@@ -6,7 +6,6 @@ mod mpp;
 mod observability;
 mod resource;
 mod run;
-mod subagents;
 mod tui;
 mod update;
 mod version;

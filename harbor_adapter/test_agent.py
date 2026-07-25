@@ -128,17 +128,15 @@ class WebSearchContractTests(unittest.TestCase):
         agent._effort = "low"
 
         agent._web_search = True
-        agent._subagents = False
         self.assertEqual(
-            agent._run_arguments("test prompt")[-6:],
-            ["--web-search", "true", "--subagents", "false", "--", "test prompt"],
+            agent._run_arguments("test prompt")[-4:],
+            ["--web-search", "true", "--", "test prompt"],
         )
 
         agent._web_search = False
-        agent._subagents = True
         self.assertEqual(
-            agent._run_arguments("test prompt")[-6:],
-            ["--web-search", "false", "--subagents", "true", "--", "test prompt"],
+            agent._run_arguments("test prompt")[-4:],
+            ["--web-search", "false", "--", "test prompt"],
         )
 
     def test_run_arguments_protect_a_prompt_that_starts_with_a_hyphen(self) -> None:
@@ -146,7 +144,6 @@ class WebSearchContractTests(unittest.TestCase):
         agent._model = "test-model"
         agent._effort = "low"
         agent._web_search = False
-        agent._subagents = False
 
         self.assertEqual(
             agent._run_arguments("- benchmark instruction")[-2:],
@@ -160,17 +157,6 @@ class WebSearchContractTests(unittest.TestCase):
         )
 
         self.assertIs(config["agents"][0]["kwargs"]["web_search"], False)
-
-    def test_terminal_bench_arms_do_not_enable_subagents(self) -> None:
-        repository = Path(__file__).resolve().parents[1]
-        for filename in (
-            "terminal-bench-2-1.yaml",
-            "terminal-bench-2-1-high-failures.yaml",
-        ):
-            config = yaml.safe_load(
-                (repository / "evals" / filename).read_text(encoding="utf-8")
-            )
-            self.assertNotIn("subagents", config["agents"][0]["kwargs"])
 
 class ContextParityContractTests(unittest.TestCase):
     def test_history_eval_arms_use_the_same_context_files(self) -> None:
@@ -886,7 +872,6 @@ class RunCancellationContractTests(unittest.IsolatedAsyncioTestCase):
             agent._model = "test-model"
             agent._effort = "low"
             agent._web_search = False
-            agent._subagents = False
             agent._agents_md_path = None
             agent._stage_api_key = AsyncMock()
             agent._remove_staged_api_key = AsyncMock()

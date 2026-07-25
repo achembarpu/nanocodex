@@ -1482,17 +1482,23 @@ fn child_lines(
 ) -> Vec<Line<'static>> {
     let (icon, color) = tool_style(child.status);
     let argument_lines = child.arguments.lines().collect::<Vec<_>>();
+    let structured_task = matches!(
+        child.name.as_str(),
+        "Task" | "Task batch" | "Task follow-up" | "Submit result"
+    );
     let detail_style = Style::default().fg(Color::DarkGray);
     let mut detail = Vec::new();
     if let Some(patch) = &child.patch {
         push_styled_detail(&mut detail, patch.summary.clone(), detail_style);
-    } else if argument_lines.len() <= 1 {
+    } else if !structured_task && argument_lines.len() <= 1 {
         push_styled_detail(&mut detail, child.arguments.clone(), detail_style);
     }
     if let Some(duration_ns) = child.duration_ns {
         push_styled_detail(&mut detail, format_duration(duration_ns), detail_style);
     }
-    if let Some(result) = child.result.as_deref().filter(|result| !result.is_empty()) {
+    if !structured_task
+        && let Some(result) = child.result.as_deref().filter(|result| !result.is_empty())
+    {
         push_styled_detail(&mut detail, result.to_owned(), detail_style);
     }
     let child_name = match (child.name.as_str(), child.status) {
@@ -1509,7 +1515,24 @@ fn child_lines(
         header.extend(detail);
     }
     let mut lines = vec![Line::from(header)];
-    if let Some(patch) = &child.patch {
+    if structured_task {
+        lines.extend(prefixed_activity_detail(
+            &child.arguments,
+            continuation,
+            "  ",
+            width,
+            Style::default().fg(Color::Gray),
+        ));
+        if let Some(result) = child.result.as_deref().filter(|result| !result.is_empty()) {
+            lines.extend(prefixed_activity_detail(
+                result,
+                continuation,
+                "  → ",
+                width,
+                Style::default().fg(color),
+            ));
+        }
+    } else if let Some(patch) = &child.patch {
         let prefix_width = u16::try_from(continuation.len()).unwrap_or(u16::MAX);
         let patch_lines = patch.lines(width.saturating_sub(prefix_width));
         lines.extend(prefixed_patch_lines(&patch_lines[1..], continuation));
@@ -1522,6 +1545,43 @@ fn child_lines(
         }
     }
     lines
+}
+
+fn prefixed_activity_detail(
+    detail: &str,
+    prefix: &'static str,
+    marker: &'static str,
+    width: u16,
+    style: Style,
+) -> Vec<Line<'static>> {
+    if detail.is_empty() {
+        return Vec::new();
+    }
+    let prefix_width = UnicodeWidthStr::width(prefix);
+    let marker_width = UnicodeWidthStr::width(marker);
+    let content_width = width
+        .saturating_sub(
+            u16::try_from(prefix_width.saturating_add(marker_width)).unwrap_or(u16::MAX),
+        )
+        .max(1);
+    wrap_line(detail, content_width)
+        .into_iter()
+        .enumerate()
+        .map(|(index, row)| {
+            Line::from(vec![
+                Span::styled(prefix, Style::default().fg(Color::DarkGray)),
+                Span::styled(
+                    if index == 0 {
+                        marker.to_owned()
+                    } else {
+                        " ".repeat(marker_width)
+                    },
+                    Style::default().fg(Color::DarkGray),
+                ),
+                Span::styled(row, style),
+            ])
+        })
+        .collect()
 }
 
 fn child_activity_groups(children: &[ToolActivity]) -> Vec<std::ops::Range<usize>> {
@@ -2787,6 +2847,66 @@ mod tests {
         assert!(rendered.contains("--workspace"));
         assert!(rendered.contains("│ └ ✓ apply_patch  src/main.rs · 80ms · applied"));
         assert!(rendered.contains("└── ✓ Ran  jq -s add /tmp/parts/*.json"));
+    }
+
+    #[test]
+    fn turbo_tasks_render_as_first_class_code_mode_activity() {
+        let mut transcript = Transcript::default();
+        transcript.push(TranscriptItem::Tool {
+            call_id: "exec-turbo".to_owned(),
+            name: "exec".to_owned(),
+            arguments: "delegate and verify".to_owned(),
+            status: ToolStatus::Running,
+        });
+        assert!(transcript.push_tool_child(
+            "exec-turbo/code-1".to_owned(),
+            "Task".to_owned(),
+            "Check the proof independently.".to_owned(),
+            ToolStatus::Running,
+        ));
+        assert!(transcript.push_tool_child(
+            "exec-turbo/code-2".to_owned(),
+            "Task batch".to_owned(),
+            "3 tasks · Try algebra. · Try geometry. · Try a counterexample.".to_owned(),
+            ToolStatus::Running,
+        ));
+        assert!(transcript.set_tool_result_timing(
+            "exec-turbo/code-1",
+            ToolStatus::Completed,
+            Some(1_000_000),
+            Some(80_000_000),
+            Some("task_019f972… · {\"verdict\":\"valid\"}".to_owned()),
+        ));
+        assert!(transcript.set_tool_result_timing(
+            "exec-turbo/code-2",
+            ToolStatus::Completed,
+            Some(2_000_000),
+            Some(100_000_000),
+            Some(
+                "2 completed · 1 failed · {\"idea\":\"algebra\"} · error: no submission".to_owned(),
+            ),
+        ));
+
+        let mut terminal = Terminal::new(TestBackend::new(110, 10)).unwrap();
+        terminal
+            .draw(|frame| {
+                frame.render_widget(transcript.widget(0, None, None, "empty"), frame.area());
+            })
+            .unwrap();
+        let rendered = terminal.backend().to_string();
+        assert!(rendered.contains("✓ Task  80ms"));
+        assert!(rendered.contains("Check the proof independently."));
+        assert!(rendered.contains("task_019f972… · {\"verdict\":\"valid\"}"));
+        assert!(rendered.contains("✓ Task batch  100ms"));
+        assert!(rendered.contains("3 tasks · Try algebra."));
+        assert!(
+            rendered.contains("2 completed · 1 failed"),
+            "batch outcome was not visible:\n{rendered}"
+        );
+        assert!(
+            rendered.contains("error: no submission"),
+            "batch failure was not visible:\n{rendered}"
+        );
     }
 
     #[test]

@@ -47,8 +47,8 @@ impl Run {
         .await;
         drop(handle);
         drop(events);
-        if let Some(child_agents) = configured.child_agents {
-            child_agents.shutdown().await;
+        if let Some(task_runtime) = configured.task_runtime {
+            task_runtime.shutdown().await;
         }
         let shutdown_result = if let Some(adapter) = configured.mpp_adapter {
             adapter.shutdown().await

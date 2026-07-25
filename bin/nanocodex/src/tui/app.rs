@@ -1,5 +1,6 @@
 use std::{
     collections::{HashMap, HashSet, VecDeque},
+    fmt::Write as _,
     path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
@@ -80,6 +81,7 @@ struct PendingPaste {
 pub(super) struct SubmittedPrompt {
     display: String,
     local_images: Vec<PathBuf>,
+    model_prefix: Option<String>,
 }
 
 impl SubmittedPrompt {
@@ -87,6 +89,7 @@ impl SubmittedPrompt {
         Self {
             display,
             local_images,
+            model_prefix: None,
         }
     }
 
@@ -106,7 +109,14 @@ impl SubmittedPrompt {
         self.display.insert_str(0, prefix);
     }
 
+    pub(super) fn set_model_prefix(&mut self, prefix: String) {
+        self.model_prefix = Some(prefix);
+    }
+
     fn append(&mut self, mut other: Self) {
+        if self.model_prefix.is_none() {
+            self.model_prefix = other.model_prefix.take();
+        }
         let image_offset = self.local_images.len();
         for index in (1..=other.local_images.len()).rev() {
             other.display = other.display.replace(
@@ -122,8 +132,11 @@ impl SubmittedPrompt {
     }
 
     pub(super) fn into_prompt(self) -> Prompt {
+        let display = self.model_prefix.map_or(self.display.clone(), |prefix| {
+            format!("{prefix}\n\n{}", self.display)
+        });
         if self.local_images.is_empty() {
-            return Prompt::new(self.display);
+            return Prompt::new(display);
         }
 
         let mut content = self
@@ -131,8 +144,8 @@ impl SubmittedPrompt {
             .into_iter()
             .map(|path| UserInput::LocalImage { path, detail: None })
             .collect::<Vec<_>>();
-        if !self.display.is_empty() {
-            content.push(UserInput::Text { text: self.display });
+        if !display.is_empty() {
+            content.push(UserInput::Text { text: display });
         }
         Prompt::content(content)
     }
@@ -1127,6 +1140,7 @@ pub(super) struct App {
     screen_selection: ScreenSelection,
     tool_details_expanded: bool,
     fast_mode: bool,
+    turbo_mode: bool,
     thinking: Thinking,
     reasoning_picker: Option<ReasoningPicker>,
 }
@@ -1178,6 +1192,7 @@ impl App {
             screen_selection: ScreenSelection::default(),
             tool_details_expanded: true,
             fast_mode: false,
+            turbo_mode: false,
             thinking: Thinking::default(),
             reasoning_picker: None,
         }
@@ -1185,6 +1200,11 @@ impl App {
 
     pub(super) const fn with_thinking(mut self, thinking: Thinking) -> Self {
         self.thinking = thinking;
+        self
+    }
+
+    pub(super) const fn with_turbo_mode(mut self, enabled: bool) -> Self {
+        self.turbo_mode = enabled;
         self
     }
 
@@ -2478,6 +2498,32 @@ impl App {
         self.set_active_status("Fast mode unchanged");
     }
 
+    pub(super) const fn turbo_mode(&self) -> bool {
+        self.turbo_mode
+    }
+
+    pub(super) fn turbo_mode_changed(&mut self, enabled: bool) {
+        self.turbo_mode = enabled;
+        self.set_active_status(if enabled {
+            "Turbo enabled"
+        } else {
+            "Turbo disabled"
+        });
+    }
+
+    pub(super) fn has_pending_agent_work(&self) -> bool {
+        self.main.running
+            || self.main.pending_turns > 0
+            || self
+                .main_branches
+                .iter()
+                .any(|branch| branch.conversation.running || branch.conversation.pending_turns > 0)
+            || self
+                .btw
+                .as_ref()
+                .is_some_and(|btw| btw.conversation.running || btw.conversation.pending_turns > 0)
+    }
+
     pub(super) const fn thinking(&self) -> Thinking {
         self.thinking
     }
@@ -2857,6 +2903,9 @@ fn summarize_tool_arguments(tool: &str, arguments: &Value) -> String {
         {
             return summary;
         }
+        if let Some(summary) = summarize_task_arguments(tool, object) {
+            return summary;
+        }
         let preferred = match tool {
             "view_image" => object.get("path").and_then(Value::as_str),
             "read_file" => object
@@ -2879,6 +2928,13 @@ fn summarize_tool_arguments(tool: &str, arguments: &Value) -> String {
 }
 
 fn present_tool_name<'a>(tool: &'a str, arguments: &Value) -> &'a str {
+    match tool {
+        "task" => return "Task",
+        "task_batch" => return "Task batch",
+        "task_continue" => return "Task follow-up",
+        "submit_result" => return "Submit result",
+        _ => {}
+    }
     if tool != "web__run" {
         return tool;
     }
@@ -2899,6 +2955,53 @@ fn present_tool_name<'a>(tool: &'a str, arguments: &Value) -> &'a str {
         "Sports"
     } else {
         "Web"
+    }
+}
+
+fn summarize_task_arguments(tool: &str, object: &serde_json::Map<String, Value>) -> Option<String> {
+    match tool {
+        "task" => object
+            .get("instruction")
+            .and_then(Value::as_str)
+            .map(compact_tool_text),
+        "task_continue" => {
+            let instruction = object.get("instruction").and_then(Value::as_str)?;
+            let task_id = object.get("task_id").and_then(Value::as_str);
+            Some(task_id.map_or_else(
+                || compact_tool_text(instruction),
+                |task_id| {
+                    format!(
+                        "{} · {}",
+                        compact_task_id(task_id),
+                        compact_tool_text(instruction)
+                    )
+                },
+            ))
+        }
+        "task_batch" => {
+            let tasks = object.get("tasks").and_then(Value::as_array)?;
+            let preview = tasks
+                .iter()
+                .filter_map(|task| task.get("instruction").and_then(Value::as_str))
+                .take(3)
+                .map(compact_tool_text)
+                .collect::<Vec<_>>()
+                .join(" · ");
+            let count = tasks.len();
+            Some(if preview.is_empty() {
+                format!("{count} task{}", if count == 1 { "" } else { "s" })
+            } else {
+                format!(
+                    "{count} task{} · {preview}",
+                    if count == 1 { "" } else { "s" }
+                )
+            })
+        }
+        "submit_result" => object
+            .get("output")
+            .map(compact_arguments)
+            .or_else(|| Some("structured result".to_owned())),
+        _ => None,
     }
 }
 
@@ -2962,6 +3065,9 @@ fn running_cell_id(result: &Value) -> Option<String> {
 }
 
 fn summarize_tool_result(tool: Option<&str>, result: &Value, status: ToolStatus) -> String {
+    if let Some(summary) = summarize_task_result(tool, result, status) {
+        return summary;
+    }
     if tool == Some("exec_command") {
         let decoded = result
             .as_str()
@@ -2994,6 +3100,87 @@ fn summarize_tool_result(tool: Option<&str>, result: &Value, status: ToolStatus)
         return compact_arguments(result);
     }
     String::new()
+}
+
+fn summarize_task_result(tool: Option<&str>, result: &Value, status: ToolStatus) -> Option<String> {
+    let tool = tool?;
+    if !matches!(
+        tool,
+        "task" | "task_batch" | "task_continue" | "submit_result"
+    ) {
+        return None;
+    }
+    if matches!(status, ToolStatus::Failed | ToolStatus::Cancelled) {
+        return Some(compact_arguments(result));
+    }
+    let decoded = result
+        .as_str()
+        .and_then(|value| serde_json::from_str::<Value>(value).ok())
+        .unwrap_or_else(|| result.clone());
+    match tool {
+        "task" | "task_continue" => {
+            let object = decoded.as_object()?;
+            let task_id = object
+                .get("task_id")
+                .and_then(Value::as_str)
+                .map(compact_task_id);
+            let output = object.get("output").map(compact_arguments);
+            Some(
+                [task_id, output]
+                    .into_iter()
+                    .flatten()
+                    .collect::<Vec<_>>()
+                    .join(" · "),
+            )
+        }
+        "task_batch" => {
+            let outcomes = decoded.as_array()?;
+            let completed = outcomes
+                .iter()
+                .filter(|outcome| {
+                    outcome.get("status").and_then(Value::as_str) == Some("completed")
+                })
+                .count();
+            let failed = outcomes.len().saturating_sub(completed);
+            let mut summary = format!("{completed} completed");
+            if failed > 0 {
+                let _ = write!(summary, " · {failed} failed");
+            }
+            let outputs = outcomes
+                .iter()
+                .filter_map(|outcome| outcome.get("output"))
+                .map(compact_arguments)
+                .take(3)
+                .collect::<Vec<_>>();
+            if !outputs.is_empty() {
+                summary.push_str(" · ");
+                summary.push_str(&outputs.join(" · "));
+            }
+            let errors = outcomes
+                .iter()
+                .filter_map(|outcome| outcome.get("error").and_then(Value::as_str))
+                .map(compact_tool_text)
+                .take(2)
+                .collect::<Vec<_>>();
+            if !errors.is_empty() {
+                summary.push_str(" · error: ");
+                summary.push_str(&errors.join(" · "));
+            }
+            Some(compact_tool_text(&summary))
+        }
+        "submit_result" => Some("accepted".to_owned()),
+        _ => None,
+    }
+}
+
+fn compact_task_id(task_id: &str) -> String {
+    const PREFIX: usize = 13;
+    if task_id.chars().count() <= PREFIX {
+        return task_id.to_owned();
+    }
+    let mut compact = task_id.chars().take(PREFIX).collect::<String>();
+    compact.push('…');
+    compact
 }
 
 fn compact_arguments(arguments: &Value) -> String {
@@ -3058,7 +3245,7 @@ mod tests {
 
     use super::{
         App, EscapeAction, PaneId, SubmittedPrompt, present_tool_name, smooth_scroll_drain,
-        summarize_tool_arguments,
+        summarize_task_result, summarize_tool_arguments,
     };
     use crate::tui::transcript::TranscriptItem;
 
@@ -3109,6 +3296,68 @@ mod tests {
         assert_eq!(
             summarize_tool_arguments("web__run", &arguments),
             "Rust async cancellation · Tokio process groups"
+        );
+    }
+
+    #[test]
+    fn recursive_tasks_present_instructions_and_structured_outcomes() {
+        let task = json!({
+            "instruction": "Check the proof independently.",
+            "context": { "claim": "P" },
+            "output_schema": { "type": "object" }
+        });
+        assert_eq!(present_tool_name("task", &task), "Task");
+        assert_eq!(
+            summarize_tool_arguments("task", &task),
+            "Check the proof independently."
+        );
+
+        let follow_up = json!({
+            "task_id": "task_019f9727-38c0-7d73-9db4",
+            "instruction": "Revise using the verifier feedback.",
+            "output_schema": { "type": "object" }
+        });
+        assert_eq!(
+            summarize_tool_arguments("task_continue", &follow_up),
+            "task_019f9727… · Revise using the verifier feedback."
+        );
+
+        let batch = json!({
+            "tasks": [
+                { "instruction": "Try algebra." },
+                { "instruction": "Try geometry." },
+                { "instruction": "Look for a counterexample." }
+            ],
+            "output_schema": { "type": "object" }
+        });
+        assert_eq!(present_tool_name("task_batch", &batch), "Task batch");
+        assert_eq!(
+            summarize_tool_arguments("task_batch", &batch),
+            "3 tasks · Try algebra. · Try geometry. · Look for a counterexample."
+        );
+
+        let outcomes = json!([
+            {
+                "status": "completed",
+                "task_id": "task_a",
+                "output": { "verdict": "valid" }
+            },
+            {
+                "status": "failed",
+                "task_id": "task_b",
+                "error": "missing submit_result"
+            }
+        ]);
+        assert_eq!(
+            summarize_task_result(
+                Some("task_batch"),
+                &outcomes,
+                crate::tui::transcript::ToolStatus::Completed
+            ),
+            Some(
+                "1 completed · 1 failed · {\"verdict\":\"valid\"} · error: missing submit_result"
+                    .to_owned()
+            )
         );
     }
 

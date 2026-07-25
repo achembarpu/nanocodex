@@ -129,7 +129,6 @@ class NanocodexAgent(BaseInstalledAgent):
         model_name: str | None = None,
         effort: str = "low",
         web_search: bool = True,
-        subagents: bool = False,
         install_node: bool = False,
         system_prompt_path: str | Path | None = None,
         agents_md_path: str | Path | None = None,
@@ -164,7 +163,6 @@ class NanocodexAgent(BaseInstalledAgent):
             raise ValueError(f"nanocodex supports only {MODEL}, got {self._model}")
         self._effort = effort
         self._web_search = web_search
-        self._subagents = subagents
         self._install_node = install_node
         self._system_prompt_path = self._resolve_context_file(
             system_prompt_path, "system prompt"
@@ -279,11 +277,6 @@ class NanocodexAgent(BaseInstalledAgent):
         agent_command = (
             f'api_key=$(<{self._API_KEY_FILE}) && test -n "$api_key" && '
             f'rm -f {self._API_KEY_FILE} && OPENAI_API_KEY="$api_key" '
-            + (
-                "NANOCODEX_SUBAGENT_JSONL=1 "
-                if getattr(self, "_subagents", False)
-                else ""
-            )
             + "PATH=$PATH:/opt/nanocodex-verifier/bin "
             + " ".join(shlex.quote(argument) for argument in arguments)
         )
@@ -308,8 +301,6 @@ class NanocodexAgent(BaseInstalledAgent):
             self._effort,
             "--web-search",
             str(self._web_search).lower(),
-            "--subagents",
-            str(getattr(self, "_subagents", False)).lower(),
             "--",
             prompt,
         ]

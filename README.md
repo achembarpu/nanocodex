@@ -103,42 +103,46 @@ model round trip between every operation.
 
 This keeps the model-facing surface small while the application keeps normal
 Rust ownership. Tool implementations, credentials, retry policy, and mutable
-state stay outside the generated program. Code Mode runs cells on a prewarmed,
-session-persistent Node host and gives the model explicit controls for yielding,
-resuming long work, and bounding returned output.
+state stay outside the generated program. Native Code Mode runs the supported
+JavaScript subset in a prewarmed embedded runtime and gives the model explicit
+controls for yielding, resuming long work, and bounding returned output.
 
-Subagents make that composition especially useful. An application can expose
-`AgentHandle::spawn()` as a clean-room worker, `AgentHandle::fork()` as a worker
-with the latest safe conversation context, and another tool for follow-up turns
-on a retained child. Code Mode can then generate the orchestration topology for
-the task instead of selecting a hard-coded workflow DAG:
+Recursive tasks make that composition especially useful. `context()` gives each
+cell an immutable typed snapshot of its own current transcript. The application
+can expose clean-room workers through `task`, bounded parallel workers through
+`task_batch`, and retained follow-ups through `task_continue`, while every
+result is checked against a runtime JSON Schema:
 
 ```js
-const [independent, contextual] = await Promise.all([
-  tools.spawn_agent({
-    role: "reviewer",
-    task: "Find assumptions the parent may have missed."
-  }),
-  tools.fork_agent({
-    role: "investigator",
-    task: "Trace the suspected regression using our existing context."
-  })
-]);
-
-const followUp = await tools.prompt_agent({
-  agent_id: independent.agent_id,
-  task: `Challenge this conclusion:\n\n${contextual.report}`
+const evidence = context().filter(item => item.type === "message");
+const candidates = await tools.task_batch({
+  tasks: [
+    { instruction: "Find the most likely root cause.", context: evidence },
+    { instruction: "Search for an independent counter-hypothesis.", context: evidence }
+  ],
+  output_schema: {
+    type: "object",
+    properties: {
+      conclusion: { type: "string" },
+      evidence: { type: "array", items: { type: "string" } }
+    },
+    required: ["conclusion", "evidence"],
+    additionalProperties: false
+  }
 });
 
-text({ independent, contextual, followUp });
+text(candidates);
 ```
 
-That allows dynamic fan-out, fan-in, independent checks, contextual branches,
-and targeted follow-ups while Nanocodex core remains one owned agent lifecycle
-rather than a generic multi-agent scheduler. The bundled CLI exposes this
-example surface with `nanocodex --subagents true`; library consumers define the
-tools and policy themselves. See [`subagents.rs`](examples/subagents.rs) for the
-complete implementation.
+That allows dynamic fan-out, fan-in, independent checks, explicit context
+selection, and targeted follow-ups while Nanocodex core remains one owned agent
+lifecycle rather than a generic multi-agent scheduler. The lower-level
+[`subagents.rs`](examples/subagents.rs) remains a direct `AgentHandle` example
+for embedders.
+The bundled TUI now exposes the schema-constrained `task`, `task_batch`, and
+`task_continue` tools through `/turbo`. Their Code Mode calls render as named
+task activity with wrapped instructions, short task IDs, structured outputs,
+and completed/failed batch summaries rather than opaque JSON blobs.
 
 ## API
 
@@ -643,14 +647,16 @@ Use `nanocodex --rollouts false ...` (or `NANOCODEX_ROLLOUTS=false`) when a CLI
 consumer does not want local session recording.
 
 The TUI retains one session across prompts. Enter submits, Tab explicitly queues
-a follow-up while work is active, and `/cancel` stops the focused turn. At any
-safe model/tool boundary, `/btw <question>` opens a fast fork in a vertical pane
-while the mainline continues. The fork inherits the last completed response ID
-plus complete tool results and applied steers after that response; partial model
-output and unmatched tool calls remain excluded. With local telemetry running,
-`/trace` opens Jaeger filtered to every turn in the focused main or `/btw`
-session. The complete keybinding reference, retained Amp and Codex research, and
-prioritized Ratatui backlog live in
+a follow-up while work is active, and `/cancel` stops the focused turn. `/turbo`
+toggles recursive structured task tools between idle turns; `context()` remains
+available in every Code Mode cell. At any safe model/tool boundary,
+`/btw <question>` opens a fast fork in a vertical pane while the mainline
+continues. The fork inherits the last completed response ID plus complete tool
+results and applied steers after that response; partial model output and
+unmatched tool calls remain excluded. With local telemetry running, `/trace`
+opens Jaeger filtered to every turn in the focused main or `/btw` session. The
+complete keybinding reference, retained Amp and Codex research, and prioritized
+Ratatui backlog live in
 [`docs/TUI_NOTES.md`](docs/TUI_NOTES.md). The headless `nanocodex run` adapter
 emits flushed JSONL for scripts and Harbor.
 

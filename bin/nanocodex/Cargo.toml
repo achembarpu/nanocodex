@@ -24,6 +24,7 @@ futures-util.workspace = true
 image.workspace = true
 nanocodex.workspace = true
 nanocodex-observability.workspace = true
+nanocodex-rlm.workspace = true
 nix.workspace = true
 nanousd.workspace = true
 pulldown-cmark.workspace = true

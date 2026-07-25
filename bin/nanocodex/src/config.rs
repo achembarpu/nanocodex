@@ -1,7 +1,4 @@
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::path::{Path, PathBuf};
 
 use clap::{ArgAction, Args, builder::NonEmptyStringValueParser};
 use eyre::{Result, WrapErr, eyre};
@@ -9,15 +6,15 @@ use nanocodex::{
     AgentEvents, Nanocodex, OpenAiAuth, OpenAiAuthMode, ReasoningMode, Responses, ResponsesHistory,
     ResponsesTransport, RolloutConfig, Thinking, Tools,
 };
+use nanocodex_rlm::TaskRuntime;
 
 use crate::mcp::McpArgs;
 use crate::mpp::{MppAdapter, MppArgs};
-use crate::subagents::{self, ChildAgents};
 
 pub(crate) struct ConfiguredAgent {
     pub(crate) handle: Nanocodex,
     pub(crate) events: AgentEvents,
-    pub(crate) child_agents: Option<Arc<ChildAgents>>,
+    pub(crate) task_runtime: Option<TaskRuntime>,
     pub(crate) mpp_adapter: Option<MppAdapter>,
 }
 
@@ -68,15 +65,6 @@ pub(crate) struct AgentArgs {
         action = ArgAction::Set
     )]
     image_generation: bool,
-
-    /// Expose reusable clean, forked, and follow-up child agents in Code Mode.
-    #[arg(
-        long,
-        env = "NANOCODEX_SUBAGENTS",
-        default_value_t = false,
-        action = ArgAction::Set
-    )]
-    subagents: bool,
 
     /// Write Codex-compatible resumable threads beneath `CODEX_HOME`.
     #[arg(
@@ -132,6 +120,14 @@ impl AgentArgs {
     }
 
     pub(crate) async fn build(self) -> Result<ConfiguredAgent> {
+        self.build_inner(false).await
+    }
+
+    pub(crate) async fn build_for_tui(self) -> Result<ConfiguredAgent> {
+        self.build_inner(true).await
+    }
+
+    async fn build_inner(self, with_task_tools: bool) -> Result<ConfiguredAgent> {
         let codex_home = default_codex_home()?;
         let rollout = self.rollouts.then(|| codex_home.clone());
         let mpp_enabled = self.mpp.is_enabled();
@@ -172,7 +168,11 @@ impl AgentArgs {
                 .remote_http_client(mpp_adapter.tool_http_client()?);
         }
         let tools = tools.build()?;
-        let child_agents = self.subagents.then(|| Arc::new(ChildAgents::default()));
+        let task_runtime = with_task_tools.then(|| {
+            let runtime = TaskRuntime::new();
+            runtime.set_enabled(false);
+            runtime
+        });
         let builder = Nanocodex::builder(auth)
             .reasoning_mode(self.reasoning_mode)
             .thinking(self.thinking)
@@ -184,12 +184,10 @@ impl AgentArgs {
         } else {
             builder
         };
-        let builder = if let Some(child_agents) = &child_agents {
+        let builder = if let Some(task_runtime) = &task_runtime {
             let tools = tools.clone();
-            let child_agents = Arc::downgrade(child_agents);
-            builder.tools_factory(move |agent| {
-                subagents::with_subagents(tools.clone(), agent, child_agents.clone())
-            })
+            let task_tools = task_runtime.tools();
+            builder.tools_factory(move |agent| task_tools.install(tools.clone(), agent))
         } else {
             builder.tools(tools)
         };
@@ -202,7 +200,7 @@ impl AgentArgs {
         Ok(ConfiguredAgent {
             handle,
             events,
-            child_agents,
+            task_runtime,
             mpp_adapter,
         })
     }
@@ -352,17 +350,6 @@ mod tests {
             }"#,
         )
         .unwrap();
-    }
-
-    #[test]
-    fn subagents_are_opt_in() {
-        let command = crate::Cli::command();
-        let subagents = command
-            .get_arguments()
-            .find(|argument| argument.get_id() == "subagents")
-            .expect("the CLI should expose the subagents argument");
-
-        assert_eq!(subagents.get_default_values(), ["false"]);
     }
 
     #[test]

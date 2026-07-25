@@ -10,7 +10,7 @@ agents:
     kwargs:
       effort: low
       # Match the existing Terminal-Bench policy: built-in local Code Mode
-      # tools only. Subagent tools are introduced only in escalation runs.
+      # tools only.
       web_search: false
 
 datasets:

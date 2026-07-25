@@ -23,6 +23,7 @@ COPY crates/nanocodex-core/Cargo.toml crates/nanocodex-core/Cargo.toml
 COPY crates/nanocodex-macros/Cargo.toml crates/nanocodex-macros/Cargo.toml
 COPY crates/nanocodex-mcp/Cargo.toml crates/nanocodex-mcp/Cargo.toml
 COPY crates/nanocodex-observability/Cargo.toml crates/nanocodex-observability/Cargo.toml
+COPY crates/nanocodex-rlm/Cargo.toml crates/nanocodex-rlm/Cargo.toml
 COPY crates/nanocodex-service/Cargo.toml crates/nanocodex-service/Cargo.toml
 COPY crates/nanocodex-tools/Cargo.toml crates/nanocodex-tools/Cargo.toml
 COPY crates/nanousd/Cargo.toml crates/nanousd/Cargo.toml
@@ -41,6 +42,7 @@ RUN mkdir bin/nanocodex/src \
         crates/nanocodex-macros/src \
         crates/nanocodex-mcp/src \
         crates/nanocodex-observability/src \
+        crates/nanocodex-rlm/src \
         crates/nanocodex-service/src \
         crates/nanocodex-service/benches \
         crates/nanocodex-tools/src \
@@ -57,6 +59,7 @@ RUN mkdir bin/nanocodex/src \
     printf '\n' > crates/nanocodex-macros/src/lib.rs && \
     printf '\n' > crates/nanocodex-mcp/src/lib.rs && \
     printf '\n' > crates/nanocodex-observability/src/lib.rs && \
+    printf '\n' > crates/nanocodex-rlm/src/lib.rs && \
     printf '\n' > crates/nanocodex-service/src/lib.rs && \
     printf 'fn main() {}\n' > crates/nanocodex-service/benches/tower_responses.rs && \
     printf '\n' > crates/nanocodex-tools/src/lib.rs && \
@@ -84,6 +87,7 @@ RUN --mount=type=cache,id=nanocodex-cargo-registry,target=/usr/local/cargo/regis
         crates/nanocodex-macros/src/lib.rs \
         crates/nanocodex-mcp/src/lib.rs \
         crates/nanocodex-observability/src/lib.rs \
+        crates/nanocodex-rlm/src/lib.rs \
         crates/nanocodex-service/src/lib.rs \
         crates/nanocodex-tools/src/lib.rs \
         crates/nanousd/src/lib.rs && \
