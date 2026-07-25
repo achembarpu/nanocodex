@@ -25,6 +25,14 @@
       ? undefined
       : jsonParse(jsonStringify(value));
 
+  function deepFreeze(value) {
+    if (value === null || typeof value !== "object" || Object.isFrozen(value)) {
+      return value;
+    }
+    for (const item of Object.values(value)) deepFreeze(item);
+    return Object.freeze(value);
+  }
+
   function stringify(value) {
     if (
       value === undefined ||
@@ -71,9 +79,10 @@
     return jsonParse(encoded);
   }
 
-  return async function runCell(source, definitionsJson, initialStoredJson) {
+  return async function runCell(source, definitionsJson, initialStoredJson, contextJson) {
     const definitions = jsonParse(definitionsJson);
     const initialStored = jsonParse(initialStoredJson);
+    const contextItems = deepFreeze(jsonParse(contextJson));
     const stored = new Map(Object.entries(initialStored));
     const storedWrites = new Map();
     const declaredTools = Object.create(null);
@@ -241,6 +250,10 @@
       return stored.has(normalizedKey) ? cloneValue(stored.get(normalizedKey)) : undefined;
     }
 
+    function context() {
+      return contextItems;
+    }
+
     function yield_control() {
       nativeYield();
     }
@@ -263,6 +276,7 @@
         "notify",
         "store",
         "load",
+        "context",
         "yield_control",
         "exit",
         "setTimeout",
@@ -280,6 +294,7 @@
           notify,
           store,
           load,
+          context,
           yield_control,
           exit,
           nativeSetTimeout,

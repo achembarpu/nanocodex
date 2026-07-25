@@ -19,7 +19,7 @@ use serde::Deserialize;
 use serde_json::Value;
 use tokio::sync::mpsc;
 
-use super::RuntimeEvent;
+use super::{ContextItem, RuntimeEvent};
 
 const BOOTSTRAP: &str = include_str!("bootstrap.js");
 
@@ -52,6 +52,7 @@ struct StartExecution {
     source: String,
     tools: Vec<Value>,
     stored: HashMap<String, Value>,
+    context: Vec<ContextItem>,
 }
 
 struct ExecutionState {
@@ -120,6 +121,7 @@ impl EmbeddedHost {
         source: &str,
         stored: HashMap<String, Value>,
         tools: Vec<Value>,
+        context: Vec<ContextItem>,
     ) -> Result<(), String> {
         self.command_tx
             .send(HostCommand::Start(StartExecution {
@@ -127,6 +129,7 @@ impl EmbeddedHost {
                 source: source.to_owned(),
                 tools,
                 stored,
+                context,
             }))
             .map_err(|_| "embedded QuickJS code-mode host is unavailable".to_owned())
     }
@@ -280,8 +283,10 @@ fn run_execution_in_context<'js>(
         .map_err(|error| format!("failed to encode QuickJS tool metadata: {error}"))?;
     let stored = serde_json::to_string(&start.stored)
         .map_err(|error| format!("failed to encode QuickJS stored values: {error}"))?;
+    let context_items = serde_json::to_string(&start.context)
+        .map_err(|error| format!("failed to encode QuickJS context items: {error}"))?;
     let promise = run_cell
-        .call::<_, Promise<'js>>((start.source, tools, stored))
+        .call::<_, Promise<'js>>((start.source, tools, stored, context_items))
         .catch(ctx)
         .map_err(|error| format!("embedded QuickJS execution failed to start: {error}"))?;
     drain_jobs(ctx);

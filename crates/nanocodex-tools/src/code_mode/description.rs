@@ -5,6 +5,41 @@ use serde_json::Value;
 
 const DEFERRED_NESTED_TOOLS_GUIDANCE: &str = r"Some deferred nested tools may be omitted from this description. They are still available on the global `tools` object and listed in `ALL_TOOLS`.
 To find one, filter `ALL_TOOLS` by `name` and `description`.";
+const CONTEXT_TYPESCRIPT: &str = r#"type ContextContent =
+  | { type: "text"; text: string }
+  | { type: "image"; image_url: string }
+  | { type: "audio"; audio_url: string };
+type ContextItem =
+  | {
+      type: "message";
+      role: "developer" | "user" | "assistant";
+      content: readonly ContextContent[];
+      phase?: "commentary" | "final_answer";
+    }
+  | {
+      type: "agent_message";
+      author: string;
+      recipient: string;
+      content: readonly ContextContent[];
+    }
+  | {
+      type: "reasoning";
+      summary: readonly string[];
+      content: readonly string[];
+    }
+  | {
+      type: "tool_call";
+      call_id?: string;
+      name: string;
+      input: string;
+    }
+  | {
+      type: "tool_result";
+      call_id?: string;
+      name?: string;
+      output: readonly ContextContent[];
+    }
+  | { type: "compaction" };"#;
 // Based on https://modelcontextprotocol.io/specification/draft/schema#calltoolresult.
 const MCP_TYPESCRIPT_PREAMBLE: &str = r#"type Role = "user" | "assistant";
 type MetaObject = Record<string, unknown>;
@@ -83,11 +118,11 @@ type CallToolResult<TStructured = { [key: string]: unknown }> = {
   [key: string]: unknown;
 };"#;
 const EXEC_DESCRIPTION: &str = r#"Run JavaScript code to orchestrate/compose tool calls
-- Evaluates the provided JavaScript code in a fresh V8 isolate as an async module.
+- Evaluates the provided JavaScript code in a fresh embedded runtime as an async function.
 - All nested tools are available on the global `tools` object, for example `await tools.exec_command(...)`. Tool names are exposed as normalized JavaScript identifiers, for example `await tools.mcp__ologs__get_profile(...)`.
 - Nested tool methods take either a string or an object as their input argument.
 - Nested tools return either an object or a string, based on the description.
-- Runs raw JavaScript -- no Node, no file system, no network access, no console.
+- Runs the runtime's supported JavaScript subset -- no Node, no file system, no network access, no console.
 - Accepts raw JavaScript source text, not JSON, quoted strings, or markdown code fences.
 - You may optionally start the tool input with a first-line pragma like `// @exec: {"yield_time_ms": 10000, "max_output_tokens": 1000}`.
 - `yield_time_ms` asks `exec` to yield early if the script is still running. Defaults to 10000 ms.
@@ -102,6 +137,7 @@ const EXEC_DESCRIPTION: &str = r#"Run JavaScript code to orchestrate/compose too
 - `generatedImage(result: { image_url: string; output_hint?: string })`: Appends an image-generation result and its optional output hint. HTTP(S) URLs are not supported.
 - `store(key: string, value: any)`: stores a serializable value under a string key for later `exec` calls in the same session.
 - `load(key: string)`: returns the stored value for a string key, or `undefined` if it is missing.
+- `context(): readonly ContextItem[]`: returns an immutable snapshot of the invoking agent's current transcript for this cell.
 - `notify(value: string | number | boolean | undefined | null)`: immediately injects an extra `custom_tool_call_output` for the current `exec` call. Values are stringified like `text(...)`.
 - `setTimeout(callback: () => void, delayMs?: number)`: schedules a callback to run later and returns a timeout id. Pending timeouts do not keep `exec` alive by themselves; await an explicit promise if you need to wait for one.
 - `clearTimeout(timeoutId?: number)`: cancels a timeout created by `setTimeout`.
@@ -113,6 +149,10 @@ pub(super) fn exec_description(
     has_deferred_tools: bool,
 ) -> String {
     let mut description = EXEC_DESCRIPTION.to_owned();
+    let _ = write!(
+        description,
+        "\n\nContext Types:\n```ts\n{CONTEXT_TYPESCRIPT}\n```"
+    );
     if has_deferred_tools {
         let _ = write!(description, "\n\n{DEFERRED_NESTED_TOOLS_GUIDANCE}");
     }

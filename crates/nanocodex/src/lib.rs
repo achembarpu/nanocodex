@@ -46,9 +46,9 @@ pub use nanocodex_service::{
 };
 #[cfg(not(target_family = "wasm"))]
 pub use nanocodex_tools::{
-    DEFAULT_TOOL_OUTPUT_TOKENS, StandardTool, Tool, ToolContext, ToolError, ToolExecution,
-    ToolInput, ToolInputError, ToolOutputBody, ToolOutputContent, ToolResult, Tools,
-    ToolsBuildError, ToolsBuilder, UpdatePlanTool,
+    ContextContent, ContextItem, DEFAULT_TOOL_OUTPUT_TOKENS, StandardTool, Tool, ToolContext,
+    ToolError, ToolExecution, ToolInput, ToolInputError, ToolOutputBody, ToolOutputContent,
+    ToolResult, Tools, ToolsBuildError, ToolsBuilder, UpdatePlanTool,
 };
 #[cfg(not(target_family = "wasm"))]
 #[doc(hidden)]

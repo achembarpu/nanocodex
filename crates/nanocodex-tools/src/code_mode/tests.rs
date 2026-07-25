@@ -172,6 +172,53 @@ text({ previous: previous ?? null, current: globalThis.__nanocodexContextGenerat
 }
 
 #[tokio::test]
+async fn context_builtin_is_a_deep_frozen_per_execution_snapshot() -> Result<()> {
+    let workspace = temporary_workspace("context-snapshot")?;
+    let tools = test_tools(&workspace);
+    let first_history = vec![ResponseItem::message(
+        nanocodex_core::MessageRole::User,
+        [nanocodex_core::ContentItem::InputText {
+            text: "first".into(),
+        }],
+    )];
+    let first = tools
+        .execute_code(
+            r"
+const items = context();
+text({
+  items,
+  frozen: Object.isFrozen(items),
+  itemFrozen: Object.isFrozen(items[0]),
+  contentFrozen: Object.isFrozen(items[0].content),
+});
+",
+            test_context(&first_history),
+        )
+        .await;
+
+    let second_history = vec![ResponseItem::message(
+        nanocodex_core::MessageRole::Assistant,
+        [nanocodex_core::ContentItem::output_text("second")],
+    )];
+    let second = tools
+        .execute_code("text(context());", test_context(&second_history))
+        .await;
+
+    assert!(first.success, "{}", execution_output(&first));
+    assert!(second.success, "{}", execution_output(&second));
+    assert_eq!(
+        emitted_text(&first)?,
+        r#"{"items":[{"type":"message","role":"user","content":[{"type":"text","text":"first"}]}],"frozen":true,"itemFrozen":true,"contentFrozen":true}"#
+    );
+    assert_eq!(
+        emitted_text(&second)?,
+        r#"[{"type":"message","role":"assistant","content":[{"type":"text","text":"second"}]}]"#
+    );
+    std::fs::remove_dir_all(workspace)?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn execution_prototype_mutations_do_not_leak_across_quickjs_contexts() -> Result<()> {
     let workspace = temporary_workspace("isolated-quickjs-prototypes")?;
     let tools = test_tools(&workspace);
