@@ -71,6 +71,9 @@ Crate ownership is fixed:
   discovery, authenticated transports, BM25 search, and deferred Code Mode
   dispatch.
 - `nanocodex`: builders and the owned stateful agent lifecycle.
+- `nanocodex-rlm`: optional recursive task tools built only from Nanocodex's
+  public agent and tool APIs. It is a thin higher-level consumer, not a
+  dependency of the core lifecycle or lower crates.
 - `nanocodex-macros`: the `#[tool]` implementation.
 - `bin/nanocodex`: the Ratatui daily-driver and headless JSONL adapter.
 
@@ -354,6 +357,211 @@ persistent Node WebSocket across follow-on turns, incremental response IDs,
 stable cache/session headers, custom JavaScript tools, unified events, and the
 browser host contract. Native cancellation remains owned by the Phase 2 turn
 lifecycle rather than a binding-specific alternate runtime.
+
+### Phase 4: Code Mode context and recursive task tools (implementation)
+
+This phase adds the small set of primitives needed to experiment with recursive
+language-model programs without introducing a separate RLM runtime. An ordinary
+Nanocodex turn uses ordinary Code Mode: JavaScript reads the current transcript,
+selects explicit context for clean child agents, maps work through `task` or
+`task_batch`, verifies or follows up with `task_continue`, and emits only its
+chosen reduction with `text(...)`.
+
+`nanocodex-rlm` is the provisional crate name because it describes the research
+consumer, not because applications or models invoke an `rlm.*` API. If the
+primitives prove generally useful, the crate may later take a less
+research-specific name without changing the tools.
+
+#### 4.1 `context()` is a Code Mode builtin
+
+- Add a synchronous global `context()` function to every native Code Mode cell.
+  It requires no builder option and is not gated by the TUI's `/turbo` mode.
+- `context()` returns an immutable typed projection of the invoking agent's
+  current model-visible active transcript. The snapshot is captured when that
+  `exec` call begins, remains fixed if the cell yields and continues running,
+  and is refreshed for each later `exec` call.
+- Define a small discriminated `ContextItem` union for semantically useful
+  messages, reasoning summaries/content, tool calls, tool results, agent
+  messages, and compaction boundaries. Preserve roles, tool names, arguments,
+  outputs, and call IDs needed to pair calls with results. Do not expose
+  provider item IDs, response IDs, internal turn keys, passthrough metadata, or
+  opaque encrypted reasoning as application-facing transcript structure.
+- Keep the projection typed in Rust and render its exact TypeScript declaration
+  in the stable `exec` description. Known transcript shapes must not be
+  round-tripped through `serde_json::Value`; JSON remains appropriate only at
+  the JavaScript boundary.
+- Start with `context(): readonly ContextItem[]`. JavaScript already supplies
+  `filter`, `slice`, and `map`, so selector arguments, transcript query
+  languages, and mutable context stores are unnecessary.
+- A child agent's `context()` sees only that child's own transcript. It never
+  reaches into the parent, siblings, or the parent Code Mode runtime.
+
+#### 4.2 Thin task tools
+
+The `nanocodex-rlm` crate owns one retained task registry and four ordinary
+Nanocodex tools:
+
+```text
+task({
+  instruction,
+  context?,
+  output_schema
+}) -> { task_id, output }
+
+task_batch({
+  tasks: [{ instruction, context? }, ...],
+  output_schema
+}) -> [{ task_id, status: "completed", output }
+      | { task_id, status: "failed", error }, ...]
+
+task_continue({
+  task_id,
+  instruction,
+  context?,
+  output_schema
+}) -> { task_id, output }
+
+submit_result({ output }) -> accepted | validation error
+```
+
+- `instruction` is the complete task, not a named profile. Optional `context`
+  is any explicitly selected JSON-serializable value, commonly all or part of
+  `context()`. `output_schema` is a runtime-provided JSON Schema. These are the
+  genuinely dynamic boundaries.
+- `task` uses the invoking driver's `AgentHandle::spawn()` to create a
+  clean-room agent with the builder-owned model, instructions, tools, auth, and
+  workspace policy, but no inherited parent transcript. It returns an opaque
+  task ID rather than a session or transport ID.
+- `task_continue` runs a later turn on the retained child identified by the task
+  ID. It preserves only that child's transcript, response chain, cache lineage,
+  WebSocket, Code Mode storage, and tools.
+- `task_batch` starts clean children concurrently, observes a bounded
+  concurrency limit, waits at one barrier, and returns results in input order.
+  Individual failures are values so the parent can reduce successful work,
+  verify failures, or selectively retry without losing the rest of the batch.
+- Child agents receive the same task tools and may recurse subject to fixed
+  depth, batch-size, and concurrency bounds. The initial crate exposes one
+  conservative policy rather than a public scheduler, strategy trait, or
+  profile hierarchy.
+
+#### 4.3 Runtime-constrained results and verification
+
+- Compile each supplied output schema in Rust before prompting a child. Include
+  that exact schema in the child task prompt and arm the child's
+  `submit_result` handler for the pending turn.
+- Keep `submit_result`'s tool definition stable and validate its dynamic
+  `output` against the armed schema in the host. This avoids mutating a
+  session's tool definitions or prompt prefix for each runtime-generated
+  schema. The handler is inactive outside a pending child task.
+- An invalid submission returns a focused tool error so the child can correct
+  and retry. Accept exactly one valid submission. A child turn that terminates
+  without one is a failed task even if it produced a plausible final message.
+- Await the child's terminal turn after accepting its structured result so its
+  committed history is safe for `task_continue`. Record complete child prompts,
+  model activity, submissions, validation failures, and results through the
+  existing tracing path.
+- Structured task results remain JavaScript values inside the Code Mode cell.
+  They enter the parent model's transcript only when JavaScript deliberately
+  emits a reduction with `text(...)`.
+- Verification is composition, not another primitive: use an independent
+  `task` or `task_batch` call to return a typed critique or verdict, then pass
+  selected feedback into `task_continue`. Initial examples should cover
+  candidate generation, independent verification, revision, and final
+  reduction.
+
+#### 4.4 Isolation, yielding, and cancellation
+
+- A task handler may receive `ToolContext` for tracing and session identity, but
+  it must never copy `ToolContext::history` into a child. The child prompt
+  contains only its configured base instructions, `instruction`, and the
+  explicitly supplied `context` value.
+- Parent Code Mode locals, `store` values, unselected transcript items, sibling
+  state, and retained task results are not implicit child inputs. Filesystem and
+  external-service visibility remain normal builder/application policy rather
+  than transcript inheritance.
+- The task calls themselves are synchronous. There is no background-task API,
+  polling protocol, mailbox, or live child steering in this slice.
+  Long-running cells may still use Code Mode's existing yield-and-wait behavior,
+  allowing the parent model to receive progress and reason before waiting again
+  without changing task semantics.
+- Cancelling or terminating a parent cell must cancel every child turn started
+  by that cell and recursively clean up descendants. Disabling `/turbo` does not
+  interrupt a task already accepted; it prevents later task calls.
+
+#### 4.5 Ratatui `/turbo`
+
+- Add `/turbo`, `/turbo on`, and `/turbo off` to the Ratatui client, defaulting
+  to off and showing the current mode in the status chrome. The no-argument form
+  toggles the current state.
+- Construct the task registry and task tool definitions with each TUI agent from
+  the beginning, including forks and clean children, so retained request
+  prefixes and tool definitions remain byte-stable. `/turbo` gates execution of
+  `task`, `task_batch`, and `task_continue`; `context()` remains available in
+  ordinary Code Mode.
+- Apply a mode change at a model-turn boundary, never halfway through a running
+  Code Mode cell. The next submitted model input carries a short
+  application-owned mode marker so the model knows whether the already-stable
+  task tools are callable.
+- The TUI owns the toggle and default research instructions. The crate itself
+  remains usable by another embedder through explicit tool registration and
+  does not depend on Ratatui concepts.
+- Present task calls as first-class Code Mode activity instead of raw JSON:
+  show compact instructions while running, short task IDs and structured
+  outputs on completion, and ordered completed/failed summaries for batches.
+  Keep long details wrapped under the task row.
+- Remove the duplicate `spawn_agent`/`fork_agent`/`prompt_agent` implementation
+  and its `--subagents` activation flag rather than maintaining two
+  orchestration systems. The bundled activation path is `/turbo`; embedders
+  install and gate the task tools through `nanocodex-rlm`. Preserve `/btw`,
+  which is a distinct user-visible contextual fork.
+
+#### Delivery order
+
+1. Add the typed transcript projection and `context()` builtin, including
+   yielded-cell snapshot tests and generated TypeScript documentation.
+2. Add `nanocodex-rlm` with `task`, retained `task_continue`, fixed
+   `submit_result`, runtime JSON Schema validation, and hard isolation tests.
+3. Add bounded concurrent `task_batch`, recursion accounting, per-item failure
+   results, and cancellation/descendant-cleanup tests.
+4. Wire the crate into the Ratatui consumer behind `/turbo`, including mode
+   status, turn-boundary behavior, recursive child wiring, and deletion of the
+   superseded CLI subagent implementation.
+5. Add small executable research examples for map/reduce, independent
+   verification and revision, and deliberate breadth/exploration strategies.
+   Keep these as instructions and Code Mode programs, not public Rust profiles.
+
+Gate:
+
+- `context()` fixtures prove exact ordering and normalization for messages,
+  reasoning, tool calls/results, compaction, later cells, yielded cells, and
+  clean child isolation.
+- Task tests prove no implicit parent-history inheritance, runtime schema
+  rejection and retry, exactly one accepted result, retained follow-up state,
+  recursive tools, ordered bounded batches, partial batch failure, and opaque
+  task IDs.
+- Cancellation tests prove a stopped parent cell leaves no running child turn,
+  descendant, or subprocess. Dropping the task registry releases retained child
+  drivers and event drains.
+- Captured requests prove that `/turbo` changes only new tail input and runtime
+  authorization, never the stable instructions/tool-definition prefix. Toggle
+  tests cover default-off, on/off/idempotent forms, busy-turn boundaries, forks,
+  and recursive children.
+- Warnings-denied Clippy, workspace tests, public examples, and a native
+  `/turbo` smoke pass before experiments make performance claims.
+
+Non-goals for this phase are a generic local scheduler, asynchronous task
+handles, polling, live steering, automatic transcript inheritance, named
+profiles, strategy traits, a schema-derived Rust type system, or an `rlm.run`
+lifecycle. Those may be reconsidered only after a concrete experiment cannot be
+expressed by `context()`, the three task calls, normal JavaScript, and
+application instructions.
+
+After this gate passes, run the first controlled experiment in `../nanoeval`.
+Reuse the existing `medium` results only after verifying their model, effort,
+task set, harness revision, and scoring metadata match; add a `medium-turbo`
+arm rather than rerunning the control unnecessarily. Compare score and failure
+classes alongside total model calls, child-task fan-out, token usage, latency,
+and cost. Do not tune against benchmark verifiers or change tasks between arms.
 
 ## Performance policy
 
