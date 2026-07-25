@@ -95,7 +95,17 @@ jobs:
           VERGEN_GIT_SHA: ${{ github.sha }}
         run: |
           mkdir dist
-          docker build \
+          retry() {
+            local attempt=1
+            until "$@"; do
+              if [ "$attempt" -ge 4 ]; then
+                return 1
+              fi
+              sleep "$((attempt * 10))"
+              attempt="$((attempt + 1))"
+            done
+          }
+          retry docker build \
             --platform linux/amd64 \
             --build-arg CARGO_PROFILE=maxperf \
             --build-arg TAG_NAME="$TAG_NAME" \
@@ -109,11 +119,25 @@ jobs:
         shell: bash
         run: |
           file dist/nanocodex-x86_64-unknown-linux-musl
+          retry() {
+            local attempt=1
+            until "$@"; do
+              if [ "$attempt" -ge 4 ]; then
+                return 1
+              fi
+              sleep "$((attempt * 10))"
+              attempt="$((attempt + 1))"
+            done
+          }
+          retry docker pull alpine:3.21
+          retry docker pull ubuntu:22.04
           docker run --rm \
+            --pull never \
             --volume "$PWD/dist:/dist:ro" \
             alpine:3.21 \
             /dist/nanocodex-x86_64-unknown-linux-musl --version
           docker run --rm \
+            --pull never \
             --volume "$PWD/dist:/dist:ro" \
             ubuntu:22.04 \
             /dist/nanocodex-x86_64-unknown-linux-musl --version
