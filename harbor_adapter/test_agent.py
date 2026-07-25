@@ -150,6 +150,18 @@ class WebSearchContractTests(unittest.TestCase):
             ["--", "- benchmark instruction"],
         )
 
+    def test_run_arguments_enable_turbo_explicitly(self) -> None:
+        agent = object.__new__(NanocodexAgent)
+        agent._model = "test-model"
+        agent._effort = "max"
+        agent._web_search = False
+        agent._turbo = True
+
+        self.assertEqual(
+            agent._run_arguments("test prompt")[-3:],
+            ["--turbo", "--", "test prompt"],
+        )
+
     def test_terminal_bench_disables_web_search(self) -> None:
         repository = Path(__file__).resolve().parents[1]
         config = yaml.safe_load(

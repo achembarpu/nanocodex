@@ -129,6 +129,7 @@ class NanocodexAgent(BaseInstalledAgent):
         model_name: str | None = None,
         effort: str = "low",
         web_search: bool = True,
+        turbo: bool = False,
         install_node: bool = False,
         system_prompt_path: str | Path | None = None,
         agents_md_path: str | Path | None = None,
@@ -163,6 +164,7 @@ class NanocodexAgent(BaseInstalledAgent):
             raise ValueError(f"nanocodex supports only {MODEL}, got {self._model}")
         self._effort = effort
         self._web_search = web_search
+        self._turbo = turbo
         self._install_node = install_node
         self._system_prompt_path = self._resolve_context_file(
             system_prompt_path, "system prompt"
@@ -294,16 +296,18 @@ class NanocodexAgent(BaseInstalledAgent):
         self._publish_events(result.stdout)
 
     def _run_arguments(self, prompt: str) -> list[str]:
-        return [
+        arguments = [
             self._BINARY,
             "run",
             "--thinking",
             self._effort,
             "--web-search",
             str(self._web_search).lower(),
-            "--",
-            prompt,
         ]
+        if getattr(self, "_turbo", False):
+            arguments.append("--turbo")
+        arguments.extend(["--", prompt])
+        return arguments
 
     def _classify_exec_error(self, command: str, result: Any) -> Exception:
         # BaseInstalledAgent classifies and raises before returning a nonzero

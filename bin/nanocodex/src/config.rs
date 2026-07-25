@@ -66,6 +66,10 @@ pub(crate) struct AgentArgs {
     )]
     image_generation: bool,
 
+    /// Enable recursive structured task tools for this session.
+    #[arg(long, env = "NANOCODEX_TURBO", action = ArgAction::SetTrue)]
+    pub(crate) turbo: bool,
+
     /// Write Codex-compatible resumable threads beneath `CODEX_HOME`.
     #[arg(
         long,
@@ -120,14 +124,20 @@ impl AgentArgs {
     }
 
     pub(crate) async fn build(self) -> Result<ConfiguredAgent> {
-        self.build_inner(false).await
+        let turbo = self.turbo;
+        self.build_inner(turbo, turbo).await
     }
 
     pub(crate) async fn build_for_tui(self) -> Result<ConfiguredAgent> {
-        self.build_inner(true).await
+        let turbo = self.turbo;
+        self.build_inner(true, turbo).await
     }
 
-    async fn build_inner(self, with_task_tools: bool) -> Result<ConfiguredAgent> {
+    async fn build_inner(
+        self,
+        with_task_tools: bool,
+        task_tools_enabled: bool,
+    ) -> Result<ConfiguredAgent> {
         let codex_home = default_codex_home()?;
         let rollout = self.rollouts.then(|| codex_home.clone());
         let mpp_enabled = self.mpp.is_enabled();
@@ -170,7 +180,7 @@ impl AgentArgs {
         let tools = tools.build()?;
         let task_runtime = with_task_tools.then(|| {
             let runtime = TaskRuntime::new();
-            runtime.set_enabled(false);
+            runtime.set_enabled(task_tools_enabled);
             runtime
         });
         let builder = Nanocodex::builder(auth)
