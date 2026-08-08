@@ -2787,9 +2787,6 @@ fn classify_submission(input: impl Into<SubmittedPrompt>) -> Submission {
         }
         let instruction = crate::benchmark::prompt(
             argument,
-            std::path::Path::new("nanocodex.toml"),
-            None,
-            None,
             None,
             None,
             crate::benchmark::DEFAULT_ORCHESTRATOR_POLICY,

@@ -1,11 +1,11 @@
 use std::{fs, path::PathBuf};
 
-use clap::{Args, builder::NonEmptyStringValueParser};
+use clap::Args;
 use eyre::{Result, WrapErr as _, bail};
 use nanocodex_eval::{Evaluation, EvaluationStatus, coordinator::CoordinatorClient};
 use serde::Deserialize;
 
-use super::{profile::default_state_dir, systemd};
+use super::systemd;
 use crate::{
     RetryableProcessExit, benchmark, config::AgentArgs, observability::ObservabilityArgs, run, tui,
     vm::VmArgs,
@@ -13,32 +13,29 @@ use crate::{
 
 #[derive(Args)]
 pub(super) struct Benchmark {
-    /// Named durable profile to drive to completion.
-    profile: String,
+    /// Named benchmark to drive to completion.
+    benchmark: String,
 
     /// Runtime harness helper configuration passed to workers.
-    #[arg(long, default_value = "nanocodex.toml")]
+    #[arg(long, env = "NANOCODEX_EVAL_CONFIG", default_value = "nanocodex.toml")]
     config: PathBuf,
 
-    /// Durable SQLite ledger and retained artifacts.
-    ///
-    /// The workflow and child commands default to ~/.nanocodex/evals.
-    #[arg(long, value_name = "DIRECTORY")]
-    state_dir: Option<PathBuf>,
-
-    /// Pull all status and execution claims from this coordinator.
-    #[arg(long, value_name = "URL", conflicts_with = "state_dir")]
-    coordinator: Option<String>,
-
-    /// Stable host identity used for coordinator task affinity.
+    /// Durable SQLite state containing the named benchmark.
     #[arg(
         long,
-        env = "NANOCODEX_WORKER_NAME",
-        value_name = "NAME",
-        value_parser = NonEmptyStringValueParser::new(),
-        requires = "coordinator"
+        value_name = "DIRECTORY",
+        required_unless_present = "coordinator"
     )]
-    worker: Option<String>,
+    state_dir: Option<PathBuf>,
+
+    /// Run against this coordinator instead of local SQLite state.
+    #[arg(
+        long,
+        value_name = "URL",
+        conflicts_with = "state_dir",
+        required_unless_present = "state_dir"
+    )]
+    coordinator: Option<String>,
 
     /// Run the same benchmark workflow as flushed JSONL without a TUI.
     #[arg(long)]
@@ -59,11 +56,10 @@ pub(super) struct Benchmark {
     #[arg(long, value_name = "DIRECTORY", requires = "systemd")]
     runtime_dir: Option<PathBuf>,
 
-    /// Replace the embedded agent-owned scheduling policy at runtime.
+    /// Replace the embedded three-bullet benchmark prompt at runtime.
     ///
-    /// The generated ledger and command contract remains fixed. The systemd
-    /// installer resolves this path absolutely so editing the file followed by
-    /// a service restart updates policy without rebuilding Nanocodex.
+    /// The systemd installer resolves this path absolutely so editing the file
+    /// followed by a service restart updates it without rebuilding Nanocodex.
     #[arg(long, env = "NANOCODEX_BENCHMARK_PROMPT_FILE", value_name = "FILE")]
     orchestrator_prompt_file: Option<PathBuf>,
 
@@ -80,11 +76,10 @@ pub(super) struct Benchmark {
 impl Benchmark {
     pub(super) async fn run(self) -> Result<()> {
         let Self {
-            profile,
+            benchmark,
             config,
             state_dir,
             coordinator,
-            worker,
             headless,
             systemd,
             runtime_dir,
@@ -95,7 +90,7 @@ impl Benchmark {
         } = self;
         if systemd {
             return systemd::install(
-                &profile,
+                &benchmark,
                 &config,
                 state_dir.as_deref(),
                 coordinator.as_deref(),
@@ -104,19 +99,14 @@ impl Benchmark {
             );
         }
         let orchestration_policy = load_orchestration_policy(orchestrator_prompt_file.as_deref())?;
-        let executable =
-            std::env::current_exe().wrap_err("failed to resolve nanocodex executable")?;
         let prompt = benchmark::prompt(
-            Some(profile.as_str()),
-            &config,
+            Some(benchmark.as_str()),
             state_dir.as_deref(),
             coordinator.as_deref(),
-            worker.as_deref(),
-            Some(&executable),
             &orchestration_policy,
         );
-        let initial = BoardStatus::load(
-            &profile,
+        let initial = CompletionStatus::load(
+            &benchmark,
             &config,
             state_dir.as_deref(),
             coordinator.as_deref(),
@@ -130,7 +120,7 @@ impl Benchmark {
             run::run_prompt(prompt, agent, vm).await
         } else {
             let _observability = observability.install(true, agent.cwd())?;
-            let display = format!("/benchmark {profile}");
+            let display = format!("/benchmark {benchmark}");
             tui::run(
                 agent,
                 vm,
@@ -139,14 +129,14 @@ impl Benchmark {
             )
             .await
         };
-        let board = BoardStatus::load(
-            &profile,
+        let status = CompletionStatus::load(
+            &benchmark,
             &config,
             state_dir.as_deref(),
             coordinator.as_deref(),
         )
         .await?;
-        board.require_complete(workflow.as_ref().err())
+        status.require_complete(workflow.as_ref().err())
     }
 }
 
@@ -163,31 +153,26 @@ fn load_orchestration_policy(path: Option<&std::path::Path>) -> Result<String> {
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
-struct BoardCounts {
+struct CompletionCounts {
     pending: i64,
     running: i64,
-    complete: i64,
 }
 
-impl BoardCounts {
-    const fn total(self) -> i64 {
-        self.pending + self.running + self.complete
-    }
-
+impl CompletionCounts {
     const fn is_complete(self) -> bool {
         self.pending == 0 && self.running == 0
     }
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq)]
-struct BoardStatus {
-    preparation: BoardCounts,
-    coordinates: BoardCounts,
+struct CompletionStatus {
+    preparation: CompletionCounts,
+    coordinates: CompletionCounts,
 }
 
-impl BoardStatus {
+impl CompletionStatus {
     async fn load(
-        profile: &str,
+        benchmark: &str,
         config: &std::path::Path,
         state_dir: Option<&std::path::Path>,
         coordinator: Option<&str>,
@@ -195,10 +180,10 @@ impl BoardStatus {
         if let Some(coordinator) = coordinator {
             let status = CoordinatorClient::new(coordinator)?.status().await?;
             return serde_json::from_value(status)
-                .wrap_err("coordinator returned an invalid benchmark board status");
+                .wrap_err("coordinator returned invalid benchmark status");
         }
-        let state_dir = state_dir.map_or_else(default_state_dir, |path| Ok(path.to_path_buf()))?;
-        let evaluation = Evaluation::open(config, profile, state_dir)?;
+        let state_dir = state_dir.ok_or_else(|| eyre::eyre!("local benchmark state is missing"))?;
+        let evaluation = Evaluation::open(config, benchmark, state_dir)?;
         Ok(evaluation.status()?.into())
     }
 
@@ -214,13 +199,9 @@ impl BoardStatus {
             format!("; agent workflow ended with: {error:#}")
         });
         Err(RetryableProcessExit::new(format!(
-            "benchmark board remains incomplete: preparation {}/{} ready ({} pending, {} running); coordinates {}/{} terminal ({} pending, {} running){workflow_error}",
-            self.preparation.complete,
-            self.preparation.total(),
+            "benchmark remains incomplete: preparation {} pending, {} running; evals {} pending, {} running{workflow_error}",
             self.preparation.pending,
             self.preparation.running,
-            self.coordinates.complete,
-            self.coordinates.total(),
             self.coordinates.pending,
             self.coordinates.running,
         ))
@@ -228,18 +209,16 @@ impl BoardStatus {
     }
 }
 
-impl From<EvaluationStatus> for BoardStatus {
+impl From<EvaluationStatus> for CompletionStatus {
     fn from(status: EvaluationStatus) -> Self {
         Self {
-            preparation: BoardCounts {
+            preparation: CompletionCounts {
                 pending: status.preparation.pending,
                 running: status.preparation.running,
-                complete: status.preparation.complete,
             },
-            coordinates: BoardCounts {
+            coordinates: CompletionCounts {
                 pending: status.coordinates.pending,
                 running: status.coordinates.running,
-                complete: status.coordinates.complete,
             },
         }
     }
@@ -247,13 +226,13 @@ impl From<EvaluationStatus> for BoardStatus {
 
 #[cfg(test)]
 mod tests {
-    use super::{BoardCounts, BoardStatus, load_orchestration_policy};
+    use super::{CompletionCounts, CompletionStatus, load_orchestration_policy};
     use crate::{RETRYABLE_EXIT_CODE, process_exit_code};
 
     #[test]
     fn orchestration_policy_uses_the_embedded_default_or_a_runtime_file() {
         let default = load_orchestration_policy(None).unwrap();
-        assert!(default.contains("Keep the host saturated with useful evaluation work"));
+        assert!(default.contains("Run as many evals in parallel as the host can sustain"));
         assert!(!default.contains("lease"));
 
         let directory = tempfile::tempdir().unwrap();
@@ -270,38 +249,36 @@ mod tests {
     }
 
     #[test]
-    fn benchmark_succeeds_only_when_the_entire_board_is_terminal() {
-        let complete = BoardStatus {
-            preparation: BoardCounts {
+    fn benchmark_succeeds_only_when_all_work_is_terminal() {
+        let complete = CompletionStatus {
+            preparation: CompletionCounts {
                 pending: 0,
                 running: 0,
-                complete: 3,
             },
-            coordinates: BoardCounts {
+            coordinates: CompletionCounts {
                 pending: 0,
                 running: 0,
-                complete: 30,
             },
         };
         assert!(complete.require_complete(None).is_ok());
 
         for incomplete in [
-            BoardStatus {
-                coordinates: BoardCounts {
+            CompletionStatus {
+                coordinates: CompletionCounts {
                     pending: 1,
                     ..complete.coordinates
                 },
                 ..complete
             },
-            BoardStatus {
-                coordinates: BoardCounts {
+            CompletionStatus {
+                coordinates: CompletionCounts {
                     running: 1,
                     ..complete.coordinates
                 },
                 ..complete
             },
-            BoardStatus {
-                preparation: BoardCounts {
+            CompletionStatus {
+                preparation: CompletionCounts {
                     running: 1,
                     ..complete.preparation
                 },
@@ -315,7 +292,7 @@ mod tests {
 
     #[test]
     fn remote_status_uses_the_same_completion_contract() {
-        let board: BoardStatus = serde_json::from_value(serde_json::json!({
+        let status: CompletionStatus = serde_json::from_value(serde_json::json!({
             "profile": "release",
             "generation": "abc",
             "preparation": { "pending": 0, "running": 0, "complete": 2 },
@@ -323,25 +300,23 @@ mod tests {
             "families": [],
         }))
         .unwrap();
-        assert!(board.require_complete(None).is_ok());
+        assert!(status.require_complete(None).is_ok());
     }
 
     #[test]
-    fn agent_failure_is_retryable_while_the_board_remains_incomplete() {
-        let board = BoardStatus {
-            preparation: BoardCounts {
+    fn agent_failure_is_retryable_while_the_benchmark_remains_incomplete() {
+        let status = CompletionStatus {
+            preparation: CompletionCounts {
                 pending: 0,
                 running: 0,
-                complete: 2,
             },
-            coordinates: BoardCounts {
+            coordinates: CompletionCounts {
                 pending: 1,
                 running: 0,
-                complete: 19,
             },
         };
         let workflow_error = eyre::eyre!("connection closed");
-        let error = board.require_complete(Some(&workflow_error)).unwrap_err();
+        let error = status.require_complete(Some(&workflow_error)).unwrap_err();
         assert_eq!(process_exit_code(&error), RETRYABLE_EXIT_CODE);
         assert!(error.to_string().contains("connection closed"));
     }

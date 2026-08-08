@@ -12,14 +12,12 @@ use eyre::{Result, WrapErr as _, bail, eyre};
 use nanocodex_eval::{Evaluation, coordinator::CoordinatorClient};
 use sha2::{Digest as _, Sha256};
 
-use super::profile::default_state_dir;
-
 const RESTART_DELAY: &str = "30s";
 const COORDINATOR_RESTART_DELAY: &str = "2s";
 const COORDINATOR_WATCHDOG: &str = "30s";
 
 pub(super) fn install(
-    profile: &str,
+    benchmark: &str,
     config: &Path,
     state_dir: Option<&Path>,
     coordinator: Option<&str>,
@@ -63,28 +61,25 @@ pub(super) fn install(
     let state_dir = if coordinator.is_some() {
         None
     } else {
-        let state_dir = state_dir.map_or_else(default_state_dir, |path| Ok(path.to_path_buf()))?;
-        let state_dir = absolute(&state_dir, &invocation_directory);
-        Evaluation::open(&config, profile, &state_dir)?;
+        let state_dir = state_dir.ok_or_else(|| eyre!("local benchmark state is missing"))?;
+        let state_dir = absolute(state_dir, &invocation_directory);
+        Evaluation::open(&config, benchmark, &state_dir)?;
         Some(state_dir.canonicalize().wrap_err_with(|| {
             format!("failed to resolve state directory {}", state_dir.display())
         })?)
     };
     let executable = env::current_exe().wrap_err("failed to resolve the nanocodex executable")?;
-    let arguments = service_arguments(
-        &config,
-        state_dir.as_deref(),
-        orchestrator_prompt_file.as_deref(),
-    )?;
+    let arguments = service_arguments(state_dir.as_deref(), orchestrator_prompt_file.as_deref())?;
     let target = coordinator
         .map(OsStr::new)
         .or_else(|| state_dir.as_deref().map(Path::as_os_str))
         .ok_or_else(|| eyre!("benchmark service target is absent"))?;
-    let unit_name = unit_name(profile, &config, target);
+    let unit_name = unit_name(benchmark, &config, target);
     let unit = render_unit(
         &executable,
         &arguments,
         working_directory,
+        &config,
         &runtime_dir,
         &temporary_directory,
     )?;
@@ -166,13 +161,11 @@ fn normalize_coordinator_arguments(
 }
 
 fn service_arguments(
-    config: &Path,
     state_dir: Option<&Path>,
     orchestrator_prompt_file: Option<&Path>,
 ) -> Result<Vec<OsString>> {
     Ok(normalize_service_arguments(
         env::args_os().skip(1).collect(),
-        config,
         state_dir,
         orchestrator_prompt_file,
     ))
@@ -180,13 +173,12 @@ fn service_arguments(
 
 fn normalize_service_arguments(
     mut arguments: Vec<OsString>,
-    config: &Path,
     state_dir: Option<&Path>,
     orchestrator_prompt_file: Option<&Path>,
 ) -> Vec<OsString> {
     arguments.retain(|argument| argument != "--systemd");
     remove_option(&mut arguments, "--runtime-dir");
-    replace_option(&mut arguments, "--config", config.as_os_str());
+    remove_option(&mut arguments, "--config");
     if let Some(state_dir) = state_dir {
         replace_option(&mut arguments, "--state-dir", state_dir.as_os_str());
     }
@@ -254,6 +246,7 @@ fn render_unit(
     executable: &Path,
     arguments: &[OsString],
     working_directory: &Path,
+    config: &Path,
     runtime_directory: &Path,
     temporary_directory: &Path,
 ) -> Result<String> {
@@ -269,6 +262,7 @@ fn render_unit(
          WorkingDirectory={}\n\
          Environment={}\n\
          Environment={}\n\
+         Environment={}\n\
          ExecStart={command}\n\
          Restart=on-failure\n\
          RestartSec={RESTART_DELAY}\n\
@@ -277,6 +271,7 @@ fn render_unit(
          [Install]\n\
          WantedBy=default.target\n",
         escape_path(working_directory.as_os_str())?,
+        quote(OsString::from(format!("NANOCODEX_EVAL_CONFIG={}", config.display())).as_os_str())?,
         quote(
             OsString::from(format!("NANOCODEX_HOME={}", runtime_directory.display())).as_os_str()
         )?,
@@ -361,15 +356,15 @@ fn quote(value: &OsStr) -> Result<String> {
     Ok(quoted)
 }
 
-fn unit_name(profile: &str, config: &Path, target: &OsStr) -> String {
+fn unit_name(benchmark: &str, config: &Path, target: &OsStr) -> String {
     let mut digest = Sha256::new();
     digest.update(config.as_os_str().as_encoded_bytes());
     digest.update([0]);
     digest.update(target.as_encoded_bytes());
     digest.update([0]);
-    digest.update(profile.as_bytes());
+    digest.update(benchmark.as_bytes());
     let digest = hex::encode(digest.finalize());
-    let profile = profile
+    let benchmark = benchmark
         .chars()
         .map(|character| {
             if character.is_ascii_alphanumeric() || character == '-' {
@@ -381,7 +376,7 @@ fn unit_name(profile: &str, config: &Path, target: &OsStr) -> String {
         .collect::<String>();
     format!(
         "nanocodex-benchmark-{}-{}.service",
-        profile.trim_matches('-'),
+        benchmark.trim_matches('-'),
         &digest[..12]
     )
 }
@@ -548,6 +543,7 @@ mod tests {
                 OsString::from("--headless"),
             ],
             "/srv/evals".as_ref(),
+            "/srv/nanocodex.toml".as_ref(),
             "/mnt/eval-runtime".as_ref(),
             "/mnt/eval-runtime/tmp".as_ref(),
         )
@@ -556,6 +552,7 @@ mod tests {
             "ExecStart=\"/opt/nanocodex/bin/nanocodex\" \"eval\" \"benchmark\" \"terminal bench\" \"--headless\""
         ));
         assert!(unit.contains("WorkingDirectory=/srv/evals"));
+        assert!(unit.contains("Environment=\"NANOCODEX_EVAL_CONFIG=/srv/nanocodex.toml\""));
         assert!(unit.contains("Environment=\"NANOCODEX_HOME=/mnt/eval-runtime\""));
         assert!(unit.contains("Environment=\"TMPDIR=/mnt/eval-runtime/tmp\""));
         assert!(unit.contains("Restart=on-failure"));
@@ -597,8 +594,6 @@ mod tests {
                 "relative.toml",
                 "--coordinator",
                 "http://127.0.0.1:8788",
-                "--worker",
-                "dev-georgios-01",
                 "--orchestrator-prompt-file",
                 "relative-policy.md",
                 "--runtime-dir=/mnt/eval-runtime",
@@ -606,7 +601,6 @@ mod tests {
             ]
             .map(OsString::from)
             .into(),
-            Path::new("/srv/nanocodex.toml"),
             None,
             Some(Path::new("/srv/benchmark-policy.md")),
         );
@@ -617,12 +611,8 @@ mod tests {
                 "eval",
                 "benchmark",
                 "release",
-                "--config",
-                "/srv/nanocodex.toml",
                 "--coordinator",
                 "http://127.0.0.1:8788",
-                "--worker",
-                "dev-georgios-01",
                 "--orchestrator-prompt-file",
                 "/srv/benchmark-policy.md",
                 "--headless",

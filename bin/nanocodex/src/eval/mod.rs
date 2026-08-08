@@ -85,16 +85,33 @@ mod tests {
                 "tasks/write-greeting",
             ],
             vec!["nanocodex", "eval", "status", "local-smoke"],
-            vec!["nanocodex", "eval", "benchmark", "local-smoke"],
             vec![
                 "nanocodex",
                 "eval",
                 "benchmark",
                 "local-smoke",
+                "--state-dir",
+                "/mnt/evals",
+            ],
+            vec![
+                "nanocodex",
+                "eval",
+                "benchmark",
+                "local-smoke",
+                "--state-dir",
+                "/mnt/evals",
                 "--orchestrator-prompt-file",
                 "benchmark-policy.md",
             ],
-            vec!["nanocodex", "eval", "benchmark", "local-smoke", "--systemd"],
+            vec![
+                "nanocodex",
+                "eval",
+                "benchmark",
+                "local-smoke",
+                "--state-dir",
+                "/mnt/evals",
+                "--systemd",
+            ],
             vec![
                 "nanocodex",
                 "eval",
@@ -102,8 +119,6 @@ mod tests {
                 "local-smoke",
                 "--coordinator",
                 "http://127.0.0.1:8788",
-                "--worker",
-                "dev-one",
                 "--systemd",
             ],
             vec!["nanocodex", "eval", "coordinator", "local-smoke"],
@@ -145,6 +160,24 @@ mod tests {
                 "eval run unexpectedly accepted {argument}"
             );
         }
+    }
+
+    #[test]
+    fn benchmark_requires_exactly_one_execution_target() {
+        assert!(Cli::try_parse_from(["nanocodex", "eval", "benchmark", "terminal-bench"]).is_err());
+        assert!(
+            Cli::try_parse_from([
+                "nanocodex",
+                "eval",
+                "benchmark",
+                "terminal-bench",
+                "--state-dir",
+                "/mnt/evals",
+                "--coordinator",
+                "http://127.0.0.1:8788",
+            ])
+            .is_err()
+        );
     }
 
     #[test]

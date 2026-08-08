@@ -82,7 +82,7 @@ pub(super) struct Add {
     /// Optional local profile recipes and runtime harness helpers.
     ///
     /// A remote coordinator resolves recipes from its own configured file.
-    #[arg(long, default_value = CONFIG_FILE)]
+    #[arg(long, env = "NANOCODEX_EVAL_CONFIG", default_value = CONFIG_FILE)]
     config: PathBuf,
 
     /// Local durable SQLite ledger and retained artifacts.
