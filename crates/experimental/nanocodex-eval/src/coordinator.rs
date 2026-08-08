@@ -30,6 +30,8 @@ use crate::{
 };
 
 const MAX_COMPRESSED_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+const ARTIFACT_TIMEOUT: Duration = Duration::from_secs(10 * 60);
 const MAX_EXTRACTED_ARTIFACT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const ARCHIVE_BUFFER_BYTES: usize = 64 * 1024;
 const ARCHIVE_CONTENT_TYPE: &str = "application/x-tar+zstd";
@@ -268,6 +270,7 @@ impl CoordinatorServer {
         }
         let reaper = spawn_reaper(self.state.active.clone(), self.worker_timeout);
         let app = Router::new()
+            .route("/v1/health", get(health))
             .route("/v1/status", get(status))
             .route("/v1/evals", get(eval_overview))
             .route("/v1/evals/work", post(add_work))
@@ -299,6 +302,13 @@ impl CoordinatorServer {
 impl CoordinatorClient {
     /// Connects to a coordinator. Plain HTTP is accepted only on loopback.
     pub fn new(base: &str) -> Result<Self, CoordinatorError> {
+        Self::with_request_timeout(base, REQUEST_TIMEOUT)
+    }
+
+    fn with_request_timeout(
+        base: &str,
+        request_timeout: Duration,
+    ) -> Result<Self, CoordinatorError> {
         let mut base =
             Url::parse(base).map_err(|error| CoordinatorError::InvalidUrl(error.to_string()))?;
         let secure = base.scheme() == "https";
@@ -323,6 +333,8 @@ impl CoordinatorClient {
             base,
             http: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
+                .connect_timeout(Duration::from_secs(5))
+                .timeout(request_timeout)
                 .build()?,
             worker: None,
         })
@@ -342,6 +354,11 @@ impl CoordinatorClient {
     pub async fn status(&self) -> Result<serde_json::Value, CoordinatorError> {
         let response = self.http.get(self.endpoint("v1/status")?).send().await?;
         decode(response).await
+    }
+
+    /// Checks whether the coordinator HTTP event loop can answer a request.
+    pub async fn health(&self) -> Result<(), CoordinatorError> {
+        accepted(self.http.get(self.endpoint("v1/health")?).send().await?).await
     }
 
     /// Appends work through the coordinator and returns the resulting status.
@@ -466,6 +483,7 @@ impl CoordinatorClient {
             .put(self.endpoint(&format!("v1/claims/{}/artifacts", lease.token))?)
             .header(reqwest::header::CONTENT_TYPE, ARCHIVE_CONTENT_TYPE)
             .body(reqwest::Body::wrap_stream(ReaderStream::new(reader)))
+            .timeout(ARTIFACT_TIMEOUT)
             .send()
             .await;
         archive.await??;
@@ -494,10 +512,18 @@ impl CoordinatorClient {
     }
 }
 
+async fn health() -> StatusCode {
+    StatusCode::NO_CONTENT
+}
+
 async fn status(
     State(state): State<CoordinatorState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let status = state.evaluation.status().map_err(ApiError::ledger)?;
+    let evaluation = state.evaluation;
+    let status = tokio::task::spawn_blocking(move || evaluation.status())
+        .await
+        .map_err(ApiError::internal)?
+        .map_err(ApiError::ledger)?;
     Ok(Json(
         serde_json::to_value(status).map_err(ApiError::internal)?,
     ))
@@ -721,10 +747,14 @@ async fn claim(
         .model(model)
         .thinking(thinking)
         .web_search(request.web_search);
-    let claim = state
-        .evaluation
-        .claim_for_host(&selector, &host, state.lease_duration)
-        .map_err(ApiError::bad_gateway)?;
+    let evaluation = state.evaluation.clone();
+    let lease_duration = state.lease_duration;
+    let claim = tokio::task::spawn_blocking(move || {
+        evaluation.claim_for_host(&selector, &host, lease_duration)
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(ApiError::bad_gateway)?;
     let response = match claim {
         EvaluationClaim::Prepare(claim) => {
             let treatment = claim.treatment().into();
@@ -796,7 +826,14 @@ async fn finish(
         .await
         .remove(&token)
         .ok_or_else(|| ApiError::not_found("claim is absent or expired"))?;
-    match (active.claim, request) {
+    tokio::task::spawn_blocking(move || finish_claim(active.claim, request))
+        .await
+        .map_err(ApiError::internal)??;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn finish_claim(claim: HeldClaim, request: FinishRequest) -> Result<(), ApiError> {
+    match (claim, request) {
         (HeldClaim::Preparation(claim), FinishRequest::Prepared) => {
             claim.complete().map_err(ApiError::ledger)?;
         }
@@ -819,7 +856,7 @@ async fn finish(
             ));
         }
     }
-    Ok(StatusCode::NO_CONTENT)
+    Ok(())
 }
 
 async fn insert_claim(state: &CoordinatorState, claim: HeldClaim) -> String {
@@ -856,17 +893,31 @@ fn spawn_reaper(
                     .filter_map(|token| active.remove(&token))
                     .collect::<Vec<_>>()
             };
-            for expired in expired {
-                let result = match expired.claim {
-                    HeldClaim::Preparation(claim) => {
-                        claim.retry("coordinator worker heartbeat expired")
+            let release = tokio::task::spawn_blocking(move || {
+                expired
+                    .into_iter()
+                    .filter_map(|expired| {
+                        let result = match expired.claim {
+                            HeldClaim::Preparation(claim) => {
+                                claim.retry("coordinator worker heartbeat expired")
+                            }
+                            HeldClaim::Coordinate(claim) => {
+                                claim.retry("coordinator worker heartbeat expired")
+                            }
+                        };
+                        result.err()
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .await;
+            match release {
+                Ok(errors) => {
+                    for error in errors {
+                        tracing::warn!(%error, "failed to release expired coordinator claim");
                     }
-                    HeldClaim::Coordinate(claim) => {
-                        claim.retry("coordinator worker heartbeat expired")
-                    }
-                };
-                if let Err(error) = result {
-                    tracing::warn!(%error, "failed to release expired coordinator claim");
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "coordinator claim reaper task failed");
                 }
             }
         }
@@ -1163,6 +1214,7 @@ mod tests {
     use std::{fs, path::Path};
 
     use nanocodex_oai_api::{Model, Thinking};
+    use rusqlite::Connection;
 
     use super::*;
     use crate::{EvaluationSelector, EvaluationWork, Task, coordinator::RemoteClaim};
@@ -1242,6 +1294,55 @@ allow_internet = false
         });
         let client = CoordinatorClient::new(&format!("http://{address}")).unwrap();
         (directory, client, selection, server)
+    }
+
+    #[tokio::test]
+    async fn coordinator_client_times_out_when_the_server_stops_answering() {
+        let listener = TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+            .await
+            .unwrap();
+        let address = listener.local_addr().unwrap();
+        let stalled = tokio::spawn(async move {
+            let (_connection, _) = listener.accept().await.unwrap();
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        });
+        let client = CoordinatorClient::with_request_timeout(
+            &format!("http://{address}"),
+            Duration::from_millis(50),
+        )
+        .unwrap();
+
+        let error = client.health().await.unwrap_err();
+        assert!(matches!(error, CoordinatorError::Http(error) if error.is_timeout()));
+        stalled.abort();
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+    async fn locked_ledger_does_not_block_the_coordinator_health_route() {
+        let (directory, client, selection, server) = fixture().await;
+        let connection = Connection::open(directory.path().join("state/state.sqlite3")).unwrap();
+        connection.execute_batch("BEGIN IMMEDIATE").unwrap();
+        let claim_client = client.clone();
+        let claim = tokio::spawn(async move { claim_client.claim(&selection).await });
+        tokio::time::sleep(Duration::from_millis(50)).await;
+
+        tokio::time::timeout(Duration::from_millis(500), client.health())
+            .await
+            .expect("health route must remain scheduled while SQLite is busy")
+            .unwrap();
+
+        connection.execute_batch("ROLLBACK").unwrap();
+        let RemoteClaim::Prepare { lease, .. } =
+            tokio::time::timeout(Duration::from_secs(2), claim)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+        else {
+            panic!("the pending preparation should be claimed after SQLite unlocks");
+        };
+        client.retry(&lease, "test cleanup").await.unwrap();
+        server.abort();
     }
 
     #[tokio::test]

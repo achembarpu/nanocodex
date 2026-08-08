@@ -3,6 +3,7 @@ mod coordinator;
 mod profile;
 mod run;
 mod systemd;
+mod watchdog;
 
 use clap::{Args, Subcommand};
 use eyre::Result;
@@ -106,6 +107,13 @@ mod tests {
                 "--systemd",
             ],
             vec!["nanocodex", "eval", "coordinator", "local-smoke"],
+            vec![
+                "nanocodex",
+                "eval",
+                "coordinator",
+                "local-smoke",
+                "--systemd",
+            ],
         ] {
             Cli::try_parse_from(arguments).expect("supported eval command must parse");
         }

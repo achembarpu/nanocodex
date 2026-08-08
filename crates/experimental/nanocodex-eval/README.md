@@ -161,6 +161,10 @@ nanocodex eval coordinator compare --port 8789
 nanocodex eval run compare --coordinator http://127.0.0.1:8789 \
   --task tasks/write-greeting --harness codex --model luna --thinking high
 
+# Install the coordinator as a durable user service. Its end-to-end HTTP
+# watchdog restarts the process if the listener stops answering requests.
+nanocodex eval coordinator compare --port 8789 --systemd
+
 # Let an agent inspect the ledger and choose task order and process fan-out.
 nanocodex eval benchmark local-smoke
 # Equivalent interactive workflow:
