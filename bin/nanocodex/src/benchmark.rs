@@ -7,6 +7,7 @@ pub(crate) fn prompt(
     benchmark: Option<&str>,
     state_dir: Option<&Path>,
     coordinator: Option<&str>,
+    executable: Option<&Path>,
     policy: &str,
 ) -> String {
     let benchmark = benchmark.unwrap_or("the selected benchmark");
@@ -19,8 +20,10 @@ pub(crate) fn prompt(
         },
         |url| format!("coordinator {url}"),
     );
+    let executable =
+        executable.map_or_else(|| "nanocodex".to_owned(), |path| path.display().to_string());
     format!(
-        "Drive benchmark {benchmark} to completion using only the `nanocodex eval` CLI against {target}. Do not do anything else.\n\n{}",
+        "Drive benchmark {benchmark} to completion using only the `{executable} eval` CLI against {target}. Do not do anything else.\n\n{}",
         policy.trim(),
     )
 }
@@ -35,12 +38,13 @@ mod tests {
             Some("terminal-bench"),
             None,
             Some("http://127.0.0.1:8788"),
+            Some(Path::new("/opt/nanocodex/bin/nanocodex")),
             DEFAULT_ORCHESTRATOR_POLICY,
         );
 
         assert!(prompt.contains("benchmark terminal-bench"));
         assert!(prompt.contains("coordinator http://127.0.0.1:8788"));
-        assert!(prompt.contains("using only the `nanocodex eval` CLI"));
+        assert!(prompt.contains("using only the `/opt/nanocodex/bin/nanocodex eval` CLI"));
         assert!(prompt.contains("Run as many evals in parallel as the host can sustain"));
         assert!(!prompt.contains("lease"));
         assert!(!prompt.contains("SQLite ledger"));
@@ -51,6 +55,7 @@ mod tests {
         let prompt = prompt(
             Some("terminal-bench"),
             Some(Path::new("/mnt/evals")),
+            None,
             None,
             DEFAULT_ORCHESTRATOR_POLICY,
         );

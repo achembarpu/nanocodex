@@ -99,10 +99,13 @@ impl Benchmark {
             );
         }
         let orchestration_policy = load_orchestration_policy(orchestrator_prompt_file.as_deref())?;
+        let executable =
+            std::env::current_exe().wrap_err("failed to resolve nanocodex executable")?;
         let prompt = benchmark::prompt(
             Some(benchmark.as_str()),
             state_dir.as_deref(),
             coordinator.as_deref(),
+            Some(&executable),
             &orchestration_policy,
         );
         let initial = CompletionStatus::load(
