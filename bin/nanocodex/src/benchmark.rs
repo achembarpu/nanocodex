@@ -37,22 +37,25 @@ pub(crate) fn prompt(
     format!(
         r#"Drive the Nanocodex evaluation profile {selected} to durable completion.
 
-This is an operations loop, not a software-development task. Do not inspect repository source, plans, documentation, or configuration. Do not edit files. Begin with the status command below, then immediately launch a wave of pending work.
+This is an operations task. Do not inspect or modify source code, benchmark tasks, verifiers, configuration, or expected outputs.
 
-The desired amount of work is already materialized in {ledger}. Do not infer it from `{config}` or add ad-hoc work during this workflow. Inspect the durable ledger with:
+The work is already stored in {ledger}. Read its current state with:
 
     {executable} eval status{profile_argument}{state_argument}{coordinator_argument} --json --family-limit 128
 
-You own task and treatment priority. Read the family records, choose exact pending task and harness treatments, and invoke one repetition with `{executable} eval run{profile_argument} --config {config_argument}{state_argument}{coordinator_argument}{worker_argument} --task <exact-profile-selector>` plus `--harness`, model, or thinking selectors required to identify that profile family. Omit `--harness` for built-in Nanocodex. The CLI atomically allocates the internal repetition; never pass or invent a trial number.
+For pending work, run this command in parallel process sessions:
+
+    {executable} eval run{profile_argument} --config {config_argument}{state_argument}{coordinator_argument}{worker_argument} --task <exact-task> [treatment selectors]
+
+Choose exact tasks and treatments from status. Treatment selectors are `--harness`, model, and thinking level as needed; omit `--harness` for built-in Nanocodex. Never pass a repetition number: the coordinator allocates it atomically.
 
 Orchestration policy:
 
 {orchestration_policy}
 
-Task preparation is part of each task's durable state. One run process may prepare a task while another receives a temporary-unavailable result. Retry temporary contention after its suggested delay. Retry durable infrastructure failures, but treat accepted model and verifier outcomes as terminal even when the benchmark failed.
+Poll every retained process session. When one exits, inspect it and start a replacement while work remains. Retry temporary infrastructure failures; accepted model and verifier outcomes are terminal even when they fail the benchmark.
 
-Re-read the bounded ledger whenever a slot needs replacement and periodically while long runs are active. Continue until every desired coordinate is terminal or a concrete non-retryable blocker is established. Inspect retained evidence for infrastructure failures and representative accepted results. Do not modify Nanocodex source, benchmark tasks, verifier code, or expected outputs in this workflow. Finish with exact completed/running/pending counts, evidence locations, failures, exclusions, and any remaining blocker."#,
-        config = config.display(),
+Do not stop after launching a wave. Keep monitoring and refilling until status reports zero pending and zero running task preparation and benchmark coordinates. Then report the final counts."#,
         orchestration_policy = orchestration_policy.trim(),
     )
 }
@@ -77,23 +80,17 @@ mod tests {
             DEFAULT_ORCHESTRATOR_POLICY,
         );
 
-        assert!(prompt.contains("choose exact pending task and harness treatments"));
-        assert!(prompt.contains("Omit `--harness` for built-in Nanocodex"));
-        assert!(prompt.contains("Ledger `running` is the number of unexpired leases"));
-        assert!(prompt.contains("Live runs are retained"));
-        assert!(prompt.contains("4 GiB for each such outstanding live run"));
-        assert!(prompt.contains("add at most four runs at a time"));
-        assert!(prompt.contains("at least 60 seconds"));
-        assert!(prompt.contains("launch exactly zero"));
-        assert!(prompt.contains("memory_cap = floor"));
-        assert!(prompt.contains("launch count must never exceed `memory_cap`"));
-        assert!(prompt.contains("Do not use `dmesg --since`"));
-        assert!(prompt.contains("kernel journal and `/proc/vmstat`"));
-        assert!(prompt.contains("never less than the last 30 minutes"));
-        assert!(prompt.contains("direct parallel tool calls"));
-        assert!(prompt.contains("never pass or invent a trial number"));
+        assert!(prompt.contains("Choose exact tasks and treatments from status"));
+        assert!(prompt.contains("omit `--harness` for built-in Nanocodex"));
+        assert!(prompt.contains("Keep the host saturated with useful evaluation work"));
+        assert!(prompt.contains("Launch normal `eval run` commands directly in parallel"));
+        assert!(prompt.contains("Poll every retained process session"));
+        assert!(prompt.contains("zero pending and zero running"));
+        assert!(prompt.contains("Never pass a repetition number"));
         assert!(prompt.contains("--state-dir '/mnt/evals'"));
-        assert!(!prompt.contains("eval work"));
+        assert!(!prompt.contains("unexpired leases"));
+        assert!(!prompt.contains("memory_cap"));
+        assert!(!prompt.contains("launch gate"));
     }
 
     #[test]
@@ -130,7 +127,7 @@ mod tests {
             "'/opt/nanocodex/bin/nanocodex' eval run 'release' --config 'nanocodex.toml' --coordinator 'http://127.0.0.1:8789' --worker 'dev-georgios-01' --task"
         ));
         assert!(prompt.contains("do not open SQLite directly"));
-        assert!(prompt.contains("not a software-development task"));
+        assert!(prompt.contains("This is an operations task"));
         assert!(!prompt.contains("--state-dir"));
     }
 
@@ -147,6 +144,6 @@ mod tests {
         );
 
         assert!(prompt.contains("Orchestration policy:\n\nKeep exactly three observed sessions."));
-        assert!(!prompt.contains("add at most four runs at a time"));
+        assert!(!prompt.contains("Keep the host saturated"));
     }
 }

@@ -253,7 +253,8 @@ mod tests {
     #[test]
     fn orchestration_policy_uses_the_embedded_default_or_a_runtime_file() {
         let default = load_orchestration_policy(None).unwrap();
-        assert!(default.contains("Ledger `running` is the number of unexpired leases"));
+        assert!(default.contains("Keep the host saturated with useful evaluation work"));
+        assert!(!default.contains("lease"));
 
         let directory = tempfile::tempdir().unwrap();
         let custom = directory.path().join("benchmark-policy.md");
