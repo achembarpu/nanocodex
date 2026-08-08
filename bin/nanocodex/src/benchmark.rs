@@ -46,7 +46,8 @@ mod tests {
         assert!(prompt.contains("coordinator http://127.0.0.1:8788"));
         assert!(prompt.contains("using only the `/opt/nanocodex/bin/nanocodex eval` CLI"));
         assert!(prompt.contains("Run as many evals in parallel as the host can sustain"));
-        assert!(prompt.contains("Never invoke\n  `eval benchmark`"));
+        assert!(prompt.contains("Never pass `--config`"));
+        assert!(prompt.contains("Never invoke `eval benchmark`"));
         assert!(!prompt.contains("lease"));
         assert!(!prompt.contains("SQLite ledger"));
     }
