@@ -238,6 +238,80 @@ async fn upgrade_required_falls_back_without_another_websocket_attempt() -> Resu
     Ok(())
 }
 
+#[tokio::test]
+async fn forbidden_websocket_handshake_retries_then_falls_back_to_https() -> Result<()> {
+    let websocket_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let websocket_url = format!("ws://{}", websocket_listener.local_addr()?);
+    let http_listener = TcpListener::bind("127.0.0.1:0").await?;
+    let api_base_url = format!("http://{}", http_listener.local_addr()?);
+
+    let websocket_server = tokio::spawn(async move {
+        for attempt in 1..=2 {
+            let (stream, _) = websocket_listener.accept().await?;
+            let cf_ray = format!("ray-{attempt}").parse()?;
+            let rejected =
+                accept_hdr_async(stream, move |_request: &Request, response: Response| {
+                    let mut response = response.map(|()| Some(String::new()));
+                    *response.status_mut() = StatusCode::FORBIDDEN;
+                    response.headers_mut().insert("cf-ray", cf_ray);
+                    Err(response)
+                })
+                .await;
+            assert!(rejected.is_err());
+        }
+        assert!(
+            timeout(
+                std::time::Duration::from_millis(250),
+                websocket_listener.accept()
+            )
+            .await
+            .is_err(),
+            "HTTP 403 recovery exceeded the configured WebSocket attempt budget"
+        );
+        Result::<()>::Ok(())
+    });
+    let http_server = tokio::spawn(async move {
+        let request = read_http_json(&http_listener).await?;
+        assert!(request.body.get("previous_response_id").is_none());
+        assert!(
+            request
+                .body
+                .to_string()
+                .contains("recover forbidden upgrade")
+        );
+        send_http_events(
+            request.stream,
+            None,
+            [completed_response("resp-forbidden", "recovered")],
+        )
+        .await
+    });
+
+    let openai = OpenAi::builder("test-key")
+        .websocket_url(websocket_url)
+        .api_base_url(api_base_url)
+        .max_attempts(NonZeroU32::new(2).unwrap())
+        .build()?;
+    let mut session = openai
+        .instructions("Recover transient WebSocket upgrade failures.")
+        .build()?;
+    assert_eq!(
+        session
+            .turn()
+            .create("recover forbidden upgrade")
+            .await?
+            .output_text(),
+        "recovered"
+    );
+    timeout(std::time::Duration::from_secs(5), websocket_server)
+        .await
+        .map_err(|_| eyre!("mock 403 WebSocket server did not finish"))???;
+    timeout(std::time::Duration::from_secs(5), http_server)
+        .await
+        .map_err(|_| eyre!("mock 403 fallback HTTP server did not finish"))???;
+    Ok(())
+}
+
 async fn next_ws_json<S>(socket: &mut WebSocketStream<S>) -> Result<Value>
 where
     S: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin,

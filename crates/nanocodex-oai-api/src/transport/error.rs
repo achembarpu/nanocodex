@@ -171,6 +171,9 @@ impl ResponsesError {
                 ..
             } => ("handshake_transport", None),
             Self::HandshakeTimeout { .. } => ("handshake_timeout", None),
+            // ChatGPT's edge can transiently reject an otherwise valid upgrade. Treating the
+            // rejection as bounded recovery also unlocks the standard HTTPS fallback.
+            Self::HandshakeRejected { status: 403, .. } => ("handshake_forbidden", None),
             Self::HandshakeRejected {
                 status,
                 retry_after,
@@ -303,6 +306,21 @@ mod tests {
             .expect("HTTP 429 handshake rejection must remain retryable");
         assert_eq!(advice.class, "handshake_rate_limit");
         assert_eq!(advice.server_delay, Some(delay));
+    }
+
+    #[test]
+    fn forbidden_handshake_rejection_is_retryable() {
+        let error = ResponsesError::HandshakeRejected {
+            status: 403,
+            body: "empty response body".to_owned(),
+            retry_after: None,
+        };
+
+        let advice = error
+            .retry_advice()
+            .expect("HTTP 403 handshake rejection must allow bounded recovery");
+        assert_eq!(advice.class, "handshake_forbidden");
+        assert_eq!(advice.server_delay, None);
     }
 
     #[test]
