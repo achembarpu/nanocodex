@@ -66,6 +66,7 @@ hmac = "0.13.0"
 hudsucker = { version = "0.25.0", git = "https://github.com/gakonst/hudsucker", rev = "9a13609adc4b37b3e7fba28a320546bf672f0f4d", default-features = false, features = ["rcgen-ca", "ring", "rustls-client"] }
 ignore = "0.4.31"
 jiff = { version = "0.2.35", default-features = false, features = ["std", "tz-system", "tzdb-zoneinfo"] }
+jsonschema = { version = "0.48.5", default-features = false }
 krun = { package = "libkrun", version = "=2.0.0-dev", git = "https://github.com/containers/libkrun", rev = "df85b8b75f55e8ef1b06b5bc18f08dc6d7b5aeb0", features = ["blk", "net"] }
 mpp = { version = "=0.11.0", git = "https://github.com/tempoxyz/mpp-rs", rev = "3e37469bb19434982b433ae44ea8c713f7ea923a", default-features = false }
 nanocodex = { version = "0.3.0", path = "crates/nanocodex" }

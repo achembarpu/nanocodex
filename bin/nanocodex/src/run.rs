@@ -50,12 +50,12 @@ impl Run {
             Ok(())
         }
         .await;
-        let agent_shutdown = handle.shutdown().await;
-        drop(handle);
-        drop(events);
         if let Some(child_agents) = configured.child_agents {
             child_agents.shutdown().await;
         }
+        let agent_shutdown = handle.shutdown().await;
+        drop(handle);
+        drop(events);
         let browser_shutdown_result = if let Some(browser) = configured.browser {
             browser.shutdown().await
         } else {
