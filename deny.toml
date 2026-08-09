@@ -31,6 +31,7 @@ allow = [
     "CDLA-Permissive-2.0",
     "ISC",
     "MIT",
+    "MIT-0",
     "MPL-2.0",
     "LicenseRef-ring",
     "Unicode-3.0",

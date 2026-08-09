@@ -57,9 +57,9 @@ mod tests {
             let mut command = Command::new("/bin/sleep");
             command.arg("60");
             terminate_child_with_parent(&mut command);
-            let child = command.spawn().unwrap();
+            let mut child = command.spawn().unwrap();
             fs::write(directory.join("owned-pid"), child.id().to_string()).unwrap();
-            thread::sleep(Duration::from_secs(60));
+            child.wait().unwrap();
             return;
         }
 
