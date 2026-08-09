@@ -1,13 +1,14 @@
 # nanocodex-eval
 
 `nanocodex-eval` owns Nanocodex's VM-isolated execution boundary and durable
-profile ledger. A profile defines the complete desired task and treatment
-matrix. Callers choose an exact family; SQLite allocates one internal
-repetition and fences its accepted completion.
+profile ledger. `Evaluation::add` defines durable work by pre-materializing one
+SQLite row per task/treatment/repetition. Opening or running a benchmark never
+derives new work from TOML. Workers atomically claim one row and fence its
+terminal outcome.
 
-The ledger deliberately has no `next work`, `run all`, concurrency, or host
-saturation policy. An embedding application or the `/benchmark` agent decides
-which family to run and how many one-coordinate processes to launch.
+The ledger has no queue, lease, retry state, or host-saturation policy. An
+embedding application or the `/benchmark` agent decides only how many
+one-row worker processes to launch.
 
 Every benchmark attempt runs tools and verification in a microVM. Native host
 execution exists only inside focused crate tests. Harbor JSONL and ATIF are
@@ -16,8 +17,7 @@ output formats, not alternate runners.
 ## Durable API
 
 ```rust,no_run
-use std::time::Duration;
-use nanocodex_eval::{Evaluation, EvaluationClaim, EvaluationSelector};
+use nanocodex_eval::{Evaluation, EvaluationClaim};
 
 # async fn example() -> Result<(), Box<dyn std::error::Error>> {
 let evaluation = Evaluation::open(
@@ -25,17 +25,12 @@ let evaluation = Evaluation::open(
     Some("local-smoke"),
     ".nanocodex/evals",
 )?;
-let selector = EvaluationSelector::new("tasks/write-greeting");
-match evaluation.claim(&selector, Duration::from_secs(300))? {
-    EvaluationClaim::Prepare(claim) => {
-        // Prepare `claim.task()`, then atomically accept or retry the lease.
-        claim.complete()?;
-    }
+match evaluation.claim_next()? {
     EvaluationClaim::Run(claim) => {
         // Execute `claim.task()` with `claim.treatment()` and retain output in
-        // `claim.output_directory()`, then accept or retry the result.
+        // `claim.output_directory()`, then record one terminal outcome.
         let evidence = claim.output_directory().to_path_buf();
-        claim.complete(&evidence)?;
+        claim.succeed(&evidence)?;
     }
     EvaluationClaim::Busy(_) | EvaluationClaim::Complete => {}
 }
@@ -43,9 +38,17 @@ match evaluation.claim(&selector, Duration::from_secs(300))? {
 # }
 ```
 
-Claims own lease heartbeats and fenced completion. Raw SQLite worksets, lease
-generations, and artifact-coordinate construction are private implementation
-details.
+A local claim holds an OS ownership lock for the worker object's lifetime.
+Process death releases that lock and the next ledger observation makes the row
+unclaimed again. A remote benchmark retains native child-agent handles in its
+service cgroup, and each child owns exactly one foreground one-row worker. On a
+terminal child result the benchmark closes that handle and reports one
+idempotent exit edge, which changes only an otherwise-running row. Systemd
+terminates the complete process group before a benchmark restart reports all
+interrupted remote workers once. There are no PID identities, supervisors, or
+periodic heartbeats. Coordinator claims use the row's durable claim ID, so a
+restarted coordinator reacquires retained running rows before accepting worker
+outcomes. Raw SQLite details and artifact paths remain private.
 
 ## Profiles
 
@@ -61,26 +64,25 @@ model = ["sol"]
 thinking = ["low"]
 ```
 
-`Evaluation::open` resolves task packages, fingerprints their complete
-execution inputs, and materializes every desired repetition in SQLite before
-execution begins. Profiles selecting an external harness also fingerprint its
-semantic configuration and pinned executable release.
+Profiles are optional recipes for `eval add --recipe`. Adding the recipe loads
+and fingerprints its task packages, then stores the task selector, canonical
+root, content digest, treatment, and every desired repetition in SQLite. After
+that, SQLite—not the TOML file—is authoritative. `Evaluation::open` only opens
+the newest generation already present in SQLite.
 
 ```text
-profile -> exact task/treatment families -> k=1..N SQLite coordinates
+profile -> task/treatment families -> k=1..N pre-materialized rows
                                       \
-                                       -> callers choose families and fan-out
+                                       -> workers atomically claim one row
 ```
 
-Task preparation is durable state too. One process owns a fenced preparation
-lease while competing processes receive a temporary-unavailable result. A
-coordinate completion is accepted only while its lease generation is current;
-an expired worker cannot overwrite its replacement.
-
-Leases guarantee exactly-once accepted completion, not absolutely
-exactly-once model spending after a worker becomes unreachable. Heartbeats and
-conservative expiry reduce duplicate spending; generation fencing prevents a
-stale result from being committed.
+Rows have exactly four durable states: `unclaimed`, `running`, `success`, and
+`failed`. Preparation and execution both happen while the row is `running`.
+A reported evaluation outcome is terminal; losing the worker owner releases
+the row to `unclaimed` for another attempt. A claim ID fences late writes.
+Local execution uses an ownership lock; remote execution combines
+the coordinator's recovered row ownership with the benchmarker's direct child
+process observation.
 
 ## External harnesses
 
@@ -115,7 +117,7 @@ model = ["sol", "luna"]
 thinking = ["medium", "high"]
 ```
 
-Durable task preparation installs the configured command at `guest_command`
+Running-task preparation installs the configured command at `guest_command`
 inside the immutable task image. Every coordinate receives a fresh writable
 overlay and routes the harness's OpenAI-compatible traffic through the same
 capture proxy. The command path,
@@ -145,44 +147,51 @@ process state cannot leak between profile repetitions.
 ## CLI
 
 ```sh
-# Materialize the complete closed profile and inspect exact counts.
+# Materialize a recipe, or add explicit task/treatment rows.
+nanocodex eval add local-smoke --recipe local-smoke
+nanocodex eval add compare --task tasks/write-greeting \
+  --harness codex --model luna --thinking high --trials 5
+
+# Inspect exact SQLite counts. This never adds work.
 nanocodex eval status local-smoke --json
 
-# Execute one SQLite-assigned repetition from an exact profile task.
-nanocodex eval run local-smoke --task tasks/write-greeting
+# Atomically claim and execute the next pre-materialized row.
+nanocodex eval run local-smoke
 
-# Execute the matching configured external-harness coordinate.
+# Optionally restrict a diagnostic run to an exact configured family.
 nanocodex eval run compare --task tasks/write-greeting --harness codex \
   --model luna --thinking high
 
-# Coordinate workers through one SQLite owner. Remote hosts reach this
-# loopback listener through an SSH reverse tunnel and run the same command.
+# Coordinate workers through one SQLite owner. Remote benchmark hosts reach
+# this loopback listener through an SSH reverse tunnel.
 nanocodex eval coordinator compare --port 8789
-nanocodex eval run compare --coordinator http://127.0.0.1:8789 \
-  --task tasks/write-greeting --harness codex --model luna --thinking high
+nanocodex eval benchmark compare --coordinator http://127.0.0.1:8789
 
-# Install the coordinator as a durable user service. Its end-to-end HTTP
-# watchdog restarts the process if the listener stops answering requests.
-nanocodex eval coordinator compare --port 8789 --systemd
-
-# Let an agent inspect the ledger and choose task order and process fan-out.
+# Let an agent inspect the ledger and choose process fan-out.
 nanocodex eval benchmark local-smoke
 # Equivalent interactive workflow:
 nanocodex
 # then enter: /benchmark local-smoke
 ```
 
-`--state-dir` overrides the default `~/.nanocodex/evals`. There is no trial
-argument: `trials` is profile-owned desired work, and SQLite assigns a
-fungible repetition inside the exact family selected by `--task` and any
-needed harness, model, or thinking selectors.
+`--state-dir` overrides the default `~/.nanocodex/evals`. `eval add --new`
+starts an independent generation; otherwise add idempotently extends the newest
+generation. SQLite chooses the next unclaimed row. `eval run --task` and
+treatment selectors remain optional diagnostic restrictions, not the normal
+worker path.
 
 Remote workers send only retained evaluation evidence: JSON/JSONL trajectories,
 events, API exchanges and summaries, plus verifier reward/stdout/stderr. VM
 disks, workspaces, task fixtures, caches, and runtime logs remain host-local and
 failed writable roots are disposable. Evidence is streamed as a zstd-compressed
 tar, validated against the same allowlist by the coordinator, extracted into a
-staging directory, and atomically renamed before fenced SQLite completion.
+staging directory, and atomically renamed before the fenced terminal update.
+Each supervised child has a unique worker ID. Normal workers report their own
+terminal outcome; after any process exit the benchmarker sends one idempotent
+exit observation, which is a no-op if the row is already terminal and otherwise
+changes its running row permanently to failed. A small locked local marker
+survives benchmarker termination so a systemd restart can reconcile children
+that died with the previous benchmark process.
 
 VM-backed evals consume a prepared host installation. The matching static
 `nanocodex-vm-guest` must be installed beside the `nanocodex` executable; VM
@@ -190,4 +199,4 @@ state is cached under `~/.cache/nanocodex/vm` (or
 `$NANOCODEX_HOME/cache/vm`). Runtime execution never builds, signs, discovers,
 or repairs that substrate. Source checkouts can produce the complete local
 installation with `just build-eval-host`; an incomplete installation fails
-before task preparation.
+before a row can enter evaluator preparation.

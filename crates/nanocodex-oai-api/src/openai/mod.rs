@@ -158,6 +158,18 @@ impl<F> OpenAiBuilder<F> {
         self
     }
 
+    /// Controls the optional non-generating request used to prewarm a
+    /// persistent Responses WebSocket before its first model call.
+    ///
+    /// Disable this when an intermediary does not support `generate: false`
+    /// requests. The first model call still opens and then reuses the same
+    /// persistent WebSocket.
+    #[must_use]
+    pub const fn websocket_warmup(mut self, enabled: bool) -> Self {
+        self.config.websocket_warmup = enabled;
+        self
+    }
+
     /// Selects incremental continuation or complete replay for healthy calls.
     #[must_use]
     pub const fn history(mut self, history: ResponsesHistory) -> Self {

@@ -12,6 +12,7 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
 const LEDGER_FILE: &str = "state.sqlite3";
+const API_SCHEMA_VERSION: u32 = 2;
 const MAX_EVENT_LINE_BYTES: usize = 8 * 1024 * 1024;
 const OUTCOME_TAIL_BYTES: u64 = 512 * 1024;
 
@@ -24,14 +25,10 @@ pub(crate) struct EvalApi {
 #[serde(rename_all = "camelCase")]
 pub(crate) struct EvalSummary {
     total: u64,
-    completed: u64,
+    unclaimed: u64,
     running: u64,
-    retrying: u64,
-    queued: u64,
-    stale: u64,
-    passed: u64,
+    success: u64,
     failed: u64,
-    errors: u64,
 }
 
 #[derive(Debug, Serialize)]
@@ -130,12 +127,11 @@ struct CoordinateDetail {
     id: String,
     repetition: u16,
     state: &'static str,
-    attempts: usize,
     status: Option<String>,
     outcome: Option<String>,
     updated_at_ms: Option<i64>,
     duration_ms: Option<i64>,
-    message: Option<&'static str>,
+    message: Option<String>,
     detail_id: Option<String>,
 }
 
@@ -182,19 +178,12 @@ struct CoordinateRow {
     treatment: String,
     repetition: u16,
     state: String,
-    lease_expires_at_ms: Option<i64>,
     result_path: Option<PathBuf>,
+    started_at_ms: Option<i64>,
+    finished_at_ms: Option<i64>,
+    error: Option<String>,
     task_name: String,
     task_digest: String,
-    attempts: Vec<ExecutionRow>,
-}
-
-#[derive(Debug)]
-struct ExecutionRow {
-    state: String,
-    started_at_ms: i64,
-    finished_at_ms: Option<i64>,
-    result_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Default)]
@@ -221,13 +210,13 @@ impl EvalApi {
         let mut total = EvalSummary::default();
         let mut overview = Vec::with_capacity(worksets.len());
         for workset in worksets {
-            let coordinates = read_coordinates(&connection, workset.id, None, None)?;
-            let summary = summarize(&coordinates, now)?;
+            let coordinates = read_coordinates(&connection, workset.id, None)?;
+            let summary = summarize(&coordinates)?;
             add_summary(&mut total, &summary);
             let task_count = u64::try_from(
                 connection
                     .query_row(
-                        "SELECT COUNT(*) FROM tasks WHERE workset_id = ?1",
+                        "SELECT COUNT(*) FROM task_definitions WHERE workset_id = ?1",
                         [workset.id],
                         |row| row.get::<_, i64>(0),
                     )
@@ -244,7 +233,7 @@ impl EvalApi {
             });
         }
         Ok(EvalOverview {
-            schema_version: 1,
+            schema_version: API_SCHEMA_VERSION,
             observed_at_ms: now,
             summary: total,
             worksets: overview,
@@ -257,8 +246,8 @@ impl EvalApi {
             return Ok(None);
         };
         let now = now_ms()?;
-        let coordinates = read_coordinates(&connection, workset.id, None, None)?;
-        let summary = summarize(&coordinates, now)?;
+        let coordinates = read_coordinates(&connection, workset.id, None)?;
+        let summary = summarize(&coordinates)?;
         let task_count = coordinates
             .iter()
             .map(|coordinate| coordinate.task_name.as_str())
@@ -295,13 +284,13 @@ impl EvalApi {
                     digest,
                     treatment_count: u64::try_from(treatment_count)
                         .map_err(|error| error.to_string())?,
-                    summary: summarize(&coordinates, now)?,
+                    summary: summarize(&coordinates)?,
                 })
             })
             .collect::<Result<Vec<_>, String>>()?;
         tasks.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(Some(WorksetDetail {
-            schema_version: 1,
+            schema_version: API_SCHEMA_VERSION,
             observed_at_ms: now,
             workset: workset_overview,
             tasks,
@@ -321,36 +310,23 @@ impl EvalApi {
             return Ok(None);
         };
         let now = now_ms()?;
-        let mut coordinates = read_coordinates(&connection, workset.id, Some(task.id), None)?;
+        let mut coordinates = read_coordinates(&connection, workset.id, Some(task.id))?;
         let mut treatments = Vec::<TreatmentDetail>::new();
         for coordinate in coordinates.drain(..) {
             let treatment = parse_treatment(&coordinate.treatment);
-            let latest = coordinate.attempts.last();
-            let expired = coordinate.state == "running"
-                && coordinate
-                    .lease_expires_at_ms
-                    .is_some_and(|expiry| expiry <= now);
-            let state = coordinate_state(&coordinate, expired);
+            let state = coordinate_state(&coordinate);
             let cell = CoordinateDetail {
                 id: case_id(workset_digest, coordinate.id),
                 repetition: coordinate.repetition,
                 state,
-                attempts: coordinate.attempts.len(),
                 status: None,
                 outcome: None,
-                updated_at_ms: latest
-                    .and_then(|attempt| attempt.finished_at_ms)
-                    .or_else(|| latest.map(|attempt| attempt.started_at_ms)),
-                duration_ms: latest.and_then(|attempt| {
-                    attempt
-                        .finished_at_ms
-                        .map(|finished| finished.saturating_sub(attempt.started_at_ms))
-                }),
-                message: match state {
-                    "stale" => Some("The execution lease expired and can be reclaimed"),
-                    "retrying" => Some("The previous attempt remains retryable"),
-                    _ => None,
-                },
+                updated_at_ms: coordinate.finished_at_ms.or(coordinate.started_at_ms),
+                duration_ms: coordinate
+                    .finished_at_ms
+                    .zip(coordinate.started_at_ms)
+                    .map(|(finished, started)| finished.saturating_sub(started)),
+                message: coordinate.error.clone(),
                 detail_id: result_path(&coordinate).map(|_| case_id(workset_digest, coordinate.id)),
             };
             let treatment_id = public_id(&[workset_digest, &coordinate.family_key]);
@@ -372,7 +348,7 @@ impl EvalApi {
             treatment.cells.sort_by_key(|cell| cell.repetition);
         }
         Ok(Some(TaskDetail {
-            schema_version: 1,
+            schema_version: API_SCHEMA_VERSION,
             observed_at_ms: now,
             workset_id: workset.digest,
             task: TaskMatrix {
@@ -399,10 +375,11 @@ impl EvalApi {
         let Some(task) = find_task(&connection, workset.id, workset_digest, task_id)? else {
             return Ok(None);
         };
-        let coordinates = read_coordinates(&connection, workset.id, Some(task.id), None)?
+        let coordinates = read_coordinates(&connection, workset.id, Some(task.id))?
             .into_iter()
             .filter(|coordinate| {
-                coordinate.state == "terminal" && result_path(coordinate).is_some()
+                matches!(coordinate.state.as_str(), "success" | "failed")
+                    && result_path(coordinate).is_some()
             })
             .collect::<Vec<_>>();
         let total = coordinates.len();
@@ -417,7 +394,7 @@ impl EvalApi {
         }
         let loaded = cursor.saturating_add(outcomes.len());
         Ok(Some(TaskOutcomesPage {
-            schema_version: 1,
+            schema_version: API_SCHEMA_VERSION,
             observed_at_ms: now_ms()?,
             workset_id: workset.digest,
             task_id: task_id.to_owned(),
@@ -429,18 +406,14 @@ impl EvalApi {
 
     pub(crate) fn case(&self, id: &str) -> Result<Option<CaseEvidence>, String> {
         let connection = self.connection()?;
-        let Some((workset_digest, coordinate_id)) = parse_case_id(id) else {
-            return Ok(None);
-        };
-        let Some(workset) = find_workset(&connection, workset_digest)? else {
-            return Ok(None);
-        };
-        let coordinate = read_coordinates(&connection, workset.id, None, Some(coordinate_id))?
-            .into_iter()
-            .next();
-        coordinate
-            .as_ref()
-            .map_or(Ok(None), |coordinate| self.evidence_for(coordinate))
+        for workset in read_worksets(&connection)? {
+            for coordinate in read_coordinates(&connection, workset.id, None)? {
+                if case_id(&workset.digest, coordinate.id) == id {
+                    return self.evidence_for(&coordinate);
+                }
+            }
+        }
+        Ok(None)
     }
 
     fn connection(&self) -> Result<Connection, String> {
@@ -480,32 +453,22 @@ impl EvalApi {
     }
 }
 
-fn result_path(coordinate: &CoordinateRow) -> Option<&PathBuf> {
-    coordinate.result_path.as_ref().or_else(|| {
-        coordinate
-            .attempts
-            .iter()
-            .rev()
-            .find_map(|attempt| attempt.result_path.as_ref())
-    })
+const fn result_path(coordinate: &CoordinateRow) -> Option<&PathBuf> {
+    coordinate.result_path.as_ref()
 }
 
-fn summarize(coordinates: &[CoordinateRow], now: i64) -> Result<EvalSummary, String> {
+fn summarize(coordinates: &[CoordinateRow]) -> Result<EvalSummary, String> {
     let mut summary = EvalSummary {
         total: u64::try_from(coordinates.len()).map_err(|error| error.to_string())?,
         ..EvalSummary::default()
     };
     for coordinate in coordinates {
-        let expired = coordinate.state == "running"
-            && coordinate
-                .lease_expires_at_ms
-                .is_some_and(|expiry| expiry <= now);
-        match coordinate_state(coordinate, expired) {
-            "completed" => summary.completed += 1,
+        match coordinate_state(coordinate) {
+            "unclaimed" => summary.unclaimed += 1,
             "running" => summary.running += 1,
-            "retrying" => summary.retrying += 1,
-            "stale" => summary.stale += 1,
-            _ => summary.queued += 1,
+            "success" => summary.success += 1,
+            "failed" => summary.failed += 1,
+            _ => return Err(format!("unknown durable task state `{}`", coordinate.state)),
         }
     }
     Ok(summary)
@@ -514,7 +477,7 @@ fn summarize(coordinates: &[CoordinateRow], now: i64) -> Result<EvalSummary, Str
 fn read_worksets(connection: &Connection) -> Result<Vec<WorksetRow>, String> {
     let mut statement = connection
         .prepare(
-            "SELECT id, name, generation, created_at_ms FROM worksets \
+            "SELECT id, profile, digest, created_at_ms FROM worksets \
              ORDER BY created_at_ms DESC, id DESC",
         )
         .map_err(|error| error.to_string())?;
@@ -535,7 +498,7 @@ fn read_worksets(connection: &Connection) -> Result<Vec<WorksetRow>, String> {
 fn find_workset(connection: &Connection, digest: &str) -> Result<Option<WorksetRow>, String> {
     connection
         .query_row(
-            "SELECT id, name, generation, created_at_ms FROM worksets WHERE generation = ?1",
+            "SELECT id, profile, digest, created_at_ms FROM worksets WHERE digest = ?1",
             [digest],
             |row| {
                 Ok(WorksetRow {
@@ -557,7 +520,9 @@ fn find_task(
     public_task_id: &str,
 ) -> Result<Option<TaskRow>, String> {
     let mut statement = connection
-        .prepare("SELECT id, name, digest FROM tasks WHERE workset_id = ?1 ORDER BY id")
+        .prepare(
+            "SELECT id, selector, digest FROM task_definitions WHERE workset_id = ?1 ORDER BY id",
+        )
         .map_err(|error| error.to_string())?;
     let rows = statement
         .query_map([workset_id], |row| {
@@ -581,92 +546,46 @@ fn read_coordinates(
     connection: &Connection,
     workset_id: i64,
     task_id: Option<i64>,
-    coordinate_id: Option<i64>,
 ) -> Result<Vec<CoordinateRow>, String> {
     let mut statement = connection
         .prepare(
-            "SELECT c.id, c.family_key, c.treatment, c.repetition, c.state, \
-                    c.lease_expires_at_ms, c.result_path, t.name, t.digest \
-             FROM coordinates c JOIN tasks t ON t.id = c.task_id \
-             WHERE c.workset_id = ?1 AND (?2 IS NULL OR c.task_id = ?2) \
-                   AND (?3 IS NULL OR c.id = ?3) \
-             ORDER BY t.name, c.family_key, c.repetition",
+            "SELECT e.id, e.family_key, e.treatment, e.repetition, e.state, \
+                    e.result_path, e.started_at_ms, e.finished_at_ms, e.error, \
+                    t.selector, t.digest \
+             FROM eval_tasks e JOIN task_definitions t ON t.id = e.definition_id \
+             WHERE e.workset_id = ?1 AND (?2 IS NULL OR e.definition_id = ?2) \
+             ORDER BY t.selector, e.family_key, e.repetition",
         )
         .map_err(|error| error.to_string())?;
-    let mut coordinates = statement
-        .query_map((workset_id, task_id, coordinate_id), |row| {
+    let coordinates = statement
+        .query_map((workset_id, task_id), |row| {
             Ok(CoordinateRow {
                 id: row.get(0)?,
                 family_key: row.get(1)?,
                 treatment: row.get(2)?,
                 repetition: row.get(3)?,
                 state: row.get(4)?,
-                lease_expires_at_ms: row.get(5)?,
-                result_path: row.get::<_, Option<String>>(6)?.map(PathBuf::from),
-                task_name: row.get(7)?,
-                task_digest: row.get(8)?,
-                attempts: Vec::new(),
+                result_path: row.get::<_, Option<String>>(5)?.map(PathBuf::from),
+                started_at_ms: row.get(6)?,
+                finished_at_ms: row.get(7)?,
+                error: row.get(8)?,
+                task_name: row.get(9)?,
+                task_digest: row.get(10)?,
             })
         })
         .map_err(|error| error.to_string())?
         .collect::<Result<Vec<_>, _>>()
         .map_err(|error| error.to_string())?;
-    let mut indices = coordinates
-        .iter()
-        .enumerate()
-        .map(|(index, coordinate)| (coordinate.id, index))
-        .collect::<HashMap<_, _>>();
-    let mut attempts = connection
-        .prepare(
-            "SELECT e.coordinate_id, e.state, e.started_at_ms, e.finished_at_ms, e.result_path \
-             FROM executions e JOIN coordinates c ON c.id = e.coordinate_id \
-             WHERE c.workset_id = ?1 AND (?2 IS NULL OR c.task_id = ?2) \
-                   AND (?3 IS NULL OR c.id = ?3) \
-             ORDER BY e.coordinate_id, e.generation",
-        )
-        .map_err(|error| error.to_string())?;
-    let rows = attempts
-        .query_map((workset_id, task_id, coordinate_id), |row| {
-            Ok((
-                row.get::<_, i64>(0)?,
-                ExecutionRow {
-                    state: row.get(1)?,
-                    started_at_ms: row.get(2)?,
-                    finished_at_ms: row.get(3)?,
-                    result_path: row.get::<_, Option<String>>(4)?.map(PathBuf::from),
-                },
-            ))
-        })
-        .map_err(|error| error.to_string())?;
-    for row in rows {
-        let (coordinate_id, execution) = row.map_err(|error| error.to_string())?;
-        if let Some(index) = indices.remove(&coordinate_id).or_else(|| {
-            coordinates
-                .iter()
-                .position(|coordinate| coordinate.id == coordinate_id)
-        }) {
-            coordinates[index].attempts.push(execution);
-            indices.insert(coordinate_id, index);
-        }
-    }
     Ok(coordinates)
 }
 
-fn coordinate_state(coordinate: &CoordinateRow, expired: bool) -> &'static str {
-    if coordinate.state == "terminal" {
-        "completed"
-    } else if expired {
-        "stale"
-    } else if coordinate.state == "running" {
-        "running"
-    } else if coordinate
-        .attempts
-        .last()
-        .is_some_and(|attempt| attempt.state == "retryable")
-    {
-        "retrying"
-    } else {
-        "queued"
+fn coordinate_state(coordinate: &CoordinateRow) -> &'static str {
+    match coordinate.state.as_str() {
+        "unclaimed" => "unclaimed",
+        "running" => "running",
+        "success" => "success",
+        "failed" => "failed",
+        _ => "failed",
     }
 }
 
@@ -778,7 +697,7 @@ fn events_path(result: &Path) -> Option<PathBuf> {
 
 const fn empty_evidence() -> CaseEvidence {
     CaseEvidence {
-        schema_version: 1,
+        schema_version: API_SCHEMA_VERSION,
         task_name: None,
         prompt: None,
         status: None,
@@ -914,14 +833,10 @@ fn treatment_label(treatment: &Treatment) -> String {
 
 const fn add_summary(total: &mut EvalSummary, summary: &EvalSummary) {
     total.total += summary.total;
-    total.completed += summary.completed;
+    total.unclaimed += summary.unclaimed;
     total.running += summary.running;
-    total.retrying += summary.retrying;
-    total.queued += summary.queued;
-    total.stale += summary.stale;
-    total.passed += summary.passed;
+    total.success += summary.success;
     total.failed += summary.failed;
-    total.errors += summary.errors;
 }
 
 fn short_name(name: &str) -> &str {
@@ -929,15 +844,7 @@ fn short_name(name: &str) -> &str {
 }
 
 fn case_id(workset_digest: &str, coordinate_id: i64) -> String {
-    format!("{workset_digest}:{coordinate_id}")
-}
-
-fn parse_case_id(id: &str) -> Option<(&str, i64)> {
-    let (workset_digest, coordinate_id) = id.rsplit_once(':')?;
-    if workset_digest.is_empty() {
-        return None;
-    }
-    Some((workset_digest, coordinate_id.parse().ok()?))
+    public_id(&[workset_digest, &coordinate_id.to_string()])
 }
 
 fn public_id(parts: &[&str]) -> String {

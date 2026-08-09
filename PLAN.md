@@ -58,6 +58,111 @@ instructions with the classifications already recorded in
 and classify every intervening commit as port/evaluate/defer/out-of-scope. Do
 not let an unreviewed upstream change silently redefine Nanocodex behavior.
 
+## Immediate working slice: durable evaluation throughput
+
+This is the only active execution track until it reaches its exit gate. Do not
+split implementation time across the later browser, managed-session, parity,
+or release milestones while safe work remains here. Those milestones are the
+ordered backlog, not concurrent work in progress.
+
+Outcome: drive a closed, pre-materialized benchmark continuously at the
+highest safe host occupancy while preserving a four-state SQLite ledger and
+exact process ownership. There is no queue, lease, heartbeat, stale-task
+reclamation, or detached worker substrate.
+
+The neural orchestrator, benchmark command, and eval workers must never block
+host admission on one eval, one batch, one wave, or a polling barrier. The
+benchmark continuously refills native child-agent capacity so the host stays
+saturated; only a child waits for the one foreground eval process it owns.
+
+- [x] Store every task/treatment/repetition as one immutable SQLite row with
+  exactly `unclaimed`, `running`, `success`, or `failed` state.
+- [x] Claim one row with an atomic SQLite transition and use its durable claim
+  ID to reject only stale terminal writes.
+- [x] Let successful and failed workers report their own terminal result; let
+  the benchmark report only an otherwise-unrecorded child exit, which releases
+  the row to `unclaimed` instead of manufacturing a terminal failure.
+- [x] Recover retained running claims from SQLite after coordinator process
+  death.
+- [x] Remove the model-facing `run_eval` tool and promise/batch orchestration.
+- [x] Port the merged native task-tree runtime: `spawn_agent` admits a clean
+  child immediately, one shared capacity bound limits active turns, and
+  `wait_agent` wakes when any selected child becomes terminal.
+- [x] Reduce orchestration to one neural refill loop. It sequentially admits
+  children up to capacity, retains only `agent_id -> worker`, waits for any
+  terminal child, closes that child's owned process tree, reports an idempotent
+  negative edge that releases unfinished work, and refills before the next
+  wait. Each child owns exactly one
+  foreground `eval run` process; no slot is reused before ownership is closed.
+- [x] Keep that refill loop in one long-lived Code Mode cell. A yielded root
+  cell is resumed in place and must never create a second controller.
+- [x] Delete Bash launchers, `&`, PID/start-time markers, polling supervisors,
+  heartbeat/lease ideas, detached sessions, waves, and `Promise.all` from the
+  benchmark contract. SQLite remains the only claim authority.
+- [x] On a systemd benchmark restart, report one negative edge for all remote
+  claims after the old cgroup has been terminated and release those rows for
+  replacement workers; do not send periodic liveness traffic. Local claims
+  retain their existing OS-lock recovery.
+- [x] Hold a measured steady native-subagent capacity that maximizes successful
+  completions without OOM. Compare occupancy, task throughput, available
+  memory, pressure, swap, load, and worker/VMM/proxy correspondence.
+- [x] Keep the benchmark command to three direct orchestration bullets and
+  do not snapshot-test prompt prose.
+- [x] Measure before/after utilization on the retained live workload: active
+  workers over time, idle-slot seconds, tasks/hour, peak and available memory,
+  swap-in/out, load, and row/worker/VM/proxy correspondence.
+  The rejected 75-worker burst yielded 3 successes and 72 processless claims;
+  the rolling 16-worker sample yielded 17 successes in 4.5 minutes (~227/hour),
+  no failures, 48--50 GiB available, zero memory pressure, no swap-out, and
+  exact row/worker/marker/VMM/proxy correspondence after startup transitions.
+  Native capacity 48 produced 33 successes in about six minutes (~330/hour),
+  but its fully resident set fell to 4.1 GiB available. Capacity 40 reached 1.6
+  GiB with memory-pressure `avg10=35.48`; capacity 32 later reached 0.1 GiB and
+  all workers collapsed. Those settings are rejected despite fast admission.
+  Capacity 24 held 23--24 running rows/eval processes/proxies for five minutes,
+  retained 36.9--43.4 GiB available with zero pressure, produced 10 successes,
+  and had no new failures. Capacity 28 then held its full resident set through
+  churn with 41--43 GiB available and 13 successes. Capacity 30 passed two hot
+  churn samples, including a heavier set with a 17.3 GiB memory floor. Its
+  first sample exposed one premature child completion, which close/report
+  contained without a leak; after tightening the child wait contract, nine
+  fresh successes had no failure or premature completion. Capacity 30 is the
+  highest measured safe setting, and the installed service drop-in preserves
+  it across restarts.
+- [x] Re-run worker death, benchmark death, and coordinator death tests against
+  native subagents. No test may leave a running row, eval worker, VMM, or proxy
+  without its corresponding live owner.
+  Killing one eval process releases its row once, removes its gvproxy/libkrun
+  descendants, and refills the slot. Benchmark cgroup death removes every
+  process before exactly releasing interrupted rows on restart. Coordinator
+  restart retains every running row and kills no worker.
+- [x] Let the configured benchmark continue under systemd, inspect exact
+  successful and failed evidence, and record the terminal board without
+  modifying tasks, verifiers, images, or expected outputs.
+  Before repairing historical orchestration artifacts, the service exited
+  normally at a terminal board of 5,034 success, 2,087 failed, zero running,
+  and zero unclaimed rows. Of the failed rows, 1,364
+  record deliberate restart/migration torture, 506 record earlier
+  launcher/process failures exposed while replacing the old designs, and 217
+  have retained evaluator results. The final service start first drained 30
+  claims owned by its killed predecessor, then completed 151 fresh rows as 142
+  successes and nine retained evaluator failures with no fresh
+  launcher/process failure. SQLite integrity is `ok`; after completion there
+  are zero eval workers, VMMs, or proxies and 53 GiB available memory.
+- [ ] Back up the retained ledger, return the 1,870 no-evidence orchestration
+  failures to `unclaimed`, deploy the release semantics, and let replacement
+  workers finish those rows without reintroducing crash-shaped failures.
+- [ ] Carry PR #135's unified routed eval UI, progress surfaces, score
+  frontiers, and task run charts onto the final four-state coordinator API;
+  validate the complete Terminal Bench workset locally against `dev-georgios`.
+
+Exit gate: focused Linux and macOS tests pass; rustfmt and warnings-denied
+Clippy are clean for the changed surface; SQLite integrity is clean; the live
+native refill loop maintains host occupancy without a wave tail; interrupted
+rows become claimable and replacement attempts converge to terminal outcomes;
+and the implementation is reduced to a reviewable, mergeable diff with no
+unrelated workspace changes.
+
 ## Active milestones
 
 ### 1. Runtime and Code Mode parity
@@ -129,6 +234,8 @@ not let an unreviewed upstream change silently redefine Nanocodex behavior.
 
 ### 4. Evaluation as product evidence
 
+- Finish the immediate durable-evaluation-throughput slice above before adding
+  another evaluation abstraction or benchmark family.
 - Rebase and complete the VM-backed differential evaluation foundation in
   [PR #61](https://github.com/gakonst/nanocodex/pull/61) after its extracted
   Code Mode slice lands.
@@ -165,22 +272,24 @@ not let an unreviewed upstream change silently redefine Nanocodex behavior.
 1. [x] Merge PR #50, ship `0.3.0`, and establish the layered stable SDK.
 2. [x] Land retained VM tools, browser/VM automation, Realtime voice, reusable
    hosted transports, composable egress, Cloudflare, and Rivet consumers.
-3. [ ] Finish and merge the focused Code Mode parity slice in PR #95.
-4. [ ] Reconcile and advance the Codex parity checkpoint with a complete commit
+3. [ ] Finish the immediate durable-evaluation-throughput slice and satisfy its
+   live rolling-pool exit gate. Keep work in progress limited to this item.
+4. [ ] Finish and merge the focused Code Mode parity slice in PR #95.
+5. [ ] Reconcile and advance the Codex parity checkpoint with a complete commit
    classification and direct evidence for every adopted behavior.
-5. [ ] Fix, validate, and merge desktop profile import in PR #93.
-6. [ ] Build browser placement and presentation policy for private host and
+6. [ ] Fix, validate, and merge desktop profile import in PR #93.
+7. [ ] Build browser placement and presentation policy for private host and
    private VM sessions, then prove both through the CLI consumer.
-7. [ ] Prototype the user-Chrome extension/native-host path; prove exact tab
+8. [ ] Prototype the user-Chrome extension/native-host path; prove exact tab
    claiming, grouping, visible cursor feedback, interruption, leasing, and
    cleanup before exposing it as normal CLI policy.
-8. [ ] Rebase and decide PR #79, then review PR #89 against the stable-core and
+9. [ ] Rebase and decide PR #79, then review PR #89 against the stable-core and
    application-policy boundaries above.
-9. [ ] Rebase and merge PR #61, then complete the stacked StableBench work in
+10. [ ] Rebase and merge PR #61, then complete the stacked StableBench work in
    PR #72 and record retained differential evidence.
-10. [ ] Decide whether PR #32 still solves a demonstrated problem or should be
+11. [ ] Decide whether PR #32 still solves a demonstrated problem or should be
     replaced by a smaller application-owned experiment.
-11. [ ] Cut the next release only after all selected milestones pass the full
+12. [ ] Cut the next release only after all selected milestones pass the full
     release gate.
 
 ## Current non-goals

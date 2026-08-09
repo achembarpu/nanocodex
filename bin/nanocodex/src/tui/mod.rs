@@ -2,6 +2,7 @@ mod app;
 mod clipboard;
 mod composer;
 mod diff;
+mod eval_attach;
 mod external_editor;
 mod markdown;
 mod notification;
@@ -55,6 +56,7 @@ use self::{
 };
 use crate::config::AgentArgs;
 
+pub(crate) use eval_attach::attach_evaluation;
 pub(crate) use resume_picker::select_resume_session;
 
 const BTW_BOUNDARY: &str = r"You are answering an ephemeral BTW side question.
@@ -2787,10 +2789,10 @@ fn classify_submission(input: impl Into<SubmittedPrompt>) -> Submission {
         }
         let instruction = crate::benchmark::prompt(
             argument,
+            std::path::Path::new("nanocodex.toml"),
             None,
             None,
-            None,
-            crate::benchmark::DEFAULT_ORCHESTRATOR_POLICY,
+            crate::subagents::DEFAULT_MAX_SUBAGENTS,
         );
         input.set_display(display);
         input.set_instruction(instruction);

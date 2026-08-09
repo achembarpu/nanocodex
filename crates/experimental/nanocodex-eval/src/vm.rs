@@ -1508,10 +1508,6 @@ struct AttemptGvproxy {
 
 impl AttemptGvproxy {
     fn spawn(binary: &Path, log: &Path) -> Result<Self, VmAttemptError> {
-        Self::spawn_with(binary, log, GvproxyProcess::spawn_isolated)
-    }
-
-    fn spawn_inherited(binary: &Path, log: &Path) -> Result<Self, VmAttemptError> {
         Self::spawn_with(binary, log, GvproxyProcess::spawn)
     }
 
@@ -1788,12 +1784,6 @@ struct AttemptVerifierCache {
     skip_setup: bool,
 }
 
-#[derive(Clone, Copy, Eq, PartialEq)]
-enum VmProcessGroup {
-    Inherited,
-    Isolated,
-}
-
 fn vm_attempt(
     environment: &VmEnvironment,
     host: VmAttemptHost<'_>,
@@ -1893,7 +1883,7 @@ fn vm_attempt_inner(
     if let Some(cache) = &attempt_cache {
         setup_guard.track_attempt_cache(cache.disk.clone());
     }
-    let session = launch.spawn(attempt_cache.as_ref(), VmProcessGroup::Isolated)?;
+    let session = launch.spawn(attempt_cache.as_ref())?;
     let vm = session.tools();
     let tools = Tools::builder()
         .without_defaults()
@@ -2109,7 +2099,7 @@ fn spawn_preparation_network(
     match policy {
         NetworkPolicy::Public => {
             let binary = gvproxy.ok_or(VmAttemptError::NetworkBackendNotPrepared)?;
-            AttemptGvproxy::spawn_inherited(binary, log).map(Some)
+            AttemptGvproxy::spawn(binary, log).map(Some)
         }
         NetworkPolicy::Disabled => Ok(None),
     }
@@ -2119,12 +2109,9 @@ impl VmLaunch {
     fn spawn(
         &self,
         verifier_cache: Option<&AttemptVerifierCache>,
-        process_group: VmProcessGroup,
     ) -> Result<VmToolSession, VmAttemptError> {
         let mut command = Command::new(&self.vmm);
-        if process_group == VmProcessGroup::Isolated {
-            command.process_group(0);
-        }
+        nanocodex_vm::terminate_child_with_parent(command.as_std_mut());
         let firmware = Path::new(DEFAULT_KRUNFW_DIRECTORY);
         if firmware.join(KRUNFW_LIBRARY_FILENAME).is_file() {
             command.env(KRUNFW_LIBRARY_PATH_ENVIRONMENT, firmware.canonicalize()?);
@@ -2396,7 +2383,7 @@ impl VerifierCache {
             skip_setup: false,
         };
         format_verifier_cache_disk(&attempt_cache.disk, self.disk_bytes)?;
-        let session = launch.spawn(Some(&attempt_cache), VmProcessGroup::Inherited)?;
+        let session = launch.spawn(Some(&attempt_cache))?;
         mount_verifier_cache(&session, launch.verifier_cache_block_device()).await?;
         let script = task.verifier_script_bytes()?;
         session
@@ -2900,7 +2887,7 @@ impl VmVerifier {
                     cleanup,
                 ));
             }
-            let session = match launch.spawn(None, VmProcessGroup::Isolated) {
+            let session = match launch.spawn(None) {
                 Ok(session) => session,
                 Err(primary) => {
                     let occurred_at = Utc::now();

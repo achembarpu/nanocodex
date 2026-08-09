@@ -1,32 +1,29 @@
 //! Typed, VM-isolated evaluation for Nanocodex agents.
 //!
-//! This crate owns task loading, durable SQLite worksets, typed events and
-//! outcomes, and VM-isolated execution. Applications choose one exact workset
-//! coordinate family; SQLite allocates its internal repetition and fences the
-//! accepted completion.
+//! This crate owns task loading, durable profile worksets, typed events and
+//! outcomes, and VM-isolated execution. Applications choose one exact profile
+//! family; SQLite atomically claims one pre-materialized task row and fences
+//! its terminal outcome.
 //!
-//! # Open a durable workset
+//! # Open a durable profile
+//!
+//! Work must first be pre-materialized with [`Evaluation::add`] or
+//! [`Evaluation::add_profile`]. Opening a benchmark never creates rows.
 //!
 //! ```no_run
-//! use std::time::Duration;
-//! use nanocodex_eval::{Evaluation, EvaluationClaim, EvaluationSelector};
+//! use nanocodex_eval::{Evaluation, EvaluationClaim};
 //!
 //! # async fn evaluate() -> Result<(), Box<dyn std::error::Error>> {
 //! let evaluation = Evaluation::open(
 //!     "nanocodex.toml",
-//!     "local-smoke",
+//!     Some("local-smoke"),
 //!     ".nanocodex/evals",
 //! )?;
-//! let selector = EvaluationSelector::new("tasks/write-greeting");
-//! match evaluation.claim(&selector, Duration::from_secs(300))? {
-//!     EvaluationClaim::Prepare(claim) => {
-//!         // Prepare the immutable package exposed by `claim.task()`.
-//!         claim.complete()?;
-//!     }
+//! match evaluation.claim_next()? {
 //!     EvaluationClaim::Run(claim) => {
-//!         // Execute exactly this SQLite treatment and retain its evidence.
+//!         // Execute exactly this profile treatment and retain its evidence.
 //!         let evidence = claim.output_directory().to_path_buf();
-//!         claim.complete(&evidence)?;
+//!         claim.succeed(&evidence)?;
 //!     }
 //!     EvaluationClaim::Busy(_) | EvaluationClaim::Complete => {}
 //! }
@@ -34,7 +31,8 @@
 //! # }
 //! ```
 //!
-//! Claims renew their own lease and expose only fenced completion or retry.
+//! A running row is held by the worker process itself. Dropping the claim or
+//! losing the worker process records a terminal failure; rows are never retried.
 
 #![deny(missing_docs, rustdoc::broken_intra_doc_links)]
 // Retained-data readers remain portable; VM execution internals become
@@ -86,8 +84,8 @@ pub(crate) use atif::{
 pub(crate) use capture_proxy::{ResponsesCaptureProxy, ResponsesCaptureProxyConfig};
 pub use evaluation::{
     CoordinateClaim, Evaluation, EvaluationBusy, EvaluationClaim, EvaluationCounts,
-    EvaluationError, EvaluationFamilyStatus, EvaluationSelector, EvaluationStatus,
-    EvaluationTreatment, EvaluationWork, PreparationClaim,
+    EvaluationError, EvaluationFamilyStatus, EvaluationObserver, EvaluationSelector,
+    EvaluationStatus, EvaluationTreatment, EvaluationWork,
 };
 pub use evaluator::{EvalError, EvalRun, Evaluator, EvaluatorBuilder};
 pub use event::{

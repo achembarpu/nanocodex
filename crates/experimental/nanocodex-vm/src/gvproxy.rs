@@ -13,6 +13,8 @@ use serde::Serialize;
 use thiserror::Error;
 use tracing::{error, warn};
 
+use crate::terminate_child_with_parent;
+
 const SOCKET_TIMEOUT: Duration = Duration::from_secs(5);
 const API_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_API_RESPONSE_BYTES: usize = 64 * 1024;
@@ -148,6 +150,7 @@ impl Gvproxy {
         if process_group == ProcessGroup::Isolated {
             command.process_group(0);
         }
+        terminate_child_with_parent(&mut command);
         let mut child = command.spawn()?;
 
         let started_at = Instant::now();

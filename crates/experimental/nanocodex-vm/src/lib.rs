@@ -17,6 +17,22 @@ mod capabilities;
         all(target_os = "macos", target_arch = "aarch64")
     )
 ))]
+mod child_lifetime;
+#[cfg(all(
+    feature = "host",
+    any(
+        all(target_os = "linux", not(target_env = "musl")),
+        all(target_os = "macos", target_arch = "aarch64")
+    )
+))]
+pub use child_lifetime::terminate_child_with_parent;
+#[cfg(all(
+    feature = "host",
+    any(
+        all(target_os = "linux", not(target_env = "musl")),
+        all(target_os = "macos", target_arch = "aarch64")
+    )
+))]
 mod command;
 #[cfg(all(
     feature = "host",

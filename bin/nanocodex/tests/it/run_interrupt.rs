@@ -1,4 +1,4 @@
-use std::{process::Stdio, time::Duration};
+use std::{path::PathBuf, process::Stdio, time::Duration};
 
 use eyre::{Result, eyre};
 use futures_util::{SinkExt, StreamExt};
@@ -21,9 +21,9 @@ async fn assert_signal_after_completion(signal_name: &str) -> Result<()> {
     let endpoint = format!("ws://{}", listener.local_addr()?);
     let (completed_tx, completed_rx) = oneshot::channel();
     let server = tokio::spawn(serve_completed_response(listener, completed_tx));
-    let workspace = tempfile::tempdir()?;
+    let workspace = temporary_workspace()?;
     let child = Command::new(env!("CARGO_BIN_EXE_nanocodex"))
-        .current_dir(workspace.path())
+        .current_dir(&workspace)
         .env_remove("OPENAI_API_KEY")
         .arg("run")
         .arg("--browser=none")
@@ -33,7 +33,7 @@ async fn assert_signal_after_completion(signal_name: &str) -> Result<()> {
         .arg("--websocket-url")
         .arg(endpoint)
         .arg("--cwd")
-        .arg(workspace.path())
+        .arg(&workspace)
         .arg("--rollouts")
         .arg("false")
         .arg("--mcp-defaults")
@@ -77,6 +77,8 @@ async fn assert_signal_after_completion(signal_name: &str) -> Result<()> {
         .iter()
         .filter(|event| matches!(event["type"].as_str(), Some("run.completed" | "run.failed")))
         .count();
+    std::fs::remove_dir_all(workspace)?;
+
     assert!(
         !output.status.success(),
         "SIG{signal_name} unexpectedly returned success"
@@ -172,4 +174,16 @@ where
         ))
         .await?;
     Ok(())
+}
+
+fn temporary_workspace() -> Result<PathBuf> {
+    let path = std::env::temp_dir().join(format!(
+        "nanocodex-run-interrupt-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)?
+            .as_nanos()
+    ));
+    std::fs::create_dir_all(&path)?;
+    Ok(path)
 }

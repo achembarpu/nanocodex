@@ -205,6 +205,15 @@ pub(crate) struct AgentArgs {
 }
 
 impl AgentArgs {
+    pub(crate) const fn enable_subagents(mut self) -> Self {
+        self.subagents = true;
+        self
+    }
+
+    pub(crate) const fn max_subagents(&self) -> usize {
+        self.max_subagents
+    }
+
     pub(crate) fn cwd(&self) -> &Path {
         self.cwd.as_deref().unwrap_or_else(|| Path::new("."))
     }
@@ -668,8 +677,7 @@ mod tests {
     use nanocodex::oai::auth::OpenAiAuthMode;
 
     use super::{
-        SUBAGENT_INSTRUCTIONS, direct_websocket_url, select_auth, select_auth_with_default,
-        selected_api_base_url, session_instructions,
+        direct_websocket_url, select_auth, select_auth_with_default, selected_api_base_url,
     };
 
     #[test]
@@ -741,31 +749,6 @@ mod tests {
             .expect("the CLI should expose the subagents argument");
 
         assert_eq!(subagents.get_default_values(), ["false"]);
-    }
-
-    #[test]
-    fn subagent_concurrency_defaults_to_tacts_limit() {
-        let command = crate::Cli::command();
-        let max_subagents = command
-            .get_arguments()
-            .find(|argument| argument.get_id() == "max_subagents")
-            .expect("the CLI should expose the max-subagents argument");
-
-        assert_eq!(max_subagents.get_default_values(), ["32"]);
-    }
-
-    #[test]
-    fn subagent_instructions_follow_the_enable_switch() {
-        let custom = "custom instructions".to_owned();
-        assert_eq!(
-            session_instructions(Some(custom.clone()), false),
-            Some(custom.clone())
-        );
-
-        let enabled = session_instructions(Some(custom), true).unwrap();
-        assert!(enabled.starts_with("custom instructions\n\n"));
-        assert!(enabled.ends_with(SUBAGENT_INSTRUCTIONS));
-        assert_eq!(enabled.matches(SUBAGENT_INSTRUCTIONS).count(), 1);
     }
 
     #[test]

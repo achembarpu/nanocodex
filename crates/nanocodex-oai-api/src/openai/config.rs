@@ -30,6 +30,9 @@ pub struct ModelConfig {
     pub fast_mode: bool,
     /// Preferred initial streaming transport.
     pub responses_transport: ResponsesTransport,
+    /// Whether a WebSocket session sends an optional non-generating prewarm
+    /// request before its first model call.
+    pub websocket_warmup: bool,
     /// Selected healthy-call history strategy.
     pub responses_history: ResponsesHistory,
     /// Whether the provider may retain response checkpoints.
@@ -82,6 +85,7 @@ impl Default for ModelConfig {
             thinking: Thinking::default(),
             fast_mode: false,
             responses_transport: ResponsesTransport::default(),
+            websocket_warmup: true,
             responses_history: ResponsesHistory::default(),
             store_responses: false,
             websocket_url: "wss://api.openai.com/v1/responses".to_owned(),

@@ -1,16 +1,13 @@
-use std::{
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::path::{Path, PathBuf};
 
-use clap::{Args, builder::NonEmptyStringValueParser};
+use clap::Args;
 use eyre::{Result, WrapErr as _, eyre};
 use nanocodex::{Model, Thinking};
 use nanocodex_eval::{
     EvalAttemptOutcome, EvalEventKind, EvalEventStream, EvalOutcome, Evaluation, EvaluationClaim,
     EvaluationSelector, EvaluationWork, Evaluator, ResolvedHarness, Task,
     atif::AtifBuilder,
-    coordinator::{CoordinatorAddRequest, CoordinatorClient, RemoteClaim, RemoteLease},
+    coordinator::{CoordinatorClient, RemoteClaim},
     harness::{Harness, HarnessAuth},
     vm::{CachePolicy, VmBackend, VmResources},
 };
@@ -24,12 +21,15 @@ use crate::{
 };
 
 const CONFIG_FILE: &str = "nanocodex.toml";
-const LEASE_DURATION: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone, Debug, Args)]
-pub(super) struct WorksetTarget {
-    /// Named durable profile stored in SQLite. Uses its latest generation.
+pub(super) struct ProfileTarget {
+    /// Named benchmark stored in SQLite. Uses its newest generation.
     profile: String,
+
+    /// Runtime harness helper configuration. SQLite owns desired work.
+    #[arg(long, default_value = CONFIG_FILE)]
+    config: PathBuf,
 
     /// Durable SQLite ledger and retained artifacts.
     ///
@@ -44,85 +44,68 @@ pub(super) struct WorksetTarget {
 
 #[derive(Args)]
 pub(super) struct Add {
-    /// Named durable profile to create or extend.
+    /// Named benchmark to create or extend.
     profile: String,
 
-    /// Expand this optional nanocodex.toml recipe into SQLite.
+    /// Expand one optional TOML profile recipe into SQLite.
     #[arg(long, value_name = "NAME")]
     recipe: Option<String>,
 
-    /// Task package to add. Repeat to add multiple task packages.
+    /// Task package to add. Repeat to add multiple tasks.
     #[arg(long, value_name = "PATH")]
     task: Vec<PathBuf>,
 
-    /// Harness name to store. Repeat to create a matrix.
+    /// Harness name to add. Repeat to create a matrix.
     #[arg(long, value_name = "NAME")]
     harness: Vec<String>,
 
-    /// Model to store. Repeat to create a matrix.
+    /// Model to add. Repeat to create a matrix.
     #[arg(long)]
     model: Vec<Model>,
 
-    /// Reasoning effort to store. Repeat to create a matrix.
+    /// Reasoning effort to add. Repeat to create a matrix.
     #[arg(long)]
     thinking: Vec<Thinking>,
 
-    /// Desired repetitions for every added treatment.
-    #[arg(long)]
-    trials: Option<u16>,
+    /// Number of rows to materialize for every treatment.
+    #[arg(long, default_value_t = 1)]
+    trials: u16,
 
-    /// Enable model-facing web search for the added treatments.
+    /// Enable model-facing web search for these rows.
     #[arg(long)]
     web_search: bool,
 
-    /// Start a new profile generation. By default, extends the latest generation.
+    /// Start a fresh generation instead of extending the newest one.
     #[arg(long)]
     new: bool,
 
-    /// Optional local profile recipes and runtime harness helpers.
-    ///
-    /// A remote coordinator resolves recipes from its own configured file.
-    #[arg(long, env = "NANOCODEX_EVAL_CONFIG", default_value = CONFIG_FILE)]
+    /// Optional profile recipes and runtime harness helpers.
+    #[arg(long, default_value = CONFIG_FILE)]
     config: PathBuf,
 
-    /// Local durable SQLite ledger and retained artifacts.
+    /// Durable SQLite ledger and retained artifacts.
     #[arg(long, value_name = "DIRECTORY")]
     state_dir: Option<PathBuf>,
-
-    /// Add work through a remote coordinator instead of opening SQLite directly.
-    #[arg(long, value_name = "URL", conflicts_with = "state_dir")]
-    coordinator: Option<String>,
 }
 
 #[derive(Args)]
 pub(super) struct Status {
     #[command(flatten)]
-    target: WorksetTarget,
+    target: ProfileTarget,
 
     /// Print the complete machine-readable profile ledger.
     #[arg(long)]
     json: bool,
-
-    /// Return at most this many nonterminal family records while preserving exact totals.
-    #[arg(long, value_name = "COUNT", value_parser = clap::value_parser!(u16).range(1..))]
-    family_limit: Option<u16>,
 }
 
 #[derive(Args)]
 pub(super) struct Run {
     #[command(flatten)]
-    target: WorksetTarget,
+    target: ProfileTarget,
 
-    /// Runtime harness helper configuration.
-    #[arg(long, default_value = CONFIG_FILE)]
-    config: PathBuf,
-
-    /// Exact SQLite task selector and locally loadable task package path.
-    ///
-    /// Remote workers need this local task package, but never the profile that
-    /// originally added it to the coordinator.
-    #[arg(long, value_name = "TASK", required = true)]
-    task: String,
+    /// Optionally restrict the atomic claim to one exact profile task.
+    #[arg(long, value_name = "TASK")]
+    task: Option<String>,
 
     /// Select one model when the profile contains a model matrix.
     #[arg(long)]
@@ -133,12 +116,7 @@ pub(super) struct Run {
     harness: Option<String>,
 
     /// Advisory stable name used for coordinator task affinity and status.
-    #[arg(
-        long,
-        env = "NANOCODEX_WORKER_NAME",
-        value_name = "NAME",
-        value_parser = NonEmptyStringValueParser::new()
-    )]
+    #[arg(long, env = "NANOCODEX_WORKER_NAME", value_name = "NAME")]
     worker: Option<String>,
 
     #[command(flatten)]
@@ -148,51 +126,42 @@ pub(super) struct Run {
     agent: EvalAgentArgs,
 }
 
+#[derive(Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+enum RunOutput<'a> {
+    Completed {
+        profile: &'a str,
+        task: &'a str,
+        repetition: u16,
+        evidence: &'a str,
+    },
+    Failed {
+        profile: &'a str,
+        task: &'a str,
+        repetition: u16,
+        error: &'a str,
+    },
+    AlreadyComplete {
+        profile: &'a str,
+        task: &'a str,
+    },
+    TemporarilyUnavailable {
+        profile: &'a str,
+        task: &'a str,
+        reason: &'a str,
+        retry_after_ms: u64,
+    },
+}
+
 impl Add {
     pub(super) async fn run(self) -> Result<()> {
-        if let Some(coordinator) = &self.coordinator {
-            for task in &self.task {
-                if !task.is_absolute() {
-                    return Err(eyre!(
-                        "remote task paths must be absolute coordinator-host paths: {}",
-                        task.display()
-                    ));
-                }
-            }
-            let request = CoordinatorAddRequest {
-                profile: self.profile,
-                recipe: self.recipe,
-                tasks: self
-                    .task
-                    .into_iter()
-                    .map(|task| task.to_string_lossy().into_owned())
-                    .collect(),
-                harnesses: self.harness,
-                models: self
-                    .model
-                    .into_iter()
-                    .map(|model| model.as_str().to_owned())
-                    .collect(),
-                thinking: self
-                    .thinking
-                    .into_iter()
-                    .map(|thinking| thinking.as_str().to_owned())
-                    .collect(),
-                trials: self.trials,
-                web_search: self.web_search,
-                new_generation: self.new,
-            };
-            let status = CoordinatorClient::new(coordinator)?.add(&request).await?;
-            print_added_remote_status(&status);
-            return Ok(());
-        }
         let state = self.state_dir.map_or_else(default_state_dir, Ok)?;
         if let Some(recipe) = self.recipe.as_deref() {
             if !self.task.is_empty()
                 || !self.harness.is_empty()
                 || !self.model.is_empty()
                 || !self.thinking.is_empty()
-                || self.trials.is_some()
+                || self.trials != 1
                 || self.web_search
             {
                 return Err(eyre!(
@@ -204,7 +173,6 @@ impl Add {
             if self.task.is_empty() {
                 return Err(eyre!("at least one --task or --recipe is required"));
             }
-            let trials = self.trials.unwrap_or(1);
             let harnesses = if self.harness.is_empty() {
                 vec!["nanocodex".to_owned()]
             } else {
@@ -233,7 +201,7 @@ impl Add {
                                     .model(*model)
                                     .thinking(*thinking)
                                     .web_search(self.web_search)
-                                    .trials(trials),
+                                    .trials(self.trials),
                             );
                         }
                     }
@@ -241,57 +209,21 @@ impl Add {
             }
             Evaluation::add(&state, &self.profile, &work, self.new)?;
         }
-        let status = Evaluation::open(&self.config, &self.profile, state)?.status()?;
+        let status = Evaluation::open(&self.config, Some(&self.profile), state)?.status()?;
         println!(
-            "{} {} · {} tasks · {} coordinate(s)",
+            "{} {} · {} pre-materialized task row(s)",
             status.profile,
-            &status.generation[..12],
-            status.preparation.pending + status.preparation.running + status.preparation.complete,
-            status.coordinates.pending + status.coordinates.running + status.coordinates.complete,
+            &status.digest[..status.digest.len().min(12)],
+            status.tasks.total()
         );
         Ok(())
     }
 }
 
-fn print_added_remote_status(status: &serde_json::Value) {
-    let profile = status["profile"].as_str().unwrap_or("unknown");
-    let generation = status["generation"].as_str().unwrap_or("unknown");
-    let generation = generation.get(..12).unwrap_or(generation);
-    println!(
-        "{} {} · {} tasks · {} coordinate(s)",
-        profile,
-        generation,
-        count_total(&status["preparation"]),
-        count_total(&status["coordinates"]),
-    );
-}
-
-#[derive(Serialize)]
-#[serde(tag = "outcome", rename_all = "snake_case")]
-enum RunOutput<'a> {
-    Completed {
-        profile: &'a str,
-        task: &'a str,
-        repetition: u16,
-        evidence: &'a str,
-    },
-    AlreadyComplete {
-        profile: &'a str,
-        task: &'a str,
-    },
-    TemporarilyUnavailable {
-        profile: &'a str,
-        task: &'a str,
-        reason: &'a str,
-        retry_after_ms: u64,
-    },
-}
-
 impl Status {
     pub(super) async fn run(self) -> Result<()> {
         if let Some(coordinator) = &self.target.coordinator {
-            let mut status = CoordinatorClient::new(coordinator)?.status().await?;
-            limit_remote_families(&mut status, self.family_limit);
+            let status = CoordinatorClient::new(coordinator)?.status().await?;
             if self.json {
                 serde_json::to_writer_pretty(std::io::stdout().lock(), &status)?;
                 println!();
@@ -300,36 +232,25 @@ impl Status {
             }
             return Ok(());
         }
-        let evaluation = self.target.open(Path::new(CONFIG_FILE))?;
-        let mut status = evaluation.status()?;
-        if let Some(limit) = self.family_limit {
-            status
-                .families
-                .retain(|family| family.pending > 0 || family.running > 0);
-            status.families.truncate(usize::from(limit));
-        }
+        let evaluation = self.target.open()?;
+        let status = evaluation.status()?;
         if self.json {
             serde_json::to_writer_pretty(std::io::stdout().lock(), &status)?;
             println!();
         } else {
             println!(
-                "{} {} · preparation {}/{} ready · coordinates {}/{} terminal, {} running",
+                "{} {} · tasks {}/{} finished · {} running · {} failed",
                 status.profile,
-                &status.generation[..12],
-                status.preparation.complete,
-                status.preparation.pending
-                    + status.preparation.running
-                    + status.preparation.complete,
-                status.coordinates.complete,
-                status.coordinates.pending
-                    + status.coordinates.running
-                    + status.coordinates.complete,
-                status.coordinates.running,
+                &status.digest[..12],
+                status.tasks.finished(),
+                status.tasks.total(),
+                status.tasks.running,
+                status.tasks.failed,
             );
             for family in status.families {
                 println!(
-                    "  {} · {}/{} terminal · {} running · {} pending",
-                    family.task, family.complete, family.desired, family.running, family.pending
+                    "  {} · {} success · {} failed · {} running · {} unclaimed",
+                    family.task, family.success, family.failed, family.running, family.unclaimed
                 );
             }
         }
@@ -337,34 +258,20 @@ impl Status {
     }
 }
 
-fn limit_remote_families(status: &mut serde_json::Value, limit: Option<u16>) {
-    let Some(limit) = limit else {
-        return;
-    };
-    let Some(families) = status
-        .get_mut("families")
-        .and_then(serde_json::Value::as_array_mut)
-    else {
-        return;
-    };
-    families.retain(|family| {
-        family.get("pending").and_then(serde_json::Value::as_u64) > Some(0)
-            || family.get("running").and_then(serde_json::Value::as_u64) > Some(0)
-    });
-    families.truncate(usize::from(limit));
-}
-
 impl Run {
     pub(super) async fn run(self) -> Result<()> {
         let _observability = self.observability.install(false, Path::new("."))?;
         let requested_thinking = self.agent.thinking();
-        let selector = EvaluationSelector::new(&self.task)
-            .harness(self.harness)
-            .model(self.model)
-            .thinking(requested_thinking)
-            .web_search(self.agent.web_search());
+        let selector = self.task.as_ref().map(|task| {
+            EvaluationSelector::new(task)
+                .harness(self.harness.clone())
+                .model(self.model)
+                .thinking(requested_thinking)
+        });
+        if selector.is_none() && (self.harness.is_some() || self.model.is_some()) {
+            return Err(eyre!("--harness and --model require --task"));
+        }
         if let Some(coordinator) = &self.target.coordinator {
-            let task = Task::load(&self.task)?;
             let mut coordinator = CoordinatorClient::new(coordinator)?;
             if let Some(worker) = self.worker {
                 coordinator = coordinator.worker(worker);
@@ -372,95 +279,92 @@ impl Run {
             return run_remote(
                 coordinator,
                 selector,
+                &self.target.config,
                 &self.target.profile,
-                task,
-                &self.config,
-                &self.task,
                 self.agent,
             )
             .await;
         }
-        let evaluation = self.target.open(&self.config)?;
-        let mut prepared = None;
-        loop {
-            match evaluation.claim(&selector, LEASE_DURATION)? {
-                EvaluationClaim::Prepare(claim) => {
-                    let result = prepare_resources(claim.task(), claim.harnesses()).await;
-                    match result {
-                        Ok(resources) => {
-                            claim.complete()?;
-                            prepared = Some(resources);
-                        }
-                        Err(error) => {
-                            claim.retry(&format!("{error:#}"))?;
-                            return Err(error).wrap_err("task preparation remains retryable");
-                        }
+        let evaluation = self.target.open()?;
+        let next = match &selector {
+            Some(selector) => evaluation.claim(selector)?,
+            None => evaluation.claim_next()?,
+        };
+        match next {
+            EvaluationClaim::Run(claim) => {
+                let repetition = claim.repetition();
+                let task_selector = claim.task_selector().to_owned();
+                let result = async {
+                    let resources = prepare_resources(claim.task(), claim.harnesses()).await?;
+                    execute_coordinate(
+                        claim.task().clone(),
+                        claim.treatment().clone(),
+                        claim.web_search(),
+                        claim.harness().cloned(),
+                        claim.output_directory().to_path_buf(),
+                        resources,
+                        self.agent,
+                    )
+                    .await
+                }
+                .await;
+                match result {
+                    Ok(ExecutionResult::Success(evidence)) => {
+                        claim.succeed(&evidence)?;
+                        let evidence = evidence.to_string_lossy();
+                        write_json(&RunOutput::Completed {
+                            profile: evaluation.name(),
+                            task: &task_selector,
+                            repetition,
+                            evidence: &evidence,
+                        })?;
+                        Ok(())
+                    }
+                    Ok(ExecutionResult::Failed { error, evidence }) => {
+                        claim.fail(Some(&evidence), &error)?;
+                        write_json(&RunOutput::Failed {
+                            profile: evaluation.name(),
+                            task: &task_selector,
+                            repetition,
+                            error: &error,
+                        })?;
+                        Err(eyre!(
+                            "task failed permanently; evidence retained at {}: {error}",
+                            evidence.display()
+                        ))
+                    }
+                    Err(error) => {
+                        let message = format!("{error:#}");
+                        claim.fail(None, &message)?;
+                        write_json(&RunOutput::Failed {
+                            profile: evaluation.name(),
+                            task: &task_selector,
+                            repetition,
+                            error: &message,
+                        })?;
+                        Err(error).wrap_err("task failed permanently")
                     }
                 }
-                EvaluationClaim::Run(claim) => {
-                    let result = async {
-                        let resources = match prepared.take() {
-                            Some(resources) => resources,
-                            None => prepare_resources(claim.task(), claim.harnesses()).await?,
-                        };
-                        execute_coordinate(
-                            claim.task().clone(),
-                            claim.treatment().clone(),
-                            claim.web_search(),
-                            claim.harness().cloned(),
-                            claim.output_directory().to_path_buf(),
-                            resources,
-                            self.agent,
-                        )
-                        .await
-                    }
-                    .await;
-                    match result {
-                        Ok(ExecutionResult::Accepted(evidence)) => {
-                            let repetition = claim.repetition();
-                            claim.complete(&evidence)?;
-                            let evidence = evidence.to_string_lossy();
-                            write_json(&RunOutput::Completed {
-                                profile: evaluation.name(),
-                                task: &self.task,
-                                repetition,
-                                evidence: &evidence,
-                            })?;
-                            return Ok(());
-                        }
-                        Ok(ExecutionResult::Retryable { error, evidence }) => {
-                            claim.retry(&error)?;
-                            return Err(eyre!(
-                                "coordinate remains retryable; evidence retained at {}: {error}",
-                                evidence.display()
-                            ));
-                        }
-                        Err(error) => {
-                            claim.retry(&format!("{error:#}"))?;
-                            return Err(error).wrap_err("coordinate remains retryable");
-                        }
-                    }
-                }
-                EvaluationClaim::Busy(busy) => {
-                    write_json(&RunOutput::TemporarilyUnavailable {
-                        profile: evaluation.name(),
-                        task: &self.task,
-                        reason: busy.reason,
-                        retry_after_ms: busy.retry_after_ms,
-                    })?;
-                    return Err(eyre!(
-                        "temporarily unavailable: {}; retry after {} ms",
-                        busy.reason,
-                        busy.retry_after_ms
-                    ));
-                }
-                EvaluationClaim::Complete => {
-                    write_json(&RunOutput::AlreadyComplete {
-                        profile: evaluation.name(),
-                        task: &self.task,
-                    })?;
-                    return Ok(());
-                }
+            }
+            EvaluationClaim::Busy(busy) => {
+                write_json(&RunOutput::TemporarilyUnavailable {
+                    profile: evaluation.name(),
+                    task: self.task.as_deref().unwrap_or("any"),
+                    reason: busy.reason,
+                    retry_after_ms: busy.retry_after_ms,
+                })?;
+                Err(eyre!(
+                    "temporarily unavailable: {}; retry after {} ms",
+                    busy.reason,
+                    busy.retry_after_ms
+                ))
+            }
+            EvaluationClaim::Complete => {
+                write_json(&RunOutput::AlreadyComplete {
+                    profile: evaluation.name(),
+                    task: self.task.as_deref().unwrap_or("any"),
+                })?;
+                Ok(())
             }
         }
     }
@@ -468,151 +372,146 @@ impl Run {
 
 async fn run_remote(
     coordinator: CoordinatorClient,
-    selector: EvaluationSelector,
-    profile: &str,
-    task: Task,
+    selector: Option<EvaluationSelector>,
     config: &Path,
-    task_selector: &str,
+    profile: &str,
     agent: EvalAgentArgs,
 ) -> Result<()> {
-    let mut prepared = None;
-    loop {
-        match coordinator.claim(&selector).await? {
-            RemoteClaim::Prepare { lease, treatment } => {
-                let harness = Evaluation::resolve_harness(config, &treatment.harness)?;
-                let harnesses = harness.iter().cloned().collect::<Vec<_>>();
-                let heartbeat = remote_heartbeat(coordinator.clone(), lease.clone());
-                let result = prepare_resources(&task, &harnesses).await;
-                match result {
-                    Ok(resources) => {
-                        let finish = coordinator.prepared(&lease).await;
-                        heartbeat.abort();
-                        finish?;
-                        prepared = Some(resources);
-                    }
-                    Err(error) => {
-                        let finish = coordinator.retry(&lease, &format!("{error:#}")).await;
-                        heartbeat.abort();
-                        finish?;
-                        return Err(error).wrap_err("remote task preparation remains retryable");
-                    }
-                }
-            }
-            RemoteClaim::Run {
-                lease,
-                repetition,
-                treatment,
-            } => {
+    let remote_claim = match &selector {
+        Some(selector) => coordinator.claim(selector).await?,
+        None => coordinator.claim_next().await?,
+    };
+    match remote_claim {
+        RemoteClaim::Run {
+            claim,
+            repetition,
+            task: task_selector,
+            treatment,
+            ..
+        } => {
+            let setup = (|| {
+                validate_web_search(&agent, profile, treatment.web_search)?;
+                let task = Task::load(&task_selector)?;
                 let harness = Evaluation::resolve_harness(config, &treatment.harness)?;
                 let harnesses = harness.iter().cloned().collect::<Vec<_>>();
                 let host = run::PreparedVmHost::open()?;
                 let output = tempfile::Builder::new()
                     .prefix("nanocodex-eval-worker-")
                     .tempdir_in(host.cache())?;
-                let heartbeat = remote_heartbeat(coordinator.clone(), lease.clone());
-                let result = async {
-                    let resources = match prepared.take() {
-                        Some(resources) => resources,
-                        None => prepare_resources_from(&task, &harnesses, &host).await?,
-                    };
-                    execute_coordinate(
-                        task.clone(),
-                        treatment.clone(),
-                        treatment.web_search,
-                        harness,
-                        output.path().to_path_buf(),
-                        resources,
-                        agent,
-                    )
-                    .await
+                Ok::<_, eyre::Report>((task, harness, harnesses, host, output))
+            })();
+            let (task, harness, harnesses, host, output) = match setup {
+                Ok(setup) => setup,
+                Err(error) => {
+                    let detail = format!("{error:#}");
+                    let finish = coordinator.fail(&claim, &detail).await;
+                    finish?;
+                    return Err(error).wrap_err("remote task setup failed permanently");
                 }
-                .await;
-                match result {
-                    Ok(ExecutionResult::Accepted(evidence)) => {
-                        let finish = coordinator.complete(&lease, output.path(), &evidence).await;
-                        heartbeat.abort();
-                        finish?;
-                        write_json(&RunOutput::Completed {
-                            profile,
-                            task: task_selector,
-                            repetition,
-                            evidence: "coordinator",
-                        })?;
-                        return Ok(());
-                    }
-                    Ok(ExecutionResult::Retryable { error, .. }) => {
-                        let finish = async {
-                            coordinator.upload(&lease, output.path()).await?;
-                            coordinator.retry(&lease, &error).await
-                        }
+            };
+            let execution = async {
+                let resources = prepare_resources_from(&task, &harnesses, &host).await?;
+                execute_coordinate(
+                    task.clone(),
+                    treatment.clone(),
+                    treatment.web_search,
+                    harness,
+                    output.path().to_path_buf(),
+                    resources,
+                    agent,
+                )
+                .await
+            };
+            let result = execution.await;
+            match result {
+                Ok(ExecutionResult::Success(evidence)) => {
+                    let finish = coordinator.succeed(&claim, output.path(), &evidence).await;
+                    finish?;
+                    write_json(&RunOutput::Completed {
+                        profile,
+                        task: &task_selector,
+                        repetition,
+                        evidence: "coordinator",
+                    })?;
+                    Ok(())
+                }
+                Ok(ExecutionResult::Failed { error, evidence }) => {
+                    let finish = coordinator
+                        .fail_with_evidence(&claim, output.path(), &evidence, &error)
                         .await;
-                        heartbeat.abort();
-                        finish?;
-                        return Err(eyre!("remote coordinate remains retryable: {error}"));
-                    }
-                    Err(error) => {
-                        let finish = async {
-                            coordinator.upload(&lease, output.path()).await?;
-                            coordinator.retry(&lease, &format!("{error:#}")).await
-                        }
+                    finish?;
+                    write_json(&RunOutput::Failed {
+                        profile,
+                        task: &task_selector,
+                        repetition,
+                        error: &error,
+                    })?;
+                    Err(eyre!("remote task failed permanently: {error}"))
+                }
+                Err(error) => {
+                    let finish = coordinator
+                        .fail_with_evidence(
+                            &claim,
+                            output.path(),
+                            output.path(),
+                            &format!("{error:#}"),
+                        )
                         .await;
-                        heartbeat.abort();
-                        finish?;
-                        return Err(error).wrap_err("remote coordinate remains retryable");
-                    }
+                    finish?;
+                    Err(error).wrap_err("remote task failed permanently")
                 }
             }
-            RemoteClaim::Busy {
-                reason,
+        }
+        RemoteClaim::Busy {
+            reason,
+            retry_after_ms,
+        } => {
+            write_json(&RunOutput::TemporarilyUnavailable {
+                profile,
+                task: "any",
+                reason: &reason,
                 retry_after_ms,
-            } => {
-                write_json(&RunOutput::TemporarilyUnavailable {
-                    profile,
-                    task: task_selector,
-                    reason: &reason,
-                    retry_after_ms,
-                })?;
-                return Err(eyre!(
-                    "temporarily unavailable: {reason}; retry after {retry_after_ms} ms"
-                ));
-            }
-            RemoteClaim::Complete => {
-                write_json(&RunOutput::AlreadyComplete {
-                    profile,
-                    task: task_selector,
-                })?;
-                return Ok(());
-            }
+            })?;
+            Err(eyre!(
+                "temporarily unavailable: {reason}; retry after {retry_after_ms} ms"
+            ))
+        }
+        RemoteClaim::Complete => {
+            write_json(&RunOutput::AlreadyComplete {
+                profile,
+                task: "any",
+            })?;
+            Ok(())
         }
     }
 }
 
-fn remote_heartbeat(
-    coordinator: CoordinatorClient,
-    lease: RemoteLease,
-) -> tokio::task::JoinHandle<()> {
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(20));
-        interval.tick().await;
-        loop {
-            interval.tick().await;
-            if coordinator.heartbeat(&lease).await.is_err() {
-                return;
-            }
-        }
-    })
+fn validate_web_search(agent: &EvalAgentArgs, profile: &str, web_search: bool) -> Result<()> {
+    if agent
+        .web_search()
+        .is_some_and(|requested| requested != web_search)
+    {
+        return Err(eyre!(
+            "--web-search cannot override profile `{profile}`; the profile fixes web_search={web_search}"
+        ));
+    }
+    Ok(())
 }
 
-impl WorksetTarget {
-    fn open(&self, config: &Path) -> Result<Evaluation> {
+impl ProfileTarget {
+    fn open(&self) -> Result<Evaluation> {
         let state_directory = self.state_dir.clone().map_or_else(default_state_dir, Ok)?;
-        Ok(Evaluation::open(config, &self.profile, state_directory)?)
+        Ok(Evaluation::open(
+            &self.config,
+            Some(&self.profile),
+            state_directory,
+        )?)
     }
 }
 
 enum ExecutionResult {
-    Accepted(PathBuf),
-    Retryable { error: String, evidence: PathBuf },
+    Success(PathBuf),
+    Failed { error: String, evidence: PathBuf },
 }
 
 async fn prepare_resources(task: &Task, harnesses: &[ResolvedHarness]) -> Result<VmResources> {
@@ -634,8 +533,7 @@ async fn prepare_resources_from(
         builder = builder.guest_executable(&harness.command, &harness.guest_command);
     }
     let resources = builder.prepare().await?;
-    // The durable preparation lease covers the complete immutable task
-    // environment, not merely the lazy recipe used to build it.
+    // Keep image construction inside the running task's ownership lifetime.
     resources.backend().await?;
     Ok(resources)
 }
@@ -666,12 +564,12 @@ async fn execute_coordinate(
             let outcome = run_native(&evaluator, task).await?;
             let evidence = evaluator.directory().to_path_buf();
             if outcome.outcome() == EvalOutcome::InfrastructureError {
-                Ok(ExecutionResult::Retryable {
+                Ok(ExecutionResult::Failed {
                     error: "native evaluator retained an infrastructure failure".to_owned(),
                     evidence,
                 })
             } else {
-                Ok(ExecutionResult::Accepted(evidence))
+                Ok(ExecutionResult::Success(evidence))
             }
         }
         _ => {
@@ -712,12 +610,12 @@ async fn execute_coordinate(
             harness.retain_trajectory(&outcome).await?;
             let evidence = harness.directory().to_path_buf();
             if outcome.outcome() == EvalOutcome::InfrastructureError {
-                Ok(ExecutionResult::Retryable {
+                Ok(ExecutionResult::Failed {
                     error: "external harness retained an infrastructure failure".to_owned(),
                     evidence,
                 })
             } else {
-                Ok(ExecutionResult::Accepted(evidence))
+                Ok(ExecutionResult::Success(evidence))
             }
         }
     }
@@ -798,6 +696,9 @@ async fn retain_native_trajectory(
 }
 
 pub(super) fn default_state_dir() -> Result<PathBuf> {
+    if let Some(home) = std::env::var_os("NANOCODEX_HOME") {
+        return Ok(PathBuf::from(home).join("evals"));
+    }
     let home = std::env::var_os("HOME")
         .ok_or_else(|| eyre!("HOME is not set; pass --state-dir for durable eval state"))?;
     Ok(PathBuf::from(home).join(".nanocodex/evals"))
@@ -805,33 +706,31 @@ pub(super) fn default_state_dir() -> Result<PathBuf> {
 
 fn print_remote_status(status: &serde_json::Value) {
     let profile = status["profile"].as_str().unwrap_or("unknown");
-    let generation = status["generation"].as_str().unwrap_or("unknown");
-    let preparation = &status["preparation"];
-    let coordinates = &status["coordinates"];
+    let digest = status["digest"].as_str().unwrap_or("unknown");
+    let tasks = &status["tasks"];
     println!(
-        "{} {} · preparation {}/{} ready · coordinates {}/{} terminal, {} running",
+        "{} {} · tasks {}/{} finished · {} running · {} failed",
         profile,
-        &generation[..generation.len().min(12)],
-        preparation["complete"].as_u64().unwrap_or(0),
-        count_total(preparation),
-        coordinates["complete"].as_u64().unwrap_or(0),
-        count_total(coordinates),
-        coordinates["running"].as_u64().unwrap_or(0),
+        &digest[..digest.len().min(12)],
+        tasks["success"].as_u64().unwrap_or(0) + tasks["failed"].as_u64().unwrap_or(0),
+        count_total(tasks),
+        tasks["running"].as_u64().unwrap_or(0),
+        tasks["failed"].as_u64().unwrap_or(0),
     );
     for family in status["families"].as_array().into_iter().flatten() {
         println!(
-            "  {} · {}/{} terminal · {} running · {} pending",
+            "  {} · {} success · {} failed · {} running · {} unclaimed",
             family["task"].as_str().unwrap_or("unknown"),
-            family["complete"].as_u64().unwrap_or(0),
-            family["desired"].as_u64().unwrap_or(0),
+            family["success"].as_u64().unwrap_or(0),
+            family["failed"].as_u64().unwrap_or(0),
             family["running"].as_u64().unwrap_or(0),
-            family["pending"].as_u64().unwrap_or(0),
+            family["unclaimed"].as_u64().unwrap_or(0),
         );
     }
 }
 
 fn count_total(counts: &serde_json::Value) -> u64 {
-    ["pending", "running", "complete"]
+    ["unclaimed", "running", "success", "failed"]
         .into_iter()
         .map(|key| counts[key].as_u64().unwrap_or(0))
         .sum()
@@ -849,11 +748,11 @@ mod tests {
 
     use clap::Parser as _;
 
-    use super::{default_state_dir, limit_remote_families};
+    use super::default_state_dir;
     use crate::{Cli, Command, eval::EvalCommand};
 
     #[test]
-    fn run_requires_an_explicit_profile_task_but_no_trial_number() {
+    fn run_can_restrict_the_atomic_claim_to_one_profile_task() {
         let cli = Cli::try_parse_from([
             "nanocodex",
             "eval",
@@ -873,65 +772,30 @@ mod tests {
         let EvalCommand::Run(run) = eval.command else {
             panic!("expected profile run");
         };
-        assert_eq!(run.task, "terminal/fix-git");
+        assert_eq!(run.task.as_deref(), Some("terminal/fix-git"));
         assert_eq!(run.worker.as_deref(), Some("dev-one"));
     }
 
     #[test]
-    fn add_accepts_remote_coordinator_and_rejects_direct_sqlite_combination() {
+    fn run_claims_the_next_row_when_task_is_omitted() {
         let cli = Cli::try_parse_from([
             "nanocodex",
             "eval",
-            "add",
+            "run",
             "release",
-            "--coordinator",
-            "http://127.0.0.1:8788",
-            "--task",
-            "/mnt/tasks/fix-git",
-            "--trials",
-            "3",
+            "--worker",
+            "dev-one",
+            "--api-key",
+            "test-key",
         ])
         .unwrap();
         let Some(Command::Eval(eval)) = cli.command else {
             panic!("expected eval command");
         };
-        let EvalCommand::Add(add) = eval.command else {
-            panic!("expected profile add");
+        let EvalCommand::Run(run) = eval.command else {
+            panic!("expected profile run");
         };
-        assert_eq!(add.coordinator.as_deref(), Some("http://127.0.0.1:8788"));
-        assert_eq!(add.task, [Path::new("/mnt/tasks/fix-git")]);
-
-        assert!(
-            Cli::try_parse_from([
-                "nanocodex",
-                "eval",
-                "add",
-                "release",
-                "--coordinator",
-                "http://127.0.0.1:8788",
-                "--state-dir",
-                "/mnt/evals",
-                "--task",
-                "/mnt/tasks/fix-git",
-            ])
-            .is_err()
-        );
-    }
-
-    #[test]
-    fn status_family_limit_keeps_exact_totals_and_only_nonterminal_rows() {
-        let mut status = serde_json::json!({
-            "coordinates": { "complete": 10, "pending": 20, "running": 2 },
-            "families": [
-                { "id": "done", "pending": 0, "running": 0 },
-                { "id": "one", "pending": 1, "running": 0 },
-                { "id": "two", "pending": 0, "running": 1 },
-            ],
-        });
-        limit_remote_families(&mut status, Some(1));
-        assert_eq!(status["coordinates"]["pending"], 20);
-        assert_eq!(status["families"].as_array().unwrap().len(), 1);
-        assert_eq!(status["families"][0]["id"], "one");
+        assert!(run.task.is_none());
     }
 
     #[test]
@@ -982,7 +846,7 @@ mod tests {
     }
 
     #[test]
-    fn home_owns_the_default_eval_directory() {
+    fn nanocodex_home_owns_the_default_eval_directory() {
         let path = default_state_dir().unwrap();
         assert_eq!(
             path.file_name().and_then(|name| name.to_str()),

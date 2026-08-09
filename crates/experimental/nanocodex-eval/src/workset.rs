@@ -1,29 +1,29 @@
-//! Durable SQLite worksets without execution policy.
+//! Durable pre-materialized evaluation tasks without scheduling policy.
 //!
-//! A workset records the complete desired coordinate matrix, but never chooses a
-//! task for its caller. Callers select an exact coordinate family and the
-//! ledger atomically allocates one fungible repetition within that family.
+//! Every desired task/treatment/repetition is one SQLite row. Rows have only
+//! four states: `unclaimed`, `running`, `success`, and `failed`. Claiming is a
+//! short `BEGIN IMMEDIATE` compare-and-set transaction; execution never holds
+//! a SQLite transaction open.
 
 use std::{
+    fs::{self, File, OpenOptions},
     path::{Path, PathBuf},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use rusqlite::{Connection, OptionalExtension as _, Transaction, TransactionBehavior, params};
+use fs2::FileExt as _;
+use rusqlite::{Connection, OpenFlags, OptionalExtension as _, TransactionBehavior, params};
 use serde::Serialize;
 use uuid::Uuid;
 
-const SCHEMA_VERSION: u32 = 4;
+const SCHEMA_VERSION: u32 = 5;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+const OBSERVER_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 
-/// One host-local task reference included in a workset.
-///
-/// SQLite retains the selector, canonical root, task name, and content digest.
-/// The task package itself remains on the assigned host and is loaded from
-/// `root` before preparation or execution.
+/// One immutable task package referenced by pre-materialized rows.
 #[derive(Clone, Debug)]
 pub struct WorksetTask {
-    /// User-visible task selector.
+    /// Benchmark-visible task selector.
     pub selector: String,
     /// Loaded task name.
     pub name: String,
@@ -33,7 +33,7 @@ pub struct WorksetTask {
     pub digest: String,
 }
 
-/// One exact treatment with a ledger-owned repetition count.
+/// One treatment whose repetitions become independent task rows.
 #[derive(Clone, Debug)]
 pub struct WorksetFamily {
     /// Stable identity of all semantic knobs except repetition.
@@ -42,104 +42,96 @@ pub struct WorksetFamily {
     pub task_selector: String,
     /// Stable serialized treatment description.
     pub treatment: String,
-    /// Number of fungible desired repetitions.
+    /// Number of desired pre-materialized repetitions.
     pub trials: u16,
 }
 
-#[cfg(test)]
-#[derive(Clone, Debug)]
-struct WorksetDefinition {
-    name: String,
-    generation: String,
-    tasks: Vec<WorksetTask>,
-    families: Vec<WorksetFamily>,
-}
-
-/// Durable SQLite workset ledger.
+/// Durable SQLite benchmark ledger.
 #[derive(Clone, Debug)]
 pub struct Workset {
     path: PathBuf,
+    claim_directory: PathBuf,
     id: i64,
-    name: String,
-    generation: String,
+    profile: String,
+    digest: String,
 }
 
-/// Result of requesting one repetition from an exact coordinate family.
-#[derive(Clone, Debug)]
-pub enum BeginCoordinate {
-    /// This task's shared preparation must be performed first.
-    Prepare(PreparationLease),
-    /// One repetition was claimed for execution.
-    Execute(CoordinateLease),
-    /// Matching work exists but is currently owned by another process.
+/// Persistent read-only view of one existing benchmark.
+pub(crate) struct WorksetObserver {
+    connection: Connection,
+    claim_directory: PathBuf,
+    id: i64,
+    profile: String,
+    digest: String,
+    data_version: i64,
+    running_ids: Vec<i64>,
+    #[cfg(test)]
+    snapshot_reads: usize,
+}
+
+/// Result of atomically claiming one row from an exact family.
+#[derive(Debug)]
+pub enum BeginTask {
+    /// One pre-materialized task row was claimed.
+    Run(TaskClaim),
+    /// Every unclaimed row is currently running elsewhere.
     Busy(WorksetBusy),
-    /// Every desired repetition in the family is terminal.
+    /// Every row in the family is terminal.
     Complete,
 }
 
-/// Fenced ownership of one task preparation.
-#[derive(Clone, Debug)]
-pub struct PreparationLease {
+/// Fenced ownership of one pre-materialized task row.
+#[derive(Debug)]
+pub struct TaskClaim {
     task_id: i64,
-    generation: i64,
-    owner: String,
-}
-
-/// Fenced ownership of one internal workset repetition.
-#[derive(Clone, Debug)]
-pub struct CoordinateLease {
-    coordinate_id: i64,
-    execution_id: i64,
-    pub(crate) generation: i64,
-    owner: String,
-    /// Internal fungible repetition allocated by SQLite.
+    claim_id: String,
+    _lock: File,
+    pub(crate) family_key: String,
+    /// Internal repetition fixed when the benchmark was created.
     pub repetition: u16,
 }
 
-/// Temporary inability to progress an explicitly selected family.
+/// Temporary inability to claim an exact family.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct WorksetBusy {
     /// Stable machine-readable reason.
     pub reason: &'static str,
-    /// Suggested delay before another inspection or run request.
+    /// Suggested delay before another claim attempt.
     pub retry_after_ms: u64,
 }
 
-/// Workset-level durable status.
+/// Complete four-state benchmark snapshot.
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 pub struct WorksetStatus {
-    /// Workset name.
-    pub name: String,
-    /// Stable identifier of this workset generation.
-    pub generation: String,
-    /// Task-preparation counts.
-    pub preparation: StateCounts,
-    /// Coordinate execution counts.
-    pub coordinates: CoordinateCounts,
+    /// Benchmark name.
+    pub profile: String,
+    /// Immutable benchmark digest.
+    pub digest: String,
+    /// Aggregate task-row counts.
+    pub tasks: TaskCounts,
     /// Exact family-level status records.
     pub families: Vec<FamilyStatus>,
 }
 
-/// Counts for a small durable state machine.
+/// Counts for the only durable task states.
 #[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
-pub struct StateCounts {
-    /// Work not currently owned.
-    pub pending: i64,
-    /// Work with an active lease.
+pub struct TaskCounts {
+    /// Rows available for an atomic claim.
+    pub unclaimed: i64,
+    /// Rows whose OS ownership lock is currently held.
     pub running: i64,
-    /// Successfully terminal work.
-    pub complete: i64,
+    /// Rows whose execution completed successfully.
+    pub success: i64,
+    /// Rows whose execution or worker failed.
+    pub failed: i64,
 }
 
-/// Coordinate counts including retry diagnostics.
-#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
-pub struct CoordinateCounts {
-    /// Repetitions available to run or retry.
-    pub pending: i64,
-    /// Repetitions with active leases.
-    pub running: i64,
-    /// Accepted terminal repetitions.
-    pub terminal: i64,
+impl TaskCounts {
+    /// Total number of pre-materialized rows.
+    #[must_use]
+    pub const fn total(&self) -> i64 {
+        self.unclaimed + self.running + self.success + self.failed
+    }
 }
 
 /// Status of one exact task/treatment family.
@@ -147,104 +139,106 @@ pub struct CoordinateCounts {
 pub struct FamilyStatus {
     /// Stable family identity.
     pub key: String,
-    /// User-visible task selector.
+    /// Benchmark-visible task selector.
     pub task: String,
-    /// Network identity of the host that owns preparation and execution.
-    pub assigned_host: Option<String>,
     /// Stable serialized treatment description.
     pub treatment: String,
-    /// Desired repetition count.
+    /// Desired row count.
     pub desired: i64,
-    /// Available repetition count.
-    pub pending: i64,
-    /// Actively leased repetition count.
+    /// Unclaimed row count.
+    pub unclaimed: i64,
+    /// Running row count.
     pub running: i64,
-    /// Accepted terminal repetition count.
-    pub terminal: i64,
+    /// Successful row count.
+    pub success: i64,
+    /// Failed row count.
+    pub failed: i64,
 }
 
 /// Durable ledger failure.
 #[derive(Debug, thiserror::Error)]
 pub enum WorksetError {
-    /// Ledger parent directory could not be created.
-    #[error("failed to create durable workset directory: {0}")]
+    /// Ledger or ownership-lock I/O failed.
+    #[error("evaluation workset I/O failed: {0}")]
     Io(#[from] std::io::Error),
     /// SQLite operation failed.
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
-    /// No generation exists for the requested workset name.
-    #[error("evaluation workset `{0}` does not exist")]
-    UnknownWorkset(String),
-    /// The selected family is not part of the initialized workset.
-    #[error("coordinate family `{0}` is not part of this workset")]
+    /// The selected family is not part of the initialized benchmark.
+    #[error("task family `{0}` is not part of this benchmark revision")]
     UnknownFamily(String),
-    /// A family references a task absent from the same workset.
-    #[error("coordinate family `{family}` references unknown task `{task}`")]
+    /// A family references a missing task definition.
+    #[error("task family `{family}` references unknown task `{task}")]
     UnknownTask {
-        /// Family containing the invalid reference.
+        /// Invalid family.
         family: String,
-        /// Missing user-visible task selector.
+        /// Missing task selector.
         task: String,
     },
-    /// Appended work disagrees with a definition already retained in SQLite.
-    #[error("workset `{0}` conflicts with its retained SQLite definition")]
+    /// An initialized benchmark disagrees with its immutable definition.
+    #[error("benchmark revision `{0}` conflicts with its initialized SQLite workset")]
     DefinitionConflict(String),
-    /// A stale worker attempted to mutate work after losing its lease.
-    #[error("stale {kind} lease was fenced before it could commit")]
-    StaleLease {
-        /// Kind of fenced work.
-        kind: &'static str,
-    },
+    /// A stale worker attempted to finish a row it no longer owns.
+    #[error("stale task claim was fenced before it could commit")]
+    StaleClaim,
     /// A numeric value could not be represented by the durable schema.
     #[error("durable workset value is out of range: {0}")]
     OutOfRange(&'static str),
+    /// No initialized benchmark matched the requested name.
+    #[error("no initialized benchmark `{0}` exists in this SQLite ledger")]
+    UnknownProfile(String),
 }
 
 impl Workset {
-    /// Opens the newest generation of a named durable workset.
-    pub fn open(path: impl Into<PathBuf>, name: &str) -> Result<Self, WorksetError> {
+    /// Opens the newest generation of a named benchmark without materializing work.
+    pub fn open(path: impl Into<PathBuf>, profile: &str) -> Result<Self, WorksetError> {
         let path = path.into();
+        let claim_directory = claim_directory(&path);
+        fs::create_dir_all(&claim_directory)?;
         let mut connection = open_connection(&path)?;
         initialize_schema(&mut connection)?;
         let retained: Option<(i64, String)> = connection
             .query_row(
-                "SELECT id, generation FROM worksets WHERE name = ?1 \
+                "SELECT id, digest FROM worksets WHERE profile = ?1 \
                  ORDER BY created_at_ms DESC, id DESC LIMIT 1",
-                [name],
+                [profile],
                 |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        let Some((id, generation)) = retained else {
-            return Err(WorksetError::UnknownWorkset(name.to_owned()));
+        let Some((id, digest)) = retained else {
+            return Err(WorksetError::UnknownProfile(profile.to_owned()));
         };
         Ok(Self {
             path,
+            claim_directory,
             id,
-            name: name.to_owned(),
-            generation,
+            profile: profile.to_owned(),
+            digest,
         })
     }
 
-    /// Creates a new empty generation of a named workset.
-    pub fn create(path: impl Into<PathBuf>, name: &str) -> Result<Self, WorksetError> {
+    /// Creates a new empty generation of a named benchmark.
+    pub fn create(path: impl Into<PathBuf>, profile: &str) -> Result<Self, WorksetError> {
         let path = path.into();
+        let claim_directory = claim_directory(&path);
+        fs::create_dir_all(&claim_directory)?;
         let mut connection = open_connection(&path)?;
         initialize_schema(&mut connection)?;
-        let generation = Uuid::now_v7().simple().to_string();
+        let digest = Uuid::now_v7().simple().to_string();
         connection.execute(
-            "INSERT INTO worksets(name, generation, created_at_ms) VALUES (?1, ?2, ?3)",
-            params![name, generation, now_ms()?],
+            "INSERT INTO worksets(profile, digest, created_at_ms) VALUES (?1, ?2, ?3)",
+            params![profile, digest, now_ms()?],
         )?;
         Ok(Self {
             path,
+            claim_directory,
             id: connection.last_insert_rowid(),
-            name: name.to_owned(),
-            generation,
+            profile: profile.to_owned(),
+            digest,
         })
     }
 
-    /// Idempotently appends tasks, treatments, and any missing repetitions.
-    /// Existing accepted work is never rewritten or removed.
+    /// Idempotently appends definitions and pre-materializes missing task rows.
     pub fn append(
         &self,
         tasks: &[WorksetTask],
@@ -252,15 +246,17 @@ impl Workset {
     ) -> Result<(), WorksetError> {
         let mut connection = open_connection(&self.path)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        append_definition(&transaction, self.id, &self.generation, tasks, families)?;
+        append_definition(&transaction, self.id, &self.digest, tasks, families)?;
         transaction.commit()?;
         Ok(())
     }
 
+    /// Stable identifier of this benchmark generation.
     pub(crate) fn generation(&self) -> &str {
-        &self.generation
+        &self.digest
     }
 
+    /// Loads one retained task and all of its exact treatment families.
     pub(crate) fn selected_definition(
         &self,
         selector: &str,
@@ -268,7 +264,7 @@ impl Workset {
         let connection = open_connection(&self.path)?;
         let task = connection
             .query_row(
-                "SELECT id, name, root, digest FROM tasks \
+                "SELECT id, name, root, digest FROM task_definitions \
                  WHERE workset_id = ?1 AND selector = ?2",
                 params![self.id, selector],
                 |row| {
@@ -284,16 +280,16 @@ impl Workset {
                 },
             )
             .optional()?;
-        let Some((task_id, task)) = task else {
+        let Some((definition_id, task)) = task else {
             return Ok(None);
         };
         let mut statement = connection.prepare(
-            "SELECT family_key, treatment, COUNT(*) FROM coordinates \
-             WHERE workset_id = ?1 AND task_id = ?2 \
+            "SELECT family_key, treatment, COUNT(*) FROM eval_tasks \
+             WHERE workset_id = ?1 AND definition_id = ?2 \
              GROUP BY family_key, treatment ORDER BY family_key",
         )?;
         let families = statement
-            .query_map(params![self.id, task_id], |row| {
+            .query_map(params![self.id, definition_id], |row| {
                 let trials: i64 = row.get(2)?;
                 Ok(WorksetFamily {
                     key: row.get(0)?,
@@ -307,415 +303,321 @@ impl Workset {
         Ok(Some((task, families)))
     }
 
-    #[cfg(test)]
-    fn definition(&self) -> Result<WorksetDefinition, WorksetError> {
+    /// Loads the retained task and treatment selected by a family key.
+    pub(crate) fn family_definition(
+        &self,
+        family_key: &str,
+    ) -> Result<Option<(WorksetTask, WorksetFamily)>, WorksetError> {
         let connection = open_connection(&self.path)?;
-        let mut tasks = connection.prepare(
-            "SELECT selector, name, root, digest FROM tasks \
-             WHERE workset_id = ?1 ORDER BY selector",
-        )?;
-        let tasks = tasks
-            .query_map([self.id], |row| {
-                Ok(WorksetTask {
-                    selector: row.get(0)?,
-                    name: row.get(1)?,
-                    root: PathBuf::from(row.get::<_, String>(2)?),
-                    digest: row.get(3)?,
-                })
-            })?
-            .collect::<Result<Vec<_>, _>>()?;
-        let mut families = connection.prepare(
-            "SELECT c.family_key, t.selector, c.treatment, COUNT(*) \
-             FROM coordinates c JOIN tasks t ON t.id = c.task_id \
-             WHERE c.workset_id = ?1 \
-             GROUP BY c.family_key, t.selector, c.treatment \
-             ORDER BY t.selector, c.family_key",
-        )?;
-        let families = families
-            .query_map([self.id], |row| {
-                let trials: i64 = row.get(3)?;
-                Ok((row.get(0)?, row.get(1)?, row.get(2)?, trials))
-            })?
-            .map(|row| {
-                let (key, task_selector, treatment, trials) = row?;
-                Ok(WorksetFamily {
-                    key,
-                    task_selector,
-                    treatment,
-                    trials: u16::try_from(trials)
-                        .map_err(|_| WorksetError::OutOfRange("family trials"))?,
-                })
-            })
-            .collect::<Result<Vec<_>, WorksetError>>()?;
-        Ok(WorksetDefinition {
-            name: self.name.clone(),
-            generation: self.generation.clone(),
-            tasks,
-            families,
-        })
+        connection
+            .query_row(
+                "SELECT d.selector, d.name, d.root, d.digest, e.treatment, COUNT(*) \
+                 FROM eval_tasks e JOIN task_definitions d ON d.id = e.definition_id \
+                 WHERE e.workset_id = ?1 AND e.family_key = ?2 \
+                 GROUP BY d.id, e.family_key, e.treatment",
+                params![self.id, family_key],
+                |row| {
+                    let trials: i64 = row.get(5)?;
+                    let selector: String = row.get(0)?;
+                    Ok((
+                        WorksetTask {
+                            selector: selector.clone(),
+                            name: row.get(1)?,
+                            root: PathBuf::from(row.get::<_, String>(2)?),
+                            digest: row.get(3)?,
+                        },
+                        WorksetFamily {
+                            key: family_key.to_owned(),
+                            task_selector: selector,
+                            treatment: row.get(4)?,
+                            trials: u16::try_from(trials)
+                                .map_err(|_| rusqlite::Error::IntegralValueOutOfRange(5, trials))?,
+                        },
+                    ))
+                },
+            )
+            .optional()
+            .map_err(Into::into)
     }
 
     #[cfg(test)]
-    pub fn path(&self) -> &Path {
+    fn path(&self) -> &Path {
         &self.path
     }
 
-    /// Atomically begins preparation or one available repetition from the
-    /// exact caller-selected family.
-    #[cfg(test)]
-    fn begin(
+    /// Atomically claims one unclaimed row from the exact caller-selected family.
+    pub fn begin_for_worker(
         &self,
         family_key: &str,
-        lease_duration: Duration,
-    ) -> Result<BeginCoordinate, WorksetError> {
-        self.begin_for_host(family_key, "local", lease_duration)
-    }
-
-    /// Atomically begins work for one family on its assigned host.
-    pub fn begin_for_host(
-        &self,
-        family_key: &str,
-        host: &str,
-        lease_duration: Duration,
-    ) -> Result<BeginCoordinate, WorksetError> {
-        let owner = Uuid::now_v7().to_string();
-        let now = now_ms()?;
-        let expires = lease_expiry(now, lease_duration)?;
+        worker: &str,
+    ) -> Result<BeginTask, WorksetError> {
+        self.reconcile_abandoned()?;
         let mut connection = open_connection(&self.path)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let task_id: Option<i64> = transaction
+        let row: Option<(i64, u16)> = transaction
             .query_row(
-                "SELECT c.task_id FROM coordinates c \
-                 WHERE c.workset_id = ?1 AND c.family_key = ?2 LIMIT 1",
-                params![self.id, family_key],
-                |row| row.get(0),
-            )
-            .optional()?;
-        let Some(task_id) = task_id else {
-            return Err(WorksetError::UnknownFamily(family_key.to_owned()));
-        };
-        let preparation: (String, i64, Option<i64>, Option<String>) = transaction.query_row(
-            "SELECT preparation_state, preparation_generation, preparation_expires_at_ms, \
-                    assigned_host \
-             FROM tasks WHERE id = ?1",
-            [task_id],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
-        )?;
-        match preparation.3.as_deref() {
-            None => {
-                transaction.execute(
-                    "UPDATE tasks SET assigned_host = ?1 WHERE id = ?2 AND assigned_host IS NULL",
-                    params![host, task_id],
-                )?;
-            }
-            Some(assigned) if assigned == host => {}
-            Some(_) => {
-                transaction.commit()?;
-                return Ok(BeginCoordinate::Busy(WorksetBusy {
-                    reason: "task_assigned_elsewhere",
-                    retry_after_ms: 30_000,
-                }));
-            }
-        }
-        if preparation.0 != "ready" {
-            let reclaimable = preparation.0 == "pending"
-                || (preparation.0 == "preparing"
-                    && preparation.2.is_some_and(|deadline| deadline <= now));
-            if !reclaimable {
-                transaction.commit()?;
-                return Ok(BeginCoordinate::Busy(WorksetBusy {
-                    reason: "task_preparing",
-                    retry_after_ms: retry_after(preparation.2, now),
-                }));
-            }
-            let generation = preparation
-                .1
-                .checked_add(1)
-                .ok_or(WorksetError::OutOfRange("preparation generation"))?;
-            transaction.execute(
-                "UPDATE tasks SET preparation_state = 'preparing', preparation_generation = ?1, \
-                    preparation_owner = ?2, preparation_expires_at_ms = ?3, preparation_error = NULL \
-                 WHERE id = ?4",
-                params![generation, owner, expires, task_id],
-            )?;
-            transaction.commit()?;
-            return Ok(BeginCoordinate::Prepare(PreparationLease {
-                task_id,
-                generation,
-                owner,
-            }));
-        }
-
-        let coordinate: Option<(i64, i64, u16)> = transaction
-            .query_row(
-                "SELECT id, generation, repetition FROM coordinates \
-                 WHERE workset_id = ?1 AND family_key = ?2 \
-                   AND (state = 'pending' OR (state = 'running' AND lease_expires_at_ms <= ?3)) \
+                "SELECT id, repetition FROM eval_tasks \
+                 WHERE workset_id = ?1 AND family_key = ?2 AND state = 'unclaimed' \
                  ORDER BY repetition LIMIT 1",
-                params![self.id, family_key, now],
-                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+                params![self.id, family_key],
+                |row| Ok((row.get(0)?, row.get(1)?)),
             )
             .optional()?;
-        if let Some((coordinate_id, previous_generation, repetition)) = coordinate {
-            let generation = previous_generation
-                .checked_add(1)
-                .ok_or(WorksetError::OutOfRange("coordinate generation"))?;
-            transaction.execute(
-                "UPDATE executions SET state = 'expired', finished_at_ms = ?1, \
-                    error = 'lease expired and was reclaimed' \
-                 WHERE coordinate_id = ?2 AND generation = ?3 AND state = 'running'",
-                params![now, coordinate_id, previous_generation],
+        if let Some((task_id, repetition)) = row {
+            let lock = open_claim_lock(&self.claim_directory, task_id)?;
+            lock.try_lock_exclusive()?;
+            let claim_id = Uuid::now_v7().to_string();
+            let changed = transaction.execute(
+                "UPDATE eval_tasks SET state = 'running', claim_id = ?1, worker = ?2, \
+                    started_at_ms = ?3, finished_at_ms = NULL, result_path = NULL, error = NULL \
+                 WHERE id = ?4 AND state = 'unclaimed'",
+                params![claim_id, worker, now_ms()?, task_id],
             )?;
-            transaction.execute(
-                "UPDATE coordinates SET state = 'running', generation = ?1, lease_owner = ?2, \
-                    lease_expires_at_ms = ?3, last_error = NULL WHERE id = ?4",
-                params![generation, owner, expires, coordinate_id],
-            )?;
-            transaction.execute(
-                "INSERT INTO executions(coordinate_id, generation, owner, started_at_ms, state) \
-                 VALUES (?1, ?2, ?3, ?4, 'running')",
-                params![coordinate_id, generation, owner, now],
-            )?;
-            let execution_id = transaction.last_insert_rowid();
+            if changed != 1 {
+                return Err(WorksetError::StaleClaim);
+            }
             transaction.commit()?;
-            return Ok(BeginCoordinate::Execute(CoordinateLease {
-                coordinate_id,
-                execution_id,
-                generation,
-                owner,
+            return Ok(BeginTask::Run(TaskClaim {
+                task_id,
+                claim_id,
+                _lock: lock,
+                family_key: family_key.to_owned(),
                 repetition,
             }));
         }
-        let (running, terminal): (i64, i64) = transaction.query_row(
-            "SELECT \
-                COALESCE(SUM(state = 'running'), 0), \
-                COALESCE(SUM(state = 'terminal'), 0) \
-             FROM coordinates WHERE workset_id = ?1 AND family_key = ?2",
-            params![self.id, family_key],
-            |row| Ok((row.get(0)?, row.get(1)?)),
-        )?;
-        let total: i64 = transaction.query_row(
-            "SELECT COUNT(*) FROM coordinates WHERE workset_id = ?1 AND family_key = ?2",
-            params![self.id, family_key],
-            |row| row.get(0),
-        )?;
         transaction.commit()?;
-        if terminal == total {
-            Ok(BeginCoordinate::Complete)
-        } else {
-            debug_assert!(running > 0);
-            Ok(BeginCoordinate::Busy(WorksetBusy {
-                reason: "coordinates_running",
+        let counts: Option<TaskCounts> = connection
+            .query_row(
+                "SELECT \
+                    COALESCE(SUM(state = 'unclaimed'), 0), \
+                    COALESCE(SUM(state = 'running'), 0), \
+                    COALESCE(SUM(state = 'success'), 0), \
+                    COALESCE(SUM(state = 'failed'), 0) \
+                 FROM eval_tasks WHERE workset_id = ?1 AND family_key = ?2",
+                params![self.id, family_key],
+                counts_from_row,
+            )
+            .optional()?;
+        let Some(counts) = counts.filter(|counts| counts.total() > 0) else {
+            return Err(WorksetError::UnknownFamily(family_key.to_owned()));
+        };
+        if counts.running > 0 {
+            Ok(BeginTask::Busy(WorksetBusy {
+                reason: "tasks_running",
                 retry_after_ms: 1_000,
             }))
+        } else {
+            Ok(BeginTask::Complete)
         }
     }
 
-    /// Extends a preparation lease while work remains live.
-    pub fn heartbeat_preparation(
-        &self,
-        lease: &PreparationLease,
-        lease_duration: Duration,
-    ) -> Result<(), WorksetError> {
-        self.update_preparation_lease(lease, lease_duration, None)
-    }
-
-    /// Fenced completion of shared task preparation.
-    pub fn complete_preparation(&self, lease: &PreparationLease) -> Result<(), WorksetError> {
-        let connection = open_connection(&self.path)?;
-        let changed = connection.execute(
-            "UPDATE tasks SET preparation_state = 'ready', preparation_owner = NULL, \
-                preparation_expires_at_ms = NULL, preparation_error = NULL \
-             WHERE id = ?1 AND preparation_state = 'preparing' \
-               AND preparation_generation = ?2 AND preparation_owner = ?3",
-            params![lease.task_id, lease.generation, lease.owner],
-        )?;
-        fenced(changed, "preparation")
-    }
-
-    /// Makes a failed preparation retryable while retaining its diagnostic.
-    pub fn retry_preparation(
-        &self,
-        lease: &PreparationLease,
-        error: &str,
-    ) -> Result<(), WorksetError> {
-        let connection = open_connection(&self.path)?;
-        let changed = connection.execute(
-            "UPDATE tasks SET preparation_state = 'pending', preparation_owner = NULL, \
-                preparation_expires_at_ms = NULL, preparation_error = ?1 \
-             WHERE id = ?2 AND preparation_state = 'preparing' \
-               AND preparation_generation = ?3 AND preparation_owner = ?4",
-            params![error, lease.task_id, lease.generation, lease.owner],
-        )?;
-        fenced(changed, "preparation")
-    }
-
-    /// Extends a coordinate lease while its process remains live.
-    pub fn heartbeat_coordinate(
-        &self,
-        lease: &CoordinateLease,
-        lease_duration: Duration,
-    ) -> Result<(), WorksetError> {
-        let now = now_ms()?;
-        let expires = lease_expiry(now, lease_duration)?;
-        let connection = open_connection(&self.path)?;
-        let changed = connection.execute(
-            "UPDATE coordinates SET lease_expires_at_ms = ?1 \
-             WHERE id = ?2 AND state = 'running' AND generation = ?3 AND lease_owner = ?4",
-            params![expires, lease.coordinate_id, lease.generation, lease.owner],
-        )?;
-        fenced(changed, "coordinate")
-    }
-
-    /// Fenced acceptance of one terminal result.
-    pub fn complete_coordinate(
-        &self,
-        lease: &CoordinateLease,
-        result_path: &Path,
-    ) -> Result<(), WorksetError> {
-        self.finish_coordinate(lease, "terminal", Some(result_path), None)
-    }
-
-    /// Makes an execution failure retryable without allocating another trial.
-    pub fn retry_coordinate(
-        &self,
-        lease: &CoordinateLease,
-        error: &str,
-    ) -> Result<(), WorksetError> {
-        self.finish_coordinate(lease, "pending", None, Some(error))
-    }
-
-    /// Reads a complete workset and family status snapshot.
-    pub fn status(&self) -> Result<WorksetStatus, WorksetError> {
-        let connection = open_connection(&self.path)?;
-        let now = now_ms()?;
-        let preparation = connection.query_row(
+    /// Atomically claims the next unclaimed row in the benchmark.
+    pub fn begin_next_for_worker(&self, worker: &str) -> Result<BeginTask, WorksetError> {
+        self.reconcile_abandoned()?;
+        let mut connection = open_connection(&self.path)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let row: Option<(i64, String, u16)> = transaction
+            .query_row(
+                "SELECT id, family_key, repetition FROM eval_tasks \
+                 WHERE workset_id = ?1 AND state = 'unclaimed' \
+                 ORDER BY id LIMIT 1",
+                [self.id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .optional()?;
+        if let Some((task_id, family_key, repetition)) = row {
+            let lock = open_claim_lock(&self.claim_directory, task_id)?;
+            lock.try_lock_exclusive()?;
+            let claim_id = Uuid::now_v7().to_string();
+            let changed = transaction.execute(
+                "UPDATE eval_tasks SET state = 'running', claim_id = ?1, worker = ?2, \
+                    started_at_ms = ?3, finished_at_ms = NULL, result_path = NULL, error = NULL \
+                 WHERE id = ?4 AND state = 'unclaimed'",
+                params![claim_id, worker, now_ms()?, task_id],
+            )?;
+            if changed != 1 {
+                return Err(WorksetError::StaleClaim);
+            }
+            transaction.commit()?;
+            return Ok(BeginTask::Run(TaskClaim {
+                task_id,
+                claim_id,
+                _lock: lock,
+                family_key,
+                repetition,
+            }));
+        }
+        transaction.commit()?;
+        let counts = connection.query_row(
             "SELECT \
-                COALESCE(SUM(preparation_state = 'pending' OR \
-                    (preparation_state = 'preparing' AND preparation_expires_at_ms <= ?2)), 0), \
-                COALESCE(SUM(preparation_state = 'preparing' AND \
-                    preparation_expires_at_ms > ?2), 0), \
-                COALESCE(SUM(preparation_state = 'ready'), 0) \
-             FROM tasks WHERE workset_id = ?1",
-            params![self.id, now],
-            |row| {
-                Ok(StateCounts {
-                    pending: row.get(0)?,
-                    running: row.get(1)?,
-                    complete: row.get(2)?,
-                })
-            },
+                COALESCE(SUM(state = 'unclaimed'), 0), \
+                COALESCE(SUM(state = 'running'), 0), \
+                COALESCE(SUM(state = 'success'), 0), \
+                COALESCE(SUM(state = 'failed'), 0) \
+             FROM eval_tasks WHERE workset_id = ?1",
+            [self.id],
+            counts_from_row,
         )?;
-        let coordinates = coordinate_counts(&connection, self.id, now)?;
+        if counts.running > 0 {
+            Ok(BeginTask::Busy(WorksetBusy {
+                reason: "tasks_running",
+                retry_after_ms: 1_000,
+            }))
+        } else {
+            Ok(BeginTask::Complete)
+        }
+    }
+
+    /// Records a successful execution if the claim still owns the row.
+    pub fn succeed(&self, claim: &TaskClaim, result_path: &Path) -> Result<(), WorksetError> {
+        self.finish(claim, "success", Some(result_path), None)
+    }
+
+    /// Records a failed execution if the claim still owns the row.
+    pub fn fail(
+        &self,
+        claim: &TaskClaim,
+        result_path: Option<&Path>,
+        error: &str,
+    ) -> Result<(), WorksetError> {
+        self.finish(claim, "failed", result_path, Some(error))
+    }
+
+    /// Releases an interrupted execution if the claim still owns the row.
+    pub fn release(&self, claim: &TaskClaim) -> Result<(), WorksetError> {
+        let connection = open_connection(&self.path)?;
+        let changed = connection.execute(
+            "UPDATE eval_tasks SET state = 'unclaimed', claim_id = NULL, worker = NULL, \
+                started_at_ms = NULL, finished_at_ms = NULL, result_path = NULL, error = NULL \
+             WHERE id = ?1 AND state = 'running' AND claim_id = ?2",
+            params![claim.task_id, claim.claim_id],
+        )?;
+        if changed == 1 {
+            Ok(())
+        } else {
+            Err(WorksetError::StaleClaim)
+        }
+    }
+
+    /// Reacquires ownership of rows retained as running after an owner restart.
+    pub(crate) fn recover_running(&self) -> Result<Vec<(TaskClaim, String)>, WorksetError> {
+        let connection = open_connection(&self.path)?;
         let mut statement = connection.prepare(
-            "SELECT c.family_key, t.selector, t.assigned_host, c.treatment, COUNT(*), \
-                COALESCE(SUM(c.state = 'pending' OR \
-                    (c.state = 'running' AND c.lease_expires_at_ms <= ?2)), 0), \
-                COALESCE(SUM(c.state = 'running' AND c.lease_expires_at_ms > ?2), 0), \
-                COALESCE(SUM(c.state = 'terminal'), 0) \
-             FROM coordinates c JOIN tasks t ON t.id = c.task_id \
-             WHERE c.workset_id = ?1 \
-             GROUP BY c.family_key, t.selector, t.assigned_host, c.treatment \
-             ORDER BY t.selector, c.family_key",
+            "SELECT id, claim_id, worker, family_key, repetition FROM eval_tasks \
+             WHERE workset_id = ?1 AND state = 'running' ORDER BY id",
         )?;
-        let families = statement
-            .query_map(params![self.id, now], |row| {
-                Ok(FamilyStatus {
-                    key: row.get(0)?,
-                    task: row.get(1)?,
-                    assigned_host: row.get(2)?,
-                    treatment: row.get(3)?,
-                    desired: row.get(4)?,
-                    pending: row.get(5)?,
-                    running: row.get(6)?,
-                    terminal: row.get(7)?,
-                })
+        let rows = statement
+            .query_map([self.id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, u16>(4)?,
+                ))
             })?
             .collect::<Result<Vec<_>, _>>()?;
-        Ok(WorksetStatus {
-            name: self.name.clone(),
-            generation: self.generation.clone(),
-            preparation,
-            coordinates,
-            families,
-        })
+        drop(statement);
+
+        rows.into_iter()
+            .map(|(task_id, claim_id, worker, family_key, repetition)| {
+                let lock = open_claim_lock(&self.claim_directory, task_id)?;
+                lock.try_lock_exclusive()?;
+                Ok((
+                    TaskClaim {
+                        task_id,
+                        claim_id,
+                        _lock: lock,
+                        family_key,
+                        repetition,
+                    },
+                    worker,
+                ))
+            })
+            .collect()
     }
 
-    fn update_preparation_lease(
-        &self,
-        lease: &PreparationLease,
-        lease_duration: Duration,
-        error: Option<&str>,
-    ) -> Result<(), WorksetError> {
-        let now = now_ms()?;
-        let expires = lease_expiry(now, lease_duration)?;
+    /// Releases every running row whose OS ownership lock is no longer held.
+    pub fn reconcile_abandoned(&self) -> Result<usize, WorksetError> {
         let connection = open_connection(&self.path)?;
-        let changed = connection.execute(
-            "UPDATE tasks SET preparation_expires_at_ms = ?1, preparation_error = ?2 \
-             WHERE id = ?3 AND preparation_state = 'preparing' \
-               AND preparation_generation = ?4 AND preparation_owner = ?5",
-            params![expires, error, lease.task_id, lease.generation, lease.owner],
+        let mut statement = connection.prepare(
+            "SELECT id FROM eval_tasks WHERE workset_id = ?1 AND state = 'running' ORDER BY id",
         )?;
-        fenced(changed, "preparation")
+        let ids = statement
+            .query_map([self.id], |row| row.get::<_, i64>(0))?
+            .collect::<Result<Vec<_>, _>>()?;
+        drop(statement);
+        let mut changed = 0;
+        for id in ids {
+            let lock = open_claim_lock(&self.claim_directory, id)?;
+            match lock.try_lock_exclusive() {
+                Ok(()) => {
+                    changed += connection.execute(
+                        "UPDATE eval_tasks SET state = 'unclaimed', claim_id = NULL, worker = NULL, \
+                            started_at_ms = NULL, finished_at_ms = NULL, result_path = NULL, error = NULL \
+                         WHERE id = ?1 AND state = 'running'",
+                        [id],
+                    )?;
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(changed)
     }
 
-    fn finish_coordinate(
+    /// Reads a complete four-state snapshot after reconciling dead owners.
+    pub fn status(&self) -> Result<WorksetStatus, WorksetError> {
+        self.reconcile_abandoned()?;
+        let connection = open_connection(&self.path)?;
+        read_status(&connection, self.id, &self.profile, &self.digest)
+    }
+
+    fn finish(
         &self,
-        lease: &CoordinateLease,
-        next_state: &str,
+        claim: &TaskClaim,
+        state: &str,
         result_path: Option<&Path>,
         error: Option<&str>,
     ) -> Result<(), WorksetError> {
-        let mut connection = open_connection(&self.path)?;
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let changed = transaction.execute(
-            "UPDATE coordinates SET state = ?1, lease_owner = NULL, lease_expires_at_ms = NULL, \
-                result_path = ?2, last_error = ?3 \
-             WHERE id = ?4 AND state = 'running' AND generation = ?5 AND lease_owner = ?6",
+        let connection = open_connection(&self.path)?;
+        let changed = connection.execute(
+            "UPDATE eval_tasks SET state = ?1, finished_at_ms = ?2, result_path = ?3, error = ?4 \
+             WHERE id = ?5 AND state = 'running' AND claim_id = ?6",
             params![
-                next_state,
-                result_path.map(|path| path.to_string_lossy()),
-                error,
-                lease.coordinate_id,
-                lease.generation,
-                lease.owner
-            ],
-        )?;
-        fenced(changed, "coordinate")?;
-        transaction.execute(
-            "UPDATE executions SET state = ?1, finished_at_ms = ?2, result_path = ?3, error = ?4 \
-             WHERE id = ?5 AND generation = ?6 AND owner = ?7 AND state = 'running'",
-            params![
-                if next_state == "terminal" {
-                    "terminal"
-                } else {
-                    "retryable"
-                },
+                state,
                 now_ms()?,
                 result_path.map(|path| path.to_string_lossy()),
                 error,
-                lease.execution_id,
-                lease.generation,
-                lease.owner
+                claim.task_id,
+                claim.claim_id,
             ],
         )?;
-        transaction.commit()?;
-        Ok(())
+        if changed == 1 {
+            Ok(())
+        } else {
+            Err(WorksetError::StaleClaim)
+        }
+    }
+}
+
+impl TaskClaim {
+    pub(crate) fn id(&self) -> &str {
+        &self.claim_id
     }
 }
 
 fn append_definition(
-    transaction: &Transaction<'_>,
+    transaction: &rusqlite::Transaction<'_>,
     workset_id: i64,
-    workset_generation: &str,
+    generation: &str,
     tasks: &[WorksetTask],
     families: &[WorksetFamily],
 ) -> Result<(), WorksetError> {
     for task in tasks {
         transaction.execute(
-            "INSERT OR IGNORE INTO tasks( \
-                workset_id, selector, name, root, digest, preparation_state, preparation_generation \
-             ) VALUES (?1, ?2, ?3, ?4, ?5, 'pending', 0)",
+            "INSERT OR IGNORE INTO task_definitions(workset_id, selector, name, root, digest) \
+             VALUES (?1, ?2, ?3, ?4, ?5)",
             params![
                 workset_id,
                 task.selector,
@@ -726,7 +628,8 @@ fn append_definition(
         )?;
         let retained: Option<(String, String, String)> = transaction
             .query_row(
-                "SELECT name, root, digest FROM tasks WHERE workset_id = ?1 AND selector = ?2",
+                "SELECT name, root, digest FROM task_definitions \
+                 WHERE workset_id = ?1 AND selector = ?2",
                 params![workset_id, task.selector],
                 |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
             )
@@ -738,49 +641,45 @@ fn append_definition(
                 task.digest.clone(),
             ))
         {
-            return Err(WorksetError::DefinitionConflict(
-                workset_generation.to_owned(),
-            ));
+            return Err(WorksetError::DefinitionConflict(generation.to_owned()));
         }
     }
     for family in families {
-        let task_id: Option<i64> = transaction
+        let definition_id: Option<i64> = transaction
             .query_row(
-                "SELECT id FROM tasks WHERE workset_id = ?1 AND selector = ?2",
+                "SELECT id FROM task_definitions WHERE workset_id = ?1 AND selector = ?2",
                 params![workset_id, family.task_selector],
                 |row| row.get(0),
             )
             .optional()?;
-        let Some(task_id) = task_id else {
+        let Some(definition_id) = definition_id else {
             return Err(WorksetError::UnknownTask {
                 family: family.key.clone(),
                 task: family.task_selector.clone(),
             });
         };
-        let retained: Option<(i64, String)> = transaction
+        let retained_treatment: Option<String> = transaction
             .query_row(
-                "SELECT task_id, treatment FROM coordinates \
+                "SELECT treatment FROM eval_tasks \
                  WHERE workset_id = ?1 AND family_key = ?2 LIMIT 1",
                 params![workset_id, family.key],
-                |row| Ok((row.get(0)?, row.get(1)?)),
+                |row| row.get(0),
             )
             .optional()?;
-        if retained
+        if retained_treatment
             .as_ref()
-            .is_some_and(|retained| retained != &(task_id, family.treatment.clone()))
+            .is_some_and(|retained| retained != &family.treatment)
         {
-            return Err(WorksetError::DefinitionConflict(
-                workset_generation.to_owned(),
-            ));
+            return Err(WorksetError::DefinitionConflict(generation.to_owned()));
         }
         for repetition in 1..=family.trials {
             transaction.execute(
-                "INSERT OR IGNORE INTO coordinates( \
-                    workset_id, task_id, family_key, treatment, repetition, state, generation \
-                 ) VALUES (?1, ?2, ?3, ?4, ?5, 'pending', 0)",
+                "INSERT OR IGNORE INTO eval_tasks( \
+                    workset_id, definition_id, family_key, treatment, repetition, state \
+                 ) VALUES (?1, ?2, ?3, ?4, ?5, 'unclaimed')",
                 params![
                     workset_id,
-                    task_id,
+                    definition_id,
                     family.key,
                     family.treatment,
                     repetition
@@ -791,9 +690,206 @@ fn append_definition(
     Ok(())
 }
 
+fn read_status(
+    connection: &Connection,
+    workset_id: i64,
+    profile: &str,
+    digest: &str,
+) -> Result<WorksetStatus, WorksetError> {
+    let tasks = connection.query_row(
+        "SELECT \
+            COALESCE(SUM(state = 'unclaimed'), 0), \
+            COALESCE(SUM(state = 'running'), 0), \
+            COALESCE(SUM(state = 'success'), 0), \
+            COALESCE(SUM(state = 'failed'), 0) \
+         FROM eval_tasks WHERE workset_id = ?1",
+        [workset_id],
+        counts_from_row,
+    )?;
+    let mut statement = connection.prepare(
+        "SELECT e.family_key, d.selector, e.treatment, COUNT(*), \
+            COALESCE(SUM(e.state = 'unclaimed'), 0), \
+            COALESCE(SUM(e.state = 'running'), 0), \
+            COALESCE(SUM(e.state = 'success'), 0), \
+            COALESCE(SUM(e.state = 'failed'), 0) \
+         FROM eval_tasks e JOIN task_definitions d ON d.id = e.definition_id \
+         WHERE e.workset_id = ?1 \
+         GROUP BY e.family_key, d.selector, e.treatment \
+         ORDER BY d.selector, e.family_key",
+    )?;
+    let families = statement
+        .query_map([workset_id], |row| {
+            Ok(FamilyStatus {
+                key: row.get(0)?,
+                task: row.get(1)?,
+                treatment: row.get(2)?,
+                desired: row.get(3)?,
+                unclaimed: row.get(4)?,
+                running: row.get(5)?,
+                success: row.get(6)?,
+                failed: row.get(7)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(WorksetStatus {
+        profile: profile.to_owned(),
+        digest: digest.to_owned(),
+        tasks,
+        families,
+    })
+}
+
+fn counts_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<TaskCounts> {
+    Ok(TaskCounts {
+        unclaimed: row.get(0)?,
+        running: row.get(1)?,
+        success: row.get(2)?,
+        failed: row.get(3)?,
+    })
+}
+
+impl WorksetObserver {
+    pub(crate) fn open(path: &Path, profile: &str) -> Result<Self, WorksetError> {
+        let connection = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
+        connection.busy_timeout(OBSERVER_BUSY_TIMEOUT)?;
+        connection.pragma_update(None, "query_only", "ON")?;
+        let schema_version: u32 =
+            connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
+        if schema_version != SCHEMA_VERSION {
+            return Err(WorksetError::DefinitionConflict(format!(
+                "schema {schema_version}; expected {SCHEMA_VERSION}"
+            )));
+        }
+        let mut statement = connection.prepare(
+            "SELECT id, profile, digest FROM worksets WHERE profile = ?1 \
+             ORDER BY created_at_ms DESC, id DESC LIMIT 1",
+        )?;
+        let mut matches = statement
+            .query_map([profile], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+            .collect::<Result<Vec<(i64, String, String)>, _>>()?;
+        drop(statement);
+        if matches.is_empty() {
+            return Err(WorksetError::UnknownProfile(profile.to_owned()));
+        }
+        let (id, profile, digest) = matches
+            .pop()
+            .ok_or_else(|| WorksetError::UnknownProfile(profile.to_owned()))?;
+        let data_version = sqlite_data_version(&connection)?;
+        Ok(Self {
+            connection,
+            claim_directory: claim_directory(path),
+            id,
+            profile,
+            digest,
+            data_version,
+            running_ids: Vec::new(),
+            #[cfg(test)]
+            snapshot_reads: 0,
+        })
+    }
+
+    pub(crate) fn snapshot(&mut self) -> Result<WorksetStatus, WorksetError> {
+        self.snapshot_inner()
+    }
+
+    pub(crate) fn refresh(&mut self) -> Result<Option<WorksetStatus>, WorksetError> {
+        let data_version = sqlite_data_version(&self.connection)?;
+        if data_version == self.data_version && !self.has_abandoned_owner()? {
+            return Ok(None);
+        }
+        self.snapshot_inner().map(Some)
+    }
+
+    fn snapshot_inner(&mut self) -> Result<WorksetStatus, WorksetError> {
+        self.data_version = sqlite_data_version(&self.connection)?;
+        self.running_ids = running_ids(&self.connection, self.id)?;
+        let mut status = read_status(&self.connection, self.id, &self.profile, &self.digest)?;
+        let abandoned = self.abandoned_ids()?;
+        if !abandoned.is_empty() {
+            let count = i64::try_from(abandoned.len())
+                .map_err(|_| WorksetError::OutOfRange("abandoned task count"))?;
+            status.tasks.running -= count;
+            status.tasks.failed += count;
+            for family in &mut status.families {
+                let family_abandoned =
+                    abandoned_in_family(&self.connection, &abandoned, &family.key)?;
+                family.running -= family_abandoned;
+                family.failed += family_abandoned;
+            }
+        }
+        #[cfg(test)]
+        {
+            self.snapshot_reads += 1;
+        }
+        Ok(status)
+    }
+
+    fn has_abandoned_owner(&self) -> Result<bool, WorksetError> {
+        Ok(!self.abandoned_ids()?.is_empty())
+    }
+
+    fn abandoned_ids(&self) -> Result<Vec<i64>, WorksetError> {
+        let mut abandoned = Vec::new();
+        for &id in &self.running_ids {
+            let lock = open_claim_lock(&self.claim_directory, id)?;
+            match lock.try_lock_exclusive() {
+                Ok(()) => abandoned.push(id),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(abandoned)
+    }
+}
+
+fn abandoned_in_family(
+    connection: &Connection,
+    ids: &[i64],
+    family: &str,
+) -> Result<i64, WorksetError> {
+    let mut count = 0;
+    for id in ids {
+        count += connection.query_row(
+            "SELECT COUNT(*) FROM eval_tasks WHERE id = ?1 AND family_key = ?2",
+            params![id, family],
+            |row| row.get::<_, i64>(0),
+        )?;
+    }
+    Ok(count)
+}
+
+fn running_ids(connection: &Connection, workset_id: i64) -> Result<Vec<i64>, WorksetError> {
+    let mut statement = connection
+        .prepare("SELECT id FROM eval_tasks WHERE workset_id = ?1 AND state = 'running'")?;
+    Ok(statement
+        .query_map([workset_id], |row| row.get::<_, i64>(0))?
+        .collect::<Result<Vec<_>, _>>()?)
+}
+
+fn claim_directory(path: &Path) -> PathBuf {
+    path.with_extension("claims")
+}
+
+fn open_claim_lock(directory: &Path, id: i64) -> Result<File, WorksetError> {
+    fs::create_dir_all(directory)?;
+    Ok(OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(directory.join(format!("{id}.lock")))?)
+}
+
+fn sqlite_data_version(connection: &Connection) -> Result<i64, WorksetError> {
+    Ok(connection.pragma_query_value(None, "data_version", |row| row.get(0))?)
+}
+
 fn open_connection(path: &Path) -> Result<Connection, WorksetError> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        fs::create_dir_all(parent)?;
     }
     let connection = Connection::open(path)?;
     connection.busy_timeout(BUSY_TIMEOUT)?;
@@ -809,98 +905,132 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), WorksetError> {
             "schema {version}; expected {SCHEMA_VERSION}"
         )));
     }
+    let four_state_exists: bool = connection.query_row(
+        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'eval_tasks')",
+        [],
+        |row| row.get(0),
+    )?;
+    if version != 0 && four_state_exists {
+        create_schema(connection)?;
+        connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+        return Ok(());
+    }
+    if version != 0 {
+        if version == 1 {
+            connection.execute("ALTER TABLE tasks ADD COLUMN assigned_host TEXT", [])?;
+        }
+        migrate_legacy_schema(connection, version >= 4)?;
+        return Ok(());
+    }
+    create_schema(connection)?;
+    connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    Ok(())
+}
+
+fn create_schema(connection: &Connection) -> Result<(), WorksetError> {
     connection.execute_batch(
         "CREATE TABLE IF NOT EXISTS worksets(
             id INTEGER PRIMARY KEY,
-            name TEXT NOT NULL,
-            generation TEXT NOT NULL,
+            profile TEXT NOT NULL,
+            digest TEXT NOT NULL,
             created_at_ms INTEGER NOT NULL,
-            UNIQUE(name, generation)
+            UNIQUE(profile, digest)
          );
-         CREATE TABLE IF NOT EXISTS tasks(
+         CREATE TABLE IF NOT EXISTS task_definitions(
             id INTEGER PRIMARY KEY,
             workset_id INTEGER NOT NULL REFERENCES worksets(id),
             selector TEXT NOT NULL,
             name TEXT NOT NULL,
             root TEXT NOT NULL,
             digest TEXT NOT NULL,
-            preparation_state TEXT NOT NULL CHECK(preparation_state IN ('pending','preparing','ready')),
-            preparation_generation INTEGER NOT NULL,
-            preparation_owner TEXT,
-            preparation_expires_at_ms INTEGER,
-            preparation_error TEXT,
-            assigned_host TEXT,
             UNIQUE(workset_id, selector)
          );
-         CREATE TABLE IF NOT EXISTS coordinates(
+         CREATE TABLE IF NOT EXISTS eval_tasks(
             id INTEGER PRIMARY KEY,
             workset_id INTEGER NOT NULL REFERENCES worksets(id),
-            task_id INTEGER NOT NULL REFERENCES tasks(id),
+            definition_id INTEGER NOT NULL REFERENCES task_definitions(id),
             family_key TEXT NOT NULL,
             treatment TEXT NOT NULL,
             repetition INTEGER NOT NULL,
-            state TEXT NOT NULL CHECK(state IN ('pending','running','terminal')),
-            generation INTEGER NOT NULL,
-            lease_owner TEXT,
-            lease_expires_at_ms INTEGER,
-            result_path TEXT,
-            last_error TEXT,
-            UNIQUE(workset_id, family_key, repetition)
-         );
-         CREATE TABLE IF NOT EXISTS executions(
-            id INTEGER PRIMARY KEY,
-            coordinate_id INTEGER NOT NULL REFERENCES coordinates(id),
-            generation INTEGER NOT NULL,
-            owner TEXT NOT NULL,
-            started_at_ms INTEGER NOT NULL,
+            state TEXT NOT NULL CHECK(state IN ('unclaimed','running','success','failed')),
+            claim_id TEXT,
+            worker TEXT,
+            started_at_ms INTEGER,
             finished_at_ms INTEGER,
-            state TEXT NOT NULL CHECK(state IN ('running','terminal','retryable','expired')),
             result_path TEXT,
             error TEXT,
-            UNIQUE(coordinate_id, generation)
-         );",
+            UNIQUE(workset_id, family_key, repetition),
+            CHECK(
+                (state = 'unclaimed' AND claim_id IS NULL AND started_at_ms IS NULL AND finished_at_ms IS NULL) OR
+                (state = 'running' AND claim_id IS NOT NULL AND started_at_ms IS NOT NULL AND finished_at_ms IS NULL) OR
+                (state IN ('success','failed') AND claim_id IS NOT NULL AND started_at_ms IS NOT NULL AND finished_at_ms IS NOT NULL)
+            )
+         );
+         CREATE INDEX IF NOT EXISTS eval_tasks_claimable
+            ON eval_tasks(workset_id, family_key, state, repetition);
+         CREATE INDEX IF NOT EXISTS eval_tasks_next
+            ON eval_tasks(workset_id, state, id);",
     )?;
-    if version != 0 && version < SCHEMA_VERSION {
-        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-        if version == 1 {
-            transaction.execute("ALTER TABLE tasks ADD COLUMN assigned_host TEXT", [])?;
-        }
-        transaction.execute("ALTER TABLE worksets RENAME COLUMN profile TO name", [])?;
-        transaction.execute(
-            "ALTER TABLE worksets RENAME COLUMN digest TO generation",
-            [],
-        )?;
-        transaction.execute("ALTER TABLE worksets DROP COLUMN config_path", [])?;
-        transaction.execute("DROP TABLE IF EXISTS workset_seeds", [])?;
-        transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        transaction.commit()?;
-    } else {
-        connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-    }
     Ok(())
 }
 
-fn coordinate_counts(
-    connection: &Connection,
-    workset_id: i64,
-    now: i64,
-) -> Result<CoordinateCounts, WorksetError> {
-    Ok(connection.query_row(
-        "SELECT \
-            COALESCE(SUM(state = 'pending' OR \
-                (state = 'running' AND lease_expires_at_ms <= ?2)), 0), \
-            COALESCE(SUM(state = 'running' AND lease_expires_at_ms > ?2), 0), \
-            COALESCE(SUM(state = 'terminal'), 0) \
-         FROM coordinates WHERE workset_id = ?1",
-        params![workset_id, now],
-        |row| {
-            Ok(CoordinateCounts {
-                pending: row.get(0)?,
-                running: row.get(1)?,
-                terminal: row.get(2)?,
-            })
-        },
-    )?)
+fn migrate_legacy_schema(
+    connection: &mut Connection,
+    named_generations: bool,
+) -> Result<(), WorksetError> {
+    connection.pragma_update(None, "foreign_keys", "OFF")?;
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute_batch(
+        "ALTER TABLE worksets RENAME TO legacy_worksets;
+         ALTER TABLE tasks RENAME TO legacy_tasks;
+         ALTER TABLE coordinates RENAME TO legacy_coordinates;
+         ALTER TABLE executions RENAME TO legacy_executions;",
+    )?;
+    create_schema(&transaction)?;
+    if named_generations {
+        transaction.execute_batch(
+            "INSERT INTO worksets(id, profile, digest, created_at_ms)
+             SELECT id, name, generation, created_at_ms FROM legacy_worksets;",
+        )?;
+    } else {
+        transaction.execute_batch(
+            "INSERT INTO worksets(id, profile, digest, created_at_ms)
+             SELECT id, profile, digest, created_at_ms FROM legacy_worksets;",
+        )?;
+    }
+    transaction.execute_batch(
+        "INSERT INTO task_definitions(id, workset_id, selector, name, root, digest)
+         SELECT id, workset_id, selector, name, root, digest FROM legacy_tasks;
+         INSERT INTO eval_tasks(
+            id, workset_id, definition_id, family_key, treatment, repetition, state,
+            claim_id, worker, started_at_ms, finished_at_ms, result_path, error
+         )
+         SELECT
+            c.id, c.workset_id, c.task_id, c.family_key, c.treatment, c.repetition,
+            CASE c.state WHEN 'terminal' THEN 'success' WHEN 'running' THEN 'failed' ELSE 'unclaimed' END,
+            CASE WHEN c.state = 'pending' THEN NULL ELSE COALESCE(c.lease_owner, 'legacy-' || c.id) END,
+            t.assigned_host,
+            CASE WHEN c.state = 'pending' THEN NULL ELSE COALESCE(
+                (SELECT MAX(e.started_at_ms) FROM legacy_executions e WHERE e.coordinate_id = c.id),
+                strftime('%s','now') * 1000
+            ) END,
+            CASE WHEN c.state = 'pending' THEN NULL WHEN c.state = 'running' THEN strftime('%s','now') * 1000 ELSE COALESCE(
+                (SELECT MAX(e.finished_at_ms) FROM legacy_executions e WHERE e.coordinate_id = c.id),
+                strftime('%s','now') * 1000
+            ) END,
+            c.result_path,
+            CASE WHEN c.state = 'running' THEN 'worker was not live during four-state schema migration' ELSE c.last_error END
+         FROM legacy_coordinates c JOIN legacy_tasks t ON t.id = c.task_id;
+         DROP TABLE IF EXISTS coordinate_results;
+         DROP TABLE legacy_executions;
+         DROP TABLE legacy_coordinates;
+         DROP TABLE legacy_tasks;
+         DROP TABLE legacy_worksets;",
+    )?;
+    transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    transaction.commit()?;
+    connection.pragma_update(None, "foreign_keys", "ON")?;
+    Ok(())
 }
 
 fn now_ms() -> Result<i64, WorksetError> {
@@ -911,30 +1041,10 @@ fn now_ms() -> Result<i64, WorksetError> {
     i64::try_from(millis).map_err(|_| WorksetError::OutOfRange("system time"))
 }
 
-fn lease_expiry(now: i64, duration: Duration) -> Result<i64, WorksetError> {
-    let millis = i64::try_from(duration.as_millis())
-        .map_err(|_| WorksetError::OutOfRange("lease duration"))?;
-    now.checked_add(millis)
-        .ok_or(WorksetError::OutOfRange("lease expiry"))
-}
-
-fn retry_after(deadline: Option<i64>, now: i64) -> u64 {
-    deadline
-        .and_then(|deadline| u64::try_from(deadline.saturating_sub(now)).ok())
-        .unwrap_or(1_000)
-        .clamp(100, 30_000)
-}
-
-const fn fenced(changed: usize, kind: &'static str) -> Result<(), WorksetError> {
-    if changed == 1 {
-        Ok(())
-    } else {
-        Err(WorksetError::StaleLease { kind })
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::{process::Command, sync::Arc, thread, time::Instant};
+
     use super::*;
 
     fn definition(root: &Path, trials: u16) -> (Vec<WorksetTask>, Vec<WorksetFamily>) {
@@ -948,7 +1058,14 @@ mod tests {
             vec![WorksetFamily {
                 key: "terminal/fix-git|harness|high".to_owned(),
                 task_selector: "terminal/fix-git".to_owned(),
-                treatment: "codex high".to_owned(),
+                treatment: serde_json::json!({
+                    "key": "terminal/fix-git|harness|high",
+                    "task": "terminal/fix-git",
+                    "harness": "codex",
+                    "model": "luna",
+                    "thinking": "high",
+                })
+                .to_string(),
                 trials,
             }],
         )
@@ -961,243 +1078,211 @@ mod tests {
         workset
     }
 
-    fn prepared_workset(directory: &Path, trials: u16) -> Workset {
-        let workset = workset(directory, trials);
-        let BeginCoordinate::Prepare(preparation) = workset
-            .begin("terminal/fix-git|harness|high", Duration::from_secs(30))
-            .unwrap()
-        else {
-            panic!("first request must own preparation");
-        };
-        workset.complete_preparation(&preparation).unwrap();
-        workset
-    }
-
     #[test]
-    fn append_materializes_every_repetition_before_execution() {
+    fn append_pre_materializes_every_task_row() {
         let directory = tempfile::tempdir().unwrap();
         let workset = workset(directory.path(), 3);
         let status = workset.status().unwrap();
-
-        assert_eq!(status.preparation.pending, 1);
-        assert_eq!(status.coordinates.pending, 3);
+        assert_eq!(status.tasks.unclaimed, 3);
+        assert_eq!(status.tasks.total(), 3);
         assert_eq!(status.families[0].desired, 3);
     }
 
     #[test]
-    fn named_workset_can_be_reopened_and_extended_without_a_manifest() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("state.sqlite3");
-        let workset = Workset::create(&path, "release").unwrap();
-        let (tasks, families) = definition(directory.path(), 2);
-        workset.append(&tasks, &families).unwrap();
-        let reopened = Workset::open(&path, "release").unwrap();
-        let retained = reopened.definition().unwrap();
-
-        assert_eq!(retained.name, "release");
-        assert_eq!(retained.generation, workset.generation);
-        assert_eq!(retained.tasks.len(), 1);
-        assert_eq!(retained.families[0].trials, 2);
-
-        let (tasks, families) = definition(directory.path(), 5);
-        reopened.append(&tasks, &families).unwrap();
-        assert_eq!(reopened.status().unwrap().coordinates.pending, 5);
-        assert_eq!(reopened.definition().unwrap().families[0].trials, 5);
-    }
-
-    #[test]
-    fn new_generation_does_not_mutate_the_previous_board() {
+    fn append_only_materializes_missing_rows_and_new_generation_is_independent() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("state.sqlite3");
         let first = Workset::create(&path, "release").unwrap();
-        let (tasks, families) = definition(directory.path(), 1);
-        first.append(&tasks, &families).unwrap();
+        let (tasks, one) = definition(directory.path(), 1);
+        first.append(&tasks, &one).unwrap();
+        let (_, three) = definition(directory.path(), 3);
+        first.append(&tasks, &three).unwrap();
+        assert_eq!(first.status().unwrap().tasks.unclaimed, 3);
+
         let second = Workset::create(&path, "release").unwrap();
-
-        assert_ne!(first.generation, second.generation);
+        let (_, two) = definition(directory.path(), 2);
+        second.append(&tasks, &two).unwrap();
+        assert_ne!(first.generation(), second.generation());
         assert_eq!(
-            Workset::open(&path, "release").unwrap().generation,
-            second.generation
+            Workset::open(&path, "release")
+                .unwrap()
+                .status()
+                .unwrap()
+                .tasks
+                .total(),
+            2
         );
-        assert!(second.definition().unwrap().tasks.is_empty());
-        assert_eq!(first.definition().unwrap().tasks.len(), 1);
+        assert_eq!(first.status().unwrap().tasks.total(), 3);
     }
 
     #[test]
-    fn concurrent_callers_allocate_distinct_internal_repetitions() {
+    fn concurrent_claimers_never_receive_the_same_row() {
         let directory = tempfile::tempdir().unwrap();
-        let workset = prepared_workset(directory.path(), 2);
-        let BeginCoordinate::Execute(first) = workset
-            .begin("terminal/fix-git|harness|high", Duration::from_secs(30))
-            .unwrap()
-        else {
-            panic!("first coordinate should execute");
-        };
-        let BeginCoordinate::Execute(second) = workset
-            .begin("terminal/fix-git|harness|high", Duration::from_secs(30))
-            .unwrap()
-        else {
-            panic!("second coordinate should execute");
-        };
+        const WORKERS: usize = 64;
+        const TASKS: usize = 1_024;
+        let workset = Arc::new(workset(directory.path(), u16::try_from(TASKS).unwrap()));
+        let mut threads = Vec::new();
+        for worker in 0..WORKERS {
+            let workset = workset.clone();
+            threads.push(thread::spawn(move || {
+                let mut repetitions = Vec::new();
+                while let BeginTask::Run(claim) = workset
+                    .begin_next_for_worker(&format!("worker-{worker}"))
+                    .unwrap()
+                {
+                    repetitions.push(claim.repetition);
+                    workset.succeed(&claim, Path::new("evidence")).unwrap();
+                }
+                repetitions
+            }));
+        }
+        let mut repetitions = threads
+            .into_iter()
+            .flat_map(|thread| thread.join().unwrap())
+            .collect::<Vec<_>>();
+        repetitions.sort_unstable();
+        repetitions.dedup();
+        assert_eq!(repetitions.len(), TASKS);
+        let status = workset.status().unwrap();
+        assert_eq!(status.tasks.success, i64::try_from(TASKS).unwrap());
+        assert_eq!(status.tasks.running, 0);
+    }
 
-        assert_ne!(first.repetition, second.repetition);
+    #[test]
+    fn dropping_owner_lock_makes_running_row_reclaimable() {
+        let directory = tempfile::tempdir().unwrap();
+        let workset = workset(directory.path(), 1);
+        let BeginTask::Run(claim) = workset
+            .begin_for_worker("terminal/fix-git|harness|high", "worker")
+            .unwrap()
+        else {
+            panic!("row should be claimable");
+        };
+        drop(claim);
+        let status = workset.status().unwrap();
+        assert_eq!(status.tasks.running, 0);
+        assert_eq!(status.tasks.failed, 0);
+        assert_eq!(status.tasks.unclaimed, 1);
         assert!(matches!(
             workset
-                .begin("terminal/fix-git|harness|high", Duration::from_secs(30))
+                .begin_for_worker("terminal/fix-git|harness|high", "replacement")
                 .unwrap(),
-            BeginCoordinate::Busy(WorksetBusy {
-                reason: "coordinates_running",
-                ..
-            })
+            BeginTask::Run(_)
         ));
     }
 
     #[test]
-    fn one_host_owns_task_preparation_and_every_coordinate() {
+    fn owner_process_death_releases_the_lock_and_reopens_the_row() {
+        const CHILD_STATE: &str = "NANOCODEX_WORKSET_CRASH_CHILD";
+        if let Some(directory) = std::env::var_os(CHILD_STATE) {
+            let directory = PathBuf::from(directory);
+            let workset = Workset::open(directory.join("state.sqlite3"), "release").unwrap();
+            let _claim = match workset.begin_next_for_worker("crash-child").unwrap() {
+                BeginTask::Run(claim) => claim,
+                other => panic!("child expected a running claim, got {other:?}"),
+            };
+            fs::write(directory.join("child-ready"), b"ready").unwrap();
+            thread::sleep(Duration::from_secs(60));
+            return;
+        }
+
         let directory = tempfile::tempdir().unwrap();
         let workset = workset(directory.path(), 1);
-        let BeginCoordinate::Prepare(preparation) = workset
-            .begin_for_host(
-                "terminal/fix-git|harness|high",
-                "100.64.0.1",
-                Duration::from_secs(30),
-            )
-            .unwrap()
-        else {
-            panic!("first host should own preparation");
-        };
+        let mut child = Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "workset::tests::owner_process_death_releases_the_lock_and_reopens_the_row",
+                "--nocapture",
+            ])
+            .env(CHILD_STATE, directory.path())
+            .spawn()
+            .unwrap();
+        let deadline = Instant::now() + Duration::from_secs(10);
+        while !directory.path().join("child-ready").is_file() {
+            assert!(
+                Instant::now() < deadline,
+                "crash child never acquired its row"
+            );
+            assert!(
+                child.try_wait().unwrap().is_none(),
+                "crash child exited early"
+            );
+            thread::sleep(Duration::from_millis(10));
+        }
+        assert_eq!(workset.status().unwrap().tasks.running, 1);
+        child.kill().unwrap();
+        child.wait().unwrap();
+        let status = workset.status().unwrap();
+        assert_eq!(status.tasks.running, 0);
+        assert_eq!(status.tasks.failed, 0);
+        assert_eq!(status.tasks.unclaimed, 1);
         assert!(matches!(
-            workset
-                .begin_for_host(
-                    "terminal/fix-git|harness|high",
-                    "100.64.0.2",
-                    Duration::from_secs(30),
-                )
-                .unwrap(),
-            BeginCoordinate::Busy(WorksetBusy {
-                reason: "task_assigned_elsewhere",
-                ..
-            })
+            workset.begin_next_for_worker("replacement").unwrap(),
+            BeginTask::Run(_)
         ));
-        workset.complete_preparation(&preparation).unwrap();
-        let BeginCoordinate::Execute(_) = workset
-            .begin_for_host(
-                "terminal/fix-git|harness|high",
-                "100.64.0.1",
-                Duration::from_secs(30),
-            )
+    }
+
+    #[test]
+    fn stale_claim_cannot_overwrite_a_terminal_row() {
+        let directory = tempfile::tempdir().unwrap();
+        let workset = workset(directory.path(), 1);
+        let BeginTask::Run(claim) = workset
+            .begin_for_worker("terminal/fix-git|harness|high", "worker")
             .unwrap()
         else {
-            panic!("assigned host should execute");
+            panic!("row should be claimable");
         };
-        assert_eq!(
-            workset.status().unwrap().families[0]
-                .assigned_host
-                .as_deref(),
-            Some("100.64.0.1")
+        workset.fail(&claim, None, "boom").unwrap();
+        assert!(matches!(
+            workset.succeed(&claim, Path::new("late")),
+            Err(WorksetError::StaleClaim)
+        ));
+    }
+
+    #[test]
+    fn observer_is_read_only_and_notices_owner_death_without_sqlite_commit() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.sqlite3");
+        let workset = Workset::create(&path, "release").unwrap();
+        let (tasks, families) = definition(directory.path(), 1);
+        workset.append(&tasks, &families).unwrap();
+        let BeginTask::Run(claim) = workset
+            .begin_for_worker("terminal/fix-git|harness|high", "worker")
+            .unwrap()
+        else {
+            panic!("row should be claimable");
+        };
+        let mut observer = WorksetObserver::open(&path, "release").unwrap();
+        assert_eq!(observer.snapshot().unwrap().tasks.running, 1);
+        drop(claim);
+        let refreshed = observer.refresh().unwrap().unwrap();
+        assert_eq!(refreshed.tasks.running, 0);
+        assert_eq!(refreshed.tasks.failed, 1);
+        assert!(
+            observer
+                .connection
+                .execute("DELETE FROM eval_tasks", [])
+                .is_err()
         );
     }
 
     #[test]
-    fn expired_preparation_is_reported_pending_and_fenced_on_reclamation() {
+    fn observer_does_not_create_a_missing_ledger() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.sqlite3");
+        assert!(WorksetObserver::open(&path, "release").is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn unknown_family_never_expands_the_closed_benchmark() {
         let directory = tempfile::tempdir().unwrap();
         let workset = workset(directory.path(), 1);
-        let BeginCoordinate::Prepare(stale) = workset
-            .begin("terminal/fix-git|harness|high", Duration::ZERO)
-            .unwrap()
-        else {
-            panic!("first request should prepare");
-        };
-        let status = workset.status().unwrap();
-        assert_eq!(status.preparation.pending, 1);
-        assert_eq!(status.preparation.running, 0);
-
-        let BeginCoordinate::Prepare(replacement) = workset
-            .begin("terminal/fix-git|harness|high", Duration::from_secs(30))
-            .unwrap()
-        else {
-            panic!("expired preparation should be reclaimed");
-        };
         assert!(matches!(
-            workset.complete_preparation(&stale),
-            Err(WorksetError::StaleLease {
-                kind: "preparation"
-            })
+            workset.begin_for_worker("missing", "worker"),
+            Err(WorksetError::UnknownFamily(family)) if family == "missing"
         ));
-        workset.complete_preparation(&replacement).unwrap();
-    }
-
-    #[test]
-    fn expired_worker_is_fenced_after_reclamation() {
-        let directory = tempfile::tempdir().unwrap();
-        let workset = prepared_workset(directory.path(), 1);
-        let BeginCoordinate::Execute(stale) = workset
-            .begin("terminal/fix-git|harness|high", Duration::ZERO)
-            .unwrap()
-        else {
-            panic!("coordinate should execute");
-        };
-        let status = workset.status().unwrap();
-        assert_eq!(status.coordinates.pending, 1);
-        assert_eq!(status.coordinates.running, 0);
-        let BeginCoordinate::Execute(replacement) = workset
-            .begin("terminal/fix-git|harness|high", Duration::from_secs(30))
-            .unwrap()
-        else {
-            panic!("expired coordinate should be reclaimed");
-        };
-        let connection = open_connection(workset.path()).unwrap();
-        let expired: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM executions WHERE state = 'expired'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(expired, 1);
-
-        assert!(matches!(
-            workset.complete_coordinate(&stale, Path::new("stale")),
-            Err(WorksetError::StaleLease { kind: "coordinate" })
-        ));
-        workset
-            .complete_coordinate(&replacement, Path::new("accepted"))
-            .unwrap();
-        assert_eq!(workset.status().unwrap().coordinates.terminal, 1);
-    }
-
-    #[test]
-    fn retry_reuses_the_same_profile_trial() {
-        let directory = tempfile::tempdir().unwrap();
-        let workset = prepared_workset(directory.path(), 1);
-        let BeginCoordinate::Execute(first) = workset
-            .begin("terminal/fix-git|harness|high", Duration::from_secs(30))
-            .unwrap()
-        else {
-            panic!("coordinate should execute");
-        };
-        workset.retry_coordinate(&first, "host rebooted").unwrap();
-        let BeginCoordinate::Execute(second) = workset
-            .begin("terminal/fix-git|harness|high", Duration::from_secs(30))
-            .unwrap()
-        else {
-            panic!("retry should execute");
-        };
-
-        assert_eq!(first.repetition, second.repetition);
-        assert!(second.generation > first.generation);
-    }
-
-    #[test]
-    fn unknown_family_never_expands_the_closed_profile() {
-        let directory = tempfile::tempdir().unwrap();
-        let workset = workset(directory.path(), 1);
-
-        assert!(matches!(
-            workset.begin("not-in-profile", Duration::from_secs(30)),
-            Err(WorksetError::UnknownFamily(family)) if family == "not-in-profile"
-        ));
-        assert_eq!(workset.status().unwrap().coordinates.pending, 1);
+        assert_eq!(workset.status().unwrap().tasks.unclaimed, 1);
     }
 
     #[test]
@@ -1207,96 +1292,101 @@ mod tests {
         let connection = Connection::open(&path).unwrap();
         connection.pragma_update(None, "user_version", 99).unwrap();
         drop(connection);
-
         assert!(matches!(
             Workset::open(&path, "release"),
             Err(WorksetError::DefinitionConflict(message)) if message.contains("schema 99")
         ));
-        let connection = Connection::open(path).unwrap();
-        let version: u32 = connection
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .unwrap();
-        assert_eq!(version, 99);
     }
 
     #[test]
-    fn legacy_ledgers_migrate_without_retaining_profile_columns_or_seed_tables() {
+    fn version_two_rows_migrate_without_retry_or_stale_states() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("state.sqlite3");
-        let connection = Connection::open(&path).unwrap();
+        let mut connection = Connection::open(&path).unwrap();
+        connection.execute_batch(
+            "CREATE TABLE worksets(id INTEGER PRIMARY KEY, profile TEXT NOT NULL, digest TEXT NOT NULL, config_path TEXT NOT NULL, created_at_ms INTEGER NOT NULL, UNIQUE(profile,digest));
+             CREATE TABLE tasks(id INTEGER PRIMARY KEY, workset_id INTEGER NOT NULL, selector TEXT NOT NULL, name TEXT NOT NULL, root TEXT NOT NULL, digest TEXT NOT NULL, preparation_state TEXT NOT NULL, preparation_generation INTEGER NOT NULL, preparation_owner TEXT, preparation_expires_at_ms INTEGER, preparation_error TEXT, assigned_host TEXT, UNIQUE(workset_id,selector));
+             CREATE TABLE coordinates(id INTEGER PRIMARY KEY, workset_id INTEGER NOT NULL, task_id INTEGER NOT NULL, family_key TEXT NOT NULL, treatment TEXT NOT NULL, repetition INTEGER NOT NULL, state TEXT NOT NULL, generation INTEGER NOT NULL, lease_owner TEXT, lease_expires_at_ms INTEGER, result_path TEXT, last_error TEXT, UNIQUE(workset_id,family_key,repetition));
+             CREATE TABLE executions(id INTEGER PRIMARY KEY, coordinate_id INTEGER NOT NULL, generation INTEGER NOT NULL, owner TEXT NOT NULL, started_at_ms INTEGER NOT NULL, finished_at_ms INTEGER, state TEXT NOT NULL, result_path TEXT, error TEXT, UNIQUE(coordinate_id,generation));
+             INSERT INTO worksets VALUES(1,'release','profile-digest','nanocodex.toml',1);
+             INSERT INTO tasks VALUES(1,1,'terminal/fix-git','fix-git','/tmp/fix-git','task-digest','ready',1,NULL,NULL,NULL,'worker');
+             INSERT INTO coordinates VALUES(1,1,1,'terminal/fix-git|harness|high','{}',1,'terminal',1,NULL,NULL,'evidence',NULL);
+             INSERT INTO executions VALUES(1,1,1,'worker',1,2,'terminal','evidence',NULL);
+             PRAGMA user_version = 2;",
+        ).unwrap();
+        let (tasks, families) = definition(directory.path(), 1);
         connection
-            .execute_batch(
-                "CREATE TABLE worksets(
-                    id INTEGER PRIMARY KEY,
-                    profile TEXT NOT NULL,
-                    digest TEXT NOT NULL,
-                    config_path TEXT NOT NULL,
-                    created_at_ms INTEGER NOT NULL,
-                    UNIQUE(profile, digest)
-                 );
-                 CREATE TABLE tasks(
-                    id INTEGER PRIMARY KEY,
-                    workset_id INTEGER NOT NULL REFERENCES worksets(id),
-                    selector TEXT NOT NULL,
-                    name TEXT NOT NULL,
-                    root TEXT NOT NULL,
-                    digest TEXT NOT NULL,
-                    preparation_state TEXT NOT NULL,
-                    preparation_generation INTEGER NOT NULL,
-                    preparation_owner TEXT,
-                    preparation_expires_at_ms INTEGER,
-                    preparation_error TEXT,
-                    UNIQUE(workset_id, selector)
-                 );
-                 CREATE TABLE workset_seeds(
-                    workset_id INTEGER NOT NULL,
-                    config_path TEXT NOT NULL
-                 );
-                 PRAGMA user_version = 1;",
+            .execute(
+                "UPDATE tasks SET root = ?1 WHERE id = 1",
+                [tasks[0].root.to_string_lossy().as_ref()],
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE coordinates SET treatment = ?1 WHERE id = 1",
+                [&families[0].treatment],
             )
             .unwrap();
         drop(connection);
-
-        let workset = Workset::create(&path, "release").unwrap();
-        let (tasks, families) = definition(directory.path(), 1);
-        workset.append(&tasks, &families).unwrap();
-        let BeginCoordinate::Prepare(preparation) = workset
-            .begin_for_host(
-                "terminal/fix-git|harness|high",
-                "127.0.0.1",
-                Duration::from_secs(30),
-            )
-            .unwrap()
-        else {
-            panic!("migrated task should remain claimable");
-        };
-        workset.complete_preparation(&preparation).unwrap();
-        assert_eq!(
-            workset.status().unwrap().families[0]
-                .assigned_host
-                .as_deref(),
-            Some("127.0.0.1")
-        );
-        let connection = Connection::open(path).unwrap();
-        let version: u32 = connection
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .unwrap();
-        assert_eq!(version, SCHEMA_VERSION);
-        let columns = connection
-            .prepare("PRAGMA table_info(worksets)")
-            .unwrap()
-            .query_map([], |row| row.get::<_, String>(1))
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert_eq!(columns, ["id", "name", "generation", "created_at_ms"]);
-        let seeds: i64 = connection
+        let workset = Workset::open(&path, "release").unwrap();
+        assert_eq!(workset.status().unwrap().tasks.success, 1);
+        connection = Connection::open(path).unwrap();
+        let tables: i64 = connection
             .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'workset_seeds'",
+                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='executions'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(seeds, 0);
+        assert_eq!(tables, 0);
+    }
+
+    #[test]
+    fn version_four_named_generation_migrates_to_four_state_rows() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.sqlite3");
+        let (_, families) = definition(directory.path(), 1);
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch(
+                "CREATE TABLE worksets(id INTEGER PRIMARY KEY, name TEXT NOT NULL, generation TEXT NOT NULL, created_at_ms INTEGER NOT NULL, UNIQUE(name,generation));
+                 CREATE TABLE tasks(id INTEGER PRIMARY KEY, workset_id INTEGER NOT NULL, selector TEXT NOT NULL, name TEXT NOT NULL, root TEXT NOT NULL, digest TEXT NOT NULL, preparation_state TEXT NOT NULL, preparation_generation INTEGER NOT NULL, preparation_owner TEXT, preparation_expires_at_ms INTEGER, preparation_error TEXT, assigned_host TEXT, UNIQUE(workset_id,selector));
+                 CREATE TABLE coordinates(id INTEGER PRIMARY KEY, workset_id INTEGER NOT NULL, task_id INTEGER NOT NULL, family_key TEXT NOT NULL, treatment TEXT NOT NULL, repetition INTEGER NOT NULL, state TEXT NOT NULL, generation INTEGER NOT NULL, lease_owner TEXT, lease_expires_at_ms INTEGER, result_path TEXT, last_error TEXT, UNIQUE(workset_id,family_key,repetition));
+                 CREATE TABLE executions(id INTEGER PRIMARY KEY, coordinate_id INTEGER NOT NULL, generation INTEGER NOT NULL, owner TEXT NOT NULL, started_at_ms INTEGER NOT NULL, finished_at_ms INTEGER, state TEXT NOT NULL, result_path TEXT, error TEXT, UNIQUE(coordinate_id,generation));
+                 CREATE TABLE coordinate_results(coordinate_id INTEGER PRIMARY KEY, result_path TEXT NOT NULL);
+                 INSERT INTO worksets VALUES(1,'release','generation-one',1);
+                 INSERT INTO tasks VALUES(1,1,'terminal/fix-git','fix-git','/tmp/fix-git','task-digest','ready',1,NULL,NULL,NULL,'worker');
+                 INSERT INTO coordinates VALUES(1,1,1,'terminal/fix-git|harness|high','placeholder',1,'running',1,'worker',999,NULL,NULL);
+                 INSERT INTO executions VALUES(1,1,1,'worker',1,NULL,'running',NULL,NULL);
+                 PRAGMA user_version = 4;",
+            )
+            .unwrap();
+        connection
+            .execute(
+                "UPDATE coordinates SET treatment = ?1 WHERE id = 1",
+                [&families[0].treatment],
+            )
+            .unwrap();
+        drop(connection);
+
+        let workset = Workset::open(&path, "release").unwrap();
+        let status = workset.status().unwrap();
+        assert_eq!(status.digest, "generation-one");
+        assert_eq!(status.tasks.failed, 1);
+        assert_eq!(status.tasks.running, 0);
+        assert_eq!(
+            Connection::open(path)
+                .unwrap()
+                .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
+                .unwrap(),
+            SCHEMA_VERSION
+        );
+    }
+
+    #[test]
+    fn path_is_the_sqlite_ledger() {
+        let directory = tempfile::tempdir().unwrap();
+        let workset = workset(directory.path(), 1);
+        assert_eq!(workset.path(), directory.path().join("state.sqlite3"));
     }
 }

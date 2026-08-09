@@ -90,7 +90,9 @@ where
         &mut self,
         factory: &ResponsesAttemptFactory,
     ) -> Result<WarmupOutcome> {
-        if matches!(self.config.responses_transport, ResponsesTransport::Https) {
+        if matches!(self.config.responses_transport, ResponsesTransport::Https)
+            || !self.config.websocket_warmup
+        {
             return Ok(WarmupOutcome {
                 response_id: None,
                 server_reasoning_included: false,

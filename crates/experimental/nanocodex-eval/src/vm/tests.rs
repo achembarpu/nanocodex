@@ -164,18 +164,15 @@ fn backend_configuration_is_single_assignment() {
 }
 
 #[tokio::test]
-async fn attempt_vmm_isolated_while_preparation_vmm_inherits_terminal_group() {
-    let inherited = recorded_vm_process_group(VmProcessGroup::Inherited).await;
-    let isolated = recorded_vm_process_group(VmProcessGroup::Isolated).await;
+async fn evaluator_vmm_inherits_the_worker_process_group() {
+    let inherited = recorded_vm_process_group().await;
     let parent_group = getpgrp().as_raw();
 
     assert_eq!(inherited.1, parent_group);
     assert_ne!(inherited.0, inherited.1);
-    assert_eq!(isolated.0, isolated.1);
-    assert_ne!(isolated.1, parent_group);
 }
 
-async fn recorded_vm_process_group(process_group: VmProcessGroup) -> (i32, i32) {
+async fn recorded_vm_process_group() -> (i32, i32) {
     let directory = tempfile::tempdir().unwrap();
     let vmm = directory.path().join("fake-vmm");
     let record = directory.path().join("process-group");
@@ -204,7 +201,7 @@ async fn recorded_vm_process_group(process_group: VmProcessGroup) -> (i32, i32) 
         shared_directories: Vec::new(),
     };
 
-    let session = launch.spawn(None, process_group).unwrap();
+    let session = launch.spawn(None).unwrap();
     let deadline = Instant::now() + Duration::from_secs(5);
     let values = loop {
         if let Ok(contents) = fs::read_to_string(&record)

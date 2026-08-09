@@ -24,6 +24,7 @@ host = [
     "dep:hex",
     "dep:ignore",
     "dep:krun",
+    "dep:nix",
     "dep:oci-client",
     "dep:reflink-copy",
     "dep:sha2",
