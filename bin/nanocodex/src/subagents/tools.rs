@@ -382,7 +382,7 @@ impl Tool for WaitAgent {
     fn definition(&self) -> ToolDefinition {
         ToolDefinition::function(
             WAIT_AGENT_TOOL,
-            "Waits until any requested subagent reaches a terminal status and returns current statuses and reports. Use one call with multiple IDs instead of polling the workspace.",
+            "Waits until any requested subagent reaches a terminal status and returns a snapshot of every requested agent. The result includes pending, running, and closing agents; consumers must preserve those nonterminal agents and act only on completed, failed, interrupted, or closed entries. Use one call with multiple IDs instead of polling the workspace.",
             json!({
                 "type": "object",
                 "properties": {
@@ -647,5 +647,17 @@ mod tests {
 
         assert!(description.as_str().unwrap().contains("spawn_agent"));
         assert!(!description.as_str().unwrap().contains("fork_agent"));
+    }
+
+    #[test]
+    fn wait_agent_definition_requires_callers_to_preserve_nonterminal_agents() {
+        let definition = WaitAgent {
+            registry: Weak::<Registry>::new(),
+        }
+        .definition();
+
+        assert!(definition.description().contains("every requested agent"));
+        assert!(definition.description().contains("preserve"));
+        assert!(definition.description().contains("nonterminal"));
     }
 }

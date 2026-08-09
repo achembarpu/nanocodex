@@ -44,7 +44,7 @@ pub(crate) fn prompt(
 
 - Read counts only with `{status_command}`. Its JSON is the count object itself: use `counts.unclaimed` and `counts.running` directly; it is not a task-row array. Use exactly `while (active.size < min({max_subagents}, counts.unclaimed))` to sequentially `spawn_agent` once per free slot. Give each child a unique string worker ID and exactly one foreground `nanocodex eval run{profile_argument} --config {config_argument}{state_argument}{coordinator_argument} --worker <worker-id>`. The child keeps `exec_command` plus all `write_stdin` waits inside one Code Mode cell beginning `// @exec: {{\"yield_time_ms\": 300000}}`. While the command has a `session_id`, it must keep calling `write_stdin` in that cell; only a numeric `exit_code` permits submitting `{{ worker, exit_code }}`.
 
-- Keep only `agent_id -> worker`. `wait_agent` on all active IDs; for every terminal result, `close_agent` first, then {exit_report}. Remove it and refill every free slot immediately. The report is idempotent and only changes a still-running row.
+- Keep only `agent_id -> worker`. `wait_agent` on all active IDs. Its `agents` array is a snapshot of every requested ID when any one finishes, so it also contains `pending`, `running`, or `closing` entries. Define `terminalStates = new Set(["completed", "failed", "interrupted", "closed"])` and begin the result loop with exactly `if (!terminalStates.has(item.status.state)) continue;`. Never close, report, or remove a nonterminal entry. For each terminal entry only, read a successful worker exit from `item.status.output.exit_code`, `close_agent` first, then {exit_report}. Remove it and refill every free slot immediately. The report is idempotent and only changes a still-running row.
 
 - Stop only when compact status has no unclaimed or running row; close all children and verify no eval worker, VMM, or proxy remains. Never use `Promise.all`, Bash, `&`, PID files, queues, heartbeats, waves, detached processes, or per-child waits. SQLite alone owns `unclaimed -> running -> success|failed`, and an interrupted owner releases `running -> unclaimed`."#,
         exit_report = exit_report,
@@ -53,4 +53,26 @@ pub(crate) fn prompt(
 
 fn shell_quote(value: &str) -> String {
     format!("'{}'", value.replace('\'', "'\\''"))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::prompt;
+
+    #[test]
+    fn benchmark_prompt_never_closes_running_wait_snapshots() {
+        let prompt = prompt(
+            Some("release"),
+            Path::new("nanocodex.toml"),
+            None,
+            Some("http://127.0.0.1:8788"),
+            30,
+        );
+
+        assert!(prompt.contains("if (!terminalStates.has(item.status.state)) continue;"));
+        assert!(prompt.contains("Never close, report, or remove a nonterminal entry"));
+        assert!(prompt.contains("item.status.output.exit_code"));
+    }
 }
