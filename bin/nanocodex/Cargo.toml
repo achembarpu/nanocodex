@@ -40,6 +40,7 @@ fs2.workspace = true
 futures-util.workspace = true
 hex.workspace = true
 image.workspace = true
+jsonschema.workspace = true
 nanocodex.workspace = true
 nanocodex-browser.workspace = true
 nanocodex-observability.workspace = true
@@ -91,6 +92,7 @@ criterion.workspace = true
 nanocodex-tools.workspace = true
 reqwest = { workspace = true, features = ["query"] }
 tokio-tungstenite.workspace = true
+tower.workspace = true
 tracing-subscriber.workspace = true
 
 [[bench]]

@@ -273,6 +273,9 @@ The CLI/TUI, Python package, Node/browser package, React bindings, and examples
 are thin consumers of the same owned session API. They do not define a second
 agent protocol.
 
+The native CLI can opt into Tact-compatible clean-room subagents with
+`--subagents true`; see the [subagent runtime contract](docs/SUBAGENTS.md).
+
 [Examples](examples/README.md) · [JavaScript](js/README.md) ·
 [Python](py/README.md) · [Web](web/README.md)
 

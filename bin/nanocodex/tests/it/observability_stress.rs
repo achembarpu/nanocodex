@@ -218,8 +218,26 @@ async fn serve_subagent_responses(listener: TcpListener) -> Result<()> {
             "name": "exec",
             "input": r#"
 const reports = await Promise.all([
-  tools.spawn_agent({ role: "researcher", task: "inspect alpha" }),
-  tools.spawn_agent({ role: "reviewer", task: "inspect beta" })
+  tools.spawn_agent({
+    role: "researcher",
+    task: "inspect alpha",
+    output_schema: {
+      type: "object",
+      properties: { report: { type: "string" } },
+      required: ["report"],
+      additionalProperties: false
+    }
+  }),
+  tools.spawn_agent({
+    role: "reviewer",
+    task: "inspect beta",
+    output_schema: {
+      type: "object",
+      properties: { report: { type: "string" } },
+      required: ["report"],
+      additionalProperties: false
+    }
+  })
 ]);
 text(JSON.stringify(reports));
 "#
@@ -263,14 +281,37 @@ async fn serve_subagent_child(
     send_completed(&mut child, &format!("subagent-{label}-warmup"), &[]).await?;
     let generation = next_json(&mut child).await?;
     assert!(generation.to_string().contains("inspect"));
+    assert!(generation.to_string().contains("turn_token: 1"));
     tokio::time::sleep(Duration::from_millis(75)).await;
+    send_completed(
+        &mut child,
+        &format!("subagent-{label}-submit"),
+        &[json!({
+            "type": "custom_tool_call",
+            "call_id": format!("subagent-{label}-submit-call"),
+            "name": "exec",
+            "input": format!(r#"
+const result = await tools.submit_result({{
+  turn_token: 1,
+  output: {{ report: "child {label} report" }}
+}});
+text(JSON.stringify(result));
+"#)
+        })],
+    )
+    .await?;
+    let continuation = next_json(&mut child).await?;
+    assert_eq!(
+        continuation["previous_response_id"],
+        format!("subagent-{label}-submit")
+    );
     send_completed(
         &mut child,
         &format!("subagent-{label}-final"),
         &[json!({
             "type": "message",
             "role": "assistant",
-            "content": [{ "type": "output_text", "text": format!("child {label} report") }]
+            "content": [{ "type": "output_text", "text": "submitted" }]
         })],
     )
     .await
