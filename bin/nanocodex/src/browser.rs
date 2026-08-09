@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use clap::{Args, ValueEnum};
 use eyre::{Result, WrapErr, eyre};
 use nanocodex_browser::{
-    BraveSession, Browser, BrowserProfileKind, BrowserStorageState, BrowserTool,
+    BraveSession, BraveSessionError, Browser, BrowserProfileKind, BrowserStorageState, BrowserTool,
     FirefoxCookieSource, SafariCookieSource,
 };
 
@@ -40,14 +40,15 @@ enum CookieSource {
 pub(crate) struct BrowserArgs {
     /// Select the private browser exposed to Code Mode as `tools.browser`.
     ///
-    /// Brave is the default. Pass `chromium` to use private Chromium or `none`
-    /// to disable browser tools.
+    /// By default, Nanocodex prefers Brave, falls back to another installed
+    /// Chromium-family browser, and disables browser tools when none is
+    /// available. Pass `brave` to require the standard Brave installation,
+    /// `chromium` to skip Brave, or `none` to disable browser tools.
     #[arg(
         long,
         env = "NANOCODEX_BROWSER",
         value_enum,
         num_args = 0..=1,
-        default_value = "brave",
         default_missing_value = "brave",
         require_equals = true
     )]
@@ -77,7 +78,7 @@ pub(crate) struct BrowserArgs {
 impl Default for BrowserArgs {
     fn default() -> Self {
         Self {
-            browser: Some(BrowserKind::Brave),
+            browser: None,
             cookies: Some(CookieSourceKind::All),
             browser_executable: None,
         }
@@ -97,7 +98,7 @@ impl BrowserArgs {
 
     #[cfg(test)]
     pub(crate) const fn is_enabled(&self) -> bool {
-        !matches!(self.browser, None | Some(BrowserKind::None))
+        !matches!(self.browser, Some(BrowserKind::None))
     }
 
     #[cfg(test)]
@@ -111,10 +112,7 @@ impl BrowserArgs {
     }
 
     pub(crate) fn configure(&self, workspace: &Path) -> Result<Option<ConfiguredBrowser>> {
-        let Some(kind) = self.browser else {
-            return Ok(None);
-        };
-        if kind == BrowserKind::None {
+        if self.browser == Some(BrowserKind::None) {
             if self.cookies.is_some_and(|source| {
                 !matches!(source, CookieSourceKind::All | CookieSourceKind::None)
             }) {
@@ -125,30 +123,23 @@ impl BrowserArgs {
             }
             return Ok(None);
         }
+        let Some(launch) = resolve_browser_launch(
+            self.browser,
+            self.browser_executable.as_deref(),
+            BraveSession::standard_for,
+        )?
+        else {
+            return Ok(None);
+        };
         let mut builder = Browser::builder().file_root(workspace);
-        match kind {
-            BrowserKind::Chromium => {
-                if let Some(executable) = &self.browser_executable {
-                    builder = builder.executable(executable);
-                }
-            }
-            BrowserKind::Brave => {
-                if self.browser_executable.is_some() {
-                    return Err(eyre!(
-                        "--browser-executable cannot be combined with --browser=brave"
-                    ));
-                }
-                let brave = BraveSession::standard()
-                    .wrap_err("failed to locate the standard Brave profile")?;
-                builder = builder.executable(brave.executable().to_path_buf());
-            }
-            BrowserKind::None => unreachable!("disabled browsers return before configuration"),
+        if let Some(executable) = launch.executable {
+            builder = builder.executable(executable);
         }
         if let Some(source) = self
             .cookies
             .filter(|source| *source != CookieSourceKind::None)
         {
-            builder = match cookie_source(source, kind)? {
+            builder = match cookie_source(source, launch.kind)? {
                 CookieSource::Chromium(source) => builder.cookie_source(source.copy_all_cookies()),
                 CookieSource::State(state) => builder.storage_state(state),
             };
@@ -157,6 +148,66 @@ impl BrowserArgs {
             .build()
             .wrap_err("failed to configure the browser tool")?;
         Ok(Some(ConfiguredBrowser { browser }))
+    }
+}
+
+struct BrowserLaunch {
+    kind: BrowserKind,
+    executable: Option<PathBuf>,
+}
+
+fn resolve_browser_launch(
+    requested: Option<BrowserKind>,
+    explicit_executable: Option<&Path>,
+    mut standard_profile: impl FnMut(BrowserProfileKind) -> Result<BraveSession, BraveSessionError>,
+) -> Result<Option<BrowserLaunch>> {
+    if requested == Some(BrowserKind::None) {
+        unreachable!("disabled browsers return before launch resolution");
+    }
+    if requested == Some(BrowserKind::Brave) && explicit_executable.is_some() {
+        return Err(eyre!(
+            "--browser-executable cannot be combined with --browser=brave"
+        ));
+    }
+    if let Some(executable) = explicit_executable {
+        return Ok(Some(BrowserLaunch {
+            kind: BrowserKind::Chromium,
+            executable: Some(executable.to_path_buf()),
+        }));
+    }
+    match requested {
+        None => Ok([
+            BrowserProfileKind::Brave,
+            BrowserProfileKind::Chrome,
+            BrowserProfileKind::Chromium,
+            BrowserProfileKind::Edge,
+        ]
+        .into_iter()
+        .find_map(|profile| {
+            standard_profile(profile).ok().map(|session| BrowserLaunch {
+                kind: if profile == BrowserProfileKind::Brave {
+                    BrowserKind::Brave
+                } else {
+                    BrowserKind::Chromium
+                },
+                executable: Some(session.executable().to_path_buf()),
+            })
+        })),
+        Some(BrowserKind::Chromium) => Ok(Some(BrowserLaunch {
+            kind: BrowserKind::Chromium,
+            executable: None,
+        })),
+        Some(BrowserKind::Brave) => {
+            let brave = standard_profile(BrowserProfileKind::Brave)
+                .wrap_err("failed to locate the standard Brave profile")?;
+            Ok(Some(BrowserLaunch {
+                kind: BrowserKind::Brave,
+                executable: Some(brave.executable().to_path_buf()),
+            }))
+        }
+        Some(BrowserKind::None) => {
+            unreachable!("disabled browsers return before launch resolution")
+        }
     }
 }
 
@@ -239,10 +290,76 @@ impl ConfiguredBrowser {
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use nanocodex::Tools;
+    use nanocodex_browser::{BraveSession, BraveSessionError, BrowserProfileKind};
     use nanocodex_tools::runtime::ToolRuntime;
 
-    use super::BrowserArgs;
+    use super::{BrowserArgs, BrowserKind, resolve_browser_launch};
+
+    #[test]
+    fn automatic_browser_falls_back_when_brave_is_not_installed() {
+        let launch = resolve_browser_launch(None, None, |profile| {
+            if profile == BrowserProfileKind::Chrome {
+                return Ok(BraveSession::new("/installed/chrome", "/chrome/profile"));
+            }
+            Err(BraveSessionError::StandardInstallationUnavailable {
+                browser: profile.name(),
+            })
+        })
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(launch.kind, BrowserKind::Chromium);
+        assert_eq!(
+            launch.executable.as_deref(),
+            Some(Path::new("/installed/chrome"))
+        );
+    }
+
+    #[test]
+    fn automatic_browser_is_disabled_when_none_is_installed() {
+        let launch = resolve_browser_launch(None, None, |profile| {
+            Err(BraveSessionError::StandardInstallationUnavailable {
+                browser: profile.name(),
+            })
+        })
+        .unwrap();
+
+        assert!(launch.is_none());
+    }
+
+    #[test]
+    fn automatic_browser_prefers_an_installed_brave() {
+        let launch = resolve_browser_launch(None, None, |_| {
+            Ok(BraveSession::new("/installed/brave", "/brave/profile"))
+        })
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(launch.kind, BrowserKind::Brave);
+        assert_eq!(
+            launch.executable.as_deref(),
+            Some(Path::new("/installed/brave"))
+        );
+    }
+
+    #[test]
+    fn explicit_brave_still_requires_the_standard_installation() {
+        let error = resolve_browser_launch(Some(BrowserKind::Brave), None, |_| {
+            Err(BraveSessionError::ExecutableUnavailable {
+                path: "/missing/brave".into(),
+            })
+        })
+        .err()
+        .unwrap();
+
+        assert_eq!(
+            error.to_string(),
+            "failed to locate the standard Brave profile"
+        );
+    }
 
     #[tokio::test]
     async fn configured_browser_adds_no_model_facing_schema() {

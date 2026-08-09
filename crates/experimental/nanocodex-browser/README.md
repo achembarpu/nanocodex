@@ -142,8 +142,10 @@ browser.close().await?;
 - Harness-owned cookies/storage, virtual passkeys, allowlisted source-browser handoff,
   upload roots, browser egress policy, remote CDP, and libkrun VM composition.
 
-The Nanocodex CLI exposes a private Brave session and copies a standard desktop
-browser profile's complete cookie database into it by default. `all`
+The Nanocodex CLI prefers a private Brave session and falls back to an
+installed Chrome, Chromium, or Edge when Brave is not installed. If none is
+available, the CLI starts without browser tools. It copies a standard desktop
+browser profile's complete cookie database by default. `all`
 auto-detects the source; `brave`, `chrome`, `chromium`, `edge`, `firefox`, and
 `safari` select it explicitly. Pass `none` to either option to disable that
 default:
