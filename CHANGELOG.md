@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## Unreleased
 
+### Bug Fixes
+
+- [oai] Retry transient HTTP 403 WebSocket upgrades before falling back to
+  HTTPS, and retain gateway diagnostics when the rejection body is empty.
+
 ### Features
 
 - [cli] Enable private Brave and complete desktop-profile cookie import by

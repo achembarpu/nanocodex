@@ -347,14 +347,40 @@ fn map_handshake_error(error: WebSocketError) -> ResponsesError {
         .and_then(|value| value.to_str().ok())
         .and_then(|value| value.parse::<f64>().ok())
         .and_then(|seconds| Duration::try_from_secs_f64(seconds).ok());
-    let body = response.body().as_deref().map_or_else(
-        || "empty response body".to_owned(),
-        |body| String::from_utf8_lossy(body).into_owned(),
-    );
+    let body = handshake_rejection_detail(response.body().as_deref(), response.headers());
     ResponsesError::HandshakeRejected {
         status,
         body,
         retry_after,
+    }
+}
+
+fn handshake_rejection_detail(
+    body: Option<&[u8]>,
+    headers: &tokio_tungstenite::tungstenite::http::HeaderMap,
+) -> String {
+    let body = body.map_or_else(String::new, |body| {
+        String::from_utf8_lossy(body).into_owned()
+    });
+    if !body.trim().is_empty() {
+        return body;
+    }
+
+    let request_id = header_string(headers, "x-request-id")
+        .or_else(|| header_string(headers, "x-oai-request-id"));
+    let diagnostics = [
+        header_string(headers, "cf-ray").map(|value| format!("cf-ray={value}")),
+        request_id.map(|value| format!("request-id={value}")),
+        header_string(headers, "x-openai-authorization-error")
+            .map(|value| format!("authorization-error={value}")),
+    ]
+    .into_iter()
+    .flatten()
+    .collect::<Vec<_>>();
+    if diagnostics.is_empty() {
+        "empty response body".to_owned()
+    } else {
+        format!("empty response body ({})", diagnostics.join(", "))
     }
 }
 
@@ -412,7 +438,10 @@ mod tests {
         tungstenite::{Message, handshake::server::Request},
     };
 
-    use super::{ResponsesSocket, SOCKET_MESSAGE_CAPACITY, parse_raw_json, turn_state_from_event};
+    use super::{
+        ResponsesSocket, SOCKET_MESSAGE_CAPACITY, handshake_rejection_detail, parse_raw_json,
+        turn_state_from_event,
+    };
 
     #[test]
     fn only_decodes_turn_state_metadata_events() {
@@ -429,6 +458,20 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn empty_handshake_rejection_retains_gateway_diagnostics() -> Result<()> {
+        let mut headers = tokio_tungstenite::tungstenite::http::HeaderMap::new();
+        headers.insert("cf-ray", "ray-test".parse()?);
+        headers.insert("x-oai-request-id", "req-test".parse()?);
+        headers.insert("x-openai-authorization-error", "edge-policy".parse()?);
+
+        assert_eq!(
+            handshake_rejection_detail(Some(b""), &headers),
+            "empty response body (cf-ray=ray-test, request-id=req-test, authorization-error=edge-policy)"
+        );
+        Ok(())
     }
 
     #[tokio::test]
