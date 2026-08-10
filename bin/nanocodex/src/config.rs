@@ -205,15 +205,6 @@ pub(crate) struct AgentArgs {
 }
 
 impl AgentArgs {
-    pub(crate) const fn enable_subagents(mut self) -> Self {
-        self.subagents = true;
-        self
-    }
-
-    pub(crate) const fn max_subagents(&self) -> usize {
-        self.max_subagents
-    }
-
     pub(crate) fn cwd(&self) -> &Path {
         self.cwd.as_deref().unwrap_or_else(|| Path::new("."))
     }

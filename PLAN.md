@@ -67,13 +67,14 @@ ordered backlog, not concurrent work in progress.
 
 Outcome: drive a closed, pre-materialized benchmark continuously at the
 highest safe host occupancy while preserving a four-state SQLite ledger and
-exact process ownership. There is no queue, lease, heartbeat, stale-task
-reclamation, or detached worker substrate.
+exact process ownership. The neural benchmark controller is disposable; each
+eval worker is an independent background process recovered from a durable PID
+marker. There is no queue, lease, heartbeat, or stale-task reclamation.
 
-The neural orchestrator, benchmark command, and eval workers must never block
-host admission on one eval, one batch, one wave, or a polling barrier. The
-benchmark continuously refills native child-agent capacity so the host stays
-saturated; only a child waits for the one foreground eval process it owns.
+The neural orchestrator continuously discovers live worker PIDs, samples the
+host, and launches independent workers while capacity remains. Controller
+death must not terminate, release, or duplicate a live worker. A restarted
+controller adopts the surviving markers before making another admission.
 
 - [x] Store every task/treatment/repetition as one immutable SQLite row with
   exactly `unclaimed`, `running`, `success`, or `failed` state.
@@ -85,29 +86,22 @@ saturated; only a child waits for the one foreground eval process it owns.
 - [x] Recover retained running claims from SQLite after coordinator process
   death.
 - [x] Remove the model-facing `run_eval` tool and promise/batch orchestration.
-- [x] Port the merged native task-tree runtime: `spawn_agent` admits a clean
-  child immediately, one shared capacity bound limits active turns, and
-  `wait_agent` wakes when any selected child becomes terminal.
-- [x] Reduce orchestration to one neural refill loop. It sequentially admits
-  children up to capacity, retains only `agent_id -> worker`, waits for any
-  terminal child, closes that child's owned process tree, reports an idempotent
-  negative edge that releases unfinished work, and refills before the next
-  wait. Each child owns exactly one
-  foreground `eval run` process; no slot is reused before ownership is closed.
-- [x] Keep that refill loop in one long-lived Code Mode cell. A yielded root
-  cell is resumed in place and must never create a second controller.
-- [x] Delete Bash launchers, `&`, PID/start-time markers, polling supervisors,
-  heartbeat/lease ideas, detached sessions, waves, and `Promise.all` from the
-  benchmark contract. SQLite remains the only claim authority.
-- [x] On a systemd benchmark restart, report one negative edge for all remote
-  claims after the old cgroup has been terminated and release those rows for
-  replacement workers; do not send periodic liveness traffic. Local claims
-  retain their existing OS-lock recovery.
-- [x] Hold a measured steady native-subagent capacity that maximizes successful
+- [ ] Launch each `eval run` as an independent background worker, write its PID
+  marker before returning to the refill loop, and never wait on it through a
+  child agent or Code Mode exec session.
+- [ ] Rebuild live occupancy from markers and the operating system before every
+  admission. An inactive marker reports one idempotent worker exit, releases
+  only that unfinished claim, and is removed before replacement.
+- [ ] Keep the neural refill policy in one long-lived Code Mode cell without
+  making that cell the worker lifetime owner. A yielded, failed, or restarted
+  controller adopts surviving workers and continues from their actual count.
+- [ ] Remove the global benchmark-restart interruption edge. Controller restart
+  is not evidence that any worker exited.
+- [x] Hold a measured steady worker capacity that maximizes successful
   completions without OOM. Compare occupancy, task throughput, available
   memory, pressure, swap, load, and worker/VMM/proxy correspondence.
-- [x] Keep the benchmark command to three direct orchestration bullets and
-  do not snapshot-test prompt prose.
+- [x] Keep the benchmark prompt direct and test its ownership and admission
+  invariants rather than snapshotting its prose.
 - [x] Measure before/after utilization on the retained live workload: active
   workers over time, idle-slot seconds, tasks/hour, peak and available memory,
   swap-in/out, load, and row/worker/VM/proxy correspondence.
@@ -129,13 +123,13 @@ saturated; only a child waits for the one foreground eval process it owns.
   fresh successes had no failure or premature completion. Capacity 30 is the
   highest measured safe setting, and the installed service drop-in preserves
   it across restarts.
-- [x] Re-run worker death, benchmark death, and coordinator death tests against
-  native subagents. No test may leave a running row, eval worker, VMM, or proxy
-  without its corresponding live owner.
+- [ ] Re-run worker death, benchmark death, and coordinator death tests against
+  independent workers. No test may leave a running row, eval worker, VMM, or
+  proxy without its corresponding live owner.
   Killing one eval process releases its row once, removes its gvproxy/libkrun
-  descendants, and refills the slot. Benchmark cgroup death removes every
-  process before exactly releasing interrupted rows on restart. Coordinator
-  restart retains every running row and kills no worker.
+  descendants, and refills the slot. Benchmark controller death leaves every
+  worker running; its replacement adopts those PIDs without releasing their
+  rows. Coordinator restart retains every running row and kills no worker.
 - [x] Let the configured benchmark continue under systemd, inspect exact
   successful and failed evidence, and record the terminal board without
   modifying tasks, verifiers, images, or expected outputs.
@@ -149,19 +143,20 @@ saturated; only a child waits for the one foreground eval process it owns.
   successes and nine retained evaluator failures with no fresh
   launcher/process failure. SQLite integrity is `ok`; after completion there
   are zero eval workers, VMMs, or proxies and 53 GiB available memory.
-- [ ] Back up the retained ledger, return the 1,870 no-evidence orchestration
-  failures to `unclaimed`, deploy the release semantics, and let replacement
-  workers finish those rows without reintroducing crash-shaped failures.
+- [x] Return the no-evidence orchestration failures to `unclaimed`, deploy the
+  release semantics, and let replacement workers finish those rows without
+  reintroducing crash-shaped terminal failures.
 - [ ] Carry PR #135's unified routed eval UI, progress surfaces, score
   frontiers, and task run charts onto the final four-state coordinator API;
   validate the complete Terminal Bench workset locally against `dev-georgios`.
 
 Exit gate: focused Linux and macOS tests pass; rustfmt and warnings-denied
 Clippy are clean for the changed surface; SQLite integrity is clean; the live
-native refill loop maintains host occupancy without a wave tail; interrupted
-rows become claimable and replacement attempts converge to terminal outcomes;
-and the implementation is reduced to a reviewable, mergeable diff with no
-unrelated workspace changes.
+neural refill loop maintains host occupancy without a wave tail; killing and
+restarting only the controller leaves worker PIDs and running rows unchanged;
+dead workers become claimable and replacement attempts converge to terminal
+outcomes; and the implementation is reduced to a reviewable, mergeable diff
+with no unrelated workspace changes.
 
 ## Active milestones
 

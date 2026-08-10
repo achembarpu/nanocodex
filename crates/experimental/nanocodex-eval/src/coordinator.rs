@@ -197,9 +197,6 @@ impl WorkerName {
     }
 }
 
-#[derive(Deserialize)]
-struct WorkersInterruptedRequest {}
-
 #[derive(Serialize)]
 struct ErrorBody<'a> {
     error: &'a str,
@@ -267,7 +264,6 @@ impl CoordinatorServer {
             .route("/v1/claims/{token}/artifacts", put(upload_artifacts))
             .route("/v1/claims/{token}/finish", post(finish))
             .route("/v1/workers/exited", post(worker_exited))
-            .route("/v1/workers/interrupted", post(workers_interrupted))
             .with_state(self.state);
         let result = axum::serve(
             listener,
@@ -424,22 +420,6 @@ impl CoordinatorClient {
             self.http
                 .post(self.endpoint("v1/workers/exited")?)
                 .json(&serde_json::json!({ "worker": worker, "error": error }))
-                .send()
-                .await?,
-        )
-        .await
-    }
-
-    /// Releases the one-shot negative edge produced when the benchmark owner
-    /// restarts after its process group has been terminated.
-    ///
-    /// This is intentionally not a liveness protocol: the benchmark calls it
-    /// once at startup before admitting replacement workers.
-    pub async fn workers_interrupted(&self, error: &str) -> Result<(), CoordinatorError> {
-        accepted(
-            self.http
-                .post(self.endpoint("v1/workers/interrupted")?)
-                .json(&serde_json::json!({ "error": error }))
                 .send()
                 .await?,
         )
@@ -733,20 +713,6 @@ async fn worker_exited(
             .collect::<Vec<_>>()
     };
     for active in exited {
-        active.claim.release().map_err(ApiError::ledger)?;
-    }
-    Ok(StatusCode::NO_CONTENT)
-}
-
-async fn workers_interrupted(
-    State(state): State<CoordinatorState>,
-    Json(_request): Json<WorkersInterruptedRequest>,
-) -> Result<StatusCode, ApiError> {
-    let interrupted = {
-        let mut active = state.active.lock().await;
-        active.drain().map(|(_, claim)| claim).collect::<Vec<_>>()
-    };
-    for active in interrupted {
         active.claim.release().map_err(ApiError::ledger)?;
     }
     Ok(StatusCode::NO_CONTENT)
@@ -1508,36 +1474,6 @@ thinking = ["high"]
                 "provider returned 429".to_owned()
             )
         );
-        server.abort();
-    }
-
-    #[tokio::test]
-    async fn benchmark_restart_releases_every_interrupted_worker_once() {
-        let (_directory, client, selection, server) = fixture().await;
-        let first = client.clone().worker("first-worker");
-        let second = client.clone().worker("second-worker");
-        assert!(matches!(
-            first.claim(&selection).await.unwrap(),
-            RemoteClaim::Run { .. }
-        ));
-        assert!(matches!(
-            second.claim(&selection).await.unwrap(),
-            RemoteClaim::Run { .. }
-        ));
-
-        client
-            .workers_interrupted("benchmark process group exited")
-            .await
-            .unwrap();
-        client
-            .workers_interrupted("duplicate restart observation")
-            .await
-            .unwrap();
-
-        let status = client.status().await.unwrap();
-        assert_eq!(status["tasks"]["running"], 0);
-        assert_eq!(status["tasks"]["failed"], 0);
-        assert_eq!(status["tasks"]["unclaimed"], 2);
         server.abort();
     }
 

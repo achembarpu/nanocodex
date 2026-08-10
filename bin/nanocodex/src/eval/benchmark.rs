@@ -64,20 +64,11 @@ impl Benchmark {
         if systemd {
             return systemd::install(Some(&profile), &config, state_dir.as_deref());
         }
-        if let Some(coordinator) = coordinator.as_deref() {
-            CoordinatorClient::new(coordinator)?
-                .workers_interrupted(
-                    "benchmark owner restarted after its worker process group was terminated",
-                )
-                .await?;
-        }
-        let agent = agent.enable_subagents();
         let prompt = benchmark::prompt(
             Some(&profile),
             &config,
             state_dir.as_deref(),
             coordinator.as_deref(),
-            agent.max_subagents(),
         );
         let initial = BoardStatus::load(
             Some(&profile),
