@@ -3,6 +3,7 @@ import react from "@vitejs/plugin-react";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 import mkcert from "vite-plugin-mkcert";
+import { chatGptDevProxy } from "./vite/chatGptDevProxy";
 
 const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
 
@@ -10,7 +11,7 @@ export default defineConfig({
   // Tempo Wallet embeds in an iframe only on HTTPS. A trusted local
   // certificate keeps the development flow identical to production and lets
   // the hosted wallet perform cross-origin passkey ceremonies in the embed.
-  plugins: [mkcert(), react(), cloudflare()],
+  plugins: [mkcert(), react(), chatGptDevProxy(), cloudflare()],
   build: {
     // The production graph gate consumes this manifest so it measures complete
     // static import closures instead of whichever output chunk happens to keep
@@ -37,11 +38,6 @@ export default defineConfig({
   },
   worker: { format: "es" },
   server: {
-    proxy: {
-      "/api/evals": {
-        target: process.env.NANOCODEX_EVALS_API ?? "http://127.0.0.1:8788",
-      },
-    },
     fs: {
       allow: [repositoryRoot],
     },

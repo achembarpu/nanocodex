@@ -12,7 +12,7 @@ import type {
   PaymentStatus,
   WebTuiCommand,
 } from "./nanocodex";
-import type { TempoAccessKey } from "./tempoAccessKey";
+import type { Address } from "viem";
 
 type Target = TuiTarget;
 
@@ -23,7 +23,7 @@ export type AgentControllerTools = {
 
 export type AgentControllerPayment = {
   rootAddress: string;
-  accessKeyAddress: string;
+  accessKeyAddress(): string | undefined;
   channelId?: string;
   cumulative(): string;
 };
@@ -31,8 +31,8 @@ export type AgentControllerPayment = {
 export type AgentControllerStart = {
   thinking: Thinking;
   reasoningMode: ReasoningMode;
-  transport: "openai" | "mpp";
-  paymentKey?: TempoAccessKey;
+  transport: "openai" | "chatgpt" | "mpp";
+  payerAddress?: Address;
 };
 
 export type AgentControllerDependencies = {
@@ -93,6 +93,7 @@ export function createAgentController({
   let btw: BtwBranch | undefined;
   let eventWatch: ReturnType<DefaultAgent["events"]["watch"]> | undefined;
   let payment: AgentControllerPayment | undefined;
+  let lastPaymentStatus: string | undefined;
   let generation = 0;
   let disposed = false;
   let disposal: Promise<void> | undefined;
@@ -106,7 +107,7 @@ export function createAgentController({
           thinking: message.thinking,
           reasoningMode: message.reasoningMode,
           transport: message.transport,
-          paymentKey: message.transport === "mpp" ? message.paymentKey : undefined,
+          payerAddress: message.transport === "mpp" ? message.payerAddress : undefined,
         });
         return;
       case "prompt": {
@@ -304,6 +305,7 @@ export function createAgentController({
       if (payment) {
         logPaymentEvent?.(event);
         postMessage({ type: "mppJsonl", line: JSON.stringify(event) });
+        postPaymentStatus();
       }
       const target = routes.get(event.request_id);
       if (target) postMessage({ type: "event", target, event });
@@ -378,10 +380,13 @@ export function createAgentController({
     if (!payment) return;
     const status: PaymentStatus = {
       rootAddress: payment.rootAddress,
-      accessKeyAddress: payment.accessKeyAddress,
+      accessKeyAddress: payment.accessKeyAddress(),
       channelId: payment.channelId,
       cumulative: payment.cumulative(),
     };
+    const encoded = JSON.stringify(status);
+    if (encoded === lastPaymentStatus) return;
+    lastPaymentStatus = encoded;
     postMessage({ type: "mppPayment", payment: status });
   }
 
@@ -442,6 +447,7 @@ export function createAgentController({
     routes.clear();
     sessionImages.clear();
     payment = undefined;
+    lastPaymentStatus = undefined;
     const disposedTurns = new Set<Turn>();
     await Promise.all([
       ...ownedBranches.map((branch) => disposeBranch(branch, disposedTurns)),

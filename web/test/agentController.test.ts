@@ -35,7 +35,7 @@ test("the Worker controller owns prompts, steering, cancellation, events, and cl
     thinking: "high",
     reasoningMode: "pro",
     transport: "openai",
-    paymentKey: undefined,
+    payerAddress: undefined,
   }]);
   assert.deepEqual(harness.watchOptions, [{ includeAllSessions: true }]);
   assert.deepEqual(messages.shift(), {
@@ -129,6 +129,77 @@ test("the Worker controller owns prompts, steering, cancellation, events, and cl
     }),
     /disposed/,
   );
+});
+
+test("MPP status follows live channel receipts without duplicate UI messages", async () => {
+  const harness = new AgentHarness();
+  const messages: any[] = [];
+  let channelId: string | undefined;
+  let cumulative = "0";
+  const controller = createAgentController({
+    async createAgent(_start, tools) {
+      harness.tools = tools;
+      return {
+        agent: harness.createAgent("paid-root") as any,
+        payment: {
+          rootAddress: "0x0000000000000000000000000000000000000001",
+          accessKeyAddress: () => "0x0000000000000000000000000000000000000002",
+          get channelId() { return channelId; },
+          cumulative: () => cumulative,
+        },
+      };
+    },
+    postMessage: (message) => messages.push(message),
+  });
+
+  await controller.handle({
+    type: "start",
+    thinking: "none",
+    reasoningMode: "standard",
+    transport: "mpp",
+    payerAddress: "0x0000000000000000000000000000000000000001",
+  });
+  assert.deepEqual(
+    messages.filter((message) => message.type === "mppPayment").map((message) => message.payment),
+    [{
+      rootAddress: "0x0000000000000000000000000000000000000001",
+      accessKeyAddress: "0x0000000000000000000000000000000000000002",
+      channelId: undefined,
+      cumulative: "0",
+    }],
+  );
+
+  channelId = "0xchannel";
+  cumulative = "1000";
+  harness.emit("paid-root", event("paid-root", 1, "model.connection.completed"));
+  harness.emit("paid-root", event("paid-root", 2, "api.event"));
+  cumulative = "2000";
+  harness.emit("paid-root", event("paid-root", 3, "api.event"));
+
+  assert.deepEqual(
+    messages.filter((message) => message.type === "mppPayment").map((message) => message.payment),
+    [
+      {
+        rootAddress: "0x0000000000000000000000000000000000000001",
+        accessKeyAddress: "0x0000000000000000000000000000000000000002",
+        channelId: undefined,
+        cumulative: "0",
+      },
+      {
+        rootAddress: "0x0000000000000000000000000000000000000001",
+        accessKeyAddress: "0x0000000000000000000000000000000000000002",
+        channelId: "0xchannel",
+        cumulative: "1000",
+      },
+      {
+        rootAddress: "0x0000000000000000000000000000000000000001",
+        accessKeyAddress: "0x0000000000000000000000000000000000000002",
+        channelId: "0xchannel",
+        cumulative: "2000",
+      },
+    ],
+  );
+  await controller.dispose();
 });
 
 test("latest and historical forks use the completed Turn boundary", async () => {

@@ -252,8 +252,16 @@ impl CoordinatorServer {
             .route("/v1/evals", get(eval_overview))
             .route("/v1/evals/worksets/{digest}", get(eval_workset))
             .route(
+                "/v1/evals/worksets/{digest}/results",
+                get(eval_workset_results),
+            )
+            .route(
                 "/v1/evals/worksets/{digest}/tasks/{task_id}",
                 get(eval_task),
+            )
+            .route(
+                "/v1/evals/worksets/{digest}/tasks/{task_id}/results",
+                get(eval_task_results),
             )
             .route(
                 "/v1/evals/worksets/{digest}/tasks/{task_id}/outcomes",
@@ -591,6 +599,34 @@ async fn eval_workset(
         .ok_or_else(|| ApiError::not_found("evaluation workset was not found"))
 }
 
+async fn eval_workset_results(
+    State(state): State<CoordinatorState>,
+    AxumPath(digest): AxumPath<String>,
+) -> Result<Response, ApiError> {
+    let api = state.eval_api;
+    let results = tokio::task::spawn_blocking(move || api.workset_results(&digest))
+        .await
+        .map_err(ApiError::internal)?
+        .map_err(ApiError::internal)?;
+    results
+        .map(|results| Json(results).into_response())
+        .ok_or_else(|| ApiError::not_found("evaluation workset was not found"))
+}
+
+async fn eval_task_results(
+    State(state): State<CoordinatorState>,
+    AxumPath((digest, task_id)): AxumPath<(String, String)>,
+) -> Result<Response, ApiError> {
+    let api = state.eval_api;
+    let results = tokio::task::spawn_blocking(move || api.task_results(&digest, &task_id))
+        .await
+        .map_err(ApiError::internal)?
+        .map_err(ApiError::internal)?;
+    results
+        .map(|results| Json(results).into_response())
+        .ok_or_else(|| ApiError::not_found("evaluation task was not found"))
+}
+
 async fn eval_case(
     State(state): State<CoordinatorState>,
     AxumPath(id): AxumPath<String>,
@@ -753,6 +789,9 @@ async fn finish(
                 return Err(ApiError::bad_request("accepted evidence was not uploaded"));
             }
             claim.succeed(&evidence).map_err(ApiError::ledger)?;
+            if let Err(error) = state.eval_api.index_result(&evidence) {
+                tracing::warn!(%error, "failed to index accepted evaluation result");
+            }
         }
         FinishRequest::Failed { error, evidence } => {
             let evidence = evidence
@@ -1224,7 +1263,7 @@ thinking = ["high"]
             fs::write(
                 output.join("events.jsonl"),
                 "{\"type\":\"attempt_started\",\"payload\":{\"prompt\":\"do it\"},\"attempt\":{\"task_name\":\"one\"}}\n\
-                 {\"type\":\"completed\",\"payload\":{\"task_name\":\"one\",\"status\":\"passed\",\"outcome\":\"passed\",\"environment\":\"micro_vm\",\"agent\":{\"model\":\"sol\",\"effort\":\"high\",\"tool_calls\":1,\"usage\":{\"total_tokens\":10}},\"verifier\":{\"exit_code\":0,\"rewards\":{\"reward\":1}}}}\n",
+                 {\"type\":\"completed\",\"payload\":{\"task_name\":\"one\",\"status\":\"passed\",\"outcome\":\"passed\",\"environment\":\"micro_vm\",\"agent\":{\"model\":\"sol\",\"effort\":\"high\",\"tool_calls\":1,\"cost_usd\":\"0.042\",\"usage\":{\"input_tokens\":7,\"cached_input_tokens\":3,\"output_tokens\":3,\"reasoning_output_tokens\":2,\"total_tokens\":10}},\"verifier\":{\"exit_code\":0,\"rewards\":{\"reward\":1}}}}\n",
             )
             .unwrap();
             fs::write(
@@ -1297,7 +1336,47 @@ thinking = ["high"]
                 .len(),
             2
         );
-        assert!(task["task"]["treatments"][0]["cells"][0]["status"].is_null());
+        assert_eq!(
+            task["task"]["treatments"][0]["cells"][0]["status"],
+            "passed"
+        );
+        let results: serde_json::Value = decode(
+            client
+                .http
+                .get(
+                    client
+                        .endpoint(&format!("v1/evals/worksets/{digest}/results"))
+                        .unwrap(),
+                )
+                .send()
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(results["points"].as_array().unwrap().len(), 2);
+        assert_eq!(results["points"][0]["status"], "passed");
+        assert_eq!(results["points"][0]["inputTokens"], 7);
+        assert_eq!(results["points"][0]["outputTokens"], 3);
+        assert_eq!(results["points"][0]["totalTokens"], 10);
+        assert_eq!(results["points"][0]["costUsd"], 0.042);
+        let task_results: serde_json::Value = decode(
+            client
+                .http
+                .get(
+                    client
+                        .endpoint(&format!(
+                            "v1/evals/worksets/{digest}/tasks/{task_id}/results"
+                        ))
+                        .unwrap(),
+                )
+                .send()
+                .await
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+        assert_eq!(task_results["points"].as_array().unwrap().len(), 2);
         assert_eq!(
             task["task"]["treatments"][0]["cells"][0]["state"],
             "success"

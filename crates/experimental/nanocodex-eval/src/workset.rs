@@ -1157,6 +1157,17 @@ fn create_schema(connection: &Connection) -> Result<(), WorksetError> {
             ON eval_tasks(workset_id, family_key, state, repetition);
          CREATE INDEX IF NOT EXISTS eval_tasks_next
             ON eval_tasks(workset_id, state, id);
+         CREATE TABLE IF NOT EXISTS coordinate_results(
+            coordinate_id INTEGER PRIMARY KEY REFERENCES eval_tasks(id),
+            status TEXT,
+            outcome TEXT,
+            input_tokens INTEGER,
+            cached_input_tokens INTEGER,
+            output_tokens INTEGER,
+            reasoning_output_tokens INTEGER,
+            total_tokens INTEGER,
+            cost_usd REAL
+         );
          CREATE TABLE IF NOT EXISTS eval_attempts(
             id INTEGER PRIMARY KEY,
             workset_id INTEGER NOT NULL REFERENCES worksets(id),
@@ -1193,7 +1204,8 @@ fn migrate_legacy_schema(
         "ALTER TABLE worksets RENAME TO legacy_worksets;
          ALTER TABLE tasks RENAME TO legacy_tasks;
          ALTER TABLE coordinates RENAME TO legacy_coordinates;
-         ALTER TABLE executions RENAME TO legacy_executions;",
+         ALTER TABLE executions RENAME TO legacy_executions;
+         DROP TABLE IF EXISTS coordinate_results;",
     )?;
     create_schema(&transaction)?;
     if named_generations {
@@ -1230,7 +1242,6 @@ fn migrate_legacy_schema(
             c.result_path,
             CASE WHEN c.state = 'running' THEN 'worker was not live during four-state schema migration' ELSE c.last_error END
          FROM legacy_coordinates c JOIN legacy_tasks t ON t.id = c.task_id;
-         DROP TABLE IF EXISTS coordinate_results;
          DROP TABLE legacy_executions;
          DROP TABLE legacy_coordinates;
          DROP TABLE legacy_tasks;
@@ -1573,6 +1584,34 @@ mod tests {
             Workset::open(&path, "release"),
             Err(WorksetError::DefinitionConflict(message)) if message.contains("schema 99")
         ));
+    }
+
+    #[test]
+    fn version_four_ledgers_add_the_result_projection_without_legacy_rewrites() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.sqlite3");
+        Workset::create(&path, "release").unwrap();
+        let connection = Connection::open(&path).unwrap();
+        connection
+            .execute_batch("DROP TABLE coordinate_results; PRAGMA user_version = 4;")
+            .unwrap();
+        drop(connection);
+
+        Workset::open(&path, "release").unwrap();
+        let connection = Connection::open(path).unwrap();
+        let version: u32 = connection
+            .pragma_query_value(None, "user_version", |row| row.get(0))
+            .unwrap();
+        let result_table: i64 = connection
+            .query_row(
+                "SELECT COUNT(*) FROM sqlite_master \
+                 WHERE type = 'table' AND name = 'coordinate_results'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        assert_eq!(result_table, 1);
     }
 
     #[test]

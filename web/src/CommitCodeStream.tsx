@@ -27,7 +27,7 @@ import {
 import { usePierreRenderer } from "./PierreWorkerProvider";
 import { Switch } from "./Switch";
 import { useCommitStreamLoader } from "./useCommitStreamLoader";
-import type { HarnessCommit, Theme } from "./Xedoc";
+import type { HarnessCommit, Theme } from "./NanocodexApp";
 
 type CommitCodeStreamProps = {
   commits: HarnessCommit[];

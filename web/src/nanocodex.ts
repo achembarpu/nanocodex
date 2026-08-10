@@ -1,16 +1,17 @@
 import { createConfig } from "nanocodex-react";
 import type { TuiCommand, TuiMessage } from "nanocodex-tui";
-import type { TempoAccessKey } from "./tempoAccessKey";
+import type { Address } from "viem";
 
 export type AgentTransport = "openai" | "mpp";
 type StartCommand = Extract<TuiCommand, { type: "start" }>;
 export type WebTuiCommand =
   | Exclude<TuiCommand, { type: "start" }>
   | (StartCommand & { transport: "openai" })
-  | (StartCommand & { paymentKey: TempoAccessKey; transport: "mpp" });
+  | (StartCommand & { transport: "chatgpt" })
+  | (StartCommand & { payerAddress: Address; transport: "mpp" });
 export type PaymentStatus = {
   rootAddress: string;
-  accessKeyAddress: string;
+  accessKeyAddress?: string;
   channelId?: string;
   cumulative: string;
 };

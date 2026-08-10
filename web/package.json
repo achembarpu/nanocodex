@@ -7,15 +7,12 @@
     "node": ">=22.13.0"
   },
   "scripts": {
-    "sync": "node scripts/sync-nanocodex.mjs && node --experimental-strip-types scripts/sync-harbor.mjs",
+    "sync": "node scripts/sync-nanocodex.mjs",
     "wasm": "cd .. && just build-wasm",
     "predev": "npm run sync && npm run wasm",
     "dev": "CLOUDFLARE_INCLUDE_PROCESS_ENV=true node --env-file-if-exists=../.env ./node_modules/vite/bin/vite.js dev",
-    "evals:dev": "vite --config vite.evals.config.ts",
-    "evals:build": "tsc --project tsconfig.evals.json && vite build --config vite.evals.config.ts",
-    "evals:server": "node scripts/evals-server.mjs",
-    "test": "npm --prefix ../js/tui test && node --experimental-strip-types --test worker/index.test.ts test/*.test.ts test/*.test.mjs",
-    "typecheck": "tsc --noEmit && tsc -p tsconfig.scripts.json",
+    "test": "npm --prefix ../js/tui test && node --experimental-strip-types --test worker/*.test.ts test/*.test.ts",
+    "typecheck": "tsc --noEmit",
     "gen:types": "wrangler types",
     "prebuild": "npm run sync && npm run wasm",
     "build": "tsc --noEmit && vite build && npm run check:bundle",
@@ -32,9 +29,9 @@
     "@radix-ui/react-switch": "1.2.6",
     "@tanstack/react-query": "^5.101.4",
     "@tanstack/react-virtual": "^3.14.6",
-    "accounts": "~0.14.12",
+    "accounts": "^0.16.0",
     "lucide-react": "^1.24.0",
-    "mppx": "^0.8.14",
+    "mppx": "^0.8.15",
     "nanocodex": "file:../js/bindings",
     "nanocodex-react": "file:../js/react",
     "nanocodex-tui": "file:../js/tui",
@@ -42,23 +39,26 @@
     "ox": "^0.14.33",
     "react": "19.2.6",
     "react-dom": "19.2.6",
+    "react-router": "^7.18.2",
+    "recharts": "^3.10.1",
     "shiki": "^4.3.1",
     "streamdown": "^2.5.0",
-    "viem": "^2.55.8",
-    "wagmi": "^3.7.4"
+    "viem": "^2.55.11"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.37.1",
     "@types/node": "^22.20.1",
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
+    "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "6.0.2",
     "typescript": "5.9.3",
     "vite": "8.0.13",
     "vite-plugin-mkcert": "^1.17.12",
-    "wrangler": "4.92.0"
+    "wrangler": "4.92.0",
+    "ws": "^8.21.3"
   },
   "overrides": {
-    "ws": "^8.21.1"
+    "ws": "^8.21.3"
   }
 }

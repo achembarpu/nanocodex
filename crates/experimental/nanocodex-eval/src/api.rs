@@ -6,7 +6,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use rusqlite::{Connection, OpenFlags, OptionalExtension as _};
+use rusqlite::{Connection, OpenFlags, OptionalExtension as _, params};
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
@@ -58,6 +58,37 @@ pub(crate) struct WorksetDetail {
     observed_at_ms: i64,
     workset: WorksetOverview,
     tasks: Vec<TaskOverview>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WorksetResults {
+    schema_version: u32,
+    observed_at_ms: i64,
+    workset_id: String,
+    points: Vec<ResultPoint>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResultPoint {
+    id: String,
+    task_id: String,
+    task_name: String,
+    task_label: String,
+    harness: String,
+    model: String,
+    thinking: String,
+    repetition: u16,
+    status: Option<String>,
+    outcome: Option<String>,
+    duration_ms: Option<i64>,
+    input_tokens: Option<i64>,
+    cached_input_tokens: Option<i64>,
+    output_tokens: Option<i64>,
+    reasoning_output_tokens: Option<i64>,
+    total_tokens: Option<i64>,
+    cost_usd: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -149,6 +180,7 @@ pub(crate) struct CaseEvidence {
     final_message: Option<String>,
     tool_calls: Option<u64>,
     usage: Option<Value>,
+    cost_usd: Option<f64>,
     verifier: Option<Value>,
     exception: Option<Value>,
     timing: Option<Value>,
@@ -184,6 +216,8 @@ struct CoordinateRow {
     error: Option<String>,
     task_name: String,
     task_digest: String,
+    status: Option<String>,
+    outcome: Option<String>,
 }
 
 #[derive(Debug, Default)]
@@ -297,6 +331,166 @@ impl EvalApi {
         }))
     }
 
+    pub(crate) fn workset_results(&self, digest: &str) -> Result<Option<WorksetResults>, String> {
+        self.results(digest, None)
+    }
+
+    pub(crate) fn task_results(
+        &self,
+        digest: &str,
+        task_id: &str,
+    ) -> Result<Option<WorksetResults>, String> {
+        self.results(digest, Some(task_id))
+    }
+
+    fn results(
+        &self,
+        digest: &str,
+        task_id: Option<&str>,
+    ) -> Result<Option<WorksetResults>, String> {
+        self.index_results(digest)?;
+        let connection = self.connection()?;
+        let Some(workset) = find_workset(&connection, digest)? else {
+            return Ok(None);
+        };
+        let task = match task_id {
+            Some(task_id) => match find_task(&connection, workset.id, digest, task_id)? {
+                Some(task) => Some(task),
+                None => return Ok(None),
+            },
+            None => None,
+        };
+        let mut statement = connection
+            .prepare(
+                "SELECT e.id, t.selector, e.treatment, e.repetition, \
+                        e.started_at_ms, e.finished_at_ms, \
+                        r.status, r.outcome, r.input_tokens, r.cached_input_tokens, \
+                        r.output_tokens, r.reasoning_output_tokens, r.total_tokens, r.cost_usd \
+                 FROM eval_tasks e \
+                 JOIN task_definitions t ON t.id = e.definition_id \
+                 LEFT JOIN coordinate_results r ON r.coordinate_id = e.id \
+                 WHERE e.workset_id = ?1 AND (?2 IS NULL OR e.definition_id = ?2) \
+                   AND e.state IN ('success', 'failed') AND e.result_path IS NOT NULL \
+                 ORDER BY t.selector, e.family_key, e.repetition",
+            )
+            .map_err(|error| error.to_string())?;
+        let points = statement
+            .query_map((workset.id, task.as_ref().map(|task| task.id)), |row| {
+                let coordinate_id = row.get::<_, i64>(0)?;
+                let task_name = row.get::<_, String>(1)?;
+                let treatment = parse_treatment(&row.get::<_, String>(2)?);
+                let started_at_ms = row.get::<_, Option<i64>>(4)?;
+                let finished_at_ms = row.get::<_, Option<i64>>(5)?;
+                Ok(ResultPoint {
+                    id: case_id(digest, coordinate_id),
+                    task_id: public_id(&[digest, &task_name]),
+                    task_label: short_name(&task_name).to_owned(),
+                    task_name,
+                    harness: treatment_harness(&treatment),
+                    model: treatment.model,
+                    thinking: treatment.thinking,
+                    repetition: row.get(3)?,
+                    status: row.get(6)?,
+                    outcome: row.get(7)?,
+                    duration_ms: started_at_ms
+                        .zip(finished_at_ms)
+                        .map(|(started, finished)| finished.saturating_sub(started)),
+                    input_tokens: row.get(8)?,
+                    cached_input_tokens: row.get(9)?,
+                    output_tokens: row.get(10)?,
+                    reasoning_output_tokens: row.get(11)?,
+                    total_tokens: row.get(12)?,
+                    cost_usd: row.get(13)?,
+                })
+            })
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        Ok(Some(WorksetResults {
+            schema_version: 1,
+            observed_at_ms: now_ms()?,
+            workset_id: workset.digest,
+            points,
+        }))
+    }
+
+    fn index_results(&self, digest: &str) -> Result<(), String> {
+        let mut connection = Connection::open(&self.ledger).map_err(|error| error.to_string())?;
+        connection
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(|error| error.to_string())?;
+        let Some(workset) = find_workset(&connection, digest)? else {
+            return Ok(());
+        };
+        let mut statement = connection
+            .prepare(
+                "SELECT e.id, e.result_path \
+                 FROM eval_tasks e \
+                 LEFT JOIN coordinate_results r ON r.coordinate_id = e.id \
+                 WHERE e.workset_id = ?1 AND e.state IN ('success', 'failed') \
+                   AND e.result_path IS NOT NULL AND r.coordinate_id IS NULL",
+            )
+            .map_err(|error| error.to_string())?;
+        let missing = statement
+            .query_map([workset.id], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    PathBuf::from(row.get::<_, String>(1)?),
+                ))
+            })
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        drop(statement);
+        let mut indexed = Vec::with_capacity(missing.len());
+        for (coordinate_id, result_path) in missing {
+            let result_path = match result_path.canonicalize() {
+                Ok(path) => path,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.to_string()),
+            };
+            let Some(evidence) = read_outcome(&result_path)? else {
+                continue;
+            };
+            indexed.push((coordinate_id, evidence));
+        }
+        let transaction = connection
+            .transaction()
+            .map_err(|error| error.to_string())?;
+        for (coordinate_id, evidence) in indexed {
+            insert_result(&transaction, coordinate_id, &evidence)?;
+        }
+        transaction.commit().map_err(|error| error.to_string())?;
+        Ok(())
+    }
+
+    pub(crate) fn index_result(&self, result_path: &Path) -> Result<(), String> {
+        let retained_path = result_path.to_string_lossy().into_owned();
+        let result_path = result_path
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let Some(evidence) = read_outcome(&result_path)? else {
+            return Ok(());
+        };
+        let connection = Connection::open(&self.ledger).map_err(|error| error.to_string())?;
+        connection
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(|error| error.to_string())?;
+        let coordinate_id = connection
+            .query_row(
+                "SELECT id FROM eval_tasks WHERE result_path = ?1 \
+                 AND state IN ('success', 'failed')",
+                [retained_path],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if let Some(coordinate_id) = coordinate_id {
+            insert_result(&connection, coordinate_id, &evidence)?;
+        }
+        Ok(())
+    }
+
     pub(crate) fn task(
         &self,
         workset_digest: &str,
@@ -315,19 +509,21 @@ impl EvalApi {
         for coordinate in coordinates.drain(..) {
             let treatment = parse_treatment(&coordinate.treatment);
             let state = coordinate_state(&coordinate);
+            let detail_id =
+                result_path(&coordinate).map(|_| case_id(workset_digest, coordinate.id));
             let cell = CoordinateDetail {
                 id: case_id(workset_digest, coordinate.id),
                 repetition: coordinate.repetition,
                 state,
-                status: None,
-                outcome: None,
+                status: coordinate.status,
+                outcome: coordinate.outcome,
                 updated_at_ms: coordinate.finished_at_ms.or(coordinate.started_at_ms),
                 duration_ms: coordinate
                     .finished_at_ms
                     .zip(coordinate.started_at_ms)
                     .map(|(finished, started)| finished.saturating_sub(started)),
                 message: coordinate.error.clone(),
-                detail_id: result_path(&coordinate).map(|_| case_id(workset_digest, coordinate.id)),
+                detail_id,
             };
             let treatment_id = public_id(&[workset_digest, &coordinate.family_key]);
             if let Some(row) = treatments.iter_mut().find(|row| row.id == treatment_id) {
@@ -385,11 +581,20 @@ impl EvalApi {
         let total = coordinates.len();
         let mut outcomes = Vec::with_capacity(limit.min(total.saturating_sub(cursor)));
         for coordinate in coordinates.into_iter().skip(cursor).take(limit) {
-            let evidence = self.outcome_for(&coordinate)?;
+            let retained = coordinate.status.is_some() || coordinate.outcome.is_some();
+            let evidence = if retained {
+                None
+            } else {
+                self.outcome_for(&coordinate)?
+            };
             outcomes.push(CoordinateOutcome {
                 id: case_id(workset_digest, coordinate.id),
-                status: evidence.as_ref().and_then(|value| value.status.clone()),
-                outcome: evidence.and_then(|value| value.outcome),
+                status: coordinate
+                    .status
+                    .or_else(|| evidence.as_ref().and_then(|value| value.status.clone())),
+                outcome: coordinate
+                    .outcome
+                    .or_else(|| evidence.and_then(|value| value.outcome)),
             });
         }
         let loaded = cursor.saturating_add(outcomes.len());
@@ -551,8 +756,9 @@ fn read_coordinates(
         .prepare(
             "SELECT e.id, e.family_key, e.treatment, e.repetition, e.state, \
                     e.result_path, e.started_at_ms, e.finished_at_ms, e.error, \
-                    t.selector, t.digest \
+                    t.selector, t.digest, r.status, r.outcome \
              FROM eval_tasks e JOIN task_definitions t ON t.id = e.definition_id \
+             LEFT JOIN coordinate_results r ON r.coordinate_id = e.id \
              WHERE e.workset_id = ?1 AND (?2 IS NULL OR e.definition_id = ?2) \
              ORDER BY t.selector, e.family_key, e.repetition",
         )
@@ -571,6 +777,8 @@ fn read_coordinates(
                 error: row.get(8)?,
                 task_name: row.get(9)?,
                 task_digest: row.get(10)?,
+                status: row.get(11)?,
+                outcome: row.get(12)?,
             })
         })
         .map_err(|error| error.to_string())?
@@ -712,6 +920,7 @@ const fn empty_evidence() -> CaseEvidence {
         final_message: None,
         tool_calls: None,
         usage: None,
+        cost_usd: None,
         verifier: None,
         exception: None,
         timing: None,
@@ -767,6 +976,14 @@ fn apply_terminal_payload(evidence: &mut CaseEvidence, payload: &Value) {
         .and_then(|value| value.get("tool_calls"))
         .and_then(Value::as_u64);
     evidence.usage = agent.and_then(|value| value.get("usage")).cloned();
+    evidence.cost_usd = agent
+        .and_then(|value| value.get("cost_usd"))
+        .and_then(decimal_value)
+        .or_else(|| {
+            agent
+                .and_then(|value| value.pointer("/metadata/estimated_cost/usd"))
+                .and_then(decimal_value)
+        });
     evidence.verifier = payload
         .get("verifier")
         .filter(|value| value.is_object())
@@ -779,6 +996,58 @@ fn apply_terminal_payload(evidence: &mut CaseEvidence, payload: &Value) {
         .get("timing")
         .filter(|value| value.is_object())
         .cloned();
+}
+
+fn insert_result(
+    connection: &Connection,
+    coordinate_id: i64,
+    evidence: &CaseEvidence,
+) -> Result<(), String> {
+    let usage = evidence.usage.as_ref();
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO coordinate_results( \
+                coordinate_id, status, outcome, input_tokens, cached_input_tokens, \
+                output_tokens, reasoning_output_tokens, total_tokens, cost_usd \
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+            params![
+                coordinate_id,
+                evidence.status,
+                evidence.outcome,
+                usage.and_then(|value| integer_field(value, "input_tokens")),
+                usage.and_then(|value| integer_field(value, "cached_input_tokens")),
+                usage.and_then(|value| integer_field(value, "output_tokens")),
+                usage.and_then(|value| integer_field(value, "reasoning_output_tokens")),
+                usage.and_then(|value| integer_field(value, "total_tokens")),
+                evidence.cost_usd,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn integer_field(value: &Value, field: &str) -> Option<i64> {
+    value
+        .get(field)
+        .and_then(Value::as_i64)
+        .or_else(|| {
+            value
+                .get(field)
+                .and_then(Value::as_u64)
+                .and_then(|value| i64::try_from(value).ok())
+        })
+        .or_else(|| {
+            value
+                .get(field)
+                .and_then(Value::as_str)
+                .and_then(|value| value.parse().ok())
+        })
+}
+
+fn decimal_value(value: &Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
 }
 
 fn parse_treatment(raw: &str) -> Treatment {

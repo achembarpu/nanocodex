@@ -32,6 +32,50 @@ function createByokSessions() {
   return { credentials, namespace: namespace as unknown as DurableObjectNamespace };
 }
 
+function createChatGptSessions() {
+  const deleted = new Set<string>();
+  const namespace = {
+    idFromName(name: string) {
+      return { name };
+    },
+    get(id: { name: string }) {
+      return {
+        async fetch(input: string | URL | Request, init?: RequestInit) {
+          const request = new Request(input, init);
+          const path = new URL(request.url).pathname;
+          if (request.method === "DELETE") {
+            deleted.add(id.name);
+            return new Response(null, { status: 204 });
+          }
+          if (path === "/start") {
+            return Response.json({
+              state: "pending",
+              verificationUrl: "https://auth.openai.test/codex/device",
+              userCode: "ABCD-EFGH",
+              expiresAt: Date.now() + 900_000,
+              pollAfterMs: 1_000,
+            });
+          }
+          if (path === "/status") {
+            return Response.json({ state: "authenticated", accountId: "account-1" });
+          }
+          if (path === "/credential") {
+            return Response.json({
+              kind: "chatgpt",
+              accessToken: "subscription-secret",
+              accountId: "account-1",
+              fedramp: false,
+              revision: 0,
+            });
+          }
+          return Response.json({ error: "not_found" }, { status: 404 });
+        },
+      };
+    },
+  };
+  return { deleted, namespace: namespace as unknown as DurableObjectNamespace };
+}
+
 test("tool proxies keep credentials server-side and preserve native request shapes", async () => {
   const originalFetch = globalThis.fetch;
   const upstream: Array<{ url: string; init?: RequestInit }> = [];
@@ -180,13 +224,157 @@ test("BYOK creation rejects cross-origin requests before storing a key", async (
   assert.equal(credentials.size, 0);
 });
 
-test("the deployed Worker does not expose local eval evidence", async () => {
-  for (const path of ["/api/evals", "/api/evals/events", "/api/evals/case?id=abc"]) {
+test("ChatGPT login exposes only device state while subscription credentials stay server-side", async () => {
+  const { deleted, namespace } = createChatGptSessions();
+  const env = { ENVIRONMENT: "test", CHATGPT_SESSIONS: namespace };
+  const started = await worker.fetch(new Request("https://demo.test/api/auth/chatgpt", {
+    method: "POST",
+    headers: { "x-nanocodex-request": "1" },
+  }), env);
+  assert.equal(started.status, 200);
+  const startBody = await started.text();
+  assert.match(startBody, /ABCD-EFGH/);
+  assert.doesNotMatch(startBody, /subscription-secret/);
+  const setCookie = started.headers.get("set-cookie") ?? "";
+  assert.match(setCookie, /^nanocodex_chatgpt=[A-Za-z0-9_-]{43};/);
+  assert.match(setCookie, /Path=\/api/);
+  assert.match(setCookie, /HttpOnly/);
+  assert.match(setCookie, /SameSite=Strict/);
+  assert.match(setCookie, /Secure/);
+  const cookie = setCookie.split(";", 1)[0]!;
+
+  const status = await worker.fetch(new Request("https://demo.test/api/auth/chatgpt", {
+    headers: { cookie },
+  }), env);
+  assert.deepEqual(await status.json(), { state: "authenticated", accountId: "account-1" });
+
+  const health = await worker.fetch(new Request("https://demo.test/api/health", {
+    headers: { cookie },
+  }), env);
+  assert.deepEqual(await health.json(), {
+    agent_configured: true,
+    credential_source: "subscription",
+    service: "nanocodex",
+    runtime: "cloudflare-workers",
+    status: "ok",
+  });
+
+  const originalFetch = globalThis.fetch;
+  let upstreamUrl = "";
+  let upstreamHeaders = new Headers();
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    upstreamUrl = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    upstreamHeaders = new Headers(init?.headers);
+    return Response.json({ output: "ok" });
+  }) as typeof fetch;
+  try {
+    const response = await worker.fetch(new Request("https://demo.test/api/tools/web-search", {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: "https://demo.test", cookie },
+      body: JSON.stringify({
+        session_id: "session-1",
+        commands: { search_query: [{ q: "nanocodex" }] },
+      }),
+    }), env);
+    assert.equal(response.status, 200);
+    assert.equal(upstreamUrl, "https://chatgpt.com/backend-api/codex/alpha/search");
+    assert.equal(upstreamHeaders.get("authorization"), "Bearer subscription-secret");
+    assert.equal(upstreamHeaders.get("chatgpt-account-id"), "account-1");
+    assert.equal(upstreamHeaders.get("originator"), "codex_cli_rs");
+    assert.equal(upstreamHeaders.get("user-agent"), "codex_cli_rs/0.0.0");
+
+    const localResponse = await worker.fetch(new Request("https://demo.test/api/tools/web-search", {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: "https://demo.test", cookie },
+      body: JSON.stringify({
+        session_id: "session-1",
+        commands: { search_query: [{ q: "nanocodex" }] },
+      }),
+    }), { ...env, ENVIRONMENT: "development" });
+    assert.equal(localResponse.status, 200);
+    assert.equal(upstreamUrl, "http://127.0.0.1:8791/backend-api/codex/alpha/search");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+
+  const cleared = await worker.fetch(new Request("https://demo.test/api/auth/chatgpt", {
+    method: "DELETE",
+    headers: { "x-nanocodex-request": "1", cookie },
+  }), env);
+  assert.equal(cleared.status, 200);
+  assert.match(cleared.headers.get("set-cookie") ?? "", /Max-Age=0/);
+  assert.equal(deleted.size, 1);
+});
+
+test("ChatGPT login rejects cross-origin session creation", async () => {
+  const { namespace } = createChatGptSessions();
+  const response = await worker.fetch(new Request("https://demo.test/api/auth/chatgpt", {
+    method: "POST",
+    headers: { origin: "https://evil.test" },
+  }), { ENVIRONMENT: "test", CHATGPT_SESSIONS: namespace });
+  assert.equal(response.status, 403);
+});
+
+test("eval routes require a configured coordinator origin", async () => {
+  const response = await worker.fetch(
+    new Request("https://demo.test/api/evals"),
+    { ENVIRONMENT: "test" },
+  );
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), { error: "evaluation API is not configured" });
+});
+
+test("only the development Worker defaults to the loopback coordinator tunnel", async () => {
+  const originalFetch = globalThis.fetch;
+  let upstream = "";
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    upstream = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    return Response.json({ schemaVersion: 1 });
+  }) as typeof fetch;
+  try {
     const response = await worker.fetch(
-      new Request(`https://demo.test${path}`),
-      { ENVIRONMENT: "test" },
+      new Request("https://demo.test/api/evals"),
+      { ENVIRONMENT: "development" },
     );
-    assert.equal(response.status, 404, path);
-    assert.deepEqual(await response.json(), { error: "not_found" });
+    assert.equal(response.status, 200);
+    assert.equal(upstream, "http://127.0.0.1:8788/v1/evals");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("eval routes proxy to the coordinator without adding another cache", async () => {
+  const originalFetch = globalThis.fetch;
+  const upstream: Array<{ url: string; headers: Headers }> = [];
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    upstream.push({ url, headers: new Headers(init?.headers) });
+    return Response.json({ schemaVersion: 1 }, {
+      headers: { "cache-control": "public, max-age=3600" },
+    });
+  }) as typeof fetch;
+
+  try {
+    const response = await worker.fetch(
+      new Request("https://demo.test/api/evals/worksets/workset/tasks/task?ignored=true"),
+      {
+        ENVIRONMENT: "test",
+        EVALS_API_ORIGIN: "https://evals-api.example.com/private/base",
+        EVALS_ACCESS_CLIENT_ID: "access-id",
+        EVALS_ACCESS_CLIENT_SECRET: "access-secret",
+      },
+    );
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.deepEqual(await response.json(), { schemaVersion: 1 });
+    assert.equal(
+      upstream[0]?.url,
+      "https://evals-api.example.com/v1/evals/worksets/workset/tasks/task?ignored=true",
+    );
+    assert.equal(upstream[0]?.headers.get("accept"), "application/json");
+    assert.equal(upstream[0]?.headers.get("cf-access-client-id"), "access-id");
+    assert.equal(upstream[0]?.headers.get("cf-access-client-secret"), "access-secret");
+  } finally {
+    globalThis.fetch = originalFetch;
   }
 });

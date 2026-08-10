@@ -1,0 +1,207 @@
+export type EvalCoordinateState = "unclaimed" | "running" | "success" | "failed";
+
+export type EvalSummary = {
+  total: number;
+  unclaimed: number;
+  running: number;
+  success: number;
+  failed: number;
+};
+
+export type EvalWorkset = {
+  id: string;
+  profile: string;
+  digest: string;
+  createdAtMs: number;
+  taskCount: number;
+  summary: EvalSummary;
+};
+
+export type EvalOverview = {
+  schemaVersion: number;
+  observedAtMs: number;
+  summary: EvalSummary;
+  worksets: EvalWorkset[];
+};
+
+export type EvalCoordinate = {
+  id: string;
+  repetition: number;
+  state: EvalCoordinateState;
+  status: string | null;
+  outcome: string | null;
+  updatedAtMs: number | null;
+  durationMs: number | null;
+  message: string | null;
+  detailId: string | null;
+};
+
+export type EvalTreatment = {
+  id: string;
+  label: string;
+  harness: string;
+  model: string;
+  thinking: string;
+  cells: EvalCoordinate[];
+};
+
+export type EvalTaskOverview = {
+  id: string;
+  name: string;
+  label: string;
+  digest: string;
+  treatmentCount: number;
+  summary: EvalSummary;
+};
+
+export type EvalTask = {
+  id: string;
+  name: string;
+  label: string;
+  digest: string;
+  treatments: EvalTreatment[];
+};
+
+export type EvalWorksetDetail = {
+  schemaVersion: number;
+  observedAtMs: number;
+  workset: EvalWorkset;
+  tasks: EvalTaskOverview[];
+};
+
+export type EvalResultPoint = {
+  id: string;
+  taskId: string;
+  taskName: string;
+  taskLabel: string;
+  harness: string;
+  model: string;
+  thinking: string;
+  repetition: number;
+  status: string | null;
+  outcome: string | null;
+  durationMs: number | null;
+  inputTokens: number | null;
+  cachedInputTokens: number | null;
+  outputTokens: number | null;
+  reasoningOutputTokens: number | null;
+  totalTokens: number | null;
+  costUsd: number | null;
+};
+
+export type EvalWorksetResults = {
+  schemaVersion: number;
+  observedAtMs: number;
+  worksetId: string;
+  points: EvalResultPoint[];
+};
+
+export type EvalTaskDetail = {
+  schemaVersion: number;
+  observedAtMs: number;
+  worksetId: string;
+  task: EvalTask;
+};
+
+export type EvalCoordinateOutcome = {
+  id: string;
+  status: string | null;
+  outcome: string | null;
+};
+
+export type EvalTaskOutcomesPage = {
+  schemaVersion: number;
+  observedAtMs: number;
+  worksetId: string;
+  taskId: string;
+  total: number;
+  nextCursor: number | null;
+  outcomes: EvalCoordinateOutcome[];
+};
+
+export type EvalCase = {
+  schemaVersion: number;
+  taskName: string | null;
+  prompt: string | null;
+  status: string | null;
+  outcome: string | null;
+  environment: string | null;
+  model: string | null;
+  effort: string | null;
+  finalMessage: string | null;
+  toolCalls: number | null;
+  usage: Record<string, unknown> | null;
+  verifier: Record<string, unknown> | null;
+  exception: Record<string, unknown> | null;
+  timing: Record<string, unknown> | null;
+  verifierStdout: string | null;
+  verifierStderr: string | null;
+};
+
+export class EvalApiError extends Error {
+  constructor(
+    message: string,
+    readonly status: number,
+  ) {
+    super(message);
+    this.name = "EvalApiError";
+  }
+}
+
+async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
+  const response = await fetch(path, {
+    headers: { accept: "application/json" },
+    cache: "no-store",
+    signal,
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => null) as { error?: unknown } | null;
+    const detail = typeof body?.error === "string" ? body.error : `HTTP ${response.status}`;
+    throw new EvalApiError(`Evaluation API request failed: ${detail}`, response.status);
+  }
+  return response.json() as Promise<T>;
+}
+
+export class EvalApiClient {
+  overview(signal?: AbortSignal) {
+    return getJson<EvalOverview>("/api/evals", signal);
+  }
+
+  workset(id: string, signal?: AbortSignal) {
+    return getJson<EvalWorksetDetail>(`/api/evals/worksets/${encodeURIComponent(id)}`, signal);
+  }
+
+  worksetResults(id: string, signal?: AbortSignal) {
+    return getJson<EvalWorksetResults>(
+      `/api/evals/worksets/${encodeURIComponent(id)}/results`,
+      signal,
+    );
+  }
+
+  taskResults(worksetId: string, taskId: string, signal?: AbortSignal) {
+    return getJson<EvalWorksetResults>(
+      `/api/evals/worksets/${encodeURIComponent(worksetId)}/tasks/${encodeURIComponent(taskId)}/results`,
+      signal,
+    );
+  }
+
+  task(worksetId: string, taskId: string, signal?: AbortSignal) {
+    return getJson<EvalTaskDetail>(
+      `/api/evals/worksets/${encodeURIComponent(worksetId)}/tasks/${encodeURIComponent(taskId)}`,
+      signal,
+    );
+  }
+
+  taskOutcomes(worksetId: string, taskId: string, cursor: number, signal?: AbortSignal) {
+    return getJson<EvalTaskOutcomesPage>(
+      `/api/evals/worksets/${encodeURIComponent(worksetId)}/tasks/${encodeURIComponent(taskId)}/outcomes?cursor=${cursor}&limit=8`,
+      signal,
+    );
+  }
+
+  evalCase(id: string, signal?: AbortSignal) {
+    return getJson<EvalCase>(`/api/evals/cases/${encodeURIComponent(id)}`, signal);
+  }
+}
+
+export const evalApi = new EvalApiClient();
