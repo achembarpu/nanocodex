@@ -35,6 +35,23 @@
 - Preserve unrelated work. Never commit `.env`, caches, retained jobs, build
   output, or another user's untracked files.
 
+## Experimental eval iteration
+
+- Treat eval ledgers, coordinator state, retained benchmark artifacts, and
+  their schemas as experimental development state, not a compatibility
+  boundary. Evolve the canonical format directly as the benchmark system
+  changes.
+- Do not add backward-compatible readers, dual-write paths, legacy schema
+  support, or compatibility shims unless the user explicitly asks for them.
+  Use a direct one-way migration for the active corpus when its data remains
+  useful; otherwise recreate or reseed the experimental state in the new
+  format.
+- Do not pause routine eval iteration or deployment to make backup copies of
+  experimental benchmark state. Make a backup only when the user explicitly
+  requests one.
+- Once active state has moved to the new format, remove obsolete format and
+  migration code instead of retaining permanent compatibility machinery.
+
 ## Codex reference
 
 - Use the local checkout at `~/github/openai/codex/codex-rs` before making an
