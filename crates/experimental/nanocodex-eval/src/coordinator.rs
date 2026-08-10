@@ -170,6 +170,10 @@ enum FinishRequest {
         error: String,
         evidence: Option<String>,
     },
+    Retry {
+        error: String,
+        evidence: Option<String>,
+    },
 }
 
 #[derive(Deserialize)]
@@ -442,7 +446,7 @@ impl CoordinatorClient {
         .await
     }
 
-    /// Records a terminal evaluation failure for one running task row.
+    /// Records a verifier-failing result for one running task row.
     pub async fn fail(&self, claim: &RemoteTaskClaim, error: &str) -> Result<(), CoordinatorError> {
         self.finish(
             claim,
@@ -451,7 +455,7 @@ impl CoordinatorClient {
         .await
     }
 
-    /// Uploads retained evidence and records a terminal failure.
+    /// Uploads retained evidence and records a verifier-failing result.
     pub async fn fail_with_evidence(
         &self,
         claim: &RemoteTaskClaim,
@@ -467,6 +471,42 @@ impl CoordinatorClient {
             claim,
             serde_json::json!({
                 "outcome": "failed",
+                "error": error,
+                "evidence": evidence.to_string_lossy(),
+            }),
+        )
+        .await
+    }
+
+    /// Records an infrastructure-failed attempt and makes its row claimable again.
+    pub async fn retry(
+        &self,
+        claim: &RemoteTaskClaim,
+        error: &str,
+    ) -> Result<(), CoordinatorError> {
+        self.finish(
+            claim,
+            serde_json::json!({ "outcome": "retry", "error": error }),
+        )
+        .await
+    }
+
+    /// Uploads infrastructure-failure evidence before making the row claimable again.
+    pub async fn retry_with_evidence(
+        &self,
+        claim: &RemoteTaskClaim,
+        output_directory: &Path,
+        evidence: &Path,
+        error: &str,
+    ) -> Result<(), CoordinatorError> {
+        let evidence = evidence
+            .strip_prefix(output_directory)
+            .map_err(|_| CoordinatorError::EvidencePath)?;
+        self.upload(claim, output_directory).await?;
+        self.finish(
+            claim,
+            serde_json::json!({
+                "outcome": "retry",
                 "error": error,
                 "evidence": evidence.to_string_lossy(),
             }),
@@ -759,6 +799,19 @@ async fn finish(
             active
                 .claim
                 .fail(evidence.as_deref(), &error)
+                .map_err(ApiError::ledger)?;
+        }
+        FinishRequest::Retry { error, evidence } => {
+            let evidence = evidence
+                .as_deref()
+                .map(|evidence| safe_evidence(active.claim.output_directory(), evidence))
+                .transpose()?;
+            if evidence.as_ref().is_some_and(|evidence| !evidence.exists()) {
+                return Err(ApiError::bad_request("failure evidence was not uploaded"));
+            }
+            active
+                .claim
+                .retry(evidence.as_deref(), &error)
                 .map_err(ApiError::ledger)?;
         }
     }
@@ -1068,6 +1121,7 @@ impl TryFrom<WireTreatment> for EvaluationTreatment {
 mod tests {
     use std::{fs, path::Path};
 
+    use rusqlite::Connection;
     use tokio::task::JoinHandle;
 
     use super::*;
@@ -1219,7 +1273,10 @@ thinking = ["high"]
             fs::write(output.join("vm/config.json"), "{}\n").unwrap();
             client.succeed(claim, &output, &evidence).await.unwrap();
         }
-        assert!(!stale_marker.exists());
+        assert!(
+            stale_marker.exists(),
+            "one attempt must not erase sibling evidence"
+        );
 
         let status = client.status().await.unwrap();
         assert_eq!(status["tasks"]["success"], 2);
@@ -1409,6 +1466,48 @@ thinking = ["high"]
             client.claim(&selection).await.unwrap(),
             RemoteClaim::Complete
         ));
+        server.abort();
+    }
+
+    #[tokio::test]
+    async fn infrastructure_failure_requeues_the_same_coordinate() {
+        let (directory, client, selection, server) = fixture().await;
+        let first = client.clone().worker("first-worker");
+        let RemoteClaim::Run {
+            claim, repetition, ..
+        } = first.claim(&selection).await.unwrap()
+        else {
+            panic!("first worker should run");
+        };
+        first.retry(&claim, "provider returned 429").await.unwrap();
+
+        let status = client.status().await.unwrap();
+        assert_eq!(status["tasks"]["unclaimed"], 2);
+        assert_eq!(status["tasks"]["failed"], 0);
+        let replacement = client.clone().worker("replacement-worker");
+        let RemoteClaim::Run {
+            repetition: replacement_repetition,
+            ..
+        } = replacement.claim(&selection).await.unwrap()
+        else {
+            panic!("infrastructure-failed coordinate should be claimable");
+        };
+        assert_eq!(replacement_repetition, repetition);
+        let connection = Connection::open(directory.path().join("state/state.sqlite3")).unwrap();
+        let attempt: (String, String) = connection
+            .query_row(
+                "SELECT state, error FROM eval_attempts ORDER BY id LIMIT 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            attempt,
+            (
+                "infrastructure_failed".to_owned(),
+                "provider returned 429".to_owned()
+            )
+        );
         server.abort();
     }
 

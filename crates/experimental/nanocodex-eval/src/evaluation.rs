@@ -449,6 +449,7 @@ impl Evaluation {
             workset.generation(),
             &claim.family_key,
             claim.repetition,
+            claim.id(),
         );
         Ok(CoordinateClaim {
             workset,
@@ -722,10 +723,19 @@ impl CoordinateClaim {
         Ok(())
     }
 
-    /// Records failed execution if this claim still owns the row.
+    /// Records a verifier-failing execution if this claim still owns the row.
     pub fn fail(mut self, evidence: Option<&Path>, failure: &str) -> Result<(), EvaluationError> {
         self.workset
             .fail(&self.claim, evidence, failure)
+            .map_err(error)?;
+        self.finished = true;
+        Ok(())
+    }
+
+    /// Retains an infrastructure failure and returns the coordinate to the claimable pool.
+    pub fn retry(mut self, evidence: Option<&Path>, failure: &str) -> Result<(), EvaluationError> {
+        self.workset
+            .retry(&self.claim, evidence, failure)
             .map_err(error)?;
         self.finished = true;
         Ok(())
@@ -782,6 +792,7 @@ fn coordinate_output(
     profile_digest: &str,
     family_key: &str,
     repetition: u16,
+    claim_id: &str,
 ) -> PathBuf {
     let family_digest = hex::encode(Sha256::digest(family_key.as_bytes()));
     state_directory
@@ -789,6 +800,7 @@ fn coordinate_output(
         .join(profile_digest)
         .join(family_digest)
         .join(format!("k-{repetition}"))
+        .join(claim_id)
 }
 
 impl Drop for CoordinateClaim {

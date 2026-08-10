@@ -77,9 +77,11 @@ profile -> task/treatment families -> k=1..N pre-materialized rows
 ```
 
 Rows have exactly four durable states: `unclaimed`, `running`, `success`, and
-`failed`. Preparation and execution both happen while the row is `running`.
-A reported evaluation outcome is terminal; losing the worker owner releases
-the row to `unclaimed` for another attempt. A claim ID fences late writes.
+`failed`. `success` means the verifier returned a passing score; `failed` means
+the verifier returned a failing score. Preparation and execution both happen
+while the row is `running`. Infrastructure failures and lost worker owners are
+retained in append-only attempt history, then release the row to `unclaimed`
+for another attempt. A claim ID fences late writes.
 Local execution uses an ownership lock; remote execution combines
 the coordinator's recovered row ownership with the benchmarker's direct child
 process observation.

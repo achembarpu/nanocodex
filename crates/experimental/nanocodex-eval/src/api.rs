@@ -680,6 +680,10 @@ fn read_outcome(result: &Path) -> Result<Option<CaseEvidence>, String> {
     read_evidence(result)
 }
 
+pub(crate) fn retained_verifier_status(result: &Path) -> Result<Option<String>, String> {
+    read_outcome(result).map(|evidence| evidence.and_then(|evidence| evidence.status))
+}
+
 fn events_path(result: &Path) -> Option<PathBuf> {
     if result.is_dir() {
         Some(result.join("events.jsonl"))

@@ -4,7 +4,7 @@ use clap::Args;
 use eyre::{Result, WrapErr as _, eyre};
 use nanocodex::{Model, Thinking};
 use nanocodex_eval::{
-    EvalAttemptOutcome, EvalEventKind, EvalEventStream, EvalOutcome, Evaluation, EvaluationClaim,
+    EvalAttemptOutcome, EvalEventKind, EvalEventStream, EvalStatus, Evaluation, EvaluationClaim,
     EvaluationSelector, EvaluationWork, Evaluator, ResolvedHarness, Task,
     atif::AtifBuilder,
     coordinator::{CoordinatorClient, RemoteClaim},
@@ -134,8 +134,9 @@ enum RunOutput<'a> {
         task: &'a str,
         repetition: u16,
         evidence: &'a str,
+        status: &'a str,
     },
-    Failed {
+    InfrastructureFailed {
         profile: &'a str,
         task: &'a str,
         repetition: u16,
@@ -309,40 +310,47 @@ impl Run {
                 }
                 .await;
                 match result {
-                    Ok(ExecutionResult::Success(evidence)) => {
-                        claim.succeed(&evidence)?;
+                    Ok(ExecutionResult::Completed { status, evidence }) => {
+                        let status_name = eval_status_name(status);
+                        match status {
+                            EvalStatus::Passed => claim.succeed(&evidence)?,
+                            EvalStatus::Failed => {
+                                claim.fail(Some(&evidence), "verifier returned a failing score")?
+                            }
+                        }
                         let evidence = evidence.to_string_lossy();
                         write_json(&RunOutput::Completed {
                             profile: evaluation.name(),
                             task: &task_selector,
                             repetition,
                             evidence: &evidence,
+                            status: status_name,
                         })?;
                         Ok(())
                     }
-                    Ok(ExecutionResult::Failed { error, evidence }) => {
-                        claim.fail(Some(&evidence), &error)?;
-                        write_json(&RunOutput::Failed {
+                    Ok(ExecutionResult::InfrastructureFailed { error, evidence }) => {
+                        claim.retry(Some(&evidence), &error)?;
+                        write_json(&RunOutput::InfrastructureFailed {
                             profile: evaluation.name(),
                             task: &task_selector,
                             repetition,
                             error: &error,
                         })?;
                         Err(eyre!(
-                            "task failed permanently; evidence retained at {}: {error}",
+                            "task infrastructure failed; evidence retained at {} and row requeued: {error}",
                             evidence.display()
                         ))
                     }
                     Err(error) => {
                         let message = format!("{error:#}");
-                        claim.fail(None, &message)?;
-                        write_json(&RunOutput::Failed {
+                        claim.retry(None, &message)?;
+                        write_json(&RunOutput::InfrastructureFailed {
                             profile: evaluation.name(),
                             task: &task_selector,
                             repetition,
                             error: &message,
                         })?;
-                        Err(error).wrap_err("task failed permanently")
+                        Err(error).wrap_err("task infrastructure failed and row was requeued")
                     }
                 }
             }
@@ -404,9 +412,9 @@ async fn run_remote(
                 Ok(setup) => setup,
                 Err(error) => {
                     let detail = format!("{error:#}");
-                    let finish = coordinator.fail(&claim, &detail).await;
+                    let finish = coordinator.retry(&claim, &detail).await;
                     finish?;
-                    return Err(error).wrap_err("remote task setup failed permanently");
+                    return Err(error).wrap_err("remote task setup failed and row was requeued");
                 }
             };
             let execution = async {
@@ -424,33 +432,50 @@ async fn run_remote(
             };
             let result = execution.await;
             match result {
-                Ok(ExecutionResult::Success(evidence)) => {
-                    let finish = coordinator.succeed(&claim, output.path(), &evidence).await;
+                Ok(ExecutionResult::Completed { status, evidence }) => {
+                    let finish = match status {
+                        EvalStatus::Passed => {
+                            coordinator.succeed(&claim, output.path(), &evidence).await
+                        }
+                        EvalStatus::Failed => {
+                            coordinator
+                                .fail_with_evidence(
+                                    &claim,
+                                    output.path(),
+                                    &evidence,
+                                    "verifier returned a failing score",
+                                )
+                                .await
+                        }
+                    };
                     finish?;
                     write_json(&RunOutput::Completed {
                         profile,
                         task: &task_selector,
                         repetition,
                         evidence: "coordinator",
+                        status: eval_status_name(status),
                     })?;
                     Ok(())
                 }
-                Ok(ExecutionResult::Failed { error, evidence }) => {
+                Ok(ExecutionResult::InfrastructureFailed { error, evidence }) => {
                     let finish = coordinator
-                        .fail_with_evidence(&claim, output.path(), &evidence, &error)
+                        .retry_with_evidence(&claim, output.path(), &evidence, &error)
                         .await;
                     finish?;
-                    write_json(&RunOutput::Failed {
+                    write_json(&RunOutput::InfrastructureFailed {
                         profile,
                         task: &task_selector,
                         repetition,
                         error: &error,
                     })?;
-                    Err(eyre!("remote task failed permanently: {error}"))
+                    Err(eyre!(
+                        "remote task infrastructure failed and row was requeued: {error}"
+                    ))
                 }
                 Err(error) => {
                     let finish = coordinator
-                        .fail_with_evidence(
+                        .retry_with_evidence(
                             &claim,
                             output.path(),
                             output.path(),
@@ -458,7 +483,7 @@ async fn run_remote(
                         )
                         .await;
                     finish?;
-                    Err(error).wrap_err("remote task failed permanently")
+                    Err(error).wrap_err("remote task infrastructure failed and row was requeued")
                 }
             }
         }
@@ -510,8 +535,37 @@ impl ProfileTarget {
 }
 
 enum ExecutionResult {
-    Success(PathBuf),
-    Failed { error: String, evidence: PathBuf },
+    Completed {
+        status: EvalStatus,
+        evidence: PathBuf,
+    },
+    InfrastructureFailed {
+        error: String,
+        evidence: PathBuf,
+    },
+}
+
+const fn eval_status_name(status: EvalStatus) -> &'static str {
+    match status {
+        EvalStatus::Passed => "passed",
+        EvalStatus::Failed => "failed",
+    }
+}
+
+fn classify_execution(outcome: &EvalAttemptOutcome, evidence: PathBuf) -> ExecutionResult {
+    match outcome.scored() {
+        Some(result) => ExecutionResult::Completed {
+            status: result.status,
+            evidence,
+        },
+        None => ExecutionResult::InfrastructureFailed {
+            error: outcome.unscored().map_or_else(
+                || "evaluation attempt was not scored".to_owned(),
+                |failure| failure.traceback().to_owned(),
+            ),
+            evidence,
+        },
+    }
 }
 
 async fn prepare_resources(task: &Task, harnesses: &[ResolvedHarness]) -> Result<VmResources> {
@@ -563,14 +617,7 @@ async fn execute_coordinate(
                 .build()?;
             let outcome = run_native(&evaluator, task).await?;
             let evidence = evaluator.directory().to_path_buf();
-            if outcome.outcome() == EvalOutcome::InfrastructureError {
-                Ok(ExecutionResult::Failed {
-                    error: "native evaluator retained an infrastructure failure".to_owned(),
-                    evidence,
-                })
-            } else {
-                Ok(ExecutionResult::Success(evidence))
-            }
+            Ok(classify_execution(&outcome, evidence))
         }
         _ => {
             let (nanocodex, auth) =
@@ -609,14 +656,7 @@ async fn execute_coordinate(
             let outcome = run_native(harness.evaluator(), task).await?;
             harness.retain_trajectory(&outcome).await?;
             let evidence = harness.directory().to_path_buf();
-            if outcome.outcome() == EvalOutcome::InfrastructureError {
-                Ok(ExecutionResult::Failed {
-                    error: "external harness retained an infrastructure failure".to_owned(),
-                    evidence,
-                })
-            } else {
-                Ok(ExecutionResult::Success(evidence))
-            }
+            Ok(classify_execution(&outcome, evidence))
         }
     }
 }

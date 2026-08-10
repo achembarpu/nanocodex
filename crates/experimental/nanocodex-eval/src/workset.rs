@@ -1,9 +1,10 @@
 //! Durable pre-materialized evaluation tasks without scheduling policy.
 //!
-//! Every desired task/treatment/repetition is one SQLite row. Rows have only
-//! four states: `unclaimed`, `running`, `success`, and `failed`. Claiming is a
-//! short `BEGIN IMMEDIATE` compare-and-set transaction; execution never holds
-//! a SQLite transaction open.
+//! Every desired task/treatment/repetition is one SQLite row. Coordinate state
+//! records scheduling and verifier outcome; an append-only attempt table keeps
+//! infrastructure failures and interruptions without consuming a coordinate.
+//! Claiming is a short `BEGIN IMMEDIATE` compare-and-set transaction; execution
+//! never holds a SQLite transaction open.
 
 use std::{
     fs::{self, File, OpenOptions},
@@ -16,7 +17,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension as _, TransactionBehavio
 use serde::Serialize;
 use uuid::Uuid;
 
-const SCHEMA_VERSION: u32 = 5;
+const SCHEMA_VERSION: u32 = 6;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const OBSERVER_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 
@@ -120,9 +121,9 @@ pub struct TaskCounts {
     pub unclaimed: i64,
     /// Rows whose OS ownership lock is currently held.
     pub running: i64,
-    /// Rows whose execution completed successfully.
+    /// Rows whose verifier completed with a passing result.
     pub success: i64,
-    /// Rows whose execution or worker failed.
+    /// Rows whose verifier completed with a failing result.
     pub failed: i64,
 }
 
@@ -367,15 +368,24 @@ impl Workset {
             let lock = open_claim_lock(&self.claim_directory, task_id)?;
             lock.try_lock_exclusive()?;
             let claim_id = Uuid::now_v7().to_string();
+            let started_at_ms = now_ms()?;
             let changed = transaction.execute(
                 "UPDATE eval_tasks SET state = 'running', claim_id = ?1, worker = ?2, \
                     started_at_ms = ?3, finished_at_ms = NULL, result_path = NULL, error = NULL \
                  WHERE id = ?4 AND state = 'unclaimed'",
-                params![claim_id, worker, now_ms()?, task_id],
+                params![claim_id, worker, started_at_ms, task_id],
             )?;
             if changed != 1 {
                 return Err(WorksetError::StaleClaim);
             }
+            insert_attempt(
+                &transaction,
+                self.id,
+                task_id,
+                &claim_id,
+                worker,
+                started_at_ms,
+            )?;
             transaction.commit()?;
             return Ok(BeginTask::Run(TaskClaim {
                 task_id,
@@ -429,15 +439,24 @@ impl Workset {
             let lock = open_claim_lock(&self.claim_directory, task_id)?;
             lock.try_lock_exclusive()?;
             let claim_id = Uuid::now_v7().to_string();
+            let started_at_ms = now_ms()?;
             let changed = transaction.execute(
                 "UPDATE eval_tasks SET state = 'running', claim_id = ?1, worker = ?2, \
                     started_at_ms = ?3, finished_at_ms = NULL, result_path = NULL, error = NULL \
                  WHERE id = ?4 AND state = 'unclaimed'",
-                params![claim_id, worker, now_ms()?, task_id],
+                params![claim_id, worker, started_at_ms, task_id],
             )?;
             if changed != 1 {
                 return Err(WorksetError::StaleClaim);
             }
+            insert_attempt(
+                &transaction,
+                self.id,
+                task_id,
+                &claim_id,
+                worker,
+                started_at_ms,
+            )?;
             transaction.commit()?;
             return Ok(BeginTask::Run(TaskClaim {
                 task_id,
@@ -468,35 +487,34 @@ impl Workset {
         }
     }
 
-    /// Records a successful execution if the claim still owns the row.
+    /// Records a verifier-passing execution if the claim still owns the row.
     pub fn succeed(&self, claim: &TaskClaim, result_path: &Path) -> Result<(), WorksetError> {
-        self.finish(claim, "success", Some(result_path), None)
+        self.finish(claim, "success", "passed", Some(result_path), None)
     }
 
-    /// Records a failed execution if the claim still owns the row.
+    /// Records a verifier-failing execution if the claim still owns the row.
     pub fn fail(
         &self,
         claim: &TaskClaim,
         result_path: Option<&Path>,
         error: &str,
     ) -> Result<(), WorksetError> {
-        self.finish(claim, "failed", result_path, Some(error))
+        self.finish(claim, "failed", "failed", result_path, Some(error))
+    }
+
+    /// Retains an infrastructure-failed attempt and makes its coordinate claimable again.
+    pub fn retry(
+        &self,
+        claim: &TaskClaim,
+        result_path: Option<&Path>,
+        error: &str,
+    ) -> Result<(), WorksetError> {
+        self.release_attempt(claim, "infrastructure_failed", result_path, Some(error))
     }
 
     /// Releases an interrupted execution if the claim still owns the row.
     pub fn release(&self, claim: &TaskClaim) -> Result<(), WorksetError> {
-        let connection = open_connection(&self.path)?;
-        let changed = connection.execute(
-            "UPDATE eval_tasks SET state = 'unclaimed', claim_id = NULL, worker = NULL, \
-                started_at_ms = NULL, finished_at_ms = NULL, result_path = NULL, error = NULL \
-             WHERE id = ?1 AND state = 'running' AND claim_id = ?2",
-            params![claim.task_id, claim.claim_id],
-        )?;
-        if changed == 1 {
-            Ok(())
-        } else {
-            Err(WorksetError::StaleClaim)
-        }
+        self.release_attempt(claim, "interrupted", None, None)
     }
 
     /// Reacquires ownership of rows retained as running after an owner restart.
@@ -539,25 +557,40 @@ impl Workset {
 
     /// Releases every running row whose OS ownership lock is no longer held.
     pub fn reconcile_abandoned(&self) -> Result<usize, WorksetError> {
-        let connection = open_connection(&self.path)?;
+        let mut connection = open_connection(&self.path)?;
         let mut statement = connection.prepare(
-            "SELECT id FROM eval_tasks WHERE workset_id = ?1 AND state = 'running' ORDER BY id",
+            "SELECT id, claim_id FROM eval_tasks \
+             WHERE workset_id = ?1 AND state = 'running' ORDER BY id",
         )?;
         let ids = statement
-            .query_map([self.id], |row| row.get::<_, i64>(0))?
+            .query_map([self.id], |row| {
+                Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+            })?
             .collect::<Result<Vec<_>, _>>()?;
         drop(statement);
         let mut changed = 0;
-        for id in ids {
+        for (id, claim_id) in ids {
             let lock = open_claim_lock(&self.claim_directory, id)?;
             match lock.try_lock_exclusive() {
                 Ok(()) => {
-                    changed += connection.execute(
+                    let transaction =
+                        connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+                    let released = transaction.execute(
                         "UPDATE eval_tasks SET state = 'unclaimed', claim_id = NULL, worker = NULL, \
                             started_at_ms = NULL, finished_at_ms = NULL, result_path = NULL, error = NULL \
-                         WHERE id = ?1 AND state = 'running'",
-                        [id],
+                         WHERE id = ?1 AND state = 'running' AND claim_id = ?2",
+                        params![id, claim_id],
                     )?;
+                    if released == 1 {
+                        transaction.execute(
+                            "UPDATE eval_attempts SET state = 'interrupted', finished_at_ms = ?1, \
+                                error = 'claim owner disappeared' \
+                             WHERE task_id = ?2 AND claim_id = ?3 AND state = 'running'",
+                            params![now_ms()?, id, claim_id],
+                        )?;
+                    }
+                    transaction.commit()?;
+                    changed += released;
                 }
                 Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {}
                 Err(error) => return Err(error.into()),
@@ -576,34 +609,120 @@ impl Workset {
     fn finish(
         &self,
         claim: &TaskClaim,
-        state: &str,
+        coordinate_state: &str,
+        attempt_state: &str,
         result_path: Option<&Path>,
         error: Option<&str>,
     ) -> Result<(), WorksetError> {
-        let connection = open_connection(&self.path)?;
-        let changed = connection.execute(
+        let mut connection = open_connection(&self.path)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let finished_at_ms = now_ms()?;
+        let changed = transaction.execute(
             "UPDATE eval_tasks SET state = ?1, finished_at_ms = ?2, result_path = ?3, error = ?4 \
              WHERE id = ?5 AND state = 'running' AND claim_id = ?6",
             params![
-                state,
-                now_ms()?,
+                coordinate_state,
+                finished_at_ms,
                 result_path.map(|path| path.to_string_lossy()),
                 error,
                 claim.task_id,
                 claim.claim_id,
             ],
         )?;
-        if changed == 1 {
-            Ok(())
-        } else {
-            Err(WorksetError::StaleClaim)
+        if changed != 1 {
+            return Err(WorksetError::StaleClaim);
         }
+        finish_attempt(
+            &transaction,
+            claim,
+            attempt_state,
+            finished_at_ms,
+            result_path,
+            error,
+        )?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    fn release_attempt(
+        &self,
+        claim: &TaskClaim,
+        attempt_state: &str,
+        result_path: Option<&Path>,
+        error: Option<&str>,
+    ) -> Result<(), WorksetError> {
+        let mut connection = open_connection(&self.path)?;
+        let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let finished_at_ms = now_ms()?;
+        let changed = transaction.execute(
+            "UPDATE eval_tasks SET state = 'unclaimed', claim_id = NULL, worker = NULL, \
+                started_at_ms = NULL, finished_at_ms = NULL, result_path = NULL, error = NULL \
+             WHERE id = ?1 AND state = 'running' AND claim_id = ?2",
+            params![claim.task_id, claim.claim_id],
+        )?;
+        if changed != 1 {
+            return Err(WorksetError::StaleClaim);
+        }
+        finish_attempt(
+            &transaction,
+            claim,
+            attempt_state,
+            finished_at_ms,
+            result_path,
+            error,
+        )?;
+        transaction.commit()?;
+        Ok(())
     }
 }
 
 impl TaskClaim {
     pub(crate) fn id(&self) -> &str {
         &self.claim_id
+    }
+}
+
+fn insert_attempt(
+    transaction: &rusqlite::Transaction<'_>,
+    workset_id: i64,
+    task_id: i64,
+    claim_id: &str,
+    worker: &str,
+    started_at_ms: i64,
+) -> Result<(), WorksetError> {
+    transaction.execute(
+        "INSERT INTO eval_attempts(\
+            workset_id, task_id, claim_id, worker, state, started_at_ms\
+         ) VALUES (?1, ?2, ?3, ?4, 'running', ?5)",
+        params![workset_id, task_id, claim_id, worker, started_at_ms],
+    )?;
+    Ok(())
+}
+
+fn finish_attempt(
+    transaction: &rusqlite::Transaction<'_>,
+    claim: &TaskClaim,
+    state: &str,
+    finished_at_ms: i64,
+    result_path: Option<&Path>,
+    error: Option<&str>,
+) -> Result<(), WorksetError> {
+    let changed = transaction.execute(
+        "UPDATE eval_attempts SET state = ?1, finished_at_ms = ?2, result_path = ?3, error = ?4 \
+         WHERE task_id = ?5 AND claim_id = ?6 AND state = 'running'",
+        params![
+            state,
+            finished_at_ms,
+            result_path.map(|path| path.to_string_lossy()),
+            error,
+            claim.task_id,
+            claim.claim_id,
+        ],
+    )?;
+    if changed == 1 {
+        Ok(())
+    } else {
+        Err(WorksetError::StaleClaim)
     }
 }
 
@@ -812,12 +931,12 @@ impl WorksetObserver {
             let count = i64::try_from(abandoned.len())
                 .map_err(|_| WorksetError::OutOfRange("abandoned task count"))?;
             status.tasks.running -= count;
-            status.tasks.failed += count;
+            status.tasks.unclaimed += count;
             for family in &mut status.families {
                 let family_abandoned =
                     abandoned_in_family(&self.connection, &abandoned, &family.key)?;
                 family.running -= family_abandoned;
-                family.failed += family_abandoned;
+                family.unclaimed += family_abandoned;
             }
         }
         #[cfg(test)]
@@ -912,6 +1031,9 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), WorksetError> {
     )?;
     if version != 0 && four_state_exists {
         create_schema(connection)?;
+        if version < 6 {
+            migrate_attempt_history(connection)?;
+        }
         connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         return Ok(());
     }
@@ -920,10 +1042,75 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), WorksetError> {
             connection.execute("ALTER TABLE tasks ADD COLUMN assigned_host TEXT", [])?;
         }
         migrate_legacy_schema(connection, version >= 4)?;
+        migrate_attempt_history(connection)?;
+        connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         return Ok(());
     }
     create_schema(connection)?;
     connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    Ok(())
+}
+
+fn migrate_attempt_history(connection: &mut Connection) -> Result<(), WorksetError> {
+    let verifier_failed = {
+        let mut statement = connection.prepare(
+            "SELECT id, result_path FROM eval_tasks \
+             WHERE state = 'success' AND result_path IS NOT NULL",
+        )?;
+        statement
+            .query_map([], |row| {
+                Ok((
+                    row.get::<_, i64>(0)?,
+                    PathBuf::from(row.get::<_, String>(1)?),
+                ))
+            })?
+            .filter_map(|row| match row {
+                Ok((id, path))
+                    if matches!(
+                        crate::api::retained_verifier_status(&path),
+                        Ok(Some(status)) if status == "failed"
+                    ) =>
+                {
+                    Some(Ok(id))
+                }
+                Ok(_) => None,
+                Err(error) => Some(Err(error)),
+            })
+            .collect::<Result<Vec<_>, rusqlite::Error>>()?
+    };
+    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    transaction.execute_batch(
+        "INSERT OR IGNORE INTO eval_attempts(
+            workset_id, task_id, claim_id, worker, state, started_at_ms,
+            finished_at_ms, result_path, error
+         )
+         SELECT
+            workset_id, id, claim_id, COALESCE(worker, 'legacy'),
+            CASE state
+                WHEN 'success' THEN 'passed'
+                WHEN 'failed' THEN 'infrastructure_failed'
+                ELSE 'running'
+            END,
+            started_at_ms, finished_at_ms, result_path, error
+         FROM eval_tasks WHERE state != 'unclaimed';
+         UPDATE eval_tasks SET
+            state = 'unclaimed', claim_id = NULL, worker = NULL,
+            started_at_ms = NULL, finished_at_ms = NULL,
+            result_path = NULL, error = NULL
+         WHERE state = 'failed';",
+    )?;
+    for task_id in verifier_failed {
+        transaction.execute(
+            "UPDATE eval_tasks SET state = 'failed' WHERE id = ?1 AND state = 'success'",
+            [task_id],
+        )?;
+        transaction.execute(
+            "UPDATE eval_attempts SET state = 'failed' \
+             WHERE task_id = ?1 AND state = 'passed'",
+            [task_id],
+        )?;
+    }
+    transaction.commit()?;
     Ok(())
 }
 
@@ -969,7 +1156,29 @@ fn create_schema(connection: &Connection) -> Result<(), WorksetError> {
          CREATE INDEX IF NOT EXISTS eval_tasks_claimable
             ON eval_tasks(workset_id, family_key, state, repetition);
          CREATE INDEX IF NOT EXISTS eval_tasks_next
-            ON eval_tasks(workset_id, state, id);",
+            ON eval_tasks(workset_id, state, id);
+         CREATE TABLE IF NOT EXISTS eval_attempts(
+            id INTEGER PRIMARY KEY,
+            workset_id INTEGER NOT NULL REFERENCES worksets(id),
+            task_id INTEGER NOT NULL REFERENCES eval_tasks(id),
+            claim_id TEXT NOT NULL UNIQUE,
+            worker TEXT NOT NULL,
+            state TEXT NOT NULL CHECK(state IN (
+                'running','passed','failed','infrastructure_failed','interrupted'
+            )),
+            started_at_ms INTEGER NOT NULL,
+            finished_at_ms INTEGER,
+            result_path TEXT,
+            error TEXT,
+            CHECK(
+                (state = 'running' AND finished_at_ms IS NULL) OR
+                (state != 'running' AND finished_at_ms IS NOT NULL)
+            )
+         );
+         CREATE INDEX IF NOT EXISTS eval_attempts_task
+            ON eval_attempts(task_id, started_at_ms);
+         CREATE INDEX IF NOT EXISTS eval_attempts_worker
+            ON eval_attempts(worker, state);",
     )?;
     Ok(())
 }
@@ -1240,6 +1449,73 @@ mod tests {
     }
 
     #[test]
+    fn infrastructure_failure_is_retained_as_an_attempt_and_requeues_the_row() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.sqlite3");
+        let workset = Workset::create(&path, "release").unwrap();
+        let (tasks, families) = definition(directory.path(), 1);
+        workset.append(&tasks, &families).unwrap();
+        let BeginTask::Run(claim) = workset
+            .begin_for_worker("terminal/fix-git|harness|high", "worker-one")
+            .unwrap()
+        else {
+            panic!("row should be claimable");
+        };
+        let evidence = directory.path().join("attempt-one/events.jsonl");
+        workset
+            .retry(&claim, Some(&evidence), "provider returned 429")
+            .unwrap();
+        drop(claim);
+
+        let status = workset.status().unwrap();
+        assert_eq!(status.tasks.unclaimed, 1);
+        assert_eq!(status.tasks.running, 0);
+        assert_eq!(status.tasks.failed, 0);
+        let connection = open_connection(&path).unwrap();
+        let attempt: (String, String, String, String) = connection
+            .query_row(
+                "SELECT worker, state, result_path, error FROM eval_attempts",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            attempt,
+            (
+                "worker-one".to_owned(),
+                "infrastructure_failed".to_owned(),
+                evidence.to_string_lossy().into_owned(),
+                "provider returned 429".to_owned(),
+            )
+        );
+
+        let BeginTask::Run(retry) = workset
+            .begin_for_worker("terminal/fix-git|harness|high", "worker-two")
+            .unwrap()
+        else {
+            panic!("infrastructure-failed row should be claimable again");
+        };
+        workset
+            .fail(
+                &retry,
+                Some(Path::new("scored/events.jsonl")),
+                "verifier failed",
+            )
+            .unwrap();
+        let status = workset.status().unwrap();
+        assert_eq!(status.tasks.unclaimed, 0);
+        assert_eq!(status.tasks.failed, 1);
+        let attempts: Vec<String> = connection
+            .prepare("SELECT state FROM eval_attempts ORDER BY id")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(attempts, ["infrastructure_failed", "failed"]);
+    }
+
+    #[test]
     fn observer_is_read_only_and_notices_owner_death_without_sqlite_commit() {
         let directory = tempfile::tempdir().unwrap();
         let path = directory.path().join("state.sqlite3");
@@ -1257,7 +1533,8 @@ mod tests {
         drop(claim);
         let refreshed = observer.refresh().unwrap().unwrap();
         assert_eq!(refreshed.tasks.running, 0);
-        assert_eq!(refreshed.tasks.failed, 1);
+        assert_eq!(refreshed.tasks.unclaimed, 1);
+        assert_eq!(refreshed.tasks.failed, 0);
         assert!(
             observer
                 .connection
@@ -1372,15 +1649,115 @@ mod tests {
         let workset = Workset::open(&path, "release").unwrap();
         let status = workset.status().unwrap();
         assert_eq!(status.digest, "generation-one");
-        assert_eq!(status.tasks.failed, 1);
+        assert_eq!(status.tasks.unclaimed, 1);
+        assert_eq!(status.tasks.failed, 0);
         assert_eq!(status.tasks.running, 0);
+        let attempt_state = Connection::open(&path)
+            .unwrap()
+            .query_row("SELECT state FROM eval_attempts", [], |row| {
+                row.get::<_, String>(0)
+            })
+            .unwrap();
+        assert_eq!(attempt_state, "infrastructure_failed");
         assert_eq!(
-            Connection::open(path)
+            Connection::open(&path)
                 .unwrap()
                 .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
                 .unwrap(),
             SCHEMA_VERSION
         );
+    }
+
+    #[test]
+    fn version_five_infrastructure_failures_requeue_and_scored_results_are_reclassified() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("state.sqlite3");
+        let verifier_failed = directory.path().join("verifier-failed");
+        let passed = directory.path().join("passed");
+        fs::create_dir_all(&verifier_failed).unwrap();
+        fs::create_dir_all(&passed).unwrap();
+        fs::write(
+            verifier_failed.join("events.jsonl"),
+            "{\"type\":\"completed\",\"payload\":{\"status\":\"failed\",\"outcome\":\"verifier_failed\"}}\n",
+        )
+        .unwrap();
+        fs::write(
+            passed.join("events.jsonl"),
+            "{\"type\":\"completed\",\"payload\":{\"status\":\"passed\",\"outcome\":\"passed\"}}\n",
+        )
+        .unwrap();
+        let connection = open_connection(&path).unwrap();
+        create_schema(&connection).unwrap();
+        connection
+            .execute_batch(
+                "DROP TABLE eval_attempts;
+                 PRAGMA user_version = 5;
+                 INSERT INTO worksets(id,profile,digest,created_at_ms)
+                    VALUES(1,'release','digest',1);
+                 INSERT INTO task_definitions(id,workset_id,selector,name,root,digest)
+                    VALUES(1,1,'one','one','/tmp/one','task-digest');",
+            )
+            .unwrap();
+        for (id, repetition, state, claim, result, error) in [
+            (1, 0, "failed", "infra", None, Some("provider returned 429")),
+            (
+                2,
+                1,
+                "success",
+                "scored-failed",
+                Some(verifier_failed.as_path()),
+                None,
+            ),
+            (
+                3,
+                2,
+                "success",
+                "scored-passed",
+                Some(passed.as_path()),
+                None,
+            ),
+        ] {
+            connection
+                .execute(
+                    "INSERT INTO eval_tasks(
+                        id,workset_id,definition_id,family_key,treatment,repetition,state,
+                        claim_id,worker,started_at_ms,finished_at_ms,result_path,error
+                     ) VALUES(?1,1,1,'family','{}',?2,?3,?4,'worker',10,20,?5,?6)",
+                    params![
+                        id,
+                        repetition,
+                        state,
+                        claim,
+                        result.map(|path| path.to_string_lossy()),
+                        error,
+                    ],
+                )
+                .unwrap();
+        }
+        drop(connection);
+
+        let workset = Workset::open(&path, "release").unwrap();
+        let status = workset.status().unwrap();
+        assert_eq!(status.tasks.unclaimed, 1);
+        assert_eq!(status.tasks.success, 1);
+        assert_eq!(status.tasks.failed, 1);
+        let connection = open_connection(&path).unwrap();
+        let attempts = connection
+            .prepare("SELECT state FROM eval_attempts ORDER BY task_id")
+            .unwrap()
+            .query_map([], |row| row.get::<_, String>(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(attempts, ["infrastructure_failed", "failed", "passed"]);
+        let infrastructure_row: (String, Option<String>) = connection
+            .query_row(
+                "SELECT state, result_path FROM eval_tasks WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(infrastructure_row, ("unclaimed".to_owned(), None));
     }
 
     #[test]
