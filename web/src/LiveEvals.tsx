@@ -9,11 +9,12 @@ import {
   Search,
   X,
 } from "lucide-react";
-import { useQuery, useQueryClient } from "@tanstack/react-query";
+import { useQuery } from "@tanstack/react-query";
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
 import { useMatch, useNavigate } from "react-router";
 import {
   evalApi,
+  type EvalAnalyticsPoint,
   type EvalCase,
   type EvalCoordinate,
   type EvalOverview,
@@ -22,7 +23,7 @@ import {
   type EvalTask,
   type EvalTaskOverview,
   type EvalTreatment,
-  type EvalWorkset,
+  type EvalWorksetAnalytics,
   type EvalWorksetResults,
 } from "./evalApi";
 import "./evals.css";
@@ -37,8 +38,10 @@ type AnalyticsView = "frontier" | "runs";
 const resultStaleMs = 30_000;
 const resultCacheMs = 30 * 60_000;
 const taskStaleMs = 30_000;
-const resultKey = (worksetId: string | null, taskId: string | null) =>
-  ["evals", "results", worksetId, taskId] as const;
+const analyticsKey = (worksetId: string | null) =>
+  ["evals", "analytics", worksetId] as const;
+const taskResultKey = (worksetId: string | null, taskId: string | null) =>
+  ["evals", "task-results", worksetId, taskId] as const;
 const taskKey = (worksetId: string | null, taskId: string | null) =>
   ["evals", "task", worksetId, taskId] as const;
 
@@ -85,15 +88,16 @@ function taskMatchesFilter(task: EvalTaskOverview, filter: MatrixFilter) {
 }
 
 function coordinateLabel(cell: EvalCoordinate) {
-  if (cell.state !== "success") return cell.state;
-  return cell.status ?? cell.outcome ?? "success";
+  if (cell.status === "passed" || cell.status === "failed") return cell.status;
+  if (cell.outcome === "passed") return "passed";
+  return cell.state;
 }
 
 function CellMark({ cell }: { cell: EvalCoordinate }) {
   const label = coordinateLabel(cell);
   return (
     <span className={`eval-cell-mark ${label}`} aria-hidden="true">
-      {label === "passed" ? "✓" : label === "failed" ? "×" : cell.repetition}
+      {label === "passed" || label === "success" ? "✓" : label === "failed" ? "×" : cell.repetition}
     </span>
   );
 }
@@ -249,17 +253,24 @@ function PageBack({ onClick, children }: { onClick: () => void; children: string
   );
 }
 
-function Analytics({ points, view = "frontier" }: { points: EvalResultPoint[]; view?: AnalyticsView }) {
+function Analytics({
+  points,
+  view = "frontier",
+  taskCount,
+}: {
+  points: EvalResultPoint[] | EvalAnalyticsPoint[];
+  view?: AnalyticsView;
+  taskCount?: number;
+}) {
   return (
     <Suspense fallback={<section className="eval-chart-loading"><CircleDashed aria-hidden="true" /><span>Loading charts…</span></section>}>
-      <EvalAnalytics points={points} view={view} />
+      <EvalAnalytics points={points} view={view} taskCount={taskCount} />
     </Suspense>
   );
 }
 
 export function LiveEvals({ overview }: { overview: EvalOverview }) {
   const navigate = useNavigate();
-  const queryClient = useQueryClient();
   const taskRoute = useMatch("/evals/worksets/:worksetId/tasks/:taskId");
   const worksetRoute = useMatch("/evals/worksets/:worksetId");
   const route = taskRoute ?? worksetRoute;
@@ -323,24 +334,24 @@ export function LiveEvals({ overview }: { overview: EvalOverview }) {
     gcTime: resultCacheMs,
     refetchOnWindowFocus: false,
   });
-  const resultsSummary = selectedTaskOverview?.summary ?? selectedWorkset?.summary;
+  const analyticsQuery = useQuery<EvalWorksetAnalytics>({
+    queryKey: analyticsKey(selectedWorkset?.id ?? null),
+    enabled: Boolean(selectedWorkset && !taskRoute),
+    queryFn: ({ signal }) => evalApi.worksetAnalytics(selectedWorkset!.id, signal),
+    refetchInterval: selectedWorkset &&
+      selectedWorkset.summary.success + selectedWorkset.summary.failed < selectedWorkset.summary.total
+      ? 15_000
+      : false,
+    staleTime: resultStaleMs,
+    gcTime: resultCacheMs,
+    refetchOnWindowFocus: false,
+  });
   const resultsQuery = useQuery<EvalWorksetResults>({
-    queryKey: resultKey(selectedWorkset?.id ?? null, selectedTaskId),
-    enabled: Boolean(selectedWorkset && (!taskRoute || selectedTaskId)),
-    queryFn: ({ signal }) => selectedTaskId
-      ? evalApi.taskResults(selectedWorkset!.id, selectedTaskId, signal)
-      : evalApi.worksetResults(selectedWorkset!.id, signal),
-    placeholderData: () => {
-      if (!selectedWorkset || !selectedTaskId) return undefined;
-      const worksetResults = queryClient.getQueryData<EvalWorksetResults>(
-        resultKey(selectedWorkset.id, null),
-      );
-      return worksetResults ? {
-        ...worksetResults,
-        points: worksetResults.points.filter((point) => point.taskId === selectedTaskId),
-      } : undefined;
-    },
-    refetchInterval: resultsSummary && resultsSummary.success + resultsSummary.failed < resultsSummary.total
+    queryKey: taskResultKey(selectedWorkset?.id ?? null, selectedTaskId),
+    enabled: Boolean(selectedWorkset && taskRoute && selectedTaskId),
+    queryFn: ({ signal }) => evalApi.taskResults(selectedWorkset!.id, selectedTaskId!, signal),
+    refetchInterval: selectedTaskOverview &&
+      selectedTaskOverview.summary.success + selectedTaskOverview.summary.failed < selectedTaskOverview.summary.total
       ? 15_000
       : false,
     staleTime: resultStaleMs,
@@ -365,42 +376,6 @@ export function LiveEvals({ overview }: { overview: EvalOverview }) {
     setSelectedCell(null);
     navigate(`/evals/worksets/${encodeURIComponent(id)}`);
   }
-
-  function prefetchWorkset(workset: EvalWorkset) {
-    void queryClient.prefetchQuery({
-      queryKey: ["evals", "workset", workset.id],
-      queryFn: ({ signal }) => evalApi.workset(workset.id, signal),
-      staleTime: 1_000,
-    });
-    void queryClient.prefetchQuery({
-      queryKey: resultKey(workset.id, null),
-      queryFn: ({ signal }) => evalApi.worksetResults(workset.id, signal),
-      staleTime: resultStaleMs,
-      gcTime: resultCacheMs,
-    });
-  }
-
-  function prefetchTask(task: EvalTaskOverview) {
-    if (!selectedWorkset) return;
-    void queryClient.prefetchQuery({
-      queryKey: taskKey(selectedWorkset.id, task.id),
-      queryFn: ({ signal }) => evalApi.task(selectedWorkset.id, task.id, signal),
-      staleTime: taskStaleMs,
-      gcTime: resultCacheMs,
-    });
-    void queryClient.prefetchQuery({
-      queryKey: resultKey(selectedWorkset.id, task.id),
-      queryFn: ({ signal }) => evalApi.taskResults(selectedWorkset.id, task.id, signal),
-      staleTime: resultStaleMs,
-      gcTime: resultCacheMs,
-    });
-  }
-
-  const warmTaskIds = visibleTasks.slice(0, 8).map((task) => task.id).join(":");
-  useEffect(() => {
-    if (!selectedWorkset || taskRoute) return;
-    for (const task of visibleTasks.slice(0, 8)) prefetchTask(task);
-  }, [selectedWorkset?.id, taskRoute, warmTaskIds]);
 
   function chooseTask(id: string) {
     if (!selectedWorkset) return;
@@ -441,8 +416,6 @@ export function LiveEvals({ overview }: { overview: EvalOverview }) {
               type="button"
               className="eval-table-row eval-workset-grid"
               onClick={() => chooseWorkset(workset.id)}
-              onPointerEnter={() => prefetchWorkset(workset)}
-              onFocus={() => prefetchWorkset(workset)}
               key={workset.id}
             >
               <span className="eval-primary-cell"><strong>{workset.profile}</strong><small>{workset.digest.slice(0, 16)}</small></span>
@@ -481,10 +454,10 @@ export function LiveEvals({ overview }: { overview: EvalOverview }) {
           </div>
           <ProgressBar summary={selectedWorkset.summary} label={`${selectedWorkset.profile} progress`} />
         </section>
-        {resultsQuery.data ? <Analytics points={resultsQuery.data.points} /> : (
+        {analyticsQuery.data ? <Analytics points={analyticsQuery.data.points} taskCount={analyticsQuery.data.taskCount} /> : (
           <section className="eval-chart-loading">
             <CircleDashed aria-hidden="true" />
-            <span>{resultsQuery.error?.message ?? "Loading completed result points…"}</span>
+            <span>{analyticsQuery.error?.message ?? "Loading compact benchmark analytics…"}</span>
           </section>
         )}
         <section className="eval-full-table" aria-labelledby="tasks-heading">
@@ -501,7 +474,7 @@ export function LiveEvals({ overview }: { overview: EvalOverview }) {
             <span>Task</span><span>Progress</span><span>Treatments</span><span />
           </div>
           {visibleTasks.map((task) => (
-            <button type="button" className="eval-table-row eval-task-grid" onClick={() => chooseTask(task.id)} onPointerEnter={() => prefetchTask(task)} onFocus={() => prefetchTask(task)} key={task.id}>
+            <button type="button" className="eval-table-row eval-task-grid" onClick={() => chooseTask(task.id)} key={task.id}>
               <span className="eval-primary-cell"><strong>{task.label}</strong><small>{task.name}</small></span>
               <ProgressBar summary={task.summary} label={`${task.label} progress`} />
               <span>{task.treatmentCount}</span>

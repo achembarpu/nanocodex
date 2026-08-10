@@ -252,8 +252,8 @@ impl CoordinatorServer {
             .route("/v1/evals", get(eval_overview))
             .route("/v1/evals/worksets/{digest}", get(eval_workset))
             .route(
-                "/v1/evals/worksets/{digest}/results",
-                get(eval_workset_results),
+                "/v1/evals/worksets/{digest}/analytics",
+                get(eval_workset_analytics),
             )
             .route(
                 "/v1/evals/worksets/{digest}/tasks/{task_id}",
@@ -599,17 +599,17 @@ async fn eval_workset(
         .ok_or_else(|| ApiError::not_found("evaluation workset was not found"))
 }
 
-async fn eval_workset_results(
+async fn eval_workset_analytics(
     State(state): State<CoordinatorState>,
     AxumPath(digest): AxumPath<String>,
 ) -> Result<Response, ApiError> {
     let api = state.eval_api;
-    let results = tokio::task::spawn_blocking(move || api.workset_results(&digest))
+    let analytics = tokio::task::spawn_blocking(move || api.workset_analytics(&digest))
         .await
         .map_err(ApiError::internal)?
         .map_err(ApiError::internal)?;
-    results
-        .map(|results| Json(results).into_response())
+    analytics
+        .map(|analytics| Json(analytics).into_response())
         .ok_or_else(|| ApiError::not_found("evaluation workset was not found"))
 }
 
@@ -1340,12 +1340,12 @@ thinking = ["high"]
             task["task"]["treatments"][0]["cells"][0]["status"],
             "passed"
         );
-        let results: serde_json::Value = decode(
+        let analytics: serde_json::Value = decode(
             client
                 .http
                 .get(
                     client
-                        .endpoint(&format!("v1/evals/worksets/{digest}/results"))
+                        .endpoint(&format!("v1/evals/worksets/{digest}/analytics"))
                         .unwrap(),
                 )
                 .send()
@@ -1354,12 +1354,13 @@ thinking = ["high"]
         )
         .await
         .unwrap();
-        assert_eq!(results["points"].as_array().unwrap().len(), 2);
-        assert_eq!(results["points"][0]["status"], "passed");
-        assert_eq!(results["points"][0]["inputTokens"], 7);
-        assert_eq!(results["points"][0]["outputTokens"], 3);
-        assert_eq!(results["points"][0]["totalTokens"], 10);
-        assert_eq!(results["points"][0]["costUsd"], 0.042);
+        assert_eq!(analytics["taskCount"], 1);
+        assert_eq!(analytics["points"].as_array().unwrap().len(), 1);
+        assert_eq!(analytics["points"][0]["passed"], 2);
+        assert_eq!(analytics["points"][0]["completed"], 2);
+        assert_eq!(analytics["points"][0]["medianOutputTokens"], 3.0);
+        assert_eq!(analytics["points"][0]["outputSamples"], 2);
+        assert_eq!(analytics["points"][0]["medianCostUsd"], 0.042);
         let task_results: serde_json::Value = decode(
             client
                 .http

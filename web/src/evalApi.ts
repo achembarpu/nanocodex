@@ -74,6 +74,7 @@ export type EvalResultPoint = {
   taskId: string;
   taskName: string;
   taskLabel: string;
+  state: "success" | "failed";
   harness: string;
   model: string;
   thinking: string;
@@ -94,6 +95,28 @@ export type EvalWorksetResults = {
   observedAtMs: number;
   worksetId: string;
   points: EvalResultPoint[];
+};
+
+export type EvalAnalyticsPoint = {
+  harness: string;
+  model: string;
+  thinking: string;
+  passed: number;
+  completed: number;
+  medianOutputTokens: number | null;
+  outputSamples: number;
+  medianDurationMs: number | null;
+  durationSamples: number;
+  medianCostUsd: number | null;
+  costSamples: number;
+};
+
+export type EvalWorksetAnalytics = {
+  schemaVersion: number;
+  observedAtMs: number;
+  worksetId: string;
+  taskCount: number;
+  points: EvalAnalyticsPoint[];
 };
 
 export type EvalTaskDetail = {
@@ -171,9 +194,9 @@ export class EvalApiClient {
     return getJson<EvalWorksetDetail>(`/api/evals/worksets/${encodeURIComponent(id)}`, signal);
   }
 
-  worksetResults(id: string, signal?: AbortSignal) {
-    return getJson<EvalWorksetResults>(
-      `/api/evals/worksets/${encodeURIComponent(id)}/results`,
+  worksetAnalytics(id: string, signal?: AbortSignal) {
+    return getJson<EvalWorksetAnalytics>(
+      `/api/evals/worksets/${encodeURIComponent(id)}/analytics`,
       signal,
     );
   }

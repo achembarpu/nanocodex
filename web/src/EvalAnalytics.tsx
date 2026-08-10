@@ -9,7 +9,7 @@ import {
   YAxis,
   ZAxis,
 } from "recharts";
-import type { EvalResultPoint } from "./evalApi";
+import type { EvalAnalyticsPoint, EvalResultPoint } from "./evalApi";
 
 type AxisKey = "output" | "latency" | "cost";
 type RunAxisKey = "input" | "latency" | "cost";
@@ -89,15 +89,6 @@ function effortRank(effort: string) {
   return rank < 0 ? effortOrder.length : rank;
 }
 
-function median(values: number[]) {
-  if (!values.length) return null;
-  const sorted = [...values].sort((left, right) => left - right);
-  const middle = Math.floor(sorted.length / 2);
-  return sorted.length % 2
-    ? sorted[middle]
-    : (sorted[middle - 1] + sorted[middle]) / 2;
-}
-
 const metrics = {
   output: {
     title: "Score by output tokens",
@@ -132,6 +123,24 @@ const metrics = {
   tick: (value: number) => string;
 }>;
 
+const analyticsMetrics = {
+  output: {
+    value: (point: EvalAnalyticsPoint) => point.medianOutputTokens,
+    sample: (point: EvalAnalyticsPoint) => point.outputSamples,
+  },
+  latency: {
+    value: (point: EvalAnalyticsPoint) => point.medianDurationMs,
+    sample: (point: EvalAnalyticsPoint) => point.durationSamples,
+  },
+  cost: {
+    value: (point: EvalAnalyticsPoint) => point.medianCostUsd,
+    sample: (point: EvalAnalyticsPoint) => point.costSamples,
+  },
+} satisfies Record<AxisKey, {
+  value: (point: EvalAnalyticsPoint) => number | null;
+  sample: (point: EvalAnalyticsPoint) => number;
+}>;
+
 const runMetrics = {
   input: {
     title: "Input vs output tokens",
@@ -159,38 +168,28 @@ const runMetrics = {
 }>;
 
 function passed(point: EvalResultPoint) {
-  return point.status === "passed" || point.outcome === "passed";
+  if (point.status !== null) return point.status === "passed";
+  if (point.outcome !== null) return point.outcome === "passed";
+  return point.state === "success";
 }
 
-function seriesFor(points: EvalResultPoint[], axisKey: AxisKey): Series[] {
-  const axis = metrics[axisKey];
-  const grouped = new Map<string, EvalResultPoint[]>();
-  for (const point of points) {
-    const key = `${point.harness}\u0000${point.model}\u0000${point.thinking}`;
-    const group = grouped.get(key) ?? [];
-    group.push(point);
-    grouped.set(key, group);
-  }
+function seriesFor(points: EvalAnalyticsPoint[], axisKey: AxisKey): Series[] {
+  const axis = analyticsMetrics[axisKey];
   const lines = new Map<string, ChartPoint[]>();
-  for (const group of grouped.values()) {
-    const first = group[0];
-    const values = group.flatMap((point) => {
-      const value = axis.value(point);
-      return value === null ? [] : [value];
-    });
-    const x = median(values);
+  for (const point of points) {
+    const x = axis.value(point);
     if (x === null) continue;
-    const key = `${first.harness}\u0000${first.model}`;
+    const key = `${point.harness}\u0000${point.model}`;
     const line = lines.get(key) ?? [];
     line.push({
       x,
-      score: group.filter(passed).length / group.length * 100,
-      effort: first.thinking,
-      harness: first.harness,
-      model: first.model,
-      passed: group.filter(passed).length,
-      completed: group.length,
-      sample: values.length,
+      score: point.completed > 0 ? point.passed / point.completed * 100 : 0,
+      effort: point.thinking,
+      harness: point.harness,
+      model: point.model,
+      passed: point.passed,
+      completed: point.completed,
+      sample: axis.sample(point),
     });
     lines.set(key, line);
   }
@@ -229,7 +228,7 @@ function runSeriesFor(points: EvalResultPoint[], axisKey: RunAxisKey): RunSeries
       harness: point.harness,
       model: point.model,
       thinking: point.thinking,
-      result: point.status ?? point.outcome ?? "unknown",
+      result: point.status ?? point.outcome ?? point.state,
       passed: didPass,
     });
     grouped.set(key, series);
@@ -282,7 +281,7 @@ function ChartTooltip({
   );
 }
 
-function FrontierChart({ points, axisKey }: { points: EvalResultPoint[]; axisKey: AxisKey }) {
+function FrontierChart({ points, axisKey }: { points: EvalAnalyticsPoint[]; axisKey: AxisKey }) {
   const axis = metrics[axisKey];
   const series = useMemo(() => seriesFor(points, axisKey), [axisKey, points]);
   return (
@@ -420,14 +419,22 @@ function RunChart({ points, axisKey }: { points: EvalResultPoint[]; axisKey: Run
 export const EvalAnalytics = memo(function EvalAnalytics({
   points,
   view = "frontier",
+  taskCount = 0,
 }: {
-  points: EvalResultPoint[];
+  points: EvalResultPoint[] | EvalAnalyticsPoint[];
   view?: "frontier" | "runs";
+  taskCount?: number;
 }) {
-  const taskCount = new Set(points.map((point) => point.taskId)).size;
-  const passedCount = points.filter(passed).length;
   const runView = view === "runs";
-  const runLegend = useMemo(() => runLegendFor(points), [points]);
+  const runPoints = runView ? points as EvalResultPoint[] : [];
+  const frontierPoints = runView ? [] : points as EvalAnalyticsPoint[];
+  const passedCount = runView
+    ? runPoints.filter(passed).length
+    : frontierPoints.reduce((total, point) => total + point.passed, 0);
+  const completedCount = runView
+    ? runPoints.length
+    : frontierPoints.reduce((total, point) => total + point.completed, 0);
+  const runLegend = useMemo(() => runLegendFor(runPoints), [runPoints]);
   return (
     <section className="eval-artifact" aria-labelledby="eval-artifact-title">
       <header className="eval-artifact-head">
@@ -448,23 +455,23 @@ export const EvalAnalytics = memo(function EvalAnalytics({
           ) : null}
         </div>
         <dl>
-          <div><dt>Runs</dt><dd>{points.length}</dd></div>
-          <div><dt>{runView ? "Failed" : "Tasks"}</dt><dd>{runView ? points.length - passedCount : taskCount}</dd></div>
+          <div><dt>Runs</dt><dd>{completedCount}</dd></div>
+          <div><dt>{runView ? "Failed" : "Tasks"}</dt><dd>{runView ? completedCount - passedCount : taskCount}</dd></div>
           <div><dt>Passed</dt><dd>{passedCount}</dd></div>
         </dl>
       </header>
       <div className="eval-chart-grid">
         {runView ? (
           <>
-            <RunChart points={points} axisKey="input" />
-            <RunChart points={points} axisKey="latency" />
-            <RunChart points={points} axisKey="cost" />
+            <RunChart points={runPoints} axisKey="input" />
+            <RunChart points={runPoints} axisKey="latency" />
+            <RunChart points={runPoints} axisKey="cost" />
           </>
         ) : (
           <>
-            <FrontierChart points={points} axisKey="output" />
-            <FrontierChart points={points} axisKey="latency" />
-            <FrontierChart points={points} axisKey="cost" />
+            <FrontierChart points={frontierPoints} axisKey="output" />
+            <FrontierChart points={frontierPoints} axisKey="latency" />
+            <FrontierChart points={frontierPoints} axisKey="cost" />
           </>
         )}
       </div>

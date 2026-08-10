@@ -12,7 +12,7 @@ use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
 const LEDGER_FILE: &str = "state.sqlite3";
-const API_SCHEMA_VERSION: u32 = 2;
+const API_SCHEMA_VERSION: u32 = 4;
 const MAX_EVENT_LINE_BYTES: usize = 8 * 1024 * 1024;
 const OUTCOME_TAIL_BYTES: u64 = 512 * 1024;
 
@@ -71,11 +71,38 @@ pub(crate) struct WorksetResults {
 
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
+pub(crate) struct WorksetAnalytics {
+    schema_version: u32,
+    observed_at_ms: i64,
+    workset_id: String,
+    task_count: u64,
+    points: Vec<AnalyticsPoint>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AnalyticsPoint {
+    harness: String,
+    model: String,
+    thinking: String,
+    passed: u64,
+    completed: u64,
+    median_output_tokens: Option<f64>,
+    output_samples: usize,
+    median_duration_ms: Option<f64>,
+    duration_samples: usize,
+    median_cost_usd: Option<f64>,
+    cost_samples: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
 struct ResultPoint {
     id: String,
     task_id: String,
     task_name: String,
     task_label: String,
+    state: String,
     harness: String,
     model: String,
     thinking: String,
@@ -214,13 +241,11 @@ struct CoordinateRow {
     started_at_ms: Option<i64>,
     finished_at_ms: Option<i64>,
     error: Option<String>,
-    task_name: String,
-    task_digest: String,
     status: Option<String>,
     outcome: Option<String>,
 }
 
-#[derive(Debug, Default)]
+#[derive(Clone, Debug, Default)]
 struct Treatment {
     harness: String,
     mode: String,
@@ -228,6 +253,18 @@ struct Treatment {
     thinking: String,
     nanocodex_tool_mode: String,
     codex_tool_mode: String,
+}
+
+#[derive(Debug)]
+struct AnalyticsGroup {
+    harness: String,
+    model: String,
+    thinking: String,
+    passed: u64,
+    completed: u64,
+    output_tokens: Vec<i64>,
+    durations_ms: Vec<i64>,
+    costs_usd: Vec<f64>,
 }
 
 impl EvalApi {
@@ -240,31 +277,51 @@ impl EvalApi {
     pub(crate) fn overview(&self) -> Result<EvalOverview, String> {
         let connection = self.connection()?;
         let now = now_ms()?;
-        let worksets = read_worksets(&connection)?;
         let mut total = EvalSummary::default();
-        let mut overview = Vec::with_capacity(worksets.len());
-        for workset in worksets {
-            let coordinates = read_coordinates(&connection, workset.id, None)?;
-            let summary = summarize(&coordinates)?;
-            add_summary(&mut total, &summary);
-            let task_count = u64::try_from(
-                connection
-                    .query_row(
-                        "SELECT COUNT(*) FROM task_definitions WHERE workset_id = ?1",
-                        [workset.id],
-                        |row| row.get::<_, i64>(0),
-                    )
-                    .map_err(|error| error.to_string())?,
+        let mut statement = connection
+            .prepare(
+                "SELECT w.profile, w.digest, w.created_at_ms, \
+                        COALESCE(d.task_count, 0), \
+                        COALESCE(s.total, 0), COALESCE(s.unclaimed, 0), \
+                        COALESCE(s.running, 0), COALESCE(s.success, 0), \
+                        COALESCE(s.failed, 0) \
+                 FROM worksets w \
+                 LEFT JOIN ( \
+                    SELECT workset_id, COUNT(*) AS task_count \
+                    FROM task_definitions GROUP BY workset_id \
+                 ) d ON d.workset_id = w.id \
+                 LEFT JOIN ( \
+                    SELECT workset_id, COUNT(*) AS total, \
+                           SUM(state = 'unclaimed') AS unclaimed, \
+                           SUM(state = 'running') AS running, \
+                           SUM(state = 'success') AS success, \
+                           SUM(state = 'failed') AS failed \
+                    FROM eval_tasks GROUP BY workset_id \
+                 ) s ON s.workset_id = w.id \
+                 ORDER BY w.created_at_ms DESC, w.id DESC",
             )
             .map_err(|error| error.to_string())?;
-            overview.push(WorksetOverview {
-                id: workset.digest.clone(),
-                profile: workset.profile,
-                digest: workset.digest,
-                created_at_ms: workset.created_at_ms,
-                task_count,
-                summary,
-            });
+        let rows = statement
+            .query_map([], |row| {
+                let summary = summary_from_row(row, 4)?;
+                Ok((
+                    WorksetOverview {
+                        id: row.get(1)?,
+                        profile: row.get(0)?,
+                        digest: row.get(1)?,
+                        created_at_ms: row.get(2)?,
+                        task_count: nonnegative_count(row, 3)?,
+                        summary: summary.clone(),
+                    },
+                    summary,
+                ))
+            })
+            .map_err(|error| error.to_string())?;
+        let mut overview = Vec::new();
+        for row in rows {
+            let (workset, summary) = row.map_err(|error| error.to_string())?;
+            add_summary(&mut total, &summary);
+            overview.push(workset);
         }
         Ok(EvalOverview {
             schema_version: API_SCHEMA_VERSION,
@@ -280,49 +337,19 @@ impl EvalApi {
             return Ok(None);
         };
         let now = now_ms()?;
-        let coordinates = read_coordinates(&connection, workset.id, None)?;
-        let summary = summarize(&coordinates)?;
-        let task_count = coordinates
-            .iter()
-            .map(|coordinate| coordinate.task_name.as_str())
-            .collect::<std::collections::HashSet<_>>()
-            .len();
+        let tasks = read_task_overviews(&connection, &workset)?;
+        let mut summary = EvalSummary::default();
+        for task in &tasks {
+            add_summary(&mut summary, &task.summary);
+        }
         let workset_overview = WorksetOverview {
             id: workset.digest.clone(),
             profile: workset.profile,
             digest: workset.digest.clone(),
             created_at_ms: workset.created_at_ms,
-            task_count: u64::try_from(task_count).map_err(|error| error.to_string())?,
+            task_count: u64::try_from(tasks.len()).map_err(|error| error.to_string())?,
             summary,
         };
-        let mut grouped = HashMap::<String, Vec<CoordinateRow>>::new();
-        for coordinate in coordinates {
-            grouped
-                .entry(coordinate.task_name.clone())
-                .or_default()
-                .push(coordinate);
-        }
-        let mut tasks = grouped
-            .into_iter()
-            .map(|(name, coordinates)| {
-                let digest = coordinates[0].task_digest.clone();
-                let treatment_count = coordinates
-                    .iter()
-                    .map(|coordinate| coordinate.family_key.as_str())
-                    .collect::<std::collections::HashSet<_>>()
-                    .len();
-                Ok(TaskOverview {
-                    id: public_id(&[&workset.digest, &name]),
-                    label: short_name(&name).to_owned(),
-                    name,
-                    digest,
-                    treatment_count: u64::try_from(treatment_count)
-                        .map_err(|error| error.to_string())?,
-                    summary: summarize(&coordinates)?,
-                })
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        tasks.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(Some(WorksetDetail {
             schema_version: API_SCHEMA_VERSION,
             observed_at_ms: now,
@@ -331,8 +358,125 @@ impl EvalApi {
         }))
     }
 
-    pub(crate) fn workset_results(&self, digest: &str) -> Result<Option<WorksetResults>, String> {
-        self.results(digest, None)
+    pub(crate) fn workset_analytics(
+        &self,
+        digest: &str,
+    ) -> Result<Option<WorksetAnalytics>, String> {
+        self.index_results(digest, None)?;
+        let connection = self.connection()?;
+        let Some(workset) = find_workset(&connection, digest)? else {
+            return Ok(None);
+        };
+        let task_count = connection
+            .query_row(
+                "SELECT COUNT(*) FROM task_definitions WHERE workset_id = ?1",
+                [workset.id],
+                |row| nonnegative_count(row, 0),
+            )
+            .map_err(|error| error.to_string())?;
+        let mut statement = connection
+            .prepare(
+                "SELECT e.treatment, e.state, e.started_at_ms, e.finished_at_ms, \
+                        r.status, r.outcome, r.output_tokens, r.cost_usd \
+                 FROM eval_tasks e \
+                 LEFT JOIN coordinate_results r ON r.coordinate_id = e.id \
+                 WHERE e.workset_id = ?1 AND e.state IN ('success', 'failed') \
+                   AND e.result_path IS NOT NULL",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([workset.id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, Option<i64>>(2)?,
+                    row.get::<_, Option<i64>>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                    row.get::<_, Option<String>>(5)?,
+                    row.get::<_, Option<i64>>(6)?,
+                    row.get::<_, Option<f64>>(7)?,
+                ))
+            })
+            .map_err(|error| error.to_string())?;
+        let mut treatments = HashMap::<String, Treatment>::new();
+        let mut groups = HashMap::<String, AnalyticsGroup>::new();
+        for row in rows {
+            let (
+                raw_treatment,
+                state,
+                started_at_ms,
+                finished_at_ms,
+                status,
+                outcome,
+                output,
+                cost,
+            ) = row.map_err(|error| error.to_string())?;
+            let treatment = if let Some(treatment) = treatments.get(&raw_treatment) {
+                treatment.clone()
+            } else {
+                let treatment = parse_treatment(&raw_treatment);
+                treatments.insert(raw_treatment, treatment.clone());
+                treatment
+            };
+            let harness = treatment_harness(&treatment);
+            let key = format!("{harness}\0{}\0{}", treatment.model, treatment.thinking);
+            let group = groups.entry(key).or_insert_with(|| AnalyticsGroup {
+                harness,
+                model: treatment.model,
+                thinking: treatment.thinking,
+                passed: 0,
+                completed: 0,
+                output_tokens: Vec::new(),
+                durations_ms: Vec::new(),
+                costs_usd: Vec::new(),
+            });
+            group.completed += 1;
+            if retained_result_passed(&state, status.as_deref(), outcome.as_deref()) {
+                group.passed += 1;
+            }
+            if let Some(output) = output.filter(|value| *value >= 0) {
+                group.output_tokens.push(output);
+            }
+            if let Some(duration) = started_at_ms
+                .zip(finished_at_ms)
+                .map(|(started, finished)| finished.saturating_sub(started))
+                .filter(|value| *value >= 0)
+            {
+                group.durations_ms.push(duration);
+            }
+            if let Some(cost) = cost.filter(|value| value.is_finite() && *value >= 0.0) {
+                group.costs_usd.push(cost);
+            }
+        }
+        let mut points = groups
+            .into_values()
+            .map(|mut group| AnalyticsPoint {
+                harness: group.harness,
+                model: group.model,
+                thinking: group.thinking,
+                passed: group.passed,
+                completed: group.completed,
+                median_output_tokens: median_i64(&mut group.output_tokens),
+                output_samples: group.output_tokens.len(),
+                median_duration_ms: median_i64(&mut group.durations_ms),
+                duration_samples: group.durations_ms.len(),
+                median_cost_usd: median_f64(&mut group.costs_usd),
+                cost_samples: group.costs_usd.len(),
+            })
+            .collect::<Vec<_>>();
+        points.sort_by(|left, right| {
+            left.harness
+                .cmp(&right.harness)
+                .then_with(|| left.model.cmp(&right.model))
+                .then_with(|| left.thinking.cmp(&right.thinking))
+        });
+        Ok(Some(WorksetAnalytics {
+            schema_version: API_SCHEMA_VERSION,
+            observed_at_ms: now_ms()?,
+            workset_id: workset.digest,
+            task_count,
+            points,
+        }))
     }
 
     pub(crate) fn task_results(
@@ -348,7 +492,7 @@ impl EvalApi {
         digest: &str,
         task_id: Option<&str>,
     ) -> Result<Option<WorksetResults>, String> {
-        self.index_results(digest)?;
+        self.index_results(digest, task_id)?;
         let connection = self.connection()?;
         let Some(workset) = find_workset(&connection, digest)? else {
             return Ok(None);
@@ -362,7 +506,7 @@ impl EvalApi {
         };
         let mut statement = connection
             .prepare(
-                "SELECT e.id, t.selector, e.treatment, e.repetition, \
+                "SELECT e.id, t.selector, e.state, e.treatment, e.repetition, \
                         e.started_at_ms, e.finished_at_ms, \
                         r.status, r.outcome, r.input_tokens, r.cached_input_tokens, \
                         r.output_tokens, r.reasoning_output_tokens, r.total_tokens, r.cost_usd \
@@ -374,47 +518,67 @@ impl EvalApi {
                  ORDER BY t.selector, e.family_key, e.repetition",
             )
             .map_err(|error| error.to_string())?;
+        let mut treatments = HashMap::<String, Treatment>::new();
+        let mut tasks = HashMap::<String, (String, String)>::new();
         let points = statement
             .query_map((workset.id, task.as_ref().map(|task| task.id)), |row| {
                 let coordinate_id = row.get::<_, i64>(0)?;
                 let task_name = row.get::<_, String>(1)?;
-                let treatment = parse_treatment(&row.get::<_, String>(2)?);
-                let started_at_ms = row.get::<_, Option<i64>>(4)?;
-                let finished_at_ms = row.get::<_, Option<i64>>(5)?;
+                let (task_id, task_label) = if let Some(task) = tasks.get(&task_name) {
+                    task.clone()
+                } else {
+                    let task = (
+                        public_id(&[digest, &task_name]),
+                        short_name(&task_name).to_owned(),
+                    );
+                    tasks.insert(task_name.clone(), task.clone());
+                    task
+                };
+                let raw_treatment = row.get::<_, String>(3)?;
+                let treatment = if let Some(treatment) = treatments.get(&raw_treatment) {
+                    treatment.clone()
+                } else {
+                    let treatment = parse_treatment(&raw_treatment);
+                    treatments.insert(raw_treatment, treatment.clone());
+                    treatment
+                };
+                let started_at_ms = row.get::<_, Option<i64>>(5)?;
+                let finished_at_ms = row.get::<_, Option<i64>>(6)?;
                 Ok(ResultPoint {
                     id: case_id(digest, coordinate_id),
-                    task_id: public_id(&[digest, &task_name]),
-                    task_label: short_name(&task_name).to_owned(),
+                    task_id,
+                    task_label,
                     task_name,
+                    state: row.get(2)?,
                     harness: treatment_harness(&treatment),
                     model: treatment.model,
                     thinking: treatment.thinking,
-                    repetition: row.get(3)?,
-                    status: row.get(6)?,
-                    outcome: row.get(7)?,
+                    repetition: row.get(4)?,
+                    status: row.get(7)?,
+                    outcome: row.get(8)?,
                     duration_ms: started_at_ms
                         .zip(finished_at_ms)
                         .map(|(started, finished)| finished.saturating_sub(started)),
-                    input_tokens: row.get(8)?,
-                    cached_input_tokens: row.get(9)?,
-                    output_tokens: row.get(10)?,
-                    reasoning_output_tokens: row.get(11)?,
-                    total_tokens: row.get(12)?,
-                    cost_usd: row.get(13)?,
+                    input_tokens: row.get(9)?,
+                    cached_input_tokens: row.get(10)?,
+                    output_tokens: row.get(11)?,
+                    reasoning_output_tokens: row.get(12)?,
+                    total_tokens: row.get(13)?,
+                    cost_usd: row.get(14)?,
                 })
             })
             .map_err(|error| error.to_string())?
             .collect::<Result<Vec<_>, _>>()
             .map_err(|error| error.to_string())?;
         Ok(Some(WorksetResults {
-            schema_version: 1,
+            schema_version: API_SCHEMA_VERSION,
             observed_at_ms: now_ms()?,
             workset_id: workset.digest,
             points,
         }))
     }
 
-    fn index_results(&self, digest: &str) -> Result<(), String> {
+    fn index_results(&self, digest: &str, task_id: Option<&str>) -> Result<(), String> {
         let mut connection = Connection::open(&self.ledger).map_err(|error| error.to_string())?;
         connection
             .busy_timeout(std::time::Duration::from_secs(5))
@@ -422,17 +586,25 @@ impl EvalApi {
         let Some(workset) = find_workset(&connection, digest)? else {
             return Ok(());
         };
+        let task = match task_id {
+            Some(task_id) => match find_task(&connection, workset.id, digest, task_id)? {
+                Some(task) => Some(task),
+                None => return Ok(()),
+            },
+            None => None,
+        };
         let mut statement = connection
             .prepare(
                 "SELECT e.id, e.result_path \
                  FROM eval_tasks e \
                  LEFT JOIN coordinate_results r ON r.coordinate_id = e.id \
                  WHERE e.workset_id = ?1 AND e.state IN ('success', 'failed') \
+                   AND (?2 IS NULL OR e.definition_id = ?2) \
                    AND e.result_path IS NOT NULL AND r.coordinate_id IS NULL",
             )
             .map_err(|error| error.to_string())?;
         let missing = statement
-            .query_map([workset.id], |row| {
+            .query_map((workset.id, task.as_ref().map(|task| task.id)), |row| {
                 Ok((
                     row.get::<_, i64>(0)?,
                     PathBuf::from(row.get::<_, String>(1)?),
@@ -446,19 +618,22 @@ impl EvalApi {
         for (coordinate_id, result_path) in missing {
             let result_path = match result_path.canonicalize() {
                 Ok(path) => path,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+                    indexed.push((coordinate_id, None));
+                    continue;
+                }
                 Err(error) => return Err(error.to_string()),
             };
-            let Some(evidence) = read_outcome(&result_path)? else {
-                continue;
-            };
-            indexed.push((coordinate_id, evidence));
+            indexed.push((coordinate_id, read_outcome(&result_path)?));
         }
         let transaction = connection
             .transaction()
             .map_err(|error| error.to_string())?;
         for (coordinate_id, evidence) in indexed {
-            insert_result(&transaction, coordinate_id, &evidence)?;
+            match evidence {
+                Some(evidence) => insert_result(&transaction, coordinate_id, &evidence)?,
+                None => mark_result_indexed(&transaction, coordinate_id)?,
+            }
         }
         transaction.commit().map_err(|error| error.to_string())?;
         Ok(())
@@ -612,9 +787,24 @@ impl EvalApi {
     pub(crate) fn case(&self, id: &str) -> Result<Option<CaseEvidence>, String> {
         let connection = self.connection()?;
         for workset in read_worksets(&connection)? {
-            for coordinate in read_coordinates(&connection, workset.id, None)? {
-                if case_id(&workset.digest, coordinate.id) == id {
-                    return self.evidence_for(&coordinate);
+            let mut statement = connection
+                .prepare(
+                    "SELECT id, result_path FROM eval_tasks \
+                     WHERE workset_id = ?1 AND result_path IS NOT NULL",
+                )
+                .map_err(|error| error.to_string())?;
+            let rows = statement
+                .query_map([workset.id], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        PathBuf::from(row.get::<_, String>(1)?),
+                    ))
+                })
+                .map_err(|error| error.to_string())?;
+            for row in rows {
+                let (coordinate_id, result_path) = row.map_err(|error| error.to_string())?;
+                if case_id(&workset.digest, coordinate_id) == id {
+                    return read_result_evidence(&result_path);
                 }
             }
         }
@@ -633,18 +823,6 @@ impl EvalApi {
         Ok(connection)
     }
 
-    fn evidence_for(&self, coordinate: &CoordinateRow) -> Result<Option<CaseEvidence>, String> {
-        let Some(result_path) = result_path(coordinate) else {
-            return Ok(None);
-        };
-        let result = match result_path.canonicalize() {
-            Ok(result) => result,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error.to_string()),
-        };
-        read_evidence(&result)
-    }
-
     fn outcome_for(&self, coordinate: &CoordinateRow) -> Result<Option<CaseEvidence>, String> {
         let Some(result_path) = result_path(coordinate) else {
             return Ok(None);
@@ -660,23 +838,6 @@ impl EvalApi {
 
 const fn result_path(coordinate: &CoordinateRow) -> Option<&PathBuf> {
     coordinate.result_path.as_ref()
-}
-
-fn summarize(coordinates: &[CoordinateRow]) -> Result<EvalSummary, String> {
-    let mut summary = EvalSummary {
-        total: u64::try_from(coordinates.len()).map_err(|error| error.to_string())?,
-        ..EvalSummary::default()
-    };
-    for coordinate in coordinates {
-        match coordinate_state(coordinate) {
-            "unclaimed" => summary.unclaimed += 1,
-            "running" => summary.running += 1,
-            "success" => summary.success += 1,
-            "failed" => summary.failed += 1,
-            _ => return Err(format!("unknown durable task state `{}`", coordinate.state)),
-        }
-    }
-    Ok(summary)
 }
 
 fn read_worksets(connection: &Connection) -> Result<Vec<WorksetRow>, String> {
@@ -718,6 +879,63 @@ fn find_workset(connection: &Connection, digest: &str) -> Result<Option<WorksetR
         .map_err(|error| error.to_string())
 }
 
+fn read_task_overviews(
+    connection: &Connection,
+    workset: &WorksetRow,
+) -> Result<Vec<TaskOverview>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT d.selector, d.digest, COUNT(DISTINCT e.family_key), COUNT(e.id), \
+                    COALESCE(SUM(e.state = 'unclaimed'), 0), \
+                    COALESCE(SUM(e.state = 'running'), 0), \
+                    COALESCE(SUM(e.state = 'success'), 0), \
+                    COALESCE(SUM(e.state = 'failed'), 0) \
+             FROM task_definitions d \
+             LEFT JOIN eval_tasks e \
+               ON e.workset_id = d.workset_id AND e.definition_id = d.id \
+             WHERE d.workset_id = ?1 \
+             GROUP BY d.id, d.selector, d.digest \
+             ORDER BY d.selector",
+        )
+        .map_err(|error| error.to_string())?;
+    statement
+        .query_map([workset.id], |row| {
+            let name = row.get::<_, String>(0)?;
+            Ok(TaskOverview {
+                id: public_id(&[&workset.digest, &name]),
+                label: short_name(&name).to_owned(),
+                name,
+                digest: row.get(1)?,
+                treatment_count: nonnegative_count(row, 2)?,
+                summary: summary_from_row(row, 3)?,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+fn summary_from_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<EvalSummary> {
+    Ok(EvalSummary {
+        total: nonnegative_count(row, offset)?,
+        unclaimed: nonnegative_count(row, offset + 1)?,
+        running: nonnegative_count(row, offset + 2)?,
+        success: nonnegative_count(row, offset + 3)?,
+        failed: nonnegative_count(row, offset + 4)?,
+    })
+}
+
+fn nonnegative_count(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<u64> {
+    let value = row.get::<_, i64>(index)?;
+    u64::try_from(value).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            rusqlite::types::Type::Integer,
+            Box::new(error),
+        )
+    })
+}
+
 fn find_task(
     connection: &Connection,
     workset_id: i64,
@@ -756,11 +974,11 @@ fn read_coordinates(
         .prepare(
             "SELECT e.id, e.family_key, e.treatment, e.repetition, e.state, \
                     e.result_path, e.started_at_ms, e.finished_at_ms, e.error, \
-                    t.selector, t.digest, r.status, r.outcome \
-             FROM eval_tasks e JOIN task_definitions t ON t.id = e.definition_id \
+                    r.status, r.outcome \
+             FROM eval_tasks e \
              LEFT JOIN coordinate_results r ON r.coordinate_id = e.id \
              WHERE e.workset_id = ?1 AND (?2 IS NULL OR e.definition_id = ?2) \
-             ORDER BY t.selector, e.family_key, e.repetition",
+             ORDER BY e.definition_id, e.family_key, e.repetition",
         )
         .map_err(|error| error.to_string())?;
     let coordinates = statement
@@ -775,10 +993,8 @@ fn read_coordinates(
                 started_at_ms: row.get(6)?,
                 finished_at_ms: row.get(7)?,
                 error: row.get(8)?,
-                task_name: row.get(9)?,
-                task_digest: row.get(10)?,
-                status: row.get(11)?,
-                outcome: row.get(12)?,
+                status: row.get(9)?,
+                outcome: row.get(10)?,
             })
         })
         .map_err(|error| error.to_string())?
@@ -795,6 +1011,47 @@ fn coordinate_state(coordinate: &CoordinateRow) -> &'static str {
         "failed" => "failed",
         _ => "failed",
     }
+}
+
+fn retained_result_passed(state: &str, status: Option<&str>, outcome: Option<&str>) -> bool {
+    match status {
+        Some(status) => status == "passed",
+        None => match outcome {
+            Some(outcome) => outcome == "passed",
+            None => state == "success",
+        },
+    }
+}
+
+fn median_i64(values: &mut [i64]) -> Option<f64> {
+    values.sort_unstable();
+    let middle = values.len().checked_div(2)?;
+    if values.len().is_multiple_of(2) {
+        let left = *values.get(middle.checked_sub(1)?)? as f64;
+        let right = *values.get(middle)? as f64;
+        Some((left + right) / 2.0)
+    } else {
+        values.get(middle).map(|value| *value as f64)
+    }
+}
+
+fn median_f64(values: &mut [f64]) -> Option<f64> {
+    values.sort_by(f64::total_cmp);
+    let middle = values.len().checked_div(2)?;
+    if values.len().is_multiple_of(2) {
+        Some((values.get(middle.checked_sub(1)?)? + values.get(middle)?) / 2.0)
+    } else {
+        values.get(middle).copied()
+    }
+}
+
+fn read_result_evidence(result_path: &Path) -> Result<Option<CaseEvidence>, String> {
+    let result = match result_path.canonicalize() {
+        Ok(result) => result,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    read_evidence(&result)
 }
 
 fn read_evidence(result: &Path) -> Result<Option<CaseEvidence>, String> {
@@ -1006,10 +1263,17 @@ fn insert_result(
     let usage = evidence.usage.as_ref();
     connection
         .execute(
-            "INSERT OR IGNORE INTO coordinate_results( \
+            "INSERT INTO coordinate_results( \
                 coordinate_id, status, outcome, input_tokens, cached_input_tokens, \
                 output_tokens, reasoning_output_tokens, total_tokens, cost_usd \
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+             ON CONFLICT(coordinate_id) DO UPDATE SET \
+                status = excluded.status, outcome = excluded.outcome, \
+                input_tokens = excluded.input_tokens, \
+                cached_input_tokens = excluded.cached_input_tokens, \
+                output_tokens = excluded.output_tokens, \
+                reasoning_output_tokens = excluded.reasoning_output_tokens, \
+                total_tokens = excluded.total_tokens, cost_usd = excluded.cost_usd",
             params![
                 coordinate_id,
                 evidence.status,
@@ -1021,6 +1285,16 @@ fn insert_result(
                 usage.and_then(|value| integer_field(value, "total_tokens")),
                 evidence.cost_usd,
             ],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn mark_result_indexed(connection: &Connection, coordinate_id: i64) -> Result<(), String> {
+    connection
+        .execute(
+            "INSERT OR IGNORE INTO coordinate_results(coordinate_id) VALUES (?1)",
+            [coordinate_id],
         )
         .map_err(|error| error.to_string())?;
     Ok(())

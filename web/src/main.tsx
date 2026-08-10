@@ -8,9 +8,6 @@ const NanocodexApp = lazy(() =>
 
 if (window.location.pathname.startsWith("/evals")) {
   void import("./Evals");
-  if (window.location.pathname.startsWith("/evals/worksets/")) {
-    void import("./EvalAnalytics");
-  }
 }
 
 createRoot(document.getElementById("root")!).render(

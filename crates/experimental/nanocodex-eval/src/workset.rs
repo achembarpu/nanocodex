@@ -1123,6 +1123,8 @@ fn create_schema(connection: &Connection) -> Result<(), WorksetError> {
             created_at_ms INTEGER NOT NULL,
             UNIQUE(profile, digest)
          );
+         CREATE INDEX IF NOT EXISTS worksets_digest
+            ON worksets(digest);
          CREATE TABLE IF NOT EXISTS task_definitions(
             id INTEGER PRIMARY KEY,
             workset_id INTEGER NOT NULL REFERENCES worksets(id),
@@ -1157,6 +1159,10 @@ fn create_schema(connection: &Connection) -> Result<(), WorksetError> {
             ON eval_tasks(workset_id, family_key, state, repetition);
          CREATE INDEX IF NOT EXISTS eval_tasks_next
             ON eval_tasks(workset_id, state, id);
+         CREATE INDEX IF NOT EXISTS eval_tasks_definition
+            ON eval_tasks(workset_id, definition_id);
+         CREATE INDEX IF NOT EXISTS eval_tasks_result_path
+            ON eval_tasks(result_path) WHERE result_path IS NOT NULL;
          CREATE TABLE IF NOT EXISTS coordinate_results(
             coordinate_id INTEGER PRIMARY KEY REFERENCES eval_tasks(id),
             status TEXT,
