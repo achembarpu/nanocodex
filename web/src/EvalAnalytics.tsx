@@ -108,9 +108,9 @@ const metrics = {
   },
   cost: {
     title: "Score by cost",
-    label: "Median cost",
+    label: "Median estimated cost",
     runTitle: "Cost by run",
-    runLabel: "Cost",
+    runLabel: "Estimated cost",
     value: (point: EvalResultPoint) => point.costUsd,
     tick: (value: number) => `$${value < 0.01 ? value.toFixed(3) : value.toFixed(2)}`,
   },
@@ -156,7 +156,7 @@ const runMetrics = {
   },
   cost: {
     title: "Cost vs output tokens",
-    label: "Cost",
+    label: "Estimated cost",
     value: (point: EvalResultPoint) => point.costUsd,
     tick: metrics.cost.tick,
   },

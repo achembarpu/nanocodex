@@ -6,6 +6,11 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use nanocodex_oai_api::{
+    Model,
+    pricing::{ServiceTier, estimate_for_model},
+    responses::{InputTokenDetails, Usage},
+};
 use rusqlite::{Connection, OpenFlags, OptionalExtension as _, params};
 use serde::Serialize;
 use serde_json::Value;
@@ -377,7 +382,8 @@ impl EvalApi {
         let mut statement = connection
             .prepare(
                 "SELECT e.treatment, e.state, e.started_at_ms, e.finished_at_ms, \
-                        r.status, r.outcome, r.output_tokens, r.cost_usd \
+                        r.status, r.outcome, r.input_tokens, r.cached_input_tokens, \
+                        r.output_tokens, r.cost_usd \
                  FROM eval_tasks e \
                  LEFT JOIN coordinate_results r ON r.coordinate_id = e.id \
                  WHERE e.workset_id = ?1 AND e.state IN ('success', 'failed') \
@@ -394,7 +400,9 @@ impl EvalApi {
                     row.get::<_, Option<String>>(4)?,
                     row.get::<_, Option<String>>(5)?,
                     row.get::<_, Option<i64>>(6)?,
-                    row.get::<_, Option<f64>>(7)?,
+                    row.get::<_, Option<i64>>(7)?,
+                    row.get::<_, Option<i64>>(8)?,
+                    row.get::<_, Option<f64>>(9)?,
                 ))
             })
             .map_err(|error| error.to_string())?;
@@ -408,6 +416,8 @@ impl EvalApi {
                 finished_at_ms,
                 status,
                 outcome,
+                input,
+                cached_input,
                 output,
                 cost,
             ) = row.map_err(|error| error.to_string())?;
@@ -419,6 +429,8 @@ impl EvalApi {
                 treatment
             };
             let harness = treatment_harness(&treatment);
+            let cost =
+                cost.or_else(|| estimated_cost_usd(&treatment.model, input, cached_input, output));
             let key = format!("{harness}\0{}\0{}", treatment.model, treatment.thinking);
             let group = groups.entry(key).or_insert_with(|| AnalyticsGroup {
                 harness,
@@ -544,6 +556,17 @@ impl EvalApi {
                 };
                 let started_at_ms = row.get::<_, Option<i64>>(5)?;
                 let finished_at_ms = row.get::<_, Option<i64>>(6)?;
+                let input_tokens = row.get(9)?;
+                let cached_input_tokens = row.get(10)?;
+                let output_tokens = row.get(11)?;
+                let cost_usd = row.get::<_, Option<f64>>(14)?.or_else(|| {
+                    estimated_cost_usd(
+                        &treatment.model,
+                        input_tokens,
+                        cached_input_tokens,
+                        output_tokens,
+                    )
+                });
                 Ok(ResultPoint {
                     id: case_id(digest, coordinate_id),
                     task_id,
@@ -559,12 +582,12 @@ impl EvalApi {
                     duration_ms: started_at_ms
                         .zip(finished_at_ms)
                         .map(|(started, finished)| finished.saturating_sub(started)),
-                    input_tokens: row.get(9)?,
-                    cached_input_tokens: row.get(10)?,
-                    output_tokens: row.get(11)?,
+                    input_tokens,
+                    cached_input_tokens,
+                    output_tokens,
                     reasoning_output_tokens: row.get(12)?,
                     total_tokens: row.get(13)?,
-                    cost_usd: row.get(14)?,
+                    cost_usd,
                 })
             })
             .map_err(|error| error.to_string())?
@@ -1322,6 +1345,33 @@ fn decimal_value(value: &Value) -> Option<f64> {
     value
         .as_f64()
         .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+}
+
+fn estimated_cost_usd(
+    model: &str,
+    input_tokens: Option<i64>,
+    cached_input_tokens: Option<i64>,
+    output_tokens: Option<i64>,
+) -> Option<f64> {
+    let model = model.parse::<Model>().ok()?;
+    let input_tokens = u64::try_from(input_tokens?).ok()?;
+    let cached_input_tokens = u64::try_from(cached_input_tokens.unwrap_or_default()).ok()?;
+    let output_tokens = u64::try_from(output_tokens?).ok()?;
+    let usage = Usage {
+        input_tokens,
+        input_tokens_details: Some(InputTokenDetails {
+            cached_tokens: cached_input_tokens,
+            cache_write_tokens: 0,
+        }),
+        output_tokens,
+        total_tokens: input_tokens.saturating_add(output_tokens),
+        ..Usage::default()
+    };
+    estimate_for_model(&usage, model, ServiceTier::Standard)
+        .amount()
+        .decimal()
+        .parse()
+        .ok()
 }
 
 fn parse_treatment(raw: &str) -> Treatment {
