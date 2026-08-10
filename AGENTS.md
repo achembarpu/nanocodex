@@ -27,6 +27,16 @@
   concrete need in the current slice.
 - Add focused deterministic tests for public contracts and demonstrated
   regressions, not for coverage. Compile public examples as part of validation.
+- Do not add or run CLI tests that assert benchmark-orchestrator prompt wording
+  or scheduling policy. Every change to benchmark orchestration or saturation
+  policy must be built, deployed, and exercised against the real coordinator
+  and benchmark host before handoff. Record the observed worker-count ramp,
+  task counts, memory, load, and pressure; never claim success from prompt
+  inspection or synthetic tests alone. During that validation, do not manually
+  kill or shed eval workers: the OS owns resource-exhaustion deaths, and the
+  benchmark controller must observe, classify, and adapt without an operator.
+  Keep automated tests for executable protocol, parsing, and durable-state
+  contracts.
 - Use `just run` for a live native smoke. Use focused Harbor trials while
   iterating and the full configured `just eval` only for milestone/release
   gates. Never modify benchmark tasks or verifiers to make Nanocodex pass.
