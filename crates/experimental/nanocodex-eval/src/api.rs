@@ -623,7 +623,9 @@ impl EvalApi {
                  LEFT JOIN coordinate_results r ON r.coordinate_id = e.id \
                  WHERE e.workset_id = ?1 AND e.state IN ('success', 'failed') \
                    AND (?2 IS NULL OR e.definition_id = ?2) \
-                   AND e.result_path IS NOT NULL AND r.coordinate_id IS NULL",
+                   AND e.result_path IS NOT NULL \
+                   AND (r.coordinate_id IS NULL OR r.result_path IS NULL \
+                        OR r.result_path != e.result_path)",
             )
             .map_err(|error| error.to_string())?;
         let missing = statement
@@ -639,23 +641,26 @@ impl EvalApi {
         drop(statement);
         let mut indexed = Vec::with_capacity(missing.len());
         for (coordinate_id, result_path) in missing {
+            let retained_path = result_path.to_string_lossy().into_owned();
             let result_path = match result_path.canonicalize() {
                 Ok(path) => path,
                 Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    indexed.push((coordinate_id, None));
+                    indexed.push((coordinate_id, retained_path, None));
                     continue;
                 }
                 Err(error) => return Err(error.to_string()),
             };
-            indexed.push((coordinate_id, read_outcome(&result_path)?));
+            indexed.push((coordinate_id, retained_path, read_outcome(&result_path)?));
         }
         let transaction = connection
             .transaction()
             .map_err(|error| error.to_string())?;
-        for (coordinate_id, evidence) in indexed {
+        for (coordinate_id, result_path, evidence) in indexed {
             match evidence {
-                Some(evidence) => insert_result(&transaction, coordinate_id, &evidence)?,
-                None => mark_result_indexed(&transaction, coordinate_id)?,
+                Some(evidence) => {
+                    insert_result(&transaction, coordinate_id, &result_path, &evidence)?
+                }
+                None => mark_result_indexed(&transaction, coordinate_id, &result_path)?,
             }
         }
         transaction.commit().map_err(|error| error.to_string())?;
@@ -678,13 +683,13 @@ impl EvalApi {
             .query_row(
                 "SELECT id FROM eval_tasks WHERE result_path = ?1 \
                  AND state IN ('success', 'failed')",
-                [retained_path],
+                [&retained_path],
                 |row| row.get::<_, i64>(0),
             )
             .optional()
             .map_err(|error| error.to_string())?;
         if let Some(coordinate_id) = coordinate_id {
-            insert_result(&connection, coordinate_id, &evidence)?;
+            insert_result(&connection, coordinate_id, &retained_path, &evidence)?;
         }
         Ok(())
     }
@@ -694,6 +699,7 @@ impl EvalApi {
         workset_digest: &str,
         task_id: &str,
     ) -> Result<Option<TaskDetail>, String> {
+        self.index_results(workset_digest, Some(task_id))?;
         let connection = self.connection()?;
         let Some(workset) = find_workset(&connection, workset_digest)? else {
             return Ok(None);
@@ -1281,17 +1287,19 @@ fn apply_terminal_payload(evidence: &mut CaseEvidence, payload: &Value) {
 fn insert_result(
     connection: &Connection,
     coordinate_id: i64,
+    result_path: &str,
     evidence: &CaseEvidence,
 ) -> Result<(), String> {
     let usage = evidence.usage.as_ref();
     connection
         .execute(
             "INSERT INTO coordinate_results( \
-                coordinate_id, status, outcome, input_tokens, cached_input_tokens, \
+                coordinate_id, result_path, status, outcome, input_tokens, cached_input_tokens, \
                 output_tokens, reasoning_output_tokens, total_tokens, cost_usd \
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9) \
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
              ON CONFLICT(coordinate_id) DO UPDATE SET \
-                status = excluded.status, outcome = excluded.outcome, \
+                result_path = excluded.result_path, status = excluded.status, \
+                outcome = excluded.outcome, \
                 input_tokens = excluded.input_tokens, \
                 cached_input_tokens = excluded.cached_input_tokens, \
                 output_tokens = excluded.output_tokens, \
@@ -1299,6 +1307,7 @@ fn insert_result(
                 total_tokens = excluded.total_tokens, cost_usd = excluded.cost_usd",
             params![
                 coordinate_id,
+                result_path,
                 evidence.status,
                 evidence.outcome,
                 usage.and_then(|value| integer_field(value, "input_tokens")),
@@ -1313,11 +1322,19 @@ fn insert_result(
     Ok(())
 }
 
-fn mark_result_indexed(connection: &Connection, coordinate_id: i64) -> Result<(), String> {
+fn mark_result_indexed(
+    connection: &Connection,
+    coordinate_id: i64,
+    result_path: &str,
+) -> Result<(), String> {
     connection
         .execute(
-            "INSERT OR IGNORE INTO coordinate_results(coordinate_id) VALUES (?1)",
-            [coordinate_id],
+            "INSERT INTO coordinate_results(coordinate_id, result_path) VALUES (?1, ?2) \
+             ON CONFLICT(coordinate_id) DO UPDATE SET \
+                result_path = excluded.result_path, status = NULL, outcome = NULL, \
+                input_tokens = NULL, cached_input_tokens = NULL, output_tokens = NULL, \
+                reasoning_output_tokens = NULL, total_tokens = NULL, cost_usd = NULL",
+            params![coordinate_id, result_path],
         )
         .map_err(|error| error.to_string())?;
     Ok(())

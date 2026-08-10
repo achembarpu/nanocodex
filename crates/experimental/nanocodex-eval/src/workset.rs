@@ -378,6 +378,10 @@ impl Workset {
             if changed != 1 {
                 return Err(WorksetError::StaleClaim);
             }
+            transaction.execute(
+                "DELETE FROM coordinate_results WHERE coordinate_id = ?1",
+                [task_id],
+            )?;
             insert_attempt(
                 &transaction,
                 self.id,
@@ -449,6 +453,10 @@ impl Workset {
             if changed != 1 {
                 return Err(WorksetError::StaleClaim);
             }
+            transaction.execute(
+                "DELETE FROM coordinate_results WHERE coordinate_id = ?1",
+                [task_id],
+            )?;
             insert_attempt(
                 &transaction,
                 self.id,
@@ -632,6 +640,10 @@ impl Workset {
         if changed != 1 {
             return Err(WorksetError::StaleClaim);
         }
+        transaction.execute(
+            "DELETE FROM coordinate_results WHERE coordinate_id = ?1",
+            [claim.task_id],
+        )?;
         finish_attempt(
             &transaction,
             claim,
@@ -663,6 +675,10 @@ impl Workset {
         if changed != 1 {
             return Err(WorksetError::StaleClaim);
         }
+        transaction.execute(
+            "DELETE FROM coordinate_results WHERE coordinate_id = ?1",
+            [claim.task_id],
+        )?;
         finish_attempt(
             &transaction,
             claim,
@@ -1034,6 +1050,9 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), WorksetError> {
         if version < 6 {
             migrate_attempt_history(connection)?;
         }
+        if version < 7 {
+            migrate_result_index_paths(connection)?;
+        }
         connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         return Ok(());
     }
@@ -1043,11 +1062,34 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), WorksetError> {
         }
         migrate_legacy_schema(connection, version >= 4)?;
         migrate_attempt_history(connection)?;
+        migrate_result_index_paths(connection)?;
         connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
         return Ok(());
     }
     create_schema(connection)?;
     connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
+    Ok(())
+}
+
+fn migrate_result_index_paths(connection: &Connection) -> Result<(), WorksetError> {
+    let has_result_path = connection
+        .prepare("PRAGMA table_info(coordinate_results)")?
+        .query_map([], |row| row.get::<_, String>(1))?
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .any(|column| column == "result_path");
+    if !has_result_path {
+        connection.execute(
+            "ALTER TABLE coordinate_results ADD COLUMN result_path TEXT",
+            [],
+        )?;
+    }
+    connection.execute(
+        "DELETE FROM coordinate_results WHERE coordinate_id IN (\
+            SELECT id FROM eval_tasks WHERE state IN ('unclaimed', 'running')\
+         )",
+        [],
+    )?;
     Ok(())
 }
 
@@ -1165,6 +1207,7 @@ fn create_schema(connection: &Connection) -> Result<(), WorksetError> {
             ON eval_tasks(result_path) WHERE result_path IS NOT NULL;
          CREATE TABLE IF NOT EXISTS coordinate_results(
             coordinate_id INTEGER PRIMARY KEY REFERENCES eval_tasks(id),
+            result_path TEXT,
             status TEXT,
             outcome TEXT,
             input_tokens INTEGER,

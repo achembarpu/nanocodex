@@ -805,6 +805,11 @@ async fn finish(
                 .claim
                 .fail(evidence.as_deref(), &error)
                 .map_err(ApiError::ledger)?;
+            if let Some(evidence) = evidence {
+                if let Err(error) = state.eval_api.index_result(&evidence) {
+                    tracing::warn!(%error, "failed to index accepted evaluation result");
+                }
+            }
         }
         FinishRequest::Retry { error, evidence } => {
             let evidence = evidence
