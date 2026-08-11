@@ -371,7 +371,7 @@ fn import_graphwalks(
 }
 
 fn import_mrcr(
-    _request: &BenchmarkRequest,
+    request: &BenchmarkRequest,
     sources: &SourceStore,
     store: &ImportStore,
 ) -> Result<ImportedDataset, AdapterError> {
@@ -383,12 +383,16 @@ fn import_mrcr(
             sha256,
         )?;
     }
-    Ok(store.import(&mrcr::Mrcr::new(
+    let mut importer = mrcr::Mrcr::new(
         sources.root().join("mrcr"),
         format!("openai/mrcr@{MRCR_REVISION}"),
         nanocodex_eval::import::Environment::OciImage("python:3.12-slim".to_owned()),
         Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/mrcr"),
-    ))?)
+    );
+    if !request.all {
+        importer = importer.tasks(request.tasks.iter().cloned());
+    }
+    Ok(store.import(&importer)?)
 }
 
 impl AdapterCatalog {

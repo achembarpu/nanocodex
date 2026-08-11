@@ -1,4 +1,4 @@
-use std::{fs::File, path::PathBuf, time::Duration};
+use std::{collections::BTreeSet, fs::File, path::PathBuf, time::Duration};
 
 use nanocodex_eval::{
     PromptMessage, Resources, ScoringPolicy, TaskOutput,
@@ -31,6 +31,7 @@ pub struct Mrcr {
     revision: String,
     environment: Environment,
     harness: PathBuf,
+    tasks: Option<BTreeSet<String>>,
 }
 
 impl Mrcr {
@@ -47,7 +48,26 @@ impl Mrcr {
             revision: revision.into(),
             environment,
             harness: harness.into(),
+            tasks: None,
         }
+    }
+
+    /// Restricts normalization to the requested stable task IDs.
+    #[must_use]
+    pub fn tasks(mut self, task_ids: impl IntoIterator<Item = impl Into<String>>) -> Self {
+        self.tasks = Some(task_ids.into_iter().map(Into::into).collect());
+        self
+    }
+
+    fn includes_partition(&self, partition: &str) -> bool {
+        self.tasks.as_ref().is_none_or(|tasks| {
+            let prefix = format!("{partition}-");
+            tasks.iter().any(|task| task.starts_with(&prefix))
+        })
+    }
+
+    fn includes_case(&self, id: &str) -> bool {
+        self.tasks.as_ref().is_none_or(|tasks| tasks.contains(id))
     }
 }
 
@@ -58,10 +78,13 @@ impl DatasetImporter for Mrcr {
             source_values.push(sha256_file(&self.harness.join(relative))?);
         }
         let harness = Harness::directory(&self.harness)?;
-        let mut cases = Vec::with_capacity(2_400);
+        let mut cases = Vec::with_capacity(self.tasks.as_ref().map_or(2_400, BTreeSet::len));
         for (partition, relative) in FILES {
             let path = self.source.join(relative);
             source_values.push(sha256_file(&path)?);
+            if !self.includes_partition(partition) {
+                continue;
+            }
             let file = File::open(&path).map_err(|source| ImportError::Io {
                 path: path.clone(),
                 source,
@@ -73,6 +96,10 @@ impl DatasetImporter for Mrcr {
                 ImportError::Invalid(format!("failed to read {}: {error}", path.display()))
             })?;
             for (index, row) in rows.enumerate() {
+                let id = format!("{partition}-{index:06}");
+                if !self.includes_case(&id) {
+                    continue;
+                }
                 let row = row.map_err(|error| {
                     ImportError::Invalid(format!(
                         "failed to decode {} row {}: {error}",
@@ -88,7 +115,7 @@ impl DatasetImporter for Mrcr {
                     })?;
                 cases.push(
                     CasePlan::hermetic(
-                        format!("{partition}-{index:06}"),
+                        id,
                         case.instruction,
                         self.environment.clone(),
                         harness.clone(),
@@ -298,10 +325,26 @@ fn positive_u64(
 
 #[cfg(test)]
 mod tests {
-    use nanocodex_eval::PromptMessageRole;
+    use nanocodex_eval::{PromptMessageRole, import::Environment};
     use parquet::record::{Field, Row};
 
-    use super::MrcrCase;
+    use super::{Mrcr, MrcrCase};
+
+    #[test]
+    fn task_selection_skips_unrequested_partitions_and_rows() {
+        let importer = Mrcr::new(
+            "source",
+            "revision",
+            Environment::OciImage("python:3.12-slim".to_owned()),
+            "harness",
+        )
+        .tasks(["8needle-0-000000"]);
+
+        assert!(!importer.includes_partition("2needle-0"));
+        assert!(importer.includes_partition("8needle-0"));
+        assert!(importer.includes_case("8needle-0-000000"));
+        assert!(!importer.includes_case("8needle-0-000001"));
+    }
 
     #[test]
     fn preserves_alternating_messages_and_official_dimensions() {
