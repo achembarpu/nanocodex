@@ -7,7 +7,7 @@
 //! that owns cleanup of the same environment.
 
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     env,
     ffi::OsStr,
     fs,
@@ -27,7 +27,6 @@ use arcbox_ext4::{
     constants::{file_mode, make_mode},
 };
 use chrono::{DateTime, Utc};
-use fs2::FileExt as _;
 use jiff::{Timestamp, tz::TimeZone};
 use nanocodex_agent::{ExecutionEnvironment, NanocodexBuilder};
 use nanocodex_tools::{Tools, ToolsBuildError, standard::UpdatePlanTool};
@@ -96,7 +95,6 @@ const VERIFIER_CACHE_BLOCK_DEVICE: &str = "/dev/vdc";
 const OVERLAY_VERIFIER_CACHE_BLOCK_DEVICE: &str = "/dev/vdd";
 const VERIFIER_CACHE_MOUNT: &str = "/run/nanoeval-verifier-cache";
 const CACHED_VERIFIER_SCRIPT: &str = "/tmp/nanoeval-verifier.sh";
-const VERIFIER_CACHE_PREPARE_SCRIPT: &str = "/tmp/nanoeval-prepare-verifier.sh";
 const GUEST_PUBLIC_RESOLV_CONF: &str =
     "nameserver 192.168.127.1\\nnameserver 1.1.1.1\\noptions timeout:2 attempts:5\\n";
 const DEFAULT_IMAGE_NETWORK_RETRIES: usize = 2;
@@ -226,8 +224,7 @@ impl VmResources {
     ///
     /// # Errors
     ///
-    /// Returns an error when task environments or verifier caches cannot be
-    /// prepared.
+    /// Returns an error when task environments cannot be prepared.
     pub async fn backend(&self) -> Result<VmBackend, VmResourcesError> {
         self.backend_with(VmBackend::builder()).await
     }
@@ -255,14 +252,9 @@ impl VmResources {
 
     /// Configures a fresh backend from these prepared resources.
     ///
-    /// Reusable verifier dependency caches are prepared before the backend is
-    /// returned, so admitting an attempt cannot observe a partially prepared
-    /// run.
-    ///
     /// # Errors
     ///
-    /// Returns an error when immutable backend configuration or verifier-cache
-    /// preparation fails.
+    /// Returns an error when immutable backend configuration fails.
     pub async fn backend_with(
         &self,
         builder: VmBackendBuilder,
@@ -299,8 +291,7 @@ impl VmResources {
     ///
     /// # Errors
     ///
-    /// Returns an error when immutable backend configuration or verifier-cache
-    /// preparation fails.
+    /// Returns an error when immutable backend configuration fails.
     pub async fn configure(&self, backend: &VmBackend) -> Result<(), VmResourcesError> {
         self.configure_for_tasks(backend, &self.tasks, None).await
     }
@@ -322,7 +313,6 @@ impl VmResources {
             configuration = configuration.gvproxy(gvproxy);
         }
         backend.configure(configuration.build())?;
-        backend.prepare_verifier_caches(tasks).await?;
         Ok(())
     }
 
@@ -1309,44 +1299,6 @@ impl VmBackend {
             .map_err(|_| VmBackendConfigureError::AlreadyConfigured)
     }
 
-    /// Prepares reusable verifier dependency caches for the configured tasks.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the backend is not configured, a task has no
-    /// prepared environment, or cache preparation fails.
-    pub async fn prepare_verifier_caches(&self, tasks: &[Task]) -> Result<(), VmAttemptError> {
-        let configuration = self.configuration()?;
-        let mut prepared = BTreeSet::new();
-        for task in tasks {
-            let environment = configuration.environments.get(task.root()).ok_or_else(|| {
-                VmAttemptError::MissingPreparedEnvironment(task.root().to_path_buf())
-            })?;
-            if environment.verifier.is_some() {
-                continue;
-            }
-            let Some(cache) =
-                prepare_verifier_cache(&environment.rootfs, task, &configuration.verifier_cache)?
-            else {
-                continue;
-            };
-            if !prepared.insert(cache.key.clone()) {
-                continue;
-            }
-            cache
-                .prepare_once(
-                    task,
-                    environment,
-                    &configuration.vmm,
-                    &configuration.runtime_image,
-                    configuration.gvproxy.as_deref(),
-                )
-                .await?;
-            task.validate_package()?;
-        }
-        Ok(())
-    }
-
     /// Materializes one fresh attempt and starts its guest tool session.
     ///
     /// # Errors
@@ -1516,9 +1468,11 @@ impl AttemptGvproxy {
         log: &Path,
         spawn: impl FnOnce(&Path, &Path, &Path) -> Result<GvproxyProcess, VmGvproxyError>,
     ) -> Result<Self, VmAttemptError> {
+        // gvproxy uses filesystem Unix sockets, so keep their paths below the
+        // platform limit even when the caller gives workers a long TMPDIR.
         let directory = tempfile::Builder::new()
-            .prefix("nanocodex-eval-gvproxy-")
-            .tempdir()?;
+            .prefix("ncx-gvp-")
+            .tempdir_in("/tmp")?;
         let process = spawn(binary, directory.path(), log)?;
         Ok(Self {
             process,
@@ -2070,28 +2024,27 @@ fn prepare_verifier_cache(
     task: &Task,
     cache: &Path,
 ) -> Result<Option<VerifierCache>, VmAttemptError> {
-    template
+    let prepared = template
         .is_file()
         .then(|| VerifierCache::prepare(template, task, cache))
         .transpose()
-        .map(Option::flatten)
+        .map(Option::flatten)?;
+    let Some(prepared) = prepared else {
+        return Ok(None);
+    };
+    if prepared.status == "hit" {
+        return Ok(Some(prepared));
+    }
+    info!(
+        target: "nanocodex_eval",
+        task_name = task.name(),
+        verifier_cache_key = prepared.key,
+        "running the canonical cold verifier without a cache disk"
+    );
+    Ok(None)
 }
 
 fn spawn_attempt_network(
-    policy: NetworkPolicy,
-    gvproxy: Option<&Path>,
-    log: &Path,
-) -> Result<Option<AttemptGvproxy>, VmAttemptError> {
-    match policy {
-        NetworkPolicy::Public => {
-            let binary = gvproxy.ok_or(VmAttemptError::NetworkBackendNotPrepared)?;
-            AttemptGvproxy::spawn(binary, log).map(Some)
-        }
-        NetworkPolicy::Disabled => Ok(None),
-    }
-}
-
-fn spawn_preparation_network(
     policy: NetworkPolicy,
     gvproxy: Option<&Path>,
     log: &Path,
@@ -2112,6 +2065,10 @@ impl VmLaunch {
     ) -> Result<VmToolSession, VmAttemptError> {
         let mut command = Command::new(&self.vmm);
         nanocodex_vm::terminate_child_with_parent(command.as_std_mut());
+        // libkrun creates its gvproxy client socket beneath TMPDIR. Worker
+        // scratch paths are intentionally private but can exceed Unix socket
+        // limits, so give only the VMM process the platform's short temp root.
+        command.env("TMPDIR", "/tmp");
         let firmware = Path::new(DEFAULT_KRUNFW_DIRECTORY);
         if firmware.join(KRUNFW_LIBRARY_FILENAME).is_file() {
             command.env(KRUNFW_LIBRARY_PATH_ENVIRONMENT, firmware.canonicalize()?);
@@ -2292,158 +2249,6 @@ impl VerifierCache {
     fn is_ready(&self) -> io::Result<bool> {
         let disk = self.root.join("cache.ext4");
         Ok(disk.is_file() && verifier_cache_populated(&disk)?)
-    }
-
-    async fn prepare_once(
-        &self,
-        task: &Task,
-        environment: &VmEnvironment,
-        vmm: &Path,
-        runtime_image: &Path,
-        gvproxy: Option<&Path>,
-    ) -> Result<(), VmAttemptError> {
-        if self.is_ready()? {
-            return Ok(());
-        }
-        fs::create_dir_all(&self.root)?;
-        let lock_path = self.root.join(".prepare.lock");
-        let lock = tokio::task::spawn_blocking(move || {
-            let file = fs::OpenOptions::new()
-                .create(true)
-                .read(true)
-                .write(true)
-                .truncate(false)
-                .open(lock_path)?;
-            file.lock_exclusive()?;
-            Ok::<_, io::Error>(file)
-        })
-        .await
-        .map_err(io::Error::other)??;
-        if self.is_ready()? {
-            info!(
-                target: "nanocodex_eval",
-                verifier_cache_key = self.key,
-                "verifier cache preparation reused another process's result"
-            );
-            drop(lock);
-            return Ok(());
-        }
-        let target = self.root.join("cache.ext4");
-        if target.is_file() {
-            fs::remove_file(&target)?;
-        }
-        self.populate(task, environment, vmm, runtime_image, gvproxy)
-            .await?;
-        drop(lock);
-        Ok(())
-    }
-
-    async fn populate(
-        &self,
-        task: &Task,
-        environment: &VmEnvironment,
-        vmm: &Path,
-        runtime_image: &Path,
-        gvproxy: Option<&Path>,
-    ) -> Result<(), VmAttemptError> {
-        let temporary = tempfile::tempdir_in(&self.root)?;
-        let root = materialize_attempt_root(
-            &environment.rootfs,
-            runtime_image,
-            temporary.path(),
-            "rootfs",
-            AttemptRootPolicy::DisposableOverlay,
-        )?;
-        let network = spawn_preparation_network(
-            task.network(),
-            gvproxy,
-            &temporary.path().join("gvproxy.log"),
-        )?;
-        let launch = VmLaunch {
-            root,
-            workspace: environment.workspace.clone(),
-            shell: environment.shell.clone(),
-            runtime_image: runtime_image.to_path_buf(),
-            vmm: vmm.to_path_buf(),
-            cpus: task.resources().cpus.clamp(1, u32::from(u8::MAX)),
-            memory_mib: task.resources().memory_mb.clamp(1, u64::from(u32::MAX)),
-            resolver_configuration: network
-                .as_ref()
-                .map_or_else(String::new, |_| GUEST_PUBLIC_RESOLV_CONF.to_owned()),
-            environment: environment.environment.clone(),
-            network_socket: network
-                .as_ref()
-                .map(|network| network.socket().to_path_buf()),
-            shared_directories: Vec::new(),
-        };
-        let verifier_directory = temporary.path().join("verifier");
-        fs::create_dir_all(&verifier_directory)?;
-        let attempt_cache = AttemptVerifierCache {
-            disk: verifier_directory.join("cache.ext4"),
-            skip_setup: false,
-        };
-        format_verifier_cache_disk(&attempt_cache.disk, self.disk_bytes)?;
-        let session = launch.spawn(Some(&attempt_cache))?;
-        mount_verifier_cache(&session, launch.verifier_cache_block_device()).await?;
-        let script = task.verifier_script_bytes()?;
-        session
-            .write_file(
-                VERIFIER_CACHE_PREPARE_SCRIPT,
-                script[self.cacheable_start..self.cacheable_end].to_vec(),
-                0o700,
-            )
-            .await?;
-        let mut last_output = None;
-        for retry in 0..=VERIFIER_NETWORK_RETRIES {
-            restore_verifier_resolver(&session, &launch).await?;
-            let output = session
-                .command(
-                    VmCommand::new(&launch.shell)
-                        .arg(VERIFIER_CACHE_PREPARE_SCRIPT)
-                        .current_directory(&launch.workspace)
-                        .environment(base_guest_environment(task, &launch.workspace))
-                        .timeout(task.verifier().timeout()),
-                )
-                .await?;
-            let retryable = verifier_bootstrap_network_failed(&output);
-            let succeeded = output.exit_code == 0;
-            last_output = Some(output);
-            if succeeded || retry == VERIFIER_NETWORK_RETRIES || !retryable {
-                break;
-            }
-            let delay = verifier_network_retry_delay(retry);
-            warn!(
-                target: "nanocodex_eval",
-                verifier_cache_key = self.key,
-                retry = retry + 1,
-                max_retries = VERIFIER_NETWORK_RETRIES,
-                retry_delay_ms = u64::try_from(delay.as_millis()).unwrap_or(u64::MAX),
-                "verifier cache preparation hit a transient network failure; retrying"
-            );
-            tokio::time::sleep(delay).await;
-        }
-        let output =
-            last_output.ok_or_else(|| io::Error::other("verifier cache setup did not execute"))?;
-        let combined = [output.stdout.as_slice(), output.stderr.as_slice()].concat();
-        fs::write(self.root.join("prepare.log"), &combined)?;
-        session.shutdown().await?;
-        if output.exit_code != 0 || !verifier_cache_populated(&attempt_cache.disk)? {
-            return Err(io::Error::other(format!(
-                "verifier cache setup exited {}: {}",
-                output.exit_code,
-                String::from_utf8_lossy(&combined)
-            ))
-            .into());
-        }
-        if !self.mark_ready(&attempt_cache)? {
-            return Err(io::Error::other("verifier cache setup produced no reusable cache").into());
-        }
-        info!(
-            target: "nanocodex_eval",
-            verifier_cache_key = self.key,
-            "verifier cache prepared before agent execution"
-        );
-        Ok(())
     }
 
     fn mark_ready(&self, attempt: &AttemptVerifierCache) -> io::Result<bool> {

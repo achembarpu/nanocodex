@@ -2,216 +2,60 @@ import {
   Activity,
   AlertTriangle,
   CheckCircle2,
+  ChevronLeft,
+  ChevronRight,
   CircleDashed,
-  Cpu,
-  Gauge,
-  HardDrive,
-  MemoryStick,
   Radio,
-  RotateCw,
   Search,
-  Server,
   X,
 } from "lucide-react";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useQuery } from "@tanstack/react-query";
+import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
+import { useMatch, useNavigate } from "react-router";
+import {
+  evalApi,
+  type EvalAnalyticsPoint,
+  type EvalCase,
+  type EvalCoordinate,
+  type EvalOverview,
+  type EvalResultPoint,
+  type EvalSummary,
+  type EvalTask,
+  type EvalTaskOverview,
+  type EvalTreatment,
+  type EvalWorksetAnalytics,
+  type EvalWorksetResults,
+} from "./evalApi";
 import "./evals.css";
 
-type HealthStatus = "healthy" | "degraded" | "stalled";
-type CellState = "queued" | "running" | "retrying" | "completed" | "stale";
-type ArmState = "queued" | "running" | "passed" | "failed" | "error" | "unknown";
+const EvalAnalytics = lazy(() =>
+  import("./EvalAnalytics").then((module) => ({ default: module.EvalAnalytics })),
+);
+
 type MatrixFilter = "all" | "active" | "issues" | "complete";
+type AnalyticsView = "frontier" | "runs";
 
-type LivePhase = {
-  phase: string;
-  kind: string;
-  summary: string | null;
-  elapsedMs: number;
-  observedAt: string | null;
-};
+const resultStaleMs = 30_000;
+const resultCacheMs = 30 * 60_000;
+const taskStaleMs = 30_000;
+const analyticsKey = (worksetId: string | null) =>
+  ["evals", "analytics", worksetId] as const;
+const taskResultKey = (worksetId: string | null, taskId: string | null) =>
+  ["evals", "task-results", worksetId, taskId] as const;
+const taskKey = (worksetId: string | null, taskId: string | null) =>
+  ["evals", "task", worksetId, taskId] as const;
 
-type LiveCell = {
-  trial: number;
-  state: CellState;
-  attempts: number;
-  classification: string | null;
-  nanocodex: ArmState;
-  codex: ArmState;
-  nanocodexPhase: LivePhase | null;
-  codexPhase: LivePhase | null;
-  updatedAt: string | null;
-  durationMs: number | null;
-  message: string | null;
-  detailId: string | null;
-};
-
-type EvidenceText = { text: string; truncated: boolean } | null;
-
-type CaseArm = {
-  status: string;
-  outcome: string;
-  model: string | null;
-  durationMs: number | null;
-  toolCalls: number | null;
-  usage: {
-    inputTokens: number;
-    cachedInputTokens: number;
-    outputTokens: number;
-    reasoningOutputTokens: number;
-    totalTokens: number;
-  };
-  memory: {
-    guestUsedPercent: number | null;
-    oomDetected: boolean;
-  };
-  exception: {
-    kind: string | null;
-    outcome: string | null;
-    message: string | null;
-    occurredAt: string | null;
-  } | null;
-  verifier: {
-    exitCode: number | null;
-    rewards: Record<string, unknown>;
-    stdout: EvidenceText;
-    stderr: EvidenceText;
-  };
-  finalMessage: string | null;
-};
-
-type CaseDetail = {
-  schemaVersion: number;
-  detailId: string;
-  task: {
-    name: string;
-    contentDigest: string;
-    instruction: EvidenceText;
-  };
-  requestedTrial: number;
-  actualTrial: number;
-  thinking: string;
-  profileLabel: string;
-  classification: string;
-  finishedAt: string | null;
-  durationMs: number | null;
-  history: Array<{
-    trial: number;
-    replacementFor: number | null;
-    classification: string;
-    nanocodexOutcome: string;
-    codexOutcome: string;
-    finishedAt: string | null;
-    durationMs: number | null;
-  }>;
-  nanocodex: CaseArm;
-  codex: CaseArm;
-};
-
-type LiveRow = {
-  taskName: string;
-  taskLabel: string;
-  taskDigest: string;
-  profile: string;
-  profileLabel: string;
-  thinking: string;
-  nanocodexToolMode: string;
-  codexToolMode: string;
-  cells: LiveCell[];
-};
-
-export type LiveEvalSnapshot = {
-  schemaVersion: number;
-  sequence: number;
-  observedAt: string;
-  sourceCount: number;
-  health: {
-    status: HealthStatus;
-    statusMessage: string;
-    evidenceAgeMs: number | null;
-    completions5m: number;
-    infrastructure15m: number;
-    host: {
-      cpuPercent: number | null;
-      loadPercent: number | null;
-      memoryUsedPercent: number | null;
-      swapUsedPercent: number | null;
-      diskUsedPercent: number | null;
-    };
-  };
-  summary: {
-    total: number;
-    completed: number;
-    running: number;
-    retrying: number;
-    queued: number;
-    stale: number;
-    bothPassed: number;
-    nanocodexOnly: number;
-    codexOnly: number;
-    neitherPassed: number;
-  };
-  rows: LiveRow[];
-  recentFailures: Array<{
-    taskName: string;
-    trial: number;
-    profileLabel: string;
-    classification: string;
-    nanocodex: string;
-    codex: string;
-    message: string | null;
-    finishedAt: string | null;
-  }>;
-};
-
-type LiveEvalConnection = {
-  availability: "checking" | "available" | "unavailable";
-  connected: boolean;
-  snapshot: LiveEvalSnapshot | null;
-};
-
-export function useLiveEvalSnapshot(): LiveEvalConnection {
-  const [state, setState] = useState<LiveEvalConnection>({
-    availability: "checking",
-    connected: false,
-    snapshot: null,
+export function useEvalOverview() {
+  return useQuery({
+    queryKey: ["evals", "overview"],
+    queryFn: ({ signal }) => evalApi.overview(signal),
+    refetchInterval: 500,
+    refetchIntervalInBackground: true,
+    refetchOnMount: "always",
+    refetchOnWindowFocus: "always",
+    refetchOnReconnect: "always",
+    staleTime: 0,
   });
-
-  useEffect(() => {
-    const controller = new AbortController();
-    let events: EventSource | null = null;
-    let retry: number | null = null;
-    const connect = () => {
-      fetch("/api/evals", { cache: "no-store", signal: controller.signal })
-        .then((response) => {
-          if (!response.ok) throw new Error(`live eval endpoint returned ${response.status}`);
-          return response.json() as Promise<LiveEvalSnapshot>;
-        })
-        .then((snapshot) => {
-          setState({ availability: "available", connected: true, snapshot });
-          events = new EventSource("/api/evals/events");
-          events.addEventListener("snapshot", (event) => {
-            const next = JSON.parse((event as MessageEvent<string>).data) as LiveEvalSnapshot;
-            setState({ availability: "available", connected: true, snapshot: next });
-          });
-          events.onopen = () =>
-            setState((current) => ({ ...current, availability: "available", connected: true }));
-          events.onerror = () =>
-            setState((current) => ({ ...current, availability: "available", connected: false }));
-        })
-        .catch((error) => {
-          if (error instanceof DOMException && error.name === "AbortError") return;
-          setState({ availability: "unavailable", connected: false, snapshot: null });
-          retry = window.setTimeout(connect, 2_000);
-        });
-    };
-    connect();
-    return () => {
-      controller.abort();
-      if (retry !== null) window.clearTimeout(retry);
-      events?.close();
-    };
-  }, []);
-
-  return state;
 }
 
 function formatDuration(milliseconds: number | null) {
@@ -219,455 +63,501 @@ function formatDuration(milliseconds: number | null) {
   if (milliseconds < 1_000) return `${Math.round(milliseconds)}ms`;
   const seconds = milliseconds / 1_000;
   if (seconds < 60) return `${seconds.toFixed(seconds < 10 ? 1 : 0)}s`;
-  const minutes = Math.floor(seconds / 60);
-  return `${minutes}m ${Math.round(seconds % 60)}s`;
+  return `${Math.floor(seconds / 60)}m ${Math.round(seconds % 60)}s`;
 }
 
-function formatAge(milliseconds: number | null) {
-  if (milliseconds === null) return "no evidence";
-  if (milliseconds < 1_000) return "now";
-  if (milliseconds < 60_000) return `${Math.floor(milliseconds / 1_000)}s ago`;
-  return `${Math.floor(milliseconds / 60_000)}m ago`;
+function formatWorksetDate(milliseconds: number) {
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  }).format(new Date(milliseconds));
 }
 
-function formatPercent(value: number | null) {
-  return value === null ? "—" : `${Math.round(value)}%`;
+function formatInteger(value: unknown) {
+  return typeof value === "number" ? value.toLocaleString() : "—";
 }
 
-function availablePercent(used: number | null) {
-  return used === null ? "unknown" : `${Math.max(0, Math.round(100 - used))}% headroom`;
-}
-
-function cellTitle(row: LiveRow, cell: LiveCell) {
-  const lines = [
-    `${row.taskLabel} · ${row.profileLabel}${cell.trial}`,
-    `${cell.state}${cell.classification ? ` · ${cell.classification.replaceAll("_", " ")}` : ""}`,
-    `Nanocodex: ${cell.nanocodexPhase?.phase ?? cell.nanocodex}`,
-    `Codex: ${cell.codexPhase?.phase ?? cell.codex}`,
-    `Attempts: ${cell.attempts || 0} · elapsed ${formatDuration(cell.durationMs)}`,
-  ];
-  if (cell.message) lines.push(cell.message);
-  return lines.join("\n");
-}
-
-function rowMatchesFilter(row: LiveRow, filter: MatrixFilter) {
+function taskMatchesFilter(task: EvalTaskOverview, filter: MatrixFilter) {
+  const { summary } = task;
   if (filter === "all") return true;
-  if (filter === "active") return row.cells.some((cell) => cell.state === "running");
-  if (filter === "issues") {
-    return row.cells.some(
-      (cell) =>
-        ["retrying", "stale"].includes(cell.state) ||
-        (cell.state === "completed" && cell.classification !== "both_passed"),
-    );
-  }
-  return row.cells.every((cell) => cell.state === "completed");
+  if (filter === "active") return summary.running > 0;
+  if (filter === "issues") return summary.failed > 0;
+  return summary.total > 0 && summary.success + summary.failed === summary.total;
 }
 
-function ArmMark({ label, state }: { label: string; state: ArmState }) {
+function coordinateLabel(cell: EvalCoordinate) {
+  if (cell.status === "passed" || cell.status === "failed") return cell.status;
+  if (cell.outcome === "passed") return "passed";
+  return cell.state;
+}
+
+function CellMark({ cell }: { cell: EvalCoordinate }) {
+  const label = coordinateLabel(cell);
   return (
-    <span className={`live-arm-mark ${state}`} aria-label={`${label}: ${state}`}>
-      <span>{label}</span>
+    <span className={`eval-cell-mark ${label}`} aria-hidden="true">
+      {label === "passed" || label === "success" ? "✓" : label === "failed" ? "×" : cell.repetition}
     </span>
   );
 }
 
-function formatInteger(value: number | null) {
-  return value === null ? "—" : value.toLocaleString();
-}
-
-function formatRewards(rewards: Record<string, unknown>) {
-  const entries = Object.entries(rewards);
-  return entries.length ? entries.map(([key, value]) => `${key} ${String(value)}`).join(" · ") : "—";
-}
-
-function EvidenceBlock({ title, evidence, open = false }: { title: string; evidence: EvidenceText; open?: boolean }) {
-  if (!evidence?.text) return null;
+function JsonEvidence({ title, value }: { title: string; value: unknown }) {
+  if (!value) return null;
   return (
-    <details className="live-evidence-block" open={open}>
-      <summary>{title}{evidence.truncated ? " · truncated" : ""}</summary>
-      <pre>{evidence.text}</pre>
+    <details className="live-evidence-block">
+      <summary>{title}</summary>
+      <pre>{JSON.stringify(value, null, 2)}</pre>
     </details>
   );
 }
 
-function CaseArmPanel({ label, arm }: { label: "Nanocodex" | "Codex"; arm: CaseArm }) {
-  const failed = arm.status !== "passed" || arm.outcome !== "passed";
+function CaseInspector({
+  detailId,
+  cell,
+  treatment,
+  onClose,
+}: {
+  detailId: string;
+  cell: EvalCoordinate;
+  treatment: EvalTreatment;
+  onClose: () => void;
+}) {
+  const detail = useQuery({
+    queryKey: ["evals", "case", detailId],
+    queryFn: ({ signal }) => evalApi.evalCase(detailId, signal),
+    staleTime: Infinity,
+  });
+  const evidence: EvalCase | undefined = detail.data;
   return (
-    <section className={`live-case-arm ${failed ? "failed" : "passed"}`}>
+    <article className={`live-case-detail ${cell.state}`} aria-label="Selected evaluation case">
       <header>
         <div>
-          <span>{label}</span>
-          <strong>{arm.status.replaceAll("_", " ")}</strong>
+          <p className="eyebrow">{treatment.harness} · {treatment.model} · {treatment.thinking}</p>
+          <h2>Repetition {cell.repetition}</h2>
         </div>
-        <span className="live-case-outcome">{arm.outcome.replaceAll("_", " ")}</span>
-      </header>
-      <dl className="live-case-metrics">
-        <div><dt>Model</dt><dd>{arm.model ?? "—"}</dd></div>
-        <div><dt>Agent time</dt><dd>{formatDuration(arm.durationMs)}</dd></div>
-        <div><dt>Tool calls</dt><dd>{formatInteger(arm.toolCalls)}</dd></div>
-        <div><dt>Total tokens</dt><dd>{formatInteger(arm.usage.totalTokens)}</dd></div>
-        <div><dt>Cached input</dt><dd>{formatInteger(arm.usage.cachedInputTokens)}</dd></div>
-        <div><dt>Guest memory</dt><dd>{formatPercent(arm.memory.guestUsedPercent)}</dd></div>
-        <div><dt>Verifier</dt><dd>{arm.verifier.exitCode === null ? "—" : `exit ${arm.verifier.exitCode}`}</dd></div>
-        <div><dt>Reward</dt><dd>{formatRewards(arm.verifier.rewards)}</dd></div>
-      </dl>
-      {arm.exception ? (
-        <div className="live-case-exception">
-          <AlertTriangle aria-hidden="true" />
-          <div>
-            <strong>{arm.exception.kind ?? "agent exception"}</strong>
-            <p>{arm.exception.message ?? arm.exception.outcome ?? "No exception message retained."}</p>
-          </div>
-        </div>
-      ) : null}
-      <EvidenceBlock title="Verifier stdout" evidence={arm.verifier.stdout} open={failed} />
-      <EvidenceBlock title="Verifier stderr" evidence={arm.verifier.stderr} open={failed} />
-      {arm.finalMessage ? (
-        <details className="live-evidence-block" open={failed && !arm.verifier.stdout?.text}>
-          <summary>Final agent message</summary>
-          <pre>{arm.finalMessage}</pre>
-        </details>
-      ) : null}
-    </section>
-  );
-}
-
-function CaseInspector({ row, cell, onClose }: { row: LiveRow; cell: LiveCell; onClose: () => void }) {
-  const [detail, setDetail] = useState<CaseDetail | null>(null);
-  const [loading, setLoading] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    const controller = new AbortController();
-    let active = true;
-    setDetail(null);
-    setError(null);
-    setLoading(Boolean(cell.detailId));
-    if (!cell.detailId) return () => {
-      active = false;
-      controller.abort();
-    };
-    fetch(`/api/evals/case?id=${encodeURIComponent(cell.detailId)}`, {
-      cache: "no-store",
-      signal: controller.signal,
-    })
-      .then((response) => {
-        if (!response.ok) throw new Error(`case detail returned ${response.status}`);
-        return response.json() as Promise<CaseDetail>;
-      })
-      .then((next) => {
-        if (active) setDetail(next);
-      })
-      .catch((reason) => {
-        if (reason instanceof DOMException && reason.name === "AbortError") return;
-        if (active) setError(reason instanceof Error ? reason.message : String(reason));
-      })
-      .finally(() => {
-        if (active) setLoading(false);
-      });
-    return () => {
-      active = false;
-      controller.abort();
-    };
-  }, [cell.detailId]);
-
-  return (
-    <article className={`live-case-detail ${cell.state}`} aria-label="Selected evaluation coordinate">
-      <header>
-        <div>
-          <p className="eyebrow">{row.thinking} effort · {row.profileLabel}{cell.trial}</p>
-          <h2>{row.taskLabel}</h2>
-        </div>
-        <button type="button" className="icon-button" onClick={onClose} aria-label="Close detail">
+        <button type="button" className="icon-button" onClick={onClose} aria-label="Close case detail">
           <X aria-hidden="true" />
         </button>
       </header>
       <div className="live-case-detail-status">
-        <strong>{cell.state}</strong>
-        <span>{cell.classification?.replaceAll("_", " ") ?? "awaiting evidence"}</span>
-        <span>{cell.attempts || 0} attempt{cell.attempts === 1 ? "" : "s"}</span>
+        <strong>{evidence?.status ?? coordinateLabel(cell)}</strong>
         <span>{formatDuration(cell.durationMs)}</span>
       </div>
-      {!cell.detailId ? (
-        <div className="live-case-live">
-          <section><strong>Nanocodex · {cell.nanocodexPhase?.phase ?? cell.nanocodex}</strong><p>{cell.nanocodexPhase?.summary ?? "No completed evidence yet."}</p></section>
-          <section><strong>Codex · {cell.codexPhase?.phase ?? cell.codex}</strong><p>{cell.codexPhase?.summary ?? "No completed evidence yet."}</p></section>
-        </div>
-      ) : null}
-      {loading ? <p className="live-case-loading">Loading retained case evidence…</p> : null}
-      {error ? <p className="live-case-error"><AlertTriangle aria-hidden="true" /> {error}</p> : null}
-      {detail ? (
+      {detail.isPending ? <p className="live-case-loading">Loading retained case evidence…</p> : null}
+      {detail.error ? <p className="live-case-error"><AlertTriangle aria-hidden="true" /> {detail.error.message}</p> : null}
+      {evidence ? (
         <>
-          {detail.task.instruction ? (
+          <dl className="live-case-metrics">
+            <div><dt>Model</dt><dd>{evidence.model ?? treatment.model}</dd></div>
+            <div><dt>Effort</dt><dd>{evidence.effort ?? treatment.thinking}</dd></div>
+            <div><dt>Environment</dt><dd>{evidence.environment ?? "—"}</dd></div>
+            <div><dt>Tool calls</dt><dd>{formatInteger(evidence.toolCalls)}</dd></div>
+            <div><dt>Input tokens</dt><dd>{formatInteger(evidence.usage?.input_tokens)}</dd></div>
+            <div><dt>Cached input</dt><dd>{formatInteger(evidence.usage?.cached_input_tokens)}</dd></div>
+            <div><dt>Output tokens</dt><dd>{formatInteger(evidence.usage?.output_tokens)}</dd></div>
+            <div><dt>Total tokens</dt><dd>{formatInteger(evidence.usage?.total_tokens)}</dd></div>
+          </dl>
+          {evidence.prompt ? (
             <section className="live-case-task">
               <p className="rail-label">Task instruction</p>
-              <pre>{detail.task.instruction.text}</pre>
+              <pre>{evidence.prompt}</pre>
             </section>
           ) : null}
-          <div className="live-case-arms">
-            <CaseArmPanel label="Nanocodex" arm={detail.nanocodex} />
-            <CaseArmPanel label="Codex" arm={detail.codex} />
-          </div>
-          {detail.history.length > 1 ? (
-            <section className="live-case-history">
-              <p className="rail-label">Attempt and replacement history</p>
-              <ol>
-                {detail.history.map((attempt, index) => (
-                  <li key={`${attempt.trial}-${index}`}>
-                    <strong>trial {attempt.trial}</strong>
-                    <span>{attempt.classification.replaceAll("_", " ")}</span>
-                    <span>N {attempt.nanocodexOutcome.replaceAll("_", " ")}</span>
-                    <span>C {attempt.codexOutcome.replaceAll("_", " ")}</span>
-                    <span>{formatDuration(attempt.durationMs)}</span>
-                  </li>
-                ))}
-              </ol>
-            </section>
+          {evidence.verifierStdout ? (
+            <details className="live-evidence-block" open={evidence.status !== "passed"}>
+              <summary>Verifier stdout</summary>
+              <pre>{evidence.verifierStdout}</pre>
+            </details>
           ) : null}
+          {evidence.verifierStderr ? (
+            <details className="live-evidence-block" open>
+              <summary>Verifier stderr</summary>
+              <pre>{evidence.verifierStderr}</pre>
+            </details>
+          ) : null}
+          {evidence.finalMessage ? (
+            <details className="live-evidence-block">
+              <summary>Final agent message</summary>
+              <pre>{evidence.finalMessage}</pre>
+            </details>
+          ) : null}
+          <JsonEvidence title="Verifier result" value={evidence.verifier} />
+          <JsonEvidence title="Exception" value={evidence.exception} />
+          <JsonEvidence title="Timing" value={evidence.timing} />
         </>
       ) : null}
     </article>
   );
 }
 
-export function LiveEvals({ connection }: { connection: LiveEvalConnection }) {
-  const snapshot = connection.snapshot!;
+function health(summary: EvalSummary) {
+  if (summary.failed > 0) {
+    return { status: "degraded", message: `${summary.failed} execution failure(s) retained with evidence.` };
+  }
+  if (summary.success === summary.total) {
+    return { status: "healthy", message: "Every durable task finished execution." };
+  }
+  return { status: "healthy", message: "The durable ledger is progressing." };
+}
+
+function progressRank(summary: EvalSummary) {
+  if (summary.running > 0) return 0;
+  if (summary.unclaimed > 0) return 1;
+  return 2;
+}
+
+function ProgressBar({ summary, label }: { summary: EvalSummary; label: string }) {
+  const denominator = Math.max(summary.total, 1);
+  const finished = summary.success + summary.failed;
+  const segments = [
+    { key: "success", value: summary.success },
+    { key: "failed", value: summary.failed },
+    { key: "running", value: summary.running },
+    { key: "unclaimed", value: summary.unclaimed },
+  ];
+  return (
+    <div
+      className="eval-progress"
+      role="progressbar"
+      aria-label={label}
+      aria-valuemin={0}
+      aria-valuemax={summary.total}
+      aria-valuenow={finished}
+    >
+      <div className="eval-progress-track">
+        {segments.map((segment) => segment.value > 0 ? (
+          <span
+            className={segment.key}
+            style={{ width: `${segment.value / denominator * 100}%` }}
+            key={segment.key}
+          />
+        ) : null)}
+      </div>
+      <div className="eval-progress-copy">
+        <strong>{finished} / {summary.total}</strong>
+        <span>{summary.running} running</span>
+        <span>{summary.unclaimed} unclaimed</span>
+        {summary.failed > 0 ? <span>{summary.failed} execution failed</span> : null}
+      </div>
+    </div>
+  );
+}
+
+function PageBack({ onClick, children }: { onClick: () => void; children: string }) {
+  return (
+    <button type="button" className="eval-back" onClick={onClick}>
+      <ChevronLeft aria-hidden="true" />
+      {children}
+    </button>
+  );
+}
+
+function Analytics({
+  points,
+  view = "frontier",
+  taskCount,
+}: {
+  points: EvalResultPoint[] | EvalAnalyticsPoint[];
+  view?: AnalyticsView;
+  taskCount?: number;
+}) {
+  return (
+    <Suspense fallback={<section className="eval-chart-loading"><CircleDashed aria-hidden="true" /><span>Loading charts…</span></section>}>
+      <EvalAnalytics points={points} view={view} taskCount={taskCount} />
+    </Suspense>
+  );
+}
+
+export function LiveEvals({ overview }: { overview: EvalOverview }) {
+  const navigate = useNavigate();
+  const taskRoute = useMatch("/evals/worksets/:worksetId/tasks/:taskId");
+  const worksetRoute = useMatch("/evals/worksets/:worksetId");
+  const route = taskRoute ?? worksetRoute;
+  const [selectedCell, setSelectedCell] = useState<{
+    treatment: EvalTreatment;
+    cell: EvalCoordinate;
+  } | null>(null);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<MatrixFilter>("all");
-  const [selected, setSelected] = useState<{ taskName: string; profile: string; trial: number } | null>(null);
   const detailRef = useRef<HTMLDivElement>(null);
+  const selectedWorkset = route?.params.worksetId
+    ? overview.worksets.find((workset) => workset.id === route.params.worksetId) ?? null
+    : null;
+  const worksetQuery = useQuery({
+    queryKey: ["evals", "workset", selectedWorkset?.id],
+    enabled: Boolean(selectedWorkset),
+    queryFn: ({ signal }) => evalApi.workset(selectedWorkset!.id, signal),
+    refetchInterval: 5_000,
+    refetchIntervalInBackground: true,
+  });
+  const tasks = worksetQuery.data?.tasks ?? [];
   const normalizedQuery = query.trim().toLowerCase();
-  const visibleRows = useMemo(
-    () =>
-      snapshot.rows.filter(
-        (row) =>
-          (!normalizedQuery || row.taskName.toLowerCase().includes(normalizedQuery)) &&
-          rowMatchesFilter(row, filter),
+  const visibleTasks = useMemo(
+    () => tasks
+      .filter(
+        (task) =>
+          (!normalizedQuery ||
+            task.name.toLowerCase().includes(normalizedQuery) ||
+            task.label.toLowerCase().includes(normalizedQuery)) &&
+          taskMatchesFilter(task, filter),
+      )
+      .sort((left, right) =>
+        progressRank(left.summary) - progressRank(right.summary) || left.name.localeCompare(right.name)
       ),
-    [filter, normalizedQuery, snapshot.rows],
+    [filter, normalizedQuery, tasks],
   );
-  const selectedCase = useMemo(() => {
-    if (!selected) return null;
-    const row = snapshot.rows.find(
-      (candidate) => candidate.taskName === selected.taskName && candidate.profile === selected.profile,
-    );
-    const cell = row?.cells.find((candidate) => candidate.trial === selected.trial);
-    return row && cell ? { row, cell } : null;
-  }, [selected, snapshot.rows]);
+  const orderedWorksets = useMemo(
+    () => [...overview.worksets].sort((left, right) =>
+      progressRank(left.summary) - progressRank(right.summary) ||
+      right.createdAtMs - left.createdAtMs
+    ),
+    [overview.worksets],
+  );
+  const selectedTaskId = taskRoute?.params.taskId ?? null;
+  const selectedTaskOverview = selectedTaskId
+    ? tasks.find((task) => task.id === selectedTaskId) ?? null
+    : null;
+  const taskQuery = useQuery({
+    queryKey: taskKey(selectedWorkset?.id ?? null, selectedTaskId),
+    enabled: Boolean(selectedWorkset && selectedTaskOverview),
+    queryFn: ({ signal }) =>
+      evalApi.task(selectedWorkset!.id, selectedTaskId!, signal),
+    refetchInterval:
+      selectedTaskOverview &&
+      selectedTaskOverview.summary.total > 0 &&
+      selectedTaskOverview.summary.success + selectedTaskOverview.summary.failed === selectedTaskOverview.summary.total
+        ? false
+        : 15_000,
+    refetchIntervalInBackground: true,
+    staleTime: taskStaleMs,
+    gcTime: resultCacheMs,
+    refetchOnWindowFocus: false,
+  });
+  const analyticsQuery = useQuery<EvalWorksetAnalytics>({
+    queryKey: analyticsKey(selectedWorkset?.id ?? null),
+    enabled: Boolean(selectedWorkset && !taskRoute),
+    queryFn: ({ signal }) => evalApi.worksetAnalytics(selectedWorkset!.id, signal),
+    refetchInterval: selectedWorkset &&
+      selectedWorkset.summary.success + selectedWorkset.summary.failed < selectedWorkset.summary.total
+      ? 15_000
+      : false,
+    staleTime: resultStaleMs,
+    gcTime: resultCacheMs,
+    refetchOnWindowFocus: false,
+  });
+  const resultsQuery = useQuery<EvalWorksetResults>({
+    queryKey: taskResultKey(selectedWorkset?.id ?? null, selectedTaskId),
+    enabled: Boolean(selectedWorkset && taskRoute && selectedTaskOverview),
+    queryFn: ({ signal }) => evalApi.taskResults(selectedWorkset!.id, selectedTaskId!, signal),
+    refetchInterval: selectedTaskOverview &&
+      selectedTaskOverview.summary.success + selectedTaskOverview.summary.failed < selectedTaskOverview.summary.total
+      ? 15_000
+      : false,
+    staleTime: resultStaleMs,
+    gcTime: resultCacheMs,
+    refetchOnWindowFocus: false,
+  });
+  const selectedTask: EvalTask | null = taskQuery.data?.task ?? null;
+  const repetitions = [
+    ...new Set(selectedTask?.treatments.flatMap((treatment) =>
+      treatment.cells.map((cell) => cell.repetition)) ?? []),
+  ].sort((left, right) => left - right);
+  const currentHealth = health(overview.summary);
 
   useEffect(() => {
-    if (!selectedCase) return;
+    if (!selectedCell) return;
     window.requestAnimationFrame(() =>
       detailRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }),
     );
-  }, [selectedCase?.row.taskName, selectedCase?.row.profile, selectedCase?.cell.trial]);
-  const completionPercent = snapshot.summary.total
-    ? (snapshot.summary.completed / snapshot.summary.total) * 100
-    : 0;
-  const trialCount = Math.max(0, ...snapshot.rows.map((row) => row.cells.length));
-  const host = snapshot.health.host;
+  }, [selectedCell?.cell.id]);
+
+  function chooseWorkset(id: string) {
+    setSelectedCell(null);
+    navigate(`/evals/worksets/${encodeURIComponent(id)}`);
+  }
+
+  function chooseTask(id: string) {
+    if (!selectedWorkset) return;
+    setSelectedCell(null);
+    navigate(
+      `/evals/worksets/${encodeURIComponent(selectedWorkset.id)}/tasks/${encodeURIComponent(id)}`,
+    );
+  }
+
+  if (!route) {
+    return (
+      <main className="live-evals">
+        <section className="eval-page-head">
+          <div>
+            <p className="eyebrow"><Radio aria-hidden="true" /> Coordinator evidence</p>
+            <h1>Evals</h1>
+            <p>Durable benchmark progress and retained result artifacts.</p>
+          </div>
+          <div className={`live-health-callout ${currentHealth.status}`}>
+            <span className="live-health-pulse" />
+            <div><strong>{currentHealth.status}</strong><p>{currentHealth.message}</p></div>
+            <small>live</small>
+          </div>
+        </section>
+        <section className="eval-stat-strip" aria-label="Evaluation summary">
+          <div><Activity aria-hidden="true" /><span>Worksets</span><strong>{overview.worksets.length}</strong></div>
+          <div><CircleDashed aria-hidden="true" /><span>Coordinates</span><strong>{overview.summary.total}</strong></div>
+          <div><Radio aria-hidden="true" /><span>Running</span><strong>{overview.summary.running}</strong></div>
+          <div><CheckCircle2 aria-hidden="true" /><span>Finished</span><strong>{overview.summary.success + overview.summary.failed}</strong></div>
+        </section>
+        <section className="eval-full-table" aria-labelledby="worksets-heading">
+          <header><p className="rail-label">Benchmarks</p><h2 id="worksets-heading">Worksets</h2></header>
+          <div className="eval-table-heading eval-workset-grid" aria-hidden="true">
+            <span>Benchmark</span><span>Progress</span><span>Tasks</span><span>Created</span><span />
+          </div>
+          {orderedWorksets.map((workset) => (
+            <button
+              type="button"
+              className="eval-table-row eval-workset-grid"
+              onClick={() => chooseWorkset(workset.id)}
+              key={workset.id}
+            >
+              <span className="eval-primary-cell"><strong>{workset.profile}</strong><small>{workset.digest.slice(0, 16)}</small></span>
+              <ProgressBar summary={workset.summary} label={`${workset.profile} progress`} />
+              <span>{workset.taskCount}</span>
+              <span>{formatWorksetDate(workset.createdAtMs)}</span>
+              <ChevronRight aria-hidden="true" />
+            </button>
+          ))}
+          {!orderedWorksets.length ? <p className="eval-empty-list">No durable worksets yet.</p> : null}
+        </section>
+      </main>
+    );
+  }
+
+  if (!selectedWorkset) {
+    return (
+      <main className="live-evals eval-route-empty">
+        <PageBack onClick={() => navigate("/evals")}>All evals</PageBack>
+        <AlertTriangle aria-hidden="true" />
+        <h1>Workset not found</h1>
+        <p>The coordinator no longer reports this durable workset.</p>
+      </main>
+    );
+  }
+
+  if (!taskRoute) {
+    return (
+      <main className="live-evals">
+        <section className="eval-page-head eval-detail-head">
+          <div>
+            <PageBack onClick={() => navigate("/evals")}>All evals</PageBack>
+            <p className="eyebrow">Benchmark · {selectedWorkset.digest.slice(0, 16)}</p>
+            <h1>{selectedWorkset.profile}</h1>
+            <p>{selectedWorkset.taskCount} tasks across the retained harness, model, thinking, and repetition sweep.</p>
+          </div>
+          <ProgressBar summary={selectedWorkset.summary} label={`${selectedWorkset.profile} progress`} />
+        </section>
+        {analyticsQuery.data ? <Analytics points={analyticsQuery.data.points} taskCount={analyticsQuery.data.taskCount} /> : (
+          <section className="eval-chart-loading">
+            <CircleDashed aria-hidden="true" />
+            <span>{analyticsQuery.error?.message ?? "Loading compact benchmark analytics…"}</span>
+          </section>
+        )}
+        <section className="eval-full-table" aria-labelledby="tasks-heading">
+          <header className="eval-table-toolbar">
+            <div><p className="rail-label">Progress</p><h2 id="tasks-heading">Tasks</h2></div>
+            <label className="live-eval-search"><Search aria-hidden="true" /><input type="search" value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Filter tasks" aria-label="Filter evaluation tasks" /></label>
+            <div className="live-filter" role="group" aria-label="Task filter">
+              {(["all", "active", "issues", "complete"] as MatrixFilter[]).map((option) => (
+                <button type="button" className={filter === option ? "is-active" : ""} onClick={() => setFilter(option)} key={option}>{option}</button>
+              ))}
+            </div>
+          </header>
+          <div className="eval-table-heading eval-task-grid" aria-hidden="true">
+            <span>Task</span><span>Progress</span><span>Treatments</span><span />
+          </div>
+          {visibleTasks.map((task) => (
+            <button type="button" className="eval-table-row eval-task-grid" onClick={() => chooseTask(task.id)} key={task.id}>
+              <span className="eval-primary-cell"><strong>{task.label}</strong><small>{task.name}</small></span>
+              <ProgressBar summary={task.summary} label={`${task.label} progress`} />
+              <span>{task.treatmentCount}</span>
+              <ChevronRight aria-hidden="true" />
+            </button>
+          ))}
+          {worksetQuery.isPending ? <p className="eval-empty-list">Loading workset tasks…</p> : null}
+          {worksetQuery.error ? <p className="eval-empty-list">{worksetQuery.error.message}</p> : null}
+          {!worksetQuery.isPending && !visibleTasks.length ? <p className="eval-empty-list">No tasks match this filter.</p> : null}
+        </section>
+      </main>
+    );
+  }
+
+  if (!selectedTaskOverview && !worksetQuery.isPending) {
+    return (
+      <main className="live-evals eval-route-empty">
+        <PageBack onClick={() => chooseWorkset(selectedWorkset.id)}>Benchmark</PageBack>
+        <AlertTriangle aria-hidden="true" />
+        <h1>Task not found</h1>
+        <p>This task is not part of the selected workset.</p>
+      </main>
+    );
+  }
 
   return (
-    <div className="live-evals">
-      <section className="live-evals-hero page-grid">
+    <main className="live-evals">
+      <section className="eval-page-head eval-detail-head">
         <div>
-          <p className="eyebrow"><Radio aria-hidden="true" /> Live retained evidence</p>
-          <h1>Evals</h1>
-          <p>
-            Every task, treatment, and repetition in one durable matrix. Cells update as model,
-            tool, verifier, retry, and completion evidence lands on disk.
-          </p>
+          <PageBack onClick={() => chooseWorkset(selectedWorkset.id)}>{selectedWorkset.profile}</PageBack>
+          <p className="eyebrow">Task · {selectedTaskOverview?.digest.slice(0, 16) ?? "loading"}</p>
+          <h1>{selectedTaskOverview?.label ?? "Loading task…"}</h1>
+          <p>{selectedTaskOverview?.name}</p>
         </div>
-        <div className={`live-health-callout ${snapshot.health.status}`}>
-          <span className="live-health-pulse" />
-          <div>
-            <strong>{snapshot.health.status}</strong>
-            <p>{snapshot.health.statusMessage}</p>
-          </div>
-          <small>{connection.connected ? "streaming" : "reconnecting"} · {formatAge(snapshot.health.evidenceAgeMs)}</small>
-        </div>
+        {selectedTaskOverview ? <ProgressBar summary={selectedTaskOverview.summary} label={`${selectedTaskOverview.label} progress`} /> : null}
       </section>
-
-      <section className="live-health-strip page-grid" aria-label="Evaluation system health">
-        <div>
-          <Activity aria-hidden="true" />
-          <span>Throughput</span>
-          <strong>{snapshot.health.completions5m}</strong>
-          <small>attempts / 5m</small>
-        </div>
-        <div>
-          <Gauge aria-hidden="true" />
-          <span>Active</span>
-          <strong>{snapshot.summary.running}</strong>
-          <small>{snapshot.summary.stale} stale</small>
-        </div>
-        <div>
-          <Cpu aria-hidden="true" />
-          <span>Host CPU</span>
-          <strong>{host.cpuPercent === null ? "warming" : formatPercent(host.cpuPercent)}</strong>
-          <small>normalized load {formatPercent(host.loadPercent)}</small>
-        </div>
-        <div>
-          <MemoryStick aria-hidden="true" />
-          <span>Memory</span>
-          <strong>{formatPercent(host.memoryUsedPercent)}</strong>
-          <small>{availablePercent(host.memoryUsedPercent)}</small>
-        </div>
-        <div>
-          <Server aria-hidden="true" />
-          <span>Swap</span>
-          <strong>{formatPercent(host.swapUsedPercent)}</strong>
-          <small>utilization</small>
-        </div>
-        <div>
-          <HardDrive aria-hidden="true" />
-          <span>Eval disk</span>
-          <strong>{formatPercent(host.diskUsedPercent)}</strong>
-          <small>{availablePercent(host.diskUsedPercent)}</small>
-        </div>
-      </section>
-
-      <section className="live-progress page-grid" aria-label="Sweep progress">
-        <header>
-          <div>
-            <span>Valid matched coordinates</span>
-            <strong>{snapshot.summary.completed.toLocaleString()} / {snapshot.summary.total.toLocaleString()}</strong>
-          </div>
-          <div className="live-progress-counts">
-            <span><i className="running" /> {snapshot.summary.running} running</span>
-            <span><i className="retrying" /> {snapshot.summary.retrying} retrying</span>
-            <span><i className="queued" /> {snapshot.summary.queued} queued</span>
-          </div>
-        </header>
-        <div className="live-progress-track"><span style={{ width: `${completionPercent}%` }} /></div>
-      </section>
-
-      <section className="live-matrix-section page-grid">
-        <header className="live-matrix-toolbar">
-          <div>
-            <p className="rail-label">CM / CMO · k={trialCount}</p>
-            <h2>Task matrix</h2>
-          </div>
-          <label className="live-eval-search">
-            <Search aria-hidden="true" />
-            <input
-              type="search"
-              value={query}
-              onChange={(event) => setQuery(event.target.value)}
-              placeholder="Filter tasks"
-              aria-label="Filter evaluation tasks"
-            />
-          </label>
-          <div className="live-filter" role="group" aria-label="Matrix filter">
-            {(["all", "active", "issues", "complete"] as MatrixFilter[]).map((option) => (
-              <button
-                type="button"
-                className={filter === option ? "is-active" : ""}
-                onClick={() => setFilter(option)}
-                key={option}
-              >
-                {option}
-              </button>
-            ))}
-          </div>
-        </header>
-
-        <div className="live-matrix-legend" aria-label="Matrix legend">
-          <span><i className="both" /> both passed</span>
-          <span><i className="nano" /> Nanocodex only</span>
-          <span><i className="codex" /> Codex only</span>
-          <span><i className="neither" /> neither passed</span>
-          <span><i className="running" /> running</span>
-          <span><i className="retrying" /> replacement</span>
-        </div>
-
-        {selectedCase ? (
-          <div className="live-case-slot" ref={detailRef}>
-            <CaseInspector
-              row={selectedCase.row}
-              cell={selectedCase.cell}
-              onClose={() => setSelected(null)}
-            />
-          </div>
+      {resultsQuery.data ? (
+        <Analytics points={resultsQuery.data.points} view="runs" />
+      ) : null}
+      <section className="eval-run-section" aria-labelledby="treatments-heading">
+        {taskQuery.isPending ? (
+          <div className="eval-empty-panel"><CircleDashed aria-hidden="true" /><h2>Loading treatments</h2><p>Reading only this task's repetition matrix.</p></div>
+        ) : taskQuery.error ? (
+          <div className="eval-empty-panel"><AlertTriangle aria-hidden="true" /><h2>Task unavailable</h2><p>{taskQuery.error.message}</p></div>
+        ) : selectedTask ? (
+          <>
+            <header className="eval-task-panel-header">
+              <div><p className="rail-label">Runs</p><h2 id="treatments-heading">Treatments and repetitions</h2></div>
+              <span>{selectedTask.treatments.length} treatments</span>
+            </header>
+            <div className="eval-matrix-legend" aria-label="Result legend">
+              <span><i className="passed" /> verifier passed</span><span><i className="failed" /> verifier / execution failed</span><span><i className="running" /> running</span><span><i className="unclaimed" /> unclaimed</span>
+            </div>
+            <div className="eval-task-matrix-scroll">
+              <table className="eval-task-matrix">
+                <thead><tr><th>Treatment</th>{repetitions.map((repetition) => <th key={repetition}>#{repetition}</th>)}<th>Done</th></tr></thead>
+                <tbody>
+                  {selectedTask.treatments.map((treatment) => (
+                    <tr key={treatment.id}>
+                      <th scope="row"><span>{treatment.harness} · {treatment.model}</span><small>{treatment.thinking} thinking</small></th>
+                      {repetitions.map((repetition) => {
+                        const cell = treatment.cells.find((candidate) => candidate.repetition === repetition);
+                        if (!cell) return <td className="is-unavailable" key={repetition} />;
+                        return (
+                          <td key={repetition}>
+                            <button type="button" className={`eval-matrix-cell ${cell.state} ${cell.status ?? cell.outcome ?? ""}`} title={`${treatment.label}\nrepetition ${repetition} · ${coordinateLabel(cell)}\n${formatDuration(cell.durationMs)}`} aria-label={`${treatment.label}, repetition ${repetition}: ${coordinateLabel(cell)}`} aria-pressed={selectedCell?.cell.id === cell.id} disabled={!cell.detailId} onClick={() => setSelectedCell({ treatment, cell })}>
+                              <CellMark cell={cell} />
+                            </button>
+                          </td>
+                        );
+                      })}
+                      <td className="live-row-total">{treatment.cells.filter((cell) => cell.state === "success" || cell.state === "failed").length}/{treatment.cells.length}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+            {selectedCell?.cell.detailId ? (
+              <div className="live-case-slot" ref={detailRef}><CaseInspector detailId={selectedCell.cell.detailId} cell={selectedCell.cell} treatment={selectedCell.treatment} onClose={() => setSelectedCell(null)} /></div>
+            ) : null}
+          </>
         ) : null}
-
-        <div className="live-matrix-scroll">
-          <table className="live-matrix">
-            <thead>
-              <tr>
-                <th>Task</th>
-                <th>Mode</th>
-                {Array.from({ length: trialCount }, (_, index) => <th key={index}>#{index + 1}</th>)}
-                <th>Done</th>
-              </tr>
-            </thead>
-            <tbody>
-              {visibleRows.map((row, index) => {
-                const firstTaskRow = index === 0 || visibleRows[index - 1].taskName !== row.taskName;
-                const taskRowCount = visibleRows.filter((candidate) => candidate.taskName === row.taskName).length;
-                return (
-                  <tr key={`${row.taskName}-${row.profile}`} className={!firstTaskRow ? "same-task" : ""}>
-                    {firstTaskRow ? <th rowSpan={taskRowCount} scope="rowgroup">{row.taskLabel}</th> : null}
-                    <th scope="row"><span>{row.profileLabel}</span><small>{row.thinking}</small></th>
-                    {row.cells.map((cell) => (
-                      <td key={cell.trial}>
-                        <button
-                          type="button"
-                          className={`live-matrix-cell ${cell.state} ${cell.classification ?? ""}`}
-                          title={cellTitle(row, cell)}
-                          aria-pressed={
-                            selected?.taskName === row.taskName &&
-                            selected.profile === row.profile &&
-                            selected.trial === cell.trial
-                          }
-                          onClick={() => setSelected({
-                            taskName: row.taskName,
-                            profile: row.profile,
-                            trial: cell.trial,
-                          })}
-                        >
-                          <span className="live-cell-number">{cell.trial}</span>
-                          <span className="live-cell-arms">
-                            <ArmMark label="N" state={cell.nanocodex} />
-                            <ArmMark label="C" state={cell.codex} />
-                          </span>
-                          {cell.attempts > 1 ? <span className="live-attempt-count"><RotateCw aria-hidden="true" />{cell.attempts}</span> : null}
-                        </button>
-                      </td>
-                    ))}
-                    <td className="live-row-total">
-                      {row.cells.filter((cell) => cell.state === "completed").length}/{row.cells.length}
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
       </section>
-
-      <section className="live-eval-footer page-grid">
-        <div>
-          <CheckCircle2 aria-hidden="true" />
-          <span>Both passed</span>
-          <strong>{snapshot.summary.bothPassed}</strong>
-        </div>
-        <div>
-          <CircleDashed aria-hidden="true" />
-          <span>Different outcomes</span>
-          <strong>{snapshot.summary.nanocodexOnly + snapshot.summary.codexOnly}</strong>
-        </div>
-        <div>
-          <AlertTriangle aria-hidden="true" />
-          <span>Infrastructure · 15m</span>
-          <strong>{snapshot.health.infrastructure15m}</strong>
-        </div>
-        <div>
-          <Radio aria-hidden="true" />
-          <span>Evidence sources</span>
-          <strong>{snapshot.sourceCount}</strong>
-        </div>
-      </section>
-    </div>
+    </main>
   );
 }

@@ -12,7 +12,7 @@ import {
 import { ChevronDown } from "lucide-react";
 import { memo, type RefObject, useMemo } from "react";
 import { CODE_VIEW_CUSTOM_CSS, CODE_VIEW_LAYOUT } from "./pierreCodeView";
-import type { Theme } from "./Xedoc";
+import type { Theme } from "./NanocodexApp";
 
 // Behavioral viewer port from pierrecomputer/pierre@4f94a5e765195b27e1e4188b943aab2ae44613cb
 // apps/diffshub/components/DiffsHubViewer.tsx. Commit weaving belongs entirely

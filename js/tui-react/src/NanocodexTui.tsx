@@ -1107,11 +1107,11 @@ const Footer = memo(function Footer({ tui, conversation, mode, workerStatus, wor
     ? "Session stopped"
     : workerStatus === "error"
       ? workerError ?? "Agent worker failed"
-      : workerStatus !== "ready"
-      ? "Loading Rust/WASM..."
-      : !enabled
-        ? unavailableMessage
-        : conversation.status;
+      : workerStatus === "starting"
+        ? "Loading Rust/WASM..."
+        : workerStatus === "idle" || !enabled
+          ? unavailableMessage
+          : conversation.status;
   if (mode === "branches") status = "Branches — ↑/↓ or j/k switch + preview · Esc close";
   else if (mode === "edit") status = "Editing history — Enter fork/send · Shift+Enter newline · Esc cancel · Ctrl+G $EDITOR";
   else if (mode === "history") status = "History — ↑/↓ navigate · e fork-edit · Esc return";

@@ -6,13 +6,18 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use rusqlite::{Connection, OpenFlags, OptionalExtension as _};
+use nanocodex_oai_api::{
+    Model,
+    pricing::{ServiceTier, estimate_for_model},
+    responses::{InputTokenDetails, Usage},
+};
+use rusqlite::{Connection, OpenFlags, OptionalExtension as _, params};
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
 const LEDGER_FILE: &str = "state.sqlite3";
-const API_SCHEMA_VERSION: u32 = 2;
+const API_SCHEMA_VERSION: u32 = 4;
 const MAX_EVENT_LINE_BYTES: usize = 8 * 1024 * 1024;
 const OUTCOME_TAIL_BYTES: u64 = 512 * 1024;
 
@@ -58,6 +63,64 @@ pub(crate) struct WorksetDetail {
     observed_at_ms: i64,
     workset: WorksetOverview,
     tasks: Vec<TaskOverview>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WorksetResults {
+    schema_version: u32,
+    observed_at_ms: i64,
+    workset_id: String,
+    points: Vec<ResultPoint>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct WorksetAnalytics {
+    schema_version: u32,
+    observed_at_ms: i64,
+    workset_id: String,
+    task_count: u64,
+    points: Vec<AnalyticsPoint>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AnalyticsPoint {
+    harness: String,
+    model: String,
+    thinking: String,
+    passed: u64,
+    completed: u64,
+    median_output_tokens: Option<f64>,
+    output_samples: usize,
+    median_duration_ms: Option<f64>,
+    duration_samples: usize,
+    median_cost_usd: Option<f64>,
+    cost_samples: usize,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ResultPoint {
+    id: String,
+    task_id: String,
+    task_name: String,
+    task_label: String,
+    state: String,
+    harness: String,
+    model: String,
+    thinking: String,
+    repetition: u16,
+    status: Option<String>,
+    outcome: Option<String>,
+    duration_ms: Option<i64>,
+    input_tokens: Option<i64>,
+    cached_input_tokens: Option<i64>,
+    output_tokens: Option<i64>,
+    reasoning_output_tokens: Option<i64>,
+    total_tokens: Option<i64>,
+    cost_usd: Option<f64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -149,6 +212,7 @@ pub(crate) struct CaseEvidence {
     final_message: Option<String>,
     tool_calls: Option<u64>,
     usage: Option<Value>,
+    cost_usd: Option<f64>,
     verifier: Option<Value>,
     exception: Option<Value>,
     timing: Option<Value>,
@@ -175,25 +239,29 @@ struct TaskRow {
 struct CoordinateRow {
     id: i64,
     family_key: String,
-    treatment: String,
+    harness: String,
+    model: String,
+    thinking: String,
     repetition: u16,
     state: String,
     result_path: Option<PathBuf>,
     started_at_ms: Option<i64>,
     finished_at_ms: Option<i64>,
     error: Option<String>,
-    task_name: String,
-    task_digest: String,
+    status: Option<String>,
+    outcome: Option<String>,
 }
 
-#[derive(Debug, Default)]
-struct Treatment {
+#[derive(Debug)]
+struct AnalyticsGroup {
     harness: String,
-    mode: String,
     model: String,
     thinking: String,
-    nanocodex_tool_mode: String,
-    codex_tool_mode: String,
+    passed: u64,
+    completed: u64,
+    output_tokens: Vec<i64>,
+    durations_ms: Vec<i64>,
+    costs_usd: Vec<f64>,
 }
 
 impl EvalApi {
@@ -206,31 +274,51 @@ impl EvalApi {
     pub(crate) fn overview(&self) -> Result<EvalOverview, String> {
         let connection = self.connection()?;
         let now = now_ms()?;
-        let worksets = read_worksets(&connection)?;
         let mut total = EvalSummary::default();
-        let mut overview = Vec::with_capacity(worksets.len());
-        for workset in worksets {
-            let coordinates = read_coordinates(&connection, workset.id, None)?;
-            let summary = summarize(&coordinates)?;
-            add_summary(&mut total, &summary);
-            let task_count = u64::try_from(
-                connection
-                    .query_row(
-                        "SELECT COUNT(*) FROM task_definitions WHERE workset_id = ?1",
-                        [workset.id],
-                        |row| row.get::<_, i64>(0),
-                    )
-                    .map_err(|error| error.to_string())?,
+        let mut statement = connection
+            .prepare(
+                "SELECT w.profile, w.digest, w.created_at_ms, \
+                        COALESCE(d.task_count, 0), \
+                        COALESCE(s.total, 0), COALESCE(s.unclaimed, 0), \
+                        COALESCE(s.running, 0), COALESCE(s.success, 0), \
+                        COALESCE(s.failed, 0) \
+                 FROM worksets w \
+                 LEFT JOIN ( \
+                    SELECT workset_id, COUNT(*) AS task_count \
+                    FROM task_definitions GROUP BY workset_id \
+                 ) d ON d.workset_id = w.id \
+                 LEFT JOIN ( \
+                    SELECT workset_id, COUNT(*) AS total, \
+                           SUM(state = 'unclaimed') AS unclaimed, \
+                           SUM(state = 'running') AS running, \
+                           SUM(state = 'success') AS success, \
+                           SUM(state = 'failed') AS failed \
+                    FROM eval_tasks GROUP BY workset_id \
+                 ) s ON s.workset_id = w.id \
+                 ORDER BY w.created_at_ms DESC, w.id DESC",
             )
             .map_err(|error| error.to_string())?;
-            overview.push(WorksetOverview {
-                id: workset.digest.clone(),
-                profile: workset.profile,
-                digest: workset.digest,
-                created_at_ms: workset.created_at_ms,
-                task_count,
-                summary,
-            });
+        let rows = statement
+            .query_map([], |row| {
+                let summary = summary_from_row(row, 4)?;
+                Ok((
+                    WorksetOverview {
+                        id: row.get(1)?,
+                        profile: row.get(0)?,
+                        digest: row.get(1)?,
+                        created_at_ms: row.get(2)?,
+                        task_count: nonnegative_count(row, 3)?,
+                        summary: summary.clone(),
+                    },
+                    summary,
+                ))
+            })
+            .map_err(|error| error.to_string())?;
+        let mut overview = Vec::new();
+        for row in rows {
+            let (workset, summary) = row.map_err(|error| error.to_string())?;
+            add_summary(&mut total, &summary);
+            overview.push(workset);
         }
         Ok(EvalOverview {
             schema_version: API_SCHEMA_VERSION,
@@ -246,55 +334,272 @@ impl EvalApi {
             return Ok(None);
         };
         let now = now_ms()?;
-        let coordinates = read_coordinates(&connection, workset.id, None)?;
-        let summary = summarize(&coordinates)?;
-        let task_count = coordinates
-            .iter()
-            .map(|coordinate| coordinate.task_name.as_str())
-            .collect::<std::collections::HashSet<_>>()
-            .len();
+        let tasks = read_task_overviews(&connection, &workset)?;
+        let mut summary = EvalSummary::default();
+        for task in &tasks {
+            add_summary(&mut summary, &task.summary);
+        }
         let workset_overview = WorksetOverview {
             id: workset.digest.clone(),
             profile: workset.profile,
             digest: workset.digest.clone(),
             created_at_ms: workset.created_at_ms,
-            task_count: u64::try_from(task_count).map_err(|error| error.to_string())?,
+            task_count: u64::try_from(tasks.len()).map_err(|error| error.to_string())?,
             summary,
         };
-        let mut grouped = HashMap::<String, Vec<CoordinateRow>>::new();
-        for coordinate in coordinates {
-            grouped
-                .entry(coordinate.task_name.clone())
-                .or_default()
-                .push(coordinate);
-        }
-        let mut tasks = grouped
-            .into_iter()
-            .map(|(name, coordinates)| {
-                let digest = coordinates[0].task_digest.clone();
-                let treatment_count = coordinates
-                    .iter()
-                    .map(|coordinate| coordinate.family_key.as_str())
-                    .collect::<std::collections::HashSet<_>>()
-                    .len();
-                Ok(TaskOverview {
-                    id: public_id(&[&workset.digest, &name]),
-                    label: short_name(&name).to_owned(),
-                    name,
-                    digest,
-                    treatment_count: u64::try_from(treatment_count)
-                        .map_err(|error| error.to_string())?,
-                    summary: summarize(&coordinates)?,
-                })
-            })
-            .collect::<Result<Vec<_>, String>>()?;
-        tasks.sort_by(|left, right| left.name.cmp(&right.name));
         Ok(Some(WorksetDetail {
             schema_version: API_SCHEMA_VERSION,
             observed_at_ms: now,
             workset: workset_overview,
             tasks,
         }))
+    }
+
+    pub(crate) fn workset_analytics(
+        &self,
+        digest: &str,
+    ) -> Result<Option<WorksetAnalytics>, String> {
+        let connection = self.connection()?;
+        let Some(workset) = find_workset(&connection, digest)? else {
+            return Ok(None);
+        };
+        let task_count = connection
+            .query_row(
+                "SELECT COUNT(*) FROM task_definitions WHERE workset_id = ?1",
+                [workset.id],
+                |row| nonnegative_count(row, 0),
+            )
+            .map_err(|error| error.to_string())?;
+        let mut statement = connection
+            .prepare(
+                "SELECT e.harness, e.model, e.thinking, e.state, \
+                        e.started_at_ms, e.finished_at_ms, r.status, r.outcome, \
+                        r.input_tokens, r.cached_input_tokens, r.output_tokens, r.cost_usd \
+                 FROM eval_tasks e \
+                 LEFT JOIN coordinate_results r ON r.coordinate_id = e.id \
+                 WHERE e.workset_id = ?1 AND e.state IN ('success', 'failed') \
+                   AND e.result_path IS NOT NULL",
+            )
+            .map_err(|error| error.to_string())?;
+        let rows = statement
+            .query_map([workset.id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<i64>>(8)?,
+                    row.get::<_, Option<i64>>(9)?,
+                    row.get::<_, Option<i64>>(10)?,
+                    row.get::<_, Option<f64>>(11)?,
+                ))
+            })
+            .map_err(|error| error.to_string())?;
+        let mut groups = HashMap::<String, AnalyticsGroup>::new();
+        for row in rows {
+            let (
+                harness,
+                model,
+                thinking,
+                state,
+                started_at_ms,
+                finished_at_ms,
+                status,
+                outcome,
+                input,
+                cached_input,
+                output,
+                cost,
+            ) = row.map_err(|error| error.to_string())?;
+            if outcome.as_deref() == Some("infrastructure_error") {
+                continue;
+            }
+            let cost = cost.or_else(|| estimated_cost_usd(&model, input, cached_input, output));
+            let key = format!("{harness}\0{model}\0{thinking}");
+            let group = groups.entry(key).or_insert_with(|| AnalyticsGroup {
+                harness,
+                model,
+                thinking,
+                passed: 0,
+                completed: 0,
+                output_tokens: Vec::new(),
+                durations_ms: Vec::new(),
+                costs_usd: Vec::new(),
+            });
+            group.completed += 1;
+            if retained_result_passed(&state, status.as_deref(), outcome.as_deref()) {
+                group.passed += 1;
+            }
+            if let Some(output) = output.filter(|value| *value >= 0) {
+                group.output_tokens.push(output);
+            }
+            if let Some(duration) = started_at_ms
+                .zip(finished_at_ms)
+                .map(|(started, finished)| finished.saturating_sub(started))
+                .filter(|value| *value >= 0)
+            {
+                group.durations_ms.push(duration);
+            }
+            if let Some(cost) = cost.filter(|value| value.is_finite() && *value >= 0.0) {
+                group.costs_usd.push(cost);
+            }
+        }
+        let mut points = groups
+            .into_values()
+            .map(|mut group| AnalyticsPoint {
+                harness: group.harness,
+                model: group.model,
+                thinking: group.thinking,
+                passed: group.passed,
+                completed: group.completed,
+                median_output_tokens: median_i64(&mut group.output_tokens),
+                output_samples: group.output_tokens.len(),
+                median_duration_ms: median_i64(&mut group.durations_ms),
+                duration_samples: group.durations_ms.len(),
+                median_cost_usd: median_f64(&mut group.costs_usd),
+                cost_samples: group.costs_usd.len(),
+            })
+            .collect::<Vec<_>>();
+        points.sort_by(|left, right| {
+            left.harness
+                .cmp(&right.harness)
+                .then_with(|| left.model.cmp(&right.model))
+                .then_with(|| left.thinking.cmp(&right.thinking))
+        });
+        Ok(Some(WorksetAnalytics {
+            schema_version: API_SCHEMA_VERSION,
+            observed_at_ms: now_ms()?,
+            workset_id: workset.digest,
+            task_count,
+            points,
+        }))
+    }
+
+    pub(crate) fn task_results(
+        &self,
+        digest: &str,
+        task_id: &str,
+    ) -> Result<Option<WorksetResults>, String> {
+        self.results(digest, Some(task_id))
+    }
+
+    fn results(
+        &self,
+        digest: &str,
+        task_id: Option<&str>,
+    ) -> Result<Option<WorksetResults>, String> {
+        let connection = self.connection()?;
+        let Some(workset) = find_workset(&connection, digest)? else {
+            return Ok(None);
+        };
+        let task = match task_id {
+            Some(task_id) => match find_task(&connection, workset.id, digest, task_id)? {
+                Some(task) => Some(task),
+                None => return Ok(None),
+            },
+            None => None,
+        };
+        let mut statement = connection
+            .prepare(
+                "SELECT e.id, t.selector, e.state, e.harness, e.model, e.thinking, \
+                        e.repetition, e.started_at_ms, e.finished_at_ms, \
+                        r.status, r.outcome, r.input_tokens, r.cached_input_tokens, \
+                        r.output_tokens, r.reasoning_output_tokens, r.total_tokens, r.cost_usd \
+                 FROM eval_tasks e \
+                 JOIN task_definitions t ON t.id = e.definition_id \
+                 LEFT JOIN coordinate_results r ON r.coordinate_id = e.id \
+                 WHERE e.workset_id = ?1 AND (?2 IS NULL OR e.definition_id = ?2) \
+                   AND e.state IN ('success', 'failed') AND e.result_path IS NOT NULL \
+                 ORDER BY t.selector, e.family_key, e.repetition",
+            )
+            .map_err(|error| error.to_string())?;
+        let mut tasks = HashMap::<String, (String, String)>::new();
+        let points = statement
+            .query_map((workset.id, task.as_ref().map(|task| task.id)), |row| {
+                let coordinate_id = row.get::<_, i64>(0)?;
+                let task_name = row.get::<_, String>(1)?;
+                let (task_id, task_label) = if let Some(task) = tasks.get(&task_name) {
+                    task.clone()
+                } else {
+                    let task = (
+                        public_id(&[digest, &task_name]),
+                        short_name(&task_name).to_owned(),
+                    );
+                    tasks.insert(task_name.clone(), task.clone());
+                    task
+                };
+                let model = row.get::<_, String>(4)?;
+                let started_at_ms = row.get::<_, Option<i64>>(7)?;
+                let finished_at_ms = row.get::<_, Option<i64>>(8)?;
+                let input_tokens = row.get(11)?;
+                let cached_input_tokens = row.get(12)?;
+                let output_tokens = row.get(13)?;
+                let cost_usd = row.get::<_, Option<f64>>(16)?.or_else(|| {
+                    estimated_cost_usd(&model, input_tokens, cached_input_tokens, output_tokens)
+                });
+                Ok(ResultPoint {
+                    id: case_id(digest, coordinate_id),
+                    task_id,
+                    task_label,
+                    task_name,
+                    state: row.get(2)?,
+                    harness: row.get(3)?,
+                    model,
+                    thinking: row.get(5)?,
+                    repetition: row.get(6)?,
+                    status: row.get(9)?,
+                    outcome: row.get(10)?,
+                    duration_ms: started_at_ms
+                        .zip(finished_at_ms)
+                        .map(|(started, finished)| finished.saturating_sub(started)),
+                    input_tokens,
+                    cached_input_tokens,
+                    output_tokens,
+                    reasoning_output_tokens: row.get(14)?,
+                    total_tokens: row.get(15)?,
+                    cost_usd,
+                })
+            })
+            .map_err(|error| error.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|error| error.to_string())?;
+        Ok(Some(WorksetResults {
+            schema_version: API_SCHEMA_VERSION,
+            observed_at_ms: now_ms()?,
+            workset_id: workset.digest,
+            points,
+        }))
+    }
+
+    pub(crate) fn index_result(&self, result_path: &Path) -> Result<(), String> {
+        let retained_path = result_path.to_string_lossy().into_owned();
+        let result_path = result_path
+            .canonicalize()
+            .map_err(|error| error.to_string())?;
+        let Some(evidence) = read_outcome(&result_path)? else {
+            return Ok(());
+        };
+        let connection = Connection::open(&self.ledger).map_err(|error| error.to_string())?;
+        connection
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(|error| error.to_string())?;
+        let coordinate_id = connection
+            .query_row(
+                "SELECT id FROM eval_tasks WHERE result_path = ?1 \
+                 AND state IN ('success', 'failed')",
+                [&retained_path],
+                |row| row.get::<_, i64>(0),
+            )
+            .optional()
+            .map_err(|error| error.to_string())?;
+        if let Some(coordinate_id) = coordinate_id {
+            insert_result(&connection, coordinate_id, &retained_path, &evidence)?;
+        }
+        Ok(())
     }
 
     pub(crate) fn task(
@@ -313,21 +618,22 @@ impl EvalApi {
         let mut coordinates = read_coordinates(&connection, workset.id, Some(task.id))?;
         let mut treatments = Vec::<TreatmentDetail>::new();
         for coordinate in coordinates.drain(..) {
-            let treatment = parse_treatment(&coordinate.treatment);
             let state = coordinate_state(&coordinate);
+            let detail_id =
+                result_path(&coordinate).map(|_| case_id(workset_digest, coordinate.id));
             let cell = CoordinateDetail {
                 id: case_id(workset_digest, coordinate.id),
                 repetition: coordinate.repetition,
                 state,
-                status: None,
-                outcome: None,
+                status: coordinate.status,
+                outcome: coordinate.outcome,
                 updated_at_ms: coordinate.finished_at_ms.or(coordinate.started_at_ms),
                 duration_ms: coordinate
                     .finished_at_ms
                     .zip(coordinate.started_at_ms)
                     .map(|(finished, started)| finished.saturating_sub(started)),
                 message: coordinate.error.clone(),
-                detail_id: result_path(&coordinate).map(|_| case_id(workset_digest, coordinate.id)),
+                detail_id,
             };
             let treatment_id = public_id(&[workset_digest, &coordinate.family_key]);
             if let Some(row) = treatments.iter_mut().find(|row| row.id == treatment_id) {
@@ -335,10 +641,14 @@ impl EvalApi {
             } else {
                 treatments.push(TreatmentDetail {
                     id: treatment_id,
-                    label: treatment_label(&treatment),
-                    harness: treatment_harness(&treatment),
-                    model: treatment.model,
-                    thinking: treatment.thinking,
+                    label: treatment_label(
+                        &coordinate.harness,
+                        &coordinate.model,
+                        &coordinate.thinking,
+                    ),
+                    harness: coordinate.harness,
+                    model: coordinate.model,
+                    thinking: coordinate.thinking,
                     cells: vec![cell],
                 });
             }
@@ -385,11 +695,20 @@ impl EvalApi {
         let total = coordinates.len();
         let mut outcomes = Vec::with_capacity(limit.min(total.saturating_sub(cursor)));
         for coordinate in coordinates.into_iter().skip(cursor).take(limit) {
-            let evidence = self.outcome_for(&coordinate)?;
+            let retained = coordinate.status.is_some() || coordinate.outcome.is_some();
+            let evidence = if retained {
+                None
+            } else {
+                self.outcome_for(&coordinate)?
+            };
             outcomes.push(CoordinateOutcome {
                 id: case_id(workset_digest, coordinate.id),
-                status: evidence.as_ref().and_then(|value| value.status.clone()),
-                outcome: evidence.and_then(|value| value.outcome),
+                status: coordinate
+                    .status
+                    .or_else(|| evidence.as_ref().and_then(|value| value.status.clone())),
+                outcome: coordinate
+                    .outcome
+                    .or_else(|| evidence.and_then(|value| value.outcome)),
             });
         }
         let loaded = cursor.saturating_add(outcomes.len());
@@ -407,9 +726,24 @@ impl EvalApi {
     pub(crate) fn case(&self, id: &str) -> Result<Option<CaseEvidence>, String> {
         let connection = self.connection()?;
         for workset in read_worksets(&connection)? {
-            for coordinate in read_coordinates(&connection, workset.id, None)? {
-                if case_id(&workset.digest, coordinate.id) == id {
-                    return self.evidence_for(&coordinate);
+            let mut statement = connection
+                .prepare(
+                    "SELECT id, result_path FROM eval_tasks \
+                     WHERE workset_id = ?1 AND result_path IS NOT NULL",
+                )
+                .map_err(|error| error.to_string())?;
+            let rows = statement
+                .query_map([workset.id], |row| {
+                    Ok((
+                        row.get::<_, i64>(0)?,
+                        PathBuf::from(row.get::<_, String>(1)?),
+                    ))
+                })
+                .map_err(|error| error.to_string())?;
+            for row in rows {
+                let (coordinate_id, result_path) = row.map_err(|error| error.to_string())?;
+                if case_id(&workset.digest, coordinate_id) == id {
+                    return read_result_evidence(&result_path);
                 }
             }
         }
@@ -428,18 +762,6 @@ impl EvalApi {
         Ok(connection)
     }
 
-    fn evidence_for(&self, coordinate: &CoordinateRow) -> Result<Option<CaseEvidence>, String> {
-        let Some(result_path) = result_path(coordinate) else {
-            return Ok(None);
-        };
-        let result = match result_path.canonicalize() {
-            Ok(result) => result,
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-            Err(error) => return Err(error.to_string()),
-        };
-        read_evidence(&result)
-    }
-
     fn outcome_for(&self, coordinate: &CoordinateRow) -> Result<Option<CaseEvidence>, String> {
         let Some(result_path) = result_path(coordinate) else {
             return Ok(None);
@@ -455,23 +777,6 @@ impl EvalApi {
 
 const fn result_path(coordinate: &CoordinateRow) -> Option<&PathBuf> {
     coordinate.result_path.as_ref()
-}
-
-fn summarize(coordinates: &[CoordinateRow]) -> Result<EvalSummary, String> {
-    let mut summary = EvalSummary {
-        total: u64::try_from(coordinates.len()).map_err(|error| error.to_string())?,
-        ..EvalSummary::default()
-    };
-    for coordinate in coordinates {
-        match coordinate_state(coordinate) {
-            "unclaimed" => summary.unclaimed += 1,
-            "running" => summary.running += 1,
-            "success" => summary.success += 1,
-            "failed" => summary.failed += 1,
-            _ => return Err(format!("unknown durable task state `{}`", coordinate.state)),
-        }
-    }
-    Ok(summary)
 }
 
 fn read_worksets(connection: &Connection) -> Result<Vec<WorksetRow>, String> {
@@ -513,6 +818,63 @@ fn find_workset(connection: &Connection, digest: &str) -> Result<Option<WorksetR
         .map_err(|error| error.to_string())
 }
 
+fn read_task_overviews(
+    connection: &Connection,
+    workset: &WorksetRow,
+) -> Result<Vec<TaskOverview>, String> {
+    let mut statement = connection
+        .prepare(
+            "SELECT d.selector, d.digest, COUNT(DISTINCT e.family_key), COUNT(e.id), \
+                    COALESCE(SUM(e.state = 'unclaimed'), 0), \
+                    COALESCE(SUM(e.state = 'running'), 0), \
+                    COALESCE(SUM(e.state = 'success'), 0), \
+                    COALESCE(SUM(e.state = 'failed'), 0) \
+             FROM task_definitions d \
+             LEFT JOIN eval_tasks e \
+               ON e.workset_id = d.workset_id AND e.definition_id = d.id \
+             WHERE d.workset_id = ?1 \
+             GROUP BY d.id, d.selector, d.digest \
+             ORDER BY d.selector",
+        )
+        .map_err(|error| error.to_string())?;
+    statement
+        .query_map([workset.id], |row| {
+            let name = row.get::<_, String>(0)?;
+            Ok(TaskOverview {
+                id: public_id(&[&workset.digest, &name]),
+                label: short_name(&name).to_owned(),
+                name,
+                digest: row.get(1)?,
+                treatment_count: nonnegative_count(row, 2)?,
+                summary: summary_from_row(row, 3)?,
+            })
+        })
+        .map_err(|error| error.to_string())?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())
+}
+
+fn summary_from_row(row: &rusqlite::Row<'_>, offset: usize) -> rusqlite::Result<EvalSummary> {
+    Ok(EvalSummary {
+        total: nonnegative_count(row, offset)?,
+        unclaimed: nonnegative_count(row, offset + 1)?,
+        running: nonnegative_count(row, offset + 2)?,
+        success: nonnegative_count(row, offset + 3)?,
+        failed: nonnegative_count(row, offset + 4)?,
+    })
+}
+
+fn nonnegative_count(row: &rusqlite::Row<'_>, index: usize) -> rusqlite::Result<u64> {
+    let value = row.get::<_, i64>(index)?;
+    u64::try_from(value).map_err(|error| {
+        rusqlite::Error::FromSqlConversionFailure(
+            index,
+            rusqlite::types::Type::Integer,
+            Box::new(error),
+        )
+    })
+}
+
 fn find_task(
     connection: &Connection,
     workset_id: i64,
@@ -549,12 +911,14 @@ fn read_coordinates(
 ) -> Result<Vec<CoordinateRow>, String> {
     let mut statement = connection
         .prepare(
-            "SELECT e.id, e.family_key, e.treatment, e.repetition, e.state, \
-                    e.result_path, e.started_at_ms, e.finished_at_ms, e.error, \
-                    t.selector, t.digest \
-             FROM eval_tasks e JOIN task_definitions t ON t.id = e.definition_id \
+            "SELECT e.id, e.family_key, e.harness, e.model, e.thinking, \
+                    e.repetition, e.state, e.result_path, e.started_at_ms, \
+                    e.finished_at_ms, e.error, \
+                    r.status, r.outcome \
+             FROM eval_tasks e \
+             LEFT JOIN coordinate_results r ON r.coordinate_id = e.id \
              WHERE e.workset_id = ?1 AND (?2 IS NULL OR e.definition_id = ?2) \
-             ORDER BY t.selector, e.family_key, e.repetition",
+             ORDER BY e.definition_id, e.family_key, e.repetition",
         )
         .map_err(|error| error.to_string())?;
     let coordinates = statement
@@ -562,15 +926,17 @@ fn read_coordinates(
             Ok(CoordinateRow {
                 id: row.get(0)?,
                 family_key: row.get(1)?,
-                treatment: row.get(2)?,
-                repetition: row.get(3)?,
-                state: row.get(4)?,
-                result_path: row.get::<_, Option<String>>(5)?.map(PathBuf::from),
-                started_at_ms: row.get(6)?,
-                finished_at_ms: row.get(7)?,
-                error: row.get(8)?,
-                task_name: row.get(9)?,
-                task_digest: row.get(10)?,
+                harness: row.get(2)?,
+                model: row.get(3)?,
+                thinking: row.get(4)?,
+                repetition: row.get(5)?,
+                state: row.get(6)?,
+                result_path: row.get::<_, Option<String>>(7)?.map(PathBuf::from),
+                started_at_ms: row.get(8)?,
+                finished_at_ms: row.get(9)?,
+                error: row.get(10)?,
+                status: row.get(11)?,
+                outcome: row.get(12)?,
             })
         })
         .map_err(|error| error.to_string())?
@@ -587,6 +953,47 @@ fn coordinate_state(coordinate: &CoordinateRow) -> &'static str {
         "failed" => "failed",
         _ => "failed",
     }
+}
+
+fn retained_result_passed(state: &str, status: Option<&str>, outcome: Option<&str>) -> bool {
+    match status {
+        Some(status) => status == "passed",
+        None => match outcome {
+            Some(outcome) => outcome == "passed",
+            None => state == "success",
+        },
+    }
+}
+
+fn median_i64(values: &mut [i64]) -> Option<f64> {
+    values.sort_unstable();
+    let middle = values.len().checked_div(2)?;
+    if values.len().is_multiple_of(2) {
+        let left = *values.get(middle.checked_sub(1)?)? as f64;
+        let right = *values.get(middle)? as f64;
+        Some((left + right) / 2.0)
+    } else {
+        values.get(middle).map(|value| *value as f64)
+    }
+}
+
+fn median_f64(values: &mut [f64]) -> Option<f64> {
+    values.sort_by(f64::total_cmp);
+    let middle = values.len().checked_div(2)?;
+    if values.len().is_multiple_of(2) {
+        Some((values.get(middle.checked_sub(1)?)? + values.get(middle)?) / 2.0)
+    } else {
+        values.get(middle).copied()
+    }
+}
+
+fn read_result_evidence(result_path: &Path) -> Result<Option<CaseEvidence>, String> {
+    let result = match result_path.canonicalize() {
+        Ok(result) => result,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.to_string()),
+    };
+    read_evidence(&result)
 }
 
 fn read_evidence(result: &Path) -> Result<Option<CaseEvidence>, String> {
@@ -712,6 +1119,7 @@ const fn empty_evidence() -> CaseEvidence {
         final_message: None,
         tool_calls: None,
         usage: None,
+        cost_usd: None,
         verifier: None,
         exception: None,
         timing: None,
@@ -767,6 +1175,14 @@ fn apply_terminal_payload(evidence: &mut CaseEvidence, payload: &Value) {
         .and_then(|value| value.get("tool_calls"))
         .and_then(Value::as_u64);
     evidence.usage = agent.and_then(|value| value.get("usage")).cloned();
+    evidence.cost_usd = agent
+        .and_then(|value| value.get("cost_usd"))
+        .and_then(decimal_value)
+        .or_else(|| {
+            agent
+                .and_then(|value| value.pointer("/metadata/estimated_cost/usd"))
+                .and_then(decimal_value)
+        });
     evidence.verifier = payload
         .get("verifier")
         .filter(|value| value.is_object())
@@ -781,58 +1197,101 @@ fn apply_terminal_payload(evidence: &mut CaseEvidence, payload: &Value) {
         .cloned();
 }
 
-fn parse_treatment(raw: &str) -> Treatment {
-    let value = serde_json::from_str::<Value>(raw).unwrap_or(Value::Null);
-    let string = |key: &str| {
-        value
-            .get(key)
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned()
+fn insert_result(
+    connection: &Connection,
+    coordinate_id: i64,
+    result_path: &str,
+    evidence: &CaseEvidence,
+) -> Result<(), String> {
+    let usage = evidence.usage.as_ref();
+    connection
+        .execute(
+            "INSERT INTO coordinate_results( \
+                coordinate_id, result_path, status, outcome, input_tokens, cached_input_tokens, \
+                output_tokens, reasoning_output_tokens, total_tokens, cost_usd \
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
+             ON CONFLICT(coordinate_id) DO UPDATE SET \
+                result_path = excluded.result_path, status = excluded.status, \
+                outcome = excluded.outcome, \
+                input_tokens = excluded.input_tokens, \
+                cached_input_tokens = excluded.cached_input_tokens, \
+                output_tokens = excluded.output_tokens, \
+                reasoning_output_tokens = excluded.reasoning_output_tokens, \
+                total_tokens = excluded.total_tokens, cost_usd = excluded.cost_usd",
+            params![
+                coordinate_id,
+                result_path,
+                evidence.status,
+                evidence.outcome,
+                usage.and_then(|value| integer_field(value, "input_tokens")),
+                usage.and_then(|value| integer_field(value, "cached_input_tokens")),
+                usage.and_then(|value| integer_field(value, "output_tokens")),
+                usage.and_then(|value| integer_field(value, "reasoning_output_tokens")),
+                usage.and_then(|value| integer_field(value, "total_tokens")),
+                evidence.cost_usd,
+            ],
+        )
+        .map_err(|error| error.to_string())?;
+    Ok(())
+}
+
+fn integer_field(value: &Value, field: &str) -> Option<i64> {
+    value
+        .get(field)
+        .and_then(Value::as_i64)
+        .or_else(|| {
+            value
+                .get(field)
+                .and_then(Value::as_u64)
+                .and_then(|value| i64::try_from(value).ok())
+        })
+        .or_else(|| {
+            value
+                .get(field)
+                .and_then(Value::as_str)
+                .and_then(|value| value.parse().ok())
+        })
+}
+
+fn decimal_value(value: &Value) -> Option<f64> {
+    value
+        .as_f64()
+        .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+}
+
+fn estimated_cost_usd(
+    model: &str,
+    input_tokens: Option<i64>,
+    cached_input_tokens: Option<i64>,
+    output_tokens: Option<i64>,
+) -> Option<f64> {
+    let model = model.parse::<Model>().ok()?;
+    let input_tokens = u64::try_from(input_tokens?).ok()?;
+    let cached_input_tokens = u64::try_from(cached_input_tokens.unwrap_or_default()).ok()?;
+    let output_tokens = u64::try_from(output_tokens?).ok()?;
+    let usage = Usage {
+        input_tokens,
+        input_tokens_details: Some(InputTokenDetails {
+            cached_tokens: cached_input_tokens,
+            cache_write_tokens: 0,
+        }),
+        output_tokens,
+        total_tokens: input_tokens.saturating_add(output_tokens),
+        ..Usage::default()
     };
-    Treatment {
-        harness: string("harness"),
-        mode: string("mode"),
-        model: string("model"),
-        thinking: string("thinking"),
-        nanocodex_tool_mode: string("nanocodex_tool_mode"),
-        codex_tool_mode: string("codex_tool_mode"),
-    }
+    estimate_for_model(&usage, model, ServiceTier::Standard)
+        .amount()
+        .decimal()
+        .parse()
+        .ok()
 }
 
-fn treatment_harness(treatment: &Treatment) -> String {
-    if !treatment.harness.is_empty() {
-        treatment.harness.clone()
-    } else if !treatment.mode.is_empty() {
-        treatment.mode.clone()
-    } else {
-        "unknown".to_owned()
-    }
-}
-
-fn treatment_label(treatment: &Treatment) -> String {
-    let mut parts = [
-        treatment_harness(treatment),
-        treatment.model.clone(),
-        treatment.thinking.clone(),
-    ]
-    .into_iter()
-    .filter(|part| !part.is_empty())
-    .collect::<Vec<_>>();
-    if !treatment.nanocodex_tool_mode.is_empty() || !treatment.codex_tool_mode.is_empty() {
-        let tools = if treatment.nanocodex_tool_mode == treatment.codex_tool_mode {
-            treatment.nanocodex_tool_mode.clone()
-        } else {
-            format!(
-                "N:{} / C:{}",
-                treatment.nanocodex_tool_mode, treatment.codex_tool_mode
-            )
-        };
-        if !tools.is_empty() {
-            parts.push(tools);
-        }
-    }
-    parts.join(" · ")
+fn treatment_label(harness: &str, model: &str, thinking: &str) -> String {
+    [harness, model, thinking]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 const fn add_summary(total: &mut EvalSummary, summary: &EvalSummary) {

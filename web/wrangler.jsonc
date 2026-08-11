@@ -25,6 +25,10 @@
       {
         "name": "BYOK_SESSIONS",
         "class_name": "ByokSession"
+      },
+      {
+        "name": "CHATGPT_SESSIONS",
+        "class_name": "ChatGptSession"
       }
     ]
   },
@@ -32,6 +36,10 @@
     {
       "tag": "v1",
       "new_sqlite_classes": ["ByokSession"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["ChatGptSession"]
     }
   ],
   "vars": {

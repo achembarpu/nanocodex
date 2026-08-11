@@ -172,7 +172,6 @@ impl Gvproxy {
             }
             thread::sleep(Duration::from_millis(10));
         }
-
         Ok(Self {
             child,
             network_socket,

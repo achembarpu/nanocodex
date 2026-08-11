@@ -15,7 +15,7 @@ use crate::{
     },
 };
 use nanocodex_oai_api::{Model, Thinking};
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use sha2::{Digest as _, Sha256};
 
 const LEDGER_FILE: &str = "state.sqlite3";
@@ -96,19 +96,6 @@ pub struct EvaluationTreatment {
     pub thinking: Thinking,
     /// Whether model-facing web search is enabled for this row.
     pub web_search: bool,
-}
-
-#[derive(Deserialize, Serialize)]
-struct StoredTreatment {
-    #[serde(default)]
-    key: String,
-    #[serde(default)]
-    task: String,
-    harness: String,
-    model: Model,
-    thinking: String,
-    #[serde(default)]
-    web_search: bool,
 }
 
 /// Temporary inability to claim the selected family.
@@ -231,15 +218,10 @@ impl Evaluation {
             families.push(WorksetFamily {
                 key: family.key.clone(),
                 task_selector: family.task.clone(),
-                treatment: serde_json::to_string(&StoredTreatment {
-                    key: family.key,
-                    task: family.task,
-                    harness: family.harness,
-                    model: family.model,
-                    thinking: family.thinking.as_str().to_owned(),
-                    web_search: item.web_search,
-                })
-                .map_err(error)?,
+                harness: family.harness.clone(),
+                model: family.model.as_str().to_owned(),
+                thinking: family.thinking.as_str().to_owned(),
+                web_search: item.web_search,
                 trials: item.trials,
             });
         }
@@ -384,12 +366,13 @@ impl Evaluation {
         let harness = selector.harness.as_deref().unwrap_or("nanocodex");
         let mut matching = Vec::new();
         for family in families {
-            let treatment = parse_treatment(&family.treatment)?;
-            if treatment.harness == harness
-                && selector.model.is_none_or(|model| treatment.model == model)
+            if family.harness == harness
+                && selector
+                    .model
+                    .is_none_or(|model| family.model == model.as_str())
                 && selector
                     .thinking
-                    .is_none_or(|thinking| treatment.thinking == thinking)
+                    .is_none_or(|thinking| family.thinking == thinking.as_str())
             {
                 matching.push(family);
             }
@@ -440,7 +423,7 @@ impl Evaluation {
                 retained_task.selector, retained_task.digest
             ))));
         }
-        let treatment = parse_treatment(&family.treatment)?;
+        let treatment = family_treatment(&family)?;
         let harness =
             EvaluationManifest::load_harness(&self.config, &treatment.harness).map_err(error)?;
         let harnesses = harness.iter().cloned().collect();
@@ -567,7 +550,12 @@ fn observed_status(status: WorksetStatus) -> Result<EvaluationStatus, Evaluation
         .families
         .into_iter()
         .map(|family| {
-            let treatment = parse_treatment(&family.treatment)?;
+            let treatment = normalized_treatment(
+                family.harness,
+                family.model,
+                family.thinking,
+                family.web_search,
+            )?;
             Ok(EvaluationFamilyStatus {
                 id: family.key,
                 task: family.task,
@@ -593,17 +581,32 @@ fn observed_status(status: WorksetStatus) -> Result<EvaluationStatus, Evaluation
     })
 }
 
-fn parse_treatment(raw: &str) -> Result<EvaluationTreatment, EvaluationError> {
-    let treatment: StoredTreatment = serde_json::from_str(raw).map_err(error)?;
-    let thinking = treatment
-        .thinking
+fn family_treatment(family: &WorksetFamily) -> Result<EvaluationTreatment, EvaluationError> {
+    normalized_treatment(
+        family.harness.clone(),
+        family.model.clone(),
+        family.thinking.clone(),
+        family.web_search,
+    )
+}
+
+fn normalized_treatment(
+    harness: String,
+    model: String,
+    thinking: String,
+    web_search: bool,
+) -> Result<EvaluationTreatment, EvaluationError> {
+    let model = model
+        .parse()
+        .map_err(|message: String| error(std::io::Error::other(message)))?;
+    let thinking = thinking
         .parse()
         .map_err(|message: String| error(std::io::Error::other(message)))?;
     Ok(EvaluationTreatment {
-        harness: treatment.harness,
-        model: treatment.model,
+        harness,
+        model,
         thinking,
-        web_search: treatment.web_search,
+        web_search,
     })
 }
 

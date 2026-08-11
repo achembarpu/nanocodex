@@ -1,3 +1,7 @@
+import { ChatGptSession, type ChatGptCredential } from "./subscriptionAuth.ts";
+
+export { ChatGptSession };
+
 const json = (body: unknown, init?: ResponseInit) =>
   Response.json(body, {
     ...init,
@@ -8,30 +12,50 @@ const json = (body: unknown, init?: ResponseInit) =>
   });
 
 const RESPONSES_UPGRADE_URL = "https://api.openai.com/v1/responses";
+const CHATGPT_API_BASE_URL = "https://chatgpt.com/backend-api/codex";
+const LOCAL_CHATGPT_API_BASE_URL = "http://127.0.0.1:8791/backend-api/codex";
 const RESPONSES_WEBSOCKETS_BETA = "responses_websockets=2026-02-06";
 const WEB_SEARCH_URL = "https://api.openai.com/v1/alpha/search";
 const IMAGE_GENERATION_URL = "https://api.openai.com/v1/images/generations";
 const IMAGE_EDIT_URL = "https://api.openai.com/v1/images/edits";
 const MODEL = "gpt-5.6-sol";
 const IMAGE_MODEL = "gpt-image-2";
+const CODEX_ORIGINATOR = "codex_cli_rs";
+const CODEX_USER_AGENT = "codex_cli_rs/0.0.0";
 const MAX_JSON_BODY_CHARS = 32 * 1024 * 1024;
 const MAX_SEARCH_OUTPUT_CHARS = 1024 * 1024;
 const MAX_API_KEY_CHARS = 1_024;
 const BYOK_SESSION_TTL_MS = 60 * 60 * 1_000;
+const CHATGPT_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
 const BYOK_COOKIE = "nanocodex_byok";
+const CHATGPT_COOKIE = "nanocodex_chatgpt";
 
 type WorkerEnv = {
   ENVIRONMENT: string;
   OPENAI_API_KEY?: string;
+  CHATGPT_ISSUER?: string;
+  EVALS_API_ORIGIN?: string;
+  EVALS_ACCESS_CLIENT_ID?: string;
+  EVALS_ACCESS_CLIENT_SECRET?: string;
   BYOK_SESSIONS?: DurableObjectNamespace;
+  CHATGPT_SESSIONS?: DurableObjectNamespace;
 };
 
-type Credential = { apiKey: string; source: "user" | "deployment" };
+type ApiKeyCredential = { kind: "api_key"; apiKey: string; source: "user" | "deployment" };
+type SubscriptionCredential = ChatGptCredential & { source: "subscription" };
+type Credential = ApiKeyCredential | SubscriptionCredential;
 type StoredCredential = { apiKey: string; expiresAt: number };
 
 export default {
   async fetch(request: Request, env: WorkerEnv): Promise<Response> {
     const url = new URL(request.url);
+
+    if (
+      request.method === "GET" &&
+      (url.pathname === "/api/evals" || url.pathname.startsWith("/api/evals/"))
+    ) {
+      return proxyEvals(request, env, url);
+    }
 
     if (url.pathname === "/api/health" && request.method === "GET") {
       const credential = await resolveCredential(request, env);
@@ -42,6 +66,18 @@ export default {
         runtime: "cloudflare-workers",
         status: "ok",
       });
+    }
+
+    if (url.pathname === "/api/auth/chatgpt" && request.method === "POST") {
+      return startChatGptSession(request, env, url);
+    }
+
+    if (url.pathname === "/api/auth/chatgpt" && request.method === "GET") {
+      return chatGptSessionStatus(request, env);
+    }
+
+    if (url.pathname === "/api/auth/chatgpt" && request.method === "DELETE") {
+      return clearChatGptSession(request, env, url);
     }
 
     if (url.pathname === "/api/auth/openai" && request.method === "PUT") {
@@ -81,6 +117,49 @@ export default {
   },
 };
 
+async function proxyEvals(request: Request, env: WorkerEnv, url: URL): Promise<Response> {
+  const configuredOrigin = env.EVALS_API_ORIGIN
+    ?? (env.ENVIRONMENT === "development" ? "http://127.0.0.1:8788" : undefined);
+  if (!configuredOrigin) {
+    return json({ error: "evaluation API is not configured" }, { status: 503 });
+  }
+  let upstream: URL;
+  try {
+    upstream = new URL(configuredOrigin);
+  } catch {
+    return json({ error: "evaluation API origin is invalid" }, { status: 500 });
+  }
+  const developmentLoopback = env.ENVIRONMENT === "development"
+    && upstream.protocol === "http:"
+    && ["127.0.0.1", "localhost", "::1"].includes(upstream.hostname);
+  if (upstream.protocol !== "https:" && !developmentLoopback) {
+    return json({ error: "evaluation API origin must use HTTPS" }, { status: 500 });
+  }
+  upstream.pathname = `/v1${url.pathname.slice("/api".length)}`;
+  upstream.search = url.search;
+  const headers = new Headers({ accept: "application/json" });
+  if (Boolean(env.EVALS_ACCESS_CLIENT_ID) !== Boolean(env.EVALS_ACCESS_CLIENT_SECRET)) {
+    return json({ error: "evaluation API Access credentials are incomplete" }, { status: 500 });
+  }
+  if (env.EVALS_ACCESS_CLIENT_ID && env.EVALS_ACCESS_CLIENT_SECRET) {
+    headers.set("CF-Access-Client-Id", env.EVALS_ACCESS_CLIENT_ID);
+    headers.set("CF-Access-Client-Secret", env.EVALS_ACCESS_CLIENT_SECRET);
+  }
+  const response = await fetch(upstream, {
+    method: "GET",
+    headers,
+    redirect: "manual",
+    signal: request.signal,
+  });
+  return new Response(response.body, {
+    status: response.status,
+    headers: {
+      "cache-control": "no-store",
+      "content-type": response.headers.get("content-type") ?? "application/json",
+    },
+  });
+}
+
 async function proxyWebSearch(request: Request, env: WorkerEnv, url: URL): Promise<Response> {
   const credential = await validateToolRequest(request, env, url);
   if (credential instanceof Response) return credential;
@@ -97,17 +176,22 @@ async function proxyWebSearch(request: Request, env: WorkerEnv, url: URL): Promi
   if (queries === 4 && !["medium", "long"].includes(String(commands.response_length))) {
     return json({ error: "four search queries require medium or long response_length" }, { status: 400 });
   }
-  const upstream = await fetch(WEB_SEARCH_URL, {
-    method: "POST",
-    headers: openAiHeaders(credential.apiKey),
-    body: JSON.stringify({
-      id: sessionId,
-      model: MODEL,
-      commands,
-      settings: { allowed_callers: ["direct"], external_web_access: true },
-      max_output_tokens: 10_000,
-    }),
-  });
+  const upstream = await fetch(
+    credential.kind === "chatgpt"
+      ? `${chatGptApiBaseUrl(env)}/alpha/search`
+      : WEB_SEARCH_URL,
+    {
+      method: "POST",
+      headers: openAiHeaders(credential),
+      body: JSON.stringify({
+        id: sessionId,
+        model: MODEL,
+        commands,
+        settings: { allowed_callers: ["direct"], external_web_access: true },
+        max_output_tokens: 10_000,
+      }),
+    },
+  );
   const body = await upstream.text();
   if (body.length > MAX_SEARCH_OUTPUT_CHARS) {
     return json({ error: "web search response exceeded 1 MiB" }, { status: 502 });
@@ -133,9 +217,12 @@ async function proxyImageGeneration(request: Request, env: WorkerEnv, url: URL):
   if (images.length > 5 || images.some((image) => !image.startsWith("data:image/"))) {
     return json({ error: "image edits require at most five data-image inputs" }, { status: 400 });
   }
-  const upstream = await fetch(images.length ? IMAGE_EDIT_URL : IMAGE_GENERATION_URL, {
+  const imageUrl = credential.kind === "chatgpt"
+    ? `${chatGptApiBaseUrl(env)}/images/${images.length ? "edits" : "generations"}`
+    : images.length ? IMAGE_EDIT_URL : IMAGE_GENERATION_URL;
+  const upstream = await fetch(imageUrl, {
     method: "POST",
-    headers: openAiHeaders(credential.apiKey),
+    headers: openAiHeaders(credential),
     body: JSON.stringify({
       ...(images.length ? { images: images.map((image_url) => ({ image_url })) } : {}),
       prompt,
@@ -189,16 +276,23 @@ function hasWebOperation(commands: Record<string, unknown>): boolean {
     .some((key) => Array.isArray(commands[key]) && commands[key].length > 0);
 }
 
-function openAiHeaders(apiKey: string): Record<string, string> {
-  return {
-    Authorization: `Bearer ${apiKey}`,
+function openAiHeaders(credential: Credential): Record<string, string> {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${credential.kind === "chatgpt" ? credential.accessToken : credential.apiKey}`,
     "content-type": "application/json",
     "User-Agent": "nanocodex-web/0.1.0",
   };
+  if (credential.kind === "chatgpt") {
+    headers.originator = CODEX_ORIGINATOR;
+    headers["User-Agent"] = CODEX_USER_AGENT;
+    headers["ChatGPT-Account-ID"] = credential.accountId;
+    if (credential.fedramp) headers["X-OpenAI-Fedramp"] = "true";
+  }
+  return headers;
 }
 
 function upstreamError(operation: string, status: number, body: string): Response {
-  let message = body.slice(0, 4_096);
+  let message = body.trimStart().startsWith("<") ? `HTTP ${status}` : body.slice(0, 4_096);
   try {
     const parsed = asObject(JSON.parse(body));
     const error = asObject(parsed?.error);
@@ -228,36 +322,185 @@ async function upgradeResponsesWebSocket(
   if (!sessionId || !/^[A-Za-z0-9._:-]{1,200}$/.test(sessionId)) {
     return new Response("Invalid session", { status: 400 });
   }
-  const credential = await resolveCredential(request, env);
+  let credential = await resolveCredential(request, env);
   if (!credential) {
     return new Response("OpenAI credentials are not configured", { status: 503 });
   }
 
-  const upstreamResponse = await fetch(RESPONSES_UPGRADE_URL, {
-    headers: {
-      Upgrade: "websocket",
-      Authorization: `Bearer ${credential.apiKey}`,
-      "OpenAI-Beta": RESPONSES_WEBSOCKETS_BETA,
-      "x-openai-internal-codex-responses-lite": "true",
-      "session-id": sessionId,
-      "thread-id": sessionId,
-      "x-client-request-id": sessionId,
-      "x-responsesapi-include-timing-metrics": "true",
-      "User-Agent": "nanocodex-web/0.1.0",
-    },
-  });
+  let upstreamResponse: Response;
+  try {
+    upstreamResponse = await openResponsesWebSocket(
+      credential,
+      sessionId,
+      chatGptApiBaseUrl(env),
+    );
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    console.error("OpenAI WebSocket upgrade request failed", { detail });
+    return new Response(`OpenAI WebSocket upgrade request failed: ${detail}`, { status: 502 });
+  }
+  if (credential.kind === "chatgpt" && upstreamResponse.status === 401) {
+    await upstreamResponse.body?.cancel();
+    const recovered = await recoverSubscriptionCredential(request, env, credential.revision);
+    if (recovered) {
+      credential = recovered;
+      try {
+        upstreamResponse = await openResponsesWebSocket(
+          credential,
+          sessionId,
+          chatGptApiBaseUrl(env),
+        );
+      } catch (error) {
+        const detail = error instanceof Error ? error.message : String(error);
+        console.error("OpenAI WebSocket retry request failed", { detail });
+        return new Response(`OpenAI WebSocket retry request failed: ${detail}`, { status: 502 });
+      }
+    }
+  }
   const upstream = upstreamResponse.webSocket;
   if (!upstream) {
-    await upstreamResponse.body?.cancel();
-    return new Response("OpenAI WebSocket upgrade failed", { status: 502 });
+    const detail = await upstreamResponseDetail(upstreamResponse);
+    console.error("OpenAI WebSocket upgrade rejected", {
+      status: upstreamResponse.status,
+      detail,
+    });
+    return new Response(
+      `OpenAI WebSocket upgrade failed with HTTP ${upstreamResponse.status}: ${detail}`,
+      { status: 502 },
+    );
   }
 
   const pair = new WebSocketPair();
   const [client, server] = Object.values(pair);
+  upstream.binaryType = "arraybuffer";
   upstream.accept();
   server.accept();
   bridge(server, upstream);
   return new Response(null, { status: 101, webSocket: client });
+}
+
+async function upstreamResponseDetail(response: Response): Promise<string> {
+  const body = await readBoundedResponse(response, 4_096);
+  try {
+    const parsed = asObject(JSON.parse(body));
+    const error = asObject(parsed?.error);
+    if (typeof error?.message === "string") return error.message.slice(0, 1_024);
+    if (typeof parsed?.detail === "string") return parsed.detail.slice(0, 1_024);
+  } catch { /* Fall through to the bounded text classification. */ }
+  const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";
+  if (contentType.startsWith("text/plain") && !body.trimStart().startsWith("<")) {
+    return body.slice(0, 1_024);
+  }
+  return `HTTP ${response.status}`;
+}
+
+async function readBoundedResponse(response: Response, limit: number): Promise<string> {
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let body = "";
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) return body + decoder.decode();
+    total += value.byteLength;
+    if (total > limit) {
+      const remaining = Math.max(0, limit - (total - value.byteLength));
+      body += decoder.decode(value.subarray(0, remaining));
+      await reader.cancel();
+      return `${body}…`;
+    }
+    body += decoder.decode(value, { stream: true });
+  }
+}
+
+function openResponsesWebSocket(
+  credential: Credential,
+  sessionId: string,
+  chatGptBaseUrl: string,
+): Promise<Response> {
+  const headers: Record<string, string> = {
+    Upgrade: "websocket",
+    Authorization: `Bearer ${credential.kind === "chatgpt" ? credential.accessToken : credential.apiKey}`,
+    "OpenAI-Beta": RESPONSES_WEBSOCKETS_BETA,
+    "x-openai-internal-codex-responses-lite": "true",
+    "session-id": sessionId,
+    "thread-id": sessionId,
+    "x-client-request-id": sessionId,
+    "x-responsesapi-include-timing-metrics": "true",
+    originator: CODEX_ORIGINATOR,
+    "User-Agent": CODEX_USER_AGENT,
+  };
+  if (credential.kind === "chatgpt") {
+    headers["ChatGPT-Account-ID"] = credential.accountId;
+    if (credential.fedramp) headers["X-OpenAI-Fedramp"] = "true";
+  }
+  return fetch(
+    credential.kind === "chatgpt" ? `${chatGptBaseUrl}/responses` : RESPONSES_UPGRADE_URL,
+    { headers },
+  );
+}
+
+function chatGptApiBaseUrl(env: WorkerEnv): string {
+  return env.ENVIRONMENT === "development"
+    ? LOCAL_CHATGPT_API_BASE_URL
+    : CHATGPT_API_BASE_URL;
+}
+
+async function startChatGptSession(
+  request: Request,
+  env: WorkerEnv,
+  url: URL,
+): Promise<Response> {
+  if (!sameOrigin(request, url)) return json({ error: "forbidden" }, { status: 403 });
+  if (!env.CHATGPT_SESSIONS) {
+    return json({ error: "ChatGPT subscription login is not configured" }, { status: 503 });
+  }
+  await deleteChatGptSession(request, env);
+  const sessionId = randomSessionId();
+  const response = await chatGptStub(env, sessionId).fetch("https://chatgpt.internal/start", {
+    method: "POST",
+  });
+  return new Response(response.body, {
+    status: response.status,
+    headers: response.ok
+      ? responseHeaders(response, { "set-cookie": chatGptSessionCookie(sessionId, url) })
+      : responseHeaders(response),
+  });
+}
+
+async function chatGptSessionStatus(request: Request, env: WorkerEnv): Promise<Response> {
+  if (!env.CHATGPT_SESSIONS) {
+    return json({ error: "ChatGPT subscription login is not configured" }, { status: 503 });
+  }
+  const sessionId = chatGptSessionIdFromRequest(request);
+  if (!sessionId) return json({ state: "signed_out" });
+  const response = await chatGptStub(env, sessionId).fetch("https://chatgpt.internal/status");
+  return new Response(response.body, {
+    status: response.status,
+    headers: responseHeaders(response),
+  });
+}
+
+async function clearChatGptSession(
+  request: Request,
+  env: WorkerEnv,
+  url: URL,
+): Promise<Response> {
+  if (!sameOrigin(request, url)) return json({ error: "forbidden" }, { status: 403 });
+  await deleteChatGptSession(request, env);
+  return json({ state: "signed_out" }, {
+    headers: { "set-cookie": clearChatGptSessionCookie(url) },
+  });
+}
+
+function responseHeaders(response: Response, extra?: Record<string, string>): Headers {
+  const headers = new Headers({
+    "cache-control": "no-store",
+    "content-type": response.headers.get("content-type") ?? "application/json",
+  });
+  for (const [name, value] of Object.entries(extra ?? {})) headers.set(name, value);
+  return headers;
 }
 
 async function createByokSession(
@@ -311,6 +554,8 @@ async function clearByokSession(
 }
 
 async function resolveCredential(request: Request, env: WorkerEnv): Promise<Credential | undefined> {
+  const subscription = await resolveSubscriptionCredential(request, env);
+  if (subscription) return subscription;
   const sessionId = sessionIdFromRequest(request);
   if (sessionId && env.BYOK_SESSIONS) {
     try {
@@ -318,11 +563,70 @@ async function resolveCredential(request: Request, env: WorkerEnv): Promise<Cred
       const response = await stub.fetch("https://byok.internal/credential");
       if (response.ok) {
         const apiKey = await response.text();
-        if (apiKey) return { apiKey, source: "user" };
+        if (apiKey) return { kind: "api_key", apiKey, source: "user" };
       }
     } catch { /* A deployment credential remains a valid fallback. */ }
   }
-  return env.OPENAI_API_KEY ? { apiKey: env.OPENAI_API_KEY, source: "deployment" } : undefined;
+  return env.OPENAI_API_KEY
+    ? { kind: "api_key", apiKey: env.OPENAI_API_KEY, source: "deployment" }
+    : undefined;
+}
+
+async function resolveSubscriptionCredential(
+  request: Request,
+  env: WorkerEnv,
+): Promise<SubscriptionCredential | undefined> {
+  const sessionId = chatGptSessionIdFromRequest(request);
+  if (!sessionId || !env.CHATGPT_SESSIONS) return undefined;
+  try {
+    const response = await chatGptStub(env, sessionId).fetch("https://chatgpt.internal/credential", {
+      method: "POST",
+    });
+    if (!response.ok) {
+      await response.body?.cancel();
+      return undefined;
+    }
+    const credential = await response.json<ChatGptCredential>();
+    return isChatGptCredential(credential) ? { ...credential, source: "subscription" } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+async function recoverSubscriptionCredential(
+  request: Request,
+  env: WorkerEnv,
+  revision: number,
+): Promise<SubscriptionCredential | undefined> {
+  const sessionId = chatGptSessionIdFromRequest(request);
+  if (!sessionId || !env.CHATGPT_SESSIONS) return undefined;
+  try {
+    const response = await chatGptStub(env, sessionId).fetch("https://chatgpt.internal/recover", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ revision }),
+    });
+    if (!response.ok) {
+      await response.body?.cancel();
+      return undefined;
+    }
+    const credential = await response.json<ChatGptCredential>();
+    return isChatGptCredential(credential) ? { ...credential, source: "subscription" } : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isChatGptCredential(value: unknown): value is ChatGptCredential {
+  const credential = asObject(value);
+  return credential?.kind === "chatgpt"
+    && typeof credential.accessToken === "string"
+    && credential.accessToken.length > 0
+    && typeof credential.accountId === "string"
+    && credential.accountId.length > 0
+    && typeof credential.fedramp === "boolean"
+    && Number.isSafeInteger(credential.revision)
+    && Number(credential.revision) >= 0;
 }
 
 async function deleteSession(request: Request, env: WorkerEnv): Promise<void> {
@@ -333,11 +637,19 @@ async function deleteSession(request: Request, env: WorkerEnv): Promise<void> {
 }
 
 function sessionIdFromRequest(request: Request): string | undefined {
+  return cookieSessionId(request, BYOK_COOKIE);
+}
+
+function chatGptSessionIdFromRequest(request: Request): string | undefined {
+  return cookieSessionId(request, CHATGPT_COOKIE);
+}
+
+function cookieSessionId(request: Request, cookieName: string): string | undefined {
   const cookie = request.headers.get("cookie");
   if (!cookie) return undefined;
   for (const part of cookie.split(";")) {
     const [name, ...rest] = part.trim().split("=");
-    if (name !== BYOK_COOKIE) continue;
+    if (name !== cookieName) continue;
     const value = rest.join("=");
     if (/^[A-Za-z0-9_-]{43}$/.test(value)) return value;
   }
@@ -361,11 +673,46 @@ function clearSessionCookie(url: URL): string {
   return `${BYOK_COOKIE}=; Path=/api; HttpOnly; SameSite=Strict; Max-Age=0${secure}`;
 }
 
+function chatGptSessionCookie(sessionId: string, url: URL): string {
+  const secure = url.protocol === "https:" ? "; Secure" : "";
+  return `${CHATGPT_COOKIE}=${sessionId}; Path=/api; HttpOnly; SameSite=Strict; Max-Age=${CHATGPT_SESSION_TTL_MS / 1_000}${secure}`;
+}
+
+function clearChatGptSessionCookie(url: URL): string {
+  const secure = url.protocol === "https:" ? "; Secure" : "";
+  return `${CHATGPT_COOKIE}=; Path=/api; HttpOnly; SameSite=Strict; Max-Age=0${secure}`;
+}
+
+function chatGptStub(env: WorkerEnv, sessionId: string): DurableObjectStub {
+  if (!env.CHATGPT_SESSIONS) throw new Error("ChatGPT subscription login is not configured");
+  return env.CHATGPT_SESSIONS.get(env.CHATGPT_SESSIONS.idFromName(sessionId));
+}
+
+async function deleteChatGptSession(request: Request, env: WorkerEnv): Promise<void> {
+  const sessionId = chatGptSessionIdFromRequest(request);
+  if (!sessionId || !env.CHATGPT_SESSIONS) return;
+  await chatGptStub(env, sessionId).fetch("https://chatgpt.internal/session", { method: "DELETE" });
+}
+
 function sameOrigin(request: Request, url: URL): boolean {
+  // A custom header protects same-origin fetches even when the local Cloudflare
+  // Vite bridge rewrites the public URL before dispatching to the Worker.
+  if (request.headers.get("x-nanocodex-request") === "1") return true;
   const origin = request.headers.get("Origin");
-  if (!origin) return false;
+  if (origin) return matchesRequestOrigin(origin, url);
+  const referer = request.headers.get("Referer");
+  return referer !== null && matchesRequestOrigin(referer, url);
+}
+
+function matchesRequestOrigin(value: string, url: URL): boolean {
   try {
-    return new URL(origin).origin === url.origin;
+    const source = new URL(value);
+    if (source.origin === url.origin) return true;
+    const loopback = (hostname: string) => ["localhost", "127.0.0.1", "::1"].includes(hostname);
+    return loopback(source.hostname)
+      && loopback(url.hostname)
+      && ["http:", "https:"].includes(source.protocol)
+      && ["http:", "https:"].includes(url.protocol);
   } catch {
     return false;
   }

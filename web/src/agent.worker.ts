@@ -7,9 +7,11 @@ import {
 import { createBrowserTools } from "./browserTools";
 import type { WebTuiCommand } from "./nanocodex";
 import { createPaymentSessionOwner } from "./paymentSessionOwner";
+import { MPP_RESPONSES_WEBSOCKET_URL } from "./tempo-policy";
 
 type IncomingMessage = WebTuiCommand;
 type PaymentSession = Awaited<ReturnType<(typeof import("./tempo"))["createTempoMppSession"]>>;
+const CHATGPT_API_BASE_URL = "https://chatgpt.com/backend-api/codex";
 
 type WorkerScope = {
   location: Location;
@@ -62,18 +64,19 @@ async function createAgent(
     reasoningMode: start.reasoningMode,
   };
   if (start.transport === "mpp") {
-    const paymentKey = start.paymentKey;
-    if (!paymentKey) {
-      throw new Error("MPP requires an authorized Tempo access key");
+    const payerAddress = start.payerAddress;
+    if (!payerAddress) {
+      throw new Error("MPP requires a connected Tempo account");
     }
     const { createTempoMppSession } = await import("./tempo");
     return paymentSessions.open(
-      () => createTempoMppSession(paymentKey),
+      () => createTempoMppSession(payerAddress),
       async (paymentSession) => {
         const agent = await Agent.create({
           ...common,
           fastMode: true,
           mpp: paymentSession.mpp,
+          websocketUrl: MPP_RESPONSES_WEBSOCKET_URL,
         });
         return {
           agent,
@@ -89,16 +92,28 @@ async function createAgent(
       },
     );
   }
+  const createWebSocket = (endpoint: string, sessionId: string) => {
+    const url = new URL(endpoint);
+    url.searchParams.set("session_id", sessionId);
+    return new WebSocket(url);
+  };
+  if (start.transport === "chatgpt") {
+    return {
+      agent: await Agent.create({
+        ...common,
+        hostAuth: true,
+        apiBaseUrl: CHATGPT_API_BASE_URL,
+        websocketUrl: workerEndpoint(),
+        createWebSocket,
+      }),
+    };
+  }
   return {
     agent: await Agent.create({
       ...common,
       apiKey: "worker-managed",
       websocketUrl: workerEndpoint(),
-      createWebSocket: (endpoint: string, sessionId: string) => {
-        const url = new URL(endpoint);
-        url.searchParams.set("session_id", sessionId);
-        return new WebSocket(url);
-      },
+      createWebSocket,
     }),
   };
 }

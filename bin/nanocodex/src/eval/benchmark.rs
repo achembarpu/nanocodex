@@ -11,6 +11,8 @@ use crate::{
     vm::VmArgs,
 };
 
+mod supervisor;
+
 #[derive(Args)]
 pub(super) struct Benchmark {
     /// Named benchmark stored in SQLite.
@@ -63,6 +65,9 @@ impl Benchmark {
         } = self;
         if systemd {
             return systemd::install(Some(&profile), &config, state_dir.as_deref());
+        }
+        if headless && let Some(coordinator) = coordinator.as_deref() {
+            return supervisor::run(&profile, &config, coordinator).await;
         }
         let prompt = benchmark::prompt(
             Some(&profile),

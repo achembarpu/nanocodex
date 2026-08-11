@@ -1,8 +1,0 @@
-{
-  "extends": "./tsconfig.json",
-  "include": [
-    "src/evals-main.tsx",
-    "src/LiveEvals.tsx",
-    "vite.evals.config.ts"
-  ]
-}

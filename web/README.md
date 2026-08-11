@@ -43,62 +43,45 @@ asset. The commit view parses complete files in bounded batches and appends
 them to one Pierre CodeView, yielding between batches so scrolling stays
 responsive.
 
-The same sync step discovers linked worktrees and derives a compact eval index
-from their retained Nanocodex and Codex jobs. It automatically pairs the largest
-exact task-set match for a like-for-like comparison. Trial
-details retain metrics, phase timing, verifier assertions, tool status, and
-API-visible final output. Raw tool output, stderr, secrets, and hidden reasoning
-are not copied into the website.
-
-The homepage and Evals view present the matched public task set as a provisional
-development instrument, not a general product ranking. The comparison links
-each disagreement back to its retained trial so compatibility gaps can be
-inspected directly.
-
 ### Live eval view
 
-The Evals route switches from its static published snapshot to a live,
-runner-independent task matrix when the local evidence endpoint is available.
-Start the read-only server with one or more differential sweep output or parent
-directories:
+`/evals` is part of the same production Vite and React application as the
+Nanocodex homepage, embedded TUI, repository tree, and commit history. The
+website uses a typed HTTP client and has no SQLite or artifact-path knowledge.
+The existing evaluation coordinator owns the durable ledger and exposes its
+read-only Axum API alongside the worker routes:
 
 ```bash
-npm run evals:server -- \
-  --static dist-evals \
-  /path/to/wave-a/output/sweep \
-  /path/to/wave-b/output/sweep
+cd ..
+cargo run -p nanocodex-bin -- eval coordinator dx-distributed-k2 \
+  --config nanocodex.dx-sweep.toml \
+  --state-dir ~/.nanocodex/evals \
+  --port 8788
 ```
 
-Build the standalone bundle first with `npm run evals:build`; `--static` serves
-it and the API from one process. For development, use `npm run evals:dev`, or
-run the complete website normally. Both proxy `/api/evals` to
-`http://127.0.0.1:8788`; set `NANOCODEX_EVALS_API` to use another endpoint.
-The browser receives an initial snapshot and subsequent updates over
-server-sent events, with automatic reconnect after an interruption.
+For development, the local Worker proxies `/api/evals` to
+`http://127.0.0.1:8788`. When the coordinator runs on another box, forward that
+loopback port before starting Vite:
 
-The server is deliberately loopback-only and is not routed by the production
-Cloudflare Worker; deployed `/api/evals*` requests return 404 unless an operator
-explicitly runs this separate process and supplies a same-origin proxy. It reads
-durable manifests, compact comparison reports, and the latest
-progress heartbeat. It folds infrastructure replacement chains back into their
-original trial coordinate, ignores cleaned reportless restart tombstones, and
-reports host CPU, memory, swap, and filesystem capacity. Clicking a completed
-coordinate loads its task instruction, structured report, final agent messages,
-and bounded canonical verifier stdout/stderr through an opaque case ID. The
-server does not provide arbitrary file or workspace access and does not serve
-raw prompts, reasoning, or tool transcripts. Host health is serialized only as
-normalized utilization percentages; exact CPU count, memory, swap, disk size,
-scheduler limits, host paths, network addresses, tailnet names, and credential
-shapes are excluded or redacted. Completed reports are cached in memory. Live
-progress files are followed from their last parsed byte, reportless tombstones
-are reconsidered when new evidence arrives, and structured progress coordinates
-keep tasks with the same short name distinct. Watching the dashboard therefore
-does not repeatedly parse full logs or interfere with VM disk cleanup and shared
-image/runtime caches.
+```bash
+ssh -N -L 127.0.0.1:8788:127.0.0.1:8788 ubuntu@dev-georgios
+```
 
-For tailnet-only access from the eval host, keep both processes bound to
-loopback and proxy the Vite port with Tailscale Serve. Inspect the host's
-existing Serve configuration before adding the route.
+Set `EVALS_API_ORIGIN` to override the local origin. Plain HTTP is accepted only
+for a loopback origin in the development environment. In production, set
+`EVALS_API_ORIGIN` on the Cloudflare Worker to the HTTPS Cloudflare Tunnel
+hostname. Protect that hostname with Cloudflare Access and configure
+`EVALS_ACCESS_CLIENT_ID` plus the `EVALS_ACCESS_CLIENT_SECRET` Worker secret.
+The Worker forwards only same-origin GET requests under `/api/evals`; SQLite
+and retained artifacts remain on the coordinator box.
+
+The API is deliberately workset-oriented: the client loads the retained
+workset index, drills into one workset's task summaries, loads one selected
+treatment matrix, then requests a single opaque case ID for terminal evidence.
+TanStack Query is the only application cache and owns polling, cancellation,
+retry, and the overview/workset/task/case query lifetimes. The coordinator and
+Cloudflare proxy add no evidence cache. There is no second eval-only HTML entry,
+React root, Vite configuration, Node eval server, or browser-side SQL path.
 
 The homepage is also a real embedded-agent demo with three deliberately thin
 layers:

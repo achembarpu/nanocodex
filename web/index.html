@@ -7,8 +7,7 @@
     <script>
       (() => {
         try {
-          const stored =
-            localStorage.getItem("nanocodex-theme") ?? localStorage.getItem("xedoc-theme");
+          const stored = localStorage.getItem("nanocodex-theme");
           const theme = stored === "dark" ? "dark" : "light";
           document.documentElement.dataset.theme = theme;
           document

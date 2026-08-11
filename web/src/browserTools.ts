@@ -113,7 +113,10 @@ export function createBrowserTools(options: BrowserToolOptions): Record<string, 
 async function postJson<T>(path: string, body: unknown): Promise<T> {
   const response = await fetch(path, {
     method: "POST",
-    headers: { "content-type": "application/json" },
+    headers: {
+      "content-type": "application/json",
+      "x-nanocodex-request": "1",
+    },
     body: JSON.stringify(body),
   });
   const payload = await response.json().catch(() => undefined) as { error?: unknown } | undefined;
