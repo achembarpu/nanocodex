@@ -119,6 +119,7 @@ struct CoordinatorState {
     evaluation: Evaluation,
     eval_api: EvalApi,
     active: Arc<Mutex<HashMap<String, ActiveClaim>>>,
+    ledger_writes: Arc<Mutex<()>>,
 }
 
 struct ActiveClaim {
@@ -223,6 +224,7 @@ impl CoordinatorServer {
                 evaluation,
                 eval_api,
                 active: Arc::new(Mutex::new(HashMap::new())),
+                ledger_writes: Arc::new(Mutex::new(())),
             },
         }
     }
@@ -570,7 +572,11 @@ impl CoordinatorClient {
 async fn status(
     State(state): State<CoordinatorState>,
 ) -> Result<Json<serde_json::Value>, ApiError> {
-    let status = state.evaluation.status().map_err(ApiError::ledger)?;
+    let evaluation = state.evaluation;
+    let status = tokio::task::spawn_blocking(move || evaluation.status())
+        .await
+        .map_err(ApiError::internal)?
+        .map_err(ApiError::ledger)?;
     Ok(Json(
         serde_json::to_value(status).map_err(ApiError::internal)?,
     ))
@@ -685,7 +691,7 @@ async fn claim(
         .worker
         .filter(|worker| !worker.trim().is_empty())
         .unwrap_or_else(|| peer.ip().to_string());
-    let claim = match request.task {
+    let selector = match request.task {
         Some(task) => {
             let model = request
                 .model
@@ -699,10 +705,19 @@ async fn claim(
                 .harness(request.harness)
                 .model(model)
                 .thinking(thinking);
-            state.evaluation.claim_for_worker(&selector, &host)
+            Some(selector)
         }
-        None => state.evaluation.claim_next_for_worker(&host),
-    }
+        None => None,
+    };
+    let _write = state.ledger_writes.lock().await;
+    let evaluation = state.evaluation.clone();
+    let claim_host = host.clone();
+    let claim = tokio::task::spawn_blocking(move || match selector {
+        Some(selector) => evaluation.claim_for_worker(&selector, &claim_host),
+        None => evaluation.claim_next_for_worker(&claim_host),
+    })
+    .await
+    .map_err(ApiError::internal)?
     .map_err(ApiError::bad_gateway)?;
     let response = match claim {
         EvaluationClaim::Run(claim) => {
@@ -736,6 +751,7 @@ async fn worker_exited(
     if worker.trim().is_empty() {
         return Err(ApiError::bad_request("worker name must not be empty"));
     }
+    let _write = state.ledger_writes.lock().await;
     let exited = {
         let mut active = state.active.lock().await;
         let tokens = active
@@ -748,9 +764,14 @@ async fn worker_exited(
             .filter_map(|token| active.remove(&token))
             .collect::<Vec<_>>()
     };
-    for active in exited {
-        active.claim.release().map_err(ApiError::ledger)?;
-    }
+    tokio::task::spawn_blocking(move || {
+        for active in exited {
+            active.claim.release().map_err(ApiError::ledger)?;
+        }
+        Ok::<_, ApiError>(())
+    })
+    .await
+    .map_err(ApiError::internal)??;
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -775,12 +796,25 @@ async fn finish(
     AxumPath(token): AxumPath<String>,
     Json(request): Json<FinishRequest>,
 ) -> Result<StatusCode, ApiError> {
+    let _write = state.ledger_writes.lock().await;
     let active = state
         .active
         .lock()
         .await
         .remove(&token)
         .ok_or_else(|| ApiError::not_found("claim is absent or expired"))?;
+    let eval_api = state.eval_api.clone();
+    tokio::task::spawn_blocking(move || finish_claim(active, request, &eval_api))
+        .await
+        .map_err(ApiError::internal)??;
+    Ok(StatusCode::NO_CONTENT)
+}
+
+fn finish_claim(
+    active: ActiveClaim,
+    request: FinishRequest,
+    eval_api: &EvalApi,
+) -> Result<(), ApiError> {
     match request {
         FinishRequest::Success { evidence } => {
             let claim = active.claim;
@@ -789,7 +823,7 @@ async fn finish(
                 return Err(ApiError::bad_request("accepted evidence was not uploaded"));
             }
             claim.succeed(&evidence).map_err(ApiError::ledger)?;
-            if let Err(error) = state.eval_api.index_result(&evidence) {
+            if let Err(error) = eval_api.index_result(&evidence) {
                 tracing::warn!(%error, "failed to index accepted evaluation result");
             }
         }
@@ -806,7 +840,7 @@ async fn finish(
                 .fail(evidence.as_deref(), &error)
                 .map_err(ApiError::ledger)?;
             if let Some(evidence) = evidence {
-                if let Err(error) = state.eval_api.index_result(&evidence) {
+                if let Err(error) = eval_api.index_result(&evidence) {
                     tracing::warn!(%error, "failed to index accepted evaluation result");
                 }
             }
@@ -825,7 +859,7 @@ async fn finish(
                 .map_err(ApiError::ledger)?;
         }
     }
-    Ok(StatusCode::NO_CONTENT)
+    Ok(())
 }
 
 async fn insert_claim(state: &CoordinatorState, claim: CoordinateClaim, worker: String) -> String {
