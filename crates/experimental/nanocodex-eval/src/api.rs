@@ -239,7 +239,9 @@ struct TaskRow {
 struct CoordinateRow {
     id: i64,
     family_key: String,
-    treatment: String,
+    harness: String,
+    model: String,
+    thinking: String,
     repetition: u16,
     state: String,
     result_path: Option<PathBuf>,
@@ -248,16 +250,6 @@ struct CoordinateRow {
     error: Option<String>,
     status: Option<String>,
     outcome: Option<String>,
-}
-
-#[derive(Clone, Debug, Default)]
-struct Treatment {
-    harness: String,
-    mode: String,
-    model: String,
-    thinking: String,
-    nanocodex_tool_mode: String,
-    codex_tool_mode: String,
 }
 
 #[derive(Debug)]
@@ -380,9 +372,9 @@ impl EvalApi {
             .map_err(|error| error.to_string())?;
         let mut statement = connection
             .prepare(
-                "SELECT e.treatment, e.state, e.started_at_ms, e.finished_at_ms, \
-                        r.status, r.outcome, r.input_tokens, r.cached_input_tokens, \
-                        r.output_tokens, r.cost_usd \
+                "SELECT e.harness, e.model, e.thinking, e.state, \
+                        e.started_at_ms, e.finished_at_ms, r.status, r.outcome, \
+                        r.input_tokens, r.cached_input_tokens, r.output_tokens, r.cost_usd \
                  FROM eval_tasks e \
                  LEFT JOIN coordinate_results r ON r.coordinate_id = e.id \
                  WHERE e.workset_id = ?1 AND e.state IN ('success', 'failed') \
@@ -394,22 +386,25 @@ impl EvalApi {
                 Ok((
                     row.get::<_, String>(0)?,
                     row.get::<_, String>(1)?,
-                    row.get::<_, Option<i64>>(2)?,
-                    row.get::<_, Option<i64>>(3)?,
-                    row.get::<_, Option<String>>(4)?,
-                    row.get::<_, Option<String>>(5)?,
-                    row.get::<_, Option<i64>>(6)?,
-                    row.get::<_, Option<i64>>(7)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<i64>>(4)?,
+                    row.get::<_, Option<i64>>(5)?,
+                    row.get::<_, Option<String>>(6)?,
+                    row.get::<_, Option<String>>(7)?,
                     row.get::<_, Option<i64>>(8)?,
-                    row.get::<_, Option<f64>>(9)?,
+                    row.get::<_, Option<i64>>(9)?,
+                    row.get::<_, Option<i64>>(10)?,
+                    row.get::<_, Option<f64>>(11)?,
                 ))
             })
             .map_err(|error| error.to_string())?;
-        let mut treatments = HashMap::<String, Treatment>::new();
         let mut groups = HashMap::<String, AnalyticsGroup>::new();
         for row in rows {
             let (
-                raw_treatment,
+                harness,
+                model,
+                thinking,
                 state,
                 started_at_ms,
                 finished_at_ms,
@@ -420,24 +415,15 @@ impl EvalApi {
                 output,
                 cost,
             ) = row.map_err(|error| error.to_string())?;
-            let treatment = if let Some(treatment) = treatments.get(&raw_treatment) {
-                treatment.clone()
-            } else {
-                let treatment = parse_treatment(&raw_treatment);
-                treatments.insert(raw_treatment, treatment.clone());
-                treatment
-            };
             if outcome.as_deref() == Some("infrastructure_error") {
                 continue;
             }
-            let harness = treatment_harness(&treatment);
-            let cost =
-                cost.or_else(|| estimated_cost_usd(&treatment.model, input, cached_input, output));
-            let key = format!("{harness}\0{}\0{}", treatment.model, treatment.thinking);
+            let cost = cost.or_else(|| estimated_cost_usd(&model, input, cached_input, output));
+            let key = format!("{harness}\0{model}\0{thinking}");
             let group = groups.entry(key).or_insert_with(|| AnalyticsGroup {
                 harness,
-                model: treatment.model,
-                thinking: treatment.thinking,
+                model,
+                thinking,
                 passed: 0,
                 completed: 0,
                 output_tokens: Vec::new(),
@@ -519,8 +505,8 @@ impl EvalApi {
         };
         let mut statement = connection
             .prepare(
-                "SELECT e.id, t.selector, e.state, e.treatment, e.repetition, \
-                        e.started_at_ms, e.finished_at_ms, \
+                "SELECT e.id, t.selector, e.state, e.harness, e.model, e.thinking, \
+                        e.repetition, e.started_at_ms, e.finished_at_ms, \
                         r.status, r.outcome, r.input_tokens, r.cached_input_tokens, \
                         r.output_tokens, r.reasoning_output_tokens, r.total_tokens, r.cost_usd \
                  FROM eval_tasks e \
@@ -531,7 +517,6 @@ impl EvalApi {
                  ORDER BY t.selector, e.family_key, e.repetition",
             )
             .map_err(|error| error.to_string())?;
-        let mut treatments = HashMap::<String, Treatment>::new();
         let mut tasks = HashMap::<String, (String, String)>::new();
         let points = statement
             .query_map((workset.id, task.as_ref().map(|task| task.id)), |row| {
@@ -547,26 +532,14 @@ impl EvalApi {
                     tasks.insert(task_name.clone(), task.clone());
                     task
                 };
-                let raw_treatment = row.get::<_, String>(3)?;
-                let treatment = if let Some(treatment) = treatments.get(&raw_treatment) {
-                    treatment.clone()
-                } else {
-                    let treatment = parse_treatment(&raw_treatment);
-                    treatments.insert(raw_treatment, treatment.clone());
-                    treatment
-                };
-                let started_at_ms = row.get::<_, Option<i64>>(5)?;
-                let finished_at_ms = row.get::<_, Option<i64>>(6)?;
-                let input_tokens = row.get(9)?;
-                let cached_input_tokens = row.get(10)?;
-                let output_tokens = row.get(11)?;
-                let cost_usd = row.get::<_, Option<f64>>(14)?.or_else(|| {
-                    estimated_cost_usd(
-                        &treatment.model,
-                        input_tokens,
-                        cached_input_tokens,
-                        output_tokens,
-                    )
+                let model = row.get::<_, String>(4)?;
+                let started_at_ms = row.get::<_, Option<i64>>(7)?;
+                let finished_at_ms = row.get::<_, Option<i64>>(8)?;
+                let input_tokens = row.get(11)?;
+                let cached_input_tokens = row.get(12)?;
+                let output_tokens = row.get(13)?;
+                let cost_usd = row.get::<_, Option<f64>>(16)?.or_else(|| {
+                    estimated_cost_usd(&model, input_tokens, cached_input_tokens, output_tokens)
                 });
                 Ok(ResultPoint {
                     id: case_id(digest, coordinate_id),
@@ -574,20 +547,20 @@ impl EvalApi {
                     task_label,
                     task_name,
                     state: row.get(2)?,
-                    harness: treatment_harness(&treatment),
-                    model: treatment.model,
-                    thinking: treatment.thinking,
-                    repetition: row.get(4)?,
-                    status: row.get(7)?,
-                    outcome: row.get(8)?,
+                    harness: row.get(3)?,
+                    model,
+                    thinking: row.get(5)?,
+                    repetition: row.get(6)?,
+                    status: row.get(9)?,
+                    outcome: row.get(10)?,
                     duration_ms: started_at_ms
                         .zip(finished_at_ms)
                         .map(|(started, finished)| finished.saturating_sub(started)),
                     input_tokens,
                     cached_input_tokens,
                     output_tokens,
-                    reasoning_output_tokens: row.get(12)?,
-                    total_tokens: row.get(13)?,
+                    reasoning_output_tokens: row.get(14)?,
+                    total_tokens: row.get(15)?,
                     cost_usd,
                 })
             })
@@ -645,7 +618,6 @@ impl EvalApi {
         let mut coordinates = read_coordinates(&connection, workset.id, Some(task.id))?;
         let mut treatments = Vec::<TreatmentDetail>::new();
         for coordinate in coordinates.drain(..) {
-            let treatment = parse_treatment(&coordinate.treatment);
             let state = coordinate_state(&coordinate);
             let detail_id =
                 result_path(&coordinate).map(|_| case_id(workset_digest, coordinate.id));
@@ -669,10 +641,14 @@ impl EvalApi {
             } else {
                 treatments.push(TreatmentDetail {
                     id: treatment_id,
-                    label: treatment_label(&treatment),
-                    harness: treatment_harness(&treatment),
-                    model: treatment.model,
-                    thinking: treatment.thinking,
+                    label: treatment_label(
+                        &coordinate.harness,
+                        &coordinate.model,
+                        &coordinate.thinking,
+                    ),
+                    harness: coordinate.harness,
+                    model: coordinate.model,
+                    thinking: coordinate.thinking,
                     cells: vec![cell],
                 });
             }
@@ -935,8 +911,9 @@ fn read_coordinates(
 ) -> Result<Vec<CoordinateRow>, String> {
     let mut statement = connection
         .prepare(
-            "SELECT e.id, e.family_key, e.treatment, e.repetition, e.state, \
-                    e.result_path, e.started_at_ms, e.finished_at_ms, e.error, \
+            "SELECT e.id, e.family_key, e.harness, e.model, e.thinking, \
+                    e.repetition, e.state, e.result_path, e.started_at_ms, \
+                    e.finished_at_ms, e.error, \
                     r.status, r.outcome \
              FROM eval_tasks e \
              LEFT JOIN coordinate_results r ON r.coordinate_id = e.id \
@@ -949,15 +926,17 @@ fn read_coordinates(
             Ok(CoordinateRow {
                 id: row.get(0)?,
                 family_key: row.get(1)?,
-                treatment: row.get(2)?,
-                repetition: row.get(3)?,
-                state: row.get(4)?,
-                result_path: row.get::<_, Option<String>>(5)?.map(PathBuf::from),
-                started_at_ms: row.get(6)?,
-                finished_at_ms: row.get(7)?,
-                error: row.get(8)?,
-                status: row.get(9)?,
-                outcome: row.get(10)?,
+                harness: row.get(2)?,
+                model: row.get(3)?,
+                thinking: row.get(4)?,
+                repetition: row.get(5)?,
+                state: row.get(6)?,
+                result_path: row.get::<_, Option<String>>(7)?.map(PathBuf::from),
+                started_at_ms: row.get(8)?,
+                finished_at_ms: row.get(9)?,
+                error: row.get(10)?,
+                status: row.get(11)?,
+                outcome: row.get(12)?,
             })
         })
         .map_err(|error| error.to_string())?
@@ -1307,58 +1286,12 @@ fn estimated_cost_usd(
         .ok()
 }
 
-fn parse_treatment(raw: &str) -> Treatment {
-    let value = serde_json::from_str::<Value>(raw).unwrap_or(Value::Null);
-    let string = |key: &str| {
-        value
-            .get(key)
-            .and_then(Value::as_str)
-            .unwrap_or_default()
-            .to_owned()
-    };
-    Treatment {
-        harness: string("harness"),
-        mode: string("mode"),
-        model: string("model"),
-        thinking: string("thinking"),
-        nanocodex_tool_mode: string("nanocodex_tool_mode"),
-        codex_tool_mode: string("codex_tool_mode"),
-    }
-}
-
-fn treatment_harness(treatment: &Treatment) -> String {
-    if !treatment.harness.is_empty() {
-        treatment.harness.clone()
-    } else if !treatment.mode.is_empty() {
-        treatment.mode.clone()
-    } else {
-        "unknown".to_owned()
-    }
-}
-
-fn treatment_label(treatment: &Treatment) -> String {
-    let mut parts = [
-        treatment_harness(treatment),
-        treatment.model.clone(),
-        treatment.thinking.clone(),
-    ]
-    .into_iter()
-    .filter(|part| !part.is_empty())
-    .collect::<Vec<_>>();
-    if !treatment.nanocodex_tool_mode.is_empty() || !treatment.codex_tool_mode.is_empty() {
-        let tools = if treatment.nanocodex_tool_mode == treatment.codex_tool_mode {
-            treatment.nanocodex_tool_mode.clone()
-        } else {
-            format!(
-                "N:{} / C:{}",
-                treatment.nanocodex_tool_mode, treatment.codex_tool_mode
-            )
-        };
-        if !tools.is_empty() {
-            parts.push(tools);
-        }
-    }
-    parts.join(" · ")
+fn treatment_label(harness: &str, model: &str, thinking: &str) -> String {
+    [harness, model, thinking]
+        .into_iter()
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>()
+        .join(" · ")
 }
 
 const fn add_summary(total: &mut EvalSummary, summary: &EvalSummary) {
