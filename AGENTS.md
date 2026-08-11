@@ -37,6 +37,21 @@
   benchmark controller must observe, classify, and adapt without an operator.
   Keep automated tests for executable protocol, parsing, and durable-state
   contracts.
+- Run benchmarks on `ubuntu@dev-georgios`. The sole canonical benchmark ledger
+  is `/mnt/nanocodex-evals/evals/state.sqlite3`; use
+  `--state-dir /mnt/nanocodex-evals/evals` for every benchmark add, run, resume,
+  migration, coordinator/API, and UI operation. Add new profiles and attempts
+  to that SQLite ledger instead of creating per-run or smoke state databases.
+  Use another benchmark host or state directory only when the user explicitly
+  requests an isolated experiment.
+- When the user asks to deploy or replace a component on `dev-georgios`, fetch
+  current `origin/master` unless the user names another ref, build that exact
+  source, and replace every running instance of only the requested component.
+  Do not preserve a stale instance of that component, and do not stop adjacent
+  components. In particular, neural-orchestrator work replaces only the
+  controller/UI process and leaves eval workers and the coordinator running;
+  coordinator work replaces only the coordinator; worker/runtime work touches
+  workers only when the user puts them in scope.
 - Treat live benchmark waves and observation windows as telemetry, not blocking
   work. While a wave runs, continue investigating known failures, inspecting
   logs and state, editing, compiling, and preparing the next deployment. Wait
@@ -60,8 +75,9 @@
 - Do not add backward-compatible readers, dual-write paths, legacy schema
   support, or compatibility shims unless the user explicitly asks for them.
   Use a direct one-way migration for the active corpus when its data remains
-  useful; otherwise recreate or reseed the experimental state in the new
-  format.
+  useful. Migrate the canonical `dev-georgios` ledger in place; never recreate,
+  reseed, replace, or redirect it unless the user explicitly requests that
+  destructive state change.
 - Do not pause routine eval iteration or deployment to make backup copies of
   experimental benchmark state. Make a backup only when the user explicitly
   requests one.
