@@ -31,7 +31,7 @@ pub(crate) fn prompt(
         },
         |coordinator| {
             format!(
-                "For every name in status.workers whose nanocodex-eval-worker-<name>.service is not live, POST {{\"worker\":<name>,\"error\":\"worker process exited\"}} to {}/v1/workers/exited before admitting replacements. The operation is idempotent.",
+                "For every name in status.workers whose nanocodex-eval-worker@<name>.service is not live, POST {{\"worker\":<name>,\"error\":\"worker process exited\"}} to {}/v1/workers/exited before admitting replacements. The operation is idempotent.",
                 coordinator.trim_end_matches('/')
             )
         },
@@ -45,10 +45,10 @@ pub(crate) fn prompt(
 
 Repeat this short control cycle until the board is terminal:
 
-1. Observe, in a fresh Code Mode call, `{status_command}`, live or activating `nanocodex-eval-worker-*.service` user units and their `ExecStart`, `/proc/meminfo`, `/proc/loadavg`, `/proc/pressure/memory`, swap activity, and recent completions or worker exits. A unit belongs to this board only when its command is the `{worker_command}` shape for this selected profile; unrelated eval units affect host pressure but never this board's live count or reconciliation. Do not keep a JavaScript loop, PID marker, worker pool, or other controller state.
+1. Observe, in a fresh Code Mode call, `{status_command}`, live or activating `nanocodex-eval-worker@*.service` user units and their `ExecStart`, `/proc/meminfo`, `/proc/loadavg`, `/proc/pressure/memory`, swap activity, and recent completions or worker exits. A unit belongs to this board only when its command is the `{worker_command}` shape for this selected profile; unrelated eval units affect host pressure but never this board's live count or reconciliation. Do not keep a JavaScript loop, PID marker, worker pool, or other controller state.
 2. Reconcile before admission. {reconciliation}
 3. Reason from the current and recent observations and choose an absolute desired live-worker count that maximizes terminal completions per hour. Starting units count as live. With backlog and no measured overload or throughput stall, grow aggressively in a batch; unused healthy capacity is a controller failure. OOMs and infrastructure retries are acceptable calibration signals. High utilization alone is not overload.
-4. Let `live` be this board's live or activating unit count. Launch `min(unclaimed, max(0, desired - live))` workers immediately with unique lowercase names using `systemd-run --user --quiet --collect --service-type=exec --unit nanocodex-eval-worker-<name>.service --working-directory "$PWD" --setenv "PATH=$PATH" {worker_command}`. The systemd unit, never this controller or a tool session, owns the worker lifetime.
+4. Let `live` be this board's live or activating unit count. Launch `min(unclaimed, max(0, desired - live))` workers immediately with unique lowercase systemd-safe names using `systemd-run --user --quiet --collect --service-type=exec --unit nanocodex-eval-worker@<name>.service --working-directory "$PWD" --setenv "PATH=$PATH" {worker_command}`. The systemd unit, never this controller or a tool session, owns the worker lifetime.
 5. Observe again after the launched processes have had time to affect throughput and host pressure. Let existing workers drain under overload; never stop, signal, or shed one manually.
 
 Controller failure or restart must leave every worker untouched. On restart, derive the complete situation again from SQLite and systemd. Do not use subagents to own workers and do not wait for worker processes in Code Mode. Finish only when status has zero unclaimed and running rows and no live unit belonging to this board remains."#,
