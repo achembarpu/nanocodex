@@ -17,7 +17,7 @@ use rusqlite::{Connection, OpenFlags, OptionalExtension as _, TransactionBehavio
 use serde::Serialize;
 use uuid::Uuid;
 
-const SCHEMA_VERSION: u32 = 9;
+const SCHEMA_VERSION: u32 = 1;
 const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 const OBSERVER_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 
