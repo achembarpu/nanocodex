@@ -6,6 +6,10 @@ registry = "evals/adapter-smoke/openai-evals/registry"
 eval = "demo.match-v1"
 revision = "nanocodex/openai-evals-smoke@1"
 
+[benchmark.external-smoke]
+adapter = "external"
+manifest = "evals/adapter-smoke/external/manifest.toml"
+
 [profiles.local-smoke]
 tasks = ["tasks/write-greeting"]
 trials = 2
@@ -108,6 +112,12 @@ thinking = ["high"]
 
 [profiles.openai-evals-smoke]
 benchmarks = ["openai-evals-smoke/demo.match-v1-000000"]
+trials = 1
+model = ["sol"]
+thinking = ["high"]
+
+[profiles.external-smoke]
+benchmarks = ["external-smoke/exact-answer"]
 trials = 1
 model = ["sol"]
 thinking = ["high"]
