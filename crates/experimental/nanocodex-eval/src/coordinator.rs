@@ -60,6 +60,8 @@ pub enum RemoteClaim {
         family_key: String,
         /// Task package selector retained in SQLite.
         task: String,
+        /// Canonical task package root retained by the coordinator host.
+        task_root: PathBuf,
         /// Exact treatment retained in SQLite.
         treatment: EvaluationTreatment,
     },
@@ -152,6 +154,7 @@ enum ClaimResponse {
         repetition: u16,
         family_key: String,
         task: String,
+        task_root: PathBuf,
         treatment: WireTreatment,
     },
     Busy {
@@ -358,12 +361,14 @@ impl CoordinatorClient {
                 repetition,
                 family_key,
                 task,
+                task_root,
                 treatment,
             } => RemoteClaim::Run {
                 claim: RemoteTaskClaim { token: claim },
                 repetition,
                 family_key,
                 task,
+                task_root,
                 treatment: treatment.try_into()?,
             },
             ClaimResponse::Busy {
@@ -395,12 +400,14 @@ impl CoordinatorClient {
                 repetition,
                 family_key,
                 task,
+                task_root,
                 treatment,
             } => RemoteClaim::Run {
                 claim: RemoteTaskClaim { token: claim },
                 repetition,
                 family_key,
                 task,
+                task_root,
                 treatment: treatment.try_into()?,
             },
             ClaimResponse::Busy {
@@ -724,6 +731,7 @@ async fn claim(
             let repetition = claim.repetition();
             let family_key = claim.family_key().to_owned();
             let task = claim.task_selector().to_owned();
+            let task_root = claim.task().root().to_path_buf();
             let treatment = WireTreatment::from(claim.treatment());
             let claim = insert_claim(&state, claim, host).await;
             ClaimResponse::Run {
@@ -731,6 +739,7 @@ async fn claim(
                 repetition,
                 family_key,
                 task,
+                task_root,
                 treatment,
             }
         }
@@ -1259,6 +1268,7 @@ thinking = ["high"]
             claim: first_claim,
             repetition: first_repetition,
             family_key: first_family_key,
+            task_root: first_task_root,
             ..
         } = first.unwrap()
         else {
@@ -1273,6 +1283,10 @@ thinking = ["high"]
             panic!("second worker should run");
         };
         assert_ne!(first_repetition, second_repetition);
+        assert_eq!(
+            first_task_root,
+            fs::canonicalize(directory.path().join("one")).unwrap()
+        );
 
         let status = client.status().await.unwrap();
         let profile_digest = status["digest"].as_str().unwrap();

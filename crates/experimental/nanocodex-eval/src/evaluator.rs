@@ -212,6 +212,7 @@ pub(crate) struct EvalAttempt<'a> {
     task: &'a Task,
     directory: &'a Path,
     workspace: &'a Path,
+    final_message: Option<&'a str>,
 }
 
 /// Failure to configure, execute, verify, or durably retain an attempt.
@@ -513,14 +514,28 @@ impl Evaluator {
                 verifier_cleanup,
             ));
         }
+        let final_message = agent
+            .result
+            .as_ref()
+            .map(|result| result.final_message.clone());
+        // Joining the agent drops its caller-defined tools before a verifier
+        // may shut down the agent environment and launch an isolated verifier
+        // environment. The verifier retains the owning environment session;
+        // keeping the agent driver alive here would leave a sibling tool
+        // capability that correctly prevents graceful VM shutdown.
+        agent.shutdown().await;
         emitter.emit(EvalEventKind::VerifierStarted);
         let verifier = match self
-            .execute_verifier(&task, &attempt, agent.verifier.take())
+            .execute_verifier(
+                &task,
+                &attempt,
+                final_message.as_deref(),
+                agent.verifier.take(),
+            )
             .await
         {
             Ok(verifier) => verifier,
             Err(failure) => {
-                agent.shutdown().await;
                 let primary = agent.error.take();
                 return Err(AttemptRunFailure::after_verifier_failure(
                     &attempt, &agent, primary, failure,
@@ -528,7 +543,6 @@ impl Evaluator {
             }
         };
         if let Err(error) = task.validate_package() {
-            agent.shutdown().await;
             return Err(AttemptRunFailure::after_verifier(
                 &attempt,
                 &agent,
@@ -543,7 +557,6 @@ impl Evaluator {
         emitter.emit(EvalEventKind::VerifierCompleted(verifier.result.clone()));
 
         if let Some(error) = verifier_bootstrap_error(&verifier) {
-            agent.shutdown().await;
             return Err(AttemptRunFailure::after_verifier(
                 &attempt,
                 &agent,
@@ -552,9 +565,7 @@ impl Evaluator {
             ));
         }
 
-        agent.shutdown().await;
-
-        let status = verifier_status(&verifier.result);
+        let status = verifier_status(&task, &verifier.result);
         let score_outcome = match status {
             EvalStatus::Passed => EvalOutcome::Passed,
             EvalStatus::Failed => EvalOutcome::VerifierFailed,
@@ -604,6 +615,7 @@ impl Evaluator {
         &self,
         task: &Task,
         attempt: &NativeAttempt,
+        final_message: Option<&str>,
         verifier: Option<Box<dyn AttemptVerifier>>,
     ) -> Result<VerifierExecution, VerifierExecutionFailure> {
         let span = info_span!(
@@ -634,6 +646,7 @@ impl Evaluator {
                             task,
                             directory: &attempt.paths.root,
                             workspace: &attempt.paths.workspace,
+                            final_message,
                         },
                     )
                     .await
@@ -674,20 +687,22 @@ impl Evaluator {
                 })
             } else {
                 let started_at = Utc::now();
-                attempt
-                    .verify(task)
-                    .await
-                    .map_err(|error| VerifierExecutionFailure {
+                attempt.verify(task, final_message).await.map_err(|error| {
+                    VerifierExecutionFailure {
                         error: RecordedEvalError::now(error),
                         cleanup: CleanupPhase::not_required(),
                         timing: Some(PhaseTiming::finished(started_at)),
-                    })
+                    }
+                })
             }
         }
         .instrument(span.clone())
         .await;
         if let Ok(verifier) = &result {
-            let passed = verifier.result.rewards.values().all(|reward| *reward > 0.0);
+            let passed = task
+                .verifier()
+                .scoring_policy()
+                .passes(&verifier.result.rewards);
             span.record("process.exit.code", verifier.result.exit_code);
             span.record(
                 "verifier.reward.total",
@@ -770,7 +785,7 @@ impl Evaluator {
         );
         let trace_started = Instant::now();
         let result = async {
-            let turn = agent.prompt(task.prompt()).await?;
+            let turn = agent.prompt(task.agent_prompt()).await?;
             let mut observation = AgentObservation::default();
             let event_result = timeout(
                 task.agent_timeout(),
@@ -1027,6 +1042,7 @@ impl Evaluator {
                         task,
                         directory: &attempt.paths.root,
                         workspace: &attempt.paths.workspace,
+                        final_message: None,
                     },
                     builder,
                 ) {
@@ -1990,6 +2006,12 @@ impl EvalAttempt<'_> {
     pub(crate) const fn workspace(&self) -> &Path {
         self.workspace
     }
+
+    /// Returns the exact final assistant message produced by the candidate.
+    #[must_use]
+    pub(crate) const fn final_message(&self) -> Option<&str> {
+        self.final_message
+    }
 }
 
 #[derive(Clone)]
@@ -2595,8 +2617,8 @@ fn validate_attempt_environment(task: &Task, custom_backend: bool) -> Result<(),
     Ok(())
 }
 
-fn verifier_status(verifier: &crate::VerifierResult) -> EvalStatus {
-    if verifier.rewards.values().all(|reward| *reward > 0.0) {
+fn verifier_status(task: &Task, verifier: &crate::VerifierResult) -> EvalStatus {
+    if task.verifier().scoring_policy().passes(&verifier.rewards) {
         EvalStatus::Passed
     } else {
         EvalStatus::Failed

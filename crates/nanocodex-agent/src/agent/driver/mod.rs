@@ -136,7 +136,7 @@ where
                                     effort: thinking,
                                 },
                                 turn_index,
-                                prompt.instruction.text_bytes(),
+                                prompt.text_bytes(),
                             );
                             drop(parent);
                             turn_span.record("status", "cancelled");
@@ -514,7 +514,7 @@ where
                     effort: thinking,
                 },
                 turn_index,
-                prompt.instruction.text_bytes(),
+                prompt.text_bytes(),
             );
             drop(parent);
             if let Some(prompt_content) = &prompt_content {

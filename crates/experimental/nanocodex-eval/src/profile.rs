@@ -58,6 +58,9 @@ pub struct Harness {
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Profile {
+    /// Adapter-owned benchmark selectors resolved before durable work is added.
+    #[serde(default)]
+    benchmarks: Vec<String>,
     #[serde(default)]
     tasks: Vec<PathBuf>,
     #[serde(default)]
@@ -172,8 +175,16 @@ pub enum ProfileError {
     #[error("evaluation profile `{0}` does not exist")]
     UnknownProfile(String),
     /// Profile had no task inputs.
-    #[error("evaluation profile `{0}` contains no tasks or suites")]
+    #[error("evaluation profile `{0}` contains no benchmarks, tasks, or suites")]
     EmptyProfile(String),
+    /// Adapter-backed benchmark selectors were not resolved to immutable tasks.
+    #[error("evaluation profile `{profile}` requires adapter resolution for: {benchmarks}")]
+    UnresolvedBenchmarks {
+        /// Selected profile.
+        profile: String,
+        /// Adapter-owned selectors requiring resolution.
+        benchmarks: String,
+    },
     /// Profile requested no repetitions.
     #[error("evaluation profile `{0}` must request at least one trial")]
     ZeroTrials(String),
@@ -298,6 +309,15 @@ impl EvaluationManifest {
         path: impl AsRef<Path>,
         requested: Option<&str>,
     ) -> Result<ResolvedProfile, ProfileError> {
+        Self::load_profile_with_tasks(path, requested, Vec::new())
+    }
+
+    /// Loads a manifest after adapters resolved its benchmark selectors.
+    pub fn load_profile_with_tasks(
+        path: impl AsRef<Path>,
+        requested: Option<&str>,
+        benchmark_tasks: Vec<ResolvedTask>,
+    ) -> Result<ResolvedProfile, ProfileError> {
         let requested_path = path.as_ref();
         let text = fs::read_to_string(requested_path).map_err(|source| ProfileError::Read {
             path: requested_path.to_path_buf(),
@@ -314,7 +334,33 @@ impl EvaluationManifest {
                     path: requested_path.to_path_buf(),
                     source,
                 })?;
-        manifest.resolve(config_path, requested)
+        manifest.resolve(config_path, requested, benchmark_tasks)
+    }
+
+    /// Reads the adapter-owned benchmark selectors requested by one profile.
+    pub fn load_benchmarks(
+        path: impl AsRef<Path>,
+        requested: Option<&str>,
+    ) -> Result<Vec<String>, ProfileError> {
+        let requested_path = path.as_ref();
+        let text = fs::read_to_string(requested_path).map_err(|source| ProfileError::Read {
+            path: requested_path.to_path_buf(),
+            source,
+        })?;
+        let manifest: Self = toml::from_str(&text).map_err(|source| ProfileError::Parse {
+            path: requested_path.to_path_buf(),
+            source,
+        })?;
+        let name = requested
+            .map(ToOwned::to_owned)
+            .or_else(|| manifest.default.clone())
+            .ok_or(ProfileError::MissingProfile)?;
+        let profile = manifest
+            .profiles
+            .get(&name)
+            .ok_or_else(|| ProfileError::UnknownProfile(name.clone()))?;
+        validate_profile(&name, profile)?;
+        Ok(profile.benchmarks.clone())
     }
 
     /// Resolves one named runtime harness helper from current local config.
@@ -385,6 +431,7 @@ impl EvaluationManifest {
         self,
         config_path: PathBuf,
         requested: Option<&str>,
+        benchmark_tasks: Vec<ResolvedTask>,
     ) -> Result<ResolvedProfile, ProfileError> {
         let name = requested
             .map(ToOwned::to_owned)
@@ -395,10 +442,16 @@ impl EvaluationManifest {
             .get(&name)
             .ok_or_else(|| ProfileError::UnknownProfile(name.clone()))?;
         validate_profile(&name, profile)?;
+        if !profile.benchmarks.is_empty() && benchmark_tasks.is_empty() {
+            return Err(ProfileError::UnresolvedBenchmarks {
+                profile: name.clone(),
+                benchmarks: profile.benchmarks.join(", "),
+            });
+        }
         let root = config_path
             .parent()
             .expect("a canonical manifest path has a parent");
-        let tasks = load_tasks(root, profile)?;
+        let tasks = load_tasks(root, profile, benchmark_tasks)?;
         let mut harness_digests = BTreeMap::new();
         for harness_name in &profile.harness {
             if harness_name == BUILTIN_HARNESS {
@@ -525,7 +578,7 @@ fn validate_profile(name: &str, profile: &Profile) -> Result<(), ProfileError> {
     if profile.trials == 0 {
         return Err(ProfileError::ZeroTrials(name.to_owned()));
     }
-    if profile.tasks.is_empty() && profile.suites.is_empty() {
+    if profile.benchmarks.is_empty() && profile.tasks.is_empty() && profile.suites.is_empty() {
         return Err(ProfileError::EmptyProfile(name.to_owned()));
     }
     for (values, dimension) in [
@@ -552,7 +605,11 @@ fn validate_profile(name: &str, profile: &Profile) -> Result<(), ProfileError> {
     Ok(())
 }
 
-fn load_tasks(root: &Path, profile: &Profile) -> Result<Vec<ResolvedTask>, ProfileError> {
+fn load_tasks(
+    root: &Path,
+    profile: &Profile,
+    benchmark_tasks: Vec<ResolvedTask>,
+) -> Result<Vec<ResolvedTask>, ProfileError> {
     let mut inputs = profile
         .tasks
         .iter()
@@ -599,7 +656,7 @@ fn load_tasks(root: &Path, profile: &Profile) -> Result<Vec<ResolvedTask>, Profi
     }
     let mut selectors = BTreeSet::new();
     let mut roots = BTreeSet::new();
-    inputs
+    let mut tasks = inputs
         .into_iter()
         .map(|(selector, path)| {
             if !selectors.insert(selector.clone()) {
@@ -613,7 +670,18 @@ fn load_tasks(root: &Path, profile: &Profile) -> Result<Vec<ResolvedTask>, Profi
                 task: Task::load(path)?,
             })
         })
-        .collect()
+        .collect::<Result<Vec<_>, _>>()?;
+    for task in benchmark_tasks {
+        if !selectors.insert(task.selector.clone()) {
+            return Err(ProfileError::DuplicateTask(task.selector));
+        }
+        let root = task.task.root().to_path_buf();
+        if !roots.insert(root.clone()) {
+            return Err(ProfileError::DuplicateTaskRoot(root));
+        }
+        tasks.push(task);
+    }
+    Ok(tasks)
 }
 
 fn expand_families(profile: &Profile, tasks: &[ResolvedTask]) -> Vec<ResolvedFamily> {
@@ -789,6 +857,43 @@ thinking = ["high"]
         assert_eq!(profile.families.len(), 1);
         assert_eq!(profile.trials, 3);
         assert_eq!(profile.task("one").unwrap().task.name(), "one");
+    }
+
+    #[test]
+    fn adapter_tasks_resolve_declared_benchmark_selectors() {
+        let directory = tempfile::tempdir().unwrap();
+        write_task(directory.path(), "imported");
+        let config = directory.path().join("nanocodex.toml");
+        fs::write(
+            &config,
+            r#"default = "smoke"
+[profiles.smoke]
+benchmarks = ["terminal-bench-2.1/fix-git"]
+trials = 1
+"#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            EvaluationManifest::load_benchmarks(&config, None).unwrap(),
+            ["terminal-bench-2.1/fix-git"]
+        );
+        assert!(matches!(
+            EvaluationManifest::load_profile(&config, None),
+            Err(ProfileError::UnresolvedBenchmarks { .. })
+        ));
+        let profile = EvaluationManifest::load_profile_with_tasks(
+            &config,
+            None,
+            vec![ResolvedTask {
+                selector: "terminal-bench-2.1/fix-git".to_owned(),
+                task: Task::load(directory.path().join("imported")).unwrap(),
+            }],
+        )
+        .unwrap();
+
+        assert_eq!(profile.tasks.len(), 1);
+        assert_eq!(profile.tasks[0].selector, "terminal-bench-2.1/fix-git");
     }
 
     #[test]

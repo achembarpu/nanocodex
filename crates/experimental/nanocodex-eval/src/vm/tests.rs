@@ -25,6 +25,24 @@ fn evaluator_vm_builder_records_the_backend_environment() {
 }
 
 #[test]
+fn run_scoped_judge_credentials_are_verifier_only() {
+    let task =
+        Task::load(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../tasks/write-greeting"))
+            .unwrap();
+    let runtime = BTreeMap::from([("NANOCODEX_JUDGE_TOKEN".to_owned(), "run-secret".to_owned())]);
+
+    let candidate = base_guest_environment(&task, "/workspace")
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+    let verifier = verifier_guest_environment(&task, "/workspace", &runtime)
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+
+    assert!(!candidate.contains_key("NANOCODEX_JUDGE_TOKEN"));
+    assert_eq!(verifier["NANOCODEX_JUDGE_TOKEN"], "run-secret");
+}
+
+#[test]
 fn eval_guest_memory_cap_only_reduces_large_task_allocations() {
     assert_eq!(effective_guest_memory_mb(8_192, None), 8_192);
     assert_eq!(effective_guest_memory_mb(8_192, Some(1_024)), 1_024);
@@ -59,6 +77,64 @@ fn guest_executables_are_installed_by_the_task_image_recipe() {
     );
     let staged = context.path().join(".nanocodex/guest-executables/0");
     assert_eq!(fs::read(staged).unwrap(), b"codex-binary");
+}
+
+#[test]
+fn artifact_archive_options_precede_the_path_terminator() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::create_dir(directory.path().join("tests")).unwrap();
+    fs::create_dir(directory.path().join("environment")).unwrap();
+    fs::write(
+        directory.path().join("task.toml"),
+        r#"
+schema_version = "1.1"
+artifacts = [
+  { source = "/workspace", exclude = ["Dockerfile", "instruction.md"] },
+  "/--option-shaped-output",
+]
+
+[task]
+name = "adapter/artifact-order"
+
+[agent]
+timeout_sec = 1.0
+
+[verifier]
+timeout_sec = 1.0
+
+[environment]
+docker_image = "example/task:latest"
+cpus = 1
+memory_mb = 1
+storage_mb = 1
+"#,
+    )
+    .unwrap();
+    fs::write(directory.path().join("instruction.md"), "Create output.").unwrap();
+    fs::write(directory.path().join("tests/test.sh"), "exit 0\n").unwrap();
+    fs::write(
+        directory.path().join("environment/Dockerfile"),
+        "FROM scratch\n",
+    )
+    .unwrap();
+    let task = Task::load(directory.path()).unwrap();
+
+    let arguments = artifact_archive_arguments(&task).unwrap();
+
+    assert_eq!(
+        arguments,
+        [
+            "-C",
+            "/",
+            "-cf",
+            "/tmp/nanoeval-artifacts.tar",
+            "--exclude=workspace/Dockerfile",
+            "--exclude=workspace/instruction.md",
+            "--",
+            "workspace",
+            "--option-shaped-output",
+        ]
+    );
 }
 
 #[tokio::test]
@@ -494,7 +570,10 @@ fn verifier_with_launch_root(root: VmLaunchRoot, retain_failed_rootfs: bool) -> 
         retain_passed_rootfs: false,
         retain_failed_rootfs,
         root_disks_finalized: false,
+        artifact_directory: directory,
+        verifier_environment: Arc::new(BTreeMap::new()),
         _network: None,
+        _verifier_network: None,
     }
 }
 
@@ -804,7 +883,10 @@ done
         retain_passed_rootfs: false,
         retain_failed_rootfs: true,
         root_disks_finalized: false,
+        artifact_directory: control.path().to_path_buf(),
+        verifier_environment: Arc::new(BTreeMap::new()),
         _network: None,
+        _verifier_network: None,
     };
 
     let (_, session) = verifier.start_verifier_session(&task).await.unwrap();

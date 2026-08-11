@@ -10,13 +10,15 @@ use eyre::{Result, WrapErr as _, eyre};
 use fs2::FileExt as _;
 use nanocodex::{Model, Thinking};
 use nanocodex_eval::{
-    EvalAttemptOutcome, EvalEventKind, EvalEventStream, EvalStatus, Evaluation, EvaluationClaim,
-    EvaluationSelector, EvaluationWork, Evaluator, ResolvedHarness, Task,
+    EvalAttemptOutcome, EvalEventKind, EvalEventStream, EvalOutcome, EvalStatus, Evaluation,
+    EvaluationClaim, EvaluationSelector, EvaluationWork, Evaluator, ResolvedHarness, Task,
     atif::AtifBuilder,
     coordinator::{CoordinatorClient, RemoteClaim},
     harness::{Harness, HarnessAuth},
+    judge::JudgeRuntime,
     vm::{CachePolicy, VmBackend, VmResources},
 };
+use nanocodex_eval_adapters::AdapterCatalog;
 use serde::Serialize;
 use tokio::io::AsyncWriteExt as _;
 
@@ -177,7 +179,26 @@ impl Add {
                     "--recipe is complete; use either --recipe or explicit work knobs"
                 ));
             }
-            Evaluation::add_profile(&self.config, Some(recipe), &state, &self.profile, self.new)?;
+            let selectors = Evaluation::profile_benchmarks(&self.config, Some(recipe))?;
+            if selectors.is_empty() {
+                Evaluation::add_profile(
+                    &self.config,
+                    Some(recipe),
+                    &state,
+                    &self.profile,
+                    self.new,
+                )?;
+            } else {
+                let tasks = AdapterCatalog::new(&state).resolve(&selectors).await?;
+                Evaluation::add_profile_with_tasks(
+                    &self.config,
+                    Some(recipe),
+                    tasks,
+                    &state,
+                    &self.profile,
+                    self.new,
+                )?;
+            }
         } else {
             if self.task.is_empty() {
                 return Err(eyre!("at least one --task or --recipe is required"));
@@ -402,12 +423,13 @@ async fn run_remote(
             claim,
             repetition,
             task: task_selector,
+            task_root,
             treatment,
             ..
         } => {
             let setup = (|| {
                 validate_web_search(&agent, profile, treatment.web_search)?;
-                let task = Task::load(&task_selector)?;
+                let task = Task::load(&task_root)?;
                 let harness = Evaluation::resolve_harness(config, &treatment.harness)?;
                 let harnesses = harness.iter().cloned().collect::<Vec<_>>();
                 let host = run::PreparedVmHost::open()?;
@@ -415,6 +437,7 @@ async fn run_remote(
                 let output = tempfile::Builder::new()
                     .prefix(WORKER_DIRECTORY_PREFIX)
                     .tempdir_in(host.cache())?;
+                let output_directory = fs::canonicalize(output.path())?;
                 let output_lease = OpenOptions::new()
                     .create(true)
                     .read(true)
@@ -422,17 +445,27 @@ async fn run_remote(
                     .truncate(false)
                     .open(output.path().join(".active.lock"))?;
                 output_lease.lock_exclusive()?;
-                Ok::<_, eyre::Report>((task, harness, harnesses, host, output, output_lease))
+                Ok::<_, eyre::Report>((
+                    task,
+                    harness,
+                    harnesses,
+                    host,
+                    output,
+                    output_directory,
+                    output_lease,
+                ))
             })();
-            let (task, harness, harnesses, host, output, _output_lease) = match setup {
-                Ok(setup) => setup,
-                Err(error) => {
-                    let detail = format!("{error:#}");
-                    let finish = coordinator.retry(&claim, &detail).await;
-                    finish?;
-                    return Err(error).wrap_err("remote task setup failed and row was requeued");
-                }
-            };
+            let (task, harness, harnesses, host, _output, output_directory, _output_lease) =
+                match setup {
+                    Ok(setup) => setup,
+                    Err(error) => {
+                        let detail = format!("{error:#}");
+                        let finish = coordinator.retry(&claim, &detail).await;
+                        finish?;
+                        return Err(error)
+                            .wrap_err("remote task setup failed and row was requeued");
+                    }
+                };
             let execution = async {
                 let resources = prepare_resources_from(&task, &harnesses, &host).await?;
                 execute_coordinate(
@@ -440,7 +473,7 @@ async fn run_remote(
                     treatment.clone(),
                     treatment.web_search,
                     harness,
-                    output.path().to_path_buf(),
+                    output_directory.clone(),
                     resources,
                     agent,
                 )
@@ -451,13 +484,15 @@ async fn run_remote(
                 Ok(ExecutionResult::Completed { status, evidence }) => {
                     let finish = match status {
                         EvalStatus::Passed => {
-                            coordinator.succeed(&claim, output.path(), &evidence).await
+                            coordinator
+                                .succeed(&claim, &output_directory, &evidence)
+                                .await
                         }
                         EvalStatus::Failed => {
                             coordinator
                                 .fail_with_evidence(
                                     &claim,
-                                    output.path(),
+                                    &output_directory,
                                     &evidence,
                                     "verifier returned a failing score",
                                 )
@@ -476,7 +511,7 @@ async fn run_remote(
                 }
                 Ok(ExecutionResult::InfrastructureFailed { error, evidence }) => {
                     let finish = coordinator
-                        .retry_with_evidence(&claim, output.path(), &evidence, &error)
+                        .retry_with_evidence(&claim, &output_directory, &evidence, &error)
                         .await;
                     finish?;
                     write_json(&RunOutput::InfrastructureFailed {
@@ -493,8 +528,8 @@ async fn run_remote(
                     let finish = coordinator
                         .retry_with_evidence(
                             &claim,
-                            output.path(),
-                            output.path(),
+                            &output_directory,
+                            &output_directory,
                             &format!("{error:#}"),
                         )
                         .await;
@@ -633,6 +668,12 @@ enum ExecutionResult {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExecutionDisposition {
+    Completed(EvalStatus),
+    Retry,
+}
+
 const fn eval_status_name(status: EvalStatus) -> &'static str {
     match status {
         EvalStatus::Passed => "passed",
@@ -641,18 +682,25 @@ const fn eval_status_name(status: EvalStatus) -> &'static str {
 }
 
 fn classify_execution(outcome: &EvalAttemptOutcome, evidence: PathBuf) -> ExecutionResult {
-    match outcome.scored() {
-        Some(result) => ExecutionResult::Completed {
-            status: result.status,
-            evidence,
-        },
-        None => ExecutionResult::InfrastructureFailed {
-            error: outcome.unscored().map_or_else(
+    match execution_disposition(outcome.outcome()) {
+        ExecutionDisposition::Completed(status) => ExecutionResult::Completed { status, evidence },
+        ExecutionDisposition::Retry => ExecutionResult::InfrastructureFailed {
+            error: outcome.exception().map_or_else(
                 || "evaluation attempt was not scored".to_owned(),
-                |failure| failure.traceback().to_owned(),
+                |exception| exception.traceback.clone(),
             ),
             evidence,
         },
+    }
+}
+
+const fn execution_disposition(outcome: EvalOutcome) -> ExecutionDisposition {
+    match outcome {
+        EvalOutcome::Passed => ExecutionDisposition::Completed(EvalStatus::Passed),
+        EvalOutcome::VerifierFailed | EvalOutcome::SafetyRefusal => {
+            ExecutionDisposition::Completed(EvalStatus::Failed)
+        }
+        EvalOutcome::AgentTimeout | EvalOutcome::InfrastructureError => ExecutionDisposition::Retry,
     }
 }
 
@@ -690,16 +738,20 @@ async fn execute_coordinate(
     agent: EvalAgentArgs,
 ) -> Result<ExecutionResult> {
     std::fs::create_dir_all(&output)?;
+    let (nanocodex, auth) =
+        agent.shared_builder(treatment.model, treatment.thinking, web_search)?;
+    let judge = JudgeRuntime::start(nanocodex.clone().thinking(Thinking::Low)).await?;
+    let verifier_environment = judge.verifier_environment();
     match treatment.harness.as_str() {
         "nanocodex" => {
             let backend = resources
                 .backend_with(
                     VmBackend::builder()
                         .retain_passed_rootfs(false)
-                        .retain_failed_rootfs(false),
+                        .retain_failed_rootfs(false)
+                        .verifier_environment(verifier_environment),
                 )
                 .await?;
-            let nanocodex = agent.builder(treatment.model, treatment.thinking, web_search)?;
             let evaluator = Evaluator::builder(nanocodex, backend)
                 .output_directory(&output)
                 .build()?;
@@ -708,8 +760,6 @@ async fn execute_coordinate(
             Ok(classify_execution(&outcome, evidence))
         }
         _ => {
-            let (nanocodex, auth) =
-                agent.shared_builder(treatment.model, treatment.thinking, web_search)?;
             let harness_auth = match auth {
                 SharedAuth::ApiKey(api_key) => HarnessAuth::api_key(api_key),
                 SharedAuth::AuthFile(path) => HarnessAuth::auth_file(path),
@@ -731,6 +781,7 @@ async fn execute_coordinate(
             .guest_memory_mb(task.resources().memory_mb)
             .arguments(configured.arguments)
             .environment(configured.environment.into_iter().collect())
+            .verifier_environment(verifier_environment)
             .credentials(
                 configured.home,
                 configured.auth_file,
@@ -876,7 +927,9 @@ mod tests {
 
     use clap::Parser as _;
 
-    use super::default_state_dir;
+    use nanocodex_eval::{EvalOutcome, EvalStatus};
+
+    use super::{ExecutionDisposition, default_state_dir, execution_disposition};
     use crate::{Cli, Command, eval::EvalCommand};
 
     #[test]
@@ -979,6 +1032,30 @@ mod tests {
         assert_eq!(
             path.file_name().and_then(|name| name.to_str()),
             Some("evals")
+        );
+    }
+
+    #[test]
+    fn lifecycle_failures_cannot_become_scored_successes() {
+        assert_eq!(
+            execution_disposition(EvalOutcome::InfrastructureError),
+            ExecutionDisposition::Retry
+        );
+        assert_eq!(
+            execution_disposition(EvalOutcome::AgentTimeout),
+            ExecutionDisposition::Retry
+        );
+        assert_eq!(
+            execution_disposition(EvalOutcome::SafetyRefusal),
+            ExecutionDisposition::Completed(EvalStatus::Failed)
+        );
+        assert_eq!(
+            execution_disposition(EvalOutcome::Passed),
+            ExecutionDisposition::Completed(EvalStatus::Passed)
+        );
+        assert_eq!(
+            execution_disposition(EvalOutcome::VerifierFailed),
+            ExecutionDisposition::Completed(EvalStatus::Failed)
         );
     }
 }

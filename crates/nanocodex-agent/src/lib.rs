@@ -54,7 +54,7 @@ pub mod events {
 /// Prompts and multimodal user input accepted by the agent.
 pub mod input {
     pub use nanocodex_oai_api::{
-        ImageDetail, Prompt, PromptInput, UserInput,
+        ImageDetail, Prompt, PromptInput, PromptMessage, PromptMessageRole, UserInput,
         responses::{AgentMessageContent, ContentItem},
     };
 }

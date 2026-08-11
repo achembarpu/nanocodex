@@ -158,11 +158,9 @@ impl Nanocodex {
     /// Returns an error for an empty prompt or if the driver stopped.
     pub async fn prompt(&self, prompt: impl Into<Prompt>) -> Result<Turn> {
         let prompt = prompt.into();
-        if prompt.instruction.is_empty() {
-            return Err(NanocodexError::InvalidRequest(
-                "prompt instruction must not be empty".to_owned(),
-            ));
-        }
+        prompt
+            .validate()
+            .map_err(|error| NanocodexError::InvalidRequest(error.to_string()))?;
         let key = TurnKey(self.next_turn.fetch_add(1, Ordering::Relaxed));
         let parent = tracing::Span::current();
         let parent = (!parent.is_disabled()).then_some(parent);
@@ -210,11 +208,9 @@ impl Nanocodex {
     /// agent driver stopped.
     pub async fn route_prompt(&self, prompt: impl Into<Prompt>) -> Result<PromptRoute> {
         let prompt = prompt.into();
-        if prompt.instruction.is_empty() {
-            return Err(NanocodexError::InvalidRequest(
-                "prompt instruction must not be empty".to_owned(),
-            ));
-        }
+        prompt
+            .validate()
+            .map_err(|error| NanocodexError::InvalidRequest(error.to_string()))?;
         let key = TurnKey(self.next_turn.fetch_add(1, Ordering::Relaxed));
         let parent = tracing::Span::current();
         let parent = (!parent.is_disabled()).then_some(parent);

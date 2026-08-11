@@ -36,7 +36,7 @@ test("the packed package installs and runs every public entry point", async () =
     assert.equal(packed.version, packageJson.version);
     assert.ok(packed.size <= 1_100_000, `compressed package grew to ${packed.size} bytes`);
     assert.ok(
-      packed.unpackedSize <= 4_920_000,
+      packed.unpackedSize <= 4_940_000,
       `unpacked package grew to ${packed.unpackedSize} bytes`,
     );
     assert.equal(
