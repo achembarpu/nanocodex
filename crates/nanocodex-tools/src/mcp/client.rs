@@ -234,6 +234,7 @@ async fn connect_http(input: HttpConnect<'_>) -> Result<ConnectedServer, String>
         return Err("Streamable HTTP URL must not be empty".to_owned());
     }
     let (resolved_headers, default_headers) = resolve_http_headers(headers)?;
+    nanocodex_oai_api::transport::install_default_rustls_crypto_provider();
     let http_client = reqwest::Client::builder()
         // Match RMCP's default: its streamed handshake responses are not always fully consumed
         // before the next request, so retaining them as idle connections can stall real peers.

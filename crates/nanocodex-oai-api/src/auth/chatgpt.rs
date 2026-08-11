@@ -892,6 +892,7 @@ fn auth_store_error(error: &ChatGptAuthError) -> OpenAiAuthError {
 }
 
 fn auth_client() -> Result<reqwest::Client, ChatGptAuthError> {
+    crate::transport::install_default_rustls_crypto_provider();
     reqwest::Client::builder()
         .timeout(AUTH_REQUEST_TIMEOUT)
         .build()

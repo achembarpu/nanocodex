@@ -514,6 +514,7 @@ fn oauth_http_client(headers: BTreeMap<String, SecretSource>) -> Result<reqwest:
         value.set_sensitive(true);
         resolved.insert(name, value);
     }
+    nanocodex_oai_api::transport::install_default_rustls_crypto_provider();
     reqwest::Client::builder()
         .default_headers(resolved)
         .pool_max_idle_per_host(0)
@@ -713,6 +714,7 @@ mod tests {
             .expires_at_millis(0)
             .scopes(["mcp:tools"]);
 
+        nanocodex_oai_api::transport::install_default_rustls_crypto_provider();
         let transport = transport_from_credentials(
             server_name,
             server_url,

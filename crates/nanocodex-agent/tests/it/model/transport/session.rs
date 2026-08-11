@@ -266,6 +266,7 @@ async fn https_uses_the_configured_http_client() -> Result<()> {
         "x-nanocodex-client",
         reqwest::header::HeaderValue::from_static("configured"),
     );
+    nanocodex_oai_api::transport::install_default_rustls_crypto_provider();
     let client = reqwest::Client::builder()
         .default_headers(headers)
         .build()?;
