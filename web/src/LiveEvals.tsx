@@ -5,8 +5,11 @@ import {
   ChevronLeft,
   ChevronRight,
   CircleDashed,
+  Cpu,
+  MemoryStick,
   Radio,
   Search,
+  Server,
   X,
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
@@ -16,6 +19,9 @@ import {
   evalApi,
   type EvalAnalyticsPoint,
   type EvalCase,
+  type EvalCluster,
+  type EvalClusterCapacity,
+  type EvalClusterNode,
   type EvalCoordinate,
   type EvalOverview,
   type EvalResultPoint,
@@ -73,6 +79,94 @@ function formatWorksetDate(milliseconds: number) {
     hour: "2-digit",
     minute: "2-digit",
   }).format(new Date(milliseconds));
+}
+
+function formatBytes(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  const exponent = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  return `${(bytes / 1024 ** exponent).toFixed(exponent < 2 ? 0 : 1)} ${units[exponent]}`;
+}
+
+function formatUptime(seconds: number) {
+  const days = Math.floor(seconds / 86_400);
+  const hours = Math.floor((seconds % 86_400) / 3_600);
+  return days > 0 ? `${days}d ${hours}h` : `${hours}h ${Math.floor((seconds % 3_600) / 60)}m`;
+}
+
+function usedPercent(capacity: EvalClusterCapacity) {
+  if (capacity.totalBytes <= 0) return 0;
+  return Math.max(0, Math.min(100,
+    ((capacity.totalBytes - capacity.availableBytes) / capacity.totalBytes) * 100,
+  ));
+}
+
+function formatPressure(value: number | null) {
+  return value === null ? "n/a" : `${value.toFixed(1)}%`;
+}
+
+function NodeCapacity({ label, capacity }: { label: string; capacity: EvalClusterCapacity }) {
+  const percent = usedPercent(capacity);
+  return (
+    <div className="eval-node-capacity">
+      <span><strong>{label}</strong><small>{percent.toFixed(0)}%</small></span>
+      <i aria-hidden="true"><b style={{ width: `${percent}%` }} /></i>
+      <small>{formatBytes(capacity.totalBytes - capacity.availableBytes)} / {formatBytes(capacity.totalBytes)}</small>
+    </div>
+  );
+}
+
+function ClusterNode({ node }: { node: EvalClusterNode }) {
+  const cpu = Math.max(0, Math.min(100, node.cpuUsagePercent));
+  return (
+    <article className="eval-node-card">
+      <header>
+        <span className="eval-node-online" aria-hidden="true" />
+        <div><strong>{node.id}</strong><small>online · up {formatUptime(node.uptimeSeconds)}</small></div>
+        <Server aria-hidden="true" />
+      </header>
+      <div className="eval-node-counts">
+        <div><span>Workers</span><strong>{node.workerProcesses}</strong></div>
+        <div><span>Claimed</span><strong>{node.claimedTasks}</strong></div>
+        <div><span>Live VMs</span><strong>{node.vmProcesses}</strong></div>
+        <div><span>CPU cores</span><strong>{node.cpuCores}</strong></div>
+      </div>
+      <div className="eval-node-utilization">
+        <div className="eval-node-capacity">
+          <span><strong><Cpu aria-hidden="true" /> CPU</strong><small>{cpu.toFixed(0)}%</small></span>
+          <i aria-hidden="true"><b style={{ width: `${cpu}%` }} /></i>
+          <small>load {node.loadAverage.one.toFixed(1)} / {node.loadAverage.five.toFixed(1)} / {node.loadAverage.fifteen.toFixed(1)}</small>
+        </div>
+        <NodeCapacity label="Memory" capacity={node.memory} />
+        <NodeCapacity label="Swap" capacity={node.swap} />
+      </div>
+      <footer>
+        <MemoryStick aria-hidden="true" />
+        <span>10s pressure</span>
+        <span>CPU {formatPressure(node.pressure.cpuSomeAvg10)}</span>
+        <span>memory some {formatPressure(node.pressure.memorySomeAvg10)}</span>
+        <span>memory full {formatPressure(node.pressure.memoryFullAvg10)}</span>
+      </footer>
+    </article>
+  );
+}
+
+function ClusterView({ cluster, pending, failed }: {
+  cluster: EvalCluster | undefined;
+  pending: boolean;
+  failed: boolean;
+}) {
+  return (
+    <section className="eval-cluster" aria-labelledby="cluster-heading">
+      <header>
+        <div><p className="rail-label">Runtime</p><h2 id="cluster-heading">Cluster</h2></div>
+        <span>{cluster ? `${cluster.nodes.length} node${cluster.nodes.length === 1 ? "" : "s"}` : "live utilization"}</span>
+      </header>
+      {cluster?.nodes.map((node) => <ClusterNode node={node} key={node.id} />)}
+      {!cluster && pending ? <p className="eval-cluster-state">Reading workload hosts…</p> : null}
+      {!cluster && failed ? <p className="eval-cluster-state is-error">Cluster telemetry unavailable.</p> : null}
+    </section>
+  );
 }
 
 function formatInteger(value: unknown) {
@@ -274,6 +368,14 @@ export function LiveEvals({ overview }: { overview: EvalOverview }) {
   const taskRoute = useMatch("/evals/worksets/:worksetId/tasks/:taskId");
   const worksetRoute = useMatch("/evals/worksets/:worksetId");
   const route = taskRoute ?? worksetRoute;
+  const clusterQuery = useQuery({
+    queryKey: ["evals", "cluster"],
+    queryFn: ({ signal }) => evalApi.cluster(signal),
+    enabled: !route,
+    refetchInterval: 2_000,
+    refetchIntervalInBackground: true,
+    staleTime: 0,
+  });
   const [selectedCell, setSelectedCell] = useState<{
     treatment: EvalTreatment;
     cell: EvalCoordinate;
@@ -406,6 +508,11 @@ export function LiveEvals({ overview }: { overview: EvalOverview }) {
           <div><Radio aria-hidden="true" /><span>Running</span><strong>{overview.summary.running}</strong></div>
           <div><CheckCircle2 aria-hidden="true" /><span>Finished</span><strong>{overview.summary.success + overview.summary.failed}</strong></div>
         </section>
+        <ClusterView
+          cluster={clusterQuery.data}
+          pending={clusterQuery.isPending}
+          failed={clusterQuery.isError}
+        />
         <section className="eval-full-table" aria-labelledby="worksets-heading">
           <header><p className="rail-label">Benchmarks</p><h2 id="worksets-heading">Worksets</h2></header>
           <div className="eval-table-heading eval-workset-grid" aria-hidden="true">

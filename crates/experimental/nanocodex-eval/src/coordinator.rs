@@ -10,7 +10,7 @@ use std::{
 
 use crate::{
     CoordinateClaim, Evaluation, EvaluationClaim, EvaluationSelector, EvaluationTreatment,
-    api::EvalApi,
+    api::EvalApi, cluster::HostSampler,
 };
 use axum::{
     Json, Router,
@@ -121,6 +121,7 @@ struct CoordinatorState {
     evaluation: Evaluation,
     eval_api: EvalApi,
     active: Arc<Mutex<HashMap<String, ActiveClaim>>>,
+    host: Arc<std::sync::Mutex<HostSampler>>,
     ledger_writes: Arc<Mutex<()>>,
 }
 
@@ -227,6 +228,7 @@ impl CoordinatorServer {
                 evaluation,
                 eval_api,
                 active: Arc::new(Mutex::new(HashMap::new())),
+                host: Arc::new(std::sync::Mutex::new(HostSampler::new())),
                 ledger_writes: Arc::new(Mutex::new(())),
             },
         }
@@ -255,6 +257,7 @@ impl CoordinatorServer {
         let app = Router::new()
             .route("/v1/status", get(status))
             .route("/v1/evals", get(eval_overview))
+            .route("/v1/evals/cluster", get(eval_cluster))
             .route("/v1/evals/worksets/{digest}", get(eval_workset))
             .route(
                 "/v1/evals/worksets/{digest}/analytics",
@@ -597,6 +600,20 @@ async fn eval_overview(State(state): State<CoordinatorState>) -> Result<Response
         .map_err(ApiError::internal)?
         .map_err(ApiError::internal)?;
     Ok(Json(overview).into_response())
+}
+
+async fn eval_cluster(State(state): State<CoordinatorState>) -> Result<Response, ApiError> {
+    let claimed_tasks = state.active.lock().await.len();
+    let host = state.host;
+    let snapshot = tokio::task::spawn_blocking(move || {
+        host.lock()
+            .map_err(|_| "evaluation host sampler lock was poisoned".to_owned())
+            .map(|mut host| host.snapshot(claimed_tasks))
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(ApiError::internal)?;
+    Ok(Json(snapshot).into_response())
 }
 
 async fn eval_workset(
