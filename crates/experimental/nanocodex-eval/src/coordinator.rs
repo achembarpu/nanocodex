@@ -839,10 +839,10 @@ fn finish_claim(
                 .claim
                 .fail(evidence.as_deref(), &error)
                 .map_err(ApiError::ledger)?;
-            if let Some(evidence) = evidence {
-                if let Err(error) = eval_api.index_result(&evidence) {
-                    tracing::warn!(%error, "failed to index accepted evaluation result");
-                }
+            if let Some(evidence) = evidence
+                && let Err(error) = eval_api.index_result(&evidence)
+            {
+                tracing::warn!(%error, "failed to index accepted evaluation result");
             }
         }
         FinishRequest::Retry { error, evidence } => {
