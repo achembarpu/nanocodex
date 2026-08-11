@@ -6,6 +6,7 @@
 
 #![deny(missing_docs, rustdoc::broken_intra_doc_links)]
 
+mod agents_last_exam;
 mod arc_agi_3;
 mod arena_hard;
 mod browsecomp;
@@ -149,6 +150,11 @@ const INSTALLED_ADAPTERS: &[InstalledAdapter] = &[
         import: import_arc_agi_3,
         matches: exact_task,
     },
+    InstalledAdapter {
+        names: &["agents-last-exam"],
+        import: import_agents_last_exam,
+        matches: exact_task,
+    },
 ];
 
 const TERMINAL_BENCH_REVISION: &str = "5c8eadf1f393183288fa08b8f73ca9a469cc5e00";
@@ -210,6 +216,9 @@ const BROWSECOMP_REVISION: &str = "652c89d0ca9df547706735883097e9537d40dc47";
 const BROWSECOMP_SHA256: &str = "7b24471cd5b3eb2a46830a14802b5c029ea62f488ff75a0f88af7923d1454abf";
 const ARC_AGI_REVISION: &str = "f12822c4d550121c35a275008d964afbbed47d2f";
 const ARC_AGI_3_BENCHMARKING_REVISION: &str = "86d72170ce3155551712a9fafd290bab471d6eee";
+const AGENTS_LAST_EXAM_REVISION: &str = "1e615e456de7cef57706680613cb80ee13c7fc76";
+const AGENTS_LAST_EXAM_DATA_REVISION: &str = "5ae9b719a901c14a9ccec7b3bd156d663e3eedcb";
+const AGENTS_LAST_EXAM_IMAGE: &str = "agentslastexam/ale-ubuntu22-docker@sha256:78ec11afeb0008ed8bc2b59cf9c90c05e63d1ac66b9d3e7cb0fada10695fca6f";
 
 fn import_harbor(
     request: &BenchmarkRequest,
@@ -574,6 +583,35 @@ fn import_arc_agi_3(
         ),
         nanocodex_eval::import::Environment::Dockerfile(assets.join("environment")),
         nanocodex_eval::import::Harness::directory(assets.join("verifier"))?,
+    ))?)
+}
+
+fn import_agents_last_exam(
+    _request: &BenchmarkRequest,
+    sources: &SourceStore,
+    store: &ImportStore,
+) -> Result<ImportedDataset, AdapterError> {
+    let source = sources.git_checkout(
+        "agents-last-exam",
+        "https://github.com/rdi-berkeley/agents-last-exam.git",
+        AGENTS_LAST_EXAM_REVISION,
+    )?;
+    let task_data = sources.prepare_huggingface_archive(
+        "agents-last-exam/agents-last-exam-data-archive",
+        "ale-tasks-data.tar.gz",
+        AGENTS_LAST_EXAM_DATA_REVISION,
+        "agents-last-exam-task-data",
+    )?;
+    Ok(store.import(&agents_last_exam::AgentsLastExam::new(
+        source,
+        task_data,
+        format!(
+            "rdi-berkeley/agents-last-exam@{AGENTS_LAST_EXAM_REVISION}+agents-last-exam-data-archive@{AGENTS_LAST_EXAM_DATA_REVISION}"
+        ),
+        nanocodex_eval::import::Environment::OciImage(AGENTS_LAST_EXAM_IMAGE.to_owned()),
+        nanocodex_eval::import::Harness::directory(
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/agents-last-exam"),
+        )?,
     ))?)
 }
 

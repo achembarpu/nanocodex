@@ -88,3 +88,14 @@ benchmarks = [
 trials = 1
 model = ["sol"]
 thinking = ["high"]
+
+[profiles.agents-last-exam-smoke]
+benchmarks = [
+  "agents-last-exam/branch_bound_atsp",
+  "agents-last-exam/basel_operational_risk_bia_cn",
+  "agents-last-exam/financial_stmt_reconstruction_aapl_fy2024",
+  "agents-last-exam/atwood_2022_measles_vaccine_reproduction",
+]
+trials = 1
+model = ["sol"]
+thinking = ["high"]
