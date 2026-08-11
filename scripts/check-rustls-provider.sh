@@ -3,19 +3,19 @@ set -euo pipefail
 
 shipped_tree=$(
   cargo tree --locked --package nanocodex-bin --features tempo \
-    --edges normal,build --prefix none
+    --edges normal,build --prefix none --color never
 )
 shipped_feature_tree=$(
   cargo tree --locked --package nanocodex-bin --features tempo \
-    --edges features --prefix none
+    --edges features --prefix none --color never
 )
 workspace_tree=$(
   cargo tree --locked --workspace --all-features \
-    --edges normal,build,dev --prefix none
+    --edges normal,build,dev --prefix none --color never
 )
 workspace_feature_tree=$(
   cargo tree --locked --workspace --all-features \
-    --edges features --prefix none
+    --edges features --prefix none --color never
 )
 
 check_tree() {
