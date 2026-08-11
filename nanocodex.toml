@@ -47,3 +47,9 @@ benchmarks = ["graphwalks/128k-and-shorter-000749"]
 trials = 1
 model = ["sol"]
 thinking = ["high"]
+
+[profiles.mrcr-smoke]
+benchmarks = ["mrcr-v2/8needle-0-000000"]
+trials = 1
+model = ["sol"]
+thinking = ["high"]
