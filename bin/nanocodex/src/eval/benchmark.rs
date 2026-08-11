@@ -52,7 +52,7 @@ impl Benchmark {
             state_dir,
             coordinator,
             headless,
-            agent,
+            mut agent,
             observability,
             vm,
         } = self;
@@ -72,6 +72,7 @@ impl Benchmark {
         if initial.is_complete() {
             return Ok(());
         }
+        agent.disable_browser();
         let workflow = if headless {
             let _observability = observability.install(false, agent.cwd())?;
             run::run_prompt(prompt, agent, vm).await

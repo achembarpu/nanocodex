@@ -89,6 +89,12 @@ pub(crate) struct ConfiguredBrowser {
 }
 
 impl BrowserArgs {
+    pub(crate) fn disable(&mut self) {
+        self.browser = Some(BrowserKind::None);
+        self.cookies = Some(CookieSourceKind::None);
+        self.browser_executable = None;
+    }
+
     #[cfg(test)]
     pub(crate) const fn is_enabled(&self) -> bool {
         !matches!(self.browser, None | Some(BrowserKind::None))

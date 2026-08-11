@@ -205,6 +205,10 @@ pub(crate) struct AgentArgs {
 }
 
 impl AgentArgs {
+    pub(crate) fn disable_browser(&mut self) {
+        self.browser.disable();
+    }
+
     pub(crate) fn cwd(&self) -> &Path {
         self.cwd.as_deref().unwrap_or_else(|| Path::new("."))
     }
