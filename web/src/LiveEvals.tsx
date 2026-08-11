@@ -1,7 +1,5 @@
 import {
-  Activity,
   AlertTriangle,
-  CheckCircle2,
   ChevronLeft,
   ChevronRight,
   CircleDashed,
@@ -501,12 +499,6 @@ export function LiveEvals({ overview }: { overview: EvalOverview }) {
             <div><strong>{currentHealth.status}</strong><p>{currentHealth.message}</p></div>
             <small>live</small>
           </div>
-        </section>
-        <section className="eval-stat-strip" aria-label="Evaluation summary">
-          <div><Activity aria-hidden="true" /><span>Worksets</span><strong>{overview.worksets.length}</strong></div>
-          <div><CircleDashed aria-hidden="true" /><span>Coordinates</span><strong>{overview.summary.total}</strong></div>
-          <div><Radio aria-hidden="true" /><span>Running</span><strong>{overview.summary.running}</strong></div>
-          <div><CheckCircle2 aria-hidden="true" /><span>Finished</span><strong>{overview.summary.success + overview.summary.failed}</strong></div>
         </section>
         <ClusterView
           cluster={clusterQuery.data}
