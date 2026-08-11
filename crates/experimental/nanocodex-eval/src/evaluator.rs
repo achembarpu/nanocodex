@@ -514,18 +514,28 @@ impl Evaluator {
                 verifier_cleanup,
             ));
         }
-        emitter.emit(EvalEventKind::VerifierStarted);
         let final_message = agent
             .result
             .as_ref()
-            .map(|result| result.final_message.as_str());
+            .map(|result| result.final_message.clone());
+        // Joining the agent drops its caller-defined tools before a verifier
+        // may shut down the agent environment and launch an isolated verifier
+        // environment. The verifier retains the owning environment session;
+        // keeping the agent driver alive here would leave a sibling tool
+        // capability that correctly prevents graceful VM shutdown.
+        agent.shutdown().await;
+        emitter.emit(EvalEventKind::VerifierStarted);
         let verifier = match self
-            .execute_verifier(&task, &attempt, final_message, agent.verifier.take())
+            .execute_verifier(
+                &task,
+                &attempt,
+                final_message.as_deref(),
+                agent.verifier.take(),
+            )
             .await
         {
             Ok(verifier) => verifier,
             Err(failure) => {
-                agent.shutdown().await;
                 let primary = agent.error.take();
                 return Err(AttemptRunFailure::after_verifier_failure(
                     &attempt, &agent, primary, failure,
@@ -533,7 +543,6 @@ impl Evaluator {
             }
         };
         if let Err(error) = task.validate_package() {
-            agent.shutdown().await;
             return Err(AttemptRunFailure::after_verifier(
                 &attempt,
                 &agent,
@@ -548,7 +557,6 @@ impl Evaluator {
         emitter.emit(EvalEventKind::VerifierCompleted(verifier.result.clone()));
 
         if let Some(error) = verifier_bootstrap_error(&verifier) {
-            agent.shutdown().await;
             return Err(AttemptRunFailure::after_verifier(
                 &attempt,
                 &agent,
@@ -556,8 +564,6 @@ impl Evaluator {
                 RecordedEvalError::now(error),
             ));
         }
-
-        agent.shutdown().await;
 
         let status = verifier_status(&task, &verifier.result);
         let score_outcome = match status {
