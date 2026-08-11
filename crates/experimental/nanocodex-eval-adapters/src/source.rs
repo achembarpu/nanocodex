@@ -1,6 +1,6 @@
 use std::{
     fs,
-    io::Write as _,
+    io::{Read as _, Write as _},
     path::{Path, PathBuf},
     process::{Command, Output},
 };
@@ -22,6 +22,8 @@ pub(crate) enum SourceError {
     },
     #[error("benchmark source command failed: {0}")]
     Command(String),
+    #[error("benchmark source archive is invalid: {0}")]
+    Archive(String),
     #[error("retained benchmark source is stale: {0}")]
     Stale(String),
 }
@@ -270,6 +272,55 @@ impl SourceStore {
             .map_err(|error| io_error(&destination, error.error))?;
         Ok(destination)
     }
+
+    pub(crate) fn validate_file(
+        &self,
+        path: &Path,
+        expected_sha256: &str,
+    ) -> Result<(), SourceError> {
+        validate_sha256(path, expected_sha256)
+    }
+
+    pub(crate) fn extract_zip_member(
+        &self,
+        relative: &str,
+        archive: &Path,
+        member: &str,
+        password: &str,
+        expected_sha256: &str,
+    ) -> Result<PathBuf, SourceError> {
+        let destination = self.root.join(relative);
+        if destination.is_file() {
+            validate_sha256(&destination, expected_sha256)?;
+            return Ok(destination);
+        }
+        let file = fs::File::open(archive).map_err(|source| io_error(archive, source))?;
+        let mut archive_reader = zip::ZipArchive::new(file).map_err(|error| {
+            SourceError::Archive(format!("failed to open {}: {error}", archive.display()))
+        })?;
+        let mut entry = archive_reader
+            .by_name_decrypt(member, password.as_bytes())
+            .map_err(|error| {
+                SourceError::Archive(format!(
+                    "failed to decrypt {member:?} from {}: {error}",
+                    archive.display()
+                ))
+            })?;
+        let mut bytes = Vec::new();
+        entry.read_to_end(&mut bytes).map_err(|error| {
+            SourceError::Archive(format!(
+                "failed to extract {member:?} from {}: {error}",
+                archive.display()
+            ))
+        })?;
+        let actual = hex::encode(Sha256::digest(&bytes));
+        if actual != expected_sha256 {
+            return Err(SourceError::Stale(format!(
+                "extracted {member} has digest {actual}, expected {expected_sha256}"
+            )));
+        }
+        self.write_verified(relative, &bytes)
+    }
 }
 
 #[allow(dead_code)]
@@ -369,7 +420,12 @@ fn encode_url_path(path: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{encode_url_path, parse_lfs_sha256};
+    use std::{fs, io::Write as _};
+
+    use sha2::{Digest as _, Sha256};
+    use zip::{ZipWriter, write::SimpleFileOptions};
+
+    use super::{SourceStore, encode_url_path, parse_lfs_sha256};
 
     #[test]
     fn parses_only_canonical_git_lfs_pointers() {
@@ -384,5 +440,32 @@ mod tests {
     #[test]
     fn encodes_asset_paths_without_hiding_directory_boundaries() {
         assert_eq!(encode_url_path("files/a b#.pdf"), "files/a%20b%23.pdf");
+    }
+
+    #[test]
+    fn extracts_zip_members_without_a_host_unzip_executable() {
+        let temporary = tempfile::tempdir().unwrap();
+        let archive = temporary.path().join("dataset.zip");
+        let contents = b"question,answer\nwhy,because\n";
+        let mut writer = ZipWriter::new(fs::File::create(&archive).unwrap());
+        writer
+            .start_file("dataset/example.csv", SimpleFileOptions::default())
+            .unwrap();
+        writer.write_all(contents).unwrap();
+        writer.finish().unwrap();
+        let store = SourceStore::new(temporary.path().join("sources"));
+        let expected = hex::encode(Sha256::digest(contents));
+
+        let extracted = store
+            .extract_zip_member(
+                "derived/example.csv",
+                &archive,
+                "dataset/example.csv",
+                "unused",
+                &expected,
+            )
+            .unwrap();
+
+        assert_eq!(fs::read(extracted).unwrap(), contents);
     }
 }

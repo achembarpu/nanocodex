@@ -11,6 +11,7 @@ repository.workspace = true
 description = "Third-party benchmark adapters for nanocodex-eval"
 
 [dependencies]
+csv.workspace = true
 hex.workspace = true
 ignore.workspace = true
 nanocodex-eval.workspace = true
@@ -22,6 +23,7 @@ tempfile.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt"] }
 tracing.workspace = true
+zip.workspace = true
 
 [lints]
 workspace = true

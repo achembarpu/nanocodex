@@ -53,6 +53,7 @@ clap = { version = "4.5.54", features = ["derive", "env"] }
 cpal = "0.16.0"
 crossterm = { version = "0.28.1", features = ["bracketed-paste", "event-stream"] }
 criterion = { version = "0.7.0", default-features = false, features = ["async_tokio", "cargo_bench_support"] }
+csv = "1.4.0"
 dotenvy = "0.15.7"
 eyre = "0.6.12"
 filetime = "0.2.26"
@@ -152,6 +153,7 @@ vergen = { version = "8", default-features = false }
 wasm-bindgen = "0.2.105"
 wasm-bindgen-futures = "0.4.55"
 web-time = "1.1.0"
+zip = { version = "8.1.0", default-features = false, features = ["deflate"] }
 webrtc = "0.17.0"
 whoami = "1.6.1"
 yansi = { version = "1.0", features = ["detect-env", "detect-tty"] }
