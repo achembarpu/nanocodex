@@ -2915,30 +2915,15 @@ impl VmVerifier {
             }
             session
         } else {
-            let setup = async {
-                let tests = tempfile::tempdir()?;
-                task.materialize_verifier_files(tests.path())?;
-                Self::copy_directory(
-                    &agent_session,
-                    tests.path(),
-                    tests.path(),
-                    Path::new("/tests"),
-                )
-                .await
-            }
-            .await;
-            if let Err(primary) = setup {
-                let occurred_at = Utc::now();
-                let cleanup = self.cleanup_session(Some(&agent_session)).await;
-                return Err(AttemptVerificationFailure::observed_at(
-                    primary,
-                    occurred_at,
-                    cleanup,
-                ));
-            }
             agent_session
         };
         let setup = async {
+            // Verifier files are execution inputs, not image contents. Stage
+            // them for both retained agent environments and freshly launched
+            // isolated verifier environments.
+            let tests = tempfile::tempdir()?;
+            task.materialize_verifier_files(tests.path())?;
+            Self::copy_directory(&session, tests.path(), tests.path(), Path::new("/tests")).await?;
             session
                 .write_file("/logs/verifier/.nanoeval", Vec::new(), 0o600)
                 .await?;
