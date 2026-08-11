@@ -5,3 +5,15 @@ tasks = ["tasks/write-greeting"]
 trials = 2
 model = ["sol", "luna"]
 thinking = ["low", "medium"]
+
+[profiles.terminal-bench-smoke]
+benchmarks = ["terminal-bench-2.1/fix-git"]
+trials = 1
+model = ["sol"]
+thinking = ["high"]
+
+[profiles.deep-swe-smoke]
+benchmarks = ["deep-swe-v1.1/aiomonitor-task-snapshots-diff"]
+trials = 1
+model = ["sol"]
+thinking = ["high"]

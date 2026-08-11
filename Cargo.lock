@@ -5287,6 +5287,7 @@ name = "nanocodex-eval-adapters"
 version = "0.3.0"
 dependencies = [
  "hex",
+ "ignore",
  "nanocodex-eval",
  "sha2 0.11.0",
  "tempfile",

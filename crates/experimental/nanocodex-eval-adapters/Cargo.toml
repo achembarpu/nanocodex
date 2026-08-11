@@ -12,6 +12,7 @@ description = "Third-party benchmark adapters for nanocodex-eval"
 
 [dependencies]
 hex.workspace = true
+ignore.workspace = true
 nanocodex-eval.workspace = true
 sha2.workspace = true
 tempfile.workspace = true

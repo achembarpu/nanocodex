@@ -6,6 +6,7 @@
 
 #![deny(missing_docs, rustdoc::broken_intra_doc_links)]
 
+mod harbor;
 mod source;
 
 use std::{
@@ -73,7 +74,55 @@ struct InstalledAdapter {
     matches: fn(&str, &str) -> bool,
 }
 
-const INSTALLED_ADAPTERS: &[InstalledAdapter] = &[];
+const INSTALLED_ADAPTERS: &[InstalledAdapter] = &[InstalledAdapter {
+    names: &["terminal-bench-2.1", "deep-swe-v1.1"],
+    import: import_harbor,
+    matches: matches_harbor_task,
+}];
+
+const TERMINAL_BENCH_REVISION: &str = "5c8eadf1f393183288fa08b8f73ca9a469cc5e00";
+const DEEP_SWE_REVISION: &str = "e016041a6ccf8da29906afc9a3f5a8df940a1f78";
+
+fn import_harbor(
+    request: &BenchmarkRequest,
+    sources: &SourceStore,
+    store: &ImportStore,
+) -> Result<ImportedDataset, AdapterError> {
+    let (root, revision) = match request.name.as_str() {
+        "terminal-bench-2.1" => (
+            sources
+                .git_checkout(
+                    "terminal-bench-2-1",
+                    "https://github.com/harbor-framework/terminal-bench-2-1.git",
+                    TERMINAL_BENCH_REVISION,
+                )?
+                .join("tasks"),
+            format!("harbor-framework/terminal-bench-2-1@{TERMINAL_BENCH_REVISION}"),
+        ),
+        "deep-swe-v1.1" => (
+            sources
+                .git_checkout(
+                    "deep-swe",
+                    "https://github.com/datacurve-ai/deep-swe.git",
+                    DEEP_SWE_REVISION,
+                )?
+                .join("tasks"),
+            format!("datacurve-ai/deep-swe@{DEEP_SWE_REVISION}"),
+        ),
+        _ => return Err(AdapterError::UnknownBenchmark(request.name.clone())),
+    };
+    Ok(store.import(&harbor::HarborDataset::new(&request.name, root, revision))?)
+}
+
+fn matches_harbor_task(selected: &str, normalized: &str) -> bool {
+    selected == normalized
+        || normalized
+            .strip_prefix("terminal-bench/")
+            .is_some_and(|task| task == selected)
+        || normalized
+            .strip_prefix("datacurve/")
+            .is_some_and(|task| task == selected)
+}
 
 impl AdapterCatalog {
     /// Uses `imports/` and `sources/` below one durable evaluator state root.
@@ -253,5 +302,14 @@ mod tests {
         let error = parse_requests(&["one/*".to_owned(), "one/a".to_owned()]).unwrap_err();
 
         assert!(error.to_string().contains("mixes *"));
+    }
+
+    #[test]
+    fn harbor_selectors_hide_upstream_name_prefixes() {
+        assert!(matches_harbor_task("fix-git", "terminal-bench/fix-git"));
+        assert!(matches_harbor_task(
+            "aiomonitor-task-snapshots-diff",
+            "datacurve/aiomonitor-task-snapshots-diff"
+        ));
     }
 }
