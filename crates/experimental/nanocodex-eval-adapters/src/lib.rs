@@ -7,6 +7,7 @@
 #![deny(missing_docs, rustdoc::broken_intra_doc_links)]
 
 mod arena_hard;
+mod gdpval;
 mod genebench_pro;
 mod graphwalks;
 mod harbor;
@@ -125,6 +126,11 @@ const INSTALLED_ADAPTERS: &[InstalledAdapter] = &[
         import: import_healthbench_professional,
         matches: exact_task,
     },
+    InstalledAdapter {
+        names: &["gdpval"],
+        import: import_gdpval,
+        matches: exact_task,
+    },
 ];
 
 const TERMINAL_BENCH_REVISION: &str = "5c8eadf1f393183288fa08b8f73ca9a469cc5e00";
@@ -175,6 +181,9 @@ const MRCR_FILES: [(&str, &str); 6] = [
 const HEALTHBENCH_PROFESSIONAL_REVISION: &str = "349962fd46dd02343a0d8a606491baf59154ea1a";
 const HEALTHBENCH_PROFESSIONAL_SHA256: &str =
     "d44b08e6e952e04c945e2c406f02533d9e7a989a84e35820ee7efdff20c9e4e2";
+const GDPVAL_REVISION: &str = "11e7900cdcac61bc4daf59e65feb238acda98fbf";
+const GDPVAL_PARQUET_SHA256: &str =
+    "f8422fab9b21d90c0ee5f0659842ab666d418cb8940842918f9f4b0df7ae0202";
 
 fn import_harbor(
     request: &BenchmarkRequest,
@@ -424,6 +433,50 @@ fn import_healthbench_professional(
             Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/healthbench-professional"),
         ))?,
     )
+}
+
+fn import_gdpval(
+    request: &BenchmarkRequest,
+    sources: &SourceStore,
+    store: &ImportStore,
+) -> Result<ImportedDataset, AdapterError> {
+    let checkout = sources.git_checkout_with_materialized_lfs(
+        "gdpval",
+        "https://huggingface.co/datasets/openai/gdpval.git",
+        GDPVAL_REVISION,
+    )?;
+    let parquet = Path::new(gdpval::PARQUET_PATH);
+    let parquet_digest = sources.materialize_checkout_lfs_file(
+        "gdpval",
+        parquet,
+        GDPVAL_REVISION,
+        "openai/gdpval",
+    )?;
+    if parquet_digest != GDPVAL_PARQUET_SHA256 {
+        return Err(AdapterError::Source(format!(
+            "GDPval Parquet has pinned digest {parquet_digest}, expected {GDPVAL_PARQUET_SHA256}"
+        )));
+    }
+    let selected = (!request.all).then_some(&request.tasks);
+    for asset in gdpval::asset_paths(&checkout.join(parquet), selected)? {
+        sources.materialize_checkout_lfs_file(
+            "gdpval",
+            &asset,
+            GDPVAL_REVISION,
+            "openai/gdpval",
+        )?;
+    }
+    let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/gdpval");
+    let mut importer = gdpval::Gdpval::new(
+        checkout,
+        format!("openai/gdpval@{GDPVAL_REVISION}"),
+        nanocodex_eval::import::Environment::Dockerfile(assets.join("environment")),
+        assets.join("verifier"),
+    );
+    if !request.all {
+        importer = importer.tasks(request.tasks.iter().cloned());
+    }
+    Ok(store.import(&importer)?)
 }
 
 impl AdapterCatalog {
