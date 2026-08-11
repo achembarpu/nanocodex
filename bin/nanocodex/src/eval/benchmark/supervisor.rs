@@ -54,7 +54,11 @@ pub(super) async fn run(profile: &str, config: &Path, coordinator: &str) -> Resu
 
         let unclaimed = usize::try_from(board.tasks.unclaimed.max(0)).unwrap_or(usize::MAX);
         let running = usize::try_from(board.tasks.running.max(0)).unwrap_or(usize::MAX);
-        let target = target_concurrency(workers.active, running, unclaimed, lower, upper);
+        let target = if workers.capacity_death {
+            workers.active
+        } else {
+            target_concurrency(workers.active, running, unclaimed, lower, upper)
+        };
         let batch = target.saturating_sub(workers.active);
         let reason = if workers.capacity_death {
             "capacity boundary"
