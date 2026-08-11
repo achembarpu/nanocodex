@@ -109,11 +109,9 @@ impl TurnControl {
     /// its steering queue is full, or if the driver stops.
     pub async fn steer(&self, prompt: impl Into<Prompt>) -> Result<()> {
         let prompt = prompt.into();
-        if prompt.instruction.is_empty() {
-            return Err(NanocodexError::InvalidRequest(
-                "steer instruction must not be empty".to_owned(),
-            ));
-        }
+        prompt
+            .validate()
+            .map_err(|error| NanocodexError::InvalidRequest(error.to_string()))?;
         request_command(&self.commands, |result| Command::Steer {
             key: self.key,
             prompt,

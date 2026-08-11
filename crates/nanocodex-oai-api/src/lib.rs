@@ -222,6 +222,9 @@ pub const CONTEXT_WINDOW_TOKENS: u64 = 272_000;
 pub struct Prompt {
     /// Ordered text and multimodal content for this turn.
     pub instruction: PromptInput,
+    /// Synthetic text-only conversation supplied before this turn.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    transcript: Vec<PromptMessage>,
 }
 
 impl Prompt {
@@ -230,6 +233,7 @@ impl Prompt {
     pub fn new(instruction: impl Into<String>) -> Self {
         Self {
             instruction: PromptInput::Text(instruction.into()),
+            transcript: Vec::new(),
         }
     }
 
@@ -238,8 +242,145 @@ impl Prompt {
     pub fn content(input: impl IntoIterator<Item = UserInput>) -> Self {
         Self {
             instruction: PromptInput::Content(input.into_iter().collect()),
+            transcript: Vec::new(),
         }
     }
+
+    /// Prepends an explicit text-only conversation to this turn.
+    ///
+    /// This is intended for synthetic conversation benchmarks. Normal
+    /// follow-on turns should continue to rely on the agent's retained
+    /// session history.
+    #[must_use]
+    pub fn with_transcript(mut self, messages: impl IntoIterator<Item = PromptMessage>) -> Self {
+        self.transcript = messages.into_iter().collect();
+        self
+    }
+
+    /// Returns the synthetic conversation preceding this turn.
+    #[must_use]
+    pub fn transcript(&self) -> &[PromptMessage] {
+        &self.transcript
+    }
+
+    /// Returns the total UTF-8 byte length of model-visible text.
+    #[must_use]
+    pub fn text_bytes(&self) -> usize {
+        self.transcript
+            .iter()
+            .map(PromptMessage::text_bytes)
+            .sum::<usize>()
+            .saturating_add(self.instruction.text_bytes())
+    }
+
+    /// Returns whether the turn instruction contains no usable content.
+    #[must_use]
+    pub fn is_empty(&self) -> bool {
+        self.instruction.is_empty()
+    }
+
+    /// Validates the instruction and synthetic transcript invariants.
+    ///
+    /// # Errors
+    ///
+    /// Returns a typed failure for empty text or a transcript that does not
+    /// alternate from user to assistant before the final user instruction.
+    pub fn validate(&self) -> Result<(), PromptValidationError> {
+        if self.instruction.is_empty() {
+            return Err(PromptValidationError::EmptyInstruction);
+        }
+        if self.transcript.iter().any(PromptMessage::is_empty) {
+            return Err(PromptValidationError::EmptyTranscriptMessage);
+        }
+        if self
+            .transcript
+            .first()
+            .is_some_and(|message| message.role() != PromptMessageRole::User)
+            || self
+                .transcript
+                .last()
+                .is_some_and(|message| message.role() != PromptMessageRole::Assistant)
+            || !self
+                .transcript
+                .windows(2)
+                .all(|pair| pair[0].role() != pair[1].role())
+        {
+            return Err(PromptValidationError::InvalidTranscriptOrdering);
+        }
+        Ok(())
+    }
+}
+
+/// Invalid model-visible prompt content.
+#[derive(Clone, Copy, Debug, Eq, PartialEq, thiserror::Error)]
+pub enum PromptValidationError {
+    /// The final user instruction has no usable content.
+    #[error("prompt instruction must not be empty")]
+    EmptyInstruction,
+    /// One synthetic message has no usable content.
+    #[error("prompt transcript messages must not be empty")]
+    EmptyTranscriptMessage,
+    /// Synthetic messages do not form complete user/assistant pairs.
+    #[error("prompt transcript must alternate user and assistant messages in complete pairs")]
+    InvalidTranscriptOrdering,
+}
+
+/// One text-only message in a synthetic prompt transcript.
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PromptMessage {
+    role: PromptMessageRole,
+    content: String,
+}
+
+impl PromptMessage {
+    /// Creates a synthetic user message.
+    #[must_use]
+    pub fn user(content: impl Into<String>) -> Self {
+        Self {
+            role: PromptMessageRole::User,
+            content: content.into(),
+        }
+    }
+
+    /// Creates a synthetic assistant message.
+    #[must_use]
+    pub fn assistant(content: impl Into<String>) -> Self {
+        Self {
+            role: PromptMessageRole::Assistant,
+            content: content.into(),
+        }
+    }
+
+    /// Returns the message role.
+    #[must_use]
+    pub const fn role(&self) -> PromptMessageRole {
+        self.role
+    }
+
+    /// Returns the complete message text.
+    #[must_use]
+    pub fn content(&self) -> &str {
+        &self.content
+    }
+
+    const fn text_bytes(&self) -> usize {
+        self.content.len()
+    }
+
+    fn is_empty(&self) -> bool {
+        self.content.trim().is_empty()
+    }
+}
+
+/// Role of one message in a synthetic prompt transcript.
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PromptMessageRole {
+    /// User-supplied text.
+    User,
+    /// Assistant text supplied by the benchmark.
+    Assistant,
 }
 
 impl From<String> for Prompt {
@@ -508,7 +649,7 @@ impl FromStr for Thinking {
 mod tests {
     use serde_json::json;
 
-    use super::{Model, Prompt, ReasoningMode, Thinking};
+    use super::{Model, Prompt, PromptMessage, PromptValidationError, ReasoningMode, Thinking};
 
     #[test]
     fn model_parses_short_and_api_names() {
@@ -544,6 +685,42 @@ mod tests {
         assert_eq!(
             serde_json::to_value(prompt).unwrap(),
             json!({ "instruction": "inspect the repository" })
+        );
+    }
+
+    #[test]
+    fn synthetic_transcript_is_typed_serialized_and_counted() {
+        let prompt = Prompt::new("repeat the second answer").with_transcript([
+            PromptMessage::user("first request"),
+            PromptMessage::assistant("first answer"),
+            PromptMessage::user("second request"),
+            PromptMessage::assistant("second answer"),
+        ]);
+
+        assert_eq!(prompt.validate(), Ok(()));
+        assert_eq!(prompt.text_bytes(), 76);
+        assert_eq!(
+            serde_json::to_value(prompt).unwrap(),
+            json!({
+                "instruction": "repeat the second answer",
+                "transcript": [
+                    {"role": "user", "content": "first request"},
+                    {"role": "assistant", "content": "first answer"},
+                    {"role": "user", "content": "second request"},
+                    {"role": "assistant", "content": "second answer"},
+                ]
+            })
+        );
+    }
+
+    #[test]
+    fn synthetic_transcript_requires_complete_pairs() {
+        let prompt =
+            Prompt::new("continue").with_transcript([PromptMessage::user("unanswered request")]);
+
+        assert_eq!(
+            prompt.validate(),
+            Err(PromptValidationError::InvalidTranscriptOrdering)
         );
     }
 

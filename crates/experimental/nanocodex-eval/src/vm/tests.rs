@@ -494,7 +494,9 @@ fn verifier_with_launch_root(root: VmLaunchRoot, retain_failed_rootfs: bool) -> 
         retain_passed_rootfs: false,
         retain_failed_rootfs,
         root_disks_finalized: false,
+        artifact_directory: directory,
         _network: None,
+        _verifier_network: None,
     }
 }
 
@@ -804,7 +806,9 @@ done
         retain_passed_rootfs: false,
         retain_failed_rootfs: true,
         root_disks_finalized: false,
+        artifact_directory: control.path().to_path_buf(),
         _network: None,
+        _verifier_network: None,
     };
 
     let (_, session) = verifier.start_verifier_session(&task).await.unwrap();

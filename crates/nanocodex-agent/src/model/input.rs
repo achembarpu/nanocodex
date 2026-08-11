@@ -1,5 +1,8 @@
-use nanocodex_oai_api::responses::{
-    ContentItem, FunctionOutputBody, FunctionOutputContent, MessageRole, ResponseItem,
+use nanocodex_oai_api::{
+    Prompt, PromptMessageRole,
+    responses::{
+        ContentItem, FunctionOutputBody, FunctionOutputContent, MessageRole, ResponseItem,
+    },
 };
 use nanocodex_tools::contract::{ToolOutputBody, ToolOutputContent};
 use serde_json::Value;
@@ -17,14 +20,33 @@ const PERMISSIONS_INSTRUCTIONS: &str = concat!(
 );
 
 pub(in crate::model) fn task_input(
+    prompt: &Prompt,
     user_content: Vec<ContentItem>,
     context: &ContextSnapshot,
 ) -> Vec<ResponseItem> {
-    vec![
-        developer_context(),
-        context.full_item(),
-        ResponseItem::message(MessageRole::User, user_content),
-    ]
+    let mut input = vec![developer_context(), context.full_item()];
+    input.extend(prompt_messages(prompt, user_content));
+    input
+}
+
+pub(in crate::model) fn prompt_messages(
+    prompt: &Prompt,
+    user_content: Vec<ContentItem>,
+) -> Vec<ResponseItem> {
+    let mut input = Vec::with_capacity(prompt.transcript().len() + 1);
+    input.extend(prompt.transcript().iter().map(|message| {
+        let role = match message.role() {
+            PromptMessageRole::User => MessageRole::User,
+            PromptMessageRole::Assistant => MessageRole::Assistant,
+        };
+        let content = match message.role() {
+            PromptMessageRole::User => ContentItem::input_text(message.content()),
+            PromptMessageRole::Assistant => ContentItem::output_text(message.content()),
+        };
+        ResponseItem::message(role, [content])
+    }));
+    input.push(ResponseItem::message(MessageRole::User, user_content));
+    input
 }
 
 pub(in crate::model) fn turn_aborted() -> ResponseItem {
@@ -116,7 +138,7 @@ fn function_output(output: ToolOutputBody) -> FunctionOutputBody {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use nanocodex_oai_api::ImageDetail;
+    use nanocodex_oai_api::{ImageDetail, PromptMessage};
     use nanocodex_tools::contract::ToolOutputContent;
     use serde_json::json;
 
@@ -129,7 +151,9 @@ mod tests {
             "2026-07-17",
             "America/Los_Angeles",
         );
+        let prompt = Prompt::new("fix the bug");
         let input = task_input(
+            &prompt,
             vec![ContentItem::InputText {
                 text: "fix the bug".into(),
             }],
@@ -171,6 +195,39 @@ mod tests {
                     }],
                 }),
             ]),
+        );
+    }
+
+    #[test]
+    fn task_input_preserves_synthetic_message_roles() {
+        let context =
+            ContextSnapshot::capture_at("/workspace", "bash", None, "2026-08-05", "Etc/UTC");
+        let prompt = Prompt::new("return the second answer").with_transcript([
+            PromptMessage::user("question one"),
+            PromptMessage::assistant("answer one"),
+            PromptMessage::user("question two"),
+            PromptMessage::assistant("answer two"),
+        ]);
+        let input = task_input(
+            &prompt,
+            vec![ContentItem::input_text("return the second answer")],
+            &context,
+        );
+
+        let roles = input
+            .iter()
+            .skip(2)
+            .map(|item| serde_json::to_value(item).unwrap()["role"].clone())
+            .collect::<Vec<_>>();
+        assert_eq!(
+            roles,
+            vec![
+                json!("user"),
+                json!("assistant"),
+                json!("user"),
+                json!("assistant"),
+                json!("user")
+            ]
         );
     }
 

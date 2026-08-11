@@ -61,6 +61,8 @@ mod event;
 /// Configured external harness execution inside evaluator-owned sandboxes.
 pub mod harness;
 mod harness_exec;
+/// Content-addressed normalization of third-party datasets into native tasks.
+pub mod import;
 mod job;
 mod native;
 #[cfg(any(
@@ -95,7 +97,7 @@ pub(crate) use harness_exec::{
     HarnessCommandOutput, HarnessCommandRunner, HarnessCommandRunnerError, HarnessCommandStatus,
     HarnessExec, HarnessExecError,
 };
-pub use profile::ResolvedHarness;
+pub use profile::{ResolvedHarness, ResolvedTask};
 pub use result::{
     AgentMetadata, AgentResult, AgentStatus, BillingCompleteness, CleanupDiagnostic, CleanupPhase,
     CleanupStatus, EvalArtifacts, EvalAttemptOutcome, EvalCleanup, EvalEnvironment, EvalException,
@@ -103,8 +105,8 @@ pub use result::{
     EvalTiming, MeasurementCompleteness, PhaseTiming, UsageTotals, VerifierResult,
 };
 pub use task::{
-    NetworkPolicy, OciImage, Resources, Task, TaskLoadError, Verifier, VerifierCollect,
-    VerifierEnvironmentMode,
+    NetworkPolicy, OciImage, Resources, ScoringPolicy, Task, TaskArtifact, TaskLoadError,
+    TaskOutput, Verifier, VerifierCollect, VerifierEnvironmentMode,
 };
 #[cfg(any(
     all(target_os = "linux", not(target_env = "musl")),

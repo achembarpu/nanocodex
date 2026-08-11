@@ -8,7 +8,7 @@ use std::{
 
 use crate::{
     Task,
-    profile::{EvaluationManifest, ResolvedFamily, ResolvedHarness},
+    profile::{EvaluationManifest, ResolvedFamily, ResolvedHarness, ResolvedProfile, ResolvedTask},
     workset::{
         BeginTask, TaskClaim, Workset, WorksetBusy, WorksetError, WorksetFamily, WorksetObserver,
         WorksetStatus, WorksetTask,
@@ -175,6 +175,14 @@ pub struct EvaluationError {
 }
 
 impl Evaluation {
+    /// Reads the adapter-owned benchmark selectors requested by a TOML profile.
+    pub fn profile_benchmarks(
+        config: impl AsRef<Path>,
+        recipe: Option<&str>,
+    ) -> Result<Vec<String>, EvaluationError> {
+        EvaluationManifest::load_benchmarks(config, recipe).map_err(error)
+    }
+
     /// Appends concrete work, creating the benchmark when it does not exist.
     pub fn add(
         state_directory: impl Into<PathBuf>,
@@ -239,6 +247,29 @@ impl Evaluation {
         new_generation: bool,
     ) -> Result<(), EvaluationError> {
         let recipe = EvaluationManifest::load_profile(config, recipe).map_err(error)?;
+        Self::add_resolved_profile(recipe, state_directory, name, new_generation)
+    }
+
+    /// Expands a TOML profile plus adapter-resolved tasks into durable rows.
+    pub fn add_profile_with_tasks(
+        config: impl AsRef<Path>,
+        recipe: Option<&str>,
+        benchmark_tasks: Vec<ResolvedTask>,
+        state_directory: impl Into<PathBuf>,
+        name: &str,
+        new_generation: bool,
+    ) -> Result<(), EvaluationError> {
+        let recipe = EvaluationManifest::load_profile_with_tasks(config, recipe, benchmark_tasks)
+            .map_err(error)?;
+        Self::add_resolved_profile(recipe, state_directory, name, new_generation)
+    }
+
+    fn add_resolved_profile(
+        recipe: ResolvedProfile,
+        state_directory: impl Into<PathBuf>,
+        name: &str,
+        new_generation: bool,
+    ) -> Result<(), EvaluationError> {
         let mut work = Vec::with_capacity(recipe.families.len());
         for task in &recipe.tasks {
             for family in recipe

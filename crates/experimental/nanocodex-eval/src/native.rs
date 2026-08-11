@@ -8,7 +8,7 @@ use std::{
 use chrono::Utc;
 use tokio::{process::Command, time::timeout};
 
-use crate::{CleanupPhase, EvalError, PhaseTiming, Task, VerifierResult};
+use crate::{CleanupPhase, EvalError, PhaseTiming, Task, TaskOutput, VerifierResult};
 
 pub(crate) struct AttemptPaths {
     pub root: PathBuf,
@@ -61,8 +61,18 @@ impl NativeAttempt {
         })
     }
 
-    pub async fn verify(&self, task: &Task) -> Result<VerifierExecution, EvalError> {
+    pub async fn verify(
+        &self,
+        task: &Task,
+        final_message: Option<&str>,
+    ) -> Result<VerifierExecution, EvalError> {
         let started_at = Utc::now();
+        if task.output() == TaskOutput::FinalMessage {
+            fs::write(
+                self.paths.workspace.join("answer.txt"),
+                final_message.unwrap_or_default(),
+            )?;
+        }
         let mut command = Command::new("/bin/sh");
         command
             .arg(self.paths.tests.join("test.sh"))
@@ -95,10 +105,14 @@ impl NativeAttempt {
         };
         fs::write(&self.paths.verifier_output, combined)?;
 
-        let reward_text = fs::read_to_string(&self.paths.reward)?;
-        let reward = reward_text.trim().parse::<f64>()?;
-        let mut rewards = BTreeMap::new();
-        rewards.insert("reward".to_owned(), reward);
+        let reward_json = self.paths.verifier.join("reward.json");
+        let rewards = if reward_json.is_file() {
+            serde_json::from_slice::<BTreeMap<String, f64>>(&fs::read(reward_json)?)?
+        } else {
+            let reward_text = fs::read_to_string(&self.paths.reward)?;
+            let reward = reward_text.trim().parse::<f64>()?;
+            BTreeMap::from([("reward".to_owned(), reward)])
+        };
 
         Ok(VerifierExecution {
             result: VerifierResult {
@@ -143,7 +157,7 @@ mod tests {
             "hello from nanoeval\n",
         )
         .unwrap();
-        let execution = attempt.verify(&task).await.unwrap();
+        let execution = attempt.verify(&task, None).await.unwrap();
 
         assert!((execution.result.rewards["reward"] - 1.0).abs() < f64::EPSILON);
         assert_eq!(execution.result.exit_code, 0);
