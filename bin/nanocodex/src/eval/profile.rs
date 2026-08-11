@@ -189,7 +189,9 @@ impl Add {
                     self.new,
                 )?;
             } else {
-                let tasks = AdapterCatalog::new(&state).resolve(&selectors).await?;
+                let tasks = AdapterCatalog::new(&state)
+                    .resolve(&self.config, &selectors)
+                    .await?;
                 Evaluation::add_profile_with_tasks(
                     &self.config,
                     Some(recipe),

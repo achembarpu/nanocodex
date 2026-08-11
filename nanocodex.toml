@@ -1,5 +1,11 @@
 default = "local-smoke"
 
+[benchmark.openai-evals-smoke]
+adapter = "openai-evals"
+registry = "evals/adapter-smoke/openai-evals/registry"
+eval = "demo.match-v1"
+revision = "nanocodex/openai-evals-smoke@1"
+
 [profiles.local-smoke]
 tasks = ["tasks/write-greeting"]
 trials = 2
@@ -96,6 +102,12 @@ benchmarks = [
   "agents-last-exam/financial_stmt_reconstruction_aapl_fy2024",
   "agents-last-exam/atwood_2022_measles_vaccine_reproduction",
 ]
+trials = 1
+model = ["sol"]
+thinking = ["high"]
+
+[profiles.openai-evals-smoke]
+benchmarks = ["openai-evals-smoke/demo.match-v1-000000"]
 trials = 1
 model = ["sol"]
 thinking = ["high"]
