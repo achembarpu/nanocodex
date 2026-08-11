@@ -78,3 +78,13 @@ trials = 1
 model = ["sol"]
 thinking = ["high"]
 web_search = true
+
+[profiles.arc-agi-3-public-smoke]
+benchmarks = [
+  "arc-agi-3-public-smoke/ls20-9607627b",
+  "arc-agi-3-public-smoke/tn36-ef4dde99",
+  "arc-agi-3-public-smoke/sb26-7fbdac44",
+]
+trials = 1
+model = ["sol"]
+thinking = ["high"]
