@@ -71,3 +71,10 @@ benchmarks = ["gpqa-diamond/rec06pnAkLOr2t2mp"]
 trials = 1
 model = ["sol"]
 thinking = ["high"]
+
+[profiles.browsecomp-smoke]
+benchmarks = ["browsecomp/000788-b1fa2bf2323cd70e"]
+trials = 1
+model = ["sol"]
+thinking = ["high"]
+web_search = true
