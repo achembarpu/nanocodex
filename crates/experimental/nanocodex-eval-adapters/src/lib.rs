@@ -7,6 +7,7 @@
 #![deny(missing_docs, rustdoc::broken_intra_doc_links)]
 
 mod arena_hard;
+mod browsecomp;
 mod gdpval;
 mod genebench_pro;
 mod gpqa_diamond;
@@ -137,6 +138,11 @@ const INSTALLED_ADAPTERS: &[InstalledAdapter] = &[
         import: import_gpqa_diamond,
         matches: exact_task,
     },
+    InstalledAdapter {
+        names: &["browsecomp"],
+        import: import_browsecomp,
+        matches: exact_task,
+    },
 ];
 
 const TERMINAL_BENCH_REVISION: &str = "5c8eadf1f393183288fa08b8f73ca9a469cc5e00";
@@ -194,6 +200,8 @@ const GPQA_REVISION: &str = "56686c06f5e19865c153de0fdb11be3890014df7";
 const GPQA_ZIP_SHA256: &str = "461ae7329f15a3e35f8184d2dac24b990f34fdf12f366ca4062d8e6638cd08dc";
 const GPQA_DIAMOND_SHA256: &str =
     "41d1213cd7a4998605a26c2798500652572007161b3a92817ba46b35befcd305";
+const BROWSECOMP_REVISION: &str = "652c89d0ca9df547706735883097e9537d40dc47";
+const BROWSECOMP_SHA256: &str = "7b24471cd5b3eb2a46830a14802b5c029ea62f488ff75a0f88af7923d1454abf";
 
 fn import_harbor(
     request: &BenchmarkRequest,
@@ -513,6 +521,24 @@ fn import_gpqa_diamond(
         format!("idavidrein/gpqa@{GPQA_REVISION}"),
         nanocodex_eval::import::Environment::OciImage("python:3.12-slim".to_owned()),
         Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/gpqa-diamond"),
+    ))?)
+}
+
+fn import_browsecomp(
+    _request: &BenchmarkRequest,
+    sources: &SourceStore,
+    store: &ImportStore,
+) -> Result<ImportedDataset, AdapterError> {
+    let dataset = sources.download(
+        "browsecomp/browse_comp_test_set.csv",
+        "https://openaipublic.blob.core.windows.net/simple-evals/browse_comp_test_set.csv",
+        BROWSECOMP_SHA256,
+    )?;
+    Ok(store.import(&browsecomp::BrowseComp::new(
+        dataset,
+        format!("openai/simple-evals@{BROWSECOMP_REVISION}"),
+        nanocodex_eval::import::Environment::OciImage("python:3.12-slim".to_owned()),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/browsecomp"),
     ))?)
 }
 

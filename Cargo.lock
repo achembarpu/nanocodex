@@ -5330,6 +5330,7 @@ dependencies = [
 name = "nanocodex-eval-adapters"
 version = "0.3.0"
 dependencies = [
+ "base64",
  "csv",
  "hex",
  "ignore",
