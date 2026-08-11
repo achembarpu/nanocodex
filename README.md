@@ -67,8 +67,9 @@ The TUI includes a behavior-preserving cleanup pass for recently changed code:
 The command selects the current Git diff, runs independent reuse,
 simplification, efficiency, and abstraction-depth reviewers concurrently, then
 deduplicates and applies valid findings. The workflow reuses the CLI's owned
-subagent runtime in ordinary TUI sessions; general-purpose subagent tools remain
-opt-in through `--subagents`.
+subagent runtime in ordinary TUI sessions. General-purpose subagent tools are
+enabled by default and can be disabled with `--subagents false`; the dedicated
+cleanup workflow remains available when they are disabled.
 
 ## Minimal API Example
 

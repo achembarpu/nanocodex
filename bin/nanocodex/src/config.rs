@@ -149,11 +149,11 @@ pub(crate) struct AgentArgs {
     )]
     image_generation: bool,
 
-    /// Expose clean, reusable Tact-style subagents in Code Mode.
+    /// Whether clean, reusable Tact-style subagents are exposed in Code Mode.
     #[arg(
         long,
         env = "NANOCODEX_SUBAGENTS",
-        default_value_t = false,
+        default_value_t = true,
         action = ArgAction::Set
     )]
     subagents: bool,
@@ -678,12 +678,12 @@ pub(crate) fn default_codex_home() -> Result<PathBuf> {
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use clap::CommandFactory;
+    use clap::{CommandFactory, Parser};
     use nanocodex::oai::auth::OpenAiAuthMode;
 
     use super::{
-        direct_websocket_url, select_auth, select_auth_with_default, selected_api_base_url,
-        selected_subagent_tools,
+        SUBAGENT_INSTRUCTIONS, direct_websocket_url, select_auth, select_auth_with_default,
+        selected_api_base_url, selected_subagent_tools, session_instructions,
     };
     use crate::subagents::SubagentToolSet;
 
@@ -748,14 +748,46 @@ mod tests {
     }
 
     #[test]
-    fn subagents_are_opt_in() {
+    fn subagents_are_enabled_by_default() {
         let command = crate::Cli::command();
         let subagents = command
             .get_arguments()
             .find(|argument| argument.get_id() == "subagents")
             .expect("the CLI should expose the subagents argument");
 
-        assert_eq!(subagents.get_default_values(), ["false"]);
+        assert_eq!(subagents.get_default_values(), ["true"]);
+    }
+
+    #[test]
+    fn subagents_can_be_disabled_explicitly() {
+        let cli = crate::Cli::try_parse_from(["nanocodex", "--subagents", "false"]).unwrap();
+
+        assert!(!cli.agent.subagents);
+    }
+
+    #[test]
+    fn subagent_concurrency_defaults_to_tacts_limit() {
+        let command = crate::Cli::command();
+        let max_subagents = command
+            .get_arguments()
+            .find(|argument| argument.get_id() == "max_subagents")
+            .expect("the CLI should expose the max-subagents argument");
+
+        assert_eq!(max_subagents.get_default_values(), ["32"]);
+    }
+
+    #[test]
+    fn subagent_instructions_follow_the_enable_switch() {
+        let custom = "custom instructions".to_owned();
+        assert_eq!(
+            session_instructions(Some(custom.clone()), false),
+            Some(custom.clone())
+        );
+
+        let enabled = session_instructions(Some(custom), true).unwrap();
+        assert!(enabled.starts_with("custom instructions\n\n"));
+        assert!(enabled.ends_with(SUBAGENT_INSTRUCTIONS));
+        assert_eq!(enabled.matches(SUBAGENT_INSTRUCTIONS).count(), 1);
     }
 
     #[test]
