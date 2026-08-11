@@ -271,6 +271,10 @@ pub enum EvalError {
     #[error("verifier exceeded its {0:?} timeout")]
     VerifierTimeout(Duration),
 
+    /// The verifier could not start because its own dependencies or network were unavailable.
+    #[error("verifier bootstrap failed: {0}")]
+    VerifierBootstrap(String),
+
     /// The agent firehose ended without a terminal event.
     #[error("agent event stream closed before a terminal event")]
     AgentEventsClosed,
@@ -482,6 +486,7 @@ impl Evaluator {
 
         if let Err(error) = task.validate_package() {
             let error = RecordedEvalError::now(EvalError::TaskPackage(error));
+            agent.shutdown().await;
             let verifier_cleanup = shutdown_attempt_verifier(&mut agent.verifier).await;
             return Err(AttemptRunFailure::after_agent(
                 &attempt,
@@ -495,6 +500,7 @@ impl Evaluator {
             .as_ref()
             .is_some_and(|error| !verifier_workspace_usable_after_agent_error(&error.error))
         {
+            agent.shutdown().await;
             let verifier_cleanup = shutdown_attempt_verifier(&mut agent.verifier).await;
             let error = agent
                 .error
@@ -514,6 +520,7 @@ impl Evaluator {
         {
             Ok(verifier) => verifier,
             Err(failure) => {
+                agent.shutdown().await;
                 let primary = agent.error.take();
                 return Err(AttemptRunFailure::after_verifier_failure(
                     &attempt, &agent, primary, failure,
@@ -521,6 +528,7 @@ impl Evaluator {
             }
         };
         if let Err(error) = task.validate_package() {
+            agent.shutdown().await;
             return Err(AttemptRunFailure::after_verifier(
                 &attempt,
                 &agent,
@@ -533,6 +541,18 @@ impl Evaluator {
             stderr: verifier.stderr.clone(),
         });
         emitter.emit(EvalEventKind::VerifierCompleted(verifier.result.clone()));
+
+        if let Some(error) = verifier_bootstrap_error(&verifier) {
+            agent.shutdown().await;
+            return Err(AttemptRunFailure::after_verifier(
+                &attempt,
+                &agent,
+                &verifier,
+                RecordedEvalError::now(error),
+            ));
+        }
+
+        agent.shutdown().await;
 
         let status = verifier_status(&verifier.result);
         let score_outcome = match status {
@@ -812,14 +832,9 @@ impl Evaluator {
             outcome.apply_lower_bound_duration(phase_timing_ns(&execution_timing));
         }
         let cleanup_started = Utc::now();
-        let (outcome, cleanup) = match result {
+        let (outcome, cleanup, retained_agent) = match result {
             Ok(AgentRunState::Finished(outcome)) => {
-                let shutdown = agent.shutdown().await;
-                let cleanup = match shutdown {
-                    Ok(()) => CleanupPhase::completed(cleanup_started),
-                    Err(error) => CleanupPhase::failed(cleanup_started, &error),
-                };
-                (outcome, cleanup)
+                (outcome, CleanupPhase::not_required(), Some(agent))
             }
             Ok(AgentRunState::TimedOut {
                 primary,
@@ -876,7 +891,7 @@ impl Evaluator {
                 };
                 let mut outcome = outcome;
                 outcome.apply_lower_bound_duration(phase_timing_ns(&execution_timing));
-                (outcome, cleanup)
+                (outcome, cleanup, None)
             }
             Err(error) => {
                 let shutdown = agent.shutdown().await;
@@ -891,6 +906,7 @@ impl Evaluator {
                         result_is_lower_bound: false,
                     },
                     cleanup,
+                    None,
                 )
             }
         };
@@ -908,6 +924,7 @@ impl Evaluator {
             setup_timing,
             execution_timing,
             cleanup,
+            retained_agent,
         })
     }
 
@@ -970,6 +987,7 @@ impl Evaluator {
             setup_timing,
             execution_timing,
             cleanup: execution.cleanup,
+            retained_agent: None,
         })
     }
 
@@ -1100,6 +1118,20 @@ struct AgentExecution {
     setup_timing: PhaseTiming,
     execution_timing: PhaseTiming,
     cleanup: CleanupPhase,
+    retained_agent: Option<Nanocodex>,
+}
+
+impl AgentExecution {
+    async fn shutdown(&mut self) {
+        let Some(agent) = self.retained_agent.take() else {
+            return;
+        };
+        let started_at = Utc::now();
+        self.cleanup = match agent.shutdown().await {
+            Ok(()) => CleanupPhase::completed(started_at),
+            Err(error) => CleanupPhase::failed(started_at, &error),
+        };
+    }
 }
 
 #[derive(Debug)]
@@ -2191,7 +2223,9 @@ fn failure_kind(error: &EvalError) -> EvalExceptionKind {
         | EvalError::Harness(_)
         | EvalError::AgentEventsClosed
         | EvalError::AgentTerminal(_) => EvalExceptionKind::Agent,
-        EvalError::AttemptVerifier(_) | EvalError::ParseReward(_) => EvalExceptionKind::Verifier,
+        EvalError::AttemptVerifier(_)
+        | EvalError::VerifierBootstrap(_)
+        | EvalError::ParseReward(_) => EvalExceptionKind::Verifier,
         EvalError::UnsupportedNativeTask { .. }
         | EvalError::TaskPackage(_)
         | EvalError::OutputOverlapsTask { .. }
@@ -2567,6 +2601,28 @@ fn verifier_status(verifier: &crate::VerifierResult) -> EvalStatus {
     } else {
         EvalStatus::Failed
     }
+}
+
+fn verifier_bootstrap_error(verifier: &VerifierExecution) -> Option<EvalError> {
+    if verifier.result.rewards.values().all(|reward| *reward > 0.0)
+        || verifier.stdout.contains("test session starts")
+    {
+        return None;
+    }
+
+    let evidence = format!("{}\n{}", verifier.stdout, verifier.stderr).to_ascii_lowercase();
+    let signal = [
+        "failed to download",
+        "error sending request",
+        "temporary failure in name resolution",
+        "could not resolve host",
+        "name or service not known",
+        "network is unreachable",
+        "connection timed out",
+    ]
+    .into_iter()
+    .find(|signal| evidence.contains(signal))?;
+    Some(EvalError::VerifierBootstrap(signal.to_owned()))
 }
 
 fn record_span_result<T, E>(span: &tracing::Span, started_at: Instant, result: &Result<T, E>)
