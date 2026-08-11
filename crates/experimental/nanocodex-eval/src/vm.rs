@@ -2065,6 +2065,10 @@ impl VmLaunch {
     ) -> Result<VmToolSession, VmAttemptError> {
         let mut command = Command::new(&self.vmm);
         nanocodex_vm::terminate_child_with_parent(command.as_std_mut());
+        // libkrun creates its gvproxy client socket beneath TMPDIR. Worker
+        // scratch paths are intentionally private but can exceed Unix socket
+        // limits, so give only the VMM process the platform's short temp root.
+        command.env("TMPDIR", "/tmp");
         let firmware = Path::new(DEFAULT_KRUNFW_DIRECTORY);
         if firmware.join(KRUNFW_LIBRARY_FILENAME).is_file() {
             command.env(KRUNFW_LIBRARY_PATH_ENVIRONMENT, firmware.canonicalize()?);
