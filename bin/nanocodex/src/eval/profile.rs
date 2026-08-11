@@ -10,8 +10,8 @@ use eyre::{Result, WrapErr as _, eyre};
 use fs2::FileExt as _;
 use nanocodex::{Model, Thinking};
 use nanocodex_eval::{
-    EvalAttemptOutcome, EvalEventKind, EvalEventStream, EvalStatus, Evaluation, EvaluationClaim,
-    EvaluationSelector, EvaluationWork, Evaluator, ResolvedHarness, Task,
+    EvalAttemptOutcome, EvalEventKind, EvalEventStream, EvalOutcome, EvalStatus, Evaluation,
+    EvaluationClaim, EvaluationSelector, EvaluationWork, Evaluator, ResolvedHarness, Task,
     atif::AtifBuilder,
     coordinator::{CoordinatorClient, RemoteClaim},
     harness::{Harness, HarnessAuth},
@@ -668,6 +668,12 @@ enum ExecutionResult {
     },
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum ExecutionDisposition {
+    Completed(EvalStatus),
+    Retry,
+}
+
 const fn eval_status_name(status: EvalStatus) -> &'static str {
     match status {
         EvalStatus::Passed => "passed",
@@ -676,18 +682,25 @@ const fn eval_status_name(status: EvalStatus) -> &'static str {
 }
 
 fn classify_execution(outcome: &EvalAttemptOutcome, evidence: PathBuf) -> ExecutionResult {
-    match outcome.scored() {
-        Some(result) => ExecutionResult::Completed {
-            status: result.status,
-            evidence,
-        },
-        None => ExecutionResult::InfrastructureFailed {
-            error: outcome.unscored().map_or_else(
+    match execution_disposition(outcome.outcome()) {
+        ExecutionDisposition::Completed(status) => ExecutionResult::Completed { status, evidence },
+        ExecutionDisposition::Retry => ExecutionResult::InfrastructureFailed {
+            error: outcome.exception().map_or_else(
                 || "evaluation attempt was not scored".to_owned(),
-                |failure| failure.traceback().to_owned(),
+                |exception| exception.traceback.clone(),
             ),
             evidence,
         },
+    }
+}
+
+const fn execution_disposition(outcome: EvalOutcome) -> ExecutionDisposition {
+    match outcome {
+        EvalOutcome::Passed => ExecutionDisposition::Completed(EvalStatus::Passed),
+        EvalOutcome::VerifierFailed | EvalOutcome::SafetyRefusal => {
+            ExecutionDisposition::Completed(EvalStatus::Failed)
+        }
+        EvalOutcome::AgentTimeout | EvalOutcome::InfrastructureError => ExecutionDisposition::Retry,
     }
 }
 
@@ -914,7 +927,9 @@ mod tests {
 
     use clap::Parser as _;
 
-    use super::default_state_dir;
+    use nanocodex_eval::{EvalOutcome, EvalStatus};
+
+    use super::{ExecutionDisposition, default_state_dir, execution_disposition};
     use crate::{Cli, Command, eval::EvalCommand};
 
     #[test]
@@ -1017,6 +1032,30 @@ mod tests {
         assert_eq!(
             path.file_name().and_then(|name| name.to_str()),
             Some("evals")
+        );
+    }
+
+    #[test]
+    fn lifecycle_failures_cannot_become_scored_successes() {
+        assert_eq!(
+            execution_disposition(EvalOutcome::InfrastructureError),
+            ExecutionDisposition::Retry
+        );
+        assert_eq!(
+            execution_disposition(EvalOutcome::AgentTimeout),
+            ExecutionDisposition::Retry
+        );
+        assert_eq!(
+            execution_disposition(EvalOutcome::SafetyRefusal),
+            ExecutionDisposition::Completed(EvalStatus::Failed)
+        );
+        assert_eq!(
+            execution_disposition(EvalOutcome::Passed),
+            ExecutionDisposition::Completed(EvalStatus::Passed)
+        );
+        assert_eq!(
+            execution_disposition(EvalOutcome::VerifierFailed),
+            ExecutionDisposition::Completed(EvalStatus::Failed)
         );
     }
 }
