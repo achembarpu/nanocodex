@@ -58,7 +58,7 @@ pub(crate) fn prompt(
     )
 }
 
-fn worker_directory(profile: Option<&str>, config: &Path) -> std::path::PathBuf {
+pub(crate) fn worker_directory(profile: Option<&str>, config: &Path) -> std::path::PathBuf {
     let profile = profile.unwrap_or("default");
     let profile = profile
         .chars()
