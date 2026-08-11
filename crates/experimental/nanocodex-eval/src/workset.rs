@@ -116,6 +116,8 @@ pub struct WorksetStatus {
     pub digest: String,
     /// Aggregate task-row counts.
     pub tasks: TaskCounts,
+    /// Stable names of workers that currently own running rows.
+    pub workers: Vec<String>,
     /// Exact family-level status records.
     pub families: Vec<FamilyStatus>,
 }
@@ -869,6 +871,13 @@ fn read_status(
         [workset_id],
         counts_from_row,
     )?;
+    let mut worker_statement = connection.prepare(
+        "SELECT DISTINCT worker FROM eval_tasks \
+         WHERE workset_id = ?1 AND state = 'running' AND worker IS NOT NULL ORDER BY worker",
+    )?;
+    let workers = worker_statement
+        .query_map([workset_id], |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
     let mut statement = connection.prepare(
         "SELECT e.family_key, d.selector, e.harness, e.model, e.thinking, e.web_search, COUNT(*), \
             COALESCE(SUM(e.state = 'unclaimed'), 0), \
@@ -901,6 +910,7 @@ fn read_status(
         profile: profile.to_owned(),
         digest: digest.to_owned(),
         tasks,
+        workers,
         families,
     })
 }

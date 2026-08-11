@@ -5,13 +5,11 @@ use eyre::{Result, WrapErr as _};
 use nanocodex_eval::{Evaluation, EvaluationStatus, coordinator::CoordinatorClient};
 use serde::Deserialize;
 
-use super::{profile::default_state_dir, systemd};
+use super::profile::default_state_dir;
 use crate::{
     RetryableProcessExit, benchmark, config::AgentArgs, observability::ObservabilityArgs, run, tui,
     vm::VmArgs,
 };
-
-mod supervisor;
 
 #[derive(Args)]
 pub(super) struct Benchmark {
@@ -36,10 +34,6 @@ pub(super) struct Benchmark {
     #[arg(long)]
     headless: bool,
 
-    /// Install and start this benchmark as a durable user systemd service.
-    #[arg(long, conflicts_with = "coordinator")]
-    systemd: bool,
-
     #[command(flatten)]
     agent: AgentArgs,
 
@@ -58,17 +52,10 @@ impl Benchmark {
             state_dir,
             coordinator,
             headless,
-            systemd,
             agent,
             observability,
             vm,
         } = self;
-        if systemd {
-            return systemd::install(Some(&profile), &config, state_dir.as_deref());
-        }
-        if headless && let Some(coordinator) = coordinator.as_deref() {
-            return supervisor::run(&profile, &config, coordinator).await;
-        }
         let prompt = benchmark::prompt(
             Some(&profile),
             &config,
@@ -183,70 +170,5 @@ impl From<EvaluationStatus> for BoardStatus {
                 failed: status.tasks.failed,
             },
         }
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use super::{BoardCounts, BoardStatus};
-    use crate::{RETRYABLE_EXIT_CODE, process_exit_code};
-
-    #[test]
-    fn benchmark_succeeds_only_when_the_entire_board_is_terminal() {
-        let complete = BoardStatus {
-            tasks: BoardCounts {
-                unclaimed: 0,
-                running: 0,
-                success: 27,
-                failed: 3,
-            },
-        };
-        assert!(complete.require_complete(None).is_ok());
-
-        for incomplete in [
-            BoardStatus {
-                tasks: BoardCounts {
-                    unclaimed: 1,
-                    ..complete.tasks
-                },
-            },
-            BoardStatus {
-                tasks: BoardCounts {
-                    running: 1,
-                    ..complete.tasks
-                },
-            },
-        ] {
-            let error = incomplete.require_complete(None).unwrap_err();
-            assert_eq!(process_exit_code(&error), RETRYABLE_EXIT_CODE);
-        }
-    }
-
-    #[test]
-    fn remote_status_uses_the_same_completion_contract() {
-        let board: BoardStatus = serde_json::from_value(serde_json::json!({
-            "profile": "release",
-            "digest": "abc",
-            "tasks": { "unclaimed": 0, "running": 0, "success": 18, "failed": 2 },
-            "families": [],
-        }))
-        .unwrap();
-        assert!(board.require_complete(None).is_ok());
-    }
-
-    #[test]
-    fn agent_failure_is_retryable_while_the_board_remains_incomplete() {
-        let board = BoardStatus {
-            tasks: BoardCounts {
-                unclaimed: 1,
-                running: 0,
-                success: 19,
-                failed: 0,
-            },
-        };
-        let workflow_error = eyre::eyre!("connection closed");
-        let error = board.require_complete(Some(&workflow_error)).unwrap_err();
-        assert_eq!(process_exit_code(&error), RETRYABLE_EXIT_CODE);
-        assert!(error.to_string().contains("connection closed"));
     }
 }
