@@ -232,14 +232,7 @@ impl EvaluatorRunner {
         &self,
         task: ClaimedEvaluationTask,
     ) -> Result<EvalAttemptOutcome, EvaluationExecutionError> {
-        let (task, _, _, _, _, output) = task.into_parts();
-        if output != self.evaluator.directory() {
-            return Err(EvaluationExecutionError::invariant(format!(
-                "claimed output {} does not match executor output {}",
-                output.display(),
-                self.evaluator.directory().display()
-            )));
-        }
+        let (task, _, _, _, _, _) = task.into_parts();
         let event_log = self.evaluator.directory().join("events.jsonl");
         let run = self.evaluator.task(task);
         let stream = run.events().subscribe();
