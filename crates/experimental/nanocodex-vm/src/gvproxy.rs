@@ -16,6 +16,7 @@ use tracing::{error, warn};
 use crate::terminate_child_with_parent;
 
 const SOCKET_TIMEOUT: Duration = Duration::from_secs(5);
+const SOCKET_ACTIVATION_GRACE: Duration = Duration::from_millis(100);
 const API_TIMEOUT: Duration = Duration::from_secs(5);
 const MAX_API_RESPONSE_BYTES: usize = 64 * 1024;
 
@@ -169,6 +170,15 @@ impl Gvproxy {
                     },
                     timeout: SOCKET_TIMEOUT,
                 });
+            }
+            thread::sleep(Duration::from_millis(10));
+        }
+        // gvproxy publishes its socket nodes before the vfkit packet loop can
+        // reliably accept an immediate libkrun client. Without this grace an
+        // otherwise healthy first VM can panic while activating virtio-net.
+        while started_at.elapsed() < SOCKET_ACTIVATION_GRACE {
+            if let Some(status) = child.try_wait()? {
+                return Err(GvproxyError::EarlyExit(status));
             }
             thread::sleep(Duration::from_millis(10));
         }
