@@ -10,6 +10,7 @@ mod arena_hard;
 mod genebench_pro;
 mod graphwalks;
 mod harbor;
+mod mrcr;
 mod source;
 mod swe_atlas_qna;
 mod swe_bench;
@@ -113,6 +114,11 @@ const INSTALLED_ADAPTERS: &[InstalledAdapter] = &[
         import: import_graphwalks,
         matches: exact_task,
     },
+    InstalledAdapter {
+        names: &["mrcr-v2"],
+        import: import_mrcr,
+        matches: exact_task,
+    },
 ];
 
 const TERMINAL_BENCH_REVISION: &str = "5c8eadf1f393183288fa08b8f73ca9a469cc5e00";
@@ -133,6 +139,33 @@ const GRAPHWALKS_SHORT_SHA256: &str =
     "54036036c91d8e04bb2a5fcd9e36f8e2a852cacece5dfc2b1ee40e3a6182b516";
 const GRAPHWALKS_LONG_SHA256: &str =
     "537879431c72a42e3b500f80efc3047e7facb90390b6063d33679b4320985911";
+const MRCR_REVISION: &str = "f4c69fae7cf81f7ca26b9fee34b392a50f6b8a1d";
+const MRCR_FILES: [(&str, &str); 6] = [
+    (
+        "2needle/2needle_0.parquet",
+        "1c297b254bf64a31856b74918cd7db889a214503e0b67daa834e84f20df6aa93",
+    ),
+    (
+        "2needle/2needle_1.parquet",
+        "a5a1dc9ccc945623253d04d33c03d89aee2d676c88955ce368da2ab16a0ce94d",
+    ),
+    (
+        "4needle/4needle_0.parquet",
+        "4d4fa3d11ce064749de3cd039eef1a621e30a81c2c9b3e64f1df37f8afeaf312",
+    ),
+    (
+        "4needle/4needle_1.parquet",
+        "8dfdb94a208cf3eee73c4e7ac6ee8a5ccb7236c6934c13c6c5f67c0a9928cdf3",
+    ),
+    (
+        "8needle/8needle_0.parquet",
+        "65df601a2e0ae4a3cfb56920a6ef99f26c0de37c6b1018695e8aed684e6a94c1",
+    ),
+    (
+        "8needle/8needle_1.parquet",
+        "c80b19573bff1d38e1c157d6a0bdf9cfd1a8ab6372296174c9a7015e164189e3",
+    ),
+];
 
 fn import_harbor(
     request: &BenchmarkRequest,
@@ -335,6 +368,31 @@ fn import_graphwalks(
         nanocodex_eval::import::Environment::OciImage("python:3.12-slim".to_owned()),
         Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/graphwalks"),
     ))?)
+}
+
+fn import_mrcr(
+    request: &BenchmarkRequest,
+    sources: &SourceStore,
+    store: &ImportStore,
+) -> Result<ImportedDataset, AdapterError> {
+    let base = format!("https://huggingface.co/datasets/openai/mrcr/resolve/{MRCR_REVISION}");
+    for (relative, sha256) in MRCR_FILES {
+        sources.download(
+            &format!("mrcr/{relative}"),
+            &format!("{base}/{relative}"),
+            sha256,
+        )?;
+    }
+    let mut importer = mrcr::Mrcr::new(
+        sources.root().join("mrcr"),
+        format!("openai/mrcr@{MRCR_REVISION}"),
+        nanocodex_eval::import::Environment::OciImage("python:3.12-slim".to_owned()),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/mrcr"),
+    );
+    if !request.all {
+        importer = importer.tasks(request.tasks.iter().cloned());
+    }
+    Ok(store.import(&importer)?)
 }
 
 impl AdapterCatalog {

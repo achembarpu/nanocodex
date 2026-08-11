@@ -99,6 +99,7 @@ pub(crate) use harness_exec::{
     HarnessCommandOutput, HarnessCommandRunner, HarnessCommandRunnerError, HarnessCommandStatus,
     HarnessExec, HarnessExecError,
 };
+pub use nanocodex_oai_api::{PromptMessage, PromptMessageRole};
 pub use profile::{ResolvedHarness, ResolvedTask};
 pub use result::{
     AgentMetadata, AgentResult, AgentStatus, BillingCompleteness, CleanupDiagnostic, CleanupPhase,
