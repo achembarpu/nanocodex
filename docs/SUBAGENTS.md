@@ -8,12 +8,20 @@ are limited to Nanocodex module paths, removal of Tact’s separate memory-tool
 coupling, CLI configuration, event draining, shutdown wiring, and explicit
 propagation of Nanocodex’s originating tool span into the child harness.
 
-Enable it explicitly for a TUI or one-shot run:
+Subagents are enabled by default for TUI and one-shot runs:
 
 ```sh
-nanocodex --subagents true --max-subagents 32
-nanocodex run --subagents true --max-subagents 32 "implement the change"
+nanocodex --max-subagents 32
+nanocodex run --max-subagents 32 "implement the change"
 ```
+
+Pass `--subagents false` or set `NANOCODEX_SUBAGENTS=false` to disable the
+general-purpose subagent tools for a session.
+
+When enabled, the root agent also receives Tact's fixed orchestration guidance:
+delegate only meaningful separable work, run independent children concurrently,
+use their typed outputs for dependent stages, avoid repeating delegated work,
+verify their findings, and keep concurrent write scopes disjoint.
 
 `--max-subagents` bounds active child turns across the complete task tree. Idle
 reusable sessions consume no capacity. Lowering the limit does not cancel work;

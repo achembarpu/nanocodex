@@ -755,7 +755,7 @@ impl Registry {
         self.capacity.set_limit(limit);
     }
 
-    async fn is_root_session(&self, session_id: &str) -> bool {
+    pub(super) async fn is_root_session(&self, session_id: &str) -> bool {
         !self
             .state
             .lock()

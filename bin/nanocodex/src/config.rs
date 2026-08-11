@@ -28,7 +28,7 @@ use nanocodex::{
 use crate::browser::{BrowserArgs, ConfiguredBrowser};
 use crate::mcp::{ConfiguredMcp, McpArgs};
 use crate::mpp::{MppAdapter, MppArgs};
-use crate::subagents::{self, ChildAgents, DEFAULT_MAX_SUBAGENTS};
+use crate::subagents::{self, ChildAgents, DEFAULT_MAX_SUBAGENTS, SubagentToolSet};
 use crate::vm::{ConfiguredVm, VmArgs};
 
 pub(crate) struct ConfiguredAgent {
@@ -149,11 +149,11 @@ pub(crate) struct AgentArgs {
     )]
     image_generation: bool,
 
-    /// Expose clean, reusable Tact-style subagents in Code Mode.
+    /// Whether clean, reusable Tact-style subagents are exposed in Code Mode.
     #[arg(
         long,
         env = "NANOCODEX_SUBAGENTS",
-        default_value_t = false,
+        default_value_t = true,
         action = ArgAction::Set
     )]
     subagents: bool,
@@ -255,21 +255,26 @@ impl AgentArgs {
     }
 
     pub(crate) async fn build(self, vm: VmArgs) -> Result<ConfiguredAgent> {
-        self.build_inner(None, vm).await
+        self.build_inner(None, vm, false).await
     }
 
-    pub(crate) async fn build_resumed(
+    pub(crate) async fn build_tui(self, vm: VmArgs) -> Result<ConfiguredAgent> {
+        self.build_inner(None, vm, true).await
+    }
+
+    pub(crate) async fn build_resumed_tui(
         self,
         session: DurableSession,
         vm: VmArgs,
     ) -> Result<ConfiguredAgent> {
-        self.build_inner(Some(session), vm).await
+        self.build_inner(Some(session), vm, true).await
     }
 
     async fn build_inner(
         self,
         durable: Option<DurableSession>,
         vm: VmArgs,
+        simplify_workflow: bool,
     ) -> Result<ConfiguredAgent> {
         let thinking = self.thinking();
         let web_search = self.web_search();
@@ -345,9 +350,9 @@ impl AgentArgs {
             tools = tools.provider(browser.tool());
         }
         let tools = tools.build()?;
-        let subagent_runtime = self
-            .subagents
-            .then(|| subagents::channel(self.max_subagents));
+        let generic_subagents = self.subagents;
+        let subagent_tools = selected_subagent_tools(generic_subagents, simplify_workflow);
+        let subagent_runtime = subagent_tools.map(|_| subagents::channel(self.max_subagents));
         let mut builder = Nanocodex::builder(openai)
             .model(self.model)
             .reasoning_mode(self.reasoning_mode)
@@ -364,16 +369,23 @@ impl AgentArgs {
         if let Some(rollout) = session.rollout {
             builder = builder.rollout(rollout);
         }
-        let builder = if let Some((registry, _, _)) = &subagent_runtime {
+        let builder = if let (Some((registry, _, _)), Some(subagent_tools)) =
+            (&subagent_runtime, subagent_tools)
+        {
             let tools = tools;
             let registry = Arc::clone(registry);
             builder.tools_factory(move |agent| {
-                subagents::install_tools(tools.clone(), agent, Arc::clone(&registry))
+                subagents::install_tools(
+                    tools.clone(),
+                    agent,
+                    Arc::clone(&registry),
+                    subagent_tools,
+                )
             })
         } else {
             builder.tools(tools)
         };
-        let instructions = session_instructions(self.instructions, self.subagents);
+        let instructions = session_instructions(self.instructions, generic_subagents);
         let builder = if let Some(instructions) = instructions {
             builder.instructions(instructions)
         } else {
@@ -393,6 +405,18 @@ impl AgentArgs {
             browser: configured_browser,
             vm: configured_vm,
         })
+    }
+}
+
+const fn selected_subagent_tools(
+    generic_subagents: bool,
+    simplify_workflow: bool,
+) -> Option<SubagentToolSet> {
+    match (generic_subagents, simplify_workflow) {
+        (true, true) => Some(SubagentToolSet::GenericAndSimplify),
+        (true, false) => Some(SubagentToolSet::Generic),
+        (false, true) => Some(SubagentToolSet::Simplify),
+        (false, false) => None,
     }
 }
 
@@ -654,12 +678,14 @@ pub(crate) fn default_codex_home() -> Result<PathBuf> {
 mod tests {
     use std::sync::atomic::{AtomicU64, Ordering};
 
-    use clap::CommandFactory;
+    use clap::{CommandFactory, Parser};
     use nanocodex::oai::auth::OpenAiAuthMode;
 
     use super::{
-        direct_websocket_url, select_auth, select_auth_with_default, selected_api_base_url,
+        SUBAGENT_INSTRUCTIONS, direct_websocket_url, select_auth, select_auth_with_default,
+        selected_api_base_url, selected_subagent_tools, session_instructions,
     };
+    use crate::subagents::SubagentToolSet;
 
     #[test]
     fn default_websocket_url_follows_the_selected_auth_mode() {
@@ -722,14 +748,63 @@ mod tests {
     }
 
     #[test]
-    fn subagents_are_opt_in() {
+    fn subagents_are_enabled_by_default() {
         let command = crate::Cli::command();
         let subagents = command
             .get_arguments()
             .find(|argument| argument.get_id() == "subagents")
             .expect("the CLI should expose the subagents argument");
 
-        assert_eq!(subagents.get_default_values(), ["false"]);
+        assert_eq!(subagents.get_default_values(), ["true"]);
+    }
+
+    #[test]
+    fn subagents_can_be_disabled_explicitly() {
+        let cli = crate::Cli::try_parse_from(["nanocodex", "--subagents", "false"]).unwrap();
+
+        assert!(!cli.agent.subagents);
+    }
+
+    #[test]
+    fn subagent_concurrency_defaults_to_tacts_limit() {
+        let command = crate::Cli::command();
+        let max_subagents = command
+            .get_arguments()
+            .find(|argument| argument.get_id() == "max_subagents")
+            .expect("the CLI should expose the max-subagents argument");
+
+        assert_eq!(max_subagents.get_default_values(), ["32"]);
+    }
+
+    #[test]
+    fn subagent_instructions_follow_the_enable_switch() {
+        let custom = "custom instructions".to_owned();
+        assert_eq!(
+            session_instructions(Some(custom.clone()), false),
+            Some(custom.clone())
+        );
+
+        let enabled = session_instructions(Some(custom), true).unwrap();
+        assert!(enabled.starts_with("custom instructions\n\n"));
+        assert!(enabled.ends_with(SUBAGENT_INSTRUCTIONS));
+        assert_eq!(enabled.matches(SUBAGENT_INSTRUCTIONS).count(), 1);
+    }
+
+    #[test]
+    fn simplify_reuses_the_runtime_without_exposing_generic_subagents() {
+        assert_eq!(
+            selected_subagent_tools(false, true),
+            Some(SubagentToolSet::Simplify)
+        );
+        assert_eq!(selected_subagent_tools(false, false), None);
+        assert_eq!(
+            selected_subagent_tools(true, false),
+            Some(SubagentToolSet::Generic)
+        );
+        assert_eq!(
+            selected_subagent_tools(true, true),
+            Some(SubagentToolSet::GenericAndSimplify)
+        );
     }
 
     #[test]

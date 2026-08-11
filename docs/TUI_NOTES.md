@@ -66,6 +66,7 @@ that may affect the current run, while `Tab` creates a later queued turn.
 | `/close` | Close the `/btw` pane once it is idle. A busy pane is retained and reports why it cannot close. |
 | `/cancel` | Cancel the focused turn without the two-stage Escape gesture. |
 | `/trace` | Open Jaeger filtered to the focused session. A `/btw` trace becomes available after its fork has produced a session ID. |
+| `/simplify [focus]` | Review the current Git diff for reuse, simplification, efficiency, and abstraction-depth cleanups with four concurrent read-only specialists, then apply behavior-preserving findings. The workflow is available without `--subagents`. |
 
 Unknown slash-prefixed input is sent to the model as an ordinary prompt.
 
