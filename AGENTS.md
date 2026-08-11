@@ -27,6 +27,12 @@
   concrete need in the current slice.
 - Add focused deterministic tests for public contracts and demonstrated
   regressions, not for coverage. Compile public examples as part of validation.
+- During active eval-orchestrator, coordinator, adapter, or dashboard
+  iteration, do not run `cargo test` after each edit. Make the complete focused
+  change, build and deploy it once on `dev-georgios`, and exercise the real
+  benchmark path there. Run focused Rust tests only at final handoff, when a
+  demonstrated regression needs one, or when the user explicitly asks; never
+  compile the full eval dependency graph merely to validate a small iteration.
 - Do not add or run CLI tests that assert benchmark-orchestrator prompt wording
   or scheduling policy. Every change to benchmark orchestration or saturation
   policy must be built, deployed, and exercised against the real coordinator
