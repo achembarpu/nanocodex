@@ -9,6 +9,7 @@
 mod arena_hard;
 mod harbor;
 mod source;
+mod swe_atlas_qna;
 mod swe_bench;
 
 use std::{
@@ -95,6 +96,11 @@ const INSTALLED_ADAPTERS: &[InstalledAdapter] = &[
         import: import_swe_bench,
         matches: exact_task,
     },
+    InstalledAdapter {
+        names: &["swe-atlas-qna"],
+        import: import_swe_atlas,
+        matches: matches_swe_atlas_task,
+    },
 ];
 
 const TERMINAL_BENCH_REVISION: &str = "5c8eadf1f393183288fa08b8f73ca9a469cc5e00";
@@ -102,6 +108,7 @@ const DEEP_SWE_REVISION: &str = "e016041a6ccf8da29906afc9a3f5a8df940a1f78";
 const ARENA_HARD_REVISION: &str = "196f6b826783b3da7310e361a805fa36f0be83f3";
 const SWE_VERIFIED_ROW_RESPONSE_SHA256: &str =
     "7c62220a467830a3a330dda51211ab4c1ba099124dffc8371fbec057933c47b8";
+const SWE_ATLAS_REVISION: &str = "6de82c3603fb9e254170b440d7560441eb257176";
 
 fn import_harbor(
     request: &BenchmarkRequest,
@@ -202,6 +209,29 @@ fn import_swe_bench(
         harness,
     );
     Ok(store.import(&importer)?)
+}
+
+fn import_swe_atlas(
+    _request: &BenchmarkRequest,
+    sources: &SourceStore,
+    store: &ImportStore,
+) -> Result<ImportedDataset, AdapterError> {
+    let root = sources.git_checkout(
+        "swe-atlas",
+        "https://github.com/scaleapi/SWE-Atlas.git",
+        SWE_ATLAS_REVISION,
+    )?;
+    Ok(store.import(&swe_atlas_qna::SweAtlasQna::new(
+        root.join("data/qa"),
+        format!("scaleapi/SWE-Atlas@{SWE_ATLAS_REVISION}"),
+    ))?)
+}
+
+fn matches_swe_atlas_task(selected: &str, normalized: &str) -> bool {
+    selected == normalized
+        || normalized
+            .strip_prefix("scale-ai-")
+            .is_some_and(|task| task == selected)
 }
 
 impl AdapterCatalog {

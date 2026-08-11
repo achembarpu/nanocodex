@@ -29,3 +29,9 @@ benchmarks = ["swe-bench-verified-smoke/astropy__astropy-12907"]
 trials = 1
 model = ["sol"]
 thinking = ["high"]
+
+[profiles.swe-atlas-smoke]
+benchmarks = ["swe-atlas-qna/task-6905333b74f22949d97ba9c2"]
+trials = 1
+model = ["sol"]
+thinking = ["high"]
