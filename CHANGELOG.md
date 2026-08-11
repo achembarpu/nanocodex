@@ -5,28 +5,351 @@ All notable changes to Nanocodex are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## Unreleased
+## [0.4.0](https://github.com/gakonst/nanocodex/releases/tag/v0.4.0) - 2026-08-11
 
 ### Bug Fixes
 
-- [oai] Retry transient HTTP 403 WebSocket upgrades before falling back to
-  HTTPS, and retain gateway diagnostics when the rejection body is empty.
+- [ci] Stabilize process timing tests
+- [eval] Extract GPQA archive in process
+- [eval] Select the pinned Arena-Hard smoke case
+- [eval] Order artifact archive options
+- [eval] Requeue scored lifecycle failures
+- [oai] Allow long silent response generations
+- [eval] Stage files in isolated verifier VMs
+- [eval] Join agents before verifier isolation
+- [eval] Canonicalize pull worker evidence roots
+- [eval] Send task roots to pull workers
+- [eval] Preserve same-role benchmark messages
+- [ci] Preserve typed prompt consumer contracts
+- [eval] Satisfy strict coordinator clippy
+- [eval] Pause admission after capacity deaths
+- [eval] Account for pending worker claims
+- [eval] Make headless benchmark supervision deterministic
+- [eval] Keep controller reconciliation bounded
+- [eval] Release every exited worker claim
+- [eval] Keep libkrun sockets on short temp paths
+- [vm] Wait for gvproxy packet activation
+- [eval] Keep cold verifiers off cache disks
+- [eval] Move verifier cache warming off worker admission
+- [eval] Keep coordinator responsive under worker bursts
+- [eval] Keep gvproxy socket paths short
+- [evals] Keep live task reads database-only
+- [evals] Refresh retried result projections
+- [evals] Estimate missing benchmark costs
+- [eval] Recover cleanly from worker infrastructure failures
+- [eval] Make benchmark saturation autonomous
+- [eval] Let workers outlive benchmark controller
+- [eval] Separate verifier and infrastructure failures
+- [eval] Reserve headroom for live VM growth
+- [eval] Continuously backfill benchmark capacity
+- [eval] Observe capacity between admissions
+- [eval] Preserve compact capacity counts
+- [eval] Make capacity telemetry executable
+- [eval] Saturate benchmark from live host capacity
+- [ci] Stabilize cross-platform runtime checks
+- [eval] Preserve active benchmark workers
+- [oai] Recover forbidden websocket handshakes
+- [ci] Satisfy durable baseline gates
+- [eval] Complete durable runtime ownership
+- [eval] Preserve inherited worker config
+- [eval] Forbid recursive benchmark agents
+- [eval] Aggressively saturate benchmark hosts
+- [eval] Keep benchmark orchestration direct
+- [eval] Expose benchmark cli executable
+- [eval] Simplify benchmark orchestration
+- [eval] Autoheal stalled coordinators
+- [eval] Make benchmark launch gates explicit
+- [eval] Launch benchmark runs before adapting
+- [eval] Drive benchmark hosts aggressively
+- [eval] Bound orchestration status and reclaim dead workers
+- [eval] Isolate benchmark agent from source checkout
+- [eval] Preserve worker affinity in orchestration
+- [eval] Route supervised benchmark through coordinator
+- [eval] Read current sqlite work on every claim
+- [eval] Satisfy Linux prepared-host Clippy ([#134](https://github.com/gakonst/nanocodex/issues/134))
+- [eval] Install harnesses during task preparation
+- [eval] Make profile identity host independent
+- [eval] Prepare task images under the durable lease
+- [browser] Keep deferred schema lookup private
+- [tools] Restore stock Codex code mode parity
+- [oai] Preserve code mode notifications in replay
+- [cli] Honor browser cookie opt-out
+- [cli] Default browser to Brave
+- Close remaining Codex wire parity gaps
+- [tui] Sanitize resume picker metadata
+- [cli] Remove Tempo charge cap
+- [rivet] Keep sandbox previews durable
+- [rivet] Use direct actor preview gateway
+- [cloudflare] Preserve snapshot tool definition
+- [cloudflare] Proxy sandbox previews through worker
+- [rivet] Reuse cached cloud credentials
+- [web] Follow live eval evidence incrementally
+- [eval] Harden durable differential progress
+- [tui] Strip quote chrome from copied markdown
+- [cloudflare] Synchronize live browser clients
+- [cloudflare] Clarify deployed session authorization
+- [cloudflare] Harden subscription edge demo
+- [web] Retain immutable comparison evidence
+- [web] Require immutable paired eval plans
+- [eval] Harden toolbox runtime fallbacks
+- [eval] Match curl with its CA bundle
+- [tui] Initialize configured fast mode
+- [tui] Support Option-Backspace word deletion
+- [egress] Preserve middleware error chains
+- [vm] Stabilize image cache identity
+- [vm] Own guest command cleanup
+- [oai] Account for usage-uncertain attempts
+- [tools] Keep tool search visible in code mode
+- [tools] Align Code Mode tool contracts
+- [browser] Gate Safari discovery by platform
+- [browser] Decouple cookies from executable
+- [rivet] Reserve turns before replay lookup
+- [mpp] Prefer NanoUSD via provider policy
+- [rivet] Own local server lifecycle
+- [agent] Dispatch unnamespaced hosted tools
+- [wasm] Harden host socket upgrades
+- [tui] Inherit terminal foreground colors
+- [tls] Standardize rustls on ring
+- [examples] Remove duplicate transcript-tail arm
+- [agent] Preserve model in adapter checkpoints
+- [examples] Handle realtime transcript tails
+- [agent] Retain model in fork checkpoints
+- Build Tower services from effective agent config
+- Preserve Codex rollout model compatibility
+- [update] Cache-bust rolling release assets
+- [ci] Allow release builds to finish
+- [ci] Restore nightly platform builds
+- Cancel voice-started turns from the TUI
+- Finish voice platform cleanup
+- Allow unsupported audio stubs
+- [ci] Stabilize loaded Linux checks
+- [ci] Stabilize observability tests
+- [vm] Harden cache and session lifecycle
+- [vm] Preserve parallel tool execution
+- [tui] Preserve streaming frame boundaries
+
+### Dependencies
+
+- [rivet] Remove AgentOS and Pi dependencies
+
+### Documentation
+
+- Keep eval debugging active during waves
+- Streamline experimental eval iteration
+- [web] Explain generated Harbor data
+- Refresh project roadmap
+- [rivet] Remove stale AgentOS reference
+- [browser] Keep agent example at consumer boundary
 
 ### Features
 
-- [cli] Enable private Brave and complete desktop-profile cookie import by
-  default, with compact up-front `tools.browser` discovery in Code Mode.
-- [cli] Enable Tact-style subagents by default with an explicit
-  `--subagents false` opt-out.
-- [tui] Add a first-class `/simplify [focus]` workflow backed by four concurrent
-  read-only reviewers on the shared subagent runtime.
-- [tools] Add bounded MCP pagination, collision-safe Code Mode registration,
-  per-tool and per-server exposure policy, and deferred custom-tool wire shapes.
-- [parity] Classify Codex through `7ada37a1` and defer the standalone V8 host.
-- [model] Support selecting `gpt-5.6-luna` when creating Rust, CLI, Python,
-  JavaScript, and Harbor agent threads.
-- [vm] Add persistent VM-backed workspace tools, immutable root-image
-  preparation, and provider-neutral composable egress leases.
+- [cli] Enable subagents by default
+- [tui] Add simplify workflow
+- [eval] Add external harness adapter
+- [eval] Add OpenAI Evals adapter
+- [eval] Add Agents Last Exam adapter
+- [eval] Add ARC-AGI-3 public smoke adapter
+- [eval] Add BrowseComp adapter
+- [eval] Add GPQA Diamond adapter
+- [eval] Add GDPval adapter
+- [eval] Add HealthBench Professional adapter
+- [eval] Add MRCR adapter
+- [eval] Add GraphWalks adapter
+- [eval] Add GeneBench Pro adapter
+- [eval] Add SWE-Atlas QnA adapter
+- [eval] Add SWE-bench adapter
+- [eval] Add Arena-Hard adapter
+- [eval] Add Harbor benchmark adapter
+- [eval] Isolate model judges behind verifier runtime
+- [eval] Route profiles through adapter catalog
+- [eval] Add benchmark adapter foundation
+- [web] Add durable eval task board
+- [cli] Port Tact subagent runtime
+- [eval] Externalize benchmark orchestration policy
+- [eval] Add work through coordinator API
+- [eval] Place supervised runtime on explicit volume
+- [eval] Expose retained eval coordinator API
+- [eval] Make sqlite own benchmark work
+- [eval] Supervise durable benchmarks with systemd
+- [mpp] Configure Tempo payment token
+- [eval] Label coordinator workers
+- [eval] Pin differential harness versions
+- [eval] Retain native coordinator trajectories
+- [eval] Coordinate directly over Tailscale
+- [eval] Coordinate pull workers over HTTP
+- [eval] Add durable profile ledger
+- [browser] Add pixel-calibrated captures
+- [cli] Enable browser tools by default
+- [tools] Align current Codex parity
+- [cli] Add interactive resume session picker
+- [examples] Use exe.dev as external sandbox
+- [examples] Add retained exe.dev agent
+- [rivet] Verify hosted sandbox previews
+- [examples] Add durable platform sandboxes
+- [model] Support Terra and routed OpenAI model IDs
+- [web] Add live evaluation dashboard
+- [cli] Add durable evaluation commands
+- [eval] Add durable evaluation SDK
+- [cli] Default credits to hosted API
+- [tui] Improve markdown math rendering
+- [cloudflare] Add resumable web client and local subscription egress
+- [cloudflare] Run locally with Codex subscription auth
+- [cloudflare] Add detachable durable REPL
+- Run Nanocodex on Cloudflare Durable Objects
+- [vercel] Add durable Workflow actor demo
+- [eval] Add priority-processing fast path
+- [vm] Add disposable guest overlays
+- [agent] Describe remote execution context
+- [browser] Import Firefox and Safari cookies
+- [browser] Select cookie source profiles
+- [browser] Import Brave profile cookies
+- [rivet] Synchronize actor clients
+- [rivet] Deploy subscription demo to Compute
+- [rivet] Package demo for Rivet Compute
+- [rivet] Add resumable browser client
+- [rivet] Run locally with Codex subscription auth
+- [rivet] Add detachable actor REPL
+- Add Rivet Actors and AgentOS example
+- [egress] Harden secret policy and VM routing
+- [wasm] Support CSP-safe direct host tools
+- Expose reusable WASM host transport
+- [voice] Add Codex realtime parity
+- Support Luna
+- Close Codex realtime parity gaps
+- Match Codex realtime steering
+- Add reusable realtime voice sessions
+- [cli] Integrate deferred browser tooling
+- [browser] Add experimental VM-backed browser
+- [tui] Render display math with Ratatex
+- [tools] Expose the ambient sensitive environment
+- [vm] Add retained VM-backed workspace tools
+- [cli] Cache and switch installed versions
+
+### Miscellaneous Tasks
+
+- [eval] Update Harbor adapter lockfile
+- Update JavaScript package size budget
+- Update JavaScript package size budget
+- Retire Harbor delivery workflows
+- Decouple Harbor from nightly releases
+- [mpp] Pin merged challenge selection
+- Update ruint past advisory
+
+### Other
+
+- Merge pull request [#127](https://github.com/gakonst/nanocodex/issues/127) from gakonst/feat/simplify-workflow
+- Merge pull request [#157](https://github.com/gakonst/nanocodex/issues/157) from gakonst/feat/eval-adapter-external-v2
+- Merge pull request [#156](https://github.com/gakonst/nanocodex/issues/156) from gakonst/feat/eval-adapter-openai-evals-v2
+- Merge pull request [#155](https://github.com/gakonst/nanocodex/issues/155) from gakonst/feat/eval-adapter-agents-last-exam-v2
+- Merge pull request [#154](https://github.com/gakonst/nanocodex/issues/154) from gakonst/feat/eval-adapter-arc-agi-3-v2
+- Merge pull request [#153](https://github.com/gakonst/nanocodex/issues/153) from gakonst/feat/eval-adapter-browsecomp-v2
+- Merge pull request [#152](https://github.com/gakonst/nanocodex/issues/152) from gakonst/feat/eval-adapter-gpqa-diamond-v2
+- Merge pull request [#151](https://github.com/gakonst/nanocodex/issues/151) from gakonst/feat/eval-adapter-gdpval-v2
+- Merge pull request [#150](https://github.com/gakonst/nanocodex/issues/150) from gakonst/feat/eval-adapter-healthbench-pro-v2
+- Merge pull request [#149](https://github.com/gakonst/nanocodex/issues/149) from gakonst/feat/eval-adapter-mrcr-v2
+- Merge pull request [#148](https://github.com/gakonst/nanocodex/issues/148) from gakonst/feat/eval-adapter-graphwalks-v2
+- Merge pull request [#147](https://github.com/gakonst/nanocodex/issues/147) from gakonst/feat/eval-adapter-genebench-pro-v2
+- Merge pull request [#146](https://github.com/gakonst/nanocodex/issues/146) from gakonst/feat/eval-adapter-swe-atlas-v2
+- Merge pull request [#145](https://github.com/gakonst/nanocodex/issues/145) from gakonst/feat/eval-adapter-swe-bench-v2
+- Merge pull request [#144](https://github.com/gakonst/nanocodex/issues/144) from gakonst/feat/eval-adapter-arena-hard-v2
+- Merge pull request [#143](https://github.com/gakonst/nanocodex/issues/143) from gakonst/feat/eval-adapter-harbor-v2
+- Merge pull request [#142](https://github.com/gakonst/nanocodex/issues/142) from gakonst/feat/eval-adapter-foundation
+- Merge pull request [#135](https://github.com/gakonst/nanocodex/issues/135) from gakonst/agent/durable-task-board-20260806
+- Merge pull request [#139](https://github.com/gakonst/nanocodex/issues/139) from gakonst/fix/websocket-403-fallback
+- Merge pull request [#137](https://github.com/gakonst/nanocodex/issues/137) from gakonst/feat/tact-subagents
+- Merge pull request [#136](https://github.com/gakonst/nanocodex/issues/136) from gakonst/feat/eval-systemd-supervision
+- Merge pull request [#124](https://github.com/gakonst/nanocodex/issues/124) from gakonst/fix/codex-parity-current
+- Merge pull request [#122](https://github.com/gakonst/nanocodex/issues/122) from Giulio2002/feat/resume-session-picker
+- Merge pull request [#123](https://github.com/gakonst/nanocodex/issues/123) from gakonst/feat/exe-dev-ssh-multiplex
+- Merge pull request [#119](https://github.com/gakonst/nanocodex/issues/119) from gakonst/feat/exe-dev-spike
+- Merge pull request [#114](https://github.com/gakonst/nanocodex/issues/114) from gakonst/feat/hosted-platform-sandboxes
+- Merge pull request [#121](https://github.com/gakonst/nanocodex/issues/121) from Slokh/kartik/upstream-contributions
+- Merge pull request [#61](https://github.com/gakonst/nanocodex/issues/61) from gakonst/agent/eval-diff
+- Merge pull request [#117](https://github.com/gakonst/nanocodex/issues/117) from gakonst/fix/decouple-harbor-nightly
+- Merge pull request [#118](https://github.com/gakonst/nanocodex/issues/118) from gakonst/codex/hosted-credits-api-default
+- Merge pull request [#115](https://github.com/gakonst/nanocodex/issues/115) from gakonst/fix/markdown-copy-blockquotes
+- Merge pull request [#113](https://github.com/gakonst/nanocodex/issues/113) from gakonst/feat/platform-sandbox-demos
+- Merge pull request [#112](https://github.com/gakonst/nanocodex/issues/112) from gakonst/feat/vercel-workflow-demo
+- Merge pull request [#109](https://github.com/gakonst/nanocodex/issues/109) from brendanjryan/brendanjryan/immutable-harbor-comparisons
+- Merge pull request [#108](https://github.com/gakonst/nanocodex/issues/108) from brendanjryan/brendanjryan/eval-no-rollouts
+- Merge pull request [#105](https://github.com/gakonst/nanocodex/issues/105) from brendanjryan/brendanjryan/eval-tool-install
+- Merge pull request [#106](https://github.com/gakonst/nanocodex/issues/106) from brendanjryan/brendanjryan/eval-fast-mode
+- Merge pull request [#107](https://github.com/gakonst/nanocodex/issues/107) from brendanjryan/brendanjryan/eval-task-images
+- Merge pull request [#103](https://github.com/gakonst/nanocodex/issues/103) from 0xahzam/fix/tui-option-backspace
+- Merge pull request [#111](https://github.com/gakonst/nanocodex/issues/111) from gakonst/fix/egress-payment-error-chain
+- Merge pull request [#100](https://github.com/gakonst/nanocodex/issues/100) from gakonst/agent/pr61-vm-overlays
+- Merge pull request [#99](https://github.com/gakonst/nanocodex/issues/99) from gakonst/agent/pr61-vm-images
+- Merge pull request [#98](https://github.com/gakonst/nanocodex/issues/98) from gakonst/agent/pr61-vm-guest
+- Merge pull request [#97](https://github.com/gakonst/nanocodex/issues/97) from gakonst/agent/pr61-tower-accounting
+- Merge pull request [#96](https://github.com/gakonst/nanocodex/issues/96) from gakonst/agent/pr61-agent-context
+- Merge pull request [#95](https://github.com/gakonst/nanocodex/issues/95) from gakonst/agent/pr61-code-mode
+- Merge pull request [#101](https://github.com/gakonst/nanocodex/issues/101) from gakonst/docs/refresh-project-plan
+- Merge pull request [#93](https://github.com/gakonst/nanocodex/issues/93) from gakonst/feat/brave-browser-cookies
+- Merge pull request [#94](https://github.com/gakonst/nanocodex/issues/94) from gakonst/feat/rivet-synchronized-clients
+- Merge pull request [#92](https://github.com/gakonst/nanocodex/issues/92) from gakonst/fix/nanousd-mpp-selection
+- Merge pull request [#90](https://github.com/gakonst/nanocodex/issues/90) from gakonst/fix/rivet-subscription-cloud-demo
+- Merge pull request [#74](https://github.com/gakonst/nanocodex/issues/74) from gakonst/feat/rivet-actors-wasm
+- Merge pull request [#88](https://github.com/gakonst/nanocodex/issues/88) from gakonst/feat/secret-egress
+- Merge pull request [#70](https://github.com/gakonst/nanocodex/issues/70) from gakonst/feat/composable-egress
+- Merge pull request [#75](https://github.com/gakonst/nanocodex/issues/75) from gakonst/feat/wasm-host-transport
+- Merge pull request [#87](https://github.com/gakonst/nanocodex/issues/87) from vovw/fix/terminal-foreground-colors
+- Merge pull request [#86](https://github.com/gakonst/nanocodex/issues/86) from gakonst/fix/ring-only-rustls
+- Merge pull request [#85](https://github.com/gakonst/nanocodex/issues/85) from gakonst/fix/realtime-tail-unreachable
+- Merge pull request [#83](https://github.com/gakonst/nanocodex/issues/83) from gakonst/fix/realtime-parity-ci
+- Merge pull request [#84](https://github.com/gakonst/nanocodex/issues/84) from gakonst/fix/committed-session-model
+- Merge pull request [#82](https://github.com/gakonst/nanocodex/issues/82) from gakonst/feat/realtime-codex-parity
+- Merge pull request [#80](https://github.com/gakonst/nanocodex/issues/80) from clabby/cl/luna
+- Merge pull request [#81](https://github.com/gakonst/nanocodex/issues/81) from gakonst/fix/voice-turn-cancellation
+- Merge pull request [#77](https://github.com/gakonst/nanocodex/issues/77) from gakonst/feat/realtime-voice
+- Merge pull request [#78](https://github.com/gakonst/nanocodex/issues/78) from gakonst/agent/browser-tui-integration
+- Merge pull request [#69](https://github.com/gakonst/nanocodex/issues/69) from gakonst/agent/pr60-experimental-browser
+- Merge pull request [#68](https://github.com/gakonst/nanocodex/issues/68) from gakonst/agent/ratatex-tui
+- Merge pull request [#66](https://github.com/gakonst/nanocodex/issues/66) from gakonst/codex/pr64-redraw-opt
+- Merge pull request [#59](https://github.com/gakonst/nanocodex/issues/59) from cjustice/feat/ambient-sensitive-environment
+- Merge pull request [#58](https://github.com/gakonst/nanocodex/issues/58) from gakonst/refactor/09-eval
+
+### Performance
+
+- [eval] Import only selected MRCR tasks
+- [evals] Normalize treatment storage
+- [evals] Accelerate live analytics reads
+- [eval] Adapt benchmark fanout to host memory
+- [examples] Reuse exe.dev SSH connections
+- [ci] Streamline release artifact builds
+- [eval] Disable rollout persistence
+- [eval] Skip redundant tool installation
+- [eval] Reuse prepared task images
+- [ci] Avoid fat LTO for release artifacts
+- Harden realtime voice audio paths
+- [tui] Bound streaming redraw CPU
+- [tui] Scope animation redraws
+
+### Refactor
+
+- [eval] Share adapter identity helpers
+- [eval] Simplify durable benchmark ownership
+- [eval] Simplify benchmark driver
+- [eval] Make profiles pure sqlite inputs
+- [eval] Simplify distributed worker runtime
+- [eval] Reduce profiles to durable coordinates
+- [eval] Remove residual sweep completion fields
+- [eval] Collapse profile execution API
+- [eval] Delete redundant orchestration
+- Trim Codex parity implementation
+- [mpp] Extract composable egress transport
+- Fix the model for each thread
+
+### Testing
+
+- [cli] Own interrupt workspaces with tempfile
+- [eval] Stress live coordinator scheduling
+- [eval] Satisfy all-target clippy
+- [rivet] Reattach long hosted smoke turns
+- [vercel] Harden hosted sandbox lifecycle
+- [cloudflare] Harden hosted sandbox tools
+- [observability] Consume OTLP request bodies
+- Synchronize realtime response queue
+- [browser] Prove Nanocodex tool integration
 
 ## [0.3.0](https://github.com/gakonst/nanocodex/releases/tag/v0.3.0) - 2026-07-28
 
@@ -105,6 +428,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Miscellaneous Tasks
 
+- [release] Refresh 0.3.0 changelogs
 - [release] Prepare 0.3.0
 - [consumers] Gate promoted language bindings
 - [js] Ship compiled tui entrypoints
@@ -168,6 +492,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [mcp] Verify read-only parallel dispatch
 - [tools] Serialize traced runtime integration tests
 - [tui] Preserve stored checkpoint branch coverage
+
 ## [0.2.0](https://github.com/gakonst/nanocodex/releases/tag/v0.2.0) - 2026-07-26
 
 ### Bug Fixes

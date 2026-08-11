@@ -1,5 +1,6 @@
 [package]
 name = "nanocodex-bin"
+autotests = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
@@ -88,13 +89,7 @@ chrono.workspace = true
 vergen = { workspace = true, features = ["build", "git", "gitcl"] }
 
 [dev-dependencies]
-axum.workspace = true
 criterion.workspace = true
-nanocodex-tools.workspace = true
-reqwest = { workspace = true, features = ["query"] }
-tokio-tungstenite.workspace = true
-tower.workspace = true
-tracing-subscriber.workspace = true
 
 [[bench]]
 name = "tui_render"
@@ -104,6 +99,7 @@ harness = false
 name = "nanocodex"
 path = "src/main.rs"
 doc = false
+test = false
 
 [lints]
 workspace = true

@@ -5,6 +5,34 @@ All notable changes to Nanocodex are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0](https://github.com/gakonst/nanocodex/releases/tag/v0.4.0) - 2026-08-11
+
+### Bug Fixes
+
+- [tools] Align Code Mode tool contracts
+
+### Features
+
+- [examples] Use exe.dev as external sandbox
+- [model] Support Terra and routed OpenAI model IDs
+- [voice] Add Codex realtime parity
+- Support Luna
+- Match Codex realtime steering
+- Add reusable realtime voice sessions
+
+### Other
+
+- Merge pull request [#119](https://github.com/gakonst/nanocodex/issues/119) from gakonst/feat/exe-dev-spike
+- Merge pull request [#121](https://github.com/gakonst/nanocodex/issues/121) from Slokh/kartik/upstream-contributions
+- Merge pull request [#95](https://github.com/gakonst/nanocodex/issues/95) from gakonst/agent/pr61-code-mode
+- Merge pull request [#82](https://github.com/gakonst/nanocodex/issues/82) from gakonst/feat/realtime-codex-parity
+- Merge pull request [#80](https://github.com/gakonst/nanocodex/issues/80) from clabby/cl/luna
+- Merge pull request [#77](https://github.com/gakonst/nanocodex/issues/77) from gakonst/feat/realtime-voice
+
+### Refactor
+
+- Fix the model for each thread
+
 ## [0.3.0](https://github.com/gakonst/nanocodex/releases/tag/v0.3.0) - 2026-07-28
 
 ### Bug Fixes
@@ -23,6 +51,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Miscellaneous Tasks
 
+- [release] Refresh 0.3.0 changelogs
 - [release] Prepare 0.3.0
 
 ### Other
