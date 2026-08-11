@@ -28,7 +28,7 @@ use nanocodex::{
 use crate::browser::{BrowserArgs, ConfiguredBrowser};
 use crate::mcp::{ConfiguredMcp, McpArgs};
 use crate::mpp::{MppAdapter, MppArgs};
-use crate::subagents::{self, ChildAgents, DEFAULT_MAX_SUBAGENTS};
+use crate::subagents::{self, ChildAgents, DEFAULT_MAX_SUBAGENTS, SubagentToolSet};
 use crate::vm::{ConfiguredVm, VmArgs};
 
 pub(crate) struct ConfiguredAgent {
@@ -255,21 +255,26 @@ impl AgentArgs {
     }
 
     pub(crate) async fn build(self, vm: VmArgs) -> Result<ConfiguredAgent> {
-        self.build_inner(None, vm).await
+        self.build_inner(None, vm, false).await
     }
 
-    pub(crate) async fn build_resumed(
+    pub(crate) async fn build_tui(self, vm: VmArgs) -> Result<ConfiguredAgent> {
+        self.build_inner(None, vm, true).await
+    }
+
+    pub(crate) async fn build_resumed_tui(
         self,
         session: DurableSession,
         vm: VmArgs,
     ) -> Result<ConfiguredAgent> {
-        self.build_inner(Some(session), vm).await
+        self.build_inner(Some(session), vm, true).await
     }
 
     async fn build_inner(
         self,
         durable: Option<DurableSession>,
         vm: VmArgs,
+        simplify_workflow: bool,
     ) -> Result<ConfiguredAgent> {
         let thinking = self.thinking();
         let web_search = self.web_search();
@@ -345,9 +350,9 @@ impl AgentArgs {
             tools = tools.provider(browser.tool());
         }
         let tools = tools.build()?;
-        let subagent_runtime = self
-            .subagents
-            .then(|| subagents::channel(self.max_subagents));
+        let generic_subagents = self.subagents;
+        let subagent_tools = selected_subagent_tools(generic_subagents, simplify_workflow);
+        let subagent_runtime = subagent_tools.map(|_| subagents::channel(self.max_subagents));
         let mut builder = Nanocodex::builder(openai)
             .model(self.model)
             .reasoning_mode(self.reasoning_mode)
@@ -364,16 +369,23 @@ impl AgentArgs {
         if let Some(rollout) = session.rollout {
             builder = builder.rollout(rollout);
         }
-        let builder = if let Some((registry, _, _)) = &subagent_runtime {
+        let builder = if let (Some((registry, _, _)), Some(subagent_tools)) =
+            (&subagent_runtime, subagent_tools)
+        {
             let tools = tools;
             let registry = Arc::clone(registry);
             builder.tools_factory(move |agent| {
-                subagents::install_tools(tools.clone(), agent, Arc::clone(&registry))
+                subagents::install_tools(
+                    tools.clone(),
+                    agent,
+                    Arc::clone(&registry),
+                    subagent_tools,
+                )
             })
         } else {
             builder.tools(tools)
         };
-        let instructions = session_instructions(self.instructions, self.subagents);
+        let instructions = session_instructions(self.instructions, generic_subagents);
         let builder = if let Some(instructions) = instructions {
             builder.instructions(instructions)
         } else {
@@ -393,6 +405,18 @@ impl AgentArgs {
             browser: configured_browser,
             vm: configured_vm,
         })
+    }
+}
+
+const fn selected_subagent_tools(
+    generic_subagents: bool,
+    simplify_workflow: bool,
+) -> Option<SubagentToolSet> {
+    match (generic_subagents, simplify_workflow) {
+        (true, true) => Some(SubagentToolSet::GenericAndSimplify),
+        (true, false) => Some(SubagentToolSet::Generic),
+        (false, true) => Some(SubagentToolSet::Simplify),
+        (false, false) => None,
     }
 }
 
@@ -659,7 +683,9 @@ mod tests {
 
     use super::{
         direct_websocket_url, select_auth, select_auth_with_default, selected_api_base_url,
+        selected_subagent_tools,
     };
+    use crate::subagents::SubagentToolSet;
 
     #[test]
     fn default_websocket_url_follows_the_selected_auth_mode() {
@@ -730,6 +756,23 @@ mod tests {
             .expect("the CLI should expose the subagents argument");
 
         assert_eq!(subagents.get_default_values(), ["false"]);
+    }
+
+    #[test]
+    fn simplify_reuses_the_runtime_without_exposing_generic_subagents() {
+        assert_eq!(
+            selected_subagent_tools(false, true),
+            Some(SubagentToolSet::Simplify)
+        );
+        assert_eq!(selected_subagent_tools(false, false), None);
+        assert_eq!(
+            selected_subagent_tools(true, false),
+            Some(SubagentToolSet::Generic)
+        );
+        assert_eq!(
+            selected_subagent_tools(true, true),
+            Some(SubagentToolSet::GenericAndSimplify)
+        );
     }
 
     #[test]

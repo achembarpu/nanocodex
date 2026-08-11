@@ -10,6 +10,7 @@ mod harness;
 mod message;
 mod model;
 mod runtime;
+mod simplify;
 mod task_tree;
 mod tools;
 
@@ -23,7 +24,7 @@ use std::sync::Arc;
 use tokio::{sync::mpsc, task::JoinHandle};
 
 pub(crate) use runtime::{Registry, SubagentControl, channel};
-pub(crate) use tools::install_tools;
+pub(crate) use tools::{SubagentToolSet, install_tools};
 
 pub(crate) const DEFAULT_MAX_SUBAGENTS: usize = 32;
 

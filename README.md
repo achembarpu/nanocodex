@@ -55,6 +55,21 @@ version.
 PR artifacts require an authenticated `gh` CLI and an already completed
 on-demand artifact workflow for that PR.
 
+### Interactive cleanup workflow
+
+The TUI includes a behavior-preserving cleanup pass for recently changed code:
+
+```text
+/simplify
+/simplify focus on memory efficiency
+```
+
+The command selects the current Git diff, runs independent reuse,
+simplification, efficiency, and abstraction-depth reviewers concurrently, then
+deduplicates and applies valid findings. The workflow reuses the CLI's owned
+subagent runtime in ordinary TUI sessions; general-purpose subagent tools remain
+opt-in through `--subagents`.
+
 ## Minimal API Example
 
 ```rust,ignore

@@ -8,6 +8,7 @@ use super::{
         MessagePurpose, agent_prompt,
     },
     runtime::{AgentDirectoryEntry, AgentSummary, OutputContract, Registry, forward_events},
+    simplify::SimplifyReview,
 };
 use nanocodex::{
     Tool, Tools,
@@ -35,17 +36,17 @@ const WAIT_AGENT_TOOL: &str = "wait_agent";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-struct AgentTask {
-    role: String,
-    task: String,
-    output_schema: Value,
+pub(super) struct AgentTask {
+    pub(super) role: String,
+    pub(super) task: String,
+    pub(super) output_schema: Value,
 }
 
 #[derive(Serialize)]
-struct AgentStartReport {
-    agent_id: AgentId,
-    role: String,
-    status: AgentStatus,
+pub(super) struct AgentStartReport {
+    pub(super) agent_id: AgentId,
+    pub(super) role: String,
+    pub(super) status: AgentStatus,
 }
 
 #[derive(Deserialize)]
@@ -104,6 +105,68 @@ fn json_output(value: &impl Serialize) -> ToolResult {
     Ok(ToolOutput::from_json(serde_json::to_value(value)?, true))
 }
 
+pub(super) type AgentToolResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync + 'static>>;
+
+pub(super) async fn start_agent(
+    parent: &AgentHandle,
+    registry: &Arc<Registry>,
+    session_id: &str,
+    task: AgentTask,
+) -> AgentToolResult<AgentStartReport> {
+    let AgentTask {
+        role,
+        task,
+        output_schema,
+    } = task;
+    let contract = OutputContract::compile(&output_schema)?;
+    let capacity = registry.reserve_turn()?;
+    let reservation = registry.reserve(session_id).await?;
+    let id = reservation.id;
+    let (child, events) = parent.spawn().await?;
+    let session_id = child.session_id().to_string();
+    let descriptor = AgentDescriptor {
+        id,
+        session_id,
+        role: role.clone(),
+        task: task.clone(),
+        parent: reservation.parent,
+    };
+    let (start_events, events_ready) = oneshot::channel();
+    let event_task = forward_events(
+        reservation.root_session_id.clone(),
+        id,
+        events,
+        events_ready,
+        Arc::downgrade(registry),
+        registry.updates.clone(),
+    );
+    registry
+        .insert(
+            reservation.root_session_id.clone(),
+            descriptor.clone(),
+            child,
+            event_task,
+            contract,
+        )
+        .await?;
+    registry.send(&reservation.root_session_id, AgentUpdate::Added(descriptor));
+    let _ = start_events.send(());
+
+    registry
+        .launch_initial_turn(
+            &reservation.root_session_id,
+            id,
+            agent_prompt(id, &task),
+            capacity,
+        )
+        .await?;
+    Ok(AgentStartReport {
+        agent_id: id,
+        role,
+        status: AgentStatus::Running,
+    })
+}
+
 struct SpawnAgent {
     parent: AgentHandle,
     registry: Weak<Registry>,
@@ -138,62 +201,13 @@ impl Tool for SpawnAgent {
     }
 
     async fn execute(&self, input: ToolInput, context: ToolContext<'_>) -> ToolResult {
-        let AgentTask {
-            role,
-            task,
-            output_schema,
-        } = input.decode_json()?;
-        let contract = OutputContract::compile(&output_schema)?;
+        let task = input.decode_json()?;
         let registry = self
             .registry
             .upgrade()
             .ok_or_else(|| std::io::Error::other("subagent runtime is closed"))?;
-        let capacity = registry.reserve_turn()?;
-        let reservation = registry.reserve(context.session_id()).await?;
-        let id = reservation.id;
-        let (child, events) = self.parent.spawn().await?;
-        let session_id = child.session_id().to_string();
-        let descriptor = AgentDescriptor {
-            id,
-            session_id,
-            role: role.clone(),
-            task: task.clone(),
-            parent: reservation.parent,
-        };
-        let (start_events, events_ready) = oneshot::channel();
-        let event_task = forward_events(
-            reservation.root_session_id.clone(),
-            id,
-            events,
-            events_ready,
-            Arc::downgrade(&registry),
-            registry.updates.clone(),
-        );
-        registry
-            .insert(
-                reservation.root_session_id.clone(),
-                descriptor.clone(),
-                child,
-                event_task,
-                contract,
-            )
-            .await?;
-        registry.send(&reservation.root_session_id, AgentUpdate::Added(descriptor));
-        let _ = start_events.send(());
-
-        registry
-            .launch_initial_turn(
-                &reservation.root_session_id,
-                id,
-                agent_prompt(id, &task),
-                capacity,
-            )
-            .await?;
-        json_output(&AgentStartReport {
-            agent_id: id,
-            role,
-            status: AgentStatus::Running,
-        })
+        let report = start_agent(&self.parent, &registry, context.session_id(), task).await?;
+        json_output(&report)
     }
 }
 
@@ -491,38 +505,63 @@ impl Tool for ChangeAgentLifecycle {
     }
 }
 
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SubagentToolSet {
+    Generic,
+    Simplify,
+    GenericAndSimplify,
+}
+
+impl SubagentToolSet {
+    const fn generic(self) -> bool {
+        matches!(self, Self::Generic | Self::GenericAndSimplify)
+    }
+
+    const fn simplify(self) -> bool {
+        matches!(self, Self::Simplify | Self::GenericAndSimplify)
+    }
+}
+
 pub(crate) fn install_tools(
     tools: Tools,
     parent: AgentHandle,
     registry: Arc<Registry>,
+    tool_set: SubagentToolSet,
 ) -> Result<Tools, ToolsBuildError> {
-    tools
-        .into_builder()
-        .tool(SpawnAgent {
-            parent,
-            registry: Arc::downgrade(&registry),
-        })
-        .tool(SubmitResult {
-            registry: Arc::downgrade(&registry),
-        })
-        .tool(SendAgentMessage {
-            registry: Arc::downgrade(&registry),
-        })
-        .tool(ListAgents {
-            registry: Arc::downgrade(&registry),
-        })
-        .tool(WaitAgent {
-            registry: Arc::downgrade(&registry),
-        })
-        .tool(ChangeAgentLifecycle {
-            registry: Arc::downgrade(&registry),
-            operation: LifecycleOperation::Interrupt,
-        })
-        .tool(ChangeAgentLifecycle {
-            registry: Arc::downgrade(&registry),
-            operation: LifecycleOperation::Close,
-        })
-        .build()
+    let mut builder = tools.into_builder().tool(SubmitResult {
+        registry: Arc::downgrade(&registry),
+    });
+    if tool_set.simplify() {
+        builder = builder.tool(SimplifyReview::new(
+            parent.clone(),
+            Arc::downgrade(&registry),
+        ));
+    }
+    if tool_set.generic() {
+        builder = builder
+            .tool(SpawnAgent {
+                parent,
+                registry: Arc::downgrade(&registry),
+            })
+            .tool(SendAgentMessage {
+                registry: Arc::downgrade(&registry),
+            })
+            .tool(ListAgents {
+                registry: Arc::downgrade(&registry),
+            })
+            .tool(WaitAgent {
+                registry: Arc::downgrade(&registry),
+            })
+            .tool(ChangeAgentLifecycle {
+                registry: Arc::downgrade(&registry),
+                operation: LifecycleOperation::Interrupt,
+            })
+            .tool(ChangeAgentLifecycle {
+                registry: Arc::downgrade(&registry),
+                operation: LifecycleOperation::Close,
+            });
+    }
+    builder.build()
 }
 
 fn spawn_agent_output_schema() -> Value {

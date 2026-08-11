@@ -561,7 +561,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
         )
     } else {
         format!(
-            "  /btw <question> side fork · /voice [voice] · {tool_help} · Ctrl+V image · Enter send/steer · Tab queue · {escape_help} · Ctrl+C quit"
+            "  /simplify [focus] cleanup · /btw <question> side fork · /voice [voice] · {tool_help} · Ctrl+V image · Enter send/steer · Tab queue · {escape_help} · Ctrl+C quit"
         )
     };
     let model_width = app.model().as_str().len() + 3 + "default".len() + 7 + 1;
@@ -1379,7 +1379,7 @@ mod tests {
                 "\"┌ Message → Main ──────────────────────────────┐\"\n",
                 "\"│                                              │\"\n",
                 "\"└──────────────────────────────────────────────┘\"\n",
-                "\" Ready  /btw <quest          gpt-5.6-sol · high \"\n",
+                "\" Ready  /simplify [          gpt-5.6-sol · high \"\n",
             )
         );
     }

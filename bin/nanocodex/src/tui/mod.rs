@@ -9,6 +9,7 @@ mod notification;
 mod resume_picker;
 mod scheduler;
 mod selection;
+mod simplify;
 mod telemetry;
 mod terminal;
 mod transcript;
@@ -602,9 +603,9 @@ pub(crate) async fn run(
         .map(|session| PathBuf::from(session.workspace()))
         .unwrap_or(resolve_cwd(&config)?);
     let configured = if let Some(session) = resume {
-        config.build_resumed(session, vm).await?
+        config.build_resumed_tui(session, vm).await?
     } else {
-        config.build(vm).await?
+        config.build_tui(vm).await?
     };
     let agent = configured.handle;
     let mut agent_events = configured.events;
@@ -2778,6 +2779,17 @@ fn classify_submission(input: impl Into<SubmittedPrompt>) -> Submission {
     if trimmed == "/trace" {
         return Submission::Trace;
     }
+    if trimmed == "/simplify" || trimmed.starts_with("/simplify ") {
+        let display = trimmed.to_owned();
+        let focus = trimmed
+            .strip_prefix("/simplify")
+            .map(str::trim)
+            .filter(|focus| !focus.is_empty());
+        let instruction = simplify::prompt(focus);
+        input.set_display(display);
+        input.set_instruction(instruction);
+        return Submission::Prompt(input);
+    }
     if trimmed == "/benchmark" || trimmed.starts_with("/benchmark ") {
         let display = trimmed.to_owned();
         let argument = trimmed
@@ -3052,6 +3064,10 @@ mod tests {
             Submission::Prompt("/btw-not-a-command".into())
         );
         assert_eq!(
+            classify_submission("/simplify-this"),
+            Submission::Prompt("/simplify-this".into())
+        );
+        assert_eq!(
             classify_submission("/trace-this".to_owned()),
             Submission::Prompt("/trace-this".into())
         );
@@ -3063,6 +3079,23 @@ mod tests {
             classify_submission("/modeling"),
             Submission::Prompt("/modeling".into())
         );
+    }
+
+    #[test]
+    fn simplify_command_submits_the_private_workflow_with_optional_focus() {
+        let Submission::Prompt(prompt) =
+            classify_submission(" /simplify focus on memory efficiency ")
+        else {
+            panic!("simplify should submit a model prompt");
+        };
+
+        assert_eq!(prompt.display(), "/simplify focus on memory efficiency");
+        assert!(matches!(
+            prompt.into_prompt().instruction,
+            PromptInput::Text(text)
+                if text.starts_with("Additional review focus: focus on memory efficiency")
+                    && text.contains("call `simplify_review` exactly once")
+        ));
     }
 
     #[test]
