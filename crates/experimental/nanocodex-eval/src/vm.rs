@@ -2596,55 +2596,9 @@ impl VmVerifier {
             return Ok(None);
         }
 
-        let mut command = VmCommand::new("/bin/tar")
-            .arg("-C")
-            .arg("/")
-            .arg("-cf")
-            .arg("/tmp/nanoeval-artifacts.tar")
-            .arg("--");
-        for artifact in task.artifacts() {
-            if let Some(service) = artifact.service() {
-                return Err(io::Error::other(format!(
-                    "artifact {} belongs to unsupported service {service:?}",
-                    artifact.source().display()
-                ))
-                .into());
-            }
-            let relative = artifact.source().strip_prefix("/").map_err(|_| {
-                io::Error::other(format!(
-                    "artifact path must be absolute: {}",
-                    artifact.source().display()
-                ))
-            })?;
-            if relative.as_os_str().is_empty()
-                || relative
-                    .components()
-                    .any(|component| !matches!(component, std::path::Component::Normal(_)))
-            {
-                return Err(io::Error::other(format!(
-                    "artifact path is not a safe guest path: {}",
-                    artifact.source().display()
-                ))
-                .into());
-            }
-            for excluded in artifact.exclude() {
-                command = command.arg(format!(
-                    "--exclude={}/{}",
-                    relative.to_string_lossy(),
-                    excluded.to_string_lossy()
-                ));
-            }
-            command = command.arg(
-                relative
-                    .to_str()
-                    .ok_or_else(|| {
-                        io::Error::other(format!(
-                            "artifact path is not UTF-8: {}",
-                            artifact.source().display()
-                        ))
-                    })?
-                    .to_owned(),
-            );
+        let mut command = VmCommand::new("/bin/tar");
+        for argument in artifact_archive_arguments(task)? {
+            command = command.arg(argument);
         }
         let output = session
             .command(command.timeout(task.verifier().timeout()))
@@ -3236,6 +3190,63 @@ impl VmVerifier {
             Ok(())
         })
     }
+}
+
+fn artifact_archive_arguments(task: &Task) -> Result<Vec<String>, VmAttemptError> {
+    let mut arguments = vec![
+        "-C".to_owned(),
+        "/".to_owned(),
+        "-cf".to_owned(),
+        "/tmp/nanoeval-artifacts.tar".to_owned(),
+    ];
+    let mut sources = Vec::with_capacity(task.artifacts().len());
+    for artifact in task.artifacts() {
+        if let Some(service) = artifact.service() {
+            return Err(io::Error::other(format!(
+                "artifact {} belongs to unsupported service {service:?}",
+                artifact.source().display()
+            ))
+            .into());
+        }
+        let relative = artifact.source().strip_prefix("/").map_err(|_| {
+            io::Error::other(format!(
+                "artifact path must be absolute: {}",
+                artifact.source().display()
+            ))
+        })?;
+        if relative.as_os_str().is_empty()
+            || relative
+                .components()
+                .any(|component| !matches!(component, std::path::Component::Normal(_)))
+        {
+            return Err(io::Error::other(format!(
+                "artifact path is not a safe guest path: {}",
+                artifact.source().display()
+            ))
+            .into());
+        }
+        for excluded in artifact.exclude() {
+            arguments.push(format!(
+                "--exclude={}/{}",
+                relative.to_string_lossy(),
+                excluded.to_string_lossy()
+            ));
+        }
+        sources.push(
+            relative
+                .to_str()
+                .ok_or_else(|| {
+                    io::Error::other(format!(
+                        "artifact path is not UTF-8: {}",
+                        artifact.source().display()
+                    ))
+                })?
+                .to_owned(),
+        );
+    }
+    arguments.push("--".to_owned());
+    arguments.extend(sources);
+    Ok(arguments)
 }
 
 impl Drop for VmVerifier {

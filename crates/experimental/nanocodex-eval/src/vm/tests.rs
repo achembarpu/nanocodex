@@ -79,6 +79,64 @@ fn guest_executables_are_installed_by_the_task_image_recipe() {
     assert_eq!(fs::read(staged).unwrap(), b"codex-binary");
 }
 
+#[test]
+fn artifact_archive_options_precede_the_path_terminator() {
+    let directory = tempfile::tempdir().unwrap();
+    fs::create_dir(directory.path().join("tests")).unwrap();
+    fs::create_dir(directory.path().join("environment")).unwrap();
+    fs::write(
+        directory.path().join("task.toml"),
+        r#"
+schema_version = "1.1"
+artifacts = [
+  { source = "/workspace", exclude = ["Dockerfile", "instruction.md"] },
+  "/--option-shaped-output",
+]
+
+[task]
+name = "adapter/artifact-order"
+
+[agent]
+timeout_sec = 1.0
+
+[verifier]
+timeout_sec = 1.0
+
+[environment]
+docker_image = "example/task:latest"
+cpus = 1
+memory_mb = 1
+storage_mb = 1
+"#,
+    )
+    .unwrap();
+    fs::write(directory.path().join("instruction.md"), "Create output.").unwrap();
+    fs::write(directory.path().join("tests/test.sh"), "exit 0\n").unwrap();
+    fs::write(
+        directory.path().join("environment/Dockerfile"),
+        "FROM scratch\n",
+    )
+    .unwrap();
+    let task = Task::load(directory.path()).unwrap();
+
+    let arguments = artifact_archive_arguments(&task).unwrap();
+
+    assert_eq!(
+        arguments,
+        [
+            "-C",
+            "/",
+            "-cf",
+            "/tmp/nanoeval-artifacts.tar",
+            "--exclude=workspace/Dockerfile",
+            "--exclude=workspace/instruction.md",
+            "--",
+            "workspace",
+            "--option-shaped-output",
+        ]
+    );
+}
+
 #[tokio::test]
 async fn vm_resources_leave_task_environments_lazy_and_single_flight() {
     let task =
