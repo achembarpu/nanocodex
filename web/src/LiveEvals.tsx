@@ -12,7 +12,7 @@ import {
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
-import { useMatch, useNavigate } from "react-router";
+import { useLocation, useMatch, useNavigate } from "react-router";
 import {
   evalApi,
   type EvalAnalyticsPoint,
@@ -50,10 +50,12 @@ const taskKey = (worksetId: string | null, taskId: string | null) =>
   ["evals", "task", worksetId, taskId] as const;
 
 export function useEvalOverview() {
+  const location = useLocation();
+  const detailRoute = location.pathname.startsWith("/evals/worksets/");
   return useQuery({
     queryKey: ["evals", "overview"],
     queryFn: ({ signal }) => evalApi.overview(signal),
-    refetchInterval: 500,
+    refetchInterval: detailRoute ? false : 500,
     refetchIntervalInBackground: true,
     refetchOnMount: "always",
     refetchOnWindowFocus: "always",
@@ -351,7 +353,7 @@ function Analytics({
   );
 }
 
-export function LiveEvals({ overview }: { overview: EvalOverview }) {
+export function LiveEvals({ overview }: { overview: EvalOverview | undefined }) {
   const navigate = useNavigate();
   const taskRoute = useMatch("/evals/worksets/:worksetId/tasks/:taskId");
   const worksetRoute = useMatch("/evals/worksets/:worksetId");
@@ -371,16 +373,18 @@ export function LiveEvals({ overview }: { overview: EvalOverview }) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<MatrixFilter>("all");
   const detailRef = useRef<HTMLDivElement>(null);
-  const selectedWorkset = route?.params.worksetId
-    ? overview.worksets.find((workset) => workset.id === route.params.worksetId) ?? null
+  const selectedWorksetId = route?.params.worksetId ?? null;
+  const overviewWorkset = selectedWorksetId
+    ? overview?.worksets.find((workset) => workset.id === selectedWorksetId) ?? null
     : null;
   const worksetQuery = useQuery({
-    queryKey: ["evals", "workset", selectedWorkset?.id],
-    enabled: Boolean(selectedWorkset),
-    queryFn: ({ signal }) => evalApi.workset(selectedWorkset!.id, signal),
+    queryKey: ["evals", "workset", selectedWorksetId],
+    enabled: Boolean(selectedWorksetId),
+    queryFn: ({ signal }) => evalApi.workset(selectedWorksetId!, signal),
     refetchInterval: 5_000,
     refetchIntervalInBackground: true,
   });
+  const selectedWorkset = worksetQuery.data?.workset ?? overviewWorkset;
   const tasks = worksetQuery.data?.tasks ?? [];
   const normalizedQuery = query.trim().toLowerCase();
   const visibleTasks = useMemo(
@@ -398,21 +402,21 @@ export function LiveEvals({ overview }: { overview: EvalOverview }) {
     [filter, normalizedQuery, tasks],
   );
   const orderedWorksets = useMemo(
-    () => [...overview.worksets].sort((left, right) =>
+    () => [...(overview?.worksets ?? [])].sort((left, right) =>
       progressRank(left.summary) - progressRank(right.summary) ||
       right.createdAtMs - left.createdAtMs
     ),
-    [overview.worksets],
+    [overview?.worksets],
   );
   const selectedTaskId = taskRoute?.params.taskId ?? null;
   const selectedTaskOverview = selectedTaskId
     ? tasks.find((task) => task.id === selectedTaskId) ?? null
     : null;
   const taskQuery = useQuery({
-    queryKey: taskKey(selectedWorkset?.id ?? null, selectedTaskId),
-    enabled: Boolean(selectedWorkset && selectedTaskOverview),
+    queryKey: taskKey(selectedWorksetId, selectedTaskId),
+    enabled: Boolean(selectedWorksetId && selectedTaskId),
     queryFn: ({ signal }) =>
-      evalApi.task(selectedWorkset!.id, selectedTaskId!, signal),
+      evalApi.task(selectedWorksetId!, selectedTaskId!, signal),
     refetchInterval:
       selectedTaskOverview &&
       selectedTaskOverview.summary.total > 0 &&
@@ -425,7 +429,7 @@ export function LiveEvals({ overview }: { overview: EvalOverview }) {
     refetchOnWindowFocus: false,
   });
   const analyticsQuery = useQuery<EvalWorksetAnalytics>({
-    queryKey: analyticsKey(selectedWorkset?.id ?? null),
+    queryKey: analyticsKey(selectedWorksetId),
     enabled: Boolean(selectedWorkset && !taskRoute),
     queryFn: ({ signal }) => evalApi.worksetAnalytics(selectedWorkset!.id, signal),
     refetchInterval: selectedWorkset &&
@@ -437,9 +441,9 @@ export function LiveEvals({ overview }: { overview: EvalOverview }) {
     refetchOnWindowFocus: false,
   });
   const resultsQuery = useQuery<EvalWorksetResults>({
-    queryKey: taskResultKey(selectedWorkset?.id ?? null, selectedTaskId),
-    enabled: Boolean(selectedWorkset && taskRoute && selectedTaskOverview),
-    queryFn: ({ signal }) => evalApi.taskResults(selectedWorkset!.id, selectedTaskId!, signal),
+    queryKey: taskResultKey(selectedWorksetId, selectedTaskId),
+    enabled: Boolean(selectedWorksetId && taskRoute && selectedTaskId),
+    queryFn: ({ signal }) => evalApi.taskResults(selectedWorksetId!, selectedTaskId!, signal),
     refetchInterval: selectedTaskOverview &&
       selectedTaskOverview.summary.success + selectedTaskOverview.summary.failed < selectedTaskOverview.summary.total
       ? 15_000
@@ -517,9 +521,11 @@ export function LiveEvals({ overview }: { overview: EvalOverview }) {
     return (
       <main className="live-evals eval-route-empty">
         <PageBack onClick={() => navigate("/evals")}>All evals</PageBack>
-        <AlertTriangle aria-hidden="true" />
-        <h1>Workset not found</h1>
-        <p>The coordinator no longer reports this durable workset.</p>
+        {worksetQuery.isPending ? <CircleDashed aria-hidden="true" /> : <AlertTriangle aria-hidden="true" />}
+        <h1>{worksetQuery.isPending ? "Loading workset…" : "Workset not found"}</h1>
+        <p>{worksetQuery.isPending
+          ? "Reading this workset while its task detail loads in parallel."
+          : worksetQuery.error?.message ?? "The coordinator no longer reports this durable workset."}</p>
       </main>
     );
   }
@@ -571,7 +577,7 @@ export function LiveEvals({ overview }: { overview: EvalOverview }) {
     );
   }
 
-  if (!selectedTaskOverview && !worksetQuery.isPending) {
+  if (!selectedTaskOverview && !selectedTask && !worksetQuery.isPending) {
     return (
       <main className="live-evals eval-route-empty">
         <PageBack onClick={() => chooseWorkset(selectedWorkset.id)}>Benchmark</PageBack>
@@ -587,9 +593,9 @@ export function LiveEvals({ overview }: { overview: EvalOverview }) {
       <section className="eval-page-head eval-detail-head">
         <div>
           <PageBack onClick={() => chooseWorkset(selectedWorkset.id)}>{selectedWorkset.profile}</PageBack>
-          <p className="eyebrow">Task · {selectedTaskOverview?.digest.slice(0, 16) ?? "loading"}</p>
-          <h1>{selectedTaskOverview?.label ?? "Loading task…"}</h1>
-          <p>{selectedTaskOverview?.name}</p>
+          <p className="eyebrow">Task · {(selectedTaskOverview?.digest ?? selectedTask?.digest)?.slice(0, 16) ?? "loading"}</p>
+          <h1>{selectedTaskOverview?.label ?? selectedTask?.label ?? "Loading task…"}</h1>
+          <p>{selectedTaskOverview?.name ?? selectedTask?.name}</p>
         </div>
         {selectedTaskOverview ? <ProgressBar summary={selectedTaskOverview.summary} label={`${selectedTaskOverview.label} progress`} /> : null}
       </section>

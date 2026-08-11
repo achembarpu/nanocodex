@@ -484,24 +484,16 @@ impl EvalApi {
         digest: &str,
         task_id: &str,
     ) -> Result<Option<WorksetResults>, String> {
-        self.results(digest, Some(task_id))
+        self.results(digest, task_id)
     }
 
-    fn results(
-        &self,
-        digest: &str,
-        task_id: Option<&str>,
-    ) -> Result<Option<WorksetResults>, String> {
+    fn results(&self, digest: &str, task_id: &str) -> Result<Option<WorksetResults>, String> {
         let connection = self.connection()?;
         let Some(workset) = find_workset(&connection, digest)? else {
             return Ok(None);
         };
-        let task = match task_id {
-            Some(task_id) => match find_task(&connection, workset.id, digest, task_id)? {
-                Some(task) => Some(task),
-                None => return Ok(None),
-            },
-            None => None,
+        let Some(task) = find_task(&connection, workset.id, digest, task_id)? else {
+            return Ok(None);
         };
         let mut statement = connection
             .prepare(
@@ -509,17 +501,17 @@ impl EvalApi {
                         e.repetition, e.started_at_ms, e.finished_at_ms, \
                         r.status, r.outcome, r.input_tokens, r.cached_input_tokens, \
                         r.output_tokens, r.reasoning_output_tokens, r.total_tokens, r.cost_usd \
-                 FROM eval_tasks e \
+                 FROM eval_tasks e INDEXED BY eval_tasks_definition \
                  JOIN task_definitions t ON t.id = e.definition_id \
                  LEFT JOIN coordinate_results r ON r.coordinate_id = e.id \
-                 WHERE e.workset_id = ?1 AND (?2 IS NULL OR e.definition_id = ?2) \
+                 WHERE e.workset_id = ?1 AND e.definition_id = ?2 \
                    AND e.state IN ('success', 'failed') AND e.result_path IS NOT NULL \
                  ORDER BY t.selector, e.family_key, e.repetition",
             )
             .map_err(|error| error.to_string())?;
         let mut tasks = HashMap::<String, (String, String)>::new();
         let points = statement
-            .query_map((workset.id, task.as_ref().map(|task| task.id)), |row| {
+            .query_map((workset.id, task.id), |row| {
                 let coordinate_id = row.get::<_, i64>(0)?;
                 let task_name = row.get::<_, String>(1)?;
                 let (task_id, task_label) = if let Some(task) = tasks.get(&task_name) {
@@ -615,7 +607,7 @@ impl EvalApi {
             return Ok(None);
         };
         let now = now_ms()?;
-        let mut coordinates = read_coordinates(&connection, workset.id, Some(task.id))?;
+        let mut coordinates = read_coordinates(&connection, workset.id, task.id)?;
         let mut treatments = Vec::<TreatmentDetail>::new();
         for coordinate in coordinates.drain(..) {
             let state = coordinate_state(&coordinate);
@@ -685,7 +677,7 @@ impl EvalApi {
         let Some(task) = find_task(&connection, workset.id, workset_digest, task_id)? else {
             return Ok(None);
         };
-        let coordinates = read_coordinates(&connection, workset.id, Some(task.id))?
+        let coordinates = read_coordinates(&connection, workset.id, task.id)?
             .into_iter()
             .filter(|coordinate| {
                 matches!(coordinate.state.as_str(), "success" | "failed")
@@ -907,7 +899,7 @@ fn find_task(
 fn read_coordinates(
     connection: &Connection,
     workset_id: i64,
-    task_id: Option<i64>,
+    task_id: i64,
 ) -> Result<Vec<CoordinateRow>, String> {
     let mut statement = connection
         .prepare(
@@ -915,10 +907,10 @@ fn read_coordinates(
                     e.repetition, e.state, e.result_path, e.started_at_ms, \
                     e.finished_at_ms, e.error, \
                     r.status, r.outcome \
-             FROM eval_tasks e \
+             FROM eval_tasks e INDEXED BY eval_tasks_definition \
              LEFT JOIN coordinate_results r ON r.coordinate_id = e.id \
-             WHERE e.workset_id = ?1 AND (?2 IS NULL OR e.definition_id = ?2) \
-             ORDER BY e.definition_id, e.family_key, e.repetition",
+             WHERE e.workset_id = ?1 AND e.definition_id = ?2 \
+             ORDER BY e.family_key, e.repetition",
         )
         .map_err(|error| error.to_string())?;
     let coordinates = statement
