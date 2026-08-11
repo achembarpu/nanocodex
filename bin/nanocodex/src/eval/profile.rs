@@ -1,36 +1,23 @@
-use std::{
-    fs::{self, OpenOptions},
-    io,
-    path::{Path, PathBuf},
-    time::{Duration, SystemTime},
-};
+use std::path::{Path, PathBuf};
 
 use clap::Args;
 use eyre::{Result, WrapErr as _, eyre};
-use fs2::FileExt as _;
 use nanocodex::{Model, Thinking};
 use nanocodex_eval::{
-    EvalAttemptOutcome, EvalEventKind, EvalEventStream, EvalOutcome, EvalStatus, Evaluation,
-    EvaluationClaim, EvaluationSelector, EvaluationWork, Evaluator, ResolvedHarness, Task,
-    atif::AtifBuilder,
+    CanonicalTaskRunner, ClaimedEvaluationTask, Evaluation, EvaluationClaim, EvaluationExecution,
+    EvaluationSelector, EvaluationTreatment, EvaluationWork, Task,
     coordinator::{CoordinatorClient, RemoteClaim},
-    harness::{Harness, HarnessAuth},
-    judge::JudgeRuntime,
-    vm::{CachePolicy, VmBackend, VmResources},
+    harness::HarnessAuth,
 };
 use nanocodex_eval_adapters::AdapterCatalog;
 use serde::Serialize;
-use tokio::io::AsyncWriteExt as _;
 
-use super::run;
 use crate::{
     config::{EvalAgentArgs, SharedAuth},
     observability::ObservabilityArgs,
 };
 
 const CONFIG_FILE: &str = "nanocodex.toml";
-const WORKER_DIRECTORY_PREFIX: &str = "nanocodex-eval-worker-";
-const ABANDONED_WORKER_AGE: Duration = Duration::from_secs(2 * 60 * 60);
 
 #[derive(Clone, Debug, Args)]
 pub(super) struct ProfileTarget {
@@ -326,50 +313,48 @@ impl Run {
             EvaluationClaim::Run(claim) => {
                 let repetition = claim.repetition();
                 let task_selector = claim.task_selector().to_owned();
+                let task = ClaimedEvaluationTask::from_claim(&claim);
                 let result = async {
-                    let resources = prepare_resources(claim.task(), claim.harnesses()).await?;
-                    execute_coordinate(
-                        claim.task().clone(),
-                        claim.treatment().clone(),
-                        claim.web_search(),
-                        claim.harness().cloned(),
-                        claim.output_directory().to_path_buf(),
-                        resources,
-                        self.agent,
-                    )
-                    .await
+                    let runner =
+                        canonical_runner(self.agent, claim.treatment(), evaluation.name())?;
+                    Ok::<_, eyre::Report>(runner.run(task).await?)
                 }
                 .await;
                 match result {
-                    Ok(ExecutionResult::Completed { status, evidence }) => {
-                        let status_name = eval_status_name(status);
-                        match status {
-                            EvalStatus::Passed => claim.succeed(&evidence)?,
-                            EvalStatus::Failed => {
-                                claim.fail(Some(&evidence), "verifier returned a failing score")?
-                            }
-                        }
+                    Ok(EvaluationExecution::Passed { evidence }) => {
+                        claim.succeed(&evidence)?;
                         let evidence = evidence.to_string_lossy();
                         write_json(&RunOutput::Completed {
                             profile: evaluation.name(),
                             task: &task_selector,
                             repetition,
                             evidence: &evidence,
-                            status: status_name,
+                            status: "passed",
                         })?;
                         Ok(())
                     }
-                    Ok(ExecutionResult::InfrastructureFailed { error, evidence }) => {
-                        claim.retry(Some(&evidence), &error)?;
+                    Ok(EvaluationExecution::Failed { evidence, failure }) => {
+                        claim.fail(Some(&evidence), &failure)?;
+                        let evidence = evidence.to_string_lossy();
+                        write_json(&RunOutput::Completed {
+                            profile: evaluation.name(),
+                            task: &task_selector,
+                            repetition,
+                            evidence: &evidence,
+                            status: "failed",
+                        })?;
+                        Ok(())
+                    }
+                    Ok(EvaluationExecution::Retry { evidence, failure }) => {
+                        claim.retry(evidence.as_deref(), &failure)?;
                         write_json(&RunOutput::InfrastructureFailed {
                             profile: evaluation.name(),
                             task: &task_selector,
                             repetition,
-                            error: &error,
+                            error: &failure,
                         })?;
                         Err(eyre!(
-                            "task infrastructure failed; evidence retained at {} and row requeued: {error}",
-                            evidence.display()
+                            "task infrastructure failed and row requeued: {failure}"
                         ))
                     }
                     Err(error) => {
@@ -433,107 +418,81 @@ async fn run_remote(
                 validate_web_search(&agent, profile, treatment.web_search)?;
                 let task = Task::load(&task_root)?;
                 let harness = Evaluation::resolve_harness(config, &treatment.harness)?;
-                let harnesses = harness.iter().cloned().collect::<Vec<_>>();
-                let host = run::PreparedVmHost::open()?;
-                reap_abandoned_worker_directories(host.cache())?;
                 let output = tempfile::Builder::new()
-                    .prefix(WORKER_DIRECTORY_PREFIX)
-                    .tempdir_in(host.cache())?;
-                let output_directory = fs::canonicalize(output.path())?;
-                let output_lease = OpenOptions::new()
-                    .create(true)
-                    .read(true)
-                    .write(true)
-                    .truncate(false)
-                    .open(output.path().join(".active.lock"))?;
-                output_lease.lock_exclusive()?;
-                Ok::<_, eyre::Report>((
+                    .prefix("nanocodex-eval-worker-")
+                    .tempdir()?;
+                let output_directory = std::fs::canonicalize(output.path())?;
+                let harnesses = harness.iter().cloned().collect();
+                let task = ClaimedEvaluationTask::new(
                     task,
+                    task_selector.clone(),
+                    treatment.clone(),
                     harness,
                     harnesses,
-                    host,
-                    output,
-                    output_directory,
-                    output_lease,
-                ))
+                    &output_directory,
+                );
+                let runner = canonical_runner(agent, &treatment, profile)?;
+                Ok::<_, eyre::Report>((runner, task, output, output_directory))
             })();
-            let (task, harness, harnesses, host, _output, output_directory, _output_lease) =
-                match setup {
-                    Ok(setup) => setup,
-                    Err(error) => {
-                        let detail = format!("{error:#}");
-                        let finish = coordinator.retry(&claim, &detail).await;
-                        finish?;
-                        return Err(error)
-                            .wrap_err("remote task setup failed and row was requeued");
-                    }
-                };
-            let execution = async {
-                let resources = prepare_resources_from(&task, &harnesses, &host).await?;
-                execute_coordinate(
-                    task.clone(),
-                    treatment.clone(),
-                    treatment.web_search,
-                    harness,
-                    output_directory.clone(),
-                    resources,
-                    agent,
-                )
-                .await
+            let (runner, task, _output, output_directory) = match setup {
+                Ok(setup) => setup,
+                Err(error) => {
+                    let detail = format!("{error:#}");
+                    coordinator.retry(&claim, &detail).await?;
+                    return Err(error).wrap_err("remote task setup failed and row was requeued");
+                }
             };
-            let result = execution.await;
+            let result = runner.run(task).await;
             match result {
-                Ok(ExecutionResult::Completed { status, evidence }) => {
-                    let finish = match status {
-                        EvalStatus::Passed => {
-                            coordinator
-                                .succeed(&claim, &output_directory, &evidence)
-                                .await
-                        }
-                        EvalStatus::Failed => {
-                            coordinator
-                                .fail_with_evidence(
-                                    &claim,
-                                    &output_directory,
-                                    &evidence,
-                                    "verifier returned a failing score",
-                                )
-                                .await
-                        }
-                    };
-                    finish?;
+                Ok(EvaluationExecution::Passed { evidence }) => {
+                    coordinator
+                        .succeed(&claim, &output_directory, &evidence)
+                        .await?;
                     write_json(&RunOutput::Completed {
                         profile,
                         task: &task_selector,
                         repetition,
                         evidence: "coordinator",
-                        status: eval_status_name(status),
+                        status: "passed",
                     })?;
                     Ok(())
                 }
-                Ok(ExecutionResult::InfrastructureFailed { error, evidence }) => {
-                    let finish = coordinator
-                        .retry_with_evidence(&claim, &output_directory, &evidence, &error)
-                        .await;
-                    finish?;
+                Ok(EvaluationExecution::Failed { evidence, failure }) => {
+                    coordinator
+                        .fail_with_evidence(&claim, &output_directory, &evidence, &failure)
+                        .await?;
+                    write_json(&RunOutput::Completed {
+                        profile,
+                        task: &task_selector,
+                        repetition,
+                        evidence: "coordinator",
+                        status: "failed",
+                    })?;
+                    Ok(())
+                }
+                Ok(EvaluationExecution::Retry { evidence, failure }) => {
+                    if let Some(evidence) = evidence.as_deref() {
+                        coordinator
+                            .retry_with_evidence(&claim, &output_directory, evidence, &failure)
+                            .await?;
+                    } else {
+                        coordinator.retry(&claim, &failure).await?;
+                    }
                     write_json(&RunOutput::InfrastructureFailed {
                         profile,
                         task: &task_selector,
                         repetition,
-                        error: &error,
+                        error: &failure,
                     })?;
                     Err(eyre!(
-                        "remote task infrastructure failed and row was requeued: {error}"
+                        "remote task infrastructure failed and row was requeued: {failure}"
                     ))
                 }
                 Err(error) => {
+                    let error = eyre::Report::new(error);
+                    let detail = format!("{error:#}");
                     let finish = coordinator
-                        .retry_with_evidence(
-                            &claim,
-                            &output_directory,
-                            &output_directory,
-                            &format!("{error:#}"),
-                        )
+                        .retry_with_evidence(&claim, &output_directory, &output_directory, &detail)
                         .await;
                     finish?;
                     Err(error).wrap_err("remote task infrastructure failed and row was requeued")
@@ -564,78 +523,6 @@ async fn run_remote(
     }
 }
 
-fn reap_abandoned_worker_directories(cache: &Path) -> Result<()> {
-    let now = SystemTime::now();
-    let mut removed = 0_u64;
-    for entry in fs::read_dir(cache)
-        .wrap_err_with(|| format!("failed to inspect VM cache {}", cache.display()))?
-    {
-        let entry = entry?;
-        if !entry
-            .file_name()
-            .to_string_lossy()
-            .starts_with(WORKER_DIRECTORY_PREFIX)
-            || !entry.file_type()?.is_dir()
-        {
-            continue;
-        }
-        let modified = entry.metadata()?.modified()?;
-        if now.duration_since(modified).unwrap_or_default() < ABANDONED_WORKER_AGE {
-            continue;
-        }
-        let directory = entry.path();
-        let lease = match OpenOptions::new()
-            .read(true)
-            .write(true)
-            .open(directory.join(".active.lock"))
-        {
-            Ok(lease) => Some(lease),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => None,
-            Err(error) => {
-                tracing::warn!(
-                    target: "nanocodex_eval",
-                    worker_directory = %directory.display(),
-                    %error,
-                    "failed to inspect stale eval worker lease"
-                );
-                continue;
-            }
-        };
-        if let Some(lease) = &lease
-            && let Err(error) = lease.try_lock_exclusive()
-        {
-            if error.kind() != io::ErrorKind::WouldBlock {
-                tracing::warn!(
-                    target: "nanocodex_eval",
-                    worker_directory = %directory.display(),
-                    %error,
-                    "failed to lock stale eval worker directory"
-                );
-            }
-            continue;
-        }
-        match fs::remove_dir_all(&directory) {
-            Ok(()) => removed = removed.saturating_add(1),
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => tracing::warn!(
-                target: "nanocodex_eval",
-                worker_directory = %directory.display(),
-                %error,
-                "failed to remove abandoned eval worker directory"
-            ),
-        }
-    }
-    if removed > 0 {
-        tracing::info!(
-            target: "nanocodex_eval",
-            removed,
-            cache = %cache.display(),
-            "removed abandoned eval worker directories"
-        );
-    }
-    Ok(())
-}
-
 fn validate_web_search(agent: &EvalAgentArgs, profile: &str, web_search: bool) -> Result<()> {
     if agent
         .web_search()
@@ -659,221 +546,19 @@ impl ProfileTarget {
     }
 }
 
-enum ExecutionResult {
-    Completed {
-        status: EvalStatus,
-        evidence: PathBuf,
-    },
-    InfrastructureFailed {
-        error: String,
-        evidence: PathBuf,
-    },
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum ExecutionDisposition {
-    Completed(EvalStatus),
-    Retry,
-}
-
-const fn eval_status_name(status: EvalStatus) -> &'static str {
-    match status {
-        EvalStatus::Passed => "passed",
-        EvalStatus::Failed => "failed",
-    }
-}
-
-fn classify_execution(outcome: &EvalAttemptOutcome, evidence: PathBuf) -> ExecutionResult {
-    match execution_disposition(outcome.outcome()) {
-        ExecutionDisposition::Completed(status) => ExecutionResult::Completed { status, evidence },
-        ExecutionDisposition::Retry => ExecutionResult::InfrastructureFailed {
-            error: outcome.exception().map_or_else(
-                || "evaluation attempt was not scored".to_owned(),
-                |exception| exception.traceback.clone(),
-            ),
-            evidence,
-        },
-    }
-}
-
-const fn execution_disposition(outcome: EvalOutcome) -> ExecutionDisposition {
-    match outcome {
-        EvalOutcome::Passed => ExecutionDisposition::Completed(EvalStatus::Passed),
-        EvalOutcome::VerifierFailed | EvalOutcome::SafetyRefusal => {
-            ExecutionDisposition::Completed(EvalStatus::Failed)
-        }
-        EvalOutcome::AgentTimeout | EvalOutcome::InfrastructureError => ExecutionDisposition::Retry,
-    }
-}
-
-async fn prepare_resources(task: &Task, harnesses: &[ResolvedHarness]) -> Result<VmResources> {
-    let host = run::PreparedVmHost::open()?;
-    prepare_resources_from(task, harnesses, &host).await
-}
-
-async fn prepare_resources_from(
-    task: &Task,
-    harnesses: &[ResolvedHarness],
-    host: &run::PreparedVmHost,
-) -> Result<VmResources> {
-    let mut builder = VmResources::builder(host.vmm(), host.runtime_image())
-        .task(task.clone())
-        .cache_directory(host.cache())
-        .cache_policy(CachePolicy::Reuse)
-        .image_preparation_concurrency(1);
-    for harness in harnesses {
-        builder = builder.guest_executable(&harness.command, &harness.guest_command);
-    }
-    let resources = builder.prepare().await?;
-    // Keep image construction inside the running task's ownership lifetime.
-    resources.backend().await?;
-    Ok(resources)
-}
-
-async fn execute_coordinate(
-    task: Task,
-    treatment: nanocodex_eval::EvaluationTreatment,
-    web_search: bool,
-    harness: Option<ResolvedHarness>,
-    output: PathBuf,
-    resources: VmResources,
+fn canonical_runner(
     agent: EvalAgentArgs,
-) -> Result<ExecutionResult> {
-    std::fs::create_dir_all(&output)?;
+    treatment: &EvaluationTreatment,
+    profile: &str,
+) -> Result<CanonicalTaskRunner> {
+    validate_web_search(&agent, profile, treatment.web_search)?;
     let (nanocodex, auth) =
-        agent.shared_builder(treatment.model, treatment.thinking, web_search)?;
-    let judge = JudgeRuntime::start(nanocodex.clone().thinking(Thinking::Low)).await?;
-    let verifier_environment = judge.verifier_environment();
-    match treatment.harness.as_str() {
-        "nanocodex" => {
-            let backend = resources
-                .backend_with(
-                    VmBackend::builder()
-                        .retain_passed_rootfs(false)
-                        .retain_failed_rootfs(false)
-                        .verifier_environment(verifier_environment),
-                )
-                .await?;
-            let evaluator = Evaluator::builder(nanocodex, backend)
-                .output_directory(&output)
-                .build()?;
-            let outcome = run_native(&evaluator, task).await?;
-            let evidence = evaluator.directory().to_path_buf();
-            Ok(classify_execution(&outcome, evidence))
-        }
-        _ => {
-            let harness_auth = match auth {
-                SharedAuth::ApiKey(api_key) => HarnessAuth::api_key(api_key),
-                SharedAuth::AuthFile(path) => HarnessAuth::auth_file(path),
-            };
-            let configured =
-                harness.ok_or_else(|| eyre!("external harness lost its resolved configuration"))?;
-            let harness = Harness::new(
-                nanocodex,
-                task.clone(),
-                &configured.command,
-                &configured.guest_command,
-                harness_auth,
-                resources,
-            )
-            .model(treatment.model)
-            .output_directory(&output)
-            .thinking(treatment.thinking)
-            .web_search(web_search)
-            .guest_memory_mb(task.resources().memory_mb)
-            .arguments(configured.arguments)
-            .environment(configured.environment.into_iter().collect())
-            .verifier_environment(verifier_environment)
-            .credentials(
-                configured.home,
-                configured.auth_file,
-                configured.api_key_environment,
-            )
-            .api_upstream(configured.api_upstream)
-            .version(configured.version)
-            .name(configured.name)
-            .prepare()
-            .await?;
-            let outcome = run_native(harness.evaluator(), task).await?;
-            harness.retain_trajectory(&outcome).await?;
-            let evidence = harness.directory().to_path_buf();
-            Ok(classify_execution(&outcome, evidence))
-        }
-    }
-}
-
-struct NativeEventRecording {
-    atif: AtifBuilder,
-    atif_error: Option<String>,
-}
-
-async fn run_native(evaluator: &Evaluator, task: Task) -> Result<EvalAttemptOutcome> {
-    let event_log = evaluator.directory().join("events.jsonl");
-    let run = evaluator.task(task);
-    let stream = run.events().subscribe();
-    let recorder = tokio::spawn(async move { record_native_events(stream, &event_log).await });
-    let outcome = run.await;
-    let recording = recorder
-        .await
-        .wrap_err("native event recorder task failed")??;
-    let outcome = outcome?;
-    retain_native_trajectory(&outcome, recording).await?;
-    Ok(outcome)
-}
-
-async fn record_native_events(
-    mut stream: EvalEventStream,
-    path: &Path,
-) -> Result<NativeEventRecording> {
-    let mut output = tokio::fs::File::create(path)
-        .await
-        .wrap_err_with(|| format!("failed to create evaluator event log {}", path.display()))?;
-    let mut atif = AtifBuilder::default();
-    let mut atif_error = None;
-    while let Some(event) = stream.recv().await? {
-        if let EvalEventKind::Agent(agent_event) = &event.kind
-            && atif_error.is_none()
-            && let Err(error) = atif.apply(agent_event)
-        {
-            atif_error = Some(format!(
-                "failed to project agent event sequence {} into ATIF: {error}",
-                event.sequence
-            ));
-        }
-        let mut encoded = serde_json::to_vec(event.as_ref())?;
-        encoded.push(b'\n');
-        output.write_all(&encoded).await?;
-    }
-    output.flush().await?;
-    output.sync_all().await?;
-    Ok(NativeEventRecording { atif, atif_error })
-}
-
-async fn retain_native_trajectory(
-    outcome: &EvalAttemptOutcome,
-    recording: NativeEventRecording,
-) -> Result<()> {
-    if let Some(error) = recording.atif_error {
-        return Err(eyre!(error));
-    }
-    let trajectory = match outcome.agent() {
-        Some(agent) => recording.atif.finish(outcome.task(), agent),
-        None => recording.atif.finish_failure(outcome.task()),
+        agent.shared_builder(treatment.model, treatment.thinking, treatment.web_search)?;
+    let auth = match auth {
+        SharedAuth::ApiKey(api_key) => HarnessAuth::api_key(api_key),
+        SharedAuth::AuthFile(path) => HarnessAuth::auth_file(path),
     };
-    let path = outcome.artifacts().directory.join("agent/trajectory.json");
-    let parent = path
-        .parent()
-        .ok_or_else(|| eyre!("trajectory path has no parent: {}", path.display()))?;
-    tokio::fs::create_dir_all(parent).await?;
-    let mut encoded = serde_json::to_vec_pretty(&trajectory)?;
-    encoded.push(b'\n');
-    let mut output = tokio::fs::File::create(&path)
-        .await
-        .wrap_err_with(|| format!("failed to create trajectory {}", path.display()))?;
-    output.write_all(&encoded).await?;
-    output.flush().await?;
-    output.sync_all().await?;
-    Ok(())
+    Ok(CanonicalTaskRunner::new(nanocodex, auth))
 }
 
 pub(super) fn default_state_dir() -> Result<PathBuf> {
@@ -929,9 +614,7 @@ mod tests {
 
     use clap::Parser as _;
 
-    use nanocodex_eval::{EvalOutcome, EvalStatus};
-
-    use super::{ExecutionDisposition, default_state_dir, execution_disposition};
+    use super::default_state_dir;
     use crate::{Cli, Command, eval::EvalCommand};
 
     #[test]
@@ -1034,30 +717,6 @@ mod tests {
         assert_eq!(
             path.file_name().and_then(|name| name.to_str()),
             Some("evals")
-        );
-    }
-
-    #[test]
-    fn lifecycle_failures_cannot_become_scored_successes() {
-        assert_eq!(
-            execution_disposition(EvalOutcome::InfrastructureError),
-            ExecutionDisposition::Retry
-        );
-        assert_eq!(
-            execution_disposition(EvalOutcome::AgentTimeout),
-            ExecutionDisposition::Retry
-        );
-        assert_eq!(
-            execution_disposition(EvalOutcome::SafetyRefusal),
-            ExecutionDisposition::Completed(EvalStatus::Failed)
-        );
-        assert_eq!(
-            execution_disposition(EvalOutcome::Passed),
-            ExecutionDisposition::Completed(EvalStatus::Passed)
-        );
-        assert_eq!(
-            execution_disposition(EvalOutcome::VerifierFailed),
-            ExecutionDisposition::Completed(EvalStatus::Failed)
         );
     }
 }

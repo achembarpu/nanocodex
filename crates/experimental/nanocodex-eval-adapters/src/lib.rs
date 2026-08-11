@@ -1,8 +1,8 @@
 //! Pinned third-party benchmark adapters for `nanocodex-eval`.
 //!
 //! Adapters acquire authoritative source material and normalize it into the
-//! evaluator's immutable task boundary. Scheduling and runtime policy remain
-//! owned by `nanocodex-eval`.
+//! evaluator's canonical immutable task boundary. Execution, durable
+//! scheduling, and claim fencing remain in `nanocodex-eval`.
 
 #![deny(missing_docs, rustdoc::broken_intra_doc_links)]
 
