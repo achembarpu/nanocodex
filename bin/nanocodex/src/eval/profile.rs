@@ -437,6 +437,7 @@ async fn run_remote(
                 let output = tempfile::Builder::new()
                     .prefix(WORKER_DIRECTORY_PREFIX)
                     .tempdir_in(host.cache())?;
+                let output_directory = fs::canonicalize(output.path())?;
                 let output_lease = OpenOptions::new()
                     .create(true)
                     .read(true)
@@ -444,17 +445,27 @@ async fn run_remote(
                     .truncate(false)
                     .open(output.path().join(".active.lock"))?;
                 output_lease.lock_exclusive()?;
-                Ok::<_, eyre::Report>((task, harness, harnesses, host, output, output_lease))
+                Ok::<_, eyre::Report>((
+                    task,
+                    harness,
+                    harnesses,
+                    host,
+                    output,
+                    output_directory,
+                    output_lease,
+                ))
             })();
-            let (task, harness, harnesses, host, output, _output_lease) = match setup {
-                Ok(setup) => setup,
-                Err(error) => {
-                    let detail = format!("{error:#}");
-                    let finish = coordinator.retry(&claim, &detail).await;
-                    finish?;
-                    return Err(error).wrap_err("remote task setup failed and row was requeued");
-                }
-            };
+            let (task, harness, harnesses, host, _output, output_directory, _output_lease) =
+                match setup {
+                    Ok(setup) => setup,
+                    Err(error) => {
+                        let detail = format!("{error:#}");
+                        let finish = coordinator.retry(&claim, &detail).await;
+                        finish?;
+                        return Err(error)
+                            .wrap_err("remote task setup failed and row was requeued");
+                    }
+                };
             let execution = async {
                 let resources = prepare_resources_from(&task, &harnesses, &host).await?;
                 execute_coordinate(
@@ -462,7 +473,7 @@ async fn run_remote(
                     treatment.clone(),
                     treatment.web_search,
                     harness,
-                    output.path().to_path_buf(),
+                    output_directory.clone(),
                     resources,
                     agent,
                 )
@@ -473,13 +484,15 @@ async fn run_remote(
                 Ok(ExecutionResult::Completed { status, evidence }) => {
                     let finish = match status {
                         EvalStatus::Passed => {
-                            coordinator.succeed(&claim, output.path(), &evidence).await
+                            coordinator
+                                .succeed(&claim, &output_directory, &evidence)
+                                .await
                         }
                         EvalStatus::Failed => {
                             coordinator
                                 .fail_with_evidence(
                                     &claim,
-                                    output.path(),
+                                    &output_directory,
                                     &evidence,
                                     "verifier returned a failing score",
                                 )
@@ -498,7 +511,7 @@ async fn run_remote(
                 }
                 Ok(ExecutionResult::InfrastructureFailed { error, evidence }) => {
                     let finish = coordinator
-                        .retry_with_evidence(&claim, output.path(), &evidence, &error)
+                        .retry_with_evidence(&claim, &output_directory, &evidence, &error)
                         .await;
                     finish?;
                     write_json(&RunOutput::InfrastructureFailed {
@@ -515,8 +528,8 @@ async fn run_remote(
                     let finish = coordinator
                         .retry_with_evidence(
                             &claim,
-                            output.path(),
-                            output.path(),
+                            &output_directory,
+                            &output_directory,
                             &format!("{error:#}"),
                         )
                         .await;
