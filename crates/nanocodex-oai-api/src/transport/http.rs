@@ -10,7 +10,7 @@ use crate::{EncodedRequest, ResponsesError, socket::ReceivedText};
 const EVENT_IDLE_TIMEOUT: Duration = if cfg!(test) {
     Duration::from_millis(100)
 } else {
-    Duration::from_secs(60)
+    Duration::from_mins(5)
 };
 const RESPONSES_LITE_HEADER: &str = "x-openai-internal-codex-responses-lite";
 const TURN_STATE_HEADER: &str = "x-codex-turn-state";
