@@ -232,6 +232,31 @@ mod tests {
     }
 
     #[test]
+    fn task_input_preserves_consecutive_synthetic_user_messages() {
+        let prompt = Prompt::new("continue").with_transcript([
+            PromptMessage::user("benchmark preamble"),
+            PromptMessage::user("question"),
+            PromptMessage::assistant("answer"),
+        ]);
+
+        let input = prompt_messages(&prompt, vec![ContentItem::input_text("continue")]);
+        let roles = input
+            .iter()
+            .map(|item| serde_json::to_value(item).unwrap()["role"].clone())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            roles,
+            vec![
+                json!("user"),
+                json!("user"),
+                json!("assistant"),
+                json!("user")
+            ]
+        );
+    }
+
+    #[test]
     fn turn_aborted_matches_codex_context_shape() {
         assert_eq!(
             serde_json::to_value(turn_aborted()).unwrap(),

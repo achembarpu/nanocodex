@@ -284,7 +284,9 @@ impl Prompt {
     /// # Errors
     ///
     /// Returns a typed failure for empty text or a transcript that does not
-    /// alternate from user to assistant before the final user instruction.
+    /// start with user input and end with assistant output before the final
+    /// user instruction. Consecutive messages with the same role are retained
+    /// because benchmark transcripts may contain them intentionally.
     pub fn validate(&self) -> Result<(), PromptValidationError> {
         if self.instruction.is_empty() {
             return Err(PromptValidationError::EmptyInstruction);
@@ -300,12 +302,8 @@ impl Prompt {
                 .transcript
                 .last()
                 .is_some_and(|message| message.role() != PromptMessageRole::Assistant)
-            || !self
-                .transcript
-                .windows(2)
-                .all(|pair| pair[0].role() != pair[1].role())
         {
-            return Err(PromptValidationError::InvalidTranscriptOrdering);
+            return Err(PromptValidationError::InvalidTranscriptEndpoints);
         }
         Ok(())
     }
@@ -320,9 +318,9 @@ pub enum PromptValidationError {
     /// One synthetic message has no usable content.
     #[error("prompt transcript messages must not be empty")]
     EmptyTranscriptMessage,
-    /// Synthetic messages do not form complete user/assistant pairs.
-    #[error("prompt transcript must alternate user and assistant messages in complete pairs")]
-    InvalidTranscriptOrdering,
+    /// Synthetic messages do not begin with user input and end with assistant output.
+    #[error("prompt transcript must start with a user message and end with an assistant message")]
+    InvalidTranscriptEndpoints,
 }
 
 /// One text-only message in a synthetic prompt transcript.
@@ -714,14 +712,26 @@ mod tests {
     }
 
     #[test]
-    fn synthetic_transcript_requires_complete_pairs() {
+    fn synthetic_transcript_requires_user_and_assistant_endpoints() {
         let prompt =
             Prompt::new("continue").with_transcript([PromptMessage::user("unanswered request")]);
 
         assert_eq!(
             prompt.validate(),
-            Err(PromptValidationError::InvalidTranscriptOrdering)
+            Err(PromptValidationError::InvalidTranscriptEndpoints)
         );
+    }
+
+    #[test]
+    fn synthetic_transcript_preserves_consecutive_same_role_messages() {
+        let prompt = Prompt::new("continue").with_transcript([
+            PromptMessage::user("benchmark preamble"),
+            PromptMessage::user("first request"),
+            PromptMessage::assistant("first answer"),
+        ]);
+
+        assert_eq!(prompt.validate(), Ok(()));
+        assert_eq!(prompt.transcript().len(), 3);
     }
 
     #[test]
