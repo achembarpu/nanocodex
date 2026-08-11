@@ -423,12 +423,13 @@ async fn run_remote(
             claim,
             repetition,
             task: task_selector,
+            task_root,
             treatment,
             ..
         } => {
             let setup = (|| {
                 validate_web_search(&agent, profile, treatment.web_search)?;
-                let task = Task::load(&task_selector)?;
+                let task = Task::load(&task_root)?;
                 let harness = Evaluation::resolve_harness(config, &treatment.harness)?;
                 let harnesses = harness.iter().cloned().collect::<Vec<_>>();
                 let host = run::PreparedVmHost::open()?;
