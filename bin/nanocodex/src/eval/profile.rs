@@ -17,6 +17,7 @@ use nanocodex_eval::{
     harness::{Harness, HarnessAuth},
     vm::{CachePolicy, VmBackend, VmResources},
 };
+use nanocodex_eval_adapters::AdapterCatalog;
 use serde::Serialize;
 use tokio::io::AsyncWriteExt as _;
 
@@ -177,7 +178,26 @@ impl Add {
                     "--recipe is complete; use either --recipe or explicit work knobs"
                 ));
             }
-            Evaluation::add_profile(&self.config, Some(recipe), &state, &self.profile, self.new)?;
+            let selectors = Evaluation::profile_benchmarks(&self.config, Some(recipe))?;
+            if selectors.is_empty() {
+                Evaluation::add_profile(
+                    &self.config,
+                    Some(recipe),
+                    &state,
+                    &self.profile,
+                    self.new,
+                )?;
+            } else {
+                let tasks = AdapterCatalog::new(&state).resolve(&selectors).await?;
+                Evaluation::add_profile_with_tasks(
+                    &self.config,
+                    Some(recipe),
+                    tasks,
+                    &state,
+                    &self.profile,
+                    self.new,
+                )?;
+            }
         } else {
             if self.task.is_empty() {
                 return Err(eyre!("at least one --task or --recipe is required"));

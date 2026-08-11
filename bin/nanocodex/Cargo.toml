@@ -77,6 +77,7 @@ arcbox-ext4.workspace = true
 chrono.workspace = true
 ignore.workspace = true
 nanocodex-eval.workspace = true
+nanocodex-eval-adapters.workspace = true
 nanocodex-vm.workspace = true
 regex.workspace = true
 sysinfo.workspace = true

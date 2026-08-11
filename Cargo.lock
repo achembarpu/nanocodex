@@ -5152,6 +5152,7 @@ dependencies = [
  "nanocodex-browser",
  "nanocodex-egress",
  "nanocodex-eval",
+ "nanocodex-eval-adapters",
  "nanocodex-observability",
  "nanocodex-tools",
  "nanocodex-vm",
@@ -5278,6 +5279,19 @@ dependencies = [
  "tracing",
  "uuid",
  "zstd",
+]
+
+[[package]]
+name = "nanocodex-eval-adapters"
+version = "0.3.0"
+dependencies = [
+ "hex",
+ "nanocodex-eval",
+ "sha2 0.11.0",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
 ]
 
 [[package]]
