@@ -1,4 +1,5 @@
 use super::*;
+use nanocodex_oai_api::PromptValidationError;
 
 /// Completion handle for an accepted turn.
 ///
@@ -109,9 +110,7 @@ impl TurnControl {
     /// its steering queue is full, or if the driver stops.
     pub async fn steer(&self, prompt: impl Into<Prompt>) -> Result<()> {
         let prompt = prompt.into();
-        prompt
-            .validate()
-            .map_err(|error| NanocodexError::InvalidRequest(error.to_string()))?;
+        prompt.validate().map_err(steer_validation_error)?;
         request_command(&self.commands, |result| Command::Steer {
             key: self.key,
             prompt,
@@ -133,6 +132,14 @@ impl TurnControl {
         })
         .await
     }
+}
+
+fn steer_validation_error(error: PromptValidationError) -> NanocodexError {
+    let message = match error {
+        PromptValidationError::EmptyInstruction => "steer instruction must not be empty".to_owned(),
+        error => error.to_string(),
+    };
+    NanocodexError::InvalidRequest(message)
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
