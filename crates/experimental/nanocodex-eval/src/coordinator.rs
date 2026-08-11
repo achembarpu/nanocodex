@@ -778,6 +778,21 @@ async fn worker_exited(
     if worker.trim().is_empty() {
         return Err(ApiError::bad_request("worker name must not be empty"));
     }
+    let observed_worker = worker.clone();
+    let host = state.host.clone();
+    let worker_is_live = tokio::task::spawn_blocking(move || {
+        host.lock()
+            .map_err(|_| "evaluation host sampler lock was poisoned".to_owned())
+            .map(|mut host| host.worker_is_live(&observed_worker))
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(ApiError::internal)?;
+    if worker_is_live {
+        return Err(ApiError::conflict(format!(
+            "worker {worker} still has a live eval process"
+        )));
+    }
     let _write = state.ledger_writes.lock().await;
     let exited = {
         let mut active = state.active.lock().await;
@@ -1131,6 +1146,13 @@ impl ApiError {
     fn bad_gateway(message: impl ToString) -> Self {
         Self {
             status: StatusCode::BAD_GATEWAY,
+            message: message.to_string(),
+        }
+    }
+
+    fn conflict(message: impl ToString) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
             message: message.to_string(),
         }
     }

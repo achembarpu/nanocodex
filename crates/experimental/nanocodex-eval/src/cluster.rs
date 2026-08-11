@@ -64,13 +64,7 @@ impl HostSampler {
     pub(crate) fn snapshot(&mut self, claimed_tasks: usize) -> ClusterSnapshot {
         self.system.refresh_cpu_usage();
         self.system.refresh_memory();
-        self.system.refresh_processes_specifics(
-            ProcessesToUpdate::All,
-            true,
-            ProcessRefreshKind::nothing()
-                .with_cmd(UpdateKind::OnlyIfNotSet)
-                .without_tasks(),
-        );
+        self.refresh_processes();
 
         let observed_at_ms = SystemTime::UNIX_EPOCH
             .elapsed()
@@ -111,31 +105,54 @@ impl HostSampler {
             nodes: vec![node],
         }
     }
+
+    pub(crate) fn worker_is_live(&mut self, worker: &str) -> bool {
+        self.refresh_processes();
+        self.system.processes().values().any(|process| {
+            is_eval_worker(process.name(), process.cmd())
+                && has_argument_value(process.cmd(), "--worker", worker)
+        })
+    }
+
+    fn refresh_processes(&mut self) {
+        self.system.refresh_processes_specifics(
+            ProcessesToUpdate::All,
+            true,
+            ProcessRefreshKind::nothing()
+                .with_cmd(UpdateKind::OnlyIfNotSet)
+                .without_tasks(),
+        );
+    }
 }
 
 fn process_counts(system: &System) -> (usize, usize) {
     let mut workers = 0;
     let mut vms = 0;
     for process in system.processes().values() {
-        if process.name() != OsStr::new("nanocodex") {
-            continue;
-        }
-        let arguments = process
-            .cmd()
-            .iter()
-            .map(|argument| argument.to_string_lossy())
-            .collect::<Vec<_>>();
-        if arguments
-            .windows(2)
-            .any(|pair| pair[0] == "eval" && pair[1] == "run")
-        {
+        let arguments = process.cmd();
+        if is_eval_worker(process.name(), arguments) {
             workers += 1;
         }
-        if arguments.iter().any(|argument| argument == "vm-run-config") {
+        // libkrun changes the process name to `libkrun VM` after startup, but
+        // Linux retains the original nanocodex command line.
+        if arguments
+            .iter()
+            .any(|argument| argument == OsStr::new("vm-run-config"))
+        {
             vms += 1;
         }
     }
     (workers, vms)
+}
+
+fn is_eval_worker(name: &OsStr, arguments: &[std::ffi::OsString]) -> bool {
+    name == OsStr::new("nanocodex") && has_argument_value(arguments, "eval", "run")
+}
+
+fn has_argument_value(arguments: &[std::ffi::OsString], argument: &str, value: &str) -> bool {
+    arguments
+        .windows(2)
+        .any(|pair| pair[0] == OsStr::new(argument) && pair[1] == OsStr::new(value))
 }
 
 fn read_pressure() -> Pressure {

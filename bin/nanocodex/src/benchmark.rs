@@ -31,7 +31,7 @@ pub(crate) fn prompt(
         },
         |coordinator| {
             format!(
-                "For every name in status.workers whose nanocodex-eval-worker@<name>.service is not live, POST {{\"worker\":<name>,\"error\":\"worker process exited\"}} to {}/v1/workers/exited before admitting replacements. The operation is idempotent.",
+                "For every name in status.workers whose nanocodex-eval-worker@<name>.service is not live, POST {{\"worker\":<name>,\"error\":\"worker process exited\"}} to {}/v1/workers/exited before admitting replacements. The operation is idempotent. Never perform the inverse: a live unit absent from status.workers is not an exited worker and must never be posted to this endpoint.",
                 coordinator.trim_end_matches('/')
             )
         },
