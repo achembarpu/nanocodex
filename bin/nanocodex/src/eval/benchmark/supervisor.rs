@@ -53,7 +53,8 @@ pub(super) async fn run(profile: &str, config: &Path, coordinator: &str) -> Resu
         }
 
         let unclaimed = usize::try_from(board.tasks.unclaimed.max(0)).unwrap_or(usize::MAX);
-        let target = target_concurrency(workers.active, unclaimed, lower, upper);
+        let running = usize::try_from(board.tasks.running.max(0)).unwrap_or(usize::MAX);
+        let target = target_concurrency(workers.active, running, unclaimed, lower, upper);
         let batch = target.saturating_sub(workers.active);
         let reason = if workers.capacity_death {
             "capacity boundary"
@@ -96,11 +97,14 @@ pub(super) async fn run(profile: &str, config: &Path, coordinator: &str) -> Resu
 
 fn target_concurrency(
     active: usize,
+    running: usize,
     unclaimed: usize,
     lower: usize,
     upper: Option<usize>,
 ) -> usize {
-    if unclaimed == 0 {
+    let pending_claims = active.saturating_sub(running);
+    let claimable = unclaimed.saturating_sub(pending_claims);
+    if claimable == 0 {
         return active;
     }
     let wanted = match upper {
@@ -109,7 +113,7 @@ fn target_concurrency(
         Some(upper) if upper <= lower.saturating_add(1) => active,
         Some(upper) => active.max(lower.saturating_add(upper).saturating_div(2)),
     };
-    wanted.min(active.saturating_add(unclaimed))
+    wanted.min(active.saturating_add(claimable))
 }
 
 struct Reconciliation {
