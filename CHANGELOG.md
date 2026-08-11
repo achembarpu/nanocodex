@@ -227,6 +227,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Miscellaneous Tasks
 
+- [release] Prepare 0.4.0
 - [eval] Update Harbor adapter lockfile
 - Update JavaScript package size budget
 - Update JavaScript package size budget

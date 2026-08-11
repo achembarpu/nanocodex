@@ -16,6 +16,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Support Luna
 
+### Miscellaneous Tasks
+
+- [release] Prepare 0.4.0
+
 ### Other
 
 - Merge pull request [#86](https://github.com/gakonst/nanocodex/issues/86) from gakonst/fix/ring-only-rustls

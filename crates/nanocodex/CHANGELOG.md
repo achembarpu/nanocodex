@@ -20,6 +20,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Match Codex realtime steering
 - Add reusable realtime voice sessions
 
+### Miscellaneous Tasks
+
+- [release] Prepare 0.4.0
+
 ### Other
 
 - Merge pull request [#119](https://github.com/gakonst/nanocodex/issues/119) from gakonst/feat/exe-dev-spike

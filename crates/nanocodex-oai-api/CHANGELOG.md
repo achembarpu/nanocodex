@@ -33,6 +33,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Add reusable realtime voice sessions
 - [vm] Add retained VM-backed workspace tools
 
+### Miscellaneous Tasks
+
+- [release] Prepare 0.4.0
+
 ### Other
 
 - Merge pull request [#142](https://github.com/gakonst/nanocodex/issues/142) from gakonst/feat/eval-adapter-foundation

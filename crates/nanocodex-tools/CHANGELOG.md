@@ -28,6 +28,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [tools] Expose the ambient sensitive environment
 - [vm] Add retained VM-backed workspace tools
 
+### Miscellaneous Tasks
+
+- [release] Prepare 0.4.0
+
 ### Other
 
 - Merge pull request [#124](https://github.com/gakonst/nanocodex/issues/124) from gakonst/fix/codex-parity-current
