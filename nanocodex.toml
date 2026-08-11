@@ -23,3 +23,9 @@ benchmarks = ["arena-hard-v2/2edbb5f36f5b42be"]
 trials = 1
 model = ["sol"]
 thinking = ["high"]
+
+[profiles.swe-bench-smoke]
+benchmarks = ["swe-bench-verified-smoke/astropy__astropy-12907"]
+trials = 1
+model = ["sol"]
+thinking = ["high"]

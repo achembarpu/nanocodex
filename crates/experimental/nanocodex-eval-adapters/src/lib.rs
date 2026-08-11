@@ -9,6 +9,7 @@
 mod arena_hard;
 mod harbor;
 mod source;
+mod swe_bench;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -89,11 +90,18 @@ const INSTALLED_ADAPTERS: &[InstalledAdapter] = &[
         import: import_arena_hard,
         matches: exact_task,
     },
+    InstalledAdapter {
+        names: &["swe-bench-verified-smoke"],
+        import: import_swe_bench,
+        matches: exact_task,
+    },
 ];
 
 const TERMINAL_BENCH_REVISION: &str = "5c8eadf1f393183288fa08b8f73ca9a469cc5e00";
 const DEEP_SWE_REVISION: &str = "e016041a6ccf8da29906afc9a3f5a8df940a1f78";
 const ARENA_HARD_REVISION: &str = "196f6b826783b3da7310e361a805fa36f0be83f3";
+const SWE_VERIFIED_ROW_RESPONSE_SHA256: &str =
+    "7c62220a467830a3a330dda51211ab4c1ba099124dffc8371fbec057933c47b8";
 
 fn import_harbor(
     request: &BenchmarkRequest,
@@ -155,6 +163,44 @@ fn import_arena_hard(
         nanocodex_eval::import::Harness::directory(assets)?,
     )
     .baseline_answers(source.join("data/arena-hard-v2.0/model_answer/o3-mini-2025-01-31.jsonl"));
+    Ok(store.import(&importer)?)
+}
+
+fn import_swe_bench(
+    request: &BenchmarkRequest,
+    sources: &SourceStore,
+    store: &ImportStore,
+) -> Result<ImportedDataset, AdapterError> {
+    let response = sources.download(
+        "swe-bench/swe-bench-verified-smoke.response.json",
+        "https://datasets-server.huggingface.co/rows?dataset=princeton-nlp/SWE-bench_Verified&config=default&split=test&offset=0&length=1",
+        SWE_VERIFIED_ROW_RESPONSE_SHA256,
+    )?;
+    let document: serde_json::Value =
+        serde_json::from_slice(&fs::read(&response).map_err(|error| {
+            AdapterError::Source(format!("failed to read {}: {error}", response.display()))
+        })?)
+        .map_err(|error| AdapterError::Source(error.to_string()))?;
+    let row = document
+        .get("rows")
+        .and_then(serde_json::Value::as_array)
+        .and_then(|rows| rows.first())
+        .and_then(|entry| entry.get("row"))
+        .ok_or_else(|| AdapterError::Source("SWE-bench response has no first row".to_owned()))?;
+    let mut bytes =
+        serde_json::to_vec(row).map_err(|error| AdapterError::Source(error.to_string()))?;
+    bytes.push(b'\n');
+    let instances = sources.write_verified("swe-bench/swe-bench-verified-smoke.jsonl", &bytes)?;
+    let harness = nanocodex_eval::import::Harness::directory(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/swe-bench"),
+    )?;
+    let importer = swe_bench::SweBench::new(
+        &request.name,
+        instances,
+        "princeton-nlp/SWE-bench_Verified@c104f840cc67f8b6eec6f759ebc8b2693d585d4a",
+        "swebench",
+        harness,
+    );
     Ok(store.import(&importer)?)
 }
 
