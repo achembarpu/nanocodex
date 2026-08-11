@@ -35,6 +35,7 @@ pub(super) struct WebSearchHandler {
 impl WebSearchHandler {
     #[cfg(test)]
     pub(super) fn new(config: WebSearchConfig) -> Self {
+        nanocodex_oai_api::transport::install_default_rustls_crypto_provider();
         Self::with_client(config, reqwest::Client::new())
     }
 

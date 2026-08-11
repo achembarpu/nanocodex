@@ -5,6 +5,47 @@ All notable changes to Nanocodex are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0](https://github.com/gakonst/nanocodex/releases/tag/v0.4.0) - 2026-08-11
+
+### Bug Fixes
+
+- [browser] Keep deferred schema lookup private
+- [tools] Restore stock Codex code mode parity
+- Close remaining Codex wire parity gaps
+- [tools] Keep tool search visible in code mode
+- [tools] Align Code Mode tool contracts
+- [agent] Dispatch unnamespaced hosted tools
+- [tls] Standardize rustls on ring
+- [vm] Harden cache and session lifecycle
+
+### Features
+
+- [browser] Add pixel-calibrated captures
+- [cli] Enable browser tools by default
+- [tools] Align current Codex parity
+- [wasm] Support CSP-safe direct host tools
+- [cli] Integrate deferred browser tooling
+- [tools] Expose the ambient sensitive environment
+- [vm] Add retained VM-backed workspace tools
+
+### Miscellaneous Tasks
+
+- [release] Prepare 0.4.0
+
+### Other
+
+- Merge pull request [#124](https://github.com/gakonst/nanocodex/issues/124) from gakonst/fix/codex-parity-current
+- Merge pull request [#95](https://github.com/gakonst/nanocodex/issues/95) from gakonst/agent/pr61-code-mode
+- Merge pull request [#75](https://github.com/gakonst/nanocodex/issues/75) from gakonst/feat/wasm-host-transport
+- Merge pull request [#86](https://github.com/gakonst/nanocodex/issues/86) from gakonst/fix/ring-only-rustls
+- Merge pull request [#78](https://github.com/gakonst/nanocodex/issues/78) from gakonst/agent/browser-tui-integration
+- Merge pull request [#59](https://github.com/gakonst/nanocodex/issues/59) from cjustice/feat/ambient-sensitive-environment
+- Merge pull request [#58](https://github.com/gakonst/nanocodex/issues/58) from gakonst/refactor/09-eval
+
+### Refactor
+
+- Trim Codex parity implementation
+
 ## [0.3.0](https://github.com/gakonst/nanocodex/releases/tag/v0.3.0) - 2026-07-28
 
 ### Bug Fixes
@@ -21,6 +62,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Miscellaneous Tasks
 
+- [release] Refresh 0.3.0 changelogs
 - [release] Prepare 0.3.0
 
 ### Other

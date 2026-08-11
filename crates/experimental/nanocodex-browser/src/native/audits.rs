@@ -326,6 +326,7 @@ pub(super) async fn crux(
         Some(endpoint) => endpoint.clone(),
         None => Url::parse(DEFAULT_CRUX_ENDPOINT)?,
     };
+    nanocodex_oai_api::transport::install_default_rustls_crypto_provider();
     let response = reqwest::Client::new()
         .post(endpoint)
         .query(&[("key", client.api_key.as_str())])

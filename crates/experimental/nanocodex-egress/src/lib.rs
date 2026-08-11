@@ -647,6 +647,7 @@ impl EgressProxy {
         std::fs::write(&ca_certificate_path, &certificate_pem)
             .map_err(EgressError::WriteCertificate)?;
 
+        install_default_rustls_crypto_provider();
         let client = reqwest::Client::builder()
             .no_proxy()
             .redirect(reqwest::redirect::Policy::none())
@@ -1470,6 +1471,12 @@ fn proxy_authentication_required() -> Response<Body> {
 
 fn random_proxy_password() -> String {
     random_identifier()
+}
+
+fn install_default_rustls_crypto_provider() {
+    if CryptoProvider::get_default().is_none() {
+        drop(ring::default_provider().install_default());
+    }
 }
 
 fn random_identifier() -> String {

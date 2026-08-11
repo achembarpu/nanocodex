@@ -311,6 +311,7 @@ impl CoordinatorClient {
         if !base.path().ends_with('/') {
             base.set_path(&format!("{}/", base.path()));
         }
+        nanocodex_oai_api::transport::install_default_rustls_crypto_provider();
         Ok(Self {
             base,
             http: reqwest::Client::builder()

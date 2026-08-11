@@ -3,19 +3,19 @@ set -euo pipefail
 
 shipped_tree=$(
   cargo tree --locked --package nanocodex-bin --features tempo \
-    --edges normal,build --prefix none
+    --edges normal,build --prefix none --color never
 )
 shipped_feature_tree=$(
   cargo tree --locked --package nanocodex-bin --features tempo \
-    --edges features --prefix none
+    --edges features --prefix none --color never
 )
 workspace_tree=$(
   cargo tree --locked --workspace --all-features \
-    --edges normal,build,dev --prefix none
+    --edges normal,build,dev --prefix none --color never
 )
 workspace_feature_tree=$(
   cargo tree --locked --workspace --all-features \
-    --edges features --prefix none
+    --edges features --prefix none --color never
 )
 
 check_tree() {
@@ -47,7 +47,13 @@ check_tree() {
 
   local reqwest_sources
   reqwest_sources=$(
-    awk '$1 == "reqwest" && $2 ~ /^v/ { print $2, $3 }' <<<"$dependency_tree" | sort -u
+    awk '$1 == "reqwest" && $2 ~ /^v/ {
+      if (NF < 3 || $3 == "(*)") {
+        print $2
+      } else {
+        print $2, $3
+      }
+    }' <<<"$dependency_tree" | sort -u
   )
   local reqwest_source_count
   reqwest_source_count=$(sed '/^$/d' <<<"$reqwest_sources" | wc -l | tr -d ' ')
@@ -57,12 +63,12 @@ check_tree() {
     exit 1
   fi
 
-  if ! grep -q '^reqwest feature "rustls-ring"' <<<"$feature_tree"; then
-    echo "error: the ${label} graph must enable reqwest's rustls-ring feature" >&2
+  if ! grep -q '^reqwest feature "rustls-no-provider"' <<<"$feature_tree"; then
+    echo "error: the ${label} graph must enable reqwest's rustls-no-provider feature" >&2
     exit 1
   fi
 
-  echo "rustls provider policy passed for ${label}: ring only (${rustls_versions}); one ring-native reqwest (${reqwest_sources})"
+  echo "rustls provider policy passed for ${label}: ring only (${rustls_versions}); one provider-neutral reqwest (${reqwest_sources})"
 }
 
 check_tree "shipped nanocodex" "$shipped_tree" "$shipped_feature_tree"

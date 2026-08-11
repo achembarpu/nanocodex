@@ -5,6 +5,66 @@ All notable changes to Nanocodex are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.0](https://github.com/gakonst/nanocodex/releases/tag/v0.4.0) - 2026-08-11
+
+### Bug Fixes
+
+- [oai] Allow long silent response generations
+- [eval] Preserve same-role benchmark messages
+- [eval] Recover cleanly from worker infrastructure failures
+- [oai] Recover forbidden websocket handshakes
+- [oai] Preserve code mode notifications in replay
+- Close remaining Codex wire parity gaps
+- [oai] Account for usage-uncertain attempts
+- [tools] Align Code Mode tool contracts
+- [tls] Standardize rustls on ring
+- Preserve Codex rollout model compatibility
+- [ci] Stabilize observability tests
+
+### Features
+
+- [eval] Add benchmark adapter foundation
+- [tools] Align current Codex parity
+- [model] Support Terra and routed OpenAI model IDs
+- [voice] Add Codex realtime parity
+- Support Luna
+- Close Codex realtime parity gaps
+- Match Codex realtime steering
+- Add reusable realtime voice sessions
+- [vm] Add retained VM-backed workspace tools
+
+### Miscellaneous Tasks
+
+- [release] Prepare 0.4.0
+
+### Other
+
+- Merge pull request [#142](https://github.com/gakonst/nanocodex/issues/142) from gakonst/feat/eval-adapter-foundation
+- Merge pull request [#139](https://github.com/gakonst/nanocodex/issues/139) from gakonst/fix/websocket-403-fallback
+- Merge pull request [#124](https://github.com/gakonst/nanocodex/issues/124) from gakonst/fix/codex-parity-current
+- Merge pull request [#121](https://github.com/gakonst/nanocodex/issues/121) from Slokh/kartik/upstream-contributions
+- Merge pull request [#97](https://github.com/gakonst/nanocodex/issues/97) from gakonst/agent/pr61-tower-accounting
+- Merge pull request [#95](https://github.com/gakonst/nanocodex/issues/95) from gakonst/agent/pr61-code-mode
+- Merge pull request [#86](https://github.com/gakonst/nanocodex/issues/86) from gakonst/fix/ring-only-rustls
+- Merge pull request [#82](https://github.com/gakonst/nanocodex/issues/82) from gakonst/feat/realtime-codex-parity
+- Merge pull request [#80](https://github.com/gakonst/nanocodex/issues/80) from clabby/cl/luna
+- Merge pull request [#77](https://github.com/gakonst/nanocodex/issues/77) from gakonst/feat/realtime-voice
+- Merge pull request [#58](https://github.com/gakonst/nanocodex/issues/58) from gakonst/refactor/09-eval
+
+### Performance
+
+- Harden realtime voice audio paths
+
+### Refactor
+
+- [eval] Simplify durable benchmark ownership
+- Trim Codex parity implementation
+- Fix the model for each thread
+
+### Testing
+
+- Synchronize realtime response queue
+
 ## [0.3.0](https://github.com/gakonst/nanocodex/releases/tag/v0.3.0) - 2026-07-28
 
 ### Bug Fixes
@@ -27,6 +87,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Miscellaneous Tasks
 
+- [release] Refresh 0.3.0 changelogs
 - [release] Prepare 0.3.0
 
 ### Other
