@@ -6,6 +6,7 @@
 
 #![deny(missing_docs, rustdoc::broken_intra_doc_links)]
 
+mod arc_agi_3;
 mod arena_hard;
 mod browsecomp;
 mod gdpval;
@@ -143,6 +144,11 @@ const INSTALLED_ADAPTERS: &[InstalledAdapter] = &[
         import: import_browsecomp,
         matches: exact_task,
     },
+    InstalledAdapter {
+        names: &["arc-agi-3-public-smoke"],
+        import: import_arc_agi_3,
+        matches: exact_task,
+    },
 ];
 
 const TERMINAL_BENCH_REVISION: &str = "5c8eadf1f393183288fa08b8f73ca9a469cc5e00";
@@ -202,6 +208,8 @@ const GPQA_DIAMOND_SHA256: &str =
     "41d1213cd7a4998605a26c2798500652572007161b3a92817ba46b35befcd305";
 const BROWSECOMP_REVISION: &str = "652c89d0ca9df547706735883097e9537d40dc47";
 const BROWSECOMP_SHA256: &str = "7b24471cd5b3eb2a46830a14802b5c029ea62f488ff75a0f88af7923d1454abf";
+const ARC_AGI_REVISION: &str = "f12822c4d550121c35a275008d964afbbed47d2f";
+const ARC_AGI_3_BENCHMARKING_REVISION: &str = "86d72170ce3155551712a9fafd290bab471d6eee";
 
 fn import_harbor(
     request: &BenchmarkRequest,
@@ -539,6 +547,33 @@ fn import_browsecomp(
         format!("openai/simple-evals@{BROWSECOMP_REVISION}"),
         nanocodex_eval::import::Environment::OciImage("python:3.12-slim".to_owned()),
         Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/browsecomp"),
+    ))?)
+}
+
+fn import_arc_agi_3(
+    _request: &BenchmarkRequest,
+    sources: &SourceStore,
+    store: &ImportStore,
+) -> Result<ImportedDataset, AdapterError> {
+    let benchmarking = sources.git_checkout(
+        "arc-agi-3-benchmarking",
+        "https://github.com/arcprize/arc-agi-3-benchmarking.git",
+        ARC_AGI_3_BENCHMARKING_REVISION,
+    )?;
+    let toolkit = sources.git_checkout(
+        "arc-agi",
+        "https://github.com/arcprize/arc-agi.git",
+        ARC_AGI_REVISION,
+    )?;
+    let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/arc-agi-3");
+    Ok(store.import(&arc_agi_3::ArcAgi3::new(
+        benchmarking,
+        toolkit,
+        format!(
+            "arcprize/arc-agi-3-benchmarking@{ARC_AGI_3_BENCHMARKING_REVISION}+arcprize/arc-agi@{ARC_AGI_REVISION}"
+        ),
+        nanocodex_eval::import::Environment::Dockerfile(assets.join("environment")),
+        nanocodex_eval::import::Harness::directory(assets.join("verifier"))?,
     ))?)
 }
 
