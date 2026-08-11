@@ -321,6 +321,68 @@ impl SourceStore {
         }
         self.write_verified(relative, &bytes)
     }
+
+    pub(crate) fn prepare_huggingface_archive(
+        &self,
+        repository: &str,
+        filename: &str,
+        revision: &str,
+        destination_relative: &str,
+    ) -> Result<PathBuf, SourceError> {
+        let destination = self.root.join(destination_relative);
+        let marker = destination.join(".nanocodex-source-revision");
+        if destination.is_dir()
+            && fs::read_to_string(&marker).is_ok_and(|value| value.trim() == revision)
+        {
+            return Ok(destination);
+        }
+        if destination.exists() {
+            return Err(SourceError::Stale(format!(
+                "{} does not carry expected revision {revision}",
+                destination.display()
+            )));
+        }
+        let download = self.root.join(format!("{destination_relative}-archive"));
+        fs::create_dir_all(&download).map_err(|source| io_error(&download, source))?;
+        let executable = if Command::new("hf")
+            .arg("--help")
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            "hf"
+        } else if Command::new("huggingface-cli")
+            .arg("--help")
+            .output()
+            .is_ok_and(|output| output.status.success())
+        {
+            "huggingface-cli"
+        } else {
+            return Err(SourceError::Command(format!(
+                "preparing {repository} requires the authenticated Hugging Face CLI"
+            )));
+        };
+        command_status(
+            Command::new(executable)
+                .arg("download")
+                .arg(repository)
+                .arg(filename)
+                .args(["--repo-type", "dataset", "--revision", revision])
+                .arg("--local-dir")
+                .arg(&download),
+        )?;
+        fs::create_dir_all(&destination).map_err(|source| io_error(&destination, source))?;
+        let archive = download.join(filename);
+        command_status(
+            Command::new("tar")
+                .args(["-xzf"])
+                .arg(&archive)
+                .arg("--directory")
+                .arg(&destination),
+        )?;
+        fs::write(&marker, format!("{revision}\n")).map_err(|source| io_error(&marker, source))?;
+        fs::remove_file(&archive).map_err(|source| io_error(&archive, source))?;
+        Ok(destination)
+    }
 }
 
 #[allow(dead_code)]
