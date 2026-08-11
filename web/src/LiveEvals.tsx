@@ -126,8 +126,8 @@ function ClusterNode({ node }: { node: EvalClusterNode }) {
         <Server aria-hidden="true" />
       </header>
       <div className="eval-node-counts">
-        <div><span>Workers</span><strong>{node.workerProcesses}</strong></div>
-        <div><span>Claimed</span><strong>{node.claimedTasks}</strong></div>
+        <div><span>Worker processes</span><strong>{node.workerProcesses}</strong></div>
+        <div><span>Active claims</span><strong>{node.claimedTasks}</strong></div>
         <div><span>Live VMs</span><strong>{node.vmProcesses}</strong></div>
         <div><span>CPU cores</span><strong>{node.cpuCores}</strong></div>
       </div>
