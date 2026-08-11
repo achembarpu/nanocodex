@@ -320,7 +320,7 @@ export function LiveEvals({ overview }: { overview: EvalOverview }) {
     : null;
   const taskQuery = useQuery({
     queryKey: taskKey(selectedWorkset?.id ?? null, selectedTaskId),
-    enabled: Boolean(selectedWorkset && selectedTaskId),
+    enabled: Boolean(selectedWorkset && selectedTaskOverview),
     queryFn: ({ signal }) =>
       evalApi.task(selectedWorkset!.id, selectedTaskId!, signal),
     refetchInterval:
@@ -348,7 +348,7 @@ export function LiveEvals({ overview }: { overview: EvalOverview }) {
   });
   const resultsQuery = useQuery<EvalWorksetResults>({
     queryKey: taskResultKey(selectedWorkset?.id ?? null, selectedTaskId),
-    enabled: Boolean(selectedWorkset && taskRoute && selectedTaskId),
+    enabled: Boolean(selectedWorkset && taskRoute && selectedTaskOverview),
     queryFn: ({ signal }) => evalApi.taskResults(selectedWorkset!.id, selectedTaskId!, signal),
     refetchInterval: selectedTaskOverview &&
       selectedTaskOverview.summary.success + selectedTaskOverview.summary.failed < selectedTaskOverview.summary.total

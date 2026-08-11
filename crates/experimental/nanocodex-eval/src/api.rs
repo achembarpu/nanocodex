@@ -367,7 +367,6 @@ impl EvalApi {
         &self,
         digest: &str,
     ) -> Result<Option<WorksetAnalytics>, String> {
-        self.index_results(digest, None)?;
         let connection = self.connection()?;
         let Some(workset) = find_workset(&connection, digest)? else {
             return Ok(None);
@@ -428,6 +427,9 @@ impl EvalApi {
                 treatments.insert(raw_treatment, treatment.clone());
                 treatment
             };
+            if outcome.as_deref() == Some("infrastructure_error") {
+                continue;
+            }
             let harness = treatment_harness(&treatment);
             let cost =
                 cost.or_else(|| estimated_cost_usd(&treatment.model, input, cached_input, output));
@@ -504,7 +506,6 @@ impl EvalApi {
         digest: &str,
         task_id: Option<&str>,
     ) -> Result<Option<WorksetResults>, String> {
-        self.index_results(digest, task_id)?;
         let connection = self.connection()?;
         let Some(workset) = find_workset(&connection, digest)? else {
             return Ok(None);
@@ -601,72 +602,6 @@ impl EvalApi {
         }))
     }
 
-    fn index_results(&self, digest: &str, task_id: Option<&str>) -> Result<(), String> {
-        let mut connection = Connection::open(&self.ledger).map_err(|error| error.to_string())?;
-        connection
-            .busy_timeout(std::time::Duration::from_secs(5))
-            .map_err(|error| error.to_string())?;
-        let Some(workset) = find_workset(&connection, digest)? else {
-            return Ok(());
-        };
-        let task = match task_id {
-            Some(task_id) => match find_task(&connection, workset.id, digest, task_id)? {
-                Some(task) => Some(task),
-                None => return Ok(()),
-            },
-            None => None,
-        };
-        let mut statement = connection
-            .prepare(
-                "SELECT e.id, e.result_path \
-                 FROM eval_tasks e \
-                 LEFT JOIN coordinate_results r ON r.coordinate_id = e.id \
-                 WHERE e.workset_id = ?1 AND e.state IN ('success', 'failed') \
-                   AND (?2 IS NULL OR e.definition_id = ?2) \
-                   AND e.result_path IS NOT NULL \
-                   AND (r.coordinate_id IS NULL OR r.result_path IS NULL \
-                        OR r.result_path != e.result_path)",
-            )
-            .map_err(|error| error.to_string())?;
-        let missing = statement
-            .query_map((workset.id, task.as_ref().map(|task| task.id)), |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    PathBuf::from(row.get::<_, String>(1)?),
-                ))
-            })
-            .map_err(|error| error.to_string())?
-            .collect::<Result<Vec<_>, _>>()
-            .map_err(|error| error.to_string())?;
-        drop(statement);
-        let mut indexed = Vec::with_capacity(missing.len());
-        for (coordinate_id, result_path) in missing {
-            let retained_path = result_path.to_string_lossy().into_owned();
-            let result_path = match result_path.canonicalize() {
-                Ok(path) => path,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                    indexed.push((coordinate_id, retained_path, None));
-                    continue;
-                }
-                Err(error) => return Err(error.to_string()),
-            };
-            indexed.push((coordinate_id, retained_path, read_outcome(&result_path)?));
-        }
-        let transaction = connection
-            .transaction()
-            .map_err(|error| error.to_string())?;
-        for (coordinate_id, result_path, evidence) in indexed {
-            match evidence {
-                Some(evidence) => {
-                    insert_result(&transaction, coordinate_id, &result_path, &evidence)?
-                }
-                None => mark_result_indexed(&transaction, coordinate_id, &result_path)?,
-            }
-        }
-        transaction.commit().map_err(|error| error.to_string())?;
-        Ok(())
-    }
-
     pub(crate) fn index_result(&self, result_path: &Path) -> Result<(), String> {
         let retained_path = result_path.to_string_lossy().into_owned();
         let result_path = result_path
@@ -699,7 +634,6 @@ impl EvalApi {
         workset_digest: &str,
         task_id: &str,
     ) -> Result<Option<TaskDetail>, String> {
-        self.index_results(workset_digest, Some(task_id))?;
         let connection = self.connection()?;
         let Some(workset) = find_workset(&connection, workset_digest)? else {
             return Ok(None);
@@ -1317,24 +1251,6 @@ fn insert_result(
                 usage.and_then(|value| integer_field(value, "total_tokens")),
                 evidence.cost_usd,
             ],
-        )
-        .map_err(|error| error.to_string())?;
-    Ok(())
-}
-
-fn mark_result_indexed(
-    connection: &Connection,
-    coordinate_id: i64,
-    result_path: &str,
-) -> Result<(), String> {
-    connection
-        .execute(
-            "INSERT INTO coordinate_results(coordinate_id, result_path) VALUES (?1, ?2) \
-             ON CONFLICT(coordinate_id) DO UPDATE SET \
-                result_path = excluded.result_path, status = NULL, outcome = NULL, \
-                input_tokens = NULL, cached_input_tokens = NULL, output_tokens = NULL, \
-                reasoning_output_tokens = NULL, total_tokens = NULL, cost_usd = NULL",
-            params![coordinate_id, result_path],
         )
         .map_err(|error| error.to_string())?;
     Ok(())
