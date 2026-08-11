@@ -19,7 +19,7 @@ model = ["sol"]
 thinking = ["high"]
 
 [profiles.arena-hard-smoke]
-benchmarks = ["arena-hard-v2/2edbb9b0a71942e6aa766d656f90de46"]
+benchmarks = ["arena-hard-v2/2edbb5f36f5b42be"]
 trials = 1
 model = ["sol"]
 thinking = ["high"]
