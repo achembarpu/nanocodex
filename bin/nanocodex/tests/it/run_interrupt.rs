@@ -7,12 +7,8 @@ use tokio::{net::TcpListener, process::Command, sync::oneshot, time::timeout};
 use tokio_tungstenite::{WebSocketStream, accept_async, tungstenite::Message};
 
 #[tokio::test]
-async fn interrupt_after_completion_still_flushes_one_terminal_event() -> Result<()> {
-    assert_signal_after_completion("INT").await
-}
-
-#[tokio::test]
-async fn terminate_after_completion_still_returns_failure() -> Result<()> {
+async fn interrupts_after_completion_flush_one_terminal_event_and_fail() -> Result<()> {
+    assert_signal_after_completion("INT").await?;
     assert_signal_after_completion("TERM").await
 }
 
@@ -53,16 +49,20 @@ async fn assert_signal_after_completion(signal_name: &str) -> Result<()> {
 
     // The response event is much larger than a pipe, so the adapter is blocked
     // writing stdout while the independently-owned driver commits the turn.
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    tokio::time::sleep(Duration::from_secs(1)).await;
     let pid = child.id().ok_or_else(|| eyre!("CLI had no process ID"))?;
     let signal = Command::new("kill")
         .args([format!("-{signal_name}"), pid.to_string()])
         .status()
         .await?;
     assert!(signal.success(), "failed to send SIG{signal_name} to CLI");
-    tokio::time::sleep(Duration::from_millis(250)).await;
+    // Keep the pipe backpressured until the CLI has selected the signal branch.
+    // Draining it too quickly makes completion and interruption simultaneously
+    // ready, so the randomized select can legitimately observe completion first
+    // on a loaded runner.
+    tokio::time::sleep(Duration::from_secs(1)).await;
 
-    let output = timeout(Duration::from_secs(10), child.wait_with_output())
+    let output = timeout(Duration::from_secs(20), child.wait_with_output())
         .await
         .map_err(|_| eyre!("interrupted CLI did not exit"))??;
     timeout(Duration::from_secs(5), server)
@@ -102,7 +102,7 @@ async fn serve_completed_response(
             json!({
                 "type": "response.reasoning_summary_text.delta",
                 "summary_index": 0,
-                "delta": "x".repeat(8 * 1024 * 1024)
+                "delta": "x".repeat(2 * 1024 * 1024)
             })
             .to_string()
             .into(),

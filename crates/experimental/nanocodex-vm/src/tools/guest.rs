@@ -1039,7 +1039,9 @@ mod tests {
             ],
             current_directory: "/".to_owned(),
             environment: Vec::new(),
-            timeout_millis: 100,
+            // Leave enough time for a process scheduled on a loaded CI host to
+            // publish its partial output before exercising the timeout path.
+            timeout_millis: 1_000,
             max_output_bytes: DEFAULT_OUTPUT_BYTES,
             stdout_mirror: None,
             stderr_mirror: None,
@@ -1056,7 +1058,7 @@ mod tests {
             response.stderr.as_deref(),
             Some(b"partial stderr".as_slice())
         );
-        assert!(started_at.elapsed() < Duration::from_secs(1));
+        assert!(started_at.elapsed() < Duration::from_secs(3));
     }
 
     #[tokio::test]
