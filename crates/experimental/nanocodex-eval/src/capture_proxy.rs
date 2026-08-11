@@ -281,6 +281,7 @@ impl ResponsesCaptureProxy {
         listener.set_nonblocking(true)?;
         let listener = TcpListener::from_std(listener)?;
         let recorder = CaptureRecorder::create(&config.output).await?;
+        nanocodex_oai_api::transport::install_default_rustls_crypto_provider();
         let state = ProxyState {
             upstream: Arc::from(config.upstream.trim_end_matches('/')),
             http: reqwest::Client::builder()
