@@ -10,6 +10,7 @@ mod agents_last_exam;
 mod arc_agi_3;
 mod arena_hard;
 mod browsecomp;
+mod external;
 mod gdpval;
 mod genebench_pro;
 mod gpqa_diamond;
@@ -194,6 +195,12 @@ const INSTALLED_ADAPTERS: &[InstalledAdapter] = &[
         kind: "openai-evals",
         names: &[],
         import: import_openai_evals,
+        matches: exact_task,
+    },
+    InstalledAdapter {
+        kind: "external",
+        names: &[],
+        import: import_external,
         matches: exact_task,
     },
 ];
@@ -703,6 +710,35 @@ fn import_openai_evals(
         configuration.recipe.revision,
         nanocodex_eval::import::Environment::OciImage(configuration.recipe.image),
     ))?)
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ExternalConfiguration {
+    adapter: String,
+    manifest: PathBuf,
+}
+
+fn import_external(
+    request: &BenchmarkRequest,
+    _sources: &SourceStore,
+    store: &ImportStore,
+    configuration: Option<&AdapterConfiguration>,
+) -> Result<ImportedDataset, AdapterError> {
+    let configuration =
+        configured::<ExternalConfiguration>(&request.name, "external", configuration)?;
+    if configuration.recipe.adapter != "external" {
+        return Err(AdapterError::Configuration(format!(
+            "benchmark {:?} selected adapter {:?}, expected external",
+            request.name, configuration.recipe.adapter
+        )));
+    }
+    Ok(
+        store.import(&external::ExternalHarness::new(resolve_config_path(
+            &configuration.root,
+            &configuration.recipe.manifest,
+        )))?,
+    )
 }
 
 struct Configured<T> {
