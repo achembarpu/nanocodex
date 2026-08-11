@@ -8,6 +8,7 @@
 
 mod arena_hard;
 mod genebench_pro;
+mod graphwalks;
 mod harbor;
 mod source;
 mod swe_atlas_qna;
@@ -107,6 +108,11 @@ const INSTALLED_ADAPTERS: &[InstalledAdapter] = &[
         import: import_genebench_pro,
         matches: exact_task,
     },
+    InstalledAdapter {
+        names: &["graphwalks"],
+        import: import_graphwalks,
+        matches: exact_task,
+    },
 ];
 
 const TERMINAL_BENCH_REVISION: &str = "5c8eadf1f393183288fa08b8f73ca9a469cc5e00";
@@ -122,6 +128,11 @@ const GENEBENCH_PRO_GRADER_SHA256: &str =
     "81a50853d1348237300ce90a7b48a9230b4edb5d1af30207c37f17f0de8bbb28";
 const GENEBENCH_PRO_BASE: &str =
     "https://huggingface.co/datasets/openai/genebench-pro-public-package/resolve";
+const GRAPHWALKS_REVISION: &str = "f338bb265735a56a79f4b0f5def722c9c3268ead";
+const GRAPHWALKS_SHORT_SHA256: &str =
+    "54036036c91d8e04bb2a5fcd9e36f8e2a852cacece5dfc2b1ee40e3a6182b516";
+const GRAPHWALKS_LONG_SHA256: &str =
+    "537879431c72a42e3b500f80efc3047e7facb90390b6063d33679b4320985911";
 
 fn import_harbor(
     request: &BenchmarkRequest,
@@ -298,6 +309,31 @@ fn import_genebench_pro(
         format!("openai/genebench-pro-public-package@{GENEBENCH_PRO_REVISION}"),
         nanocodex_eval::import::Environment::Dockerfile(assets.join("environment")),
         nanocodex_eval::import::Harness::directory(assets.join("verifier"))?,
+    ))?)
+}
+
+fn import_graphwalks(
+    _request: &BenchmarkRequest,
+    sources: &SourceStore,
+    store: &ImportStore,
+) -> Result<ImportedDataset, AdapterError> {
+    let base =
+        format!("https://huggingface.co/datasets/openai/graphwalks/resolve/{GRAPHWALKS_REVISION}");
+    sources.download(
+        "graphwalks/graphwalks_128k_and_shorter.parquet",
+        &format!("{base}/graphwalks_128k_and_shorter.parquet"),
+        GRAPHWALKS_SHORT_SHA256,
+    )?;
+    sources.download(
+        "graphwalks/graphwalks_256k_to_1mil.parquet",
+        &format!("{base}/graphwalks_256k_to_1mil.parquet"),
+        GRAPHWALKS_LONG_SHA256,
+    )?;
+    Ok(store.import(&graphwalks::GraphWalks::new(
+        sources.root().join("graphwalks"),
+        format!("openai/graphwalks@{GRAPHWALKS_REVISION}"),
+        nanocodex_eval::import::Environment::OciImage("python:3.12-slim".to_owned()),
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/graphwalks"),
     ))?)
 }
 
