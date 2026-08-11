@@ -63,6 +63,13 @@
   their schemas as experimental development state, not a compatibility
   boundary. Evolve the canonical format directly as the benchmark system
   changes.
+- A canonical-state version mismatch must never send development back to an
+  older binary or trigger compatibility work. Stop the benchmark controller
+  and its scoped workers, migrate or reseed the canonical state directly in
+  place for the current code, and continue. Preserve completed results only
+  when the direct transformation is obvious; otherwise recreate them. Do not
+  back up experimental state or keep old runtimes available unless the user
+  explicitly asks.
 - Do not add backward-compatible readers, dual-write paths, legacy schema
   support, or compatibility shims unless the user explicitly asks for them.
   Use a direct one-way migration for the active corpus when its data remains
