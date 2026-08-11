@@ -6,11 +6,14 @@
 
 #![deny(missing_docs, rustdoc::broken_intra_doc_links)]
 
+mod arena_hard;
 mod harbor;
 mod source;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fs,
+    io::{BufReader, Read as _},
     path::{Path, PathBuf},
 };
 
@@ -18,6 +21,7 @@ use nanocodex_eval::{
     ResolvedTask,
     import::{ImportError, ImportStore, ImportedDataset},
 };
+use serde::Deserialize;
 use sha2::{Digest as _, Sha256};
 use source::SourceStore;
 
@@ -74,14 +78,22 @@ struct InstalledAdapter {
     matches: fn(&str, &str) -> bool,
 }
 
-const INSTALLED_ADAPTERS: &[InstalledAdapter] = &[InstalledAdapter {
-    names: &["terminal-bench-2.1", "deep-swe-v1.1"],
-    import: import_harbor,
-    matches: matches_harbor_task,
-}];
+const INSTALLED_ADAPTERS: &[InstalledAdapter] = &[
+    InstalledAdapter {
+        names: &["terminal-bench-2.1", "deep-swe-v1.1"],
+        import: import_harbor,
+        matches: matches_harbor_task,
+    },
+    InstalledAdapter {
+        names: &["arena-hard-v2"],
+        import: import_arena_hard,
+        matches: exact_task,
+    },
+];
 
 const TERMINAL_BENCH_REVISION: &str = "5c8eadf1f393183288fa08b8f73ca9a469cc5e00";
 const DEEP_SWE_REVISION: &str = "e016041a6ccf8da29906afc9a3f5a8df940a1f78";
+const ARENA_HARD_REVISION: &str = "196f6b826783b3da7310e361a805fa36f0be83f3";
 
 fn import_harbor(
     request: &BenchmarkRequest,
@@ -122,6 +134,28 @@ fn matches_harbor_task(selected: &str, normalized: &str) -> bool {
         || normalized
             .strip_prefix("datacurve/")
             .is_some_and(|task| task == selected)
+}
+
+fn import_arena_hard(
+    request: &BenchmarkRequest,
+    sources: &SourceStore,
+    store: &ImportStore,
+) -> Result<ImportedDataset, AdapterError> {
+    let source = sources.git_checkout(
+        "arena-hard-auto",
+        "https://github.com/lm-sys/arena-hard-auto.git",
+        ARENA_HARD_REVISION,
+    )?;
+    let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/arena-hard");
+    let importer = arena_hard::ArenaHard::new(
+        &request.name,
+        source.join("data/arena-hard-v2.0/question.jsonl"),
+        format!("lm-sys/arena-hard-auto@{ARENA_HARD_REVISION}"),
+        nanocodex_eval::import::Environment::OciImage("debian:bookworm-slim".to_owned()),
+        nanocodex_eval::import::Harness::directory(assets)?,
+    )
+    .baseline_answers(source.join("data/arena-hard-v2.0/model_answer/o3-mini-2025-01-31.jsonl"));
+    Ok(store.import(&importer)?)
 }
 
 impl AdapterCatalog {
@@ -281,6 +315,47 @@ fn safe_case_id(value: &str) -> String {
     } else {
         output
     }
+}
+
+fn sha256_file(path: &Path) -> Result<String, ImportError> {
+    let file = fs::File::open(path).map_err(|source| ImportError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    let mut reader = BufReader::new(file);
+    let mut digest = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = reader.read(&mut buffer).map_err(|source| ImportError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
+        if read == 0 {
+            break;
+        }
+        digest.update(&buffer[..read]);
+    }
+    Ok(hex::encode(digest.finalize()))
+}
+
+fn read_json_lines<T: for<'de> Deserialize<'de>>(path: &Path) -> Result<Vec<T>, ImportError> {
+    let text = fs::read_to_string(path).map_err(|source| ImportError::Io {
+        path: path.to_path_buf(),
+        source,
+    })?;
+    text.lines()
+        .enumerate()
+        .filter(|(_, line)| !line.trim().is_empty())
+        .map(|(line, value)| {
+            serde_json::from_str(value).map_err(|source| {
+                ImportError::Invalid(format!(
+                    "failed to decode {} line {}: {source}",
+                    path.display(),
+                    line + 1
+                ))
+            })
+        })
+        .collect()
 }
 
 #[cfg(test)]
