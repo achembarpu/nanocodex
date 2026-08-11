@@ -17,3 +17,9 @@ benchmarks = ["deep-swe-v1.1/aiomonitor-task-snapshots-diff"]
 trials = 1
 model = ["sol"]
 thinking = ["high"]
+
+[profiles.arena-hard-smoke]
+benchmarks = ["arena-hard-v2/2edbb5f36f5b42be"]
+trials = 1
+model = ["sol"]
+thinking = ["high"]
