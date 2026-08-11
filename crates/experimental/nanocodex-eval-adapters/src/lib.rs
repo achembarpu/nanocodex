@@ -17,6 +17,7 @@ mod graphwalks;
 mod harbor;
 mod healthbench_professional;
 mod mrcr;
+mod openai_evals;
 mod source;
 mod swe_atlas_qna;
 mod swe_bench;
@@ -33,6 +34,7 @@ use nanocodex_eval::{
     import::{ImportError, ImportStore, ImportedDataset},
 };
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use sha2::{Digest as _, Sha256};
 use source::SourceStore;
 
@@ -72,6 +74,9 @@ pub enum AdapterError {
     /// A blocking adapter worker failed.
     #[error("evaluation adapter worker failed: {0}")]
     Worker(String),
+    /// Adapter configuration could not be read or decoded.
+    #[error("invalid adapter configuration: {0}")]
+    Configuration(String),
 }
 
 #[derive(Clone, Debug)]
@@ -83,76 +88,112 @@ pub(crate) struct BenchmarkRequest {
 
 #[derive(Clone, Copy)]
 struct InstalledAdapter {
+    kind: &'static str,
     names: &'static [&'static str],
-    import:
-        fn(&BenchmarkRequest, &SourceStore, &ImportStore) -> Result<ImportedDataset, AdapterError>,
+    import: fn(
+        &BenchmarkRequest,
+        &SourceStore,
+        &ImportStore,
+        Option<&AdapterConfiguration>,
+    ) -> Result<ImportedDataset, AdapterError>,
     matches: fn(&str, &str) -> bool,
+}
+
+#[derive(Clone, Debug)]
+struct AdapterConfiguration {
+    root: PathBuf,
+    value: toml::Value,
+}
+
+#[derive(Deserialize)]
+struct AdapterManifest {
+    #[serde(default)]
+    benchmark: BTreeMap<String, toml::Value>,
 }
 
 const INSTALLED_ADAPTERS: &[InstalledAdapter] = &[
     InstalledAdapter {
+        kind: "harbor",
         names: &["terminal-bench-2.1", "deep-swe-v1.1"],
         import: import_harbor,
         matches: matches_harbor_task,
     },
     InstalledAdapter {
+        kind: "arena-hard",
         names: &["arena-hard-v2"],
         import: import_arena_hard,
         matches: exact_task,
     },
     InstalledAdapter {
+        kind: "swe-bench",
         names: &["swe-bench-verified-smoke"],
         import: import_swe_bench,
         matches: exact_task,
     },
     InstalledAdapter {
+        kind: "swe-atlas-qna",
         names: &["swe-atlas-qna"],
         import: import_swe_atlas,
         matches: matches_swe_atlas_task,
     },
     InstalledAdapter {
+        kind: "genebench-pro",
         names: &["genebench-pro-public"],
         import: import_genebench_pro,
         matches: exact_task,
     },
     InstalledAdapter {
+        kind: "graphwalks",
         names: &["graphwalks"],
         import: import_graphwalks,
         matches: exact_task,
     },
     InstalledAdapter {
+        kind: "mrcr",
         names: &["mrcr-v2"],
         import: import_mrcr,
         matches: exact_task,
     },
     InstalledAdapter {
+        kind: "healthbench-professional",
         names: &["healthbench-professional"],
         import: import_healthbench_professional,
         matches: exact_task,
     },
     InstalledAdapter {
+        kind: "gdpval",
         names: &["gdpval"],
         import: import_gdpval,
         matches: exact_task,
     },
     InstalledAdapter {
+        kind: "gpqa-diamond",
         names: &["gpqa-diamond"],
         import: import_gpqa_diamond,
         matches: exact_task,
     },
     InstalledAdapter {
+        kind: "browsecomp",
         names: &["browsecomp"],
         import: import_browsecomp,
         matches: exact_task,
     },
     InstalledAdapter {
+        kind: "arc-agi-3",
         names: &["arc-agi-3-public-smoke"],
         import: import_arc_agi_3,
         matches: exact_task,
     },
     InstalledAdapter {
+        kind: "agents-last-exam",
         names: &["agents-last-exam"],
         import: import_agents_last_exam,
+        matches: exact_task,
+    },
+    InstalledAdapter {
+        kind: "openai-evals",
+        names: &[],
+        import: import_openai_evals,
         matches: exact_task,
     },
 ];
@@ -224,6 +265,7 @@ fn import_harbor(
     request: &BenchmarkRequest,
     sources: &SourceStore,
     store: &ImportStore,
+    _configuration: Option<&AdapterConfiguration>,
 ) -> Result<ImportedDataset, AdapterError> {
     let (root, revision) = match request.name.as_str() {
         "terminal-bench-2.1" => (
@@ -265,6 +307,7 @@ fn import_arena_hard(
     request: &BenchmarkRequest,
     sources: &SourceStore,
     store: &ImportStore,
+    _configuration: Option<&AdapterConfiguration>,
 ) -> Result<ImportedDataset, AdapterError> {
     let source = sources.git_checkout(
         "arena-hard-auto",
@@ -287,6 +330,7 @@ fn import_swe_bench(
     request: &BenchmarkRequest,
     sources: &SourceStore,
     store: &ImportStore,
+    _configuration: Option<&AdapterConfiguration>,
 ) -> Result<ImportedDataset, AdapterError> {
     let response = sources.download(
         "swe-bench/swe-bench-verified-smoke.response.json",
@@ -325,6 +369,7 @@ fn import_swe_atlas(
     _request: &BenchmarkRequest,
     sources: &SourceStore,
     store: &ImportStore,
+    _configuration: Option<&AdapterConfiguration>,
 ) -> Result<ImportedDataset, AdapterError> {
     let root = sources.git_checkout(
         "swe-atlas",
@@ -348,6 +393,7 @@ fn import_genebench_pro(
     _request: &BenchmarkRequest,
     sources: &SourceStore,
     store: &ImportStore,
+    _configuration: Option<&AdapterConfiguration>,
 ) -> Result<ImportedDataset, AdapterError> {
     let package_name = "genebench-pro-public-package";
     let manifest_relative = format!("{package_name}/manifest.json");
@@ -402,6 +448,7 @@ fn import_graphwalks(
     _request: &BenchmarkRequest,
     sources: &SourceStore,
     store: &ImportStore,
+    _configuration: Option<&AdapterConfiguration>,
 ) -> Result<ImportedDataset, AdapterError> {
     let base =
         format!("https://huggingface.co/datasets/openai/graphwalks/resolve/{GRAPHWALKS_REVISION}");
@@ -427,6 +474,7 @@ fn import_mrcr(
     request: &BenchmarkRequest,
     sources: &SourceStore,
     store: &ImportStore,
+    _configuration: Option<&AdapterConfiguration>,
 ) -> Result<ImportedDataset, AdapterError> {
     let base = format!("https://huggingface.co/datasets/openai/mrcr/resolve/{MRCR_REVISION}");
     for (relative, sha256) in MRCR_FILES {
@@ -452,6 +500,7 @@ fn import_healthbench_professional(
     _request: &BenchmarkRequest,
     sources: &SourceStore,
     store: &ImportStore,
+    _configuration: Option<&AdapterConfiguration>,
 ) -> Result<ImportedDataset, AdapterError> {
     let dataset = sources.download(
         "healthbench-professional/healthbench_professional_eval.jsonl",
@@ -474,6 +523,7 @@ fn import_gdpval(
     request: &BenchmarkRequest,
     sources: &SourceStore,
     store: &ImportStore,
+    _configuration: Option<&AdapterConfiguration>,
 ) -> Result<ImportedDataset, AdapterError> {
     let checkout = sources.git_checkout_with_materialized_lfs(
         "gdpval",
@@ -518,6 +568,7 @@ fn import_gpqa_diamond(
     _request: &BenchmarkRequest,
     sources: &SourceStore,
     store: &ImportStore,
+    _configuration: Option<&AdapterConfiguration>,
 ) -> Result<ImportedDataset, AdapterError> {
     let checkout = sources.git_checkout(
         "gpqa",
@@ -545,6 +596,7 @@ fn import_browsecomp(
     _request: &BenchmarkRequest,
     sources: &SourceStore,
     store: &ImportStore,
+    _configuration: Option<&AdapterConfiguration>,
 ) -> Result<ImportedDataset, AdapterError> {
     let dataset = sources.download(
         "browsecomp/browse_comp_test_set.csv",
@@ -563,6 +615,7 @@ fn import_arc_agi_3(
     _request: &BenchmarkRequest,
     sources: &SourceStore,
     store: &ImportStore,
+    _configuration: Option<&AdapterConfiguration>,
 ) -> Result<ImportedDataset, AdapterError> {
     let benchmarking = sources.git_checkout(
         "arc-agi-3-benchmarking",
@@ -590,6 +643,7 @@ fn import_agents_last_exam(
     _request: &BenchmarkRequest,
     sources: &SourceStore,
     store: &ImportStore,
+    _configuration: Option<&AdapterConfiguration>,
 ) -> Result<ImportedDataset, AdapterError> {
     let source = sources.git_checkout(
         "agents-last-exam",
@@ -615,6 +669,80 @@ fn import_agents_last_exam(
     ))?)
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct OpenAiEvalsConfiguration {
+    adapter: String,
+    registry: PathBuf,
+    eval: String,
+    revision: String,
+    #[serde(default = "default_python_image")]
+    image: String,
+}
+
+fn import_openai_evals(
+    request: &BenchmarkRequest,
+    _sources: &SourceStore,
+    store: &ImportStore,
+    configuration: Option<&AdapterConfiguration>,
+) -> Result<ImportedDataset, AdapterError> {
+    let configuration =
+        configured::<OpenAiEvalsConfiguration>(&request.name, "openai-evals", configuration)?;
+    if configuration.recipe.adapter != "openai-evals" {
+        return Err(AdapterError::Configuration(format!(
+            "benchmark {:?} selected adapter {:?}, expected openai-evals",
+            request.name, configuration.recipe.adapter
+        )));
+    }
+    let assets = Path::new(env!("CARGO_MANIFEST_DIR")).join("assets/openai-evals");
+    Ok(store.import(&openai_evals::OpenAiEvals::new(
+        &request.name,
+        resolve_config_path(&configuration.root, &configuration.recipe.registry),
+        assets,
+        configuration.recipe.eval,
+        configuration.recipe.revision,
+        nanocodex_eval::import::Environment::OciImage(configuration.recipe.image),
+    ))?)
+}
+
+struct Configured<T> {
+    root: PathBuf,
+    recipe: T,
+}
+
+fn configured<T: DeserializeOwned>(
+    benchmark: &str,
+    expected_adapter: &str,
+    configuration: Option<&AdapterConfiguration>,
+) -> Result<Configured<T>, AdapterError> {
+    let configuration = configuration.ok_or_else(|| {
+        AdapterError::Configuration(format!(
+            "benchmark {benchmark:?} requires [{expected_adapter}] configuration"
+        ))
+    })?;
+    let recipe = configuration
+        .value
+        .clone()
+        .try_into::<T>()
+        .map_err(|error| AdapterError::Configuration(error.to_string()))?;
+    Ok(Configured {
+        root: configuration.root.clone(),
+        recipe,
+    })
+}
+
+fn resolve_config_path(root: &Path, path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        root.join(path)
+    }
+}
+
+fn default_python_image() -> String {
+    "python:3.12-slim".to_owned()
+}
+
 impl AdapterCatalog {
     /// Uses `imports/` and `sources/` below one durable evaluator state root.
     #[must_use]
@@ -627,17 +755,34 @@ impl AdapterCatalog {
     }
 
     /// Acquires, imports, and selects every configured benchmark task.
-    pub async fn resolve(&self, selectors: &[String]) -> Result<Vec<ResolvedTask>, AdapterError> {
+    pub async fn resolve(
+        &self,
+        config: impl AsRef<Path>,
+        selectors: &[String],
+    ) -> Result<Vec<ResolvedTask>, AdapterError> {
+        let config = config.as_ref();
+        let text = fs::read_to_string(config).map_err(|error| {
+            AdapterError::Configuration(format!("failed to read {}: {error}", config.display()))
+        })?;
+        let manifest: AdapterManifest = toml::from_str(&text).map_err(|error| {
+            AdapterError::Configuration(format!("failed to parse {}: {error}", config.display()))
+        })?;
+        let config = config.canonicalize().map_err(|error| {
+            AdapterError::Configuration(format!("failed to resolve {}: {error}", config.display()))
+        })?;
+        let root = config
+            .parent()
+            .ok_or_else(|| AdapterError::Configuration("config has no parent".to_owned()))?;
         let requests = parse_requests(selectors)?;
         let mut jobs = tokio::task::JoinSet::new();
         for request in requests.into_values() {
-            let adapter = installed_adapter(&request.name)?;
+            let (adapter, configuration) = installed_adapter(&request.name, &manifest, root)?;
             let imports = self.imports.clone();
             let sources = self.sources.clone();
             jobs.spawn_blocking(move || {
                 let store = ImportStore::new(imports);
                 let sources = SourceStore::new(sources);
-                let dataset = (adapter.import)(&request, &sources, &store)?;
+                let dataset = (adapter.import)(&request, &sources, &store, configuration.as_ref())?;
                 select_tasks(&request, &dataset, adapter.matches)
             });
         }
@@ -650,12 +795,40 @@ impl AdapterCatalog {
     }
 }
 
-fn installed_adapter(name: &str) -> Result<InstalledAdapter, AdapterError> {
-    INSTALLED_ADAPTERS
+fn installed_adapter(
+    name: &str,
+    manifest: &AdapterManifest,
+    root: &Path,
+) -> Result<(InstalledAdapter, Option<AdapterConfiguration>), AdapterError> {
+    if let Some(adapter) = INSTALLED_ADAPTERS
         .iter()
         .copied()
         .find(|adapter| adapter.names.contains(&name))
-        .ok_or_else(|| AdapterError::UnknownBenchmark(name.to_owned()))
+    {
+        return Ok((adapter, None));
+    }
+    let value = manifest
+        .benchmark
+        .get(name)
+        .ok_or_else(|| AdapterError::UnknownBenchmark(name.to_owned()))?;
+    let kind = value
+        .get("adapter")
+        .and_then(toml::Value::as_str)
+        .ok_or_else(|| {
+            AdapterError::Configuration(format!("benchmark {name:?} must declare a string adapter"))
+        })?;
+    let adapter = INSTALLED_ADAPTERS
+        .iter()
+        .copied()
+        .find(|adapter| adapter.kind == kind)
+        .ok_or_else(|| AdapterError::UnknownBenchmark(format!("{name} (adapter {kind})")))?;
+    Ok((
+        adapter,
+        Some(AdapterConfiguration {
+            root: root.to_path_buf(),
+            value: value.clone(),
+        }),
+    ))
 }
 
 fn parse_requests(

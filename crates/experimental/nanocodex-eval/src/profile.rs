@@ -22,6 +22,8 @@ pub struct EvaluationManifest {
     default: Option<String>,
     #[serde(default)]
     harness: BTreeMap<String, Harness>,
+    #[serde(default, rename = "benchmark")]
+    _benchmarks: BTreeMap<String, toml::Value>,
     profiles: BTreeMap<String, Profile>,
 }
 

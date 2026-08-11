@@ -122,6 +122,7 @@ self-replace = "1.5.0"
 semver = "1.0.27"
 serde = { version = "1.0.228", features = ["derive", "rc"] }
 serde_json = { version = "1.0.149", features = ["raw_value"] }
+serde_yaml_ng = "0.10.0"
 sha1 = "0.11.0"
 sha2 = { version = "0.11.0", default-features = false }
 shlex = "2.0.1"
