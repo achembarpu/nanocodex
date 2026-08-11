@@ -17,6 +17,7 @@ use nanocodex_eval::{
     ResolvedTask,
     import::{ImportError, ImportStore, ImportedDataset},
 };
+use sha2::{Digest as _, Sha256};
 use source::SourceStore;
 
 /// Installed adapter catalog bound to one durable evaluator state directory.
@@ -197,6 +198,39 @@ pub(crate) fn exact_task(selected: &str, normalized: &str) -> bool {
 impl From<source::SourceError> for AdapterError {
     fn from(error: source::SourceError) -> Self {
         Self::Source(error.to_string())
+    }
+}
+
+#[allow(dead_code)]
+fn sha256_values(values: impl IntoIterator<Item = impl AsRef<[u8]>>) -> String {
+    let mut digest = Sha256::new();
+    for value in values {
+        digest.update(Sha256::digest(value));
+    }
+    hex::encode(digest.finalize())
+}
+
+#[allow(dead_code)]
+fn safe_case_id(value: &str) -> String {
+    let mut output = String::with_capacity(value.len());
+    let mut separator = false;
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-' | b'+') {
+            output.push(char::from(byte));
+            separator = false;
+        } else if !separator && !output.is_empty() {
+            output.push('-');
+            separator = true;
+        }
+    }
+    while output.ends_with('-') {
+        output.pop();
+    }
+    if output.is_empty() || output == "." || output == ".." {
+        let digest = Sha256::digest(value.as_bytes());
+        format!("case-{}", &hex::encode(digest)[..16])
+    } else {
+        output
     }
 }
 
