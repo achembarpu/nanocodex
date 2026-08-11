@@ -15,6 +15,7 @@ use nanocodex_eval::{
     atif::AtifBuilder,
     coordinator::{CoordinatorClient, RemoteClaim},
     harness::{Harness, HarnessAuth},
+    judge::JudgeRuntime,
     vm::{CachePolicy, VmBackend, VmResources},
 };
 use nanocodex_eval_adapters::AdapterCatalog;
@@ -710,16 +711,20 @@ async fn execute_coordinate(
     agent: EvalAgentArgs,
 ) -> Result<ExecutionResult> {
     std::fs::create_dir_all(&output)?;
+    let (nanocodex, auth) =
+        agent.shared_builder(treatment.model, treatment.thinking, web_search)?;
+    let judge = JudgeRuntime::start(nanocodex.clone().thinking(Thinking::Low)).await?;
+    let verifier_environment = judge.verifier_environment();
     match treatment.harness.as_str() {
         "nanocodex" => {
             let backend = resources
                 .backend_with(
                     VmBackend::builder()
                         .retain_passed_rootfs(false)
-                        .retain_failed_rootfs(false),
+                        .retain_failed_rootfs(false)
+                        .verifier_environment(verifier_environment),
                 )
                 .await?;
-            let nanocodex = agent.builder(treatment.model, treatment.thinking, web_search)?;
             let evaluator = Evaluator::builder(nanocodex, backend)
                 .output_directory(&output)
                 .build()?;
@@ -728,8 +733,6 @@ async fn execute_coordinate(
             Ok(classify_execution(&outcome, evidence))
         }
         _ => {
-            let (nanocodex, auth) =
-                agent.shared_builder(treatment.model, treatment.thinking, web_search)?;
             let harness_auth = match auth {
                 SharedAuth::ApiKey(api_key) => HarnessAuth::api_key(api_key),
                 SharedAuth::AuthFile(path) => HarnessAuth::auth_file(path),
@@ -751,6 +754,7 @@ async fn execute_coordinate(
             .guest_memory_mb(task.resources().memory_mb)
             .arguments(configured.arguments)
             .environment(configured.environment.into_iter().collect())
+            .verifier_environment(verifier_environment)
             .credentials(
                 configured.home,
                 configured.auth_file,

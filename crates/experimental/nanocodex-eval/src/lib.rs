@@ -64,6 +64,8 @@ mod harness_exec;
 /// Content-addressed normalization of third-party datasets into native tasks.
 pub mod import;
 mod job;
+/// Evaluator-owned model judge endpoint for isolated verifier processes.
+pub mod judge;
 mod native;
 #[cfg(any(
     all(target_os = "linux", not(target_env = "musl")),

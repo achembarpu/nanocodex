@@ -10,6 +10,7 @@ pub(super) async fn prepare_harness_vm_resources(
     vm: &VmResources,
     guest_memory_mb: u64,
     web_search: bool,
+    verifier_environment: &BTreeMap<String, String>,
 ) -> InternalResult<HarnessVmResources> {
     let environment = vm.environment(task).await?;
     let backend = vm
@@ -17,7 +18,8 @@ pub(super) async fn prepare_harness_vm_resources(
             VmBackend::builder()
                 .retain_passed_rootfs(false)
                 .retain_failed_rootfs(false)
-                .web_search(web_search),
+                .web_search(web_search)
+                .verifier_environment(verifier_environment.clone()),
             task,
             guest_memory_mb,
         )

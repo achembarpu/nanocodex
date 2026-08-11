@@ -1257,6 +1257,7 @@ pub struct VmBackend {
     retain_failed_rootfs: bool,
     web_search: bool,
     shared_directories: Arc<[SharedDirectory]>,
+    verifier_environment: Arc<BTreeMap<String, String>>,
 }
 
 /// Deliberate policy for a [`VmBackend`].
@@ -1265,6 +1266,7 @@ pub struct VmBackendBuilder {
     retain_failed_rootfs: bool,
     web_search: bool,
     shared_directories: Vec<SharedDirectory>,
+    verifier_environment: BTreeMap<String, String>,
 }
 
 impl Default for VmBackendBuilder {
@@ -1274,6 +1276,7 @@ impl Default for VmBackendBuilder {
             retain_failed_rootfs: true,
             web_search: false,
             shared_directories: Vec::new(),
+            verifier_environment: BTreeMap::new(),
         }
     }
 }
@@ -1326,6 +1329,7 @@ impl VmBackend {
                 retain_failed_rootfs: self.retain_failed_rootfs,
                 web_search: self.web_search,
                 shared_directories: &self.shared_directories,
+                verifier_environment: &self.verifier_environment,
             },
             attempt,
         )
@@ -1367,6 +1371,16 @@ impl VmBackendBuilder {
         self
     }
 
+    /// Adds run-scoped values visible only to verifier commands.
+    #[must_use]
+    pub fn verifier_environment(
+        mut self,
+        environment: impl IntoIterator<Item = (String, String)>,
+    ) -> Self {
+        self.verifier_environment.extend(environment);
+        self
+    }
+
     /// Builds a cloneable backend handle.
     #[must_use]
     pub fn build(self) -> VmBackend {
@@ -1376,6 +1390,7 @@ impl VmBackendBuilder {
             retain_failed_rootfs: self.retain_failed_rootfs,
             web_search: self.web_search,
             shared_directories: self.shared_directories.into(),
+            verifier_environment: Arc::new(self.verifier_environment),
         }
     }
 }
@@ -1452,6 +1467,7 @@ struct VmAttemptHost<'a> {
     retain_failed_rootfs: bool,
     web_search: bool,
     shared_directories: &'a [SharedDirectory],
+    verifier_environment: &'a Arc<BTreeMap<String, String>>,
 }
 
 struct AttemptGvproxy {
@@ -1687,6 +1703,7 @@ struct VmVerifier {
     retain_failed_rootfs: bool,
     root_disks_finalized: bool,
     artifact_directory: PathBuf,
+    verifier_environment: Arc<BTreeMap<String, String>>,
     _network: Option<AttemptGvproxy>,
     _verifier_network: Option<AttemptGvproxy>,
 }
@@ -1879,6 +1896,7 @@ fn vm_attempt_inner(
         retain_failed_rootfs: host.retain_failed_rootfs,
         root_disks_finalized: false,
         artifact_directory: attempt.directory().to_path_buf(),
+        verifier_environment: Arc::clone(host.verifier_environment),
         _network: network,
         _verifier_network: verifier_network,
     };
@@ -3184,7 +3202,11 @@ impl VmVerifier {
         };
         command = command
             .current_directory(&launch.workspace)
-            .environment(base_guest_environment(task, &launch.workspace))
+            .environment(verifier_guest_environment(
+                task,
+                &launch.workspace,
+                &self.verifier_environment,
+            ))
             .timeout(task.verifier().timeout());
         Ok(command)
     }
@@ -3357,6 +3379,18 @@ fn base_guest_environment(task: &Task, workspace: &str) -> Vec<(String, String)>
     ]);
     environment.extend(task.environment().clone());
     environment.extend(task.verifier().environment().clone());
+    environment.into_iter().collect()
+}
+
+fn verifier_guest_environment(
+    task: &Task,
+    workspace: &str,
+    runtime: &BTreeMap<String, String>,
+) -> Vec<(String, String)> {
+    let mut environment = base_guest_environment(task, workspace)
+        .into_iter()
+        .collect::<BTreeMap<_, _>>();
+    environment.extend(runtime.clone());
     environment.into_iter().collect()
 }
 

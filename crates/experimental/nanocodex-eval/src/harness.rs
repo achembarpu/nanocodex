@@ -5,6 +5,7 @@
 //! verifier lifecycle.
 
 use std::{
+    collections::BTreeMap,
     error::Error,
     fs,
     future::Future,
@@ -120,6 +121,7 @@ pub struct Harness {
     api_upstream: Option<String>,
     version: String,
     name: String,
+    verifier_environment: BTreeMap<String, String>,
 }
 
 impl Harness {
@@ -153,6 +155,7 @@ impl Harness {
             api_upstream: None,
             version: "configured".to_owned(),
             name: "harness".to_owned(),
+            verifier_environment: BTreeMap::new(),
         }
     }
 
@@ -202,6 +205,16 @@ impl Harness {
     #[must_use]
     pub fn environment(mut self, environment: Vec<(String, String)>) -> Self {
         self.environment = environment;
+        self
+    }
+
+    /// Adds run-scoped values visible only to verifier commands.
+    #[must_use]
+    pub fn verifier_environment(
+        mut self,
+        environment: impl IntoIterator<Item = (String, String)>,
+    ) -> Self {
+        self.verifier_environment.extend(environment);
         self
     }
 
@@ -262,6 +275,7 @@ impl Harness {
             &self.resources,
             self.guest_memory_mb,
             self.web_search,
+            &self.verifier_environment,
         )
         .await
         .map_err(HarnessError::from_box)?;

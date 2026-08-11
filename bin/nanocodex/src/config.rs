@@ -431,16 +431,6 @@ impl AuthArgs {
     all(target_os = "macos", target_arch = "aarch64")
 ))]
 impl EvalAgentArgs {
-    pub(crate) fn builder(
-        self,
-        model: Model,
-        thinking: Thinking,
-        web_search: bool,
-    ) -> Result<NanocodexBuilder> {
-        let auth = self.auth.resolve()?;
-        eval_builder_with_auth(auth.nanocodex()?, model, thinking, web_search)
-    }
-
     pub(crate) fn shared_builder(
         self,
         model: Model,
