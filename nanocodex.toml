@@ -35,3 +35,9 @@ benchmarks = ["swe-atlas-qna/task-6905333b74f22949d97ba9c2"]
 trials = 1
 model = ["sol"]
 thinking = ["high"]
+
+[profiles.genebench-pro-smoke]
+benchmarks = ["genebench-pro-public/multiparent_qtl_hmm_lmm"]
+trials = 1
+model = ["sol"]
+thinking = ["high"]
