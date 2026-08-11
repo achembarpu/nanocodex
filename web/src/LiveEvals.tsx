@@ -283,16 +283,6 @@ function CaseInspector({
   );
 }
 
-function health(summary: EvalSummary) {
-  if (summary.failed > 0) {
-    return { status: "degraded", message: `${summary.failed} execution failure(s) retained with evidence.` };
-  }
-  if (summary.success === summary.total) {
-    return { status: "healthy", message: "Every durable task finished execution." };
-  }
-  return { status: "healthy", message: "The durable ledger is progressing." };
-}
-
 function progressRank(summary: EvalSummary) {
   if (summary.running > 0) return 0;
   if (summary.unclaimed > 0) return 1;
@@ -463,8 +453,6 @@ export function LiveEvals({ overview }: { overview: EvalOverview }) {
     ...new Set(selectedTask?.treatments.flatMap((treatment) =>
       treatment.cells.map((cell) => cell.repetition)) ?? []),
   ].sort((left, right) => left - right);
-  const currentHealth = health(overview.summary);
-
   useEffect(() => {
     if (!selectedCell) return;
     window.requestAnimationFrame(() =>
@@ -488,16 +476,11 @@ export function LiveEvals({ overview }: { overview: EvalOverview }) {
   if (!route) {
     return (
       <main className="live-evals">
-        <section className="eval-page-head">
+        <section className="eval-page-head eval-overview-head">
           <div>
             <p className="eyebrow"><Radio aria-hidden="true" /> Coordinator evidence</p>
             <h1>Evals</h1>
             <p>Durable benchmark progress and retained result artifacts.</p>
-          </div>
-          <div className={`live-health-callout ${currentHealth.status}`}>
-            <span className="live-health-pulse" />
-            <div><strong>{currentHealth.status}</strong><p>{currentHealth.message}</p></div>
-            <small>live</small>
           </div>
         </section>
         <ClusterView

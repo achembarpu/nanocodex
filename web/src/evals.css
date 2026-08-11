@@ -43,6 +43,8 @@
   border-bottom: 1px solid var(--border-soft);
 }
 
+.eval-overview-head { grid-template-columns: minmax(0, 1fr); }
+
 .eval-page-head h1 {
   margin-top: 8px;
   font-size: clamp(48px, 6vw, 82px);
@@ -85,60 +87,6 @@
 .eval-back svg {
   width: 13px;
   height: 13px;
-}
-
-.live-health-callout {
-  display: grid;
-  grid-template-columns: auto minmax(0, 1fr) auto;
-  gap: 8px 12px;
-  align-items: start;
-  padding: 16px 0;
-  border-block: 1px solid var(--border-soft);
-}
-
-.live-health-pulse {
-  position: relative;
-  width: 8px;
-  height: 8px;
-  margin-top: 3px;
-  background: var(--positive);
-  border-radius: 50%;
-}
-
-.live-health-pulse::after {
-  position: absolute;
-  inset: -4px;
-  content: "";
-  border: 1px solid var(--positive);
-  border-radius: inherit;
-  animation: eval-pulse 1.8s ease-out infinite;
-}
-
-.live-health-callout.degraded .live-health-pulse { background: #d89116; }
-.live-health-callout.degraded .live-health-pulse::after { border-color: #d89116; }
-.live-health-callout.stalled .live-health-pulse { background: var(--negative); }
-.live-health-callout.stalled .live-health-pulse::after { border-color: var(--negative); }
-
-.live-health-callout strong {
-  text-transform: capitalize;
-}
-
-.live-health-callout p {
-  margin-top: 5px;
-  color: color-mix(in srgb, var(--text) 55%, transparent);
-  line-height: 1.45;
-}
-
-.live-health-callout small {
-  color: var(--text-muted);
-  font-size: 8px;
-  opacity: 0.55;
-  text-transform: uppercase;
-}
-
-@keyframes eval-pulse {
-  from { opacity: 0.8; transform: scale(0.7); }
-  to { opacity: 0; transform: scale(1.5); }
 }
 
 .eval-cluster {
