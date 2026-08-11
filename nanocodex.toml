@@ -65,3 +65,9 @@ benchmarks = ["gdpval/854f3814-681c-4950-91ac-55b0db0e3781"]
 trials = 1
 model = ["sol"]
 thinking = ["high"]
+
+[profiles.gpqa-diamond-smoke]
+benchmarks = ["gpqa-diamond/rec06pnAkLOr2t2mp"]
+trials = 1
+model = ["sol"]
+thinking = ["high"]

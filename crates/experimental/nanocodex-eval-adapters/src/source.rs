@@ -270,6 +270,44 @@ impl SourceStore {
             .map_err(|error| io_error(&destination, error.error))?;
         Ok(destination)
     }
+
+    pub(crate) fn validate_file(
+        &self,
+        path: &Path,
+        expected_sha256: &str,
+    ) -> Result<(), SourceError> {
+        validate_sha256(path, expected_sha256)
+    }
+
+    pub(crate) fn extract_zip_member(
+        &self,
+        relative: &str,
+        archive: &Path,
+        member: &str,
+        password: &str,
+        expected_sha256: &str,
+    ) -> Result<PathBuf, SourceError> {
+        let destination = self.root.join(relative);
+        if destination.is_file() {
+            validate_sha256(&destination, expected_sha256)?;
+            return Ok(destination);
+        }
+        let rendered = format!("unzip {:?} {member:?}", archive);
+        let output = Command::new("unzip")
+            .args(["-p", "-P", password])
+            .arg(archive)
+            .arg(member)
+            .output()
+            .map_err(|error| SourceError::Command(format!("{rendered}: {error}")))?;
+        let bytes = ensure_success(rendered, output)?.stdout;
+        let actual = hex::encode(Sha256::digest(&bytes));
+        if actual != expected_sha256 {
+            return Err(SourceError::Stale(format!(
+                "extracted {member} has digest {actual}, expected {expected_sha256}"
+            )));
+        }
+        self.write_verified(relative, &bytes)
+    }
 }
 
 #[allow(dead_code)]
