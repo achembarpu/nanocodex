@@ -59,3 +59,9 @@ benchmarks = ["healthbench-professional/e339f34a3a35f3f067422b5768287f7c"]
 trials = 1
 model = ["sol"]
 thinking = ["high"]
+
+[profiles.gdpval-smoke]
+benchmarks = ["gdpval/854f3814-681c-4950-91ac-55b0db0e3781"]
+trials = 1
+model = ["sol"]
+thinking = ["high"]

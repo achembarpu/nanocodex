@@ -43,6 +43,25 @@ impl SourceStore {
         url: &str,
         revision: &str,
     ) -> Result<PathBuf, SourceError> {
+        self.git_checkout_with_policy(relative, url, revision, false)
+    }
+
+    pub(crate) fn git_checkout_with_materialized_lfs(
+        &self,
+        relative: &str,
+        url: &str,
+        revision: &str,
+    ) -> Result<PathBuf, SourceError> {
+        self.git_checkout_with_policy(relative, url, revision, true)
+    }
+
+    fn git_checkout_with_policy(
+        &self,
+        relative: &str,
+        url: &str,
+        revision: &str,
+        allow_materialized_lfs: bool,
+    ) -> Result<PathBuf, SourceError> {
         let destination = self.root.join(relative);
         if destination.exists() {
             let head = command_text(
@@ -58,13 +77,14 @@ impl SourceStore {
                     head.trim()
                 )));
             }
-            let dirty = command_text(
-                Command::new("git")
-                    .arg("-C")
-                    .arg(&destination)
-                    .args(["status", "--porcelain=v1"]),
-            )?;
-            if !dirty.trim().is_empty() {
+            let dirty = command_text(Command::new("git").arg("-C").arg(&destination).args([
+                "status",
+                "--porcelain=v1",
+                "-z",
+            ]))?;
+            if !dirty.trim().is_empty()
+                && !(allow_materialized_lfs && self.allowed_materialized_lfs(relative, &dirty)?)
+            {
                 return Err(SourceError::Stale(format!(
                     "{} has local changes",
                     destination.display()
@@ -94,6 +114,94 @@ impl SourceStore {
         fs::rename(temporary.keep(), &destination)
             .map_err(|source| io_error(&destination, source))?;
         Ok(destination)
+    }
+
+    pub(crate) fn materialize_checkout_lfs_file(
+        &self,
+        checkout: &str,
+        relative: &Path,
+        revision: &str,
+        dataset: &str,
+    ) -> Result<String, SourceError> {
+        let relative_text = relative.to_str().ok_or_else(|| {
+            SourceError::Stale(format!("non-UTF-8 LFS path: {}", relative.display()))
+        })?;
+        let object = self.checkout_object(checkout, relative_text)?;
+        let expected = object.sha256;
+        let destination = self.root.join(checkout).join(relative);
+        if destination.is_file() && validate_sha256(&destination, &expected).is_ok() {
+            return Ok(expected);
+        }
+        if let Some(bytes) = object.git_bytes {
+            fs::write(&destination, bytes).map_err(|source| io_error(&destination, source))?;
+            validate_sha256(&destination, &expected)?;
+            return Ok(expected);
+        }
+        if destination.exists() {
+            let pointer = fs::read_to_string(&destination)
+                .map_err(|source| io_error(&destination, source))?;
+            if parse_lfs_sha256(&pointer).as_deref() != Some(expected.as_str()) {
+                return Err(SourceError::Stale(format!(
+                    "{} is neither the pinned LFS pointer nor its object",
+                    destination.display()
+                )));
+            }
+            fs::remove_file(&destination).map_err(|source| io_error(&destination, source))?;
+        }
+        let url = format!(
+            "https://huggingface.co/datasets/{dataset}/resolve/{revision}/{}",
+            encode_url_path(relative_text)
+        );
+        self.download(&format!("{checkout}/{relative_text}"), &url, &expected)?;
+        Ok(expected)
+    }
+
+    fn allowed_materialized_lfs(&self, checkout: &str, status: &str) -> Result<bool, SourceError> {
+        let records = status
+            .split('\0')
+            .filter(|record| !record.is_empty())
+            .collect::<Vec<_>>();
+        if records.is_empty() {
+            return Ok(false);
+        }
+        for record in records {
+            let (state, relative) = record.split_at(3.min(record.len()));
+            if state != " M " {
+                return Ok(false);
+            }
+            let expected = self.checkout_object(checkout, relative)?.sha256;
+            if validate_sha256(&self.root.join(checkout).join(relative), &expected).is_err() {
+                return Ok(false);
+            }
+        }
+        Ok(true)
+    }
+
+    fn checkout_object(
+        &self,
+        checkout: &str,
+        relative: &str,
+    ) -> Result<CheckoutObject, SourceError> {
+        let bytes = command_bytes(
+            Command::new("git")
+                .arg("-C")
+                .arg(self.root.join(checkout))
+                .arg("show")
+                .arg(format!("HEAD:{relative}")),
+        )?;
+        if let Ok(pointer) = std::str::from_utf8(&bytes)
+            && let Some(sha256) = parse_lfs_sha256(pointer)
+        {
+            Ok(CheckoutObject {
+                sha256,
+                git_bytes: None,
+            })
+        } else {
+            Ok(CheckoutObject {
+                sha256: hex::encode(Sha256::digest(&bytes)),
+                git_bytes: Some(bytes),
+            })
+        }
     }
 
     #[allow(dead_code)]
@@ -197,6 +305,14 @@ fn command_text(command: &mut Command) -> Result<String, SourceError> {
     String::from_utf8(output.stdout).map_err(|error| SourceError::Command(error.to_string()))
 }
 
+fn command_bytes(command: &mut Command) -> Result<Vec<u8>, SourceError> {
+    let rendered = format!("{command:?}");
+    let output = command
+        .output()
+        .map_err(|error| SourceError::Command(format!("{rendered}: {error}")))?;
+    Ok(ensure_success(rendered, output)?.stdout)
+}
+
 #[allow(dead_code)]
 fn ensure_success(rendered: String, output: Output) -> Result<Output, SourceError> {
     if output.status.success() {
@@ -215,5 +331,58 @@ fn io_error(path: &Path, source: std::io::Error) -> SourceError {
     SourceError::Io {
         path: path.to_path_buf(),
         source,
+    }
+}
+
+struct CheckoutObject {
+    sha256: String,
+    git_bytes: Option<Vec<u8>>,
+}
+
+fn parse_lfs_sha256(pointer: &str) -> Option<String> {
+    if !pointer.starts_with("version https://git-lfs.github.com/spec/v1\n") {
+        return None;
+    }
+    pointer.lines().find_map(|line| {
+        let digest = line.strip_prefix("oid sha256:")?;
+        (digest.len() == 64
+            && digest
+                .bytes()
+                .all(|byte| byte.is_ascii_digit() || matches!(byte, b'a'..=b'f')))
+        .then(|| digest.to_owned())
+    })
+}
+
+fn encode_url_path(path: &str) -> String {
+    let mut encoded = String::with_capacity(path.len());
+    for byte in path.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~' | b'/') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push('%');
+            encoded.push(char::from(b"0123456789ABCDEF"[usize::from(byte >> 4)]));
+            encoded.push(char::from(b"0123456789ABCDEF"[usize::from(byte & 0x0f)]));
+        }
+    }
+    encoded
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{encode_url_path, parse_lfs_sha256};
+
+    #[test]
+    fn parses_only_canonical_git_lfs_pointers() {
+        let digest = "a".repeat(64);
+        let pointer =
+            format!("version https://git-lfs.github.com/spec/v1\noid sha256:{digest}\nsize 12\n");
+
+        assert_eq!(parse_lfs_sha256(&pointer), Some(digest));
+        assert_eq!(parse_lfs_sha256("ordinary file"), None);
+    }
+
+    #[test]
+    fn encodes_asset_paths_without_hiding_directory_boundaries() {
+        assert_eq!(encode_url_path("files/a b#.pdf"), "files/a%20b%23.pdf");
     }
 }
