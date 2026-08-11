@@ -1,9 +1,9 @@
-//! Typed, VM-isolated evaluation for Nanocodex agents.
+//! Typed evaluation contracts and durable worksets for Nanocodex agents.
 //!
 //! This crate owns task loading, durable profile worksets, typed events and
-//! outcomes, and VM-isolated execution. Applications choose one exact profile
-//! family; SQLite atomically claims one pre-materialized task row and fences
-//! its terminal outcome.
+//! outcomes, plus one canonical native execution contract. Applications choose
+//! one exact profile family; SQLite atomically claims one pre-materialized task
+//! row and fences its terminal outcome.
 //!
 //! # Open a durable profile
 //!
@@ -31,8 +31,9 @@
 //! # }
 //! ```
 //!
-//! A running row is held by the worker process itself. Dropping the claim or
-//! losing the worker process records a terminal failure; rows are never retried.
+//! A running row is held by the worker process itself. The claim owner may
+//! explicitly requeue infrastructure failures; dropping the claim or losing
+//! the worker process records a terminal failure.
 
 #![deny(missing_docs, rustdoc::broken_intra_doc_links)]
 // Retained-data readers remain portable; VM execution internals become
@@ -54,6 +55,7 @@ mod digest;
 mod evaluation;
 mod evaluator;
 mod event;
+mod execution;
 #[cfg(any(
     all(target_os = "linux", not(target_env = "musl")),
     all(target_os = "macos", target_arch = "aarch64")
@@ -95,6 +97,12 @@ pub use evaluator::{EvalError, EvalRun, Evaluator, EvaluatorBuilder};
 pub use event::{
     EvalEvent, EvalEventAttempt, EvalEventKind, EvalEventStream, EvalEventStreamError, EvalEvents,
 };
+#[cfg(any(
+    all(target_os = "linux", not(target_env = "musl")),
+    all(target_os = "macos", target_arch = "aarch64")
+))]
+pub use execution::CanonicalTaskRunner;
+pub use execution::{ClaimedEvaluationTask, EvaluationExecution, EvaluationExecutionError};
 pub(crate) use harness_exec::{
     HarnessCommandOutput, HarnessCommandRunner, HarnessCommandRunnerError, HarnessCommandStatus,
     HarnessExec, HarnessExecError,

@@ -116,6 +116,8 @@ pub struct EvaluationStatus {
     pub digest: String,
     /// Pre-materialized task-row counts.
     pub tasks: EvaluationCounts,
+    /// Stable names of workers that currently own running rows.
+    pub workers: Vec<String>,
     /// Status grouped by exact semantic treatment.
     pub families: Vec<EvaluationFamilyStatus>,
 }
@@ -608,6 +610,7 @@ fn observed_status(status: WorksetStatus) -> Result<EvaluationStatus, Evaluation
             success: status.tasks.success,
             failed: status.tasks.failed,
         },
+        workers: status.workers,
         families,
     })
 }

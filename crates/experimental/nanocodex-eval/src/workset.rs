@@ -116,6 +116,8 @@ pub struct WorksetStatus {
     pub digest: String,
     /// Aggregate task-row counts.
     pub tasks: TaskCounts,
+    /// Stable names of workers that currently own running rows.
+    pub workers: Vec<String>,
     /// Exact family-level status records.
     pub families: Vec<FamilyStatus>,
 }
@@ -869,6 +871,13 @@ fn read_status(
         [workset_id],
         counts_from_row,
     )?;
+    let mut worker_statement = connection.prepare(
+        "SELECT DISTINCT worker FROM eval_tasks \
+         WHERE workset_id = ?1 AND state = 'running' AND worker IS NOT NULL ORDER BY worker",
+    )?;
+    let workers = worker_statement
+        .query_map([workset_id], |row| row.get(0))?
+        .collect::<Result<Vec<_>, _>>()?;
     let mut statement = connection.prepare(
         "SELECT e.family_key, d.selector, e.harness, e.model, e.thinking, e.web_search, COUNT(*), \
             COALESCE(SUM(e.state = 'unclaimed'), 0), \
@@ -901,6 +910,7 @@ fn read_status(
         profile: profile.to_owned(),
         digest: digest.to_owned(),
         tasks,
+        workers,
         families,
     })
 }
@@ -1066,197 +1076,15 @@ fn open_connection(path: &Path) -> Result<Connection, WorksetError> {
 
 fn initialize_schema(connection: &mut Connection) -> Result<(), WorksetError> {
     let version: u32 = connection.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    if version > SCHEMA_VERSION {
+    if version != 0 && version != SCHEMA_VERSION {
         return Err(WorksetError::DefinitionConflict(format!(
             "schema {version}; expected {SCHEMA_VERSION}"
         )));
     }
-    let four_state_exists: bool = connection.query_row(
-        "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'eval_tasks')",
-        [],
-        |row| row.get(0),
-    )?;
-    if version != 0 && four_state_exists {
-        create_schema(connection)?;
-        if version < 6 {
-            migrate_attempt_history(connection)?;
-        }
-        if version < 7 {
-            migrate_result_index_paths(connection)?;
-        }
-        if version < 8 {
-            migrate_analytics_dimensions(connection)?;
-        }
-        if version < 9 {
-            migrate_normalized_treatments(connection)?;
-        }
-        connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        return Ok(());
-    }
-    if version != 0 {
-        if version == 1 {
-            connection.execute("ALTER TABLE tasks ADD COLUMN assigned_host TEXT", [])?;
-        }
-        migrate_legacy_schema(connection, version >= 4)?;
-        migrate_attempt_history(connection)?;
-        migrate_result_index_paths(connection)?;
-        migrate_analytics_dimensions(connection)?;
-        migrate_normalized_treatments(connection)?;
-        connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-        return Ok(());
-    }
     create_schema(connection)?;
-    migrate_analytics_dimensions(connection)?;
-    migrate_normalized_treatments(connection)?;
-    connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-    Ok(())
-}
-
-fn migrate_analytics_dimensions(connection: &Connection) -> Result<(), WorksetError> {
-    let columns = connection
-        .prepare("PRAGMA table_info(eval_tasks)")?
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<Result<Vec<_>, _>>()?;
-    for column in ["harness", "model", "thinking"] {
-        if !columns.iter().any(|retained| retained == column) {
-            connection.execute(
-                &format!("ALTER TABLE eval_tasks ADD COLUMN {column} TEXT NOT NULL DEFAULT ''"),
-                [],
-            )?;
-        }
+    if version == 0 {
+        connection.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
-    if columns.iter().any(|column| column == "treatment") {
-        connection.execute_batch(
-            "UPDATE eval_tasks SET \
-            harness = CASE \
-                WHEN json_valid(treatment) AND json_type(treatment, '$.harness') = 'text' \
-                     AND json_extract(treatment, '$.harness') != '' \
-                    THEN json_extract(treatment, '$.harness') \
-                WHEN json_valid(treatment) AND json_type(treatment, '$.mode') = 'text' \
-                     AND json_extract(treatment, '$.mode') != '' \
-                    THEN json_extract(treatment, '$.mode') \
-                ELSE 'unknown' \
-            END, \
-            model = CASE \
-                WHEN json_valid(treatment) AND json_type(treatment, '$.model') = 'text' \
-                    THEN json_extract(treatment, '$.model') ELSE '' \
-            END, \
-            thinking = CASE \
-                WHEN json_valid(treatment) AND json_type(treatment, '$.thinking') = 'text' \
-                    THEN json_extract(treatment, '$.thinking') ELSE '' \
-            END \
-         WHERE harness = '' OR model = '' OR thinking = '';",
-        )?;
-    }
-    Ok(())
-}
-
-fn migrate_normalized_treatments(connection: &Connection) -> Result<(), WorksetError> {
-    let columns = connection
-        .prepare("PRAGMA table_info(eval_tasks)")?
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<Result<Vec<_>, _>>()?;
-    if !columns.iter().any(|column| column == "web_search") {
-        connection.execute(
-            "ALTER TABLE eval_tasks ADD COLUMN web_search INTEGER NOT NULL DEFAULT 0",
-            [],
-        )?;
-    }
-    if columns.iter().any(|column| column == "treatment") {
-        connection.execute_batch(
-            "UPDATE eval_tasks SET web_search = CASE \
-                WHEN json_valid(treatment) \
-                    THEN COALESCE(json_extract(treatment, '$.web_search'), 0) \
-                ELSE 0 \
-             END; \
-             ALTER TABLE eval_tasks DROP COLUMN treatment;",
-        )?;
-    }
-    Ok(())
-}
-
-fn migrate_result_index_paths(connection: &Connection) -> Result<(), WorksetError> {
-    let has_result_path = connection
-        .prepare("PRAGMA table_info(coordinate_results)")?
-        .query_map([], |row| row.get::<_, String>(1))?
-        .collect::<Result<Vec<_>, _>>()?
-        .into_iter()
-        .any(|column| column == "result_path");
-    if !has_result_path {
-        connection.execute(
-            "ALTER TABLE coordinate_results ADD COLUMN result_path TEXT",
-            [],
-        )?;
-    }
-    connection.execute(
-        "DELETE FROM coordinate_results WHERE coordinate_id IN (\
-            SELECT id FROM eval_tasks WHERE state IN ('unclaimed', 'running')\
-         )",
-        [],
-    )?;
-    Ok(())
-}
-
-fn migrate_attempt_history(connection: &mut Connection) -> Result<(), WorksetError> {
-    let verifier_failed = {
-        let mut statement = connection.prepare(
-            "SELECT id, result_path FROM eval_tasks \
-             WHERE state = 'success' AND result_path IS NOT NULL",
-        )?;
-        statement
-            .query_map([], |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    PathBuf::from(row.get::<_, String>(1)?),
-                ))
-            })?
-            .filter_map(|row| match row {
-                Ok((id, path))
-                    if matches!(
-                        crate::api::retained_verifier_status(&path),
-                        Ok(Some(status)) if status == "failed"
-                    ) =>
-                {
-                    Some(Ok(id))
-                }
-                Ok(_) => None,
-                Err(error) => Some(Err(error)),
-            })
-            .collect::<Result<Vec<_>, rusqlite::Error>>()?
-    };
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    transaction.execute_batch(
-        "INSERT OR IGNORE INTO eval_attempts(
-            workset_id, task_id, claim_id, worker, state, started_at_ms,
-            finished_at_ms, result_path, error
-         )
-         SELECT
-            workset_id, id, claim_id, COALESCE(worker, 'legacy'),
-            CASE state
-                WHEN 'success' THEN 'passed'
-                WHEN 'failed' THEN 'infrastructure_failed'
-                ELSE 'running'
-            END,
-            started_at_ms, finished_at_ms, result_path, error
-         FROM eval_tasks WHERE state != 'unclaimed';
-         UPDATE eval_tasks SET
-            state = 'unclaimed', claim_id = NULL, worker = NULL,
-            started_at_ms = NULL, finished_at_ms = NULL,
-            result_path = NULL, error = NULL
-         WHERE state = 'failed';",
-    )?;
-    for task_id in verifier_failed {
-        transaction.execute(
-            "UPDATE eval_tasks SET state = 'failed' WHERE id = ?1 AND state = 'success'",
-            [task_id],
-        )?;
-        transaction.execute(
-            "UPDATE eval_attempts SET state = 'failed' \
-             WHERE task_id = ?1 AND state = 'passed'",
-            [task_id],
-        )?;
-    }
-    transaction.commit()?;
     Ok(())
 }
 
@@ -1350,71 +1178,6 @@ fn create_schema(connection: &Connection) -> Result<(), WorksetError> {
     Ok(())
 }
 
-fn migrate_legacy_schema(
-    connection: &mut Connection,
-    named_generations: bool,
-) -> Result<(), WorksetError> {
-    connection.pragma_update(None, "foreign_keys", "OFF")?;
-    let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    transaction.execute_batch(
-        "ALTER TABLE worksets RENAME TO legacy_worksets;
-         ALTER TABLE tasks RENAME TO legacy_tasks;
-         ALTER TABLE coordinates RENAME TO legacy_coordinates;
-         ALTER TABLE executions RENAME TO legacy_executions;
-         DROP TABLE IF EXISTS coordinate_results;",
-    )?;
-    create_schema(&transaction)?;
-    if named_generations {
-        transaction.execute_batch(
-            "INSERT INTO worksets(id, profile, digest, created_at_ms)
-             SELECT id, name, generation, created_at_ms FROM legacy_worksets;",
-        )?;
-    } else {
-        transaction.execute_batch(
-            "INSERT INTO worksets(id, profile, digest, created_at_ms)
-             SELECT id, profile, digest, created_at_ms FROM legacy_worksets;",
-        )?;
-    }
-    transaction.execute_batch(
-        "INSERT INTO task_definitions(id, workset_id, selector, name, root, digest)
-         SELECT id, workset_id, selector, name, root, digest FROM legacy_tasks;
-         INSERT INTO eval_tasks(
-            id, workset_id, definition_id, family_key, harness, model, thinking, web_search, \
-            repetition, state,
-            claim_id, worker, started_at_ms, finished_at_ms, result_path, error
-         )
-         SELECT
-            c.id, c.workset_id, c.task_id, c.family_key,
-            COALESCE(NULLIF(json_extract(c.treatment, '$.harness'), ''), \
-                     NULLIF(json_extract(c.treatment, '$.mode'), ''), 'unknown'),
-            COALESCE(json_extract(c.treatment, '$.model'), ''),
-            COALESCE(json_extract(c.treatment, '$.thinking'), ''),
-            COALESCE(json_extract(c.treatment, '$.web_search'), 0), c.repetition,
-            CASE c.state WHEN 'terminal' THEN 'success' WHEN 'running' THEN 'failed' ELSE 'unclaimed' END,
-            CASE WHEN c.state = 'pending' THEN NULL ELSE COALESCE(c.lease_owner, 'legacy-' || c.id) END,
-            t.assigned_host,
-            CASE WHEN c.state = 'pending' THEN NULL ELSE COALESCE(
-                (SELECT MAX(e.started_at_ms) FROM legacy_executions e WHERE e.coordinate_id = c.id),
-                strftime('%s','now') * 1000
-            ) END,
-            CASE WHEN c.state = 'pending' THEN NULL WHEN c.state = 'running' THEN strftime('%s','now') * 1000 ELSE COALESCE(
-                (SELECT MAX(e.finished_at_ms) FROM legacy_executions e WHERE e.coordinate_id = c.id),
-                strftime('%s','now') * 1000
-            ) END,
-            c.result_path,
-            CASE WHEN c.state = 'running' THEN 'worker was not live during four-state schema migration' ELSE c.last_error END
-         FROM legacy_coordinates c JOIN legacy_tasks t ON t.id = c.task_id;
-         DROP TABLE legacy_executions;
-         DROP TABLE legacy_coordinates;
-         DROP TABLE legacy_tasks;
-         DROP TABLE legacy_worksets;",
-    )?;
-    transaction.pragma_update(None, "user_version", SCHEMA_VERSION)?;
-    transaction.commit()?;
-    connection.pragma_update(None, "foreign_keys", "ON")?;
-    Ok(())
-}
-
 fn now_ms() -> Result<i64, WorksetError> {
     let millis = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -1447,18 +1210,6 @@ mod tests {
                 trials,
             }],
         )
-    }
-
-    fn legacy_treatment(family: &WorksetFamily) -> String {
-        serde_json::json!({
-            "key": family.key,
-            "task": family.task_selector,
-            "harness": family.harness,
-            "model": family.model,
-            "thinking": family.thinking,
-            "web_search": family.web_search,
-        })
-        .to_string()
     }
 
     fn workset(directory: &Path, trials: u16) -> Workset {
@@ -1754,220 +1505,6 @@ mod tests {
             Workset::open(&path, "release"),
             Err(WorksetError::DefinitionConflict(message)) if message.contains("schema 99")
         ));
-    }
-
-    #[test]
-    fn version_four_ledgers_add_the_result_projection_without_legacy_rewrites() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("state.sqlite3");
-        Workset::create(&path, "release").unwrap();
-        let connection = Connection::open(&path).unwrap();
-        connection
-            .execute_batch("DROP TABLE coordinate_results; PRAGMA user_version = 4;")
-            .unwrap();
-        drop(connection);
-
-        Workset::open(&path, "release").unwrap();
-        let connection = Connection::open(path).unwrap();
-        let version: u32 = connection
-            .pragma_query_value(None, "user_version", |row| row.get(0))
-            .unwrap();
-        let result_table: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master \
-                 WHERE type = 'table' AND name = 'coordinate_results'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(version, SCHEMA_VERSION);
-        assert_eq!(result_table, 1);
-    }
-
-    #[test]
-    fn version_two_rows_migrate_without_retry_or_stale_states() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("state.sqlite3");
-        let mut connection = Connection::open(&path).unwrap();
-        connection.execute_batch(
-            "CREATE TABLE worksets(id INTEGER PRIMARY KEY, profile TEXT NOT NULL, digest TEXT NOT NULL, config_path TEXT NOT NULL, created_at_ms INTEGER NOT NULL, UNIQUE(profile,digest));
-             CREATE TABLE tasks(id INTEGER PRIMARY KEY, workset_id INTEGER NOT NULL, selector TEXT NOT NULL, name TEXT NOT NULL, root TEXT NOT NULL, digest TEXT NOT NULL, preparation_state TEXT NOT NULL, preparation_generation INTEGER NOT NULL, preparation_owner TEXT, preparation_expires_at_ms INTEGER, preparation_error TEXT, assigned_host TEXT, UNIQUE(workset_id,selector));
-             CREATE TABLE coordinates(id INTEGER PRIMARY KEY, workset_id INTEGER NOT NULL, task_id INTEGER NOT NULL, family_key TEXT NOT NULL, treatment TEXT NOT NULL, repetition INTEGER NOT NULL, state TEXT NOT NULL, generation INTEGER NOT NULL, lease_owner TEXT, lease_expires_at_ms INTEGER, result_path TEXT, last_error TEXT, UNIQUE(workset_id,family_key,repetition));
-             CREATE TABLE executions(id INTEGER PRIMARY KEY, coordinate_id INTEGER NOT NULL, generation INTEGER NOT NULL, owner TEXT NOT NULL, started_at_ms INTEGER NOT NULL, finished_at_ms INTEGER, state TEXT NOT NULL, result_path TEXT, error TEXT, UNIQUE(coordinate_id,generation));
-             INSERT INTO worksets VALUES(1,'release','profile-digest','nanocodex.toml',1);
-             INSERT INTO tasks VALUES(1,1,'terminal/fix-git','fix-git','/tmp/fix-git','task-digest','ready',1,NULL,NULL,NULL,'worker');
-             INSERT INTO coordinates VALUES(1,1,1,'terminal/fix-git|harness|high','{}',1,'terminal',1,NULL,NULL,'evidence',NULL);
-             INSERT INTO executions VALUES(1,1,1,'worker',1,2,'terminal','evidence',NULL);
-             PRAGMA user_version = 2;",
-        ).unwrap();
-        let (tasks, families) = definition(directory.path(), 1);
-        connection
-            .execute(
-                "UPDATE tasks SET root = ?1 WHERE id = 1",
-                [tasks[0].root.to_string_lossy().as_ref()],
-            )
-            .unwrap();
-        connection
-            .execute(
-                "UPDATE coordinates SET treatment = ?1 WHERE id = 1",
-                [legacy_treatment(&families[0])],
-            )
-            .unwrap();
-        drop(connection);
-        let workset = Workset::open(&path, "release").unwrap();
-        assert_eq!(workset.status().unwrap().tasks.success, 1);
-        connection = Connection::open(path).unwrap();
-        let tables: i64 = connection
-            .query_row(
-                "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='executions'",
-                [],
-                |row| row.get(0),
-            )
-            .unwrap();
-        assert_eq!(tables, 0);
-    }
-
-    #[test]
-    fn version_four_named_generation_migrates_to_four_state_rows() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("state.sqlite3");
-        let (_, families) = definition(directory.path(), 1);
-        let connection = Connection::open(&path).unwrap();
-        connection
-            .execute_batch(
-                "CREATE TABLE worksets(id INTEGER PRIMARY KEY, name TEXT NOT NULL, generation TEXT NOT NULL, created_at_ms INTEGER NOT NULL, UNIQUE(name,generation));
-                 CREATE TABLE tasks(id INTEGER PRIMARY KEY, workset_id INTEGER NOT NULL, selector TEXT NOT NULL, name TEXT NOT NULL, root TEXT NOT NULL, digest TEXT NOT NULL, preparation_state TEXT NOT NULL, preparation_generation INTEGER NOT NULL, preparation_owner TEXT, preparation_expires_at_ms INTEGER, preparation_error TEXT, assigned_host TEXT, UNIQUE(workset_id,selector));
-                 CREATE TABLE coordinates(id INTEGER PRIMARY KEY, workset_id INTEGER NOT NULL, task_id INTEGER NOT NULL, family_key TEXT NOT NULL, treatment TEXT NOT NULL, repetition INTEGER NOT NULL, state TEXT NOT NULL, generation INTEGER NOT NULL, lease_owner TEXT, lease_expires_at_ms INTEGER, result_path TEXT, last_error TEXT, UNIQUE(workset_id,family_key,repetition));
-                 CREATE TABLE executions(id INTEGER PRIMARY KEY, coordinate_id INTEGER NOT NULL, generation INTEGER NOT NULL, owner TEXT NOT NULL, started_at_ms INTEGER NOT NULL, finished_at_ms INTEGER, state TEXT NOT NULL, result_path TEXT, error TEXT, UNIQUE(coordinate_id,generation));
-                 CREATE TABLE coordinate_results(coordinate_id INTEGER PRIMARY KEY, result_path TEXT NOT NULL);
-                 INSERT INTO worksets VALUES(1,'release','generation-one',1);
-                 INSERT INTO tasks VALUES(1,1,'terminal/fix-git','fix-git','/tmp/fix-git','task-digest','ready',1,NULL,NULL,NULL,'worker');
-                 INSERT INTO coordinates VALUES(1,1,1,'terminal/fix-git|harness|high','placeholder',1,'running',1,'worker',999,NULL,NULL);
-                 INSERT INTO executions VALUES(1,1,1,'worker',1,NULL,'running',NULL,NULL);
-                 PRAGMA user_version = 4;",
-            )
-            .unwrap();
-        connection
-            .execute(
-                "UPDATE coordinates SET treatment = ?1 WHERE id = 1",
-                [legacy_treatment(&families[0])],
-            )
-            .unwrap();
-        drop(connection);
-
-        let workset = Workset::open(&path, "release").unwrap();
-        let status = workset.status().unwrap();
-        assert_eq!(status.digest, "generation-one");
-        assert_eq!(status.tasks.unclaimed, 1);
-        assert_eq!(status.tasks.failed, 0);
-        assert_eq!(status.tasks.running, 0);
-        let attempt_state = Connection::open(&path)
-            .unwrap()
-            .query_row("SELECT state FROM eval_attempts", [], |row| {
-                row.get::<_, String>(0)
-            })
-            .unwrap();
-        assert_eq!(attempt_state, "infrastructure_failed");
-        assert_eq!(
-            Connection::open(&path)
-                .unwrap()
-                .pragma_query_value(None, "user_version", |row| row.get::<_, u32>(0))
-                .unwrap(),
-            SCHEMA_VERSION
-        );
-    }
-
-    #[test]
-    fn version_five_infrastructure_failures_requeue_and_scored_results_are_reclassified() {
-        let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("state.sqlite3");
-        let verifier_failed = directory.path().join("verifier-failed");
-        let passed = directory.path().join("passed");
-        fs::create_dir_all(&verifier_failed).unwrap();
-        fs::create_dir_all(&passed).unwrap();
-        fs::write(
-            verifier_failed.join("events.jsonl"),
-            "{\"type\":\"completed\",\"payload\":{\"status\":\"failed\",\"outcome\":\"verifier_failed\"}}\n",
-        )
-        .unwrap();
-        fs::write(
-            passed.join("events.jsonl"),
-            "{\"type\":\"completed\",\"payload\":{\"status\":\"passed\",\"outcome\":\"passed\"}}\n",
-        )
-        .unwrap();
-        let connection = open_connection(&path).unwrap();
-        create_schema(&connection).unwrap();
-        connection
-            .execute_batch(
-                "ALTER TABLE eval_tasks ADD COLUMN treatment TEXT NOT NULL DEFAULT '{}';
-                 DROP TABLE eval_attempts;
-                 PRAGMA user_version = 5;
-                 INSERT INTO worksets(id,profile,digest,created_at_ms)
-                    VALUES(1,'release','digest',1);
-                 INSERT INTO task_definitions(id,workset_id,selector,name,root,digest)
-                    VALUES(1,1,'one','one','/tmp/one','task-digest');",
-            )
-            .unwrap();
-        for (id, repetition, state, claim, result, error) in [
-            (1, 0, "failed", "infra", None, Some("provider returned 429")),
-            (
-                2,
-                1,
-                "success",
-                "scored-failed",
-                Some(verifier_failed.as_path()),
-                None,
-            ),
-            (
-                3,
-                2,
-                "success",
-                "scored-passed",
-                Some(passed.as_path()),
-                None,
-            ),
-        ] {
-            connection
-                .execute(
-                    "INSERT INTO eval_tasks(
-                        id,workset_id,definition_id,family_key,treatment,repetition,state,
-                        claim_id,worker,started_at_ms,finished_at_ms,result_path,error
-                     ) VALUES(?1,1,1,'family','{}',?2,?3,?4,'worker',10,20,?5,?6)",
-                    params![
-                        id,
-                        repetition,
-                        state,
-                        claim,
-                        result.map(|path| path.to_string_lossy()),
-                        error,
-                    ],
-                )
-                .unwrap();
-        }
-        drop(connection);
-
-        let workset = Workset::open(&path, "release").unwrap();
-        let status = workset.status().unwrap();
-        assert_eq!(status.tasks.unclaimed, 1);
-        assert_eq!(status.tasks.success, 1);
-        assert_eq!(status.tasks.failed, 1);
-        let connection = open_connection(&path).unwrap();
-        let attempts = connection
-            .prepare("SELECT state FROM eval_attempts ORDER BY task_id")
-            .unwrap()
-            .query_map([], |row| row.get::<_, String>(0))
-            .unwrap()
-            .collect::<Result<Vec<_>, _>>()
-            .unwrap();
-        assert_eq!(attempts, ["infrastructure_failed", "failed", "passed"]);
-        let infrastructure_row: (String, Option<String>) = connection
-            .query_row(
-                "SELECT state, result_path FROM eval_tasks WHERE id = 1",
-                [],
-                |row| Ok((row.get(0)?, row.get(1)?)),
-            )
-            .unwrap();
-        assert_eq!(infrastructure_row, ("unclaimed".to_owned(), None));
     }
 
     #[test]

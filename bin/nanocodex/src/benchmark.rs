@@ -9,72 +9,50 @@ pub(crate) fn prompt(
     let selected = profile.unwrap_or("the manifest default profile");
     let profile_argument =
         profile.map_or_else(String::new, |profile| format!(" {}", shell_quote(profile)));
+    let config_argument = shell_quote(&config.to_string_lossy());
     let state_argument = state_dir.map_or_else(String::new, |directory| {
         format!(" --state-dir {}", shell_quote(&directory.to_string_lossy()))
     });
     let coordinator_argument = coordinator.map_or_else(String::new, |coordinator| {
         format!(" --coordinator {}", shell_quote(coordinator))
     });
-    let exit_report = coordinator.map_or_else(
-        || "let SQLite observe the released local claim lock".to_owned(),
-        |coordinator| {
-            format!(
-                "POST `{{\"worker\":<worker-id>,\"error\":\"confirmed worker process exit\"}}` once to {}/v1/workers/exited and require that request to succeed",
-                coordinator.trim_end_matches('/')
-            )
-        },
-    );
-    let config_argument = shell_quote(&config.to_string_lossy());
-    let worker_directory = worker_directory(profile, config);
-    let worker_directory_argument = shell_quote(&worker_directory.to_string_lossy());
     let status_command = coordinator.map_or_else(
         || {
             format!(
-                "nanocodex eval status{profile_argument} --config {config_argument}{state_argument} --json | jq -c .tasks"
+                "nanocodex eval status{profile_argument} --config {config_argument}{state_argument} --json"
             )
+        },
+        |coordinator| format!("curl -fsS {}/v1/status", coordinator.trim_end_matches('/')),
+    );
+    let reconciliation = coordinator.map_or_else(
+        || {
+            "Local status releases rows whose worker process disappeared; do not maintain another recovery record."
+                .to_owned()
         },
         |coordinator| {
             format!(
-                "curl -fsS {}/v1/status | jq -c .tasks",
+                "For every name in status.workers whose nanocodex-eval-worker@<name>.service is not live, POST {{\"worker\":<name>,\"error\":\"worker process exited\"}} to {}/v1/workers/exited before admitting replacements. The operation is idempotent.",
                 coordinator.trim_end_matches('/')
             )
         },
     );
+    let worker_command = format!(
+        "nanocodex eval run{profile_argument} --config {config_argument}{state_argument}{coordinator_argument} --worker <name>"
+    );
+
     format!(
-        r#"Drive the pre-materialized Nanocodex benchmark {selected} to completion while continuously saturating the host. The benchmark controller is disposable: every eval worker must continue running if this controller process or Code Mode cell dies. Your first and only action is one Code Mode cell beginning `// @exec: {{\"yield_time_ms\": 3600000}}`; put the entire loop in it. If that cell ever yields, only resume that same cell. Keep orchestration state and the outer loop in JavaScript. `exec_command` already invokes a shell: pass each shell snippet directly as its `cmd`. Never wrap a snippet or script in `bash -lc`, `sh -c`, or another quoted shell command, and never embed `JSON.stringify(script)` into `cmd`. The resolved `exec_command` object's `output` field is raw command stdout; parse it directly. Never search it for telemetry-only text such as `Chunk ID`, `Final output`, or `Output:` and never strip an imagined execution-report envelope from it. Keep using `exit_code` from the resolved object for command success. If any command exits nonzero, inspect its output and correct the command; never repeat the identical failing command. `notify` is the built-in reporting function: call it directly and never declare a variable, function, or parameter named `notify`.
+        r#"Drive the pre-materialized benchmark {selected} to completion at the highest productive host occupancy. You are the neural controller. SQLite is the only task authority, systemd is the only process authority, and every worker is one independent `{worker_command}` process.
 
-- Use `{worker_directory_argument}` as the durable worker directory and create it before doing anything else. One marker named `<worker-id>.pid` contains the decimal PID of one independently running worker, and `<worker-id>.tmp` is that worker's private temporary directory. At startup and before every admission, rebuild the complete `active` map from these marker files, never from prior JavaScript memory. For each marker read and validate its PID, derive unit `nanocodex-eval-worker-<worker-id>.service`, then query `systemctl --user show` for `LoadState`, `ActiveState`, `MainPID`, `Result`, `ExecMainCode`, and `ExecMainStatus`. When requesting multiple systemd properties, never use `--value` or parse output by line position because systemd does not preserve requested property order. Parse named `Property=value` lines into a map and read each property by name. The initial scan must return only marker identity, PID, and these compact named properties: do not read any journal for an active or activating unit, do not concatenate journals across workers, and do not embed journal text in a multi-worker JSON stream. An explicit `active` or `activating` unit is live; update its marker atomically when `MainPID` becomes nonzero. If the unit query is malformed but the marker PID still passes `kill -0`, preserve it as live. With `systemd-run --collect`, a dead unit commonly appears as `LoadState=not-found`, `ActiveState=inactive`, and misleading default success values; if its marker PID no longer exists, this is a confirmed exit, not an indeterminate state. Only then inspect that one dead unit's journal in its own bounded command to classify and report it. Preserve the marker and retry only when the available evidence cannot establish whether the marker PID or unit is alive. This report is idempotent and only releases a still-running row. Never signal or stop a live worker merely because the controller is starting, yielding, failing, or exiting.
+Repeat this short control cycle until the board is terminal:
 
-- There is no fixed worker, memory, or load target. Continuously search for the host's actual capacity instead of admitting one worker at a time or waiting for a wave to finish. Before each decision read counts with `{status_command}`. That command's JSON is the count object itself: use `counts.unclaimed` and `counts.running` directly; never treat it as an array or look for task rows. Sample `/proc/meminfo`, `/proc/loadavg`, `/proc/pressure/memory`, and `getconf _NPROCESSORS_ONLN`; `/proc/meminfo` field names include a trailing colon, so remove it before looking up `MemTotal` or `MemAvailable`. Keep the highest concurrency that completed a full 10-second observation window without a capacity-related death as the lower bound and the concurrency immediately before an OS capacity death as the upper bound. Never raise the lower bound merely because a batch launched. After every full healthy observation window, set the lower bound to at least the observed active concurrency whether or not an upper bound already exists; this is what makes binary search advance instead of sticking at its first midpoint. With no upper bound and clear idle capacity, target twice the current local concurrency, seeding one worker from zero. With an upper bound, target the integer midpoint between the bounds. Always clamp the target to `active + counts.unclaimed`, so `batch <= counts.unclaimed`; never launch workers that cannot claim one of the currently unclaimed tasks. Launch every worker needed to reach the clamped target as one immediate batch, never pausing between launches. Then observe the resulting memory, load, pressure, worker exits, and task throughput for 10 seconds before making the next growth decision so VM growth can become visible. Low available memory, load, or pressure pauses admission but never terminates work. Once the host recovers, continue from the observed bounds. Use `notify(JSON.stringify(...))` for every sample and decision with counts, active workers, bounds, target, batch size, CPUs, load, available/total memory, pressure, recent exits, and the reason for the decision; `console` is unavailable in Code Mode.
+1. Observe, in one fresh compact Code Mode call, `{status_command}`; live or activating `nanocodex-eval-worker@*.service` user units with only their `Id`, `ActiveState`, `SubState`, and `ExecStart`; the `nanocodex-eval.slice` aggregate `MemoryCurrent`, `MemoryPeak`, `CPUUsageNSec`, and `TasksCurrent`; and the relevant lines from `/proc/meminfo`, `/proc/loadavg`, and `/proc/pressure/memory`. A unit belongs to this board only when its `ExecStart` has the `{worker_command}` shape for this selected profile; unrelated eval units affect host pressure but never this board's live count or reconciliation. Do not list inactive units, request unselected systemd properties, read journals or tracing during normal control, or keep a JavaScript loop, PID marker, worker pool, or other controller state. Only when a worker vanished unexpectedly may you read at most its last 20 warning-or-higher journal lines.
+2. Reconcile before admission. {reconciliation}
+3. Reason from the current and recent observations and choose an absolute desired live-worker count that maximizes terminal completions per hour. Starting units count as live. With backlog and no measured overload or throughput stall, grow aggressively in a batch; unused healthy capacity is a controller failure. OOMs and infrastructure retries are acceptable calibration signals. High utilization alone is not overload.
+4. Let `live` be this board's live or activating unit count. Launch `min(unclaimed, max(0, desired - live))` workers immediately with unique lowercase systemd-safe names using `systemd-run --user --quiet --collect --service-type=exec --unit nanocodex-eval-worker@<name>.service --slice nanocodex-eval.slice --property OOMScoreAdjust=500 --property OOMPolicy=kill --working-directory "$PWD" --setenv "PATH=$PATH" {worker_command}`. The systemd unit, never this controller or a tool session, owns the worker lifetime. The kernel may kill a worker under genuine exhaustion; systemd must then clear that worker's entire cgroup so the next cycle can reconcile it.
+5. With live workers and no elevated pressure or vanished worker, combine waiting and observation in one Code Mode call: start it with `// @exec: {{"yield_time_ms": 30000, "max_output_tokens": 2000}}`, await a 25-second `setTimeout` promise, and then collect the next compact observation. Never create a sleep subprocess, yielded background cell, or separate wait call. Let existing workers drain under overload; never stop, signal, or shed one manually.
 
-- Give each worker a unique lowercase ASCII worker ID containing only letters, digits, and hyphens. In the same launch shell snippet, assign `worker_tmp` to `{worker_directory_argument}/<actual-worker-id>.tmp` with the actual ID substituted and the complete path safely quoted. Before launch, atomically create `{worker_directory_argument}/<worker-id>.pid` containing `0`, remove any residue at `$worker_tmp`, and create that private temporary directory. Resolve the current `nanocodex` executable with `command -v nanocodex`, then launch exactly one `nanocodex eval run{profile_argument} --config {config_argument}{state_argument}{coordinator_argument} --worker <worker-id>` using `systemd-run --user --quiet --collect --service-type=exec --unit nanocodex-eval-worker-<worker-id>.service --working-directory "$PWD" --setenv "PATH=$PATH" --setenv "TMPDIR=$worker_tmp"`. The launch command must return after the independent unit starts; never wait for the eval process. Read the unit's `MainPID` and atomically replace the marker with that PID. Use an explicit multiline `if ...; then ...; else ...; fi` for launch success and failure cleanup; never place a brace group directly after `&&` or `||`. If launch fails, {exit_report}, remove the marker, and remove its private temporary directory. Never use `spawn_agent`, `wait_agent`, `close_agent`, a foreground eval command, or a Code Mode exec session to own a worker.
-
-- Reconciliation is the first phase of every outer-loop iteration. For each confirmed dead marker, inspect the unit's recent user journal as well as any retained named systemd properties. When `LoadState=not-found`, do not trust the synthetic `Result=success`, `ExecMainCode=0`, or `ExecMainStatus=0`; the journal is authoritative. Journal text saying the OOM killer acted or the result was `oom-kill` is a capacity death. Only systemd lifecycle evidence saying the main process exited nonzero, was killed, or the unit failed is an abnormal infrastructure exit; an eval log field such as `score.status=failed`, `eval.score.status=failed`, or a verifier failure is a successfully completed benchmark task and is not a worker crash. Every confirmed dead worker requires {exit_report} before its marker is removed, including a journal-backed clean exit; the report is idempotent and becomes a no-op when the worker already recorded a terminal result. A capacity death also lowers the upper bound to the marker count immediately before reconciliation and must not be blindly replaced. A journal-backed clean process exit is a normally completed eval and creates an immediate replacement opportunity while unclaimed work remains. Remove the marker only after the exit report succeeds, then remove `{worker_directory_argument}/<worker-id>.tmp`. Never remove a live worker's private temporary directory. When neither replacement nor growth is currently justified, wait 10 seconds and reconcile again.
-
-- The operating system alone owns worker termination under resource exhaustion. Never send a signal to a worker unit, never stop one to create headroom, and never perform manual load shedding from the controller. Treat OS worker deaths as expected search feedback, allow surviving independent units to continue, and adapt the next admission decision from the observed failure and recovery. The benchmark must remain autonomous when no operator is present.
-
-- Stop the controller only when compact status has no unclaimed or running row and reconciliation finds no active worker marker. Never stop live worker units during normal controller shutdown. SQLite alone owns `unclaimed -> running -> success|failed`, and an interrupted owner releases `running -> unclaimed`."#,
-        exit_report = exit_report,
+Controller failure or restart must leave every worker untouched. On restart, derive the complete situation again from SQLite and systemd. Do not use subagents to own workers and do not wait for worker processes in Code Mode. Finish only when status has zero unclaimed and running rows and no live unit belonging to this board remains."#,
     )
-}
-
-pub(crate) fn worker_directory(profile: Option<&str>, config: &Path) -> std::path::PathBuf {
-    let profile = profile.unwrap_or("default");
-    let profile = profile
-        .chars()
-        .map(|character| {
-            if character.is_ascii_alphanumeric() || character == '-' {
-                character.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>();
-    config
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join(".nanocodex-benchmark-workers")
-        .join(profile.trim_matches('-'))
 }
 
 fn shell_quote(value: &str) -> String {

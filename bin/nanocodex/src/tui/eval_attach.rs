@@ -331,6 +331,7 @@ mod tests {
                 success: 0,
                 failed: 0,
             },
+            workers: Vec::new(),
             families: (0..family_count)
                 .map(|index| EvaluationFamilyStatus {
                     id: format!("family-{index}"),

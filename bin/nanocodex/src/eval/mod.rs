@@ -2,8 +2,6 @@ mod attach;
 mod benchmark;
 mod coordinator;
 mod profile;
-mod run;
-mod systemd;
 
 use clap::{Args, Subcommand};
 use eyre::Result;
@@ -89,7 +87,6 @@ mod tests {
             vec!["nanocodex", "eval", "status", "local-smoke"],
             vec!["nanocodex", "eval", "attach", "local-smoke"],
             vec!["nanocodex", "eval", "benchmark", "local-smoke"],
-            vec!["nanocodex", "eval", "benchmark", "local-smoke", "--systemd"],
             vec!["nanocodex", "eval", "coordinator", "local-smoke"],
         ] {
             Cli::try_parse_from(arguments).expect("supported eval command must parse");

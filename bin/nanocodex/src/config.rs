@@ -205,6 +205,16 @@ pub(crate) struct AgentArgs {
 }
 
 impl AgentArgs {
+    pub(crate) fn restrict_to_host_control(&mut self, instructions: impl Into<String>) {
+        self.browser.disable();
+        self.mcp.disable();
+        self.model_policy.web_search = Some(false);
+        self.image_generation = false;
+        self.subagents = false;
+        self.rollouts = false;
+        self.instructions = Some(instructions.into());
+    }
+
     pub(crate) fn cwd(&self) -> &Path {
         self.cwd.as_deref().unwrap_or_else(|| Path::new("."))
     }

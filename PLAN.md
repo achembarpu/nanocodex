@@ -65,98 +65,60 @@ split implementation time across the later browser, managed-session, parity,
 or release milestones while safe work remains here. Those milestones are the
 ordered backlog, not concurrent work in progress.
 
-Outcome: drive a closed, pre-materialized benchmark continuously at the
-highest safe host occupancy while preserving a four-state SQLite ledger and
-exact process ownership. The neural benchmark controller is disposable; each
-eval worker is an independent background process recovered from a durable PID
-marker. There is no queue, lease, heartbeat, or stale-task reclamation.
+Outcome: drive a closed, pre-materialized benchmark continuously at maximum
+productive host occupancy with only three actors:
 
-The neural orchestrator continuously discovers live worker PIDs, samples the
-host, and launches independent workers while capacity remains. Controller
-death must not terminate, release, or duplicate a live worker. A restarted
-controller adopts the surviving markers before making another admission.
+```text
+Controller   observes the host and chooses desired occupancy
+Coordinator  atomically hands out tasks and records outcomes in SQLite
+Worker       runs exactly one `nanocodex eval run`, reports, and exits
+```
+
+The controller is neural and disposable. It owns no worker process and keeps
+no durable state. SQLite is the sole task authority; systemd is the sole
+process authority. The one-task command delegates benchmark execution to an
+adapter selected by the binary. Harbor owns its task containers, verification,
+and retained eval record; Nanocodex supplies the Rust agent process. There is
+no PID-marker store, worker pool, queue, lease, heartbeat, release manager,
+reconciliation database, wave scheduler, binary search, or generic durability
+framework.
 
 - [x] Store every task/treatment/repetition as one immutable SQLite row with
   exactly `unclaimed`, `running`, `success`, or `failed` state.
-- [x] Claim one row with an atomic SQLite transition and use its durable claim
-  ID to reject only stale terminal writes.
-- [x] Let successful and failed workers report their own terminal result; let
-  the benchmark report only an otherwise-unrecorded child exit, which releases
-  the row to `unclaimed` instead of manufacturing a terminal failure.
-- [x] Recover retained running claims from SQLite after coordinator process
-  death.
-- [x] Remove the model-facing `run_eval` tool and promise/batch orchestration.
-- [ ] Launch each `eval run` as an independent background worker, write its PID
-  marker before returning to the refill loop, and never wait on it through a
-  child agent or Code Mode exec session.
-- [ ] Rebuild live occupancy from markers and the operating system before every
-  admission. An inactive marker reports one idempotent worker exit, releases
-  only that unfinished claim, and is removed before replacement.
-- [ ] Keep the neural refill policy in one long-lived Code Mode cell without
-  making that cell the worker lifetime owner. A yielded, failed, or restarted
-  controller adopts surviving workers and continues from their actual count.
-- [ ] Remove the global benchmark-restart interruption edge. Controller restart
-  is not evidence that any worker exited.
-- [x] Hold a measured steady worker capacity that maximizes successful
-  completions without OOM. Compare occupancy, task throughput, available
-  memory, pressure, swap, load, and worker/VMM/proxy correspondence.
-- [x] Keep the benchmark prompt direct and test its ownership and admission
-  invariants rather than snapshotting its prose.
-- [x] Measure before/after utilization on the retained live workload: active
-  workers over time, idle-slot seconds, tasks/hour, peak and available memory,
-  swap-in/out, load, and row/worker/VM/proxy correspondence.
-  The rejected 75-worker burst yielded 3 successes and 72 processless claims;
-  the rolling 16-worker sample yielded 17 successes in 4.5 minutes (~227/hour),
-  no failures, 48--50 GiB available, zero memory pressure, no swap-out, and
-  exact row/worker/marker/VMM/proxy correspondence after startup transitions.
-  Native capacity 48 produced 33 successes in about six minutes (~330/hour),
-  but its fully resident set fell to 4.1 GiB available. Capacity 40 reached 1.6
-  GiB with memory-pressure `avg10=35.48`; capacity 32 later reached 0.1 GiB and
-  all workers collapsed. Those settings are rejected despite fast admission.
-  Capacity 24 held 23--24 running rows/eval processes/proxies for five minutes,
-  retained 36.9--43.4 GiB available with zero pressure, produced 10 successes,
-  and had no new failures. Capacity 28 then held its full resident set through
-  churn with 41--43 GiB available and 13 successes. Capacity 30 passed two hot
-  churn samples, including a heavier set with a 17.3 GiB memory floor. Its
-  first sample exposed one premature child completion, which close/report
-  contained without a leak; after tightening the child wait contract, nine
-  fresh successes had no failure or premature completion. Capacity 30 is the
-  highest measured safe setting, and the installed service drop-in preserves
-  it across restarts.
-- [ ] Re-run worker death, benchmark death, and coordinator death tests against
-  independent workers. No test may leave a running row, eval worker, VMM, or
-  proxy without its corresponding live owner.
-  Killing one eval process releases its row once, removes its gvproxy/libkrun
-  descendants, and refills the slot. Benchmark controller death leaves every
-  worker running; its replacement adopts those PIDs without releasing their
-  rows. Coordinator restart retains every running row and kills no worker.
-- [x] Let the configured benchmark continue under systemd, inspect exact
-  successful and failed evidence, and record the terminal board without
-  modifying tasks, verifiers, images, or expected outputs.
-  Before repairing historical orchestration artifacts, the service exited
-  normally at a terminal board of 5,034 success, 2,087 failed, zero running,
-  and zero unclaimed rows. Of the failed rows, 1,364
-  record deliberate restart/migration torture, 506 record earlier
-  launcher/process failures exposed while replacing the old designs, and 217
-  have retained evaluator results. The final service start first drained 30
-  claims owned by its killed predecessor, then completed 151 fresh rows as 142
-  successes and nine retained evaluator failures with no fresh
-  launcher/process failure. SQLite integrity is `ok`; after completion there
-  are zero eval workers, VMMs, or proxies and 53 GiB available memory.
-- [x] Return the no-evidence orchestration failures to `unclaimed`, deploy the
-  release semantics, and let replacement workers finish those rows without
-  reintroducing crash-shaped terminal failures.
-- [ ] Carry PR #135's unified routed eval UI, progress surfaces, score
-  frontiers, and task run charts onto the final four-state coordinator API;
-  validate the complete Terminal Bench workset locally against `dev-georgios`.
+- [x] Claim one row atomically. A verifier result becomes `success` or `failed`;
+  infrastructure failure or worker death returns the row to `unclaimed`.
+- [x] Recover SQLite running claims across coordinator restart and make worker
+  exit reporting idempotent.
+- [ ] Define the one-task runner contract in `nanocodex-eval`, implement it in
+  `nanocodex-eval-adapters`, and have the binary wire the selected adapter into
+  `nanocodex eval run`. Do not retain a second Harbor-like VM/verifier runtime
+  in the durable worker path.
+- [ ] Expose the names attached to running SQLite rows, delete the compiled
+  supervisor and PID markers, and have the neural controller reconcile those
+  names directly against live systemd units.
+- [ ] On every control cycle, observe SQLite, live and starting units, recent
+  completions, memory, swap, load, and pressure; reason about an absolute
+  desired occupancy; and launch the missing workers as one immediate batch.
+- [ ] With backlog and no measured overload or throughput stall, increase
+  occupancy aggressively. OOMs and retries are acceptable calibration signals;
+  chronic unused capacity or repeated unadapted thrashing is failure.
+- [ ] Never stop or shed a live worker. Controller death leaves workers alone;
+  controller restart reconstructs the entire situation from SQLite and
+  systemd before another admission.
+- [ ] Exercise the actual CLI processes end to end: one successful worker, one
+  verifier-failed worker, worker death, coordinator death, and controller death.
+  Do not add scheduler-policy or prompt-wording unit tests.
+- [ ] Deploy the reduced implementation to `dev-georgios`, run the retained
+  benchmark without changing tasks or verifiers, and record the worker-count
+  ramp, task counts, throughput, memory, swap, load, pressure, OOMs, retries,
+  and worker/VM/proxy correspondence through terminal completion.
 
-Exit gate: focused Linux and macOS tests pass; rustfmt and warnings-denied
-Clippy are clean for the changed surface; SQLite integrity is clean; the live
-neural refill loop maintains host occupancy without a wave tail; killing and
-restarting only the controller leaves worker PIDs and running rows unchanged;
-dead workers become claimable and replacement attempts converge to terminal
-outcomes; and the implementation is reduced to a reviewable, mergeable diff
-with no unrelated workspace changes.
+Exit gate: the implementation is net-negative and reviewable versus `master`;
+rustfmt and warnings-denied Clippy are clean; real CLI-process checks preserve
+every task across worker, coordinator, and controller death; SQLite integrity
+is clean; the neural controller maintains occupancy without a wave tail; and
+the terminal host has zero running/unclaimed rows, worker units, VMMs, proxies,
+or controller-owned recovery residue.
 
 ## Active milestones
 
