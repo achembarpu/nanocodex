@@ -13,29 +13,10 @@ Each child directory is a standard Harbor task with:
 - `tests/` for the agent-hidden deterministic verifier; and
 - `solution/` for an oracle implementation used to validate the task itself.
 
-Run the nanocodex against the complete dataset with:
-
-```sh
-just prepare-evals config=evals/history-derived.yaml
-just eval config=evals/history-derived.yaml
-```
-
-Run the stock Codex 0.144.5 comparison arm with:
-
-```sh
-just prepare-evals config=evals/history-derived-codex.yaml
-just eval config=evals/history-derived-codex.yaml
-```
-
-Before spending model tokens, validate the task environments and oracle
-solutions with Harbor:
-
-```sh
-HARBOR_TELEMETRY=off .venv/bin/harbor run \
-  --path evals/history-derived \
-  --agent oracle \
-  --jobs-dir .nanocodex/harbor/setup
-```
+The deprecated Python Harbor job configurations and custom Python agent,
+environment, and verifier implementations have been removed. These canonical
+task packages remain inputs to the native Rust evaluation adapters; pass the
+selected child task roots to `nanocodex eval add`.
 
 The two context-compaction probes found in history are not included yet. Their
 success criteria depend on retained trajectory events (tool-call count,
