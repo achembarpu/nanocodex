@@ -1516,9 +1516,11 @@ impl AttemptGvproxy {
         log: &Path,
         spawn: impl FnOnce(&Path, &Path, &Path) -> Result<GvproxyProcess, VmGvproxyError>,
     ) -> Result<Self, VmAttemptError> {
+        // gvproxy uses filesystem Unix sockets, so keep their paths below the
+        // platform limit even when the caller gives workers a long TMPDIR.
         let directory = tempfile::Builder::new()
-            .prefix("nanocodex-eval-gvproxy-")
-            .tempdir()?;
+            .prefix("ncx-gvp-")
+            .tempdir_in("/tmp")?;
         let process = spawn(binary, directory.path(), log)?;
         Ok(Self {
             process,
