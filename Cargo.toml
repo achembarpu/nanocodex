@@ -99,6 +99,7 @@ opentelemetry-otlp = { version = "0.32", default-features = false, features = ["
 opentelemetry-semantic-conventions = "0.32"
 opentelemetry_sdk = { version = "0.32", default-features = false, features = ["experimental_trace_batch_span_processor_with_async_runtime", "rt-tokio", "trace"] }
 percent-encoding = "2.3.2"
+parquet = { version = "59.1.0", default-features = false, features = ["snap"] }
 opusic-c = "1.6.1"
 pyo3 = "0.29.0"
 proc-macro-crate = "3"

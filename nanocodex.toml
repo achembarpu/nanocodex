@@ -41,3 +41,9 @@ benchmarks = ["genebench-pro-public/multiparent_qtl_hmm_lmm"]
 trials = 1
 model = ["sol"]
 thinking = ["high"]
+
+[profiles.graphwalks-smoke]
+benchmarks = ["graphwalks/128k-and-shorter-000749"]
+trials = 1
+model = ["sol"]
+thinking = ["high"]
