@@ -37,6 +37,12 @@
   benchmark controller must observe, classify, and adapt without an operator.
   Keep automated tests for executable protocol, parsing, and durable-state
   contracts.
+- Treat live benchmark waves and observation windows as telemetry, not blocking
+  work. While a wave runs, continue investigating known failures, inspecting
+  logs and state, editing, compiling, and preparing the next deployment. Wait
+  only when a concurrent mutation would race the specific measurement or
+  invalidate evidence needed for the next decision; never idle merely to watch
+  a wave finish.
 - Use `just run` for a live native smoke. Use focused Harbor trials while
   iterating and the full configured `just eval` only for milestone/release
   gates. Never modify benchmark tasks or verifiers to make Nanocodex pass.
