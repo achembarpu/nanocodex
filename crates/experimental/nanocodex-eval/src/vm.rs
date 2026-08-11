@@ -2024,11 +2024,24 @@ fn prepare_verifier_cache(
     task: &Task,
     cache: &Path,
 ) -> Result<Option<VerifierCache>, VmAttemptError> {
-    template
+    let prepared = template
         .is_file()
         .then(|| VerifierCache::prepare(template, task, cache))
         .transpose()
-        .map(Option::flatten)
+        .map(Option::flatten)?;
+    let Some(prepared) = prepared else {
+        return Ok(None);
+    };
+    if prepared.status == "hit" {
+        return Ok(Some(prepared));
+    }
+    info!(
+        target: "nanocodex_eval",
+        task_name = task.name(),
+        verifier_cache_key = prepared.key,
+        "running the canonical cold verifier without a cache disk"
+    );
+    Ok(None)
 }
 
 fn spawn_attempt_network(
