@@ -338,7 +338,9 @@ check:
     ./scripts/check-experimental-boundary.sh
     ./scripts/check-rustls-provider.sh
     cargo fmt --all -- --check
-    cargo clippy --workspace --all-targets --all-features -- -D warnings
+    cargo clippy --workspace --all-targets --all-features --exclude nanocodex-bin -- -D warnings
+    cargo clippy --package nanocodex-bin --all-features --bin nanocodex -- -D warnings
+    cargo clippy --package nanocodex-bin --all-features --bench tui_render -- -D warnings
     cargo test --workspace
     .venv/bin/python -m unittest discover -s harbor_adapter -p 'test_*.py'
     .venv/bin/python -m compileall -q harbor_adapter

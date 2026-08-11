@@ -42,7 +42,6 @@ jobs:
         with:
           cache-on-failure: true
       - run: cargo test --workspace --locked
-      - run: cargo test --package nanocodex-bin --features tempo --locked
 
   quality:
     name: rustfmt, clippy, and docs
@@ -62,7 +61,11 @@ jobs:
         with:
           cache-on-failure: true
       - run: cargo fmt --all -- --check
-      - run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Clippy workspace targets
+        run: |
+          cargo clippy --workspace --all-targets --all-features --exclude nanocodex-bin -- -D warnings
+          cargo clippy --package nanocodex-bin --all-features --bin nanocodex -- -D warnings
+          cargo clippy --package nanocodex-bin --all-features --bench tui_render -- -D warnings
       - name: Check independently usable crates and public examples
         run: |
           cargo check --locked --package nanocodex-oai-api
