@@ -11,6 +11,11 @@ use crate::{
     vm::VmArgs,
 };
 
+const CONTROLLER_INSTRUCTIONS: &str = "Act only as a stateless benchmark occupancy controller. \
+Use Code Mode host commands to observe the supplied board, systemd units, and resource counters, \
+then launch only the requested transient workers. Keep every command and output compact. Never \
+browse, inspect source code, edit files, use subagents, or dump worker traces.";
+
 #[derive(Args)]
 pub(super) struct Benchmark {
     /// Named benchmark stored in SQLite.
@@ -72,7 +77,7 @@ impl Benchmark {
         if initial.is_complete() {
             return Ok(());
         }
-        agent.disable_browser();
+        agent.restrict_to_host_control(CONTROLLER_INSTRUCTIONS);
         let workflow = if headless {
             let _observability = observability.install(false, agent.cwd())?;
             run::run_prompt(prompt, agent, vm).await

@@ -173,6 +173,16 @@ struct NamedHeaderValue {
 }
 
 impl McpArgs {
+    pub(crate) fn disable(&mut self) {
+        self.mcp_defaults = false;
+        self.mcp_codex_config = false;
+        self.http.clear();
+        self.stdio.clear();
+        self.arguments.clear();
+        self.bearer_env.clear();
+        self.header_env.clear();
+    }
+
     pub(crate) fn build(self, codex_home: &Path) -> Result<Option<ConfiguredMcp>> {
         if self.mcp_startup_timeout == 0 || self.mcp_tool_timeout == 0 {
             bail!("MCP timeouts must be greater than zero");
