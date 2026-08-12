@@ -184,6 +184,7 @@ enum FinishRequest {
 #[derive(Deserialize)]
 struct WorkerExitRequest {
     worker: WorkerName,
+    error: String,
 }
 
 #[derive(Deserialize)]
@@ -778,6 +779,10 @@ async fn worker_exited(
     if worker.trim().is_empty() {
         return Err(ApiError::bad_request("worker name must not be empty"));
     }
+    if request.error.trim().is_empty() {
+        return Err(ApiError::bad_request("worker exit error must not be empty"));
+    }
+    let error = request.error;
     let observed_worker = worker.clone();
     let host = state.host.clone();
     let worker_is_live = tokio::task::spawn_blocking(move || {
@@ -808,7 +813,7 @@ async fn worker_exited(
     };
     tokio::task::spawn_blocking(move || {
         for active in exited {
-            active.claim.release().map_err(ApiError::ledger)?;
+            active.claim.release(&error).map_err(ApiError::ledger)?;
         }
         Ok::<_, ApiError>(())
     })
@@ -1575,6 +1580,11 @@ thinking = ["high"]
             .worker_exited("duplicate process observation")
             .await
             .unwrap();
+        let status = client.status().await.unwrap();
+        assert_eq!(
+            status["recent_attempts"]["failures"][0]["error"],
+            "worker process exited with signal 9"
+        );
 
         let replacement_client = client.clone().worker("replacement-worker");
         let RemoteClaim::Run {

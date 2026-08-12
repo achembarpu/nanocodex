@@ -572,8 +572,8 @@ impl Workset {
     }
 
     /// Releases an interrupted execution if the claim still owns the row.
-    pub fn release(&self, claim: &TaskClaim) -> Result<(), WorksetError> {
-        self.release_attempt(claim, "interrupted", None, None)
+    pub fn release(&self, claim: &TaskClaim, error: &str) -> Result<(), WorksetError> {
+        self.release_attempt(claim, "interrupted", None, Some(error))
     }
 
     /// Reacquires ownership of rows retained as running after an owner restart.

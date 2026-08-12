@@ -782,8 +782,8 @@ impl CoordinateClaim {
     }
 
     /// Releases an interrupted execution so another worker can claim its row.
-    pub fn release(mut self) -> Result<(), EvaluationError> {
-        self.workset.release(&self.claim).map_err(error)?;
+    pub fn release(mut self, failure: &str) -> Result<(), EvaluationError> {
+        self.workset.release(&self.claim, failure).map_err(error)?;
         self.finished = true;
         Ok(())
     }
@@ -846,7 +846,9 @@ fn coordinate_output(
 impl Drop for CoordinateClaim {
     fn drop(&mut self) {
         if !self.finished {
-            let _ = self.workset.release(&self.claim);
+            let _ = self
+                .workset
+                .release(&self.claim, "claim dropped before recording an outcome");
         }
     }
 }
