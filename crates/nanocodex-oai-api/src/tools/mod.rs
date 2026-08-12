@@ -29,9 +29,7 @@ impl ToolOutputBody {
     #[must_use]
     pub fn structured_result(&self) -> Value {
         match self {
-            Self::Text(text) => {
-                serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.clone()))
-            }
+            Self::Text(text) => Value::String(text.clone()),
             Self::Content(content) => serde_json::to_value(content).unwrap_or(Value::Null),
         }
     }
@@ -150,8 +148,8 @@ impl ToolOutput {
     /// Serializes one successful function result as JSON text.
     #[must_use]
     pub fn json(output: &impl Serialize) -> Self {
-        match serde_json::to_string(output) {
-            Ok(output) => Self::text(output),
+        match serde_json::to_value(output) {
+            Ok(output) => Self::from_json(output, true),
             Err(error) => Self::error(format!("failed to encode tool result: {error}")),
         }
     }
@@ -204,9 +202,8 @@ impl ToolOutput {
 
     /// Returns the exact machine-readable tool result.
     ///
-    /// An explicit structured result takes precedence. Otherwise JSON text is
-    /// decoded, plain text remains a string, and multimodal content becomes an
-    /// array.
+    /// An explicit structured result takes precedence. Otherwise plain text
+    /// remains a string and multimodal content becomes an array.
     #[must_use]
     pub fn structured_result(&self) -> Value {
         if let Some(value) = &self.structured_result {
@@ -483,4 +480,17 @@ pub trait Tool: Send + Sync + 'static {
 
     /// Executes one invocation.
     async fn execute(&self, input: ToolInput, context: ToolContext<'_>) -> ToolResult;
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::ToolOutput;
+
+    #[test]
+    fn structured_result_preserves_text_and_json_types() {
+        assert_eq!(ToolOutput::text("42").structured_result(), json!("42"));
+        assert_eq!(ToolOutput::json(&42).structured_result(), json!(42));
+    }
 }

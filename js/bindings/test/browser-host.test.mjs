@@ -69,6 +69,30 @@ test("browser host directly dispatches tools without dynamic code evaluation", a
   assert.deepEqual(result.structured_result, { runtime: "worker", call_id: "call-1" });
 });
 
+test("browser host reports non-JSON nested results as tool failures", async () => {
+  const host = createBrowserHost({
+    tools: {
+      bigint: {
+        parameters: { type: "object" },
+        handler: () => 1n,
+      },
+    },
+  });
+  const execution = JSON.parse(await host.executeCode(
+    "try { await tools.bigint({}); } catch (error) { text(error.message); }",
+    "session",
+    "call-exec",
+  ));
+
+  assert.equal(execution.success, true);
+  assert.equal(execution.nested_calls[0].success, false);
+  assert.match(execution.nested_calls[0].structured_result, /JSON-serializable/);
+
+  const direct = JSON.parse(await host.executeTool("bigint", "{}"));
+  assert.equal(direct.success, false);
+  assert.match(direct.output, /JSON-serializable/);
+});
+
 test("browser host opens application sockets through MPP", async () => {
   const socket = new FakeWebSocket("wss://paid.test");
   socket.readyState = FakeWebSocket.OPEN;

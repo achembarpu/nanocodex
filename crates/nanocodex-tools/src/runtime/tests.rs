@@ -82,7 +82,7 @@ impl Tool for Double {
 
     async fn execute(&self, input: ToolInput, _context: ToolContext<'_>) -> ToolResult {
         let input = input.decode_json::<DoubleInput>()?;
-        Ok(ToolOutput::text((input.value * 2).to_string()))
+        Ok(ToolOutput::json(&(input.value * 2)))
     }
 }
 

@@ -570,11 +570,15 @@ impl Conversation {
             return self.on_cell_transport_result(&cell_id, &payload, status);
         }
         let pending_code_exec = self.pending_code_execs.contains_key(&payload.call_id);
+        let shell_tool = matches!(
+            payload.tool.as_deref(),
+            Some("exec_command" | "write_stdin")
+        );
         let shell_result = payload
             .structured_result
             .as_ref()
             .or(payload.result.as_ref());
-        if payload.tool.as_deref() == Some("exec_command")
+        if shell_tool
             && status == ToolStatus::Completed
             && let Some(session_id) = shell_result.and_then(result_session_id)
         {
@@ -606,7 +610,7 @@ impl Conversation {
         if self.pending_code_execs.remove(&payload.call_id).is_some() {
             return false;
         }
-        let result = if payload.tool.as_deref() == Some("exec_command") {
+        let result = if shell_tool {
             shell_result
         } else {
             payload.result.as_ref()
@@ -3216,7 +3220,7 @@ fn running_cell_id(result: &Value) -> Option<String> {
 }
 
 fn summarize_tool_result(tool: Option<&str>, result: &Value, status: ToolStatus) -> String {
-    if tool == Some("exec_command") {
+    if matches!(tool, Some("exec_command" | "write_stdin")) {
         let decoded = result
             .as_str()
             .and_then(|value| serde_json::from_str::<Value>(value).ok())

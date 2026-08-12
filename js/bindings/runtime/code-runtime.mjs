@@ -36,7 +36,7 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
     }
     try {
       const result = await tool.handler(input, { sessionId, parentCallId: "", callId });
-      return encodeToolOutput(outputBody(result), true, clone(result) ?? null);
+      return encodeToolOutput(outputBody(result), true, structuredResult(result, `tool ${name} result`));
     } catch (error) {
       return encodeToolOutput(errorMessage(error), false, null);
     }
@@ -65,7 +65,7 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
             name,
             input: recordedInput,
             output: outputBody(result),
-            structured_result: clone(result) ?? null,
+            structured_result: structuredResult(result, `tool ${name} result`),
             success: true,
             started_after_ns: startedAfterNs,
             duration_ns: elapsedNs(toolStartedAt),
@@ -218,6 +218,10 @@ function jsonSnapshot(value, label) {
   } catch (error) {
     throw new TypeError(`${label} must be JSON-serializable`, { cause: error });
   }
+}
+
+function structuredResult(value, label) {
+  return value === undefined ? null : jsonSnapshot(value, label);
 }
 
 function deepFreeze(value) {
