@@ -32,7 +32,7 @@ pub(crate) fn prompt(
         },
         |coordinator| {
             format!(
-                "status.workers is a JSON array of worker-name strings: extract it exactly with `jq -r '.workers[]'` and never access a field on an element. For every name whose nanocodex-eval-worker@<name>.service is not live, read that unit's bounded warning journal, then POST {{\"worker\":<name>,\"error\":<concise process or OOM classification>}} to {}/v1/workers/exited before admitting replacements. The operation is idempotent. Never perform the inverse: a live unit absent from status.workers is not an exited worker and must never be posted to this endpoint.",
+                "status.workers is a JSON array of worker-name strings: extract it exactly with `jq -r '.workers[]'` and never access a field on an element. For every name whose nanocodex-eval-worker@<name>.service is not live, read that unit's bounded warning journal, then POST {{\"worker\":<name>,\"error\":<concise process or OOM classification>}} to {}/v1/workers/exited before admitting replacements. A journal containing `oom-kill` must be reported as literal `OOM`; otherwise retain the exact main-process exit line and never use a vague `see journal` classification. The operation is idempotent. Never perform the inverse: a live unit absent from status.workers is not an exited worker and must never be posted to this endpoint.",
                 coordinator.trim_end_matches('/')
             )
         },
