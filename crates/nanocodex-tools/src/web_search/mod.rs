@@ -9,7 +9,7 @@ use nanocodex_oai_api::{
     tools::ToolDefinition,
 };
 use reqwest::header::{AUTHORIZATION, USER_AGENT};
-use serde_json::{Value, json};
+use serde_json::json;
 use tokio::time::{sleep, timeout};
 
 use self::{
@@ -136,7 +136,7 @@ impl WebSearchHandler {
 
         let output = outputs.join("\n");
         let mut execution = if failures.is_empty() {
-            ToolOutput::text(output.clone()).with_structured_result(Value::String(output))
+            ToolOutput::text(output)
         } else {
             let mut error = failures.join("\n");
             if !output.is_empty() {

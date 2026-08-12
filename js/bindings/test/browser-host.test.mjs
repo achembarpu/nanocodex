@@ -69,7 +69,7 @@ test("browser host directly dispatches tools without dynamic code evaluation", a
   assert.deepEqual(result.structured_result, { runtime: "worker", call_id: "call-1" });
 });
 
-test("browser host reports non-JSON nested results as tool failures", async () => {
+test("browser host reports non-JSON tool results as failures", async () => {
   const host = createBrowserHost({
     tools: {
       bigint: {

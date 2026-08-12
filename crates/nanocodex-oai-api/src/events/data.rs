@@ -327,7 +327,6 @@ pub struct ToolResultEvent {
     /// Complete model-visible output.
     pub result: ToolOutputBody,
     /// Exact machine-readable tool result.
-    #[serde(default)]
     pub structured_result: Value,
     /// Optional application or remote-tool metadata.
     pub metadata: Option<Box<RawValue>>,

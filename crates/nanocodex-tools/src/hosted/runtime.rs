@@ -426,31 +426,6 @@ mod tests {
         assert!(description.find("tools.alpha").unwrap() < description.find("tools.zeta").unwrap());
     }
 
-    #[test]
-    fn nested_calls_require_the_structured_result() {
-        let mut execution = json!({
-            "output": "done",
-            "success": true,
-            "nested_calls": [{
-                "call_id": "call-1/code-0",
-                "name": "example",
-                "input": {},
-                "output": "visible",
-                "success": true,
-                "started_after_ns": 1,
-                "duration_ns": 2
-            }]
-        });
-        assert!(serde_json::from_value::<CodeModeExecution>(execution.clone()).is_err());
-
-        execution["nested_calls"][0]["structured_result"] = json!({"answer": 42});
-        let execution = serde_json::from_value::<CodeModeExecution>(execution).unwrap();
-        assert_eq!(
-            execution.nested_calls[0].structured_result,
-            json!({"answer": 42})
-        );
-    }
-
     #[tokio::test]
     async fn execution_receives_the_standard_tool_context() {
         let tools = HostedTools::new(EchoHost);

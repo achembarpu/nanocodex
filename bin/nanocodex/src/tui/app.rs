@@ -574,13 +574,9 @@ impl Conversation {
             payload.tool.as_deref(),
             Some("exec_command" | "write_stdin")
         );
-        let shell_result = payload
-            .structured_result
-            .as_ref()
-            .or(payload.result.as_ref());
         if shell_tool
             && status == ToolStatus::Completed
-            && let Some(session_id) = shell_result.and_then(result_session_id)
+            && let Some(session_id) = result_session_id(&payload.structured_result)
         {
             self.running_shell_sessions.insert(
                 session_id,
@@ -611,7 +607,7 @@ impl Conversation {
             return false;
         }
         let result = if shell_tool {
-            shell_result
+            Some(&payload.structured_result)
         } else {
             payload.result.as_ref()
         }
@@ -659,16 +655,17 @@ impl Conversation {
             return false;
         };
         continued.add_duration(payload.duration_ns);
-        let result = payload
-            .structured_result
-            .as_ref()
-            .or(payload.result.as_ref());
-        if status == ToolStatus::Completed && result.and_then(result_session_id).is_some() {
+        if status == ToolStatus::Completed
+            && result_session_id(&payload.structured_result).is_some()
+        {
             self.running_shell_sessions.insert(session_id, continued);
             return false;
         }
-        let result =
-            result.map(|result| summarize_tool_result(Some("exec_command"), result, status));
+        let result = Some(summarize_tool_result(
+            Some("exec_command"),
+            &payload.structured_result,
+            status,
+        ));
         self.finish_continued_tool(&continued, status, result)
     }
 
@@ -2902,8 +2899,7 @@ struct ToolResultPayload {
     started_after_ns: Option<u64>,
     #[serde(default)]
     result: Option<Value>,
-    #[serde(default)]
-    structured_result: Option<Value>,
+    structured_result: Value,
 }
 
 struct ContinuedTool {
