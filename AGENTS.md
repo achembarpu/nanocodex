@@ -72,6 +72,11 @@
   evidence, fixing known failures, and preparing the next deployment while a
   wave runs. Wait only when a concurrent mutation would invalidate a specific
   measurement needed for the next decision.
+- Treat obsolete services, systemd drop-ins, scratch directories, deployments,
+  and other stale host residue as operator cleanup. Inspect their exact scope
+  and remove them directly on `dev-georgios`; do not infer a product feature,
+  compatibility path, migration, or automatic cleanup requirement merely
+  because old operational state exists.
 - Use `just run` for a live native smoke, focused trials while iterating, and the
   full configured eval only for milestone or release gates. Never modify a
   benchmark task or verifier to make Nanocodex pass. Inspect exact JSONL,
