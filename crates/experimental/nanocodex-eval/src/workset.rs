@@ -135,6 +135,21 @@ pub struct RecentAttemptCounts {
     pub infrastructure_failed: i64,
     /// Attempts released because their owner disappeared.
     pub interrupted: i64,
+    /// Newest infrastructure failures and interruptions in this window.
+    pub failures: Vec<RecentAttemptFailure>,
+}
+
+/// One recent retryable attempt retained for controller diagnosis.
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct RecentAttemptFailure {
+    /// Worker which owned the attempt.
+    pub worker: String,
+    /// `infrastructure_failed` or `interrupted`.
+    pub state: String,
+    /// Worker or coordinator diagnostic when one was recorded.
+    pub error: Option<String>,
+    /// Completion time in Unix milliseconds.
+    pub finished_at_ms: i64,
 }
 
 /// Counts for the only durable task states.
@@ -909,9 +924,27 @@ fn read_status(
                 failed: row.get(1)?,
                 infrastructure_failed: row.get(2)?,
                 interrupted: row.get(3)?,
+                failures: Vec::new(),
             })
         },
     )?;
+    let mut recent_attempts = recent_attempts;
+    let mut failure_statement = connection.prepare(
+        "SELECT worker, state, error, finished_at_ms FROM eval_attempts \
+         WHERE workset_id = ?1 AND finished_at_ms >= ?2 \
+            AND state IN ('infrastructure_failed', 'interrupted') \
+         ORDER BY finished_at_ms DESC LIMIT 8",
+    )?;
+    recent_attempts.failures = failure_statement
+        .query_map(params![workset_id, recent_cutoff_ms], |row| {
+            Ok(RecentAttemptFailure {
+                worker: row.get(0)?,
+                state: row.get(1)?,
+                error: row.get(2)?,
+                finished_at_ms: row.get(3)?,
+            })
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
     let mut statement = connection.prepare(
         "SELECT e.family_key, d.selector, e.harness, e.model, e.thinking, e.web_search, COUNT(*), \
             COALESCE(SUM(e.state = 'unclaimed'), 0), \
