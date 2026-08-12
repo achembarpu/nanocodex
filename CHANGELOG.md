@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Miscellaneous Tasks
 
+- [release] Prepare 0.5.0
 - [eval] Remove deprecated Python Harbor stack
 
 ### Other

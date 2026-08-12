@@ -14,6 +14,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - [events] Retain structured nested tool results
 - [oai] Drop notifications orphaned by compaction
 
+### Miscellaneous Tasks
+
+- [release] Prepare 0.5.0
+
 ### Other
 
 - Merge pull request [#167](https://github.com/gakonst/nanocodex/issues/167) from clabby/cl/structured-events
