@@ -570,9 +570,10 @@ impl Conversation {
             return self.on_cell_transport_result(&cell_id, &payload, status);
         }
         let pending_code_exec = self.pending_code_execs.contains_key(&payload.call_id);
+        let shell_result = payload.code_mode_value.as_ref().or(payload.result.as_ref());
         if payload.tool.as_deref() == Some("exec_command")
             && status == ToolStatus::Completed
-            && let Some(session_id) = payload.result.as_ref().and_then(result_session_id)
+            && let Some(session_id) = shell_result.and_then(result_session_id)
         {
             self.running_shell_sessions.insert(
                 session_id,
@@ -602,10 +603,12 @@ impl Conversation {
         if self.pending_code_execs.remove(&payload.call_id).is_some() {
             return false;
         }
-        let result = payload
-            .result
-            .as_ref()
-            .map(|result| summarize_tool_result(payload.tool.as_deref(), result, status));
+        let result = if payload.tool.as_deref() == Some("exec_command") {
+            shell_result
+        } else {
+            payload.result.as_ref()
+        }
+        .map(|result| summarize_tool_result(payload.tool.as_deref(), result, status));
         self.note_tail_will_change();
         let _ = if payload.started_after_ns.is_some() {
             self.transcript.set_tool_result_timing(
@@ -649,20 +652,13 @@ impl Conversation {
             return false;
         };
         continued.add_duration(payload.duration_ns);
-        if status == ToolStatus::Completed
-            && payload
-                .result
-                .as_ref()
-                .and_then(result_session_id)
-                .is_some()
-        {
+        let result = payload.code_mode_value.as_ref().or(payload.result.as_ref());
+        if status == ToolStatus::Completed && result.and_then(result_session_id).is_some() {
             self.running_shell_sessions.insert(session_id, continued);
             return false;
         }
-        let result = payload
-            .result
-            .as_ref()
-            .map(|result| summarize_tool_result(Some("exec_command"), result, status));
+        let result =
+            result.map(|result| summarize_tool_result(Some("exec_command"), result, status));
         self.finish_continued_tool(&continued, status, result)
     }
 
@@ -2896,6 +2892,8 @@ struct ToolResultPayload {
     started_after_ns: Option<u64>,
     #[serde(default)]
     result: Option<Value>,
+    #[serde(default)]
+    code_mode_value: Option<Value>,
 }
 
 struct ContinuedTool {
@@ -4621,7 +4619,8 @@ mod tests {
                 "tool": "exec_command",
                 "status": "completed",
                 "duration_ns": 10_000_000,
-                "result": "{\"session_id\":7,\"output\":\"\"}"
+                "result": "Wall time: 10.0000 seconds\nProcess running with session ID 7\nOutput:\n",
+                "code_mode_value": {"session_id": 7, "output": ""}
             }),
         ));
         app.main.on_agent_event(&event(
@@ -4639,7 +4638,8 @@ mod tests {
                 "tool": "write_stdin",
                 "status": "completed",
                 "duration_ns": 5_000_000,
-                "result": "{\"session_id\":7,\"output\":\"\"}"
+                "result": "Wall time: 5.0000 seconds\nProcess running with session ID 7\nOutput:\n",
+                "code_mode_value": {"session_id": 7, "output": ""}
             }),
         ));
         app.main.on_agent_event(&event(
@@ -4657,7 +4657,8 @@ mod tests {
                 "tool": "write_stdin",
                 "status": "completed",
                 "duration_ns": 1_000_000,
-                "result": "{\"exit_code\":130,\"output\":\"\"}"
+                "result": "Wall time: 1.0000 seconds\nProcess exited with code 130\nOutput:\n",
+                "code_mode_value": {"exit_code": 130, "output": ""}
             }),
         ));
         app.main.on_agent_event(&event(

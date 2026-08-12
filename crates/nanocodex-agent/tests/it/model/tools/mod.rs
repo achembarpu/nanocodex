@@ -621,7 +621,23 @@ async fn connection_local_response_code_mode_round_trip() -> Result<()> {
         .await
         .map_err(|_| eyre!("mock Responses server did not finish"))???;
     assert!(output.contains("\"tool\":\"exec\""));
-    assert!(output.contains("\"tool\":\"exec_command\""));
+    let shell_result = output
+        .lines()
+        .map(serde_json::from_str::<Value>)
+        .collect::<Result<Vec<_>, _>>()?
+        .into_iter()
+        .find(|event| event["type"] == "tool.result" && event["payload"]["tool"] == "exec_command")
+        .ok_or_else(|| eyre!("nested shell result event was not emitted"))?;
+    assert!(
+        shell_result["payload"]["result"]
+            .as_str()
+            .is_some_and(|result| result.contains("Process exited with code 0"))
+    );
+    assert_eq!(shell_result["payload"]["code_mode_value"]["exit_code"], 0);
+    assert_eq!(
+        shell_result["payload"]["code_mode_value"]["output"],
+        "hello"
+    );
     std::fs::remove_dir_all(workspace)?;
     Ok(())
 }

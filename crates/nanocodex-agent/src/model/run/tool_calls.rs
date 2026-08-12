@@ -78,6 +78,7 @@ impl CodeModeObserver for NestedToolEventObserver<'_> {
                         duration_ns: call.duration_ns,
                         started_after_ns: Some(call.started_after_ns),
                         result: &call.output,
+                        code_mode_value: Some(&call.code_mode_value),
                         metadata: call.metadata.as_deref(),
                     },
                 )
@@ -369,6 +370,7 @@ where
                 duration_ns: completed.duration_ns,
                 started_after_ns: None,
                 result: &completed.output,
+                code_mode_value: None,
                 metadata: completed.metadata.as_deref(),
             },
         )?;

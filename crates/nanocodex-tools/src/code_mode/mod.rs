@@ -1337,13 +1337,14 @@ async fn execute_nested_call(
         .or_else(|| value.get("session_id").and_then(Value::as_i64));
     CompletedNestedCall {
         id,
-        value,
+        value: value.clone(),
         shell_session_id,
         call: NestedToolCall {
             call_id,
             name,
             input,
             output: execution.output,
+            code_mode_value: value,
             success: execution.success,
             started_after_ns,
             duration_ns,

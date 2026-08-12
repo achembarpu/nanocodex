@@ -555,6 +555,7 @@ where
                     duration_ns,
                     started_after_ns: None,
                     result: &output,
+                    code_mode_value: None,
                     metadata: None,
                 },
             )?;

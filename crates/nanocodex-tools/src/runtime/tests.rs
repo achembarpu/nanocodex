@@ -819,6 +819,7 @@ text(result);
     assert_eq!(execution.nested_calls.len(), 1);
     assert_eq!(execution.nested_calls[0].name, "double");
     assert_eq!(execution.nested_calls[0].input, json!({ "value": 21 }));
+    assert_eq!(execution.nested_calls[0].code_mode_value, json!(42));
     let ToolOutputBody::Content(content) = execution.output else {
         panic!("expected content output");
     };
