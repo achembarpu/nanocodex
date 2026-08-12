@@ -124,7 +124,7 @@
 
 .eval-node-counts {
   display: grid;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
   border-block: 1px solid var(--border-soft);
 }
 
@@ -132,6 +132,8 @@
 .eval-node-counts > div:last-child { border-right: 0; }
 .eval-node-counts span { color: color-mix(in srgb, var(--text) 44%, transparent); font-size: 8px; text-transform: uppercase; }
 .eval-node-counts strong { font-family: "Paradigm Serif", Georgia, serif; font-size: 22px; font-weight: 400; }
+.eval-node-counts .eval-node-mismatch strong { color: var(--negative); font-size: 16px; }
+.eval-node-counts .eval-node-mismatch small { color: color-mix(in srgb, var(--text) 44%, transparent); font-size: 8px; }
 
 .eval-node-utilization { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); }
 .eval-node-capacity { display: grid; gap: 8px; min-width: 0; padding: 17px var(--eval-pad); border-right: 1px solid var(--border-soft); }

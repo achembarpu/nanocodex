@@ -118,6 +118,8 @@ function NodeCapacity({ label, capacity }: { label: string; capacity: EvalCluste
 
 function ClusterNode({ node }: { node: EvalClusterNode }) {
   const cpu = Math.max(0, Math.min(100, node.cpuUsagePercent));
+  const lifecycleAligned = node.workerProcesses === node.claimedTasks &&
+    node.claimedTasks === node.vmProcesses;
   return (
     <article className="eval-node-card">
       <header>
@@ -126,10 +128,15 @@ function ClusterNode({ node }: { node: EvalClusterNode }) {
         <Server aria-hidden="true" />
       </header>
       <div className="eval-node-counts">
-        <div><span>Worker processes</span><strong>{node.workerProcesses}</strong></div>
-        <div><span>Active claims</span><strong>{node.claimedTasks}</strong></div>
-        <div><span>Live VMs</span><strong>{node.vmProcesses}</strong></div>
+        <div><span>Active evals</span><strong>{node.claimedTasks}</strong></div>
         <div><span>CPU cores</span><strong>{node.cpuCores}</strong></div>
+        {!lifecycleAligned ? (
+          <div className="eval-node-mismatch">
+            <span>Lifecycle mismatch</span>
+            <strong>{node.workerProcesses} / {node.claimedTasks} / {node.vmProcesses}</strong>
+            <small>workers / claims / VMs</small>
+          </div>
+        ) : null}
       </div>
       <div className="eval-node-utilization">
         <div className="eval-node-capacity">
