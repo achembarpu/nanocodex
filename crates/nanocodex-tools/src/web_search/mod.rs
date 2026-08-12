@@ -136,7 +136,7 @@ impl WebSearchHandler {
 
         let output = outputs.join("\n");
         let mut execution = if failures.is_empty() {
-            ToolOutput::text(output.clone()).with_code_mode_value(Value::String(output))
+            ToolOutput::text(output.clone()).with_structured_result(Value::String(output))
         } else {
             let mut error = failures.join("\n");
             if !output.is_empty() {

@@ -14,6 +14,10 @@ test("browser host carries ordered frames and application tools", async () => {
         parameters: { type: "object" },
         handler: ({ value }) => value * 2,
       },
+      numericText: {
+        parameters: { type: "object" },
+        handler: () => "42",
+      },
     },
   });
   const connecting = host.connect("ws://example.test", "not-forwarded", "session");
@@ -26,7 +30,7 @@ test("browser host carries ordered frames and application tools", async () => {
   assert.equal(JSON.parse(await host.next(1, 10)).text, '{"type":"two"}');
 
   const execution = JSON.parse(await host.executeCode(
-    "text(await tools.double({ value: 21 }));",
+    "text(await tools.double({ value: 21 })); text(await tools.numericText({}));",
     "session",
     "call-exec",
   ));
@@ -34,6 +38,8 @@ test("browser host carries ordered frames and application tools", async () => {
   assert.match(JSON.stringify(execution.output), /42/);
   assert.equal(execution.nested_calls[0].name, "double");
   assert.equal(execution.nested_calls[0].call_id, "call-exec/code-1");
+  assert.equal(execution.nested_calls[0].structured_result, 42);
+  assert.equal(execution.nested_calls[1].structured_result, "42");
   assert.equal(Number.isSafeInteger(execution.nested_calls[0].started_after_ns), true);
   assert.ok(execution.nested_calls[0].started_after_ns >= 0);
   assert.equal(JSON.parse(host.toolDefinitions())[0].name, "double");
@@ -60,6 +66,7 @@ test("browser host directly dispatches tools without dynamic code evaluation", a
   ));
   assert.equal(result.success, true);
   assert.deepEqual(JSON.parse(result.output), { runtime: "worker", call_id: "call-1" });
+  assert.deepEqual(result.structured_result, { runtime: "worker", call_id: "call-1" });
 });
 
 test("browser host opens application sockets through MPP", async () => {

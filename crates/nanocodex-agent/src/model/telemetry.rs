@@ -121,8 +121,7 @@ pub(super) struct ToolResultEvent<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) started_after_ns: Option<u64>,
     pub(super) result: &'a ToolOutputBody,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) code_mode_value: Option<&'a Value>,
+    pub(super) structured_result: &'a Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) metadata: Option<&'a RawValue>,
 }

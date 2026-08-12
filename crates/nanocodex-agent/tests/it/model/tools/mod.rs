@@ -218,7 +218,32 @@ async fn normal_code_mode_executes_direct_function_and_custom_tools() -> Result<
     assert!(output.contains(r#""tool":"update_plan""#));
     assert!(output.contains(r#""tool":"apply_patch""#));
     assert!(output.contains(r#""tool":"test_namespace__echo""#));
-    assert!(output.contains(r#""tool":"exec_command""#));
+    let events = output
+        .lines()
+        .map(serde_json::from_str::<Value>)
+        .collect::<Result<Vec<_>, _>>()?;
+    let direct_results = events
+        .iter()
+        .filter(|event| event["type"] == "tool.result")
+        .collect::<Vec<_>>();
+    assert_eq!(direct_results.len(), 4);
+    assert!(
+        direct_results
+            .iter()
+            .all(|event| event["payload"].get("structured_result").is_some())
+    );
+    let direct_shell_result = direct_results
+        .into_iter()
+        .find(|event| event["payload"]["tool"] == "exec_command")
+        .ok_or_else(|| eyre!("direct shell result event was not emitted"))?;
+    assert_eq!(
+        direct_shell_result["payload"]["structured_result"]["exit_code"],
+        0
+    );
+    assert_eq!(
+        direct_shell_result["payload"]["structured_result"]["output"],
+        "direct-shell-dispatch-worked"
+    );
     std::fs::remove_dir_all(workspace)?;
     Ok(())
 }
@@ -633,9 +658,9 @@ async fn connection_local_response_code_mode_round_trip() -> Result<()> {
             .as_str()
             .is_some_and(|result| result.contains("Process exited with code 0"))
     );
-    assert_eq!(shell_result["payload"]["code_mode_value"]["exit_code"], 0);
+    assert_eq!(shell_result["payload"]["structured_result"]["exit_code"], 0);
     assert_eq!(
-        shell_result["payload"]["code_mode_value"]["output"],
+        shell_result["payload"]["structured_result"]["output"],
         "hello"
     );
     std::fs::remove_dir_all(workspace)?;

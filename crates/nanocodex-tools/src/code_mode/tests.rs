@@ -661,8 +661,11 @@ text({ closed, exit_code: interrupted.exit_code });
         serde_json::from_str::<Value>(emitted_text(&execution)?)?,
         serde_json::json!({ "closed": true, "exit_code": 130 })
     );
-    assert_eq!(execution.nested_calls[0].code_mode_value["session_id"], 1);
-    assert_eq!(execution.nested_calls[2].code_mode_value["exit_code"], 130);
+    assert_eq!(execution.nested_calls[0].structured_result["session_id"], 1);
+    assert_eq!(
+        execution.nested_calls[2].structured_result["exit_code"],
+        130
+    );
     std::fs::remove_dir_all(workspace)?;
     Ok(())
 }
@@ -691,7 +694,7 @@ text({
     assert_eq!(result["present"], true);
     assert_eq!(result["count"], 1);
     assert_eq!(
-        execution.nested_calls[0].code_mode_value["original_token_count"],
+        execution.nested_calls[0].structured_result["original_token_count"],
         1
     );
     std::fs::remove_dir_all(workspace)?;

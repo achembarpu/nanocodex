@@ -443,7 +443,7 @@ async fn parallel_safety_follows_direct_then_provider_dispatch_precedence() {
             context,
         )
         .await;
-    assert_eq!(direct.code_mode_value(), json!("direct"));
+    assert_eq!(direct.structured_result(), json!("direct"));
 
     let provider_collision = Tools::builder()
         .without_defaults()
@@ -469,7 +469,7 @@ async fn parallel_safety_follows_direct_then_provider_dispatch_precedence() {
             context,
         )
         .await;
-    assert_eq!(provider.code_mode_value(), json!("first"));
+    assert_eq!(provider.structured_result(), json!("first"));
 }
 
 #[test]
@@ -715,7 +715,7 @@ async fn extending_a_runtime_keeps_the_first_exact_tool_registration() {
         )
         .await;
 
-    assert_eq!(output.code_mode_value(), json!("first"));
+    assert_eq!(output.structured_result(), json!("first"));
 }
 
 #[test]
@@ -819,7 +819,7 @@ text(result);
     assert_eq!(execution.nested_calls.len(), 1);
     assert_eq!(execution.nested_calls[0].name, "double");
     assert_eq!(execution.nested_calls[0].input, json!({ "value": 21 }));
-    assert_eq!(execution.nested_calls[0].code_mode_value, json!(42));
+    assert_eq!(execution.nested_calls[0].structured_result, json!(42));
     let ToolOutputBody::Content(content) = execution.output else {
         panic!("expected content output");
     };
@@ -941,7 +941,7 @@ async fn direct_model_calls_reach_activated_dynamic_tools() {
         )
         .await;
     assert!(execution.success);
-    assert_eq!(execution.code_mode_value(), json!({ "value": 21 }));
+    assert_eq!(execution.structured_result(), json!({ "value": 21 }));
 }
 
 #[tokio::test]

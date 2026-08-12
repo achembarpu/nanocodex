@@ -427,7 +427,7 @@ mod tests {
     }
 
     #[test]
-    fn nested_calls_require_the_code_mode_value() {
+    fn nested_calls_require_the_structured_result() {
         let mut execution = json!({
             "output": "done",
             "success": true,
@@ -443,10 +443,10 @@ mod tests {
         });
         assert!(serde_json::from_value::<CodeModeExecution>(execution.clone()).is_err());
 
-        execution["nested_calls"][0]["code_mode_value"] = json!({"answer": 42});
+        execution["nested_calls"][0]["structured_result"] = json!({"answer": 42});
         let execution = serde_json::from_value::<CodeModeExecution>(execution).unwrap();
         assert_eq!(
-            execution.nested_calls[0].code_mode_value,
+            execution.nested_calls[0].structured_result,
             json!({"answer": 42})
         );
     }

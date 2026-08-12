@@ -543,6 +543,7 @@ where
             } else {
                 format!("aborted by user after {:.1}s", elapsed_seconds.max(0.1))
             });
+            let structured_result = output.structured_result();
             self.finish_active_tool_progress(&call.progress);
             self.finish_cancelled_tool_work(&call);
             record_tool_span_terminal(&call.span, "cancelled", "ERROR", duration_ns, &output);
@@ -555,7 +556,7 @@ where
                     duration_ns,
                     started_after_ns: None,
                     result: &output,
-                    code_mode_value: None,
+                    structured_result: &structured_result,
                     metadata: None,
                 },
             )?;

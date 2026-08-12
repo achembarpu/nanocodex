@@ -142,8 +142,8 @@ pub struct NestedToolCall {
     pub input: Value,
     /// Complete model-visible output.
     pub output: ToolOutputBody,
-    /// Structured value returned to the Code Mode program.
-    pub code_mode_value: Value,
+    /// Exact machine-readable tool result.
+    pub structured_result: Value,
     /// Whether the nested operation succeeded.
     pub success: bool,
     /// Nanoseconds from cell start until this call started.

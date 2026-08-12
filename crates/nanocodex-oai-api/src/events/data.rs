@@ -326,9 +326,9 @@ pub struct ToolResultEvent {
     pub started_after_ns: Option<u64>,
     /// Complete model-visible output.
     pub result: ToolOutputBody,
-    /// Structured value returned to a containing Code Mode program.
+    /// Exact machine-readable tool result.
     #[serde(default)]
-    pub code_mode_value: Option<Value>,
+    pub structured_result: Value,
     /// Optional application or remote-tool metadata.
     pub metadata: Option<Box<RawValue>>,
 }

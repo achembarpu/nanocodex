@@ -570,7 +570,10 @@ impl Conversation {
             return self.on_cell_transport_result(&cell_id, &payload, status);
         }
         let pending_code_exec = self.pending_code_execs.contains_key(&payload.call_id);
-        let shell_result = payload.code_mode_value.as_ref().or(payload.result.as_ref());
+        let shell_result = payload
+            .structured_result
+            .as_ref()
+            .or(payload.result.as_ref());
         if payload.tool.as_deref() == Some("exec_command")
             && status == ToolStatus::Completed
             && let Some(session_id) = shell_result.and_then(result_session_id)
@@ -652,7 +655,10 @@ impl Conversation {
             return false;
         };
         continued.add_duration(payload.duration_ns);
-        let result = payload.code_mode_value.as_ref().or(payload.result.as_ref());
+        let result = payload
+            .structured_result
+            .as_ref()
+            .or(payload.result.as_ref());
         if status == ToolStatus::Completed && result.and_then(result_session_id).is_some() {
             self.running_shell_sessions.insert(session_id, continued);
             return false;
@@ -2893,7 +2899,7 @@ struct ToolResultPayload {
     #[serde(default)]
     result: Option<Value>,
     #[serde(default)]
-    code_mode_value: Option<Value>,
+    structured_result: Option<Value>,
 }
 
 struct ContinuedTool {
@@ -4620,7 +4626,7 @@ mod tests {
                 "status": "completed",
                 "duration_ns": 10_000_000,
                 "result": "Wall time: 10.0000 seconds\nProcess running with session ID 7\nOutput:\n",
-                "code_mode_value": {"session_id": 7, "output": ""}
+                "structured_result": {"session_id": 7, "output": ""}
             }),
         ));
         app.main.on_agent_event(&event(
@@ -4639,7 +4645,7 @@ mod tests {
                 "status": "completed",
                 "duration_ns": 5_000_000,
                 "result": "Wall time: 5.0000 seconds\nProcess running with session ID 7\nOutput:\n",
-                "code_mode_value": {"session_id": 7, "output": ""}
+                "structured_result": {"session_id": 7, "output": ""}
             }),
         ));
         app.main.on_agent_event(&event(
@@ -4658,7 +4664,7 @@ mod tests {
                 "status": "completed",
                 "duration_ns": 1_000_000,
                 "result": "Wall time: 1.0000 seconds\nProcess exited with code 130\nOutput:\n",
-                "code_mode_value": {"exit_code": 130, "output": ""}
+                "structured_result": {"exit_code": 130, "output": ""}
             }),
         ));
         app.main.on_agent_event(&event(
