@@ -109,7 +109,7 @@ impl Tool for ViewImageHandler {
             image_url: image_url.clone(),
             detail,
         }])
-        .with_code_mode_value(json!({
+        .with_structured_result(json!({
             "image_url": image_url,
             "detail": detail,
         })))

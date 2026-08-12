@@ -48,7 +48,7 @@ impl Tool for UpdatePlanTool {
             );
         }
         *self.current.lock().await = Some(plan);
-        Ok(ToolOutput::text("Plan updated").with_code_mode_value(json!({})))
+        Ok(ToolOutput::text("Plan updated").with_structured_result(json!({})))
     }
 }
 

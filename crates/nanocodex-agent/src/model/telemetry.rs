@@ -4,7 +4,7 @@ use nanocodex_oai_api::{
     __private::ModelConfig, Thinking, responses::Usage, transport::TransportStatsDelta,
 };
 use serde::Serialize;
-use serde_json::value::RawValue;
+use serde_json::{Value, value::RawValue};
 use web_time::Instant;
 
 use crate::usage::TurnUsage;
@@ -121,6 +121,7 @@ pub(super) struct ToolResultEvent<'a> {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) started_after_ns: Option<u64>,
     pub(super) result: &'a ToolOutputBody,
+    pub(super) structured_result: &'a Value,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub(super) metadata: Option<&'a RawValue>,
 }

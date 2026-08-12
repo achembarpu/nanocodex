@@ -709,7 +709,7 @@ impl Tool for McpSearch {
         }
         Ok(match result {
             Ok(result) => match result.loadable_tools() {
-                Ok(tools) => ToolOutput::json(&result).with_code_mode_value(tools),
+                Ok(tools) => ToolOutput::json(&result).with_structured_result(tools),
                 Err(error) => {
                     ToolOutput::error(format!("failed to encode MCP tool definitions: {error}"))
                 }
@@ -960,7 +960,7 @@ mod tests {
             .await;
         assert!(resources.success);
         assert_eq!(
-            resources.code_mode_value()["resources"],
+            resources.structured_result()["resources"],
             json!([
                 {
                     "server": "fixture",
@@ -987,7 +987,7 @@ mod tests {
             .await;
         assert!(templates.success);
         assert_eq!(
-            templates.code_mode_value()["resourceTemplates"][0],
+            templates.structured_result()["resourceTemplates"][0],
             json!({
                 "server": "fixture",
                 "uriTemplate": "fixture://item/{id}",
@@ -1010,10 +1010,10 @@ mod tests {
             )
             .await;
         assert!(read.success);
-        assert_eq!(read.code_mode_value()["server"], "fixture");
-        assert_eq!(read.code_mode_value()["uri"], "fixture://first");
+        assert_eq!(read.structured_result()["server"], "fixture");
+        assert_eq!(read.structured_result()["uri"], "fixture://first");
         assert_eq!(
-            read.code_mode_value()["contents"][0]["text"],
+            read.structured_result()["contents"][0]["text"],
             "fixture resource body"
         );
     }
@@ -1041,7 +1041,7 @@ mod tests {
             .unwrap();
         assert!(search.success);
         assert_eq!(
-            search.code_mode_value(),
+            search.structured_result(),
             json!([
                 {
                     "type": "namespace",

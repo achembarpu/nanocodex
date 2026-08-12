@@ -344,7 +344,7 @@ mod tests {
         ));
         assert_eq!(
             serde_json::to_string(&response).unwrap(),
-            r#"{"kind":"tool","payload":{"id":1,"execution":{"output":"/app\n","success":true,"code_mode_value":null,"metadata":null,"process_trace":{"exit_code":0,"session_id":null,"original_token_count":null,"output_bytes":5,"wall_time_seconds":0.01}},"error":null}}"#
+            r#"{"kind":"tool","payload":{"id":1,"execution":{"output":"/app\n","success":true,"structured_result":null,"metadata":null,"process_trace":{"exit_code":0,"session_id":null,"original_token_count":null,"output_bytes":5,"wall_time_seconds":0.01}},"error":null}}"#
         );
     }
 

@@ -102,14 +102,14 @@ impl ImageGenerationHandler {
             image_url: image_url.clone(),
             detail: ImageDetail::High,
         }];
-        let mut code_mode_value = json!({ "image_url": image_url });
+        let mut structured_result = json!({ "image_url": image_url });
         if let Some(output_hint) = output_hint {
             output_items.push(ToolOutputContent::InputText {
                 text: output_hint.clone(),
             });
-            code_mode_value["output_hint"] = Value::String(output_hint);
+            structured_result["output_hint"] = Value::String(output_hint);
         }
-        ToolOutput::content(output_items).with_code_mode_value(code_mode_value)
+        ToolOutput::content(output_items).with_structured_result(structured_result)
     }
 
     async fn post_image_request<R: Serialize + ?Sized>(

@@ -3782,7 +3782,7 @@ impl Tool for BrowserTool {
         } else {
             let mut code_mode_result = result.clone();
             code_mode_result.attach_model_images(&model_images);
-            let code_mode_value = match serde_json::to_value(code_mode_result) {
+            let structured_result = match serde_json::to_value(code_mode_result) {
                 Ok(value) => value,
                 Err(error) => {
                     return Ok(ToolOutput::error(format!(
@@ -3799,7 +3799,7 @@ impl Tool for BrowserTool {
                 }
             };
             content.insert(0, ToolOutputContent::InputText { text: encoded });
-            Ok(ToolOutput::content(content).with_code_mode_value(code_mode_value))
+            Ok(ToolOutput::content(content).with_structured_result(structured_result))
         }
     }
 }

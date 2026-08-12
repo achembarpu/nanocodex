@@ -3,7 +3,7 @@
 use std::sync::Arc;
 
 use serde::Deserialize;
-use serde_json::value::RawValue;
+use serde_json::{Value, value::RawValue};
 
 use crate::CostStatus;
 use crate::{AgentEventKind, EstimatedUsdCost, MessagePhase, ToolOutputBody, Usage};
@@ -326,6 +326,8 @@ pub struct ToolResultEvent {
     pub started_after_ns: Option<u64>,
     /// Complete model-visible output.
     pub result: ToolOutputBody,
+    /// Exact machine-readable tool result.
+    pub structured_result: Value,
     /// Optional application or remote-tool metadata.
     pub metadata: Option<Box<RawValue>>,
 }

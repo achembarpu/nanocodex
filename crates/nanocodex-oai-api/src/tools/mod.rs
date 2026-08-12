@@ -24,6 +24,17 @@ pub enum ToolOutputBody {
     Content(Vec<ToolOutputContent>),
 }
 
+impl ToolOutputBody {
+    /// Returns the machine-readable value represented by this output.
+    #[must_use]
+    pub fn structured_result(&self) -> Value {
+        match self {
+            Self::Text(text) => Value::String(text.clone()),
+            Self::Content(content) => serde_json::to_value(content).unwrap_or(Value::Null),
+        }
+    }
+}
+
 /// One model-visible item in a multimodal tool output.
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -59,7 +70,7 @@ pub struct ToolOutput {
     pub success: bool,
     /// Optional validated opaque metadata for events and adapters.
     pub metadata: Option<Box<RawValue>>,
-    code_mode_value: Option<Value>,
+    structured_result: Option<Value>,
     process_trace: Option<ToolProcessTrace>,
 }
 
@@ -70,7 +81,7 @@ pub struct ToolOutput {
 pub struct ToolOutputWire {
     pub output: ToolOutputBody,
     pub success: bool,
-    pub code_mode_value: Option<Box<RawValue>>,
+    pub structured_result: Option<Box<RawValue>>,
     pub metadata: Option<Box<RawValue>>,
     pub process_trace: Option<ToolProcessTraceWire>,
 }
@@ -117,7 +128,7 @@ impl ToolOutput {
             output: ToolOutputBody::Text(output.into()),
             success: true,
             metadata: None,
-            code_mode_value: None,
+            structured_result: None,
             process_trace: None,
         }
     }
@@ -129,7 +140,7 @@ impl ToolOutput {
             output: ToolOutputBody::Text(error.into()),
             success: false,
             metadata: None,
-            code_mode_value: None,
+            structured_result: None,
             process_trace: None,
         }
     }
@@ -137,16 +148,16 @@ impl ToolOutput {
     /// Serializes one successful function result as JSON text.
     #[must_use]
     pub fn json(output: &impl Serialize) -> Self {
-        match serde_json::to_string(output) {
-            Ok(output) => Self::text(output),
+        match serde_json::to_value(output) {
+            Ok(output) => Self::from_json(output, true),
             Err(error) => Self::error(format!("failed to encode tool result: {error}")),
         }
     }
 
     /// Creates a JSON result with an explicit success state.
     ///
-    /// Code Mode receives the typed JSON value while the Responses API
-    /// receives its serialized text representation.
+    /// Structured consumers receive the typed JSON value while the Responses
+    /// API receives its serialized text representation.
     #[must_use]
     pub fn from_json(output: Value, success: bool) -> Self {
         match serde_json::to_string(&output) {
@@ -154,7 +165,7 @@ impl ToolOutput {
                 output: ToolOutputBody::Text(encoded),
                 success,
                 metadata: None,
-                code_mode_value: Some(output),
+                structured_result: Some(output),
                 process_trace: None,
             },
             Err(error) => Self::error(format!("failed to encode tool result: {error}")),
@@ -168,7 +179,7 @@ impl ToolOutput {
             output: ToolOutputBody::Content(output),
             success: true,
             metadata: None,
-            code_mode_value: None,
+            structured_result: None,
             process_trace: None,
         }
     }
@@ -189,28 +200,22 @@ impl ToolOutput {
         self
     }
 
-    /// Returns the value exposed to Code Mode.
-    #[doc(hidden)]
+    /// Returns the exact machine-readable tool result.
+    ///
+    /// An explicit structured result takes precedence. Otherwise plain text
+    /// remains a string and multimodal content becomes an array.
     #[must_use]
-    pub fn code_mode_value(&self) -> Value {
-        if let Some(value) = &self.code_mode_value {
+    pub fn structured_result(&self) -> Value {
+        if let Some(value) = &self.structured_result {
             return value.clone();
         }
-        match &self.output {
-            ToolOutputBody::Text(text) => {
-                serde_json::from_str(text).unwrap_or_else(|_| Value::String(text.clone()))
-            }
-            ToolOutputBody::Content(content) => {
-                serde_json::to_value(content).unwrap_or(Value::Null)
-            }
-        }
+        self.output.structured_result()
     }
 
-    /// Replaces the value exposed to Code Mode.
-    #[doc(hidden)]
+    /// Sets the exact machine-readable result independently of model-visible output.
     #[must_use]
-    pub fn with_code_mode_value(mut self, value: Value) -> Self {
-        self.code_mode_value = Some(value);
+    pub fn with_structured_result(mut self, value: Value) -> Self {
+        self.structured_result = Some(value);
         self
     }
 
@@ -246,14 +251,14 @@ impl ToolOutput {
     ///
     /// # Errors
     ///
-    /// Returns an error if the internal Code Mode JSON cannot be encoded.
+    /// Returns an error if the internal structured result cannot be encoded.
     #[doc(hidden)]
     pub fn into_wire(self) -> Result<ToolOutputWire, serde_json::Error> {
         Ok(ToolOutputWire {
             output: self.output,
             success: self.success,
-            code_mode_value: self
-                .code_mode_value
+            structured_result: self
+                .structured_result
                 .map(|value| to_raw_value(&value))
                 .transpose()?,
             metadata: self.metadata,
@@ -265,15 +270,15 @@ impl ToolOutput {
     ///
     /// # Errors
     ///
-    /// Returns an error if an opaque Code Mode value cannot be decoded.
+    /// Returns an error if an opaque structured result cannot be decoded.
     #[doc(hidden)]
     pub fn from_wire(wire: ToolOutputWire) -> Result<Self, serde_json::Error> {
         Ok(Self {
             output: wire.output,
             success: wire.success,
             metadata: wire.metadata,
-            code_mode_value: wire
-                .code_mode_value
+            structured_result: wire
+                .structured_result
                 .map(|value| serde_json::from_str(value.get()))
                 .transpose()?,
             process_trace: wire.process_trace.map(Into::into),
@@ -475,4 +480,17 @@ pub trait Tool: Send + Sync + 'static {
 
     /// Executes one invocation.
     async fn execute(&self, input: ToolInput, context: ToolContext<'_>) -> ToolResult;
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::ToolOutput;
+
+    #[test]
+    fn structured_result_preserves_text_and_json_types() {
+        assert_eq!(ToolOutput::text("42").structured_result(), json!("42"));
+        assert_eq!(ToolOutput::json(&42).structured_result(), json!(42));
+    }
 }

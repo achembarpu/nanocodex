@@ -2011,7 +2011,7 @@ mod tracing_tests {
     #[test]
     fn vm_rpc_is_timed_parented_and_records_admission_wait() {
         let _test_guard = TRACE_TEST_LOCK.lock().unwrap();
-        let response = r#"{"kind":"tool","payload":{"id":0,"execution":{"output":"ok","success":true,"code_mode_value":null,"metadata":null,"process_trace":null},"error":null}}"#;
+        let response = r#"{"kind":"tool","payload":{"id":0,"execution":{"output":"ok","success":true,"structured_result":null,"metadata":null,"process_trace":null},"error":null}}"#;
         let script = format!("IFS= read -r request\nprintf '%s\\n' '{response}'");
         let mut command = tokio::process::Command::new("/bin/sh");
         command.arg("-c").arg(script);

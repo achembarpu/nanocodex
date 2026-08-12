@@ -35,7 +35,7 @@ impl Tool for ApplyPatchHandler {
         let workspace = self.workspace.clone();
         Ok(
             match tokio::task::spawn_blocking(move || apply(&input, &workspace)).await {
-                Ok(Ok(output)) => ToolOutput::text(output).with_code_mode_value(json!({})),
+                Ok(Ok(output)) => ToolOutput::text(output).with_structured_result(json!({})),
                 Ok(Err(error)) => {
                     ToolOutput::error(format!("apply_patch verification failed: {error}"))
                 }
