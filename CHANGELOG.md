@@ -5,10 +5,54 @@ All notable changes to Nanocodex are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0](https://github.com/gakonst/nanocodex/releases/tag/v0.5.0) - 2026-08-12
+
+### Bug Fixes
+
+- [update] Retry transient asset downloads
+- [tui] Handle terminal input as shell output
+- [events] Preserve structured results universally
+- [events] Retain structured nested tool results
+- [oai] Drop notifications orphaned by compaction
+- [eval] Keep neural waits within one tool call
+- [eval] Allow per-attempt evidence directories
+- [eval] Admit only missing neural workers
+- [eval] Disable browser in neural controller
+- [eval] Scope neural occupancy to its board
+
+### Features
+
+- [eval] Isolate workers in a systemd slice
+
+### Miscellaneous Tasks
+
+- [eval] Remove deprecated Python Harbor stack
+
+### Other
+
+- Merge pull request [#167](https://github.com/gakonst/nanocodex/issues/167) from clabby/cl/structured-events
+- :broom:
+- Merge pull request [#168](https://github.com/gakonst/nanocodex/issues/168) from clabby/cl/fix-orphaned-notifs
+- Merge pull request [#161](https://github.com/gakonst/nanocodex/issues/161) from gakonst/agent/simple-neural-eval-runtime
+- Merge pull request [#162](https://github.com/gakonst/nanocodex/issues/162) from gakonst/agent/remove-python-harbor
+
+### Refactor
+
+- [eval] Combine neural wait and observation
+- [eval] Own canonical task execution
+- [eval] Strip neural controller tools
+- [eval] Name workers as systemd instances
+- [eval] Replace compiled supervisor with neural control
+- [eval] Remove obsolete ledger migrations
+
 ## [0.4.0](https://github.com/gakonst/nanocodex/releases/tag/v0.4.0) - 2026-08-11
 
 ### Bug Fixes
 
+- [http] Initialize rustls at client boundaries
+- [eval] Initialize rustls clients
+- [egress] Install rustls provider
+- [release] Normalize colored dependency trees
 - [ci] Stabilize process timing tests
 - [eval] Extract GPQA archive in process
 - [eval] Select the pinned Arena-Hard smoke case
@@ -227,6 +271,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Miscellaneous Tasks
 
+- Exclude nanocodex-bin tests
+- [release] Refresh 0.4.0 changelogs
 - [release] Prepare 0.4.0
 - [eval] Update Harbor adapter lockfile
 - Update JavaScript package size budget
@@ -238,6 +284,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Other
 
+- Merge pull request [#160](https://github.com/gakonst/nanocodex/issues/160) from gakonst/release/v0.4.0
 - Merge pull request [#127](https://github.com/gakonst/nanocodex/issues/127) from gakonst/feat/simplify-workflow
 - Merge pull request [#157](https://github.com/gakonst/nanocodex/issues/157) from gakonst/feat/eval-adapter-external-v2
 - Merge pull request [#156](https://github.com/gakonst/nanocodex/issues/156) from gakonst/feat/eval-adapter-openai-evals-v2

@@ -18,10 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Miscellaneous Tasks
 
+- [release] Refresh 0.4.0 changelogs
 - [release] Prepare 0.4.0
 
 ### Other
 
+- Merge pull request [#160](https://github.com/gakonst/nanocodex/issues/160) from gakonst/release/v0.4.0
 - Merge pull request [#86](https://github.com/gakonst/nanocodex/issues/86) from gakonst/fix/ring-only-rustls
 - Merge pull request [#80](https://github.com/gakonst/nanocodex/issues/80) from clabby/cl/luna
 
