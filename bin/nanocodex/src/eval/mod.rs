@@ -2,6 +2,7 @@ mod attach;
 mod benchmark;
 mod coordinator;
 mod profile;
+mod systemd;
 
 use clap::{Args, Subcommand};
 use eyre::Result;

@@ -118,8 +118,23 @@ pub struct WorksetStatus {
     pub tasks: TaskCounts,
     /// Stable names of workers that currently own running rows.
     pub workers: Vec<String>,
+    /// Terminal attempt outcomes recorded during the last five minutes.
+    pub recent_attempts: RecentAttemptCounts,
     /// Exact family-level status records.
     pub families: Vec<FamilyStatus>,
+}
+
+/// Recent terminal attempt outcomes used by the occupancy controller.
+#[derive(Clone, Debug, Default, Eq, PartialEq, Serialize)]
+pub struct RecentAttemptCounts {
+    /// Successful task executions.
+    pub passed: i64,
+    /// Completed verifier failures.
+    pub failed: i64,
+    /// Infrastructure failures which returned their task to the queue.
+    pub infrastructure_failed: i64,
+    /// Attempts released because their owner disappeared.
+    pub interrupted: i64,
 }
 
 /// Counts for the only durable task states.
@@ -878,6 +893,25 @@ fn read_status(
     let workers = worker_statement
         .query_map([workset_id], |row| row.get(0))?
         .collect::<Result<Vec<_>, _>>()?;
+    let recent_cutoff_ms = now_ms()?.saturating_sub(5 * 60 * 1_000);
+    let recent_attempts = connection.query_row(
+        "SELECT \
+            COALESCE(SUM(a.state = 'passed'), 0), \
+            COALESCE(SUM(a.state = 'failed'), 0), \
+            COALESCE(SUM(a.state = 'infrastructure_failed'), 0), \
+            COALESCE(SUM(a.state = 'interrupted'), 0) \
+         FROM eval_attempts a \
+         WHERE a.workset_id = ?1 AND a.finished_at_ms >= ?2",
+        params![workset_id, recent_cutoff_ms],
+        |row| {
+            Ok(RecentAttemptCounts {
+                passed: row.get(0)?,
+                failed: row.get(1)?,
+                infrastructure_failed: row.get(2)?,
+                interrupted: row.get(3)?,
+            })
+        },
+    )?;
     let mut statement = connection.prepare(
         "SELECT e.family_key, d.selector, e.harness, e.model, e.thinking, e.web_search, COUNT(*), \
             COALESCE(SUM(e.state = 'unclaimed'), 0), \
@@ -911,6 +945,7 @@ fn read_status(
         digest: digest.to_owned(),
         tasks,
         workers,
+        recent_attempts,
         families,
     })
 }
@@ -1173,7 +1208,9 @@ fn create_schema(connection: &Connection) -> Result<(), WorksetError> {
          CREATE INDEX IF NOT EXISTS eval_attempts_task
             ON eval_attempts(task_id, started_at_ms);
          CREATE INDEX IF NOT EXISTS eval_attempts_worker
-            ON eval_attempts(worker, state);",
+            ON eval_attempts(worker, state);
+         CREATE INDEX IF NOT EXISTS eval_attempts_recent
+            ON eval_attempts(workset_id, finished_at_ms);",
     )?;
     Ok(())
 }
