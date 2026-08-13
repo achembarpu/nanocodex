@@ -5,6 +5,14 @@ All notable changes to Nanocodex are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## Unreleased
+
+### Bug Fixes
+
+- [cli] Fall back to another installed Chromium-family browser when the default
+  Brave installation is absent, or omit browser tools when none is available,
+  while keeping explicit browser selection strict.
+
 ## [0.5.0](https://github.com/gakonst/nanocodex/releases/tag/v0.5.0) - 2026-08-12
 
 ### Bug Fixes
