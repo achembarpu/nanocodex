@@ -687,7 +687,7 @@ checksum = "830c87b05870c80c8d2cfb9245feaff36468893f19fc124c7ff563cabda6386c"
 dependencies = [
  "alloy-json-rpc",
  "auto_impl",
- "base64",
+ "base64 0.22.1",
  "derive_more",
  "futures",
  "futures-utils-wasm",
@@ -1393,7 +1393,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "31b698c5f9a010f6573133b09e0de5408834d0c82f8d7475a89fc1867a71cd90"
 dependencies = [
  "axum-core",
- "base64",
+ "base64 0.22.1",
  "bytes",
  "form_urlencoded",
  "futures-util",
@@ -1450,6 +1450,12 @@ name = "base64"
 version = "0.22.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "72b3254f16251a8381aa12e40e3c4d2f0199f8c6508fbecb9d91f575e0fbb8c6"
+
+[[package]]
+name = "base64"
+version = "0.23.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "ac07cdecf99051d9a5238b80f35af32cdeba5b336e55d957b318b50137e18da5"
 
 [[package]]
 name = "base64-simd"
@@ -1921,7 +1927,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "26ed067eb6c1f660bdb87c05efb964421d2ca262bae0296cdfe38cf0cd949a3e"
 dependencies = [
  "async-tungstenite",
- "base64",
+ "base64 0.22.1",
  "bytes",
  "chromiumoxide_cdp",
  "chromiumoxide_types",
@@ -3950,7 +3956,7 @@ version = "0.1.20"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "96547c2556ec9d12fb1578c4eaf448b04993e7fb79cbaad930a656880a6bdfa0"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "futures-channel",
  "futures-util",
@@ -5081,7 +5087,7 @@ dependencies = [
  "alloy",
  "anyhow",
  "async-trait",
- "base64",
+ "base64 0.22.1",
  "hex",
  "hmac 0.13.0",
  "http",
@@ -5169,7 +5175,7 @@ dependencies = [
  "arboard",
  "arcbox-ext4",
  "async-trait",
- "base64",
+ "base64 0.22.1",
  "chrono",
  "clap",
  "criterion",
@@ -5226,7 +5232,7 @@ name = "nanocodex-browser"
 version = "0.5.0"
 dependencies = [
  "async-trait",
- "base64",
+ "base64 0.22.1",
  "chromiumoxide",
  "chrono",
  "criterion",
@@ -5260,7 +5266,7 @@ version = "0.5.0"
 dependencies = [
  "async-trait",
  "axum",
- "base64",
+ "base64 0.22.1",
  "criterion",
  "futures-util",
  "http",
@@ -5282,7 +5288,7 @@ version = "0.5.0"
 dependencies = [
  "arcbox-ext4",
  "axum",
- "base64",
+ "base64 0.22.1",
  "chrono",
  "filetime",
  "flate2",
@@ -5317,7 +5323,7 @@ dependencies = [
 name = "nanocodex-eval-adapters"
 version = "0.5.0"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "csv",
  "hex",
  "ignore",
@@ -5383,7 +5389,7 @@ name = "nanocodex-oai-api"
 version = "0.5.0"
 dependencies = [
  "async-trait",
- "base64",
+ "base64 0.22.1",
  "criterion",
  "eyre",
  "futures-util",
@@ -5444,7 +5450,7 @@ name = "nanocodex-tools"
 version = "0.5.0"
 dependencies = [
  "async-trait",
- "base64",
+ "base64 0.22.1",
  "bm25",
  "criterion",
  "eyre",
@@ -5488,7 +5494,7 @@ version = "0.5.0"
 dependencies = [
  "arcbox-ext4",
  "async-trait",
- "base64",
+ "base64 0.22.1",
  "criterion",
  "filetime",
  "flate2",
@@ -5870,7 +5876,7 @@ version = "5.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "51e219e79014df21a225b1860a479e2dcd7cbd9130f4defd4bd0e191ea31d67d"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "chrono",
  "getrandom 0.2.17",
  "http",
@@ -6008,7 +6014,7 @@ name = "oci-client"
 version = "0.17.0"
 source = "git+https://github.com/gakonst/rust-oci-client?rev=17c22ce8842e9275ef6bc11fa4eb58101a4abd7f#17c22ce8842e9275ef6bc11fa4eb58101a4abd7f"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "chrono",
  "futures-util",
@@ -6347,7 +6353,7 @@ version = "3.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1d30c53c26bc5b31a98cd02d20f25a7c8567146caf63ed593a9d87b2775291be"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "serde_core",
 ]
 
@@ -6991,7 +6997,7 @@ version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "4d61493e25a18254d630c12b1ed370302b1318fa2348c572b7fc2677b9e27f2c"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "crossbeam-channel",
  "directories",
  "hex",
@@ -7334,7 +7340,7 @@ version = "0.13.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "219c5811de6525e5416c7d5d53bb656d3afdbc6c5af816e0802bcfa42dbdc1c3"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bytes",
  "futures-channel",
  "futures-core",
@@ -7726,11 +7732,13 @@ dependencies = [
 
 [[package]]
 name = "rmcp"
-version = "1.8.0"
+version = "3.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1d1f571c72940a19d9532fe52dbea8bc9912bf1d766c2970bb824056b86f3f59"
+checksum = "fcd2b6dd3b18129368955f32661a7718969e8c152c7d8866434c09cf15a512e0"
 dependencies = [
  "async-trait",
+ "base64 0.23.1",
+ "bytes",
  "chrono",
  "futures",
  "http",
@@ -8388,7 +8396,7 @@ version = "3.21.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "76a5c54c7310e7b8b9577c286d7e399ddd876c3e12b3ed917a8aabc4b96e9e8c"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "bs58",
  "chrono",
  "hex",
@@ -8888,7 +8896,7 @@ version = "0.17.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2e3b8d5ad1dd4c8cd0595440f26521a71dd593cb5873ee8e06b91510b7d97269"
 dependencies = [
- "base64",
+ "base64 0.22.1",
  "crc",
  "lazy_static",
  "md-5",
@@ -9097,7 +9105,7 @@ dependencies = [
  "alloy-sol-types",
  "alloy-transport",
  "async-trait",
- "base64",
+ "base64 0.22.1",
  "dashmap",
  "derive_more",
  "dirs-next",
@@ -9165,7 +9173,7 @@ dependencies = [
  "alloy-primitives",
  "alloy-rlp",
  "alloy-serde",
- "base64",
+ "base64 0.22.1",
  "derive_more",
  "ed25519-consensus",
  "once_cell",
@@ -9732,7 +9740,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d99249a493335eb44c4d7943a8751b22561a82c9903d8eb2d29780b3927880a7"
 dependencies = [
  "async-trait",
- "base64",
+ "base64 0.22.1",
  "futures",
  "log",
  "md-5",

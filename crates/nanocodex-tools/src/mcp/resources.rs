@@ -197,10 +197,7 @@ async fn list_resources(state: &ProviderState, input: ListInput) -> Result<Value
         let pages = collect_paginated("resources/list", |params| {
             let client = Arc::clone(&client);
             async move {
-                let result = client
-                    .list_resources(params)
-                    .await
-                    .map_err(|error| error.to_string())?;
+                let result = client.list_resources(params).await?;
                 Ok((result.resources, result.next_cursor))
             }
         })
@@ -239,10 +236,7 @@ async fn list_resource_templates(state: &ProviderState, input: ListInput) -> Res
         let pages = collect_paginated("resources/templates/list", |params| {
             let client = Arc::clone(&client);
             async move {
-                let result = client
-                    .list_resource_templates(params)
-                    .await
-                    .map_err(|error| error.to_string())?;
+                let result = client.list_resource_templates(params).await?;
                 Ok((result.resource_templates, result.next_cursor))
             }
         })

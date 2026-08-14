@@ -34,8 +34,8 @@ claims.
 
 | Classification | Count |
 | --- | ---: |
-| `port` | 52 |
-| `evaluate` | 45 |
+| `port` | 53 |
+| `evaluate` | 44 |
 | `defer` | 10 |
 | `out-of-scope` | 448 |
 | Total | 555 |
@@ -352,6 +352,30 @@ serializes developer/user text as `input_text`, assistant text as
 `output_text`, and omits the field when empty. Focused wire and policy tests
 cover the public contract; the experimental voice lifecycle forwards the same
 items without introducing app-server protocol types.
+
+### P40 — serialized, recoverable MCP OAuth refresh
+
+[`OAuthRuntime`](../crates/nanocodex-tools/src/mcp/oauth.rs) refreshes
+known-expiring credentials before startup and every MCP operation. The
+transaction in
+[`oauth/refresh.rs`](../crates/nanocodex-tools/src/mcp/oauth/refresh.rs)
+continues after caller cancellation, bounds lock and provider waits, locks
+across the authoritative reread, provider exchange, and durable save, adopts a
+refresh won by another runtime, preserves refresh tokens and scopes omitted by
+the provider, and restores the prior in-memory credential if persistence
+fails. Only a typed refresh-token rejection requires authorization; transient
+failures remain ordinary retryable errors. The CLI store implements
+Codex-compatible per-credential filesystem locks, allowing Codex and
+Nanocodex processes sharing `CODEX_HOME` to serialize rotating-token
+refreshes. The exact `rmcp 3.0.0` upgrade supplies one-shot server-401 refresh
+and retry behavior.
+
+Focused regressions cover omitted response fields, transient and rejected
+refreshes, concurrent runtimes, caller cancellation, persistence rollback, and
+a real HTTP 401 followed by token refresh and one authenticated retry. This
+ports the refresh invariants from Codex `6962a2ecae` and the OAuth-relevant
+portion of `a05bcda3db`; unrelated RMCP protocol and server surfaces remain
+outside this claim.
 
 ## Reviewed baseline behavior
 

@@ -27,7 +27,7 @@ use serde_json::{Value, json};
 use tracing::{Instrument, info_span};
 
 pub use config::{McpServer, McpToolExposure};
-pub use oauth::{McpOAuthCredentials, McpOAuthStore};
+pub use oauth::{McpOAuthCredentials, McpOAuthRefreshGuard, McpOAuthStore};
 
 const MAX_TOOL_SEARCH_SOURCE_DESCRIPTION_BYTES: usize = 4 * 1024;
 
@@ -580,6 +580,14 @@ impl DynamicToolProvider for Mcp {
             mcp.arguments.count = argument_count,
             status = tracing::field::Empty,
         );
+        if let Err(error) = entry.client.refresh_oauth().await {
+            span.record("status", "failed");
+            span.record("otel.status_code", "ERROR");
+            return Some(ToolOutput::error(format!(
+                "MCP tool {}/{} could not refresh OAuth credentials: {error}",
+                entry.server_name, entry.remote_name
+            )));
+        }
         let result = match tokio::time::timeout(
             entry.timeout,
             entry.client.call_tool(params).instrument(span.clone()),
