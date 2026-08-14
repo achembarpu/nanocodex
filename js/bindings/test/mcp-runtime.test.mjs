@@ -6,6 +6,33 @@ import { Methods } from "mppx/tempo";
 
 import { createCodeRuntime } from "../runtime/code-runtime.mjs";
 import { createMcpRuntime } from "../runtime/mcp-runtime.mjs";
+import {
+  createTempoProvider,
+  DEFAULT_MERCATOR_MCP_URL,
+  resolveMcpServers,
+} from "../runtime/tempo-provider.mjs";
+
+test("Mercator is a paid default only for explicit Tempo provider mode", () => {
+  const session = { ws: async () => ({}) };
+  const payment = { methods: [{}] };
+  assert.throws(
+    () => createTempoProvider({ session, payment: { methods: [] } }),
+    /at least one MPPx method/,
+  );
+  const provider = createTempoProvider({ session, payment });
+
+  assert.equal(resolveMcpServers(session, undefined), undefined);
+  assert.equal(resolveMcpServers(undefined, undefined), undefined);
+  assert.equal(resolveMcpServers(provider, false), undefined);
+  assert.equal(provider.session, session);
+
+  const defaults = resolveMcpServers(provider, undefined);
+  assert.equal(defaults.mercator.url, DEFAULT_MERCATOR_MCP_URL);
+  assert.equal(defaults.mercator.payment, payment);
+
+  const custom = { client: { listTools() {}, callTool() {} } };
+  assert.equal(resolveMcpServers(provider, { mercator: custom }).mercator, custom);
+});
 
 test("remote MCP stays deferred behind tool_search and executes through Code Mode", async () => {
   const calls = [];

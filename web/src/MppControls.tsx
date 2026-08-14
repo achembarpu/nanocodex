@@ -12,6 +12,7 @@ import type { PaymentStatus } from "./nanocodex";
 import {
   MPP_ACCESS_KEY_LIMIT,
   MPP_MIN_WALLET_BALANCE,
+  PATH_USD,
   USDC_E,
 } from "./tempo-policy";
 import { tempoAccount } from "./tempoAccount";
@@ -97,16 +98,19 @@ function ConnectedMppControls({ jsonl, payment, onDisconnect, onReady }: {
     retry: 2,
     queryFn: async () => {
       if (!address) throw new Error("Tempo account is disconnected");
-      return Actions.token.getBalance(tempoAccount.getClient(), {
-        account: address,
-        token: USDC_E,
-      });
+      const client = tempoAccount.getClient();
+      const [usdc, pathUsd] = await Promise.all([
+        Actions.token.getBalance(client, { account: address, token: USDC_E }),
+        Actions.token.getBalance(client, { account: address, token: PATH_USD }),
+      ]);
+      return { pathUsd, usdc };
     },
   });
 
   const minimumDeposit = parseUnits(MPP_MIN_WALLET_BALANCE, 6);
   const funded = balances.data !== undefined
-    && balances.data.amount >= minimumDeposit;
+    && (balances.data.usdc.amount >= minimumDeposit
+      || balances.data.pathUsd.amount >= minimumDeposit);
 
   useEffect(() => {
     if (!authorized || !address || !funded) {
@@ -171,11 +175,18 @@ function ConnectedMppControls({ jsonl, payment, onDisconnect, onReady }: {
             label="USDC.e"
             value={balances.data === undefined
               ? "Loading…"
-              : formatTokenBalance(balances.data.amount, "USDC.e")}
+              : formatTokenBalance(balances.data.usdc.amount, "USDC.e")}
+          />
+          <Detail
+            label="pathUSD"
+            value={balances.data === undefined
+              ? "Loading…"
+              : formatTokenBalance(balances.data.pathUsd.amount, "pathUSD")}
           />
           <Detail label="Signer" value={payment?.accessKeyAddress ?? "Managed by Tempo Accounts"} />
           <Detail label="Channel" value={payment?.channelId ?? "Opens on first paid request"} />
-          <Detail label="Cumulative" value={payment ? formatTokenBalance(BigInt(payment.cumulative), "USDC.e") : "0 USDC.e"} />
+          <Detail label="Model paid" value={payment ? formatTokenBalance(BigInt(payment.cumulative), "USDC.e") : "0 USDC.e"} />
+          <Detail label="Mercator paid" value={payment?.mcpCumulative ? formatTokenBalance(BigInt(payment.mcpCumulative), "USD") : "0 USD"} />
         </dl>
       ) : null}
       {jsonl.length ? (

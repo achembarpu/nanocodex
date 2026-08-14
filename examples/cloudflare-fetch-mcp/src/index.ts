@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import asyncVariant from "@jitl/quickjs-wasmfile-release-asyncify";
 import { createJsonChannelStore, tempo } from "mppx/client";
-import { Agent, createQuickJsEvaluator } from "nanocodex/browser";
+import { Agent, createQuickJsEvaluator, createTempoProvider } from "nanocodex/browser";
 import {
   newQuickJSAsyncWASMModuleFromVariant,
   newVariant,
@@ -26,7 +26,6 @@ export interface Env {
   HOSTED_AGENT: DurableObjectNamespace<HostedNanocodex>;
   API_TOKEN: string;
   TEMPO_PRIVATE_KEY: string;
-  MERCATOR_MCP_URL?: string;
 }
 
 const json = (body: unknown, init: ResponseInit = {}) => Response.json(body, {
@@ -102,7 +101,7 @@ export class HostedNanocodex extends DurableObject<Env> {
       },
     });
     const mcpChannels = new Map<string, bigint>();
-    const mcpMethod = tempo.session({
+    const mcpMethod = tempo({
       account,
       autoSwap: { tokenIn: [PATH_USD], slippage: 1 },
       channelStore,
@@ -127,14 +126,10 @@ export class HostedNanocodex extends DurableObject<Env> {
     try {
       agent = await Agent.create({
         module: nanocodexWasm,
-        mpp: modelMpp,
-        mcp: {
-          mercator: {
-            url: this.env.MERCATOR_MCP_URL ?? "https://mercator.tempoxyz.dev/mcp",
-            description: "Discovers and composes paid Tempo services and MPP flows.",
-            payment: { methods: [mcpMethod] },
-          },
-        },
+        mpp: createTempoProvider({
+          session: modelMpp,
+          payment: { methods: [mcpMethod] },
+        }),
         codeEvaluator: await quickJsEvaluator,
         thinking: input.thinking,
         instructions: "You are Nanocodex hosted in a Cloudflare Worker. Remote MCP tools are deferred: use tool_search first, then call discovered mcp__mercator__* tools only from Code Mode.",

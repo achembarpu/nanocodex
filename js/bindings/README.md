@@ -48,7 +48,7 @@ session manager has this shape. Nanocodex defaults the socket to
 `wss://openai.mpp.tempo.xyz/v1/responses` when `mpp` is present.
 
 ```js
-import { Agent } from "nanocodex/node";
+import { Agent, createTempoProvider } from "nanocodex/node";
 import { Expiry } from "accounts";
 import { Provider } from "accounts/cli";
 import { tempo } from "mppx/client";
@@ -86,8 +86,19 @@ const mpp = tempo.session.manager({
   maxDeposit: "0.05",
   topUpAmount: "0.05",
 });
+const mcpMethod = tempo({
+  account,
+  autoSwap: { tokenIn: [pathUsd], slippage: 1 },
+  getClient: () => provider.getClient(),
+  maxDeposit: "0.05",
+  topUpAmount: "0.05",
+});
+const tempoProvider = createTempoProvider({
+  session: mpp,
+  payment: { methods: [mcpMethod] },
+});
 
-const agent = await Agent.create({ mpp, thinking: "none", fastMode: true, tools });
+const agent = await Agent.create({ mpp: tempoProvider, thinking: "none", fastMode: true, tools });
 const events = agent.events.watch();
 const unwatch = events.onEvent((event) => {
   process.stdout.write(`${JSON.stringify(event)}\n`);
@@ -123,7 +134,11 @@ The application still owns its wallet, deposit policy, persisted payment
 channel store, and final settlement. Keep the manager alive to reuse its channel
 across agents, and supply mppx `channelStore` for reuse after a process or page
 restart. Nanocodex never closes a caller-owned MPP session. `apiKey` and `mpp`
-are mutually exclusive.
+are mutually exclusive. `createTempoProvider({ session, payment })` explicitly
+selects Tempo provider mode. In that mode Nanocodex automatically adds its
+built-in Mercator MCP and wraps it with the supplied MPPx payment methods.
+Passing a generic `MppSession`, an OpenAI key, or ChatGPT host auth does not
+initialize Mercator. Pass `mcp: false` to opt out explicitly.
 
 Remote Streamable HTTP MCP servers are configured directly on the agent. The
 JavaScript binding uses the official MCP SDK transport, keeps remote tools
@@ -133,11 +148,12 @@ functions are callable only below Code Mode. Search results return loadable
 namespaces for the next model request; remote tools never become a flat set of
 top-level model-visible calls.
 
-MPP-enabled MCP uses MPPx's in-place `McpClient.wrap`. A Tempo session method
-can share the model manager's signer, client, and persistent channel store:
+MPP-enabled MCP uses MPPx's in-place `McpClient.wrap`. The public `tempo()`
+method supports both Tempo charge and session challenges, so paid services
+composed behind Mercator use the same signer and spending policy as the model:
 
 ```js
-const mcpMethod = tempo.session({
+const mcpMethod = tempo({
   account,
   channelStore,
   getClient: () => provider.getClient(),
@@ -146,16 +162,15 @@ const mcpMethod = tempo.session({
 });
 
 const agent = await Agent.create({
-  mpp,
-  mcp: {
-    mercator: {
-      url: "https://mercator.tempoxyz.dev/mcp",
-      description: "Discovers and composes paid Tempo services and MPP flows.",
-      payment: { methods: [mcpMethod] },
-    },
-  },
+  mpp: createTempoProvider({
+    session: mpp,
+    payment: { methods: [mcpMethod] },
+  }),
 });
 ```
+
+Explicit `mcp` entries are merged over the Tempo defaults, so an application
+can replace `mercator` or add other servers without rebuilding the provider.
 
 Each server also accepts `headers`, `fetch`, allow/deny tool lists, a timeout,
 or an already initialized MCP SDK-compatible `client`. Nanocodex closes clients
@@ -171,7 +186,7 @@ keeps deferred MCP plus Code Mode functional in Cloudflare Workers:
 
 ```js
 import asyncVariant from "@jitl/quickjs-wasmfile-release-asyncify";
-import { Agent, createQuickJsEvaluator } from "nanocodex/browser";
+import { Agent, createQuickJsEvaluator, createTempoProvider } from "nanocodex/browser";
 import { newQuickJSAsyncWASMModuleFromVariant } from "quickjs-emscripten-core";
 
 const quickJs = await newQuickJSAsyncWASMModuleFromVariant(asyncVariant);

@@ -1,10 +1,12 @@
 import { Provider, Storage } from "accounts";
 import { createJsonChannelStore, tempo } from "mppx/client";
+import { createTempoProvider } from "nanocodex/browser";
 import type { Address } from "viem";
 
 import {
   MPP_ACCESS_KEY_LIMIT,
   MPP_RESPONSES_WEBSOCKET_URL,
+  USDC_E,
 } from "./tempo-policy";
 
 export async function createTempoMppSession(rootAddress: Address) {
@@ -47,12 +49,30 @@ export async function createTempoMppSession(rootAddress: Address) {
   });
   const mpp = tempo.session.manager({
     ...accessKeyParameters,
+    autoSwap: { tokenIn: [USDC_E], slippage: 1 },
     bootstrap: true,
     channelStore,
     maxDeposit: MPP_ACCESS_KEY_LIMIT,
   });
+  const mcpChannels = new Map<string, bigint>();
+  const mcpMethod = tempo({
+    ...accessKeyParameters,
+    autoSwap: { tokenIn: [USDC_E], slippage: 1 },
+    channelStore,
+    maxDeposit: MPP_ACCESS_KEY_LIMIT,
+    onChannelUpdate(entry) {
+      mcpChannels.set(entry.channelId, entry.cumulativeAmount);
+    },
+  });
   return {
     mpp,
+    provider: createTempoProvider({
+      session: mpp,
+      payment: { methods: [mcpMethod] },
+    }),
+    mcpCumulative() {
+      return [...mcpChannels.values()].reduce((total, amount) => total + amount, 0n);
+    },
     rootAddress,
     accessKeyAddress() {
       return accessKeyAddress;

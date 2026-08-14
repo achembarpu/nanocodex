@@ -13,7 +13,7 @@ import type {
 
 export type Agent = DefaultAgent;
 type ToolExposureOptions =
-  | { mcp?: never; toolMode?: "code" | "direct" | undefined }
+  | { mcp?: false | undefined; toolMode?: "code" | "direct" | undefined }
   | { mcp: McpServers; toolMode?: "code" | undefined };
 
 /** Creates a browser- or Worker-hosted Rust/WASM Agent. */

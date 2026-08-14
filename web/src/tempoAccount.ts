@@ -13,8 +13,8 @@ const accessKeyLimits = MPP_PAYMENT_TOKENS.map((token) => ({
   token,
 }));
 
-// The live OpenAI MPP challenge is denominated in USDC.e. The key can approve
-// that token and operate its one payment-channel escrow, and nothing else.
+// The key can pay USDC.e or pathUSD Charge and Session challenges. Its only
+// additional authority is the exact DEX swap needed to bridge those currencies.
 const accessKeyScopes = MPP_ACCESS_KEY_SCOPES satisfies readonly {
   address: Address;
   recipients?: readonly Address[];

@@ -25,9 +25,6 @@
       "new_sqlite_classes": ["HostedNanocodex"]
     }
   ],
-  "vars": {
-    "MERCATOR_MCP_URL": "https://mercator.tempoxyz.dev/mcp"
-  },
   "observability": {
     "enabled": true
   }

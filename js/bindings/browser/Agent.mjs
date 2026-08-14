@@ -44,6 +44,7 @@ export function create(options = {}) {
     throw new TypeError("hostAuth is mutually exclusive with apiKey and mpp");
   }
   const events = createEventChannel();
+  const tempoMcp = mpp?.[Symbol.for("nanocodex.tempo.mcp")];
   const host = createBrowserHost({
     WebSocketImpl,
     createWebSocket,
@@ -52,7 +53,9 @@ export function create(options = {}) {
     onEvent: events.emit,
     tools,
     toolMode,
-    mcp,
+    mcp: mcp === false
+      ? undefined
+      : tempoMcp ? { ...tempoMcp, ...mcp } : mcp,
     codeEvaluator,
   });
   activateHost(host);

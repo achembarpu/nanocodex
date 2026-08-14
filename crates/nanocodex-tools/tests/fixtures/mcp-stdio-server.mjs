@@ -56,6 +56,30 @@ lines.on("line", (line) => {
       result: { tools },
     });
   } else if (request.method === "tools/call") {
+    const paid = request.params?._meta?.["org.paymentauth/credential"] === "fixture-paid";
+    if (process.env.NANOCODEX_MCP_FIXTURE_PAYMENT && !paid) {
+      send({
+        jsonrpc: "2.0",
+        id: request.id,
+        error: {
+          code: -32042,
+          message: "Payment Required",
+          data: {
+            httpStatus: 402,
+            challenges: [{ id: "fixture-payment", method: "tempo", intent: "charge" }],
+          },
+        },
+      });
+      return;
+    }
+    if (paid && process.env.NANOCODEX_MCP_FIXTURE_PAYMENT_REJECT) {
+      send({
+        jsonrpc: "2.0",
+        id: request.id,
+        error: { code: -32043, message: "Payment Rejected" },
+      });
+      return;
+    }
     const message = request.params.arguments?.message;
     const failed = message === "__fail__";
     const delayMs = request.params.arguments?.delay_ms ?? 0;

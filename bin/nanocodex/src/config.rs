@@ -345,7 +345,7 @@ impl AgentArgs {
             .map_or_else(Tools::builder, ConfiguredVm::tools_builder)
             .web_search(web_search)
             .image_generation(self.image_generation);
-        let mcp = self.mcp.build(&codex_home)?;
+        let mcp = self.mcp.build(&codex_home, mpp_adapter.as_ref())?;
         let mcp_handle = mcp.as_ref().map(|mcp| mcp.handle.clone());
         if let Some(ConfiguredMcp { provider, .. }) = mcp {
             tools = tools.provider(provider);

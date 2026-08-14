@@ -7,7 +7,7 @@ import {
 import { createBrowserTools } from "./browserTools";
 import type { WebTuiCommand } from "./nanocodex";
 import { createPaymentSessionOwner } from "./paymentSessionOwner";
-import { MPP_RESPONSES_WEBSOCKET_URL } from "./tempo-policy";
+import { MPP_RESPONSES_WEBSOCKET_URL } from "./tempo-constants";
 
 type IncomingMessage = WebTuiCommand;
 type PaymentSession = Awaited<ReturnType<(typeof import("./tempo"))["createTempoMppSession"]>>;
@@ -75,7 +75,7 @@ async function createAgent(
         const agent = await Agent.create({
           ...common,
           fastMode: true,
-          mpp: paymentSession.mpp,
+          mpp: paymentSession.provider,
           websocketUrl: MPP_RESPONSES_WEBSOCKET_URL,
         });
         return {
@@ -87,6 +87,7 @@ async function createAgent(
               return paymentSession.mpp.channelId;
             },
             cumulative: () => paymentSession.mpp.cumulative.toString(),
+            mcpCumulative: () => paymentSession.mcpCumulative().toString(),
           },
         };
       },

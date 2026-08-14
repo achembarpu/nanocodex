@@ -25,8 +25,9 @@ the MPP integration from same-origin IndexedDB and opens
 `wss://openai.mpp.tempo.xyz/v1/responses`. The normal OpenAI bundle and runtime
 do not initialize a wallet, access key, or payment session.
 
-The same delegated signer and persistent channel store also back the remote
-Mercator MCP client at `https://mercator.tempoxyz.dev/mcp`. Nanocodex exposes
+Marking the model manager as a Nanocodex Tempo provider automatically enables
+the built-in Mercator MCP at `https://mercator.tempoxyz.dev/mcp`, backed by the
+same delegated signer and persistent channel store. Nanocodex exposes
 only provider-native `tool_search` to the model initially. Mercator's tools stay
 deferred under `mcp__mercator__*`, become discoverable through BM25 search, and
 are invoked from Code Mode. MPPx wraps the MCP SDK client and automatically

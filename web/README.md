@@ -113,11 +113,15 @@ open the standard embedded Tempo Wallet dialog for its account and passkey flow,
 authorize a bounded one-day access key in that same Accounts connection
 ceremony. The
 module Worker hydrates that delegated signer from Accounts' IndexedDB storage
-and gives it to an mppx session manager with a durable channel store. The same
-MPP channel is reused across turns and reloads and is not closed by Nanocodex.
-Wallet, payer, delegated signer, channel, cumulative authorization, and the
-agent event JSONL are shown only while the MPP route is selected. The normal
-OpenAI route does not initialize or expose any payment state.
+and gives it to an mppx session manager with a durable channel store. Marking
+that manager as Nanocodex's Tempo provider also enables the package's built-in
+Mercator MCP. MPPx pays its charge or session challenges with the same signer,
+limits, and durable store; its tools remain deferred behind `tool_search` and
+Code Mode. The model channel is reused across turns and reloads and is not
+closed by Nanocodex. Wallet, payer, delegated signer, channel, model cumulative,
+Mercator cumulative, and agent event JSONL are shown only while the MPP route
+is selected. The normal OpenAI and ChatGPT routes do not initialize Mercator or
+expose any payment state.
 
 Development uses `vite-plugin-mkcert` because the Accounts SDK intentionally
 falls back to a popup on plain HTTP. Cross-origin passkeys inside the hosted

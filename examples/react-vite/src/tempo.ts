@@ -1,5 +1,6 @@
 import { Provider, Storage } from "accounts";
 import { createJsonChannelStore, tempo } from "mppx/client";
+import { createTempoProvider } from "nanocodex/browser";
 import { parseUnits } from "viem";
 import type { Account as TempoAccount } from "viem/tempo";
 import { PATH_USD, USDC_E } from "./tempo-policy";
@@ -60,7 +61,7 @@ export async function createTempoMppSession() {
     topUpAmount: "0.05",
   };
   const mcpChannels = new Map<string, bigint>();
-  const mcpMethod = tempo.session({
+  const mcpMethod = tempo({
     ...sessionParameters,
     getClient: () => provider.getClient(),
     onChannelUpdate(entry) {
@@ -74,7 +75,10 @@ export async function createTempoMppSession() {
   });
   return {
     mpp,
-    mcpPayment: { methods: [mcpMethod] },
+    provider: createTempoProvider({
+      session: mpp,
+      payment: { methods: [mcpMethod] },
+    }),
     mcpCumulative: () => [...mcpChannels.values()].reduce((total, value) => total + value, 0n),
     rootAddress: root.address,
     accessKeyAddress: account.accessKeyAddress,

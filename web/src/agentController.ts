@@ -26,6 +26,7 @@ export type AgentControllerPayment = {
   accessKeyAddress(): string | undefined;
   channelId?: string;
   cumulative(): string;
+  mcpCumulative?(): string;
 };
 
 export type AgentControllerStart = {
@@ -383,6 +384,9 @@ export function createAgentController({
       accessKeyAddress: payment.accessKeyAddress(),
       channelId: payment.channelId,
       cumulative: payment.cumulative(),
+      ...(payment.mcpCumulative
+        ? { mcpCumulative: payment.mcpCumulative() }
+        : {}),
     };
     const encoded = JSON.stringify(status);
     if (encoded === lastPaymentStatus) return;

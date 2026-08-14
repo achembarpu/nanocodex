@@ -7,15 +7,16 @@ use rmcp::{
         CallToolRequestParams, CallToolResult, ListResourceTemplatesResult, ListResourcesResult,
         PaginatedRequestParams, ReadResourceRequestParams, ReadResourceResult, Tool,
     },
-    service::{RoleClient, RunningService},
+    service::{RoleClient, RunningService, ServiceError},
     transport::{
         StreamableHttpClientTransport, streamable_http_client::StreamableHttpClientTransportConfig,
     },
 };
+use serde_json::Value;
 use tokio::io::AsyncReadExt;
 use tracing::{Instrument, Span, info_span};
 
-use super::config::{McpServer, McpTransport, SecretSource};
+use super::config::{McpPaymentProvider, McpServer, McpTransport, SecretSource};
 use super::oauth::{McpOAuthStore, OAuthMetadataCache, OAuthRuntime, transport_from_credentials};
 use super::pagination::collect_paginated;
 use super::stdio::McpStdioTransport;
@@ -28,7 +29,10 @@ pub(crate) type Client = Arc<ClientInner>;
 pub(crate) struct ClientInner {
     service: Arc<RunningService<RoleClient, ()>>,
     oauth: Option<Arc<OAuthRuntime>>,
+    payment: Option<Arc<dyn McpPaymentProvider>>,
 }
+
+const MCP_CREDENTIAL_META_KEY: &str = "org.paymentauth/credential";
 
 impl ClientInner {
     pub(crate) async fn call_tool(
@@ -36,17 +40,48 @@ impl ClientInner {
         params: CallToolRequestParams,
     ) -> Result<CallToolResult, String> {
         let parent = Span::current();
-        let result = self
-            .service
-            .call_tool(params)
-            .await
-            .map_err(|error| error.to_string());
+        let result = self.call_tool_with_payment(params).await;
         if let Some(oauth) = &self.oauth
             && let Err(error) = oauth.persist_if_changed(&parent).await
         {
             tracing::warn!(%error, "failed to persist refreshed MCP OAuth credentials");
         }
         result
+    }
+
+    async fn call_tool_with_payment(
+        &self,
+        params: CallToolRequestParams,
+    ) -> Result<CallToolResult, String> {
+        let first = self.service.call_tool(params.clone()).await;
+        let (error, payment) = match (&first, &self.payment) {
+            (Err(ServiceError::McpError(error)), Some(payment)) => (error, payment),
+            _ => return first.map_err(|error| error.to_string()),
+        };
+        let error = serde_json::to_value(error)
+            .map_err(|error| format!("failed to encode MCP payment challenge: {error}"))?;
+        let Some(credential) = payment.credential(&error).await? else {
+            return first.map_err(|error| error.to_string());
+        };
+
+        let mut paid = params;
+        paid.meta
+            .get_or_insert_with(rmcp::model::RequestMetaObject::new)
+            .0
+            .0
+            .insert(MCP_CREDENTIAL_META_KEY.to_owned(), credential.clone());
+        let mut pending = PendingMcpPayment::new(Arc::clone(payment), credential);
+        match self.service.call_tool(paid).await {
+            Ok(result) => {
+                pending.commit().await?;
+                Ok(result)
+            }
+            Err(error @ ServiceError::McpError(_)) => {
+                pending.rollback().await?;
+                Err(error.to_string())
+            }
+            Err(error) => Err(error.to_string()),
+        }
     }
 
     pub(crate) async fn list_resources(
@@ -496,6 +531,7 @@ async fn finish_startup(
     let client = Arc::new(ClientInner {
         service: Arc::new(client),
         oauth,
+        payment: server.payment.clone(),
     });
     let span = info_span!(
         target: "nanocodex_tools",
@@ -526,6 +562,42 @@ async fn finish_startup(
     }
     let tools = tools?;
     Ok(ConnectedServer { client, tools })
+}
+
+struct PendingMcpPayment {
+    provider: Arc<dyn McpPaymentProvider>,
+    credential: Value,
+    active: bool,
+}
+
+impl PendingMcpPayment {
+    fn new(provider: Arc<dyn McpPaymentProvider>, credential: Value) -> Self {
+        Self {
+            provider,
+            credential,
+            active: true,
+        }
+    }
+
+    async fn commit(&mut self) -> Result<(), String> {
+        self.provider.commit(&self.credential).await?;
+        self.active = false;
+        Ok(())
+    }
+
+    async fn rollback(&mut self) -> Result<(), String> {
+        self.provider.rollback(&self.credential).await?;
+        self.active = false;
+        Ok(())
+    }
+}
+
+impl Drop for PendingMcpPayment {
+    fn drop(&mut self) {
+        if self.active {
+            self.provider.abandon(&self.credential);
+        }
+    }
 }
 
 fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {

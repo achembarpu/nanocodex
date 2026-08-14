@@ -14,6 +14,7 @@ export type PaymentStatus = {
   accessKeyAddress?: string;
   channelId?: string;
   cumulative: string;
+  mcpCumulative?: string;
 };
 export type WebTuiMessage = TuiMessage
   | { type: "mppPayment"; payment: PaymentStatus }

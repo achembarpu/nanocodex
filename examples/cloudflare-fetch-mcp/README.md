@@ -3,7 +3,8 @@
 This is the small hosted counterpart to the browser demo. A client sends one
 ordinary authenticated `fetch` request. A Cloudflare Durable Object runs the
 real Rust/WASM Nanocodex loop server-side, pays for the model over Tempo MPP,
-discovers Mercator tools through provider-native `tool_search`, and executes
+uses Tempo provider mode to enable the package's built-in Mercator MCP,
+discovers its tools through provider-native `tool_search`, and executes
 deferred `mcp__mercator__*` calls inside QuickJS-backed Code Mode.
 
 QuickJS is required because Cloudflare Workers reject request-time `eval` and

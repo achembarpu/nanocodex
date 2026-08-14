@@ -40,9 +40,12 @@ export function create(options = {}) {
   if (mpp !== undefined && apiKey !== undefined) {
     throw new TypeError("apiKey and mpp are mutually exclusive");
   }
+  const tempoMcp = mpp?.[Symbol.for("nanocodex.tempo.mcp")];
   const host = createNodeHost({
     mpp,
-    mcpServers: mcp,
+    mcpServers: mcp === false
+      ? undefined
+      : tempoMcp ? { ...tempoMcp, ...mcp } : mcp,
     onEvent: events.emit,
     tools,
     toolMode,
