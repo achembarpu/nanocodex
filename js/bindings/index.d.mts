@@ -1,14 +1,23 @@
 export * as Actions from "./actions/index.mjs";
+export { createQuickJsEvaluator } from "./runtime/quickjs-evaluator.mjs";
+export type { AsyncQuickJsModule, QuickJsEvaluatorOptions } from "./runtime/quickjs-evaluator.mjs";
 export type {
   Agent,
   AgentActions,
   AgentEvent,
   AgentOptions,
   CostStatus,
+  CodeEvaluator,
+  CodeEvaluatorEnvironment,
   DefaultAgent,
   EventWatcher,
   EstimatedUsdCost,
   ForkOptions,
+  McpClient,
+  McpPayment,
+  McpServer,
+  McpServers,
+  McpTool,
   PromptInput,
   PromptItem,
   ReasoningMode,

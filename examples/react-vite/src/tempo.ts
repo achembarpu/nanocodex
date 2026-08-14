@@ -52,17 +52,30 @@ export async function createTempoMppSession() {
       await channelStorage.removeItem(key);
     },
   });
-  const mpp = tempo.session.manager({
+  const sessionParameters = {
     account,
-    autoSwap: { tokenIn: [PATH_USD], slippage: 1 },
-    bootstrap: true,
+    autoSwap: { tokenIn: [PATH_USD as `0x${string}`], slippage: 1 },
     channelStore,
-    client: provider.getClient(),
     maxDeposit: "0.05",
     topUpAmount: "0.05",
+  };
+  const mcpChannels = new Map<string, bigint>();
+  const mcpMethod = tempo.session({
+    ...sessionParameters,
+    getClient: () => provider.getClient(),
+    onChannelUpdate(entry) {
+      mcpChannels.set(entry.channelId, entry.cumulativeAmount);
+    },
+  });
+  const mpp = tempo.session.manager({
+    ...sessionParameters,
+    bootstrap: true,
+    client: provider.getClient(),
   });
   return {
     mpp,
+    mcpPayment: { methods: [mcpMethod] },
+    mcpCumulative: () => [...mcpChannels.values()].reduce((total, value) => total + value, 0n),
     rootAddress: root.address,
     accessKeyAddress: account.accessKeyAddress,
   };

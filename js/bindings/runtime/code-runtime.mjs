@@ -1,5 +1,6 @@
 export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
   const stores = new Map();
+  const providers = [];
   let nextCallId = 1;
   const definitions = [];
   const configuredTools = [];
@@ -20,13 +21,43 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
       }, `tool ${name} parameters`),
     }));
   }
-  Object.freeze(configuredTools);
   Object.freeze(definitions);
-  const encodedDefinitions = JSON.stringify(definitions);
   const toolByName = new Map(configuredTools.map((tool) => [tool.name, tool]));
 
+  function currentDefinitions() {
+    return [
+      ...definitions,
+      ...providers.flatMap((provider) => provider.definitions()),
+    ];
+  }
+
+  function currentCodeDefinitions() {
+    return currentDefinitions().filter((definition) => definition.type !== "tool_search");
+  }
+
+  function currentTools() {
+    const tools = [...configuredTools];
+    for (const provider of providers) {
+      for (const definition of provider.definitions()) {
+        if (definition.type === "tool_search") continue;
+        const tool = provider.resolve(definition.name);
+        if (tool) tools.push(tool);
+      }
+    }
+    return tools;
+  }
+
+  function resolveTool(name) {
+    const configured = toolByName.get(name);
+    if (configured) return configured;
+    for (const provider of providers) {
+      const tool = provider.resolve(name);
+      if (tool) return tool;
+    }
+  }
+
   async function executeTool(name, encodedInput, sessionId = "default", callId = "tool") {
-    const tool = toolByName.get(name);
+    const tool = resolveTool(name);
     if (!tool) return encodeToolOutput(`unknown application tool: ${name}`, false, null);
     let input;
     try {
@@ -49,7 +80,9 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
     stores.set(sessionId, stored);
     const nestedCalls = [];
     const tools = Object.create(null);
-    for (const { handler, name } of configuredTools) {
+    const availableTools = currentTools();
+    const availableDefinitions = currentCodeDefinitions();
+    for (const { handler, name } of availableTools) {
       tools[name] = async (input) => {
         const callId = `${parentCallId}/code-${nextCallId++}`;
         const toolStartedAt = performance.now();
@@ -70,7 +103,7 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
             started_after_ns: startedAfterNs,
             duration_ns: elapsedNs(toolStartedAt),
           });
-          return result;
+          return isToolResult(result) ? result.output : result;
         } catch (error) {
           const message = errorMessage(error);
           nestedCalls.push({
@@ -88,7 +121,6 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
       };
     }
     Object.freeze(tools);
-    const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
     const EXIT = Symbol("exit");
 
     function text(value) {
@@ -127,32 +159,19 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
     }
 
     try {
-      const script = new AsyncFunction(
-        "tools",
-        "ALL_TOOLS",
-        "text",
-        "image",
-        "generatedImage",
-        "store",
-        "load",
-        "exit",
-        "require",
-        "console",
-        source,
-      );
       try {
-        await script(
+        await (extras.evaluate || evaluateNative)(source, {
           tools,
-          definitions,
+          toolDefinitions: availableDefinitions,
           text,
           image,
           generatedImage,
           store,
           load,
           exit,
-          extras.require,
-          extras.console || console,
-        );
+          require: extras.require,
+          console: extras.console || console,
+        });
       } catch (error) {
         if (error !== EXIT) throw error;
       }
@@ -171,13 +190,48 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
   }
 
   return Object.freeze({
+    addProvider(provider) {
+      if (!provider || typeof provider.definitions !== "function" || typeof provider.resolve !== "function") {
+        throw new TypeError("a Code Mode tool provider requires definitions() and resolve(name)");
+      }
+      providers.push(provider);
+    },
     executeCode,
     executeTool,
-    toolDefinitions: () => encodedDefinitions,
+    toolDefinitions: () => JSON.stringify(currentDefinitions()),
     reset() {
       stores.clear();
     },
   });
+}
+
+async function evaluateNative(source, environment) {
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  const script = new AsyncFunction(
+    "tools",
+    "ALL_TOOLS",
+    "text",
+    "image",
+    "generatedImage",
+    "store",
+    "load",
+    "exit",
+    "require",
+    "console",
+    source,
+  );
+  await script(
+    environment.tools,
+    environment.toolDefinitions,
+    environment.text,
+    environment.image,
+    environment.generatedImage,
+    environment.store,
+    environment.load,
+    environment.exit,
+    environment.require,
+    environment.console,
+  );
 }
 
 function encodeToolOutput(output, success, structuredResult) {
@@ -191,6 +245,7 @@ function encodeToolOutput(output, success, structuredResult) {
 }
 
 function outputBody(value) {
+  if (isToolResult(value)) return outputBody(value.output);
   if (Array.isArray(value) && value.every((item) => item?.type === "input_text" || item?.type === "input_image")) {
     return clone(value);
   }
@@ -221,7 +276,18 @@ function jsonSnapshot(value, label) {
 }
 
 function structuredResult(value, label) {
+  if (isToolResult(value)) return jsonSnapshot(value.structuredResult, label);
   return value === undefined ? null : jsonSnapshot(value, label);
+}
+
+const TOOL_RESULT = Symbol("nanocodex.toolResult");
+
+export function toolResult(output, structuredResult = output) {
+  return Object.freeze({ [TOOL_RESULT]: true, output, structuredResult });
+}
+
+function isToolResult(value) {
+  return Boolean(value?.[TOOL_RESULT]);
 }
 
 function deepFreeze(value) {

@@ -125,6 +125,66 @@ across agents, and supply mppx `channelStore` for reuse after a process or page
 restart. Nanocodex never closes a caller-owned MPP session. `apiKey` and `mpp`
 are mutually exclusive.
 
+Remote Streamable HTTP MCP servers are configured directly on the agent. The
+JavaScript binding uses the official MCP SDK transport, keeps remote tools
+deferred, and mirrors native Nanocodex exposure: the initial Responses request
+contains provider-native `tool_search`, while canonical `mcp__<server>__<tool>`
+functions are callable only below Code Mode. Search results return loadable
+namespaces for the next model request; remote tools never become a flat set of
+top-level model-visible calls.
+
+MPP-enabled MCP uses MPPx's in-place `McpClient.wrap`. A Tempo session method
+can share the model manager's signer, client, and persistent channel store:
+
+```js
+const mcpMethod = tempo.session({
+  account,
+  channelStore,
+  getClient: () => provider.getClient(),
+  maxDeposit: "0.05",
+  topUpAmount: "0.05",
+});
+
+const agent = await Agent.create({
+  mpp,
+  mcp: {
+    mercator: {
+      url: "https://mercator.tempoxyz.dev/mcp",
+      description: "Discovers and composes paid Tempo services and MPP flows.",
+      payment: { methods: [mcpMethod] },
+    },
+  },
+});
+```
+
+Each server also accepts `headers`, `fetch`, allow/deny tool lists, a timeout,
+or an already initialized MCP SDK-compatible `client`. Nanocodex closes clients
+it creates and leaves caller-owned clients open. Connection failures are
+reported by `tool_search` so one unavailable server does not prevent the agent
+from starting.
+
+Runtimes whose content-security policy rejects `eval`/`new Function` can supply
+a Code Mode evaluator. `createQuickJsEvaluator` accepts an asyncified
+`quickjs-emscripten-core` module, serializes Asyncify execution, and exposes only
+the standard Nanocodex Code Mode globals across the interpreter boundary. This
+keeps deferred MCP plus Code Mode functional in Cloudflare Workers:
+
+```js
+import asyncVariant from "@jitl/quickjs-wasmfile-release-asyncify";
+import { Agent, createQuickJsEvaluator } from "nanocodex/browser";
+import { newQuickJSAsyncWASMModuleFromVariant } from "quickjs-emscripten-core";
+
+const quickJs = await newQuickJSAsyncWASMModuleFromVariant(asyncVariant);
+const agent = await Agent.create({
+  // module, mpp, and mcp omitted here
+  codeEvaluator: createQuickJsEvaluator(quickJs),
+});
+```
+
+Cloudflare requires the QuickJS `.wasm` file to be statically imported and
+passed with `newVariant(..., { wasmModule })`; the complete deployment is in
+`examples/cloudflare-fetch-mcp`.
+
 Completed results can be persisted and resumed by a fresh Node or browser
 agent:
 

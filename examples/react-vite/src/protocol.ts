@@ -32,6 +32,6 @@ export type AgentWorkerMessage =
       type: "result";
       id: number;
       message: string;
-      payment?: { channelId?: string; cumulative: string };
+      payment?: { channelId?: string; cumulative: string; mcpCumulative?: string };
     }
   | { type: "error"; id?: number; message: string };

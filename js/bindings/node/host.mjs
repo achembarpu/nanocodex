@@ -5,6 +5,7 @@ import WebSocket from "ws";
 import packageMetadata from "../package.json" with { type: "json" };
 
 import { createCodeRuntime } from "../runtime/code-runtime.mjs";
+import { createMcpRuntime } from "../runtime/mcp-runtime.mjs";
 
 const RESPONSES_WEBSOCKETS_BETA = "responses_websockets=2026-02-06";
 const USER_AGENT = `nanocodex-wasm/${packageMetadata.version}`;
@@ -17,11 +18,19 @@ export function createNodeHost(options = {}) {
   const code = createCodeRuntime(options.tools, {
     require: createRequire(resolve(options.workspace ?? process.cwd(), ".nanocodex-code-mode.cjs")),
     console: new Console({ stdout: process.stderr, stderr: process.stderr }),
+    evaluate: options.codeEvaluator,
   });
   const toolMode = options.toolMode ?? "code";
   if (toolMode !== "code" && toolMode !== "direct") {
     throw new TypeError("toolMode must be code or direct");
   }
+  if (options.mcpServers && toolMode !== "code") {
+    throw new TypeError("remote MCP requires Code Mode");
+  }
+  const mcp = options.mcpServers
+    ? createMcpRuntime(options.mcpServers, { clientName: "nanocodex-node" })
+    : undefined;
+  if (mcp) mcp.then((provider) => code.addProvider(provider), () => {});
   const onEvent = options.onEvent || (() => {});
   const connectTimeoutMs = options.connectTimeoutMs ?? 30_000;
   const sendTimeoutMs = options.sendTimeoutMs ?? 30_000;
@@ -29,6 +38,8 @@ export function createNodeHost(options = {}) {
   const maxQueuedBytes = options.maxQueuedBytes ?? DEFAULT_MAX_QUEUED_BYTES;
   const maxFrameBytes = options.maxFrameBytes ?? DEFAULT_MAX_FRAME_BYTES;
   let nextHandle = 1;
+  let references = 0;
+  let disposal;
 
   function connect(endpoint, apiKey, sessionId, metadata = {}) {
     if (options.mpp) return connectMpp(endpoint);
@@ -234,7 +245,26 @@ export function createNodeHost(options = {}) {
     connection.queuedBytes += bytes;
   }
 
+  async function dispose() {
+    if (disposal) return disposal;
+    disposal = (async () => {
+      for (const handle of [...connections.keys()]) close(handle);
+      code.reset();
+      await mcp?.then((provider) => provider.close(), () => {});
+    })();
+    return disposal;
+  }
+
   return Object.freeze({
+    ready: async () => { await mcp; },
+    retain() {
+      if (disposal) throw new Error("Nanocodex host is already disposed");
+      references += 1;
+    },
+    release() {
+      if (references > 0) references -= 1;
+      return references === 0 ? dispose() : Promise.resolve();
+    },
     connect,
     send,
     next,
@@ -246,6 +276,7 @@ export function createNodeHost(options = {}) {
     toolDefinitions: code.toolDefinitions,
     emitEvent: onEvent,
     reset: code.reset,
+    dispose,
   });
 }
 

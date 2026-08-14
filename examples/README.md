@@ -18,6 +18,9 @@ All language consumers live at this repository boundary:
 - Cloudflare Workers: `cloudflare-workers/` runs the Rust/WASM harness inside a
   SQLite-backed Durable Object, with a Sandbox container and R2-backed
   workspace, and proves hibernation-safe session recovery.
+- Cloudflare fetch + MCP: `cloudflare-fetch-mcp/` exposes one authenticated HTTP
+  fetch endpoint backed by Rust/WASM, Tempo MPP, deferred Mercator MCP tools,
+  and QuickJS Code Mode inside a serialized Durable Object wallet owner.
 - Vercel Workflows: `vercel-workflows/` runs Nanocodex as a durable Workflow
   actor with a persistent Vercel Sandbox, replayable state, and synchronized
   native WebSocket clients.

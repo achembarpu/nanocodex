@@ -48,10 +48,15 @@
     "test:typecheck": "tsc -p test/tsconfig.json"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "minisearch": "7.2.0",
+    "mppx": "0.8.17",
     "ws": "^8.18.3"
   },
   "devDependencies": {
+    "@jitl/quickjs-wasmfile-release-asyncify": "0.32.0",
     "pkg-pr-new": "0.0.79",
+    "quickjs-emscripten-core": "0.32.0",
     "typescript": "5.9.3"
   },
   "engines": {

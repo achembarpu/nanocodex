@@ -1,3 +1,5 @@
+import type { CodeEvaluator, McpServers, MppSession, ToolMap } from "../types.mjs";
+
 export type BrowserTool = {
   description: string;
   parameters: Record<string, unknown>;
@@ -45,7 +47,12 @@ export function createBrowserHost(options?: {
     request: BrowserWebSocketRequest,
   ) => WebSocket | BrowserWebSocketConnection | Promise<WebSocket | BrowserWebSocketConnection>;
   onEvent?: (eventJson: string) => void;
-  tools?: BrowserToolMap;
+  tools?: ToolMap;
+  mpp?: MppSession;
+  /** Remote MCP servers exposed through direct tool_search plus deferred Code Mode tools. */
+  mcp?: McpServers;
+  codeEvaluator?: CodeEvaluator;
+  toolMode?: "code" | "direct";
   maxQueuedMessages?: number;
   maxQueuedBytes?: number;
   maxBufferedSendBytes?: number;

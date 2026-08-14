@@ -63,11 +63,18 @@ assert(
   assets.includes(tempoImport[1]),
   `the lazy Worker MPP chunk ${tempoImport[1]} is missing`,
 );
+const mcpImport = workerSource.match(/import\(`\.\/(mcp-runtime-[^`]+\.js)`\)/);
+assert(mcpImport, "the Agent Worker must retain an explicit lazy MCP path");
+assert(
+  assets.includes(mcpImport[1]),
+  `the lazy Worker MCP chunk ${mcpImport[1]} is missing`,
+);
 
 console.log(JSON.stringify({
   defaultEntryBytes: entryBytes,
   defaultStaticChunks: [...staticEntries],
   mppEntry: mpp.file,
+  workerMcpEntry: mcpImport[1],
   workerMppEntry: tempoImport[1],
 }));
 

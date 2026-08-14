@@ -22,6 +22,7 @@ const EXEC_DESCRIPTION: &str = r"Run JavaScript in the embedded host.
 - `generatedImage(result)` appends an image-generation result for the model.
 - `store(key, value)` and `load(key)` retain serializable values across calls.
 - JavaScript runs inside the Node or browser host supplied by the embedding application.";
+const DEFERRED_TOOLS_DESCRIPTION: &str = r"Some deferred nested tools are omitted from this description. They remain available on the global `tools` object and are listed in `ALL_TOOLS`. Use `tool_search` to discover remote tools before calling them.";
 
 /// Tool selection backed by an embedding [`CodeModeHost`].
 #[derive(Clone, Default)]
@@ -180,7 +181,23 @@ impl HostedToolRuntime {
             }
             return (definitions, Vec::new());
         }
-        let code_mode_tool_names = definitions
+        let (direct_definitions, code_mode_definitions): (Vec<_>, Vec<_>) = definitions
+            .into_iter()
+            .partition(|definition| matches!(definition, ToolDefinition::ToolSearch { .. }));
+        if let Ok(mut names) = self.direct_tool_names.write() {
+            names.clear();
+            names.extend(
+                direct_definitions
+                    .iter()
+                    .map(|definition| definition.name().to_owned()),
+            );
+        } else {
+            tracing::warn!(
+                target: "nanocodex_tools",
+                "hosted direct-tool registry lock was poisoned"
+            );
+        }
+        let code_mode_tool_names = code_mode_definitions
             .iter()
             .map(|definition| {
                 (
@@ -190,20 +207,37 @@ impl HostedToolRuntime {
             })
             .collect();
         let mut description = EXEC_DESCRIPTION.to_owned();
-        for definition in definitions {
+        let mut has_deferred_tools = false;
+        for definition in code_mode_definitions {
+            if matches!(
+                definition,
+                ToolDefinition::Function {
+                    defer_loading: Some(true),
+                    ..
+                } | ToolDefinition::Custom {
+                    defer_loading: Some(true),
+                    ..
+                }
+            ) {
+                has_deferred_tools = true;
+                continue;
+            }
             description.push_str("\n\n- `tools.");
             description.push_str(definition.name());
             description.push_str("`: ");
             description.push_str(definition.description().trim());
         }
-        (
-            vec![ToolDefinition::custom(
-                "exec",
-                description,
-                CustomToolFormat::grammar("lark", EXEC_GRAMMAR),
-            )],
-            code_mode_tool_names,
-        )
+        if has_deferred_tools {
+            description.push_str("\n\n");
+            description.push_str(DEFERRED_TOOLS_DESCRIPTION);
+        }
+        let mut model_definitions = vec![ToolDefinition::custom(
+            "exec",
+            description,
+            CustomToolFormat::grammar("lark", EXEC_GRAMMAR),
+        )];
+        model_definitions.extend(direct_definitions);
+        (model_definitions, code_mode_tool_names)
     }
 
     /// Returns `false`; hosted definitions execute inside one Code Mode cell.
@@ -214,22 +248,17 @@ impl HostedToolRuntime {
         false
     }
 
-    /// Returns `false`; hosted tools are callable only inside Code Mode.
+    /// Returns whether a direct hosted definition (currently `tool_search`) is callable.
     #[must_use]
     pub fn contains(&self, name: &str) -> bool {
-        self.host.as_ref().is_some_and(|host| {
-            host.tool_mode() == HostedToolMode::Direct
-                && self
-                    .direct_tool_names
-                    .read()
-                    .is_ok_and(|names| names.contains(name))
+        self.host.as_ref().is_some_and(|_| {
+            self.direct_tool_names
+                .read()
+                .is_ok_and(|names| names.contains(name))
         })
     }
 
-    /// Returns a model-visible failure for unsupported direct hosted dispatch.
-    ///
-    /// Hosted tools remain nested below the embedding application's Code Mode
-    /// host rather than becoming direct Responses API tools.
+    /// Dispatches a direct hosted definition or returns a model-visible failure.
     #[allow(
         clippy::unused_async,
         reason = "matches the native tool-runtime contract"
@@ -243,10 +272,8 @@ impl HostedToolRuntime {
         let Some(host) = &self.host else {
             return ToolOutput::error("no hosted tool adapter is configured");
         };
-        if host.tool_mode() != HostedToolMode::Direct {
-            return ToolOutput::error(format!(
-                "direct tool `{name}` is unavailable in a Code Mode hosted runtime"
-            ));
+        if !self.contains(name) {
+            return ToolOutput::error(format!("direct hosted tool `{name}` is unavailable"));
         }
         match host.execute_tool(name, input, context).await {
             Ok(output) => output,
@@ -378,11 +405,13 @@ mod tests {
 
     use super::{HostedToolRuntime, HostedTools};
     use crate::{
-        ToolContext, ToolDefinition,
+        ToolContext, ToolDefinition, ToolInput,
         hosted::{CodeModeExecution, CodeModeHost, CodeModeHostError, HostFuture, NestedToolCall},
     };
 
     struct EchoHost;
+
+    struct DeferredHost;
 
     impl CodeModeHost for EchoHost {
         fn tool_definitions(
@@ -416,6 +445,44 @@ mod tests {
         }
     }
 
+    impl CodeModeHost for DeferredHost {
+        fn tool_definitions(
+            &self,
+            _session_id: &str,
+        ) -> Result<Vec<ToolDefinition>, CodeModeHostError> {
+            Ok(vec![
+                ToolDefinition::tool_search(
+                    "client",
+                    "Search deferred MCP tools.",
+                    json!({"type": "object"}),
+                ),
+                ToolDefinition::function(
+                    "mcp__mercator__search",
+                    "Search Mercator.",
+                    json!({"type": "object"}),
+                )
+                .with_deferred_loading(),
+            ])
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _source: &'a str,
+            _context: ToolContext<'a>,
+        ) -> HostFuture<'a, Result<CodeModeExecution, CodeModeHostError>> {
+            Box::pin(async { unreachable!("this test dispatches tool_search directly") })
+        }
+
+        fn execute_tool<'a>(
+            &'a self,
+            name: &'a str,
+            _input: ToolInput,
+            _context: ToolContext<'a>,
+        ) -> HostFuture<'a, Result<crate::ToolOutput, CodeModeHostError>> {
+            Box::pin(async move { Ok(crate::ToolOutput::from_json(json!({"name": name}), true)) })
+        }
+    }
+
     #[test]
     fn model_description_orders_host_definitions() {
         let tools = HostedTools::new(EchoHost).for_session("session-1");
@@ -424,6 +491,34 @@ mod tests {
             HostedToolRuntime::new_with_tools(".", None, None, &tools).model_specs("session-1");
         let description = specs[0].description();
         assert!(description.find("tools.alpha").unwrap() < description.find("tools.zeta").unwrap());
+    }
+
+    #[tokio::test]
+    async fn code_mode_keeps_tool_search_direct_and_mcp_tools_deferred() {
+        let tools = HostedTools::new(DeferredHost);
+        let runtime = HostedToolRuntime::new_with_tools(".", None, None, &tools);
+        let specs = runtime.model_specs("session-1");
+        let names = specs.iter().map(ToolDefinition::name).collect::<Vec<_>>();
+        assert_eq!(names, ["exec", "tool_search"]);
+        assert!(
+            !specs[0]
+                .description()
+                .contains("tools.mcp__mercator__search")
+        );
+        assert!(specs[0].description().contains("deferred nested tools"));
+        assert!(runtime.contains("tool_search"));
+        assert!(!runtime.contains("mcp__mercator__search"));
+
+        let output = runtime
+            .execute_tool(
+                "tool_search",
+                ToolInput::Function(
+                    serde_json::value::to_raw_value(&json!({"query": "mercator"})).unwrap(),
+                ),
+                ToolContext::new("gpt-5", "session-1", "call-1", &[], 1_000),
+            )
+            .await;
+        assert!(output.success);
     }
 
     #[tokio::test]

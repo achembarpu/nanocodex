@@ -1,7 +1,10 @@
 export { Actions } from "../index.mjs";
+export { createQuickJsEvaluator } from "../runtime/quickjs-evaluator.mjs";
 export type {
   AgentEvent,
   CostStatus,
+  CodeEvaluator,
+  CodeEvaluatorEnvironment,
   EstimatedUsdCost,
   PromptInput,
   PromptItem,

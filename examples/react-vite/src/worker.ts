@@ -61,6 +61,13 @@ async function createAgent(data: StartMessage) {
         const agent = await Agent.create({
           ...common,
           mpp: paymentSession.mpp,
+          mcp: {
+            mercator: {
+              url: "https://mercator.tempoxyz.dev/mcp",
+              description: "Discovers and composes paid Tempo services and MPP flows.",
+              payment: paymentSession.mcpPayment,
+            },
+          },
         });
         const payment: ExamplePayment = {
           rootAddress: paymentSession.rootAddress,
@@ -69,6 +76,7 @@ async function createAgent(data: StartMessage) {
             return paymentSession.mpp.channelId;
           },
           cumulative: () => paymentSession.mpp.cumulative.toString(),
+          mcpCumulative: () => paymentSession.mcpCumulative().toString(),
         };
         return { agent, payment };
       },
