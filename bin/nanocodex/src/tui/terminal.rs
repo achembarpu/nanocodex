@@ -17,6 +17,7 @@ use crossterm::{
         PopKeyboardEnhancementFlags, PushKeyboardEnhancementFlags,
     },
     execute, queue,
+    style::force_color_output,
     terminal::{
         BeginSynchronizedUpdate, EndSynchronizedUpdate, EnterAlternateScreen, LeaveAlternateScreen,
         disable_raw_mode, enable_raw_mode,
@@ -223,6 +224,7 @@ impl TerminalSession {
                 "interactive mode requires terminal stdin and stdout; use `nanocodex run` for JSONL",
             ));
         }
+        enable_tui_colors();
         install_panic_hook();
         let mut restore = RestoreOnDrop { armed: true };
         enable_raw_mode()?;
@@ -300,6 +302,13 @@ impl TerminalSession {
         self.active = true;
         Ok(())
     }
+}
+
+fn enable_tui_colors() {
+    // Color carries semantic state in the interactive UI. `NO_COLOR` is also normalized for
+    // child tools and can leak back through a long-lived tmux server, so it must not disable the
+    // TUI's own Crossterm styles.
+    force_color_output(true);
 }
 
 pub(super) fn seed_from_cached_frame<B: Backend>(
@@ -399,12 +408,22 @@ fn install_panic_hook() {
 mod tests {
     use std::{cell::Cell, io::Write, rc::Rc};
 
+    use crossterm::style::{Color, SetForegroundColor, force_color_output};
     use ratatui::{Terminal, backend::TestBackend, text::Text, widgets::Paragraph};
 
     use super::{
-        ByteCountingWriter, MeasuredBackend, begin_synchronized_update, end_synchronized_update,
-        restore_commands, seed_from_cached_frame,
+        ByteCountingWriter, MeasuredBackend, begin_synchronized_update, enable_tui_colors,
+        end_synchronized_update, restore_commands, seed_from_cached_frame,
     };
+
+    #[test]
+    fn interactive_tui_forces_semantic_colors() {
+        force_color_output(false);
+
+        enable_tui_colors();
+
+        assert!(!SetForegroundColor(Color::Cyan).to_string().is_empty());
+    }
 
     #[test]
     fn synchronized_update_uses_csi_2026() {
