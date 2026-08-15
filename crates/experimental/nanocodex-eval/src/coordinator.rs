@@ -10,7 +10,7 @@ use std::{
 
 use crate::{
     CoordinateClaim, Evaluation, EvaluationClaim, EvaluationSelector, EvaluationTreatment,
-    api::EvalApi,
+    api::EvalApi, cluster::HostSampler,
 };
 use axum::{
     Json, Router,
@@ -121,6 +121,7 @@ struct CoordinatorState {
     evaluation: Evaluation,
     eval_api: EvalApi,
     active: Arc<Mutex<HashMap<String, ActiveClaim>>>,
+    host: Arc<std::sync::Mutex<HostSampler>>,
     ledger_writes: Arc<Mutex<()>>,
 }
 
@@ -183,6 +184,7 @@ enum FinishRequest {
 #[derive(Deserialize)]
 struct WorkerExitRequest {
     worker: WorkerName,
+    error: String,
 }
 
 #[derive(Deserialize)]
@@ -227,6 +229,7 @@ impl CoordinatorServer {
                 evaluation,
                 eval_api,
                 active: Arc::new(Mutex::new(HashMap::new())),
+                host: Arc::new(std::sync::Mutex::new(HostSampler::new())),
                 ledger_writes: Arc::new(Mutex::new(())),
             },
         }
@@ -255,6 +258,7 @@ impl CoordinatorServer {
         let app = Router::new()
             .route("/v1/status", get(status))
             .route("/v1/evals", get(eval_overview))
+            .route("/v1/evals/cluster", get(eval_cluster))
             .route("/v1/evals/worksets/{digest}", get(eval_workset))
             .route(
                 "/v1/evals/worksets/{digest}/analytics",
@@ -599,6 +603,20 @@ async fn eval_overview(State(state): State<CoordinatorState>) -> Result<Response
     Ok(Json(overview).into_response())
 }
 
+async fn eval_cluster(State(state): State<CoordinatorState>) -> Result<Response, ApiError> {
+    let claimed_tasks = state.active.lock().await.len();
+    let host = state.host;
+    let snapshot = tokio::task::spawn_blocking(move || {
+        host.lock()
+            .map_err(|_| "evaluation host sampler lock was poisoned".to_owned())
+            .map(|mut host| host.snapshot(claimed_tasks))
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(ApiError::internal)?;
+    Ok(Json(snapshot).into_response())
+}
+
 async fn eval_workset(
     State(state): State<CoordinatorState>,
     AxumPath(digest): AxumPath<String>,
@@ -761,6 +779,25 @@ async fn worker_exited(
     if worker.trim().is_empty() {
         return Err(ApiError::bad_request("worker name must not be empty"));
     }
+    if request.error.trim().is_empty() {
+        return Err(ApiError::bad_request("worker exit error must not be empty"));
+    }
+    let error = request.error;
+    let observed_worker = worker.clone();
+    let host = state.host.clone();
+    let worker_is_live = tokio::task::spawn_blocking(move || {
+        host.lock()
+            .map_err(|_| "evaluation host sampler lock was poisoned".to_owned())
+            .map(|mut host| host.worker_is_live(&observed_worker))
+    })
+    .await
+    .map_err(ApiError::internal)?
+    .map_err(ApiError::internal)?;
+    if worker_is_live {
+        return Err(ApiError::conflict(format!(
+            "worker {worker} still has a live eval process"
+        )));
+    }
     let _write = state.ledger_writes.lock().await;
     let exited = {
         let mut active = state.active.lock().await;
@@ -776,7 +813,7 @@ async fn worker_exited(
     };
     tokio::task::spawn_blocking(move || {
         for active in exited {
-            active.claim.release().map_err(ApiError::ledger)?;
+            active.claim.release(&error).map_err(ApiError::ledger)?;
         }
         Ok::<_, ApiError>(())
     })
@@ -1114,6 +1151,13 @@ impl ApiError {
     fn bad_gateway(message: impl ToString) -> Self {
         Self {
             status: StatusCode::BAD_GATEWAY,
+            message: message.to_string(),
+        }
+    }
+
+    fn conflict(message: impl ToString) -> Self {
+        Self {
+            status: StatusCode::CONFLICT,
             message: message.to_string(),
         }
     }
@@ -1536,6 +1580,11 @@ thinking = ["high"]
             .worker_exited("duplicate process observation")
             .await
             .unwrap();
+        let status = client.status().await.unwrap();
+        assert_eq!(
+            status["recent_attempts"]["failures"][0]["error"],
+            "worker process exited with signal 9"
+        );
 
         let replacement_client = client.clone().worker("replacement-worker");
         let RemoteClaim::Run {

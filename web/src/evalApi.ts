@@ -24,6 +24,36 @@ export type EvalOverview = {
   worksets: EvalWorkset[];
 };
 
+export type EvalClusterCapacity = {
+  totalBytes: number;
+  availableBytes: number;
+};
+
+export type EvalClusterNode = {
+  id: string;
+  observedAtMs: number;
+  uptimeSeconds: number;
+  claimedTasks: number;
+  workerProcesses: number;
+  vmProcesses: number;
+  cpuCores: number;
+  cpuUsagePercent: number;
+  loadAverage: { one: number; five: number; fifteen: number };
+  memory: EvalClusterCapacity;
+  swap: EvalClusterCapacity;
+  pressure: {
+    cpuSomeAvg10: number | null;
+    memorySomeAvg10: number | null;
+    memoryFullAvg10: number | null;
+  };
+};
+
+export type EvalCluster = {
+  schemaVersion: number;
+  observedAtMs: number;
+  nodes: EvalClusterNode[];
+};
+
 export type EvalCoordinate = {
   id: string;
   repetition: number;
@@ -188,6 +218,10 @@ async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
 export class EvalApiClient {
   overview(signal?: AbortSignal) {
     return getJson<EvalOverview>("/api/evals", signal);
+  }
+
+  cluster(signal?: AbortSignal) {
+    return getJson<EvalCluster>("/api/evals/cluster", signal);
   }
 
   workset(id: string, signal?: AbortSignal) {

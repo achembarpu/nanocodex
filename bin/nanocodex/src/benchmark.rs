@@ -5,6 +5,7 @@ pub(crate) fn prompt(
     config: &Path,
     state_dir: Option<&Path>,
     coordinator: Option<&str>,
+    executable: Option<&Path>,
 ) -> String {
     let selected = profile.unwrap_or("the manifest default profile");
     let profile_argument =
@@ -31,13 +32,17 @@ pub(crate) fn prompt(
         },
         |coordinator| {
             format!(
-                "For every name in status.workers whose nanocodex-eval-worker@<name>.service is not live, POST {{\"worker\":<name>,\"error\":\"worker process exited\"}} to {}/v1/workers/exited before admitting replacements. The operation is idempotent.",
+                "status.workers is a JSON array of worker-name strings: extract it exactly with `jq -r '.workers[]'` and never access a field on an element. For every name whose nanocodex-eval-worker@<name>.service is not live, read that unit's bounded warning journal, then POST {{\"worker\":<name>,\"error\":<concise process or OOM classification>}} to {}/v1/workers/exited before admitting replacements. A journal containing `oom-kill` must be reported as literal `OOM`; otherwise retain the exact main-process exit line and never use a vague `see journal` classification. The operation is idempotent. Never perform the inverse: a live unit absent from status.workers is not an exited worker and must never be posted to this endpoint.",
                 coordinator.trim_end_matches('/')
             )
         },
     );
+    let executable = executable.map_or_else(
+        || "nanocodex".to_owned(),
+        |path| shell_quote(&path.to_string_lossy()),
+    );
     let worker_command = format!(
-        "nanocodex eval run{profile_argument} --config {config_argument}{state_argument}{coordinator_argument} --worker <name>"
+        "{executable} eval run{profile_argument} --config {config_argument}{state_argument}{coordinator_argument} --worker <name>"
     );
 
     format!(
@@ -45,10 +50,10 @@ pub(crate) fn prompt(
 
 Repeat this short control cycle until the board is terminal:
 
-1. Observe, in one fresh compact Code Mode call, `{status_command}`; live or activating `nanocodex-eval-worker@*.service` user units with only their `Id`, `ActiveState`, `SubState`, and `ExecStart`; the `nanocodex-eval.slice` aggregate `MemoryCurrent`, `MemoryPeak`, `CPUUsageNSec`, and `TasksCurrent`; and the relevant lines from `/proc/meminfo`, `/proc/loadavg`, and `/proc/pressure/memory`. A unit belongs to this board only when its `ExecStart` has the `{worker_command}` shape for this selected profile; unrelated eval units affect host pressure but never this board's live count or reconciliation. Do not list inactive units, request unselected systemd properties, read journals or tracing during normal control, or keep a JavaScript loop, PID marker, worker pool, or other controller state. Only when a worker vanished unexpectedly may you read at most its last 20 warning-or-higher journal lines.
+1. Observe, in one fresh compact Code Mode call, `{status_command}`; live or activating `nanocodex-eval-worker@*.service` user units with only their `Id`, `ActiveState`, `SubState`, and `ExecStart`; the `nanocodex-eval.slice` aggregate `MemoryCurrent`, `MemoryPeak`, `CPUUsageNSec`, and `TasksCurrent`; and the relevant lines from `/proc/meminfo`, `/proc/loadavg`, `/proc/pressure/memory`, and `df -B1 / "${{TMPDIR:-/tmp}}"`. Compact status only with `jq '{{tasks, recent_attempts, workers}}'`: the field is exactly `.recent_attempts`, never `.recent`. Status includes terminal attempt outcomes and the newest eight retryable failures from the last five minutes; reason from their exact errors and compare terminal attempts across cycles for throughput. For an interrupted attempt, use its retained worker name to read at most that unit's last 20 warning-or-higher journal lines and distinguish OOM from another process exit. A unit belongs to this board only when its `ExecStart` has the `{worker_command}` shape for this selected profile; unrelated eval units affect host pressure but never this board's live count or reconciliation. Do not list inactive units, request unselected systemd properties, read other journals or tracing during normal control, or keep a JavaScript loop, PID marker, worker pool, or other controller state.
 2. Reconcile before admission. {reconciliation}
-3. Reason from the current and recent observations and choose an absolute desired live-worker count that maximizes terminal completions per hour. Starting units count as live. With backlog and no measured overload or throughput stall, grow aggressively in a batch; unused healthy capacity is a controller failure. OOMs and infrastructure retries are acceptable calibration signals. High utilization alone is not overload.
-4. Let `live` be this board's live or activating unit count. Launch `min(unclaimed, max(0, desired - live))` workers immediately with unique lowercase systemd-safe names using `systemd-run --user --quiet --collect --service-type=exec --unit nanocodex-eval-worker@<name>.service --slice nanocodex-eval.slice --property OOMScoreAdjust=500 --property OOMPolicy=kill --working-directory "$PWD" --setenv "PATH=$PATH" {worker_command}`. The systemd unit, never this controller or a tool session, owns the worker lifetime. The kernel may kill a worker under genuine exhaustion; systemd must then clear that worker's entire cgroup so the next cycle can reconcile it.
+3. Reason from the current and recent observations and choose an absolute desired live-worker count that maximizes terminal completions per hour. Starting units count as live. Enter recovery mode whenever memory `full avg10` is nonzero: admit nothing and let existing workers drain until it clears. A recent OOM remains a saturation calibration signal after pressure clears: resume below the failed occupancy with only a small probe, and do not grow again until the probe produces terminal throughput without renewed pressure. A non-resource infrastructure retry such as download, transport, provider, or harness failure does not itself require recovery; replace it promptly when host pressure is clear. Outside recovery mode, with backlog and no measured overload or throughput stall, grow aggressively in a batch; unused healthy capacity is a controller failure. Repeatedly replacing OOMs before pressure clears is a controller failure. High CPU or load alone is not overload.
+4. Let `live` be this board's live or activating unit count. Launch `min(unclaimed, max(0, desired - live))` workers immediately. Before the batch, read current Unix nanoseconds once; name its workers `w-<unix-nanoseconds>-<ordinal>` so a controller restart can never collide with a loaded prior unit. For each worker set `worker_tmp="${{TMPDIR:-/tmp}}/workers/<name>"`, create it, then use `systemd-run --user --quiet --collect --service-type=exec --unit nanocodex-eval-worker@<name>.service --slice nanocodex-eval.slice --property OOMScoreAdjust=500 --property OOMPolicy=kill --property "ExecStopPost=/usr/bin/rm -rf -- $worker_tmp" --working-directory "$PWD" --setenv "PATH=$PATH" --setenv "TMPDIR=$worker_tmp" {worker_command}`. Remove `worker_tmp` yourself only if the launch command fails. The worker's systemd unit owns both its process cgroup and scratch directory, including cleanup after kernel OOM; the controller and tool session own neither.
 5. With live workers and no elevated pressure or vanished worker, combine waiting and observation in one Code Mode call: start it with `// @exec: {{"yield_time_ms": 30000, "max_output_tokens": 2000}}`, await a 25-second `setTimeout` promise, and then collect the next compact observation. Never create a sleep subprocess, yielded background cell, or separate wait call. Let existing workers drain under overload; never stop, signal, or shed one manually.
 
 Controller failure or restart must leave every worker untouched. On restart, derive the complete situation again from SQLite and systemd. Do not use subagents to own workers and do not wait for worker processes in Code Mode. Finish only when status has zero unclaimed and running rows and no live unit belonging to this board remains."#,

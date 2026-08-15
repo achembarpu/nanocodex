@@ -1,8 +1,11 @@
+import { useLocation } from "react-router";
 import { LiveEvals, useEvalOverview } from "./LiveEvals";
 
 export function Evals() {
   const overview = useEvalOverview();
-  if (overview.data) return <LiveEvals overview={overview.data} />;
+  const location = useLocation();
+  const detailRoute = location.pathname.startsWith("/evals/worksets/");
+  if (overview.data || detailRoute) return <LiveEvals overview={overview.data} />;
   return (
     <main className="live-evals-boot page-grid">
       <p className="eyebrow">Nanocodex · durable evaluations</p>

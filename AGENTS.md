@@ -19,70 +19,85 @@
 
 ## Workflow
 
-- Follow the active work in `PLAN.md` in order. Build vertical library slices
+- Follow the active work in `PLAN.md` in order. Build complete vertical slices
   with a real consumer; do not accumulate speculative abstractions.
 - Prefer deletion and direct ownership over adapters that merely move data.
-  Cleanup should materially reduce production or planning surface.
+  Cleanup must materially reduce production or planning surface.
 - Use existing project tooling and patterns. Add a dependency only for a
   concrete need in the current slice.
-- Add focused deterministic tests for public contracts and demonstrated
-  regressions, not for coverage. Compile public examples as part of validation.
-- Do not add or run CLI tests that assert benchmark-orchestrator prompt wording
-  or scheduling policy. Every change to benchmark orchestration or saturation
-  policy must be built, deployed, and exercised against the real coordinator
-  and benchmark host before handoff. Record the observed worker-count ramp,
-  task counts, memory, load, and pressure; never claim success from prompt
-  inspection or synthetic tests alone. During that validation, do not manually
-  kill or shed eval workers: the OS owns resource-exhaustion deaths, and the
-  benchmark controller must observe, classify, and adapt without an operator.
-  Keep automated tests for executable protocol, parsing, and durable-state
-  contracts.
-- Run benchmarks on `ubuntu@dev-georgios`. The sole canonical benchmark ledger
-  is `/mnt/nanocodex-evals/evals/state.sqlite3`; use
-  `--state-dir /mnt/nanocodex-evals/evals` for every benchmark add, run, resume,
-  migration, coordinator/API, and UI operation. Add new profiles and attempts
-  to that SQLite ledger instead of creating per-run or smoke state databases.
-  Use another benchmark host or state directory only when the user explicitly
-  requests an isolated experiment.
-- When the user asks to deploy or replace a component on `dev-georgios`, fetch
-  current `origin/master` unless the user names another ref, build that exact
-  source, and replace every running instance of only the requested component.
-  Do not preserve a stale instance of that component, and do not stop adjacent
-  components. In particular, neural-orchestrator work replaces only the
-  controller/UI process and leaves eval workers and the coordinator running;
-  coordinator work replaces only the coordinator; worker/runtime work touches
-  workers only when the user puts them in scope.
-- Treat live benchmark waves and observation windows as telemetry, not blocking
-  work. While a wave runs, continue investigating known failures, inspecting
-  logs and state, editing, compiling, and preparing the next deployment. Wait
-  only when a concurrent mutation would race the specific measurement or
-  invalidate evidence needed for the next decision; never idle merely to watch
-  a wave finish.
-- Use `just run` for a live native smoke. Use focused Harbor trials while
-  iterating and the full configured `just eval` only for milestone/release
-  gates. Never modify benchmark tasks or verifiers to make Nanocodex pass.
-- Inspect the exact JSONL, Harbor result, trajectory, and verifier output for an
-  eval claim. Separate cold image/bootstrap time from warm agent work.
-- Preserve unrelated work. Never commit `.env`, caches, retained jobs, build
-  output, or another user's untracked files.
+- Keep commits focused, chronological, and independently understandable. Never
+  mix unrelated cleanup into an iteration commit.
+- Preserve unrelated user work. Never commit `.env`, caches, retained jobs,
+  build output, or another user's untracked files.
 
-## Experimental eval iteration
+## Frontier eval iteration
 
-- Treat eval ledgers, coordinator state, retained benchmark artifacts, and
-  their schemas as experimental development state, not a compatibility
-  boundary. Evolve the canonical format directly as the benchmark system
-  changes.
-- Do not add backward-compatible readers, dual-write paths, legacy schema
-  support, or compatibility shims unless the user explicitly asks for them.
-  Use a direct one-way migration for the active corpus when its data remains
-  useful. Migrate the canonical `dev-georgios` ledger in place; never recreate,
-  reseed, replace, or redirect it unless the user explicitly requests that
-  destructive state change.
-- Do not pause routine eval iteration or deployment to make backup copies of
-  experimental benchmark state. Make a backup only when the user explicitly
-  requests one.
-- Once active state has moved to the new format, remove obsolete format and
-  migration code instead of retaining permanent compatibility machinery.
+- Optimize for wall-clock time from an idea to evidence from the real benchmark
+  host. Local compilation ceremony, compatibility work, speculative tests, and
+  preserving replaceable experimental processes are subordinate to that loop.
+- Run benchmarks on `ubuntu@dev-georgios`. The canonical state directory is
+  `/mnt/nanocodex-evals/evals` and the canonical ledger is
+  `/mnt/nanocodex-evals/evals/state.sqlite3`. Imports, new worksets, resumed
+  runs, coordinator/API reads, and the eval dashboard use that ledger unless
+  the user explicitly requests an isolated scratch run.
+- Deploy a coherent slice immediately and exercise it there. Start from fresh
+  `origin/master` plus the focused change being tested; if GitHub or DNS is
+  unavailable on the host, transfer the exact local source instead of waiting
+  or using an old deployment.
+- Replacement is component-scoped, not preservation-oriented. Controller/UI
+  work replaces the controller/UI and leaves workers and coordinator alone;
+  coordinator work replaces the coordinator; worker/runtime or schema work may
+  stop the controller and all workers for that benchmark before restarting the
+  whole scoped run. Never disturb unrelated profiles or services. When the user
+  asks to replace a scoped component on the box, replace it instead of trying
+  to preserve that component's current process.
+- Do not run `cargo test`, broad `cargo check`, Clippy, or full-workspace builds
+  during the active edit loop. Make the complete focused change, format it, use
+  cheap consumer typechecks when useful, then build once for deployment on
+  `dev-georgios`. Run a focused Rust test only for a demonstrated regression or
+  when the user explicitly asks. Reserve broad validation for an explicit
+  milestone, release gate, or final handoff where its signal justifies the
+  compile time.
+- Never test neural scheduling policy by asserting prompt text. Build, deploy,
+  and exercise orchestration changes against the real coordinator and host.
+  Record worker/VM correspondence, task deltas, completions per unit time,
+  memory, swap, load, pressure, infrastructure retries, and OOMs.
+- High utilization is the goal, not a failure. Judge saturation by productive
+  throughput, stale claims, infrastructure retries, OOM behavior, and recovery;
+  do not label a host unhealthy merely because CPU, RAM, swap, load, or pressure
+  is high. During a normal saturation measurement, never manually shed workers:
+  the OS and controller own exhaustion behavior. Scoped deployment and schema
+  resets are the explicit exception.
+- Treat live waves as telemetry, not blocking work. Continue inspecting real
+  evidence, fixing known failures, and preparing the next deployment while a
+  wave runs. Wait only when a concurrent mutation would invalidate a specific
+  measurement needed for the next decision.
+- Treat obsolete services, systemd drop-ins, scratch directories, deployments,
+  and other stale host residue as operator cleanup. Inspect their exact scope
+  and remove them directly on `dev-georgios`; do not infer a product feature,
+  compatibility path, migration, or automatic cleanup requirement merely
+  because old operational state exists.
+- Use `just run` for a live native smoke, focused trials while iterating, and the
+  full configured eval only for milestone or release gates. Never modify a
+  benchmark task or verifier to make Nanocodex pass. Inspect exact JSONL,
+  trajectories, verifier output, and retained evidence for concrete claims.
+
+## Experimental eval state
+
+- Eval ledgers, coordinator state, retained artifacts, and their schemas are
+  mutable development state, not compatibility boundaries.
+- Keep SQLite `user_version = 1`; it is a current-format marker, not migration
+  history. On every schema change, stop the scoped run, directly mutate the
+  canonical database in place to the one new layout, update the single current
+  schema definition, and restart. Preserve completed rows only when the direct
+  transformation is useful and obvious; otherwise recreate or reseed them.
+- Never add old-schema readers, migration ladders, version-specific branches,
+  dual writes, fallback runtimes, or compatibility shims unless the user
+  explicitly asks. Never return to an older binary because current code rejects
+  experimental state.
+- Do not make backups or pause iteration to preserve experimental state unless
+  the user explicitly requests one. Once the canonical database is migrated,
+  delete obsolete schema and migration code immediately.
 
 ## Codex reference
 
@@ -218,9 +233,10 @@
 - Return errors with context. Avoid `unwrap`, `expect`, and silent fallback in
   runtime paths. Use focused typed errors where callers distinguish policy or
   retry classes; keep `eyre` at application boundaries.
-- Before handoff run rustfmt, Clippy with warnings denied, relevant tests, and
-  public-example checks. Benchmark performance claims on representative retained
-  traces, not synthetic microbenchmarks alone.
+- At an explicit final handoff or release gate, run the smallest relevant set of
+  rustfmt, warnings-denied Clippy, focused tests, and public-example checks.
+  Benchmark performance claims on representative retained traces, not synthetic
+  microbenchmarks alone.
 
 ## TUI performance
 

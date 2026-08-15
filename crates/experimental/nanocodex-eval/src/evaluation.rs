@@ -10,8 +10,8 @@ use crate::{
     Task,
     profile::{EvaluationManifest, ResolvedFamily, ResolvedHarness, ResolvedProfile, ResolvedTask},
     workset::{
-        BeginTask, TaskClaim, Workset, WorksetBusy, WorksetError, WorksetFamily, WorksetObserver,
-        WorksetStatus, WorksetTask,
+        BeginTask, RecentAttemptCounts, TaskClaim, Workset, WorksetBusy, WorksetError,
+        WorksetFamily, WorksetObserver, WorksetStatus, WorksetTask,
     },
 };
 use nanocodex_oai_api::{Model, Thinking};
@@ -118,6 +118,8 @@ pub struct EvaluationStatus {
     pub tasks: EvaluationCounts,
     /// Stable names of workers that currently own running rows.
     pub workers: Vec<String>,
+    /// Terminal attempt outcomes recorded during the last five minutes.
+    pub recent_attempts: RecentAttemptCounts,
     /// Status grouped by exact semantic treatment.
     pub families: Vec<EvaluationFamilyStatus>,
 }
@@ -611,6 +613,7 @@ fn observed_status(status: WorksetStatus) -> Result<EvaluationStatus, Evaluation
             failed: status.tasks.failed,
         },
         workers: status.workers,
+        recent_attempts: status.recent_attempts,
         families,
     })
 }
@@ -779,8 +782,8 @@ impl CoordinateClaim {
     }
 
     /// Releases an interrupted execution so another worker can claim its row.
-    pub fn release(mut self) -> Result<(), EvaluationError> {
-        self.workset.release(&self.claim).map_err(error)?;
+    pub fn release(mut self, failure: &str) -> Result<(), EvaluationError> {
+        self.workset.release(&self.claim, failure).map_err(error)?;
         self.finished = true;
         Ok(())
     }
@@ -843,7 +846,9 @@ fn coordinate_output(
 impl Drop for CoordinateClaim {
     fn drop(&mut self) {
         if !self.finished {
-            let _ = self.workset.release(&self.claim);
+            let _ = self
+                .workset
+                .release(&self.claim, "claim dropped before recording an outcome");
         }
     }
 }

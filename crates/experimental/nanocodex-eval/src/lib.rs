@@ -50,6 +50,7 @@ mod api;
 /// Agent Trajectory Interchange Format projection and wire types.
 pub mod atif;
 mod capture_proxy;
+mod cluster;
 pub mod coordinator;
 mod digest;
 mod evaluation;
@@ -124,3 +125,4 @@ pub use task::{
     all(target_os = "macos", target_arch = "aarch64")
 ))]
 pub use vm::{CachePolicy, VmResources, VmResourcesBuilder, VmResourcesError};
+pub use workset::{RecentAttemptCounts, RecentAttemptFailure};

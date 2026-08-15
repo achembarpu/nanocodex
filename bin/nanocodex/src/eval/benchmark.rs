@@ -5,7 +5,7 @@ use eyre::{Result, WrapErr as _};
 use nanocodex_eval::{Evaluation, EvaluationStatus, coordinator::CoordinatorClient};
 use serde::Deserialize;
 
-use super::profile::default_state_dir;
+use super::{profile::default_state_dir, systemd};
 use crate::{
     RetryableProcessExit, benchmark, config::AgentArgs, observability::ObservabilityArgs, run, tui,
     vm::VmArgs,
@@ -39,6 +39,14 @@ pub(super) struct Benchmark {
     #[arg(long)]
     headless: bool,
 
+    /// Install and start this controller as a durable user systemd service.
+    #[arg(long)]
+    systemd: bool,
+
+    /// Host-local cache and temporary workspace for the systemd controller and workers.
+    #[arg(long, value_name = "DIRECTORY", requires = "systemd")]
+    runtime_dir: Option<PathBuf>,
+
     #[command(flatten)]
     agent: AgentArgs,
 
@@ -57,15 +65,29 @@ impl Benchmark {
             state_dir,
             coordinator,
             headless,
+            systemd,
+            runtime_dir,
             mut agent,
             observability,
             vm,
         } = self;
+        if systemd {
+            return systemd::install(
+                &profile,
+                &config,
+                state_dir.as_deref(),
+                coordinator.as_deref(),
+                runtime_dir.as_deref(),
+            );
+        }
+        let executable =
+            std::env::current_exe().wrap_err("failed to resolve nanocodex executable")?;
         let prompt = benchmark::prompt(
             Some(&profile),
             &config,
             state_dir.as_deref(),
             coordinator.as_deref(),
+            Some(&executable),
         );
         let initial = BoardStatus::load(
             Some(&profile),

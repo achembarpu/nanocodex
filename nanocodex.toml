@@ -82,8 +82,21 @@ trials = 1
 model = ["sol"]
 thinking = ["high"]
 
+[profiles.gpqa-diamond-full]
+benchmarks = ["gpqa-diamond/*"]
+trials = 1
+model = ["sol"]
+thinking = ["high"]
+
 [profiles.browsecomp-smoke]
 benchmarks = ["browsecomp/000788-b1fa2bf2323cd70e"]
+trials = 1
+model = ["sol"]
+thinking = ["high"]
+web_search = true
+
+[profiles.browsecomp-full]
+benchmarks = ["browsecomp/*"]
 trials = 1
 model = ["sol"]
 thinking = ["high"]

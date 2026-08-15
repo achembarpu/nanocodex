@@ -1,21 +1,25 @@
 import {
-  Activity,
   AlertTriangle,
-  CheckCircle2,
   ChevronLeft,
   ChevronRight,
   CircleDashed,
+  Cpu,
+  MemoryStick,
   Radio,
   Search,
+  Server,
   X,
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
 import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
-import { useMatch, useNavigate } from "react-router";
+import { useLocation, useMatch, useNavigate } from "react-router";
 import {
   evalApi,
   type EvalAnalyticsPoint,
   type EvalCase,
+  type EvalCluster,
+  type EvalClusterCapacity,
+  type EvalClusterNode,
   type EvalCoordinate,
   type EvalOverview,
   type EvalResultPoint,
@@ -46,10 +50,12 @@ const taskKey = (worksetId: string | null, taskId: string | null) =>
   ["evals", "task", worksetId, taskId] as const;
 
 export function useEvalOverview() {
+  const location = useLocation();
+  const detailRoute = location.pathname.startsWith("/evals/worksets/");
   return useQuery({
     queryKey: ["evals", "overview"],
     queryFn: ({ signal }) => evalApi.overview(signal),
-    refetchInterval: 500,
+    refetchInterval: detailRoute ? false : 500,
     refetchIntervalInBackground: true,
     refetchOnMount: "always",
     refetchOnWindowFocus: "always",
@@ -73,6 +79,101 @@ function formatWorksetDate(milliseconds: number) {
     hour: "2-digit",
     minute: "2-digit",
   }).format(new Date(milliseconds));
+}
+
+function formatBytes(bytes: number) {
+  if (!Number.isFinite(bytes) || bytes <= 0) return "0 B";
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  const exponent = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  return `${(bytes / 1024 ** exponent).toFixed(exponent < 2 ? 0 : 1)} ${units[exponent]}`;
+}
+
+function formatUptime(seconds: number) {
+  const days = Math.floor(seconds / 86_400);
+  const hours = Math.floor((seconds % 86_400) / 3_600);
+  return days > 0 ? `${days}d ${hours}h` : `${hours}h ${Math.floor((seconds % 3_600) / 60)}m`;
+}
+
+function usedPercent(capacity: EvalClusterCapacity) {
+  if (capacity.totalBytes <= 0) return 0;
+  return Math.max(0, Math.min(100,
+    ((capacity.totalBytes - capacity.availableBytes) / capacity.totalBytes) * 100,
+  ));
+}
+
+function formatPressure(value: number | null) {
+  return value === null ? "n/a" : `${value.toFixed(1)}%`;
+}
+
+function NodeCapacity({ label, capacity }: { label: string; capacity: EvalClusterCapacity }) {
+  const percent = usedPercent(capacity);
+  return (
+    <div className="eval-node-capacity">
+      <span><strong>{label}</strong><small>{percent.toFixed(0)}%</small></span>
+      <i aria-hidden="true"><b style={{ width: `${percent}%` }} /></i>
+      <small>{formatBytes(capacity.totalBytes - capacity.availableBytes)} / {formatBytes(capacity.totalBytes)}</small>
+    </div>
+  );
+}
+
+function ClusterNode({ node }: { node: EvalClusterNode }) {
+  const cpu = Math.max(0, Math.min(100, node.cpuUsagePercent));
+  const lifecycleAligned = node.workerProcesses === node.claimedTasks &&
+    node.claimedTasks === node.vmProcesses;
+  return (
+    <article className="eval-node-card">
+      <header>
+        <span className="eval-node-online" aria-hidden="true" />
+        <div><strong>{node.id}</strong><small>online · up {formatUptime(node.uptimeSeconds)}</small></div>
+        <Server aria-hidden="true" />
+      </header>
+      <div className="eval-node-counts">
+        <div><span>Active evals</span><strong>{node.claimedTasks}</strong></div>
+        <div><span>CPU cores</span><strong>{node.cpuCores}</strong></div>
+        {!lifecycleAligned ? (
+          <div className="eval-node-mismatch">
+            <span>Lifecycle mismatch</span>
+            <strong>{node.workerProcesses} / {node.claimedTasks} / {node.vmProcesses}</strong>
+            <small>workers / claims / VMs</small>
+          </div>
+        ) : null}
+      </div>
+      <div className="eval-node-utilization">
+        <div className="eval-node-capacity">
+          <span><strong><Cpu aria-hidden="true" /> CPU</strong><small>{cpu.toFixed(0)}%</small></span>
+          <i aria-hidden="true"><b style={{ width: `${cpu}%` }} /></i>
+          <small>load {node.loadAverage.one.toFixed(1)} / {node.loadAverage.five.toFixed(1)} / {node.loadAverage.fifteen.toFixed(1)}</small>
+        </div>
+        <NodeCapacity label="Memory" capacity={node.memory} />
+        <NodeCapacity label="Swap" capacity={node.swap} />
+      </div>
+      <footer>
+        <MemoryStick aria-hidden="true" />
+        <span>10s pressure</span>
+        <span>CPU {formatPressure(node.pressure.cpuSomeAvg10)}</span>
+        <span>memory some {formatPressure(node.pressure.memorySomeAvg10)}</span>
+        <span>memory full {formatPressure(node.pressure.memoryFullAvg10)}</span>
+      </footer>
+    </article>
+  );
+}
+
+function ClusterView({ cluster, pending, failed }: {
+  cluster: EvalCluster | undefined;
+  pending: boolean;
+  failed: boolean;
+}) {
+  return (
+    <section className="eval-cluster" aria-labelledby="cluster-heading">
+      <header>
+        <div><p className="rail-label">Runtime</p><h2 id="cluster-heading">Cluster</h2></div>
+        <span>{cluster ? `${cluster.nodes.length} node${cluster.nodes.length === 1 ? "" : "s"}` : "live utilization"}</span>
+      </header>
+      {cluster?.nodes.map((node) => <ClusterNode node={node} key={node.id} />)}
+      {!cluster && pending ? <p className="eval-cluster-state">Reading workload hosts…</p> : null}
+      {!cluster && failed ? <p className="eval-cluster-state is-error">Cluster telemetry unavailable.</p> : null}
+    </section>
+  );
 }
 
 function formatInteger(value: unknown) {
@@ -191,16 +292,6 @@ function CaseInspector({
   );
 }
 
-function health(summary: EvalSummary) {
-  if (summary.failed > 0) {
-    return { status: "degraded", message: `${summary.failed} execution failure(s) retained with evidence.` };
-  }
-  if (summary.success === summary.total) {
-    return { status: "healthy", message: "Every durable task finished execution." };
-  }
-  return { status: "healthy", message: "The durable ledger is progressing." };
-}
-
 function progressRank(summary: EvalSummary) {
   if (summary.running > 0) return 0;
   if (summary.unclaimed > 0) return 1;
@@ -269,11 +360,19 @@ function Analytics({
   );
 }
 
-export function LiveEvals({ overview }: { overview: EvalOverview }) {
+export function LiveEvals({ overview }: { overview: EvalOverview | undefined }) {
   const navigate = useNavigate();
   const taskRoute = useMatch("/evals/worksets/:worksetId/tasks/:taskId");
   const worksetRoute = useMatch("/evals/worksets/:worksetId");
   const route = taskRoute ?? worksetRoute;
+  const clusterQuery = useQuery({
+    queryKey: ["evals", "cluster"],
+    queryFn: ({ signal }) => evalApi.cluster(signal),
+    enabled: !route,
+    refetchInterval: 2_000,
+    refetchIntervalInBackground: true,
+    staleTime: 0,
+  });
   const [selectedCell, setSelectedCell] = useState<{
     treatment: EvalTreatment;
     cell: EvalCoordinate;
@@ -281,16 +380,18 @@ export function LiveEvals({ overview }: { overview: EvalOverview }) {
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<MatrixFilter>("all");
   const detailRef = useRef<HTMLDivElement>(null);
-  const selectedWorkset = route?.params.worksetId
-    ? overview.worksets.find((workset) => workset.id === route.params.worksetId) ?? null
+  const selectedWorksetId = route?.params.worksetId ?? null;
+  const overviewWorkset = selectedWorksetId
+    ? overview?.worksets.find((workset) => workset.id === selectedWorksetId) ?? null
     : null;
   const worksetQuery = useQuery({
-    queryKey: ["evals", "workset", selectedWorkset?.id],
-    enabled: Boolean(selectedWorkset),
-    queryFn: ({ signal }) => evalApi.workset(selectedWorkset!.id, signal),
+    queryKey: ["evals", "workset", selectedWorksetId],
+    enabled: Boolean(selectedWorksetId),
+    queryFn: ({ signal }) => evalApi.workset(selectedWorksetId!, signal),
     refetchInterval: 5_000,
     refetchIntervalInBackground: true,
   });
+  const selectedWorkset = worksetQuery.data?.workset ?? overviewWorkset;
   const tasks = worksetQuery.data?.tasks ?? [];
   const normalizedQuery = query.trim().toLowerCase();
   const visibleTasks = useMemo(
@@ -308,21 +409,21 @@ export function LiveEvals({ overview }: { overview: EvalOverview }) {
     [filter, normalizedQuery, tasks],
   );
   const orderedWorksets = useMemo(
-    () => [...overview.worksets].sort((left, right) =>
+    () => [...(overview?.worksets ?? [])].sort((left, right) =>
       progressRank(left.summary) - progressRank(right.summary) ||
       right.createdAtMs - left.createdAtMs
     ),
-    [overview.worksets],
+    [overview?.worksets],
   );
   const selectedTaskId = taskRoute?.params.taskId ?? null;
   const selectedTaskOverview = selectedTaskId
     ? tasks.find((task) => task.id === selectedTaskId) ?? null
     : null;
   const taskQuery = useQuery({
-    queryKey: taskKey(selectedWorkset?.id ?? null, selectedTaskId),
-    enabled: Boolean(selectedWorkset && selectedTaskOverview),
+    queryKey: taskKey(selectedWorksetId, selectedTaskId),
+    enabled: Boolean(selectedWorksetId && selectedTaskId),
     queryFn: ({ signal }) =>
-      evalApi.task(selectedWorkset!.id, selectedTaskId!, signal),
+      evalApi.task(selectedWorksetId!, selectedTaskId!, signal),
     refetchInterval:
       selectedTaskOverview &&
       selectedTaskOverview.summary.total > 0 &&
@@ -335,7 +436,7 @@ export function LiveEvals({ overview }: { overview: EvalOverview }) {
     refetchOnWindowFocus: false,
   });
   const analyticsQuery = useQuery<EvalWorksetAnalytics>({
-    queryKey: analyticsKey(selectedWorkset?.id ?? null),
+    queryKey: analyticsKey(selectedWorksetId),
     enabled: Boolean(selectedWorkset && !taskRoute),
     queryFn: ({ signal }) => evalApi.worksetAnalytics(selectedWorkset!.id, signal),
     refetchInterval: selectedWorkset &&
@@ -347,9 +448,9 @@ export function LiveEvals({ overview }: { overview: EvalOverview }) {
     refetchOnWindowFocus: false,
   });
   const resultsQuery = useQuery<EvalWorksetResults>({
-    queryKey: taskResultKey(selectedWorkset?.id ?? null, selectedTaskId),
-    enabled: Boolean(selectedWorkset && taskRoute && selectedTaskOverview),
-    queryFn: ({ signal }) => evalApi.taskResults(selectedWorkset!.id, selectedTaskId!, signal),
+    queryKey: taskResultKey(selectedWorksetId, selectedTaskId),
+    enabled: Boolean(selectedWorksetId && taskRoute && selectedTaskId),
+    queryFn: ({ signal }) => evalApi.taskResults(selectedWorksetId!, selectedTaskId!, signal),
     refetchInterval: selectedTaskOverview &&
       selectedTaskOverview.summary.success + selectedTaskOverview.summary.failed < selectedTaskOverview.summary.total
       ? 15_000
@@ -363,8 +464,6 @@ export function LiveEvals({ overview }: { overview: EvalOverview }) {
     ...new Set(selectedTask?.treatments.flatMap((treatment) =>
       treatment.cells.map((cell) => cell.repetition)) ?? []),
   ].sort((left, right) => left - right);
-  const currentHealth = health(overview.summary);
-
   useEffect(() => {
     if (!selectedCell) return;
     window.requestAnimationFrame(() =>
@@ -388,24 +487,18 @@ export function LiveEvals({ overview }: { overview: EvalOverview }) {
   if (!route) {
     return (
       <main className="live-evals">
-        <section className="eval-page-head">
+        <section className="eval-page-head eval-overview-head">
           <div>
             <p className="eyebrow"><Radio aria-hidden="true" /> Coordinator evidence</p>
             <h1>Evals</h1>
             <p>Durable benchmark progress and retained result artifacts.</p>
           </div>
-          <div className={`live-health-callout ${currentHealth.status}`}>
-            <span className="live-health-pulse" />
-            <div><strong>{currentHealth.status}</strong><p>{currentHealth.message}</p></div>
-            <small>live</small>
-          </div>
         </section>
-        <section className="eval-stat-strip" aria-label="Evaluation summary">
-          <div><Activity aria-hidden="true" /><span>Worksets</span><strong>{overview.worksets.length}</strong></div>
-          <div><CircleDashed aria-hidden="true" /><span>Coordinates</span><strong>{overview.summary.total}</strong></div>
-          <div><Radio aria-hidden="true" /><span>Running</span><strong>{overview.summary.running}</strong></div>
-          <div><CheckCircle2 aria-hidden="true" /><span>Finished</span><strong>{overview.summary.success + overview.summary.failed}</strong></div>
-        </section>
+        <ClusterView
+          cluster={clusterQuery.data}
+          pending={clusterQuery.isPending}
+          failed={clusterQuery.isError}
+        />
         <section className="eval-full-table" aria-labelledby="worksets-heading">
           <header><p className="rail-label">Benchmarks</p><h2 id="worksets-heading">Worksets</h2></header>
           <div className="eval-table-heading eval-workset-grid" aria-hidden="true">
@@ -435,9 +528,11 @@ export function LiveEvals({ overview }: { overview: EvalOverview }) {
     return (
       <main className="live-evals eval-route-empty">
         <PageBack onClick={() => navigate("/evals")}>All evals</PageBack>
-        <AlertTriangle aria-hidden="true" />
-        <h1>Workset not found</h1>
-        <p>The coordinator no longer reports this durable workset.</p>
+        {worksetQuery.isPending ? <CircleDashed aria-hidden="true" /> : <AlertTriangle aria-hidden="true" />}
+        <h1>{worksetQuery.isPending ? "Loading workset…" : "Workset not found"}</h1>
+        <p>{worksetQuery.isPending
+          ? "Reading this workset while its task detail loads in parallel."
+          : worksetQuery.error?.message ?? "The coordinator no longer reports this durable workset."}</p>
       </main>
     );
   }
@@ -489,7 +584,7 @@ export function LiveEvals({ overview }: { overview: EvalOverview }) {
     );
   }
 
-  if (!selectedTaskOverview && !worksetQuery.isPending) {
+  if (!selectedTaskOverview && !selectedTask && !worksetQuery.isPending) {
     return (
       <main className="live-evals eval-route-empty">
         <PageBack onClick={() => chooseWorkset(selectedWorkset.id)}>Benchmark</PageBack>
@@ -505,9 +600,9 @@ export function LiveEvals({ overview }: { overview: EvalOverview }) {
       <section className="eval-page-head eval-detail-head">
         <div>
           <PageBack onClick={() => chooseWorkset(selectedWorkset.id)}>{selectedWorkset.profile}</PageBack>
-          <p className="eyebrow">Task · {selectedTaskOverview?.digest.slice(0, 16) ?? "loading"}</p>
-          <h1>{selectedTaskOverview?.label ?? "Loading task…"}</h1>
-          <p>{selectedTaskOverview?.name}</p>
+          <p className="eyebrow">Task · {(selectedTaskOverview?.digest ?? selectedTask?.digest)?.slice(0, 16) ?? "loading"}</p>
+          <h1>{selectedTaskOverview?.label ?? selectedTask?.label ?? "Loading task…"}</h1>
+          <p>{selectedTaskOverview?.name ?? selectedTask?.name}</p>
         </div>
         {selectedTaskOverview ? <ProgressBar summary={selectedTaskOverview.summary} label={`${selectedTaskOverview.label} progress`} /> : null}
       </section>
