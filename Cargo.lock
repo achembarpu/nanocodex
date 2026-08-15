@@ -5082,7 +5082,7 @@ dependencies = [
 [[package]]
 name = "mpp"
 version = "0.11.0"
-source = "git+https://github.com/tempoxyz/mpp-rs?rev=36b7486b2c95e301af1e02815e3403006777ff01#36b7486b2c95e301af1e02815e3403006777ff01"
+source = "git+https://github.com/tempoxyz/mpp-rs?rev=2e265801d216ef54a85b31acda5d0fac192e1b5e#2e265801d216ef54a85b31acda5d0fac192e1b5e"
 dependencies = [
  "alloy",
  "anyhow",
