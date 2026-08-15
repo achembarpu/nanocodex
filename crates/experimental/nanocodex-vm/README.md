@@ -298,7 +298,7 @@ bounded writer channel. `duration_ns` covers the complete RPC.
 
 ```json
 {"kind":"tool","payload":{"id":1,"tool":"exec_command","input":{"function":{"arguments":{"cmd":"pwd"}}},"context":{"model":"gpt-5.6","session_id":"session-1","call_id":"call-1","output_token_budget":10000}}}
-{"kind":"tool","payload":{"id":1,"execution":{"output":"/app\n","success":true,"code_mode_value":null,"metadata":null,"process_trace":{"exit_code":0,"session_id":null,"original_token_count":null,"output_bytes":5,"wall_time_seconds":0.01}},"error":null}}
+{"kind":"tool","payload":{"id":1,"execution":{"output":"/app\n","success":true,"structured_result":null,"metadata":null,"process_trace":{"exit_code":0,"session_id":null,"original_token_count":null,"output_bytes":5,"wall_time_seconds":0.01}},"error":null}}
 ```
 
 The normal adapter sends `exec_command`, `write_stdin`, `apply_patch`, or
@@ -313,7 +313,7 @@ Function `arguments` remain opaque JSON. `context` contains `model`,
 `session_id`, `call_id`, and `output_token_budget`; conversation history is
 not copied into the guest context. `execution.output` is either a string or
 the canonical ordered multimodal array of `input_text`, `input_image`, and
-`input_audio` objects. `code_mode_value` and `metadata` are opaque JSON or
+`input_audio` objects. `structured_result` and `metadata` are opaque JSON or
 `null`. `process_trace` is `null` or contains `exit_code`, `session_id`,
 `original_token_count`, `output_bytes`, and `wall_time_seconds`.
 

@@ -220,6 +220,6 @@ mod tests {
             .await;
 
         assert!(output.success);
-        assert_eq!(output.code_mode_value()["output"], "from-image");
+        assert_eq!(output.structured_result()["output"], "from-image");
     }
 }

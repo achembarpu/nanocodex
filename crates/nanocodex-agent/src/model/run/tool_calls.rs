@@ -25,6 +25,7 @@ pub(super) struct CompletedToolCall {
     pub(super) duration_ns: u64,
     pub(super) work_duration_ns: u64,
     pub(super) output: ToolOutputBody,
+    pub(super) structured_result: Value,
     pub(super) metadata: Option<Box<RawValue>>,
     pub(super) response_items: Vec<ResponseItem>,
 }
@@ -78,6 +79,7 @@ impl CodeModeObserver for NestedToolEventObserver<'_> {
                         duration_ns: call.duration_ns,
                         started_after_ns: Some(call.started_after_ns),
                         result: &call.output,
+                        structured_result: &call.structured_result,
                         metadata: call.metadata.as_deref(),
                     },
                 )
@@ -369,6 +371,7 @@ where
                 duration_ns: completed.duration_ns,
                 started_after_ns: None,
                 result: &completed.output,
+                structured_result: &completed.structured_result,
                 metadata: completed.metadata.as_deref(),
             },
         )?;
@@ -382,6 +385,7 @@ where
         let message = panic_payload(payload);
         record_span_content(&active.span, "tool.panic", &message);
         let output = ToolOutputBody::Text("aborted".to_owned());
+        let structured_result = output.structured_result();
         let duration_ns = elapsed_ns(active.started_at);
         record_tool_span_terminal(&active.span, "failed", "ERROR", duration_ns, &output);
         let response_item = match active.kind {
@@ -396,6 +400,7 @@ where
             duration_ns,
             work_duration_ns: Self::completed_tool_work_duration(active),
             output,
+            structured_result,
             metadata: None,
             response_items: vec![response_item],
         }
@@ -418,6 +423,7 @@ where
         let qualified_name = qualified_tool_name(&call);
         if let Some(message) = unsupported_tool_message(tools, &call) {
             let output = ToolOutputBody::Text(message);
+            let structured_result = output.structured_result();
             record_tool_span_terminal(tool_span, "failed", "ERROR", 0, &output);
             let response_item = match call.kind {
                 CodeCallKind::Custom => custom_tool_output(call.call_id.clone(), output.clone()),
@@ -433,6 +439,7 @@ where
                 duration_ns: 0,
                 work_duration_ns: 0,
                 output,
+                structured_result,
                 metadata: None,
                 response_items: vec![response_item],
             });
@@ -475,6 +482,7 @@ where
                     unreachable!("tool search is not an ordinary direct tool")
                 }
             };
+            let structured_result = execution.structured_result();
             prepare_output_images(&mut execution.output).await;
             if let Some(content) = serialize_trace_content(&execution.output) {
                 record_span_content(tool_span, "tool.output", &content);
@@ -501,6 +509,7 @@ where
                     }
                 }],
                 output: execution.output,
+                structured_result,
                 metadata: execution.metadata,
             });
         }
@@ -531,9 +540,10 @@ where
             tool_span.record("status", status(execution.success));
             tool_span.record("otel.status_code", otel_status(execution.success));
             tool_span.record("duration_ns", duration_ns);
+            let structured_result = execution.structured_result();
             let tools = if execution.success {
-                match execution.code_mode_value() {
-                    Value::Array(tools) => tools,
+                match &structured_result {
+                    Value::Array(tools) => tools.clone(),
                     _ => Vec::new(),
                 }
             } else {
@@ -547,6 +557,7 @@ where
                 work_duration_ns: 0,
                 response_items: vec![tool_search_output(call.call_id, tools)],
                 output: execution.output,
+                structured_result,
                 metadata: execution.metadata,
             });
         }
@@ -574,6 +585,7 @@ where
         if let Some(error) = update_error {
             return Err(error);
         }
+        let structured_result = execution.output.structured_result();
         prepare_output_images(&mut execution.output).await;
         if let Some(content) = serialize_trace_content(&execution.output) {
             record_span_content(tool_span, "tool.output", &content);
@@ -607,6 +619,7 @@ where
             duration_ns,
             work_duration_ns: 0,
             output: execution.output,
+            structured_result,
             metadata: None,
             response_items: outputs,
         })

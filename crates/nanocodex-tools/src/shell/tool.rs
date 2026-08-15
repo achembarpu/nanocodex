@@ -84,14 +84,14 @@ fn shell_execution(result: &super::ExecCommandResult) -> ToolOutput {
     if let Some(error) = &result.error {
         return ToolOutput::error(error);
     }
-    let code_mode_value = match serde_json::to_value(result) {
+    let structured_result = match serde_json::to_value(result) {
         Ok(value) => value,
         Err(error) => {
             return ToolOutput::error(format!("failed to encode tool result: {error}"));
         }
     };
     ToolOutput::text(shell_response_text(result))
-        .with_code_mode_value(code_mode_value)
+        .with_structured_result(structured_result)
         .with_process_trace(
             result.exit_code,
             result.session_id,
@@ -222,7 +222,7 @@ mod tests {
              hello\n"
         );
         assert_eq!(
-            output.code_mode_value(),
+            output.structured_result(),
             serde_json::json!({
                 "chunk_id": "a1b2c3",
                 "wall_time_seconds": 0.68754,

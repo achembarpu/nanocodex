@@ -570,9 +570,13 @@ impl Conversation {
             return self.on_cell_transport_result(&cell_id, &payload, status);
         }
         let pending_code_exec = self.pending_code_execs.contains_key(&payload.call_id);
-        if payload.tool.as_deref() == Some("exec_command")
+        let shell_tool = matches!(
+            payload.tool.as_deref(),
+            Some("exec_command" | "write_stdin")
+        );
+        if shell_tool
             && status == ToolStatus::Completed
-            && let Some(session_id) = payload.result.as_ref().and_then(result_session_id)
+            && let Some(session_id) = result_session_id(&payload.structured_result)
         {
             self.running_shell_sessions.insert(
                 session_id,
@@ -602,10 +606,12 @@ impl Conversation {
         if self.pending_code_execs.remove(&payload.call_id).is_some() {
             return false;
         }
-        let result = payload
-            .result
-            .as_ref()
-            .map(|result| summarize_tool_result(payload.tool.as_deref(), result, status));
+        let result = if shell_tool {
+            Some(&payload.structured_result)
+        } else {
+            payload.result.as_ref()
+        }
+        .map(|result| summarize_tool_result(payload.tool.as_deref(), result, status));
         self.note_tail_will_change();
         let _ = if payload.started_after_ns.is_some() {
             self.transcript.set_tool_result_timing(
@@ -650,19 +656,16 @@ impl Conversation {
         };
         continued.add_duration(payload.duration_ns);
         if status == ToolStatus::Completed
-            && payload
-                .result
-                .as_ref()
-                .and_then(result_session_id)
-                .is_some()
+            && result_session_id(&payload.structured_result).is_some()
         {
             self.running_shell_sessions.insert(session_id, continued);
             return false;
         }
-        let result = payload
-            .result
-            .as_ref()
-            .map(|result| summarize_tool_result(Some("exec_command"), result, status));
+        let result = Some(summarize_tool_result(
+            Some("exec_command"),
+            &payload.structured_result,
+            status,
+        ));
         self.finish_continued_tool(&continued, status, result)
     }
 
@@ -2896,6 +2899,7 @@ struct ToolResultPayload {
     started_after_ns: Option<u64>,
     #[serde(default)]
     result: Option<Value>,
+    structured_result: Value,
 }
 
 struct ContinuedTool {
@@ -3212,7 +3216,7 @@ fn running_cell_id(result: &Value) -> Option<String> {
 }
 
 fn summarize_tool_result(tool: Option<&str>, result: &Value, status: ToolStatus) -> String {
-    if tool == Some("exec_command") {
+    if matches!(tool, Some("exec_command" | "write_stdin")) {
         let decoded = result
             .as_str()
             .and_then(|value| serde_json::from_str::<Value>(value).ok())
@@ -4621,7 +4625,8 @@ mod tests {
                 "tool": "exec_command",
                 "status": "completed",
                 "duration_ns": 10_000_000,
-                "result": "{\"session_id\":7,\"output\":\"\"}"
+                "result": "Wall time: 10.0000 seconds\nProcess running with session ID 7\nOutput:\n",
+                "structured_result": {"session_id": 7, "output": ""}
             }),
         ));
         app.main.on_agent_event(&event(
@@ -4639,7 +4644,8 @@ mod tests {
                 "tool": "write_stdin",
                 "status": "completed",
                 "duration_ns": 5_000_000,
-                "result": "{\"session_id\":7,\"output\":\"\"}"
+                "result": "Wall time: 5.0000 seconds\nProcess running with session ID 7\nOutput:\n",
+                "structured_result": {"session_id": 7, "output": ""}
             }),
         ));
         app.main.on_agent_event(&event(
@@ -4657,7 +4663,8 @@ mod tests {
                 "tool": "write_stdin",
                 "status": "completed",
                 "duration_ns": 1_000_000,
-                "result": "{\"exit_code\":130,\"output\":\"\"}"
+                "result": "Wall time: 1.0000 seconds\nProcess exited with code 130\nOutput:\n",
+                "structured_result": {"exit_code": 130, "output": ""}
             }),
         ));
         app.main.on_agent_event(&event(

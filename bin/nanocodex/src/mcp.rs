@@ -12,7 +12,9 @@ use std::{
 use async_trait::async_trait;
 use clap::{ArgAction, Args};
 use eyre::{Result, WrapErr, bail, eyre};
-use nanocodex::tools::mcp::{Mcp, McpHandle, McpOAuthCredentials, McpOAuthStore, McpServer};
+use nanocodex::tools::mcp::{
+    Mcp, McpHandle, McpOAuthCredentials, McpOAuthRefreshGuard, McpOAuthStore, McpServer,
+};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
@@ -447,6 +449,28 @@ impl McpOAuthStore for CodexOAuthStore {
         .await
         .map_err(|error| format!("MCP OAuth credential writer stopped: {error}"))?
     }
+
+    async fn acquire_refresh_lock(
+        &self,
+        server_name: &str,
+        server_url: &str,
+    ) -> Result<Box<dyn McpOAuthRefreshGuard>, String> {
+        let codex_home = self.codex_home.clone();
+        let server_name = server_name.to_owned();
+        let server_url = server_url.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let store_key = codex_oauth_key(&server_name, &server_url)?;
+            let mut hasher = Sha256::new();
+            hasher.update(store_key.as_bytes());
+            let path = codex_home
+                .join("mcp-oauth-locks")
+                .join(format!("{}.lock", hex::encode(hasher.finalize())));
+            acquire_oauth_file_lock(&path, "refresh transaction")
+                .map(|file| Box::new(file) as Box<dyn McpOAuthRefreshGuard>)
+        })
+        .await
+        .map_err(|error| format!("MCP OAuth refresh-lock task stopped: {error}"))?
+    }
 }
 
 struct CodexOAuthFileLock {
@@ -455,44 +479,48 @@ struct CodexOAuthFileLock {
 
 impl CodexOAuthFileLock {
     fn acquire(codex_home: &Path) -> Result<Self, String> {
-        let directory = codex_home.join("mcp-oauth-locks");
-        fs::create_dir_all(&directory).map_err(|error| {
-            format!(
-                "failed to create MCP OAuth lock directory {}: {error}",
-                directory.display()
-            )
-        })?;
-        let path = directory.join("file-store.lock");
-        let file = OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create(true)
-            .truncate(false)
-            .open(&path)
-            .map_err(|error| {
-                format!("failed to open MCP OAuth lock {}: {error}", path.display())
-            })?;
-        let started = std::time::Instant::now();
-        loop {
-            match file.try_lock() {
-                Ok(()) => return Ok(Self { _file: file }),
-                Err(std::fs::TryLockError::WouldBlock)
-                    if started.elapsed() >= Duration::from_mins(1) =>
-                {
-                    return Err(format!(
-                        "timed out waiting for MCP OAuth lock {}",
-                        path.display()
-                    ));
-                }
-                Err(std::fs::TryLockError::WouldBlock) => {
-                    thread::sleep(Duration::from_millis(50));
-                }
-                Err(error) => {
-                    return Err(format!(
-                        "failed to lock MCP OAuth store {}: {error}",
-                        path.display()
-                    ));
-                }
+        let path = codex_home.join("mcp-oauth-locks/file-store.lock");
+        acquire_oauth_file_lock(&path, "credential store").map(|file| Self { _file: file })
+    }
+}
+
+fn acquire_oauth_file_lock(path: &Path, purpose: &str) -> Result<File, String> {
+    let directory = path
+        .parent()
+        .ok_or_else(|| format!("MCP OAuth lock path has no parent: {}", path.display()))?;
+    fs::create_dir_all(directory).map_err(|error| {
+        format!(
+            "failed to create MCP OAuth lock directory {}: {error}",
+            directory.display()
+        )
+    })?;
+    let file = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(path)
+        .map_err(|error| format!("failed to open MCP OAuth lock {}: {error}", path.display()))?;
+    let started = std::time::Instant::now();
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::WouldBlock)
+                if started.elapsed() >= Duration::from_mins(1) =>
+            {
+                return Err(format!(
+                    "timed out waiting for MCP OAuth {purpose} lock {}",
+                    path.display()
+                ));
+            }
+            Err(std::fs::TryLockError::WouldBlock) => {
+                thread::sleep(Duration::from_millis(50));
+            }
+            Err(error) => {
+                return Err(format!(
+                    "failed to lock MCP OAuth {purpose} {}: {error}",
+                    path.display()
+                ));
             }
         }
     }

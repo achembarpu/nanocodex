@@ -30,6 +30,10 @@ The decision codes reuse the main ledger's policy:
 - `P39` — the model-visible `tool_search` source advertisement is bounded to
   4 KiB without truncating UTF-8 or removing complete namespace descriptions
   from returned definitions.
+- `P40` — MCP OAuth refreshes are serialized through durable persistence,
+  preserve optional rotated-token fields, distinguish rejection from transient
+  failure, survive caller cancellation, and retry one server-rejected access
+  token through the exact RMCP 3 client behavior.
 - `E15` — relevant runtime, transport, TUI, MCP, or cleanup behavior needs a
   focused Nanocodex regression, profile, or consumer before adoption.
 - `D3` — the standalone sandbox-enabled V8 host, its packaging, and its
@@ -98,7 +102,7 @@ cef3910ea4 evaluate E15
 1da9f846b3 out-of-scope O15
 f9b18d04ba out-of-scope O15
 df326d31cd defer D3
-a05bcda3db evaluate E15
+a05bcda3db port P40
 7579a2b413 out-of-scope O15
 c41a38dd10 evaluate E15
 ad6fc66b6d out-of-scope O15

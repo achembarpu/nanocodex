@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
-    sync::Arc,
+    sync::{Arc, OnceLock, Weak},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -8,7 +8,7 @@ use async_trait::async_trait;
 use http::{HeaderName, HeaderValue};
 use oauth2::{AccessToken, RefreshToken, Scope, TokenResponse, basic::BasicTokenType};
 use rmcp::transport::{
-    AuthorizationManager,
+    AuthorizationManager, AuthorizationRequest,
     auth::{
         AuthClient, AuthorizationMetadata, CredentialStore, InMemoryCredentialStore, OAuthState,
         OAuthTokenResponse, StoredCredentials, VendorExtraTokenFields,
@@ -23,6 +23,8 @@ use tokio::{
 use tracing::{Instrument, info_span};
 
 use super::config::SecretSource;
+
+mod refresh;
 
 const LOGIN_TIMEOUT: Duration = Duration::from_mins(5);
 const MAX_CALLBACK_BYTES: usize = 16 * 1024;
@@ -61,6 +63,11 @@ pub struct McpOAuthCredentials {
     expires_at_millis: Option<u64>,
     scopes: Vec<String>,
 }
+
+/// An acquired refresh-transaction lock held until its boxed value is dropped.
+pub trait McpOAuthRefreshGuard: Send {}
+
+impl<T: Send> McpOAuthRefreshGuard for T {}
 
 impl McpOAuthCredentials {
     /// Creates credentials from a dynamically registered client and access token.
@@ -194,6 +201,36 @@ pub trait McpOAuthStore: Send + Sync {
         server_url: &str,
         credentials: &McpOAuthCredentials,
     ) -> Result<(), String>;
+
+    /// Serializes one credential's authoritative load, provider refresh, and save transaction.
+    ///
+    /// The default coordinates runtimes in this process. Stores shared by multiple processes must
+    /// override this with a matching cross-process or provider-backed lock and bound lock waits.
+    async fn acquire_refresh_lock(
+        &self,
+        server_name: &str,
+        server_url: &str,
+    ) -> Result<Box<dyn McpOAuthRefreshGuard>, String> {
+        let key = format!("{server_name}\0{server_url}");
+        let lock = {
+            static LOCKS: OnceLock<
+                std::sync::Mutex<HashMap<String, Weak<tokio::sync::Mutex<()>>>>,
+            > = OnceLock::new();
+            let locks = LOCKS.get_or_init(Default::default);
+            let mut locks = locks
+                .lock()
+                .map_err(|_| "MCP OAuth refresh lock registry was poisoned".to_owned())?;
+            locks.retain(|_, lock| lock.strong_count() > 0);
+            if let Some(lock) = locks.get(&key).and_then(Weak::upgrade) {
+                lock
+            } else {
+                let lock = Arc::new(tokio::sync::Mutex::new(()));
+                locks.insert(key, Arc::downgrade(&lock));
+                lock
+            }
+        };
+        Ok(Box::new(lock.lock_owned().await))
+    }
 }
 
 pub(crate) struct OAuthRuntime {
@@ -201,7 +238,7 @@ pub(crate) struct OAuthRuntime {
     server_url: String,
     manager: Arc<Mutex<AuthorizationManager>>,
     store: Arc<dyn McpOAuthStore>,
-    last_credentials: Mutex<McpOAuthCredentials>,
+    last_credentials: Mutex<Option<McpOAuthCredentials>>,
 }
 
 impl OAuthRuntime {
@@ -217,7 +254,7 @@ impl OAuthRuntime {
             server_url,
             manager,
             store,
-            last_credentials: Mutex::new(credentials),
+            last_credentials: Mutex::new(Some(credentials)),
         }
     }
 
@@ -234,10 +271,20 @@ impl OAuthRuntime {
         };
         let mut credentials = McpOAuthCredentials::from_token_response(client_id, &response);
         let mut previous = self.last_credentials.lock().await;
-        if credentials.same_token(&previous) {
-            credentials.expires_at_millis = previous.expires_at_millis;
+        if let Some(previous) = previous.as_ref() {
+            if response.refresh_token().is_none() {
+                credentials
+                    .refresh_token
+                    .clone_from(&previous.refresh_token);
+            }
+            if response.scopes().is_none() {
+                credentials.scopes.clone_from(&previous.scopes);
+            }
+            if credentials.same_token(previous) {
+                credentials.expires_at_millis = previous.expires_at_millis;
+            }
         }
-        if *previous == credentials {
+        if previous.as_ref() == Some(&credentials) {
             return Ok(());
         }
         let span = info_span!(
@@ -267,7 +314,7 @@ impl OAuthRuntime {
             if result.is_ok() { "OK" } else { "ERROR" },
         );
         result?;
-        *previous = credentials;
+        *previous = Some(credentials);
         Ok(())
     }
 }
@@ -297,9 +344,10 @@ pub(crate) async fn transport_from_credentials(
             (metadata, true)
         } else {
             let metadata = manager
-                .discover_metadata()
+                .resolve_metadata()
                 .await
-                .map_err(|error| format!("failed to discover MCP OAuth metadata: {error}"))?;
+                .map_err(|error| format!("failed to discover MCP OAuth metadata: {error}"))?
+                .metadata;
             metadata_cache
                 .insert(server_name, server_url, metadata.clone())
                 .await;
@@ -371,7 +419,9 @@ pub(crate) async fn begin_login(
             .await
             .map_err(|error| format!("failed to discover MCP OAuth metadata: {error}"))?;
         state
-            .start_authorization(&[], &redirect_uri, Some("Nanocodex"))
+            .start_authorization(
+                AuthorizationRequest::new(&redirect_uri).with_client_name("Nanocodex"),
+            )
             .await
             .map_err(|error| format!("failed to start MCP OAuth authorization: {error}"))?;
         let authorization_url = state
@@ -609,7 +659,17 @@ mod tests {
 
     #[derive(Default)]
     struct RecordingStore {
+        current: Mutex<Option<McpOAuthCredentials>>,
         saved: Mutex<Vec<McpOAuthCredentials>>,
+    }
+
+    impl RecordingStore {
+        fn with_credentials(credentials: McpOAuthCredentials) -> Self {
+            Self {
+                current: Mutex::new(Some(credentials)),
+                saved: Mutex::new(Vec::new()),
+            }
+        }
     }
 
     #[async_trait]
@@ -619,7 +679,7 @@ mod tests {
             _server_name: &str,
             _server_url: &str,
         ) -> Result<Option<McpOAuthCredentials>, String> {
-            Ok(None)
+            Ok(self.current.lock().await.clone())
         }
 
         async fn save(
@@ -629,6 +689,7 @@ mod tests {
             credentials: &McpOAuthCredentials,
         ) -> Result<(), String> {
             self.saved.lock().await.push(credentials.clone());
+            *self.current.lock().await = Some(credentials.clone());
             Ok(())
         }
     }
@@ -708,11 +769,11 @@ mod tests {
         metadata_cache
             .insert(server_name, server_url, metadata)
             .await;
-        let store = Arc::new(RecordingStore::default());
         let credentials = McpOAuthCredentials::new("client", "expired-access")
             .refresh_token("refresh-token")
             .expires_at_millis(0)
             .scopes(["mcp:tools"]);
+        let store = Arc::new(RecordingStore::with_credentials(credentials.clone()));
 
         nanocodex_oai_api::transport::install_default_rustls_crypto_provider();
         let transport = transport_from_credentials(
@@ -726,15 +787,7 @@ mod tests {
         .await
         .unwrap();
         assert!(transport.metadata_cache_hit);
-        assert_eq!(
-            transport.client.get_access_token().await.unwrap(),
-            "refreshed-access"
-        );
-        transport
-            .runtime
-            .persist_if_changed(&tracing::Span::none())
-            .await
-            .unwrap();
+        transport.runtime.refresh_if_needed().await.unwrap();
         responder.await.unwrap();
 
         let saved = store.saved.lock().await;

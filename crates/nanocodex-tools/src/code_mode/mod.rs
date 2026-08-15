@@ -1330,20 +1330,21 @@ async fn execute_nested_call(
     );
     let execution = tools.execute_nested(&name, input.clone(), context).await;
     let duration_ns = u64::try_from(started_at.elapsed().as_nanos()).unwrap_or(u64::MAX);
-    let value = execution.code_mode_value();
+    let value = execution.structured_result();
     let shell_session_id = execution
         .process_trace()
         .and_then(|process| process.session_id)
         .or_else(|| value.get("session_id").and_then(Value::as_i64));
     CompletedNestedCall {
         id,
-        value,
+        value: value.clone(),
         shell_session_id,
         call: NestedToolCall {
             call_id,
             name,
             input,
             output: execution.output,
+            structured_result: value,
             success: execution.success,
             started_after_ns,
             duration_ns,

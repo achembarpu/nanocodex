@@ -7,7 +7,7 @@ use std::{
 
 use clap::{Args, ValueHint};
 use eyre::{Context, Result, bail, eyre};
-use reqwest::{Client, Url, header};
+use reqwest::{Client, StatusCode, Url, header};
 use semver::Version;
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -25,6 +25,8 @@ const NIGHTLY_RELEASE_API: &str =
     "https://api.github.com/repos/gakonst/nanocodex/releases/tags/nightly";
 const TAGGED_RELEASE_API: &str = "https://api.github.com/repos/gakonst/nanocodex/releases/tags";
 const CHECKSUMS_ASSET: &str = "SHA256SUMS";
+const DOWNLOAD_ATTEMPTS: usize = 5;
+const DOWNLOAD_RETRY_DELAY: Duration = Duration::from_millis(250);
 
 #[derive(Debug, Args)]
 pub(crate) struct Update {
@@ -277,17 +279,45 @@ fn report_activation(previous: &str, selected: &str, downloaded: bool) {
 }
 
 async fn download(client: &Client, asset: &ReleaseAsset) -> Result<Vec<u8>> {
-    client
-        .get(asset.download_url()?)
-        .send()
-        .await
-        .wrap_err_with(|| format!("failed to download {}", asset.name))?
-        .error_for_status()
-        .wrap_err_with(|| format!("GitHub rejected the {} download", asset.name))?
-        .bytes()
-        .await
-        .wrap_err_with(|| format!("failed to read {}", asset.name))
-        .map(|bytes| bytes.to_vec())
+    let url = asset.download_url()?;
+    for attempt in 0..DOWNLOAD_ATTEMPTS {
+        let result: reqwest::Result<Vec<u8>> = async {
+            let response = client.get(url.clone()).send().await?.error_for_status()?;
+            Ok(response.bytes().await?.to_vec())
+        }
+        .await;
+
+        match result {
+            Ok(contents) => return Ok(contents),
+            Err(error) if attempt + 1 < DOWNLOAD_ATTEMPTS && retryable_download_error(&error) => {
+                tokio::time::sleep(DOWNLOAD_RETRY_DELAY.saturating_mul(1 << attempt)).await;
+            }
+            Err(error) => {
+                return Err(error).wrap_err_with(|| {
+                    format!(
+                        "failed to download {} after {} attempt{}",
+                        asset.name,
+                        attempt + 1,
+                        if attempt == 0 { "" } else { "s" }
+                    )
+                });
+            }
+        }
+    }
+
+    unreachable!("the download attempt loop always returns")
+}
+
+fn retryable_download_error(error: &reqwest::Error) -> bool {
+    error.status().is_none_or(retryable_download_status)
+}
+
+fn retryable_download_status(status: StatusCode) -> bool {
+    status.is_server_error()
+        || matches!(
+            status,
+            StatusCode::REQUEST_TIMEOUT | StatusCode::TOO_MANY_REQUESTS
+        )
 }
 
 fn parse_release_version(tag: &str) -> Result<Version> {
@@ -452,5 +482,13 @@ mod tests {
             asset.download_url().unwrap().as_str(),
             "https://github.com/gakonst/nanocodex/releases/download/nightly/SHA256SUMS?asset_id=496045871"
         );
+    }
+
+    #[test]
+    fn retries_only_transient_download_statuses() {
+        assert!(retryable_download_status(StatusCode::REQUEST_TIMEOUT));
+        assert!(retryable_download_status(StatusCode::TOO_MANY_REQUESTS));
+        assert!(retryable_download_status(StatusCode::SERVICE_UNAVAILABLE));
+        assert!(!retryable_download_status(StatusCode::NOT_FOUND));
     }
 }

@@ -5,10 +5,26 @@ All notable changes to Nanocodex are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.0](https://github.com/gakonst/nanocodex/releases/tag/v0.5.0) - 2026-08-12
+
+### Bug Fixes
+
+- [events] Preserve structured results universally
+- [events] Retain structured nested tool results
+
+### Miscellaneous Tasks
+
+- [release] Prepare 0.5.0
+
+### Other
+
+- Merge pull request [#167](https://github.com/gakonst/nanocodex/issues/167) from clabby/cl/structured-events
+
 ## [0.4.0](https://github.com/gakonst/nanocodex/releases/tag/v0.4.0) - 2026-08-11
 
 ### Bug Fixes
 
+- [http] Initialize rustls at client boundaries
 - [eval] Preserve same-role benchmark messages
 - [ci] Preserve typed prompt consumer contracts
 - Close remaining Codex wire parity gaps
@@ -33,10 +49,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Miscellaneous Tasks
 
+- [release] Refresh 0.4.0 changelogs
 - [release] Prepare 0.4.0
 
 ### Other
 
+- Merge pull request [#160](https://github.com/gakonst/nanocodex/issues/160) from gakonst/release/v0.4.0
 - Merge pull request [#142](https://github.com/gakonst/nanocodex/issues/142) from gakonst/feat/eval-adapter-foundation
 - Merge pull request [#124](https://github.com/gakonst/nanocodex/issues/124) from gakonst/fix/codex-parity-current
 - Merge pull request [#122](https://github.com/gakonst/nanocodex/issues/122) from Giulio2002/feat/resume-session-picker

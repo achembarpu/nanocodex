@@ -75,6 +75,23 @@ impl ContextManager {
             .filter(is_api_item)
             .map(truncate_tool_output)
         {
+            if let ResponseItem::CustomToolCallOutput {
+                call_id,
+                name: Some(_),
+                ..
+            } = &item
+                && !self.items.iter().any(|item| {
+                    matches!(
+                        item,
+                        ResponseItem::CustomToolCall {
+                            call_id: candidate,
+                            ..
+                        } if candidate == call_id
+                    )
+                })
+            {
+                continue;
+            }
             assign_missing_response_item_id(&mut item);
             self.calls.track(&item);
             self.items.push(item);
@@ -591,17 +608,7 @@ mod tests {
 
     #[test]
     fn notification_for_committed_custom_call_keeps_history_balanced() {
-        let call: ResponseItem = serde_json::from_str(
-            r#"{"type":"custom_tool_call","id":"ctc_source","call_id":"exec","name":"exec","input":"code"}"#,
-        )
-        .unwrap();
-        let output = ResponseItem::custom_tool_output(
-            "exec".to_owned(),
-            None,
-            FunctionOutputBody::Text("running".into()),
-        );
-        let mut context = ContextManager::new(vec![call, output]);
-        context.commit_tail();
+        let mut context = committed_custom_call_context("running");
 
         context.record_items([ResponseItem::custom_tool_output(
             "exec".to_owned(),
@@ -645,6 +652,55 @@ mod tests {
             } if call_id.as_ref() == "exec"
                 && name.as_ref() == "exec"
                 && text.as_ref() == "progress"
+        )));
+    }
+
+    #[test]
+    fn notification_for_custom_call_removed_by_compaction_is_not_replayed() {
+        let mut context = committed_custom_call_context("yielded");
+
+        context.replace_and_recompute(vec![message("compacted history")], &[]);
+        context.record_items([ResponseItem::custom_tool_output(
+            "exec".to_owned(),
+            Some("exec".to_owned()),
+            FunctionOutputBody::Text("resumed".into()),
+        )]);
+
+        assert_eq!(context.len(), 1);
+        let prompt = context.prompt_items();
+        let prompt = prompt.iter().cloned().collect::<Vec<_>>();
+        assert_eq!(prompt.len(), 1);
+        assert!(has_well_formed_tool_calls(&prompt));
+    }
+
+    #[test]
+    fn notification_for_custom_call_retained_by_compaction_is_replayed() {
+        let mut context = committed_custom_call_context("yielded");
+
+        let mut retained = context.flattened_items();
+        retained.push(message("compacted history"));
+        context.replace_and_recompute(retained, &[]);
+        context.record_items([ResponseItem::custom_tool_output(
+            "exec".to_owned(),
+            Some("exec".to_owned()),
+            FunctionOutputBody::Text("deferred subagent completed".into()),
+        )]);
+
+        assert_eq!(context.len(), 4);
+        let prompt = context.prompt_items();
+        let prompt = prompt.iter().cloned().collect::<Vec<_>>();
+        assert_eq!(prompt.len(), 4);
+        assert!(has_well_formed_tool_calls(&prompt));
+        assert!(prompt.iter().any(|item| matches!(
+            item,
+            ResponseItem::CustomToolCallOutput {
+                call_id,
+                name: Some(name),
+                output: FunctionOutputBody::Text(text),
+                ..
+            } if call_id.as_ref() == "exec"
+                && name.as_ref() == "exec"
+                && text.as_ref() == "deferred subagent completed"
         )));
     }
 
@@ -804,6 +860,21 @@ mod tests {
             MessageRole::User,
             [ContentItem::InputText { text: text.into() }],
         )
+    }
+
+    fn committed_custom_call_context(output: &str) -> ContextManager {
+        let call: ResponseItem = serde_json::from_str(
+            r#"{"type":"custom_tool_call","id":"ctc_source","call_id":"exec","name":"exec","input":"code"}"#,
+        )
+        .unwrap();
+        let output = ResponseItem::custom_tool_output(
+            "exec".to_owned(),
+            None,
+            FunctionOutputBody::Text(output.into()),
+        );
+        let mut context = ContextManager::new(vec![call, output]);
+        context.commit_tail();
+        context
     }
 
     fn tool_search_call(call_id: &str, execution: &str) -> ResponseItem {

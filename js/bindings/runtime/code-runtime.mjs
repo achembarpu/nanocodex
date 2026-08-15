@@ -36,7 +36,7 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
     }
     try {
       const result = await tool.handler(input, { sessionId, parentCallId: "", callId });
-      return encodeToolOutput(outputBody(result), true, clone(result) ?? null);
+      return encodeToolOutput(outputBody(result), true, structuredResult(result, `tool ${name} result`));
     } catch (error) {
       return encodeToolOutput(errorMessage(error), false, null);
     }
@@ -65,17 +65,20 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
             name,
             input: recordedInput,
             output: outputBody(result),
+            structured_result: structuredResult(result, `tool ${name} result`),
             success: true,
             started_after_ns: startedAfterNs,
             duration_ns: elapsedNs(toolStartedAt),
           });
           return result;
         } catch (error) {
+          const message = errorMessage(error);
           nestedCalls.push({
             call_id: callId,
             name,
             input: recordedInput,
-            output: errorMessage(error),
+            output: message,
+            structured_result: message,
             success: false,
             started_after_ns: startedAfterNs,
             duration_ns: elapsedNs(toolStartedAt),
@@ -177,11 +180,11 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
   });
 }
 
-function encodeToolOutput(output, success, codeModeValue) {
+function encodeToolOutput(output, success, structuredResult) {
   return JSON.stringify({
     output,
     success,
-    code_mode_value: codeModeValue,
+    structured_result: structuredResult,
     metadata: null,
     process_trace: null,
   });
@@ -215,6 +218,10 @@ function jsonSnapshot(value, label) {
   } catch (error) {
     throw new TypeError(`${label} must be JSON-serializable`, { cause: error });
   }
+}
+
+function structuredResult(value, label) {
+  return value === undefined ? null : jsonSnapshot(value, label);
 }
 
 function deepFreeze(value) {

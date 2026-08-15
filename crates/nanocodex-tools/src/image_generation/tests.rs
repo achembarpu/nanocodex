@@ -63,7 +63,7 @@ async fn generation_uses_codex_images_request_and_persists_result() -> Result<()
                 && text.contains("already displayed to the user")
     ));
     assert_eq!(
-        execution.code_mode_value()["image_url"],
+        execution.structured_result()["image_url"],
         format!("data:image/png;base64,{encoded}")
     );
     let saved_path = workspace
