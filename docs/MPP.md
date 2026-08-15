@@ -107,11 +107,12 @@ overrides the built-in endpoint.
 
 Mercator remains deferred: the model sees provider-native `tool_search`, then
 calls discovered `mcp__mercator__*` functions only from Code Mode. On MCP error
-`-32042`, the native client selects a supported unexpired Tempo challenge,
-creates a credential with the same Accounts wallet and access-key policy as the
-model provider, places it in `org.paymentauth/credential`, and retries the tool
-call. Successful calls commit the authorization; definitive MCP rejection rolls
-it back; ambiguous transport failure preserves durable payment state.
+`-32042` or `org.paymentauth/payment-required` result metadata, the mpp-rs client
+selects a supported unexpired Tempo challenge and creates a credential with the
+same Accounts wallet and access-key policy as the model provider. Nanocodex
+places it in `org.paymentauth/credential` and retries the tool call. Successful
+calls commit the authorization; definitive MCP rejection rolls it back;
+ambiguous transport failure preserves durable payment state.
 
 Session channels use the shared Tempo SQLite channel store, scoped to the MCP
 endpoint, with a 0.05-token maximum reserve and top-up. This allows a single

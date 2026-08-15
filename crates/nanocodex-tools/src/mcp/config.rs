@@ -52,18 +52,25 @@ pub struct McpServer {
 /// Creates and reconciles protocol-level MPP credentials for paid MCP calls.
 #[async_trait]
 pub trait McpPaymentProvider: Send + Sync {
-    /// Returns a credential for an MCP payment-required error, or `None` when
-    /// none of the offered challenges are supported.
-    async fn credential(&self, error: &Value) -> Result<Option<Value>, String>;
+    /// Prepares one payment-required payload, or returns `None` when none of
+    /// its challenges are supported.
+    async fn prepare(
+        &self,
+        payment_required: &Value,
+    ) -> Result<Option<Box<dyn McpPendingPayment>>, String>;
+}
+
+/// One prepared MCP payment whose provider lifecycle follows request delivery.
+#[async_trait]
+pub trait McpPendingPayment: Send {
+    /// Returns the credential to attach to request metadata.
+    fn credential(&self) -> &Value;
 
     /// Commits provider state after the paid retry succeeds.
-    async fn commit(&self, credential: &Value) -> Result<(), String>;
+    async fn commit(self: Box<Self>) -> Result<(), String>;
 
-    /// Rolls provider state back after the server definitively rejects the retry.
-    async fn rollback(&self, credential: &Value) -> Result<(), String>;
-
-    /// Releases transient delivery state when a paid retry is cancelled or ambiguous.
-    fn abandon(&self, credential: &Value);
+    /// Rolls provider state back after the credential was not sent or was rejected.
+    async fn rollback(self: Box<Self>) -> Result<(), String>;
 }
 
 #[derive(Clone)]

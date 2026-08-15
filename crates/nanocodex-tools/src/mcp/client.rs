@@ -33,6 +33,8 @@ pub(crate) struct ClientInner {
 }
 
 const MCP_CREDENTIAL_META_KEY: &str = "org.paymentauth/credential";
+const MCP_PAYMENT_REQUIRED_CODE: i32 = -32042;
+const MCP_PAYMENT_REQUIRED_META_KEY: &str = "org.paymentauth/payment-required";
 
 impl ClientInner {
     pub(crate) async fn call_tool(
@@ -54,13 +56,24 @@ impl ClientInner {
         params: CallToolRequestParams,
     ) -> Result<CallToolResult, String> {
         let first = self.service.call_tool(params.clone()).await;
-        let (error, payment) = match (&first, &self.payment) {
-            (Err(ServiceError::McpError(error)), Some(payment)) => (error, payment),
+        let (payment_required, payment) = match (&first, &self.payment) {
+            (Err(ServiceError::McpError(error)), Some(payment))
+                if error.code.0 == MCP_PAYMENT_REQUIRED_CODE =>
+            {
+                let Some(data) = error.data.as_ref() else {
+                    return first.map_err(|error| error.to_string());
+                };
+                (data, payment)
+            }
+            (Ok(result), Some(payment)) => {
+                let Some(data) = payment_required_result(result) else {
+                    return first.map_err(|error| error.to_string());
+                };
+                (data, payment)
+            }
             _ => return first.map_err(|error| error.to_string()),
         };
-        let error = serde_json::to_value(error)
-            .map_err(|error| format!("failed to encode MCP payment challenge: {error}"))?;
-        let Some(credential) = payment.credential(&error).await? else {
+        let Some(pending) = payment.prepare(payment_required).await? else {
             return first.map_err(|error| error.to_string());
         };
 
@@ -69,9 +82,15 @@ impl ClientInner {
             .get_or_insert_with(rmcp::model::RequestMetaObject::new)
             .0
             .0
-            .insert(MCP_CREDENTIAL_META_KEY.to_owned(), credential.clone());
-        let mut pending = PendingMcpPayment::new(Arc::clone(payment), credential);
+            .insert(
+                MCP_CREDENTIAL_META_KEY.to_owned(),
+                pending.credential().clone(),
+            );
         match self.service.call_tool(paid).await {
+            Ok(result) if payment_required_result(&result).is_some() => {
+                pending.rollback().await?;
+                Ok(result)
+            }
             Ok(result) => {
                 pending.commit().await?;
                 Ok(result)
@@ -164,6 +183,10 @@ impl ClientInner {
         }
         Ok(())
     }
+}
+
+fn payment_required_result(result: &CallToolResult) -> Option<&Value> {
+    result.meta.as_ref()?.0.get(MCP_PAYMENT_REQUIRED_META_KEY)
 }
 
 pub(crate) struct ConnectedServer {
@@ -562,42 +585,6 @@ async fn finish_startup(
     }
     let tools = tools?;
     Ok(ConnectedServer { client, tools })
-}
-
-struct PendingMcpPayment {
-    provider: Arc<dyn McpPaymentProvider>,
-    credential: Value,
-    active: bool,
-}
-
-impl PendingMcpPayment {
-    fn new(provider: Arc<dyn McpPaymentProvider>, credential: Value) -> Self {
-        Self {
-            provider,
-            credential,
-            active: true,
-        }
-    }
-
-    async fn commit(&mut self) -> Result<(), String> {
-        self.provider.commit(&self.credential).await?;
-        self.active = false;
-        Ok(())
-    }
-
-    async fn rollback(&mut self) -> Result<(), String> {
-        self.provider.rollback(&self.credential).await?;
-        self.active = false;
-        Ok(())
-    }
-}
-
-impl Drop for PendingMcpPayment {
-    fn drop(&mut self) {
-        if self.active {
-            self.provider.abandon(&self.credential);
-        }
-    }
 }
 
 fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {

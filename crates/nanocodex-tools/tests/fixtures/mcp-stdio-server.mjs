@@ -58,6 +58,22 @@ lines.on("line", (line) => {
   } else if (request.method === "tools/call") {
     const paid = request.params?._meta?.["org.paymentauth/credential"] === "fixture-paid";
     if (process.env.NANOCODEX_MCP_FIXTURE_PAYMENT && !paid) {
+      if (process.env.NANOCODEX_MCP_FIXTURE_PAYMENT_RESULT) {
+        send({
+          jsonrpc: "2.0",
+          id: request.id,
+          result: {
+            content: [],
+            isError: true,
+            _meta: {
+              "org.paymentauth/payment-required": {
+                challenges: [{ id: "fixture-payment", method: "tempo", intent: "charge" }],
+              },
+            },
+          },
+        });
+        return;
+      }
       send({
         jsonrpc: "2.0",
         id: request.id,

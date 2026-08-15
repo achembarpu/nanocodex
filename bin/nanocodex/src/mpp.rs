@@ -1,8 +1,4 @@
-use std::{
-    collections::HashMap,
-    path::PathBuf,
-    sync::{Arc, Mutex},
-};
+use std::{path::PathBuf, sync::Arc};
 
 #[cfg(any(
     all(target_os = "linux", not(target_env = "musl")),
@@ -19,22 +15,25 @@ use clap::{ArgAction, Args, builder::NonEmptyStringValueParser};
 use eyre::{Context, Result, eyre};
 use mpp::{
     client::{
-        PaymentContext, PaymentProvider, TempoAccountsProvider,
+        PaymentContext, TempoAccountsProvider,
         tempo::{
             AutoswapConfig,
             session::store::{SqliteChannelStore, SqliteChannelStoreOptions},
         },
     },
-    mcp as mpp_mcp,
+    mcp::{
+        client::{McpPayment, PendingPayment},
+        credential_value, extract_challenges_from_data,
+    },
     protocol::{
         core::{
-            PaymentChallenge, PaymentCredential,
+            PaymentChallenge,
             accept_payment::{ACCEPT_PAYMENT_HEADER, from_methods},
         },
         methods::tempo::{INTENT_CHARGE, METHOD_NAME},
     },
 };
-use nanocodex::tools::mcp::McpPaymentProvider;
+use nanocodex::tools::mcp::{McpPaymentProvider, McpPendingPayment};
 use nanocodex_egress::EgressProxy;
 use nanousd::{NANOUSD_ADDRESS, TEMPO_MAINNET_CHAIN_ID};
 use serde_json::Value;
@@ -339,170 +338,82 @@ impl MppAdapter {
 }
 
 struct TempoMcpPayment {
-    provider: TempoAccountsProvider,
-    resource_url: reqwest::Url,
-    pending: Mutex<HashMap<String, (PaymentChallenge, PaymentCredential)>>,
+    payment: McpPayment<TempoAccountsProvider>,
 }
 
 impl TempoMcpPayment {
     fn new(provider: TempoAccountsProvider, resource_url: reqwest::Url) -> Self {
         Self {
-            provider,
-            resource_url,
-            pending: Mutex::new(HashMap::new()),
+            payment: McpPayment::new(
+                provider,
+                PaymentContext {
+                    url: resource_url,
+                    headers: reqwest::header::HeaderMap::new(),
+                },
+            ),
         }
-    }
-
-    fn key(credential: &Value) -> Result<String, String> {
-        let key = serde_json::to_string(credential)
-            .map_err(|error| format!("invalid Tempo MCP credential: {error}"))?;
-        Ok(key)
-    }
-
-    fn get(
-        &self,
-        credential: &Value,
-    ) -> Result<(String, PaymentChallenge, PaymentCredential), String> {
-        let key = Self::key(credential)?;
-        let decoded: PaymentCredential = serde_json::from_value(credential.clone())
-            .map_err(|error| format!("invalid Tempo MCP credential: {error}"))?;
-        let payment = self
-            .pending
-            .lock()
-            .map_err(|_| "Tempo MCP payment state is unavailable".to_owned())?
-            .get(&key)
-            .cloned()
-            .ok_or_else(|| {
-                format!(
-                    "Tempo MCP payment {} has no pending lifecycle state",
-                    decoded.challenge.id
-                )
-            })?;
-        Ok((key, payment.0, payment.1))
-    }
-
-    fn remove(&self, key: &str) -> Result<(), String> {
-        self.pending
-            .lock()
-            .map_err(|_| "Tempo MCP payment state is unavailable".to_owned())?
-            .remove(key)
-            .ok_or_else(|| "Tempo MCP payment lifecycle was already completed".to_owned())?;
-        Ok(())
-    }
-
-    fn take(&self, credential: &Value) -> Result<(PaymentChallenge, PaymentCredential), String> {
-        let (key, challenge, credential) = self.get(credential)?;
-        self.remove(&key)?;
-        Ok((challenge, credential))
     }
 }
 
 #[async_trait::async_trait]
 impl McpPaymentProvider for TempoMcpPayment {
-    async fn credential(&self, error: &Value) -> Result<Option<Value>, String> {
-        if !mpp_mcp::is_payment_required(error) {
+    async fn prepare(
+        &self,
+        payment_required: &Value,
+    ) -> Result<Option<Box<dyn McpPendingPayment>>, String> {
+        let challenges: Vec<PaymentChallenge> = extract_challenges_from_data(payment_required)
+            .ok_or_else(|| "MCP payment-required payload has no valid challenges".to_owned())?;
+        let Some(pending) = self
+            .payment
+            .prepare(&challenges)
+            .await
+            .map_err(|error| format!("failed to prepare Tempo MCP payment: {error}"))?
+        else {
             return Ok(None);
-        }
-        let challenges = mpp_mcp::extract_challenges(error)
-            .ok_or_else(|| "MCP payment-required error has no valid challenges".to_owned())?;
-        let supported: Vec<_> = challenges
-            .iter()
-            .filter(|challenge| {
-                self.provider
-                    .supports(challenge.method.as_str(), challenge.intent.as_str())
-            })
-            .collect();
-        if supported.is_empty() {
-            return Ok(None);
-        }
-        let payable: Vec<_> = supported
-            .iter()
-            .copied()
-            .filter(|challenge| !challenge.is_expired())
-            .collect();
-        let challenge = self
-            .provider
-            .select_challenge(&payable)
-            .ok_or_else(|| "all supported MCP payment challenges are expired".to_owned())?
-            .clone();
-        let credential = self
-            .provider
-            .pay_with_context(
-                &challenge,
-                PaymentContext {
-                    url: self.resource_url.clone(),
-                    headers: reqwest::header::HeaderMap::new(),
-                },
-            )
-            .await
-            .map_err(|error| format!("failed to create Tempo MCP payment: {error}"))?;
-        let encoded = match serde_json::to_value(&credential) {
-            Ok(encoded) => encoded,
+        };
+        let credential = match credential_value(pending.credential()) {
+            Ok(credential) => credential,
             Err(error) => {
-                let _ = self
-                    .provider
-                    .rollback_payment(&challenge, &credential)
-                    .await;
-                return Err(format!("failed to encode Tempo MCP credential: {error}"));
+                let rollback = pending.rollback().await;
+                let mut message = format!("failed to encode Tempo MCP credential: {error}");
+                if let Err(rollback) = rollback {
+                    message.push_str(&format!("; rollback failed: {rollback}"));
+                }
+                return Err(message);
             }
         };
-        let key = match serde_json::to_string(&encoded) {
-            Ok(key) => key,
-            Err(error) => {
-                let _ = self
-                    .provider
-                    .rollback_payment(&challenge, &credential)
-                    .await;
-                return Err(format!("failed to key Tempo MCP credential: {error}"));
-            }
-        };
-        let mut state = Some((challenge, credential));
-        let insert_error = match self.pending.lock() {
-            Ok(pending) if pending.contains_key(&key) => {
-                Some("Tempo MCP payment credential is already pending".to_owned())
-            }
-            Ok(mut pending) => {
-                pending.insert(key, state.take().expect("payment state is present"));
-                None
-            }
-            Err(_) => Some("Tempo MCP payment state is unavailable".to_owned()),
-        };
-        if let Some(mut error) = insert_error {
-            let (challenge, credential) = state.expect("failed payment state is present");
-            if let Err(rollback) = self
-                .provider
-                .rollback_payment(&challenge, &credential)
-                .await
-            {
-                error.push_str(&format!("; rollback failed: {rollback}"));
-            }
-            return Err(error);
-        }
-        Ok(Some(encoded))
+        Ok(Some(Box::new(TempoPendingMcpPayment {
+            pending,
+            credential,
+        })))
+    }
+}
+
+struct TempoPendingMcpPayment {
+    pending: PendingPayment<TempoAccountsProvider>,
+    credential: Value,
+}
+
+#[async_trait::async_trait]
+impl McpPendingPayment for TempoPendingMcpPayment {
+    fn credential(&self) -> &Value {
+        &self.credential
     }
 
-    async fn commit(&self, credential: &Value) -> Result<(), String> {
-        let (key, challenge, credential) = self.get(credential)?;
-        self.provider
-            .commit_payment(&challenge, &credential)
+    async fn commit(self: Box<Self>) -> Result<(), String> {
+        let Self { pending, .. } = *self;
+        pending
+            .commit()
             .await
-            .map_err(|error| format!("failed to commit Tempo MCP payment: {error}"))?;
-        self.remove(&key)
+            .map_err(|error| format!("failed to commit Tempo MCP payment: {error}"))
     }
 
-    async fn rollback(&self, credential: &Value) -> Result<(), String> {
-        let (key, challenge, credential) = self.get(credential)?;
-        self.provider
-            .rollback_payment(&challenge, &credential)
+    async fn rollback(self: Box<Self>) -> Result<(), String> {
+        let Self { pending, .. } = *self;
+        pending
+            .rollback()
             .await
-            .map_err(|error| format!("failed to roll back Tempo MCP payment: {error}"))?;
-        self.remove(&key)
-    }
-
-    fn abandon(&self, credential: &Value) {
-        if let Ok((challenge, credential)) = self.take(credential) {
-            self.provider.abandon_payment(&challenge, &credential);
-        }
+            .map_err(|error| format!("failed to roll back Tempo MCP payment: {error}"))
     }
 }
 
