@@ -64,6 +64,7 @@ impl HarnessVmResources {
 
 pub(super) enum GuestAuth {
     ApiKey(Arc<str>),
+    AccessToken(Arc<str>),
     AuthFile(Vec<u8>),
 }
 
@@ -108,6 +109,7 @@ impl VmHarnessRunner {
         fs::create_dir_all(&artifact_directory)?;
         let auth = match auth.kind {
             HarnessAuthKind::ApiKey(api_key) => GuestAuth::ApiKey(api_key),
+            HarnessAuthKind::AccessToken(access_token) => GuestAuth::AccessToken(access_token),
             HarnessAuthKind::AuthFile(path) => {
                 let contents = fs::read(&path)?;
                 GuestAuth::AuthFile(contents)
@@ -136,10 +138,18 @@ impl VmHarnessRunner {
         let auth_file = match auth {
             GuestAuth::ApiKey(api_key) => {
                 command_environment.insert(guest.api_key_environment.clone(), api_key.to_string());
+                command_environment.remove("CODEX_ACCESS_TOKEN");
+                None
+            }
+            GuestAuth::AccessToken(access_token) => {
+                command_environment.remove(&guest.api_key_environment);
+                command_environment
+                    .insert("CODEX_ACCESS_TOKEN".to_owned(), access_token.to_string());
                 None
             }
             GuestAuth::AuthFile(contents) => {
                 command_environment.remove(&guest.api_key_environment);
+                command_environment.remove("CODEX_ACCESS_TOKEN");
                 Some(contents)
             }
         };

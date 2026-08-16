@@ -24,6 +24,10 @@ use tokio::{
 use url::Url;
 
 const AUTH_ISSUER: &str = "https://auth.openai.com";
+const AUTH_API_BASE_URL: &str = "https://auth.openai.com/api/accounts";
+const AUTH_API_BASE_URL_ENV: &str = "CODEX_AUTHAPI_BASE_URL";
+const PERSONAL_ACCESS_TOKEN_PREFIX: &str = "at-";
+const WHOAMI_PATH: &str = "/v1/user-auth-credential/whoami";
 const OAUTH_CLIENT_ID: &str = "app_EMoamEEZ73f0CkXaXp7hrann";
 const OAUTH_SCOPE: &str =
     "openid profile email offline_access api.connectors.read api.connectors.invoke";
@@ -84,6 +88,9 @@ pub enum ChatGptAuthError {
     /// Authorization-code or refresh-token exchange failed.
     #[error("ChatGPT token exchange failed: {0}")]
     TokenExchange(String),
+    /// Persistent access-token metadata could not be resolved.
+    #[error("ChatGPT access-token metadata request failed: {0}")]
+    AccessTokenMetadata(String),
 }
 
 /// An in-progress authorization-code login using PKCE and a loopback callback.
@@ -247,18 +254,22 @@ impl OAuthCallback {
     }
 }
 
-/// Loads a persisted `ChatGPT` OAuth session as shared authorization for an agent family.
+/// Loads a persisted `ChatGPT` credential as shared authorization for an agent family.
 ///
 /// The file uses Codex's `auth.json` format and can be shared with Codex and other Nanocodex
-/// processes. Before refreshing, each authorization handle reloads a same-account credential
-/// written by another process. Refreshes within one handle are serialized, and successful writes
-/// preserve unknown fields while atomically replacing the file with owner-only permissions.
+/// processes. OAuth handles reload same-account rotations before refreshing, serialize refreshes,
+/// and atomically preserve unknown fields. Persistent access tokens resolve account metadata once
+/// and never enter the OAuth refresh path.
 ///
 /// # Errors
 ///
 /// Returns an error when the credential file cannot be read or is invalid.
 pub fn load_chatgpt_auth(auth_file: impl Into<PathBuf>) -> Result<OpenAiAuth, ChatGptAuthError> {
     let auth_file = auth_file.into();
+    let document = read_document(&auth_file)?;
+    if let Some(access_token) = personal_access_token_from_document(&document, &auth_file)? {
+        return chatgpt_access_token(access_token);
+    }
     let (credentials, auth_record) = read_stored_auth(&auth_file)?;
     credentials.validate(&auth_file)?;
     let manager = ManagedChatGptAuth {
@@ -276,7 +287,52 @@ pub fn load_chatgpt_auth(auth_file: impl Into<PathBuf>) -> Result<OpenAiAuth, Ch
     Ok(OpenAiAuth::managed_chatgpt(Arc::new(manager)))
 }
 
-/// Inspect a stored `ChatGPT` authorization without exposing its tokens.
+/// Creates `ChatGPT` authorization from a persistent Business or Enterprise access token.
+///
+/// The token must use Codex's `at-` prefix. Account routing metadata is resolved lazily from the
+/// ChatGPT authorization service on the first request and reused for the lifetime of the handle.
+/// Persistent access tokens do not participate in OAuth refresh.
+///
+/// # Errors
+///
+/// Returns an error when the token is empty, has the wrong credential type, or the authorization
+/// client cannot be constructed.
+pub fn chatgpt_access_token(
+    access_token: impl Into<Arc<str>>,
+) -> Result<OpenAiAuth, ChatGptAuthError> {
+    personal_access_token_auth(access_token.into(), &auth_api_base_url())
+}
+
+/// Resolves non-secret account information for any supported Codex `auth.json` credential.
+///
+/// Unlike [`chatgpt_auth_status`], this async variant also supports persistent access tokens,
+/// whose account metadata must be fetched from the authorization service.
+///
+/// # Errors
+///
+/// Returns an error when the credential file cannot be read, is invalid, or its access-token
+/// metadata cannot be resolved.
+pub async fn resolve_chatgpt_auth_status(
+    auth_file: impl AsRef<Path>,
+) -> Result<ChatGptAuthStatus, ChatGptAuthError> {
+    let auth_file = auth_file.as_ref();
+    let document = read_document(auth_file)?;
+    if let Some(access_token) = personal_access_token_from_document(&document, auth_file)? {
+        return hydrate_personal_access_token(
+            &auth_client()?,
+            &whoami_endpoint(&auth_api_base_url()),
+            &access_token,
+        )
+        .await;
+    }
+    let credentials = StoredCredentials::from_document(&document, auth_file)?;
+    credentials.validate(auth_file)?;
+    Ok(credentials.status())
+}
+
+/// Inspect a stored `ChatGPT` OAuth authorization without exposing its tokens.
+///
+/// Use [`resolve_chatgpt_auth_status`] when the file may contain a persistent access token.
 ///
 /// # Errors
 ///
@@ -414,6 +470,8 @@ struct CodexAuthDocument {
     tokens: Option<CodexTokenData>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     last_refresh: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    personal_access_token: Option<String>,
     #[serde(flatten)]
     extra: BTreeMap<String, serde_json::Value>,
 }
@@ -447,6 +505,175 @@ struct ManagedState {
 struct AuthScopedRefreshFailure {
     auth_record: CodexAuthDocument,
     detail: Arc<str>,
+}
+
+#[derive(Deserialize)]
+struct PersonalAccessTokenMetadata {
+    #[serde(default)]
+    email: Option<String>,
+    #[serde(rename = "chatgpt_user_id")]
+    _chatgpt_user_id: String,
+    chatgpt_account_id: String,
+    chatgpt_plan_type: String,
+    chatgpt_account_is_fedramp: bool,
+}
+
+struct PersonalAccessTokenAuth {
+    access_token: Arc<str>,
+    client: reqwest::Client,
+    whoami_endpoint: Arc<str>,
+    status: tokio::sync::OnceCell<ChatGptAuthStatus>,
+}
+
+impl PersonalAccessTokenAuth {
+    async fn status(&self) -> Result<&ChatGptAuthStatus, OpenAiAuthError> {
+        self.status
+            .get_or_try_init(|| async {
+                hydrate_personal_access_token(
+                    &self.client,
+                    &self.whoami_endpoint,
+                    &self.access_token,
+                )
+                .await
+                .map_err(|error| OpenAiAuthError::Unavailable(Arc::from(error.to_string())))
+            })
+            .await
+    }
+}
+
+impl OpenAiAuthSource for PersonalAccessTokenAuth {
+    fn validate(&self) -> Result<(), OpenAiAuthError> {
+        validate_personal_access_token(&self.access_token)
+            .map_err(|error| OpenAiAuthError::Unavailable(Arc::from(error.to_string())))
+    }
+
+    fn snapshot(&self) -> OpenAiAuthFuture<'_, Result<OpenAiAuthSnapshot, OpenAiAuthError>> {
+        Box::pin(async move {
+            let status = self.status().await?;
+            Ok(OpenAiAuthSnapshot::new(
+                OpenAiAuthMode::ChatGpt,
+                Arc::clone(&self.access_token),
+                Some(Arc::<str>::from(status.account_id.as_str())),
+                status.fedramp,
+                0,
+            ))
+        })
+    }
+
+    fn recover_unauthorized(
+        &self,
+        _rejected: &OpenAiAuthSnapshot,
+    ) -> OpenAiAuthFuture<'_, Result<(), OpenAiAuthError>> {
+        Box::pin(async {
+            Err(OpenAiAuthError::LoginRequired(Arc::from(
+                "persistent access token was rejected and cannot be refreshed",
+            )))
+        })
+    }
+}
+
+fn personal_access_token_auth(
+    access_token: Arc<str>,
+    auth_api_base_url: &str,
+) -> Result<OpenAiAuth, ChatGptAuthError> {
+    validate_personal_access_token(&access_token)?;
+    let source = PersonalAccessTokenAuth {
+        access_token,
+        client: auth_client()?,
+        whoami_endpoint: Arc::from(whoami_endpoint(auth_api_base_url)),
+        status: tokio::sync::OnceCell::new(),
+    };
+    Ok(OpenAiAuth::managed_chatgpt(Arc::new(source)))
+}
+
+fn validate_personal_access_token(access_token: &str) -> Result<(), ChatGptAuthError> {
+    if access_token.trim().is_empty() {
+        return Err(ChatGptAuthError::InvalidToken(
+            "persistent access token is empty".into(),
+        ));
+    }
+    if !access_token.starts_with(PERSONAL_ACCESS_TOKEN_PREFIX) {
+        return Err(ChatGptAuthError::InvalidToken(
+            "persistent access token must start with `at-`".into(),
+        ));
+    }
+    Ok(())
+}
+
+fn personal_access_token_from_document(
+    document: &CodexAuthDocument,
+    path: &Path,
+) -> Result<Option<Arc<str>>, ChatGptAuthError> {
+    let selected = match document.auth_mode.as_deref() {
+        Some("personalAccessToken") => true,
+        Some(_) => false,
+        None => document.personal_access_token.is_some(),
+    };
+    if !selected {
+        return Ok(None);
+    }
+    let access_token = document.personal_access_token.as_deref().ok_or_else(|| {
+        ChatGptAuthError::InvalidStore {
+            path: path.to_path_buf(),
+            detail: "Codex auth.json has no personal access token".into(),
+        }
+    })?;
+    validate_personal_access_token(access_token).map_err(|error| {
+        ChatGptAuthError::InvalidStore {
+            path: path.to_path_buf(),
+            detail: error.to_string(),
+        }
+    })?;
+    Ok(Some(Arc::from(access_token)))
+}
+
+async fn hydrate_personal_access_token(
+    client: &reqwest::Client,
+    endpoint: &str,
+    access_token: &str,
+) -> Result<ChatGptAuthStatus, ChatGptAuthError> {
+    let response = client
+        .get(endpoint)
+        .bearer_auth(access_token)
+        .send()
+        .await
+        .map_err(|error| ChatGptAuthError::AccessTokenMetadata(error.to_string()))?;
+    let status = response.status();
+    if !status.is_success() {
+        return Err(ChatGptAuthError::AccessTokenMetadata(format!(
+            "authorization service returned HTTP {status}"
+        )));
+    }
+    let metadata = response
+        .json::<PersonalAccessTokenMetadata>()
+        .await
+        .map_err(|error| ChatGptAuthError::AccessTokenMetadata(error.to_string()))?;
+    if metadata.chatgpt_account_id.trim().is_empty() {
+        return Err(ChatGptAuthError::AccessTokenMetadata(
+            "authorization service returned an empty ChatGPT account ID".into(),
+        ));
+    }
+    Ok(ChatGptAuthStatus {
+        account_id: metadata.chatgpt_account_id,
+        email: metadata.email,
+        plan: Some(metadata.chatgpt_plan_type),
+        fedramp: metadata.chatgpt_account_is_fedramp,
+    })
+}
+
+fn whoami_endpoint(auth_api_base_url: &str) -> String {
+    format!(
+        "{}{WHOAMI_PATH}",
+        auth_api_base_url.trim().trim_end_matches('/')
+    )
+}
+
+fn auth_api_base_url() -> String {
+    std::env::var(AUTH_API_BASE_URL_ENV)
+        .ok()
+        .map(|value| value.trim().trim_end_matches('/').to_owned())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| AUTH_API_BASE_URL.to_owned())
 }
 
 impl ManagedChatGptAuth {

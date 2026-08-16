@@ -102,12 +102,29 @@ println!("{}", completed.output_text());
 
 Keep the credential file outside source control and reuse the same path on
 later runs. It uses Codex's `auth.json` format, so Codex and multiple Nanocodex
-processes can safely share the same path. [`auth::load_chatgpt_auth`] adopts a
-same-account rotation from disk before refreshing, refreshes expiring
-credentials, and recovers an unauthorized request once with the refreshed
-authorization.
-[`auth::chatgpt_auth_status`] inspects the selected account without exposing
-tokens, and [`auth::logout_chatgpt`] removes the stored credentials.
+processes can safely share the same path. The loader accepts both Codex OAuth
+sessions and its `personal_access_token` format. OAuth sessions adopt a
+same-account rotation from disk before refreshing; persistent Business and
+Enterprise access tokens resolve their account metadata once and never enter
+the OAuth refresh path.
+
+Applications that receive a persistent `at-...` token directly can skip the
+credential file:
+
+```rust,no_run
+use nanocodex_oai_api::{OpenAi, auth::chatgpt_access_token};
+
+# fn run() -> Result<(), Box<dyn std::error::Error>> {
+let auth = chatgpt_access_token(std::env::var("CODEX_ACCESS_TOKEN")?)?;
+let openai = OpenAi::new(auth)?;
+# let _ = openai;
+# Ok(())
+# }
+```
+
+[`auth::resolve_chatgpt_auth_status`] inspects either stored credential type
+without exposing tokens, and [`auth::logout_chatgpt`] removes the stored
+credentials.
 
 A [`Response`] is also a typed stream. It retains the completed aggregate
 after the stream reaches [`ResponseEvent::Completed`]:

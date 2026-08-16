@@ -140,6 +140,10 @@ nanocodex auth login # once; shares ~/.codex/auth.json with Codex
 cargo run -p nanocodex-examples --bin voice
 ```
 
+For non-interactive Business or Enterprise hosts, set
+`CODEX_ACCESS_TOKEN=at-...`; it takes precedence over the default stored
+credential and does not require browser login or OAuth refresh.
+
 The lower adapter leaves device and media ownership outside Nanocodex. It reads
 24 kHz mono PCM16 little-endian audio from stdin, writes the same format to
 stdout, and keeps transcripts and agent events on stderr:
