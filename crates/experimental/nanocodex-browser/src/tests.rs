@@ -18,10 +18,10 @@ use super::{
     BrowserCookie, BrowserCruxClient, BrowserCruxScope, BrowserDocumentReadyState,
     BrowserEgressPolicy, BrowserError, BrowserKeyModifier, BrowserLighthouseCategory,
     BrowserLighthouseFormFactor, BrowserLoadState, BrowserNetworkBodyKind, BrowserNetworkContext,
-    BrowserOriginStorage, BrowserPerformanceInsight, BrowserPostActionSnapshot, BrowserPseudoClass,
-    BrowserReactEventKind, BrowserReducedMotion, BrowserRouteHeader, BrowserRouteResponse,
-    BrowserStorageState, BrowserTarget, BrowserTool, BrowserViewport, BrowserWaitForSelectorState,
-    ReactDiagnostics, VirtualAuthenticator, browser_tool_builder,
+    BrowserOriginStorage, BrowserPasskeyMode, BrowserPerformanceInsight, BrowserPostActionSnapshot,
+    BrowserPseudoClass, BrowserReactEventKind, BrowserReducedMotion, BrowserRouteHeader,
+    BrowserRouteResponse, BrowserStorageState, BrowserTarget, BrowserTool, BrowserViewport,
+    BrowserWaitForSelectorState, ReactDiagnostics, VirtualAuthenticator, browser_tool_builder,
 };
 
 #[test]
@@ -149,6 +149,192 @@ async fn virtual_credentials_require_the_first_navigation() -> Result<()> {
     Ok(())
 }
 
+#[tokio::test]
+#[ignore = "requires a local Chrome or Chromium installation"]
+async fn virtual_passkeys_persist_across_browser_sessions() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let credential_store = directory.path().join("browser/passkeys.json");
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(serve_passkey_fixture(listener));
+    let url = format!("http://localhost:{}/", address.port());
+
+    let first = Browser::builder()
+        .virtual_authenticator(
+            VirtualAuthenticator::platform_passkey().credential_store(credential_store.clone()),
+        )
+        .build()?;
+    first
+        .execute(BrowserAction::Open { url: url.clone() })
+        .await?;
+    first
+        .execute(BrowserAction::Click {
+            target: BrowserTarget::role("button").named("Register passkey"),
+            options: None,
+        })
+        .await?;
+    let registration_wait = first
+        .execute(BrowserAction::WaitForText {
+            text: "registered".to_owned(),
+            target: Some(BrowserTarget::css("#status")),
+            hidden: false,
+        })
+        .await;
+    if let Err(error) = registration_wait {
+        let status = first
+            .execute(BrowserAction::Evaluate {
+                expression: "document.querySelector('#status').textContent".to_owned(),
+            })
+            .await?;
+        return Err(eyre!(
+            "passkey registration failed with {status:?}: {error}"
+        ));
+    }
+    let registered = first.virtual_credentials().await?;
+    assert_eq!(registered.len(), 1);
+    let credential_id = registered[0].credential_id.clone();
+    let registration_count = registered[0].sign_count;
+    first.close().await?;
+    assert!(credential_store.is_file());
+
+    let second = Browser::builder()
+        .virtual_authenticator(
+            VirtualAuthenticator::platform_passkey().credential_store(credential_store),
+        )
+        .build()?;
+    second.execute(BrowserAction::Open { url }).await?;
+    let restored = second.virtual_credentials().await?;
+    assert_eq!(restored.len(), 1);
+    assert_eq!(restored[0].credential_id, credential_id);
+    let listed = second.execute(BrowserAction::Passkeys).await?;
+    assert!(matches!(
+        listed,
+        BrowserActionResult::Passkeys {
+            mode: BrowserPasskeyMode::Auto,
+            ref credentials,
+            ..
+        } if credentials.len() == 1 && credentials[0].credential_id == credential_id
+    ));
+    let selected = second
+        .execute(BrowserAction::PasskeyUse {
+            credential_id: credential_id.clone(),
+            relying_party_id: restored[0].relying_party_id.clone(),
+        })
+        .await?;
+    assert!(matches!(
+        selected,
+        BrowserActionResult::Passkeys {
+            mode: BrowserPasskeyMode::Use { ref credential_id, .. },
+            ..
+        } if credential_id == &registered[0].credential_id
+    ));
+    second
+        .execute(BrowserAction::Click {
+            target: BrowserTarget::role("button").named("Authenticate passkey"),
+            options: None,
+        })
+        .await?;
+    let authentication_wait = second
+        .execute(BrowserAction::WaitForText {
+            text: "authenticated".to_owned(),
+            target: Some(BrowserTarget::css("#status")),
+            hidden: false,
+        })
+        .await;
+    if let Err(error) = authentication_wait {
+        let status = second
+            .execute(BrowserAction::Evaluate {
+                expression: "document.querySelector('#status').textContent".to_owned(),
+            })
+            .await?;
+        return Err(eyre!(
+            "passkey authentication failed with {status:?}: {error}"
+        ));
+    }
+    let authenticated = second.virtual_credentials().await?;
+    assert_eq!(authenticated.len(), 1);
+    assert_eq!(authenticated[0].credential_id, credential_id);
+    assert!(authenticated[0].sign_count > registration_count);
+    let fresh = second.execute(BrowserAction::PasskeyNew).await?;
+    assert!(matches!(
+        fresh,
+        BrowserActionResult::Passkeys {
+            mode: BrowserPasskeyMode::New,
+            ref credentials,
+            ..
+        } if credentials.len() == 1 && credentials[0].credential_id == credential_id
+    ));
+    let automatic = second.execute(BrowserAction::PasskeyAuto).await?;
+    assert!(matches!(
+        automatic,
+        BrowserActionResult::Passkeys {
+            mode: BrowserPasskeyMode::Auto,
+            ref credentials,
+            ..
+        } if credentials.len() == 1 && credentials[0].credential_id == credential_id
+    ));
+    second.close().await?;
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a local Chrome or Chromium installation"]
+async fn virtual_authenticator_is_reused_when_returning_to_a_tab() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let credential_store = directory.path().join("browser/passkeys.json");
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(serve_passkey_fixture(listener));
+    let url = format!("http://localhost:{}/", address.port());
+    let browser = Browser::builder()
+        .virtual_authenticator(
+            VirtualAuthenticator::platform_passkey().credential_store(credential_store),
+        )
+        .build()?;
+
+    browser
+        .execute(BrowserAction::Open { url: url.clone() })
+        .await?;
+    let BrowserActionResult::Tabs { tabs, .. } = browser.execute(BrowserAction::ListTabs).await?
+    else {
+        return Err(eyre!("expected browser tabs"));
+    };
+    let original_tab = tabs
+        .into_iter()
+        .find(|tab| tab.active)
+        .ok_or_else(|| eyre!("missing active browser tab"))?
+        .tab_id;
+    browser
+        .execute(BrowserAction::NewTab { url: Some(url) })
+        .await?;
+    browser
+        .execute(BrowserAction::SelectTab {
+            tab_id: original_tab,
+        })
+        .await?;
+    browser.execute(BrowserAction::Passkeys).await?;
+    let BrowserActionResult::Tabs { tabs, .. } = browser.execute(BrowserAction::ListTabs).await?
+    else {
+        return Err(eyre!("expected browser tabs"));
+    };
+    let inactive_tab = tabs
+        .into_iter()
+        .find(|tab| !tab.active)
+        .ok_or_else(|| eyre!("missing inactive browser tab"))?
+        .tab_id;
+    browser
+        .execute(BrowserAction::CloseTab {
+            tab_id: inactive_tab,
+        })
+        .await?;
+    browser.execute(BrowserAction::Passkeys).await?;
+
+    browser.close().await?;
+    server.abort();
+    Ok(())
+}
+
 #[test]
 fn authentication_handoff_requires_an_authenticated_brave_session() -> Result<()> {
     let browser = Browser::new()?;
@@ -261,6 +447,56 @@ text({ opened, snapshot, clicked, html, elementContext });
     Ok(())
 }
 
+#[test]
+fn recording_browser_exposes_model_controlled_passkey_modes() -> Result<()> {
+    let (_browser, recording) = BrowserTool::recording();
+
+    let listed = recording.record(BrowserAction::Passkeys)?;
+    let selected = recording.record(BrowserAction::PasskeyUse {
+        credential_id: "credential-id".to_owned(),
+        relying_party_id: Some("wallet.example".to_owned()),
+    })?;
+    let fresh = recording.record(BrowserAction::PasskeyNew)?;
+    let automatic = recording.record(BrowserAction::PasskeyAuto)?;
+
+    assert!(matches!(
+        listed,
+        BrowserActionResult::Passkeys {
+            action: BrowserActionName::Passkeys,
+            mode: BrowserPasskeyMode::Auto,
+            ..
+        }
+    ));
+    assert!(matches!(
+        selected,
+        BrowserActionResult::Passkeys {
+            action: BrowserActionName::PasskeyUse,
+            mode: BrowserPasskeyMode::Use {
+                credential_id,
+                relying_party_id: Some(relying_party_id),
+            },
+            ..
+        } if credential_id == "credential-id" && relying_party_id == "wallet.example"
+    ));
+    assert!(matches!(
+        fresh,
+        BrowserActionResult::Passkeys {
+            action: BrowserActionName::PasskeyNew,
+            mode: BrowserPasskeyMode::New,
+            ..
+        }
+    ));
+    assert!(matches!(
+        automatic,
+        BrowserActionResult::Passkeys {
+            action: BrowserActionName::PasskeyAuto,
+            mode: BrowserPasskeyMode::Auto,
+            ..
+        }
+    ));
+    Ok(())
+}
+
 #[tokio::test]
 async fn code_mode_description_exposes_browser_action_schema() -> Result<()> {
     let (browser, _recording) = BrowserTool::recording();
@@ -320,6 +556,10 @@ async fn code_mode_description_exposes_browser_action_schema() -> Result<()> {
     assert!(description.contains(r#"action: "axe_audit""#));
     assert!(description.contains(r#"action: "lighthouse_audit""#));
     assert!(description.contains(r#"action: "crux""#));
+    assert!(description.contains(r#"action: "passkeys""#));
+    assert!(description.contains(r#"action: "passkey_use""#));
+    assert!(description.contains(r#"action: "passkey_new""#));
+    assert!(description.contains(r#"action: "passkey_auto""#));
     assert!(description.contains(r#"action: "export_har""#));
     assert!(description.contains(r#"action: "list_frames""#));
     assert!(description.contains(r#"action: "list_tabs""#));
@@ -2300,6 +2540,70 @@ async fn serve_action_fixture(listener: TcpListener) -> std::io::Result<()> {
         });
     }
 }
+
+async fn serve_passkey_fixture(listener: TcpListener) -> std::io::Result<()> {
+    loop {
+        let (mut stream, _) = listener.accept().await?;
+        tokio::spawn(async move {
+            let mut request = [0_u8; 4_096];
+            if stream.read(&mut request).await? == 0 {
+                return Ok(());
+            }
+            let response = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: text/html\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{PASSKEY_FIXTURE_HTML}",
+                PASSKEY_FIXTURE_HTML.len()
+            );
+            stream.write_all(response.as_bytes()).await?;
+            stream.shutdown().await
+        });
+    }
+}
+
+const PASSKEY_FIXTURE_HTML: &str = r##"<!doctype html>
+<button id="register">Register passkey</button>
+<button id="authenticate">Authenticate passkey</button>
+<output id="status" role="status">idle</output>
+<script>
+const challenge = () => crypto.getRandomValues(new Uint8Array(32));
+const status = document.querySelector("#status");
+document.querySelector("#register").addEventListener("click", async () => {
+  try {
+    const credential = await navigator.credentials.create({ publicKey: {
+      challenge: challenge(),
+      rp: { id: location.hostname, name: "Nanocodex passkey fixture" },
+      user: {
+        id: new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]),
+        name: "tester@nanocodex.invalid",
+        displayName: "Nanocodex Tester"
+      },
+      pubKeyCredParams: [{ type: "public-key", alg: -7 }],
+      authenticatorSelection: {
+        authenticatorAttachment: "platform",
+        residentKey: "required",
+        userVerification: "required"
+      },
+      attestation: "none",
+      timeout: 5000
+    }});
+    status.textContent = credential ? "registered" : "registration failed";
+  } catch (error) {
+    status.textContent = `error:${error.name}:${error.message}`;
+  }
+});
+document.querySelector("#authenticate").addEventListener("click", async () => {
+  try {
+    const credential = await navigator.credentials.get({ publicKey: {
+      challenge: challenge(),
+      rpId: location.hostname,
+      userVerification: "required",
+      timeout: 5000
+    }});
+    status.textContent = credential ? "authenticated" : "authentication failed";
+  } catch (error) {
+    status.textContent = `error:${error.name}:${error.message}`;
+  }
+});
+</script>"##;
 
 const ACTION_FIXTURE_HTML: &str = r#"<!doctype html>
 <style>
