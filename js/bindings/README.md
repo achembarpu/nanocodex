@@ -48,10 +48,9 @@ session manager has this shape. Nanocodex defaults the socket to
 `wss://openai.mpp.tempo.xyz/v1/responses` when `mpp` is present.
 
 ```js
-import { Agent, createTempoProvider } from "nanocodex/node";
+import { Agent, createTempoProviderFromAccounts } from "nanocodex/node";
 import { Expiry } from "accounts";
 import { Provider } from "accounts/cli";
-import { tempo } from "mppx/client";
 import { parseUnits } from "viem";
 import { connect } from "viem/experimental/erc7846";
 import WebSocket from "ws";
@@ -77,26 +76,17 @@ const account = await provider.store.accessKeys.select({
 });
 if (!account) throw new Error("Tempo account has no usable access key");
 console.error(`Tempo access-key signer: ${account.accessKeyAddress}`);
-const mpp = tempo.session.manager({
-  account,
-  autoSwap: { tokenIn: [pathUsd], slippage: 1 },
-  bootstrap: true,
-  client: provider.getClient(),
-  webSocket: WebSocket,
-  maxDeposit: "0.05",
-  topUpAmount: "0.05",
+const tempoProvider = await createTempoProviderFromAccounts({
+  wallet: provider,
+  accessKey: account.accessKeyAddress,
+  policy: {
+    autoSwap: { tokenIn: [pathUsd], slippage: 1 },
+    maxDeposit: "0.05",
+    topUpAmount: "0.05",
+  },
+  session: { bootstrap: true, webSocket: WebSocket },
 });
-const mcpMethod = tempo({
-  account,
-  autoSwap: { tokenIn: [pathUsd], slippage: 1 },
-  getClient: () => provider.getClient(),
-  maxDeposit: "0.05",
-  topUpAmount: "0.05",
-});
-const tempoProvider = createTempoProvider({
-  session: mpp,
-  payment: { methods: [mcpMethod] },
-});
+const mpp = tempoProvider.session;
 
 const agent = await Agent.create({ mpp: tempoProvider, thinking: "none", fastMode: true, tools });
 const events = agent.events.watch();
@@ -134,9 +124,14 @@ The application still owns its wallet, deposit policy, persisted payment
 channel store, and final settlement. Keep the manager alive to reuse its channel
 across agents, and supply mppx `channelStore` for reuse after a process or page
 restart. Nanocodex never closes a caller-owned MPP session. `apiKey` and `mpp`
-are mutually exclusive. `createTempoProvider({ session, payment })` explicitly
-selects Tempo provider mode. In that mode Nanocodex automatically adds its
-built-in Mercator MCP and wraps it with the supplied MPPx payment methods.
+are mutually exclusive. `createTempoProviderFromAccounts({ wallet, ... })`
+accepts any provider returned by Accounts SDK `Provider.create(...)`, regardless
+of its wallet adapter, and constructs both payment paths from that provider's
+adapter-neutral `getMppxParameters()` contract. The lower-level
+`createTempoProvider({ session, payment })` remains available when the
+application constructs MPPx itself. Both explicitly select Tempo provider mode.
+In that mode Nanocodex automatically adds its built-in Mercator MCP and wraps it
+with the same wallet and payment policy.
 Passing a generic `MppSession`, an OpenAI key, or ChatGPT host auth does not
 initialize Mercator. Pass `mcp: false` to opt out explicitly.
 

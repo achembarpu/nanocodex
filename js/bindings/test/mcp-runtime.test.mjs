@@ -8,6 +8,7 @@ import { createCodeRuntime } from "../runtime/code-runtime.mjs";
 import { createMcpRuntime } from "../runtime/mcp-runtime.mjs";
 import {
   createTempoProvider,
+  createTempoProviderFromAccounts,
   DEFAULT_MERCATOR_MCP_URL,
   resolveMcpServers,
 } from "../runtime/tempo-provider.mjs";
@@ -32,6 +33,47 @@ test("Mercator is a paid default only for explicit Tempo provider mode", () => {
 
   const custom = { client: { listTools() {}, callTool() {} } };
   assert.equal(resolveMcpServers(provider, { mercator: custom }).mercator, custom);
+});
+
+test("any Accounts SDK provider can own both Tempo payment paths", async () => {
+  const accessKey = "0x0000000000000000000000000000000000000001";
+  const calls = [];
+  const walletParameters = {
+    getClient() { return {}; },
+    async resolveAccount() { return undefined; },
+  };
+  const wallet = {
+    getMppxParameters(options) {
+      calls.push(options);
+      return walletParameters;
+    },
+  };
+
+  const provider = await createTempoProviderFromAccounts({
+    wallet,
+    accessKey,
+    policy: { maxDeposit: "0.05" },
+    session: { bootstrap: true },
+  });
+
+  assert.deepEqual(calls, [{ accessKey }]);
+  assert.equal(provider.kind, "tempo");
+  assert.equal(typeof provider.ws, "function");
+  const mercator = resolveMcpServers(provider, undefined).mercator;
+  assert.equal(mercator.url, DEFAULT_MERCATOR_MCP_URL);
+  assert.equal(mercator.payment.methods.length, 1);
+  assert.equal(mercator.payment.methods[0].length, 2);
+
+  await assert.rejects(
+    createTempoProviderFromAccounts({ wallet: {} }),
+    /getMppxParameters/,
+  );
+  await assert.rejects(
+    createTempoProviderFromAccounts({
+      wallet: { getMppxParameters: () => ({}) },
+    }),
+    /invalid MPPx parameters/,
+  );
 });
 
 test("remote MCP stays deferred behind tool_search and executes through Code Mode", async () => {

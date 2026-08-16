@@ -1,7 +1,15 @@
 export { Actions } from "../index.mjs";
 export { createQuickJsEvaluator } from "../runtime/quickjs-evaluator.mjs";
-export { createTempoProvider, DEFAULT_MERCATOR_MCP_URL } from "../runtime/tempo-provider.mjs";
-export type { TempoProvider } from "../runtime/tempo-provider.mjs";
+export {
+  createTempoProvider,
+  createTempoProviderFromAccounts,
+  DEFAULT_MERCATOR_MCP_URL,
+} from "../runtime/tempo-provider.mjs";
+export type {
+  AccountsTempoProviderOptions,
+  AccountsWallet,
+  TempoProvider,
+} from "../runtime/tempo-provider.mjs";
 export type {
   AgentEvent,
   CostStatus,
