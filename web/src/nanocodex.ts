@@ -1,7 +1,7 @@
 import { createConfig } from "nanocodex-react";
 import type { TuiCommand, TuiMessage } from "nanocodex-tui";
+import type { ArtifactDocument } from "nanocodex-artifacts";
 import type { Address } from "viem";
-import type { ArtifactDocument } from "./artifact";
 
 export type AgentTransport = "openai" | "mpp";
 type StartCommand = Extract<TuiCommand, { type: "start" }>;

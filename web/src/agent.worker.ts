@@ -47,7 +47,8 @@ async function createAgent(
 ) {
   await paymentSessions.clear();
   const workspace = await kernelWorkspace;
-  const { createArtifactTool } = await import("./artifact");
+  const { ArtifactStore } = await import("nanocodex-artifacts");
+  const artifacts = new ArtifactStore(workspace);
   const common = {
     filesystem: workspace,
     tools: {
@@ -55,7 +56,7 @@ async function createAgent(
         recentImages: tools.recentImages,
         rememberImage: tools.rememberImage,
       }),
-      render_artifact: createArtifactTool(workspace, (artifact) => {
+      render_artifact: artifacts.tool((artifact) => {
         worker.postMessage({ type: "artifact", artifact });
       }),
       browserInfo: {

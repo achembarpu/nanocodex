@@ -14,19 +14,18 @@ import {
   memo,
   useCallback,
   useEffect,
+  useRef,
   useState,
 } from "react";
-import type { Workspace } from "nanocodex/browser/workspace";
-
-import {
-  createArtifactTool,
-  deleteArtifact,
-  loadArtifacts,
-  type ArtifactDocument,
-} from "./artifact";
+import type {
+  ArtifactStore,
+  ArtifactDocument,
+  ArtifactInput,
+} from "nanocodex-artifacts";
+import "nanocodex-artifacts-react/styles.css";
 import { openKernelWorkspace } from "./workspace";
 
-const ArtifactRenderer = lazy(() => import("./ArtifactRenderer").then((module) => ({
+const ArtifactRenderer = lazy(() => import("nanocodex-artifacts-react").then((module) => ({
   default: module.ArtifactRenderer,
 })));
 
@@ -39,51 +38,59 @@ export const ArtifactDock = memo(function ArtifactDock({
   agentReady: boolean;
   onPrompt(artifact: ArtifactDocument, prompt: string): void;
 }) {
-  const [workspace, setWorkspace] = useState<Workspace>();
-  const [artifacts, setArtifacts] = useState<ArtifactDocument[]>([]);
+  const [store, setStore] = useState<ArtifactStore>();
+  const [readFile, setReadFile] = useState<(path: string) => Promise<Uint8Array>>();
+  const [artifacts, setArtifacts] = useState<readonly ArtifactDocument[]>([]);
   const [selectedId, setSelectedId] = useState<string>();
   const [open, setOpen] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
   const [message, setMessage] = useState("Loading artifacts…");
+  const refreshEpoch = useRef(0);
   const selected = artifacts.find((artifact) => artifact.id === selectedId) ?? artifacts[0];
 
-  const refresh = useCallback(async (nextWorkspace: Workspace | undefined) => {
-    if (!nextWorkspace) return;
+  const refresh = useCallback(async (nextStore: ArtifactStore | undefined) => {
+    if (!nextStore) return;
+    const epoch = ++refreshEpoch.current;
     try {
-      const next = await loadArtifacts(nextWorkspace);
+      const { artifacts: next, rejected } = await nextStore.scan();
+      if (epoch !== refreshEpoch.current) return;
       setArtifacts(next);
       setSelectedId((current) => current && next.some(({ id }) => id === current) ? current : next[0]?.id);
-      setMessage(next.length ? "" : "Ask the agent to create a dashboard, report, chart, or interactive explainer.");
+      setMessage(rejected.length
+        ? `Skipped ${rejected.length} invalid artifact document${rejected.length === 1 ? "" : "s"}.`
+        : next.length ? "" : "Ask the agent to create a dashboard, report, chart, or interactive explainer.");
     } catch (error) {
-      setMessage(errorMessage(error));
+      if (epoch === refreshEpoch.current) setMessage(errorMessage(error));
     }
   }, []);
 
   useEffect(() => {
     let active = true;
-    void openKernelWorkspace().then(async (nextWorkspace) => {
+    void Promise.all([
+      openKernelWorkspace(),
+      import("nanocodex-artifacts"),
+    ]).then(async ([nextWorkspace, { ArtifactStore }]) => {
       if (!active) return;
-      setWorkspace(nextWorkspace);
-      await refresh(nextWorkspace);
+      const nextStore = new ArtifactStore(nextWorkspace);
+      setStore(nextStore);
+      setReadFile(() => (path: string) => nextWorkspace.readFile(path));
+      await refresh(nextStore);
     }).catch((error) => active && setMessage(errorMessage(error)));
     return () => { active = false; };
   }, [refresh]);
 
   useEffect(() => {
-    if (!workspace) return;
-    const timer = window.setInterval(() => void refresh(workspace), 2_000);
+    if (!store) return;
     const onVisible = () => {
-      if (document.visibilityState === "visible") void refresh(workspace);
+      if (document.visibilityState === "visible") void refresh(store);
     };
     document.addEventListener("visibilitychange", onVisible);
-    return () => {
-      window.clearInterval(timer);
-      document.removeEventListener("visibilitychange", onVisible);
-    };
-  }, [refresh, workspace]);
+    return () => document.removeEventListener("visibilitychange", onVisible);
+  }, [refresh, store]);
 
   useEffect(() => {
     if (!latest) return;
+    refreshEpoch.current++;
     setArtifacts((current) => [latest, ...current.filter(({ id }) => id !== latest.id)]);
     setSelectedId(latest.id);
     setOpen(true);
@@ -91,10 +98,10 @@ export const ArtifactDock = memo(function ArtifactDock({
   }, [latest]);
 
   const remove = async () => {
-    if (!workspace || !selected || !window.confirm(`Delete the artifact “${selected.title}”?`)) return;
+    if (!store || !selected || !window.confirm(`Delete the artifact “${selected.title}”?`)) return;
     try {
-      await deleteArtifact(workspace, selected.id);
-      await refresh(workspace);
+      await store.remove(selected.id);
+      await refresh(store);
     } catch (error) {
       setMessage(errorMessage(error));
     }
@@ -122,14 +129,13 @@ export const ArtifactDock = memo(function ArtifactDock({
   };
 
   const createExample = async () => {
-    if (!workspace) return;
+    if (!store) return;
     try {
-      const tool = createArtifactTool(workspace, (artifact) => {
-        setArtifacts((current) => [artifact, ...current.filter(({ id }) => id !== artifact.id)]);
-        setSelectedId(artifact.id);
-        setMessage("");
-      });
-      await tool.handler(exampleArtifact());
+      const artifact = await store.save(exampleArtifact());
+      refreshEpoch.current++;
+      setArtifacts((current) => [artifact, ...current.filter(({ id }) => id !== artifact.id)]);
+      setSelectedId(artifact.id);
+      setMessage("");
     } catch (error) {
       setMessage(errorMessage(error));
     }
@@ -156,7 +162,7 @@ export const ArtifactDock = memo(function ArtifactDock({
           </select>
         ) : <strong>{selected?.title ?? "Artifacts"}</strong>}
         <div>
-          <DockAction label="Refresh artifacts" onClick={() => void refresh(workspace)}><RefreshCw /></DockAction>
+          <DockAction label="Refresh artifacts" onClick={() => void refresh(store)}><RefreshCw /></DockAction>
           <DockAction label="Download artifact" disabled={!selected} onClick={download}><Download /></DockAction>
           <DockAction label="Delete artifact" disabled={!selected} onClick={() => void remove()}><Trash2 /></DockAction>
           <DockAction label={fullscreen ? "Exit fullscreen" : "View fullscreen"} onClick={() => setFullscreen((value) => !value)}>
@@ -168,13 +174,17 @@ export const ArtifactDock = memo(function ArtifactDock({
       <div className="artifact-canvas">
         {selected ? (
           <Suspense fallback={<div className="artifact-empty">Loading visual renderer…</div>}>
-            <ArtifactRenderer artifact={selected} onPrompt={ask} />
+            <ArtifactRenderer
+              artifact={selected}
+              onAction={ask}
+              readFile={readFile}
+            />
           </Suspense>
         ) : (
           <div className="artifact-empty">
             <PanelRightOpen aria-hidden="true" />
             <p>{message}</p>
-            <button className="artifact-button is-primary" type="button" onClick={() => void createExample()}>
+            <button className="nc-artifact-button is-primary" type="button" onClick={() => void createExample()}>
               Preview an example
             </button>
           </div>
@@ -205,7 +215,7 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function exampleArtifact() {
+function exampleArtifact(): ArtifactInput {
   return {
     id: "artifact-demo",
     title: "Interactive artifact demo",

@@ -148,6 +148,8 @@ jobs:
           cache: npm
           cache-dependency-path: |
             js/bindings/package-lock.json
+            js/artifacts/package-lock.json
+            js/artifacts-react/package-lock.json
             js/react/package-lock.json
             js/tui/package-lock.json
             js/tui-react/package-lock.json
@@ -169,6 +171,9 @@ jobs:
             --package nanocodex-wasm \
             -- -D warnings
           npm ci --prefix js/bindings
+          npm ci --prefix js/artifacts
+          npm run build --prefix js/artifacts
+          npm ci --prefix js/artifacts-react
           npm ci --prefix js/react
           npm ci --prefix js/tui
           npm run build --prefix js/tui
@@ -188,6 +193,8 @@ jobs:
         run: |
           npm run test:typecheck --prefix js/bindings
           npm run check:package --prefix js/bindings
+          npm test --prefix js/artifacts
+          npm test --prefix js/artifacts-react
           npm test --prefix js/react
           npm test --prefix js/tui
           npm test --prefix js/tui-react
@@ -283,6 +290,8 @@ jobs:
           cache: npm
           cache-dependency-path: |
             js/react/package-lock.json
+            js/artifacts/package-lock.json
+            js/artifacts-react/package-lock.json
             js/tui/package-lock.json
             js/tui-react/package-lock.json
             web/package-lock.json
@@ -293,6 +302,10 @@ jobs:
       - name: Build local website packages
         run: |
           npm ci --prefix js/react
+          npm ci --prefix js/artifacts
+          npm run build --prefix js/artifacts
+          npm ci --prefix js/artifacts-react
+          npm run build --prefix js/artifacts-react
           npm ci --prefix js/tui
           npm run build --prefix js/tui
           npm ci --prefix js/tui-react

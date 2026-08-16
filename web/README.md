@@ -92,6 +92,10 @@ layers:
 - `../js/react` publishes `nanocodex-react`, the wagmi-like headless React owner. Its provider and
   hooks manage the module Worker lifecycle, readiness, commands, and event
   subscriptions without imposing presentation policy.
+- `../js/artifacts` publishes `nanocodex-artifacts`, the framework-independent
+  document validator, bounded workspace store, and `render_artifact` tool.
+- `../js/artifacts-react` publishes `nanocodex-artifacts-react`, the accessible,
+  themeable 16-component renderer with injected file and action capabilities.
 - `AgentTerminal` is the optimized Ratatui-faithful consumer: native colors,
   rendering hierarchy, queue/steer behavior, `/btw`, historical branch editing,
   branch navigation, per-branch drafts, clipboard images, and key bindings over
@@ -109,11 +113,13 @@ session and returns only an opaque `HttpOnly`, `SameSite=Strict` cookie. The key
 is never placed in a URL, local storage, React state, or WASM configuration.
 
 The homepage also registers an application-owned `render_artifact` tool. The
-agent emits a validated flat JSON UI tree from a fixed catalog of layout, card,
+agent emits a strictly validated flat JSON UI tree from a fixed catalog of layout, card,
 metric, table, chart, workspace-image, code, tab, progress, badge, and explicit
 agent-action components. Artifact documents persist under the private
 `.nanocodex/artifacts` workspace directory and render in a lazy split-screen or
-fullscreen dock. The renderer never evaluates model-authored JavaScript;
+fullscreen dock. The reusable renderer has no runtime dependencies beyond
+React, uses dependency-free SVG charts, and receives workspace reads and agent
+actions as caller-owned capabilities. It never evaluates model-authored JavaScript;
 button actions are visible user gestures that re-enter the normal queued prompt
 lifecycle.
 A user key takes precedence over the optional deployment-owned

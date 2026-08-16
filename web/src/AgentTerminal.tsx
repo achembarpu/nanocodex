@@ -12,6 +12,7 @@ import {
   useNanocodexMessage,
 } from "nanocodex-react";
 import { NanocodexTui } from "nanocodex-tui-react";
+import type { ArtifactDocument } from "nanocodex-artifacts";
 import type { Address } from "viem";
 import "nanocodex-tui-react/structure.css";
 
@@ -22,7 +23,6 @@ import {
   type WebTuiCommand,
   type WebTuiMessage,
 } from "./nanocodex";
-import type { ArtifactDocument } from "./artifact";
 import { ArtifactDock } from "./ArtifactDock";
 import { WorkspacePanel } from "./WorkspacePanel";
 
