@@ -22,6 +22,7 @@ import {
   type WebTuiCommand,
   type WebTuiMessage,
 } from "./nanocodex";
+import { WorkspacePanel } from "./WorkspacePanel";
 
 const MppControls = lazy(async () => ({
   default: (await import("./MppControls")).MppControls,
@@ -112,11 +113,14 @@ function AgentTerminalDemo() {
           />
         </Suspense>
       )}
-      <NanocodexTui
-        key={transport}
-        enabled={enabled}
-        unavailableMessage={unavailableMessage}
-      />
+      <div className="agent-workspace-shell">
+        <WorkspacePanel />
+        <NanocodexTui
+          key={transport}
+          enabled={enabled}
+          unavailableMessage={unavailableMessage}
+        />
+      </div>
     </div>
   );
 }

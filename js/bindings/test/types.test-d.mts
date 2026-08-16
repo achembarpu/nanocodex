@@ -13,6 +13,8 @@ import {
   Agent as BrowserAgent,
   Workspace as BrowserWorkspace,
 } from "../browser/index.mjs";
+import type { WorkspaceEntry as BrowserWorkspaceEntry } from "../browser/workspace.mjs";
+import type { WorkspaceEntry as NodeWorkspaceEntry } from "../node/workspace.mjs";
 
 declare const apiKey: string;
 declare const accountsWallet: AccountsWallet;
@@ -23,6 +25,10 @@ async function check() {
   Workspace.tools(nodeWorkspace);
   const browserWorkspace = await BrowserWorkspace.open({ name: "notebook" });
   BrowserWorkspace.tools(browserWorkspace);
+  const browserEntries: readonly BrowserWorkspaceEntry[] = await browserWorkspace.list();
+  const nodeEntries: readonly NodeWorkspaceEntry[] = await nodeWorkspace.list();
+  void browserEntries;
+  void nodeEntries;
 
   const agent = await Agent.create({
     apiKey,

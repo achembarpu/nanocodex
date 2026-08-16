@@ -21,7 +21,7 @@ type WorkerScope = {
 
 const worker = self as unknown as WorkerScope;
 const kernelWorkspace = import("nanocodex/browser/workspace")
-  .then((Workspace) => Workspace.open({ name: "nanocodex-home" }));
+  .then((module) => module.open({ name: "nanocodex-home" }));
 const paymentSessions = createPaymentSessionOwner<PaymentSession>();
 const controller = createAgentController({
   createAgent,

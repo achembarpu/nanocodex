@@ -12,6 +12,7 @@ const budgets = Object.freeze({
   initialCss: 70_000,
   initialCssGzip: 14_000,
   agentJavaScript: 850_000,
+  // The persistent OPFS mount adds one lazy workspace edge to the Worker.
   agentWorker: 48_000,
   agentWorkerGzip: 15_500,
   wasm: 2_400_000,

@@ -100,7 +100,8 @@ layers:
 The module Worker loads the generated `nanocodex-wasm` package, and the Rust
 engine owns the persistent Responses session, typed history, event stream, and
 tool loop. It also opens the stable `nanocodex-home` OPFS workspace and exposes
-that same application-owned handle through bounded file tools. Files therefore
+that same application-owned handle through bounded file tools and the homepage
+file tree/editor. Uploads, downloads, and edits use the same handle, so files
 survive agent, Worker, and page restarts without being copied into conversation
 snapshots or Cloudflare state. The Cloudflare Worker upgrades `/api/responses` and proxies OpenAI
 tool calls. It accepts a user-provided OpenAI key into a one-hour Durable Object

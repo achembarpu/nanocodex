@@ -1,4 +1,4 @@
-import type { Workspace, WorkspaceBackend } from "../runtime/workspace.mjs";
+import type { Workspace, WorkspaceBackend, WorkspaceEntry } from "../runtime/workspace.mjs";
 
 export { tools } from "../runtime/workspace.mjs";
 
@@ -6,4 +6,4 @@ export function open(options: {
   path: string;
 }): Promise<Workspace>;
 
-export type { Workspace, WorkspaceBackend };
+export type { Workspace, WorkspaceBackend, WorkspaceEntry };
