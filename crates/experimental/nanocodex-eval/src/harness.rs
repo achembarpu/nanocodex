@@ -70,6 +70,7 @@ pub struct HarnessAuth {
 #[derive(Clone)]
 enum HarnessAuthKind {
     ApiKey(Arc<str>),
+    AccessToken(Arc<str>),
     AuthFile(PathBuf),
 }
 
@@ -88,6 +89,14 @@ impl HarnessAuth {
     pub fn api_key(api_key: impl Into<Arc<str>>) -> Self {
         Self {
             kind: HarnessAuthKind::ApiKey(api_key.into()),
+        }
+    }
+
+    /// Uses a persistent ChatGPT access token in the harness guest.
+    #[must_use]
+    pub fn access_token(access_token: impl Into<Arc<str>>) -> Self {
+        Self {
+            kind: HarnessAuthKind::AccessToken(access_token.into()),
         }
     }
 

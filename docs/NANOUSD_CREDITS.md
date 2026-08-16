@@ -25,15 +25,27 @@ The CLI defaults to the hosted credits service at
 `https://nanocodex-api.paradigm.xyz`. Override it with `--api-url` or
 `NANOCODEX_CREDITS_API_URL` when running a local service.
 
-In Stripe mode, `credits buy` creates an order and opens the returned hosted
-Stripe Checkout URL in the system browser. `--no-open` prints the URL for SSH
-and other headless environments. The CLI then polls the capability-protected
-order until issuance is confirmed.
+In Stripe mode, `credits buy` creates an order and prefers Stripe's Link CLI
+when `link-cli` is installed and the hosted Checkout Session advertises Link
+Pay Token support. Nanocodex opens that Checkout Session in its private
+headless browser, asks Link for purchase approval, injects the merchant-bound
+short-lived token, and submits the existing Checkout Session without exposing
+card details or opening `checkout.stripe.com` in the system browser.
+
+Run `link-cli auth login --client-name Nanocodex` once before using this path.
+If Link CLI is absent or the Checkout Session does not expose its agent-payment
+markers, the CLI opens the hosted Checkout URL in the system browser as before.
+`--no-open` disables both forms of automation and prints the URL for SSH and
+other headless environments. `--no-wait` retains its immediate-return behavior
+and therefore opens the browser rather than waiting for Link approval. The CLI
+then polls the capability-protected order until issuance is confirmed.
 
 Card entry should not be implemented directly in the TUI. Hosted Checkout keeps
-sensitive payment entry in Stripe's browser surface; collecting PAN/CVC data in
-a terminal would move Nanocodex into a substantially larger PCI scope. Stripe
-Terminal is for physical card readers, not an online terminal UI.
+sensitive payment entry in Stripe's browser surface, while the Link Pay Token
+path authorizes a saved Link payment method without returning PAN/CVC data to
+Nanocodex. Collecting card data in a terminal would move Nanocodex into a
+substantially larger PCI scope. Stripe Terminal is for physical card readers,
+not an online terminal UI.
 
 ## Local faucet
 

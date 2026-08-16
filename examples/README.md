@@ -68,7 +68,8 @@ adapters over the same typed Realtime events and retained agent lifecycle.
 Both use the shared Codex/ChatGPT subscription credentials at
 `$CODEX_HOME/auth.json` or `~/.codex/auth.json`; `NANOCODEX_AUTH_FILE` overrides
 that path. Run `nanocodex auth login` once if the shared credential does not
-exist.
+exist. Business and Enterprise hosts can instead set a persistent
+`CODEX_ACCESS_TOKEN=at-...` without a browser login.
 
 The other command-line examples use `OPENAI_API_KEY` by default. The browser
 example instead asks the

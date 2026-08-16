@@ -2,7 +2,7 @@ use std::{path::PathBuf, process::Command};
 
 use clap::{Args, Subcommand};
 use eyre::{Result, WrapErr};
-use nanocodex::oai::auth::{ChatGptLogin, chatgpt_auth_status, logout_chatgpt};
+use nanocodex::oai::auth::{ChatGptLogin, logout_chatgpt, resolve_chatgpt_auth_status};
 
 use crate::config::default_auth_file;
 
@@ -33,7 +33,7 @@ impl Auth {
     pub(crate) async fn run(self) -> Result<()> {
         match self.command {
             AuthCommand::Login(args) => login(args.path()?).await,
-            AuthCommand::Status(args) => status(&args.path()?),
+            AuthCommand::Status(args) => status(&args.path()?).await,
             AuthCommand::Logout(args) => logout(&args.path()?),
         }
     }
@@ -70,8 +70,9 @@ async fn login(auth_file: PathBuf) -> Result<()> {
     Ok(())
 }
 
-fn status(auth_file: &PathBuf) -> Result<()> {
-    let account = chatgpt_auth_status(auth_file)
+async fn status(auth_file: &PathBuf) -> Result<()> {
+    let account = resolve_chatgpt_auth_status(auth_file)
+        .await
         .wrap_err_with(|| format!("could not load {}", auth_file.display()))?;
     println!("Logged in with ChatGPT");
     if let Some(email) = account.email {

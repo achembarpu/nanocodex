@@ -556,6 +556,7 @@ fn canonical_runner(
         agent.shared_builder(treatment.model, treatment.thinking, treatment.web_search)?;
     let auth = match auth {
         SharedAuth::ApiKey(api_key) => HarnessAuth::api_key(api_key),
+        SharedAuth::AccessToken(access_token) => HarnessAuth::access_token(access_token),
         SharedAuth::AuthFile(path) => HarnessAuth::auth_file(path),
     };
     Ok(CanonicalTaskRunner::new(nanocodex, auth))

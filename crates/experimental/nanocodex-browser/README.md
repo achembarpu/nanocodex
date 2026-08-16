@@ -39,6 +39,12 @@ out of the model-facing tool prefix. A runnable version lives at
 `examples/browser_agent.rs`. Callers that deliberately want the eager schema
 can register the same value with `.tool(browser)`.
 
+`BrowserTool::new()`, `BrowserTool::with_executable(...)`, and the Nanocodex CLI
+install an isolated virtual platform authenticator by default, so passkey
+registration and sign-in work unattended inside the private browser session.
+Low-level `Browser::builder()` consumers retain explicit control through
+`.virtual_authenticator(...)`.
+
 For isolation, one non-cloneable VM owner keeps the disposable browser alive
 and gives the agent a tool handle:
 
@@ -147,8 +153,20 @@ installed Chrome, Chromium, or Edge when Brave is not installed. If none is
 available, the CLI starts without browser tools. It copies a standard desktop
 browser profile's complete cookie database by default. `all`
 auto-detects the source; `brave`, `chrome`, `chromium`, `edge`, `firefox`, and
-`safari` select it explicitly. Pass `none` to either option to disable that
-default:
+`safari` select it explicitly.
+
+The CLI's virtual platform authenticator persists testing passkeys across
+browser and Nanocodex restarts in `$NANOCODEX_DIR/browser/passkeys.json`, or
+`~/.nanocodex/browser/passkeys.json` by default. That owner-only file contains
+private keys. Library consumers opt into persistence explicitly with
+`VirtualAuthenticator::platform_passkey().credential_store(path)`.
+With persistence configured, the model-facing browser tool can call `passkeys`
+to inspect non-secret metadata, `passkey_use` to expose one saved credential,
+`passkey_new` to create against an empty authenticator, and `passkey_auto` to
+restore normal automatic credential selection. Selection never deletes the
+other credentials in the persisted store.
+
+Pass `none` to either option to disable the browser or cookie-copy default:
 
 ```console
 nanocodex
