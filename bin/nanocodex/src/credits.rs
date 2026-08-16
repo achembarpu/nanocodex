@@ -1,11 +1,14 @@
-use std::{path::PathBuf, process::Command, time::Duration};
+use std::{path::PathBuf, process::Command, process::Stdio, time::Duration};
 
 use clap::{Args, Subcommand};
-use eyre::{Result, eyre};
+use eyre::{Result, WrapErr, eyre};
+use nanocodex_browser::{Browser, BrowserAction, BrowserActionResult, BrowserFrame};
 use nanousd::{
     CreateOrderRequest, CreateOrderResponse, CreditsClient, NANOUSD_DECIMALS, Order, OrderStatus,
 };
+use serde::Deserialize;
 use tempo_alloy::accounts::TempoAccountsStore;
+use tokio::process::Command as AsyncCommand;
 
 const DEFAULT_CREDITS_API_URL: &str = "https://nanocodex-api.paradigm.xyz";
 
@@ -50,7 +53,7 @@ struct BuyArgs {
     /// Package value in whole US dollars, for example `10`, `25`, or `50`.
     dollars: u64,
 
-    /// Print the checkout URL instead of opening it.
+    /// Print the checkout URL instead of paying with Link CLI or opening a browser.
     #[arg(long)]
     no_open: bool,
 
@@ -167,14 +170,24 @@ async fn buy(
             if !args.json {
                 println!("Checkout: {checkout_url}");
             }
-        } else if let Err(error) = open_browser(checkout_url) {
-            if !args.json {
-                eprintln!(
-                    "Could not open checkout automatically ({error}). Open this URL:\n{checkout_url}"
-                );
+        } else if !args.no_wait && link_cli_available().await {
+            match pay_checkout_with_link(
+                checkout_url,
+                created.order.package.usd_cents,
+                Duration::from_secs(args.timeout_seconds),
+                !args.json,
+            )
+            .await?
+            {
+                LinkCheckout::Submitted => {
+                    if !args.json {
+                        println!("Submitted secure Stripe Checkout with Link.");
+                    }
+                }
+                LinkCheckout::Unsupported => open_checkout(checkout_url, args.json),
             }
-        } else if !args.json {
-            println!("Opened secure Stripe Checkout in your browser.");
+        } else {
+            open_checkout(checkout_url, args.json);
         }
     }
     if args.no_wait {
@@ -196,6 +209,402 @@ async fn buy(
     )
     .await?;
     print_order(&order, args.json)
+}
+
+fn open_checkout(checkout_url: &str, json: bool) {
+    if let Err(error) = open_browser(checkout_url) {
+        if !json {
+            eprintln!(
+                "Could not open checkout automatically ({error}). Open this URL:\n{checkout_url}"
+            );
+        }
+    } else if !json {
+        println!("Opened secure Stripe Checkout in your browser.");
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LinkCheckout {
+    Unsupported,
+    Submitted,
+}
+
+#[derive(Debug, Deserialize)]
+struct LinkAuthStatus {
+    authenticated: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct LinkSpendRequest {
+    id: String,
+    status: String,
+    link_pay_token: Option<String>,
+}
+
+struct LinkCheckoutFrame {
+    frame_id: String,
+    merchant_account_id: String,
+}
+
+async fn link_cli_available() -> bool {
+    match AsyncCommand::new("link-cli")
+        .arg("--version")
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .kill_on_drop(true)
+        .status()
+        .await
+    {
+        Ok(status) => status.success(),
+        Err(_) => false,
+    }
+}
+
+async fn pay_checkout_with_link(
+    checkout_url: &str,
+    amount_cents: u64,
+    timeout: Duration,
+    progress: bool,
+) -> Result<LinkCheckout> {
+    let browser = match Browser::new() {
+        Ok(browser) => browser,
+        Err(error) => {
+            if progress {
+                eprintln!("Link Checkout is unavailable ({error}); falling back to the browser.");
+            }
+            return Ok(LinkCheckout::Unsupported);
+        }
+    };
+    if let Err(error) = browser
+        .execute(BrowserAction::Open {
+            url: checkout_url.to_owned(),
+        })
+        .await
+    {
+        if progress {
+            eprintln!("Link Checkout is unavailable ({error}); falling back to the browser.");
+        }
+        return Ok(LinkCheckout::Unsupported);
+    }
+    let frame = match find_link_checkout_frame(&browser).await {
+        Ok(Some(frame)) => frame,
+        Ok(None) => {
+            drop(browser.close().await);
+            if progress {
+                println!(
+                    "Stripe Checkout does not advertise Link agent payments; using the browser."
+                );
+            }
+            return Ok(LinkCheckout::Unsupported);
+        }
+        Err(error) => {
+            drop(browser.close().await);
+            if progress {
+                eprintln!("Link Checkout is unavailable ({error}); falling back to the browser.");
+            }
+            return Ok(LinkCheckout::Unsupported);
+        }
+    };
+
+    let auth: LinkAuthStatus = run_link_cli(
+        &["auth", "status", "--format", "json"],
+        Duration::from_secs(15),
+    )
+    .await
+    .wrap_err("failed to read Link CLI authentication status")?;
+    if !auth.authenticated {
+        return Err(eyre!(
+            "link-cli is installed but is not authenticated; run `link-cli auth login --client-name Nanocodex` and retry"
+        ));
+    }
+
+    if progress {
+        println!(
+            "Requesting approval in Link for ${}…",
+            format_cents(amount_cents)
+        );
+    }
+    let amount = amount_cents.to_string();
+    let line_item = format!("name:Nanocodex NANOUSD credits,unit_amount:{amount_cents},quantity:1");
+    let total = format!("type:total,display_text:Total,amount:{amount_cents}");
+    let context = format!(
+        "Purchasing ${} of NANOUSD credits for the active Nanocodex Tempo wallet. The user initiated this purchase with `nanocodex credits buy`.",
+        format_cents(amount_cents)
+    );
+    let created: LinkSpendRequest = run_link_cli_owned(
+        vec![
+            "spend-request".to_owned(),
+            "create".to_owned(),
+            "--execution-method".to_owned(),
+            "link_pay_token".to_owned(),
+            "--merchant-account-id".to_owned(),
+            frame.merchant_account_id,
+            "--amount".to_owned(),
+            amount,
+            "--context".to_owned(),
+            context,
+            "--line-item".to_owned(),
+            line_item,
+            "--total".to_owned(),
+            total,
+            "--request-approval".to_owned(),
+            "--format".to_owned(),
+            "json".to_owned(),
+        ],
+        timeout,
+    )
+    .await
+    .wrap_err("Link did not approve the Nanocodex credits purchase")?;
+    if created.status != "approved" {
+        return Err(eyre!(
+            "Link spend request {} finished with status {}",
+            created.id,
+            created.status
+        ));
+    }
+
+    let spend_request_id = created.id;
+    let prepare_and_submit = async {
+        let retrieved: LinkSpendRequest = run_link_cli_owned(
+            vec![
+                "spend-request".to_owned(),
+                "retrieve".to_owned(),
+                spend_request_id.clone(),
+                "--include".to_owned(),
+                "link_pay_token".to_owned(),
+                "--format".to_owned(),
+                "json".to_owned(),
+            ],
+            Duration::from_secs(15),
+        )
+        .await
+        .wrap_err("failed to retrieve the approved Link Pay Token")?;
+        let token = retrieved
+            .link_pay_token
+            .ok_or_else(|| eyre!("approved Link spend request omitted its Link Pay Token"))?;
+        inject_link_pay_token(&browser, &frame.frame_id, &token).await?;
+        wait_for_link_card(&browser).await?;
+        submit_link_checkout(&browser).await
+    }
+    .await;
+    if let Err(error) = prepare_and_submit {
+        let _: Result<LinkSpendRequest> = run_link_cli_owned(
+            vec![
+                "spend-request".to_owned(),
+                "cancel".to_owned(),
+                spend_request_id,
+                "--format".to_owned(),
+                "json".to_owned(),
+            ],
+            Duration::from_secs(15),
+        )
+        .await;
+        drop(browser.close().await);
+        return Err(error);
+    }
+    wait_for_checkout_navigation(&browser, Duration::from_secs(30)).await;
+    drop(browser.close().await);
+    Ok(LinkCheckout::Submitted)
+}
+
+async fn find_link_checkout_frame(browser: &Browser) -> Result<Option<LinkCheckoutFrame>> {
+    const REVEAL: &str = r#"(() => {
+        const root = document.querySelector('.AiAgentPaymentSteering');
+        if (!root) return false;
+        const checkbox = root.querySelector('input[type="checkbox"]');
+        if (checkbox && !checkbox.checked) checkbox.click();
+        return true;
+    })()"#;
+    const READ_BINDING: &str = r#"(() => {
+        const root = document.querySelector('.AiAgentPaymentSteering');
+        const token = document.querySelector('input[name="link_pay_token"]');
+        const merchant = root?.matches('[data-stripe-merchant-account]')
+            ? root
+            : root?.querySelector('[data-stripe-merchant-account]');
+        const account = merchant?.getAttribute('data-stripe-merchant-account');
+        return token && account ? account : null;
+    })()"#;
+
+    for _ in 0..20 {
+        let frames = browser_frames(browser).await?;
+        for frame in &frames {
+            let _ = evaluate_frame(browser, &frame.frame_id, REVEAL).await;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+        for frame in browser_frames(browser).await? {
+            let Ok(value) = evaluate_frame(browser, &frame.frame_id, READ_BINDING).await else {
+                continue;
+            };
+            if let Some(merchant_account_id) = value.as_str().filter(|value| !value.is_empty()) {
+                return Ok(Some(LinkCheckoutFrame {
+                    frame_id: frame.frame_id,
+                    merchant_account_id: merchant_account_id.to_owned(),
+                }));
+            }
+        }
+    }
+    Ok(None)
+}
+
+async fn inject_link_pay_token(browser: &Browser, frame_id: &str, token: &str) -> Result<()> {
+    let token = serde_json::to_string(token)?;
+    let expression = format!(
+        r#"((token) => {{
+            const input = document.querySelector('input[name="link_pay_token"]');
+            if (!input) return false;
+            const setter = Object.getOwnPropertyDescriptor(
+                window.HTMLInputElement.prototype,
+                'value'
+            )?.set;
+            if (!setter) return false;
+            setter.call(input, token);
+            input.dispatchEvent(new Event('input', {{ bubbles: true }}));
+            return true;
+        }})({token})"#
+    );
+    let injected = evaluate_frame(browser, frame_id, &expression).await?;
+    if injected == serde_json::Value::Bool(true) {
+        Ok(())
+    } else {
+        Err(eyre!("Stripe Checkout removed its Link Pay Token input"))
+    }
+}
+
+async fn wait_for_link_card(browser: &Browser) -> Result<()> {
+    const CARD_INPUT_COUNT: &str = r#"document.querySelectorAll(
+        'input[autocomplete="cc-number"], input[name="cardnumber"], input[name="cardNumber"], input[data-elements-stable-field-name="cardNumber"]'
+    ).length"#;
+    let initial = count_across_frames(browser, CARD_INPUT_COUNT).await?;
+    if initial == 0 {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        return Ok(());
+    }
+    for _ in 0..40 {
+        if count_across_frames(browser, CARD_INPUT_COUNT).await? == 0 {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+    Err(eyre!(
+        "Stripe Checkout did not exchange the approved Link Pay Token for a saved payment method"
+    ))
+}
+
+async fn submit_link_checkout(browser: &Browser) -> Result<()> {
+    const SUBMIT: &str = r#"(() => {
+        const visible = (element) => {
+            const style = getComputedStyle(element);
+            const box = element.getBoundingClientRect();
+            return style.visibility !== 'hidden' && style.display !== 'none'
+                && box.width > 0 && box.height > 0;
+        };
+        const buttons = [...document.querySelectorAll('button')].filter(
+            (button) => !button.disabled && visible(button)
+        );
+        const button = buttons.find((candidate) =>
+            candidate.type === 'submit'
+            && /pay|purchase|buy|subscribe|complete|place order/i.test(candidate.textContent || '')
+        ) || buttons.find((candidate) => candidate.type === 'submit');
+        if (!button) return false;
+        button.click();
+        return true;
+    })()"#;
+    for frame in browser_frames(browser).await? {
+        if evaluate_frame(browser, &frame.frame_id, SUBMIT).await? == serde_json::Value::Bool(true)
+        {
+            return Ok(());
+        }
+    }
+    Err(eyre!(
+        "Stripe Checkout did not expose an enabled payment button"
+    ))
+}
+
+async fn wait_for_checkout_navigation(browser: &Browser, timeout: Duration) {
+    let started = tokio::time::Instant::now();
+    while started.elapsed() < timeout {
+        if let Ok(BrowserActionResult::Url { url, .. }) =
+            browser.execute(BrowserAction::GetUrl).await
+            && url.contains("/v1/credits/checkout/complete")
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(250)).await;
+    }
+}
+
+async fn count_across_frames(browser: &Browser, expression: &str) -> Result<u64> {
+    let mut count = 0_u64;
+    for frame in browser_frames(browser).await? {
+        if let Ok(value) = evaluate_frame(browser, &frame.frame_id, expression).await {
+            count = count.saturating_add(value.as_u64().unwrap_or_default());
+        }
+    }
+    Ok(count)
+}
+
+async fn browser_frames(browser: &Browser) -> Result<Vec<BrowserFrame>> {
+    match browser.execute(BrowserAction::ListFrames).await? {
+        BrowserActionResult::Frames { frames, .. } => Ok(frames),
+        _ => Err(eyre!("browser returned an invalid frame result")),
+    }
+}
+
+async fn evaluate_frame(
+    browser: &Browser,
+    frame_id: &str,
+    expression: &str,
+) -> Result<serde_json::Value> {
+    match browser
+        .execute(BrowserAction::EvaluateFrame {
+            frame_id: frame_id.to_owned(),
+            expression: expression.to_owned(),
+        })
+        .await?
+    {
+        BrowserActionResult::FrameEvaluation { value, .. } => Ok(value),
+        _ => Err(eyre!("browser returned an invalid frame evaluation")),
+    }
+}
+
+async fn run_link_cli<T: for<'de> Deserialize<'de>>(args: &[&str], timeout: Duration) -> Result<T> {
+    run_link_cli_owned(args.iter().map(|arg| (*arg).to_owned()).collect(), timeout).await
+}
+
+async fn run_link_cli_owned<T: for<'de> Deserialize<'de>>(
+    args: Vec<String>,
+    timeout: Duration,
+) -> Result<T> {
+    let output = tokio::time::timeout(
+        timeout,
+        AsyncCommand::new("link-cli")
+            .args(&args)
+            .env("NO_UPDATE_NOTIFIER", "1")
+            .stdin(Stdio::null())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await
+    .map_err(|_| eyre!("link-cli timed out after {} seconds", timeout.as_secs()))??;
+    if !output.status.success() {
+        let message = String::from_utf8_lossy(&output.stderr);
+        let message = message.trim();
+        return Err(eyre!(
+            "link-cli exited with {}{}",
+            output.status,
+            if message.is_empty() {
+                String::new()
+            } else {
+                format!(": {message}")
+            }
+        ));
+    }
+    serde_json::from_slice(&output.stdout).wrap_err("link-cli returned invalid JSON")
+}
+
+fn format_cents(cents: u64) -> String {
+    format!("{}.{:02}", cents / 100, cents % 100)
 }
 
 fn describe_created(created: &CreateOrderResponse, json: bool) {
