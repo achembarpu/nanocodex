@@ -31,6 +31,7 @@ export function create(options = {}) {
     websocketUrl,
     apiBaseUrl,
     module,
+    filesystem,
     tools,
     toolMode,
     mcp,
@@ -40,6 +41,9 @@ export function create(options = {}) {
   if (mpp !== undefined && apiKey !== undefined) {
     throw new TypeError("apiKey and mpp are mutually exclusive");
   }
+  if (filesystem && workspace !== undefined && workspace !== filesystem.root) {
+    throw new TypeError("workspace must match filesystem.root when both are provided");
+  }
   const tempoMcp = mpp?.[Symbol.for("nanocodex.tempo.mcp")];
   const host = createNodeHost({
     mpp,
@@ -47,9 +51,10 @@ export function create(options = {}) {
       ? undefined
       : tempoMcp ? { ...tempoMcp, ...mcp } : mcp,
     onEvent: events.emit,
+    filesystem,
     tools,
     toolMode,
-    workspace: workspace ?? resume?.workspace,
+    workspace: workspace ?? filesystem?.root ?? resume?.workspace,
     codeEvaluator,
   });
   activateHost(host);
@@ -101,7 +106,7 @@ export function create(options = {}) {
     fastMode,
     instructions,
     sessionId,
-    workspace,
+    workspace: workspace ?? filesystem?.root,
     resume,
   });
 }

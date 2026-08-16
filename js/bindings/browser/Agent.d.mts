@@ -10,6 +10,7 @@ import type {
   BrowserWebSocketConnection,
   BrowserWebSocketRequest,
 } from "./host.mjs";
+import type { Workspace } from "./workspace.mjs";
 
 export type Agent = DefaultAgent;
 type ToolExposureOptions =
@@ -31,6 +32,8 @@ export declare namespace create {
       sessionId: string,
       request: BrowserWebSocketRequest,
     ): WebSocket | BrowserWebSocketConnection | Promise<WebSocket | BrowserWebSocketConnection>;
+    /** Caller-owned persistent filesystem mounted through standard workspace tools. */
+    filesystem?: Workspace | undefined;
     module?: unknown;
     /** Optional CSP-compatible Code Mode evaluator, such as createQuickJsEvaluator(). */
     codeEvaluator?: CodeEvaluator | undefined;

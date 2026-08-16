@@ -1,5 +1,5 @@
 import type { CodeEvaluator, McpServers, MppSession, ToolMap } from "../types.mjs";
-
+import type { Workspace } from "./workspace.mjs";
 export type BrowserTool = {
   description: string;
   parameters: Record<string, unknown>;
@@ -46,6 +46,7 @@ export function createBrowserHost(options?: {
     sessionId: string,
     request: BrowserWebSocketRequest,
   ) => WebSocket | BrowserWebSocketConnection | Promise<WebSocket | BrowserWebSocketConnection>;
+  filesystem?: Workspace;
   onEvent?: (eventJson: string) => void;
   tools?: ToolMap;
   mpp?: MppSession;

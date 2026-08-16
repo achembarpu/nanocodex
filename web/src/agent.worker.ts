@@ -20,6 +20,8 @@ type WorkerScope = {
 };
 
 const worker = self as unknown as WorkerScope;
+const kernelWorkspace = import("nanocodex/browser/workspace")
+  .then((Workspace) => Workspace.open({ name: "nanocodex-home" }));
 const paymentSessions = createPaymentSessionOwner<PaymentSession>();
 const controller = createAgentController({
   createAgent,
@@ -44,7 +46,9 @@ async function createAgent(
   tools: AgentControllerTools,
 ) {
   await paymentSessions.clear();
+  const workspace = await kernelWorkspace;
   const common = {
+    filesystem: workspace,
     tools: {
       ...createBrowserTools({
         recentImages: tools.recentImages,

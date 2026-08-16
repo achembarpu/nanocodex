@@ -6,3 +6,4 @@ export {
   DEFAULT_MERCATOR_MCP_URL,
 } from "../runtime/tempo-provider.mjs";
 export * as Agent from "./Agent.mjs";
+export * as Workspace from "./workspace.mjs";

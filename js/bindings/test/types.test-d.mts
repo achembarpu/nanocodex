@@ -7,19 +7,30 @@ import {
   type SessionSnapshot,
   type Turn,
   type TurnResult,
+  Workspace,
 } from "../node/index.mjs";
-import { Agent as BrowserAgent } from "../browser/index.mjs";
+import {
+  Agent as BrowserAgent,
+  Workspace as BrowserWorkspace,
+} from "../browser/index.mjs";
 
 declare const apiKey: string;
 declare const accountsWallet: AccountsWallet;
 
 async function check() {
+  const nodeWorkspace = await Workspace.open({ path: "/tmp/nanocodex" });
+  await nodeWorkspace.writeFile("notes.txt", "hello");
+  Workspace.tools(nodeWorkspace);
+  const browserWorkspace = await BrowserWorkspace.open({ name: "notebook" });
+  BrowserWorkspace.tools(browserWorkspace);
+
   const agent = await Agent.create({
     apiKey,
+    filesystem: nodeWorkspace,
     model: "gpt-5.6-terra",
     thinking: "high",
     fastMode: false,
-    workspace: "/workspace",
+    workspace: nodeWorkspace.root,
   });
   await agent.session.compact();
   await agent.session.setFastMode(true);
@@ -70,7 +81,7 @@ async function check() {
 
   await BrowserAgent.create({ websocketUrl: "wss://example.com" });
   await BrowserAgent.create({ hostAuth: true, websocketUrl: "wss://example.com" });
-  await BrowserAgent.create({ apiKey });
+  await BrowserAgent.create({ apiKey, filesystem: browserWorkspace });
   await BrowserAgent.create({ mpp: { async ws() { return {} as WebSocket; } } });
   // @ts-expect-error API-key and MPP authentication are mutually exclusive.
   await BrowserAgent.create({ apiKey, mpp: { async ws() { return {} as WebSocket; } } });

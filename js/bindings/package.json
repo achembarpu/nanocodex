@@ -13,9 +13,17 @@
       "types": "./node/index.d.mts",
       "import": "./node/index.mjs"
     },
+    "./node/workspace": {
+      "types": "./node/workspace.d.mts",
+      "import": "./node/workspace.mjs"
+    },
     "./browser": {
       "types": "./browser/index.d.mts",
       "import": "./browser/index.mjs"
+    },
+    "./browser/workspace": {
+      "types": "./browser/workspace.d.mts",
+      "import": "./browser/workspace.mjs"
     },
     "./wasm": {
       "types": "./wasm.d.mts",

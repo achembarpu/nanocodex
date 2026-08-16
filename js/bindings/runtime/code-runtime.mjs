@@ -4,25 +4,30 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
   let nextCallId = 1;
   const definitions = [];
   const configuredTools = [];
+  const toolByName = new Map();
 
-  for (const [name, tool] of Object.entries(toolConfiguration)) {
-    if (!tool || typeof tool.handler !== "function") {
-      throw new TypeError(`tool ${name} requires a handler function`);
+  function addTools(configuration = {}) {
+    for (const [name, tool] of Object.entries(configuration)) {
+      if (toolByName.has(name)) throw new Error(`tool is already configured: ${name}`);
+      if (!tool || typeof tool.handler !== "function") {
+        throw new TypeError(`tool ${name} requires a handler function`);
+      }
+      const configured = Object.freeze({ handler: tool.handler, name });
+      configuredTools.push(configured);
+      toolByName.set(name, configured);
+      definitions.push(deepFreeze({
+        type: "function",
+        name,
+        description: tool.description || "Application-defined tool.",
+        strict: false,
+        parameters: jsonSnapshot(tool.parameters || {
+          type: "object",
+          additionalProperties: true,
+        }, `tool ${name} parameters`),
+      }));
     }
-    configuredTools.push(Object.freeze({ handler: tool.handler, name }));
-    definitions.push(deepFreeze({
-      type: "function",
-      name,
-      description: tool.description || "Application-defined tool.",
-      strict: false,
-      parameters: jsonSnapshot(tool.parameters || {
-        type: "object",
-        additionalProperties: true,
-      }, `tool ${name} parameters`),
-    }));
   }
-  Object.freeze(definitions);
-  const toolByName = new Map(configuredTools.map((tool) => [tool.name, tool]));
+  addTools(toolConfiguration);
 
   function currentDefinitions() {
     return [
@@ -190,6 +195,7 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
   }
 
   return Object.freeze({
+    addTools,
     addProvider(provider) {
       if (!provider || typeof provider.definitions !== "function" || typeof provider.resolve !== "function") {
         throw new TypeError("a Code Mode tool provider requires definitions() and resolve(name)");
