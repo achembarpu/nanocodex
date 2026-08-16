@@ -148,6 +148,21 @@ const wasmFile = exactlyOne(
   assets.filter((file) => /^nanocodex_bg-.*\.wasm$/.test(file)),
   "Nanocodex WASM asset",
 );
+const wasmPath = join(assetsDirectory, wasmFile);
+const wasmBytes = await readFile(wasmPath);
+const wasmImports = WebAssembly.Module.imports(
+  new WebAssembly.Module(wasmBytes),
+);
+const missingWasmImports = wasmImports.filter((entry) =>
+  entry.module !== "./nanocodex_bg.js"
+  || entry.kind !== "function"
+  || !workerSource.includes(entry.name)
+);
+assert.deepEqual(
+  missingWasmImports,
+  [],
+  "the Agent Worker wasm-bindgen glue does not satisfy the bundled WASM imports",
+);
 const wasm = await fileStats([`assets/${wasmFile}`]);
 within("Nanocodex WASM", wasm.bytes, budgets.wasm);
 within("Nanocodex WASM gzip", wasm.gzipBytes, budgets.wasmGzip);
@@ -176,6 +191,7 @@ console.log(JSON.stringify({
   wasm: {
     bytes: wasm.bytes,
     gzipBytes: wasm.gzipBytes,
+    imports: wasmImports.length,
   },
 }));
 

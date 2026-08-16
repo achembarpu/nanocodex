@@ -36,6 +36,14 @@ export default defineConfig({
       "streamdown",
     ],
   },
+  // The local nanocodex package is regenerated immediately before Vite starts.
+  // Its wasm-bindgen glue and WASM binary are one indivisible artifact, so they
+  // must never be split between Vite's persistent dependency cache and the live
+  // package. Serving the package directly keeps both the normal and Tempo MPP
+  // Worker paths on the same freshly generated pair.
+  optimizeDeps: {
+    exclude: ["nanocodex"],
+  },
   worker: { format: "es" },
   server: {
     fs: {
