@@ -4,7 +4,7 @@ use clap::{Args, ValueEnum};
 use eyre::{Result, WrapErr, eyre};
 use nanocodex_browser::{
     BraveSession, BraveSessionError, Browser, BrowserProfileKind, BrowserStorageState, BrowserTool,
-    FirefoxCookieSource, SafariCookieSource,
+    FirefoxCookieSource, SafariCookieSource, VirtualAuthenticator,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -131,7 +131,9 @@ impl BrowserArgs {
         else {
             return Ok(None);
         };
-        let mut builder = Browser::builder().file_root(workspace);
+        let mut builder = Browser::builder()
+            .file_root(workspace)
+            .virtual_authenticator(VirtualAuthenticator::platform_passkey());
         if let Some(executable) = launch.executable {
             builder = builder.executable(executable);
         }

@@ -3687,6 +3687,10 @@ pub struct BrowserTool {
     backend: BrowserBackend,
 }
 
+fn browser_tool_builder() -> BrowserBuilder {
+    Browser::builder().virtual_authenticator(VirtualAuthenticator::platform_passkey())
+}
+
 impl BrowserTool {
     /// Creates an isolated in-process headless Chromium session.
     ///
@@ -3699,7 +3703,7 @@ impl BrowserTool {
     /// created. A missing Chrome or Chromium installation is reported by the
     /// first tool call.
     pub fn new() -> Result<Self, BrowserBuildError> {
-        Ok(Self::from_browser(Browser::new()?))
+        Ok(Self::from_browser(browser_tool_builder().build()?))
     }
 
     /// Creates a managed browser tool using an explicit Chromium executable.
@@ -3711,7 +3715,9 @@ impl BrowserTool {
     pub fn with_executable(
         executable: impl Into<std::path::PathBuf>,
     ) -> Result<Self, BrowserBuildError> {
-        Ok(Self::from_browser(Browser::with_executable(executable)?))
+        Ok(Self::from_browser(
+            browser_tool_builder().executable(executable).build()?,
+        ))
     }
 
     /// Wraps an existing browser handle as a Nanocodex tool.

@@ -39,6 +39,12 @@ out of the model-facing tool prefix. A runnable version lives at
 `examples/browser_agent.rs`. Callers that deliberately want the eager schema
 can register the same value with `.tool(browser)`.
 
+`BrowserTool::new()`, `BrowserTool::with_executable(...)`, and the Nanocodex CLI
+install an isolated virtual platform authenticator by default, so passkey
+registration and sign-in work unattended inside the private browser session.
+Low-level `Browser::builder()` consumers retain explicit control through
+`.virtual_authenticator(...)`.
+
 For isolation, one non-cloneable VM owner keeps the disposable browser alive
 and gives the agent a tool handle:
 
