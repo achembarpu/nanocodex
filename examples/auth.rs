@@ -1,9 +1,14 @@
 use std::path::PathBuf;
 
 use eyre::{Result, eyre};
-use nanocodex::oai::auth::{OpenAiAuth, load_chatgpt_auth};
+use nanocodex::oai::auth::{OpenAiAuth, chatgpt_access_token, load_chatgpt_auth};
 
 pub(crate) fn load_codex_auth() -> Result<OpenAiAuth> {
+    if let Ok(access_token) = std::env::var("CODEX_ACCESS_TOKEN")
+        && !access_token.trim().is_empty()
+    {
+        return chatgpt_access_token(access_token.trim().to_owned()).map_err(Into::into);
+    }
     let auth_file = default_auth_file()?;
     load_chatgpt_auth(&auth_file).map_err(|error| {
         eyre!(

@@ -4,10 +4,10 @@ use std::sync::{
 };
 
 use super::{
-    ManagedChatGptAuth, ManagedState, StoredCredentials, authorize_url, jwt_expiration, read_store,
-    refresh_error_code, rfc3339_utc, unix_now, write_store,
+    ManagedChatGptAuth, ManagedState, StoredCredentials, authorize_url, jwt_expiration,
+    personal_access_token_auth, read_store, refresh_error_code, rfc3339_utc, unix_now, write_store,
 };
-use crate::auth::{OpenAiAuth, OpenAiAuthError};
+use crate::auth::{OpenAiAuth, OpenAiAuthError, OpenAiAuthMode};
 use base64::{Engine, engine::general_purpose::URL_SAFE_NO_PAD};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
@@ -105,7 +105,7 @@ async fn read_http_request(stream: &mut tokio::net::TcpStream) -> String {
                     .map(str::trim)
                     .and_then(|length| length.parse::<usize>().ok())
             })
-            .unwrap();
+            .unwrap_or(0);
         if request.len() >= headers_end + content_length {
             return String::from_utf8(request).unwrap();
         }
@@ -214,6 +214,59 @@ fn authorization_url_contains_the_pkce_and_offline_access_contract() {
     assert_eq!(query.get("code_challenge").unwrap(), "challenge-value");
     assert_eq!(query.get("state").unwrap(), "state-value");
     assert!(query.get("scope").unwrap().contains("offline_access"));
+}
+
+#[test]
+fn loads_codex_personal_access_token_auth_files_without_oauth_tokens() {
+    let auth_file = temp_auth_file();
+    std::fs::write(&auth_file, br#"{"personal_access_token":"at-file-token"}"#).unwrap();
+
+    let auth = super::load_chatgpt_auth(&auth_file).unwrap();
+
+    assert_eq!(auth.mode(), OpenAiAuthMode::ChatGpt);
+    std::fs::remove_file(auth_file).unwrap();
+}
+
+#[tokio::test]
+async fn persistent_access_token_hydrates_account_metadata_once_and_never_refreshes() {
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let requests = Arc::new(AtomicUsize::new(0));
+    let server_requests = Arc::clone(&requests);
+    let server = tokio::spawn(async move {
+        let (mut stream, _) = listener.accept().await.unwrap();
+        server_requests.fetch_add(1, Ordering::AcqRel);
+        let request = read_http_request(&mut stream).await;
+        assert!(request.starts_with("GET /v1/user-auth-credential/whoami HTTP/1.1"));
+        assert!(request.contains("authorization: Bearer at-persistent-token\r\n"));
+        reply_json(
+            &mut stream,
+            "200 OK",
+            &serde_json::json!({
+                "email": "business@example.com",
+                "chatgpt_user_id": "user-1",
+                "chatgpt_account_id": "account-business",
+                "chatgpt_plan_type": "business",
+                "chatgpt_account_is_fedramp": true
+            }),
+        )
+        .await;
+    });
+    let auth = personal_access_token_auth(Arc::from("at-persistent-token"), &base_url).unwrap();
+
+    let first = auth.snapshot().await.unwrap();
+    let second = auth.snapshot().await.unwrap();
+
+    assert_eq!(first.bearer(), "at-persistent-token");
+    assert_eq!(first.account_id(), Some("account-business"));
+    assert!(first.is_fedramp());
+    assert_eq!(second.account_id(), first.account_id());
+    assert!(matches!(
+        auth.recover_unauthorized(&first).await,
+        Err(OpenAiAuthError::LoginRequired(_))
+    ));
+    server.await.unwrap();
+    assert_eq!(requests.load(Ordering::Acquire), 1);
 }
 
 #[tokio::test]
