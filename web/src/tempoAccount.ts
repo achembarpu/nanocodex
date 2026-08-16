@@ -23,6 +23,54 @@ const accessKeyScopes = MPP_ACCESS_KEY_SCOPES satisfies readonly {
   selector?: string;
 }[];
 
+const MINIMUM_REUSE_HOURS = 1;
+
+type MppAccessKeyRecord = {
+  address: Address;
+  expiry?: number;
+  limits?: readonly { limit: bigint; token: Address }[];
+  scopes?: readonly {
+    address: Address;
+    recipients?: readonly Address[];
+    selector?: string;
+  }[];
+};
+
+type MppAccessKeyStore = {
+  get(query: {
+    accessKey: Address;
+    account: Address;
+    chainId: number;
+  }): Promise<unknown>;
+  list(query: {
+    account: Address;
+    chainId: number;
+  }): readonly MppAccessKeyRecord[];
+};
+
+function supportsMppPolicy(record: MppAccessKeyRecord) {
+  if (record.expiry === undefined || record.expiry < Expiry.hours(MINIMUM_REUSE_HOURS)) return false;
+  const limitsMatch = accessKeyLimits.every((required) =>
+    record.limits?.some((limit) =>
+      limit.token.toLowerCase() === required.token.toLowerCase()
+      && limit.limit >= required.limit
+    )
+  );
+  const scopesMatch = accessKeyScopes.every((required) =>
+    record.scopes?.some((scope) =>
+      scope.address.toLowerCase() === required.address.toLowerCase()
+      && scope.selector?.toLowerCase() === required.selector?.toLowerCase()
+      && (required.recipients === undefined
+        || required.recipients.every((recipient) =>
+          scope.recipients?.some((candidate) =>
+            candidate.toLowerCase() === recipient.toLowerCase()
+          )
+        ))
+    )
+  );
+  return limitsMatch && scopesMatch;
+}
+
 function accessKeyAuthorization() {
   return {
     expiry: Expiry.days(1),
@@ -46,7 +94,7 @@ export const tempoAccount = Provider.create({
     authorize: () => ({
       ...accessKeyAuthorization(),
       reuse: {
-        minExpiry: Expiry.hours(1),
+        minExpiry: Expiry.hours(MINIMUM_REUSE_HOURS),
         minLimits: accessKeyLimits,
       },
     }),
@@ -66,18 +114,25 @@ export async function resolveTempoMppAccessKey(
   accessKeyAddress?: Address,
 ) {
   const client = tempoAccount.getClient();
-  const account = await tempoAccount.getMppxParameters(
-    accessKeyAddress ? { accessKey: accessKeyAddress } : undefined,
-  ).resolveAccount({
-    account: tempoAccount.getAccount({ address: rootAddress }),
-    chainId: client.chain.id,
-    operation: { kind: "authorizePaymentChannel" },
-  });
-  const address = account && "accessKeyAddress" in account
-    && typeof account.accessKeyAddress === "string"
-    ? account.accessKeyAddress
-    : undefined;
-  return address as Address | undefined;
+  const accessKeys = (tempoAccount.store as unknown as {
+    accessKeys: MppAccessKeyStore;
+  }).accessKeys;
+  const candidates = accessKeys
+    .list({ account: rootAddress, chainId: client.chain.id })
+    .filter((record) =>
+      (!accessKeyAddress
+        || record.address.toLowerCase() === accessKeyAddress.toLowerCase())
+      && supportsMppPolicy(record)
+    );
+  for (const candidate of candidates) {
+    const account = await accessKeys.get({
+      accessKey: candidate.address,
+      account: rootAddress,
+      chainId: client.chain.id,
+    });
+    if (account) return candidate.address;
+  }
+  return undefined;
 }
 
 export async function ensureTempoMppAccessKey(

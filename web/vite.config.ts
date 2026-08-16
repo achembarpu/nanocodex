@@ -48,6 +48,8 @@ export default defineConfig({
     include: [
       "nanocodex > ajv",
       "nanocodex > ajv-formats",
+      "nanocodex > content-type",
+      "nanocodex > eventemitter3",
     ],
   },
   worker: { format: "es" },

@@ -233,8 +233,8 @@ function ConnectedMppControls({ jsonl, payment, onDisconnect, onReady }: {
           />
           <Detail label="Signer" value={payment?.accessKeyAddress ?? accessKeyAddress ?? "Not authorized"} />
           <Detail label="Channel" value={payment?.channelId ?? "Opens on first paid request"} />
-          <Detail label="Model paid" value={payment ? formatTokenBalance(BigInt(payment.cumulative), "USDC.e") : "0 USDC.e"} />
-          <Detail label="Mercator paid" value={payment?.mcpCumulative ? formatTokenBalance(BigInt(payment.mcpCumulative), "USD") : "0 USD"} />
+          <Detail label="Model authorized" value={payment ? formatTokenBalance(BigInt(payment.cumulative), "USDC.e") : "0 USDC.e"} />
+          <Detail label="Mercator authorized" value={payment?.mcpCumulative ? formatTokenBalance(BigInt(payment.mcpCumulative), "USDC.e") : "0 USDC.e"} />
         </dl>
       ) : null}
       {jsonl.length ? (

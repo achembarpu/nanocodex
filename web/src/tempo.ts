@@ -4,8 +4,9 @@ import { createTempoProviderFromAccounts } from "nanocodex/browser";
 import type { Address } from "viem";
 
 import {
-  MPP_ACCESS_KEY_LIMIT,
+  MPP_MODEL_CHANNEL_LIMIT,
   MPP_RESPONSES_WEBSOCKET_URL,
+  PATH_USD,
   TEMPO_ACCOUNT_STORAGE_KEY,
   USDC_E,
 } from "./tempo-policy";
@@ -55,6 +56,7 @@ export async function createTempoMppSession(
   const storage = Storage.idb({ key: "nanocodex-mpp-channels" });
   const storageScope = [
     rootAddress.toLowerCase(),
+    accessKeyAddress.toLowerCase(),
     new URL(MPP_RESPONSES_WEBSOCKET_URL).origin,
   ].join(":");
   const storageKey = (key: string) => `${storageScope}:${key}`;
@@ -68,11 +70,11 @@ export async function createTempoMppSession(
     wallet: provider,
     accessKey: accessKeyAddress as Address,
     policy: {
-      autoSwap: { tokenIn: [USDC_E], slippage: 1 },
+      autoSwap: { tokenIn: [USDC_E, PATH_USD], slippage: 1 },
       channelStore,
-      maxDeposit: MPP_ACCESS_KEY_LIMIT,
+      maxDeposit: MPP_MODEL_CHANNEL_LIMIT,
     },
-    session: { bootstrap: true },
+    session: { bootstrap: false },
     mercator: {
       onChannelUpdate(entry) {
         mcpChannels.set(entry.channelId, entry.cumulativeAmount);
