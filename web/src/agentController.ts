@@ -115,6 +115,23 @@ export function createAgentController({
           payerAddress: message.transport === "mpp" ? message.payerAddress : undefined,
         });
         return;
+      case "artifactPrompt": {
+        const target = { pane: "main" as const, branchId: 0 };
+        postMessage({
+          type: "externalPrompt",
+          target,
+          id: message.id,
+          prompt: message.prompt,
+        });
+        await handle({
+          type: "prompt",
+          target,
+          id: message.id,
+          prompt: message.prompt,
+          intent: "queue",
+        });
+        return;
+      }
       case "prompt": {
         const branch = resolveTarget(message.target);
         if (!branch) {

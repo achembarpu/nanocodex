@@ -47,12 +47,16 @@ async function createAgent(
 ) {
   await paymentSessions.clear();
   const workspace = await kernelWorkspace;
+  const { createArtifactTool } = await import("./artifact");
   const common = {
     filesystem: workspace,
     tools: {
       ...createBrowserTools({
         recentImages: tools.recentImages,
         rememberImage: tools.rememberImage,
+      }),
+      render_artifact: createArtifactTool(workspace, (artifact) => {
+        worker.postMessage({ type: "artifact", artifact });
       }),
       browserInfo: {
         description: "Return basic information about the browser Worker runtime.",

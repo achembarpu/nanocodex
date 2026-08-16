@@ -114,6 +114,28 @@ test("the Worker controller owns prompts, steering, cancellation, events, and cl
     error: "model failed",
   });
 
+  await controller.handle({
+    type: "artifactPrompt",
+    id: 4,
+    prompt: "Explain the selected chart",
+  });
+  assert.deepEqual(messages.shift(), {
+    type: "externalPrompt",
+    target: main,
+    id: 4,
+    prompt: "Explain the selected chart",
+  });
+  const artifactTurn = harness.turns[2]!;
+  assert.equal(artifactTurn.input, "Explain the selected chart");
+  artifactTurn.complete("explained");
+  await settle();
+  assert.deepEqual(messages.shift(), {
+    type: "turnFinished",
+    target: main,
+    id: 4,
+    message: "explained",
+  });
+
   await controller.dispose();
   assert.equal(harness.watchOffs, 1);
   assert.equal(harness.agents.get("root")?.disposed, 1);
@@ -123,7 +145,7 @@ test("the Worker controller owns prompts, steering, cancellation, events, and cl
     controller.handle({
       type: "prompt",
       target: main,
-      id: 4,
+      id: 5,
       prompt: "late",
       intent: "queue",
     }),

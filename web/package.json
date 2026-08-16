@@ -22,6 +22,8 @@
     "deploy": "npm run build && wrangler deploy"
   },
   "dependencies": {
+    "@json-render/core": "0.20.0",
+    "@json-render/react": "0.20.0",
     "@modelcontextprotocol/sdk": "1.30.0",
     "@pierre/diffs": "1.2.12",
     "@pierre/theme": "^1.1.0",
@@ -45,7 +47,8 @@
     "recharts": "^3.10.1",
     "shiki": "^4.3.1",
     "streamdown": "^2.5.0",
-    "viem": "^2.55.11"
+    "viem": "^2.55.11",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@cloudflare/vite-plugin": "1.37.1",

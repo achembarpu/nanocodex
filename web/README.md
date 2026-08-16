@@ -107,6 +107,15 @@ snapshots or Cloudflare state. The Cloudflare Worker upgrades `/api/responses` a
 tool calls. It accepts a user-provided OpenAI key into a one-hour Durable Object
 session and returns only an opaque `HttpOnly`, `SameSite=Strict` cookie. The key
 is never placed in a URL, local storage, React state, or WASM configuration.
+
+The homepage also registers an application-owned `render_artifact` tool. The
+agent emits a validated flat JSON UI tree from a fixed catalog of layout, card,
+metric, table, chart, workspace-image, code, tab, progress, badge, and explicit
+agent-action components. Artifact documents persist under the private
+`.nanocodex/artifacts` workspace directory and render in a lazy split-screen or
+fullscreen dock. The renderer never evaluates model-authored JavaScript;
+button actions are visible user gestures that re-enter the normal queued prompt
+lifecycle.
 A user key takes precedence over the optional deployment-owned
 `OPENAI_API_KEY`; forgetting or expiring it falls back to that deployment key
 when present.

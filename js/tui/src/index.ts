@@ -22,6 +22,7 @@ export type TuiCommand =
 
 export type TuiMessage =
   | { type: "ready"; sessionId: string }
+  | { type: "externalPrompt"; target: TuiTarget; id: number; prompt: string }
   | { type: "event"; target: TuiTarget; event: AgentEvent }
   | { type: "turnFinished"; target: TuiTarget; id: number; message?: string; error?: string }
   | { type: "steerAdmitted"; target: TuiTarget; id: number }

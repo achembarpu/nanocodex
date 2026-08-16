@@ -190,6 +190,12 @@ export function NanocodexTui({
       }
       flushEvents();
       if (data.type === "ready") return;
+      if (data.type === "externalPrompt") {
+        setTui((current) => updateConversation(current, data.target, (conversation) =>
+          queuePrompt(conversation, data.id, data.prompt),
+        ));
+        return;
+      }
       if (data.type === "turnFinished") {
         setTui((current) => updateConversation(current, data.target, (conversation) =>
           turnFinished(conversation, data.error),

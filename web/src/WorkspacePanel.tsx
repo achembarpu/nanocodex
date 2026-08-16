@@ -56,7 +56,8 @@ export const WorkspacePanel = memo(function WorkspacePanel() {
   const refresh = useCallback(async (nextWorkspace: Workspace | undefined) => {
     if (!nextWorkspace) return;
     try {
-      const nextEntries = await nextWorkspace.list(".", { recursive: true });
+      const nextEntries = (await nextWorkspace.list(".", { recursive: true }))
+        .filter((entry) => !entry.path.startsWith(`${nextWorkspace.root}/.nanocodex`));
       setEntries(nextEntries);
       setSelectedPath((current) => current && nextEntries.some(({ path }) => path === current)
         ? current

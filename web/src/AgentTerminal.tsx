@@ -22,11 +22,14 @@ import {
   type WebTuiCommand,
   type WebTuiMessage,
 } from "./nanocodex";
+import type { ArtifactDocument } from "./artifact";
+import { ArtifactDock } from "./ArtifactDock";
 import { WorkspacePanel } from "./WorkspacePanel";
 
 const MppControls = lazy(async () => ({
   default: (await import("./MppControls")).MppControls,
 }));
+let nextArtifactPromptId = 1_000_000_000;
 
 /** Website policy around the reusable TUI: credential UX and the site theme. */
 export const AgentTerminal = memo(function AgentTerminal() {
@@ -43,11 +46,13 @@ function AgentTerminalDemo() {
   const [credentialSource, setCredentialSource] = useState<CredentialSource | undefined>();
   const [payment, setPayment] = useState<PaymentStatus>();
   const [jsonl, setJsonl] = useState<string[]>([]);
+  const [latestArtifact, setLatestArtifact] = useState<ArtifactDocument>();
   useNanocodexMessage<WebTuiMessage>((message) => {
     if (message.type === "mppPayment") setPayment(message.payment);
     if (message.type === "mppJsonl") {
       setJsonl((current) => [...current.slice(-99), message.line]);
     }
+    if (message.type === "artifact") setLatestArtifact(message.artifact);
   });
   useEffect(() => {
     setPayment(undefined);
@@ -66,6 +71,13 @@ function AgentTerminalDemo() {
     nanocodexConfig.restart(startCommand("mpp", payerAddress, accessKeyAddress));
   }, []);
   const disconnectMpp = useCallback(() => nanocodexConfig.disconnect(), []);
+  const promptFromArtifact = useCallback((artifact: ArtifactDocument, prompt: string) => {
+    agent.dispatch({
+      type: "artifactPrompt",
+      id: nextArtifactPromptId++,
+      prompt: `The user invoked an action from the “${artifact.title}” artifact (${artifact.id}): ${prompt}\n\nThe artifact document is available at /workspace/.nanocodex/artifacts/${artifact.id}.json.`,
+    });
+  }, [agent]);
   const selectTransport = (next: AgentTransport) => {
     if (next === transport) return;
     nanocodexConfig.disconnect();
@@ -119,6 +131,11 @@ function AgentTerminalDemo() {
           key={transport}
           enabled={enabled}
           unavailableMessage={unavailableMessage}
+        />
+        <ArtifactDock
+          latest={latestArtifact}
+          agentReady={agent.status === "ready"}
+          onPrompt={promptFromArtifact}
         />
       </div>
     </div>
