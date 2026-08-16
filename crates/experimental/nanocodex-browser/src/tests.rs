@@ -21,8 +21,16 @@ use super::{
     BrowserOriginStorage, BrowserPerformanceInsight, BrowserPostActionSnapshot, BrowserPseudoClass,
     BrowserReactEventKind, BrowserReducedMotion, BrowserRouteHeader, BrowserRouteResponse,
     BrowserStorageState, BrowserTarget, BrowserTool, BrowserViewport, BrowserWaitForSelectorState,
-    ReactDiagnostics, VirtualAuthenticator,
+    ReactDiagnostics, VirtualAuthenticator, browser_tool_builder,
 };
+
+#[test]
+fn browser_tool_enables_virtual_platform_passkeys() {
+    assert_eq!(
+        browser_tool_builder().virtual_authenticator,
+        Some(VirtualAuthenticator::platform_passkey())
+    );
+}
 
 #[test]
 fn remote_browser_accepts_cookie_only_brave_sessions() -> Result<()> {
