@@ -25,6 +25,29 @@ the MPP integration from same-origin IndexedDB and opens
 `wss://openai.mpp.tempo.xyz/v1/responses`. The normal OpenAI bundle and runtime
 do not initialize a wallet, access key, or payment session.
 
+Marking the model manager as a Nanocodex Tempo provider automatically enables
+the built-in Mercator MCP at `https://mercator.tempoxyz.dev/mcp`, backed by the
+same delegated signer and persistent channel store. Nanocodex exposes
+only provider-native `tool_search` to the model initially. Mercator's tools stay
+deferred under `mcp__mercator__*`, become discoverable through BM25 search, and
+are invoked from Code Mode. MPPx wraps the MCP SDK client and automatically
+answers Tempo payment challenges, including paid flows Mercator composes from
+its service catalog. The UI reports model and Mercator cumulative payments
+separately.
+
+Try this after starting the Tempo MPP agent:
+
+```text
+Use tool_search to discover the Mercator tools. Then, only from Code Mode,
+search for a low-cost service that returns the current Tempo chain block number
+and describe the best match. Build and quote a one-node flow with totalMax and
+maxSpend both set to 0.01. If the aggregate quote is at most 0.01 pathUSD,
+submit it with a unique idempotency key and poll the job until it completes.
+Report the chosen service, quote, result, model MPP payment, and
+Mercator/downstream MPP payment. Never call mcp__mercator__* as a top-level
+model tool.
+```
+
 In either mode the Worker owns one persistent Nanocodex agent. In MPP mode it
 also owns one persistent MPP manager, which reuses its paid channel. Serialized
 channel state is retained in IndexedDB and can be recovered after a Worker or

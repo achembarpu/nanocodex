@@ -1,7 +1,7 @@
 import { Provider, Storage } from "accounts";
-import { createJsonChannelStore, tempo } from "mppx/client";
+import { createJsonChannelStore } from "mppx/client";
+import { createTempoProviderFromAccounts } from "nanocodex/browser";
 import { parseUnits } from "viem";
-import type { Account as TempoAccount } from "viem/tempo";
 import { PATH_USD, USDC_E } from "./tempo-policy";
 
 const accessKeyLimits = [
@@ -16,7 +16,6 @@ type AccessKeyRecord = {
 
 type AccountsStore = {
   accessKeys: {
-    get(query: { account: `0x${string}`; accessKey: `0x${string}`; chainId: number }): Promise<TempoAccount.Account | undefined>;
     list(query: { account: `0x${string}`; chainId: number }): readonly AccessKeyRecord[];
   };
   persist: {
@@ -33,12 +32,6 @@ export async function createTempoMppSession() {
   const root = provider.getAccount();
   const record = findReusableAccessKey(provider, root.address);
   if (!record) throw new Error("Authorize the Tempo access key in the page first");
-  const account = await provider.store.accessKeys.get({
-    account: root.address,
-    accessKey: record.address,
-    chainId: provider.getClient().chain.id,
-  });
-  if (!account?.accessKeyAddress) throw new Error("Tempo Accounts SDK did not load an access key");
 
   const channelStorage = Storage.idb({ key: "nanocodex-mpp-channels" });
   const channelStore = createJsonChannelStore({
@@ -52,19 +45,29 @@ export async function createTempoMppSession() {
       await channelStorage.removeItem(key);
     },
   });
-  const mpp = tempo.session.manager({
-    account,
-    autoSwap: { tokenIn: [PATH_USD], slippage: 1 },
-    bootstrap: true,
-    channelStore,
-    client: provider.getClient(),
-    maxDeposit: "0.05",
-    topUpAmount: "0.05",
+  const mcpChannels = new Map<string, bigint>();
+  const tempoProvider = await createTempoProviderFromAccounts({
+    wallet: provider,
+    accessKey: record.address,
+    policy: {
+      autoSwap: { tokenIn: [PATH_USD as `0x${string}`], slippage: 1 },
+      channelStore,
+      maxDeposit: "0.05",
+      topUpAmount: "0.05",
+    },
+    session: { bootstrap: true },
+    mercator: {
+      onChannelUpdate(entry) {
+        mcpChannels.set(entry.channelId, entry.cumulativeAmount);
+      },
+    },
   });
   return {
-    mpp,
+    mpp: tempoProvider.session,
+    provider: tempoProvider,
+    mcpCumulative: () => [...mcpChannels.values()].reduce((total, value) => total + value, 0n),
     rootAddress: root.address,
-    accessKeyAddress: account.accessKeyAddress,
+    accessKeyAddress: record.address,
   };
 }
 

@@ -33,17 +33,24 @@ export function create(options = {}) {
     module,
     tools,
     toolMode,
+    mcp,
+    codeEvaluator,
   } = options;
   const events = createEventChannel();
   if (mpp !== undefined && apiKey !== undefined) {
     throw new TypeError("apiKey and mpp are mutually exclusive");
   }
+  const tempoMcp = mpp?.[Symbol.for("nanocodex.tempo.mcp")];
   const host = createNodeHost({
     mpp,
+    mcpServers: mcp === false
+      ? undefined
+      : tempoMcp ? { ...tempoMcp, ...mcp } : mcp,
     onEvent: events.emit,
     tools,
     toolMode,
     workspace: workspace ?? resume?.workspace,
+    codeEvaluator,
   });
   activateHost(host);
   const runtime = defineRuntime({
@@ -51,23 +58,40 @@ export function create(options = {}) {
     name: "Nanocodex Node WASM",
     type: "node",
     async create(config) {
-      activateHost(host);
-      const Nanocodex = module === undefined
-        ? loadNodeNanocodex()
-        : await loadWebNanocodex(module);
-      activateHost(host);
-      return new Nanocodex(JSON.stringify(toWasmConfig({
-        apiKey: apiKey ?? (mpp === undefined ? undefined : "mpp-managed"),
-        websocketUrl: websocketUrl ?? (mpp === undefined
-          ? undefined
-          : "wss://openai.mpp.tempo.xyz/v1/responses"),
-        apiBaseUrl,
-        ...config,
-      })));
+      try {
+        activateHost(host);
+        await host.ready();
+        const Nanocodex = module === undefined
+          ? loadNodeNanocodex()
+          : await loadWebNanocodex(module);
+        activateHost(host);
+        return new Nanocodex(JSON.stringify(toWasmConfig({
+          apiKey: apiKey ?? (mpp === undefined ? undefined : "mpp-managed"),
+          websocketUrl: websocketUrl ?? (mpp === undefined
+            ? undefined
+            : "wss://openai.mpp.tempo.xyz/v1/responses"),
+          apiBaseUrl,
+          ...config,
+        })));
+      } catch (error) {
+        await host.dispose();
+        throw error;
+      }
     },
     subscribe: events.subscribe,
-    adopt: (raw) => bindHostSession(host, raw.sessionId),
-    release: (raw) => releaseHostSession(host, raw.sessionId),
+    adopt(raw) {
+      host.retain();
+      try {
+        bindHostSession(host, raw.sessionId);
+      } catch (error) {
+        releaseHost(host);
+        throw error;
+      }
+    },
+    release(raw) {
+      releaseHostSession(host, raw.sessionId);
+      releaseHost(host);
+    },
     decorate: (agent) => agent.extend(agentActions()),
   });
   return createAgentClient(runtime, {
@@ -79,6 +103,13 @@ export function create(options = {}) {
     sessionId,
     workspace,
     resume,
+  });
+}
+
+function releaseHost(host) {
+  void host.release().catch((error) => {
+    if (typeof globalThis.reportError === "function") globalThis.reportError(error);
+    else console.error(error);
   });
 }
 

@@ -61,8 +61,8 @@ function AgentTerminalDemo() {
     }
   }, [credentialSource, transport]);
 
-  const startMpp = useCallback((payerAddress: Address) => {
-    nanocodexConfig.restart(startCommand("mpp", payerAddress));
+  const startMpp = useCallback((payerAddress: Address, accessKeyAddress: Address) => {
+    nanocodexConfig.restart(startCommand("mpp", payerAddress, accessKeyAddress));
   }, []);
   const disconnectMpp = useCallback(() => nanocodexConfig.disconnect(), []);
   const selectTransport = (next: AgentTransport) => {
@@ -122,11 +122,21 @@ function AgentTerminalDemo() {
 }
 
 function startCommand(transport: "openai" | "chatgpt"): WebTuiCommand;
-function startCommand(transport: "mpp", payerAddress: Address): WebTuiCommand;
-function startCommand(transport: "openai" | "chatgpt" | "mpp", payerAddress?: Address): WebTuiCommand {
+function startCommand(
+  transport: "mpp",
+  payerAddress: Address,
+  accessKeyAddress: Address,
+): WebTuiCommand;
+function startCommand(
+  transport: "openai" | "chatgpt" | "mpp",
+  payerAddress?: Address,
+  accessKeyAddress?: Address,
+): WebTuiCommand {
   if (transport === "mpp") {
     if (!payerAddress) throw new Error("MPP requires a connected Tempo account");
+    if (!accessKeyAddress) throw new Error("MPP requires a locally signable Tempo access key");
     return {
+      accessKeyAddress,
       type: "start",
       transport,
       payerAddress,

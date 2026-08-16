@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, path::PathBuf, time::Duration};
+use std::{collections::BTreeMap, path::PathBuf, sync::Arc, time::Duration};
+
+use async_trait::async_trait;
+use serde_json::Value;
 
 const DEFAULT_STARTUP_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_TOOL_TIMEOUT: Duration = Duration::from_mins(5);
@@ -42,7 +45,32 @@ pub struct McpServer {
     pub(crate) tool_exposure: McpToolExposure,
     pub(crate) enabled_tools: Option<Vec<String>>,
     pub(crate) disabled_tools: Vec<String>,
+    pub(crate) payment: Option<Arc<dyn McpPaymentProvider>>,
     pub(crate) unsupported_option: Option<&'static str>,
+}
+
+/// Creates and reconciles protocol-level MPP credentials for paid MCP calls.
+#[async_trait]
+pub trait McpPaymentProvider: Send + Sync {
+    /// Prepares one payment-required payload, or returns `None` when none of
+    /// its challenges are supported.
+    async fn prepare(
+        &self,
+        payment_required: &Value,
+    ) -> Result<Option<Box<dyn McpPendingPayment>>, String>;
+}
+
+/// One prepared MCP payment whose provider lifecycle follows request delivery.
+#[async_trait]
+pub trait McpPendingPayment: Send {
+    /// Returns the credential to attach to request metadata.
+    fn credential(&self) -> &Value;
+
+    /// Commits provider state after the paid retry succeeds.
+    async fn commit(self: Box<Self>) -> Result<(), String>;
+
+    /// Rolls provider state back after the credential was not sent or was rejected.
+    async fn rollback(self: Box<Self>) -> Result<(), String>;
 }
 
 #[derive(Clone)]
@@ -84,6 +112,7 @@ impl McpServer {
             tool_exposure: McpToolExposure::default(),
             enabled_tools: None,
             disabled_tools: Vec::new(),
+            payment: None,
             unsupported_option: None,
         }
     }
@@ -104,6 +133,7 @@ impl McpServer {
             tool_exposure: McpToolExposure::default(),
             enabled_tools: None,
             disabled_tools: Vec::new(),
+            payment: None,
             unsupported_option: None,
         }
     }
@@ -157,6 +187,13 @@ impl McpServer {
     #[must_use]
     pub fn disabled_tools(mut self, tools: impl IntoIterator<Item = impl Into<String>>) -> Self {
         self.disabled_tools = tools.into_iter().map(Into::into).collect();
+        self
+    }
+
+    /// Enables protocol-level paid tool retries for this MCP server.
+    #[must_use]
+    pub fn payment_provider(mut self, provider: Arc<dyn McpPaymentProvider>) -> Self {
+        self.payment = Some(provider);
         self
     }
 

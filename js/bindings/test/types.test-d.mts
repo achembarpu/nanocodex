@@ -1,7 +1,9 @@
 import {
   Actions,
   Agent,
+  type AccountsWallet,
   type CostStatus,
+  createTempoProviderFromAccounts,
   type SessionSnapshot,
   type Turn,
   type TurnResult,
@@ -9,6 +11,7 @@ import {
 import { Agent as BrowserAgent } from "../browser/index.mjs";
 
 declare const apiKey: string;
+declare const accountsWallet: AccountsWallet;
 
 async function check() {
   const agent = await Agent.create({
@@ -38,6 +41,13 @@ async function check() {
   void costStatus;
 
   await Agent.create({ apiKey, resume: snapshot });
+  const tempoProvider = await createTempoProviderFromAccounts({
+    wallet: accountsWallet,
+    accessKey: "0x0000000000000000000000000000000000000001",
+    policy: { maxDeposit: "0.05", topUpAmount: "0.05" },
+    session: { bootstrap: true },
+  });
+  await Agent.create({ mpp: tempoProvider, mcp: false });
 
   const fork = await Actions.session.fork(agent, { at: completed });
   fork.turn.prompt({ input: [{ type: "text", text: "continue" }] });

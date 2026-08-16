@@ -43,6 +43,13 @@ impl MppAdapter {
         match *self {}
     }
 
+    pub(crate) fn mcp_payment_provider(
+        &self,
+        _url: &str,
+    ) -> Result<std::sync::Arc<dyn nanocodex::tools::mcp::McpPaymentProvider>> {
+        match *self {}
+    }
+
     pub(crate) const fn vm_egress_lease(&self) -> Result<crate::vm::EgressLease> {
         match *self {}
     }

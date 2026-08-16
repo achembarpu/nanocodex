@@ -48,10 +48,9 @@ session manager has this shape. Nanocodex defaults the socket to
 `wss://openai.mpp.tempo.xyz/v1/responses` when `mpp` is present.
 
 ```js
-import { Agent } from "nanocodex/node";
+import { Agent, createTempoProviderFromAccounts } from "nanocodex/node";
 import { Expiry } from "accounts";
 import { Provider } from "accounts/cli";
-import { tempo } from "mppx/client";
 import { parseUnits } from "viem";
 import { connect } from "viem/experimental/erc7846";
 import WebSocket from "ws";
@@ -77,17 +76,19 @@ const account = await provider.store.accessKeys.select({
 });
 if (!account) throw new Error("Tempo account has no usable access key");
 console.error(`Tempo access-key signer: ${account.accessKeyAddress}`);
-const mpp = tempo.session.manager({
-  account,
-  autoSwap: { tokenIn: [pathUsd], slippage: 1 },
-  bootstrap: true,
-  client: provider.getClient(),
-  webSocket: WebSocket,
-  maxDeposit: "0.05",
-  topUpAmount: "0.05",
+const tempoProvider = await createTempoProviderFromAccounts({
+  wallet: provider,
+  accessKey: account.accessKeyAddress,
+  policy: {
+    autoSwap: { tokenIn: [pathUsd], slippage: 1 },
+    maxDeposit: "0.05",
+    topUpAmount: "0.05",
+  },
+  session: { bootstrap: true, webSocket: WebSocket },
 });
+const mpp = tempoProvider.session;
 
-const agent = await Agent.create({ mpp, thinking: "none", fastMode: true, tools });
+const agent = await Agent.create({ mpp: tempoProvider, thinking: "none", fastMode: true, tools });
 const events = agent.events.watch();
 const unwatch = events.onEvent((event) => {
   process.stdout.write(`${JSON.stringify(event)}\n`);
@@ -123,7 +124,76 @@ The application still owns its wallet, deposit policy, persisted payment
 channel store, and final settlement. Keep the manager alive to reuse its channel
 across agents, and supply mppx `channelStore` for reuse after a process or page
 restart. Nanocodex never closes a caller-owned MPP session. `apiKey` and `mpp`
-are mutually exclusive.
+are mutually exclusive. `createTempoProviderFromAccounts({ wallet, ... })`
+accepts any provider returned by Accounts SDK `Provider.create(...)`, regardless
+of its wallet adapter, and constructs both payment paths from that provider's
+adapter-neutral `getMppxParameters()` contract. The lower-level
+`createTempoProvider({ session, payment })` remains available when the
+application constructs MPPx itself. Both explicitly select Tempo provider mode.
+In that mode Nanocodex automatically adds its built-in Mercator MCP and wraps it
+with the same wallet and payment policy.
+Passing a generic `MppSession`, an OpenAI key, or ChatGPT host auth does not
+initialize Mercator. Pass `mcp: false` to opt out explicitly.
+
+Remote Streamable HTTP MCP servers are configured directly on the agent. The
+JavaScript binding uses the official MCP SDK transport, keeps remote tools
+deferred, and mirrors native Nanocodex exposure: the initial Responses request
+contains provider-native `tool_search`, while canonical `mcp__<server>__<tool>`
+functions are callable only below Code Mode. Search results return loadable
+namespaces for the next model request; remote tools never become a flat set of
+top-level model-visible calls.
+
+MPP-enabled MCP uses MPPx's in-place `McpClient.wrap`. The public `tempo()`
+method supports both Tempo charge and session challenges, so paid services
+composed behind Mercator use the same signer and spending policy as the model:
+
+```js
+const mcpMethod = tempo({
+  account,
+  channelStore,
+  getClient: () => provider.getClient(),
+  maxDeposit: "0.05",
+  topUpAmount: "0.05",
+});
+
+const agent = await Agent.create({
+  mpp: createTempoProvider({
+    session: mpp,
+    payment: { methods: [mcpMethod] },
+  }),
+});
+```
+
+Explicit `mcp` entries are merged over the Tempo defaults, so an application
+can replace `mercator` or add other servers without rebuilding the provider.
+
+Each server also accepts `headers`, `fetch`, allow/deny tool lists, a timeout,
+or an already initialized MCP SDK-compatible `client`. Nanocodex closes clients
+it creates and leaves caller-owned clients open. Connection failures are
+reported by `tool_search` so one unavailable server does not prevent the agent
+from starting.
+
+Runtimes whose content-security policy rejects `eval`/`new Function` can supply
+a Code Mode evaluator. `createQuickJsEvaluator` accepts an asyncified
+`quickjs-emscripten-core` module, serializes Asyncify execution, and exposes only
+the standard Nanocodex Code Mode globals across the interpreter boundary. This
+keeps deferred MCP plus Code Mode functional in Cloudflare Workers:
+
+```js
+import asyncVariant from "@jitl/quickjs-wasmfile-release-asyncify";
+import { Agent, createQuickJsEvaluator, createTempoProvider } from "nanocodex/browser";
+import { newQuickJSAsyncWASMModuleFromVariant } from "quickjs-emscripten-core";
+
+const quickJs = await newQuickJSAsyncWASMModuleFromVariant(asyncVariant);
+const agent = await Agent.create({
+  // module, mpp, and mcp omitted here
+  codeEvaluator: createQuickJsEvaluator(quickJs),
+});
+```
+
+Cloudflare requires the QuickJS `.wasm` file to be statically imported and
+passed with `newVariant(..., { wasmModule })`; the complete deployment is in
+`examples/cloudflare-fetch-mcp`.
 
 Completed results can be persisted and resumed by a fresh Node or browser
 agent:

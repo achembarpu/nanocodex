@@ -134,6 +134,70 @@ export type Tool = {
 
 export type ToolMap = Record<string, Tool>;
 
+export type CodeEvaluatorEnvironment = {
+  tools: Readonly<Record<string, (input: unknown) => Promise<unknown>>>;
+  toolDefinitions: readonly Record<string, unknown>[];
+  text(value: unknown): void;
+  image(value: unknown, detail?: string): void;
+  generatedImage(value: unknown): void;
+  store(key: string, value: unknown): void;
+  load(key: string): unknown;
+  exit(): never;
+  require?: unknown;
+  console?: Console;
+};
+
+export type CodeEvaluator = (
+  source: string,
+  environment: CodeEvaluatorEnvironment,
+) => void | Promise<void>;
+
+export type McpPayment = {
+  /** MPPx client methods, such as `tempo.session({ account, getClient, channelStore })`. */
+  methods: readonly unknown[];
+  /** Optional MPP method context forwarded for each paid MCP tool call. */
+  context?: unknown;
+  /** Called before MPPx creates a payment credential. */
+  onPaymentRequired?: ((challenge: unknown) => boolean | Promise<boolean>) | undefined;
+  orderChallenges?: ((challenges: readonly unknown[]) => readonly unknown[] | Promise<readonly unknown[]>) | undefined;
+  paymentPreferences?: unknown;
+};
+
+export type McpClient = {
+  listTools(params?: { cursor?: string | undefined }): Promise<{
+    tools: readonly McpTool[];
+    nextCursor?: string | undefined;
+  }>;
+  callTool(
+    params: { name: string; arguments?: Record<string, unknown> | undefined },
+    resultSchema?: unknown,
+    options?: Record<string, unknown>,
+  ): Promise<unknown>;
+};
+
+export type McpTool = {
+  name: string;
+  title?: string | undefined;
+  description?: string | undefined;
+  inputSchema?: Record<string, unknown> | undefined;
+};
+
+export type McpServer = {
+  /** Public Streamable HTTP MCP endpoint. Omit when supplying an initialized client. */
+  url?: string | URL | undefined;
+  /** Existing MCP SDK-compatible client; Nanocodex does not close caller-owned clients. */
+  client?: McpClient | undefined;
+  description?: string | undefined;
+  headers?: HeadersInit | undefined;
+  fetch?: typeof globalThis.fetch | undefined;
+  payment?: McpPayment | undefined;
+  enabledTools?: readonly string[] | undefined;
+  disabledTools?: readonly string[] | undefined;
+  timeoutMs?: number | undefined;
+};
+
+export type McpServers = Record<string, string | URL | McpServer>;
+
 /** A paid WebSocket session, such as an mppx Tempo session manager. */
 export type MppSession = {
   ws(endpoint: string | URL): Promise<MppWebSocket>;

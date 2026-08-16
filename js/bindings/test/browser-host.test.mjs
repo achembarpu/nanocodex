@@ -69,6 +69,13 @@ test("browser host directly dispatches tools without dynamic code evaluation", a
   assert.deepEqual(result.structured_result, { runtime: "worker", call_id: "call-1" });
 });
 
+test("browser host never flattens remote MCP tools into direct mode", () => {
+  assert.throws(
+    () => createBrowserHost({ mcp: { fixture: { client: {} } }, toolMode: "direct" }),
+    /remote MCP requires Code Mode/,
+  );
+});
+
 test("browser host reports non-JSON tool results as failures", async () => {
   const host = createBrowserHost({
     tools: {

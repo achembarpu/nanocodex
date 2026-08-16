@@ -26,12 +26,14 @@ export type AgentControllerPayment = {
   accessKeyAddress(): string | undefined;
   channelId?: string;
   cumulative(): string;
+  mcpCumulative?(): string;
 };
 
 export type AgentControllerStart = {
   thinking: Thinking;
   reasoningMode: ReasoningMode;
   transport: "openai" | "chatgpt" | "mpp";
+  accessKeyAddress?: Address;
   payerAddress?: Address;
 };
 
@@ -107,6 +109,9 @@ export function createAgentController({
           thinking: message.thinking,
           reasoningMode: message.reasoningMode,
           transport: message.transport,
+          ...(message.transport === "mpp"
+            ? { accessKeyAddress: message.accessKeyAddress }
+            : {}),
           payerAddress: message.transport === "mpp" ? message.payerAddress : undefined,
         });
         return;
@@ -383,6 +388,9 @@ export function createAgentController({
       accessKeyAddress: payment.accessKeyAddress(),
       channelId: payment.channelId,
       cumulative: payment.cumulative(),
+      ...(payment.mcpCumulative
+        ? { mcpCumulative: payment.mcpCumulative() }
+        : {}),
     };
     const encoded = JSON.stringify(status);
     if (encoded === lastPaymentStatus) return;

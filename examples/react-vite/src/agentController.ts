@@ -15,6 +15,7 @@ export type ExamplePayment = {
   accessKeyAddress: string;
   channelId?: string;
   cumulative(): string;
+  mcpCumulative?(): string;
 };
 
 export type ExampleAgentControllerDependencies = {
@@ -112,6 +113,9 @@ export function createExampleAgentController({
               ? {
                   channelId: payment.channelId,
                   cumulative: payment.cumulative(),
+                  ...(payment.mcpCumulative
+                    ? { mcpCumulative: payment.mcpCumulative() }
+                    : {}),
                 }
               : undefined,
           });

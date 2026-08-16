@@ -7,7 +7,7 @@ import {
 import { createBrowserTools } from "./browserTools";
 import type { WebTuiCommand } from "./nanocodex";
 import { createPaymentSessionOwner } from "./paymentSessionOwner";
-import { MPP_RESPONSES_WEBSOCKET_URL } from "./tempo-policy";
+import { MPP_RESPONSES_WEBSOCKET_URL } from "./tempo-constants";
 
 type IncomingMessage = WebTuiCommand;
 type PaymentSession = Awaited<ReturnType<(typeof import("./tempo"))["createTempoMppSession"]>>;
@@ -65,17 +65,21 @@ async function createAgent(
   };
   if (start.transport === "mpp") {
     const payerAddress = start.payerAddress;
+    const accessKeyAddress = start.accessKeyAddress;
     if (!payerAddress) {
       throw new Error("MPP requires a connected Tempo account");
     }
+    if (!accessKeyAddress) {
+      throw new Error("MPP requires a locally signable Tempo access key");
+    }
     const { createTempoMppSession } = await import("./tempo");
     return paymentSessions.open(
-      () => createTempoMppSession(payerAddress),
+      () => createTempoMppSession(payerAddress, accessKeyAddress),
       async (paymentSession) => {
         const agent = await Agent.create({
           ...common,
           fastMode: true,
-          mpp: paymentSession.mpp,
+          mpp: paymentSession.provider,
           websocketUrl: MPP_RESPONSES_WEBSOCKET_URL,
         });
         return {
@@ -87,6 +91,7 @@ async function createAgent(
               return paymentSession.mpp.channelId;
             },
             cumulative: () => paymentSession.mpp.cumulative.toString(),
+            mcpCumulative: () => paymentSession.mcpCumulative().toString(),
           },
         };
       },

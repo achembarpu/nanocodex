@@ -60,7 +60,7 @@ async function createAgent(data: StartMessage) {
       async (paymentSession) => {
         const agent = await Agent.create({
           ...common,
-          mpp: paymentSession.mpp,
+          mpp: paymentSession.provider,
         });
         const payment: ExamplePayment = {
           rootAddress: paymentSession.rootAddress,
@@ -69,6 +69,7 @@ async function createAgent(data: StartMessage) {
             return paymentSession.mpp.channelId;
           },
           cumulative: () => paymentSession.mpp.cumulative.toString(),
+          mcpCumulative: () => paymentSession.mcpCumulative().toString(),
         };
         return { agent, payment };
       },

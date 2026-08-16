@@ -7,9 +7,11 @@ MPP remains an application concern. The private
 HTTPS Responses client. No public Nanocodex library crate contains wallet or
 payment behavior.
 
-The Tempo provider supports one payment path: estimated, up-front
-`tempo/charge` over HTTPS. It deliberately does not configure an MPP
-WebSocket/session transport.
+The Tempo provider pays Responses with estimated, up-front `tempo/charge` over
+HTTPS. It deliberately does not configure an MPP WebSocket transport for the
+model. In Tempo provider mode, Nanocodex also enables its built-in Mercator MCP;
+that protocol-level client supports both `tempo/charge` and `tempo/session`
+challenges from Mercator and services composed behind it.
 
 ```text
 Nanocodex Responses HTTPS client
@@ -96,6 +98,27 @@ Tempo selects the HTTPS Responses transport. Explicitly selecting WebSocket
 with `--provider.tempo` is rejected during startup. Direct OpenAI continues to
 default to its persistent Responses WebSocket.
 
+## Built-in Mercator MCP
+
+`--provider.tempo` adds `https://mercator.tempoxyz.dev/mcp` to the standard MCP
+defaults. Direct OpenAI mode does not add it. `--mcp-defaults=false` is the
+explicit opt-out, while a named `mercator` entry in Codex config or `--mcp`
+overrides the built-in endpoint.
+
+Mercator remains deferred: the model sees provider-native `tool_search`, then
+calls discovered `mcp__mercator__*` functions only from Code Mode. On MCP error
+`-32042` or `org.paymentauth/payment-required` result metadata, the mpp-rs client
+selects a supported unexpired Tempo challenge and creates a credential with the
+same Accounts wallet and access-key policy as the model provider. Nanocodex
+places it in `org.paymentauth/credential` and retries the tool call. Successful
+calls commit the authorization; definitive MCP rejection rolls it back;
+ambiguous transport failure preserves durable payment state.
+
+Session channels use the shared Tempo SQLite channel store, scoped to the MCP
+endpoint, with a 0.05-token maximum reserve and top-up. This allows a single
+Mercator integration to satisfy either one-time Charge or high-volume Session
+MPP without exposing wallet material to the model or MCP server.
+
 Charge payment is accepted before the complete SSE response has arrived, so
 the CLI limits paid Responses calls to one SDK attempt. A premature close or
 other retryable stream failure is returned to the caller instead of replaying
@@ -113,7 +136,9 @@ generic OpenAI API base setting while the Tempo provider is enabled.
 loopback port. Nanocodex routes its own Responses and remote-tool clients
 through that proxy and gives authenticated proxy environment variables plus an
 ephemeral CA to workspace-tool child processes. It does not mutate the parent
-environment or MCP transports.
+environment. MCP protocol payments are handled separately at the MCP client
+boundary because their challenges are JSON-RPC errors rather than HTTP 402
+responses.
 
 The egress proxy buffers a request body up to 16 MiB so it can replay the exact
 request after a valid 402 challenge. It rejects redirects, protocol upgrades,

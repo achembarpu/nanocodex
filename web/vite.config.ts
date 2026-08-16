@@ -43,6 +43,14 @@ export default defineConfig({
   // Worker paths on the same freshly generated pair.
   optimizeDeps: {
     exclude: ["nanocodex"],
+    // `nanocodex` remains live, but the MCP SDK it contains imports these
+    // CommonJS packages from ESM. They still need Vite's interop wrapper.
+    include: [
+      "nanocodex > ajv",
+      "nanocodex > ajv-formats",
+      "nanocodex > content-type",
+      "nanocodex > eventemitter3",
+    ],
   },
   worker: { format: "es" },
   server: {

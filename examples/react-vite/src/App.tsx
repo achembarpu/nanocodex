@@ -42,6 +42,7 @@ type ToolTrace = {
   duration_ns?: number;
 };
 const DEFAULT_PROMPT = `Inspect the browser runtime with tools.browserInfo(), then explain what is running in Rust/WASM versus JavaScript. End with one concrete idea for a useful browser-native tool.`;
+const MERCATOR_PROMPT = `Use tool_search to discover the Mercator tools. Then, only from Code Mode, search for a low-cost service that returns the current Tempo chain block number and describe the best match. Build and quote a one-node flow with totalMax and maxSpend both set to 0.01. If the aggregate quote is at most 0.01 pathUSD, submit it with a unique idempotency key and poll the job until it completes. Report the chosen service, quote, result, model MPP payment, and Mercator/downstream MPP payment. Never call mcp__mercator__* as a top-level model tool.`;
 
 export function App() {
   const workerRef = useRef<Worker | null>(null);
@@ -60,7 +61,7 @@ export function App() {
   const [liveAnswer, setLiveAnswer] = useState("");
   const [reasoning, setReasoning] = useState("");
   const [elapsedMs, setElapsedMs] = useState(0);
-  const [payment, setPayment] = useState<{ rootAddress?: string; accessKeyAddress?: string; channelId?: string; cumulative?: string }>({});
+  const [payment, setPayment] = useState<{ rootAddress?: string; accessKeyAddress?: string; channelId?: string; cumulative?: string; mcpCumulative?: string }>({});
   const [mppConnection, setMppConnection] = useState<MppConnection>();
   const updateMppConnection = useCallback(
     (connection: MppConnection | undefined) => setMppConnection(connection),
@@ -264,7 +265,15 @@ export function App() {
           </label>
           <label>
             <span>Payment</span>
-            <select value={transport} onChange={(event) => setTransport(event.target.value as "openai" | "mpp") }>
+            <select value={transport} onChange={(event) => {
+              const next = event.target.value as "openai" | "mpp";
+              setTransport(next);
+              setPrompt((current) =>
+                !current.trim() || current === DEFAULT_PROMPT || current === MERCATOR_PROMPT
+                  ? next === "mpp" ? MERCATOR_PROMPT : DEFAULT_PROMPT
+                  : current,
+              );
+            }}>
               <option value="openai">OpenAI API key</option>
               <option value="mpp">Tempo MPP</option>
             </select>
@@ -339,6 +348,9 @@ export function App() {
         <Metric label="WS connects" value={formatNumber(stats?.connection_attempts ?? count(events, "model.connection.completed"))} />
         {transport === "mpp" && (
           <Metric label="MPP paid" value={payment.cumulative ? `${Number(payment.cumulative) / 1_000_000}` : "—"} />
+        )}
+        {transport === "mpp" && (
+          <Metric label="Mercator paid" value={payment.mcpCumulative ? `${Number(payment.mcpCumulative) / 1_000_000}` : "—"} />
         )}
         {transport === "mpp" && (
           <Metric label="PathUSD available" value={mppConnection?.balance ?? "—"} />

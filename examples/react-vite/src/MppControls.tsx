@@ -49,24 +49,24 @@ function ConnectedMppControls({
   const connection = useConnection();
   const connectors = useConnectors();
   const connect = useConnect();
+  const connector = connectors[0];
+  const connectAsync = connect.mutateAsync;
+  const connectionAddress = connection.address;
+  const connectionStatus = connection.status;
   const balance = Hooks.token.useGetBalance({
-    account: connection.address,
+    account: connectionAddress,
     token: PATH_USD,
     query: {
-      enabled: connection.status === "connected",
+      enabled: connectionStatus === "connected",
       refetchInterval: 5_000,
     },
   });
   const start = useCallback(async () => {
-    const connector = connectors[0];
     if (!connector) throw new Error("Tempo Wallet connector is unavailable");
-    const connected = connection.status === "connected"
-      ? connection
-      : await connect.mutateAsync({ connector, chainId: tempo.id });
-    return "address" in connected
-      ? connected.address
-      : connected.accounts[0];
-  }, [connect, connection, connectors]);
+    if (connectionStatus === "connected") return connectionAddress;
+    const connected = await connectAsync({ connector, chainId: tempo.id });
+    return connected.accounts[0];
+  }, [connectAsync, connectionAddress, connectionStatus, connector]);
   const formattedBalance = balance.data === undefined
     ? undefined
     : formatUnits(balance.data.amount, 6);

@@ -89,6 +89,7 @@ use hudsucker::{
         pki_types::{CertificateDer, PrivateKeyDer, PrivatePkcs8KeyDer},
     },
 };
+use reqwest::ResponseBuilderExt as _;
 use reqwest_middleware::{ClientBuilder, ClientWithMiddleware, Middleware, Next};
 use tempfile::TempDir;
 use tokio::{
@@ -356,6 +357,7 @@ impl Middleware for BufferRequestedResponses {
             return Ok(response);
         };
         let status = response.status();
+        let response_url = response.url().clone();
         let response: ::http::Response<reqwest::Body> = response.into();
         let (parts, body) = response.into_parts();
         let body = tokio::time::timeout(self.timeout, Limited::new(body, limit).collect())
@@ -378,7 +380,15 @@ impl Middleware for BufferRequestedResponses {
             })?
             .to_bytes();
         record_body_content("egress.proxy.buffered.response.body", &body);
-        Ok(::http::Response::from_parts(parts, body).into())
+        let mut response = ::http::Response::builder()
+            .status(parts.status)
+            .version(parts.version)
+            .url(response_url)
+            .body(body)
+            .map_err(reqwest_middleware::Error::middleware)?;
+        *response.headers_mut() = parts.headers;
+        response.extensions_mut().extend(parts.extensions);
+        Ok(response.into())
     }
 }
 
@@ -1896,6 +1906,31 @@ mod tests {
         }
     }
 
+    struct ObserveBufferedUrlLayer(Arc<Mutex<Option<(reqwest::Url, reqwest::Url)>>>);
+
+    #[async_trait]
+    impl EgressLayer for ObserveBufferedUrlLayer {
+        async fn handle(
+            &self,
+            request: reqwest::Request,
+            extensions: &mut ::http::Extensions,
+            next: Next<'_>,
+        ) -> reqwest_middleware::Result<reqwest::Response> {
+            let request_url = request.url().clone();
+            request_response_buffer(extensions, reqwest::StatusCode::PAYMENT_REQUIRED, 1024);
+            let response = next.run(request, extensions).await?;
+            self.0
+                .lock()
+                .unwrap()
+                .replace((request_url, response.url().clone()));
+            Ok(response)
+        }
+
+        fn uses_response_buffering(&self) -> bool {
+            true
+        }
+    }
+
     struct DenyLayer;
 
     #[async_trait]
@@ -2079,6 +2114,32 @@ mod tests {
 
         assert_eq!(response.status(), AxumStatus::OK);
         assert_eq!(response.text().await.unwrap(), "plain");
+        egress.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn buffered_responses_preserve_their_effective_url() {
+        let origin = spawn_origin(Router::new().route(
+            "/payment-required",
+            get(|| async { (AxumStatus::PAYMENT_REQUIRED, "pay up") }),
+        ))
+        .await;
+        let observed = Arc::new(Mutex::new(None));
+        let egress = local_proxy_builder()
+            .layer(ObserveBufferedUrlLayer(Arc::clone(&observed)))
+            .spawn()
+            .await
+            .unwrap();
+
+        let response = proxied_client(&egress)
+            .get(format!("{origin}/payment-required"))
+            .send()
+            .await
+            .unwrap();
+
+        assert_eq!(response.status(), AxumStatus::PAYMENT_REQUIRED);
+        let (request_url, response_url) = observed.lock().unwrap().take().unwrap();
+        assert_eq!(response_url, request_url);
         egress.shutdown().await.unwrap();
     }
 

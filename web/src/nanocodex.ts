@@ -8,12 +8,17 @@ export type WebTuiCommand =
   | Exclude<TuiCommand, { type: "start" }>
   | (StartCommand & { transport: "openai" })
   | (StartCommand & { transport: "chatgpt" })
-  | (StartCommand & { payerAddress: Address; transport: "mpp" });
+  | (StartCommand & {
+      accessKeyAddress: Address;
+      payerAddress: Address;
+      transport: "mpp";
+    });
 export type PaymentStatus = {
   rootAddress: string;
   accessKeyAddress?: string;
   channelId?: string;
   cumulative: string;
+  mcpCumulative?: string;
 };
 export type WebTuiMessage = TuiMessage
   | { type: "mppPayment"; payment: PaymentStatus }

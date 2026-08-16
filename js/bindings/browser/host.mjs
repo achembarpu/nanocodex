@@ -13,17 +13,27 @@ export function createBrowserHost(options = {}) {
     throw new Error("WebSocket is unavailable in this runtime");
   }
   const connections = new Map();
-  const code = createCodeRuntime(options.tools);
+  const code = createCodeRuntime(options.tools, { evaluate: options.codeEvaluator });
   const toolMode = options.toolMode ?? "code";
   if (toolMode !== "code" && toolMode !== "direct") {
     throw new TypeError("toolMode must be code or direct");
   }
+  if (options.mcp && toolMode !== "code") {
+    throw new TypeError("remote MCP requires Code Mode");
+  }
+  const mcp = options.mcp
+    ? import("../runtime/mcp-runtime.mjs").then(({ createMcpRuntime }) =>
+        createMcpRuntime(options.mcp, { clientName: "nanocodex-browser" }))
+    : undefined;
+  if (mcp) mcp.then((provider) => code.addProvider(provider), () => {});
   const onEvent = options.onEvent || (() => {});
   const maxQueuedMessages = options.maxQueuedMessages ?? DEFAULT_MAX_QUEUED_MESSAGES;
   const maxQueuedBytes = options.maxQueuedBytes ?? DEFAULT_MAX_QUEUED_BYTES;
   const maxBufferedSendBytes = options.maxBufferedSendBytes ?? DEFAULT_MAX_BUFFERED_SEND_BYTES;
   const encoder = new TextEncoder();
   let nextHandle = 1;
+  let references = 0;
+  let disposal;
 
   async function connect(endpoint, apiKey, sessionId, metadata = {}) {
     if (options.mpp) return connectMpp(endpoint);
@@ -217,7 +227,26 @@ export function createBrowserHost(options = {}) {
     connection.queuedBytes += bytes;
   }
 
+  async function dispose() {
+    if (disposal) return disposal;
+    disposal = (async () => {
+      for (const handle of [...connections.keys()]) close(handle);
+      code.reset();
+      await mcp?.then((provider) => provider.close(), () => {});
+    })();
+    return disposal;
+  }
+
   return Object.freeze({
+    ready: async () => { await mcp; },
+    retain() {
+      if (disposal) throw new Error("Nanocodex host is already disposed");
+      references += 1;
+    },
+    release() {
+      if (references > 0) references -= 1;
+      return references === 0 ? dispose() : Promise.resolve();
+    },
     connect,
     send,
     next,
@@ -229,6 +258,7 @@ export function createBrowserHost(options = {}) {
     toolDefinitions: code.toolDefinitions,
     emitEvent: onEvent,
     reset: code.reset,
+    dispose,
   });
 }
 

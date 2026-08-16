@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::{path::PathBuf, sync::Arc};
 
 #[cfg(any(
     all(target_os = "linux", not(target_env = "musl")),
@@ -14,14 +14,29 @@ use alloy_primitives::Address;
 use clap::{ArgAction, Args, builder::NonEmptyStringValueParser};
 use eyre::{Context, Result, eyre};
 use mpp::{
-    client::{TempoAccountsProvider, tempo::AutoswapConfig},
+    client::{
+        PaymentContext, TempoAccountsProvider,
+        tempo::{
+            AutoswapConfig,
+            session::store::{SqliteChannelStore, SqliteChannelStoreOptions},
+        },
+    },
+    mcp::{
+        client::{McpPayment, PendingPayment},
+        credential_value, extract_challenges_from_data,
+    },
     protocol::{
-        core::accept_payment::{ACCEPT_PAYMENT_HEADER, from_methods},
+        core::{
+            PaymentChallenge,
+            accept_payment::{ACCEPT_PAYMENT_HEADER, from_methods},
+        },
         methods::tempo::{INTENT_CHARGE, METHOD_NAME},
     },
 };
+use nanocodex::tools::mcp::{McpPaymentProvider, McpPendingPayment};
 use nanocodex_egress::EgressProxy;
 use nanousd::{NANOUSD_ADDRESS, TEMPO_MAINNET_CHAIN_ID};
+use serde_json::Value;
 
 #[cfg(any(
     all(target_os = "linux", not(target_env = "musl")),
@@ -33,6 +48,8 @@ use crate::vm::EgressLease;
 
 const DEFAULT_MPP_API_BASE_URL: &str = "https://openai.mpp.tempo.xyz/v1";
 const DEFAULT_TEMPO_SWAP_SLIPPAGE_BPS: u16 = 100;
+const DEFAULT_MCP_SESSION_MAX_DEPOSIT: u128 = 50_000;
+const DEFAULT_MCP_SESSION_TOP_UP: u128 = 50_000;
 #[cfg(any(
     all(target_os = "linux", not(target_env = "musl")),
     all(target_os = "macos", target_arch = "aarch64")
@@ -150,7 +167,7 @@ impl MppArgs {
             ));
         let egress = EgressProxy::builder()
             .allow_loopback_upstreams(allow_loopback)
-            .layer(TempoEgress::new(provider))
+            .layer(TempoEgress::new(provider.clone()))
             .spawn()
             .await
             .wrap_err("failed to start the embedded MPP egress proxy")?;
@@ -158,6 +175,7 @@ impl MppArgs {
         Ok(Some(MppAdapter {
             api_base_url,
             mpp_api_key: self.mpp_api_key,
+            provider,
             egress: Some(egress),
         }))
     }
@@ -199,6 +217,7 @@ fn normalize_api_base_url(value: &str) -> Result<String> {
 pub(crate) struct MppAdapter {
     api_base_url: String,
     mpp_api_key: Option<String>,
+    provider: TempoAccountsProvider,
     egress: Option<EgressProxy>,
 }
 
@@ -288,6 +307,25 @@ impl MppAdapter {
             .wrap_err("failed to configure the MPP-aware tool HTTP client")
     }
 
+    pub(crate) fn mcp_payment_provider(&self, url: &str) -> Result<Arc<dyn McpPaymentProvider>> {
+        let store = SqliteChannelStore::open(SqliteChannelStoreOptions {
+            namespace: url.to_owned(),
+            request_url: Some(url.to_owned()),
+            ..Default::default()
+        })
+        .wrap_err("failed to open the durable Tempo MCP channel store")?;
+        let provider = self
+            .provider
+            .clone()
+            .with_session_store(Arc::new(store))
+            .with_session_max_deposit(DEFAULT_MCP_SESSION_MAX_DEPOSIT)
+            .with_session_top_up_amount(DEFAULT_MCP_SESSION_TOP_UP);
+        Ok(Arc::new(TempoMcpPayment::new(
+            provider,
+            url.parse().wrap_err("Tempo MCP URL is invalid")?,
+        )))
+    }
+
     pub(crate) async fn shutdown(mut self) -> Result<()> {
         if let Some(egress) = self.egress.take() {
             egress
@@ -296,6 +334,86 @@ impl MppAdapter {
                 .wrap_err("failed to stop the embedded MPP egress proxy")?;
         }
         Ok(())
+    }
+}
+
+struct TempoMcpPayment {
+    payment: McpPayment<TempoAccountsProvider>,
+}
+
+impl TempoMcpPayment {
+    fn new(provider: TempoAccountsProvider, resource_url: reqwest::Url) -> Self {
+        Self {
+            payment: McpPayment::new(
+                provider,
+                PaymentContext {
+                    url: resource_url,
+                    headers: reqwest::header::HeaderMap::new(),
+                },
+            ),
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl McpPaymentProvider for TempoMcpPayment {
+    async fn prepare(
+        &self,
+        payment_required: &Value,
+    ) -> Result<Option<Box<dyn McpPendingPayment>>, String> {
+        let challenges: Vec<PaymentChallenge> = extract_challenges_from_data(payment_required)
+            .ok_or_else(|| "MCP payment-required payload has no valid challenges".to_owned())?;
+        let Some(pending) = self
+            .payment
+            .prepare(&challenges)
+            .await
+            .map_err(|error| format!("failed to prepare Tempo MCP payment: {error}"))?
+        else {
+            return Ok(None);
+        };
+        let credential = match credential_value(pending.credential()) {
+            Ok(credential) => credential,
+            Err(error) => {
+                let rollback = pending.rollback().await;
+                let mut message = format!("failed to encode Tempo MCP credential: {error}");
+                if let Err(rollback) = rollback {
+                    message.push_str(&format!("; rollback failed: {rollback}"));
+                }
+                return Err(message);
+            }
+        };
+        Ok(Some(Box::new(TempoPendingMcpPayment {
+            pending,
+            credential,
+        })))
+    }
+}
+
+struct TempoPendingMcpPayment {
+    pending: PendingPayment<TempoAccountsProvider>,
+    credential: Value,
+}
+
+#[async_trait::async_trait]
+impl McpPendingPayment for TempoPendingMcpPayment {
+    fn credential(&self) -> &Value {
+        &self.credential
+    }
+
+    async fn commit(self: Box<Self>) -> Result<(), String> {
+        let Self { pending, .. } = *self;
+        pending
+            .commit()
+            .await
+            .map_err(|error| format!("failed to commit Tempo MCP payment: {error}"))
+    }
+
+    async fn rollback(self: Box<Self>) -> Result<(), String> {
+        let Self { pending, .. } = *self;
+        pending
+            .rollback()
+            .await
+            .map_err(|error| format!("failed to roll back Tempo MCP payment: {error}"))
     }
 }
 

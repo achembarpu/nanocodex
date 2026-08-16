@@ -34,6 +34,8 @@ export function create(options = {}) {
     createWebSocket,
     tools,
     toolMode,
+    mcp,
+    codeEvaluator,
   } = options;
   if (mpp !== undefined && apiKey !== undefined) {
     throw new TypeError("apiKey and mpp are mutually exclusive");
@@ -42,6 +44,7 @@ export function create(options = {}) {
     throw new TypeError("hostAuth is mutually exclusive with apiKey and mpp");
   }
   const events = createEventChannel();
+  const tempoMcp = mpp?.[Symbol.for("nanocodex.tempo.mcp")];
   const host = createBrowserHost({
     WebSocketImpl,
     createWebSocket,
@@ -50,6 +53,10 @@ export function create(options = {}) {
     onEvent: events.emit,
     tools,
     toolMode,
+    mcp: mcp === false
+      ? undefined
+      : tempoMcp ? { ...tempoMcp, ...mcp } : mcp,
+    codeEvaluator,
   });
   activateHost(host);
   const runtime = defineRuntime({
@@ -57,22 +64,39 @@ export function create(options = {}) {
     name: "Nanocodex Browser WASM",
     type: "browser",
     async create(config) {
-      activateHost(host);
-      initialized ||= module === undefined ? init() : init({ module_or_path: module });
-      await initialized;
-      activateHost(host);
-      return new Nanocodex(JSON.stringify(toWasmConfig({
-        apiKey: apiKey ?? (mpp === undefined ? "host-managed" : "mpp-managed"),
-        websocketUrl: websocketUrl ?? (mpp === undefined
-          ? undefined
-          : "wss://openai.mpp.tempo.xyz/v1/responses"),
-        apiBaseUrl,
-        ...config,
-      })));
+      try {
+        activateHost(host);
+        await host.ready();
+        initialized ||= module === undefined ? init() : init({ module_or_path: module });
+        await initialized;
+        activateHost(host);
+        return new Nanocodex(JSON.stringify(toWasmConfig({
+          apiKey: apiKey ?? (mpp === undefined ? "host-managed" : "mpp-managed"),
+          websocketUrl: websocketUrl ?? (mpp === undefined
+            ? undefined
+            : "wss://openai.mpp.tempo.xyz/v1/responses"),
+          apiBaseUrl,
+          ...config,
+        })));
+      } catch (error) {
+        await host.dispose();
+        throw error;
+      }
     },
     subscribe: events.subscribe,
-    adopt: (raw) => bindHostSession(host, raw.sessionId),
-    release: (raw) => releaseHostSession(host, raw.sessionId),
+    adopt(raw) {
+      host.retain();
+      try {
+        bindHostSession(host, raw.sessionId);
+      } catch (error) {
+        releaseHost(host);
+        throw error;
+      }
+    },
+    release(raw) {
+      releaseHostSession(host, raw.sessionId);
+      releaseHost(host);
+    },
     decorate: (agent) => agent.extend(agentActions()),
   });
   return createAgentClient(runtime, {
@@ -84,5 +108,12 @@ export function create(options = {}) {
     sessionId,
     workspace,
     resume,
+  });
+}
+
+function releaseHost(host) {
+  void host.release().catch((error) => {
+    if (typeof globalThis.reportError === "function") globalThis.reportError(error);
+    else console.error(error);
   });
 }

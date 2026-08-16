@@ -40,6 +40,59 @@ test("Node host opens application sockets through MPP", async () => {
   host.close(1);
 });
 
+test("Node host loads and calls deferred Mercator MCP tools", async () => {
+  const calls = [];
+  const host = createNodeHost({
+    mcpServers: {
+      mercator: {
+        description: "Deterministic Mercator fixture.",
+        client: {
+          async listTools() {
+            return {
+              tools: [{
+                name: "search_services",
+                description: "Search paid services.",
+                inputSchema: {
+                  type: "object",
+                  properties: { query: { type: "string" } },
+                  required: ["query"],
+                },
+              }],
+            };
+          },
+          async callTool(input) {
+            calls.push(input);
+            return { content: [{ type: "text", text: "node-mercator-ok" }] };
+          },
+        },
+      },
+    },
+  });
+
+  try {
+    await host.ready();
+    const definitions = JSON.parse(host.toolDefinitions());
+    assert.deepEqual(definitions.map((definition) => definition.name ?? definition.type), [
+      "tool_search",
+      "mcp__mercator__search_services",
+    ]);
+    assert.equal(definitions[1].defer_loading, true);
+    const execution = JSON.parse(await host.executeCode(
+      "text(await tools.mcp__mercator__search_services({ query: 'weather' }));",
+      "node-session",
+      "node-exec",
+    ));
+    assert.equal(execution.success, true);
+    assert.match(JSON.stringify(execution.output), /node-mercator-ok/);
+    assert.deepEqual(calls, [{
+      name: "search_services",
+      arguments: { query: "weather" },
+    }]);
+  } finally {
+    await host.dispose();
+  }
+});
+
 test("Node host preserves structured WebSocket handshake rejection detail", async () => {
   const server = createServer((_request, response) => {
     response.writeHead(429, {

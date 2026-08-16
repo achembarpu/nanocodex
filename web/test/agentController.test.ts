@@ -134,10 +134,12 @@ test("the Worker controller owns prompts, steering, cancellation, events, and cl
 test("MPP status follows live channel receipts without duplicate UI messages", async () => {
   const harness = new AgentHarness();
   const messages: any[] = [];
+  const starts: AgentControllerStart[] = [];
   let channelId: string | undefined;
   let cumulative = "0";
   const controller = createAgentController({
-    async createAgent(_start, tools) {
+    async createAgent(start, tools) {
+      starts.push(start);
       harness.tools = tools;
       return {
         agent: harness.createAgent("paid-root") as any,
@@ -157,8 +159,16 @@ test("MPP status follows live channel receipts without duplicate UI messages", a
     thinking: "none",
     reasoningMode: "standard",
     transport: "mpp",
+    accessKeyAddress: "0x0000000000000000000000000000000000000002",
     payerAddress: "0x0000000000000000000000000000000000000001",
   });
+  assert.deepEqual(starts, [{
+    thinking: "none",
+    reasoningMode: "standard",
+    transport: "mpp",
+    accessKeyAddress: "0x0000000000000000000000000000000000000002",
+    payerAddress: "0x0000000000000000000000000000000000000001",
+  }]);
   assert.deepEqual(
     messages.filter((message) => message.type === "mppPayment").map((message) => message.payment),
     [{

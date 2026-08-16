@@ -187,6 +187,136 @@ test("web-target WASM directly dispatches a CSP-safe application tool", async ()
   }
 });
 
+test("web-target WASM keeps remote MCP deferred behind tool_search and Code Mode", async () => {
+  const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await new Promise((resolve, reject) => {
+    server.once("listening", resolve);
+    server.once("error", reject);
+  });
+  const connection = new Promise((resolve) => server.once("connection", resolve));
+  const events = [];
+  const calls = [];
+  const wasm = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
+  const mcpClient = {
+    async listTools() {
+      return {
+        tools: [{
+          name: "echo",
+          description: "Echo a deterministic MCP fixture message.",
+          inputSchema: {
+            type: "object",
+            properties: { message: { type: "string" } },
+            required: ["message"],
+            additionalProperties: false,
+          },
+        }],
+      };
+    },
+    async callTool({ name, arguments: input }) {
+      calls.push({ name, input });
+      return {
+        content: [{ type: "text", text: `fixture:${input.message}` }],
+        isError: false,
+      };
+    },
+  };
+  const agent = await Agent.create({
+    apiKey: "test-key",
+    WebSocketImpl: WebSocket,
+    module: wasm,
+    sessionId: "018f1f9a-7b3c-7a07-8000-000000000009",
+    thinking: "low",
+    mcp: {
+      fixture: {
+        client: mcpClient,
+        description: "Deterministic remote MCP fixture.",
+      },
+    },
+    websocketUrl: `ws://127.0.0.1:${server.address().port}`,
+  });
+  const watch = agent.events.watch();
+  watch.onEvent((event) => events.push(event));
+  let turn;
+  try {
+    turn = agent.turn.prompt({ input: "Find and call the remote MCP echo tool." });
+    const socket = await connection;
+    const reader = messageReader(socket);
+    const warmup = await reader.next();
+    const toolPrefix = warmup.input.find((item) => item.type === "additional_tools");
+    assert.deepEqual(toolPrefix.tools.map((tool) => tool.name ?? tool.type), ["exec", "tool_search"]);
+    assert.doesNotMatch(toolPrefix.tools[0].description, /mcp__fixture__echo/);
+    assert.equal(toolPrefix.tools.some((tool) => tool.name === "mcp__fixture__echo"), false);
+    send(socket, { type: "response.completed", response: { id: "mcp-warmup", usage: null } });
+
+    const generation = await reader.next();
+    assert.equal(generation.previous_response_id, "mcp-warmup");
+    send(socket, {
+      type: "response.completed",
+      response: {
+        id: "mcp-search",
+        status: "completed",
+        output: [{
+          type: "tool_search_call",
+          call_id: "search-mcp",
+          execution: "client",
+          arguments: { query: "echo deterministic message", limit: 1 },
+        }],
+        usage: null,
+      },
+    });
+
+    const searched = await reader.next();
+    assert.equal(searched.previous_response_id, "mcp-search");
+    assert.equal(searched.input[0].type, "tool_search_output");
+    assert.equal(searched.input[0].tools[0].type, "namespace");
+    assert.equal(searched.input[0].tools[0].name, "mcp__fixture__");
+    assert.deepEqual(searched.input[0].tools[0].tools.map((tool) => tool.name), ["echo"]);
+    send(socket, {
+      type: "response.completed",
+      response: {
+        id: "mcp-exec",
+        status: "completed",
+        output: [{
+          type: "custom_tool_call",
+          call_id: "call-exec-mcp",
+          name: "exec",
+          input: "text(await tools.mcp__fixture__echo({ message: 'hello' }));",
+        }],
+        usage: null,
+      },
+    });
+
+    const called = await reader.next();
+    assert.equal(called.previous_response_id, "mcp-exec");
+    assert.equal(called.input[0].type, "custom_tool_call_output");
+    assert.match(JSON.stringify(called.input[0].output), /fixture:hello/);
+    send(socket, {
+      type: "response.completed",
+      response: {
+        id: "mcp-final",
+        status: "completed",
+        output: [{
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "MCP_WASM_OK" }],
+        }],
+        usage: null,
+      },
+    });
+
+    assert.equal((await turn.result()).finalMessage, "MCP_WASM_OK");
+    assert.deepEqual(calls, [{ name: "echo", input: { message: "hello" } }]);
+    assert.equal(events.some((event) =>
+      event.type === "tool.call" && event.payload.tool === "mcp__fixture__echo"), true);
+  } finally {
+    turn?.dispose();
+    watch.off();
+    await agent.session.shutdown();
+    for (const socket of server.clients) socket.terminate();
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
 function messageReader(socket) {
   const messages = [];
   let waiter;
