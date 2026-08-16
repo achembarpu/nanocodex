@@ -4,4 +4,5 @@ export const MPP_ESCROW = "0x4d50500000000000000000000000000000000000";
 export const MPP_ACCESS_KEY_LIMIT = "0.25";
 export const MPP_MIN_WALLET_BALANCE = "0.05";
 export const MPP_RESPONSES_WEBSOCKET_URL = "wss://openai.mpp.tempo.xyz/v1/responses";
+export const TEMPO_ACCOUNT_STORAGE_KEY = "nanocodex-tempo-account-v2";
 export const MPP_PAYMENT_TOKENS = [USDC_E, PATH_USD] as const;

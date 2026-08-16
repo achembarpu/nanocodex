@@ -33,6 +33,7 @@ export type AgentControllerStart = {
   thinking: Thinking;
   reasoningMode: ReasoningMode;
   transport: "openai" | "chatgpt" | "mpp";
+  accessKeyAddress?: Address;
   payerAddress?: Address;
 };
 
@@ -108,6 +109,9 @@ export function createAgentController({
           thinking: message.thinking,
           reasoningMode: message.reasoningMode,
           transport: message.transport,
+          ...(message.transport === "mpp"
+            ? { accessKeyAddress: message.accessKeyAddress }
+            : {}),
           payerAddress: message.transport === "mpp" ? message.payerAddress : undefined,
         });
         return;

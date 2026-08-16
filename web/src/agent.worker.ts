@@ -65,12 +65,16 @@ async function createAgent(
   };
   if (start.transport === "mpp") {
     const payerAddress = start.payerAddress;
+    const accessKeyAddress = start.accessKeyAddress;
     if (!payerAddress) {
       throw new Error("MPP requires a connected Tempo account");
     }
+    if (!accessKeyAddress) {
+      throw new Error("MPP requires a locally signable Tempo access key");
+    }
     const { createTempoMppSession } = await import("./tempo");
     return paymentSessions.open(
-      () => createTempoMppSession(payerAddress),
+      () => createTempoMppSession(payerAddress, accessKeyAddress),
       async (paymentSession) => {
         const agent = await Agent.create({
           ...common,
