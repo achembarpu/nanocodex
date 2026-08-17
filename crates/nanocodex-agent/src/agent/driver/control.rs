@@ -81,6 +81,7 @@ pub(super) fn cancel_queued_turn(queued_turns: &mut VecDeque<QueuedTurn>, target
     };
     let QueuedTurn::Pending {
         prompt,
+        durable_operation,
         thinking,
         fast_mode,
         parent,
@@ -95,6 +96,7 @@ pub(super) fn cancel_queued_turn(queued_turns: &mut VecDeque<QueuedTurn>, target
         position,
         QueuedTurn::Cancelled {
             prompt,
+            durable_operation,
             thinking,
             fast_mode,
             parent,
@@ -110,6 +112,7 @@ pub(super) fn mark_all_queued_turns_cancelled(queued_turns: &mut VecDeque<Queued
     queued_turns.extend(accepted.into_iter().map(|queued| match queued {
         QueuedTurn::Pending {
             prompt,
+            durable_operation,
             thinking,
             fast_mode,
             parent,
@@ -118,6 +121,7 @@ pub(super) fn mark_all_queued_turns_cancelled(queued_turns: &mut VecDeque<Queued
             ..
         } => QueuedTurn::Cancelled {
             prompt,
+            durable_operation,
             thinking,
             fast_mode,
             parent,
@@ -137,9 +141,16 @@ pub(super) async fn begin_shutdown(
     commands.close();
     while let Some(command) = commands.recv().await {
         match command {
+            Command::DurablePrompt {
+                accepted, result, ..
+            } => {
+                drop(accepted.send(Err(NanocodexError::AgentStopped)));
+                drop(result);
+            }
             Command::Prompt {
                 key,
                 prompt,
+                durable_operation,
                 thinking,
                 fast_mode,
                 parent,
@@ -149,6 +160,7 @@ pub(super) async fn begin_shutdown(
                 queued_turns.push_back(QueuedTurn::Pending {
                     key,
                     prompt,
+                    durable_operation,
                     thinking: thinking.unwrap_or(default_thinking),
                     fast_mode: fast_mode.unwrap_or(default_fast_mode),
                     parent,
@@ -252,5 +264,11 @@ pub(super) fn handle_idle_command<S>(
             drop(result.send(Err(NanocodexError::AgentStopped)));
         }
         Command::Prompt { .. } => {}
+        Command::DurablePrompt {
+            accepted, result, ..
+        } => {
+            drop(accepted.send(Err(NanocodexError::AgentStopped)));
+            drop(result);
+        }
     }
 }

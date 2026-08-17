@@ -151,7 +151,13 @@ pub(super) struct TurnKey(pub(super) u64);
 pub struct TurnResult {
     pub(super) final_message: String,
     pub(super) usage: TurnUsage,
-    pub(super) checkpoint: Arc<CommittedSession>,
+    pub(super) checkpoint: TurnCheckpoint,
+}
+
+#[derive(Clone)]
+pub(super) enum TurnCheckpoint {
+    Live(Arc<CommittedSession>),
+    Replayed(SessionSnapshot),
 }
 
 impl TurnResult {
@@ -180,7 +186,10 @@ impl TurnResult {
     /// responsible for protecting and retaining serialized snapshots appropriately.
     #[must_use]
     pub fn snapshot(&self) -> SessionSnapshot {
-        self.checkpoint.snapshot()
+        match &self.checkpoint {
+            TurnCheckpoint::Live(checkpoint) => checkpoint.snapshot(),
+            TurnCheckpoint::Replayed(snapshot) => snapshot.clone(),
+        }
     }
 }
 
@@ -194,9 +203,19 @@ impl fmt::Debug for TurnResult {
 }
 
 pub(super) enum Command {
+    DurablePrompt {
+        key: TurnKey,
+        prompt: Prompt,
+        operation_id: String,
+        parent: Option<tracing::Span>,
+        events: EventSink,
+        result: oneshot::Sender<Result<TurnResult>>,
+        accepted: oneshot::Sender<Result<()>>,
+    },
     Prompt {
         key: TurnKey,
         prompt: Prompt,
+        durable_operation: Option<String>,
         thinking: Option<Thinking>,
         fast_mode: Option<bool>,
         parent: Option<tracing::Span>,
@@ -256,6 +275,7 @@ pub(super) enum QueuedTurn {
     Pending {
         key: TurnKey,
         prompt: Prompt,
+        durable_operation: Option<String>,
         thinking: Thinking,
         fast_mode: bool,
         parent: Option<tracing::Span>,
@@ -264,6 +284,7 @@ pub(super) enum QueuedTurn {
     },
     Cancelled {
         prompt: Prompt,
+        durable_operation: Option<String>,
         thinking: Thinking,
         fast_mode: bool,
         parent: Option<tracing::Span>,

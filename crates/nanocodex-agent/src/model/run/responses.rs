@@ -1,5 +1,24 @@
 use super::*;
 
+#[derive(Serialize)]
+struct DurableModelCall<'a> {
+    call_index: u32,
+    model: &'a str,
+    reasoning_mode: &'a str,
+    effort: &'a str,
+    fast_mode: bool,
+    prompt_history: &'a [ResponseItem],
+}
+
+#[derive(Deserialize, Serialize)]
+struct DurableModelResult {
+    response: TurnResult,
+    attempt: u32,
+    connection_generation: u32,
+    server_reasoning_included: bool,
+    duration_ns: u64,
+}
+
 impl<S> ModelRun<S>
 where
     S: Service<ResponsesAttempt, Response = ResponsesServiceResponse> + AgentSend + 'static,
@@ -53,33 +72,85 @@ where
         if let Some(input_content) = &input_content {
             record_span_content(&span, "model.input", input_content);
         }
-        let success = match self.client.execute(request).instrument(span.clone()).await {
-            Ok(success) => success,
-            Err(error) => {
+        let durable_steps = self.durable_steps.clone();
+        let step_id = format!("model-{call_index}");
+        let mut durable_prompt_history = prompt_history.iter().cloned().collect::<Vec<_>>();
+        for item in &mut durable_prompt_history {
+            item.strip_id();
+        }
+        let step_input = DurableModelCall {
+            call_index,
+            model: self.model.as_str(),
+            reasoning_mode: self.config.reasoning_mode.as_str(),
+            effort: self.thinking.as_str(),
+            fast_mode: self.fast_mode,
+            prompt_history: &durable_prompt_history,
+        };
+        let recovered = if let Some(steps) = &durable_steps {
+            match steps
+                .begin::<_, DurableModelResult>(
+                    &step_id,
+                    "model_call",
+                    &step_input,
+                    nanocodex_durability::RetryPolicy::Idempotent,
+                )
+                .await?
+            {
+                crate::agent::DurableStep::Execute => None,
+                crate::agent::DurableStep::Replay(output) => Some(output),
+            }
+        } else {
+            None
+        };
+        let durable_result = if let Some(output) = recovered {
+            output
+        } else {
+            let success = match self.client.execute(request).instrument(span.clone()).await {
+                Ok(success) => success,
+                Err(error) => {
+                    span.record("status", "failed");
+                    span.record("otel.status_code", "ERROR");
+                    span.record("duration_ns", elapsed_ns(started_at));
+                    return self.model_call_failed(
+                        call_index,
+                        started_at,
+                        NanocodexError::Response(error.into()),
+                    );
+                }
+            };
+            let attempt = success.attempt();
+            let connection_generation = success.connection_generation();
+            let server_reasoning_included = success.server_reasoning_included();
+            let ResponsesOutput::Generation(response) = success.into_output() else {
                 span.record("status", "failed");
                 span.record("otel.status_code", "ERROR");
-                span.record("duration_ns", elapsed_ns(started_at));
-                return self.model_call_failed(
-                    call_index,
-                    started_at,
-                    NanocodexError::Response(error.into()),
-                );
+                return Err(NanocodexError::InvalidAttemptState {
+                    detail: "generation returned a non-generation response",
+                });
+            };
+            let output = DurableModelResult {
+                response,
+                attempt,
+                connection_generation,
+                server_reasoning_included,
+                duration_ns: elapsed_ns(started_at),
+            };
+            if let Some(steps) = &durable_steps {
+                steps.complete(&step_id, &output).await?;
             }
+            output
         };
-        let attempt = success.attempt();
-        let connection_generation = success.connection_generation();
-        conversation.observe_server_reasoning(success.server_reasoning_included());
-        let ResponsesOutput::Generation(response) = success.into_output() else {
-            span.record("status", "failed");
-            span.record("otel.status_code", "ERROR");
-            return Err(NanocodexError::InvalidAttemptState {
-                detail: "generation returned a non-generation response",
-            });
-        };
+        let DurableModelResult {
+            response,
+            attempt,
+            connection_generation,
+            server_reasoning_included,
+            duration_ns,
+        } = durable_result;
+        conversation.observe_server_reasoning(server_reasoning_included);
         if prompt_repaired {
             conversation.adopt_prompt_history(prompt_history);
         }
-        let duration_ns = elapsed_ns(started_at);
         record_model_response(&span, &response);
         span.record("status", "completed");
         span.record("otel.status_code", "OK");

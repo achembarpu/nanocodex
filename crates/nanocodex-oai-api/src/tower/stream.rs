@@ -5,7 +5,7 @@ use crate::{
     ResponseItemId, monotonic_now_ns,
     responses::{ServerEvent, Usage},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use web_time::Instant;
 
 use crate::{
@@ -19,6 +19,7 @@ use crate::{
 const INVALID_IMAGE_ERROR: &str = "The image data you provided does not represent a valid image";
 
 /// Complete provider output from one `response.create` operation.
+#[derive(Deserialize, Serialize)]
 pub struct GenerationOutput {
     /// Provider response ID retained privately by a managed session.
     pub id: String,
@@ -61,7 +62,7 @@ pub struct CompactionOutput {
 }
 
 /// Work and latency counters for one complete streamed response.
-#[derive(Clone, Copy, Default)]
+#[derive(Clone, Copy, Default, Deserialize, Serialize)]
 pub struct ResponsePipelineStats {
     /// Provider events received.
     pub event_count: u64,
@@ -94,6 +95,7 @@ pub struct ResponsePipelineStats {
 }
 
 /// Completed callable output derived from a response item.
+#[derive(Clone, Deserialize, Serialize)]
 pub struct CodeCall {
     /// Provider call identity.
     pub call_id: String,
@@ -108,7 +110,8 @@ pub struct CodeCall {
 }
 
 /// Wire-level representation used by a completed callable output.
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum CodeCallKind {
     /// Custom tool call with free-form input.
     Custom,

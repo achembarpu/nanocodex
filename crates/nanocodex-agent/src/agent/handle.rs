@@ -171,6 +171,7 @@ impl Nanocodex {
             .send(Command::Prompt {
                 key,
                 prompt,
+                durable_operation: None,
                 thinking: None,
                 fast_mode: None,
                 parent,
@@ -182,6 +183,68 @@ impl Nanocodex {
         {
             return Err(NanocodexError::AgentStopped);
         }
+        Ok(Turn {
+            control: TurnControl {
+                key,
+                commands: self.commands.clone(),
+            },
+            events: event_stream,
+            result: receiver,
+        })
+    }
+
+    /// Durably accepts an idempotent prompt before returning its turn handle.
+    ///
+    /// The operation ID is stable across process crashes and host retries. A
+    /// duplicate completed submission returns its stored result without model
+    /// or tool execution. A duplicate unfinished submission may resume in a
+    /// fresh process, but cannot be started twice by one live agent.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an empty operation ID or prompt, when no durability
+    /// journal is configured, when the ID conflicts with another input, or
+    /// when the agent stopped before receiving the accepted command.
+    pub async fn prompt_durable(
+        &self,
+        operation_id: impl Into<String>,
+        prompt: impl Into<Prompt>,
+    ) -> Result<Turn> {
+        let operation_id = operation_id.into();
+        if operation_id.trim().is_empty() {
+            return Err(NanocodexError::InvalidRequest(
+                "durable operation ID must not be empty".to_owned(),
+            ));
+        }
+        let prompt = prompt.into();
+        prompt
+            .validate()
+            .map_err(|error| NanocodexError::InvalidRequest(error.to_string()))?;
+        let key = TurnKey(self.next_turn.fetch_add(1, Ordering::Relaxed));
+        let parent = tracing::Span::current();
+        let parent = (!parent.is_disabled()).then_some(parent);
+        let (events, event_stream) = self.events.mirrored_channel();
+        let (result, receiver) = oneshot::channel();
+        let (accepted, acceptance) = oneshot::channel();
+        if self
+            .commands
+            .send(Command::DurablePrompt {
+                key,
+                prompt,
+                operation_id,
+                parent,
+                events,
+                result,
+                accepted,
+            })
+            .await
+            .is_err()
+        {
+            return Err(NanocodexError::AgentStopped);
+        }
+        acceptance
+            .await
+            .map_err(|_| NanocodexError::AgentStopped)??;
         Ok(Turn {
             control: TurnControl {
                 key,
@@ -380,11 +443,13 @@ impl Nanocodex {
     /// Returns an error when the result belongs to another conversation or the
     /// driver stopped.
     pub async fn fork_from(&self, completed: &TurnResult) -> Result<(Self, AgentEvents)> {
-        if completed.checkpoint.lineage_id() != self.lineage_id.as_ref() {
+        let TurnCheckpoint::Live(checkpoint) = &completed.checkpoint else {
+            return Err(NanocodexError::ReplayedCheckpointUnavailable);
+        };
+        if checkpoint.lineage_id() != self.lineage_id.as_ref() {
             return Err(NanocodexError::CheckpointLineageMismatch);
         }
-        self.request_fork(Some(Arc::clone(&completed.checkpoint)))
-            .await
+        self.request_fork(Some(Arc::clone(checkpoint))).await
     }
 
     async fn request_fork(

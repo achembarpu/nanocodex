@@ -192,6 +192,40 @@ impl<F> NanocodexBuilder<F> {
         self.resume = Some(snapshot);
         self
     }
+
+    /// Attaches an opened portable durability journal and restores its latest
+    /// committed session checkpoint.
+    ///
+    /// The journal is authoritative when it contains a checkpoint. An explicit
+    /// [`Self::resume`] value must encode the same snapshot. Durable prompt IDs,
+    /// inputs, results, retry attempts, and checkpoints are subsequently
+    /// reduced and committed by Rust; the selected host only stores opaque
+    /// compare-and-append batches.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the durable checkpoint is not a valid Nanocodex
+    /// session snapshot or conflicts with an explicitly configured snapshot.
+    pub async fn durability(
+        mut self,
+        journal: nanocodex_durability::DurableSession,
+    ) -> Result<Self> {
+        if let Some(checkpoint) = journal.latest_checkpoint().await? {
+            let restored = checkpoint.decode::<SessionSnapshot>()?;
+            if let Some(configured) = &self.resume
+                && serde_json::to_string(configured)
+                    .map_err(|error| NanocodexError::InvalidSessionSnapshot(error.to_string()))?
+                    != checkpoint.json()
+            {
+                return Err(NanocodexError::InvalidSessionSnapshot(
+                    "configured resume snapshot does not match the durability journal".to_owned(),
+                ));
+            }
+            self.resume = Some(restored);
+        }
+        self.codex.durability.set_journal(journal);
+        Ok(self)
+    }
 }
 
 #[cfg(not(target_family = "wasm"))]

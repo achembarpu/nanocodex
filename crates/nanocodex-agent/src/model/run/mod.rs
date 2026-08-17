@@ -33,7 +33,7 @@ use nanocodex_oai_api::{
     },
     transport::{ResponsesError, ResponsesTransport, TransportStats},
 };
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, value::RawValue};
 use tokio::sync::{RwLock, watch};
 use tower::Service;
@@ -54,7 +54,7 @@ use super::{
 };
 use crate::{
     NanocodexError, Result,
-    agent::{AgentSend, ContextSource},
+    agent::{AgentSend, ContextSource, DurableSteps},
     prompt_cache::ModelPromptCache,
     usage::TurnUsage,
 };
@@ -90,6 +90,7 @@ pub(crate) struct ModelRun<S> {
     global_instructions: Option<Arc<str>>,
     force_compaction: bool,
     pending_developer_messages: Vec<ResponseItem>,
+    durable_steps: Option<DurableSteps>,
 }
 
 pub(crate) enum ModelTurnOutcome {
@@ -234,6 +235,7 @@ impl<S> ModelRun<S> {
             global_instructions,
             force_compaction: false,
             pending_developer_messages: Vec::new(),
+            durable_steps: None,
         }
     }
 
@@ -300,6 +302,7 @@ impl<S> ModelRun<S> {
             global_instructions,
             force_compaction: false,
             pending_developer_messages: Vec::new(),
+            durable_steps: None,
         }
     }
 

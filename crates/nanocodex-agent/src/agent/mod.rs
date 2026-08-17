@@ -33,7 +33,7 @@ use crate::{
     NanocodexError, Result,
     model::run::{
         CompletedModelTurn, HistoryCheckpoint, ModelCheckpoint, ModelCompactOutcome, ModelRun,
-        ModelTurnOutcome, PreparedCheckpoint, prepare_history_checkpoint,
+        ModelTurnOutcome, PreparedCheckpoint, prepare_checkpoint, prepare_history_checkpoint,
         prepare_resumed_checkpoint,
     },
     session::{CommittedSession, SessionResume, SessionSnapshot},
@@ -101,6 +101,7 @@ pub use builder::NanocodexBuilder;
 pub use context_source::ExecutionEnvironment;
 pub use handle::{AgentHandle, Nanocodex};
 pub use session_context::AgentSessionContext;
+use turn::TurnCheckpoint;
 pub use turn::{PromptRoute, Turn, TurnControl, TurnResult};
 
 use builder::{CodexCompatibility, PromptCacheConfig};
@@ -108,6 +109,7 @@ pub(crate) use context_source::ContextSource;
 use context_source::ContextSourceConfig;
 use driver::{AgentDriver, AgentOrigin, BranchSpawner, DriverShutdown};
 use durability::{Durability, DurabilityConfig};
+pub(crate) use durability::{DurableStep, DurableSteps};
 pub(crate) use executor::{AgentFactory, AgentSend};
 use executor::{ServiceFactory, spawn_driver};
 use handle::request_command;

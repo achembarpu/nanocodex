@@ -102,6 +102,18 @@ pub enum NanocodexError {
     #[error("invalid session snapshot: {0}")]
     InvalidSessionSnapshot(String),
 
+    /// A portable durability journal or host store failed.
+    #[error(transparent)]
+    Durability(Arc<nanocodex_durability::Error>),
+
+    /// A durable prompt was submitted without a configured journal.
+    #[error("durable prompt submission requires a configured durability journal")]
+    DurabilityNotConfigured,
+
+    /// A replayed durable result does not retain an in-process fork checkpoint.
+    #[error("a replayed durable result cannot be used as an in-process fork checkpoint")]
+    ReplayedCheckpointUnavailable,
+
     /// Agent construction was attempted outside an active Tokio runtime.
     #[error("building an agent requires an active Tokio runtime")]
     TokioRuntimeUnavailable,
@@ -150,6 +162,12 @@ impl NanocodexError {
             Self::Shutdown(error) => error.responses_error(),
             _ => None,
         }
+    }
+}
+
+impl From<nanocodex_durability::Error> for NanocodexError {
+    fn from(error: nanocodex_durability::Error) -> Self {
+        Self::Durability(Arc::new(error))
     }
 }
 

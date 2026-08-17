@@ -2,6 +2,7 @@ mod branch;
 mod control;
 mod telemetry;
 
+use super::durability::DurableAdmission;
 use super::*;
 pub(super) use branch::{AgentOrigin, BranchSpawner};
 pub(super) use control::DriverShutdown;
@@ -94,6 +95,7 @@ where
                         QueuedTurn::Pending {
                             key,
                             prompt,
+                            durable_operation,
                             thinking,
                             fast_mode,
                             parent,
@@ -103,6 +105,7 @@ where
                             break Command::Prompt {
                                 key,
                                 prompt,
+                                durable_operation,
                                 thinking: Some(thinking),
                                 fast_mode: Some(fast_mode),
                                 parent,
@@ -112,6 +115,7 @@ where
                         }
                         QueuedTurn::Cancelled {
                             prompt,
+                            durable_operation,
                             thinking,
                             fast_mode,
                             parent,
@@ -160,7 +164,16 @@ where
                                 fast_mode,
                             )?;
                             model.set_events(self.events.clone());
-                            drop(result.send(Err(NanocodexError::TurnCancelled)));
+                            drop(_guard);
+                            let outcome = if let Some(operation_id) = durable_operation {
+                                self.durability
+                                    .cancel_operation(&operation_id)
+                                    .await
+                                    .and(Err(NanocodexError::TurnCancelled))
+                            } else {
+                                Err(NanocodexError::TurnCancelled)
+                            };
+                            drop(result.send(outcome));
                             continue;
                         }
                     }
@@ -168,6 +181,10 @@ where
                 if commands_open {
                     let Some(command) = self.commands.recv().await else {
                         commands_open = false;
+                        continue;
+                    };
+                    let Some(command) = accept_durable_command(&self.durability, command).await
+                    else {
                         continue;
                     };
                     if let Command::Shutdown = command {
@@ -199,6 +216,7 @@ where
                     Command::Prompt {
                         key,
                         prompt,
+                        durable_operation: None,
                         thinking: None,
                         fast_mode: None,
                         parent,
@@ -211,6 +229,7 @@ where
             let Command::Prompt {
                 key,
                 prompt,
+                durable_operation,
                 thinking,
                 fast_mode,
                 parent,
@@ -276,10 +295,18 @@ where
                             biased;
                             outcome = &mut execution => break outcome,
                             command = self.commands.recv() => {
+                                let command = match command {
+                                    Some(command) => accept_durable_command(
+                                        &self.durability,
+                                        command,
+                                    ).await,
+                                    None => None,
+                                };
                                 match command {
                                     Some(Command::Prompt {
                                         key,
                                         prompt,
+                                        durable_operation,
                                         thinking: _,
                                         fast_mode: _,
                                         parent,
@@ -289,6 +316,7 @@ where
                                         queued_turns.push_back(QueuedTurn::Pending {
                                             key,
                                             prompt,
+                                            durable_operation,
                                             thinking: default_thinking,
                                             fast_mode: default_fast_mode,
                                             parent,
@@ -307,6 +335,7 @@ where
                                         queued_turns.push_back(QueuedTurn::Pending {
                                             key,
                                             prompt,
+                                            durable_operation: None,
                                             thinking: default_thinking,
                                             fast_mode: default_fast_mode,
                                             parent,
@@ -378,6 +407,12 @@ where
                                         commands_open = false;
                                         break execution.as_mut().await;
                                     }
+                                    Some(Command::DurablePrompt {
+                                        accepted, result, ..
+                                    }) => {
+                                        drop(accepted.send(Err(NanocodexError::AgentStopped)));
+                                        drop(result);
+                                    }
                                     None => {
                                         commands_open = false;
                                         mark_all_queued_turns_cancelled(&mut queued_turns);
@@ -408,8 +443,7 @@ where
                                     &checkpoint,
                                     durability_turn.completed_without_message(),
                                 )
-                                .await;
-                            Ok(())
+                                .await
                         }
                         Ok(ModelCompactOutcome::Cancelled(checkpoint)) => {
                             let checkpoint = Arc::new(CommittedSession::new(
@@ -426,7 +460,7 @@ where
                             self.durability
                                 .persist(&checkpoint, durability_turn)
                                 .instrument(span.clone())
-                                .await;
+                                .await?;
                             model.replace_client(ResponsesClient::new((self
                                 .spawner
                                 .service_factory)(
@@ -444,7 +478,7 @@ where
                             self.durability
                                 .persist(&checkpoint, durability_turn.failed())
                                 .instrument(span.clone())
-                                .await;
+                                .await?;
                             Err(error)
                         }
                         Err(error) => Err(error),
@@ -527,7 +561,20 @@ where
                     );
                 });
             }
-            let durability_turn = self.durability.start_turn(&prompt, thinking);
+            let durability_turn =
+                self.durability
+                    .start_turn(&prompt, thinking, durable_operation.clone());
+            if let Err(error) = durability_turn.begin().await {
+                if let Some(operation_id) = &durable_operation {
+                    self.durability.release_claim(operation_id).await;
+                }
+                drop(result.send(Err(error)));
+                continue;
+            }
+            let durable_base_checkpoint = durable_operation
+                .as_ref()
+                .map(|_| latest_fork_checkpoint.clone());
+            let durable_steps = durability_turn.steps();
             let (steers, steer_rx) = mpsc::channel(STEER_CAPACITY);
             let (cancel, cancel_rx) = oneshot::channel();
             let (fork_snapshots, mut fork_snapshot_rx) = watch::channel(None);
@@ -546,6 +593,7 @@ where
                         steer_rx,
                         cancel_rx,
                         fork_snapshots,
+                        durable_steps,
                     )
                     .instrument(turn_span.clone()),
             );
@@ -571,10 +619,18 @@ where
                     }
                     outcome = &mut execution => break outcome,
                     command = self.commands.recv() => {
+                        let command = match command {
+                            Some(command) => accept_durable_command(
+                                &self.durability,
+                                command,
+                            ).await,
+                            None => None,
+                        };
                         match command {
                             Some(Command::Prompt {
                                 key,
                                 prompt,
+                                durable_operation,
                                 thinking: _,
                                 fast_mode: _,
                                 parent,
@@ -584,6 +640,7 @@ where
                                 queued_turns.push_back(QueuedTurn::Pending {
                                     key,
                                     prompt,
+                                    durable_operation,
                                     thinking: default_thinking,
                                     fast_mode: default_fast_mode,
                                     parent,
@@ -718,6 +775,12 @@ where
                                 .await;
                                 commands_open = false;
                             }
+                            Some(Command::DurablePrompt {
+                                accepted, result, ..
+                            }) => {
+                                drop(accepted.send(Err(NanocodexError::AgentStopped)));
+                                drop(result);
+                            }
                             None => {
                                 commands_open = false;
                                 mark_all_queued_turns_cancelled(&mut queued_turns);
@@ -743,17 +806,19 @@ where
                         thread_model,
                         checkpoint,
                     ));
-                    let durability_turn = durability_turn.completed(final_message.clone());
-                    self.durability
+                    let durability_turn =
+                        durability_turn.completed(final_message.clone(), usage.clone());
+                    let persisted = self
+                        .durability
                         .persist(&checkpoint, durability_turn)
                         .instrument(turn_span.clone())
                         .await;
                     latest_fork_checkpoint = Some(Arc::clone(&checkpoint));
                     (
-                        Ok(TurnResult {
+                        persisted.map(|()| TurnResult {
                             final_message,
                             usage,
-                            checkpoint,
+                            checkpoint: TurnCheckpoint::Live(checkpoint),
                         }),
                         false,
                     )
@@ -765,7 +830,8 @@ where
                         checkpoint,
                     ));
                     let durability_turn = durability_turn.interrupted();
-                    self.durability
+                    let persisted = self
+                        .durability
                         .persist(&checkpoint, durability_turn)
                         .instrument(turn_span.clone())
                         .await;
@@ -773,7 +839,7 @@ where
                     model.replace_client(ResponsesClient::new((self.spawner.service_factory)(
                         Arc::clone(&self.spawner.config),
                     )));
-                    (Err(NanocodexError::TurnCancelled), true)
+                    (persisted.and(Err(NanocodexError::TurnCancelled)), true)
                 }
                 Ok(ModelTurnOutcome::Failed { error, checkpoint }) => {
                     let checkpoint = Arc::new(CommittedSession::new(
@@ -782,15 +848,40 @@ where
                         checkpoint,
                     ));
                     let durability_turn = durability_turn.failed();
-                    self.durability
+                    let persisted = self
+                        .durability
                         .persist(&checkpoint, durability_turn)
                         .instrument(turn_span.clone())
                         .await;
                     latest_fork_checkpoint = Some(checkpoint);
-                    (Err(error), false)
+                    (persisted.and(Err(error)), false)
                 }
-                Err(error) => (Err(error), false),
+                Err(error) => {
+                    if matches!(error, NanocodexError::Durability(_)) {
+                        (Err(error), false)
+                    } else {
+                        let persisted = self
+                            .durability
+                            .fail_without_checkpoint(durability_turn)
+                            .instrument(turn_span.clone())
+                            .await;
+                        (persisted.and(Err(error)), false)
+                    }
+                }
             };
+            if outcome.is_err()
+                && let Some(base_checkpoint) = durable_base_checkpoint
+            {
+                latest_fork_checkpoint = base_checkpoint.clone();
+                model = model_from_checkpoint(
+                    &self.events,
+                    &self.transport_stats,
+                    &self.tools,
+                    &self.spawner,
+                    &prompt_cache,
+                    base_checkpoint.as_deref(),
+                );
+            }
             turn_span.record(
                 "status",
                 if was_cancelled {
@@ -823,6 +914,99 @@ where
                 };
                 drop(cancel_result.send(outcome));
             }
+        }
+    }
+}
+
+fn model_from_checkpoint<S>(
+    events: &EventSink,
+    transport_stats: &Arc<TransportStats>,
+    tools: &Tools,
+    spawner: &BranchSpawner<S>,
+    prompt_cache: &ModelPromptCache,
+    checkpoint: Option<&CommittedSession>,
+) -> ModelRun<S>
+where
+    S: Service<ResponsesAttempt, Response = ResponsesServiceResponse> + AgentSend + 'static,
+    S::Error: Into<ResponseError>,
+    S::Future: AgentSend,
+{
+    let client = ResponsesClient::new((spawner.service_factory)(Arc::clone(&spawner.config)));
+    if let Some(checkpoint) = checkpoint {
+        let prepared = prepare_checkpoint(
+            checkpoint.model().clone(),
+            &spawner.config,
+            tools,
+            spawner.context_source.clone(),
+        );
+        ModelRun::from_checkpoint(
+            events.clone(),
+            Arc::clone(&spawner.config),
+            client,
+            Arc::clone(transport_stats),
+            tools.clone(),
+            prompt_cache.clone(),
+            prepared,
+        )
+    } else {
+        ModelRun::new(
+            events.clone(),
+            Arc::clone(&spawner.config),
+            client,
+            Arc::clone(transport_stats),
+            tools.clone(),
+            prompt_cache.clone(),
+            spawner.context_source.clone(),
+        )
+    }
+}
+
+async fn accept_durable_command(durability: &Durability, command: Command) -> Option<Command> {
+    let Command::DurablePrompt {
+        key,
+        prompt,
+        operation_id,
+        parent,
+        events,
+        result,
+        accepted,
+    } = command
+    else {
+        return Some(command);
+    };
+    match durability.admit(&operation_id, &prompt).await {
+        Ok(DurableAdmission::Execute) => {
+            if accepted.send(Ok(())).is_err() {
+                durability.release_claim(&operation_id).await;
+                return None;
+            }
+            Some(Command::Prompt {
+                key,
+                prompt,
+                durable_operation: Some(operation_id),
+                thinking: None,
+                fast_mode: None,
+                parent,
+                events,
+                result,
+            })
+        }
+        Ok(DurableAdmission::Completed { output, snapshot }) => {
+            drop(accepted.send(Ok(())));
+            drop(result.send(Ok(TurnResult {
+                final_message: output.final_message,
+                usage: output.usage,
+                checkpoint: TurnCheckpoint::Replayed(snapshot),
+            })));
+            None
+        }
+        Ok(DurableAdmission::Cancelled) => {
+            drop(accepted.send(Err(NanocodexError::TurnCancelled)));
+            None
+        }
+        Err(error) => {
+            drop(accepted.send(Err(error)));
+            None
         }
     }
 }

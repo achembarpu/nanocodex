@@ -1,15 +1,15 @@
 use crate::{Result, session::CommittedSession};
 
 #[derive(Clone, Default)]
-pub(crate) struct DurabilityConfig;
+pub(super) struct Config;
 
-impl DurabilityConfig {
-    pub(crate) const fn for_new_thread(&self) -> Self {
+impl Config {
+    pub(super) const fn for_new_thread(&self) -> Self {
         Self
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) const fn start(
+    pub(super) const fn start(
         &self,
         _session_id: &str,
         _workspace: Option<&str>,
@@ -23,58 +23,50 @@ impl DurabilityConfig {
 }
 
 #[derive(Clone)]
-pub(crate) struct Durability;
+pub(super) struct Durability;
 
 impl Durability {
-    pub(crate) const fn start_turn(
+    pub(super) const fn start_turn(
         &self,
         _prompt: &nanocodex_oai_api::Prompt,
         _effort: nanocodex_oai_api::Thinking,
-    ) -> DurabilityTurn {
-        DurabilityTurn
+    ) -> Turn {
+        Turn
     }
 
-    pub(crate) const fn start_compaction(
-        &self,
-        _effort: nanocodex_oai_api::Thinking,
-    ) -> DurabilityTurn {
-        DurabilityTurn
+    pub(super) const fn start_compaction(&self, _effort: nanocodex_oai_api::Thinking) -> Turn {
+        Turn
     }
 
-    pub(crate) async fn persist(&self, _checkpoint: &CommittedSession, _turn: DurabilityTurn) {}
+    pub(super) async fn persist(&self, _checkpoint: &CommittedSession, _turn: Turn) {}
 
-    pub(crate) async fn persist_compaction(
-        &self,
-        _checkpoint: &CommittedSession,
-        _turn: DurabilityTurn,
-    ) {
-    }
+    pub(super) async fn persist_compaction(&self, _checkpoint: &CommittedSession, _turn: Turn) {}
 
-    pub(crate) async fn shutdown(&self) -> Result<()> {
+    pub(super) async fn shutdown(&self) -> Result<()> {
         Ok(())
     }
 }
 
-pub(crate) struct DurabilityTurn;
+pub(super) struct Turn;
 
-impl DurabilityTurn {
-    pub(crate) fn completed(self, _final_message: String) -> Self {
+impl Turn {
+    pub(super) fn completed(self, _final_message: String) -> Self {
         self
     }
 
-    pub(crate) const fn completed_without_message(self) -> Self {
+    pub(super) const fn completed_without_message(self) -> Self {
         self
     }
 
-    pub(crate) const fn interrupted(self) -> Self {
+    pub(super) const fn interrupted(self) -> Self {
         self
     }
 
-    pub(crate) const fn replaced(self) -> Self {
+    pub(super) const fn replaced(self) -> Self {
         self
     }
 
-    pub(crate) const fn failed(self) -> Self {
+    pub(super) const fn failed(self) -> Self {
         self
     }
 }

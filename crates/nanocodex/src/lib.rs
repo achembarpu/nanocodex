@@ -23,8 +23,8 @@ pub mod agent {
     pub use nanocodex_agent::{
         AgentEvents, AgentHandle, AgentSessionContext, CostStatus, EstimatedUsdCost,
         ExecutionEnvironment, Nanocodex, NanocodexBuilder, NanocodexError, PromptRoute, Result,
-        ServiceTier, Turn, TurnControl, TurnResult, TurnUsage, UsdAmount, events, input, session,
-        usage,
+        ServiceTier, Turn, TurnControl, TurnResult, TurnUsage, UsdAmount, durability, events,
+        input, session, usage,
     };
 }
 
