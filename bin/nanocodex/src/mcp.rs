@@ -18,7 +18,7 @@ use nanocodex::tools::mcp::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-const DEFAULT_MCP_SERVERS: [(&str, &str, &str); 3] = [
+const DEFAULT_MCP_SERVERS: [(&str, &str, &str); 5] = [
     (
         "openaiDeveloperDocs",
         "https://developers.openai.com/mcp",
@@ -34,9 +34,29 @@ const DEFAULT_MCP_SERVERS: [(&str, &str, &str); 3] = [
         "https://docs.mcp.cloudflare.com/mcp",
         "Search Cloudflare developer documentation.",
     ),
+    (
+        "viem",
+        "https://viem.sh/api/mcp",
+        "Search Viem developer documentation.",
+    ),
+    (
+        "vocs",
+        "https://vocs.dev/api/mcp",
+        "Search Vocs developer documentation.",
+    ),
 ];
 pub(crate) const MERCATOR_MCP_URL: &str = "https://mercator.tempoxyz.dev/mcp";
 const MERCATOR_MCP_DESCRIPTION: &str = "Discovers and composes paid Tempo services and MPP flows.";
+
+fn default_parallel_tools(name: &str) -> &'static [&'static str] {
+    match name {
+        "openaiDeveloperDocs" => &["fetch_openai_doc", "search_openai_docs"],
+        "tempo" => &["code", "search"],
+        "cloudflare" => &["search_cloudflare_documentation"],
+        "viem" | "vocs" => &["list_pages", "read_page", "search_docs", "search_source"],
+        _ => &[],
+    }
+}
 
 #[derive(Args)]
 pub(crate) struct McpArgs {
@@ -49,11 +69,11 @@ pub(crate) struct McpArgs {
     )]
     mcp_defaults: bool,
 
-    /// Load enabled MCP servers from `$CODEX_HOME/config.toml`.
+    /// Also load enabled MCP servers from `$CODEX_HOME/config.toml`.
     #[arg(
         long,
         env = "NANOCODEX_MCP_CODEX_CONFIG",
-        default_value_t = true,
+        default_value_t = false,
         action = ArgAction::Set
     )]
     mcp_codex_config: bool,
@@ -105,6 +125,7 @@ struct ServerConfig {
     tool_timeout: Option<Duration>,
     enabled_tools: Option<Vec<String>>,
     disabled_tools: Vec<String>,
+    parallel_tools: Vec<String>,
 }
 
 #[derive(Default, Deserialize)]
@@ -238,6 +259,10 @@ impl McpArgs {
                         tool_timeout: None,
                         enabled_tools: None,
                         disabled_tools: Vec::new(),
+                        parallel_tools: default_parallel_tools(name)
+                            .iter()
+                            .map(|tool| (*tool).to_owned())
+                            .collect(),
                     });
             }
             if tempo.is_some() && !codex_server_names.contains("mercator") {
@@ -256,6 +281,7 @@ impl McpArgs {
                         tool_timeout: None,
                         enabled_tools: None,
                         disabled_tools: Vec::new(),
+                        parallel_tools: Vec::new(),
                     });
             }
         }
@@ -357,7 +383,9 @@ fn build_mcp(
         if let Some(enabled_tools) = server.enabled_tools {
             configured = configured.enabled_tools(enabled_tools);
         }
-        configured = configured.disabled_tools(server.disabled_tools);
+        configured = configured
+            .disabled_tools(server.disabled_tools)
+            .parallel_tools(server.parallel_tools);
         builder = builder.server(name, configured);
     }
     let provider = builder.build()?;
@@ -686,6 +714,7 @@ impl CodexMcpServer {
             tool_timeout,
             enabled_tools: self.enabled_tools,
             disabled_tools: self.disabled_tools,
+            parallel_tools: Vec::new(),
         }))
     }
 }
@@ -721,6 +750,7 @@ fn insert_server(
                 tool_timeout: None,
                 enabled_tools: None,
                 disabled_tools: Vec::new(),
+                parallel_tools: Vec::new(),
             },
         )
         .is_some()
@@ -890,6 +920,8 @@ enabled = false
         assert!(encoded.contains("local"));
         assert!(encoded.contains("openaiDeveloperDocs"));
         assert!(encoded.contains("cloudflare"));
+        assert!(encoded.contains("viem"));
+        assert!(encoded.contains("vocs"));
         assert!(!encoded.contains("\n- tempo:"));
     }
 

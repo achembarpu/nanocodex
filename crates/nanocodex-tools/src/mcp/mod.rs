@@ -304,12 +304,9 @@ impl McpHandle {
                     .map(|tool| {
                         ToolEntry::new(
                             server_name,
-                            server.config.description.as_deref(),
                             &tool,
                             Arc::clone(&connected.client),
-                            server.config.tool_timeout,
-                            server.config.supports_parallel_tool_calls,
-                            server.config.tool_exposure,
+                            &server.config,
                         )
                     })
                     .collect();
@@ -481,15 +478,7 @@ impl DynamicToolProvider for Mcp {
                             .tools
                             .into_iter()
                             .map(|tool| {
-                                ToolEntry::new(
-                                    &name,
-                                    config.description.as_deref(),
-                                    &tool,
-                                    Arc::clone(&connected.client),
-                                    config.tool_timeout,
-                                    config.supports_parallel_tool_calls,
-                                    config.tool_exposure,
-                                )
+                                ToolEntry::new(&name, &tool, Arc::clone(&connected.client), &config)
                             })
                             .collect::<Vec<_>>();
                         ConnectedCatalog {
@@ -794,7 +783,7 @@ fn search_description(servers: &[NamedServer]) -> String {
         }
     }
     format!(
-        "# Tool discovery\n\nSearches over deferred tool metadata with BM25 and exposes matching tools for the next model call.\n\nYou have access to tools from the following sources:\n{sources}\nSome of the tools may not have been provided to you upfront, and you should use this tool (`tool_search`) to search for the required tools. For MCP tool discovery, always use `tool_search` instead of `list_mcp_resources` or `list_mcp_resource_templates`."
+        "# Tool discovery\n\nSearches over deferred tool metadata with BM25 and exposes matching tools for the next model call.\n\nYou have access to tools from the following sources:\n{sources}\nSome of the tools may not have been provided to you upfront, and you should use this tool (`tool_search`) to search for the required tools. For MCP tool discovery, always use `tool_search` instead of `list_mcp_resources` or `list_mcp_resource_templates`. Each search result reports whether it supports parallel tool calls. After discovery, invoke two or more independent supported tools together from one `exec` cell with `Promise.all` instead of using serial model rounds."
     )
 }
 
@@ -929,7 +918,7 @@ mod tests {
             json!({
                 "type": "tool_search",
                 "execution": "client",
-                "description": "# Tool discovery\n\nSearches over deferred tool metadata with BM25 and exposes matching tools for the next model call.\n\nYou have access to tools from the following sources:\n- docs: Search product documentation.\nSome of the tools may not have been provided to you upfront, and you should use this tool (`tool_search`) to search for the required tools. For MCP tool discovery, always use `tool_search` instead of `list_mcp_resources` or `list_mcp_resource_templates`.",
+                "description": "# Tool discovery\n\nSearches over deferred tool metadata with BM25 and exposes matching tools for the next model call.\n\nYou have access to tools from the following sources:\n- docs: Search product documentation.\nSome of the tools may not have been provided to you upfront, and you should use this tool (`tool_search`) to search for the required tools. For MCP tool discovery, always use `tool_search` instead of `list_mcp_resources` or `list_mcp_resource_templates`. Each search result reports whether it supports parallel tool calls. After discovery, invoke two or more independent supported tools together from one `exec` cell with `Promise.all` instead of using serial model rounds.",
                 "parameters": {
                     "type": "object",
                     "properties": {

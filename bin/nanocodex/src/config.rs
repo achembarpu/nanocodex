@@ -188,6 +188,15 @@ pub(crate) struct AgentArgs {
     #[arg(long, env = "OPENAI_RESPONSES_WEBSOCKET_URL")]
     websocket_url: Option<String>,
 
+    /// Prime the Responses WebSocket before the first model request.
+    #[arg(
+        long,
+        env = "NANOCODEX_WEBSOCKET_WARMUP",
+        default_value_t = false,
+        action = ArgAction::Set
+    )]
+    websocket_warmup: bool,
+
     /// Responses transport fixed for the complete agent session.
     ///
     /// Defaults to HTTPS for the Tempo provider and WebSocket for direct
@@ -316,7 +325,8 @@ impl AgentArgs {
         let mpp_adapter = self.mpp.start().await?;
         let mut openai = OpenAi::builder(auth)
             .transport(responses_transport)
-            .websocket_url(direct_websocket_url);
+            .websocket_url(direct_websocket_url)
+            .websocket_warmup(self.websocket_warmup);
         if let Some(prefix) = self.model_id_prefix.as_deref() {
             openai = openai.model_id_prefix(prefix);
         }
@@ -870,7 +880,7 @@ mod tests {
     }
 
     #[test]
-    fn standard_and_codex_config_mcp_servers_are_enabled_by_default() {
+    fn standard_mcp_servers_are_enabled_and_codex_config_is_opt_in() {
         let command = crate::Cli::command();
         let mcp_defaults = command
             .get_arguments()
@@ -883,7 +893,7 @@ mod tests {
             .get_arguments()
             .find(|argument| argument.get_id() == "mcp_codex_config")
             .expect("the CLI should expose the Codex MCP config argument");
-        assert_eq!(codex_config.get_default_values(), ["true"]);
+        assert_eq!(codex_config.get_default_values(), ["false"]);
     }
 
     #[test]
@@ -907,6 +917,12 @@ mod tests {
             .find(|argument| argument.get_id() == "store_responses")
             .expect("the CLI should expose the Responses storage argument");
         assert!(store.get_default_values().is_empty());
+
+        let warmup = command
+            .get_arguments()
+            .find(|argument| argument.get_id() == "websocket_warmup")
+            .expect("the CLI should expose the WebSocket warmup argument");
+        assert_eq!(warmup.get_default_values(), ["false"]);
     }
 
     #[test]
