@@ -257,6 +257,37 @@ so the first resumed request safely replays the committed conversation. Resume
 with the same instructions and tool definitions, and release the original
 agent before handing its snapshot to another writer.
 
+For crash recovery inside a turn, provide the generic durability host instead
+of manually persisting snapshots. The host stores opaque Rust journal batches;
+model replay, tool ambiguity, operation deduplication, and checkpoint recovery
+remain in Rust/WASM:
+
+```js
+const agent = await Agent.create({
+  apiKey: process.env.OPENAI_API_KEY,
+  durability: {
+    async load(journalId) {
+      return database.loadJournal(journalId);
+    },
+    async append(journalId, { expectedRevision, payload }) {
+      return database.compareAndAppend(journalId, expectedRevision, payload);
+      // { status: "appended", revision: "8" }
+      // or { status: "conflict", actualRevision: "8" }
+    },
+  },
+  durabilityId: "customer-agent-123",
+});
+
+const turn = agent.turn.prompt({ id: "request-7", input: "Build the thing." });
+console.log((await turn.result()).finalMessage);
+```
+
+Revisions are unsigned decimal strings so JavaScript preserves Rust's full
+`u64` range. TypeScript exposes them as a nominal `DurabilityRevision`; use the
+exported `durabilityRevision(value)` validator when converting database text or
+incremented `bigint`s. See `examples/cloudflare-workers` for an atomic Durable
+Object SQL adapter and `examples/vercel-workflows` for a workflow-step adapter.
+
 Node embedders whose bundler relocates package assets may compile and pass the
 web-target artifact explicitly. The runtime still uses the Node host for
 WebSockets and Code Mode:

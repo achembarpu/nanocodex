@@ -6,7 +6,7 @@ Vercel Workflows and native Vercel Function WebSockets.
 Each Workflow run is one agent session:
 
 - a typed Workflow hook accepts prompts and processes them sequentially;
-- the Workflow event log retains the latest Nanocodex `SessionSnapshot` between
+- the Workflow event log retains opaque Rust durability batches between
   stateless Function steps;
 - every accepted prompt, typed agent event, and terminal result is appended to
   the Workflow's resumable stream;
@@ -38,7 +38,13 @@ browser B ─ WebSocket Function ─┘             │
 
 The WebSocket connection itself is disposable and bounded by the Vercel
 Function duration. The browser reconnects automatically. The Workflow run,
-snapshot, prompt hook, and output stream are the durable pieces.
+Rust journal, prompt hook, and output stream are the durable pieces. Vercel
+persists the coarse Function-step result; within that step Rust/WASM still owns
+deduplication, checkpoint reconstruction, and model/tool recovery policy.
+A Function crash before the step returns therefore retries from the preceding
+journal, not from an in-turn model or tool boundary. Deployments that need
+mid-step crash recovery should back the same `DurabilityStore` interface with
+an external atomic compare-and-append service instead of this in-step adapter.
 
 Every Workflow actor also owns a named Vercel Sandbox. The caller-defined
 `sandbox_exec`, `sandbox_start_process`, `sandbox_read_file`,

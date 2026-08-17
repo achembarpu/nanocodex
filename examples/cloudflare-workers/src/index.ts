@@ -2,12 +2,16 @@ import { DurableObject } from "cloudflare:workers";
 import { ContainerProxy, Sandbox } from "@cloudflare/sandbox";
 import type {
   DefaultAgent,
+  DurabilityAppendResult,
+  DurabilityRevision,
+  DurabilityStoredJournal,
+  DurabilityStore,
   EventWatcher,
   PromptInput,
-  SessionSnapshot,
   Turn,
   TurnResult,
 } from "nanocodex";
+import { durabilityRevision } from "nanocodex";
 import { Agent } from "nanocodex/browser";
 import nanocodexWasm from "./nanocodex.wasm";
 import {
@@ -37,7 +41,6 @@ import {
 const MAX_CLIENT_MESSAGE_BYTES = 1024 * 1024;
 const MAX_ACTIVE_TURNS = 16;
 const MAX_CLIENT_CONNECTIONS = 64;
-const MAX_TERMINAL_TURNS = 256;
 const OPENAI_WEBSOCKET_BETA = "responses_websockets=2026-02-06";
 const CHATGPT_WEBSOCKET_URL = "wss://chatgpt.com/backend-api/codex/responses";
 const CHATGPT_API_BASE_URL = "https://chatgpt.com/backend-api/codex";
@@ -67,12 +70,10 @@ export interface Env {
 type SessionRow = {
   session_id: string;
   public_origin: string;
-  snapshot: string | null;
   completed_turns: number;
   last_active: number;
 };
 
-type TerminalRow = { payload: string };
 type SessionStatusRow = {
   session_id: string;
   has_snapshot: number;
@@ -242,18 +243,23 @@ export class NanocodexSession extends DurableObject<Env> {
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
     this.ctx.storage.sql.exec(`
+      DROP TABLE IF EXISTS terminal_turns;
       CREATE TABLE IF NOT EXISTS session_state (
         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
         session_id TEXT NOT NULL UNIQUE,
         public_origin TEXT NOT NULL DEFAULT '',
-        snapshot TEXT,
         completed_turns INTEGER NOT NULL DEFAULT 0,
         last_active INTEGER NOT NULL
       );
-      CREATE TABLE IF NOT EXISTS terminal_turns (
-        id TEXT PRIMARY KEY,
+      CREATE TABLE IF NOT EXISTS durability_journals (
+        journal_id TEXT PRIMARY KEY,
+        revision TEXT NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS durability_batches (
+        journal_id TEXT NOT NULL,
+        revision TEXT NOT NULL,
         payload TEXT NOT NULL,
-        completed_at INTEGER NOT NULL
+        PRIMARY KEY (journal_id, revision)
       );
     `);
     const sessionColumns = this.ctx.storage.sql.exec<{ name: string }>(
@@ -329,7 +335,8 @@ export class NanocodexSession extends DurableObject<Env> {
       await this.#stop();
       for (const socket of this.ctx.getWebSockets()) closeSocket(socket, 1000, "session deleted");
       this.ctx.storage.transactionSync(() => {
-        this.ctx.storage.sql.exec("DELETE FROM terminal_turns");
+        this.ctx.storage.sql.exec("DELETE FROM durability_batches");
+        this.ctx.storage.sql.exec("DELETE FROM durability_journals");
         this.ctx.storage.sql.exec("DELETE FROM session_state");
       });
       await this.ctx.storage.deleteAlarm();
@@ -426,11 +433,6 @@ export class NanocodexSession extends DurableObject<Env> {
       return;
     }
 
-    const terminal = this.#terminal(command.id);
-    if (terminal) {
-      this.#sendEncoded(socket, terminal);
-      return;
-    }
     if (this.#turns.has(command.id) || this.#pendingTurnIds.has(command.id)) {
       const input = this.#turnInputs.get(command.id);
       if (input !== undefined && JSON.stringify(input) !== JSON.stringify(command.input)) {
@@ -454,7 +456,7 @@ export class NanocodexSession extends DurableObject<Env> {
     try {
       const agent = await this.#ensureAgent();
       if (this.#agent !== agent) throw new Error("agent became unavailable while accepting the turn");
-      const turn = agent.turn.prompt({ input: command.input });
+      const turn = agent.turn.prompt({ id: command.id, input: command.input });
       this.#turns.set(command.id, turn);
       this.#pendingTurnIds.delete(command.id);
       this.ctx.waitUntil(this.#complete(command.id, turn));
@@ -487,9 +489,6 @@ export class NanocodexSession extends DurableObject<Env> {
     if (authMode === "api_key" && !this.env.OPENAI_API_KEY) {
       throw new Error("OPENAI_API_KEY is not configured");
     }
-    const resume = session.snapshot === null
-      ? undefined
-      : JSON.parse(session.snapshot) as SessionSnapshot;
     const auth = this.env.NANOCODEX_AUTH.getByName("subscription");
     const authorization = authMode === "api_key"
       ? { apiKey: this.env.OPENAI_API_KEY! }
@@ -501,7 +500,8 @@ export class NanocodexSession extends DurableObject<Env> {
         ?? (authMode === "chatgpt" ? CHATGPT_WEBSOCKET_URL : undefined),
       apiBaseUrl: authMode === "chatgpt" ? CHATGPT_API_BASE_URL : undefined,
       sessionId: session.session_id,
-      resume,
+      durability: this.#durabilityStore(),
+      durabilityId: session.session_id,
       workspace: "/workspace",
       instructions: "You are Nanocodex running inside a Cloudflare Durable Object. Use the sandbox_* tools for code, files, and previews; their /workspace is isolated and persisted in R2 for this session.",
       // Workers forbid eval/new Function. Direct mode keeps caller-defined
@@ -551,34 +551,15 @@ export class NanocodexSession extends DurableObject<Env> {
         final_message: result.finalMessage,
         usage: result.usage,
       };
-      const snapshot = JSON.stringify(result.snapshot);
       const payload = JSON.stringify(terminal);
       const completedAt = Date.now();
       try {
-        this.ctx.storage.transactionSync(() => {
-          this.ctx.storage.sql.exec(
-            "UPDATE session_state SET snapshot = ?, completed_turns = completed_turns + 1, last_active = ? WHERE singleton = 1",
-            snapshot,
-            completedAt,
-          );
-          this.ctx.storage.sql.exec(
-            "INSERT OR REPLACE INTO terminal_turns (id, payload, completed_at) VALUES (?, ?, ?)",
-            id,
-            payload,
-            completedAt,
-          );
-          this.ctx.storage.sql.exec(
-            "DELETE FROM terminal_turns WHERE id NOT IN (SELECT id FROM terminal_turns ORDER BY completed_at DESC, rowid DESC LIMIT ?)",
-            MAX_TERMINAL_TURNS,
-          );
-        });
+        this.ctx.storage.sql.exec(
+          "UPDATE session_state SET completed_turns = completed_turns + 1, last_active = ? WHERE singleton = 1",
+          completedAt,
+        );
       } catch (error) {
-        // The in-memory driver has observed this completed turn, but durable
-        // state has not. Drop it so the next prompt cannot continue from a
-        // history prefix that clients cannot recover after eviction.
-        await this.#shutdownAgent();
-        this.#broadcast({ type: "turn_failed", id, error: `durable commit failed: ${errorMessage(error)}` });
-        return;
+        console.error("failed to update session telemetry", errorMessage(error));
       }
       this.#broadcastEncoded(payload);
     } finally {
@@ -620,7 +601,7 @@ export class NanocodexSession extends DurableObject<Env> {
 
   #session(): SessionRow | undefined {
     return this.ctx.storage.sql.exec<SessionRow>(
-      "SELECT session_id, public_origin, snapshot, completed_turns, last_active FROM session_state WHERE singleton = 1",
+      "SELECT session_id, public_origin, completed_turns, last_active FROM session_state WHERE singleton = 1",
     ).toArray()[0];
   }
 
@@ -632,17 +613,65 @@ export class NanocodexSession extends DurableObject<Env> {
 
   #sessionStatus(): SessionStatusRow | undefined {
     return this.ctx.storage.sql.exec<SessionStatusRow>(
-      `SELECT session_id, snapshot IS NOT NULL AS has_snapshot, completed_turns, last_active
+      `SELECT session_id, completed_turns > 0 AS has_snapshot, completed_turns, last_active
        FROM session_state WHERE singleton = 1`,
     ).toArray()[0];
   }
 
-  #terminal(id: string): string | undefined {
-    const row = this.ctx.storage.sql.exec<TerminalRow>(
-      "SELECT payload FROM terminal_turns WHERE id = ?",
-      id,
-    ).toArray()[0];
-    return row?.payload;
+  #durabilityStore(): DurabilityStore {
+    return {
+      load: (journalId) => this.#loadJournal(journalId),
+      append: (journalId, request) => this.#appendJournal(
+        journalId,
+        request.expectedRevision,
+        request.payload,
+      ),
+    };
+  }
+
+  #loadJournal(journalId: string): DurabilityStoredJournal {
+    const revision = durabilityRevision(this.ctx.storage.sql.exec<{ revision: string }>(
+      "SELECT revision FROM durability_journals WHERE journal_id = ?",
+      journalId,
+    ).toArray()[0]?.revision ?? "0");
+    const batches = this.ctx.storage.sql.exec<{ revision: string; payload: string }>(
+      "SELECT revision, payload FROM durability_batches WHERE journal_id = ? ORDER BY rowid",
+      journalId,
+    ).toArray().map((batch) => ({
+      revision: durabilityRevision(batch.revision),
+      payload: batch.payload,
+    }));
+    return { revision, batches };
+  }
+
+  #appendJournal(
+    journalId: string,
+    expectedRevision: DurabilityRevision,
+    payload: string,
+  ): DurabilityAppendResult {
+    return this.ctx.storage.transactionSync(() => {
+      const actualRevision = durabilityRevision(this.ctx.storage.sql.exec<{ revision: string }>(
+        "SELECT revision FROM durability_journals WHERE journal_id = ?",
+        journalId,
+      ).toArray()[0]?.revision ?? "0");
+      if (actualRevision !== expectedRevision) {
+        return { status: "conflict", actualRevision };
+      }
+      const revision = durabilityRevision((BigInt(expectedRevision) + 1n).toString());
+      this.ctx.storage.sql.exec(
+        `INSERT INTO durability_journals (journal_id, revision) VALUES (?, ?)
+         ON CONFLICT (journal_id) DO UPDATE SET revision = excluded.revision`,
+        journalId,
+        revision,
+      );
+      this.ctx.storage.sql.exec(
+        "INSERT INTO durability_batches (journal_id, revision, payload) VALUES (?, ?, ?)",
+        journalId,
+        revision,
+        payload,
+      );
+      return { status: "appended", revision };
+    });
   }
 
   #activeTurnIds(): string[] {

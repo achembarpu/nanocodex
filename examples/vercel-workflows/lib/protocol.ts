@@ -1,4 +1,4 @@
-import type { AgentEvent, SessionSnapshot, TurnUsage } from "nanocodex";
+import type { AgentEvent, DurabilityStoredJournal, TurnUsage } from "nanocodex";
 
 export type PromptRequest = {
   id: string;
@@ -40,11 +40,12 @@ export type TurnOutcome =
   | {
       ok: true;
       completed: TurnCompleted;
-      snapshot: SessionSnapshot;
+      journal: DurabilityStoredJournal;
     }
   | {
       ok: false;
       error: string;
+      journal: DurabilityStoredJournal;
     };
 
 export type StreamRecord = {

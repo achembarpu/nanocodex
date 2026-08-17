@@ -6,6 +6,8 @@ use nanocodex::{
     TurnResult,
     agent::{
         ExecutionEnvironment,
+        PromptRequest,
+        durability::{JournalStore, StoreError, StoreFuture, StoredBatch, StoredJournal},
         input::{Prompt, UserInput},
         session::{SessionId, SessionSnapshot},
     },
@@ -58,6 +60,16 @@ extern "C" {
 
     #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = toolDefinitions)]
     fn host_tool_definitions(session_id: &str) -> Result<String, JsValue>;
+
+    #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = durabilityLoad)]
+    fn host_durability_load(journal_id: &str) -> Result<Promise, JsValue>;
+
+    #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = durabilityAppend)]
+    fn host_durability_append(
+        journal_id: &str,
+        expected_revision: &str,
+        payload: &str,
+    ) -> Result<Promise, JsValue>;
 
     #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = readWorkspaceFile)]
     fn host_read_workspace_file(path: &str, session_id: &str) -> Result<Promise, JsValue>;
@@ -196,6 +208,90 @@ fn parse_subscription_revision(revision: &str) -> Result<u64, SubscriptionHostEr
 
 fn subscription_host_error(error: JsValue) -> SubscriptionHostError {
     SubscriptionHostError::new(host_error_message(&error))
+}
+
+struct JavaScriptDurabilityStore;
+
+#[derive(Deserialize)]
+struct JavaScriptStoredJournal {
+    revision: String,
+    batches: Vec<JavaScriptStoredBatch>,
+}
+
+#[derive(Deserialize)]
+struct JavaScriptStoredBatch {
+    revision: String,
+    payload: String,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum JavaScriptAppendResult {
+    Appended { revision: String },
+    Conflict { actual_revision: String },
+}
+
+impl JournalStore for JavaScriptDurabilityStore {
+    fn load<'a>(
+        &'a mut self,
+        journal_id: &'a str,
+    ) -> StoreFuture<'a, Result<StoredJournal, StoreError>> {
+        Box::pin(async move {
+            let promise = host_durability_load(journal_id)
+                .map_err(|error| StoreError::Backend(host_error_message(&error)))?;
+            let value = JsFuture::from(promise)
+                .await
+                .map_err(|error| StoreError::Backend(host_error_message(&error)))?;
+            let encoded = value.as_string().ok_or_else(|| {
+                StoreError::Backend("JavaScript durability load returned a non-string".to_owned())
+            })?;
+            let stored =
+                serde_json::from_str::<JavaScriptStoredJournal>(&encoded).map_err(|error| {
+                    StoreError::Backend(format!("invalid durability load: {error}"))
+                })?;
+            Ok(StoredJournal {
+                revision: parse_revision(&stored.revision)?,
+                batches: stored
+                    .batches
+                    .into_iter()
+                    .map(|batch| {
+                        Ok(StoredBatch {
+                            revision: parse_revision(&batch.revision)?,
+                            payload: batch.payload,
+                        })
+                    })
+                    .collect::<Result<_, StoreError>>()?,
+            })
+        })
+    }
+
+    fn append<'a>(
+        &'a mut self,
+        journal_id: &'a str,
+        expected_revision: u64,
+        payload: &'a str,
+    ) -> StoreFuture<'a, Result<u64, StoreError>> {
+        Box::pin(async move {
+            let expected = expected_revision.to_string();
+            let promise = host_durability_append(journal_id, &expected, payload)
+                .map_err(|error| StoreError::Backend(host_error_message(&error)))?;
+            let value = JsFuture::from(promise)
+                .await
+                .map_err(|error| StoreError::Backend(host_error_message(&error)))?;
+            let encoded = value.as_string().ok_or_else(|| {
+                StoreError::Backend("JavaScript durability append returned a non-string".to_owned())
+            })?;
+            match serde_json::from_str::<JavaScriptAppendResult>(&encoded).map_err(|error| {
+                StoreError::Backend(format!("invalid durability append result: {error}"))
+            })? {
+                JavaScriptAppendResult::Appended { revision } => parse_revision(&revision),
+                JavaScriptAppendResult::Conflict { actual_revision } => Err(StoreError::Conflict {
+                    expected: expected_revision,
+                    actual: parse_revision(&actual_revision)?,
+                }),
+            }
+        })
+    }
 }
 
 struct JavaScriptCodeModeHost {
@@ -364,10 +460,10 @@ struct WasmConfig {
     fast_mode: bool,
     #[serde(default)]
     websocket_warmup: bool,
-    #[serde(default = "default_websocket_url")]
-    websocket_url: String,
-    #[serde(default = "default_api_base_url")]
-    api_base_url: String,
+    #[serde(default)]
+    websocket_url: Option<String>,
+    #[serde(default)]
+    api_base_url: Option<String>,
     #[serde(default)]
     instructions: Option<String>,
     #[serde(default)]
@@ -378,6 +474,8 @@ struct WasmConfig {
     execution_environment: Option<WasmExecutionEnvironment>,
     #[serde(default)]
     resume: Option<SessionSnapshot>,
+    #[serde(default)]
+    durability_id: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -506,12 +604,11 @@ impl WasmNanocodex {
     /// # Errors
     ///
     /// Throws when the JSON or agent policy is invalid.
-    #[wasm_bindgen(constructor)]
-    pub fn new(config_json: &str) -> Result<Self, JsValue> {
+    pub async fn create(config_json: &str) -> Result<Self, JsValue> {
         let config = serde_json::from_str::<WasmConfig>(config_json)
             .map_err(|error| js_error(format!("invalid Nanocodex configuration: {error}")))?;
         let auth = nanocodex::oai::auth::OpenAiAuth::api_key(config.api_key.clone());
-        Self::create_with_auth(config, auth)
+        Self::create_with_auth(config, auth).await
     }
 
     /// Builds an agent whose ChatGPT credential lifecycle is owned by Rust.
@@ -523,10 +620,10 @@ impl WasmNanocodex {
         let config = serde_json::from_str::<WasmConfig>(config_json)
             .map_err(|error| js_error(format!("invalid Nanocodex configuration: {error}")))?;
         let auth = subscription.inner.authorization().await.map_err(js_error)?;
-        Self::create_with_auth(config, auth)
+        Self::create_with_auth(config, auth).await
     }
 
-    fn create_with_auth(
+    async fn create_with_auth(
         config: WasmConfig,
         auth: nanocodex::oai::auth::OpenAiAuth,
     ) -> Result<Self, JsValue> {
@@ -538,17 +635,20 @@ impl WasmNanocodex {
             .reasoning_mode
             .parse::<ReasoningMode>()
             .map_err(js_error)?;
-        let openai = OpenAi::builder(auth)
+        let mut openai = OpenAi::builder(auth)
             .model(model)
             .thinking(thinking)
             .reasoning_mode(reasoning_mode)
             .fast_mode(config.fast_mode)
             .websocket_warmup(config.websocket_warmup)
-            .websocket_url(config.websocket_url)
-            .api_base_url(config.api_base_url)
-            .host_transport(JavaScriptResponsesHost)
-            .build()
-            .map_err(js_error)?;
+            .host_transport(JavaScriptResponsesHost);
+        if let Some(websocket_url) = config.websocket_url {
+            openai = openai.websocket_url(websocket_url);
+        }
+        if let Some(api_base_url) = config.api_base_url {
+            openai = openai.api_base_url(api_base_url);
+        }
+        let openai = openai.build().map_err(js_error)?;
         let mut builder =
             RustNanocodex::builder(openai).tools(HostedTools::new(JavaScriptCodeModeHost::new()));
         if let Some(instructions) = config.instructions {
@@ -571,6 +671,15 @@ impl WasmNanocodex {
         if let Some(resume) = config.resume {
             builder = builder.resume(resume);
         }
+        if let Some(journal_id) = config.durability_id {
+            let journal = nanocodex::agent::durability::DurableSession::open(
+                JavaScriptDurabilityStore,
+                journal_id,
+            )
+            .await
+            .map_err(js_error)?;
+            builder = builder.durability(journal).await.map_err(js_error)?;
+        }
         let (inner, events) = builder.build().map_err(js_error)?;
         Ok(Self::from_parts(inner, events))
     }
@@ -587,13 +696,19 @@ impl WasmNanocodex {
     /// # Errors
     ///
     /// Throws when the prompt is empty.
-    pub fn prompt(&self, instruction: &str) -> Result<WasmTurn, JsValue> {
+    pub fn prompt(
+        &self,
+        instruction: &str,
+        operation_id: Option<String>,
+    ) -> Result<WasmTurn, JsValue> {
+        validate_operation_id(operation_id.as_deref())?;
         if instruction.trim().is_empty() {
             return Err(js_error("prompt instruction must not be empty"));
         }
         Ok(WasmTurn::accept(
             self.inner.clone(),
             Prompt::new(instruction),
+            operation_id,
         ))
     }
 
@@ -603,10 +718,16 @@ impl WasmNanocodex {
     ///
     /// Throws for malformed, empty, or local-filesystem input.
     #[wasm_bindgen(js_name = promptContent)]
-    pub fn prompt_content(&self, content_json: &str) -> Result<WasmTurn, JsValue> {
+    pub fn prompt_content(
+        &self,
+        content_json: &str,
+        operation_id: Option<String>,
+    ) -> Result<WasmTurn, JsValue> {
+        validate_operation_id(operation_id.as_deref())?;
         Ok(WasmTurn::accept(
             self.inner.clone(),
             parse_browser_prompt(content_json)?,
+            operation_id,
         ))
     }
 
@@ -777,7 +898,7 @@ impl WasmTurn {
 }
 
 impl WasmTurn {
-    fn accept(agent: RustNanocodex, prompt: Prompt) -> Self {
+    fn accept(agent: RustNanocodex, prompt: Prompt, operation_id: Option<String>) -> Self {
         let state = Rc::new(RefCell::new(TurnState {
             control: None,
             completed: None,
@@ -785,7 +906,12 @@ impl WasmTurn {
         }));
         let task_state = Rc::clone(&state);
         spawn_local(async move {
-            let completed = match agent.prompt(prompt).await {
+            let mut request = PromptRequest::new(prompt);
+            if let Some(operation_id) = operation_id {
+                request = request.id(operation_id);
+            }
+            let accepted = agent.prompt(request).await;
+            let completed = match accepted {
                 Ok(turn) => {
                     {
                         let mut state = task_state.borrow_mut();
@@ -912,10 +1038,11 @@ fn parse_browser_prompt(content_json: &str) -> Result<Prompt, JsValue> {
 
 fn validate(config: &WasmConfig) -> Result<(), JsValue> {
     for (name, value) in [
-        ("api_key", config.api_key.as_str()),
-        ("websocket_url", config.websocket_url.as_str()),
-        ("api_base_url", config.api_base_url.as_str()),
+        ("api_key", Some(config.api_key.as_str())),
+        ("websocket_url", config.websocket_url.as_deref()),
+        ("api_base_url", config.api_base_url.as_deref()),
     ] {
+        let Some(value) = value else { continue };
         if value.trim().is_empty() {
             return Err(js_error(format!("{name} must not be empty")));
         }
@@ -927,7 +1054,27 @@ fn validate(config: &WasmConfig) -> Result<(), JsValue> {
     {
         return Err(js_error("session_id must not be empty"));
     }
+    if config
+        .durability_id
+        .as_deref()
+        .is_some_and(|journal_id| journal_id.trim().is_empty())
+    {
+        return Err(js_error("durability_id must not be empty"));
+    }
     Ok(())
+}
+
+fn validate_operation_id(operation_id: Option<&str>) -> Result<(), JsValue> {
+    if operation_id.is_some_and(|operation_id| operation_id.trim().is_empty()) {
+        return Err(js_error("durable operation ID must not be empty"));
+    }
+    Ok(())
+}
+
+fn parse_revision(revision: &str) -> Result<u64, StoreError> {
+    revision.parse::<u64>().map_err(|error| {
+        StoreError::Backend(format!("invalid JavaScript durability revision: {error}"))
+    })
 }
 
 fn default_thinking() -> String {
@@ -940,14 +1087,6 @@ fn default_model() -> String {
 
 fn default_reasoning_mode() -> String {
     "standard".to_owned()
-}
-
-fn default_websocket_url() -> String {
-    "wss://api.openai.com/v1/responses".to_owned()
-}
-
-fn default_api_base_url() -> String {
-    "https://api.openai.com/v1".to_owned()
 }
 
 fn host_error_message(error: &JsValue) -> String {

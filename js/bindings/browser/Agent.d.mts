@@ -3,6 +3,7 @@ import type {
   CodeEvaluator,
   ChatGptSubscriptionHandle,
   DefaultAgent,
+  DurabilityStore,
   ExecutionEnvironment,
   McpServers,
   MppSession,
@@ -51,6 +52,9 @@ export declare namespace create {
     /** Sends an optional non-generating request before the first turn. */
     websocketWarmup?: boolean | undefined;
     websocketUrl?: string | undefined;
-  };
+  } & (
+    | { durability?: undefined; durabilityId?: undefined }
+    | { durability: DurabilityStore; durabilityId: string }
+  );
   type ReturnType = Agent;
 }

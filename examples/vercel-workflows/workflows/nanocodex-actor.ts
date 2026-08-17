@@ -1,14 +1,19 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
-import type { DefaultAgent, EventWatcher, SessionSnapshot } from "nanocodex";
-import { Agent } from "nanocodex/browser";
+import type {
+  DefaultAgent,
+  DurabilityAppendResult,
+  DurabilityRevision,
+  DurabilityStoredJournal,
+  DurabilityStore,
+  EventWatcher,
+} from "nanocodex";
 import { defineHook, getWorkflowMetadata, getWritable } from "workflow";
 
 import type {
   PromptRequest,
   SessionEvent,
-  TurnCompleted,
   TurnOutcome,
 } from "@/lib/protocol";
 import { errorMessage } from "@/lib/validation";
@@ -20,13 +25,7 @@ import { vercelSandboxTools } from "./sandbox-tools";
 
 const CHATGPT_WEBSOCKET_URL = "wss://chatgpt.com/backend-api/codex/responses";
 const CHATGPT_API_BASE_URL = "https://chatgpt.com/backend-api/codex";
-const MAX_TERMINAL_TURNS = 64;
 const wasmBytes = readFile(resolve(process.cwd(), "workflows/nanocodex.wasm"));
-
-type TerminalTurn = {
-  input: string;
-  completed: TurnCompleted;
-};
 
 export const nanocodexPromptHook = defineHook<PromptRequest>();
 
@@ -41,8 +40,8 @@ export async function nanocodexActor(agentSessionId: string): Promise<never> {
   const receivePrompt = nanocodexPromptHook.create({
     token: promptHookToken(sessionId),
   });
-  let snapshot: SessionSnapshot | undefined;
-  const terminals = new Map<string, TerminalTurn>();
+  let journal: DurabilityStoredJournal = { revision: durabilityRevision(0n), batches: [] };
+  const seen = new Set<string>();
 
   await writeSessionEvent({
     type: "ready",
@@ -51,33 +50,15 @@ export async function nanocodexActor(agentSessionId: string): Promise<never> {
   });
 
   for await (const request of receivePrompt) {
-    const terminal = terminals.get(request.id);
-    if (terminal) {
-      if (terminal.input !== request.input) {
-        await writeSessionEvent({
-          type: "turn_failed",
-          id: request.id,
-          error: `turn ${request.id} already has different input`,
-        });
-        continue;
-      }
-      await writeSessionEvent({
-        type: "turn_accepted",
-        id: request.id,
-        input: request.input,
-        replayed: true,
-      });
-      await writeSessionEvent(terminal.completed);
-      continue;
-    }
-
     await writeSessionEvent({
       type: "turn_accepted",
       id: request.id,
       input: request.input,
-      replayed: false,
+      replayed: seen.has(request.id),
     });
-    const outcome = await runNanocodexTurn(agentSessionId, request, snapshot);
+    const outcome = await runNanocodexTurn(agentSessionId, request, journal);
+    journal = outcome.journal;
+    seen.add(request.id);
     if (!outcome.ok) {
       await writeSessionEvent({
         type: "turn_failed",
@@ -87,13 +68,6 @@ export async function nanocodexActor(agentSessionId: string): Promise<never> {
       continue;
     }
 
-    snapshot = outcome.snapshot;
-    terminals.set(request.id, { input: request.input, completed: outcome.completed });
-    while (terminals.size > MAX_TERMINAL_TURNS) {
-      const oldest = terminals.keys().next().value;
-      if (oldest === undefined) break;
-      terminals.delete(oldest);
-    }
     await writeSessionEvent(outcome.completed);
   }
 
@@ -115,7 +89,7 @@ export async function writeSessionEvent(event: SessionEvent): Promise<void> {
 export async function runNanocodexTurn(
   sessionId: string,
   request: PromptRequest,
-  snapshot?: SessionSnapshot,
+  initialJournal: DurabilityStoredJournal,
 ): Promise<TurnOutcome> {
   "use step";
 
@@ -124,14 +98,17 @@ export async function runNanocodexTurn(
   const writable = getWritable<SessionEvent>();
   const writer = writable.getWriter();
   let eventWrites = Promise.resolve();
+  const durability = workflowDurabilityStore(initialJournal);
 
   try {
+    const { Agent } = await import("nanocodex/browser");
     const mode = modelAuthMode();
     const common = {
       apiBaseUrl: mode === "chatgpt" ? CHATGPT_API_BASE_URL : undefined,
       instructions: "You are Nanocodex running as a durable Vercel Workflow actor. Use the sandbox_* tools for code, files, and previews; their /workspace is an isolated persistent Vercel Sandbox for this session.",
       module: await wasmBytes,
-      resume: snapshot,
+      durability,
+      durabilityId: sessionId,
       sessionId,
       toolMode: "direct" as const,
       tools: {
@@ -172,7 +149,7 @@ export async function runNanocodexTurn(
       }));
     });
 
-    const turn = agent.turn.prompt({ input: request.input });
+    const turn = agent.turn.prompt({ id: request.id, input: request.input });
     try {
       const result = await turn.result();
       await eventWrites;
@@ -184,14 +161,14 @@ export async function runNanocodexTurn(
           final_message: result.finalMessage,
           usage: result.usage,
         },
-        snapshot: result.snapshot,
+        journal: durability.snapshot(),
       };
     } finally {
       turn.dispose();
     }
   } catch (error) {
     await eventWrites.catch(() => {});
-    return { ok: false, error: errorMessage(error) };
+    return { ok: false, error: errorMessage(error), journal: durability.snapshot() };
   } finally {
     events?.off();
     writer.releaseLock();
@@ -199,12 +176,44 @@ export async function runNanocodexTurn(
       try {
         await agent.session.shutdown();
       } catch {
-        // The completed snapshot or typed failure above is authoritative.
+        // The Rust journal result or typed failure above is authoritative.
       } finally {
         agent.dispose();
       }
     }
   }
+}
+
+function workflowDurabilityStore(initial: DurabilityStoredJournal): DurabilityStore & {
+  snapshot(): DurabilityStoredJournal;
+} {
+  let journal: DurabilityStoredJournal = {
+    revision: initial.revision,
+    batches: initial.batches.map((batch) => ({ ...batch })),
+  };
+  return {
+    load: () => journal,
+    append: (_journalId, request): DurabilityAppendResult => {
+      if (request.expectedRevision !== journal.revision) {
+        return { status: "conflict", actualRevision: journal.revision };
+      }
+      const revision = durabilityRevision(BigInt(journal.revision) + 1n);
+      journal = {
+        revision,
+        batches: [...journal.batches, { revision, payload: request.payload }],
+      };
+      return { status: "appended", revision };
+    },
+    snapshot: () => journal,
+  };
+}
+
+function durabilityRevision(value: string | bigint): DurabilityRevision {
+  const revision = String(value);
+  if (!/^(0|[1-9][0-9]*)$/.test(revision)) {
+    throw new TypeError("durability revision must be an unsigned decimal string");
+  }
+  return revision as DurabilityRevision;
 }
 
 function modelAuthMode(): "api_key" | "chatgpt" {

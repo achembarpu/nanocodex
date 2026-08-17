@@ -4,10 +4,13 @@ import { test } from "node:test";
 import { Actions } from "../index.mjs";
 import {
   activateHost,
+  bindDurabilityHost,
   bindHostSession,
   createAgentClient,
   defineRuntime,
   releaseHostSession,
+  releaseDurabilityHost,
+  retainDurabilityHost,
 } from "../internal.mjs";
 
 test("the headless client exposes matching direct and standalone actions", async () => {
@@ -36,6 +39,8 @@ test("the headless client exposes matching direct and standalone actions", async
   const secondTurn = Actions.turn.prompt(agent, { input: "second" });
   const second = await Actions.turn.getResult(secondTurn);
   assert.equal(second.finalMessage, "session-1:second");
+  const durable = await agent.turn.prompt({ id: "request-7", input: "durable" }).result();
+  assert.equal(durable.finalMessage, "session-1:request-7:durable");
 
   const seen = [];
   const watch = agent.events.watch();
@@ -77,6 +82,62 @@ test("the headless client exposes matching direct and standalone actions", async
   branch.dispose();
   fresh.dispose();
   agent.dispose();
+});
+
+test("the WASM host bridge preserves typed decimal durability revisions", async () => {
+  const batches = [];
+  const host = {
+    connect() {},
+    durability: {
+      load: () => ({ revision: String(batches.length), batches }),
+      append(_journalId, { expectedRevision, payload }) {
+        if (expectedRevision !== String(batches.length)) {
+          return { status: "conflict", actualRevision: String(batches.length) };
+        }
+        const revision = String(batches.length + 1);
+        batches.push({ revision, payload });
+        return { status: "appended", revision };
+      },
+    },
+  };
+  activateHost(host);
+  bindDurabilityHost(host, "journal-1");
+  retainDurabilityHost(host, "journal-1");
+  retainDurabilityHost(host, "journal-1");
+  try {
+    assert.deepEqual(
+      JSON.parse(await globalThis.nanocodexHost.durabilityLoad("journal-1")),
+      { revision: "0", batches: [] },
+    );
+    assert.deepEqual(
+      JSON.parse(await globalThis.nanocodexHost.durabilityAppend(
+        "journal-1",
+        "0",
+        "opaque-rust-batch",
+      )),
+      { status: "appended", revision: "1" },
+    );
+    assert.deepEqual(
+      JSON.parse(await globalThis.nanocodexHost.durabilityAppend(
+        "journal-1",
+        "0",
+        "stale",
+      )),
+      { status: "conflict", actual_revision: "1" },
+    );
+    releaseDurabilityHost(host, "journal-1");
+    assert.equal(
+      JSON.parse(await globalThis.nanocodexHost.durabilityLoad("journal-1")).revision,
+      "1",
+      "releasing a child host reference must preserve its parent's journal binding",
+    );
+  } finally {
+    releaseDurabilityHost(host, "journal-1");
+  }
+  await assert.rejects(
+    globalThis.nanocodexHost.durabilityLoad("journal-1"),
+    /no Nanocodex host owns durability journal/,
+  );
 });
 
 test("concurrent graceful shutdown defers exactly-once release until the join completes", async () => {
@@ -374,8 +435,14 @@ function rawAgent(sessionId) {
     prompt(input) {
       return rawTurn(`${sessionId}:${input}`);
     },
+    promptDurable(id, input) {
+      return rawTurn(`${sessionId}:${id}:${input}`);
+    },
     promptContent(input) {
       return rawTurn(`${sessionId}:${JSON.parse(input)[0].text}`);
+    },
+    promptContentDurable(id, input) {
+      return rawTurn(`${sessionId}:${id}:${JSON.parse(input)[0].text}`);
     },
     async fork() {
       return rawAgent(`${sessionId}-fork`);
