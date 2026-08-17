@@ -119,6 +119,12 @@ test("browser host opens application sockets through MPP", async () => {
   assert.equal(JSON.parse(await host.next(1, 10)).text, '{"type":"paid"}');
   assert.equal(JSON.parse(await host.send(1, "request")).ok, true);
   assert.deepEqual(socket.sent.map(JSON.parse), [{ mpp: "message", data: "request" }]);
+  socket.close(3008, "requested voucher amount exceeds local maxDeposit");
+  assert.deepEqual(JSON.parse(await host.next(1, 10)), {
+    kind: "error",
+    detail: "MPP WebSocket payment flow failed with code 3008: requested voucher amount exceeds local maxDeposit",
+    reconnectable: false,
+  });
 });
 
 test("browser host does not require a global constructor for host-owned sockets", async () => {
@@ -462,10 +468,10 @@ class FakeWebSocket {
   }
 
   send(message) { this.sent.push(message); }
-  close(code) {
+  close(code, reason = "") {
     this.readyState = 3;
     this.closedCode = code;
-    this.emit("close", { code });
+    this.emit("close", { code, reason });
   }
 
   emit(type, event) {

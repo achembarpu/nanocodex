@@ -68,9 +68,17 @@ struct HostSendWire {
 #[derive(Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum HostMessageWire {
-    Text { text: String },
-    Closed { detail: String },
-    Error { detail: String },
+    Text {
+        text: String,
+    },
+    Closed {
+        detail: String,
+    },
+    Error {
+        detail: String,
+        #[serde(default = "default_reconnectable")]
+        reconnectable: bool,
+    },
     Timeout,
     Binary,
 }
@@ -172,9 +180,10 @@ impl HostConnection for JavaScriptHostConnection {
             match message {
                 HostMessageWire::Text { text } => Ok(HostMessage::Text(text)),
                 HostMessageWire::Closed { detail } => Ok(HostMessage::Closed { detail }),
-                HostMessageWire::Error { detail } => {
-                    Err(HostError::new(detail).with_reconnectable(true))
-                }
+                HostMessageWire::Error {
+                    detail,
+                    reconnectable,
+                } => Err(HostError::new(detail).with_reconnectable(reconnectable)),
                 HostMessageWire::Timeout => Ok(HostMessage::Timeout),
                 HostMessageWire::Binary => Ok(HostMessage::Binary),
             }
@@ -184,6 +193,10 @@ impl HostConnection for JavaScriptHostConnection {
     fn close(&mut self) {
         host_close(self.handle);
     }
+}
+
+const fn default_reconnectable() -> bool {
+    true
 }
 
 async fn await_json<T: for<'de> Deserialize<'de>>(promise: Promise) -> Result<T, JsValue> {
