@@ -161,9 +161,10 @@ impl<F> OpenAiBuilder<F> {
     /// Controls the optional non-generating request used to prewarm a
     /// persistent Responses WebSocket before its first model call.
     ///
-    /// Disable this when an intermediary does not support `generate: false`
-    /// requests. The first model call still opens and then reuses the same
-    /// persistent WebSocket.
+    /// This is disabled by default because the first model call can open and
+    /// then reuse the same persistent WebSocket without an extra response.
+    /// Enable it only when hiding connection setup is worth the additional
+    /// non-generating request.
     #[must_use]
     pub const fn websocket_warmup(mut self, enabled: bool) -> Self {
         self.config.websocket_warmup = enabled;

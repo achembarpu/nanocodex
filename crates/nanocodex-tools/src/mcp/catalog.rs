@@ -90,6 +90,7 @@ struct SearchTool {
     server: String,
     tool: String,
     description: String,
+    supports_parallel_tool_calls: bool,
     input_schema: Value,
 }
 
@@ -414,6 +415,7 @@ impl ToolEntry {
         client: Client,
         timeout: Duration,
         server_supports_parallel_tool_calls: bool,
+        tool_parallel_policy: bool,
         tool_exposure: McpToolExposure,
     ) -> Self {
         let remote_name = tool.name.to_string();
@@ -425,8 +427,11 @@ impl ToolEntry {
             .map(str::to_owned)
             .unwrap_or_else(|| format!("Tools in the {namespace} namespace."));
         let description = tool.description.as_deref().unwrap_or_default().to_owned();
-        let supports_parallel_tool_calls =
-            tool_supports_parallel_calls(tool, server_supports_parallel_tool_calls);
+        let supports_parallel_tool_calls = tool_supports_parallel_calls(
+            tool,
+            server_supports_parallel_tool_calls,
+            tool_parallel_policy,
+        );
         let mut input_schema = tool.input_schema.as_ref().clone();
         if input_schema.get("properties").is_none_or(Value::is_null) {
             input_schema.insert("properties".to_owned(), Value::Object(Map::new()));
@@ -485,6 +490,7 @@ impl ToolEntry {
             server: self.server_name.clone(),
             tool: self.remote_name.clone(),
             description: self.definition.description().to_owned(),
+            supports_parallel_tool_calls: self.supports_parallel_tool_calls,
             input_schema: self
                 .definition
                 .parameters()
@@ -513,8 +519,8 @@ fn tool_is_read_only(tool: &RmcpTool) -> bool {
         .is_some_and(|annotations| annotations.read_only_hint == Some(true))
 }
 
-fn tool_supports_parallel_calls(tool: &RmcpTool, server_opt_in: bool) -> bool {
-    server_opt_in || tool_is_read_only(tool)
+fn tool_supports_parallel_calls(tool: &RmcpTool, server_opt_in: bool, tool_policy: bool) -> bool {
+    server_opt_in || tool_policy || tool_is_read_only(tool)
 }
 
 fn canonical_tool_name(server_name: &str, tool_name: &str) -> String {
@@ -605,13 +611,14 @@ mod tests {
     fn parallel_safety_requires_server_opt_in_or_explicit_read_only_hint() {
         let schema = Arc::new(Map::new());
         let mut tool = RmcpTool::new("lookup", "Lookup", schema);
-        assert!(!tool_supports_parallel_calls(&tool, false));
-        assert!(tool_supports_parallel_calls(&tool, true));
+        assert!(!tool_supports_parallel_calls(&tool, false, false));
+        assert!(tool_supports_parallel_calls(&tool, true, false));
+        assert!(tool_supports_parallel_calls(&tool, false, true));
 
         tool.annotations = Some(ToolAnnotations::new().read_only(false));
-        assert!(!tool_supports_parallel_calls(&tool, false));
+        assert!(!tool_supports_parallel_calls(&tool, false, false));
 
         tool.annotations = Some(ToolAnnotations::new().read_only(true));
-        assert!(tool_supports_parallel_calls(&tool, false));
+        assert!(tool_supports_parallel_calls(&tool, false, false));
     }
 }

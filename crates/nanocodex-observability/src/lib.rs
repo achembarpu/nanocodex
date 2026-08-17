@@ -15,12 +15,13 @@ use opentelemetry_sdk::{
     },
 };
 use opentelemetry_semantic_conventions::{SCHEMA_URL, attribute::SERVICE_VERSION};
-use tracing_appender::non_blocking::WorkerGuard;
+use tracing_appender::non_blocking::{NonBlockingBuilder, WorkerGuard};
 use tracing_subscriber::{
     EnvFilter, Layer, fmt::format::FmtSpan, layer::SubscriberExt, util::SubscriberInitExt,
 };
 
 const DEPLOYMENT_ENVIRONMENT_NAME: &str = "deployment.environment.name";
+const LOCAL_LOG_BUFFERED_LINES_LIMIT: usize = 4_096;
 
 /// Human-readable or structured local tracing output.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -156,7 +157,10 @@ impl ObservabilityBuilder {
         if rustls::crypto::CryptoProvider::get_default().is_none() {
             drop(rustls::crypto::ring::default_provider().install_default());
         }
-        let (writer, writer_guard) = tracing_appender::non_blocking(self.writer()?);
+        let (writer, writer_guard) = NonBlockingBuilder::default()
+            .buffered_lines_limit(LOCAL_LOG_BUFFERED_LINES_LIMIT)
+            .lossy(false)
+            .finish(self.writer()?);
         let filter = EnvFilter::try_new(self.filter.as_str())?;
         let otel_filter = EnvFilter::try_new(self.otel_filter.as_str())?;
         let fmt_layer = match self.format {
