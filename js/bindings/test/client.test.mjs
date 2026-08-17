@@ -432,17 +432,14 @@ test("a failing event listener is reported without interrupting other observers"
 function rawAgent(sessionId) {
   return {
     sessionId,
-    prompt(input) {
-      return rawTurn(`${sessionId}:${input}`);
+    prompt(input, id) {
+      return rawTurn(id === undefined
+        ? `${sessionId}:${input}`
+        : `${sessionId}:${id}:${input}`);
     },
-    promptDurable(id, input) {
-      return rawTurn(`${sessionId}:${id}:${input}`);
-    },
-    promptContent(input) {
-      return rawTurn(`${sessionId}:${JSON.parse(input)[0].text}`);
-    },
-    promptContentDurable(id, input) {
-      return rawTurn(`${sessionId}:${id}:${JSON.parse(input)[0].text}`);
+    promptContent(input, id) {
+      const text = JSON.parse(input)[0].text;
+      return rawTurn(id === undefined ? `${sessionId}:${text}` : `${sessionId}:${id}:${text}`);
     },
     async fork() {
       return rawAgent(`${sessionId}-fork`);

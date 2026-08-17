@@ -202,20 +202,59 @@ impl fmt::Debug for TurnResult {
     }
 }
 
+/// One prompt submission with optional durable operation identity.
+///
+/// Plain strings and [`Prompt`] values convert directly into non-durable
+/// requests. Attach an ID when the configured durability journal should
+/// deduplicate and recover the submission across process restarts.
+#[derive(Clone, Debug)]
+pub struct PromptRequest {
+    pub(super) prompt: Prompt,
+    pub(super) operation_id: Option<String>,
+}
+
+impl PromptRequest {
+    /// Creates a prompt submission without durable identity.
+    #[must_use]
+    pub fn new(prompt: impl Into<Prompt>) -> Self {
+        Self {
+            prompt: prompt.into(),
+            operation_id: None,
+        }
+    }
+
+    /// Attaches the stable idempotency identity used by the durability journal.
+    #[must_use]
+    pub fn id(mut self, operation_id: impl Into<String>) -> Self {
+        self.operation_id = Some(operation_id.into());
+        self
+    }
+}
+
+impl From<Prompt> for PromptRequest {
+    fn from(prompt: Prompt) -> Self {
+        Self::new(prompt)
+    }
+}
+
+impl From<String> for PromptRequest {
+    fn from(prompt: String) -> Self {
+        Self::new(prompt)
+    }
+}
+
+impl From<&str> for PromptRequest {
+    fn from(prompt: &str) -> Self {
+        Self::new(prompt)
+    }
+}
+
 pub(super) enum Command {
-    DurablePrompt {
-        key: TurnKey,
-        prompt: Prompt,
-        operation_id: String,
-        parent: Option<tracing::Span>,
-        events: EventSink,
-        result: oneshot::Sender<Result<TurnResult>>,
-        accepted: oneshot::Sender<Result<()>>,
-    },
     Prompt {
         key: TurnKey,
         prompt: Prompt,
         durable_operation: Option<String>,
+        accepted: Option<oneshot::Sender<Result<()>>>,
         thinking: Option<Thinking>,
         fast_mode: Option<bool>,
         parent: Option<tracing::Span>,

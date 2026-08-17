@@ -4,7 +4,8 @@
 
 pub use nanocodex_agent::{
     AgentEvents, AgentSessionContext, CostStatus, EstimatedUsdCost, Nanocodex, NanocodexBuilder,
-    NanocodexError, PromptRoute, ServiceTier, Turn, TurnControl, TurnResult, TurnUsage, UsdAmount,
+    NanocodexError, PromptRequest, PromptRoute, ServiceTier, Turn, TurnControl, TurnResult,
+    TurnUsage, UsdAmount,
 };
 pub use nanocodex_oai_api::{Model, OpenAi, ReasoningMode, Thinking};
 #[cfg(not(target_family = "wasm"))]
@@ -22,9 +23,9 @@ pub mod agent {
     pub use nanocodex_agent::rollout;
     pub use nanocodex_agent::{
         AgentEvents, AgentHandle, AgentSessionContext, CostStatus, EstimatedUsdCost,
-        ExecutionEnvironment, Nanocodex, NanocodexBuilder, NanocodexError, PromptRoute, Result,
-        ServiceTier, Turn, TurnControl, TurnResult, TurnUsage, UsdAmount, durability, events,
-        input, session, usage,
+        ExecutionEnvironment, Nanocodex, NanocodexBuilder, NanocodexError, PromptRequest,
+        PromptRoute, Result, ServiceTier, Turn, TurnControl, TurnResult, TurnUsage, UsdAmount,
+        durability, events, input, session, usage,
     };
 }
 

@@ -106,6 +106,7 @@ where
                                 key,
                                 prompt,
                                 durable_operation,
+                                accepted: None,
                                 thinking: Some(thinking),
                                 fast_mode: Some(fast_mode),
                                 parent,
@@ -217,6 +218,7 @@ where
                         key,
                         prompt,
                         durable_operation: None,
+                        accepted: None,
                         thinking: None,
                         fast_mode: None,
                         parent,
@@ -230,6 +232,7 @@ where
                 key,
                 prompt,
                 durable_operation,
+                accepted: _,
                 thinking,
                 fast_mode,
                 parent,
@@ -307,6 +310,7 @@ where
                                         key,
                                         prompt,
                                         durable_operation,
+                                        accepted: _,
                                         thinking: _,
                                         fast_mode: _,
                                         parent,
@@ -406,12 +410,6 @@ where
                                         .await;
                                         commands_open = false;
                                         break execution.as_mut().await;
-                                    }
-                                    Some(Command::DurablePrompt {
-                                        accepted, result, ..
-                                    }) => {
-                                        drop(accepted.send(Err(NanocodexError::AgentStopped)));
-                                        drop(result);
                                     }
                                     None => {
                                         commands_open = false;
@@ -631,6 +629,7 @@ where
                                 key,
                                 prompt,
                                 durable_operation,
+                                accepted: _,
                                 thinking: _,
                                 fast_mode: _,
                                 parent,
@@ -774,12 +773,6 @@ where
                                 )
                                 .await;
                                 commands_open = false;
-                            }
-                            Some(Command::DurablePrompt {
-                                accepted, result, ..
-                            }) => {
-                                drop(accepted.send(Err(NanocodexError::AgentStopped)));
-                                drop(result);
                             }
                             None => {
                                 commands_open = false;
@@ -962,14 +955,16 @@ where
 }
 
 async fn accept_durable_command(durability: &Durability, command: Command) -> Option<Command> {
-    let Command::DurablePrompt {
+    let Command::Prompt {
         key,
         prompt,
-        operation_id,
+        durable_operation: Some(operation_id),
+        accepted: Some(accepted),
+        thinking,
+        fast_mode,
         parent,
         events,
         result,
-        accepted,
     } = command
     else {
         return Some(command);
@@ -984,8 +979,9 @@ async fn accept_durable_command(durability: &Durability, command: Command) -> Op
                 key,
                 prompt,
                 durable_operation: Some(operation_id),
-                thinking: None,
-                fast_mode: None,
+                accepted: None,
+                thinking,
+                fast_mode,
                 parent,
                 events,
                 result,

@@ -42,12 +42,8 @@ export function prompt(agent, options) {
     throw new TypeError("durable prompt id must be a non-empty string");
   }
   const raw = typeof input === "string"
-    ? operationId === undefined
-      ? state.raw.prompt(input)
-      : state.raw.promptDurable(operationId, input)
-    : operationId === undefined
-      ? state.raw.promptContent(JSON.stringify(input))
-      : state.raw.promptContentDurable(operationId, JSON.stringify(input));
+    ? state.raw.prompt(input, operationId)
+    : state.raw.promptContent(JSON.stringify(input), operationId);
   return createTurn(raw, agent);
 }
 

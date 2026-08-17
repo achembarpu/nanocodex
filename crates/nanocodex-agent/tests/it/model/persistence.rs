@@ -220,7 +220,7 @@ async fn portable_journal_replays_a_completed_model_step_after_terminal_commit_f
         .await?;
     let (agent, events) = builder.build()?;
     let error = agent
-        .prompt_durable("turn-1", "replay this exact turn")
+        .prompt(PromptRequest::new("replay this exact turn").id("turn-1"))
         .await?
         .result()
         .await
@@ -238,7 +238,7 @@ async fn portable_journal_replays_a_completed_model_step_after_terminal_commit_f
         .await?;
     let (resumed, resumed_events) = builder.build()?;
     let result = resumed
-        .prompt_durable("turn-1", "replay this exact turn")
+        .prompt(PromptRequest::new("replay this exact turn").id("turn-1"))
         .await?
         .result()
         .await?;
@@ -285,7 +285,7 @@ async fn portable_journal_restores_the_live_owner_before_retrying_a_failed_commi
     let (agent, events) = builder.build()?;
 
     let first = agent
-        .prompt_durable("turn-1", "replay this exact turn")
+        .prompt(PromptRequest::new("replay this exact turn").id("turn-1"))
         .await?
         .result()
         .await
@@ -293,7 +293,7 @@ async fn portable_journal_restores_the_live_owner_before_retrying_a_failed_commi
     assert!(first.to_string().contains("injected append failure"));
 
     let recovered = agent
-        .prompt_durable("turn-1", "replay this exact turn")
+        .prompt(PromptRequest::new("replay this exact turn").id("turn-1"))
         .await?
         .result()
         .await?;
@@ -347,7 +347,7 @@ async fn portable_journal_refuses_to_repeat_a_tool_with_an_ambiguous_completion(
         .await?;
     let (agent, events) = builder.build()?;
     let first = agent
-        .prompt_durable("turn-1", "run the counter")
+        .prompt(PromptRequest::new("run the counter").id("turn-1"))
         .await?
         .result()
         .await
@@ -366,7 +366,7 @@ async fn portable_journal_refuses_to_repeat_a_tool_with_an_ambiguous_completion(
         .await?;
     let (resumed, resumed_events) = builder.build()?;
     let recovered = resumed
-        .prompt_durable("turn-1", "run the counter")
+        .prompt(PromptRequest::new("run the counter").id("turn-1"))
         .await?
         .result()
         .await

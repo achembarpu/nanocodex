@@ -141,8 +141,10 @@ pub(super) async fn begin_shutdown(
     commands.close();
     while let Some(command) = commands.recv().await {
         match command {
-            Command::DurablePrompt {
-                accepted, result, ..
+            Command::Prompt {
+                accepted: Some(accepted),
+                result,
+                ..
             } => {
                 drop(accepted.send(Err(NanocodexError::AgentStopped)));
                 drop(result);
@@ -151,6 +153,7 @@ pub(super) async fn begin_shutdown(
                 key,
                 prompt,
                 durable_operation,
+                accepted: None,
                 thinking,
                 fast_mode,
                 parent,
@@ -264,11 +267,5 @@ pub(super) fn handle_idle_command<S>(
             drop(result.send(Err(NanocodexError::AgentStopped)));
         }
         Command::Prompt { .. } => {}
-        Command::DurablePrompt {
-            accepted, result, ..
-        } => {
-            drop(accepted.send(Err(NanocodexError::AgentStopped)));
-            drop(result);
-        }
     }
 }
