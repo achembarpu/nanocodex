@@ -37,6 +37,12 @@ test("Node host opens application sockets through MPP", async () => {
   assert.equal(JSON.parse(await host.next(1, 10)).text, '{"type":"paid"}');
   assert.equal(JSON.parse(await host.send(1, "request")).ok, true);
   assert.deepEqual(socket.sent.map(JSON.parse), [{ mpp: "message", data: "request" }]);
+  socket.close(3008, "requested voucher amount exceeds local maxDeposit");
+  assert.deepEqual(JSON.parse(await host.next(1, 10)), {
+    kind: "error",
+    detail: "MPP WebSocket payment flow failed with code 3008: requested voucher amount exceeds local maxDeposit",
+    reconnectable: false,
+  });
   host.close(1);
 });
 
@@ -492,9 +498,14 @@ class ManagedSocket extends EventTarget {
     this.sent.push(message);
   }
 
-  close() {
+  close(code = 1000, reason = "") {
     this.readyState = 3;
-    this.dispatchEvent(new Event("close"));
+    const event = new Event("close");
+    Object.defineProperties(event, {
+      code: { value: code },
+      reason: { value: reason },
+    });
+    this.dispatchEvent(event);
   }
 
   message(data) {

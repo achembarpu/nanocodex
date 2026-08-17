@@ -4,7 +4,9 @@ import { createTempoProviderFromAccounts } from "nanocodex/browser";
 import type { Address } from "viem";
 
 import {
+  MPP_MERCATOR_CHANNEL_LIMIT,
   MPP_MODEL_CHANNEL_LIMIT,
+  MPP_MODEL_CHANNEL_TOP_UP,
   MPP_RESPONSES_WEBSOCKET_URL,
   PATH_USD,
   TEMPO_ACCOUNT_STORAGE_KEY,
@@ -72,10 +74,14 @@ export async function createTempoMppSession(
     policy: {
       autoSwap: { tokenIn: [USDC_E, PATH_USD], slippage: 1 },
       channelStore,
-      maxDeposit: MPP_MODEL_CHANNEL_LIMIT,
     },
-    session: { bootstrap: false },
+    session: {
+      bootstrap: false,
+      maxDeposit: MPP_MODEL_CHANNEL_LIMIT,
+      topUpAmount: MPP_MODEL_CHANNEL_TOP_UP,
+    },
     mercator: {
+      maxDeposit: MPP_MERCATOR_CHANNEL_LIMIT,
       onChannelUpdate(entry) {
         mcpChannels.set(entry.channelId, entry.cumulativeAmount);
       },

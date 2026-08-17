@@ -12,6 +12,7 @@ const USER_AGENT = `nanocodex-wasm/${packageMetadata.version}`;
 const DEFAULT_MAX_QUEUED_MESSAGES = 4_096;
 const DEFAULT_MAX_QUEUED_BYTES = 32 * 1024 * 1024;
 const DEFAULT_MAX_FRAME_BYTES = 16 * 1024 * 1024;
+const MPP_CLIENT_PROTOCOL_ERROR_CLOSE_CODE = 3008;
 
 export function createNodeHost(options = {}) {
   const connections = new Map();
@@ -136,8 +137,15 @@ export function createNodeHost(options = {}) {
     });
     socket.addEventListener("close", (event) => {
       if (!connection.intentionallyClosed && !connection.overflowed) {
+        const code = event.code ?? 1000;
         const suffix = event.reason ? `: ${event.reason}` : "";
-        enqueue(connection, { kind: "closed", detail: `with code ${event.code ?? 1000}${suffix}` });
+        enqueue(connection, code === MPP_CLIENT_PROTOCOL_ERROR_CLOSE_CODE
+          ? {
+              kind: "error",
+              detail: `MPP WebSocket payment flow failed with code ${code}${suffix}`,
+              reconnectable: false,
+            }
+          : { kind: "closed", detail: `with code ${code}${suffix}` });
       }
     });
     socket.addEventListener("error", () => {

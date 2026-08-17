@@ -71,7 +71,7 @@ impl HostedTools {
 pub struct HostedToolRuntime {
     working_directory: Arc<str>,
     host: Option<Arc<dyn CodeModeHost>>,
-    direct_tool_names: RwLock<HashSet<String>>,
+    callable_tool_names: RwLock<HashSet<String>>,
 }
 
 /// Cancellation handle for a hosted runtime.
@@ -97,7 +97,7 @@ impl HostedToolRuntime {
         Self {
             working_directory: Arc::from(workspace.to_string_lossy().into_owned()),
             host: None,
-            direct_tool_names: RwLock::new(HashSet::new()),
+            callable_tool_names: RwLock::new(HashSet::new()),
         }
     }
 
@@ -165,38 +165,25 @@ impl HostedToolRuntime {
             }
         });
         crate::code_mode_order::sort_definitions(&mut definitions);
-        if mode == HostedToolMode::Direct {
-            if let Ok(mut names) = self.direct_tool_names.write() {
-                names.clear();
-                names.extend(
-                    definitions
-                        .iter()
-                        .map(|definition| definition.name().to_owned()),
-                );
-            } else {
-                tracing::warn!(
-                    target: "nanocodex_tools",
-                    "hosted direct-tool registry lock was poisoned"
-                );
-            }
-            return (definitions, Vec::new());
-        }
-        let (direct_definitions, code_mode_definitions): (Vec<_>, Vec<_>) = definitions
-            .into_iter()
-            .partition(|definition| matches!(definition, ToolDefinition::ToolSearch { .. }));
-        if let Ok(mut names) = self.direct_tool_names.write() {
+        if let Ok(mut names) = self.callable_tool_names.write() {
             names.clear();
             names.extend(
-                direct_definitions
+                definitions
                     .iter()
                     .map(|definition| definition.name().to_owned()),
             );
         } else {
             tracing::warn!(
                 target: "nanocodex_tools",
-                "hosted direct-tool registry lock was poisoned"
+                "hosted callable-tool registry lock was poisoned"
             );
         }
+        if mode == HostedToolMode::Direct {
+            return (definitions, Vec::new());
+        }
+        let (direct_definitions, code_mode_definitions): (Vec<_>, Vec<_>) = definitions
+            .into_iter()
+            .partition(|definition| matches!(definition, ToolDefinition::ToolSearch { .. }));
         let code_mode_tool_names = code_mode_definitions
             .iter()
             .map(|definition| {
@@ -248,11 +235,16 @@ impl HostedToolRuntime {
         false
     }
 
-    /// Returns whether a direct hosted definition (currently `tool_search`) is callable.
+    /// Returns whether the embedding host registered a callable definition.
+    ///
+    /// Deferred exposure controls model-visible schemas, not dispatch. This
+    /// matches the native and Codex runtimes: a tool loaded by `tool_search`
+    /// remains registered even though its schema was omitted from the initial
+    /// request.
     #[must_use]
     pub fn contains(&self, name: &str) -> bool {
         self.host.as_ref().is_some_and(|_| {
-            self.direct_tool_names
+            self.callable_tool_names
                 .read()
                 .is_ok_and(|names| names.contains(name))
         })
@@ -507,7 +499,7 @@ mod tests {
         );
         assert!(specs[0].description().contains("deferred nested tools"));
         assert!(runtime.contains("tool_search"));
-        assert!(!runtime.contains("mcp__mercator__search"));
+        assert!(runtime.contains("mcp__mercator__search"));
 
         let output = runtime
             .execute_tool(
@@ -519,6 +511,16 @@ mod tests {
             )
             .await;
         assert!(output.success);
+
+        let output = runtime
+            .execute_tool(
+                "mcp__mercator__search",
+                ToolInput::Function(serde_json::value::to_raw_value(&json!({})).unwrap()),
+                ToolContext::new("gpt-5", "session-1", "call-2", &[], 1_000),
+            )
+            .await;
+        assert!(output.success);
+        assert_eq!(output.structured_result()["name"], "mcp__mercator__search");
     }
 
     #[tokio::test]
