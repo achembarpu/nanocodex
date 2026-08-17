@@ -85,7 +85,7 @@ impl Default for ModelConfig {
             thinking: Thinking::default(),
             fast_mode: false,
             responses_transport: ResponsesTransport::default(),
-            websocket_warmup: false,
+            websocket_warmup: true,
             responses_history: ResponsesHistory::default(),
             store_responses: false,
             websocket_url: "wss://api.openai.com/v1/responses".to_owned(),

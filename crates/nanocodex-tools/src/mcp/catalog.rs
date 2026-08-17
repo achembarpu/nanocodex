@@ -11,7 +11,10 @@ use serde::Serialize;
 use serde_json::{Map, Value, json};
 use tokio::sync::watch;
 
-use super::{client::Client, config::McpToolExposure};
+use super::{
+    client::Client,
+    config::{McpServer, McpToolExposure},
+};
 
 const DEFAULT_SEARCH_LIMIT: usize = 8;
 const MAX_SEARCH_LIMIT: usize = 32;
@@ -410,18 +413,16 @@ fn push_search_token(tokens: &mut Vec<String>, token: &mut String) {
 impl ToolEntry {
     pub(crate) fn new(
         server_name: &str,
-        server_description: Option<&str>,
         tool: &RmcpTool,
         client: Client,
-        timeout: Duration,
-        server_supports_parallel_tool_calls: bool,
-        tool_parallel_policy: bool,
-        tool_exposure: McpToolExposure,
+        config: &McpServer,
     ) -> Self {
         let remote_name = tool.name.to_string();
         let canonical_name = canonical_tool_name(server_name, &remote_name);
         let namespace = canonical_namespace(server_name);
-        let namespace_description = server_description
+        let namespace_description = config
+            .description
+            .as_deref()
             .map(str::trim)
             .filter(|description| !description.is_empty())
             .map(str::to_owned)
@@ -429,8 +430,8 @@ impl ToolEntry {
         let description = tool.description.as_deref().unwrap_or_default().to_owned();
         let supports_parallel_tool_calls = tool_supports_parallel_calls(
             tool,
-            server_supports_parallel_tool_calls,
-            tool_parallel_policy,
+            config.supports_parallel_tool_calls,
+            config.parallel_tools.contains(tool.name.as_ref()),
         );
         let mut input_schema = tool.input_schema.as_ref().clone();
         if input_schema.get("properties").is_none_or(Value::is_null) {
@@ -477,10 +478,10 @@ impl ToolEntry {
             namespace_description,
             definition,
             supports_parallel_tool_calls,
-            tool_exposure,
+            tool_exposure: config.tool_exposure,
             search_text,
             client,
-            timeout,
+            timeout: config.tool_timeout,
         }
     }
 

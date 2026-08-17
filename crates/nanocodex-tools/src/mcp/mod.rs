@@ -304,13 +304,9 @@ impl McpHandle {
                     .map(|tool| {
                         ToolEntry::new(
                             server_name,
-                            server.config.description.as_deref(),
                             &tool,
                             Arc::clone(&connected.client),
-                            server.config.tool_timeout,
-                            server.config.supports_parallel_tool_calls,
-                            server.config.parallel_tools.contains(tool.name.as_ref()),
-                            server.config.tool_exposure,
+                            &server.config,
                         )
                     })
                     .collect();
@@ -482,16 +478,7 @@ impl DynamicToolProvider for Mcp {
                             .tools
                             .into_iter()
                             .map(|tool| {
-                                ToolEntry::new(
-                                    &name,
-                                    config.description.as_deref(),
-                                    &tool,
-                                    Arc::clone(&connected.client),
-                                    config.tool_timeout,
-                                    config.supports_parallel_tool_calls,
-                                    config.parallel_tools.contains(tool.name.as_ref()),
-                                    config.tool_exposure,
-                                )
+                                ToolEntry::new(&name, &tool, Arc::clone(&connected.client), &config)
                             })
                             .collect::<Vec<_>>();
                         ConnectedCatalog {
