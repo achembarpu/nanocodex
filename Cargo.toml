@@ -5,6 +5,7 @@ members = [
     "bin/nanousd-api",
     "crates/nanocodex",
     "crates/nanocodex-agent",
+    "crates/nanocodex-durability",
     "crates/experimental/nanocodex-browser",
     "crates/experimental/nanocodex-egress",
     "crates/experimental/nanocodex-voice",
@@ -74,6 +75,7 @@ krun = { package = "libkrun", version = "=2.0.0-dev", git = "https://github.com/
 mpp = { version = "=0.11.0", git = "https://github.com/tempoxyz/mpp-rs", rev = "2e265801d216ef54a85b31acda5d0fac192e1b5e", default-features = false }
 nanocodex = { version = "0.5.0", path = "crates/nanocodex" }
 nanocodex-agent = { version = "0.5.0", path = "crates/nanocodex-agent" }
+nanocodex-durability = { version = "0.5.0", path = "crates/nanocodex-durability" }
 nanocodex-browser = { version = "0.5.0", path = "crates/experimental/nanocodex-browser" }
 nanocodex-egress = { version = "0.5.0", path = "crates/experimental/nanocodex-egress" }
 nanocodex-voice = { version = "0.5.0", path = "crates/experimental/nanocodex-voice" }
@@ -117,6 +119,7 @@ rustls = { version = "0.23.42", default-features = false, features = ["ring"] }
 regex = "1"
 rusqlite = { version = "0.38", features = ["bundled"] }
 seccompiler = "0.5.0"
+tokio-postgres = "0.7"
 rquickjs = "0.12.1"
 rmcp = { version = "=3.0.0", default-features = false, features = ["auth", "client", "reqwest-tls-no-provider", "transport-async-rw", "transport-streamable-http-client-reqwest"] }
 oauth2 = { version = "5.0", default-features = false }

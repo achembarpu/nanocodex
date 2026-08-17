@@ -1,0 +1,54 @@
+# nanocodex-durability
+
+`nanocodex-durability` is the portable durable-execution boundary used by
+Nanocodex agents. Rust owns the journal format, optimistic revision protocol,
+state reduction, deduplication, checkpoint selection, and recovery decisions.
+Hosts provide only atomic journal loading and compare-and-append.
+
+The crate includes an in-memory store on every target and optional native
+SQLite and Postgres stores. JavaScript runtimes implement the same small store
+contract through the Nanocodex WASM host bridge.
+
+Operations are durable accepted units of work. Steps are replayable boundaries
+inside an operation. An unfinished step is classified from its retry policy:
+retry-safe steps can start another attempt, while an unfinished unsafe step is
+reported as ambiguous and is never silently repeated.
+
+The runtime follows the same ownership model as the agent SDK. A
+`DurableSession` is a cheap channel handle; one spawned task owns its reducer,
+live claims, revision, and store. The store itself is moved into that task.
+There is no shared mutable reducer or `Arc<Mutex<Connection>>` contract.
+
+```rust
+use nanocodex_durability::{Admission, DurableSession, MemoryStore};
+
+# async fn example() -> nanocodex_durability::Result<()> {
+let store = MemoryStore::new()?;
+let journal = DurableSession::open(store.clone(), "agent-123").await?;
+
+match journal.admit_typed::<_, String, String>("request-7", &"hello").await? {
+    Admission::Accepted | Admission::Pending => {
+        journal.begin_attempt("request-7").await?;
+        journal.complete("request-7", &"checkpoint", &"answer").await?;
+    }
+    Admission::Completed { checkpoint, output } => {
+        assert_eq!((checkpoint, output), ("checkpoint".to_owned(), "answer".to_owned()));
+    }
+    Admission::Cancelled => {}
+}
+# Ok(())
+# }
+```
+
+Enable `sqlite` and open `SqliteStore` for a directly owned native connection.
+Enable `postgres` and pass a driven `tokio_postgres::Client` to
+`PostgresStore::new`. Both implement the exact same `JournalStore` contract.
+
+The host contract has only two operations:
+
+- `load(journal_id)` returns ordered opaque batches plus the current revision.
+- `append(journal_id, expected_revision, payload)` atomically compares the
+  revision and appends the opaque payload.
+
+Hosts do not deserialize entries, snapshots, model outputs, or tool results.
+Rust owns those types and all recovery decisions.

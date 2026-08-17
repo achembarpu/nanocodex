@@ -1,0 +1,43 @@
+[package]
+name = "nanocodex-durability"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+publish.workspace = true
+authors.workspace = true
+license.workspace = true
+homepage.workspace = true
+repository.workspace = true
+readme = "README.md"
+keywords.workspace = true
+categories.workspace = true
+description = "Portable durable execution journal and stores for Nanocodex"
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["-D", "warnings"]
+
+[features]
+default = []
+sqlite = ["dep:rusqlite"]
+postgres = ["dep:tokio-postgres"]
+
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["rt", "sync"] }
+
+[target.'cfg(target_family = "wasm")'.dependencies]
+wasm-bindgen-futures.workspace = true
+
+[target.'cfg(not(target_family = "wasm"))'.dependencies]
+rusqlite = { workspace = true, optional = true }
+tokio-postgres = { workspace = true, optional = true }
+
+[dev-dependencies]
+tempfile.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true
