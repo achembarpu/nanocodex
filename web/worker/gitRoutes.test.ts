@@ -86,6 +86,19 @@ test("Git protocol requests accept the gzip encoding used by clone clients", asy
   assert.deepEqual(decoded, expected);
 });
 
+test("public Git requests are bounded after decompression", async () => {
+  const request = new Request("https://nanocodex.example/git/git-upload-pack", {
+    method: "POST",
+    headers: { "content-encoding": "gzip" },
+    body: gzipSync(new Uint8Array([1, 2, 3, 4, 5])),
+  });
+
+  const result = await readGitProtocolRequest(request, 4);
+  assert.ok(result instanceof Response);
+  assert.equal(result.status, 413);
+  assert.equal(await result.text(), "Git request is too large\n");
+});
+
 test("repository reads hit edge cache before the publication Durable Object", async () => {
   const cache = new Map<string, Response>();
   const originalCaches = globalThis.caches;
