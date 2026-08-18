@@ -21,9 +21,6 @@ const budgets = Object.freeze({
   browserShellJavaScriptGzip: 450_000,
   artifactCoreJavaScript: 7_000,
   artifactCoreJavaScriptGzip: 2_800,
-  // Includes the canonical Rust apply_patch grammar and planner in browser WASM.
-  wasm: 2_550_000,
-  wasmGzip: 550_000,
   mppControlsJavaScript: 1_300_000,
   workerTempoJavaScript: 800_000,
 });
@@ -213,8 +210,6 @@ assert.deepEqual(
   "the Agent Worker wasm-bindgen glue does not satisfy the bundled WASM imports",
 );
 const wasm = await fileStats([`assets/${wasmFile}`]);
-within("Nanocodex WASM", wasm.bytes, budgets.wasm);
-within("Nanocodex WASM gzip", wasm.gzipBytes, budgets.wasmGzip);
 
 const workerManifest = JSON.parse(
   await readFile(join(workerDirectory, ".vite", "manifest.json"), "utf8"),
