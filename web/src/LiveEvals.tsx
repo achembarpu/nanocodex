@@ -10,8 +10,9 @@ import {
   X,
 } from "lucide-react";
 import { useQuery } from "@tanstack/react-query";
-import { Suspense, lazy, useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { useLocation, useMatch, useNavigate } from "react-router";
+import { EvalAnalytics } from "./EvalAnalytics";
 import {
   evalApi,
   type EvalAnalyticsPoint,
@@ -31,10 +32,6 @@ import {
   type EvalWorksetResults,
 } from "./evalApi";
 import "./evals.css";
-
-const EvalAnalytics = lazy(() =>
-  import("./EvalAnalytics").then((module) => ({ default: module.EvalAnalytics })),
-);
 
 type MatrixFilter = "all" | "active" | "issues" | "complete";
 type AnalyticsView = "frontier" | "runs";
@@ -361,11 +358,7 @@ function Analytics({
   view?: AnalyticsView;
   taskCount?: number;
 }) {
-  return (
-    <Suspense fallback={null}>
-      <EvalAnalytics points={points} view={view} taskCount={taskCount} />
-    </Suspense>
-  );
+  return <EvalAnalytics points={points} view={view} taskCount={taskCount} />;
 }
 
 export function LiveEvals({ overview }: { overview: EvalOverview | undefined }) {
@@ -451,8 +444,8 @@ export function LiveEvals({ overview }: { overview: EvalOverview | undefined }) 
   });
   const analyticsQuery = useQuery<EvalWorksetAnalytics>({
     queryKey: analyticsKey(selectedWorksetId),
-    enabled: Boolean(selectedWorkset && !taskRoute),
-    queryFn: ({ signal }) => evalApi.worksetAnalytics(selectedWorkset!.id, signal),
+    enabled: Boolean(selectedWorksetId && !taskRoute),
+    queryFn: ({ signal }) => evalApi.worksetAnalytics(selectedWorksetId!, signal),
     refetchInterval: selectedWorkset &&
       selectedWorkset.summary.success + selectedWorkset.summary.failed < selectedWorkset.summary.total
       ? 15_000
