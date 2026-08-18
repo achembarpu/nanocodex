@@ -240,6 +240,15 @@ const hostBridge = Object.freeze({
   executeTool(name, input, sessionId, callId) {
     return requiredSessionHost(sessionId).executeTool(name, input, sessionId, callId);
   },
+  readWorkspaceFile(path, sessionId) {
+    return requiredSessionHost(sessionId).readWorkspaceFile(path);
+  },
+  writeWorkspaceFile(path, contents, sessionId) {
+    return requiredSessionHost(sessionId).writeWorkspaceFile(path, contents);
+  },
+  removeWorkspaceFile(path, sessionId) {
+    return requiredSessionHost(sessionId).removeWorkspaceFile(path);
+  },
   toolMode(sessionId) {
     // The WASM constructor asks before its session is adopted.
     return (hostSessions.get(sessionId) ?? requiredActiveHost()).toolMode();

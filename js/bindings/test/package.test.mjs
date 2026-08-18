@@ -34,9 +34,10 @@ test("the packed package installs and runs every public entry point", async () =
     const [packed] = JSON.parse(stdout);
     assert.equal(packed.name, packageJson.name);
     assert.equal(packed.version, packageJson.version);
-    assert.ok(packed.size <= 1_100_000, `compressed package grew to ${packed.size} bytes`);
+    assert.ok(packed.size <= 1_110_000, `compressed package grew to ${packed.size} bytes`);
+    // Both WASM targets include the canonical Rust apply_patch grammar and planner.
     assert.ok(
-      packed.unpackedSize <= 5_050_000,
+      packed.unpackedSize <= 5_300_000,
       `unpacked package grew to ${packed.unpackedSize} bytes`,
     );
     assert.equal(

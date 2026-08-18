@@ -11,8 +11,9 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 #![cfg_attr(target_family = "wasm", allow(clippy::module_name_repetitions))]
 
-#[cfg(all(not(target_family = "wasm"), feature = "workspace-runtime"))]
-mod apply_patch;
+#[cfg(feature = "workspace-runtime")]
+#[doc(hidden)]
+pub mod apply_patch;
 #[cfg(all(not(target_family = "wasm"), feature = "native"))]
 #[cfg_attr(docsrs, doc(cfg(not(target_family = "wasm"))))]
 pub mod code_mode;
@@ -37,7 +38,7 @@ pub mod runtime;
 mod runtime_config;
 #[cfg(all(not(target_family = "wasm"), feature = "workspace-runtime"))]
 mod shell;
-#[cfg(all(not(target_family = "wasm"), feature = "workspace-runtime"))]
+#[cfg(feature = "workspace-runtime")]
 #[cfg_attr(docsrs, doc(cfg(not(target_family = "wasm"))))]
 pub mod standard;
 #[cfg(all(not(target_family = "wasm"), feature = "workspace-runtime"))]
@@ -110,7 +111,7 @@ pub use runtime::{ToolsBuildError, ToolsBuilder};
 #[cfg(all(not(target_family = "wasm"), feature = "native"))]
 #[cfg_attr(docsrs, doc(cfg(all(not(target_family = "wasm"), feature = "native"))))]
 pub use shell::ambient_sensitive_environment;
-#[cfg(all(not(target_family = "wasm"), feature = "workspace-runtime"))]
+#[cfg(feature = "workspace-runtime")]
 pub(crate) use standard::StandardTool;
 
 #[doc(hidden)]

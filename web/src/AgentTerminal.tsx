@@ -4,6 +4,7 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -17,19 +18,24 @@ import type { ArtifactDocument } from "nanocodex-artifacts";
 import type { Address } from "viem";
 import type { TuiTarget } from "nanocodex-tui";
 import "nanocodex-tui-react/structure.css";
+import "./AgentTerminal.css";
 
 import {
   nanocodexConfig,
+  prewarmNanocodexWorker,
   type AgentTransport,
   type PaymentStatus,
   type WebTuiCommand,
   type WebTuiMessage,
 } from "./nanocodex";
 import { ArtifactDock } from "./ArtifactDock";
-import { WorkspacePanel } from "./WorkspacePanel";
+import { getBrowserThread } from "./workspace";
 
 const MppControls = lazy(async () => ({
   default: (await import("./MppControls")).MppControls,
+}));
+const WorkspacePanel = lazy(async () => ({
+  default: (await import("./WorkspacePanel")).WorkspacePanel,
 }));
 let nextArtifactPromptId = 1_000_000_000;
 let nextVoicePromptId = 2_000_000_000;
@@ -45,11 +51,12 @@ export const AgentTerminal = memo(function AgentTerminal() {
 
 function AgentTerminalDemo() {
   const agent = useNanocodex<WebTuiCommand>();
+  const thread = useMemo(getBrowserThread, []);
   const [transport, setTransport] = useState<AgentTransport>("openai");
   const [credentialSource, setCredentialSource] = useState<CredentialSource | undefined>();
   const [payment, setPayment] = useState<PaymentStatus>();
   const [jsonl, setJsonl] = useState<string[]>([]);
-  const [latestArtifact, setLatestArtifact] = useState<ArtifactDocument>();
+  const [mobilePane, setMobilePane] = useState<"files" | "agent" | "ui">("agent");
   const [sessionId, setSessionId] = useState<string>();
   const [voiceStatus, setVoiceStatus] = useState<string>();
   const voice = useRef<import("./browserVoice").BrowserVoiceSession | undefined>(undefined);
@@ -59,21 +66,29 @@ function AgentTerminalDemo() {
     if (message.type === "mppJsonl") {
       setJsonl((current) => [...current.slice(-99), message.line]);
     }
-    if (message.type === "artifact") setLatestArtifact(message.artifact);
     voice.current?.observe(message);
   });
+  useEffect(() => {
+    const prewarm = () => prewarmNanocodexWorker();
+    if ("requestIdleCallback" in window) {
+      const id = window.requestIdleCallback(prewarm, { timeout: 1_500 });
+      return () => window.cancelIdleCallback(id);
+    }
+    const id = setTimeout(prewarm, 1_000);
+    return () => clearTimeout(id);
+  }, []);
   useEffect(() => {
     setPayment(undefined);
     setJsonl([]);
     if (transport !== "openai") return;
     if (credentialSource === "subscription") {
-      nanocodexConfig.restart(startCommand("chatgpt"));
+      nanocodexConfig.restart(startCommand("chatgpt", thread.id));
     } else if (credentialSource === "user" || credentialSource === "deployment") {
-      nanocodexConfig.restart(startCommand("openai"));
+      nanocodexConfig.restart(startCommand("openai", thread.id));
     } else {
       nanocodexConfig.disconnect();
     }
-  }, [credentialSource, transport]);
+  }, [credentialSource, thread.id, transport]);
 
   useEffect(() => () => voice.current?.close(), []);
   useEffect(() => {
@@ -84,8 +99,8 @@ function AgentTerminalDemo() {
   }, [credentialSource, transport]);
 
   const startMpp = useCallback((payerAddress: Address, accessKeyAddress: Address) => {
-    nanocodexConfig.restart(startCommand("mpp", payerAddress, accessKeyAddress));
-  }, []);
+    nanocodexConfig.restart(startCommand("mpp", thread.id, payerAddress, accessKeyAddress));
+  }, [thread.id]);
   const disconnectMpp = useCallback(() => nanocodexConfig.disconnect(), []);
   const promptFromArtifact = useCallback((artifact: ArtifactDocument, prompt: string) => {
     agent.dispatch({
@@ -164,11 +179,9 @@ function AgentTerminalDemo() {
     : agent.status === "ready";
   const unavailableMessage = transport === "openai"
     ? credentialSource === undefined
-      ? "Checking ChatGPT login..."
+      ? "Sign in with ChatGPT to start the agent"
       : "Sign in with ChatGPT to start the agent"
-    : agent.status === "starting"
-      ? "Starting paid MPP session..."
-      : agent.status === "error"
+    : agent.status === "error"
         ? agent.error ?? "MPP session failed"
         : "Connect Tempo to authorize an MPP session";
 
@@ -189,7 +202,7 @@ function AgentTerminalDemo() {
       {transport === "openai" ? (
         <SubscriptionBar source={credentialSource} onSourceChange={setCredentialSource} />
       ) : (
-        <Suspense fallback={<aside className="agent-byok">Loading Tempo Accounts…</aside>}>
+        <Suspense fallback={null}>
           <MppControls
             jsonl={jsonl}
             payment={payment}
@@ -198,8 +211,13 @@ function AgentTerminalDemo() {
           />
         </Suspense>
       )}
-      <div className="agent-workspace-shell">
-        <WorkspacePanel />
+      <nav className="agent-mobile-nav" aria-label="Workspace view">
+        <button type="button" aria-pressed={mobilePane === "files"} onClick={() => setMobilePane("files")}>Files</button>
+        <button type="button" aria-pressed={mobilePane === "agent"} onClick={() => setMobilePane("agent")}>Agent</button>
+        <button type="button" aria-pressed={mobilePane === "ui"} onClick={() => setMobilePane("ui")}>UI</button>
+      </nav>
+      <div className={`agent-workspace-shell mobile-pane-${mobilePane}`}>
+        <Suspense fallback={null}><WorkspacePanel /></Suspense>
         <NanocodexTui
           key={transport}
           enabled={enabled}
@@ -208,7 +226,6 @@ function AgentTerminalDemo() {
           voiceStatus={voiceStatus}
         />
         <ArtifactDock
-          latest={latestArtifact}
           agentReady={agent.status === "ready"}
           onPrompt={promptFromArtifact}
         />
@@ -217,14 +234,16 @@ function AgentTerminalDemo() {
   );
 }
 
-function startCommand(transport: "openai" | "chatgpt"): WebTuiCommand;
+function startCommand(transport: "openai" | "chatgpt", threadId: string): WebTuiCommand;
 function startCommand(
   transport: "mpp",
+  threadId: string,
   payerAddress: Address,
   accessKeyAddress: Address,
 ): WebTuiCommand;
 function startCommand(
   transport: "openai" | "chatgpt" | "mpp",
+  threadId: string,
   payerAddress?: Address,
   accessKeyAddress?: Address,
 ): WebTuiCommand {
@@ -234,6 +253,7 @@ function startCommand(
     return {
       accessKeyAddress,
       type: "start",
+      threadId,
       transport,
       payerAddress,
       thinking: "none",
@@ -242,6 +262,7 @@ function startCommand(
   }
   return {
     type: "start",
+    threadId,
     transport,
     thinking: "high",
     reasoningMode: "standard",
@@ -320,7 +341,6 @@ function SubscriptionBar({
       const response = await fetch("/api/auth/chatgpt", {
         method: "POST",
         credentials: "same-origin",
-        headers: { "x-nanocodex-request": "1" },
       });
       if (!response.ok) throw new Error(await credentialError(response));
       const next = await response.json() as ChatGptStatus;
@@ -348,7 +368,6 @@ function SubscriptionBar({
       const response = await fetch("/api/auth/chatgpt", {
         method: "DELETE",
         credentials: "same-origin",
-        headers: { "x-nanocodex-request": "1" },
       });
       if (!response.ok) throw new Error(await credentialError(response));
       setStatus({ state: "signed_out" });
@@ -371,9 +390,7 @@ function SubscriptionBar({
         ? "Using your existing API-key session"
         : source === "deployment"
           ? "Using the site demo key"
-          : status === undefined || source === undefined
-            ? "Checking ChatGPT login"
-            : "Sign in to use your ChatGPT subscription";
+          : "Sign in to use your ChatGPT subscription";
 
   return (
     <aside className="agent-byok" aria-label="ChatGPT subscription login">
@@ -384,11 +401,16 @@ function SubscriptionBar({
             <button type="button" onClick={signOut} disabled={busy}>Sign out</button>
           ) : (
             <button type="button" onClick={startLogin} disabled={busy || status?.state === "pending"}>
-              {busy ? "Starting…" : "Sign in with ChatGPT"}
+              Sign in with ChatGPT
             </button>
           )}
         </div>
       </div>
+      <p className="agent-auth-privacy">
+        The agent runs in your browser. Prompts and a short-lived token cross a
+        session-isolated Cloudflare relay; stored credentials are encrypted and
+        this login expires within seven days.
+      </p>
       {status?.state === "pending" ? (
         <div className="agent-oauth-code">
           <span>Enter code <strong>{status.userCode}</strong> at ChatGPT.</span>

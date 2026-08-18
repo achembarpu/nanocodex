@@ -50,6 +50,7 @@ nanocodex-oai-api = { path = "../nanocodex-oai-api", version = "0.5.0", default-
 serde.workspace = true
 serde_json.workspace = true
 tracing.workspace = true
+thiserror = { workspace = true, optional = true }
 
 [target.'cfg(not(target_family = "wasm"))'.dependencies]
 async-trait = { workspace = true, optional = true }
@@ -67,7 +68,6 @@ rquickjs = { workspace = true, optional = true }
 rmcp = { workspace = true, optional = true }
 schemars = { workspace = true, optional = true }
 sha1 = { workspace = true, optional = true }
-thiserror = { workspace = true, optional = true }
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "net", "process", "rt", "sync", "time"], optional = true }
 tokio-util = { workspace = true, optional = true }
 

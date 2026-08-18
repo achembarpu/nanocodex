@@ -9,47 +9,15 @@ import DiffWorker from "@pierre/diffs/worker/worker.js?worker";
 import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
 
-function isMobileBrowser() {
-  const browserNavigator = globalThis.navigator;
-  if (!browserNavigator) return false;
-  return (
-    browserNavigator.maxTouchPoints > 0 &&
-    globalThis.matchMedia?.("(max-width: 767px), (pointer: coarse)").matches === true
-  );
-}
-
-function getWorkerLimits() {
-  return isMobileBrowser()
-    ? { poolSize: 1, totalASTLRUCacheSize: 10 }
-    : { poolSize: 3, totalASTLRUCacheSize: 100 };
-}
-
-const workerLimits = getWorkerLimits();
-const hardwareConcurrency = globalThis.navigator?.hardwareConcurrency ?? 1;
 const poolOptions: WorkerPoolOptions = {
-  poolSize: Math.min(
-    Math.max(1, hardwareConcurrency - 1),
-    workerLimits.poolSize,
-  ),
-  totalASTLRUCacheSize: workerLimits.totalASTLRUCacheSize,
+  poolSize: 1,
+  totalASTLRUCacheSize: 100,
   workerFactory: () => new DiffWorker(),
 };
 
 const highlighterOptions: WorkerInitializationRenderOptions = {
   theme: DEFAULT_THEMES,
-  langs: [
-    "cpp",
-    "css",
-    "go",
-    "python",
-    "rust",
-    "sh",
-    "swift",
-    "tsx",
-    "typescript",
-    "zig",
-  ],
-  preferredHighlighter: "shiki-wasm",
+  preferredHighlighter: "shiki-js",
 };
 
 export function PierreWorkerProvider({ children }: { children: ReactNode }) {

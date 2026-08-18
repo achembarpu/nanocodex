@@ -1,6 +1,5 @@
 import { createConfig } from "nanocodex-react";
 import type { TuiCommand, TuiMessage, TuiTarget } from "nanocodex-tui";
-import type { ArtifactDocument } from "nanocodex-artifacts";
 import type { Address } from "viem";
 
 export type AgentTransport = "openai" | "mpp";
@@ -10,11 +9,12 @@ export type WebTuiCommand =
   | { type: "artifactPrompt"; id: number; prompt: string }
   | { type: "voicePrompt"; target: TuiTarget; id: number; prompt: string }
   | { type: "voiceTranscript"; target: TuiTarget; speaker: "user" | "assistant"; text: string }
-  | (StartCommand & { transport: "openai" })
-  | (StartCommand & { transport: "chatgpt" })
+  | (StartCommand & { threadId: string; transport: "openai" })
+  | (StartCommand & { threadId: string; transport: "chatgpt" })
   | (StartCommand & {
       accessKeyAddress: Address;
       payerAddress: Address;
+      threadId: string;
       transport: "mpp";
     });
 export type PaymentStatus = {
@@ -26,11 +26,28 @@ export type PaymentStatus = {
 };
 export type WebTuiMessage = TuiMessage
   | { type: "mppPayment"; payment: PaymentStatus }
-  | { type: "mppJsonl"; line: string }
-  | { type: "artifact"; artifact: ArtifactDocument };
+  | { type: "mppJsonl"; line: string };
+
+let prewarmedWorker: Worker | undefined;
+let workerClaimed = false;
+
+function createAgentWorker() {
+  return new Worker(new URL("./agent.worker.ts", import.meta.url), { type: "module" });
+}
+
+export function prewarmNanocodexWorker() {
+  if (workerClaimed) return;
+  prewarmedWorker ??= createAgentWorker();
+  prewarmedWorker.postMessage({ type: "warmup" });
+}
 
 /** Website-owned wiring for the publishable React package. */
 export const nanocodexConfig = createConfig<WebTuiCommand, WebTuiMessage>({
   autoStart: false,
-  worker: () => new Worker(new URL("./agent.worker.ts", import.meta.url), { type: "module" }),
+  worker: () => {
+    workerClaimed = true;
+    const worker = prewarmedWorker ?? createAgentWorker();
+    prewarmedWorker = undefined;
+    return worker;
+  },
 });

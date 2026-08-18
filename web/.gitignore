@@ -25,6 +25,7 @@ yarn-error.log*
 
 /dist/
 /dist-evals/
+/.repository-data/
 /.vinext/
 /.wrangler/
 /.dev.vars*

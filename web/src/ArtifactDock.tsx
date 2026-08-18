@@ -15,14 +15,16 @@ import type {
   ArtifactInput,
 } from "nanocodex-artifacts";
 import { LiveReactArtifact } from "./LiveReactArtifact";
-import { openKernelWorkspace } from "./workspace";
+import {
+  getBrowserThread,
+  openKernelWorkspace,
+  subscribeThreadWorkspaceChanges,
+} from "./workspace";
 
 export const ArtifactDock = memo(function ArtifactDock({
-  latest,
   agentReady,
   onPrompt,
 }: {
-  latest: ArtifactDocument | undefined;
   agentReady: boolean;
   onPrompt(artifact: ArtifactDocument, prompt: string): void;
 }) {
@@ -30,7 +32,7 @@ export const ArtifactDock = memo(function ArtifactDock({
   const [store, setStore] = useState<ArtifactStore>();
   const [artifacts, setArtifacts] = useState<readonly ArtifactDocument[]>([initialArtifact]);
   const [selectedId, setSelectedId] = useState(initialArtifact.id);
-  const [fullscreen, setFullscreen] = useState(true);
+  const [fullscreen, setFullscreen] = useState(() => !window.matchMedia("(max-width: 740px)").matches);
   const [message, setMessage] = useState("");
   const refreshEpoch = useRef(0);
   const selected = artifacts.find((artifact) => artifact.id === selectedId) ?? artifacts[0];
@@ -66,15 +68,20 @@ export const ArtifactDock = memo(function ArtifactDock({
         await refresh(nextStore);
         return;
       }
-      const artifact = await nextStore.save(exampleArtifact());
-      if (!active) return;
       refreshEpoch.current++;
-      setArtifacts([artifact]);
-      setSelectedId(artifact.id);
-      setMessage("");
+      setArtifacts([initialArtifact]);
+      setSelectedId(initialArtifact.id);
+      setMessage("Ask the agent to create any custom interface, or preview the live React demo.");
     }).catch((error) => active && setMessage(errorMessage(error)));
     return () => { active = false; };
   }, [refresh]);
+
+  useEffect(() => {
+    return subscribeThreadWorkspaceChanges(
+      getBrowserThread().id,
+      () => void refresh(store),
+    );
+  }, [refresh, store]);
 
   useEffect(() => {
     if (!store) return;
@@ -84,15 +91,6 @@ export const ArtifactDock = memo(function ArtifactDock({
     document.addEventListener("visibilitychange", onVisible);
     return () => document.removeEventListener("visibilitychange", onVisible);
   }, [refresh, store]);
-
-  useEffect(() => {
-    if (!latest) return;
-    refreshEpoch.current++;
-    setArtifacts((current) => [latest, ...current.filter(({ id }) => id !== latest.id)]);
-    setSelectedId(latest.id);
-    setFullscreen(true);
-    setMessage("");
-  }, [latest]);
 
   const remove = async () => {
     if (!store || !selected || !window.confirm(`Delete the artifact “${selected.title}”?`)) return;
@@ -132,7 +130,7 @@ export const ArtifactDock = memo(function ArtifactDock({
       refreshEpoch.current++;
       setArtifacts((current) => [artifact, ...current.filter(({ id }) => id !== artifact.id)]);
       setSelectedId(artifact.id);
-      setFullscreen(true);
+      setFullscreen(!window.matchMedia("(max-width: 740px)").matches);
       setMessage("");
     } catch (error) {
       setMessage(errorMessage(error));

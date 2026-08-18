@@ -1,7 +1,7 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { ChevronRight } from "lucide-react";
 import { memo, useRef } from "react";
-import type { HarnessCommit } from "./NanocodexApp";
+import type { HarnessCommit } from "./threadRepositorySnapshot";
 
 type VirtualCommitListProps = {
   commits: HarnessCommit[];

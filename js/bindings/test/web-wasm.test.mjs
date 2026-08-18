@@ -192,6 +192,105 @@ test("web-target WASM directly dispatches a CSP-safe application tool", async ()
   }
 });
 
+test("web-target WASM exposes browser bash and Rust apply_patch as standard tools", async () => {
+  const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await new Promise((resolve, reject) => {
+    server.once("listening", resolve);
+    server.once("error", reject);
+  });
+  const connection = new Promise((resolve) => server.once("connection", resolve));
+  const wasm = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
+  const files = new Map([["/workspace/note.txt", new TextEncoder().encode("before\n")]]);
+  const workspace = {
+    root: "/workspace",
+    async list() { return []; },
+    async readFile(path) {
+      const value = files.get(path.startsWith("/") ? path : `/workspace/${path}`);
+      if (!value) throw Object.assign(new Error("not found"), { code: "ENOENT" });
+      return value;
+    },
+    async writeFile(path, contents) {
+      files.set(path.startsWith("/") ? path : `/workspace/${path}`, typeof contents === "string"
+        ? new TextEncoder().encode(contents)
+        : new Uint8Array(contents.buffer ?? contents, contents.byteOffset ?? 0, contents.byteLength));
+    },
+    async remove(path) {
+      const resolved = path.startsWith("/") ? path : `/workspace/${path}`;
+      if (!files.delete(resolved)) throw Object.assign(new Error("not found"), { code: "ENOENT" });
+    },
+    async mkdir() {},
+  };
+  const agent = await createWarmAgent({
+    apiKey: "test-key",
+    WebSocketImpl: WebSocket,
+    module: wasm,
+    filesystem: workspace,
+    filesystemTools: false,
+    sessionId: "018f1f9a-7b3c-7a07-8000-000000000010",
+    thinking: "low",
+    tools: {
+      exec_command: {
+        description: "Run browser bash.",
+        parameters: { type: "object", required: ["cmd"] },
+        handler: () => ({ output: "", wall_time_seconds: 0, exit_code: 0 }),
+      },
+    },
+    websocketUrl: `ws://127.0.0.1:${server.address().port}`,
+  });
+  try {
+    const turn = agent.turn.prompt({ input: "Update note.txt with apply_patch." });
+    const socket = await connection;
+    const reader = messageReader(socket);
+    const warmup = await reader.next();
+    const toolPrefix = warmup.input.find((item) => item.type === "additional_tools");
+    assert.deepEqual(toolPrefix.tools.map((tool) => tool.name), [
+      "exec",
+      "exec_command",
+      "apply_patch",
+    ]);
+    assert.equal(toolPrefix.tools.some((tool) => tool.name === "read_file"), false);
+    send(socket, { type: "response.completed", response: { id: "workspace-warmup", usage: null } });
+    await reader.next();
+    send(socket, {
+      type: "response.completed",
+      response: {
+        id: "workspace-patch",
+        status: "completed",
+        output: [{
+          type: "custom_tool_call",
+          call_id: "call-apply-patch",
+          name: "apply_patch",
+          input: "*** Begin Patch\n*** Update File: note.txt\n@@\n-before\n+after\n*** End Patch",
+        }],
+        usage: null,
+      },
+    });
+    const continuation = await reader.next();
+    assert.equal(continuation.input[0].type, "custom_tool_call_output");
+    assert.equal(continuation.input[0].call_id, "call-apply-patch");
+    assert.match(continuation.input[0].output, /Success.*M note\.txt/s);
+    assert.equal(new TextDecoder().decode(files.get("/workspace/note.txt")), "after\n");
+    send(socket, {
+      type: "response.completed",
+      response: {
+        id: "workspace-final",
+        status: "completed",
+        output: [{
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "updated" }],
+        }],
+        usage: null,
+      },
+    });
+    assert.equal((await turn.result()).finalMessage, "updated");
+  } finally {
+    agent.dispose();
+    for (const socket of server.clients) socket.terminate();
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
 test("web-target WASM keeps remote MCP deferred behind tool_search and Code Mode", async () => {
   const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await new Promise((resolve, reject) => {

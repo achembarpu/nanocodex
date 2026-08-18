@@ -181,9 +181,12 @@ impl HostedToolRuntime {
         if mode == HostedToolMode::Direct {
             return (definitions, Vec::new());
         }
-        let (direct_definitions, code_mode_definitions): (Vec<_>, Vec<_>) = definitions
-            .into_iter()
-            .partition(|definition| matches!(definition, ToolDefinition::ToolSearch { .. }));
+        let (mut direct_definitions, code_mode_definitions): (Vec<_>, Vec<_>) =
+            definitions.into_iter().partition(|definition| {
+                matches!(definition, ToolDefinition::ToolSearch { .. })
+                    || is_standard_workspace_tool(definition.name())
+            });
+        crate::code_mode_order::sort_direct_definitions(&mut direct_definitions);
         let code_mode_tool_names = code_mode_definitions
             .iter()
             .map(|definition| {
@@ -329,6 +332,18 @@ impl HostedToolRuntime {
         replay_nested_updates(&execution, observer);
         execution
     }
+}
+
+fn is_standard_workspace_tool(name: &str) -> bool {
+    [
+        crate::StandardTool::ExecCommand,
+        crate::StandardTool::WriteStdin,
+        crate::StandardTool::UpdatePlan,
+        crate::StandardTool::ApplyPatch,
+        crate::StandardTool::ViewImage,
+    ]
+    .into_iter()
+    .any(|tool| tool.name() == name)
 }
 
 fn normalize_identifier(name: &str) -> String {

@@ -1,9 +1,0 @@
-# Required by `just run` and model-backed Harbor evals.
-OPENAI_API_KEY=
-
-# Optional CLI defaults; the eval YAML pins these explicitly.
-# OPENAI_REASONING_EFFORT=low
-
-# Local Harbor artifacts use Cargo's fast, symbol-rich dev profile by default.
-# Use `profiling` for optimized CPU profiling without stripping debug symbols.
-# NANOCODEX_BUILD_PROFILE=dev

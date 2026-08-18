@@ -43,6 +43,7 @@ export function create(options = {}) {
     WebSocketImpl,
     createWebSocket,
     filesystem,
+    filesystemTools,
     tools,
     toolMode,
     mcp,
@@ -66,6 +67,7 @@ export function create(options = {}) {
     mpp,
     onEvent: events.emit,
     filesystem,
+    filesystemTools,
     tools,
     toolMode,
     mcp: mcp === false

@@ -7,6 +7,7 @@ import {
 import {
   CodeView,
   type CodeViewHandle,
+  type CodeViewProps,
   useStableCallback,
 } from "@pierre/diffs/react";
 import { ChevronDown } from "lucide-react";
@@ -23,6 +24,7 @@ interface DiffsHubViewerProps {
   disableWorkerPool: boolean;
   initialItems: CodeViewItem<undefined>[];
   lineNumbers: boolean;
+  onScroll?: CodeViewProps<undefined>["onScroll"];
   overflow: "wrap" | "scroll";
   scrollRef: RefObject<HTMLDivElement | null>;
   showBackgrounds: boolean;
@@ -36,6 +38,7 @@ export const DiffsHubViewer = memo(function DiffsHubViewer({
   disableWorkerPool,
   initialItems,
   lineNumbers,
+  onScroll,
   overflow,
   scrollRef,
   showBackgrounds,
@@ -115,6 +118,7 @@ export const DiffsHubViewer = memo(function DiffsHubViewer({
       className="commit-stream code-view cv-scrollbar"
       disableWorkerPool={disableWorkerPool}
       options={options}
+      onScroll={onScroll}
       renderHeaderPrefix={renderHeaderPrefix}
     />
   );

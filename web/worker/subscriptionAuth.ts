@@ -1,9 +1,21 @@
+import { CredentialVault, type CredentialVaultEnv, type EncryptedEnvelope } from "./credentialVault.ts";
+
 const OAUTH_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const DEFAULT_ISSUER = "https://auth.openai.com";
 const REFRESH_EARLY_MS = 5 * 60_000;
-const LOGIN_TTL_MS = 15 * 60_000;
-const SESSION_TTL_MS = 30 * 24 * 60 * 60_000;
+export const CHATGPT_LOGIN_TTL_MS = 15 * 60_000;
+export const CHATGPT_SESSION_TTL_MS = 7 * 24 * 60 * 60_000;
 const MAX_RESPONSE_BYTES = 16 * 1024;
+const USAGE_WINDOW_MS = 60_000;
+const SOCKET_LEASE_MS = 2 * 60 * 60_000;
+const MAX_ACTIVE_SOCKETS = 3;
+const OPERATION_LIMITS = {
+  socket: 12,
+  search: 30,
+  image: 4,
+} as const;
+
+export type ChatGptOperation = "health" | keyof typeof OPERATION_LIMITS;
 
 export type ChatGptCredential = {
   kind: "chatgpt";
@@ -16,6 +28,11 @@ export type ChatGptCredential = {
 type StoredCredential = ChatGptCredential & {
   refreshToken: string;
   expiresAt: number | null;
+};
+
+type StoredUsage = {
+  windows: Partial<Record<keyof typeof OPERATION_LIMITS, { startedAt: number; count: number }>>;
+  socketLeases: Record<string, number>;
 };
 
 type PendingLogin = {
@@ -48,11 +65,16 @@ type TokenResponse = {
 export class ChatGptSession {
   readonly #state: DurableObjectState;
   readonly #issuer: string;
+  readonly #vault: CredentialVault;
   #refreshing?: { revision: number; promise: Promise<StoredCredential> };
 
-  constructor(state: DurableObjectState, env: { CHATGPT_ISSUER?: string }) {
+  constructor(
+    state: DurableObjectState,
+    env: CredentialVaultEnv & { CHATGPT_ISSUER?: string },
+  ) {
     this.#state = state;
     this.#issuer = (env.CHATGPT_ISSUER?.trim() || DEFAULT_ISSUER).replace(/\/$/, "");
+    this.#vault = new CredentialVault(env, `chatgpt/${state.id?.toString() ?? "test"}`);
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -66,10 +88,27 @@ export class ChatGptSession {
         return Response.json(await this.#status(), { headers: noStoreHeaders() });
       }
       if (request.method === "POST" && url.pathname === "/credential") {
+        const body = await request.json<{ operation?: unknown; leaseId?: unknown }>();
+        const operation = parseOperation(body.operation);
+        if (!operation) {
+          return Response.json({ error: "invalid operation" }, { status: 400, headers: noStoreHeaders() });
+        }
         const credential = await this.#currentCredential();
-        return credential
-          ? Response.json(publicCredential(credential), { headers: noStoreHeaders() })
-          : Response.json({ error: "not_authenticated" }, { status: 404, headers: noStoreHeaders() });
+        if (!credential) {
+          return Response.json({ error: "not_authenticated" }, { status: 404, headers: noStoreHeaders() });
+        }
+        if (!await this.#consume(operation, body.leaseId)) {
+          return Response.json(
+            { error: "session_rate_limit_exceeded" },
+            { status: 429, headers: { ...noStoreHeaders(), "retry-after": "60" } },
+          );
+        }
+        return Response.json(publicCredential(credential), { headers: noStoreHeaders() });
+      }
+      if (request.method === "DELETE" && url.pathname === "/lease") {
+        const body = await request.json<{ leaseId?: unknown }>();
+        await this.#releaseLease(body.leaseId);
+        return new Response(null, { status: 204, headers: noStoreHeaders() });
       }
       if (request.method === "POST" && url.pathname === "/recover") {
         const body = await request.json<{ revision?: unknown }>();
@@ -111,11 +150,12 @@ export class ChatGptSession {
       verificationUrl: `${this.#issuer}/codex/device`,
       intervalMs: intervalSeconds * 1_000,
       nextPollAt: now + intervalSeconds * 1_000,
-      expiresAt: now + LOGIN_TTL_MS,
+      expiresAt: now + CHATGPT_LOGIN_TTL_MS,
     };
     await this.#state.storage.delete("credential");
+    await this.#state.storage.delete("usage");
     await this.#state.storage.put("pending", pending);
-    await this.#state.storage.setAlarm(now + SESSION_TTL_MS);
+    await this.#state.storage.setAlarm(pending.expiresAt);
     return pending;
   }
 
@@ -138,8 +178,9 @@ export class ChatGptSession {
     if (pending.nextPollAt > now) return publicPending(pending);
     const result = await this.#poll(pending);
     if (!result) return publicPending(pending);
-    await this.#state.storage.put("credential", result);
+    await this.#putCredential(result);
     await this.#state.storage.delete("pending");
+    await this.#state.storage.setAlarm(now + CHATGPT_SESSION_TTL_MS);
     return {
       state: "authenticated",
       accountId: result.accountId,
@@ -188,8 +229,11 @@ export class ChatGptSession {
   }
 
   async #currentCredential(): Promise<StoredCredential | undefined> {
-    let credential = await this.#state.storage.get<StoredCredential>("credential");
-    if (!credential) return undefined;
+    const envelope = await this.#state.storage.get<EncryptedEnvelope>("credential");
+    if (!envelope) return undefined;
+    const opened = await this.#vault.open<StoredCredential>(envelope);
+    let credential = opened.value;
+    if (opened.reseal) await this.#putCredential(credential);
     if (credential.expiresAt !== null && credential.expiresAt <= Date.now() + REFRESH_EARLY_MS) {
       credential = await this.#refresh(credential.revision);
     }
@@ -197,7 +241,8 @@ export class ChatGptSession {
   }
 
   async #refresh(rejectedRevision: number): Promise<StoredCredential> {
-    const current = await this.#state.storage.get<StoredCredential>("credential");
+    const envelope = await this.#state.storage.get<EncryptedEnvelope>("credential");
+    const current = envelope ? (await this.#vault.open<StoredCredential>(envelope)).value : undefined;
     if (!current) throw new Error("ChatGPT credentials are not initialized");
     if (current.revision !== rejectedRevision) return current;
     if (this.#refreshing?.revision === rejectedRevision) return this.#refreshing.promise;
@@ -227,8 +272,47 @@ export class ChatGptSession {
     if (next.accountId !== current.accountId) {
       throw new Error("the refreshed ChatGPT credential changed accounts");
     }
-    await this.#state.storage.put("credential", next);
+    await this.#putCredential(next);
     return next;
+  }
+
+  async #putCredential(credential: StoredCredential): Promise<void> {
+    await this.#state.storage.put("credential", await this.#vault.seal(credential));
+  }
+
+  async #consume(operation: ChatGptOperation, leaseId: unknown): Promise<boolean> {
+    if (operation === "health") return true;
+    const now = Date.now();
+    const usage = await this.#state.storage.get<StoredUsage>("usage") ?? {
+      windows: {},
+      socketLeases: {},
+    };
+    usage.socketLeases = Object.fromEntries(
+      Object.entries(usage.socketLeases).filter(([, expiresAt]) => expiresAt > now),
+    );
+    const current = usage.windows[operation];
+    const window = !current || current.startedAt + USAGE_WINDOW_MS <= now
+      ? { startedAt: now, count: 0 }
+      : current;
+    if (window.count >= OPERATION_LIMITS[operation]) return false;
+    if (operation === "socket") {
+      if (!isLeaseId(leaseId) || Object.keys(usage.socketLeases).length >= MAX_ACTIVE_SOCKETS) {
+        return false;
+      }
+      usage.socketLeases[leaseId] = now + SOCKET_LEASE_MS;
+    }
+    window.count += 1;
+    usage.windows[operation] = window;
+    await this.#state.storage.put("usage", usage);
+    return true;
+  }
+
+  async #releaseLease(leaseId: unknown): Promise<void> {
+    if (!isLeaseId(leaseId)) return;
+    const usage = await this.#state.storage.get<StoredUsage>("usage");
+    if (!usage || !(leaseId in usage.socketLeases)) return;
+    delete usage.socketLeases[leaseId];
+    await this.#state.storage.put("usage", usage);
   }
 }
 
@@ -276,6 +360,16 @@ function publicPending(pending: PendingLogin) {
     expiresAt: pending.expiresAt,
     pollAfterMs: Math.max(250, pending.nextPollAt - Date.now()),
   };
+}
+
+function parseOperation(value: unknown): ChatGptOperation | undefined {
+  return value === "health" || value === "socket" || value === "search" || value === "image"
+    ? value
+    : undefined;
+}
+
+function isLeaseId(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9_-]{43}$/.test(value);
 }
 
 function noStoreHeaders() {

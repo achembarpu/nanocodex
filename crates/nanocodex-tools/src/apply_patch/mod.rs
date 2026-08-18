@@ -1,11 +1,14 @@
 use std::{
-    fs,
+    collections::{HashMap, HashSet},
     path::{Path, PathBuf},
 };
 
+#[cfg(not(target_family = "wasm"))]
 use nanocodex_oai_api::tools::ToolDefinition;
+#[cfg(not(target_family = "wasm"))]
 use serde_json::json;
 
+#[cfg(not(target_family = "wasm"))]
 use super::{StandardTool, Tool, ToolContext, ToolInput, ToolOutput, ToolResult};
 
 mod parser;
@@ -14,16 +17,19 @@ mod streaming_parser;
 
 use parser::{Hunk, UpdateFileChunk, parse_patch};
 
+#[cfg(not(target_family = "wasm"))]
 pub(crate) struct ApplyPatchHandler {
     workspace: PathBuf,
 }
 
+#[cfg(not(target_family = "wasm"))]
 impl ApplyPatchHandler {
     pub(crate) const fn new(workspace: PathBuf) -> Self {
         Self { workspace }
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 #[async_trait::async_trait]
 impl Tool for ApplyPatchHandler {
     fn definition(&self) -> ToolDefinition {
@@ -45,6 +51,144 @@ impl Tool for ApplyPatchHandler {
     }
 }
 
+/// One filesystem mutation produced by the canonical Rust patch engine.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PatchOperation {
+    /// Create or replace a UTF-8 file.
+    Write {
+        /// Workspace-relative or absolute patch path.
+        path: PathBuf,
+        /// Complete replacement contents.
+        contents: String,
+    },
+    /// Delete a file.
+    Delete {
+        /// Workspace-relative or absolute patch path.
+        path: PathBuf,
+    },
+}
+
+/// Verified filesystem mutations and the normal `apply_patch` success output.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct PatchPlan {
+    operations: Vec<PatchOperation>,
+    summary: String,
+}
+
+impl PatchPlan {
+    /// Returns the mutations in execution order.
+    #[must_use]
+    pub fn operations(&self) -> &[PatchOperation] {
+        &self.operations
+    }
+
+    /// Returns the canonical model-visible success summary.
+    #[must_use]
+    pub fn summary(&self) -> &str {
+        &self.summary
+    }
+}
+
+/// Returns existing UTF-8 files that must be read before planning a patch.
+///
+/// Files created earlier in the same patch are not returned.
+pub fn required_files(patch: &str) -> Result<Vec<PathBuf>, String> {
+    let hunks = parse(patch)?;
+    let mut produced = HashSet::new();
+    let mut required = Vec::new();
+    let mut retained = HashSet::new();
+    for hunk in hunks {
+        match hunk {
+            Hunk::AddFile { path, .. } => {
+                produced.insert(path);
+            }
+            Hunk::DeleteFile { path } => {
+                produced.remove(&path);
+            }
+            Hunk::UpdateFile {
+                path, move_path, ..
+            } => {
+                if !produced.contains(&path) && retained.insert(path.clone()) {
+                    required.push(path.clone());
+                }
+                produced.remove(&path);
+                produced.insert(move_path.unwrap_or(path));
+            }
+        }
+    }
+    Ok(required)
+}
+
+/// Verifies a patch against its required input files and produces mutations.
+pub fn plan(patch: &str, initial_files: &HashMap<PathBuf, String>) -> Result<PatchPlan, String> {
+    let hunks = parse(patch)?;
+    let mut files = initial_files.clone();
+    let mut operations = Vec::new();
+    let mut added = Vec::new();
+    let mut modified = Vec::new();
+    let mut deleted = Vec::new();
+
+    for hunk in hunks {
+        match hunk {
+            Hunk::AddFile { path, contents } => {
+                files.insert(path.clone(), contents.clone());
+                operations.push(PatchOperation::Write {
+                    path: path.clone(),
+                    contents,
+                });
+                added.push(path);
+            }
+            Hunk::DeleteFile { path } => {
+                files.remove(&path);
+                operations.push(PatchOperation::Delete { path: path.clone() });
+                deleted.push(path);
+            }
+            Hunk::UpdateFile {
+                path,
+                move_path,
+                chunks,
+            } => {
+                let original = files
+                    .get(&path)
+                    .ok_or_else(|| format!("Failed to read file to update {}", path.display()))?;
+                let updated = apply_chunks(original, &chunks, &path)?;
+                if let Some(destination) = move_path {
+                    files.remove(&path);
+                    files.insert(destination.clone(), updated.clone());
+                    operations.push(PatchOperation::Write {
+                        path: destination.clone(),
+                        contents: updated,
+                    });
+                    operations.push(PatchOperation::Delete { path });
+                    modified.push(destination);
+                } else {
+                    files.insert(path.clone(), updated.clone());
+                    operations.push(PatchOperation::Write {
+                        path: path.clone(),
+                        contents: updated,
+                    });
+                    modified.push(path);
+                }
+            }
+        }
+    }
+
+    let mut summary = String::from("Success. Updated the following files:\n");
+    for path in &added {
+        push_summary_line(&mut summary, 'A', path);
+    }
+    for path in &modified {
+        push_summary_line(&mut summary, 'M', path);
+    }
+    for path in &deleted {
+        push_summary_line(&mut summary, 'D', path);
+    }
+    Ok(PatchPlan {
+        operations,
+        summary,
+    })
+}
+
 #[derive(Debug, PartialEq)]
 struct ApplyPatchArgs {
     patch: String,
@@ -53,7 +197,37 @@ struct ApplyPatchArgs {
     environment_id: Option<String>,
 }
 
+#[cfg(not(target_family = "wasm"))]
 pub(super) fn apply(patch: &str, workspace: &Path) -> Result<String, String> {
+    let mut initial_files = HashMap::new();
+    for path in required_files(patch)? {
+        let source = resolve(workspace, &path);
+        let contents = std::fs::read_to_string(&source).map_err(|error| {
+            format!(
+                "Failed to read file to update {}: {error}",
+                source.display()
+            )
+        })?;
+        initial_files.insert(path, contents);
+    }
+    let plan = plan(patch, &initial_files)?;
+    for operation in plan.operations() {
+        match operation {
+            PatchOperation::Write { path, contents } => {
+                write_file(&resolve(workspace, path), contents.as_bytes())?;
+            }
+            PatchOperation::Delete { path } => {
+                let target = resolve(workspace, path);
+                std::fs::remove_file(&target).map_err(|error| {
+                    format!("Failed to delete file {}: {error}", target.display())
+                })?;
+            }
+        }
+    }
+    Ok(plan.summary().to_owned())
+}
+
+fn parse(patch: &str) -> Result<Vec<Hunk>, String> {
     let ApplyPatchArgs {
         hunks,
         patch: _,
@@ -63,65 +237,7 @@ pub(super) fn apply(patch: &str, workspace: &Path) -> Result<String, String> {
     if hunks.is_empty() {
         return Err("No files were modified.".to_owned());
     }
-
-    let mut added = Vec::new();
-    let mut modified = Vec::new();
-    let mut deleted = Vec::new();
-
-    for hunk in hunks {
-        let affected_path = hunk.path().to_path_buf();
-        match hunk {
-            Hunk::AddFile { path, contents } => {
-                let target = resolve(workspace, &path);
-                write_file(&target, contents.as_bytes())?;
-                added.push(affected_path);
-            }
-            Hunk::DeleteFile { path } => {
-                let target = resolve(workspace, &path);
-                fs::remove_file(&target).map_err(|error| {
-                    format!("Failed to delete file {}: {error}", target.display())
-                })?;
-                deleted.push(affected_path);
-            }
-            Hunk::UpdateFile {
-                path,
-                move_path,
-                chunks,
-            } => {
-                let source = resolve(workspace, &path);
-                let original = fs::read_to_string(&source).map_err(|error| {
-                    format!(
-                        "Failed to read file to update {}: {error}",
-                        source.display()
-                    )
-                })?;
-                let updated = apply_chunks(&original, &chunks, &source)?;
-                if let Some(move_path) = move_path {
-                    let destination = resolve(workspace, &move_path);
-                    write_file(&destination, updated.as_bytes())?;
-                    fs::remove_file(&source).map_err(|error| {
-                        format!("Failed to remove original {}: {error}", source.display())
-                    })?;
-                    modified.push(affected_path);
-                } else {
-                    write_file(&source, updated.as_bytes())?;
-                    modified.push(affected_path);
-                }
-            }
-        }
-    }
-
-    let mut summary = String::from("Success. Updated the following files:\n");
-    for path in added {
-        push_summary_line(&mut summary, 'A', &path);
-    }
-    for path in modified {
-        push_summary_line(&mut summary, 'M', &path);
-    }
-    for path in deleted {
-        push_summary_line(&mut summary, 'D', &path);
-    }
-    Ok(summary)
+    Ok(hunks)
 }
 
 fn apply_chunks(original: &str, chunks: &[UpdateFileChunk], path: &Path) -> Result<String, String> {
@@ -200,6 +316,7 @@ fn apply_chunks(original: &str, chunks: &[UpdateFileChunk], path: &Path) -> Resu
     Ok(original_lines.join("\n"))
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn resolve(workspace: &Path, path: &Path) -> PathBuf {
     if path.is_absolute() {
         path.to_owned()
@@ -208,16 +325,17 @@ fn resolve(workspace: &Path, path: &Path) -> PathBuf {
     }
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn write_file(path: &Path, contents: &[u8]) -> Result<(), String> {
     if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent).map_err(|error| {
+        std::fs::create_dir_all(parent).map_err(|error| {
             format!(
                 "Failed to create parent directories for {}: {error}",
                 path.display()
             )
         })?;
     }
-    fs::write(path, contents)
+    std::fs::write(path, contents)
         .map_err(|error| format!("Failed to write file {}: {error}", path.display()))
 }
 

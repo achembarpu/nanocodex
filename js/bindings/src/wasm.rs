@@ -1,4 +1,4 @@
-use std::{cell::RefCell, rc::Rc};
+use std::{cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc};
 
 use js_sys::Promise;
 use nanocodex::{
@@ -15,6 +15,7 @@ use nanocodex::{
             CodeModeExecution, CodeModeHost, CodeModeHostError, HostFuture, HostedToolMode,
             HostedTools,
         },
+        standard::StandardTool,
     },
 };
 use serde::Deserialize;
@@ -48,6 +49,19 @@ extern "C" {
 
     #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = toolDefinitions)]
     fn host_tool_definitions(session_id: &str) -> Result<String, JsValue>;
+
+    #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = readWorkspaceFile)]
+    fn host_read_workspace_file(path: &str, session_id: &str) -> Result<Promise, JsValue>;
+
+    #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = writeWorkspaceFile)]
+    fn host_write_workspace_file(
+        path: &str,
+        contents: &str,
+        session_id: &str,
+    ) -> Result<Promise, JsValue>;
+
+    #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = removeWorkspaceFile)]
+    fn host_remove_workspace_file(path: &str, session_id: &str) -> Result<Promise, JsValue>;
 }
 
 struct JavaScriptCodeModeHost {
@@ -74,11 +88,26 @@ impl CodeModeHost for JavaScriptCodeModeHost {
     fn tool_definitions(&self, session_id: &str) -> Result<Vec<ToolDefinition>, CodeModeHostError> {
         let encoded = host_tool_definitions(session_id)
             .map_err(|error| CodeModeHostError::new(host_error_message(&error)))?;
-        serde_json::from_str(&encoded).map_err(|error| {
-            CodeModeHostError::new(format!(
-                "JavaScript Code Mode host returned invalid tool definitions: {error}"
-            ))
-        })
+        let mut definitions =
+            serde_json::from_str::<Vec<ToolDefinition>>(&encoded).map_err(|error| {
+                CodeModeHostError::new(format!(
+                    "JavaScript Code Mode host returned invalid tool definitions: {error}"
+                ))
+            })?;
+        for definition in &mut definitions {
+            let standard = match definition.name() {
+                name if name == StandardTool::ExecCommand.name() => Some(StandardTool::ExecCommand),
+                name if name == StandardTool::WriteStdin.name() => Some(StandardTool::WriteStdin),
+                name if name == StandardTool::UpdatePlan.name() => Some(StandardTool::UpdatePlan),
+                name if name == StandardTool::ApplyPatch.name() => Some(StandardTool::ApplyPatch),
+                name if name == StandardTool::ViewImage.name() => Some(StandardTool::ViewImage),
+                _ => None,
+            };
+            if let Some(standard) = standard {
+                *definition = standard.definition();
+            }
+        }
+        Ok(definitions)
     }
 
     fn execute<'a>(
@@ -110,6 +139,9 @@ impl CodeModeHost for JavaScriptCodeModeHost {
         context: ToolContext<'a>,
     ) -> HostFuture<'a, Result<ToolOutput, CodeModeHostError>> {
         Box::pin(async move {
+            if name == StandardTool::ApplyPatch.name() {
+                return execute_browser_apply_patch(input, context.session_id()).await;
+            }
             let input = match input {
                 ToolInput::Function(input) => input.get().to_owned(),
                 ToolInput::Freeform(input) => serde_json::to_string(&input).map_err(|error| {
@@ -134,6 +166,48 @@ impl CodeModeHost for JavaScriptCodeModeHost {
             })
         })
     }
+}
+
+async fn execute_browser_apply_patch(
+    input: ToolInput,
+    session_id: &str,
+) -> Result<ToolOutput, CodeModeHostError> {
+    use nanocodex::tools::apply_patch::{PatchOperation, plan, required_files};
+
+    let patch = input
+        .into_freeform()
+        .map_err(|error| CodeModeHostError::new(format!("invalid apply_patch input: {error}")))?;
+    let mut files = HashMap::new();
+    for path in required_files(&patch).map_err(CodeModeHostError::new)? {
+        let display = path.to_string_lossy().into_owned();
+        let promise = host_read_workspace_file(&display, session_id)
+            .map_err(|error| CodeModeHostError::new(host_error_message(&error)))?;
+        let value = JsFuture::from(promise)
+            .await
+            .map_err(|error| CodeModeHostError::new(host_error_message(&error)))?;
+        let contents = value.as_string().ok_or_else(|| {
+            CodeModeHostError::new(format!(
+                "browser workspace returned non-text data for {display}"
+            ))
+        })?;
+        files.insert(PathBuf::from(display), contents);
+    }
+    let plan = plan(&patch, &files).map_err(CodeModeHostError::new)?;
+    for operation in plan.operations() {
+        let promise = match operation {
+            PatchOperation::Write { path, contents } => {
+                host_write_workspace_file(&path.to_string_lossy(), contents, session_id)
+            }
+            PatchOperation::Delete { path } => {
+                host_remove_workspace_file(&path.to_string_lossy(), session_id)
+            }
+        }
+        .map_err(|error| CodeModeHostError::new(host_error_message(&error)))?;
+        JsFuture::from(promise)
+            .await
+            .map_err(|error| CodeModeHostError::new(host_error_message(&error)))?;
+    }
+    Ok(ToolOutput::text(plan.summary().to_owned()).with_structured_result(serde_json::json!({})))
 }
 
 #[derive(Deserialize)]

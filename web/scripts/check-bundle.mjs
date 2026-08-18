@@ -6,19 +6,23 @@ import { gzipSync } from "node:zlib";
 
 const budgets = Object.freeze({
   initialJavaScriptFiles: 2,
-  initialJavaScript: 240_000,
-  initialJavaScriptGzip: 78_000,
+  initialJavaScript: 260_000,
+  initialJavaScriptGzip: 83_000,
   initialCssFiles: 2,
   initialCss: 60_000,
   initialCssGzip: 12_000,
   agentJavaScript: 830_000,
   // OPFS, artifacts, voice routing, and the paid MCP seam add lazy Worker edges.
-  agentWorker: 48_500,
-  agentWorkerGzip: 15_800,
+  agentWorker: 51_000,
+  agentWorkerGzip: 16_500,
+  // just-bash and its built-in Unix command set stay behind Agent startup.
+  browserShellJavaScript: 1_600_000,
+  browserShellJavaScriptGzip: 450_000,
   artifactCoreJavaScript: 7_000,
   artifactCoreJavaScriptGzip: 2_800,
-  wasm: 2_400_000,
-  wasmGzip: 510_000,
+  // Includes the canonical Rust apply_patch grammar and planner in browser WASM.
+  wasm: 2_550_000,
+  wasmGzip: 550_000,
   mppControlsJavaScript: 1_300_000,
   workerTempoJavaScript: 800_000,
 });
@@ -123,9 +127,15 @@ for (const marker of [
 }
 
 const html = await readFile(join(clientDirectory, "index.html"), "utf8");
+const headers = await readFile(join(clientDirectory, "_headers"), "utf8");
 assert(
   !html.includes(mpp.file),
   "index.html must not preload the opt-in MPP controls",
+);
+assert.match(
+  headers,
+  /\/assets\/\*[\s\S]*Cache-Control: public, max-age=31536000, immutable/,
+  "hashed browser assets must retain immutable browser caching",
 );
 
 const assets = await readdir(assetsDirectory);
@@ -141,6 +151,22 @@ within(
   "OpenAI Agent Worker gzip",
   worker.gzipBytes,
   budgets.agentWorkerGzip,
+);
+
+const browserShellImport = workerSource.match(
+  /import\((?:`|'|")\.\/(browserShell-[^`'"]+\.js)(?:`|'|")\)/,
+);
+assert(browserShellImport, "the Agent Worker must lazy-load the browser shell");
+const browserShell = await fileStats([`assets/${browserShellImport[1]}`]);
+within(
+  "Browser shell JavaScript",
+  browserShell.bytes,
+  budgets.browserShellJavaScript,
+);
+within(
+  "Browser shell JavaScript gzip",
+  browserShell.gzipBytes,
+  budgets.browserShellJavaScriptGzip,
 );
 
 const tempoImport = workerSource.match(

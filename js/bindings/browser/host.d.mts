@@ -47,6 +47,7 @@ export function createBrowserHost(options?: {
     request: BrowserWebSocketRequest,
   ) => WebSocket | BrowserWebSocketConnection | Promise<WebSocket | BrowserWebSocketConnection>;
   filesystem?: Workspace;
+  filesystemTools?: boolean;
   onEvent?: (eventJson: string) => void;
   tools?: ToolMap;
   mpp?: MppSession;

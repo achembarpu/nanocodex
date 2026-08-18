@@ -37,6 +37,8 @@ export declare namespace create {
     ): WebSocket | BrowserWebSocketConnection | Promise<WebSocket | BrowserWebSocketConnection>;
     /** Caller-owned persistent filesystem mounted through standard workspace tools. */
     filesystem?: Workspace | undefined;
+    /** Disable the legacy list/read/write workspace functions when a shell owns filesystem access. */
+    filesystemTools?: boolean | undefined;
     module?: unknown;
     /** Optional CSP-compatible Code Mode evaluator, such as createQuickJsEvaluator(). */
     codeEvaluator?: CodeEvaluator | undefined;

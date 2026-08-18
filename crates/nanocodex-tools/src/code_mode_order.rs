@@ -21,7 +21,6 @@ pub(crate) fn sort_definitions(definitions: &mut [ToolDefinition]) {
 
 /// Matches Codex's direct Code Mode prefix: shell, plan, patch, image view,
 /// then application and namespaced tools in their registration order.
-#[cfg(not(target_family = "wasm"))]
 pub(crate) fn sort_direct_definitions(definitions: &mut [ToolDefinition]) {
     definitions.sort_by_key(|definition| match definition.name() {
         "exec_command" => 0,

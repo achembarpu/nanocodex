@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { ChatGptSession } from "./subscriptionAuth.ts";
+import {
+  CHATGPT_LOGIN_TTL_MS,
+  CHATGPT_SESSION_TTL_MS,
+  ChatGptSession,
+} from "./subscriptionAuth.ts";
+
+const TEST_KEY = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY";
 
 class MemoryStorage {
   readonly values = new Map<string, unknown>();
@@ -76,8 +82,15 @@ test("device login stores and rotates ChatGPT tokens without exposing them in pu
 
   try {
     const storage = new MemoryStorage();
-    const state = { storage } as unknown as DurableObjectState;
-    const session = new ChatGptSession(state, { CHATGPT_ISSUER: "https://auth.openai.test/" });
+    const state = {
+      id: { toString: () => "session-id" },
+      storage,
+    } as unknown as DurableObjectState;
+    const session = new ChatGptSession(state, {
+      CHATGPT_ISSUER: "https://auth.openai.test/",
+      ENVIRONMENT: "test",
+      SESSION_CREDENTIAL_KEY: TEST_KEY,
+    });
 
     const started = await session.fetch(new Request("https://session.test/start", { method: "POST" }));
     assert.deepEqual(await started.json(), {
@@ -88,7 +101,7 @@ test("device login stores and rotates ChatGPT tokens without exposing them in pu
       pollAfterMs: 1_000,
     });
     assert.equal(requests.length, 1);
-    assert.equal(storage.alarm, now + 30 * 24 * 60 * 60_000);
+    assert.equal(storage.alarm, now + CHATGPT_LOGIN_TTL_MS);
 
     const pending = await session.fetch(new Request("https://session.test/status"));
     assert.equal((await pending.json() as { state: string }).state, "pending");
@@ -102,13 +115,61 @@ test("device login stores and rotates ChatGPT tokens without exposing them in pu
     assert.equal("accessToken" in publicStatus, false);
     assert.equal("refreshToken" in publicStatus, false);
 
-    const internal = await session.fetch(new Request("https://session.test/credential", { method: "POST" }));
+    assert.equal(storage.alarm, now + CHATGPT_SESSION_TTL_MS);
+
+    const internal = await session.fetch(new Request("https://session.test/credential", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ operation: "health" }),
+    }));
     const credential = await internal.json() as Record<string, unknown>;
     assert.equal(credential.kind, "chatgpt");
     assert.equal(credential.accountId, "account-1");
     assert.equal(credential.fedramp, true);
     assert.equal(credential.revision, 0);
     assert.equal("refreshToken" in credential, false);
+
+    for (let requestIndex = 0; requestIndex < 4; requestIndex += 1) {
+      const allowed = await session.fetch(new Request("https://session.test/credential", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ operation: "image" }),
+      }));
+      assert.equal(allowed.status, 200);
+    }
+    const imageLimited = await session.fetch(new Request("https://session.test/credential", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ operation: "image" }),
+    }));
+    assert.equal(imageLimited.status, 429);
+    assert.equal(imageLimited.headers.get("retry-after"), "60");
+
+    for (let socketIndex = 0; socketIndex < 3; socketIndex += 1) {
+      const allowed = await session.fetch(new Request("https://session.test/credential", {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ operation: "socket", leaseId: String(socketIndex).repeat(43) }),
+      }));
+      assert.equal(allowed.status, 200);
+    }
+    const socketLimited = await session.fetch(new Request("https://session.test/credential", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ operation: "socket", leaseId: "z".repeat(43) }),
+    }));
+    assert.equal(socketLimited.status, 429);
+    await session.fetch(new Request("https://session.test/lease", {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ leaseId: "0".repeat(43) }),
+    }));
+    const socketAfterRelease = await session.fetch(new Request("https://session.test/credential", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ operation: "socket", leaseId: "z".repeat(43) }),
+    }));
+    assert.equal(socketAfterRelease.status, 200);
 
     const recovered = await session.fetch(new Request("https://session.test/recover", {
       method: "POST",
@@ -118,7 +179,8 @@ test("device login stores and rotates ChatGPT tokens without exposing them in pu
     const rotated = await recovered.json() as Record<string, unknown>;
     assert.equal(rotated.revision, 1);
     assert.equal(rotated.accountId, "account-1");
-    assert.equal((storage.values.get("credential") as { refreshToken: string }).refreshToken, "refresh-2");
+    const stored = JSON.stringify(storage.values.get("credential"));
+    assert.doesNotMatch(stored, /refresh-2|refresh-1|account-1/);
   } finally {
     globalThis.fetch = originalFetch;
     Date.now = originalNow;

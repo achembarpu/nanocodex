@@ -3,7 +3,8 @@ import react from "@vitejs/plugin-react";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 import mkcert from "vite-plugin-mkcert";
-import { chatGptDevProxy } from "./vite/chatGptDevProxy";
+import { chatGptDevProxy } from "./vite/chatGptDevProxy.ts";
+import { repositoryDevServer } from "./vite/repositoryDevServer.ts";
 
 const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
 
@@ -11,12 +12,28 @@ export default defineConfig({
   // Tempo Wallet embeds in an iframe only on HTTPS. A trusted local
   // certificate keeps the development flow identical to production and lets
   // the hosted wallet perform cross-origin passkey ceremonies in the embed.
-  plugins: [mkcert(), react(), chatGptDevProxy(), cloudflare()],
+  plugins: [
+    mkcert(),
+    react(),
+    repositoryDevServer(),
+    chatGptDevProxy(),
+    cloudflare(),
+  ],
   build: {
     // The production graph gate consumes this manifest so it measures complete
     // static import closures instead of whichever output chunk happens to keep
     // the entry-point name.
     manifest: true,
+    rolldownOptions: {
+      output: {
+        // Rolldown otherwise promotes tiny helpers shared with lazy routes into
+        // separate startup requests. Merge sub-10 KiB chunks while preserving
+        // the large route boundaries that keep Agent and MPP code off startup.
+        codeSplitting: {
+          groups: [{ name: "initial-deps", tags: ["$initial"] }],
+        },
+      },
+    },
   },
   resolve: {
     preserveSymlinks: true,
@@ -37,7 +54,7 @@ export default defineConfig({
       "streamdown",
     ],
   },
-  // The local nanocodex package is regenerated immediately before Vite starts.
+  // The local nanocodex package is validated immediately before Vite starts.
   // Its wasm-bindgen glue and WASM binary are one indivisible artifact, so they
   // must never be split between Vite's persistent dependency cache and the live
   // package. Serving the package directly keeps both the normal and Tempo MPP

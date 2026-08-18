@@ -28,6 +28,8 @@ import type { CodeBrowserHandle } from "./CodeBrowser";
 import type { CommitCodeStreamHandle } from "./CommitCodeStream";
 import { fuzzyScore } from "./fuzzy";
 import { pathForSurface, surfaceFromUrl, type Surface } from "./navigation";
+import type { HarnessCommit, RepositorySnapshot } from "./threadRepositorySnapshot";
+import { getBrowserThread } from "./workspace";
 
 const Evals = lazy(() =>
   import("./Evals").then((module) => ({ default: module.Evals }))
@@ -59,67 +61,8 @@ const VirtualCommitList = lazy(() =>
 export type Theme = "light" | "dark";
 type Scope = "all" | "eval" | "fix" | "docs" | "perf";
 type ProposalState = "ready" | "submitting" | "payment-required";
-type RepositoryFile = {
-  path: string;
-  mode: string;
-  objectId: string;
-  size: number | null;
-  contentUrl: string | null;
-};
-
-type SerializedTreeInput = {
-  paths: string[];
-  preparedPaths: Array<{
-    basename: string;
-    isDirectory: boolean;
-    path: string;
-    segments: string[];
-  }>;
-};
-
-export type ChangedFile = {
-  path: string;
-  previousPath: string | null;
-  status: string;
-  additions: number | null;
-  deletions: number | null;
-};
-
-export type HarnessCommit = {
-  hash: string;
-  shortHash: string;
-  parents: string[];
-  author: string;
-  authoredAt: string;
-  refs: string[];
-  subject: string;
-  body: string;
-  files: ChangedFile[];
-  stats: {
-    files: number;
-    additions: number;
-    deletions: number;
-  };
-};
-
-type RepositorySnapshot = {
-  repository: {
-    fullName: string;
-    branch: string;
-    head: string;
-    totalCommits: number;
-    dirty: boolean;
-    dirtyCount: number;
-  };
-  generatedAt: string;
-  commitPatchUrl: string;
-  tree: RepositoryFile[];
-  treeInput: SerializedTreeInput;
-  commits: HarnessCommit[];
-};
 
 const emptyCommits: HarnessCommit[] = [];
-let repositorySnapshotPromise: Promise<RepositorySnapshot> | undefined;
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
@@ -131,13 +74,8 @@ const queryClient = new QueryClient({
 });
 
 function loadRepositorySnapshot(): Promise<RepositorySnapshot> {
-  repositorySnapshotPromise ??= import("./data/harness-repository.json").then(
-    (module) => module.default as RepositorySnapshot,
-  ).catch((error) => {
-    repositorySnapshotPromise = undefined;
-    throw error;
-  });
-  return repositorySnapshotPromise;
+  return import("./threadRepositorySnapshot")
+    .then((module) => module.loadThreadRepositorySnapshot());
 }
 
 const scopes: Array<{ id: Scope; label: string }> = [
@@ -181,11 +119,13 @@ const installCommand =
   "curl -fsSL https://nanocodex.paradigm.xyz | bash";
 
 function RepositorySurfaceLoading({ failed }: { failed: boolean }) {
+  if (!failed) return null;
   return (
     <section className="requests-empty page-grid" aria-live="polite">
       <GitBranch aria-hidden="true" />
       <p className="eyebrow">Repository</p>
-      <h1>{failed ? "Repository data unavailable." : "Loading repository…"}</h1>
+      <h1>Thread repository unavailable.</h1>
+      <p>Return to the agent workspace and retry the thread pull.</p>
     </section>
   );
 }
@@ -201,6 +141,7 @@ export function NanocodexApp() {
 function NanocodexShell() {
   const location = useLocation();
   const navigate = useNavigate();
+  const thread = useMemo(getBrowserThread, []);
   const [theme, setTheme] = useState<Theme>(() => {
     const initialTheme = document.documentElement.dataset.theme;
     if (initialTheme === "dark" || initialTheme === "light")
@@ -228,6 +169,9 @@ function NanocodexShell() {
   const headerCenterRef = useRef<HTMLDivElement>(null);
   const codeBrowserRef = useRef<CodeBrowserHandle>(null);
   const commitStreamRef = useRef<CommitCodeStreamHandle>(null);
+  const snapshotRef = useRef<RepositorySnapshot | undefined>(undefined);
+  const repositoryRequestId = useRef(0);
+  snapshotRef.current = snapshot;
 
   const commits = snapshot?.commits ?? emptyCommits;
   const selected = useMemo(
@@ -297,26 +241,54 @@ function NanocodexShell() {
     [commits, queryTokens, searchOpen],
   );
 
-  useEffect(() => {
-    const needsRepository =
-      surface === "code" || surface === "commits" || proposalOpen;
-    if (!needsRepository || snapshot) return;
-    let active = true;
+  const refreshRepository = useCallback(() => {
+    const requestId = ++repositoryRequestId.current;
     setRepositoryLoadError(false);
     void loadRepositorySnapshot().then(
       (loaded) => {
-        if (!active) return;
-        setSnapshot(loaded);
-        setSelectedHash((current) => current ?? loaded.repository.head);
+        if (repositoryRequestId.current !== requestId) {
+          loaded.release();
+          return;
+        }
+        setSnapshot((current) => {
+          current?.release();
+          return loaded;
+        });
+        setSelectedHash((current) => current && loaded.commits.some(({ hash }) => hash === current)
+          ? current
+          : loaded.repository.head);
       },
       () => {
-        if (active) setRepositoryLoadError(true);
+        if (repositoryRequestId.current === requestId) setRepositoryLoadError(true);
       },
     );
+  }, []);
+
+  useEffect(() => {
+    const needsRepository =
+      surface === "code" || surface === "commits" || proposalOpen;
+    if (needsRepository && !snapshot) refreshRepository();
+  }, [proposalOpen, refreshRepository, snapshot, surface]);
+
+  useEffect(() => {
+    let unsubscribe: (() => void) | undefined;
+    let active = true;
+    void import("./threadGit").then(({ subscribeThreadGitChanges }) => {
+      if (!active) return;
+      unsubscribe = subscribeThreadGitChanges(thread, () => {
+        if (snapshotRef.current) refreshRepository();
+      });
+    });
     return () => {
       active = false;
+      unsubscribe?.();
     };
-  }, [proposalOpen, snapshot, surface]);
+  }, [refreshRepository, thread]);
+
+  useEffect(() => () => {
+    repositoryRequestId.current++;
+    snapshotRef.current?.release();
+  }, []);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -326,9 +298,13 @@ function NanocodexShell() {
     localStorage.setItem("nanocodex-theme", theme);
   }, [theme]);
 
+  const threadSurfacePath = useCallback(
+    (nextSurface: Surface) => `${pathForSurface(nextSurface)}?thread=${thread.id}`,
+    [thread.id],
+  );
   const navigateToSurface = useCallback((nextSurface: Surface) => {
-    navigate(pathForSurface(nextSurface));
-  }, [navigate]);
+    navigate(threadSurfacePath(nextSurface));
+  }, [navigate, threadSurfacePath]);
 
   useLayoutEffect(() => {
     const headerCenter = headerCenterRef.current;
@@ -472,7 +448,7 @@ function NanocodexShell() {
         <header className="site-header">
           <a
             className="wordmark"
-            href="/"
+            href={threadSurfacePath("home")}
             aria-label="nanocodex home"
             onClick={(event) => {
               event.preventDefault();
@@ -485,7 +461,7 @@ function NanocodexShell() {
             <nav className="surface-switch" aria-label="Repository surfaces">
               <a
                 className={surface === "code" ? "is-active" : ""}
-                href={pathForSurface("code")}
+                href={threadSurfacePath("code")}
                 onClick={(event) => {
                   event.preventDefault();
                   navigateToSurface("code");
@@ -495,7 +471,7 @@ function NanocodexShell() {
               </a>
               <a
                 className={surface === "commits" ? "is-active" : ""}
-                href={pathForSurface("commits")}
+                href={threadSurfacePath("commits")}
                 onClick={(event) => {
                   event.preventDefault();
                   navigateToSurface("commits");
@@ -505,7 +481,7 @@ function NanocodexShell() {
               </a>
               <a
                 className={surface === "requests" ? "is-active" : ""}
-                href={pathForSurface("requests")}
+                href={threadSurfacePath("requests")}
                 onClick={(event) => {
                   event.preventDefault();
                   navigateToSurface("requests");
@@ -515,7 +491,7 @@ function NanocodexShell() {
               </a>
               <a
                 className={surface === "evals" ? "is-active" : ""}
-                href={pathForSurface("evals")}
+                href={threadSurfacePath("evals")}
                 onClick={(event) => {
                   event.preventDefault();
                   navigateToSurface("evals");
@@ -705,11 +681,11 @@ function NanocodexShell() {
           ) : surface === "code" ? snapshot ? (
             <Suspense fallback={null}>
               <PierreWorkerProvider>
-                <CodeBrowser
-                  ref={codeBrowserRef}
-                  files={snapshot.tree}
-                  treeInput={snapshot.treeInput}
-                  branch={snapshot.repository.branch}
+                  <CodeBrowser
+                    key={snapshot.repository.head}
+                    ref={codeBrowserRef}
+                    files={snapshot.tree}
+                    branch={snapshot.repository.branch}
                   head={snapshot.repository.head}
                   theme={theme}
                 />
@@ -928,11 +904,13 @@ function NanocodexShell() {
               </button>
               <p className="eyebrow">MPP proposal gate · testnet preview</p>
               <h2 id="proposal-title">Propose a change</h2>
-              {!snapshot || !selected ? (
+              {!snapshot ? repositoryLoadError ? (
                 <p className="proposal-intro">
-                  {repositoryLoadError
-                    ? "Repository data is unavailable."
-                    : "Loading repository…"}
+                  The thread repository is unavailable. Return to the agent workspace and retry the pull.
+                </p>
+              ) : null : !selected ? (
+                <p className="proposal-intro">
+                  Commit and push the thread workspace before proposing a change.
                 </p>
               ) : proposalState === "payment-required" ? (
                 <div className="payment-required">

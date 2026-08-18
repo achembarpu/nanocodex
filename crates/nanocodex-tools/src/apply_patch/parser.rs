@@ -32,7 +32,6 @@
 
 use super::ApplyPatchArgs;
 use super::streaming_parser::StreamingPatchParser;
-use std::path::Path;
 use std::path::PathBuf;
 
 use thiserror::Error;
@@ -82,25 +81,6 @@ pub enum Hunk {
         /// should occur later in the file than the previous chunk.
         chunks: Vec<UpdateFileChunk>,
     },
-}
-
-impl Hunk {
-    /// Returns the path affected by this hunk, using the move destination for rename hunks.
-    pub fn path(&self) -> &Path {
-        match self {
-            Self::AddFile { path, .. } => path,
-            Self::DeleteFile { path } => path,
-            Self::UpdateFile {
-                move_path: Some(path),
-                ..
-            } => path,
-            Self::UpdateFile {
-                path,
-                move_path: None,
-                ..
-            } => path,
-        }
-    }
 }
 
 #[derive(Debug, PartialEq, Clone)]

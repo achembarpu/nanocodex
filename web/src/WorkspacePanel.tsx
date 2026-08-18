@@ -1,11 +1,14 @@
 import {
   ChevronDown,
   ChevronRight,
+  Copy,
   Download,
   File,
   FilePlus,
   Folder,
   FolderPlus,
+  GitBranch,
+  GitPullRequestArrow,
   PanelLeftClose,
   PanelLeftOpen,
   RefreshCw,
@@ -24,7 +27,8 @@ import {
 } from "react";
 import type { Workspace, WorkspaceEntry } from "nanocodex/browser/workspace";
 
-import { openKernelWorkspace } from "./workspace";
+import type { ThreadGitStatus } from "./threadGit";
+import { getBrowserThread, openKernelWorkspace } from "./workspace";
 import {
   buildWorkspaceTree,
   parentWorkspaceDirectory,
@@ -35,7 +39,9 @@ import {
 const decoder = new TextDecoder("utf-8", { fatal: true });
 
 export const WorkspacePanel = memo(function WorkspacePanel() {
+  const thread = useMemo(getBrowserThread, []);
   const [workspace, setWorkspace] = useState<Workspace>();
+  const [gitStatus, setGitStatus] = useState<ThreadGitStatus>();
   const [entries, setEntries] = useState<readonly WorkspaceEntry[]>([]);
   const [selectedPath, setSelectedPath] = useState<string>();
   const [contents, setContents] = useState("");
@@ -46,7 +52,8 @@ export const WorkspacePanel = memo(function WorkspacePanel() {
   const [newName, setNewName] = useState("");
   const [panelOpen, setPanelOpen] = useState(true);
   const [busy, setBusy] = useState(false);
-  const [message, setMessage] = useState("Opening persistent workspace…");
+  const [gitBusy, setGitBusy] = useState(false);
+  const [message, setMessage] = useState("");
   const uploadRef = useRef<HTMLInputElement>(null);
   const selected = entries.find((entry) => entry.path === selectedPath);
   const dirty = selected?.kind === "file"
@@ -57,7 +64,9 @@ export const WorkspacePanel = memo(function WorkspacePanel() {
     if (!nextWorkspace) return;
     try {
       const nextEntries = (await nextWorkspace.list(".", { recursive: true }))
-        .filter((entry) => !entry.path.startsWith(`${nextWorkspace.root}/.nanocodex`));
+        .filter((entry) =>
+          !entry.path.startsWith(`${nextWorkspace.root}/.nanocodex`) &&
+          !entry.path.startsWith(`${nextWorkspace.root}/.git`));
       setEntries(nextEntries);
       setSelectedPath((current) => current && nextEntries.some(({ path }) => path === current)
         ? current
@@ -70,15 +79,18 @@ export const WorkspacePanel = memo(function WorkspacePanel() {
 
   useEffect(() => {
     let active = true;
-    void openKernelWorkspace()
-      .then(async (nextWorkspace) => {
+    void import("./threadGit")
+      .then(({ initializeThreadGit }) => initializeThreadGit(thread))
+      .then(async (nextGitStatus) => {
+        const nextWorkspace = await openKernelWorkspace();
         if (!active) return;
+        setGitStatus(nextGitStatus);
         setWorkspace(nextWorkspace);
         await refresh(nextWorkspace);
       })
       .catch((error) => active && setMessage(errorMessage(error)));
     return () => { active = false; };
-  }, [refresh]);
+  }, [refresh, thread]);
 
   useEffect(() => {
     if (!workspace) return;
@@ -92,6 +104,16 @@ export const WorkspacePanel = memo(function WorkspacePanel() {
       document.removeEventListener("visibilitychange", onVisible);
     };
   }, [refresh, workspace]);
+
+  useEffect(() => {
+    const mobile = window.matchMedia("(max-width: 740px)");
+    const expandOnMobile = () => {
+      if (mobile.matches) setPanelOpen(true);
+    };
+    expandOnMobile();
+    mobile.addEventListener("change", expandOnMobile);
+    return () => mobile.removeEventListener("change", expandOnMobile);
+  }, []);
 
   useEffect(() => {
     if (!workspace || !selected || selected.kind !== "file") {
@@ -143,6 +165,8 @@ export const WorkspacePanel = memo(function WorkspacePanel() {
     try {
       await operation();
       await refresh(workspace);
+      const { threadGitStatus } = await import("./threadGit");
+      setGitStatus(await threadGitStatus(thread));
       setMessage(success);
       return true;
     } catch (error) {
@@ -150,6 +174,57 @@ export const WorkspacePanel = memo(function WorkspacePanel() {
       return false;
     } finally {
       setBusy(false);
+    }
+  };
+
+  const syncGit = async (
+    operation: () => Promise<ThreadGitStatus>,
+    success: string,
+  ) => {
+    if (!workspace || gitBusy) return;
+    setGitBusy(true);
+    try {
+      const next = await operation();
+      setGitStatus(next);
+      await refresh(workspace);
+      setMessage(success);
+    } catch (error) {
+      setMessage(errorMessage(error));
+    } finally {
+      setGitBusy(false);
+    }
+  };
+
+  const push = async () => {
+    await syncGit(
+      async () => {
+        if (dirty && selected?.kind === "file") {
+          await workspace?.writeFile(selected.path, contents);
+          setSavedContents(contents);
+        }
+        const { commitAndPushThread } = await import("./threadGit");
+        return commitAndPushThread(thread, "Update Nanocodex workspace");
+      },
+      "Committed and pushed origin nanocodex.",
+    );
+  };
+
+  const pull = async () => {
+    if ((dirty || gitStatus?.changes.length) && !window.confirm(
+      "Pulling can replace local workspace changes. Continue?",
+    )) return;
+    await syncGit(async () => {
+      const { pullThread } = await import("./threadGit");
+      return pullThread(thread);
+    }, "Pulled origin nanocodex into OPFS.");
+  };
+
+  const copyThreadLink = async () => {
+    try {
+      await navigator.clipboard.writeText(thread.shareUrl);
+      setMessage("Copied this thread's workspace link.");
+    } catch (error) {
+      setMessage(errorMessage(error));
     }
   };
 
@@ -230,6 +305,24 @@ export const WorkspacePanel = memo(function WorkspacePanel() {
 
       {panelOpen ? (
         <>
+          <div className="workspace-git" aria-label="Thread Git repository">
+            <span title={thread.remoteUrl}>
+              <GitBranch aria-hidden="true" />
+              {thread.branch}
+            </span>
+            <small>{gitStatus?.changes.length
+              ? `${gitStatus.changes.length} changed`
+              : gitStatus?.head ? gitStatus.head.slice(0, 7) : "local"}</small>
+            <WorkspaceAction label="Pull origin nanocodex" disabled={gitBusy} onClick={() => void pull()}>
+              <GitPullRequestArrow />
+            </WorkspaceAction>
+            <WorkspaceAction label="Commit and push origin nanocodex" disabled={gitBusy} onClick={() => void push()}>
+              <Upload />
+            </WorkspaceAction>
+            <WorkspaceAction label="Copy thread workspace link" onClick={() => void copyThreadLink()}>
+              <Copy />
+            </WorkspaceAction>
+          </div>
           <input
             ref={uploadRef}
             className="workspace-file-input"

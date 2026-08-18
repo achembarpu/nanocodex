@@ -32,6 +32,7 @@ export type AgentControllerPayment = {
 export type AgentControllerStart = {
   thinking: Thinking;
   reasoningMode: ReasoningMode;
+  threadId?: string;
   transport: "openai" | "chatgpt" | "mpp";
   accessKeyAddress?: Address;
   payerAddress?: Address;
@@ -108,6 +109,7 @@ export function createAgentController({
         await start({
           thinking: message.thinking,
           reasoningMode: message.reasoningMode,
+          ...(message.threadId ? { threadId: message.threadId } : {}),
           transport: message.transport,
           ...(message.transport === "mpp"
             ? { accessKeyAddress: message.accessKeyAddress }

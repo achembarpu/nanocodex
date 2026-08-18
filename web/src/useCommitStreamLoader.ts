@@ -31,7 +31,7 @@ import {
   getStreamedPatchMetadata,
   streamGitPatchFiles,
 } from "./streamGitPatchFiles";
-import type { HarnessCommit } from "./NanocodexApp";
+import type { HarnessCommit } from "./threadRepositorySnapshot";
 
 const STREAM_PUBLISH_INTERVAL_MS = 100;
 const STREAM_INITIAL_PUBLISH_INTERVAL_MS = 500;

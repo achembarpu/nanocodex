@@ -9,6 +9,7 @@ and evaluation record legible.
 - Vite + React
 - Cloudflare Vite plugin and Workers runtime
 - Wrangler for preview and deployment
+- just-bash over the thread's OPFS filesystem, with browser `git` and `gh` compatibility commands
 - Pierre Trees and Diffs for the file tree, source viewer, and the single virtualized commit stream
 - TanStack Virtual for the commit quick-jump and evaluation indexes
 - Derived job, trial, trajectory, and verifier views
@@ -35,52 +36,69 @@ history, credential policy, or model-loop state.
 The local Worker and Vite client run together at `https://localhost:5173`, using
 the same Cloudflare Vite-plugin layout as Tempo's React MPP examples.
 
-`npm run dev` and `npm run build` first regenerate
-`src/data/harness-repository.json` from the parent repository. Override the source or
-history depth with `NANOCODEX_REPO` and `NANOCODEX_COMMIT_LIMIT`. The default index
-covers the complete repository history and stores it as one streamed patch
-asset. The commit view parses complete files in bounded batches and appends
-them to one Pierre CodeView, yielding between batches so scrolling stays
-responsive.
+In development, Vite reads repository metadata from Git, serves working-tree
+files on demand, and streams history directly from Git only when the commit
+view opens. Startup does not generate or rewrite repository blobs. Set
+`NANOCODEX_REPO` to point the development view at another checkout.
+
+`npm run build` does not inspect Git or generate repository assets. Production
+repository data is published separately to R2 by `npm run
+publish:repository`. The publisher derives one coherent generation from a Git
+commit, uploads only previously unseen source blobs and commit patches, uploads
+one complete clone pack for exactly the advertised refs, and stores new Git
+objects once in bounded immutable pack-entry shards. The Worker streams the
+complete pack for a fresh clone, but uses the object graph and reusable shards
+to send only the closure missing from an incremental or shallow fetch. Shards
+are compacted after a bounded number of generations. Publication advances one
+Durable Object pointer only after every referenced R2 object exists, so a failed
+or concurrent publisher cannot expose mixed tree, history, or Git data. The
+commit view loads only the selected patch and parses it in bounded batches,
+yielding between batches so scrolling stays responsive.
+
+For this single-repository deployment, R2 owns immutable bytes and one Durable
+Object owns the current generation with compare-and-swap publication. D1 is
+deliberately absent: there is no repository registry, account model, search
+index, or relational query to justify it. Publishing requires the same
+`GIT_MIRROR_TOKEN` secret on the Worker and `NANOCODEX_GIT_TOKEN` in the
+publisher environment:
+
+```bash
+NANOCODEX_GIT_ORIGIN=https://nanocodex.me-7fb.workers.dev \
+NANOCODEX_GIT_TOKEN=... \
+npm run publish:repository
+```
+
+Production serves the website indexes, immutable file and patch objects, and a
+read-only Git protocol-v2 endpoint from that publication. Clone the mirror with
+`git clone https://nanocodex.me-7fb.workers.dev/git`. GitHub remains the write
+remote; a workflow publishes each new `master` commit to Cloudflare after it is
+pushed.
+
+Each browser thread owns an OPFS working tree and an `origin` Cloudflare Git
+remote on branch `nanocodex`. The Files and Commits surfaces read that thread's
+actual Git objects in the browser; file blobs and commit patches are generated
+on demand and released when the view refreshes. Push and pull notifications
+cross the page/agent Worker boundary so an open repository view can preserve
+its last complete render until the replacement snapshot is ready.
 
 ### Live eval view
 
 `/evals` is part of the same production Vite and React application as the
 Nanocodex homepage, embedded TUI, repository tree, and commit history. The
-website uses a typed HTTP client and has no SQLite or artifact-path knowledge.
-The existing evaluation coordinator owns the durable ledger and exposes its
-read-only Axum API alongside the worker routes:
+website reads its public API directly from the Cloudflare Worker. D1 owns the
+task board and normalized result index; R2 owns task packages, case records,
+and complete evidence. There is no coordinator host, tunnel, origin override,
+or Access credential in the website read path.
 
-```bash
-cd ..
-cargo run -p nanocodex-bin -- eval coordinator dx-distributed-k2 \
-  --config nanocodex.dx-sweep.toml \
-  --state-dir ~/.nanocodex/evals \
-  --port 8788
-```
-
-For development, the local Worker proxies `/api/evals` to
-`http://127.0.0.1:8788`. When the coordinator runs on another box, forward that
-loopback port before starting Vite:
-
-```bash
-ssh -N -L 127.0.0.1:8788:127.0.0.1:8788 ubuntu@dev-georgios
-```
-
-Set `EVALS_API_ORIGIN` to override the local origin. Plain HTTP is accepted only
-for a loopback origin in the development environment. In production, set
-`EVALS_API_ORIGIN` on the Cloudflare Worker to the HTTPS Cloudflare Tunnel
-hostname. Protect that hostname with Cloudflare Access and configure
-`EVALS_ACCESS_CLIENT_ID` plus the `EVALS_ACCESS_CLIENT_SECRET` Worker secret.
-The Worker forwards only same-origin GET requests under `/api/evals`; SQLite
-and retained artifacts remain on the coordinator box.
+Native benchmark hosts are disposable compute clients. They claim R2-backed
+tasks from the Worker and authenticate every mutation with
+`NANOCODEX_EVALS_WRITE_TOKEN`; they are never an authority for website reads.
 
 The API is deliberately workset-oriented: the client loads the retained
 workset index, drills into one workset's task summaries, loads one selected
 treatment matrix, then requests a single opaque case ID for terminal evidence.
 TanStack Query is the only application cache and owns polling, cancellation,
-retry, and the overview/workset/task/case query lifetimes. The coordinator and
-Cloudflare proxy add no evidence cache. There is no second eval-only HTML entry,
+retry, and the overview/workset/task/case query lifetimes. There is no second eval-only HTML entry,
 React root, Vite configuration, Node eval server, or browser-side SQL path.
 
 The homepage is also a real embedded-agent demo with three deliberately thin
@@ -93,7 +111,7 @@ layers:
   hooks manage the module Worker lifecycle, readiness, commands, and event
   subscriptions without imposing presentation policy.
 - `../js/artifacts` publishes `nanocodex-artifacts`, the framework-independent
-  live React source document, bounded workspace store, and `render_artifact` tool.
+  live React source document and bounded workspace store.
 - `AgentTerminal` is the optimized Ratatui-faithful consumer: native colors,
   rendering hierarchy, queue/steer behavior, `/btw`, historical branch editing,
   branch navigation, per-branch drafts, clipboard images, and key bindings over
@@ -101,20 +119,25 @@ layers:
 
 The module Worker loads the generated `nanocodex-wasm` package, and the Rust
 engine owns the persistent Responses session, typed history, event stream, and
-tool loop. It also opens the stable `nanocodex-home` OPFS workspace and exposes
-that same application-owned handle through bounded file tools and the homepage
-file tree/editor. Uploads, downloads, and edits use the same handle, so files
-survive agent, Worker, and page restarts without being copied into conversation
-snapshots or Cloudflare state. The Cloudflare Worker upgrades `/api/responses` and proxies OpenAI
+tool loop. Each thread opens one OPFS workspace shared by just-bash, Rust
+`apply_patch`, isomorphic-git, the file viewer, commit history, uploads,
+downloads, and the artifact dock. The model receives the standard
+`exec_command` and Rust `apply_patch` tools rather than separate list/read/write
+or Git tools. Shell commands include normal virtual Unix commands plus `git`,
+`gh`, and `artifact`; `git push origin nanocodex` publishes the same objects the
+Commits view reads from the Cloudflare thread remote. Files survive agent,
+Worker, and page restarts without being copied into conversation snapshots.
+The Cloudflare Worker upgrades `/api/responses` and proxies OpenAI
 tool calls. It accepts a user-provided OpenAI key into a one-hour Durable Object
 session and returns only an opaque `HttpOnly`, `SameSite=Strict` cookie. The key
 is never placed in a URL, local storage, React state, or WASM configuration.
 
-The homepage also registers an application-owned `render_artifact` tool. The
-agent emits JavaScript source defining a real React `App`, with `React`, an
-`html` tagged-template helper, and `sendPrompt` supplied by an isolated iframe
-runtime. Documents persist under the private `.nanocodex/artifacts` workspace
-directory and open in a fullscreen dock. Reusing an artifact ID replaces the
+Custom interfaces use the shell instead of a model-specific tool. The agent
+writes JavaScript source defining a real React `App`, then runs
+`artifact publish <source.js> --id <id> --title "<title>"`. `React`, an `html`
+tagged-template helper, and `sendPrompt` are supplied by the isolated iframe
+runtime. Published documents live under `.nanocodex/artifacts` in the same Git
+working tree and open in a fullscreen dock. Reusing an artifact ID replaces the
 interface in place, so voice or text turns can continuously retheme and extend
 it. Generated code has no imports, network access, or access to the parent page;
 explicit `sendPrompt` actions re-enter the normal queued prompt lifecycle.

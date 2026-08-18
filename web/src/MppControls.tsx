@@ -171,13 +171,9 @@ function ConnectedMppControls({ jsonl, payment, onDisconnect, onReady }: {
           {ready
             ? "Tempo Wallet ready"
             : connected
-              ? checkingAccessKey
-                ? "Checking Tempo MPP access…"
-                : !accessKeyAddress
+              ? !accessKeyAddress
                   ? "Authorize Tempo MPP access to continue"
-                  : balances.isPending
-                ? "Checking Tempo balance…"
-                : "Fund Tempo Wallet to continue"
+                  : "Fund Tempo Wallet to continue"
             : "Use Tempo Wallet for MPP"}
         </span>
         <div>
@@ -185,16 +181,16 @@ function ConnectedMppControls({ jsonl, payment, onDisconnect, onReady }: {
             <>
               {!checkingAccessKey && !accessKeyAddress ? (
                 <button type="button" disabled={authorize.isPending} onClick={() => authorize.mutate()}>
-                  {authorize.isPending ? "Authorizing MPP…" : "Authorize MPP"}
+                  Authorize MPP
                 </button>
               ) : null}
               {!funded ? (
                 <button type="button" disabled={deposit.isPending} onClick={() => deposit.mutate()}>
-                  {deposit.isPending ? "Opening deposit…" : "Add funds"}
+                  Add funds
                 </button>
               ) : null}
               <button type="button" disabled={disconnect.isPending} onClick={() => disconnect.mutate()}>
-                {disconnect.isPending ? "Disconnecting…" : "Disconnect"}
+                Disconnect
               </button>
             </>
           ) : (
@@ -203,7 +199,7 @@ function ConnectedMppControls({ jsonl, payment, onDisconnect, onReady }: {
               disabled={connecting}
               onClick={() => connect.mutate()}
             >
-              {connecting ? "Opening Tempo Wallet…" : "Continue with Tempo Wallet"}
+              Continue with Tempo Wallet
             </button>
           )}
         </div>
@@ -222,13 +218,13 @@ function ConnectedMppControls({ jsonl, payment, onDisconnect, onReady }: {
           <Detail
             label="USDC.e"
             value={balances.data === undefined
-              ? "Loading…"
+              ? "—"
               : formatTokenBalance(balances.data.usdc.amount, "USDC.e")}
           />
           <Detail
             label="pathUSD"
             value={balances.data === undefined
-              ? "Loading…"
+              ? "—"
               : formatTokenBalance(balances.data.pathUsd.amount, "pathUSD")}
           />
           <Detail label="Signer" value={payment?.accessKeyAddress ?? accessKeyAddress ?? "Not authorized"} />

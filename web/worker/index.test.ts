@@ -76,6 +76,25 @@ function createChatGptSessions() {
   return { deleted, namespace: namespace as unknown as DurableObjectNamespace };
 }
 
+test("Tempo discovers a request-origin-bound uRPC consumer document", async () => {
+  const response = await worker.fetch(
+    new Request("https://preview.nanocodex.example/.well-known/urpc/consumer.json"),
+    { ENVIRONMENT: "preview" },
+  );
+
+  assert.equal(response.status, 200);
+  assert.match(response.headers.get("content-type") ?? "", /^application\/json/);
+  assert.equal(response.headers.get("cache-control"), "public, max-age=3600");
+  assert.deepEqual(await response.json(), {
+    version: "1.0",
+    id: "preview.nanocodex.example",
+    origin: "https://preview.nanocodex.example",
+    name: "Nanocodex",
+    description: "A compact, browser-native Codex agent powered through Tempo MPP.",
+    website_url: "https://preview.nanocodex.example",
+  });
+});
+
 test("tool proxies keep credentials server-side and preserve native request shapes", async () => {
   const originalFetch = globalThis.fetch;
   const upstream: Array<{ url: string; init?: RequestInit }> = [];
@@ -159,7 +178,7 @@ test("BYOK sessions keep the key behind an opaque HttpOnly cookie and take prece
   assert.doesNotMatch(createdBody, /user-secret/);
   assert.match(createdBody, /"credential_source":"user"/);
   const setCookie = created.headers.get("set-cookie") ?? "";
-  assert.match(setCookie, /^nanocodex_byok=[A-Za-z0-9_-]{43};/);
+  assert.match(setCookie, /^__Secure-nanocodex_byok_v2=[A-Za-z0-9_-]{43};/);
   assert.match(setCookie, /Path=\/api/);
   assert.match(setCookie, /HttpOnly/);
   assert.match(setCookie, /SameSite=Strict/);
@@ -224,19 +243,62 @@ test("BYOK creation rejects cross-origin requests before storing a key", async (
   assert.equal(credentials.size, 0);
 });
 
+test("Responses WebSocket rejects a missing credential before dialing upstream", async () => {
+  const originalFetch = globalThis.fetch;
+  let upstreamDialed = false;
+  globalThis.fetch = (async () => {
+    upstreamDialed = true;
+    throw new Error("upstream must not be reached");
+  }) as typeof fetch;
+  try {
+    const response = await worker.fetch(new Request(
+      "https://demo.test/api/responses?session_id=session-1",
+      { headers: { origin: "https://demo.test", upgrade: "websocket" } },
+    ), { ENVIRONMENT: "test" });
+    assert.equal(response.status, 503);
+    assert.equal(await response.text(), "OpenAI credentials are not configured");
+    assert.equal(upstreamDialed, false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("production never exposes a configured deployment API key as a public proxy", async () => {
+  const response = await worker.fetch(
+    new Request("https://demo.test/api/health"),
+    { ENVIRONMENT: "production", OPENAI_API_KEY: "must-stay-disabled" },
+  );
+  assert.deepEqual(await response.json(), {
+    agent_configured: false,
+    credential_source: null,
+    service: "nanocodex",
+    runtime: "cloudflare-workers",
+    status: "ok",
+  });
+});
+
+test("custom headers never bypass the same-origin boundary", async () => {
+  const { namespace } = createChatGptSessions();
+  const response = await worker.fetch(new Request("https://demo.test/api/auth/chatgpt", {
+    method: "POST",
+    headers: { "x-nanocodex-request": "1" },
+  }), { ENVIRONMENT: "development", CHATGPT_SESSIONS: namespace });
+  assert.equal(response.status, 403);
+});
+
 test("ChatGPT login exposes only device state while subscription credentials stay server-side", async () => {
   const { deleted, namespace } = createChatGptSessions();
   const env = { ENVIRONMENT: "test", CHATGPT_SESSIONS: namespace };
   const started = await worker.fetch(new Request("https://demo.test/api/auth/chatgpt", {
     method: "POST",
-    headers: { "x-nanocodex-request": "1" },
+    headers: { origin: "https://demo.test" },
   }), env);
   assert.equal(started.status, 200);
   const startBody = await started.text();
   assert.match(startBody, /ABCD-EFGH/);
   assert.doesNotMatch(startBody, /subscription-secret/);
   const setCookie = started.headers.get("set-cookie") ?? "";
-  assert.match(setCookie, /^nanocodex_chatgpt=[A-Za-z0-9_-]{43};/);
+  assert.match(setCookie, /^__Secure-nanocodex_chatgpt_v2=[A-Za-z0-9_-]{43};/);
   assert.match(setCookie, /Path=\/api/);
   assert.match(setCookie, /HttpOnly/);
   assert.match(setCookie, /SameSite=Strict/);
@@ -299,7 +361,7 @@ test("ChatGPT login exposes only device state while subscription credentials sta
 
   const cleared = await worker.fetch(new Request("https://demo.test/api/auth/chatgpt", {
     method: "DELETE",
-    headers: { "x-nanocodex-request": "1", cookie },
+    headers: { origin: "https://demo.test", cookie },
   }), env);
   assert.equal(cleared.status, 200);
   assert.match(cleared.headers.get("set-cookie") ?? "", /Max-Age=0/);
@@ -317,7 +379,7 @@ test("ChatGPT login rejects cross-origin session creation", async () => {
 
 test("Realtime calls keep subscription credentials server-side and bind the agent session", async () => {
   const { namespace } = createChatGptSessions();
-  const cookie = `nanocodex_chatgpt=${"a".repeat(43)}`;
+  const cookie = `__Secure-nanocodex_chatgpt_v2=${"a".repeat(43)}`;
   const originalFetch = globalThis.fetch;
   let upstreamUrl = "";
   let upstreamHeaders = new Headers();
@@ -366,56 +428,18 @@ test("eval routes require a configured coordinator origin", async () => {
   assert.deepEqual(await response.json(), { error: "evaluation API is not configured" });
 });
 
-test("only the development Worker defaults to the loopback coordinator tunnel", async () => {
+test("eval reads require Cloudflare storage and never proxy a host", async () => {
   const originalFetch = globalThis.fetch;
-  let upstream = "";
-  globalThis.fetch = (async (input: string | URL | Request) => {
-    upstream = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-    return Response.json({ schemaVersion: 1 });
+  globalThis.fetch = (async () => {
+    throw new Error("eval reads must not call an upstream origin");
   }) as typeof fetch;
   try {
     const response = await worker.fetch(
       new Request("https://demo.test/api/evals"),
       { ENVIRONMENT: "development" },
     );
-    assert.equal(response.status, 200);
-    assert.equal(upstream, "http://127.0.0.1:8788/v1/evals");
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
-test("eval routes proxy to the coordinator without adding another cache", async () => {
-  const originalFetch = globalThis.fetch;
-  const upstream: Array<{ url: string; headers: Headers }> = [];
-  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
-    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-    upstream.push({ url, headers: new Headers(init?.headers) });
-    return Response.json({ schemaVersion: 1 }, {
-      headers: { "cache-control": "public, max-age=3600" },
-    });
-  }) as typeof fetch;
-
-  try {
-    const response = await worker.fetch(
-      new Request("https://demo.test/api/evals/worksets/workset/tasks/task?ignored=true"),
-      {
-        ENVIRONMENT: "test",
-        EVALS_API_ORIGIN: "https://evals-api.example.com/private/base",
-        EVALS_ACCESS_CLIENT_ID: "access-id",
-        EVALS_ACCESS_CLIENT_SECRET: "access-secret",
-      },
-    );
-    assert.equal(response.status, 200);
-    assert.equal(response.headers.get("cache-control"), "no-store");
-    assert.deepEqual(await response.json(), { schemaVersion: 1 });
-    assert.equal(
-      upstream[0]?.url,
-      "https://evals-api.example.com/v1/evals/worksets/workset/tasks/task?ignored=true",
-    );
-    assert.equal(upstream[0]?.headers.get("accept"), "application/json");
-    assert.equal(upstream[0]?.headers.get("cf-access-client-id"), "access-id");
-    assert.equal(upstream[0]?.headers.get("cf-access-client-secret"), "access-secret");
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), { error: "evaluation API is not configured" });
   } finally {
     globalThis.fetch = originalFetch;
   }

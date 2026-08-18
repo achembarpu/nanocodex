@@ -15,7 +15,18 @@ export function createBrowserHost(options = {}) {
   }
   const connections = new Map();
   const code = createCodeRuntime(options.tools, { evaluate: options.codeEvaluator });
-  const filesystem = options.filesystem
+  if (options.filesystem && options.filesystemTools === false) {
+    code.addTools({
+      apply_patch: {
+        description: "Apply a Rust-verified patch to the browser workspace.",
+        parameters: { type: "object", additionalProperties: false },
+        handler() {
+          throw new Error("apply_patch must be dispatched by the Rust workspace runtime");
+        },
+      },
+    });
+  }
+  const filesystemReady = options.filesystem && options.filesystemTools !== false
     ? import("../runtime/workspace.mjs")
         .then(({ tools }) => code.addTools(tools(options.filesystem)))
     : undefined;
@@ -251,7 +262,7 @@ export function createBrowserHost(options = {}) {
   }
 
   return Object.freeze({
-    ready: async () => { await Promise.all([filesystem, mcp]); },
+    ready: async () => { await Promise.all([filesystemReady, mcp]); },
     retain() {
       if (disposal) throw new Error("Nanocodex host is already disposed");
       references += 1;
@@ -267,6 +278,19 @@ export function createBrowserHost(options = {}) {
     sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
     executeCode: code.executeCode,
     executeTool: code.executeTool,
+    readWorkspaceFile: async (path) => {
+      if (!options.filesystem) throw new Error("browser workspace is unavailable");
+      return new TextDecoder("utf-8", { fatal: true })
+        .decode(await options.filesystem.readFile(path));
+    },
+    writeWorkspaceFile: async (path, contents) => {
+      if (!options.filesystem) throw new Error("browser workspace is unavailable");
+      await options.filesystem.writeFile(path, contents);
+    },
+    removeWorkspaceFile: async (path) => {
+      if (!options.filesystem) throw new Error("browser workspace is unavailable");
+      await options.filesystem.remove(path);
+    },
     toolMode: () => toolMode,
     toolDefinitions: code.toolDefinitions,
     emitEvent: onEvent,
