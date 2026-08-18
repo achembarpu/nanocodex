@@ -1,4 +1,7 @@
-use std::path::{Path, PathBuf};
+use std::{
+    path::{Path, PathBuf},
+    time::Duration,
+};
 
 use clap::Args;
 use eyre::{Result, WrapErr as _, eyre};
@@ -6,7 +9,7 @@ use nanocodex::{Model, Thinking};
 use nanocodex_eval::{
     CanonicalTaskRunner, ClaimedEvaluationTask, Evaluation, EvaluationClaim, EvaluationExecution,
     EvaluationSelector, EvaluationTreatment, EvaluationWork, Task,
-    coordinator::{CoordinatorClient, RemoteClaim},
+    coordinator::{CoordinatorClient, CoordinatorError, RemoteClaim, RemoteTaskSource},
     harness::HarnessAuth,
 };
 use nanocodex_eval_adapters::AdapterCatalog;
@@ -18,6 +21,7 @@ use crate::{
 };
 
 const CONFIG_FILE: &str = "nanocodex.toml";
+const CLAIM_HEARTBEAT_INTERVAL: Duration = Duration::from_secs(5 * 60);
 
 #[derive(Clone, Debug, Args)]
 pub(super) struct ProfileTarget {
@@ -242,7 +246,10 @@ impl Add {
 impl Status {
     pub(super) async fn run(self) -> Result<()> {
         if let Some(coordinator) = &self.target.coordinator {
-            let status = CoordinatorClient::new(coordinator)?.status().await?;
+            let status = CoordinatorClient::new(coordinator)?
+                .profile(&self.target.profile)
+                .status()
+                .await?;
             if self.json {
                 serde_json::to_writer_pretty(std::io::stdout().lock(), &status)?;
                 println!();
@@ -291,7 +298,8 @@ impl Run {
             return Err(eyre!("--harness and --model require --task"));
         }
         if let Some(coordinator) = &self.target.coordinator {
-            let mut coordinator = CoordinatorClient::new(coordinator)?;
+            let mut coordinator =
+                CoordinatorClient::new(coordinator)?.profile(&self.target.profile);
             if let Some(worker) = self.worker {
                 coordinator = coordinator.worker(worker);
             }
@@ -410,13 +418,48 @@ async fn run_remote(
             claim,
             repetition,
             task: task_selector,
-            task_root,
+            task_source,
             treatment,
             ..
         } => {
+            let task_materialization: Result<_> = match task_source {
+                RemoteTaskSource::Filesystem { root, digest } => Ok((root, digest, None)),
+                RemoteTaskSource::Package { key, digest } => {
+                    let directory = tempfile::Builder::new()
+                        .prefix("nanocodex-eval-task-")
+                        .tempdir();
+                    match directory {
+                        Ok(directory) => {
+                            let root = directory.path().join("task");
+                            coordinator
+                                .materialize_task_package(&key, &root)
+                                .await
+                                .map_err(eyre::Report::new)
+                                .map(|()| (root, digest, Some(directory)))
+                        }
+                        Err(error) => Err(eyre::Report::new(error)),
+                    }
+                }
+            };
+            let (task_root, task_digest, task_materialization) = match task_materialization {
+                Ok(materialization) => materialization,
+                Err(error) => {
+                    let detail = format!("task package materialization failed: {error:#}");
+                    coordinator.retry(&claim, &detail).await?;
+                    return Err(error).wrap_err(
+                        "remote task package failed to materialize and row was requeued",
+                    );
+                }
+            };
             let setup = (|| {
                 validate_web_search(&agent, profile, treatment.web_search)?;
                 let task = Task::load(&task_root)?;
+                if task.package_digest() != task_digest {
+                    return Err(eyre!(
+                        "task package digest mismatch: expected {task_digest}, found {}",
+                        task.package_digest(),
+                    ));
+                }
                 let harness = Evaluation::resolve_harness(config, &treatment.harness)?;
                 let output = tempfile::Builder::new()
                     .prefix("nanocodex-eval-worker-")
@@ -432,9 +475,15 @@ async fn run_remote(
                     &output_directory,
                 );
                 let runner = canonical_runner(agent, &treatment, profile)?;
-                Ok::<_, eyre::Report>((runner, task, output, output_directory))
+                Ok::<_, eyre::Report>((
+                    runner,
+                    task,
+                    output,
+                    output_directory,
+                    task_materialization,
+                ))
             })();
-            let (runner, task, _output, output_directory) = match setup {
+            let (runner, task, _output, output_directory, _task_materialization) = match setup {
                 Ok(setup) => setup,
                 Err(error) => {
                     let detail = format!("{error:#}");
@@ -442,7 +491,37 @@ async fn run_remote(
                     return Err(error).wrap_err("remote task setup failed and row was requeued");
                 }
             };
-            let result = runner.run(task).await;
+            let heartbeat_coordinator = coordinator.clone();
+            let heartbeat_claim = claim.clone();
+            let mut heartbeat = tokio::spawn(async move {
+                let mut interval = tokio::time::interval(CLAIM_HEARTBEAT_INTERVAL);
+                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                loop {
+                    interval.tick().await;
+                    heartbeat_coordinator.heartbeat(&heartbeat_claim).await?;
+                }
+                #[allow(unreachable_code)]
+                Ok::<(), CoordinatorError>(())
+            });
+            let mut run = Box::pin(runner.run(task));
+            let result = tokio::select! {
+                result = &mut run => result,
+                heartbeat_result = &mut heartbeat => {
+                    drop(run);
+                    let error = match heartbeat_result {
+                        Ok(Err(error)) => eyre::Report::new(error),
+                        Ok(Ok(())) => eyre!("remote claim heartbeat stopped unexpectedly"),
+                        Err(error) => eyre::Report::new(error),
+                    };
+                    let detail = format!("claim heartbeat failed: {error:#}");
+                    coordinator.retry(&claim, &detail).await?;
+                    return Err(error).wrap_err(
+                        "remote claim heartbeat failed and row was requeued",
+                    );
+                }
+            };
+            heartbeat.abort();
+            let _ = heartbeat.await;
             match result {
                 Ok(EvaluationExecution::Passed { evidence }) => {
                     coordinator
