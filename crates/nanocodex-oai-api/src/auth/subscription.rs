@@ -45,7 +45,7 @@ impl SubscriptionHostError {
 }
 
 /// One opaque subscription value loaded from host-owned durable storage.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct SubscriptionStoreValue {
     /// Monotonic storage revision used for compare-and-swap updates.
     pub revision: u64,
@@ -1104,15 +1104,6 @@ mod tests {
             Self {
                 responses: Mutex::new(responses.into_iter().collect()),
                 ..Self::default()
-            }
-        }
-    }
-
-    impl Default for SubscriptionStoreValue {
-        fn default() -> Self {
-            Self {
-                revision: 0,
-                payload: None,
             }
         }
     }
