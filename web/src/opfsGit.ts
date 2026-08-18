@@ -19,13 +19,21 @@ export function createOpfsGitFs(root: FileSystemDirectoryHandle): OpfsGitFs {
 
 function createPromises(root: FileSystemDirectoryHandle) {
   return {
-    async readFile(path?: string, options?: { encoding?: string } | string) {
+    async readFile(
+      path?: string,
+      options?: { encoding?: string; maxBytes?: number } | string,
+    ) {
       const relative = normalize(path);
       if (!relative) throw fsError("EISDIR", "cannot read a directory");
       try {
         const { parent, name } = await parentHandle(root, relative, false);
         const file = await (await parent.getFileHandle(name)).getFile();
-        const bytes = new Uint8Array(await file.arrayBuffer());
+        const maxBytes = typeof options === "object" ? options.maxBytes : undefined;
+        const source = maxBytes === undefined ? file : file.slice(0, maxBytes);
+        let bytes = new Uint8Array(await source.arrayBuffer());
+        if (maxBytes !== undefined && bytes.byteLength > maxBytes) {
+          bytes = bytes.subarray(0, maxBytes);
+        }
         const encoding = typeof options === "string" ? options : options?.encoding;
         return encoding ? new TextDecoder(encoding).decode(bytes) : bytes;
       } catch (error) {

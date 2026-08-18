@@ -209,9 +209,13 @@ async function exists(fs: Awaited<ReturnType<typeof openOpfsGitFs>>, path: strin
 export async function withThreadGitLock<T>(
   thread: BrowserThread,
   operation: () => Promise<T>,
+  signal?: AbortSignal,
 ): Promise<T> {
   if (!navigator.locks) {
     throw new Error("This browser must support Web Locks to safely share the OPFS Git repository");
   }
-  return navigator.locks.request(`nanocodex-git-${thread.id}`, operation);
+  const name = `nanocodex-git-${thread.id}`;
+  return signal
+    ? navigator.locks.request(name, { signal }, operation)
+    : navigator.locks.request(name, operation);
 }

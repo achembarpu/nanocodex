@@ -15,6 +15,7 @@ import { EvalCoordinator, routeEvalMutation, type EvalStorageEnv } from "./evalC
 import { routeEvalRead } from "./evalReadApi.ts";
 import { handleGitRequest, type GitStorageEnv } from "./gitRoutes.ts";
 import { GitRepository } from "./gitRepository.ts";
+import { proxyDefaultMcp } from "./mcpProxy.ts";
 import {
   handleThreadGitRequest,
   type ThreadGitStorageEnv,
@@ -119,6 +120,8 @@ export default {
     if (gitResponse != null) return gitResponse;
     const threadGitResponse = await handleThreadGitRequest(request, env, url, context);
     if (threadGitResponse != null) return threadGitResponse;
+    const mcpResponse = await proxyDefaultMcp(request, url, sameOrigin(request, url, env));
+    if (mcpResponse != null) return mcpResponse;
 
     if (url.pathname === "/api/health" && request.method === "GET") {
       const resolved = await resolveCredential(request, env, "health");
@@ -1082,6 +1085,10 @@ async function deleteChatGptSession(request: Request, env: WorkerEnv): Promise<v
 }
 
 function sameOrigin(request: Request, url: URL, env: WorkerEnv): boolean {
+  if (
+    request.headers.get("x-nanocodex-request") === "1" &&
+    request.headers.get("sec-fetch-site") === "same-origin"
+  ) return true;
   const origin = request.headers.get("Origin");
   if (origin) return matchesRequestOrigin(origin, url, env.ENVIRONMENT === "development");
   const referer = request.headers.get("Referer");

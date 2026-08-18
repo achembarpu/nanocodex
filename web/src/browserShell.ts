@@ -31,6 +31,8 @@ const MAX_EXECUTION_MS = 30_000;
 const MAX_GIT_LOG_DEPTH = 200;
 const MAX_DIFF_FILE_BYTES = 1024 * 1024;
 const MAX_INDEXED_PATHS = 100_000;
+const MAX_PROJECT_INSTRUCTIONS_BYTES = 32 * 1024;
+const PROJECT_INSTRUCTION_FILES = ["AGENTS.override.md", "AGENTS.md"] as const;
 const DIFF_TRUNCATION_NOTICE = "\n[diff truncated by browser git]\n";
 const AGENT_INSTRUCTIONS = `You are working in a persistent browser filesystem rooted at /workspace.
 Use exec_command for bash commands such as ls, cat, find, grep, and git. The shell is implemented
@@ -59,11 +61,16 @@ type BrowserBashOptions = {
   onChanged?: () => void;
 };
 
+type ExecCommandContext = {
+  signal?: AbortSignal;
+};
+
 export async function prepareBrowserShell(threadId: string, origin: string) {
   const thread = browserThread(threadId, origin);
   await initializeThreadGit(thread);
   const rawFs = await openOpfsGitFs(thread.workspaceName);
   const { exec, filesystem: shellFs } = await createBrowserBash(rawFs, thread);
+  const projectInstructions = await loadBrowserProjectInstructions(rawFs);
 
   const workspace = await openThreadWorkspace(threadId);
   const notifyingWorkspace = Object.freeze({
@@ -97,6 +104,7 @@ export async function prepareBrowserShell(threadId: string, origin: string) {
   });
   return {
     instructions: AGENT_INSTRUCTIONS,
+    projectInstructions,
     workspace: notifyingWorkspace,
     execTool: {
       description: "Run a bash command in the browser thread workspace.",
@@ -109,6 +117,41 @@ export async function prepareBrowserShell(threadId: string, origin: string) {
       handler: exec,
     },
   };
+}
+
+/** Captures the root project instructions using the native Nanocodex precedence and budget. */
+export async function loadBrowserProjectInstructions(
+  rawFs: OpfsGitFs,
+): Promise<string | undefined> {
+  for (const filename of PROJECT_INSTRUCTION_FILES) {
+    const path = `${THREAD_GIT_DIRECTORY}/${filename}`;
+    let stat: Awaited<ReturnType<OpfsGitFs["promises"]["stat"]>>;
+    try {
+      stat = await rawFs.promises.stat(path);
+    } catch (error) {
+      if ((error as { code?: unknown })?.code === "ENOENT") continue;
+      console.warn("failed to read project AGENTS.md instructions", { path, error });
+      return undefined;
+    }
+    if (!stat.isFile()) continue;
+    if (stat.size > MAX_PROJECT_INSTRUCTIONS_BYTES) {
+      console.warn("project doc exceeds remaining budget; truncating", {
+        path,
+        remainingBytes: MAX_PROJECT_INSTRUCTIONS_BYTES,
+      });
+    }
+    try {
+      const bytes = await rawFs.promises.readFile(path, {
+        maxBytes: MAX_PROJECT_INSTRUCTIONS_BYTES,
+      }) as Uint8Array;
+      const instructions = utf8Decoder.decode(bytes);
+      return instructions.trim() ? instructions : undefined;
+    } catch (error) {
+      console.warn("failed to read project AGENTS.md instructions", { path, error });
+      return undefined;
+    }
+  }
+  return undefined;
 }
 
 /** Builds the browser shell over an already-open OPFS Git adapter. */
@@ -152,12 +195,13 @@ export async function createBrowserBash(
   return {
     bash,
     filesystem,
-    exec: (input: ExecCommandInput) => execute(
+    exec: (input: ExecCommandInput, context?: ExecCommandContext) => execute(
       bash,
       filesystem,
       thread,
       input,
       options.onChanged ?? (() => notifyThreadGitChanged(thread)),
+      context?.signal,
     ),
   };
 }
@@ -168,6 +212,7 @@ async function execute(
   thread: BrowserThread,
   input: ExecCommandInput,
   onChanged: () => void,
+  signal?: AbortSignal,
 ) {
   if (typeof input?.cmd !== "string" || !input.cmd.trim()) {
     throw new TypeError("exec_command.cmd must be a non-empty string");
@@ -185,11 +230,11 @@ async function execute(
   const result = await withThreadGitLock(thread, async () => {
     const mutationVersion = shellFs.mutationVersion;
     try {
-      return await bash.exec(input.cmd as string, { cwd: workdir });
+      return await bash.exec(input.cmd as string, { cwd: workdir, signal });
     } finally {
       if (shellFs.mutationVersion !== mutationVersion) onChanged();
     }
-  });
+  }, signal);
   const combined = `${result.stdout}${result.stderr}`;
   const maxCharacters = maxTokens * 4;
   const truncated = combined.length > maxCharacters;

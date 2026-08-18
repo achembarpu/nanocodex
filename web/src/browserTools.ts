@@ -1,5 +1,6 @@
 type ToolContext = {
   sessionId: string;
+  signal?: AbortSignal;
 };
 
 type ToolDefinition = {
@@ -11,7 +12,12 @@ type ToolDefinition = {
 type BrowserToolOptions = {
   recentImages(sessionId: string, count: number): string[];
   rememberImage(sessionId: string, imageUrl: string): void;
+  workspace: {
+    readFile(path: string): Promise<Uint8Array>;
+  };
 };
+
+const MAX_VIEW_IMAGE_BYTES = 10 * 1024 * 1024;
 
 const WEB_DESCRIPTION = `Search and inspect the public internet. Use search_query for web
 search, image_query for image-source discovery, open/click/find for pages, and the specialized
@@ -33,7 +39,7 @@ export function createBrowserTools(options: BrowserToolOptions): Record<string, 
         const result = await postJson<{ output: string }>("/api/tools/web-search", {
           commands,
           session_id: context.sessionId,
-        });
+        }, context.signal);
         return result.output;
       },
     },
@@ -66,9 +72,39 @@ export function createBrowserTools(options: BrowserToolOptions): Record<string, 
         const result = await postJson<{ image_url: string }>("/api/tools/image-generation", {
           images,
           prompt,
-        });
+        }, context.signal);
         options.rememberImage(context.sessionId, result.image_url);
         return result;
+      },
+    },
+    view_image: {
+      description: "View an image file from the browser thread workspace.",
+      parameters: {
+        type: "object",
+        properties: {
+          path: { type: "string" },
+          detail: { type: "string", enum: ["high", "original"] },
+        },
+        required: ["path"],
+        additionalProperties: false,
+      },
+      async handler(input) {
+        const args = requireObject(input, "view_image");
+        const path = requireString(args.path, "view_image.path");
+        const detail = args.detail === undefined ? "high" : args.detail;
+        if (detail !== "high" && detail !== "original") {
+          throw new Error("view_image.detail must be high or original");
+        }
+        const bytes = await options.workspace.readFile(path);
+        if (bytes.byteLength > MAX_VIEW_IMAGE_BYTES) {
+          throw new Error("view_image input exceeds 10 MiB");
+        }
+        const mimeType = imageMimeType(bytes);
+        if (!mimeType) throw new Error("view_image supports PNG, JPEG, GIF, WebP, and SVG files");
+        return {
+          detail,
+          image_url: `data:${mimeType};base64,${base64(bytes)}`,
+        };
       },
     },
     update_plan: {
@@ -110,7 +146,7 @@ export function createBrowserTools(options: BrowserToolOptions): Record<string, 
   };
 }
 
-async function postJson<T>(path: string, body: unknown): Promise<T> {
+async function postJson<T>(path: string, body: unknown, signal?: AbortSignal): Promise<T> {
   const response = await fetch(path, {
     method: "POST",
     headers: {
@@ -118,6 +154,7 @@ async function postJson<T>(path: string, body: unknown): Promise<T> {
       "x-nanocodex-request": "1",
     },
     body: JSON.stringify(body),
+    signal,
   });
   const payload = await response.json().catch(() => undefined) as { error?: unknown } | undefined;
   if (!response.ok) {
@@ -143,6 +180,31 @@ function optionalInteger(value: unknown): number | undefined {
   if (value === undefined) return undefined;
   if (!Number.isInteger(value)) throw new Error("num_last_images_to_include must be an integer");
   return value as number;
+}
+
+function imageMimeType(bytes: Uint8Array): string | undefined {
+  if (startsWith(bytes, [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a])) return "image/png";
+  if (startsWith(bytes, [0xff, 0xd8, 0xff])) return "image/jpeg";
+  if (startsWith(bytes, [0x47, 0x49, 0x46, 0x38])) return "image/gif";
+  if (startsWith(bytes, [0x52, 0x49, 0x46, 0x46])
+    && startsWith(bytes.subarray(8), [0x57, 0x45, 0x42, 0x50])) return "image/webp";
+  const prefix = new TextDecoder().decode(bytes.subarray(0, 1024)).trimStart();
+  if (prefix.startsWith("<svg") || (/^<\?xml\b/.test(prefix) && prefix.includes("<svg"))) {
+    return "image/svg+xml";
+  }
+  return undefined;
+}
+
+function startsWith(bytes: Uint8Array, signature: number[]): boolean {
+  return signature.every((value, index) => bytes[index] === value);
+}
+
+function base64(bytes: Uint8Array): string {
+  let binary = "";
+  for (let offset = 0; offset < bytes.length; offset += 32_768) {
+    binary += String.fromCharCode(...bytes.subarray(offset, offset + 32_768));
+  }
+  return btoa(binary);
 }
 
 const query = {
