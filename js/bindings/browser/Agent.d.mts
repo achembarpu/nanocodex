@@ -3,6 +3,7 @@ import type {
   CodeEvaluator,
   ChatGptSubscriptionHandle,
   DefaultAgent,
+  ExecutionEnvironment,
   McpServers,
   MppSession,
   ToolMap,
@@ -42,6 +43,8 @@ export declare namespace create {
     /** Disable the legacy list/read/write workspace functions when a shell owns filesystem access. */
     filesystemTools?: boolean | undefined;
     module?: unknown;
+    /** Fixed browser workspace facts, including its AGENTS.md snapshot. */
+    executionEnvironment?: ExecutionEnvironment | undefined;
     /** Optional CSP-compatible Code Mode evaluator, such as createQuickJsEvaluator(). */
     codeEvaluator?: CodeEvaluator | undefined;
     tools?: ToolMap | undefined;

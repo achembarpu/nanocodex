@@ -284,6 +284,7 @@ export function createNodeHost(options = {}) {
     sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
     executeCode: code.executeCode,
     executeTool: code.executeTool,
+    cancelCode: code.cancel,
     toolMode: () => toolMode,
     toolDefinitions: code.toolDefinitions,
     emitEvent: onEvent,

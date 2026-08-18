@@ -42,3 +42,26 @@ test("QuickJS evaluator reports guest failures as Code Mode failures", async () 
   assert.equal(result.success, false);
   assert.match(result.output, /guest exploded/);
 });
+
+test("Code Mode cancellation aborts active nested tools", async () => {
+  let started;
+  const toolStarted = new Promise((resolve) => { started = resolve; });
+  const runtime = createCodeRuntime({
+    blocked: {
+      async handler(_input, context) {
+        started();
+        await new Promise((resolve, reject) => {
+          context.signal.addEventListener("abort", () => reject(new Error("nested tool cancelled")), {
+            once: true,
+          });
+        });
+      },
+    },
+  }, { evaluate: createQuickJsEvaluator(quickJs) });
+  const execution = runtime.executeCode("await tools.blocked({});", "cancel", "exec-cancel");
+  await toolStarted;
+  runtime.cancel();
+  const result = JSON.parse(await execution);
+  assert.equal(result.success, false);
+  assert.match(result.output, /nested tool cancelled/);
+});

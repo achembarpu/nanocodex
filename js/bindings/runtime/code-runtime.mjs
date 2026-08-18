@@ -1,4 +1,5 @@
 export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
+  const activeExecutions = new Set();
   const stores = new Map();
   const providers = [];
   let nextCallId = 1;
@@ -70,11 +71,21 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
     } catch (error) {
       return encodeToolOutput(`invalid tool input: ${errorMessage(error)}`, false, null);
     }
+    const controller = new AbortController();
+    const execution = { callId, controller, sessionId };
+    activeExecutions.add(execution);
     try {
-      const result = await tool.handler(input, { sessionId, parentCallId: "", callId });
+      const result = await tool.handler(input, {
+        sessionId,
+        parentCallId: "",
+        callId,
+        signal: controller.signal,
+      });
       return encodeToolOutput(outputBody(result), true, structuredResult(result, `tool ${name} result`));
     } catch (error) {
       return encodeToolOutput(errorMessage(error), false, null);
+    } finally {
+      activeExecutions.delete(execution);
     }
   }
 
@@ -84,6 +95,9 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
     const stored = stores.get(sessionId) || new Map();
     stores.set(sessionId, stored);
     const nestedCalls = [];
+    const controller = new AbortController();
+    const execution = { callId: parentCallId, controller, sessionId };
+    activeExecutions.add(execution);
     const tools = Object.create(null);
     const availableTools = currentTools();
     const availableDefinitions = currentCodeDefinitions();
@@ -97,7 +111,13 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
         );
         const recordedInput = clone(input) ?? null;
         try {
-          const result = await handler(input, { sessionId, parentCallId, callId });
+          if (controller.signal.aborted) throw new Error("Code Mode execution was cancelled");
+          const result = await handler(input, {
+            sessionId,
+            parentCallId,
+            callId,
+            signal: controller.signal,
+          });
           nestedCalls.push({
             call_id: callId,
             name,
@@ -191,6 +211,8 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
         success: false,
         nested_calls: nestedCalls,
       });
+    } finally {
+      activeExecutions.delete(execution);
     }
   }
 
@@ -204,8 +226,16 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
     },
     executeCode,
     executeTool,
+    cancel(sessionId) {
+      for (const execution of activeExecutions) {
+        if (sessionId === undefined || execution.sessionId === sessionId) {
+          execution.controller.abort();
+        }
+      }
+    },
     toolDefinitions: () => JSON.stringify(currentDefinitions()),
     reset() {
+      for (const execution of activeExecutions) execution.controller.abort();
       stores.clear();
     },
   });

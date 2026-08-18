@@ -35,6 +35,7 @@ export type {
   DefaultAgent,
   EventWatcher,
   EstimatedUsdCost,
+  ExecutionEnvironment,
   ForkOptions,
   McpClient,
   McpPayment,

@@ -100,6 +100,43 @@ test("browser host reports non-JSON tool results as failures", async () => {
   assert.match(direct.output, /JSON-serializable/);
 });
 
+test("browser host cancellation is scoped to one session", async () => {
+  const started = new Map();
+  const host = createBrowserHost({
+    tools: {
+      blocked: {
+        parameters: { type: "object" },
+        handler(_input, context) {
+          started.get(context.sessionId)?.();
+          return new Promise((_resolve, reject) => {
+            context.signal.addEventListener(
+              "abort",
+              () => reject(new Error(`${context.sessionId} cancelled`)),
+              { once: true },
+            );
+          });
+        },
+      },
+    },
+  });
+  const startA = new Promise((resolve) => started.set("session-a", resolve));
+  const startB = new Promise((resolve) => started.set("session-b", resolve));
+  const callA = host.executeTool("blocked", "{}", "session-a", "call-a");
+  const callB = host.executeTool("blocked", "{}", "session-b", "call-b");
+  await Promise.all([startA, startB]);
+  host.cancelCode("session-a");
+  const resultA = JSON.parse(await callA);
+  assert.equal(resultA.success, false);
+  assert.match(resultA.output, /session-a cancelled/);
+  const stillPending = await Promise.race([
+    callB.then(() => false),
+    new Promise((resolve) => setTimeout(() => resolve(true), 10)),
+  ]);
+  assert.equal(stillPending, true);
+  host.cancelCode("session-b");
+  assert.match(JSON.parse(await callB).output, /session-b cancelled/);
+});
+
 test("browser host opens application sockets through MPP", async () => {
   const socket = new FakeWebSocket("wss://paid.test");
   socket.readyState = FakeWebSocket.OPEN;

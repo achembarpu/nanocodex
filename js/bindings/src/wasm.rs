@@ -5,6 +5,7 @@ use nanocodex::{
     AgentEvents, Model, Nanocodex as RustNanocodex, OpenAi, ReasoningMode, Thinking, TurnControl,
     TurnResult,
     agent::{
+        ExecutionEnvironment,
         input::{Prompt, UserInput},
         session::{SessionId, SessionSnapshot},
     },
@@ -48,6 +49,9 @@ extern "C" {
         session_id: &str,
         call_id: &str,
     ) -> Result<Promise, JsValue>;
+
+    #[wasm_bindgen(js_namespace = ["globalThis", "nanocodexHost"], js_name = cancelCode)]
+    fn host_cancel_code(session_id: &str);
 
     #[wasm_bindgen(js_namespace = ["globalThis", "nanocodexHost"], js_name = toolMode)]
     fn host_tool_mode(session_id: &str) -> String;
@@ -226,7 +230,6 @@ impl CodeModeHost for JavaScriptCodeModeHost {
             })?;
         for definition in &mut definitions {
             let standard = match definition.name() {
-                name if name == StandardTool::ExecCommand.name() => Some(StandardTool::ExecCommand),
                 name if name == StandardTool::WriteStdin.name() => Some(StandardTool::WriteStdin),
                 name if name == StandardTool::UpdatePlan.name() => Some(StandardTool::UpdatePlan),
                 name if name == StandardTool::ApplyPatch.name() => Some(StandardTool::ApplyPatch),
@@ -294,6 +297,13 @@ impl CodeModeHost for JavaScriptCodeModeHost {
             ToolOutput::from_wire(wire).map_err(|error| {
                 CodeModeHostError::new(format!("JavaScript tool result was invalid: {error}"))
             })
+        })
+    }
+
+    fn cancel<'a>(&'a self, session_id: &'a str) -> HostFuture<'a, Result<(), CodeModeHostError>> {
+        Box::pin(async move {
+            host_cancel_code(session_id);
+            Ok(())
         })
     }
 }
@@ -365,7 +375,18 @@ struct WasmConfig {
     #[serde(default)]
     workspace: Option<String>,
     #[serde(default)]
+    execution_environment: Option<WasmExecutionEnvironment>,
+    #[serde(default)]
     resume: Option<SessionSnapshot>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WasmExecutionEnvironment {
+    current_date: String,
+    timezone: String,
+    #[serde(default)]
+    project_instructions: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -538,6 +559,14 @@ impl WasmNanocodex {
         }
         if let Some(workspace) = config.workspace {
             builder = builder.workspace(workspace);
+        }
+        if let Some(configured) = config.execution_environment {
+            let mut environment =
+                ExecutionEnvironment::new(configured.current_date, configured.timezone);
+            if let Some(project_instructions) = configured.project_instructions {
+                environment = environment.project_instructions(project_instructions);
+            }
+            builder = builder.execution_environment(environment);
         }
         if let Some(resume) = config.resume {
             builder = builder.resume(resume);

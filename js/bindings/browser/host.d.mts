@@ -5,7 +5,7 @@ export type BrowserTool = {
   parameters: Record<string, unknown>;
   handler: (
     input: unknown,
-    context: { sessionId: string },
+    context: { sessionId: string; signal: AbortSignal },
   ) => unknown | Promise<unknown>;
 };
 
