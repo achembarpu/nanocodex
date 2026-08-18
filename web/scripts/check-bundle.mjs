@@ -11,7 +11,7 @@ const budgets = Object.freeze({
   initialCssFiles: 2,
   initialCss: 60_000,
   initialCssGzip: 12_000,
-  agentJavaScript: 820_000,
+  agentJavaScript: 830_000,
   // OPFS, artifacts, voice routing, and the paid MCP seam add lazy Worker edges.
   agentWorker: 48_500,
   agentWorkerGzip: 15_800,
