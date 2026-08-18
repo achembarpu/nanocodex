@@ -3,7 +3,12 @@ import type { ToolMap } from "nanocodex";
 
 import { cloudflareSandboxTools, destroyCloudflareSandbox } from "./sandbox-tools";
 
-const context = { callId: "smoke", parentCallId: "smoke", sessionId: "smoke" };
+const context = {
+  callId: "smoke",
+  parentCallId: "smoke",
+  sessionId: "smoke",
+  signal: new AbortController().signal,
+};
 
 export async function cloudflareSandboxSmokeSetup(
   namespace: DurableObjectNamespace<Sandbox>,

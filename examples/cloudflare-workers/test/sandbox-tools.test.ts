@@ -9,7 +9,12 @@ import {
 
 const MIB = 1024 * 1024;
 const OUTPUT_LIMIT = 128 * 1024;
-const context = { callId: "call", parentCallId: "parent", sessionId: "session" };
+const context = {
+  callId: "call",
+  parentCallId: "parent",
+  sessionId: "session",
+  signal: new AbortController().signal,
+};
 
 describe("Cloudflare sandbox workspace paths", () => {
   it("canonicalizes paths under the virtual workspace", () => {
