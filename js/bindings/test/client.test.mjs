@@ -4,14 +4,16 @@ import { test } from "node:test";
 import { Actions } from "../index.mjs";
 import {
   activateHost,
-  bindDurabilityHost,
   bindHostSession,
   createAgentClient,
   defineRuntime,
   releaseHostSession,
-  releaseDurabilityHost,
-  retainDurabilityHost,
 } from "../internal.mjs";
+import {
+  own as ownDurabilityHost,
+  release as releaseDurabilityHost,
+  retain as retainDurabilityHost,
+} from "../runtime/durability.mjs";
 
 test("the headless client exposes matching direct and standalone actions", async () => {
   const events = new Set();
@@ -101,7 +103,7 @@ test("the WASM host bridge preserves typed decimal durability revisions", async 
     },
   };
   activateHost(host);
-  bindDurabilityHost(host, "journal-1");
+  ownDurabilityHost(host, host.durability, "journal-1");
   retainDurabilityHost(host, "journal-1");
   retainDurabilityHost(host, "journal-1");
   try {

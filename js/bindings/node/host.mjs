@@ -288,7 +288,6 @@ export function createNodeHost(options = {}) {
     toolMode: () => toolMode,
     toolDefinitions: code.toolDefinitions,
     emitEvent: onEvent,
-    durability: options.durability,
     reset: code.reset,
     dispose,
   });

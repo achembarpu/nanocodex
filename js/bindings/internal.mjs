@@ -3,7 +3,6 @@ const turnStates = new WeakMap();
 const resultStates = new WeakMap();
 const hostSessions = new Map();
 const hostConnections = new Map();
-const durabilityHosts = new Map();
 let activeHost;
 let nextHostConnection = 1;
 let nextAgentUid = 1;
@@ -35,12 +34,7 @@ export async function createAgentClient(runtime, options = {}) {
 export function prompt(agent, options) {
   const state = agentState(agent);
   const input = actionInput(options);
-  const operationId = options && typeof options === "object" && !Array.isArray(options)
-    ? options.id
-    : undefined;
-  if (operationId !== undefined && (typeof operationId !== "string" || !operationId.trim())) {
-    throw new TypeError("durable prompt id must be a non-empty string");
-  }
+  const operationId = options?.id;
   const raw = typeof input === "string"
     ? state.raw.prompt(input, operationId)
     : state.raw.promptContent(JSON.stringify(input), operationId);
@@ -206,6 +200,17 @@ export function installHostBridge() {
   globalThis.nanocodexHost = hostBridge;
 }
 
+export function loadDurabilityRuntime() {
+  return import("./runtime/durability.mjs");
+}
+
+export function reportError(error) {
+  try {
+    if (typeof globalThis.reportError === "function") globalThis.reportError(error);
+    else globalThis.console?.error?.(error);
+  } catch {}
+}
+
 export function bindHostSession(host, sessionId) {
   const existing = hostSessions.get(sessionId);
   if (existing && existing !== host) {
@@ -216,40 +221,6 @@ export function bindHostSession(host, sessionId) {
 
 export function releaseHostSession(host, sessionId) {
   if (hostSessions.get(sessionId) === host) hostSessions.delete(sessionId);
-}
-
-export function bindDurabilityHost(host, journalId) {
-  if (journalId === undefined) return;
-  const existing = durabilityHosts.get(journalId);
-  if (existing && existing.host !== host) {
-    throw new Error(`Nanocodex durability journal is already active: ${journalId}`);
-  }
-  durabilityHosts.set(journalId, existing ?? { host, references: 0 });
-}
-
-export function retainDurabilityHost(host, journalId) {
-  if (journalId === undefined) return;
-  const ownership = durabilityHosts.get(journalId);
-  if (!ownership || ownership.host !== host) {
-    throw new Error(`Nanocodex durability journal is not bound to this host: ${journalId}`);
-  }
-  ownership.references += 1;
-}
-
-export function releaseDurabilityHost(host, journalId) {
-  if (journalId === undefined) return;
-  const ownership = durabilityHosts.get(journalId);
-  if (!ownership || ownership.host !== host) return;
-  if (ownership.references > 0) ownership.references -= 1;
-  if (ownership.references === 0) durabilityHosts.delete(journalId);
-}
-
-export function abandonDurabilityHost(host, journalId) {
-  if (journalId === undefined) return;
-  const ownership = durabilityHosts.get(journalId);
-  if (ownership?.host === host && ownership.references === 0) {
-    durabilityHosts.delete(journalId);
-  }
 }
 
 const hostBridge = Object.freeze({
@@ -337,41 +308,14 @@ const hostBridge = Object.freeze({
     return (hostSessions.get(sessionId) ?? requiredActiveHost()).toolDefinitions();
   },
   async durabilityLoad(journalId) {
-    const store = requiredDurabilityStore(journalId);
-    const stored = await store.load(journalId);
-    if (!stored || typeof stored !== "object" || !Array.isArray(stored.batches)) {
-      throw new TypeError("durability.load() must return { revision, batches }");
-    }
-    return JSON.stringify({
-      revision: revisionString(stored.revision, "durability load revision"),
-      batches: stored.batches.map((batch) => ({
-        revision: revisionString(batch?.revision, "durability batch revision"),
-        payload: requiredString(batch?.payload, "durability batch payload"),
-      })),
-    });
+    return (await loadDurabilityRuntime()).load(journalId);
   },
   async durabilityAppend(journalId, expectedRevision, payload) {
-    const store = requiredDurabilityStore(journalId);
-    const result = await store.append(journalId, {
+    return (await loadDurabilityRuntime()).append(
+      journalId,
       expectedRevision,
       payload,
-    });
-    if (result?.status === "appended") {
-      return JSON.stringify({
-        status: "appended",
-        revision: revisionString(result.revision, "durability append revision"),
-      });
-    }
-    if (result?.status === "conflict") {
-      return JSON.stringify({
-        status: "conflict",
-        actual_revision: revisionString(
-          result.actualRevision,
-          "durability conflict revision",
-        ),
-      });
-    }
-    throw new TypeError("durability.append() must return an appended or conflict result");
+    );
   },
   emitEvent(eventJson) {
     const event = JSON.parse(eventJson);
@@ -490,28 +434,6 @@ async function joinAgentShutdown(state) {
 function requiredActiveHost() {
   if (!activeHost) throw new Error("no Nanocodex host is active");
   return activeHost;
-}
-
-function requiredDurabilityStore(journalId) {
-  const host = durabilityHosts.get(journalId)?.host;
-  if (!host) throw new Error(`no Nanocodex host owns durability journal: ${journalId}`);
-  const store = host.durability;
-  if (!store || typeof store.load !== "function" || typeof store.append !== "function") {
-    throw new TypeError("the selected Nanocodex host must define a durability store");
-  }
-  return store;
-}
-
-function revisionString(value, name) {
-  if (typeof value !== "string" || !/^(0|[1-9][0-9]*)$/.test(value)) {
-    throw new TypeError(`${name} must be an unsigned decimal string`);
-  }
-  return value;
-}
-
-function requiredString(value, name) {
-  if (typeof value !== "string") throw new TypeError(`${name} must be a string`);
-  return value;
 }
 
 function connectFailure(error) {

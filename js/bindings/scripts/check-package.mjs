@@ -40,7 +40,6 @@ const requiredFiles = [
   "pkg-web/nanocodex_worker.js",
   "pkg-node/nanocodex.js",
   "pkg-node/nanocodex.d.ts",
-  "pkg-node/nanocodex_bg.wasm",
 ];
 
 export async function checkPackage(packageRoot = root) {
@@ -67,13 +66,12 @@ export async function checkPackage(packageRoot = root) {
     assert(metadata.size > 0, `${file} must not be empty`);
   }
 
-  for (const target of ["web", "node"]) {
-    const wasm = await readFile(
-      new URL(`pkg-${target}/nanocodex_bg.wasm`, packageRoot),
-    );
-    assert(wasm.byteLength > 100_000, `pkg-${target} WASM is unexpectedly small`);
-    assert.deepEqual([...wasm.subarray(0, 4)], [0x00, 0x61, 0x73, 0x6d]);
-  }
+  const wasm = await readFile(new URL("pkg-web/nanocodex_bg.wasm", packageRoot));
+  assert(wasm.byteLength > 100_000, "shared WASM is unexpectedly small");
+  assert.deepEqual([...wasm.subarray(0, 4)], [0x00, 0x61, 0x73, 0x6d]);
+
+  const nodeGlue = await readFile(new URL("pkg-node/nanocodex.js", packageRoot), "utf8");
+  assert.match(nodeGlue, /__dirname\}\/\.\.\/pkg-web\/nanocodex_bg\.wasm/);
 
   console.log(`nanocodex@${packageJson.version} package artifacts are complete`);
 }
