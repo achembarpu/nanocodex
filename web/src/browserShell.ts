@@ -14,7 +14,16 @@ import {
   type RmOptions,
 } from "just-bash/browser";
 
-import { openOpfsGitFs, type OpfsGitFs } from "./opfsGit.ts";
+import {
+  createOpfsGitFs,
+  openOpfsWorkspaceRoot,
+  type OpfsGitFs,
+} from "./opfsGit.ts";
+import {
+  BrowserPythonRuntime,
+  pythonCommands,
+  type PythonRuntime,
+} from "./browserPython.ts";
 import {
   browserThread,
   initializeThreadGit,
@@ -37,8 +46,12 @@ const MAX_PROJECT_INSTRUCTIONS_BYTES = 32 * 1024;
 const PROJECT_INSTRUCTION_FILES = ["AGENTS.override.md", "AGENTS.md"] as const;
 const DIFF_TRUNCATION_NOTICE = "\n[diff truncated by browser git]\n";
 const AGENT_INSTRUCTIONS = `You are working in a persistent browser filesystem rooted at /workspace.
-Use exec_command for bash commands such as ls, cat, find, grep, and git. The shell is implemented
-in-browser, so it has no host process or PTY. The repository's only publish branch is nanocodex;
+Use exec_command for bash commands such as ls, cat, find, grep, git, curl, wget, and python3. The
+shell and Python runtime execute entirely in browser sandboxes, so they have no host process or PTY.
+curl and wget use browser Fetch directly, so remote servers must permit this origin with CORS. The
+clang, clang++, gcc, g++, cc, and c++ compile C/C++ sources to WASI WebAssembly in a lazy worker.
+Browser SSH is noninteractive and requires a wss:// endpoint that carries raw SSH because browsers
+cannot open TCP sockets. The repository's only publish branch is nanocodex;
 publish with git add, git commit -m "...", and git push origin nanocodex. Use the standard Rust
 apply_patch tool for focused edits. Custom React interfaces live in
 /workspace/.nanocodex/artifacts and are displayed by the web app from that same filesystem. To
@@ -62,7 +75,30 @@ type ExecCommandInput = {
 type BrowserBashOptions = {
   onChanged?: () => void;
   executionTimeoutMs?: number;
+  fetch?: SecureFetch;
+  pythonRuntime?: PythonRuntime;
+  workspaceRoot?: FileSystemDirectoryHandle;
 };
+
+type SecureFetchOptions = {
+  method?: string;
+  headers?: Headers | Record<string, string>;
+  body?: string;
+  followRedirects?: boolean;
+  timeoutMs?: number;
+  maxRedirects?: number;
+  signal?: AbortSignal;
+};
+
+type SecureFetchResult = {
+  status: number;
+  statusText: string;
+  headers: Record<string, string>;
+  body: Uint8Array;
+  url: string;
+};
+
+type SecureFetch = (url: string, options?: SecureFetchOptions) => Promise<SecureFetchResult>;
 
 type ExecCommandContext = {
   signal?: AbortSignal;
@@ -71,8 +107,11 @@ type ExecCommandContext = {
 export async function prepareBrowserShell(threadId: string, origin: string) {
   const thread = browserThread(threadId, origin);
   await initializeThreadGit(thread);
-  const rawFs = await openOpfsGitFs(thread.workspaceName);
-  const { exec, filesystem: shellFs } = await createBrowserBash(rawFs, thread);
+  const workspaceRoot = await openOpfsWorkspaceRoot(thread.workspaceName);
+  const rawFs = createOpfsGitFs(workspaceRoot);
+  const { exec, filesystem: shellFs } = await createBrowserBash(rawFs, thread, {
+    workspaceRoot,
+  });
   const projectInstructions = await loadBrowserProjectInstructions(rawFs);
 
   const workspace = await openThreadWorkspace(threadId);
@@ -166,6 +205,9 @@ export async function createBrowserBash(
   const filesystem = new OpfsShellFileSystem(rawFs);
   await filesystem.refreshPaths();
   const executionTimeoutMs = options.executionTimeoutMs ?? MAX_EXECUTION_MS;
+  const pythonRuntime = options.pythonRuntime ?? (
+    options.workspaceRoot ? new BrowserPythonRuntime(options.workspaceRoot) : undefined
+  );
   const bash = new Bash({
     cwd: THREAD_GIT_DIRECTORY,
     env: {
@@ -178,10 +220,21 @@ export async function createBrowserBash(
       PATH: THREAD_GIT_DIRECTORY,
     },
     fs: filesystem,
+    fetch: options.fetch ?? browserSecureFetch,
     customCommands: [
       gitCommand(rawFs, thread, filesystem),
       ghCommand(rawFs, thread),
       artifactCommand(),
+      unameCommand(),
+      ...pythonCommands(pythonRuntime, filesystem),
+      {
+        name: "ssh",
+        load: async () => (await import("./browserSsh.ts")).createSshCommand(filesystem),
+      },
+      ...["clang", "clang++", "gcc", "g++", "cc", "c++"].map((name) => ({
+        name,
+        load: async () => (await import("./browserCompiler.ts")).createCompilerCommand(name, filesystem),
+      })),
     ],
     executionLimitProfile: "hardened",
     executionLimits: {
@@ -210,6 +263,74 @@ export async function createBrowserBash(
       executionTimeoutMs,
     ),
   };
+}
+
+const browserSecureFetch: SecureFetch = async (target, options = {}) => {
+  const url = new URL(target, globalThis.location?.href);
+  if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) {
+    throw new Error("browser curl supports only credential-free http:// and https:// URLs");
+  }
+  const timeout = new AbortController();
+  const timeoutMs = Math.min(options.timeoutMs ?? MAX_EXECUTION_MS, MAX_EXECUTION_MS);
+  const timeoutId = setTimeout(() => timeout.abort(new Error("network request timed out")), timeoutMs);
+  const abort = () => timeout.abort(options.signal?.reason);
+  options.signal?.addEventListener("abort", abort, { once: true });
+  if (options.signal?.aborted) abort();
+  try {
+    const response = await fetch(url, {
+      method: options.method,
+      headers: options.headers,
+      body: options.body,
+      credentials: "omit",
+      redirect: options.followRedirects === false ? "manual" : "follow",
+      signal: timeout.signal,
+    });
+    return {
+      status: response.status,
+      statusText: response.statusText,
+      headers: Object.fromEntries(response.headers.entries()),
+      body: new Uint8Array(await response.arrayBuffer()),
+      url: response.url || url.href,
+    };
+  } catch (error) {
+    if (timeout.signal.aborted) throw timeout.signal.reason;
+    const detail = error instanceof Error ? error.message : String(error);
+    throw new Error(`browser fetch failed (${detail}); the target must allow this origin with CORS`);
+  } finally {
+    clearTimeout(timeoutId);
+    options.signal?.removeEventListener("abort", abort);
+  }
+};
+
+function unameCommand() {
+  return defineCommand("uname", async (args) => {
+    const fields = {
+      s: "Nanocodex",
+      n: "browser",
+      r: "1.0.0",
+      v: "browser-wasm",
+      m: "wasm32",
+      p: "wasm32",
+      i: "wasm32",
+      o: "Browser",
+    } as const;
+    if (args.includes("--help")) {
+      return ok("usage: uname [-asnrvmpio]\n");
+    }
+    const requested: Array<keyof typeof fields> = [];
+    for (const arg of args.length ? args : ["-s"]) {
+      if (arg === "--all") requested.push("s", "n", "r", "v", "m", "p", "i", "o");
+      else if (/^-[asnrvmpio]+$/.test(arg)) {
+        for (const flag of arg.slice(1)) {
+          if (flag === "a") requested.push("s", "n", "r", "v", "m", "p", "i", "o");
+          else requested.push(flag as keyof typeof fields);
+        }
+      } else {
+        return fail(`uname: unrecognized option '${arg}'\n`, 1);
+      }
+    }
+    return ok(`${[...new Set(requested)].map((key) => fields[key]).join(" ")}\n`);
+  });
 }
 
 async function execute(

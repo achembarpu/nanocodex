@@ -236,6 +236,70 @@ test("browser command lookup stays inside the virtual workspace", async () => {
   );
 });
 
+test("browser compatibility commands expose uname and Fetch-backed curl", async () => {
+  const root = new MemoryDirectory();
+  const fs = createOpfsGitFs(root as unknown as FileSystemDirectoryHandle);
+  await git.init({ fs, dir: "/workspace", defaultBranch: "nanocodex" });
+  const requests: Array<{ url: string; method?: string }> = [];
+  const shell = await createBrowserBash(fs, thread, {
+    fetch: async (url, options) => {
+      requests.push({ url, method: options?.method });
+      return {
+        status: 200,
+        statusText: "OK",
+        headers: { "content-type": "text/plain" },
+        body: new TextEncoder().encode("network works\n"),
+        url,
+      };
+    },
+  });
+
+  const uname = await shell.exec({ cmd: "uname -srm" });
+  assert.equal(uname.exit_code, 0);
+  assert.equal(uname.output, "Nanocodex 1.0.0 wasm32\n");
+
+  const curl = await shell.exec({ cmd: "curl -sS https://example.test/data" });
+  assert.equal(curl.exit_code, 0);
+  assert.equal(curl.output, "network works\n");
+  assert.deepEqual(requests, [{ url: "https://example.test/data", method: "GET" }]);
+});
+
+test("browser python commands use the isolated runtime boundary", async () => {
+  const root = new MemoryDirectory();
+  const fs = createOpfsGitFs(root as unknown as FileSystemDirectoryHandle);
+  await git.init({ fs, dir: "/workspace", defaultBranch: "nanocodex" });
+  const executions: Array<{ args: string[]; cwd: string; stdin: string }> = [];
+  const shell = await createBrowserBash(fs, thread, {
+    pythonRuntime: {
+      async execute(input) {
+        executions.push(input);
+        return { stdout: "42\n", stderr: "", exitCode: 0 };
+      },
+    },
+  });
+
+  const result = await shell.exec({ cmd: "python3 -c 'print(6 * 7)'" });
+  assert.equal(result.exit_code, 0);
+  assert.equal(result.output, "42\n");
+  assert.deepEqual(executions, [{
+    args: ["-c", "print(6 * 7)"],
+    cwd: "/workspace",
+    stdin: "",
+  }]);
+});
+
+test("browser ssh documents its direct WebSocket-only transport", async () => {
+  const root = new MemoryDirectory();
+  const fs = createOpfsGitFs(root as unknown as FileSystemDirectoryHandle);
+  await git.init({ fs, dir: "/workspace", defaultBranch: "nanocodex" });
+  const shell = await createBrowserBash(fs, thread);
+
+  const result = await shell.exec({ cmd: "ssh --help" });
+  assert.equal(result.exit_code, 2);
+  assert.match(result.output, /wss:\/\/SSH-GATEWAY/);
+  assert.match(result.output, /browsers cannot open TCP port 22/);
+});
+
 test("browser command substitutions settle without reaching the execution timeout", async () => {
   const root = new MemoryDirectory();
   const fs = createOpfsGitFs(root as unknown as FileSystemDirectoryHandle);
