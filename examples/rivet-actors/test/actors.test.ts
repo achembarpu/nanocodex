@@ -28,6 +28,7 @@ let modelRequests = 0;
 let nextResponse = 1;
 let rejectNextSubscriptionUpgrade = false;
 let responseDelayMs = 0;
+let responseGate: Promise<void> | undefined;
 let authActorKey = "subscription";
 
 beforeAll(async () => {
@@ -58,6 +59,7 @@ beforeAll(async () => {
       const asksForHistory = encoded.includes("What exact token did I ask you to return previously?");
       const hasHistory = encoded.includes("Reply with exactly EDGE_OK");
       if (responseDelayMs > 0) await new Promise((resolve) => setTimeout(resolve, responseDelayMs));
+      if (responseGate) await responseGate;
       const text = asksForHistory
         ? (hasHistory ? "EDGE_OK" : "HISTORY_MISSING")
         : (exactToken ?? "RIVET_OK");
@@ -320,16 +322,27 @@ describe.sequential("Nanocodex Rivet Actors", () => {
     await expect(session.turn({ id: "oversized", input: "x".repeat(1024 * 1024 + 1) }))
       .rejects.toThrow(/exceeds 1 MiB/);
 
-    responseDelayMs = 20;
-    const turns = Array.from({ length: 17 }, (_, index) => session.turn({
+    let releaseResponses = () => {};
+    responseGate = new Promise<void>((resolve) => {
+      releaseResponses = resolve;
+    });
+    const turns = Array.from({ length: 16 }, (_, index) => session.turn({
       id: `bounded-${index}`,
       input: `Reply with exactly BOUNDED_${index}`,
     }));
-    const settled = await Promise.allSettled(turns);
-    expect(settled.filter((result) => result.status === "fulfilled")).toHaveLength(16);
-    const rejected = settled.filter((result) => result.status === "rejected");
-    expect(rejected).toHaveLength(1);
-    expect(String((rejected[0] as PromiseRejectedResult).reason)).toMatch(/at most 16 turns/);
+    try {
+      await vi.waitFor(async () => {
+        expect((await session.status()).active_turns).toHaveLength(16);
+      }, { timeout: 10_000 });
+      await expect(session.turn({
+        id: "bounded-overflow",
+        input: "Reply with exactly BOUNDED_OVERFLOW",
+      })).rejects.toThrow(/at most 16 turns/);
+    } finally {
+      releaseResponses();
+      responseGate = undefined;
+    }
+    await expect(Promise.all(turns)).resolves.toHaveLength(16);
   });
 });
 
