@@ -3,7 +3,9 @@
   "version": "0.5.0",
   "description": "Viem-style Node and browser bindings for the Nanocodex WASM agent",
   "type": "module",
-  "sideEffects": false,
+  "sideEffects": [
+    "./tools/browser/browserBuffer.mjs"
+  ],
   "exports": {
     ".": {
       "types": "./index.d.mts",
@@ -37,6 +39,18 @@
       "types": "./runtime/subagents.d.mts",
       "import": "./runtime/subagents.mjs"
     },
+    "./tools": {
+      "types": "./tools/index.d.mts",
+      "import": "./tools/index.mjs"
+    },
+    "./tools/browser": {
+      "types": "./tools/browser/index.d.mts",
+      "import": "./tools/browser/index.mjs"
+    },
+    "./tools/vite": {
+      "types": "./tools/vite.d.mts",
+      "import": "./tools/vite.mjs"
+    },
     "./worker": {
       "types": "./worker/index.d.mts",
       "import": "./worker/index.mjs"
@@ -54,6 +68,7 @@
     "pkg-node",
     "pkg-web",
     "runtime",
+    "tools",
     "internal.mjs",
     "index.d.mts",
     "index.mjs",
@@ -73,9 +88,17 @@
     "test:typecheck": "tsc -p test/tsconfig.json"
   },
   "dependencies": {
+    "@eduoj/wasm-clang": "1.0.0",
+    "@microsoft/dev-tunnels-ssh": "3.12.40",
+    "@microsoft/dev-tunnels-ssh-keys": "3.12.40",
     "@modelcontextprotocol/sdk": "1.30.0",
+    "buffer": "6.0.3",
+    "diff": "^9.0.0",
+    "isomorphic-git": "^1.41.5",
+    "just-bash": "^3.4.0",
     "minisearch": "7.2.0",
     "mppx": "0.8.17",
+    "pyodide": "314.0.5",
     "ws": "^8.18.3"
   },
   "devDependencies": {

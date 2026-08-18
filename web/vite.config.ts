@@ -1,5 +1,6 @@
 import { cloudflare } from "@cloudflare/vite-plugin";
 import react from "@vitejs/plugin-react";
+import { nanocodexTools } from "nanocodex/tools/vite";
 import { fileURLToPath } from "node:url";
 import { defineConfig } from "vite";
 import mkcert from "vite-plugin-mkcert";
@@ -13,6 +14,7 @@ export default defineConfig({
   // certificate keeps the development flow identical to production and lets
   // the hosted wallet perform cross-origin passkey ceremonies in the embed.
   plugins: [
+    nanocodexTools(),
     mkcert(),
     react(),
     repositoryDevServer(),
@@ -37,19 +39,6 @@ export default defineConfig({
   },
   resolve: {
     preserveSymlinks: true,
-    // The Microsoft SSH package selects Web Crypto at runtime in browsers, but
-    // its CommonJS fallback still contains an unreachable require("node-rsa").
-    // Keep the Node-only fallback out of the browser graph.
-    alias: [
-      {
-        find: /^@microsoft\/dev-tunnels-ssh$/,
-        replacement: fileURLToPath(new URL("./src/devTunnelsSshBrowser.ts", import.meta.url)),
-      },
-      {
-        find: "node-rsa",
-        replacement: fileURLToPath(new URL("./src/unsupportedNodeRsa.ts", import.meta.url)),
-      },
-    ],
     dedupe: [
       "react",
       "react-dom",
@@ -83,7 +72,13 @@ export default defineConfig({
       "nanocodex > eventemitter3",
     ],
   },
-  worker: { format: "es" },
+  worker: {
+    format: "es",
+    // Vite creates a separate plugin graph for nested browser Workers. The
+    // Nanocodex browser-tool adapter must therefore be installed in both the
+    // page build above and this Worker build.
+    plugins: () => [nanocodexTools()],
+  },
   server: {
     // The live artifact frame intentionally has an opaque sandbox origin. Its
     // module graph therefore needs CORS even though it is served by this host.

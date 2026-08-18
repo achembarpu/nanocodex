@@ -1,0 +1,28 @@
+import type { NamedTool } from "../types.mjs";
+import type { Workspace } from "../runtime/workspace.mjs";
+export type JsonToolOptions = Readonly<{
+  /** Defaults to the same-origin `/api/tools/web-search` or image route. */
+  url?: string | URL | undefined;
+  fetch?: typeof globalThis.fetch | undefined;
+  headers?: Readonly<Record<string, string>> | undefined;
+}>;
+
+export type ImageGenerationOptions = JsonToolOptions & Readonly<{
+  recentImages?(sessionId: string, count: number): string[];
+  rememberImage?(sessionId: string, imageUrl: string): void;
+  workspace?: Readonly<{ readFile(path: string): Promise<Uint8Array> }> | undefined;
+}>;
+
+/** The standard web search tool with its complete runtime JSON Schema. */
+export function web(options?: JsonToolOptions): NamedTool;
+
+/** The standard image generation/editing tool. */
+export function imageGeneration(options?: ImageGenerationOptions): NamedTool;
+
+/** Reads supported image formats from a caller-owned workspace. */
+export function viewImage(options: {
+  workspace: Pick<Workspace, "readFile">;
+}): NamedTool;
+
+/** A session-scoped planning tool. */
+export function updatePlan(): NamedTool;

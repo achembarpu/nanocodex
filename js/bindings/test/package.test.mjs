@@ -38,7 +38,7 @@ test("the packed package installs and runs every public entry point", async () =
     // Both WASM targets include the canonical Rust apply_patch planner and the
     // full JSON-Schema-backed subagent runtime.
     assert.ok(
-      packed.unpackedSize <= 7_900_000,
+      packed.unpackedSize <= 8_050_000,
       `unpacked package grew to ${packed.unpackedSize} bytes`,
     );
     assert.equal(
@@ -62,12 +62,16 @@ test("the packed package installs and runs every public entry point", async () =
       import { dirname, resolve } from "node:path";
       import { fileURLToPath } from "node:url";
       import { Actions } from "nanocodex";
+      import { web } from "nanocodex/tools";
+      import { nanocodexTools } from "nanocodex/tools/vite";
       import { Agent as NodeAgent, Subagents as NodeSubagents, Transport as NodeTransport, Workspace as NodeWorkspace } from "nanocodex/node";
       import { Agent as BrowserAgent, Subagents as BrowserSubagents, Transport as BrowserTransport, Workspace as BrowserWorkspace } from "nanocodex/browser";
 
       assert.equal(typeof Actions.turn.prompt, "function");
       assert.equal(typeof NodeWorkspace.open, "function");
       assert.equal(typeof BrowserWorkspace.open, "function");
+      assert.equal(web({ url: "https://example.test/tools/web" }).name, "web__run");
+      assert.match(nanocodexTools().resolveId("node-rsa"), /unsupportedNodeRsa\.mjs$/);
       const nodeAgent = await NodeAgent.create({
         transport: NodeTransport.openAi({ apiKey: "package-test" }),
         tools: [...NodeSubagents.create({ maxConcurrency: 2 })],

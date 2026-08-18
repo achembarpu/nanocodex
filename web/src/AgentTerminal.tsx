@@ -29,7 +29,7 @@ import {
   type WebTuiMessage,
 } from "./nanocodex";
 import { ArtifactDock } from "./ArtifactDock";
-import { getBrowserThread } from "./workspace";
+import { getBrowserThread } from "nanocodex/tools/browser";
 
 const MppControls = lazy(async () => ({
   default: (await import("./MppControls")).MppControls,

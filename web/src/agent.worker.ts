@@ -49,27 +49,30 @@ async function createAgent(
   tools: AgentControllerTools,
 ) {
   await paymentSessions.clear();
-  const [shellModule, mcpModule, toolModule] = await Promise.all([
-    import("./browserShell"),
+  const [runtime, mcpModule] = await Promise.all([
+    import("nanocodex/tools/browser").then(({ browser }) => browser({
+      threadId: start.threadId!,
+      origin: self.location.origin,
+      web: {
+        url: new URL("/api/tools/web-search", self.location.origin),
+        headers: { "x-nanocodex-request": "1" },
+      },
+      images: {
+        url: new URL("/api/tools/image-generation", self.location.origin),
+        headers: { "x-nanocodex-request": "1" },
+      },
+      recentImages: tools.recentImages,
+      rememberImage: tools.rememberImage,
+    })),
     import("./browserMcp"),
-    import("./browserTools"),
   ]);
-  const { execTool, instructions, projectInstructions, workspace } =
-    await shellModule.prepareBrowserShell(start.threadId!, self.location.origin);
   const common = {
-    filesystem: workspace,
+    filesystem: runtime.filesystem,
     filesystemTools: false,
-    instructions,
-    executionEnvironment: browserExecutionEnvironment(projectInstructions),
+    instructions: runtime.instructions,
+    executionEnvironment: browserExecutionEnvironment(runtime.projectInstructions),
     mcp: mcpModule.browserMcpConfiguration(self.location.origin),
-    tools: {
-      exec_command: execTool,
-      ...toolModule.createBrowserTools({
-        recentImages: tools.recentImages,
-        rememberImage: tools.rememberImage,
-        workspace,
-      }),
-    },
+    tools: runtime.tools,
     thinking: start.thinking,
     reasoningMode: start.reasoningMode,
   };

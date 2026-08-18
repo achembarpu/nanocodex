@@ -159,11 +159,14 @@ within(
   budgets.agentWorkerGzip,
 );
 
-const browserShellImport = workerSource.match(
-  /import\((?:`|'|")\.\/(browserShell-[^`'"]+\.js)(?:`|'|")\)/,
+const browserShellFile = await findLazyAsset(
+  workerSource,
+  (file, source) =>
+    /^browser-.*\.js$/.test(file) &&
+    source.includes("persistent browser filesystem rooted at /workspace"),
 );
-assert(browserShellImport, "the Agent Worker must lazy-load the browser shell");
-const browserShell = await fileStats([`assets/${browserShellImport[1]}`]);
+assert(browserShellFile, "the Agent Worker must lazy-load the browser shell");
+const browserShell = await fileStats([`assets/${browserShellFile}`]);
 within(
   "Browser shell JavaScript",
   browserShell.bytes,
@@ -344,6 +347,21 @@ function byteStats(source) {
     bytes: content.byteLength,
     gzipBytes: gzipSync(content, { level: 9 }).byteLength,
   };
+}
+
+async function findLazyAsset(source, matches, visited = new Set()) {
+  const imports = [...source.matchAll(
+    /import\((?:`|'|")\.\/([^`'"]+\.js)(?:`|'|")\)/g,
+  )].map((match) => match[1]);
+  for (const file of imports) {
+    if (visited.has(file)) continue;
+    visited.add(file);
+    const child = await readFile(join(assetsDirectory, file), "utf8");
+    if (matches(file, child)) return file;
+    const found = await findLazyAsset(child, matches, visited);
+    if (found) return found;
+  }
+  return undefined;
 }
 
 function within(name, actual, maximum) {

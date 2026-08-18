@@ -3,8 +3,7 @@ import { test } from "node:test";
 import { parsePatchFiles } from "@pierre/diffs";
 import git from "isomorphic-git";
 
-import { createBrowserBash } from "../src/browserShell.ts";
-import { createOpfsGitFs } from "../src/opfsGit.ts";
+import { createBrowserBash, createOpfsGitFs } from "nanocodex/tools/browser";
 import {
   MAX_COMMIT_HISTORY,
   MAX_COMMIT_PATCH_BYTES,

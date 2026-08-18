@@ -2,8 +2,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import git from "isomorphic-git";
 
-import { createBrowserBash, loadBrowserProjectInstructions } from "../src/browserShell.ts";
-import { createOpfsGitFs, type OpfsGitFs } from "../src/opfsGit.ts";
+import {
+  createBrowserBash,
+  createOpfsGitFs,
+  loadBrowserProjectInstructions,
+  type OpfsGitFs,
+} from "nanocodex/tools/browser";
 
 const observedLockSignals: Array<AbortSignal | undefined> = [];
 

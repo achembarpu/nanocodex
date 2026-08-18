@@ -21,6 +21,14 @@ import {
 } from "../browser/index.mjs";
 import type { WorkspaceEntry as BrowserWorkspaceEntry } from "../browser/workspace.mjs";
 import type { WorkspaceEntry as NodeWorkspaceEntry } from "../node/workspace.mjs";
+import {
+  imageGeneration,
+  updatePlan,
+  viewImage,
+  web,
+} from "../tools/index.mjs";
+import { browser as browserTools } from "../tools/browser/index.mjs";
+import { nanocodexTools } from "../tools/vite.mjs";
 
 declare const apiKey: string;
 declare const accountsWallet: AccountsWallet;
@@ -109,8 +117,33 @@ async function check() {
   await BrowserAgent.create({
     transport: BrowserTransport.openAi({ apiKey }),
     filesystem: browserWorkspace,
-    tools: [...BrowserSubagents.create()],
+    tools: [
+      web({ url: "https://example.com/tools/web" }),
+      imageGeneration({
+        url: "https://example.com/tools/images",
+        recentImages: () => [],
+        rememberImage: () => {},
+      }),
+      viewImage({ workspace: browserWorkspace }),
+      updatePlan(),
+      ...BrowserSubagents.create(),
+    ],
   });
+  const browserRuntime = await browserTools({
+    threadId: "thread-1",
+    origin: "https://example.com",
+    web: { url: "https://example.com/tools/web" },
+    images: { url: "https://example.com/tools/images" },
+    recentImages: () => [],
+    rememberImage: () => {},
+  });
+  await BrowserAgent.create({
+    transport: BrowserTransport.openAi({ apiKey }),
+    filesystem: browserRuntime.filesystem,
+    instructions: browserRuntime.instructions,
+    tools: [...browserRuntime.tools, ...BrowserSubagents.create()],
+  });
+  nanocodexTools().resolveId("node-rsa");
   // @ts-expect-error Rust extensions must come from a branded constructor.
   await Agent.create({ transport: Transport.openAi({ apiKey }), tools: [{ maxConcurrency: 8 }] });
   await BrowserAgent.create({
