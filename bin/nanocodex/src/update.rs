@@ -123,18 +123,11 @@ impl Update {
             .wrap_err("failed to create the update client")?;
         let release_description = self.release_description();
         let release_api = release_api(self.nightly, self.version.as_ref());
-        let release = client
-            .get(release_api.as_ref())
-            .header(header::ACCEPT, "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .send()
-            .await
-            .wrap_err_with(|| format!("failed to query the {release_description}"))?
-            .error_for_status()
-            .wrap_err_with(|| format!("GitHub did not return the {release_description}"))?
-            .json::<Release>()
-            .await
-            .wrap_err("GitHub returned invalid release metadata")?;
+        let mut release =
+            fetch_release(&client, release_api.as_ref(), &release_description).await?;
+        if self.nightly {
+            release = fetch_immutable_nightly(&client, &release).await?;
+        }
 
         let latest = if self.nightly {
             None
@@ -195,6 +188,29 @@ impl Update {
             Cow::Borrowed("latest stable Nanocodex release")
         }
     }
+}
+
+async fn fetch_release(client: &Client, url: &str, description: &str) -> Result<Release> {
+    client
+        .get(url)
+        .header(header::ACCEPT, "application/vnd.github+json")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .send()
+        .await
+        .wrap_err_with(|| format!("failed to query the {description}"))?
+        .error_for_status()
+        .wrap_err_with(|| format!("GitHub did not return the {description}"))?
+        .json::<Release>()
+        .await
+        .wrap_err_with(|| format!("GitHub returned invalid {description} metadata"))
+}
+
+async fn fetch_immutable_nightly(client: &Client, pointer: &Release) -> Result<Release> {
+    let tag = immutable_nightly_tag(pointer)?;
+    let url = format!("{TAGGED_RELEASE_API}/{tag}");
+    let release = fetch_release(client, &url, &format!("immutable {tag} release")).await?;
+    validate_immutable_nightly(&release, &tag)?;
+    Ok(release)
 }
 
 fn release_api(nightly: bool, version: Option<&Version>) -> Cow<'static, str> {
@@ -353,10 +369,7 @@ fn nightly_key(release: &Release) -> Result<String> {
 }
 
 fn nightly_key_for(release: &Release, os: &str, arch: &str) -> Result<String> {
-    let sha = &release.target_commitish;
-    if sha.len() != 40 || !sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-        bail!("nightly release target {sha:?} is not an exact Git commit");
-    }
+    let sha = exact_release_commit(release)?;
     let binary = find_asset(release, release_asset_name_for(os, arch)?)?;
     let mut key = format!("nightly-{}-{}", sha.to_ascii_lowercase(), binary.id);
     if let Some(guest_asset_name) = vm_guest_asset_name_for(os, arch) {
@@ -364,6 +377,47 @@ fn nightly_key_for(release: &Release, os: &str, arch: &str) -> Result<String> {
         key.push_str(&format!("-{}", guest.id));
     }
     Ok(key)
+}
+
+fn immutable_nightly_tag(pointer: &Release) -> Result<String> {
+    if pointer.tag_name != "nightly" {
+        bail!(
+            "GitHub returned release {} for the nightly release pointer",
+            pointer.tag_name
+        );
+    }
+    Ok(format!(
+        "nightly-{}",
+        exact_release_commit(pointer)?.to_ascii_lowercase()
+    ))
+}
+
+fn validate_immutable_nightly(release: &Release, expected_tag: &str) -> Result<()> {
+    if release.tag_name != expected_tag {
+        bail!(
+            "GitHub returned release {} for immutable nightly {expected_tag}",
+            release.tag_name
+        );
+    }
+    let expected_sha = expected_tag
+        .strip_prefix("nightly-")
+        .ok_or_else(|| eyre!("invalid immutable nightly tag {expected_tag:?}"))?;
+    let actual_sha = exact_release_commit(release)?;
+    if !actual_sha.eq_ignore_ascii_case(expected_sha) {
+        bail!("immutable nightly {expected_tag} targets {actual_sha}, expected {expected_sha}");
+    }
+    Ok(())
+}
+
+fn exact_release_commit(release: &Release) -> Result<&str> {
+    let sha = release.target_commitish.as_str();
+    if sha.len() != 40 || !sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!(
+            "release {} target {sha:?} is not an exact Git commit",
+            release.tag_name
+        );
+    }
+    Ok(sha)
 }
 
 fn find_asset<'a>(release: &'a Release, name: &str) -> Result<&'a ReleaseAsset> {
@@ -544,7 +598,7 @@ mod tests {
     #[test]
     fn nightly_versions_are_bound_to_the_commit_and_both_assets() {
         let release = Release {
-            tag_name: "nightly".to_owned(),
+            tag_name: "nightly-0123456789abcdef0123456789abcdef01234567".to_owned(),
             target_commitish: "0123456789abcdef0123456789abcdef01234567".to_owned(),
             assets: vec![
                 ReleaseAsset {
@@ -569,5 +623,53 @@ mod tests {
             Some(VM_GUEST_ASSET)
         );
         assert_eq!(vm_guest_asset_name_for("macos", "aarch64"), None);
+    }
+
+    #[test]
+    fn resolves_and_validates_the_immutable_nightly_release() {
+        let pointer = Release {
+            tag_name: "nightly".to_owned(),
+            target_commitish: "ABCDEF0123456789ABCDEF0123456789ABCDEF01".to_owned(),
+            assets: Vec::new(),
+        };
+        let tag = immutable_nightly_tag(&pointer).unwrap();
+        assert_eq!(tag, "nightly-abcdef0123456789abcdef0123456789abcdef01");
+
+        let release = Release {
+            tag_name: tag.clone(),
+            target_commitish: "abcdef0123456789abcdef0123456789abcdef01".to_owned(),
+            assets: Vec::new(),
+        };
+        validate_immutable_nightly(&release, &tag).unwrap();
+    }
+
+    #[test]
+    fn rejects_misdirected_nightly_release_metadata() {
+        let branch_target = Release {
+            tag_name: "nightly".to_owned(),
+            target_commitish: "master".to_owned(),
+            assets: Vec::new(),
+        };
+        assert!(immutable_nightly_tag(&branch_target).is_err());
+
+        let wrong_pointer = Release {
+            tag_name: "nightly-other".to_owned(),
+            target_commitish: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            assets: Vec::new(),
+        };
+        assert!(immutable_nightly_tag(&wrong_pointer).is_err());
+
+        let wrong_target = Release {
+            tag_name: "nightly-0123456789abcdef0123456789abcdef01234567".to_owned(),
+            target_commitish: "fedcba9876543210fedcba9876543210fedcba98".to_owned(),
+            assets: Vec::new(),
+        };
+        assert!(
+            validate_immutable_nightly(
+                &wrong_target,
+                "nightly-0123456789abcdef0123456789abcdef01234567"
+            )
+            .is_err()
+        );
     }
 }
