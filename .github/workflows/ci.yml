@@ -286,6 +286,7 @@ jobs:
           node-version: 22.13.0
           cache: npm
           cache-dependency-path: |
+            js/bindings/package-lock.json
             js/react/package-lock.json
             js/artifacts/package-lock.json
             js/tui/package-lock.json
@@ -297,6 +298,7 @@ jobs:
           path: js/bindings/pkg-web
       - name: Build local website packages
         run: |
+          npm ci --prefix js/bindings
           npm ci --prefix js/react
           npm ci --prefix js/artifacts
           npm run build --prefix js/artifacts
