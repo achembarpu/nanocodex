@@ -1,8 +1,7 @@
 import { createTwoFilesPatch, diffLines } from "diff";
-import "./browserBuffer.ts";
 import git, { type ReadCommitResult, type WalkerEntry } from "isomorphic-git";
 
-import type { OpfsGitFs } from "./opfsGit.ts";
+import type { OpfsGitFs } from "nanocodex/tools/browser";
 
 const directory = "/workspace";
 const textDecoder = new TextDecoder("utf-8", { fatal: true });
@@ -66,10 +65,7 @@ export type RepositorySnapshot = {
 export async function loadThreadRepositorySnapshot(
   includeHistory = true,
 ): Promise<RepositorySnapshot> {
-  const [{ inspectThreadGit }, { getBrowserThread }] = await Promise.all([
-    import("./threadGit.ts"),
-    import("./workspace.ts"),
-  ]);
+  const { getBrowserThread, inspectThreadGit } = await import("nanocodex/tools/browser");
   const thread = getBrowserThread();
   const snapshot = await inspectThreadGit(thread, (fs) => buildThreadRepositorySnapshot(
     fs,

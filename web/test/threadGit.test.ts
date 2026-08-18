@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { browserThread } from "../src/threadGit.ts";
+import { browserThread } from "nanocodex/tools/browser";
 
 test("worker-owned thread metadata keeps the shareable thread identity", () => {
   const id = "12345678-1234-4123-8123-123456789abc";

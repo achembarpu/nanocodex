@@ -34,11 +34,14 @@ test("the packed package installs and runs every public entry point", async () =
     const [packed] = JSON.parse(stdout);
     assert.equal(packed.name, packageJson.name);
     assert.equal(packed.version, packageJson.version);
-    assert.ok(packed.size <= 2_450_000, `compressed package grew to ${packed.size} bytes`);
+    // The package now owns the browser shell source while its language and SSH
+    // dependencies remain external and runtime-lazy. npm's tar output differs
+    // slightly across platforms, so retain a tight portable compressed gate.
+    assert.ok(packed.size <= 2_500_000, `compressed package grew to ${packed.size} bytes`);
     // Both WASM targets include the canonical Rust apply_patch planner and the
     // full JSON-Schema-backed subagent runtime.
     assert.ok(
-      packed.unpackedSize <= 7_900_000,
+      packed.unpackedSize <= 8_050_000,
       `unpacked package grew to ${packed.unpackedSize} bytes`,
     );
     assert.equal(
@@ -62,12 +65,16 @@ test("the packed package installs and runs every public entry point", async () =
       import { dirname, resolve } from "node:path";
       import { fileURLToPath } from "node:url";
       import { Actions } from "nanocodex";
+      import { web } from "nanocodex/tools";
+      import { nanocodexTools } from "nanocodex/tools/vite";
       import { Agent as NodeAgent, Subagents as NodeSubagents, Transport as NodeTransport, Workspace as NodeWorkspace } from "nanocodex/node";
       import { Agent as BrowserAgent, Subagents as BrowserSubagents, Transport as BrowserTransport, Workspace as BrowserWorkspace } from "nanocodex/browser";
 
       assert.equal(typeof Actions.turn.prompt, "function");
       assert.equal(typeof NodeWorkspace.open, "function");
       assert.equal(typeof BrowserWorkspace.open, "function");
+      assert.equal(web({ url: "https://example.test/tools/web" }).name, "web__run");
+      assert.match(nanocodexTools().resolveId("node-rsa"), /unsupportedNodeRsa\.mjs$/);
       const nodeAgent = await NodeAgent.create({
         transport: NodeTransport.openAi({ apiKey: "package-test" }),
         tools: [...NodeSubagents.create({ maxConcurrency: 2 })],

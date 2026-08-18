@@ -9,6 +9,7 @@ import type {
   TurnResult,
 } from "nanocodex";
 import { Agent, Subagents, Transport } from "nanocodex/browser";
+import { web } from "nanocodex/tools";
 import nanocodexWasm from "./nanocodex.wasm";
 import {
   cloudflareSandboxTools,
@@ -62,6 +63,8 @@ export interface Env {
   CHATGPT_FEDRAMP?: string;
   CHATGPT_REFRESH_TOKEN?: string;
   CHATGPT_ISSUER?: string;
+  WEB_TOOL_URL?: string;
+  WEB_TOOL_TOKEN?: string;
 }
 
 type SessionRow = {
@@ -517,6 +520,7 @@ export class NanocodexSession extends DurableObject<Env> {
       // typed host bridge without dynamic code generation.
       toolMode: "direct",
       tools: [
+        ...cloudflareWebTools(this.env),
         ...Object.entries(cloudflareSandboxTools(
           this.env.Sandbox,
           session.session_id,
@@ -686,6 +690,20 @@ export class NanocodexSession extends DurableObject<Env> {
     if (socket.readyState !== WebSocket.OPEN) return;
     try { socket.send(encoded); } catch { closeSocket(socket, 1011, "send failed"); }
   }
+}
+
+function cloudflareWebTools(env: Env) {
+  if (!env.WEB_TOOL_URL) return [];
+  const url = new URL(env.WEB_TOOL_URL);
+  if (url.protocol !== "https:" && url.hostname !== "127.0.0.1" && url.hostname !== "localhost") {
+    throw new Error("WEB_TOOL_URL must use HTTPS outside local development");
+  }
+  return [web({
+    url,
+    headers: env.WEB_TOOL_TOKEN
+      ? { authorization: `Bearer ${env.WEB_TOOL_TOKEN}` }
+      : undefined,
+  })];
 }
 
 async function openAiWebSocket(

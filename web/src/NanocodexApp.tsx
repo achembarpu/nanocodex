@@ -32,7 +32,7 @@ import { fuzzyScore } from "./fuzzy";
 import { pathForSurface, surfaceFromUrl, type Surface } from "./navigation";
 import type { PublishedRepositorySnapshot } from "./publishedRepository";
 import type { HarnessCommit } from "./threadRepositorySnapshot";
-import { getBrowserThread } from "./workspace";
+import { getBrowserThread } from "nanocodex/tools/browser";
 
 const loadEvals = () =>
   import("./Evals").then((module) => ({ default: module.Evals }));

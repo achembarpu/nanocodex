@@ -19,7 +19,7 @@ import {
   getBrowserThread,
   openKernelWorkspace,
   subscribeThreadWorkspaceChanges,
-} from "./workspace";
+} from "nanocodex/tools/browser";
 
 export const COMPACT_WORKSPACE_MEDIA_QUERY = "(max-width: 740px), (pointer: coarse) and (orientation: landscape) and (max-width: 950px)";
 

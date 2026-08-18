@@ -94,6 +94,109 @@ const agent = await Agent.create({
 erased at runtime, so provide JSON Schema only when the model needs a precise
 argument contract, as `lookup_order` does above.
 
+## Standard web and browser tools
+
+`nanocodex/tools` contains composable named tools rather than another agent or
+runtime. Each factory returns an entry that can sit beside application tools
+and Rust/WASM extensions in the same array:
+
+```js
+import { Agent, Subagents, Transport } from "nanocodex/browser";
+import {
+  imageGeneration,
+  updatePlan,
+  web,
+} from "nanocodex/tools";
+
+const agent = await Agent.create({
+  transport: Transport.hostManaged({
+    websocketUrl: "/api/responses",
+    createWebSocket: (endpoint) => new WebSocket(endpoint),
+  }),
+  tools: [
+    web(),
+    imageGeneration({
+      recentImages: (sessionId, count) => images.get(sessionId).slice(-count),
+      rememberImage: (sessionId, imageUrl) => images.get(sessionId).push(imageUrl),
+    }),
+    updatePlan(),
+    myApplicationTool,
+    ...Subagents.create({ maxConcurrency: 8 }),
+  ],
+});
+```
+
+The web and image factories use the canonical OpenAI/Codex tool names, argument
+schemas, bounds, and image-edit modes, and normalize common malformed model
+arguments before dispatch. In a browser, they default to the same-origin
+`/api/tools/web-search` and `/api/tools/image-generation` routes. The host owns
+only a bounded JSON endpoint, credentials, authorization, and persistence.
+`web(...)` posts `{ commands, session_id }`; `imageGeneration(...)` posts
+`{ images, prompt }`. Pass `url` when the host route lives elsewhere.
+This same adapter works inside a Cloudflare Worker or Durable Object:
+
+```js
+import { Agent, Subagents, Transport } from "nanocodex/browser";
+import { web } from "nanocodex/tools";
+
+const agent = await Agent.create({
+  module: env.NANOCODEX_WASM,
+  transport: Transport.hostManaged({
+    websocketUrl: env.RESPONSES_WEBSOCKET_URL,
+    createWebSocket: (endpoint) => new WebSocket(endpoint),
+  }),
+  toolMode: "direct",
+  tools: [
+    web({
+      url: env.WEB_TOOL_URL,
+      headers: { authorization: `Bearer ${env.WEB_TOOL_TOKEN}` },
+    }),
+    ...Subagents.create(),
+  ],
+});
+```
+
+For a browser Agent Worker, `browser(...)` composes the same tools with one
+persistent OPFS workspace and a lazy WASM-backed shell (Python through Pyodide,
+C/C++ through wasm-clang, plus browser Git and bounded commands):
+
+```js
+import { browser } from "nanocodex/tools/browser";
+
+const runtime = await browser({
+  threadId,
+  recentImages,
+  rememberImage,
+});
+
+const agent = await Agent.create({
+  transport,
+  filesystem: runtime.filesystem,
+  instructions: runtime.instructions,
+  executionEnvironment: {
+    currentDate,
+    timezone,
+    projectInstructions: runtime.projectInstructions,
+  },
+  tools: [...runtime.tools, ...Subagents.create()],
+});
+```
+
+`browser(...)` runs in a browser Worker because OPFS is a browser capability;
+use the individual factories in server-side Cloudflare Workers. Vite consumers
+install the package-owned SSH compatibility adapter in both page and nested
+Worker plugin graphs:
+
+```js
+import { nanocodexTools } from "nanocodex/tools/vite";
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  plugins: [nanocodexTools()],
+  worker: { format: "es", plugins: () => [nanocodexTools()] },
+});
+```
+
 This is what loading a Rust-written tool from JavaScript looks like here.
 `nanocodex-subagents` is statically linked into `nanocodex.wasm`; importing the
 module loads that Rust code, and spreading `Subagents.create()` into `tools`
