@@ -14,6 +14,15 @@ import { createBrowserHost } from "./host.mjs";
 
 let initialized;
 
+export function prewarm(options = {}) {
+  return initialized ||= (options.module === undefined
+    ? init()
+    : init({ module_or_path: options.module })).catch((error) => {
+      initialized = undefined;
+      throw error;
+    });
+}
+
 export function create(options = {}) {
   const {
     apiKey,
@@ -26,6 +35,7 @@ export function create(options = {}) {
     thinking,
     reasoningMode,
     fastMode,
+    websocketWarmup,
     instructions,
     sessionId,
     workspace,
@@ -72,8 +82,7 @@ export function create(options = {}) {
       try {
         activateHost(host);
         await host.ready();
-        initialized ||= module === undefined ? init() : init({ module_or_path: module });
-        await initialized;
+        await prewarm({ module });
         activateHost(host);
         return new Nanocodex(JSON.stringify(toWasmConfig({
           apiKey: apiKey ?? (mpp === undefined ? "host-managed" : "mpp-managed"),
@@ -81,6 +90,7 @@ export function create(options = {}) {
             ? undefined
             : "wss://openai.mpp.tempo.xyz/v1/responses"),
           apiBaseUrl,
+          websocketWarmup,
           ...config,
         })));
       } catch (error) {

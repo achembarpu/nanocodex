@@ -1151,7 +1151,7 @@ const Footer = memo(function Footer({ tui, conversation, mode, workerStatus, wor
     : workerStatus === "error"
       ? workerError ?? "Agent worker failed"
       : workerStatus === "starting"
-        ? "Loading Rust/WASM..."
+        ? conversation.status
         : workerStatus === "idle" || !enabled
           ? unavailableMessage
           : conversation.status;

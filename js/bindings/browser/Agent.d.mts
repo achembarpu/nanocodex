@@ -17,6 +17,9 @@ type ToolExposureOptions =
   | { mcp?: false | undefined; toolMode?: "code" | "direct" | undefined }
   | { mcp: McpServers; toolMode?: "code" | undefined };
 
+/** Downloads and compiles the browser runtime without opening an agent session. */
+export function prewarm(options?: { module?: unknown }): Promise<void>;
+
 /** Creates a browser- or Worker-hosted Rust/WASM Agent. */
 export function create(options?: create.Options): Promise<create.ReturnType>;
 export declare namespace create {
@@ -38,6 +41,8 @@ export declare namespace create {
     /** Optional CSP-compatible Code Mode evaluator, such as createQuickJsEvaluator(). */
     codeEvaluator?: CodeEvaluator | undefined;
     tools?: ToolMap | undefined;
+    /** Sends an optional non-generating request before the first turn. */
+    websocketWarmup?: boolean | undefined;
     websocketUrl?: string | undefined;
   };
   type ReturnType = Agent;

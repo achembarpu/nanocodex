@@ -24,13 +24,18 @@ const SESSION_IDS = Object.freeze({
   shutdown: "018f1f9a-7b3c-7a17-8000-000000000017",
 });
 
+const createWarmAgent = (options) => Agent.create({
+  ...options,
+  websocketWarmup: true,
+});
+
 test("prompt acceptance is separate from results and healthy follow-ons reuse one socket", async () => {
   const server = await startResponsesServer();
   const firstSeen = deferred();
   const releaseFirst = deferred();
   const events = [];
   let socketClosed;
-  const agent = await Agent.create({
+  const agent = await createWarmAgent({
     apiKey: "test-key",
     websocketUrl: server.url,
     thinking: "none",
@@ -97,7 +102,7 @@ test("steering joins the active turn at the next model boundary", async () => {
   const server = await startResponsesServer();
   const initialSeen = deferred();
   const releaseInitial = deferred();
-  const agent = await Agent.create({
+  const agent = await createWarmAgent({
     apiKey: "test-key",
     websocketUrl: server.url,
     thinking: "none",
@@ -135,7 +140,7 @@ test("steering joins the active turn at the next model boundary", async () => {
 test("cancellation stops the active socket and replays only committed and aborted input", async () => {
   const server = await startResponsesServer();
   const activeSeen = deferred();
-  const agent = await Agent.create({
+  const agent = await createWarmAgent({
     apiKey: "test-key",
     websocketUrl: server.url,
     thinking: "none",
@@ -184,7 +189,7 @@ test("graceful shutdown cancels active work and joins transport cleanup exactly 
   const server = await startResponsesServer();
   const activeSeen = deferred();
   const socketClosed = deferred();
-  const agent = await Agent.create({
+  const agent = await createWarmAgent({
     apiKey: "test-key",
     websocketUrl: server.url,
     thinking: "none",
@@ -218,7 +223,7 @@ test("graceful shutdown cancels active work and joins transport cleanup exactly 
   await agent.session.shutdown();
   turn.dispose();
 
-  const replacement = await Agent.create({
+  const replacement = await createWarmAgent({
     apiKey: "test-key",
     websocketUrl: server.url,
     thinking: "none",
@@ -231,7 +236,7 @@ test("graceful shutdown cancels active work and joins transport cleanup exactly 
 test("a replacement socket drops the remote response ID and replays committed history", async () => {
   const server = await startResponsesServer();
   const firstClosed = deferred();
-  const agent = await Agent.create({
+  const agent = await createWarmAgent({
     apiKey: "test-key",
     websocketUrl: server.url,
     thinking: "none",
@@ -276,7 +281,7 @@ test("a replacement socket drops the remote response ID and replays committed hi
 
 test("manual compaction and historical forks preserve exact committed boundaries", async () => {
   const server = await startResponsesServer();
-  const agent = await Agent.create({
+  const agent = await createWarmAgent({
     apiKey: "test-key",
     websocketUrl: server.url,
     thinking: "none",

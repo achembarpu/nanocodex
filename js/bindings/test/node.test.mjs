@@ -15,6 +15,11 @@ const SESSION_IDS = Object.freeze({
   left: "018f1f9a-7b3c-7a05-8000-000000000005",
   right: "018f1f9a-7b3c-7a06-8000-000000000006",
 });
+
+const createWarmAgent = (options) => Agent.create({
+  ...options,
+  websocketWarmup: true,
+});
 const PACKAGE_VERSION = JSON.parse(
   await readFile(new URL("../package.json", import.meta.url), "utf8"),
 ).version;
@@ -133,7 +138,7 @@ test("Node host preserves structured WebSocket handshake rejection detail", asyn
 test("Node-hosted WASM preserves follow-ons, cache identity, events, and custom tools", async () => {
   const server = await startServer();
   const events = [];
-  const agent = await Agent.create({
+  const agent = await createWarmAgent({
     apiKey: "test-key",
     websocketUrl: server.url,
     thinking: "none",
@@ -242,7 +247,7 @@ test("Node-hosted WASM preserves follow-ons, cache identity, events, and custom 
 
 test("WASM snapshots resume authoritative history in a fresh agent", async () => {
   const originalServer = await startServer();
-  const original = await Agent.create({
+  const original = await createWarmAgent({
     apiKey: "test-key",
     websocketUrl: originalServer.url,
     thinking: "none",
@@ -269,7 +274,7 @@ test("WASM snapshots resume authoritative history in a fresh agent", async () =>
   await originalServer.close();
 
   const resumedServer = await startServer();
-  const resumed = await Agent.create({
+  const resumed = await createWarmAgent({
     apiKey: "test-key",
     websocketUrl: resumedServer.url,
     thinking: "none",
@@ -344,7 +349,7 @@ test("Node can load an application-owned web module and resume Codex rollout his
       },
     ],
   };
-  const agent = await Agent.create({
+  const agent = await createWarmAgent({
     apiKey: "test-key",
     module: wasm,
     websocketUrl: server.url,
@@ -375,7 +380,7 @@ test("Node can load an application-owned web module and resume Codex rollout his
 test("independent agents keep their host connections isolated", async () => {
   const leftServer = await startServer();
   const rightServer = await startServer();
-  const left = await Agent.create({
+  const left = await createWarmAgent({
     apiKey: "left-key",
     websocketUrl: leftServer.url,
     thinking: "none",
@@ -388,7 +393,7 @@ test("independent agents keep their host connections isolated", async () => {
       },
     },
   });
-  const right = await Agent.create({
+  const right = await createWarmAgent({
     apiKey: "right-key",
     websocketUrl: rightServer.url,
     thinking: "none",

@@ -23,6 +23,8 @@ export declare namespace create {
     filesystem?: Workspace | undefined;
     module?: unknown;
     tools?: ToolMap | undefined;
+    /** Sends an optional non-generating request before the first turn. */
+    websocketWarmup?: boolean | undefined;
     websocketUrl?: string | undefined;
   };
   type ReturnType = Agent;

@@ -5,6 +5,11 @@ import WebSocket, { WebSocketServer } from "ws";
 
 import { Agent } from "../browser/index.mjs";
 
+const createWarmAgent = (options) => Agent.create({
+  ...options,
+  websocketWarmup: true,
+});
+
 test("web-target WASM runs the shared model loop through the browser host", async () => {
   const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
   await new Promise((resolve, reject) => {
@@ -15,7 +20,7 @@ test("web-target WASM runs the shared model loop through the browser host", asyn
   const events = [];
   const wasm = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
   const endpoint = `ws://127.0.0.1:${server.address().port}`;
-  const agent = await Agent.create({
+  const agent = await createWarmAgent({
     apiKey: "test-key",
     WebSocketImpl: WebSocket,
     module: wasm,
@@ -115,7 +120,7 @@ test("web-target WASM directly dispatches a CSP-safe application tool", async ()
   const connection = new Promise((resolve) => server.once("connection", resolve));
   const events = [];
   const wasm = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
-  const agent = await Agent.create({
+  const agent = await createWarmAgent({
     apiKey: "test-key",
     WebSocketImpl: WebSocket,
     module: wasm,
@@ -220,7 +225,7 @@ test("web-target WASM keeps remote MCP deferred behind tool_search and Code Mode
       };
     },
   };
-  const agent = await Agent.create({
+  const agent = await createWarmAgent({
     apiKey: "test-key",
     WebSocketImpl: WebSocket,
     module: wasm,

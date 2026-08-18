@@ -148,6 +148,8 @@ struct WasmConfig {
     reasoning_mode: String,
     #[serde(default)]
     fast_mode: bool,
+    #[serde(default)]
+    websocket_warmup: bool,
     #[serde(default = "default_websocket_url")]
     websocket_url: String,
     #[serde(default = "default_api_base_url")]
@@ -192,6 +194,7 @@ impl WasmNanocodex {
             .thinking(thinking)
             .reasoning_mode(reasoning_mode)
             .fast_mode(config.fast_mode)
+            .websocket_warmup(config.websocket_warmup)
             .websocket_url(config.websocket_url)
             .api_base_url(config.api_base_url)
             .host_transport(JavaScriptResponsesHost)

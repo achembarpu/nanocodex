@@ -22,6 +22,7 @@ export function create(options = {}) {
     thinking,
     reasoningMode,
     fastMode,
+    websocketWarmup,
     instructions,
     sessionId,
     workspace,
@@ -76,6 +77,7 @@ export function create(options = {}) {
             ? undefined
             : "wss://openai.mpp.tempo.xyz/v1/responses"),
           apiBaseUrl,
+          websocketWarmup,
           ...config,
         })));
       } catch (error) {
