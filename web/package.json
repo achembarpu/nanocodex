@@ -18,8 +18,8 @@
     "build": "tsc --noEmit && vite build && npm run check:bundle",
     "check:bundle": "node scripts/check-bundle.mjs",
     "preview": "vite preview",
-    "deploy:preview": "npm run build && wrangler deploy --env preview",
-    "deploy": "npm run build && wrangler deploy"
+    "deploy:preview": "NANOCODEX_COMMIT_LIMIT=500 npm run build && wrangler deploy --env preview",
+    "deploy": "NANOCODEX_COMMIT_LIMIT=500 npm run build && wrangler deploy"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.0",
