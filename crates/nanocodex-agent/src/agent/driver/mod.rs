@@ -2,7 +2,7 @@ mod branch;
 mod control;
 mod telemetry;
 
-use super::durability::DurableAdmission;
+use super::execution::AdmittedExecution;
 use super::*;
 pub(super) use branch::{AgentOrigin, BranchSpawner};
 pub(super) use control::DriverShutdown;
@@ -23,7 +23,7 @@ pub(super) struct AgentDriver<S> {
     pub(super) spawner: BranchSpawner<S>,
     pub(super) initial_model: Option<PreparedCheckpoint>,
     pub(super) origin: AgentOrigin,
-    pub(super) durability: Durability,
+    pub(super) execution: Execution,
 }
 
 impl<S> AgentDriver<S>
@@ -95,7 +95,7 @@ where
                         QueuedTurn::Pending {
                             key,
                             prompt,
-                            durable_operation,
+                            execution_operation,
                             thinking,
                             fast_mode,
                             parent,
@@ -105,7 +105,8 @@ where
                             break Command::Prompt {
                                 key,
                                 prompt,
-                                durable_operation: durable_operation.map(PromptOperation::Admitted),
+                                execution_operation: execution_operation
+                                    .map(ExecutionOperation::Admitted),
                                 accepted: None,
                                 thinking: Some(thinking),
                                 fast_mode: Some(fast_mode),
@@ -116,7 +117,7 @@ where
                         }
                         QueuedTurn::Cancelled {
                             prompt,
-                            durable_operation,
+                            execution_operation,
                             thinking,
                             fast_mode,
                             parent,
@@ -166,8 +167,8 @@ where
                             )?;
                             model.set_events(self.events.clone());
                             drop(_guard);
-                            let outcome = if let Some(operation_id) = durable_operation {
-                                self.durability
+                            let outcome = if let Some(operation_id) = execution_operation {
+                                self.execution
                                     .cancel_operation(&operation_id)
                                     .await
                                     .and(Err(NanocodexError::TurnCancelled))
@@ -184,7 +185,7 @@ where
                         commands_open = false;
                         continue;
                     };
-                    let Some(command) = accept_durable_command(&self.durability, command).await
+                    let Some(command) = accept_execution_command(&self.execution, command).await
                     else {
                         continue;
                     };
@@ -217,7 +218,7 @@ where
                     Command::Prompt {
                         key,
                         prompt,
-                        durable_operation: None,
+                        execution_operation: None,
                         accepted: None,
                         thinking: None,
                         fast_mode: None,
@@ -231,7 +232,7 @@ where
             let Command::Prompt {
                 key,
                 prompt,
-                durable_operation,
+                execution_operation,
                 accepted: _,
                 thinking,
                 fast_mode,
@@ -275,7 +276,7 @@ where
                     );
                     drop(parent);
                     let compact_started = web_time::Instant::now();
-                    let durability_turn = self.durability.start_compaction(default_thinking);
+                    let execution_turn = self.execution.start_compaction(default_thinking);
                     let mut compact_replaced = false;
                     let (cancel_compaction, mut cancel_compaction_rx) = oneshot::channel();
                     let mut cancel_compaction = Some(cancel_compaction);
@@ -299,8 +300,8 @@ where
                             outcome = &mut execution => break outcome,
                             command = self.commands.recv() => {
                                 let command = match command {
-                                    Some(command) => accept_durable_command(
-                                        &self.durability,
+                                    Some(command) => accept_execution_command(
+                                        &self.execution,
                                         command,
                                     ).await,
                                     None => None,
@@ -309,7 +310,7 @@ where
                                     Some(Command::Prompt {
                                         key,
                                         prompt,
-                                        durable_operation,
+                                        execution_operation,
                                         accepted: _,
                                         thinking: _,
                                         fast_mode: _,
@@ -317,12 +318,12 @@ where
                                         events,
                                         result,
                                     }) => {
-                                        let durable_operation =
-                                            durable_operation.map(PromptOperation::into_id);
+                                        let execution_operation =
+                                            execution_operation.map(ExecutionOperation::into_id);
                                         queued_turns.push_back(QueuedTurn::Pending {
                                             key,
                                             prompt,
-                                            durable_operation,
+                                            execution_operation,
                                             thinking: default_thinking,
                                             fast_mode: default_fast_mode,
                                             parent,
@@ -341,7 +342,7 @@ where
                                         queued_turns.push_back(QueuedTurn::Pending {
                                             key,
                                             prompt,
-                                            durable_operation: None,
+                                            execution_operation: None,
                                             thinking: default_thinking,
                                             fast_mode: default_fast_mode,
                                             parent,
@@ -438,10 +439,10 @@ where
                             // contract as completed prompt turns and must not
                             // roll back or hide the safe fork checkpoint.
                             latest_fork_checkpoint = Some(Arc::clone(&checkpoint));
-                            self.durability
+                            self.execution
                                 .persist_compaction(
                                     &checkpoint,
-                                    durability_turn.completed_without_message(),
+                                    execution_turn.completed_without_message(),
                                 )
                                 .await
                         }
@@ -452,13 +453,13 @@ where
                                 checkpoint,
                             ));
                             latest_fork_checkpoint = Some(Arc::clone(&checkpoint));
-                            let durability_turn = if compact_replaced {
-                                durability_turn.replaced()
+                            let execution_turn = if compact_replaced {
+                                execution_turn.replaced()
                             } else {
-                                durability_turn.interrupted()
+                                execution_turn.interrupted()
                             };
-                            self.durability
-                                .persist(&checkpoint, durability_turn)
+                            self.execution
+                                .persist(&checkpoint, execution_turn)
                                 .instrument(span.clone())
                                 .await?;
                             model.replace_client(ResponsesClient::new((self
@@ -475,8 +476,8 @@ where
                                 checkpoint,
                             ));
                             latest_fork_checkpoint = Some(Arc::clone(&checkpoint));
-                            self.durability
-                                .persist(&checkpoint, durability_turn.failed())
+                            self.execution
+                                .persist(&checkpoint, execution_turn.failed())
                                 .instrument(span.clone())
                                 .await?;
                             Err(error)
@@ -527,7 +528,7 @@ where
                 );
                 continue;
             };
-            let durable_operation = durable_operation.map(PromptOperation::into_id);
+            let execution_operation = execution_operation.map(ExecutionOperation::into_id);
             let thinking = thinking.unwrap_or(default_thinking);
             let fast_mode = fast_mode.unwrap_or(default_fast_mode);
             turn_index += 1;
@@ -562,20 +563,20 @@ where
                     );
                 });
             }
-            let durability_turn =
-                self.durability
-                    .start_turn(&prompt, thinking, durable_operation.clone());
-            if let Err(error) = durability_turn.begin().await {
-                if let Some(operation_id) = &durable_operation {
-                    self.durability.release_claim(operation_id).await;
+            let execution_turn =
+                self.execution
+                    .start_turn(&prompt, thinking, execution_operation.clone());
+            if let Err(error) = execution_turn.begin().await {
+                if let Some(operation_id) = &execution_operation {
+                    self.execution.release_claim(operation_id).await;
                 }
                 drop(result.send(Err(error)));
                 continue;
             }
-            let durable_base_checkpoint = durable_operation
+            let execution_base_checkpoint = execution_operation
                 .as_ref()
                 .map(|_| latest_fork_checkpoint.clone());
-            let durable_steps = durability_turn.steps();
+            let execution_steps = execution_turn.steps();
             let (steers, steer_rx) = mpsc::channel(STEER_CAPACITY);
             let (cancel, cancel_rx) = oneshot::channel();
             let (fork_snapshots, mut fork_snapshot_rx) = watch::channel(None);
@@ -594,7 +595,7 @@ where
                         steer_rx,
                         cancel_rx,
                         fork_snapshots,
-                        durable_steps,
+                        execution_steps,
                     )
                     .instrument(turn_span.clone()),
             );
@@ -621,8 +622,8 @@ where
                     outcome = &mut execution => break outcome,
                     command = self.commands.recv() => {
                         let command = match command {
-                            Some(command) => accept_durable_command(
-                                &self.durability,
+                            Some(command) => accept_execution_command(
+                                &self.execution,
                                 command,
                             ).await,
                             None => None,
@@ -631,7 +632,7 @@ where
                             Some(Command::Prompt {
                                 key,
                                 prompt,
-                                durable_operation,
+                                execution_operation,
                                 accepted: _,
                                 thinking: _,
                                 fast_mode: _,
@@ -639,12 +640,12 @@ where
                                 events,
                                 result,
                             }) => {
-                                let durable_operation =
-                                    durable_operation.map(PromptOperation::into_id);
+                                let execution_operation =
+                                    execution_operation.map(ExecutionOperation::into_id);
                                 queued_turns.push_back(QueuedTurn::Pending {
                                     key,
                                     prompt,
-                                    durable_operation,
+                                    execution_operation,
                                     thinking: default_thinking,
                                     fast_mode: default_fast_mode,
                                     parent,
@@ -804,11 +805,11 @@ where
                         thread_model,
                         checkpoint,
                     ));
-                    let durability_turn =
-                        durability_turn.completed(final_message.clone(), usage.clone());
+                    let execution_turn =
+                        execution_turn.completed(final_message.clone(), usage.clone());
                     let persisted = self
-                        .durability
-                        .persist(&checkpoint, durability_turn)
+                        .execution
+                        .persist(&checkpoint, execution_turn)
                         .instrument(turn_span.clone())
                         .await;
                     latest_fork_checkpoint = Some(Arc::clone(&checkpoint));
@@ -827,10 +828,10 @@ where
                         thread_model,
                         checkpoint,
                     ));
-                    let durability_turn = durability_turn.interrupted();
+                    let execution_turn = execution_turn.interrupted();
                     let persisted = self
-                        .durability
-                        .persist(&checkpoint, durability_turn)
+                        .execution
+                        .persist(&checkpoint, execution_turn)
                         .instrument(turn_span.clone())
                         .await;
                     latest_fork_checkpoint = Some(Arc::clone(&checkpoint));
@@ -845,22 +846,22 @@ where
                         thread_model,
                         checkpoint,
                     ));
-                    let durability_turn = durability_turn.failed();
+                    let execution_turn = execution_turn.failed();
                     let persisted = self
-                        .durability
-                        .persist(&checkpoint, durability_turn)
+                        .execution
+                        .persist(&checkpoint, execution_turn)
                         .instrument(turn_span.clone())
                         .await;
                     latest_fork_checkpoint = Some(checkpoint);
                     (persisted.and(Err(error)), false)
                 }
                 Err(error) => {
-                    if matches!(error, NanocodexError::Durability(_)) {
+                    if matches!(error, NanocodexError::ExecutionPolicy { .. }) {
                         (Err(error), false)
                     } else {
                         let persisted = self
-                            .durability
-                            .fail_without_checkpoint(durability_turn)
+                            .execution
+                            .fail_without_checkpoint(execution_turn)
                             .instrument(turn_span.clone())
                             .await;
                         (persisted.and(Err(error)), false)
@@ -868,7 +869,7 @@ where
                 }
             };
             if outcome.is_err()
-                && let Some(base_checkpoint) = durable_base_checkpoint
+                && let Some(base_checkpoint) = execution_base_checkpoint
             {
                 latest_fork_checkpoint = base_checkpoint.clone();
                 model = model_from_checkpoint(
@@ -959,11 +960,11 @@ where
     }
 }
 
-async fn accept_durable_command(durability: &Durability, command: Command) -> Option<Command> {
+async fn accept_execution_command(execution: &Execution, command: Command) -> Option<Command> {
     let Command::Prompt {
         key,
         prompt,
-        durable_operation: Some(operation),
+        execution_operation: Some(operation),
         accepted: Some(accepted),
         thinking,
         fast_mode,
@@ -975,27 +976,29 @@ async fn accept_durable_command(durability: &Durability, command: Command) -> Op
         return Some(command);
     };
     let admission = match operation {
-        PromptOperation::Caller(operation_id) => durability
+        ExecutionOperation::Caller(operation_id) => execution
             .admit(&operation_id, &prompt)
             .await
             .map(|admission| (operation_id, admission)),
-        PromptOperation::Automatic(candidate_operation_id) => {
-            durability
+        ExecutionOperation::Automatic(candidate_operation_id) => {
+            execution
                 .admit_automatic(candidate_operation_id, &prompt)
                 .await
         }
-        PromptOperation::Admitted(operation_id) => Ok((operation_id, DurableAdmission::Execute)),
+        ExecutionOperation::Admitted(operation_id) => {
+            Ok((operation_id, AdmittedExecution::Execute))
+        }
     };
     match admission {
-        Ok((operation_id, DurableAdmission::Execute)) => {
+        Ok((operation_id, AdmittedExecution::Execute)) => {
             if accepted.send(Ok(())).is_err() {
-                durability.release_claim(&operation_id).await;
+                execution.release_claim(&operation_id).await;
                 return None;
             }
             Some(Command::Prompt {
                 key,
                 prompt,
-                durable_operation: Some(PromptOperation::Admitted(operation_id)),
+                execution_operation: Some(ExecutionOperation::Admitted(operation_id)),
                 accepted: None,
                 thinking,
                 fast_mode,
@@ -1004,7 +1007,7 @@ async fn accept_durable_command(durability: &Durability, command: Command) -> Op
                 result,
             })
         }
-        Ok((_, DurableAdmission::Completed { output, snapshot })) => {
+        Ok((_, AdmittedExecution::Completed { output, snapshot })) => {
             drop(accepted.send(Ok(())));
             drop(result.send(Ok(TurnResult {
                 final_message: output.final_message,
@@ -1013,7 +1016,7 @@ async fn accept_durable_command(durability: &Durability, command: Command) -> Op
             })));
             None
         }
-        Ok((_, DurableAdmission::Cancelled)) => {
+        Ok((_, AdmittedExecution::Cancelled)) => {
             drop(accepted.send(Err(NanocodexError::TurnCancelled)));
             None
         }

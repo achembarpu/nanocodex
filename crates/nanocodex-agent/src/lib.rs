@@ -14,15 +14,15 @@ mod agent;
 mod error;
 mod model;
 mod prompt_cache;
-/// Portable durable execution journals and host-store contracts.
-pub mod durability {
-    pub use nanocodex_durability::*;
+/// Neutral interception contract implemented by optional execution layers.
+pub mod execution {
+    pub use crate::agent::execution::*;
 }
 #[cfg(not(target_family = "wasm"))]
 #[cfg_attr(docsrs, doc(cfg(not(target_family = "wasm"))))]
 /// Codex-compatible durable rollout recording and restoration.
 pub mod rollout;
-/// Durable agent session identities and snapshots.
+/// Agent session identities and serializable resume snapshots.
 pub mod session;
 /// Per-turn token accounting and USD estimates.
 pub mod usage;

@@ -33,9 +33,9 @@ impl Config {
         origin_kind: &'static str,
         parent_session_id: Option<&str>,
         resume_history_len: Option<usize>,
-    ) -> Result<Durability> {
+    ) -> Result<Execution> {
         let Some(config) = &self.rollout else {
-            return Ok(Durability::default());
+            return Ok(Execution::default());
         };
         let runtime = tokio::runtime::Handle::try_current()
             .map_err(|_| NanocodexError::TokioRuntimeUnavailable)?;
@@ -60,18 +60,18 @@ impl Config {
             codex_home: config.codex_home().to_path_buf(),
             source,
         })?;
-        Ok(Durability {
+        Ok(Execution {
             recorder: Some(recorder),
         })
     }
 }
 
 #[derive(Clone, Default)]
-pub(super) struct Durability {
+pub(super) struct Execution {
     recorder: Option<RolloutRecorder>,
 }
 
-impl Durability {
+impl Execution {
     pub(super) const fn info(&self) -> Option<&RolloutInfo> {
         match &self.recorder {
             Some(recorder) => Some(recorder.info()),

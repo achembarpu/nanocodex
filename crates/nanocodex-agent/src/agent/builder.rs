@@ -25,7 +25,7 @@ pub(super) struct PromptCacheConfig {
 #[derive(Clone, Default)]
 pub(super) struct CodexCompatibility {
     pub(super) context: ContextSourceConfig,
-    pub(super) durability: DurabilityConfig,
+    pub(super) execution: ExecutionConfig,
 }
 
 impl<F> NanocodexBuilder<F> {
@@ -176,7 +176,7 @@ impl<F> NanocodexBuilder<F> {
                 .context
                 .set_codex_home(rollout.codex_home().to_path_buf());
         }
-        self.codex.durability.set_rollout(rollout);
+        self.codex.execution.set_rollout(rollout);
         self
     }
 
@@ -193,38 +193,23 @@ impl<F> NanocodexBuilder<F> {
         self
     }
 
-    /// Attaches an opened portable durability journal and restores its latest
-    /// committed session checkpoint.
+    /// Returns the explicitly configured resume boundary, if any.
+    #[doc(hidden)]
+    #[must_use]
+    pub const fn resume_snapshot(&self) -> Option<&SessionSnapshot> {
+        self.resume.as_ref()
+    }
+
+    /// Attaches a higher-layer execution policy at the agent's model, tool,
+    /// and committed-session boundaries.
     ///
-    /// The journal is authoritative when it contains a checkpoint. An explicit
-    /// [`Self::resume`] value must encode the same snapshot. Durable prompt IDs,
-    /// inputs, results, retry attempts, and checkpoints are subsequently
-    /// reduced and committed by Rust; the selected host only stores opaque
-    /// compare-and-append batches.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when the durable checkpoint is not a valid Nanocodex
-    /// session snapshot or conflicts with an explicitly configured snapshot.
-    pub async fn durability(
-        mut self,
-        journal: nanocodex_durability::DurableSession,
-    ) -> Result<Self> {
-        if let Some(checkpoint) = journal.latest_checkpoint().await? {
-            let restored = checkpoint.decode::<SessionSnapshot>()?;
-            if let Some(configured) = &self.resume
-                && serde_json::to_string(configured)
-                    .map_err(|error| NanocodexError::InvalidSessionSnapshot(error.to_string()))?
-                    != checkpoint.json()
-            {
-                return Err(NanocodexError::InvalidSessionSnapshot(
-                    "configured resume snapshot does not match the durability journal".to_owned(),
-                ));
-            }
-            self.resume = Some(restored);
-        }
-        self.codex.durability.set_journal(journal);
-        Ok(self)
+    /// Persistence formats, storage, admission, and recovery remain owned by
+    /// the implementing crate. Most callers use a higher-level extension such
+    /// as `nanocodex-durability` instead of invoking this seam directly.
+    #[must_use]
+    pub fn execution_policy(mut self, policy: Arc<dyn execution::ExecutionPolicy>) -> Self {
+        self.codex.execution.set_policy(policy);
+        self
     }
 }
 

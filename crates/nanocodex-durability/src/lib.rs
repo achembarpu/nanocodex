@@ -2,6 +2,7 @@
 #![deny(missing_docs, rustdoc::broken_intra_doc_links)]
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
+mod agent;
 mod journal;
 mod memory;
 #[cfg(all(feature = "postgres", not(target_family = "wasm")))]
@@ -101,3 +102,4 @@ pub enum Error {
     #[error("durability payload is invalid JSON: {0}")]
     InvalidPayload(#[from] serde_json::Error),
 }
+pub use agent::DurableAgentExt;

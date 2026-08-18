@@ -167,7 +167,7 @@ where
         let tool_call_indices = self.tool_call_indices.clone();
         let session_id = events.request_id().to_owned();
         let model = self.model;
-        let durable_steps = self.durable_steps.clone();
+        let execution_steps = self.execution_steps.clone();
         let mut executions = prepared
             .into_iter()
             .map(|(call, supports_parallel, active)| {
@@ -176,22 +176,22 @@ where
                 let events = events.clone();
                 let tool_call_indices = tool_call_indices.clone();
                 let session_id = session_id.clone();
-                let durable_steps = durable_steps.clone();
+                let execution_steps = execution_steps.clone();
                 async move {
                     let started_at = active.started_at;
                     let step_id = format!("tool-{call_index}-{}", call.call_id);
-                    let recovered = if let Some(steps) = &durable_steps {
+                    let recovered = if let Some(steps) = &execution_steps {
                         match steps
                             .begin::<_, CompletedToolCall>(
                                 &step_id,
                                 "tool_call",
                                 &call,
-                                nanocodex_durability::RetryPolicy::Never,
+                                crate::agent::execution::ExecutionRetry::Never,
                             )
                             .await?
                         {
-                            crate::agent::DurableStep::Execute => None,
-                            crate::agent::DurableStep::Replay(output) => Some(output),
+                            crate::agent::ExecutionStep::Execute => None,
+                            crate::agent::ExecutionStep::Replay(output) => Some(output),
                         }
                     } else {
                         None
@@ -255,7 +255,7 @@ where
                             if executed {
                                 completed.work_duration_ns =
                                     Self::completed_tool_work_duration(&active);
-                                if let Some(steps) = &durable_steps {
+                                if let Some(steps) = &execution_steps {
                                     steps.complete(&step_id, &completed).await?;
                                 }
                             }

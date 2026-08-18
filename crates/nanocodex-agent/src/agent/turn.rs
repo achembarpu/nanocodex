@@ -202,11 +202,11 @@ impl fmt::Debug for TurnResult {
     }
 }
 
-/// One prompt submission with optional durable operation identity.
+/// One prompt submission with an optional execution identity.
 ///
-/// When durability is configured, the agent automatically assigns an operation
-/// ID to requests that omit one. Attach a caller-owned ID when an external job,
-/// webhook, or host retry must resubmit the same logical operation.
+/// When an execution policy is attached, the agent automatically assigns an
+/// operation ID to requests that omit one. Attach a caller-owned ID when an
+/// external job, webhook, or host retry resubmits the same logical operation.
 #[derive(Clone, Debug)]
 pub struct PromptRequest {
     pub(super) prompt: Prompt,
@@ -214,10 +214,10 @@ pub struct PromptRequest {
 }
 
 impl PromptRequest {
-    /// Creates a prompt submission without a caller-owned durable identity.
+    /// Creates a prompt submission without a caller-owned operation identity.
     ///
-    /// A durability-enabled agent assigns a unique operation ID before
-    /// accepting this request.
+    /// A policy-enabled agent assigns a unique operation ID before accepting
+    /// this request.
     #[must_use]
     pub fn new(prompt: impl Into<Prompt>) -> Self {
         Self {
@@ -256,7 +256,7 @@ pub(super) enum Command {
     Prompt {
         key: TurnKey,
         prompt: Prompt,
-        durable_operation: Option<PromptOperation>,
+        execution_operation: Option<ExecutionOperation>,
         accepted: Option<oneshot::Sender<Result<()>>>,
         thinking: Option<Thinking>,
         fast_mode: Option<bool>,
@@ -307,13 +307,13 @@ pub(super) enum Command {
     Shutdown,
 }
 
-pub(super) enum PromptOperation {
+pub(super) enum ExecutionOperation {
     Caller(String),
     Automatic(String),
     Admitted(String),
 }
 
-impl PromptOperation {
+impl ExecutionOperation {
     pub(super) fn into_id(self) -> String {
         match self {
             Self::Caller(operation_id)
@@ -333,7 +333,7 @@ pub(super) enum QueuedTurn {
     Pending {
         key: TurnKey,
         prompt: Prompt,
-        durable_operation: Option<String>,
+        execution_operation: Option<String>,
         thinking: Thinking,
         fast_mode: bool,
         parent: Option<tracing::Span>,
@@ -342,7 +342,7 @@ pub(super) enum QueuedTurn {
     },
     Cancelled {
         prompt: Prompt,
-        durable_operation: Option<String>,
+        execution_operation: Option<String>,
         thinking: Thinking,
         fast_mode: bool,
         parent: Option<tracing::Span>,

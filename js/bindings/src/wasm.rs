@@ -2,8 +2,8 @@ use std::{cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc};
 
 use js_sys::Promise;
 use nanocodex::{
-    AgentEvents, Model, Nanocodex as RustNanocodex, OpenAi, ReasoningMode, Thinking, TurnControl,
-    TurnResult,
+    AgentEvents, DurableAgentExt, Model, Nanocodex as RustNanocodex, OpenAi, ReasoningMode,
+    Thinking, TurnControl, TurnResult,
     agent::{
         ExecutionEnvironment,
         PromptRequest,

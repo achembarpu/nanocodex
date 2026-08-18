@@ -1,7 +1,7 @@
 use super::*;
 
 #[derive(Serialize)]
-struct DurableModelCall<'a> {
+struct RecordedModelCall<'a> {
     call_index: u32,
     model: &'a str,
     reasoning_mode: &'a str,
@@ -11,7 +11,7 @@ struct DurableModelCall<'a> {
 }
 
 #[derive(Deserialize, Serialize)]
-struct DurableModelResult {
+struct RecordedModelResult {
     response: TurnResult,
     attempt: u32,
     connection_generation: u32,
@@ -72,37 +72,37 @@ where
         if let Some(input_content) = &input_content {
             record_span_content(&span, "model.input", input_content);
         }
-        let durable_steps = self.durable_steps.clone();
+        let execution_steps = self.execution_steps.clone();
         let step_id = format!("model-{call_index}");
-        let mut durable_prompt_history = prompt_history.iter().cloned().collect::<Vec<_>>();
-        for item in &mut durable_prompt_history {
+        let mut recorded_prompt_history = prompt_history.iter().cloned().collect::<Vec<_>>();
+        for item in &mut recorded_prompt_history {
             item.strip_id();
         }
-        let step_input = DurableModelCall {
+        let step_input = RecordedModelCall {
             call_index,
             model: self.model.as_str(),
             reasoning_mode: self.config.reasoning_mode.as_str(),
             effort: self.thinking.as_str(),
             fast_mode: self.fast_mode,
-            prompt_history: &durable_prompt_history,
+            prompt_history: &recorded_prompt_history,
         };
-        let recovered = if let Some(steps) = &durable_steps {
+        let recovered = if let Some(steps) = &execution_steps {
             match steps
-                .begin::<_, DurableModelResult>(
+                .begin::<_, RecordedModelResult>(
                     &step_id,
                     "model_call",
                     &step_input,
-                    nanocodex_durability::RetryPolicy::Idempotent,
+                    crate::agent::execution::ExecutionRetry::Idempotent,
                 )
                 .await?
             {
-                crate::agent::DurableStep::Execute => None,
-                crate::agent::DurableStep::Replay(output) => Some(output),
+                crate::agent::ExecutionStep::Execute => None,
+                crate::agent::ExecutionStep::Replay(output) => Some(output),
             }
         } else {
             None
         };
-        let durable_result = if let Some(output) = recovered {
+        let recorded_result = if let Some(output) = recovered {
             output
         } else {
             let success = match self.client.execute(request).instrument(span.clone()).await {
@@ -128,25 +128,25 @@ where
                     detail: "generation returned a non-generation response",
                 });
             };
-            let output = DurableModelResult {
+            let output = RecordedModelResult {
                 response,
                 attempt,
                 connection_generation,
                 server_reasoning_included,
                 duration_ns: elapsed_ns(started_at),
             };
-            if let Some(steps) = &durable_steps {
+            if let Some(steps) = &execution_steps {
                 steps.complete(&step_id, &output).await?;
             }
             output
         };
-        let DurableModelResult {
+        let RecordedModelResult {
             response,
             attempt,
             connection_generation,
             server_reasoning_included,
             duration_ns,
-        } = durable_result;
+        } = recorded_result;
         conversation.observe_server_reasoning(server_reasoning_included);
         if prompt_repaired {
             conversation.adopt_prompt_history(prompt_history);

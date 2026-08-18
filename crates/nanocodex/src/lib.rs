@@ -7,6 +7,7 @@ pub use nanocodex_agent::{
     NanocodexError, PromptRequest, PromptRoute, ServiceTier, Turn, TurnControl, TurnResult,
     TurnUsage, UsdAmount,
 };
+pub use nanocodex_durability::DurableAgentExt;
 pub use nanocodex_oai_api::{Model, OpenAi, ReasoningMode, Thinking};
 #[cfg(not(target_family = "wasm"))]
 #[cfg_attr(docsrs, doc(cfg(not(target_family = "wasm"))))]
@@ -18,6 +19,7 @@ pub use nanocodex_tools::{Tool, Tools};
 /// Provider and tool-runtime APIs keep their canonical detailed paths under
 /// [`crate::oai`] and [`crate::tools`].
 pub mod agent {
+    pub use crate::durability;
     #[cfg(not(target_family = "wasm"))]
     #[cfg_attr(docsrs, doc(cfg(not(target_family = "wasm"))))]
     pub use nanocodex_agent::rollout;
@@ -25,9 +27,13 @@ pub mod agent {
         AgentEvents, AgentHandle, AgentSessionContext, CostStatus, EstimatedUsdCost,
         ExecutionEnvironment, Nanocodex, NanocodexBuilder, NanocodexError, PromptRequest,
         PromptRoute, Result, ServiceTier, Turn, TurnControl, TurnResult, TurnUsage, UsdAmount,
-        durability, events, input, session, usage,
+        events, execution, input, session, usage,
     };
 }
+
+/// Portable durable execution policy and host-store contracts.
+#[doc(inline)]
+pub use nanocodex_durability as durability;
 
 /// Tower-native OpenAI Responses client, sessions, protocol, and transport.
 #[doc(inline)]
@@ -51,7 +57,7 @@ pub mod prelude {
     #[cfg(not(target_family = "wasm"))]
     #[cfg_attr(docsrs, doc(cfg(not(target_family = "wasm"))))]
     pub use crate::tool;
-    pub use crate::{Model, Nanocodex, NanocodexBuilder, OpenAi, Tool, Tools};
+    pub use crate::{DurableAgentExt, Model, Nanocodex, NanocodexBuilder, OpenAi, Tool, Tools};
 }
 
 #[cfg(not(target_family = "wasm"))]

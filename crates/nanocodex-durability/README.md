@@ -5,6 +5,22 @@ Nanocodex agents. Rust owns the journal format, optimistic revision protocol,
 state reduction, deduplication, checkpoint selection, and recovery decisions.
 Hosts provide only atomic journal loading and compare-and-append.
 
+This crate is an optional layer over `nanocodex-agent`: durability depends on
+the agent, never the reverse. It implements the agent's neutral execution
+policy seam at prompt admission, model calls, tool calls, and committed
+session boundaries. Import [`DurableAgentExt`] to retain the fluent builder
+shape:
+
+```rust,ignore
+use nanocodex_durability::DurableAgentExt;
+
+let journal = DurableSession::open(store, "agent-123").await?;
+let (agent, events) = Nanocodex::builder(openai)
+    .durability(journal)
+    .await?
+    .build()?;
+```
+
 The crate includes an in-memory store on every target and optional native
 SQLite and Postgres stores. JavaScript runtimes implement the same small store
 contract through the Nanocodex WASM host bridge.

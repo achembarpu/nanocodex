@@ -14,7 +14,7 @@ where
         logical_turn: u64,
         cancel: &mut tokio::sync::oneshot::Receiver<()>,
     ) -> Result<ModelCompactOutcome> {
-        self.durable_steps = None;
+        self.execution_steps = None;
         self.thinking = thinking;
         self.fast_mode = fast_mode;
         self.started_at = Instant::now();
@@ -151,9 +151,9 @@ where
         steers: tokio::sync::mpsc::Receiver<Prompt>,
         mut cancel: tokio::sync::oneshot::Receiver<()>,
         fork_snapshots: watch::Sender<Option<ModelCheckpoint>>,
-        durable_steps: Option<DurableSteps>,
+        execution_steps: Option<ExecutionSteps>,
     ) -> Result<ModelTurnOutcome> {
-        self.durable_steps = durable_steps;
+        self.execution_steps = execution_steps;
         self.thinking = thinking;
         self.fast_mode = fast_mode;
         self.started_at = Instant::now();

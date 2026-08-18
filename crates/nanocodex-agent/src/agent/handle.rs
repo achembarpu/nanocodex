@@ -10,7 +10,7 @@ pub struct Nanocodex {
     pub(super) next_turn: Arc<AtomicU64>,
     pub(super) lineage_id: Arc<str>,
     pub(super) session_id: SessionId,
-    pub(super) durability: Durability,
+    pub(super) execution: Execution,
     pub(super) shutdown: DriverShutdown,
 }
 
@@ -22,7 +22,7 @@ impl Clone for Nanocodex {
             next_turn: Arc::clone(&self.next_turn),
             lineage_id: Arc::clone(&self.lineage_id),
             session_id: self.session_id,
-            durability: self.durability.clone(),
+            execution: self.execution.clone(),
             shutdown: self.shutdown.clone(),
         }
     }
@@ -99,7 +99,7 @@ impl Nanocodex {
     #[cfg_attr(docsrs, doc(cfg(not(target_family = "wasm"))))]
     #[must_use]
     pub const fn rollout(&self) -> Option<&RolloutInfo> {
-        self.durability.info()
+        self.execution.info()
     }
 
     /// Retries any pending rollout write and waits for a durable file flush.
@@ -115,7 +115,7 @@ impl Nanocodex {
     #[cfg(not(target_family = "wasm"))]
     #[cfg_attr(docsrs, doc(cfg(not(target_family = "wasm"))))]
     pub async fn flush_rollout(&self) -> Result<()> {
-        self.durability.flush().await
+        self.execution.flush().await
     }
 
     /// Gracefully stops this agent and waits for all owned resources to close.
@@ -138,7 +138,7 @@ impl Nanocodex {
     pub async fn shutdown(&self) -> Result<()> {
         let (initiate, receiver) = self.shutdown.request();
         if initiate && self.commands.send(Command::Shutdown).await.is_err() {
-            let outcome = match self.durability.shutdown().await {
+            let outcome = match self.execution.shutdown().await {
                 Ok(()) => Err(NanocodexError::AgentStopped),
                 Err(error) => Err(error),
             };
@@ -153,14 +153,14 @@ impl Nanocodex {
 
     /// Accepts a prompt submission and immediately returns its turn handle.
     ///
-    /// When durability is configured, strings and [`Prompt`] values receive an
-    /// automatically generated journal identity. Use [`PromptRequest::id`] to
-    /// supply the stable identity needed for caller retries and deduplication.
+    /// When an execution policy is configured, strings and [`Prompt`] values
+    /// receive an automatically generated operation identity. Use
+    /// [`PromptRequest::id`] to supply a stable caller-owned identity.
     ///
     /// # Errors
     ///
-    /// Returns an error for an empty prompt or operation ID, when durable work
-    /// is submitted without a configured journal, or if the driver stopped.
+    /// Returns an error for an empty prompt or operation ID, when identified
+    /// work is submitted without a configured policy, or if the driver stopped.
     pub async fn prompt(&self, request: impl Into<PromptRequest>) -> Result<Turn> {
         let PromptRequest {
             prompt,
@@ -174,20 +174,20 @@ impl Nanocodex {
             .is_some_and(|operation_id| operation_id.trim().is_empty())
         {
             return Err(NanocodexError::InvalidRequest(
-                "durable operation ID must not be empty".to_owned(),
+                "operation ID must not be empty".to_owned(),
             ));
         }
-        let durable_operation = operation_id.map(PromptOperation::Caller).or_else(|| {
-            self.durability
-                .journals_prompts()
-                .then(|| PromptOperation::Automatic(SessionId::new().to_string()))
+        let execution_operation = operation_id.map(ExecutionOperation::Caller).or_else(|| {
+            self.execution
+                .identifies_prompts()
+                .then(|| ExecutionOperation::Automatic(SessionId::new().to_string()))
         });
         let key = TurnKey(self.next_turn.fetch_add(1, Ordering::Relaxed));
         let parent = tracing::Span::current();
         let parent = (!parent.is_disabled()).then_some(parent);
         let (events, event_stream) = self.events.mirrored_channel();
         let (result, receiver) = oneshot::channel();
-        let (accepted, acceptance) = if durable_operation.is_some() {
+        let (accepted, acceptance) = if execution_operation.is_some() {
             let (accepted, acceptance) = oneshot::channel();
             (Some(accepted), Some(acceptance))
         } else {
@@ -198,7 +198,7 @@ impl Nanocodex {
             .send(Command::Prompt {
                 key,
                 prompt,
-                durable_operation,
+                execution_operation,
                 accepted,
                 thinking: None,
                 fast_mode: None,

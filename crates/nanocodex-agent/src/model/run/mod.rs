@@ -54,7 +54,7 @@ use super::{
 };
 use crate::{
     NanocodexError, Result,
-    agent::{AgentSend, ContextSource, DurableSteps},
+    agent::{AgentSend, ContextSource, ExecutionSteps},
     prompt_cache::ModelPromptCache,
     usage::TurnUsage,
 };
@@ -90,7 +90,7 @@ pub(crate) struct ModelRun<S> {
     global_instructions: Option<Arc<str>>,
     force_compaction: bool,
     pending_developer_messages: Vec<ResponseItem>,
-    durable_steps: Option<DurableSteps>,
+    execution_steps: Option<ExecutionSteps>,
 }
 
 pub(crate) enum ModelTurnOutcome {
@@ -151,7 +151,7 @@ impl ModelCheckpoint {
         self.conversation.shared_history()
     }
 
-    #[allow(dead_code, reason = "consumed by the native durability boundary only")]
+    #[allow(dead_code, reason = "consumed by the native rollout boundary only")]
     pub(crate) const fn history_revision(&self) -> u64 {
         self.conversation.history_revision()
     }
@@ -235,7 +235,7 @@ impl<S> ModelRun<S> {
             global_instructions,
             force_compaction: false,
             pending_developer_messages: Vec::new(),
-            durable_steps: None,
+            execution_steps: None,
         }
     }
 
@@ -302,7 +302,7 @@ impl<S> ModelRun<S> {
             global_instructions,
             force_compaction: false,
             pending_developer_messages: Vec::new(),
-            durable_steps: None,
+            execution_steps: None,
         }
     }
 

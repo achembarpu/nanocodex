@@ -17,15 +17,15 @@ impl Config {
         _origin_kind: &'static str,
         _parent_session_id: Option<&str>,
         _resume_history_len: Option<usize>,
-    ) -> Result<Durability> {
-        Ok(Durability)
+    ) -> Result<Execution> {
+        Ok(Execution)
     }
 }
 
 #[derive(Clone)]
-pub(super) struct Durability;
+pub(super) struct Execution;
 
-impl Durability {
+impl Execution {
     pub(super) const fn start_turn(
         &self,
         _prompt: &nanocodex_oai_api::Prompt,
