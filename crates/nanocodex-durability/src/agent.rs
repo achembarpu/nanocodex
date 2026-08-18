@@ -187,7 +187,7 @@ const fn map_retry(retry: ExecutionRetry) -> RetryPolicy {
 }
 
 fn raw(json: String) -> AgentResult<Box<RawValue>> {
-    RawValue::from_string(json).map_err(|error| NanocodexError::ExecutionPayload(error))
+    RawValue::from_string(json).map_err(NanocodexError::ExecutionPayload)
 }
 
 fn agent_error(error: Error) -> NanocodexError {
