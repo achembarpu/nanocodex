@@ -24,10 +24,6 @@ const repositoryPath = resolve(
 );
 const uploadConcurrency = 12;
 
-if (resolve(process.argv[1] ?? "") === scriptPath) {
-  await main();
-}
-
 async function main() {
   const origin = requiredEnvironment("NANOCODEX_GIT_ORIGIN").replace(/\/$/, "");
   const token = requiredEnvironment("NANOCODEX_GIT_TOKEN");
@@ -595,4 +591,8 @@ function requiredEnvironment(name) {
   const value = process.env[name]?.trim();
   if (!value) throw new Error(`${name} is required`);
   return value;
+}
+
+if (resolve(process.argv[1] ?? "") === scriptPath) {
+  await main();
 }
