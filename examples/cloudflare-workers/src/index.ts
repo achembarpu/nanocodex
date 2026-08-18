@@ -261,6 +261,10 @@ export class NanocodexSession extends DurableObject<Env> {
         payload TEXT NOT NULL,
         PRIMARY KEY (journal_id, revision)
       );
+      CREATE TABLE IF NOT EXISTS completed_operations (
+        id TEXT PRIMARY KEY,
+        completed_at INTEGER NOT NULL
+      );
     `);
     const sessionColumns = this.ctx.storage.sql.exec<{ name: string }>(
       "PRAGMA table_info(session_state)",
@@ -337,6 +341,7 @@ export class NanocodexSession extends DurableObject<Env> {
       this.ctx.storage.transactionSync(() => {
         this.ctx.storage.sql.exec("DELETE FROM durability_batches");
         this.ctx.storage.sql.exec("DELETE FROM durability_journals");
+        this.ctx.storage.sql.exec("DELETE FROM completed_operations");
         this.ctx.storage.sql.exec("DELETE FROM session_state");
       });
       await this.ctx.storage.deleteAlarm();
@@ -554,10 +559,19 @@ export class NanocodexSession extends DurableObject<Env> {
       const payload = JSON.stringify(terminal);
       const completedAt = Date.now();
       try {
-        this.ctx.storage.sql.exec(
-          "UPDATE session_state SET completed_turns = completed_turns + 1, last_active = ? WHERE singleton = 1",
-          completedAt,
-        );
+        this.ctx.storage.transactionSync(() => {
+          this.ctx.storage.sql.exec(
+            "INSERT OR IGNORE INTO completed_operations (id, completed_at) VALUES (?, ?)",
+            id,
+            completedAt,
+          );
+          this.ctx.storage.sql.exec(
+            `UPDATE session_state
+             SET completed_turns = (SELECT COUNT(*) FROM completed_operations), last_active = ?
+             WHERE singleton = 1`,
+            completedAt,
+          );
+        });
       } catch (error) {
         console.error("failed to update session telemetry", errorMessage(error));
       }
