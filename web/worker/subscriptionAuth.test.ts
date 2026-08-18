@@ -57,7 +57,8 @@ test("device login stores and rotates ChatGPT tokens without exposing them in pu
       chatgpt_account_is_fedramp: true,
     },
   };
-  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+  globalThis.fetch = (async function (this: typeof globalThis, input: string | URL | Request, init?: RequestInit) {
+    assert.equal(this, globalThis, "the subscription bridge preserves the Worker fetch receiver");
     const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
     requests.push({ url, init });
     if (url.endsWith("/api/accounts/deviceauth/usercode")) {
