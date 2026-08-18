@@ -26,3 +26,6 @@ export function viewImage(options: {
 
 /** A session-scoped planning tool. */
 export function updatePlan(): NamedTool;
+
+export { dataset } from "./dataset.mjs";
+export type { DatasetOptions } from "./dataset.mjs";

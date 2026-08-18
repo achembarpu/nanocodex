@@ -228,6 +228,10 @@ export type Tool = {
   /** Runtime JSON Schema for model-generated input. Defaults to an open object. */
   parameters?: Record<string, unknown> | undefined;
   handler(input: unknown, context: ToolContext): unknown | Promise<unknown>;
+  /** Releases state owned by one completed agent session. */
+  releaseSession?(sessionId: string): void;
+  /** Releases all retained tool state when the owning host shuts down. */
+  dispose?(): void;
 };
 
 export type ToolMap = Record<string, Tool>;

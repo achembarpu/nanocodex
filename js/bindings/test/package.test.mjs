@@ -65,7 +65,8 @@ test("the packed package installs and runs every public entry point", async () =
       import { dirname, resolve } from "node:path";
       import { fileURLToPath } from "node:url";
       import { Actions } from "nanocodex";
-      import { web } from "nanocodex/tools";
+      import { dataset as aggregateDataset, web } from "nanocodex/tools";
+      import { dataset } from "nanocodex/tools/dataset";
       import { nanocodexTools } from "nanocodex/tools/vite";
       import { Agent as NodeAgent, Subagents as NodeSubagents, Transport as NodeTransport, Workspace as NodeWorkspace } from "nanocodex/node";
       import { Agent as BrowserAgent, Subagents as BrowserSubagents, Transport as BrowserTransport, Workspace as BrowserWorkspace } from "nanocodex/browser";
@@ -74,6 +75,21 @@ test("the packed package installs and runs every public entry point", async () =
       assert.equal(typeof NodeWorkspace.open, "function");
       assert.equal(typeof BrowserWorkspace.open, "function");
       assert.equal(web({ url: "https://example.test/tools/web" }).name, "web__run");
+      assert.equal(aggregateDataset().name, "dataset");
+      const datasetTool = dataset({
+        fetch: async () => new Response('{"id":1}\\n'),
+      });
+      assert(Object.isFrozen(datasetTool));
+      const opened = await datasetTool.handler({
+        operation: "open",
+        source: { kind: "url", url: "https://example.test/data.jsonl", format: "jsonl" },
+      }, {
+        callId: "dataset-open",
+        parentCallId: "",
+        sessionId: "package-test",
+        signal: new AbortController().signal,
+      });
+      assert.deepEqual(opened.previewRows, [{ id: 1 }]);
       assert.match(nanocodexTools().resolveId("node-rsa"), /unsupportedNodeRsa\.mjs$/);
       const nodeAgent = await NodeAgent.create({
         transport: NodeTransport.openAi({ apiKey: "package-test" }),
@@ -101,6 +117,10 @@ test("the packed package installs and runs every public entry point", async () =
 
       await assert.rejects(
         import("nanocodex/internal.mjs"),
+        (error) => error.code === "ERR_PACKAGE_PATH_NOT_EXPORTED",
+      );
+      await assert.rejects(
+        import("nanocodex/tools/datasetEngine"),
         (error) => error.code === "ERR_PACKAGE_PATH_NOT_EXPORTED",
       );
     `);

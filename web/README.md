@@ -164,6 +164,31 @@ A user key takes precedence over the optional deployment-owned
 `OPENAI_API_KEY`; forgetting or expiring it falls back to that deployment key
 when present.
 
+The reusable `browser(...)` tool bundle gives the browser agent a bounded
+`dataset` tool. It can inspect public
+Parquet URLs, Hugging Face dataset/config/split exports, and uncompressed JSONL
+URLs without downloading whole datasets into memory. Parquet reads use HTTP
+ranges and filter/projection pushdown where possible; JSONL reads incrementally
+scan the response stream. Dataset handles are scoped to an agent session, every
+query has row, input-byte, and output-byte limits, and partial results explicitly
+report `complete: false`. The implementation and Parquet codecs are lazy chunks,
+so ordinary agent sessions do not download them. Direct sources must permit
+browser CORS, and Parquet sources must honor byte-range requests.
+
+For example, ask the web agent to “inspect the `main` config’s `train` split of
+`openai/gsm8k`, show its schema, and find five examples containing arithmetic.”
+The resulting tool flow is equivalent to:
+
+```json
+{"operation":"open","source":{"kind":"huggingface","dataset":"openai/gsm8k","config":"main","split":"train"}}
+{"operation":"query","dataset_id":"<returned id>","columns":["question","answer"],"filters":[{"column":"question","op":"contains","value":"how many"}],"limit":5}
+{"operation":"close","dataset_id":"<returned id>"}
+```
+
+Run `npm run bench:dataset` in `js/bindings` for the deterministic 100,000-row
+Snappy Parquet/JSONL browser-path benchmark. It reports cold and repeated query
+latency, pulled bytes, range requests, scanned rows, and cache hits.
+
 OpenAI remains the default agent connection. A user can explicitly select
 Tempo MPP instead; only then does React lazy-load Wagmi and Tempo Accounts,
 open the standard embedded Tempo Wallet dialog for its account and passkey flow, and

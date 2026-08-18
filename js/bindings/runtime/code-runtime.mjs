@@ -231,10 +231,12 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
     toolDefinitions: () => JSON.stringify(currentDefinitions()),
     releaseSession(sessionId) {
       stores.delete(sessionId);
+      for (const tool of configuredTools) tool.releaseSession?.(sessionId);
     },
     reset() {
       for (const execution of activeExecutions) execution.controller.abort();
       stores.clear();
+      for (const tool of configuredTools) tool.dispose?.();
     },
   });
 }
@@ -243,7 +245,12 @@ function addTool(name, tool, collection) {
   if (!tool || typeof tool.handler !== "function") {
     throw new TypeError(`tool ${name} requires a handler function`);
   }
-  const configured = Object.freeze({ handler: tool.handler, name });
+  const configured = Object.freeze({
+    dispose: typeof tool.dispose === "function" ? tool.dispose : undefined,
+    handler: tool.handler,
+    name,
+    releaseSession: typeof tool.releaseSession === "function" ? tool.releaseSession : undefined,
+  });
   collection.configuredTools.push(configured);
   collection.toolByName.set(name, configured);
   collection.definitions.push(deepFreeze({

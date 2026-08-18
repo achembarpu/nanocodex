@@ -1,6 +1,6 @@
 import type { Workspace } from "../../runtime/workspace.mjs";
 import type { NamedTool } from "../../types.mjs";
-import type { JsonToolOptions } from "../index.mjs";
+import type { DatasetOptions, JsonToolOptions } from "../index.mjs";
 
 export type BrowserThread = Readonly<{
   id: string;
@@ -127,6 +127,7 @@ export type BrowserOptions = Readonly<{
   origin?: string | undefined;
   web?: JsonToolOptions | undefined;
   images?: JsonToolOptions | undefined;
+  dataset?: DatasetOptions | undefined;
   recentImages?(sessionId: string, count: number): string[];
   rememberImage?(sessionId: string, imageUrl: string): void;
 }>;
