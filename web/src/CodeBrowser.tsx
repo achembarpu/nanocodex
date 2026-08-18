@@ -21,19 +21,13 @@ import { fuzzyScore } from "./fuzzy";
 import { usePierreRenderer } from "./PierreWorkerProvider";
 import { CODE_VIEW_CUSTOM_CSS, CODE_VIEW_LAYOUT } from "./pierreCodeView";
 import { syntaxLanguageForFile } from "./syntax";
-
-export type RepositoryFile = {
-  path: string;
-  mode: string;
-  objectId: string;
-  size: number | null;
-  contentUrl: string | null;
-};
+import type { RepositoryFile } from "./threadRepositorySnapshot";
 
 type CodeBrowserProps = {
   files: RepositoryFile[];
   branch: string;
   head: string;
+  readFile(file: RepositoryFile): Promise<string>;
   theme: "light" | "dark";
 };
 
@@ -61,7 +55,7 @@ function countLines(contents: string | null): number | null {
 }
 
 function CodeBrowserComponent(
-  { files, branch, head, theme }: CodeBrowserProps,
+  { files, branch, head, readFile, theme }: CodeBrowserProps,
   ref: ForwardedRef<CodeBrowserHandle>,
 ) {
   const defaultPath = useMemo(
@@ -75,8 +69,12 @@ function CodeBrowserComponent(
   const [selectedPath, setSelectedPath] = useState(defaultPath);
   const selectedPathRef = useRef(selectedPath);
   selectedPathRef.current = selectedPath;
-  const [contents, setContents] = useState<string | null>(null);
-  const [loadedObjectId, setLoadedObjectId] = useState<string | null>(null);
+  const readFileRef = useRef(readFile);
+  readFileRef.current = readFile;
+  const [loaded, setLoaded] = useState<{
+    contents: string;
+    file: RepositoryFile;
+  } | null>(null);
   const [fileError, setFileError] = useState<string | null>(null);
   const [treeOpen, setTreeOpen] = useState(false);
   const [fileSearchOpen, setFileSearchOpen] = useState(false);
@@ -104,14 +102,10 @@ function CodeBrowserComponent(
     icons: { set: "standard", colored: false },
   });
   const selected = files.find((file) => file.path === selectedPath) ?? files[0];
-  const displayed = loadedObjectId == null
-    ? undefined
-    : files.find((file) => file.objectId === loadedObjectId);
+  const displayed = loaded?.file;
+  const contents = loaded?.contents ?? null;
   const viewFile = displayed ?? selected;
-  const codeReady =
-    displayed != null &&
-    contents !== null &&
-    renderer.ready;
+  const codeReady = loaded != null && renderer.ready;
   const fileSearchResults = useMemo(() => {
     const tokens = fileQuery.trim().split(/\s+/).filter(Boolean);
     const matches = files
@@ -230,47 +224,46 @@ function CodeBrowserComponent(
   }, [files, model]);
 
   useEffect(() => {
-    if (!selected?.contentUrl) {
-      setFileError(selected?.path ?? null);
+    if (!selected) {
+      setFileError(null);
       return;
     }
-    const controller = new AbortController();
+    let active = true;
     setFileError(null);
-    fetch(selected.contentUrl, { signal: controller.signal })
-      .then((response) => {
-        if (!response.ok) throw new Error(`File request failed: ${response.status}`);
-        return response.text();
-      })
+    readFileRef.current(selected)
       .then((nextContents) => {
-        setContents(nextContents);
-        setLoadedObjectId(selected.objectId);
+        if (!active) return;
+        setLoaded({ contents: nextContents, file: selected });
         setFileError(null);
       })
-      .catch((error) => {
-        if (error instanceof DOMException && error.name === "AbortError") return;
+      .catch(() => {
+        if (!active) return;
+        setLoaded(null);
         setFileError(selected.path);
       });
-    return () => controller.abort();
-  }, [selected?.contentUrl, selected?.objectId]);
+    return () => {
+      active = false;
+    };
+  }, [selected?.objectId, selected?.path]);
 
   const lineCount = useMemo(() => countLines(contents), [contents]);
   const codeItems = useMemo<CodeViewItem<undefined>[]>(
     () =>
-      codeReady
+      codeReady && loaded
         ? [
             {
-              id: `file:${displayed.objectId}`,
+              id: `file:${loaded.file.objectId}`,
               type: "file",
               file: {
-                name: displayed.path,
-                contents,
-                cacheKey: displayed.objectId,
-                lang: syntaxLanguageForFile(displayed.path, contents),
+                name: loaded.file.path,
+                contents: loaded.contents,
+                cacheKey: loaded.file.objectId,
+                lang: syntaxLanguageForFile(loaded.file.path, loaded.contents),
               },
             },
           ]
         : [],
-    [codeReady, contents, displayed],
+    [codeReady, loaded],
   );
   const codeViewOptions = useMemo<CodeViewOptions<undefined>>(
     () => ({

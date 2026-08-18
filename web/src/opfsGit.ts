@@ -50,17 +50,48 @@ function createPromises(root: FileSystemDirectoryHandle) {
         throw translateError(error, "ENOENT", `cannot write ${relative}`);
       }
     },
+    async appendFile(path?: string, value?: unknown) {
+      const relative = normalize(path);
+      if (!relative) throw fsError("EISDIR", "cannot append to a directory");
+      try {
+        const { parent, name } = await parentHandle(root, relative, false);
+        const handle = await parent.getFileHandle(name, { create: true });
+        const size = (await handle.getFile()).size;
+        const writable = await handle.createWritable({ keepExistingData: true });
+        try {
+          await writable.seek(size);
+          await writable.write(asWriteValue(value));
+          await writable.close();
+        } catch (error) {
+          await writable.abort(error).catch(() => undefined);
+          throw error;
+        }
+      } catch (error) {
+        throw translateError(error, "ENOENT", `cannot append ${relative}`);
+      }
+    },
     async unlink(path?: string) {
       await remove(root, normalize(path), false);
     },
     async readdir(path?: string) {
       const directory = await directoryHandle(root, normalize(path), false);
       const names: string[] = [];
-      const entries = (directory as FileSystemDirectoryHandle & {
-        entries(): AsyncIterableIterator<[string, FileSystemHandle]>;
-      }).entries();
+      const entries = directoryEntries(directory);
       for await (const [name] of entries) names.push(name);
       return names;
+    },
+    async readdirWithFileTypes(path?: string) {
+      const directory = await directoryHandle(root, normalize(path), false);
+      const entries = [];
+      for await (const [name, handle] of directoryEntries(directory)) {
+        entries.push({
+          name,
+          isFile: handle.kind === "file",
+          isDirectory: handle.kind === "directory",
+          isSymbolicLink: false,
+        });
+      }
+      return entries;
     },
     async mkdir(path?: string) {
       await directoryHandle(root, normalize(path), true);
@@ -88,6 +119,12 @@ function createPromises(root: FileSystemDirectoryHandle) {
       throw fsError("ENOSYS", "OPFS does not support symbolic links");
     },
   };
+}
+
+function directoryEntries(directory: FileSystemDirectoryHandle) {
+  return (directory as FileSystemDirectoryHandle & {
+    entries(): AsyncIterableIterator<[string, FileSystemHandle]>;
+  }).entries();
 }
 
 async function stat(root: FileSystemDirectoryHandle, relative: string) {

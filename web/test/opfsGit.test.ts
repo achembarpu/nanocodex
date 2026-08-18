@@ -5,7 +5,11 @@ import git from "isomorphic-git";
 
 import { createBrowserBash } from "../src/browserShell.ts";
 import { createOpfsGitFs } from "../src/opfsGit.ts";
-import { buildThreadRepositorySnapshot } from "../src/threadRepositorySnapshot.ts";
+import {
+  MAX_COMMIT_HISTORY,
+  MAX_COMMIT_PATCH_BYTES,
+  buildThreadRepositorySnapshot,
+} from "../src/threadRepositorySnapshot.ts";
 
 test("an unborn thread exposes its OPFS working tree without inventing a commit", async () => {
   const root = new MemoryDirectory();
@@ -67,10 +71,8 @@ test("the OPFS adapter supports a real isomorphic-git repository", async () => {
     { path: "App.tsx", status: "A" },
     { path: "README.md", status: "M" },
   ]);
-  assert.equal(
-    await fetch(snapshot.tree[0]!.contentUrl!).then((response) => response.text()),
-    "export default function App() { return <main>Hello</main> }\n",
-  );
+  assert.equal(await snapshot.readFile(snapshot.tree[0]!),
+    "export default function App() { return <main>Hello</main> }\n");
   const patch = await fetch(snapshot.commitPatchUrl).then((response) => response.text());
   assert.match(patch, new RegExp(`^From ${head}`));
   assert.match(patch, /diff --git a\/App\.tsx b\/App\.tsx/);
@@ -78,6 +80,110 @@ test("the OPFS adapter supports a real isomorphic-git repository", async () => {
   const parsed = parsePatchFiles(patch, "thread-test");
   assert.equal(parsed.length, 2);
   assert.deepEqual(parsed[0]?.files.map(({ name }) => name), ["App.tsx", "README.md"]);
+  snapshot.release();
+});
+
+test("a lightweight repository snapshot defers HEAD blobs and commit history", async () => {
+  const root = new MemoryDirectory();
+  const fs = createOpfsGitFs(root as unknown as FileSystemDirectoryHandle);
+  await git.init({ fs, dir: "/workspace", defaultBranch: "nanocodex" });
+  await fs.promises.writeFile("/workspace/lazy.txt", "loaded on demand\n");
+  await git.add({ fs, dir: "/workspace", filepath: "lazy.txt" });
+  await git.commit({
+    fs,
+    dir: "/workspace",
+    message: "Create lazy file",
+    author: { name: "Nanocodex", email: "agent@nanocodex.dev" },
+  });
+
+  const snapshot = await buildThreadRepositorySnapshot(
+    fs,
+    "thread-test",
+    "nanocodex",
+    { includeHistory: false },
+  );
+  assert.equal(snapshot.historyLoaded, false);
+  assert.equal(snapshot.commitPatchUrl, null);
+  assert.deepEqual(snapshot.commits, []);
+  assert.equal(snapshot.tree[0]?.size, null);
+  assert.equal(await snapshot.readFile(snapshot.tree[0]!), "loaded on demand\n");
+  snapshot.release();
+});
+
+test("commit snapshots cap history and classify unsafe diff blobs as binary", async () => {
+  const root = new MemoryDirectory();
+  const fs = createOpfsGitFs(root as unknown as FileSystemDirectoryHandle);
+  await git.init({ fs, dir: "/workspace", defaultBranch: "nanocodex" });
+  await fs.promises.writeFile("/workspace/large.txt", new Uint8Array(1024 * 1024 + 1).fill(97));
+  await fs.promises.writeFile("/workspace/nul.txt", new Uint8Array([97, 0, 98]));
+  await fs.promises.writeFile("/workspace/invalid.txt", new Uint8Array([0xc3, 0x28]));
+  for (const path of ["large.txt", "nul.txt", "invalid.txt"]) {
+    await git.add({ fs, dir: "/workspace", filepath: path });
+  }
+  await git.commit({
+    fs,
+    dir: "/workspace",
+    message: "Add binary fixtures",
+    author: { name: "Nanocodex", email: "agent@nanocodex.dev" },
+  });
+  const binarySnapshot = await buildThreadRepositorySnapshot(fs, "thread-test", "nanocodex");
+  assert.deepEqual(
+    binarySnapshot.commits[0]?.files.map(({ binary, additions, deletions }) => ({
+      binary,
+      additions,
+      deletions,
+    })),
+    [
+      { binary: true, additions: null, deletions: null },
+      { binary: true, additions: null, deletions: null },
+      { binary: true, additions: null, deletions: null },
+    ],
+  );
+  const binaryPatch = await fetch(binarySnapshot.commitPatchUrl!)
+    .then((response) => response.text());
+  assert.equal(binaryPatch.match(/Binary files/g)?.length, 3);
+  assert.ok(binaryPatch.length < 2_000);
+  binarySnapshot.release();
+
+  for (let index = 1; index <= MAX_COMMIT_HISTORY; index += 1) {
+    await fs.promises.writeFile("/workspace/counter.txt", `${index}\n`);
+    await git.add({ fs, dir: "/workspace", filepath: "counter.txt" });
+    await git.commit({
+      fs,
+      dir: "/workspace",
+      message: `Update ${index}`,
+      author: { name: "Nanocodex", email: "agent@nanocodex.dev" },
+    });
+  }
+
+  const snapshot = await buildThreadRepositorySnapshot(fs, "thread-test", "nanocodex");
+  assert.equal(snapshot.commits.length, MAX_COMMIT_HISTORY);
+  assert.equal(snapshot.commits.at(-1)?.subject, "Update 1");
+  const patch = await fetch(snapshot.commitPatchUrl!).then((response) => response.text());
+  assert.ok(patch.length <= MAX_COMMIT_PATCH_BYTES);
+  snapshot.release();
+});
+
+test("commit patch memory is capped at four MiB", async () => {
+  const root = new MemoryDirectory();
+  const fs = createOpfsGitFs(root as unknown as FileSystemDirectoryHandle);
+  await git.init({ fs, dir: "/workspace", defaultBranch: "nanocodex" });
+  const contents = "a\n".repeat((1024 * 1024 - 2) / 2);
+  for (const path of ["one.txt", "two.txt", "three.txt", "four.txt"]) {
+    await fs.promises.writeFile(`/workspace/${path}`, contents);
+    await git.add({ fs, dir: "/workspace", filepath: path });
+  }
+  await git.commit({
+    fs,
+    dir: "/workspace",
+    message: "Add large text files",
+    author: { name: "Nanocodex", email: "agent@nanocodex.dev" },
+  });
+
+  const snapshot = await buildThreadRepositorySnapshot(fs, "thread-test", "nanocodex");
+  const patch = await fetch(snapshot.commitPatchUrl!).then((response) => response.text());
+  assert.ok(patch.length <= MAX_COMMIT_PATCH_BYTES);
+  assert.match(patch, /Patch output truncated at 4 MiB/);
   snapshot.release();
 });
 
@@ -117,6 +223,27 @@ test("just-bash and browser git share the same OPFS working tree", async () => {
   ));
   assert.equal(artifact.title, "Hello UI");
   assert.match(artifact.source, /function App/);
+});
+
+test("OPFS append preserves existing data and writes only the suffix at end", async () => {
+  const root = new MemoryDirectory();
+  const fs = createOpfsGitFs(root as unknown as FileSystemDirectoryHandle);
+  await fs.promises.writeFile("/workspace/output.log", "existing");
+  const file = root.entriesByName.get("output.log");
+  assert(file instanceof MemoryFile);
+  file.resetWriteInstrumentation();
+
+  await fs.promises.appendFile("/workspace/output.log", "-one");
+  await fs.promises.appendFile("/workspace/output.log", new TextEncoder().encode("-two"));
+
+  assert.deepEqual(file.writableOptions, [
+    { keepExistingData: true },
+    { keepExistingData: true },
+  ]);
+  assert.deepEqual(file.seekPositions, [8, 12]);
+  assert.deepEqual(file.writtenChunks.map((bytes) => new TextDecoder().decode(bytes)), ["-one", "-two"]);
+  assert.equal(file.arrayBufferReads, 0);
+  assert.equal(new TextDecoder().decode(file.bytes), "existing-one-two");
 });
 
 class MemoryDirectory {
@@ -161,17 +288,34 @@ class MemoryFile {
   readonly kind = "file";
   bytes = new Uint8Array();
   modifiedAt = Date.now();
+  writableOptions: FileSystemCreateWritableOptions[] = [];
+  seekPositions: number[] = [];
+  writtenChunks: Uint8Array[] = [];
+  arrayBufferReads = 0;
+
+  resetWriteInstrumentation() {
+    this.writableOptions = [];
+    this.seekPositions = [];
+    this.writtenChunks = [];
+    this.arrayBufferReads = 0;
+  }
 
   async getFile() {
     const bytes = this.bytes.slice();
     return {
       size: bytes.byteLength,
       lastModified: this.modifiedAt,
-      arrayBuffer: async () => bytes.buffer,
+      arrayBuffer: async () => {
+        this.arrayBufferReads += 1;
+        return bytes.buffer;
+      },
     };
   }
 
-  async createWritable() {
+  async createWritable(options: FileSystemCreateWritableOptions = {}) {
+    this.writableOptions.push({ ...options });
+    let bytes = options.keepExistingData ? this.bytes.slice() : new Uint8Array();
+    let position = 0;
     return {
       write: async (value: FileSystemWriteChunkType) => {
         const buffer = typeof value === "string"
@@ -181,10 +325,22 @@ class MemoryFile {
             : value instanceof ArrayBuffer
               ? new Uint8Array(value)
               : new Uint8Array(value.buffer, value.byteOffset, value.byteLength);
-        this.bytes = buffer.slice();
+        this.writtenChunks.push(buffer.slice());
+        const length = Math.max(bytes.byteLength, position + buffer.byteLength);
+        const next = new Uint8Array(length);
+        next.set(bytes);
+        next.set(buffer, position);
+        bytes = next;
+        position += buffer.byteLength;
+      },
+      seek: async (nextPosition: number) => {
+        this.seekPositions.push(nextPosition);
+        position = nextPosition;
+      },
+      close: async () => {
+        this.bytes = bytes;
         this.modifiedAt = Date.now();
       },
-      close: async () => undefined,
       abort: async () => undefined,
     };
   }
