@@ -95,6 +95,10 @@ impl Durability {
         self.platform.info()
     }
 
+    pub(crate) const fn journals_prompts(&self) -> bool {
+        self.journal.is_some()
+    }
+
     pub(crate) async fn admit<T: Serialize + ?Sized>(
         &self,
         operation_id: &str,
@@ -104,17 +108,30 @@ impl Durability {
             .journal
             .as_ref()
             .ok_or(NanocodexError::DurabilityNotConfigured)?;
-        match journal
-            .admit_typed::<_, SessionSnapshot, DurableTurnOutput>(operation_id, input)
-            .await?
-        {
-            Admission::Accepted | Admission::Pending => Ok(DurableAdmission::Execute),
-            Admission::Completed { checkpoint, output } => Ok(DurableAdmission::Completed {
-                output,
-                snapshot: checkpoint,
-            }),
-            Admission::Cancelled => Ok(DurableAdmission::Cancelled),
-        }
+        Ok(map_admission(
+            journal
+                .admit_typed::<_, SessionSnapshot, DurableTurnOutput>(operation_id, input)
+                .await?,
+        ))
+    }
+
+    pub(crate) async fn admit_automatic<T: Serialize + ?Sized>(
+        &self,
+        candidate_operation_id: String,
+        input: &T,
+    ) -> Result<(String, DurableAdmission)> {
+        let journal = self
+            .journal
+            .as_ref()
+            .ok_or(NanocodexError::DurabilityNotConfigured)?;
+        let admission = journal
+            .admit_automatic_typed::<_, SessionSnapshot, DurableTurnOutput>(
+                candidate_operation_id,
+                input,
+            )
+            .await?;
+        let (operation_id, admission) = admission.into_parts();
+        Ok((operation_id, map_admission(admission)))
     }
 
     pub(crate) async fn release_claim(&self, operation_id: &str) {
@@ -203,6 +220,17 @@ impl Durability {
 
     pub(crate) async fn shutdown(&self) -> Result<()> {
         self.platform.shutdown().await
+    }
+}
+
+fn map_admission(admission: Admission<SessionSnapshot, DurableTurnOutput>) -> DurableAdmission {
+    match admission {
+        Admission::Accepted | Admission::Pending => DurableAdmission::Execute,
+        Admission::Completed { checkpoint, output } => DurableAdmission::Completed {
+            output,
+            snapshot: checkpoint,
+        },
+        Admission::Cancelled => DurableAdmission::Cancelled,
     }
 }
 

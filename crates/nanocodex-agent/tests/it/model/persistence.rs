@@ -192,6 +192,51 @@ impl tower::Service<nanocodex_oai_api::tower::ResponsesAttempt> for DurableRepla
 }
 
 #[tokio::test]
+async fn configured_durability_automatically_journals_plain_prompts() -> Result<()> {
+    let store = nanocodex_agent::durability::MemoryStore::new()?;
+    let journal =
+        nanocodex_agent::durability::DurableSession::open(store, "automatic-prompt").await?;
+    let journal_state = journal.clone();
+    let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let openai = OpenAi::builder("test-key")
+        .service({
+            let generations = Arc::clone(&generations);
+            move || DurableReplayService {
+                generations: Arc::clone(&generations),
+            }
+        })
+        .build()?;
+    let workspace = temporary_workspace("automatic-portable-durability")?;
+    let builder = Nanocodex::builder(openai)
+        .workspace(&workspace)
+        .session_id(test_session_id())
+        .durability(journal)
+        .await?;
+    let (agent, events) = builder.build()?;
+
+    let result = agent
+        .prompt("journal this automatically")
+        .await?
+        .result()
+        .await?;
+    assert_eq!(result.final_message(), "durably replayed");
+    let state = journal_state.state().await?;
+    assert_eq!(state.operations().len(), 1);
+    let generated_id = state
+        .operations()
+        .keys()
+        .next()
+        .ok_or_else(|| eyre!("automatic durable operation is missing"))?;
+    uuid::Uuid::parse_str(generated_id)?;
+    assert!(journal_state.latest_checkpoint().await?.is_some());
+
+    agent.shutdown().await?;
+    drop((agent, events));
+    std::fs::remove_dir_all(workspace)?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn portable_journal_replays_a_completed_model_step_after_terminal_commit_failure()
 -> Result<()> {
     let store = nanocodex_agent::durability::MemoryStore::new()?;
@@ -220,7 +265,7 @@ async fn portable_journal_replays_a_completed_model_step_after_terminal_commit_f
         .await?;
     let (agent, events) = builder.build()?;
     let error = agent
-        .prompt(PromptRequest::new("replay this exact turn").id("turn-1"))
+        .prompt("replay this exact turn")
         .await?
         .result()
         .await
@@ -238,7 +283,7 @@ async fn portable_journal_replays_a_completed_model_step_after_terminal_commit_f
         .await?;
     let (resumed, resumed_events) = builder.build()?;
     let result = resumed
-        .prompt(PromptRequest::new("replay this exact turn").id("turn-1"))
+        .prompt("replay this exact turn")
         .await?
         .result()
         .await?;
@@ -285,7 +330,7 @@ async fn portable_journal_restores_the_live_owner_before_retrying_a_failed_commi
     let (agent, events) = builder.build()?;
 
     let first = agent
-        .prompt(PromptRequest::new("replay this exact turn").id("turn-1"))
+        .prompt("replay this exact turn")
         .await?
         .result()
         .await
@@ -293,7 +338,7 @@ async fn portable_journal_restores_the_live_owner_before_retrying_a_failed_commi
     assert!(first.to_string().contains("injected append failure"));
 
     let recovered = agent
-        .prompt(PromptRequest::new("replay this exact turn").id("turn-1"))
+        .prompt("replay this exact turn")
         .await?
         .result()
         .await?;

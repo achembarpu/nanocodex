@@ -278,7 +278,10 @@ const agent = await Agent.create({
   durabilityId: "customer-agent-123",
 });
 
-const turn = agent.turn.prompt({ id: "request-7", input: "Build the thing." });
+// Every prompt is journaled because durability is configured. Supply `id`
+// only when an external retry must identify the same logical operation.
+const turn = agent.turn.prompt({ input: "Build the thing." });
+// const turn = agent.turn.prompt({ id: "request-7", input: "Build the thing." });
 console.log((await turn.result()).finalMessage);
 ```
 

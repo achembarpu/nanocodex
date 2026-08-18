@@ -105,7 +105,7 @@ where
                             break Command::Prompt {
                                 key,
                                 prompt,
-                                durable_operation,
+                                durable_operation: durable_operation.map(PromptOperation::Admitted),
                                 accepted: None,
                                 thinking: Some(thinking),
                                 fast_mode: Some(fast_mode),
@@ -317,6 +317,8 @@ where
                                         events,
                                         result,
                                     }) => {
+                                        let durable_operation =
+                                            durable_operation.map(PromptOperation::into_id);
                                         queued_turns.push_back(QueuedTurn::Pending {
                                             key,
                                             prompt,
@@ -525,6 +527,7 @@ where
                 );
                 continue;
             };
+            let durable_operation = durable_operation.map(PromptOperation::into_id);
             let thinking = thinking.unwrap_or(default_thinking);
             let fast_mode = fast_mode.unwrap_or(default_fast_mode);
             turn_index += 1;
@@ -636,6 +639,8 @@ where
                                 events,
                                 result,
                             }) => {
+                                let durable_operation =
+                                    durable_operation.map(PromptOperation::into_id);
                                 queued_turns.push_back(QueuedTurn::Pending {
                                     key,
                                     prompt,
@@ -958,7 +963,7 @@ async fn accept_durable_command(durability: &Durability, command: Command) -> Op
     let Command::Prompt {
         key,
         prompt,
-        durable_operation: Some(operation_id),
+        durable_operation: Some(operation),
         accepted: Some(accepted),
         thinking,
         fast_mode,
@@ -969,8 +974,20 @@ async fn accept_durable_command(durability: &Durability, command: Command) -> Op
     else {
         return Some(command);
     };
-    match durability.admit(&operation_id, &prompt).await {
-        Ok(DurableAdmission::Execute) => {
+    let admission = match operation {
+        PromptOperation::Caller(operation_id) => durability
+            .admit(&operation_id, &prompt)
+            .await
+            .map(|admission| (operation_id, admission)),
+        PromptOperation::Automatic(candidate_operation_id) => {
+            durability
+                .admit_automatic(candidate_operation_id, &prompt)
+                .await
+        }
+        PromptOperation::Admitted(operation_id) => Ok((operation_id, DurableAdmission::Execute)),
+    };
+    match admission {
+        Ok((operation_id, DurableAdmission::Execute)) => {
             if accepted.send(Ok(())).is_err() {
                 durability.release_claim(&operation_id).await;
                 return None;
@@ -978,7 +995,7 @@ async fn accept_durable_command(durability: &Durability, command: Command) -> Op
             Some(Command::Prompt {
                 key,
                 prompt,
-                durable_operation: Some(operation_id),
+                durable_operation: Some(PromptOperation::Admitted(operation_id)),
                 accepted: None,
                 thinking,
                 fast_mode,
@@ -987,7 +1004,7 @@ async fn accept_durable_command(durability: &Durability, command: Command) -> Op
                 result,
             })
         }
-        Ok(DurableAdmission::Completed { output, snapshot }) => {
+        Ok((_, DurableAdmission::Completed { output, snapshot })) => {
             drop(accepted.send(Ok(())));
             drop(result.send(Ok(TurnResult {
                 final_message: output.final_message,
@@ -996,7 +1013,7 @@ async fn accept_durable_command(durability: &Durability, command: Command) -> Op
             })));
             None
         }
-        Ok(DurableAdmission::Cancelled) => {
+        Ok((_, DurableAdmission::Cancelled)) => {
             drop(accepted.send(Err(NanocodexError::TurnCancelled)));
             None
         }

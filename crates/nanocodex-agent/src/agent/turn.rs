@@ -204,9 +204,9 @@ impl fmt::Debug for TurnResult {
 
 /// One prompt submission with optional durable operation identity.
 ///
-/// Plain strings and [`Prompt`] values convert directly into non-durable
-/// requests. Attach an ID when the configured durability journal should
-/// deduplicate and recover the submission across process restarts.
+/// When durability is configured, the agent automatically assigns an operation
+/// ID to requests that omit one. Attach a caller-owned ID when an external job,
+/// webhook, or host retry must resubmit the same logical operation.
 #[derive(Clone, Debug)]
 pub struct PromptRequest {
     pub(super) prompt: Prompt,
@@ -214,7 +214,10 @@ pub struct PromptRequest {
 }
 
 impl PromptRequest {
-    /// Creates a prompt submission without durable identity.
+    /// Creates a prompt submission without a caller-owned durable identity.
+    ///
+    /// A durability-enabled agent assigns a unique operation ID before
+    /// accepting this request.
     #[must_use]
     pub fn new(prompt: impl Into<Prompt>) -> Self {
         Self {
@@ -223,7 +226,7 @@ impl PromptRequest {
         }
     }
 
-    /// Attaches the stable idempotency identity used by the durability journal.
+    /// Overrides the generated identity with a caller-owned idempotency key.
     #[must_use]
     pub fn id(mut self, operation_id: impl Into<String>) -> Self {
         self.operation_id = Some(operation_id.into());
@@ -253,7 +256,7 @@ pub(super) enum Command {
     Prompt {
         key: TurnKey,
         prompt: Prompt,
-        durable_operation: Option<String>,
+        durable_operation: Option<PromptOperation>,
         accepted: Option<oneshot::Sender<Result<()>>>,
         thinking: Option<Thinking>,
         fast_mode: Option<bool>,
@@ -302,6 +305,22 @@ pub(super) enum Command {
         result: oneshot::Sender<Result<AgentSessionContext>>,
     },
     Shutdown,
+}
+
+pub(super) enum PromptOperation {
+    Caller(String),
+    Automatic(String),
+    Admitted(String),
+}
+
+impl PromptOperation {
+    pub(super) fn into_id(self) -> String {
+        match self {
+            Self::Caller(operation_id)
+            | Self::Automatic(operation_id)
+            | Self::Admitted(operation_id) => operation_id,
+        }
+    }
 }
 
 #[derive(Clone, Copy)]

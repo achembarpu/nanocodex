@@ -28,6 +28,27 @@ pub enum Admission<C = EncodedPayload, O = EncodedPayload> {
     Cancelled,
 }
 
+/// One automatically identified operation and its admission result.
+#[derive(Clone, Debug)]
+pub struct AutomaticAdmission<C = EncodedPayload, O = EncodedPayload> {
+    operation_id: String,
+    admission: Admission<C, O>,
+}
+
+impl<C, O> AutomaticAdmission<C, O> {
+    /// Identity assigned to the admitted operation.
+    #[must_use]
+    pub fn operation_id(&self) -> &str {
+        &self.operation_id
+    }
+
+    /// Splits the assigned operation identity from its admission result.
+    #[must_use]
+    pub fn into_parts(self) -> (String, Admission<C, O>) {
+        (self.operation_id, self.admission)
+    }
+}
+
 /// Result of beginning a replayable step.
 #[derive(Clone, Debug)]
 pub enum BeginStep<O = EncodedPayload> {
@@ -47,6 +68,33 @@ enum StoredAdmission {
     Cancelled,
 }
 
+impl StoredAdmission {
+    fn into_encoded(self) -> Admission {
+        match self {
+            Self::Accepted => Admission::Accepted,
+            Self::Pending => Admission::Pending,
+            Self::Completed { checkpoint, output } => Admission::Completed { checkpoint, output },
+            Self::Cancelled => Admission::Cancelled,
+        }
+    }
+
+    fn decode<C, O>(self) -> Result<Admission<C, O>>
+    where
+        C: DeserializeOwned,
+        O: DeserializeOwned,
+    {
+        match self {
+            Self::Accepted => Ok(Admission::Accepted),
+            Self::Pending => Ok(Admission::Pending),
+            Self::Completed { checkpoint, output } => Ok(Admission::Completed {
+                checkpoint: checkpoint.decode()?,
+                output: output.decode()?,
+            }),
+            Self::Cancelled => Ok(Admission::Cancelled),
+        }
+    }
+}
+
 enum StoredBeginStep {
     Execute,
     Replay(EncodedPayload),
@@ -63,6 +111,11 @@ enum Command {
         operation_id: String,
         input: EncodedPayload,
         result: oneshot::Sender<Result<StoredAdmission>>,
+    },
+    AdmitAutomatic {
+        candidate_operation_id: String,
+        input: EncodedPayload,
+        result: oneshot::Sender<Result<(String, StoredAdmission)>>,
     },
     Release {
         operation_id: String,
@@ -125,6 +178,14 @@ impl Driver {
                     result,
                 } => {
                     let outcome = self.admit(operation_id, input).await;
+                    drop(result.send(outcome));
+                }
+                Command::AdmitAutomatic {
+                    candidate_operation_id,
+                    input,
+                    result,
+                } => {
+                    let outcome = self.admit_automatic(candidate_operation_id, input).await;
                     drop(result.send(outcome));
                 }
                 Command::Release { operation_id } => {
@@ -233,6 +294,32 @@ impl Driver {
         .await?;
         self.claimed.insert(operation_id);
         Ok(StoredAdmission::Accepted)
+    }
+
+    async fn admit_automatic(
+        &mut self,
+        candidate_operation_id: String,
+        input: EncodedPayload,
+    ) -> Result<(String, StoredAdmission)> {
+        if let Some((pending_id, operation)) = self
+            .state
+            .pending_operations()
+            .into_iter()
+            .find(|(pending_id, _)| !self.claimed.contains(*pending_id))
+        {
+            if operation.input != input {
+                return Err(Error::OperationBlocked {
+                    operation_id: candidate_operation_id,
+                    pending_id: pending_id.to_owned(),
+                });
+            }
+            let recovered_operation_id = pending_id.to_owned();
+            let admission = self.admit(recovered_operation_id.clone(), input).await?;
+            return Ok((recovered_operation_id, admission));
+        }
+
+        let admission = self.admit(candidate_operation_id.clone(), input).await?;
+        Ok((candidate_operation_id, admission))
     }
 
     async fn begin_attempt(&mut self, operation_id: String) -> Result<u32> {
@@ -462,17 +549,10 @@ impl DurableSession {
     where
         I: Serialize + ?Sized,
     {
-        match self
+        Ok(self
             .admit_encoded(operation_id.into(), EncodedPayload::encode(input)?)
             .await?
-        {
-            StoredAdmission::Accepted => Ok(Admission::Accepted),
-            StoredAdmission::Pending => Ok(Admission::Pending),
-            StoredAdmission::Completed { checkpoint, output } => {
-                Ok(Admission::Completed { checkpoint, output })
-            }
-            StoredAdmission::Cancelled => Ok(Admission::Cancelled),
-        }
+            .into_encoded())
     }
 
     /// Durably accepts and claims an operation with typed replay values.
@@ -486,18 +566,63 @@ impl DurableSession {
         C: DeserializeOwned,
         O: DeserializeOwned,
     {
-        match self
-            .admit_encoded(operation_id.into(), EncodedPayload::encode(input)?)
+        self.admit_encoded(operation_id.into(), EncodedPayload::encode(input)?)
             .await?
-        {
-            StoredAdmission::Accepted => Ok(Admission::Accepted),
-            StoredAdmission::Pending => Ok(Admission::Pending),
-            StoredAdmission::Completed { checkpoint, output } => Ok(Admission::Completed {
-                checkpoint: checkpoint.decode()?,
-                output: output.decode()?,
-            }),
-            StoredAdmission::Cancelled => Ok(Admission::Cancelled),
-        }
+            .decode()
+    }
+
+    /// Durably admits automatically identified work, retaining terminal
+    /// payloads in their encoded journal form.
+    ///
+    /// The candidate identity is used for new work. If the oldest unclaimed
+    /// pending operation has identical input, that operation is reclaimed and
+    /// its previously stored identity is returned instead.
+    pub async fn admit_automatic<I>(
+        &self,
+        candidate_operation_id: impl Into<String>,
+        input: &I,
+    ) -> Result<AutomaticAdmission>
+    where
+        I: Serialize + ?Sized,
+    {
+        let (operation_id, admission) = self
+            .admit_automatic_encoded(
+                candidate_operation_id.into(),
+                EncodedPayload::encode(input)?,
+            )
+            .await?;
+        Ok(AutomaticAdmission {
+            operation_id,
+            admission: admission.into_encoded(),
+        })
+    }
+
+    /// Durably admits automatically identified work, reclaiming the oldest
+    /// unclaimed pending operation when its input is identical.
+    ///
+    /// `candidate_operation_id` is used for new work. Recovered work retains
+    /// its previously stored identity, which is returned with the admission.
+    pub async fn admit_automatic_typed<I, C, O>(
+        &self,
+        candidate_operation_id: impl Into<String>,
+        input: &I,
+    ) -> Result<AutomaticAdmission<C, O>>
+    where
+        I: Serialize + ?Sized,
+        C: DeserializeOwned,
+        O: DeserializeOwned,
+    {
+        let (operation_id, admission) = self
+            .admit_automatic_encoded(
+                candidate_operation_id.into(),
+                EncodedPayload::encode(input)?,
+            )
+            .await?;
+        let admission = admission.decode()?;
+        Ok(AutomaticAdmission {
+            operation_id,
+            admission,
+        })
     }
 
     async fn admit_encoded(
@@ -508,6 +633,21 @@ impl DurableSession {
         let (result, receiver) = oneshot::channel();
         self.send(Command::Admit {
             operation_id,
+            input,
+            result,
+        })
+        .await?;
+        receive(receiver).await
+    }
+
+    async fn admit_automatic_encoded(
+        &self,
+        candidate_operation_id: String,
+        input: EncodedPayload,
+    ) -> Result<(String, StoredAdmission)> {
+        let (result, receiver) = oneshot::channel();
+        self.send(Command::AdmitAutomatic {
+            candidate_operation_id,
             input,
             result,
         })

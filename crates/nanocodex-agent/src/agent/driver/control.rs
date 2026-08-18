@@ -160,6 +160,7 @@ pub(super) async fn begin_shutdown(
                 events,
                 result,
             } => {
+                let durable_operation = durable_operation.map(PromptOperation::into_id);
                 queued_turns.push_back(QueuedTurn::Pending {
                     key,
                     prompt,

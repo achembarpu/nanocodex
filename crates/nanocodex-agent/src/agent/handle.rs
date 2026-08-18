@@ -153,9 +153,9 @@ impl Nanocodex {
 
     /// Accepts a prompt submission and immediately returns its turn handle.
     ///
-    /// Strings and [`Prompt`] values submit ordinary queued work. Use
-    /// [`PromptRequest::id`] to attach a stable operation identity when the
-    /// configured durability journal should deduplicate and recover the turn.
+    /// When durability is configured, strings and [`Prompt`] values receive an
+    /// automatically generated journal identity. Use [`PromptRequest::id`] to
+    /// supply the stable identity needed for caller retries and deduplication.
     ///
     /// # Errors
     ///
@@ -177,12 +177,17 @@ impl Nanocodex {
                 "durable operation ID must not be empty".to_owned(),
             ));
         }
+        let durable_operation = operation_id.map(PromptOperation::Caller).or_else(|| {
+            self.durability
+                .journals_prompts()
+                .then(|| PromptOperation::Automatic(SessionId::new().to_string()))
+        });
         let key = TurnKey(self.next_turn.fetch_add(1, Ordering::Relaxed));
         let parent = tracing::Span::current();
         let parent = (!parent.is_disabled()).then_some(parent);
         let (events, event_stream) = self.events.mirrored_channel();
         let (result, receiver) = oneshot::channel();
-        let (accepted, acceptance) = if operation_id.is_some() {
+        let (accepted, acceptance) = if durable_operation.is_some() {
             let (accepted, acceptance) = oneshot::channel();
             (Some(accepted), Some(acceptance))
         } else {
@@ -193,7 +198,7 @@ impl Nanocodex {
             .send(Command::Prompt {
                 key,
                 prompt,
-                durable_operation: operation_id,
+                durable_operation,
                 accepted,
                 thinking: None,
                 fast_mode: None,

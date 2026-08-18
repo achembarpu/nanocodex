@@ -169,6 +169,95 @@ async fn queues_admission_but_serializes_attempts() {
 }
 
 #[tokio::test]
+async fn automatic_admission_reclaims_matching_unclaimed_work() {
+    let store = MemoryStore::new().unwrap();
+    let session = DurableSession::open(store.clone(), "automatic")
+        .await
+        .unwrap();
+    let first = session
+        .admit_automatic_typed::<_, Checkpoint, TurnOutput>(
+            "candidate-1",
+            &PromptInput {
+                prompt: "resume me".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(first.operation_id(), "candidate-1");
+    assert!(matches!(first.into_parts().1, Admission::Accepted));
+    drop(session);
+
+    let reopened = DurableSession::open(store, "automatic").await.unwrap();
+    let resumed = reopened
+        .admit_automatic_typed::<_, Checkpoint, TurnOutput>(
+            "candidate-2",
+            &PromptInput {
+                prompt: "resume me".to_owned(),
+            },
+        )
+        .await
+        .unwrap();
+    assert_eq!(resumed.operation_id(), "candidate-1");
+    assert!(matches!(resumed.into_parts().1, Admission::Pending));
+    assert_eq!(reopened.state().await.unwrap().operations().len(), 1);
+}
+
+#[tokio::test]
+async fn automatic_admission_does_not_guess_past_different_recovered_work() {
+    let store = MemoryStore::new().unwrap();
+    let session = DurableSession::open(store.clone(), "automatic-blocked")
+        .await
+        .unwrap();
+    session.admit("turn-1", &"first").await.unwrap();
+    drop(session);
+
+    let reopened = DurableSession::open(store, "automatic-blocked")
+        .await
+        .unwrap();
+    assert!(matches!(
+        reopened
+            .admit_automatic_typed::<_, Checkpoint, TurnOutput>("candidate-2", &"different")
+            .await,
+        Err(Error::OperationBlocked { pending_id, .. }) if pending_id == "turn-1"
+    ));
+    assert_eq!(reopened.state().await.unwrap().operations().len(), 1);
+}
+
+#[tokio::test]
+async fn automatic_admission_reclaims_multiple_queued_operations_in_order() {
+    let store = MemoryStore::new().unwrap();
+    let session = DurableSession::open(store.clone(), "automatic-queue")
+        .await
+        .unwrap();
+    session
+        .admit_automatic_typed::<_, Checkpoint, TurnOutput>("turn-1", &"first")
+        .await
+        .unwrap();
+    session
+        .admit_automatic_typed::<_, Checkpoint, TurnOutput>("turn-2", &"second")
+        .await
+        .unwrap();
+    drop(session);
+
+    let reopened = DurableSession::open(store, "automatic-queue")
+        .await
+        .unwrap();
+    let first = reopened
+        .admit_automatic_typed::<_, Checkpoint, TurnOutput>("new-1", &"first")
+        .await
+        .unwrap();
+    let second = reopened
+        .admit_automatic_typed::<_, Checkpoint, TurnOutput>("new-2", &"second")
+        .await
+        .unwrap();
+    assert_eq!(first.operation_id(), "turn-1");
+    assert_eq!(second.operation_id(), "turn-2");
+    assert!(matches!(first.into_parts().1, Admission::Pending));
+    assert!(matches!(second.into_parts().1, Admission::Pending));
+    assert_eq!(reopened.state().await.unwrap().operations().len(), 2);
+}
+
+#[tokio::test]
 async fn rejects_invalid_transitions_before_the_host_append() {
     let store = MemoryStore::new().unwrap();
     let session = DurableSession::open(store.clone(), "session")
