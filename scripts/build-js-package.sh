@@ -51,6 +51,9 @@ cp "$worker_bindings/nanocodex.js" js/bindings/pkg-web/nanocodex_worker.js
 generated_wasm="js/bindings/pkg-web/nanocodex_bg.wasm"
 optimized_wasm="$generated_dir/nanocodex.wasm"
 "$binaryen" -Oz \
+  --enable-bulk-memory \
+  --enable-bulk-memory-opt \
+  --enable-nontrapping-float-to-int \
   --strip-debug \
   --strip-producers \
   --strip-toolchain-annotations \
