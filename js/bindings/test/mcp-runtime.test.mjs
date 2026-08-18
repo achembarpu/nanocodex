@@ -123,7 +123,11 @@ test("remote MCP stays deferred behind tool_search and executes through Code Mod
   const definitions = JSON.parse(runtime.toolDefinitions());
   assert.equal(definitions[0].type, "tool_search");
   assert.deepEqual(
-    definitions.slice(1).map((definition) => [definition.name, definition.defer_loading]),
+    definitions.slice(1, 4).map((definition) => definition.name),
+    ["list_mcp_resources", "list_mcp_resource_templates", "read_mcp_resource"],
+  );
+  assert.deepEqual(
+    definitions.slice(4).map((definition) => [definition.name, definition.defer_loading]),
     [
       ["mcp__mercator__call", true],
       ["mcp__mercator__search_endpoints", true],
@@ -153,6 +157,58 @@ test("remote MCP stays deferred behind tool_search and executes through Code Mod
   assert.match(JSON.stringify(execution.output), /called call/);
 });
 
+test("browser MCP exposes native-compatible resource listing and reads", async () => {
+  const client = {
+    async listTools() {
+      return { tools: [] };
+    },
+    async listResources(params) {
+      return params?.cursor
+        ? { resources: [{ uri: "docs://two", name: "Two" }] }
+        : { resources: [{ uri: "docs://one", name: "One" }], nextCursor: "next" };
+    },
+    async listResourceTemplates() {
+      return { resourceTemplates: [{ uriTemplate: "docs://{slug}", name: "Docs" }] };
+    },
+    async readResource({ uri }) {
+      return { contents: [{ uri, text: "resource body" }] };
+    },
+  };
+  const mcp = await createMcpRuntime({ docs: { client } });
+  const runtime = createCodeRuntime();
+  runtime.addProvider(mcp);
+
+  const listed = JSON.parse(await runtime.executeTool(
+    "list_mcp_resources",
+    "{}",
+  ));
+  assert.deepEqual(JSON.parse(listed.output), {
+    resources: [
+      { server: "docs", uri: "docs://one", name: "One" },
+      { server: "docs", uri: "docs://two", name: "Two" },
+    ],
+  });
+
+  const templates = JSON.parse(await runtime.executeTool(
+    "list_mcp_resource_templates",
+    JSON.stringify({ server: "docs" }),
+  ));
+  assert.deepEqual(JSON.parse(templates.output), {
+    server: "docs",
+    resourceTemplates: [{ server: "docs", uriTemplate: "docs://{slug}", name: "Docs" }],
+  });
+
+  const read = JSON.parse(await runtime.executeTool(
+    "read_mcp_resource",
+    JSON.stringify({ server: "docs", uri: "docs://one" }),
+  ));
+  assert.deepEqual(JSON.parse(read.output), {
+    contents: [{ uri: "docs://one", text: "resource body" }],
+    server: "docs",
+    uri: "docs://one",
+  });
+});
+
 test("remote MCP failures are reported by tool_search without breaking agent creation", async () => {
   const mcp = await createMcpRuntime({
     unavailable: {
@@ -172,6 +228,39 @@ test("remote MCP failures are reported by tool_search without breaking agent cre
   assert.deepEqual(JSON.parse(result.output).failed_servers, {
     unavailable: "connection refused",
   });
+});
+
+test("MCP startup timeout bounds complete paginated discovery", async () => {
+  let pages = 0;
+  const mcp = await createMcpRuntime({
+    slow: {
+      startupTimeoutMs: 20,
+      client: {
+        async listTools(_params, options) {
+          pages += 1;
+          if (pages === 1) return { tools: [], nextCursor: "next" };
+          await new Promise((_resolve, reject) => {
+            options.signal.addEventListener(
+              "abort",
+              () => reject(new Error("aborted")),
+              { once: true },
+            );
+          });
+        },
+      },
+    },
+  });
+  const runtime = createCodeRuntime();
+  runtime.addProvider(mcp);
+  const result = JSON.parse(await runtime.executeTool(
+    "tool_search",
+    JSON.stringify({ query: "slow" }),
+  ));
+  assert.match(
+    JSON.parse(result.output).failed_servers.slow,
+    /startup exceeded 20 milliseconds/,
+  );
+  assert.equal(pages, 2);
 });
 
 test("remote MCP tools retry payment challenges through McpClient.wrap", async () => {

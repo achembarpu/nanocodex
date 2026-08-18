@@ -3601,7 +3601,7 @@ html[data-theme="dark"] .tui-syntax .shiki span {
   }
 }
 
-@media (max-width: 740px) {
+@media (max-width: 740px), (pointer: coarse) and (orientation: landscape) and (max-width: 950px) {
   .surface-code .header-actions,
   .surface-commits .header-actions {
     display: none;
@@ -3614,6 +3614,13 @@ html[data-theme="dark"] .tui-syntax .shiki span {
 
   .code-workspace {
     display: block;
+  }
+
+  .commits-workspace {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-areas:
+      "header"
+      "viewer";
   }
 
   .commit-sidebar {
@@ -3676,8 +3683,8 @@ html[data-theme="dark"] .tui-syntax .shiki span {
 
   .pierre-tree-heading button {
     display: grid;
-    width: 36px;
-    height: 36px;
+    width: 44px;
+    height: 44px;
   }
 
   .pierre-tree-heading .tree-search-trigger {
@@ -3687,8 +3694,8 @@ html[data-theme="dark"] .tui-syntax .shiki span {
   .mobile-tree-toggle {
     display: grid;
     flex: 0 0 auto;
-    width: 36px;
-    height: 36px;
+    width: 44px;
+    height: 44px;
     padding: 0;
     background: var(--surface-subtle);
     border-radius: var(--radius-small);
@@ -3703,13 +3710,18 @@ html[data-theme="dark"] .tui-syntax .shiki span {
 
   .commit-sidebar-header .icon-button,
   .commit-scope-tabs button {
-    min-height: 36px;
+    min-height: 44px;
+  }
+
+  .commit-sidebar-header .icon-button {
+    width: 44px;
+    height: 44px;
   }
 
   .mobile-drawer-close {
     display: grid;
-    width: 36px;
-    height: 36px;
+    width: 44px;
+    height: 44px;
     padding: 0;
     background: var(--surface-raised);
     border-radius: var(--radius-small);
@@ -3740,9 +3752,31 @@ html[data-theme="dark"] .tui-syntax .shiki span {
 
   .code-file-search {
     justify-content: center;
-    width: 36px;
-    min-height: 36px;
+    width: 44px;
+    min-height: 44px;
     padding: 0;
+  }
+
+  .commit-view-button {
+    width: 44px;
+    height: 44px;
+    flex-basis: 44px;
+  }
+
+  .commit-query button {
+    width: 44px;
+    height: 44px;
+    padding: 0;
+  }
+
+  .commit-display-menu-item,
+  .commit-setting-row {
+    min-height: 44px;
+  }
+
+  .commit-indicator-options button {
+    min-width: 44px;
+    height: 44px;
   }
 
   .file-search-result {

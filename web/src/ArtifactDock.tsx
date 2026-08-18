@@ -21,6 +21,12 @@ import {
   subscribeThreadWorkspaceChanges,
 } from "./workspace";
 
+export const COMPACT_WORKSPACE_MEDIA_QUERY = "(max-width: 740px), (pointer: coarse) and (orientation: landscape) and (max-width: 950px)";
+
+function compactWorkspace(): boolean {
+  return window.matchMedia(COMPACT_WORKSPACE_MEDIA_QUERY).matches;
+}
+
 export const ArtifactDock = memo(function ArtifactDock({
   agentReady,
   onPrompt,
@@ -32,7 +38,7 @@ export const ArtifactDock = memo(function ArtifactDock({
   const [store, setStore] = useState<ArtifactStore>();
   const [artifacts, setArtifacts] = useState<readonly ArtifactDocument[]>([initialArtifact]);
   const [selectedId, setSelectedId] = useState(initialArtifact.id);
-  const [fullscreen, setFullscreen] = useState(() => !window.matchMedia("(max-width: 740px)").matches);
+  const [fullscreen, setFullscreen] = useState(() => !compactWorkspace());
   const [message, setMessage] = useState("");
   const refreshEpoch = useRef(0);
   const selected = artifacts.find((artifact) => artifact.id === selectedId) ?? artifacts[0];
@@ -92,6 +98,16 @@ export const ArtifactDock = memo(function ArtifactDock({
     return () => document.removeEventListener("visibilitychange", onVisible);
   }, [refresh, store]);
 
+  useEffect(() => {
+    const compact = window.matchMedia(COMPACT_WORKSPACE_MEDIA_QUERY);
+    const exitFullscreen = () => {
+      if (compact.matches) setFullscreen(false);
+    };
+    exitFullscreen();
+    compact.addEventListener("change", exitFullscreen);
+    return () => compact.removeEventListener("change", exitFullscreen);
+  }, []);
+
   const remove = async () => {
     if (!store || !selected || !window.confirm(`Delete the artifact “${selected.title}”?`)) return;
     try {
@@ -130,7 +146,7 @@ export const ArtifactDock = memo(function ArtifactDock({
       refreshEpoch.current++;
       setArtifacts((current) => [artifact, ...current.filter(({ id }) => id !== artifact.id)]);
       setSelectedId(artifact.id);
-      setFullscreen(!window.matchMedia("(max-width: 740px)").matches);
+      setFullscreen(!compactWorkspace());
       setMessage("");
     } catch (error) {
       setMessage(errorMessage(error));

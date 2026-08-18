@@ -278,6 +278,7 @@ export function createBrowserHost(options = {}) {
     sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
     executeCode: code.executeCode,
     executeTool: code.executeTool,
+    cancelCode: code.cancel,
     readWorkspaceFile: async (path) => {
       if (!options.filesystem) throw new Error("browser workspace is unavailable");
       return new TextDecoder("utf-8", { fatal: true })

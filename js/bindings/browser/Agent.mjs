@@ -49,6 +49,7 @@ export function create(options = {}) {
     tools,
     toolMode,
     mcp,
+    executionEnvironment,
     codeEvaluator,
   } = options;
   if (mpp !== undefined && apiKey !== undefined) {
@@ -138,6 +139,7 @@ export function create(options = {}) {
     instructions,
     sessionId,
     workspace: workspace ?? filesystem?.root,
+    executionEnvironment,
     resume,
   });
 }

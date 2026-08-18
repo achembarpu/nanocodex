@@ -338,12 +338,33 @@
   content: "  │ ";
 }
 
-@media (max-width: 740px) {
+@media (max-width: 740px), (pointer: coarse) and (orientation: landscape) and (max-width: 950px) {
   .agent-tui {
-    height: var(--nc-mobile-height, min(680px, calc(100svh - 112px)));
-    min-height: var(--nc-mobile-min-height, 500px);
+    height: var(--nc-mobile-height, calc(100dvh - 50px - env(safe-area-inset-bottom)));
+    min-height: var(--nc-mobile-min-height, 0);
     font-size: var(--nc-mobile-font-size, 10px);
     line-height: 16px;
+  }
+
+  .tui-inline-edit textarea,
+  .agent-tui-composer textarea,
+  .agent-tui-editor textarea {
+    font-size: 16px;
+  }
+
+  .agent-tui-composer {
+    min-height: 52px !important;
+  }
+
+  .agent-tui-composer:has(.agent-tui-voice) textarea {
+    padding-right: 52px;
+  }
+
+  .agent-tui-voice {
+    right: 4px;
+    bottom: 4px;
+    min-width: 44px;
+    height: 44px;
   }
 
   .agent-tui-header,

@@ -27,6 +27,11 @@ test("web-target WASM runs the shared model loop through the browser host", asyn
     websocketUrl: endpoint,
     thinking: "low",
     sessionId: "018f1f9a-7b3c-7a07-8000-000000000007",
+    executionEnvironment: {
+      currentDate: "2026-08-18",
+      timezone: "America/Los_Angeles",
+      projectInstructions: "BROWSER_PROJECT_INSTRUCTIONS",
+    },
   });
   const watch = agent.events.watch({ includeAllSessions: true });
   watch.onEvent((event) => events.push(event));
@@ -37,6 +42,7 @@ test("web-target WASM runs the shared model loop through the browser host", asyn
     await reader.next();
     send(socket, { type: "response.completed", response: { id: "web-warmup", usage: null } });
     const generation = await reader.next();
+    assert.match(JSON.stringify(generation.input), /BROWSER_PROJECT_INSTRUCTIONS/);
     assert.equal(generation.previous_response_id, "web-warmup");
     send(socket, {
       type: "response.completed",
@@ -248,6 +254,10 @@ test("web-target WASM exposes browser bash and Rust apply_patch as standard tool
       "exec_command",
       "apply_patch",
     ]);
+    assert.equal(
+      toolPrefix.tools.find((tool) => tool.name === "exec_command").description,
+      "Run browser bash.",
+    );
     assert.equal(toolPrefix.tools.some((tool) => tool.name === "read_file"), false);
     send(socket, { type: "response.completed", response: { id: "workspace-warmup", usage: null } });
     await reader.next();

@@ -4,7 +4,6 @@ import {
   type AgentControllerStart,
   type AgentControllerTools,
 } from "./agentController";
-import { createBrowserTools } from "./browserTools";
 import type { WebTuiCommand } from "./nanocodex";
 import { createPaymentSessionOwner } from "./paymentSessionOwner";
 import { MPP_RESPONSES_WEBSOCKET_URL } from "./tempo-constants";
@@ -50,17 +49,25 @@ async function createAgent(
   tools: AgentControllerTools,
 ) {
   await paymentSessions.clear();
-  const { execTool, instructions, workspace } = await (await import("./browserShell"))
-    .prepareBrowserShell(start.threadId!, self.location.origin);
+  const [shellModule, mcpModule, toolModule] = await Promise.all([
+    import("./browserShell"),
+    import("./browserMcp"),
+    import("./browserTools"),
+  ]);
+  const { execTool, instructions, projectInstructions, workspace } =
+    await shellModule.prepareBrowserShell(start.threadId!, self.location.origin);
   const common = {
     filesystem: workspace,
     filesystemTools: false,
     instructions,
+    executionEnvironment: browserExecutionEnvironment(projectInstructions),
+    mcp: mcpModule.browserMcpConfiguration(self.location.origin),
     tools: {
       exec_command: execTool,
-      ...createBrowserTools({
+      ...toolModule.createBrowserTools({
         recentImages: tools.recentImages,
         rememberImage: tools.rememberImage,
+        workspace,
       }),
     },
     thinking: start.thinking,
@@ -122,6 +129,25 @@ async function createAgent(
       websocketUrl: workerEndpoint(),
       createWebSocket,
     }),
+  };
+}
+
+function browserExecutionEnvironment(projectInstructions?: string) {
+  const now = new Date();
+  const resolvedTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const timezone = resolvedTimezone || "Etc/UTC";
+  const year = resolvedTimezone ? now.getFullYear() : now.getUTCFullYear();
+  const month = resolvedTimezone ? now.getMonth() + 1 : now.getUTCMonth() + 1;
+  const day = resolvedTimezone ? now.getDate() : now.getUTCDate();
+  const currentDate = [
+    year.toString().padStart(4, "0"),
+    month.toString().padStart(2, "0"),
+    day.toString().padStart(2, "0"),
+  ].join("-");
+  return {
+    currentDate,
+    timezone,
+    ...(projectInstructions === undefined ? {} : { projectInstructions }),
   };
 }
 

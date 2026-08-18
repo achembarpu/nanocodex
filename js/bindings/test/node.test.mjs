@@ -85,9 +85,12 @@ test("Node host loads and calls deferred Mercator MCP tools", async () => {
     const definitions = JSON.parse(host.toolDefinitions());
     assert.deepEqual(definitions.map((definition) => definition.name ?? definition.type), [
       "tool_search",
+      "list_mcp_resources",
+      "list_mcp_resource_templates",
+      "read_mcp_resource",
       "mcp__mercator__search_services",
     ]);
-    assert.equal(definitions[1].defer_loading, true);
+    assert.equal(definitions[4].defer_loading, true);
     const execution = JSON.parse(await host.executeCode(
       "text(await tools.mcp__mercator__search_services({ query: 'weather' }));",
       "node-session",

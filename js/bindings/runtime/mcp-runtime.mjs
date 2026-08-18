@@ -6,20 +6,27 @@ import { toolResult } from "./code-runtime.mjs";
 
 const DEFAULT_SEARCH_LIMIT = 8;
 const MAX_SEARCH_LIMIT = 32;
+const DEFAULT_STARTUP_TIMEOUT_MS = 30_000;
 const DEFAULT_TOOL_TIMEOUT_MS = 5 * 60_000;
 const SEARCH_DESCRIPTION_PREFIX = "# Tool discovery\n\nSearches over deferred tool metadata with BM25 and exposes matching tools for the next model call.";
+const RESOURCE_TOOL_NAMES = new Set([
+  "list_mcp_resources",
+  "list_mcp_resource_templates",
+  "read_mcp_resource",
+]);
 
 export async function createMcpRuntime(configuration, options = {}) {
   const servers = normalizeServers(configuration);
   const entries = [];
   const failures = Object.create(null);
   const ownedClients = [];
+  const connectedServers = [];
 
   await Promise.all(servers.map(async (server) => {
     try {
-      const connection = await connectServer(server, options);
+      const { connection, tools } = await initializeServer(server, options);
       if (connection.owned) ownedClients.push(connection.client);
-      const tools = await listAllTools(connection.client);
+      connectedServers.push({ client: connection.client, server });
       for (const tool of tools) {
         if (!includesTool(server, tool.name)) continue;
         entries.push(createEntry(server, connection.client, tool));
@@ -45,6 +52,7 @@ export async function createMcpRuntime(configuration, options = {}) {
     name: "tool_search",
     handler: ({ query, limit }) => searchTools(query, limit),
   };
+  const resourceTools = createResourceTools(connectedServers);
 
   function searchTools(query, limit = DEFAULT_SEARCH_LIMIT) {
     if (typeof query !== "string" || !query.trim()) {
@@ -74,10 +82,17 @@ export async function createMcpRuntime(configuration, options = {}) {
 
   return Object.freeze({
     definitions() {
-      return [toolSearchDefinition(servers), ...entries.map((entry) => entry.definition)];
+      return [
+        toolSearchDefinition(servers),
+        ...resourceTools.map((tool) => tool.definition),
+        ...entries.map((entry) => entry.definition),
+      ];
     },
     resolve(name) {
       if (name === "tool_search") return toolSearch;
+      if (RESOURCE_TOOL_NAMES.has(name)) {
+        return resourceTools.find((tool) => tool.name === name);
+      }
       const entry = byName.get(name);
       if (!entry) return undefined;
       return {
@@ -91,12 +106,52 @@ export async function createMcpRuntime(configuration, options = {}) {
   });
 }
 
-async function listAllTools(client) {
+async function initializeServer(server, options) {
+  const controller = new AbortController();
+  let timeout;
+  const deadline = new Promise((_resolve, reject) => {
+    timeout = setTimeout(() => {
+      controller.abort();
+      reject(new Error("MCP startup deadline exceeded"));
+    }, server.startupTimeoutMs);
+  });
+  let connection;
+  try {
+    return await Promise.race([
+      (async () => {
+        connection = await connectServer(server, options, controller.signal);
+        const tools = await listAllTools(
+          connection.client,
+          server.startupTimeoutMs,
+          controller.signal,
+        );
+        return { connection, tools };
+      })(),
+      deadline,
+    ]);
+  } catch (error) {
+    if (connection?.owned) await connection.client.close().catch(() => {});
+    if (controller.signal.aborted) {
+      throw new Error(
+        `MCP server ${server.name} startup exceeded ${server.startupTimeoutMs} milliseconds`,
+        { cause: error },
+      );
+    }
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+async function listAllTools(client, timeoutMs, signal) {
   const tools = [];
   const seen = new Set();
   let cursor;
   for (let page = 0; page < 100; page += 1) {
-    const listed = await client.listTools(cursor ? { cursor } : undefined);
+    const listed = await client.listTools(
+      cursor ? { cursor } : undefined,
+      { maxTotalTimeout: timeoutMs, signal, timeout: timeoutMs },
+    );
     tools.push(...listed.tools);
     if (!listed.nextCursor) return tools;
     if (seen.has(listed.nextCursor)) throw new Error("MCP tools/list returned a repeated cursor");
@@ -106,7 +161,7 @@ async function listAllTools(client) {
   throw new Error("MCP tools/list exceeded 100 pages");
 }
 
-async function connectServer(server, options) {
+async function connectServer(server, options, signal) {
   const client = server.client ?? new Client({
     name: options.clientName ?? "nanocodex-js",
     version: options.clientVersion ?? "0.0.0",
@@ -122,7 +177,11 @@ async function connectServer(server, options) {
     ...(server.headers ? { requestInit: { headers: server.headers } } : {}),
   });
   try {
-    await client.connect(transport);
+    await client.connect(transport, {
+      maxTotalTimeout: server.startupTimeoutMs,
+      signal,
+      timeout: server.startupTimeoutMs,
+    });
     return { client, owned: true };
   } catch (error) {
     await client.close().catch(() => {});
@@ -156,10 +215,15 @@ function normalizeServers(configuration) {
       && (!Number.isFinite(server.timeoutMs) || server.timeoutMs <= 0)) {
       throw new TypeError(`MCP server ${name} timeoutMs must be a positive number`);
     }
+    if (server.startupTimeoutMs !== undefined
+      && (!Number.isFinite(server.startupTimeoutMs) || server.startupTimeoutMs <= 0)) {
+      throw new TypeError(`MCP server ${name} startupTimeoutMs must be a positive number`);
+    }
     return {
       ...server,
       name,
       url: server.url?.toString(),
+      startupTimeoutMs: server.startupTimeoutMs ?? DEFAULT_STARTUP_TIMEOUT_MS,
       timeoutMs: server.timeoutMs ?? DEFAULT_TOOL_TIMEOUT_MS,
     };
   });
@@ -169,6 +233,172 @@ function normalizeServers(configuration) {
 
 function isStringArray(value) {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+function createResourceTools(connectedServers) {
+  const byServer = new Map(connectedServers.map((connection) => [
+    connection.server.name,
+    connection,
+  ]));
+  return [
+    {
+      name: "list_mcp_resources",
+      definition: listResourcesDefinition(
+        "list_mcp_resources",
+        "Lists resources provided by MCP servers. Resources allow servers to share data that provides context to language models, such as files, database schemas, or application-specific information. Prefer resources over web search when possible.",
+        "resources",
+      ),
+      handler: (input, context) => listMcpEntries(byServer, input, "resources", context?.signal),
+    },
+    {
+      name: "list_mcp_resource_templates",
+      definition: listResourcesDefinition(
+        "list_mcp_resource_templates",
+        "Lists resource templates provided by MCP servers. Parameterized resource templates allow servers to share data that takes parameters and provides context to language models, such as files, database schemas, or application-specific information. Prefer resource templates over web search when possible.",
+        "resource templates",
+      ),
+      handler: (input, context) =>
+        listMcpEntries(byServer, input, "resourceTemplates", context?.signal),
+    },
+    {
+      name: "read_mcp_resource",
+      definition: {
+        type: "function",
+        name: "read_mcp_resource",
+        description: "Read a specific resource from an MCP server given the server name and resource URI.",
+        strict: false,
+        parameters: {
+          type: "object",
+          properties: {
+            server: {
+              type: "string",
+              description: "MCP server name exactly as configured. Must match the 'server' field returned by list_mcp_resources.",
+            },
+            uri: {
+              type: "string",
+              description: "Resource URI to read. Must be one of the URIs returned by list_mcp_resources.",
+            },
+          },
+          required: ["server", "uri"],
+          additionalProperties: false,
+        },
+      },
+      handler: (input, context) => readMcpResource(byServer, input, context?.signal),
+    },
+  ];
+}
+
+function listResourcesDefinition(name, description, noun) {
+  return {
+    type: "function",
+    name,
+    description,
+    strict: false,
+    parameters: {
+      type: "object",
+      properties: {
+        cursor: {
+          type: "string",
+          description: `Opaque cursor from a previous ${name} call; omit for the first page.`,
+        },
+        server: {
+          type: "string",
+          description: `MCP server name. Omit to list ${noun} from every configured server.`,
+        },
+      },
+      additionalProperties: false,
+    },
+  };
+}
+
+async function listMcpEntries(byServer, input, kind, signal) {
+  const { cursor, server } = normalizeListInput(input);
+  if (server) {
+    const connection = requiredMcpConnection(byServer, server);
+    const result = await listMcpPage(connection, kind, cursor, signal);
+    return {
+      server,
+      [kind]: tagMcpEntries(result[kind], server),
+      ...(result.nextCursor ? { nextCursor: result.nextCursor } : {}),
+    };
+  }
+  if (cursor) throw new Error("cursor can only be used when a server is specified");
+  const pages = await Promise.allSettled([...byServer].map(async ([name, connection]) =>
+    tagMcpEntries(await listAllMcpEntries(connection, kind, signal), name)));
+  return {
+    [kind]: pages.flatMap((page) => page.status === "fulfilled" ? page.value : []),
+  };
+}
+
+function normalizeListInput(input) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new TypeError("MCP resource listing requires an object");
+  }
+  const normalized = {};
+  for (const field of ["cursor", "server"]) {
+    const value = input[field];
+    if (value === undefined) continue;
+    if (typeof value !== "string") throw new TypeError(`${field} must be a string`);
+    if (value.trim()) normalized[field] = value.trim();
+  }
+  return normalized;
+}
+
+async function listAllMcpEntries(connection, kind, signal) {
+  const entries = [];
+  const seen = new Set();
+  let cursor;
+  for (let page = 0; page < 100; page += 1) {
+    const result = await listMcpPage(connection, kind, cursor, signal);
+    entries.push(...(result[kind] ?? []));
+    if (!result.nextCursor) return entries;
+    if (seen.has(result.nextCursor)) {
+      throw new Error(`MCP ${kind} returned a repeated cursor`);
+    }
+    seen.add(result.nextCursor);
+    cursor = result.nextCursor;
+  }
+  throw new Error(`MCP ${kind} exceeded 100 pages`);
+}
+
+function listMcpPage(connection, kind, cursor, signal) {
+  const params = cursor ? { cursor } : undefined;
+  return withMcpRequest(connection.server, signal, (options) =>
+    kind === "resources"
+      ? connection.client.listResources(params, options)
+      : connection.client.listResourceTemplates(params, options));
+}
+
+function tagMcpEntries(entries = [], server) {
+  return entries.map((entry) => ({ ...entry, server }));
+}
+
+async function readMcpResource(byServer, input, signal) {
+  if (!input || typeof input !== "object" || Array.isArray(input)) {
+    throw new TypeError("read_mcp_resource requires an object");
+  }
+  const server = requiredString(input.server, "server");
+  const uri = requiredString(input.uri, "uri");
+  const connection = requiredMcpConnection(byServer, server);
+  const result = await withMcpRequest(connection.server, signal, (options) =>
+    connection.client.readResource({ uri }, options));
+  if (!result || typeof result !== "object" || Array.isArray(result)) {
+    throw new Error("MCP resources/read returned a non-object result");
+  }
+  return { ...result, server, uri };
+}
+
+function requiredMcpConnection(byServer, server) {
+  const connection = byServer.get(server);
+  if (!connection) throw new Error(`unknown MCP server: ${server}`);
+  return connection;
+}
+
+function requiredString(value, name) {
+  if (typeof value !== "string" || !value.trim()) {
+    throw new TypeError(`${name} must not be empty`);
+  }
+  return value.trim();
 }
 
 function createEntry(server, client, tool) {
@@ -212,12 +442,10 @@ function createSearchIndex(entries) {
   return index;
 }
 
-async function callRemoteTool(entry, input) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), entry.server.timeoutMs);
-  try {
+async function callRemoteTool(entry, input, context) {
+  return withMcpRequest(entry.server, context?.signal, async (requestOptions) => {
     const options = {
-      signal: controller.signal,
+      ...requestOptions,
       ...(entry.server.payment?.context !== undefined
         ? { context: entry.server.payment.context }
         : {}),
@@ -227,16 +455,26 @@ async function callRemoteTool(entry, input) {
       undefined,
       options,
     );
+  });
+}
+
+async function withMcpRequest(server, outerSignal, operation) {
+  const controller = new AbortController();
+  const abort = () => controller.abort();
+  if (outerSignal?.aborted) abort();
+  else outerSignal?.addEventListener("abort", abort, { once: true });
+  const timeout = setTimeout(abort, server.timeoutMs);
+  try {
+    return await operation({ signal: controller.signal, timeout: server.timeoutMs });
   } catch (error) {
     if (controller.signal.aborted) {
-      throw new Error(
-        `MCP tool ${entry.server.name}/${entry.remoteName} exceeded ${entry.server.timeoutMs} milliseconds`,
-        { cause: error },
-      );
+      const reason = outerSignal?.aborted ? "was cancelled" : `exceeded ${server.timeoutMs} milliseconds`;
+      throw new Error(`MCP request to ${server.name} ${reason}`, { cause: error });
     }
     throw error;
   } finally {
     clearTimeout(timeout);
+    outerSignal?.removeEventListener("abort", abort);
   }
 }
 

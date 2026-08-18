@@ -308,6 +308,141 @@ jobs:
       - name: Type-check and build the website
         working-directory: web
         run: npm test && npm run typecheck && npx --no-install vite build && npm run check:bundle
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nanocodex-web-deployment
+          path: web/dist
+          include-hidden-files: true
+          retention-days: 1
+
+  production:
+    name: production website
+    if: github.repository == 'gakonst/nanocodex' && github.event_name == 'push' && github.ref == 'refs/heads/master' && vars.CLOUDFLARE_DEPLOY_ENABLED == 'true'
+    needs: [test, quality, vm-guest, policy, bindings, python, web, codeql]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: nanocodex-cloudflare
+      cancel-in-progress: false
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22.13.0
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: nanocodex-web-deployment
+          path: web/dist
+      - name: Install deployment tooling
+        run: npm ci --prefix web --ignore-scripts
+      - name: Select the current production revision
+        id: production
+        env:
+          TARGET_SHA: ${{ github.sha }}
+        run: |
+          current_sha="$(git ls-remote https://github.com/gakonst/nanocodex.git refs/heads/master | cut -f1)"
+          if [ "$current_sha" = "$TARGET_SHA" ]; then
+            echo "current=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "current=false" >> "$GITHUB_OUTPUT"
+            echo "Skipping obsolete production revision $TARGET_SHA; master is $current_sha"
+          fi
+      - name: Deploy the attested Cloudflare Worker
+        if: steps.production.outputs.current == 'true'
+        working-directory: web
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          TARGET_SHA: ${{ github.sha }}
+        run: |
+          : "${CLOUDFLARE_ACCOUNT_ID:?configure the CLOUDFLARE_ACCOUNT_ID repository variable}"
+          : "${CLOUDFLARE_API_TOKEN:?configure the CLOUDFLARE_API_TOKEN repository secret}"
+          npx --no-install wrangler deploy \
+            --config dist/nanocodex/wrangler.json \
+            --strict \
+            --tag "$TARGET_SHA" \
+            --message "gakonst/nanocodex@$TARGET_SHA" \
+            --var "DEPLOYMENT_SHA:$TARGET_SHA"
+      - name: Verify the active Worker revision
+        if: steps.production.outputs.current == 'true'
+        env:
+          TARGET_SHA: ${{ github.sha }}
+        run: |
+          for attempt in $(seq 1 12); do
+            if body="$(curl -fsS "https://nanocodex.me-7fb.workers.dev/api/health?revision=$TARGET_SHA")" && \
+              DEPLOYMENT_HEALTH="$body" node -e '
+                const health = JSON.parse(process.env.DEPLOYMENT_HEALTH);
+                if (health.status !== "ok" || health.deployment_sha !== process.env.TARGET_SHA) process.exit(1);
+              '
+            then
+              exit 0
+            fi
+            if [ "$attempt" -lt 12 ]; then sleep 5; fi
+          done
+          echo "Cloudflare did not activate deployment $TARGET_SHA" >&2
+          exit 1
+      - name: Require master to remain on the deployed revision
+        if: steps.production.outputs.current == 'true'
+        env:
+          TARGET_SHA: ${{ github.sha }}
+        run: |
+          current_sha="$(git ls-remote https://github.com/gakonst/nanocodex.git refs/heads/master | cut -f1)"
+          test "$current_sha" = "$TARGET_SHA" || {
+            echo "Master advanced to $current_sha after deploying $TARGET_SHA; refusing to publish" >&2
+            exit 1
+          }
+      - name: Publish the matching repository generation
+        if: steps.production.outputs.current == 'true'
+        working-directory: web
+        env:
+          NANOCODEX_GIT_ORIGIN: https://nanocodex.me-7fb.workers.dev
+          NANOCODEX_GIT_TOKEN: ${{ secrets.NANOCODEX_GIT_TOKEN }}
+        run: npm run publish:repository
+      - name: Verify the repository snapshot and Git endpoint
+        if: steps.production.outputs.current == 'true'
+        env:
+          TARGET_SHA: ${{ github.sha }}
+        run: |
+          snapshot_ready=false
+          for attempt in $(seq 1 12); do
+            if curl -fsS \
+              "https://nanocodex.me-7fb.workers.dev/api/repository/snapshot?revision=$TARGET_SHA" \
+              -o "$RUNNER_TEMP/nanocodex-repository.json" && \
+              node -e '
+                const fs = require("node:fs");
+                const snapshot = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+                if (snapshot.repository?.head !== process.env.TARGET_SHA) process.exit(1);
+              ' "$RUNNER_TEMP/nanocodex-repository.json"
+            then
+              snapshot_ready=true
+              break
+            fi
+            if [ "$attempt" -lt 12 ]; then sleep 5; fi
+          done
+          test "$snapshot_ready" = true || {
+            echo "Repository snapshot did not advance to $TARGET_SHA" >&2
+            exit 1
+          }
+
+          for attempt in $(seq 1 12); do
+            if remote_shas="$(git ls-remote \
+              https://nanocodex.me-7fb.workers.dev/git \
+              HEAD refs/heads/master | awk '{print $1}' | sort -u)" && \
+              [ "$remote_shas" = "$TARGET_SHA" ]
+            then
+              exit 0
+            fi
+            if [ "$attempt" -lt 12 ]; then sleep 5; fi
+          done
+          echo "Git endpoint did not advance to $TARGET_SHA (observed: $remote_shas)" >&2
+          exit 1
 
   codeql:
     name: CodeQL actions
@@ -332,7 +467,7 @@ jobs:
   ci-success:
     name: ci success
     if: always()
-    needs: [test, quality, policy, bindings, python, web, codeql]
+    needs: [test, quality, vm-guest, policy, bindings, python, web, production, codeql]
     runs-on: ubuntu-latest
     timeout-minutes: 5
     steps:
@@ -340,16 +475,20 @@ jobs:
         env:
           TEST: ${{ needs.test.result }}
           QUALITY: ${{ needs.quality.result }}
+          VM_GUEST: ${{ needs.vm-guest.result }}
           POLICY: ${{ needs.policy.result }}
           BINDINGS: ${{ needs.bindings.result }}
           PYTHON: ${{ needs.python.result }}
           WEB: ${{ needs.web.result }}
+          PRODUCTION: ${{ needs.production.result }}
           CODEQL: ${{ needs.codeql.result }}
         run: |
           test "$TEST" = success
           test "$QUALITY" = success
+          test "$VM_GUEST" = success
           test "$POLICY" = success
           test "$BINDINGS" = success
           test "$PYTHON" = success
           test "$WEB" = success
+          test "$PRODUCTION" = success || test "$PRODUCTION" = skipped
           test "$CODEQL" = success

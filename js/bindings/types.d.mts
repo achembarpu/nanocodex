@@ -28,6 +28,13 @@ export type AgentOptions = {
   resume?: SessionSnapshot | undefined;
 };
 
+/** Model-visible facts for tools executing outside the embedding process. */
+export type ExecutionEnvironment = Readonly<{
+  currentDate: string;
+  timezone: string;
+  projectInstructions?: string | undefined;
+}>;
+
 /** Unsigned decimal revision for opaque ChatGPT subscription state. */
 declare const subscriptionRevisionBrand: unique symbol;
 export type SubscriptionRevision = string & {
@@ -213,6 +220,7 @@ export type ToolContext = {
   callId: string;
   parentCallId: string;
   sessionId: string;
+  signal: AbortSignal;
 };
 
 export type Tool = {
@@ -253,7 +261,7 @@ export type McpPayment = {
 };
 
 export type McpClient = {
-  listTools(params?: { cursor?: string | undefined }): Promise<{
+  listTools(params?: { cursor?: string | undefined }, options?: Record<string, unknown>): Promise<{
     tools: readonly McpTool[];
     nextCursor?: string | undefined;
   }>;
@@ -262,6 +270,24 @@ export type McpClient = {
     resultSchema?: unknown,
     options?: Record<string, unknown>,
   ): Promise<unknown>;
+  listResources?(
+    params?: { cursor?: string | undefined },
+    options?: Record<string, unknown>,
+  ): Promise<{
+    resources: readonly Record<string, unknown>[];
+    nextCursor?: string | undefined;
+  }>;
+  listResourceTemplates?(
+    params?: { cursor?: string | undefined },
+    options?: Record<string, unknown>,
+  ): Promise<{
+    resourceTemplates: readonly Record<string, unknown>[];
+    nextCursor?: string | undefined;
+  }>;
+  readResource?(
+    params: { uri: string },
+    options?: Record<string, unknown>,
+  ): Promise<Record<string, unknown>>;
 };
 
 export type McpTool = {
@@ -282,6 +308,7 @@ export type McpServer = {
   payment?: McpPayment | undefined;
   enabledTools?: readonly string[] | undefined;
   disabledTools?: readonly string[] | undefined;
+  startupTimeoutMs?: number | undefined;
   timeoutMs?: number | undefined;
 };
 

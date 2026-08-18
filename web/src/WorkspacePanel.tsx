@@ -35,6 +35,7 @@ import {
   relativeWorkspacePath,
   type WorkspaceTreeNode,
 } from "./workspaceTree";
+import { listVisibleWorkspaceEntries } from "./workspaceListing";
 
 const decoder = new TextDecoder("utf-8", { fatal: true });
 
@@ -55,6 +56,7 @@ export const WorkspacePanel = memo(function WorkspacePanel() {
   const [gitBusy, setGitBusy] = useState(false);
   const [message, setMessage] = useState("");
   const uploadRef = useRef<HTMLInputElement>(null);
+  const notificationSource = useRef(crypto.randomUUID()).current;
   const selected = entries.find((entry) => entry.path === selectedPath);
   const dirty = selected?.kind === "file"
     && selected.path === loadedFile?.path
@@ -63,10 +65,7 @@ export const WorkspacePanel = memo(function WorkspacePanel() {
   const refresh = useCallback(async (nextWorkspace: Workspace | undefined) => {
     if (!nextWorkspace) return;
     try {
-      const nextEntries = (await nextWorkspace.list(".", { recursive: true }))
-        .filter((entry) =>
-          !entry.path.startsWith(`${nextWorkspace.root}/.nanocodex`) &&
-          !entry.path.startsWith(`${nextWorkspace.root}/.git`));
+      const nextEntries = await listVisibleWorkspaceEntries(nextWorkspace);
       setEntries(nextEntries);
       setSelectedPath((current) => current && nextEntries.some(({ path }) => path === current)
         ? current
@@ -94,16 +93,36 @@ export const WorkspacePanel = memo(function WorkspacePanel() {
 
   useEffect(() => {
     if (!workspace) return;
-    const timer = window.setInterval(() => void refresh(workspace), 2_000);
+    let unsubscribe: (() => void) | undefined;
+    let active = true;
+    const refreshWorkspace = async () => {
+      try {
+        const { threadGitStatus } = await import("./threadGit");
+        const [nextGitStatus] = await Promise.all([
+          threadGitStatus(thread),
+          refresh(workspace),
+        ]);
+        if (active) setGitStatus(nextGitStatus);
+      } catch (error) {
+        if (active) setMessage(errorMessage(error));
+      }
+    };
+    void import("./threadGit").then(({ subscribeThreadGitChanges }) => {
+      if (!active) return;
+      unsubscribe = subscribeThreadGitChanges(thread, (source) => {
+        if (source !== notificationSource) void refreshWorkspace();
+      });
+    });
     const onVisible = () => {
-      if (document.visibilityState === "visible") void refresh(workspace);
+      if (document.visibilityState === "visible") void refreshWorkspace();
     };
     document.addEventListener("visibilitychange", onVisible);
     return () => {
-      window.clearInterval(timer);
+      active = false;
+      unsubscribe?.();
       document.removeEventListener("visibilitychange", onVisible);
     };
-  }, [refresh, workspace]);
+  }, [notificationSource, refresh, thread, workspace]);
 
   useEffect(() => {
     const mobile = window.matchMedia("(max-width: 740px)");
@@ -165,7 +184,8 @@ export const WorkspacePanel = memo(function WorkspacePanel() {
     try {
       await operation();
       await refresh(workspace);
-      const { threadGitStatus } = await import("./threadGit");
+      const { notifyThreadGitChanged, threadGitStatus } = await import("./threadGit");
+      notifyThreadGitChanged(thread, notificationSource);
       setGitStatus(await threadGitStatus(thread));
       setMessage(success);
       return true;
@@ -203,7 +223,11 @@ export const WorkspacePanel = memo(function WorkspacePanel() {
           setSavedContents(contents);
         }
         const { commitAndPushThread } = await import("./threadGit");
-        return commitAndPushThread(thread, "Update Nanocodex workspace");
+        return commitAndPushThread(
+          thread,
+          "Update Nanocodex workspace",
+          notificationSource,
+        );
       },
       "Committed and pushed origin nanocodex.",
     );
@@ -215,7 +239,7 @@ export const WorkspacePanel = memo(function WorkspacePanel() {
     )) return;
     await syncGit(async () => {
       const { pullThread } = await import("./threadGit");
-      return pullThread(thread);
+      return pullThread(thread, notificationSource);
     }, "Pulled origin nanocodex into OPFS.");
   };
 

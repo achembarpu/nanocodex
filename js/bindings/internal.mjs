@@ -151,6 +151,21 @@ export function toWasmConfig(options = {}) {
   copy(config, "instructions", options.instructions);
   copy(config, "session_id", options.sessionId);
   copy(config, "workspace", options.workspace);
+  if (options.executionEnvironment !== undefined) {
+    const environment = options.executionEnvironment;
+    if (!environment || typeof environment !== "object" || Array.isArray(environment)) {
+      throw new TypeError("executionEnvironment must be an object");
+    }
+    config.execution_environment = {
+      current_date: environment.currentDate,
+      timezone: environment.timezone,
+    };
+    copy(
+      config.execution_environment,
+      "project_instructions",
+      environment.projectInstructions,
+    );
+  }
   copy(config, "resume", options.resume);
   return config;
 }
@@ -243,6 +258,9 @@ const hostBridge = Object.freeze({
   },
   executeTool(name, input, sessionId, callId) {
     return requiredSessionHost(sessionId).executeTool(name, input, sessionId, callId);
+  },
+  cancelCode(sessionId) {
+    hostSessions.get(sessionId)?.cancelCode?.(sessionId);
   },
   readWorkspaceFile(path, sessionId) {
     return requiredSessionHost(sessionId).readWorkspaceFile(path);

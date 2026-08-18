@@ -161,6 +161,25 @@ test("tool proxies reject cross-origin calls before using the credential", async
   assert.equal(response.status, 403);
 });
 
+test("same-origin Fetch Metadata admits MCP GET streams without a referrer", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = (async () => new Response("event: message\ndata: {}\n\n", {
+    headers: { "content-type": "text/event-stream" },
+  })) as typeof fetch;
+  try {
+    const response = await worker.fetch(new Request("https://demo.test/api/mcp/tempo", {
+      headers: {
+        "sec-fetch-site": "same-origin",
+        "x-nanocodex-request": "1",
+      },
+    }), { ENVIRONMENT: "test" });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-type"), "text/event-stream");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("BYOK sessions keep the key behind an opaque HttpOnly cookie and take precedence", async () => {
   const { credentials, namespace } = createByokSessions();
   const env = {
@@ -193,6 +212,7 @@ test("BYOK sessions keep the key behind an opaque HttpOnly cookie and take prece
   assert.deepEqual(await health.json(), {
     agent_configured: true,
     credential_source: "user",
+    deployment_sha: null,
     service: "nanocodex",
     runtime: "cloudflare-workers",
     status: "ok",
@@ -271,10 +291,32 @@ test("production never exposes a configured deployment API key as a public proxy
   assert.deepEqual(await response.json(), {
     agent_configured: false,
     credential_source: null,
+    deployment_sha: null,
     service: "nanocodex",
     runtime: "cloudflare-workers",
     status: "ok",
   });
+});
+
+test("health attests only a complete deployment commit SHA", async () => {
+  const deploymentSha = "0123456789abcdef0123456789abcdef01234567";
+  const attested = await worker.fetch(
+    new Request("https://demo.test/api/health"),
+    { ENVIRONMENT: "production", DEPLOYMENT_SHA: deploymentSha },
+  );
+  assert.equal(
+    ((await attested.json()) as { deployment_sha: string | null }).deployment_sha,
+    deploymentSha,
+  );
+
+  const malformed = await worker.fetch(
+    new Request("https://demo.test/api/health"),
+    { ENVIRONMENT: "production", DEPLOYMENT_SHA: "master" },
+  );
+  assert.equal(
+    ((await malformed.json()) as { deployment_sha: string | null }).deployment_sha,
+    null,
+  );
 });
 
 test("custom headers never bypass the same-origin boundary", async () => {
@@ -316,6 +358,7 @@ test("ChatGPT login exposes only device state while subscription credentials sta
   assert.deepEqual(await health.json(), {
     agent_configured: true,
     credential_source: "subscription",
+    deployment_sha: null,
     service: "nanocodex",
     runtime: "cloudflare-workers",
     status: "ok",

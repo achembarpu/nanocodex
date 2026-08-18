@@ -28,6 +28,7 @@ const DEFERRED_TOOLS_DESCRIPTION: &str = r"Some deferred nested tools are omitte
 #[derive(Clone, Default)]
 pub struct HostedTools {
     host: Option<Arc<dyn CodeModeHost>>,
+    session_id: Option<Arc<str>>,
 }
 
 impl HostedTools {
@@ -36,6 +37,7 @@ impl HostedTools {
     pub fn new(host: impl CodeModeHost) -> Self {
         Self {
             host: Some(Arc::new(host)),
+            session_id: None,
         }
     }
 
@@ -56,7 +58,8 @@ impl HostedTools {
     /// Hosted tool discovery and execution receive the session ID directly, so
     /// there is no Rust-owned subprocess environment to update here.
     #[must_use]
-    pub const fn for_session(self, _session_id: &str) -> Self {
+    pub fn for_session(mut self, session_id: &str) -> Self {
+        self.session_id = Some(Arc::from(session_id));
         self
     }
 
@@ -71,16 +74,18 @@ impl HostedTools {
 pub struct HostedToolRuntime {
     working_directory: Arc<str>,
     host: Option<Arc<dyn CodeModeHost>>,
+    session_id: Option<Arc<str>>,
     callable_tool_names: RwLock<HashSet<String>>,
 }
 
 /// Cancellation handle for a hosted runtime.
 ///
-/// A host call is cancelled by dropping its future. This handle exists so the
-/// hosted runtime can satisfy the same lifecycle contract as the native
-/// runtime.
-#[derive(Clone, Copy)]
-pub struct HostedToolRuntimeControl;
+/// Cancellation handle for work owned by an embedding host.
+#[derive(Clone, Default)]
+pub struct HostedToolRuntimeControl {
+    host: Option<Arc<dyn CodeModeHost>>,
+    session_id: Option<Arc<str>>,
+}
 
 impl HostedToolRuntime {
     /// Creates a runtime without an application host.
@@ -97,6 +102,7 @@ impl HostedToolRuntime {
         Self {
             working_directory: Arc::from(workspace.to_string_lossy().into_owned()),
             host: None,
+            session_id: None,
             callable_tool_names: RwLock::new(HashSet::new()),
         }
     }
@@ -116,6 +122,7 @@ impl HostedToolRuntime {
     #[must_use]
     pub fn with_tools(mut self, tools: &HostedTools) -> Self {
         self.host.clone_from(&tools.host);
+        self.session_id.clone_from(&tools.session_id);
         self
     }
 
@@ -133,8 +140,11 @@ impl HostedToolRuntime {
 
     /// Returns a cancellation handle for the runtime.
     #[must_use]
-    pub const fn control(&self) -> HostedToolRuntimeControl {
-        HostedToolRuntimeControl
+    pub fn control(&self) -> HostedToolRuntimeControl {
+        HostedToolRuntimeControl {
+            host: self.host.clone(),
+            session_id: self.session_id.clone(),
+        }
     }
 
     /// Builds the `exec` definition from the host's current tool definitions.
@@ -368,21 +378,23 @@ impl HostedToolRuntimeControl {
     pub const fn begin_turn(&self) {}
 
     /// Cancels work owned by the current logical turn.
-    #[allow(
-        clippy::unused_async,
-        reason = "matches the native tool-runtime control contract"
-    )]
-    pub async fn cancel_turn(&self) {}
+    pub async fn cancel_turn(&self) {
+        self.cancel().await;
+    }
 
     /// Cancels active work.
     ///
-    /// Hosted calls are cancelled by dropping their futures, so no additional
-    /// control message is required.
-    #[allow(
-        clippy::unused_async,
-        reason = "matches the native tool-runtime control contract"
-    )]
-    pub async fn cancel(&self) {}
+    pub async fn cancel(&self) {
+        if let (Some(host), Some(session_id)) = (&self.host, &self.session_id)
+            && let Err(error) = host.cancel(session_id).await
+        {
+            tracing::warn!(
+                target: "nanocodex_tools",
+                %error,
+                "hosted Code Mode cancellation failed"
+            );
+        }
+    }
 }
 
 fn replay_nested_updates(execution: &CodeModeExecution, observer: &mut dyn CodeModeObserver) {

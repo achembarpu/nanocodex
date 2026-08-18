@@ -152,4 +152,9 @@ pub trait CodeModeHost: Send + Sync + 'static {
             )))
         })
     }
+
+    /// Cancels host-owned Code Mode and nested-tool work for one agent session.
+    fn cancel<'a>(&'a self, _session_id: &'a str) -> HostFuture<'a, Result<(), CodeModeHostError>> {
+        Box::pin(async { Ok(()) })
+    }
 }

@@ -26,6 +26,7 @@ export type {
   CodeEvaluator,
   CodeEvaluatorEnvironment,
   EstimatedUsdCost,
+  ExecutionEnvironment,
   PromptInput,
   PromptItem,
   ReasoningMode,

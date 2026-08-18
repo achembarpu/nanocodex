@@ -15,6 +15,7 @@ import { EvalCoordinator, routeEvalMutation, type EvalStorageEnv } from "./evalC
 import { routeEvalRead } from "./evalReadApi.ts";
 import { handleGitRequest, type GitStorageEnv } from "./gitRoutes.ts";
 import { GitRepository } from "./gitRepository.ts";
+import { proxyDefaultMcp } from "./mcpProxy.ts";
 import {
   handleThreadGitRequest,
   type ThreadGitStorageEnv,
@@ -71,10 +72,12 @@ const BYOK_COOKIE = "nanocodex_byok_v2";
 const SECURE_BYOK_COOKIE = "__Secure-nanocodex_byok_v2";
 const CHATGPT_COOKIE = "nanocodex_chatgpt_v2";
 const SECURE_CHATGPT_COOKIE = "__Secure-nanocodex_chatgpt_v2";
+const GIT_SHA_PATTERN = /^[0-9a-f]{40}$/;
 
 type WorkerEnv = GitStorageEnv & ThreadGitStorageEnv & EvalStorageEnv & ChatGptEgressEnv
   & PublicSecurityEnv & CredentialVaultEnv & {
   ENVIRONMENT: string;
+  DEPLOYMENT_SHA?: string;
   OPENAI_API_KEY?: string;
   CHATGPT_ISSUER?: string;
   BYOK_SESSIONS?: DurableObjectNamespace;
@@ -117,6 +120,8 @@ export default {
     if (gitResponse != null) return gitResponse;
     const threadGitResponse = await handleThreadGitRequest(request, env, url, context);
     if (threadGitResponse != null) return threadGitResponse;
+    const mcpResponse = await proxyDefaultMcp(request, url, sameOrigin(request, url, env));
+    if (mcpResponse != null) return mcpResponse;
 
     if (url.pathname === "/api/health" && request.method === "GET") {
       const resolved = await resolveCredential(request, env, "health");
@@ -127,6 +132,9 @@ export default {
       return json({
         agent_configured: Boolean(credential),
         credential_source: credential?.source ?? null,
+        deployment_sha: GIT_SHA_PATTERN.test(env.DEPLOYMENT_SHA ?? "")
+          ? env.DEPLOYMENT_SHA
+          : null,
         service: "nanocodex",
         runtime: "cloudflare-workers",
         status: "ok",
@@ -1077,6 +1085,10 @@ async function deleteChatGptSession(request: Request, env: WorkerEnv): Promise<v
 }
 
 function sameOrigin(request: Request, url: URL, env: WorkerEnv): boolean {
+  if (
+    request.headers.get("x-nanocodex-request") === "1" &&
+    request.headers.get("sec-fetch-site") === "same-origin"
+  ) return true;
   const origin = request.headers.get("Origin");
   if (origin) return matchesRequestOrigin(origin, url, env.ENVIRONMENT === "development");
   const referer = request.headers.get("Referer");

@@ -8,7 +8,6 @@ export const THREAD_GIT_DIRECTORY = "/workspace";
 export const THREAD_GIT_AUTHOR = { name: "Nanocodex", email: "agent@nanocodex.dev" };
 const directory = THREAD_GIT_DIRECTORY;
 const author = THREAD_GIT_AUTHOR;
-const localLocks = new Map<string, Promise<unknown>>();
 
 export type ThreadGitStatus = {
   branch: "nanocodex";
@@ -21,13 +20,16 @@ export function browserThread(threadId: string, origin: string): BrowserThread {
   if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(threadId)) {
     throw new Error("invalid browser thread id");
   }
+  const baseUrl = new URL(origin);
+  const shareUrl = new URL("/", baseUrl);
+  shareUrl.searchParams.set("thread", threadId);
   return {
     id: threadId,
     workspaceName: `nanocodex-thread-${threadId}`,
     repositoryName: `thread-${threadId}`,
     branch: "nanocodex",
-    remoteUrl: `${origin}/git/thread-${threadId}`,
-    shareUrl: origin,
+    remoteUrl: `${baseUrl.origin}/git/thread-${threadId}`,
+    shareUrl: shareUrl.toString(),
   };
 }
 
@@ -62,6 +64,7 @@ export async function threadGitStatus(thread: BrowserThread): Promise<ThreadGitS
 export async function commitAndPushThread(
   thread: BrowserThread,
   message = "Update workspace",
+  notificationSource?: string,
 ): Promise<ThreadGitStatus> {
   return withThreadGitLock(thread, async () => {
     const fs = await openOpfsGitFs(thread.workspaceName);
@@ -87,12 +90,15 @@ export async function commitAndPushThread(
       remoteRef: thread.branch,
     });
     const next = await status(fs, thread);
-    notifyThreadGitChanged(thread);
+    notifyThreadGitChanged(thread, notificationSource);
     return next;
   });
 }
 
-export async function pullThread(thread: BrowserThread): Promise<ThreadGitStatus> {
+export async function pullThread(
+  thread: BrowserThread,
+  notificationSource?: string,
+): Promise<ThreadGitStatus> {
   return withThreadGitLock(thread, async () => {
     const fs = await openOpfsGitFs(thread.workspaceName);
     if (!(await exists(fs, `${directory}/.git/config`))) await initializeOrRestore(fs, thread);
@@ -107,25 +113,31 @@ export async function pullThread(thread: BrowserThread): Promise<ThreadGitStatus
       await restoreRemote(fs, thread);
     }
     const next = await status(fs, thread);
-    notifyThreadGitChanged(thread);
+    notifyThreadGitChanged(thread, notificationSource);
     return next;
   });
 }
 
 export function subscribeThreadGitChanges(
   thread: BrowserThread,
-  listener: () => void,
+  listener: (source?: string) => void,
 ): () => void {
   if (typeof BroadcastChannel === "undefined") return () => undefined;
   const channel = new BroadcastChannel(`nanocodex-git-${thread.id}`);
-  channel.addEventListener("message", listener);
+  channel.addEventListener("message", (event) => {
+    const source = event.data != null && typeof event.data === "object" &&
+        typeof (event.data as { source?: unknown }).source === "string"
+      ? (event.data as { source: string }).source
+      : undefined;
+    listener(source);
+  });
   return () => channel.close();
 }
 
-export function notifyThreadGitChanged(thread: BrowserThread): void {
+export function notifyThreadGitChanged(thread: BrowserThread, source?: string): void {
   if (typeof BroadcastChannel === "undefined") return;
   const channel = new BroadcastChannel(`nanocodex-git-${thread.id}`);
-  channel.postMessage({ type: "changed" });
+  channel.postMessage({ type: "changed", source });
   channel.close();
 }
 
@@ -197,16 +209,13 @@ async function exists(fs: Awaited<ReturnType<typeof openOpfsGitFs>>, path: strin
 export async function withThreadGitLock<T>(
   thread: BrowserThread,
   operation: () => Promise<T>,
+  signal?: AbortSignal,
 ): Promise<T> {
-  if (navigator.locks) {
-    return navigator.locks.request(`nanocodex-git-${thread.id}`, operation);
+  if (!navigator.locks) {
+    throw new Error("This browser must support Web Locks to safely share the OPFS Git repository");
   }
-  const previous = localLocks.get(thread.id) ?? Promise.resolve();
-  const current = previous.catch(() => undefined).then(operation);
-  localLocks.set(thread.id, current);
-  try {
-    return await current;
-  } finally {
-    if (localLocks.get(thread.id) === current) localLocks.delete(thread.id);
-  }
+  const name = `nanocodex-git-${thread.id}`;
+  return signal
+    ? navigator.locks.request(name, { signal }, operation)
+    : navigator.locks.request(name, operation);
 }

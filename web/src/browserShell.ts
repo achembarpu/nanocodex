@@ -25,8 +25,15 @@ import { openThreadWorkspace, type BrowserThread } from "./workspace.ts";
 
 const utf8 = new TextEncoder();
 const utf8Decoder = new TextDecoder();
+const diffDecoder = new TextDecoder("utf-8", { fatal: true });
 const MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
 const MAX_EXECUTION_MS = 30_000;
+const MAX_GIT_LOG_DEPTH = 200;
+const MAX_DIFF_FILE_BYTES = 1024 * 1024;
+const MAX_INDEXED_PATHS = 100_000;
+const MAX_PROJECT_INSTRUCTIONS_BYTES = 32 * 1024;
+const PROJECT_INSTRUCTION_FILES = ["AGENTS.override.md", "AGENTS.md"] as const;
+const DIFF_TRUNCATION_NOTICE = "\n[diff truncated by browser git]\n";
 const AGENT_INSTRUCTIONS = `You are working in a persistent browser filesystem rooted at /workspace.
 Use exec_command for bash commands such as ls, cat, find, grep, and git. The shell is implemented
 in-browser, so it has no host process or PTY. The repository's only publish branch is nanocodex;
@@ -50,11 +57,20 @@ type ExecCommandInput = {
   prefix_rule?: unknown;
 };
 
+type BrowserBashOptions = {
+  onChanged?: () => void;
+};
+
+type ExecCommandContext = {
+  signal?: AbortSignal;
+};
+
 export async function prepareBrowserShell(threadId: string, origin: string) {
   const thread = browserThread(threadId, origin);
   await initializeThreadGit(thread);
   const rawFs = await openOpfsGitFs(thread.workspaceName);
-  const { bash, filesystem: shellFs } = await createBrowserBash(rawFs, thread);
+  const { exec, filesystem: shellFs } = await createBrowserBash(rawFs, thread);
+  const projectInstructions = await loadBrowserProjectInstructions(rawFs);
 
   const workspace = await openThreadWorkspace(threadId);
   const notifyingWorkspace = Object.freeze({
@@ -63,19 +79,32 @@ export async function prepareBrowserShell(threadId: string, origin: string) {
     readFile: workspace.readFile,
     async writeFile(path: string, contents: string | ArrayBuffer | ArrayBufferView) {
       await workspace.writeFile(path, contents);
-      notifyThreadGitChanged(thread);
+      try {
+        shellFs.recordExternalWrite(path);
+      } finally {
+        notifyThreadGitChanged(thread);
+      }
     },
     async remove(path: string, options?: { recursive?: boolean }) {
       await workspace.remove(path, options);
-      notifyThreadGitChanged(thread);
+      try {
+        shellFs.recordExternalRemove(path);
+      } finally {
+        notifyThreadGitChanged(thread);
+      }
     },
     async mkdir(path: string) {
       await workspace.mkdir(path);
-      notifyThreadGitChanged(thread);
+      try {
+        shellFs.recordExternalWrite(path);
+      } finally {
+        notifyThreadGitChanged(thread);
+      }
     },
   });
   return {
     instructions: AGENT_INSTRUCTIONS,
+    projectInstructions,
     workspace: notifyingWorkspace,
     execTool: {
       description: "Run a bash command in the browser thread workspace.",
@@ -85,13 +114,52 @@ export async function prepareBrowserShell(threadId: string, origin: string) {
         required: ["cmd"],
         additionalProperties: true,
       },
-      handler: (input: ExecCommandInput) => execute(bash, shellFs, thread, input),
+      handler: exec,
     },
   };
 }
 
+/** Captures the root project instructions using the native Nanocodex precedence and budget. */
+export async function loadBrowserProjectInstructions(
+  rawFs: OpfsGitFs,
+): Promise<string | undefined> {
+  for (const filename of PROJECT_INSTRUCTION_FILES) {
+    const path = `${THREAD_GIT_DIRECTORY}/${filename}`;
+    let stat: Awaited<ReturnType<OpfsGitFs["promises"]["stat"]>>;
+    try {
+      stat = await rawFs.promises.stat(path);
+    } catch (error) {
+      if ((error as { code?: unknown })?.code === "ENOENT") continue;
+      console.warn("failed to read project AGENTS.md instructions", { path, error });
+      return undefined;
+    }
+    if (!stat.isFile()) continue;
+    if (stat.size > MAX_PROJECT_INSTRUCTIONS_BYTES) {
+      console.warn("project doc exceeds remaining budget; truncating", {
+        path,
+        remainingBytes: MAX_PROJECT_INSTRUCTIONS_BYTES,
+      });
+    }
+    try {
+      const bytes = await rawFs.promises.readFile(path, {
+        maxBytes: MAX_PROJECT_INSTRUCTIONS_BYTES,
+      }) as Uint8Array;
+      const instructions = utf8Decoder.decode(bytes);
+      return instructions.trim() ? instructions : undefined;
+    } catch (error) {
+      console.warn("failed to read project AGENTS.md instructions", { path, error });
+      return undefined;
+    }
+  }
+  return undefined;
+}
+
 /** Builds the browser shell over an already-open OPFS Git adapter. */
-export async function createBrowserBash(rawFs: OpfsGitFs, thread: BrowserThread) {
+export async function createBrowserBash(
+  rawFs: OpfsGitFs,
+  thread: BrowserThread,
+  options: BrowserBashOptions = {},
+) {
   const filesystem = new OpfsShellFileSystem(rawFs);
   await filesystem.refreshPaths();
   const bash = new Bash({
@@ -105,7 +173,11 @@ export async function createBrowserBash(rawFs: OpfsGitFs, thread: BrowserThread)
       GIT_COMMITTER_EMAIL: THREAD_GIT_AUTHOR.email,
     },
     fs: filesystem,
-    customCommands: [gitCommand(rawFs, thread), ghCommand(rawFs, thread), artifactCommand()],
+    customCommands: [
+      gitCommand(rawFs, thread, filesystem),
+      ghCommand(rawFs, thread),
+      artifactCommand(),
+    ],
     executionLimitProfile: "hardened",
     executionLimits: {
       maxCommandCount: 10_000,
@@ -120,7 +192,18 @@ export async function createBrowserBash(rawFs: OpfsGitFs, thread: BrowserThread)
     },
   });
 
-  return { bash, filesystem };
+  return {
+    bash,
+    filesystem,
+    exec: (input: ExecCommandInput, context?: ExecCommandContext) => execute(
+      bash,
+      filesystem,
+      thread,
+      input,
+      options.onChanged ?? (() => notifyThreadGitChanged(thread)),
+      context?.signal,
+    ),
+  };
 }
 
 async function execute(
@@ -128,6 +211,8 @@ async function execute(
   shellFs: OpfsShellFileSystem,
   thread: BrowserThread,
   input: ExecCommandInput,
+  onChanged: () => void,
+  signal?: AbortSignal,
 ) {
   if (typeof input?.cmd !== "string" || !input.cmd.trim()) {
     throw new TypeError("exec_command.cmd must be a non-empty string");
@@ -143,11 +228,13 @@ async function execute(
   const maxTokens = optionalPositiveInteger(input.max_output_tokens, 10_000);
   const startedAt = performance.now();
   const result = await withThreadGitLock(thread, async () => {
-    await shellFs.refreshPaths();
-    const next = await bash.exec(input.cmd as string, { cwd: workdir });
-    notifyThreadGitChanged(thread);
-    return next;
-  });
+    const mutationVersion = shellFs.mutationVersion;
+    try {
+      return await bash.exec(input.cmd as string, { cwd: workdir, signal });
+    } finally {
+      if (shellFs.mutationVersion !== mutationVersion) onChanged();
+    }
+  }, signal);
   const combined = `${result.stdout}${result.stderr}`;
   const maxCharacters = maxTokens * 4;
   const truncated = combined.length > maxCharacters;
@@ -161,7 +248,11 @@ async function execute(
   };
 }
 
-function gitCommand(fs: OpfsGitFs, thread: BrowserThread) {
+function gitCommand(
+  fs: OpfsGitFs,
+  thread: BrowserThread,
+  shellFs: OpfsShellFileSystem,
+) {
   return defineCommand("git", async (args, context) => {
     try {
       const command = args[0];
@@ -172,14 +263,28 @@ function gitCommand(fs: OpfsGitFs, thread: BrowserThread) {
           return ok(gitHelp());
         case "status":
           return ok(await gitStatus(fs, thread, args.slice(1)));
-        case "add":
-          return ok(await gitAdd(fs, args.slice(1), context.cwd));
-        case "commit":
-          return ok(await gitCommit(fs, args.slice(1)));
+        case "add": {
+          const output = await gitAdd(
+            fs,
+            args.slice(1),
+            context.cwd,
+            () => shellFs.recordRepositoryMutation(),
+          );
+          return ok(output);
+        }
+        case "commit": {
+          const output = await gitCommit(fs, args.slice(1));
+          shellFs.recordRepositoryMutation();
+          return ok(output);
+        }
         case "push":
           return ok(await gitPush(fs, thread, args.slice(1)));
-        case "pull":
-          return ok(await gitPull(fs, thread, args.slice(1)));
+        case "pull": {
+          const output = await gitPull(fs, thread, args.slice(1));
+          await shellFs.refreshPaths();
+          shellFs.recordRepositoryMutation();
+          return ok(output);
+        }
         case "log":
           return ok(await gitLog(fs, args.slice(1)));
         case "diff":
@@ -319,7 +424,12 @@ async function gitStatus(fs: OpfsGitFs, thread: BrowserThread, args: string[]): 
   ].join("\n");
 }
 
-async function gitAdd(fs: OpfsGitFs, args: string[], cwd: string): Promise<string> {
+async function gitAdd(
+  fs: OpfsGitFs,
+  args: string[],
+  cwd: string,
+  onStaged: () => void,
+): Promise<string> {
   const requested = args.filter((arg) => !arg.startsWith("-"));
   if (!requested.length && !args.includes("-A") && !args.includes("--all")) {
     throw new Error("nothing specified, nothing added");
@@ -329,9 +439,15 @@ async function gitAdd(fs: OpfsGitFs, args: string[], cwd: string): Promise<strin
   const prefixes = requested.filter((path) => path !== ".").map((path) => repositoryPath(path, cwd));
   const selected = matrix.filter(([path]) => all || prefixes.some((prefix) => path === prefix || path.startsWith(`${prefix}/`)));
   if (!all && selected.length === 0) throw new Error(`pathspec '${requested.join(" ")}' did not match any files`);
-  for (const [filepath, , workdirStatus] of selected) {
-    if (workdirStatus === 0) await git.remove({ fs, dir: THREAD_GIT_DIRECTORY, filepath });
-    else await git.add({ fs, dir: THREAD_GIT_DIRECTORY, filepath });
+  let staged = false;
+  try {
+    for (const [filepath, , workdirStatus] of selected) {
+      if (workdirStatus === 0) await git.remove({ fs, dir: THREAD_GIT_DIRECTORY, filepath });
+      else await git.add({ fs, dir: THREAD_GIT_DIRECTORY, filepath });
+      staged = true;
+    }
+  } finally {
+    if (staged) onStaged();
   }
   return "";
 }
@@ -382,6 +498,9 @@ async function gitPull(fs: OpfsGitFs, thread: BrowserThread, args: string[]): Pr
 async function gitLog(fs: OpfsGitFs, args: string[]): Promise<string> {
   const countArgument = args.find((arg) => /^-\d+$/.test(arg));
   const depth = countArgument ? Number(countArgument.slice(1)) : 20;
+  if (!Number.isSafeInteger(depth) || depth > MAX_GIT_LOG_DEPTH) {
+    throw new Error(`browser git log depth cannot exceed ${MAX_GIT_LOG_DEPTH}`);
+  }
   const commits = await git.log({ fs, dir: THREAD_GIT_DIRECTORY, depth }).catch(() => []);
   if (args.includes("--oneline")) {
     return commits.map(({ oid, commit }) => `${oid.slice(0, 7)} ${firstLine(commit.message)}`).join("\n") + (commits.length ? "\n" : "");
@@ -406,16 +525,69 @@ async function gitDiff(fs: OpfsGitFs, args: string[]): Promise<string> {
   const files = matrix.filter(([path, headStatus, workdirStatus]) =>
     headStatus !== workdirStatus && (!requested.length || requested.includes(path)));
   const patches: string[] = [];
+  let outputLength = 0;
   for (const [filepath, headStatus, workdirStatus] of files) {
-    const before = head && headStatus !== 0
-      ? utf8Decoder.decode((await git.readBlob({ fs, dir: THREAD_GIT_DIRECTORY, oid: head, filepath })).blob)
-      : "";
-    const after = workdirStatus === 0
-      ? ""
-      : utf8Decoder.decode(await fs.promises.readFile(`${THREAD_GIT_DIRECTORY}/${filepath}`) as Uint8Array);
-    patches.push(createTwoFilesPatch(`a/${filepath}`, `b/${filepath}`, before, after, "HEAD", "worktree"));
+    const worktreePath = `${THREAD_GIT_DIRECTORY}/${filepath}`;
+    const worktreeTooLarge = workdirStatus !== 0 &&
+      (await fs.promises.stat(worktreePath)).size > MAX_DIFF_FILE_BYTES;
+    const beforeBytes = head && headStatus !== 0 && !worktreeTooLarge
+      ? (await git.readBlob({ fs, dir: THREAD_GIT_DIRECTORY, oid: head, filepath })).blob
+      : undefined;
+    const afterBytes = workdirStatus !== 0 && !worktreeTooLarge
+      ? await fs.promises.readFile(worktreePath) as Uint8Array
+      : undefined;
+    const patch = worktreeTooLarge ||
+        (beforeBytes?.byteLength ?? 0) > MAX_DIFF_FILE_BYTES ||
+        (afterBytes?.byteLength ?? 0) > MAX_DIFF_FILE_BYTES ||
+        beforeBytes?.includes(0) ||
+        afterBytes?.includes(0)
+      ? binaryFilePatch(filepath, headStatus, workdirStatus)
+      : textFilePatch(filepath, headStatus, workdirStatus, beforeBytes, afterBytes);
+    const separatorLength = patches.length ? 1 : 0;
+    const remaining = MAX_OUTPUT_BYTES - outputLength - separatorLength;
+    if (patch.length > remaining) {
+      if (remaining > DIFF_TRUNCATION_NOTICE.length) {
+        patches.push(`${patch.slice(0, remaining - DIFF_TRUNCATION_NOTICE.length)}${DIFF_TRUNCATION_NOTICE}`);
+      } else if (outputLength + DIFF_TRUNCATION_NOTICE.length <= MAX_OUTPUT_BYTES) {
+        patches.push(DIFF_TRUNCATION_NOTICE);
+      }
+      break;
+    }
+    patches.push(patch);
+    outputLength += separatorLength + patch.length;
   }
   return patches.join("\n");
+}
+
+function textFilePatch(
+  filepath: string,
+  headStatus: number,
+  workdirStatus: number,
+  beforeBytes: Uint8Array | undefined,
+  afterBytes: Uint8Array | undefined,
+): string {
+  let before: string;
+  let after: string;
+  try {
+    before = beforeBytes ? diffDecoder.decode(beforeBytes) : "";
+    after = afterBytes ? diffDecoder.decode(afterBytes) : "";
+  } catch {
+    return binaryFilePatch(filepath, headStatus, workdirStatus);
+  }
+  return createTwoFilesPatch(
+    headStatus === 0 ? "/dev/null" : `a/${filepath}`,
+    workdirStatus === 0 ? "/dev/null" : `b/${filepath}`,
+    before,
+    after,
+    "HEAD",
+    "worktree",
+  );
+}
+
+function binaryFilePatch(filepath: string, headStatus: number, workdirStatus: number): string {
+  const before = headStatus === 0 ? "/dev/null" : `a/${filepath}`;
+  const after = workdirStatus === 0 ? "/dev/null" : `b/${filepath}`;
+  return `diff --git a/${filepath} b/${filepath}\nBinary files ${before} and ${after} differ\n`;
 }
 
 function gitBranch(thread: BrowserThread, args: string[]): string {
@@ -504,16 +676,37 @@ function fail(stderr: string, exitCode: number) {
 
 class OpfsShellFileSystem implements IFileSystem {
   readonly #fs: OpfsGitFs;
-  readonly #paths = new Set<string>([THREAD_GIT_DIRECTORY]);
+  #paths = new Set<string>([THREAD_GIT_DIRECTORY]);
+  #sortedPaths: string[] | undefined;
+  #mutationVersion = 0;
 
   constructor(fs: OpfsGitFs) {
     this.#fs = fs;
   }
 
+  get mutationVersion(): number {
+    return this.#mutationVersion;
+  }
+
   async refreshPaths(): Promise<void> {
-    this.#paths.clear();
-    this.#paths.add(THREAD_GIT_DIRECTORY);
-    await this.#visit(THREAD_GIT_DIRECTORY);
+    const paths = new Set<string>([THREAD_GIT_DIRECTORY]);
+    await this.#visit(THREAD_GIT_DIRECTORY, paths);
+    this.#paths = paths;
+    this.#sortedPaths = undefined;
+  }
+
+  recordExternalWrite(path: string): void {
+    this.#recordMutation();
+    this.#addPath(resolveWorkspacePath(THREAD_GIT_DIRECTORY, path));
+  }
+
+  recordExternalRemove(path: string): void {
+    this.#recordMutation();
+    this.#removePath(resolveWorkspacePath(THREAD_GIT_DIRECTORY, path));
+  }
+
+  recordRepositoryMutation(): void {
+    this.#recordMutation();
   }
 
   async readFile(path: string, options?: { encoding?: BufferEncoding | null } | BufferEncoding): Promise<string> {
@@ -538,6 +731,7 @@ class OpfsShellFileSystem implements IFileSystem {
   ): Promise<void> {
     const absolute = resolveWorkspacePath(THREAD_GIT_DIRECTORY, path);
     await this.#fs.promises.writeFile(absolute, encode(content, options));
+    this.#recordMutation();
     this.#addPath(absolute);
   }
 
@@ -546,15 +740,10 @@ class OpfsShellFileSystem implements IFileSystem {
     content: FileContent,
     options?: { encoding?: BufferEncoding } | BufferEncoding,
   ): Promise<void> {
-    const previous = await this.readFileBuffer(path).catch((error) => {
-      if (isCode(error, "ENOENT")) return new Uint8Array();
-      throw error;
-    });
-    const addition = encode(content, options);
-    const combined = new Uint8Array(previous.length + addition.length);
-    combined.set(previous);
-    combined.set(addition, previous.length);
-    await this.writeFile(path, combined);
+    const absolute = resolveWorkspacePath(THREAD_GIT_DIRECTORY, path);
+    await this.#fs.promises.appendFile(absolute, encode(content, options));
+    this.#recordMutation();
+    this.#addPath(absolute);
   }
 
   async exists(path: string): Promise<boolean> {
@@ -583,6 +772,7 @@ class OpfsShellFileSystem implements IFileSystem {
   async mkdir(path: string): Promise<void> {
     const absolute = resolveWorkspacePath(THREAD_GIT_DIRECTORY, path);
     await this.#fs.promises.mkdir(absolute);
+    this.#recordMutation();
     this.#addPath(absolute);
   }
 
@@ -592,26 +782,21 @@ class OpfsShellFileSystem implements IFileSystem {
 
   async readdirWithFileTypes(path: string) {
     const absolute = resolveWorkspacePath(THREAD_GIT_DIRECTORY, path);
-    return Promise.all((await this.readdir(absolute)).map(async (name) => {
-      const entry = await this.stat(`${absolute}/${name}`);
-      return {
-        name,
-        isFile: entry.isFile,
-        isDirectory: entry.isDirectory,
-        isSymbolicLink: entry.isSymbolicLink,
-      };
-    }));
+    return this.#fs.promises.readdirWithFileTypes(absolute);
   }
 
   async rm(path: string, options?: RmOptions): Promise<void> {
     const absolute = resolveWorkspacePath(THREAD_GIT_DIRECTORY, path);
+    let removed = false;
     try {
       await this.#fs.promises.rm(absolute, { recursive: options?.recursive });
+      removed = true;
     } catch (error) {
       if (!options?.force || !isCode(error, "ENOENT")) throw error;
     }
-    for (const candidate of this.#paths) {
-      if (candidate === absolute || candidate.startsWith(`${absolute}/`)) this.#paths.delete(candidate);
+    if (removed) {
+      this.#recordMutation();
+      this.#removePath(absolute);
     }
   }
 
@@ -641,7 +826,8 @@ class OpfsShellFileSystem implements IFileSystem {
   }
 
   getAllPaths(): string[] {
-    return [...this.#paths].sort();
+    this.#sortedPaths ??= [...this.#paths].sort();
+    return this.#sortedPaths.slice();
   }
 
   async chmod(path: string): Promise<void> {
@@ -674,22 +860,51 @@ class OpfsShellFileSystem implements IFileSystem {
     await this.stat(path);
   }
 
-  async #visit(directory: string): Promise<void> {
-    for (const name of await this.readdir(directory)) {
-      const path = `${directory}/${name}`;
-      this.#paths.add(path);
-      if ((await this.stat(path)).isDirectory) await this.#visit(path);
+  async #visit(directory: string, paths: Set<string>): Promise<void> {
+    for (const entry of await this.readdirWithFileTypes(directory)) {
+      if (directory === THREAD_GIT_DIRECTORY && entry.name === ".git") continue;
+      const path = `${directory}/${entry.name}`;
+      this.#addIndexedPath(paths, path);
+      if (entry.isDirectory) await this.#visit(path, paths);
     }
   }
 
   #addPath(path: string): void {
+    const gitDirectory = `${THREAD_GIT_DIRECTORY}/.git`;
+    if (path === gitDirectory || path.startsWith(`${gitDirectory}/`)) return;
     const segments = path.slice(THREAD_GIT_DIRECTORY.length + 1).split("/");
     let current = THREAD_GIT_DIRECTORY;
+    let changed = false;
     for (const segment of segments) {
       if (!segment) continue;
       current += `/${segment}`;
-      this.#paths.add(current);
+      changed = this.#addIndexedPath(this.#paths, current) || changed;
     }
+    if (changed) this.#sortedPaths = undefined;
+  }
+
+  #addIndexedPath(paths: Set<string>, path: string): boolean {
+    if (paths.has(path)) return false;
+    if (paths.size >= MAX_INDEXED_PATHS) {
+      throw fsError("EFBIG", `browser shell path index exceeds ${MAX_INDEXED_PATHS} entries`);
+    }
+    paths.add(path);
+    return true;
+  }
+
+  #removePath(path: string): void {
+    let changed = false;
+    for (const candidate of this.#paths) {
+      if (candidate === path || candidate.startsWith(`${path}/`)) {
+        this.#paths.delete(candidate);
+        changed = true;
+      }
+    }
+    if (changed) this.#sortedPaths = undefined;
+  }
+
+  #recordMutation(): void {
+    this.#mutationVersion += 1;
   }
 }
 

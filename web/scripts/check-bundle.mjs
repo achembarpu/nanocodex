@@ -9,7 +9,8 @@ const budgets = Object.freeze({
   initialJavaScript: 260_000,
   initialJavaScriptGzip: 83_000,
   initialCssFiles: 2,
-  initialCss: 60_000,
+  // Includes compact Code/Commits controls for portrait and phone landscape.
+  initialCss: 60_500,
   initialCssGzip: 12_000,
   agentJavaScript: 830_000,
   // OPFS, artifacts, voice routing, subscription auth, and paid MCP stay in the Worker.
