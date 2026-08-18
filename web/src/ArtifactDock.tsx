@@ -8,26 +8,14 @@ import {
   Sparkles,
   Trash2,
 } from "lucide-react";
-import {
-  Suspense,
-  lazy,
-  memo,
-  useCallback,
-  useEffect,
-  useRef,
-  useState,
-} from "react";
+import { memo, useCallback, useEffect, useRef, useState } from "react";
 import type {
   ArtifactStore,
   ArtifactDocument,
   ArtifactInput,
 } from "nanocodex-artifacts";
-import "nanocodex-artifacts-react/styles.css";
+import { LiveReactArtifact } from "./LiveReactArtifact";
 import { openKernelWorkspace } from "./workspace";
-
-const ArtifactRenderer = lazy(() => import("nanocodex-artifacts-react").then((module) => ({
-  default: module.ArtifactRenderer,
-})));
 
 export const ArtifactDock = memo(function ArtifactDock({
   latest,
@@ -38,13 +26,12 @@ export const ArtifactDock = memo(function ArtifactDock({
   agentReady: boolean;
   onPrompt(artifact: ArtifactDocument, prompt: string): void;
 }) {
+  const initialArtifact = useRef(exampleDocument()).current;
   const [store, setStore] = useState<ArtifactStore>();
-  const [readFile, setReadFile] = useState<(path: string) => Promise<Uint8Array>>();
-  const [artifacts, setArtifacts] = useState<readonly ArtifactDocument[]>([]);
-  const [selectedId, setSelectedId] = useState<string>();
-  const [open, setOpen] = useState(false);
-  const [fullscreen, setFullscreen] = useState(false);
-  const [message, setMessage] = useState("Loading artifacts…");
+  const [artifacts, setArtifacts] = useState<readonly ArtifactDocument[]>([initialArtifact]);
+  const [selectedId, setSelectedId] = useState(initialArtifact.id);
+  const [fullscreen, setFullscreen] = useState(true);
+  const [message, setMessage] = useState("");
   const refreshEpoch = useRef(0);
   const selected = artifacts.find((artifact) => artifact.id === selectedId) ?? artifacts[0];
 
@@ -58,7 +45,7 @@ export const ArtifactDock = memo(function ArtifactDock({
       setSelectedId((current) => current && next.some(({ id }) => id === current) ? current : next[0]?.id);
       setMessage(rejected.length
         ? `Skipped ${rejected.length} invalid artifact document${rejected.length === 1 ? "" : "s"}.`
-        : next.length ? "" : "Ask the agent to create a dashboard, report, chart, or interactive explainer.");
+        : next.length ? "" : "Ask the agent to create any custom interface, or preview the live React demo.");
     } catch (error) {
       if (epoch === refreshEpoch.current) setMessage(errorMessage(error));
     }
@@ -73,8 +60,18 @@ export const ArtifactDock = memo(function ArtifactDock({
       if (!active) return;
       const nextStore = new ArtifactStore(nextWorkspace);
       setStore(nextStore);
-      setReadFile(() => (path: string) => nextWorkspace.readFile(path));
-      await refresh(nextStore);
+      const existing = await nextStore.scan();
+      if (!active) return;
+      if (existing.artifacts.length) {
+        await refresh(nextStore);
+        return;
+      }
+      const artifact = await nextStore.save(exampleArtifact());
+      if (!active) return;
+      refreshEpoch.current++;
+      setArtifacts([artifact]);
+      setSelectedId(artifact.id);
+      setMessage("");
     }).catch((error) => active && setMessage(errorMessage(error)));
     return () => { active = false; };
   }, [refresh]);
@@ -93,7 +90,7 @@ export const ArtifactDock = memo(function ArtifactDock({
     refreshEpoch.current++;
     setArtifacts((current) => [latest, ...current.filter(({ id }) => id !== latest.id)]);
     setSelectedId(latest.id);
-    setOpen(true);
+    setFullscreen(true);
     setMessage("");
   }, [latest]);
 
@@ -109,10 +106,10 @@ export const ArtifactDock = memo(function ArtifactDock({
 
   const download = () => {
     if (!selected) return;
-    const url = URL.createObjectURL(new Blob([JSON.stringify(selected, null, 2)], { type: "application/json" }));
+    const url = URL.createObjectURL(new Blob([selected.source], { type: "text/javascript" }));
     const anchor = document.createElement("a");
     anchor.href = url;
-    anchor.download = `${selected.id}.artifact.json`;
+    anchor.download = `${selected.id}.ui.js`;
     anchor.click();
     window.setTimeout(() => URL.revokeObjectURL(url), 0);
   };
@@ -135,22 +132,12 @@ export const ArtifactDock = memo(function ArtifactDock({
       refreshEpoch.current++;
       setArtifacts((current) => [artifact, ...current.filter(({ id }) => id !== artifact.id)]);
       setSelectedId(artifact.id);
+      setFullscreen(true);
       setMessage("");
     } catch (error) {
       setMessage(errorMessage(error));
     }
   };
-
-  if (!open) {
-    return (
-      <aside className="artifact-dock is-collapsed" aria-label="Artifacts">
-        <button type="button" onClick={() => setOpen(true)} aria-label="Open artifacts" title="Open artifacts">
-          <Sparkles aria-hidden="true" />
-          {artifacts.length ? <span>{artifacts.length}</span> : null}
-        </button>
-      </aside>
-    );
-  }
 
   return (
     <aside className={`artifact-dock${fullscreen ? " is-fullscreen" : ""}`} aria-label="Artifacts">
@@ -168,24 +155,18 @@ export const ArtifactDock = memo(function ArtifactDock({
           <DockAction label={fullscreen ? "Exit fullscreen" : "View fullscreen"} onClick={() => setFullscreen((value) => !value)}>
             {fullscreen ? <Minimize2 /> : <Maximize2 />}
           </DockAction>
-          <DockAction label="Close artifacts" onClick={() => { setFullscreen(false); setOpen(false); }}><PanelRightClose /></DockAction>
+          <DockAction label="Dock interface" onClick={() => setFullscreen(false)}><PanelRightClose /></DockAction>
         </div>
       </header>
       <div className="artifact-canvas">
         {selected ? (
-          <Suspense fallback={<div className="artifact-empty">Loading visual renderer…</div>}>
-            <ArtifactRenderer
-              artifact={selected}
-              onAction={ask}
-              readFile={readFile}
-            />
-          </Suspense>
+          <LiveReactArtifact artifact={selected} onAction={ask} />
         ) : (
           <div className="artifact-empty">
             <PanelRightOpen aria-hidden="true" />
-            <p>{message}</p>
-            <button className="nc-artifact-button is-primary" type="button" onClick={() => void createExample()}>
-              Preview an example
+            {message ? <p>{message}</p> : null}
+            <button className="artifact-preview-button" type="button" onClick={() => void createExample()}>
+              Preview custom UI
             </button>
           </div>
         )}
@@ -215,33 +196,36 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
 
-function exampleArtifact(): ArtifactInput {
+function exampleArtifact(): ArtifactInput & { id: string } {
   return {
     id: "artifact-demo",
-    title: "Interactive artifact demo",
-    spec: {
-      root: "root",
-      elements: {
-        root: { type: "Stack", props: { gap: 14 }, children: ["intro", "metrics", "chart", "table", "action"] },
-        intro: { type: "Card", props: { title: "Client-side artifacts", subtitle: "Generated as trusted JSON UI and persisted in OPFS.", tone: "accent" }, children: ["intro-text"] },
-        "intro-text": { type: "Text", props: { text: "The model describes the interface. Nanocodex validates the specification, and your component catalog renders it without executing model-generated JavaScript.", tone: "muted" } },
-        metrics: { type: "Grid", props: { columns: 3, gap: 10 }, children: ["metric-a", "metric-b", "metric-c"] },
-        "metric-a": { type: "Metric", props: { label: "Rendering", value: "Client", detail: "No artifact server", trend: "up" } },
-        "metric-b": { type: "Metric", props: { label: "Persistence", value: "OPFS", detail: "Survives refreshes", trend: "up" } },
-        "metric-c": { type: "Metric", props: { label: "Components", value: "16", detail: "Catalog constrained", trend: "neutral" } },
-        chart: { type: "BarChart", props: { title: "Example workflow activity", data: [
-          { label: "Files", value: 18 }, { label: "Tools", value: 27 }, { label: "Artifacts", value: 42 }, { label: "Actions", value: 31 },
-        ] } },
-        table: { type: "Table", props: {
-          columns: [{ key: "surface", label: "Surface" }, { key: "owner", label: "Owner" }, { key: "state", label: "State" }],
-          rows: [
-            { surface: "Workspace", owner: "Application", state: "Persistent" },
-            { surface: "Artifact", owner: "Application", state: "Interactive" },
-            { surface: "Agent", owner: "Nanocodex", state: "In flow" },
-          ],
-        } },
-        action: { type: "Button", props: { label: "Ask how this works", prompt: "Explain how this artifact is rendered and persisted entirely on the client.", variant: "primary" } },
-      },
-    },
+    title: "Live React artifact demo",
+    source: `
+function App({ sendPrompt }) {
+  const [theme, setTheme] = React.useState("electric");
+  return html\`<main className=\${theme}>
+    <style>\${\`
+      body { overflow: hidden; }
+      main { min-height: 100vh; padding: clamp(32px, 8vw, 110px); color: #eaffff; background: radial-gradient(circle at 15% 10%, #154f68, #071116 55%); transition: .5s; }
+      main.steampunk { color: #ffe6ae; background: radial-gradient(circle at 15% 10%, #70451e, #17100a 58%); }
+      h1 { max-width: 850px; margin: 0; font: 800 clamp(50px, 9vw, 130px)/.86 system-ui; letter-spacing: -.07em; }
+      p { max-width: 650px; font-size: clamp(18px, 2.2vw, 28px); opacity: .78; }
+      button { margin: 12px 12px 0 0; padding: 13px 18px; color: inherit; background: #ffffff12; border: 1px solid currentColor; border-radius: 999px; cursor: pointer; }
+    \`}</style>
+    <h1>Speak the interface into existence.</h1>
+    <p>This is real React generated at runtime, isolated from the credential-bearing host page.</p>
+    <button onClick=\${() => setTheme(theme === "electric" ? "steampunk" : "electric")}>Retheme locally</button>
+    <button onClick=\${() => sendPrompt("Turn this live interface into an animated mission control dashboard")}>Ask the agent to evolve it</button>
+  </main>\`;
+}`,
+  };
+}
+
+function exampleDocument(): ArtifactDocument {
+  return {
+    version: 1,
+    ...exampleArtifact(),
+    createdAt: 0,
+    updatedAt: 0,
   };
 }

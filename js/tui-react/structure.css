@@ -248,7 +248,26 @@
 }
 
 .agent-tui-composer {
+  position: relative;
   min-height: 38px !important;
+}
+
+.agent-tui-composer:has(.agent-tui-voice) textarea {
+  padding-right: 9ch;
+}
+
+.agent-tui-voice {
+  position: absolute;
+  right: 0.6ch;
+  bottom: 3px;
+  min-width: 7ch;
+  height: 22px;
+  padding: 0 0.7ch;
+  border: 1px solid;
+  border-radius: 3px;
+  font: inherit;
+  font-size: 10px;
+  cursor: pointer;
 }
 
 .tui-draft-preserved {

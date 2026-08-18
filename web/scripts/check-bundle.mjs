@@ -12,13 +12,11 @@ const budgets = Object.freeze({
   initialCss: 60_000,
   initialCssGzip: 12_000,
   agentJavaScript: 820_000,
-  // OPFS, artifacts, and the paid MCP seam add lazy Worker edges.
-  agentWorker: 48_100,
+  // OPFS, artifacts, voice routing, and the paid MCP seam add lazy Worker edges.
+  agentWorker: 48_300,
   agentWorkerGzip: 15_700,
-  artifactRendererJavaScript: 8_000,
-  artifactRendererJavaScriptGzip: 3_100,
-  artifactCoreJavaScript: 13_500,
-  artifactCoreJavaScriptGzip: 5_000,
+  artifactCoreJavaScript: 7_000,
+  artifactCoreJavaScriptGzip: 2_800,
   wasm: 2_400_000,
   wasmGzip: 510_000,
   mppControlsJavaScript: 1_300_000,
@@ -35,18 +33,15 @@ const manifest = JSON.parse(
 
 const entryKey = manifestKey("index.html");
 const agentKey = manifestKey("src/AgentTerminal.tsx");
-const artifactRendererKey = manifestKey("nanocodex-artifacts-react/dist/index.js");
 const artifactCoreKey = manifestKey("nanocodex-artifacts/dist/index.js");
 const mppKey = manifestKey("src/MppControls.tsx");
 const entry = manifest[entryKey];
 const agent = manifest[agentKey];
-const artifactRenderer = manifest[artifactRendererKey];
 const artifactCore = manifest[artifactCoreKey];
 const mpp = manifest[mppKey];
 
 assert(entry?.isEntry, "the browser entry is missing from the Vite manifest");
 assert(agent?.isDynamicEntry, "the Agent terminal must remain a dynamic entry");
-assert(artifactRenderer?.isDynamicEntry, "the artifact renderer must remain a dynamic entry");
 assert(artifactCore?.isDynamicEntry, "the artifact core must remain a dynamic entry");
 assert(mpp?.isDynamicEntry, "the MPP controls must remain a dynamic entry");
 
@@ -62,9 +57,7 @@ assert(
 
 const initialStatic = importClosure(entryKey, false);
 const agentStatic = importClosure(agentKey, false);
-const artifactRendererStatic = importClosure(artifactRendererKey, false);
 const artifactCoreStatic = importClosure(artifactCoreKey, false);
-for (const shared of agentStatic) artifactRendererStatic.delete(shared);
 for (const shared of agentStatic) artifactCoreStatic.delete(shared);
 assert(
   !initialStatic.has(agentKey),
@@ -75,10 +68,6 @@ assert(
   "the default OpenAI graph must not statically import the MPP controls",
 );
 assert(
-  !agentStatic.has(artifactRendererKey) && artifactRendererStatic.has(artifactRendererKey),
-  "the artifact renderer must remain lazy from the Agent terminal",
-);
-assert(
   !agentStatic.has(artifactCoreKey) && artifactCoreStatic.has(artifactCoreKey),
   "artifact persistence and validation must remain lazy from the Agent terminal",
 );
@@ -87,7 +76,6 @@ const initialJavaScript = await closureStats(initialStatic, "file");
 const initialCssFiles = cssClosure(initialStatic);
 const initialCss = await fileStats(initialCssFiles);
 const agentJavaScript = await closureStats(agentStatic, "file");
-const artifactRendererJavaScript = await closureStats(artifactRendererStatic, "file");
 const artifactCoreJavaScript = await closureStats(artifactCoreStatic, "file");
 const mppJavaScript = await closureStats(importClosure(mppKey, false), "file");
 
@@ -110,16 +98,6 @@ withinCount("initial CSS files", initialCss.fileCount, budgets.initialCssFiles);
 within("initial CSS", initialCss.bytes, budgets.initialCss);
 within("initial CSS gzip", initialCss.gzipBytes, budgets.initialCssGzip);
 within("Agent JavaScript", agentJavaScript.bytes, budgets.agentJavaScript);
-within(
-  "artifact renderer JavaScript",
-  artifactRendererJavaScript.bytes,
-  budgets.artifactRendererJavaScript,
-);
-within(
-  "artifact renderer JavaScript gzip",
-  artifactRendererJavaScript.gzipBytes,
-  budgets.artifactRendererJavaScriptGzip,
-);
 within("artifact core JavaScript", artifactCoreJavaScript.bytes, budgets.artifactCoreJavaScript);
 within(
   "artifact core JavaScript gzip",
@@ -226,8 +204,6 @@ console.log(JSON.stringify({
   artifacts: {
     coreJavaScriptBytes: artifactCoreJavaScript.bytes,
     coreJavaScriptGzipBytes: artifactCoreJavaScript.gzipBytes,
-    rendererJavaScriptBytes: artifactRendererJavaScript.bytes,
-    rendererJavaScriptGzipBytes: artifactRendererJavaScript.gzipBytes,
   },
   mpp: {
     controlsJavaScriptBytes: mppJavaScript.bytes,

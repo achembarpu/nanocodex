@@ -18,6 +18,7 @@ import { Streamdown, type Components } from "streamdown";
 
 import {
   appendError,
+  appendVoiceTranscript,
   applyAgentEvents,
   groupAgentEventsByTarget,
   initialTerminalState,
@@ -128,6 +129,10 @@ export type NanocodexTuiProps = Omit<
   enabled?: boolean;
   /** Status shown when the embedding application disables agent input. */
   unavailableMessage?: string;
+  /** Application-owned browser voice command handler. */
+  onVoiceCommand?: (argument: string | undefined, target: TuiTarget) => void;
+  /** Active browser voice status shown beside normal agent state. */
+  voiceStatus?: string;
 };
 
 export function NanocodexTui({
@@ -136,6 +141,8 @@ export function NanocodexTui({
   cwd = "/browser",
   enabled = true,
   unavailableMessage = "Agent unavailable",
+  onVoiceCommand,
+  voiceStatus,
   className,
   "aria-label": ariaLabel = "Nanocodex terminal",
   onClick,
@@ -192,7 +199,15 @@ export function NanocodexTui({
       if (data.type === "ready") return;
       if (data.type === "externalPrompt") {
         setTui((current) => updateConversation(current, data.target, (conversation) =>
-          queuePrompt(conversation, data.id, data.prompt),
+          data.intent === "immediate" && conversation.running
+            ? queueSteer(conversation, data.id, data.prompt)
+            : queuePrompt(conversation, data.id, data.prompt),
+        ));
+        return;
+      }
+      if (data.type === "voiceTranscript") {
+        setTui((current) => updateConversation(current, data.target, (conversation) =>
+          appendVoiceTranscript(conversation, data.speaker, data.text),
         ));
         return;
       }
@@ -290,6 +305,8 @@ export function NanocodexTui({
   const conversation = activeConversation(tui);
   const activeBranch = branchById(tui, tui.activeBranchId)!;
   const target = activeTarget(tui);
+  const voiceActive = voiceStatus?.startsWith("Voice active")
+    || voiceStatus?.startsWith("Connecting voice");
   const mode = tui.historicalEdit
     ? "edit"
     : tui.branchNavigatorId !== undefined
@@ -367,6 +384,11 @@ export function NanocodexTui({
     }
     if (trimmed === "/trace") {
       window.open("http://127.0.0.1:16686/search?service=nanocodex", "_blank", "noopener");
+      return;
+    }
+    if (onVoiceCommand && (trimmed === "/voice" || trimmed.startsWith("/voice "))) {
+      const argument = trimmed === "/voice" ? undefined : trimmed.slice(7).trim() || undefined;
+      onVoiceCommand(argument, target);
       return;
     }
     queueInput(target, raw, intent, submittedImages);
@@ -793,16 +815,29 @@ export function NanocodexTui({
         {mode === "branches" || mode === "edit" ? (
           <span className="tui-draft-preserved"> draft preserved </span>
         ) : (
-          <textarea
-            ref={composerRef}
-            value={draft}
-            disabled={!ready || stopped || !enabled}
-            aria-label="Message Nanocodex"
-            onChange={(event) => updateDraft(event.target.value)}
-            onPaste={handleImagePaste}
-            rows={1}
-            spellCheck={false}
-          />
+          <>
+            <textarea
+              ref={composerRef}
+              value={draft}
+              disabled={!ready || stopped || !enabled}
+              aria-label="Message Nanocodex"
+              onChange={(event) => updateDraft(event.target.value)}
+              onPaste={handleImagePaste}
+              rows={1}
+              spellCheck={false}
+            />
+            {onVoiceCommand ? (
+              <button
+                type="button"
+                className="agent-tui-voice"
+                disabled={!ready || stopped || !enabled}
+                aria-label={voiceActive ? "Stop voice mode" : "Start voice mode"}
+                aria-pressed={voiceActive}
+                title={voiceActive ? "Stop voice mode (/voice off)" : "Start voice mode (/voice)"}
+                onClick={() => onVoiceCommand(undefined, target)}
+              >🎙 {voiceActive ? "Stop" : "Voice"}</button>
+            ) : null}
+          </>
         )}
       </fieldset>
 
@@ -814,6 +849,7 @@ export function NanocodexTui({
         workerError={workerError}
         enabled={enabled}
         unavailableMessage={unavailableMessage}
+        voiceStatus={voiceStatus}
       />
 
       {externalEditor ? (
@@ -1093,7 +1129,7 @@ function PendingPane({ title, conversation, focused }: { title: string; conversa
   </fieldset>;
 }
 
-const Footer = memo(function Footer({ tui, conversation, mode, workerStatus, workerError, enabled, unavailableMessage }: {
+const Footer = memo(function Footer({ tui, conversation, mode, workerStatus, workerError, enabled, unavailableMessage, voiceStatus }: {
   tui: TuiState;
   conversation: TerminalState;
   mode: "normal" | "history" | "edit" | "branches";
@@ -1101,6 +1137,7 @@ const Footer = memo(function Footer({ tui, conversation, mode, workerStatus, wor
   workerError?: string;
   enabled: boolean;
   unavailableMessage: string;
+  voiceStatus?: string;
 }) {
   const spinning = mode === "normal" && conversation.running && !conversation.status.startsWith("Stop Agent");
   const [frame, setFrame] = useState(0);
@@ -1122,12 +1159,13 @@ const Footer = memo(function Footer({ tui, conversation, mode, workerStatus, wor
   else if (mode === "edit") status = "Editing history — Enter fork/send · Shift+Enter newline · Esc cancel · Ctrl+G $EDITOR";
   else if (mode === "history") status = "History — ↑/↓ navigate · e fork-edit · Esc return";
   else if (spinning) status = `${SPINNER[frame % SPINNER.length]} Thinking...`;
+  else if (voiceStatus) status = voiceStatus;
   const queued = Math.max(0, conversation.pendingTurns - Number(conversation.running));
   const steers = conversation.pendingSteers.length;
   const counts = [steers ? `${steers} steer${steers === 1 ? "" : "s"}` : "", queued ? `${queued} queued` : ""].filter(Boolean).join(" · ");
   const help = tui.btw
     ? "BackTab switch · Ctrl+V image · /close dismiss · Enter send/steer · Tab queue · Esc Esc stop · Ctrl+C quit"
-    : "/btw <question> side fork · Ctrl+V image · Enter send/steer · Tab queue · Esc Esc stop · Ctrl+C quit";
+    : "/btw <question> side fork · /voice [voice] · Ctrl+V image · Enter send/steer · Tab queue · Esc Esc stop · Ctrl+C quit";
   return <footer className="agent-tui-footer" data-nc-part="footer"> {status}{counts ? ` · ${counts}` : ""}  {help}</footer>;
 });
 

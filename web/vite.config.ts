@@ -24,7 +24,6 @@ export default defineConfig({
       "react",
       "react-dom",
       "nanocodex-artifacts",
-      "nanocodex-artifacts-react",
       "nanocodex-react",
       "nanocodex-tui",
       "@pierre/theme",
@@ -56,6 +55,9 @@ export default defineConfig({
   },
   worker: { format: "es" },
   server: {
+    // The live artifact frame intentionally has an opaque sandbox origin. Its
+    // module graph therefore needs CORS even though it is served by this host.
+    headers: { "Access-Control-Allow-Origin": "*" },
     fs: {
       allow: [repositoryRoot],
     },

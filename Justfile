@@ -19,7 +19,6 @@ bootstrap-bindings:
     rustup target add "{{wasm_target}}"
     npm ci --prefix js/bindings
     npm ci --prefix js/artifacts
-    npm ci --prefix js/artifacts-react
     npm ci --prefix examples/node
     npm ci --prefix examples/react-vite
     npm ci --prefix examples/vercel-workflows
@@ -54,7 +53,6 @@ build-wasm:
 test-wasm: build-wasm
     npm test --prefix js/bindings
     npm test --prefix js/artifacts
-    npm test --prefix js/artifacts-react
     npm test --prefix js/react
 
 # Run custom JavaScript tooling and a follow-on through Node-hosted WASM.

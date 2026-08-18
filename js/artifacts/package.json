@@ -1,7 +1,7 @@
 {
   "name": "nanocodex-artifacts",
   "version": "0.1.0",
-  "description": "Validated, persistent JSON artifacts for Nanocodex applications",
+  "description": "Persistent live React interfaces for Nanocodex applications",
   "type": "module",
   "sideEffects": false,
   "exports": {

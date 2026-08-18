@@ -132,6 +132,26 @@ export function createAgentController({
         });
         return;
       }
+      case "voicePrompt": {
+        postMessage({
+          type: "externalPrompt",
+          target: message.target,
+          id: message.id,
+          prompt: message.prompt,
+          intent: "immediate",
+        });
+        await handle({
+          type: "prompt",
+          target: message.target,
+          id: message.id,
+          prompt: message.prompt,
+          intent: "immediate",
+        });
+        return;
+      }
+      case "voiceTranscript":
+        postMessage(message);
+        return;
       case "prompt": {
         const branch = resolveTarget(message.target);
         if (!branch) {

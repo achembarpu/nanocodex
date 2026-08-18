@@ -6,14 +6,21 @@ const NanocodexApp = lazy(() =>
   import("./NanocodexApp").then((module) => ({ default: module.NanocodexApp })),
 );
 
-if (window.location.pathname.startsWith("/evals")) {
+if (window.location.pathname === "/artifact-runtime") {
+  void import("./artifactRuntime");
+} else if (window.location.pathname.startsWith("/evals")) {
   void import("./Evals");
+  renderApp();
+} else {
+  renderApp();
 }
 
-createRoot(document.getElementById("root")!).render(
-  <BrowserRouter>
-    <Suspense fallback={<main className="app-boot" aria-busy="true">Loading Nanocodex…</main>}>
-      <NanocodexApp />
-    </Suspense>
-  </BrowserRouter>,
-);
+function renderApp() {
+  createRoot(document.getElementById("root")!).render(
+    <BrowserRouter>
+      <Suspense fallback={null}>
+        <NanocodexApp />
+      </Suspense>
+    </BrowserRouter>,
+  );
+}

@@ -136,6 +136,43 @@ test("the Worker controller owns prompts, steering, cancellation, events, and cl
     message: "explained",
   });
 
+  await controller.handle({
+    type: "voicePrompt",
+    target: main,
+    id: 5,
+    prompt: "retheme the live interface",
+  });
+  assert.deepEqual(messages.shift(), {
+    type: "externalPrompt",
+    target: main,
+    id: 5,
+    prompt: "retheme the live interface",
+    intent: "immediate",
+  });
+  const voiceTurn = harness.turns[3]!;
+  assert.equal(voiceTurn.input, "retheme the live interface");
+  voiceTurn.complete("rethemed");
+  await settle();
+  assert.deepEqual(messages.shift(), {
+    type: "turnFinished",
+    target: main,
+    id: 5,
+    message: "rethemed",
+  });
+
+  await controller.handle({
+    type: "voiceTranscript",
+    target: main,
+    speaker: "user",
+    text: "make it steampunk",
+  });
+  assert.deepEqual(messages.shift(), {
+    type: "voiceTranscript",
+    target: main,
+    speaker: "user",
+    text: "make it steampunk",
+  });
+
   await controller.dispose();
   assert.equal(harness.watchOffs, 1);
   assert.equal(harness.agents.get("root")?.disposed, 1);
@@ -145,7 +182,7 @@ test("the Worker controller owns prompts, steering, cancellation, events, and cl
     controller.handle({
       type: "prompt",
       target: main,
-      id: 5,
+      id: 6,
       prompt: "late",
       intent: "queue",
     }),

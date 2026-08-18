@@ -1,5 +1,5 @@
 import { createConfig } from "nanocodex-react";
-import type { TuiCommand, TuiMessage } from "nanocodex-tui";
+import type { TuiCommand, TuiMessage, TuiTarget } from "nanocodex-tui";
 import type { ArtifactDocument } from "nanocodex-artifacts";
 import type { Address } from "viem";
 
@@ -8,6 +8,8 @@ type StartCommand = Extract<TuiCommand, { type: "start" }>;
 export type WebTuiCommand =
   | Exclude<TuiCommand, { type: "start" }>
   | { type: "artifactPrompt"; id: number; prompt: string }
+  | { type: "voicePrompt"; target: TuiTarget; id: number; prompt: string }
+  | { type: "voiceTranscript"; target: TuiTarget; speaker: "user" | "assistant"; text: string }
   | (StartCommand & { transport: "openai" })
   | (StartCommand & { transport: "chatgpt" })
   | (StartCommand & {

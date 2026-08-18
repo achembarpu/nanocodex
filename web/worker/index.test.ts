@@ -315,6 +315,48 @@ test("ChatGPT login rejects cross-origin session creation", async () => {
   assert.equal(response.status, 403);
 });
 
+test("Realtime calls keep subscription credentials server-side and bind the agent session", async () => {
+  const { namespace } = createChatGptSessions();
+  const cookie = `nanocodex_chatgpt=${"a".repeat(43)}`;
+  const originalFetch = globalThis.fetch;
+  let upstreamUrl = "";
+  let upstreamHeaders = new Headers();
+  let upstreamBody: Record<string, unknown> | undefined;
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    upstreamUrl = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    upstreamHeaders = new Headers(init?.headers);
+    upstreamBody = JSON.parse(String(init?.body));
+    return new Response("v=0\r\na=answer\r\n", {
+      status: 201,
+      headers: { location: "/backend-api/codex/realtime/calls/rtc_test" },
+    });
+  }) as typeof fetch;
+  try {
+    const response = await worker.fetch(new Request("https://demo.test/api/realtime/calls", {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        origin: "https://demo.test",
+        cookie,
+      },
+      body: JSON.stringify({ sdp: "v=0\r\na=offer\r\n", session_id: "session-1", voice: "cove" }),
+    }), { ENVIRONMENT: "test", CHATGPT_SESSIONS: namespace });
+    assert.equal(response.status, 200);
+    assert.equal(await response.text(), "v=0\r\na=answer\r\n");
+    assert.equal(response.headers.get("x-nanocodex-realtime-call-id"), "rtc_test");
+    assert.equal(upstreamUrl, "https://chatgpt.com/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas");
+    assert.equal(upstreamHeaders.get("authorization"), "Bearer subscription-secret");
+    assert.equal(upstreamHeaders.get("chatgpt-account-id"), "account-1");
+    assert.equal(upstreamHeaders.get("openai-alpha"), "quicksilver=v2");
+    assert.equal(upstreamHeaders.get("thread-id"), "session-1");
+    const session = upstreamBody?.session as Record<string, unknown>;
+    assert.deepEqual(session.delegation, { type: "client" });
+    assert.equal(session.model, "gpt-live-1-boulder-alpha");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("eval routes require a configured coordinator origin", async () => {
   const response = await worker.fetch(
     new Request("https://demo.test/api/evals"),

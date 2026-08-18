@@ -4,6 +4,7 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useRef,
   useState,
 } from "react";
 import {
@@ -14,6 +15,7 @@ import {
 import { NanocodexTui } from "nanocodex-tui-react";
 import type { ArtifactDocument } from "nanocodex-artifacts";
 import type { Address } from "viem";
+import type { TuiTarget } from "nanocodex-tui";
 import "nanocodex-tui-react/structure.css";
 
 import {
@@ -30,6 +32,7 @@ const MppControls = lazy(async () => ({
   default: (await import("./MppControls")).MppControls,
 }));
 let nextArtifactPromptId = 1_000_000_000;
+let nextVoicePromptId = 2_000_000_000;
 
 /** Website policy around the reusable TUI: credential UX and the site theme. */
 export const AgentTerminal = memo(function AgentTerminal() {
@@ -47,12 +50,17 @@ function AgentTerminalDemo() {
   const [payment, setPayment] = useState<PaymentStatus>();
   const [jsonl, setJsonl] = useState<string[]>([]);
   const [latestArtifact, setLatestArtifact] = useState<ArtifactDocument>();
+  const [sessionId, setSessionId] = useState<string>();
+  const [voiceStatus, setVoiceStatus] = useState<string>();
+  const voice = useRef<import("./browserVoice").BrowserVoiceSession | undefined>(undefined);
   useNanocodexMessage<WebTuiMessage>((message) => {
+    if (message.type === "ready") setSessionId(message.sessionId);
     if (message.type === "mppPayment") setPayment(message.payment);
     if (message.type === "mppJsonl") {
       setJsonl((current) => [...current.slice(-99), message.line]);
     }
     if (message.type === "artifact") setLatestArtifact(message.artifact);
+    voice.current?.observe(message);
   });
   useEffect(() => {
     setPayment(undefined);
@@ -65,6 +73,14 @@ function AgentTerminalDemo() {
     } else {
       nanocodexConfig.disconnect();
     }
+  }, [credentialSource, transport]);
+
+  useEffect(() => () => voice.current?.close(), []);
+  useEffect(() => {
+    if (transport === "openai" && credentialSource === "subscription") return;
+    voice.current?.close();
+    voice.current = undefined;
+    setVoiceStatus(undefined);
   }, [credentialSource, transport]);
 
   const startMpp = useCallback((payerAddress: Address, accessKeyAddress: Address) => {
@@ -83,6 +99,63 @@ function AgentTerminalDemo() {
     nanocodexConfig.disconnect();
     setTransport(next);
   };
+  const controlVoice = useCallback((argument: string | undefined, target: TuiTarget) => {
+    void import("./browserVoice").then(({ BrowserVoiceSession, CHATGPT_VOICES, parseVoiceArgument }) => {
+      const command = parseVoiceArgument(argument);
+      if (command.action === "list") {
+        setVoiceStatus(`ChatGPT voices (default cove): ${CHATGPT_VOICES.join(", ")}`);
+        return;
+      }
+      if (command.action === "invalid") {
+        setVoiceStatus(`Voice: ${command.message}`);
+        return;
+      }
+      if (command.action === "stop" || (command.action === "toggle" && voice.current)) {
+        voice.current?.close();
+        voice.current = undefined;
+        return;
+      }
+      if (voice.current) {
+        setVoiceStatus("Voice is already active; use /voice off before changing it");
+        return;
+      }
+      if (transport !== "openai" || credentialSource !== "subscription") {
+        setVoiceStatus("Voice requires an active ChatGPT subscription session");
+        return;
+      }
+      if (!sessionId || agent.status !== "ready") {
+        setVoiceStatus("Voice is waiting for the agent session to become ready");
+        return;
+      }
+      const selectedVoice = command.action === "start" ? command.voice : "cove";
+      const next = new BrowserVoiceSession({
+        sessionId,
+        target,
+        voice: selectedVoice,
+        onDelegation(prompt) {
+          agent.dispatch({
+            type: "voicePrompt",
+            target,
+            id: nextVoicePromptId++,
+            prompt,
+          });
+        },
+        onStatus: setVoiceStatus,
+        onTranscript(speaker, text) {
+          agent.dispatch({ type: "voiceTranscript", target, speaker, text });
+        },
+      });
+      voice.current = next;
+      void next.start().catch((error) => {
+        if (voice.current !== next) return;
+        next.close();
+        voice.current = undefined;
+        setVoiceStatus(`Voice: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }).catch((error) => {
+      setVoiceStatus(`Voice: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  }, [agent, credentialSource, sessionId, transport]);
 
   const enabled = transport === "openai"
     ? credentialSource === "subscription"
@@ -131,6 +204,8 @@ function AgentTerminalDemo() {
           key={transport}
           enabled={enabled}
           unavailableMessage={unavailableMessage}
+          onVoiceCommand={controlVoice}
+          voiceStatus={voiceStatus}
         />
         <ArtifactDock
           latest={latestArtifact}
