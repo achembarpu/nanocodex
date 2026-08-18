@@ -99,7 +99,32 @@ impl Gvproxy {
     /// gvproxy cannot start, or its network and services sockets do not become
     /// ready before the startup deadline.
     pub fn spawn(binary: &Path, state_directory: &Path, log: &Path) -> Result<Self, GvproxyError> {
-        Self::spawn_with_process_group(binary, state_directory, log, ProcessGroup::Inherited)
+        Self::spawn_with_process_group(binary, state_directory, log, ProcessGroup::Inherited, None)
+    }
+
+    /// Starts gvproxy with host TCP connections restricted to one capture port.
+    ///
+    /// The wrapper must apply the restriction to itself and then replace itself
+    /// with gvproxy. This keeps the network policy out of post-fork callbacks.
+    ///
+    /// # Errors
+    ///
+    /// Returns the errors documented by [`Self::spawn`].
+    #[cfg(target_os = "linux")]
+    pub fn spawn_capture_only(
+        binary: &Path,
+        state_directory: &Path,
+        log: &Path,
+        wrapper: &Path,
+        port: u16,
+    ) -> Result<Self, GvproxyError> {
+        Self::spawn_with_process_group(
+            binary,
+            state_directory,
+            log,
+            ProcessGroup::Inherited,
+            Some((wrapper, port)),
+        )
     }
 
     /// Starts gvproxy in a new process group and waits for its sockets.
@@ -116,7 +141,7 @@ impl Gvproxy {
         state_directory: &Path,
         log: &Path,
     ) -> Result<Self, GvproxyError> {
-        Self::spawn_with_process_group(binary, state_directory, log, ProcessGroup::Isolated)
+        Self::spawn_with_process_group(binary, state_directory, log, ProcessGroup::Isolated, None)
     }
 
     fn spawn_with_process_group(
@@ -124,6 +149,7 @@ impl Gvproxy {
         state_directory: &Path,
         log: &Path,
         process_group: ProcessGroup,
+        capture_only: Option<(&Path, u16)>,
     ) -> Result<Self, GvproxyError> {
         fs::create_dir_all(state_directory)?;
         if let Some(parent) = log.parent() {
@@ -136,7 +162,16 @@ impl Gvproxy {
 
         let log_path = log.to_path_buf();
         let log = fs::File::create(log)?;
-        let mut command = std::process::Command::new(binary);
+        let mut command = if let Some((wrapper, port)) = capture_only {
+            let mut command = std::process::Command::new(wrapper);
+            command
+                .arg("--host-capture-only")
+                .arg(port.to_string())
+                .arg(binary);
+            command
+        } else {
+            std::process::Command::new(binary)
+        };
         command
             .arg("--listen-vfkit")
             .arg(format!("unixgram:{}", network_socket.display()))

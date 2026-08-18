@@ -14,6 +14,7 @@ use std::{
     future::Future,
     io,
     io::{Read as _, Write as _},
+    net::{Ipv4Addr, TcpListener},
     num::ParseFloatError,
     os::unix::fs::PermissionsExt as _,
     path::{Component, Path, PathBuf},
@@ -205,6 +206,7 @@ pub struct VmResourcesBuilder {
     image_network_retries: usize,
     image_preparation_concurrency: usize,
     gvproxy: Option<PathBuf>,
+    require_gvproxy: bool,
     guest_executables: Vec<VmGuestExecutable>,
 }
 
@@ -247,6 +249,7 @@ impl VmResources {
             image_network_retries: DEFAULT_IMAGE_NETWORK_RETRIES,
             image_preparation_concurrency: DEFAULT_IMAGE_PREPARATION_CONCURRENCY,
             gvproxy: None,
+            require_gvproxy: false,
             guest_executables: Vec::new(),
         }
     }
@@ -448,6 +451,16 @@ impl VmResourcesBuilder {
         self
     }
 
+    /// Prepares gvproxy even when the benchmark itself declares no public network.
+    ///
+    /// External harnesses need this evaluator-owned path to their host capture
+    /// proxy. Whether an attempt actually attaches to it remains backend policy.
+    #[must_use]
+    pub const fn require_gvproxy(mut self, required: bool) -> Self {
+        self.require_gvproxy = required;
+        self
+    }
+
     /// Installs one host executable into every immutable prepared task image.
     #[must_use]
     pub fn guest_executable(
@@ -528,10 +541,11 @@ impl VmResourcesBuilder {
             .iter()
             .map(|task| (task.root().to_path_buf(), Arc::new(AsyncOnceCell::new())))
             .collect();
-        let public_network = self.tasks.iter().any(|task| {
-            task.network() == NetworkPolicy::Public
-                || task.verifier().network() == NetworkPolicy::Public
-        });
+        let public_network = self.require_gvproxy
+            || self.tasks.iter().any(|task| {
+                task.network() == NetworkPolicy::Public
+                    || task.verifier().network() == NetworkPolicy::Public
+            });
         let gvproxy = if public_network {
             match self.gvproxy {
                 Some(path) if path.is_file() => Some(path),
@@ -1258,6 +1272,7 @@ pub struct VmBackend {
     web_search: bool,
     shared_directories: Arc<[SharedDirectory]>,
     verifier_environment: Arc<BTreeMap<String, String>>,
+    force_agent_network: bool,
 }
 
 /// Deliberate policy for a [`VmBackend`].
@@ -1267,6 +1282,7 @@ pub struct VmBackendBuilder {
     web_search: bool,
     shared_directories: Vec<SharedDirectory>,
     verifier_environment: BTreeMap<String, String>,
+    force_agent_network: bool,
 }
 
 impl Default for VmBackendBuilder {
@@ -1277,6 +1293,7 @@ impl Default for VmBackendBuilder {
             web_search: false,
             shared_directories: Vec::new(),
             verifier_environment: BTreeMap::new(),
+            force_agent_network: false,
         }
     }
 }
@@ -1330,6 +1347,7 @@ impl VmBackend {
                 web_search: self.web_search,
                 shared_directories: &self.shared_directories,
                 verifier_environment: &self.verifier_environment,
+                force_agent_network: self.force_agent_network,
             },
             attempt,
         )
@@ -1381,6 +1399,17 @@ impl VmBackendBuilder {
         self
     }
 
+    /// Attaches the agent VM to the prepared network independently of the task's
+    /// public-network policy.
+    ///
+    /// External harnesses use this only for their evaluator-owned capture proxy;
+    /// the verifier continues to follow the benchmark's declared policy.
+    #[must_use]
+    pub const fn force_agent_network(mut self, enabled: bool) -> Self {
+        self.force_agent_network = enabled;
+        self
+    }
+
     /// Builds a cloneable backend handle.
     #[must_use]
     pub fn build(self) -> VmBackend {
@@ -1391,6 +1420,7 @@ impl VmBackendBuilder {
             web_search: self.web_search,
             shared_directories: self.shared_directories.into(),
             verifier_environment: Arc::new(self.verifier_environment),
+            force_agent_network: self.force_agent_network,
         }
     }
 }
@@ -1468,6 +1498,7 @@ struct VmAttemptHost<'a> {
     web_search: bool,
     shared_directories: &'a [SharedDirectory],
     verifier_environment: &'a Arc<BTreeMap<String, String>>,
+    force_agent_network: bool,
 }
 
 struct AttemptGvproxy {
@@ -1478,6 +1509,18 @@ struct AttemptGvproxy {
 impl AttemptGvproxy {
     fn spawn(binary: &Path, log: &Path) -> Result<Self, VmAttemptError> {
         Self::spawn_with(binary, log, GvproxyProcess::spawn)
+    }
+
+    #[cfg(target_os = "linux")]
+    fn spawn_capture_only(
+        binary: &Path,
+        wrapper: &Path,
+        port: u16,
+        log: &Path,
+    ) -> Result<Self, VmAttemptError> {
+        Self::spawn_with(binary, log, |binary, state_directory, log| {
+            GvproxyProcess::spawn_capture_only(binary, state_directory, log, wrapper, port)
+        })
     }
 
     fn spawn_with(
@@ -1532,6 +1575,10 @@ pub enum VmAttemptError {
     #[error("the task requires public networking but gvproxy was not prepared")]
     NetworkBackendNotPrepared,
 
+    /// Capture-only external harness networking requires Linux Landlock.
+    #[error("capture-only external harness networking is only supported on Linux hosts")]
+    CaptureOnlyNetworkUnsupported,
+
     /// Materializing the task root would overwrite attempt-owned data.
     #[error("rootfs entry collides with attempt data: {0}")]
     Collision(PathBuf),
@@ -1574,9 +1621,14 @@ pub(crate) struct VmAttempt {
     tools: Tools,
     timezone: String,
     verifier: VmVerifier,
+    capture_listener: Option<TcpListener>,
 }
 
 impl VmAttempt {
+    pub(crate) fn take_capture_listener(&mut self) -> Option<TcpListener> {
+        self.capture_listener.take()
+    }
+
     /// Returns a cheap handle for guest commands used by a custom attempt driver.
     ///
     /// # Errors
@@ -1816,11 +1868,26 @@ fn vm_attempt_inner(
     if let Some(disk) = root.writable_disk() {
         setup_guard.track_root_disk(disk.to_path_buf());
     }
-    let network = spawn_attempt_network(
-        attempt.task().network(),
-        host.gvproxy,
-        &attempt.directory().join("vm").join("gvproxy.log"),
-    )?;
+    let agent_network = if host.force_agent_network {
+        NetworkPolicy::Public
+    } else {
+        attempt.task().network()
+    };
+    let capture_listener = (host.force_agent_network
+        && attempt.task().network() == NetworkPolicy::Disabled)
+        .then(|| TcpListener::bind((Ipv4Addr::LOCALHOST, 0)))
+        .transpose()?;
+    let network_log = attempt.directory().join("vm").join("gvproxy.log");
+    let network = if let Some(listener) = &capture_listener {
+        spawn_capture_only_attempt_network(
+            host.gvproxy,
+            host.vmm,
+            listener.local_addr()?.port(),
+            &network_log,
+        )?
+    } else {
+        spawn_attempt_network(agent_network, host.gvproxy, &network_log)?
+    };
     let launch = VmLaunch {
         root,
         workspace: environment.workspace.clone(),
@@ -1905,7 +1972,30 @@ fn vm_attempt_inner(
         tools,
         timezone: environment.timezone.clone(),
         verifier,
+        capture_listener,
     })
+}
+
+#[cfg(target_os = "linux")]
+fn spawn_capture_only_attempt_network(
+    gvproxy: Option<&Path>,
+    vmm: &Path,
+    port: u16,
+    log: &Path,
+) -> Result<Option<AttemptGvproxy>, VmAttemptError> {
+    let binary = gvproxy.ok_or(VmAttemptError::NetworkBackendNotPrepared)?;
+    let wrapper = vmm.with_file_name("nanocodex-vm-guest");
+    AttemptGvproxy::spawn_capture_only(binary, &wrapper, port, log).map(Some)
+}
+
+#[cfg(target_os = "macos")]
+fn spawn_capture_only_attempt_network(
+    _gvproxy: Option<&Path>,
+    _vmm: &Path,
+    _port: u16,
+    _log: &Path,
+) -> Result<Option<AttemptGvproxy>, VmAttemptError> {
+    Err(VmAttemptError::CaptureOnlyNetworkUnsupported)
 }
 
 impl VmAttemptSetupGuard {

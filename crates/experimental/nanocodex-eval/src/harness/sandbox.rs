@@ -18,6 +18,7 @@ pub(super) async fn prepare_harness_vm_resources(
             VmBackend::builder()
                 .retain_passed_rootfs(false)
                 .retain_failed_rootfs(false)
+                .force_agent_network(true)
                 .web_search(web_search)
                 .verifier_environment(verifier_environment.clone()),
             task,
@@ -37,13 +38,14 @@ impl HarnessVmResources {
 
     pub(super) fn harness_attempt(
         &self,
-        runtime: VmAttempt,
+        mut runtime: VmAttempt,
         attempt: EvalAttempt<'_>,
         command: HarnessExec,
         guest_command: String,
         auth: HarnessAuth,
         guest: HarnessGuestConfig,
     ) -> InternalResult<AttemptAgent, VmAttemptError> {
+        let capture_listener = runtime.take_capture_listener();
         let session = runtime.session_handle()?;
         let runner = VmHarnessRunner::new(
             session,
@@ -52,6 +54,7 @@ impl HarnessVmResources {
             guest_command,
             auth,
             guest,
+            capture_listener,
         )?;
         let api_base_url = runner.api_base_url().to_owned();
         let runner = Arc::new(runner);
@@ -79,6 +82,7 @@ pub(super) struct VmHarnessRunner {
     capture_upstream: String,
     capture_listener: Mutex<Option<TcpListener>>,
     capture_base_url: String,
+    capture_only_port: Option<u16>,
     api_exchanges: PathBuf,
 }
 
@@ -90,6 +94,7 @@ impl VmHarnessRunner {
         guest_command: String,
         auth: HarnessAuth,
         guest: HarnessGuestConfig,
+        capture_listener: Option<TcpListener>,
     ) -> InternalResult<Self, VmAttemptError> {
         if !Path::new(&guest.home).is_absolute() || !Path::new(&guest.auth_file).is_absolute() {
             return Err(io::Error::new(
@@ -115,9 +120,22 @@ impl VmHarnessRunner {
                 GuestAuth::AuthFile(contents)
             }
         };
-        let capture_listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?;
+        let capture_listener = match capture_listener {
+            Some(listener) => listener,
+            None if attempt.task().network() == crate::NetworkPolicy::Public => {
+                TcpListener::bind((Ipv4Addr::LOCALHOST, 0))?
+            }
+            None => {
+                return Err(io::Error::other(
+                    "capture-only harness VM did not reserve its capture listener",
+                )
+                .into());
+            }
+        };
         let capture_port = capture_listener.local_addr()?.port();
         let capture_base_url = capture_proxy_vm_base_url(capture_port);
+        let capture_only_port =
+            (attempt.task().network() == crate::NetworkPolicy::Disabled).then_some(capture_port);
         let mut command_environment = environment.guest_environment(attempt.task());
         command_environment.extend(guest.environment.into_iter().map(|(key, value)| {
             let value = value
@@ -167,6 +185,7 @@ impl VmHarnessRunner {
             capture_upstream,
             capture_listener: Mutex::new(Some(capture_listener)),
             capture_base_url,
+            capture_only_port,
             api_exchanges: artifact_directory.join(HARNESS_API_EXCHANGES_FILENAME),
         })
     }
@@ -258,11 +277,18 @@ impl HarnessCommandRunner for VmHarnessRunner {
     > {
         Box::pin(async move {
             let capture_proxy = self.start_capture_proxy().await?;
-            let mut command = VmCommand::new(&self.guest_command)
-                .current_directory(&self.workspace)
-                .environment(self.environment.clone())
-                .timeout(timeout)
-                .max_output_bytes(HARNESS_OUTPUT_BYTES);
+            let mut command = if let Some(port) = self.capture_only_port {
+                VmCommand::new(CAPTURE_ONLY_GUEST_RUNTIME)
+                    .arg("--capture-only")
+                    .arg(port.to_string())
+                    .arg(&self.guest_command)
+            } else {
+                VmCommand::new(&self.guest_command)
+            }
+            .current_directory(&self.workspace)
+            .environment(self.environment.clone())
+            .timeout(timeout)
+            .max_output_bytes(HARNESS_OUTPUT_BYTES);
             for argument in arguments {
                 command = command.arg(argument);
             }

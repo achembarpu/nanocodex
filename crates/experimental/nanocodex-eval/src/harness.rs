@@ -49,6 +49,7 @@ const DEFAULT_HARNESS_HOME: &str = "/run/nanocodex-harness-home";
 const DEFAULT_HARNESS_AUTH_FILE: &str = "/run/nanocodex-harness-home/auth.json";
 const DEFAULT_HARNESS_API_KEY_ENVIRONMENT: &str = "OPENAI_API_KEY";
 const HARNESS_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
+pub(crate) const CAPTURE_ONLY_GUEST_RUNTIME: &str = "/usr/local/bin/nanocodex-vm-capture";
 #[cfg(target_arch = "aarch64")]
 const VM_GUEST_TARGET: &str = "aarch64-unknown-linux-musl";
 #[cfg(target_arch = "x86_64")]

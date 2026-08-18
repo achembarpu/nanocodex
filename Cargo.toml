@@ -49,6 +49,7 @@ axum = { version = "0.8.9", default-features = false, features = ["form", "http1
 bm25 = { version = "2.3.2", default-features = false }
 chrono = { version = "0.4.43", default-features = false, features = ["clock", "std", "wasmbind"] }
 chromiumoxide = "0.9.1"
+landlock = "0.4.4"
 clap = { version = "4.5.54", features = ["derive", "env"] }
 cpal = "0.16.0"
 crossterm = { version = "0.28.1", features = ["bracketed-paste", "event-stream"] }
@@ -110,9 +111,12 @@ ratatui = { version = "0.29.0", features = ["unstable-rendered-line-info"] }
 ratatex = "0.1.0"
 reqwest = { version = "0.13.4", default-features = false, features = ["json", "rustls-no-provider"] }
 reqwest-middleware = "0.5.2"
+rtnetlink = "0.21.0"
+rustix = { version = "1.1.4", features = ["thread"] }
 rustls = { version = "0.23.42", default-features = false, features = ["ring"] }
 regex = "1"
 rusqlite = { version = "0.38", features = ["bundled"] }
+seccompiler = "0.5.0"
 rquickjs = "0.12.1"
 rmcp = { version = "=3.0.0", default-features = false, features = ["auth", "client", "reqwest-tls-no-provider", "transport-async-rw", "transport-streamable-http-client-reqwest"] }
 oauth2 = { version = "5.0", default-features = false }
@@ -250,5 +254,6 @@ inherits = "profiling"
 inherits = "release"
 codegen-units = 1
 lto = "fat"
-opt-level = "s"
-strip = "debuginfo"
+opt-level = "z"
+panic = "abort"
+strip = "symbols"

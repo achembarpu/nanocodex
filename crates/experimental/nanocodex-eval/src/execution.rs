@@ -33,7 +33,7 @@ use crate::{
     all(target_os = "macos", target_arch = "aarch64")
 ))]
 use crate::{
-    harness::{Harness, HarnessAuth},
+    harness::{CAPTURE_ONLY_GUEST_RUNTIME, Harness, HarnessAuth},
     judge::JudgeRuntime,
     vm::{CachePolicy, VmBackend, VmResources},
 };
@@ -127,6 +127,7 @@ struct EvaluatorRunner {
 ))]
 struct PreparedVmHost {
     vmm: PathBuf,
+    runtime: PathBuf,
     runtime_image: PathBuf,
     cache: PathBuf,
 }
@@ -415,10 +416,24 @@ impl PreparedVmHost {
         );
         Ok(Self {
             vmm,
+            runtime,
             runtime_image: runtime_disk.path().to_path_buf(),
             cache,
         })
     }
+}
+
+/// Validates and prepares the complete VM-backed evaluation host installation.
+///
+/// Controllers call this before admitting workers so a missing, malformed, or
+/// incompatible guest runtime fails at the process boundary instead of being
+/// rediscovered independently by every claimed task.
+#[cfg(any(
+    all(target_os = "linux", not(target_env = "musl")),
+    all(target_os = "macos", target_arch = "aarch64")
+))]
+pub fn validate_prepared_eval_host() -> Result<(), EvaluationExecutionError> {
+    PreparedVmHost::open().map(drop)
 }
 
 #[cfg(any(
@@ -434,7 +449,11 @@ async fn prepare_resources(
         .task(task.clone())
         .cache_directory(&host.cache)
         .cache_policy(CachePolicy::Reuse)
-        .image_preparation_concurrency(1);
+        .image_preparation_concurrency(1)
+        .require_gvproxy(!harnesses.is_empty());
+    if !harnesses.is_empty() {
+        builder = builder.guest_executable(&host.runtime, CAPTURE_ONLY_GUEST_RUNTIME);
+    }
     for harness in harnesses {
         builder = builder.guest_executable(&harness.command, &harness.guest_command);
     }

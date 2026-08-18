@@ -35,13 +35,26 @@ host = [
     "dep:zstd",
     "nanocodex-tools/native",
 ]
-guest-runtime = ["dep:nix", "nanocodex-tools/workspace-runtime"]
+guest-runtime = [
+    "dep:futures-util",
+    "dep:landlock",
+    "dep:nix",
+    "dep:rtnetlink",
+    "dep:rustix",
+    "dep:seccompiler",
+    "nanocodex-tools/workspace-runtime",
+]
 
 [dependencies]
 base64.workspace = true
 filetime.workspace = true
+futures-util = { workspace = true, optional = true }
+landlock = { workspace = true, optional = true }
 nanocodex-tools = { path = "../../nanocodex-tools", version = "0.5.0", default-features = false }
 nix = { workspace = true, optional = true, features = ["fs", "mount"] }
+rtnetlink = { workspace = true, optional = true }
+rustix = { workspace = true, optional = true }
+seccompiler = { workspace = true, optional = true }
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
@@ -52,7 +65,6 @@ arcbox-ext4 = { workspace = true, optional = true }
 async-trait = { workspace = true, optional = true }
 flate2 = { workspace = true, optional = true }
 fs2 = { workspace = true, optional = true }
-futures-util = { workspace = true, optional = true }
 hex = { workspace = true, optional = true }
 ignore = { workspace = true, optional = true }
 krun = { workspace = true, optional = true }
