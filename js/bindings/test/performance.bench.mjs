@@ -4,12 +4,12 @@ import { performance } from "node:perf_hooks";
 import { test } from "node:test";
 
 import { Actions } from "../index.mjs";
-import { Agent as BrowserAgent } from "../browser/index.mjs";
+import { Agent as BrowserAgent, Transport as BrowserTransport } from "../browser/index.mjs";
 import {
   createAgentClient,
   defineRuntime,
 } from "../internal.mjs";
-import { Agent as NodeAgent } from "../node/index.mjs";
+import { Agent as NodeAgent, Transport as NodeTransport } from "../node/index.mjs";
 import { createCodeRuntime } from "../runtime/code-runtime.mjs";
 
 const LIMITS = Object.freeze({
@@ -19,6 +19,11 @@ const LIMITS = Object.freeze({
   actionNanoseconds: 5_000,
   bufferedEventsMs: 50,
   codeModeMicroseconds: 250,
+});
+const nodeTransport = NodeTransport.openAi({ apiKey: "performance-test" });
+const browserTransport = BrowserTransport.openAi({
+  apiKey: "performance-test",
+  WebSocketImpl: class {},
 });
 
 test("Node reuses one compiled WASM instance and keeps warm agent creation sub-millisecond", async (context) => {
@@ -40,14 +45,14 @@ test("Node reuses one compiled WASM instance and keeps warm agent creation sub-m
   };
   try {
     const coldStarted = performance.now();
-    const cold = await NodeAgent.create({ apiKey: "performance-test" });
+    const cold = await NodeAgent.create({ transport: nodeTransport });
     const coldMs = performance.now() - coldStarted;
     cold.dispose();
 
     const samples = [];
     for (let index = 0; index < 64; index += 1) {
       const started = performance.now();
-      const agent = await NodeAgent.create({ apiKey: "performance-test" });
+      const agent = await NodeAgent.create({ transport: nodeTransport });
       samples.push(performance.now() - started);
       agent.dispose();
     }
@@ -84,17 +89,15 @@ test("a precompiled browser module instantiates once across isolated agents", as
   try {
     const coldStarted = performance.now();
     const cold = await BrowserAgent.create({
-      apiKey: "performance-test",
+      transport: browserTransport,
       module,
-      WebSocketImpl: class {},
     });
     const coldMs = performance.now() - coldStarted;
     cold.dispose();
     for (let index = 0; index < 16; index += 1) {
       const agent = await BrowserAgent.create({
-        apiKey: "performance-test",
+        transport: browserTransport,
         module,
-        WebSocketImpl: class {},
       });
       agent.dispose();
     }
@@ -103,9 +106,8 @@ test("a precompiled browser module instantiates once across isolated agents", as
     for (let index = 0; index < 64; index += 1) {
       const started = performance.now();
       const agent = await BrowserAgent.create({
-        apiKey: "performance-test",
+        transport: browserTransport,
         module,
-        WebSocketImpl: class {},
       });
       samples.push(performance.now() - started);
       agent.dispose();

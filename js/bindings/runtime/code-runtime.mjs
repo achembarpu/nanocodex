@@ -9,23 +9,10 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
 
   function addTools(configuration = {}) {
     for (const [name, tool] of Object.entries(configuration)) {
-      if (toolByName.has(name)) throw new Error(`tool is already configured: ${name}`);
-      if (!tool || typeof tool.handler !== "function") {
-        throw new TypeError(`tool ${name} requires a handler function`);
+      if (toolByName.has(name)) {
+        throw new Error(`tool is already configured: ${name}`);
       }
-      const configured = Object.freeze({ handler: tool.handler, name });
-      configuredTools.push(configured);
-      toolByName.set(name, configured);
-      definitions.push(deepFreeze({
-        type: "function",
-        name,
-        description: tool.description || "Application-defined tool.",
-        strict: false,
-        parameters: jsonSnapshot(tool.parameters || {
-          type: "object",
-          additionalProperties: true,
-        }, `tool ${name} parameters`),
-      }));
+      addTool(name, tool, { configuredTools, definitions, toolByName });
     }
   }
   addTools(toolConfiguration);
@@ -242,11 +229,33 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
       }
     },
     toolDefinitions: () => JSON.stringify(currentDefinitions()),
+    releaseSession(sessionId) {
+      stores.delete(sessionId);
+    },
     reset() {
       for (const execution of activeExecutions) execution.controller.abort();
       stores.clear();
     },
   });
+}
+
+function addTool(name, tool, collection) {
+  if (!tool || typeof tool.handler !== "function") {
+    throw new TypeError(`tool ${name} requires a handler function`);
+  }
+  const configured = Object.freeze({ handler: tool.handler, name });
+  collection.configuredTools.push(configured);
+  collection.toolByName.set(name, configured);
+  collection.definitions.push(deepFreeze({
+    type: "function",
+    name,
+    description: tool.description || "Application-defined tool.",
+    strict: false,
+    parameters: jsonSnapshot(tool.parameters || {
+      type: "object",
+      additionalProperties: true,
+    }, `tool ${name} parameters`),
+  }));
 }
 
 async function evaluateNative(source, environment) {

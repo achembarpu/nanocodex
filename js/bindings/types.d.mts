@@ -225,11 +225,19 @@ export type ToolContext = {
 
 export type Tool = {
   description: string;
-  parameters: Record<string, unknown>;
+  /** Runtime JSON Schema for model-generated input. Defaults to an open object. */
+  parameters?: Record<string, unknown> | undefined;
   handler(input: unknown, context: ToolContext): unknown | Promise<unknown>;
 };
 
 export type ToolMap = Record<string, Tool>;
+
+export type NamedTool = Tool & Readonly<{ name: string }>;
+
+/** Static JavaScript tools, optionally composed with Rust-backed extensions. */
+export type ToolConfiguration<Extension = never> =
+  | ToolMap
+  | readonly (NamedTool | Extension)[];
 
 export type CodeEvaluatorEnvironment = {
   tools: Readonly<Record<string, (input: unknown) => Promise<unknown>>>;

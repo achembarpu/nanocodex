@@ -19,6 +19,15 @@ OPENAI_API_KEY=... npm start
 key remains in the Node process and is used by the Node WebSocket host; it is
 not compiled into the WASM artifact or the npm package.
 
+The subagent example opts into the canonical Rust task tree compiled into the
+package's WASM. JavaScript spreads `Subagents.create()` into `tools`; Rust installs
+`spawn_agent`, `submit_result`, `send_agent_message`, `list_agents`,
+`wait_agent`, `interrupt_agent`, and `close_agent` for every child:
+
+```sh
+npm run subagents -- "Review the JS API with whatever workers you need"
+```
+
 To run the keyless MPP path with a Tempo account managed by the Tempo Accounts
 SDK:
 

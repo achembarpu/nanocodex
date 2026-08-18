@@ -1,4 +1,4 @@
-import { Agent } from "nanocodex/browser";
+import { Agent, Transport } from "nanocodex/browser";
 import {
   createAgentController,
   type AgentControllerStart,
@@ -89,8 +89,10 @@ async function createAgent(
         const agent = await Agent.create({
           ...common,
           fastMode: true,
-          mpp: paymentSession.provider,
-          websocketUrl: MPP_RESPONSES_WEBSOCKET_URL,
+          transport: Transport.mpp({
+            session: paymentSession.provider,
+            websocketUrl: MPP_RESPONSES_WEBSOCKET_URL,
+          }),
         });
         return {
           agent,
@@ -115,19 +117,22 @@ async function createAgent(
     return {
       agent: await Agent.create({
         ...common,
-        hostAuth: true,
-        apiBaseUrl: CHATGPT_API_BASE_URL,
-        websocketUrl: workerEndpoint(),
-        createWebSocket,
+        transport: Transport.hostManaged({
+          apiBaseUrl: CHATGPT_API_BASE_URL,
+          websocketUrl: workerEndpoint(),
+          createWebSocket,
+        }),
       }),
     };
   }
   return {
     agent: await Agent.create({
       ...common,
-      apiKey: "worker-managed",
-      websocketUrl: workerEndpoint(),
-      createWebSocket,
+      transport: Transport.openAi({
+        apiKey: "worker-managed",
+        websocketUrl: workerEndpoint(),
+        createWebSocket,
+      }),
     }),
   };
 }

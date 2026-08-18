@@ -8,7 +8,7 @@ import type {
   Turn,
   TurnResult,
 } from "nanocodex";
-import { Agent } from "nanocodex/browser";
+import { Agent, Subagents, Transport } from "nanocodex/browser";
 import nanocodexWasm from "./nanocodex.wasm";
 import {
   cloudflareSandboxTools,
@@ -491,35 +491,41 @@ export class NanocodexSession extends DurableObject<Env> {
       ? undefined
       : JSON.parse(session.snapshot) as SessionSnapshot;
     const auth = this.env.NANOCODEX_AUTH.getByName("subscription");
-    const authorization = authMode === "api_key"
-      ? { apiKey: this.env.OPENAI_API_KEY! }
-      : { hostAuth: true as const };
+    const websocketUrl = this.env.OPENAI_WEBSOCKET_URL
+      ?? (authMode === "chatgpt" ? CHATGPT_WEBSOCKET_URL : undefined);
+    const transport = authMode === "api_key"
+      ? Transport.openAi({
+          apiKey: this.env.OPENAI_API_KEY!,
+          websocketUrl,
+          createWebSocket: openAiWebSocket,
+        })
+      : Transport.hostManaged({
+          apiBaseUrl: CHATGPT_API_BASE_URL,
+          websocketUrl,
+          createWebSocket: (endpoint, id, request) =>
+            openSubscriptionWebSocket(auth, endpoint, id, request),
+        });
     const agent = await Agent.create({
-      ...authorization,
+      transport,
       module: nanocodexWasm,
-      websocketUrl: this.env.OPENAI_WEBSOCKET_URL
-        ?? (authMode === "chatgpt" ? CHATGPT_WEBSOCKET_URL : undefined),
-      apiBaseUrl: authMode === "chatgpt" ? CHATGPT_API_BASE_URL : undefined,
       sessionId: session.session_id,
       resume,
       workspace: "/workspace",
-      instructions: "You are Nanocodex running inside a Cloudflare Durable Object. Use the sandbox_* tools for code, files, and previews; their /workspace is isolated and persisted in R2 for this session.",
+      instructions: "You are Nanocodex running inside a Cloudflare Durable Object. Use the sandbox_* tools for code, files, and previews; their /workspace is isolated and persisted in R2 for this session. Delegate independent work with spawn_agent and use the task-tree communication tools to coordinate children.",
       // Workers forbid eval/new Function. Direct mode keeps caller-defined
       // tools in the WASM lifecycle while dispatching handlers through the
       // typed host bridge without dynamic code generation.
       toolMode: "direct",
-      createWebSocket: authMode === "api_key"
-        ? openAiWebSocket
-        : (endpoint, id, request) => openSubscriptionWebSocket(auth, endpoint, id, request),
-      tools: {
-        ...cloudflareSandboxTools(
+      tools: [
+        ...Object.entries(cloudflareSandboxTools(
           this.env.Sandbox,
           session.session_id,
           this.env.NANOCODEX_SANDBOX_LOCAL === "true",
           session.public_origin || undefined,
           this.env.NANOCODEX_ADMIN_TOKEN,
-        ),
-        runtimeInfo: {
+        )).map(([name, tool]) => ({ name, ...tool })),
+        {
+          name: "runtimeInfo",
           description: "Return information about the current agent runtime.",
           parameters: { type: "object", additionalProperties: false },
           handler: () => ({
@@ -529,7 +535,10 @@ export class NanocodexSession extends DurableObject<Env> {
             workspace: "/workspace",
           }),
         },
-      },
+        // The imported module contains nanocodex-subagents; this spread enables
+        // its Rust-owned tools for this Durable Object's agent family.
+        ...Subagents.create({ maxConcurrency: 8 }),
+      ],
     });
     this.#events = agent.events.watch();
     this.#events.onEvent((event) => this.#broadcast({ type: "event", event }));

@@ -600,11 +600,13 @@ impl WasmNanocodex {
         let (mut builder, subagents) = if let Some(subagents) = config.subagents {
             let (registry, control, updates) =
                 nanocodex_subagents::channel(subagents.max_concurrency);
-            let tools = hosted_tools.clone();
-            let tool_registry = registry.clone();
             (
                 RustNanocodex::builder(openai).tools_factory(move |agent| {
-                    nanocodex_subagents::install_tools(tools.clone(), agent, tool_registry.clone())
+                    nanocodex_subagents::install_tools(
+                        hosted_tools.clone(),
+                        agent,
+                        registry.clone(),
+                    )
                 }),
                 Some(WasmSubagents::new(control, updates)),
             )
