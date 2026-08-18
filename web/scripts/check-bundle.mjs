@@ -31,6 +31,9 @@ const budgets = Object.freeze({
 const clientDirectory = fileURLToPath(
   new URL("../dist/client/", import.meta.url),
 );
+const workerDirectory = fileURLToPath(
+  new URL("../dist/nanocodex/", import.meta.url),
+);
 const assetsDirectory = join(clientDirectory, "assets");
 const manifest = JSON.parse(
   await readFile(join(clientDirectory, ".vite", "manifest.json"), "utf8"),
@@ -212,6 +215,35 @@ assert.deepEqual(
 const wasm = await fileStats([`assets/${wasmFile}`]);
 within("Nanocodex WASM", wasm.bytes, budgets.wasm);
 within("Nanocodex WASM gzip", wasm.gzipBytes, budgets.wasmGzip);
+
+const workerManifest = JSON.parse(
+  await readFile(join(workerDirectory, ".vite", "manifest.json"), "utf8"),
+);
+const subscriptionWorkerKey = exactlyOne(
+  Object.keys(workerManifest).filter((key) =>
+    key.endsWith("node_modules/nanocodex/worker/index.mjs")
+  ),
+  "Cloudflare subscription Worker entry",
+);
+const subscriptionWorker = workerManifest[subscriptionWorkerKey];
+const subscriptionWorkerSource = await readFile(
+  join(workerDirectory, subscriptionWorker.file),
+  "utf8",
+);
+const workerAssets = await readdir(join(workerDirectory, "assets"));
+const workerWasmFile = exactlyOne(
+  workerAssets.filter((file) => /^nanocodex_bg-.*\.wasm$/.test(file)),
+  "Cloudflare subscription WASM module",
+);
+assert(
+  subscriptionWorkerSource.includes(`./${workerWasmFile}`),
+  "the subscription Worker must import its compiled WASM module",
+);
+assert.match(
+  subscriptionWorkerSource,
+  /__wbg_set_wasm\(wasm\)/,
+  "the subscription Worker must initialize wasm-bindgen before opening a subscription",
+);
 
 console.log(JSON.stringify({
   initial: {
