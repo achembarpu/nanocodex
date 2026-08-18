@@ -14,10 +14,6 @@ import {
 
 import { openOpfsGitFs, type OpfsGitFs } from "./opfsGit.ts";
 import {
-  MAX_COMMIT_HISTORY,
-  MAX_DIFF_FILE_BYTES,
-} from "./threadRepositorySnapshot.ts";
-import {
   browserThread,
   initializeThreadGit,
   notifyThreadGitChanged,
@@ -32,6 +28,8 @@ const utf8Decoder = new TextDecoder();
 const diffDecoder = new TextDecoder("utf-8", { fatal: true });
 const MAX_OUTPUT_BYTES = 4 * 1024 * 1024;
 const MAX_EXECUTION_MS = 30_000;
+const MAX_GIT_LOG_DEPTH = 200;
+const MAX_DIFF_FILE_BYTES = 1024 * 1024;
 const MAX_INDEXED_PATHS = 100_000;
 const DIFF_TRUNCATION_NOTICE = "\n[diff truncated by browser git]\n";
 const AGENT_INSTRUCTIONS = `You are working in a persistent browser filesystem rooted at /workspace.
@@ -455,8 +453,8 @@ async function gitPull(fs: OpfsGitFs, thread: BrowserThread, args: string[]): Pr
 async function gitLog(fs: OpfsGitFs, args: string[]): Promise<string> {
   const countArgument = args.find((arg) => /^-\d+$/.test(arg));
   const depth = countArgument ? Number(countArgument.slice(1)) : 20;
-  if (!Number.isSafeInteger(depth) || depth > MAX_COMMIT_HISTORY) {
-    throw new Error(`browser git log depth cannot exceed ${MAX_COMMIT_HISTORY}`);
+  if (!Number.isSafeInteger(depth) || depth > MAX_GIT_LOG_DEPTH) {
+    throw new Error(`browser git log depth cannot exceed ${MAX_GIT_LOG_DEPTH}`);
   }
   const commits = await git.log({ fs, dir: THREAD_GIT_DIRECTORY, depth }).catch(() => []);
   if (args.includes("--oneline")) {
