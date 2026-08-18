@@ -28,6 +28,95 @@ export type AgentOptions = {
   resume?: SessionSnapshot | undefined;
 };
 
+/** Unsigned decimal revision for opaque ChatGPT subscription state. */
+declare const subscriptionRevisionBrand: unique symbol;
+export type SubscriptionRevision = string & {
+  readonly [subscriptionRevisionBrand]: "NanocodexSubscriptionRevision";
+};
+
+export type SubscriptionStoredValue = Readonly<{
+  revision: SubscriptionRevision;
+  payload?: string | undefined;
+}>;
+
+export type SubscriptionCommitRequest = Readonly<{
+  expectedRevision: SubscriptionRevision;
+  /** Opaque Rust-owned credential state. Hosts must store it as a secret. */
+  payload: string;
+}>;
+
+export type SubscriptionCommitResult =
+  | Readonly<{ status: "committed"; revision: SubscriptionRevision }>
+  | Readonly<{ status: "conflict"; actualRevision: SubscriptionRevision }>;
+
+/** Generic secret persistence consumed by the Rust ChatGPT lifecycle. */
+export type ChatGptSubscriptionStore = Readonly<{
+  load(id: string): SubscriptionStoredValue | Promise<SubscriptionStoredValue>;
+  compareAndSwap(
+    id: string,
+    request: SubscriptionCommitRequest,
+  ): SubscriptionCommitResult | Promise<SubscriptionCommitResult>;
+}>;
+
+export type MemoryChatGptSubscriptionStore = ChatGptSubscriptionStore & Readonly<{
+  id: string;
+  snapshot(): SubscriptionStoredValue;
+}>;
+
+export type ChatGptCredentialSeed = Readonly<{
+  accessToken: string;
+  refreshToken?: string | undefined;
+  accountId: string;
+  fedramp?: boolean | undefined;
+}>;
+
+export type ChatGptLoginStatus =
+  | Readonly<{ state: "signed_out" | "expired" }>
+  | Readonly<{
+      state: "pending";
+      verificationUrl: string;
+      userCode: string;
+      expiresAt: number;
+      pollAfterMs: number;
+    }>
+  | Readonly<{
+      state: "authenticated";
+      accountId: string;
+      expiresAt: number | null;
+    }>;
+
+export type ChatGptCredential = Readonly<{
+  kind: "chatgpt";
+  /** Resolved bearer credential. Do not retain or log it. */
+  accessToken: string;
+  accountId: string;
+  fedramp: boolean;
+  revision: SubscriptionRevision;
+}>;
+
+export type ChatGptSubscriptionHandle = Readonly<{
+  id: string;
+  startLogin(): Promise<ChatGptLoginStatus>;
+  status(): Promise<ChatGptLoginStatus>;
+  credential(): Promise<ChatGptCredential>;
+  recover(rejectedRevision: SubscriptionRevision): Promise<ChatGptCredential>;
+  logout(): Promise<void>;
+  dispose(): void;
+}>;
+
+export type ChatGptSubscriptionOptions = Readonly<{
+  id: string;
+  store: ChatGptSubscriptionStore;
+  /** Generic bounded HTTP capability; defaults to global fetch. */
+  fetch?: typeof globalThis.fetch | undefined;
+  /** Trusted initial credentials, typically imported from Codex auth.json. */
+  seed?: ChatGptCredentialSeed | undefined;
+  /** Test-only local issuer override. */
+  issuer?: string | undefined;
+  /** Browser WASM module compiled from the same nanocodex package. */
+  module?: unknown;
+}>;
+
 export type EstimatedUsdCost = Readonly<{
   usd: string;
   input_usd: string;

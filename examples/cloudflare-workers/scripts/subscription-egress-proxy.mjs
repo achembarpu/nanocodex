@@ -21,7 +21,10 @@ const FORWARDED_HEADERS = [
 
 export async function startSubscriptionEgressProxy(options = {}) {
   const upstreamUrl = options.upstreamUrl ?? DEFAULT_UPSTREAM;
-  const capability = randomBytes(32).toString("base64url");
+  const capability = options.capability ?? randomBytes(32).toString("base64url");
+  if (!/^[A-Za-z0-9_-]{43,}$/.test(capability)) {
+    throw new Error("subscription proxy capability must be at least 32 random bytes encoded as base64url");
+  }
   const path = `/v1/${capability}`;
   const sockets = new Set();
   const server = createServer((_request, response) => {

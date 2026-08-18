@@ -61,7 +61,7 @@ export interface Env {
   CHATGPT_ACCOUNT_ID?: string;
   CHATGPT_FEDRAMP?: string;
   CHATGPT_REFRESH_TOKEN?: string;
-  CHATGPT_TOKEN_ENDPOINT?: string;
+  CHATGPT_ISSUER?: string;
 }
 
 type SessionRow = {
@@ -717,7 +717,7 @@ async function openSubscriptionWebSocket(
 async function subscriptionSnapshot(
   auth: DurableObjectStub<NanocodexSubscriptionAuth>,
   path: "/snapshot" | "/recover",
-  revision?: number,
+  revision?: string,
 ): Promise<SubscriptionSnapshot> {
   const response = await auth.fetch(`https://auth.internal${path}`, {
     method: "POST",

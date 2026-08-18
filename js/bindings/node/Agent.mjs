@@ -8,6 +8,7 @@ import {
   createAgentClient,
   createEventChannel,
   defineRuntime,
+  loadSubscriptionRuntime,
   releaseHostSession,
   toWasmConfig,
 } from "../internal.mjs";
@@ -28,6 +29,7 @@ export function create(options = {}) {
     workspace,
     resume,
     apiKey,
+    subscription,
     mpp,
     websocketUrl,
     apiBaseUrl,
@@ -41,6 +43,9 @@ export function create(options = {}) {
   const events = createEventChannel();
   if (mpp !== undefined && apiKey !== undefined) {
     throw new TypeError("apiKey and mpp are mutually exclusive");
+  }
+  if (subscription !== undefined && (apiKey !== undefined || mpp !== undefined)) {
+    throw new TypeError("subscription is mutually exclusive with apiKey and mpp");
   }
   if (filesystem && workspace !== undefined && workspace !== filesystem.root) {
     throw new TypeError("workspace must match filesystem.root when both are provided");
@@ -71,15 +76,23 @@ export function create(options = {}) {
           ? loadNodeNanocodex()
           : await loadWebNanocodex(module);
         activateHost(host);
-        return new Nanocodex(JSON.stringify(toWasmConfig({
-          apiKey: apiKey ?? (mpp === undefined ? undefined : "mpp-managed"),
+        const configJson = JSON.stringify(toWasmConfig({
+          apiKey: apiKey ?? (subscription === undefined
+            ? mpp === undefined ? undefined : "mpp-managed"
+            : "subscription-managed"),
           websocketUrl: websocketUrl ?? (mpp === undefined
             ? undefined
             : "wss://openai.mpp.tempo.xyz/v1/responses"),
           apiBaseUrl,
           websocketWarmup,
           ...config,
-        })));
+        }));
+        return subscription === undefined
+          ? new Nanocodex(configJson)
+          : Nanocodex.createWithChatGpt(
+              configJson,
+              (await loadSubscriptionRuntime()).rawSubscription(subscription),
+            );
       } catch (error) {
         await host.dispose();
         throw error;

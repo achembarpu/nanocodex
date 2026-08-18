@@ -176,7 +176,11 @@ This is the same access-token-only policy as the Cloudflare demo. It keeps
 working until the current access token expires or ChatGPT rejects it; then run
 `codex login` and deploy again. Once the Rivet CLI has cached credentials,
 `RIVET_CLOUD_TOKEN` may be omitted. `NANOCODEX_CODEX_AUTH_FILE`, `CODEX_HOME`,
-and `RIVET_NAMESPACE` override the auth path and target namespace.
+and `RIVET_NAMESPACE` override the auth path and target namespace. The helper
+derives the disposable credential actor key from a one-way token fingerprint,
+so a newly authenticated deployment seeds fresh state instead of reopening an
+expired access-token-only actor. Set `RIVET_REUSE_IMAGE=1` to update only this
+deployment environment after the current source image has already been pushed.
 
 For a long-lived deployment, give the auth actor dedicated rotating
 subscription credentials instead. This still does not require

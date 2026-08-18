@@ -6,6 +6,7 @@ if (!Number.isInteger(port) || port < 1 || port > 65_535) {
 }
 
 const proxy = await startSubscriptionEgressProxy({
+  capability: process.env.NANOCODEX_EGRESS_CAPABILITY,
   port,
   upstreamUrl: process.env.OPENAI_WEBSOCKET_URL,
   onEvent: ({ type, status, code }) => {

@@ -28,12 +28,16 @@ const requiredFiles = [
   "node/index.d.mts",
   "node/workspace.mjs",
   "node/workspace.d.mts",
+  "worker/index.mjs",
+  "worker/index.d.mts",
   "runtime/workspace.mjs",
   "runtime/workspace.d.mts",
   "wasm.d.mts",
   "pkg-web/nanocodex.js",
   "pkg-web/nanocodex.d.ts",
+  "pkg-web/nanocodex_bg.js",
   "pkg-web/nanocodex_bg.wasm",
+  "pkg-web/nanocodex_worker.js",
   "pkg-node/nanocodex.js",
   "pkg-node/nanocodex.d.ts",
   "pkg-node/nanocodex_bg.wasm",
@@ -53,6 +57,7 @@ export async function checkPackage(packageRoot = root) {
   assert.equal(packageJson.exports?.["./browser/workspace"]?.import, "./browser/workspace.mjs");
   assert.equal(packageJson.exports?.["./node"]?.import, "./node/index.mjs");
   assert.equal(packageJson.exports?.["./node/workspace"]?.import, "./node/workspace.mjs");
+  assert.equal(packageJson.exports?.["./worker"]?.import, "./worker/index.mjs");
   assert.equal(packageJson.exports?.["./wasm"]?.import, "./pkg-web/nanocodex_bg.wasm");
   checkDocumentedBrowserVersion(readme, packageJson.version);
 

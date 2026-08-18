@@ -7,6 +7,7 @@ import {
   createAgentClient,
   createEventChannel,
   defineRuntime,
+  loadSubscriptionRuntime,
   releaseHostSession,
   toWasmConfig,
 } from "../internal.mjs";
@@ -27,6 +28,7 @@ export function create(options = {}) {
   const {
     apiKey,
     hostAuth,
+    subscription,
     mpp,
     websocketUrl,
     apiBaseUrl,
@@ -55,6 +57,9 @@ export function create(options = {}) {
   if (hostAuth && (apiKey !== undefined || mpp !== undefined)) {
     throw new TypeError("hostAuth is mutually exclusive with apiKey and mpp");
   }
+  if (subscription !== undefined && (hostAuth || apiKey !== undefined || mpp !== undefined)) {
+    throw new TypeError("subscription is mutually exclusive with hostAuth, apiKey, and mpp");
+  }
   if (filesystem && workspace !== undefined && workspace !== filesystem.root) {
     throw new TypeError("workspace must match filesystem.root when both are provided");
   }
@@ -63,7 +68,8 @@ export function create(options = {}) {
   const host = createBrowserHost({
     WebSocketImpl,
     createWebSocket,
-    hostAuth: hostAuth === true || (apiKey === undefined && mpp === undefined),
+    hostAuth: hostAuth === true
+      || (apiKey === undefined && mpp === undefined && subscription === undefined),
     mpp,
     onEvent: events.emit,
     filesystem,
@@ -86,15 +92,23 @@ export function create(options = {}) {
         await host.ready();
         await prewarm({ module });
         activateHost(host);
-        return new Nanocodex(JSON.stringify(toWasmConfig({
-          apiKey: apiKey ?? (mpp === undefined ? "host-managed" : "mpp-managed"),
+        const configJson = JSON.stringify(toWasmConfig({
+          apiKey: apiKey ?? (mpp === undefined
+            ? subscription === undefined ? "host-managed" : "subscription-managed"
+            : "mpp-managed"),
           websocketUrl: websocketUrl ?? (mpp === undefined
             ? undefined
             : "wss://openai.mpp.tempo.xyz/v1/responses"),
           apiBaseUrl,
           websocketWarmup,
           ...config,
-        })));
+        }));
+        return subscription === undefined
+          ? new Nanocodex(configJson)
+          : Nanocodex.createWithChatGpt(
+              configJson,
+              (await loadSubscriptionRuntime()).rawSubscription(subscription),
+            );
       } catch (error) {
         await host.dispose();
         throw error;

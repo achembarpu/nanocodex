@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -11,8 +11,15 @@ const codexHome = process.env.CODEX_HOME ?? join(homedir(), ".codex");
 const authFile = resolve(process.env.NANOCODEX_CODEX_AUTH_FILE ?? join(codexHome, "auth.json"));
 const auth = await createCodexAuthFileProvider(authFile).snapshot();
 const namespace = process.env.RIVET_NAMESPACE?.trim() || "production";
+const refreshToken = process.env.CHATGPT_REFRESH_TOKEN?.trim();
+const disposableCredentialId = createHash("sha256")
+  .update(auth.bearerToken)
+  .digest("hex")
+  .slice(0, 16);
 const actorKey = process.env.NANOCODEX_AUTH_ACTOR_KEY?.trim()
-  || `nanocodex-subscription-${namespace}`;
+  || (refreshToken
+    ? `nanocodex-subscription-${namespace}`
+    : `nanocodex-subscription-${namespace}-${disposableCredentialId}`);
 const capability = process.env.NANOCODEX_AUTH_CAPABILITY?.trim()
   || randomBytes(32).toString("base64url");
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -27,7 +34,6 @@ const environment = [
 ];
 const publicUrl = process.env.NANOCODEX_PUBLIC_URL?.trim();
 if (publicUrl) environment.push(`NANOCODEX_PUBLIC_URL=${publicUrl}`);
-const refreshToken = process.env.CHATGPT_REFRESH_TOKEN?.trim();
 if (refreshToken) environment.push(`CHATGPT_REFRESH_TOKEN=${refreshToken}`);
 
 process.stderr.write(
@@ -44,6 +50,7 @@ const child = spawn("npx", [
   ".",
   "--namespace",
   namespace,
+  ...(process.env.RIVET_REUSE_IMAGE === "1" ? ["--reuse-image"] : []),
   ...environment.flatMap((value) => ["--env", value]),
 ], {
   cwd: repository,

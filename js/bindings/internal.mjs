@@ -176,6 +176,10 @@ export function activateHost(host) {
     throw new TypeError("a Nanocodex host must define connect()");
   }
   activeHost = host;
+  installHostBridge();
+}
+
+export function installHostBridge() {
   globalThis.nanocodexHost = hostBridge;
 }
 
@@ -249,6 +253,19 @@ const hostBridge = Object.freeze({
   removeWorkspaceFile(path, sessionId) {
     return requiredSessionHost(sessionId).removeWorkspaceFile(path);
   },
+  async subscriptionLoad(subscriptionId) {
+    return (await loadSubscriptionRuntime()).load(subscriptionId);
+  },
+  async subscriptionCompareAndSwap(subscriptionId, expectedRevision, payload) {
+    return (await loadSubscriptionRuntime()).compareAndSwap(
+      subscriptionId,
+      expectedRevision,
+      payload,
+    );
+  },
+  async subscriptionRequest(subscriptionId, request) {
+    return (await loadSubscriptionRuntime()).request(subscriptionId, request);
+  },
   toolMode(sessionId) {
     // The WASM constructor asks before its session is adopted.
     return (hostSessions.get(sessionId) ?? requiredActiveHost()).toolMode();
@@ -264,6 +281,10 @@ const hostBridge = Object.freeze({
     requiredSessionHost(event.request_id).emitEvent(eventJson);
   },
 });
+
+export function loadSubscriptionRuntime() {
+  return import("./runtime/chatgpt-subscription.mjs");
+}
 
 function createAgent(raw, runtime) {
   if (!raw || typeof raw.prompt !== "function") {

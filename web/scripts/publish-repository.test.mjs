@@ -78,6 +78,12 @@ test("the publisher CLI initializes its module before building a generation", as
     const publication = JSON.parse(publicationRequest.body);
     assert.equal(publication.expectedHead, null);
     assert.equal(publication.publication.head, head);
+    assert.ok(requests.some(({ url }) =>
+      url === `/api/git/objects/generations/${head}/commits/0000.json`
+    ));
+    assert.equal(requests.some(({ url }) =>
+      url === `/api/git/objects/generations/${head}/commits/0000`
+    ), false);
   } finally {
     if (server.listening) await new Promise((resolveClose) => server.close(resolveClose));
     await rm(directory, { recursive: true, force: true });

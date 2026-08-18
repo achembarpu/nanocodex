@@ -21,9 +21,11 @@ test("subscription egress proxy is capability-gated and relays headers and frame
   assert(address && typeof address !== "string");
 
   const proxy = await startSubscriptionEgressProxy({
+    capability: "test-capability-0000000000000000000000000000",
     upstreamUrl: `ws://127.0.0.1:${address.port}/responses`,
   });
   try {
+    assert.match(proxy.url, /\/v1\/test-capability-0000000000000000000000000000$/);
     const denied = await rejected(proxy.url.replace(/\/v1\/[^/]+$/, "/v1/wrong"));
     assert.equal(denied, 404);
 
@@ -45,6 +47,13 @@ test("subscription egress proxy is capability-gated and relays headers and frame
     upstreamSockets.clients.forEach((socket) => socket.terminate());
     await new Promise((resolve, reject) => upstreamServer.close((error) => error ? reject(error) : resolve()));
   }
+});
+
+test("subscription egress proxy rejects weak configured capabilities", async () => {
+  await assert.rejects(
+    startSubscriptionEgressProxy({ capability: "short" }),
+    /at least 32 random bytes/,
+  );
 });
 
 test("an upstream rejection settles once and leaves the proxy alive", async () => {
