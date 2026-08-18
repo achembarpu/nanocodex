@@ -187,6 +187,20 @@ jobs:
           fi
           gh release upload "$immutable_tag" dist/* --repo "$GITHUB_REPOSITORY" --clobber
 
+          # SHA256SUMS is the commit marker for clients that still read rolling assets.
+          rolling_exists=false
+          if gh release view nightly --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            rolling_exists=true
+            checksum_asset_id=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/nightly" \
+              --jq '[.assets[] | select(.name == "SHA256SUMS") | .id][0] // empty')
+            if [ -n "$checksum_asset_id" ]; then
+              gh api --method DELETE \
+                "repos/${GITHUB_REPOSITORY}/releases/assets/${checksum_asset_id}"
+            fi
+            gh release upload nightly dist/nanocodex-* \
+              --repo "$GITHUB_REPOSITORY" --clobber
+          fi
+
           if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/nightly" >/dev/null 2>&1; then
             gh api --method PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/nightly" \
               -f sha="$GITHUB_SHA" -F force=true >/dev/null
@@ -195,7 +209,7 @@ jobs:
               -f ref='refs/tags/nightly' -f sha="$GITHUB_SHA" >/dev/null
           fi
 
-          if gh release view nightly --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          if [ "$rolling_exists" = true ]; then
             gh release edit nightly --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" --title "Nanocodex Nightly" \
               --notes-file "$notes_file" --prerelease
@@ -203,5 +217,8 @@ jobs:
             gh release create nightly --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" --title "Nanocodex Nightly" \
               --notes-file "$notes_file" --prerelease
+            gh release upload nightly dist/nanocodex-* \
+              --repo "$GITHUB_REPOSITORY" --clobber
           fi
-          gh release upload nightly dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload nightly dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --clobber
