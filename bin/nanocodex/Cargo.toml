@@ -45,6 +45,7 @@ jsonschema.workspace = true
 nanocodex.workspace = true
 nanocodex-browser.workspace = true
 nanocodex-observability.workspace = true
+nanocodex-subagents.workspace = true
 nanocodex-voice.workspace = true
 nix.workspace = true
 nanousd = { workspace = true, optional = true }

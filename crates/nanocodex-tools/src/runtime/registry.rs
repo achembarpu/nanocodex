@@ -296,7 +296,7 @@ impl ToolRegistry {
             .into_iter()
             .map(|definition| {
                 (
-                    code_mode::description::normalize_identifier(definition.name()),
+                    crate::code_mode_description::normalize_identifier(definition.name()),
                     definition.name().to_owned(),
                 )
             })
@@ -322,14 +322,14 @@ impl ToolRegistry {
         let mut seen = self
             .registered_code_mode_definitions()
             .into_iter()
-            .map(|definition| code_mode::description::normalize_identifier(definition.name()))
+            .map(|definition| crate::code_mode_description::normalize_identifier(definition.name()))
             .collect::<HashSet<_>>();
         let mut summaries = self
             .providers
             .iter()
             .flat_map(|provider| provider.code_mode_tool_summaries())
             .filter_map(|(name, description)| {
-                let normalized = code_mode::description::normalize_identifier(&name);
+                let normalized = crate::code_mode_description::normalize_identifier(&name);
                 (!host_owned_name(&name) && seen.insert(normalized.clone()))
                     .then_some((normalized, description))
             })
@@ -370,7 +370,7 @@ fn first_normalized_definitions(
     definitions
         .into_iter()
         .filter(|definition| {
-            let normalized = code_mode::description::normalize_identifier(definition.name());
+            let normalized = crate::code_mode_description::normalize_identifier(definition.name());
             if seen.insert(normalized.clone()) {
                 true
             } else {
@@ -392,7 +392,7 @@ fn definition_metadata(name: &str, definition: &ToolDefinition) -> Value {
         ToolDefinition::Custom { .. } => "freeform",
         ToolDefinition::ToolSearch { .. } => "tool_search",
     };
-    let metadata_name = code_mode::description::normalize_identifier(name);
+    let metadata_name = crate::code_mode_description::normalize_identifier(name);
     json!({
         "name": metadata_name,
         "tool_name": name,

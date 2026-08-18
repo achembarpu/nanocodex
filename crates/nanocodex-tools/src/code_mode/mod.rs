@@ -1,6 +1,5 @@
 //! Code Mode execution results, notifications, and nested-tool observation.
 
-pub(crate) mod description;
 mod embedded;
 mod output;
 mod spec;
@@ -26,6 +25,7 @@ use tokio::{
 use tracing::{Instrument, info_span};
 
 use super::{ToolContext, ToolOutputBody, ToolOutputContent};
+use crate::code_mode_description as description;
 pub use crate::hosted::{
     CodeModeExecution, CodeModeNotification, CodeModeObserver, CodeModeUpdate, NestedToolCall,
 };

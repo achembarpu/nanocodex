@@ -1,32 +1,54 @@
-// Derived from clabby/tact@1d9ccaefd1d8613dab020812af04a91cd9b4c52c (Apache-2.0).
-// Modified for Nanocodex's CLI-owned module paths and runtime wiring.
+//! CLI composition over the reusable subagent extension.
 
-#![allow(dead_code, unused_imports)]
-
-//! Reusable child-agent tools and the typed runtime/UI update boundary.
-
-mod capacity;
-mod harness;
-mod message;
-mod model;
-mod runtime;
 mod simplify;
-mod task_tree;
-mod tools;
 
-pub(crate) use model::{
-    AgentDescriptor, AgentId, AgentMessage, AgentMessageUpdate, AgentStatus, AgentThread,
-    AgentUpdate, MessageDeliveryState, MessageDisposition, MessageId, MessagePriority,
-    MessagePurpose, MessageSender, ScopedAgentUpdate, SubagentRuntimeId, ThreadId,
+use nanocodex::{Tools, agent::AgentHandle, tools::ToolsBuildError};
+pub(crate) use nanocodex_subagents::{
+    AgentId, AgentStatus, DEFAULT_MAX_SUBAGENTS, Registry, channel,
 };
+use nanocodex_subagents::{ScopedAgentUpdate, SubagentControl};
 use std::sync::Arc;
-
 use tokio::{sync::mpsc, task::JoinHandle};
 
-pub(crate) use runtime::{Registry, SubagentControl, channel};
-pub(crate) use tools::{SubagentToolSet, install_tools};
+use self::simplify::SimplifyReview;
 
-pub(crate) const DEFAULT_MAX_SUBAGENTS: usize = 32;
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SubagentToolSet {
+    Generic,
+    Simplify,
+    GenericAndSimplify,
+}
+
+impl SubagentToolSet {
+    const fn generic(self) -> bool {
+        matches!(self, Self::Generic | Self::GenericAndSimplify)
+    }
+
+    const fn simplify(self) -> bool {
+        matches!(self, Self::Simplify | Self::GenericAndSimplify)
+    }
+}
+
+pub(crate) fn install_tools(
+    tools: Tools,
+    parent: AgentHandle,
+    registry: Arc<Registry>,
+    tool_set: SubagentToolSet,
+) -> Result<Tools, ToolsBuildError> {
+    let tools = if tool_set.generic() {
+        nanocodex_subagents::install_tools(tools, parent.clone(), Arc::clone(&registry))?
+    } else {
+        tools
+    };
+    if tool_set.simplify() {
+        tools
+            .into_builder()
+            .tool(SimplifyReview::new(parent, Arc::downgrade(&registry)))
+            .build()
+    } else {
+        Ok(tools)
+    }
+}
 
 pub(crate) struct ChildAgents {
     root_session_id: String,
@@ -49,7 +71,7 @@ impl ChildAgents {
     }
 
     pub(crate) async fn shutdown(&self) {
-        self.control.close_all(&self.root_session_id).await;
+        drop(self.control.close_all(&self.root_session_id).await);
         if let Some(update_task) = self.update_task.lock().await.take() {
             update_task.abort();
             drop(update_task.await);

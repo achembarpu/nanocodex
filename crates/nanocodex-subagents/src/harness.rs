@@ -1,19 +1,17 @@
 // Derived from clabby/tact@1d9ccaefd1d8613dab020812af04a91cd9b4c52c (Apache-2.0).
-// Modified for Nanocodex's CLI-owned module paths and runtime wiring.
+// Modified for Nanocodex's reusable native/WASM extension runtime.
 
 //! Per-agent actor that exclusively owns a child runtime and its active turn.
 
 use super::{
     capacity::{Capacity, TurnCapacity},
     model::{AgentId, AgentMessage, MessageDisposition, MessageId, MessagePriority},
+    platform::{self, Task, TaskError},
     runtime::{DelegationChange, Registry, completion_instructions},
 };
-use nanocodex::{Nanocodex, NanocodexError, TurnControl};
+use nanocodex_agent::{Nanocodex, NanocodexError, Result as AgentResult, TurnControl, TurnResult};
 use std::{collections::VecDeque, sync::Weak};
-use tokio::{
-    sync::{mpsc, oneshot, watch},
-    task::{JoinError, JoinHandle},
-};
+use tokio::sync::{mpsc, oneshot, watch};
 use tracing::Instrument;
 
 const COMMAND_CAPACITY: usize = 8;
@@ -90,7 +88,7 @@ struct Harness {
 
 struct ActiveTurn {
     control: TurnControl,
-    result: JoinHandle<nanocodex::agent::Result<nanocodex::TurnResult>>,
+    result: Task<AgentResult<TurnResult>>,
     _capacity: TurnCapacity,
 }
 
@@ -99,7 +97,7 @@ enum HarnessEvent {
     Deferred(Option<DeliveryCommand>),
     Urgent(Option<DeliveryCommand>),
     CapacityChanged,
-    TurnFinished(Result<nanocodex::agent::Result<nanocodex::TurnResult>, JoinError>),
+    TurnFinished(Result<AgentResult<TurnResult>, TaskError>),
 }
 
 impl HarnessHandle {
@@ -178,7 +176,7 @@ pub(super) fn spawn(
     capacity: Capacity,
     registry: Weak<Registry>,
     output_schema: String,
-) -> (HarnessHandle, JoinHandle<()>) {
+) -> (HarnessHandle, Task<()>) {
     let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
     let (deferred, deferred_receiver) = mpsc::channel(DEFERRED_CAPACITY);
     let (urgent, urgent_receiver) = mpsc::channel(URGENT_CAPACITY);
@@ -188,7 +186,7 @@ pub(super) fn spawn(
         urgent,
     };
     let capacity_revision = capacity.subscribe();
-    let task = tokio::spawn(
+    let task = platform::spawn(
         Harness {
             root_session_id,
             id,
@@ -559,7 +557,7 @@ impl Harness {
             }
         };
         let control = turn.control();
-        let result = tokio::spawn(turn);
+        let result = platform::spawn(turn);
         self.active = Some(ActiveTurn {
             control,
             result,
@@ -591,18 +589,12 @@ impl Harness {
         self.publish_turn_result(result).await;
     }
 
-    async fn turn_finished(
-        &mut self,
-        result: Result<nanocodex::agent::Result<nanocodex::TurnResult>, JoinError>,
-    ) {
+    async fn turn_finished(&mut self, result: Result<AgentResult<TurnResult>, TaskError>) {
         self.active = None;
         self.publish_turn_result(result).await;
     }
 
-    async fn publish_turn_result(
-        &self,
-        result: Result<nanocodex::agent::Result<nanocodex::TurnResult>, JoinError>,
-    ) {
+    async fn publish_turn_result(&self, result: Result<AgentResult<TurnResult>, TaskError>) {
         let result = result.unwrap_or_else(|error| {
             Err(NanocodexError::InvalidRequest(format!(
                 "subagent turn task failed: {error}"

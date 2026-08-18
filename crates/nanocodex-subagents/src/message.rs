@@ -1,5 +1,5 @@
 // Derived from clabby/tact@1d9ccaefd1d8613dab020812af04a91cd9b4c52c (Apache-2.0).
-// Modified for Nanocodex's CLI-owned module paths and runtime wiring.
+// Modified for Nanocodex's reusable native/WASM extension runtime.
 
 //! Message identity, thread correlation, and bounded input validation.
 
@@ -201,9 +201,7 @@ fn validate_body(body: &str) -> std::io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{MAX_MESSAGE_BYTES, MAX_RETAINED_MESSAGES, MessageThreads};
-    use crate::subagents::{
-        AgentId, MessageDisposition, MessagePriority, MessagePurpose, MessageSender,
-    };
+    use crate::{AgentId, MessageDisposition, MessagePriority, MessagePurpose, MessageSender};
 
     #[test]
     fn replies_inherit_threads_and_require_the_original_recipient() {
@@ -313,7 +311,7 @@ mod tests {
                 AgentId::new(2),
                 MessagePriority::Deferred,
                 MessagePurpose::Coordinate,
-                Some(crate::subagents::MessageId::new(1)),
+                Some(crate::MessageId::new(1)),
                 "answer".to_owned(),
             )
             .unwrap_err();

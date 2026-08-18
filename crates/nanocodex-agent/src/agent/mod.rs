@@ -22,7 +22,6 @@ use nanocodex_oai_api::{
     transport::{ResponsesHistory, ResponsesTransport, TransportStats},
 };
 use nanocodex_tools::Tools;
-#[cfg(not(target_family = "wasm"))]
 use nanocodex_tools::ToolsBuildError;
 use tokio::sync::{mpsc, oneshot, watch};
 use tower::Service;
@@ -43,7 +42,6 @@ use crate::{
 const COMMAND_CAPACITY: usize = 8;
 const STEER_CAPACITY: usize = 8;
 
-#[cfg(not(target_family = "wasm"))]
 type ToolsFactory =
     Arc<dyn Fn(AgentHandle) -> std::result::Result<Tools, ToolsBuildError> + Send + Sync>;
 
@@ -71,17 +69,13 @@ impl InitialResume {
 #[derive(Clone)]
 enum ToolsConfiguration {
     Shared(Tools),
-    #[cfg(not(target_family = "wasm"))]
     PerAgent(ToolsFactory),
 }
 
 impl ToolsConfiguration {
     fn materialize(&self, agent_handle: AgentHandle) -> Result<Tools> {
-        #[cfg(all(target_family = "wasm", target_os = "unknown"))]
-        let _ = agent_handle;
         match self {
             Self::Shared(tools) => Ok(tools.clone()),
-            #[cfg(not(target_family = "wasm"))]
             Self::PerAgent(factory) => factory(agent_handle).map_err(Into::into),
         }
     }

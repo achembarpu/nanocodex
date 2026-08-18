@@ -1,5 +1,5 @@
 // Derived from clabby/tact@1d9ccaefd1d8613dab020812af04a91cd9b4c52c (Apache-2.0).
-// Modified for Nanocodex's CLI-owned module paths and runtime wiring.
+// Modified for Nanocodex's reusable native/WASM extension runtime.
 
 //! Synchronous subagent topology and descendant authorization.
 
@@ -132,7 +132,7 @@ impl TaskTree {
 #[cfg(test)]
 mod tests {
     use super::TaskTree;
-    use crate::subagents::AgentId;
+    use crate::AgentId;
 
     fn insert(tree: &mut TaskTree, session_id: &str, parent: Option<AgentId>) -> AgentId {
         let id = tree.reserve(parent).unwrap();
