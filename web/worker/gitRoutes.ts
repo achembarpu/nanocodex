@@ -243,16 +243,42 @@ export async function handleGitRequest(
   return undefined;
 }
 
-export async function readGitProtocolRequest(request: Request): Promise<Uint8Array | Response> {
+export async function readGitProtocolRequest(
+  request: Request,
+  maxBytes = 4 * 1024 * 1024,
+): Promise<Uint8Array | Response> {
   const encoding = request.headers.get("content-encoding")?.trim().toLowerCase();
   if (encoding && encoding !== "identity" && encoding !== "gzip") {
     return new Response("unsupported upload-pack content encoding\n", { status: 415 });
   }
   if (request.body == null) return new Uint8Array();
-  const body = encoding === "gzip"
+  const stream = encoding === "gzip"
     ? request.body.pipeThrough(new DecompressionStream("gzip"))
     : request.body;
-  return new Uint8Array(await new Response(body).arrayBuffer());
+  const reader = stream.getReader();
+  const chunks: Uint8Array[] = [];
+  let totalBytes = 0;
+  try {
+    while (true) {
+      const next = await reader.read();
+      if (next.done) break;
+      totalBytes += next.value.byteLength;
+      if (totalBytes > maxBytes) {
+        await reader.cancel("Git request is too large");
+        return new Response("Git request is too large\n", { status: 413 });
+      }
+      chunks.push(next.value);
+    }
+  } catch {
+    return new Response("Git request body could not be decoded\n", { status: 400 });
+  }
+  const body = new Uint8Array(totalBytes);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body;
 }
 
 function gitUploadResponse(body: BodyInit): Response {

@@ -1625,7 +1625,7 @@ pub(crate) struct VmAttempt {
 }
 
 impl VmAttempt {
-    pub(crate) fn take_capture_listener(&mut self) -> Option<TcpListener> {
+    pub(crate) const fn take_capture_listener(&mut self) -> Option<TcpListener> {
         self.capture_listener.take()
     }
 
@@ -1989,7 +1989,7 @@ fn spawn_capture_only_attempt_network(
 }
 
 #[cfg(target_os = "macos")]
-fn spawn_capture_only_attempt_network(
+const fn spawn_capture_only_attempt_network(
     _gvproxy: Option<&Path>,
     _vmm: &Path,
     _port: u16,

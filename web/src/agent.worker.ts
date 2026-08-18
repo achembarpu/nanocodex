@@ -8,7 +8,6 @@ import { createBrowserTools } from "./browserTools";
 import type { WebTuiCommand } from "./nanocodex";
 import { createPaymentSessionOwner } from "./paymentSessionOwner";
 import { MPP_RESPONSES_WEBSOCKET_URL } from "./tempo-constants";
-import { createWorkerManagedWebSocket } from "./workerManagedWebSocket";
 
 type IncomingMessage = WebTuiCommand | { type: "warmup" };
 type PaymentSession = Awaited<ReturnType<(typeof import("./tempo"))["createTempoMppSession"]>>;
@@ -51,20 +50,12 @@ async function createAgent(
   tools: AgentControllerTools,
 ) {
   await paymentSessions.clear();
-  const { execTool, workspace } = await (await import("./browserShell"))
+  const { execTool, instructions, workspace } = await (await import("./browserShell"))
     .prepareBrowserShell(start.threadId!, self.location.origin);
   const common = {
     filesystem: workspace,
     filesystemTools: false,
-    instructions: `You are working in a persistent browser filesystem rooted at /workspace.
-Use exec_command for bash commands such as ls, cat, find, grep, and git. The shell is implemented
-in-browser, so it has no host process or PTY. The repository's only publish branch is nanocodex;
-publish with git add, git commit -m "...", and git push origin nanocodex. Use the standard Rust
-apply_patch tool for focused edits. Custom React interfaces live in
-/workspace/.nanocodex/artifacts and are displayed by the web app from that same filesystem. To
-publish one, write a JavaScript source file that defines function App({ sendPrompt }); React and
-the html tagged template helper are already in scope. Then run
-artifact publish <source.js> --id <lowercase-id> --title "<title>". Re-run it after edits.`,
+    instructions,
     tools: {
       exec_command: execTool,
       ...createBrowserTools({
@@ -110,7 +101,9 @@ artifact publish <source.js> --id <lowercase-id> --title "<title>". Re-run it af
     );
   }
   const createWebSocket = (endpoint: string, sessionId: string) =>
-    createWorkerManagedWebSocket(endpoint, sessionId);
+    import("./workerManagedWebSocket").then(({ createWorkerManagedWebSocket }) =>
+      createWorkerManagedWebSocket(endpoint, sessionId)
+    );
   if (start.transport === "chatgpt") {
     return {
       agent: await Agent.create({

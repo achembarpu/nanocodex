@@ -94,9 +94,7 @@ jobs:
           retention-days: ${{ inputs.pr && 7 || 1 }}
 
   build-vm-guest:
-    if: >-
-      github.repository == 'gakonst/nanocodex' &&
-      (github.event_name != 'workflow_dispatch' || inputs.pr == '')
+    if: github.repository == 'gakonst/nanocodex'
     name: build x86_64 Linux VM guest
     runs-on: ubuntu-22.04
     timeout-minutes: 45
@@ -105,7 +103,7 @@ jobs:
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
-          ref: ${{ github.sha }}
+          ref: ${{ inputs.pr && format('refs/pull/{0}/head', inputs.pr) || github.sha }}
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
         with:
@@ -141,7 +139,7 @@ jobs:
           name: nanocodex-vm-guest-x86_64-unknown-linux-musl
           path: dist/*
           if-no-files-found: error
-          retention-days: 1
+          retention-days: ${{ inputs.pr && 7 || 1 }}
 
   publish:
     if: >-
@@ -187,6 +185,20 @@ jobs:
           fi
           gh release upload "$immutable_tag" dist/* --repo "$GITHUB_REPOSITORY" --clobber
 
+          # SHA256SUMS is the commit marker for clients that still read rolling assets.
+          rolling_exists=false
+          if gh release view nightly --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            rolling_exists=true
+            checksum_asset_id=$(gh api "repos/${GITHUB_REPOSITORY}/releases/tags/nightly" \
+              --jq '[.assets[] | select(.name == "SHA256SUMS") | .id][0] // empty')
+            if [ -n "$checksum_asset_id" ]; then
+              gh api --method DELETE \
+                "repos/${GITHUB_REPOSITORY}/releases/assets/${checksum_asset_id}"
+            fi
+            gh release upload nightly dist/nanocodex-* \
+              --repo "$GITHUB_REPOSITORY" --clobber
+          fi
+
           if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/nightly" >/dev/null 2>&1; then
             gh api --method PATCH "repos/${GITHUB_REPOSITORY}/git/refs/tags/nightly" \
               -f sha="$GITHUB_SHA" -F force=true >/dev/null
@@ -195,7 +207,7 @@ jobs:
               -f ref='refs/tags/nightly' -f sha="$GITHUB_SHA" >/dev/null
           fi
 
-          if gh release view nightly --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          if [ "$rolling_exists" = true ]; then
             gh release edit nightly --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" --title "Nanocodex Nightly" \
               --notes-file "$notes_file" --prerelease
@@ -203,5 +215,8 @@ jobs:
             gh release create nightly --repo "$GITHUB_REPOSITORY" \
               --target "$GITHUB_SHA" --title "Nanocodex Nightly" \
               --notes-file "$notes_file" --prerelease
+            gh release upload nightly dist/nanocodex-* \
+              --repo "$GITHUB_REPOSITORY" --clobber
           fi
-          gh release upload nightly dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload nightly dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --clobber
