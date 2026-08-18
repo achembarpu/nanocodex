@@ -43,6 +43,10 @@
       "types": "./tools/index.d.mts",
       "import": "./tools/index.mjs"
     },
+    "./tools/dataset": {
+      "types": "./tools/dataset.d.mts",
+      "import": "./tools/dataset.mjs"
+    },
     "./tools/browser": {
       "types": "./tools/browser/index.d.mts",
       "import": "./tools/browser/index.mjs"
@@ -85,6 +89,7 @@
     "prepack": "npm run check:package",
     "test": "node --test test/*.test.mjs && npm run test:performance && npm run test:typecheck && npm run check:package",
     "test:performance": "node --test test/performance.bench.mjs",
+    "bench:dataset": "node scripts/dataset.bench.mjs",
     "test:typecheck": "tsc -p test/tsconfig.json"
   },
   "dependencies": {
@@ -94,6 +99,8 @@
     "@modelcontextprotocol/sdk": "1.30.0",
     "buffer": "6.0.3",
     "diff": "^9.0.0",
+    "hyparquet": "1.28.2",
+    "hyparquet-compressors": "1.1.1",
     "isomorphic-git": "^1.41.5",
     "just-bash": "^3.4.0",
     "minisearch": "7.2.0",
@@ -103,6 +110,7 @@
   },
   "devDependencies": {
     "@jitl/quickjs-wasmfile-release-asyncify": "0.32.0",
+    "hyparquet-writer": "0.16.6",
     "pkg-pr-new": "0.0.79",
     "quickjs-emscripten-core": "0.32.0",
     "typescript": "5.9.3"

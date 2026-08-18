@@ -103,6 +103,7 @@ and Rust/WASM extensions in the same array:
 ```js
 import { Agent, Subagents, Transport } from "nanocodex/browser";
 import {
+  dataset,
   imageGeneration,
   updatePlan,
   web,
@@ -115,6 +116,7 @@ const agent = await Agent.create({
   }),
   tools: [
     web(),
+    dataset(),
     imageGeneration({
       recentImages: (sessionId, count) => images.get(sessionId).slice(-count),
       rememberImage: (sessionId, imageUrl) => images.get(sessionId).push(imageUrl),
@@ -133,6 +135,38 @@ arguments before dispatch. In a browser, they default to the same-origin
 only a bounded JSON endpoint, credentials, authorization, and persistence.
 `web(...)` posts `{ commands, session_id }`; `imageGeneration(...)` posts
 `{ images, prompt }`. Pass `url` when the host route lives elsewhere.
+
+`dataset()` runs entirely in the caller and inspects public HTTPS Parquet,
+uncompressed JSONL, and Hugging Face datasets. It opens a session-scoped handle,
+returns schema metadata, and supports bounded projection and filtering queries.
+Parquet uses HTTP range reads and predicate pushdown where possible; JSONL scans
+the response stream incrementally. The implementation, Parquet reader, and
+non-Snappy codecs load only after the model first calls the tool. Direct URLs
+must allow browser CORS, and Parquet servers must support byte ranges.
+Consumers that only need this capability can import `dataset` from the smaller
+`nanocodex/tools/dataset` leaf entry.
+
+```js
+const datasets = dataset();
+const opened = await datasets.handler({
+  operation: "open",
+  source: {
+    kind: "huggingface",
+    dataset: "openai/gsm8k",
+    config: "main",
+    split: "train",
+  },
+}, { sessionId: "thread-1" });
+
+await datasets.handler({
+  operation: "query",
+  dataset_id: opened.datasetId,
+  columns: ["question", "answer"],
+  filters: [{ column: "question", op: "contains", value: "how many" }],
+  limit: 5,
+}, { sessionId: "thread-1" });
+```
+
 This same adapter works inside a Cloudflare Worker or Durable Object:
 
 ```js

@@ -22,11 +22,16 @@ import {
 import type { WorkspaceEntry as BrowserWorkspaceEntry } from "../browser/workspace.mjs";
 import type { WorkspaceEntry as NodeWorkspaceEntry } from "../node/workspace.mjs";
 import {
+  dataset,
   imageGeneration,
   updatePlan,
   viewImage,
   web,
 } from "../tools/index.mjs";
+import {
+  dataset as leafDataset,
+  type DatasetOptions,
+} from "../tools/dataset.mjs";
 import { browser as browserTools } from "../tools/browser/index.mjs";
 import { nanocodexTools } from "../tools/vite.mjs";
 
@@ -34,6 +39,8 @@ declare const apiKey: string;
 declare const accountsWallet: AccountsWallet;
 
 async function check() {
+  const datasetOptions: DatasetOptions = { fetch: globalThis.fetch };
+  leafDataset(datasetOptions);
   const nodeWorkspace = await Workspace.open({ path: "/tmp/nanocodex" });
   await nodeWorkspace.writeFile("notes.txt", "hello");
   Workspace.tools(nodeWorkspace);
@@ -119,6 +126,7 @@ async function check() {
     filesystem: browserWorkspace,
     tools: [
       web({ url: "https://example.com/tools/web" }),
+      dataset(),
       imageGeneration({
         url: "https://example.com/tools/images",
         recentImages: () => [],
@@ -134,6 +142,7 @@ async function check() {
     origin: "https://example.com",
     web: { url: "https://example.com/tools/web" },
     images: { url: "https://example.com/tools/images" },
+    dataset: { fetch: globalThis.fetch },
     recentImages: () => [],
     rememberImage: () => {},
   });

@@ -1,4 +1,7 @@
 import { IMAGE_DESCRIPTION, WEB_DESCRIPTION } from "./standardDescriptions.mjs";
+import { namedTool } from "./namedTool.mjs";
+
+export { namedTool };
 
 const MAX_VIEW_IMAGE_BYTES = 10 * 1024 * 1024;
 const DEFAULT_WEB_URL = "/api/tools/web-search";
@@ -138,10 +141,6 @@ export function updatePlan() {
       return { updated: true };
     },
   });
-}
-
-export function namedTool(name, tool) {
-  return Object.freeze({ name, ...tool });
 }
 
 function jsonRequester(options, defaultUrl) {

@@ -16,6 +16,16 @@ const budgets = Object.freeze({
   // OPFS, artifacts, voice routing, subscription auth, and paid MCP stay in the Worker.
   agentWorker: 55_000,
   agentWorkerGzip: 17_500,
+  datasetFacadeJavaScript: 1_500,
+  datasetFacadeJavaScriptGzip: 700,
+  datasetContractJavaScript: 1_500,
+  datasetContractJavaScriptGzip: 700,
+  datasetToolJavaScript: 21_000,
+  datasetToolJavaScriptGzip: 7_200,
+  parquetJavaScript: 60_000,
+  parquetJavaScriptGzip: 18_000,
+  parquetCompressorsJavaScript: 116_000,
+  parquetCompressorsJavaScriptGzip: 75_500,
   // just-bash and its built-in Unix command set stay behind Agent startup.
   browserShellJavaScript: 1_600_000,
   browserShellJavaScriptGzip: 450_000,
@@ -221,6 +231,100 @@ assert(
   "the compiler command must create its isolated Worker only on execution",
 );
 
+const datasetFacadeFile = await findLazyAsset(
+  workerSource,
+  (_file, source) => source.includes("dataset tool options must be an object"),
+);
+assert(datasetFacadeFile, "the package-owned browser tools must lazy-load the dataset facade");
+assert(!html.includes(datasetFacadeFile), "index.html must not preload the dataset facade");
+assert(
+  !browserShellFiles.has(datasetFacadeFile),
+  "the dataset facade must not enter the browser shell's static closure",
+);
+const datasetFacadeSource = await readFile(join(assetsDirectory, datasetFacadeFile), "utf8");
+const datasetFacade = byteStats(datasetFacadeSource);
+within("Dataset facade JavaScript", datasetFacade.bytes, budgets.datasetFacadeJavaScript);
+within(
+  "Dataset facade JavaScript gzip",
+  datasetFacade.gzipBytes,
+  budgets.datasetFacadeJavaScriptGzip,
+);
+const datasetImport = datasetFacadeSource.match(
+  /import\((?:`|'|")\.\/(datasetEngine-[^`'"]+\.js)(?:`|'|")\)/,
+);
+assert(datasetImport, "the dataset facade must retain an explicit lazy engine edge");
+const datasetFile = datasetImport[1];
+assert(assets.includes(datasetFile), `the lazy dataset tool ${datasetFile} is missing`);
+assert(!html.includes(datasetFile), "index.html must not preload the dataset tool");
+const datasetPath = join(assetsDirectory, datasetFile);
+const datasetSource = await readFile(datasetPath, "utf8");
+const dataset = byteStats(datasetSource);
+within("Dataset tool JavaScript", dataset.bytes, budgets.datasetToolJavaScript);
+within(
+  "Dataset tool JavaScript gzip",
+  dataset.gzipBytes,
+  budgets.datasetToolJavaScriptGzip,
+);
+const datasetContractFile = exactlyOne(
+  assets.filter((file) => /^datasetContract-.*\.js$/.test(file)),
+  "dataset tool contract",
+);
+assert(!html.includes(datasetContractFile), "index.html must not preload the dataset contract");
+const datasetFacadeFiles = await staticAssetClosure(datasetFacadeFile);
+assert(
+  datasetFacadeFiles.has(datasetContractFile),
+  "the dataset facade must statically own its model-visible contract",
+);
+const datasetContract = await fileStats([`assets/${datasetContractFile}`]);
+within(
+  "Dataset contract JavaScript",
+  datasetContract.bytes,
+  budgets.datasetContractJavaScript,
+);
+within(
+  "Dataset contract JavaScript gzip",
+  datasetContract.gzipBytes,
+  budgets.datasetContractJavaScriptGzip,
+);
+const datasetRuntimeImports = [...datasetSource.matchAll(
+  /import\((?:`|'|")\.\/(src-[^`'"]+\.js)(?:`|'|")\)/g,
+)].map((match) => match[1]);
+assert.equal(datasetRuntimeImports.length, 2, "the dataset tool must lazily load Parquet and its codecs");
+for (const file of datasetRuntimeImports) {
+  assert(assets.includes(file), `the lazy dataset runtime ${file} is missing`);
+  assert(!html.includes(file), `index.html must not preload the dataset runtime ${file}`);
+}
+const datasetRuntimeSources = await Promise.all(datasetRuntimeImports.map(async (file) => ({
+  file,
+  source: await readFile(join(assetsDirectory, file), "utf8"),
+})));
+const parquetFile = exactlyOne(
+  datasetRuntimeSources
+    .filter(({ source }) => source.includes("parquet expected AsyncBuffer"))
+    .map(({ file }) => file),
+  "Hyparquet runtime",
+);
+const parquetCompressorsFile = exactlyOne(
+  datasetRuntimeSources
+    .filter(({ source }) => source.includes("lz4 offset out of range"))
+    .map(({ file }) => file),
+  "Parquet compressor runtime",
+);
+const parquet = await fileStats([`assets/${parquetFile}`]);
+within("Hyparquet JavaScript", parquet.bytes, budgets.parquetJavaScript);
+within("Hyparquet JavaScript gzip", parquet.gzipBytes, budgets.parquetJavaScriptGzip);
+const parquetCompressors = await fileStats([`assets/${parquetCompressorsFile}`]);
+within(
+  "Parquet compressors JavaScript",
+  parquetCompressors.bytes,
+  budgets.parquetCompressorsJavaScript,
+);
+within(
+  "Parquet compressors JavaScript gzip",
+  parquetCompressors.gzipBytes,
+  budgets.parquetCompressorsJavaScriptGzip,
+);
+
 const tempoImport = workerSource.match(
   /import\((?:`|'|")\.\/(tempo-[^`'"]+\.js)(?:`|'|")\)/,
 );
@@ -315,6 +419,18 @@ console.log(JSON.stringify({
     pythonEntry: pythonFile,
     compilerEntry: compilerFile,
     sshEntry: sshFile,
+    dataset: {
+      facadeBytes: datasetFacade.bytes,
+      facadeGzipBytes: datasetFacade.gzipBytes,
+      contractBytes: datasetContract.bytes,
+      contractGzipBytes: datasetContract.gzipBytes,
+      toolBytes: dataset.bytes,
+      toolGzipBytes: dataset.gzipBytes,
+      parquetBytes: parquet.bytes,
+      parquetGzipBytes: parquet.gzipBytes,
+      compressorsBytes: parquetCompressors.bytes,
+      compressorsGzipBytes: parquetCompressors.gzipBytes,
+    },
   },
   artifacts: {
     coreJavaScriptBytes: artifactCoreJavaScript.bytes,

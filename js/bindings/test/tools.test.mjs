@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
+import { createCodeRuntime } from "../runtime/code-runtime.mjs";
 
 import {
+  dataset,
   imageGeneration,
   updatePlan,
   viewImage,
@@ -104,7 +106,25 @@ test("image generation resolves recent session images without owning conversatio
 
 test("each factory returns an immutable named tool for direct array composition", () => {
   assert(Object.isFrozen(updatePlan()));
+  assert.equal(dataset().name, "dataset");
   assert.equal(viewImage({ workspace: { readFile: async () => new Uint8Array() } }).name, "view_image");
+});
+
+test("the code runtime forwards session and host lifecycle to stateful tools", () => {
+  const released = [];
+  let disposals = 0;
+  const runtime = createCodeRuntime({
+    stateful: {
+      description: "stateful test tool",
+      handler: () => null,
+      releaseSession: (sessionId) => released.push(sessionId),
+      dispose: () => disposals++,
+    },
+  });
+  runtime.releaseSession("session-1");
+  runtime.reset();
+  assert.deepEqual(released, ["session-1"]);
+  assert.equal(disposals, 1);
 });
 
 test("image generation implements the canonical workspace-path edit mode", async () => {

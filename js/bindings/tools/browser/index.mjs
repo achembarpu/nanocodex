@@ -34,9 +34,10 @@ export async function browser(options) {
   if (typeof origin !== "string" || !origin) {
     throw new TypeError("browser origin is required outside a browser location");
   }
-  const [shellModule, standard] = await Promise.all([
+  const [shellModule, standard, datasets] = await Promise.all([
     import("./browserShell.mjs"),
     import("../standard.mjs"),
+    import("../dataset.mjs"),
   ]);
   const shell = await shellModule.prepareBrowserShell(options.threadId, origin);
   return Object.freeze({
@@ -54,6 +55,7 @@ export async function browser(options) {
       }),
       standard.viewImage({ workspace: shell.workspace }),
       standard.updatePlan(),
+      datasets.dataset(options.dataset),
     ]),
   });
 }
