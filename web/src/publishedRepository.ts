@@ -40,7 +40,7 @@ export async function loadPublishedRepositorySnapshot(
     ? "/__nanocodex/repository"
     : "/api/repository";
   const snapshotResponse = await request(`${base}/snapshot`, {
-    cache: development ? "no-store" : "default",
+    cache: "no-store",
   });
   if (!snapshotResponse.ok) {
     throw new Error(`Repository request failed (${snapshotResponse.status})`);
@@ -52,7 +52,7 @@ export async function loadPublishedRepositorySnapshot(
   let commits: HarnessCommit[] = [];
   if (includeHistory) {
     const commitsResponse = await request(`${base}/commits`, {
-      cache: development ? "no-store" : "default",
+      cache: "no-store",
     });
     if (!commitsResponse.ok) {
       throw new Error(`Commit request failed (${commitsResponse.status})`);

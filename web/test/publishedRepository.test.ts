@@ -40,9 +40,14 @@ const document = {
 
 test("published repository surfaces load the public snapshot and commit index", async () => {
   const requests: string[] = [];
-  const request = async (input: string | URL | Request) => {
+  const cacheModes: Array<RequestCache | undefined> = [];
+  const request = async (
+    input: string | URL | Request,
+    init?: RequestInit,
+  ) => {
     const url = String(input);
     requests.push(url);
+    cacheModes.push(init?.cache);
     if (url === "/api/repository/snapshot") {
       return Response.json(document, {
         headers: { "x-repository-generation": head },
@@ -67,6 +72,7 @@ test("published repository surfaces load the public snapshot and commit index", 
     "/api/repository/snapshot",
     "/api/repository/commits",
   ]);
+  assert.deepEqual(cacheModes, ["no-store", "no-store"]);
   assert.equal(snapshot.repository.fullName, "gakonst/nanocodex");
   assert.deepEqual(snapshot.commits, [commit]);
   assert.equal(snapshot.commitPatchUrl(commit), `/api/repository/commit/${head}.patch`);
