@@ -1,6 +1,7 @@
 import type {
   AgentOptions,
   CodeEvaluator,
+  ChatGptSubscriptionHandle,
   DefaultAgent,
   McpServers,
   MppSession,
@@ -24,9 +25,10 @@ export function prewarm(options?: { module?: unknown }): Promise<void>;
 export function create(options?: create.Options): Promise<create.ReturnType>;
 export declare namespace create {
   type Options = AgentOptions & (
-    | { apiKey?: string | undefined; hostAuth?: never; mpp?: never }
-    | { apiKey?: never; hostAuth?: true; mpp?: never }
-    | { apiKey?: never; hostAuth?: never; mpp: MppSession }
+    | { apiKey?: string | undefined; hostAuth?: never; mpp?: never; subscription?: never }
+    | { apiKey?: never; hostAuth?: true; mpp?: never; subscription?: never }
+    | { apiKey?: never; hostAuth?: never; mpp: MppSession; subscription?: never }
+    | { apiKey?: never; hostAuth?: never; mpp?: never; subscription: ChatGptSubscriptionHandle }
   ) & ToolExposureOptions & {
     WebSocketImpl?: typeof WebSocket | undefined;
     apiBaseUrl?: string | undefined;

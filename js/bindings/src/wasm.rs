@@ -8,6 +8,11 @@ use nanocodex::{
         input::{Prompt, UserInput},
         session::{SessionId, SessionSnapshot},
     },
+    oai::auth::{
+        ChatGptCredentialSeed, ChatGptLoginStatus, ChatGptSubscription, ChatGptSubscriptionHost,
+        SubscriptionCommit, SubscriptionFuture, SubscriptionHostError, SubscriptionHttpRequest,
+        SubscriptionHttpResponse, SubscriptionStoreValue,
+    },
     tools::{
         ToolContext, ToolDefinition, ToolInput, ToolOutput,
         contract::ToolOutputWire,
@@ -62,6 +67,131 @@ extern "C" {
 
     #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = removeWorkspaceFile)]
     fn host_remove_workspace_file(path: &str, session_id: &str) -> Result<Promise, JsValue>;
+
+    #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = subscriptionLoad)]
+    fn host_subscription_load(subscription_id: &str) -> Result<Promise, JsValue>;
+
+    #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = subscriptionCompareAndSwap)]
+    fn host_subscription_compare_and_swap(
+        subscription_id: &str,
+        expected_revision: &str,
+        payload: &str,
+    ) -> Result<Promise, JsValue>;
+
+    #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = subscriptionRequest)]
+    fn host_subscription_request(subscription_id: &str, request: &str) -> Result<Promise, JsValue>;
+}
+
+struct JavaScriptSubscriptionHost {
+    subscription_id: String,
+}
+
+#[derive(Deserialize)]
+struct JavaScriptSubscriptionValue {
+    revision: String,
+    #[serde(default)]
+    payload: Option<String>,
+}
+
+#[derive(Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum JavaScriptSubscriptionCommit {
+    Committed { revision: String },
+    Conflict { actual_revision: String },
+}
+
+#[derive(Deserialize)]
+struct JavaScriptSubscriptionResponse {
+    status: u16,
+    body: String,
+}
+
+impl ChatGptSubscriptionHost for JavaScriptSubscriptionHost {
+    fn load<'a>(
+        &'a self,
+        _key: &'a str,
+    ) -> SubscriptionFuture<'a, Result<SubscriptionStoreValue, SubscriptionHostError>> {
+        Box::pin(async move {
+            let promise =
+                host_subscription_load(&self.subscription_id).map_err(subscription_host_error)?;
+            let stored: JavaScriptSubscriptionValue = await_subscription_json(promise).await?;
+            Ok(SubscriptionStoreValue {
+                revision: parse_subscription_revision(&stored.revision)?,
+                payload: stored.payload,
+            })
+        })
+    }
+
+    fn compare_and_swap<'a>(
+        &'a self,
+        _key: &'a str,
+        expected_revision: u64,
+        payload: &'a str,
+    ) -> SubscriptionFuture<'a, Result<SubscriptionCommit, SubscriptionHostError>> {
+        Box::pin(async move {
+            let expected = expected_revision.to_string();
+            let promise =
+                host_subscription_compare_and_swap(&self.subscription_id, &expected, payload)
+                    .map_err(subscription_host_error)?;
+            match await_subscription_json::<JavaScriptSubscriptionCommit>(promise).await? {
+                JavaScriptSubscriptionCommit::Committed { revision } => Ok(
+                    SubscriptionCommit::Committed(parse_subscription_revision(&revision)?),
+                ),
+                JavaScriptSubscriptionCommit::Conflict { actual_revision } => Ok(
+                    SubscriptionCommit::Conflict(parse_subscription_revision(&actual_revision)?),
+                ),
+            }
+        })
+    }
+
+    fn request<'a>(
+        &'a self,
+        request: SubscriptionHttpRequest,
+    ) -> SubscriptionFuture<'a, Result<SubscriptionHttpResponse, SubscriptionHostError>> {
+        Box::pin(async move {
+            let encoded = serde_json::json!({
+                "method": request.method(),
+                "url": request.url(),
+                "contentType": request.content_type(),
+                "body": request.body(),
+                "maxResponseBytes": request.max_response_bytes(),
+            })
+            .to_string();
+            let promise = host_subscription_request(&self.subscription_id, &encoded)
+                .map_err(subscription_host_error)?;
+            let response: JavaScriptSubscriptionResponse = await_subscription_json(promise).await?;
+            Ok(SubscriptionHttpResponse {
+                status: response.status,
+                body: response.body,
+            })
+        })
+    }
+}
+
+async fn await_subscription_json<T: for<'de> Deserialize<'de>>(
+    promise: Promise,
+) -> Result<T, SubscriptionHostError> {
+    let value = JsFuture::from(promise)
+        .await
+        .map_err(subscription_host_error)?;
+    let encoded = value.as_string().ok_or_else(|| {
+        SubscriptionHostError::new("JavaScript subscription host returned a non-string")
+    })?;
+    serde_json::from_str(&encoded).map_err(|error| {
+        SubscriptionHostError::new(format!(
+            "JavaScript subscription host returned invalid JSON: {error}"
+        ))
+    })
+}
+
+fn parse_subscription_revision(revision: &str) -> Result<u64, SubscriptionHostError> {
+    revision.parse().map_err(|error| {
+        SubscriptionHostError::new(format!("invalid subscription revision: {error}"))
+    })
+}
+
+fn subscription_host_error(error: JsValue) -> SubscriptionHostError {
+    SubscriptionHostError::new(host_error_message(&error))
 }
 
 struct JavaScriptCodeModeHost {
@@ -238,6 +368,110 @@ struct WasmConfig {
     resume: Option<SessionSnapshot>,
 }
 
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct WasmSubscriptionConfig {
+    id: String,
+    #[serde(default)]
+    issuer: Option<String>,
+    #[serde(default)]
+    seed: Option<WasmSubscriptionSeed>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct WasmSubscriptionSeed {
+    access_token: String,
+    #[serde(default)]
+    refresh_token: String,
+    account_id: String,
+    #[serde(default)]
+    fedramp: bool,
+}
+
+/// JavaScript binding over the Rust-owned hosted ChatGPT credential lifecycle.
+#[wasm_bindgen(js_name = ChatGptSubscription)]
+pub struct WasmChatGptSubscription {
+    inner: ChatGptSubscription,
+}
+
+#[wasm_bindgen(js_class = ChatGptSubscription)]
+impl WasmChatGptSubscription {
+    /// Opens a subscription over the currently registered generic host capabilities.
+    #[wasm_bindgen(js_name = open)]
+    pub async fn open(config_json: &str) -> Result<Self, JsValue> {
+        let config = serde_json::from_str::<WasmSubscriptionConfig>(config_json)
+            .map_err(|error| js_error(format!("invalid ChatGPT subscription config: {error}")))?;
+        let seed = config.seed.map(|seed| {
+            ChatGptCredentialSeed::new(
+                seed.access_token,
+                seed.refresh_token,
+                seed.account_id,
+                seed.fedramp,
+            )
+        });
+        let host = JavaScriptSubscriptionHost {
+            subscription_id: config.id.clone(),
+        };
+        let inner = if let Some(issuer) = config.issuer {
+            ChatGptSubscription::open_with_issuer(host, config.id, seed, issuer).await
+        } else {
+            ChatGptSubscription::open(host, config.id, seed).await
+        }
+        .map_err(js_error)?;
+        Ok(Self { inner })
+    }
+
+    /// Starts a ChatGPT device login and returns public pending state as JSON.
+    #[wasm_bindgen(js_name = startLogin)]
+    pub async fn start_login(&self) -> Result<String, JsValue> {
+        encode_login_status(self.inner.start_login().await)
+    }
+
+    /// Polls device login and returns public state as JSON.
+    pub async fn status(&self) -> Result<String, JsValue> {
+        encode_login_status(self.inner.status().await)
+    }
+
+    /// Resolves one credential generation for a host-owned outbound request.
+    pub async fn credential(&self) -> Result<String, JsValue> {
+        encode_subscription_credential(self.inner.credential().await)
+    }
+
+    /// Refreshes a rejected generation and returns the credential now current.
+    pub async fn recover(&self, rejected_revision: &str) -> Result<String, JsValue> {
+        let revision = rejected_revision
+            .parse::<u64>()
+            .map_err(|error| js_error(format!("invalid credential revision: {error}")))?;
+        encode_subscription_credential(self.inner.recover(revision).await)
+    }
+
+    /// Clears the persisted credential and pending login.
+    pub async fn logout(&self) -> Result<(), JsValue> {
+        self.inner.logout().await.map_err(js_error)
+    }
+}
+
+fn encode_login_status<E: ToString>(
+    status: Result<ChatGptLoginStatus, E>,
+) -> Result<String, JsValue> {
+    serde_json::to_string(&status.map_err(js_error)?).map_err(js_error)
+}
+
+fn encode_subscription_credential(
+    credential: Result<nanocodex::oai::auth::ChatGptCredential, impl ToString>,
+) -> Result<String, JsValue> {
+    let credential = credential.map_err(js_error)?;
+    Ok(serde_json::json!({
+        "kind": "chatgpt",
+        "accessToken": credential.access_token(),
+        "accountId": credential.account_id(),
+        "fedramp": credential.is_fedramp(),
+        "revision": credential.revision().to_string(),
+    })
+    .to_string())
+}
+
 /// JavaScript binding over the shared Rust agent lifecycle.
 #[wasm_bindgen(js_name = Nanocodex)]
 pub struct WasmNanocodex {
@@ -255,6 +489,26 @@ impl WasmNanocodex {
     pub fn new(config_json: &str) -> Result<Self, JsValue> {
         let config = serde_json::from_str::<WasmConfig>(config_json)
             .map_err(|error| js_error(format!("invalid Nanocodex configuration: {error}")))?;
+        let auth = nanocodex::oai::auth::OpenAiAuth::api_key(config.api_key.clone());
+        Self::create_with_auth(config, auth)
+    }
+
+    /// Builds an agent whose ChatGPT credential lifecycle is owned by Rust.
+    #[wasm_bindgen(js_name = createWithChatGpt)]
+    pub async fn create_with_chat_gpt(
+        config_json: &str,
+        subscription: &WasmChatGptSubscription,
+    ) -> Result<Self, JsValue> {
+        let config = serde_json::from_str::<WasmConfig>(config_json)
+            .map_err(|error| js_error(format!("invalid Nanocodex configuration: {error}")))?;
+        let auth = subscription.inner.authorization().await.map_err(js_error)?;
+        Self::create_with_auth(config, auth)
+    }
+
+    fn create_with_auth(
+        config: WasmConfig,
+        auth: nanocodex::oai::auth::OpenAiAuth,
+    ) -> Result<Self, JsValue> {
         validate(&config)?;
 
         let model = config.model.parse::<Model>().map_err(js_error)?;
@@ -263,7 +517,7 @@ impl WasmNanocodex {
             .reasoning_mode
             .parse::<ReasoningMode>()
             .map_err(js_error)?;
-        let openai = OpenAi::builder(config.api_key)
+        let openai = OpenAi::builder(auth)
             .model(model)
             .thinking(thinking)
             .reasoning_mode(reasoning_mode)

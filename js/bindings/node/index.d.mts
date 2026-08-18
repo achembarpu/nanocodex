@@ -1,4 +1,8 @@
-export { Actions } from "../index.mjs";
+export {
+  Actions,
+  createMemoryChatGptSubscriptionStore,
+  subscriptionRevision,
+} from "../index.mjs";
 export { createQuickJsEvaluator } from "../runtime/quickjs-evaluator.mjs";
 export {
   createTempoProvider,
@@ -12,6 +16,12 @@ export type {
 } from "../runtime/tempo-provider.mjs";
 export type {
   AgentEvent,
+  ChatGptCredential,
+  ChatGptCredentialSeed,
+  ChatGptLoginStatus,
+  ChatGptSubscriptionHandle,
+  ChatGptSubscriptionOptions,
+  ChatGptSubscriptionStore,
   CostStatus,
   CodeEvaluator,
   CodeEvaluatorEnvironment,
@@ -30,7 +40,13 @@ export type {
   McpPayment,
   McpServer,
   McpServers,
+  MemoryChatGptSubscriptionStore,
   MppSession,
+  SubscriptionCommitRequest,
+  SubscriptionCommitResult,
+  SubscriptionRevision,
+  SubscriptionStoredValue,
 } from "../types.mjs";
 export * as Agent from "./Agent.mjs";
+export * as ChatGptSubscription from "./ChatGptSubscription.mjs";
 export * as Workspace from "./workspace.mjs";

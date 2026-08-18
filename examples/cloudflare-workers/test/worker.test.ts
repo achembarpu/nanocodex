@@ -138,21 +138,20 @@ describe("Nanocodex Durable Object Worker", () => {
     expect(await snapshots[0]!.json()).toMatchObject({
       accountId: "test-account-id",
       fedramp: false,
-      revision: 1,
+      revision: "1",
     });
-    expect(await snapshots[1]!.json()).toMatchObject({ revision: 1 });
+    expect(await snapshots[1]!.json()).toMatchObject({ revision: "1" });
 
     const staleRecovery = await auth.fetch("https://auth.internal/recover", {
       method: "POST",
-      body: JSON.stringify({ revision: 0 }),
+      body: JSON.stringify({ revision: "0" }),
     });
-    expect(await staleRecovery.json()).toMatchObject({ revision: 1 });
+    expect(await staleRecovery.json()).toMatchObject({ revision: "1" });
 
     const status = await SELF.fetch("https://example.test/auth/chatgpt", { headers: authorization });
     expect(await status.json()).toMatchObject({
-      configured: true,
-      account_id: "test-account-id",
-      revision: 1,
+      state: "authenticated",
+      accountId: "test-account-id",
     });
     const reset = await SELF.fetch("https://example.test/auth/chatgpt", {
       method: "DELETE",

@@ -13,14 +13,14 @@ export default defineConfig({
           CHATGPT_ACCESS_TOKEN: "e30.eyJleHAiOjF9.test",
           CHATGPT_ACCOUNT_ID: "test-account-id",
           CHATGPT_REFRESH_TOKEN: "test-refresh-token",
-          CHATGPT_TOKEN_ENDPOINT: "https://auth.test/oauth/token",
+          CHATGPT_ISSUER: "http://127.0.0.1:8799",
           NANOCODEX_ADMIN_TOKEN: "test-admin-token",
           NANOCODEX_AUTH_MODE: "api_key",
           OPENAI_API_KEY: "test-openai-key",
         },
         outboundService: async (request) => {
           const url = new URL(request.url);
-          if (request.method !== "POST" || url.href !== "https://auth.test/oauth/token") {
+          if (request.method !== "POST" || url.href !== "http://127.0.0.1:8799/oauth/token") {
             return new Response("not found", { status: 404 });
           }
           const payload = await request.json<{ refresh_token?: unknown }>();

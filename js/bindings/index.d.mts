@@ -1,4 +1,11 @@
 export * as Actions from "./actions/index.mjs";
+export declare function subscriptionRevision(
+  value: string | bigint,
+): import("./types.mjs").SubscriptionRevision;
+export declare function createMemoryChatGptSubscriptionStore(
+  id: string,
+  initial?: import("./types.mjs").SubscriptionStoredValue,
+): import("./types.mjs").MemoryChatGptSubscriptionStore;
 export { createQuickJsEvaluator } from "./runtime/quickjs-evaluator.mjs";
 export type { AsyncQuickJsModule, QuickJsEvaluatorOptions } from "./runtime/quickjs-evaluator.mjs";
 export {
@@ -16,6 +23,12 @@ export type {
   AgentActions,
   AgentEvent,
   AgentOptions,
+  ChatGptCredential,
+  ChatGptCredentialSeed,
+  ChatGptLoginStatus,
+  ChatGptSubscriptionHandle,
+  ChatGptSubscriptionOptions,
+  ChatGptSubscriptionStore,
   CostStatus,
   CodeEvaluator,
   CodeEvaluatorEnvironment,
@@ -28,11 +41,16 @@ export type {
   McpServer,
   McpServers,
   McpTool,
+  MemoryChatGptSubscriptionStore,
   MppSession,
   PromptInput,
   PromptItem,
   ReasoningMode,
   SessionSnapshot,
+  SubscriptionCommitRequest,
+  SubscriptionCommitResult,
+  SubscriptionRevision,
+  SubscriptionStoredValue,
   Thinking,
   Tool,
   ToolContext,

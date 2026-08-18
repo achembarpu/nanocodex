@@ -187,6 +187,7 @@ capability-gated relay on such a host:
 
 ```sh
 NANOCODEX_EGRESS_PORT=8791 \
+NANOCODEX_EGRESS_CAPABILITY="$(openssl rand -base64 32 | tr '+/' '-_' | tr -d '=')" \
   npm run relay:subscription --prefix examples/cloudflare-workers
 ```
 
@@ -196,7 +197,9 @@ For a disposable personal demo, a Cloudflare Quick Tunnel can expose the local
 port; use a stable relay under your control for anything long-lived. The relay
 still requires the Worker's bearer credential in addition to the unguessable
 path, never reads `auth.json`, bounds queued data, and forwards only the
-allowlisted handshake headers. Rotate the route by restarting it.
+allowlisted handshake headers. Set `NANOCODEX_EGRESS_CAPABILITY` from a
+protected service environment file to keep the route stable across supervised
+restarts; omit it to generate a new route.
 
 The real edge validation for this example used only the current subscription
 access token and account ID—no API key and no refresh token—and completed three

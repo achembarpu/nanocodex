@@ -1003,8 +1003,8 @@ function isChatGptCredential(value: unknown): value is ChatGptCredential {
     && typeof credential.accountId === "string"
     && credential.accountId.length > 0
     && typeof credential.fedramp === "boolean"
-    && Number.isSafeInteger(credential.revision)
-    && Number(credential.revision) >= 0;
+    && typeof credential.revision === "string"
+    && /^(0|[1-9][0-9]*)$/.test(credential.revision);
 }
 
 async function deleteSession(request: Request, env: WorkerEnv): Promise<void> {

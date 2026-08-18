@@ -1,6 +1,7 @@
 import type {
   AgentOptions,
   CodeEvaluator,
+  ChatGptSubscriptionHandle,
   DefaultAgent,
   McpServers,
   MppSession,
@@ -16,7 +17,11 @@ type ToolExposureOptions =
 /** Creates a Node-hosted Rust/WASM Agent. */
 export function create(options: create.Options): Promise<create.ReturnType>;
 export declare namespace create {
-  type Options = AgentOptions & ({ apiKey: string; mpp?: never } | { apiKey?: never; mpp: MppSession }) & ToolExposureOptions & {
+  type Options = AgentOptions & (
+    | { apiKey: string; mpp?: never; subscription?: never }
+    | { apiKey?: never; mpp: MppSession; subscription?: never }
+    | { apiKey?: never; mpp?: never; subscription: ChatGptSubscriptionHandle }
+  ) & ToolExposureOptions & {
     apiBaseUrl?: string | undefined;
     codeEvaluator?: CodeEvaluator | undefined;
     /** Caller-owned rooted filesystem mounted through standard workspace tools. */

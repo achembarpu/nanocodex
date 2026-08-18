@@ -1,9 +1,11 @@
 import {
   Actions,
   Agent,
+  ChatGptSubscription,
   type AccountsWallet,
   type CostStatus,
   createTempoProviderFromAccounts,
+  createMemoryChatGptSubscriptionStore,
   type SessionSnapshot,
   type Turn,
   type TurnResult,
@@ -65,6 +67,14 @@ async function check() {
     session: { bootstrap: true },
   });
   await Agent.create({ mpp: tempoProvider, mcp: false });
+  const subscription = await ChatGptSubscription.open({
+    id: "account-1",
+    store: createMemoryChatGptSubscriptionStore("account-1"),
+  });
+  await subscription.status();
+  await Agent.create({ subscription });
+  // @ts-expect-error API-key and managed subscription authentication are mutually exclusive.
+  await Agent.create({ apiKey, subscription });
 
   const fork = await Actions.session.fork(agent, { at: completed });
   fork.turn.prompt({ input: [{ type: "text", text: "continue" }] });
@@ -89,6 +99,7 @@ async function check() {
   await BrowserAgent.create({ hostAuth: true, websocketUrl: "wss://example.com" });
   await BrowserAgent.create({ apiKey, filesystem: browserWorkspace });
   await BrowserAgent.create({ mpp: { async ws() { return {} as WebSocket; } } });
+  await BrowserAgent.create({ subscription });
   // @ts-expect-error API-key and MPP authentication are mutually exclusive.
   await BrowserAgent.create({ apiKey, mpp: { async ws() { return {} as WebSocket; } } });
   // @ts-expect-error API-key and host-managed authentication are mutually exclusive.

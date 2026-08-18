@@ -65,7 +65,7 @@ function createChatGptSessions() {
               accessToken: "subscription-secret",
               accountId: "account-1",
               fedramp: false,
-              revision: 0,
+              revision: "0",
             });
           }
           return Response.json({ error: "not_found" }, { status: 404 });

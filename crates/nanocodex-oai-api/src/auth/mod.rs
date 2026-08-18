@@ -7,12 +7,19 @@ use std::{
 
 #[cfg(not(target_family = "wasm"))]
 mod chatgpt;
+mod subscription;
 
 #[cfg(not(target_family = "wasm"))]
 #[cfg_attr(docsrs, doc(cfg(not(target_family = "wasm"))))]
 pub use chatgpt::{
     ChatGptAuthError, ChatGptAuthStatus, ChatGptLogin, chatgpt_access_token, chatgpt_auth_status,
     load_chatgpt_auth, logout_chatgpt, resolve_chatgpt_auth_status,
+};
+pub use subscription::{
+    ChatGptCredential, ChatGptCredentialSeed, ChatGptLoginStatus, ChatGptSubscription,
+    ChatGptSubscriptionError, ChatGptSubscriptionHost, SubscriptionCommit, SubscriptionFuture,
+    SubscriptionHostError, SubscriptionHttpRequest, SubscriptionHttpResponse,
+    SubscriptionStoreValue,
 };
 
 /// Authentication mode for the single `OpenAI` service family supported by Nanocodex.

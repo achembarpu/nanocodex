@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 
 import {
@@ -31,6 +32,10 @@ class MemoryStorage {
 
   async setAlarm(timestamp: number): Promise<void> {
     this.alarm = timestamp;
+  }
+
+  async transaction<T>(callback: (transaction: MemoryStorage) => T | Promise<T>): Promise<T> {
+    return callback(this);
   }
 }
 
@@ -86,16 +91,20 @@ test("device login stores and rotates ChatGPT tokens without exposing them in pu
       id: { toString: () => "session-id" },
       storage,
     } as unknown as DurableObjectState;
+    const module = await WebAssembly.compile(await readFile(new URL(
+      "../../js/bindings/pkg-web/nanocodex_bg.wasm",
+      import.meta.url,
+    )));
     const session = new ChatGptSession(state, {
-      CHATGPT_ISSUER: "https://auth.openai.test/",
+      CHATGPT_ISSUER: "http://127.0.0.1:8799/",
       ENVIRONMENT: "test",
       SESSION_CREDENTIAL_KEY: TEST_KEY,
-    });
+    }, module);
 
     const started = await session.fetch(new Request("https://session.test/start", { method: "POST" }));
     assert.deepEqual(await started.json(), {
       state: "pending",
-      verificationUrl: "https://auth.openai.test/codex/device",
+      verificationUrl: "http://127.0.0.1:8799/codex/device",
       userCode: "ABCD-EFGH",
       expiresAt: now + 900_000,
       pollAfterMs: 1_000,
@@ -126,7 +135,7 @@ test("device login stores and rotates ChatGPT tokens without exposing them in pu
     assert.equal(credential.kind, "chatgpt");
     assert.equal(credential.accountId, "account-1");
     assert.equal(credential.fedramp, true);
-    assert.equal(credential.revision, 0);
+    assert.equal(credential.revision, "0");
     assert.equal("refreshToken" in credential, false);
 
     for (let requestIndex = 0; requestIndex < 4; requestIndex += 1) {
@@ -174,12 +183,12 @@ test("device login stores and rotates ChatGPT tokens without exposing them in pu
     const recovered = await session.fetch(new Request("https://session.test/recover", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ revision: 0 }),
+      body: JSON.stringify({ revision: "0" }),
     }));
     const rotated = await recovered.json() as Record<string, unknown>;
-    assert.equal(rotated.revision, 1);
+    assert.equal(rotated.revision, "1");
     assert.equal(rotated.accountId, "account-1");
-    const stored = JSON.stringify(storage.values.get("credential"));
+    const stored = JSON.stringify(storage.values.get("subscription"));
     assert.doesNotMatch(stored, /refresh-2|refresh-1|account-1/);
   } finally {
     globalThis.fetch = originalFetch;
