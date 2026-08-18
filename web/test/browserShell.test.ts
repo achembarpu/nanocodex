@@ -196,8 +196,8 @@ test("browser exec forwards ToolContext cancellation through Web Locks and bash"
 
   const result = await shell.exec({ cmd: "true" }, { signal: controller.signal });
   assert.equal(result.exit_code, 0);
-  assert.equal(observedLockSignals.at(-1), controller.signal);
-  assert.equal(bashSignal, controller.signal);
+  assert.equal(observedLockSignals.at(-1), bashSignal);
+  assert.equal(bashSignal?.aborted, false);
 
   const cancelled = new AbortController();
   cancelled.abort(new Error("cancelled before lock acquisition"));
@@ -205,8 +205,92 @@ test("browser exec forwards ToolContext cancellation through Web Locks and bash"
     shell.exec({ cmd: "touch cancelled.txt" }, { signal: cancelled.signal }),
     /cancelled before lock acquisition/,
   );
-  assert.equal(observedLockSignals.at(-1), cancelled.signal);
+  assert.equal(observedLockSignals.at(-1)?.aborted, true);
+  assert.match(String(observedLockSignals.at(-1)?.reason), /cancelled before lock acquisition/);
   await assert.rejects(fs.promises.stat("/workspace/cancelled.txt"), /cannot stat/);
+});
+
+test("browser command lookup stays inside the virtual workspace", async () => {
+  const root = new MemoryDirectory();
+  const fs = createOpfsGitFs(root as unknown as FileSystemDirectoryHandle);
+  await git.init({ fs, dir: "/workspace", defaultBranch: "nanocodex" });
+  await fs.promises.writeFile("/workspace/input.txt", "hello\n");
+  const shell = await createBrowserBash(fs, thread);
+
+  const result = await shell.exec({
+    cmd: [
+      "if command -v sha256sum >/dev/null 2>&1; then",
+      "  sha256sum input.txt",
+      "else",
+      "  echo missing",
+      "fi",
+    ].join("\n"),
+  });
+
+  assert.equal(result.exit_code, 0);
+  assert.doesNotMatch(result.output, /path escapes \/workspace/);
+  assert.match(result.output, /^[0-9a-f]{64}  input\.txt\n$/);
+  await assert.rejects(
+    shell.exec({ cmd: "printf forbidden > /etc/forbidden" }),
+    /path escapes \/workspace/,
+  );
+});
+
+test("browser command substitutions settle without reaching the execution timeout", async () => {
+  const root = new MemoryDirectory();
+  const fs = createOpfsGitFs(root as unknown as FileSystemDirectoryHandle);
+  await git.init({ fs, dir: "/workspace", defaultBranch: "nanocodex" });
+  await fs.promises.writeFile("/workspace/input.txt", "first\nsecond\n");
+  const shell = await createBrowserBash(fs, thread);
+
+  const startedAt = performance.now();
+  const result = await shell.exec({
+    cmd: [
+      "actual=$(cat input.txt)",
+      "lines=$(wc -l < input.txt)",
+      "hash=$(sha256sum input.txt)",
+      "printf '%s|%s|%s\\n' \"$actual\" \"$lines\" \"$hash\"",
+    ].join("\n"),
+  });
+
+  assert.equal(result.exit_code, 0);
+  assert(performance.now() - startedAt < 2_000);
+  assert.match(result.output, /^first\nsecond\|2\|[0-9a-f]{64}  input\.txt\n$/);
+});
+
+test("browser cancellation settles work running inside command substitution", async () => {
+  const root = new MemoryDirectory();
+  const fs = createOpfsGitFs(root as unknown as FileSystemDirectoryHandle);
+  await git.init({ fs, dir: "/workspace", defaultBranch: "nanocodex" });
+  const shell = await createBrowserBash(fs, thread);
+  const controller = new AbortController();
+
+  const execution = shell.exec(
+    { cmd: "value=$(sleep 30)\nprintf '%s\\n' \"$value\"" },
+    { signal: controller.signal },
+  );
+  setTimeout(() => controller.abort(new Error("cancel nested work")), 10);
+
+  const cancelled = await execution;
+  assert.equal(cancelled.exit_code, 124);
+  assert.match(cancelled.output, /execution aborted/i);
+  const settled = await shell.exec({ cmd: "printf 'settled\\n'" });
+  assert.equal(settled.output, "settled\n");
+});
+
+test("browser execution deadline aborts and settles command substitution work", async () => {
+  const root = new MemoryDirectory();
+  const fs = createOpfsGitFs(root as unknown as FileSystemDirectoryHandle);
+  await git.init({ fs, dir: "/workspace", defaultBranch: "nanocodex" });
+  const shell = await createBrowserBash(fs, thread, { executionTimeoutMs: 20 });
+
+  const startedAt = performance.now();
+  const timedOut = await shell.exec({ cmd: "value=$(sleep 30)\nprintf '%s\\n' \"$value\"" });
+  assert(performance.now() - startedAt < 1_000);
+  assert.equal(timedOut.exit_code, 124);
+  assert.match(timedOut.output, /execution aborted|deadline/i);
+  const settled = await shell.exec({ cmd: "printf 'settled\\n'" });
+  assert.equal(settled.output, "settled\n");
 });
 
 test("browser git bounds log depth and avoids text diffs for oversized files", async () => {

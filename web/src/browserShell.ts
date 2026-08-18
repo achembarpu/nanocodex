@@ -61,6 +61,7 @@ type ExecCommandInput = {
 
 type BrowserBashOptions = {
   onChanged?: () => void;
+  executionTimeoutMs?: number;
 };
 
 type ExecCommandContext = {
@@ -164,6 +165,7 @@ export async function createBrowserBash(
 ) {
   const filesystem = new OpfsShellFileSystem(rawFs);
   await filesystem.refreshPaths();
+  const executionTimeoutMs = options.executionTimeoutMs ?? MAX_EXECUTION_MS;
   const bash = new Bash({
     cwd: THREAD_GIT_DIRECTORY,
     env: {
@@ -173,6 +175,7 @@ export async function createBrowserBash(
       GIT_AUTHOR_EMAIL: THREAD_GIT_AUTHOR.email,
       GIT_COMMITTER_NAME: THREAD_GIT_AUTHOR.name,
       GIT_COMMITTER_EMAIL: THREAD_GIT_AUTHOR.email,
+      PATH: THREAD_GIT_DIRECTORY,
     },
     fs: filesystem,
     customCommands: [
@@ -183,7 +186,7 @@ export async function createBrowserBash(
     executionLimitProfile: "hardened",
     executionLimits: {
       maxCommandCount: 10_000,
-      maxExecutionTimeMs: MAX_EXECUTION_MS,
+      maxExecutionTimeMs: executionTimeoutMs,
       maxFileSystemBytes: 256 * 1024 * 1024,
       maxInputBytes: 16 * 1024 * 1024,
       maxLiveBytes: 64 * 1024 * 1024,
@@ -204,6 +207,7 @@ export async function createBrowserBash(
       input,
       options.onChanged ?? (() => notifyThreadGitChanged(thread)),
       context?.signal,
+      executionTimeoutMs,
     ),
   };
 }
@@ -215,6 +219,7 @@ async function execute(
   input: ExecCommandInput,
   onChanged: () => void,
   signal?: AbortSignal,
+  executionTimeoutMs = MAX_EXECUTION_MS,
 ) {
   if (typeof input?.cmd !== "string" || !input.cmd.trim()) {
     throw new TypeError("exec_command.cmd must be a non-empty string");
@@ -229,14 +234,28 @@ async function execute(
   const workdir = input.workdir === undefined ? THREAD_GIT_DIRECTORY : requireString(input.workdir, "workdir");
   const maxTokens = optionalPositiveInteger(input.max_output_tokens, 10_000);
   const startedAt = performance.now();
-  const result = await withThreadGitLock(thread, async () => {
-    const mutationVersion = shellFs.mutationVersion;
-    try {
-      return await bash.exec(input.cmd as string, { cwd: workdir, signal });
-    } finally {
-      if (shellFs.mutationVersion !== mutationVersion) onChanged();
-    }
-  }, signal);
+  const deadline = new AbortController();
+  const abort = () => deadline.abort(signal?.reason);
+  signal?.addEventListener("abort", abort, { once: true });
+  if (signal?.aborted) abort();
+  const timeout = setTimeout(
+    () => deadline.abort(new Error(`browser exec_command exceeded ${executionTimeoutMs} milliseconds`)),
+    executionTimeoutMs,
+  );
+  let result: Awaited<ReturnType<Bash["exec"]>>;
+  try {
+    result = await withThreadGitLock(thread, async () => {
+      const mutationVersion = shellFs.mutationVersion;
+      try {
+        return await bash.exec(input.cmd as string, { cwd: workdir, signal: deadline.signal });
+      } finally {
+        if (shellFs.mutationVersion !== mutationVersion) onChanged();
+      }
+    }, deadline.signal);
+  } finally {
+    clearTimeout(timeout);
+    signal?.removeEventListener("abort", abort);
+  }
   const combined = `${result.stdout}${result.stderr}`;
   const maxCharacters = maxTokens * 4;
   const truncated = combined.length > maxCharacters;
@@ -722,7 +741,9 @@ class OpfsShellFileSystem implements IFileSystem {
   }
 
   async readFileBuffer(path: string): Promise<Uint8Array> {
-    const value = await this.#fs.promises.readFile(resolveWorkspacePath(THREAD_GIT_DIRECTORY, path));
+    const absolute = resolveShellPath(THREAD_GIT_DIRECTORY, path);
+    if (absolute === "/dev/null") return new Uint8Array();
+    const value = await this.#fs.promises.readFile(absolute);
     return value instanceof Uint8Array ? value : utf8.encode(value);
   }
 
@@ -731,7 +752,8 @@ class OpfsShellFileSystem implements IFileSystem {
     content: FileContent,
     options?: { encoding?: BufferEncoding } | BufferEncoding,
   ): Promise<void> {
-    const absolute = resolveWorkspacePath(THREAD_GIT_DIRECTORY, path);
+    const absolute = resolveShellPath(THREAD_GIT_DIRECTORY, path);
+    if (absolute === "/dev/null") return;
     await this.#fs.promises.writeFile(absolute, encode(content, options));
     this.#recordMutation();
     this.#addPath(absolute);
@@ -742,7 +764,8 @@ class OpfsShellFileSystem implements IFileSystem {
     content: FileContent,
     options?: { encoding?: BufferEncoding } | BufferEncoding,
   ): Promise<void> {
-    const absolute = resolveWorkspacePath(THREAD_GIT_DIRECTORY, path);
+    const absolute = resolveShellPath(THREAD_GIT_DIRECTORY, path);
+    if (absolute === "/dev/null") return;
     await this.#fs.promises.appendFile(absolute, encode(content, options));
     this.#recordMutation();
     this.#addPath(absolute);
@@ -751,16 +774,28 @@ class OpfsShellFileSystem implements IFileSystem {
   async exists(path: string): Promise<boolean> {
     let absolute: string;
     try {
-      absolute = resolveWorkspacePath(THREAD_GIT_DIRECTORY, path);
+      absolute = resolveShellPath(THREAD_GIT_DIRECTORY, path);
     } catch (error) {
       if (isCode(error, "EPERM")) return false;
       throw error;
     }
+    if (isShellDevice(absolute)) return true;
     return this.#fs.promises.stat(absolute).then(() => true, () => false);
   }
 
   async stat(path: string): Promise<FsStat> {
-    const result = await this.#fs.promises.stat(resolveWorkspacePath(THREAD_GIT_DIRECTORY, path));
+    const absolute = resolveShellPath(THREAD_GIT_DIRECTORY, path);
+    if (isShellDevice(absolute)) {
+      return {
+        isFile: true,
+        isDirectory: false,
+        isSymbolicLink: false,
+        mode: 0o666,
+        size: 0,
+        mtime: new Date(0),
+      };
+    }
+    const result = await this.#fs.promises.stat(absolute);
     return {
       isFile: result.isFile(),
       isDirectory: result.isDirectory(),
@@ -824,7 +859,7 @@ class OpfsShellFileSystem implements IFileSystem {
   }
 
   resolvePath(base: string, path: string): string {
-    return resolveWorkspacePath(base, path);
+    return resolveShellPath(base, path);
   }
 
   getAllPaths(): string[] {
@@ -908,6 +943,17 @@ class OpfsShellFileSystem implements IFileSystem {
   #recordMutation(): void {
     this.#mutationVersion += 1;
   }
+}
+
+const SHELL_DEVICES = new Set(["/dev/full", "/dev/null", "/dev/stderr", "/dev/stdout"]);
+
+function isShellDevice(path: string): boolean {
+  return SHELL_DEVICES.has(path);
+}
+
+function resolveShellPath(base: string, path: string): string {
+  if (isShellDevice(path)) return path;
+  return resolveWorkspacePath(base, path);
 }
 
 function resolveWorkspacePath(base: string, path: string): string {
