@@ -340,10 +340,15 @@
 
 @media (max-width: 740px), (pointer: coarse) and (orientation: landscape) and (max-width: 950px) {
   .agent-tui {
+    grid-template-rows: 22px minmax(0, 1fr) minmax(0, max-content) auto 22px;
     height: var(--nc-mobile-height, calc(100dvh - 50px - env(safe-area-inset-bottom)));
     min-height: var(--nc-mobile-min-height, 0);
     font-size: var(--nc-mobile-font-size, 10px);
     line-height: 16px;
+  }
+
+  .agent-tui-pending {
+    overflow-y: auto;
   }
 
   .tui-inline-edit textarea,

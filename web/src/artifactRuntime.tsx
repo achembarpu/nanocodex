@@ -3,6 +3,7 @@ import { createRoot } from "react-dom/client";
 import htm from "htm";
 
 const html = htm.bind(React.createElement);
+document.documentElement.classList.add("artifact-runtime-page");
 const container = document.getElementById("root");
 if (!container) throw new Error("artifact runtime root is missing");
 const root = createRoot(container);

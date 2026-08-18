@@ -219,7 +219,7 @@ function App({ sendPrompt }) {
   const [theme, setTheme] = React.useState("electric");
   return html\`<main className=\${theme}>
     <style>\${\`
-      body { overflow: hidden; }
+      html, body, #root { min-height: 100%; margin: 0; }
       main { min-height: 100vh; padding: clamp(32px, 8vw, 110px); color: #eaffff; background: radial-gradient(circle at 15% 10%, #154f68, #071116 55%); transition: .5s; }
       main.steampunk { color: #ffe6ae; background: radial-gradient(circle at 15% 10%, #70451e, #17100a 58%); }
       h1 { max-width: 850px; margin: 0; font: 800 clamp(50px, 9vw, 130px)/.86 system-ui; letter-spacing: -.07em; }
