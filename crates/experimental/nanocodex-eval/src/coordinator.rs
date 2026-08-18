@@ -28,6 +28,8 @@ use tokio_util::io::{ReaderStream, SyncIoBridge};
 
 const MAX_COMPRESSED_ARTIFACT_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_EXTRACTED_ARTIFACT_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const MAX_COMPRESSED_TASK_PACKAGE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const MAX_EXTRACTED_TASK_PACKAGE_BYTES: u64 = 8 * 1024 * 1024 * 1024;
 const ARCHIVE_BUFFER_BYTES: usize = 64 * 1024;
 const ARCHIVE_CONTENT_TYPE: &str = "application/x-tar+zstd";
 const EVIDENCE_EXTENSIONS: [&str; 2] = ["json", "jsonl"];
@@ -44,7 +46,9 @@ pub struct CoordinatorServer {
 pub struct CoordinatorClient {
     base: Url,
     http: reqwest::Client,
+    profile: Option<String>,
     worker: Option<String>,
+    write_token: Option<String>,
 }
 
 /// One action atomically allocated by the coordinator.
@@ -60,8 +64,8 @@ pub enum RemoteClaim {
         family_key: String,
         /// Task package selector retained in SQLite.
         task: String,
-        /// Canonical task package root retained by the coordinator host.
-        task_root: PathBuf,
+        /// Immutable source used to materialize the task package.
+        task_source: RemoteTaskSource,
         /// Exact treatment retained in SQLite.
         treatment: EvaluationTreatment,
     },
@@ -74,6 +78,25 @@ pub enum RemoteClaim {
     },
     /// Every desired repetition in this family is terminal.
     Complete,
+}
+
+/// Immutable source for one coordinator-owned task package.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RemoteTaskSource {
+    /// Local coordinator package used only by the loopback development server.
+    Filesystem {
+        /// Canonical local package root.
+        root: PathBuf,
+        /// Content digest retained with the workset.
+        digest: String,
+    },
+    /// R2 object owned by the Cloudflare coordinator.
+    Package {
+        /// Immutable R2 object key.
+        key: String,
+        /// Expected task content digest.
+        digest: String,
+    },
 }
 
 /// Opaque capability for one running task row.
@@ -111,6 +134,12 @@ pub enum CoordinatorError {
     /// Coordinator returned an invalid retained treatment.
     #[error("evaluation coordinator returned an invalid treatment: {0}")]
     InvalidTreatment(String),
+    /// Coordinator returned an absent or ambiguous task package source.
+    #[error("evaluation coordinator returned an invalid task package source")]
+    InvalidTaskSource,
+    /// Retained evidence could not be projected into the public case record.
+    #[error("evaluation coordinator evidence failed: {0}")]
+    Evidence(String),
     /// Durable evaluation ledger could not be recovered.
     #[error("evaluation coordinator ledger failed: {0}")]
     Ledger(#[source] crate::EvaluationError),
@@ -132,6 +161,7 @@ struct ActiveClaim {
 
 #[derive(Deserialize)]
 struct ClaimRequest {
+    profile: Option<String>,
     task: Option<String>,
     harness: Option<String>,
     model: Option<String>,
@@ -155,7 +185,11 @@ enum ClaimResponse {
         repetition: u16,
         family_key: String,
         task: String,
-        task_root: PathBuf,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_root: Option<PathBuf>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        task_package: Option<String>,
+        task_digest: String,
         treatment: WireTreatment,
     },
     Busy {
@@ -320,9 +354,21 @@ impl CoordinatorClient {
             base,
             http: reqwest::Client::builder()
                 .redirect(reqwest::redirect::Policy::none())
+                .user_agent(concat!("nanocodex-eval-worker/", env!("CARGO_PKG_VERSION")))
                 .build()?,
+            profile: None,
             worker: None,
+            write_token: std::env::var("NANOCODEX_EVALS_WRITE_TOKEN")
+                .ok()
+                .filter(|token| !token.trim().is_empty()),
         })
+    }
+
+    /// Restricts status and claims to the newest ready revision of one profile.
+    #[must_use]
+    pub fn profile(mut self, profile: impl Into<String>) -> Self {
+        self.profile = Some(profile.into());
+        self
     }
 
     /// Attaches an advisory worker name to future claims.
@@ -335,10 +381,71 @@ impl CoordinatorClient {
         self
     }
 
+    /// Uses one bearer credential for every coordinator mutation.
+    #[must_use]
+    pub fn write_token(mut self, token: impl Into<String>) -> Self {
+        self.write_token = Some(token.into());
+        self
+    }
+
     /// Reads the coordinator's complete structured ledger snapshot.
     pub async fn status(&self) -> Result<serde_json::Value, CoordinatorError> {
-        let response = self.http.get(self.endpoint("v1/status")?).send().await?;
+        let mut endpoint = self.endpoint("v1/status")?;
+        if let Some(profile) = &self.profile {
+            endpoint.query_pairs_mut().append_pair("profile", profile);
+        }
+        let response = self.http.get(endpoint).send().await?;
         decode(response).await
+    }
+
+    /// Downloads and safely materializes one immutable coordinator-owned task package.
+    pub async fn materialize_task_package(
+        &self,
+        key: &str,
+        output: &Path,
+    ) -> Result<(), CoordinatorError> {
+        let mut endpoint = self.endpoint("v1/task-package")?;
+        endpoint.query_pairs_mut().append_pair("key", key);
+        let response = self.http.get(endpoint).send().await?;
+        if !response.status().is_success() {
+            return Err(rejected(response).await);
+        }
+        let parent = output
+            .parent()
+            .ok_or_else(|| std::io::Error::other("task package output has no parent"))?;
+        tokio::fs::create_dir_all(parent).await?;
+        let archive = parent.join(".task-package.tar.zst");
+        let staging = parent.join(".task-package.staging");
+        let mut file = tokio::fs::File::create(&archive).await?;
+        let mut stream = response.bytes_stream();
+        let mut received = 0_u64;
+        while let Some(chunk) = stream.next().await {
+            let chunk = chunk?;
+            received = received
+                .checked_add(u64::try_from(chunk.len()).map_err(std::io::Error::other)?)
+                .ok_or_else(|| std::io::Error::other("task package is too large"))?;
+            if received > MAX_COMPRESSED_TASK_PACKAGE_BYTES {
+                drop(file);
+                let _ = tokio::fs::remove_file(&archive).await;
+                return Err(std::io::Error::other("task package is too large").into());
+            }
+            file.write_all(&chunk).await?;
+        }
+        file.sync_all().await?;
+        drop(file);
+        let archive_for_task = archive.clone();
+        let staging_for_task = staging.clone();
+        let output = output.to_path_buf();
+        let extraction = tokio::task::spawn_blocking(move || {
+            extract_task_package_archive(&archive_for_task, &staging_for_task, &output)
+        })
+        .await?;
+        let _ = tokio::fs::remove_file(&archive).await;
+        if let Err(error) = extraction {
+            let _ = tokio::fs::remove_dir_all(&staging).await;
+            return Err(error.into());
+        }
+        Ok(())
     }
 
     /// Claims one pre-materialized task row matching ordinary SQLite selectors.
@@ -347,9 +454,9 @@ impl CoordinatorClient {
         selection: &EvaluationSelector,
     ) -> Result<RemoteClaim, CoordinatorError> {
         let response: ClaimResponse = decode(
-            self.http
-                .post(self.endpoint("v1/claims")?)
+            self.authorize(self.http.post(self.endpoint("v1/claims")?))
                 .json(&serde_json::json!({
+                    "profile": self.profile,
                     "task": selection.task(),
                     "harness": selection.harness_name(),
                     "model": selection.model_name(),
@@ -367,13 +474,15 @@ impl CoordinatorClient {
                 family_key,
                 task,
                 task_root,
+                task_package,
+                task_digest,
                 treatment,
             } => RemoteClaim::Run {
                 claim: RemoteTaskClaim { token: claim },
                 repetition,
                 family_key,
                 task,
-                task_root,
+                task_source: remote_task_source(task_root, task_package, task_digest)?,
                 treatment: treatment.try_into()?,
             },
             ClaimResponse::Busy {
@@ -390,9 +499,9 @@ impl CoordinatorClient {
     /// Claims the next unclaimed row without selecting a task or treatment.
     pub async fn claim_next(&self) -> Result<RemoteClaim, CoordinatorError> {
         let response: ClaimResponse = decode(
-            self.http
-                .post(self.endpoint("v1/claims")?)
+            self.authorize(self.http.post(self.endpoint("v1/claims")?))
                 .json(&serde_json::json!({
+                    "profile": self.profile,
                     "worker": self.worker,
                 }))
                 .send()
@@ -406,13 +515,15 @@ impl CoordinatorClient {
                 family_key,
                 task,
                 task_root,
+                task_package,
+                task_digest,
                 treatment,
             } => RemoteClaim::Run {
                 claim: RemoteTaskClaim { token: claim },
                 repetition,
                 family_key,
                 task,
-                task_root,
+                task_source: remote_task_source(task_root, task_package, task_digest)?,
                 treatment: treatment.try_into()?,
             },
             ClaimResponse::Busy {
@@ -439,11 +550,23 @@ impl CoordinatorClient {
                 message: "worker exit reports require a configured worker name".to_owned(),
             })?;
         accepted(
-            self.http
-                .post(self.endpoint("v1/workers/exited")?)
+            self.authorize(self.http.post(self.endpoint("v1/workers/exited")?))
                 .json(&serde_json::json!({ "worker": worker, "error": error }))
                 .send()
                 .await?,
+        )
+        .await
+    }
+
+    /// Extends one active claim lease while its worker is still making progress.
+    pub async fn heartbeat(&self, claim: &RemoteTaskClaim) -> Result<(), CoordinatorError> {
+        accepted(
+            self.authorize(
+                self.http
+                    .post(self.endpoint(&format!("v1/claims/{}/heartbeat", claim.token))?),
+            )
+            .send()
+            .await?,
         )
         .await
     }
@@ -468,6 +591,7 @@ impl CoordinatorClient {
         let evidence = evidence
             .strip_prefix(output_directory)
             .map_err(|_| CoordinatorError::EvidencePath)?;
+        let case = EvalApi::evidence(output_directory).map_err(CoordinatorError::Evidence)?;
         self.upload(claim, output_directory).await?;
         self.finish(
             claim,
@@ -475,6 +599,7 @@ impl CoordinatorClient {
                 "outcome": "failed",
                 "error": error,
                 "evidence": evidence.to_string_lossy(),
+                "case": case,
             }),
         )
         .await
@@ -504,6 +629,7 @@ impl CoordinatorClient {
         let evidence = evidence
             .strip_prefix(output_directory)
             .map_err(|_| CoordinatorError::EvidencePath)?;
+        let case = EvalApi::evidence(output_directory).map_err(CoordinatorError::Evidence)?;
         self.upload(claim, output_directory).await?;
         self.finish(
             claim,
@@ -511,6 +637,7 @@ impl CoordinatorClient {
                 "outcome": "retry",
                 "error": error,
                 "evidence": evidence.to_string_lossy(),
+                "case": case,
             }),
         )
         .await
@@ -526,12 +653,14 @@ impl CoordinatorClient {
         let evidence = evidence
             .strip_prefix(output_directory)
             .map_err(|_| CoordinatorError::EvidencePath)?;
+        let case = EvalApi::evidence(output_directory).map_err(CoordinatorError::Evidence)?;
         self.upload(claim, output_directory).await?;
         self.finish(
             claim,
             serde_json::json!({
                 "outcome": "success",
                 "evidence": evidence.to_string_lossy(),
+                "case": case,
             }),
         )
         .await
@@ -549,8 +678,10 @@ impl CoordinatorClient {
             write_evidence_archive(&directory, SyncIoBridge::new(writer))
         });
         let response = self
-            .http
-            .put(self.endpoint(&format!("v1/claims/{}/artifacts", claim.token))?)
+            .authorize(
+                self.http
+                    .put(self.endpoint(&format!("v1/claims/{}/artifacts", claim.token))?),
+            )
             .header(reqwest::header::CONTENT_TYPE, ARCHIVE_CONTENT_TYPE)
             .body(reqwest::Body::wrap_stream(ReaderStream::new(reader)))
             .send()
@@ -565,17 +696,26 @@ impl CoordinatorClient {
             .map_err(|error| CoordinatorError::InvalidUrl(error.to_string()))
     }
 
+    fn authorize(&self, request: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
+        match &self.write_token {
+            Some(token) => request.bearer_auth(token),
+            None => request,
+        }
+    }
+
     async fn finish(
         &self,
         claim: &RemoteTaskClaim,
         body: serde_json::Value,
     ) -> Result<(), CoordinatorError> {
         accepted(
-            self.http
-                .post(self.endpoint(&format!("v1/claims/{}/finish", claim.token))?)
-                .json(&body)
-                .send()
-                .await?,
+            self.authorize(
+                self.http
+                    .post(self.endpoint(&format!("v1/claims/{}/finish", claim.token))?),
+            )
+            .json(&body)
+            .send()
+            .await?,
         )
         .await
     }
@@ -713,6 +853,7 @@ async fn claim(
     ConnectInfo(peer): ConnectInfo<SocketAddr>,
     Json(request): Json<ClaimRequest>,
 ) -> Result<Json<ClaimResponse>, ApiError> {
+    let _profile = request.profile;
     let host = request
         .worker
         .filter(|worker| !worker.trim().is_empty())
@@ -751,6 +892,7 @@ async fn claim(
             let family_key = claim.family_key().to_owned();
             let task = claim.task_selector().to_owned();
             let task_root = claim.task().root().to_path_buf();
+            let task_digest = claim.task().package_digest().to_owned();
             let treatment = WireTreatment::from(claim.treatment());
             let claim = insert_claim(&state, claim, host).await;
             ClaimResponse::Run {
@@ -758,7 +900,9 @@ async fn claim(
                 repetition,
                 family_key,
                 task,
-                task_root,
+                task_root: Some(task_root),
+                task_package: None,
+                task_digest,
                 treatment,
             }
         }
@@ -1032,6 +1176,54 @@ fn extract_evidence_archive(archive: &Path, staging: &Path, output: &Path) -> st
     Ok(())
 }
 
+fn extract_task_package_archive(
+    archive: &Path,
+    staging: &Path,
+    output: &Path,
+) -> std::io::Result<()> {
+    std::fs::create_dir(staging)?;
+    let file = std::fs::File::open(archive)?;
+    let decoder = zstd::Decoder::new(file)?;
+    let mut archive = tar::Archive::new(decoder);
+    let mut extracted = 0_u64;
+    for entry in archive.entries()? {
+        let mut entry = entry?;
+        let path = entry.path()?.into_owned();
+        let safe_path = !path.as_os_str().is_empty()
+            && !path.is_absolute()
+            && path
+                .components()
+                .all(|component| matches!(component, Component::Normal(_)));
+        let entry_type = entry.header().entry_type();
+        if !safe_path || !(entry_type.is_file() || entry_type.is_dir()) {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("task archive contained an unsafe entry: {}", path.display()),
+            ));
+        }
+        if entry_type.is_file() {
+            extracted = extracted
+                .checked_add(entry.size())
+                .ok_or_else(|| std::io::Error::other("extracted task package is too large"))?;
+            if extracted > MAX_EXTRACTED_TASK_PACKAGE_BYTES {
+                return Err(std::io::Error::other("extracted task package is too large"));
+            }
+        }
+        if !entry.unpack_in(staging)? {
+            return Err(std::io::Error::other(
+                "task archive escaped its output directory",
+            ));
+        }
+    }
+    if std::fs::symlink_metadata(output).is_ok() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::AlreadyExists,
+            "task package output already exists",
+        ));
+    }
+    std::fs::rename(staging, output)
+}
+
 fn write_evidence_archive<W: Write>(directory: &Path, writer: W) -> std::io::Result<()> {
     let encoder = zstd::Encoder::new(writer, 3)?;
     let mut archive = tar::Builder::new(encoder);
@@ -1194,6 +1386,18 @@ impl From<&EvaluationTreatment> for WireTreatment {
     }
 }
 
+fn remote_task_source(
+    root: Option<PathBuf>,
+    package: Option<String>,
+    digest: String,
+) -> Result<RemoteTaskSource, CoordinatorError> {
+    match (root, package) {
+        (Some(root), None) => Ok(RemoteTaskSource::Filesystem { root, digest }),
+        (None, Some(key)) if !key.is_empty() => Ok(RemoteTaskSource::Package { key, digest }),
+        _ => Err(CoordinatorError::InvalidTaskSource),
+    }
+}
+
 impl TryFrom<WireTreatment> for EvaluationTreatment {
     type Error = CoordinatorError;
 
@@ -1224,7 +1428,7 @@ mod tests {
 
     use super::*;
     use crate::{
-        EvaluationSelector,
+        EvaluationSelector, Task,
         coordinator::RemoteClaim,
         workset::{BeginTask, Workset},
     };
@@ -1298,7 +1502,9 @@ thinking = ["high"]
                 .await
                 .unwrap();
         });
-        let client = CoordinatorClient::new(&format!("http://{address}")).unwrap();
+        let client = CoordinatorClient::new(&format!("http://{address}"))
+            .unwrap()
+            .profile("release");
         (directory, client, selection, server)
     }
 
@@ -1313,7 +1519,7 @@ thinking = ["high"]
             claim: first_claim,
             repetition: first_repetition,
             family_key: first_family_key,
-            task_root: first_task_root,
+            task_source: first_task_source,
             ..
         } = first.unwrap()
         else {
@@ -1328,6 +1534,13 @@ thinking = ["high"]
             panic!("second worker should run");
         };
         assert_ne!(first_repetition, second_repetition);
+        let RemoteTaskSource::Filesystem {
+            root: first_task_root,
+            ..
+        } = first_task_source
+        else {
+            panic!("loopback coordinator should retain a filesystem task source");
+        };
         assert_eq!(
             first_task_root,
             fs::canonicalize(directory.path().join("one")).unwrap()
@@ -1737,6 +1950,63 @@ thinking = ["high"]
         assert_eq!(status["tasks"]["running"], 0);
         assert_eq!(status["tasks"]["failed"], 1);
         server.abort();
+    }
+
+    #[test]
+    fn task_archives_extract_without_filesystem_authority() {
+        let directory = tempfile::tempdir().unwrap();
+        write_task(directory.path());
+        let source = directory.path().join("one");
+        let expected = Task::load(&source).unwrap().package_digest().to_owned();
+        let archive_path = directory.path().join("task.tar.zst");
+        let file = fs::File::create(&archive_path).unwrap();
+        let encoder = zstd::Encoder::new(file, 3).unwrap();
+        let mut archive = tar::Builder::new(encoder);
+        archive
+            .append_path_with_name(source.join("task.toml"), "task.toml")
+            .unwrap();
+        archive
+            .append_path_with_name(source.join("instruction.md"), "instruction.md")
+            .unwrap();
+        archive
+            .append_dir("environment", source.join("environment"))
+            .unwrap();
+        archive
+            .append_path_with_name(
+                source.join("environment/Dockerfile"),
+                "environment/Dockerfile",
+            )
+            .unwrap();
+        archive.append_dir("tests", source.join("tests")).unwrap();
+        archive
+            .append_path_with_name(source.join("tests/test.sh"), "tests/test.sh")
+            .unwrap();
+        let encoder = archive.into_inner().unwrap();
+        encoder.finish().unwrap();
+
+        let staging = directory.path().join("staging");
+        let output = directory.path().join("materialized");
+        extract_task_package_archive(&archive_path, &staging, &output).unwrap();
+
+        assert_eq!(Task::load(output).unwrap().package_digest(), expected);
+    }
+
+    #[test]
+    fn mutation_requests_use_the_configured_bearer_credential() {
+        let client = CoordinatorClient::new("http://127.0.0.1:8789")
+            .unwrap()
+            .write_token("eval-secret");
+        let request = client
+            .authorize(client.http.post(client.endpoint("v1/claims").unwrap()))
+            .build()
+            .unwrap();
+        assert_eq!(
+            request
+                .headers()
+                .get(reqwest::header::AUTHORIZATION)
+                .unwrap(),
+            "Bearer eval-secret",
+        );
     }
 
     #[test]

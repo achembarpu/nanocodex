@@ -13,7 +13,7 @@ use nanocodex_oai_api::{
     responses::{InputTokenDetails, Usage},
 };
 use rusqlite::{Connection, OpenFlags, OptionalExtension as _, params};
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest as _, Sha256};
 
@@ -586,6 +586,10 @@ impl EvalApi {
         Ok(())
     }
 
+    pub(crate) fn evidence(result_path: &Path) -> Result<Option<CaseEvidence>, String> {
+        read_result_evidence(result_path)
+    }
+
     pub(crate) fn task(
         &self,
         workset_digest: &str,
@@ -990,12 +994,19 @@ fn read_evidence(result: &Path) -> Result<Option<CaseEvidence>, String> {
     let mut evidence = empty_evidence();
     for line in BufReader::new(file).lines() {
         let line = line.map_err(|error| error.to_string())?;
+        let kind = retained_event_kind(line.as_bytes())?;
+        if !matches!(
+            kind,
+            "attempt_started" | "verifier_output" | "completed" | "failed"
+        ) {
+            continue;
+        }
         if line.len() > MAX_EVENT_LINE_BYTES {
             return Err("retained evaluation event exceeded the API limit".to_owned());
         }
         let event: Value = serde_json::from_str(&line).map_err(|error| error.to_string())?;
-        match event.get("type").and_then(Value::as_str) {
-            Some("attempt_started") => {
+        match kind {
+            "attempt_started" => {
                 evidence.task_name = event
                     .pointer("/attempt/task_name")
                     .and_then(Value::as_str)
@@ -1005,7 +1016,7 @@ fn read_evidence(result: &Path) -> Result<Option<CaseEvidence>, String> {
                     .and_then(Value::as_str)
                     .map(str::to_owned);
             }
-            Some("verifier_output") => {
+            "verifier_output" => {
                 evidence.verifier_stdout = event
                     .pointer("/payload/stdout")
                     .and_then(Value::as_str)
@@ -1015,8 +1026,7 @@ fn read_evidence(result: &Path) -> Result<Option<CaseEvidence>, String> {
                     .and_then(Value::as_str)
                     .map(str::to_owned);
             }
-            Some("completed") => apply_terminal_payload(&mut evidence, &event["payload"]),
-            Some("failed") => apply_terminal_payload(&mut evidence, &event["payload"]),
+            "completed" | "failed" => apply_terminal_payload(&mut evidence, &event["payload"]),
             _ => {}
         }
     }
@@ -1053,20 +1063,31 @@ fn read_outcome(result: &Path) -> Result<Option<CaseEvidence>, String> {
         .rev()
         .filter(|line| !line.is_empty())
     {
+        let kind = retained_event_kind(line)?;
+        if !matches!(kind, "completed" | "failed") {
+            continue;
+        }
         if line.len() > MAX_EVENT_LINE_BYTES {
             return Err("retained evaluation event exceeded the API limit".to_owned());
         }
         let event: Value = serde_json::from_slice(line).map_err(|error| error.to_string())?;
-        if matches!(
-            event.get("type").and_then(Value::as_str),
-            Some("completed" | "failed")
-        ) {
-            let mut evidence = empty_evidence();
-            apply_terminal_payload(&mut evidence, &event["payload"]);
-            return Ok(Some(evidence));
-        }
+        let mut evidence = empty_evidence();
+        apply_terminal_payload(&mut evidence, &event["payload"]);
+        return Ok(Some(evidence));
     }
     read_evidence(result)
+}
+
+#[derive(Deserialize)]
+struct RetainedEventKind<'a> {
+    #[serde(rename = "type", borrow)]
+    kind: &'a str,
+}
+
+fn retained_event_kind(line: &[u8]) -> Result<&str, String> {
+    serde_json::from_slice::<RetainedEventKind<'_>>(line)
+        .map(|event| event.kind)
+        .map_err(|error| error.to_string())
 }
 
 fn events_path(result: &Path) -> Option<PathBuf> {
@@ -1318,9 +1339,12 @@ fn now_ms() -> Result<i64, String> {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
+    use std::{fs::File, io::Write as _};
 
-    use super::agent_duration_ms;
+    use serde_json::json;
+    use tempfile::tempdir;
+
+    use super::{MAX_EVENT_LINE_BYTES, agent_duration_ms, read_evidence, read_outcome};
 
     #[test]
     fn agent_duration_uses_retained_execution_phase() {
@@ -1333,5 +1357,30 @@ mod tests {
             }
         });
         assert_eq!(agent_duration_ms(Some(&timing)), Some(3_152));
+    }
+
+    #[test]
+    fn evidence_reader_skips_oversized_unmaterialized_events() {
+        let result = tempdir().unwrap();
+        let mut events = File::create(result.path().join("events.jsonl")).unwrap();
+        write!(events, "{{\"type\":\"agent\",\"payload\":\"").unwrap();
+        events
+            .write_all(&vec![b'x'; MAX_EVENT_LINE_BYTES + 1])
+            .unwrap();
+        writeln!(events, "\"}}").unwrap();
+        writeln!(
+            events,
+            "{{\"type\":\"completed\",\"payload\":{{\"status\":\"success\",\"outcome\":\"pass\"}}}}"
+        )
+        .unwrap();
+        drop(events);
+
+        let evidence = read_evidence(result.path()).unwrap().unwrap();
+        assert_eq!(evidence.status.as_deref(), Some("success"));
+        assert_eq!(evidence.outcome.as_deref(), Some("pass"));
+
+        let outcome = read_outcome(result.path()).unwrap().unwrap();
+        assert_eq!(outcome.status.as_deref(), Some("success"));
+        assert_eq!(outcome.outcome.as_deref(), Some("pass"));
     }
 }
