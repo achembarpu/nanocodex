@@ -2,7 +2,7 @@ const hosts = new Map();
 const RAW_SUBSCRIPTION = Symbol.for("nanocodex.chatgpt.subscription");
 const DEFAULT_MAX_RESPONSE_BYTES = 16 * 1024;
 
-export async function openSubscription(options, openRaw) {
+export async function openSubscription(options, openRaw, { replaceHost = false } = {}) {
   if (!options || typeof options !== "object") {
     throw new TypeError("ChatGptSubscription.open requires options");
   }
@@ -19,7 +19,7 @@ export async function openSubscription(options, openRaw) {
     references: 0,
   };
   validateHost(host);
-  bind(id, host);
+  bind(id, host, replaceHost);
   try {
     const raw = await openRaw(JSON.stringify({
       id,
@@ -128,8 +128,10 @@ export async function request(subscriptionId, encoded) {
   });
 }
 
-function bind(id, host) {
-  if (hosts.has(id)) throw new Error(`ChatGPT subscription is already open: ${id}`);
+function bind(id, host, replaceHost) {
+  if (!replaceHost && hosts.has(id)) {
+    throw new Error(`ChatGPT subscription is already open: ${id}`);
+  }
   hosts.set(id, host);
 }
 

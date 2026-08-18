@@ -6,6 +6,7 @@ import {
   subscriptionRevision,
 } from "../index.mjs";
 import { ChatGptSubscription } from "../node/index.mjs";
+import { load, openSubscription } from "../runtime/chatgpt-subscription.mjs";
 
 test("Rust owns hosted ChatGPT credential state over a generic store", async () => {
   const id = "subscription-1";
@@ -47,6 +48,30 @@ test("memory subscription store rejects stale compare-and-swap writes", () => {
     payload: "stale",
   }), { status: "conflict", actualRevision: subscriptionRevision(1n) });
   assert.equal(store.snapshot().payload, "first");
+});
+
+test("Worker subscription hosts can rebind after their Durable Object is reconstructed", async () => {
+  const raw = () => ({
+    async startLogin() { return JSON.stringify({ state: "signed_out" }); },
+    async status() { return JSON.stringify({ state: "signed_out" }); },
+    async credential() { throw new Error("not authenticated"); },
+    async recover() { throw new Error("not authenticated"); },
+    async logout() {},
+    free() {},
+  });
+  const first = await openSubscription({
+    id: "durable-subscription",
+    store: createMemoryChatGptSubscriptionStore("durable-subscription", { payload: "first" }),
+  }, raw, { replaceHost: true });
+  const second = await openSubscription({
+    id: "durable-subscription",
+    store: createMemoryChatGptSubscriptionStore("durable-subscription", { payload: "second" }),
+  }, raw, { replaceHost: true });
+
+  assert.equal(JSON.parse(await load("durable-subscription")).payload, "second");
+  first.dispose();
+  assert.equal(JSON.parse(await load("durable-subscription")).payload, "second");
+  second.dispose();
 });
 
 function jwt(exp) {

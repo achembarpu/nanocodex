@@ -10,7 +10,13 @@ let initialization;
 export async function open(options) {
   installHostBridge();
   await initialize();
-  return openSubscription(options, (config) => WasmChatGptSubscription.open(config));
+  return openSubscription(
+    options,
+    (config) => WasmChatGptSubscription.open(config),
+    // A Cloudflare isolate can outlive an evicted Durable Object instance.
+    // Rebind its stable subscription ID to the reconstructed instance.
+    { replaceHost: true },
+  );
 }
 
 function initialize() {
