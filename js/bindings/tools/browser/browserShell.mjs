@@ -4,7 +4,6 @@ import git from "isomorphic-git";
 import http from "isomorphic-git/http/web";
 import { Bash, defineCommand, } from "just-bash/browser";
 import { createOpfsGitFs, openOpfsWorkspaceRoot, } from "./opfsGit.mjs";
-import { BrowserPythonRuntime, pythonCommands, } from "./browserPython.mjs";
 import { browserThread, initializeThreadGit, notifyThreadGitChanged, THREAD_GIT_AUTHOR, THREAD_GIT_DIRECTORY, withThreadGitLock, } from "./threadGit.mjs";
 import { openThreadWorkspace } from "./workspace.mjs";
 const utf8 = new TextEncoder();
@@ -130,7 +129,14 @@ export async function createBrowserBash(rawFs, thread, options = {}) {
     const filesystem = new OpfsShellFileSystem(rawFs);
     await filesystem.refreshPaths();
     const executionTimeoutMs = options.executionTimeoutMs ?? MAX_EXECUTION_MS;
-    const pythonRuntime = options.pythonRuntime ?? (options.workspaceRoot ? new BrowserPythonRuntime(options.workspaceRoot) : undefined);
+    let pythonRuntime = options.pythonRuntime;
+    const loadPython = async (name) => {
+        const module = await import("./browserPython.mjs");
+        pythonRuntime ??= options.workspaceRoot
+            ? new module.BrowserPythonRuntime(options.workspaceRoot)
+            : undefined;
+        return module.createPythonCommand(name, pythonRuntime, filesystem);
+    };
     const bash = new Bash({
         cwd: THREAD_GIT_DIRECTORY,
         env: {
@@ -149,7 +155,10 @@ export async function createBrowserBash(rawFs, thread, options = {}) {
             ghCommand(rawFs, thread),
             artifactCommand(),
             unameCommand(),
-            ...pythonCommands(pythonRuntime, filesystem),
+            ...["python3", "python"].map((name) => ({
+                name,
+                load: () => loadPython(name),
+            })),
             {
                 name: "ssh",
                 load: async () => (await import("./browserSsh.mjs")).createSshCommand(filesystem),

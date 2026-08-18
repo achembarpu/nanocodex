@@ -64,7 +64,7 @@ export class BrowserPythonRuntime {
             this.#worker = undefined;
     }
 }
-export function pythonCommands(runtime, filesystem) {
+export function createPythonCommand(name, runtime, filesystem) {
     const execute = async (args, context) => {
         if (!runtime) {
             return {
@@ -91,8 +91,5 @@ export function pythonCommands(runtime, filesystem) {
             };
         }
     };
-    return [
-        defineCommand("python3", execute),
-        defineCommand("python", execute),
-    ];
+    return defineCommand(name, execute);
 }

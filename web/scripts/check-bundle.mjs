@@ -161,12 +161,14 @@ within(
 
 const browserShellFile = await findLazyAsset(
   workerSource,
-  (file, source) =>
-    /^browser-.*\.js$/.test(file) &&
-    source.includes("persistent browser filesystem rooted at /workspace"),
+  (_file, source) => source.includes("persistent browser filesystem rooted at /workspace"),
 );
 assert(browserShellFile, "the Agent Worker must lazy-load the browser shell");
-const browserShell = await fileStats([`assets/${browserShellFile}`]);
+const browserShellSource = await readFile(join(assetsDirectory, browserShellFile), "utf8");
+const browserShellFiles = await staticAssetClosure(browserShellFile);
+const browserShell = await fileStats(
+  [...browserShellFiles].map((file) => `assets/${file}`),
+);
 within(
   "Browser shell JavaScript",
   browserShell.bytes,
@@ -176,6 +178,47 @@ within(
   "Browser shell JavaScript gzip",
   browserShell.gzipBytes,
   budgets.browserShellJavaScriptGzip,
+);
+
+const pythonFile = await findLazyAsset(
+  browserShellSource,
+  (_file, source) => source.includes("Python worker failed"),
+);
+const compilerFile = await findLazyAsset(
+  browserShellSource,
+  (_file, source) => source.includes("compiler worker failed"),
+);
+const sshFile = await findLazyAsset(
+  browserShellSource,
+  (_file, source) => source.includes("Browser SSH requires a server-provided WebSocket"),
+);
+assert(pythonFile, "the browser shell must lazy-load Python on first use");
+assert(compilerFile, "the browser shell must lazy-load wasm-clang on first use");
+assert(sshFile, "the browser shell must lazy-load SSH on first use");
+for (const file of [pythonFile, compilerFile, sshFile]) {
+  assert(
+    !browserShellFiles.has(file),
+    `${file} must not enter the browser shell's static closure`,
+  );
+}
+
+const pythonWorkerFile = exactlyOne(
+  assets.filter((file) => /^python\.worker-.*\.js$/.test(file)),
+  "lazy Python Worker",
+);
+const compilerWorkerFile = exactlyOne(
+  assets.filter((file) => /^compiler\.worker-.*\.js$/.test(file)),
+  "lazy compiler Worker",
+);
+const pythonSource = await readFile(join(assetsDirectory, pythonFile), "utf8");
+const compilerSource = await readFile(join(assetsDirectory, compilerFile), "utf8");
+assert(
+  pythonSource.includes(pythonWorkerFile),
+  "the Python command must create its isolated Worker only on execution",
+);
+assert(
+  compilerSource.includes(compilerWorkerFile),
+  "the compiler command must create its isolated Worker only on execution",
 );
 
 const tempoImport = workerSource.match(
@@ -264,6 +307,14 @@ console.log(JSON.stringify({
     javascriptBytes: agentJavaScript.bytes,
     workerBytes: worker.bytes,
     workerGzipBytes: worker.gzipBytes,
+  },
+  browserTools: {
+    shellFiles: browserShell.fileCount,
+    shellBytes: browserShell.bytes,
+    shellGzipBytes: browserShell.gzipBytes,
+    pythonEntry: pythonFile,
+    compilerEntry: compilerFile,
+    sshEntry: sshFile,
   },
   artifacts: {
     coreJavaScriptBytes: artifactCoreJavaScript.bytes,
@@ -362,6 +413,22 @@ async function findLazyAsset(source, matches, visited = new Set()) {
     if (found) return found;
   }
   return undefined;
+}
+
+async function staticAssetClosure(root, visited = new Set()) {
+  if (visited.has(root)) return visited;
+  visited.add(root);
+  const source = await readFile(join(assetsDirectory, root), "utf8");
+  const imports = [
+    ...source.matchAll(
+      /(?:import|export)[^"'`()]*?from(?:`|'|")\.\/([^`'"]+\.js)(?:`|'|")/g,
+    ),
+    ...source.matchAll(
+      /import(?:`|'|")\.\/([^`'"]+\.js)(?:`|'|")/g,
+    ),
+  ].map((match) => match[1]);
+  for (const file of imports) await staticAssetClosure(file, visited);
+  return visited;
 }
 
 function within(name, actual, maximum) {

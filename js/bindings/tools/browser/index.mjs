@@ -1,11 +1,5 @@
 import "./browserBuffer.mjs";
-import { prepareBrowserShell } from "./browserShell.mjs";
-import * as standard from "../standard.mjs";
 
-export {
-  createBrowserBash,
-  loadBrowserProjectInstructions,
-} from "./browserShell.mjs";
 export {
   createOpfsGitFs,
   openOpfsGitFs,
@@ -40,7 +34,11 @@ export async function browser(options) {
   if (typeof origin !== "string" || !origin) {
     throw new TypeError("browser origin is required outside a browser location");
   }
-  const shell = await prepareBrowserShell(options.threadId, origin);
+  const [shellModule, standard] = await Promise.all([
+    import("./browserShell.mjs"),
+    import("../standard.mjs"),
+  ]);
+  const shell = await shellModule.prepareBrowserShell(options.threadId, origin);
   return Object.freeze({
     filesystem: shell.workspace,
     instructions: shell.instructions,
@@ -58,4 +56,14 @@ export async function browser(options) {
       standard.updatePlan(),
     ]),
   });
+}
+
+export async function createBrowserBash(rawFs, thread, options) {
+  const { createBrowserBash: create } = await import("./browserShell.mjs");
+  return create(rawFs, thread, options);
+}
+
+export async function loadBrowserProjectInstructions(rawFs) {
+  const { loadBrowserProjectInstructions: load } = await import("./browserShell.mjs");
+  return load(rawFs);
 }
