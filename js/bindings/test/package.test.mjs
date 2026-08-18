@@ -34,7 +34,10 @@ test("the packed package installs and runs every public entry point", async () =
     const [packed] = JSON.parse(stdout);
     assert.equal(packed.name, packageJson.name);
     assert.equal(packed.version, packageJson.version);
-    assert.ok(packed.size <= 2_450_000, `compressed package grew to ${packed.size} bytes`);
+    // The package now owns the browser shell source while its language and SSH
+    // dependencies remain external and runtime-lazy. npm's tar output differs
+    // slightly across platforms, so retain a tight portable compressed gate.
+    assert.ok(packed.size <= 2_500_000, `compressed package grew to ${packed.size} bytes`);
     // Both WASM targets include the canonical Rust apply_patch planner and the
     // full JSON-Schema-backed subagent runtime.
     assert.ok(
