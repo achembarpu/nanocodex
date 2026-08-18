@@ -19,6 +19,12 @@
 
 ## Workflow
 
+- Stop a workflow as soon as there is sufficient evidence that it is
+  pathological, wasteful, destructive, or architecturally wrong. Never let a
+  known-bad operation finish merely to obtain its output or preserve momentum.
+  Fix the root cause at the highest boundary that owns it, then rerun the
+  corrected workflow from that boundary; do not paper over the problem with a
+  downstream workaround.
 - Follow the active work in `PLAN.md` in order. Build complete vertical slices
   with a real consumer; do not accumulate speculative abstractions.
 - Prefer deletion and direct ownership over adapters that merely move data.
@@ -29,6 +35,10 @@
   mix unrelated cleanup into an iteration commit.
 - Preserve unrelated user work. Never commit `.env`, caches, retained jobs,
   build output, or another user's untracked files.
+- Web interfaces must never show transient loading copy, spinners, skeletons,
+  or Suspense placeholders. Preserve the last complete interface when possible;
+  otherwise render nothing until the boundary is ready. Show explicit,
+  actionable failure states only after an operation actually fails.
 
 ## Frontier eval iteration
 
