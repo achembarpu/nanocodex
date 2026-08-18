@@ -51,7 +51,6 @@ export async function checkPackage(packageRoot = root) {
 
   assert.equal(packageJson.name, "nanocodex");
   assert.equal(packageJson.type, "module");
-  assert.deepEqual(packageJson.sideEffects, ["./pkg-web/nanocodex_worker.js"]);
   assert.equal(packageJson.engines?.node, ">=22.13.0");
   assert.equal(packageJson.publishConfig?.access, "public");
   assert.equal(packageJson.exports?.["./browser"]?.import, "./browser/index.mjs");

@@ -241,8 +241,8 @@ assert(
 );
 assert.match(
   subscriptionWorkerSource,
-  /__wbg_set_wasm\(wasm\)/,
-  "the subscription Worker must initialize wasm-bindgen before opening a subscription",
+  /module_or_path:\s*wasmModule/,
+  "the subscription Worker must instantiate its compiled module through wasm-bindgen",
 );
 
 console.log(JSON.stringify({
