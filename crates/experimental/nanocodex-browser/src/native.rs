@@ -857,6 +857,24 @@ impl Session {
         close
     }
 
+    fn driver_finished(&self) -> bool {
+        self.handler.is_finished()
+    }
+
+    async fn discard(mut self) -> Result<(), BrowserError> {
+        self.handler.abort();
+        for task in &self.browser_tasks {
+            task.abort();
+        }
+        for task in &self.page_tasks {
+            task.abort();
+        }
+        if let Some(result) = self.browser.kill().await {
+            result?;
+        }
+        Ok(())
+    }
+
     async fn refresh_remote_cookies(
         &mut self,
         runtime_dir: &Path,
@@ -2506,6 +2524,17 @@ impl NativeBrowser {
     }
 
     async fn ensure_session(&self, state: &mut BrowserState) -> Result<(), BrowserError> {
+        if state.session.as_ref().is_some_and(Session::driver_finished) {
+            let session = state
+                .session
+                .take()
+                .ok_or(BrowserError::SessionUnavailable)?;
+            session.discard().await?;
+            warn!(
+                target: "nanocodex_browser",
+                "restarting browser after the DevTools driver stopped"
+            );
+        }
         if state.session.is_none() {
             state.session = Some(Session::launch(self).await?);
         }
@@ -7104,6 +7133,49 @@ mod tests {
         assert_eq!(parameters.len(), 2);
         assert_eq!(parameters[0].domain.as_deref(), Some(".example.com"));
         assert_eq!(parameters[1].domain.as_deref(), Some("sibling.example.net"));
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a local Chrome or Chromium installation"]
+    async fn browser_recovers_after_the_devtools_driver_stops()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let browser = Browser::new()?;
+        browser.start().await?;
+        {
+            let state = browser.inner.state.lock().await;
+            state
+                .session
+                .as_ref()
+                .expect("started browser has a session")
+                .handler
+                .abort();
+        }
+        for _ in 0..100 {
+            let finished = {
+                let state = browser.inner.state.lock().await;
+                state
+                    .session
+                    .as_ref()
+                    .expect("started browser has a session")
+                    .driver_finished()
+            };
+            if finished {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        let result = browser
+            .execute(BrowserAction::Evaluate {
+                expression: "1 + 1".to_owned(),
+            })
+            .await?;
+        let BrowserActionResult::Evaluation { value, .. } = result else {
+            return Err(std::io::Error::other("expected evaluation result").into());
+        };
+        assert_eq!(value.as_i64(), Some(2));
+        browser.close().await?;
+        Ok(())
     }
 
     #[tokio::test]
