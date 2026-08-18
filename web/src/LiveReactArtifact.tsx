@@ -30,7 +30,7 @@ export function LiveReactArtifact({
       key={`${artifact.id}:${artifact.updatedAt}`}
       ref={frame}
       className="live-react-artifact"
-      src="/artifact-runtime"
+      src="/artifact-runtime?embedded=1"
       sandbox="allow-scripts"
       title={artifact.title}
       onLoad={() => postArtifact(frame.current, artifact)}
