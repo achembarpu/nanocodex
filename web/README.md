@@ -70,6 +70,20 @@ NANOCODEX_GIT_TOKEN=... \
 npm run publish:repository
 ```
 
+If the Durable Object contains an obsolete publication shape, the publisher
+stops before uploading anything. Repair it atomically after deploying the
+current Worker by explicitly opting into a current-format replacement:
+
+```bash
+NANOCODEX_GIT_ORIGIN=https://nanocodex.me-7fb.workers.dev \
+NANOCODEX_GIT_TOKEN=... \
+NANOCODEX_REPAIR_INVALID_PUBLICATION=1 \
+npm run publish:repository
+```
+
+The replacement is accepted only while the stored publication is invalid; it
+cannot overwrite a valid generation or bypass its compare-and-swap head.
+
 Production serves the website indexes, immutable file and patch objects, and a
 read-only Git protocol-v2 endpoint from that publication. Clone the mirror with
 `git clone https://nanocodex.me-7fb.workers.dev/git`. GitHub remains the write
@@ -228,6 +242,9 @@ authenticated operator can publish the already-deployed master revision with:
 ```bash
 gh workflow run mirror-cloudflare-git.yml --ref master -f revision="$revision"
 ```
+
+For the one-time invalid-publication repair, add
+`-f repair_invalid_publication=true` to that dispatch.
 
 The proposal endpoint is intentionally a testnet-preview `402` until a live MPP
 recipient and settlement policy are configured.

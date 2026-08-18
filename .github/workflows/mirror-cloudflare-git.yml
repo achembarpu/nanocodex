@@ -7,6 +7,11 @@ on:
         description: Deployed 40-character master commit SHA
         required: true
         type: string
+      repair_invalid_publication:
+        description: Atomically replace an invalid legacy publication with the current format
+        required: false
+        default: false
+        type: boolean
 
 concurrency:
   group: nanocodex-cloudflare-git
@@ -46,6 +51,7 @@ jobs:
         env:
           NANOCODEX_GIT_ORIGIN: https://nanocodex.me-7fb.workers.dev
           NANOCODEX_GIT_TOKEN: ${{ secrets.NANOCODEX_GIT_TOKEN }}
+          NANOCODEX_REPAIR_INVALID_PUBLICATION: ${{ inputs.repair_invalid_publication && '1' || '0' }}
         run: npm run publish:repository
       - name: Verify the repository snapshot and Git endpoint
         env:

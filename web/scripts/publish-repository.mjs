@@ -29,7 +29,11 @@ async function main() {
   const head = await git(["rev-parse", "HEAD"]);
   await requireDeploymentSha(origin, head);
   const token = requiredEnvironment("NANOCODEX_GIT_TOKEN");
-  const previous = await readRemoteState(origin, token);
+  const previous = await readRemoteState(
+    origin,
+    token,
+    process.env.NANOCODEX_REPAIR_INVALID_PUBLICATION === "1",
+  );
   if (previous?.publication?.head === head && process.env.NANOCODEX_FORCE_SYNC !== "1") {
     console.log(`Cloudflare repository is current (${head.slice(0, 7)})`);
     return;
@@ -133,6 +137,7 @@ async function main() {
       body: JSON.stringify({
         expectedHead: previous?.publication?.head ?? null,
         publication,
+        ...(previous?.replaceInvalid === true ? { replaceInvalid: true } : {}),
       }),
     });
     if (!response.ok) throw new Error(await responseError("publish", response));
@@ -176,9 +181,26 @@ export function buildUploadPlan(inventory, previousInventory) {
   };
 }
 
-async function readRemoteState(origin, token) {
+export async function readRemoteState(origin, token, repairInvalid = false) {
   const response = await authenticatedFetch(`${origin}/api/git/state`, token);
-  if (response.status === 503 || response.status === 404) return null;
+  if (response.status === 404) return null;
+  if (response.status === 503) {
+    let failure;
+    try {
+      failure = await response.clone().json();
+    } catch {
+      // The normal response error below retains the bounded raw response body.
+    }
+    if (failure?.error === "repository publication is invalid") {
+      if (!repairInvalid) {
+        throw new Error(
+          "Cloudflare repository publication is invalid; set NANOCODEX_REPAIR_INVALID_PUBLICATION=1 to atomically replace it with the current format",
+        );
+      }
+      console.log("Replacing invalid Cloudflare repository publication with the current format");
+      return { replaceInvalid: true };
+    }
+  }
   if (!response.ok) throw new Error(await responseError("read state", response));
   return response.json();
 }

@@ -90,6 +90,11 @@ export async function handleGitRequest(
     if (key == null) return Response.json({ error: "invalid_object_key" }, { status: 400 });
     if (request.body == null) return Response.json({ error: "missing_body" }, { status: 400 });
     const bucket = requireBucket(env);
+    const existing = await bucket.head(key);
+    if (existing != null) {
+      await request.body.cancel();
+      return immutableUploadResponse(key, existing, false);
+    }
     const uploaded = await bucket.put(key, request.body, {
       onlyIf: { etagDoesNotMatch: "*" },
       httpMetadata: {
@@ -98,19 +103,15 @@ export async function handleGitRequest(
       },
       customMetadata: { uploadedBy: "nanocodex-repository-mirror" },
     });
+    if (uploaded == null && !request.body.locked) await request.body.cancel();
     const object = uploaded ?? await bucket.head(key);
     if (object == null) return storageFailure("immutable object upload did not resolve");
-    return Response.json({
-      key,
-      etag: object.httpEtag,
-      size: object.size,
-      stored: uploaded != null,
-    });
+    return immutableUploadResponse(key, object, uploaded != null);
   }
 
   if (url.pathname === "/api/git/publish" && request.method === "PUT") {
     if (!(await authorizeMirrorRequest(request, env))) return unauthorized();
-    let body: { expectedHead?: unknown; publication?: unknown };
+    let body: { expectedHead?: unknown; publication?: unknown; replaceInvalid?: unknown };
     try {
       body = await request.json();
     } catch {
@@ -120,6 +121,7 @@ export async function handleGitRequest(
     if (
       !(expectedHead === null ||
         (typeof expectedHead === "string" && SHA1_PATTERN.test(expectedHead))) ||
+      (body.replaceInvalid !== undefined && body.replaceInvalid !== true) ||
       !isRepositoryPublication(body.publication)
     ) {
       return Response.json({ error: "invalid_publication" }, { status: 400 });
@@ -162,7 +164,11 @@ export async function handleGitRequest(
     return repositoryStub(env).fetch("https://repository.internal/publication", {
       method: "PUT",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ expectedHead, publication }),
+      body: JSON.stringify({
+        expectedHead,
+        publication,
+        ...(body.replaceInvalid === true ? { replaceInvalid: true } : {}),
+      }),
     });
   }
 
@@ -241,6 +247,15 @@ export async function handleGitRequest(
   }
 
   return undefined;
+}
+
+function immutableUploadResponse(key: string, object: R2Object, stored: boolean): Response {
+  return Response.json({
+    key,
+    etag: object.httpEtag,
+    size: object.size,
+    stored,
+  });
 }
 
 export async function readGitProtocolRequest(

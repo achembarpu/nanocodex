@@ -47,6 +47,40 @@ test("publication uses compare-and-swap so stale mirrors cannot win", async () =
   assert.equal((await current.json() as RepositoryPublication).head, secondHash);
 });
 
+test("publication repair atomically replaces only invalid stored state", async () => {
+  const values = new Map<string, unknown>([[
+    "publication",
+    { version: 1, head: firstHash, packIndexKey: `generations/${firstHash}/repository.idx` },
+  ]]);
+  const state = {
+    storage: {
+      get: async <T>(key: string) => values.get(key) as T | undefined,
+      put: async (key: string, value: unknown) => { values.set(key, value); },
+    },
+    blockConcurrencyWhile: async <T>(callback: () => Promise<T>) => callback(),
+  } as unknown as DurableObjectState;
+  const repository = new GitRepository(state);
+
+  const normal = await repository.fetch(publishRequest(null, publication(secondHash)));
+  assert.equal(normal.status, 409);
+  assert.deepEqual(await normal.json(), { error: "publication_invalid" });
+
+  const repaired = await repository.fetch(
+    publishRequest(null, publication(secondHash), true),
+  );
+  assert.equal(repaired.status, 200);
+  assert.equal((values.get("publication") as RepositoryPublication).head, secondHash);
+
+  const clobber = await repository.fetch(
+    publishRequest(null, publication(firstHash), true),
+  );
+  assert.equal(clobber.status, 409);
+  assert.deepEqual(await clobber.json(), {
+    error: "publication_repair_conflict",
+    currentHead: secondHash,
+  });
+});
+
 function publication(head: string): RepositoryPublication {
   const prefix = `generations/${head}/`;
   return {
@@ -64,10 +98,18 @@ function publication(head: string): RepositoryPublication {
   };
 }
 
-function publishRequest(expectedHead: string | null, value: RepositoryPublication): Request {
+function publishRequest(
+  expectedHead: string | null,
+  value: RepositoryPublication,
+  replaceInvalid = false,
+): Request {
   return new Request("https://repository.test/publication", {
     method: "PUT",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ expectedHead, publication: value }),
+    body: JSON.stringify({
+      expectedHead,
+      publication: value,
+      ...(replaceInvalid ? { replaceInvalid: true } : {}),
+    }),
   });
 }

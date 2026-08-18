@@ -35,24 +35,77 @@ test("generation-pinned commit pages bypass mutable publication state", async ()
 });
 
 test("repository uploads cannot overwrite an immutable R2 key", async () => {
-  let putOptions: R2PutOptions | undefined;
+  let bodyCancelled = false;
+  let putCalled = false;
   const existing = {
     httpEtag: '"already-stored"',
-    size: 12,
+    size: 1_639_731,
   } as R2Object;
   const bucket = {
-    put: async (_key: string, _body: ReadableStream, options?: R2PutOptions) => {
-      putOptions = options;
-      return null;
-    },
     head: async () => existing,
+    put: async () => {
+      putCalled = true;
+      throw new Error("existing immutable objects must not enter R2.put");
+    },
+  } as unknown as R2Bucket;
+  const body = new ReadableStream<Uint8Array>({
+    pull(controller) {
+      controller.enqueue(new Uint8Array(existing.size));
+      controller.close();
+    },
+    cancel() {
+      bodyCancelled = true;
+    },
+  });
+  const init: RequestInit & { duplex: "half" } = {
+    method: "PUT",
+    headers: { authorization: "Bearer mirror-token" },
+    body,
+    duplex: "half",
+  };
+  const request = new Request(
+    "https://nanocodex.example/api/git/objects/blobs/0123456789abcdef0123456789abcdef01234567",
+    init,
+  );
+
+  const response = await handleGitRequest(
+    request,
+    { GIT_OBJECTS: bucket, GIT_MIRROR_TOKEN: "mirror-token" },
+    new URL(request.url),
+  );
+
+  assert.equal(response?.status, 200);
+  assert.equal(putCalled, false);
+  assert.equal(bodyCancelled, true);
+  assert.deepEqual(await response?.json(), {
+    key: "blobs/0123456789abcdef0123456789abcdef01234567.txt",
+    etag: '"already-stored"',
+    size: existing.size,
+    stored: false,
+  });
+});
+
+test("repository uploads retain conditional creation for a new immutable key", async () => {
+  let putOptions: R2PutOptions | undefined;
+  let uploadedBody = "";
+  const created = {
+    httpEtag: '"created"',
+    size: 7,
+  } as R2Object;
+  const bucket = {
+    head: async () => null,
+    put: async (_key: string, body: ReadableStream, options?: R2PutOptions) => {
+      putOptions = options;
+      uploadedBody = await new Response(body).text();
+      return created;
+    },
   } as unknown as R2Bucket;
   const request = new Request(
     "https://nanocodex.example/api/git/objects/blobs/0123456789abcdef0123456789abcdef01234567",
     {
       method: "PUT",
       headers: { authorization: "Bearer mirror-token" },
-      body: "replacement",
+      body: "created",
     },
   );
 
@@ -63,12 +116,75 @@ test("repository uploads cannot overwrite an immutable R2 key", async () => {
   );
 
   assert.equal(response?.status, 200);
+  assert.equal(uploadedBody, "created");
   assert.deepEqual(putOptions?.onlyIf, { etagDoesNotMatch: "*" });
   assert.deepEqual(await response?.json(), {
     key: "blobs/0123456789abcdef0123456789abcdef01234567.txt",
-    etag: '"already-stored"',
-    size: 12,
-    stored: false,
+    etag: '"created"',
+    size: 7,
+    stored: true,
+  });
+});
+
+test("repository publication forwards an explicit invalid-state replacement", async () => {
+  const shardKey = `generations/${head}/objects/0000.pack`;
+  const publication = {
+    version: 1 as const,
+    head,
+    branch: "master",
+    refs: [{ name: "refs/heads/master", oid: head }],
+    snapshotKey: `generations/${head}/repository.json`,
+    commitsKey: `generations/${head}/commits.json`,
+    inventoryKey: `generations/${head}/inventory.json`,
+    packKey: `generations/${head}/repository.pack`,
+    objectManifestKey: `generations/${head}/objects.json`,
+    packHash: "b".repeat(40),
+    publishedAt: "2026-08-18T00:00:00.000Z",
+  };
+  const manifest = {
+    version: 1,
+    head,
+    shards: [{ key: shardKey, size: 1 }],
+    objects: { [head]: [1, 0, 0, 1, []] },
+  };
+  let forwarded: unknown;
+  const namespace = {
+    idFromName: () => ({}) as DurableObjectId,
+    get: () => ({
+      fetch: async (_input: RequestInfo | URL, init?: RequestInit) => {
+        forwarded = JSON.parse(String(init?.body));
+        return Response.json(publication);
+      },
+    }),
+  } as unknown as DurableObjectNamespace;
+  const bucket = {
+    get: async () => ({ json: async () => manifest }),
+    head: async () => ({ httpEtag: '"present"', size: 1 }),
+  } as unknown as R2Bucket;
+  const request = new Request("https://nanocodex.example/api/git/publish", {
+    method: "PUT",
+    headers: {
+      authorization: "Bearer mirror-token",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ expectedHead: null, publication, replaceInvalid: true }),
+  });
+
+  const response = await handleGitRequest(
+    request,
+    {
+      GIT_OBJECTS: bucket,
+      GIT_REPOSITORY: namespace,
+      GIT_MIRROR_TOKEN: "mirror-token",
+    },
+    new URL(request.url),
+  );
+
+  assert.equal(response?.status, 200);
+  assert.deepEqual(forwarded, {
+    expectedHead: null,
+    publication,
+    replaceInvalid: true,
   });
 });
 

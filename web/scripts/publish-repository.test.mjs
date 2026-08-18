@@ -13,6 +13,7 @@ import {
   buildGitArtifacts,
   buildUploadPlan,
   isRetriableUploadStatus,
+  readRemoteState,
 } from "./publish-repository.mjs";
 
 const execFileAsync = promisify(execFile);
@@ -141,6 +142,34 @@ test("repository uploads retry only transient and secret-propagation responses",
   }
   for (const status of [400, 403, 404, 409, 422]) {
     assert.equal(isRetriableUploadStatus(status), false, `${status} should fail`);
+  }
+});
+
+test("invalid publication repair requires an explicit operator opt-in", async () => {
+  let authorization;
+  const server = createServer(async (request, response) => {
+    authorization = request.headers.authorization;
+    response.writeHead(503, { "content-type": "application/json" });
+    response.end(JSON.stringify({ error: "repository publication is invalid" }));
+  });
+  try {
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const origin = `http://127.0.0.1:${address.port}`;
+
+    await assert.rejects(
+      readRemoteState(origin, "mirror-token"),
+      /NANOCODEX_REPAIR_INVALID_PUBLICATION=1/,
+    );
+    assert.deepEqual(
+      await readRemoteState(origin, "mirror-token", true),
+      { replaceInvalid: true },
+    );
+    assert.equal(authorization, "Bearer mirror-token");
+  } finally {
+    if (server.listening) await new Promise((resolveClose) => server.close(resolveClose));
   }
 });
 

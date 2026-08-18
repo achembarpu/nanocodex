@@ -24,6 +24,7 @@ export type RepositoryPublication = {
 type PublishRequest = {
   expectedHead: string | null;
   publication: RepositoryPublication;
+  replaceInvalid?: true;
 };
 
 const publicationStorageKey = "publication";
@@ -63,12 +64,25 @@ export class GitRepository {
     }
 
     return this.#state.blockConcurrencyWhile(async () => {
-      const current = await this.#state.storage.get<RepositoryPublication>(
+      const current = await this.#state.storage.get<unknown>(
         publicationStorageKey,
       );
-      if ((current?.head ?? null) !== body.expectedHead) {
+      const validCurrent = isRepositoryPublication(current) ? current : undefined;
+      if (body.replaceInvalid === true) {
+        if (current == null || validCurrent != null) {
+          return Response.json(
+            {
+              error: "publication_repair_conflict",
+              currentHead: validCurrent?.head ?? null,
+            },
+            { status: 409 },
+          );
+        }
+      } else if (validCurrent == null && current != null) {
+        return Response.json({ error: "publication_invalid" }, { status: 409 });
+      } else if ((validCurrent?.head ?? null) !== body.expectedHead) {
         return Response.json(
-          { error: "publication_conflict", currentHead: current?.head ?? null },
+          { error: "publication_conflict", currentHead: validCurrent?.head ?? null },
           { status: 409 },
         );
       }
@@ -127,6 +141,8 @@ function isPublishRequest(value: unknown): value is PublishRequest {
     (request.expectedHead === null ||
       (typeof request.expectedHead === "string" &&
         SHA1_PATTERN.test(request.expectedHead))) &&
+    (request.replaceInvalid === undefined || request.replaceInvalid === true) &&
+    (request.replaceInvalid !== true || request.expectedHead === null) &&
     isRepositoryPublication(request.publication)
   );
 }
