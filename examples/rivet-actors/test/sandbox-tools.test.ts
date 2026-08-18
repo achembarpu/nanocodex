@@ -320,5 +320,10 @@ async function invoke(
 ): Promise<any> {
   const tool = tools[name];
   if (!tool) throw new Error(`missing tool: ${name}`);
-  return tool.handler(input, { callId: "call", parentCallId: "parent", sessionId: "session" });
+  return tool.handler(input, {
+    callId: "call",
+    parentCallId: "parent",
+    sessionId: "session",
+    signal: new AbortController().signal,
+  });
 }
