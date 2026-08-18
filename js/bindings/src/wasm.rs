@@ -5,8 +5,7 @@ use nanocodex::{
     AgentEvents, DurableAgentExt, Model, Nanocodex as RustNanocodex, OpenAi, ReasoningMode,
     Thinking, TurnControl, TurnResult,
     agent::{
-        ExecutionEnvironment,
-        PromptRequest,
+        ExecutionEnvironment, PromptRequest,
         durability::{JournalStore, StoreError, StoreFuture, StoredBatch, StoredJournal},
         input::{Prompt, UserInput},
         session::{SessionId, SessionSnapshot},
@@ -908,7 +907,7 @@ impl WasmTurn {
         spawn_local(async move {
             let mut request = PromptRequest::new(prompt);
             if let Some(operation_id) = operation_id {
-                request = request.id(operation_id);
+                request = request.request_id(operation_id);
             }
             let accepted = agent.prompt(request).await;
             let completed = match accepted {

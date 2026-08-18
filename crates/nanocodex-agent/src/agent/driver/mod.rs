@@ -815,6 +815,7 @@ where
                     latest_fork_checkpoint = Some(Arc::clone(&checkpoint));
                     (
                         persisted.map(|()| TurnResult {
+                            request_id: execution_operation.clone(),
                             final_message,
                             usage,
                             checkpoint: TurnCheckpoint::Live(checkpoint),
@@ -991,7 +992,7 @@ async fn accept_execution_command(execution: &Execution, command: Command) -> Op
     };
     match admission {
         Ok((operation_id, AdmittedExecution::Execute)) => {
-            if accepted.send(Ok(())).is_err() {
+            if accepted.send(Ok(operation_id.clone())).is_err() {
                 execution.release_claim(&operation_id).await;
                 return None;
             }
@@ -1007,9 +1008,10 @@ async fn accept_execution_command(execution: &Execution, command: Command) -> Op
                 result,
             })
         }
-        Ok((_, AdmittedExecution::Completed { output, snapshot })) => {
-            drop(accepted.send(Ok(())));
+        Ok((operation_id, AdmittedExecution::Completed { output, snapshot })) => {
+            drop(accepted.send(Ok(operation_id.clone())));
             drop(result.send(Ok(TurnResult {
+                request_id: Some(operation_id),
                 final_message: output.final_message,
                 usage: output.usage,
                 checkpoint: TurnCheckpoint::Replayed(snapshot),

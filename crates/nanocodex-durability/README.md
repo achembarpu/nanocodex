@@ -19,6 +19,12 @@ let (agent, events) = Nanocodex::builder(openai)
     .durability(journal)
     .await?
     .build()?;
+
+// Omit request_id() to let the durable agent generate one during admission.
+let turn = agent
+    .prompt(PromptRequest::new("hello").request_id("request-7"))
+    .await?;
+assert_eq!(turn.request_id(), Some("request-7"));
 ```
 
 The crate includes an in-memory store on every target and optional native

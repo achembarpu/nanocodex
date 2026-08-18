@@ -223,12 +223,14 @@ async fn configured_durability_automatically_journals_plain_prompts() -> Result<
         .await?;
     let (agent, events) = builder.build()?;
 
-    let result = agent
-        .prompt("journal this automatically")
-        .await?
-        .result()
-        .await?;
+    let turn = agent.prompt("journal this automatically").await?;
+    let generated_request_id = turn
+        .request_id()
+        .ok_or_else(|| eyre!("automatic durable request ID is missing"))?
+        .to_owned();
+    let result = turn.result().await?;
     assert_eq!(result.final_message(), "durably replayed");
+    assert_eq!(result.request_id(), Some(generated_request_id.as_str()));
     let state = journal_state.state().await?;
     assert_eq!(state.operations().len(), 1);
     let generated_id = state
@@ -236,7 +238,8 @@ async fn configured_durability_automatically_journals_plain_prompts() -> Result<
         .keys()
         .next()
         .ok_or_else(|| eyre!("automatic durable operation is missing"))?;
-    assert!(generated_id.parse::<SessionId>().is_ok());
+    assert_eq!(generated_id, &generated_request_id);
+    assert!(generated_request_id.parse::<SessionId>().is_ok());
     assert!(journal_state.latest_checkpoint().await?.is_some());
 
     agent.shutdown().await?;
@@ -271,9 +274,12 @@ async fn portable_journal_replays_a_completed_model_step_after_terminal_commit_f
         .durability(journal)
         .await?;
     let (agent, events) = builder.build()?;
-    let error = agent
-        .prompt("replay this exact turn")
-        .await?
+    let first_turn = agent.prompt("replay this exact turn").await?;
+    let first_request_id = first_turn
+        .request_id()
+        .ok_or_else(|| eyre!("first durable request ID is missing"))?
+        .to_owned();
+    let error = first_turn
         .result()
         .await
         .expect_err("the injected terminal append must fail the first attempt");
@@ -288,11 +294,10 @@ async fn portable_journal_replays_a_completed_model_step_after_terminal_commit_f
         .durability(journal)
         .await?;
     let (resumed, resumed_events) = builder.build()?;
-    let result = resumed
-        .prompt("replay this exact turn")
-        .await?
-        .result()
-        .await?;
+    let recovered_turn = resumed.prompt("replay this exact turn").await?;
+    assert_eq!(recovered_turn.request_id(), Some(first_request_id.as_str()));
+    let result = recovered_turn.result().await?;
+    assert_eq!(result.request_id(), Some(first_request_id.as_str()));
     assert_eq!(result.final_message(), "durably replayed");
     assert_eq!(
         generations.load(std::sync::atomic::Ordering::SeqCst),
@@ -392,9 +397,11 @@ async fn portable_journal_refuses_to_repeat_a_tool_with_an_ambiguous_completion(
         .durability(journal)
         .await?;
     let (agent, events) = builder.build()?;
-    let first = agent
-        .prompt(PromptRequest::new("run the counter").id("turn-1"))
-        .await?
+    let first_turn = agent
+        .prompt(PromptRequest::new("run the counter").request_id("turn-1"))
+        .await?;
+    assert_eq!(first_turn.request_id(), Some("turn-1"));
+    let first = first_turn
         .result()
         .await
         .expect_err("the injected tool completion append must fail");
@@ -410,9 +417,11 @@ async fn portable_journal_refuses_to_repeat_a_tool_with_an_ambiguous_completion(
         .durability(journal)
         .await?;
     let (resumed, resumed_events) = builder.build()?;
-    let recovered = resumed
-        .prompt(PromptRequest::new("run the counter").id("turn-1"))
-        .await?
+    let recovered_turn = resumed
+        .prompt(PromptRequest::new("run the counter").request_id("turn-1"))
+        .await?;
+    assert_eq!(recovered_turn.request_id(), Some("turn-1"));
+    let recovered = recovered_turn
         .result()
         .await
         .expect_err("an unsafe unfinished tool must remain ambiguous");

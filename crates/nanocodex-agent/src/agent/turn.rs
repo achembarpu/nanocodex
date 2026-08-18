@@ -12,6 +12,7 @@ use nanocodex_oai_api::PromptValidationError;
 #[must_use = "a turn continues running when dropped; await result(), control it, or explicitly drop it"]
 pub struct Turn {
     pub(super) control: TurnControl,
+    pub(super) request_id: Option<String>,
     pub(super) events: AgentEvents,
     pub(super) result: oneshot::Receiver<Result<TurnResult>>,
 }
@@ -30,6 +31,17 @@ pub enum PromptRoute {
 }
 
 impl Turn {
+    /// Returns the durable request identity selected during prompt admission.
+    ///
+    /// A caller-supplied [`PromptRequest::request_id`] is returned unchanged.
+    /// When an execution policy generated the identity, this returns the
+    /// generated or recovered journal operation ID. Agents without an attached
+    /// execution policy do not assign request identities.
+    #[must_use]
+    pub fn request_id(&self) -> Option<&str> {
+        self.request_id.as_deref()
+    }
+
     /// Returns a cheap cloneable capability targeting this exact turn.
     #[must_use]
     pub fn control(&self) -> TurnControl {
@@ -149,6 +161,7 @@ pub(super) struct TurnKey(pub(super) u64);
 #[derive(Clone)]
 #[non_exhaustive]
 pub struct TurnResult {
+    pub(super) request_id: Option<String>,
     pub(super) final_message: String,
     pub(super) usage: TurnUsage,
     pub(super) checkpoint: TurnCheckpoint,
@@ -161,6 +174,12 @@ pub(super) enum TurnCheckpoint {
 }
 
 impl TurnResult {
+    /// Returns the durable request identity selected during prompt admission.
+    #[must_use]
+    pub fn request_id(&self) -> Option<&str> {
+        self.request_id.as_deref()
+    }
+
     /// Returns the final assistant message for this completed turn.
     #[must_use]
     pub fn final_message(&self) -> &str {
@@ -210,7 +229,7 @@ impl fmt::Debug for TurnResult {
 #[derive(Clone, Debug)]
 pub struct PromptRequest {
     pub(super) prompt: Prompt,
-    pub(super) operation_id: Option<String>,
+    pub(super) request_id: Option<String>,
 }
 
 impl PromptRequest {
@@ -222,14 +241,19 @@ impl PromptRequest {
     pub fn new(prompt: impl Into<Prompt>) -> Self {
         Self {
             prompt: prompt.into(),
-            operation_id: None,
+            request_id: None,
         }
     }
 
-    /// Overrides the generated identity with a caller-owned idempotency key.
+    /// Supplies a stable caller-owned request identity.
+    ///
+    /// When omitted, an execution policy generates an identity before the
+    /// prompt is accepted. Resubmitting the same request ID with the same
+    /// prompt resumes or replays that durable operation; reusing it for a
+    /// different prompt is rejected as a conflict.
     #[must_use]
-    pub fn id(mut self, operation_id: impl Into<String>) -> Self {
-        self.operation_id = Some(operation_id.into());
+    pub fn request_id(mut self, request_id: impl Into<String>) -> Self {
+        self.request_id = Some(request_id.into());
         self
     }
 }
@@ -257,7 +281,7 @@ pub(super) enum Command {
         key: TurnKey,
         prompt: Prompt,
         execution_operation: Option<ExecutionOperation>,
-        accepted: Option<oneshot::Sender<Result<()>>>,
+        accepted: Option<oneshot::Sender<Result<String>>>,
         thinking: Option<Thinking>,
         fast_mode: Option<bool>,
         parent: Option<tracing::Span>,

@@ -155,29 +155,26 @@ impl Nanocodex {
     ///
     /// When an execution policy is configured, strings and [`Prompt`] values
     /// receive an automatically generated operation identity. Use
-    /// [`PromptRequest::id`] to supply a stable caller-owned identity.
+    /// [`PromptRequest::request_id`] to supply a stable caller-owned identity.
     ///
     /// # Errors
     ///
-    /// Returns an error for an empty prompt or operation ID, when identified
+    /// Returns an error for an empty prompt or request ID, when identified
     /// work is submitted without a configured policy, or if the driver stopped.
     pub async fn prompt(&self, request: impl Into<PromptRequest>) -> Result<Turn> {
-        let PromptRequest {
-            prompt,
-            operation_id,
-        } = request.into();
+        let PromptRequest { prompt, request_id } = request.into();
         prompt
             .validate()
             .map_err(|error| NanocodexError::InvalidRequest(error.to_string()))?;
-        if operation_id
+        if request_id
             .as_deref()
-            .is_some_and(|operation_id| operation_id.trim().is_empty())
+            .is_some_and(|request_id| request_id.trim().is_empty())
         {
             return Err(NanocodexError::InvalidRequest(
-                "operation ID must not be empty".to_owned(),
+                "request ID must not be empty".to_owned(),
             ));
         }
-        let execution_operation = operation_id.map(ExecutionOperation::Caller).or_else(|| {
+        let execution_operation = request_id.map(ExecutionOperation::Caller).or_else(|| {
             self.execution
                 .identifies_prompts()
                 .then(|| ExecutionOperation::Automatic(SessionId::new().to_string()))
@@ -211,16 +208,21 @@ impl Nanocodex {
         {
             return Err(NanocodexError::AgentStopped);
         }
-        if let Some(acceptance) = acceptance {
-            acceptance
-                .await
-                .map_err(|_| NanocodexError::AgentStopped)??;
-        }
+        let request_id = if let Some(acceptance) = acceptance {
+            Some(
+                acceptance
+                    .await
+                    .map_err(|_| NanocodexError::AgentStopped)??,
+            )
+        } else {
+            None
+        };
         Ok(Turn {
             control: TurnControl {
                 key,
                 commands: self.commands.clone(),
             },
+            request_id,
             events: event_stream,
             result: receiver,
         })
@@ -275,6 +277,7 @@ impl Nanocodex {
                     key,
                     commands: self.commands.clone(),
                 },
+                request_id: None,
                 events: event_stream,
                 result: turn_receiver,
             })),
