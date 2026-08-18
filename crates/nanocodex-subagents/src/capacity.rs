@@ -1,5 +1,5 @@
 // Derived from clabby/tact@1d9ccaefd1d8613dab020812af04a91cd9b4c52c (Apache-2.0).
-// Modified for Nanocodex's CLI-owned module paths and runtime wiring.
+// Modified for Nanocodex's reusable native/WASM extension runtime.
 
 use std::sync::{Arc, Mutex};
 use tokio::sync::watch;

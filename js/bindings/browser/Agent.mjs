@@ -8,10 +8,14 @@ import {
   createEventChannel,
   defineRuntime,
   loadSubscriptionRuntime,
+  registerDefinitionHost,
+  releaseDefinitionHost,
   releaseHostSession,
   toWasmConfig,
 } from "../internal.mjs";
 import { createBrowserHost } from "./host.mjs";
+import { resolveTools } from "../runtime/tool-configuration.mjs";
+import { resolve as resolveTransport } from "./Transport.mjs";
 
 let initialized;
 
@@ -26,24 +30,16 @@ export function prewarm(options = {}) {
 
 export function create(options = {}) {
   const {
-    apiKey,
-    hostAuth,
-    subscription,
-    mpp,
-    websocketUrl,
-    apiBaseUrl,
+    transport,
     module,
     model,
     thinking,
     reasoningMode,
     fastMode,
-    websocketWarmup,
     instructions,
     sessionId,
     workspace,
     resume,
-    WebSocketImpl,
-    createWebSocket,
     filesystem,
     filesystemTools,
     tools,
@@ -52,20 +48,24 @@ export function create(options = {}) {
     executionEnvironment,
     codeEvaluator,
   } = options;
-  if (mpp !== undefined && apiKey !== undefined) {
-    throw new TypeError("apiKey and mpp are mutually exclusive");
-  }
-  if (hostAuth && (apiKey !== undefined || mpp !== undefined)) {
-    throw new TypeError("hostAuth is mutually exclusive with apiKey and mpp");
-  }
-  if (subscription !== undefined && (hostAuth || apiKey !== undefined || mpp !== undefined)) {
-    throw new TypeError("subscription is mutually exclusive with hostAuth, apiKey, and mpp");
-  }
+  const {
+    apiKey,
+    hostAuth,
+    subscription,
+    mpp,
+    websocketUrl,
+    apiBaseUrl,
+    websocketWarmup,
+    WebSocketImpl,
+    createWebSocket,
+  } = resolveTransport(transport);
+  const { tools: hostTools, subagents: subagentConfig } = resolveTools(tools);
   if (filesystem && workspace !== undefined && workspace !== filesystem.root) {
     throw new TypeError("workspace must match filesystem.root when both are provided");
   }
   const events = createEventChannel();
   const tempoMcp = mpp?.[Symbol.for("nanocodex.tempo.mcp")];
+  let hostDefinitionId;
   const host = createBrowserHost({
     WebSocketImpl,
     createWebSocket,
@@ -75,13 +75,15 @@ export function create(options = {}) {
     onEvent: events.emit,
     filesystem,
     filesystemTools,
-    tools,
+    tools: hostTools,
     toolMode,
     mcp: mcp === false
       ? undefined
       : tempoMcp ? { ...tempoMcp, ...mcp } : mcp,
     codeEvaluator,
+    onDispose: () => releaseDefinitionHost(hostDefinitionId),
   });
+  hostDefinitionId = registerDefinitionHost(host);
   activateHost(host);
   const runtime = defineRuntime({
     key: "browser-wasm",
@@ -102,6 +104,8 @@ export function create(options = {}) {
             : "wss://openai.mpp.tempo.xyz/v1/responses"),
           apiBaseUrl,
           websocketWarmup,
+          subagents: subagentConfig,
+          hostDefinitionId,
           ...config,
         }));
         return subscription === undefined
@@ -126,6 +130,7 @@ export function create(options = {}) {
       }
     },
     release(raw) {
+      host.releaseSession(raw.sessionId);
       releaseHostSession(host, raw.sessionId);
       releaseHost(host);
     },

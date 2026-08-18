@@ -1,12 +1,15 @@
+#[cfg(not(target_family = "wasm"))]
 use std::{collections::BTreeSet, fmt::Write as _};
 
 use nanocodex_oai_api::{responses::JsonSchema, tools::ToolDefinition};
 use serde_json::Value;
 
+#[cfg(not(target_family = "wasm"))]
 const DEFERRED_NESTED_TOOLS_GUIDANCE: &str = r"Some deferred nested tools may be omitted from this description. They are still available on the global `tools` object and listed in `ALL_TOOLS`.
 To find one, filter `ALL_TOOLS` by `name` and `description`.
 Call independent nested tools concurrently in one cell with `Promise.all`.";
 // Based on https://modelcontextprotocol.io/specification/draft/schema#calltoolresult.
+#[cfg(not(target_family = "wasm"))]
 const MCP_TYPESCRIPT_PREAMBLE: &str = r#"type Role = "user" | "assistant";
 type MetaObject = Record<string, unknown>;
 type Annotations = {
@@ -83,6 +86,7 @@ type CallToolResult<TStructured = { [key: string]: unknown }> = {
   structuredContent?: TStructured;
   [key: string]: unknown;
 };"#;
+#[cfg(not(target_family = "wasm"))]
 const EXEC_DESCRIPTION: &str = r#"Run JavaScript code to orchestrate/compose tool calls
 - Evaluates the provided JavaScript code in a fresh V8 isolate as an async module.
 - All nested tools are available on the global `tools` object, for example `await tools.exec_command(...)`. Tool names are exposed as normalized JavaScript identifiers, for example `await tools.mcp__ologs__get_profile(...)`.
@@ -109,6 +113,7 @@ const EXEC_DESCRIPTION: &str = r#"Run JavaScript code to orchestrate/compose too
 - `ALL_TOOLS`: metadata for the enabled nested tools as `{ name, description }` entries.
 - `yield_control()`: yields the accumulated output to the model immediately while the script keeps running."#;
 
+#[cfg(not(target_family = "wasm"))]
 pub(super) fn exec_description(
     definitions: &[ToolDefinition],
     provider_summaries: &[(String, String)],
@@ -216,6 +221,7 @@ fn exec_tool_declaration(spec: &ToolDefinition) -> Option<String> {
     ))
 }
 
+#[cfg(not(target_family = "wasm"))]
 fn code_mode_namespace_and_name(name: &str) -> Option<(&str, &str)> {
     let (namespace, name) = name.split_once("__")?;
     (!namespace.is_empty() && !name.is_empty()).then_some((namespace, name))

@@ -3,7 +3,7 @@ import { setImmediate as immediate } from "node:timers/promises";
 import { test } from "node:test";
 
 import { Actions } from "../index.mjs";
-import { Agent } from "../node/index.mjs";
+import { Agent, Transport } from "../node/index.mjs";
 import {
   deferred,
   messageReader,
@@ -24,9 +24,9 @@ const SESSION_IDS = Object.freeze({
   shutdown: "018f1f9a-7b3c-7a17-8000-000000000017",
 });
 
-const createWarmAgent = (options) => Agent.create({
+const createWarmAgent = ({ apiKey, websocketUrl, ...options }) => Agent.create({
   ...options,
-  websocketWarmup: true,
+  transport: Transport.openAi({ apiKey, websocketUrl, websocketWarmup: true }),
 });
 
 test("prompt acceptance is separate from results and healthy follow-ons reuse one socket", async () => {

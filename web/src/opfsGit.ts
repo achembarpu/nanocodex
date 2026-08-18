@@ -3,14 +3,19 @@ const WORKSPACE_DIRECTORY = "nanocodex-workspaces";
 export type OpfsPromises = ReturnType<typeof createPromises>;
 export type OpfsGitFs = { promises: OpfsPromises };
 
-export async function openOpfsGitFs(workspaceName: string): Promise<OpfsGitFs> {
+export async function openOpfsWorkspaceRoot(
+  workspaceName: string,
+): Promise<FileSystemDirectoryHandle> {
   if (!navigator.storage?.getDirectory) {
     throw new Error("Origin Private File System storage is unavailable in this browser");
   }
   const origin = await navigator.storage.getDirectory();
   const workspaces = await origin.getDirectoryHandle(WORKSPACE_DIRECTORY, { create: true });
-  const root = await workspaces.getDirectoryHandle(encodeURIComponent(workspaceName), { create: true });
-  return createOpfsGitFs(root);
+  return workspaces.getDirectoryHandle(encodeURIComponent(workspaceName), { create: true });
+}
+
+export async function openOpfsGitFs(workspaceName: string): Promise<OpfsGitFs> {
+  return createOpfsGitFs(await openOpfsWorkspaceRoot(workspaceName));
 }
 
 export function createOpfsGitFs(root: FileSystemDirectoryHandle): OpfsGitFs {

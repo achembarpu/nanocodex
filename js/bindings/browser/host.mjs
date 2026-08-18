@@ -14,7 +14,9 @@ export function createBrowserHost(options = {}) {
     throw new Error("WebSocket is unavailable in this runtime");
   }
   const connections = new Map();
-  const code = createCodeRuntime(options.tools, { evaluate: options.codeEvaluator });
+  const code = createCodeRuntime(options.tools, {
+    evaluate: options.codeEvaluator,
+  });
   if (options.filesystem && options.filesystemTools === false) {
     code.addTools({
       apply_patch: {
@@ -257,6 +259,7 @@ export function createBrowserHost(options = {}) {
       for (const handle of [...connections.keys()]) close(handle);
       code.reset();
       await mcp?.then((provider) => provider.close(), () => {});
+      options.onDispose?.();
     })();
     return disposal;
   }
@@ -294,6 +297,7 @@ export function createBrowserHost(options = {}) {
     },
     toolMode: () => toolMode,
     toolDefinitions: code.toolDefinitions,
+    releaseSession: code.releaseSession,
     emitEvent: onEvent,
     reset: code.reset,
     dispose,

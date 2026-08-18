@@ -1,5 +1,5 @@
 // Derived from clabby/tact@1d9ccaefd1d8613dab020812af04a91cd9b4c52c (Apache-2.0).
-// Modified for Nanocodex's CLI-owned module paths and runtime wiring.
+// Modified for Nanocodex's reusable native/WASM extension runtime.
 
 use super::{
     message::MAX_MESSAGE_BYTES,
@@ -8,15 +8,12 @@ use super::{
         MessagePurpose, agent_prompt,
     },
     runtime::{AgentDirectoryEntry, AgentSummary, OutputContract, Registry, forward_events},
-    simplify::SimplifyReview,
 };
-use nanocodex::{
-    Tool, Tools,
-    agent::AgentHandle,
-    tools::{
-        ToolsBuildError,
-        contract::{ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult, async_trait},
-    },
+use async_trait::async_trait;
+use nanocodex_agent::AgentHandle;
+use nanocodex_tools::{
+    Tool, ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult, Tools,
+    runtime::ToolsBuildError,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -36,17 +33,17 @@ const WAIT_AGENT_TOOL: &str = "wait_agent";
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct AgentTask {
-    pub(super) role: String,
-    pub(super) task: String,
-    pub(super) output_schema: Value,
+pub struct AgentTask {
+    pub role: String,
+    pub task: String,
+    pub output_schema: Value,
 }
 
 #[derive(Serialize)]
-pub(super) struct AgentStartReport {
-    pub(super) agent_id: AgentId,
-    pub(super) role: String,
-    pub(super) status: AgentStatus,
+pub struct AgentStartReport {
+    pub agent_id: AgentId,
+    pub role: String,
+    pub status: AgentStatus,
 }
 
 #[derive(Deserialize)]
@@ -105,9 +102,9 @@ fn json_output(value: &impl Serialize) -> ToolResult {
     Ok(ToolOutput::from_json(serde_json::to_value(value)?, true))
 }
 
-pub(super) type AgentToolResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync + 'static>>;
+pub type AgentToolResult<T> = Result<T, Box<dyn std::error::Error + Send + Sync + 'static>>;
 
-pub(super) async fn start_agent(
+pub async fn start_agent(
     parent: &AgentHandle,
     registry: &Arc<Registry>,
     session_id: &str,
@@ -505,63 +502,72 @@ impl Tool for ChangeAgentLifecycle {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum SubagentToolSet {
-    Generic,
-    Simplify,
-    GenericAndSimplify,
-}
-
-impl SubagentToolSet {
-    const fn generic(self) -> bool {
-        matches!(self, Self::Generic | Self::GenericAndSimplify)
-    }
-
-    const fn simplify(self) -> bool {
-        matches!(self, Self::Simplify | Self::GenericAndSimplify)
-    }
-}
-
-pub(crate) fn install_tools(
+#[cfg(not(target_family = "wasm"))]
+pub fn install_tools(
     tools: Tools,
     parent: AgentHandle,
     registry: Arc<Registry>,
-    tool_set: SubagentToolSet,
 ) -> Result<Tools, ToolsBuildError> {
-    let mut builder = tools.into_builder().tool(SubmitResult {
-        registry: Arc::downgrade(&registry),
-    });
-    if tool_set.simplify() {
-        builder = builder.tool(SimplifyReview::new(
-            parent.clone(),
-            Arc::downgrade(&registry),
-        ));
-    }
-    if tool_set.generic() {
-        builder = builder
-            .tool(SpawnAgent {
-                parent,
-                registry: Arc::downgrade(&registry),
-            })
-            .tool(SendAgentMessage {
-                registry: Arc::downgrade(&registry),
-            })
-            .tool(ListAgents {
-                registry: Arc::downgrade(&registry),
-            })
-            .tool(WaitAgent {
-                registry: Arc::downgrade(&registry),
-            })
-            .tool(ChangeAgentLifecycle {
-                registry: Arc::downgrade(&registry),
-                operation: LifecycleOperation::Interrupt,
-            })
-            .tool(ChangeAgentLifecycle {
-                registry: Arc::downgrade(&registry),
-                operation: LifecycleOperation::Close,
-            });
-    }
-    builder.build()
+    tools
+        .into_builder()
+        .tool(SubmitResult {
+            registry: Arc::downgrade(&registry),
+        })
+        .tool(SpawnAgent {
+            parent,
+            registry: Arc::downgrade(&registry),
+        })
+        .tool(SendAgentMessage {
+            registry: Arc::downgrade(&registry),
+        })
+        .tool(ListAgents {
+            registry: Arc::downgrade(&registry),
+        })
+        .tool(WaitAgent {
+            registry: Arc::downgrade(&registry),
+        })
+        .tool(ChangeAgentLifecycle {
+            registry: Arc::downgrade(&registry),
+            operation: LifecycleOperation::Interrupt,
+        })
+        .tool(ChangeAgentLifecycle {
+            registry: Arc::downgrade(&registry),
+            operation: LifecycleOperation::Close,
+        })
+        .build()
+}
+
+#[cfg(target_family = "wasm")]
+pub fn install_tools(
+    tools: Tools,
+    parent: AgentHandle,
+    registry: Arc<Registry>,
+) -> Result<Tools, ToolsBuildError> {
+    tools
+        .with_tool(SubmitResult {
+            registry: Arc::downgrade(&registry),
+        })?
+        .with_tool(SpawnAgent {
+            parent,
+            registry: Arc::downgrade(&registry),
+        })?
+        .with_tool(SendAgentMessage {
+            registry: Arc::downgrade(&registry),
+        })?
+        .with_tool(ListAgents {
+            registry: Arc::downgrade(&registry),
+        })?
+        .with_tool(WaitAgent {
+            registry: Arc::downgrade(&registry),
+        })?
+        .with_tool(ChangeAgentLifecycle {
+            registry: Arc::downgrade(&registry),
+            operation: LifecycleOperation::Interrupt,
+        })?
+        .with_tool(ChangeAgentLifecycle {
+            registry: Arc::downgrade(&registry),
+            operation: LifecycleOperation::Close,
+        })
 }
 
 fn spawn_agent_output_schema() -> Value {
@@ -643,8 +649,8 @@ fn agent_status_schema() -> Value {
 #[cfg(test)]
 mod tests {
     use super::{SendAgentMessage, SubmitResult, WaitAgent};
-    use crate::subagents::runtime::Registry;
-    use nanocodex::Tool;
+    use crate::runtime::Registry;
+    use nanocodex_tools::Tool;
     use serde_json::json;
     use std::sync::Weak;
 

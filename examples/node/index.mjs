@@ -1,4 +1,4 @@
-import { Agent } from "nanocodex/node";
+import { Agent, Transport } from "nanocodex/node";
 import { runOwnedSession } from "./session.mjs";
 
 const apiKey = process.env.OPENAI_API_KEY?.trim();
@@ -7,7 +7,7 @@ if (!apiKey) {
 }
 
 const agent = await Agent.create({
-  apiKey,
+  transport: Transport.openAi({ apiKey }),
   thinking: "low",
   tools: {
     multiply: {

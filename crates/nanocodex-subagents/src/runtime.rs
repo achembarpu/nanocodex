@@ -1,5 +1,5 @@
 // Derived from clabby/tact@1d9ccaefd1d8613dab020812af04a91cd9b4c52c (Apache-2.0).
-// Modified for Nanocodex's CLI-owned module paths and runtime wiring.
+// Modified for Nanocodex's reusable native/WASM extension runtime.
 
 //! Async child-agent sessions, turns, and lifecycle orchestration.
 
@@ -12,11 +12,12 @@ use super::{
         AgentUpdate, MessageDeliveryState, MessageDisposition, MessageId, MessagePriority,
         MessagePurpose, MessageSender, ScopedAgentUpdate, SubagentRuntimeId, ThreadId,
     },
+    platform::{self, Task, timeout_at},
     task_tree::TaskTree,
 };
 use futures_util::future::join_all;
 use jsonschema::Validator;
-use nanocodex::{AgentEvents, Nanocodex, NanocodexError};
+use nanocodex_agent::{AgentEvents, Nanocodex, NanocodexError, Result as AgentResult, TurnResult};
 use serde::Serialize;
 use serde_json::Value;
 use std::{
@@ -24,17 +25,14 @@ use std::{
     sync::{Arc, Weak},
     time::Duration,
 };
-use tokio::{
-    sync::{mpsc, oneshot, watch},
-    task::JoinHandle,
-    time::{Instant, timeout_at},
-};
+use tokio::sync::{mpsc, oneshot, watch};
+use web_time::Instant;
 
 pub(super) struct ChildSession {
     pub(super) descriptor: AgentDescriptor,
-    pub(super) event_task: Option<JoinHandle<()>>,
+    pub(super) event_task: Option<Task<()>>,
     pub(super) harness: Option<HarnessHandle>,
-    pub(super) harness_task: Option<JoinHandle<()>>,
+    pub(super) harness_task: Option<Task<()>>,
     pub(super) status: AgentStatus,
     pub(super) active: bool,
     pub(super) output_validator: Validator,
@@ -62,30 +60,21 @@ impl OutputContract {
 
 pub(super) fn completion_instructions(schema: &str, turn_token: u64) -> String {
     format!(
-        "Your contractual result is not prose. Before finishing, use Code Mode to call \
-         `await tools.submit_result({{ turn_token: {turn_token}, output: ... }})` exactly once \
-         with a JSON value matching the output schema below. If validation rejects the value, \
-         correct it and retry. A turn that ends without an accepted result fails.\n\nOutput \
-         schema:\n{schema}"
+        "Your contractual result is not prose. Before finishing, call `submit_result` exactly \
+         once with `{{ turn_token: {turn_token}, output: ... }}` and a JSON value matching the \
+         output schema below. The tool may be exposed directly or through Code Mode as \
+         `tools.submit_result`. If validation rejects the value, correct it and retry. A turn \
+         that ends without an accepted result fails.\n\nOutput schema:\n{schema}"
     )
 }
 
-pub(crate) struct Registry {
+pub struct Registry {
     id: SubagentRuntimeId,
     state: tokio::sync::Mutex<RegistryState>,
     pub(super) updates: mpsc::UnboundedSender<ScopedAgentUpdate>,
     revision: watch::Sender<u64>,
     capacity: Capacity,
     message_lock: tokio::sync::Mutex<()>,
-}
-
-/// Identifies whether a tool call belongs to a coordinating root agent.
-///
-/// Clean subagents are registered by session before they can execute a turn. Root sessions and
-/// user-created forks are intentionally absent from that map and retain mutation authority.
-#[derive(Clone)]
-pub(crate) struct RootAgentGuard {
-    registry: Weak<Registry>,
 }
 
 #[derive(Default)]
@@ -116,19 +105,19 @@ pub(super) struct CloseRequest {
 
 pub(super) struct ClosedSessions {
     pub(super) summaries: Vec<AgentSummary>,
-    pub(super) harness_tasks: Vec<JoinHandle<()>>,
-    pub(super) event_tasks: Vec<JoinHandle<()>>,
+    pub(super) harness_tasks: Vec<Task<()>>,
+    pub(super) event_tasks: Vec<Task<()>>,
 }
 
 #[derive(Clone, Serialize)]
-pub(super) struct AgentSummary {
-    pub(super) agent_id: AgentId,
-    pub(super) role: String,
-    pub(super) task: String,
-    pub(super) parent_agent_id: Option<AgentId>,
-    pub(super) status: AgentStatus,
+pub struct AgentSummary {
+    pub agent_id: AgentId,
+    pub role: String,
+    pub task: String,
+    pub parent_agent_id: Option<AgentId>,
+    pub status: AgentStatus,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(super) last_output: Option<Value>,
+    pub last_output: Option<Value>,
 }
 
 #[derive(Serialize)]
@@ -751,11 +740,11 @@ impl Registry {
         self.capacity.reserve()
     }
 
-    pub(super) fn set_max_concurrency(&self, limit: usize) {
+    pub fn set_max_concurrency(&self, limit: usize) {
         self.capacity.set_limit(limit);
     }
 
-    pub(super) async fn is_root_session(&self, session_id: &str) -> bool {
+    pub async fn is_root_session(&self, session_id: &str) -> bool {
         !self
             .state
             .lock()
@@ -808,7 +797,7 @@ impl Registry {
         root_session_id: String,
         descriptor: AgentDescriptor,
         agent: Nanocodex,
-        event_task: JoinHandle<()>,
+        event_task: Task<()>,
         contract: OutputContract,
     ) -> std::io::Result<()> {
         let OutputContract { validator, schema } = contract;
@@ -927,7 +916,7 @@ impl Registry {
         &self,
         root_session_id: &str,
         id: AgentId,
-        result: nanocodex::agent::Result<nanocodex::TurnResult>,
+        result: AgentResult<TurnResult>,
     ) {
         let status = {
             let mut state = self.state.lock().await;
@@ -1187,7 +1176,7 @@ impl Registry {
             .mark_message_terminal(root_session_id, message_id);
     }
 
-    pub(super) async fn wait(
+    pub async fn wait(
         &self,
         session_id: &str,
         ids: &[AgentId],
@@ -1233,11 +1222,7 @@ impl Registry {
             .summaries_in_scope(&root_session_id, &ids)
     }
 
-    pub(super) async fn close(
-        &self,
-        session_id: &str,
-        id: AgentId,
-    ) -> std::io::Result<Vec<AgentSummary>> {
+    pub async fn close(&self, session_id: &str, id: AgentId) -> std::io::Result<Vec<AgentSummary>> {
         let _message_guard = self.message_lock.lock().await;
         let CloseRequest {
             root_session_id,
@@ -1382,7 +1367,7 @@ impl Registry {
 
     async fn wait_for_tasks(
         &self,
-        mut tasks: Vec<JoinHandle<()>>,
+        mut tasks: Vec<Task<()>>,
         deadline: Instant,
         description: &str,
     ) -> std::io::Result<()> {
@@ -1441,27 +1426,6 @@ impl Registry {
     }
 }
 
-impl RootAgentGuard {
-    pub(crate) fn new(registry: &Arc<Registry>) -> Self {
-        Self {
-            registry: Arc::downgrade(registry),
-        }
-    }
-
-    pub(crate) async fn require_root(&self, session_id: &str) -> std::io::Result<()> {
-        let registry = self
-            .registry
-            .upgrade()
-            .ok_or_else(|| std::io::Error::other("subagent runtime is closed"))?;
-        if registry.is_root_session(session_id).await {
-            return Ok(());
-        }
-        Err(std::io::Error::other(
-            "memory mutation is only available to root agents",
-        ))
-    }
-}
-
 fn complete_session(session: &mut ChildSession, output: Option<Value>) -> AgentStatus {
     let Some(output) = output else {
         return AgentStatus::Failed {
@@ -1509,24 +1473,24 @@ impl ChildSession {
 }
 
 #[derive(Clone)]
-pub(crate) struct SubagentControl {
+pub struct SubagentControl {
     registry: Arc<Registry>,
 }
 
 impl SubagentControl {
-    pub(crate) fn set_max_concurrency(&self, limit: usize) {
+    pub fn set_max_concurrency(&self, limit: usize) {
         self.registry.set_max_concurrency(limit);
     }
 
-    pub(crate) async fn cancel_all(&self, root_session_id: &str) {
+    pub async fn cancel_all(&self, root_session_id: &str) {
         self.registry.cancel_all(root_session_id).await;
     }
 
-    pub(crate) async fn close_all(&self, root_session_id: &str) {
-        drop(self.registry.close_all(root_session_id).await);
+    pub async fn close_all(&self, root_session_id: &str) -> std::io::Result<()> {
+        self.registry.close_all(root_session_id).await.map(drop)
     }
 
-    pub(crate) fn runtime_id(&self) -> SubagentRuntimeId {
+    pub fn runtime_id(&self) -> SubagentRuntimeId {
         self.registry.id
     }
 }
@@ -1538,8 +1502,8 @@ pub(super) fn forward_events(
     start: oneshot::Receiver<()>,
     registry: Weak<Registry>,
     updates: mpsc::UnboundedSender<ScopedAgentUpdate>,
-) -> JoinHandle<()> {
-    tokio::spawn(async move {
+) -> Task<()> {
+    platform::spawn(async move {
         if start.await.is_err() {
             return;
         }
@@ -1567,7 +1531,7 @@ fn send_update(
         .is_ok()
 }
 
-pub(crate) fn channel(
+pub fn channel(
     max_concurrency: usize,
 ) -> (
     Arc<Registry>,
@@ -1586,17 +1550,15 @@ pub(crate) fn channel(
 mod tests {
     use super::{
         AgentDescriptor, AgentId, AgentStatus, ChildSession, OutputContract, Registry,
-        RegistryState, RootAgentGuard, complete_session, completion_instructions, forward_events,
+        RegistryState, complete_session, completion_instructions, forward_events,
     };
-    use crate::subagents::{
+    use crate::platform;
+    use crate::{
         AgentUpdate, MessageDeliveryState, MessageDisposition, MessagePriority, MessagePurpose,
     };
-    use nanocodex::{
-        Nanocodex, OpenAi,
-        oai::{
-            ResponseError,
-            tower::{ResponsesAttempt, ResponsesServiceResponse},
-        },
+    use nanocodex_agent::{
+        AgentEvents, Nanocodex, OpenAi, ResponseError,
+        transport::{ResponsesAttempt, ResponsesServiceResponse},
     };
     use serde_json::json;
     use std::{
@@ -1607,7 +1569,7 @@ mod tests {
         time::Duration,
     };
     use tokio::{
-        sync::{Notify, mpsc, oneshot},
+        sync::{Notify, oneshot},
         time::timeout,
     };
     use tower::Service;
@@ -1632,7 +1594,7 @@ mod tests {
         }
     }
 
-    fn pending_agent(called: Arc<Notify>) -> (Nanocodex, nanocodex::AgentEvents) {
+    fn pending_agent(called: Arc<Notify>) -> (Nanocodex, AgentEvents) {
         let openai = OpenAi::builder("test-key")
             .service(move || PendingService {
                 called: Arc::clone(&called),
@@ -1647,26 +1609,6 @@ mod tests {
             validator: jsonschema::validator_for(&json!({})).unwrap(),
             schema: "{}".to_owned(),
         }
-    }
-
-    #[tokio::test]
-    async fn root_agent_guard_rejects_registered_child_sessions() {
-        let (updates, _updates_receiver) = mpsc::unbounded_channel();
-        let registry = Arc::new(Registry::new(updates, 1));
-        registry
-            .state
-            .lock()
-            .await
-            .root_by_session
-            .insert("child".to_owned(), "root".to_owned());
-        let guard = RootAgentGuard::new(&registry);
-
-        assert!(guard.require_root("root").await.is_ok());
-        assert!(guard.require_root("fork").await.is_ok());
-        assert_eq!(
-            guard.require_root("child").await.unwrap_err().to_string(),
-            "memory mutation is only available to root agents"
-        );
     }
 
     #[test]
@@ -1692,7 +1634,7 @@ mod tests {
         reservation: &super::AgentReservation,
         parent: Option<AgentId>,
         agent: Nanocodex,
-        events: nanocodex::AgentEvents,
+        events: AgentEvents,
     ) -> String {
         let session_id = events.request_id().to_owned();
         let descriptor = AgentDescriptor {
@@ -1741,7 +1683,7 @@ mod tests {
 
     async fn next_message_update(
         updates: &mut tokio::sync::mpsc::UnboundedReceiver<super::ScopedAgentUpdate>,
-    ) -> crate::subagents::AgentMessageUpdate {
+    ) -> crate::AgentMessageUpdate {
         timeout(Duration::from_secs(5), async {
             loop {
                 let update = updates
@@ -1783,7 +1725,7 @@ mod tests {
         };
         ChildSession {
             descriptor,
-            event_task: Some(tokio::spawn(async {})),
+            event_task: Some(platform::spawn(async {})),
             harness: None,
             harness_task: None,
             status: AgentStatus::Pending,
@@ -2404,7 +2346,7 @@ mod tests {
             insert_pending_runtime_session(&registry, "main", None, Arc::new(Notify::new())).await;
         mark_reusable(&registry, "main", target).await;
 
-        for index in 0..crate::subagents::harness::DEFERRED_CAPACITY {
+        for index in 0..crate::harness::DEFERRED_CAPACITY {
             let receipt = registry
                 .send_message(
                     &sender_session,
@@ -2431,7 +2373,7 @@ mod tests {
             .unwrap_err();
         assert!(normal_error.to_string().contains("mailbox"));
 
-        for index in 0..crate::subagents::harness::URGENT_CAPACITY {
+        for index in 0..crate::harness::URGENT_CAPACITY {
             let receipt = registry
                 .send_message(
                     &sender_session,

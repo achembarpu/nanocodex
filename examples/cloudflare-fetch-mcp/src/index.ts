@@ -1,7 +1,7 @@
 import { DurableObject } from "cloudflare:workers";
 import asyncVariant from "@jitl/quickjs-wasmfile-release-asyncify";
 import { createJsonChannelStore, tempo } from "mppx/client";
-import { Agent, createQuickJsEvaluator, createTempoProvider } from "nanocodex/browser";
+import { Agent, createQuickJsEvaluator, createTempoProvider, Transport } from "nanocodex/browser";
 import {
   newQuickJSAsyncWASMModuleFromVariant,
   newVariant,
@@ -126,9 +126,11 @@ export class HostedNanocodex extends DurableObject<Env> {
     try {
       agent = await Agent.create({
         module: nanocodexWasm,
-        mpp: createTempoProvider({
-          session: modelMpp,
-          payment: { methods: [mcpMethod] },
+        transport: Transport.mpp({
+          session: createTempoProvider({
+            session: modelMpp,
+            payment: { methods: [mcpMethod] },
+          }),
         }),
         codeEvaluator: await quickJsEvaluator,
         thinking: input.thinking,

@@ -53,7 +53,9 @@ use std::{error::Error, fmt, future::Future, pin::Pin};
 use crate::{ToolContext, ToolDefinition, ToolInput, ToolOutput};
 
 pub use input::{prepare_output_images, prepare_user_input};
-pub use runtime::{HostedToolRuntime, HostedToolRuntimeControl, HostedTools};
+pub use runtime::{
+    HostedToolRuntime, HostedToolRuntimeControl, HostedTools, HostedToolsBuildError,
+};
 pub use types::{
     CodeModeExecution, CodeModeNotification, CodeModeObserver, CodeModeUpdate, NestedToolCall,
     OwnedToolContext,

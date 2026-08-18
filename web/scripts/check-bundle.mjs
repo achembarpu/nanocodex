@@ -21,9 +21,11 @@ const budgets = Object.freeze({
   browserShellJavaScriptGzip: 450_000,
   artifactCoreJavaScript: 7_000,
   artifactCoreJavaScriptGzip: 2_800,
-  // Includes the canonical Rust apply_patch grammar and planner in browser WASM.
-  wasm: 2_550_000,
-  wasmGzip: 550_000,
+  // Includes the canonical Rust apply_patch planner and the complete
+  // JSON-Schema-backed subagent runtime. Keep these close to the optimized
+  // artifact so future growth still fails this gate.
+  wasm: 3_750_000,
+  wasmGzip: 1_200_000,
   mppControlsJavaScript: 1_300_000,
   workerTempoJavaScript: 800_000,
 });

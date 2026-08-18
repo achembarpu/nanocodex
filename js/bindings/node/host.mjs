@@ -263,6 +263,7 @@ export function createNodeHost(options = {}) {
       for (const handle of [...connections.keys()]) close(handle);
       code.reset();
       await mcp?.then((provider) => provider.close(), () => {});
+      options.onDispose?.();
     })();
     return disposal;
   }
@@ -287,6 +288,7 @@ export function createNodeHost(options = {}) {
     cancelCode: code.cancel,
     toolMode: () => toolMode,
     toolDefinitions: code.toolDefinitions,
+    releaseSession: code.releaseSession,
     emitEvent: onEvent,
     reset: code.reset,
     dispose,

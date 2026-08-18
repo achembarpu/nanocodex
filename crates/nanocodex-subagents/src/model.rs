@@ -1,7 +1,7 @@
 // Derived from clabby/tact@1d9ccaefd1d8613dab020812af04a91cd9b4c52c (Apache-2.0).
-// Modified for Nanocodex's CLI-owned module paths and runtime wiring.
+// Modified for Nanocodex's reusable native/WASM extension runtime.
 
-use nanocodex::agent::events::AgentEvent;
+use nanocodex_agent::events::AgentEvent;
 use serde::{Deserialize, Serialize};
 use std::{
     fmt,
@@ -12,7 +12,7 @@ static NEXT_RUNTIME_ID: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
-pub(crate) struct AgentId(u64);
+pub struct AgentId(u64);
 
 impl AgentId {
     #[cfg(test)]
@@ -34,7 +34,7 @@ impl fmt::Display for AgentId {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
-pub(crate) struct MessageId(u64);
+pub struct MessageId(u64);
 
 impl MessageId {
     #[cfg(test)]
@@ -56,14 +56,9 @@ impl fmt::Display for MessageId {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, Ord, PartialEq, PartialOrd, Serialize)]
 #[serde(transparent)]
-pub(crate) struct ThreadId(u64);
+pub struct ThreadId(u64);
 
 impl ThreadId {
-    #[cfg(test)]
-    pub(crate) const fn new(value: u64) -> Self {
-        Self(value)
-    }
-
     pub(super) const fn for_message(message: MessageId) -> Self {
         Self(message.0)
     }
@@ -77,7 +72,7 @@ impl fmt::Display for ThreadId {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, Hash, PartialEq, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
-pub(crate) enum MessageSender {
+pub enum MessageSender {
     Root,
     Agent { agent_id: AgentId },
 }
@@ -93,14 +88,14 @@ impl MessageSender {
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum MessagePriority {
+pub enum MessagePriority {
     #[default]
     Deferred,
     Urgent,
 }
 
 impl MessagePriority {
-    pub(crate) const fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Deferred => "deferred",
             Self::Urgent => "urgent",
@@ -110,7 +105,7 @@ impl MessagePriority {
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum MessagePurpose {
+pub enum MessagePurpose {
     Delegate,
     #[default]
     Coordinate,
@@ -120,7 +115,7 @@ pub(crate) enum MessagePurpose {
 }
 
 impl MessagePurpose {
-    pub(crate) const fn as_str(self) -> &'static str {
+    pub const fn as_str(self) -> &'static str {
         match self {
             Self::Delegate => "delegate",
             Self::Coordinate => "coordinate",
@@ -133,23 +128,23 @@ impl MessagePurpose {
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub(crate) enum MessageDisposition {
+pub enum MessageDisposition {
     Started,
     Queued,
     Steered,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct AgentMessage {
-    pub(crate) id: MessageId,
-    pub(crate) thread_id: ThreadId,
-    pub(crate) from: MessageSender,
-    pub(crate) to: AgentId,
-    pub(crate) priority: MessagePriority,
-    pub(crate) purpose: MessagePurpose,
+pub struct AgentMessage {
+    pub id: MessageId,
+    pub thread_id: ThreadId,
+    pub from: MessageSender,
+    pub to: AgentId,
+    pub priority: MessagePriority,
+    pub purpose: MessagePurpose,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) in_reply_to: Option<MessageId>,
-    pub(crate) body: String,
+    pub in_reply_to: Option<MessageId>,
+    pub body: String,
 }
 
 impl AgentMessage {
@@ -189,25 +184,25 @@ impl AgentMessage {
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct AgentThread {
-    pub(crate) id: ThreadId,
-    pub(crate) participants: [MessageSender; 2],
-    pub(crate) messages: Vec<AgentMessage>,
+pub struct AgentThread {
+    pub id: ThreadId,
+    pub participants: [MessageSender; 2],
+    pub messages: Vec<AgentMessage>,
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
-pub(crate) enum MessageDeliveryState {
+pub enum MessageDeliveryState {
     Admitted { disposition: MessageDisposition },
     Delivered { disposition: MessageDisposition },
     Failed { error: String },
 }
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
-pub(crate) struct AgentMessageUpdate {
-    pub(crate) message_id: MessageId,
-    pub(crate) thread: AgentThread,
-    pub(crate) delivery: MessageDeliveryState,
+pub struct AgentMessageUpdate {
+    pub message_id: MessageId,
+    pub thread: AgentThread,
+    pub delivery: MessageDeliveryState,
 }
 
 pub(super) fn agent_prompt(id: AgentId, task: &str) -> String {
@@ -233,7 +228,7 @@ pub(super) fn agent_prompt(id: AgentId, task: &str) -> String {
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
-pub(crate) enum AgentStatus {
+pub enum AgentStatus {
     Pending,
     Running,
     Completed { output: serde_json::Value },
@@ -244,7 +239,7 @@ pub(crate) enum AgentStatus {
 }
 
 impl AgentStatus {
-    pub(crate) const fn is_active(&self) -> bool {
+    pub const fn is_active(&self) -> bool {
         matches!(self, Self::Pending | Self::Running | Self::Closing)
     }
 
@@ -264,29 +259,29 @@ impl AgentStatus {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub(crate) struct AgentDescriptor {
-    pub(crate) id: AgentId,
-    pub(crate) session_id: String,
-    pub(crate) role: String,
-    pub(crate) task: String,
-    pub(crate) parent: Option<AgentId>,
+pub struct AgentDescriptor {
+    pub id: AgentId,
+    pub session_id: String,
+    pub role: String,
+    pub task: String,
+    pub parent: Option<AgentId>,
 }
 
 #[derive(Debug)]
-pub(crate) enum AgentUpdate {
+pub enum AgentUpdate {
     Added(AgentDescriptor),
     Event { id: AgentId, event: AgentEvent },
     Status { id: AgentId, status: AgentStatus },
     Message(AgentMessageUpdate),
 }
 
-pub(crate) struct ScopedAgentUpdate {
-    pub(crate) root_session_id: String,
-    pub(crate) update: AgentUpdate,
+pub struct ScopedAgentUpdate {
+    pub root_session_id: String,
+    pub update: AgentUpdate,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
-pub(crate) struct SubagentRuntimeId(u64);
+pub struct SubagentRuntimeId(u64);
 
 impl SubagentRuntimeId {
     pub(super) fn next() -> Self {

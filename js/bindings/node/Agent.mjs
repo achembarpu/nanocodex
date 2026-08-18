@@ -9,10 +9,14 @@ import {
   createEventChannel,
   defineRuntime,
   loadSubscriptionRuntime,
+  registerDefinitionHost,
+  releaseDefinitionHost,
   releaseHostSession,
   toWasmConfig,
 } from "../internal.mjs";
 import { createNodeHost } from "./host.mjs";
+import { resolveTools } from "../runtime/tool-configuration.mjs";
+import { resolve as resolveTransport } from "./Transport.mjs";
 
 let initializedWeb;
 let NodeNanocodex;
@@ -23,16 +27,11 @@ export function create(options = {}) {
     thinking,
     reasoningMode,
     fastMode,
-    websocketWarmup,
     instructions,
     sessionId,
     workspace,
     resume,
-    apiKey,
-    subscription,
-    mpp,
-    websocketUrl,
-    apiBaseUrl,
+    transport,
     module,
     filesystem,
     tools,
@@ -40,17 +39,21 @@ export function create(options = {}) {
     mcp,
     codeEvaluator,
   } = options;
+  const {
+    apiKey,
+    subscription,
+    mpp,
+    websocketUrl,
+    apiBaseUrl,
+    websocketWarmup,
+  } = resolveTransport(transport);
+  const { tools: hostTools, subagents: subagentConfig } = resolveTools(tools);
   const events = createEventChannel();
-  if (mpp !== undefined && apiKey !== undefined) {
-    throw new TypeError("apiKey and mpp are mutually exclusive");
-  }
-  if (subscription !== undefined && (apiKey !== undefined || mpp !== undefined)) {
-    throw new TypeError("subscription is mutually exclusive with apiKey and mpp");
-  }
   if (filesystem && workspace !== undefined && workspace !== filesystem.root) {
     throw new TypeError("workspace must match filesystem.root when both are provided");
   }
   const tempoMcp = mpp?.[Symbol.for("nanocodex.tempo.mcp")];
+  let hostDefinitionId;
   const host = createNodeHost({
     mpp,
     mcpServers: mcp === false
@@ -58,11 +61,13 @@ export function create(options = {}) {
       : tempoMcp ? { ...tempoMcp, ...mcp } : mcp,
     onEvent: events.emit,
     filesystem,
-    tools,
+    tools: hostTools,
     toolMode,
     workspace: workspace ?? filesystem?.root ?? resume?.workspace,
     codeEvaluator,
+    onDispose: () => releaseDefinitionHost(hostDefinitionId),
   });
+  hostDefinitionId = registerDefinitionHost(host);
   activateHost(host);
   const runtime = defineRuntime({
     key: "node-wasm",
@@ -85,6 +90,8 @@ export function create(options = {}) {
             : "wss://openai.mpp.tempo.xyz/v1/responses"),
           apiBaseUrl,
           websocketWarmup,
+          subagents: subagentConfig,
+          hostDefinitionId,
           ...config,
         }));
         return subscription === undefined
@@ -109,6 +116,7 @@ export function create(options = {}) {
       }
     },
     release(raw) {
+      host.releaseSession(raw.sessionId);
       releaseHostSession(host, raw.sessionId);
       releaseHost(host);
     },

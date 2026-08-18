@@ -1,4 +1,4 @@
-import { Agent } from "nanocodex/browser";
+import { Agent, Transport } from "nanocodex/browser";
 
 import {
   createExampleAgentController,
@@ -60,7 +60,7 @@ async function createAgent(data: StartMessage) {
       async (paymentSession) => {
         const agent = await Agent.create({
           ...common,
-          mpp: paymentSession.provider,
+          transport: Transport.mpp({ session: paymentSession.provider }),
         });
         const payment: ExamplePayment = {
           rootAddress: paymentSession.rootAddress,
@@ -78,13 +78,15 @@ async function createAgent(data: StartMessage) {
   return {
     agent: await Agent.create({
       ...common,
-      apiKey: "worker-managed",
-      websocketUrl: workerEndpoint(),
-      createWebSocket: (endpoint: string, sessionId: string) => {
-        const url = new URL(endpoint);
-        url.searchParams.set("session_id", sessionId);
-        return new WebSocket(url);
-      },
+      transport: Transport.openAi({
+        apiKey: "worker-managed",
+        websocketUrl: workerEndpoint(),
+        createWebSocket: (endpoint: string, sessionId: string) => {
+          const url = new URL(endpoint);
+          url.searchParams.set("session_id", sessionId);
+          return new WebSocket(url);
+        },
+      }),
     }),
   };
 }

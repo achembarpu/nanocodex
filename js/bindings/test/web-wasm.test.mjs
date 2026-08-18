@@ -3,11 +3,23 @@ import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import WebSocket, { WebSocketServer } from "ws";
 
-import { Agent } from "../browser/index.mjs";
+import { Agent, Transport } from "../browser/index.mjs";
 
-const createWarmAgent = (options) => Agent.create({
+const createWarmAgent = ({
+  apiKey,
+  createWebSocket,
+  WebSocketImpl,
+  websocketUrl,
+  ...options
+}) => Agent.create({
   ...options,
-  websocketWarmup: true,
+  transport: Transport.openAi({
+    apiKey,
+    createWebSocket,
+    WebSocketImpl,
+    websocketUrl,
+    websocketWarmup: true,
+  }),
 });
 
 test("web-target WASM runs the shared model loop through the browser host", async () => {

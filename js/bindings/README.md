@@ -1,14 +1,15 @@
 # Nanocodex for JavaScript
 
 The Node and browser entrypoints expose the same viem-v3-style API over the
-same Rust/WASM agent. Runtime-specific host options are flattened into
-`Agent.create(...)`; generated WASM handles and host routing remain private.
+same Rust/WASM agent. A required Responses `Transport` owns authentication and
+socket setup; `Agent.create(...)` owns agent policy, tools, and lifecycle.
+Generated WASM handles and host routing remain private.
 
 ```js
-import { Actions, Agent } from "nanocodex/node";
+import { Actions, Agent, Transport } from "nanocodex/node";
 
 const agent = await Agent.create({
-  apiKey: process.env.OPENAI_API_KEY,
+  transport: Transport.openAi({ apiKey: process.env.OPENAI_API_KEY }),
   model: "gpt-5.6-luna",
   instructions: "You are a Rust coding agent. Preserve unrelated work and run relevant tests.",
   reasoningMode: "pro",
@@ -42,6 +43,84 @@ await branch.session.shutdown();
 await agent.session.shutdown();
 ```
 
+Transports are explicit, immutable configurations, like viem v3 transports:
+
+```js
+Transport.openAi({ apiKey, websocketUrl });
+Transport.chatGpt({ subscription });
+Transport.mpp({ session: paymentSession });
+```
+
+The browser entrypoint additionally exposes `Transport.hostManaged(...)` for a
+Worker, Durable Object, or application proxy that owns rotating credentials.
+Authentication modes are constructors rather than a union of mutually
+exclusive fields on `Agent.create`.
+
+Task-tree orchestration is an optional extension over the core agent. Both
+native and WASM consumers run the same Rust implementation and receive the
+same seven tools: `spawn_agent`, `submit_result`, `send_agent_message`,
+`list_agents`, `wait_agent`, `interrupt_agent`, and `close_agent`.
+
+```js
+import { Agent, Subagents, Transport } from "nanocodex/browser";
+import nanocodexWasm from "./nanocodex.wasm";
+
+const myApplicationTool = {
+  name: "lookup_order",
+  description: "Look up one order.",
+  parameters: {
+    type: "object",
+    properties: { id: { type: "string" } },
+    required: ["id"],
+    additionalProperties: false,
+  },
+  handler: ({ id }) => orders.get(id),
+};
+
+const agent = await Agent.create({
+  module: nanocodexWasm,
+  transport: Transport.hostManaged({
+    websocketUrl: "/api/responses",
+    createWebSocket: (endpoint) => new WebSocket(endpoint),
+  }),
+  tools: [
+    myApplicationTool,
+    ...Subagents.create({ maxConcurrency: 8 }),
+  ],
+});
+```
+
+`parameters` is optional and defaults to an open object. TypeScript types are
+erased at runtime, so provide JSON Schema only when the model needs a precise
+argument contract, as `lookup_order` does above.
+
+This is what loading a Rust-written tool from JavaScript looks like here.
+`nanocodex-subagents` is statically linked into `nanocodex.wasm`; importing the
+module loads that Rust code, and spreading `Subagents.create()` into `tools`
+selects it for this agent. The spread contributes one opaque extension entry,
+not seven JavaScript handlers. Inside the binding, Rust creates one shared
+registry and installs fresh tools for every root, spawn, and fork:
+
+```rust,ignore
+let (registry, control, updates) = nanocodex_subagents::channel(max_concurrency);
+let tools = HostedTools::new(javascript_host);
+let (agent, events) = Nanocodex::builder(openai)
+    .tools_factory(move |handle| {
+        nanocodex_subagents::install_tools(tools.clone(), handle, registry.clone())
+    })
+    .build()?;
+```
+
+This is deliberately static composition, not a generic runtime loader for an
+arbitrary second `.wasm` plugin. A custom Rust extension is linked into the
+binding crate at build time and exposed by a small branded JS configuration;
+adding a dynamic component ABI would be a separate feature with a much larger
+contract and runtime cost.
+
+The root owns the task tree. `agent.session.shutdown()` closes every child
+before stopping the root driver; applications do not maintain a parallel JS
+scheduler or reimplement the communication tools.
+
 ## Persistent workspaces
 
 Runtime-specific `Workspace` adapters give an embedding application one file
@@ -52,11 +131,14 @@ adapter roots the same operations in an ordinary directory and refuses path
 traversal and symbolic-link escapes.
 
 ```js
-import { Agent, Workspace } from "nanocodex/browser";
+import { Agent, Transport, Workspace } from "nanocodex/browser";
 
 const workspace = await Workspace.open({ name: "my-notebook" });
 const agent = await Agent.create({
-  apiKey,
+  transport: Transport.hostManaged({
+    websocketUrl: "/api/responses",
+    createWebSocket: (endpoint) => new WebSocket(endpoint),
+  }),
   filesystem: workspace,
 });
 
@@ -73,11 +155,11 @@ does not add a fake browser shell.
 Node uses the same shape with a real directory:
 
 ```js
-import { Agent, Workspace } from "nanocodex/node";
+import { Agent, Transport, Workspace } from "nanocodex/node";
 
 const workspace = await Workspace.open({ path: process.cwd() });
 const agent = await Agent.create({
-  apiKey: process.env.OPENAI_API_KEY,
+  transport: Transport.openAi({ apiKey: process.env.OPENAI_API_KEY }),
   filesystem: workspace,
 });
 ```
@@ -88,7 +170,7 @@ session manager has this shape. Nanocodex defaults the socket to
 `wss://openai.mpp.tempo.xyz/v1/responses` when `mpp` is present.
 
 ```js
-import { Agent, createTempoProviderFromAccounts } from "nanocodex/node";
+import { Agent, createTempoProviderFromAccounts, Transport } from "nanocodex/node";
 import { Expiry } from "accounts";
 import { Provider } from "accounts/cli";
 import { parseUnits } from "viem";
@@ -128,7 +210,12 @@ const tempoProvider = await createTempoProviderFromAccounts({
 });
 const mpp = tempoProvider.session;
 
-const agent = await Agent.create({ mpp: tempoProvider, thinking: "none", fastMode: true, tools });
+const agent = await Agent.create({
+  transport: Transport.mpp({ session: tempoProvider }),
+  thinking: "none",
+  fastMode: true,
+  tools,
+});
 const events = agent.events.watch();
 const unwatch = events.onEvent((event) => {
   process.stdout.write(`${JSON.stringify(event)}\n`);
@@ -163,8 +250,8 @@ try {
 The application still owns its wallet, deposit policy, persisted payment
 channel store, and final settlement. Keep the manager alive to reuse its channel
 across agents, and supply mppx `channelStore` for reuse after a process or page
-restart. Nanocodex never closes a caller-owned MPP session. `apiKey` and `mpp`
-are mutually exclusive. `createTempoProviderFromAccounts({ wallet, ... })`
+restart. Nanocodex never closes a caller-owned MPP session.
+`createTempoProviderFromAccounts({ wallet, ... })`
 accepts any provider returned by Accounts SDK `Provider.create(...)`, regardless
 of its wallet adapter, and constructs both payment paths from that provider's
 adapter-neutral `getMppxParameters()` contract. The lower-level
@@ -199,9 +286,11 @@ const mcpMethod = tempo({
 });
 
 const agent = await Agent.create({
-  mpp: createTempoProvider({
-    session: mpp,
-    payment: { methods: [mcpMethod] },
+  transport: Transport.mpp({
+    session: createTempoProvider({
+      session: mpp,
+      payment: { methods: [mcpMethod] },
+    }),
   }),
 });
 ```
@@ -223,12 +312,13 @@ keeps deferred MCP plus Code Mode functional in Cloudflare Workers:
 
 ```js
 import asyncVariant from "@jitl/quickjs-wasmfile-release-asyncify";
-import { Agent, createQuickJsEvaluator, createTempoProvider } from "nanocodex/browser";
+import { Agent, createQuickJsEvaluator, createTempoProvider, Transport } from "nanocodex/browser";
 import { newQuickJSAsyncWASMModuleFromVariant } from "quickjs-emscripten-core";
 
 const quickJs = await newQuickJSAsyncWASMModuleFromVariant(asyncVariant);
 const agent = await Agent.create({
-  // module, mpp, and mcp omitted here
+  transport: Transport.mpp({ session: tempoProvider }),
+  // module and mcp omitted here
   codeEvaluator: createQuickJsEvaluator(quickJs),
 });
 ```
@@ -245,7 +335,7 @@ const snapshot = result.snapshot;
 await agent.session.shutdown();
 
 const resumed = await Agent.create({
-  apiKey: process.env.OPENAI_API_KEY,
+  transport: Transport.openAi({ apiKey: process.env.OPENAI_API_KEY }),
   resume: snapshot,
   tools,
 });
@@ -263,7 +353,7 @@ WebSockets and Code Mode:
 
 ```js
 const module = await WebAssembly.compile(await readFile(wasmAssetPath));
-const agent = await Agent.create({ apiKey, module });
+const agent = await Agent.create({ transport: Transport.openAi({ apiKey }), module });
 ```
 
 A Codex-compatible rollout can also be resumed by materializing its committed
@@ -342,64 +432,74 @@ extended.inspect.session();
 Browser Workers use the identical shape:
 
 ```js
-import { Agent } from "nanocodex/browser";
+import { Agent, Transport } from "nanocodex/browser";
 
 const agent = await Agent.create({
-  websocketUrl: signedOrCookieAuthorizedEndpoint,
-  createWebSocket(endpoint, sessionId) {
-    const url = new URL(endpoint);
-    url.searchParams.set("session_id", sessionId);
-    return new WebSocket(url);
-  },
+  transport: Transport.hostManaged({
+    websocketUrl: signedOrCookieAuthorizedEndpoint,
+    createWebSocket(endpoint, sessionId) {
+      const url = new URL(endpoint);
+      url.searchParams.set("session_id", sessionId);
+      return new WebSocket(url);
+    },
+  }),
   tools,
 });
 ```
 
 Server-side Worker runtimes can await a `fetch()`-based WebSocket upgrade. The
 third callback argument is a discriminated authorization request plus connection
-metadata. With `apiKey`, `authorization` is `"bearer"` and `bearerToken` is
-present. With `hostAuth: true`, it is `"host_managed"`; the host must resolve
+metadata. With `Transport.openAi`, `authorization` is `"bearer"` and
+`bearerToken` is present. With `Transport.hostManaged`, it is `"host_managed"`;
+the host must resolve
 credentials without exposing them to WASM. Do not retain or log bearer tokens.
 Return the socket alone or a descriptor containing response metadata:
 
 ```js
-import { Agent } from "nanocodex/browser";
+import { Agent, Transport } from "nanocodex/browser";
 import module from "nanocodex/wasm";
 
 const agent = await Agent.create({
-  apiKey,
+  transport: Transport.openAi({
+    apiKey,
+    async createWebSocket(endpoint, sessionId, request) {
+      if (request.authorization !== "bearer") {
+        throw new Error("this host requires Nanocodex bearer authorization");
+      }
+      const response = await fetch(endpoint.replace("wss:", "https:"), {
+        headers: {
+          Authorization: `Bearer ${request.bearerToken}`,
+          Upgrade: "websocket",
+          "session-id": sessionId,
+        },
+      });
+      if (!response.webSocket) throw new Error(`upgrade failed: ${response.status}`);
+      response.webSocket.accept();
+      return { socket: response.webSocket, status: response.status };
+    },
+  }),
   module,
-  async createWebSocket(endpoint, sessionId, request) {
-    if (request.authorization !== "bearer") {
-      throw new Error("this host requires Nanocodex bearer authorization");
-    }
-    const response = await fetch(endpoint.replace("wss:", "https:"), {
-      headers: {
-        Authorization: `Bearer ${request.bearerToken}`,
-        Upgrade: "websocket",
-        "session-id": sessionId,
-      },
-    });
-    if (!response.webSocket) throw new Error(`upgrade failed: ${response.status}`);
-    response.webSocket.accept();
-    return { socket: response.webSocket, status: response.status };
-  },
 });
 ```
 
-`hostAuth` is useful when the embedding runtime owns rotating credentials. The
+`Transport.hostManaged` is useful when the embedding runtime owns rotating credentials. The
 callback can acquire a fresh token, attempt the upgrade, and refresh-and-retry
 on 401. Bound and reject upgrade work in the callback: until it returns a
-socket, there is no connection handle for Nanocodex to close. `apiKey`,
-`hostAuth`, and `mpp` are mutually exclusive.
+socket, there is no connection handle for Nanocodex to close. Selecting one
+transport makes authentication modes mutually exclusive by construction.
 
 After publication, a browser can load the same entrypoint without a package
 manager or build step:
 
 ```html
 <script type="module">
-  import { Agent } from "https://cdn.jsdelivr.net/npm/nanocodex@0.5.0/browser/index.mjs";
-  const agent = await Agent.create({ websocketUrl: "/api/responses" });
+  import { Agent, Transport } from "https://cdn.jsdelivr.net/npm/nanocodex@0.5.0/browser/index.mjs";
+  const agent = await Agent.create({
+    transport: Transport.hostManaged({
+      websocketUrl: "/api/responses",
+      createWebSocket: (endpoint) => new WebSocket(endpoint),
+    }),
+  });
   const turn = agent.turn.prompt({ input: "Hello." });
   try {
     const result = await turn.result();

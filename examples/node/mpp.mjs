@@ -1,7 +1,7 @@
 import { Expiry } from "accounts";
 import { Provider } from "accounts/cli";
 import { tempo } from "mppx/client";
-import { Agent } from "nanocodex/node";
+import { Agent, Transport } from "nanocodex/node";
 import { parseUnits } from "viem";
 import { connect } from "viem/experimental/erc7846";
 import { Actions } from "viem/tempo";
@@ -92,7 +92,7 @@ let unwatch;
 
 try {
   agent = await Agent.create({
-    mpp,
+    transport: Transport.mpp({ session: mpp }),
     thinking: "none",
     fastMode: true,
     instructions: "Answer the user's request directly and concisely.",

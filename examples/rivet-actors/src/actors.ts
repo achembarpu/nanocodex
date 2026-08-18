@@ -9,7 +9,7 @@ import type {
   Turn,
   TurnUsage,
 } from "nanocodex";
-import { Agent } from "nanocodex/browser";
+import { Agent, Transport } from "nanocodex/browser";
 import { agentOS } from "@rivet-dev/agentos";
 import { event, UserError } from "rivetkit";
 import type { RawAccess } from "rivetkit/db";
@@ -370,8 +370,9 @@ async function createAgent(context: SessionContext): Promise<DefaultAgent> {
   const row = await sessionRow(context.db);
   const resume = row.snapshot === null ? undefined : JSON.parse(row.snapshot) as SessionSnapshot;
   const mode = modelAuthMode();
+  const websocketUrl = process.env.OPENAI_WEBSOCKET_URL
+    ?? (mode === "chatgpt" ? CHATGPT_WEBSOCKET_URL : undefined);
   const common = {
-    apiBaseUrl: mode === "chatgpt" ? CHATGPT_API_BASE_URL : undefined,
     instructions: "You are Nanocodex running as a durable Rivet Actor. Use the sandbox_* tools for code, files, and previews; their /workspace is an isolated persistent AgentOS VM filesystem for this actor.",
     module: await wasmBytes,
     resume,
@@ -389,8 +390,6 @@ async function createAgent(context: SessionContext): Promise<DefaultAgent> {
         }),
       },
     },
-    websocketUrl: process.env.OPENAI_WEBSOCKET_URL
-      ?? (mode === "chatgpt" ? CHATGPT_WEBSOCKET_URL : undefined),
     workspace: "/workspace",
   };
 
@@ -399,8 +398,7 @@ async function createAgent(context: SessionContext): Promise<DefaultAgent> {
     const apiKey = requiredSecret("OPENAI_API_KEY");
     agent = await Agent.create({
       ...common,
-      apiKey,
-      createWebSocket: openApiKeyWebSocket,
+      transport: Transport.openAi({ apiKey, websocketUrl, createWebSocket: openApiKeyWebSocket }),
     });
   } else {
     const authFile = process.env.NANOCODEX_CODEX_AUTH_FILE;
@@ -409,9 +407,12 @@ async function createAgent(context: SessionContext): Promise<DefaultAgent> {
       : subscriptionActorProvider(context);
     agent = await Agent.create({
       ...common,
-      hostAuth: true,
-      createWebSocket: (endpoint: string, sessionId: string, request: BrowserAuthRequest) =>
-        openSubscriptionWebSocket(auth, endpoint, sessionId, request),
+      transport: Transport.hostManaged({
+        apiBaseUrl: CHATGPT_API_BASE_URL,
+        websocketUrl,
+        createWebSocket: (endpoint: string, sessionId: string, request: BrowserAuthRequest) =>
+          openSubscriptionWebSocket(auth, endpoint, sessionId, request),
+      }),
     });
   }
   const watcher = agent.events.watch();

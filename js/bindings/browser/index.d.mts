@@ -33,7 +33,9 @@ export type {
   SessionSnapshot,
   Thinking,
   Tool,
+  NamedTool,
   ToolContext,
+  ToolConfiguration,
   ToolMap,
   Turn,
   TurnResult,
@@ -50,4 +52,6 @@ export type {
 } from "../types.mjs";
 export * as Agent from "./Agent.mjs";
 export * as ChatGptSubscription from "./ChatGptSubscription.mjs";
+export * as Subagents from "../runtime/subagents.mjs";
+export * as Transport from "./Transport.mjs";
 export * as Workspace from "./workspace.mjs";

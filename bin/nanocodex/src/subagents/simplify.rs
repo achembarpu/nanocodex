@@ -1,7 +1,4 @@
-use super::{
-    AgentId, AgentStatus, Registry,
-    tools::{AgentTask, AgentToolResult, start_agent},
-};
+use super::{AgentId, AgentStatus, Registry};
 use nanocodex::{
     Tool,
     agent::AgentHandle,
@@ -9,6 +6,7 @@ use nanocodex::{
         ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult, async_trait,
     },
 };
+use nanocodex_subagents::{AgentTask, AgentToolResult, start_agent};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{

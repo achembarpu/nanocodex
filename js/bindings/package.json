@@ -17,6 +17,10 @@
       "types": "./node/workspace.d.mts",
       "import": "./node/workspace.mjs"
     },
+    "./node/transport": {
+      "types": "./node/Transport.d.mts",
+      "import": "./node/Transport.mjs"
+    },
     "./browser": {
       "types": "./browser/index.d.mts",
       "import": "./browser/index.mjs"
@@ -24,6 +28,14 @@
     "./browser/workspace": {
       "types": "./browser/workspace.d.mts",
       "import": "./browser/workspace.mjs"
+    },
+    "./browser/transport": {
+      "types": "./browser/Transport.d.mts",
+      "import": "./browser/Transport.mjs"
+    },
+    "./subagents": {
+      "types": "./runtime/subagents.d.mts",
+      "import": "./runtime/subagents.mjs"
     },
     "./worker": {
       "types": "./worker/index.d.mts",

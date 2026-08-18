@@ -37,6 +37,19 @@ export default defineConfig({
   },
   resolve: {
     preserveSymlinks: true,
+    // The Microsoft SSH package selects Web Crypto at runtime in browsers, but
+    // its CommonJS fallback still contains an unreachable require("node-rsa").
+    // Keep the Node-only fallback out of the browser graph.
+    alias: [
+      {
+        find: /^@microsoft\/dev-tunnels-ssh$/,
+        replacement: fileURLToPath(new URL("./src/devTunnelsSshBrowser.ts", import.meta.url)),
+      },
+      {
+        find: "node-rsa",
+        replacement: fileURLToPath(new URL("./src/unsupportedNodeRsa.ts", import.meta.url)),
+      },
+    ],
     dedupe: [
       "react",
       "react-dom",
