@@ -6,10 +6,7 @@ use std::{
     num::ParseFloatError,
     path::{Path, PathBuf},
     pin::Pin,
-    sync::{
-        Arc, Mutex, PoisonError,
-        atomic::{AtomicU64, Ordering},
-    },
+    sync::{Arc, Mutex, PoisonError},
     task::{Context, Poll},
     time::{Duration, Instant},
 };
@@ -49,9 +46,6 @@ const EVENT_CAPACITY: usize = 16_384;
 // join after this deadline: a broken driver quarantines its admission lane
 // instead of racing a verifier against live agent work.
 const AGENT_CANCELLATION_GRACE: Duration = Duration::from_secs(10);
-// One warmup plus three typical four-call attempts stays below the provider's
-// approximate 15-request-per-minute routing guidance for a cache key.
-const PROMPT_CACHE_COHORT_SIZE: u64 = 3;
 const ESTIMATED_LOWER_BOUND_COST_STATUS: &str = "estimated_lower_bound";
 
 /// A reusable evaluation recipe. Every task call creates an independent agent
@@ -82,7 +76,6 @@ struct EvaluatorInner {
     nanocodex: NanocodexBuilder,
     job: EvalJob,
     attempt_environment: EvalEnvironment,
-    next_prompt_cache_attempt: AtomicU64,
     attempt_agent: Option<AttemptAgentFactory>,
 }
 
@@ -324,7 +317,7 @@ impl<T> Drop for EvalRun<T> {
 impl Evaluator {
     pub(crate) fn new_builder(nanocodex: NanocodexBuilder) -> EvaluatorBuilder {
         EvaluatorBuilder {
-            nanocodex: nanocodex.shared_prompt_cache(),
+            nanocodex,
             output_directory: PathBuf::from(".nanocodex/evals"),
             attempt_environment: EvalEnvironment::Native,
             attempt_agent: None,
@@ -400,11 +393,6 @@ impl Evaluator {
         } = input;
         let session_id = SessionId::new();
         let attempt_id = session_id.as_uuid();
-        let prompt_cache_cohort = self
-            .inner
-            .next_prompt_cache_attempt
-            .fetch_add(1, Ordering::Relaxed)
-            / PROMPT_CACHE_COHORT_SIZE;
         let trial_name = trial_name(&task, attempt_id);
         let admitted_at = Utc::now();
         let queue_wait = PhaseTiming {
@@ -412,9 +400,8 @@ impl Evaluator {
             finished_at: admitted_at,
         };
         let started_at = queued_at;
-        let mut emitter =
-            AttemptEmitter::new(run, session_id, prompt_cache_cohort, &task, &trial_name);
-        let span = attempt_span(self, &task, attempt_id, &trial_name, prompt_cache_cohort);
+        let mut emitter = AttemptEmitter::new(run, session_id, &task, &trial_name);
+        let span = attempt_span(self, &task, attempt_id, &trial_name);
         record_content(&span, "task.prompt", task.prompt());
         let trace_started = Instant::now();
         let result = self
@@ -1030,12 +1017,7 @@ impl Evaluator {
         let result = async {
             let builder = nanocodex
                 .workspace(&attempt.paths.workspace)
-                .session_id(emitter.session_id)
-                .prompt_cache_key(format!(
-                    "nanoeval:{}:{:x}",
-                    self.id().simple(),
-                    emitter.prompt_cache_cohort
-                ));
+                .session_id(emitter.session_id);
             let configured = if let Some(factory) = &self.inner.attempt_agent {
                 match factory(
                     EvalAttempt {
@@ -1901,7 +1883,6 @@ impl EvaluatorBuilder {
                 nanocodex: self.nanocodex,
                 job,
                 attempt_environment: self.attempt_environment,
-                next_prompt_cache_attempt: AtomicU64::new(0),
                 attempt_agent: self.attempt_agent,
             }),
         })
@@ -2100,25 +2081,17 @@ struct AttemptEmitter {
     run: RunEmitter,
     attempt_id: Uuid,
     session_id: SessionId,
-    prompt_cache_cohort: u64,
     task_name: String,
     trial_name: String,
     sequence: u64,
 }
 
 impl AttemptEmitter {
-    fn new(
-        run: RunEmitter,
-        session_id: SessionId,
-        prompt_cache_cohort: u64,
-        task: &Task,
-        trial_name: &str,
-    ) -> Self {
+    fn new(run: RunEmitter, session_id: SessionId, task: &Task, trial_name: &str) -> Self {
         Self {
             run,
             attempt_id: session_id.as_uuid(),
             session_id,
-            prompt_cache_cohort,
             task_name: task.name().to_owned(),
             trial_name: trial_name.to_owned(),
             sequence: 0,
@@ -2373,13 +2346,7 @@ fn error_traceback(error: &dyn Error) -> String {
     traceback
 }
 
-fn attempt_span(
-    eval: &Evaluator,
-    task: &Task,
-    attempt_id: Uuid,
-    trial_name: &str,
-    prompt_cache_cohort: u64,
-) -> Span {
+fn attempt_span(eval: &Evaluator, task: &Task, attempt_id: Uuid, trial_name: &str) -> Span {
     info_span!(
         target: "nanocodex_eval",
         parent: None,
@@ -2406,7 +2373,6 @@ fn attempt_span(
         agent.usage.completeness = tracing::field::Empty,
         agent.usage.missing = tracing::field::Empty,
         agent.billing.completeness = tracing::field::Empty,
-        agent.prompt_cache.cohort = prompt_cache_cohort,
         gen_ai.usage.input_tokens = tracing::field::Empty,
         gen_ai.usage.cached_input_tokens = tracing::field::Empty,
         gen_ai.usage.cache_write_input_tokens = tracing::field::Empty,
