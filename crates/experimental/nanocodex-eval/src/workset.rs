@@ -3,8 +3,9 @@
 //! Every desired task/treatment/repetition is one SQLite row. Coordinate state
 //! records scheduling and verifier outcome; an append-only attempt table keeps
 //! infrastructure failures and interruptions without consuming a coordinate.
-//! Claiming is a short `BEGIN IMMEDIATE` compare-and-set transaction; execution
-//! never holds a SQLite transaction open.
+//! Ledger mutations are serialized by a process-safe writer lock. Claiming is a
+//! short `BEGIN IMMEDIATE` compare-and-set transaction; execution never holds a
+//! SQLite transaction open.
 
 use std::{
     fs::{self, File, OpenOptions},
@@ -240,6 +241,7 @@ impl Workset {
         let path = path.into();
         let claim_directory = claim_directory(&path);
         fs::create_dir_all(&claim_directory)?;
+        let _writer = lock_workset_writer(&claim_directory)?;
         let mut connection = open_connection(&path)?;
         initialize_schema(&mut connection)?;
         let retained: Option<(i64, String)> = connection
@@ -267,6 +269,7 @@ impl Workset {
         let path = path.into();
         let claim_directory = claim_directory(&path);
         fs::create_dir_all(&claim_directory)?;
+        let _writer = lock_workset_writer(&claim_directory)?;
         let mut connection = open_connection(&path)?;
         initialize_schema(&mut connection)?;
         let digest = Uuid::now_v7().simple().to_string();
@@ -289,6 +292,7 @@ impl Workset {
         tasks: &[WorksetTask],
         families: &[WorksetFamily],
     ) -> Result<(), WorksetError> {
+        let _writer = lock_workset_writer(&self.claim_directory)?;
         let mut connection = open_connection(&self.path)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         append_definition(&transaction, self.id, &self.digest, tasks, families)?;
@@ -403,8 +407,9 @@ impl Workset {
         family_key: &str,
         worker: &str,
     ) -> Result<BeginTask, WorksetError> {
-        self.reconcile_abandoned()?;
+        let _writer = lock_workset_writer(&self.claim_directory)?;
         let mut connection = open_connection(&self.path)?;
+        self.reconcile_abandoned_with_connection(&mut connection)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let row: Option<(i64, u16)> = transaction
             .query_row(
@@ -478,8 +483,9 @@ impl Workset {
 
     /// Atomically claims the next unclaimed row in the benchmark.
     pub fn begin_next_for_worker(&self, worker: &str) -> Result<BeginTask, WorksetError> {
-        self.reconcile_abandoned()?;
+        let _writer = lock_workset_writer(&self.claim_directory)?;
         let mut connection = open_connection(&self.path)?;
+        self.reconcile_abandoned_with_connection(&mut connection)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let row: Option<(i64, String, u16)> = transaction
             .query_row(
@@ -616,7 +622,15 @@ impl Workset {
 
     /// Releases every running row whose OS ownership lock is no longer held.
     pub fn reconcile_abandoned(&self) -> Result<usize, WorksetError> {
+        let _writer = lock_workset_writer(&self.claim_directory)?;
         let mut connection = open_connection(&self.path)?;
+        self.reconcile_abandoned_with_connection(&mut connection)
+    }
+
+    fn reconcile_abandoned_with_connection(
+        &self,
+        connection: &mut Connection,
+    ) -> Result<usize, WorksetError> {
         let mut statement = connection.prepare(
             "SELECT id, claim_id FROM eval_tasks \
              WHERE workset_id = ?1 AND state = 'running' ORDER BY id",
@@ -673,6 +687,7 @@ impl Workset {
         result_path: Option<&Path>,
         error: Option<&str>,
     ) -> Result<(), WorksetError> {
+        let _writer = lock_workset_writer(&self.claim_directory)?;
         let mut connection = open_connection(&self.path)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let finished_at_ms = now_ms()?;
@@ -714,6 +729,7 @@ impl Workset {
         result_path: Option<&Path>,
         error: Option<&str>,
     ) -> Result<(), WorksetError> {
+        let _writer = lock_workset_writer(&self.claim_directory)?;
         let mut connection = open_connection(&self.path)?;
         let transaction = connection.transaction_with_behavior(TransactionBehavior::Immediate)?;
         let finished_at_ms = now_ms()?;
@@ -1125,6 +1141,18 @@ fn open_claim_lock(directory: &Path, id: i64) -> Result<File, WorksetError> {
         .create(true)
         .truncate(false)
         .open(directory.join(format!("{id}.lock")))?)
+}
+
+fn lock_workset_writer(directory: &Path) -> Result<File, WorksetError> {
+    fs::create_dir_all(directory)?;
+    let lock = OpenOptions::new()
+        .read(true)
+        .write(true)
+        .create(true)
+        .truncate(false)
+        .open(directory.join("writer.lock"))?;
+    lock.lock_exclusive()?;
+    Ok(lock)
 }
 
 fn sqlite_data_version(connection: &Connection) -> Result<i64, WorksetError> {
