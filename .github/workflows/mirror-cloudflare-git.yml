@@ -27,7 +27,7 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
-          ref: ${{ inputs.revision }}
+          ref: master
       - name: Require an exact master revision
         env:
           TARGET_SHA: ${{ inputs.revision }}
