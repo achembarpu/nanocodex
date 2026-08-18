@@ -70,7 +70,7 @@ export function legacyRepositoryAdvertisement(repository: RepositoryView | undef
   ]);
 }
 
-export function receiveAdvertisement(): Uint8Array {
+export function receiveAdvertisement(repository?: RepositoryView): Uint8Array {
   const capabilities = [
     "report-status",
     "side-band-64k",
@@ -80,7 +80,9 @@ export function receiveAdvertisement(): Uint8Array {
   return concatenate([
     encodePacketLine("# service=git-receive-pack\n"),
     flushPacket,
-    encodePacketLine(`${zeroOid} capabilities^{}\0${capabilities}\n`),
+    encodePacketLine(repository
+      ? `${repository.head} refs/heads/${repository.branch}\0${capabilities}\n`
+      : `${zeroOid} capabilities^{}\0${capabilities}\n`),
     flushPacket,
   ]);
 }
@@ -167,10 +169,12 @@ export function buildLsRefsResponse(
   ]);
 }
 
-export function buildNegotiationResponse(): Uint8Array {
+export function buildNegotiationResponse(commonHaves: readonly string[] = []): Uint8Array {
   return concatenate([
     encodePacketLine("acknowledgments\n"),
-    encodePacketLine("NAK\n"),
+    ...(commonHaves.length === 0
+      ? [encodePacketLine("NAK\n")]
+      : commonHaves.map((oid) => encodePacketLine(`ACK ${oid}\n`))),
     flushPacket,
   ]);
 }
@@ -198,8 +202,9 @@ export function buildFullPackResponse(
 
 export function buildLegacyFullPackResponse(
   pack: ReadableStream<Uint8Array>,
+  acknowledgedHave?: string,
 ): ReadableStream<Uint8Array> {
-  return buildPackResponse(pack, "NAK\n");
+  return buildPackResponse(pack, acknowledgedHave ? `ACK ${acknowledgedHave}\n` : "NAK\n");
 }
 
 function buildPackResponse(

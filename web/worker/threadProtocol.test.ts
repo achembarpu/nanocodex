@@ -31,10 +31,13 @@ test("upload-pack advertises protocol v2 and an empty repository has no refs", (
   assert.deepEqual(parsePacketLines(buildLsRefsResponse(undefined, [])), [{ kind: "flush" }]);
 });
 
-test("receive-pack advertises an empty capability repository on every push", () => {
+test("receive-pack advertises empty and persisted thread refs", () => {
   const lines = dataLines(receiveAdvertisement());
   assert.equal(lines[0], "# service=git-receive-pack\n");
   assert.match(lines[1]!, new RegExp(`^${zero} capabilities\\^\\{\\}\\0report-status`));
+  const persisted = dataLines(receiveAdvertisement(repository()));
+  assert.equal(persisted[0], "# service=git-receive-pack\n");
+  assert.match(persisted[1]!, new RegExp(`^${head} refs/heads/nanocodex\\0report-status`));
 });
 
 test("protocol v0 advertises the persisted branch for browser Git clients", () => {
@@ -77,9 +80,14 @@ function repository(): ThreadRepository {
     branch: "nanocodex",
     head,
     refs: [{ name: "refs/heads/nanocodex", oid: head }],
-    packKey: "thread-repositories/thread-123/pack.pack",
-    packHash: "b".repeat(40),
-    packSize: 123,
+    packs: [{
+      key: "thread-repositories/thread-123/pack.pack",
+      hash: "b".repeat(40),
+      size: 123,
+      objectCount: 3,
+      oldOid: "0".repeat(40),
+      newOid: head,
+    }],
     updatedAt: "2026-08-18T00:00:00.000Z",
   };
 }

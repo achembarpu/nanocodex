@@ -13,7 +13,13 @@ import {
   repositoryAdvertisement,
   type ReceiveCommand,
 } from "./threadProtocol.ts";
-import { isThreadRepository, type RepositoryView, type ThreadRepository } from "./threadRepository.ts";
+import { createThreadPackStream } from "./threadPack.ts";
+import {
+  isThreadRepository,
+  type RepositoryView,
+  type ThreadPack,
+  type ThreadPackMetadata,
+} from "./threadRepository.ts";
 
 // Smart-HTTP/DO/R2 ownership follows the MIT-licensed Git-on-Cloudflare design.
 // Its account, admin, registry, and D1 product layers are intentionally absent;
@@ -58,7 +64,9 @@ export async function handleThreadGitRequest(
       });
     }
     if (service === "git-receive-pack") {
-      return new Response(byteBody(receiveAdvertisement()), {
+      const repository = await getThreadRepository(env, route.repository);
+      if (repository instanceof Response) return repository;
+      return new Response(byteBody(receiveAdvertisement(repository)), {
         headers: gitHeaders("application/x-git-receive-pack-advertisement"),
       });
     }
@@ -98,19 +106,27 @@ async function uploadPack(
   if (command.command !== "fetch") return gitError("unsupported Git protocol command", 400);
   if (!repository) return gitError("thread repository is empty", 404);
 
-  const wants = command.arguments
-    .filter((argument) => argument.startsWith("want "))
-    .map((argument) => argument.slice("want ".length));
+  let wants: string[];
+  let haves: string[];
+  try {
+    wants = parseFetchOids(command.arguments, "want");
+    haves = parseFetchOids(command.arguments, "have");
+  } catch (error) {
+    return gitError(errorMessage(error), 400);
+  }
   const advertisedOids = new Set([repository.head, ...repository.refs.map((ref) => ref.oid)]);
   if (wants.length === 0 || wants.some((oid) => !advertisedOids.has(oid))) {
     return gitError("invalid fetch wants", 400);
   }
+  const selection = selectPackSuffix(repository.packs, haves);
   if (!command.arguments.includes("done")) {
-    return uploadResponse(byteBody(buildNegotiationResponse()));
+    return uploadResponse(byteBody(buildNegotiationResponse(
+      selection.have ? [selection.have] : [],
+    )));
   }
-  const pack = await env.GIT_OBJECTS!.get(repository.packKey);
-  if (!pack) return gitError("thread pack is missing", 503);
-  return uploadResponse(buildFullPackResponse(pack.body));
+  const pack = await fetchPackStream(env.GIT_OBJECTS!, selection.packs);
+  if (pack instanceof Response) return pack;
+  return uploadResponse(buildFullPackResponse(pack));
 }
 
 async function legacyUploadPack(
@@ -120,22 +136,24 @@ async function legacyUploadPack(
 ): Promise<Response> {
   if (!repository) return gitError("thread repository is empty", 404);
   let wants: string[];
+  let haves: string[];
   try {
-    wants = parsePacketLines(body)
+    const lines = parsePacketLines(body)
       .filter((packet) => packet.kind === "data")
-      .map((packet) => new TextDecoder().decode(packet.data).replace(/\n$/, ""))
-      .filter((line) => line.startsWith("want "))
-      .map((line) => line.slice("want ".length).split(" ", 1)[0]!);
-  } catch {
-    return gitError("malformed git-upload-pack request", 400);
+      .map((packet) => new TextDecoder().decode(packet.data).replace(/\n$/, ""));
+    wants = parseFetchOids(lines, "want");
+    haves = parseFetchOids(lines, "have");
+  } catch (error) {
+    return gitError(errorMessage(error), 400);
   }
   const advertisedOids = new Set([repository.head, ...repository.refs.map((ref) => ref.oid)]);
   if (wants.length === 0 || wants.some((oid) => !advertisedOids.has(oid))) {
     return gitError("invalid fetch wants", 400);
   }
-  const pack = await env.GIT_OBJECTS!.get(repository.packKey);
-  if (!pack) return gitError("thread pack is missing", 503);
-  return uploadResponse(buildLegacyFullPackResponse(pack.body));
+  const selection = selectPackSuffix(repository.packs, haves);
+  const pack = await fetchPackStream(env.GIT_OBJECTS!, selection.packs);
+  if (pack instanceof Response) return pack;
+  return uploadResponse(buildLegacyFullPackResponse(pack, selection.have));
 }
 
 async function receivePack(
@@ -149,25 +167,45 @@ async function receivePack(
 
   let command: ReceiveCommand | undefined;
   let pack: Uint8Array | undefined;
+  let packMetadata: Awaited<ReturnType<typeof validatePack>> | undefined;
   let sideBand64k = false;
   try {
     const parsed = parseReceiveRequest(body);
     sideBand64k = parsed.sideBand64k;
     if (parsed.commands.length !== 1) throw new Error("only one branch may be pushed at a time");
     command = parsed.commands[0]!;
-    if (command.oldOid !== ZERO_OID || command.ref !== THREAD_REF || !SHA1_PATTERN.test(command.newOid)) {
-      throw new Error(`push refs/heads/${THREAD_BRANCH} from the advertised empty repository`);
+    if (
+      !SHA1_PATTERN.test(command.oldOid) ||
+      !SHA1_PATTERN.test(command.newOid) ||
+      command.newOid === ZERO_OID ||
+      command.ref !== THREAD_REF
+    ) {
+      throw new Error(`only updates to refs/heads/${THREAD_BRANCH} are supported`);
     }
     pack = parsed.pack;
-    await validatePack(pack);
+    packMetadata = await validatePack(pack);
   } catch (error) {
     const fallback = command ?? { oldOid: ZERO_OID, newOid: ZERO_OID, ref: THREAD_REF };
     return receiveResponse(buildReceiveReport(fallback, errorMessage(error)), sideBand64k);
   }
+  if (!command || !pack || !packMetadata) return gitError("invalid receive state", 500);
 
   const stub = repositoryStub(env, repositoryName);
-  const begin = await stub.fetch("https://repository.internal/receive/begin", { method: "POST" });
-  if (begin.status === 409) return gitError("repository is busy; retry the push", 503);
+  const begin = await stub.fetch("https://repository.internal/receive/begin", {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify(command),
+  });
+  if (begin.status === 409) {
+    const conflict = await begin.json().catch(() => undefined) as { error?: unknown } | undefined;
+    if (conflict?.error === "stale_receive") {
+      return receiveResponse(
+        buildReceiveReport(command, "stale ref; pull and retry"),
+        sideBand64k,
+      );
+    }
+    return gitError("repository is busy; retry the push", 503);
+  }
   if (!begin.ok) return gitError("could not reserve repository receive", 503);
   const beginBody = await begin.json() as { lease?: { token?: unknown } };
   const token = typeof beginBody.lease?.token === "string" ? beginBody.lease.token : "";
@@ -175,8 +213,8 @@ async function receivePack(
 
   const packKey = `thread-repositories/${repositoryName}/${crypto.randomUUID()}.pack`;
   let uploaded = false;
+  let finalizeAttempted = false;
   try {
-    const packHash = bytesToHex(pack.slice(-20));
     await env.GIT_OBJECTS!.put(packKey, pack, {
       httpMetadata: {
         contentType: "application/x-git-packed-objects",
@@ -185,32 +223,23 @@ async function receivePack(
       customMetadata: { repository: repositoryName, head: command.newOid },
     });
     uploaded = true;
-    const repository: ThreadRepository = {
-      version: 1,
-      head: command.newOid,
-      branch: THREAD_BRANCH,
-      refs: [{ name: THREAD_REF, oid: command.newOid }],
-      packKey,
-      packHash,
-      packSize: pack.byteLength,
-      updatedAt: new Date().toISOString(),
+    const storedPack: ThreadPackMetadata = {
+      key: packKey,
+      hash: packMetadata.hash,
+      size: packMetadata.size,
+      objectCount: packMetadata.objectCount,
     };
+    finalizeAttempted = true;
     const finalized = await stub.fetch("https://repository.internal/receive/finalize", {
       method: "PUT",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ token, repository }),
+      body: JSON.stringify({ token, pack: storedPack }),
     });
     if (!finalized.ok) throw new Error("receive lease expired before refs were committed");
-    const result = await finalized.json() as { previousPackKey?: unknown };
-    if (typeof result.previousPackKey === "string" && result.previousPackKey !== packKey) {
-      const cleanup = env.GIT_OBJECTS!.delete(result.previousPackKey);
-      if (context) context.waitUntil(cleanup);
-      else await cleanup;
-    }
     return receiveResponse(buildReceiveReport(command), sideBand64k);
   } catch (error) {
     const cleanup = Promise.all([
-      uploaded ? env.GIT_OBJECTS!.delete(packKey) : Promise.resolve(),
+      uploaded && !finalizeAttempted ? env.GIT_OBJECTS!.delete(packKey) : Promise.resolve(),
       stub.fetch("https://repository.internal/receive/abort", {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -223,7 +252,11 @@ async function receivePack(
   }
 }
 
-async function validatePack(pack: Uint8Array): Promise<void> {
+async function validatePack(pack: Uint8Array): Promise<{
+  hash: string;
+  size: number;
+  objectCount: number;
+}> {
   if (pack.byteLength > MAX_THREAD_PACK_BYTES) throw new Error("pack exceeds 32 MiB");
   if (pack.byteLength < 32) throw new Error("pack is truncated");
   if (new TextDecoder().decode(pack.subarray(0, 4)) !== "PACK") {
@@ -231,13 +264,50 @@ async function validatePack(pack: Uint8Array): Promise<void> {
   }
   const view = new DataView(pack.buffer, pack.byteOffset, pack.byteLength);
   if (view.getUint32(4) !== 2) throw new Error("only Git pack version 2 is supported");
-  if (view.getUint32(8) === 0) throw new Error("pack contains no objects");
+  const objectCount = view.getUint32(8);
+  if (objectCount === 0) throw new Error("pack contains no objects");
   const expected = pack.subarray(pack.byteLength - 20);
+  const digestBytes = arrayBufferView(pack, pack.byteLength - 20);
   const actual = new Uint8Array(await crypto.subtle.digest(
     "SHA-1",
-    byteBody(pack.subarray(0, pack.byteLength - 20)),
+    digestBytes,
   ));
   if (!constantTimeEqual(actual, expected)) throw new Error("pack checksum is invalid");
+  return { hash: bytesToHex(expected), size: pack.byteLength, objectCount };
+}
+
+async function fetchPackStream(
+  bucket: R2Bucket,
+  packs: readonly ThreadPack[],
+): Promise<ReadableStream<Uint8Array> | Response> {
+  try {
+    return await createThreadPackStream(bucket, packs);
+  } catch (error) {
+    return gitError(errorMessage(error), 503);
+  }
+}
+
+function parseFetchOids(lines: readonly string[], kind: "want" | "have"): string[] {
+  const prefix = `${kind} `;
+  return lines.filter((line) => line.startsWith(prefix)).map((line) => {
+    const oid = line.slice(prefix.length).split(" ", 1)[0]!;
+    if (!SHA1_PATTERN.test(oid)) throw new Error(`invalid fetch ${kind}`);
+    return oid;
+  });
+}
+
+function selectPackSuffix(
+  packs: readonly ThreadPack[],
+  haves: readonly string[],
+): { packs: readonly ThreadPack[]; have?: string } {
+  const clientOids = new Set(haves);
+  for (let index = packs.length - 1; index >= 0; index--) {
+    const newOid = packs[index]!.newOid;
+    if (clientOids.has(newOid)) {
+      return { packs: packs.slice(index + 1), have: newOid };
+    }
+  }
+  return { packs };
 }
 
 async function getThreadRepository(
@@ -335,6 +405,13 @@ function gitError(message: string, status: number): Response {
 
 function byteBody(bytes: Uint8Array): ArrayBuffer {
   return bytes.slice().buffer;
+}
+
+function arrayBufferView(bytes: Uint8Array, byteLength: number): Uint8Array<ArrayBuffer> {
+  if (bytes.buffer instanceof ArrayBuffer) {
+    return new Uint8Array(bytes.buffer, bytes.byteOffset, byteLength);
+  }
+  return bytes.subarray(0, byteLength).slice();
 }
 
 function bytesToHex(bytes: Uint8Array): string {
