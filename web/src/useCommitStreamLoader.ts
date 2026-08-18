@@ -47,7 +47,7 @@ export type CommitStreamLoadState =
 interface UseCommitStreamLoaderOptions {
   collapseMode: "expanded" | "collapsed";
   commits: HarnessCommit[];
-  patchUrl: string;
+  patchUrl: string | ((commit: HarnessCommit) => string);
   viewerRef: RefObject<CodeViewHandle<undefined> | null>;
 }
 
@@ -143,7 +143,13 @@ export function useCommitStreamLoader({
 
     async function loadPatch() {
       try {
-        const cacheKeyPrefix = encodeURIComponent(patchUrl);
+        const cacheKeyPrefix = encodeURIComponent(
+          typeof patchUrl === "string"
+            ? patchUrl
+            : commits[0] == null
+            ? "repository-commits"
+            : patchUrl(commits[0]),
+        );
         const commitByHash = new Map(
           commits.map((commit) => [commit.hash, commit]),
         );
@@ -193,17 +199,26 @@ export function useCommitStreamLoader({
           await yieldToBrowser();
         }
 
-        const response = await fetch(patchUrl, {
-          cache: "no-store",
-          signal: controller.signal,
-        });
-        if (!response.ok) {
-          throw new Error(`Patch request failed (${response.status}).`);
-        }
-
-        if (response.body == null) {
-          await commitFullPatch(await response.text());
-          return;
+        let responseBody: ReadableStream<Uint8Array>;
+        if (typeof patchUrl === "string") {
+          const response = await fetch(patchUrl, {
+            cache: "no-store",
+            signal: controller.signal,
+          });
+          if (!response.ok) {
+            throw new Error(`Patch request failed (${response.status}).`);
+          }
+          if (response.body == null) {
+            await commitFullPatch(await response.text());
+            return;
+          }
+          responseBody = response.body;
+        } else {
+          responseBody = streamCommitPatches(
+            commits,
+            patchUrl,
+            controller.signal,
+          );
         }
 
         setLoadState("streaming");
@@ -321,7 +336,7 @@ export function useCommitStreamLoader({
         };
 
         const fallbackPatchContent = await streamGitPatchFiles(
-          response.body,
+          responseBody,
           appendStreamedFile,
         );
         if (!isCurrentRequest()) return;
@@ -354,6 +369,40 @@ export function useCommitStreamLoader({
     retryLoad,
     viewerKey,
   };
+}
+
+function streamCommitPatches(
+  commits: readonly HarnessCommit[],
+  patchUrl: (commit: HarnessCommit) => string,
+  signal: AbortSignal,
+): ReadableStream<Uint8Array> {
+  let nextCommit = 0;
+  return new ReadableStream<Uint8Array>({
+    async pull(controller) {
+      const commit = commits[nextCommit];
+      if (commit == null) {
+        controller.close();
+        return;
+      }
+      const response = await fetch(patchUrl(commit), {
+        cache: "default",
+        signal,
+      });
+      if (!response.ok) {
+        throw new Error(`Patch request failed (${response.status}).`);
+      }
+      const patch = new Uint8Array(await response.arrayBuffer());
+      if (nextCommit === 0) {
+        controller.enqueue(patch);
+      } else {
+        const separated = new Uint8Array(patch.byteLength + 1);
+        separated[0] = 10;
+        separated.set(patch, 1);
+        controller.enqueue(separated);
+      }
+      nextCommit++;
+    },
+  });
 }
 
 function applyCommitItemIdRename(

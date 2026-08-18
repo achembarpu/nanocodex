@@ -33,7 +33,7 @@ import type { HarnessCommit } from "./threadRepositorySnapshot";
 type CommitCodeStreamProps = {
   commits: HarnessCommit[];
   onOpenCommitRail?: () => void;
-  patchUrl: string;
+  patchUrl: string | ((commit: HarnessCommit) => string);
   theme: Theme;
 };
 

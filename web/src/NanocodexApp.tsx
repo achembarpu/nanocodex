@@ -28,7 +28,8 @@ import type { CodeBrowserHandle } from "./CodeBrowser";
 import type { CommitCodeStreamHandle } from "./CommitCodeStream";
 import { fuzzyScore } from "./fuzzy";
 import { pathForSurface, surfaceFromUrl, type Surface } from "./navigation";
-import type { HarnessCommit, RepositorySnapshot } from "./threadRepositorySnapshot";
+import type { PublishedRepositorySnapshot } from "./publishedRepository";
+import type { HarnessCommit } from "./threadRepositorySnapshot";
 import { getBrowserThread } from "./workspace";
 
 const Evals = lazy(() =>
@@ -73,9 +74,11 @@ const queryClient = new QueryClient({
   },
 });
 
-function loadRepositorySnapshot(includeHistory: boolean): Promise<RepositorySnapshot> {
-  return import("./threadRepositorySnapshot")
-    .then((module) => module.loadThreadRepositorySnapshot(includeHistory));
+function loadRepositorySnapshot(
+  includeHistory: boolean,
+): Promise<PublishedRepositorySnapshot> {
+  return import("./publishedRepository")
+    .then((module) => module.loadPublishedRepositorySnapshot(includeHistory));
 }
 
 const scopes: Array<{ id: Scope; label: string }> = [
@@ -118,14 +121,23 @@ function commitSearchScore(commit: HarnessCommit, tokens: readonly string[]) {
 const installCommand =
   "curl -fsSL https://nanocodex.paradigm.xyz | bash";
 
-function RepositorySurfaceLoading({ failed }: { failed: boolean }) {
+function RepositorySurfaceError({
+  failed,
+  onRetry,
+}: {
+  failed: boolean;
+  onRetry(): void;
+}) {
   if (!failed) return null;
   return (
-    <section className="requests-empty page-grid" aria-live="polite">
+    <section className="requests-empty page-grid" role="alert">
       <GitBranch aria-hidden="true" />
       <p className="eyebrow">Repository</p>
-      <h1>Thread repository unavailable.</h1>
-      <p>Return to the agent workspace and retry the thread pull.</p>
+      <h1>Published repository unavailable.</h1>
+      <p>The Code and Commits publication could not be loaded.</p>
+      <button className="button button--medium" type="button" onClick={onRetry}>
+        Try again
+      </button>
     </section>
   );
 }
@@ -154,7 +166,7 @@ function NanocodexShell() {
     pathname: location.pathname,
     searchParams: new URLSearchParams(location.search),
   });
-  const [snapshot, setSnapshot] = useState<RepositorySnapshot>();
+  const [snapshot, setSnapshot] = useState<PublishedRepositorySnapshot>();
   const [repositoryLoadError, setRepositoryLoadError] = useState(false);
   const [scope, setScope] = useState<Scope>("all");
   const [query, setQuery] = useState("");
@@ -171,16 +183,7 @@ function NanocodexShell() {
   const headerCenterRef = useRef<HTMLDivElement>(null);
   const codeBrowserRef = useRef<CodeBrowserHandle>(null);
   const commitStreamRef = useRef<CommitCodeStreamHandle>(null);
-  const snapshotRef = useRef<RepositorySnapshot | undefined>(undefined);
   const repositoryRequestId = useRef(0);
-  const repositoryRefreshInFlight = useRef(false);
-  const repositoryRefreshTrailing = useRef(false);
-  const repositoryConsumerActiveRef = useRef(needsRepository);
-  const repositoryHistoryNeededRef = useRef(needsRepositoryHistory);
-  const refreshRepositoryRef = useRef<() => void>(() => undefined);
-  snapshotRef.current = snapshot;
-  repositoryConsumerActiveRef.current = needsRepository;
-  repositoryHistoryNeededRef.current = needsRepositoryHistory;
 
   const commits = snapshot?.commits ?? emptyCommits;
   const selected = useMemo(
@@ -250,62 +253,31 @@ function NanocodexShell() {
     [commits, queryTokens, searchOpen],
   );
 
-  refreshRepositoryRef.current = () => {
-    if (!repositoryConsumerActiveRef.current) return;
-    if (repositoryRefreshInFlight.current) {
-      repositoryRefreshTrailing.current = true;
-      return;
-    }
-    repositoryRefreshInFlight.current = true;
+  const refreshRepository = useCallback(() => {
+    if (!needsRepository) return;
     const requestId = ++repositoryRequestId.current;
-    const includeHistory = repositoryHistoryNeededRef.current;
     setRepositoryLoadError(false);
-    void loadRepositorySnapshot(includeHistory).then(
+    void loadRepositorySnapshot(needsRepositoryHistory).then(
       (loaded) => {
-        if (
-          repositoryRequestId.current !== requestId ||
-          !repositoryConsumerActiveRef.current
-        ) {
-          loaded.release();
-          return;
-        }
-        setSnapshot((current) => {
-          current?.release();
-          return loaded;
-        });
+        if (repositoryRequestId.current !== requestId) return;
+        setSnapshot(loaded);
         setSelectedHash((current) => current && loaded.commits.some(({ hash }) => hash === current)
           ? current
           : loaded.repository.head);
       },
       () => {
         if (
-          repositoryRequestId.current === requestId &&
-          repositoryConsumerActiveRef.current
+          repositoryRequestId.current === requestId
         ) {
           setRepositoryLoadError(true);
         }
       },
-    ).finally(() => {
-      repositoryRefreshInFlight.current = false;
-      if (
-        repositoryRefreshTrailing.current &&
-        repositoryConsumerActiveRef.current
-      ) {
-        repositoryRefreshTrailing.current = false;
-        queueMicrotask(() => refreshRepositoryRef.current());
-      }
-    });
-  };
-  const refreshRepository = useCallback(() => refreshRepositoryRef.current(), []);
+    );
+  }, [needsRepository, needsRepositoryHistory]);
 
   useEffect(() => {
-    repositoryConsumerActiveRef.current = needsRepository;
-    repositoryHistoryNeededRef.current = needsRepositoryHistory;
     if (!needsRepository) {
       repositoryRequestId.current++;
-      repositoryRefreshTrailing.current = false;
-      snapshotRef.current?.release();
-      snapshotRef.current = undefined;
       setSnapshot(undefined);
       setRepositoryLoadError(false);
       return;
@@ -315,26 +287,8 @@ function NanocodexShell() {
     }
   }, [needsRepository, needsRepositoryHistory, refreshRepository, snapshot]);
 
-  useEffect(() => {
-    let unsubscribe: (() => void) | undefined;
-    let active = true;
-    void import("./threadGit").then(({ subscribeThreadGitChanges }) => {
-      if (!active) return;
-      unsubscribe = subscribeThreadGitChanges(thread, () => {
-        if (repositoryConsumerActiveRef.current) refreshRepository();
-      });
-    });
-    return () => {
-      active = false;
-      unsubscribe?.();
-    };
-  }, [refreshRepository, thread]);
-
   useEffect(() => () => {
     repositoryRequestId.current++;
-    repositoryConsumerActiveRef.current = false;
-    repositoryRefreshTrailing.current = false;
-    snapshotRef.current?.release();
   }, []);
 
   useEffect(() => {
@@ -740,8 +694,11 @@ function NanocodexShell() {
               </PierreWorkerProvider>
             </Suspense>
           ) : (
-            <RepositorySurfaceLoading failed={repositoryLoadError} />
-          ) : surface === "commits" ? snapshot?.historyLoaded && snapshot.commitPatchUrl ? (
+            <RepositorySurfaceError
+              failed={repositoryLoadError}
+              onRetry={refreshRepository}
+            />
+          ) : surface === "commits" ? snapshot?.historyLoaded ? (
             <Suspense fallback={null}>
               <PierreWorkerProvider>
                 <section
@@ -851,7 +808,10 @@ function NanocodexShell() {
               </PierreWorkerProvider>
             </Suspense>
           ) : (
-            <RepositorySurfaceLoading failed={repositoryLoadError} />
+            <RepositorySurfaceError
+              failed={repositoryLoadError}
+              onRetry={refreshRepository}
+            />
           ) : surface === "requests" ? (
             <section
               className="requests-empty page-grid"
