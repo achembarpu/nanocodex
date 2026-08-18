@@ -2,7 +2,9 @@ use std::path::PathBuf;
 
 use clap::Args;
 use eyre::{Result, WrapErr as _};
-use nanocodex_eval::{Evaluation, EvaluationStatus, coordinator::CoordinatorClient};
+use nanocodex_eval::{
+    Evaluation, EvaluationStatus, coordinator::CoordinatorClient, validate_prepared_eval_host,
+};
 use serde::Deserialize;
 
 use super::{profile::default_state_dir, systemd};
@@ -99,6 +101,7 @@ impl Benchmark {
         if initial.is_complete() {
             return Ok(());
         }
+        validate_prepared_eval_host().wrap_err("evaluation host preflight failed")?;
         agent.restrict_to_host_control(CONTROLLER_INSTRUCTIONS);
         let workflow = if headless {
             let _observability = observability.install(false, agent.cwd())?;

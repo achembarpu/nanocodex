@@ -102,7 +102,7 @@ pub use event::{
     all(target_os = "linux", not(target_env = "musl")),
     all(target_os = "macos", target_arch = "aarch64")
 ))]
-pub use execution::CanonicalTaskRunner;
+pub use execution::{CanonicalTaskRunner, validate_prepared_eval_host};
 pub use execution::{ClaimedEvaluationTask, EvaluationExecution, EvaluationExecutionError};
 pub(crate) use harness_exec::{
     HarnessCommandOutput, HarnessCommandRunner, HarnessCommandRunnerError, HarnessCommandStatus,
