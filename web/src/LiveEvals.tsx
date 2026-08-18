@@ -387,7 +387,6 @@ export function LiveEvals({ overview }: { overview: EvalOverview | undefined }) 
   } | null>(null);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<MatrixFilter>("all");
-  const [analyticsWorksetId, setAnalyticsWorksetId] = useState<string | null>(null);
   const [shownTaskRows, setShownTaskRows] = useState(initialTaskRows);
   const detailRef = useRef<HTMLDivElement>(null);
   const selectedWorksetId = route?.params.worksetId ?? null;
@@ -452,9 +451,7 @@ export function LiveEvals({ overview }: { overview: EvalOverview | undefined }) 
   });
   const analyticsQuery = useQuery<EvalWorksetAnalytics>({
     queryKey: analyticsKey(selectedWorksetId),
-    enabled: Boolean(
-      selectedWorkset && !taskRoute && analyticsWorksetId === selectedWorksetId,
-    ),
+    enabled: Boolean(selectedWorkset && !taskRoute),
     queryFn: ({ signal }) => evalApi.worksetAnalytics(selectedWorkset!.id, signal),
     refetchInterval: selectedWorkset &&
       selectedWorkset.summary.success + selectedWorkset.summary.failed < selectedWorkset.summary.total
@@ -573,17 +570,7 @@ export function LiveEvals({ overview }: { overview: EvalOverview | undefined }) 
           <section className="eval-chart-error" role="alert">
             {analyticsQuery.error.message}
           </section>
-        ) : analyticsWorksetId === selectedWorksetId ? null : (
-          <section className="eval-analytics-reveal">
-            <button
-              type="button"
-              onClick={() => setAnalyticsWorksetId(selectedWorksetId)}
-            >
-              <span><strong>Score frontiers</strong><small>Output tokens, execution time, and cost</small></span>
-              <ChevronRight aria-hidden="true" />
-            </button>
-          </section>
-        )}
+        ) : null}
         <section className="eval-full-table" aria-labelledby="tasks-heading">
           <header className="eval-table-toolbar">
             <div><p className="rail-label">Progress</p><h2 id="tasks-heading">Tasks</h2></div>

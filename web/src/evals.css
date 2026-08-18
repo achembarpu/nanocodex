@@ -210,12 +210,6 @@
   color: color-mix(in srgb, var(--text) 35%, transparent);
 }
 
-.eval-analytics-reveal {
-  width: 100%;
-  border-bottom: 1px solid var(--border-soft);
-}
-
-.eval-analytics-reveal > button,
 .eval-show-more {
   display: flex;
   align-items: center;
@@ -229,19 +223,13 @@
   text-align: left;
 }
 
-.eval-analytics-reveal > button:hover,
-.eval-analytics-reveal > button:focus-visible,
 .eval-show-more:hover,
 .eval-show-more:focus-visible {
   background: color-mix(in srgb, var(--blue) 5%, var(--surface));
   outline: 0;
 }
 
-.eval-analytics-reveal span { display: grid; gap: 4px; }
-.eval-analytics-reveal strong { font-size: 12px; }
-.eval-analytics-reveal small,
 .eval-show-more small { color: color-mix(in srgb, var(--text) 46%, transparent); font-size: 8px; }
-.eval-analytics-reveal svg { width: 15px; height: 15px; color: var(--blue); }
 
 .eval-show-more {
   min-height: 58px;
