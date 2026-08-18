@@ -16,6 +16,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   Suspense,
   lazy,
+  startTransition,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -26,15 +27,16 @@ import {
 import { useLocation, useNavigate } from "react-router";
 import type { CodeBrowserHandle } from "./CodeBrowser";
 import type { CommitCodeStreamHandle } from "./CommitCodeStream";
+import { evalApi } from "./evalApi";
 import { fuzzyScore } from "./fuzzy";
 import { pathForSurface, surfaceFromUrl, type Surface } from "./navigation";
 import type { PublishedRepositorySnapshot } from "./publishedRepository";
 import type { HarnessCommit } from "./threadRepositorySnapshot";
 import { getBrowserThread } from "./workspace";
 
-const Evals = lazy(() =>
-  import("./Evals").then((module) => ({ default: module.Evals }))
-);
+const loadEvals = () =>
+  import("./Evals").then((module) => ({ default: module.Evals }));
+const Evals = lazy(loadEvals);
 const AgentTerminal = lazy(() =>
   import("./AgentTerminal").then((module) => ({
     default: module.AgentTerminal,
@@ -73,6 +75,21 @@ const queryClient = new QueryClient({
     },
   },
 });
+
+function preloadEvalOverview() {
+  void loadEvals().catch(() => undefined);
+  void Promise.all([
+    queryClient.prefetchQuery({
+      queryKey: ["evals", "overview"],
+      queryFn: ({ signal }) => evalApi.overview(signal),
+    }),
+    queryClient.prefetchQuery({
+      queryKey: ["evals", "cluster"],
+      queryFn: ({ signal }) => evalApi.cluster(signal),
+      staleTime: 5_000,
+    }),
+  ]).catch(() => undefined);
+}
 
 function loadRepositorySnapshot(
   includeHistory: boolean,
@@ -304,7 +321,8 @@ function NanocodexShell() {
     [thread.id],
   );
   const navigateToSurface = useCallback((nextSurface: Surface) => {
-    navigate(threadSurfacePath(nextSurface));
+    if (nextSurface === "evals") preloadEvalOverview();
+    startTransition(() => navigate(threadSurfacePath(nextSurface)));
   }, [navigate, threadSurfacePath]);
 
   useLayoutEffect(() => {
@@ -493,6 +511,8 @@ function NanocodexShell() {
               <a
                 className={surface === "evals" ? "is-active" : ""}
                 href={threadSurfacePath("evals")}
+                onFocus={preloadEvalOverview}
+                onPointerEnter={preloadEvalOverview}
                 onClick={(event) => {
                   event.preventDefault();
                   navigateToSurface("evals");
@@ -826,7 +846,7 @@ function NanocodexShell() {
               </p>
             </section>
           ) : (
-            <Suspense fallback={<section className="eval-surface-loading" aria-busy="true">Loading evals…</section>}>
+            <Suspense fallback={null}>
               <Evals />
             </Suspense>
           )}

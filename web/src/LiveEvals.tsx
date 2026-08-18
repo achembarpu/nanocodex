@@ -9,9 +9,9 @@ import {
   Server,
   X,
 } from "lucide-react";
-import { useQuery } from "@tanstack/react-query";
-import { useEffect, useMemo, useRef, useState } from "react";
-import { useLocation, useMatch, useNavigate } from "react-router";
+import { useQueryClient } from "@tanstack/react-query";
+import { startTransition, useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router";
 import { EvalAnalytics } from "./EvalAnalytics";
 import {
   evalApi,
@@ -36,41 +36,7 @@ import "./evals.css";
 type MatrixFilter = "all" | "active" | "issues" | "complete";
 type AnalyticsView = "frontier" | "runs";
 
-const resultStaleMs = 30_000;
-const resultCacheMs = 30 * 60_000;
-const taskStaleMs = 30_000;
 const initialTaskRows = 50;
-const activeOverviewPollMs = 2_000;
-const quietOverviewPollMs = 30_000;
-const analyticsKey = (worksetId: string | null) =>
-  ["evals", "analytics", worksetId] as const;
-const taskResultKey = (worksetId: string | null, taskId: string | null) =>
-  ["evals", "task-results", worksetId, taskId] as const;
-const taskKey = (worksetId: string | null, taskId: string | null) =>
-  ["evals", "task", worksetId, taskId] as const;
-
-export function useEvalOverview() {
-  const location = useLocation();
-  const detailRoute = location.pathname.startsWith("/evals/worksets/");
-  return useQuery({
-    queryKey: ["evals", "overview"],
-    enabled: !detailRoute,
-    queryFn: ({ signal }) => evalApi.overview(signal),
-    refetchInterval: detailRoute
-      ? false
-      : (query) => {
-          const data = query.state.data as EvalOverview | undefined;
-          return data && data.summary.running === 0 && data.summary.unclaimed === 0
-            ? quietOverviewPollMs
-            : activeOverviewPollMs;
-        },
-    refetchIntervalInBackground: false,
-    refetchOnMount: "always",
-    refetchOnWindowFocus: "always",
-    refetchOnReconnect: "always",
-    staleTime: 0,
-  });
-}
 
 function formatDuration(milliseconds: number | null) {
   if (milliseconds === null) return "—";
@@ -166,18 +132,14 @@ function ClusterNode({ node }: { node: EvalClusterNode }) {
   );
 }
 
-function ClusterView({ cluster, failed }: {
-  cluster: EvalCluster | undefined;
-  failed: boolean;
-}) {
+function ClusterView({ cluster }: { cluster: EvalCluster }) {
   return (
     <section className="eval-cluster" aria-labelledby="cluster-heading">
       <header>
         <div><p className="rail-label">Runtime</p><h2 id="cluster-heading">Cluster</h2></div>
-        <span>{cluster ? `${cluster.nodes.length} node${cluster.nodes.length === 1 ? "" : "s"}` : "live utilization"}</span>
+        <span>{cluster.nodes.length} node{cluster.nodes.length === 1 ? "" : "s"}</span>
       </header>
-      {cluster?.nodes.map((node) => <ClusterNode node={node} key={node.id} />)}
-      {!cluster && failed ? <p className="eval-cluster-state is-error">Cluster telemetry unavailable.</p> : null}
+      {cluster.nodes.map((node) => <ClusterNode node={node} key={node.id} />)}
     </section>
   );
 }
@@ -220,22 +182,16 @@ function JsonEvidence({ title, value }: { title: string; value: unknown }) {
 }
 
 function CaseInspector({
-  detailId,
+  evidence,
   cell,
   treatment,
   onClose,
 }: {
-  detailId: string;
+  evidence: EvalCase;
   cell: EvalCoordinate;
   treatment: EvalTreatment;
   onClose: () => void;
 }) {
-  const detail = useQuery({
-    queryKey: ["evals", "case", detailId],
-    queryFn: ({ signal }) => evalApi.evalCase(detailId, signal),
-    staleTime: Infinity,
-  });
-  const evidence: EvalCase | undefined = detail.data;
   return (
     <article className={`live-case-detail ${cell.state}`} aria-label="Selected evaluation case">
       <header>
@@ -248,51 +204,46 @@ function CaseInspector({
         </button>
       </header>
       <div className="live-case-detail-status">
-        <strong>{evidence?.status ?? coordinateLabel(cell)}</strong>
+        <strong>{evidence.status ?? coordinateLabel(cell)}</strong>
         <span>{formatDuration(cell.durationMs)}</span>
       </div>
-      {detail.error ? <p className="live-case-error"><AlertTriangle aria-hidden="true" /> {detail.error.message}</p> : null}
-      {evidence ? (
-        <>
-          <dl className="live-case-metrics">
-            <div><dt>Model</dt><dd>{evidence.model ?? treatment.model}</dd></div>
-            <div><dt>Effort</dt><dd>{evidence.effort ?? treatment.thinking}</dd></div>
-            <div><dt>Environment</dt><dd>{evidence.environment ?? "—"}</dd></div>
-            <div><dt>Tool calls</dt><dd>{formatInteger(evidence.toolCalls)}</dd></div>
-            <div><dt>Input tokens</dt><dd>{formatInteger(evidence.usage?.input_tokens)}</dd></div>
-            <div><dt>Cached input</dt><dd>{formatInteger(evidence.usage?.cached_input_tokens)}</dd></div>
-            <div><dt>Output tokens</dt><dd>{formatInteger(evidence.usage?.output_tokens)}</dd></div>
-            <div><dt>Total tokens</dt><dd>{formatInteger(evidence.usage?.total_tokens)}</dd></div>
-          </dl>
-          {evidence.prompt ? (
-            <section className="live-case-task">
-              <p className="rail-label">Task instruction</p>
-              <pre>{evidence.prompt}</pre>
-            </section>
-          ) : null}
-          {evidence.verifierStdout ? (
-            <details className="live-evidence-block" open={evidence.status !== "passed"}>
-              <summary>Verifier stdout</summary>
-              <pre>{evidence.verifierStdout}</pre>
-            </details>
-          ) : null}
-          {evidence.verifierStderr ? (
-            <details className="live-evidence-block" open>
-              <summary>Verifier stderr</summary>
-              <pre>{evidence.verifierStderr}</pre>
-            </details>
-          ) : null}
-          {evidence.finalMessage ? (
-            <details className="live-evidence-block">
-              <summary>Final agent message</summary>
-              <pre>{evidence.finalMessage}</pre>
-            </details>
-          ) : null}
-          <JsonEvidence title="Verifier result" value={evidence.verifier} />
-          <JsonEvidence title="Exception" value={evidence.exception} />
-          <JsonEvidence title="Timing" value={evidence.timing} />
-        </>
+      <dl className="live-case-metrics">
+        <div><dt>Model</dt><dd>{evidence.model ?? treatment.model}</dd></div>
+        <div><dt>Effort</dt><dd>{evidence.effort ?? treatment.thinking}</dd></div>
+        <div><dt>Environment</dt><dd>{evidence.environment ?? "—"}</dd></div>
+        <div><dt>Tool calls</dt><dd>{formatInteger(evidence.toolCalls)}</dd></div>
+        <div><dt>Input tokens</dt><dd>{formatInteger(evidence.usage?.input_tokens)}</dd></div>
+        <div><dt>Cached input</dt><dd>{formatInteger(evidence.usage?.cached_input_tokens)}</dd></div>
+        <div><dt>Output tokens</dt><dd>{formatInteger(evidence.usage?.output_tokens)}</dd></div>
+        <div><dt>Total tokens</dt><dd>{formatInteger(evidence.usage?.total_tokens)}</dd></div>
+      </dl>
+      {evidence.prompt ? (
+        <section className="live-case-task">
+          <p className="rail-label">Task instruction</p>
+          <pre>{evidence.prompt}</pre>
+        </section>
       ) : null}
+      {evidence.verifierStdout ? (
+        <details className="live-evidence-block" open={evidence.status !== "passed"}>
+          <summary>Verifier stdout</summary>
+          <pre>{evidence.verifierStdout}</pre>
+        </details>
+      ) : null}
+      {evidence.verifierStderr ? (
+        <details className="live-evidence-block" open>
+          <summary>Verifier stderr</summary>
+          <pre>{evidence.verifierStderr}</pre>
+        </details>
+      ) : null}
+      {evidence.finalMessage ? (
+        <details className="live-evidence-block">
+          <summary>Final agent message</summary>
+          <pre>{evidence.finalMessage}</pre>
+        </details>
+      ) : null}
+      <JsonEvidence title="Verifier result" value={evidence.verifier} />
+      <JsonEvidence title="Exception" value={evidence.exception} />
+      <JsonEvidence title="Timing" value={evidence.timing} />
     </article>
   );
 }
@@ -361,44 +312,43 @@ function Analytics({
   return <EvalAnalytics points={points} view={view} taskCount={taskCount} />;
 }
 
-export function LiveEvals({ overview }: { overview: EvalOverview | undefined }) {
+export type LiveEvalsData =
+  | {
+      kind: "overview";
+      overview: EvalOverview;
+      cluster: EvalCluster;
+    }
+  | {
+      kind: "workset";
+      detail: EvalWorksetDetail;
+      analytics: EvalWorksetAnalytics;
+    }
+  | {
+      kind: "task";
+      detail: EvalWorksetDetail;
+      task: { task: EvalTask };
+      results: EvalWorksetResults;
+      taskId: string;
+    };
+
+export function LiveEvals({ data }: { data: LiveEvalsData }) {
   const navigate = useNavigate();
-  const taskRoute = useMatch("/evals/worksets/:worksetId/tasks/:taskId");
-  const worksetRoute = useMatch("/evals/worksets/:worksetId");
-  const route = taskRoute ?? worksetRoute;
-  const clusterQuery = useQuery({
-    queryKey: ["evals", "cluster"],
-    queryFn: ({ signal }) => evalApi.cluster(signal),
-    enabled: !route,
-    refetchInterval: 10_000,
-    refetchIntervalInBackground: false,
-    staleTime: 5_000,
-  });
+  const queryClient = useQueryClient();
   const [selectedCell, setSelectedCell] = useState<{
     treatment: EvalTreatment;
     cell: EvalCoordinate;
+    evidence: EvalCase;
   } | null>(null);
+  const [caseError, setCaseError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<MatrixFilter>("all");
   const [shownTaskRows, setShownTaskRows] = useState(initialTaskRows);
   const detailRef = useRef<HTMLDivElement>(null);
-  const selectedWorksetId = route?.params.worksetId ?? null;
-  const overviewWorkset = selectedWorksetId
-    ? overview?.worksets.find((workset) => workset.id === selectedWorksetId) ?? null
-    : null;
-  const worksetQuery = useQuery({
-    queryKey: ["evals", "workset", selectedWorksetId],
-    enabled: Boolean(selectedWorksetId),
-    queryFn: ({ signal }) => evalApi.workset(selectedWorksetId!, signal),
-    refetchInterval: (query) => {
-      const data = query.state.data as EvalWorksetDetail | undefined;
-      const summary = data?.workset.summary;
-      return summary && summary.running === 0 && summary.unclaimed === 0 ? false : 10_000;
-    },
-    refetchIntervalInBackground: false,
-  });
-  const selectedWorkset = worksetQuery.data?.workset ?? overviewWorkset;
-  const tasks = worksetQuery.data?.tasks ?? [];
+  const caseRequestId = useRef(0);
+  const detail = data.kind === "overview" ? null : data.detail;
+  const selectedWorkset = detail?.workset ?? null;
+  const selectedWorksetId = selectedWorkset?.id ?? null;
+  const tasks = detail?.tasks ?? [];
   const normalizedQuery = query.trim().toLowerCase();
   const visibleTasks = useMemo(
     () => tasks
@@ -416,57 +366,17 @@ export function LiveEvals({ overview }: { overview: EvalOverview | undefined }) 
   );
   const renderedTasks = visibleTasks.slice(0, shownTaskRows);
   const orderedWorksets = useMemo(
-    () => [...(overview?.worksets ?? [])].sort((left, right) =>
+    () => [...(data.kind === "overview" ? data.overview.worksets : [])].sort((left, right) =>
       progressRank(left.summary) - progressRank(right.summary) ||
       right.createdAtMs - left.createdAtMs
     ),
-    [overview?.worksets],
+    [data],
   );
-  const selectedTaskId = taskRoute?.params.taskId ?? null;
+  const selectedTaskId = data.kind === "task" ? data.taskId : null;
   const selectedTaskOverview = selectedTaskId
     ? tasks.find((task) => task.id === selectedTaskId) ?? null
     : null;
-  const taskQuery = useQuery({
-    queryKey: taskKey(selectedWorksetId, selectedTaskId),
-    enabled: Boolean(selectedWorksetId && selectedTaskId),
-    queryFn: ({ signal }) =>
-      evalApi.task(selectedWorksetId!, selectedTaskId!, signal),
-    refetchInterval:
-      selectedTaskOverview &&
-      selectedTaskOverview.summary.total > 0 &&
-      selectedTaskOverview.summary.success + selectedTaskOverview.summary.failed === selectedTaskOverview.summary.total
-        ? false
-        : 15_000,
-    refetchIntervalInBackground: true,
-    staleTime: taskStaleMs,
-    gcTime: resultCacheMs,
-    refetchOnWindowFocus: false,
-  });
-  const analyticsQuery = useQuery<EvalWorksetAnalytics>({
-    queryKey: analyticsKey(selectedWorksetId),
-    enabled: Boolean(selectedWorksetId && !taskRoute),
-    queryFn: ({ signal }) => evalApi.worksetAnalytics(selectedWorksetId!, signal),
-    refetchInterval: selectedWorkset &&
-      selectedWorkset.summary.success + selectedWorkset.summary.failed < selectedWorkset.summary.total
-      ? 15_000
-      : false,
-    staleTime: resultStaleMs,
-    gcTime: resultCacheMs,
-    refetchOnWindowFocus: false,
-  });
-  const resultsQuery = useQuery<EvalWorksetResults>({
-    queryKey: taskResultKey(selectedWorksetId, selectedTaskId),
-    enabled: Boolean(selectedWorksetId && taskRoute && selectedTaskId),
-    queryFn: ({ signal }) => evalApi.taskResults(selectedWorksetId!, selectedTaskId!, signal),
-    refetchInterval: selectedTaskOverview &&
-      selectedTaskOverview.summary.success + selectedTaskOverview.summary.failed < selectedTaskOverview.summary.total
-      ? 15_000
-      : false,
-    staleTime: resultStaleMs,
-    gcTime: resultCacheMs,
-    refetchOnWindowFocus: false,
-  });
-  const selectedTask: EvalTask | null = taskQuery.data?.task ?? null;
+  const selectedTask: EvalTask | null = data.kind === "task" ? data.task.task : null;
   const repetitions = [
     ...new Set(selectedTask?.treatments.flatMap((treatment) =>
       treatment.cells.map((cell) => cell.repetition)) ?? []),
@@ -482,19 +392,51 @@ export function LiveEvals({ overview }: { overview: EvalOverview | undefined }) 
   }, [filter, normalizedQuery, selectedWorksetId]);
 
   function chooseWorkset(id: string) {
+    caseRequestId.current++;
     setSelectedCell(null);
-    navigate(`/evals/worksets/${encodeURIComponent(id)}`);
+    setCaseError(null);
+    startTransition(() => navigate(`/evals/worksets/${encodeURIComponent(id)}`));
   }
 
   function chooseTask(id: string) {
     if (!selectedWorkset) return;
+    caseRequestId.current++;
     setSelectedCell(null);
-    navigate(
-      `/evals/worksets/${encodeURIComponent(selectedWorkset.id)}/tasks/${encodeURIComponent(id)}`,
+    setCaseError(null);
+    startTransition(() => {
+      navigate(
+        `/evals/worksets/${encodeURIComponent(selectedWorkset.id)}/tasks/${encodeURIComponent(id)}`,
+      );
+    });
+  }
+
+  function chooseCell(treatment: EvalTreatment, cell: EvalCoordinate) {
+    if (!cell.detailId) return;
+    const requestId = ++caseRequestId.current;
+    setCaseError(null);
+    void queryClient.fetchQuery({
+      queryKey: ["evals", "case", cell.detailId],
+      queryFn: ({ signal }) => evalApi.evalCase(cell.detailId!, signal),
+      staleTime: Infinity,
+    }).then(
+      (evidence) => {
+        if (caseRequestId.current !== requestId) return;
+        startTransition(() => setSelectedCell({ treatment, cell, evidence }));
+      },
+      (error: unknown) => {
+        if (caseRequestId.current !== requestId) return;
+        setCaseError(error instanceof Error ? error.message : "Case evidence is unavailable.");
+      },
     );
   }
 
-  if (!route) {
+  function closeCell() {
+    caseRequestId.current++;
+    setSelectedCell(null);
+    setCaseError(null);
+  }
+
+  if (data.kind === "overview") {
     return (
       <main className="live-evals">
         <section className="eval-page-head eval-overview-head">
@@ -504,10 +446,7 @@ export function LiveEvals({ overview }: { overview: EvalOverview | undefined }) 
             <p>Durable benchmark progress and retained result artifacts.</p>
           </div>
         </section>
-        <ClusterView
-          cluster={clusterQuery.data}
-          failed={clusterQuery.isError}
-        />
+        <ClusterView cluster={data.cluster} />
         <section className="eval-full-table" aria-labelledby="worksets-heading">
           <header><p className="rail-label">Benchmarks</p><h2 id="worksets-heading">Worksets</h2></header>
           <div className="eval-table-heading eval-workset-grid" aria-hidden="true">
@@ -533,37 +472,20 @@ export function LiveEvals({ overview }: { overview: EvalOverview | undefined }) 
     );
   }
 
-  if (!selectedWorkset) {
-    if (worksetQuery.isPending) return null;
-    return (
-      <main className="live-evals eval-route-empty">
-        <PageBack onClick={() => navigate("/evals")}>All evals</PageBack>
-        <AlertTriangle aria-hidden="true" />
-        <h1>Workset not found</h1>
-        <p>{worksetQuery.error?.message ?? "The coordinator no longer reports this durable workset."}</p>
-      </main>
-    );
-  }
-
-  if (!taskRoute) {
+  if (data.kind === "workset") {
+    const workset = data.detail.workset;
     return (
       <main className="live-evals">
         <section className="eval-page-head eval-detail-head">
           <div>
-            <PageBack onClick={() => navigate("/evals")}>All evals</PageBack>
-            <p className="eyebrow">Benchmark · {selectedWorkset.digest.slice(0, 16)}</p>
-            <h1>{selectedWorkset.profile}</h1>
-            <p>{selectedWorkset.taskCount} tasks across the retained harness, model, thinking, and repetition sweep.</p>
+            <PageBack onClick={() => startTransition(() => navigate("/evals"))}>All evals</PageBack>
+            <p className="eyebrow">Benchmark · {workset.digest.slice(0, 16)}</p>
+            <h1>{workset.profile}</h1>
+            <p>{workset.taskCount} tasks across the retained harness, model, thinking, and repetition sweep.</p>
           </div>
-          <ProgressBar summary={selectedWorkset.summary} label={`${selectedWorkset.profile} progress`} />
+          <ProgressBar summary={workset.summary} label={`${workset.profile} progress`} />
         </section>
-        {analyticsQuery.data ? (
-          <Analytics points={analyticsQuery.data.points} taskCount={analyticsQuery.data.taskCount} />
-        ) : analyticsQuery.error ? (
-          <section className="eval-chart-error" role="alert">
-            {analyticsQuery.error.message}
-          </section>
-        ) : null}
+        <Analytics points={data.analytics.points} taskCount={data.analytics.taskCount} />
         <section className="eval-full-table" aria-labelledby="tasks-heading">
           <header className="eval-table-toolbar">
             <div><p className="rail-label">Progress</p><h2 id="tasks-heading">Tasks</h2></div>
@@ -595,46 +517,27 @@ export function LiveEvals({ overview }: { overview: EvalOverview | undefined }) 
               <small>{visibleTasks.length - renderedTasks.length} remaining</small>
             </button>
           ) : null}
-          {worksetQuery.error ? <p className="eval-empty-list">{worksetQuery.error.message}</p> : null}
-          {!worksetQuery.isPending && !visibleTasks.length ? <p className="eval-empty-list">No tasks match this filter.</p> : null}
+          {!visibleTasks.length ? <p className="eval-empty-list">No tasks match this filter.</p> : null}
         </section>
       </main>
     );
   }
 
-  if (!selectedTaskOverview && !selectedTask && worksetQuery.isPending) {
-    return null;
-  }
-
-  if (!selectedTaskOverview && !selectedTask) {
-    return (
-      <main className="live-evals eval-route-empty">
-        <PageBack onClick={() => chooseWorkset(selectedWorkset.id)}>Benchmark</PageBack>
-        <AlertTriangle aria-hidden="true" />
-        <h1>Task not found</h1>
-        <p>This task is not part of the selected workset.</p>
-      </main>
-    );
-  }
-
+  const taskWorkset = data.detail.workset;
   return (
     <main className="live-evals">
       <section className="eval-page-head eval-detail-head">
         <div>
-          <PageBack onClick={() => chooseWorkset(selectedWorkset.id)}>{selectedWorkset.profile}</PageBack>
+          <PageBack onClick={() => chooseWorkset(taskWorkset.id)}>{taskWorkset.profile}</PageBack>
           <p className="eyebrow">Task · {(selectedTaskOverview?.digest ?? selectedTask?.digest)?.slice(0, 16)}</p>
           <h1>{selectedTaskOverview?.label ?? selectedTask?.label}</h1>
           <p>{selectedTaskOverview?.name ?? selectedTask?.name}</p>
         </div>
         {selectedTaskOverview ? <ProgressBar summary={selectedTaskOverview.summary} label={`${selectedTaskOverview.label} progress`} /> : null}
       </section>
-      {resultsQuery.data ? (
-        <Analytics points={resultsQuery.data.points} view="runs" />
-      ) : null}
+      <Analytics points={data.results.points} view="runs" />
       <section className="eval-run-section" aria-labelledby="treatments-heading">
-        {taskQuery.isPending ? null : taskQuery.error ? (
-          <div className="eval-empty-panel"><AlertTriangle aria-hidden="true" /><h2>Task unavailable</h2><p>{taskQuery.error.message}</p></div>
-        ) : selectedTask ? (
+        {selectedTask ? (
           <>
             <header className="eval-task-panel-header">
               <div><p className="rail-label">Runs</p><h2 id="treatments-heading">Treatments and repetitions</h2></div>
@@ -655,7 +558,7 @@ export function LiveEvals({ overview }: { overview: EvalOverview | undefined }) 
                         if (!cell) return <td className="is-unavailable" key={repetition} />;
                         return (
                           <td key={repetition}>
-                            <button type="button" className={`eval-matrix-cell ${cell.state} ${cell.status ?? cell.outcome ?? ""}`} title={`${treatment.label}\nrepetition ${repetition} · ${coordinateLabel(cell)}\n${formatDuration(cell.durationMs)}`} aria-label={`${treatment.label}, repetition ${repetition}: ${coordinateLabel(cell)}`} aria-pressed={selectedCell?.cell.id === cell.id} disabled={!cell.detailId} onClick={() => setSelectedCell({ treatment, cell })}>
+                            <button type="button" className={`eval-matrix-cell ${cell.state} ${cell.status ?? cell.outcome ?? ""}`} title={`${treatment.label}\nrepetition ${repetition} · ${coordinateLabel(cell)}\n${formatDuration(cell.durationMs)}`} aria-label={`${treatment.label}, repetition ${repetition}: ${coordinateLabel(cell)}`} aria-pressed={selectedCell?.cell.id === cell.id} disabled={!cell.detailId} onClick={() => chooseCell(treatment, cell)}>
                               <CellMark cell={cell} />
                             </button>
                           </td>
@@ -667,8 +570,11 @@ export function LiveEvals({ overview }: { overview: EvalOverview | undefined }) 
                 </tbody>
               </table>
             </div>
-            {selectedCell?.cell.detailId ? (
-              <div className="live-case-slot" ref={detailRef}><CaseInspector detailId={selectedCell.cell.detailId} cell={selectedCell.cell} treatment={selectedCell.treatment} onClose={() => setSelectedCell(null)} /></div>
+            {caseError ? (
+              <p className="live-case-error" role="alert"><AlertTriangle aria-hidden="true" /> {caseError}</p>
+            ) : null}
+            {selectedCell ? (
+              <div className="live-case-slot" ref={detailRef}><CaseInspector evidence={selectedCell.evidence} cell={selectedCell.cell} treatment={selectedCell.treatment} onClose={closeCell} /></div>
             ) : null}
           </>
         ) : null}
