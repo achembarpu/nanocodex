@@ -1,0 +1,11 @@
+import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
+import test from "node:test";
+
+test("the sandboxed artifact runtime may be framed only by the host app", async () => {
+  const headers = await readFile(new URL("../public/_headers", import.meta.url), "utf8");
+
+  assert.match(headers, /frame-ancestors 'self'/);
+  assert.match(headers, /X-Frame-Options: SAMEORIGIN/);
+  assert.match(headers, /\/artifact-runtime\*[\s\S]*default-src 'none'/);
+});
