@@ -34,6 +34,10 @@ name = "minimal"
 path = "minimal.rs"
 
 [[bin]]
+name = "durable"
+path = "durable.rs"
+
+[[bin]]
 name = "follow-on"
 path = "follow_on.rs"
 

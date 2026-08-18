@@ -8,14 +8,32 @@ Hosts provide only atomic journal loading and compare-and-append.
 This crate is an optional layer over `nanocodex-agent`: durability depends on
 the agent, never the reverse. It implements the agent's neutral execution
 policy seam at prompt admission, model calls, tool calls, and committed
-session boundaries. Import [`DurableAgentExt`] to retain the fluent builder
-shape:
+session boundaries.
+
+The pieces compose progressively; none of the lower layers imports this crate:
+
+```text
+nanocodex-oai-api <- nanocodex-tools <- nanocodex-agent
+                                             ^
+                                             |
+                                  nanocodex-durability
+```
+
+Construct only the layer an application needs, or attach the journal after the
+OpenAI client and tool registry have been composed into an agent:
 
 ```rust,ignore
-use nanocodex_durability::DurableAgentExt;
+use nanocodex_agent::{Nanocodex, OpenAi, PromptRequest};
+use nanocodex_durability::{DurableAgentExt, DurableSession, MemoryStore};
+use nanocodex_tools::Tools;
 
+let openai = OpenAi::new(std::env::var("OPENAI_API_KEY")?)?;
+let tools = Tools::builder().without_defaults().build()?;
+
+let store = MemoryStore::new()?;
 let journal = DurableSession::open(store, "agent-123").await?;
 let (agent, events) = Nanocodex::builder(openai)
+    .tools(tools)
     .durability(journal)
     .await?
     .build()?;
@@ -26,6 +44,14 @@ let turn = agent
     .await?;
 assert_eq!(turn.request_id(), Some("request-7"));
 ```
+
+Without `.durability(...)`, the same builder is an ordinary non-durable agent.
+An OpenAI-only consumer can stop at `OpenAi::instructions(...).build()`, and a
+tools-only consumer can stop at `Tools::builder().build()`. A caller that owns
+either lower-level lifecycle can use `DurableSession` directly, choose its own
+operation and step IDs, and persist its own typed checkpoints and outputs. The
+automatic model/tool/checkpoint integration is specifically the
+`DurableAgentExt` adapter.
 
 The crate includes an in-memory store on every target and optional native
 SQLite and Postgres stores. JavaScript runtimes implement the same small store

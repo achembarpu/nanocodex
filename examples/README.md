@@ -2,8 +2,8 @@
 
 All language consumers live at this repository boundary:
 
-- Rust: `minimal.rs`, `voice.rs`, `realtime_pipe.rs`, `follow_on.rs`, `lifecycle.rs`,
-  `custom_tool.rs`, `subagents.rs`, `resume.rs`, `fork_conversations.rs`,
+- Rust: `minimal.rs`, `durable.rs`, `voice.rs`, `realtime_pipe.rs`, `follow_on.rs`,
+  `lifecycle.rs`, `custom_tool.rs`, `subagents.rs`, `resume.rs`, `fork_conversations.rs`,
   `fork_checkpoint_bench.rs`, `secret_egress.rs`, and `mcp.rs` are binaries in the
   `nanocodex-examples` package.
 - Python: `python/` uses the native PyO3 binding (`follow_on.py`, `events.py`,
@@ -31,6 +31,8 @@ From the repository root:
 
 ```sh
 cargo run -p nanocodex-examples --bin minimal
+# Compose OpenAI, tools, the agent lifecycle, and the optional durability layer:
+cargo run -p nanocodex-examples --bin durable
 # Own the default microphone and speaker directly in Rust:
 cargo run -p nanocodex-examples --bin voice
 # Or keep devices outside the process and compose raw PCM with Unix pipes:

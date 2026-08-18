@@ -199,6 +199,7 @@ nanocodex                         Alloy-style facade and prelude
 │   ├── oai                       nanocodex-oai-api
 │   └── tools                     nanocodex-tools
 │       └── macros                nanocodex-tools-macros
+├── durability                    nanocodex-durability -> nanocodex-agent
 ├── oai                           nanocodex-oai-api
 ├── tools                         nanocodex-tools
 └── observability                 nanocodex-observability (optional)
@@ -231,6 +232,22 @@ the agent.
 
 [Agent guide](crates/nanocodex-agent/README.md) ·
 [API documentation](https://docs.rs/nanocodex-agent)
+
+### `nanocodex-durability`
+
+The optional durable-execution layer: an append-only Rust journal, typed
+reduction and recovery policy, operation deduplication, effect replay, session
+checkpoints, and in-memory, SQLite, Postgres, or host-provided stores. The host
+contract is only atomic load and compare-and-append; Rust owns the journal
+format and recovery decisions.
+
+Durability depends on `nanocodex-agent` and implements its neutral execution
+policy seam. The agent never depends on durability. Lower-level consumers can
+instead use `DurableSession` directly with caller-owned operation, step,
+checkpoint, and output types.
+
+[Durability guide](crates/nanocodex-durability/README.md) ·
+[API documentation](https://docs.rs/nanocodex-durability)
 
 ### `nanocodex-oai-api`
 
