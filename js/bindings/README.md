@@ -288,8 +288,13 @@ console.log((await turn.result()).finalMessage);
 Revisions are unsigned decimal strings so JavaScript preserves Rust's full
 `u64` range. TypeScript exposes them as a nominal `DurabilityRevision`; use the
 exported `durabilityRevision(value)` validator when converting database text or
-incremented `bigint`s. See `examples/cloudflare-workers` for an atomic Durable
-Object SQL adapter and `examples/vercel-workflows` for a workflow-step adapter.
+incremented `bigint`s. Durable step hosts can use
+`createMemoryDurabilityStore(journalId, priorSnapshot)` and carry its
+`snapshot()` into the next step. SQLite hosts can use
+`createSqliteDurabilityStore({ transaction })`; the transaction's query adapter
+is the only platform-specific code. See `examples/cloudflare-workers`,
+`examples/vercel-workflows`, and `examples/rivet-actors` for all three host
+shapes.
 
 Node embedders whose bundler relocates package assets may compile and pass the
 web-target artifact explicitly. The runtime still uses the Node host for

@@ -6,8 +6,8 @@ Vercel Workflows and native Vercel Function WebSockets.
 Each Workflow run is one agent session:
 
 - a typed Workflow hook accepts prompts and processes them sequentially;
-- the Workflow event log retains opaque Rust durability batches between
-  stateless Function steps;
+- each Function step uses Nanocodex's built-in memory durability store and
+  returns its opaque journal to the Workflow event log for the next step;
 - every accepted prompt, typed agent event, and terminal result is appended to
   the Workflow's resumable stream;
 - each WebSocket Function independently tails that durable stream, so clients

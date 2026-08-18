@@ -111,7 +111,7 @@ describe.sequential("Nanocodex Rivet Actors", () => {
       .toBe("AGENTOS_OK");
   });
 
-  test("commits, deduplicates, unloads, and restores a WASM session", async (context) => {
+  test("uses the Rust journal to deduplicate, unload, and restore a WASM session", async (context) => {
     resetMock();
     configureApiKey();
     const { client } = await setupTest(context, registry);

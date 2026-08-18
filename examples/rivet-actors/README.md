@@ -18,17 +18,17 @@ dormant upstream package to remain in AgentOS's lockfile subtree.
 Each `nanocodex` actor owns one conversation:
 
 - the live WASM driver, event watcher, and turns live in ephemeral `c.vars`;
-- the typed Nanocodex snapshot and terminal idempotency records live in the
-  actor's embedded SQLite database;
+- the actor's embedded SQLite database supplies atomic load and
+  compare-and-append for opaque Nanocodex journal batches;
 - the AgentOS root filesystem is chunked into the same actor-owned SQLite
   storage and restored automatically across VM sleep/wake cycles;
 - `sandbox_exec`, `sandbox_read_file`, `sandbox_write_file`,
   `sandbox_list_files`, `sandbox_start_process`, and `sandbox_preview` expose
   bounded AgentOS operations to Nanocodex without putting model credentials in
   the guest;
-- a completed turn is transactionally committed before its action returns or
-  broadcasts `turnCompleted`;
-- duplicate turn IDs share one in-flight promise or replay the stored terminal
+- Rust/WASM owns typed checkpoints, terminal results, input conflicts, and
+  recovery across model and tool steps;
+- duplicate turn IDs share one in-flight promise or replay Nanocodex's durable
   result without another model call;
 - `onSleep` and `onDestroy` cancel turns, close the Responses WebSocket, and
   release WASM resources;
@@ -36,8 +36,9 @@ Each `nanocodex` actor owns one conversation:
   Nanocodex's session contract.
 
 Actions execute in parallel in Rivet. The actor therefore caps fan-in at 16
-turns, distinguishes conflicting idempotency keys by a SHA-256 input digest,
-and keeps each prompt action awake through its complete model turn.
+turns and keeps each prompt action awake through its complete model turn.
+The host's `completed_operations` table is presentation metadata for status
+counters and duplicate-broadcast suppression; it is not a second replay log.
 
 Local development reads the current access token and account ID from the
 mode-`0600` Codex auth file for each connection. It never uses the refresh token
@@ -123,8 +124,9 @@ REPL state file.
 
 This demonstrates durable client detachment, not distributed exactly-once
 inference. If the actor host itself dies before a turn commits, reopening the
-REPL resubmits the same turn from the last committed snapshot; a partial
-provider response cannot be resumed.
+REPL resubmits the same turn from Nanocodex's last committed checkpoint. A
+completed model step is replayed after actor loss; an unsafe tool start without
+a committed completion stops with an explicit ambiguous-outcome error.
 
 The local Rivet endpoint is `http://127.0.0.1:6420`. Set
 `RIVET_PUBLIC_ENDPOINT` for another deployment. Set `NANOCODEX_WEB_HOST` or
@@ -223,11 +225,11 @@ connection.on("agentEvent", (event) => console.log(event));
 connection.on("turnCompleted", (result) => console.log(result));
 
 await session.turn({ id: crypto.randomUUID(), input: "Hello" });
-await session.unload(); // snapshot remains durable
+await session.unload(); // Nanocodex journal remains durable
 await connection.dispose();
 ```
 
-Use `reset()` to delete the conversation snapshot and terminal replay records.
+Use `reset()` to delete the Nanocodex journal and completion metadata.
 Rivet automatically sleeps idle actors after 30 seconds.
 
 ## Deployment

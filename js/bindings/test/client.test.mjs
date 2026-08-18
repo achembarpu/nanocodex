@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { Actions } from "../index.mjs";
+import {
+  Actions,
+  createMemoryDurabilityStore,
+  createSqliteDurabilityStore,
+} from "../index.mjs";
 import {
   activateHost,
   bindHostSession,
@@ -14,6 +18,65 @@ import {
   release as releaseDurabilityHost,
   retain as retainDurabilityHost,
 } from "../runtime/durability.mjs";
+
+test("the memory durability store carries opaque Rust batches across host steps", () => {
+  const store = createMemoryDurabilityStore("journal-1");
+  assert.deepEqual(store.load("journal-1"), { revision: "0", batches: [] });
+  assert.deepEqual(store.append("journal-1", {
+    expectedRevision: "0",
+    payload: "{\"entry\":1}",
+  }), { status: "appended", revision: "1" });
+  assert.deepEqual(store.append("journal-1", {
+    expectedRevision: "0",
+    payload: "stale",
+  }), { status: "conflict", actualRevision: "1" });
+  assert.deepEqual(store.snapshot(), {
+    revision: "1",
+    batches: [{ revision: "1", payload: "{\"entry\":1}" }],
+  });
+  assert.throws(() => store.load("other"), /unknown durability journal/);
+});
+
+test("the SQLite durability store owns revision validation and compare-and-append", () => {
+  const revisions = new Map();
+  const batches = [];
+  const query = (sql, args) => {
+    const [journalId, revision, payload] = args;
+    if (sql.startsWith("SELECT revision FROM durability_journals")) {
+      const stored = revisions.get(journalId);
+      return stored === undefined ? [] : [{ revision: stored }];
+    }
+    if (sql.startsWith("SELECT revision, payload FROM durability_batches")) {
+      return batches.filter((batch) => batch.journalId === journalId);
+    }
+    if (sql.startsWith("INSERT INTO durability_journals")) {
+      revisions.set(journalId, revision);
+      return [];
+    }
+    if (sql.startsWith("INSERT INTO durability_batches")) {
+      batches.push({ journalId, revision, payload });
+      return [];
+    }
+    throw new Error(`unexpected SQL: ${sql}`);
+  };
+  const store = createSqliteDurabilityStore({
+    transaction: (callback) => callback(query),
+  });
+
+  assert.deepEqual(store.load("journal-1"), { revision: "0", batches: [] });
+  assert.deepEqual(store.append("journal-1", {
+    expectedRevision: "0",
+    payload: "opaque",
+  }), { status: "appended", revision: "1" });
+  assert.deepEqual(store.append("journal-1", {
+    expectedRevision: "0",
+    payload: "stale",
+  }), { status: "conflict", actualRevision: "1" });
+  assert.deepEqual(store.load("journal-1"), {
+    revision: "1",
+    batches: [{ revision: "1", payload: "opaque" }],
+  });
+});
 
 test("the headless client exposes matching direct and standalone actions", async () => {
   const events = new Set();

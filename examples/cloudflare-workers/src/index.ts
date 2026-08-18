@@ -2,16 +2,16 @@ import { DurableObject } from "cloudflare:workers";
 import { ContainerProxy, Sandbox } from "@cloudflare/sandbox";
 import type {
   DefaultAgent,
-  DurabilityAppendResult,
-  DurabilityRevision,
-  DurabilityStoredJournal,
+  DurabilitySqliteQuery,
+  DurabilitySqliteRow,
+  DurabilitySqliteValue,
   DurabilityStore,
   EventWatcher,
   PromptInput,
   Turn,
   TurnResult,
 } from "nanocodex";
-import { durabilityRevision } from "nanocodex";
+import { createSqliteDurabilityStore } from "nanocodex";
 import { Agent } from "nanocodex/browser";
 import nanocodexWasm from "./nanocodex.wasm";
 import {
@@ -619,59 +619,16 @@ export class NanocodexSession extends DurableObject<Env> {
   }
 
   #durabilityStore(): DurabilityStore {
-    return {
-      load: (journalId) => this.#loadJournal(journalId),
-      append: (journalId, request) => this.#appendJournal(
-        journalId,
-        request.expectedRevision,
-        request.payload,
-      ),
-    };
-  }
-
-  #loadJournal(journalId: string): DurabilityStoredJournal {
-    const revision = durabilityRevision(this.ctx.storage.sql.exec<{ revision: string }>(
-      "SELECT revision FROM durability_journals WHERE journal_id = ?",
-      journalId,
-    ).toArray()[0]?.revision ?? "0");
-    const batches = this.ctx.storage.sql.exec<{ revision: string; payload: string }>(
-      "SELECT revision, payload FROM durability_batches WHERE journal_id = ? ORDER BY rowid",
-      journalId,
-    ).toArray().map((batch) => ({
-      revision: durabilityRevision(batch.revision),
-      payload: batch.payload,
-    }));
-    return { revision, batches };
-  }
-
-  #appendJournal(
-    journalId: string,
-    expectedRevision: DurabilityRevision,
-    payload: string,
-  ): DurabilityAppendResult {
-    return this.ctx.storage.transactionSync(() => {
-      const actualRevision = durabilityRevision(this.ctx.storage.sql.exec<{ revision: string }>(
-        "SELECT revision FROM durability_journals WHERE journal_id = ?",
-        journalId,
-      ).toArray()[0]?.revision ?? "0");
-      if (actualRevision !== expectedRevision) {
-        return { status: "conflict", actualRevision };
-      }
-      const revision = durabilityRevision((BigInt(expectedRevision) + 1n).toString());
-      this.ctx.storage.sql.exec(
-        `INSERT INTO durability_journals (journal_id, revision) VALUES (?, ?)
-         ON CONFLICT (journal_id) DO UPDATE SET revision = excluded.revision`,
-        journalId,
-        revision,
-      );
-      this.ctx.storage.sql.exec(
-        "INSERT INTO durability_batches (journal_id, revision, payload) VALUES (?, ?, ?)",
-        journalId,
-        revision,
-        payload,
-      );
-      return { status: "appended", revision };
+    const query = this.#durabilityQuery();
+    return createSqliteDurabilityStore({
+      transaction: (callback) => this.ctx.storage.transactionSync(() => callback(query)),
     });
+  }
+
+  #durabilityQuery(): DurabilitySqliteQuery {
+    return <Row extends DurabilitySqliteRow>(sql: string, args: readonly DurabilitySqliteValue[]) => (
+      this.ctx.storage.sql.exec<Row>(sql, ...args).toArray()
+    );
   }
 
   #activeTurnIds(): string[] {

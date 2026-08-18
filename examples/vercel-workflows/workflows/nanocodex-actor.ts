@@ -1,13 +1,12 @@
 import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
-import type {
-  DefaultAgent,
-  DurabilityAppendResult,
-  DurabilityRevision,
-  DurabilityStoredJournal,
-  DurabilityStore,
-  EventWatcher,
+import {
+  createMemoryDurabilityStore,
+  durabilityRevision,
+  type DefaultAgent,
+  type DurabilityStoredJournal,
+  type EventWatcher,
 } from "nanocodex";
 import { defineHook, getWorkflowMetadata, getWritable } from "workflow";
 
@@ -98,7 +97,7 @@ export async function runNanocodexTurn(
   const writable = getWritable<SessionEvent>();
   const writer = writable.getWriter();
   let eventWrites = Promise.resolve();
-  const durability = workflowDurabilityStore(initialJournal);
+  const durability = createMemoryDurabilityStore(sessionId, initialJournal);
 
   try {
     const { Agent } = await import("nanocodex/browser");
@@ -182,38 +181,6 @@ export async function runNanocodexTurn(
       }
     }
   }
-}
-
-function workflowDurabilityStore(initial: DurabilityStoredJournal): DurabilityStore & {
-  snapshot(): DurabilityStoredJournal;
-} {
-  let journal: DurabilityStoredJournal = {
-    revision: initial.revision,
-    batches: initial.batches.map((batch) => ({ ...batch })),
-  };
-  return {
-    load: () => journal,
-    append: (_journalId, request): DurabilityAppendResult => {
-      if (request.expectedRevision !== journal.revision) {
-        return { status: "conflict", actualRevision: journal.revision };
-      }
-      const revision = durabilityRevision(BigInt(journal.revision) + 1n);
-      journal = {
-        revision,
-        batches: [...journal.batches, { revision, payload: request.payload }],
-      };
-      return { status: "appended", revision };
-    },
-    snapshot: () => journal,
-  };
-}
-
-function durabilityRevision(value: string | bigint): DurabilityRevision {
-  const revision = String(value);
-  if (!/^(0|[1-9][0-9]*)$/.test(revision)) {
-    throw new TypeError("durability revision must be an unsigned decimal string");
-  }
-  return revision as DurabilityRevision;
 }
 
 function modelAuthMode(): "api_key" | "chatgpt" {
