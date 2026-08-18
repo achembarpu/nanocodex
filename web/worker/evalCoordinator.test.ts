@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { authorized, routeEvalMutation } from "./evalCoordinator.ts";
+import { authorized, estimatedCostUsd, routeEvalMutation } from "./evalCoordinator.ts";
+
+test("missing coordinator costs use the canonical standard-tier model rates", () => {
+  const usage = { inputTokens: 1_000, cachedInputTokens: 800, outputTokens: 100 };
+  assert.equal(estimatedCostUsd("sol", usage), 0.0044);
+  assert.equal(estimatedCostUsd("gpt-5.6-luna", usage), 0.000176);
+  assert.equal(estimatedCostUsd("unknown", usage), null);
+  assert.equal(estimatedCostUsd("sol", { inputTokens: 1_000 }), null);
+});
 
 test("all evaluation mutations require the configured bearer credential", async () => {
   const namespace = coordinatorNamespace();

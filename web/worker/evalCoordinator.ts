@@ -283,7 +283,7 @@ export class EvalCoordinator {
             result?.outputTokens ?? null,
             result?.reasoningOutputTokens ?? null,
             result?.totalTokens ?? null,
-            result?.costUsd ?? null,
+            result?.costUsd ?? estimatedCostUsd(coordinate.model, result),
             result?.durationMs ?? null,
           ),
         ];
@@ -460,7 +460,7 @@ export class EvalCoordinator {
         metrics.outputTokens,
         metrics.reasoningOutputTokens,
         metrics.totalTokens,
-        metrics.costUsd,
+        metrics.costUsd ?? estimatedCostUsd(active.model, metrics),
         metrics.durationMs,
       ),
     ]);
@@ -807,6 +807,29 @@ function caseMetrics(value: Record<string, unknown> | undefined) {
     costUsd: numberOrNull(value?.costUsd) ?? numberOrNull(agent?.cost_usd) ?? numberOrNull(estimatedCost?.usd),
     durationMs: phaseDurationMs(execution),
   };
+}
+
+export function estimatedCostUsd(
+  model: string,
+  usage: {
+    inputTokens?: number | null;
+    cachedInputTokens?: number | null;
+    outputTokens?: number | null;
+  } | undefined,
+): number | null {
+  const rates = model === "sol" || model === "gpt-5.6-sol"
+    ? { input: 5, cached: 0.5, output: 30 }
+    : model === "terra" || model === "gpt-5.6-terra"
+      ? { input: 2, cached: 0.2, output: 12 }
+      : model === "luna" || model === "gpt-5.6-luna"
+        ? { input: 0.2, cached: 0.02, output: 1.2 }
+        : null;
+  const input = usage?.inputTokens;
+  const output = usage?.outputTokens;
+  if (rates == null || input == null || output == null) return null;
+  const cached = Math.max(0, Math.min(input, usage?.cachedInputTokens ?? 0));
+  const ordinary = Math.max(0, input - cached);
+  return (ordinary * rates.input + cached * rates.cached + output * rates.output) / 1_000_000;
 }
 
 function phaseDurationMs(phase: Record<string, unknown> | null): number | null {
