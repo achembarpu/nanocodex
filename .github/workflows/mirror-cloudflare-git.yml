@@ -1,9 +1,12 @@
-name: Mirror Git to Cloudflare
+name: Publish Cloudflare Git
 
 on:
-  push:
-    branches: [master]
   workflow_dispatch:
+    inputs:
+      revision:
+        description: Deployed 40-character master commit SHA
+        required: true
+        type: string
 
 concurrency:
   group: nanocodex-cloudflare-git
@@ -14,7 +17,7 @@ permissions: {}
 jobs:
   publish:
     if: github.repository == 'gakonst/nanocodex'
-    name: publish repository generation
+    name: publish deployed repository generation
     runs-on: ubuntu-latest
     timeout-minutes: 15
     permissions:
@@ -24,6 +27,13 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+          ref: ${{ inputs.revision }}
+      - name: Require an exact master revision
+        env:
+          TARGET_SHA: ${{ inputs.revision }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$TARGET_SHA"
+          test "$(git ls-remote https://github.com/gakonst/nanocodex.git refs/heads/master | cut -f1)" = "$TARGET_SHA"
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version: 22.13.0
@@ -31,9 +41,25 @@ jobs:
           cache-dependency-path: web/package-lock.json
       - name: Install publisher dependency
         run: npm ci --prefix web --ignore-scripts
-      - name: Publish immutable repository generation
+      - name: Publish the attested repository generation
         working-directory: web
         env:
           NANOCODEX_GIT_ORIGIN: https://nanocodex.me-7fb.workers.dev
           NANOCODEX_GIT_TOKEN: ${{ secrets.NANOCODEX_GIT_TOKEN }}
         run: npm run publish:repository
+      - name: Verify the repository snapshot and Git endpoint
+        env:
+          TARGET_SHA: ${{ inputs.revision }}
+        run: |
+          curl -fsS \
+            "https://nanocodex.me-7fb.workers.dev/api/repository/snapshot?revision=$TARGET_SHA" \
+            -o "$RUNNER_TEMP/nanocodex-repository.json"
+          node -e '
+            const fs = require("node:fs");
+            const snapshot = JSON.parse(fs.readFileSync(process.argv[1], "utf8"));
+            if (snapshot.repository?.head !== process.env.TARGET_SHA) process.exit(1);
+          ' "$RUNNER_TEMP/nanocodex-repository.json"
+          remote_shas="$(git ls-remote \
+            https://nanocodex.me-7fb.workers.dev/git \
+            HEAD refs/heads/master | awk '{print $1}' | sort -u)"
+          test "$remote_shas" = "$TARGET_SHA"

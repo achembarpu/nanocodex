@@ -60,7 +60,9 @@ Object owns the current generation with compare-and-swap publication. D1 is
 deliberately absent: there is no repository registry, account model, search
 index, or relational query to justify it. Publishing requires the same
 `GIT_MIRROR_TOKEN` secret on the Worker and `NANOCODEX_GIT_TOKEN` in the
-publisher environment:
+publisher environment. The publisher also requires `/api/health` to attest the
+same complete Git SHA before it makes an authenticated request or uploads an
+object:
 
 ```bash
 NANOCODEX_GIT_ORIGIN=https://nanocodex.me-7fb.workers.dev \
@@ -71,8 +73,11 @@ npm run publish:repository
 Production serves the website indexes, immutable file and patch objects, and a
 read-only Git protocol-v2 endpoint from that publication. Clone the mirror with
 `git clone https://nanocodex.me-7fb.workers.dev/git`. GitHub remains the write
-remote; a workflow publishes each new `master` commit to Cloudflare after it is
-pushed.
+remote. After each current `master` commit passes CI, the website job deploys
+the exact tested Worker with that SHA, waits for `/api/health` to return it as
+`deployment_sha`, publishes the repository generation, and verifies both the
+snapshot and Git protocol advertise the same SHA. An obsolete queued CI run is
+not allowed to deploy or publish.
 
 Each browser thread owns an OPFS working tree and an `origin` Cloudflare Git
 remote on branch `nanocodex`. The Files and Commits surfaces read that thread's
@@ -191,11 +196,37 @@ scrolling are left to Pierre CodeView and the browser's native input behavior.
 
 ## Production
 
+`master` CI can own production deployment after the `CLOUDFLARE_API_TOKEN`
+repository secret, `CLOUDFLARE_ACCOUNT_ID` repository variable, and
+`CLOUDFLARE_DEPLOY_ENABLED=true` repository variable are configured. The
+existing `NANOCODEX_GIT_TOKEN` publishes the matching repository generation.
+Without that explicit enablement, CI still validates the complete production
+graph but does not mutate the hosted Worker. Local commands build and preview
+it:
+
 ```bash
 npm run build
 npm run preview
-npm run deploy:preview
-npm run deploy
+```
+
+For a break-glass production deployment, start from a clean commit and preserve
+the same attestation contract before running `publish:repository`:
+
+```bash
+revision=$(git rev-parse HEAD)
+npm run build
+npx wrangler deploy --strict \
+  --tag "$revision" \
+  --message "gakonst/nanocodex@$revision" \
+  --var "DEPLOYMENT_SHA:$revision"
+```
+
+Do not publish repository data until the hosted `/api/health` reports that
+exact `deployment_sha`. The publisher enforces this ordering independently. An
+authenticated operator can publish the already-deployed master revision with:
+
+```bash
+gh workflow run mirror-cloudflare-git.yml --ref master -f revision="$revision"
 ```
 
 The proposal endpoint is intentionally a testnet-preview `402` until a live MPP

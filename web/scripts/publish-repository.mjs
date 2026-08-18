@@ -26,9 +26,10 @@ const uploadConcurrency = 12;
 
 async function main() {
   const origin = requiredEnvironment("NANOCODEX_GIT_ORIGIN").replace(/\/$/, "");
+  const head = await git(["rev-parse", "HEAD"]);
+  await requireDeploymentSha(origin, head);
   const token = requiredEnvironment("NANOCODEX_GIT_TOKEN");
   const previous = await readRemoteState(origin, token);
-  const head = await git(["rev-parse", "HEAD"]);
   if (previous?.publication?.head === head && process.env.NANOCODEX_FORCE_SYNC !== "1") {
     console.log(`Cloudflare repository is current (${head.slice(0, 7)})`);
     return;
@@ -140,6 +141,29 @@ async function main() {
     );
   } finally {
     await rm(temporaryDirectory, { recursive: true, force: true });
+  }
+}
+
+async function requireDeploymentSha(origin, expected) {
+  const response = await fetch(`${origin}/api/health`, {
+    headers: { accept: "application/json" },
+  });
+  if (!response.ok) {
+    throw new Error(await responseError("read deployment health", response));
+  }
+  let health;
+  try {
+    health = await response.json();
+  } catch {
+    throw new Error("Cloudflare Worker health returned invalid JSON");
+  }
+  const observed = typeof health?.deployment_sha === "string"
+    ? health.deployment_sha
+    : "unattested";
+  if (observed !== expected) {
+    throw new Error(
+      `Cloudflare Worker revision ${observed} does not match repository ${expected}; deploy the Worker before publishing`,
+    );
   }
 }
 

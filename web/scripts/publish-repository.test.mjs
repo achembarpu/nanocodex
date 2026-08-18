@@ -22,6 +22,7 @@ test("the publisher CLI initializes its module before building a generation", as
   const directory = await mkdtemp(resolve(tmpdir(), "nanocodex-publisher-cli-test-"));
   const repository = resolve(directory, "repo");
   const requests = [];
+  let deploymentSha;
   const server = createServer(async (request, response) => {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
@@ -32,6 +33,11 @@ test("the publisher CLI initializes its module before building a generation", as
       method: request.method,
       url: request.url,
     });
+    if (request.method === "GET" && request.url === "/api/health") {
+      response.setHeader("content-type", "application/json");
+      response.end(JSON.stringify({ deployment_sha: deploymentSha }));
+      return;
+    }
     if (request.method === "GET" && request.url === "/api/git/state") {
       response.writeHead(404).end();
       return;
@@ -54,6 +60,7 @@ test("the publisher CLI initializes its module before building a generation", as
     await git(["add", "README.md"], repository);
     await git(["commit", "-qm", "initial fixture"], repository);
     const head = await git(["rev-parse", "HEAD"], repository);
+    deploymentSha = head;
 
     server.listen(0, "127.0.0.1");
     await once(server, "listening");
@@ -72,7 +79,11 @@ test("the publisher CLI initializes its module before building a generation", as
 
     assert.match(stdout, new RegExp(`Published gakonst/nanocodex ${head.slice(0, 7)}`));
     assert.ok(requests.length > 3);
-    assert.ok(requests.every(({ authorization }) => authorization === "Bearer publisher-test-token"));
+    assert.equal(requests[0]?.url, "/api/health");
+    assert.equal(requests[0]?.authorization, undefined);
+    assert.ok(requests.slice(1).every(
+      ({ authorization }) => authorization === "Bearer publisher-test-token"
+    ));
     const publicationRequest = requests.find(({ url }) => url === "/api/git/publish");
     assert.ok(publicationRequest);
     const publication = JSON.parse(publicationRequest.body);
@@ -84,6 +95,30 @@ test("the publisher CLI initializes its module before building a generation", as
     assert.equal(requests.some(({ url }) =>
       url === `/api/git/objects/generations/${head}/commits/0000`
     ), false);
+
+    deploymentSha = "0".repeat(40);
+    const mismatchRequestIndex = requests.length;
+    await assert.rejects(
+      execFileAsync(process.execPath, [publisherPath], {
+        env: {
+          ...process.env,
+          NANOCODEX_GIT_ORIGIN: `http://127.0.0.1:${address.port}`,
+          NANOCODEX_GIT_TOKEN: "publisher-test-token",
+          NANOCODEX_REPO: repository,
+        },
+        encoding: "utf8",
+        maxBuffer: 16 * 1024 * 1024,
+      }),
+      new RegExp(`Cloudflare Worker revision ${"0".repeat(40)} does not match repository ${head}`),
+    );
+    assert.deepEqual(
+      requests.slice(mismatchRequestIndex).map(({ authorization, method, url }) => ({
+        authorization,
+        method,
+        url,
+      })),
+      [{ authorization: undefined, method: "GET", url: "/api/health" }],
+    );
   } finally {
     if (server.listening) await new Promise((resolveClose) => server.close(resolveClose));
     await rm(directory, { recursive: true, force: true });

@@ -193,6 +193,7 @@ test("BYOK sessions keep the key behind an opaque HttpOnly cookie and take prece
   assert.deepEqual(await health.json(), {
     agent_configured: true,
     credential_source: "user",
+    deployment_sha: null,
     service: "nanocodex",
     runtime: "cloudflare-workers",
     status: "ok",
@@ -271,10 +272,32 @@ test("production never exposes a configured deployment API key as a public proxy
   assert.deepEqual(await response.json(), {
     agent_configured: false,
     credential_source: null,
+    deployment_sha: null,
     service: "nanocodex",
     runtime: "cloudflare-workers",
     status: "ok",
   });
+});
+
+test("health attests only a complete deployment commit SHA", async () => {
+  const deploymentSha = "0123456789abcdef0123456789abcdef01234567";
+  const attested = await worker.fetch(
+    new Request("https://demo.test/api/health"),
+    { ENVIRONMENT: "production", DEPLOYMENT_SHA: deploymentSha },
+  );
+  assert.equal(
+    ((await attested.json()) as { deployment_sha: string | null }).deployment_sha,
+    deploymentSha,
+  );
+
+  const malformed = await worker.fetch(
+    new Request("https://demo.test/api/health"),
+    { ENVIRONMENT: "production", DEPLOYMENT_SHA: "master" },
+  );
+  assert.equal(
+    ((await malformed.json()) as { deployment_sha: string | null }).deployment_sha,
+    null,
+  );
 });
 
 test("custom headers never bypass the same-origin boundary", async () => {
@@ -316,6 +339,7 @@ test("ChatGPT login exposes only device state while subscription credentials sta
   assert.deepEqual(await health.json(), {
     agent_configured: true,
     credential_source: "subscription",
+    deployment_sha: null,
     service: "nanocodex",
     runtime: "cloudflare-workers",
     status: "ok",

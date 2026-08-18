@@ -71,10 +71,12 @@ const BYOK_COOKIE = "nanocodex_byok_v2";
 const SECURE_BYOK_COOKIE = "__Secure-nanocodex_byok_v2";
 const CHATGPT_COOKIE = "nanocodex_chatgpt_v2";
 const SECURE_CHATGPT_COOKIE = "__Secure-nanocodex_chatgpt_v2";
+const GIT_SHA_PATTERN = /^[0-9a-f]{40}$/;
 
 type WorkerEnv = GitStorageEnv & ThreadGitStorageEnv & EvalStorageEnv & ChatGptEgressEnv
   & PublicSecurityEnv & CredentialVaultEnv & {
   ENVIRONMENT: string;
+  DEPLOYMENT_SHA?: string;
   OPENAI_API_KEY?: string;
   CHATGPT_ISSUER?: string;
   BYOK_SESSIONS?: DurableObjectNamespace;
@@ -127,6 +129,9 @@ export default {
       return json({
         agent_configured: Boolean(credential),
         credential_source: credential?.source ?? null,
+        deployment_sha: GIT_SHA_PATTERN.test(env.DEPLOYMENT_SHA ?? "")
+          ? env.DEPLOYMENT_SHA
+          : null,
         service: "nanocodex",
         runtime: "cloudflare-workers",
         status: "ok",
