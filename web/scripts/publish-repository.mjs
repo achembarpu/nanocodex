@@ -107,7 +107,7 @@ async function main() {
       mapConcurrent(commitPageNames, uploadConcurrency, (name) => uploadFile(
           origin,
           token,
-          `${generationPrefix}/commits/${name}`,
+          `${generationPrefix}/commits/${name}.json`,
           resolve(dataDirectory, "commit-pages", `${name}.json`),
         )),
     ]);
