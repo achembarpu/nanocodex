@@ -378,10 +378,10 @@ struct WasmConfig {
     fast_mode: bool,
     #[serde(default)]
     websocket_warmup: bool,
-    #[serde(default = "default_websocket_url")]
-    websocket_url: String,
-    #[serde(default = "default_api_base_url")]
-    api_base_url: String,
+    #[serde(default)]
+    websocket_url: Option<String>,
+    #[serde(default)]
+    api_base_url: Option<String>,
     #[serde(default)]
     instructions: Option<String>,
     #[serde(default)]
@@ -585,14 +585,19 @@ impl WasmNanocodex {
             .reasoning_mode
             .parse::<ReasoningMode>()
             .map_err(js_error)?;
-        let openai = OpenAi::builder(auth)
+        let mut openai = OpenAi::builder(auth)
             .model(model)
             .thinking(thinking)
             .reasoning_mode(reasoning_mode)
             .fast_mode(config.fast_mode)
-            .websocket_warmup(config.websocket_warmup)
-            .websocket_url(config.websocket_url)
-            .api_base_url(config.api_base_url)
+            .websocket_warmup(config.websocket_warmup);
+        if let Some(websocket_url) = config.websocket_url {
+            openai = openai.websocket_url(websocket_url);
+        }
+        if let Some(api_base_url) = config.api_base_url {
+            openai = openai.api_base_url(api_base_url);
+        }
+        let openai = openai
             .host_transport(JavaScriptResponsesHost)
             .build()
             .map_err(js_error)?;
@@ -1048,12 +1053,14 @@ fn validate(config: &WasmConfig) -> Result<(), JsValue> {
     if config.host_definition_id == 0 {
         return Err(js_error("host_definition_id must be at least 1"));
     }
+    if config.api_key.trim().is_empty() {
+        return Err(js_error("api_key must not be empty"));
+    }
     for (name, value) in [
-        ("api_key", config.api_key.as_str()),
-        ("websocket_url", config.websocket_url.as_str()),
-        ("api_base_url", config.api_base_url.as_str()),
+        ("websocket_url", config.websocket_url.as_deref()),
+        ("api_base_url", config.api_base_url.as_deref()),
     ] {
-        if value.trim().is_empty() {
+        if value.is_some_and(|value| value.trim().is_empty()) {
             return Err(js_error(format!("{name} must not be empty")));
         }
     }
@@ -1083,14 +1090,6 @@ fn default_model() -> String {
 
 fn default_reasoning_mode() -> String {
     "standard".to_owned()
-}
-
-fn default_websocket_url() -> String {
-    "wss://api.openai.com/v1/responses".to_owned()
-}
-
-fn default_api_base_url() -> String {
-    "https://api.openai.com/v1".to_owned()
 }
 
 const fn default_max_subagents() -> usize {
