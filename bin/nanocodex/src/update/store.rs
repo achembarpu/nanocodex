@@ -9,6 +9,8 @@ use sha2::{Digest, Sha256};
 use tempfile::NamedTempFile;
 
 const CHECKSUM_FILE: &str = "nanocodex.sha256";
+const VM_GUEST_BINARY_NAME: &str = "nanocodex-vm-guest";
+const VM_GUEST_CHECKSUM_FILE: &str = "nanocodex-vm-guest.sha256";
 
 #[cfg(windows)]
 const BINARY_NAME: &str = "nanocodex.exe";
@@ -77,20 +79,7 @@ impl VersionStore {
 
     pub(super) fn is_cached(&self, key: &str) -> Result<bool> {
         validate_key(key)?;
-        let binary = self.binary_path(key);
-        let checksum_path = self.checksum_path(key);
-        if !binary.is_file() || !checksum_path.is_file() {
-            return Ok(false);
-        }
-        let expected = fs::read_to_string(&checksum_path)
-            .wrap_err_with(|| format!("failed to read {}", checksum_path.display()))?;
-        let expected = expected.trim();
-        if expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
-            return Ok(false);
-        }
-        let contents = fs::read(&binary)
-            .wrap_err_with(|| format!("failed to read cached {}", binary.display()))?;
-        Ok(hex::encode(Sha256::digest(contents)) == expected.to_ascii_lowercase())
+        file_matches_checksum(&self.binary_path(key), &self.checksum_path(key))
     }
 
     pub(super) fn install(&self, key: &str, contents: &[u8]) -> Result<()> {
@@ -105,6 +94,57 @@ impl VersionStore {
             format!("{checksum}\n").as_bytes(),
             false,
         )
+    }
+
+    pub(super) fn install_with_vm_guest(
+        &self,
+        key: &str,
+        binary: &[u8],
+        vm_guest: &[u8],
+    ) -> Result<()> {
+        validate_key(key)?;
+        fs::create_dir_all(self.versions_dir())
+            .wrap_err("failed to create the Nanocodex version store")?;
+        if self.is_cached_with_vm_guest(key)? {
+            return Ok(());
+        }
+
+        let directory = self.version_dir(key);
+        if directory.exists() {
+            bail!(
+                "cannot coherently replace incomplete Nanocodex version {}; remove {} and retry",
+                key,
+                directory.display()
+            );
+        }
+
+        let staging = tempfile::Builder::new()
+            .prefix(".install-")
+            .tempdir_in(self.versions_dir())
+            .wrap_err("failed to stage the Nanocodex version")?;
+        atomic_write(&staging.path().join(BINARY_NAME), binary, true)?;
+        atomic_write(
+            &staging.path().join(CHECKSUM_FILE),
+            format!("{}\n", hex::encode(Sha256::digest(binary))).as_bytes(),
+            false,
+        )?;
+        atomic_write(&staging.path().join(VM_GUEST_BINARY_NAME), vm_guest, true)?;
+        atomic_write(
+            &staging.path().join(VM_GUEST_CHECKSUM_FILE),
+            format!("{}\n", hex::encode(Sha256::digest(vm_guest))).as_bytes(),
+            false,
+        )?;
+        fs::rename(staging.path(), &directory)
+            .wrap_err_with(|| format!("failed to install {}", directory.display()))?;
+        Ok(())
+    }
+
+    fn is_cached_with_vm_guest(&self, key: &str) -> Result<bool> {
+        Ok(self.is_cached(key)?
+            && file_matches_checksum(
+                &self.version_dir(key).join(VM_GUEST_BINARY_NAME),
+                &self.version_dir(key).join(VM_GUEST_CHECKSUM_FILE),
+            )?)
     }
 
     pub(super) fn activate(&self, key: &str) -> Result<()> {
@@ -261,6 +301,21 @@ fn validate_key(key: &str) -> Result<()> {
     Ok(())
 }
 
+fn file_matches_checksum(path: &Path, checksum_path: &Path) -> Result<bool> {
+    if !path.is_file() || !checksum_path.is_file() {
+        return Ok(false);
+    }
+    let expected = fs::read_to_string(checksum_path)
+        .wrap_err_with(|| format!("failed to read {}", checksum_path.display()))?;
+    let expected = expected.trim();
+    if expected.len() != 64 || !expected.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        return Ok(false);
+    }
+    let contents =
+        fs::read(path).wrap_err_with(|| format!("failed to read cached {}", path.display()))?;
+    Ok(hex::encode(Sha256::digest(contents)) == expected.to_ascii_lowercase())
+}
+
 fn atomic_write(path: &Path, contents: &[u8], executable: bool) -> Result<()> {
     let parent = path
         .parent()
@@ -333,5 +388,31 @@ mod tests {
 
         assert!(!store.is_cached("0.2.0").unwrap());
         assert!(store.activate("0.2.0").is_err());
+    }
+
+    #[test]
+    fn installs_cli_and_vm_guest_as_one_activatable_directory() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = VersionStore::at(directory.path());
+
+        store
+            .install_with_vm_guest("nightly-build", b"cli", b"guest")
+            .unwrap();
+        store.activate("nightly-build").unwrap();
+
+        assert!(store.is_cached_with_vm_guest("nightly-build").unwrap());
+        assert_eq!(
+            fs::read(directory.path().join("current/nanocodex-vm-guest")).unwrap(),
+            b"guest"
+        );
+
+        fs::write(
+            store
+                .version_dir("nightly-build")
+                .join(VM_GUEST_BINARY_NAME),
+            b"corrupted",
+        )
+        .unwrap();
+        assert!(!store.is_cached_with_vm_guest("nightly-build").unwrap());
     }
 }

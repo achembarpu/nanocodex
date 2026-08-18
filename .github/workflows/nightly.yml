@@ -93,12 +93,62 @@ jobs:
           if-no-files-found: error
           retention-days: ${{ inputs.pr && 7 || 1 }}
 
+  build-vm-guest:
+    if: >-
+      github.repository == 'gakonst/nanocodex' &&
+      (github.event_name != 'workflow_dispatch' || inputs.pr == '')
+    name: build x86_64 Linux VM guest
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9
+        with:
+          toolchain: stable
+          targets: x86_64-unknown-linux-musl
+      - uses: Swatinem/rust-cache@779680da715d629ac1d338a641029a2f4372abb5 # v2
+        with:
+          cache-on-failure: true
+      - run: sudo apt-get update && sudo apt-get install --yes musl-tools
+      - name: Build nightly VM guest
+        shell: bash
+        run: >-
+          CARGO_TARGET_X86_64_UNKNOWN_LINUX_MUSL_LINKER=musl-gcc
+          cargo build --locked --profile nightly --package nanocodex-vm
+          --bin nanocodex-vm-guest --no-default-features
+          --features guest-runtime --target x86_64-unknown-linux-musl
+      - name: Verify VM guest is static
+        shell: bash
+        run: |
+          guest=target/x86_64-unknown-linux-musl/nightly/nanocodex-vm-guest
+          if LC_ALL=C readelf -lW "$guest" | grep -q '[[:space:]]INTERP[[:space:]]'; then
+            echo "VM guest has a dynamic program interpreter" >&2
+            exit 1
+          fi
+      - name: Stage artifact
+        shell: bash
+        run: |
+          mkdir dist
+          cp target/x86_64-unknown-linux-musl/nightly/nanocodex-vm-guest \
+            dist/nanocodex-vm-guest-x86_64-unknown-linux-musl
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: nanocodex-vm-guest-x86_64-unknown-linux-musl
+          path: dist/*
+          if-no-files-found: error
+          retention-days: 1
+
   publish:
     if: >-
       github.repository == 'gakonst/nanocodex' &&
       (github.event_name != 'workflow_dispatch' || inputs.pr == '')
     name: publish immutable and rolling nightlies
-    needs: build
+    needs: [build, build-vm-guest]
     runs-on: ubuntu-22.04
     timeout-minutes: 10
     permissions:
@@ -151,6 +201,7 @@ jobs:
               --notes-file "$notes_file" --prerelease
           else
             gh release create nightly --repo "$GITHUB_REPOSITORY" \
-              --title "Nanocodex Nightly" --notes-file "$notes_file" --prerelease
+              --target "$GITHUB_SHA" --title "Nanocodex Nightly" \
+              --notes-file "$notes_file" --prerelease
           fi
           gh release upload nightly dist/* --repo "$GITHUB_REPOSITORY" --clobber

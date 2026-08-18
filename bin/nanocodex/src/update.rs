@@ -25,6 +25,7 @@ const NIGHTLY_RELEASE_API: &str =
     "https://api.github.com/repos/gakonst/nanocodex/releases/tags/nightly";
 const TAGGED_RELEASE_API: &str = "https://api.github.com/repos/gakonst/nanocodex/releases/tags";
 const CHECKSUMS_ASSET: &str = "SHA256SUMS";
+const VM_GUEST_ASSET: &str = "nanocodex-vm-guest-x86_64-unknown-linux-musl";
 const DOWNLOAD_ATTEMPTS: usize = 5;
 const DOWNLOAD_RETRY_DELAY: Duration = Duration::from_millis(250);
 
@@ -68,6 +69,7 @@ pub(crate) struct Update {
 #[derive(Debug, Deserialize)]
 struct Release {
     tag_name: String,
+    target_commitish: String,
     assets: Vec<ReleaseAsset>,
 }
 
@@ -150,7 +152,7 @@ impl Update {
 
         let key = latest
             .as_ref()
-            .map_or_else(|| "nightly".to_owned(), ToString::to_string);
+            .map_or_else(|| nightly_key(&release), |version| Ok(version.to_string()))?;
         if !self.nightly && !self.force && store.is_cached(&key)? {
             store.activate(&key)?;
             if let Some(latest) = &latest {
@@ -164,16 +166,20 @@ impl Update {
         let binary = find_asset(&release, asset_name)?;
         let checksums = find_asset(&release, CHECKSUMS_ASSET)?;
         let checksum_manifest = download(&client, checksums).await?;
-        let expected = checksum_for(&checksum_manifest, asset_name)?;
-        let contents = download(&client, binary).await?;
-        let actual = hex::encode(Sha256::digest(&contents));
-        if actual != expected {
-            bail!("checksum mismatch for {asset_name}: expected {expected}, downloaded {actual}");
+        let contents = download_verified(&client, binary, &checksum_manifest).await?;
+        if self.nightly
+            && let Some(guest_asset_name) = vm_guest_asset_name()
+        {
+            let guest = find_asset(&release, guest_asset_name)?;
+            let guest_contents = download_verified(&client, guest, &checksum_manifest).await?;
+            store.install_with_vm_guest(&key, &contents, &guest_contents)?;
+        } else {
+            store.install(&key, &contents)?;
         }
-
-        store.install(&key, &contents)?;
         store.activate(&key)?;
-        if let Some(latest) = &latest {
+        if self.nightly {
+            store.promote_manager(&key)?;
+        } else if let Some(latest) = &latest {
             maybe_promote_manager(&store, &key, latest, &manager_version)?;
         }
         report_activation(&previous, &key, true);
@@ -308,6 +314,23 @@ async fn download(client: &Client, asset: &ReleaseAsset) -> Result<Vec<u8>> {
     unreachable!("the download attempt loop always returns")
 }
 
+async fn download_verified(
+    client: &Client,
+    asset: &ReleaseAsset,
+    checksum_manifest: &[u8],
+) -> Result<Vec<u8>> {
+    let expected = checksum_for(checksum_manifest, &asset.name)?;
+    let contents = download(client, asset).await?;
+    let actual = hex::encode(Sha256::digest(&contents));
+    if actual != expected {
+        bail!(
+            "checksum mismatch for {}: expected {expected}, downloaded {actual}",
+            asset.name
+        );
+    }
+    Ok(contents)
+}
+
 fn retryable_download_error(error: &reqwest::Error) -> bool {
     error.status().is_none_or(retryable_download_status)
 }
@@ -323,6 +346,24 @@ fn retryable_download_status(status: StatusCode) -> bool {
 fn parse_release_version(tag: &str) -> Result<Version> {
     Version::parse(tag.strip_prefix('v').unwrap_or(tag))
         .wrap_err_with(|| format!("release tag {tag:?} is not a semantic version"))
+}
+
+fn nightly_key(release: &Release) -> Result<String> {
+    nightly_key_for(release, std::env::consts::OS, std::env::consts::ARCH)
+}
+
+fn nightly_key_for(release: &Release, os: &str, arch: &str) -> Result<String> {
+    let sha = &release.target_commitish;
+    if sha.len() != 40 || !sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        bail!("nightly release target {sha:?} is not an exact Git commit");
+    }
+    let binary = find_asset(release, release_asset_name_for(os, arch)?)?;
+    let mut key = format!("nightly-{}-{}", sha.to_ascii_lowercase(), binary.id);
+    if let Some(guest_asset_name) = vm_guest_asset_name_for(os, arch) {
+        let guest = find_asset(release, guest_asset_name)?;
+        key.push_str(&format!("-{}", guest.id));
+    }
+    Ok(key)
 }
 
 fn find_asset<'a>(release: &'a Release, name: &str) -> Result<&'a ReleaseAsset> {
@@ -361,6 +402,14 @@ fn checksum_for(manifest: &[u8], asset_name: &str) -> Result<String> {
 
 fn release_asset_name() -> Result<&'static str> {
     release_asset_name_for(std::env::consts::OS, std::env::consts::ARCH)
+}
+
+fn vm_guest_asset_name() -> Option<&'static str> {
+    vm_guest_asset_name_for(std::env::consts::OS, std::env::consts::ARCH)
+}
+
+fn vm_guest_asset_name_for(os: &str, arch: &str) -> Option<&'static str> {
+    matches!((os, arch), ("linux", "x86_64")).then_some(VM_GUEST_ASSET)
 }
 
 fn release_asset_name_for(os: &str, arch: &str) -> Result<&'static str> {
@@ -490,5 +539,35 @@ mod tests {
         assert!(retryable_download_status(StatusCode::TOO_MANY_REQUESTS));
         assert!(retryable_download_status(StatusCode::SERVICE_UNAVAILABLE));
         assert!(!retryable_download_status(StatusCode::NOT_FOUND));
+    }
+
+    #[test]
+    fn nightly_versions_are_bound_to_the_commit_and_both_assets() {
+        let release = Release {
+            tag_name: "nightly".to_owned(),
+            target_commitish: "0123456789abcdef0123456789abcdef01234567".to_owned(),
+            assets: vec![
+                ReleaseAsset {
+                    id: 11,
+                    name: "nanocodex-x86_64-unknown-linux-gnu".to_owned(),
+                    browser_download_url: "https://example.invalid/nanocodex".to_owned(),
+                },
+                ReleaseAsset {
+                    id: 12,
+                    name: VM_GUEST_ASSET.to_owned(),
+                    browser_download_url: "https://example.invalid/nanocodex-vm-guest".to_owned(),
+                },
+            ],
+        };
+
+        assert_eq!(
+            nightly_key_for(&release, "linux", "x86_64").unwrap(),
+            "nightly-0123456789abcdef0123456789abcdef01234567-11-12"
+        );
+        assert_eq!(
+            vm_guest_asset_name_for("linux", "x86_64"),
+            Some(VM_GUEST_ASSET)
+        );
+        assert_eq!(vm_guest_asset_name_for("macos", "aarch64"), None);
     }
 }
