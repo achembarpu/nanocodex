@@ -143,17 +143,25 @@ test("remote MCP stays deferred behind tool_search and executes through Code Mod
   assert.equal(searched.structured_result[0].tools[0].defer_loading, true);
 
   const execution = JSON.parse(await runtime.executeCode(
-    `if ("tool_search" in tools || ALL_TOOLS.some((tool) => tool.type === "tool_search")) {
-      throw new Error("tool_search must remain direct");
+    `const searchDefinition = ALL_TOOLS.find((tool) => tool.name === "tool_search");
+    if (searchDefinition?.type !== "function") {
+      throw new Error("Code Mode requires function-shaped tool_search metadata");
     }
-    const result = await tools.mcp__mercator__call({ service_id: "exa" });
+    const found = await tools.tool_search({ query: "paid curated service" });
+    const selected = found.tools.find((tool) => tool.name === "mcp__mercator__call");
+    if (!selected) throw new Error("tool_search did not expose the MCP tool");
+    const result = await tools[selected.name]({ service_id: "exa" });
     text(result);`,
     "session-1",
     "exec-1",
   ));
   assert.equal(execution.success, true);
   assert.deepEqual(calls, [{ name: "call", arguments: { service_id: "exa" } }]);
-  assert.equal(execution.nested_calls[0].name, "mcp__mercator__call");
+  assert.deepEqual(
+    execution.nested_calls.map((call) => call.name),
+    ["tool_search", "mcp__mercator__call"],
+  );
+  assert.equal(execution.nested_calls[0].structured_result[0].name, "mcp__mercator__");
   assert.match(JSON.stringify(execution.output), /called call/);
 });
 

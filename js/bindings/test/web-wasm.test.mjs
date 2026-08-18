@@ -394,7 +394,9 @@ test("web-target WASM keeps remote MCP deferred behind tool_search and Code Mode
           type: "custom_tool_call",
           call_id: "call-exec-mcp",
           name: "exec",
-          input: "text(await tools.mcp__fixture__echo({ message: 'hello' }));",
+          input: `const found = await tools.tool_search({ query: "echo deterministic message", limit: 1 });
+const selected = found.tools[0];
+text(await tools[selected.name]({ message: "hello" }));`,
         }],
         usage: null,
       },

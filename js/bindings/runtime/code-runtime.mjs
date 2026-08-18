@@ -38,15 +38,23 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
   }
 
   function currentCodeDefinitions() {
-    return currentDefinitions().filter((definition) => definition.type !== "tool_search");
+    return currentDefinitions().map((definition) => definition.type === "tool_search"
+      ? deepFreeze({
+          type: "function",
+          name: "tool_search",
+          description: definition.description,
+          strict: false,
+          parameters: jsonSnapshot(definition.parameters, "tool_search parameters"),
+        })
+      : definition);
   }
 
   function currentTools() {
     const tools = [...configuredTools];
     for (const provider of providers) {
       for (const definition of provider.definitions()) {
-        if (definition.type === "tool_search") continue;
-        const tool = provider.resolve(definition.name);
+        const name = definition.type === "tool_search" ? "tool_search" : definition.name;
+        const tool = provider.resolve(name);
         if (tool) tools.push(tool);
       }
     }

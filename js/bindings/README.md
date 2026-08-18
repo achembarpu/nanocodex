@@ -179,9 +179,11 @@ Remote Streamable HTTP MCP servers are configured directly on the agent. The
 JavaScript binding uses the official MCP SDK transport, keeps remote tools
 deferred, and mirrors native Nanocodex exposure: the initial Responses request
 contains provider-native `tool_search`, while canonical `mcp__<server>__<tool>`
-functions are callable only below Code Mode. Search results return loadable
-namespaces for the next model request; remote tools never become a flat set of
-top-level model-visible calls.
+functions are callable only below Code Mode. Code Mode also exposes
+`tools.tool_search`, so one cell can discover a deferred tool and invoke the
+returned canonical name. Search results return loadable namespaces for the next
+model request; remote tools never become a flat set of top-level model-visible
+calls.
 
 MPP-enabled MCP uses MPPx's in-place `McpClient.wrap`. The public `tempo()`
 method supports both Tempo charge and session challenges, so paid services

@@ -51,7 +51,7 @@ export function createBrowserHost(options?: {
   onEvent?: (eventJson: string) => void;
   tools?: ToolMap;
   mpp?: MppSession;
-  /** Remote MCP servers exposed through direct tool_search plus deferred Code Mode tools. */
+  /** Remote MCP servers exposed through native and Code Mode tool_search plus deferred tools. */
   mcp?: McpServers;
   codeEvaluator?: CodeEvaluator;
   toolMode?: "code" | "direct";
