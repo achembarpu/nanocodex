@@ -13,14 +13,6 @@
   align-content: center;
 }
 
-.eval-surface-loading {
-  display: grid;
-  min-height: calc(100svh - var(--header-height));
-  color: color-mix(in srgb, var(--text) 52%, transparent);
-  font-size: 10px;
-  place-content: center;
-}
-
 .live-evals-boot h1 {
   margin-top: 10px;
   font-size: clamp(44px, 7vw, 88px);
@@ -218,6 +210,46 @@
   color: color-mix(in srgb, var(--text) 35%, transparent);
 }
 
+.eval-analytics-reveal {
+  width: 100%;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.eval-analytics-reveal > button,
+.eval-show-more {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  width: 100%;
+  padding: 20px var(--eval-pad);
+  color: var(--text);
+  background: var(--surface-subtle);
+  border: 0;
+  cursor: pointer;
+  text-align: left;
+}
+
+.eval-analytics-reveal > button:hover,
+.eval-analytics-reveal > button:focus-visible,
+.eval-show-more:hover,
+.eval-show-more:focus-visible {
+  background: color-mix(in srgb, var(--blue) 5%, var(--surface));
+  outline: 0;
+}
+
+.eval-analytics-reveal span { display: grid; gap: 4px; }
+.eval-analytics-reveal strong { font-size: 12px; }
+.eval-analytics-reveal small,
+.eval-show-more small { color: color-mix(in srgb, var(--text) 46%, transparent); font-size: 8px; }
+.eval-analytics-reveal svg { width: 15px; height: 15px; color: var(--blue); }
+
+.eval-show-more {
+  min-height: 58px;
+  border-bottom: 1px solid var(--border-soft);
+  font-size: 9px;
+  text-transform: uppercase;
+}
+
 .eval-primary-cell {
   display: grid;
   min-width: 0;
@@ -405,7 +437,7 @@
 .eval-run-legend b { color: var(--text); font-size: 12px; font-weight: 600; line-height: 1; }
 
 .eval-chart-empty,
-.eval-chart-loading {
+.eval-chart-error {
   display: grid;
   min-height: 230px;
   color: color-mix(in srgb, var(--text) 48%, transparent);
@@ -415,10 +447,7 @@
 
 .eval-chart-empty { min-height: 360px; gap: 5px; }
 .eval-chart-empty strong { color: var(--text); }
-.eval-chart-loading { width: 100%; border-bottom: 1px solid var(--border-soft); }
-.eval-chart-loading svg { width: 18px; height: 18px; margin: 0 auto 9px; animation: eval-spin 1s linear infinite; }
-
-@keyframes eval-spin { to { transform: rotate(360deg); } }
+.eval-chart-error { width: 100%; border-bottom: 1px solid var(--border-soft); }
 
 .eval-task-panel-header {
   display: flex;
@@ -545,7 +574,6 @@
 .live-case-detail .icon-button svg { width: 13px; height: 13px; }
 .live-case-detail-status { display: flex; gap: 10px; align-items: center; margin-top: 12px; color: color-mix(in srgb, var(--text) 55%, transparent); font-size: 9px; }
 .live-case-detail-status strong { padding: 4px 7px; color: var(--blue); background: color-mix(in srgb, var(--blue) 10%, transparent); text-transform: capitalize; }
-.live-case-loading,
 .live-case-error { padding: 18px 0; margin-top: 20px; border-block: 1px solid var(--border-soft); }
 .live-case-error { display: flex; gap: 8px; color: var(--negative); }
 .live-case-error svg { width: 14px; height: 14px; }

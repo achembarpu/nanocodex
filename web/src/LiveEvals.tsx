@@ -2,7 +2,6 @@ import {
   AlertTriangle,
   ChevronLeft,
   ChevronRight,
-  CircleDashed,
   Cpu,
   MemoryStick,
   Radio,
@@ -28,6 +27,7 @@ import {
   type EvalTaskOverview,
   type EvalTreatment,
   type EvalWorksetAnalytics,
+  type EvalWorksetDetail,
   type EvalWorksetResults,
 } from "./evalApi";
 import "./evals.css";
@@ -42,6 +42,9 @@ type AnalyticsView = "frontier" | "runs";
 const resultStaleMs = 30_000;
 const resultCacheMs = 30 * 60_000;
 const taskStaleMs = 30_000;
+const initialTaskRows = 50;
+const activeOverviewPollMs = 2_000;
+const quietOverviewPollMs = 30_000;
 const analyticsKey = (worksetId: string | null) =>
   ["evals", "analytics", worksetId] as const;
 const taskResultKey = (worksetId: string | null, taskId: string | null) =>
@@ -54,9 +57,17 @@ export function useEvalOverview() {
   const detailRoute = location.pathname.startsWith("/evals/worksets/");
   return useQuery({
     queryKey: ["evals", "overview"],
+    enabled: !detailRoute,
     queryFn: ({ signal }) => evalApi.overview(signal),
-    refetchInterval: detailRoute ? false : 500,
-    refetchIntervalInBackground: true,
+    refetchInterval: detailRoute
+      ? false
+      : (query) => {
+          const data = query.state.data as EvalOverview | undefined;
+          return data && data.summary.running === 0 && data.summary.unclaimed === 0
+            ? quietOverviewPollMs
+            : activeOverviewPollMs;
+        },
+    refetchIntervalInBackground: false,
     refetchOnMount: "always",
     refetchOnWindowFocus: "always",
     refetchOnReconnect: "always",
@@ -158,9 +169,8 @@ function ClusterNode({ node }: { node: EvalClusterNode }) {
   );
 }
 
-function ClusterView({ cluster, pending, failed }: {
+function ClusterView({ cluster, failed }: {
   cluster: EvalCluster | undefined;
-  pending: boolean;
   failed: boolean;
 }) {
   return (
@@ -170,7 +180,6 @@ function ClusterView({ cluster, pending, failed }: {
         <span>{cluster ? `${cluster.nodes.length} node${cluster.nodes.length === 1 ? "" : "s"}` : "live utilization"}</span>
       </header>
       {cluster?.nodes.map((node) => <ClusterNode node={node} key={node.id} />)}
-      {!cluster && pending ? <p className="eval-cluster-state">Reading workload hosts…</p> : null}
       {!cluster && failed ? <p className="eval-cluster-state is-error">Cluster telemetry unavailable.</p> : null}
     </section>
   );
@@ -245,7 +254,6 @@ function CaseInspector({
         <strong>{evidence?.status ?? coordinateLabel(cell)}</strong>
         <span>{formatDuration(cell.durationMs)}</span>
       </div>
-      {detail.isPending ? <p className="live-case-loading">Loading retained case evidence…</p> : null}
       {detail.error ? <p className="live-case-error"><AlertTriangle aria-hidden="true" /> {detail.error.message}</p> : null}
       {evidence ? (
         <>
@@ -354,7 +362,7 @@ function Analytics({
   taskCount?: number;
 }) {
   return (
-    <Suspense fallback={<section className="eval-chart-loading"><CircleDashed aria-hidden="true" /><span>Loading charts…</span></section>}>
+    <Suspense fallback={null}>
       <EvalAnalytics points={points} view={view} taskCount={taskCount} />
     </Suspense>
   );
@@ -369,9 +377,9 @@ export function LiveEvals({ overview }: { overview: EvalOverview | undefined }) 
     queryKey: ["evals", "cluster"],
     queryFn: ({ signal }) => evalApi.cluster(signal),
     enabled: !route,
-    refetchInterval: 2_000,
-    refetchIntervalInBackground: true,
-    staleTime: 0,
+    refetchInterval: 10_000,
+    refetchIntervalInBackground: false,
+    staleTime: 5_000,
   });
   const [selectedCell, setSelectedCell] = useState<{
     treatment: EvalTreatment;
@@ -379,6 +387,8 @@ export function LiveEvals({ overview }: { overview: EvalOverview | undefined }) 
   } | null>(null);
   const [query, setQuery] = useState("");
   const [filter, setFilter] = useState<MatrixFilter>("all");
+  const [analyticsWorksetId, setAnalyticsWorksetId] = useState<string | null>(null);
+  const [shownTaskRows, setShownTaskRows] = useState(initialTaskRows);
   const detailRef = useRef<HTMLDivElement>(null);
   const selectedWorksetId = route?.params.worksetId ?? null;
   const overviewWorkset = selectedWorksetId
@@ -388,8 +398,12 @@ export function LiveEvals({ overview }: { overview: EvalOverview | undefined }) 
     queryKey: ["evals", "workset", selectedWorksetId],
     enabled: Boolean(selectedWorksetId),
     queryFn: ({ signal }) => evalApi.workset(selectedWorksetId!, signal),
-    refetchInterval: 5_000,
-    refetchIntervalInBackground: true,
+    refetchInterval: (query) => {
+      const data = query.state.data as EvalWorksetDetail | undefined;
+      const summary = data?.workset.summary;
+      return summary && summary.running === 0 && summary.unclaimed === 0 ? false : 10_000;
+    },
+    refetchIntervalInBackground: false,
   });
   const selectedWorkset = worksetQuery.data?.workset ?? overviewWorkset;
   const tasks = worksetQuery.data?.tasks ?? [];
@@ -408,6 +422,7 @@ export function LiveEvals({ overview }: { overview: EvalOverview | undefined }) 
       ),
     [filter, normalizedQuery, tasks],
   );
+  const renderedTasks = visibleTasks.slice(0, shownTaskRows);
   const orderedWorksets = useMemo(
     () => [...(overview?.worksets ?? [])].sort((left, right) =>
       progressRank(left.summary) - progressRank(right.summary) ||
@@ -437,7 +452,9 @@ export function LiveEvals({ overview }: { overview: EvalOverview | undefined }) 
   });
   const analyticsQuery = useQuery<EvalWorksetAnalytics>({
     queryKey: analyticsKey(selectedWorksetId),
-    enabled: Boolean(selectedWorkset && !taskRoute),
+    enabled: Boolean(
+      selectedWorkset && !taskRoute && analyticsWorksetId === selectedWorksetId,
+    ),
     queryFn: ({ signal }) => evalApi.worksetAnalytics(selectedWorkset!.id, signal),
     refetchInterval: selectedWorkset &&
       selectedWorkset.summary.success + selectedWorkset.summary.failed < selectedWorkset.summary.total
@@ -470,6 +487,9 @@ export function LiveEvals({ overview }: { overview: EvalOverview | undefined }) 
       detailRef.current?.scrollIntoView({ behavior: "smooth", block: "start" }),
     );
   }, [selectedCell?.cell.id]);
+  useEffect(() => {
+    setShownTaskRows(initialTaskRows);
+  }, [filter, normalizedQuery, selectedWorksetId]);
 
   function chooseWorkset(id: string) {
     setSelectedCell(null);
@@ -496,7 +516,6 @@ export function LiveEvals({ overview }: { overview: EvalOverview | undefined }) 
         </section>
         <ClusterView
           cluster={clusterQuery.data}
-          pending={clusterQuery.isPending}
           failed={clusterQuery.isError}
         />
         <section className="eval-full-table" aria-labelledby="worksets-heading">
@@ -525,14 +544,13 @@ export function LiveEvals({ overview }: { overview: EvalOverview | undefined }) 
   }
 
   if (!selectedWorkset) {
+    if (worksetQuery.isPending) return null;
     return (
       <main className="live-evals eval-route-empty">
         <PageBack onClick={() => navigate("/evals")}>All evals</PageBack>
-        {worksetQuery.isPending ? <CircleDashed aria-hidden="true" /> : <AlertTriangle aria-hidden="true" />}
-        <h1>{worksetQuery.isPending ? "Loading workset…" : "Workset not found"}</h1>
-        <p>{worksetQuery.isPending
-          ? "Reading this workset while its task detail loads in parallel."
-          : worksetQuery.error?.message ?? "The coordinator no longer reports this durable workset."}</p>
+        <AlertTriangle aria-hidden="true" />
+        <h1>Workset not found</h1>
+        <p>{worksetQuery.error?.message ?? "The coordinator no longer reports this durable workset."}</p>
       </main>
     );
   }
@@ -549,10 +567,21 @@ export function LiveEvals({ overview }: { overview: EvalOverview | undefined }) 
           </div>
           <ProgressBar summary={selectedWorkset.summary} label={`${selectedWorkset.profile} progress`} />
         </section>
-        {analyticsQuery.data ? <Analytics points={analyticsQuery.data.points} taskCount={analyticsQuery.data.taskCount} /> : (
-          <section className="eval-chart-loading">
-            <CircleDashed aria-hidden="true" />
-            <span>{analyticsQuery.error?.message ?? "Loading compact benchmark analytics…"}</span>
+        {analyticsQuery.data ? (
+          <Analytics points={analyticsQuery.data.points} taskCount={analyticsQuery.data.taskCount} />
+        ) : analyticsQuery.error ? (
+          <section className="eval-chart-error" role="alert">
+            {analyticsQuery.error.message}
+          </section>
+        ) : analyticsWorksetId === selectedWorksetId ? null : (
+          <section className="eval-analytics-reveal">
+            <button
+              type="button"
+              onClick={() => setAnalyticsWorksetId(selectedWorksetId)}
+            >
+              <span><strong>Score frontiers</strong><small>Output tokens, execution time, and cost</small></span>
+              <ChevronRight aria-hidden="true" />
+            </button>
           </section>
         )}
         <section className="eval-full-table" aria-labelledby="tasks-heading">
@@ -568,7 +597,7 @@ export function LiveEvals({ overview }: { overview: EvalOverview | undefined }) 
           <div className="eval-table-heading eval-task-grid" aria-hidden="true">
             <span>Task</span><span>Progress</span><span>Treatments</span><span />
           </div>
-          {visibleTasks.map((task) => (
+          {renderedTasks.map((task) => (
             <button type="button" className="eval-table-row eval-task-grid" onClick={() => chooseTask(task.id)} key={task.id}>
               <span className="eval-primary-cell"><strong>{task.label}</strong><small>{task.name}</small></span>
               <ProgressBar summary={task.summary} label={`${task.label} progress`} />
@@ -576,7 +605,16 @@ export function LiveEvals({ overview }: { overview: EvalOverview | undefined }) 
               <ChevronRight aria-hidden="true" />
             </button>
           ))}
-          {worksetQuery.isPending ? <p className="eval-empty-list">Loading workset tasks…</p> : null}
+          {renderedTasks.length < visibleTasks.length ? (
+            <button
+              type="button"
+              className="eval-show-more"
+              onClick={() => setShownTaskRows((count) => count + initialTaskRows)}
+            >
+              Show {Math.min(initialTaskRows, visibleTasks.length - renderedTasks.length)} more tasks
+              <small>{visibleTasks.length - renderedTasks.length} remaining</small>
+            </button>
+          ) : null}
           {worksetQuery.error ? <p className="eval-empty-list">{worksetQuery.error.message}</p> : null}
           {!worksetQuery.isPending && !visibleTasks.length ? <p className="eval-empty-list">No tasks match this filter.</p> : null}
         </section>
@@ -584,7 +622,11 @@ export function LiveEvals({ overview }: { overview: EvalOverview | undefined }) 
     );
   }
 
-  if (!selectedTaskOverview && !selectedTask && !worksetQuery.isPending) {
+  if (!selectedTaskOverview && !selectedTask && worksetQuery.isPending) {
+    return null;
+  }
+
+  if (!selectedTaskOverview && !selectedTask) {
     return (
       <main className="live-evals eval-route-empty">
         <PageBack onClick={() => chooseWorkset(selectedWorkset.id)}>Benchmark</PageBack>
@@ -600,8 +642,8 @@ export function LiveEvals({ overview }: { overview: EvalOverview | undefined }) 
       <section className="eval-page-head eval-detail-head">
         <div>
           <PageBack onClick={() => chooseWorkset(selectedWorkset.id)}>{selectedWorkset.profile}</PageBack>
-          <p className="eyebrow">Task · {(selectedTaskOverview?.digest ?? selectedTask?.digest)?.slice(0, 16) ?? "loading"}</p>
-          <h1>{selectedTaskOverview?.label ?? selectedTask?.label ?? "Loading task…"}</h1>
+          <p className="eyebrow">Task · {(selectedTaskOverview?.digest ?? selectedTask?.digest)?.slice(0, 16)}</p>
+          <h1>{selectedTaskOverview?.label ?? selectedTask?.label}</h1>
           <p>{selectedTaskOverview?.name ?? selectedTask?.name}</p>
         </div>
         {selectedTaskOverview ? <ProgressBar summary={selectedTaskOverview.summary} label={`${selectedTaskOverview.label} progress`} /> : null}
@@ -610,9 +652,7 @@ export function LiveEvals({ overview }: { overview: EvalOverview | undefined }) 
         <Analytics points={resultsQuery.data.points} view="runs" />
       ) : null}
       <section className="eval-run-section" aria-labelledby="treatments-heading">
-        {taskQuery.isPending ? (
-          <div className="eval-empty-panel"><CircleDashed aria-hidden="true" /><h2>Loading treatments</h2><p>Reading only this task's repetition matrix.</p></div>
-        ) : taskQuery.error ? (
+        {taskQuery.isPending ? null : taskQuery.error ? (
           <div className="eval-empty-panel"><AlertTriangle aria-hidden="true" /><h2>Task unavailable</h2><p>{taskQuery.error.message}</p></div>
         ) : selectedTask ? (
           <>

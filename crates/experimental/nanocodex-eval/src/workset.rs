@@ -1218,7 +1218,8 @@ fn create_schema(connection: &Connection) -> Result<(), WorksetError> {
             output_tokens INTEGER,
             reasoning_output_tokens INTEGER,
             total_tokens INTEGER,
-            cost_usd REAL
+            cost_usd REAL,
+            agent_duration_ms INTEGER
          );
          CREATE TABLE IF NOT EXISTS eval_attempts(
             id INTEGER PRIMARY KEY,

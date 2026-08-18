@@ -6,6 +6,7 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 
+use chrono::DateTime;
 use nanocodex_oai_api::{
     Model,
     pricing::{ServiceTier, estimate_for_model},
@@ -250,6 +251,7 @@ struct CoordinateRow {
     error: Option<String>,
     status: Option<String>,
     outcome: Option<String>,
+    agent_duration_ms: Option<i64>,
 }
 
 #[derive(Debug)]
@@ -373,7 +375,7 @@ impl EvalApi {
         let mut statement = connection
             .prepare(
                 "SELECT e.harness, e.model, e.thinking, e.state, \
-                        e.started_at_ms, e.finished_at_ms, r.status, r.outcome, \
+                        r.agent_duration_ms, r.status, r.outcome, \
                         r.input_tokens, r.cached_input_tokens, r.output_tokens, r.cost_usd \
                  FROM eval_tasks e \
                  LEFT JOIN coordinate_results r ON r.coordinate_id = e.id \
@@ -389,13 +391,12 @@ impl EvalApi {
                     row.get::<_, String>(2)?,
                     row.get::<_, String>(3)?,
                     row.get::<_, Option<i64>>(4)?,
-                    row.get::<_, Option<i64>>(5)?,
+                    row.get::<_, Option<String>>(5)?,
                     row.get::<_, Option<String>>(6)?,
-                    row.get::<_, Option<String>>(7)?,
+                    row.get::<_, Option<i64>>(7)?,
                     row.get::<_, Option<i64>>(8)?,
                     row.get::<_, Option<i64>>(9)?,
-                    row.get::<_, Option<i64>>(10)?,
-                    row.get::<_, Option<f64>>(11)?,
+                    row.get::<_, Option<f64>>(10)?,
                 ))
             })
             .map_err(|error| error.to_string())?;
@@ -406,8 +407,7 @@ impl EvalApi {
                 model,
                 thinking,
                 state,
-                started_at_ms,
-                finished_at_ms,
+                agent_duration_ms,
                 status,
                 outcome,
                 input,
@@ -437,11 +437,7 @@ impl EvalApi {
             if let Some(output) = output.filter(|value| *value >= 0) {
                 group.output_tokens.push(output);
             }
-            if let Some(duration) = started_at_ms
-                .zip(finished_at_ms)
-                .map(|(started, finished)| finished.saturating_sub(started))
-                .filter(|value| *value >= 0)
-            {
+            if let Some(duration) = agent_duration_ms.filter(|value| *value >= 0) {
                 group.durations_ms.push(duration);
             }
             if let Some(cost) = cost.filter(|value| value.is_finite() && *value >= 0.0) {
@@ -498,8 +494,8 @@ impl EvalApi {
         let mut statement = connection
             .prepare(
                 "SELECT e.id, t.selector, e.state, e.harness, e.model, e.thinking, \
-                        e.repetition, e.started_at_ms, e.finished_at_ms, \
-                        r.status, r.outcome, r.input_tokens, r.cached_input_tokens, \
+                        e.repetition, r.agent_duration_ms, r.status, r.outcome, \
+                        r.input_tokens, r.cached_input_tokens, \
                         r.output_tokens, r.reasoning_output_tokens, r.total_tokens, r.cost_usd \
                  FROM eval_tasks e INDEXED BY eval_tasks_definition \
                  JOIN task_definitions t ON t.id = e.definition_id \
@@ -525,12 +521,10 @@ impl EvalApi {
                     task
                 };
                 let model = row.get::<_, String>(4)?;
-                let started_at_ms = row.get::<_, Option<i64>>(7)?;
-                let finished_at_ms = row.get::<_, Option<i64>>(8)?;
-                let input_tokens = row.get(11)?;
-                let cached_input_tokens = row.get(12)?;
-                let output_tokens = row.get(13)?;
-                let cost_usd = row.get::<_, Option<f64>>(16)?.or_else(|| {
+                let input_tokens = row.get(10)?;
+                let cached_input_tokens = row.get(11)?;
+                let output_tokens = row.get(12)?;
+                let cost_usd = row.get::<_, Option<f64>>(15)?.or_else(|| {
                     estimated_cost_usd(&model, input_tokens, cached_input_tokens, output_tokens)
                 });
                 Ok(ResultPoint {
@@ -543,16 +537,14 @@ impl EvalApi {
                     model,
                     thinking: row.get(5)?,
                     repetition: row.get(6)?,
-                    status: row.get(9)?,
-                    outcome: row.get(10)?,
-                    duration_ms: started_at_ms
-                        .zip(finished_at_ms)
-                        .map(|(started, finished)| finished.saturating_sub(started)),
+                    status: row.get(8)?,
+                    outcome: row.get(9)?,
+                    duration_ms: row.get(7)?,
                     input_tokens,
                     cached_input_tokens,
                     output_tokens,
-                    reasoning_output_tokens: row.get(14)?,
-                    total_tokens: row.get(15)?,
+                    reasoning_output_tokens: row.get(13)?,
+                    total_tokens: row.get(14)?,
                     cost_usd,
                 })
             })
@@ -620,10 +612,7 @@ impl EvalApi {
                 status: coordinate.status,
                 outcome: coordinate.outcome,
                 updated_at_ms: coordinate.finished_at_ms.or(coordinate.started_at_ms),
-                duration_ms: coordinate
-                    .finished_at_ms
-                    .zip(coordinate.started_at_ms)
-                    .map(|(finished, started)| finished.saturating_sub(started)),
+                duration_ms: coordinate.agent_duration_ms,
                 message: coordinate.error.clone(),
                 detail_id,
             };
@@ -906,7 +895,7 @@ fn read_coordinates(
             "SELECT e.id, e.family_key, e.harness, e.model, e.thinking, \
                     e.repetition, e.state, e.result_path, e.started_at_ms, \
                     e.finished_at_ms, e.error, \
-                    r.status, r.outcome \
+                    r.status, r.outcome, r.agent_duration_ms \
              FROM eval_tasks e INDEXED BY eval_tasks_definition \
              LEFT JOIN coordinate_results r ON r.coordinate_id = e.id \
              WHERE e.workset_id = ?1 AND e.definition_id = ?2 \
@@ -929,6 +918,7 @@ fn read_coordinates(
                 error: row.get(10)?,
                 status: row.get(11)?,
                 outcome: row.get(12)?,
+                agent_duration_ms: row.get(13)?,
             })
         })
         .map_err(|error| error.to_string())?
@@ -1196,8 +1186,9 @@ fn insert_result(
         .execute(
             "INSERT INTO coordinate_results( \
                 coordinate_id, result_path, status, outcome, input_tokens, cached_input_tokens, \
-                output_tokens, reasoning_output_tokens, total_tokens, cost_usd \
-             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10) \
+                output_tokens, reasoning_output_tokens, total_tokens, cost_usd, \
+                agent_duration_ms \
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11) \
              ON CONFLICT(coordinate_id) DO UPDATE SET \
                 result_path = excluded.result_path, status = excluded.status, \
                 outcome = excluded.outcome, \
@@ -1205,7 +1196,8 @@ fn insert_result(
                 cached_input_tokens = excluded.cached_input_tokens, \
                 output_tokens = excluded.output_tokens, \
                 reasoning_output_tokens = excluded.reasoning_output_tokens, \
-                total_tokens = excluded.total_tokens, cost_usd = excluded.cost_usd",
+                total_tokens = excluded.total_tokens, cost_usd = excluded.cost_usd, \
+                agent_duration_ms = excluded.agent_duration_ms",
             params![
                 coordinate_id,
                 result_path,
@@ -1217,6 +1209,7 @@ fn insert_result(
                 usage.and_then(|value| integer_field(value, "reasoning_output_tokens")),
                 usage.and_then(|value| integer_field(value, "total_tokens")),
                 evidence.cost_usd,
+                agent_duration_ms(evidence.timing.as_ref()),
             ],
         )
         .map_err(|error| error.to_string())?;
@@ -1245,6 +1238,14 @@ fn decimal_value(value: &Value) -> Option<f64> {
     value
         .as_f64()
         .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
+}
+
+fn agent_duration_ms(timing: Option<&Value>) -> Option<i64> {
+    let execution = timing?.get("agent_execution")?;
+    let started = DateTime::parse_from_rfc3339(execution.get("started_at")?.as_str()?).ok()?;
+    let finished = DateTime::parse_from_rfc3339(execution.get("finished_at")?.as_str()?).ok()?;
+    let duration = finished.signed_duration_since(started).num_milliseconds();
+    (duration >= 0).then_some(duration)
 }
 
 fn estimated_cost_usd(
@@ -1313,4 +1314,24 @@ fn now_ms() -> Result<i64, String> {
         .map_err(|error| error.to_string())?
         .as_millis();
     i64::try_from(millis).map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use super::agent_duration_ms;
+
+    #[test]
+    fn agent_duration_uses_retained_execution_phase() {
+        let timing = json!({
+            "started_at": "2026-08-17T22:29:47.063935980Z",
+            "finished_at": "2026-08-17T22:29:50.535579014Z",
+            "agent_execution": {
+                "started_at": "2026-08-17T22:29:47.160886122Z",
+                "finished_at": "2026-08-17T22:29:50.313306533Z"
+            }
+        });
+        assert_eq!(agent_duration_ms(Some(&timing)), Some(3_152));
+    }
 }
