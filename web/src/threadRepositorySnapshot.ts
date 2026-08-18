@@ -1,4 +1,5 @@
 import { createTwoFilesPatch, diffLines } from "diff";
+import "./browserBuffer.ts";
 import git, { type ReadCommitResult, type WalkerEntry } from "isomorphic-git";
 
 import type { OpfsGitFs } from "./opfsGit.ts";
