@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
+import { ChatGptSubscription } from "nanocodex/browser";
 
 import {
   CHATGPT_LOGIN_TTL_MS,
@@ -99,7 +100,9 @@ test("device login stores and rotates ChatGPT tokens without exposing them in pu
       CHATGPT_ISSUER: "http://127.0.0.1:8799/",
       ENVIRONMENT: "test",
       SESSION_CREDENTIAL_KEY: TEST_KEY,
-    }, module);
+    }, {
+      open: (options) => ChatGptSubscription.open({ ...options, module }),
+    });
 
     const started = await session.fetch(new Request("https://session.test/start", { method: "POST" }));
     assert.deepEqual(await started.json(), {

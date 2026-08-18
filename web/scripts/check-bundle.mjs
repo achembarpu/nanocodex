@@ -12,9 +12,9 @@ const budgets = Object.freeze({
   initialCss: 60_000,
   initialCssGzip: 12_000,
   agentJavaScript: 830_000,
-  // OPFS, artifacts, voice routing, and the paid MCP seam add lazy Worker edges.
-  agentWorker: 51_000,
-  agentWorkerGzip: 16_500,
+  // OPFS, artifacts, voice routing, subscription auth, and paid MCP stay in the Worker.
+  agentWorker: 55_000,
+  agentWorkerGzip: 17_500,
   // just-bash and its built-in Unix command set stay behind Agent startup.
   browserShellJavaScript: 1_600_000,
   browserShellJavaScriptGzip: 450_000,

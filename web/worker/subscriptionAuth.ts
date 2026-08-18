@@ -1,5 +1,4 @@
 import {
-  ChatGptSubscription,
   subscriptionRevision,
   type ChatGptCredential,
   type ChatGptLoginStatus,
@@ -7,7 +6,7 @@ import {
   type ChatGptSubscriptionStore,
   type SubscriptionCommitRequest,
   type SubscriptionStoredValue,
-} from "nanocodex/browser";
+} from "nanocodex";
 
 import { CredentialVault, type CredentialVaultEnv, type EncryptedEnvelope } from "./credentialVault.ts";
 
@@ -35,23 +34,31 @@ type StoredSubscriptionRow = {
   envelope: EncryptedEnvelope;
 };
 
+type SubscriptionRuntime = {
+  open(options: {
+    id: string;
+    store: ChatGptSubscriptionStore;
+    issuer?: string;
+  }): Promise<ChatGptSubscriptionHandle>;
+};
+
 export class ChatGptSession {
   readonly #state: DurableObjectState;
   readonly #store: DurableSubscriptionStore;
   readonly #issuer?: string;
-  readonly #module?: unknown;
+  readonly #runtime?: SubscriptionRuntime;
   #subscription?: Promise<ChatGptSubscriptionHandle>;
 
   constructor(
     state: DurableObjectState,
     env: CredentialVaultEnv & { CHATGPT_ISSUER?: string },
-    module?: unknown,
+    runtime?: SubscriptionRuntime,
   ) {
     this.#state = state;
     const scope = `chatgpt/${state.id?.toString() ?? "test"}`;
     this.#store = new DurableSubscriptionStore(state.storage, new CredentialVault(env, scope));
     this.#issuer = env.CHATGPT_ISSUER?.trim() || undefined;
-    this.#module = module;
+    this.#runtime = runtime;
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -120,11 +127,10 @@ export class ChatGptSession {
   }
 
   async #openManager(): Promise<ChatGptSubscriptionHandle> {
-    const module = this.#module ?? (await import("nanocodex/wasm")).default;
-    return ChatGptSubscription.open({
+    const runtime = this.#runtime ?? (await import("nanocodex/worker")).ChatGptSubscription;
+    return runtime.open({
       id: `chatgpt:${this.#state.id?.toString() ?? "test"}`,
       store: this.#store,
-      module,
       ...(this.#issuer === undefined ? {} : { issuer: this.#issuer }),
     });
   }

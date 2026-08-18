@@ -25,6 +25,10 @@
       "types": "./browser/workspace.d.mts",
       "import": "./browser/workspace.mjs"
     },
+    "./worker": {
+      "types": "./worker/index.d.mts",
+      "import": "./worker/index.mjs"
+    },
     "./wasm": {
       "types": "./wasm.d.mts",
       "import": "./pkg-web/nanocodex_bg.wasm"
@@ -34,6 +38,7 @@
     "actions",
     "browser",
     "node",
+    "worker",
     "pkg-node",
     "pkg-web",
     "runtime",
