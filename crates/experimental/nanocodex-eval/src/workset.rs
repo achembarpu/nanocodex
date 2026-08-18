@@ -1137,7 +1137,6 @@ fn open_connection(path: &Path) -> Result<Connection, WorksetError> {
     }
     let connection = Connection::open(path)?;
     connection.busy_timeout(BUSY_TIMEOUT)?;
-    connection.pragma_update(None, "journal_mode", "WAL")?;
     connection.pragma_update(None, "foreign_keys", "ON")?;
     Ok(connection)
 }
@@ -1148,6 +1147,9 @@ fn initialize_schema(connection: &mut Connection) -> Result<(), WorksetError> {
         return Err(WorksetError::DefinitionConflict(format!(
             "schema {version}; expected {SCHEMA_VERSION}"
         )));
+    }
+    if version == 0 {
+        connection.pragma_update(None, "journal_mode", "WAL")?;
     }
     create_schema(connection)?;
     if version == 0 {
