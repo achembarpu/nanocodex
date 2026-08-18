@@ -36,7 +36,7 @@ test("the packed package installs and runs every public entry point", async () =
     assert.equal(packed.version, packageJson.version);
     assert.ok(packed.size <= 1_100_000, `compressed package grew to ${packed.size} bytes`);
     assert.ok(
-      packed.unpackedSize <= 5_000_000,
+      packed.unpackedSize <= 5_050_000,
       `unpacked package grew to ${packed.unpackedSize} bytes`,
     );
     assert.equal(
@@ -60,10 +60,12 @@ test("the packed package installs and runs every public entry point", async () =
       import { dirname, resolve } from "node:path";
       import { fileURLToPath } from "node:url";
       import { Actions } from "nanocodex";
-      import { Agent as NodeAgent } from "nanocodex/node";
-      import { Agent as BrowserAgent } from "nanocodex/browser";
+      import { Agent as NodeAgent, Workspace as NodeWorkspace } from "nanocodex/node";
+      import { Agent as BrowserAgent, Workspace as BrowserWorkspace } from "nanocodex/browser";
 
       assert.equal(typeof Actions.turn.prompt, "function");
+      assert.equal(typeof NodeWorkspace.open, "function");
+      assert.equal(typeof BrowserWorkspace.open, "function");
       const nodeAgent = await NodeAgent.create({ apiKey: "package-test" });
       assert.equal(nodeAgent.type, "node");
       await nodeAgent.session.shutdown();

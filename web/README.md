@@ -92,6 +92,8 @@ layers:
 - `../js/react` publishes `nanocodex-react`, the wagmi-like headless React owner. Its provider and
   hooks manage the module Worker lifecycle, readiness, commands, and event
   subscriptions without imposing presentation policy.
+- `../js/artifacts` publishes `nanocodex-artifacts`, the framework-independent
+  live React source document, bounded workspace store, and `render_artifact` tool.
 - `AgentTerminal` is the optimized Ratatui-faithful consumer: native colors,
   rendering hierarchy, queue/steer behavior, `/btw`, historical branch editing,
   branch navigation, per-branch drafts, clipboard images, and key bindings over
@@ -99,10 +101,23 @@ layers:
 
 The module Worker loads the generated `nanocodex-wasm` package, and the Rust
 engine owns the persistent Responses session, typed history, event stream, and
-tool loop. The Cloudflare Worker upgrades `/api/responses` and proxies OpenAI
+tool loop. It also opens the stable `nanocodex-home` OPFS workspace and exposes
+that same application-owned handle through bounded file tools and the homepage
+file tree/editor. Uploads, downloads, and edits use the same handle, so files
+survive agent, Worker, and page restarts without being copied into conversation
+snapshots or Cloudflare state. The Cloudflare Worker upgrades `/api/responses` and proxies OpenAI
 tool calls. It accepts a user-provided OpenAI key into a one-hour Durable Object
 session and returns only an opaque `HttpOnly`, `SameSite=Strict` cookie. The key
 is never placed in a URL, local storage, React state, or WASM configuration.
+
+The homepage also registers an application-owned `render_artifact` tool. The
+agent emits JavaScript source defining a real React `App`, with `React`, an
+`html` tagged-template helper, and `sendPrompt` supplied by an isolated iframe
+runtime. Documents persist under the private `.nanocodex/artifacts` workspace
+directory and open in a fullscreen dock. Reusing an artifact ID replaces the
+interface in place, so voice or text turns can continuously retheme and extend
+it. Generated code has no imports, network access, or access to the parent page;
+explicit `sendPrompt` actions re-enter the normal queued prompt lifecycle.
 A user key takes precedence over the optional deployment-owned
 `OPENAI_API_KEY`; forgetting or expiring it falls back to that deployment key
 when present.

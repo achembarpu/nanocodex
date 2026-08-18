@@ -15,6 +15,10 @@ export function createBrowserHost(options = {}) {
   }
   const connections = new Map();
   const code = createCodeRuntime(options.tools, { evaluate: options.codeEvaluator });
+  const filesystem = options.filesystem
+    ? import("../runtime/workspace.mjs")
+        .then(({ tools }) => code.addTools(tools(options.filesystem)))
+    : undefined;
   const toolMode = options.toolMode ?? "code";
   if (toolMode !== "code" && toolMode !== "direct") {
     throw new TypeError("toolMode must be code or direct");
@@ -247,7 +251,7 @@ export function createBrowserHost(options = {}) {
   }
 
   return Object.freeze({
-    ready: async () => { await mcp; },
+    ready: async () => { await Promise.all([filesystem, mcp]); },
     retain() {
       if (disposal) throw new Error("Nanocodex host is already disposed");
       references += 1;

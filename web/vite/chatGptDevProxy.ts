@@ -170,9 +170,14 @@ function upstreamHttpHeaders(request: IncomingMessage): Headers {
     "authorization",
     "chatgpt-account-id",
     "content-type",
+    "openai-alpha",
     "originator",
+    "session-id",
+    "thread-id",
     "user-agent",
+    "x-oai-attestation",
     "x-openai-fedramp",
+    "x-session-id",
   ]) {
     const value = request.headers[name];
     if (typeof value === "string") headers.set(name, value);

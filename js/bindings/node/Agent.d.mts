@@ -6,6 +6,7 @@ import type {
   MppSession,
   ToolMap,
 } from "../types.mjs";
+import type { Workspace } from "./workspace.mjs";
 
 export type Agent = DefaultAgent;
 type ToolExposureOptions =
@@ -18,6 +19,8 @@ export declare namespace create {
   type Options = AgentOptions & ({ apiKey: string; mpp?: never } | { apiKey?: never; mpp: MppSession }) & ToolExposureOptions & {
     apiBaseUrl?: string | undefined;
     codeEvaluator?: CodeEvaluator | undefined;
+    /** Caller-owned rooted filesystem mounted through standard workspace tools. */
+    filesystem?: Workspace | undefined;
     module?: unknown;
     tools?: ToolMap | undefined;
     websocketUrl?: string | undefined;

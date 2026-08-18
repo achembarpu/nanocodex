@@ -105,6 +105,27 @@
 
 .agent-tui textarea:disabled { color: var(--nc-color-muted); }
 
+.agent-tui-voice {
+  color: var(--nc-color-foreground);
+  background: var(--nc-color-subtle);
+  border-color: var(--nc-color-border);
+}
+
+.agent-tui-voice:hover,
+.agent-tui-voice:focus-visible,
+.agent-tui-voice[aria-pressed="true"] {
+  color: var(--nc-color-background);
+  background: var(--nc-color-accent);
+  border-color: var(--nc-color-accent);
+  outline: none;
+}
+
+.agent-tui-voice:disabled {
+  color: var(--nc-color-muted);
+  cursor: default;
+  opacity: 0.55;
+}
+
 .tui-assistant :where(th, td),
 .tui-tool-images img,
 .tui-syntax { border: 1px solid var(--nc-color-border); }

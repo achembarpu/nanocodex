@@ -18,6 +18,7 @@ bootstrap-bindings:
     uv pip install --python "{{python_binding_bin}}" "maturin>=1.9,<2"
     rustup target add "{{wasm_target}}"
     npm ci --prefix js/bindings
+    npm ci --prefix js/artifacts
     npm ci --prefix examples/node
     npm ci --prefix examples/react-vite
     npm ci --prefix examples/vercel-workflows
@@ -51,6 +52,7 @@ build-wasm:
 # Exercise the real WASM model loop under Node and the browser host contract.
 test-wasm: build-wasm
     npm test --prefix js/bindings
+    npm test --prefix js/artifacts
     npm test --prefix js/react
 
 # Run custom JavaScript tooling and a follow-on through Node-hosted WASM.

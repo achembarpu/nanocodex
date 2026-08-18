@@ -20,11 +20,22 @@ const IMAGE_GENERATION_URL = "https://api.openai.com/v1/images/generations";
 const IMAGE_EDIT_URL = "https://api.openai.com/v1/images/edits";
 const MODEL = "gpt-5.6-sol";
 const IMAGE_MODEL = "gpt-image-2";
+const CHATGPT_REALTIME_MODEL = "gpt-live-1-boulder-alpha";
+const CHATGPT_REALTIME_VOICES = new Set([
+  "juniper", "maple", "spruce", "ember", "vale", "breeze", "arbor", "sol", "cove",
+]);
+const CHATGPT_REALTIME_INSTRUCTIONS = `You are Codex, a concise and warm conversational surface for the coding agent visible on the page.
+Treat the coding agent and yourself as one assistant. Never mention a backend or separate system.
+For every action or task, create a client delegation. Use direct speech only for brief conversation that needs no tools or execution.
+The coding agent's visible output is authoritative. Summarize it naturally without repeating long code, tables, or structured data.
+Running work remains steerable: delegate corrections and new instructions immediately.`;
 const CODEX_ORIGINATOR = "codex_cli_rs";
 const CODEX_USER_AGENT = "codex_cli_rs/0.0.0";
 const MAX_JSON_BODY_CHARS = 32 * 1024 * 1024;
 const MAX_SEARCH_OUTPUT_CHARS = 1024 * 1024;
 const MAX_API_KEY_CHARS = 1_024;
+const MAX_REALTIME_SDP_CHARS = 1024 * 1024;
+const REALTIME_SIDEBAND_URL = "https://api.openai.com/v1/live";
 const BYOK_SESSION_TTL_MS = 60 * 60 * 1_000;
 const CHATGPT_SESSION_TTL_MS = 30 * 24 * 60 * 60 * 1_000;
 const BYOK_COOKIE = "nanocodex_byok";
@@ -90,6 +101,14 @@ export default {
 
     if (url.pathname === "/api/responses") {
       return upgradeResponsesWebSocket(request, env, url);
+    }
+
+    if (url.pathname === "/api/realtime/sideband") {
+      return upgradeRealtimeSideband(request, env, url);
+    }
+
+    if (url.pathname === "/api/realtime/calls" && request.method === "POST") {
+      return createRealtimeCall(request, env, url);
     }
 
     if (url.pathname === "/api/tools/web-search" && request.method === "POST") {
@@ -245,6 +264,181 @@ async function proxyImageGeneration(request: Request, env: WorkerEnv, url: URL):
     return json({ error: "image generation returned no image" }, { status: 502 });
   }
   return json({ image_url: `data:image/png;base64,${encoded}` });
+}
+
+async function createRealtimeCall(request: Request, env: WorkerEnv, url: URL): Promise<Response> {
+  if (!sameOrigin(request, url)) return json({ error: "forbidden" }, { status: 403 });
+  if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
+    return json({ error: "expected JSON" }, { status: 415 });
+  }
+  const decoded = await readJsonBody(request);
+  if (decoded instanceof Response) return decoded;
+  const sdp = typeof decoded.sdp === "string" ? decoded.sdp : "";
+  const sessionId = typeof decoded.session_id === "string" ? decoded.session_id : "";
+  const voice = typeof decoded.voice === "string" ? decoded.voice : "";
+  if (!sdp || sdp.length > MAX_REALTIME_SDP_CHARS) {
+    return json({ error: "invalid WebRTC offer" }, { status: 400 });
+  }
+  if (!/^[A-Za-z0-9._:-]{1,200}$/.test(sessionId)) {
+    return json({ error: "invalid session" }, { status: 400 });
+  }
+  if (!CHATGPT_REALTIME_VOICES.has(voice)) {
+    return json({ error: "unsupported ChatGPT voice" }, { status: 400 });
+  }
+  let credential = await resolveSubscriptionCredential(request, env);
+  if (!credential) {
+    return json({ error: "voice requires an authenticated ChatGPT subscription" }, { status: 503 });
+  }
+  let upstream = await openRealtimeCall(credential, env, sdp, sessionId, voice);
+  if (upstream.status === 401) {
+    await upstream.body?.cancel();
+    const recovered = await recoverSubscriptionCredential(request, env, credential.revision);
+    if (recovered) {
+      credential = recovered;
+      upstream = await openRealtimeCall(credential, env, sdp, sessionId, voice);
+    }
+  }
+  const callId = realtimeCallId(upstream.headers.get("location"));
+  const answer = await upstream.text();
+  if (answer.length > MAX_REALTIME_SDP_CHARS) {
+    return json({ error: "Realtime answer exceeded 1 MiB" }, { status: 502 });
+  }
+  if (!upstream.ok) return upstreamError("Realtime call", upstream.status, answer);
+  if (!callId) {
+    return json({ error: "Realtime call response omitted a call ID" }, { status: 502 });
+  }
+  return new Response(answer, {
+    headers: {
+      "cache-control": "no-store",
+      "content-type": "application/sdp",
+      "x-nanocodex-realtime-call-id": callId,
+    },
+  });
+}
+
+function realtimeCallId(location: string | null): string | undefined {
+  if (!location) return undefined;
+  return location
+    .split("?", 1)[0]
+    .split("/")
+    .reverse()
+    .find((segment) => (segment.startsWith("rtc_") && segment.length > 4) || isUuid(segment));
+}
+
+function isUuid(value: string): boolean {
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
+}
+
+function openRealtimeCall(
+  credential: SubscriptionCredential,
+  env: WorkerEnv,
+  sdp: string,
+  sessionId: string,
+  voice: string,
+): Promise<Response> {
+  const endpoint = `${chatGptApiBaseUrl(env)}/realtime/calls?intent=quicksilver&architecture=avas`;
+  return fetch(endpoint, {
+    method: "POST",
+    headers: {
+      ...openAiHeaders(credential),
+      "openai-alpha": "quicksilver=v2",
+      "x-oai-attestation": '{"v":1,"s":1}',
+      "x-session-id": sessionId,
+      "session-id": sessionId,
+      "thread-id": sessionId,
+    },
+    body: JSON.stringify({
+      sdp,
+      session: {
+        model: CHATGPT_REALTIME_MODEL,
+        instructions: CHATGPT_REALTIME_INSTRUCTIONS,
+        audio: { output: { voice } },
+        delegation: { type: "client" },
+      },
+    }),
+  });
+}
+
+async function upgradeRealtimeSideband(
+  request: Request,
+  env: WorkerEnv,
+  url: URL,
+): Promise<Response> {
+  if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+    return new Response("Expected WebSocket upgrade", { status: 426 });
+  }
+  if (!sameOrigin(request, url)) return new Response("Forbidden", { status: 403 });
+  const callId = url.searchParams.get("call_id") ?? "";
+  const sessionId = url.searchParams.get("session_id") ?? "";
+  if (!realtimeCallId(callId) || !/^[A-Za-z0-9._:-]{1,200}$/.test(sessionId)) {
+    return new Response("Invalid Realtime session", { status: 400 });
+  }
+  let credential = await resolveSubscriptionCredential(request, env);
+  if (!credential) {
+    return new Response("Voice requires an authenticated ChatGPT subscription", { status: 503 });
+  }
+
+  let upstreamResponse = await openRealtimeSidebandWithRetry(credential, callId, sessionId);
+  if (upstreamResponse.status === 401) {
+    await upstreamResponse.body?.cancel();
+    const recovered = await recoverSubscriptionCredential(request, env, credential.revision);
+    if (recovered) {
+      credential = recovered;
+      upstreamResponse = await openRealtimeSidebandWithRetry(credential, callId, sessionId);
+    }
+  }
+  const upstream = upstreamResponse.webSocket;
+  if (!upstream) {
+    const detail = await upstreamResponseDetail(upstreamResponse);
+    return new Response(
+      `Realtime sideband upgrade failed with HTTP ${upstreamResponse.status}: ${detail}`,
+      { status: 502 },
+    );
+  }
+
+  const pair = new WebSocketPair();
+  const [client, server] = Object.values(pair);
+  upstream.accept();
+  server.accept();
+  bridge(server, upstream);
+  return new Response(null, { status: 101, webSocket: client });
+}
+
+async function openRealtimeSidebandWithRetry(
+  credential: SubscriptionCredential,
+  callId: string,
+  sessionId: string,
+): Promise<Response> {
+  let response: Response | undefined;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    response = await openRealtimeSideband(credential, callId, sessionId);
+    if (response.webSocket || response.status === 401) return response;
+    if (attempt < 3) {
+      await response.body?.cancel();
+      await new Promise((resolve) => setTimeout(resolve, 100 * 2 ** attempt));
+    }
+  }
+  return response!;
+}
+
+function openRealtimeSideband(
+  credential: SubscriptionCredential,
+  callId: string,
+  sessionId: string,
+): Promise<Response> {
+  return fetch(`${REALTIME_SIDEBAND_URL}/${encodeURIComponent(callId)}`, {
+    headers: {
+      Upgrade: "websocket",
+      ...openAiHeaders(credential),
+      "openai-alpha": "quicksilver=v2",
+      "x-oai-attestation": '{"v":1,"s":1}',
+      "x-session-id": sessionId,
+      "session-id": sessionId,
+      "thread-id": sessionId,
+      originator: "nanocodex",
+      "User-Agent": "nanocodex/0.1.0",
+    },
+  });
 }
 
 async function validateToolRequest(

@@ -20,6 +20,8 @@ type WorkerScope = {
 };
 
 const worker = self as unknown as WorkerScope;
+const kernelWorkspace = import("nanocodex/browser/workspace")
+  .then((module) => module.open({ name: "nanocodex-home" }));
 const paymentSessions = createPaymentSessionOwner<PaymentSession>();
 const controller = createAgentController({
   createAgent,
@@ -44,11 +46,18 @@ async function createAgent(
   tools: AgentControllerTools,
 ) {
   await paymentSessions.clear();
+  const workspace = await kernelWorkspace;
+  const { ArtifactStore } = await import("nanocodex-artifacts");
+  const artifacts = new ArtifactStore(workspace);
   const common = {
+    filesystem: workspace,
     tools: {
       ...createBrowserTools({
         recentImages: tools.recentImages,
         rememberImage: tools.rememberImage,
+      }),
+      render_artifact: artifacts.tool((artifact) => {
+        worker.postMessage({ type: "artifact", artifact });
       }),
       browserInfo: {
         description: "Return basic information about the browser Worker runtime.",

@@ -22,8 +22,14 @@ export function checkDocumentedBrowserVersion(readme, packageVersion) {
 const requiredFiles = [
   "browser/index.mjs",
   "browser/index.d.mts",
+  "browser/workspace.mjs",
+  "browser/workspace.d.mts",
   "node/index.mjs",
   "node/index.d.mts",
+  "node/workspace.mjs",
+  "node/workspace.d.mts",
+  "runtime/workspace.mjs",
+  "runtime/workspace.d.mts",
   "wasm.d.mts",
   "pkg-web/nanocodex.js",
   "pkg-web/nanocodex.d.ts",
@@ -44,7 +50,9 @@ export async function checkPackage(packageRoot = root) {
   assert.equal(packageJson.engines?.node, ">=22.13.0");
   assert.equal(packageJson.publishConfig?.access, "public");
   assert.equal(packageJson.exports?.["./browser"]?.import, "./browser/index.mjs");
+  assert.equal(packageJson.exports?.["./browser/workspace"]?.import, "./browser/workspace.mjs");
   assert.equal(packageJson.exports?.["./node"]?.import, "./node/index.mjs");
+  assert.equal(packageJson.exports?.["./node/workspace"]?.import, "./node/workspace.mjs");
   assert.equal(packageJson.exports?.["./wasm"]?.import, "./pkg-web/nanocodex_bg.wasm");
   checkDocumentedBrowserVersion(readme, packageJson.version);
 

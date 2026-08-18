@@ -33,3 +33,4 @@ export type {
   MppSession,
 } from "../types.mjs";
 export * as Agent from "./Agent.mjs";
+export * as Workspace from "./workspace.mjs";

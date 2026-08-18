@@ -42,6 +42,46 @@ await branch.session.shutdown();
 await agent.session.shutdown();
 ```
 
+## Persistent workspaces
+
+Runtime-specific `Workspace` adapters give an embedding application one file
+contract for both local browser kernels and Node kernels. The browser adapter
+uses the origin-private file system (OPFS), so reopening the same stable name
+after a Worker, page, or agent-session restart reuses its files. The Node
+adapter roots the same operations in an ordinary directory and refuses path
+traversal and symbolic-link escapes.
+
+```js
+import { Agent, Workspace } from "nanocodex/browser";
+
+const workspace = await Workspace.open({ name: "my-notebook" });
+const agent = await Agent.create({
+  apiKey,
+  filesystem: workspace,
+});
+
+await workspace.writeFile("README.md", "# Durable browser workspace\n");
+console.log(await workspace.list(".", { recursive: true }));
+```
+
+The returned handle is application-owned and remains usable by a file browser,
+editor, upload/download surface, or another agent session. `Workspace.tools`
+exposes bounded `list_files`, `read_file`, `write_file`, `make_directory`, and
+`delete_file` operations through the normal caller-defined tool boundary. It
+does not add a fake browser shell.
+
+Node uses the same shape with a real directory:
+
+```js
+import { Agent, Workspace } from "nanocodex/node";
+
+const workspace = await Workspace.open({ path: process.cwd() });
+const agent = await Agent.create({
+  apiKey: process.env.OPENAI_API_KEY,
+  filesystem: workspace,
+});
+```
+
 Node and browser applications can instead pay through MPP without an OpenAI
 API key. Pass an MPP session with a `ws(endpoint)` method; an `mppx` Tempo
 session manager has this shape. Nanocodex defaults the socket to

@@ -22,6 +22,8 @@ export type TuiCommand =
 
 export type TuiMessage =
   | { type: "ready"; sessionId: string }
+  | { type: "externalPrompt"; target: TuiTarget; id: number; prompt: string; intent?: "immediate" | "queue" }
+  | { type: "voiceTranscript"; target: TuiTarget; speaker: "user" | "assistant"; text: string }
   | { type: "event"; target: TuiTarget; event: AgentEvent }
   | { type: "turnFinished"; target: TuiTarget; id: number; message?: string; error?: string }
   | { type: "steerAdmitted"; target: TuiTarget; id: number }
@@ -193,6 +195,29 @@ export function appendError(state: TerminalState, text: string): TerminalState {
     ...state,
     syntheticId,
     entries: [...state.entries, { id: `error-${syntheticId}`, kind: "error", text }],
+  };
+}
+
+/** Append one completed voice transcript without treating it as agent input. */
+export function appendVoiceTranscript(
+  state: TerminalState,
+  speaker: "user" | "assistant",
+  text: string,
+): TerminalState {
+  const syntheticId = state.syntheticId + 1;
+  const label = speaker === "user" ? "🎙 You" : "🔊 Voice";
+  return {
+    ...state,
+    syntheticId,
+    entries: [
+      ...state.entries,
+      {
+        id: `voice-${syntheticId}`,
+        kind: "assistant",
+        text: `**${label}:** ${text}`,
+        streaming: false,
+      },
+    ],
   };
 }
 

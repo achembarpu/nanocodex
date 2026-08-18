@@ -20,6 +20,10 @@ py/bindings/python/nanocodex/*.so
 py/bindings/python/nanocodex/*.dylib
 py/bindings/python/nanocodex/*.pyd
 js/bindings/node_modules/
+js/artifacts/node_modules/
+js/artifacts/dist/
+js/artifacts-react/node_modules/
+js/artifacts-react/dist/
 js/react/node_modules/
 js/tui/node_modules/
 js/tui/dist/

@@ -32,6 +32,7 @@ export function create(options = {}) {
     resume,
     WebSocketImpl,
     createWebSocket,
+    filesystem,
     tools,
     toolMode,
     mcp,
@@ -43,6 +44,9 @@ export function create(options = {}) {
   if (hostAuth && (apiKey !== undefined || mpp !== undefined)) {
     throw new TypeError("hostAuth is mutually exclusive with apiKey and mpp");
   }
+  if (filesystem && workspace !== undefined && workspace !== filesystem.root) {
+    throw new TypeError("workspace must match filesystem.root when both are provided");
+  }
   const events = createEventChannel();
   const tempoMcp = mpp?.[Symbol.for("nanocodex.tempo.mcp")];
   const host = createBrowserHost({
@@ -51,6 +55,7 @@ export function create(options = {}) {
     hostAuth: hostAuth === true || (apiKey === undefined && mpp === undefined),
     mpp,
     onEvent: events.emit,
+    filesystem,
     tools,
     toolMode,
     mcp: mcp === false
@@ -106,7 +111,7 @@ export function create(options = {}) {
     fastMode,
     instructions,
     sessionId,
-    workspace,
+    workspace: workspace ?? filesystem?.root,
     resume,
   });
 }
