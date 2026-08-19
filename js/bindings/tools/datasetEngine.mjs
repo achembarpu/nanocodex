@@ -23,7 +23,10 @@ const QUERY_CACHE_BYTES = 2 * 1024 * 1024;
 const MAX_CACHED_QUERIES = 16;
 const MAX_BLOOM_FILTER_GROUPS = 8;
 function createDatasetTool(options = {}) {
-  const fetchImpl = options.fetch ?? globalThis.fetch;
+  const providedFetch = options.fetch;
+  const fetchImpl = providedFetch === undefined
+    ? globalThis.fetch.bind(globalThis)
+    : (input, init) => providedFetch(input, init);
   const randomId = options.randomId ?? (() => crypto.randomUUID());
   const loadParquet = options.loadParquet ?? (() => import("hyparquet"));
   const loadCompressors = options.loadCompressors ?? (() => import("hyparquet-compressors"));
