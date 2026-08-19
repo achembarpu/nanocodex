@@ -2,18 +2,23 @@
 
 <h1>Nanocodex</h1>
 
-<p><strong>Building blocks for frontier OpenAI agents.</strong></p>
+<p><strong>A complete OpenAI coding agent, embedded in your product.</strong></p>
+
+<p>
+Nanocodex owns the model session, conversation history, tool loop, Code Mode,
+retries, branching, cancellation, and cleanup. You keep the product, interface,
+tools, deployment, and policy.
+</p>
 
 [![CI](https://img.shields.io/github/actions/workflow/status/gakonst/nanocodex/ci.yml?branch=master)][ci]
 [![Crates.io](https://img.shields.io/crates/v/nanocodex.svg)][crates]
 [![Docs.rs](https://img.shields.io/docsrs/nanocodex)][docs]
 [![License](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)][license]
 
-**[Install](#install)** · **[Agent API](#minimal-api-example)** ·
-**[Thesis](#thesis)** · **[Components](#components)** ·
-**[VM-backed tools](#vm-backed-tools)** ·
-**[Evaluation](crates/experimental/nanocodex-eval/README.md)** ·
-**[Documentation](#documentation)**
+**[Rust](#rust-start-here)** · **[JavaScript](#javascript-node-browser-and-wasm)** ·
+**[Python](#python)** · **[Capabilities](#one-agent-owned-end-to-end)** ·
+**[Evaluation](#evaluation-is-a-product-boundary)** ·
+**[Deployments](#deployment-proofs)** · **[Status](#what-is-stable)**
 
 [ci]: https://github.com/gakonst/nanocodex/actions/workflows/ci.yml
 [crates]: https://crates.io/crates/nanocodex
@@ -22,346 +27,619 @@
 
 </div>
 
+Nanocodex is a headless, library-first SDK for building products around one
+deliberately supported OpenAI coding-agent stack. It is not a provider
+abstraction and it is not an app server. The public product is an embeddable
+agent with an owned lifecycle; the native CLI/TUI, browser apps, Python and
+JavaScript packages, durable actors, sandboxes, voice client, and evaluation
+harness are consumers that prove the same contract.
+
+The important difference from assembling a model client and a loop is what the
+caller does **not** have to rebuild:
+
+- no passing previous messages, response IDs, or tool results back on every
+  turn;
+- no separate state machine for prompt ordering, steering, compaction,
+  reconnect replay, or partially completed responses;
+- no coupling between receiving a typed result and consuming an event stream;
+- no orphaned shell sessions or subprocess trees when a turn is cancelled; and
+- no second orchestration runtime when an agent forks or delegates work.
+
 ## Install
 
-Install the Nanocodex CLI on macOS or Linux:
+Choose the host language; each path runs the Rust-owned agent lifecycle. The
+Rust and JavaScript packages are registry releases. The Python binding is
+currently built from the repository checkout.
+
+```sh
+# Rust
+cargo add nanocodex
+
+# Node.js 22.13+
+npm install nanocodex
+
+# Python 3.11+ (from a checkout)
+uv venv --python 3.11 py/bindings/.venv
+uv pip install --python py/bindings/.venv/bin/python 'maturin>=1.9,<2'
+VIRTUAL_ENV="$PWD/py/bindings/.venv" \
+  py/bindings/.venv/bin/maturin develop --manifest-path py/bindings/Cargo.toml
+```
+
+Or install the native CLI/TUI on macOS or Linux:
 
 ```sh
 curl -fsSL https://nanocodex.paradigm.xyz | bash
+nanocodex
 ```
 
-Or add the Rust SDK to an application:
+The CLI is a production consumer and a useful way to try the agent, not a
+process protocol that applications must adopt. See
+[`bin/nanocodex`](bin/nanocodex), the [examples index](examples/README.md), and
+the [release switcher documentation](bin/nanocodex/src/update.rs).
 
-```sh
-cargo add nanocodex
-```
+## Rust: start here
 
-Switch the installed CLI between builds:
+Build one agent, submit ordered prompts through its cheap handle, and await a
+typed result:
 
-```sh
-nanocodex update                 # latest stable release
-nanocodex update 0.2.0           # exact release, including downgrades
-nanocodex update --nightly       # latest nightly
-nanocodex update --pr 50         # verified on-demand PR artifact
-nanocodex update --path ./nanocodex  # trusted local binary
-```
-
-Downloaded builds are retained under `~/.nanocodex/versions`. Running
-`nanocodex update 0.2.0` again switches to the cached binary without another
-download. A stable launcher keeps `nanocodex update` available even while an
-older binary is active, and `~/.nanocodex/current` points to the selected
-version.
-
-PR artifacts require an authenticated `gh` CLI and an already completed
-on-demand artifact workflow for that PR.
-
-### Interactive cleanup workflow
-
-The TUI includes a behavior-preserving cleanup pass for recently changed code:
-
-```text
-/simplify
-/simplify focus on memory efficiency
-```
-
-The command selects the current Git diff, runs independent reuse,
-simplification, efficiency, and abstraction-depth reviewers concurrently, then
-deduplicates and applies valid findings. The workflow reuses the CLI's owned
-subagent runtime in ordinary TUI sessions. General-purpose subagent tools are
-enabled by default and can be disabled with `--subagents false`; the dedicated
-cleanup workflow remains available when they are disabled.
-
-## Minimal API Example
-
-```rust,ignore
+```rust,no_run
 use nanocodex::{Nanocodex, OpenAi};
 
-let openai = OpenAi::new(std::env::var("OPENAI_API_KEY")?)?;
-let (agent, mut events) = Nanocodex::builder(openai)
-    .instructions(
-        "You are a Rust coding agent. Make focused changes, preserve unrelated work, \
-         and run relevant tests before finishing.",
-    )
-    .workspace(std::env::current_dir()?)
-    .build()?;
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let openai = OpenAi::new(std::env::var("OPENAI_API_KEY")?)?;
+    let (agent, _events) = Nanocodex::builder(openai)
+        .instructions(
+            "You are a Rust coding agent. Preserve unrelated work and run relevant tests.",
+        )
+        .workspace(std::env::current_dir()?)
+        .build()?;
 
-let event_task = tokio::spawn(async move {
-    while let Some(event) = events.recv().await {
-        eprintln!("event {}: {:?}", event.seq, event.kind);
-        if event.kind.is_terminal() {
-            break;
-        }
-    }
-});
+    let turn = agent.prompt("Find and fix the failing parser test.").await?;
+    let result = turn.await?;
+    println!("{}", result.final_message());
 
-// Alternative: stream this turn's response as it arrives:
-// use futures_util::StreamExt;
-// use nanocodex::agent::events::{AgentEventData, AssistantEvent};
-// let mut turn = agent.prompt("Find and fix the failing parser test.").await?;
-// while let Some(event) = turn.next().await {
-//     if let AgentEventData::Assistant(AssistantEvent::Delta(delta)) = event.data()? {
-//         print!("{}", delta.text);
-//     }
-// }
-let result = agent
-    .prompt("Find and fix the failing parser test.")
-    .await?
-    .await?;
-
-event_task.await?;
-println!("{}", result.final_message());
+    agent.shutdown().await?;
+    Ok(())
+}
 ```
 
-The first `await` accepts and orders the prompt. The second waits for its typed
-`TurnResult`. Follow-on prompts automatically reuse the agent's retained
-history, WebSocket, tools, shell sessions, and prompt-cache identity.
-`agent.clone()` is a cheap handle to that same session; the independently
-returned `AgentEvents` stream is the session-wide event firehose.
+The first `await` accepts and orders the prompt. The returned `Turn` is both an
+independently awaitable future for `TurnResult` and an optional per-turn event
+stream. The separate `AgentEvents` value is the session-wide stream; neither
+stream has to be drained for the result to complete.
 
-Nanocodex supports `gpt-5.6-sol` (the default), `gpt-5.6-terra`, and
-`gpt-5.6-luna`. Select a model with `.model(Model::Terra)` or
-`.model(Model::Luna)` when creating an agent. The model is fixed for that
-thread: switching later would invalidate the provider checkpoint and require
-an inefficient replay of the complete retained context.
+Follow-on prompts reuse the same retained typed history, persistent Responses
+WebSocket, response chain, cache identity, tools, Code Mode worker, and shell
+sessions. `agent.clone()` is a constant-time command capability to that same
+session. `shutdown()` cancels unfinished work and joins model, tool, transport,
+and process cleanup.
 
-API-key HTTPS OpenAI routing gateways that namespace model identifiers can set
-`NANOCODEX_MODEL_ID_PREFIX`. For example, a prefix of `openai` sends
-`openai/gpt-5.6-sol` on the wire while preserving Sol's typed behavior,
-pricing, compaction, and snapshot identity inside Nanocodex. This does not add
-an alternate provider or arbitrary-model surface.
+The runnable source is [`examples/minimal.rs`](examples/minimal.rs). For event
+streaming, steering, cancellation, clean spawning, historical forks, and
+snapshots, see [`examples/lifecycle.rs`](examples/lifecycle.rs),
+[`examples/follow_on.rs`](examples/follow_on.rs), and
+[`examples/resume.rs`](examples/resume.rs).
 
-## Voice: devices or Unix pipes
+Nanocodex currently supports the OpenAI `gpt-5.6-sol` family (`sol` is the
+default, with `terra` and `luna` selections). It owns the typed Responses
+WebSocket behavior for that family. An API-key gateway may prefix the on-wire
+model identifier with `NANOCODEX_MODEL_ID_PREFIX`, but that does not create an
+alternate-provider or arbitrary-model API.
 
-The non-TUI desktop example owns the default microphone and speaker directly
-in Rust, using the same `VoiceSessionBuilder` as the production TUI:
-
-```sh
-nanocodex auth login # once; shares ~/.codex/auth.json with Codex
-cargo run -p nanocodex-examples --bin voice
-```
-
-For non-interactive Business or Enterprise hosts, set
-`CODEX_ACCESS_TOKEN=at-...`; it takes precedence over the default stored
-credential and does not require browser login or OAuth refresh.
-
-The lower adapter leaves device and media ownership outside Nanocodex. It reads
-24 kHz mono PCM16 little-endian audio from stdin, writes the same format to
-stdout, and keeps transcripts and agent events on stderr:
-
-```sh
-cargo run -p nanocodex-examples --bin realtime-pipe < microphone.pcm > speaker.pcm
-
-# Equivalently, compose any live capture/decoder and playback/encoder:
-capture-s16le | cargo run --quiet -p nanocodex-examples --bin realtime-pipe | play-s16le
-```
-
-Both retain one coding-agent session. A spoken request starts work while idle;
-a follow-up received during that work atomically steers the active turn at its
-next safe model boundary. Both use shared Codex/ChatGPT subscription auth, not
-an API key. Set `NANOCODEX_AUTH_FILE` to override the normal Codex credential
-path.
-
-## Thesis
-
-### Small, excellent building blocks
-
-Agent infrastructure is easier to understand and reuse when each piece has a
-sharp owner and a useful API of its own. An OpenAI client should work without
-an agent loop. Tools should work without a CLI. The high-level agent should
-compose those pieces rather than hide another implementation of them.
-
-Nanocodex makes a small number of deliberate choices—Rust, Tower, typed
-protocols, owned lifecycle state, and builder APIs—then keeps the boundaries
-boring.
-
-### The model and harness are co-designed
-
-We do not try to outsmart behavior that frontier models and Codex already make
-explicit. Context management, `AGENTS.md`, compaction, cache identity, tool
-shapes, continuation, reconnect replay, cancellation, and process cleanup are
-parts of the model-facing contract.
-
-Nanocodex carries those invariants into a smaller, library-first API while
-leaving application policy with the caller.
-
-### Evidence over intuition
-
-Representative `cargo bench` workloads, OpenTelemetry traces, differential
-tests, and end-to-end evals keep the harness honest. The goal is simple: normal
-agent turns should be model- and network-latency bound, with token usage and
-estimated USD cost visible at the same typed boundary as the result.
-
-## Components
+## One agent, owned end to end
 
 ```text
-nanocodex                         Alloy-style facade and prelude
-├── agent                         nanocodex-agent
-│   ├── oai                       nanocodex-oai-api
-│   └── tools                     nanocodex-tools
-│       └── macros                nanocodex-tools-macros
-├── durability                    nanocodex-durability -> nanocodex-agent
-├── oai                           nanocodex-oai-api
-├── tools                         nanocodex-tools
-├── observability                 nanocodex-observability (optional)
-└── subagents                     nanocodex-subagents (optional extension)
+your application
+  ├─ cheap Nanocodex command handle ── prompt / steer / cancel / fork
+  ├─ optional typed events ─────────── UI / persistence / telemetry
+  ├─ caller-defined tools ──────────── your data and capabilities
+  ├─ optional durability layer ─────── journal / replay / recovery / stores
+  └─ private driver
+       ├─ ordered turns and typed committed history
+       ├─ persistent OpenAI Responses WebSocket + typed retries
+       ├─ Code Mode, MCP, shell sessions, and process cleanup
+       └─ snapshots, compaction, branches, and task-tree children
 ```
 
-The facade provides the canonical common imports. Each lower crate is also
-designed to be useful directly, without importing the higher orchestration
-layer.
+### Sessions and history are authoritative
 
-### `nanocodex`
+The private spawned driver is the sole mutable owner. A healthy follow-on sends
+only the new delta with its private continuation checkpoint. If the socket is
+replaced or a stored checkpoint is unavailable, Nanocodex drops the checkpoint
+and safely replays complete client-owned typed history. Only completed
+responses enter history: a failed partial response cannot execute a tool or
+become the base of a later turn.
 
-The thin facade reexports the golden agent path at the crate root and keeps
-detailed APIs under `nanocodex::agent`, `nanocodex::oai`, and
-`nanocodex::tools`. Its prelude contains only the common types needed to build
-an agent.
+That gives an embedding a simple contract:
 
-[Facade guide](crates/nanocodex/README.md) ·
-[API documentation](https://docs.rs/nanocodex)
+- `prompt()` is bounded admission, not a hidden full-turn wait;
+- accepted prompts retain FIFO ordering even when their `Turn` handles are
+  awaited elsewhere;
+- steering joins at the next safe model boundary;
+- cancellation targets one active or queued turn and terminates managed
+  subprocess groups;
+- snapshots contain the complete committed conversation and can resume in a
+  fresh process; and
+- token usage, cache behavior, and estimated USD cost arrive on the same typed
+  terminal result.
 
-### `nanocodex-agent`
+The implementation boundaries are documented in
+[`nanocodex-agent`](crates/nanocodex-agent/README.md) and
+[`nanocodex-oai-api`](crates/nanocodex-oai-api/README.md). Applications that
+only need a managed OpenAI conversation can use the lower-level
+`OpenAi -> Session -> ResponseTurn -> Response` API without adopting agent
+policy. The Responses client remains generic over the caller's concrete Tower
+service, so deadlines, concurrency limits, tracing, load shedding, and circuit
+breaking stay composable without introducing a second retry owner.
 
-The batteries-included lifecycle: an owned private driver, a cheap cloneable
-`Nanocodex` handle, typed `Turn` and `TurnResult` values, and an optional event
-stream. It owns prompt ordering, the tool loop, `AGENTS.md` discovery,
-compaction timing, cancellation, snapshots, and branching through `spawn`,
-`fork`, and `fork_from`.
+### Durable execution is optional and Rust-owned
 
-Callers never pass previous messages, response IDs, or tool results back into
-the agent.
+`nanocodex-durability` adds an append-only journal, typed reduction and
+recovery policy, operation deduplication, effect replay, and session
+checkpoints. It includes memory, SQLite, and Postgres stores, plus a
+host-provided store contract whose only requirement is atomic load and
+compare-and-append. Rust owns the journal format and every recovery decision.
 
-[Agent guide](crates/nanocodex-agent/README.md) ·
-[API documentation](https://docs.rs/nanocodex-agent)
+The layer implements the agent's neutral execution-policy seam; the core agent
+does not depend on it. Lower-level consumers can use `DurableSession` directly
+with caller-owned operation, step, checkpoint, and output types. Read the
+[durability guide](crates/nanocodex-durability/README.md) or the
+[API documentation](https://docs.rs/nanocodex-durability).
 
-### `nanocodex-durability`
+### Tools, Code Mode, and MCP
 
-The optional durable-execution layer: an append-only Rust journal, typed
-reduction and recovery policy, operation deduplication, effect replay, session
-checkpoints, and in-memory, SQLite, Postgres, or host-provided stores. The host
-contract is only atomic load and compare-and-append; Rust owns the journal
-format and recovery decisions.
+Tools are caller-owned capabilities, not callbacks hidden behind a global
+runtime. Register the standard workspace set, implement the typed `Tool`
+contract, or write a Rust function with `#[tool]`:
 
-Durability depends on `nanocodex-agent` and implements its neutral execution
-policy seam. The agent never depends on durability. Lower-level consumers can
-instead use `DurableSession` directly with caller-owned operation, step,
-checkpoint, and output types.
+```rust,no_run
+use nanocodex::{Nanocodex, OpenAi, Tools, tool};
 
-[Durability guide](crates/nanocodex-durability/README.md) ·
-[API documentation](https://docs.rs/nanocodex-durability)
+#[tool(description = "Multiplies two signed integers.")]
+async fn multiply(left: i64, right: i64) -> Result<i64, &'static str> {
+    left.checked_mul(right).ok_or("integer overflow")
+}
 
-### `nanocodex-oai-api`
+# fn build(openai: OpenAi) -> Result<(), Box<dyn std::error::Error>> {
+let tools = Tools::builder().without_defaults().tool(multiply).build()?;
+let (_agent, _events) = Nanocodex::builder(openai).tools(tools).build()?;
+# Ok(())
+# }
+```
 
-The complete OpenAI boundary: API-key and ChatGPT authentication, typed
-Responses protocol values, a persistent WebSocket transport, client-owned
-context, continuation and replay, automatic pricing, and a generic Tower
-client.
+The default native workspace runtime supplies bounded `exec_command`, retained
+`write_stdin` sessions, Rust-verified `apply_patch`, `view_image`, planning,
+web search, and image generation. Code Mode presents one compositional
+JavaScript execution tool to the model; inside a cell, ordinary code can loop,
+branch, fan out with `Promise.all`, and call typed tools through
+`await tools.<name>(...)`. The runtime bounds code, tool output, process output,
+and cancellation while keeping the model-facing schema compact.
 
-Its standalone `OpenAi -> Session -> ResponseTurn -> Response` path provides a
-managed conversation without taking on agent policy. Custom Tower layers and
-services remain concrete and nameable—no boxing or global client is required.
+MCP is part of the native tools crate rather than a separate agent runtime.
+Stdio and Streamable HTTP servers are discovered in the background; deferred
+tools remain out of the initial model prefix, are found with BM25
+`tool_search`, and become callable by their canonical
+`mcp__<server>__<tool>` names from Code Mode. OAuth persistence, allow/deny
+lists, bounded concurrent startup, hot reload, and caller-owned clients live at
+that boundary.
 
-[OpenAI API guide](crates/nanocodex-oai-api/README.md) ·
-[API documentation](https://docs.rs/nanocodex-oai-api)
+Read [`crates/nanocodex-tools`](crates/nanocodex-tools/README.md), run
+[`examples/custom_tool.rs`](examples/custom_tool.rs), or start the complete MCP
+example in [`examples/mcp.rs`](examples/mcp.rs):
 
-### `nanocodex-tools`
+```sh
+OPENAI_API_KEY=... cargo run -p nanocodex-examples --bin custom-tool
+OPENAI_API_KEY=... cargo run -p nanocodex-examples --bin mcp
+```
 
-The model-facing tool runtime: the `Tool` contract, heterogeneous `Tools`
-registry, standard workspace tools, shell and process lifecycle, Code Mode,
-deferred `tool_search`, remote dispatch, and MCP. MCP is always available on
-native targets.
+### Branches, snapshots, and subagents
 
-Applications can implement `Tool` directly or use the reexported `#[tool]`
-macro. The separate `nanocodex-tools-macros` package exists only for Rust's
-procedural-macro boundary.
+Branching is a lifecycle primitive, not cloned mutable state:
 
-[Tools guide](crates/nanocodex-tools/README.md) ·
-[API documentation](https://docs.rs/nanocodex-tools)
+- `spawn()` creates a clean agent with the same private builder configuration
+  and no conversation history;
+- `fork()` creates an independent session from the latest safe committed
+  boundary;
+- `fork_from(&completed_turn)` pins an exact historical checkpoint; and
+- `SessionSnapshot` serializes authoritative committed history for later
+  process or actor resumption without exposing provider response IDs.
 
-### `nanocodex-subagents`
+Forked drivers get their own socket, prompt queue, tools, and cancellation
+domain. Shared immutable history makes local fork-and-append constant-time, and
+the retained provider checkpoint keeps healthy branch requests delta-sized.
+See the runnable [`fork-conversations`](examples/fork_conversations.rs) example
+and the [stored-checkpoint measurements](benchmarks/fork_results.md).
 
-An optional extension over `nanocodex-agent` that supplies structured
-task-tree delegation without baking orchestration into the core agent. It owns
-the canonical spawn, result submission, directed messaging, directory, wait,
-interrupt, and close tools. The same Rust runtime is consumed by the native CLI
-and the Node/browser WASM bindings.
+[`nanocodex-subagents`](crates/nanocodex-subagents/README.md) is an optional
+extension above the core. It installs a shared task-tree registry and seven
+agent-relative tools—spawn, structured result submission, directed messaging,
+listing, waiting, interrupting, and closing—fresh for every root, child, and
+fork. The root owns recursive cleanup. Native and WASM applications use the
+same Rust implementation; the core agent crate does not depend on it and does
+not become a general scheduler.
 
-[Subagents guide](crates/nanocodex-subagents/README.md) ·
-[API documentation](https://docs.rs/nanocodex-subagents)
+This lets the model synthesize a temporary orchestration program in Code Mode
+without requiring the host to declare a DAG. The executable examples are
+[`examples/subagents.rs`](examples/subagents.rs) and
+[`examples/node/subagents.mjs`](examples/node/subagents.mjs).
 
-### `nanocodex-observability`
+## JavaScript: Node, browser, and WASM
 
-Application-owned tracing and OpenTelemetry setup for the data already flowing
-through the agent. It provides structured lifecycle, model, tool, usage, cost,
-cache, and latency telemetry without changing the core runtime path.
+The `nanocodex` npm package exposes viem-style `Agent`, `Actions`, and
+`Transport` namespaces for Node and browser hosts. The Rust/WASM engine still
+owns prompt ordering, history, tool calls, branching, snapshots, and cleanup;
+JavaScript owns WebSocket creation, credentials, UI, persistence, and ordinary
+application tools.
 
-Enable the facade's `observability` feature or depend on the component
-directly.
+### Node.js
 
-[Observability guide](crates/nanocodex-observability/README.md) ·
-[API documentation](https://docs.rs/nanocodex-observability)
+```js
+import { Agent, Transport } from "nanocodex/node";
 
-### Experimental components
+const agent = await Agent.create({
+  transport: Transport.openAi({ apiKey: process.env.OPENAI_API_KEY }),
+  instructions: "You are a coding agent. Make focused changes and verify them.",
+  workspace: process.cwd(),
+  tools: [{
+    name: "lookup_issue",
+    description: "Return one issue by number.",
+    parameters: {
+      type: "object",
+      properties: { number: { type: "integer" } },
+      required: ["number"],
+      additionalProperties: false,
+    },
+    handler: ({ number }) => issueTracker.get(number),
+  }],
+});
 
-Components whose public contracts are still maturing live under
-[`crates/experimental/`](crates/experimental/README.md):
+const turn = agent.turn.prompt({ input: "Fix issue 42." });
+const result = await turn.result();
+console.log(result.finalMessage, result.usage);
+turn.dispose();
 
-| Package | Responsibility |
-| --- | --- |
-| [`nanocodex-voice`](crates/experimental/nanocodex-voice/README.md) | Desktop GPT Realtime audio and reusable voice-to-agent lifecycle |
-| [`nanocodex-vm`](crates/experimental/nanocodex-vm/README.md) | VM lifecycle and images plus retained guest-backed workspace tools |
-| [`nanocodex-eval`](crates/experimental/nanocodex-eval/README.md) | VM-backed evaluation, canonical verification, durable evidence, and live stock-Codex differential analysis |
+await agent.session.shutdown();
+```
 
-The CLI is a consumer of these crates. Voice and VM-backed tools remain thin,
-opt-in adapters over the stable library contracts for normal agent sessions;
-VM-backed execution is mandatory for benchmark eval commands.
+Use `Transport.chatGpt({ subscription })` for a caller-owned ChatGPT
+subscription or `Transport.mpp({ session })` for a caller-owned MPP session.
+Transport constructors are explicit immutable configurations; Nanocodex does
+not infer provider portability from them. See the complete
+[JavaScript guide](js/bindings/README.md) and runnable
+[Node session](examples/node/session.mjs).
 
-### CLI and language bindings
+### A complete coding workspace in a browser
 
-The CLI/TUI, Python package, Node/browser package, React bindings, and examples
-are thin consumers of the same owned session API. They do not define a second
-agent protocol.
+The browser entrypoint runs the same Rust agent in a Worker. It can open a
+persistent origin-private filesystem (OPFS) workspace and compose a lazy
+WASM-backed shell with Python through Pyodide, C/C++ through wasm-clang,
+browser Git, bounded file commands, web and image tools, artifacts, and the
+optional Rust subagent tree:
 
-[Examples](examples/README.md) · [JavaScript](js/README.md) ·
-[Python](py/README.md) · [Web](web/README.md)
+```js
+import { Agent, Subagents, Transport } from "nanocodex/browser";
+import { browser } from "nanocodex/tools/browser";
 
-## VM-backed tools
+const runtime = await browser({
+  threadId: "project-42",
+  recentImages,
+  rememberImage,
+});
 
-Normal TUI and one-shot sessions keep host workspace tools by default. They can
-instead route `exec_command`, `write_stdin`, `apply_patch`, and `view_image`
-through one retained VM:
+const agent = await Agent.create({
+  transport: Transport.hostManaged({
+    websocketUrl: "/api/responses",
+    createWebSocket: (url) => new WebSocket(url),
+  }),
+  filesystem: runtime.filesystem,
+  instructions: runtime.instructions,
+  executionEnvironment: {
+    currentDate: "2026-08-19",
+    timezone: "America/Los_Angeles",
+    projectInstructions: runtime.projectInstructions,
+  },
+  tools: [...runtime.tools, ...Subagents.create({ maxConcurrency: 8 })],
+});
+```
+
+This is a browser-native workspace: files persist across page, Worker, and
+agent restarts, and coding can happen without provisioning a server-side
+sandbox. It is **not** a claim that OPFS or in-browser execution is an
+untrusted-code security sandbox. Products that need stronger isolation should
+provide remote caller-defined tools or use one of the VM/container consumers
+below.
+
+Browser WebSockets cannot attach OpenAI's authorization header, so
+`Transport.hostManaged` expects an application-authorized same-origin relay;
+the API key stays out of the page and WASM artifact. The one-file
+[`browser-cdn`](examples/browser-cdn/README.md) consumer needs no bundler or
+framework. The [`React + Vite`](examples/react-vite/README.md) example keeps
+one persistent agent in a module Worker and forwards ordered events into React.
+
+The package also exposes composable browser-safe web search, image generation,
+public Parquet/JSONL/Hugging Face dataset queries, and live React artifact
+tools. Read their exact contracts and bounds in
+[`js/bindings/README.md`](js/bindings/README.md#standard-web-and-browser-tools).
+
+## Python
+
+The Python wheel embeds the native Rust runtime through PyO3. Blocking result
+waits release the GIL; all agents in a process share one async runtime, while
+each agent retains its own driver, WebSocket, history, Code Mode worker, and
+cleanup boundary.
+
+```python
+import os
+from nanocodex import Nanocodex
+
+agent, events = Nanocodex(
+    os.environ["OPENAI_API_KEY"],
+    instructions="You are a coding agent. Preserve unrelated work.",
+)
+
+first = agent.prompt("Remember the identifier PYO3_17.").result()
+second = agent.prompt("Return the identifier I asked you to remember.").result()
+print(second.final_message)
+
+branch, branch_events = agent.fork_from(first)
+print(branch.prompt("What was the identifier?").result().final_message)
+
+branch.shutdown()
+agent.shutdown()
+```
+
+Python exposes typed event envelopes, steering, per-turn cancellation,
+compaction, thinking and fast-mode policy, `spawn`, `fork`, `fork_from`,
+snapshots, and resume. Start with the [Python guide](py/bindings/README.md) and
+the runnable [`examples/python`](examples/python) consumers.
+
+## Web search and a real browser agent
+
+Web search and browser automation are different capabilities. The stable tool
+runtime includes the bounded OpenAI/Codex-compatible web-search boundary, and
+JavaScript hosts can use the matching `web()` factory. Applications decide
+which network tool to install and where credentials live.
+
+For full deterministic Chromium control, the unpublished experimental
+[`nanocodex-browser`](crates/experimental/nanocodex-browser/README.md) crate
+provides an ordinary deferred `BrowserTool`. It supports semantic/CSS/role/text
+targets, tabs and frames, bounded DOM/layout/style and network inspection,
+screenshots and pixel diffs, PDFs, traces, video, accessibility, performance,
+coverage, heap and React diagnostics, uploads, and virtual passkeys. The full
+roughly 67 KiB action contract stays runtime-only until discovered, adding no
+browser schema bytes to the initial model request.
+
+```rust,ignore
+use nanocodex::{Nanocodex, OpenAi, Tools};
+use nanocodex_browser::BrowserTool;
+
+# fn build(openai: OpenAi) -> Result<(), Box<dyn std::error::Error>> {
+let tools = Tools::builder().provider(BrowserTool::new()?).build()?;
+let (_agent, _events) = Nanocodex::builder(openai).tools(tools).build()?;
+# Ok(())
+# }
+```
+
+Local mode uses a private browser profile but is not an OS sandbox. The optional
+`BrowserVm` composition starts an unprivileged headed Chromium under Xvfb in a
+disposable libkrun guest and closes CDP, Chromium, networking, VMM, and disk as
+one owned lifecycle. Run the source in
+[`examples/browser_agent.rs`](examples/browser_agent.rs).
+
+## VMs, sandboxes, and voice
+
+These are application-owned adapters over the same agent session, not alternate
+agent runtimes.
+
+### Retained VM workspaces
+
+The experimental, unpublished
+[`nanocodex-vm`](crates/experimental/nanocodex-vm/README.md) crate owns the
+libkrun boundary. An application launches one private workspace, retains it
+across sequential turns, and swaps only `exec_command`, `write_stdin`,
+`apply_patch`, and `view_image` for guest-backed implementations with the same
+model-visible names and schemas. Web search, image generation, and planning can
+remain on the host.
+
+Immutable OCI/Dockerfile roots are content-addressed; each retained session
+gets a writable private ext4 copy, while high-fanout attempts can use a fresh
+sparse OverlayFS upper. The non-cloneable workspace is the shutdown capability,
+and clone-cheap tool handles share its filesystem and interactive shells.
+Cancellation, output limits, process groups, egress leases, VMM process, guest
+runtime, and disk cleanup all have explicit owners.
+
+The CLI can exercise the same boundary:
 
 ```sh
 just build-vm-guest
-nanocodex \
-  --vm .nanocodex/vm/session-rootfs.ext4 \
-  --vm-guest-runtime target/aarch64-unknown-linux-musl/debug/nanocodex-vm-guest \
-  --vm-workspace /app
 nanocodex run "inspect the repository" \
   --vm .nanocodex/vm/session-rootfs.ext4 \
   --vm-guest-runtime target/aarch64-unknown-linux-musl/debug/nanocodex-vm-guest \
   --vm-workspace /app
 ```
 
-Directory roots may instead contain
-`/usr/local/bin/nanocodex-vm-guest`. See the
-[VM guide](docs/VM.md) for image preparation, lifecycle, egress, Linux
-requirements, and macOS signing.
+See the [VM operations guide](docs/VM.md) for image preparation, libkrun,
+Linux KVM, macOS signing, networking, and egress.
 
-## Documentation
+### Voice is another input to the retained agent
 
-- [Facade API](https://docs.rs/nanocodex)
-- [Migration from 0.2.x](docs/MIGRATING.md)
-- [Examples](examples/README.md)
+The experimental, unpublished
+[`nanocodex-voice`](crates/experimental/nanocodex-voice/README.md) crate connects
+GPT Realtime to an existing `Nanocodex` session. Speech while idle starts an
+independently awaitable coding turn; speech while work is active atomically
+steers it at the next safe model boundary. Typed work is mirrored back to the
+voice session, while stopping audio does not silently cancel coding work.
+
+The default-device adapter supports macOS and Windows. The lower device-neutral
+Realtime boundary reads and writes raw 24 kHz mono PCM16, so other applications
+can own capture, codecs, sockets, or playback:
+
+```sh
+nanocodex auth login
+cargo run -p nanocodex-examples --bin voice
+cargo run -p nanocodex-examples --bin realtime-pipe \
+  < microphone.pcm > speaker.pcm
+```
+
+Runnable sources: [`examples/voice.rs`](examples/voice.rs) and
+[`examples/realtime_pipe.rs`](examples/realtime_pipe.rs).
+
+## Evaluation is a product boundary
+
+Evals are not a score pasted onto the end of development. They are how the
+session, tool, VM, event, and cleanup contracts are exercised together.
+
+The experimental, unpublished
+[`nanocodex-eval`](crates/experimental/nanocodex-eval/README.md) layer runs every
+attempt and its canonical verifier in a microVM. `eval add` fingerprints tasks
+and pre-materializes one immutable SQLite row for every
+task/treatment/repetition. Workers atomically claim exactly one row; verifier
+pass/fail is terminal, while infrastructure failure is retained in attempt
+history and safely returns work for another claim. A claim ID fences late
+writes.
+
+The durable ledger—not a TOML recipe, controller memory, or inferred queue—is
+the authority. Each arm receives a fresh writable overlay. The retained output
+contains raw JSONL, typed trajectories, model API exchanges and summaries,
+usage, verifier reward/stdout/stderr, and exact treatment coordinates. External
+harnesses such as stock Codex are independent coordinates using the same task,
+isolation, capture proxy, verifier, and evidence format; differential reports
+are offline joins rather than special comparison behavior in the agent.
+
+```sh
+# Materialize an immutable generation from the repository recipe.
+nanocodex eval add local-smoke --recipe local-smoke
+
+# Inspect state without deriving or adding work.
+nanocodex eval status local-smoke --json
+
+# Atomically claim and run one row, or let the benchmark consumer size workers.
+nanocodex eval run local-smoke
+nanocodex eval benchmark local-smoke
+```
+
+Task packages are ordinary inputs with agent instructions, a starting
+environment, hidden deterministic tests, and an oracle used to validate the
+task itself. Explore [`tasks/`](tasks), the
+[history-derived suite](evals/history-derived/README.md), and the
+[comparison-plan contract](evals/harbor-comparisons/README.md). Benchmark tasks
+and verifiers are never modified to make Nanocodex pass.
+
+### Retained evidence
+
+The repository keeps enough detail to distinguish correctness, service time,
+local overhead, and infrastructure failure:
+
+| Retained measurement | Result | What it supports |
+| --- | ---: | --- |
+| [PR #50 release gate](benchmarks/pr50_milestone_2026-07-28.md) | **39/39 latency gates passed** | Request, history, compaction, events, Code Mode, MCP, and TUI boundaries were all measured. |
+| [Paired 10-turn + three-fork workload](benchmarks/pr50_milestone_2026-07-28.md#live-model-latency-boundary) | **70 turns; 97.879% model time; 0.267 ms median local overhead** | The representative owned lifecycle remained model-latency bound. |
+| [41-task retained workload](benchmarks/long_prompt_profile_2026-07-20.md#41-task-retained-workload) | **503 model calls, 892 tool calls, 81,618 API events, 63.1 MB JSONL** | Model generation plus requested tool work accounted for 99.864% of summed wall time; unattributed local remainder was 0.136%. |
+| [Stored historical forks](benchmarks/fork_results.md#live-api-results) | **1.224 s branch median; 99.6% cached input; 97.4% smaller request payload than replay** | Healthy branches reused provider checkpoints and stable cache lineage. The stock-Codex comparison is directional, not apples-to-apples. |
+| [Retained live VM](benchmarks/refactor_vm_baseline_2026-07-26.md#results) | **320.93–352.97 µs command RPC; 162.63–165.22 ms boot + first RPC + shutdown** | Normal retained sessions do not pay image construction or VM boot per tool call. |
+| [Frozen Terminal-Bench 2.1 experiment](docs/HARBOR_RS_LOG.md#2026-07-21--abandon-benchmark-specific-agent-tuning) | **13/20 in 8m15s, 3.01M input tokens** | A model-driven completion audit reached 16/20 but took 16m22s and 6.98M tokens, so the benchmark-specific tuning was discarded rather than promoted into product policy. |
+
+The final row is deliberately historical, not a claim about the current release
+or the full benchmark. It demonstrates the evaluation standard: a higher score
+does not justify a pathological runtime policy. Exact deterministic verifier
+results remain authoritative; setup timeouts, cancelled jobs, and
+infrastructure-only trials are not reported as agent scores.
+
+## Deployment proofs
+
+Nanocodex does not impose a generic app-server protocol. These applications
+show how different products can own authentication, idempotency, durable state,
+client projection, and sandbox policy while reusing one agent lifecycle:
+
+| Consumer | What it proves |
+| --- | --- |
+| [Native CLI and Ratatui TUI](bin/nanocodex) | Interactive sessions, JSONL one-shot adapter, branching UI, MCP, browser, VM, voice, and full lifecycle cleanup. |
+| [Static browser CDN page](examples/browser-cdn/README.md) | One HTML file runs the Rust/WASM agent from the npm package with no framework, bundler, or install step. |
+| [React + Vite Worker](examples/react-vite/README.md) | A browser Worker owns one persistent session and React consumes ordered events without reshaping the contract. |
+| [Cloudflare Durable Object](examples/cloudflare-workers/README.md) | One SQLite-backed object owns WASM history and hibernatable clients; a separate Sandbox container and R2 prefix provide per-session tools and files. |
+| [Cloudflare fetch + MCP](examples/cloudflare-fetch-mcp/README.md) | CSP-safe QuickJS Code Mode, deferred remote MCP, and caller-owned paid transport inside a serialized Durable Object. |
+| [Rivet Actor](examples/rivet-actors/README.md) | Durable SQLite snapshots and idempotent turns around the WASM driver, with an actor-owned AgentOS workspace and previews. |
+| [Vercel Workflow actor](examples/vercel-workflows/README.md) | Snapshots between stateless steps, replayable multi-client streams, and a persistent caller-owned Vercel Sandbox; wterm attaches an ephemeral operator shell to that same workspace. |
+| [exe.dev](examples/exe-dev/README.md) | Both a retained native session inside a VM and the inverse: a host agent controlling one exact remote VM through narrow tools. |
+| [Python](examples/python) and [Node](examples/node/README.md) | Thin language bindings over the same results, events, history, snapshots, branches, and shutdown semantics. |
+
+These are reference consumers, not portability promises. Cloudflare, Rivet,
+Vercel, exe.dev, and the native VM layer each keep their platform policy above
+the stable crates.
+
+## What is stable
+
+“Experimental” below describes API stability and publication status, not a
+second-class quality bar. Experimental crates remain workspace members and pass
+the repository's formatting, Clippy, documentation, test, cancellation,
+tracing, and benchmark gates; stable crates never depend on them.
+
+| Surface | Status | Owner |
+| --- | --- | --- |
+| [`nanocodex`](crates/nanocodex/README.md) | Stable, published | Thin Alloy-style facade and canonical imports; no runtime implementation. |
+| [`nanocodex-agent`](crates/nanocodex-agent/README.md) | Stable, published | Owned driver, turns/results/events, history policy, snapshots, compaction, branches, and cancellation. |
+| [`nanocodex-oai-api`](crates/nanocodex-oai-api/README.md) | Stable, published | OpenAI auth, typed Responses and Realtime boundaries, persistent transports, managed context, retry, pricing, and Tower client. |
+| [`nanocodex-tools`](crates/nanocodex-tools/README.md) | Stable, published | Tool contract, standard tools, shell/process lifecycle, Code Mode, deferred search, MCP, and remote dispatch. |
+| [`nanocodex-subagents`](crates/nanocodex-subagents/README.md) | Optional workspace extension | Task-tree lifecycle and the seven canonical child-agent tools above the core. |
+| [`nanocodex-observability`](crates/nanocodex-observability/README.md) | Stable, published, optional | Full-fidelity tracing and application-owned OpenTelemetry initialization. |
+| [`nanocodex` for JavaScript](js/bindings/README.md) | Published language binding | Node/browser hosts around the Rust/WASM agent, plus React, artifacts, and TUI packages under [`js/`](js/README.md). |
+| [`nanocodex` for Python](py/bindings/README.md) | Source-distributed language binding | Native PyO3 consumer of the Rust-owned lifecycle, built and tested with Maturin. |
+| [`nanocodex-browser`](crates/experimental/nanocodex-browser/README.md) | Experimental, unpublished | Deterministic Chromium control and optional headed browser VM. |
+| [`nanocodex-vm`](crates/experimental/nanocodex-vm/README.md) | Experimental, unpublished | libkrun images, retained/ephemeral guests, and canonical VM-backed workspace tools. |
+| [`nanocodex-voice`](crates/experimental/nanocodex-voice/README.md) | Experimental, unpublished | Opinionated desktop GPT Realtime voice-to-agent lifecycle. |
+| [`nanocodex-egress`](crates/experimental/nanocodex-egress/README.md) | Experimental, unpublished | Authenticated loopback HTTP(S) proxy and application-owned outbound layers. |
+| [`nanocodex-eval`](crates/experimental/nanocodex-eval/README.md) | Experimental, unpublished | VM-isolated attempts, durable SQLite work, verification, retained evidence, and differential coordinates. |
+
+## Design boundaries
+
+Nanocodex is intentionally narrow:
+
+- one supported OpenAI coding-model family and the Responses WebSocket API;
+- one owned agent lifecycle with client-owned typed history;
+- caller-defined tools and application-owned policy;
+- no provider/model portability layer;
+- no generic JSON-RPC agent daemon or app-server protocol;
+- no approval subsystem or compatibility framework; and
+- no stable generic scheduler hidden inside the core agent.
+
+The separation is what makes the SDK embeddable. A lower OpenAI client works
+without the agent. Tools work without the CLI. Subagents compose above the
+agent. VMs, browsers, voice, payment, durable actors, and evaluation remain
+consumers with explicit owners.
+
+## Repository map
+
+```text
+crates/
+├── nanocodex/                  facade and prelude
+├── nanocodex-oai-api/          OpenAI protocol, context, transport, Tower
+├── nanocodex-tools/            tools, Code Mode, MCP, process runtime
+├── nanocodex-agent/            owned agent lifecycle
+├── nanocodex-subagents/        optional task-tree extension
+├── nanocodex-observability/    optional tracing and OTLP setup
+└── experimental/               browser, VM, voice, egress, eval
+js/                             Node, browser/WASM, React, artifacts, TUI
+py/                             native Python binding
+bin/nanocodex/                  CLI and Ratatui product consumer
+examples/                       native, language, browser, actor, sandbox proofs
+evals/ and tasks/               deterministic evaluation inputs
+benchmarks/                     retained measurements and regression gates
+```
+
+Further reading:
+
+- [Facade API documentation](https://docs.rs/nanocodex)
+- [Examples and runnable commands](examples/README.md)
+- [Migration guide](docs/MIGRATING.md)
+- [Responses + Tower design](docs/RESPONSES_TOWER.md)
+- [Observability contract](docs/OBSERVABILITY.md)
+- [Subagent design](docs/SUBAGENTS.md)
+- [VM operations](docs/VM.md)
 - [Benchmarks and retained measurements](benchmarks/)
-- [VM evaluation and stock-Codex differential runs](crates/experimental/nanocodex-eval/README.md)
-- [VM-backed tools and egress](docs/VM.md)
+- [Implementation history](docs/IMPLEMENTATION_HISTORY.md)
 
 ## License
 
-Licensed under either of:
-
-- Apache License, Version 2.0
-- MIT License
-
-at your option.
+Licensed under either the Apache License, Version 2.0 or the MIT License, at
+your option.
