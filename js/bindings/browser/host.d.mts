@@ -1,4 +1,10 @@
-import type { CodeEvaluator, McpServers, MppSession, ToolMap } from "../types.mjs";
+import type {
+  CodeEvaluator,
+  DurabilityStore,
+  McpServers,
+  MppSession,
+  ToolMap,
+} from "../types.mjs";
 import type { Workspace } from "./workspace.mjs";
 export type BrowserTool = {
   description: string;
@@ -55,6 +61,7 @@ export function createBrowserHost(options?: {
   mcp?: McpServers;
   codeEvaluator?: CodeEvaluator;
   toolMode?: "code" | "direct";
+  durability?: DurabilityStore;
   maxQueuedMessages?: number;
   maxQueuedBytes?: number;
   maxBufferedSendBytes?: number;

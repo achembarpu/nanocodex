@@ -2,6 +2,7 @@ import type {
   AgentOptions,
   CodeEvaluator,
   DefaultAgent,
+  DurabilityStore,
   ExecutionEnvironment,
   McpServers,
   ToolConfiguration,
@@ -33,6 +34,9 @@ export declare namespace create {
     codeEvaluator?: CodeEvaluator | undefined;
     tools?: ToolConfiguration<SubagentTool> | undefined;
     transport: Transport;
-  };
+  } & (
+    | { durability?: undefined; durabilityId?: undefined }
+    | { durability: DurabilityStore; durabilityId: string }
+  );
   type ReturnType = Agent;
 }

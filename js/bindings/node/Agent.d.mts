@@ -2,6 +2,7 @@ import type {
   AgentOptions,
   CodeEvaluator,
   DefaultAgent,
+  DurabilityStore,
   McpServers,
   ToolConfiguration,
 } from "../types.mjs";
@@ -24,6 +25,9 @@ export declare namespace create {
     module?: unknown;
     tools?: ToolConfiguration<SubagentTool> | undefined;
     transport: Transport;
-  };
+  } & (
+    | { durability?: undefined; durabilityId?: undefined }
+    | { durability: DurabilityStore; durabilityId: string }
+  );
   type ReturnType = Agent;
 }

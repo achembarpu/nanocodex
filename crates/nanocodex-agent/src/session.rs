@@ -48,12 +48,12 @@ impl CommittedSession {
         self.selected_model
     }
 
-    #[allow(dead_code, reason = "consumed by the native durability boundary only")]
+    #[allow(dead_code, reason = "consumed by the native rollout boundary only")]
     pub(crate) fn rollout_history(&self) -> nanocodex_oai_api::responses::ResponseHistory {
         self.model.history()
     }
 
-    #[allow(dead_code, reason = "consumed by the native durability boundary only")]
+    #[allow(dead_code, reason = "consumed by the native rollout boundary only")]
     pub(crate) const fn history_revision(&self) -> u64 {
         self.model.history_revision()
     }

@@ -9,23 +9,23 @@ use crate::{
 };
 
 #[derive(Clone, Default)]
-pub(crate) struct DurabilityConfig {
+pub(super) struct Config {
     rollout: Option<RolloutConfig>,
 }
 
-impl DurabilityConfig {
-    pub(crate) fn set_rollout(&mut self, rollout: RolloutConfig) {
+impl Config {
+    pub(super) fn set_rollout(&mut self, rollout: RolloutConfig) {
         self.rollout = Some(rollout);
     }
 
-    pub(crate) fn for_new_thread(&self) -> Self {
+    pub(super) fn for_new_thread(&self) -> Self {
         Self {
             rollout: self.rollout.as_ref().map(RolloutConfig::for_new_thread),
         }
     }
 
     #[allow(clippy::too_many_arguments)]
-    pub(crate) fn start(
+    pub(super) fn start(
         &self,
         session_id: &str,
         workspace: Option<&str>,
@@ -33,9 +33,9 @@ impl DurabilityConfig {
         origin_kind: &'static str,
         parent_session_id: Option<&str>,
         resume_history_len: Option<usize>,
-    ) -> Result<Durability> {
+    ) -> Result<Execution> {
         let Some(config) = &self.rollout else {
-            return Ok(Durability::default());
+            return Ok(Execution::default());
         };
         let runtime = tokio::runtime::Handle::try_current()
             .map_err(|_| NanocodexError::TokioRuntimeUnavailable)?;
@@ -60,78 +60,64 @@ impl DurabilityConfig {
             codex_home: config.codex_home().to_path_buf(),
             source,
         })?;
-        Ok(Durability {
+        Ok(Execution {
             recorder: Some(recorder),
         })
     }
 }
 
 #[derive(Clone, Default)]
-pub(crate) struct Durability {
+pub(super) struct Execution {
     recorder: Option<RolloutRecorder>,
 }
 
-impl Durability {
-    pub(crate) const fn info(&self) -> Option<&RolloutInfo> {
+impl Execution {
+    pub(super) const fn info(&self) -> Option<&RolloutInfo> {
         match &self.recorder {
             Some(recorder) => Some(recorder.info()),
             None => None,
         }
     }
 
-    pub(crate) fn start_turn(
+    pub(super) fn start_turn(
         &self,
         prompt: &nanocodex_oai_api::Prompt,
         effort: nanocodex_oai_api::Thinking,
-    ) -> DurabilityTurn {
-        DurabilityTurn(
+    ) -> Turn {
+        Turn(
             self.recorder
                 .as_ref()
                 .map(|_| RolloutTurn::started(prompt, effort)),
         )
     }
 
-    pub(crate) fn start_compaction(&self, effort: nanocodex_oai_api::Thinking) -> DurabilityTurn {
-        DurabilityTurn(
+    pub(super) fn start_compaction(&self, effort: nanocodex_oai_api::Thinking) -> Turn {
+        Turn(
             self.recorder
                 .as_ref()
                 .map(|_| RolloutTurn::compaction_started(effort)),
         )
     }
 
-    pub(crate) async fn persist(&self, checkpoint: &CommittedSession, turn: DurabilityTurn) {
+    pub(super) async fn persist(&self, checkpoint: &CommittedSession, turn: Turn) {
         let (Some(recorder), Some(turn)) = (&self.recorder, turn.0) else {
             return;
         };
         if let Err(source) = recorder.persist(checkpoint, turn).await {
-            error!(
-                target: "nanocodex",
-                rollout_path = %recorder.info().path().display(),
-                error = %source,
-                "failed to persist Codex rollout"
-            );
+            error!(target: "nanocodex", rollout_path = %recorder.info().path().display(), error = %source, "failed to persist Codex rollout");
         }
     }
 
-    pub(crate) async fn persist_compaction(
-        &self,
-        checkpoint: &CommittedSession,
-        turn: DurabilityTurn,
-    ) {
+    pub(super) async fn persist_compaction(&self, checkpoint: &CommittedSession, turn: Turn) {
         let (Some(recorder), Some(turn)) = (&self.recorder, turn.0) else {
             return;
         };
         if let Err(source) = recorder.persist_compaction(checkpoint, turn).await {
-            error!(
-                target: "nanocodex",
-                rollout_path = %recorder.info().path().display(),
-                error = %source,
-                "failed to persist Codex compaction boundary"
-            );
+            error!(target: "nanocodex", rollout_path = %recorder.info().path().display(), error = %source, "failed to persist Codex compaction boundary");
         }
     }
 
-    pub(crate) async fn flush(&self) -> Result<()> {
+    pub(super) async fn flush(&self) -> Result<()> {
         let Some(recorder) = &self.recorder else {
             return Ok(());
         };
@@ -144,7 +130,7 @@ impl Durability {
             })
     }
 
-    pub(crate) async fn shutdown(&self) -> Result<()> {
+    pub(super) async fn shutdown(&self) -> Result<()> {
         let Some(recorder) = &self.recorder else {
             return Ok(());
         };
@@ -158,26 +144,26 @@ impl Durability {
     }
 }
 
-pub(crate) struct DurabilityTurn(Option<RolloutTurn>);
+pub(super) struct Turn(Option<RolloutTurn>);
 
-impl DurabilityTurn {
-    pub(crate) fn completed(self, final_message: String) -> Self {
+impl Turn {
+    pub(super) fn completed(self, final_message: String) -> Self {
         Self(self.0.map(|turn| turn.completed(final_message)))
     }
 
-    pub(crate) fn completed_without_message(self) -> Self {
+    pub(super) fn completed_without_message(self) -> Self {
         Self(self.0.map(RolloutTurn::completed_without_message))
     }
 
-    pub(crate) fn interrupted(self) -> Self {
+    pub(super) fn interrupted(self) -> Self {
         Self(self.0.map(RolloutTurn::interrupted))
     }
 
-    pub(crate) fn replaced(self) -> Self {
+    pub(super) fn replaced(self) -> Self {
         Self(self.0.map(RolloutTurn::replaced))
     }
 
-    pub(crate) fn failed(self) -> Self {
+    pub(super) fn failed(self) -> Self {
         Self(self.0.map(RolloutTurn::failed))
     }
 }

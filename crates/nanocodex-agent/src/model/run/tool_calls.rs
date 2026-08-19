@@ -18,6 +18,7 @@ pub(super) struct ActiveToolProgress {
     pub(super) nested_tool_calls: u32,
 }
 
+#[derive(Deserialize, Serialize)]
 pub(super) struct CompletedToolCall {
     pub(super) call_id: String,
     pub(super) tool: String,
@@ -166,6 +167,7 @@ where
         let tool_call_indices = self.tool_call_indices.clone();
         let session_id = events.request_id().to_owned();
         let model = self.model;
+        let execution_steps = self.execution_steps.clone();
         let mut executions = prepared
             .into_iter()
             .map(|(call, supports_parallel, active)| {
@@ -174,61 +176,89 @@ where
                 let events = events.clone();
                 let tool_call_indices = tool_call_indices.clone();
                 let session_id = session_id.clone();
+                let execution_steps = execution_steps.clone();
                 async move {
                     let started_at = active.started_at;
-                    let dispatch = async {
-                        if supports_parallel {
-                            let _guard = gate.read().await;
-                            active
-                                .execution_started_at
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .replace(Instant::now());
-                            Self::execute_model_tool_call(
-                                tools,
-                                &events,
-                                &tool_call_indices,
-                                call_index,
-                                call,
-                                history,
-                                &session_id,
-                                model,
-                                started_at,
-                                &active.progress,
-                                &active.span,
+                    let step_id = format!("tool-{call_index}-{}", call.call_id);
+                    let recovered = if let Some(steps) = &execution_steps {
+                        match steps
+                            .begin::<_, CompletedToolCall>(
+                                &step_id,
+                                "tool_call",
+                                &call,
+                                crate::agent::execution::ExecutionRetry::Never,
                             )
-                            .await
-                        } else {
-                            let _guard = gate.write().await;
-                            active
-                                .execution_started_at
-                                .lock()
-                                .unwrap_or_else(std::sync::PoisonError::into_inner)
-                                .replace(Instant::now());
-                            Self::execute_model_tool_call(
-                                tools,
-                                &events,
-                                &tool_call_indices,
-                                call_index,
-                                call,
-                                history,
-                                &session_id,
-                                model,
-                                started_at,
-                                &active.progress,
-                                &active.span,
-                            )
-                            .await
+                            .await?
+                        {
+                            crate::agent::ExecutionStep::Execute => None,
+                            crate::agent::ExecutionStep::Replay(output) => Some(output),
                         }
+                    } else {
+                        None
                     };
-                    let result = match AssertUnwindSafe(dispatch).catch_unwind().await {
-                        Ok(result) => result,
-                        Err(payload) => Ok(Self::panicked_tool_call(&active, payload)),
+                    let (result, executed) = if let Some(completed) = recovered {
+                        (Ok(completed), false)
+                    } else {
+                        let dispatch = async {
+                            if supports_parallel {
+                                let _guard = gate.read().await;
+                                active
+                                    .execution_started_at
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .replace(Instant::now());
+                                Self::execute_model_tool_call(
+                                    tools,
+                                    &events,
+                                    &tool_call_indices,
+                                    call_index,
+                                    call,
+                                    history,
+                                    &session_id,
+                                    model,
+                                    started_at,
+                                    &active.progress,
+                                    &active.span,
+                                )
+                                .await
+                            } else {
+                                let _guard = gate.write().await;
+                                active
+                                    .execution_started_at
+                                    .lock()
+                                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                                    .replace(Instant::now());
+                                Self::execute_model_tool_call(
+                                    tools,
+                                    &events,
+                                    &tool_call_indices,
+                                    call_index,
+                                    call,
+                                    history,
+                                    &session_id,
+                                    model,
+                                    started_at,
+                                    &active.progress,
+                                    &active.span,
+                                )
+                                .await
+                            }
+                        };
+                        let result = match AssertUnwindSafe(dispatch).catch_unwind().await {
+                            Ok(result) => result,
+                            Err(payload) => Ok(Self::panicked_tool_call(&active, payload)),
+                        };
+                        (result, true)
                     };
                     match result {
                         Ok(mut completed) => {
-                            completed.work_duration_ns =
-                                Self::completed_tool_work_duration(&active);
+                            if executed {
+                                completed.work_duration_ns =
+                                    Self::completed_tool_work_duration(&active);
+                                if let Some(steps) = &execution_steps {
+                                    steps.complete(&step_id, &completed).await?;
+                                }
+                            }
                             Self::emit_completed_tool_result(&events, &completed)?;
                             active
                                 .completion

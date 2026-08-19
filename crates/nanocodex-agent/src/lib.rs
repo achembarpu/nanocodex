@@ -14,18 +14,22 @@ mod agent;
 mod error;
 mod model;
 mod prompt_cache;
+/// Neutral interception contract implemented by optional execution layers.
+pub mod execution {
+    pub use crate::agent::execution::*;
+}
 #[cfg(not(target_family = "wasm"))]
 #[cfg_attr(docsrs, doc(cfg(not(target_family = "wasm"))))]
 /// Codex-compatible durable rollout recording and restoration.
 pub mod rollout;
-/// Durable agent session identities and snapshots.
+/// Agent session identities and serializable resume snapshots.
 pub mod session;
 /// Per-turn token accounting and USD estimates.
 pub mod usage;
 
 pub use agent::{
     AgentHandle, AgentSessionContext, ExecutionEnvironment, Nanocodex, NanocodexBuilder,
-    PromptRoute, Turn, TurnControl, TurnResult,
+    PromptRequest, PromptRoute, Turn, TurnControl, TurnResult,
 };
 pub use error::{NanocodexError, Result};
 pub use nanocodex_oai_api::{

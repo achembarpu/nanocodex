@@ -1,6 +1,9 @@
 export {
   Actions,
+  createMemoryDurabilityStore,
   createMemoryChatGptSubscriptionStore,
+  createSqliteDurabilityStore,
+  durabilityRevision,
   subscriptionRevision,
 } from "../index.mjs";
 export { createQuickJsEvaluator } from "../runtime/quickjs-evaluator.mjs";

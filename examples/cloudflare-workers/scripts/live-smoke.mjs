@@ -19,16 +19,17 @@ try {
 
   currentStage = "first-turn";
   const firstId = randomUUID();
+  const firstInput = "Reply with exactly EDGE_OK and nothing else.";
   const firstStarted = performance.now();
   socket.send(JSON.stringify({
     type: "prompt",
     id: firstId,
-    input: "Reply with exactly EDGE_OK and nothing else.",
+    input: firstInput,
   }));
   socket.send(JSON.stringify({
     type: "prompt",
     id: firstId,
-    input: "This in-flight duplicate must not reach the model.",
+    input: firstInput,
   }));
   const first = await terminal(inbox, firstId, terminalTimeoutMs);
   progress("first-turn-completed");
@@ -38,7 +39,7 @@ try {
   }
 
   currentStage = "terminal-replay";
-  socket.send(JSON.stringify({ type: "prompt", id: firstId, input: "must not run" }));
+  socket.send(JSON.stringify({ type: "prompt", id: firstId, input: firstInput }));
   const replay = await terminal(inbox, firstId, 10_000);
   if (replay.final_message !== first.final_message) {
     throw new Error("completed turn replay changed its terminal result");

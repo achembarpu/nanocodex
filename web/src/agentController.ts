@@ -411,6 +411,7 @@ export function createAgentController({
       }
       const prepared = preparePrompt(branch, prompt);
       turn = branch.agent.turn.prompt({
+        id: String(id),
         input: images.length ? promptContent(prepared, images) : prepared,
       });
     } catch (error) {

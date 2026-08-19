@@ -35,6 +35,62 @@ export type ExecutionEnvironment = Readonly<{
   projectInstructions?: string | undefined;
 }>;
 
+/** Unsigned decimal revision. Strings preserve the complete Rust `u64` range. */
+declare const durabilityRevisionBrand: unique symbol;
+export type DurabilityRevision = string & {
+  readonly [durabilityRevisionBrand]: "NanocodexDurabilityRevision";
+};
+
+export type DurabilityStoredBatch = Readonly<{
+  revision: DurabilityRevision;
+  payload: string;
+}>;
+
+export type DurabilityStoredJournal = Readonly<{
+  revision: DurabilityRevision;
+  batches: readonly DurabilityStoredBatch[];
+}>;
+
+export type DurabilityAppendRequest = Readonly<{
+  expectedRevision: DurabilityRevision;
+  payload: string;
+}>;
+
+export type DurabilityAppendResult =
+  | Readonly<{ status: "appended"; revision: DurabilityRevision }>
+  | Readonly<{ status: "conflict"; actualRevision: DurabilityRevision }>;
+
+/** Host capability consumed by the Rust/WASM durability driver. */
+export type DurabilityStore = Readonly<{
+  load(journalId: string): DurabilityStoredJournal | Promise<DurabilityStoredJournal>;
+  append(
+    journalId: string,
+    request: DurabilityAppendRequest,
+  ): DurabilityAppendResult | Promise<DurabilityAppendResult>;
+}>;
+
+/** In-process store for hosts that carry its snapshot across durable steps. */
+export type MemoryDurabilityStore = DurabilityStore & Readonly<{
+  journalId: string;
+  snapshot(): DurabilityStoredJournal;
+}>;
+
+export type DurabilitySqliteValue = string | number | null;
+export type DurabilitySqliteRow = Record<string, DurabilitySqliteValue>;
+
+export type DurabilitySqliteQuery = <Row extends DurabilitySqliteRow>(
+  sql: string,
+  args: readonly DurabilitySqliteValue[],
+) => readonly Row[] | Promise<readonly Row[]>;
+
+export type DurabilitySqliteTransaction = <Result>(
+  callback: (query: DurabilitySqliteQuery) => Result | Promise<Result>,
+) => Result | Promise<Result>;
+
+export type SqliteDurabilityStoreOptions = Readonly<{
+  transaction: DurabilitySqliteTransaction;
+}>;
+
 /** Unsigned decimal revision for opaque ChatGPT subscription state. */
 declare const subscriptionRevisionBrand: unique symbol;
 export type SubscriptionRevision = string & {
@@ -200,7 +256,7 @@ export type AgentActions = {
     };
   };
   turn: {
-    prompt(options: { input: PromptInput }): Turn;
+    prompt(options: { input: PromptInput; id?: string | undefined }): Turn;
   };
 };
 

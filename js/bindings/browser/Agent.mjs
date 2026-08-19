@@ -7,7 +7,9 @@ import {
   createAgentClient,
   createEventChannel,
   defineRuntime,
+  loadDurabilityRuntime,
   loadSubscriptionRuntime,
+  reportError,
   registerDefinitionHost,
   releaseDefinitionHost,
   releaseHostSession,
@@ -40,6 +42,8 @@ export function create(options = {}) {
     sessionId,
     workspace,
     resume,
+    durability,
+    durabilityId,
     filesystem,
     filesystemTools,
     tools,
@@ -83,6 +87,7 @@ export function create(options = {}) {
     codeEvaluator,
     onDispose: () => releaseDefinitionHost(hostDefinitionId),
   });
+  let durabilityOwner;
   hostDefinitionId = registerDefinitionHost(host);
   activateHost(host);
   const runtime = defineRuntime({
@@ -91,6 +96,13 @@ export function create(options = {}) {
     type: "browser",
     async create(config) {
       try {
+        if (durability !== undefined || durabilityId !== undefined) {
+          durabilityOwner = (await loadDurabilityRuntime()).own(
+            host,
+            durability,
+            durabilityId,
+          );
+        }
         activateHost(host);
         await host.ready();
         await prewarm({ module });
@@ -109,12 +121,13 @@ export function create(options = {}) {
           ...config,
         }));
         return subscription === undefined
-          ? new Nanocodex(configJson)
+          ? Nanocodex.create(configJson)
           : Nanocodex.createWithChatGpt(
               configJson,
               (await loadSubscriptionRuntime()).rawSubscription(subscription),
             );
       } catch (error) {
+        durabilityOwner?.abandon();
         await host.dispose();
         throw error;
       }
@@ -123,8 +136,10 @@ export function create(options = {}) {
     adopt(raw) {
       host.retain();
       try {
+        durabilityOwner?.retain();
         bindHostSession(host, raw.sessionId);
       } catch (error) {
+        durabilityOwner?.release();
         releaseHost(host);
         throw error;
       }
@@ -132,6 +147,7 @@ export function create(options = {}) {
     release(raw) {
       host.releaseSession(raw.sessionId);
       releaseHostSession(host, raw.sessionId);
+      durabilityOwner?.release();
       releaseHost(host);
     },
     decorate: (agent) => agent.extend(agentActions()),
@@ -146,12 +162,10 @@ export function create(options = {}) {
     workspace: workspace ?? filesystem?.root,
     executionEnvironment,
     resume,
+    durabilityId,
   });
 }
 
 function releaseHost(host) {
-  void host.release().catch((error) => {
-    if (typeof globalThis.reportError === "function") globalThis.reportError(error);
-    else console.error(error);
-  });
+  void host.release().catch(reportError);
 }

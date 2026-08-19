@@ -35,9 +35,10 @@ export async function createAgentClient(runtime, options = {}) {
 export function prompt(agent, options) {
   const state = agentState(agent);
   const input = actionInput(options);
+  const operationId = options?.id;
   const raw = typeof input === "string"
-    ? state.raw.prompt(input)
-    : state.raw.promptContent(JSON.stringify(input));
+    ? state.raw.prompt(input, operationId)
+    : state.raw.promptContent(JSON.stringify(input), operationId);
   return createTurn(raw, agent);
 }
 
@@ -195,6 +196,7 @@ export function toWasmConfig(options = {}) {
     );
   }
   copy(config, "resume", options.resume);
+  copy(config, "durability_id", options.durabilityId);
   copy(config, "subagents", options.subagents);
   copy(config, "host_definition_id", options.hostDefinitionId);
   return config;
@@ -225,6 +227,17 @@ export function activateHost(host) {
 
 export function installHostBridge() {
   globalThis.nanocodexHost = hostBridge;
+}
+
+export function loadDurabilityRuntime() {
+  return import("./runtime/durability.mjs");
+}
+
+export function reportError(error) {
+  try {
+    if (typeof globalThis.reportError === "function") globalThis.reportError(error);
+    else globalThis.console?.error?.(error);
+  } catch {}
 }
 
 export function bindHostSession(host, sessionId) {
@@ -345,6 +358,16 @@ const hostBridge = Object.freeze({
     // before the returned session can be adopted. The private definition host
     // keeps that lookup instance-scoped for roots and Rust-spawned children.
     return requiredDefinitionHost(definitionHostId).toolDefinitions(sessionId);
+  },
+  async durabilityLoad(journalId) {
+    return (await loadDurabilityRuntime()).load(journalId);
+  },
+  async durabilityAppend(journalId, expectedRevision, payload) {
+    return (await loadDurabilityRuntime()).append(
+      journalId,
+      expectedRevision,
+      payload,
+    );
   },
   emitEvent(eventJson) {
     const event = JSON.parse(eventJson);

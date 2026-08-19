@@ -32,7 +32,7 @@ use crate::{
     NanocodexError, Result,
     model::run::{
         CompletedModelTurn, HistoryCheckpoint, ModelCheckpoint, ModelCompactOutcome, ModelRun,
-        ModelTurnOutcome, PreparedCheckpoint, prepare_history_checkpoint,
+        ModelTurnOutcome, PreparedCheckpoint, prepare_checkpoint, prepare_history_checkpoint,
         prepare_resumed_checkpoint,
     },
     session::{CommittedSession, SessionResume, SessionSnapshot},
@@ -84,7 +84,7 @@ impl ToolsConfiguration {
 mod builder;
 mod context_source;
 mod driver;
-mod durability;
+pub mod execution;
 mod executor;
 mod handle;
 mod session_context;
@@ -95,15 +95,17 @@ pub use builder::NanocodexBuilder;
 pub use context_source::ExecutionEnvironment;
 pub use handle::{AgentHandle, Nanocodex};
 pub use session_context::AgentSessionContext;
-pub use turn::{PromptRoute, Turn, TurnControl, TurnResult};
+use turn::TurnCheckpoint;
+pub use turn::{PromptRequest, PromptRoute, Turn, TurnControl, TurnResult};
 
 use builder::{CodexCompatibility, PromptCacheConfig};
 pub(crate) use context_source::ContextSource;
 use context_source::ContextSourceConfig;
 use driver::{AgentDriver, AgentOrigin, BranchSpawner, DriverShutdown};
-use durability::{Durability, DurabilityConfig};
+use execution::{Execution, ExecutionConfig};
+pub(crate) use execution::{ExecutionStep, ExecutionSteps};
 pub(crate) use executor::{AgentFactory, AgentSend};
 use executor::{ServiceFactory, spawn_driver};
 use handle::request_command;
 use spawn::{build_agent, spawn_agent_driver, validate};
-use turn::{Command, PromptRouteKind, QueuedTurn, TurnKey};
+use turn::{Command, ExecutionOperation, PromptRouteKind, QueuedTurn, TurnKey};

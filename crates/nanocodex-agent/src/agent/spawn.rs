@@ -115,7 +115,7 @@ where
             context_config: codex.context,
             context_source,
             depth: 0,
-            durability: codex.durability,
+            execution: codex.execution,
             service_factory,
         },
         session_id,
@@ -151,7 +151,7 @@ where
             commands: commands.downgrade(),
         })?
         .for_session(&session_id_text);
-    let durability = spawner.durability.start(
+    let execution = spawner.execution.start(
         &session_id_text,
         workspace.as_deref(),
         spawner.config.system_prompt(),
@@ -186,7 +186,7 @@ where
         next_turn: Arc::new(AtomicU64::new(1)),
         lineage_id: Arc::clone(&spawner.lineage_id),
         session_id,
-        durability: durability.clone(),
+        execution: execution.clone(),
         shutdown: shutdown.clone(),
     };
     // Start discovery before returning the handle so an idle CLI or TUI immediately
@@ -202,12 +202,12 @@ where
         spawner,
         initial_model,
         origin,
-        durability: durability.clone(),
+        execution: execution.clone(),
     };
     let driver_task = async move {
         let outcome = driver.run().await;
         if shutdown.requested() {
-            let outcome = outcome.and(durability.shutdown().await);
+            let outcome = outcome.and(execution.shutdown().await);
             shutdown.complete(outcome);
         } else if let Err(error) = outcome {
             tracing::error!(

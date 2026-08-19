@@ -24,6 +24,7 @@ realtime = ["nanocodex-oai-api/realtime"]
 
 [dependencies]
 nanocodex-agent.workspace = true
+nanocodex-durability.workspace = true
 nanocodex-oai-api.workspace = true
 nanocodex-tools.workspace = true
 

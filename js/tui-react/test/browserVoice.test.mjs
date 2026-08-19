@@ -8,6 +8,7 @@ import {
   preferredPhysicalInput,
   browserVoiceStartupContext,
 } from "../dist/index.js";
+import { SpeakerPlayback } from "../dist/browserVoice.js";
 
 test("parses browser voice commands against the ChatGPT catalog", () => {
   assert.deepEqual(parseVoiceArgument(undefined), { action: "toggle" });
@@ -31,6 +32,44 @@ test("replaces a virtual default input with the built-in microphone", () => {
     "built-in",
   );
   assert.equal(preferredPhysicalInput(devices, "USB microphone"), undefined);
+});
+
+test("retries blocked speaker playback from the next pointer gesture", async () => {
+  let attempts = 0;
+  let resume;
+  const statuses = [];
+  const speaker = {
+    autoplay: false,
+    srcObject: null,
+    pause() {},
+    play() {
+      attempts += 1;
+      return attempts === 1 ? Promise.reject(new Error("blocked")) : Promise.resolve();
+    },
+  };
+  const gestures = {
+    addEventListener(type, listener) {
+      assert.equal(type, "pointerdown");
+      resume = listener;
+    },
+    removeEventListener(type, listener) {
+      assert.equal(type, "pointerdown");
+      if (resume === listener) resume = undefined;
+    },
+  };
+  const playback = new SpeakerPlayback(speaker, (status) => statuses.push(status), gestures);
+  playback.attach({});
+  await Promise.resolve();
+  await Promise.resolve();
+  assert.equal(attempts, 1);
+  assert.match(statuses.at(-1) ?? "", /tap once/);
+  assert.equal(typeof resume, "function");
+
+  resume({ type: "pointerdown" });
+  await Promise.resolve();
+  assert.equal(attempts, 2);
+  playback.close();
+  assert.equal(speaker.srcObject, null);
 });
 
 test("builds bounded startup context from the main agent history and browser workspace", async () => {

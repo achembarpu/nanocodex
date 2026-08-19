@@ -102,6 +102,32 @@ pub enum NanocodexError {
     #[error("invalid session snapshot: {0}")]
     InvalidSessionSnapshot(String),
 
+    /// A higher-layer execution policy or its host store failed.
+    #[error("{layer} execution policy failed: {source}")]
+    ExecutionPolicy {
+        /// Human-readable layer identity.
+        layer: &'static str,
+        /// Original extension error.
+        #[source]
+        source: Arc<dyn std::error::Error + Send + Sync>,
+    },
+
+    /// An identified prompt was submitted without an execution policy.
+    #[error("identified prompt submission requires a configured execution policy")]
+    ExecutionPolicyNotConfigured,
+
+    /// An attached execution policy violated the agent integration contract.
+    #[error("invalid execution policy state: {0}")]
+    InvalidExecutionPolicy(String),
+
+    /// A typed execution boundary could not be encoded or decoded.
+    #[error("execution policy payload is invalid: {0}")]
+    ExecutionPayload(#[source] serde_json::Error),
+
+    /// A policy-replayed result does not retain an in-process fork checkpoint.
+    #[error("a policy-replayed result cannot be used as an in-process fork checkpoint")]
+    ReplayedCheckpointUnavailable,
+
     /// Agent construction was attempted outside an active Tokio runtime.
     #[error("building an agent requires an active Tokio runtime")]
     TokioRuntimeUnavailable,
@@ -140,6 +166,18 @@ pub enum NanocodexError {
 }
 
 impl NanocodexError {
+    /// Wraps an error returned by a higher-layer execution policy.
+    #[doc(hidden)]
+    pub fn execution_policy<E>(layer: &'static str, source: E) -> Self
+    where
+        E: std::error::Error + Send + Sync + 'static,
+    {
+        Self::ExecutionPolicy {
+            layer,
+            source: Arc::new(source),
+        }
+    }
+
     /// Returns the underlying Responses transport/API error, including when a
     /// caller-provided Tower middleware boxed the standard service error.
     #[must_use]

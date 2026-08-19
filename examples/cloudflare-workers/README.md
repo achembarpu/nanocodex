@@ -10,7 +10,7 @@ client WebSocket ──> Worker router ──> one NanocodexSession object per s
                                          ├─ Rust/WASM Nanocodex driver
                                          ├─ persistent model WebSocket
                                          ├─ hibernatable client sockets
-                                         ├─ SQLite snapshot + terminal turns
+                                         ├─ opaque Rust journal batches in SQLite
                                          └─ Cloudflare Sandbox DO + container
                                               └─ /workspace mounted to per-session R2 prefix
 
@@ -21,17 +21,18 @@ ChatGPT subscription ───────────────> one Nanocode
 ```
 
 Hot follow-on turns reuse the same WASM agent, cache identity, typed history,
-and upstream socket. Each completed turn atomically commits its Nanocodex
-snapshot and terminal client result. Failed partial turns never enter durable
-history. Repeating a completed client turn ID returns the stored terminal result
-without another model call; duplicates received during cold initialization are
-coalesced before the first await for the same reason.
+and upstream socket. The Durable Object supplies only atomic load and
+compare-and-append over opaque batches. Rust/WASM owns operation deduplication,
+typed checkpoints, model-step replay, and tool-step ambiguity. Repeating a
+completed client turn ID returns the Rust-journaled terminal result without
+another model call; an unsafe tool whose completion was not committed is
+reported as ambiguous and is never silently executed twice.
 
 An outbound WebSocket prevents a Durable Object from hibernating while it is
 retained. A one-shot idle alarm therefore shuts down Nanocodex after 30 seconds
 (configurable), closing the OpenAI socket. Client WebSockets use Cloudflare's
 hibernation API and remain connected. Their next command wakes the object and
-resumes complete client-owned typed history from SQLite. See Cloudflare's
+rebuilds complete client-owned typed history from the Rust journal in SQLite. See Cloudflare's
 [Durable Object lifecycle](https://developers.cloudflare.com/durable-objects/concepts/durable-object-lifecycle/)
 and [WebSocket hibernation](https://developers.cloudflare.com/durable-objects/best-practices/websockets/)
 documentation for the underlying behavior.
@@ -117,10 +118,11 @@ active turn or replays its committed terminal result. Use `/status` or `/exit`
 at the prompt. Set `NANOCODEX_REPL_STATE` to isolate another local REPL state
 file.
 
-This demonstrates durable client detachment, not distributed exactly-once
-inference. If the Worker process itself dies before a turn commits, reopening
-the REPL resubmits the same turn from the last committed snapshot; a partial
-provider response cannot be resumed.
+This demonstrates durable client detachment plus step recovery, not a claim
+that arbitrary external effects are magically exactly once. A completed model
+step is replayed from the journal after Worker loss. A tool start without a
+committed completion stops with an explicit ambiguous-outcome error so the
+application can reconcile the external system before retrying.
 
 `smoke:sandbox` bypasses the model and directly attacks the same bounded tool
 handlers used by the agent. It checks write/exec/read/list behavior, non-zero

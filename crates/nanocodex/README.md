@@ -78,6 +78,8 @@ The root exports only the golden-path types. Reach for a named module when an
 embedding needs more control:
 
 - [`agent`] — lifecycle policy, events, input, sessions, usage, and rollout
+- [`durability`] — optional durable admission, effect replay, checkpoints, and
+  host-store contracts layered over an agent
 - [`oai`] — managed Responses sessions and the concrete Tower boundary
 - [`tools`] — tool contracts, built-ins, Code Mode, and MCP
 - `observability` — native tracing and OTLP setup when the default-off
@@ -96,6 +98,7 @@ when reaching for its detailed API:
 ```rust
 use nanocodex::{Nanocodex, OpenAi};
 use nanocodex::agent::{events::AgentEvent, session::SessionSnapshot};
+use nanocodex::durability::{DurableSession, MemoryStore};
 use nanocodex::oai::tower::ResponsesAttempt;
 use nanocodex::tools::mcp::Mcp;
 
@@ -104,6 +107,8 @@ use nanocodex::tools::mcp::Mcp;
 #     _: Option<OpenAi>,
 #     _: Option<AgentEvent>,
 #     _: Option<SessionSnapshot>,
+#     _: Option<DurableSession>,
+#     _: Option<MemoryStore>,
 #     _: Option<ResponsesAttempt>,
 #     _: Option<Mcp>,
 # ) {}
@@ -115,4 +120,5 @@ intentionally does not repeat sibling convenience exports: provider
 configuration belongs under [`oai`], tool implementation belongs under
 [`tools`], and lifecycle state belongs under [`agent`]. Applications that need
 only one component can depend on its package directly and use
-`nanocodex_oai_api`, `nanocodex_tools`, or `nanocodex_agent`.
+`nanocodex_oai_api`, `nanocodex_tools`, `nanocodex_agent`, or
+`nanocodex_durability`.

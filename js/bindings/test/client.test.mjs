@@ -1,7 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { Actions } from "../index.mjs";
+import {
+  Actions,
+  createMemoryDurabilityStore,
+  createSqliteDurabilityStore,
+} from "../index.mjs";
 import {
   activateHost,
   bindHostSession,
@@ -9,6 +13,70 @@ import {
   defineRuntime,
   releaseHostSession,
 } from "../internal.mjs";
+import {
+  own as ownDurabilityHost,
+  release as releaseDurabilityHost,
+  retain as retainDurabilityHost,
+} from "../runtime/durability.mjs";
+
+test("the memory durability store carries opaque Rust batches across host steps", () => {
+  const store = createMemoryDurabilityStore("journal-1");
+  assert.deepEqual(store.load("journal-1"), { revision: "0", batches: [] });
+  assert.deepEqual(store.append("journal-1", {
+    expectedRevision: "0",
+    payload: "{\"entry\":1}",
+  }), { status: "appended", revision: "1" });
+  assert.deepEqual(store.append("journal-1", {
+    expectedRevision: "0",
+    payload: "stale",
+  }), { status: "conflict", actualRevision: "1" });
+  assert.deepEqual(store.snapshot(), {
+    revision: "1",
+    batches: [{ revision: "1", payload: "{\"entry\":1}" }],
+  });
+  assert.throws(() => store.load("other"), /unknown durability journal/);
+});
+
+test("the SQLite durability store owns revision validation and compare-and-append", () => {
+  const revisions = new Map();
+  const batches = [];
+  const query = (sql, args) => {
+    const [journalId, revision, payload] = args;
+    if (sql.startsWith("SELECT revision FROM durability_journals")) {
+      const stored = revisions.get(journalId);
+      return stored === undefined ? [] : [{ revision: stored }];
+    }
+    if (sql.startsWith("SELECT revision, payload FROM durability_batches")) {
+      return batches.filter((batch) => batch.journalId === journalId);
+    }
+    if (sql.startsWith("INSERT INTO durability_journals")) {
+      revisions.set(journalId, revision);
+      return [];
+    }
+    if (sql.startsWith("INSERT INTO durability_batches")) {
+      batches.push({ journalId, revision, payload });
+      return [];
+    }
+    throw new Error(`unexpected SQL: ${sql}`);
+  };
+  const store = createSqliteDurabilityStore({
+    transaction: (callback) => callback(query),
+  });
+
+  assert.deepEqual(store.load("journal-1"), { revision: "0", batches: [] });
+  assert.deepEqual(store.append("journal-1", {
+    expectedRevision: "0",
+    payload: "opaque",
+  }), { status: "appended", revision: "1" });
+  assert.deepEqual(store.append("journal-1", {
+    expectedRevision: "0",
+    payload: "stale",
+  }), { status: "conflict", actualRevision: "1" });
+  assert.deepEqual(store.load("journal-1"), {
+    revision: "1",
+    batches: [{ revision: "1", payload: "opaque" }],
+  });
+});
 
 test("the headless client exposes matching direct and standalone actions", async () => {
   const events = new Set();
@@ -36,6 +104,8 @@ test("the headless client exposes matching direct and standalone actions", async
   const secondTurn = Actions.turn.prompt(agent, { input: "second" });
   const second = await Actions.turn.getResult(secondTurn);
   assert.equal(second.finalMessage, "session-1:second");
+  const durable = await agent.turn.prompt({ id: "request-7", input: "durable" }).result();
+  assert.equal(durable.finalMessage, "session-1:request-7:durable");
 
   const seen = [];
   const watch = agent.events.watch();
@@ -102,6 +172,62 @@ test("the headless client exposes matching direct and standalone actions", async
   branch.dispose();
   fresh.dispose();
   agent.dispose();
+});
+
+test("the WASM host bridge preserves typed decimal durability revisions", async () => {
+  const batches = [];
+  const host = {
+    connect() {},
+    durability: {
+      load: () => ({ revision: String(batches.length), batches }),
+      append(_journalId, { expectedRevision, payload }) {
+        if (expectedRevision !== String(batches.length)) {
+          return { status: "conflict", actualRevision: String(batches.length) };
+        }
+        const revision = String(batches.length + 1);
+        batches.push({ revision, payload });
+        return { status: "appended", revision };
+      },
+    },
+  };
+  activateHost(host);
+  ownDurabilityHost(host, host.durability, "journal-1");
+  retainDurabilityHost(host, "journal-1");
+  retainDurabilityHost(host, "journal-1");
+  try {
+    assert.deepEqual(
+      JSON.parse(await globalThis.nanocodexHost.durabilityLoad("journal-1")),
+      { revision: "0", batches: [] },
+    );
+    assert.deepEqual(
+      JSON.parse(await globalThis.nanocodexHost.durabilityAppend(
+        "journal-1",
+        "0",
+        "opaque-rust-batch",
+      )),
+      { status: "appended", revision: "1" },
+    );
+    assert.deepEqual(
+      JSON.parse(await globalThis.nanocodexHost.durabilityAppend(
+        "journal-1",
+        "0",
+        "stale",
+      )),
+      { status: "conflict", actual_revision: "1" },
+    );
+    releaseDurabilityHost(host, "journal-1");
+    assert.equal(
+      JSON.parse(await globalThis.nanocodexHost.durabilityLoad("journal-1")).revision,
+      "1",
+      "releasing a child host reference must preserve its parent's journal binding",
+    );
+  } finally {
+    releaseDurabilityHost(host, "journal-1");
+  }
+  await assert.rejects(
+    globalThis.nanocodexHost.durabilityLoad("journal-1"),
+    /no Nanocodex host owns durability journal/,
+  );
 });
 
 test("concurrent graceful shutdown defers exactly-once release until the join completes", async () => {
@@ -396,11 +522,14 @@ test("a failing event listener is reported without interrupting other observers"
 function rawAgent(sessionId) {
   return {
     sessionId,
-    prompt(input) {
-      return rawTurn(`${sessionId}:${input}`);
+    prompt(input, id) {
+      return rawTurn(id === undefined
+        ? `${sessionId}:${input}`
+        : `${sessionId}:${id}:${input}`);
     },
-    promptContent(input) {
-      return rawTurn(`${sessionId}:${JSON.parse(input)[0].text}`);
+    promptContent(input, id) {
+      const text = JSON.parse(input)[0].text;
+      return rawTurn(id === undefined ? `${sessionId}:${text}` : `${sessionId}:${id}:${text}`);
     },
     async fork() {
       return rawAgent(`${sessionId}-fork`);

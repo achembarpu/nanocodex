@@ -1,4 +1,4 @@
-import { subscribeAgentEvents } from "../internal.mjs";
+import { reportError, subscribeAgentEvents } from "../internal.mjs";
 
 const MAX_BUFFERED_EVENTS = 4_096;
 const MAX_BUFFERED_EVENT_CHARACTERS = 32 * 1024 * 1024;
@@ -14,7 +14,7 @@ export function watch(agent, options = {}) {
       try {
         listener(event);
       } catch (error) {
-        reportListenerError(error);
+        reportError(error);
       }
     }
     for (const iterator of iterators) iterator.push(event, encodedLength);
@@ -159,16 +159,4 @@ function emptyIterator() {
     return: () => Promise.resolve({ done: true, value: undefined }),
     [Symbol.asyncIterator]() { return this; },
   };
-}
-
-function reportListenerError(error) {
-  try {
-    if (typeof globalThis.reportError === "function") {
-      globalThis.reportError(error);
-      return;
-    }
-  } catch {}
-  try {
-    globalThis.console?.error?.("Nanocodex event listener failed", error);
-  } catch {}
 }

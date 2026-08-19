@@ -53,12 +53,13 @@ type Focus = "main" | "btw";
 type BranchView = {
   id: number;
   parentId?: number;
+  sessionId?: string;
   conversation: TerminalState;
   draft: string;
   images: AttachedImage[];
 };
 
-type BtwView = { id: number; conversation: TerminalState };
+type BtwView = { id: number; sessionId?: string; conversation: TerminalState };
 
 type AttachedImage = { placeholder: string; dataUrl: string };
 
@@ -175,7 +176,6 @@ export function NanocodexTui({
   const [draft, setDraft] = useState(starterPrompt);
   const [images, setImages] = useState<AttachedImage[]>([]);
   const [externalEditor, setExternalEditor] = useState(false);
-  const [agentSessionId, setAgentSessionId] = useState<string>();
   const [voiceActive, setVoiceActive] = useState(false);
   const [voiceStatus, setVoiceStatus] = useState<string>();
   const composerRef = useRef<HTMLTextAreaElement>(null);
@@ -216,7 +216,26 @@ export function NanocodexTui({
   useNanocodexMessage<TuiMessage>((data) => {
       voiceSession.current?.observe(data);
       if (data.type === "ready") {
-        setAgentSessionId(data.sessionId);
+        const active = voiceSession.current;
+        voiceSession.current = undefined;
+        voiceStarting.current = false;
+        voiceGeneration.current += 1;
+        setVoiceActive(false);
+        setVoiceStatus(undefined);
+        active?.abort();
+        setDraft(starterPrompt);
+        setImages([]);
+        setTui({
+          branches: [{
+            id: 0,
+            sessionId: data.sessionId,
+            conversation: initialTerminalState(),
+            draft: starterPrompt,
+            images: [],
+          }],
+          activeBranchId: 0,
+          focus: "main",
+        });
         return;
       }
       if (data.type === "voiceLifecycleResult") {
@@ -250,7 +269,7 @@ export function NanocodexTui({
       }
       if (data.type === "turnFinished") {
         setTui((current) => updateConversation(current, data.target, (conversation) =>
-          turnFinished(conversation, data.error),
+          turnFinished(conversation, data.error, data.message),
         ));
         return;
       }
@@ -290,6 +309,7 @@ export function NanocodexTui({
           ...current,
           btw: {
             ...current.btw,
+            sessionId: data.sessionId,
             conversation: {
               ...current.btw.conversation,
               status: current.btw.conversation.pendingTurns ? "Starting" : "Ready",
@@ -311,7 +331,15 @@ export function NanocodexTui({
         } : current);
         return;
       }
-      if (data.type === "branchOpened") return;
+      if (data.type === "branchOpened") {
+        setTui((current) => ({
+          ...current,
+          branches: current.branches.map((branch) => branch.id === data.id
+            ? { ...branch, sessionId: data.sessionId }
+            : branch),
+        }));
+        return;
+      }
       if (data.type === "branchOpenFailed") {
         setTui((current) => updateConversation(
           current,
@@ -329,7 +357,7 @@ export function NanocodexTui({
 
   useEffect(() => () => {
     if (animationFrame.current !== undefined) cancelAnimationFrame(animationFrame.current);
-    void voiceSession.current?.close().catch(() => {});
+    voiceSession.current?.abort();
     voiceSession.current = undefined;
     voiceStarting.current = false;
     voiceGeneration.current += 1;
@@ -341,13 +369,12 @@ export function NanocodexTui({
 
   useEffect(() => {
     if (workerStatus === "ready") return;
-    setAgentSessionId(undefined);
     const active = voiceSession.current;
     voiceSession.current = undefined;
     voiceStarting.current = false;
     voiceGeneration.current += 1;
     setVoiceActive(false);
-    if (active) void active.close().catch(() => {});
+    active?.abort();
     for (const request of voiceLifecycleRequests.current.values()) {
       request.reject(new Error("voice lifecycle stopped with the agent worker"));
     }
@@ -412,16 +439,17 @@ export function NanocodexTui({
         setVoiceStatus("Voice is already active; use /voice off before changing it");
         return;
       }
-      if (!agentSessionId || workerStatus !== "ready") {
+      const sessionId = sessionIdForTarget(tui, voiceTarget);
+      if (!sessionId || workerStatus !== "ready") {
         voiceStarting.current = false;
-        setVoiceStatus("Voice is waiting for the agent session to become ready");
+        setVoiceStatus("Voice is waiting for this branch session to become ready");
         return;
       }
       const selectedVoice = command.action === "start"
         ? command.voice
         : voiceOptions.defaultVoice ?? "cove";
       const next = new BrowserVoiceSession({
-        sessionId: agentSessionId,
+        sessionId,
         target: voiceTarget,
         voice: selectedVoice,
         callUrl: voiceOptions.callUrl,
@@ -463,7 +491,7 @@ export function NanocodexTui({
       setVoiceActive(false);
       setVoiceStatus(`Voice: ${error instanceof Error ? error.message : String(error)}`);
     });
-  }, [agentSessionId, dispatch, runVoiceLifecycle, voiceOptions, workerStatus]);
+  }, [dispatch, runVoiceLifecycle, tui, voiceOptions, workerStatus]);
   const mode = tui.historicalEdit
     ? "edit"
     : tui.branchNavigatorId !== undefined
@@ -530,8 +558,29 @@ export function NanocodexTui({
           },
         } : current);
       } else {
-        dispatch({ type: "closeBtw", id: tui.btw.id });
-        setTui((current) => ({ ...current, btw: undefined, focus: "main" }));
+        const closingId = tui.btw.id;
+        const closeBranch = () => {
+          dispatch({ type: "closeBtw", id: closingId });
+          setTui((current) => current.btw?.id === closingId
+            ? { ...current, btw: undefined, focus: "main" }
+            : current);
+        };
+        const activeVoice = voiceSession.current;
+        if (activeVoice && sameTarget(activeVoice.target, { pane: "btw", id: closingId })) {
+          voiceSession.current = undefined;
+          voiceStarting.current = true;
+          setVoiceActive(false);
+          void activeVoice.close()
+            .catch((error) => {
+              setVoiceStatus(`Voice: ${error instanceof Error ? error.message : String(error)}`);
+            })
+            .finally(() => {
+              voiceStarting.current = false;
+              closeBranch();
+            });
+        } else {
+          closeBranch();
+        }
       }
       return;
     }
@@ -1372,6 +1421,19 @@ function conversationForTarget(tui: TuiState, target: Target): TerminalState | u
 
 function branchById(tui: TuiState, id: number): BranchView | undefined {
   return tui.branches.find((branch) => branch.id === id);
+}
+
+function sessionIdForTarget(tui: TuiState, target: TuiTarget): string | undefined {
+  return target.pane === "main"
+    ? branchById(tui, target.branchId)?.sessionId
+    : tui.btw?.id === target.id ? tui.btw.sessionId : undefined;
+}
+
+function sameTarget(left: TuiTarget, right: TuiTarget): boolean {
+  return left.pane === right.pane
+    && (left.pane === "main"
+      ? right.pane === "main" && left.branchId === right.branchId
+      : right.pane === "btw" && left.id === right.id);
 }
 
 function persistActiveDraft(tui: TuiState, draft: string, images: AttachedImage[]): BranchView[] {

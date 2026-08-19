@@ -9,7 +9,7 @@ pub(in crate::agent) struct BranchSpawner<S> {
     pub(in crate::agent) context_config: ContextSourceConfig,
     pub(in crate::agent) context_source: ContextSource,
     pub(in crate::agent) depth: u32,
-    pub(in crate::agent) durability: DurabilityConfig,
+    pub(in crate::agent) execution: ExecutionConfig,
     pub(in crate::agent) service_factory: ServiceFactory<S>,
 }
 
@@ -31,7 +31,7 @@ impl<S> Clone for BranchSpawner<S> {
             context_config: self.context_config.clone(),
             context_source: self.context_source.clone(),
             depth: self.depth,
-            durability: self.durability.for_new_thread(),
+            execution: self.execution.for_new_thread(),
             service_factory: Arc::clone(&self.service_factory),
         }
     }
@@ -104,7 +104,7 @@ where
             context_config: self.context_config.clone(),
             context_source: self.context_config.build(),
             depth,
-            durability: self.durability.for_new_thread(),
+            execution: self.execution.for_new_thread(),
             service_factory: Arc::clone(&self.service_factory),
         };
         let service = (spawner.service_factory)(Arc::clone(&spawner.config));
