@@ -1,0 +1,81 @@
+---
+title: Rust SDK
+description: The canonical Nanocodex facade and lower-level component crates.
+---
+
+# Rust SDK
+
+Add the Alloy-style facade for the normal path:
+
+```sh
+cargo add nanocodex
+```
+
+```rust
+use nanocodex::{Nanocodex, OpenAi, Thinking, Tools};
+
+let tools = Tools::builder().build()?;
+let openai = OpenAi::new(std::env::var("OPENAI_API_KEY")?)?;
+let (agent, events) = Nanocodex::builder(openai)
+    .workspace(std::env::current_dir()?)
+    .thinking(Thinking::High)
+    .tools(tools)
+    .build()?;
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+Common types are at the crate root. Detailed APIs live under `agent`, `oai`, and
+`tools`; avoid sibling convenience paths. The
+[facade README](https://github.com/gakonst/nanocodex/blob/master/crates/nanocodex/README.md)
+is the canonical import guide.
+
+## Choose the lowest owner
+
+- Use `nanocodex-agent` for the complete coding-agent lifecycle.
+- Use `nanocodex-oai-api` for a managed typed Responses session or a concrete
+  Tower service without the tool loop.
+- Use `nanocodex-tools` for tools, Code Mode, MCP, or a hosted runtime without
+  an agent.
+- Add `nanocodex-observability` or `nanocodex-subagents` only when needed.
+
+One Tower call is one complete streamed Responses attempt through completion or
+typed failure. `ResponsesClient<S>` remains generic over the concrete service,
+so caller layers can add deadlines, concurrency, load shedding, tracing, or
+metrics while the SDK remains the only retry owner. See
+[the Tower design](https://github.com/gakonst/nanocodex/blob/master/docs/RESPONSES_TOWER.md).
+
+## Complete examples
+
+Run from the repository root:
+
+```sh
+export OPENAI_API_KEY="..."
+cargo run -p nanocodex-examples --bin minimal
+cargo run -p nanocodex-examples --bin follow-on
+cargo run -p nanocodex-examples --bin lifecycle
+cargo run -p nanocodex-examples --bin resume
+```
+
+Browse [all Rust examples](https://github.com/gakonst/nanocodex/tree/master/examples)
+for custom tools, MCP, forks, subagents, voice, VM tools, and egress.
+
+## Rust integration guidance
+
+Move owned protocol and tool values rather than cloning them to satisfy a
+borrowed interface. Keep `Value` at genuinely dynamic boundaries and use typed
+wire shapes or `RawValue` for retained opaque payloads. Runtime paths return
+contextual errors instead of silently falling back. The builder exposes policy
+such as model, instructions, workspace, tools, execution environment, and
+Tower layers; queue capacities, socket tasks, replay bookkeeping, and mutable
+run state stay private.
+
+For remote tools, supply one coherent `ExecutionEnvironment` describing date,
+timezone, and project instructions. Otherwise the native builder discovers
+those facts on the embedding host, which is wrong when the tool filesystem
+lives elsewhere. For agent-relative tools, prefer `tools_factory` to a shared
+registry. At shutdown, stop child trees and drop tool capabilities before
+joining their external VM or process owner.
+
+The public API is async and runtime-owned, but the lower crates remain useful
+independently. This makes it possible to unit-test a tool registry or Tower
+service without constructing a second fake agent loop.

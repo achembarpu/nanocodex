@@ -1,0 +1,87 @@
+---
+title: Nanocodex
+description: A complete OpenAI coding agent, embedded in your product.
+---
+
+# A complete OpenAI coding agent, embedded in your product.
+
+Nanocodex is a library-first Rust SDK for putting a real coding-agent lifecycle
+inside your application. Build one agent, send ordered prompts through a cheap
+cloneable handle, await typed results, and optionally reduce a separate stream
+of typed events into your own terminal, web interface, logs, or storage.
+
+```rust
+use nanocodex::{Nanocodex, OpenAi};
+
+let openai = OpenAi::new(std::env::var("OPENAI_API_KEY")?)?;
+let (agent, _events) = Nanocodex::builder(openai)
+    .instructions("Inspect before editing. Preserve unrelated work.")
+    .workspace(std::env::current_dir()?)
+    .build()?;
+
+let result = agent
+    .prompt("Find and fix the failing parser test.")
+    .await?
+    .await?;
+
+println!("{}", result.final_message());
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+The first `await` accepts and orders the prompt. The second waits for the
+immutable `TurnResult`. Follow-on prompts retain typed history, the WebSocket,
+tool and shell state, response lineage, and cache identity without asking the
+caller to replay messages or provider response IDs. See the
+[agent implementation](https://github.com/gakonst/nanocodex/tree/master/crates/nanocodex-agent)
+and [minimal runnable example](https://github.com/gakonst/nanocodex/blob/master/examples/minimal.rs).
+
+## What you can embed
+
+- **Owned sessions.** Prompt ordering, steering, cancellation, compaction,
+  snapshots, clean spawns, contextual forks, tool loops, and cleanup have one
+  owner: the private driver.
+- **Tools and Code Mode.** Register typed Rust or JavaScript tools, use the
+  standard workspace runtime, execute nested tool calls from JavaScript cells,
+  and keep large MCP catalogs deferred until searched.
+- **Native and web products.** Use Rust directly, the Node/browser WASM package,
+  Python/PyO3, React bindings, or the framework-independent and React TUI
+  packages. They consume the same lifecycle rather than defining new protocols.
+- **A browser-native coding workspace.** The current web consumer combines
+  persistent OPFS, just-bash, Rust `apply_patch`, browser Git and `gh`, web and
+  image tools, datasets, and live React artifacts. It does not require a remote
+  sandbox to provide those browser capabilities.
+- **Optional isolation and modalities.** Opt into retained libkrun VMs,
+  application-owned sandboxes, browser automation, or a realtime voice front
+  end without changing the core session contract.
+- **Evaluation as product infrastructure.** Run verifier-backed attempts in
+  fresh microVM overlays, retain exact JSONL, trajectories, API exchanges, and
+  verifier evidence, and compare only explicitly pinned arms.
+
+## The boundary
+
+Nanocodex deliberately supports one OpenAI Responses agent family. It is not a
+provider abstraction, generic app server, plugin framework, approval system, or
+database. Authentication and transport recipes can use an OpenAI API key,
+managed ChatGPT credentials, a host-managed socket, or an MPP session while the
+agent semantics remain OpenAI Responses semantics.
+
+The application keeps product policy: UI, durable session indexing, tenancy,
+credentials, memory, skills, review workflows, sandbox choice, and deployment.
+The [Tact case study](/examples/tact) shows that split in a complete product.
+
+## Choose a path
+
+- [Get started](/getting-started) with the native Rust library and CLI.
+- Learn [the owned-agent lifecycle](/core/owned-agent).
+- Add [tools, Code Mode, and MCP](/core/tools-code-mode).
+- Compare the [Rust](/sdks/rust), [JavaScript](/sdks/javascript), and
+  [Python](/sdks/python) surfaces.
+- Build a [browser-native agent](/capabilities/web-agent) or select a
+  [deployment pattern](/deployments).
+- Read [stability and scope](/stability) before depending on an optional or
+  experimental component.
+
+Primary sources: [repository README](https://github.com/gakonst/nanocodex/blob/master/README.md),
+[facade](https://github.com/gakonst/nanocodex/tree/master/crates/nanocodex),
+[examples](https://github.com/gakonst/nanocodex/tree/master/examples), and
+[workspace architecture](https://github.com/gakonst/nanocodex/blob/master/AGENTS.md).

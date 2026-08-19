@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "engines": {
-    "node": ">=22.13.0"
+    "node": "^22.15.0 || ^24.0.0 || ^26.0.0"
   },
   "scripts": {
     "sync": "node scripts/sync-nanocodex.mjs",
@@ -14,9 +14,11 @@
     "dev": "CLOUDFLARE_ENV=development CLOUDFLARE_INCLUDE_PROCESS_ENV=true node --env-file-if-exists=../.env ./node_modules/vite/bin/vite.js dev",
     "test": "npm --prefix ../js/artifacts test && npm --prefix ../js/tui test && node --experimental-strip-types --test worker/*.test.ts test/*.test.ts scripts/*.test.mjs",
     "typecheck": "tsc --noEmit",
+    "docs:dev": "cd docs && vocs dev",
+    "docs:build": "cd docs && vocs build && cd .. && node scripts/install-docs.mjs && node scripts/check-docs.mjs",
     "gen:types": "wrangler types",
     "prebuild": "npm run wasm",
-    "build": "tsc --noEmit && vite build && npm run check:bundle",
+    "build": "tsc --noEmit && vite build && npm run docs:build && npm run check:bundle",
     "check:bundle": "node scripts/check-bundle.mjs",
     "preview": "vite preview",
     "deploy": "npm run build && wrangler deploy"
@@ -44,8 +46,8 @@
     "nanocodex-tui": "file:../js/tui",
     "nanocodex-tui-react": "file:../js/tui-react",
     "ox": "^0.14.33",
-    "react": "19.2.6",
-    "react-dom": "19.2.6",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
     "react-router": "^7.18.2",
     "recharts": "^3.10.1",
     "shiki": "^4.3.1",
@@ -59,9 +61,12 @@
     "@types/react-dom": "19.2.3",
     "@types/ws": "^8.18.1",
     "@vitejs/plugin-react": "6.0.2",
+    "react-server-dom-webpack": "19.2.8",
     "typescript": "5.9.3",
     "vite": "8.2.1",
     "vite-plugin-mkcert": "^1.17.12",
+    "vocs": "2.8.5",
+    "waku": "1.0.0-beta.9",
     "wrangler": "4.123.0",
     "ws": "^8.21.3"
   },

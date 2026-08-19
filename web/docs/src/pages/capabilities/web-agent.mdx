@@ -1,0 +1,83 @@
+---
+title: Web agent
+description: A complete coding workspace running in a browser Worker.
+---
+
+# Web agent
+
+The browser package runs the Rust/WASM agent in a module Worker. The current web
+consumer adds a persistent browser-native workspace and product UI; the remote
+host is needed for authenticated OpenAI and hosted web/image routes, not for a
+basic shell or browser-native filesystem.
+
+## Browser-native workspace
+
+`browser({ threadId })` composes:
+
+- persistent origin-private filesystem (OPFS), reusable across Worker and page
+  restarts;
+- lazy just-bash execution, with Python through Pyodide and C/C++ through
+  wasm-clang;
+- Rust/WASM `apply_patch` using the canonical tool contract;
+- browser Git and `gh` compatibility, with real Git-backed file and commit views;
+- upload/download and bounded workspace operations;
+- web search, image generation, `update_plan`, and application tools;
+- public HTTPS Parquet, JSONL, and Hugging Face dataset inspection with bounded
+  cursor continuation; and
+- persistent live React source artifacts rendered in an isolated iframe.
+
+These run from browser capabilities without requiring a Vercel, Cloudflare,
+Rivet, exe.dev, or libkrun sandbox. A hosted sandbox remains useful when work
+needs arbitrary native Linux packages or stronger isolation.
+
+```js
+import { Agent, Subagents, Transport } from "nanocodex/browser";
+import { browser } from "nanocodex/tools/browser";
+
+const runtime = await browser({ threadId: "thread-1" });
+const agent = await Agent.create({
+  transport: Transport.hostManaged({
+    websocketUrl: "/api/responses",
+    createWebSocket: (url) => new WebSocket(url),
+  }),
+  filesystem: runtime.filesystem,
+  instructions: runtime.instructions,
+  tools: [...runtime.tools, ...Subagents.create()],
+});
+```
+
+Vite applications install `nanocodexTools()` in both page and Worker plugin
+graphs. See the [binding browser-tool guide](https://github.com/gakonst/nanocodex/blob/master/js/bindings/README.md#standard-web-and-browser-tools)
+and [web architecture](https://github.com/gakonst/nanocodex/blob/master/web/README.md).
+
+## Current web application
+
+The application splits presentation (`AgentTerminal`), UI lifecycle
+(`agentController`), Worker hosting (`agent.worker`), SDK adaptation
+(`nanocodex`), and authenticated Worker routes. Rust/WASM still owns history and
+the tool loop. Code, Commits, Requests, and Evals are separate application
+surfaces. Inspect the [web source](https://github.com/gakonst/nanocodex/tree/master/web/src)
+or run it:
+
+```sh
+cd web
+npm install
+npm run dev
+```
+
+The web app and browser composition are experimental consumers, not the stable
+core library contract. Treat storage quotas, cross-origin isolation, CORS,
+hosted credential routing, and generated-code policy as application concerns.
+
+## Data and artifact boundaries
+
+Dataset queries execute in the caller and return bounded pages with opaque
+cursors; direct URLs need CORS, and Parquet continuation needs HTTP byte ranges.
+Artifact tools write source documents into the workspace and validate syntax,
+but do not dynamically evaluate code inside the tool handler. The embedding app
+chooses iframe headers, source capacity, persistence, and preview policy.
+
+OPFS is origin-private durable storage, not a cross-device sync system. Give
+each product thread a stable name, expose upload/download deliberately, and
+decide when a user can delete or export it. Hosted search and image endpoints
+must independently enforce authentication and request/output bounds.

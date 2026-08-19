@@ -41,7 +41,7 @@ jobs:
           test "$(git ls-remote https://github.com/gakonst/nanocodex.git refs/heads/master | cut -f1)" = "$TARGET_SHA"
       - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 22.13.0
+          node-version: 22.15.0
           cache: npm
           cache-dependency-path: web/package-lock.json
       - name: Install publisher dependency

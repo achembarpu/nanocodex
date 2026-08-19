@@ -344,33 +344,31 @@ html[data-theme="dark"] .button--medium:focus-visible {
   align-items: flex-start;
   justify-content: center;
   min-height: calc(100svh - var(--header-height));
-  padding: 48px 24px 72px;
+  padding: 64px 24px 96px;
   background: color-mix(in srgb, var(--surface) 96%, var(--text));
 }
 
 .home-article {
-  width: min(100%, 720px);
+  width: min(100%, 1080px);
   margin: auto;
   font-size: 14px;
   line-height: 1.55;
 }
 
-.home-intro {
-  max-width: none;
-}
-
 .home-intro h1 {
-  font-size: 36px;
-  line-height: 1.05;
+  margin-top: 12px;
+  font-size: clamp(44px, 6vw, 68px);
+  line-height: 0.98;
 }
 
-.home-intro > p:last-child,
-.home-copy {
+.home-intro > p:nth-of-type(2) {
+  margin-top: 22px;
   color: var(--text-muted);
+  font-size: 16px;
 }
 
-.home-intro > p:last-child {
-  margin-top: 10px;
+.home-actions {
+  margin-top: 28px;
 }
 
 .agent-demo-slot {
@@ -1953,7 +1951,8 @@ html[data-theme="dark"] .tui-syntax .shiki span {
   display: grid;
   grid-template-columns: 1fr;
   gap: 28px;
-  margin-top: 18px;
+  margin-top: 72px;
+  color: var(--text-muted);
 }
 
 .home-copy h2,
@@ -1963,17 +1962,12 @@ html[data-theme="dark"] .tui-syntax .shiki span {
   line-height: 1;
 }
 
-.home-copy ul {
-  margin: 10px 0 0;
-  padding-left: 20px;
-}
-
-.home-copy li + li {
-  margin-top: 6px;
+.home-api-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
 }
 
 .home-release-section {
-  margin-top: 30px;
+  margin-top: 72px;
   padding: 18px;
   background: var(--surface-raised);
   border: 1px solid var(--border-soft);
@@ -2854,15 +2848,17 @@ html[data-theme="dark"] .tui-syntax .shiki span {
     display: none;
   }
 
-  .home-copy {
-    grid-template-columns: 1fr;
-    gap: 28px;
-    margin-top: 18px;
-  }
-
   .home-copy h2,
   .home-release-section h2 {
     font-size: 22px;
+  }
+
+  .home-capability-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .home-api-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .requests-empty {
@@ -3834,12 +3830,12 @@ html[data-theme="dark"] .tui-syntax .shiki span {
     font-size: 28px;
   }
 
-  .home-intro > p:last-child {
+  .home-intro > p:nth-of-type(2) {
     line-height: 1.5;
   }
 
-  .home-copy {
-    gap: 24px;
+  .home-api-grid {
+    grid-template-columns: 1fr;
   }
 
   .home-release-section {

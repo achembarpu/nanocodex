@@ -294,7 +294,7 @@ export function createAgentController({
         return;
       }
       case "closeBtw": {
-        if (btw?.id === message.id) {
+        if (btw && btw.id === message.id) {
           const closing = btw;
           btw = undefined;
           await disposeBranch(closing);

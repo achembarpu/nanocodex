@@ -1,0 +1,113 @@
+---
+title: Getting started
+description: Run Nanocodex, then embed one retained agent session.
+---
+
+# Getting started
+
+The fastest way to understand Nanocodex is to run one complete turn, then send
+a follow-on prompt to the same owned session.
+
+## Prerequisites
+
+- Rust and Cargo for the native SDK, or macOS/Linux for the installer.
+- An OpenAI API key for the examples below. ChatGPT subscription auth is also
+  supported by the native product, but API-key setup is the smallest SDK path.
+- A workspace the agent may inspect and modify. Normal local execution is
+  **unsandboxed** and runs tools with the embedding process's authority. Use a
+  private checkout, container, or the optional VM boundary when isolation is
+  required.
+
+## Run the CLI
+
+```sh
+curl -fsSL https://nanocodex.paradigm.xyz | bash
+nanocodex auth login
+nanocodex
+```
+
+Or run one prompt non-interactively:
+
+```sh
+nanocodex run "Inspect this repository and summarize its architecture."
+```
+
+The installer and updater contract is documented in the
+[repository README](https://github.com/gakonst/nanocodex/blob/master/README.md#install).
+
+## Embed the Rust SDK
+
+Create an application and add the facade:
+
+```sh
+cargo new my-agent
+cd my-agent
+cargo add nanocodex tokio --features tokio/full
+export OPENAI_API_KEY="..."
+```
+
+Replace `src/main.rs` with:
+
+```rust
+use nanocodex::{Nanocodex, OpenAi};
+
+#[tokio::main]
+async fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let openai = OpenAi::new(std::env::var("OPENAI_API_KEY")?)?;
+    let (agent, mut events) = Nanocodex::builder(openai)
+        .instructions(
+            "You are a coding agent. Inspect before changing files, preserve \
+             unrelated work, and run focused verification.",
+        )
+        .workspace(std::env::current_dir()?)
+        .build()?;
+
+    let event_task = tokio::spawn(async move {
+        while let Some(event) = events.recv().await {
+            eprintln!("{} {:?}", event.seq, event.kind);
+        }
+    });
+
+    let first = agent
+        .prompt("Create NOTES.md containing one verified fact about this project.")
+        .await?
+        .await?;
+    println!("{}", first.final_message());
+
+    let second = agent
+        .prompt("Now report the exact fact you wrote.")
+        .await?
+        .await?;
+    println!("{}", second.final_message());
+
+    agent.shutdown().await?;
+    event_task.await?;
+    Ok(())
+}
+```
+
+```sh
+cargo run
+```
+
+No prior messages, response IDs, or tool results are supplied in the second
+call. The driver retained them. Compare the complete
+[follow-on example](https://github.com/gakonst/nanocodex/blob/master/examples/follow_on.rs)
+and [agent guide](https://github.com/gakonst/nanocodex/blob/master/crates/nanocodex-agent/README.md).
+
+## Understand the handles
+
+`Nanocodex` is the cheap command capability for one session. `AgentEvents` is
+an optional session-wide stream. `prompt().await` returns a `Turn`, which can be
+streamed, steered, cancelled, or awaited for exactly one `TurnResult`.
+
+Dropping every command handle stops the driver. Explicit `shutdown()` is clearer
+for applications that also own event-draining tasks, child agents, or process
+resources.
+
+## Next steps
+
+- Add an application tool with [Tools and Code Mode](/core/tools-code-mode).
+- Persist and restore a completed [snapshot](/core/branching#snapshots-and-resume).
+- Use [JavaScript](/sdks/javascript) or [Python](/sdks/python).
+- Review [stability and scope](/stability) before adopting experimental crates.

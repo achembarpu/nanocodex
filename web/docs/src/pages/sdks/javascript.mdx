@@ -1,0 +1,90 @@
+---
+title: JavaScript SDK
+description: One Rust/WASM lifecycle for Node, browser Workers, React, and browser TUIs.
+---
+
+# JavaScript SDK
+
+The `nanocodex` package exposes viem-style Node and browser entrypoints over the
+same Rust/WASM driver. Transport is explicit; generated WASM handles stay
+private.
+
+```js
+import { Agent, Transport } from "nanocodex/node";
+
+const agent = await Agent.create({
+  transport: Transport.openAi({ apiKey: process.env.OPENAI_API_KEY }),
+  instructions: "Inspect before editing and preserve unrelated work.",
+  workspace: process.cwd(),
+});
+
+const turn = agent.turn.prompt({ input: "Summarize this repository." });
+try {
+  const result = await turn.result();
+  console.log(result.finalMessage);
+} finally {
+  turn.dispose();
+  await agent.session.shutdown();
+}
+```
+
+Use `nanocodex/node` with a real directory and Node WebSocket host;
+`nanocodex/browser` runs in a browser Worker or server isolate. Supported
+transport constructors include OpenAI, ChatGPT subscription, MPP, and the
+browser-only host-managed socket. They route the same OpenAI Responses
+lifecycle, not different provider implementations.
+
+## Node and browser state
+
+`Agent.create` owns policy and lifecycle. `agent.turn.prompt` returns immediate
+turn control; `result()` awaits the typed result. `agent.events.watch()` is an
+independent stream. `agent.session` exposes thinking/fast-mode updates,
+compaction, fork, snapshots, and shutdown. Read the complete
+[binding guide](https://github.com/gakonst/nanocodex/blob/master/js/bindings/README.md)
+and [owned Node example](https://github.com/gakonst/nanocodex/blob/master/examples/node/session.mjs).
+
+`Workspace.open({ path })` uses a guarded Node directory.
+`Workspace.open({ name })` uses persistent OPFS in a browser. Application file
+browsers and agents can share the returned workspace handle.
+
+## React and terminal UI
+
+`nanocodex-react` owns a browser Worker's lifecycle and typed external store:
+
+```tsx
+const config = createConfig({
+  worker: () => new Worker(new URL("./agent.worker.ts", import.meta.url), {
+    type: "module",
+  }),
+  thinking: "high",
+});
+
+<NanocodexProvider config={config}><App /></NanocodexProvider>
+```
+
+`nanocodex-tui` is a framework-independent reducer and controller protocol.
+`nanocodex-tui-react` adds an accessible virtualized renderer with streaming,
+steering, queueing, cancellation, branches, image paste, and optional theme.
+See [React](https://github.com/gakonst/nanocodex/blob/master/js/react/README.md),
+[TUI state](https://github.com/gakonst/nanocodex/blob/master/js/tui/README.md), and
+[React TUI](https://github.com/gakonst/nanocodex/blob/master/js/tui-react/README.md).
+
+For a complete app, start with the
+[React/Vite example](https://github.com/gakonst/nanocodex/tree/master/examples/react-vite)
+or [one-file browser CDN example](https://github.com/gakonst/nanocodex/tree/master/examples/browser-cdn).
+
+## Tools and extensions
+
+JavaScript tools are ordinary objects with `name`, `description`, an optional
+JSON Schema `parameters`, and a handler. Add `outputSchema` when Code Mode needs
+an exact TypeScript return declaration. The browser package also exports named
+web, image, dataset, artifact, and planning factories. Spreading
+`Subagents.create()` selects the Rust task-tree implementation already linked
+into the WASM module; it does not recreate seven orchestration handlers in
+JavaScript.
+
+Dispose finished `Turn` wrappers, detach event watches, and call session
+shutdown in short-lived programs. Long-lived applications normally retain one
+agent per durable thread. Generated WASM bindings and host adapters are package
+internals; import only documented Node, browser, Worker, tools, React, and TUI
+entrypoints.

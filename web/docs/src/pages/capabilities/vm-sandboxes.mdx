@@ -1,0 +1,68 @@
+---
+title: VMs and sandboxes
+description: Keep host tools, opt into one retained libkrun VM, or bring a hosted sandbox.
+---
+
+# VMs and sandboxes
+
+Normal native Nanocodex sessions execute workspace tools on the host and are
+unsandboxed. Isolation is explicit: replace only workspace-effecting handlers
+with one retained VM or a caller-owned remote sandbox while preserving their
+model-visible names and schemas.
+
+## Retained libkrun VM
+
+The experimental `nanocodex-vm` crate owns audited libkrun configuration, image
+preparation, gvproxy and egress, a private host/guest protocol, and retained
+`exec_command`, `write_stdin`, `apply_patch`, and `view_image` tools. Web search,
+image generation, MCP, and planning remain host-side unless replaced separately.
+
+```sh
+just build-vm-guest
+nanocodex run "inspect the repository" \
+  --vm .nanocodex/vm/session-rootfs.ext4 \
+  --vm-guest-runtime target/aarch64-unknown-linux-musl/debug/nanocodex-vm-guest \
+  --vm-workspace /app
+```
+
+The root must be session-private. One VM and its shell sessions can be shared
+across a root agent tree by capturing clone-cheap VM tools in `tools_factory`;
+each driver still receives fresh agent-relative handlers. Network-disabled and
+composed egress leases are explicit policy. Read the
+[VM guide](https://github.com/gakonst/nanocodex/blob/master/docs/VM.md) and
+[crate contract](https://github.com/gakonst/nanocodex/blob/master/crates/experimental/nanocodex-vm/README.md).
+
+## Hosted sandboxes
+
+JavaScript deployment examples demonstrate other ownership choices:
+
+- Cloudflare Durable Objects own SQLite session state, a Sandbox container, and
+  an R2-backed workspace.
+- Rivet Actors own SQLite state and an AgentOS sandbox.
+- Vercel Workflow owns replayable state and one persistent Vercel Sandbox.
+- exe.dev demonstrates both an agent inside a persistent VM and an external
+  agent using an exe.dev VM as a caller-defined tool.
+
+These are examples, not a generic Nanocodex sandbox API. The application owns
+provisioning, credentials, tenancy, persistence, timeout policy, egress, and
+recovery. Choose a boundary based on the code being executed and the isolation
+you actually need; browser-native OPFS and just-bash do not require any of them.
+
+Evaluation is stricter: each benchmark attempt and verifier run in a fresh
+microVM overlay. See [Evaluation](/evals).
+
+## Host/guest ownership
+
+The VM guest reuses canonical workspace-tool schemas and handlers but excludes
+OpenAI transport, Code Mode, MCP, HTTP clients, and image preparation. A
+lockstep private protocol carries bounded calls and cancellation between host
+and guest. The host retains the VMM process, egress guards, and graceful
+shutdown capability; dropping only an agent handle is not enough to authorize
+destroying shared VM state.
+
+Immutable Dockerfile-derived images and private writable roots have different
+lifecycles. Cache identities include build context, base digests, architecture,
+resources, guest runtime, firmware policy, and non-secret egress identity.
+Every live session should receive a private mutable disk. Hosted-platform
+sandboxes need equivalent rules even when their SDK names differ: exclusive
+ownership, explicit recovery, bounded execution, and teardown of descendants.

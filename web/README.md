@@ -36,6 +36,15 @@ history, credential policy, or model-loop state.
 The local Worker and Vite client run together at `https://localhost:5173`, using
 the same Cloudflare Vite-plugin layout as Tempo's React MPP examples.
 
+### Documentation
+
+The product guide lives in `docs/src/pages` and uses Vocs with full-static
+rendering under `/docs`. Run `npm run docs:dev` while writing, or `npm run
+docs:build` to generate the site, install it into `dist/client/docs`, and check
+every route plus `llms.txt` and `llms-full.txt`. The normal `npm run build`
+composes the Vite application and Vocs output into the one Cloudflare asset
+tree; the docs are not a second service or runtime.
+
 In development, Vite reads repository metadata from Git, serves working-tree
 files on demand, and streams history directly from Git only when the commit
 view opens. Startup does not generate or rewrite repository blobs. Set

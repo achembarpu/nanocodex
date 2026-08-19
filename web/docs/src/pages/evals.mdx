@@ -1,0 +1,78 @@
+---
+title: Evaluation
+description: VM-isolated, verifier-backed trials with durable evidence and pinned comparisons.
+---
+
+# Evaluation
+
+Evaluation is a first-class product boundary, not a prompt-demo afterthought.
+The experimental `nanocodex-eval` crate pre-materializes every
+task/treatment/repetition in SQLite, runs each attempt and verifier in a fresh
+microVM overlay, and retains the evidence required to inspect or reproduce a
+claim.
+
+```text
+profile recipe ── eval add ──> immutable task/treatment rows in SQLite
+                                      │
+                            atomic one-row claims
+                                      │
+                       fresh VM + agent + verifier
+                                      │
+                   evidence + fenced terminal outcome
+```
+
+## Run a profile
+
+```sh
+nanocodex eval add local-smoke --recipe local-smoke
+nanocodex eval status local-smoke --json
+nanocodex eval run local-smoke
+
+# Let the agent choose process fan-out over pre-materialized rows:
+nanocodex eval benchmark local-smoke
+```
+
+Rows have four durable states: unclaimed, running, success, and failed.
+Infrastructure failure is retained in append-only attempt history and releases
+work for another claim; claim IDs fence late writes. SQLite, not TOML, becomes
+authoritative after `eval add`. Read the
+[evaluation contract](https://github.com/gakonst/nanocodex/blob/master/crates/experimental/nanocodex-eval/README.md).
+
+## Evidence, not vibes
+
+Each arm retains result JSON, raw JSONL, trajectory, API exchange, verifier
+reward/stdout/stderr, task and candidate digests, and operational evidence.
+Harbor/ATIF are export formats, not alternate execution paths. External
+harnesses such as stock Codex are independent coordinates executed in the same
+fresh-overlay and capture boundary.
+
+Published A/B comparisons require an explicit plan binding dataset and task
+digests, attempt count, model/effort, instructions, environment, verifier,
+timeouts, resources, tools, candidate provenance, exact job IDs, lock digests,
+and exact retained trial IDs. The website does not infer comparisons from
+similar names. See the [comparison-plan schema](https://github.com/gakonst/nanocodex/blob/master/evals/harbor-comparisons/README.md).
+
+## Retained numbers
+
+Only checked-in retained measurements are quoted here:
+
+- A frozen four-task Terminal-Bench 2.1 high-effort baseline, with web search,
+  subagents, and completion audit disabled, passed **13 of 20 attempts in 8m15s**.
+  It is a small historical baseline, not a broad leaderboard claim. The same
+  log explicitly rejects pathological completion-audit and infrastructure runs
+  as agent scores. [Retained operational log](https://github.com/gakonst/nanocodex/blob/master/docs/HARBOR_RS_LOG.md#2026-07-21--abandon-benchmark-specific-agent-tuning)
+- The retained PR #50 performance gate passed **39 latency gates**. In its
+  paired 70-turn Nanocodex workload, reported model work was **97.879%** of
+  measured turn time and median local turn overhead was **0.267 ms**. This is a
+  harness-overhead result, not a task-quality score. [Retained milestone](https://github.com/gakonst/nanocodex/blob/master/benchmarks/pr50_milestone_2026-07-28.md)
+
+The web app includes live evaluation status and analytics views, but SQLite and
+retained artifacts remain the source of truth.
+
+## Reading results
+
+Treat high host utilization as telemetry, not automatic failure. Judge a wave
+by productive throughput, stale claims, infrastructure retries, verifier
+outcomes, OOMs, and recovery. Separate infrastructure evidence from agent
+scores, and inspect exact trajectories before attributing a result to model or
+harness behavior. Never modify a task or verifier to make Nanocodex pass.

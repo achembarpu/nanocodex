@@ -477,7 +477,7 @@ function NanocodexShell() {
             nanocodex <span>[H]</span>
           </a>
           <div className="header-center" ref={headerCenterRef}>
-            <nav className="surface-switch" aria-label="Repository surfaces">
+            <nav className="surface-switch" aria-label="Product navigation">
               <a
                 className={surface === "code" ? "is-active" : ""}
                 href={threadSurfacePath("code")}
@@ -520,6 +520,9 @@ function NanocodexShell() {
               >
                 Evals <span>[E]</span>
               </a>
+              <a className="docs-nav" href="/docs/">
+                Docs <ArrowUpRight aria-hidden="true" size={11} />
+              </a>
             </nav>
           </div>
           <nav className="header-actions" aria-label="Site actions">
@@ -557,30 +560,306 @@ function NanocodexShell() {
             <section className="home-page" aria-labelledby="home-title">
                 <article className="home-article">
                   <header className="home-intro">
+                    <p className="eyebrow">OpenAI coding agent SDK</p>
                     <h1 id="home-title">
-                      Nanocodex: a headless Codex runtime you can embed.
+                      A complete OpenAI coding agent, embedded in your product
                     </h1>
                     <p>
-                      Nanocodex packages Codex lifecycle and context management
-                      behind an ergonomic Rust API, so you can bring the agent
-                      loop into your own applications without bringing along an
-                      entire product.
+                      Nanocodex packages the full coding loop—persistent
+                      Responses sessions, typed history, tools, context
+                      management, branches, events, and cleanup—behind small
+                      APIs for Rust, JavaScript, browser applications, and
+                      Python. It is built for one OpenAI model family, so your
+                      team can own the product instead of rebuilding the agent.
+                    </p>
+                    <div className="header-actions home-actions">
+                      <a className="button button--high" href="/docs/">
+                        Read the docs <ChevronRight aria-hidden="true" />
+                      </a>
+                      <a
+                        className="button button--medium"
+                        href="https://github.com/gakonst/nanocodex"
+                        target="_blank"
+                        rel="noreferrer"
+                      >
+                        View on GitHub <ArrowUpRight aria-hidden="true" />
+                      </a>
+                    </div>
+                    <p className="eyebrow">
+                      Rust · Node · Browser + React · Python
                     </p>
                   </header>
 
-                  <Suspense
-                    fallback={
-                      <section
-                        className="agent-tui agent-tui-loading"
-                        aria-label="Nanocodex terminal"
-                        aria-busy="true"
-                      >
-                        Loading agent…
-                      </section>
-                    }
+                  <section
+                    className="home-copy home-demo"
+                    id="agent-demo"
+                    aria-labelledby="agent-demo-title"
                   >
-                    <AgentTerminal />
-                  </Suspense>
+                    <div className="home-section-heading">
+                      <div>
+                        <p className="eyebrow">Live browser agent</p>
+                        <h2 id="agent-demo-title">
+                          The agent, not a chat wrapper.
+                        </h2>
+                      </div>
+                      <p>
+                        This is the real Rust engine compiled to WebAssembly,
+                        owned by a browser Worker and rendered through the
+                        headless React bindings. Give it a key and work in the
+                        embedded coding workspace below.
+                      </p>
+                    </div>
+                    <Suspense fallback={null}>
+                      <AgentTerminal />
+                    </Suspense>
+                  </section>
+
+                  <section
+                    className="home-copy home-capabilities"
+                    aria-labelledby="home-capabilities-title"
+                  >
+                    <div className="home-section-heading">
+                      <div>
+                        <p className="eyebrow">The complete loop</p>
+                        <h2 id="home-capabilities-title">
+                          Own the experience. Embed the hard parts.
+                        </h2>
+                      </div>
+                      <p>
+                        Nanocodex keeps model-facing behavior coherent while
+                        leaving tools, interfaces, infrastructure, and product
+                        policy with the application that can make those choices.
+                      </p>
+                    </div>
+
+                    <div className="home-release-grid home-capability-grid">
+                      <article>
+                        <span>01 / Session</span>
+                        <h3>One agent across four application surfaces</h3>
+                        <p>
+                          Start with <code>Nanocodex::builder</code> in Rust,
+                          <code> Agent.create</code> in Node or the browser, or
+                          the PyO3-backed <code>Nanocodex</code> class in Python.
+                          Each is a thin consumer of the same owned session.
+                        </p>
+                      </article>
+                      <article>
+                        <span>02 / Tools</span>
+                        <h3>Tools, Code Mode, and MCP</h3>
+                        <p>
+                          Bring caller-defined tools or use the typed workspace
+                          set. Code Mode composes them in JavaScript, while
+                          deferred <code>tool_search</code> keeps large built-ins
+                          and remote MCP servers out of the initial model prefix.
+                        </p>
+                      </article>
+                      <article>
+                        <span>03 / Context</span>
+                        <h3>Branches and reusable task-tree subagents</h3>
+                        <p>
+                          Spawn a fresh agent, fork the latest result, or branch
+                          from an earlier completed turn without asking callers
+                          to replay history. The optional task-tree extension,
+                          extracted from Tact, adds parallel specialist work
+                          without turning the core into a scheduler.
+                        </p>
+                      </article>
+                      <article>
+                        <span>04 / Web</span>
+                        <h3>Web agents and browser workspaces</h3>
+                        <p>
+                          Run the Rust lifecycle inside a browser Worker, wire it
+                          to <code>nanocodex-react</code>, and render the
+                          virtualized terminal or your own workspace. Optional
+                          experimental browser tools add deterministic Chromium
+                          automation, passkeys, screenshots, traces, and
+                          diagnostics.
+                        </p>
+                      </article>
+                      <article>
+                        <span>05 / Isolation</span>
+                        <h3>Retained VMs and hosted sandboxes</h3>
+                        <p>
+                          The experimental VM crate routes canonical workspace
+                          tools through one retained libkrun guest. Cloudflare
+                          Sandbox and Rivet AgentOS examples show caller-owned
+                          isolated files, processes, and live previews.
+                        </p>
+                      </article>
+                      <article>
+                        <span>06 / Interfaces</span>
+                        <h3>Voice and durable deployments</h3>
+                        <p>
+                          Add experimental GPT Realtime voice to the same coding
+                          session, or deploy the WASM agent as a resumable
+                          Cloudflare Durable Object or Rivet Actor. Typed
+                          snapshots restore history without a second protocol.
+                        </p>
+                      </article>
+                    </div>
+                  </section>
+
+                  <section
+                    className="home-copy home-api-section"
+                    aria-labelledby="home-api-title"
+                  >
+                    <div className="home-section-heading">
+                      <div>
+                        <p className="eyebrow">Deliberate APIs</p>
+                        <h2 id="home-api-title">Start at the boundary you own.</h2>
+                      </div>
+                      <p>
+                        Typed builders expose product policy. WebSocket tasks,
+                        queues, replay bookkeeping, and mutable run state stay
+                        inside the agent.
+                      </p>
+                    </div>
+                    <div className="home-release-grid home-api-grid">
+                      <article>
+                        <span>Rust</span>
+                        <code>Nanocodex::builder(openai)</code>
+                        <p>Alloy-style facade, typed turns, Tower middleware.</p>
+                      </article>
+                      <article>
+                        <span>JavaScript</span>
+                        <code>{"Agent.create({ ... })"}</code>
+                        <p>Viem-style actions for Node and browser WASM.</p>
+                      </article>
+                      <article>
+                        <span>Browser</span>
+                        <code>{"createConfig({ worker })"}</code>
+                        <p>Headless React ownership and an accessible TUI.</p>
+                      </article>
+                      <article>
+                        <span>Python</span>
+                        <code>Nanocodex(api_key)</code>
+                        <p>Native Rust lifecycle in a typed Python package.</p>
+                      </article>
+                    </div>
+                    <a className="text-action" href="/docs/">
+                      Compare APIs and build an agent
+                      <ChevronRight aria-hidden="true" />
+                    </a>
+                  </section>
+
+                  <section
+                    className="home-copy home-built-section"
+                    aria-labelledby="home-built-title"
+                  >
+                    <div className="home-section-heading">
+                      <div>
+                        <p className="eyebrow">Built with Nanocodex</p>
+                        <h2 id="home-built-title">The SDK is the starting point.</h2>
+                      </div>
+                      <p>
+                        Real products keep their own interface, persistence,
+                        memory, authorization, and deployment policy while
+                        reusing the same agent lifecycle.
+                      </p>
+                    </div>
+                    <div className="home-release-grid home-case-grid">
+                      <article>
+                        <span>Tact</span>
+                        <a href="/docs/examples/tact">
+                          A complete terminal coding agent
+                          <ArrowUpRight aria-hidden="true" />
+                        </a>
+                        <p>
+                          Tact builds its TUI, durable sessions, explicit memory,
+                          skills, reflection, and review workflows around
+                          Nanocodex sessions, tools, branches, and events.
+                        </p>
+                      </article>
+                      <article>
+                        <span>Vercel Workflow + wterm</span>
+                        <a
+                          href="https://github.com/gakonst/nanocodex/tree/master/examples/vercel-workflows"
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          A durable agent with a live workspace terminal
+                          <ArrowUpRight aria-hidden="true" />
+                        </a>
+                        <p>
+                          Workflow retains the agent stream, Vercel Sandbox
+                          persists files, and wterm attaches an operator shell
+                          without becoming a second agent protocol.
+                        </p>
+                      </article>
+                    </div>
+                  </section>
+
+                  <section
+                    className="home-copy home-proof-section"
+                    aria-labelledby="home-proof-title"
+                  >
+                    <div className="home-section-heading">
+                      <div>
+                        <p className="eyebrow">Evidence over intuition</p>
+                        <h2 id="home-proof-title">
+                          The proof ships beside the SDK.
+                        </h2>
+                      </div>
+                      <p>
+                        VM-backed benchmarks run real coding tasks against
+                        canonical verifiers. Nanocodex retains the exact
+                        trajectory, tool activity, usage, cost, and failure
+                        evidence—and publishes the board here.
+                      </p>
+                    </div>
+                    <div className="home-release-grid home-proof-grid">
+                      <article>
+                        <span>Results</span>
+                        <a
+                          href={threadSurfacePath("evals")}
+                          onFocus={preloadEvalOverview}
+                          onPointerEnter={preloadEvalOverview}
+                          onClick={(event) => {
+                            event.preventDefault();
+                            navigateToSurface("evals");
+                          }}
+                        >
+                          Open live evals <ArrowUpRight aria-hidden="true" />
+                        </a>
+                        <p>
+                          Worksets, treatments, task outcomes, and retained case
+                          evidence.
+                        </p>
+                      </article>
+                      <article>
+                        <span>Implementation</span>
+                        <a
+                          href={threadSurfacePath("code")}
+                          onClick={(event) => {
+                            event.preventDefault();
+                            navigateToSurface("code");
+                          }}
+                        >
+                          Inspect the source <ArrowUpRight aria-hidden="true" />
+                        </a>
+                        <p>
+                          The published repository tree behind the agent and
+                          evaluation loop.
+                        </p>
+                      </article>
+                      <article>
+                        <span>Record</span>
+                        <a
+                          href={threadSurfacePath("commits")}
+                          onClick={(event) => {
+                            event.preventDefault();
+                            navigateToSurface("commits");
+                          }}
+                        >
+                          Read every change <ArrowUpRight aria-hidden="true" />
+                        </a>
+                        <p>
+                          Searchable patches connect product claims to the work
+                          that landed.
+                        </p>
+                      </article>
+                    </div>
+                  </section>
 
                   <section
                     className="home-release-section"
@@ -637,8 +916,8 @@ function NanocodexShell() {
                         <span>Embed</span>
                         <code>cargo add nanocodex</code>
                         <p>
-                          All seven public Rust crates ship together under one
-                          version in dependency order.
+                          The facade and its focused Rust crates ship together
+                          under one version.
                         </p>
                       </article>
                       <article>
@@ -653,50 +932,6 @@ function NanocodexShell() {
                       </article>
                     </div>
                   </section>
-
-                  <div className="home-copy">
-                    <section>
-                      <h2>A library, not a product</h2>
-                      <ul>
-                        <li>
-                          Codex is a complete coding agent. Nanocodex isolates
-                          the reusable engine: model lifecycle, conversation
-                          context &amp; the exact tool boundary.
-                        </li>
-                        <li>
-                          The core intentionally does not ship subagents, skills
-                          or on-disk history. Your application owns orchestration,
-                          persistence &amp; product policy.
-                        </li>
-                        <li>
-                          The library-first architecture is designed for native
-                          Rust applications, WebAssembly in the browser &amp;
-                          Python bindings through PyO3.
-                        </li>
-                      </ul>
-                    </section>
-
-                    <section>
-                      <h2>What we optimize for</h2>
-                      <ul>
-                        <li>
-                          Production-grade Rust patterns. Tower middleware keeps
-                          cross-cutting behavior composable &amp; application-specific
-                          extensions straightforward.
-                        </li>
-                        <li>
-                          Conversation forks as a first-class primitive, so
-                          branching from shared context is fast &amp; efficient.
-                        </li>
-                        <li>
-                          Eval-driven development. Every vertical slice runs on
-                          real tasks, with failures traced through the verifier
-                          &amp; complete tool trajectory.
-                        </li>
-                      </ul>
-                    </section>
-                  </div>
-
                 </article>
             </section>
           ) : surface === "code" ? snapshot ? (
@@ -806,7 +1041,7 @@ function NanocodexShell() {
                     </div>
                   ) : null}
 
-                  <Suspense fallback={<div className="commit-list" />}>
+                  <Suspense fallback={null}>
                     <VirtualCommitList
                       commits={filteredCommits}
                       selectedHash={selected?.hash}
