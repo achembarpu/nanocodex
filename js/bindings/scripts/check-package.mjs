@@ -39,6 +39,8 @@ const requiredFiles = [
   "tools/datasetContract.mjs",
   "tools/datasetEngine.mjs",
   "tools/namedTool.mjs",
+  "tools/artifact.mjs",
+  "tools/artifact.d.mts",
   "tools/standardDescriptions.mjs",
   "tools/browser/index.mjs",
   "tools/browser/index.d.mts",
@@ -72,6 +74,7 @@ export async function checkPackage(packageRoot = root) {
   assert.equal(packageJson.exports?.["./worker"]?.import, "./worker/index.mjs");
   assert.equal(packageJson.exports?.["./tools"]?.import, "./tools/index.mjs");
   assert.equal(packageJson.exports?.["./tools/dataset"]?.import, "./tools/dataset.mjs");
+  assert.equal(packageJson.exports?.["./tools/artifact"]?.import, "./tools/artifact.mjs");
   assert.equal(packageJson.exports?.["./tools/browser"]?.import, "./tools/browser/index.mjs");
   assert.equal(packageJson.exports?.["./tools/vite"]?.import, "./tools/vite.mjs");
   assert.equal(packageJson.exports?.["./wasm"]?.import, "./pkg-web/nanocodex_bg.wasm");

@@ -53,7 +53,7 @@ const manifest = JSON.parse(
 
 const entryKey = manifestKey("index.html");
 const agentKey = manifestKey("src/AgentTerminal.tsx");
-const artifactCoreKey = manifestKey("nanocodex-artifacts/dist/index.js");
+const artifactCoreKey = manifestKey("node_modules/nanocodex/tools/artifact.mjs");
 const mppKey = manifestKey("src/MppControls.tsx");
 const entry = manifest[entryKey];
 const agent = manifest[agentKey];

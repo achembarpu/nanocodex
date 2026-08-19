@@ -170,6 +170,7 @@ export function withThreadGitLock<T>(
 ): Promise<T>;
 
 export function loadBrowserProjectInstructions(rawFs: OpfsGitFs): Promise<string | undefined>;
+export function validateBrowserArtifactSource(source: string): Promise<void>;
 export function createBrowserBash(
   rawFs: OpfsGitFs,
   thread: BrowserThread,

@@ -5,6 +5,8 @@ import { createCodeRuntime } from "../runtime/code-runtime.mjs";
 
 import {
   dataset,
+  ArtifactStore,
+  artifact,
   imageGeneration,
   updatePlan,
   viewImage,
@@ -127,6 +129,43 @@ test("the code runtime forwards session and host lifecycle to stateful tools", (
   assert.equal(disposals, 1);
 });
 
+test("artifact is a named typed tool, not a shell command", async () => {
+  const workspace = memoryWorkspace();
+  const rendered = [];
+  const tool = artifact({ workspace, onArtifact: (document) => rendered.push(document) });
+
+  assert.equal(tool.name, "render_artifact");
+  assert(Object.isFrozen(tool));
+  assert.deepEqual(tool.parameters.required, ["title", "source"]);
+  assert.deepEqual(await tool.handler({
+    id: "answer",
+    title: "Answer",
+    source: "function App() { return html`<main>42</main>`; }",
+  }, context), {
+    artifactId: "answer",
+    path: "/workspace/.nanocodex/artifacts/answer.json",
+    title: "Answer",
+    runtime: "react",
+  });
+  assert.equal(rendered.length, 1);
+  assert.equal((await new ArtifactStore(workspace).read("answer")).title, "Answer");
+});
+
+test("artifact source validation is host-owned and runs before persistence", async () => {
+  const workspace = memoryWorkspace();
+  const tool = artifact({
+    workspace,
+    validateSource(source) {
+      if (source.includes("<main")) throw new SyntaxError("JSX is unavailable");
+    },
+  });
+  await assert.rejects(
+    tool.handler({ title: "Invalid", source: "function App() { return <main />; }" }, context),
+    /JSX is unavailable/,
+  );
+  assert.deepEqual(await new ArtifactStore(workspace).list(), []);
+});
+
 test("image generation implements the canonical workspace-path edit mode", async () => {
   const tool = imageGeneration({
     url: "https://host.test/tools/images",
@@ -150,3 +189,32 @@ test("image generation implements the canonical workspace-path edit mode", async
     /not both/,
   );
 });
+
+function memoryWorkspace() {
+  const files = new Map();
+  const directories = new Set(["/workspace"]);
+  return {
+    root: "/workspace",
+    async list() {
+      return [
+        ...[...directories].filter((path) => path !== "/workspace")
+          .map((path) => ({ kind: "directory", path })),
+        ...[...files].map(([path, contents]) => ({ kind: "file", path, size: contents.byteLength })),
+      ];
+    },
+    async readFile(path) {
+      const contents = files.get(path);
+      if (!contents) throw Object.assign(new Error("not found"), { code: "ENOENT" });
+      return contents;
+    },
+    async writeFile(path, contents) {
+      files.set(path, typeof contents === "string"
+        ? new TextEncoder().encode(contents)
+        : contents instanceof ArrayBuffer
+          ? new Uint8Array(contents)
+          : new Uint8Array(contents.buffer, contents.byteOffset, contents.byteLength));
+    },
+    async remove(path) { files.delete(path); },
+    async mkdir(path) { directories.add(path); },
+  };
+}

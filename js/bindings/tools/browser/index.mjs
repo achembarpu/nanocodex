@@ -56,6 +56,7 @@ export async function browser(options) {
       standard.viewImage({ workspace: shell.workspace }),
       standard.updatePlan(),
       datasets.dataset(options.dataset),
+      shell.artifactTool,
     ]),
   });
 }
@@ -68,4 +69,9 @@ export async function createBrowserBash(rawFs, thread, options) {
 export async function loadBrowserProjectInstructions(rawFs) {
   const { loadBrowserProjectInstructions: load } = await import("./browserShell.mjs");
   return load(rawFs);
+}
+
+export async function validateBrowserArtifactSource(source) {
+  const { validateBrowserArtifactSource: validate } = await import("./browserShell.mjs");
+  return validate(source);
 }

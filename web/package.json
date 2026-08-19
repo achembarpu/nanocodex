@@ -40,7 +40,6 @@
     "minisearch": "7.2.0",
     "mppx": "^0.8.15",
     "nanocodex": "file:../js/bindings",
-    "nanocodex-artifacts": "file:../js/artifacts",
     "nanocodex-react": "file:../js/react",
     "nanocodex-tui": "file:../js/tui",
     "nanocodex-tui-react": "file:../js/tui-react",

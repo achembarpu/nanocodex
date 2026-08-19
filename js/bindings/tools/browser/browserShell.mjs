@@ -3,6 +3,7 @@ import { createTwoFilesPatch } from "diff";
 import git from "isomorphic-git";
 import http from "isomorphic-git/http/web";
 import { Bash, defineCommand, } from "just-bash/browser";
+import { artifact } from "../artifact.mjs";
 import { createOpfsGitFs, openOpfsWorkspaceRoot, } from "./opfsGit.mjs";
 import { browserThread, initializeThreadGit, notifyThreadGitChanged, THREAD_GIT_AUTHOR, THREAD_GIT_DIRECTORY, withThreadGitLock, } from "./threadGit.mjs";
 import { openThreadWorkspace } from "./workspace.mjs";
@@ -25,11 +26,20 @@ clang, clang++, gcc, g++, cc, and c++ compile C/C++ sources to WASI WebAssembly 
 Browser SSH is noninteractive and requires a wss:// endpoint that carries raw SSH because browsers
 cannot open TCP sockets. The repository's only publish branch is nanocodex;
 publish with git add, git commit -m "...", and git push origin nanocodex. Use the standard Rust
-apply_patch tool for focused edits. Custom React interfaces live in
-/workspace/.nanocodex/artifacts and are displayed by the web app from that same filesystem. To
-publish one, write a JavaScript source file that defines function App({ sendPrompt }); React and
-the html tagged template helper are already in scope. Then run
-artifact publish <source.js> --id <lowercase-id> --title "<title>". Re-run it after edits.`;
+apply_patch tool for focused edits. Create or update custom React interfaces with the
+render_artifact tool. Its source defines function App({ sendPrompt }); React and the html tagged
+template helper are already in scope.`;
+
+export function validateBrowserArtifactSource(source) {
+    try {
+        // Compile with the exact bindings and strict wrapper used by the
+        // isolated artifact frame without running application code.
+        new Function("React", "html", "sendPrompt", `"use strict";\n${source}\n;return typeof App === "function" ? App : undefined;`);
+    }
+    catch (error) {
+        throw new Error(`artifact source is not executable JavaScript: ${errorMessage(error)}`);
+    }
+}
 export async function prepareBrowserShell(threadId, origin) {
     const thread = browserThread(threadId, origin);
     await initializeThreadGit(thread);
@@ -76,6 +86,10 @@ export async function prepareBrowserShell(threadId, origin) {
         instructions: AGENT_INSTRUCTIONS,
         projectInstructions,
         workspace: notifyingWorkspace,
+        artifactTool: artifact({
+            workspace: notifyingWorkspace,
+            validateSource: validateBrowserArtifactSource,
+        }),
         execTool: {
             description: "Run a bash command in the browser thread workspace.",
             parameters: {
@@ -153,7 +167,6 @@ export async function createBrowserBash(rawFs, thread, options = {}) {
         customCommands: [
             gitCommand(rawFs, thread, filesystem),
             ghCommand(rawFs, thread),
-            artifactCommand(),
             unameCommand(),
             ...["python3", "python"].map((name) => ({
                 name,
@@ -393,73 +406,6 @@ function ghCommand(fs, thread) {
         }
         catch (error) {
             return fail(`gh: ${errorMessage(error)}\n`, 1);
-        }
-    });
-}
-function artifactCommand() {
-    return defineCommand("artifact", async (args, context) => {
-        try {
-            if (args[0] === "list") {
-                const directory = `${THREAD_GIT_DIRECTORY}/.nanocodex/artifacts`;
-                const names = await context.fs.readdir(directory).catch((error) => {
-                    if (isCode(error, "ENOENT"))
-                        return [];
-                    throw error;
-                });
-                const artifacts = names.filter((name) => name.endsWith(".json"));
-                return ok(`${artifacts.join("\n")}${artifacts.length ? "\n" : ""}`);
-            }
-            if (args[0] !== "publish") {
-                return ok([
-                    "usage: artifact publish <source.js> --id <id> --title <title>",
-                    "       artifact list",
-                    "",
-                    "The source file must define function App({ sendPrompt }); React and html are in scope.",
-                    "",
-                ].join("\n"));
-            }
-            const sourcePath = args[1];
-            if (!sourcePath || sourcePath.startsWith("-"))
-                throw new Error("publish requires a source file");
-            const id = flagValue(args, "--id") ?? sourcePath.split("/").pop()?.replace(/\.[^.]+$/, "");
-            const title = flagValue(args, "--title");
-            if (!id || !/^[a-z0-9][a-z0-9_-]{0,63}$/.test(id)) {
-                throw new Error("--id must be a lowercase artifact identifier");
-            }
-            if (!title?.trim() || title.length > 120)
-                throw new Error("--title is required and must be at most 120 characters");
-            const source = await context.fs.readFile(context.fs.resolvePath(context.cwd, sourcePath));
-            if (!source.trim())
-                throw new Error("artifact source cannot be empty");
-            if (source.length > 262_144)
-                throw new Error("artifact source cannot exceed 262144 characters");
-            const directory = `${THREAD_GIT_DIRECTORY}/.nanocodex/artifacts`;
-            const path = `${directory}/${id}.json`;
-            const now = Date.now();
-            let createdAt = now;
-            try {
-                const previous = JSON.parse(await context.fs.readFile(path));
-                if (Number.isSafeInteger(previous.createdAt) && previous.createdAt >= 0) {
-                    createdAt = previous.createdAt;
-                }
-            }
-            catch (error) {
-                if (!isCode(error, "ENOENT") && !(error instanceof SyntaxError))
-                    throw error;
-            }
-            await context.fs.mkdir(directory, { recursive: true });
-            await context.fs.writeFile(path, JSON.stringify({
-                version: 1,
-                id,
-                title: title.trim(),
-                source,
-                createdAt,
-                updatedAt: now,
-            }));
-            return ok(`Published ${id} from ${sourcePath} to ${path}\n`);
-        }
-        catch (error) {
-            return fail(`artifact: ${errorMessage(error)}\n`, 1);
         }
     });
 }

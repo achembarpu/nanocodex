@@ -14,8 +14,8 @@ import {
   useNanocodexMessage,
 } from "nanocodex-react";
 import { NanocodexTui } from "nanocodex-tui-react";
-import type { ArtifactDocument } from "nanocodex-artifacts";
 import type { AgentSessionContext } from "nanocodex";
+import type { ArtifactDocument } from "nanocodex/tools/artifact";
 import type { Address } from "viem";
 import type { TuiTarget } from "nanocodex-tui";
 import "nanocodex-tui-react/structure.css";

@@ -231,6 +231,25 @@ export default defineConfig({
 });
 ```
 
+The browser composition includes `render_artifact` as a normal typed tool. For
+other hosts, compose the same factory with any workspace implementing the
+Nanocodex workspace contract:
+
+```js
+import { artifact, web } from "nanocodex/tools";
+
+const tools = [
+  web({ url: env.WEB_TOOL_URL }),
+  artifact({ workspace }),
+];
+```
+
+The artifact factory performs no dynamic evaluation and is safe to load in a
+Cloudflare Worker. Browser hosts additionally install the exact iframe syntax
+validator. The model calls `tools.render_artifact({ id, title, source })` from
+Code Mode, or `render_artifact` directly when the host selects direct mode; no
+artifact CLI is installed.
+
 This is what loading a Rust-written tool from JavaScript looks like here.
 `nanocodex-subagents` is statically linked into `nanocodex.wasm`; importing the
 module loads that Rust code, and spreading `Subagents.create()` into `tools`

@@ -42,7 +42,6 @@ export default defineConfig({
     dedupe: [
       "react",
       "react-dom",
-      "nanocodex-artifacts",
       "nanocodex-react",
       "nanocodex-tui",
       "@pierre/theme",

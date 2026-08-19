@@ -1,5 +1,6 @@
 import type { NamedTool } from "../types.mjs";
 import type { Workspace } from "../runtime/workspace.mjs";
+export * from "./artifact.mjs";
 export type JsonToolOptions = Readonly<{
   /** Defaults to the same-origin `/api/tools/web-search` or image route. */
   url?: string | URL | undefined;

@@ -49,17 +49,19 @@ async function createAgent(
   tools: AgentControllerTools,
 ) {
   await paymentSessions.clear();
+  const origin = self.location.origin;
+  const toolHeaders = { "x-nanocodex-request": "1" };
   const [runtime, mcpModule] = await Promise.all([
     import("nanocodex/tools/browser").then(({ browser }) => browser({
       threadId: start.threadId!,
-      origin: self.location.origin,
+      origin,
       web: {
-        url: new URL("/api/tools/web-search", self.location.origin),
-        headers: { "x-nanocodex-request": "1" },
+        url: new URL("/api/tools/web-search", origin),
+        headers: toolHeaders,
       },
       images: {
-        url: new URL("/api/tools/image-generation", self.location.origin),
-        headers: { "x-nanocodex-request": "1" },
+        url: new URL("/api/tools/image-generation", origin),
+        headers: toolHeaders,
       },
       recentImages: tools.recentImages,
       rememberImage: tools.rememberImage,
@@ -71,7 +73,7 @@ async function createAgent(
     filesystemTools: false,
     instructions: runtime.instructions,
     executionEnvironment: browserExecutionEnvironment(runtime.projectInstructions),
-    mcp: mcpModule.browserMcpConfiguration(self.location.origin),
+    mcp: mcpModule.browserMcpConfiguration(origin),
     tools: runtime.tools,
     thinking: start.thinking,
     reasoningMode: start.reasoningMode,

@@ -129,8 +129,8 @@ layers:
 - `../js/react` publishes `nanocodex-react`, the wagmi-like headless React owner. Its provider and
   hooks manage the module Worker lifecycle, readiness, commands, and event
   subscriptions without imposing presentation policy.
-- `../js/artifacts` publishes `nanocodex-artifacts`, the framework-independent
-  live React source document and bounded workspace store.
+- `nanocodex/tools` owns the framework-independent live React document,
+  bounded workspace store, and typed artifact tool used by the web consumer.
 - `AgentTerminal` is the optimized Ratatui-faithful consumer: native colors,
   rendering hierarchy, queue/steer behavior, `/btw`, historical branch editing,
   branch navigation, per-branch drafts, clipboard images, and key bindings over
@@ -142,8 +142,8 @@ tool loop. Each thread opens one OPFS workspace shared by just-bash, Rust
 `apply_patch`, isomorphic-git, the file viewer, commit history, uploads,
 downloads, and the artifact dock. The model receives the standard
 `exec_command` and Rust `apply_patch` tools rather than separate list/read/write
-or Git tools. Shell commands include normal virtual Unix commands plus `git`,
-`gh`, and `artifact`; `git push origin nanocodex` publishes the same objects the
+or Git tools. Shell commands include normal virtual Unix commands plus `git`
+and `gh`; `git push origin nanocodex` publishes the same objects the
 Commits view reads from the Cloudflare thread remote. Files survive agent,
 Worker, and page restarts without being copied into conversation snapshots.
 The Cloudflare Worker upgrades `/api/responses` and proxies OpenAI
@@ -151,10 +151,10 @@ tool calls. It accepts a user-provided OpenAI key into a one-hour Durable Object
 session and returns only an opaque `HttpOnly`, `SameSite=Strict` cookie. The key
 is never placed in a URL, local storage, React state, or WASM configuration.
 
-Custom interfaces use the shell instead of a model-specific tool. The agent
-writes JavaScript source defining a real React `App`, then runs
-`artifact publish <source.js> --id <id> --title "<title>"`. `React`, an `html`
-tagged-template helper, and `sendPrompt` are supplied by the isolated iframe
+Custom interfaces use the typed `render_artifact` tool composed by
+`nanocodex/tools/browser`, alongside `exec_command`, `web__run`, and
+`image_gen__imagegen`. The tool accepts JavaScript source defining a real React
+`App`; `React`, an `html` tagged-template helper, and `sendPrompt` are supplied by the isolated iframe
 runtime. Published documents live under `.nanocodex/artifacts` in the same Git
 working tree and open in a fullscreen dock. Reusing an artifact ID replaces the
 interface in place, so voice or text turns can continuously retheme and extend

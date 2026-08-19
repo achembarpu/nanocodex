@@ -105,6 +105,19 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
           Math.round((toolStartedAt - startedAt) * 1_000_000),
         );
         const recordedInput = clone(input) ?? null;
+        const recordedCall = {
+          call_id: callId,
+          name,
+          input: recordedInput,
+          output: "",
+          structured_result: null,
+          success: false,
+          started_after_ns: startedAfterNs,
+          duration_ns: 0,
+        };
+        // Rust records nested calls in invocation order even when parallel
+        // siblings finish out of order. Reserve the slot before dispatch.
+        nestedCalls.push(recordedCall);
         try {
           if (controller.signal.aborted) throw new Error("Code Mode execution was cancelled");
           const result = await handler(input, {
@@ -113,27 +126,19 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
             callId,
             signal: controller.signal,
           });
-          nestedCalls.push({
-            call_id: callId,
-            name,
-            input: recordedInput,
+          Object.assign(recordedCall, {
             output: outputBody(result),
             structured_result: structuredResult(result, `tool ${name} result`),
             success: true,
-            started_after_ns: startedAfterNs,
             duration_ns: elapsedNs(toolStartedAt),
           });
           return isToolResult(result) ? result.output : result;
         } catch (error) {
           const message = errorMessage(error);
-          nestedCalls.push({
-            call_id: callId,
-            name,
-            input: recordedInput,
+          Object.assign(recordedCall, {
             output: message,
             structured_result: message,
             success: false,
-            started_after_ns: startedAfterNs,
             duration_ns: elapsedNs(toolStartedAt),
           });
           throw error;

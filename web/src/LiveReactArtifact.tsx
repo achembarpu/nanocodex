@@ -1,5 +1,5 @@
 import { useEffect, useRef } from "react";
-import type { ArtifactDocument } from "nanocodex-artifacts";
+import type { ArtifactDocument } from "nanocodex/tools/artifact";
 
 export function LiveReactArtifact({
   artifact,

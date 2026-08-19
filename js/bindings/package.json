@@ -47,6 +47,10 @@
       "types": "./tools/dataset.d.mts",
       "import": "./tools/dataset.mjs"
     },
+    "./tools/artifact": {
+      "types": "./tools/artifact.d.mts",
+      "import": "./tools/artifact.mjs"
+    },
     "./tools/browser": {
       "types": "./tools/browser/index.d.mts",
       "import": "./tools/browser/index.mjs"

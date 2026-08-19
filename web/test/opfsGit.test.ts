@@ -213,15 +213,9 @@ test("just-bash and browser git share the same OPFS working tree", async () => {
   assert.match((await bash.exec("git log --oneline -1")).stdout, /^[a-f0-9]{7} Create hello\n$/);
   assert.equal((await bash.exec("git status --short")).stdout, "");
 
-  await bash.exec("printf 'function App() { return html`<main>Hello</main>`; }\\n' > hello-ui.js");
-  const publish = await bash.exec("artifact publish hello-ui.js --id hello --title 'Hello UI'");
-  assert.equal(publish.exitCode, 0);
-  assert.match(publish.stdout, /Published hello/);
-  const artifact = JSON.parse(new TextDecoder().decode(
-    await fs.promises.readFile("/workspace/.nanocodex/artifacts/hello.json") as Uint8Array,
-  ));
-  assert.equal(artifact.title, "Hello UI");
-  assert.match(artifact.source, /function App/);
+  const artifactCli = await bash.exec("artifact --help");
+  assert.equal(artifactCli.exitCode, 127);
+  assert.match(artifactCli.stderr, /artifact: command not found/);
 });
 
 test("OPFS append preserves existing data and writes only the suffix at end", async () => {
