@@ -183,11 +183,49 @@ export function steerFailed(
   return appendError(removeSteer(state, id), error);
 }
 
-export function turnFinished(state: TerminalState, error?: string): TerminalState {
-  const next = {
+export function turnFinished(
+  state: TerminalState,
+  error?: string,
+  finalMessage?: string,
+): TerminalState {
+  let next = {
     ...state,
     pendingTurns: Math.max(0, state.pendingTurns - 1),
   };
+  if (finalMessage?.trim()) {
+    let userIndex = -1;
+    let assistantIndex = -1;
+    for (let index = next.entries.length - 1; index >= 0; index -= 1) {
+      if (next.entries[index]?.kind === "user") {
+        userIndex = index;
+        break;
+      }
+    }
+    for (let index = next.entries.length - 1; index > userIndex; index -= 1) {
+      if (next.entries[index]?.kind === "assistant") {
+        assistantIndex = index;
+        break;
+      }
+    }
+    if (assistantIndex >= 0) {
+      const assistant = next.entries[assistantIndex];
+      if (assistant?.kind === "assistant" && assistant.text !== finalMessage) {
+        const entries = next.entries.slice();
+        entries[assistantIndex] = { ...assistant, text: finalMessage, streaming: false };
+        next = { ...next, entries };
+      }
+    } else {
+      const syntheticId = next.syntheticId + 1;
+      next = {
+        ...next,
+        syntheticId,
+        entries: [
+          ...next.entries,
+          { id: `assistant-result-${syntheticId}`, kind: "assistant", text: finalMessage, streaming: false },
+        ],
+      };
+    }
+  }
   if (!error || error === "the turn was cancelled") return next;
   const tail = next.entries.at(-1);
   return tail?.kind === "error" && tail.text === error ? next : appendError(next, error);

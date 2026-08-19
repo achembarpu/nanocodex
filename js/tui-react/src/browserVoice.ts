@@ -39,6 +39,65 @@ export type BrowserVoiceOptions = {
   onTranscript(speaker: "user" | "assistant", text: string): void;
 };
 
+type PlaybackGestureTarget = Pick<Document, "addEventListener" | "removeEventListener">;
+
+/** Owns browser speaker playback and retries it from the next user gesture when autoplay is blocked. */
+export class SpeakerPlayback {
+  readonly #speaker: HTMLAudioElement;
+  readonly #gestures: PlaybackGestureTarget;
+  readonly #onStatus: (status: string) => void;
+  #resume?: EventListener;
+  #closed = false;
+
+  constructor(
+    speaker: HTMLAudioElement,
+    onStatus: (status: string) => void,
+    gestures: PlaybackGestureTarget = document,
+  ) {
+    this.#speaker = speaker;
+    this.#onStatus = onStatus;
+    this.#gestures = gestures;
+    this.#speaker.autoplay = true;
+  }
+
+  attach(stream: MediaStream): void {
+    if (this.#closed) return;
+    this.#speaker.srcObject = stream;
+    this.#play();
+  }
+
+  close(): void {
+    if (this.#closed) return;
+    this.#closed = true;
+    this.#disarm();
+    this.#speaker.pause();
+    this.#speaker.srcObject = null;
+  }
+
+  #play(): void {
+    if (this.#closed) return;
+    this.#disarm();
+    void this.#speaker.play().catch(() => {
+      if (this.#closed) return;
+      this.#onStatus("Voice connected — tap once to enable speaker audio");
+      const resume: EventListener = () => {
+        if (this.#resume !== resume) return;
+        this.#resume = undefined;
+        this.#gestures.removeEventListener("pointerdown", resume, true);
+        this.#play();
+      };
+      this.#resume = resume;
+      this.#gestures.addEventListener("pointerdown", resume, { capture: true, once: true });
+    });
+  }
+
+  #disarm(): void {
+    if (!this.#resume) return;
+    this.#gestures.removeEventListener("pointerdown", this.#resume, true);
+    this.#resume = undefined;
+  }
+}
+
 const MAX_CONTEXT_APPEND_BYTES = 500;
 const OUTPUT_FLUSH_MS = 200;
 const REALTIME_OUTPUT_BYTE_LIMIT = 4_000;
@@ -51,7 +110,7 @@ export class BrowserVoiceSession {
   #channel?: RTCDataChannel;
   #sideband?: WebSocket;
   #microphone?: MediaStream;
-  #speaker?: HTMLAudioElement;
+  #speaker?: SpeakerPlayback;
   #call?: AbortController;
   #transcript: VoiceTranscriptEntry[] = [];
   #newInputEntry = false;
@@ -110,13 +169,10 @@ export class BrowserVoiceSession {
     this.#channel = channel;
     peer.addEventListener("track", (event) => {
       const stream = event.streams[0] ?? new MediaStream([event.track]);
-      const speaker = this.#speaker ?? new Audio();
-      speaker.autoplay = true;
-      speaker.srcObject = stream;
+      const speaker = this.#speaker
+        ?? new SpeakerPlayback(new Audio(), this.#options.onStatus);
       this.#speaker = speaker;
-      void speaker.play().catch(() => {
-        this.#options.onStatus("Voice connected — click the page once to enable speaker audio");
-      });
+      speaker.attach(stream);
     });
     peer.addEventListener("connectionstatechange", () => {
       if (peer.connectionState === "failed" || peer.connectionState === "disconnected") {
@@ -218,6 +274,23 @@ export class BrowserVoiceSession {
   close(): Promise<void> {
     if (this.#closePromise) return this.#closePromise;
     this.#closed = true;
+    this.#stopMedia();
+    this.#options.onStatus("Voice stopped");
+    const tail = this.#transcript.splice(0).filter(({ text }) => text.trim());
+    this.#closePromise = this.#finishLifecycle(tail);
+    return this.#closePromise;
+  }
+
+  /** Releases browser resources after the owning agent disappears without messaging that agent again. */
+  abort(): void {
+    if (this.#closed) return;
+    this.#closed = true;
+    this.#stopMedia();
+    this.#transcript = [];
+    this.#closePromise = Promise.resolve();
+  }
+
+  #stopMedia(): void {
     this.#call?.abort();
     this.#call = undefined;
     if (this.#flushTimer !== undefined) window.clearTimeout(this.#flushTimer);
@@ -230,14 +303,7 @@ export class BrowserVoiceSession {
     this.#channel?.close();
     this.#peer?.close();
     stopStream(this.#microphone);
-    if (this.#speaker) {
-      this.#speaker.pause();
-      this.#speaker.srcObject = null;
-    }
-    this.#options.onStatus("Voice stopped");
-    const tail = this.#transcript.splice(0).filter(({ text }) => text.trim());
-    this.#closePromise = this.#finishLifecycle(tail);
-    return this.#closePromise;
+    this.#speaker?.close();
   }
 
   async #finishLifecycle(tail: VoiceTranscriptEntry[]): Promise<void> {

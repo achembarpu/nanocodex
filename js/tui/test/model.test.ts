@@ -43,6 +43,26 @@ test("a terminal failure is rendered once across event and result paths", () => 
   );
 });
 
+test("a replayed durable result remains visible without streamed events", () => {
+  const queued = queuePrompt(initialTerminalState(), 8, "replay me");
+  const replayed = turnFinished(queued, undefined, "replayed answer");
+
+  assert.deepEqual(replayed.entries.at(-1), {
+    id: "assistant-result-1",
+    kind: "assistant",
+    text: "replayed answer",
+    streaming: false,
+  });
+  const deduplicated = turnFinished(
+    applyAgentEvents(queuePrompt(initialTerminalState(), 9, "stream me"), [
+      event(1, "assistant.message", { text: "streamed answer" }),
+    ]),
+    undefined,
+    "streamed answer",
+  );
+  assert.equal(deduplicated.entries.filter((entry) => entry.kind === "assistant").length, 1);
+});
+
 test("a streaming burst remains one semantic transcript entry", () => {
   const events = Array.from({ length: 20_000 }, (_, index) =>
     event(index + 1, "assistant.delta", { text: "x" }),
