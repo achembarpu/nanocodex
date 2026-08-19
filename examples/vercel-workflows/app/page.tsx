@@ -1,3 +1,5 @@
+import { WorkspaceTerminal } from "./workspace-terminal";
+
 export default function Home() {
   return (
     <main>
@@ -38,6 +40,8 @@ export default function Home() {
         <textarea id="prompt" rows={3} maxLength={1_048_576} placeholder="Ask the durable workflow actor…" required />
         <button id="send" type="submit" disabled>Run durably</button>
       </form>
+
+      <WorkspaceTerminal />
 
       <footer>
         <span id="activity">idle</span>

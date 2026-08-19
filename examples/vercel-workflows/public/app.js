@@ -1,5 +1,6 @@
 const STORAGE_KEY = "nanocodex.vercel.workflow.web.v1";
 const CLIENT_KEY = "nanocodex.vercel.workflow.client";
+const TERMINAL_SESSION_EVENT = "nanocodex:workflow-session";
 const MAX_STREAMED_TEXT = 1024 * 1024;
 const byId = (id) => document.getElementById(id);
 const ui = {
@@ -257,6 +258,7 @@ function renderState() {
   renderControls();
   if (!state.sessionId) setStatus("no session");
   else if (state.pending) setStatus("pending · reconnecting", "warn");
+  announceSession();
 }
 
 function renderMessages() {
@@ -331,6 +333,13 @@ function syncStoredState(encoded) {
     nextIndex = loadCursor(state.sessionId);
     if (state.sessionId) connect();
   }
+  announceSession();
+}
+
+function announceSession() {
+  window.dispatchEvent(new CustomEvent(TERMINAL_SESSION_EVENT, {
+    detail: { sessionId: state.sessionId },
+  }));
 }
 
 function saveState() {

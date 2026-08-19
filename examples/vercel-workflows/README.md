@@ -34,6 +34,9 @@ browser B ─ WebSocket Function ─┘             │
                                      ├─ Responses WebSocket → OpenAI
                                      └─ named persistent Vercel Sandbox
                                           └─ files, commands, preview domains
+
+browser terminal ─ controller PTY WebSocket ─ same named Vercel Sandbox
+                         (separate from the durable agent event stream)
 ```
 
 The WebSocket connection itself is disposable and bounded by the Vercel
@@ -58,6 +61,23 @@ its port before requesting a preview. The demo exposes ports 3000, 5173, 8000,
 and 8080. Vercel OIDC authenticates Sandbox SDK calls inside the deployment, so
 no Vercel access token is passed to Nanocodex or the guest VM.
 
+The optional workspace terminal uses `@wterm/react` as the browser renderer and
+`Sandbox.openInteractive()` as the PTY owner. The attach route resolves exactly
+the same `nanocodex-<workflow-run-id>` Sandbox used by the agent tools, then
+returns the SDK's short-lived controller WebSocket URL and token. Terminal stdin
+is sent as binary UTF-8; the initial `start` and later `resize` controls are JSON
+text frames. The PTY socket never carries Nanocodex events and the replayable
+Workflow socket never carries terminal bytes.
+
+These lifetimes are intentionally different:
+
+- the Workflow actor and Nanocodex snapshot retain committed conversation state;
+- the named persistent Sandbox retains files across VM stop/resume;
+- each terminal attachment owns one ephemeral login shell; reconnecting requests
+  a fresh credential and starts a fresh shell; and
+- detached preview processes survive a browser terminal disconnect while their
+  VM remains running, but do not survive a Sandbox stop/resume boundary.
+
 ## Local development
 
 Build the repository's WASM package and install this consumer:
@@ -73,6 +93,7 @@ WebSocket upgrades require Vercel's Function adapter:
 ```sh
 export OPENAI_API_KEY=sk-...
 export NANOCODEX_AUTH_MODE=api_key
+export NANOCODEX_TERMINAL_TOKEN="$(openssl rand -hex 32)"
 npx vercel dev examples/vercel-workflows
 ```
 
@@ -86,12 +107,19 @@ The helper reads `$CODEX_HOME/auth.json` or `~/.codex/auth.json`, verifies that
 the file is private and that the access token is not about to expire, and keeps
 the token in the server process. `NANOCODEX_CODEX_AUTH_FILE` overrides the path.
 
+`NANOCODEX_TERMINAL_TOKEN` is optional for the agent demo but required to attach
+the workspace terminal. If it is absent, the terminal route fails closed with
+HTTP 503. Enter the configured value in the browser only when attaching; the UI
+keeps it in React memory and does not put it in localStorage, sessionStorage, a
+URL, or the Workflow stream.
+
 ## Deploy with subscription authentication
 
 Authenticate Vercel CLI once with `npx vercel login`, then run from the
 repository root:
 
 ```sh
+export NANOCODEX_TERMINAL_TOKEN="$(openssl rand -hex 32)"
 npm run deploy:subscription --prefix examples/vercel-workflows
 ```
 
@@ -101,7 +129,9 @@ The deployment helper:
    `VERCEL_PROJECT`; set `VERCEL_SCOPE` when your account belongs to multiple
    teams);
 2. copies only the current Codex access token and account metadata into
-   sensitive Production environment variables;
+   sensitive Production environment variables, plus
+   `NANOCODEX_TERMINAL_TOKEN` when it is present in the deploy command's
+   environment;
 3. enables Fluid Compute and sequential Workflow replay;
 4. builds and packs the current repository's Nanocodex WASM package into a
    temporary deployment directory; and
@@ -142,12 +172,26 @@ the local machine—served the response.
    stream and terminal result.
 6. Ask it to use `sandbox_start_process` for a server on port 3000, then use
    `sandbox_preview`; open the returned `vercel.run` URL.
+7. Enter the separately shared terminal token and attach. The shell starts in
+   `/workspace`, the same filesystem the `sandbox_*` tools mutate. Detaching the
+   terminal does not cancel an agent turn, and detaching the agent stream does
+   not stop the shell.
 
 The browser stores only the session capability, a bounded transcript, active
 turn metadata, and its own stream cursor. Model credentials stay in the server
 step. Treat the session ID as a bearer capability: anyone who knows it can read
 that session's stream and submit prompts. If `NANOCODEX_ADMIN_TOKEN` is unset,
 any visitor can also create sessions and consume model tokens.
+
+Terminal access is deliberately stricter. `POST
+/api/sessions/<session-id>/terminal` requires
+`Authorization: Bearer <NANOCODEX_TERMINAL_TOKEN>` before it resolves or resumes
+a Sandbox. The returned controller token grants an interactive shell and must
+not be logged, persisted, placed in application URLs, or copied into Workflow
+state. A production application should replace the demo's shared terminal token
+with authenticated per-user authorization and verify that the caller owns the
+requested Workflow session before issuing a PTY credential. Knowing only the
+Workflow session ID is not sufficient for terminal access in this example.
 
 ## Validation
 

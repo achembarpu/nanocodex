@@ -1,9 +1,12 @@
-import { Sandbox } from "@vercel/sandbox";
+import type { Sandbox } from "@vercel/sandbox";
 import type { ToolMap } from "nanocodex";
 
-const WORKSPACE = "/vercel/sandbox";
-const VIRTUAL_WORKSPACE = "/workspace";
-const PREVIEW_PORTS = [3000, 5173, 8000, 8080] as const;
+import {
+  PHYSICAL_WORKSPACE as WORKSPACE,
+  PREVIEW_PORTS,
+  VIRTUAL_WORKSPACE,
+  prepareSessionSandbox,
+} from "./session-sandbox";
 const MAX_COMMAND_CHARS = 32 * 1024;
 const MAX_FILE_BYTES = 1024 * 1024;
 const MAX_OUTPUT_BYTES = 128 * 1024;
@@ -11,7 +14,7 @@ const MAX_LIST_ENTRIES = 512;
 const MAX_TIMEOUT_MS = 120_000;
 
 export function vercelSandboxTools(sessionId: string): ToolMap {
-  return createVercelSandboxTools(() => prepareSandbox(sessionId));
+  return createVercelSandboxTools(() => prepareSessionSandbox(sessionId));
 }
 
 export function createVercelSandboxTools(
@@ -180,31 +183,6 @@ export function createVercelSandboxTools(
       },
     },
   };
-}
-
-async function prepareSandbox(sessionId: string): Promise<Sandbox> {
-  const sandbox = await Sandbox.getOrCreate({
-    name: `nanocodex-${sessionId}`,
-    runtime: "node24",
-    persistent: true,
-    timeout: 10 * 60_000,
-    ports: [...PREVIEW_PORTS],
-    keepLastSnapshots: { count: 3, expiration: 7 * 24 * 60 * 60_000 },
-    tags: { application: "nanocodex", session: sessionId.slice(0, 64) },
-  });
-  const linked = await sandbox.runCommand({
-    cmd: "bash",
-    args: [
-      "-lc",
-      `if [ -e ${VIRTUAL_WORKSPACE} ] || [ -L ${VIRTUAL_WORKSPACE} ]; then test "$(readlink -f ${VIRTUAL_WORKSPACE})" = ${WORKSPACE}; else ln -s ${WORKSPACE} ${VIRTUAL_WORKSPACE}; fi`,
-    ],
-    sudo: true,
-    timeoutMs: 10_000,
-  });
-  if (linked.exitCode !== 0) {
-    throw new Error(`failed to prepare /workspace: ${await linked.stderr()}`);
-  }
-  return sandbox;
 }
 
 async function waitForPort(

@@ -10,9 +10,22 @@ describe("browser demo", () => {
     expect(source).toContain("stream_event");
     expect(source).toContain("window.addEventListener(\"storage\"");
     expect(source).toContain("assistant.delta");
+    expect(source).toContain("nanocodex:workflow-session");
     expect(source).not.toContain("CHATGPT_ACCESS_TOKEN");
     expect(source).not.toContain("OPENAI_API_KEY");
     expect(source).not.toContain("cloud_api_");
+  });
+
+  it("keeps the PTY attachment separate from the replayable agent stream", async () => {
+    const terminal = await readFile(
+      new URL("../app/workspace-terminal.tsx", import.meta.url),
+      "utf8",
+    );
+    expect(terminal).toContain("terminalStartFrame");
+    expect(terminal).toContain("terminalInputFrame");
+    expect(terminal).toContain("NANOCODEX_TERMINAL_TOKEN");
+    expect(terminal).not.toContain("startIndex");
+    expect(terminal).not.toContain("stream_event");
   });
 
   it("keeps model credentials behind the server-side workflow step", async () => {
