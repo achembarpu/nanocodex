@@ -89,7 +89,7 @@ export function createExampleAgentController({
 
     let turn: Turn;
     try {
-      turn = current.turn.prompt({ id: String(command.id), input: command.prompt });
+      turn = current.turn.prompt({ input: command.prompt });
     } catch (error) {
       postMessage({
         type: "error",

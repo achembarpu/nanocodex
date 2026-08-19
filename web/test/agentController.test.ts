@@ -72,7 +72,6 @@ test("the Worker controller owns prompts, steering, cancellation, events, and cl
     intent: "immediate",
   });
   const first = harness.turns[0]!;
-  assert.equal(first.id, "1");
   assert.equal(first.input, "inspect");
 
   await controller.handle({
@@ -729,9 +728,8 @@ class FakeAgent {
     this.harness = harness;
     this.sessionId = sessionId;
     this.turn = {
-      prompt: ({ id, input }: { id?: string; input: unknown }) => {
+      prompt: ({ input }: { input: unknown }) => {
         const turn = new FakeTurn(
-          id,
           input,
           this.harness.nextTurnResultError,
           this.harness.nextSteerError,
@@ -804,7 +802,6 @@ class FakeTurn {
   disposed = 0;
   cancelled = 0;
   steers: unknown[] = [];
-  readonly id?: string;
   readonly input: unknown;
   private readonly resultError?: Error;
   steerError?: Error;
@@ -813,12 +810,10 @@ class FakeTurn {
   private readonly completion: Promise<FakeTurnResult>;
 
   constructor(
-    id: string | undefined,
     input: unknown,
     resultError?: Error,
     steerError?: Error,
   ) {
-    this.id = id;
     this.input = input;
     this.resultError = resultError;
     this.steerError = steerError;
