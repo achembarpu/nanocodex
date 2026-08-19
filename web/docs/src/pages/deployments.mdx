@@ -21,9 +21,10 @@ state, clients, and sandbox policy in that application.
 ## Durable platform owners
 
 - [Vercel Workflows](https://github.com/gakonst/nanocodex/tree/master/examples/vercel-workflows)
-  models the agent as a durable Workflow actor, retains replayable state, owns a
-  persistent Vercel Sandbox, synchronizes native WebSocket clients, and attaches
-  a wterm operator shell to the same workspace.
+  models the agent as a durable Workflow actor, retains the opaque Rust journal
+  and replayable client stream, owns a persistent Vercel Sandbox, synchronizes
+  native WebSocket clients, and attaches a wterm operator shell to the same
+  workspace.
 - [Cloudflare Workers](https://github.com/gakonst/nanocodex/tree/master/examples/cloudflare-workers)
   uses a SQLite-backed Durable Object, Sandbox container, R2-backed workspace,
   and hibernation-safe session recovery.
@@ -40,14 +41,18 @@ state, clients, and sandbox policy in that application.
 ## Design checklist
 
 1. Give one durable platform owner exclusive access to each live agent.
-2. Persist snapshots only after completed turns, in an application-versioned
-   envelope containing the policy needed to reconstruct the agent.
-3. Keep event delivery independent from result completion; clients may reconnect
+2. Attach [`nanocodex-durability`](/core/durability) when prompts and internal
+   model/tool steps need journaled deduplication and recovery.
+3. Back that journal with a platform store that provides atomic
+   compare-and-append at the recovery granularity the deployment requires.
+4. If using snapshots instead, persist them only after completed turns in an
+   application-versioned envelope containing reconstruction policy.
+5. Keep event delivery independent from result completion; clients may reconnect
    without becoming owners of conversation history.
-4. Create fresh agent-relative tools for spawns and forks.
-5. Make sandbox lifecycle, workspace durability, egress, secrets, and cleanup
+6. Create fresh agent-relative tools for spawns and forks.
+7. Make sandbox lifecycle, workspace durability, egress, secrets, and cleanup
    explicit.
-6. Close descendant task trees and tool processes before stopping the root.
+8. Close descendant task trees and tool processes before stopping the root.
 
 These examples are runnable integration proofs, not portability guarantees for
 platform APIs. Pin versions and test the recovery semantics that matter to your
@@ -57,7 +62,7 @@ product.
 
 The Vercel example keeps three lifecycles deliberately separate:
 
-- Workflow retains the Nanocodex snapshot and replayable typed event stream;
+- Workflow retains the Nanocodex Rust journal and replayable typed event stream;
 - one named persistent Vercel Sandbox retains `/workspace`; and
 - `@wterm/react` renders an operator PTY created by `Sandbox.openInteractive()`.
 
@@ -67,7 +72,8 @@ receives binary output plus text exit controls. The attachment route requires a
 separate bearer secret before it asks Vercel for a short-lived URL and token.
 Those credentials never enter Workflow history.
 
-Agent history survives Workflow replay and files survive Sandbox snapshots. The
+Agent history is reconstructed from the journal and files survive Sandbox
+snapshots. The
 interactive shell is ephemeral per attachment and must request a fresh token
 after disconnect; persistent files do not imply PTY process continuity. This
 operator terminal is therefore not a second agent protocol and does not require
@@ -75,15 +81,24 @@ an AI SDK Harness adapter. See the [implementation and security notes](https://g
 
 ## Recovery boundary
 
-Persist only complete checkpoints and reconstruct one owner before accepting
-new prompts. A Durable Object, Workflow, or Actor may replay its own execution,
-but model requests and tool effects are not automatically replay-safe platform
-steps. Keep Nanocodex's owned driver live behind the actor boundary and use the
-application snapshot as the restart handoff. Clients should reconnect to that
-owner rather than replaying prior messages, response IDs, or tool results.
+The optional durability layer journals admission, model calls, tool calls, and
+committed checkpoints. Rust decides whether an interrupted step is retry-safe,
+completed and replayable, or ambiguous because an unsafe external effect may
+already have happened. The platform should not independently infer that policy
+from a Function or Workflow retry.
+
+The Vercel example persists one opaque journal in each completed Function-step
+result. A crash before that step returns restarts from the preceding journal.
+For mid-step crash recovery, back the same `DurabilityStore` host interface with
+an external atomic compare-and-append service. Cloudflare and Rivet can map that
+contract onto their own serialized state owners.
+
+Reconstruct one agent owner before accepting new prompts. Clients reconnect to
+its event projection; they never replay prior messages, response IDs, or tool
+results into a replacement agent.
 
 Hosted Responses proxies should authorize the user before upgrading the socket,
 scope credentials to the thread, and keep diagnostics off contractual stdout or
-client event streams. A sandbox's persistent filesystem and the session
-snapshot need coordinated retention but remain separate data: restoring one
-does not prove the other is current.
+client event streams. A sandbox's persistent filesystem and the agent journal
+need coordinated retention but remain separate data: restoring one does not
+prove the other is current.

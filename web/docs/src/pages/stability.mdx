@@ -15,6 +15,8 @@ The published foundation is:
 
 - `nanocodex`, the thin Alloy-style facade;
 - `nanocodex-agent`, the owned session, events, results, snapshots, and branches;
+- optional `nanocodex-durability`, the Rust-owned journal, recovery policy,
+  checkpoints, and portable store boundary;
 - `nanocodex-oai-api`, the typed OpenAI Responses and Tower boundary;
 - `nanocodex-tools` and `nanocodex-tools-macros`, including native Code Mode,
   workspace tools, MCP, web, and image tooling;
@@ -56,8 +58,8 @@ Nanocodex does not provide:
 - provider or arbitrary-model portability;
 - a generic app server, JSON-RPC daemon, or remote agent protocol;
 - an approval subsystem or security sandbox enabled by default;
-- a database, durable session index, memory system, skill/plugin framework, or
-  application scheduler;
+- a tenancy database, application session index, memory system, skill/plugin
+  framework, or application scheduler;
 - generic browser/computer use in the stable core.
 
 It supports a deliberate OpenAI model family and Responses lifecycle. API-key,
@@ -72,7 +74,9 @@ security claim about arbitrary generated code. VM-backed tools and hosted
 sandboxes are explicit choices, not implicit defaults.
 
 Applications own credentials, tenancy, authorization, egress policy, durable
-storage, and data retention. Tracing is designed as a full-fidelity copy of the
+store selection, and data retention. The optional durability crate owns its
+journal format and recovery decisions, not the surrounding product database.
+Tracing is designed as a full-fidelity copy of the
 agent lifecycle, so its backend must receive conversation-equivalent access and
 retention policy. See the [observability contract](https://github.com/gakonst/nanocodex/blob/master/docs/OBSERVABILITY.md).
 

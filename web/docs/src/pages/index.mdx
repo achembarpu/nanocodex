@@ -40,6 +40,9 @@ and [minimal runnable example](https://github.com/gakonst/nanocodex/blob/master/
 - **Owned sessions.** Prompt ordering, steering, cancellation, compaction,
   snapshots, clean spawns, contextual forks, tool loops, and cleanup have one
   owner: the private driver.
+- **Optional durable execution.** Attach a Rust-owned append-only journal for
+  request deduplication, model/tool step recovery, effect replay, and
+  checkpoints backed by memory, SQLite, Postgres, or a host store.
 - **Tools and Code Mode.** Register typed Rust or JavaScript tools, use the
   standard workspace runtime, execute nested tool calls from JavaScript cells,
   and keep large MCP catalogs deferred until searched.
@@ -65,14 +68,17 @@ database. Authentication and transport recipes can use an OpenAI API key,
 managed ChatGPT credentials, a host-managed socket, or an MPP session while the
 agent semantics remain OpenAI Responses semantics.
 
-The application keeps product policy: UI, durable session indexing, tenancy,
-credentials, memory, skills, review workflows, sandbox choice, and deployment.
+The application keeps product policy: UI, tenancy, credentials, memory, skills,
+review workflows, sandbox choice, storage selection, and deployment. Nanocodex
+can own the durable journal and recovery state machine without owning your
+account model or application database.
 The [Tact case study](/examples/tact) shows that split in a complete product.
 
 ## Choose a path
 
 - [Get started](/getting-started) with the native Rust library and CLI.
 - Learn [the owned-agent lifecycle](/core/owned-agent).
+- Add [durable execution and recovery](/core/durability).
 - Add [tools, Code Mode, and MCP](/core/tools-code-mode).
 - Compare the [Rust](/sdks/rust), [JavaScript](/sdks/javascript), and
   [Python](/sdks/python) surfaces.

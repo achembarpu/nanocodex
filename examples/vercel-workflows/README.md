@@ -71,7 +71,7 @@ Workflow socket never carries terminal bytes.
 
 These lifetimes are intentionally different:
 
-- the Workflow actor and Nanocodex snapshot retain committed conversation state;
+- the Workflow actor and Rust journal retain committed conversation state;
 - the named persistent Sandbox retains files across VM stop/resume;
 - each terminal attachment owns one ephemeral login shell; reconnecting requests
   a fresh credential and starts a fresh shell; and

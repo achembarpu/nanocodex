@@ -560,7 +560,7 @@ client projection, and sandbox policy while reusing one agent lifecycle:
 | [Cloudflare Durable Object](examples/cloudflare-workers/README.md) | One SQLite-backed object owns WASM history and hibernatable clients; a separate Sandbox container and R2 prefix provide per-session tools and files. |
 | [Cloudflare fetch + MCP](examples/cloudflare-fetch-mcp/README.md) | CSP-safe QuickJS Code Mode, deferred remote MCP, and caller-owned paid transport inside a serialized Durable Object. |
 | [Rivet Actor](examples/rivet-actors/README.md) | Durable SQLite snapshots and idempotent turns around the WASM driver, with an actor-owned AgentOS workspace and previews. |
-| [Vercel Workflow actor](examples/vercel-workflows/README.md) | Snapshots between stateless steps, replayable multi-client streams, and a persistent caller-owned Vercel Sandbox; wterm attaches an ephemeral operator shell to that same workspace. |
+| [Vercel Workflow actor](examples/vercel-workflows/README.md) | A Rust-owned journal between stateless steps, replayable multi-client streams, and a persistent caller-owned Vercel Sandbox; wterm attaches an ephemeral operator shell to that same workspace. |
 | [exe.dev](examples/exe-dev/README.md) | Both a retained native session inside a VM and the inverse: a host agent controlling one exact remote VM through narrow tools. |
 | [Python](examples/python) and [Node](examples/node/README.md) | Thin language bindings over the same results, events, history, snapshots, branches, and shutdown semantics. |
 
@@ -579,6 +579,7 @@ tracing, and benchmark gates; stable crates never depend on them.
 | --- | --- | --- |
 | [`nanocodex`](crates/nanocodex/README.md) | Stable, published | Thin Alloy-style facade and canonical imports; no runtime implementation. |
 | [`nanocodex-agent`](crates/nanocodex-agent/README.md) | Stable, published | Owned driver, turns/results/events, history policy, snapshots, compaction, branches, and cancellation. |
+| [`nanocodex-durability`](crates/nanocodex-durability/README.md) | Stable, published, optional | Append-only execution journal, deduplication, replay and recovery policy, checkpoints, and memory/SQLite/Postgres/host stores. |
 | [`nanocodex-oai-api`](crates/nanocodex-oai-api/README.md) | Stable, published | OpenAI auth, typed Responses and Realtime boundaries, persistent transports, managed context, retry, pricing, and Tower client. |
 | [`nanocodex-tools`](crates/nanocodex-tools/README.md) | Stable, published | Tool contract, standard tools, shell/process lifecycle, Code Mode, deferred search, MCP, and remote dispatch. |
 | [`nanocodex-subagents`](crates/nanocodex-subagents/README.md) | Optional workspace extension | Task-tree lifecycle and the seven canonical child-agent tools above the core. |

@@ -688,12 +688,12 @@ function NanocodexShell() {
                       </article>
                       <article>
                         <span>06 / Interfaces</span>
-                        <h3>Voice and durable deployments</h3>
+                        <h3>Durability, voice, and durable deployments</h3>
                         <p>
-                          Add experimental GPT Realtime voice to the same coding
-                          session, or deploy the WASM agent as a resumable
-                          Cloudflare Durable Object or Rivet Actor. Typed
-                          snapshots restore history without a second protocol.
+                          Attach the Rust-owned journal for deduplication,
+                          checkpoints, and recovery; add experimental GPT
+                          Realtime voice; or deploy the WASM agent inside a
+                          resumable Workflow, Durable Object, or Rivet Actor.
                         </p>
                       </article>
                     </div>

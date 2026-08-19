@@ -1,9 +1,10 @@
 import { defineConfig } from "vocs/config";
+import { docsBasePath } from "./site.js";
 
 export default defineConfig({
   title: "Nanocodex",
   description: "A complete OpenAI coding agent, embedded in your product.",
-  basePath: "/docs",
+  basePath: docsBasePath,
   baseUrl: "https://nanocodex.me-7fb.workers.dev",
   renderStrategy: "full-static",
   ogImageUrl: "https://nanocodex.me-7fb.workers.dev/og.png",
@@ -27,6 +28,7 @@ export default defineConfig({
       text: "Core",
       items: [
         { text: "The owned agent", link: "/core/owned-agent" },
+        { text: "Durable execution", link: "/core/durability" },
         { text: "Tools and Code Mode", link: "/core/tools-code-mode" },
         { text: "Branches and subagents", link: "/core/branching" },
       ],
