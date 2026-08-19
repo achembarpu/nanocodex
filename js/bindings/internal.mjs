@@ -95,6 +95,13 @@ export function compact(agent) {
   return agentState(agent).raw.compact();
 }
 
+export async function appendDeveloperMessage(agent, text) {
+  if (typeof text !== "string" || !text.trim()) {
+    throw new TypeError("non-empty string");
+  }
+  return JSON.parse(await agentState(agent).raw.appendDeveloperMessage(text));
+}
+
 export async function shutdown(agent) {
   const state = knownAgentState(agent);
   if (state.shutdownPromise) return state.shutdownPromise;

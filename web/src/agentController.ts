@@ -1,5 +1,6 @@
 import type {
   AgentEvent,
+  AgentSessionContext,
   DefaultAgent,
   ReasoningMode,
   Thinking,
@@ -13,6 +14,10 @@ import type {
   WebTuiCommand,
 } from "./nanocodex";
 import type { Address } from "viem";
+import {
+  REALTIME_END_INSTRUCTIONS,
+  REALTIME_START_INSTRUCTIONS,
+} from "./voiceProtocol.ts";
 
 type Target = TuiTarget;
 
@@ -132,6 +137,24 @@ export function createAgentController({
           prompt: message.prompt,
           intent: "queue",
         });
+        return;
+      }
+      case "voiceLifecycle": {
+        const branch = resolveTarget(message.target);
+        if (!branch) {
+          postVoiceLifecycleResult(message.id, message.action, undefined, "Branch is unavailable");
+          return;
+        }
+        try {
+          const context = await branch.agent.session.appendDeveloperMessage(
+            message.action === "start"
+              ? REALTIME_START_INSTRUCTIONS
+              : REALTIME_END_INSTRUCTIONS,
+          );
+          postVoiceLifecycleResult(message.id, message.action, context);
+        } catch (error) {
+          postVoiceLifecycleResult(message.id, message.action, undefined, errorMessage(error));
+        }
         return;
       }
       case "voicePrompt": {
@@ -435,6 +458,21 @@ export function createAgentController({
     if (encoded === lastPaymentStatus) return;
     lastPaymentStatus = encoded;
     postMessage({ type: "mppPayment", payment: status });
+  }
+
+  function postVoiceLifecycleResult(
+    id: number,
+    action: "start" | "stop",
+    context?: AgentSessionContext,
+    error?: string,
+  ): void {
+    postMessage({
+      type: "voiceLifecycleResult",
+      id,
+      action,
+      ...(context ? { context } : {}),
+      ...(error ? { error } : {}),
+    });
   }
 
   function rememberSessionImage(sessionId: string, imageUrl: string): void {

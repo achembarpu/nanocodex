@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import worker from "./index.ts";
+import { CHATGPT_REALTIME_INSTRUCTIONS } from "./realtimePrompt.ts";
 
 function createByokSessions() {
   const credentials = new Map<string, string>();
@@ -444,7 +445,12 @@ test("Realtime calls keep subscription credentials server-side and bind the agen
         origin: "https://demo.test",
         cookie,
       },
-      body: JSON.stringify({ sdp: "v=0\r\na=offer\r\n", session_id: "session-1", voice: "cove" }),
+      body: JSON.stringify({
+        sdp: "v=0\r\na=offer\r\n",
+        session_id: "session-1",
+        startup_context: "<startup_context>current thread</startup_context>",
+        voice: "cove",
+      }),
     }), { ENVIRONMENT: "test", CHATGPT_SESSIONS: namespace });
     assert.equal(response.status, 200);
     assert.equal(await response.text(), "v=0\r\na=answer\r\n");
@@ -457,6 +463,10 @@ test("Realtime calls keep subscription credentials server-side and bind the agen
     const session = upstreamBody?.session as Record<string, unknown>;
     assert.deepEqual(session.delegation, { type: "client" });
     assert.equal(session.model, "gpt-live-1-boulder-alpha");
+    assert.equal(
+      session.instructions,
+      `${CHATGPT_REALTIME_INSTRUCTIONS}\n\n<startup_context>current thread</startup_context>`,
+    );
   } finally {
     globalThis.fetch = originalFetch;
   }

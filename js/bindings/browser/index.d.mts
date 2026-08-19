@@ -16,6 +16,7 @@ export type {
 } from "../runtime/tempo-provider.mjs";
 export type {
   AgentEvent,
+  AgentSessionContext,
   ChatGptCredential,
   ChatGptCredentialSeed,
   ChatGptLoginStatus,

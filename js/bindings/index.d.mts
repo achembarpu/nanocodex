@@ -23,6 +23,7 @@ export type {
   AgentActions,
   AgentEvent,
   AgentOptions,
+  AgentSessionContext,
   ChatGptCredential,
   ChatGptCredentialSeed,
   ChatGptLoginStatus,

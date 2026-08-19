@@ -163,6 +163,12 @@ export type TurnUsage = Readonly<{
 export type ForkOptions = { at?: TurnResult | undefined };
 export type WatchEventsOptions = { includeAllSessions?: boolean | undefined };
 
+/** Read-only model context captured at the latest safe agent boundary. */
+export type AgentSessionContext = Readonly<{
+  workspace: string;
+  history: readonly Record<string, unknown>[];
+}>;
+
 export type EventWatcher = Readonly<{
   onEvent(listener: (event: AgentEvent) => void): () => void;
   off(): void;
@@ -174,6 +180,7 @@ export type AgentActions = {
     watch(options?: WatchEventsOptions): EventWatcher;
   };
   session: {
+    appendDeveloperMessage(text: string): Promise<AgentSessionContext>;
     compact(): Promise<void>;
     fork(options?: ForkOptions): Promise<DefaultAgent>;
     setFastMode(enabled: boolean): Promise<void>;

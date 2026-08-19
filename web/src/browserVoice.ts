@@ -1,6 +1,14 @@
+import type { AgentSessionContext } from "nanocodex";
+import type { Workspace } from "nanocodex/browser/workspace";
 import type { AgentEvent, TuiTarget } from "nanocodex-tui";
 
 import type { WebTuiMessage } from "./nanocodex";
+import {
+  browserVoiceStartupContext,
+  realtimeDelegation,
+  realtimeTailDelegation,
+  type VoiceTranscriptEntry,
+} from "./voiceProtocol.ts";
 
 export const CHATGPT_VOICES = [
   "juniper",
@@ -16,12 +24,13 @@ export const CHATGPT_VOICES = [
 
 export type ChatGptVoice = typeof CHATGPT_VOICES[number];
 
-type TranscriptEntry = { role: "user" | "assistant"; text: string };
-
 export type BrowserVoiceOptions = {
   sessionId: string;
   target: TuiTarget;
   voice: ChatGptVoice;
+  workspace(): Promise<Workspace>;
+  onStart(): Promise<AgentSessionContext>;
+  onStop(): Promise<void>;
   onDelegation(prompt: string): void;
   onStatus(status: string): void;
   onTranscript(speaker: "user" | "assistant", text: string): void;
@@ -29,6 +38,8 @@ export type BrowserVoiceOptions = {
 
 const MAX_CONTEXT_APPEND_BYTES = 500;
 const OUTPUT_FLUSH_MS = 200;
+const REALTIME_OUTPUT_BYTE_LIMIT = 4_000;
+const HANDOFF_STREAM_TRUNCATION_MARKER = "\n…output truncated…\n";
 
 /** Main-thread browser media and ChatGPT Realtime lifecycle. */
 export class BrowserVoiceSession {
@@ -39,13 +50,17 @@ export class BrowserVoiceSession {
   #microphone?: MediaStream;
   #speaker?: HTMLAudioElement;
   #call?: AbortController;
-  #transcript: TranscriptEntry[] = [];
+  #transcript: VoiceTranscriptEntry[] = [];
   #newInputEntry = false;
   #newOutputEntry = false;
   #activeDelegation?: string;
-  #output = "";
+  #output = new HandoffStream();
   #flushTimer?: number;
-  #streamedThisRun = false;
+  #streamedThisMessage = false;
+  #outputSentThisRun = false;
+  #runError?: string;
+  #lifecycleStart?: Promise<AgentSessionContext>;
+  #closePromise?: Promise<void>;
   #closed = false;
 
   constructor(options: BrowserVoiceOptions) {
@@ -57,10 +72,16 @@ export class BrowserVoiceSession {
   }
 
   async start(): Promise<void> {
+    const lifecycleStart = this.#options.onStart();
+    this.#lifecycleStart = lifecycleStart;
+    const context = await lifecycleStart;
+    if (this.#closed) return;
+    const workspace = await this.#options.workspace().catch(() => undefined);
+    const startupContext = await browserVoiceStartupContext(context, workspace);
+    if (this.#closed) return;
     if (!navigator.mediaDevices?.getUserMedia) {
       throw new Error("this browser does not expose microphone capture");
     }
-    this.#options.onStatus("Connecting voice…");
     let microphone = await navigator.mediaDevices.getUserMedia({ audio: voiceAudioConstraints() });
     const devices = await navigator.mediaDevices.enumerateDevices();
     const initialTrack = microphone.getAudioTracks()[0];
@@ -118,6 +139,7 @@ export class BrowserVoiceSession {
       body: JSON.stringify({
         sdp,
         session_id: this.#options.sessionId,
+        ...(startupContext ? { startup_context: startupContext } : {}),
         voice: this.#options.voice,
       }),
     });
@@ -134,7 +156,11 @@ export class BrowserVoiceSession {
     this.#sideband = sideband;
     sideband.addEventListener("message", (event) => this.#onRealtimeMessage(event.data));
     sideband.addEventListener("close", () => {
-      if (!this.#closed) this.#options.onStatus("Voice stopped");
+      if (!this.#closed) {
+        void this.close().catch((error) => {
+          this.#options.onStatus(`Voice: ${error instanceof Error ? error.message : String(error)}`);
+        });
+      }
     });
     await waitForWebSocket(sideband);
     if (!this.#closed) {
@@ -146,40 +172,51 @@ export class BrowserVoiceSession {
     if (this.#closed || message.type !== "event" || !sameTarget(message.target, this.target)) return;
     const event = message.event;
     if (event.type === "run.started") {
-      this.#streamedThisRun = false;
+      this.#streamedThisMessage = false;
+      this.#outputSentThisRun = false;
+      this.#runError = undefined;
+      this.#output = new HandoffStream();
       return;
     }
     if (event.type === "assistant.delta") {
       const text = payloadText(event);
       if (text) {
-        this.#streamedThisRun = true;
-        this.#output += text;
+        this.#streamedThisMessage = true;
+        this.#output.pushText(text);
         this.#scheduleFlush();
       }
       return;
     }
-    if (event.type === "assistant.message" && !this.#streamedThisRun) {
+    if (event.type === "assistant.message") {
       const text = payloadText(event);
-      if (text) {
-        this.#output += text;
-        this.#flushOutput();
-      }
+      if (text && !this.#streamedThisMessage) this.#output.pushText(text);
+      this.#flushOutput(true);
+      this.#output = new HandoffStream();
+      this.#streamedThisMessage = false;
+      return;
+    }
+    if (event.type === "run.error") {
+      this.#runError = payloadText(event) || "The coding agent failed.";
       return;
     }
     if (event.type === "run.completed" || event.type === "run.failed") {
-      this.#flushOutput();
+      this.#flushOutput(true);
+      if (event.type === "run.failed" && this.#activeDelegation && !this.#outputSentThisRun) {
+        this.#sendOutput(this.#runError ?? "The coding agent failed.");
+      }
+      this.#output = new HandoffStream();
       this.#activeDelegation = undefined;
     }
   }
 
-  close(): void {
-    if (this.#closed) return;
+  close(): Promise<void> {
+    if (this.#closePromise) return this.#closePromise;
     this.#closed = true;
     this.#call?.abort();
     this.#call = undefined;
     if (this.#flushTimer !== undefined) window.clearTimeout(this.#flushTimer);
     this.#flushTimer = undefined;
-    this.#output = "";
+    this.#output = new HandoffStream();
     if (this.#sideband?.readyState === WebSocket.OPEN) {
       this.#sideband.send(JSON.stringify({ type: "session.close" }));
     }
@@ -192,6 +229,20 @@ export class BrowserVoiceSession {
       this.#speaker.srcObject = null;
     }
     this.#options.onStatus("Voice stopped");
+    const tail = realtimeTailDelegation(this.#transcript.splice(0));
+    this.#closePromise = this.#finishLifecycle(tail);
+    return this.#closePromise;
+  }
+
+  async #finishLifecycle(tail: string | undefined): Promise<void> {
+    if (!this.#lifecycleStart) return;
+    try {
+      await this.#lifecycleStart;
+    } catch {
+      return;
+    }
+    if (tail) this.#options.onDelegation(tail);
+    await this.#options.onStop();
   }
 
   #onRealtimeMessage(payload: unknown): void {
@@ -206,7 +257,19 @@ export class BrowserVoiceSession {
     }
     if (event.type === "error") {
       const error = asRecord(event.error);
-      this.#options.onStatus(typeof error?.message === "string" ? `Voice: ${error.message}` : "Voice failed");
+      const status = typeof error?.message === "string" ? `Voice: ${error.message}` : "Voice failed";
+      void this.close().then(
+        () => this.#options.onStatus(status),
+        () => this.#options.onStatus(status),
+      );
+      return;
+    }
+    if (event.type === "input_audio_buffer.speech_started" || event.type === "speech_started") {
+      this.#newInputEntry = true;
+      return;
+    }
+    if (event.type === "response.created" || event.type === "response.started") {
+      this.#newOutputEntry = true;
       return;
     }
     if (event.type === "input_transcript.added" || event.type === "output_transcript.added") {
@@ -273,16 +336,22 @@ export class BrowserVoiceSession {
     if (this.#flushTimer !== undefined) return;
     this.#flushTimer = window.setTimeout(() => {
       this.#flushTimer = undefined;
-      this.#flushOutput();
+      this.#flushOutput(false);
     }, OUTPUT_FLUSH_MS);
   }
 
-  #flushOutput(): void {
+  #flushOutput(final: boolean): void {
     if (this.#flushTimer !== undefined) window.clearTimeout(this.#flushTimer);
     this.#flushTimer = undefined;
-    const output = this.#output;
-    this.#output = "";
-    if (!output || this.#sideband?.readyState !== WebSocket.OPEN) return;
+    if (this.#sideband?.readyState !== WebSocket.OPEN) return;
+    const output = final ? this.#output.drainFinalChunk() : this.#output.drainStreamChunk();
+    if (!output) return;
+    this.#sendOutput(output);
+  }
+
+  #sendOutput(output: string): void {
+    if (this.#sideband?.readyState !== WebSocket.OPEN) return;
+    this.#outputSentThisRun = true;
     for (const text of byteChunks(`[BACKEND] ${output}`, MAX_CONTEXT_APPEND_BYTES)) {
       this.#sideband.send(JSON.stringify(this.#activeDelegation
         ? {
@@ -315,18 +384,8 @@ export function parseVoiceArgument(argument: string | undefined):
 }
 
 function payloadText(event: AgentEvent): string {
-  return typeof event.payload.text === "string" ? event.payload.text : "";
-}
-
-function realtimeDelegation(input: string, transcript: readonly TranscriptEntry[]): string {
-  const delta = transcript.map(({ role, text }) => `${role}: ${text}`).join("\n");
-  return delta
-    ? `<realtime_delegation>\n  <input>${escapeXml(input)}</input>\n  <transcript_delta>${escapeXml(delta)}</transcript_delta>\n</realtime_delegation>`
-    : `<realtime_delegation>\n  <input>${escapeXml(input)}</input>\n</realtime_delegation>`;
-}
-
-function escapeXml(value: string): string {
-  return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;");
+  if (typeof event.payload.text === "string") return event.payload.text;
+  return typeof event.payload.message === "string" ? event.payload.message : "";
 }
 
 function byteChunks(value: string, size: number): string[] {
@@ -346,6 +405,100 @@ function byteChunks(value: string, size: number): string[] {
   }
   if (chunk) result.push(chunk);
   return result;
+}
+
+export class HandoffStream {
+  #sentBytes = 0;
+  #bufferedText = "";
+  #tailText = "";
+  #truncated = false;
+
+  get hasOutput(): boolean {
+    return this.#sentBytes > 0 || Boolean(this.#bufferedText || this.#tailText);
+  }
+
+  pushText(text: string): void {
+    if (!text) return;
+    if (this.#truncated) {
+      this.#tailText = takeLastBytes(this.#tailText + text, this.#tailByteLimit());
+      return;
+    }
+    this.#bufferedText += text;
+    const remaining = REALTIME_OUTPUT_BYTE_LIMIT - this.#sentBytes;
+    if (utf8Bytes(this.#bufferedText) <= remaining) return;
+    this.#tailText = takeLastBytes(this.#bufferedText, this.#tailByteLimit());
+    this.#bufferedText = takeFirstBytes(this.#bufferedText, this.#streamableTextBytes());
+    this.#truncated = true;
+  }
+
+  drainStreamChunk(): string | undefined {
+    const text = takeFirstBytes(this.#bufferedText, this.#streamableTextBytes());
+    if (!text) return undefined;
+    this.#bufferedText = this.#bufferedText.slice(text.length);
+    this.#sentBytes += utf8Bytes(text);
+    return text;
+  }
+
+  drainFinalChunk(): string | undefined {
+    if (!this.#truncated) {
+      if (!this.#bufferedText) return undefined;
+      const text = this.#bufferedText;
+      this.#bufferedText = "";
+      this.#sentBytes += utf8Bytes(text);
+      return text;
+    }
+    const text = `${this.#bufferedText}${HANDOFF_STREAM_TRUNCATION_MARKER}${this.#tailText}`;
+    this.#bufferedText = "";
+    this.#tailText = "";
+    this.#sentBytes += utf8Bytes(text);
+    return text;
+  }
+
+  #streamHeadByteLimit(): number {
+    return Math.floor(
+      (REALTIME_OUTPUT_BYTE_LIMIT - utf8Bytes(HANDOFF_STREAM_TRUNCATION_MARKER)) / 2,
+    );
+  }
+
+  #tailByteLimit(): number {
+    return REALTIME_OUTPUT_BYTE_LIMIT
+      - this.#streamHeadByteLimit()
+      - utf8Bytes(HANDOFF_STREAM_TRUNCATION_MARKER);
+  }
+
+  #streamableTextBytes(): number {
+    return Math.max(0, this.#streamHeadByteLimit() - this.#sentBytes);
+  }
+}
+
+function takeFirstBytes(text: string, maximum: number): string {
+  let bytes = 0;
+  let end = 0;
+  for (const character of text) {
+    const next = utf8Bytes(character);
+    if (bytes + next > maximum) break;
+    bytes += next;
+    end += character.length;
+  }
+  return text.slice(0, end);
+}
+
+function takeLastBytes(text: string, maximum: number): string {
+  let bytes = 0;
+  let start = text.length;
+  const characters = [...text];
+  for (let index = characters.length - 1; index >= 0; index -= 1) {
+    const character = characters[index]!;
+    const next = utf8Bytes(character);
+    if (bytes + next > maximum) break;
+    bytes += next;
+    start -= character.length;
+  }
+  return text.slice(start);
+}
+
+function utf8Bytes(text: string): number {
+  return new TextEncoder().encode(text).byteLength;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

@@ -1,6 +1,7 @@
 import {
   Actions,
   Agent,
+  type AgentSessionContext,
   ChatGptSubscription,
   type AccountsWallet,
   type CostStatus,
@@ -61,6 +62,10 @@ async function check() {
     tools: [...Subagents.create({ maxConcurrency: 8 })],
   });
   await agent.session.compact();
+  const sessionContext: AgentSessionContext = await agent.session.appendDeveloperMessage(
+    "voice started",
+  );
+  sessionContext.history;
   await agent.session.setFastMode(true);
   const options: Actions.turn.prompt.Options = { input: "hello" };
   const turn: Turn = agent.turn.prompt(options);

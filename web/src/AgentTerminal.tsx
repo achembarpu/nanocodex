@@ -15,6 +15,7 @@ import {
 } from "nanocodex-react";
 import { NanocodexTui } from "nanocodex-tui-react";
 import type { ArtifactDocument } from "nanocodex-artifacts";
+import type { AgentSessionContext } from "nanocodex";
 import type { Address } from "viem";
 import type { TuiTarget } from "nanocodex-tui";
 import "nanocodex-tui-react/structure.css";
@@ -29,7 +30,7 @@ import {
   type WebTuiMessage,
 } from "./nanocodex";
 import { ArtifactDock } from "./ArtifactDock";
-import { getBrowserThread } from "nanocodex/tools/browser";
+import { getBrowserThread, openThreadWorkspace } from "nanocodex/tools/browser";
 
 const MppControls = lazy(async () => ({
   default: (await import("./MppControls")).MppControls,
@@ -39,6 +40,13 @@ const WorkspacePanel = lazy(async () => ({
 }));
 let nextArtifactPromptId = 1_000_000_000;
 let nextVoicePromptId = 2_000_000_000;
+let nextVoiceLifecycleId = 3_000_000_000;
+
+type VoiceLifecycleRequest = {
+  action: "start" | "stop";
+  resolve(context: AgentSessionContext | undefined): void;
+  reject(error: Error): void;
+};
 
 /** Website policy around the reusable TUI: credential UX and the site theme. */
 export const AgentTerminal = memo(function AgentTerminal() {
@@ -60,11 +68,20 @@ function AgentTerminalDemo() {
   const [sessionId, setSessionId] = useState<string>();
   const [voiceStatus, setVoiceStatus] = useState<string>();
   const voice = useRef<import("./browserVoice").BrowserVoiceSession | undefined>(undefined);
+  const voiceLifecycleRequests = useRef(new Map<number, VoiceLifecycleRequest>());
   useNanocodexMessage<WebTuiMessage>((message) => {
     if (message.type === "ready") setSessionId(message.sessionId);
     if (message.type === "mppPayment") setPayment(message.payment);
     if (message.type === "mppJsonl") {
       setJsonl((current) => [...current.slice(-99), message.line]);
+    }
+    if (message.type === "voiceLifecycleResult") {
+      const request = voiceLifecycleRequests.current.get(message.id);
+      if (request && request.action === message.action) {
+        voiceLifecycleRequests.current.delete(message.id);
+        if (message.error) request.reject(new Error(message.error));
+        else request.resolve(message.context);
+      }
     }
     voice.current?.observe(message);
   });
@@ -78,26 +95,36 @@ function AgentTerminalDemo() {
     return () => clearTimeout(id);
   }, []);
   useEffect(() => {
-    setPayment(undefined);
-    setJsonl([]);
-    if (transport !== "openai") return;
-    if (credentialSource === "subscription") {
-      nanocodexConfig.restart(startCommand("chatgpt", thread.id));
-    } else if (credentialSource === "user" || credentialSource === "deployment") {
-      nanocodexConfig.restart(startCommand("openai", thread.id));
-    } else {
-      nanocodexConfig.disconnect();
-    }
+    let cancelled = false;
+    void (async () => {
+      const activeVoice = voice.current;
+      voice.current = undefined;
+      if (activeVoice) await activeVoice.close().catch(() => {});
+      if (cancelled) return;
+      setVoiceStatus(undefined);
+      setPayment(undefined);
+      setJsonl([]);
+      if (transport !== "openai") return;
+      if (credentialSource === "subscription") {
+        nanocodexConfig.restart(startCommand("chatgpt", thread.id));
+      } else if (credentialSource === "user" || credentialSource === "deployment") {
+        nanocodexConfig.restart(startCommand("openai", thread.id));
+      } else {
+        nanocodexConfig.disconnect();
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, [credentialSource, thread.id, transport]);
 
-  useEffect(() => () => voice.current?.close(), []);
-  useEffect(() => {
-    if (transport === "openai" && credentialSource === "subscription") return;
-    voice.current?.close();
-    voice.current = undefined;
-    setVoiceStatus(undefined);
-  }, [credentialSource, transport]);
-
+  useEffect(() => () => {
+    void voice.current?.close().catch(() => {});
+    for (const request of voiceLifecycleRequests.current.values()) {
+      request.reject(new Error("voice lifecycle stopped with the agent worker"));
+    }
+    voiceLifecycleRequests.current.clear();
+  }, []);
   const startMpp = useCallback((payerAddress: Address, accessKeyAddress: Address) => {
     nanocodexConfig.restart(startCommand("mpp", thread.id, payerAddress, accessKeyAddress));
   }, [thread.id]);
@@ -114,6 +141,19 @@ function AgentTerminalDemo() {
     nanocodexConfig.disconnect();
     setTransport(next);
   };
+  const runVoiceLifecycle = useCallback((
+    action: "start" | "stop",
+    target: TuiTarget,
+  ): Promise<AgentSessionContext | undefined> => new Promise((resolve, reject) => {
+    const id = nextVoiceLifecycleId++;
+    voiceLifecycleRequests.current.set(id, { action, resolve, reject });
+    try {
+      agent.dispatch({ type: "voiceLifecycle", id, target, action });
+    } catch (error) {
+      voiceLifecycleRequests.current.delete(id);
+      reject(error instanceof Error ? error : new Error(String(error)));
+    }
+  }), [agent]);
   const controlVoice = useCallback((argument: string | undefined, target: TuiTarget) => {
     void import("./browserVoice").then(({ BrowserVoiceSession, CHATGPT_VOICES, parseVoiceArgument }) => {
       const command = parseVoiceArgument(argument);
@@ -126,7 +166,9 @@ function AgentTerminalDemo() {
         return;
       }
       if (command.action === "stop" || (command.action === "toggle" && voice.current)) {
-        voice.current?.close();
+        void voice.current?.close().catch((error) => {
+          setVoiceStatus(`Voice: ${error instanceof Error ? error.message : String(error)}`);
+        });
         voice.current = undefined;
         return;
       }
@@ -147,6 +189,15 @@ function AgentTerminalDemo() {
         sessionId,
         target,
         voice: selectedVoice,
+        workspace: () => openThreadWorkspace(thread.id),
+        async onStart() {
+          const context = await runVoiceLifecycle("start", target);
+          if (!context) throw new Error("voice lifecycle start omitted the agent context");
+          return context;
+        },
+        async onStop() {
+          await runVoiceLifecycle("stop", target);
+        },
         onDelegation(prompt) {
           agent.dispatch({
             type: "voicePrompt",
@@ -161,16 +212,16 @@ function AgentTerminalDemo() {
         },
       });
       voice.current = next;
-      void next.start().catch((error) => {
+      void next.start().catch(async (error) => {
         if (voice.current !== next) return;
-        next.close();
+        await next.close().catch(() => {});
         voice.current = undefined;
         setVoiceStatus(`Voice: ${error instanceof Error ? error.message : String(error)}`);
       });
     }).catch((error) => {
       setVoiceStatus(`Voice: ${error instanceof Error ? error.message : String(error)}`);
     });
-  }, [agent, credentialSource, sessionId, transport]);
+  }, [agent, credentialSource, runVoiceLifecycle, sessionId, thread.id, transport]);
 
   const enabled = transport === "openai"
     ? credentialSource === "subscription"

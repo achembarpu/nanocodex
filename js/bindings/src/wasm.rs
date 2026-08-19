@@ -24,7 +24,7 @@ use nanocodex::{
         standard::StandardTool,
     },
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{JsFuture, spawn_local};
@@ -119,6 +119,12 @@ enum JavaScriptSubscriptionCommit {
 struct JavaScriptSubscriptionResponse {
     status: u16,
     body: String,
+}
+
+#[derive(Serialize)]
+struct WasmAgentSessionContext<'a> {
+    workspace: &'a str,
+    history: &'a [nanocodex::oai::responses::ResponseItem],
 }
 
 impl ChatGptSubscriptionHost for JavaScriptSubscriptionHost {
@@ -742,6 +748,27 @@ impl WasmNanocodex {
     /// Throws when compaction or the agent driver fails.
     pub async fn compact(&self) -> Result<(), JsValue> {
         self.inner.compact().await.map_err(js_error)
+    }
+
+    /// Appends adapter-owned developer context at the next safe model boundary.
+    ///
+    /// Returns the complete read-only session context captured at that boundary.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty text or a stopped driver.
+    #[wasm_bindgen(js_name = appendDeveloperMessage)]
+    pub async fn append_developer_message(&self, text: &str) -> Result<String, JsValue> {
+        let context = self
+            .inner
+            .append_developer_message(text)
+            .await
+            .map_err(js_error)?;
+        serde_json::to_string(&WasmAgentSessionContext {
+            workspace: context.workspace(),
+            history: context.history(),
+        })
+        .map_err(js_error)
     }
 
     /// Gracefully stops the driver and joins every resource owned by this agent.

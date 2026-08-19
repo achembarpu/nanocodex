@@ -7,6 +7,10 @@ import {
   type AgentControllerStart,
   type AgentControllerTools,
 } from "../src/agentController.ts";
+import {
+  REALTIME_END_INSTRUCTIONS,
+  REALTIME_START_INSTRUCTIONS,
+} from "../src/voiceProtocol.ts";
 
 const main = { pane: "main" as const, branchId: 0 };
 const LIFECYCLE_BUDGET_MS = 750;
@@ -41,6 +45,23 @@ test("the Worker controller owns prompts, steering, cancellation, events, and cl
   assert.deepEqual(messages.shift(), {
     type: "ready",
     sessionId: "root",
+  });
+
+  await controller.handle({
+    type: "voiceLifecycle",
+    target: main,
+    id: 900,
+    action: "start",
+  });
+  assert.deepEqual(harness.developerMessages, [{
+    sessionId: "root",
+    text: REALTIME_START_INSTRUCTIONS,
+  }]);
+  assert.deepEqual(messages.shift(), {
+    type: "voiceLifecycleResult",
+    id: 900,
+    action: "start",
+    context: { workspace: "/workspace", history: [] },
   });
 
   harness.emit("root", event("root", 1, "run.started"));
@@ -171,6 +192,23 @@ test("the Worker controller owns prompts, steering, cancellation, events, and cl
     target: main,
     speaker: "user",
     text: "make it steampunk",
+  });
+
+  await controller.handle({
+    type: "voiceLifecycle",
+    target: main,
+    id: 901,
+    action: "stop",
+  });
+  assert.deepEqual(harness.developerMessages.at(-1), {
+    sessionId: "root",
+    text: REALTIME_END_INSTRUCTIONS,
+  });
+  assert.deepEqual(messages.shift(), {
+    type: "voiceLifecycleResult",
+    id: 901,
+    action: "stop",
+    context: { workspace: "/workspace", history: [] },
   });
 
   await controller.dispose();
@@ -670,6 +708,7 @@ class AgentHarness {
   tools?: AgentControllerTools;
   nextTurnResultError?: Error;
   nextSteerError?: Error;
+  developerMessages: Array<{ sessionId: string; text: string }> = [];
 
   createAgent(sessionId: string) {
     const agent = new FakeAgent(this, sessionId);
@@ -708,6 +747,10 @@ class FakeAgent {
       },
     };
     this.session = {
+      appendDeveloperMessage: async (text: string) => {
+        this.harness.developerMessages.push({ sessionId: this.sessionId, text });
+        return { workspace: "/workspace", history: [] };
+      },
       fork: async (options?: { at?: FakeTurnResult }) => {
         this.harness.forks.push({
           source: this.sessionId,

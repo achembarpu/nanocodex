@@ -10,6 +10,7 @@ export function agentActions() {
       watch: (options) => events.watch(agent, options),
     },
     session: {
+      appendDeveloperMessage: (text) => session.appendDeveloperMessage(agent, text),
       compact: () => session.compact(agent),
       fork: (options) => session.fork(agent, options),
       setFastMode: (enabled) => session.setFastMode(agent, enabled),

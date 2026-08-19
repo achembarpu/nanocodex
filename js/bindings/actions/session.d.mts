@@ -1,4 +1,10 @@
-import type { Agent, DefaultAgent, ForkOptions, Thinking } from "../types.mjs";
+import type { Agent, AgentSessionContext, DefaultAgent, ForkOptions, Thinking } from "../types.mjs";
+
+/** Appends adapter-owned developer context and returns the latest safe session context. */
+export function appendDeveloperMessage(
+  agent: Agent<object>,
+  text: string,
+): Promise<AgentSessionContext>;
 
 /** Compacts retained history immediately without fabricating a user prompt. */
 export function compact(agent: Agent<object>): Promise<void>;
