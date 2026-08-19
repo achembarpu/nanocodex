@@ -57,10 +57,18 @@ const parquetQuery = {
 const parquetCold = await timed(() => tool.handler(parquetQuery, context));
 const parquetColdResult = parquetCold.value;
 const parquetColdIo = remote.take();
+const parquetNext = await timed(() => tool.handler({
+  operation: "query",
+  dataset_id: parquetId,
+  cursor: parquetColdResult.nextCursor,
+  limit: 100
+}, context));
+const parquetNextIo = remote.take();
 const parquetWarm = await timed(() => tool.handler(parquetQuery, context));
 const parquetWarmResult = parquetWarm.value;
 const parquetWarmIo = remote.take();
-assertQueryPair(parquetColdResult, parquetWarmResult, expectedRows());
+assertQueryPair(parquetColdResult, parquetWarmResult, expectedRows(500, 600));
+assertQueryPage(parquetNext.value, expectedRows(600, 700), 600);
 assert.ok(parquetColdIo.rangeRequests > 0);
 assert.ok(parquetColdIo.rangeBytes > 0);
 assertZeroNetwork(parquetWarmIo);
@@ -80,13 +88,24 @@ const jsonlQuery = {
 const jsonlCold = await timed(() => tool.handler(jsonlQuery, context));
 const jsonlColdResult = jsonlCold.value;
 const jsonlColdIo = remote.take();
+const jsonlNext = await timed(() => tool.handler({
+  operation: "query",
+  dataset_id: jsonlId,
+  cursor: jsonlColdResult.nextCursor,
+  limit: 100
+}, context));
+const jsonlNextIo = remote.take();
 const jsonlRepeated = await timed(() => tool.handler(jsonlQuery, context));
 const jsonlRepeatedResult = jsonlRepeated.value;
 const jsonlRepeatedIo = remote.take();
-assertQueryPair(jsonlColdResult, jsonlRepeatedResult, expectedRows());
+assertQueryPair(jsonlColdResult, jsonlRepeatedResult, expectedRows(500, 600));
+assertQueryPage(jsonlNext.value, expectedRows(600, 700), 600);
 assert.equal(jsonlColdResult.rowsScanned, 23997);
 assert.ok(jsonlColdIo.streamRequests > 0);
 assert.ok(jsonlColdIo.streamBytesPulled > 0);
+assert.equal(jsonlNextIo.streamRequests, 0);
+assert.equal(jsonlNextIo.rangeRequests, 1);
+assert.ok(jsonlNextIo.rangeBytes < jsonlColdIo.streamBytesPulled);
 assertZeroNetwork(jsonlRepeatedIo);
 console.log(JSON.stringify({
   corpus: {
@@ -97,18 +116,20 @@ console.log(JSON.stringify({
   parquet: {
     open: openMeasurement(parquetOpen, parquetOpenIo),
     coldQuery: queryMeasurement(parquetCold, parquetColdIo),
+    cursorContinuation: queryMeasurement(parquetNext, parquetNextIo),
     exactRepeat: queryMeasurement(parquetWarm, parquetWarmIo),
     speedupX: speedup(parquetCold.milliseconds, parquetWarm.milliseconds)
   },
   jsonl: {
     open: openMeasurement(jsonlOpen, jsonlOpenIo),
     coldQuery: queryMeasurement(jsonlCold, jsonlColdIo),
+    cursorContinuation: queryMeasurement(jsonlNext, jsonlNextIo),
     exactRepeat: queryMeasurement(jsonlRepeated, jsonlRepeatedIo),
     speedupX: speedup(jsonlCold.milliseconds, jsonlRepeated.milliseconds)
   }
 }, null, 2));
-function expectedRows() {
-  return ids.filter((id) => languages[id] === "rust" && scores[id] >= 900).slice(500, 600).map((id) => ({ id, text: texts[id] }));
+function expectedRows(start, end) {
+  return ids.filter((id) => languages[id] === "rust" && scores[id] >= 900).slice(start, end).map((id) => ({ id, text: texts[id] }));
 }
 function assertQueryPair(cold, repeated, expected) {
   assert.deepEqual(cold.rows, expected);
@@ -124,6 +145,14 @@ function assertQueryPair(cold, repeated, expected) {
   assert.ok(cold.bytesRead > 0);
   assert.equal(repeated.bytesRead, 0);
   assert.equal(repeated.rowsScanned, cold.rowsScanned);
+}
+function assertQueryPage(page, expected, offset) {
+  assert.deepEqual(page.rows, expected);
+  assert.equal(page.returnedRows, expected.length);
+  assert.equal(page.offset, offset);
+  assert.equal(page.complete, false);
+  assert.equal(page.truncatedReason, "limit");
+  assert.ok(page.nextCursor);
 }
 function assertZeroNetwork(io) {
   assert.deepEqual(io, emptyIo());
@@ -171,8 +200,7 @@ function benchmarkFetch(objects) {
       const end = Number(match[2]);
       const body = data.slice(start, end + 1);
       io.rangeRequests++;
-      io.rangeBytes += body.byteLength;
-      return new Response(body, {
+      return new Response(chunked(body, 64 * 1024, (length) => io.rangeBytes += length), {
         status: 206,
         headers: {
           "content-length": String(body.byteLength),
