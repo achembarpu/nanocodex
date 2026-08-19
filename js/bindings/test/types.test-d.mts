@@ -1,27 +1,47 @@
 import {
   Actions,
   Agent,
+  type AgentSessionContext,
   ChatGptSubscription,
   type AccountsWallet,
   type CostStatus,
   createTempoProviderFromAccounts,
   createMemoryChatGptSubscriptionStore,
+  Subagents,
   type SessionSnapshot,
+  Transport,
   type Turn,
   type TurnResult,
   Workspace,
 } from "../node/index.mjs";
 import {
   Agent as BrowserAgent,
+  Subagents as BrowserSubagents,
+  Transport as BrowserTransport,
   Workspace as BrowserWorkspace,
 } from "../browser/index.mjs";
 import type { WorkspaceEntry as BrowserWorkspaceEntry } from "../browser/workspace.mjs";
 import type { WorkspaceEntry as NodeWorkspaceEntry } from "../node/workspace.mjs";
+import {
+  dataset,
+  imageGeneration,
+  updatePlan,
+  viewImage,
+  web,
+} from "../tools/index.mjs";
+import {
+  dataset as leafDataset,
+  type DatasetOptions,
+} from "../tools/dataset.mjs";
+import { browser as browserTools } from "../tools/browser/index.mjs";
+import { nanocodexTools } from "../tools/vite.mjs";
 
 declare const apiKey: string;
 declare const accountsWallet: AccountsWallet;
 
 async function check() {
+  const datasetOptions: DatasetOptions = { fetch: globalThis.fetch };
+  leafDataset(datasetOptions);
   const nodeWorkspace = await Workspace.open({ path: "/tmp/nanocodex" });
   await nodeWorkspace.writeFile("notes.txt", "hello");
   Workspace.tools(nodeWorkspace);
@@ -33,14 +53,30 @@ async function check() {
   void nodeEntries;
 
   const agent = await Agent.create({
-    apiKey,
+    transport: Transport.openAi({ apiKey }),
     filesystem: nodeWorkspace,
     model: "gpt-5.6-terra",
     thinking: "high",
     fastMode: false,
     workspace: nodeWorkspace.root,
+    tools: [...Subagents.create({ maxConcurrency: 8 })],
   });
   await agent.session.compact();
+  const sessionContext: AgentSessionContext = await agent.session.appendDeveloperMessage(
+    "voice started",
+  );
+  sessionContext.history;
+  const realtimeContext: AgentSessionContext = await agent.session.realtime.start();
+  const realtimeDelegation: string = agent.session.realtime.delegation("inspect the workspace", [
+    { role: "user", text: "Please inspect it." },
+  ]);
+  const realtimeTail: string | undefined = agent.session.realtime.tailDelegation([
+    { role: "assistant", text: "I will hand this back." },
+  ]);
+  await agent.session.realtime.end();
+  void realtimeContext;
+  void realtimeDelegation;
+  void realtimeTail;
   await agent.session.setFastMode(true);
   const options: Actions.turn.prompt.Options = { input: "hello" };
   const turn: Turn = agent.turn.prompt(options);
@@ -59,22 +95,22 @@ async function check() {
   void usage;
   void costStatus;
 
-  await Agent.create({ apiKey, resume: snapshot });
+  await Agent.create({ transport: Transport.openAi({ apiKey }), resume: snapshot });
   const tempoProvider = await createTempoProviderFromAccounts({
     wallet: accountsWallet,
     accessKey: "0x0000000000000000000000000000000000000001",
     policy: { maxDeposit: "0.05", topUpAmount: "0.05" },
     session: { bootstrap: true },
   });
-  await Agent.create({ mpp: tempoProvider, mcp: false });
+  await Agent.create({ transport: Transport.mpp({ session: tempoProvider }), mcp: false });
   const subscription = await ChatGptSubscription.open({
     id: "account-1",
     store: createMemoryChatGptSubscriptionStore("account-1"),
   });
   await subscription.status();
-  await Agent.create({ subscription });
-  // @ts-expect-error API-key and managed subscription authentication are mutually exclusive.
-  await Agent.create({ apiKey, subscription });
+  await Agent.create({ transport: Transport.chatGpt({ subscription }) });
+  // @ts-expect-error authentication belongs to the selected transport.
+  await Agent.create({ transport: Transport.openAi({ apiKey }), subscription });
 
   const fork = await Actions.session.fork(agent, { at: completed });
   fork.turn.prompt({ input: [{ type: "text", text: "continue" }] });
@@ -95,30 +131,73 @@ async function check() {
   await agent.session.shutdown();
   await Actions.session.shutdown(agent);
 
-  await BrowserAgent.create({ websocketUrl: "wss://example.com" });
-  await BrowserAgent.create({ hostAuth: true, websocketUrl: "wss://example.com" });
-  await BrowserAgent.create({ apiKey, filesystem: browserWorkspace });
-  await BrowserAgent.create({ mpp: { async ws() { return {} as WebSocket; } } });
-  await BrowserAgent.create({ subscription });
-  // @ts-expect-error API-key and MPP authentication are mutually exclusive.
-  await BrowserAgent.create({ apiKey, mpp: { async ws() { return {} as WebSocket; } } });
-  // @ts-expect-error API-key and host-managed authentication are mutually exclusive.
-  await BrowserAgent.create({ apiKey, hostAuth: true });
-  // @ts-expect-error MPP and host-managed authentication are mutually exclusive.
-  await BrowserAgent.create({ hostAuth: true, mpp: { async ws() { return {} as WebSocket; } } });
+  await BrowserAgent.create({
+    transport: BrowserTransport.hostManaged({
+      websocketUrl: "wss://example.com",
+      createWebSocket: () => ({} as WebSocket),
+    }),
+  });
+  await BrowserAgent.create({
+    transport: BrowserTransport.openAi({ apiKey }),
+    filesystem: browserWorkspace,
+    tools: [
+      web({ url: "https://example.com/tools/web" }),
+      dataset(),
+      imageGeneration({
+        url: "https://example.com/tools/images",
+        recentImages: () => [],
+        rememberImage: () => {},
+      }),
+      viewImage({ workspace: browserWorkspace }),
+      updatePlan(),
+      ...BrowserSubagents.create(),
+    ],
+  });
+  const browserRuntime = await browserTools({
+    threadId: "thread-1",
+    origin: "https://example.com",
+    web: { url: "https://example.com/tools/web" },
+    images: { url: "https://example.com/tools/images" },
+    dataset: { fetch: globalThis.fetch },
+    recentImages: () => [],
+    rememberImage: () => {},
+  });
+  await BrowserAgent.create({
+    transport: BrowserTransport.openAi({ apiKey }),
+    filesystem: browserRuntime.filesystem,
+    instructions: browserRuntime.instructions,
+    tools: [...browserRuntime.tools, ...BrowserSubagents.create()],
+  });
+  nanocodexTools().resolveId("node-rsa");
+  // @ts-expect-error Rust extensions must come from a branded constructor.
+  await Agent.create({ transport: Transport.openAi({ apiKey }), tools: [{ maxConcurrency: 8 }] });
+  await BrowserAgent.create({
+    transport: BrowserTransport.mpp({ session: { async ws() { return {} as WebSocket; } } }),
+  });
+  await BrowserAgent.create({ transport: BrowserTransport.chatGpt({ subscription }) });
+  // @ts-expect-error authentication is not an Agent.create option.
+  await BrowserAgent.create({ transport: BrowserTransport.openAi({ apiKey }), hostAuth: true });
+  // @ts-expect-error a transport cannot be fabricated from an arbitrary object.
+  await BrowserAgent.create({ transport: { key: "fake", name: "fake", type: "fake", setup: () => ({}) } });
   await Agent.create({
-    mpp: {
+    transport: Transport.mpp({ session: {
       async ws() {
         return {} as WebSocket;
       },
       async close() {},
-    },
+    } }),
   });
-  await Agent.create({ apiKey, module: new WebAssembly.Module(new Uint8Array()) });
+  await Agent.create({
+    transport: Transport.openAi({ apiKey }),
+    module: new WebAssembly.Module(new Uint8Array()),
+  });
   // @ts-expect-error transport queue policy is private to the adapter.
-  await Agent.create({ apiKey, maxQueuedMessages: 1 });
-  // @ts-expect-error browser send-buffer policy is private to the adapter.
-  await BrowserAgent.create({ apiKey, maxBufferedSendBytes: 1 });
+  await Agent.create({ transport: Transport.openAi({ apiKey }), maxQueuedMessages: 1 });
+  await BrowserAgent.create({
+    transport: BrowserTransport.openAi({ apiKey }),
+    // @ts-expect-error browser send-buffer policy is private to the adapter.
+    maxBufferedSendBytes: 1,
+  });
 
   const rolloutSnapshot: SessionSnapshot = {
     version: 1,
@@ -133,7 +212,10 @@ async function check() {
     },
     history: [],
   };
-  await Agent.create({ apiKey, resume: rolloutSnapshot });
+  await Agent.create({
+    transport: Transport.openAi({ apiKey }),
+    resume: rolloutSnapshot,
+  });
 
   // @ts-expect-error actions are domain-grouped on the decorated Agent.
   agent.prompt("hello");

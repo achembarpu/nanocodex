@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import { test } from "node:test";
 import { WebSocketServer } from "ws";
 
-import { Actions, Agent } from "../node/index.mjs";
+import { Actions, Agent, Subagents, Transport } from "../node/index.mjs";
 import { createNodeHost } from "../node/host.mjs";
 
 const SESSION_IDS = Object.freeze({
@@ -16,9 +16,9 @@ const SESSION_IDS = Object.freeze({
   right: "018f1f9a-7b3c-7a06-8000-000000000006",
 });
 
-const createWarmAgent = (options) => Agent.create({
+const createWarmAgent = ({ apiKey, websocketUrl, ...options }) => Agent.create({
   ...options,
-  websocketWarmup: true,
+  transport: Transport.openAi({ apiKey, websocketUrl, websocketWarmup: true }),
 });
 const PACKAGE_VERSION = JSON.parse(
   await readFile(new URL("../package.json", import.meta.url), "utf8"),
@@ -248,6 +248,151 @@ test("Node-hosted WASM preserves follow-ons, cache identity, events, and custom 
   await server.close();
 });
 
+test("Node-hosted WASM runs the canonical Rust subagent task tree", async () => {
+  const server = await startServer();
+  const decoyServer = await startServer();
+  const events = [];
+  const agent = await createWarmAgent({
+    apiKey: "test-key",
+    websocketUrl: server.url,
+    thinking: "none",
+    sessionId: "018f1f9a-7b3c-7a08-8000-000000000008",
+    tools: [
+      {
+        name: "rootOnly",
+        description: "Only the orchestrator family can see this tool.",
+        parameters: { type: "object" },
+        handler: () => "root",
+      },
+      ...Subagents.create({ maxConcurrency: 2 }),
+    ],
+  });
+  // Make another host realm globally active before the Rust child is built.
+  // Child definitions must still inherit their own root's host.
+  const decoy = await Agent.create({
+    transport: Transport.openAi({ apiKey: "decoy", websocketUrl: decoyServer.url }),
+    tools: {
+      decoyOnly: {
+        description: "Only the decoy family can see this tool.",
+        parameters: { type: "object" },
+        handler: () => "decoy",
+      },
+    },
+  });
+  const watch = agent.events.watch({ includeAllSessions: true });
+  watch.onEvent((event) => events.push(event));
+
+  let childSessionId;
+  const scenario = (async () => {
+    const rootSocket = await server.connection;
+    const rootReader = messageReader(rootSocket);
+    const rootWarmup = await rootReader.next();
+    assert.deepEqual(
+      rootWarmup.input[0].tools.map((tool) => tool.name).sort(),
+      [
+        "close_agent",
+        "exec",
+        "interrupt_agent",
+        "list_agents",
+        "send_agent_message",
+        "spawn_agent",
+        "submit_result",
+        "wait_agent",
+      ],
+    );
+    sendWarmup(rootSocket, "root-warmup");
+
+    const rootGeneration = await rootReader.next();
+    const childConnection = new Promise((resolve) => {
+      server.websocketServer.once("connection", (socket, request) => {
+        socket.request = request;
+        resolve(socket);
+      });
+    });
+    sendCompleted(rootSocket, "root-spawn", [{
+      type: "function_call",
+      call_id: "call-spawn",
+      name: "spawn_agent",
+      arguments: JSON.stringify({
+        role: "reviewer",
+        task: "Return the word portable.",
+        output_schema: {
+          type: "object",
+          properties: { report: { type: "string" } },
+          required: ["report"],
+          additionalProperties: false,
+        },
+      }),
+    }]);
+
+    const childSocket = await childConnection;
+    childSessionId = childSocket.request.headers["session-id"];
+    assert.ok(childSessionId);
+    const childReader = messageReader(childSocket);
+    const childWarmup = await childReader.next();
+    assert.equal(childWarmup.input[0].tools.some((tool) => tool.name === "send_agent_message"), true);
+    assert.match(childWarmup.input[0].tools[0].description, /tools\.rootOnly/);
+    assert.doesNotMatch(childWarmup.input[0].tools[0].description, /tools\.decoyOnly/);
+    sendWarmup(childSocket, "child-warmup");
+
+    const rootSpawned = await rootReader.next();
+    assert.equal(rootSpawned.input[0].call_id, "call-spawn");
+    assert.deepEqual(JSON.parse(rootSpawned.input[0].output), {
+      agent_id: 1,
+      role: "reviewer",
+      status: { state: "running" },
+    });
+    sendCompleted(rootSocket, "root-wait", [{
+      type: "function_call",
+      call_id: "call-wait",
+      name: "wait_agent",
+      arguments: JSON.stringify({ agent_ids: [1], timeout_ms: 5_000 }),
+    }]);
+
+    await childReader.next();
+    sendCompleted(childSocket, "child-submit", [{
+      type: "function_call",
+      call_id: "call-submit",
+      name: "submit_result",
+      arguments: JSON.stringify({ turn_token: 1, output: { report: "portable" } }),
+    }]);
+    const childSubmitted = await childReader.next();
+    assert.deepEqual(JSON.parse(childSubmitted.input[0].output), { accepted: true });
+    sendFinal(childSocket, "child-final", "submitted");
+
+    const rootWaited = await rootReader.next();
+    const waited = JSON.parse(rootWaited.input[0].output);
+    assert.equal(waited.timed_out, false);
+    assert.deepEqual(waited.agents[0].status, {
+      state: "completed",
+      output: { report: "portable" },
+    });
+    sendFinal(rootSocket, "root-final", "portable");
+  })();
+
+  try {
+    const result = await agent.turn.prompt({ input: "Delegate this check." }).result();
+    assert.equal(result.finalMessage, "portable");
+    await scenario;
+    assert.ok(events.some((event) => event.request_id === childSessionId));
+  } finally {
+    watch.off();
+    await agent.session.shutdown();
+    assert.throws(
+      () => globalThis.nanocodexHost.executeTool(
+        "missing",
+        "{}",
+        childSessionId,
+        "after-shutdown",
+      ),
+      /no Nanocodex host is active/,
+    );
+    await decoy.session.shutdown();
+    await server.close();
+    await decoyServer.close();
+  }
+});
+
 test("WASM snapshots resume authoritative history in a fresh agent", async () => {
   const originalServer = await startServer();
   const original = await createWarmAgent({
@@ -410,25 +555,20 @@ test("independent agents keep their host connections isolated", async () => {
     },
   });
 
-  const leftTools = globalThis.nanocodexHost.toolDefinitions(SESSION_IDS.left);
-  const rightTools = globalThis.nanocodexHost.toolDefinitions(SESSION_IDS.right);
-  assert.match(leftTools, /leftTool/);
-  assert.doesNotMatch(leftTools, /rightTool/);
-  assert.match(rightTools, /rightTool/);
-  assert.doesNotMatch(rightTools, /leftTool/);
-
-  const serve = async (server, sessionId, message) => {
+  const serve = async (server, sessionId, message, visibleTool, hiddenTool) => {
     const socket = await server.connection;
     assert.equal(socket.request.headers["session-id"], sessionId);
     const reader = messageReader(socket);
-    await reader.next();
+    const warmup = await reader.next();
+    assert.match(warmup.input[0].tools[0].description, new RegExp(`tools\\.${visibleTool}`));
+    assert.doesNotMatch(warmup.input[0].tools[0].description, new RegExp(`tools\\.${hiddenTool}`));
     sendWarmup(socket, `${sessionId}-warmup`);
     await reader.next();
     sendFinal(socket, `${sessionId}-final`, message);
   };
   const scenarios = Promise.all([
-    serve(leftServer, SESSION_IDS.left, "LEFT"),
-    serve(rightServer, SESSION_IDS.right, "RIGHT"),
+    serve(leftServer, SESSION_IDS.left, "LEFT", "leftTool", "rightTool"),
+    serve(rightServer, SESSION_IDS.right, "RIGHT", "rightTool", "leftTool"),
   ]);
 
   // Prompt the first agent only after the second factory has installed its

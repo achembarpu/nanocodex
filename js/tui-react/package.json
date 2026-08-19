@@ -36,6 +36,7 @@
     "streamdown": "^2.5.0"
   },
   "peerDependencies": {
+    "nanocodex": "^0.5.0",
     "nanocodex-react": "^0.1.0",
     "nanocodex-tui": "^0.1.0",
     "react": ">=18",
@@ -44,6 +45,7 @@
   "devDependencies": {
     "@types/react": "19.2.14",
     "@types/react-dom": "19.2.3",
+    "nanocodex": "file:../bindings",
     "nanocodex-react": "file:../react",
     "nanocodex-tui": "file:../tui",
     "react": "19.2.6",

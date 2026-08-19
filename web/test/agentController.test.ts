@@ -43,6 +43,20 @@ test("the Worker controller owns prompts, steering, cancellation, events, and cl
     sessionId: "root",
   });
 
+  await controller.handle({
+    type: "voiceLifecycle",
+    target: main,
+    id: 900,
+    action: "start",
+  });
+  assert.deepEqual(harness.realtimeLifecycle, [{ sessionId: "root", action: "start" }]);
+  assert.deepEqual(messages.shift(), {
+    type: "voiceLifecycleResult",
+    id: 900,
+    action: "start",
+    context: { workspace: "/workspace", history: [] },
+  });
+
   harness.emit("root", event("root", 1, "run.started"));
   assert.deepEqual(messages.shift(), {
     type: "event",
@@ -140,17 +154,21 @@ test("the Worker controller owns prompts, steering, cancellation, events, and cl
     type: "voicePrompt",
     target: main,
     id: 5,
-    prompt: "retheme the live interface",
+    delegation: {
+      kind: "request",
+      input: "retheme the live interface",
+      transcript: [{ role: "user", text: "please do it" }],
+    },
   });
   assert.deepEqual(messages.shift(), {
     type: "externalPrompt",
     target: main,
     id: 5,
-    prompt: "retheme the live interface",
+    prompt: "delegated:retheme the live interface:user: please do it",
     intent: "immediate",
   });
   const voiceTurn = harness.turns[3]!;
-  assert.equal(voiceTurn.input, "retheme the live interface");
+  assert.equal(voiceTurn.input, "delegated:retheme the live interface:user: please do it");
   voiceTurn.complete("rethemed");
   await settle();
   assert.deepEqual(messages.shift(), {
@@ -171,6 +189,20 @@ test("the Worker controller owns prompts, steering, cancellation, events, and cl
     target: main,
     speaker: "user",
     text: "make it steampunk",
+  });
+
+  await controller.handle({
+    type: "voiceLifecycle",
+    target: main,
+    id: 901,
+    action: "stop",
+  });
+  assert.deepEqual(harness.realtimeLifecycle.at(-1), { sessionId: "root", action: "stop" });
+  assert.deepEqual(messages.shift(), {
+    type: "voiceLifecycleResult",
+    id: 901,
+    action: "stop",
+    context: { workspace: "/workspace", history: [] },
   });
 
   await controller.dispose();
@@ -670,6 +702,7 @@ class AgentHarness {
   tools?: AgentControllerTools;
   nextTurnResultError?: Error;
   nextSteerError?: Error;
+  realtimeLifecycle: Array<{ sessionId: string; action: "start" | "stop" }> = [];
 
   createAgent(sessionId: string) {
     const agent = new FakeAgent(this, sessionId);
@@ -708,6 +741,20 @@ class FakeAgent {
       },
     };
     this.session = {
+      realtime: {
+        start: async () => {
+          this.harness.realtimeLifecycle.push({ sessionId: this.sessionId, action: "start" });
+          return { workspace: "/workspace", history: [] };
+        },
+        end: async () => {
+          this.harness.realtimeLifecycle.push({ sessionId: this.sessionId, action: "stop" });
+          return { workspace: "/workspace", history: [] };
+        },
+        delegation: (input: string, transcript: Array<{ role: string; text: string }>) =>
+          `delegated:${input}:${transcript.map(({ role, text }) => `${role}: ${text}`).join("\n")}`,
+        tailDelegation: (transcript: Array<{ role: string; text: string }>) =>
+          transcript.length ? `tail:${transcript.map(({ role, text }) => `${role}: ${text}`).join("\n")}` : undefined,
+      },
       fork: async (options?: { at?: FakeTurnResult }) => {
         this.harness.forks.push({
           source: this.sessionId,

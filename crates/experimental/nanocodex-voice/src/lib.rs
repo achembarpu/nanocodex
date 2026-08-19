@@ -20,7 +20,14 @@ use nanocodex::{
         responses::MessagePhase,
     },
 };
+use nanocodex_voice_protocol::{
+    TranscriptEntry as ProtocolTranscriptEntry,
+    realtime_delegation as protocol_realtime_delegation,
+    realtime_tail_delegation as protocol_realtime_tail_delegation,
+};
 use tokio::sync::{mpsc, oneshot};
+
+pub use nanocodex_voice_protocol::{REALTIME_END_INSTRUCTIONS, REALTIME_START_INSTRUCTIONS};
 
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod audio;
@@ -46,24 +53,6 @@ const HANDOFF_STREAM_FLUSH_INTERVAL: Duration = Duration::from_millis(200);
 const REALTIME_ASSISTANT_OUTPUT_TOKEN_BUDGET: usize = 1_000;
 const APPROX_BYTES_PER_TOKEN: usize = 4;
 const HANDOFF_STREAM_TRUNCATION_MARKER: &str = "\n…output truncated…\n";
-const REALTIME_SESSION_ENDED_HANDOFF_INSTRUCTION: &str = "The user just ended their realtime session. Here is the remaining handoff/transcript tail. You probably do not have to do anything; acknowledge the handoff unless the transcript itself asks for something.";
-const REALTIME_START_INSTRUCTIONS: &str = concat!(
-    "<realtime_conversation>\n\n",
-    "Realtime conversation started.\n\n",
-    "You are operating as a backend executor behind an intermediary. The user does not talk to you directly. Any response you produce will be consumed by the intermediary and may be summarized before the user sees it.\n\n",
-    "When invoked, you receive the latest conversation transcript and any relevant mode or metadata. The intermediary may invoke you even when backend help is not actually needed. Use the transcript to decide whether you should do work. If backend help is unnecessary, avoid verbose responses that add user-visible latency.\n\n",
-    "When user text is routed from realtime, treat it as a transcript. It may be unpunctuated or contain recognition errors.\n\n",
-    "- Keep responses concise and action-oriented. Your updates should help the intermediary respond to the user.\n\n",
-    "</realtime_conversation>"
-);
-const REALTIME_END_INSTRUCTIONS: &str = concat!(
-    "<realtime_conversation>\n\n",
-    "Realtime conversation ended.\n\n",
-    "Subsequent user input will return to typed text rather than transcript-style text. Do not assume recognition errors or missing punctuation once realtime has ended. Resume normal chat behavior.\n\n",
-    "Reason: inactive\n\n",
-    "</realtime_conversation>"
-);
-
 /// Desktop capture and playback policy.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct AudioConfig {
@@ -1192,21 +1181,11 @@ async fn route_transcript_tail(
 /// Wraps an unconsumed session tail in Codex's tail-flush delegation markers.
 #[must_use]
 pub fn codex_realtime_tail_delegation(tail: &[RealtimeTranscriptEntry]) -> Option<String> {
-    if tail.is_empty() {
-        return None;
-    }
     let transcript = tail
         .iter()
-        .map(|entry| format!("{}: {}", entry.role, entry.text))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let source = "  <source>transcript_tail_flush</source>\n";
-    let input = escape_xml(REALTIME_SESSION_ENDED_HANDOFF_INSTRUCTION);
-    let transcript = escape_xml(&transcript);
-    let prompt = format!(
-        "<realtime_delegation>\n{source}  <input>{input}</input>\n  <transcript_delta>{transcript}</transcript_delta>\n</realtime_delegation>"
-    );
-    Some(prompt)
+        .map(|entry| ProtocolTranscriptEntry::new(&entry.role, &entry.text))
+        .collect::<Vec<_>>();
+    protocol_realtime_tail_delegation(&transcript)
 }
 
 async fn flush_observed_agent_output(
@@ -1404,26 +1383,11 @@ pub fn codex_realtime_delegation_with_transcript(
     input: &str,
     transcript: &[RealtimeTranscriptEntry],
 ) -> String {
-    let input = escape_xml(input);
     let transcript = transcript
         .iter()
-        .map(|entry| format!("{}: {}", entry.role, entry.text))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let transcript = escape_xml(&transcript);
-    if transcript.is_empty() {
-        format!("<realtime_delegation>\n  <input>{input}</input>\n</realtime_delegation>")
-    } else {
-        format!(
-            "<realtime_delegation>\n  <input>{input}</input>\n  <transcript_delta>{transcript}</transcript_delta>\n</realtime_delegation>"
-        )
-    }
-}
-
-fn escape_xml(text: &str) -> String {
-    text.replace('&', "&amp;")
-        .replace('<', "&lt;")
-        .replace('>', "&gt;")
+        .map(|entry| ProtocolTranscriptEntry::new(&entry.role, &entry.text))
+        .collect::<Vec<_>>();
+    protocol_realtime_delegation(input, &transcript)
 }
 
 fn send_event(events: &mpsc::UnboundedSender<VoiceEvent>, event: VoiceEvent) {

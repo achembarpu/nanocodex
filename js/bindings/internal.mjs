@@ -3,8 +3,9 @@ const turnStates = new WeakMap();
 const resultStates = new WeakMap();
 const hostSessions = new Map();
 const hostConnections = new Map();
-let activeHost;
+const definitionHosts = new Map();
 let nextHostConnection = 1;
+let nextDefinitionHost = 1;
 let nextAgentUid = 1;
 
 export function defineRuntime(definition) {
@@ -95,6 +96,29 @@ export function compact(agent) {
   return agentState(agent).raw.compact();
 }
 
+export async function appendDeveloperMessage(agent, text) {
+  if (typeof text !== "string" || !text.trim()) {
+    throw new TypeError("non-empty string");
+  }
+  return parseSessionContext(await agentState(agent).raw.appendDeveloperMessage(text));
+}
+
+export async function startRealtimeConversation(agent) {
+  return parseSessionContext(await agentState(agent).raw.startRealtimeConversation());
+}
+
+export async function endRealtimeConversation(agent) {
+  return parseSessionContext(await agentState(agent).raw.endRealtimeConversation());
+}
+
+export function realtimeDelegation(agent, input, transcript = []) {
+  return agentState(agent).raw.realtimeDelegation(input, JSON.stringify(transcript));
+}
+
+export function realtimeTailDelegation(agent, transcript) {
+  return agentState(agent).raw.realtimeTailDelegation(JSON.stringify(transcript));
+}
+
 export async function shutdown(agent) {
   const state = knownAgentState(agent);
   if (state.shutdownPromise) return state.shutdownPromise;
@@ -105,6 +129,10 @@ export async function shutdown(agent) {
   state.disposed = true;
   state.shutdownPromise = joinAgentShutdown(state);
   return state.shutdownPromise;
+}
+
+function parseSessionContext(context) {
+  return JSON.parse(context);
 }
 
 export function subscribeAgentEvents(agent, listener, options = {}, onRelease) {
@@ -169,6 +197,8 @@ export function toWasmConfig(options = {}) {
   }
   copy(config, "resume", options.resume);
   copy(config, "durability_id", options.durabilityId);
+  copy(config, "subagents", options.subagents);
+  copy(config, "host_definition_id", options.hostDefinitionId);
   return config;
 }
 
@@ -192,7 +222,6 @@ export function activateHost(host) {
   if (!host || typeof host.connect !== "function") {
     throw new TypeError("a Nanocodex host must define connect()");
   }
-  activeHost = host;
   installHostBridge();
 }
 
@@ -221,6 +250,16 @@ export function bindHostSession(host, sessionId) {
 
 export function releaseHostSession(host, sessionId) {
   if (hostSessions.get(sessionId) === host) hostSessions.delete(sessionId);
+}
+
+export function registerDefinitionHost(host) {
+  const id = nextDefinitionHost++;
+  definitionHosts.set(id, host);
+  return id;
+}
+
+export function releaseDefinitionHost(id) {
+  definitionHosts.delete(id);
 }
 
 const hostBridge = Object.freeze({
@@ -266,6 +305,20 @@ const hostBridge = Object.freeze({
     }
     return host.sleep(milliseconds);
   },
+  bindSubagentSession(rootSessionId, sessionId) {
+    const host = requiredSessionHost(rootSessionId);
+    const existing = hostSessions.get(sessionId);
+    if (existing && existing !== host) {
+      throw new Error(`Nanocodex subagent session ID is already active: ${sessionId}`);
+    }
+    hostSessions.set(sessionId, host);
+  },
+  releaseSubagentSession(sessionId) {
+    const host = hostSessions.get(sessionId);
+    if (!host) return;
+    host.releaseSession(sessionId);
+    hostSessions.delete(sessionId);
+  },
   executeCode(source, sessionId, callId) {
     return requiredSessionHost(sessionId).executeCode(source, sessionId, callId);
   },
@@ -297,15 +350,14 @@ const hostBridge = Object.freeze({
   async subscriptionRequest(subscriptionId, request) {
     return (await loadSubscriptionRuntime()).request(subscriptionId, request);
   },
-  toolMode(sessionId) {
-    // The WASM constructor asks before its session is adopted.
-    return (hostSessions.get(sessionId) ?? requiredActiveHost()).toolMode();
+  toolMode(definitionHostId, sessionId) {
+    return requiredDefinitionHost(definitionHostId).toolMode(sessionId);
   },
-  toolDefinitions(sessionId) {
+  toolDefinitions(definitionHostId, sessionId) {
     // ModelRun builds its stable tool prefix inside the WASM constructor,
-    // immediately before the returned session can be adopted. Runtime
-    // factories activate their host directly around that synchronous step.
-    return (hostSessions.get(sessionId) ?? requiredActiveHost()).toolDefinitions();
+    // before the returned session can be adopted. The private definition host
+    // keeps that lookup instance-scoped for roots and Rust-spawned children.
+    return requiredDefinitionHost(definitionHostId).toolDefinitions(sessionId);
   },
   async durabilityLoad(journalId) {
     return (await loadDurabilityRuntime()).load(journalId);
@@ -348,7 +400,8 @@ function createAgent(raw, runtime) {
     throw error;
   }
   const agent = agentView(state, {});
-  return runtime.decorate ? runtime.decorate(agent) : agent;
+  const decorated = runtime.decorate ? runtime.decorate(agent) : agent;
+  return decorated;
 }
 
 function agentView(state, extensions) {
@@ -382,6 +435,12 @@ function agentView(state, extensions) {
 function requiredSessionHost(sessionId) {
   const host = hostSessions.get(sessionId);
   if (!host) throw new Error(`no Nanocodex host is active for session: ${sessionId}`);
+  return host;
+}
+
+function requiredDefinitionHost(id) {
+  const host = definitionHosts.get(id);
+  if (!host) throw new Error(`no Nanocodex definition host is active: ${id}`);
   return host;
 }
 
@@ -429,11 +488,6 @@ async function joinAgentShutdown(state) {
   }
   if (shutdownFailed) throw shutdownError;
   if (cleanupFailed) throw cleanupError;
-}
-
-function requiredActiveHost() {
-  if (!activeHost) throw new Error("no Nanocodex host is active");
-  return activeHost;
 }
 
 function connectFailure(error) {

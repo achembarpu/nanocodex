@@ -12,7 +12,8 @@ import type {
   TurnResult,
 } from "nanocodex";
 import { createSqliteDurabilityStore } from "nanocodex";
-import { Agent } from "nanocodex/browser";
+import { Agent, Subagents, Transport } from "nanocodex/browser";
+import { web } from "nanocodex/tools";
 import nanocodexWasm from "./nanocodex.wasm";
 import {
   cloudflareSandboxTools,
@@ -65,6 +66,8 @@ export interface Env {
   CHATGPT_FEDRAMP?: string;
   CHATGPT_REFRESH_TOKEN?: string;
   CHATGPT_ISSUER?: string;
+  WEB_TOOL_URL?: string;
+  WEB_TOOL_TOKEN?: string;
 }
 
 type SessionRow = {
@@ -495,36 +498,43 @@ export class NanocodexSession extends DurableObject<Env> {
       throw new Error("OPENAI_API_KEY is not configured");
     }
     const auth = this.env.NANOCODEX_AUTH.getByName("subscription");
-    const authorization = authMode === "api_key"
-      ? { apiKey: this.env.OPENAI_API_KEY! }
-      : { hostAuth: true as const };
+    const websocketUrl = this.env.OPENAI_WEBSOCKET_URL
+      ?? (authMode === "chatgpt" ? CHATGPT_WEBSOCKET_URL : undefined);
+    const transport = authMode === "api_key"
+      ? Transport.openAi({
+          apiKey: this.env.OPENAI_API_KEY!,
+          websocketUrl,
+          createWebSocket: openAiWebSocket,
+        })
+      : Transport.hostManaged({
+          apiBaseUrl: CHATGPT_API_BASE_URL,
+          websocketUrl,
+          createWebSocket: (endpoint, id, request) =>
+            openSubscriptionWebSocket(auth, endpoint, id, request),
+        });
     const agent = await Agent.create({
-      ...authorization,
+      transport,
       module: nanocodexWasm,
-      websocketUrl: this.env.OPENAI_WEBSOCKET_URL
-        ?? (authMode === "chatgpt" ? CHATGPT_WEBSOCKET_URL : undefined),
-      apiBaseUrl: authMode === "chatgpt" ? CHATGPT_API_BASE_URL : undefined,
       sessionId: session.session_id,
       durability: this.#durabilityStore(),
       durabilityId: session.session_id,
       workspace: "/workspace",
-      instructions: "You are Nanocodex running inside a Cloudflare Durable Object. Use the sandbox_* tools for code, files, and previews; their /workspace is isolated and persisted in R2 for this session.",
+      instructions: "You are Nanocodex running inside a Cloudflare Durable Object. Use the sandbox_* tools for code, files, and previews; their /workspace is isolated and persisted in R2 for this session. Delegate independent work with spawn_agent and use the task-tree communication tools to coordinate children.",
       // Workers forbid eval/new Function. Direct mode keeps caller-defined
       // tools in the WASM lifecycle while dispatching handlers through the
       // typed host bridge without dynamic code generation.
       toolMode: "direct",
-      createWebSocket: authMode === "api_key"
-        ? openAiWebSocket
-        : (endpoint, id, request) => openSubscriptionWebSocket(auth, endpoint, id, request),
-      tools: {
-        ...cloudflareSandboxTools(
+      tools: [
+        ...cloudflareWebTools(this.env),
+        ...Object.entries(cloudflareSandboxTools(
           this.env.Sandbox,
           session.session_id,
           this.env.NANOCODEX_SANDBOX_LOCAL === "true",
           session.public_origin || undefined,
           this.env.NANOCODEX_ADMIN_TOKEN,
-        ),
-        runtimeInfo: {
+        )).map(([name, tool]) => ({ name, ...tool })),
+        {
+          name: "runtimeInfo",
           description: "Return information about the current agent runtime.",
           parameters: { type: "object", additionalProperties: false },
           handler: () => ({
@@ -534,7 +544,10 @@ export class NanocodexSession extends DurableObject<Env> {
             workspace: "/workspace",
           }),
         },
-      },
+        // The imported module contains nanocodex-subagents; this spread enables
+        // its Rust-owned tools for this Durable Object's agent family.
+        ...Subagents.create({ maxConcurrency: 8 }),
+      ],
     });
     this.#events = agent.events.watch();
     this.#events.onEvent((event) => this.#broadcast({ type: "event", event }));
@@ -677,6 +690,20 @@ export class NanocodexSession extends DurableObject<Env> {
     if (socket.readyState !== WebSocket.OPEN) return;
     try { socket.send(encoded); } catch { closeSocket(socket, 1011, "send failed"); }
   }
+}
+
+function cloudflareWebTools(env: Env) {
+  if (!env.WEB_TOOL_URL) return [];
+  const url = new URL(env.WEB_TOOL_URL);
+  if (url.protocol !== "https:" && url.hostname !== "127.0.0.1" && url.hostname !== "localhost") {
+    throw new Error("WEB_TOOL_URL must use HTTPS outside local development");
+  }
+  return [web({
+    url,
+    headers: env.WEB_TOOL_TOKEN
+      ? { authorization: `Bearer ${env.WEB_TOOL_TOKEN}` }
+      : undefined,
+  })];
 }
 
 async function openAiWebSocket(

@@ -6,7 +6,7 @@ use std::{
 
 use nanocodex_oai_api::{
     responses::CustomToolFormat,
-    tools::{ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolOutputBody},
+    tools::{Tool, ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolOutputBody},
 };
 
 use super::{
@@ -29,7 +29,20 @@ const DEFERRED_TOOLS_DESCRIPTION: &str = r"Some deferred nested tools are omitte
 pub struct HostedTools {
     host: Option<Arc<dyn CodeModeHost>>,
     session_id: Option<Arc<str>>,
+    local: Vec<(Arc<str>, Arc<dyn Tool>)>,
 }
+
+/// Invalid composition of Rust extension tools in a hosted runtime.
+#[derive(Debug)]
+pub struct HostedToolsBuildError(String);
+
+impl std::fmt::Display for HostedToolsBuildError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
+impl std::error::Error for HostedToolsBuildError {}
 
 impl HostedTools {
     /// Selects an application-owned Code Mode host.
@@ -38,7 +51,29 @@ impl HostedTools {
         Self {
             host: Some(Arc::new(host)),
             session_id: None,
+            local: Vec::new(),
         }
+    }
+
+    /// Adds a Rust-owned direct tool while retaining the embedding host's tools.
+    pub fn with_tool(mut self, tool: impl Tool) -> Result<Self, HostedToolsBuildError> {
+        let name = tool.definition().name().trim().to_owned();
+        if name.is_empty() {
+            return Err(HostedToolsBuildError(
+                "tool name cannot be empty".to_owned(),
+            ));
+        }
+        if self
+            .local
+            .iter()
+            .any(|(configured, _)| configured.as_ref() == name)
+        {
+            return Err(HostedToolsBuildError(format!(
+                "tool is already configured: {name}"
+            )));
+        }
+        self.local.push((Arc::from(name), Arc::new(tool)));
+        Ok(self)
     }
 
     /// Returns `false`; direct web search belongs to the embedding host.
@@ -75,11 +110,10 @@ pub struct HostedToolRuntime {
     working_directory: Arc<str>,
     host: Option<Arc<dyn CodeModeHost>>,
     session_id: Option<Arc<str>>,
+    local: Vec<(Arc<str>, Arc<dyn Tool>)>,
     callable_tool_names: RwLock<HashSet<String>>,
 }
 
-/// Cancellation handle for a hosted runtime.
-///
 /// Cancellation handle for work owned by an embedding host.
 #[derive(Clone, Default)]
 pub struct HostedToolRuntimeControl {
@@ -103,6 +137,7 @@ impl HostedToolRuntime {
             working_directory: Arc::from(workspace.to_string_lossy().into_owned()),
             host: None,
             session_id: None,
+            local: Vec::new(),
             callable_tool_names: RwLock::new(HashSet::new()),
         }
     }
@@ -123,6 +158,7 @@ impl HostedToolRuntime {
     pub fn with_tools(mut self, tools: &HostedTools) -> Self {
         self.host.clone_from(&tools.host);
         self.session_id.clone_from(&tools.session_id);
+        self.local.clone_from(&tools.local);
         self
     }
 
@@ -174,6 +210,12 @@ impl HostedToolRuntime {
                 }
             }
         });
+        definitions.retain(|definition| {
+            !self
+                .local
+                .iter()
+                .any(|(name, _)| name.as_ref() == definition.name())
+        });
         crate::code_mode_order::sort_definitions(&mut definitions);
         if let Ok(mut names) = self.callable_tool_names.write() {
             names.clear();
@@ -189,6 +231,8 @@ impl HostedToolRuntime {
             );
         }
         if mode == HostedToolMode::Direct {
+            definitions.extend(self.local.iter().map(|(_, tool)| tool.definition()));
+            crate::code_mode_order::sort_definitions(&mut definitions);
             return (definitions, Vec::new());
         }
         let (mut direct_definitions, code_mode_definitions): (Vec<_>, Vec<_>) =
@@ -196,6 +240,12 @@ impl HostedToolRuntime {
                 matches!(definition, ToolDefinition::ToolSearch { .. })
                     || is_standard_workspace_tool(definition.name())
             });
+        direct_definitions = direct_definitions
+            .into_iter()
+            .map(crate::code_mode_description::augment_definition_for_code_mode)
+            .collect();
+        crate::code_mode_order::sort_direct_definitions(&mut direct_definitions);
+        direct_definitions.extend(self.local.iter().map(|(_, tool)| tool.definition()));
         crate::code_mode_order::sort_direct_definitions(&mut direct_definitions);
         let code_mode_tool_names = code_mode_definitions
             .iter()
@@ -222,6 +272,8 @@ impl HostedToolRuntime {
                 has_deferred_tools = true;
                 continue;
             }
+            let definition =
+                crate::code_mode_description::augment_definition_for_code_mode(definition);
             description.push_str("\n\n- `tools.");
             description.push_str(definition.name());
             description.push_str("`: ");
@@ -256,11 +308,14 @@ impl HostedToolRuntime {
     /// request.
     #[must_use]
     pub fn contains(&self, name: &str) -> bool {
-        self.host.as_ref().is_some_and(|_| {
-            self.callable_tool_names
-                .read()
-                .is_ok_and(|names| names.contains(name))
-        })
+        self.local
+            .iter()
+            .any(|(configured, _)| configured.as_ref() == name)
+            || self.host.as_ref().is_some_and(|_| {
+                self.callable_tool_names
+                    .read()
+                    .is_ok_and(|names| names.contains(name))
+            })
     }
 
     /// Dispatches a direct hosted definition or returns a model-visible failure.
@@ -274,6 +329,16 @@ impl HostedToolRuntime {
         input: ToolInput,
         context: ToolContext<'_>,
     ) -> ToolOutput {
+        if let Some((_, tool)) = self
+            .local
+            .iter()
+            .find(|(configured, _)| configured.as_ref() == name)
+        {
+            return tool
+                .execute(input, context)
+                .await
+                .unwrap_or_else(|error| ToolOutput::error(error.to_string()));
+        }
         let Some(host) = &self.host else {
             return ToolOutput::error("no hosted tool adapter is configured");
         };
@@ -383,7 +448,6 @@ impl HostedToolRuntimeControl {
     }
 
     /// Cancels active work.
-    ///
     pub async fn cancel(&self) {
         if let (Some(host), Some(session_id)) = (&self.host, &self.session_id)
             && let Err(error) = host.cancel(session_id).await
@@ -419,18 +483,39 @@ fn failed(message: &str) -> CodeModeExecution {
 
 #[cfg(all(test, not(target_family = "wasm")))]
 mod tests {
+    use async_trait::async_trait;
     use nanocodex_oai_api::tools::ToolOutputBody;
     use serde_json::json;
 
     use super::{HostedToolRuntime, HostedTools};
     use crate::{
-        ToolContext, ToolDefinition, ToolInput,
+        Tool, ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult,
         hosted::{CodeModeExecution, CodeModeHost, CodeModeHostError, HostFuture, NestedToolCall},
     };
 
     struct EchoHost;
 
     struct DeferredHost;
+
+    struct ExecHost;
+
+    struct LocalAlpha;
+
+    struct WebHost;
+
+    #[async_trait]
+    impl Tool for LocalAlpha {
+        fn definition(&self) -> ToolDefinition {
+            ToolDefinition::function("alpha", "Rust alpha.", json!({"type": "object"}))
+        }
+
+        async fn execute(&self, _input: ToolInput, context: ToolContext<'_>) -> ToolResult {
+            Ok(ToolOutput::from_json(
+                json!({"session_id": context.session_id()}),
+                true,
+            ))
+        }
+    }
 
     impl CodeModeHost for EchoHost {
         fn tool_definitions(
@@ -502,6 +587,80 @@ mod tests {
         }
     }
 
+    impl CodeModeHost for ExecHost {
+        fn tool_definitions(
+            &self,
+            _session_id: &str,
+        ) -> Result<Vec<ToolDefinition>, CodeModeHostError> {
+            Ok(vec![
+                ToolDefinition::function(
+                    "exec_command",
+                    "Run a command.",
+                    json!({
+                        "type": "object",
+                        "properties": { "cmd": { "type": "string" } },
+                        "required": ["cmd"]
+                    }),
+                )
+                .with_output_schema(json!({
+                    "type": "object",
+                    "properties": {
+                        "output": { "type": "string" },
+                        "wall_time_seconds": { "type": "number" }
+                    },
+                    "required": ["output", "wall_time_seconds"]
+                })),
+            ])
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _source: &'a str,
+            _context: ToolContext<'a>,
+        ) -> HostFuture<'a, Result<CodeModeExecution, CodeModeHostError>> {
+            Box::pin(async { unreachable!("this test only inspects the model contract") })
+        }
+    }
+
+    impl CodeModeHost for WebHost {
+        fn tool_definitions(
+            &self,
+            _session_id: &str,
+        ) -> Result<Vec<ToolDefinition>, CodeModeHostError> {
+            Ok(vec![ToolDefinition::function(
+                "web__run",
+                "Search the public internet.",
+                json!({
+                    "type": "object",
+                    "properties": {
+                        "search_query": {
+                            "type": "array",
+                            "items": {
+                                "type": "object",
+                                "properties": { "q": { "type": "string" } },
+                                "required": ["q"],
+                                "additionalProperties": false
+                            }
+                        },
+                        "response_length": {
+                            "type": "string",
+                            "enum": ["short", "medium", "long"]
+                        }
+                    },
+                    "additionalProperties": false
+                }),
+            )])
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _source: &'a str,
+            _context: ToolContext<'a>,
+        ) -> HostFuture<'a, Result<CodeModeExecution, CodeModeHostError>> {
+            Box::pin(async { unreachable!("this test only inspects the model contract") })
+        }
+    }
+
     #[test]
     fn model_description_orders_host_definitions() {
         let tools = HostedTools::new(EchoHost).for_session("session-1");
@@ -510,6 +669,53 @@ mod tests {
             HostedToolRuntime::new_with_tools(".", None, None, &tools).model_specs("session-1");
         let description = specs[0].description();
         assert!(description.find("tools.alpha").unwrap() < description.find("tools.zeta").unwrap());
+    }
+
+    #[test]
+    fn model_description_includes_hosted_tool_argument_shapes() {
+        let specs = HostedToolRuntime::new_with_tools(".", None, None, &HostedTools::new(WebHost))
+            .model_specs("session-1");
+        let description = specs[0].description();
+
+        assert!(description.contains("web__run(args:"));
+        assert!(description.contains("search_query?: Array<{ q: string; }>"));
+        assert!(description.contains("response_length?: \"short\" | \"medium\" | \"long\""));
+    }
+
+    #[test]
+    fn direct_workspace_tool_describes_its_code_mode_return_shape() {
+        let specs = HostedToolRuntime::new_with_tools(".", None, None, &HostedTools::new(ExecHost))
+            .model_specs("session-1");
+        let exec_command = specs
+            .iter()
+            .find(|definition| definition.name() == "exec_command")
+            .unwrap();
+
+        assert!(exec_command.description().contains(
+            "exec_command(args: { cmd: string; }): Promise<{ output: string; wall_time_seconds: number; }>"
+        ));
+    }
+
+    #[tokio::test]
+    async fn rust_extension_tools_shadow_host_tools_and_dispatch_directly() {
+        let tools = HostedTools::new(EchoHost).with_tool(LocalAlpha).unwrap();
+        let runtime = HostedToolRuntime::new_with_tools(".", None, None, &tools);
+        let specs = runtime.model_specs("session-1");
+        assert_eq!(
+            specs.iter().map(ToolDefinition::name).collect::<Vec<_>>(),
+            ["exec", "alpha"]
+        );
+        assert!(!specs[0].description().contains("tools.alpha"));
+
+        let output = runtime
+            .execute_tool(
+                "alpha",
+                ToolInput::Function(serde_json::value::to_raw_value(&json!({})).unwrap()),
+                ToolContext::new("gpt-5", "session-1", "call-1", &[], 1_000),
+            )
+            .await;
+        assert!(output.success);
+        assert_eq!(output.structured_result()["session_id"], "session-1");
     }
 
     #[tokio::test]

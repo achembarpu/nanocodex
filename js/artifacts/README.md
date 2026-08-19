@@ -22,5 +22,7 @@ ID replaces that interface in place, so an agent can continuously redesign and
 extend it from voice or text instructions.
 
 `ArtifactStore` depends only on the narrow structural subset of `Workspace`
-used for persistence. Stored documents are byte-bounded and strictly validated;
-there is no component catalog or JSON-to-UI rendering contract.
+used for persistence. Documents are structurally validated, while storage and
+runtime capacity remain owned by the host; the binding adds no byte, source, or
+document-count ceilings. There is no component catalog or JSON-to-UI rendering
+contract.

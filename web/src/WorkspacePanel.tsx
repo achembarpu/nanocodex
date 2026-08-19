@@ -27,8 +27,8 @@ import {
 } from "react";
 import type { Workspace, WorkspaceEntry } from "nanocodex/browser/workspace";
 
-import type { ThreadGitStatus } from "./threadGit";
-import { getBrowserThread, openKernelWorkspace } from "./workspace";
+import type { ThreadGitStatus } from "nanocodex/tools/browser";
+import { getBrowserThread, openKernelWorkspace } from "nanocodex/tools/browser";
 import {
   buildWorkspaceTree,
   parentWorkspaceDirectory,
@@ -78,7 +78,7 @@ export const WorkspacePanel = memo(function WorkspacePanel() {
 
   useEffect(() => {
     let active = true;
-    void import("./threadGit")
+    void import("nanocodex/tools/browser")
       .then(({ initializeThreadGit }) => initializeThreadGit(thread))
       .then(async (nextGitStatus) => {
         const nextWorkspace = await openKernelWorkspace();
@@ -97,7 +97,7 @@ export const WorkspacePanel = memo(function WorkspacePanel() {
     let active = true;
     const refreshWorkspace = async () => {
       try {
-        const { threadGitStatus } = await import("./threadGit");
+        const { threadGitStatus } = await import("nanocodex/tools/browser");
         const [nextGitStatus] = await Promise.all([
           threadGitStatus(thread),
           refresh(workspace),
@@ -107,7 +107,7 @@ export const WorkspacePanel = memo(function WorkspacePanel() {
         if (active) setMessage(errorMessage(error));
       }
     };
-    void import("./threadGit").then(({ subscribeThreadGitChanges }) => {
+    void import("nanocodex/tools/browser").then(({ subscribeThreadGitChanges }) => {
       if (!active) return;
       unsubscribe = subscribeThreadGitChanges(thread, (source) => {
         if (source !== notificationSource) void refreshWorkspace();
@@ -184,7 +184,7 @@ export const WorkspacePanel = memo(function WorkspacePanel() {
     try {
       await operation();
       await refresh(workspace);
-      const { notifyThreadGitChanged, threadGitStatus } = await import("./threadGit");
+      const { notifyThreadGitChanged, threadGitStatus } = await import("nanocodex/tools/browser");
       notifyThreadGitChanged(thread, notificationSource);
       setGitStatus(await threadGitStatus(thread));
       setMessage(success);
@@ -222,7 +222,7 @@ export const WorkspacePanel = memo(function WorkspacePanel() {
           await workspace?.writeFile(selected.path, contents);
           setSavedContents(contents);
         }
-        const { commitAndPushThread } = await import("./threadGit");
+        const { commitAndPushThread } = await import("nanocodex/tools/browser");
         return commitAndPushThread(
           thread,
           "Update Nanocodex workspace",
@@ -238,7 +238,7 @@ export const WorkspacePanel = memo(function WorkspacePanel() {
       "Pulling can replace local workspace changes. Continue?",
     )) return;
     await syncGit(async () => {
-      const { pullThread } = await import("./threadGit");
+      const { pullThread } = await import("nanocodex/tools/browser");
       return pullThread(thread, notificationSource);
     }, "Pulled origin nanocodex into OPFS.");
   };

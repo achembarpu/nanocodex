@@ -1,4 +1,5 @@
 import {
+  appendDeveloperMessage as appendAgentDeveloperMessage,
   compact as compactAgent,
   fork as forkAgent,
   setFastMode as setAgentFastMode,
@@ -6,6 +7,17 @@ import {
   shutdown as shutdownAgent,
   spawn as spawnAgent,
 } from "../internal.mjs";
+
+export {
+  endRealtimeConversation,
+  realtimeDelegation,
+  realtimeTailDelegation,
+  startRealtimeConversation,
+} from "../internal.mjs";
+
+export function appendDeveloperMessage(agent, text) {
+  return appendAgentDeveloperMessage(agent, text);
+}
 
 export function compact(agent) {
   return compactAgent(agent);

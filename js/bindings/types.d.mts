@@ -219,6 +219,17 @@ export type TurnUsage = Readonly<{
 export type ForkOptions = { at?: TurnResult | undefined };
 export type WatchEventsOptions = { includeAllSessions?: boolean | undefined };
 
+/** Read-only model context captured at the latest safe agent boundary. */
+export type AgentSessionContext = Readonly<{
+  workspace: string;
+  history: readonly Record<string, unknown>[];
+}>;
+
+export type RealtimeTranscriptEntry = Readonly<{
+  role: "user" | "assistant";
+  text: string;
+}>;
+
 export type EventWatcher = Readonly<{
   onEvent(listener: (event: AgentEvent) => void): () => void;
   off(): void;
@@ -230,12 +241,19 @@ export type AgentActions = {
     watch(options?: WatchEventsOptions): EventWatcher;
   };
   session: {
+    appendDeveloperMessage(text: string): Promise<AgentSessionContext>;
     compact(): Promise<void>;
     fork(options?: ForkOptions): Promise<DefaultAgent>;
     setFastMode(enabled: boolean): Promise<void>;
     setThinking(thinking: Thinking): Promise<void>;
     shutdown(): Promise<void>;
     spawn(): Promise<DefaultAgent>;
+    realtime: {
+      start(): Promise<AgentSessionContext>;
+      end(): Promise<AgentSessionContext>;
+      delegation(input: string, transcript?: readonly RealtimeTranscriptEntry[]): string;
+      tailDelegation(transcript: readonly RealtimeTranscriptEntry[]): string | undefined;
+    };
   };
   turn: {
     prompt(options: { input: PromptInput; id?: string | undefined }): Turn;
@@ -281,11 +299,25 @@ export type ToolContext = {
 
 export type Tool = {
   description: string;
-  parameters: Record<string, unknown>;
+  /** Runtime JSON Schema for model-generated input. Defaults to an open object. */
+  parameters?: Record<string, unknown> | undefined;
+  /** Runtime JSON Schema for the resolved handler value shown to Code Mode. */
+  outputSchema?: Record<string, unknown> | undefined;
   handler(input: unknown, context: ToolContext): unknown | Promise<unknown>;
+  /** Releases state owned by one completed agent session. */
+  releaseSession?(sessionId: string): void;
+  /** Releases all retained tool state when the owning host shuts down. */
+  dispose?(): void;
 };
 
 export type ToolMap = Record<string, Tool>;
+
+export type NamedTool = Tool & Readonly<{ name: string }>;
+
+/** Static JavaScript tools, optionally composed with Rust-backed extensions. */
+export type ToolConfiguration<Extension = never> =
+  | ToolMap
+  | readonly (NamedTool | Extension)[];
 
 export type CodeEvaluatorEnvironment = {
   tools: Readonly<Record<string, (input: unknown) => Promise<unknown>>>;

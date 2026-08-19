@@ -17,6 +17,7 @@ public_packages='[
   "nanocodex-durability",
   "nanocodex-oai-api",
   "nanocodex-observability",
+  "nanocodex-subagents",
   "nanocodex-tools",
   "nanocodex-tools-macros"
 ]'
@@ -40,7 +41,7 @@ assert_snapshot() {
   exit 1
 }
 
-expected_packages=$'nanocodex\nnanocodex-agent\nnanocodex-durability\nnanocodex-oai-api\nnanocodex-observability\nnanocodex-tools\nnanocodex-tools-macros'
+expected_packages=$'nanocodex\nnanocodex-agent\nnanocodex-durability\nnanocodex-oai-api\nnanocodex-observability\nnanocodex-subagents\nnanocodex-tools\nnanocodex-tools-macros'
 actual_packages="$(
   jq -r '
     .packages[]
@@ -50,7 +51,7 @@ actual_packages="$(
 )"
 assert_snapshot "public package set" "$expected_packages" "$actual_packages"
 
-expected_edges=$'nanocodex\tnanocodex-agent\tnormal\tall\nnanocodex\tnanocodex-durability\tnormal\tall\nnanocodex\tnanocodex-oai-api\tnormal\tall\nnanocodex\tnanocodex-observability\tnormal\tcfg(not(target_family = "wasm"))\nnanocodex\tnanocodex-tools\tnormal\tall\nnanocodex-agent\tnanocodex-oai-api\tnormal\tall\nnanocodex-agent\tnanocodex-tools\tnormal\tall\nnanocodex-durability\tnanocodex-agent\tnormal\tall\nnanocodex-tools\tnanocodex-oai-api\tnormal\tall\nnanocodex-tools\tnanocodex-tools-macros\tnormal\tcfg(not(target_family = "wasm"))'
+expected_edges=$'nanocodex\tnanocodex-agent\tnormal\tall\nnanocodex\tnanocodex-durability\tnormal\tall\nnanocodex\tnanocodex-oai-api\tnormal\tall\nnanocodex\tnanocodex-observability\tnormal\tcfg(not(target_family = "wasm"))\nnanocodex\tnanocodex-tools\tnormal\tall\nnanocodex-agent\tnanocodex-oai-api\tnormal\tall\nnanocodex-agent\tnanocodex-tools\tnormal\tall\nnanocodex-durability\tnanocodex-agent\tnormal\tall\nnanocodex-subagents\tnanocodex-agent\tnormal\tall\nnanocodex-subagents\tnanocodex-tools\tnormal\tall\nnanocodex-tools\tnanocodex-oai-api\tnormal\tall\nnanocodex-tools\tnanocodex-tools-macros\tnormal\tcfg(not(target_family = "wasm"))'
 actual_edges="$(
   jq -r --argjson public "$public_packages" '
     .packages[]

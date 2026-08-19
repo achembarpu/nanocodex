@@ -7,8 +7,6 @@ type StartCommand = Extract<TuiCommand, { type: "start" }>;
 export type WebTuiCommand =
   | Exclude<TuiCommand, { type: "start" }>
   | { type: "artifactPrompt"; id: number; prompt: string }
-  | { type: "voicePrompt"; target: TuiTarget; id: number; prompt: string }
-  | { type: "voiceTranscript"; target: TuiTarget; speaker: "user" | "assistant"; text: string }
   | (StartCommand & { threadId: string; transport: "openai" })
   | (StartCommand & { threadId: string; transport: "chatgpt" })
   | (StartCommand & {

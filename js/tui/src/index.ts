@@ -12,18 +12,36 @@ export type TuiTarget =
   | { pane: "main"; branchId: number }
   | { pane: "btw"; id: number };
 
+export type VoiceTranscriptEntry = Readonly<{
+  role: "user" | "assistant";
+  text: string;
+}>;
+
+export type VoiceDelegation =
+  | { kind: "request"; input: string; transcript: readonly VoiceTranscriptEntry[] }
+  | { kind: "tail"; transcript: readonly VoiceTranscriptEntry[] };
+
+export type VoiceSessionContext = Readonly<{
+  workspace: string;
+  history: readonly Record<string, unknown>[];
+}>;
+
 export type TuiCommand =
   | { type: "start"; thinking: "none" | "low" | "medium" | "high" | "xhigh" | "max"; reasoningMode: "standard" | "pro" }
   | { type: "prompt"; target: TuiTarget; id: number; prompt: string; images?: string[]; intent: "immediate" | "queue" }
   | { type: "cancel"; target: TuiTarget }
   | { type: "openBtw"; id: number; sourceBranchId: number; promptId?: number; prompt?: string; images?: string[] }
   | { type: "closeBtw"; id: number }
-  | { type: "historicalFork"; sourceBranchId: number; newBranchId: number; selectedPromptId: number; newPromptId: number; prompt: string };
+  | { type: "historicalFork"; sourceBranchId: number; newBranchId: number; selectedPromptId: number; newPromptId: number; prompt: string }
+  | { type: "voiceLifecycle"; id: number; target: TuiTarget; action: "start" | "stop" }
+  | { type: "voicePrompt"; target: TuiTarget; id: number; delegation: VoiceDelegation }
+  | { type: "voiceTranscript"; target: TuiTarget; speaker: "user" | "assistant"; text: string };
 
 export type TuiMessage =
   | { type: "ready"; sessionId: string }
   | { type: "externalPrompt"; target: TuiTarget; id: number; prompt: string; intent?: "immediate" | "queue" }
   | { type: "voiceTranscript"; target: TuiTarget; speaker: "user" | "assistant"; text: string }
+  | { type: "voiceLifecycleResult"; id: number; action: "start" | "stop"; context?: VoiceSessionContext; error?: string }
   | { type: "event"; target: TuiTarget; event: AgentEvent }
   | { type: "turnFinished"; target: TuiTarget; id: number; message?: string; error?: string }
   | { type: "steerAdmitted"; target: TuiTarget; id: number }

@@ -34,10 +34,14 @@ test("the packed package installs and runs every public entry point", async () =
     const [packed] = JSON.parse(stdout);
     assert.equal(packed.name, packageJson.name);
     assert.equal(packed.version, packageJson.version);
-    assert.ok(packed.size <= 1_110_000, `compressed package grew to ${packed.size} bytes`);
-    // Both WASM targets include the canonical Rust apply_patch grammar and planner.
+    // The package now owns the browser shell source while its language and SSH
+    // dependencies remain external and runtime-lazy. npm's tar output differs
+    // slightly across platforms, so retain a tight portable compressed gate.
+    assert.ok(packed.size <= 2_500_000, `compressed package grew to ${packed.size} bytes`);
+    // Both WASM targets include the canonical Rust apply_patch planner and the
+    // full JSON-Schema-backed subagent runtime.
     assert.ok(
-      packed.unpackedSize <= 5_300_000,
+      packed.unpackedSize <= 8_050_000,
       `unpacked package grew to ${packed.unpackedSize} bytes`,
     );
     assert.equal(
@@ -61,13 +65,36 @@ test("the packed package installs and runs every public entry point", async () =
       import { dirname, resolve } from "node:path";
       import { fileURLToPath } from "node:url";
       import { Actions } from "nanocodex";
-      import { Agent as NodeAgent, Workspace as NodeWorkspace } from "nanocodex/node";
-      import { Agent as BrowserAgent, Workspace as BrowserWorkspace } from "nanocodex/browser";
+      import { dataset as aggregateDataset, web } from "nanocodex/tools";
+      import { dataset } from "nanocodex/tools/dataset";
+      import { nanocodexTools } from "nanocodex/tools/vite";
+      import { Agent as NodeAgent, Subagents as NodeSubagents, Transport as NodeTransport, Workspace as NodeWorkspace } from "nanocodex/node";
+      import { Agent as BrowserAgent, Subagents as BrowserSubagents, Transport as BrowserTransport, Workspace as BrowserWorkspace } from "nanocodex/browser";
 
       assert.equal(typeof Actions.turn.prompt, "function");
       assert.equal(typeof NodeWorkspace.open, "function");
       assert.equal(typeof BrowserWorkspace.open, "function");
-      const nodeAgent = await NodeAgent.create({ apiKey: "package-test" });
+      assert.equal(web({ url: "https://example.test/tools/web" }).name, "web__run");
+      assert.equal(aggregateDataset().name, "dataset");
+      const datasetTool = dataset({
+        fetch: async () => new Response('{"id":1}\\n'),
+      });
+      assert(Object.isFrozen(datasetTool));
+      const opened = await datasetTool.handler({
+        operation: "open",
+        source: { kind: "url", url: "https://example.test/data.jsonl", format: "jsonl" },
+      }, {
+        callId: "dataset-open",
+        parentCallId: "",
+        sessionId: "package-test",
+        signal: new AbortController().signal,
+      });
+      assert.deepEqual(opened.previewRows, [{ id: 1 }]);
+      assert.match(nanocodexTools().resolveId("node-rsa"), /unsupportedNodeRsa\.mjs$/);
+      const nodeAgent = await NodeAgent.create({
+        transport: NodeTransport.openAi({ apiKey: "package-test" }),
+        tools: [...NodeSubagents.create({ maxConcurrency: 2 })],
+      });
       assert.equal(nodeAgent.type, "node");
       await nodeAgent.session.shutdown();
       await nodeAgent.session.shutdown();
@@ -78,15 +105,22 @@ test("the packed package installs and runs every public entry point", async () =
         "../pkg-web/nanocodex_bg.wasm",
       ));
       const browserAgent = await BrowserAgent.create({
-        apiKey: "package-test",
+        transport: BrowserTransport.openAi({
+          apiKey: "package-test",
+          WebSocketImpl: class {},
+        }),
         module: wasm,
-        WebSocketImpl: class {},
+        tools: [...BrowserSubagents.create({ maxConcurrency: 2 })],
       });
       assert.equal(browserAgent.type, "browser");
       await browserAgent.session.shutdown();
 
       await assert.rejects(
         import("nanocodex/internal.mjs"),
+        (error) => error.code === "ERR_PACKAGE_PATH_NOT_EXPORTED",
+      );
+      await assert.rejects(
+        import("nanocodex/tools/datasetEngine"),
         (error) => error.code === "ERR_PACKAGE_PATH_NOT_EXPORTED",
       );
     `);

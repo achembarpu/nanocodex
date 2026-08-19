@@ -9,23 +9,10 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
 
   function addTools(configuration = {}) {
     for (const [name, tool] of Object.entries(configuration)) {
-      if (toolByName.has(name)) throw new Error(`tool is already configured: ${name}`);
-      if (!tool || typeof tool.handler !== "function") {
-        throw new TypeError(`tool ${name} requires a handler function`);
+      if (toolByName.has(name)) {
+        throw new Error(`tool is already configured: ${name}`);
       }
-      const configured = Object.freeze({ handler: tool.handler, name });
-      configuredTools.push(configured);
-      toolByName.set(name, configured);
-      definitions.push(deepFreeze({
-        type: "function",
-        name,
-        description: tool.description || "Application-defined tool.",
-        strict: false,
-        parameters: jsonSnapshot(tool.parameters || {
-          type: "object",
-          additionalProperties: true,
-        }, `tool ${name} parameters`),
-      }));
+      addTool(name, tool, { configuredTools, definitions, toolByName });
     }
   }
   addTools(toolConfiguration);
@@ -118,6 +105,19 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
           Math.round((toolStartedAt - startedAt) * 1_000_000),
         );
         const recordedInput = clone(input) ?? null;
+        const recordedCall = {
+          call_id: callId,
+          name,
+          input: recordedInput,
+          output: "",
+          structured_result: null,
+          success: false,
+          started_after_ns: startedAfterNs,
+          duration_ns: 0,
+        };
+        // Rust records nested calls in invocation order even when parallel
+        // siblings finish out of order. Reserve the slot before dispatch.
+        nestedCalls.push(recordedCall);
         try {
           if (controller.signal.aborted) throw new Error("Code Mode execution was cancelled");
           const result = await handler(input, {
@@ -126,27 +126,19 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
             callId,
             signal: controller.signal,
           });
-          nestedCalls.push({
-            call_id: callId,
-            name,
-            input: recordedInput,
+          Object.assign(recordedCall, {
             output: outputBody(result),
             structured_result: structuredResult(result, `tool ${name} result`),
             success: true,
-            started_after_ns: startedAfterNs,
             duration_ns: elapsedNs(toolStartedAt),
           });
           return isToolResult(result) ? result.output : result;
         } catch (error) {
           const message = errorMessage(error);
-          nestedCalls.push({
-            call_id: callId,
-            name,
-            input: recordedInput,
+          Object.assign(recordedCall, {
             output: message,
             structured_result: message,
             success: false,
-            started_after_ns: startedAfterNs,
             duration_ns: elapsedNs(toolStartedAt),
           });
           throw error;
@@ -242,11 +234,44 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
       }
     },
     toolDefinitions: () => JSON.stringify(currentDefinitions()),
+    releaseSession(sessionId) {
+      stores.delete(sessionId);
+      for (const tool of configuredTools) tool.releaseSession?.(sessionId);
+    },
     reset() {
       for (const execution of activeExecutions) execution.controller.abort();
       stores.clear();
+      for (const tool of configuredTools) tool.dispose?.();
     },
   });
+}
+
+function addTool(name, tool, collection) {
+  if (!tool || typeof tool.handler !== "function") {
+    throw new TypeError(`tool ${name} requires a handler function`);
+  }
+  const configured = Object.freeze({
+    dispose: typeof tool.dispose === "function" ? tool.dispose : undefined,
+    handler: tool.handler,
+    name,
+    releaseSession: typeof tool.releaseSession === "function" ? tool.releaseSession : undefined,
+  });
+  collection.configuredTools.push(configured);
+  collection.toolByName.set(name, configured);
+  const definition = {
+    type: "function",
+    name,
+    description: tool.description || "Application-defined tool.",
+    strict: false,
+    parameters: jsonSnapshot(tool.parameters || {
+      type: "object",
+      additionalProperties: true,
+    }, `tool ${name} parameters`),
+  };
+  if (tool.outputSchema !== undefined) {
+    definition.output_schema = jsonSnapshot(tool.outputSchema, "tool output schema");
+  }
+  collection.definitions.push(deepFreeze(definition));
 }
 
 async function evaluateNative(source, environment) {

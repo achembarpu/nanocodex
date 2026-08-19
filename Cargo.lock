@@ -5245,6 +5245,7 @@ dependencies = [
  "nanocodex-eval",
  "nanocodex-eval-adapters",
  "nanocodex-observability",
+ "nanocodex-subagents",
  "nanocodex-vm",
  "nanocodex-voice",
  "nanousd",
@@ -5516,6 +5517,26 @@ dependencies = [
 ]
 
 [[package]]
+name = "nanocodex-subagents"
+version = "0.5.0"
+dependencies = [
+ "async-trait",
+ "futures-util",
+ "js-sys",
+ "jsonschema",
+ "nanocodex-agent",
+ "nanocodex-tools",
+ "serde",
+ "serde_json",
+ "tokio",
+ "tower",
+ "tracing",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-time",
+]
+
+[[package]]
 name = "nanocodex-tools"
 version = "0.5.0"
 dependencies = [
@@ -5601,6 +5622,7 @@ dependencies = [
  "cpal",
  "futures-util",
  "nanocodex",
+ "nanocodex-voice-protocol",
  "serde_json",
  "tempfile",
  "thiserror 2.0.18",
@@ -5610,11 +5632,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "nanocodex-voice-protocol"
+version = "0.5.0"
+
+[[package]]
 name = "nanocodex-wasm"
 version = "0.5.0"
 dependencies = [
  "js-sys",
  "nanocodex",
+ "nanocodex-subagents",
+ "nanocodex-voice-protocol",
  "serde",
  "serde_json",
  "tokio",

@@ -1,18 +1,14 @@
 import type {
   AgentOptions,
   CodeEvaluator,
-  ChatGptSubscriptionHandle,
   DefaultAgent,
   DurabilityStore,
   ExecutionEnvironment,
   McpServers,
-  MppSession,
-  ToolMap,
+  ToolConfiguration,
 } from "../types.mjs";
-import type {
-  BrowserWebSocketConnection,
-  BrowserWebSocketRequest,
-} from "./host.mjs";
+import type { Transport } from "./Transport.mjs";
+import type { Tool as SubagentTool } from "../runtime/subagents.mjs";
 import type { Workspace } from "./workspace.mjs";
 
 export type Agent = DefaultAgent;
@@ -24,21 +20,9 @@ type ToolExposureOptions =
 export function prewarm(options?: { module?: unknown }): Promise<void>;
 
 /** Creates a browser- or Worker-hosted Rust/WASM Agent. */
-export function create(options?: create.Options): Promise<create.ReturnType>;
+export function create(options: create.Options): Promise<create.ReturnType>;
 export declare namespace create {
-  type Options = AgentOptions & (
-    | { apiKey?: string | undefined; hostAuth?: never; mpp?: never; subscription?: never }
-    | { apiKey?: never; hostAuth?: true; mpp?: never; subscription?: never }
-    | { apiKey?: never; hostAuth?: never; mpp: MppSession; subscription?: never }
-    | { apiKey?: never; hostAuth?: never; mpp?: never; subscription: ChatGptSubscriptionHandle }
-  ) & ToolExposureOptions & {
-    WebSocketImpl?: typeof WebSocket | undefined;
-    apiBaseUrl?: string | undefined;
-    createWebSocket?(
-      endpoint: string,
-      sessionId: string,
-      request: BrowserWebSocketRequest,
-    ): WebSocket | BrowserWebSocketConnection | Promise<WebSocket | BrowserWebSocketConnection>;
+  type Options = AgentOptions & ToolExposureOptions & {
     /** Caller-owned persistent filesystem mounted through standard workspace tools. */
     filesystem?: Workspace | undefined;
     /** Disable the legacy list/read/write workspace functions when a shell owns filesystem access. */
@@ -48,10 +32,8 @@ export declare namespace create {
     executionEnvironment?: ExecutionEnvironment | undefined;
     /** Optional CSP-compatible Code Mode evaluator, such as createQuickJsEvaluator(). */
     codeEvaluator?: CodeEvaluator | undefined;
-    tools?: ToolMap | undefined;
-    /** Sends an optional non-generating request before the first turn. */
-    websocketWarmup?: boolean | undefined;
-    websocketUrl?: string | undefined;
+    tools?: ToolConfiguration<SubagentTool> | undefined;
+    transport: Transport;
   } & (
     | { durability?: undefined; durabilityId?: undefined }
     | { durability: DurabilityStore; durabilityId: string }

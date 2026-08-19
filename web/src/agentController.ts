@@ -134,19 +134,50 @@ export function createAgentController({
         });
         return;
       }
+      case "voiceLifecycle": {
+        const branch = resolveTarget(message.target);
+        if (!branch) {
+          postVoiceLifecycleResult(message.id, message.action, undefined, "Branch is unavailable");
+          return;
+        }
+        try {
+          const context = await (message.action === "start"
+            ? branch.agent.session.realtime.start()
+            : branch.agent.session.realtime.end());
+          postVoiceLifecycleResult(message.id, message.action, context);
+        } catch (error) {
+          postVoiceLifecycleResult(message.id, message.action, undefined, errorMessage(error));
+        }
+        return;
+      }
       case "voicePrompt": {
+        const branch = resolveTarget(message.target);
+        if (!branch) {
+          post("turnFinished", message.target, {
+            id: message.id,
+            error: "Branch is unavailable",
+          });
+          return;
+        }
+        const prompt = message.delegation.kind === "request"
+          ? branch.agent.session.realtime.delegation(
+              message.delegation.input,
+              message.delegation.transcript,
+            )
+          : branch.agent.session.realtime.tailDelegation(message.delegation.transcript);
+        if (!prompt) return;
         postMessage({
           type: "externalPrompt",
           target: message.target,
           id: message.id,
-          prompt: message.prompt,
+          prompt,
           intent: "immediate",
         });
         await handle({
           type: "prompt",
           target: message.target,
           id: message.id,
-          prompt: message.prompt,
+          prompt,
           intent: "immediate",
         });
         return;
@@ -435,6 +466,21 @@ export function createAgentController({
     if (encoded === lastPaymentStatus) return;
     lastPaymentStatus = encoded;
     postMessage({ type: "mppPayment", payment: status });
+  }
+
+  function postVoiceLifecycleResult(
+    id: number,
+    action: "start" | "stop",
+    context?: import("nanocodex-tui").VoiceSessionContext,
+    error?: string,
+  ): void {
+    postMessage({
+      type: "voiceLifecycleResult",
+      id,
+      action,
+      ...(context ? { context } : {}),
+      ...(error ? { error } : {}),
+    });
   }
 
   function rememberSessionImage(sessionId: string, imageUrl: string): void {

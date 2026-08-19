@@ -3,7 +3,9 @@
   "version": "0.5.0",
   "description": "Viem-style Node and browser bindings for the Nanocodex WASM agent",
   "type": "module",
-  "sideEffects": false,
+  "sideEffects": [
+    "./tools/browser/browserBuffer.mjs"
+  ],
   "exports": {
     ".": {
       "types": "./index.d.mts",
@@ -17,6 +19,10 @@
       "types": "./node/workspace.d.mts",
       "import": "./node/workspace.mjs"
     },
+    "./node/transport": {
+      "types": "./node/Transport.d.mts",
+      "import": "./node/Transport.mjs"
+    },
     "./browser": {
       "types": "./browser/index.d.mts",
       "import": "./browser/index.mjs"
@@ -24,6 +30,38 @@
     "./browser/workspace": {
       "types": "./browser/workspace.d.mts",
       "import": "./browser/workspace.mjs"
+    },
+    "./browser/transport": {
+      "types": "./browser/Transport.d.mts",
+      "import": "./browser/Transport.mjs"
+    },
+    "./browser/realtime": {
+      "types": "./browser/realtimePrompt.d.mts",
+      "import": "./browser/realtimePrompt.mjs"
+    },
+    "./subagents": {
+      "types": "./runtime/subagents.d.mts",
+      "import": "./runtime/subagents.mjs"
+    },
+    "./tools": {
+      "types": "./tools/index.d.mts",
+      "import": "./tools/index.mjs"
+    },
+    "./tools/dataset": {
+      "types": "./tools/dataset.d.mts",
+      "import": "./tools/dataset.mjs"
+    },
+    "./tools/artifact": {
+      "types": "./tools/artifact.d.mts",
+      "import": "./tools/artifact.mjs"
+    },
+    "./tools/browser": {
+      "types": "./tools/browser/index.d.mts",
+      "import": "./tools/browser/index.mjs"
+    },
+    "./tools/vite": {
+      "types": "./tools/vite.d.mts",
+      "import": "./tools/vite.mjs"
     },
     "./worker": {
       "types": "./worker/index.d.mts",
@@ -42,6 +80,7 @@
     "pkg-node",
     "pkg-web",
     "runtime",
+    "tools",
     "internal.mjs",
     "index.d.mts",
     "index.mjs",
@@ -58,17 +97,29 @@
     "prepack": "npm run check:package",
     "test": "node --test test/*.test.mjs && npm run test:performance && npm run test:typecheck && npm run check:package",
     "test:performance": "node --test test/performance.bench.mjs",
+    "bench:dataset": "node scripts/dataset.bench.mjs",
     "test:typecheck": "tsc -p test/tsconfig.json"
   },
   "dependencies": {
+    "@eduoj/wasm-clang": "1.0.0",
+    "@microsoft/dev-tunnels-ssh": "3.12.40",
+    "@microsoft/dev-tunnels-ssh-keys": "3.12.40",
     "@modelcontextprotocol/sdk": "1.30.0",
+    "buffer": "6.0.3",
+    "diff": "^9.0.0",
+    "hyparquet": "1.28.2",
+    "hyparquet-compressors": "1.1.1",
+    "isomorphic-git": "^1.41.5",
+    "just-bash": "^3.4.0",
     "minisearch": "7.2.0",
     "mppx": "0.8.17",
+    "pyodide": "314.0.5",
     "ws": "^8.18.3"
   },
   "devDependencies": {
     "@jitl/quickjs-wasmfile-release-asyncify": "0.32.0",
     "binaryen": "132.0.0",
+    "hyparquet-writer": "0.16.6",
     "pkg-pr-new": "0.0.79",
     "quickjs-emscripten-core": "0.32.0",
     "typescript": "5.9.3"

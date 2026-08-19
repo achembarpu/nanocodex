@@ -27,19 +27,19 @@ async function evaluate(quickJs, source, environment, options) {
   let interruptCycles = 0;
   const maxInterruptCycles = options.maxInterruptCycles ?? DEFAULT_INTERRUPT_CYCLES;
   runtime.setInterruptHandler(() => ++interruptCycles > maxInterruptCycles);
+  let closed = false;
 
   try {
-    exposeAsync(vm, "__nanocodex_call_tool", async (nameHandle, inputHandle) => {
-      try {
-        const name = vm.getString(nameHandle);
-        const tool = environment.tools[name];
-        if (typeof tool !== "function") throw new Error(`unknown application tool: ${name}`);
-        const input = JSON.parse(vm.getString(inputHandle));
-        const value = await tool(input);
-        return vm.newString(JSON.stringify({ ok: true, value }));
-      } catch (error) {
-        return vm.newString(JSON.stringify({ ok: false, error: errorMessage(error) }));
-      }
+    expose(vm, "__nanocodex_call_tool", (nameHandle, inputHandle) => {
+      const name = vm.getString(nameHandle);
+      const input = vm.getString(inputHandle);
+      const deferred = vm.newPromise();
+      invokeTool(environment, name, input).then((encoded) => {
+        if (closed) return;
+        vm.newString(encoded).consume(deferred.resolve);
+        runtime.executePendingJobs().unwrap();
+      });
+      return deferred.handle;
     });
     expose(vm, "__nanocodex_emit", (kindHandle, payloadHandle) => {
       const kind = vm.getString(kindHandle);
@@ -83,6 +83,7 @@ async function evaluate(quickJs, source, environment, options) {
       promise.dispose();
     }
   } finally {
+    closed = true;
     vm.dispose();
   }
 }
@@ -139,7 +140,7 @@ const __nanocodex_decode = (encoded) => {
 };
 const tools = Object.freeze(Object.fromEntries(
   ${JSON.stringify(toolNames)}.map((name) => [name, (input) =>
-    __nanocodex_decode(__nanocodex_call_tool(name, JSON.stringify(input ?? null)))])
+    __nanocodex_call_tool(name, JSON.stringify(input ?? null)).then(__nanocodex_decode)])
 ));
 const ALL_TOOLS = Object.freeze(${JSON.stringify(toolDefinitions)});
 const text = (value) => __nanocodex_emit("text", JSON.stringify(__nanocodex_stringify(value)));
@@ -171,4 +172,15 @@ ${source}
 function errorMessage(error) {
   if (error && (error.stack || error.message)) return error.stack || error.message;
   return String(error);
+}
+
+async function invokeTool(environment, name, encodedInput) {
+  try {
+    const tool = environment.tools[name];
+    if (typeof tool !== "function") throw new Error(`unknown application tool: ${name}`);
+    const value = await tool(JSON.parse(encodedInput));
+    return JSON.stringify({ ok: true, value });
+  } catch (error) {
+    return JSON.stringify({ ok: false, error: errorMessage(error) });
+  }
 }

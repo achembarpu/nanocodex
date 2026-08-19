@@ -90,8 +90,6 @@ impl<F> NanocodexBuilder<F> {
     /// runtime is being built. Use this for agent-relative tools such as Code
     /// Mode child-agent tools; stateless tools may continue using
     /// [`Self::tools`].
-    #[cfg(not(target_family = "wasm"))]
-    #[cfg_attr(docsrs, doc(cfg(not(target_family = "wasm"))))]
     #[must_use]
     pub fn tools_factory<T>(mut self, factory: T) -> Self
     where

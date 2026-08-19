@@ -131,6 +131,9 @@
   is always available on native targets.
 - `nanocodex-agent` owns the private driver, lifecycle policy, branching,
   snapshots, Codex rollouts, and ergonomic agent builders.
+- `nanocodex-subagents` is an optional extension above `nanocodex-agent`. It
+  owns task-tree lifecycle, structured child results, directed communication,
+  and the canonical subagent tools; `nanocodex-agent` must not depend on it.
 - `nanocodex` is an Alloy-style facade containing reexports, named component
   modules, and a small prelude. It contains no runtime implementation.
 - Keep facade imports canonical: common types may appear at the crate root and

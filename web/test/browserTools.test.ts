@@ -1,12 +1,10 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { createBrowserTools } from "../src/browserTools.ts";
+import { viewImage } from "nanocodex/tools";
 
 test("view_image returns browser workspace images to Code Mode", async () => {
-  const tools = createBrowserTools({
-    recentImages: () => [],
-    rememberImage: () => undefined,
+  const tool = viewImage({
     workspace: {
       async readFile(path) {
         assert.equal(path, "/workspace/pixel.png");
@@ -14,9 +12,14 @@ test("view_image returns browser workspace images to Code Mode", async () => {
       },
     },
   });
-  const result = await tools.view_image.handler(
+  const result = await tool.handler(
     { path: "/workspace/pixel.png", detail: "original" },
-    { sessionId: "session-1" },
+    {
+      callId: "call-1",
+      parentCallId: "",
+      sessionId: "session-1",
+      signal: new AbortController().signal,
+    },
   ) as { detail: string; image_url: string };
   assert.equal(result.detail, "original");
   assert.equal(result.image_url, "data:image/png;base64,iVBORw0KGgo=");

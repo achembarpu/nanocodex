@@ -1,4 +1,4 @@
-import { Agent } from "nanocodex/browser";
+import { Agent, Transport } from "nanocodex/browser";
 import {
   createAgentController,
   type AgentControllerStart,
@@ -49,27 +49,32 @@ async function createAgent(
   tools: AgentControllerTools,
 ) {
   await paymentSessions.clear();
-  const [shellModule, mcpModule, toolModule] = await Promise.all([
-    import("./browserShell"),
+  const origin = worker.location.origin;
+  const toolHeaders = { "x-nanocodex-request": "1" };
+  const [runtime, mcpModule] = await Promise.all([
+    import("nanocodex/tools/browser").then(({ browser }) => browser({
+      threadId: start.threadId!,
+      origin,
+      web: {
+        url: new URL("/api/tools/web-search", origin),
+        headers: toolHeaders,
+      },
+      images: {
+        url: new URL("/api/tools/image-generation", origin),
+        headers: toolHeaders,
+      },
+      recentImages: tools.recentImages,
+      rememberImage: tools.rememberImage,
+    })),
     import("./browserMcp"),
-    import("./browserTools"),
   ]);
-  const { execTool, instructions, projectInstructions, workspace } =
-    await shellModule.prepareBrowserShell(start.threadId!, self.location.origin);
   const common = {
-    filesystem: workspace,
+    filesystem: runtime.filesystem,
     filesystemTools: false,
-    instructions,
-    executionEnvironment: browserExecutionEnvironment(projectInstructions),
-    mcp: mcpModule.browserMcpConfiguration(self.location.origin),
-    tools: {
-      exec_command: execTool,
-      ...toolModule.createBrowserTools({
-        recentImages: tools.recentImages,
-        rememberImage: tools.rememberImage,
-        workspace,
-      }),
-    },
+    instructions: runtime.instructions,
+    executionEnvironment: browserExecutionEnvironment(runtime.projectInstructions),
+    mcp: mcpModule.browserMcpConfiguration(origin),
+    tools: runtime.tools,
     thinking: start.thinking,
     reasoningMode: start.reasoningMode,
   };
@@ -89,8 +94,10 @@ async function createAgent(
         const agent = await Agent.create({
           ...common,
           fastMode: true,
-          mpp: paymentSession.provider,
-          websocketUrl: MPP_RESPONSES_WEBSOCKET_URL,
+          transport: Transport.mpp({
+            session: paymentSession.provider,
+            websocketUrl: MPP_RESPONSES_WEBSOCKET_URL,
+          }),
         });
         return {
           agent,
@@ -115,45 +122,42 @@ async function createAgent(
     return {
       agent: await Agent.create({
         ...common,
-        hostAuth: true,
-        apiBaseUrl: CHATGPT_API_BASE_URL,
-        websocketUrl: workerEndpoint(),
-        createWebSocket,
+        transport: Transport.hostManaged({
+          apiBaseUrl: CHATGPT_API_BASE_URL,
+          websocketUrl: workerEndpoint(),
+          createWebSocket,
+        }),
       }),
     };
   }
   return {
     agent: await Agent.create({
       ...common,
-      apiKey: "worker-managed",
-      websocketUrl: workerEndpoint(),
-      createWebSocket,
+      transport: Transport.openAi({
+        apiKey: "worker-managed",
+        websocketUrl: workerEndpoint(),
+        createWebSocket,
+      }),
     }),
   };
 }
 
 function browserExecutionEnvironment(projectInstructions?: string) {
   const now = new Date();
-  const resolvedTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  const timezone = resolvedTimezone || "Etc/UTC";
-  const year = resolvedTimezone ? now.getFullYear() : now.getUTCFullYear();
-  const month = resolvedTimezone ? now.getMonth() + 1 : now.getUTCMonth() + 1;
-  const day = resolvedTimezone ? now.getDate() : now.getUTCDate();
-  const currentDate = [
-    year.toString().padStart(4, "0"),
-    month.toString().padStart(2, "0"),
-    day.toString().padStart(2, "0"),
-  ].join("-");
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const currentDate = timezone
+    ? `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`
+    : now.toISOString().slice(0, 10);
   return {
     currentDate,
-    timezone,
+    timezone: timezone || "Etc/UTC",
     ...(projectInstructions === undefined ? {} : { projectInstructions }),
   };
 }
 
 function workerEndpoint(): string {
-  const protocol = self.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${self.location.host}/api/responses`;
+  const protocol = worker.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${worker.location.host}/api/responses`;
 }
 
 function errorMessage(error: unknown): string {

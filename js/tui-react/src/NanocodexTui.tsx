@@ -38,7 +38,9 @@ import {
   type TuiCommand,
   type TuiMessage,
   type TuiTarget,
+  type VoiceSessionContext,
 } from "nanocodex-tui";
+import type { Workspace } from "nanocodex/browser/workspace";
 import {
   useNanocodex,
   useNanocodexMessage,
@@ -79,6 +81,22 @@ type TuiState = {
 };
 
 type TranscriptController = { scrollBy(rows: number): void; jumpToBottom(): void };
+type VoiceLifecycleRequest = {
+  action: "start" | "stop";
+  resolve(context: VoiceSessionContext | undefined): void;
+  reject(error: Error): void;
+};
+
+export type NanocodexVoiceOptions = {
+  /** Opens the workspace used to build bounded Realtime startup context. */
+  workspace(): Promise<Workspace>;
+  /** Default ChatGPT output voice. */
+  defaultVoice?: import("./browserVoice.js").ChatGptVoice;
+  /** Authenticated endpoint that creates one browser Realtime call. */
+  callUrl?: string | URL;
+  /** Optional authenticated sideband URL builder. */
+  sidebandUrl?(callId: string, sessionId: string): string | URL;
+};
 
 const DEFAULT_STARTER_PROMPT =
   "Explain in two sentences what runs in Rust/WASM and what the browser hosts.";
@@ -129,10 +147,8 @@ export type NanocodexTuiProps = Omit<
   enabled?: boolean;
   /** Status shown when the embedding application disables agent input. */
   unavailableMessage?: string;
-  /** Application-owned browser voice command handler. */
-  onVoiceCommand?: (argument: string | undefined, target: TuiTarget) => void;
-  /** Active browser voice status shown beside normal agent state. */
-  voiceStatus?: string;
+  /** Enables the component-owned browser Realtime voice lifecycle. */
+  voice?: NanocodexVoiceOptions;
 };
 
 export function NanocodexTui({
@@ -141,8 +157,7 @@ export function NanocodexTui({
   cwd = "/browser",
   enabled = true,
   unavailableMessage = "Agent unavailable",
-  onVoiceCommand,
-  voiceStatus,
+  voice: voiceOptions,
   className,
   "aria-label": ariaLabel = "Nanocodex terminal",
   onClick,
@@ -160,6 +175,9 @@ export function NanocodexTui({
   const [draft, setDraft] = useState(starterPrompt);
   const [images, setImages] = useState<AttachedImage[]>([]);
   const [externalEditor, setExternalEditor] = useState(false);
+  const [agentSessionId, setAgentSessionId] = useState<string>();
+  const [voiceActive, setVoiceActive] = useState(false);
+  const [voiceStatus, setVoiceStatus] = useState<string>();
   const composerRef = useRef<HTMLTextAreaElement>(null);
   const terminalRef = useRef<HTMLElement>(null);
   const nextPromptId = useRef(1);
@@ -169,6 +187,12 @@ export function NanocodexTui({
   const eventQueue = useRef<Array<{ target: Target; event: AgentEvent }>>([]);
   const animationFrame = useRef<number | undefined>(undefined);
   const transcriptControllers = useRef(new Map<string, TranscriptController>());
+  const voiceSession = useRef<import("./browserVoice.js").BrowserVoiceSession | undefined>(undefined);
+  const voiceStarting = useRef(false);
+  const voiceGeneration = useRef(0);
+  const voiceLifecycleRequests = useRef(new Map<number, VoiceLifecycleRequest>());
+  const nextVoiceLifecycleId = useRef(1);
+  const nextVoicePromptId = useRef(1);
 
   const flushEvents = useCallback(() => {
     if (animationFrame.current !== undefined) {
@@ -190,13 +214,26 @@ export function NanocodexTui({
   }, []);
 
   useNanocodexMessage<TuiMessage>((data) => {
+      voiceSession.current?.observe(data);
+      if (data.type === "ready") {
+        setAgentSessionId(data.sessionId);
+        return;
+      }
+      if (data.type === "voiceLifecycleResult") {
+        const request = voiceLifecycleRequests.current.get(data.id);
+        if (request?.action === data.action) {
+          voiceLifecycleRequests.current.delete(data.id);
+          if (data.error) request.reject(new Error(data.error));
+          else request.resolve(data.context);
+        }
+        return;
+      }
       if (data.type === "event") {
         eventQueue.current.push({ target: data.target, event: data.event });
         animationFrame.current ??= requestAnimationFrame(flushEvents);
         return;
       }
       flushEvents();
-      if (data.type === "ready") return;
       if (data.type === "externalPrompt") {
         setTui((current) => updateConversation(current, data.target, (conversation) =>
           data.intent === "immediate" && conversation.running
@@ -292,7 +329,44 @@ export function NanocodexTui({
 
   useEffect(() => () => {
     if (animationFrame.current !== undefined) cancelAnimationFrame(animationFrame.current);
+    void voiceSession.current?.close().catch(() => {});
+    voiceSession.current = undefined;
+    voiceStarting.current = false;
+    voiceGeneration.current += 1;
+    for (const request of voiceLifecycleRequests.current.values()) {
+      request.reject(new Error("voice lifecycle stopped with the agent worker"));
+    }
+    voiceLifecycleRequests.current.clear();
   }, []);
+
+  useEffect(() => {
+    if (workerStatus === "ready") return;
+    setAgentSessionId(undefined);
+    const active = voiceSession.current;
+    voiceSession.current = undefined;
+    voiceStarting.current = false;
+    voiceGeneration.current += 1;
+    setVoiceActive(false);
+    if (active) void active.close().catch(() => {});
+    for (const request of voiceLifecycleRequests.current.values()) {
+      request.reject(new Error("voice lifecycle stopped with the agent worker"));
+    }
+    voiceLifecycleRequests.current.clear();
+  }, [workerStatus]);
+
+  const runVoiceLifecycle = useCallback((
+    action: "start" | "stop",
+    target: TuiTarget,
+  ): Promise<VoiceSessionContext | undefined> => new Promise((resolve, reject) => {
+    const id = nextVoiceLifecycleId.current++;
+    voiceLifecycleRequests.current.set(id, { action, resolve, reject });
+    try {
+      dispatch({ type: "voiceLifecycle", id, target, action });
+    } catch (error) {
+      voiceLifecycleRequests.current.delete(id);
+      reject(error instanceof Error ? error : new Error(String(error)));
+    }
+  }), [dispatch]);
 
   useLayoutEffect(() => {
     const composer = composerRef.current;
@@ -305,8 +379,91 @@ export function NanocodexTui({
   const conversation = activeConversation(tui);
   const activeBranch = branchById(tui, tui.activeBranchId)!;
   const target = activeTarget(tui);
-  const voiceActive = voiceStatus?.startsWith("Voice active")
-    || voiceStatus?.startsWith("Connecting voice");
+  const controlVoice = useCallback((argument: string | undefined, voiceTarget: TuiTarget) => {
+    if (!voiceOptions) return;
+    if (voiceStarting.current) return;
+    voiceStarting.current = true;
+    const generation = voiceGeneration.current;
+    void import("./browserVoice.js").then(({ BrowserVoiceSession, CHATGPT_VOICES, parseVoiceArgument }) => {
+      if (generation !== voiceGeneration.current) return;
+      const command = parseVoiceArgument(argument);
+      if (command.action === "list") {
+        voiceStarting.current = false;
+        setVoiceStatus(`ChatGPT voices (default ${voiceOptions.defaultVoice ?? "cove"}): ${CHATGPT_VOICES.join(", ")}`);
+        return;
+      }
+      if (command.action === "invalid") {
+        voiceStarting.current = false;
+        setVoiceStatus(`Voice: ${command.message}`);
+        return;
+      }
+      if (command.action === "stop" || (command.action === "toggle" && voiceSession.current)) {
+        voiceStarting.current = false;
+        const active = voiceSession.current;
+        voiceSession.current = undefined;
+        setVoiceActive(false);
+        void active?.close().catch((error) => {
+          setVoiceStatus(`Voice: ${error instanceof Error ? error.message : String(error)}`);
+        });
+        return;
+      }
+      if (voiceSession.current) {
+        voiceStarting.current = false;
+        setVoiceStatus("Voice is already active; use /voice off before changing it");
+        return;
+      }
+      if (!agentSessionId || workerStatus !== "ready") {
+        voiceStarting.current = false;
+        setVoiceStatus("Voice is waiting for the agent session to become ready");
+        return;
+      }
+      const selectedVoice = command.action === "start"
+        ? command.voice
+        : voiceOptions.defaultVoice ?? "cove";
+      const next = new BrowserVoiceSession({
+        sessionId: agentSessionId,
+        target: voiceTarget,
+        voice: selectedVoice,
+        callUrl: voiceOptions.callUrl,
+        sidebandUrl: voiceOptions.sidebandUrl,
+        workspace: voiceOptions.workspace,
+        async onStart() {
+          const context = await runVoiceLifecycle("start", voiceTarget);
+          if (!context) throw new Error("voice lifecycle start omitted the agent context");
+          return context;
+        },
+        async onStop() {
+          await runVoiceLifecycle("stop", voiceTarget);
+        },
+        onDelegation(delegation) {
+          dispatch({
+            type: "voicePrompt",
+            target: voiceTarget,
+            id: nextVoicePromptId.current++,
+            delegation,
+          });
+        },
+        onStatus: setVoiceStatus,
+        onTranscript(speaker, text) {
+          dispatch({ type: "voiceTranscript", target: voiceTarget, speaker, text });
+        },
+      });
+      voiceSession.current = next;
+      voiceStarting.current = false;
+      setVoiceActive(true);
+      void next.start().catch(async (error) => {
+        if (voiceSession.current !== next) return;
+        await next.close().catch(() => {});
+        voiceSession.current = undefined;
+        setVoiceActive(false);
+        setVoiceStatus(`Voice: ${error instanceof Error ? error.message : String(error)}`);
+      });
+    }).catch((error) => {
+      voiceStarting.current = false;
+      setVoiceActive(false);
+      setVoiceStatus(`Voice: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  }, [agentSessionId, dispatch, runVoiceLifecycle, voiceOptions, workerStatus]);
   const mode = tui.historicalEdit
     ? "edit"
     : tui.branchNavigatorId !== undefined
@@ -386,9 +543,9 @@ export function NanocodexTui({
       window.open("http://127.0.0.1:16686/search?service=nanocodex", "_blank", "noopener");
       return;
     }
-    if (onVoiceCommand && (trimmed === "/voice" || trimmed.startsWith("/voice "))) {
+    if (voiceOptions && (trimmed === "/voice" || trimmed.startsWith("/voice "))) {
       const argument = trimmed === "/voice" ? undefined : trimmed.slice(7).trim() || undefined;
-      onVoiceCommand(argument, target);
+      controlVoice(argument, target);
       return;
     }
     queueInput(target, raw, intent, submittedImages);
@@ -826,7 +983,7 @@ export function NanocodexTui({
               rows={1}
               spellCheck={false}
             />
-            {onVoiceCommand ? (
+            {voiceOptions ? (
               <button
                 type="button"
                 className="agent-tui-voice"
@@ -834,7 +991,7 @@ export function NanocodexTui({
                 aria-label={voiceActive ? "Stop voice mode" : "Start voice mode"}
                 aria-pressed={voiceActive}
                 title={voiceActive ? "Stop voice mode (/voice off)" : "Start voice mode (/voice)"}
-                onClick={() => onVoiceCommand(undefined, target)}
+                onClick={() => controlVoice(undefined, target)}
               >🎙 {voiceActive ? "Stop" : "Voice"}</button>
             ) : null}
           </>

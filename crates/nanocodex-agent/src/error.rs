@@ -161,7 +161,6 @@ pub enum NanocodexError {
     Response(#[from] ResponseError),
 
     /// The configured tool registry or runtime could not be built.
-    #[cfg(not(target_family = "wasm"))]
     #[error("failed to build tools for an agent driver: {0}")]
     Tools(#[from] nanocodex_tools::ToolsBuildError),
 }

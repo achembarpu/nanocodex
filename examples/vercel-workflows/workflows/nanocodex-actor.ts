@@ -8,6 +8,7 @@ import {
   type DurabilityStoredJournal,
   type EventWatcher,
 } from "nanocodex";
+import { Transport } from "nanocodex/browser";
 import { defineHook, getWorkflowMetadata, getWritable } from "workflow";
 
 import type {
@@ -102,8 +103,9 @@ export async function runNanocodexTurn(
   try {
     const { Agent } = await import("nanocodex/browser");
     const mode = modelAuthMode();
+    const websocketUrl = process.env.OPENAI_WEBSOCKET_URL
+      ?? (mode === "chatgpt" ? CHATGPT_WEBSOCKET_URL : undefined);
     const common = {
-      apiBaseUrl: mode === "chatgpt" ? CHATGPT_API_BASE_URL : undefined,
       instructions: "You are Nanocodex running as a durable Vercel Workflow actor. Use the sandbox_* tools for code, files, and previews; their /workspace is an isolated persistent Vercel Sandbox for this session.",
       module: await wasmBytes,
       durability,
@@ -123,21 +125,25 @@ export async function runNanocodexTurn(
           }),
         },
       },
-      websocketUrl: process.env.OPENAI_WEBSOCKET_URL
-        ?? (mode === "chatgpt" ? CHATGPT_WEBSOCKET_URL : undefined),
       workspace: "/workspace",
     };
 
     agent = mode === "chatgpt"
       ? await Agent.create({
           ...common,
-          hostAuth: true,
-          createWebSocket: openSubscriptionWebSocket,
+          transport: Transport.hostManaged({
+            apiBaseUrl: CHATGPT_API_BASE_URL,
+            websocketUrl,
+            createWebSocket: openSubscriptionWebSocket,
+          }),
         })
       : await Agent.create({
           ...common,
-          apiKey: requiredSecret("OPENAI_API_KEY"),
-          createWebSocket: openApiKeyWebSocket,
+          transport: Transport.openAi({
+            apiKey: requiredSecret("OPENAI_API_KEY"),
+            websocketUrl,
+            createWebSocket: openApiKeyWebSocket,
+          }),
         });
     events = agent.events.watch();
     events.onEvent((event) => {

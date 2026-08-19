@@ -18,6 +18,9 @@ pub mod apply_patch;
 #[cfg_attr(docsrs, doc(cfg(not(target_family = "wasm"))))]
 pub mod code_mode;
 #[cfg(feature = "native")]
+#[path = "code_mode/description.rs"]
+mod code_mode_description;
+#[cfg(feature = "native")]
 mod code_mode_order;
 #[cfg(feature = "native")]
 pub mod hosted;
@@ -82,7 +85,8 @@ pub mod runtime {
     pub use crate::{
         hosted::{
             HostedToolMode, HostedToolRuntime as ToolRuntime,
-            HostedToolRuntimeControl as ToolRuntimeControl, HostedTools as Tools, OwnedToolContext,
+            HostedToolRuntimeControl as ToolRuntimeControl, HostedTools as Tools,
+            HostedToolsBuildError as ToolsBuildError, OwnedToolContext,
         },
         runtime_config::{ImageGenerationConfig, WebSearchConfig},
     };
@@ -93,6 +97,8 @@ pub(crate) use contract::ToolOutputBody;
 #[cfg(all(not(target_family = "wasm"), feature = "workspace-runtime"))]
 pub(crate) use contract::ToolOutputContent;
 pub use contract::{Tool, ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult};
+#[cfg(all(target_family = "wasm", feature = "native"))]
+pub use hosted::HostedToolsBuildError as ToolsBuildError;
 #[cfg(all(not(target_family = "wasm"), feature = "workspace-runtime"))]
 pub(crate) use nanocodex_oai_api::ImageDetail;
 #[cfg(all(not(target_family = "wasm"), feature = "native"))]

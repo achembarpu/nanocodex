@@ -5,7 +5,6 @@ import {
   useCallback,
   useEffect,
   useMemo,
-  useRef,
   useState,
 } from "react";
 import {
@@ -14,9 +13,8 @@ import {
   useNanocodexMessage,
 } from "nanocodex-react";
 import { NanocodexTui } from "nanocodex-tui-react";
-import type { ArtifactDocument } from "nanocodex-artifacts";
+import type { ArtifactDocument } from "nanocodex/tools/artifact";
 import type { Address } from "viem";
-import type { TuiTarget } from "nanocodex-tui";
 import "nanocodex-tui-react/structure.css";
 import "./AgentTerminal.css";
 
@@ -29,7 +27,7 @@ import {
   type WebTuiMessage,
 } from "./nanocodex";
 import { ArtifactDock } from "./ArtifactDock";
-import { getBrowserThread } from "./workspace";
+import { getBrowserThread, openThreadWorkspace } from "nanocodex/tools/browser";
 
 const MppControls = lazy(async () => ({
   default: (await import("./MppControls")).MppControls,
@@ -38,7 +36,6 @@ const WorkspacePanel = lazy(async () => ({
   default: (await import("./WorkspacePanel")).WorkspacePanel,
 }));
 let nextArtifactPromptId = 1_000_000_000;
-let nextVoicePromptId = 2_000_000_000;
 
 /** Website policy around the reusable TUI: credential UX and the site theme. */
 export const AgentTerminal = memo(function AgentTerminal() {
@@ -57,16 +54,11 @@ function AgentTerminalDemo() {
   const [payment, setPayment] = useState<PaymentStatus>();
   const [jsonl, setJsonl] = useState<string[]>([]);
   const [mobilePane, setMobilePane] = useState<"files" | "agent" | "ui">("agent");
-  const [sessionId, setSessionId] = useState<string>();
-  const [voiceStatus, setVoiceStatus] = useState<string>();
-  const voice = useRef<import("./browserVoice").BrowserVoiceSession | undefined>(undefined);
   useNanocodexMessage<WebTuiMessage>((message) => {
-    if (message.type === "ready") setSessionId(message.sessionId);
     if (message.type === "mppPayment") setPayment(message.payment);
     if (message.type === "mppJsonl") {
       setJsonl((current) => [...current.slice(-99), message.line]);
     }
-    voice.current?.observe(message);
   });
   useEffect(() => {
     const prewarm = () => prewarmNanocodexWorker();
@@ -89,15 +81,6 @@ function AgentTerminalDemo() {
       nanocodexConfig.disconnect();
     }
   }, [credentialSource, thread.id, transport]);
-
-  useEffect(() => () => voice.current?.close(), []);
-  useEffect(() => {
-    if (transport === "openai" && credentialSource === "subscription") return;
-    voice.current?.close();
-    voice.current = undefined;
-    setVoiceStatus(undefined);
-  }, [credentialSource, transport]);
-
   const startMpp = useCallback((payerAddress: Address, accessKeyAddress: Address) => {
     nanocodexConfig.restart(startCommand("mpp", thread.id, payerAddress, accessKeyAddress));
   }, [thread.id]);
@@ -114,64 +97,6 @@ function AgentTerminalDemo() {
     nanocodexConfig.disconnect();
     setTransport(next);
   };
-  const controlVoice = useCallback((argument: string | undefined, target: TuiTarget) => {
-    void import("./browserVoice").then(({ BrowserVoiceSession, CHATGPT_VOICES, parseVoiceArgument }) => {
-      const command = parseVoiceArgument(argument);
-      if (command.action === "list") {
-        setVoiceStatus(`ChatGPT voices (default cove): ${CHATGPT_VOICES.join(", ")}`);
-        return;
-      }
-      if (command.action === "invalid") {
-        setVoiceStatus(`Voice: ${command.message}`);
-        return;
-      }
-      if (command.action === "stop" || (command.action === "toggle" && voice.current)) {
-        voice.current?.close();
-        voice.current = undefined;
-        return;
-      }
-      if (voice.current) {
-        setVoiceStatus("Voice is already active; use /voice off before changing it");
-        return;
-      }
-      if (transport !== "openai" || credentialSource !== "subscription") {
-        setVoiceStatus("Voice requires an active ChatGPT subscription session");
-        return;
-      }
-      if (!sessionId || agent.status !== "ready") {
-        setVoiceStatus("Voice is waiting for the agent session to become ready");
-        return;
-      }
-      const selectedVoice = command.action === "start" ? command.voice : "cove";
-      const next = new BrowserVoiceSession({
-        sessionId,
-        target,
-        voice: selectedVoice,
-        onDelegation(prompt) {
-          agent.dispatch({
-            type: "voicePrompt",
-            target,
-            id: nextVoicePromptId++,
-            prompt,
-          });
-        },
-        onStatus: setVoiceStatus,
-        onTranscript(speaker, text) {
-          agent.dispatch({ type: "voiceTranscript", target, speaker, text });
-        },
-      });
-      voice.current = next;
-      void next.start().catch((error) => {
-        if (voice.current !== next) return;
-        next.close();
-        voice.current = undefined;
-        setVoiceStatus(`Voice: ${error instanceof Error ? error.message : String(error)}`);
-      });
-    }).catch((error) => {
-      setVoiceStatus(`Voice: ${error instanceof Error ? error.message : String(error)}`);
-    });
-  }, [agent, credentialSource, sessionId, transport]);
-
   const enabled = transport === "openai"
     ? credentialSource === "subscription"
       || credentialSource === "user"
@@ -184,6 +109,9 @@ function AgentTerminalDemo() {
     : agent.status === "error"
         ? agent.error ?? "MPP session failed"
         : "Connect Tempo to authorize an MPP session";
+  const voiceOptions = useMemo(() => credentialSource === "subscription"
+    ? { workspace: () => openThreadWorkspace(thread.id) }
+    : undefined, [credentialSource, thread.id]);
 
   return (
     <div className="nanocodex-demo">
@@ -222,8 +150,7 @@ function AgentTerminalDemo() {
           key={transport}
           enabled={enabled}
           unavailableMessage={unavailableMessage}
-          onVoiceCommand={controlVoice}
-          voiceStatus={voiceStatus}
+          voice={voiceOptions}
         />
         <ArtifactDock
           agentReady={agent.status === "ready"}

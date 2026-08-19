@@ -36,6 +36,58 @@ test("QuickJS evaluator runs async Code Mode tools without host eval", async () 
   assert.match(JSON.stringify(second.output), /42/);
 });
 
+test("QuickJS keeps Promise.all tool calls concurrent through map and reduce", async () => {
+  let active = 0;
+  let peak = 0;
+  const runtime = createCodeRuntime({
+    exec_command: {
+      description: "Run one bounded command.",
+      parameters: { type: "object" },
+      outputSchema: {
+        type: "object",
+        properties: { output: { type: "string" } },
+        required: ["output"],
+        additionalProperties: false,
+      },
+      async handler({ value, delay }) {
+        active += 1;
+        peak = Math.max(peak, active);
+        await new Promise((resolve) => setTimeout(resolve, delay));
+        active -= 1;
+        return { exit_code: 0, output: String(value) };
+      },
+    },
+  }, { evaluate: createQuickJsEvaluator(quickJs) });
+
+  const execution = JSON.parse(await runtime.executeCode(`
+    const commands = [
+      { value: 20, delay: 60 },
+      { value: 21, delay: 10 },
+      { value: 1, delay: 30 },
+    ].map((input) => tools.exec_command(input));
+    const total = (await Promise.all(commands))
+      .map(({ output }) => Number(output))
+      .reduce((sum, value) => sum + value, 0);
+    text({ total });
+  `, "quickjs", "exec-concurrent"));
+
+  assert.equal(execution.success, true);
+  assert.equal(peak, 3);
+  assert.deepEqual(
+    JSON.parse(runtime.toolDefinitions())[0].output_schema.required,
+    ["output"],
+  );
+  assert.deepEqual(
+    execution.nested_calls.map((call) => call.call_id),
+    [
+      "exec-concurrent/code-1",
+      "exec-concurrent/code-2",
+      "exec-concurrent/code-3",
+    ],
+  );
+  assert.equal(execution.output.at(-1).text, '{"total":42}');
+});
+
 test("QuickJS evaluator reports guest failures as Code Mode failures", async () => {
   const runtime = createCodeRuntime({}, { evaluate: createQuickJsEvaluator(quickJs) });
   const result = JSON.parse(await runtime.executeCode(`throw new Error("guest exploded")`));

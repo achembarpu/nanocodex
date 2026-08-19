@@ -1,9 +1,16 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import git from "isomorphic-git";
+import { createCodeRuntime } from "../../js/bindings/runtime/code-runtime.mjs";
+import { artifact as artifactTool } from "nanocodex/tools";
 
-import { createBrowserBash, loadBrowserProjectInstructions } from "../src/browserShell.ts";
-import { createOpfsGitFs, type OpfsGitFs } from "../src/opfsGit.ts";
+import {
+  createBrowserBash,
+  createOpfsGitFs,
+  loadBrowserProjectInstructions,
+  validateBrowserArtifactSource,
+  type OpfsGitFs,
+} from "nanocodex/tools/browser";
 
 const observedLockSignals: Array<AbortSignal | undefined> = [];
 
@@ -236,6 +243,149 @@ test("browser command lookup stays inside the virtual workspace", async () => {
   );
 });
 
+test("browser compatibility commands expose uname and Fetch-backed curl", async () => {
+  const root = new MemoryDirectory();
+  const fs = createOpfsGitFs(root as unknown as FileSystemDirectoryHandle);
+  await git.init({ fs, dir: "/workspace", defaultBranch: "nanocodex" });
+  const requests: Array<{ url: string; method?: string }> = [];
+  const shell = await createBrowserBash(fs, thread, {
+    fetch: async (url, options) => {
+      requests.push({ url, method: options?.method });
+      return {
+        status: 200,
+        statusText: "OK",
+        headers: { "content-type": "text/plain" },
+        body: new TextEncoder().encode("network works\n"),
+        url,
+      };
+    },
+  });
+
+  const uname = await shell.exec({ cmd: "uname -srm" });
+  assert.equal(uname.exit_code, 0);
+  assert.equal(uname.output, "Nanocodex 1.0.0 wasm32\n");
+
+  const curl = await shell.exec({ cmd: "curl -sS https://example.test/data" });
+  assert.equal(curl.exit_code, 0);
+  assert.equal(curl.output, "network works\n");
+  assert.deepEqual(requests, [{ url: "https://example.test/data", method: "GET" }]);
+});
+
+test("browser python commands use the isolated runtime boundary", async () => {
+  const root = new MemoryDirectory();
+  const fs = createOpfsGitFs(root as unknown as FileSystemDirectoryHandle);
+  await git.init({ fs, dir: "/workspace", defaultBranch: "nanocodex" });
+  const executions: Array<{ args: string[]; cwd: string; stdin: string }> = [];
+  const shell = await createBrowserBash(fs, thread, {
+    pythonRuntime: {
+      async execute(input) {
+        executions.push(input);
+        return { stdout: "42\n", stderr: "", exitCode: 0 };
+      },
+    },
+  });
+
+  const result = await shell.exec({ cmd: "python3 -c 'print(6 * 7)'" });
+  assert.equal(result.exit_code, 0);
+  assert.equal(result.output, "42\n");
+  assert.deepEqual(executions, [{
+    args: ["-c", "print(6 * 7)"],
+    cwd: "/workspace",
+    stdin: "",
+  }]);
+});
+
+test("elaborate Code Mode scripts compose concurrent browser commands into an artifact", async () => {
+  const root = new MemoryDirectory();
+  const fs = createOpfsGitFs(root as unknown as FileSystemDirectoryHandle);
+  await git.init({ fs, dir: "/workspace", defaultBranch: "nanocodex" });
+  const shell = await createBrowserBash(fs, thread);
+  const renderArtifact = artifactTool({
+    workspace: artifactWorkspace(fs),
+    validateSource: validateBrowserArtifactSource,
+  });
+  const runtime = createCodeRuntime({
+    exec_command: {
+      description: "Run a bash command in the browser thread workspace.",
+      parameters: { type: "object" },
+      handler: shell.exec,
+    },
+    [renderArtifact.name]: renderArtifact,
+  });
+  const artifactSource = `function App() {
+  return html\`<main><h1>Code Mode total: 42</h1></main>\`;
+}`;
+  const execution = JSON.parse(await runtime.executeCode(`
+    const inputs = [
+      { path: "twenty.txt", value: 20 },
+      { path: "twenty-one.txt", value: 21 },
+      { path: "one.txt", value: 1 },
+    ];
+    const writes = await Promise.all(inputs.map(({ path, value }) =>
+      tools.exec_command({ cmd: "printf '%s\\n' " + value + " > " + path })));
+    const reads = await Promise.all(inputs.map(({ path }) =>
+      tools.exec_command({ cmd: "cat " + path })));
+    const values = reads
+      .map(({ output }) => Number(output.trim()))
+      .filter(Number.isFinite);
+    const total = values.reduce((sum, value) => sum + value, 0);
+    const source = ${JSON.stringify(artifactSource)};
+    const published = await tools.render_artifact({
+      id: "stress-ui",
+      title: "Stress UI",
+      source,
+    });
+    const verified = await tools.exec_command({
+      cmd: "git status --short && cat .nanocodex/artifacts/stress-ui.json",
+    });
+    const summary = {
+      total,
+      writeExitCodes: writes.map(({ exit_code }) => exit_code),
+      artifactId: published.artifactId,
+      published: verified.output.includes("Code Mode total: 42"),
+    };
+    store("stress-summary", summary);
+    text(summary);
+  `, "stress-session", "stress-exec"));
+
+  assert.equal(execution.success, true, execution.output);
+  assert.equal(execution.nested_calls.length, 8);
+  assert.deepEqual(
+    execution.nested_calls.map((call: { call_id: string }) => call.call_id),
+    Array.from({ length: 8 }, (_, index) => `stress-exec/code-${index + 1}`),
+  );
+  assert.deepEqual(
+    execution.nested_calls.slice(0, 6).map((call: { success: boolean }) => call.success),
+    [true, true, true, true, true, true],
+  );
+  assert.match(JSON.stringify(execution.output), /\\\"total\\\":42/);
+
+  const retained = JSON.parse(await runtime.executeCode(
+    'text(load("stress-summary"));',
+    "stress-session",
+    "stress-read",
+  ));
+  assert.equal(retained.success, true);
+  assert.match(JSON.stringify(retained.output), /\\\"published\\\":true/);
+  const artifact = JSON.parse(new TextDecoder().decode(
+    await fs.promises.readFile("/workspace/.nanocodex/artifacts/stress-ui.json") as Uint8Array,
+  ));
+  assert.equal(artifact.title, "Stress UI");
+  assert.match(artifact.source, /Code Mode total: 42/);
+});
+
+test("browser ssh documents its direct WebSocket-only transport", async () => {
+  const root = new MemoryDirectory();
+  const fs = createOpfsGitFs(root as unknown as FileSystemDirectoryHandle);
+  await git.init({ fs, dir: "/workspace", defaultBranch: "nanocodex" });
+  const shell = await createBrowserBash(fs, thread);
+
+  const result = await shell.exec({ cmd: "ssh --help" });
+  assert.equal(result.exit_code, 2);
+  assert.match(result.output, /wss:\/\/SSH-GATEWAY/);
+  assert.match(result.output, /browsers cannot open TCP port 22/);
+});
+
 test("browser command substitutions settle without reaching the execution timeout", async () => {
   const root = new MemoryDirectory();
   const fs = createOpfsGitFs(root as unknown as FileSystemDirectoryHandle);
@@ -377,6 +527,30 @@ function instrument(base: OpfsGitFs) {
     },
   };
   return { counters, fs };
+}
+
+function artifactWorkspace(fs: OpfsGitFs) {
+  return {
+    root: "/workspace",
+    async list() { return []; },
+    async readFile(path: string) {
+      return fs.promises.readFile(path) as Promise<Uint8Array>;
+    },
+    async writeFile(path: string, contents: string | ArrayBuffer | ArrayBufferView) {
+      const bytes = typeof contents === "string"
+        ? contents
+        : contents instanceof ArrayBuffer
+          ? new Uint8Array(contents)
+          : new Uint8Array(contents.buffer, contents.byteOffset, contents.byteLength);
+      await fs.promises.writeFile(path, bytes);
+    },
+    async remove(path: string) {
+      await fs.promises.rm(path, { recursive: true });
+    },
+    async mkdir(path: string) {
+      await fs.promises.mkdir(path);
+    },
+  };
 }
 
 class MemoryDirectory {

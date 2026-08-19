@@ -344,7 +344,7 @@ fn group_direct_code_mode_definitions(
     for definition in definitions {
         let canonical_name = definition.name().to_owned();
         let mut definition = if code_mode_names.contains(&canonical_name) {
-            code_mode::description::augment_definition_for_code_mode(definition)
+            crate::code_mode_description::augment_definition_for_code_mode(definition)
         } else {
             definition
         };

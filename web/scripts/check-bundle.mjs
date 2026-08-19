@@ -13,14 +13,30 @@ const budgets = Object.freeze({
   initialCss: 60_500,
   initialCssGzip: 12_000,
   agentJavaScript: 830_000,
-  // OPFS, artifacts, voice routing, subscription auth, and paid MCP stay in the Worker.
-  agentWorker: 55_000,
+  // OPFS, artifacts, durability, typed voice lifecycle routing, subscription auth, and paid MCP stay in the Worker.
+  agentWorker: 56_100,
   agentWorkerGzip: 17_500,
+  datasetFacadeJavaScript: 1_500,
+  datasetFacadeJavaScriptGzip: 700,
+  datasetContractJavaScript: 1_500,
+  datasetContractJavaScriptGzip: 700,
+  // Includes stateless physical cursors for bounded Parquet and JSONL continuation.
+  datasetToolJavaScript: 24_500,
+  datasetToolJavaScriptGzip: 8_300,
+  parquetJavaScript: 60_000,
+  parquetJavaScriptGzip: 18_000,
+  parquetCompressorsJavaScript: 116_000,
+  parquetCompressorsJavaScriptGzip: 75_500,
   // just-bash and its built-in Unix command set stay behind Agent startup.
   browserShellJavaScript: 1_600_000,
   browserShellJavaScriptGzip: 450_000,
   artifactCoreJavaScript: 7_000,
   artifactCoreJavaScriptGzip: 2_800,
+  // Includes the canonical Rust apply_patch planner and the complete
+  // JSON-Schema-backed subagent runtime. Keep these close to the optimized
+  // artifact so future growth still fails this gate.
+  wasm: 3_750_000,
+  wasmGzip: 1_200_000,
   mppControlsJavaScript: 1_300_000,
   workerTempoJavaScript: 800_000,
 });
@@ -38,7 +54,7 @@ const manifest = JSON.parse(
 
 const entryKey = manifestKey("index.html");
 const agentKey = manifestKey("src/AgentTerminal.tsx");
-const artifactCoreKey = manifestKey("nanocodex-artifacts/dist/index.js");
+const artifactCoreKey = manifestKey("node_modules/nanocodex/tools/artifact.mjs");
 const mppKey = manifestKey("src/MppControls.tsx");
 const entry = manifest[entryKey];
 const agent = manifest[agentKey];
@@ -154,11 +170,16 @@ within(
   budgets.agentWorkerGzip,
 );
 
-const browserShellImport = workerSource.match(
-  /import\((?:`|'|")\.\/(browserShell-[^`'"]+\.js)(?:`|'|")\)/,
+const browserShellFile = await findLazyAsset(
+  workerSource,
+  (_file, source) => source.includes("persistent browser filesystem rooted at /workspace"),
 );
-assert(browserShellImport, "the Agent Worker must lazy-load the browser shell");
-const browserShell = await fileStats([`assets/${browserShellImport[1]}`]);
+assert(browserShellFile, "the Agent Worker must lazy-load the browser shell");
+const browserShellSource = await readFile(join(assetsDirectory, browserShellFile), "utf8");
+const browserShellFiles = await staticAssetClosure(browserShellFile);
+const browserShell = await fileStats(
+  [...browserShellFiles].map((file) => `assets/${file}`),
+);
 within(
   "Browser shell JavaScript",
   browserShell.bytes,
@@ -168,6 +189,141 @@ within(
   "Browser shell JavaScript gzip",
   browserShell.gzipBytes,
   budgets.browserShellJavaScriptGzip,
+);
+
+const pythonFile = await findLazyAsset(
+  browserShellSource,
+  (_file, source) => source.includes("Python worker failed"),
+);
+const compilerFile = await findLazyAsset(
+  browserShellSource,
+  (_file, source) => source.includes("compiler worker failed"),
+);
+const sshFile = await findLazyAsset(
+  browserShellSource,
+  (_file, source) => source.includes("Browser SSH requires a server-provided WebSocket"),
+);
+assert(pythonFile, "the browser shell must lazy-load Python on first use");
+assert(compilerFile, "the browser shell must lazy-load wasm-clang on first use");
+assert(sshFile, "the browser shell must lazy-load SSH on first use");
+for (const file of [pythonFile, compilerFile, sshFile]) {
+  assert(
+    !browserShellFiles.has(file),
+    `${file} must not enter the browser shell's static closure`,
+  );
+}
+
+const pythonWorkerFile = exactlyOne(
+  assets.filter((file) => /^python\.worker-.*\.js$/.test(file)),
+  "lazy Python Worker",
+);
+const compilerWorkerFile = exactlyOne(
+  assets.filter((file) => /^compiler\.worker-.*\.js$/.test(file)),
+  "lazy compiler Worker",
+);
+const pythonSource = await readFile(join(assetsDirectory, pythonFile), "utf8");
+const compilerSource = await readFile(join(assetsDirectory, compilerFile), "utf8");
+assert(
+  pythonSource.includes(pythonWorkerFile),
+  "the Python command must create its isolated Worker only on execution",
+);
+assert(
+  compilerSource.includes(compilerWorkerFile),
+  "the compiler command must create its isolated Worker only on execution",
+);
+
+const datasetFacadeFile = await findLazyAsset(
+  workerSource,
+  (_file, source) => source.includes("dataset tool options must be an object"),
+);
+assert(datasetFacadeFile, "the package-owned browser tools must lazy-load the dataset facade");
+assert(!html.includes(datasetFacadeFile), "index.html must not preload the dataset facade");
+assert(
+  !browserShellFiles.has(datasetFacadeFile),
+  "the dataset facade must not enter the browser shell's static closure",
+);
+const datasetFacadeSource = await readFile(join(assetsDirectory, datasetFacadeFile), "utf8");
+const datasetFacade = byteStats(datasetFacadeSource);
+within("Dataset facade JavaScript", datasetFacade.bytes, budgets.datasetFacadeJavaScript);
+within(
+  "Dataset facade JavaScript gzip",
+  datasetFacade.gzipBytes,
+  budgets.datasetFacadeJavaScriptGzip,
+);
+const datasetImport = datasetFacadeSource.match(
+  /import\((?:`|'|")\.\/(datasetEngine-[^`'"]+\.js)(?:`|'|")\)/,
+);
+assert(datasetImport, "the dataset facade must retain an explicit lazy engine edge");
+const datasetFile = datasetImport[1];
+assert(assets.includes(datasetFile), `the lazy dataset tool ${datasetFile} is missing`);
+assert(!html.includes(datasetFile), "index.html must not preload the dataset tool");
+const datasetPath = join(assetsDirectory, datasetFile);
+const datasetSource = await readFile(datasetPath, "utf8");
+const dataset = byteStats(datasetSource);
+within("Dataset tool JavaScript", dataset.bytes, budgets.datasetToolJavaScript);
+within(
+  "Dataset tool JavaScript gzip",
+  dataset.gzipBytes,
+  budgets.datasetToolJavaScriptGzip,
+);
+const datasetContractFile = exactlyOne(
+  assets.filter((file) => /^datasetContract-.*\.js$/.test(file)),
+  "dataset tool contract",
+);
+assert(!html.includes(datasetContractFile), "index.html must not preload the dataset contract");
+const datasetFacadeFiles = await staticAssetClosure(datasetFacadeFile);
+assert(
+  datasetFacadeFiles.has(datasetContractFile),
+  "the dataset facade must statically own its model-visible contract",
+);
+const datasetContract = await fileStats([`assets/${datasetContractFile}`]);
+within(
+  "Dataset contract JavaScript",
+  datasetContract.bytes,
+  budgets.datasetContractJavaScript,
+);
+within(
+  "Dataset contract JavaScript gzip",
+  datasetContract.gzipBytes,
+  budgets.datasetContractJavaScriptGzip,
+);
+const datasetRuntimeImports = [...datasetSource.matchAll(
+  /import\((?:`|'|")\.\/(src-[^`'"]+\.js)(?:`|'|")\)/g,
+)].map((match) => match[1]);
+assert.equal(datasetRuntimeImports.length, 2, "the dataset tool must lazily load Parquet and its codecs");
+for (const file of datasetRuntimeImports) {
+  assert(assets.includes(file), `the lazy dataset runtime ${file} is missing`);
+  assert(!html.includes(file), `index.html must not preload the dataset runtime ${file}`);
+}
+const datasetRuntimeSources = await Promise.all(datasetRuntimeImports.map(async (file) => ({
+  file,
+  source: await readFile(join(assetsDirectory, file), "utf8"),
+})));
+const parquetFile = exactlyOne(
+  datasetRuntimeSources
+    .filter(({ source }) => source.includes("parquet expected AsyncBuffer"))
+    .map(({ file }) => file),
+  "Hyparquet runtime",
+);
+const parquetCompressorsFile = exactlyOne(
+  datasetRuntimeSources
+    .filter(({ source }) => source.includes("lz4 offset out of range"))
+    .map(({ file }) => file),
+  "Parquet compressor runtime",
+);
+const parquet = await fileStats([`assets/${parquetFile}`]);
+within("Hyparquet JavaScript", parquet.bytes, budgets.parquetJavaScript);
+within("Hyparquet JavaScript gzip", parquet.gzipBytes, budgets.parquetJavaScriptGzip);
+const parquetCompressors = await fileStats([`assets/${parquetCompressorsFile}`]);
+within(
+  "Parquet compressors JavaScript",
+  parquetCompressors.bytes,
+  budgets.parquetCompressorsJavaScript,
+);
+within(
+  "Parquet compressors JavaScript gzip",
+  parquetCompressors.gzipBytes,
+  budgets.parquetCompressorsJavaScriptGzip,
 );
 
 const tempoImport = workerSource.match(
@@ -255,6 +411,26 @@ console.log(JSON.stringify({
     workerBytes: worker.bytes,
     workerGzipBytes: worker.gzipBytes,
   },
+  browserTools: {
+    shellFiles: browserShell.fileCount,
+    shellBytes: browserShell.bytes,
+    shellGzipBytes: browserShell.gzipBytes,
+    pythonEntry: pythonFile,
+    compilerEntry: compilerFile,
+    sshEntry: sshFile,
+    dataset: {
+      facadeBytes: datasetFacade.bytes,
+      facadeGzipBytes: datasetFacade.gzipBytes,
+      contractBytes: datasetContract.bytes,
+      contractGzipBytes: datasetContract.gzipBytes,
+      toolBytes: dataset.bytes,
+      toolGzipBytes: dataset.gzipBytes,
+      parquetBytes: parquet.bytes,
+      parquetGzipBytes: parquet.gzipBytes,
+      compressorsBytes: parquetCompressors.bytes,
+      compressorsGzipBytes: parquetCompressors.gzipBytes,
+    },
+  },
   artifacts: {
     coreJavaScriptBytes: artifactCoreJavaScript.bytes,
     coreJavaScriptGzipBytes: artifactCoreJavaScript.gzipBytes,
@@ -337,6 +513,37 @@ function byteStats(source) {
     bytes: content.byteLength,
     gzipBytes: gzipSync(content, { level: 9 }).byteLength,
   };
+}
+
+async function findLazyAsset(source, matches, visited = new Set()) {
+  const imports = [...source.matchAll(
+    /import\((?:`|'|")\.\/([^`'"]+\.js)(?:`|'|")\)/g,
+  )].map((match) => match[1]);
+  for (const file of imports) {
+    if (visited.has(file)) continue;
+    visited.add(file);
+    const child = await readFile(join(assetsDirectory, file), "utf8");
+    if (matches(file, child)) return file;
+    const found = await findLazyAsset(child, matches, visited);
+    if (found) return found;
+  }
+  return undefined;
+}
+
+async function staticAssetClosure(root, visited = new Set()) {
+  if (visited.has(root)) return visited;
+  visited.add(root);
+  const source = await readFile(join(assetsDirectory, root), "utf8");
+  const imports = [
+    ...source.matchAll(
+      /(?:import|export)[^"'`()]*?from(?:`|'|")\.\/([^`'"]+\.js)(?:`|'|")/g,
+    ),
+    ...source.matchAll(
+      /import(?:`|'|")\.\/([^`'"]+\.js)(?:`|'|")/g,
+    ),
+  ].map((match) => match[1]);
+  for (const file of imports) await staticAssetClosure(file, visited);
+  return visited;
 }
 
 function within(name, actual, maximum) {

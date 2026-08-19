@@ -202,7 +202,8 @@ nanocodex                         Alloy-style facade and prelude
 ├── durability                    nanocodex-durability -> nanocodex-agent
 ├── oai                           nanocodex-oai-api
 ├── tools                         nanocodex-tools
-└── observability                 nanocodex-observability (optional)
+├── observability                 nanocodex-observability (optional)
+└── subagents                     nanocodex-subagents (optional extension)
 ```
 
 The facade provides the canonical common imports. Each lower crate is also
@@ -276,6 +277,17 @@ procedural-macro boundary.
 
 [Tools guide](crates/nanocodex-tools/README.md) ·
 [API documentation](https://docs.rs/nanocodex-tools)
+
+### `nanocodex-subagents`
+
+An optional extension over `nanocodex-agent` that supplies structured
+task-tree delegation without baking orchestration into the core agent. It owns
+the canonical spawn, result submission, directed messaging, directory, wait,
+interrupt, and close tools. The same Rust runtime is consumed by the native CLI
+and the Node/browser WASM bindings.
+
+[Subagents guide](crates/nanocodex-subagents/README.md) ·
+[API documentation](https://docs.rs/nanocodex-subagents)
 
 ### `nanocodex-observability`
 

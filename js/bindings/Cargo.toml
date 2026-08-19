@@ -16,6 +16,8 @@ crate-type = ["cdylib", "rlib"]
 [target.'cfg(all(target_arch = "wasm32", target_os = "unknown"))'.dependencies]
 js-sys.workspace = true
 nanocodex.workspace = true
+nanocodex-subagents.workspace = true
+nanocodex-voice-protocol.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["sync"] }

@@ -32,6 +32,20 @@ const requiredFiles = [
   "worker/index.d.mts",
   "runtime/workspace.mjs",
   "runtime/workspace.d.mts",
+  "tools/index.mjs",
+  "tools/index.d.mts",
+  "tools/dataset.mjs",
+  "tools/dataset.d.mts",
+  "tools/datasetContract.mjs",
+  "tools/datasetEngine.mjs",
+  "tools/namedTool.mjs",
+  "tools/artifact.mjs",
+  "tools/artifact.d.mts",
+  "tools/standardDescriptions.mjs",
+  "tools/browser/index.mjs",
+  "tools/browser/index.d.mts",
+  "tools/vite.mjs",
+  "tools/vite.d.mts",
   "wasm.d.mts",
   "pkg-web/nanocodex.js",
   "pkg-web/nanocodex.d.ts",
@@ -57,6 +71,11 @@ export async function checkPackage(packageRoot = root) {
   assert.equal(packageJson.exports?.["./node"]?.import, "./node/index.mjs");
   assert.equal(packageJson.exports?.["./node/workspace"]?.import, "./node/workspace.mjs");
   assert.equal(packageJson.exports?.["./worker"]?.import, "./worker/index.mjs");
+  assert.equal(packageJson.exports?.["./tools"]?.import, "./tools/index.mjs");
+  assert.equal(packageJson.exports?.["./tools/dataset"]?.import, "./tools/dataset.mjs");
+  assert.equal(packageJson.exports?.["./tools/artifact"]?.import, "./tools/artifact.mjs");
+  assert.equal(packageJson.exports?.["./tools/browser"]?.import, "./tools/browser/index.mjs");
+  assert.equal(packageJson.exports?.["./tools/vite"]?.import, "./tools/vite.mjs");
   assert.equal(packageJson.exports?.["./wasm"]?.import, "./pkg-web/nanocodex_bg.wasm");
   checkDocumentedBrowserVersion(readme, packageJson.version);
 

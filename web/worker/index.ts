@@ -28,6 +28,7 @@ import {
   limitSessionPoll,
   type PublicSecurityEnv,
 } from "./publicSecurity.ts";
+import { CHATGPT_REALTIME_INSTRUCTIONS } from "nanocodex/browser/realtime";
 
 export { ChatGptSession, EvalCoordinator, GitRepository, ThreadGitRepository };
 
@@ -54,17 +55,13 @@ const CHATGPT_REALTIME_MODEL = "gpt-live-1-boulder-alpha";
 const CHATGPT_REALTIME_VOICES = new Set([
   "juniper", "maple", "spruce", "ember", "vale", "breeze", "arbor", "sol", "cove",
 ]);
-const CHATGPT_REALTIME_INSTRUCTIONS = `You are Codex, a concise and warm conversational surface for the coding agent visible on the page.
-Treat the coding agent and yourself as one assistant. Never mention a backend or separate system.
-For every action or task, create a client delegation. Use direct speech only for brief conversation that needs no tools or execution.
-The coding agent's visible output is authoritative. Summarize it naturally without repeating long code, tables, or structured data.
-Running work remains steerable: delegate corrections and new instructions immediately.`;
 const CODEX_ORIGINATOR = "codex_cli_rs";
 const CODEX_USER_AGENT = "codex_cli_rs/0.0.0";
 const MAX_JSON_BODY_CHARS = 32 * 1024 * 1024;
 const MAX_SEARCH_OUTPUT_CHARS = 1024 * 1024;
 const MAX_API_KEY_CHARS = 1_024;
 const MAX_REALTIME_SDP_CHARS = 1024 * 1024;
+const MAX_REALTIME_STARTUP_CONTEXT_BYTES = 24 * 1024;
 const REALTIME_SIDEBAND_URL = "https://api.openai.com/v1/live";
 const MAX_WEBSOCKET_MESSAGE_CHARS = 8 * 1024 * 1024;
 const BYOK_SESSION_TTL_MS = 60 * 60 * 1_000;
@@ -312,6 +309,7 @@ async function createRealtimeCall(request: Request, env: WorkerEnv, url: URL): P
   if (decoded instanceof Response) return decoded;
   const sdp = typeof decoded.sdp === "string" ? decoded.sdp : "";
   const sessionId = typeof decoded.session_id === "string" ? decoded.session_id : "";
+  const startupContext = typeof decoded.startup_context === "string" ? decoded.startup_context : "";
   const voice = typeof decoded.voice === "string" ? decoded.voice : "";
   if (!sdp || sdp.length > MAX_REALTIME_SDP_CHARS) {
     return json({ error: "invalid WebRTC offer" }, { status: 400 });
@@ -322,6 +320,9 @@ async function createRealtimeCall(request: Request, env: WorkerEnv, url: URL): P
   if (!CHATGPT_REALTIME_VOICES.has(voice)) {
     return json({ error: "unsupported ChatGPT voice" }, { status: 400 });
   }
+  if (new TextEncoder().encode(startupContext).byteLength > MAX_REALTIME_STARTUP_CONTEXT_BYTES) {
+    return json({ error: "Realtime startup context exceeded 24 KiB" }, { status: 400 });
+  }
   const resolved = await resolveSubscriptionCredential(request, env, "health");
   if (resolved instanceof Response) return resolved;
   let credential = resolved;
@@ -330,13 +331,27 @@ async function createRealtimeCall(request: Request, env: WorkerEnv, url: URL): P
   }
   const limited = await limitAgentOperation(env, credential.actorId, "socket");
   if (limited) return limited;
-  let upstream = await openRealtimeCall(credential, env, sdp, sessionId, voice);
+  let upstream = await openRealtimeCall(
+    credential,
+    env,
+    sdp,
+    sessionId,
+    voice,
+    startupContext,
+  );
   if (upstream.status === 401) {
     await upstream.body?.cancel();
     const recovered = await recoverSubscriptionCredential(request, env, credential);
     if (recovered) {
       credential = recovered;
-      upstream = await openRealtimeCall(credential, env, sdp, sessionId, voice);
+      upstream = await openRealtimeCall(
+        credential,
+        env,
+        sdp,
+        sessionId,
+        voice,
+        startupContext,
+      );
     }
   }
   const callId = realtimeCallId(upstream.headers.get("location"));
@@ -376,6 +391,7 @@ function openRealtimeCall(
   sdp: string,
   sessionId: string,
   voice: string,
+  startupContext: string,
 ): Promise<Response> {
   const endpoint = `${chatGptApiBaseUrl(env)}/realtime/calls?intent=quicksilver&architecture=avas`;
   return fetch(endpoint, {
@@ -387,12 +403,16 @@ function openRealtimeCall(
       "x-session-id": sessionId,
       "session-id": sessionId,
       "thread-id": sessionId,
+      originator: "nanocodex",
+      "User-Agent": "nanocodex/0.1.0",
     },
     body: JSON.stringify({
       sdp,
       session: {
         model: CHATGPT_REALTIME_MODEL,
-        instructions: CHATGPT_REALTIME_INSTRUCTIONS,
+        instructions: startupContext
+          ? `${CHATGPT_REALTIME_INSTRUCTIONS}\n\n${startupContext}`
+          : CHATGPT_REALTIME_INSTRUCTIONS,
         audio: { output: { voice } },
         delegation: { type: "client" },
       },

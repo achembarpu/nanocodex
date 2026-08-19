@@ -16,6 +16,7 @@ description = "Experimental desktop GPT Realtime voice sessions for Nanocodex ag
 [dependencies]
 futures-util.workspace = true
 nanocodex = { workspace = true, features = ["realtime"] }
+nanocodex-voice-protocol.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true
 tokio = { workspace = true, features = ["rt", "sync"] }

@@ -129,8 +129,8 @@ layers:
 - `../js/react` publishes `nanocodex-react`, the wagmi-like headless React owner. Its provider and
   hooks manage the module Worker lifecycle, readiness, commands, and event
   subscriptions without imposing presentation policy.
-- `../js/artifacts` publishes `nanocodex-artifacts`, the framework-independent
-  live React source document and bounded workspace store.
+- `nanocodex/tools` owns the framework-independent live React document,
+  bounded workspace store, and typed artifact tool used by the web consumer.
 - `AgentTerminal` is the optimized Ratatui-faithful consumer: native colors,
   rendering hierarchy, queue/steer behavior, `/btw`, historical branch editing,
   branch navigation, per-branch drafts, clipboard images, and key bindings over
@@ -142,8 +142,8 @@ tool loop. Each thread opens one OPFS workspace shared by just-bash, Rust
 `apply_patch`, isomorphic-git, the file viewer, commit history, uploads,
 downloads, and the artifact dock. The model receives the standard
 `exec_command` and Rust `apply_patch` tools rather than separate list/read/write
-or Git tools. Shell commands include normal virtual Unix commands plus `git`,
-`gh`, and `artifact`; `git push origin nanocodex` publishes the same objects the
+or Git tools. Shell commands include normal virtual Unix commands plus `git`
+and `gh`; `git push origin nanocodex` publishes the same objects the
 Commits view reads from the Cloudflare thread remote. Files survive agent,
 Worker, and page restarts without being copied into conversation snapshots.
 The Cloudflare Worker upgrades `/api/responses` and proxies OpenAI
@@ -151,10 +151,10 @@ tool calls. It accepts a user-provided OpenAI key into a one-hour Durable Object
 session and returns only an opaque `HttpOnly`, `SameSite=Strict` cookie. The key
 is never placed in a URL, local storage, React state, or WASM configuration.
 
-Custom interfaces use the shell instead of a model-specific tool. The agent
-writes JavaScript source defining a real React `App`, then runs
-`artifact publish <source.js> --id <id> --title "<title>"`. `React`, an `html`
-tagged-template helper, and `sendPrompt` are supplied by the isolated iframe
+Custom interfaces use the typed `render_artifact` tool composed by
+`nanocodex/tools/browser`, alongside `exec_command`, `web__run`, and
+`image_gen__imagegen`. The tool accepts JavaScript source defining a real React
+`App`; `React`, an `html` tagged-template helper, and `sendPrompt` are supplied by the isolated iframe
 runtime. Published documents live under `.nanocodex/artifacts` in the same Git
 working tree and open in a fullscreen dock. Reusing an artifact ID replaces the
 interface in place, so voice or text turns can continuously retheme and extend
@@ -163,6 +163,35 @@ explicit `sendPrompt` actions re-enter the normal queued prompt lifecycle.
 A user key takes precedence over the optional deployment-owned
 `OPENAI_API_KEY`; forgetting or expiring it falls back to that deployment key
 when present.
+
+The reusable `browser(...)` tool bundle gives the browser agent a bounded
+`dataset` tool. It can inspect public
+Parquet URLs, Hugging Face dataset/config/split exports, and uncompressed JSONL
+URLs without downloading whole datasets into memory. Parquet reads use HTTP
+ranges and filter/projection pushdown where possible; JSONL reads incrementally
+scan the response stream. Dataset handles are scoped to an agent session. Query
+limits and offsets accept any nonnegative safe range; input-byte and output-byte
+budgets remain bounded. Partial results report `complete: false` and an opaque
+`nextCursor` that retains projection and filters while resuming at the physical
+Parquet row batch or JSONL byte position. The implementation and Parquet codecs
+are lazy chunks, so ordinary agent sessions do not download them. Direct sources
+must permit browser CORS. Parquet sources must honor byte-range requests; JSONL
+sources must honor them when continuing from a cursor.
+
+For example, ask the web agent to “inspect the `main` config’s `train` split of
+`openai/gsm8k`, show its schema, and find five examples containing arithmetic.”
+The resulting tool flow is equivalent to:
+
+```json
+{"operation":"open","source":{"kind":"huggingface","dataset":"openai/gsm8k","config":"main","split":"train"}}
+{"operation":"query","dataset_id":"<returned id>","columns":["question","answer"],"filters":[{"column":"question","op":"contains","value":"how many"}],"limit":5}
+{"operation":"query","dataset_id":"<returned id>","cursor":"<returned nextCursor>","limit":5}
+{"operation":"close","dataset_id":"<returned id>"}
+```
+
+Run `npm run bench:dataset` in `js/bindings` for the deterministic 100,000-row
+Snappy Parquet/JSONL browser-path benchmark. It reports cold and repeated query
+latency, pulled bytes, range requests, scanned rows, and cache hits.
 
 OpenAI remains the default agent connection. A user can explicitly select
 Tempo MPP instead; only then does React lazy-load Wagmi and Tempo Accounts,

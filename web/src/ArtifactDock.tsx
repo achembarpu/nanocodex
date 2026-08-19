@@ -13,13 +13,13 @@ import type {
   ArtifactStore,
   ArtifactDocument,
   ArtifactInput,
-} from "nanocodex-artifacts";
+} from "nanocodex/tools/artifact";
 import { LiveReactArtifact } from "./LiveReactArtifact";
 import {
   getBrowserThread,
   openKernelWorkspace,
   subscribeThreadWorkspaceChanges,
-} from "./workspace";
+} from "nanocodex/tools/browser";
 
 export const COMPACT_WORKSPACE_MEDIA_QUERY = "(max-width: 740px), (pointer: coarse) and (orientation: landscape) and (max-width: 950px)";
 
@@ -63,7 +63,7 @@ export const ArtifactDock = memo(function ArtifactDock({
     let active = true;
     void Promise.all([
       openKernelWorkspace(),
-      import("nanocodex-artifacts"),
+      import("nanocodex/tools/artifact"),
     ]).then(async ([nextWorkspace, { ArtifactStore }]) => {
       if (!active) return;
       const nextStore = new ArtifactStore(nextWorkspace);

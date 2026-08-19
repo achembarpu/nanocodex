@@ -25,10 +25,19 @@ use nanocodex::{
         standard::StandardTool,
     },
 };
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::sync::oneshot;
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::{JsFuture, spawn_local};
+
+use nanocodex_subagents::{
+    AgentId as SubagentId, AgentStatus as SubagentStatus, AgentUpdate as SubagentUpdate,
+    ScopedAgentUpdate, SubagentControl,
+};
+use nanocodex_voice_protocol::{
+    REALTIME_END_INSTRUCTIONS, REALTIME_START_INSTRUCTIONS, TranscriptEntry, realtime_delegation,
+    realtime_tail_delegation,
+};
 
 mod transport;
 
@@ -55,10 +64,10 @@ extern "C" {
     fn host_cancel_code(session_id: &str);
 
     #[wasm_bindgen(js_namespace = ["globalThis", "nanocodexHost"], js_name = toolMode)]
-    fn host_tool_mode(session_id: &str) -> String;
+    fn host_tool_mode(definition_host_id: u32, session_id: &str) -> String;
 
     #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = toolDefinitions)]
-    fn host_tool_definitions(session_id: &str) -> Result<String, JsValue>;
+    fn host_tool_definitions(definition_host_id: u32, session_id: &str) -> Result<String, JsValue>;
 
     #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = durabilityLoad)]
     fn host_durability_load(journal_id: &str) -> Result<Promise, JsValue>;
@@ -95,6 +104,12 @@ extern "C" {
 
     #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = subscriptionRequest)]
     fn host_subscription_request(subscription_id: &str, request: &str) -> Result<Promise, JsValue>;
+
+    #[wasm_bindgen(js_namespace = ["globalThis", "nanocodexHost"], js_name = bindSubagentSession)]
+    fn host_bind_subagent_session(root_session_id: &str, session_id: &str);
+
+    #[wasm_bindgen(js_namespace = ["globalThis", "nanocodexHost"], js_name = releaseSubagentSession)]
+    fn host_release_subagent_session(session_id: &str);
 }
 
 struct JavaScriptSubscriptionHost {
@@ -119,6 +134,18 @@ enum JavaScriptSubscriptionCommit {
 struct JavaScriptSubscriptionResponse {
     status: u16,
     body: String,
+}
+
+#[derive(Serialize)]
+struct WasmAgentSessionContext<'a> {
+    workspace: &'a str,
+    history: &'a [nanocodex::oai::responses::ResponseItem],
+}
+
+#[derive(Deserialize)]
+struct WasmRealtimeTranscriptEntry {
+    role: String,
+    text: String,
 }
 
 impl ChatGptSubscriptionHost for JavaScriptSubscriptionHost {
@@ -294,13 +321,15 @@ impl JournalStore for JavaScriptDurabilityStore {
 }
 
 struct JavaScriptCodeModeHost {
+    definition_host_id: u32,
     mode: HostedToolMode,
 }
 
 impl JavaScriptCodeModeHost {
-    fn new() -> Self {
+    fn new(definition_host_id: u32) -> Self {
         Self {
-            mode: if host_tool_mode("") == "direct" {
+            definition_host_id,
+            mode: if host_tool_mode(definition_host_id, "") == "direct" {
                 HostedToolMode::Direct
             } else {
                 HostedToolMode::Code
@@ -315,7 +344,7 @@ impl CodeModeHost for JavaScriptCodeModeHost {
     }
 
     fn tool_definitions(&self, session_id: &str) -> Result<Vec<ToolDefinition>, CodeModeHostError> {
-        let encoded = host_tool_definitions(session_id)
+        let encoded = host_tool_definitions(self.definition_host_id, session_id)
             .map_err(|error| CodeModeHostError::new(host_error_message(&error)))?;
         let mut definitions =
             serde_json::from_str::<Vec<ToolDefinition>>(&encoded).map_err(|error| {
@@ -449,6 +478,7 @@ async fn execute_browser_apply_patch(
 #[serde(deny_unknown_fields)]
 struct WasmConfig {
     api_key: String,
+    host_definition_id: u32,
     #[serde(default = "default_model")]
     model: String,
     #[serde(default = "default_thinking")]
@@ -475,6 +505,15 @@ struct WasmConfig {
     resume: Option<SessionSnapshot>,
     #[serde(default)]
     durability_id: Option<String>,
+    #[serde(default)]
+    subagents: Option<WasmSubagentsConfig>,
+}
+
+#[derive(Clone, Copy, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WasmSubagentsConfig {
+    #[serde(default = "default_max_subagents")]
+    max_concurrency: usize,
 }
 
 #[derive(Deserialize)]
@@ -594,6 +633,30 @@ fn encode_subscription_credential(
 #[wasm_bindgen(js_name = Nanocodex)]
 pub struct WasmNanocodex {
     inner: RustNanocodex,
+    subagents: Option<WasmSubagents>,
+}
+
+#[derive(Clone)]
+struct WasmSubagents {
+    control: SubagentControl,
+    sessions: Rc<RefCell<HashMap<(String, SubagentId), String>>>,
+}
+
+impl WasmSubagents {
+    fn new(
+        control: SubagentControl,
+        updates: tokio::sync::mpsc::UnboundedReceiver<ScopedAgentUpdate>,
+    ) -> Self {
+        let sessions = Rc::new(RefCell::new(HashMap::new()));
+        forward_subagent_updates(updates, Rc::clone(&sessions));
+        Self { control, sessions }
+    }
+
+    async fn close_all(&self, root_session_id: &str) -> std::io::Result<()> {
+        self.control.close_all(root_session_id).await?;
+        release_subagent_scope(&self.sessions, root_session_id);
+        Ok(())
+    }
 }
 
 #[wasm_bindgen(js_class = Nanocodex)]
@@ -639,17 +702,34 @@ impl WasmNanocodex {
             .thinking(thinking)
             .reasoning_mode(reasoning_mode)
             .fast_mode(config.fast_mode)
-            .websocket_warmup(config.websocket_warmup)
-            .host_transport(JavaScriptResponsesHost);
+            .websocket_warmup(config.websocket_warmup);
         if let Some(websocket_url) = config.websocket_url {
             openai = openai.websocket_url(websocket_url);
         }
         if let Some(api_base_url) = config.api_base_url {
             openai = openai.api_base_url(api_base_url);
         }
-        let openai = openai.build().map_err(js_error)?;
-        let mut builder =
-            RustNanocodex::builder(openai).tools(HostedTools::new(JavaScriptCodeModeHost::new()));
+        let openai = openai
+            .host_transport(JavaScriptResponsesHost)
+            .build()
+            .map_err(js_error)?;
+        let hosted_tools = HostedTools::new(JavaScriptCodeModeHost::new(config.host_definition_id));
+        let (mut builder, subagents) = if let Some(subagents) = config.subagents {
+            let (registry, control, updates) =
+                nanocodex_subagents::channel(subagents.max_concurrency);
+            (
+                RustNanocodex::builder(openai).tools_factory(move |agent| {
+                    nanocodex_subagents::install_tools(
+                        hosted_tools.clone(),
+                        agent,
+                        registry.clone(),
+                    )
+                }),
+                Some(WasmSubagents::new(control, updates)),
+            )
+        } else {
+            (RustNanocodex::builder(openai).tools(hosted_tools), None)
+        };
         if let Some(instructions) = config.instructions {
             builder = builder.instructions(instructions);
         }
@@ -680,7 +760,7 @@ impl WasmNanocodex {
             builder = builder.durability(journal).await.map_err(js_error)?;
         }
         let (inner, events) = builder.build().map_err(js_error)?;
-        Ok(Self::from_parts(inner, events))
+        Ok(Self::from_parts(inner, events, subagents))
     }
 
     /// Returns the stable `UUIDv7` session identity.
@@ -737,7 +817,7 @@ impl WasmNanocodex {
     /// Rejects before the first safe boundary or after the driver stops.
     pub async fn fork(&self) -> Result<Self, JsValue> {
         let (inner, events) = self.inner.fork().await.map_err(js_error)?;
-        Ok(Self::from_parts(inner, events))
+        Ok(Self::from_parts(inner, events, self.subagents.clone()))
     }
 
     /// Forks from an exact completed historical turn.
@@ -752,7 +832,7 @@ impl WasmNanocodex {
             .fork_from(&result.inner)
             .await
             .map_err(js_error)?;
-        Ok(Self::from_parts(inner, events))
+        Ok(Self::from_parts(inner, events, self.subagents.clone()))
     }
 
     /// Starts a clean sibling with the same private agent policy.
@@ -762,7 +842,7 @@ impl WasmNanocodex {
     /// Rejects after the driver stops.
     pub async fn spawn(&self) -> Result<Self, JsValue> {
         let (inner, events) = self.inner.spawn().await.map_err(js_error)?;
-        Ok(Self::from_parts(inner, events))
+        Ok(Self::from_parts(inner, events, self.subagents.clone()))
     }
 
     /// Changes the reasoning effort for subsequently accepted turns.
@@ -797,20 +877,94 @@ impl WasmNanocodex {
         self.inner.compact().await.map_err(js_error)
     }
 
+    /// Appends adapter-owned developer context at the next safe model boundary.
+    ///
+    /// Returns the complete read-only session context captured at that boundary.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty text or a stopped driver.
+    #[wasm_bindgen(js_name = appendDeveloperMessage)]
+    pub async fn append_developer_message(&self, text: &str) -> Result<String, JsValue> {
+        append_developer_context(&self.inner, text).await
+    }
+
+    /// Starts the canonical Codex Realtime adapter lifecycle.
+    ///
+    /// # Errors
+    ///
+    /// Rejects when the agent driver has stopped or context serialization fails.
+    #[wasm_bindgen(js_name = startRealtimeConversation)]
+    pub async fn start_realtime_conversation(&self) -> Result<String, JsValue> {
+        append_developer_context(&self.inner, REALTIME_START_INSTRUCTIONS).await
+    }
+
+    /// Ends the canonical Codex Realtime adapter lifecycle.
+    ///
+    /// # Errors
+    ///
+    /// Rejects when the agent driver has stopped or context serialization fails.
+    #[wasm_bindgen(js_name = endRealtimeConversation)]
+    pub async fn end_realtime_conversation(&self) -> Result<String, JsValue> {
+        append_developer_context(&self.inner, REALTIME_END_INSTRUCTIONS).await
+    }
+
+    /// Formats one structured Realtime delegation using canonical Codex markers.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed transcript JSON.
+    #[wasm_bindgen(js_name = realtimeDelegation)]
+    pub fn realtime_delegation(&self, input: &str, transcript: &str) -> Result<String, JsValue> {
+        let transcript = serde_json::from_str::<Vec<WasmRealtimeTranscriptEntry>>(transcript)
+            .map_err(js_error)?;
+        let transcript = transcript
+            .into_iter()
+            .map(|entry| TranscriptEntry::new(entry.role, entry.text))
+            .collect::<Vec<_>>();
+        Ok(realtime_delegation(input, &transcript))
+    }
+
+    /// Formats an unconsumed Realtime transcript tail using canonical Codex markers.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed transcript JSON.
+    #[wasm_bindgen(js_name = realtimeTailDelegation)]
+    pub fn realtime_tail_delegation(&self, transcript: &str) -> Result<Option<String>, JsValue> {
+        let transcript = serde_json::from_str::<Vec<WasmRealtimeTranscriptEntry>>(transcript)
+            .map_err(js_error)?;
+        let transcript = transcript
+            .into_iter()
+            .map(|entry| TranscriptEntry::new(entry.role, entry.text))
+            .collect::<Vec<_>>();
+        Ok(realtime_tail_delegation(&transcript))
+    }
+
     /// Gracefully stops the driver and joins every resource owned by this agent.
     ///
     /// # Errors
     ///
     /// Rejects when the driver had already stopped or cleanup fails.
     pub async fn shutdown(&self) -> Result<(), JsValue> {
+        if let Some(subagents) = &self.subagents {
+            subagents
+                .close_all(&self.inner.session_id().to_string())
+                .await
+                .map_err(js_error)?;
+        }
         self.inner.shutdown().await.map_err(js_error)
     }
 }
 
 impl WasmNanocodex {
-    fn from_parts(inner: RustNanocodex, events: AgentEvents) -> Self {
+    fn from_parts(
+        inner: RustNanocodex,
+        events: AgentEvents,
+        subagents: Option<WasmSubagents>,
+    ) -> Self {
         forward_events(events);
-        Self { inner }
+        Self { inner, subagents }
     }
 }
 
@@ -1005,6 +1159,18 @@ impl WasmTurnResult {
     }
 }
 
+async fn append_developer_context(agent: &RustNanocodex, text: &str) -> Result<String, JsValue> {
+    let context = agent
+        .append_developer_message(text)
+        .await
+        .map_err(js_error)?;
+    serde_json::to_string(&WasmAgentSessionContext {
+        workspace: context.workspace(),
+        history: context.history(),
+    })
+    .map_err(js_error)
+}
+
 fn forward_events(mut events: AgentEvents) {
     spawn_local(async move {
         while let Some(event) = events.recv().await {
@@ -1013,6 +1179,68 @@ fn forward_events(mut events: AgentEvents) {
             }
         }
     });
+}
+
+fn forward_subagent_updates(
+    mut updates: tokio::sync::mpsc::UnboundedReceiver<ScopedAgentUpdate>,
+    sessions: Rc<RefCell<HashMap<(String, SubagentId), String>>>,
+) {
+    spawn_local(async move {
+        while let Some(scoped) = updates.recv().await {
+            let root_session_id = scoped.root_session_id;
+            match scoped.update {
+                SubagentUpdate::Added(descriptor) => {
+                    host_bind_subagent_session(&root_session_id, &descriptor.session_id);
+                    sessions
+                        .borrow_mut()
+                        .insert((root_session_id, descriptor.id), descriptor.session_id);
+                }
+                SubagentUpdate::Event { event, .. } => {
+                    if let Ok(encoded) = serde_json::to_string(&event) {
+                        host_emit_event(&encoded);
+                    }
+                }
+                SubagentUpdate::Status {
+                    id,
+                    status: SubagentStatus::Closed,
+                } => {
+                    let session_id = sessions.borrow_mut().remove(&(root_session_id, id));
+                    if let Some(session_id) = session_id {
+                        host_release_subagent_session(&session_id);
+                    }
+                }
+                SubagentUpdate::Status { .. } | SubagentUpdate::Message(_) => {}
+            }
+        }
+        let session_ids = sessions
+            .borrow_mut()
+            .drain()
+            .map(|(_, session_id)| session_id)
+            .collect::<Vec<_>>();
+        for session_id in session_ids {
+            host_release_subagent_session(&session_id);
+        }
+    });
+}
+
+fn release_subagent_scope(
+    sessions: &Rc<RefCell<HashMap<(String, SubagentId), String>>>,
+    root_session_id: &str,
+) {
+    let session_ids = {
+        let mut sessions = sessions.borrow_mut();
+        let keys = sessions
+            .keys()
+            .filter(|(root, _)| root == root_session_id)
+            .cloned()
+            .collect::<Vec<_>>();
+        keys.into_iter()
+            .filter_map(|key| sessions.remove(&key))
+            .collect::<Vec<_>>()
+    };
+    for session_id in session_ids {
+        host_release_subagent_session(&session_id);
+    }
 }
 
 fn parse_browser_prompt(content_json: &str) -> Result<Prompt, JsValue> {
@@ -1036,13 +1264,17 @@ fn parse_browser_prompt(content_json: &str) -> Result<Prompt, JsValue> {
 }
 
 fn validate(config: &WasmConfig) -> Result<(), JsValue> {
+    if config.host_definition_id == 0 {
+        return Err(js_error("host_definition_id must be at least 1"));
+    }
+    if config.api_key.trim().is_empty() {
+        return Err(js_error("api_key must not be empty"));
+    }
     for (name, value) in [
-        ("api_key", Some(config.api_key.as_str())),
         ("websocket_url", config.websocket_url.as_deref()),
         ("api_base_url", config.api_base_url.as_deref()),
     ] {
-        let Some(value) = value else { continue };
-        if value.trim().is_empty() {
+        if value.is_some_and(|value| value.trim().is_empty()) {
             return Err(js_error(format!("{name} must not be empty")));
         }
     }
@@ -1059,6 +1291,12 @@ fn validate(config: &WasmConfig) -> Result<(), JsValue> {
         .is_some_and(|journal_id| journal_id.trim().is_empty())
     {
         return Err(js_error("durability_id must not be empty"));
+    }
+    if config
+        .subagents
+        .is_some_and(|subagents| subagents.max_concurrency == 0)
+    {
+        return Err(js_error("subagents.max_concurrency must be at least 1"));
     }
     Ok(())
 }
@@ -1086,6 +1324,10 @@ fn default_model() -> String {
 
 fn default_reasoning_mode() -> String {
     "standard".to_owned()
+}
+
+const fn default_max_subagents() -> usize {
+    nanocodex_subagents::DEFAULT_MAX_SUBAGENTS
 }
 
 fn host_error_message(error: &JsValue) -> String {

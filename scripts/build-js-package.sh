@@ -18,7 +18,7 @@ if [[ ! -x "$binaryen" ]]; then
   exit 1
 fi
 stamp_path="js/bindings/pkg-web/.nanocodex-bindgen-stamp"
-fingerprint="$(wasm-bindgen --version; "$binaryen" --version; printf 'worker-bundler-v1\n'; cksum < "$wasm_artifact")"
+fingerprint="$(wasm-bindgen --version; "$binaryen" --version; printf 'worker-bundler-v1-simd\n'; cksum < "$wasm_artifact")"
 if [[ -f "$stamp_path" ]] \
   && [[ -f js/bindings/pkg-web/nanocodex_bg.wasm ]] \
   && [[ -f js/bindings/pkg-web/nanocodex_bg.js ]] \
@@ -54,6 +54,7 @@ optimized_wasm="$generated_dir/nanocodex.wasm"
   --enable-bulk-memory \
   --enable-bulk-memory-opt \
   --enable-nontrapping-float-to-int \
+  --enable-simd \
   --strip-debug \
   --strip-producers \
   --strip-toolchain-annotations \

@@ -8,7 +8,8 @@ All language consumers live at this repository boundary:
   `nanocodex-examples` package.
 - Python: `python/` uses the native PyO3 binding (`follow_on.py`, `events.py`,
   `lifecycle.py`).
-- Node.js: `node/` uses the shared Rust/WASM package with a Node WebSocket host.
+- Node.js: `node/` uses the shared Rust/WASM package with a Node WebSocket host
+  and demonstrates the Rust-owned task-tree extension compiled into WASM.
 - Browser: `react-vite/` runs that WASM agent in a module Worker and renders its
   ordered events in React.
 - Browser CDN: `browser-cdn/` is one static HTML file that imports the published
@@ -49,6 +50,7 @@ just build-vm-example
 target/debug/vm-tools ROOTFS [GUEST_RUNTIME_BINARY_OR_EXT4]
 just smoke-python
 just smoke-wasm-node
+npm run subagents --prefix examples/node -- "Review the JS API"
 just build-react-example
 just build-rivet-example
 just build-cloudflare-example

@@ -136,10 +136,11 @@ pub trait ExecutionPolicy: Send + Sync {
 
 /// Optional higher-layer policy for admitting executions and intercepting effects.
 ///
-/// This WebAssembly form omits native thread-safety bounds because JavaScript
-/// host futures remain isolate-local.
+/// JavaScript host futures remain isolate-local, while the policy handle stays
+/// thread-safe so cheap agent capabilities retain their public `Send + Sync`
+/// guarantees on every target.
 #[cfg(target_family = "wasm")]
-pub trait ExecutionPolicy {
+pub trait ExecutionPolicy: Send + Sync {
     /// Admits a caller-identified operation.
     fn admit<'a>(
         &'a self,
