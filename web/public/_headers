@@ -1,7 +1,7 @@
 /*
   Content-Security-Policy: object-src 'none'; base-uri 'none'; frame-ancestors 'self'
   Cross-Origin-Opener-Policy: same-origin-allow-popups
-  Permissions-Policy: camera=(), microphone=(), geolocation=(), usb=()
+  Permissions-Policy: camera=(), microphone=(self), geolocation=(), usb=()
   Referrer-Policy: no-referrer
   Strict-Transport-Security: max-age=31536000
   X-Content-Type-Options: nosniff
