@@ -15,6 +15,25 @@ test("the public dataset factory advertises the lazy dataset capability", () => 
   );
 });
 
+test("the default dataset fetch keeps the browser global receiver", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = function () {
+    if (this !== globalThis) throw new TypeError("Illegal invocation");
+    return Promise.resolve(new Response('{"id":1}\n', { status: 200 }));
+  };
+  try {
+    const tool = createDatasetTool({ randomId: () => "browser-fetch" });
+    const opened = await tool.handler({
+      operation: "open",
+      source: { kind: "url", url: "https://data.example/browser.jsonl" },
+    }, context);
+    assert.equal(opened.datasetId, "browser-fetch");
+    assert.deepEqual(opened.previewRows, [{ id: 1 }]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("the public dataset factory releases session handles and rejects work after disposal", async () => {
   const url = "https://data.example/release.jsonl";
   const tool = dataset({
