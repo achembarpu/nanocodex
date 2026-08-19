@@ -1,6 +1,7 @@
 import { start } from "workflow/api";
 import { v7 as uuidv7 } from "uuid";
 
+import { hasBearerToken } from "@/lib/bearer-auth";
 import { nanocodexActor } from "@/workflows/nanocodex-actor";
 
 export const runtime = "nodejs";
@@ -30,5 +31,5 @@ export async function POST(request: Request): Promise<Response> {
 function authorizedToCreate(request: Request): boolean {
   const expected = process.env.NANOCODEX_ADMIN_TOKEN?.trim();
   if (!expected) return true;
-  return request.headers.get("authorization") === `Bearer ${expected}`;
+  return hasBearerToken(request, expected);
 }

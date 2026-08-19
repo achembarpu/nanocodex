@@ -12,6 +12,7 @@ import {
   terminalSocketUrl,
   terminalStartFrame,
 } from "@/lib/terminal-protocol";
+import { errorMessage } from "@/lib/validation";
 
 const BROWSER_STATE_KEY = "nanocodex.vercel.workflow.web.v1";
 
@@ -47,6 +48,7 @@ export function WorkspaceTerminal() {
       const nextSessionId = typeof detail?.sessionId === "string"
         ? detail.sessionId
         : "";
+      if (nextSessionId === sessionId) return;
       closeSocket("workflow session changed");
       setStatus("detached");
       setError("");
@@ -57,7 +59,7 @@ export function WorkspaceTerminal() {
       window.removeEventListener(TERMINAL_SESSION_EVENT, onSession);
       closeSocket("terminal component unmounted");
     };
-  }, [closeSocket]);
+  }, [closeSocket, sessionId]);
 
   const attach = useCallback(async () => {
     const terminal = terminalRef.current;
@@ -238,8 +240,4 @@ function readStoredSessionId(): string {
   } catch {
     return "";
   }
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
 }

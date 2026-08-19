@@ -332,8 +332,8 @@ function syncStoredState(encoded) {
     detach(false);
     nextIndex = loadCursor(state.sessionId);
     if (state.sessionId) connect();
+    announceSession();
   }
-  announceSession();
 }
 
 function announceSession() {

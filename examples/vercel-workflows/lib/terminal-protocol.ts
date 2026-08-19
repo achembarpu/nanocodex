@@ -1,6 +1,7 @@
 export const TERMINAL_SESSION_EVENT = "nanocodex:workflow-session";
 
 const MAX_TERMINAL_DIMENSION = 4096;
+const terminalEncoder = new TextEncoder();
 
 export type TerminalExit = {
   type: "exit";
@@ -33,7 +34,7 @@ export function terminalResizeFrame(cols: number, rows: number): string {
 }
 
 export function terminalInputFrame(data: string): Uint8Array<ArrayBuffer> {
-  return new TextEncoder().encode(data) as Uint8Array<ArrayBuffer>;
+  return terminalEncoder.encode(data) as Uint8Array<ArrayBuffer>;
 }
 
 export function parseTerminalTextFrame(data: string): TerminalExit | null {

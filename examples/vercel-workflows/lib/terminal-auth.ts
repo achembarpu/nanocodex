@@ -1,5 +1,4 @@
-import { timingSafeEqual } from "node:crypto";
-
+import { hasBearerToken } from "./bearer-auth";
 import { RequestError } from "./validation";
 
 export function requireTerminalAuthorization(
@@ -14,16 +13,7 @@ export function requireTerminalAuthorization(
     );
   }
 
-  const header = request.headers.get("authorization");
-  const suppliedToken = header?.startsWith("Bearer ")
-    ? header.slice("Bearer ".length)
-    : "";
-  const configured = Buffer.from(configuredToken);
-  const supplied = Buffer.from(suppliedToken);
-  if (
-    supplied.length !== configured.length ||
-    !timingSafeEqual(supplied, configured)
-  ) {
+  if (!hasBearerToken(request, configuredToken)) {
     throw new RequestError(
       "terminal_unauthorized",
       "workspace terminal token was rejected",
