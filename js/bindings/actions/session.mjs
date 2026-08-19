@@ -8,6 +8,13 @@ import {
   spawn as spawnAgent,
 } from "../internal.mjs";
 
+export {
+  endRealtimeConversation,
+  realtimeDelegation,
+  realtimeTailDelegation,
+  startRealtimeConversation,
+} from "../internal.mjs";
+
 export function appendDeveloperMessage(agent, text) {
   return appendAgentDeveloperMessage(agent, text);
 }

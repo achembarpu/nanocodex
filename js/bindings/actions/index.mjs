@@ -17,6 +17,12 @@ export function agentActions() {
       setThinking: (thinking) => session.setThinking(agent, thinking),
       shutdown: () => session.shutdown(agent),
       spawn: () => session.spawn(agent),
+      realtime: {
+        start: () => session.startRealtimeConversation(agent),
+        end: () => session.endRealtimeConversation(agent),
+        delegation: (input, transcript) => session.realtimeDelegation(agent, input, transcript),
+        tailDelegation: (transcript) => session.realtimeTailDelegation(agent, transcript),
+      },
     },
     turn: {
       prompt: (options) => turn.prompt(agent, options),

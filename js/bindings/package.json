@@ -35,6 +35,10 @@
       "types": "./browser/Transport.d.mts",
       "import": "./browser/Transport.mjs"
     },
+    "./browser/realtime": {
+      "types": "./browser/realtimePrompt.d.mts",
+      "import": "./browser/realtimePrompt.mjs"
+    },
     "./subagents": {
       "types": "./runtime/subagents.d.mts",
       "import": "./runtime/subagents.mjs"

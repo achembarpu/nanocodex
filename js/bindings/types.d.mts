@@ -169,6 +169,11 @@ export type AgentSessionContext = Readonly<{
   history: readonly Record<string, unknown>[];
 }>;
 
+export type RealtimeTranscriptEntry = Readonly<{
+  role: "user" | "assistant";
+  text: string;
+}>;
+
 export type EventWatcher = Readonly<{
   onEvent(listener: (event: AgentEvent) => void): () => void;
   off(): void;
@@ -187,6 +192,12 @@ export type AgentActions = {
     setThinking(thinking: Thinking): Promise<void>;
     shutdown(): Promise<void>;
     spawn(): Promise<DefaultAgent>;
+    realtime: {
+      start(): Promise<AgentSessionContext>;
+      end(): Promise<AgentSessionContext>;
+      delegation(input: string, transcript?: readonly RealtimeTranscriptEntry[]): string;
+      tailDelegation(transcript: readonly RealtimeTranscriptEntry[]): string | undefined;
+    };
   };
   turn: {
     prompt(options: { input: PromptInput }): Turn;

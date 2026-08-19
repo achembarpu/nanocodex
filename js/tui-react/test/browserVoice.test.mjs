@@ -6,12 +6,8 @@ import {
   HandoffStream,
   parseVoiceArgument,
   preferredPhysicalInput,
-} from "../src/browserVoice.ts";
-import {
   browserVoiceStartupContext,
-  realtimeDelegation,
-  realtimeTailDelegation,
-} from "../src/voiceProtocol.ts";
+} from "../dist/index.js";
 
 test("parses browser voice commands against the ChatGPT catalog", () => {
   assert.deepEqual(parseVoiceArgument(undefined), { action: "toggle" });
@@ -29,26 +25,12 @@ test("replaces a virtual default input with the built-in microphone", () => {
     { kind: "audioinput", deviceId: "virtual", label: "BlackHole 2ch (Virtual)" },
     { kind: "audioinput", deviceId: "usb", label: "USB microphone" },
     { kind: "audioinput", deviceId: "built-in", label: "MacBook Pro Microphone" },
-  ] as MediaDeviceInfo[];
+  ];
   assert.equal(
     preferredPhysicalInput(devices, "BlackHole 2ch (Virtual)")?.deviceId,
     "built-in",
   );
   assert.equal(preferredPhysicalInput(devices, "USB microphone"), undefined);
-});
-
-test("uses the Rust delegation and transcript-tail markers", () => {
-  assert.equal(
-    realtimeDelegation("fix <x> & ship", [
-      { role: "assistant", text: "Use <main>" },
-      { role: "user", text: "yes & now" },
-    ]),
-    "<realtime_delegation>\n  <input>fix &lt;x&gt; &amp; ship</input>\n  <transcript_delta>assistant: Use &lt;main&gt;\nuser: yes &amp; now</transcript_delta>\n</realtime_delegation>",
-  );
-  const tail = realtimeTailDelegation([{ role: "user", text: "finish this" }]);
-  assert.match(tail ?? "", /<source>transcript_tail_flush<\/source>/);
-  assert.match(tail ?? "", /user: finish this/);
-  assert.equal(realtimeTailDelegation([]), undefined);
 });
 
 test("builds bounded startup context from the main agent history and browser workspace", async () => {
@@ -73,7 +55,7 @@ test("builds bounded startup context from the main agent history and browser wor
           ? [{ kind: "file", path: "/workspace/src/App.tsx" }]
           : [];
     },
-  } as any);
+  });
   assert.match(context ?? "", /build voice mode/);
   assert.match(context ?? "", /working on it/);
   assert.match(context ?? "", /src\/\n  - App\.tsx/);

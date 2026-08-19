@@ -1,14 +1,11 @@
-import type { AgentSessionContext } from "nanocodex";
 import type { Workspace } from "nanocodex/browser/workspace";
-import type { AgentEvent, TuiTarget } from "nanocodex-tui";
+import type { AgentEvent, TuiTarget, VoiceSessionContext } from "nanocodex-tui";
 
-import type { WebTuiMessage } from "./nanocodex";
+import type { TuiMessage as WebTuiMessage } from "nanocodex-tui";
 import {
   browserVoiceStartupContext,
-  realtimeDelegation,
-  realtimeTailDelegation,
   type VoiceTranscriptEntry,
-} from "./voiceProtocol.ts";
+} from "./voiceProtocol.js";
 
 export const CHATGPT_VOICES = [
   "juniper",
@@ -24,14 +21,20 @@ export const CHATGPT_VOICES = [
 
 export type ChatGptVoice = typeof CHATGPT_VOICES[number];
 
+export type BrowserVoiceDelegation =
+  | { kind: "request"; input: string; transcript: VoiceTranscriptEntry[] }
+  | { kind: "tail"; transcript: VoiceTranscriptEntry[] };
+
 export type BrowserVoiceOptions = {
   sessionId: string;
   target: TuiTarget;
   voice: ChatGptVoice;
+  callUrl?: string | URL;
+  sidebandUrl?(callId: string, sessionId: string): string | URL;
   workspace(): Promise<Workspace>;
-  onStart(): Promise<AgentSessionContext>;
+  onStart(): Promise<VoiceSessionContext>;
   onStop(): Promise<void>;
-  onDelegation(prompt: string): void;
+  onDelegation(delegation: BrowserVoiceDelegation): void;
   onStatus(status: string): void;
   onTranscript(speaker: "user" | "assistant", text: string): void;
 };
@@ -59,7 +62,7 @@ export class BrowserVoiceSession {
   #streamedThisMessage = false;
   #outputSentThisRun = false;
   #runError?: string;
-  #lifecycleStart?: Promise<AgentSessionContext>;
+  #lifecycleStart?: Promise<VoiceSessionContext>;
   #closePromise?: Promise<void>;
   #closed = false;
 
@@ -82,12 +85,12 @@ export class BrowserVoiceSession {
     if (!navigator.mediaDevices?.getUserMedia) {
       throw new Error("this browser does not expose microphone capture");
     }
-    let microphone = await navigator.mediaDevices.getUserMedia({ audio: voiceAudioConstraints() });
+    let microphone = await captureMicrophone({ audio: voiceAudioConstraints() });
     const devices = await navigator.mediaDevices.enumerateDevices();
     const initialTrack = microphone.getAudioTracks()[0];
     const physicalInput = preferredPhysicalInput(devices, initialTrack?.label);
     if (initialTrack && isVirtualAudioInput(initialTrack.label) && physicalInput) {
-      const physicalMicrophone = await navigator.mediaDevices.getUserMedia({
+      const physicalMicrophone = await captureMicrophone({
         audio: { ...voiceAudioConstraints(), deviceId: { exact: physicalInput.deviceId } },
       });
       stopStream(microphone);
@@ -128,7 +131,7 @@ export class BrowserVoiceSession {
     if (!sdp) throw new Error("the browser did not produce a Realtime WebRTC offer");
     const call = new AbortController();
     this.#call = call;
-    const response = await fetch("/api/realtime/calls", {
+    const response = await fetch(this.#options.callUrl ?? "/api/realtime/calls", {
       method: "POST",
       signal: call.signal,
       credentials: "same-origin",
@@ -152,7 +155,10 @@ export class BrowserVoiceSession {
     }
     await peer.setRemoteDescription({ type: "answer", sdp: answer });
     if (this.#closed) return;
-    const sideband = new WebSocket(realtimeSidebandUrl(callId, this.#options.sessionId));
+    const sideband = new WebSocket(String(
+      this.#options.sidebandUrl?.(callId, this.#options.sessionId)
+        ?? realtimeSidebandUrl(callId, this.#options.sessionId),
+    ));
     this.#sideband = sideband;
     sideband.addEventListener("message", (event) => this.#onRealtimeMessage(event.data));
     sideband.addEventListener("close", () => {
@@ -229,19 +235,19 @@ export class BrowserVoiceSession {
       this.#speaker.srcObject = null;
     }
     this.#options.onStatus("Voice stopped");
-    const tail = realtimeTailDelegation(this.#transcript.splice(0));
+    const tail = this.#transcript.splice(0).filter(({ text }) => text.trim());
     this.#closePromise = this.#finishLifecycle(tail);
     return this.#closePromise;
   }
 
-  async #finishLifecycle(tail: string | undefined): Promise<void> {
+  async #finishLifecycle(tail: VoiceTranscriptEntry[]): Promise<void> {
     if (!this.#lifecycleStart) return;
     try {
       await this.#lifecycleStart;
     } catch {
       return;
     }
-    if (tail) this.#options.onDelegation(tail);
+    if (tail.length) this.#options.onDelegation({ kind: "tail", transcript: tail });
     await this.#options.onStop();
   }
 
@@ -317,7 +323,7 @@ export class BrowserVoiceSession {
     const transcript = this.#transcript.splice(0);
     this.#newInputEntry = true;
     this.#newOutputEntry = true;
-    this.#options.onDelegation(realtimeDelegation(prompt, transcript));
+    this.#options.onDelegation({ kind: "request", input: prompt, transcript });
   }
 
   #appendTranscript(role: "user" | "assistant", text: string, forceNew: boolean): void {
@@ -525,6 +531,28 @@ function voiceAudioConstraints(): MediaTrackConstraints {
     echoCancellation: true,
     noiseSuppression: true,
   };
+}
+
+async function captureMicrophone(constraints: MediaStreamConstraints): Promise<MediaStream> {
+  try {
+    return await navigator.mediaDevices.getUserMedia(constraints);
+  } catch (error) {
+    if (error instanceof DOMException) {
+      if (error.name === "NotAllowedError" || error.name === "SecurityError") {
+        throw new Error(
+          "microphone permission denied; allow microphone access for this site and retry",
+          { cause: error },
+        );
+      }
+      if (error.name === "NotFoundError" || error.name === "DevicesNotFoundError") {
+        throw new Error("no microphone is available", { cause: error });
+      }
+      if (error.name === "NotReadableError" || error.name === "TrackStartError") {
+        throw new Error("the microphone is busy or unavailable", { cause: error });
+      }
+    }
+    throw error;
+  }
 }
 
 export function preferredPhysicalInput(

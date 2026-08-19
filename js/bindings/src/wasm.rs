@@ -33,6 +33,10 @@ use nanocodex_subagents::{
     AgentId as SubagentId, AgentStatus as SubagentStatus, AgentUpdate as SubagentUpdate,
     ScopedAgentUpdate, SubagentControl,
 };
+use nanocodex_voice_protocol::{
+    REALTIME_END_INSTRUCTIONS, REALTIME_START_INSTRUCTIONS, TranscriptEntry, realtime_delegation,
+    realtime_tail_delegation,
+};
 
 mod transport;
 
@@ -125,6 +129,12 @@ struct JavaScriptSubscriptionResponse {
 struct WasmAgentSessionContext<'a> {
     workspace: &'a str,
     history: &'a [nanocodex::oai::responses::ResponseItem],
+}
+
+#[derive(Deserialize)]
+struct WasmRealtimeTranscriptEntry {
+    role: String,
+    text: String,
 }
 
 impl ChatGptSubscriptionHost for JavaScriptSubscriptionHost {
@@ -759,16 +769,59 @@ impl WasmNanocodex {
     /// Rejects empty text or a stopped driver.
     #[wasm_bindgen(js_name = appendDeveloperMessage)]
     pub async fn append_developer_message(&self, text: &str) -> Result<String, JsValue> {
-        let context = self
-            .inner
-            .append_developer_message(text)
-            .await
+        append_developer_context(&self.inner, text).await
+    }
+
+    /// Starts the canonical Codex Realtime adapter lifecycle.
+    ///
+    /// # Errors
+    ///
+    /// Rejects when the agent driver has stopped or context serialization fails.
+    #[wasm_bindgen(js_name = startRealtimeConversation)]
+    pub async fn start_realtime_conversation(&self) -> Result<String, JsValue> {
+        append_developer_context(&self.inner, REALTIME_START_INSTRUCTIONS).await
+    }
+
+    /// Ends the canonical Codex Realtime adapter lifecycle.
+    ///
+    /// # Errors
+    ///
+    /// Rejects when the agent driver has stopped or context serialization fails.
+    #[wasm_bindgen(js_name = endRealtimeConversation)]
+    pub async fn end_realtime_conversation(&self) -> Result<String, JsValue> {
+        append_developer_context(&self.inner, REALTIME_END_INSTRUCTIONS).await
+    }
+
+    /// Formats one structured Realtime delegation using canonical Codex markers.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed transcript JSON.
+    #[wasm_bindgen(js_name = realtimeDelegation)]
+    pub fn realtime_delegation(&self, input: &str, transcript: &str) -> Result<String, JsValue> {
+        let transcript = serde_json::from_str::<Vec<WasmRealtimeTranscriptEntry>>(transcript)
             .map_err(js_error)?;
-        serde_json::to_string(&WasmAgentSessionContext {
-            workspace: context.workspace(),
-            history: context.history(),
-        })
-        .map_err(js_error)
+        let transcript = transcript
+            .into_iter()
+            .map(|entry| TranscriptEntry::new(entry.role, entry.text))
+            .collect::<Vec<_>>();
+        Ok(realtime_delegation(input, &transcript))
+    }
+
+    /// Formats an unconsumed Realtime transcript tail using canonical Codex markers.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed transcript JSON.
+    #[wasm_bindgen(js_name = realtimeTailDelegation)]
+    pub fn realtime_tail_delegation(&self, transcript: &str) -> Result<Option<String>, JsValue> {
+        let transcript = serde_json::from_str::<Vec<WasmRealtimeTranscriptEntry>>(transcript)
+            .map_err(js_error)?;
+        let transcript = transcript
+            .into_iter()
+            .map(|entry| TranscriptEntry::new(entry.role, entry.text))
+            .collect::<Vec<_>>();
+        Ok(realtime_tail_delegation(&transcript))
     }
 
     /// Gracefully stops the driver and joins every resource owned by this agent.
@@ -982,6 +1035,18 @@ impl WasmTurnResult {
     pub fn usage(&self) -> Result<String, JsValue> {
         serde_json::to_string(self.inner.usage()).map_err(js_error)
     }
+}
+
+async fn append_developer_context(agent: &RustNanocodex, text: &str) -> Result<String, JsValue> {
+    let context = agent
+        .append_developer_message(text)
+        .await
+        .map_err(js_error)?;
+    serde_json::to_string(&WasmAgentSessionContext {
+        workspace: context.workspace(),
+        history: context.history(),
+    })
+    .map_err(js_error)
 }
 
 fn forward_events(mut events: AgentEvents) {

@@ -99,7 +99,23 @@ export async function appendDeveloperMessage(agent, text) {
   if (typeof text !== "string" || !text.trim()) {
     throw new TypeError("non-empty string");
   }
-  return JSON.parse(await agentState(agent).raw.appendDeveloperMessage(text));
+  return parseSessionContext(await agentState(agent).raw.appendDeveloperMessage(text));
+}
+
+export async function startRealtimeConversation(agent) {
+  return parseSessionContext(await agentState(agent).raw.startRealtimeConversation());
+}
+
+export async function endRealtimeConversation(agent) {
+  return parseSessionContext(await agentState(agent).raw.endRealtimeConversation());
+}
+
+export function realtimeDelegation(agent, input, transcript = []) {
+  return agentState(agent).raw.realtimeDelegation(input, JSON.stringify(transcript));
+}
+
+export function realtimeTailDelegation(agent, transcript) {
+  return agentState(agent).raw.realtimeTailDelegation(JSON.stringify(transcript));
 }
 
 export async function shutdown(agent) {
@@ -112,6 +128,10 @@ export async function shutdown(agent) {
   state.disposed = true;
   state.shutdownPromise = joinAgentShutdown(state);
   return state.shutdownPromise;
+}
+
+function parseSessionContext(context) {
+  return JSON.parse(context);
 }
 
 export function subscribeAgentEvents(agent, listener, options = {}, onRelease) {

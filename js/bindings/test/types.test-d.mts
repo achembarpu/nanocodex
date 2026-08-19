@@ -66,6 +66,17 @@ async function check() {
     "voice started",
   );
   sessionContext.history;
+  const realtimeContext: AgentSessionContext = await agent.session.realtime.start();
+  const realtimeDelegation: string = agent.session.realtime.delegation("inspect the workspace", [
+    { role: "user", text: "Please inspect it." },
+  ]);
+  const realtimeTail: string | undefined = agent.session.realtime.tailDelegation([
+    { role: "assistant", text: "I will hand this back." },
+  ]);
+  await agent.session.realtime.end();
+  void realtimeContext;
+  void realtimeDelegation;
+  void realtimeTail;
   await agent.session.setFastMode(true);
   const options: Actions.turn.prompt.Options = { input: "hello" };
   const turn: Turn = agent.turn.prompt(options);

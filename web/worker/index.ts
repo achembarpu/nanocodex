@@ -28,7 +28,7 @@ import {
   limitSessionPoll,
   type PublicSecurityEnv,
 } from "./publicSecurity.ts";
-import { CHATGPT_REALTIME_INSTRUCTIONS } from "./realtimePrompt.ts";
+import { CHATGPT_REALTIME_INSTRUCTIONS } from "nanocodex/browser/realtime";
 
 export { ChatGptSession, EvalCoordinator, GitRepository, ThreadGitRepository };
 
@@ -403,6 +403,8 @@ function openRealtimeCall(
       "x-session-id": sessionId,
       "session-id": sessionId,
       "thread-id": sessionId,
+      originator: "nanocodex",
+      "User-Agent": "nanocodex/0.1.0",
     },
     body: JSON.stringify({
       sdp,

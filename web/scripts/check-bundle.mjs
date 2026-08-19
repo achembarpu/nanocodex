@@ -13,8 +13,8 @@ const budgets = Object.freeze({
   initialCss: 60_500,
   initialCssGzip: 12_000,
   agentJavaScript: 830_000,
-  // OPFS, artifacts, voice routing, subscription auth, and paid MCP stay in the Worker.
-  agentWorker: 55_000,
+  // OPFS, artifacts, typed voice lifecycle routing, subscription auth, and paid MCP stay in the Worker.
+  agentWorker: 56_000,
   agentWorkerGzip: 17_500,
   datasetFacadeJavaScript: 1_500,
   datasetFacadeJavaScriptGzip: 700,

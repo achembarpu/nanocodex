@@ -80,6 +80,22 @@ test("the headless client exposes matching direct and standalone actions", async
     { workspace: "/workspace", history: [{ type: "message", role: "developer" }] },
   );
   await assert.rejects(agent.session.appendDeveloperMessage("  "), /non-empty string/);
+  assert.deepEqual(
+    await agent.session.realtime.start(),
+    { workspace: "/workspace", history: [{ type: "message", role: "developer" }] },
+  );
+  assert.deepEqual(
+    await agent.session.realtime.end(),
+    { workspace: "/workspace", history: [{ type: "message", role: "developer" }] },
+  );
+  assert.equal(
+    agent.session.realtime.delegation("ship", [{ role: "user", text: "now" }]),
+    "delegated:ship:user: now",
+  );
+  assert.equal(
+    agent.session.realtime.tailDelegation([{ role: "assistant", text: "done" }]),
+    "tail:assistant: done",
+  );
 
   const extended = agent.extend((client) => ({ inspect: { session: () => client.sessionId } }));
   assert.equal(extended.inspect.session(), "session-1");
@@ -401,6 +417,21 @@ function rawAgent(sessionId) {
         workspace: "/workspace",
         history: [{ type: "message", role: "developer" }],
       });
+    },
+    async startRealtimeConversation() {
+      return this.appendDeveloperMessage();
+    },
+    async endRealtimeConversation() {
+      return this.appendDeveloperMessage();
+    },
+    realtimeDelegation(input, transcript) {
+      return `delegated:${input}:${JSON.parse(transcript).map(({ role, text }) => `${role}: ${text}`).join("\n")}`;
+    },
+    realtimeTailDelegation(transcript) {
+      const entries = JSON.parse(transcript);
+      return entries.length
+        ? `tail:${entries.map(({ role, text }) => `${role}: ${text}`).join("\n")}`
+        : undefined;
     },
     free() {},
   };

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import worker from "./index.ts";
-import { CHATGPT_REALTIME_INSTRUCTIONS } from "./realtimePrompt.ts";
+import { CHATGPT_REALTIME_INSTRUCTIONS } from "nanocodex/browser/realtime";
 
 function createByokSessions() {
   const credentials = new Map<string, string>();
@@ -459,6 +459,8 @@ test("Realtime calls keep subscription credentials server-side and bind the agen
     assert.equal(upstreamHeaders.get("authorization"), "Bearer subscription-secret");
     assert.equal(upstreamHeaders.get("chatgpt-account-id"), "account-1");
     assert.equal(upstreamHeaders.get("openai-alpha"), "quicksilver=v2");
+    assert.equal(upstreamHeaders.get("originator"), "nanocodex");
+    assert.equal(upstreamHeaders.get("user-agent"), "nanocodex/0.1.0");
     assert.equal(upstreamHeaders.get("thread-id"), "session-1");
     const session = upstreamBody?.session as Record<string, unknown>;
     assert.deepEqual(session.delegation, { type: "client" });

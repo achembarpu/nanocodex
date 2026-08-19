@@ -1,5 +1,4 @@
 import { createConfig } from "nanocodex-react";
-import type { AgentSessionContext } from "nanocodex";
 import type { TuiCommand, TuiMessage, TuiTarget } from "nanocodex-tui";
 import type { Address } from "viem";
 
@@ -8,9 +7,6 @@ type StartCommand = Extract<TuiCommand, { type: "start" }>;
 export type WebTuiCommand =
   | Exclude<TuiCommand, { type: "start" }>
   | { type: "artifactPrompt"; id: number; prompt: string }
-  | { type: "voiceLifecycle"; id: number; target: TuiTarget; action: "start" | "stop" }
-  | { type: "voicePrompt"; target: TuiTarget; id: number; prompt: string }
-  | { type: "voiceTranscript"; target: TuiTarget; speaker: "user" | "assistant"; text: string }
   | (StartCommand & { threadId: string; transport: "openai" })
   | (StartCommand & { threadId: string; transport: "chatgpt" })
   | (StartCommand & {
@@ -27,13 +23,6 @@ export type PaymentStatus = {
   mcpCumulative?: string;
 };
 export type WebTuiMessage = TuiMessage
-  | {
-      type: "voiceLifecycleResult";
-      id: number;
-      action: "start" | "stop";
-      context?: AgentSessionContext;
-      error?: string;
-    }
   | { type: "mppPayment"; payment: PaymentStatus }
   | { type: "mppJsonl"; line: string };
 

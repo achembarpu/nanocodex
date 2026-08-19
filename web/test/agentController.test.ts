@@ -7,10 +7,6 @@ import {
   type AgentControllerStart,
   type AgentControllerTools,
 } from "../src/agentController.ts";
-import {
-  REALTIME_END_INSTRUCTIONS,
-  REALTIME_START_INSTRUCTIONS,
-} from "../src/voiceProtocol.ts";
 
 const main = { pane: "main" as const, branchId: 0 };
 const LIFECYCLE_BUDGET_MS = 750;
@@ -53,10 +49,7 @@ test("the Worker controller owns prompts, steering, cancellation, events, and cl
     id: 900,
     action: "start",
   });
-  assert.deepEqual(harness.developerMessages, [{
-    sessionId: "root",
-    text: REALTIME_START_INSTRUCTIONS,
-  }]);
+  assert.deepEqual(harness.realtimeLifecycle, [{ sessionId: "root", action: "start" }]);
   assert.deepEqual(messages.shift(), {
     type: "voiceLifecycleResult",
     id: 900,
@@ -161,17 +154,21 @@ test("the Worker controller owns prompts, steering, cancellation, events, and cl
     type: "voicePrompt",
     target: main,
     id: 5,
-    prompt: "retheme the live interface",
+    delegation: {
+      kind: "request",
+      input: "retheme the live interface",
+      transcript: [{ role: "user", text: "please do it" }],
+    },
   });
   assert.deepEqual(messages.shift(), {
     type: "externalPrompt",
     target: main,
     id: 5,
-    prompt: "retheme the live interface",
+    prompt: "delegated:retheme the live interface:user: please do it",
     intent: "immediate",
   });
   const voiceTurn = harness.turns[3]!;
-  assert.equal(voiceTurn.input, "retheme the live interface");
+  assert.equal(voiceTurn.input, "delegated:retheme the live interface:user: please do it");
   voiceTurn.complete("rethemed");
   await settle();
   assert.deepEqual(messages.shift(), {
@@ -200,10 +197,7 @@ test("the Worker controller owns prompts, steering, cancellation, events, and cl
     id: 901,
     action: "stop",
   });
-  assert.deepEqual(harness.developerMessages.at(-1), {
-    sessionId: "root",
-    text: REALTIME_END_INSTRUCTIONS,
-  });
+  assert.deepEqual(harness.realtimeLifecycle.at(-1), { sessionId: "root", action: "stop" });
   assert.deepEqual(messages.shift(), {
     type: "voiceLifecycleResult",
     id: 901,
@@ -708,7 +702,7 @@ class AgentHarness {
   tools?: AgentControllerTools;
   nextTurnResultError?: Error;
   nextSteerError?: Error;
-  developerMessages: Array<{ sessionId: string; text: string }> = [];
+  realtimeLifecycle: Array<{ sessionId: string; action: "start" | "stop" }> = [];
 
   createAgent(sessionId: string) {
     const agent = new FakeAgent(this, sessionId);
@@ -747,9 +741,19 @@ class FakeAgent {
       },
     };
     this.session = {
-      appendDeveloperMessage: async (text: string) => {
-        this.harness.developerMessages.push({ sessionId: this.sessionId, text });
-        return { workspace: "/workspace", history: [] };
+      realtime: {
+        start: async () => {
+          this.harness.realtimeLifecycle.push({ sessionId: this.sessionId, action: "start" });
+          return { workspace: "/workspace", history: [] };
+        },
+        end: async () => {
+          this.harness.realtimeLifecycle.push({ sessionId: this.sessionId, action: "stop" });
+          return { workspace: "/workspace", history: [] };
+        },
+        delegation: (input: string, transcript: Array<{ role: string; text: string }>) =>
+          `delegated:${input}:${transcript.map(({ role, text }) => `${role}: ${text}`).join("\n")}`,
+        tailDelegation: (transcript: Array<{ role: string; text: string }>) =>
+          transcript.length ? `tail:${transcript.map(({ role, text }) => `${role}: ${text}`).join("\n")}` : undefined,
       },
       fork: async (options?: { at?: FakeTurnResult }) => {
         this.harness.forks.push({
