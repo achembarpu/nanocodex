@@ -1,8 +1,6 @@
 export {
   ARTIFACT_DIRECTORY,
   ArtifactStore,
-  MAX_ARTIFACT_BYTES,
-  MAX_ARTIFACT_SOURCE_CHARS,
   artifact,
   artifactPath,
   artifactToolDefinition,

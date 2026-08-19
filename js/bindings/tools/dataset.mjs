@@ -1,5 +1,5 @@
 import { namedTool } from "./namedTool.mjs";
-import { DATASET_DESCRIPTION, datasetParameters } from "./datasetContract.mjs";
+import { DATASET_DESCRIPTION, datasetOutputSchema, datasetParameters } from "./datasetContract.mjs";
 
 /** A session-scoped, lazy browser dataset inspector. */
 export function dataset(options = {}) {
@@ -17,6 +17,7 @@ export function dataset(options = {}) {
   const tool = namedTool("dataset", {
     description: DATASET_DESCRIPTION,
     parameters: datasetParameters,
+    outputSchema: datasetOutputSchema,
     handler(input, context) {
       if (disposed) throw new Error("dataset tool is disposed");
       loaded ??= import("./datasetEngine.mjs")

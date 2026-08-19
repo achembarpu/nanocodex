@@ -14,6 +14,7 @@ import { artifact as artifactTool } from "../tools/index.mjs";
 import { readCodexSubscription } from "../../../examples/cloudflare-workers/scripts/codex-auth-file.mjs";
 
 const executeFile = promisify(execFile);
+const LOGICAL_WORKSPACE = "/workspace";
 const authPath = resolve(
   process.env.NANOCODEX_CODEX_AUTH_FILE ?? join(homedir(), ".codex", "auth.json"),
 );
@@ -43,7 +44,7 @@ try {
     transport: Transport.chatGpt({ subscription }),
     model: "gpt-5.6-luna",
     thinking: "medium",
-    workspace,
+    workspace: LOGICAL_WORKSPACE,
     instructions: [
       "You are exercising a browser-computer-compatible Code Mode boundary.",
       "Perform real work through tools.exec_command; never simulate command output.",
@@ -51,7 +52,7 @@ try {
     ].join(" "),
     tools: [{
       name: "exec_command",
-      description: "Run a bounded bash command in the persistent workspace.",
+      description: "Run a bash command in the persistent workspace.",
       parameters: {
         type: "object",
         properties: {
@@ -59,6 +60,17 @@ try {
           workdir: { type: "string" },
         },
         required: ["cmd"],
+        additionalProperties: false,
+      },
+      outputSchema: {
+        type: "object",
+        properties: {
+          wall_time_seconds: { type: "number" },
+          exit_code: { type: "number" },
+          original_token_count: { type: "number" },
+          output: { type: "string", description: "Command output text, possibly truncated." },
+        },
+        required: ["wall_time_seconds", "output"],
         additionalProperties: false,
       },
       handler: executeCommand,
@@ -75,6 +87,9 @@ try {
         type: event.type,
         status: event.payload?.status,
         tool: event.payload?.tool,
+        ...(event.type === "tool.result" && event.payload?.status !== "completed"
+          ? { result: event.payload?.result }
+          : {}),
       })}\n`);
     }
   });
@@ -118,7 +133,7 @@ async function executeCommand(input, context) {
   if (!input || typeof input !== "object" || typeof input.cmd !== "string" || !input.cmd.trim()) {
     throw new TypeError("exec_command.cmd must be a non-empty string");
   }
-  const cwd = workspacePath(input.workdir ?? workspace);
+  const cwd = workspacePath(input.workdir ?? LOGICAL_WORKSPACE);
   const startedAt = performance.now();
   const call = { cmd: input.cmd, exitCode: undefined };
   calls.push(call);
@@ -171,17 +186,20 @@ function validateArtifactSource(source) {
 
 function nodeArtifactWorkspace() {
   return {
-    root: workspace,
+    root: LOGICAL_WORKSPACE,
     async list() { return []; },
-    async readFile(path) { return readFile(path); },
-    async writeFile(path, contents) { await writeFile(path, contents); },
-    async remove(path) { await rm(path, { recursive: true, force: true }); },
-    async mkdir(path) { await mkdir(path, { recursive: true }); },
+    async readFile(path) { return readFile(workspacePath(path)); },
+    async writeFile(path, contents) { await writeFile(workspacePath(path), contents); },
+    async remove(path) { await rm(workspacePath(path), { recursive: true, force: true }); },
+    async mkdir(path) { await mkdir(workspacePath(path), { recursive: true }); },
   };
 }
 
 function workspacePath(path) {
-  const target = isAbsolute(path) ? resolve(path) : resolve(workspace, path);
+  const logical = path === LOGICAL_WORKSPACE || path.startsWith(`${LOGICAL_WORKSPACE}/`)
+    ? relative(LOGICAL_WORKSPACE, path)
+    : path;
+  const target = isAbsolute(logical) ? resolve(logical) : resolve(workspace, logical);
   const child = relative(workspace, target);
   if (child.startsWith("..") || isAbsolute(child)) throw new Error("workdir escapes the workspace");
   return target;

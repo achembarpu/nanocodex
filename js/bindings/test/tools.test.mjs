@@ -137,6 +137,7 @@ test("artifact is a named typed tool, not a shell command", async () => {
   assert.equal(tool.name, "render_artifact");
   assert(Object.isFrozen(tool));
   assert.deepEqual(tool.parameters.required, ["title", "source"]);
+  assert.deepEqual(tool.outputSchema.required, ["artifactId", "path", "title", "runtime"]);
   assert.deepEqual(await tool.handler({
     id: "answer",
     title: "Answer",
@@ -149,6 +150,14 @@ test("artifact is a named typed tool, not a shell command", async () => {
   });
   assert.equal(rendered.length, 1);
   assert.equal((await new ArtifactStore(workspace).read("answer")).title, "Answer");
+});
+
+test("artifact persistence does not impose binding-specific size or count limits", async () => {
+  const workspace = memoryWorkspace();
+  const store = new ArtifactStore(workspace);
+  const largeSource = `function App() { return ${JSON.stringify("x".repeat(600 * 1024))}; }`;
+  const document = await store.save({ title: "Large", source: largeSource });
+  assert.equal((await store.read(document.id)).source, largeSource);
 });
 
 test("artifact source validation is host-owned and runs before persistence", async () => {

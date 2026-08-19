@@ -43,6 +43,12 @@ test("QuickJS keeps Promise.all tool calls concurrent through map and reduce", a
     exec_command: {
       description: "Run one bounded command.",
       parameters: { type: "object" },
+      outputSchema: {
+        type: "object",
+        properties: { output: { type: "string" } },
+        required: ["output"],
+        additionalProperties: false,
+      },
       async handler({ value, delay }) {
         active += 1;
         peak = Math.max(peak, active);
@@ -67,6 +73,10 @@ test("QuickJS keeps Promise.all tool calls concurrent through map and reduce", a
 
   assert.equal(execution.success, true);
   assert.equal(peak, 3);
+  assert.deepEqual(
+    JSON.parse(runtime.toolDefinitions())[0].output_schema.required,
+    ["output"],
+  );
   assert.deepEqual(
     execution.nested_calls.map((call) => call.call_id),
     [

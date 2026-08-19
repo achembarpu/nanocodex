@@ -248,7 +248,28 @@ The artifact factory performs no dynamic evaluation and is safe to load in a
 Cloudflare Worker. Browser hosts additionally install the exact iframe syntax
 validator. The model calls `tools.render_artifact({ id, title, source })` from
 Code Mode, or `render_artifact` directly when the host selects direct mode; no
-artifact CLI is installed.
+artifact CLI is installed. Artifact capacity is host-owned: the binding adds no
+byte, source-length, ID-length, or document-count policy limits.
+
+Application tools may provide `outputSchema` alongside `parameters`. The
+binding serializes it to Rust's `output_schema`, so Code Mode receives the same
+generated TypeScript return declaration as native Codex tools instead of
+guessing result fields:
+
+```js
+const execCommand = {
+  name: "exec_command",
+  description: "Run a command.",
+  parameters: { type: "object", properties: { cmd: { type: "string" } }, required: ["cmd"] },
+  outputSchema: {
+    type: "object",
+    properties: { output: { type: "string" }, wall_time_seconds: { type: "number" } },
+    required: ["output", "wall_time_seconds"],
+    additionalProperties: false,
+  },
+  handler: runCommand,
+};
+```
 
 This is what loading a Rust-written tool from JavaScript looks like here.
 `nanocodex-subagents` is statically linked into `nanocodex.wasm`; importing the

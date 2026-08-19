@@ -49,7 +49,7 @@ async function createAgent(
   tools: AgentControllerTools,
 ) {
   await paymentSessions.clear();
-  const origin = self.location.origin;
+  const origin = worker.location.origin;
   const toolHeaders = { "x-nanocodex-request": "1" };
   const [runtime, mcpModule] = await Promise.all([
     import("nanocodex/tools/browser").then(({ browser }) => browser({
@@ -144,26 +144,20 @@ async function createAgent(
 
 function browserExecutionEnvironment(projectInstructions?: string) {
   const now = new Date();
-  const resolvedTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
-  const timezone = resolvedTimezone || "Etc/UTC";
-  const year = resolvedTimezone ? now.getFullYear() : now.getUTCFullYear();
-  const month = resolvedTimezone ? now.getMonth() + 1 : now.getUTCMonth() + 1;
-  const day = resolvedTimezone ? now.getDate() : now.getUTCDate();
-  const currentDate = [
-    year.toString().padStart(4, "0"),
-    month.toString().padStart(2, "0"),
-    day.toString().padStart(2, "0"),
-  ].join("-");
+  const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  const currentDate = timezone
+    ? `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, "0")}-${String(now.getDate()).padStart(2, "0")}`
+    : now.toISOString().slice(0, 10);
   return {
     currentDate,
-    timezone,
+    timezone: timezone || "Etc/UTC",
     ...(projectInstructions === undefined ? {} : { projectInstructions }),
   };
 }
 
 function workerEndpoint(): string {
-  const protocol = self.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${self.location.host}/api/responses`;
+  const protocol = worker.location.protocol === "https:" ? "wss:" : "ws:";
+  return `${protocol}//${worker.location.host}/api/responses`;
 }
 
 function errorMessage(error: unknown): string {

@@ -2,8 +2,6 @@ import type { NamedTool } from "../types.mjs";
 import type { Workspace, WorkspaceEntry } from "../runtime/workspace.mjs";
 
 export const ARTIFACT_DIRECTORY: "/workspace/.nanocodex/artifacts";
-export const MAX_ARTIFACT_BYTES: number;
-export const MAX_ARTIFACT_SOURCE_CHARS: number;
 
 export type ArtifactDocument = Readonly<{
   version: 1;
@@ -36,8 +34,6 @@ export type ArtifactScan = Readonly<{
 
 export type ArtifactStoreOptions = Readonly<{
   directory?: string | undefined;
-  maxBytes?: number | undefined;
-  maxDocuments?: number | undefined;
   validateSource?(source: string): void | Promise<void>;
 }>;
 
@@ -53,8 +49,6 @@ export const artifactToolDefinition: Readonly<{
 
 export class ArtifactStore {
   readonly directory: string;
-  readonly maxBytes: number;
-  readonly maxDocuments: number;
   constructor(workspace: ArtifactWorkspace, options?: ArtifactStoreOptions);
   path(id: string): string;
   read(id: string): Promise<ArtifactDocument>;

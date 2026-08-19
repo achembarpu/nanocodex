@@ -234,6 +234,8 @@ export type Tool = {
   description: string;
   /** Runtime JSON Schema for model-generated input. Defaults to an open object. */
   parameters?: Record<string, unknown> | undefined;
+  /** Runtime JSON Schema for the resolved handler value shown to Code Mode. */
+  outputSchema?: Record<string, unknown> | undefined;
   handler(input: unknown, context: ToolContext): unknown | Promise<unknown>;
   /** Releases state owned by one completed agent session. */
   releaseSession?(sessionId: string): void;

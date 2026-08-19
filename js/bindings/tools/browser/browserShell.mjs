@@ -18,6 +18,19 @@ const MAX_INDEXED_PATHS = 100_000;
 const MAX_PROJECT_INSTRUCTIONS_BYTES = 32 * 1024;
 const PROJECT_INSTRUCTION_FILES = ["AGENTS.override.md", "AGENTS.md"];
 const DIFF_TRUNCATION_NOTICE = "\n[diff truncated by browser git]\n";
+const UNIFIED_EXEC_OUTPUT_SCHEMA = {
+    type: "object",
+    properties: {
+        chunk_id: { type: "string", description: "Chunk identifier included when the response reports one." },
+        wall_time_seconds: { type: "number", description: "Elapsed wall time spent waiting for output in seconds." },
+        exit_code: { type: "number", description: "Process exit code when the command finished during this call." },
+        session_id: { type: "number", description: "Session identifier to pass to write_stdin when the process is still running." },
+        original_token_count: { type: "number", description: "Approximate token count before output truncation." },
+        output: { type: "string", description: "Command output text, possibly truncated." },
+    },
+    required: ["wall_time_seconds", "output"],
+    additionalProperties: false,
+};
 const AGENT_INSTRUCTIONS = `You are working in a persistent browser filesystem rooted at /workspace.
 Use exec_command for bash commands such as ls, cat, find, grep, git, curl, wget, and python3. The
 shell and Python runtime execute entirely in browser sandboxes, so they have no host process or PTY.
@@ -98,6 +111,7 @@ export async function prepareBrowserShell(threadId, origin) {
                 required: ["cmd"],
                 additionalProperties: true,
             },
+            outputSchema: UNIFIED_EXEC_OUTPUT_SCHEMA,
             handler: exec,
         },
     };

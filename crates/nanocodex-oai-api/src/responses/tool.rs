@@ -20,7 +20,7 @@ pub enum ToolDefinition {
         defer_loading: Option<bool>,
         /// JSON Schema accepted as function arguments.
         parameters: JsonSchema,
-        #[serde(skip)]
+        #[serde(default, skip_serializing)]
         /// Optional JSON Schema produced by the function.
         ///
         /// This is client-owned Code Mode metadata and is not part of the
@@ -388,6 +388,34 @@ mod tests {
             [ToolDefinition::namespace("inner", "Inner tools.", [])],
         );
         assert!(serde_json::to_value(nested).is_err());
+    }
+
+    #[test]
+    fn output_schema_is_host_input_metadata_but_not_responses_wire_output() {
+        let definition: ToolDefinition = serde_json::from_value(json!({
+            "type": "function",
+            "name": "exec_command",
+            "description": "Run a command.",
+            "strict": false,
+            "parameters": { "type": "object" },
+            "output_schema": {
+                "type": "object",
+                "properties": { "output": { "type": "string" } },
+                "required": ["output"]
+            }
+        }))
+        .unwrap();
+
+        assert_eq!(
+            definition.output_schema().unwrap().as_value()["required"],
+            json!(["output"])
+        );
+        assert!(
+            serde_json::to_value(definition)
+                .unwrap()
+                .get("output_schema")
+                .is_none()
+        );
     }
 
     #[test]

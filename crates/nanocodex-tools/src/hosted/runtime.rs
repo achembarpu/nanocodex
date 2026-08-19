@@ -240,6 +240,10 @@ impl HostedToolRuntime {
                 matches!(definition, ToolDefinition::ToolSearch { .. })
                     || is_standard_workspace_tool(definition.name())
             });
+        direct_definitions = direct_definitions
+            .into_iter()
+            .map(crate::code_mode_description::augment_definition_for_code_mode)
+            .collect();
         crate::code_mode_order::sort_direct_definitions(&mut direct_definitions);
         direct_definitions.extend(self.local.iter().map(|(_, tool)| tool.definition()));
         crate::code_mode_order::sort_direct_definitions(&mut direct_definitions);
@@ -493,6 +497,8 @@ mod tests {
 
     struct DeferredHost;
 
+    struct ExecHost;
+
     struct LocalAlpha;
 
     struct WebHost;
@@ -581,6 +587,41 @@ mod tests {
         }
     }
 
+    impl CodeModeHost for ExecHost {
+        fn tool_definitions(
+            &self,
+            _session_id: &str,
+        ) -> Result<Vec<ToolDefinition>, CodeModeHostError> {
+            Ok(vec![
+                ToolDefinition::function(
+                    "exec_command",
+                    "Run a command.",
+                    json!({
+                        "type": "object",
+                        "properties": { "cmd": { "type": "string" } },
+                        "required": ["cmd"]
+                    }),
+                )
+                .with_output_schema(json!({
+                    "type": "object",
+                    "properties": {
+                        "output": { "type": "string" },
+                        "wall_time_seconds": { "type": "number" }
+                    },
+                    "required": ["output", "wall_time_seconds"]
+                })),
+            ])
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _source: &'a str,
+            _context: ToolContext<'a>,
+        ) -> HostFuture<'a, Result<CodeModeExecution, CodeModeHostError>> {
+            Box::pin(async { unreachable!("this test only inspects the model contract") })
+        }
+    }
+
     impl CodeModeHost for WebHost {
         fn tool_definitions(
             &self,
@@ -639,6 +680,20 @@ mod tests {
         assert!(description.contains("web__run(args:"));
         assert!(description.contains("search_query?: Array<{ q: string; }>"));
         assert!(description.contains("response_length?: \"short\" | \"medium\" | \"long\""));
+    }
+
+    #[test]
+    fn direct_workspace_tool_describes_its_code_mode_return_shape() {
+        let specs = HostedToolRuntime::new_with_tools(".", None, None, &HostedTools::new(ExecHost))
+            .model_specs("session-1");
+        let exec_command = specs
+            .iter()
+            .find(|definition| definition.name() == "exec_command")
+            .unwrap();
+
+        assert!(exec_command.description().contains(
+            "exec_command(args: { cmd: string; }): Promise<{ output: string; wall_time_seconds: number; }>"
+        ));
     }
 
     #[tokio::test]

@@ -50,3 +50,5 @@ export const datasetParameters = {
   required: ["operation"],
   additionalProperties: false,
 };
+
+export const datasetOutputSchema = { type: "object" };

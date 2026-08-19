@@ -3,7 +3,6 @@ import test from "node:test";
 
 import {
   ArtifactStore,
-  MAX_ARTIFACT_SOURCE_CHARS,
   artifactPath,
   artifactToolDefinition,
   createArtifactTool,
@@ -103,7 +102,7 @@ test("derives persistence from the caller-owned workspace root", async () => {
   assert.equal((await workspace.readFile(`${store.directory}/${artifact.id}.json`)).byteLength > 0, true);
 });
 
-test("rejects missing source, legacy specs, unknown fields, and oversized source", async () => {
+test("rejects missing source, legacy specs, and unknown fields", async () => {
   const store = new ArtifactStore(memoryWorkspace());
   await assert.rejects(() => store.save({ title: "Missing" }), /source must be a string/);
   await assert.rejects(
@@ -122,10 +121,14 @@ test("rejects missing source, legacy specs, unknown fields, and oversized source
     })),
     /unsupported properties: script/,
   );
-  await assert.rejects(
-    () => store.save({ title: "Large", source: "x".repeat(MAX_ARTIFACT_SOURCE_CHARS + 1) }),
-    /cannot exceed/,
-  );
+});
+
+test("does not impose binding-specific document or source limits", async () => {
+  const workspace = memoryWorkspace();
+  const store = new ArtifactStore(workspace);
+  const largeSource = `function App() { return ${JSON.stringify("x".repeat(600 * 1024))}; }`;
+  const artifact = await store.save({ title: "Large", source: largeSource });
+  assert.equal((await store.read(artifact.id)).source, largeSource);
 });
 
 function memoryWorkspace(root = "/workspace") {

@@ -1,8 +1,6 @@
 import { namedTool } from "./namedTool.mjs";
 
 export const ARTIFACT_DIRECTORY = "/workspace/.nanocodex/artifacts";
-export const MAX_ARTIFACT_BYTES = 512 * 1024;
-export const MAX_ARTIFACT_SOURCE_CHARS = 262_144;
 
 export const artifactToolDefinition = Object.freeze({
   description: [
@@ -20,13 +18,12 @@ export const artifactToolDefinition = Object.freeze({
       id: {
         type: "string",
         description: "Stable lowercase artifact ID. Reuse it to update an interface.",
-        pattern: "^[a-z0-9][a-z0-9_-]{0,63}$",
+        pattern: "^[a-z0-9][a-z0-9_-]*$",
       },
-      title: { type: "string", minLength: 1, maxLength: 120 },
+      title: { type: "string", minLength: 1 },
       source: {
         type: "string",
         minLength: 1,
-        maxLength: MAX_ARTIFACT_SOURCE_CHARS,
         description: "JavaScript defining App; React, html, and sendPrompt are in scope.",
       },
     },
@@ -46,8 +43,6 @@ export class ArtifactStore {
       throw new TypeError("validateSource must be a function");
     }
     this.directory = artifactDirectory(options.directory ?? defaultArtifactDirectory(workspace.root));
-    this.maxBytes = positiveInteger(options.maxBytes ?? MAX_ARTIFACT_BYTES, "maxBytes");
-    this.maxDocuments = positiveInteger(options.maxDocuments ?? 100, "maxDocuments");
   }
 
   path(id) {
@@ -61,7 +56,7 @@ export class ArtifactStore {
   async scan() {
     let entries;
     try {
-      entries = await this.#workspace.list(this.directory, { maxEntries: this.maxDocuments + 1 });
+      entries = await this.#workspace.list(this.directory);
     } catch (error) {
       if (isNotFound(error)) return { artifacts: [], rejected: [] };
       throw error;
@@ -71,14 +66,8 @@ export class ArtifactStore {
       && entry.path.startsWith(prefix)
       && !entry.path.slice(prefix.length).includes("/")
       && entry.path.endsWith(".json"));
-    if (files.length > this.maxDocuments) {
-      throw new RangeError(`artifact store exceeds ${this.maxDocuments} documents`);
-    }
     const results = await mapConcurrent(files, 8, async (entry) => {
       try {
-        if (entry.size !== undefined && entry.size > this.maxBytes) {
-          throw new RangeError(`artifact exceeds ${this.maxBytes} bytes`);
-        }
         return { ok: true, path: entry.path, artifact: await this.#readPath(entry.path) };
       } catch (error) {
         return { ok: false, path: entry.path, error };
@@ -100,11 +89,11 @@ export class ArtifactStore {
 
   async save(input) {
     const value = exactRecord(input, "artifact input", ["id", "title", "source"]);
-    const title = boundedString(value.title, "title", 120).trim();
+    const title = requiredString(value.title, "title").trim();
     const id = value.id === undefined
       ? slugArtifactId(title)
-      : validateArtifactId(boundedString(value.id, "id", 64));
-    const source = boundedString(value.source, "source", MAX_ARTIFACT_SOURCE_CHARS);
+      : validateArtifactId(requiredString(value.id, "id"));
+    const source = requiredString(value.source, "source");
     await this.#validateSource?.(source);
     const now = Date.now();
     let previous;
@@ -121,10 +110,8 @@ export class ArtifactStore {
       createdAt: previous?.createdAt ?? now,
       updatedAt: now,
     };
-    const encoded = JSON.stringify(document);
-    assertByteLength(encoded, this.maxBytes);
     await this.#workspace.mkdir(this.directory);
-    await this.#workspace.writeFile(this.path(id), encoded);
+    await this.#workspace.writeFile(this.path(id), JSON.stringify(document));
     return document;
   }
 
@@ -136,6 +123,17 @@ export class ArtifactStore {
     if (typeof onArtifact !== "function") throw new TypeError("onArtifact must be a function");
     return namedTool("render_artifact", {
       ...artifactToolDefinition,
+      outputSchema: {
+        type: "object",
+        properties: {
+          artifactId: { type: "string" },
+          path: { type: "string" },
+          title: { type: "string" },
+          runtime: { type: "string", const: "react" },
+        },
+        required: ["artifactId", "path", "title", "runtime"],
+        additionalProperties: false,
+      },
       handler: async (input) => {
         const document = await this.save(input);
         onArtifact(document);
@@ -152,7 +150,6 @@ export class ArtifactStore {
   async #readPath(path) {
     const bytes = await this.#workspace.readFile(path);
     try {
-      if (bytes.byteLength > this.maxBytes) throw new RangeError(`artifact exceeds ${this.maxBytes} bytes`);
       const document = parseArtifactDocument(new TextDecoder().decode(bytes));
       if (this.path(document.id) !== path) throw new TypeError("artifact id does not match its filename");
       return document;
@@ -172,7 +169,7 @@ class InvalidArtifactDocumentError extends Error {
 /** Viem-style factory returning a named tool ready for array composition. */
 export function artifact(options) {
   const value = exactRecord(options, "artifact options", [
-    "workspace", "onArtifact", "directory", "maxBytes", "maxDocuments", "validateSource",
+    "workspace", "onArtifact", "directory", "validateSource",
   ]);
   return new ArtifactStore(value.workspace, value).tool(value.onArtifact);
 }
@@ -192,9 +189,9 @@ export function parseArtifactDocument(encoded) {
   if (value.version !== 1) throw new TypeError("unsupported artifact version");
   return {
     version: 1,
-    id: validateArtifactId(boundedString(value.id, "artifact.id", 64)),
-    title: boundedString(value.title, "artifact.title", 120).trim(),
-    source: boundedString(value.source, "artifact.source", MAX_ARTIFACT_SOURCE_CHARS),
+    id: validateArtifactId(requiredString(value.id, "artifact.id")),
+    title: requiredString(value.title, "artifact.title").trim(),
+    source: requiredString(value.source, "artifact.source"),
     createdAt: timestamp(value.createdAt, "artifact.createdAt"),
     updatedAt: timestamp(value.updatedAt, "artifact.updatedAt"),
   };
@@ -231,33 +228,23 @@ function joinAbsolutePath(directory, name) {
 }
 
 function validateArtifactId(value) {
-  if (!/^[a-z0-9][a-z0-9_-]{0,63}$/.test(value)) throw new TypeError("artifact id is invalid");
+  if (!/^[a-z0-9][a-z0-9_-]*$/.test(value)) throw new TypeError("artifact id is invalid");
   return value;
 }
 
 function slugArtifactId(value) {
-  const id = value.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 64);
+  const id = value.toLowerCase().replace(/[^a-z0-9_-]+/g, "-").replace(/^-+|-+$/g, "");
   return validateArtifactId(id);
 }
 
-function boundedString(value, name, max) {
+function requiredString(value, name) {
   if (typeof value !== "string" || !value.trim()) throw new TypeError(`${name} must be a string`);
-  if (value.length > max) throw new RangeError(`${name} cannot exceed ${max} characters`);
   return value;
 }
 
 function timestamp(value, name) {
   if (!Number.isSafeInteger(value) || value < 0) throw new TypeError(`${name} must be a timestamp`);
   return value;
-}
-
-function positiveInteger(value, name) {
-  if (!Number.isSafeInteger(value) || value <= 0) throw new TypeError(`${name} must be a positive integer`);
-  return value;
-}
-
-function assertByteLength(value, max) {
-  if (new TextEncoder().encode(value).byteLength > max) throw new RangeError(`artifact exceeds ${max} bytes`);
 }
 
 function errorMessage(error) {

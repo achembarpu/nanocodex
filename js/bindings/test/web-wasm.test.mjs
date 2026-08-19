@@ -250,6 +250,15 @@ test("web-target WASM exposes browser bash and Rust apply_patch as standard tool
       exec_command: {
         description: "Run browser bash.",
         parameters: { type: "object", required: ["cmd"] },
+        outputSchema: {
+          type: "object",
+          properties: {
+            output: { type: "string" },
+            wall_time_seconds: { type: "number" },
+          },
+          required: ["output", "wall_time_seconds"],
+          additionalProperties: false,
+        },
         handler: () => ({ output: "", wall_time_seconds: 0, exit_code: 0 }),
       },
     },
@@ -266,10 +275,9 @@ test("web-target WASM exposes browser bash and Rust apply_patch as standard tool
       "exec_command",
       "apply_patch",
     ]);
-    assert.equal(
-      toolPrefix.tools.find((tool) => tool.name === "exec_command").description,
-      "Run browser bash.",
-    );
+    const execCommand = toolPrefix.tools.find((tool) => tool.name === "exec_command");
+    assert.match(execCommand.description, /^Run browser bash\./);
+    assert.match(execCommand.description, /output: string/);
     assert.equal(toolPrefix.tools.some((tool) => tool.name === "read_file"), false);
     send(socket, { type: "response.completed", response: { id: "workspace-warmup", usage: null } });
     await reader.next();

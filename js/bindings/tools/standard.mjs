@@ -12,6 +12,7 @@ export function web(options = {}) {
   return namedTool("web__run", {
     description: WEB_DESCRIPTION,
     parameters: webParameters,
+    outputSchema: { type: "string" },
     async handler(input, context) {
       const commands = normalizeWebCommands(input);
       const result = requireObject(await request({
@@ -46,6 +47,15 @@ export function imageGeneration(options = {}) {
       },
       required: ["prompt"],
       additionalProperties: false,
+    },
+    outputSchema: {
+      type: "object",
+      properties: {
+        image_url: { type: "string" },
+        output_hint: { type: "string" },
+      },
+      required: ["image_url"],
+      additionalProperties: true,
     },
     async handler(input, context) {
       const args = requireObject(input, "image_gen__imagegen");
@@ -88,6 +98,15 @@ export function viewImage(options) {
       required: ["path"],
       additionalProperties: false,
     },
+    outputSchema: {
+      type: "object",
+      properties: {
+        detail: { type: "string", enum: ["high", "original"] },
+        image_url: { type: "string" },
+      },
+      required: ["detail", "image_url"],
+      additionalProperties: false,
+    },
     async handler(input) {
       const args = requireObject(input, "view_image");
       const path = requireString(args.path, "view_image.path");
@@ -128,6 +147,12 @@ export function updatePlan() {
         },
       },
       required: ["plan"],
+      additionalProperties: false,
+    },
+    outputSchema: {
+      type: "object",
+      properties: { updated: { type: "boolean", const: true } },
+      required: ["updated"],
       additionalProperties: false,
     },
     async handler(input, context) {

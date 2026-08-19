@@ -258,7 +258,7 @@ function addTool(name, tool, collection) {
   });
   collection.configuredTools.push(configured);
   collection.toolByName.set(name, configured);
-  collection.definitions.push(deepFreeze({
+  const definition = {
     type: "function",
     name,
     description: tool.description || "Application-defined tool.",
@@ -267,7 +267,11 @@ function addTool(name, tool, collection) {
       type: "object",
       additionalProperties: true,
     }, `tool ${name} parameters`),
-  }));
+  };
+  if (tool.outputSchema !== undefined) {
+    definition.output_schema = jsonSnapshot(tool.outputSchema, "tool output schema");
+  }
+  collection.definitions.push(deepFreeze(definition));
 }
 
 async function evaluateNative(source, environment) {
