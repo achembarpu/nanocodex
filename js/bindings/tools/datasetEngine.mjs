@@ -1,8 +1,6 @@
 import {
   DATASET_DESCRIPTION,
   MAX_QUERY_BYTES,
-  MAX_QUERY_LIMIT,
-  MAX_QUERY_OFFSET,
   datasetParameters
 } from "./datasetContract.mjs";
 const MAX_OPEN_DATASETS = 8;
@@ -22,6 +20,8 @@ const MAX_CACHED_RANGE_BYTES = 4 * 1024 * 1024;
 const QUERY_CACHE_BYTES = 2 * 1024 * 1024;
 const MAX_CACHED_QUERIES = 16;
 const MAX_BLOOM_FILTER_GROUPS = 8;
+const PARQUET_SCAN_ROWS = 2048;
+const CURSOR_VERSION = 1;
 function createDatasetTool(options = {}) {
   const providedFetch = options.fetch;
   const fetchImpl = providedFetch === undefined
@@ -81,7 +81,7 @@ function createDatasetTool(options = {}) {
         if (cached) return { ...cached, bytesRead: 0, cacheHit: true };
         const budget = new ByteBudget(query.maxBytes);
         const progress = dataset.format === "parquet" ? await queryParquet(dataset, query, budget, runtime, loadParquet, loadCompressors) : await queryJsonl(dataset, query, budget, runtime);
-        const result = boundedQueryResult(dataset, query, budget, progress);
+        const result = queryResult(dataset, query, budget, progress);
         dataset.queryCache.set(cacheKey, result);
         return { ...result, cacheHit: false };
       }
@@ -245,102 +245,85 @@ async function queryParquet(dataset, query, budget, runtime, loadParquet, loadCo
   if (!shards) throw new Error("Parquet dataset is unavailable");
   const pushdownFilters = query.filters.filter((filter) => filter.op !== "contains");
   const postFilters = query.filters.filter((filter) => filter.op === "contains");
-  const rows = [];
-  let skip = query.offset;
-  let complete = true;
-  let truncatedReason;
+  const filtered = pushdownFilters.length > 0 || postFilters.length > 0;
+  const rows = new QueryRows(query.limit);
+  let position = query.position ?? { format: "parquet", shard: 0, row: 0, match: 0 };
+  let skip = query.skip;
+  let rowsScanned = 0;
   let compressors;
   try {
-    for (const shard of shards) {
+    for (let shardIndex = position.shard; shardIndex < shards.length; shardIndex++) {
+      const shard = shards[shardIndex];
       const metadata = await parquetMetadata(shard, budget, runtime, parquet);
       const file = remoteBuffer(shard, budget, runtime);
       if (!compressors && needsCustomCompressors(metadata, query)) {
         compressors = (await loadCompressors()).compressors;
       }
       const useBloomFilters = pushdownFilters.length > 0 && metadata.row_groups.length <= MAX_BLOOM_FILTER_GROUPS;
-      if (!postFilters.length && !pushdownFilters.length) {
-        const shardRows = safeCount(metadata.num_rows);
-        if (skip >= shardRows) {
-          skip -= shardRows;
+      const shardRows = safeCount(metadata.num_rows);
+      let rowStart = shardIndex === position.shard ? position.row : 0;
+      let matchStart = shardIndex === position.shard ? position.match : 0;
+      if (!filtered && skip > 0) {
+        const available = shardRows - rowStart;
+        if (skip >= available) {
+          skip -= available;
+          position = { format: "parquet", shard: shardIndex + 1, row: 0, match: 0 };
           continue;
         }
-        const rowStart = skip;
-        const rowEnd = Math.min(shardRows, rowStart + query.limit - rows.length);
-        rows.push(...await parquet.parquetQuery({
+        rowStart += skip;
+        skip = 0;
+      }
+      while (rowStart < shardRows) {
+        const rowEnd = Math.min(shardRows, rowStart + PARQUET_SCAN_ROWS);
+        position = { format: "parquet", shard: shardIndex, row: rowStart, match: matchStart };
+        const found = await parquet.parquetReadObjects({
           file,
           metadata,
-          columns: query.columns,
+          columns: postFilters.length ? columnsForPostFilter(query.columns, postFilters) : query.columns,
+          filter: pushdownFilters.length ? parquetFilter(pushdownFilters) : void 0,
           rowStart,
           rowEnd,
-          compressors,
-          useOffsetIndex: true
-        }));
-        skip = 0;
-      } else if (!postFilters.length) {
-        const requested = skip + (query.limit - rows.length);
-        const found = await parquet.parquetQuery({
-          file,
-          metadata,
-          columns: query.columns,
-          filter: parquetFilter(pushdownFilters),
-          rowStart: 0,
-          rowEnd: requested,
           compressors,
           useBloomFilters,
           usePageIndex: pushdownFilters.length > 0,
           useOffsetIndex: true
         });
-        if (skip >= found.length) {
-          skip -= found.length;
-          continue;
-        }
-        rows.push(...found.slice(skip, skip + query.limit - rows.length));
-        skip = 0;
-      } else {
-        let groupStart = 0;
-        for (const group of metadata.row_groups) {
-          const groupEnd = groupStart + safeCount(group.num_rows);
-          const found = await parquet.parquetReadObjects({
-            file,
-            metadata,
-            columns: columnsForPostFilter(query.columns, postFilters),
-            filter: parquetFilter(pushdownFilters),
-            rowStart: groupStart,
-            rowEnd: groupEnd,
-            compressors,
-            useBloomFilters,
-            usePageIndex: pushdownFilters.length > 0,
-            useOffsetIndex: true
-          });
-          for (const candidate of found) {
-            if (!matchesFilters(candidate, postFilters)) continue;
-            if (skip > 0) {
-              skip--;
-              continue;
-            }
-            rows.push(projectRow(candidate, query.columns));
-            if (rows.length >= query.limit) break;
+        rowsScanned += rowEnd - rowStart;
+        const candidates = postFilters.length
+          ? found.filter((candidate) => matchesFilters(candidate, postFilters)).map((candidate) => projectRow(candidate, query.columns))
+          : found;
+        for (let match = matchStart; match < candidates.length; match++) {
+          const nextPosition = match + 1 < candidates.length
+            ? { format: "parquet", shard: shardIndex, row: rowStart, match: match + 1 }
+            : { format: "parquet", shard: shardIndex, row: rowEnd, match: 0 };
+          if (skip > 0) {
+            skip--;
+            position = nextPosition;
+            continue;
           }
-          groupStart = groupEnd;
-          if (rows.length >= query.limit) break;
+          const status = rows.add(candidates[match]);
+          if (status === "output_limit") {
+            return partialQuery(rows, rowsScanned, "output_limit", position, skip);
+          }
+          position = nextPosition;
+          if (status === "limit") {
+            return partialQuery(rows, rowsScanned, "limit", position, skip);
+          }
         }
+        rowStart = rowEnd;
+        matchStart = 0;
+        position = { format: "parquet", shard: shardIndex, row: rowStart, match: 0 };
       }
-      if (rows.length >= query.limit) {
-        complete = false;
-        truncatedReason = "limit";
-        break;
-      }
+      position = { format: "parquet", shard: shardIndex + 1, row: 0, match: 0 };
     }
   } catch (error) {
     if (!(error instanceof ByteLimitError)) throw error;
-    complete = false;
-    truncatedReason = "byte_limit";
+    return partialQuery(rows, rowsScanned, "byte_limit", position, skip);
   }
-  if (complete && dataset.source.kind === "huggingface" && dataset.source.partial) {
-    complete = false;
-    truncatedReason = "source_partial";
+  if (dataset.source.kind === "huggingface" && dataset.source.partial) {
+    return { rows: rows.rows, rowsScanned, complete: false, truncatedReason: "source_partial" };
   }
-  return { rows, rowsScanned: null, complete, truncatedReason };
+  return { rows: rows.rows, rowsScanned, complete: true };
 }
 async function queryJsonl(dataset, query, budget, runtime) {
   return scanJsonl(dataset, query, budget, runtime);
@@ -356,26 +339,51 @@ function needsCustomCompressors(metadata, query) {
 async function scanJsonl(dataset, query, budget, runtime) {
   const object = dataset.jsonl?.object;
   if (!object) throw new Error("JSONL dataset is unavailable");
-  const response = await safeFetch(object.url, runtime, { method: "GET" }, object.allowRedirects);
+  const rows = new QueryRows(query.limit);
+  const startByte = query.position?.byte ?? 0;
+  if (object.byteLength != null && startByte >= object.byteLength) {
+    return { rows: rows.rows, rowsScanned: 0, complete: true };
+  }
+  const headers = startByte > 0
+    ? { range: `bytes=${startByte}-${object.byteLength == null ? "" : object.byteLength - 1}` }
+    : void 0;
+  const response = await safeFetch(object.url, runtime, { method: "GET", headers }, object.allowRedirects);
   if (!response.ok || !response.body) {
     await response.body?.cancel().catch(() => void 0);
     throw new Error(`JSONL fetch failed with HTTP ${response.status}`);
   }
-  if (object.byteLength == null) {
+  if (startByte > 0 && response.status !== 206) {
+    await response.body.cancel().catch(() => void 0);
+    throw new Error("JSONL server does not support byte-range continuation");
+  }
+  if (response.status === 206) {
+    const range = parseContentRange(response.headers.get("content-range"));
+    if (!range || range.start !== startByte) {
+      await response.body.cancel().catch(() => void 0);
+      throw new Error("JSONL server returned an invalid Content-Range");
+    }
+    if (range.total != null) {
+      object.byteLength = range.total;
+      dataset.byteLength = range.total;
+    }
+  } else if (object.byteLength == null) {
     object.byteLength = contentLength(response.headers.get("content-length"));
     dataset.byteLength = object.byteLength;
   }
   const reader = response.body.getReader();
-  const decoder = new TextDecoder();
-  const rows = [];
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const encoder = new TextEncoder();
   let buffer = "";
+  let networkOffset = startByte;
+  let position = { format: "jsonl", byte: startByte };
   let rowsScanned = 0;
-  let skip = query.offset;
-  let complete = true;
-  let truncatedReason;
-  const processLine = (line) => {
+  let skip = query.skip;
+  const processLine = (line, newlineBytes) => {
+    const lineStart = position.byte;
+    const lineEnd = lineStart + encoder.encode(line).byteLength + newlineBytes;
+    position = { format: "jsonl", byte: lineEnd };
     const trimmed = line.endsWith("\r") ? line.slice(0, -1) : line;
-    if (!trimmed) return false;
+    if (!trimmed) return "accepted";
     if (trimmed.length > MAX_JSONL_LINE_BYTES) {
       throw new Error(`JSONL row exceeds ${MAX_JSONL_LINE_BYTES} characters`);
     }
@@ -386,57 +394,54 @@ async function scanJsonl(dataset, query, budget, runtime) {
       throw new Error(`JSONL row ${rowsScanned + 1} is invalid: ${errorMessage(error)}`);
     }
     rowsScanned++;
-    if (!isRecord(value) || !matchesFilters(value, query.filters)) return false;
+    if (!isRecord(value) || !matchesFilters(value, query.filters)) return "accepted";
     if (skip > 0) {
       skip--;
-      return false;
+      return "accepted";
     }
-    rows.push(projectRow(value, query.columns));
-    return rows.length >= query.limit;
+    const status = rows.add(projectRow(value, query.columns));
+    if (status === "output_limit") {
+      position = { format: "jsonl", byte: lineStart };
+    }
+    return status;
   };
   try {
-    read: while (true) {
+    while (true) {
       const chunk = await reader.read();
       if (chunk.done) break;
       const acceptedBytes = Math.min(chunk.value.byteLength, budget.remaining);
-      if (acceptedBytes > 0) {
-        budget.consume(acceptedBytes);
-        buffer += decoder.decode(chunk.value.subarray(0, acceptedBytes), { stream: true });
-      }
-      const hitByteLimit = acceptedBytes < chunk.value.byteLength || budget.remaining === 0 && (object.byteLength == null || budget.used < object.byteLength);
+      if (acceptedBytes === 0) throw new ByteLimitError("dataset byte limit reached");
+      budget.consume(acceptedBytes);
+      buffer += decoder.decode(chunk.value.subarray(0, acceptedBytes), { stream: true });
+      networkOffset += acceptedBytes;
       if (buffer.length > MAX_JSONL_LINE_BYTES && !buffer.includes("\n")) {
         throw new Error(`JSONL row exceeds ${MAX_JSONL_LINE_BYTES} characters`);
       }
-      let newline = buffer.indexOf("\n");
-      while (newline >= 0) {
-        const line = buffer.slice(0, newline);
+      for (let newline = buffer.indexOf("\n"); newline >= 0; newline = buffer.indexOf("\n")) {
+        const status = processLine(buffer.slice(0, newline), 1);
         buffer = buffer.slice(newline + 1);
-        if (processLine(line)) {
-          complete = false;
-          truncatedReason = "limit";
-          break read;
+        if (status === "limit" || status === "output_limit") {
+          return partialQuery(rows, rowsScanned, status, position, skip);
         }
-        newline = buffer.indexOf("\n");
       }
-      if (hitByteLimit) {
-        complete = false;
-        truncatedReason = "byte_limit";
-        break;
+      if (acceptedBytes < chunk.value.byteLength || budget.remaining === 0 && (object.byteLength == null || networkOffset < object.byteLength)) {
+        return partialQuery(rows, rowsScanned, "byte_limit", position, skip);
       }
     }
     buffer += decoder.decode();
-    if (complete && buffer && processLine(buffer)) {
-      complete = false;
-      truncatedReason = "limit";
+    if (buffer) {
+      const status = processLine(buffer, 0);
+      if (status === "limit" || status === "output_limit") {
+        return partialQuery(rows, rowsScanned, status, position, skip);
+      }
     }
   } catch (error) {
     if (!(error instanceof ByteLimitError)) throw error;
-    complete = false;
-    truncatedReason = "byte_limit";
+    return partialQuery(rows, rowsScanned, "byte_limit", position, skip);
   } finally {
     await reader.cancel().catch(() => void 0);
   }
-  return { rows, rowsScanned, complete, truncatedReason };
+  return { rows: rows.rows, rowsScanned, complete: true };
 }
 async function parquetMetadata(shard, budget, runtime, parquet) {
   shard.metadata ??= await parquet.parquetMetadataAsync(remoteBuffer(shard, budget, runtime));
@@ -573,21 +578,41 @@ async function safeFetch(input, runtime, init, allowRedirects = false) {
 }
 function parseQuery(args, dataset) {
   const datasetId = requireString(args.dataset_id, "dataset.dataset_id");
-  const columns = optionalStringArray(args.columns, "dataset.columns");
+  const cursor = args.cursor === void 0 ? void 0 : requireString(args.cursor, "dataset.cursor");
+  let source = args;
+  let position;
+  let offset;
+  let skip;
+  if (cursor !== void 0) {
+    if (args.columns !== void 0 || args.filters !== void 0 || args.offset !== void 0) {
+      throw new Error("dataset.cursor retains columns, filters, and position; do not combine them with cursor");
+    }
+    const state = decodeQueryCursor(cursor);
+    if (state.v !== CURSOR_VERSION || state.d !== dataset.id || !isRecord(state.q)) {
+      throw new Error("dataset.cursor is unavailable for this dataset handle");
+    }
+    source = state.q;
+    position = parseCursorPosition(state.p, dataset.format);
+    offset = nonnegativeSafeInteger(state.o, "dataset.cursor offset");
+    skip = nonnegativeSafeInteger(state.s, "dataset.cursor remaining offset");
+  } else {
+    offset = optionalIntegerAtLeast(args.offset, 0, 0, "dataset.offset");
+    skip = offset;
+  }
+  const columns = optionalStringArray(source.columns, "dataset.columns");
   if (columns && dataset.format === "parquet") {
     const known = new Set(dataset.schema.map((column) => column.name));
     const unknown = columns.filter((column) => !known.has(column));
     if (unknown.length) throw new Error(`dataset columns not found: ${unknown.join(", ")}`);
   }
-  let filters = parseFilters(args.filters);
+  let filters = parseFilters(source.filters);
   if (dataset.format === "parquet") {
     const known = new Set(dataset.schema.map((column) => column.name));
     const unknown = filters.map((filter) => filter.column.split(".")[0]).filter((column) => !known.has(column));
     if (unknown.length) throw new Error(`dataset filter columns not found: ${unique(unknown).join(", ")}`);
     filters = coerceParquetFilters(filters, dataset.parquet?.filterKinds ?? /* @__PURE__ */ new Map());
   }
-  const offset = optionalBoundedInteger(args.offset, 0, MAX_QUERY_OFFSET, 0, "dataset.offset");
-  const limit = optionalBoundedInteger(args.limit, 1, MAX_QUERY_LIMIT, DEFAULT_QUERY_LIMIT, "dataset.limit");
+  const limit = optionalIntegerAtLeast(args.limit, 1, DEFAULT_QUERY_LIMIT, "dataset.limit");
   const maxBytes = optionalBoundedInteger(
     args.max_bytes,
     1024,
@@ -595,7 +620,20 @@ function parseQuery(args, dataset) {
     DEFAULT_QUERY_BYTES,
     "dataset.max_bytes"
   );
-  return { datasetId, columns, filters, offset, limit, maxBytes };
+  return {
+    datasetId,
+    columns,
+    filters,
+    offset,
+    limit,
+    maxBytes,
+    position,
+    skip,
+    cursorQuery: {
+      ...(columns === void 0 ? {} : { columns }),
+      ...(source.filters === void 0 ? {} : { filters: source.filters })
+    }
+  };
 }
 function coerceParquetFilters(filters, kinds) {
   return filters.map((filter) => {
@@ -745,39 +783,86 @@ function valueType(value) {
   if (Array.isArray(value)) return "array";
   return typeof value === "object" ? "object" : typeof value;
 }
-function boundedQueryResult(dataset, query, budget, progress) {
-  const normalized = progress.rows.map((row) => normalizeValue(row));
-  const rows = [];
-  let outputBytes = 0;
-  const encoder = new TextEncoder();
-  for (const row of normalized) {
-    const bytes = encoder.encode(JSON.stringify(row)).byteLength;
-    if (outputBytes + bytes > MAX_TOOL_OUTPUT_BYTES) break;
-    rows.push(row);
-    outputBytes += bytes;
-  }
-  const outputTruncated = rows.length !== normalized.length;
+function queryResult(dataset, query, budget, progress) {
+  const nextCursor = progress.nextPosition === void 0 ? void 0 : encodeQueryCursor({
+    v: CURSOR_VERSION,
+    d: dataset.id,
+    q: query.cursorQuery,
+    p: progress.nextPosition,
+    o: safeIntegerSum(query.offset, progress.rows.length, "dataset cursor offset"),
+    s: progress.nextSkip
+  });
   return {
     datasetId: dataset.id,
     format: dataset.format,
-    rows,
-    returnedRows: rows.length,
+    rows: progress.rows,
+    returnedRows: progress.rows.length,
     rowsScanned: progress.rowsScanned,
     bytesRead: budget.used,
-    complete: progress.complete && !outputTruncated,
-    truncatedReason: outputTruncated ? "output_limit" : progress.truncatedReason,
+    complete: progress.complete,
+    truncatedReason: progress.truncatedReason,
     offset: query.offset,
-    limit: query.limit
+    limit: query.limit,
+    ...(nextCursor === void 0 ? {} : { nextCursor })
   };
 }
 function queryCacheKey(query) {
   return JSON.stringify({
-    columns: query.columns,
-    filters: query.filters.map(({ column, op, value }) => ({ column, op, value })),
+    cursorQuery: query.cursorQuery,
+    position: query.position,
     offset: query.offset,
+    skip: query.skip,
     limit: query.limit,
     maxBytes: query.maxBytes
   }, (_key, value) => typeof value === "bigint" ? { $bigint: value.toString() } : value);
+}
+function partialQuery(rows, rowsScanned, truncatedReason, nextPosition, nextSkip) {
+  return {
+    rows: rows.rows,
+    rowsScanned,
+    complete: false,
+    truncatedReason,
+    nextPosition,
+    nextSkip
+  };
+}
+function encodeQueryCursor(state) {
+  return encodeURIComponent(JSON.stringify(state));
+}
+function decodeQueryCursor(cursor) {
+  try {
+    const state = JSON.parse(decodeURIComponent(cursor));
+    if (!isRecord(state)) throw new Error("cursor state must be an object");
+    return state;
+  } catch {
+    throw new Error("dataset.cursor is invalid");
+  }
+}
+function parseCursorPosition(value, format) {
+  if (!isRecord(value) || value.format !== format) {
+    throw new Error("dataset.cursor is unavailable for this dataset format");
+  }
+  if (format === "parquet") {
+    return {
+      format,
+      shard: nonnegativeSafeInteger(value.shard, "dataset.cursor shard"),
+      row: nonnegativeSafeInteger(value.row, "dataset.cursor row"),
+      match: nonnegativeSafeInteger(value.match, "dataset.cursor match")
+    };
+  }
+  return {
+    format,
+    byte: nonnegativeSafeInteger(value.byte, "dataset.cursor byte")
+  };
+}
+function parseContentRange(value) {
+  const match = value?.match(/^bytes (\d+)-(\d+)\/(\d+|\*)$/);
+  if (!match) return null;
+  const start = contentLength(match[1]);
+  const end = contentLength(match[2]);
+  const total = match[3] === "*" ? null : contentLength(match[3]);
+  if (start == null || end == null || end < start || total != null && end >= total) return null;
+  return { start, end, total };
 }
 function normalizeValue(value, seen = /* @__PURE__ */ new WeakSet()) {
   if (value === void 0) return null;
@@ -915,6 +1000,24 @@ function optionalBoundedInteger(value, minimum, maximum, fallback, name) {
   }
   return value;
 }
+function optionalIntegerAtLeast(value, minimum, fallback, name) {
+  if (value === void 0) return fallback;
+  if (!Number.isSafeInteger(value) || value < minimum) {
+    throw new Error(`${name} must be a safe integer greater than or equal to ${minimum}`);
+  }
+  return value;
+}
+function nonnegativeSafeInteger(value, name) {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`${name} must be a nonnegative safe integer`);
+  }
+  return value;
+}
+function safeIntegerSum(left, right, name) {
+  const sum = left + right;
+  if (!Number.isSafeInteger(sum)) throw new Error(`${name} exceeds JavaScript safe integers`);
+  return sum;
+}
 function boundedNonnegativeInteger(value, name) {
   if (!Number.isSafeInteger(value) || value < 0) throw new Error(`${name} is invalid`);
   return value;
@@ -953,6 +1056,27 @@ class ByteBudget {
     if (!Number.isSafeInteger(bytes) || bytes < 0) throw new Error("dataset byte count is invalid");
     if (this.used + bytes > this.limit) throw new ByteLimitError("dataset byte limit reached");
     this.used += bytes;
+  }
+}
+class QueryRows {
+  rows = [];
+  bytes = 0;
+  limit;
+  encoder = new TextEncoder();
+  constructor(limit) {
+    this.limit = limit;
+  }
+  add(value) {
+    if (this.rows.length >= this.limit) return "limit";
+    const normalized = normalizeValue(value);
+    const bytes = this.encoder.encode(JSON.stringify(normalized)).byteLength;
+    if (bytes > MAX_TOOL_OUTPUT_BYTES && this.rows.length === 0) {
+      throw new Error("dataset row exceeds the tool output budget; select fewer columns");
+    }
+    if (this.bytes + bytes > MAX_TOOL_OUTPUT_BYTES) return "output_limit";
+    this.rows.push(normalized);
+    this.bytes += bytes;
+    return this.rows.length >= this.limit ? "limit" : "accepted";
   }
 }
 class RangeCache {

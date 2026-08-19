@@ -169,11 +169,14 @@ The reusable `browser(...)` tool bundle gives the browser agent a bounded
 Parquet URLs, Hugging Face dataset/config/split exports, and uncompressed JSONL
 URLs without downloading whole datasets into memory. Parquet reads use HTTP
 ranges and filter/projection pushdown where possible; JSONL reads incrementally
-scan the response stream. Dataset handles are scoped to an agent session, every
-query has row, input-byte, and output-byte limits, and partial results explicitly
-report `complete: false`. The implementation and Parquet codecs are lazy chunks,
-so ordinary agent sessions do not download them. Direct sources must permit
-browser CORS, and Parquet sources must honor byte-range requests.
+scan the response stream. Dataset handles are scoped to an agent session. Query
+limits and offsets accept any nonnegative safe range; input-byte and output-byte
+budgets remain bounded. Partial results report `complete: false` and an opaque
+`nextCursor` that retains projection and filters while resuming at the physical
+Parquet row batch or JSONL byte position. The implementation and Parquet codecs
+are lazy chunks, so ordinary agent sessions do not download them. Direct sources
+must permit browser CORS. Parquet sources must honor byte-range requests; JSONL
+sources must honor them when continuing from a cursor.
 
 For example, ask the web agent to “inspect the `main` config’s `train` split of
 `openai/gsm8k`, show its schema, and find five examples containing arithmetic.”
@@ -182,6 +185,7 @@ The resulting tool flow is equivalent to:
 ```json
 {"operation":"open","source":{"kind":"huggingface","dataset":"openai/gsm8k","config":"main","split":"train"}}
 {"operation":"query","dataset_id":"<returned id>","columns":["question","answer"],"filters":[{"column":"question","op":"contains","value":"how many"}],"limit":5}
+{"operation":"query","dataset_id":"<returned id>","cursor":"<returned nextCursor>","limit":5}
 {"operation":"close","dataset_id":"<returned id>"}
 ```
 

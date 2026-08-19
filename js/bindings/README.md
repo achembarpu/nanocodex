@@ -138,10 +138,13 @@ only a bounded JSON endpoint, credentials, authorization, and persistence.
 
 `dataset()` runs entirely in the caller and inspects public HTTPS Parquet,
 uncompressed JSONL, and Hugging Face datasets. It opens a session-scoped handle,
-returns schema metadata, and supports bounded projection and filtering queries.
-Parquet uses HTTP range reads and predicate pushdown where possible; JSONL scans
-the response stream incrementally. The implementation, Parquet reader, and
-non-Snappy codecs load only after the model first calls the tool. Direct URLs
+returns schema metadata, and supports projection and filtering queries without
+hard row or offset ceilings. Input and output bytes remain bounded; partial
+results return an opaque `nextCursor` that retains the query and resumes from a
+physical Parquet row batch or JSONL byte position. Parquet uses HTTP range reads
+and predicate pushdown where possible; JSONL scans incrementally and requires
+byte-range support for cursor continuation. The implementation, Parquet reader,
+and non-Snappy codecs load only after the model first calls the tool. Direct URLs
 must allow browser CORS, and Parquet servers must support byte ranges.
 Consumers that only need this capability can import `dataset` from the smaller
 `nanocodex/tools/dataset` leaf entry.
@@ -158,13 +161,22 @@ const opened = await datasets.handler({
   },
 }, { sessionId: "thread-1" });
 
-await datasets.handler({
+const page = await datasets.handler({
   operation: "query",
   dataset_id: opened.datasetId,
   columns: ["question", "answer"],
   filters: [{ column: "question", op: "contains", value: "how many" }],
   limit: 5,
 }, { sessionId: "thread-1" });
+
+if (page.nextCursor) {
+  await datasets.handler({
+    operation: "query",
+    dataset_id: opened.datasetId,
+    cursor: page.nextCursor,
+    limit: 5,
+  }, { sessionId: "thread-1" });
+}
 ```
 
 This same adapter works inside a Cloudflare Worker or Durable Object:

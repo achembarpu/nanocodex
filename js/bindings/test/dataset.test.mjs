@@ -13,6 +13,9 @@ test("the public dataset factory advertises the lazy dataset capability", () => 
     tool.parameters.properties.operation.enum,
     ["open", "query", "close"]
   );
+  assert.equal(tool.parameters.properties.limit.maximum, undefined);
+  assert.equal(tool.parameters.properties.offset.maximum, undefined);
+  assert.equal(tool.parameters.properties.cursor.type, "string");
 });
 
 test("the default dataset fetch keeps the browser global receiver", async () => {
@@ -155,6 +158,24 @@ test("JSONL datasets stream, filter, project, and report partial scans", async (
   assert.equal(partial.complete, false);
   assert.equal(partial.truncatedReason, "byte_limit");
   assert.equal(partial.bytesRead, 1024);
+  let deepPage = await boundedTool.handler({
+    operation: "query",
+    dataset_id: bounded.datasetId,
+    columns: ["index"],
+    offset: 20,
+    limit: 1,
+    max_bytes: 1024
+  }, context);
+  for (let page = 0; deepPage.rows.length === 0 && page < 10; page++) {
+    deepPage = await boundedTool.handler({
+      operation: "query",
+      dataset_id: bounded.datasetId,
+      cursor: deepPage.nextCursor,
+      limit: 1,
+      max_bytes: 1024
+    }, context);
+  }
+  assert.deepEqual(deepPage.rows, [{ index: 20 }]);
   const sparseRows = Array.from(
     { length: 40 },
     (_, index) => index === 35 ? { index, late: "discovered during query" } : { index }
@@ -178,6 +199,89 @@ test("JSONL datasets stream, filter, project, and report partial scans", async (
     limit: 1
   }, context);
   assert.deepEqual(late.rows, [{ late: "discovered during query" }]);
+});
+test("queries allow deep offsets and continue JSONL scans from byte cursors", async () => {
+  const records = Array.from({ length: 12_050 }, (_, id) => ({ id, tag: id % 2 ? "é" : "雪" }));
+  const url = "https://data.example/deep.jsonl";
+  const bytes = new TextEncoder().encode(`${records.map(JSON.stringify).join("\n")}\n`);
+  const baseFetch = objectFetch(new Map([[url, bytes]]), 4096);
+  const ranges = [];
+  const tool = createDatasetTool({
+    fetch: (input, init) => {
+      ranges.push(new Headers(init?.headers).get("range"));
+      return baseFetch(input, init);
+    },
+    randomId: () => "deep-jsonl"
+  });
+  const opened = await tool.handler({
+    operation: "open",
+    source: { kind: "url", url }
+  }, context);
+  const first = await tool.handler({
+    operation: "query",
+    dataset_id: opened.datasetId,
+    columns: ["id"],
+    filters: [{ column: "tag", op: "eq", value: "雪" }],
+    offset: 5_500,
+    limit: 2
+  }, context);
+  assert.deepEqual(first.rows, [{ id: 11_000 }, { id: 11_002 }]);
+  assert.ok(first.nextCursor);
+  const second = await tool.handler({
+    operation: "query",
+    dataset_id: opened.datasetId,
+    cursor: first.nextCursor,
+    limit: 2
+  }, context);
+  assert.deepEqual(second.rows, [{ id: 11_004 }, { id: 11_006 }]);
+  assert.equal(second.offset, 5_502);
+  assert.equal(second.rowsScanned, 4);
+  assert.match(ranges.at(-1), /^bytes=\d+-\d+$/);
+  await assert.rejects(
+    tool.handler({
+      operation: "query",
+      dataset_id: opened.datasetId,
+      cursor: first.nextCursor,
+      offset: 0
+    }, context),
+    /do not combine them with cursor/
+  );
+});
+test("Parquet queries accept limits above 100 and continue from physical cursors", async () => {
+  const ids = Array.from({ length: 12_500 }, (_, id) => id);
+  const parquet = new Uint8Array(parquetWriteBuffer({
+    columnData: [{ name: "id", data: ids, type: "INT32" }],
+    rowGroupSize: 1000
+  }));
+  const url = "https://data.example/deep.parquet";
+  const tool = createDatasetTool({
+    fetch: objectFetch(new Map([[url, parquet]])),
+    randomId: () => "deep-parquet"
+  });
+  const opened = await tool.handler({
+    operation: "open",
+    source: { kind: "url", url }
+  }, context);
+  const first = await tool.handler({
+    operation: "query",
+    dataset_id: opened.datasetId,
+    columns: ["id"],
+    offset: 11_000,
+    limit: 150
+  }, context);
+  assert.equal(first.returnedRows, 150);
+  assert.equal(first.rows[0].id, 11_000);
+  assert.equal(first.rows.at(-1).id, 11_149);
+  assert.ok(first.nextCursor);
+  const second = await tool.handler({
+    operation: "query",
+    dataset_id: opened.datasetId,
+    cursor: first.nextCursor,
+    limit: 150
+  }, context);
+  assert.equal(second.rows[0].id, 11_150);
+  assert.equal(second.rows.at(-1).id, 11_299);
+  assert.equal(second.offset, 11_150);
 });
 test("Hugging Face sources resolve the default training split to Parquet shards", async () => {
   const parquet = new Uint8Array(parquetWriteBuffer({
@@ -274,10 +378,13 @@ test("Parquet filters coerce JSON-safe INT64 values without losing precision", a
     limit: 10
   }, context);
   assert.deepEqual(precise.rows, [{ value: "9007199254740993" }]);
-  await assert.rejects(
-    tool.handler({ operation: "query", dataset_id: opened.datasetId, offset: 10001 }, context),
-    /between 0 and 10000/
-  );
+  const beyondDataset = await tool.handler({
+    operation: "query",
+    dataset_id: opened.datasetId,
+    offset: 10001
+  }, context);
+  assert.deepEqual(beyondDataset.rows, []);
+  assert.equal(beyondDataset.complete, true);
 });
 test("dataset handles are session-scoped and arbitrary URLs reject local targets", async () => {
   const bytes = new TextEncoder().encode('{"value":1}\n');

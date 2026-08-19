@@ -20,8 +20,9 @@ const budgets = Object.freeze({
   datasetFacadeJavaScriptGzip: 700,
   datasetContractJavaScript: 1_500,
   datasetContractJavaScriptGzip: 700,
-  datasetToolJavaScript: 21_000,
-  datasetToolJavaScriptGzip: 7_200,
+  // Includes stateless physical cursors for bounded Parquet and JSONL continuation.
+  datasetToolJavaScript: 24_500,
+  datasetToolJavaScriptGzip: 8_300,
   parquetJavaScript: 60_000,
   parquetJavaScriptGzip: 18_000,
   parquetCompressorsJavaScript: 116_000,
