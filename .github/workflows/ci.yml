@@ -309,7 +309,7 @@ jobs:
           npm ci --prefix web
       - name: Type-check and build the website
         working-directory: web
-        run: npm test && npm run typecheck && npx --no-install vite build && npm run docs:build && npm run check:bundle
+        run: npm test && npm run build:from-wasm
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: nanocodex-web-deployment

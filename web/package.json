@@ -19,6 +19,7 @@
     "gen:types": "wrangler types",
     "prebuild": "npm run wasm",
     "build": "tsc --noEmit && vite build && npm run docs:build && npm run check:bundle",
+    "build:from-wasm": "tsc --noEmit && vite build && npm run docs:build && npm run check:bundle",
     "check:bundle": "node scripts/check-bundle.mjs",
     "preview": "vite preview",
     "deploy": "npm run build && wrangler deploy"
@@ -66,7 +67,7 @@
     "vite": "8.2.1",
     "vite-plugin-mkcert": "^1.17.12",
     "vocs": "2.8.5",
-    "waku": "1.0.0-beta.9",
+    "waku": "1.0.0-beta.6",
     "wrangler": "4.123.0",
     "ws": "^8.21.3"
   },

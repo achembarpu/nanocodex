@@ -329,7 +329,11 @@ export const WorkspacePanel = memo(function WorkspacePanel() {
 
       {panelOpen ? (
         <>
-          <div className="workspace-git" aria-label="Thread Git repository">
+          <div
+            className="workspace-git"
+            role="group"
+            aria-label="Thread Git repository"
+          >
             <span title={thread.remoteUrl}>
               <GitBranch aria-hidden="true" />
               {thread.branch}
@@ -351,6 +355,7 @@ export const WorkspacePanel = memo(function WorkspacePanel() {
             ref={uploadRef}
             className="workspace-file-input"
             type="file"
+            aria-label="Upload workspace files"
             multiple
             onChange={(event) => void uploadFiles(event.currentTarget.files)}
           />
