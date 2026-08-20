@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import {
   buildGitArtifacts,
   buildUploadPlan,
+  isRetriableUploadError,
   isRetriableUploadStatus,
   readRemoteState,
 } from "./publish-repository.mjs";
@@ -24,6 +25,7 @@ test("the publisher CLI initializes its module before building a generation", as
   const repository = resolve(directory, "repo");
   const requests = [];
   let deploymentSha;
+  let droppedUpload = false;
   const server = createServer(async (request, response) => {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
@@ -44,6 +46,11 @@ test("the publisher CLI initializes its module before building a generation", as
       return;
     }
     if (request.method === "PUT" && request.url?.startsWith("/api/git/objects/")) {
+      if (!droppedUpload) {
+        droppedUpload = true;
+        request.socket.destroy();
+        return;
+      }
       response.writeHead(201).end();
       return;
     }
@@ -79,6 +86,7 @@ test("the publisher CLI initializes its module before building a generation", as
     });
 
     assert.match(stdout, new RegExp(`Published gakonst/nanocodex ${head.slice(0, 7)}`));
+    assert.equal(droppedUpload, true);
     assert.ok(requests.length > 3);
     assert.equal(requests[0]?.url, "/api/health");
     assert.equal(requests[0]?.authorization, undefined);
@@ -136,13 +144,15 @@ test("repository publication uploads only content absent from the prior inventor
   );
 });
 
-test("repository uploads retry only transient and secret-propagation responses", () => {
+test("repository uploads retry bounded transient responses and transport failures", () => {
   for (const status of [401, 408, 425, 429, 500, 503]) {
     assert.equal(isRetriableUploadStatus(status), true, `${status} should retry`);
   }
   for (const status of [400, 403, 404, 409, 422]) {
     assert.equal(isRetriableUploadStatus(status), false, `${status} should fail`);
   }
+  assert.equal(isRetriableUploadError(new TypeError("fetch failed")), true);
+  assert.equal(isRetriableUploadError(new Error("invalid local input")), false);
 });
 
 test("invalid publication repair requires an explicit operator opt-in", async () => {

@@ -561,11 +561,22 @@ async function uploadFile(origin, token, remote, local) {
   for (let attempt = 1; attempt <= 5; attempt += 1) {
     const headers = new Headers({ "content-length": String(size) });
     const body = Readable.toWeb(createReadStream(local));
-    const response = await authenticatedFetch(
-      `${origin}/api/git/objects/${remote}`,
-      token,
-      { method: "PUT", headers, body, duplex: "half" },
-    );
+    let response;
+    try {
+      response = await authenticatedFetch(
+        `${origin}/api/git/objects/${remote}`,
+        token,
+        { method: "PUT", headers, body, duplex: "half" },
+      );
+    } catch (error) {
+      lastError = new Error(
+        `upload ${basename(local)} failed: ${error instanceof Error ? error.message : String(error)}`,
+        { cause: error },
+      );
+      if (!isRetriableUploadError(error) || attempt === 5) break;
+      await delay(250 * (2 ** (attempt - 1)));
+      continue;
+    }
     if (response.ok) return;
     lastError = new Error(await responseError(`upload ${basename(local)}`, response));
     if (!isRetriableUploadStatus(response.status) || attempt === 5) break;
@@ -576,6 +587,10 @@ async function uploadFile(origin, token, remote, local) {
 
 export function isRetriableUploadStatus(status) {
   return status === 401 || status === 408 || status === 425 || status === 429 || status >= 500;
+}
+
+export function isRetriableUploadError(error) {
+  return error instanceof TypeError;
 }
 
 function delay(milliseconds) {
