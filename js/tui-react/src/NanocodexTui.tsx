@@ -29,7 +29,6 @@ import {
   steerFailed,
   steerQueued,
   turnFinished,
-  turnRejected,
   type AgentEvent,
   type PlanUpdate,
   type TerminalEntry,
@@ -326,16 +325,7 @@ export function NanocodexTui({
         return;
       }
       if (data.type === "btwOpenFailed") {
-        setTui((current) => current.btw?.id === data.id ? {
-          ...current,
-          btw: {
-            ...current.btw,
-            conversation: turnRejected(
-              { ...current.btw.conversation, status: "Fork failed" },
-              data.error,
-            ),
-          },
-        } : current);
+        setTui((current) => recoverBtwOpenFailure(current, data.id, data.error));
         return;
       }
       if (data.type === "branchOpened") {
@@ -348,11 +338,7 @@ export function NanocodexTui({
         return;
       }
       if (data.type === "branchOpenFailed") {
-        setTui((current) => updateConversation(
-          current,
-          { pane: "main", branchId: data.id },
-          (conversation) => turnRejected({ ...conversation, status: "Historical edit failed" }, data.error),
-        ));
+        setTui((current) => recoverBranchOpenFailure(current, data.id, data.error));
         return;
       }
       if (data.type === "fatal") {
@@ -609,6 +595,15 @@ export function NanocodexTui({
   };
 
   const queueInput = (inputTarget: Target, text: string, intent: "immediate" | "queue", promptImages: AttachedImage[] = []) => {
+    if (workerStatus !== "ready" || !sessionIdForTarget(tui, inputTarget)) {
+      setDraft(text);
+      setImages(promptImages);
+      setTui((current) => updateConversation(current, inputTarget, (value) => appendError(
+        { ...value, status: "Branch still starting" },
+        "This branch is not ready yet; the message remains in the composer",
+      )));
+      return;
+    }
     const id = nextPromptId.current++;
     const currentConversation = conversationForTarget(tui, inputTarget);
     const steering = intent === "immediate" && currentConversation?.running;
@@ -1433,6 +1428,44 @@ function updateConversation(tui: TuiState, target: Target, update: (state: Termi
       ? { ...branch, conversation: update(branch.conversation) }
       : branch),
   };
+}
+
+/** @internal Ensures a failed ephemeral fork cannot strand input on a sessionless target. */
+export function recoverBtwOpenFailure(tui: TuiState, id: number, error: string): TuiState {
+  if (tui.btw?.id !== id) return tui;
+  const recovered = { ...tui, btw: undefined, focus: "main" as const };
+  return updateConversation(
+    recovered,
+    { pane: "main", branchId: recovered.activeBranchId },
+    (conversation) => appendError(
+      { ...conversation, status: "Ready" },
+      `BTW branch failed; returned to Main: ${error}`,
+    ),
+  );
+}
+
+/** @internal Ensures a failed historical fork returns to its live parent branch. */
+export function recoverBranchOpenFailure(tui: TuiState, id: number, error: string): TuiState {
+  const failed = branchById(tui, id);
+  if (!failed || failed.sessionId) return tui;
+  const fallbackId = failed.parentId ?? 0;
+  const recovered: TuiState = {
+    ...tui,
+    branches: tui.branches.filter((branch) => branch.id !== id),
+    activeBranchId: fallbackId,
+    branchNavigatorId: undefined,
+    historicalEdit: undefined,
+    selectedPromptId: undefined,
+    focus: "main",
+  };
+  return updateConversation(
+    recovered,
+    { pane: "main", branchId: fallbackId },
+    (conversation) => appendError(
+      { ...conversation, status: "Ready" },
+      `Branch fork failed; returned to its parent: ${error}`,
+    ),
+  );
 }
 
 function updateActiveConversation(tui: TuiState, update: (state: TerminalState) => TerminalState): TuiState {

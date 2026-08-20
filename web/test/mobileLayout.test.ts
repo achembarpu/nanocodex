@@ -68,6 +68,10 @@ test("mobile actions wait for the active branch session generation", () => {
   );
   assert.match(tui, /if \(workerStatus !== "ready" \|\| !sessionId\)/);
   assert.match(
+    tui,
+    /if \(workerStatus !== "ready" \|\| !sessionIdForTarget\(tui, inputTarget\)\)/,
+  );
+  assert.match(
     terminal,
     /key=\{`\$\{transport\}:\$\{credentialSource \?\? "signed-out"\}`\}/,
   );
