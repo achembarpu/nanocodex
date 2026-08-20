@@ -116,28 +116,8 @@
   margin-top: 0;
 }
 
-.home-demo .agent-workspace-shell {
-  width: 100%;
-  height: clamp(500px, 66svh, 640px);
-  margin: 10px 0 0;
-  border-color: var(--border-soft);
+.home-demo .agent-terminal-shell {
   box-shadow: none;
-  transform: none;
-}
-
-.surface-home .tui-brand {
-  color: #fff;
-  background: color-mix(in srgb, var(--blue) 72%, #000);
-}
-
-.surface-home .tui-cwd,
-.surface-home .agent-tui-empty,
-.surface-home .agent-tui-footer {
-  color: color-mix(in srgb, var(--text) 68%, var(--surface));
-}
-
-.surface-home .agent-tui-mobile-only {
-  color: var(--text);
 }
 
 .home-summary {
@@ -293,11 +273,8 @@
     margin-top: 28px;
   }
 
-  .home-demo .agent-workspace-shell,
-  .home-demo .agent-workspace-shell:has(.workspace-panel.is-collapsed) {
+  .home-demo .agent-terminal-shell {
     width: 100%;
-    height: calc(var(--nc-mobile-workspace-height, calc(100dvh - var(--mobile-header-height) - 172px)) - env(safe-area-inset-bottom));
-    margin-bottom: max(24px, env(safe-area-inset-bottom));
   }
 
   .home-summary {

@@ -668,7 +668,7 @@ function NanocodexShell() {
                   </article>
                   <article>
                     <h2>Bring any interface</h2>
-                    <p>Typed events can drive a CLI, Ratatui, wterm, xterm.js, custom React, storage, telemetry, or several consumers at once.</p>
+                    <p>Attach one retained agent to xterm.js, WTerm, a native TTY, WebSocket, or test through a five-method terminal host—or consume typed events directly in React, storage, and telemetry.</p>
                   </article>
                   <article>
                     <h2>Application-owned memory</h2>
@@ -684,6 +684,7 @@ function NanocodexShell() {
                 <section className="home-start" aria-label="Install Nanocodex">
                   <code>$ cargo add nanocodex</code>
                   <code>$ npm install nanocodex</code>
+                  <code>$ npm install nanocodex-terminal @xterm/xterm</code>
                   <nav>
                     <a href="/docs/getting-started">get started</a>
                     <a href="https://github.com/gakonst/nanocodex/tree/master/examples/vercel-workflows" target="_blank" rel="noreferrer">wterm example</a>

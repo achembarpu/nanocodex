@@ -25,6 +25,13 @@ export type PaymentStatus = {
 export type WebTuiMessage = TuiMessage
   | { type: "mppPayment"; payment: PaymentStatus }
   | { type: "mppJsonl"; line: string };
+export type WebTerminalCommand =
+  | (Extract<WebTuiCommand, { type: "start" }> & { surface: "terminal" })
+  | { type: "terminalInput"; data: string }
+  | { type: "terminalResize"; cols: number; rows: number };
+export type WebWorkerCommand = WebTuiCommand | WebTerminalCommand;
+export type WebWorkerMessage = WebTuiMessage
+  | { type: "terminalWrite"; data: string };
 
 let prewarmedWorker: Worker | undefined;
 let workerClaimed = false;
@@ -40,7 +47,7 @@ export function prewarmNanocodexWorker() {
 }
 
 /** Website-owned wiring for the publishable React package. */
-export const nanocodexConfig = createConfig<WebTuiCommand, WebTuiMessage>({
+export const nanocodexConfig = createConfig<WebWorkerCommand, WebWorkerMessage>({
   autoStart: false,
   worker: () => {
     workerClaimed = true;

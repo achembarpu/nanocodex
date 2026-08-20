@@ -14,8 +14,10 @@ const budgets = Object.freeze({
   initialCssGzip: 12_000,
   agentJavaScript: 830_000,
   // OPFS, artifacts, durability, typed voice lifecycle routing, subscription auth, and paid MCP stay in the Worker.
-  agentWorker: 56_100,
-  agentWorkerGzip: 17_500,
+  // Includes the renderer-neutral terminal bridge; the ANSI reducer stays in
+  // a lazy chunk loaded only after an authenticated terminal starts.
+  agentWorker: 58_500,
+  agentWorkerGzip: 18_200,
   datasetFacadeJavaScript: 1_500,
   datasetFacadeJavaScriptGzip: 700,
   datasetContractJavaScript: 1_500,
@@ -30,8 +32,6 @@ const budgets = Object.freeze({
   // just-bash and its built-in Unix command set stay behind Agent startup.
   browserShellJavaScript: 1_600_000,
   browserShellJavaScriptGzip: 450_000,
-  artifactCoreJavaScript: 7_000,
-  artifactCoreJavaScriptGzip: 2_800,
   // Includes the canonical Rust apply_patch planner and the complete
   // JSON-Schema-backed subagent runtime. Keep these close to the optimized
   // artifact so future growth still fails this gate.
@@ -54,16 +54,13 @@ const manifest = JSON.parse(
 
 const entryKey = manifestKey("index.html");
 const agentKey = manifestKey("src/AgentTerminal.tsx");
-const artifactCoreKey = manifestKey("node_modules/nanocodex/tools/artifact.mjs");
 const mppKey = manifestKey("src/MppControls.tsx");
 const entry = manifest[entryKey];
 const agent = manifest[agentKey];
-const artifactCore = manifest[artifactCoreKey];
 const mpp = manifest[mppKey];
 
 assert(entry?.isEntry, "the browser entry is missing from the Vite manifest");
 assert(agent?.isDynamicEntry, "the Agent terminal must remain a dynamic entry");
-assert(artifactCore?.isDynamicEntry, "the artifact core must remain a dynamic entry");
 assert(mpp?.isDynamicEntry, "the MPP controls must remain a dynamic entry");
 
 const allEntryImports = importClosure(entryKey, true);
@@ -78,8 +75,6 @@ assert(
 
 const initialStatic = importClosure(entryKey, false);
 const agentStatic = importClosure(agentKey, false);
-const artifactCoreStatic = importClosure(artifactCoreKey, false);
-for (const shared of agentStatic) artifactCoreStatic.delete(shared);
 assert(
   !initialStatic.has(agentKey),
   "the initial route must not statically import the Agent terminal",
@@ -88,16 +83,10 @@ assert(
   !initialStatic.has(mppKey) && !agentStatic.has(mppKey),
   "the default OpenAI graph must not statically import the MPP controls",
 );
-assert(
-  !agentStatic.has(artifactCoreKey) && artifactCoreStatic.has(artifactCoreKey),
-  "artifact persistence and validation must remain lazy from the Agent terminal",
-);
-
 const initialJavaScript = await closureStats(initialStatic, "file");
 const initialCssFiles = cssClosure(initialStatic);
 const initialCss = await fileStats(initialCssFiles);
 const agentJavaScript = await closureStats(agentStatic, "file");
-const artifactCoreJavaScript = await closureStats(artifactCoreStatic, "file");
 const mppJavaScript = await closureStats(importClosure(mppKey, false), "file");
 
 withinCount(
@@ -119,12 +108,6 @@ withinCount("initial CSS files", initialCss.fileCount, budgets.initialCssFiles);
 within("initial CSS", initialCss.bytes, budgets.initialCss);
 within("initial CSS gzip", initialCss.gzipBytes, budgets.initialCssGzip);
 within("Agent JavaScript", agentJavaScript.bytes, budgets.agentJavaScript);
-within("artifact core JavaScript", artifactCoreJavaScript.bytes, budgets.artifactCoreJavaScript);
-within(
-  "artifact core JavaScript gzip",
-  artifactCoreJavaScript.gzipBytes,
-  budgets.artifactCoreJavaScriptGzip,
-);
 within(
   "MPP controls JavaScript",
   mppJavaScript.bytes,
@@ -430,10 +413,6 @@ console.log(JSON.stringify({
       compressorsBytes: parquetCompressors.bytes,
       compressorsGzipBytes: parquetCompressors.gzipBytes,
     },
-  },
-  artifacts: {
-    coreJavaScriptBytes: artifactCoreJavaScript.bytes,
-    coreJavaScriptGzipBytes: artifactCoreJavaScript.gzipBytes,
   },
   mpp: {
     controlsJavaScriptBytes: mppJavaScript.bytes,

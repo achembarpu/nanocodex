@@ -13,10 +13,11 @@ import {
   useNanocodex,
   useNanocodexMessage,
 } from "nanocodex-react";
-import { NanocodexTui } from "nanocodex-tui-react";
-import type { ArtifactDocument } from "nanocodex/tools/artifact";
+import { Terminal as Xterm, type Terminal as XtermInstance } from "@xterm/xterm";
+import { FitAddon } from "@xterm/addon-fit";
+import { encodeXtermKeyEvent } from "nanocodex-terminal";
 import type { Address } from "viem";
-import "nanocodex-tui-react/structure.css";
+import "@xterm/xterm/css/xterm.css";
 import "./AgentTerminal.css";
 
 import {
@@ -24,21 +25,17 @@ import {
   prewarmNanocodexWorker,
   type AgentTransport,
   type PaymentStatus,
-  type WebTuiCommand,
-  type WebTuiMessage,
+  type WebTerminalCommand,
+  type WebWorkerCommand,
+  type WebWorkerMessage,
 } from "./nanocodex";
-import { ArtifactDock } from "./ArtifactDock";
-import { getBrowserThread, openThreadWorkspace } from "nanocodex/tools/browser";
+import { getBrowserThread } from "nanocodex/tools/browser";
 
 const MppControls = lazy(async () => ({
   default: (await import("./MppControls")).MppControls,
 }));
-const WorkspacePanel = lazy(async () => ({
-  default: (await import("./WorkspacePanel")).WorkspacePanel,
-}));
-let nextArtifactPromptId = 1_000_000_000;
 
-/** Website policy around the reusable TUI: credential UX and the site theme. */
+/** Website policy around the reusable terminal adapter: credentials and theme. */
 export const AgentTerminal = memo(function AgentTerminal() {
   return (
     <NanocodexProvider config={nanocodexConfig}>
@@ -48,20 +45,20 @@ export const AgentTerminal = memo(function AgentTerminal() {
 });
 
 function AgentTerminalDemo() {
-  const agent = useNanocodex<WebTuiCommand>();
+  const agent = useNanocodex<WebWorkerCommand>();
   const thread = useMemo(getBrowserThread, []);
   const [transport, setTransport] = useState<AgentTransport>("openai");
   const [credentialSource, setCredentialSource] = useState<CredentialSource | undefined>();
   const [payment, setPayment] = useState<PaymentStatus>();
   const [jsonl, setJsonl] = useState<string[]>([]);
-  const [mobilePane, setMobilePane] = useState<"files" | "agent" | "ui">("agent");
-  const workspaceShell = useRef<HTMLDivElement>(null);
   const workerRecoveryAttempts = useRef(0);
-  useNanocodexMessage<WebTuiMessage>((message) => {
+  const terminal = useRef<XtermInstance | undefined>(undefined);
+  useNanocodexMessage<WebWorkerMessage>((message) => {
     if (message.type === "mppPayment") setPayment(message.payment);
     if (message.type === "mppJsonl") {
       setJsonl((current) => [...current.slice(-99), message.line]);
     }
+    if (message.type === "terminalWrite") terminal.current?.write(message.data);
   });
   useEffect(() => {
     const prewarm = () => prewarmNanocodexWorker();
@@ -105,27 +102,6 @@ function AgentTerminalDemo() {
     };
   }, []);
   useEffect(() => {
-    const shell = workspaceShell.current;
-    const viewport = window.visualViewport;
-    if (!shell || !viewport) return;
-    const measure = () => {
-      const top = Math.max(0, shell.getBoundingClientRect().top - viewport.offsetTop);
-      shell.style.setProperty("--nc-mobile-workspace-height", `${Math.max(0, Math.floor(viewport.height - top))}px`);
-    };
-    measure();
-    viewport.addEventListener("resize", measure);
-    viewport.addEventListener("scroll", measure);
-    window.addEventListener("scroll", measure, { passive: true });
-    const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(measure);
-    observer?.observe(shell.parentElement ?? shell);
-    return () => {
-      viewport.removeEventListener("resize", measure);
-      viewport.removeEventListener("scroll", measure);
-      window.removeEventListener("scroll", measure);
-      observer?.disconnect();
-    };
-  }, []);
-  useEffect(() => {
     setPayment(undefined);
     setJsonl([]);
     if (transport !== "openai") return;
@@ -163,23 +139,11 @@ function AgentTerminalDemo() {
     nanocodexConfig.restart(startCommand("mpp", thread.id, payerAddress, accessKeyAddress));
   }, [thread.id]);
   const disconnectMpp = useCallback(() => nanocodexConfig.disconnect(), []);
-  const promptFromArtifact = useCallback((artifact: ArtifactDocument, prompt: string) => {
-    agent.dispatch({
-      type: "artifactPrompt",
-      id: nextArtifactPromptId++,
-      prompt: `The user invoked an action from the “${artifact.title}” artifact (${artifact.id}): ${prompt}\n\nThe artifact document is available at /workspace/.nanocodex/artifacts/${artifact.id}.json.`,
-    });
-  }, [agent]);
   const selectTransport = (next: AgentTransport) => {
     if (next === transport) return;
     nanocodexConfig.disconnect();
     setTransport(next);
   };
-  const enabled = transport === "openai"
-    ? credentialSource === "subscription"
-      || credentialSource === "user"
-      || credentialSource === "deployment"
-    : agent.status === "ready";
   const unavailableMessage = transport === "openai"
     ? credentialSource === undefined
       ? "Sign in with ChatGPT to start the agent"
@@ -187,9 +151,14 @@ function AgentTerminalDemo() {
     : agent.status === "error"
         ? agent.error ?? "MPP session failed"
         : "Connect Tempo to authorize an MPP session";
-  const voiceOptions = useMemo(() => credentialSource === "subscription"
-    ? { workspace: () => openThreadWorkspace(thread.id) }
-    : undefined, [credentialSource, thread.id]);
+  useEffect(() => {
+    if (agent.status !== "ready" || !terminal.current) return;
+    agent.dispatch({
+      type: "terminalResize",
+      cols: terminal.current.cols,
+      rows: terminal.current.rows,
+    });
+  }, [agent]);
 
   return (
     <div className="nanocodex-demo">
@@ -217,41 +186,126 @@ function AgentTerminalDemo() {
           />
         </Suspense>
       )}
-      <nav className="agent-mobile-nav" aria-label="Workspace view">
-        <button type="button" aria-pressed={mobilePane === "files"} onClick={() => setMobilePane("files")}>Files</button>
-        <button type="button" aria-pressed={mobilePane === "agent"} onClick={() => setMobilePane("agent")}>Agent</button>
-        <button type="button" aria-pressed={mobilePane === "ui"} onClick={() => setMobilePane("ui")}>UI</button>
-      </nav>
-      <div ref={workspaceShell} className={`agent-workspace-shell mobile-pane-${mobilePane}`}>
-        <Suspense fallback={null}><WorkspacePanel /></Suspense>
-        <NanocodexTui
-          key={`${transport}:${credentialSource ?? "signed-out"}`}
-          enabled={enabled}
-          unavailableMessage={unavailableMessage}
-          voice={voiceOptions}
-        />
-        <ArtifactDock
-          agentReady={agent.status === "ready"}
-          onPrompt={promptFromArtifact}
-        />
-      </div>
+      <XtermSurface
+        inactiveMessage={unavailableMessage}
+        status={agent.status}
+        onReady={(instance) => {
+          terminal.current = instance;
+          if (agent.status === "ready") {
+            agent.dispatch({
+              type: "terminalResize",
+              cols: instance.cols,
+              rows: instance.rows,
+            });
+          }
+        }}
+        onData={(data) => {
+          if (agent.status === "ready") agent.dispatch({ type: "terminalInput", data });
+        }}
+        onResize={({ cols, rows }) => {
+          if (agent.status === "ready") agent.dispatch({ type: "terminalResize", cols, rows });
+        }}
+      />
     </div>
   );
 }
 
-function startCommand(transport: "openai" | "chatgpt", threadId: string): WebTuiCommand;
+function XtermSurface({
+  inactiveMessage,
+  status,
+  onReady,
+  onData,
+  onResize,
+}: {
+  inactiveMessage: string;
+  status: "idle" | "starting" | "ready" | "stopped" | "error";
+  onReady(terminal: XtermInstance): void;
+  onData(data: string): void;
+  onResize(size: { cols: number; rows: number }): void;
+}) {
+  const element = useRef<HTMLDivElement>(null);
+  const instance = useRef<XtermInstance | undefined>(undefined);
+  const latest = useRef({ onData, onReady, onResize });
+  latest.current = { onData, onReady, onResize };
+
+  useEffect(() => {
+    if (!element.current) return;
+    const terminal = new Xterm({
+      cursorBlink: true,
+      cursorStyle: "block",
+      fontFamily: '"Paradigm SemiMono", "Geist Mono", monospace',
+      fontSize: 13,
+      fontWeight: "400",
+      fontWeightBold: "600",
+      lineHeight: 1.25,
+      scrollback: 5_000,
+      scrollOnUserInput: true,
+      theme: {
+        background: "#111111",
+        foreground: "#f2f2f2",
+        cursor: "#f2f2f2",
+        cursorAccent: "#111111",
+        selectionBackground: "#3a3a3a",
+        black: "#111111",
+        brightBlack: "#777777",
+        red: "#ff6b6b",
+        cyan: "#62d8f2",
+      },
+    });
+    const fit = new FitAddon();
+    terminal.loadAddon(fit);
+    terminal.open(element.current);
+    fit.fit();
+    instance.current = terminal;
+    terminal.attachCustomKeyEventHandler((event) => {
+      const data = encodeXtermKeyEvent(event);
+      if (data === null) return true;
+      latest.current.onData(data);
+      return false;
+    });
+    element.current.querySelector("textarea")?.setAttribute("aria-label", "Nanocodex terminal input");
+    const data = terminal.onData((value) => latest.current.onData(value));
+    const resize = terminal.onResize((size) => latest.current.onResize(size));
+    const observer = new ResizeObserver(() => fit.fit());
+    observer.observe(element.current);
+    latest.current.onReady(terminal);
+    terminal.focus();
+    return () => {
+      observer.disconnect();
+      data.dispose();
+      resize.dispose();
+      terminal.dispose();
+      instance.current = undefined;
+    };
+  }, []);
+
+  useEffect(() => {
+    if (status === "ready" || status === "starting" || !instance.current) return;
+    instance.current.write(
+      `\x1b[3J\x1b[2J\x1b[H\x1b[1mnanocodex\x1b[0m\r\n\r\n\x1b[2m${inactiveMessage}\x1b[0m\r\n\r\n> `,
+    );
+  }, [inactiveMessage, status]);
+
+  return (
+    <section className="agent-terminal-shell" aria-label="Live Nanocodex terminal">
+      <div ref={element} className="agent-xterm" />
+    </section>
+  );
+}
+
+function startCommand(transport: "openai" | "chatgpt", threadId: string): Extract<WebTerminalCommand, { type: "start" }>;
 function startCommand(
   transport: "mpp",
   threadId: string,
   payerAddress: Address,
   accessKeyAddress: Address,
-): WebTuiCommand;
+): Extract<WebTerminalCommand, { type: "start" }>;
 function startCommand(
   transport: "openai" | "chatgpt" | "mpp",
   threadId: string,
   payerAddress?: Address,
   accessKeyAddress?: Address,
-): WebTuiCommand {
+): Extract<WebTerminalCommand, { type: "start" }> {
   if (transport === "mpp") {
     if (!payerAddress) throw new Error("MPP requires a connected Tempo account");
     if (!accessKeyAddress) throw new Error("MPP requires a locally signable Tempo access key");
@@ -263,6 +317,7 @@ function startCommand(
       payerAddress,
       thinking: "none",
       reasoningMode: "standard",
+      surface: "terminal",
     };
   }
   return {
@@ -271,6 +326,7 @@ function startCommand(
     transport,
     thinking: "high",
     reasoningMode: "standard",
+    surface: "terminal",
   };
 }
 

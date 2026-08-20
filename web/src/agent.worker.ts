@@ -1,14 +1,21 @@
 import { Agent, Transport } from "nanocodex/browser";
+import type { AgentTerminal, TerminalHost } from "nanocodex-terminal";
+import type { DefaultAgent, EventWatcher } from "nanocodex";
 import {
   createAgentController,
+  type AgentControllerPayment,
   type AgentControllerStart,
   type AgentControllerTools,
 } from "./agentController";
-import type { WebTuiCommand } from "./nanocodex";
+import type {
+  PaymentStatus,
+  WebTerminalCommand,
+  WebWorkerCommand,
+} from "./nanocodex";
 import { createPaymentSessionOwner } from "./paymentSessionOwner";
 import { MPP_RESPONSES_WEBSOCKET_URL } from "./tempo-constants";
 
-type IncomingMessage = WebTuiCommand | { type: "warmup" };
+type IncomingMessage = WebWorkerCommand | { type: "warmup" };
 type PaymentSession = Awaited<ReturnType<(typeof import("./tempo"))["createTempoMppSession"]>>;
 const CHATGPT_API_BASE_URL = "https://chatgpt.com/backend-api/codex";
 
@@ -25,6 +32,10 @@ const controller = createAgentController({
   postMessage: (message) => worker.postMessage(message),
   logPaymentEvent: (event) => console.info(JSON.stringify(event)),
 });
+let attachedTerminal: AgentTerminal | undefined;
+let terminalAgent: DefaultAgent | undefined;
+let terminalEvents: EventWatcher | undefined;
+let terminalHost: WorkerTerminalHost | undefined;
 let commands = Promise.resolve();
 
 worker.onmessage = ({ data }: MessageEvent<IncomingMessage>) => {
@@ -34,8 +45,18 @@ worker.onmessage = ({ data }: MessageEvent<IncomingMessage>) => {
     });
     return;
   }
+  if (data.type === "terminalInput") {
+    terminalHost?.input(data.data);
+    return;
+  }
+  if (data.type === "terminalResize") {
+    terminalHost?.resize(data.cols, data.rows);
+    return;
+  }
   commands = commands
-    .then(() => controller.handle(data))
+    .then(() => data.type === "start" && "surface" in data && data.surface === "terminal"
+      ? startTerminal(data)
+      : controller.handle(data))
     .catch((error) => {
       worker.postMessage({
         type: "fatal",
@@ -43,6 +64,124 @@ worker.onmessage = ({ data }: MessageEvent<IncomingMessage>) => {
       });
     });
 };
+
+async function startTerminal(command: Extract<WebTerminalCommand, { type: "start" }>) {
+  const { createAgentTerminal } = await import("nanocodex-terminal");
+  attachedTerminal?.dispose();
+  terminalEvents?.off();
+  if (terminalAgent) await terminalAgent.session.shutdown();
+  attachedTerminal = undefined;
+  terminalEvents = undefined;
+  terminalAgent = undefined;
+
+  const images = new Map<string, string[]>();
+  const created = await createAgent({
+    thinking: command.thinking,
+    reasoningMode: command.reasoningMode,
+    threadId: command.threadId,
+    transport: command.transport,
+    ...(command.transport === "mpp"
+      ? {
+          accessKeyAddress: command.accessKeyAddress,
+          payerAddress: command.payerAddress,
+        }
+      : {}),
+  }, {
+    recentImages(sessionId, count) {
+      return (images.get(sessionId) ?? []).slice(-count);
+    },
+    rememberImage(sessionId, imageUrl) {
+      const retained = images.get(sessionId) ?? [];
+      retained.push(imageUrl);
+      if (retained.length > 10) retained.splice(0, retained.length - 10);
+      images.set(sessionId, retained);
+    },
+  });
+  const payment = "payment" in created ? created.payment : undefined;
+  terminalAgent = created.agent;
+  terminalHost = createWorkerTerminalHost();
+  attachedTerminal = createAgentTerminal({
+    agent: created.agent,
+    terminal: terminalHost.host,
+    onEvent(event) {
+      if (event.type === "prompt.completed") postPaymentStatus(payment);
+    },
+  });
+  if (payment) {
+    terminalEvents = created.agent.events.watch({ includeAllSessions: true });
+    terminalEvents.onEvent((event) => {
+      console.info(JSON.stringify(event));
+      worker.postMessage({ type: "mppJsonl", line: JSON.stringify(event) });
+      postPaymentStatus(payment);
+    });
+    postPaymentStatus(payment);
+  }
+  await attachedTerminal.ready;
+  worker.postMessage({ type: "ready", sessionId: created.agent.sessionId });
+}
+
+type WorkerTerminalHost = {
+  host: TerminalHost;
+  input(data: string): void;
+  resize(cols: number, rows: number): void;
+};
+
+function createWorkerTerminalHost(): WorkerTerminalHost {
+  let cols = 80;
+  let rows = 24;
+  const dataListeners = new Set<(data: string) => void>();
+  const resizeListeners = new Set<(size: { cols: number; rows: number }) => void>();
+  return {
+    host: {
+      write(data) {
+        worker.postMessage({
+          type: "terminalWrite",
+          data: typeof data === "string" ? data : new TextDecoder().decode(data),
+        });
+      },
+      onData(listener) {
+        dataListeners.add(listener);
+        return () => dataListeners.delete(listener);
+      },
+      onResize(listener) {
+        resizeListeners.add(listener);
+        return () => resizeListeners.delete(listener);
+      },
+      get cols() { return cols; },
+      get rows() { return rows; },
+    },
+    input(data) {
+      for (const listener of dataListeners) listener(data);
+    },
+    resize(nextCols, nextRows) {
+      if (!Number.isSafeInteger(nextCols) || !Number.isSafeInteger(nextRows)
+        || nextCols <= 0 || nextRows <= 0) return;
+      cols = nextCols;
+      rows = nextRows;
+      for (const listener of resizeListeners) listener({ cols, rows });
+    },
+  };
+}
+
+let lastPaymentStatus: string | undefined;
+function postPaymentStatus(
+  payment: AgentControllerPayment | undefined,
+) {
+  if (!payment) return;
+  const status: PaymentStatus = {
+    rootAddress: payment.rootAddress,
+    accessKeyAddress: payment.accessKeyAddress(),
+    channelId: payment.channelId,
+    cumulative: payment.cumulative(),
+    ...(payment.mcpCumulative
+      ? { mcpCumulative: payment.mcpCumulative() }
+      : {}),
+  };
+  const encoded = JSON.stringify(status);
+  if (encoded === lastPaymentStatus) return;
+  lastPaymentStatus = encoded;
+  worker.postMessage({ type: "mppPayment", payment: status });
+}
 
 async function createAgent(
   start: AgentControllerStart,
