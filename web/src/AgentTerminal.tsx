@@ -170,7 +170,7 @@ function AgentTerminalDemo() {
       <div ref={workspaceShell} className={`agent-workspace-shell mobile-pane-${mobilePane}`}>
         <Suspense fallback={null}><WorkspacePanel /></Suspense>
         <NanocodexTui
-          key={transport}
+          key={`${transport}:${credentialSource ?? "signed-out"}`}
           enabled={enabled}
           unavailableMessage={unavailableMessage}
           voice={voiceOptions}

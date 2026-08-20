@@ -64,6 +64,17 @@ test("mobile interaction follows the visual viewport and exposes touch actions",
   assert.match(actions, /gap:\s*6px/);
 });
 
+test("mobile actions wait for the active branch session generation", () => {
+  assert.match(
+    tui,
+    /const ready = workerStatus === "ready" && Boolean\(activeBranch\.sessionId\)/,
+  );
+  assert.match(
+    terminal,
+    /key=\{`\$\{transport\}:\$\{credentialSource \?\? "signed-out"\}`\}/,
+  );
+});
+
 test("short compact workspaces keep transcript, composer, and file controls in their grids", () => {
   const compact = tuiCss.indexOf(`@media ${compactQuery}`);
   const tui = ruleBlock(tuiCss, ".agent-tui {", compact);

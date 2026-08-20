@@ -174,7 +174,6 @@ export function NanocodexTui({
   ...rootProps
 }: NanocodexTuiProps) {
   const { status: workerStatus, error: workerError, dispatch, stop } = useNanocodex<TuiCommand>();
-  const ready = workerStatus === "ready";
   const stopped = workerStatus === "stopped";
   const [tui, setTui] = useState<TuiState>(() => ({
     branches: [{ id: 0, conversation: initialTerminalState(), draft: starterPrompt, images: [] }],
@@ -413,6 +412,7 @@ export function NanocodexTui({
 
   const conversation = activeConversation(tui);
   const activeBranch = branchById(tui, tui.activeBranchId)!;
+  const ready = workerStatus === "ready" && Boolean(activeBranch.sessionId);
   const target = activeTarget(tui);
   const controlVoice = useCallback((argument: string | undefined, voiceTarget: TuiTarget) => {
     if (!voiceOptions) return;
@@ -445,7 +445,7 @@ export function NanocodexTui({
       return;
     }
     const sessionId = sessionIdForTarget(tui, voiceTarget);
-    if (!sessionId || workerStatus !== "ready") {
+    if (!ready || !sessionId) {
       voiceStarting.current = false;
       setVoiceStatus("Voice is waiting for this branch session to become ready");
       return;
@@ -499,7 +499,7 @@ export function NanocodexTui({
       setVoiceActive(false);
       setVoiceStatus(`Voice: ${error instanceof Error ? error.message : String(error)}`);
     });
-  }, [dispatch, runVoiceLifecycle, tui, voiceOptions, workerStatus]);
+  }, [dispatch, ready, runVoiceLifecycle, tui, voiceOptions]);
   const mode = tui.historicalEdit
     ? "edit"
     : tui.branchNavigatorId !== undefined
