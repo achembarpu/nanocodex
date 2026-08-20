@@ -58,6 +58,8 @@ test("mobile interaction follows the visual viewport and exposes touch actions",
   assert.match(terminal, /event\.persisted/);
   assert.match(terminal, /sha !== deploymentSha/);
   assert.match(terminal, /window\.location\.reload\(\)/);
+  assert.match(terminal, /workerRecoveryAttempts\.current >= 2/);
+  assert.match(terminal, /nanocodexConfig\.restart\(startCommand\(nextTransport, thread\.id\)\)/);
   const compact = tuiCss.indexOf(`@media ${compactQuery}`);
   const actions = ruleBlock(tuiCss, ".agent-tui-mobile-actions {", compact);
   assert.match(actions, /display:\s*flex/);

@@ -56,6 +56,7 @@ function AgentTerminalDemo() {
   const [jsonl, setJsonl] = useState<string[]>([]);
   const [mobilePane, setMobilePane] = useState<"files" | "agent" | "ui">("agent");
   const workspaceShell = useRef<HTMLDivElement>(null);
+  const workerRecoveryAttempts = useRef(0);
   useNanocodexMessage<WebTuiMessage>((message) => {
     if (message.type === "mppPayment") setPayment(message.payment);
     if (message.type === "mppJsonl") {
@@ -136,6 +137,28 @@ function AgentTerminalDemo() {
       nanocodexConfig.disconnect();
     }
   }, [credentialSource, thread.id, transport]);
+  useEffect(() => {
+    if (agent.status === "ready") {
+      workerRecoveryAttempts.current = 0;
+      return;
+    }
+    if (
+      agent.status !== "error"
+      || transport !== "openai"
+      || workerRecoveryAttempts.current >= 2
+    ) return;
+    const nextTransport = credentialSource === "subscription"
+      ? "chatgpt"
+      : credentialSource === "user" || credentialSource === "deployment"
+        ? "openai"
+        : undefined;
+    if (!nextTransport) return;
+    workerRecoveryAttempts.current += 1;
+    const timer = window.setTimeout(() => {
+      nanocodexConfig.restart(startCommand(nextTransport, thread.id));
+    }, 250);
+    return () => window.clearTimeout(timer);
+  }, [agent.status, credentialSource, thread.id, transport]);
   const startMpp = useCallback((payerAddress: Address, accessKeyAddress: Address) => {
     nanocodexConfig.restart(startCommand("mpp", thread.id, payerAddress, accessKeyAddress));
   }, [thread.id]);
