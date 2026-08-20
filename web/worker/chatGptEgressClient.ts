@@ -44,5 +44,5 @@ export async function warmChatGptEgress(env: ChatGptEgressEnv, sessionId: string
 }
 
 function egressStub(namespace: DurableObjectNamespace, sessionId: string): DurableObjectStub {
-  return namespace.get(namespace.idFromName(`session:${sessionId}`));
+  return namespace.get(namespace.idFromName(`session-v2:${sessionId}`));
 }

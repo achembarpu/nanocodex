@@ -15,7 +15,7 @@ function egress() {
   } as unknown as DurableObjectStub;
   const namespace = {
     idFromName(name: string) {
-      assert.equal(name, `session:${SESSION_ID}`);
+      assert.equal(name, `session-v2:${SESSION_ID}`);
       return {} as DurableObjectId;
     },
     get() {

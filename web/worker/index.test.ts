@@ -81,7 +81,7 @@ function createChatGptEgress(response: () => Response) {
   const requests: Request[] = [];
   const namespace = {
     idFromName(name: string) {
-      assert.equal(name, `session:${"a".repeat(43)}`);
+      assert.equal(name, `session-v2:${"a".repeat(43)}`);
       return { name };
     },
     get() {
