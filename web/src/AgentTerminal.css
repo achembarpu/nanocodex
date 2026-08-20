@@ -215,7 +215,8 @@
 }
 
 .agent-xterm .xterm-dim {
-  opacity: 0.62;
+  color: var(--terminal-muted) !important;
+  opacity: 1;
 }
 
 .agent-xterm .xterm-screen canvas {
