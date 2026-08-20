@@ -40,13 +40,7 @@ if [[ -n "$crate_root" ]]; then
         generate_crate_changelog "$crate_root"
     fi
 else
-    for crate_path in \
-        nanocodex-oai-api \
-        nanocodex-tools/macros \
-        nanocodex-observability \
-        nanocodex-tools \
-        nanocodex-agent \
-        nanocodex; do
-        generate_crate_changelog "$workspace_root/crates/$crate_path"
-    done
+    while IFS= read -r crate_path; do
+        generate_crate_changelog "$workspace_root/$crate_path"
+    done < <("$workspace_root/scripts/release-crates.sh" paths)
 fi

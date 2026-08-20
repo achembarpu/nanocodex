@@ -5,18 +5,17 @@ repository_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repository_root"
 
 version="$(cargo metadata --no-deps --format-version 1 | jq -er '.packages[] | select(.name == "nanocodex") | .version')"
-crates=(
-  nanocodex-oai-api
-  nanocodex-tools-macros
-  nanocodex-observability
-  nanocodex-tools
-  nanocodex-agent
-  nanocodex
-)
+./scripts/release-crates.sh check
+crates=()
+while IFS= read -r crate; do
+  crates+=("$crate")
+done < <(./scripts/release-crates.sh names)
 
 is_published() {
   local crate="$1"
-  [[ "$(curl --user-agent "nanocodex-release/$version" --silent --output /dev/null --write-out '%{http_code}' "https://crates.io/api/v1/crates/$crate/$version")" == "200" ]]
+  [[ "$(curl --connect-timeout 10 --max-time 30 \
+    --user-agent "nanocodex-release/$version" --silent --output /dev/null \
+    --write-out '%{http_code}' "https://crates.io/api/v1/crates/$crate/$version")" == "200" ]]
 }
 
 for crate in "${crates[@]}"; do

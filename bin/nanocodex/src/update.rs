@@ -1,12 +1,16 @@
 use std::{
     borrow::Cow,
     fs,
+    io::Read,
     path::{Path, PathBuf},
     time::Duration,
 };
 
 use clap::{Args, ValueHint};
 use eyre::{Context, Result, bail, eyre};
+use flate2::read::GzDecoder;
+use futures_util::StreamExt;
+use indicatif::{ProgressBar, ProgressStyle};
 use reqwest::{Client, StatusCode, Url, header};
 use semver::Version;
 use serde::Deserialize;
@@ -28,6 +32,18 @@ const CHECKSUMS_ASSET: &str = "SHA256SUMS";
 const VM_GUEST_ASSET: &str = "nanocodex-vm-guest-x86_64-unknown-linux-musl";
 const DOWNLOAD_ATTEMPTS: usize = 5;
 const DOWNLOAD_RETRY_DELAY: Duration = Duration::from_millis(250);
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
+const READ_TIMEOUT: Duration = Duration::from_secs(30);
+const MAX_ARCHIVE_BYTES: u64 = 256 * 1024 * 1024;
+const MAX_BINARY_BYTES: u64 = 256 * 1024 * 1024;
+
+#[derive(Debug, thiserror::Error)]
+enum DownloadError {
+    #[error(transparent)]
+    Request(#[from] reqwest::Error),
+    #[error("download exceeds the 256 MiB limit")]
+    TooLarge,
+}
 
 #[derive(Debug, Args)]
 pub(crate) struct Update {
@@ -73,7 +89,7 @@ struct Release {
     assets: Vec<ReleaseAsset>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct ReleaseAsset {
     id: u64,
     name: String,
@@ -118,7 +134,8 @@ impl Update {
 
         let client = Client::builder()
             .user_agent(format!("nanocodex/{}", version::SEMVER_VERSION))
-            .timeout(Duration::from_mins(1))
+            .connect_timeout(CONNECT_TIMEOUT)
+            .read_timeout(READ_TIMEOUT)
             .build()
             .wrap_err("failed to create the update client")?;
         let release_description = self.release_description();
@@ -146,25 +163,34 @@ impl Update {
         let key = latest
             .as_ref()
             .map_or_else(|| nightly_key(&release), |version| Ok(version.to_string()))?;
-        if !self.nightly && !self.force && store.is_cached(&key)? {
+        let cached = if self.nightly && vm_guest_binary_asset_name().is_some() {
+            store.is_cached_with_vm_guest(&key)?
+        } else {
+            store.is_cached(&key)?
+        };
+        if !self.force && cached {
             store.activate(&key)?;
-            if let Some(latest) = &latest {
+            if self.nightly {
+                store.promote_manager(&key)?;
+            } else if let Some(latest) = &latest {
                 maybe_promote_manager(&store, &key, latest, &manager_version)?;
             }
             report_activation(&previous, &key, false);
             return Ok(());
         }
 
-        let asset_name = release_asset_name()?;
-        let binary = find_asset(&release, asset_name)?;
+        let binary_name = binary_asset_name()?;
+        let (binary, compressed) = find_preferred_asset(&release, binary_name)?;
         let checksums = find_asset(&release, CHECKSUMS_ASSET)?;
-        let checksum_manifest = download(&client, checksums).await?;
-        let contents = download_verified(&client, binary, &checksum_manifest).await?;
+        let checksum_manifest = download(&client, checksums, false).await?;
+        let archive = download_verified(&client, binary, &checksum_manifest, true).await?;
+        let contents = unpack_release_asset(archive, &binary.name, compressed)?;
         if self.nightly
-            && let Some(guest_asset_name) = vm_guest_asset_name()
+            && let Some(guest_name) = vm_guest_binary_asset_name()
         {
-            let guest = find_asset(&release, guest_asset_name)?;
-            let guest_contents = download_verified(&client, guest, &checksum_manifest).await?;
+            let (guest, compressed) = find_preferred_asset(&release, guest_name)?;
+            let guest_archive = download_verified(&client, guest, &checksum_manifest, true).await?;
+            let guest_contents = unpack_release_asset(guest_archive, &guest.name, compressed)?;
             store.install_with_vm_guest(&key, &contents, &guest_contents)?;
         } else {
             store.install(&key, &contents)?;
@@ -262,7 +288,7 @@ fn install_local_binary(path: &Path, store: &VersionStore, previous: &str) -> Re
 }
 
 async fn install_pr_binary(number: u64, store: &VersionStore, previous: &str) -> Result<()> {
-    let asset_name = release_asset_name()?;
+    let asset_name = binary_asset_name()?;
     let artifact = pr::download(number, asset_name).await?;
     let key = format!("pr-{number}-{}", artifact.head_sha);
     store.install(&key, &artifact.contents)?;
@@ -300,19 +326,27 @@ fn report_activation(previous: &str, selected: &str, downloaded: bool) {
     }
 }
 
-async fn download(client: &Client, asset: &ReleaseAsset) -> Result<Vec<u8>> {
+async fn download(client: &Client, asset: &ReleaseAsset, show_progress: bool) -> Result<Vec<u8>> {
     let url = asset.download_url()?;
+    if show_progress {
+        eprintln!("downloading {}...", asset.name);
+    }
     for attempt in 0..DOWNLOAD_ATTEMPTS {
-        let result: reqwest::Result<Vec<u8>> = async {
-            let response = client.get(url.clone()).send().await?.error_for_status()?;
-            Ok(response.bytes().await?.to_vec())
-        }
-        .await;
+        let result = download_once(client, url.clone(), show_progress).await;
 
         match result {
             Ok(contents) => return Ok(contents),
             Err(error) if attempt + 1 < DOWNLOAD_ATTEMPTS && retryable_download_error(&error) => {
-                tokio::time::sleep(DOWNLOAD_RETRY_DELAY.saturating_mul(1 << attempt)).await;
+                let delay = DOWNLOAD_RETRY_DELAY.saturating_mul(1 << attempt);
+                if show_progress {
+                    eprintln!(
+                        "download interrupted ({error}); retrying {}/{} in {:.2}s...",
+                        attempt + 2,
+                        DOWNLOAD_ATTEMPTS,
+                        delay.as_secs_f64()
+                    );
+                }
+                tokio::time::sleep(delay).await;
             }
             Err(error) => {
                 return Err(error).wrap_err_with(|| {
@@ -330,13 +364,79 @@ async fn download(client: &Client, asset: &ReleaseAsset) -> Result<Vec<u8>> {
     unreachable!("the download attempt loop always returns")
 }
 
+async fn download_once(
+    client: &Client,
+    url: Url,
+    show_progress: bool,
+) -> std::result::Result<Vec<u8>, DownloadError> {
+    let response = client
+        .get(url)
+        .header(header::ACCEPT, "application/octet-stream")
+        .header("X-GitHub-Api-Version", "2022-11-28")
+        .send()
+        .await?
+        .error_for_status()?;
+    if response
+        .content_length()
+        .is_some_and(|length| length > MAX_ARCHIVE_BYTES)
+    {
+        return Err(DownloadError::TooLarge);
+    }
+
+    let progress = if show_progress {
+        download_progress(response.content_length())
+    } else {
+        ProgressBar::hidden()
+    };
+    let mut contents = Vec::with_capacity(
+        response
+            .content_length()
+            .and_then(|length| usize::try_from(length).ok())
+            .map(|length| length.min(MAX_ARCHIVE_BYTES as usize))
+            .unwrap_or_default(),
+    );
+    let mut stream = response.bytes_stream();
+    while let Some(chunk) = stream.next().await {
+        match chunk {
+            Ok(chunk) => {
+                if contents.len().saturating_add(chunk.len()) > MAX_ARCHIVE_BYTES as usize {
+                    progress.finish_and_clear();
+                    return Err(DownloadError::TooLarge);
+                }
+                progress.inc(chunk.len() as u64);
+                contents.extend_from_slice(&chunk);
+            }
+            Err(error) => {
+                progress.finish_and_clear();
+                return Err(error.into());
+            }
+        }
+    }
+    progress.finish_and_clear();
+    Ok(contents)
+}
+
+fn download_progress(total_size: Option<u64>) -> ProgressBar {
+    let progress = total_size.map_or_else(ProgressBar::new_spinner, ProgressBar::new);
+    let template = if total_size.is_some() {
+        "{spinner:.green} [{bar:40.cyan/blue}] {bytes}/{total_bytes} ({bytes_per_sec}, {eta})"
+    } else {
+        "{spinner:.green} {bytes} downloaded ({bytes_per_sec})"
+    };
+    if let Ok(style) = ProgressStyle::with_template(template) {
+        progress.set_style(style.progress_chars("#>-"));
+    }
+    progress
+}
+
 async fn download_verified(
     client: &Client,
     asset: &ReleaseAsset,
     checksum_manifest: &[u8],
+    show_progress: bool,
 ) -> Result<Vec<u8>> {
     let expected = checksum_for(checksum_manifest, &asset.name)?;
-    let contents = download(client, asset).await?;
+    let contents = download(client, asset, show_progress).await?;
     let actual = hex::encode(Sha256::digest(&contents));
     if actual != expected {
         bail!(
@@ -347,8 +447,11 @@ async fn download_verified(
     Ok(contents)
 }
 
-fn retryable_download_error(error: &reqwest::Error) -> bool {
-    error.status().is_none_or(retryable_download_status)
+fn retryable_download_error(error: &DownloadError) -> bool {
+    match error {
+        DownloadError::Request(error) => error.status().is_none_or(retryable_download_status),
+        DownloadError::TooLarge => false,
+    }
 }
 
 fn retryable_download_status(status: StatusCode) -> bool {
@@ -370,10 +473,10 @@ fn nightly_key(release: &Release) -> Result<String> {
 
 fn nightly_key_for(release: &Release, os: &str, arch: &str) -> Result<String> {
     let sha = exact_release_commit(release)?;
-    let binary = find_asset(release, release_asset_name_for(os, arch)?)?;
+    let (binary, _) = find_preferred_asset(release, binary_asset_name_for(os, arch)?)?;
     let mut key = format!("nightly-{}-{}", sha.to_ascii_lowercase(), binary.id);
-    if let Some(guest_asset_name) = vm_guest_asset_name_for(os, arch) {
-        let guest = find_asset(release, guest_asset_name)?;
+    if let Some(guest_name) = vm_guest_binary_asset_name_for(os, arch) {
+        let (guest, _) = find_preferred_asset(release, guest_name)?;
         key.push_str(&format!("-{}", guest.id));
     }
     Ok(key)
@@ -434,6 +537,21 @@ fn find_asset<'a>(release: &'a Release, name: &str) -> Result<&'a ReleaseAsset> 
         })
 }
 
+fn find_preferred_asset<'a>(
+    release: &'a Release,
+    binary_name: &str,
+) -> Result<(&'a ReleaseAsset, bool)> {
+    let compressed_name = format!("{binary_name}.gz");
+    if let Some(asset) = release
+        .assets
+        .iter()
+        .find(|asset| asset.name == compressed_name)
+    {
+        return Ok((asset, true));
+    }
+    find_asset(release, binary_name).map(|asset| (asset, false))
+}
+
 fn checksum_for(manifest: &[u8], asset_name: &str) -> Result<String> {
     let manifest = std::str::from_utf8(manifest).wrap_err("SHA256SUMS is not UTF-8")?;
     for line in manifest.lines() {
@@ -454,19 +572,24 @@ fn checksum_for(manifest: &[u8], asset_name: &str) -> Result<String> {
     bail!("SHA256SUMS does not contain {asset_name}")
 }
 
-fn release_asset_name() -> Result<&'static str> {
-    release_asset_name_for(std::env::consts::OS, std::env::consts::ARCH)
+#[cfg(test)]
+fn release_asset_name_for(os: &str, arch: &str) -> Result<String> {
+    Ok(format!("{}.gz", binary_asset_name_for(os, arch)?))
 }
 
-fn vm_guest_asset_name() -> Option<&'static str> {
-    vm_guest_asset_name_for(std::env::consts::OS, std::env::consts::ARCH)
+fn binary_asset_name() -> Result<&'static str> {
+    binary_asset_name_for(std::env::consts::OS, std::env::consts::ARCH)
 }
 
-fn vm_guest_asset_name_for(os: &str, arch: &str) -> Option<&'static str> {
+fn vm_guest_binary_asset_name() -> Option<&'static str> {
+    vm_guest_binary_asset_name_for(std::env::consts::OS, std::env::consts::ARCH)
+}
+
+fn vm_guest_binary_asset_name_for(os: &str, arch: &str) -> Option<&'static str> {
     matches!((os, arch), ("linux", "x86_64")).then_some(VM_GUEST_ASSET)
 }
 
-fn release_asset_name_for(os: &str, arch: &str) -> Result<&'static str> {
+fn binary_asset_name_for(os: &str, arch: &str) -> Result<&'static str> {
     match (os, arch) {
         ("linux", "x86_64") => Ok("nanocodex-x86_64-unknown-linux-gnu"),
         ("macos", "aarch64") => Ok("nanocodex-aarch64-apple-darwin"),
@@ -474,10 +597,34 @@ fn release_asset_name_for(os: &str, arch: &str) -> Result<&'static str> {
     }
 }
 
+fn decompress_release_asset(archive: &[u8], asset_name: &str) -> Result<Vec<u8>> {
+    let mut contents = Vec::new();
+    GzDecoder::new(archive)
+        .take(MAX_BINARY_BYTES + 1)
+        .read_to_end(&mut contents)
+        .wrap_err_with(|| format!("failed to decompress {asset_name}"))?;
+    if contents.len() as u64 > MAX_BINARY_BYTES {
+        bail!("decompressed {asset_name} exceeds the 256 MiB limit");
+    }
+    Ok(contents)
+}
+
+fn unpack_release_asset(archive: Vec<u8>, asset_name: &str, compressed: bool) -> Result<Vec<u8>> {
+    if compressed {
+        decompress_release_asset(&archive, asset_name)
+    } else if archive.len() as u64 > MAX_BINARY_BYTES {
+        bail!("{asset_name} exceeds the 256 MiB limit");
+    } else {
+        Ok(archive)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use clap::{Parser, Subcommand};
+    use flate2::{Compression, write::GzEncoder};
+    use std::io::Write;
 
     #[derive(Parser)]
     struct TestCli {
@@ -517,11 +664,11 @@ mod tests {
     fn publishes_only_linux_x86_64_and_apple_silicon_assets() {
         assert_eq!(
             release_asset_name_for("linux", "x86_64").unwrap(),
-            "nanocodex-x86_64-unknown-linux-gnu"
+            "nanocodex-x86_64-unknown-linux-gnu.gz"
         );
         assert_eq!(
             release_asset_name_for("macos", "aarch64").unwrap(),
-            "nanocodex-aarch64-apple-darwin"
+            "nanocodex-aarch64-apple-darwin.gz"
         );
         assert!(release_asset_name_for("linux", "aarch64").is_err());
         assert!(release_asset_name_for("macos", "x86_64").is_err());
@@ -572,6 +719,51 @@ mod tests {
     }
 
     #[test]
+    fn decompresses_release_assets() {
+        let mut encoder = GzEncoder::new(Vec::new(), Compression::best());
+        encoder.write_all(b"nanocodex binary").unwrap();
+        let archive = encoder.finish().unwrap();
+
+        assert_eq!(
+            decompress_release_asset(&archive, "nanocodex-test.gz").unwrap(),
+            b"nanocodex binary"
+        );
+        assert!(decompress_release_asset(b"not gzip", "nanocodex-test.gz").is_err());
+    }
+
+    #[test]
+    fn prefers_compressed_assets_and_falls_back_to_older_raw_releases() {
+        let release = Release {
+            tag_name: "v0.5.0".to_owned(),
+            target_commitish: "master".to_owned(),
+            assets: vec![
+                ReleaseAsset {
+                    id: 1,
+                    name: "nanocodex-test".to_owned(),
+                    browser_download_url: "https://example.invalid/raw".to_owned(),
+                },
+                ReleaseAsset {
+                    id: 2,
+                    name: "nanocodex-test.gz".to_owned(),
+                    browser_download_url: "https://example.invalid/gzip".to_owned(),
+                },
+            ],
+        };
+
+        let (preferred, compressed) = find_preferred_asset(&release, "nanocodex-test").unwrap();
+        assert_eq!(preferred.id, 2);
+        assert!(compressed);
+
+        let raw_release = Release {
+            assets: release.assets[..1].to_vec(),
+            ..release
+        };
+        let (raw, compressed) = find_preferred_asset(&raw_release, "nanocodex-test").unwrap();
+        assert_eq!(raw.id, 1);
+        assert!(!compressed);
+    }
+
+    #[test]
     fn cache_busts_mutable_release_assets_with_their_identity() {
         let asset = ReleaseAsset {
             id: 496_045_871,
@@ -603,12 +795,12 @@ mod tests {
             assets: vec![
                 ReleaseAsset {
                     id: 11,
-                    name: "nanocodex-x86_64-unknown-linux-gnu".to_owned(),
+                    name: "nanocodex-x86_64-unknown-linux-gnu.gz".to_owned(),
                     browser_download_url: "https://example.invalid/nanocodex".to_owned(),
                 },
                 ReleaseAsset {
                     id: 12,
-                    name: VM_GUEST_ASSET.to_owned(),
+                    name: format!("{VM_GUEST_ASSET}.gz"),
                     browser_download_url: "https://example.invalid/nanocodex-vm-guest".to_owned(),
                 },
             ],
@@ -619,10 +811,10 @@ mod tests {
             "nightly-0123456789abcdef0123456789abcdef01234567-11-12"
         );
         assert_eq!(
-            vm_guest_asset_name_for("linux", "x86_64"),
+            vm_guest_binary_asset_name_for("linux", "x86_64"),
             Some(VM_GUEST_ASSET)
         );
-        assert_eq!(vm_guest_asset_name_for("macos", "aarch64"), None);
+        assert_eq!(vm_guest_binary_asset_name_for("macos", "aarch64"), None);
     }
 
     #[test]

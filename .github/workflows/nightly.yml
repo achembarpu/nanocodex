@@ -67,9 +67,15 @@ jobs:
               --target ${{ matrix.target }}
       - name: Stage artifact
         shell: bash
+        env:
+          PR_NUMBER: ${{ inputs.pr }}
         run: |
           mkdir dist
           cp "target/${{ matrix.target }}/nightly/nanocodex" "dist/${{ matrix.artifact }}"
+          if [[ -z "$PR_NUMBER" ]]; then
+            gzip -n -9 -c "dist/${{ matrix.artifact }}" \
+              > "dist/${{ matrix.artifact }}.gz"
+          fi
       - name: Stage PR provenance and checksum
         if: github.event_name == 'workflow_dispatch' && inputs.pr != ''
         shell: bash
@@ -94,7 +100,9 @@ jobs:
           retention-days: ${{ inputs.pr && 7 || 1 }}
 
   build-vm-guest:
-    if: github.repository == 'gakonst/nanocodex'
+    if: >-
+      github.repository == 'gakonst/nanocodex' &&
+      (github.event_name != 'workflow_dispatch' || inputs.pr == '')
     name: build x86_64 Linux VM guest
     runs-on: ubuntu-22.04
     timeout-minutes: 45
@@ -124,7 +132,9 @@ jobs:
         shell: bash
         run: |
           guest=target/x86_64-unknown-linux-musl/nightly/nanocodex-vm-guest
-          if LC_ALL=C readelf -lW "$guest" | grep -q '[[:space:]]INTERP[[:space:]]'; then
+          LC_ALL=C readelf -lW "$guest" > guest-program-headers.txt
+          if grep -q '[[:space:]]INTERP[[:space:]]' guest-program-headers.txt; then
+            cat guest-program-headers.txt >&2
             echo "VM guest has a dynamic program interpreter" >&2
             exit 1
           fi
@@ -134,6 +144,8 @@ jobs:
           mkdir dist
           cp target/x86_64-unknown-linux-musl/nightly/nanocodex-vm-guest \
             dist/nanocodex-vm-guest-x86_64-unknown-linux-musl
+          gzip -n -9 -c dist/nanocodex-vm-guest-x86_64-unknown-linux-musl \
+            > dist/nanocodex-vm-guest-x86_64-unknown-linux-musl.gz
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: nanocodex-vm-guest-x86_64-unknown-linux-musl
@@ -160,7 +172,7 @@ jobs:
         shell: bash
         run: |
           cd dist
-          sha256sum nanocodex-* > SHA256SUMS
+          sha256sum nanocodex-*.gz > SHA256SUMS
       - name: Publish immutable and rolling releases
         env:
           GH_TOKEN: ${{ github.token }}
@@ -183,7 +195,12 @@ jobs:
               --target "$GITHUB_SHA" --title "$release_name" \
               --notes-file "$notes_file" --prerelease
           fi
-          gh release upload "$immutable_tag" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          gh release upload "$immutable_tag" dist/*.gz dist/SHA256SUMS \
+            --repo "$GITHUB_REPOSITORY" --clobber
+
+          # Rolling releases retain raw binaries for updaters shipped before
+          # gzip support. Their checksum manifest covers both representations.
+          (cd dist && sha256sum nanocodex-* > SHA256SUMS)
 
           # SHA256SUMS is the commit marker for clients that still read rolling assets.
           rolling_exists=false
@@ -197,6 +214,22 @@ jobs:
             fi
             gh release upload nightly dist/nanocodex-* \
               --repo "$GITHUB_REPOSITORY" --clobber
+
+            while IFS=$'\t' read -r asset_id asset_name; do
+              case "$asset_name" in
+                nanocodex-aarch64-apple-darwin|nanocodex-aarch64-apple-darwin.gz|\
+                nanocodex-x86_64-unknown-linux-gnu|nanocodex-x86_64-unknown-linux-gnu.gz|\
+                nanocodex-vm-guest-x86_64-unknown-linux-musl|nanocodex-vm-guest-x86_64-unknown-linux-musl.gz)
+                  ;;
+                *)
+                  gh api --method DELETE \
+                    "repos/${GITHUB_REPOSITORY}/releases/assets/${asset_id}"
+                  ;;
+              esac
+            done < <(
+              gh api "repos/${GITHUB_REPOSITORY}/releases/tags/nightly" \
+                --jq '.assets[] | [.id, .name] | @tsv'
+            )
           fi
 
           if gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/nightly" >/dev/null 2>&1; then

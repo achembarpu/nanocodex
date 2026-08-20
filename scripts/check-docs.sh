@@ -10,14 +10,11 @@ if [[ "$target_dir" != /* ]]; then
 fi
 
 version="$(cargo metadata --no-deps --format-version 1 | jq -er '.packages[] | select(.name == "nanocodex") | .version')"
-crates=(
-  nanocodex-oai-api
-  nanocodex-tools-macros
-  nanocodex-observability
-  nanocodex-tools
-  nanocodex-agent
-  nanocodex
-)
+./scripts/release-crates.sh check
+crates=()
+while IFS= read -r crate; do
+  crates+=("$crate")
+done < <(./scripts/release-crates.sh names)
 temporary_dir="$(mktemp -d 2>/dev/null)" || {
   echo "failed to create a temporary docs.rs check directory" >&2
   exit 1

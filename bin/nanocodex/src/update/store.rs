@@ -139,7 +139,7 @@ impl VersionStore {
         Ok(())
     }
 
-    fn is_cached_with_vm_guest(&self, key: &str) -> Result<bool> {
+    pub(super) fn is_cached_with_vm_guest(&self, key: &str) -> Result<bool> {
         Ok(self.is_cached(key)?
             && file_matches_checksum(
                 &self.version_dir(key).join(VM_GUEST_BINARY_NAME),
