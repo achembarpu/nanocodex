@@ -15,6 +15,7 @@ import {
   CODE_VIEW_CUSTOM_CSS,
   CODE_VIEW_LAYOUT,
   CODE_VIEW_THEMES,
+  observePierreCodeScrollRegions,
 } from "./pierreCodeView";
 import type { Theme } from "./NanocodexApp";
 
@@ -77,37 +78,7 @@ export const DiffsHubViewer = memo(function DiffsHubViewer({
     container.tabIndex = 0;
     container.setAttribute("role", "region");
     container.setAttribute("aria-label", "Commit diff stream");
-
-    const shadowObservers = new Map<ShadowRoot, MutationObserver>();
-    const exposeColumns = (root: ShadowRoot) => {
-      for (const column of root.querySelectorAll<HTMLElement>("code[data-code]")) {
-        column.tabIndex = 0;
-      }
-    };
-    const exposeDiffs = () => {
-      for (const [root, observer] of shadowObservers) {
-        if (container.contains(root.host)) continue;
-        observer.disconnect();
-        shadowObservers.delete(root);
-      }
-      for (const host of container.querySelectorAll<HTMLElement>("diffs-container")) {
-        const root = host.shadowRoot;
-        if (!root) continue;
-        exposeColumns(root);
-        if (shadowObservers.has(root)) continue;
-        const observer = new MutationObserver(() => exposeColumns(root));
-        observer.observe(root, { childList: true, subtree: true });
-        shadowObservers.set(root, observer);
-      }
-    };
-
-    exposeDiffs();
-    const containerObserver = new MutationObserver(exposeDiffs);
-    containerObserver.observe(container, { childList: true, subtree: true });
-    return () => {
-      containerObserver.disconnect();
-      for (const observer of shadowObservers.values()) observer.disconnect();
-    };
+    return observePierreCodeScrollRegions(container);
   }, [scrollRef]);
 
   const renderHeaderPrefix = useStableCallback(

@@ -33,6 +33,57 @@ export function getInitialBatchSize(): number {
   );
 }
 
+export function observePierreCodeScrollRegions(container: HTMLElement): () => void {
+  const shadowObservers = new Map<ShadowRoot, MutationObserver>();
+  let animationFrame: number | undefined;
+
+  const exposeColumns = (root: ShadowRoot) => {
+    for (const column of root.querySelectorAll<HTMLElement>("code[data-code]")) {
+      if (column.tabIndex !== 0) column.tabIndex = 0;
+    }
+  };
+  const scheduleScan = () => {
+    if (animationFrame !== undefined) return;
+    animationFrame = requestAnimationFrame(() => {
+      animationFrame = undefined;
+      exposeDiffs();
+    });
+  };
+  const exposeDiffs = () => {
+    for (const [root, observer] of shadowObservers) {
+      if (container.contains(root.host)) continue;
+      observer.disconnect();
+      shadowObservers.delete(root);
+    }
+    for (const host of container.querySelectorAll<HTMLElement>("diffs-container")) {
+      const root = host.shadowRoot;
+      if (!root) {
+        scheduleScan();
+        continue;
+      }
+      exposeColumns(root);
+      if (shadowObservers.has(root)) continue;
+      const observer = new MutationObserver(() => exposeColumns(root));
+      observer.observe(root, {
+        attributes: true,
+        attributeFilter: ["tabindex"],
+        childList: true,
+        subtree: true,
+      });
+      shadowObservers.set(root, observer);
+    }
+  };
+
+  exposeDiffs();
+  const containerObserver = new MutationObserver(exposeDiffs);
+  containerObserver.observe(container, { childList: true, subtree: true });
+  return () => {
+    containerObserver.disconnect();
+    if (animationFrame !== undefined) cancelAnimationFrame(animationFrame);
+    for (const observer of shadowObservers.values()) observer.disconnect();
+  };
+}
+
 export const CODE_VIEW_CUSTOM_CSS = `
 [data-code]:focus-visible {
   outline: none;

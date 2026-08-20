@@ -19,6 +19,7 @@ import {
   CODE_VIEW_CUSTOM_CSS,
   CODE_VIEW_LAYOUT,
   CODE_VIEW_THEMES,
+  observePierreCodeScrollRegions,
 } from "./pierreCodeView";
 import { syntaxLanguageForFile } from "./syntax";
 import type { RepositoryFile } from "./threadRepositorySnapshot";
@@ -207,30 +208,77 @@ function CodeBrowserComponent(
   }, [fileSearchOpen]);
 
   useEffect(() => {
-    const host = treePanelRef.current?.querySelector("file-tree-container");
-    const treeRoot = host?.shadowRoot?.querySelector<HTMLElement>(
-      "[data-file-tree-virtualized-root]",
-    );
-    const treeRows = treeRoot?.querySelector<HTMLElement>(
-      "[data-file-tree-virtualized-scroll]",
-    );
-    if (!treeRoot || !treeRows) return;
+    const panel = treePanelRef.current;
+    if (!panel) return;
+    let animationFrame: number | undefined;
+    let observedRoot: ShadowRoot | undefined;
+    let rootObserver: MutationObserver | undefined;
+    let stopped = false;
 
-    // Pierre's root also owns its header and search input. Keep those controls
-    // outside the ARIA tree while retaining the widget's keyboard event root.
-    treeRoot.removeAttribute("role");
-    treeRoot.removeAttribute("aria-label");
-    treeRows.setAttribute("role", "tree");
-    treeRows.setAttribute("aria-label", "Repository files");
+    const exposeTree = () => {
+      const treeRoot = observedRoot?.querySelector<HTMLElement>(
+        "[data-file-tree-virtualized-root]",
+      );
+      const treeRows = treeRoot?.querySelector<HTMLElement>(
+        "[data-file-tree-virtualized-scroll]",
+      );
+      if (!treeRoot || !treeRows) return;
 
-    const searchInput = treeRoot.querySelector<HTMLInputElement>(
-      "[data-file-tree-search-input]",
-    );
-    if (searchInput) {
-      const rowsId = `${treeRoot.id || "repository-file-tree"}__rows`;
-      treeRows.id = rowsId;
-      searchInput.setAttribute("aria-controls", rowsId);
-    }
+      // Pierre owns keyboard events on the root but also renders its header and
+      // search there. Keep only the actual file rows inside the ARIA tree.
+      if (treeRoot.hasAttribute("role")) treeRoot.removeAttribute("role");
+      if (treeRoot.hasAttribute("aria-label")) treeRoot.removeAttribute("aria-label");
+      if (treeRows.getAttribute("role") !== "tree") treeRows.setAttribute("role", "tree");
+      if (treeRows.getAttribute("aria-label") !== "Repository files") {
+        treeRows.setAttribute("aria-label", "Repository files");
+      }
+
+      const searchInput = treeRoot.querySelector<HTMLInputElement>(
+        "[data-file-tree-search-input]",
+      );
+      if (searchInput) {
+        const rowsId = `${treeRoot.id || "repository-file-tree"}__rows`;
+        if (treeRows.id !== rowsId) treeRows.id = rowsId;
+        if (searchInput.getAttribute("aria-controls") !== rowsId) {
+          searchInput.setAttribute("aria-controls", rowsId);
+        }
+      }
+    };
+    const attachTree = () => {
+      if (stopped) return;
+      const root = panel.querySelector("file-tree-container")?.shadowRoot;
+      if (!root) {
+        if (animationFrame === undefined) {
+          animationFrame = requestAnimationFrame(() => {
+            animationFrame = undefined;
+            attachTree();
+          });
+        }
+        return;
+      }
+      if (root !== observedRoot) {
+        rootObserver?.disconnect();
+        observedRoot = root;
+        rootObserver = new MutationObserver(exposeTree);
+        rootObserver.observe(root, {
+          attributes: true,
+          attributeFilter: ["aria-controls", "aria-label", "id", "role"],
+          childList: true,
+          subtree: true,
+        });
+      }
+      exposeTree();
+    };
+
+    attachTree();
+    const panelObserver = new MutationObserver(attachTree);
+    panelObserver.observe(panel, { childList: true, subtree: true });
+    return () => {
+      stopped = true;
+      panelObserver.disconnect();
+      rootObserver?.disconnect();
+      if (animationFrame !== undefined) cancelAnimationFrame(animationFrame);
+    };
   }, [model]);
 
   useEffect(() => {
@@ -239,6 +287,7 @@ function CodeBrowserComponent(
     container.tabIndex = 0;
     container.setAttribute("role", "region");
     container.setAttribute("aria-label", `${viewFile.path} source code`);
+    return observePierreCodeScrollRegions(container);
   }, [codeReady, viewFile]);
 
   useEffect(() => {
@@ -362,7 +411,12 @@ function CodeBrowserComponent(
                 ))}
               </div>
               <div className="code-file-meta">
-                <button className="code-file-search" type="button" onClick={openFileSearch}>
+                <button
+                  className="code-file-search"
+                  type="button"
+                  aria-label="Jump to file"
+                  onClick={openFileSearch}
+                >
                   <Search aria-hidden="true" />
                   <span>Jump to file</span>
                   <kbd>Ctrl F</kbd>

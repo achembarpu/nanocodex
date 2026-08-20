@@ -14,16 +14,20 @@ test("source and commit workspaces expose headings and keyboard-scrollable code"
   assert.match(application, /<h1 className="sr-only">Nanocodex repository commits<\/h1>/);
   assert.match(codeBrowser, /container\.tabIndex = 0/);
   assert.match(diffViewer, /container\.tabIndex = 0/);
-  assert.match(diffViewer, /column\.tabIndex = 0/);
-  assert.match(diffViewer, /new MutationObserver\(exposeDiffs\)/);
-  assert.match(diffViewer, /container\.contains\(root\.host\)/);
+  assert.match(codeBrowser, /observePierreCodeScrollRegions\(container\)/);
+  assert.match(diffViewer, /observePierreCodeScrollRegions\(container\)/);
+  assert.match(pierreCodeView, /column\.tabIndex = 0/);
+  assert.match(pierreCodeView, /new MutationObserver\(exposeDiffs\)/);
+  assert.match(pierreCodeView, /container\.contains\(root\.host\)/);
   assert.match(pierreCodeView, /\[data-code\]:focus-visible/);
+  assert.match(codeBrowser, /aria-label="Jump to file"/);
 });
 
 test("the Pierre file-tree adapter exposes only file rows as the ARIA tree", () => {
   assert.match(codeBrowser, /treeRoot\.removeAttribute\("role"\)/);
   assert.match(codeBrowser, /treeRows\.setAttribute\("role", "tree"\)/);
   assert.match(codeBrowser, /searchInput\.setAttribute\("aria-controls", rowsId\)/);
+  assert.match(codeBrowser, /new MutationObserver\(exposeTree\)/);
   assert.match(codeBrowser, /role="group"[\s\S]*?File path:/);
 });
 
