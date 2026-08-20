@@ -17,7 +17,7 @@ test("compact workspace policy includes portrait and coarse landscape phones", (
   assert.ok(indexCss.includes(`@media ${compactQuery} {`));
   assert.ok(terminalCss.includes(`@media ${compactQuery} {`));
   assert.ok(tuiCss.includes(`@media ${compactQuery} {`));
-  assert.match(artifactDock, /const \[fullscreen, setFullscreen\] = useState\(\(\) => !compactWorkspace\(\)\)/);
+  assert.match(artifactDock, /const \[fullscreen, setFullscreen\] = useState\(false\)/);
   assert.match(artifactDock, /if \(compact\.matches\) setFullscreen\(false\)/);
   assert.match(artifactDock, /setFullscreen\(!compactWorkspace\(\)\)/);
 });

@@ -141,8 +141,7 @@ function commitSearchScore(commit: HarnessCommit, tokens: readonly string[]) {
   return total;
 }
 
-const installCommand =
-  "curl -fsSL https://nanocodex.paradigm.xyz | bash";
+const installCommand = "cargo add nanocodex";
 
 function RepositorySurfaceError({
   failed,
@@ -590,241 +589,106 @@ function NanocodexShell() {
             <section className="home-page" aria-labelledby="home-title">
               <article className="home-article">
                 <header className="home-intro">
-                  <div className="home-status-line" aria-label="Nanocodex product scope">
-                    <span>OpenAI agent SDK</span>
-                    <span>Rust · JavaScript · Python</span>
-                    <span>Verifier-backed</span>
-                  </div>
-                  <div className="home-intro-grid">
-                    <p className="home-index">00 / Premise</p>
-                    <div className="home-intro-copy">
-                      <h1 id="home-title">The coding agent is the library.</h1>
-                      <p className="home-deck">
-                        Nanocodex puts the complete coding loop inside your
-                        product: retained sessions, typed history, tools,
-                        branches, events, retries, and cleanup. You keep the
-                        interface, data, memory, infrastructure, and policy.
-                      </p>
-                      <nav className="home-actions" aria-label="Get started">
-                        <a href="#agent-demo">Run it here <ChevronRight aria-hidden="true" /></a>
-                        <a href="/docs/getting-started">Embed an agent <ChevronRight aria-hidden="true" /></a>
-                        <a href="https://github.com/gakonst/nanocodex" target="_blank" rel="noreferrer">
-                          Source <ArrowUpRight aria-hidden="true" />
-                        </a>
-                      </nav>
-                    </div>
-                  </div>
+                  <h1 id="home-title">The coding agent is the library.</h1>
+                  <button
+                    className="home-install"
+                    type="button"
+                    aria-label="Copy Rust install command"
+                    onClick={() => {
+                      void navigator.clipboard.writeText(installCommand).then(() => {
+                        setInstallCopied(true);
+                        window.setTimeout(() => setInstallCopied(false), 1_500);
+                      });
+                    }}
+                  >
+                    <span aria-hidden="true">$</span>
+                    <code>{installCommand}</code>
+                    <span className="home-install-state">
+                      {installCopied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
+                      {installCopied ? "copied" : "copy"}
+                    </span>
+                  </button>
+                  <p className="home-meta">Rust · JavaScript · Python · native + WebAssembly</p>
                 </header>
 
                 <section className="home-demo" id="agent-demo" aria-labelledby="agent-demo-title">
-                  <div className="home-chapter-heading">
-                    <p className="home-index">01 / Live system</p>
-                    <div>
-                      <p className="eyebrow">Browser agent</p>
-                      <h2 id="agent-demo-title">Not a recording. Not a chat wrapper.</h2>
-                      <p>
-                        The Rust lifecycle below is really running as WebAssembly
-                        in a Worker against a persistent browser workspace.
-                        Connect with ChatGPT or an API key; credentials stay
-                        behind your transport.
-                      </p>
-                    </div>
-                  </div>
+                  <h2 className="sr-only" id="agent-demo-title">Live Nanocodex browser agent</h2>
                   <Suspense fallback={null}>
                     <AgentTerminal />
                   </Suspense>
-                  <dl className="home-demo-ledger">
-                    <div><dt>Engine</dt><dd>Rust → WASM Worker</dd></div>
-                    <div><dt>Workspace</dt><dd>OPFS · shell · Git · artifacts</dd></div>
-                    <div><dt>Interface</dt><dd>Headless events · bring any renderer</dd></div>
-                  </dl>
                 </section>
 
-                <section className="home-chapter home-boundary" aria-labelledby="home-boundary-title">
-                  <div className="home-chapter-heading">
-                    <p className="home-index">02 / Boundary</p>
-                    <div>
-                      <p className="eyebrow">One owned lifecycle</p>
-                      <h2 id="home-boundary-title">Embed the hard parts. Keep the product.</h2>
-                      <p>
-                        One private driver owns mutable conversation, model,
-                        transport, and tool state. The public API stays small
-                        because callers should express policy, not replay internals.
-                      </p>
-                    </div>
-                  </div>
-                  <div className="home-ownership">
-                    <article>
-                      <p>Nanocodex owns</p>
-                      <ul>
-                        <li>Prompt ordering and independently awaitable turns</li>
-                        <li>Committed typed history and persistent WebSocket reuse</li>
-                        <li>Tool execution, Code Mode, deferred MCP discovery</li>
-                        <li>Retries, compaction, branches, snapshots, cancellation</li>
-                        <li>Process-group cleanup and optional durable recovery</li>
-                      </ul>
-                    </article>
-                    <article>
-                      <p>Your product owns</p>
-                      <ul>
-                        <li>Interface, interaction model, tenancy, and authorization</li>
-                        <li>Tools, workspace, sandbox, egress, and secrets</li>
-                        <li>Persistence, memory governance, review, and telemetry</li>
-                        <li>Deployment on native, browser, Workflow, Workers, or Actors</li>
-                        <li>The opinionated experience users actually touch</li>
-                      </ul>
-                    </article>
-                  </div>
-                  <div className="home-lifecycle" aria-label="Agent lifecycle">
-                    <code>prompt → Turn → TurnResult</code>
-                    <span>+</span>
-                    <code>AgentEvents → UI · storage · telemetry</code>
-                  </div>
-                </section>
-
-                <section className="home-chapter home-bindings" aria-labelledby="home-bindings-title">
-                  <div className="home-chapter-heading">
-                    <p className="home-index">03 / Surfaces</p>
-                    <div>
-                      <p className="eyebrow">Same agent, thin bindings</p>
-                      <h2 id="home-bindings-title">Start at the boundary you already own.</h2>
-                      <p>
-                        Follow-on prompts reuse history, tools, socket, and cache
-                        identity automatically. No binding asks you to pass old
-                        messages, response IDs, or tool results back in.
-                      </p>
-                    </div>
-                  </div>
-                  <div className="home-binding-ledger">
-                    <article><span>Rust</span><code>Nanocodex::builder(openai)</code><p>Typed turns, optional events, Tower middleware, and the complete owned lifecycle.</p><a href="/docs/sdks/rust">Rust SDK <ChevronRight aria-hidden="true" /></a></article>
-                    <article><span>JavaScript</span><code>{"Agent.create({ transport })"}</code><p>Viem-style actions for Node and browser WASM, plus headless React ownership.</p><a href="/docs/sdks/javascript">JavaScript SDK <ChevronRight aria-hidden="true" /></a></article>
-                    <article><span>Python</span><code>Nanocodex(api_key)</code><p>A typed PyO3 adapter over the native Rust session—not a second agent implementation.</p><a href="/docs/sdks/python">Python SDK <ChevronRight aria-hidden="true" /></a></article>
-                  </div>
-                  <div className="home-web-proof">
-                    <div>
-                      <p className="eyebrow">The web is a real host</p>
-                      <h3>Build a capable agent without provisioning a remote sandbox.</h3>
-                      <p>
-                        Browser JavaScript can host the Rust agent and an OPFS
-                        workspace directly. Lazy tools add just-bash, Python,
-                        C/C++, canonical apply_patch, Git and gh, bounded dataset
-                        inspection, image generation, web search, and live React
-                        artifacts.
-                      </p>
-                      <p className="home-caveat">
-                        Local browser execution is convenience, not isolation.
-                        Choose a retained VM or hosted sandbox when the workload
-                        needs a security boundary.
-                      </p>
-                    </div>
-                    <pre aria-label="JavaScript agent example"><code>{`const agent = await Agent.create({ transport })
-await agent.prompt("inspect this workspace")
-const result = await agent.result()`}</code></pre>
-                  </div>
-                </section>
-
-                <section className="home-chapter home-tact" aria-labelledby="home-tact-title">
-                  <div className="home-chapter-heading">
-                    <p className="home-index">04 / Built on it</p>
-                    <div>
-                      <p className="eyebrow">Tact</p>
-                      <h2 id="home-tact-title">A complete product around a deliberately incomplete SDK.</h2>
-                      <p>
-                        Tact composes retained sessions, tools, branches, events,
-                        and optional task trees into its own terminal agent. Its
-                        durable index, skills, reflection, review, authorization,
-                        and memory system stay application-owned.
-                      </p>
-                    </div>
-                  </div>
-                  <div className="home-tact-grid">
-                    <article>
-                      <span>Composition</span>
-                      <p>Nanocodex lifecycle + typed tools</p>
-                      <span className="home-flow-arrow">↓</span>
-                      <p>Tact session envelope + extensions</p>
-                      <span className="home-flow-arrow">↓</span>
-                      <p>Terminal, review, memory, and product policy</p>
-                    </article>
-                    <article>
-                      <span>Memory with authority</span>
-                      <p>
-                        Memory is selected by the application, never silently
-                        injected. Tact uses exact versioned keys, explicit
-                        scan-before-put behavior, root-write/child-read policy,
-                        and no quiet remote fallback.
-                      </p>
-                      <a href="/docs/examples/tact">Read the Tact case study <ChevronRight aria-hidden="true" /></a>
-                      <a href="https://github.com/clabby/tact" target="_blank" rel="noreferrer">Open Tact <ArrowUpRight aria-hidden="true" /></a>
-                    </article>
-                  </div>
-                  <a className="home-inline-proof" href="https://github.com/gakonst/nanocodex/tree/master/examples/vercel-workflows" target="_blank" rel="noreferrer">
-                    See one headless agent rendered through @wterm/react—with the same stream ready for xterm.js or custom React
-                    <ArrowUpRight aria-hidden="true" />
-                  </a>
-                </section>
-
-                <section className="home-chapter home-evidence" aria-labelledby="home-evidence-title">
-                  <div className="home-chapter-heading">
-                    <p className="home-index">05 / Evidence</p>
-                    <div>
-                      <p className="eyebrow">Verifier-backed, artifact-retained</p>
-                      <h2 id="home-evidence-title">Claims come with the work that produced them.</h2>
-                      <p>
-                        Fresh VM overlays run the agent and canonical verifier.
-                        Result JSON, raw events, trajectories, API exchanges,
-                        verifier output, usage, cost, and infrastructure evidence
-                        remain inspectable.
-                      </p>
-                    </div>
-                  </div>
-                  <div className="home-metrics">
-                    <article><strong>39 / 39</strong><span>latency gates</span><p>Retained PR #50 release evidence. A performance gate, not a task-quality score.</p></article>
-                    <article><strong>0.267 ms</strong><span>median local overhead</span><p>Paired 70-turn workload; 97.879% of measured time was reported model work.</p></article>
-                    <article><strong>13 / 20</strong><span>attempts · 8m15s</span><p>Frozen four-task Terminal-Bench 2.1 slice. Historical baseline, not a leaderboard claim.</p></article>
-                  </div>
-                  <nav className="home-proof-links" aria-label="Inspect Nanocodex evidence">
-                    <a href={threadSurfacePath("evals")} onFocus={preloadEvalOverview} onPointerEnter={preloadEvalOverview} onClick={(event) => { event.preventDefault(); navigateToSurface("evals"); }}>Live evals <ArrowUpRight aria-hidden="true" /></a>
-                    <a href="/docs/evals">Evaluation contract <ChevronRight aria-hidden="true" /></a>
-                    <a href={threadSurfacePath("code")} onClick={(event) => { event.preventDefault(); navigateToSurface("code"); }}>Source <ArrowUpRight aria-hidden="true" /></a>
-                    <a href={threadSurfacePath("commits")} onClick={(event) => { event.preventDefault(); navigateToSurface("commits"); }}>Commit record <ArrowUpRight aria-hidden="true" /></a>
+                <section className="home-summary" aria-label="What Nanocodex is">
+                  <p>
+                    Nanocodex is a headless Rust agents SDK. It owns the coding
+                    loop—sessions, typed history, tools, retries, branches,
+                    cancellation, and cleanup—while your application owns the
+                    interface and policy.
+                  </p>
+                  <p>
+                    One retained session reuses its WebSocket, history, tools,
+                    shell, and cache identity. Send a prompt, await a typed
+                    result, or consume the same event stream independently.
+                  </p>
+                  <p>
+                    JavaScript can run that loop directly in a browser Worker
+                    with OPFS, shell, Python, Git, patches, datasets, search,
+                    image generation, and live React artifacts. Use a VM or
+                    hosted sandbox only when you need an isolation boundary.
+                  </p>
+                  <p>
+                    <a href="https://github.com/clabby/tact" target="_blank" rel="noreferrer">Tact</a>
+                    {" "}shows the intended composition: Nanocodex supplies the
+                    agent lifecycle; the product supplies its terminal, review,
+                    skills, authorization, durable index, and memory system.
+                  </p>
+                  <nav className="home-links" aria-label="Nanocodex links">
+                    <a href="/docs">docs</a>
+                    <a href="/docs/sdks/javascript">JavaScript</a>
+                    <a href="/docs/sdks/python">Python</a>
+                    <a href="/docs/examples/tact">Tact case study</a>
+                    <a href="https://github.com/gakonst/nanocodex" target="_blank" rel="noreferrer">source</a>
                   </nav>
                 </section>
 
-                <section className="home-chapter home-doc-paths" aria-labelledby="home-docs-title">
-                  <div className="home-chapter-heading">
-                    <p className="home-index">06 / Manual</p>
-                    <div>
-                      <p className="eyebrow">Documentation</p>
-                      <h2 id="home-docs-title">Read by the job you are doing.</h2>
-                    </div>
-                  </div>
-                  <div className="home-path-grid">
-                    <article><span>Try it</span><a href="/docs/getting-started">Getting started</a><a href="/docs/capabilities/web-agent">Web agent</a></article>
-                    <article><span>Embed it</span><a href="/docs/core/owned-agent">Owned lifecycle</a><a href="/docs/core/tools-code-mode">Tools and Code Mode</a></article>
-                    <article><span>Verify it</span><a href="/docs/stability">Stability and scope</a><a href="/docs/evals">Evaluation</a></article>
-                  </div>
+                <p className="home-divider" aria-hidden="true">***</p>
+
+                <section className="home-facts" aria-label="Nanocodex capabilities">
+                  <article>
+                    <h2>Owned agent lifecycle</h2>
+                    <p>Prompt ordering, independently awaitable turns, committed history, reconnect replay, compaction, snapshots, branches, and process-group cleanup.</p>
+                  </article>
+                  <article>
+                    <h2>Tools and Code Mode</h2>
+                    <p>Caller-defined typed tools, heterogeneous registries, MCP transports, deferred discovery, remote dispatch, and one agent-owned execution loop.</p>
+                  </article>
+                  <article>
+                    <h2>Native and browser hosts</h2>
+                    <p>Run in Rust, Node, Python, browser WASM, Cloudflare Workers, Vercel Workflows, or an application-owned VM without changing the session contract.</p>
+                  </article>
+                  <article>
+                    <h2>Bring any interface</h2>
+                    <p>Typed events can drive a CLI, Ratatui, wterm, xterm.js, custom React, storage, telemetry, or several consumers at once.</p>
+                  </article>
+                  <article>
+                    <h2>Application-owned memory</h2>
+                    <p>Memory is explicit product policy, not hidden context injection. Tact demonstrates versioned keys, scan-before-put behavior, and root-write/child-read authority.</p>
+                  </article>
+                  <article>
+                    <h2>Verifier-backed evals</h2>
+                    <p>39/39 latency gates, 0.267 ms median local overhead, and a retained 13/20 Terminal-Bench slice—with trajectories, verifier output, usage, and artifacts.</p>
+                    <a href={threadSurfacePath("evals")} onFocus={preloadEvalOverview} onPointerEnter={preloadEvalOverview} onClick={(event) => { event.preventDefault(); navigateToSurface("evals"); }}>inspect live evals</a>
+                  </article>
                 </section>
 
-                <section className="home-release-section" aria-labelledby="home-release-title">
-                  <div className="home-release-heading">
-                    <div>
-                      <p className="home-index">07 / Start</p>
-                      <h2 id="home-release-title">Choose your host.</h2>
-                    </div>
-                    <a href="https://github.com/gakonst/nanocodex/releases/latest" target="_blank" rel="noreferrer">
-                      Latest release <ArrowUpRight aria-hidden="true" />
-                    </a>
-                  </div>
-                  <div className="home-hosts">
-                    <div><span>Rust</span><code>cargo add nanocodex</code></div>
-                    <div><span>JavaScript</span><code>npm install nanocodex</code></div>
-                    <div><span>Native consumer</span><code>{installCommand}</code></div>
-                  </div>
-                  <button className="home-copy-install" type="button" aria-label="Copy install command" onClick={() => { void navigator.clipboard.writeText(installCommand).then(() => { setInstallCopied(true); window.setTimeout(() => setInstallCopied(false), 1_500); }); }}>
-                    {installCopied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
-                    {installCopied ? "Copied CLI command" : "Copy CLI command"}
-                  </button>
+                <section className="home-start" aria-label="Install Nanocodex">
+                  <code>$ cargo add nanocodex</code>
+                  <code>$ npm install nanocodex</code>
+                  <nav>
+                    <a href="/docs/getting-started">get started</a>
+                    <a href="https://github.com/gakonst/nanocodex/tree/master/examples/vercel-workflows" target="_blank" rel="noreferrer">wterm example</a>
+                    <a href="https://github.com/gakonst/nanocodex/releases/latest" target="_blank" rel="noreferrer">releases</a>
+                  </nav>
                 </section>
               </article>
             </section>

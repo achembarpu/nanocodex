@@ -38,7 +38,7 @@ export const ArtifactDock = memo(function ArtifactDock({
   const [store, setStore] = useState<ArtifactStore>();
   const [artifacts, setArtifacts] = useState<readonly ArtifactDocument[]>([initialArtifact]);
   const [selectedId, setSelectedId] = useState(initialArtifact.id);
-  const [fullscreen, setFullscreen] = useState(() => !compactWorkspace());
+  const [fullscreen, setFullscreen] = useState(false);
   const [message, setMessage] = useState("");
   const refreshEpoch = useRef(0);
   const selected = artifacts.find((artifact) => artifact.id === selectedId) ?? artifacts[0];
