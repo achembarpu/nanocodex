@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import { execFile } from "node:child_process";
 import { once } from "node:events";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { resolve } from "node:path";
@@ -12,6 +12,7 @@ import { fileURLToPath } from "node:url";
 import {
   buildGitArtifacts,
   buildUploadPlan,
+  buildRepositoryPackParts,
   isRetriableUploadError,
   isRetriableUploadStatus,
   readRemoteState,
@@ -29,7 +30,8 @@ test("the publisher CLI initializes its module before building a generation", as
   const server = createServer(async (request, response) => {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
-    const body = Buffer.concat(chunks).toString("utf8");
+    const rawBody = Buffer.concat(chunks);
+    const body = rawBody.toString("utf8");
     requests.push({
       authorization: request.headers.authorization,
       body,
@@ -51,7 +53,8 @@ test("the publisher CLI initializes its module before building a generation", as
         request.socket.destroy();
         return;
       }
-      response.writeHead(201).end();
+      response.writeHead(201, { "content-type": "application/json" });
+      response.end(JSON.stringify({ size: rawBody.byteLength }));
       return;
     }
     if (request.method === "PUT" && request.url === "/api/git/publish") {
@@ -98,6 +101,15 @@ test("the publisher CLI initializes its module before building a generation", as
     const publication = JSON.parse(publicationRequest.body);
     assert.equal(publication.expectedHead, null);
     assert.equal(publication.publication.head, head);
+    assert.ok(publication.publication.packParts.length > 0);
+    assert.equal("packKey" in publication.publication, false);
+    assert.ok(publication.publication.packParts.every(({ key, size }) =>
+      requests.some(({ url }) => url === `/api/git/objects/${key}`) &&
+      Number.isSafeInteger(size) &&
+      size > 0 &&
+      size <= 16 * 1024 * 1024
+    ));
+    assert.equal(requests.some(({ url }) => url?.endsWith("/repository.pack")), false);
     assert.ok(requests.some(({ url }) =>
       url === `/api/git/objects/generations/${head}/commits/0000.json`
     ));
@@ -142,6 +154,24 @@ test("repository publication uploads only content absent from the prior inventor
     ),
     { blobs: ["b"], patches: ["2"] },
   );
+});
+
+test("repository packs are divided into canonical bounded upload parts", () => {
+  const head = "a".repeat(40);
+  const packHash = "b".repeat(40);
+  const partBytes = 16 * 1024 * 1024;
+  const packSize = (partBytes * 4) + 1_100_465;
+  const parts = buildRepositoryPackParts(head, packHash, packSize);
+
+  assert.equal(parts.length, 5);
+  assert.equal(parts.reduce((total, part) => total + part.size, 0), packSize);
+  assert.deepEqual(parts.map(({ key, offset, size }) => ({ key, offset, size })), [
+    { key: `generations/${head}/packs/${packHash}/0000.pack`, offset: 0, size: partBytes },
+    { key: `generations/${head}/packs/${packHash}/0001.pack`, offset: partBytes, size: partBytes },
+    { key: `generations/${head}/packs/${packHash}/0002.pack`, offset: partBytes * 2, size: partBytes },
+    { key: `generations/${head}/packs/${packHash}/0003.pack`, offset: partBytes * 3, size: partBytes },
+    { key: `generations/${head}/packs/${packHash}/0004.pack`, offset: partBytes * 4, size: 1_100_465 },
+  ]);
 });
 
 test("repository uploads retry bounded transient responses and transport failures", () => {
@@ -220,6 +250,14 @@ test("Git artifacts contain only advertised refs and reuse immutable object shar
     assert.equal(first.manifest.objects[hiddenCommit], undefined);
     assert.equal(first.manifest.objects[hiddenBlob], undefined);
     assert.ok(first.manifest.objects[firstHead]);
+    const firstPack = await readFile(first.packPath);
+    assert.equal(first.packSize, firstPack.byteLength);
+    assert.deepEqual(
+      Buffer.concat(first.packParts.map(({ offset, size }) =>
+        firstPack.subarray(offset, offset + size)
+      )),
+      firstPack,
+    );
     const advertisedPack = await git(
       ["verify-pack", "-v", resolve(firstOutput, "repository.idx")],
       repository,

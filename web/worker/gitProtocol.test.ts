@@ -15,6 +15,7 @@ import type { RepositoryPublication } from "./gitRepository.ts";
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 const hash = "a".repeat(40);
+const packHash = "c".repeat(40);
 
 const publication: RepositoryPublication = {
   version: 1,
@@ -27,9 +28,10 @@ const publication: RepositoryPublication = {
   snapshotKey: `generations/${hash}/repository.json`,
   commitsKey: `generations/${hash}/commits.json`,
   inventoryKey: `generations/${hash}/inventory.json`,
-  packKey: `generations/${hash}/repository.pack`,
+  packParts: [{ key: `generations/${hash}/packs/${packHash}/0000.pack`, size: 1 }],
+  packSize: 1,
   objectManifestKey: `generations/${hash}/objects.json`,
-  packHash: "c".repeat(40),
+  packHash,
   publishedAt: "2026-08-17T00:00:00.000Z",
 };
 

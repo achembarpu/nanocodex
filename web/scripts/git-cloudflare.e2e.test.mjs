@@ -27,7 +27,7 @@ test("stock Git clones, incrementally fetches, and deepens R2 publications", asy
     await git(["init", "-q", "-b", "main", source], directory);
     await git(["config", "user.name", "Nanocodex E2E"], source);
     await git(["config", "user.email", "e2e@nanocodex.invalid"], source);
-    await writeFile(resolve(source, "large.bin"), randomBytes(512 * 1024));
+    await writeFile(resolve(source, "large.bin"), randomBytes(17 * 1024 * 1024));
     await writeFile(resolve(source, "README.md"), "# fixture\n");
     await git(["add", "."], source);
     await git(["commit", "-qm", "large root"], source);
@@ -50,6 +50,7 @@ test("stock Git clones, incrementally fetches, and deepens R2 publications", asy
       refs: firstRefs,
       previousManifest: null,
     });
+    assert.ok(first.packParts.length > 1, "fresh clone fixture must cross a pack-part boundary");
     state.publication = publication(firstHead, firstRefs, first);
     await storeArtifacts(bucket, state.publication, first);
 
@@ -64,7 +65,7 @@ test("stock Git clones, incrementally fetches, and deepens R2 publications", asy
     assert.equal(await git(["rev-parse", "HEAD"], full), firstHead);
     assert.equal(await git(["tag", "-l", "v1"], full), "v1");
     const cloneBytes = transferBytes.reduce((total, size) => total + size, 0);
-    assert.ok(cloneBytes > 400_000, `expected a representative full clone, got ${cloneBytes}`);
+    assert.ok(cloneBytes > 16 * 1024 * 1024, `expected a multipart full clone, got ${cloneBytes}`);
 
     await writeFile(resolve(source, "src", "main.rs"), "fn main() { println!(\"small\"); }\n");
     await git(["add", "src/main.rs"], source);
@@ -178,7 +179,13 @@ class MemoryR2Bucket {
 }
 
 async function storeArtifacts(bucket, current, artifacts) {
-  await bucket.putBytes(current.packKey, await readFile(artifacts.packPath));
+  const pack = await readFile(artifacts.packPath);
+  for (const part of artifacts.packParts) {
+    await bucket.putBytes(
+      part.key,
+      pack.subarray(part.offset, part.offset + part.size),
+    );
+  }
   await bucket.putBytes(current.objectManifestKey, await readFile(artifacts.manifestPath));
   for (const shard of artifacts.shards) await bucket.putBytes(shard.key, await readFile(shard.path));
 }
@@ -193,7 +200,8 @@ function publication(head, refs, artifacts) {
     snapshotKey: `${prefix}/repository.json`,
     commitsKey: `${prefix}/commits.json`,
     inventoryKey: `${prefix}/inventory.json`,
-    packKey: `${prefix}/repository.pack`,
+    packParts: artifacts.packParts.map(({ key, size }) => ({ key, size })),
+    packSize: artifacts.packSize,
     objectManifestKey: `${prefix}/objects.json`,
     packHash: artifacts.packHash,
     publishedAt: new Date().toISOString(),

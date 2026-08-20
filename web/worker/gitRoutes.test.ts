@@ -5,6 +5,7 @@ import { gzipSync } from "node:zlib";
 import { handleGitRequest, readGitProtocolRequest } from "./gitRoutes.ts";
 
 const head = "a".repeat(40);
+const packHash = "b".repeat(40);
 
 test("generation-pinned commit pages bypass mutable publication state", async () => {
   let requestedKey = "";
@@ -86,6 +87,7 @@ test("repository uploads cannot overwrite an immutable R2 key", async () => {
 });
 
 test("repository uploads retain conditional creation for a new immutable key", async () => {
+  let storedKey = "";
   let putOptions: R2PutOptions | undefined;
   let uploadedBody = "";
   const created = {
@@ -94,14 +96,15 @@ test("repository uploads retain conditional creation for a new immutable key", a
   } as R2Object;
   const bucket = {
     head: async () => null,
-    put: async (_key: string, body: ReadableStream, options?: R2PutOptions) => {
+    put: async (key: string, body: ReadableStream, options?: R2PutOptions) => {
+      storedKey = key;
       putOptions = options;
       uploadedBody = await new Response(body).text();
       return created;
     },
   } as unknown as R2Bucket;
   const request = new Request(
-    "https://nanocodex.example/api/git/objects/blobs/0123456789abcdef0123456789abcdef01234567",
+    `https://nanocodex.example/api/git/objects/generations/${head}/packs/${packHash}/0000.pack`,
     {
       method: "PUT",
       headers: { authorization: "Bearer mirror-token" },
@@ -116,10 +119,11 @@ test("repository uploads retain conditional creation for a new immutable key", a
   );
 
   assert.equal(response?.status, 200);
+  assert.equal(storedKey, `generations/${head}/packs/${packHash}/0000.pack`);
   assert.equal(uploadedBody, "created");
   assert.deepEqual(putOptions?.onlyIf, { etagDoesNotMatch: "*" });
   assert.deepEqual(await response?.json(), {
-    key: "blobs/0123456789abcdef0123456789abcdef01234567.txt",
+    key: `generations/${head}/packs/${packHash}/0000.pack`,
     etag: '"created"',
     size: 7,
     stored: true,
@@ -136,9 +140,10 @@ test("repository publication forwards an explicit invalid-state replacement", as
     snapshotKey: `generations/${head}/repository.json`,
     commitsKey: `generations/${head}/commits.json`,
     inventoryKey: `generations/${head}/inventory.json`,
-    packKey: `generations/${head}/repository.pack`,
+    packParts: [{ key: `generations/${head}/packs/${packHash}/0000.pack`, size: 1 }],
+    packSize: 1,
     objectManifestKey: `generations/${head}/objects.json`,
-    packHash: "b".repeat(40),
+    packHash,
     publishedAt: "2026-08-18T00:00:00.000Z",
   };
   const manifest = {
@@ -185,6 +190,65 @@ test("repository publication forwards an explicit invalid-state replacement", as
     expectedHead: null,
     publication,
     replaceInvalid: true,
+  });
+});
+
+test("repository publication rejects pack parts whose stored size changed", async () => {
+  const partKey = `generations/${head}/packs/${packHash}/0000.pack`;
+  const publication = {
+    version: 1 as const,
+    head,
+    branch: "master",
+    refs: [{ name: "refs/heads/master", oid: head }],
+    snapshotKey: `generations/${head}/repository.json`,
+    commitsKey: `generations/${head}/commits.json`,
+    inventoryKey: `generations/${head}/inventory.json`,
+    packParts: [{ key: partKey, size: 2 }],
+    packSize: 2,
+    objectManifestKey: `generations/${head}/objects.json`,
+    packHash,
+    publishedAt: "2026-08-18T00:00:00.000Z",
+  };
+  let forwarded = false;
+  const namespace = {
+    idFromName: () => ({}) as DurableObjectId,
+    get: () => ({
+      fetch: async () => {
+        forwarded = true;
+        return Response.json(publication);
+      },
+    }),
+  } as unknown as DurableObjectNamespace;
+  const bucket = {
+    head: async (key: string) => ({
+      httpEtag: '"present"',
+      size: key === partKey ? 1 : 2,
+    }),
+  } as unknown as R2Bucket;
+  const request = new Request("https://nanocodex.example/api/git/publish", {
+    method: "PUT",
+    headers: {
+      authorization: "Bearer mirror-token",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ expectedHead: null, publication, replaceInvalid: true }),
+  });
+
+  const response = await handleGitRequest(
+    request,
+    {
+      GIT_OBJECTS: bucket,
+      GIT_REPOSITORY: namespace,
+      GIT_MIRROR_TOKEN: "mirror-token",
+    },
+    new URL(request.url),
+  );
+
+  assert.equal(response?.status, 409);
+  assert.equal(forwarded, false);
+  assert.deepEqual(await response?.json(), {
+    error: "publication_pack_parts_invalid",
+    invalid: [partKey],
   });
 });
 
@@ -239,9 +303,10 @@ test("repository reads hit edge cache before the publication Durable Object", as
     snapshotKey: `generations/${head}/repository.json`,
     commitsKey: `generations/${head}/commits.json`,
     inventoryKey: `generations/${head}/inventory.json`,
-    packKey: `generations/${head}/repository.pack`,
+    packParts: [{ key: `generations/${head}/packs/${packHash}/0000.pack`, size: 1 }],
+    packSize: 1,
     objectManifestKey: `generations/${head}/objects.json`,
-    packHash: "b".repeat(40),
+    packHash,
     publishedAt: "2026-08-17T00:00:00.000Z",
   };
   const namespace = {

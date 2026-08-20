@@ -12,15 +12,17 @@ import {
   type GitObjectManifest,
 } from "./gitObjectManifest.ts";
 import { createSelectedPackStream } from "./gitObjectPack.ts";
+import { createRepositoryPackStream } from "./gitPackParts.ts";
 import {
   isRepositoryPublication,
   type RepositoryPublication,
 } from "./gitRepository.ts";
 
 const SHA1_PATTERN = /^[a-f0-9]{40}$/;
-const generationFilePattern = /^(repository\.json|commits\.json|inventory\.json|repository\.pack|objects\.json)$/;
+const generationFilePattern = /^(repository\.json|commits\.json|inventory\.json|objects\.json)$/;
 const generationCommitPagePattern = /^commits\/(\d{4})\.json$/;
 const generationObjectShardPattern = /^objects\/(\d{4})\.pack$/;
+const generationPackPartPattern = /^packs\/([a-f0-9]{40})\/(\d{4})\.pack$/;
 const immutableCacheControl = "public, max-age=31536000, immutable";
 
 export type GitStorageEnv = {
@@ -131,12 +133,22 @@ export async function handleGitRequest(
       publication.snapshotKey,
       publication.commitsKey,
       publication.inventoryKey,
-      publication.packKey,
+      ...publication.packParts.map((part) => part.key),
     ];
     const objects = await Promise.all(requiredKeys.map((key) => requireBucket(env).head(key)));
     const missing = requiredKeys.filter((_, index) => objects[index] == null);
     if (missing.length > 0) {
       return Response.json({ error: "publication_objects_missing", missing }, { status: 409 });
+    }
+    const packOffset = requiredKeys.length - publication.packParts.length;
+    const invalidPackParts = publication.packParts
+      .filter((part, index) => objects[packOffset + index]?.size !== part.size)
+      .map((part) => part.key);
+    if (invalidPackParts.length > 0) {
+      return Response.json(
+        { error: "publication_pack_parts_invalid", invalid: invalidPackParts },
+        { status: 409 },
+      );
     }
     const storedManifest = await requireBucket(env).get(publication.objectManifestKey);
     if (storedManifest == null) {
@@ -227,9 +239,15 @@ export async function handleGitRequest(
       fetchRequest.shallow.length === 0 &&
       fetchRequest.deepen === 0
     ) {
-      const pack = await requireBucket(env).get(publication.packKey);
-      if (pack == null) return storageFailure("published pack is missing");
-      return gitUploadResponse(buildFullPackResponse(pack.body));
+      try {
+        const pack = await createRepositoryPackStream(
+          requireBucket(env),
+          publication.packParts,
+        );
+        return gitUploadResponse(buildFullPackResponse(pack));
+      } catch {
+        return storageFailure("published pack is missing or invalid");
+      }
     }
     const selection = selectGitObjects(
       manifest,
@@ -479,6 +497,12 @@ function objectKeyFromUploadPath(pathname: string): string | null {
   );
   if (objectShard && generationObjectShardPattern.test(objectShard[2])) {
     return `generations/${objectShard[1]}/${objectShard[2]}`;
+  }
+  const packPart = relative.match(
+    /^generations\/([a-f0-9]{40})\/(packs\/[a-f0-9]{40}\/\d{4}\.pack)$/,
+  );
+  if (packPart && generationPackPartPattern.test(packPart[2])) {
+    return `generations/${packPart[1]}/${packPart[2]}`;
   }
   return null;
 }

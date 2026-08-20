@@ -23,6 +23,7 @@ const repositoryPath = resolve(
   process.env.NANOCODEX_REPO ?? resolve(projectRoot, ".."),
 );
 const uploadConcurrency = 12;
+const repositoryPackPartBytes = 16 * 1024 * 1024;
 
 async function main() {
   const origin = requiredEnvironment("NANOCODEX_GIT_ORIGIN").replace(/\/$/, "");
@@ -109,6 +110,9 @@ async function main() {
       mapConcurrent(gitArtifacts.shards, uploadConcurrency, (shard) =>
         uploadFile(origin, token, shard.key, shard.path)
       ),
+      mapConcurrent(gitArtifacts.packParts, 2, (part) =>
+        uploadFile(origin, token, part.key, gitArtifacts.packPath, part)
+      ),
       mapConcurrent(commitPageNames, uploadConcurrency, (name) => uploadFile(
           origin,
           token,
@@ -116,8 +120,6 @@ async function main() {
           resolve(dataDirectory, "commit-pages", `${name}.json`),
         )),
     ]);
-    await uploadFile(origin, token, `${generationPrefix}/repository.pack`, gitArtifacts.packPath);
-
     const publication = {
       version: 1,
       head,
@@ -126,7 +128,8 @@ async function main() {
       snapshotKey: `${generationPrefix}/repository.json`,
       commitsKey: `${generationPrefix}/commits.json`,
       inventoryKey: `${generationPrefix}/inventory.json`,
-      packKey: `${generationPrefix}/repository.pack`,
+      packParts: gitArtifacts.packParts.map(({ key, size }) => ({ key, size })),
+      packSize: gitArtifacts.packSize,
       objectManifestKey: `${generationPrefix}/objects.json`,
       packHash: gitArtifacts.packHash,
       publishedAt: new Date().toISOString(),
@@ -142,7 +145,7 @@ async function main() {
     });
     if (!response.ok) throw new Error(await responseError("publish", response));
     console.log(
-      `Published ${snapshot.repository.fullName} ${head.slice(0, 7)} (${commits.length} commits, ${gitArtifacts.objectCount} objects, ${gitArtifacts.packHash.slice(0, 7)} pack)`,
+      `Published ${snapshot.repository.fullName} ${head.slice(0, 7)} (${commits.length} commits, ${gitArtifacts.objectCount} objects, ${gitArtifacts.packParts.length} pack parts, ${gitArtifacts.packHash.slice(0, 7)} pack)`,
     );
   } finally {
     await rm(temporaryDirectory, { recursive: true, force: true });
@@ -225,6 +228,8 @@ export async function buildGitArtifacts({
   const indexPath = resolve(temporaryDirectory, "repository.idx");
   await writePack(packPath, revisionOids, repository, true);
   const packHash = await indexAndVerifyPack(packPath, indexPath, repository);
+  const packSize = (await stat(packPath)).size;
+  const packParts = buildRepositoryPackParts(head, packHash, packSize);
   const reachableOids = await listReachableOids(revisionOids, repository);
 
   const reusePrevious = isReusableManifest(previousManifest) &&
@@ -267,11 +272,31 @@ export async function buildGitArtifacts({
   return {
     packPath,
     packHash,
+    packParts,
+    packSize,
     manifest,
     manifestPath,
     shards: newShards.map(({ key, path }) => ({ key, path })),
     objectCount: reachableOids.length,
   };
+}
+
+export function buildRepositoryPackParts(head, packHash, packSize) {
+  if (!/^[a-f0-9]{40}$/.test(head)) throw new Error("repository pack head is invalid");
+  if (!/^[a-f0-9]{40}$/.test(packHash)) throw new Error("repository pack hash is invalid");
+  if (!Number.isSafeInteger(packSize) || packSize <= 0) {
+    throw new Error("repository pack size is invalid");
+  }
+  const count = Math.ceil(packSize / repositoryPackPartBytes);
+  if (count > 256) throw new Error("repository pack part count exceeds 256");
+  return Array.from({ length: count }, (_, index) => {
+    const offset = index * repositoryPackPartBytes;
+    return {
+      key: `generations/${head}/packs/${packHash}/${String(index).padStart(4, "0")}.pack`,
+      offset,
+      size: Math.min(repositoryPackPartBytes, packSize - offset),
+    };
+  });
 }
 
 async function writePack(path, objectIds, repository, traverseRevisions) {
@@ -555,12 +580,26 @@ async function readRefs() {
   });
 }
 
-async function uploadFile(origin, token, remote, local) {
-  const size = (await stat(local)).size;
+async function uploadFile(origin, token, remote, local, range) {
+  const fileSize = (await stat(local)).size;
+  const offset = range?.offset ?? 0;
+  const size = range?.size ?? fileSize;
+  if (
+    !Number.isSafeInteger(offset) ||
+    offset < 0 ||
+    !Number.isSafeInteger(size) ||
+    size <= 0 ||
+    offset + size > fileSize
+  ) {
+    throw new Error(`upload ${basename(local)} has an invalid byte range`);
+  }
   let lastError;
   for (let attempt = 1; attempt <= 5; attempt += 1) {
     const headers = new Headers({ "content-length": String(size) });
-    const body = Readable.toWeb(createReadStream(local));
+    const body = Readable.toWeb(createReadStream(local, {
+      start: offset,
+      end: offset + size - 1,
+    }));
     let response;
     try {
       response = await authenticatedFetch(
@@ -577,7 +616,20 @@ async function uploadFile(origin, token, remote, local) {
       await delay(250 * (2 ** (attempt - 1)));
       continue;
     }
-    if (response.ok) return;
+    if (response.ok) {
+      let uploaded;
+      try {
+        uploaded = await response.json();
+      } catch {
+        throw new Error(`upload ${basename(local)} returned invalid JSON`);
+      }
+      if (uploaded?.size !== size) {
+        throw new Error(
+          `upload ${basename(local)} resolved ${uploaded?.size ?? "an unknown number of"} bytes; expected ${size}`,
+        );
+      }
+      return;
+    }
     lastError = new Error(await responseError(`upload ${basename(local)}`, response));
     if (!isRetriableUploadStatus(response.status) || attempt === 5) break;
     await delay(250 * (2 ** (attempt - 1)));

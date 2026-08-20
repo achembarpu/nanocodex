@@ -56,9 +56,10 @@ view opens. Startup does not generate or rewrite repository blobs. Set
 `npm run build` does not inspect Git or generate repository assets. Production
 repository data is published separately to R2 by `npm run
 publish:repository`. The publisher derives one coherent generation from a Git
-commit, uploads only previously unseen source blobs and commit patches, uploads
-one complete clone pack for exactly the advertised refs, and stores new Git
-objects once in bounded immutable pack-entry shards. The Worker streams the
+commit, uploads only previously unseen source blobs and commit patches, builds
+one verified clone pack for exactly the advertised refs, uploads that pack in
+bounded immutable parts, and stores new Git objects once in bounded immutable
+pack-entry shards. The Worker streams the pack parts byte-for-byte as the
 complete pack for a fresh clone, but uses the object graph and reusable shards
 to send only the closure missing from an incremental or shallow fetch. Shards
 are compacted after a bounded number of generations. Publication advances one

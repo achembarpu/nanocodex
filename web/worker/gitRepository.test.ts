@@ -3,18 +3,51 @@ import { test } from "node:test";
 
 import {
   GitRepository,
+  REPOSITORY_PACK_PART_BYTES,
   isRepositoryPublication,
   type RepositoryPublication,
 } from "./gitRepository.ts";
 
 const firstHash = "a".repeat(40);
 const secondHash = "b".repeat(40);
+const packHash = "c".repeat(40);
 
 test("publication validation pins every mutable view to one generation", () => {
   assert.equal(isRepositoryPublication(publication(firstHash)), true);
+  const current = publication(firstHash);
+  const { packParts: _packParts, packSize: _packSize, ...legacy } = current;
+  assert.equal(isRepositoryPublication({
+    ...legacy,
+    packKey: `generations/${firstHash}/repository.pack`,
+  }), false);
   assert.equal(isRepositoryPublication({
     ...publication(firstHash),
-    packKey: `generations/${secondHash}/repository.pack`,
+    packParts: [{ key: `generations/${secondHash}/packs/${packHash}/0000.pack`, size: 1 }],
+  }), false);
+  assert.equal(isRepositoryPublication({
+    ...publication(firstHash),
+    packParts: [{ key: `generations/${firstHash}/packs/${secondHash}/0000.pack`, size: 1 }],
+  }), false);
+  assert.equal(isRepositoryPublication({
+    ...publication(firstHash),
+    packParts: [],
+    packSize: 0,
+  }), false);
+  assert.equal(isRepositoryPublication({
+    ...publication(firstHash),
+    packParts: [{
+      key: `generations/${firstHash}/packs/${packHash}/0000.pack`,
+      size: REPOSITORY_PACK_PART_BYTES + 1,
+    }],
+    packSize: REPOSITORY_PACK_PART_BYTES + 1,
+  }), false);
+  assert.equal(isRepositoryPublication({
+    ...publication(firstHash),
+    packParts: [
+      { key: `generations/${firstHash}/packs/${packHash}/0000.pack`, size: 1 },
+      { key: `generations/${firstHash}/packs/${packHash}/0001.pack`, size: 1 },
+    ],
+    packSize: 2,
   }), false);
   assert.equal(isRepositoryPublication({
     ...publication(firstHash),
@@ -48,9 +81,22 @@ test("publication uses compare-and-swap so stale mirrors cannot win", async () =
 });
 
 test("publication repair atomically replaces only invalid stored state", async () => {
+  const oldPrefix = `generations/${firstHash}/`;
   const values = new Map<string, unknown>([[
     "publication",
-    { version: 1, head: firstHash, packIndexKey: `generations/${firstHash}/repository.idx` },
+    {
+      version: 1,
+      head: firstHash,
+      branch: "master",
+      refs: [{ name: "refs/heads/master", oid: firstHash }],
+      snapshotKey: `${oldPrefix}repository.json`,
+      commitsKey: `${oldPrefix}commits.json`,
+      inventoryKey: `${oldPrefix}inventory.json`,
+      packKey: `${oldPrefix}repository.pack`,
+      objectManifestKey: `${oldPrefix}objects.json`,
+      packHash,
+      publishedAt: "2026-08-17T00:00:00.000Z",
+    },
   ]]);
   const state = {
     storage: {
@@ -91,9 +137,10 @@ function publication(head: string): RepositoryPublication {
     snapshotKey: `${prefix}repository.json`,
     commitsKey: `${prefix}commits.json`,
     inventoryKey: `${prefix}inventory.json`,
-    packKey: `${prefix}repository.pack`,
+    packParts: [{ key: `${prefix}packs/${packHash}/0000.pack`, size: 1 }],
+    packSize: 1,
     objectManifestKey: `${prefix}objects.json`,
-    packHash: "c".repeat(40),
+    packHash,
     publishedAt: "2026-08-17T00:00:00.000Z",
   };
 }

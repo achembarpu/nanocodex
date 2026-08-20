@@ -1,10 +1,16 @@
 const SHA1_PATTERN = /^[a-f0-9]{40}$/;
 const REF_PATTERN = /^refs\/(heads|tags)\/[A-Za-z0-9][A-Za-z0-9._\/-]*$/;
+export const REPOSITORY_PACK_PART_BYTES = 16 * 1024 * 1024;
 
 export type RepositoryRef = {
   name: string;
   oid: string;
   peeled?: string;
+};
+
+export type RepositoryPackPart = {
+  key: string;
+  size: number;
 };
 
 export type RepositoryPublication = {
@@ -15,7 +21,8 @@ export type RepositoryPublication = {
   snapshotKey: string;
   commitsKey: string;
   inventoryKey: string;
-  packKey: string;
+  packParts: RepositoryPackPart[];
+  packSize: number;
   objectManifestKey: string;
   packHash: string;
   publishedAt: string;
@@ -106,6 +113,9 @@ export function isRepositoryPublication(
     !Array.isArray(publication.refs) ||
     typeof publication.publishedAt !== "string" ||
     !Number.isFinite(Date.parse(publication.publishedAt)) ||
+    typeof publication.packSize !== "number" ||
+    !Number.isSafeInteger(publication.packSize) ||
+    publication.packSize <= 0 ||
     typeof publication.packHash !== "string" ||
     !SHA1_PATTERN.test(publication.packHash)
   ) {
@@ -127,10 +137,28 @@ export function isRepositoryPublication(
     return false;
   }
   const prefix = `generations/${publication.head}/`;
+  if (
+    !Array.isArray(publication.packParts) ||
+    publication.packParts.length === 0 ||
+    publication.packParts.length > 256 ||
+    !publication.packParts.every((part, index) =>
+      part != null &&
+      typeof part === "object" &&
+      part.key === `${prefix}packs/${publication.packHash}/${String(index).padStart(4, "0")}.pack` &&
+      Number.isSafeInteger(part.size) &&
+      part.size > 0 &&
+      part.size <= REPOSITORY_PACK_PART_BYTES &&
+      (index === publication.packParts!.length - 1 ||
+        part.size === REPOSITORY_PACK_PART_BYTES)
+    ) ||
+    publication.packParts.reduce((total, part) => total + part.size, 0) !==
+      publication.packSize
+  ) {
+    return false;
+  }
   return publication.snapshotKey === `${prefix}repository.json` &&
     publication.commitsKey === `${prefix}commits.json` &&
     publication.inventoryKey === `${prefix}inventory.json` &&
-    publication.packKey === `${prefix}repository.pack` &&
     publication.objectManifestKey === `${prefix}objects.json`;
 }
 
