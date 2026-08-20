@@ -125,6 +125,21 @@
   transform: none;
 }
 
+.surface-home .tui-brand {
+  color: #fff;
+  background: color-mix(in srgb, var(--blue) 72%, #000);
+}
+
+.surface-home .tui-cwd,
+.surface-home .agent-tui-empty,
+.surface-home .agent-tui-footer {
+  color: color-mix(in srgb, var(--text) 68%, var(--surface));
+}
+
+.surface-home .agent-tui-mobile-only {
+  color: var(--text);
+}
+
 .home-summary {
   display: grid;
   gap: 18px;
