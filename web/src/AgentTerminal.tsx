@@ -36,15 +36,15 @@ const MppControls = lazy(async () => ({
 }));
 
 /** Website policy around the reusable terminal adapter: credentials and theme. */
-export const AgentTerminal = memo(function AgentTerminal() {
+export const AgentTerminal = memo(function AgentTerminal({ theme }: { theme: "light" | "dark" }) {
   return (
     <NanocodexProvider config={nanocodexConfig}>
-      <AgentTerminalDemo />
+      <AgentTerminalDemo theme={theme} />
     </NanocodexProvider>
   );
 });
 
-function AgentTerminalDemo() {
+function AgentTerminalDemo({ theme }: { theme: "light" | "dark" }) {
   const agent = useNanocodex<WebWorkerCommand>();
   const thread = useMemo(getBrowserThread, []);
   const [transport, setTransport] = useState<AgentTransport>("openai");
@@ -178,6 +178,7 @@ function AgentTerminalDemo() {
       <XtermSurface
         inactiveMessage={unavailableMessage}
         status={agent.status}
+        theme={theme}
         onReady={(instance) => {
           terminal.current = instance;
           if (agent.status === "ready") {
@@ -202,12 +203,14 @@ function AgentTerminalDemo() {
 function XtermSurface({
   inactiveMessage,
   status,
+  theme,
   onReady,
   onData,
   onResize,
 }: {
   inactiveMessage: string;
   status: "idle" | "starting" | "ready" | "stopped" | "error";
+  theme: "light" | "dark";
   onReady(terminal: XtermInstance): void;
   onData(data: string): void;
   onResize(size: { cols: number; rows: number }): void;
@@ -220,27 +223,18 @@ function XtermSurface({
   useEffect(() => {
     if (!element.current) return;
     const terminal = new Xterm({
-      cursorBlink: true,
+      cursorBlink: !window.matchMedia("(prefers-reduced-motion: reduce)").matches,
       cursorStyle: "block",
-      fontFamily: '"Paradigm SemiMono", "Geist Mono", monospace',
+      fontFamily: '"Paradigm SemiMono", SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
       fontSize: 14,
       fontWeight: "400",
       fontWeightBold: "600",
       letterSpacing: 0,
       lineHeight: 1.25,
+      minimumContrastRatio: 4.5,
       scrollback: 5_000,
       scrollOnUserInput: true,
-      theme: {
-        background: "#111111",
-        foreground: "#f2f2f2",
-        cursor: "#f2f2f2",
-        cursorAccent: "#111111",
-        selectionBackground: "#3a3a3a",
-        black: "#111111",
-        brightBlack: "#777777",
-        red: "#ff6b6b",
-        cyan: "#62d8f2",
-      },
+      theme: terminalTheme(theme),
     });
     const fit = new FitAddon();
     terminal.loadAddon(fit);
@@ -276,6 +270,10 @@ function XtermSurface({
   }, []);
 
   useEffect(() => {
+    if (instance.current) instance.current.options.theme = terminalTheme(theme);
+  }, [theme]);
+
+  useEffect(() => {
     if (status === "ready" || status === "starting" || !instance.current) return;
     writeInactiveFrame(instance.current, inactiveMessage);
   }, [inactiveMessage, status]);
@@ -292,6 +290,32 @@ function writeInactiveFrame(terminal: XtermInstance, message: string) {
   terminal.write(
     `\x1b[3J\x1b[2J\x1b[H\x1b[?25l\x1b[1mnanocodex\x1b[0m${"\r\n".repeat(gap)}\x1b[2m  ${message}\x1b[0m`,
   );
+}
+
+function terminalTheme(theme: "light" | "dark") {
+  return theme === "dark"
+    ? {
+        background: "#161616",
+        foreground: "#ffffff",
+        cursor: "#ffffff",
+        cursorAccent: "#161616",
+        selectionBackground: "#333333",
+        black: "#161616",
+        brightBlack: "#999999",
+        red: "#ff8585",
+        cyan: "#0a82e1",
+      }
+    : {
+        background: "#ffffff",
+        foreground: "#000000",
+        cursor: "#000000",
+        cursorAccent: "#ffffff",
+        selectionBackground: "#dddddd",
+        black: "#000000",
+        brightBlack: "#666666",
+        red: "#d53b3b",
+        cyan: "#0a82e1",
+      };
 }
 
 function startCommand(transport: "openai" | "chatgpt", threadId: string): Extract<WebTerminalCommand, { type: "start" }>;

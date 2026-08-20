@@ -1,58 +1,42 @@
-/* Route-local homepage: narrow, product-first, and deliberately sparse. */
-.surface-home .site-header {
-  grid-template-columns: auto 1fr auto;
-  padding-inline: 30px;
-  background: var(--surface);
-  border-bottom-color: transparent;
-}
-
-.surface-home .header-center {
-  margin-left: 42px;
-  justify-self: start;
-}
-
-.surface-home .surface-switch {
-  gap: 24px;
-  padding: 0;
-  background: transparent;
-}
-
-.surface-home .surface-switch a {
-  height: auto;
-  padding: 0;
-  background: transparent;
-  border-radius: 0;
-}
-
-.surface-home .surface-switch a:nth-child(-n + 3),
-.surface-home .surface-switch a span,
-.surface-home .header-propose,
-.surface-home .text-action > span {
-  display: none;
-}
-
 .home-page {
   min-height: calc(100svh - var(--header-height));
-  padding: 48px 30px 120px;
+  padding: clamp(56px, 7vw, 96px) var(--page-margin) 128px;
   overflow: hidden;
   background: var(--surface);
 }
 
 .home-article {
-  width: min(100%, 760px);
+  width: min(100%, var(--content-max));
+  margin-inline: auto;
   font-size: 13px;
   line-height: 1.7;
 }
 
-.home-page h1,
-.home-page h2 {
-  font: inherit;
-  font-weight: 500;
-  letter-spacing: 0;
+.home-intro {
+  width: min(100%, 860px);
+  margin-inline: auto;
+  text-align: center;
+}
+
+.home-eyebrow {
+  justify-content: center;
+  margin-bottom: 18px;
 }
 
 .home-intro h1 {
+  font-family: var(--font-display);
+  font-size: clamp(52px, 7.2vw, 92px);
+  font-weight: 400;
+  letter-spacing: -0.055em;
+  line-height: 0.92;
+}
+
+.home-deck {
+  max-width: 680px;
+  margin: 24px auto 0;
+  color: color-mix(in srgb, var(--text) 64%, transparent);
   font-size: 14px;
+  line-height: 1.65;
 }
 
 .home-install {
@@ -61,7 +45,7 @@
   align-items: center;
   width: min(100%, 480px);
   min-height: 34px;
-  margin-top: 16px;
+  margin: 22px auto 0;
   padding: 0;
   overflow: hidden;
   color: var(--text);
@@ -108,8 +92,38 @@
 }
 
 .home-demo {
-  width: min(980px, calc(100vw - 60px));
-  margin-top: 34px;
+  width: min(100%, 1040px);
+  margin-inline: auto;
+  margin-top: clamp(56px, 7vw, 88px);
+}
+
+.home-demo-head,
+.home-section-head {
+  display: flex;
+  gap: 24px;
+  align-items: end;
+  justify-content: space-between;
+}
+
+.home-demo-head {
+  padding-bottom: 16px;
+}
+
+.home-demo-head h2,
+.home-section-head h2 {
+  margin-top: 5px;
+  font-family: var(--font-display);
+  font-size: clamp(28px, 3.4vw, 44px);
+  font-weight: 400;
+  letter-spacing: -0.035em;
+  line-height: 1;
+}
+
+.home-demo-head > p {
+  max-width: 360px;
+  color: color-mix(in srgb, var(--text) 64%, transparent);
+  font-size: 10px;
+  text-align: right;
 }
 
 .home-demo .agent-terminal-shell {
@@ -119,9 +133,15 @@
 .home-summary {
   display: grid;
   gap: 18px;
-  width: min(100%, 620px);
-  margin-top: 46px;
+  width: min(100%, 720px);
+  margin: 64px auto 0;
   color: color-mix(in srgb, var(--text) 68%, transparent);
+}
+
+.home-summary > p:first-child {
+  color: var(--text);
+  font-size: 16px;
+  line-height: 1.65;
 }
 
 .home-summary a,
@@ -154,48 +174,90 @@
 }
 
 .home-divider {
-  margin: 180px 0 72px;
-  color: color-mix(in srgb, var(--text) 54%, transparent);
-  letter-spacing: 0.18em;
-}
-
-.home-facts {
-  width: min(100%, 700px);
-}
-
-.home-facts article {
-  display: grid;
-  grid-template-columns: 190px minmax(0, 1fr);
-  gap: 24px;
-  padding: 20px 0;
+  margin: 112px 0 72px;
   border-top: 1px solid var(--border-soft);
 }
 
-.home-facts article:last-child {
+.home-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  width: 100%;
   border-bottom: 1px solid var(--border-soft);
 }
 
-.home-facts h2 {
-  font-size: 12px;
+.home-section-head {
+  grid-column: 1 / -1;
+  padding-bottom: 28px;
 }
 
-.home-facts p {
+.home-facts article {
+  display: block;
+  min-height: 180px;
+  padding: 26px 28px 30px 0;
+  border-top: 1px solid var(--border-soft);
+}
+
+.home-facts article:nth-of-type(odd) {
+  padding-right: 34px;
+  border-right: 1px solid var(--border-soft);
+}
+
+.home-facts article:nth-of-type(even) {
+  padding-left: 34px;
+}
+
+.home-facts article > h2 {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0;
+}
+
+.home-facts article > p {
+  margin-top: 12px;
   color: color-mix(in srgb, var(--text) 64%, transparent);
   font-size: 11px;
   line-height: 1.65;
 }
 
 .home-facts a {
-  grid-column: 2;
+  display: inline-block;
   width: fit-content;
+  margin-top: 14px;
   font-size: 11px;
 }
+
+.home-surfaces {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  width: 100%;
+  margin-top: 84px;
+  border-block: 1px solid var(--border-soft);
+}
+
+.home-surfaces a {
+  display: grid;
+  min-height: 210px;
+  padding: 24px 28px 26px;
+  color: var(--text);
+  border-right: 1px solid var(--border-soft);
+  transition: background-color 120ms ease;
+}
+
+.home-surfaces a:first-child { padding-left: 0; }
+.home-surfaces a:last-child { padding-right: 0; border-right: 0; }
+.home-surfaces a:hover,
+.home-surfaces a:focus-visible { background: var(--surface-hover); outline: 0; }
+.home-surfaces small { color: color-mix(in srgb, var(--text) 62%, transparent); font-size: 9px; text-transform: uppercase; }
+.home-surfaces strong { align-self: end; font-family: var(--font-display); font-size: clamp(25px, 2.6vw, 36px); font-weight: 400; letter-spacing: -0.035em; }
+.home-surfaces span { margin-top: 10px; color: color-mix(in srgb, var(--text) 62%, transparent); font-size: 11px; line-height: 1.6; }
+.home-surfaces em { align-self: end; margin-top: 18px; color: var(--text); font-size: 10px; font-style: normal; text-decoration: underline; text-decoration-color: color-mix(in srgb, var(--text) 28%, transparent); text-underline-offset: 4px; }
 
 .home-start {
   display: grid;
   gap: 8px;
-  width: min(100%, 700px);
-  margin-top: 86px;
+  width: min(100%, 720px);
+  margin: 96px auto 0;
 }
 
 .home-start code {
@@ -211,42 +273,9 @@
 }
 
 @media (max-width: 740px) {
-  .surface-home {
-    --mobile-header-height: calc(48px + env(safe-area-inset-top));
-  }
-
-  .surface-home .site-header {
-    grid-template-columns: auto 1fr auto;
-    grid-template-rows: 48px;
-    height: var(--mobile-header-height);
-    padding-inline: 16px;
-    flex-basis: var(--mobile-header-height);
-  }
-
-  .surface-home .header-center {
-    grid-column: 2;
-    grid-row: 1;
-    margin-left: 0;
-    justify-self: end;
-  }
-
-  .surface-home .surface-switch {
-    gap: 14px;
-  }
-
-  .surface-home .surface-switch a {
-    min-height: 32px;
-    padding-inline: 2px;
-  }
-
-  .surface-home .header-actions {
-    grid-column: 3;
-    margin-left: 8px;
-  }
-
   .home-page {
-    min-height: calc(100svh - var(--mobile-header-height));
-    padding: 34px 16px max(70px, calc(46px + env(safe-area-inset-bottom)));
+    min-height: calc(100svh - var(--shell-header-height));
+    padding: 46px var(--page-margin) max(80px, calc(52px + env(safe-area-inset-bottom)));
     overflow: visible;
   }
 
@@ -255,19 +284,28 @@
     overflow-wrap: anywhere;
   }
 
+  .home-intro h1 { font-size: clamp(44px, 13vw, 60px); }
+  .home-deck { font-size: 13px; }
+
   .home-install {
     width: 100%;
+    max-width: 360px;
   }
 
   .home-meta {
     max-width: 300px;
+    margin-inline: auto;
     line-height: 1.55;
   }
 
   .home-demo {
     width: 100%;
-    margin-top: 28px;
+    margin-top: 56px;
   }
+
+  .home-demo-head,
+  .home-section-head { display: grid; gap: 10px; }
+  .home-demo-head > p { max-width: none; text-align: left; }
 
   .home-demo .agent-terminal-shell {
     width: 100%;
@@ -278,18 +316,22 @@
   }
 
   .home-divider {
-    margin: 96px 0 52px;
+    margin: 64px 0 44px;
   }
 
+  .home-facts { grid-template-columns: 1fr; }
   .home-facts article {
-    grid-template-columns: 1fr;
-    gap: 7px;
-    padding: 18px 0;
+    min-height: 0;
+    padding: 22px 0 24px;
   }
+  .home-facts article:nth-of-type(odd),
+  .home-facts article:nth-of-type(even) { padding-inline: 0; border-right: 0; }
 
-  .home-facts a {
-    grid-column: 1;
-  }
+  .home-surfaces { grid-template-columns: 1fr; margin-top: 68px; }
+  .home-surfaces a,
+  .home-surfaces a:first-child,
+  .home-surfaces a:last-child { min-height: 176px; padding: 22px 0; border-right: 0; border-bottom: 1px solid var(--border-soft); }
+  .home-surfaces a:last-child { border-bottom: 0; }
 
   .home-start {
     margin-top: 64px;

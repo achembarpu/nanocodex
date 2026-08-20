@@ -324,7 +324,7 @@ export function createAgentTerminal(options) {
 }
 
 export function renderTerminal({ state, input = "", cursor = input.length, cols = 80, rows = 24 }) {
-  const content = [`${BOLD}nanocodex${RESET}`, renderTranscript(state.entries)].filter(Boolean).join("\r\n\r\n");
+  const content = [`${BOLD}nanocodex${RESET}`, renderTranscript(state.entries, cols)].filter(Boolean).join("\r\n\r\n");
   const safeCursor = Math.max(0, Math.min(input.length, cursor));
   const before = terminalText(input.slice(0, safeCursor));
   const at = terminalText(input.slice(safeCursor, safeCursor + 1) || " ");
@@ -341,10 +341,10 @@ export function renderTerminal({ state, input = "", cursor = input.length, cols 
   return `${CLEAR_SCREEN}${HIDE_CURSOR}${content}${"\r\n".repeat(gap)}${footer}`;
 }
 
-function renderTranscript(entries) {
+function renderTranscript(entries, cols) {
   return entries.reduce((output, entry, index) => {
     if (index > 0) output += entries[index - 1].kind === "tool" && entry.kind === "tool" ? "\r\n" : "\r\n\r\n";
-    return output + renderEntry(entry);
+    return output + renderEntry(entry, cols);
   }, "");
 }
 
@@ -433,10 +433,10 @@ export function wtermAdapter(term) {
   };
 }
 
-function renderEntry(entry) {
+function renderEntry(entry, cols) {
   switch (entry.kind) {
     case "user":
-      return renderUserEntry(entry.text);
+      return renderUserEntry(entry.text, cols);
     case "assistant":
       return indentText(boundedText(entry.text));
     case "reasoning":
@@ -452,11 +452,34 @@ function renderEntry(entry) {
   }
 }
 
-function renderUserEntry(value) {
-  return boundedText(value)
+function renderUserEntry(value, cols) {
+  const text = terminalText(value);
+  const bounded = text.length > MAX_ENTRY_CHARACTERS
+    ? `${text.slice(0, MAX_ENTRY_CHARACTERS)}\r\n… input truncated`
+    : text;
+  return bounded
     .split("\r\n")
+    .flatMap((line) => wrapLine(line, Math.max(8, positiveInteger(cols, 80) - 2)))
     .map((line) => `${DIM}│${RESET} ${BOLD}${line}${RESET}`)
     .join("\r\n");
+}
+
+function wrapLine(line, width) {
+  const characters = [...line];
+  if (characters.length <= width) return [line];
+  const rows = [];
+  let cursor = 0;
+  while (characters.length - cursor > width) {
+    let breakAt = -1;
+    for (let index = 0; index <= width; index += 1) {
+      if (characters[cursor + index] === " ") breakAt = index;
+    }
+    const take = breakAt > 0 ? breakAt : width;
+    rows.push(characters.slice(cursor, cursor + take).join(""));
+    cursor += take + (breakAt > 0 ? 1 : 0);
+  }
+  rows.push(characters.slice(cursor).join(""));
+  return rows;
 }
 
 function indentText(value) {

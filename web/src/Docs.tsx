@@ -80,6 +80,7 @@ export function Docs() {
   const [browseOpen, setBrowseOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const browseButtonRef = useRef<HTMLButtonElement>(null);
+  const drawerRef = useRef<HTMLDivElement>(null);
   const drawerCloseRef = useRef<HTMLButtonElement>(null);
 
   useEffect(() => {
@@ -100,16 +101,44 @@ export function Docs() {
     const overflow = window.document.documentElement.style.overflow;
     window.document.documentElement.style.overflow = "hidden";
     drawerCloseRef.current?.focus();
-    const closeOnEscape = (event: KeyboardEvent) => {
-      if (event.key === "Escape") setBrowseOpen(false);
+    const containDrawerFocus = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setBrowseOpen(false);
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const focusable = Array.from(
+        drawerRef.current?.querySelectorAll<HTMLElement>(
+          'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])',
+        ) ?? [],
+      );
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      if (!first || !last) return;
+      if (event.shiftKey && window.document.activeElement === first) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && window.document.activeElement === last) {
+        event.preventDefault();
+        first.focus();
+      }
     };
-    window.addEventListener("keydown", closeOnEscape);
+    window.addEventListener("keydown", containDrawerFocus);
     return () => {
-      window.removeEventListener("keydown", closeOnEscape);
+      window.removeEventListener("keydown", containDrawerFocus);
       window.document.documentElement.style.overflow = overflow;
       browseButtonRef.current?.focus();
     };
   }, [browseOpen]);
+
+  useEffect(() => {
+    const desktop = window.matchMedia("(min-width: 901px)");
+    const closeDrawerOnDesktop = (event: MediaQueryListEvent) => {
+      if (event.matches) setBrowseOpen(false);
+    };
+    desktop.addEventListener("change", closeDrawerOnDesktop);
+    return () => desktop.removeEventListener("change", closeDrawerOnDesktop);
+  }, []);
 
   if (!doc || !source) {
     return (
@@ -194,8 +223,9 @@ export function Docs() {
             aria-label="Close documentation navigation"
             onClick={() => setBrowseOpen(false)}
           />
-          <aside
+          <div
             className="docs-drawer"
+            ref={drawerRef}
             id="docs-mobile-navigation"
             role="dialog"
             aria-modal="true"
@@ -208,7 +238,7 @@ export function Docs() {
               </button>
             </header>
             <DocsNavigation path={path} />
-          </aside>
+          </div>
         </div>
       ) : null}
     </div>

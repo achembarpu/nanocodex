@@ -1,6 +1,6 @@
 :root {
   color-scheme: light;
-  font-family: "Paradigm SemiMono", SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-family: var(--font-mono);
   font-synthesis: none;
   text-rendering: optimizeLegibility;
   --black: #000000;
@@ -17,7 +17,9 @@
   --grey-700: #333333;
   --grey-800: #161616;
   --text: var(--black);
-  --text-muted: var(--black);
+  --text-muted: color-mix(in srgb, var(--text) 60%, transparent);
+  --text-secondary: color-mix(in srgb, var(--text) 64%, transparent);
+  --text-faint: color-mix(in srgb, var(--text) 42%, transparent);
   --text-inverse: var(--white);
   --border: var(--grey-400);
   --border-soft: rgba(0, 0, 0, 0.08);
@@ -28,18 +30,25 @@
   --surface-hover: rgba(0, 0, 0, 0.04);
   --positive: #128342;
   --negative: #d53b3b;
+  --on-positive: var(--white);
+  --on-negative: var(--white);
+  --on-accent: var(--black);
   --header-height: 52px;
+  --shell-header-height: var(--header-height);
   --page-margin: 36px;
   --gutter: 36px;
   --radius-small: 4px;
   --radius-medium: 12px;
   --shadow-overlay: 0 24px 70px rgba(0, 0, 0, 0.13);
+  --font-display: "Paradigm Serif", Georgia, "Times New Roman", serif;
+  --font-mono: "Paradigm SemiMono", SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  --content-max: 1120px;
+  --wide-max: 1440px;
 }
 
 html[data-theme="dark"] {
   color-scheme: dark;
   --text: var(--white);
-  --text-muted: var(--white);
   --text-inverse: var(--black);
   --border: var(--grey-600);
   --border-soft: rgba(255, 255, 255, 0.1);
@@ -50,6 +59,8 @@ html[data-theme="dark"] {
   --surface-hover: rgba(255, 255, 255, 0.06);
   --positive: #73d89b;
   --negative: #ff8585;
+  --on-positive: var(--black);
+  --on-negative: var(--black);
   --shadow-overlay: 0 24px 70px rgba(0, 0, 0, 0.55);
 }
 
@@ -116,7 +127,7 @@ pre {
 h1,
 h2,
 h3 {
-  font-family: "Paradigm Serif", Georgia, "Times New Roman", serif;
+  font-family: var(--font-display);
   font-weight: 400;
   letter-spacing: -0.03em;
 }
@@ -159,7 +170,7 @@ svg {
 }
 
 .page-grid {
-  width: min(calc(100% - (var(--page-margin) * 2)), 1752px);
+  width: min(calc(100% - (var(--page-margin) * 2)), var(--wide-max));
   margin-inline: auto;
 }
 
@@ -172,7 +183,7 @@ svg {
   flex: 0 0 var(--header-height);
   align-items: center;
   height: var(--header-height);
-  padding-inline: 16px;
+  padding-inline: max(var(--page-margin), calc((100vw - var(--wide-max)) / 2));
   background: color-mix(in srgb, var(--surface) 94%, transparent);
   border-bottom: 1px solid var(--border-soft);
   backdrop-filter: none;
@@ -183,14 +194,14 @@ svg {
   gap: 7px;
   align-items: baseline;
   justify-self: start;
-  font-family: "Paradigm Serif", Georgia, "Times New Roman", serif;
+  font-family: var(--font-display);
   font-size: 20px;
   letter-spacing: -0.04em;
 }
 
 .wordmark span {
   color: var(--text-muted);
-  font-family: "Paradigm SemiMono", SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 9px;
   letter-spacing: 0;
 }
@@ -229,6 +240,8 @@ svg {
 
 .surface-switch a.is-active {
   background: var(--surface-raised);
+  box-shadow: inset 0 0 0 1px var(--border-soft);
+  font-weight: 600;
 }
 
 .surface-switch a span {
@@ -348,7 +361,7 @@ html[data-theme="dark"] .button--medium:focus-visible {
   margin: 30px 0 34px 50%;
   overflow: hidden;
   color: var(--text);
-  font-family: "Paradigm SemiMono", SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 11px;
   line-height: 1.45;
   background: var(--surface-raised);
@@ -724,7 +737,7 @@ html[data-theme="dark"] .button--medium:focus-visible {
   min-height: 0;
   overflow: hidden;
   color: var(--text);
-  font-family: "Paradigm SemiMono", SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  font-family: var(--font-mono);
   font-size: 10px;
   background: var(--surface-raised);
 }
@@ -1256,7 +1269,7 @@ html[data-theme="dark"] .button--medium:focus-visible {
   --nc-color-warning: #a86f00;
   --nc-color-danger: var(--negative);
   --nc-color-border: var(--border);
-  --nc-font-family: "Paradigm SemiMono", SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+  --nc-font-family: var(--font-mono);
   --nc-radius: var(--radius-small);
   --tui-bg: var(--nc-color-background);
   --tui-fg: var(--nc-color-foreground);
@@ -2121,7 +2134,7 @@ html[data-theme="dark"] .tui-syntax .shiki span {
   width: 68px;
   height: 68px;
   color: var(--text-inverse);
-  font-family: "Paradigm Serif", Georgia, serif;
+  font-family: var(--font-display);
   font-size: 24px;
   background: var(--text);
   border-radius: 50%;
@@ -2166,7 +2179,7 @@ html[data-theme="dark"] .tui-syntax .shiki span {
 .code-heading > p {
   max-width: 520px;
   color: var(--text-muted);
-  font-family: "Paradigm Serif", Georgia, "Times New Roman", serif;
+  font-family: var(--font-display);
   font-size: clamp(17px, 1.35vw, 22px);
   letter-spacing: -0.02em;
   line-height: 1.18;
@@ -2203,14 +2216,14 @@ html[data-theme="dark"] .tui-syntax .shiki span {
   --trees-border-radius-override: var(--radius-small);
   --trees-fg-override: var(--text);
   --trees-fg-muted-override: var(--text-muted);
-  --trees-focus-ring-color-override: var(--text-muted);
-  --trees-font-family-override: "Paradigm SemiMono", SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  --trees-focus-ring-color-override: var(--blue);
+  --trees-font-family-override: var(--font-mono);
   --trees-font-size-override: 11px;
   --trees-input-bg-override: var(--surface-raised);
   --trees-padding-inline-override: 8px;
   --trees-search-bg-override: var(--surface-raised);
   --trees-search-fg-override: var(--text);
-  --trees-selected-bg-override: var(--surface-raised);
+  --trees-selected-bg-override: color-mix(in srgb, var(--blue) 10%, var(--surface-subtle));
   --trees-selected-fg-override: var(--text);
 }
 
@@ -2398,7 +2411,7 @@ html[data-theme="dark"] .tui-syntax .shiki span {
   max-width: 520px;
   margin-top: 24px;
   color: var(--text-muted);
-  font-family: "Paradigm Serif", Georgia, "Times New Roman", serif;
+  font-family: var(--font-display);
   font-size: clamp(18px, 1.5vw, 24px);
   letter-spacing: -0.02em;
   line-height: 1.2;
@@ -2434,22 +2447,23 @@ html[data-theme="dark"] .tui-syntax .shiki span {
   :root {
     --page-margin: 16px;
     --gutter: 16px;
-    --mobile-header-height: calc(92px + env(safe-area-inset-top));
+    --mobile-header-height: calc(48px + env(safe-area-inset-top));
+    --shell-header-height: var(--mobile-header-height);
   }
 
   .site-header {
-    grid-template-columns: 1fr auto;
-    grid-template-rows: 48px 44px;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-rows: 48px;
     gap: 0 8px;
     height: var(--mobile-header-height);
     flex-basis: var(--mobile-header-height);
     padding-top: env(safe-area-inset-top);
-    padding-right: max(10px, env(safe-area-inset-right));
-    padding-left: max(10px, env(safe-area-inset-left));
+    padding-right: max(var(--page-margin), env(safe-area-inset-right));
+    padding-left: max(var(--page-margin), env(safe-area-inset-left));
   }
 
   .wordmark {
-    display: flex;
+    grid-column: 1;
     grid-row: 1;
     min-height: 44px;
     align-items: center;
@@ -2457,8 +2471,8 @@ html[data-theme="dark"] .tui-syntax .shiki span {
   }
 
   .header-center {
-    grid-row: 2;
-    grid-column: 1 / -1;
+    grid-row: 1;
+    grid-column: 2;
     width: 100%;
     min-width: 0;
     overflow-x: auto;
@@ -2473,7 +2487,7 @@ html[data-theme="dark"] .tui-syntax .shiki span {
 
   .surface-switch {
     flex: 0 0 auto;
-    min-width: 100%;
+    min-width: max-content;
     padding: 0;
   }
 
@@ -2507,7 +2521,7 @@ html[data-theme="dark"] .tui-syntax .shiki span {
 
   .header-actions {
     grid-row: 1;
-    grid-column: 2;
+    grid-column: 3;
   }
 
   .agent-terminal {
@@ -2552,7 +2566,7 @@ html[data-theme="dark"] .tui-syntax .shiki span {
   }
 
   .requests-empty {
-    min-height: calc(100svh - var(--mobile-header-height));
+    min-height: calc(100svh - var(--shell-header-height));
     padding-top: 52px;
     padding-bottom: max(52px, calc(28px + env(safe-area-inset-bottom)));
   }
@@ -2624,6 +2638,8 @@ html[data-theme="dark"] .tui-syntax .shiki span {
   *::before,
   *::after {
     transition-duration: 0.01ms !important;
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
   }
 }
 
@@ -2645,9 +2661,10 @@ html[data-theme="dark"] .tui-syntax .shiki span {
 .code-workspace,
 .commits-workspace {
   display: grid;
-  width: 100%;
+  width: min(100%, var(--wide-max));
   height: 100%;
   min-height: 0;
+  margin-inline: auto;
   overflow: hidden;
 }
 
@@ -3143,6 +3160,8 @@ html[data-theme="dark"] .tui-syntax .shiki span {
   contain: strict;
   overflow-anchor: none;
   will-change: scroll-position;
+  --diffs-font-family: var(--font-mono);
+  --diffs-header-font-family: var(--font-mono);
 }
 
 .cv-scrollbar {
@@ -3300,16 +3319,6 @@ html[data-theme="dark"] .tui-syntax .shiki span {
 }
 
 @media (max-width: 740px), (pointer: coarse) and (orientation: landscape) and (max-width: 950px) {
-  .surface-code .header-actions,
-  .surface-commits .header-actions {
-    display: none;
-  }
-
-  .surface-code .site-header,
-  .surface-commits .site-header {
-    grid-template-columns: minmax(0, 1fr);
-  }
-
   .code-workspace {
     display: block;
   }
@@ -3477,25 +3486,23 @@ html[data-theme="dark"] .tui-syntax .shiki span {
     height: 44px;
   }
 
+  .diff-collapse-button {
+    width: 44px;
+    height: 44px;
+    flex-basis: 44px;
+  }
+
   .file-search-result {
     grid-template-columns: minmax(0, 1fr) 14px;
   }
 
 }
 
-@media (max-width: 740px) {
-  .site-header {
-    flex-basis: var(--mobile-header-height);
-    padding-right: max(10px, env(safe-area-inset-right));
-    padding-left: max(10px, env(safe-area-inset-left));
-  }
-}
-
 @media (max-width: 420px) {
   .site-header {
     gap: 0 6px;
-    padding-right: max(8px, env(safe-area-inset-right));
-    padding-left: max(8px, env(safe-area-inset-left));
+    padding-right: max(12px, env(safe-area-inset-right));
+    padding-left: max(12px, env(safe-area-inset-left));
   }
 
   .wordmark {

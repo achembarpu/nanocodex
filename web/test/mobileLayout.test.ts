@@ -4,6 +4,7 @@ import test from "node:test";
 
 const indexCss = source("../src/index.css");
 const terminalCss = source("../src/AgentTerminal.css");
+const homeCss = source("../src/Home.css");
 const application = source("../src/NanocodexApp.tsx");
 const artifactRuntime = source("../src/artifactRuntime.tsx");
 const terminal = source("../src/AgentTerminal.tsx");
@@ -20,7 +21,17 @@ test("terminal and application controls share the compact phone policy", () => {
   assert.match(auth, /min-height:\s*44px/);
   assert.match(shell, /100dvh/);
   assert.match(shell, /env\(safe-area-inset-bottom\)/);
-  assert.match(shell, /min-height:\s*390px/);
+  assert.match(shell, /min-height:\s*420px/);
+});
+
+test("the shared phone header stays in one compact row on every surface", () => {
+  const phone = indexCss.indexOf("@media (max-width: 740px) {", indexCss.indexOf("@media (max-width: 1023px)"));
+  const header = ruleBlock(indexCss, ".site-header {", phone);
+  assert.match(header, /grid-template-columns:\s*auto minmax\(0, 1fr\) auto/);
+  assert.match(header, /grid-template-rows:\s*48px/);
+  assert.match(header, /height:\s*var\(--mobile-header-height\)/);
+  assert.doesNotMatch(indexCss, /\.surface-code \.header-actions/);
+  assert.doesNotMatch(indexCss, /\.surface-commits \.header-actions/);
 });
 
 test("portrait commits still collapse to an in-viewport viewer column", () => {
@@ -32,9 +43,15 @@ test("portrait commits still collapse to an in-viewport viewer column", () => {
 test("the phone home surface explains the live agent before mounting it", () => {
   const phone = terminalCss.lastIndexOf("@media (max-width: 740px) {");
   assert.ok(application.indexOf('id="home-title"') < application.indexOf('id="agent-demo"'));
-  assert.ok(application.indexOf('id="agent-demo-title"') < application.indexOf("<AgentTerminal />"));
+  assert.ok(application.indexOf('id="agent-demo-title"') < application.indexOf("<AgentTerminal theme={theme}"));
   assert.ok(phone < 0, "the compact terminal policy is shared across phone orientations");
+  assert.match(application, /<AgentTerminal theme=\{theme\}/);
   assert.match(terminal, /<XtermSurface/);
+  assert.match(terminal, /theme=\{theme\}/);
+  assert.match(terminal, /instance\.current\.options\.theme = terminalTheme\(theme\)/);
+  assert.match(terminalCss, /--terminal-background:\s*var\(--surface\)/);
+  assert.match(homeCss, /\.home-facts article > h2/);
+  assert.match(homeCss, /\.home-facts article > p/);
   assert.doesNotMatch(terminal, /<NanocodexTui|<WorkspacePanel|<ArtifactDock/);
 });
 

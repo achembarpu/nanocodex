@@ -41,11 +41,11 @@ class EvalRouteErrorBoundary extends Component<
   render() {
     if (!this.state.error) return this.props.children;
     return (
-      <main className="live-evals-boot page-grid" role="alert">
+      <div className="live-evals-boot page-grid" role="alert">
         <p className="eyebrow">Nanocodex · durable evaluations</p>
         <h1>Evals unavailable</h1>
         <p>{this.state.error.message}</p>
-      </main>
+      </div>
     );
   }
 }
@@ -188,11 +188,11 @@ function TaskRoute({ route }: { route: Extract<EvalRoute, { kind: "task" }> }) {
 
 function UnknownRoute() {
   return (
-    <main className="live-evals-boot page-grid" role="alert">
+    <div className="live-evals-boot page-grid" role="alert">
       <p className="eyebrow">Nanocodex · durable evaluations</p>
       <h1>Eval view not found</h1>
       <p>Return to Evals and choose a retained workset.</p>
-    </main>
+    </div>
   );
 }
 

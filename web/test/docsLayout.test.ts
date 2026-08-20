@@ -1,0 +1,21 @@
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import test from "node:test";
+
+const css = readFileSync(new URL("../src/Docs.css", import.meta.url), "utf8");
+const source = readFileSync(new URL("../src/Docs.tsx", import.meta.url), "utf8");
+
+test("documentation uses the shared centered frame and readable heading scale", () => {
+  assert.match(css, /width:\s*min\(calc\(100% - \(var\(--page-margin\) \* 2\)\), var\(--wide-max\)\)/);
+  assert.match(css, /\.docs-article h1 \{[\s\S]*?font-size:\s*28px/);
+  assert.match(css, /\.docs-article h2 \{[\s\S]*?font-size:\s*20px/);
+});
+
+test("documentation drawers and pagination keep mobile targets and focus containment", () => {
+  assert.match(css, /\.docs-drawer nav a \{[\s\S]*?min-height:\s*44px/);
+  assert.match(css, /\.docs-pagination > a \{[\s\S]*?min-height:\s*44px/);
+  assert.match(source, /event\.key !== "Tab"/);
+  assert.match(source, /last\.focus\(\)/);
+  assert.match(source, /first\.focus\(\)/);
+  assert.match(source, /matchMedia\("\(min-width: 901px\)"\)/);
+});

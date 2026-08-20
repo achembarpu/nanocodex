@@ -438,7 +438,7 @@ export function LiveEvals({ data }: { data: LiveEvalsData }) {
 
   if (data.kind === "overview") {
     return (
-      <main className="live-evals">
+      <div className="live-evals">
         <section className="eval-page-head eval-overview-head">
           <div>
             <p className="eyebrow"><Radio aria-hidden="true" /> Coordinator evidence</p>
@@ -461,21 +461,21 @@ export function LiveEvals({ data }: { data: LiveEvalsData }) {
             >
               <span className="eval-primary-cell"><strong>{workset.profile}</strong><small>{workset.digest.slice(0, 16)}</small></span>
               <ProgressBar summary={workset.summary} label={`${workset.profile} progress`} />
-              <span>{workset.taskCount}</span>
-              <span>{formatWorksetDate(workset.createdAtMs)}</span>
+              <span className="eval-row-meta eval-workset-count"><span>Tasks · </span>{workset.taskCount}</span>
+              <span className="eval-row-meta eval-workset-created"><span>Created · </span>{formatWorksetDate(workset.createdAtMs)}</span>
               <ChevronRight aria-hidden="true" />
             </button>
           ))}
           {!orderedWorksets.length ? <p className="eval-empty-list">No durable worksets yet.</p> : null}
         </section>
-      </main>
+      </div>
     );
   }
 
   if (data.kind === "workset") {
     const workset = data.detail.workset;
     return (
-      <main className="live-evals">
+      <div className="live-evals">
         <section className="eval-page-head eval-detail-head">
           <div>
             <PageBack onClick={() => startTransition(() => navigate("/evals"))}>All evals</PageBack>
@@ -503,7 +503,7 @@ export function LiveEvals({ data }: { data: LiveEvalsData }) {
             <button type="button" className="eval-table-row eval-task-grid" onClick={() => chooseTask(task.id)} key={task.id}>
               <span className="eval-primary-cell"><strong>{task.label}</strong><small>{task.name}</small></span>
               <ProgressBar summary={task.summary} label={`${task.label} progress`} />
-              <span>{task.treatmentCount}</span>
+              <span className="eval-row-meta eval-task-treatments"><span>Treatments · </span>{task.treatmentCount}</span>
               <ChevronRight aria-hidden="true" />
             </button>
           ))}
@@ -519,13 +519,13 @@ export function LiveEvals({ data }: { data: LiveEvalsData }) {
           ) : null}
           {!visibleTasks.length ? <p className="eval-empty-list">No tasks match this filter.</p> : null}
         </section>
-      </main>
+      </div>
     );
   }
 
   const taskWorkset = data.detail.workset;
   return (
-    <main className="live-evals">
+    <div className="live-evals">
       <section className="eval-page-head eval-detail-head">
         <div>
           <PageBack onClick={() => chooseWorkset(taskWorkset.id)}>{taskWorkset.profile}</PageBack>
@@ -579,6 +579,6 @@ export function LiveEvals({ data }: { data: LiveEvalsData }) {
           </>
         ) : null}
       </section>
-    </main>
+    </div>
   );
 }

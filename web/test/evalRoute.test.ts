@@ -49,6 +49,12 @@ test("case evidence replaces the inspector only after the request completes", ()
   assert.doesNotMatch(liveEvalsSource, /detail\.isPending|detail\.data/);
 });
 
+test("Evals keeps the application main as the only main landmark", () => {
+  assert.doesNotMatch(evalsSource, /<main\b/);
+  assert.doesNotMatch(liveEvalsSource, /<main\b/);
+  assert.match(appSource, /<main id="top">/);
+});
+
 function source(path: string) {
   return readFileSync(new URL(path, import.meta.url), "utf8");
 }

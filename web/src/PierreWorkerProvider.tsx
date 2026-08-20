@@ -1,4 +1,3 @@
-import { DEFAULT_THEMES } from "@pierre/diffs";
 import {
   WorkerPoolContextProvider,
   type WorkerInitializationRenderOptions,
@@ -8,6 +7,7 @@ import {
 import DiffWorker from "@pierre/diffs/worker/worker.js?worker";
 import type { ReactNode } from "react";
 import { useEffect, useRef, useState } from "react";
+import { CODE_VIEW_THEMES } from "./pierreCodeView";
 
 const poolOptions: WorkerPoolOptions = {
   poolSize: 1,
@@ -16,7 +16,7 @@ const poolOptions: WorkerPoolOptions = {
 };
 
 const highlighterOptions: WorkerInitializationRenderOptions = {
-  theme: DEFAULT_THEMES,
+  theme: CODE_VIEW_THEMES,
   preferredHighlighter: "shiki-js",
 };
 

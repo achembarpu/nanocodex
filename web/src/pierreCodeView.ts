@@ -1,10 +1,18 @@
-import type { CodeViewLayout } from "@pierre/diffs";
+import type { CodeViewLayout, ThemesType } from "@pierre/diffs";
 
 export const CODE_VIEW_LAYOUT: CodeViewLayout = {
   paddingTop: 0,
   gap: 1,
   paddingBottom: 0,
 };
+
+export const CODE_VIEW_THEMES = {
+  light: "pierre-light",
+  dark: "pierre-dark-soft",
+} satisfies ThemesType;
+
+export const COMPACT_WORKSPACE_QUERY =
+  "(max-width: 740px), (pointer: coarse) and (orientation: landscape) and (max-width: 950px)";
 
 export const CODE_VIEW_FILE_TREE_ITEM_HEIGHT = 24;
 export const CODE_VIEW_BATCH_COUNT = 25;

@@ -589,7 +589,13 @@ function NanocodexShell() {
             <section className="home-page" aria-labelledby="home-title">
               <article className="home-article">
                 <header className="home-intro">
+                  <p className="eyebrow home-eyebrow">Library-first agent runtime</p>
                   <h1 id="home-title">The coding agent is the library.</h1>
+                  <p className="home-deck">
+                    The complete retained coding loop, embedded anywhere—from a
+                    native Rust service to a browser Worker. Nanocodex owns the
+                    lifecycle; your product owns the interface, memory, data, and policy.
+                  </p>
                   <button
                     className="home-install"
                     type="button"
@@ -612,9 +618,15 @@ function NanocodexShell() {
                 </header>
 
                 <section className="home-demo" id="agent-demo" aria-labelledby="agent-demo-title">
-                  <h2 className="sr-only" id="agent-demo-title">Live Nanocodex browser agent</h2>
+                  <header className="home-demo-head">
+                    <div>
+                      <p className="rail-label">Live browser consumer</p>
+                      <h2 id="agent-demo-title">The same agent runs here.</h2>
+                    </div>
+                    <p>Browser WASM · retained session · caller-owned interface</p>
+                  </header>
                   <Suspense fallback={null}>
-                    <AgentTerminal />
+                    <AgentTerminal theme={theme} />
                   </Suspense>
                 </section>
 
@@ -651,9 +663,30 @@ function NanocodexShell() {
                   </nav>
                 </section>
 
-                <p className="home-divider" aria-hidden="true">***</p>
+                <nav className="home-surfaces" aria-label="Explore Nanocodex product surfaces">
+                  <a href={threadSurfacePath("code")} onClick={(event) => { event.preventDefault(); navigateToSurface("code"); }}>
+                    <small>01 · source</small><strong>Code</strong>
+                    <span>Browse the actual SDK, bindings, adapters, and examples powering this page.</span>
+                    <em>Inspect the library →</em>
+                  </a>
+                  <a href={threadSurfacePath("commits")} onClick={(event) => { event.preventDefault(); navigateToSurface("commits"); }}>
+                    <small>02 · evolution</small><strong>Commits</strong>
+                    <span>Read the implementation as a continuous rendered diff, not a marketing changelog.</span>
+                    <em>Follow every change →</em>
+                  </a>
+                  <a href={threadSurfacePath("evals")} onFocus={preloadEvalOverview} onPointerEnter={preloadEvalOverview} onClick={(event) => { event.preventDefault(); navigateToSurface("evals"); }}>
+                    <small>03 · evidence</small><strong>Evals</strong>
+                    <span>Inspect retained worksets, frontier charts, trajectories, usage, and verifier output.</span>
+                    <em>Open the evidence →</em>
+                  </a>
+                </nav>
+
+                <div className="home-divider" aria-hidden="true" />
 
                 <section className="home-facts" aria-label="Nanocodex capabilities">
+                  <header className="home-section-head">
+                    <div><p className="rail-label">Capability surface</p><h2>Small core. Serious range.</h2></div>
+                  </header>
                   <article>
                     <h2>Owned agent lifecycle</h2>
                     <p>Prompt ordering, independently awaitable turns, committed history, reconnect replay, compaction, snapshots, branches, and process-group cleanup.</p>

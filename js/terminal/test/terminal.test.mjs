@@ -141,6 +141,24 @@ test("terminal rendering keeps a restrained transcript above a bottom composer",
   assert.doesNotMatch(rendered, /you|nanocodex · live|─/);
 });
 
+test("narrow terminals word-wrap user turns and repeat their rail", () => {
+  const state = {
+    ...initialTerminalState(),
+    entries: [{
+      id: "user",
+      kind: "user",
+      text: "Use the shell to run pwd, then reply in one short sentence with the path.",
+    }],
+  };
+  const rendered = renderTerminal({ state, cols: 40, rows: 18 });
+  const userRows = rendered.match(/\x1b\[2m│\x1b\[0m \x1b\[1m[^\r]+/g) ?? [];
+
+  assert.deepEqual(userRows.map((row) => row.replace(/\x1b\[[0-9;]*m/g, "")), [
+    "│ Use the shell to run pwd, then reply",
+    "│ in one short sentence with the path.",
+  ]);
+});
+
 test("xtermAdapter maps disposable subscriptions to the generic host", () => {
   let dataDisposed = false;
   let resizeDisposed = false;

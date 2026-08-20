@@ -1,8 +1,4 @@
-import {
-  DEFAULT_THEMES,
-  type CodeViewItem,
-  type CodeViewOptions,
-} from "@pierre/diffs";
+import { type CodeViewItem, type CodeViewOptions } from "@pierre/diffs";
 import { CodeView } from "@pierre/diffs/react";
 import { prepareFileTreeInput, type FileTreePreparedInput } from "@pierre/trees";
 import { FileTree, useFileTree } from "@pierre/trees/react";
@@ -19,7 +15,11 @@ import {
 } from "react";
 import { fuzzyScore } from "./fuzzy";
 import { usePierreRenderer } from "./PierreWorkerProvider";
-import { CODE_VIEW_CUSTOM_CSS, CODE_VIEW_LAYOUT } from "./pierreCodeView";
+import {
+  CODE_VIEW_CUSTOM_CSS,
+  CODE_VIEW_LAYOUT,
+  CODE_VIEW_THEMES,
+} from "./pierreCodeView";
 import { syntaxLanguageForFile } from "./syntax";
 import type { RepositoryFile } from "./threadRepositorySnapshot";
 
@@ -268,7 +268,7 @@ function CodeBrowserComponent(
   const codeViewOptions = useMemo<CodeViewOptions<undefined>>(
     () => ({
       layout: CODE_VIEW_LAYOUT,
-      theme: DEFAULT_THEMES,
+      theme: CODE_VIEW_THEMES,
       themeType: theme,
       overflow: "scroll",
       disableFileHeader: true,

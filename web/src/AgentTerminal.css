@@ -1,6 +1,11 @@
 .nanocodex-demo {
   position: relative;
   width: 100%;
+  --terminal-background: var(--surface);
+  --terminal-foreground: var(--text);
+  --terminal-muted: color-mix(in srgb, var(--text) 56%, transparent);
+  --terminal-border: var(--border-soft);
+  --terminal-hover: var(--surface-hover);
 }
 
 .agent-session-shell,
@@ -8,11 +13,11 @@
   position: relative;
   z-index: 2;
   width: 100%;
-  color: #8f8f8f;
-  font-family: "Paradigm SemiMono", "Geist Mono", monospace;
+  color: var(--terminal-muted);
+  font-family: var(--font-mono);
   font-size: 11px;
-  background: #111;
-  border: 1px solid #2a2a2a;
+  background: var(--terminal-background);
+  border: 1px solid var(--terminal-border);
   border-bottom: 0;
 }
 
@@ -46,13 +51,13 @@
   width: 6px;
   height: 6px;
   flex: 0 0 auto;
-  background: #555;
+  background: currentColor;
   border-radius: 50%;
 }
 
 .agent-session-status i.is-ready,
 .agent-byok-summary i.is-ready {
-  background: #aaa;
+  background: var(--terminal-foreground);
 }
 
 .agent-session-actions button,
@@ -61,7 +66,7 @@
 .agent-oauth-code button {
   min-height: 28px;
   padding: 0 8px;
-  color: #aaa;
+  color: var(--terminal-muted);
   font: inherit;
   background: transparent;
   border: 0;
@@ -76,8 +81,8 @@
 .agent-byok-summary button:focus-visible,
 .agent-oauth-code button:hover,
 .agent-oauth-code button:focus-visible {
-  color: #fff;
-  outline: 1px solid #555;
+  color: var(--terminal-foreground);
+  outline: 1px solid var(--border);
   outline-offset: -1px;
 }
 
@@ -119,8 +124,8 @@
   display: grid;
   min-width: 150px;
   padding: 4px;
-  background: #111;
-  border: 1px solid #383838;
+  background: var(--surface-raised);
+  border: 1px solid var(--border);
   box-shadow: 0 12px 30px rgb(0 0 0 / 28%);
 }
 
@@ -130,8 +135,8 @@
 }
 
 .agent-session-menu > div button[aria-pressed="true"] {
-  color: #fff;
-  background: #202020;
+  color: var(--terminal-foreground);
+  background: var(--terminal-hover);
 }
 
 .agent-oauth-code,
@@ -145,16 +150,16 @@
 }
 
 .agent-oauth-code strong {
-  color: #fff;
+  color: var(--terminal-foreground);
   letter-spacing: 0.08em;
 }
 
 .agent-oauth-code a {
-  color: #8ac7ff;
+  color: var(--blue);
 }
 
 .agent-byok-error {
-  color: #ff7b7b;
+  color: var(--negative);
 }
 
 .agent-session-panel {
@@ -166,7 +171,7 @@
 }
 
 .agent-payment-details summary {
-  color: #8f8f8f;
+  color: var(--terminal-muted);
   cursor: pointer;
 }
 
@@ -181,16 +186,16 @@
   overflow: auto;
   font-size: 9px;
   line-height: 1.45;
-  background: #171717;
-  border: 1px solid #2a2a2a;
+  background: var(--surface-subtle);
+  border: 1px solid var(--terminal-border);
 }
 
 .agent-terminal-shell {
   width: 100%;
-  height: clamp(460px, 58svh, 560px);
+  height: clamp(420px, 52svh, 500px);
   overflow: hidden;
-  background: #111;
-  border: 1px solid #2a2a2a;
+  background: var(--terminal-background);
+  border: 1px solid var(--terminal-border);
 }
 
 .agent-xterm,
@@ -204,9 +209,13 @@
 }
 
 .agent-xterm .xterm-viewport {
-  background: #111 !important;
-  scrollbar-color: #555 #111;
+  background: var(--terminal-background) !important;
+  scrollbar-color: var(--terminal-muted) var(--terminal-background);
   scrollbar-width: thin;
+}
+
+.agent-xterm .xterm-dim {
+  opacity: 0.62;
 }
 
 .agent-xterm .xterm-screen canvas {
@@ -246,8 +255,8 @@
   }
 
   .agent-terminal-shell {
-    height: min(560px, calc(100dvh - var(--mobile-header-height, 48px) - 112px));
-    min-height: 390px;
+    height: min(460px, calc(100dvh - var(--mobile-header-height, 48px) - 112px));
+    min-height: 420px;
     margin-bottom: max(24px, env(safe-area-inset-bottom));
   }
 

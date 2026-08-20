@@ -1,5 +1,4 @@
 import {
-  DEFAULT_THEMES,
   type CodeViewItem,
   type CodeViewOptions,
   type DiffIndicators,
@@ -12,7 +11,11 @@ import {
 } from "@pierre/diffs/react";
 import { ChevronDown } from "lucide-react";
 import { memo, type RefObject, useMemo } from "react";
-import { CODE_VIEW_CUSTOM_CSS, CODE_VIEW_LAYOUT } from "./pierreCodeView";
+import {
+  CODE_VIEW_CUSTOM_CSS,
+  CODE_VIEW_LAYOUT,
+  CODE_VIEW_THEMES,
+} from "./pierreCodeView";
 import type { Theme } from "./NanocodexApp";
 
 // Behavioral viewer port from pierrecomputer/pierre@4f94a5e765195b27e1e4188b943aab2ae44613cb
@@ -87,7 +90,7 @@ export const DiffsHubViewer = memo(function DiffsHubViewer({
     () =>
       ({
         layout: CODE_VIEW_LAYOUT,
-        theme: DEFAULT_THEMES,
+        theme: CODE_VIEW_THEMES,
         themeType: theme,
         diffStyle,
         diffIndicators,

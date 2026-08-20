@@ -25,6 +25,7 @@ import {
   DropdownMenuTrigger,
 } from "./DropdownMenu";
 import { usePierreRenderer } from "./PierreWorkerProvider";
+import { COMPACT_WORKSPACE_QUERY } from "./pierreCodeView";
 import { Switch } from "./Switch";
 import { useCommitStreamLoader } from "./useCommitStreamLoader";
 import type { Theme } from "./NanocodexApp";
@@ -67,7 +68,7 @@ const CommitCodeStreamComponent = forwardRef<
   const [lineNumbers, setLineNumbers] = useState(true);
 
   useEffect(() => {
-    const mediaQuery = window.matchMedia("(max-width: 767px)");
+    const mediaQuery = window.matchMedia(COMPACT_WORKSPACE_QUERY);
     const updateDiffStyle = (matches: boolean) => {
       setDiffStyle(matches ? "unified" : "split");
     };
