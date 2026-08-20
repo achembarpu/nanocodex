@@ -946,6 +946,7 @@ function NanocodexShell() {
                   className="commits-workspace"
                   aria-label="Repository commits"
                 >
+                <h1 className="sr-only">Nanocodex repository commits</h1>
                 <button
                   className={
                     commitRailOpen

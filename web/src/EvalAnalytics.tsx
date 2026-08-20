@@ -461,7 +461,7 @@ export const EvalAnalytics = memo(function EvalAnalytics({
             ? "Actual retained runs positioned by output-token volume. Circle means pass; × means failure."
             : "Codex and Nanocodex across model and thinking effort, using medians over retained repetitions."}</p>
           {runView ? (
-            <div className="eval-run-legend" aria-label="Run chart legend">
+            <div className="eval-run-legend" role="group" aria-label="Run chart legend">
               {runLegend.map((item) => (
                 <span key={item.key}><i style={{ backgroundColor: item.color }} /> {item.label}</span>
               ))}

@@ -543,7 +543,7 @@ export function LiveEvals({ data }: { data: LiveEvalsData }) {
               <div><p className="rail-label">Runs</p><h2 id="treatments-heading">Treatments and repetitions</h2></div>
               <span>{selectedTask.treatments.length} treatments</span>
             </header>
-            <div className="eval-matrix-legend" aria-label="Result legend">
+            <div className="eval-matrix-legend" role="group" aria-label="Result legend">
               <span><i className="passed" /> verifier passed</span><span><i className="failed" /> verifier / execution failed</span><span><i className="running" /> running</span><span><i className="unclaimed" /> unclaimed</span>
             </div>
             <div className="eval-task-matrix-scroll">

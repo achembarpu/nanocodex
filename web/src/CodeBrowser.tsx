@@ -81,6 +81,8 @@ function CodeBrowserComponent(
   const [fileQuery, setFileQuery] = useState("");
   const [activeFileIndex, setActiveFileIndex] = useState(0);
   const fileSearchInputRef = useRef<HTMLInputElement>(null);
+  const treePanelRef = useRef<HTMLElement>(null);
+  const codeViewContainerRef = useRef<HTMLDivElement>(null);
   const renderer = usePierreRenderer();
   const treeInput = useMemo(
     () => prepareFileTreeInput(files.map((file) => file.path), {
@@ -205,6 +207,41 @@ function CodeBrowserComponent(
   }, [fileSearchOpen]);
 
   useEffect(() => {
+    const host = treePanelRef.current?.querySelector("file-tree-container");
+    const treeRoot = host?.shadowRoot?.querySelector<HTMLElement>(
+      "[data-file-tree-virtualized-root]",
+    );
+    const treeRows = treeRoot?.querySelector<HTMLElement>(
+      "[data-file-tree-virtualized-scroll]",
+    );
+    if (!treeRoot || !treeRows) return;
+
+    // Pierre's root also owns its header and search input. Keep those controls
+    // outside the ARIA tree while retaining the widget's keyboard event root.
+    treeRoot.removeAttribute("role");
+    treeRoot.removeAttribute("aria-label");
+    treeRows.setAttribute("role", "tree");
+    treeRows.setAttribute("aria-label", "Repository files");
+
+    const searchInput = treeRoot.querySelector<HTMLInputElement>(
+      "[data-file-tree-search-input]",
+    );
+    if (searchInput) {
+      const rowsId = `${treeRoot.id || "repository-file-tree"}__rows`;
+      treeRows.id = rowsId;
+      searchInput.setAttribute("aria-controls", rowsId);
+    }
+  }, [model]);
+
+  useEffect(() => {
+    const container = codeViewContainerRef.current;
+    if (!container || !viewFile || !codeReady) return;
+    container.tabIndex = 0;
+    container.setAttribute("role", "region");
+    container.setAttribute("aria-label", `${viewFile.path} source code`);
+  }, [codeReady, viewFile]);
+
+  useEffect(() => {
     setActiveFileIndex(0);
   }, [fileQuery]);
 
@@ -282,6 +319,7 @@ function CodeBrowserComponent(
 
   return (
     <section className="code-workspace" aria-label="Code browser">
+      <h1 className="sr-only">Nanocodex source code</h1>
       <button
         className={treeOpen ? "workspace-backdrop is-visible" : "workspace-backdrop"}
         type="button"
@@ -289,6 +327,7 @@ function CodeBrowserComponent(
         onClick={() => setTreeOpen(false)}
       />
       <aside
+        ref={treePanelRef}
         className={treeOpen ? "code-tree-panel is-mobile-open" : "code-tree-panel"}
         aria-label="Repository files"
       >
@@ -310,7 +349,11 @@ function CodeBrowserComponent(
               >
                 <PanelLeft aria-hidden="true" />
               </button>
-              <div className="file-breadcrumb" aria-label={viewFile.path}>
+              <div
+                className="file-breadcrumb"
+                role="group"
+                aria-label={`File path: ${viewFile.path}`}
+              >
                 {viewFile.path.split("/").map((part, index, parts) => (
                   <span key={`${part}-${index}`}>
                     {part}
@@ -338,6 +381,7 @@ function CodeBrowserComponent(
                 key={renderer.disableWorkerPool ? "main" : "workers"}
                 items={codeItems}
                 className="code-file-frame code-view cv-scrollbar"
+                containerRef={codeViewContainerRef}
                 disableWorkerPool={renderer.disableWorkerPool}
                 options={codeViewOptions}
               />

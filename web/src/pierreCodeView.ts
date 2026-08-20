@@ -34,6 +34,11 @@ export function getInitialBatchSize(): number {
 }
 
 export const CODE_VIEW_CUSTOM_CSS = `
+[data-code]:focus-visible {
+  outline: none;
+  box-shadow: inset 0 0 0 2px var(--blue);
+}
+
 [data-diffs-header] {
   container-type: scroll-state;
   container-name: sticky-header;

@@ -2723,6 +2723,12 @@ html[data-theme="dark"] .tui-syntax .shiki span {
   border-radius: 0;
 }
 
+.code-file-frame:focus-visible,
+.commit-stream:focus-visible {
+  outline: 0;
+  box-shadow: inset 0 0 0 2px var(--blue);
+}
+
 .code-file-search {
   display: inline-flex;
   gap: 6px;
@@ -2749,7 +2755,7 @@ html[data-theme="dark"] .tui-syntax .shiki span {
 }
 
 .code-file-search kbd {
-  color: var(--text-faint);
+  color: currentColor;
   font: inherit;
 }
 
