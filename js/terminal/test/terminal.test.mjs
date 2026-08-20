@@ -124,6 +124,23 @@ test("ANSI rendering neutralizes transcript control bytes", () => {
   assert.match(rendered, /safe�\[2Jstill safe/);
 });
 
+test("terminal rendering keeps a restrained transcript above a bottom composer", () => {
+  const state = {
+    ...initialTerminalState(),
+    entries: [
+      { id: "user", kind: "user", text: "show me" },
+      { id: "assistant", kind: "assistant", text: "Here it is.", streaming: false },
+    ],
+  };
+  const rendered = renderTerminal({ state, cols: 80, rows: 18 });
+
+  assert.match(rendered, /\x1b\[2m│\x1b\[0m \x1b\[1mshow me\x1b\[0m/);
+  assert.match(rendered, /  Here it is\./);
+  assert.match(rendered, /(?:\r\n){6,}\x1b\[2m│\x1b\[0m/);
+  assert.match(rendered, /enter send · shift\+enter newline · \/help/);
+  assert.doesNotMatch(rendered, /you|nanocodex · live|─/);
+});
+
 test("xtermAdapter maps disposable subscriptions to the generic host", () => {
   let dataDisposed = false;
   let resizeDisposed = false;

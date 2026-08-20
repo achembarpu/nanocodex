@@ -15,7 +15,6 @@ const RESET = "\x1b[0m";
 const BOLD = "\x1b[1m";
 const DIM = "\x1b[2m";
 const RED = "\x1b[31m";
-const CYAN = "\x1b[36m";
 const MAX_ENTRY_CHARACTERS = 8_000;
 
 /**
@@ -324,18 +323,29 @@ export function createAgentTerminal(options) {
   });
 }
 
-export function renderTerminal({ state, input = "", cursor = input.length, cols = 80 }) {
-  const lines = [`${BOLD}nanocodex${RESET}`];
-  for (const entry of state.entries) lines.push(renderEntry(entry));
-  if (state.running) lines.push(`${CYAN}${state.status || "Working"}${RESET}`);
-  const safeInput = terminalText(input);
+export function renderTerminal({ state, input = "", cursor = input.length, cols = 80, rows = 24 }) {
+  const content = [`${BOLD}nanocodex${RESET}`, renderTranscript(state.entries)].filter(Boolean).join("\r\n\r\n");
   const safeCursor = Math.max(0, Math.min(input.length, cursor));
   const before = terminalText(input.slice(0, safeCursor));
   const at = terminalText(input.slice(safeCursor, safeCursor + 1) || " ");
   const after = terminalText(input.slice(safeCursor + 1));
-  lines.push(`${BOLD}>${RESET} ${before}\x1b[7m${at}${RESET}${after}`);
-  lines.push(`${DIM}${rule(cols)}  Enter send · Shift+Enter newline · /help${RESET}`);
-  return `${CLEAR_SCREEN}${HIDE_CURSOR}${lines.join("\r\n\r\n")}\r\n`;
+  const footer = [
+    ...(state.running ? [`${DIM}  · ${state.status || "working"}${RESET}`] : []),
+    `${DIM}│${RESET} ${before}\x1b[7m${at}${RESET}${after}`,
+    `${DIM}  ${footerHint(cols)}${RESET}`,
+  ].join("\r\n");
+  const gap = Math.max(
+    1,
+    positiveInteger(rows, 24) - renderedRows(content, cols) - renderedRows(footer, cols) - 1,
+  );
+  return `${CLEAR_SCREEN}${HIDE_CURSOR}${content}${"\r\n".repeat(gap)}${footer}`;
+}
+
+function renderTranscript(entries) {
+  return entries.reduce((output, entry, index) => {
+    if (index > 0) output += entries[index - 1].kind === "tool" && entry.kind === "tool" ? "\r\n" : "\r\n\r\n";
+    return output + renderEntry(entry);
+  }, "");
 }
 
 export function encodeXtermKeyEvent(event) {
@@ -426,20 +436,31 @@ export function wtermAdapter(term) {
 function renderEntry(entry) {
   switch (entry.kind) {
     case "user":
-      return `${BOLD}you${RESET}\r\n${boundedText(entry.text)}`;
+      return renderUserEntry(entry.text);
     case "assistant":
-      return `${BOLD}nanocodex${entry.streaming ? ` ${CYAN}· live${RESET}` : ""}${RESET}\r\n${boundedText(entry.text)}`;
+      return indentText(boundedText(entry.text));
     case "reasoning":
-      return `${DIM}thinking${entry.streaming ? " · live" : ""}\r\n${boundedText(entry.text)}${RESET}`;
+      return `${DIM}  thinking${entry.streaming ? "…" : ""}\r\n${indentText(boundedText(entry.text))}${RESET}`;
     case "error":
-      return `${RED}error${RESET}\r\n${boundedText(entry.text)}`;
+      return `${RED}!${RESET} ${boundedText(entry.text)}`;
     case "plan":
-      return `${DIM}plan\r\n${entry.update.plan.map((step) => `${step.status === "completed" ? "✓" : step.status === "in_progress" ? "→" : "·"} ${terminalText(step.step)}`).join("\r\n")}${RESET}`;
+      return `${DIM}${entry.update.plan.map((step) => `  ${step.status === "completed" ? "✓" : step.status === "in_progress" ? "→" : "·"} ${terminalText(step.step)}`).join("\r\n")}${RESET}`;
     case "tool": {
-      const result = entry.tool.result ? `\r\n${boundedText(entry.tool.result)}` : "";
-      return `${DIM}${entry.tool.status === "running" ? "→" : entry.tool.status === "completed" ? "✓" : "!"} ${terminalText(entry.tool.name)}${result}${RESET}`;
+      const result = entry.tool.result ? `\r\n${indentText(boundedText(entry.tool.result))}` : "";
+      return `${DIM}  ${entry.tool.status === "running" ? "→" : entry.tool.status === "completed" ? "✓" : "!"} ${terminalText(entry.tool.name)}${result}${RESET}`;
     }
   }
+}
+
+function renderUserEntry(value) {
+  return boundedText(value)
+    .split("\r\n")
+    .map((line) => `${DIM}│${RESET} ${BOLD}${line}${RESET}`)
+    .join("\r\n");
+}
+
+function indentText(value) {
+  return String(value).split("\r\n").map((line) => `  ${line}`).join("\r\n");
 }
 
 function boundedText(value) {
@@ -457,8 +478,19 @@ function terminalText(value) {
     .replace(/\n/g, "\r\n");
 }
 
-function rule(cols) {
-  return "─".repeat(Math.max(8, Math.min(48, positiveInteger(cols, 80) - 2)));
+function renderedRows(value, cols) {
+  const width = positiveInteger(cols, 80);
+  return String(value).split("\r\n").reduce((total, line) => {
+    const visible = line.replace(/\x1b\[[0-?]*[ -\/]*[@-~]/g, "");
+    return total + Math.max(1, Math.ceil([...visible].length / width));
+  }, 0);
+}
+
+function footerHint(cols) {
+  const width = positiveInteger(cols, 80);
+  if (width >= 54) return "enter send · shift+enter newline · /help";
+  if (width >= 34) return "enter send · shift+enter newline";
+  return "enter send";
 }
 
 function positiveInteger(value, fallback) {

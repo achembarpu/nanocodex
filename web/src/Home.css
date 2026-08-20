@@ -108,7 +108,7 @@
 }
 
 .home-demo {
-  width: min(1180px, calc(100vw - 60px));
+  width: min(980px, calc(100vw - 60px));
   margin-top: 34px;
 }
 

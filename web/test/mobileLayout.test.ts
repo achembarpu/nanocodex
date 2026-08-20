@@ -20,7 +20,7 @@ test("terminal and application controls share the compact phone policy", () => {
   assert.match(auth, /min-height:\s*44px/);
   assert.match(shell, /100dvh/);
   assert.match(shell, /env\(safe-area-inset-bottom\)/);
-  assert.match(shell, /min-height:\s*440px/);
+  assert.match(shell, /min-height:\s*390px/);
 });
 
 test("portrait commits still collapse to an in-viewport viewer column", () => {
@@ -50,10 +50,12 @@ test("terminal interaction is renderer-neutral and resize-driven", () => {
   assert.match(terminal, /new Xterm\(/);
   assert.match(terminal, /new FitAddon\(\)/);
   assert.match(terminal, /encodeXtermKeyEvent/);
-  assert.match(terminal, /new ResizeObserver\(\(\) => fit\.fit\(\)\)/);
+  assert.match(terminal, /new ResizeObserver\(\(\) => \{[\s\S]*?fit\.fit\(\)/);
   assert.match(terminal, /aria-label", "Nanocodex terminal input"/);
   assert.match(terminal, /type: "terminalInput"/);
   assert.match(terminal, /type: "terminalResize"/);
+  assert.match(terminal, /terminal\.rows - 3/);
+  assert.doesNotMatch(terminal, /\\r\\n\\r\\n> /);
 });
 
 test("the Worker hosts the reusable terminal adapter", () => {

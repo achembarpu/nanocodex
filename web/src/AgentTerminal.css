@@ -52,7 +52,7 @@
 
 .agent-session-status i.is-ready,
 .agent-byok-summary i.is-ready {
-  background: #68d391;
+  background: #aaa;
 }
 
 .agent-session-actions button,
@@ -187,7 +187,7 @@
 
 .agent-terminal-shell {
   width: 100%;
-  height: clamp(520px, 66svh, 640px);
+  height: clamp(460px, 58svh, 560px);
   overflow: hidden;
   background: #111;
   border: 1px solid #2a2a2a;
@@ -200,7 +200,7 @@
 }
 
 .agent-xterm > .xterm {
-  padding: 14px;
+  padding: 12px;
 }
 
 .agent-xterm .xterm-viewport {
@@ -246,12 +246,12 @@
   }
 
   .agent-terminal-shell {
-    height: min(620px, calc(100dvh - var(--mobile-header-height, 48px) - 112px));
-    min-height: 440px;
+    height: min(560px, calc(100dvh - var(--mobile-header-height, 48px) - 112px));
+    min-height: 390px;
     margin-bottom: max(24px, env(safe-area-inset-bottom));
   }
 
   .agent-xterm > .xterm {
-    padding: 10px;
+    padding: 12px;
   }
 }

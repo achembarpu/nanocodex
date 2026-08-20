@@ -144,13 +144,9 @@ function AgentTerminalDemo() {
     nanocodexConfig.disconnect();
     setTransport(next);
   };
-  const unavailableMessage = transport === "openai"
-    ? credentialSource === undefined
-      ? "Connecting…"
-      : "Connect to start."
-    : agent.status === "error"
-        ? "Could not connect. Try again."
-        : "Connect to start.";
+  const unavailableMessage = transport !== "openai" && agent.status === "error"
+    ? "Could not connect. Try again."
+    : "Connect to start.";
   useEffect(() => {
     if (agent.status !== "ready" || !terminal.current) return;
     agent.dispatch({
@@ -218,8 +214,8 @@ function XtermSurface({
 }) {
   const element = useRef<HTMLDivElement>(null);
   const instance = useRef<XtermInstance | undefined>(undefined);
-  const latest = useRef({ onData, onReady, onResize });
-  latest.current = { onData, onReady, onResize };
+  const latest = useRef({ inactiveMessage, status, onData, onReady, onResize });
+  latest.current = { inactiveMessage, status, onData, onReady, onResize };
 
   useEffect(() => {
     if (!element.current) return;
@@ -227,9 +223,10 @@ function XtermSurface({
       cursorBlink: true,
       cursorStyle: "block",
       fontFamily: '"Paradigm SemiMono", "Geist Mono", monospace',
-      fontSize: 13,
+      fontSize: 14,
       fontWeight: "400",
       fontWeightBold: "600",
+      letterSpacing: 0,
       lineHeight: 1.25,
       scrollback: 5_000,
       scrollOnUserInput: true,
@@ -259,7 +256,13 @@ function XtermSurface({
     element.current.querySelector("textarea")?.setAttribute("aria-label", "Nanocodex terminal input");
     const data = terminal.onData((value) => latest.current.onData(value));
     const resize = terminal.onResize((size) => latest.current.onResize(size));
-    const observer = new ResizeObserver(() => fit.fit());
+    const observer = new ResizeObserver(() => {
+      fit.fit();
+      const current = latest.current;
+      if (current.status !== "ready" && current.status !== "starting") {
+        writeInactiveFrame(terminal, current.inactiveMessage);
+      }
+    });
     observer.observe(element.current);
     latest.current.onReady(terminal);
     terminal.focus();
@@ -274,15 +277,20 @@ function XtermSurface({
 
   useEffect(() => {
     if (status === "ready" || status === "starting" || !instance.current) return;
-    instance.current.write(
-      `\x1b[3J\x1b[2J\x1b[H\x1b[?25l\x1b[1mnanocodex\x1b[0m\r\n\r\n\x1b[2m${inactiveMessage}\x1b[0m\r\n\r\n> `,
-    );
+    writeInactiveFrame(instance.current, inactiveMessage);
   }, [inactiveMessage, status]);
 
   return (
     <section className="agent-terminal-shell" aria-label="Live Nanocodex terminal">
       <div ref={element} className="agent-xterm" />
     </section>
+  );
+}
+
+function writeInactiveFrame(terminal: XtermInstance, message: string) {
+  const gap = Math.max(1, terminal.rows - 3);
+  terminal.write(
+    `\x1b[3J\x1b[2J\x1b[H\x1b[?25l\x1b[1mnanocodex\x1b[0m${"\r\n".repeat(gap)}\x1b[2m  ${message}\x1b[0m`,
   );
 }
 
