@@ -187,6 +187,7 @@ async function storeArtifacts(bucket, current, artifacts) {
     );
   }
   await bucket.putBytes(current.objectManifestKey, await readFile(artifacts.manifestPath));
+  await bucket.putBytes(current.commitPatchParts[0].key, new Uint8Array([0]));
   for (const shard of artifacts.shards) await bucket.putBytes(shard.key, await readFile(shard.path));
 }
 
@@ -199,6 +200,8 @@ function publication(head, refs, artifacts) {
     refs,
     snapshotKey: `${prefix}/repository.json`,
     commitsKey: `${prefix}/commits.json`,
+    commitPatchParts: [{ key: `${prefix}/commit-patches/0000.diff`, size: 1 }],
+    commitPatchSize: 1,
     inventoryKey: `${prefix}/inventory.json`,
     packParts: artifacts.packParts.map(({ key, size }) => ({ key, size })),
     packSize: artifacts.packSize,

@@ -26,7 +26,7 @@ export type PublishedRepositorySnapshot = PublishedRepositoryDocument & {
   historyLoaded: boolean;
   commits: HarnessCommit[];
   readFile(file: RepositoryFile): Promise<string>;
-  commitPatchUrl(commit: HarnessCommit): string;
+  commitPatchUrl: string | ((commit: HarnessCommit) => string);
 };
 
 type Fetch = typeof fetch;
@@ -94,11 +94,9 @@ export async function loadPublishedRepositorySnapshot(
       fileContents.set(file.objectId, pending);
       return pending;
     },
-    commitPatchUrl(commit) {
-      return development
-        ? `${base}/commits.diff?hash=${commit.hash}`
-        : `${base}/commit/${commit.hash}.patch`;
-    },
+    commitPatchUrl: development
+      ? (commit) => `${base}/commits.diff?hash=${commit.hash}`
+      : `${base}/commits/${snapshot.repository.head}.diff`,
   };
 }
 

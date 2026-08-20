@@ -75,10 +75,31 @@ test("published repository surfaces load the public snapshot and commit index", 
   assert.deepEqual(cacheModes, ["no-store", "no-store"]);
   assert.equal(snapshot.repository.fullName, "gakonst/nanocodex");
   assert.deepEqual(snapshot.commits, [commit]);
-  assert.equal(snapshot.commitPatchUrl(commit), `/api/repository/commit/${head}.patch`);
+  assert.equal(snapshot.commitPatchUrl, `/api/repository/commits/${head}.diff`);
   assert.equal(await snapshot.readFile(snapshot.tree[0]), "# Nanocodex\n");
   assert.equal(await snapshot.readFile(snapshot.tree[0]), "# Nanocodex\n");
   assert.equal(requests.filter((url) => url === document.tree[0].contentUrl).length, 1);
+});
+
+test("development repository history retains callable per-commit patches", async () => {
+  const request = async (input: string | URL | Request) => {
+    if (String(input).endsWith("/snapshot")) return Response.json(document);
+    return Response.json([commit]);
+  };
+
+  const snapshot = await loadPublishedRepositorySnapshot(
+    true,
+    request as typeof fetch,
+    true,
+  );
+
+  assert.equal(typeof snapshot.commitPatchUrl, "function");
+  assert.equal(
+    typeof snapshot.commitPatchUrl === "function"
+      ? snapshot.commitPatchUrl(commit)
+      : null,
+    `/__nanocodex/repository/commits.diff?hash=${head}`,
+  );
 });
 
 test("the Code surface does not fetch commit history", async () => {

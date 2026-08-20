@@ -1,6 +1,6 @@
 const SHA1_PATTERN = /^[a-f0-9]{40}$/;
 const REF_PATTERN = /^refs\/(heads|tags)\/[A-Za-z0-9][A-Za-z0-9._\/-]*$/;
-export const REPOSITORY_PACK_PART_BYTES = 16 * 1024 * 1024;
+export const REPOSITORY_PART_BYTES = 16 * 1024 * 1024;
 
 export type RepositoryRef = {
   name: string;
@@ -8,8 +8,15 @@ export type RepositoryRef = {
   peeled?: string;
 };
 
-export type RepositoryPackPart = {
+export type RepositoryPart = {
   key: string;
+  size: number;
+};
+
+export type RepositoryPartsManifest = {
+  version: 1;
+  head: string;
+  parts: RepositoryPart[];
   size: number;
 };
 
@@ -20,8 +27,10 @@ export type RepositoryPublication = {
   refs: RepositoryRef[];
   snapshotKey: string;
   commitsKey: string;
+  commitPatchParts: RepositoryPart[];
+  commitPatchSize: number;
   inventoryKey: string;
-  packParts: RepositoryPackPart[];
+  packParts: RepositoryPart[];
   packSize: number;
   objectManifestKey: string;
   packHash: string;
@@ -113,9 +122,6 @@ export function isRepositoryPublication(
     !Array.isArray(publication.refs) ||
     typeof publication.publishedAt !== "string" ||
     !Number.isFinite(Date.parse(publication.publishedAt)) ||
-    typeof publication.packSize !== "number" ||
-    !Number.isSafeInteger(publication.packSize) ||
-    publication.packSize <= 0 ||
     typeof publication.packHash !== "string" ||
     !SHA1_PATTERN.test(publication.packHash)
   ) {
@@ -138,21 +144,17 @@ export function isRepositoryPublication(
   }
   const prefix = `generations/${publication.head}/`;
   if (
-    !Array.isArray(publication.packParts) ||
-    publication.packParts.length === 0 ||
-    publication.packParts.length > 256 ||
-    !publication.packParts.every((part, index) =>
-      part != null &&
-      typeof part === "object" &&
-      part.key === `${prefix}packs/${publication.packHash}/${String(index).padStart(4, "0")}.pack` &&
-      Number.isSafeInteger(part.size) &&
-      part.size > 0 &&
-      part.size <= REPOSITORY_PACK_PART_BYTES &&
-      (index === publication.packParts!.length - 1 ||
-        part.size === REPOSITORY_PACK_PART_BYTES)
+    !areCanonicalParts(
+      publication.commitPatchParts,
+      publication.commitPatchSize,
+      (index) => `${prefix}commit-patches/${String(index).padStart(4, "0")}.diff`,
     ) ||
-    publication.packParts.reduce((total, part) => total + part.size, 0) !==
-      publication.packSize
+    !areCanonicalParts(
+      publication.packParts,
+      publication.packSize,
+      (index) =>
+        `${prefix}packs/${publication.packHash}/${String(index).padStart(4, "0")}.pack`,
+    )
   ) {
     return false;
   }
@@ -160,6 +162,54 @@ export function isRepositoryPublication(
     publication.commitsKey === `${prefix}commits.json` &&
     publication.inventoryKey === `${prefix}inventory.json` &&
     publication.objectManifestKey === `${prefix}objects.json`;
+}
+
+export function isCommitPatchManifest(
+  value: unknown,
+  expectedHead: string,
+): value is RepositoryPartsManifest {
+  if (value == null || typeof value !== "object") return false;
+  const manifest = value as Partial<RepositoryPartsManifest>;
+  return manifest.version === 1 &&
+    manifest.head === expectedHead &&
+    areCanonicalParts(
+      manifest.parts,
+      manifest.size,
+      (index) =>
+        `generations/${expectedHead}/commit-patches/${String(index).padStart(4, "0")}.diff`,
+    );
+}
+
+function areCanonicalParts(
+  value: unknown,
+  totalSize: unknown,
+  keyAt: (index: number) => string,
+): value is RepositoryPart[] {
+  if (
+    !Array.isArray(value) ||
+    value.length === 0 ||
+    value.length > 256 ||
+    !Number.isSafeInteger(totalSize) ||
+    (totalSize as number) <= 0
+  ) {
+    return false;
+  }
+  let observedSize = 0;
+  for (const [index, part] of value.entries()) {
+    if (
+      part == null ||
+      typeof part !== "object" ||
+      part.key !== keyAt(index) ||
+      !Number.isSafeInteger(part.size) ||
+      part.size <= 0 ||
+      part.size > REPOSITORY_PART_BYTES ||
+      (index < value.length - 1 && part.size !== REPOSITORY_PART_BYTES)
+    ) {
+      return false;
+    }
+    observedSize += part.size;
+  }
+  return observedSize === totalSize;
 }
 
 function isPublishRequest(value: unknown): value is PublishRequest {

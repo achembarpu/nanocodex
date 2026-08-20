@@ -12,15 +12,17 @@ import {
   type GitObjectManifest,
 } from "./gitObjectManifest.ts";
 import { createSelectedPackStream } from "./gitObjectPack.ts";
-import { createRepositoryPackStream } from "./gitPackParts.ts";
+import { createRepositoryPartsStream } from "./gitPackParts.ts";
 import {
+  isCommitPatchManifest,
   isRepositoryPublication,
   type RepositoryPublication,
 } from "./gitRepository.ts";
 
 const SHA1_PATTERN = /^[a-f0-9]{40}$/;
-const generationFilePattern = /^(repository\.json|commits\.json|inventory\.json|objects\.json)$/;
+const generationFilePattern = /^(repository\.json|commits\.json|commit-patches\.json|inventory\.json|objects\.json)$/;
 const generationCommitPagePattern = /^commits\/(\d{4})\.json$/;
+const generationCommitPatchPartPattern = /^commit-patches\/(\d{4})\.diff$/;
 const generationObjectShardPattern = /^objects\/(\d{4})\.pack$/;
 const generationPackPartPattern = /^packs\/([a-f0-9]{40})\/(\d{4})\.pack$/;
 const immutableCacheControl = "public, max-age=31536000, immutable";
@@ -55,6 +57,19 @@ export async function handleGitRequest(
         : serveCommitPage(request, env, context, generation, Number(page));
     }
     return servePublishedObject(request, env, context, "commitsKey", false);
+  }
+  const commitPatchMatch = url.pathname.match(
+    /^\/api\/repository\/commits\/([a-f0-9]{40})\.diff$/,
+  );
+  if (request.method === "GET" && commitPatchMatch) {
+    return serveCommitPatch(env, commitPatchMatch[1]);
+  }
+  if (
+    request.method === "GET" &&
+    url.pathname.startsWith("/api/repository/commits/") &&
+    url.pathname.endsWith(".diff")
+  ) {
+    return Response.json({ error: "invalid_repository_generation" }, { status: 400 });
   }
   const blobMatch = url.pathname.match(/^\/api\/repository\/blob\/([a-f0-9]{40})$/);
   if (request.method === "GET" && blobMatch) {
@@ -133,6 +148,8 @@ export async function handleGitRequest(
       publication.snapshotKey,
       publication.commitsKey,
       publication.inventoryKey,
+      `generations/${publication.head}/commit-patches.json`,
+      ...publication.commitPatchParts.map((part) => part.key),
       ...publication.packParts.map((part) => part.key),
     ];
     const objects = await Promise.all(requiredKeys.map((key) => requireBucket(env).head(key)));
@@ -140,7 +157,33 @@ export async function handleGitRequest(
     if (missing.length > 0) {
       return Response.json({ error: "publication_objects_missing", missing }, { status: 409 });
     }
-    const packOffset = requiredKeys.length - publication.packParts.length;
+    let commitPatchManifest: unknown;
+    try {
+      const storedManifest = await requireBucket(env).get(requiredKeys[3]!);
+      commitPatchManifest = storedManifest == null ? undefined : await storedManifest.json();
+    } catch {
+      return storageFailure("published commit patch manifest is invalid");
+    }
+    if (
+      !isCommitPatchManifest(commitPatchManifest, publication.head) ||
+      commitPatchManifest.size !== publication.commitPatchSize
+    ) {
+      return Response.json(
+        { error: "publication_commit_patch_manifest_invalid" },
+        { status: 409 },
+      );
+    }
+    const commitPatchOffset = 4;
+    const invalidCommitPatchParts = publication.commitPatchParts
+      .filter((part, index) => objects[commitPatchOffset + index]?.size !== part.size)
+      .map((part) => part.key);
+    if (invalidCommitPatchParts.length > 0) {
+      return Response.json(
+        { error: "publication_commit_patch_parts_invalid", invalid: invalidCommitPatchParts },
+        { status: 409 },
+      );
+    }
+    const packOffset = commitPatchOffset + publication.commitPatchParts.length;
     const invalidPackParts = publication.packParts
       .filter((part, index) => objects[packOffset + index]?.size !== part.size)
       .map((part) => part.key);
@@ -240,7 +283,7 @@ export async function handleGitRequest(
       fetchRequest.deepen === 0
     ) {
       try {
-        const pack = await createRepositoryPackStream(
+        const pack = await createRepositoryPartsStream(
           requireBucket(env),
           publication.packParts,
         );
@@ -383,6 +426,43 @@ function serveCommitPage(
   );
 }
 
+async function serveCommitPatch(
+  env: GitStorageEnv,
+  generation: string,
+): Promise<Response> {
+  const manifestKey = `generations/${generation}/commit-patches.json`;
+  let manifest: unknown;
+  try {
+    const storedManifest = await requireBucket(env).get(manifestKey);
+    if (storedManifest == null) {
+      return Response.json({ error: "repository_generation_not_published" }, { status: 404 });
+    }
+    manifest = await storedManifest.json();
+  } catch {
+    return storageFailure("published commit patch manifest is invalid");
+  }
+  if (!isCommitPatchManifest(manifest, generation)) {
+    return storageFailure("published commit patch manifest is invalid");
+  }
+  let body: ReadableStream<Uint8Array>;
+  try {
+    body = await createRepositoryPartsStream(
+      requireBucket(env),
+      manifest.parts,
+    );
+  } catch {
+    return storageFailure("published commit patch is missing or invalid");
+  }
+  const headers = new Headers({
+    "cache-control": immutableCacheControl,
+    "content-length": String(manifest.size),
+    "content-type": "text/x-diff; charset=utf-8",
+    "x-content-type-options": "nosniff",
+    "x-repository-generation": generation,
+  });
+  return new Response(body, { headers });
+}
+
 async function serveObject(
   request: Request,
   env: GitStorageEnv,
@@ -492,6 +572,12 @@ function objectKeyFromUploadPath(pathname: string): string | null {
   if (commitPage && generationCommitPagePattern.test(commitPage[2])) {
     return `generations/${commitPage[1]}/${commitPage[2]}`;
   }
+  const commitPatchPart = relative.match(
+    /^generations\/([a-f0-9]{40})\/(commit-patches\/\d{4}\.diff)$/,
+  );
+  if (commitPatchPart && generationCommitPatchPartPattern.test(commitPatchPart[2])) {
+    return `generations/${commitPatchPart[1]}/${commitPatchPart[2]}`;
+  }
   const objectShard = relative.match(
     /^generations\/([a-f0-9]{40})\/(objects\/\d{4}\.pack)$/,
   );
@@ -509,6 +595,7 @@ function objectKeyFromUploadPath(pathname: string): string | null {
 
 function contentTypeForKey(key: string): string {
   if (key.endsWith(".json")) return "application/json; charset=utf-8";
+  if (key.endsWith(".diff") || key.endsWith(".patch")) return "text/x-diff; charset=utf-8";
   if (key.endsWith(".pack") || key.endsWith(".idx")) return "application/octet-stream";
   return "text/plain; charset=utf-8";
 }

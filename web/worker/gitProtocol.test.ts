@@ -27,6 +27,11 @@ const publication: RepositoryPublication = {
   ],
   snapshotKey: `generations/${hash}/repository.json`,
   commitsKey: `generations/${hash}/commits.json`,
+  commitPatchParts: [{
+    key: `generations/${hash}/commit-patches/0000.diff`,
+    size: 1,
+  }],
+  commitPatchSize: 1,
   inventoryKey: `generations/${hash}/inventory.json`,
   packParts: [{ key: `generations/${hash}/packs/${packHash}/0000.pack`, size: 1 }],
   packSize: 1,

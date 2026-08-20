@@ -202,7 +202,7 @@ export function useCommitStreamLoader({
         let responseBody: ReadableStream<Uint8Array>;
         if (typeof patchUrl === "string") {
           const response = await fetch(patchUrl, {
-            cache: "no-store",
+            cache: "default",
             signal: controller.signal,
           });
           if (!response.ok) {

@@ -10,6 +10,7 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
 import {
+  buildCommitPatchParts,
   buildGitArtifacts,
   buildUploadPlan,
   buildRepositoryPackParts,
@@ -70,6 +71,9 @@ test("the publisher CLI initializes its module before building a generation", as
     await writeFile(resolve(repository, "README.md"), "# publisher fixture\n");
     await git(["add", "README.md"], repository);
     await git(["commit", "-qm", "initial fixture"], repository);
+    await writeFile(resolve(repository, "README.md"), "# publisher fixture\n\nsecond commit\n");
+    await git(["add", "README.md"], repository);
+    await git(["commit", "-qm", "second fixture"], repository);
     const head = await git(["rev-parse", "HEAD"], repository);
     await git(["branch", "private-preview"], repository);
     await git(["tag", "v0-test"], repository);
@@ -107,6 +111,35 @@ test("the publisher CLI initializes its module before building a generation", as
     assert.deepEqual(publication.publication.refs, [
       { name: "refs/heads/master", oid: head },
     ]);
+    assert.ok(publication.publication.commitPatchParts.length > 0);
+    assert.equal(
+      publication.publication.commitPatchParts.reduce(
+        (total, part) => total + part.size,
+        0,
+      ),
+      publication.publication.commitPatchSize,
+    );
+    assert.ok(publication.publication.commitPatchParts.every(({ key, size }) =>
+      requests.some(({ url }) => url === `/api/git/objects/${key}`) &&
+      Number.isSafeInteger(size) &&
+      size > 0 &&
+      size <= 16 * 1024 * 1024
+    ));
+    assert.equal(
+      requests.some(({ url }) =>
+        url === `/api/git/objects/generations/${head}/commits.diff`
+      ),
+      false,
+    );
+    const commitPatchManifestUpload = requests.find(({ url }) =>
+      url === `/api/git/objects/generations/${head}/commit-patches.json`
+    );
+    assert.deepEqual(JSON.parse(commitPatchManifestUpload.body), {
+      version: 1,
+      head,
+      parts: publication.publication.commitPatchParts,
+      size: publication.publication.commitPatchSize,
+    });
     assert.ok(publication.publication.packParts.length > 0);
     assert.equal("packKey" in publication.publication, false);
     assert.ok(publication.publication.packParts.every(({ key, size }) =>
@@ -122,8 +155,17 @@ test("the publisher CLI initializes its module before building a generation", as
     const commitsUpload = requests.find(({ url }) =>
       url === `/api/git/objects/generations/${head}/commits.json`
     );
+    const commitPatchBody = publication.publication.commitPatchParts
+      .map(({ key }) => requests.find(({ url }) => url === `/api/git/objects/${key}`)?.body)
+      .join("");
     assert.equal(JSON.parse(snapshotUpload.body).repository.branch, "master");
-    assert.deepEqual(JSON.parse(commitsUpload.body)[0].refs, ["HEAD -> master"]);
+    const publishedCommits = JSON.parse(commitsUpload.body);
+    assert.deepEqual(publishedCommits[0].refs, ["HEAD -> master"]);
+    assert.deepEqual(
+      [...commitPatchBody.matchAll(/^From ([a-f0-9]{40}) Mon Sep 17 00:00:00 2001$/gm)]
+        .map((match) => match[1]),
+      publishedCommits.map(({ hash }) => hash),
+    );
     assert.ok(requests.some(({ url }) =>
       url === `/api/git/objects/generations/${head}/commits/0000.json`
     ));
@@ -185,6 +227,31 @@ test("repository packs are divided into canonical bounded upload parts", () => {
     { key: `generations/${head}/packs/${packHash}/0002.pack`, offset: partBytes * 2, size: partBytes },
     { key: `generations/${head}/packs/${packHash}/0003.pack`, offset: partBytes * 3, size: partBytes },
     { key: `generations/${head}/packs/${packHash}/0004.pack`, offset: partBytes * 4, size: 1_100_465 },
+  ]);
+});
+
+test("aggregate commit patches are divided into canonical bounded upload parts", () => {
+  const head = "a".repeat(40);
+  const partBytes = 16 * 1024 * 1024;
+  const patchSize = 37_248_679;
+  const parts = buildCommitPatchParts(head, patchSize);
+
+  assert.deepEqual(parts, [
+    {
+      key: `generations/${head}/commit-patches/0000.diff`,
+      offset: 0,
+      size: partBytes,
+    },
+    {
+      key: `generations/${head}/commit-patches/0001.diff`,
+      offset: partBytes,
+      size: partBytes,
+    },
+    {
+      key: `generations/${head}/commit-patches/0002.diff`,
+      offset: partBytes * 2,
+      size: patchSize - (partBytes * 2),
+    },
   ]);
 });
 

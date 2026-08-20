@@ -56,13 +56,16 @@ async function main() {
       },
     });
 
-    const [snapshot, commits, blobNames, patchNames, commitPageNames] = await Promise.all([
+    const commitPatchPath = resolve(dataDirectory, "commits.diff");
+    const [snapshot, commits, blobNames, patchNames, commitPageNames, commitPatchFile] = await Promise.all([
       readJson(resolve(dataDirectory, "repository.json")),
       readJson(resolve(dataDirectory, "commits.json")),
       listObjectNames(resolve(dataDirectory, "blobs"), ".txt"),
       listObjectNames(resolve(dataDirectory, "patches"), ".patch"),
       listObjectNames(resolve(dataDirectory, "commit-pages"), ".json"),
+      stat(commitPatchPath),
     ]);
+    const commitPatchParts = buildCommitPatchParts(head, commitPatchFile.size);
     const refs = [{ name: `refs/heads/${publicationBranch}`, oid: head }];
     if (
       snapshot.repository?.head !== head ||
@@ -106,10 +109,24 @@ async function main() {
 
     const generationPrefix = `generations/${head}`;
     const inventoryPath = resolve(temporaryDirectory, "inventory.json");
-    await writeFile(inventoryPath, `${JSON.stringify(inventory)}\n`);
+    const commitPatchManifestPath = resolve(temporaryDirectory, "commit-patches.json");
+    const commitPatchManifest = {
+      version: 1,
+      head,
+      parts: commitPatchParts.map(({ key, size }) => ({ key, size })),
+      size: commitPatchFile.size,
+    };
+    await Promise.all([
+      writeFile(inventoryPath, `${JSON.stringify(inventory)}\n`),
+      writeFile(commitPatchManifestPath, `${JSON.stringify(commitPatchManifest)}\n`),
+    ]);
     await Promise.all([
       uploadFile(origin, token, `${generationPrefix}/repository.json`, resolve(dataDirectory, "repository.json")),
       uploadFile(origin, token, `${generationPrefix}/commits.json`, resolve(dataDirectory, "commits.json")),
+      uploadFile(origin, token, `${generationPrefix}/commit-patches.json`, commitPatchManifestPath),
+      mapConcurrent(commitPatchParts, 2, (part) =>
+        uploadFile(origin, token, part.key, commitPatchPath, part)
+      ),
       uploadFile(origin, token, `${generationPrefix}/inventory.json`, inventoryPath),
       uploadFile(origin, token, `${generationPrefix}/objects.json`, gitArtifacts.manifestPath),
       mapConcurrent(gitArtifacts.shards, uploadConcurrency, (shard) =>
@@ -132,6 +149,8 @@ async function main() {
       refs,
       snapshotKey: `${generationPrefix}/repository.json`,
       commitsKey: `${generationPrefix}/commits.json`,
+      commitPatchParts: commitPatchParts.map(({ key, size }) => ({ key, size })),
+      commitPatchSize: commitPatchFile.size,
       inventoryKey: `${generationPrefix}/inventory.json`,
       packParts: gitArtifacts.packParts.map(({ key, size }) => ({ key, size })),
       packSize: gitArtifacts.packSize,
@@ -289,17 +308,36 @@ export async function buildGitArtifacts({
 export function buildRepositoryPackParts(head, packHash, packSize) {
   if (!/^[a-f0-9]{40}$/.test(head)) throw new Error("repository pack head is invalid");
   if (!/^[a-f0-9]{40}$/.test(packHash)) throw new Error("repository pack hash is invalid");
-  if (!Number.isSafeInteger(packSize) || packSize <= 0) {
-    throw new Error("repository pack size is invalid");
+  return buildBoundedParts(
+    packSize,
+    (index) =>
+      `generations/${head}/packs/${packHash}/${String(index).padStart(4, "0")}.pack`,
+    "repository pack",
+  );
+}
+
+export function buildCommitPatchParts(head, patchSize) {
+  if (!/^[a-f0-9]{40}$/.test(head)) throw new Error("commit patch head is invalid");
+  return buildBoundedParts(
+    patchSize,
+    (index) =>
+      `generations/${head}/commit-patches/${String(index).padStart(4, "0")}.diff`,
+    "commit patch",
+  );
+}
+
+function buildBoundedParts(totalSize, keyAt, description) {
+  if (!Number.isSafeInteger(totalSize) || totalSize <= 0) {
+    throw new Error(`${description} size is invalid`);
   }
-  const count = Math.ceil(packSize / repositoryPackPartBytes);
-  if (count > 256) throw new Error("repository pack part count exceeds 256");
+  const count = Math.ceil(totalSize / repositoryPackPartBytes);
+  if (count > 256) throw new Error(`${description} part count exceeds 256`);
   return Array.from({ length: count }, (_, index) => {
     const offset = index * repositoryPackPartBytes;
     return {
-      key: `generations/${head}/packs/${packHash}/${String(index).padStart(4, "0")}.pack`,
+      key: keyAt(index),
       offset,
-      size: Math.min(repositoryPackPartBytes, packSize - offset),
+      size: Math.min(repositoryPackPartBytes, totalSize - offset),
     };
   });
 }

@@ -7,6 +7,19 @@ import { handleGitRequest, readGitProtocolRequest } from "./gitRoutes.ts";
 const head = "a".repeat(40);
 const packHash = "b".repeat(40);
 
+function commitPatchManifest(publication: {
+  head: string;
+  commitPatchParts: Array<{ key: string; size: number }>;
+  commitPatchSize: number;
+}) {
+  return {
+    version: 1 as const,
+    head: publication.head,
+    parts: publication.commitPatchParts,
+    size: publication.commitPatchSize,
+  };
+}
+
 test("generation-pinned commit pages bypass mutable publication state", async () => {
   let requestedKey = "";
   const bucket = {
@@ -33,6 +46,92 @@ test("generation-pinned commit pages bypass mutable publication state", async ()
   assert.equal(requestedKey, `generations/${head}/commits/0002.json`);
   assert.equal(response?.headers.get("x-repository-generation"), head);
   assert.equal(response?.headers.get("cache-control"), "public, max-age=31536000, immutable");
+});
+
+test("generation-pinned aggregate commit patches stream immutable R2 bodies without mutable state", async () => {
+  const firstPart = new Uint8Array(16 * 1024 * 1024);
+  const finalPart = new TextEncoder().encode(
+    `From ${head} Mon Sep 17 00:00:00 2001\n`,
+  );
+  const partKeys = [
+    `generations/${head}/commit-patches/0000.diff`,
+    `generations/${head}/commit-patches/0001.diff`,
+  ];
+  const objects = new Map([
+    [partKeys[0], firstPart],
+    [partKeys[1], finalPart],
+  ]);
+  const publication = {
+    version: 1 as const,
+    head,
+    branch: "master",
+    refs: [{ name: "refs/heads/master", oid: head }],
+    snapshotKey: `generations/${head}/repository.json`,
+    commitsKey: `generations/${head}/commits.json`,
+    commitPatchParts: partKeys.map((key) => ({ key, size: objects.get(key)!.byteLength })),
+    commitPatchSize: firstPart.byteLength + finalPart.byteLength,
+    inventoryKey: `generations/${head}/inventory.json`,
+    packParts: [{ key: `generations/${head}/packs/${packHash}/0000.pack`, size: 1 }],
+    packSize: 1,
+    objectManifestKey: `generations/${head}/objects.json`,
+    packHash,
+    publishedAt: "2026-08-18T00:00:00.000Z",
+  };
+  const requestedKeys: string[] = [];
+  let manifestReads = 0;
+  const bucket = {
+    head: async (key: string) => {
+      const bytes = objects.get(key);
+      return bytes == null ? null : { size: bytes.byteLength };
+    },
+    get: async (key: string) => {
+      if (key === `generations/${head}/commit-patches.json`) {
+        manifestReads += 1;
+        return { json: async () => commitPatchManifest(publication) };
+      }
+      requestedKeys.push(key);
+      const bytes = objects.get(key);
+      if (bytes == null) return null;
+      return {
+        body: new Blob([bytes]).stream(),
+        size: bytes.byteLength,
+      };
+    },
+  } as unknown as R2Bucket;
+  const request = new Request(
+    `https://nanocodex.example/api/repository/commits/${head}.diff`,
+  );
+
+  const response = await handleGitRequest(
+    request,
+    { GIT_OBJECTS: bucket },
+    new URL(request.url),
+  );
+
+  assert.equal(response?.status, 200);
+  assert.equal(response?.headers.get("x-repository-generation"), head);
+  assert.equal(response?.headers.get("cache-control"), "public, max-age=31536000, immutable");
+  assert.equal(response?.headers.get("content-type"), "text/x-diff; charset=utf-8");
+  assert.equal(response?.headers.get("content-length"), String(publication.commitPatchSize));
+  const body = new Uint8Array(await response!.arrayBuffer());
+  assert.equal(manifestReads, 1);
+  assert.deepEqual(requestedKeys, partKeys);
+  assert.equal(body.byteLength, publication.commitPatchSize);
+  assert.equal(body.subarray(0, firstPart.byteLength).every((byte) => byte === 0), true);
+  assert.equal(
+    new TextDecoder().decode(body.subarray(firstPart.byteLength)),
+    new TextDecoder().decode(finalPart),
+  );
+
+  const invalid = new Request(
+    "https://nanocodex.example/api/repository/commits/not-a-generation.diff",
+  );
+  const invalidResponse = await handleGitRequest(
+    invalid,
+    { GIT_OBJECTS: bucket },
+    new URL(invalid.url),
+  );
+  assert.equal(invalidResponse?.status, 400);
 });
 
 test("repository uploads cannot overwrite an immutable R2 key", async () => {
@@ -104,7 +203,7 @@ test("repository uploads retain conditional creation for a new immutable key", a
     },
   } as unknown as R2Bucket;
   const request = new Request(
-    `https://nanocodex.example/api/git/objects/generations/${head}/packs/${packHash}/0000.pack`,
+    `https://nanocodex.example/api/git/objects/generations/${head}/commit-patches/0000.diff`,
     {
       method: "PUT",
       headers: { authorization: "Bearer mirror-token" },
@@ -119,11 +218,11 @@ test("repository uploads retain conditional creation for a new immutable key", a
   );
 
   assert.equal(response?.status, 200);
-  assert.equal(storedKey, `generations/${head}/packs/${packHash}/0000.pack`);
+  assert.equal(storedKey, `generations/${head}/commit-patches/0000.diff`);
   assert.equal(uploadedBody, "created");
   assert.deepEqual(putOptions?.onlyIf, { etagDoesNotMatch: "*" });
   assert.deepEqual(await response?.json(), {
-    key: `generations/${head}/packs/${packHash}/0000.pack`,
+    key: `generations/${head}/commit-patches/0000.diff`,
     etag: '"created"',
     size: 7,
     stored: true,
@@ -139,6 +238,11 @@ test("repository publication forwards an explicit invalid-state replacement", as
     refs: [{ name: "refs/heads/master", oid: head }],
     snapshotKey: `generations/${head}/repository.json`,
     commitsKey: `generations/${head}/commits.json`,
+    commitPatchParts: [{
+      key: `generations/${head}/commit-patches/0000.diff`,
+      size: 1,
+    }],
+    commitPatchSize: 1,
     inventoryKey: `generations/${head}/inventory.json`,
     packParts: [{ key: `generations/${head}/packs/${packHash}/0000.pack`, size: 1 }],
     packSize: 1,
@@ -163,7 +267,11 @@ test("repository publication forwards an explicit invalid-state replacement", as
     }),
   } as unknown as DurableObjectNamespace;
   const bucket = {
-    get: async () => ({ json: async () => manifest }),
+    get: async (key: string) => ({
+      json: async () => key.endsWith("commit-patches.json")
+        ? commitPatchManifest(publication)
+        : manifest,
+    }),
     head: async () => ({ httpEtag: '"present"', size: 1 }),
   } as unknown as R2Bucket;
   const request = new Request("https://nanocodex.example/api/git/publish", {
@@ -193,6 +301,116 @@ test("repository publication forwards an explicit invalid-state replacement", as
   });
 });
 
+test("repository publication requires the aggregate commit patch before cutover", async () => {
+  const shardKey = `generations/${head}/objects/0000.pack`;
+  const publication = {
+    version: 1 as const,
+    head,
+    branch: "master",
+    refs: [{ name: "refs/heads/master", oid: head }],
+    snapshotKey: `generations/${head}/repository.json`,
+    commitsKey: `generations/${head}/commits.json`,
+    commitPatchParts: [{
+      key: `generations/${head}/commit-patches/0000.diff`,
+      size: 1,
+    }],
+    commitPatchSize: 1,
+    inventoryKey: `generations/${head}/inventory.json`,
+    packParts: [{ key: `generations/${head}/packs/${packHash}/0000.pack`, size: 1 }],
+    packSize: 1,
+    objectManifestKey: `generations/${head}/objects.json`,
+    packHash,
+    publishedAt: "2026-08-18T00:00:00.000Z",
+  };
+  const manifest = {
+    version: 1,
+    head,
+    shards: [{ key: shardKey, size: 1 }],
+    objects: { [head]: [1, 0, 0, 1, []] },
+  };
+  let forwarded = false;
+  const namespace = {
+    idFromName: () => ({}) as DurableObjectId,
+    get: () => ({
+      fetch: async () => {
+        forwarded = true;
+        return Response.json(publication);
+      },
+    }),
+  } as unknown as DurableObjectNamespace;
+  const bucket = {
+    get: async (key: string) => ({
+      json: async () => key.endsWith("commit-patches.json")
+        ? commitPatchManifest(publication)
+        : manifest,
+    }),
+    head: async (key: string) =>
+      key === publication.commitPatchParts[0].key
+        ? null
+        : { httpEtag: '"present"', size: 1 },
+  } as unknown as R2Bucket;
+  const request = new Request("https://nanocodex.example/api/git/publish", {
+    method: "PUT",
+    headers: {
+      authorization: "Bearer mirror-token",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ expectedHead: null, publication }),
+  });
+
+  const response = await handleGitRequest(
+    request,
+    {
+      GIT_OBJECTS: bucket,
+      GIT_REPOSITORY: namespace,
+      GIT_MIRROR_TOKEN: "mirror-token",
+    },
+    new URL(request.url),
+  );
+
+  assert.equal(response?.status, 409);
+  assert.equal(forwarded, false);
+  assert.deepEqual(await response?.json(), {
+    error: "publication_objects_missing",
+    missing: [publication.commitPatchParts[0].key],
+  });
+
+  const wrongSizeBucket = {
+    get: async (key: string) => ({
+      json: async () => key.endsWith("commit-patches.json")
+        ? commitPatchManifest(publication)
+        : manifest,
+    }),
+    head: async (key: string) => ({
+      httpEtag: '"present"',
+      size: key === publication.commitPatchParts[0].key ? 2 : 1,
+    }),
+  } as unknown as R2Bucket;
+  const wrongSizeRequest = new Request("https://nanocodex.example/api/git/publish", {
+    method: "PUT",
+    headers: {
+      authorization: "Bearer mirror-token",
+      "content-type": "application/json",
+    },
+    body: JSON.stringify({ expectedHead: null, publication }),
+  });
+  const wrongSizeResponse = await handleGitRequest(
+    wrongSizeRequest,
+    {
+      GIT_OBJECTS: wrongSizeBucket,
+      GIT_REPOSITORY: namespace,
+      GIT_MIRROR_TOKEN: "mirror-token",
+    },
+    new URL(wrongSizeRequest.url),
+  );
+  assert.equal(wrongSizeResponse?.status, 409);
+  assert.equal(forwarded, false);
+  assert.deepEqual(await wrongSizeResponse?.json(), {
+    error: "publication_commit_patch_parts_invalid",
+    invalid: [publication.commitPatchParts[0].key],
+  });
+});
+
 test("repository publication rejects pack parts whose stored size changed", async () => {
   const partKey = `generations/${head}/packs/${packHash}/0000.pack`;
   const publication = {
@@ -202,6 +420,11 @@ test("repository publication rejects pack parts whose stored size changed", asyn
     refs: [{ name: "refs/heads/master", oid: head }],
     snapshotKey: `generations/${head}/repository.json`,
     commitsKey: `generations/${head}/commits.json`,
+    commitPatchParts: [{
+      key: `generations/${head}/commit-patches/0000.diff`,
+      size: 1,
+    }],
+    commitPatchSize: 1,
     inventoryKey: `generations/${head}/inventory.json`,
     packParts: [{ key: partKey, size: 2 }],
     packSize: 2,
@@ -220,9 +443,10 @@ test("repository publication rejects pack parts whose stored size changed", asyn
     }),
   } as unknown as DurableObjectNamespace;
   const bucket = {
-    head: async (key: string) => ({
+    get: async () => ({ json: async () => commitPatchManifest(publication) }),
+    head: async () => ({
       httpEtag: '"present"',
-      size: key === partKey ? 1 : 2,
+      size: 1,
     }),
   } as unknown as R2Bucket;
   const request = new Request("https://nanocodex.example/api/git/publish", {
@@ -302,6 +526,11 @@ test("repository reads hit edge cache before the publication Durable Object", as
     refs: [{ name: "refs/heads/master", oid: head }],
     snapshotKey: `generations/${head}/repository.json`,
     commitsKey: `generations/${head}/commits.json`,
+    commitPatchParts: [{
+      key: `generations/${head}/commit-patches/0000.diff`,
+      size: 1,
+    }],
+    commitPatchSize: 1,
     inventoryKey: `generations/${head}/inventory.json`,
     packParts: [{ key: `generations/${head}/packs/${packHash}/0000.pack`, size: 1 }],
     packSize: 1,

@@ -23,6 +23,7 @@ const generatedDataDirectory = resolve(
 );
 const outputPath = resolve(generatedDataDirectory, "repository.json");
 const commitsOutputPath = resolve(generatedDataDirectory, "commits.json");
+const commitPatchOutputPath = resolve(generatedDataDirectory, "commits.diff");
 const commitPagesDirectory = resolve(generatedDataDirectory, "commit-pages");
 const commitLimit = parseCommitLimit(process.env.NANOCODEX_COMMIT_LIMIT);
 const forceSync = process.env.NANOCODEX_FORCE_SYNC === "1";
@@ -165,19 +166,25 @@ const writes = [
   ),
 ];
 if (emitObjects) {
-  const patches = splitCommitPatches(commits, rawCommitPatches);
+  const patches = splitCommitPatches(commits, rawCommitPatches).map(
+    ({ hash, contents }) => ({ hash, contents: redactPublicText(contents) }),
+  );
   await Promise.all([
     mkdir(resolve(generatedDataDirectory, "blobs"), { recursive: true }),
     mkdir(resolve(generatedDataDirectory, "patches"), { recursive: true }),
   ]);
   writes.push(
+    writeIfChanged(
+      commitPatchOutputPath,
+      Buffer.from(patches.map(({ contents }) => contents).join("\n"), "utf8"),
+    ),
     ...blobFiles.map(({ objectId, contents }) =>
       writeIfChanged(resolve(generatedDataDirectory, "blobs", `${objectId}.txt`), contents),
     ),
     ...patches.map(({ hash, contents }) =>
       writeIfChanged(
         resolve(generatedDataDirectory, "patches", `${hash}.patch`),
-        Buffer.from(redactPublicText(contents), "utf8"),
+        Buffer.from(contents, "utf8"),
       ),
     ),
   );
@@ -209,6 +216,7 @@ async function generatedSnapshotIsCurrent(repository) {
     await Promise.all([
       access(outputPath),
       access(commitsOutputPath),
+      ...(emitObjects ? [access(commitPatchOutputPath)] : []),
     ]);
     return true;
   } catch (error) {

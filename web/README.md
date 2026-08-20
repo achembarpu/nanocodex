@@ -66,8 +66,10 @@ from an incremental or shallow fetch. Shards are compacted after a bounded
 number of generations. Publication advances one
 Durable Object pointer only after every referenced R2 object exists, so a failed
 or concurrent publisher cannot expose mixed tree, history, or Git data. The
-commit view loads only the selected patch and parses it in bounded batches,
-yielding between batches so scrolling stays responsive.
+commit view resolves an immutable generation manifest, streams its aggregate
+patch from bounded parts instead of issuing a request per commit, then parses
+and publishes it in bounded batches while yielding between batches so the
+first diff and scrolling stay responsive.
 
 For this single-repository deployment, R2 owns immutable bytes and one Durable
 Object owns the current generation with compare-and-swap publication. D1 is

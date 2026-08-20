@@ -3,7 +3,8 @@ import { test } from "node:test";
 
 import {
   GitRepository,
-  REPOSITORY_PACK_PART_BYTES,
+  REPOSITORY_PART_BYTES,
+  isCommitPatchManifest,
   isRepositoryPublication,
   type RepositoryPublication,
 } from "./gitRepository.ts";
@@ -14,6 +15,31 @@ const packHash = "c".repeat(40);
 
 test("publication validation pins every mutable view to one generation", () => {
   assert.equal(isRepositoryPublication(publication(firstHash)), true);
+  assert.equal(isRepositoryPublication({
+    ...publication(firstHash),
+    commitPatchParts: undefined,
+  }), false);
+  assert.equal(isRepositoryPublication({
+    ...publication(firstHash),
+    commitPatchParts: [{
+      key: `generations/${secondHash}/commit-patches/0000.diff`,
+      size: 1,
+    }],
+  }), false);
+  assert.equal(isRepositoryPublication({
+    ...publication(firstHash),
+    commitPatchParts: [
+      {
+        key: `generations/${firstHash}/commit-patches/0000.diff`,
+        size: 1,
+      },
+      {
+        key: `generations/${firstHash}/commit-patches/0001.diff`,
+        size: 1,
+      },
+    ],
+    commitPatchSize: 2,
+  }), false);
   const current = publication(firstHash);
   const { packParts: _packParts, packSize: _packSize, ...legacy } = current;
   assert.equal(isRepositoryPublication({
@@ -37,9 +63,9 @@ test("publication validation pins every mutable view to one generation", () => {
     ...publication(firstHash),
     packParts: [{
       key: `generations/${firstHash}/packs/${packHash}/0000.pack`,
-      size: REPOSITORY_PACK_PART_BYTES + 1,
+      size: REPOSITORY_PART_BYTES + 1,
     }],
-    packSize: REPOSITORY_PACK_PART_BYTES + 1,
+    packSize: REPOSITORY_PART_BYTES + 1,
   }), false);
   assert.equal(isRepositoryPublication({
     ...publication(firstHash),
@@ -53,6 +79,23 @@ test("publication validation pins every mutable view to one generation", () => {
     ...publication(firstHash),
     refs: [{ name: "refs/heads/../escape", oid: firstHash }],
   }), false);
+});
+
+test("commit patch manifests are immutable generation maps", () => {
+  const current = publication(firstHash);
+  const manifest = {
+    version: 1,
+    head: firstHash,
+    parts: current.commitPatchParts,
+    size: current.commitPatchSize,
+  };
+  assert.equal(isCommitPatchManifest(manifest, firstHash), true);
+  assert.equal(isCommitPatchManifest(manifest, secondHash), false);
+  assert.equal(isCommitPatchManifest({ ...manifest, size: 2 }, firstHash), false);
+  assert.equal(isCommitPatchManifest({
+    ...manifest,
+    parts: [{ key: `generations/${secondHash}/commit-patches/0000.diff`, size: 1 }],
+  }, firstHash), false);
 });
 
 test("publication uses compare-and-swap so stale mirrors cannot win", async () => {
@@ -136,6 +179,8 @@ function publication(head: string): RepositoryPublication {
     refs: [{ name: "refs/heads/master", oid: head }],
     snapshotKey: `${prefix}repository.json`,
     commitsKey: `${prefix}commits.json`,
+    commitPatchParts: [{ key: `${prefix}commit-patches/0000.diff`, size: 1 }],
+    commitPatchSize: 1,
     inventoryKey: `${prefix}inventory.json`,
     packParts: [{ key: `${prefix}packs/${packHash}/0000.pack`, size: 1 }],
     packSize: 1,
