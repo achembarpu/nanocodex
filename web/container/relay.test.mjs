@@ -60,3 +60,60 @@ test("relay preserves authenticated ChatGPT HTTP requests and streams responses"
     body: '{"query":"nanocodex"}',
   });
 });
+
+test("relay admits Realtime call creation and preserves its protocol headers", async (t) => {
+  let upstreamRequest;
+  const upstream = createServer(async (request, response) => {
+    upstreamRequest = {
+      headers: request.headers,
+      url: request.url,
+      body: await new Response(request).text(),
+    };
+    response.writeHead(201, {
+      "content-type": "application/sdp",
+      location: "/backend-api/codex/realtime/calls/rtc_test",
+    });
+    response.end("v=answer\r\n");
+  });
+  upstream.listen(0, "127.0.0.1");
+  t.after(() => upstream.close());
+  await once(upstream, "listening");
+  const upstreamAddress = upstream.address();
+  assert(upstreamAddress && typeof upstreamAddress === "object");
+
+  const relay = startRelay({
+    host: "127.0.0.1",
+    port: 0,
+    upstreamOrigin: `http://127.0.0.1:${upstreamAddress.port}`,
+  });
+  t.after(() => relay.close());
+  await once(relay, "listening");
+  const relayAddress = relay.address();
+  assert(relayAddress && typeof relayAddress === "object");
+  const response = await fetch(
+    `http://127.0.0.1:${relayAddress.port}/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas`,
+    {
+      method: "POST",
+      headers: {
+        authorization: "Bearer secret",
+        "content-type": "application/json",
+        "openai-alpha": "quicksilver=v2",
+        "x-oai-attestation": '{"v":1,"s":1}',
+        "x-session-id": "session-1",
+      },
+      body: '{"sdp":"v=offer"}',
+    },
+  );
+
+  assert.equal(response.status, 201);
+  assert.equal(response.headers.get("location"), "/backend-api/codex/realtime/calls/rtc_test");
+  assert.equal(await response.text(), "v=answer\r\n");
+  assert.equal(
+    upstreamRequest.url,
+    "/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas",
+  );
+  assert.equal(upstreamRequest.headers["openai-alpha"], "quicksilver=v2");
+  assert.equal(upstreamRequest.headers["x-oai-attestation"], '{"v":1,"s":1}');
+  assert.equal(upstreamRequest.headers["x-session-id"], "session-1");
+  assert.equal(upstreamRequest.body, '{"sdp":"v=offer"}');
+});

@@ -10,12 +10,14 @@ const ALLOWED_HTTP_PATHS = new Set([
   "/backend-api/codex/alpha/search",
   "/backend-api/codex/images/edits",
   "/backend-api/codex/images/generations",
+  "/backend-api/codex/realtime/calls",
 ]);
 const RESPONSES_PATH = "/backend-api/codex/responses";
 const FORWARDED_HEADERS = [
   "authorization",
   "chatgpt-account-id",
   "content-type",
+  "openai-alpha",
   "openai-beta",
   "originator",
   "session-id",
@@ -23,12 +25,15 @@ const FORWARDED_HEADERS = [
   "user-agent",
   "x-client-request-id",
   "x-codex-turn-state",
+  "x-oai-attestation",
   "x-openai-fedramp",
   "x-openai-internal-codex-responses-lite",
   "x-responsesapi-include-timing-metrics",
+  "x-session-id",
 ];
 const RETURNED_HEADERS = [
   "content-type",
+  "location",
   "openai-model",
   "retry-after",
   "x-codex-turn-state",
