@@ -97,6 +97,8 @@ type VoiceLifecycleRequest = {
 export type NanocodexVoiceOptions = {
   /** Opens the workspace used to build bounded Realtime startup context. */
   workspace(): Promise<Workspace>;
+  /** Acquires browser audio. Defaults to microphone capture; injectable for hosts and automation. */
+  captureMicrophone?(): Promise<MediaStream>;
   /** Default ChatGPT output voice. */
   defaultVoice?: ChatGptVoice;
   /** Authenticated endpoint that creates one browser Realtime call. */
@@ -457,6 +459,7 @@ export function NanocodexTui({
       voice: selectedVoice,
       callUrl: voiceOptions.callUrl,
       sidebandUrl: voiceOptions.sidebandUrl,
+      captureMicrophone: voiceOptions.captureMicrophone,
       workspace: voiceOptions.workspace,
       async onStart() {
         const context = await runVoiceLifecycle("start", voiceTarget);
