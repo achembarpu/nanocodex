@@ -164,33 +164,33 @@ function ConnectedMppControls({ jsonl, payment, onDisconnect, onReady }: {
   const ready = connected && funded && accessKeyAddress !== undefined;
   const connecting = connect.isPending;
   return (
-    <aside className="agent-byok agent-mpp" aria-label="Tempo MPP payment">
+    <aside className="agent-session-panel agent-mpp" aria-label="Tempo MPP payment">
       <div className="agent-byok-summary">
         <span>
           <i className={ready ? "is-ready" : ""} aria-hidden="true" />
           {ready
-            ? "Tempo Wallet ready"
+            ? "ready"
             : connected
               ? !accessKeyAddress
-                  ? "Authorize Tempo MPP access to continue"
-                  : "Fund Tempo Wallet to continue"
-            : "Use Tempo Wallet for MPP"}
+                  ? "authorize to continue"
+                  : "add funds to continue"
+            : "connect wallet"}
         </span>
         <div>
           {connected ? (
             <>
               {!checkingAccessKey && !accessKeyAddress ? (
                 <button type="button" disabled={authorize.isPending} onClick={() => authorize.mutate()}>
-                  Authorize MPP
+                  authorize
                 </button>
               ) : null}
               {!funded ? (
                 <button type="button" disabled={deposit.isPending} onClick={() => deposit.mutate()}>
-                  Add funds
+                  add funds
                 </button>
               ) : null}
               <button type="button" disabled={disconnect.isPending} onClick={() => disconnect.mutate()}>
-                Disconnect
+                disconnect
               </button>
             </>
           ) : (
@@ -199,7 +199,7 @@ function ConnectedMppControls({ jsonl, payment, onDisconnect, onReady }: {
               disabled={connecting}
               onClick={() => connect.mutate()}
             >
-              Continue with Tempo Wallet
+              connect
             </button>
           )}
         </div>
@@ -211,32 +211,32 @@ function ConnectedMppControls({ jsonl, payment, onDisconnect, onReady }: {
       {balances.error ? (
         <p className="agent-byok-error" role="alert">Could not refresh Tempo balances.</p>
       ) : null}
-      {connected ? (
-        <dl className="agent-mpp-details">
-          <Detail label="Tempo account" value={address} />
-          <Detail label="Payer" value={payment?.rootAddress ?? address} />
-          <Detail
-            label="USDC.e"
-            value={balances.data === undefined
-              ? "—"
-              : formatTokenBalance(balances.data.usdc.amount, "USDC.e")}
-          />
-          <Detail
-            label="pathUSD"
-            value={balances.data === undefined
-              ? "—"
-              : formatTokenBalance(balances.data.pathUsd.amount, "pathUSD")}
-          />
-          <Detail label="Signer" value={payment?.accessKeyAddress ?? accessKeyAddress ?? "Not authorized"} />
-          <Detail label="Channel" value={payment?.channelId ?? "Opens on first paid request"} />
-          <Detail label="Model authorized" value={payment ? formatTokenBalance(BigInt(payment.cumulative), "USDC.e") : "0 USDC.e"} />
-          <Detail label="Mercator authorized" value={payment?.mcpCumulative ? formatTokenBalance(BigInt(payment.mcpCumulative), "USDC.e") : "0 USDC.e"} />
-        </dl>
-      ) : null}
-      {jsonl.length ? (
-        <details className="agent-mpp-jsonl">
-          <summary>MPP run JSONL ({jsonl.length})</summary>
-          <pre>{jsonl.join("\n")}</pre>
+      {connected || jsonl.length ? (
+        <details className="agent-payment-details">
+          <summary>payment details</summary>
+          {connected ? (
+            <dl className="agent-mpp-details">
+              <Detail label="Tempo account" value={address} />
+              <Detail label="Payer" value={payment?.rootAddress ?? address} />
+              <Detail
+                label="USDC.e"
+                value={balances.data === undefined
+                  ? "—"
+                  : formatTokenBalance(balances.data.usdc.amount, "USDC.e")}
+              />
+              <Detail
+                label="pathUSD"
+                value={balances.data === undefined
+                  ? "—"
+                  : formatTokenBalance(balances.data.pathUsd.amount, "pathUSD")}
+              />
+              <Detail label="Signer" value={payment?.accessKeyAddress ?? accessKeyAddress ?? "Not authorized"} />
+              <Detail label="Channel" value={payment?.channelId ?? "Opens on first paid request"} />
+              <Detail label="Model authorized" value={payment ? formatTokenBalance(BigInt(payment.cumulative), "USDC.e") : "0 USDC.e"} />
+              <Detail label="Mercator authorized" value={payment?.mcpCumulative ? formatTokenBalance(BigInt(payment.mcpCumulative), "USDC.e") : "0 USDC.e"} />
+            </dl>
+          ) : null}
+          {jsonl.length ? <pre>{jsonl.join("\n")}</pre> : null}
         </details>
       ) : null}
     </aside>

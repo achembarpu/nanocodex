@@ -146,11 +146,11 @@ function AgentTerminalDemo() {
   };
   const unavailableMessage = transport === "openai"
     ? credentialSource === undefined
-      ? "Sign in with ChatGPT to start the agent"
-      : "Sign in with ChatGPT to start the agent"
+      ? "Connecting…"
+      : "Connect to start."
     : agent.status === "error"
-        ? agent.error ?? "MPP session failed"
-        : "Connect Tempo to authorize an MPP session";
+        ? "Could not connect. Try again."
+        : "Connect to start.";
   useEffect(() => {
     if (agent.status !== "ready" || !terminal.current) return;
     agent.dispatch({
@@ -162,21 +162,14 @@ function AgentTerminalDemo() {
 
   return (
     <div className="nanocodex-demo">
-      <div className="agent-transport" role="group" aria-label="Agent connection">
-        <button
-          type="button"
-          aria-pressed={transport === "openai"}
-          onClick={() => selectTransport("openai")}
-        >ChatGPT subscription</button>
-        <button
-          type="button"
-          aria-pressed={transport === "mpp"}
-          onClick={() => selectTransport("mpp")}
-        >Tempo MPP</button>
-      </div>
-      {transport === "openai" ? (
-        <SubscriptionBar source={credentialSource} onSourceChange={setCredentialSource} />
-      ) : (
+      <SubscriptionBar
+        agentStatus={agent.status}
+        source={credentialSource}
+        transport={transport}
+        onSelectTransport={selectTransport}
+        onSourceChange={setCredentialSource}
+      />
+      {transport === "mpp" ? (
         <Suspense fallback={null}>
           <MppControls
             jsonl={jsonl}
@@ -185,7 +178,7 @@ function AgentTerminalDemo() {
             onReady={startMpp}
           />
         </Suspense>
-      )}
+      ) : null}
       <XtermSurface
         inactiveMessage={unavailableMessage}
         status={agent.status}
@@ -345,10 +338,16 @@ type ChatGptStatus =
   | { state: "error"; error: string };
 
 function SubscriptionBar({
+  agentStatus,
   source,
+  transport,
+  onSelectTransport,
   onSourceChange,
 }: {
+  agentStatus: "idle" | "starting" | "ready" | "stopped" | "error";
   source: CredentialSource | undefined;
+  transport: AgentTransport;
+  onSelectTransport(transport: AgentTransport): void;
   onSourceChange(source: CredentialSource): void;
 }) {
   const [status, setStatus] = useState<ChatGptStatus>();
@@ -443,35 +442,53 @@ function SubscriptionBar({
     }
   };
 
-  const label = status?.state === "authenticated"
-    ? "Connected to your ChatGPT subscription"
+  const ready = transport === "mpp" ? agentStatus === "ready" : source !== null && source !== undefined;
+  const label = ready
+    ? "ready"
     : status?.state === "pending"
-      ? "Finish signing in with ChatGPT"
-      : source === "user"
-        ? "Using your existing API-key session"
-        : source === "deployment"
-          ? "Using the site demo key"
-          : "Sign in to use your ChatGPT subscription";
+      ? "finish sign-in"
+      : source === undefined
+        ? "checking"
+        : "connect to run";
 
   return (
-    <aside className="agent-byok" aria-label="ChatGPT subscription login">
-      <div className="agent-byok-summary">
-        <span><i className={source ? "is-ready" : ""} aria-hidden="true" />{label}</span>
-        <div>
-          {status?.state === "authenticated" ? (
-            <button type="button" onClick={signOut} disabled={busy}>Sign out</button>
-          ) : (
-            <button type="button" onClick={startLogin} disabled={busy || status?.state === "pending"}>
-              Sign in with ChatGPT
-            </button>
-          )}
+    <div className="agent-session-shell">
+      <div className="agent-session-bar">
+        <span className="agent-session-status" aria-live="polite">
+          <i className={ready ? "is-ready" : ""} aria-hidden="true" />
+          {label}
+        </span>
+        <div className="agent-session-actions">
+          {transport === "openai" && !ready ? (
+            <button
+              type="button"
+              aria-label="Connect with ChatGPT"
+              onClick={startLogin}
+              disabled={busy || status?.state === "pending"}
+            >connect</button>
+          ) : null}
+          <details className="agent-session-menu">
+            <summary aria-label="Connection options">session</summary>
+            <div role="group" aria-label="Agent connection">
+              <button
+                type="button"
+                aria-label="Use ChatGPT subscription"
+                aria-pressed={transport === "openai"}
+                onClick={() => onSelectTransport("openai")}
+              >ChatGPT</button>
+              <button
+                type="button"
+                aria-label="Use Tempo MPP"
+                aria-pressed={transport === "mpp"}
+                onClick={() => onSelectTransport("mpp")}
+              >Tempo</button>
+              {status?.state === "authenticated" ? (
+                <button type="button" onClick={signOut} disabled={busy}>Sign out</button>
+              ) : null}
+            </div>
+          </details>
         </div>
       </div>
-      <p className="agent-auth-privacy">
-        The agent runs in your browser. Prompts and a short-lived token cross a
-        session-isolated Cloudflare relay; stored credentials are encrypted and
-        this login expires within seven days.
-      </p>
       {status?.state === "pending" ? (
         <div className="agent-oauth-code">
           <span>Enter code <strong>{status.userCode}</strong> at ChatGPT.</span>
@@ -485,7 +502,7 @@ function SubscriptionBar({
       {status?.state === "expired" ? (
         <p className="agent-byok-error" role="status">The login code expired. Start sign-in again.</p>
       ) : null}
-    </aside>
+    </div>
   );
 }
 

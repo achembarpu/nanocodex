@@ -7,6 +7,7 @@ const terminalCss = source("../src/AgentTerminal.css");
 const application = source("../src/NanocodexApp.tsx");
 const artifactRuntime = source("../src/artifactRuntime.tsx");
 const terminal = source("../src/AgentTerminal.tsx");
+const mpp = source("../src/MppControls.tsx");
 const worker = source("../src/agent.worker.ts");
 const compactQuery = "(max-width: 740px), (pointer: coarse) and (orientation: landscape) and (max-width: 950px)";
 
@@ -14,9 +15,9 @@ test("terminal and application controls share the compact phone policy", () => {
   assert.ok(indexCss.includes(`@media ${compactQuery} {`));
   assert.ok(terminalCss.includes(`@media ${compactQuery} {`));
   const compact = terminalCss.indexOf(`@media ${compactQuery}`);
-  const auth = ruleBlock(terminalCss, ".agent-transport {", compact);
+  const auth = ruleBlock(terminalCss, ".agent-session-bar,", compact);
   const shell = ruleBlock(terminalCss, ".agent-terminal-shell {", compact);
-  assert.match(auth, /grid-template-columns:\s*1fr 1fr/);
+  assert.match(auth, /min-height:\s*44px/);
   assert.match(shell, /100dvh/);
   assert.match(shell, /env\(safe-area-inset-bottom\)/);
   assert.match(shell, /min-height:\s*440px/);
@@ -32,7 +33,7 @@ test("the phone home surface explains the live agent before mounting it", () => 
   const phone = terminalCss.lastIndexOf("@media (max-width: 740px) {");
   assert.ok(application.indexOf('id="home-title"') < application.indexOf('id="agent-demo"'));
   assert.ok(application.indexOf('id="agent-demo-title"') < application.indexOf("<AgentTerminal />"));
-  assert.doesNotMatch(terminalCss.slice(phone), /\.agent-auth-privacy\s*\{[^}]*display:\s*none/);
+  assert.ok(phone < 0, "the compact terminal policy is shared across phone orientations");
   assert.match(terminal, /<XtermSurface/);
   assert.doesNotMatch(terminal, /<NanocodexTui|<WorkspacePanel|<ArtifactDock/);
 });
@@ -68,8 +69,7 @@ test("the artifact runtime remains independently scrollable", () => {
 });
 
 test("phone auth controls and other application targets meet mobile baselines", () => {
-  assert.ok(terminalCss.includes(".agent-byok input {\n    font-size: 16px;"));
-  assert.match(ruleBlock(terminalCss, ".agent-transport button,", terminalCss.indexOf(`@media ${compactQuery}`)), /min-height:\s*44px/);
+  assert.match(ruleBlock(terminalCss, ".agent-session-actions button,", terminalCss.indexOf(`@media ${compactQuery}`)), /min-height:\s*44px/);
 
   for (const selector of [
     ".pierre-tree-heading button",
@@ -93,6 +93,22 @@ test("phone auth controls and other application targets meet mobile baselines", 
   assert.match(surfaces, /min-height:\s*44px/);
   assert.match(theme, /width:\s*44px/);
   assert.match(theme, /min-height:\s*44px/);
+});
+
+test("the default terminal chrome stays generic while advanced connection paths remain available", () => {
+  assert.doesNotMatch(terminal, /Connected to your ChatGPT subscription/);
+  assert.doesNotMatch(terminal, /The agent runs in your browser/);
+  assert.match(terminal, /aria-live="polite"/);
+  assert.match(terminal, /aria-label="Connection options">session/);
+  assert.match(terminal, /aria-label="Use ChatGPT subscription"/);
+  assert.match(terminal, /aria-label="Use Tempo MPP"/);
+  assert.match(terminal, /aria-pressed=\{transport === "openai"\}/);
+  assert.match(terminal, /aria-pressed=\{transport === "mpp"\}/);
+  assert.match(mpp, /<details className="agent-payment-details">/);
+  assert.match(mpp, /<summary>payment details<\/summary>/);
+  for (const capability of ["authorize", "add funds", "disconnect", "Tempo account", "Model authorized", "Mercator authorized"]) {
+    assert.match(mpp, new RegExp(capability, "i"));
+  }
 });
 
 function source(path: string): string {

@@ -125,7 +125,7 @@ export function createAgentTerminal(options) {
         state = steerAdmitted(state, id);
         emit("prompt.steered", { id });
       } catch (error) {
-        state = steerFailed(state, id, errorMessage(error));
+        state = steerFailed(state, id, terminalErrorMessage(error));
         emit("prompt.steer_error", { error, id });
       }
       render();
@@ -136,7 +136,7 @@ export function createAgentTerminal(options) {
     try {
       turn = agent.turn.prompt({ input: prompt });
     } catch (error) {
-      appendError(errorMessage(error));
+      appendError(terminalErrorMessage(error));
       emit("prompt.rejected", { error, id });
       return undefined;
     }
@@ -149,7 +149,7 @@ export function createAgentTerminal(options) {
       state = turnFinished(state, undefined, result.finalMessage);
       emit("prompt.completed", { id, result });
     }, (error) => {
-      state = turnFinished(state, errorMessage(error));
+      state = turnFinished(state, terminalErrorMessage(error));
       emit("prompt.failed", { error, id });
     }).finally(() => {
       record.settled = true;
@@ -169,7 +169,7 @@ export function createAgentTerminal(options) {
       await current.turn.cancel();
       emit("prompt.cancelled");
     } catch (error) {
-      appendError(errorMessage(error));
+      appendError(terminalErrorMessage(error));
       emit("prompt.cancel_error", { error });
     }
   }
@@ -326,12 +326,8 @@ export function createAgentTerminal(options) {
 
 export function renderTerminal({ state, input = "", cursor = input.length, cols = 80 }) {
   const lines = [`${BOLD}nanocodex${RESET}`];
-  if (!state.entries.length) lines.push(`${DIM}Ask the agent anything.${RESET}`);
   for (const entry of state.entries) lines.push(renderEntry(entry));
-  const status = state.running
-    ? `${CYAN}${state.status || "Running"}${RESET}`
-    : `${DIM}${state.status || "Ready"}${RESET}`;
-  lines.push(status);
+  if (state.running) lines.push(`${CYAN}${state.status || "Working"}${RESET}`);
   const safeInput = terminalText(input);
   const safeCursor = Math.max(0, Math.min(input.length, cursor));
   const before = terminalText(input.slice(0, safeCursor));
@@ -479,6 +475,13 @@ function validateTerminal(terminal) {
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function terminalErrorMessage(error) {
+  const message = errorMessage(error);
+  return /Responses WebSocket handshake failed|WebSocket connection failed/.test(message)
+    ? "Could not connect to the agent. Try again."
+    : message;
 }
 
 function performanceNow() {

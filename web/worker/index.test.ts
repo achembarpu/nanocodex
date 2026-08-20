@@ -283,9 +283,52 @@ test("BYOK creation rejects cross-origin requests before storing a key", async (
   assert.equal(credentials.size, 0);
 });
 
-test("Responses WebSocket rejects a missing credential before dialing upstream", async () => {
+test("Responses WebSocket reports a missing credential through the accepted proxy socket", async () => {
   const originalFetch = globalThis.fetch;
+  const OriginalResponse = globalThis.Response;
+  const OriginalWebSocketPair = (globalThis as any).WebSocketPair;
   let upstreamDialed = false;
+  const sockets: FakeWorkerSocket[] = [];
+  class FakeWorkerSocket {
+    peer?: FakeWorkerSocket;
+    messages: string[] = [];
+    listeners = new Map<string, Set<() => void>>();
+    accept() {}
+    addEventListener(type: string, listener: () => void) {
+      const listeners = this.listeners.get(type) ?? new Set();
+      listeners.add(listener);
+      this.listeners.set(type, listeners);
+    }
+    removeEventListener(type: string, listener: () => void) {
+      this.listeners.get(type)?.delete(listener);
+    }
+    send(message: string) { this.peer?.messages.push(message); }
+    close() {
+      for (const listener of this.listeners.get("close") ?? []) listener();
+      for (const listener of this.peer?.listeners.get("close") ?? []) listener();
+    }
+  }
+  class WorkerTestResponse extends OriginalResponse {
+    webSocket: WebSocket | null = null;
+    constructor(body?: BodyInit | null, init?: ResponseInit & { webSocket?: WebSocket }) {
+      const websocket = init?.webSocket;
+      super(body, init?.status === 101 ? { ...init, status: 200 } : init);
+      if (init?.status === 101) Object.defineProperty(this, "status", { value: 101 });
+      this.webSocket = websocket ?? null;
+    }
+  }
+  (globalThis as any).Response = WorkerTestResponse;
+  (globalThis as any).WebSocketPair = class {
+    0: FakeWorkerSocket;
+    1: FakeWorkerSocket;
+    constructor() {
+      this[0] = new FakeWorkerSocket();
+      this[1] = new FakeWorkerSocket();
+      this[0].peer = this[1];
+      this[1].peer = this[0];
+      sockets.push(this[0], this[1]);
+    }
+  };
   globalThis.fetch = (async () => {
     upstreamDialed = true;
     throw new Error("upstream must not be reached");
@@ -295,11 +338,103 @@ test("Responses WebSocket rejects a missing credential before dialing upstream",
       "https://demo.test/api/responses?session_id=session-1",
       { headers: { origin: "https://demo.test", upgrade: "websocket" } },
     ), { ENVIRONMENT: "test" });
-    assert.equal(response.status, 503);
-    assert.equal(await response.text(), "OpenAI credentials are not configured");
+    assert.equal(response.status, 101);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(JSON.parse(sockets[0]?.messages[0] ?? "null"), {
+      type: "nanocodex.proxy.rejected",
+      status: 503,
+      error: "OpenAI credentials are not configured",
+    });
     assert.equal(upstreamDialed, false);
   } finally {
     globalThis.fetch = originalFetch;
+    globalThis.Response = OriginalResponse;
+    (globalThis as any).WebSocketPair = OriginalWebSocketPair;
+  }
+});
+
+test("Responses proxy closes an upstream opened after the browser leaves during setup", async () => {
+  const originalFetch = globalThis.fetch;
+  const OriginalResponse = globalThis.Response;
+  const OriginalWebSocketPair = (globalThis as any).WebSocketPair;
+  let resolveUpstream!: (response: Response) => void;
+  const upstreamResponse = new Promise<Response>((resolve) => { resolveUpstream = resolve; });
+  let markDialStarted!: () => void;
+  const dialStarted = new Promise<void>((resolve) => { markDialStarted = resolve; });
+  const sockets: FakeWorkerSocket[] = [];
+  class FakeWorkerSocket {
+    peer?: FakeWorkerSocket;
+    listeners = new Map<string, Set<() => void>>();
+    messages: string[] = [];
+    accepted = false;
+    closed = false;
+    binaryType = "blob";
+    accept() { this.accepted = true; }
+    addEventListener(type: string, listener: () => void) {
+      const listeners = this.listeners.get(type) ?? new Set();
+      listeners.add(listener);
+      this.listeners.set(type, listeners);
+    }
+    removeEventListener(type: string, listener: () => void) {
+      this.listeners.get(type)?.delete(listener);
+    }
+    send(message: string) { this.peer?.messages.push(message); }
+    close() {
+      this.closed = true;
+      for (const listener of this.listeners.get("close") ?? []) listener();
+      for (const listener of this.peer?.listeners.get("close") ?? []) listener();
+    }
+  }
+  class WorkerTestResponse extends OriginalResponse {
+    webSocket: WebSocket | null = null;
+    constructor(body?: BodyInit | null, init?: ResponseInit & { webSocket?: WebSocket }) {
+      const websocket = init?.webSocket;
+      super(body, init?.status === 101 ? { ...init, status: 200 } : init);
+      if (init?.status === 101) Object.defineProperty(this, "status", { value: 101 });
+      this.webSocket = websocket ?? null;
+    }
+  }
+  (globalThis as any).Response = WorkerTestResponse;
+  (globalThis as any).WebSocketPair = class {
+    0: FakeWorkerSocket;
+    1: FakeWorkerSocket;
+    constructor() {
+      this[0] = new FakeWorkerSocket();
+      this[1] = new FakeWorkerSocket();
+      this[0].peer = this[1];
+      this[1].peer = this[0];
+      sockets.push(this[0], this[1]);
+    }
+  };
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    if (url === "https://api.openai.com/v1/responses") {
+      markDialStarted();
+      return upstreamResponse;
+    }
+    return OriginalResponse.json({ success: true });
+  }) as typeof fetch;
+  try {
+    const response = await worker.fetch(new Request(
+      "https://demo.test/api/responses?session_id=session-1",
+      { headers: { origin: "https://demo.test", upgrade: "websocket" } },
+    ), { ENVIRONMENT: "test", OPENAI_API_KEY: "deployment-secret" });
+    assert.equal(response.status, 101);
+    await dialStarted;
+    sockets[0]?.close();
+    const upstream = new FakeWorkerSocket();
+    resolveUpstream(new WorkerTestResponse(null, {
+      status: 101,
+      webSocket: upstream as unknown as WebSocket,
+    }));
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(upstream.accepted, true);
+    assert.equal(upstream.closed, true);
+    assert.deepEqual(sockets[0]?.messages, []);
+  } finally {
+    globalThis.fetch = originalFetch;
+    globalThis.Response = OriginalResponse;
+    (globalThis as any).WebSocketPair = OriginalWebSocketPair;
   }
 });
 

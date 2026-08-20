@@ -626,77 +626,129 @@ async function upgradeResponsesWebSocket(
   if (!sessionId || !/^[A-Za-z0-9._:-]{1,200}$/.test(sessionId)) {
     return new Response("Invalid session", { status: 400 });
   }
-  const leaseId = randomSessionId();
-  const resolved = await resolveCredential(request, env, "socket", leaseId);
-  if (resolved instanceof Response) return webSocketError(resolved);
-  let credential = resolved;
-  if (!credential) {
-    return new Response("OpenAI credentials are not configured", { status: 503 });
-  }
-  const limited = await limitAgentOperation(env, credential.actorId, "socket");
-  if (limited) {
-    await releaseSubscriptionLease(env, credential);
-    return webSocketError(limited);
-  }
+  const pair = new WebSocketPair();
+  const [client, server] = Object.values(pair);
+  server.accept();
+  const setup = setupResponsesWebSocket(request, env, sessionId, server, context);
+  if (context) context.waitUntil(setup);
+  else void setup;
+  return new Response(null, { status: 101, webSocket: client });
+}
 
-  let upstreamResponse: Response;
+async function setupResponsesWebSocket(
+  request: Request,
+  env: WorkerEnv,
+  sessionId: string,
+  downstream: WebSocket,
+  context?: ExecutionContext,
+): Promise<void> {
+  let credential: Credential | undefined;
+  let upstream: WebSocket | undefined;
+  let bridged = false;
+  let downstreamClosed = false;
+  let leaseReleased = false;
+  const onDownstreamClose = () => { downstreamClosed = true; };
+  const releaseLease = async () => {
+    if (!credential || leaseReleased) return;
+    leaseReleased = true;
+    await releaseSubscriptionLease(env, credential);
+  };
+  const removeSetupListeners = () => {
+    downstream.removeEventListener("close", onDownstreamClose);
+    downstream.removeEventListener("error", onDownstreamClose);
+  };
+  downstream.addEventListener("close", onDownstreamClose);
+  downstream.addEventListener("error", onDownstreamClose);
   try {
-    upstreamResponse = await openResponsesWebSocket(
+    const leaseId = randomSessionId();
+    const resolved = await resolveCredential(request, env, "socket", leaseId);
+    if (resolved instanceof Response) {
+      await rejectResponsesWebSocket(downstream, resolved);
+      return;
+    }
+    credential = resolved;
+    if (!credential) {
+      await rejectResponsesWebSocket(
+        downstream,
+        new Response("OpenAI credentials are not configured", { status: 503 }),
+      );
+      return;
+    }
+    if (downstreamClosed) return;
+    const limited = await limitAgentOperation(env, credential.actorId, "socket");
+    if (limited) {
+      await rejectResponsesWebSocket(downstream, limited);
+      return;
+    }
+    if (downstreamClosed) return;
+
+    let upstreamResponse = await openResponsesWebSocket(
       env,
       credential,
       sessionId,
       chatGptApiBaseUrl(env),
     );
-  } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    console.error("OpenAI WebSocket upgrade request failed", { detail });
-    await releaseSubscriptionLease(env, credential);
-    return new Response(`OpenAI WebSocket upgrade request failed: ${detail}`, { status: 502 });
-  }
-  if (credential.kind === "chatgpt" && upstreamResponse.status === 401) {
-    await upstreamResponse.body?.cancel();
-    const recovered = await recoverSubscriptionCredential(request, env, credential);
-    if (recovered) {
-      credential = recovered;
-      try {
+    if (credential.kind === "chatgpt" && upstreamResponse.status === 401) {
+      const recovered = await recoverSubscriptionCredential(request, env, credential);
+      if (recovered) {
+        await upstreamResponse.body?.cancel();
+        credential = recovered;
         upstreamResponse = await openResponsesWebSocket(
           env,
           credential,
           sessionId,
           chatGptApiBaseUrl(env),
         );
-      } catch (error) {
-        const detail = error instanceof Error ? error.message : String(error);
-        console.error("OpenAI WebSocket retry request failed", { detail });
-        await releaseSubscriptionLease(env, credential);
-        return new Response(`OpenAI WebSocket retry request failed: ${detail}`, { status: 502 });
       }
     }
-  }
-  const upstream = upstreamResponse.webSocket;
-  if (!upstream) {
-    const detail = await upstreamResponseDetail(upstreamResponse);
-    console.error("OpenAI WebSocket upgrade rejected", {
-      status: upstreamResponse.status,
-      detail,
+    upstream = upstreamResponse.webSocket ?? undefined;
+    if (!upstream) {
+      console.error("OpenAI WebSocket upgrade rejected", { status: upstreamResponse.status });
+      await rejectResponsesWebSocket(downstream, upstreamResponse);
+      return;
+    }
+    upstream.binaryType = "arraybuffer";
+    upstream.accept();
+    if (downstreamClosed) return;
+    downstream.send(JSON.stringify({ type: "nanocodex.proxy.ready" }));
+    if (downstreamClosed) return;
+    bridge(downstream, upstream, () => {
+      const release = releaseLease();
+      if (context) context.waitUntil(release);
+      else void release;
     });
-    await releaseSubscriptionLease(env, credential);
-    return new Response(
-      `OpenAI WebSocket upgrade failed with HTTP ${upstreamResponse.status}: ${detail}`,
-      { status: 502 },
-    );
+    bridged = true;
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error);
+    console.error("OpenAI WebSocket setup failed", { detail });
+    if (!downstreamClosed) {
+      await rejectResponsesWebSocket(
+        downstream,
+        new Response(`OpenAI WebSocket setup failed: ${detail}`, { status: 502 }),
+      );
+    }
+  } finally {
+    removeSetupListeners();
+    if (!bridged) {
+      try { upstream?.close(1000, "proxy setup ended"); } catch { /* Already closed. */ }
+      await releaseLease();
+    }
   }
-  const pair = new WebSocketPair();
-  const [client, server] = Object.values(pair);
-  upstream.binaryType = "arraybuffer";
-  upstream.accept();
-  server.accept();
-  bridge(server, upstream, () => {
-    const release = releaseSubscriptionLease(env, credential);
-    if (context) context.waitUntil(release);
-    else void release;
-  });
-  return new Response(null, { status: 101, webSocket: client });
+}
+
+async function rejectResponsesWebSocket(socket: WebSocket, response: Response): Promise<void> {
+  const status = response.status;
+  const error = await upstreamResponseDetail(response);
+  const retryAfter = response.headers.get("retry-after");
+  try {
+    socket.send(JSON.stringify({
+      type: "nanocodex.proxy.rejected",
+      status,
+      error,
+      ...(retryAfter === null ? {} : { retryAfter }),
+    }));
+    socket.close(status === 429 ? 1013 : 1011, "connection rejected");
+  } catch { /* The browser may have gone away while the upstream was opening. */ }
 }
 
 async function upstreamResponseDetail(response: Response): Promise<string> {
@@ -705,6 +757,7 @@ async function upstreamResponseDetail(response: Response): Promise<string> {
     const parsed = asObject(JSON.parse(body));
     const error = asObject(parsed?.error);
     if (typeof error?.message === "string") return error.message.slice(0, 1_024);
+    if (typeof parsed?.error === "string") return parsed.error.slice(0, 1_024);
     if (typeof parsed?.detail === "string") return parsed.detail.slice(0, 1_024);
   } catch { /* Fall through to the bounded text classification. */ }
   const contentType = response.headers.get("content-type")?.toLowerCase() ?? "";

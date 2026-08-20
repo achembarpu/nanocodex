@@ -41,7 +41,8 @@ function fakeAgent() {
     turn: {
       prompt({ input }) {
         let resolve;
-        const result = new Promise((next) => { resolve = next; });
+        let reject;
+        const result = new Promise((next, fail) => { resolve = next; reject = fail; });
         const turn = {
           input,
           cancelled: false,
@@ -53,6 +54,7 @@ function fakeAgent() {
           complete(message) {
             resolve({ finalMessage: message, snapshot: {}, usage: {} });
           },
+          fail(error) { reject(error); },
         };
         turns.push(turn);
         return turn;
@@ -76,6 +78,20 @@ test("a generic terminal host can drive one retained agent", async () => {
   agent.turns[0].complete("done");
   await new Promise((resolve) => setImmediate(resolve));
   assert.match(host.writes.at(-1), /done/);
+  terminal.dispose();
+});
+
+test("connection failures stay concise and return to the prompt", async () => {
+  const host = fakeTerminal();
+  const agent = fakeAgent();
+  const terminal = createAgentTerminal({ agent, terminal: host });
+  await terminal.submit("hello");
+  agent.turns[0].fail(new Error("Responses WebSocket handshake failed: Error: WebSocket connection failed\n    at noisy stack"));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const frame = host.writes.at(-1);
+  assert.match(frame, /Could not connect to the agent\. Try again\./);
+  assert.doesNotMatch(frame, /WebSocket|noisy stack|Turn failed/);
   terminal.dispose();
 });
 

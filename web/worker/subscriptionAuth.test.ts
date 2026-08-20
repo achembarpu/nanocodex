@@ -158,7 +158,7 @@ test("device login stores and rotates ChatGPT tokens without exposing them in pu
     assert.equal(imageLimited.status, 429);
     assert.equal(imageLimited.headers.get("retry-after"), "60");
 
-    for (let socketIndex = 0; socketIndex < 3; socketIndex += 1) {
+    for (let socketIndex = 0; socketIndex < 8; socketIndex += 1) {
       const allowed = await session.fetch(new Request("https://session.test/credential", {
         method: "POST",
         headers: { "content-type": "application/json" },

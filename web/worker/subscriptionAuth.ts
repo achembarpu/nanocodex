@@ -14,7 +14,7 @@ export const CHATGPT_LOGIN_TTL_MS = 15 * 60_000;
 export const CHATGPT_SESSION_TTL_MS = 7 * 24 * 60 * 60_000;
 const USAGE_WINDOW_MS = 60_000;
 const SOCKET_LEASE_MS = 2 * 60 * 60_000;
-const MAX_ACTIVE_SOCKETS = 3;
+const MAX_ACTIVE_SOCKETS = 8;
 const OPERATION_LIMITS = {
   socket: 12,
   search: 30,

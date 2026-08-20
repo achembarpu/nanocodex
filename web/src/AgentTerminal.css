@@ -1,11 +1,193 @@
 .nanocodex-demo {
+  position: relative;
   width: 100%;
+}
+
+.agent-session-shell,
+.agent-session-panel {
+  position: relative;
+  z-index: 2;
+  width: 100%;
+  color: #8f8f8f;
+  font-family: "Paradigm SemiMono", "Geist Mono", monospace;
+  font-size: 11px;
+  background: #111;
+  border: 1px solid #2a2a2a;
+  border-bottom: 0;
+}
+
+.agent-session-bar,
+.agent-byok-summary,
+.agent-session-actions,
+.agent-byok-summary > div,
+.agent-oauth-code {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+}
+
+.agent-session-bar,
+.agent-byok-summary {
+  min-height: 34px;
+  padding: 0 12px;
+  justify-content: space-between;
+}
+
+.agent-session-status,
+.agent-byok-summary > span {
+  display: inline-flex;
+  min-width: 0;
+  gap: 7px;
+  align-items: center;
+}
+
+.agent-session-status i,
+.agent-byok-summary i {
+  width: 6px;
+  height: 6px;
+  flex: 0 0 auto;
+  background: #555;
+  border-radius: 50%;
+}
+
+.agent-session-status i.is-ready,
+.agent-byok-summary i.is-ready {
+  background: #68d391;
+}
+
+.agent-session-actions button,
+.agent-session-menu summary,
+.agent-byok-summary button,
+.agent-oauth-code button {
+  min-height: 28px;
+  padding: 0 8px;
+  color: #aaa;
+  font: inherit;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.agent-session-actions button:hover,
+.agent-session-actions button:focus-visible,
+.agent-session-menu summary:hover,
+.agent-session-menu summary:focus-visible,
+.agent-byok-summary button:hover,
+.agent-byok-summary button:focus-visible,
+.agent-oauth-code button:hover,
+.agent-oauth-code button:focus-visible {
+  color: #fff;
+  outline: 1px solid #555;
+  outline-offset: -1px;
+}
+
+.agent-session-actions button:disabled,
+.agent-byok-summary button:disabled,
+.agent-oauth-code button:disabled {
+  opacity: 0.45;
+  cursor: wait;
+}
+
+.agent-session-menu {
+  position: relative;
+}
+
+.agent-session-menu summary {
+  display: inline-flex;
+  align-items: center;
+  list-style: none;
+}
+
+.agent-session-menu summary::-webkit-details-marker {
+  display: none;
+}
+
+.agent-session-menu summary::after {
+  margin-left: 6px;
+  content: "⌄";
+}
+
+.agent-session-menu[open] summary::after {
+  content: "⌃";
+}
+
+.agent-session-menu > div {
+  position: absolute;
+  z-index: 5;
+  top: calc(100% + 4px);
+  right: 0;
+  display: grid;
+  min-width: 150px;
+  padding: 4px;
+  background: #111;
+  border: 1px solid #383838;
+  box-shadow: 0 12px 30px rgb(0 0 0 / 28%);
+}
+
+.agent-session-menu > div button {
+  justify-content: flex-start;
+  text-align: left;
+}
+
+.agent-session-menu > div button[aria-pressed="true"] {
+  color: #fff;
+  background: #202020;
+}
+
+.agent-oauth-code,
+.agent-byok-error {
+  margin: 0;
+  padding: 0 12px 10px;
+}
+
+.agent-oauth-code {
+  flex-wrap: wrap;
+}
+
+.agent-oauth-code strong {
+  color: #fff;
+  letter-spacing: 0.08em;
+}
+
+.agent-oauth-code a {
+  color: #8ac7ff;
+}
+
+.agent-byok-error {
+  color: #ff7b7b;
+}
+
+.agent-session-panel {
+  padding: 4px 0 8px;
+}
+
+.agent-payment-details {
+  margin: 4px 12px 0;
+}
+
+.agent-payment-details summary {
+  color: #8f8f8f;
+  cursor: pointer;
+}
+
+.agent-payment-details .agent-mpp-details,
+.agent-payment-details pre {
+  margin-top: 8px;
+}
+
+.agent-payment-details pre {
+  max-height: 180px;
+  padding: 8px;
+  overflow: auto;
+  font-size: 9px;
+  line-height: 1.45;
+  background: #171717;
+  border: 1px solid #2a2a2a;
 }
 
 .agent-terminal-shell {
   width: 100%;
   height: clamp(520px, 66svh, 640px);
-  margin-top: 10px;
   overflow: hidden;
   background: #111;
   border: 1px solid #2a2a2a;
@@ -36,25 +218,21 @@
     min-width: 0;
   }
 
-  .agent-transport {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    width: 100%;
-    margin-top: 20px;
+  .agent-session-bar,
+  .agent-byok-summary {
+    min-height: 44px;
+    padding-inline: 10px 4px;
   }
 
-  .agent-transport button,
-  .agent-byok button,
-  .agent-byok input {
+  .agent-session-actions button,
+  .agent-session-menu summary,
+  .agent-byok-summary button,
+  .agent-oauth-code button {
     min-height: 44px;
   }
 
-  .agent-byok {
-    padding: 10px;
-  }
-
-  .agent-byok input {
-    font-size: 16px;
+  .agent-session-menu > div {
+    min-width: 180px;
   }
 
   .agent-byok-summary {
@@ -62,23 +240,18 @@
   }
 
   .agent-byok-summary > div {
+    display: flex;
     flex-wrap: wrap;
     justify-content: flex-end;
   }
 
   .agent-terminal-shell {
-    height: min(620px, calc(100dvh - var(--mobile-header-height, 48px) - 156px));
+    height: min(620px, calc(100dvh - var(--mobile-header-height, 48px) - 112px));
     min-height: 440px;
     margin-bottom: max(24px, env(safe-area-inset-bottom));
   }
 
   .agent-xterm > .xterm {
     padding: 10px;
-  }
-}
-
-@media (max-width: 740px) {
-  .agent-transport {
-    margin-top: 0;
   }
 }
