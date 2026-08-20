@@ -5,9 +5,11 @@ description: One Rust/WASM lifecycle for Node, browser Workers, React, and brows
 
 # JavaScript SDK
 
-The `nanocodex` package exposes viem-style Node and browser entrypoints over the
-same Rust/WASM driver. Transport is explicit; generated WASM handles stay
-private.
+The repository's `nanocodex` package exposes viem-style Node and browser
+entrypoints over the same Rust/WASM driver. The current registry release
+contains the core root, Node, browser, and WASM entrypoints; newer browser-tool
+and subagent exports in this guide currently require a pinned checkout.
+Transport is explicit; generated WASM handles stay private.
 
 ```js
 import { Agent, Transport } from "nanocodex/node";
@@ -48,6 +50,11 @@ and [owned Node example](https://github.com/gakonst/nanocodex/blob/master/exampl
 browsers and agents can share the returned workspace handle.
 
 ## React and terminal UI
+
+The core `nanocodex` binding is registry-published. The React, artifacts, TUI,
+and terminal companions below currently ship from repository source; consume
+their package entrypoints from a pinned checkout until they join the release
+pipeline.
 
 `nanocodex-react` owns a browser Worker's lifecycle and typed external store:
 

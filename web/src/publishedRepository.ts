@@ -63,24 +63,36 @@ export async function loadPublishedRepositorySnapshot(
     commits = body as HarnessCommit[];
   }
 
+  const fileContents = new Map<string, Promise<string>>();
+
   return {
     ...snapshot,
     historyLoaded: includeHistory,
     commits,
     async readFile(file) {
+      const cached = fileContents.get(file.objectId);
+      if (cached) return cached;
       const published = snapshot.tree.find((candidate) =>
         candidate.objectId === file.objectId && candidate.path === file.path
       );
       if (published?.contentUrl == null) {
         throw new Error(`${file.path} is not available as published text`);
       }
-      const response = await request(published.contentUrl, {
+      const pending = request(published.contentUrl, {
         cache: development ? "no-store" : "default",
+      }).then((response) => {
+        if (!response.ok) {
+          throw new Error(`File request failed (${response.status})`);
+        }
+        return response.text();
+      }).catch((error) => {
+        if (fileContents.get(file.objectId) === pending) {
+          fileContents.delete(file.objectId);
+        }
+        throw error;
       });
-      if (!response.ok) {
-        throw new Error(`File request failed (${response.status})`);
-      }
-      return response.text();
+      fileContents.set(file.objectId, pending);
+      return pending;
     },
     commitPatchUrl(commit) {
       return development

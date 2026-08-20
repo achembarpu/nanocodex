@@ -1,7 +1,15 @@
-export type Surface = "home" | "docs" | "code" | "commits" | "requests" | "evals";
+export type Surface =
+  | "home"
+  | "agent"
+  | "docs"
+  | "code"
+  | "commits"
+  | "requests"
+  | "evals";
 
 const surfacePaths: Record<Surface, string> = {
   home: "/",
+  agent: "/agent",
   docs: "/docs",
   code: "/code",
   commits: "/commits",

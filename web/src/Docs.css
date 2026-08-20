@@ -41,9 +41,8 @@
   grid-template-columns: minmax(180px, 220px) minmax(0, 700px) minmax(180px, 220px);
   gap: clamp(40px, 5vw, 76px);
   justify-content: center;
-  width: min(calc(100% - (var(--page-margin) * 2)), var(--wide-max));
-  margin-inline: auto;
-  padding: 56px 0 112px;
+  width: 100%;
+  padding: 56px var(--page-margin) 112px;
 }
 
 .docs-sidebar,
@@ -63,7 +62,7 @@
 .docs-drawer nav section > p,
 .docs-on-this-page > p {
   margin-bottom: 9px;
-  color: color-mix(in srgb, var(--text) 52%, transparent);
+  color: color-mix(in srgb, var(--text) 56%, transparent);
   font-size: 10px;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -261,6 +260,14 @@
   white-space: pre;
 }
 
+.docs-code-token {
+  color: color-mix(in srgb, var(--shiki-light, var(--text)) 70%, var(--text));
+}
+
+html[data-theme="dark"] .docs-code-token {
+  color: color-mix(in srgb, var(--shiki-dark, var(--text)) 70%, var(--text));
+}
+
 .docs-table-scroll {
   margin-top: 22px;
   overflow-x: auto;
@@ -419,6 +426,7 @@
   .docs-layout {
     display: block;
     width: min(calc(100% - (var(--page-margin) * 2)), 700px);
+    margin-inline: auto;
     padding-top: 40px;
   }
   .docs-sidebar { display: none; }

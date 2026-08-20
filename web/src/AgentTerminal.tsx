@@ -4,6 +4,7 @@ import {
   Suspense,
   useCallback,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -35,16 +36,30 @@ const MppControls = lazy(async () => ({
   default: (await import("./MppControls")).MppControls,
 }));
 
+export type AgentTerminalMode = "preview" | "full" | "hidden";
+
 /** Website policy around the reusable terminal adapter: credentials and theme. */
-export const AgentTerminal = memo(function AgentTerminal({ theme }: { theme: "light" | "dark" }) {
+export const AgentTerminal = memo(function AgentTerminal({
+  mode,
+  theme,
+}: {
+  mode: AgentTerminalMode;
+  theme: "light" | "dark";
+}) {
   return (
     <NanocodexProvider config={nanocodexConfig}>
-      <AgentTerminalDemo theme={theme} />
+      <AgentTerminalDemo mode={mode} theme={theme} />
     </NanocodexProvider>
   );
 });
 
-function AgentTerminalDemo({ theme }: { theme: "light" | "dark" }) {
+function AgentTerminalDemo({
+  mode,
+  theme,
+}: {
+  mode: AgentTerminalMode;
+  theme: "light" | "dark";
+}) {
   const agent = useNanocodex<WebWorkerCommand>();
   const thread = useMemo(getBrowserThread, []);
   const [transport, setTransport] = useState<AgentTransport>("openai");
@@ -177,6 +192,7 @@ function AgentTerminalDemo({ theme }: { theme: "light" | "dark" }) {
       ) : null}
       <XtermSurface
         inactiveMessage={unavailableMessage}
+        mode={mode}
         status={agent.status}
         theme={theme}
         onReady={(instance) => {
@@ -202,6 +218,7 @@ function AgentTerminalDemo({ theme }: { theme: "light" | "dark" }) {
 
 function XtermSurface({
   inactiveMessage,
+  mode,
   status,
   theme,
   onReady,
@@ -209,6 +226,7 @@ function XtermSurface({
   onResize,
 }: {
   inactiveMessage: string;
+  mode: AgentTerminalMode;
   status: "idle" | "starting" | "ready" | "stopped" | "error";
   theme: "light" | "dark";
   onReady(terminal: XtermInstance): void;
@@ -217,8 +235,9 @@ function XtermSurface({
 }) {
   const element = useRef<HTMLDivElement>(null);
   const instance = useRef<XtermInstance | undefined>(undefined);
-  const latest = useRef({ inactiveMessage, status, onData, onReady, onResize });
-  latest.current = { inactiveMessage, status, onData, onReady, onResize };
+  const fitAddon = useRef<FitAddon | undefined>(undefined);
+  const latest = useRef({ inactiveMessage, mode, status, onData, onReady, onResize });
+  latest.current = { inactiveMessage, mode, status, onData, onReady, onResize };
 
   useEffect(() => {
     if (!element.current) return;
@@ -240,6 +259,7 @@ function XtermSurface({
     terminal.loadAddon(fit);
     terminal.open(element.current);
     fit.fit();
+    fitAddon.current = fit;
     instance.current = terminal;
     terminal.attachCustomKeyEventHandler((event) => {
       const data = encodeXtermKeyEvent(event);
@@ -251,6 +271,7 @@ function XtermSurface({
     const data = terminal.onData((value) => latest.current.onData(value));
     const resize = terminal.onResize((size) => latest.current.onResize(size));
     const observer = new ResizeObserver(() => {
+      if (latest.current.mode === "hidden") return;
       fit.fit();
       const current = latest.current;
       if (current.status !== "ready" && current.status !== "starting") {
@@ -259,15 +280,36 @@ function XtermSurface({
     });
     observer.observe(element.current);
     latest.current.onReady(terminal);
-    terminal.focus();
+    if (latest.current.mode === "full") terminal.focus();
     return () => {
       observer.disconnect();
       data.dispose();
       resize.dispose();
       terminal.dispose();
+      fitAddon.current = undefined;
       instance.current = undefined;
     };
   }, []);
+
+  useLayoutEffect(() => {
+    const terminal = instance.current;
+    const fit = fitAddon.current;
+    const host = element.current;
+    if (!terminal || !fit || !host) return;
+    if (mode === "hidden") {
+      if (host.contains(window.document.activeElement)) {
+        (window.document.activeElement as HTMLElement | null)?.blur();
+      }
+      return;
+    }
+    const frame = window.requestAnimationFrame(() => {
+      if (!host.isConnected || host.offsetParent === null) return;
+      fit.fit();
+      latest.current.onResize({ cols: terminal.cols, rows: terminal.rows });
+      if (mode === "full") terminal.focus();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [mode]);
 
   useEffect(() => {
     if (instance.current) instance.current.options.theme = terminalTheme(theme);

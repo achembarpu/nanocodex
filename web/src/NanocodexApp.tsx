@@ -7,6 +7,8 @@ import {
   Copy,
   GitBranch,
   GitPullRequest,
+  Maximize2,
+  Minimize2,
   Moon,
   Search,
   Sun,
@@ -23,6 +25,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type MouseEvent as ReactMouseEvent,
 } from "react";
 import { useLocation, useNavigate } from "react-router";
 import type { CodeBrowserHandle } from "./CodeBrowser";
@@ -37,35 +40,35 @@ import { getBrowserThread } from "nanocodex/tools/browser";
 const loadEvals = () =>
   import("./Evals").then((module) => ({ default: module.Evals }));
 const Evals = lazy(loadEvals);
-const Docs = lazy(() =>
-  import("./Docs").then((module) => ({ default: module.Docs }))
-);
-const HomeFrame = lazy(() =>
-  import("./HomeFrame").then((module) => ({ default: module.HomeFrame }))
-);
-const AgentTerminal = lazy(() =>
+const loadDocs = () =>
+  import("./Docs").then((module) => ({ default: module.Docs }));
+const Docs = lazy(loadDocs);
+const loadHomeFrame = () =>
+  import("./HomeFrame").then((module) => ({ default: module.HomeFrame }));
+const HomeFrame = lazy(loadHomeFrame);
+const loadAgentTerminal = () =>
   import("./AgentTerminal").then((module) => ({
     default: module.AgentTerminal,
-  }))
-);
-const PierreWorkerProvider = lazy(() =>
+  }));
+const AgentTerminal = lazy(loadAgentTerminal);
+const loadPierreWorkerProvider = () =>
   import("./PierreWorkerProvider").then((module) => ({
     default: module.PierreWorkerProvider,
-  }))
-);
-const CodeBrowser = lazy(() =>
-  import("./CodeBrowser").then((module) => ({ default: module.CodeBrowser }))
-);
-const CommitCodeStream = lazy(() =>
+  }));
+const PierreWorkerProvider = lazy(loadPierreWorkerProvider);
+const loadCodeBrowser = () =>
+  import("./CodeBrowser").then((module) => ({ default: module.CodeBrowser }));
+const CodeBrowser = lazy(loadCodeBrowser);
+const loadCommitCodeStream = () =>
   import("./CommitCodeStream").then((module) => ({
     default: module.CommitCodeStream,
-  }))
-);
-const VirtualCommitList = lazy(() =>
+  }));
+const CommitCodeStream = lazy(loadCommitCodeStream);
+const loadVirtualCommitList = () =>
   import("./VirtualCommitList").then((module) => ({
     default: module.VirtualCommitList,
-  })),
-);
+  }));
+const VirtualCommitList = lazy(loadVirtualCommitList);
 
 export type Theme = "light" | "dark";
 type Scope = "all" | "eval" | "fix" | "docs" | "perf";
@@ -97,11 +100,30 @@ function preloadEvalOverview() {
   ]).catch(() => undefined);
 }
 
+let repositorySnapshotRequest: Promise<PublishedRepositorySnapshot> | undefined;
+let repositoryHistoryRequest: Promise<PublishedRepositorySnapshot> | undefined;
+
 function loadRepositorySnapshot(
   includeHistory: boolean,
 ): Promise<PublishedRepositorySnapshot> {
-  return import("./publishedRepository")
-    .then((module) => module.loadPublishedRepositorySnapshot(includeHistory));
+  if (includeHistory && repositoryHistoryRequest) return repositoryHistoryRequest;
+  if (!includeHistory && repositoryHistoryRequest) return repositoryHistoryRequest;
+  if (!includeHistory && repositorySnapshotRequest) return repositorySnapshotRequest;
+
+  const request = import("./publishedRepository")
+    .then((module) => module.loadPublishedRepositorySnapshot(includeHistory))
+    .then((loaded) => {
+      if (loaded.historyLoaded) repositorySnapshotRequest = Promise.resolve(loaded);
+      return loaded;
+    })
+    .catch((error) => {
+      if (includeHistory) repositoryHistoryRequest = undefined;
+      else repositorySnapshotRequest = undefined;
+      throw error;
+    });
+  if (includeHistory) repositoryHistoryRequest = request;
+  else repositorySnapshotRequest = request;
+  return request;
 }
 
 const scopes: Array<{ id: Scope; label: string }> = [
@@ -201,6 +223,9 @@ function NanocodexShell() {
   const [proposalTitle, setProposalTitle] = useState("");
   const [commitRailOpen, setCommitRailOpen] = useState(false);
   const [installCopied, setInstallCopied] = useState(false);
+  const [agentExperienceMounted, setAgentExperienceMounted] = useState(
+    surface === "home" || surface === "agent",
+  );
   const needsRepository = surface === "code" || surface === "commits" || proposalOpen;
   const needsRepositoryHistory = surface === "commits" || proposalOpen;
   const searchInputRef = useRef<HTMLInputElement>(null);
@@ -208,6 +233,12 @@ function NanocodexShell() {
   const codeBrowserRef = useRef<CodeBrowserHandle>(null);
   const commitStreamRef = useRef<CommitCodeStreamHandle>(null);
   const repositoryRequestId = useRef(0);
+
+  const retainAgentExperience = useCallback((nextSurface: Surface) => {
+    if (nextSurface === "home" || nextSurface === "agent") {
+      setAgentExperienceMounted(true);
+    }
+  }, []);
 
   const commits = snapshot?.commits ?? emptyCommits;
   const selected = useMemo(
@@ -277,14 +308,15 @@ function NanocodexShell() {
     [commits, queryTokens, searchOpen],
   );
 
-  const refreshRepository = useCallback(() => {
-    if (!needsRepository) return;
+  const requestRepository = useCallback((includeHistory: boolean) => {
     const requestId = ++repositoryRequestId.current;
     setRepositoryLoadError(false);
-    void loadRepositorySnapshot(needsRepositoryHistory).then(
+    void loadRepositorySnapshot(includeHistory).then(
       (loaded) => {
         if (repositoryRequestId.current !== requestId) return;
-        setSnapshot(loaded);
+        setSnapshot((current) =>
+          current?.historyLoaded && !loaded.historyLoaded ? current : loaded
+        );
         setSelectedHash((current) => current && loaded.commits.some(({ hash }) => hash === current)
           ? current
           : loaded.repository.head);
@@ -297,15 +329,19 @@ function NanocodexShell() {
         }
       },
     );
-  }, [needsRepository, needsRepositoryHistory]);
+  }, []);
+
+  const refreshRepository = useCallback(() => {
+    if (!needsRepository) return;
+    requestRepository(needsRepositoryHistory);
+  }, [needsRepository, needsRepositoryHistory, requestRepository]);
+
+  useLayoutEffect(() => {
+    retainAgentExperience(surface);
+  }, [retainAgentExperience, surface]);
 
   useEffect(() => {
-    if (!needsRepository) {
-      repositoryRequestId.current++;
-      setSnapshot(undefined);
-      setRepositoryLoadError(false);
-      return;
-    }
+    if (!needsRepository) return;
     if (!snapshot || (needsRepositoryHistory && !snapshot.historyLoaded)) {
       refreshRepository();
     }
@@ -323,6 +359,13 @@ function NanocodexShell() {
     localStorage.setItem("nanocodex-theme", theme);
   }, [theme]);
 
+  useEffect(() => {
+    if (surface === "docs") return;
+    document.title = surface === "home"
+      ? "Nanocodex · the coding agent is the library"
+      : `${surface[0].toUpperCase()}${surface.slice(1)} · Nanocodex`;
+  }, [surface]);
+
   const threadSurfacePath = useCallback(
     (nextSurface: Surface) =>
       threadId
@@ -330,23 +373,95 @@ function NanocodexShell() {
         : pathForSurface(nextSurface),
     [threadId],
   );
-  const navigateToSurface = useCallback((nextSurface: Surface) => {
-    if (nextSurface === "evals") preloadEvalOverview();
+
+  const preloadSurface = useCallback((nextSurface: Surface) => {
+    if (nextSurface === "home" || nextSurface === "agent") {
+      void Promise.all([loadHomeFrame(), loadAgentTerminal()]).catch(() => undefined);
+      return;
+    }
     if (nextSurface === "docs") {
-      startTransition(() => navigate(pathForSurface(nextSurface)));
+      void loadDocs().catch(() => undefined);
+      return;
+    }
+    if (nextSurface === "code") {
+      void Promise.all([loadPierreWorkerProvider(), loadCodeBrowser()]).catch(() => undefined);
+      if (!snapshot) requestRepository(false);
+      return;
+    }
+    if (nextSurface === "commits") {
+      void Promise.all([
+        loadPierreWorkerProvider(),
+        loadCommitCodeStream(),
+        loadVirtualCommitList(),
+      ]).catch(() => undefined);
+      if (!snapshot?.historyLoaded) requestRepository(true);
+      return;
+    }
+    if (nextSurface === "evals") preloadEvalOverview();
+  }, [requestRepository, snapshot]);
+
+  const navigateToSurface = useCallback((nextSurface: Surface) => {
+    retainAgentExperience(nextSurface);
+    preloadSurface(nextSurface);
+    if (nextSurface === "docs") {
+      const destination = pathForSurface(nextSurface);
+      if (`${location.pathname}${location.search}` === destination) return;
+      startTransition(() => navigate(destination));
       return;
     }
     const nextThreadId = threadId ?? getBrowserThread().id;
     if (!threadId) setThreadId(nextThreadId);
-    startTransition(() =>
-      navigate(`${pathForSurface(nextSurface)}?thread=${nextThreadId}`)
-    );
-  }, [navigate, threadId]);
+    const destination = `${pathForSurface(nextSurface)}?thread=${nextThreadId}`;
+    if (`${location.pathname}${location.search}` === destination) return;
+    startTransition(() => navigate(destination));
+  }, [location.pathname, location.search, navigate, preloadSurface, retainAgentExperience, threadId]);
+
+  const handleSurfaceClick = useCallback((
+    event: ReactMouseEvent<HTMLAnchorElement>,
+    nextSurface: Surface,
+  ) => {
+    if (
+      event.defaultPrevented ||
+      event.button !== 0 ||
+      event.metaKey ||
+      event.ctrlKey ||
+      event.shiftKey ||
+      event.altKey
+    ) return;
+    event.preventDefault();
+    navigateToSurface(nextSurface);
+  }, [navigateToSurface]);
+
+  const handlePathClick = useCallback((
+    event: ReactMouseEvent<HTMLAnchorElement>,
+    path: string,
+  ) => {
+    if (
+      event.defaultPrevented ||
+      event.button !== 0 ||
+      event.metaKey ||
+      event.ctrlKey ||
+      event.shiftKey ||
+      event.altKey
+    ) return;
+    event.preventDefault();
+    if (path.startsWith("/docs")) {
+      preloadSurface("docs");
+    }
+    startTransition(() => navigate(path));
+  }, [navigate, preloadSurface]);
+
+  const collapseAgent = useCallback(() => {
+    navigateToSurface("home");
+    window.requestAnimationFrame(() => {
+      window.document.getElementById("agent-demo")?.scrollIntoView({ block: "start" });
+    });
+  }, [navigateToSurface]);
 
   useLayoutEffect(() => {
     const headerCenter = headerCenterRef.current;
     const activeButton =
-      headerCenter?.querySelector<HTMLButtonElement>(".is-active");
+      headerCenter?.querySelector<HTMLElement>(".is-active");
     if (
       !headerCenter ||
       !activeButton ||
@@ -430,6 +545,8 @@ function NanocodexShell() {
       const nextSurface =
         key === "h"
           ? "home"
+          : key === "a"
+          ? "agent"
           : key === "d"
           ? "docs"
           : key === "t"
@@ -486,73 +603,87 @@ function NanocodexShell() {
     <div className={`site-shell surface-${surface}`}>
         <header className="site-header">
           <a
-            className="wordmark"
+            className={surface === "home" ? "wordmark is-active" : "wordmark"}
             href={threadSurfacePath("home")}
             aria-label="nanocodex home"
-            onClick={(event) => {
-              event.preventDefault();
-              navigateToSurface("home");
-            }}
+            aria-current={surface === "home" ? "page" : undefined}
+            onFocus={() => preloadSurface("home")}
+            onPointerEnter={() => preloadSurface("home")}
+            onClick={(event) => handleSurfaceClick(event, "home")}
           >
-            nanocodex <span>[H]</span>
+            nanocodex
           </a>
           <div className="header-center" ref={headerCenterRef}>
             <nav className="surface-switch" aria-label="Product navigation">
               <a
+                className={surface === "agent" ? "is-active" : ""}
+                href={threadSurfacePath("agent")}
+                aria-current={surface === "agent" ? "page" : undefined}
+                onFocus={() => preloadSurface("agent")}
+                onPointerEnter={() => preloadSurface("agent")}
+                onClick={(event) => handleSurfaceClick(event, "agent")}
+              >
+                agent
+              </a>
+              <a
+                className={surface === "docs" ? "is-active" : ""}
+                href="/docs"
+                aria-current={surface === "docs" ? "page" : undefined}
+                onFocus={() => preloadSurface("docs")}
+                onPointerEnter={() => preloadSurface("docs")}
+                onClick={(event) => handleSurfaceClick(event, "docs")}
+              >
+                docs
+              </a>
+              <a
                 className={surface === "code" ? "is-active" : ""}
                 href={threadSurfacePath("code")}
-                onClick={(event) => {
-                  event.preventDefault();
-                  navigateToSurface("code");
-                }}
+                aria-current={surface === "code" ? "page" : undefined}
+                onFocus={() => preloadSurface("code")}
+                onPointerEnter={() => preloadSurface("code")}
+                onClick={(event) => handleSurfaceClick(event, "code")}
               >
-                Code <span>[T]</span>
+                code
               </a>
               <a
                 className={surface === "commits" ? "is-active" : ""}
                 href={threadSurfacePath("commits")}
-                onClick={(event) => {
-                  event.preventDefault();
-                  navigateToSurface("commits");
-                }}
+                aria-current={surface === "commits" ? "page" : undefined}
+                onFocus={() => preloadSurface("commits")}
+                onPointerEnter={() => preloadSurface("commits")}
+                onClick={(event) => handleSurfaceClick(event, "commits")}
               >
-                Commits <span>[C]</span>
-              </a>
-              <a
-                className={surface === "requests" ? "is-active" : ""}
-                href={threadSurfacePath("requests")}
-                onClick={(event) => {
-                  event.preventDefault();
-                  navigateToSurface("requests");
-                }}
-              >
-                Requests <span>[R]</span>
+                commits
               </a>
               <a
                 className={surface === "evals" ? "is-active" : ""}
                 href={threadSurfacePath("evals")}
-                onFocus={preloadEvalOverview}
-                onPointerEnter={preloadEvalOverview}
-                onClick={(event) => {
-                  event.preventDefault();
-                  navigateToSurface("evals");
-                }}
+                aria-current={surface === "evals" ? "page" : undefined}
+                onFocus={() => preloadSurface("evals")}
+                onPointerEnter={() => preloadSurface("evals")}
+                onClick={(event) => handleSurfaceClick(event, "evals")}
               >
-                Evals <span>[E]</span>
+                evals
               </a>
               <a
-                className={surface === "docs" ? "docs-nav is-active" : "docs-nav"}
-                href="/docs"
-                onClick={(event) => {
-                  event.preventDefault();
-                  navigateToSurface("docs");
-                }}
+                className={surface === "requests" ? "nav-optional is-active" : "nav-optional"}
+                href={threadSurfacePath("requests")}
+                aria-current={surface === "requests" ? "page" : undefined}
+                onClick={(event) => handleSurfaceClick(event, "requests")}
               >
-                Docs <span>[D]</span>
+                requests
               </a>
             </nav>
           </div>
           <nav className="header-actions" aria-label="Site actions">
+            <a
+              className="header-source"
+              href="https://github.com/gakonst/nanocodex"
+              target="_blank"
+              rel="noreferrer"
+            >
+              source <ArrowUpRight aria-hidden="true" />
+            </a>
             <button
               className="text-action"
               type="button"
@@ -560,35 +691,45 @@ function NanocodexShell() {
                 setTheme((current) => (current === "light" ? "dark" : "light"))
               }
               aria-label={`Use ${theme === "light" ? "dark" : "light"} theme`}
+              title={`Use ${theme === "light" ? "dark" : "light"} theme`}
             >
               {theme === "light" ? (
                 <Moon aria-hidden="true" />
               ) : (
                 <Sun aria-hidden="true" />
               )}
-              <span>Theme</span>
-              <span className="keycap">[M]</span>
-            </button>
-            <button
-              className="button button--medium header-propose"
-              type="button"
-              onClick={() => {
-                setProposalState("ready");
-                setProposalOpen(true);
-              }}
-            >
-              Propose <span>[P]</span>
             </button>
           </nav>
         </header>
 
         <main id="top">
-          {surface === "home" ? (
+          {surface === "home" ||
+          surface === "agent" ||
+          agentExperienceMounted ? (
             <Suspense fallback={null}>
             <HomeFrame>
-            <section className="home-page" aria-labelledby="home-title">
+            <section
+              className={
+                surface === "home"
+                  ? "home-page is-home"
+                  : surface === "agent"
+                    ? "home-page is-agent"
+                    : "home-page is-stashed"
+              }
+              hidden={surface !== "home" && surface !== "agent"}
+              inert={surface !== "home" && surface !== "agent" ? true : undefined}
+              aria-hidden={surface !== "home" && surface !== "agent"}
+              aria-labelledby={surface === "agent" ? "agent-page-title" : "home-title"}
+            >
               <article className="home-article">
-                <header className="home-intro">
+                <h1
+                  className="sr-only"
+                  id="agent-page-title"
+                  hidden={surface !== "agent"}
+                >
+                  Nanocodex browser agent
+                </h1>
+                <header className="home-intro" hidden={surface === "agent"}>
                   <p className="eyebrow home-eyebrow">Library-first agent runtime</p>
                   <h1 id="home-title">The coding agent is the library.</h1>
                   <p className="home-deck">
@@ -620,17 +761,50 @@ function NanocodexShell() {
                 <section className="home-demo" id="agent-demo" aria-labelledby="agent-demo-title">
                   <header className="home-demo-head">
                     <div>
-                      <p className="rail-label">Live browser consumer</p>
-                      <h2 id="agent-demo-title">The same agent runs here.</h2>
+                      <p className="rail-label">
+                        {surface === "agent" ? "Full browser agent" : "Live browser consumer"}
+                      </p>
+                      <h2 id="agent-demo-title">
+                        {surface === "agent" ? "The entire retained workspace." : "The same agent runs here."}
+                      </h2>
                     </div>
-                    <p>Browser WASM · retained session · caller-owned interface</p>
+                    <div className="home-demo-meta">
+                      <p>
+                        {surface === "agent"
+                          ? "Browser WASM · OPFS · shell · Git · Python · caller-owned interface"
+                          : "Browser WASM · retained session · caller-owned interface"}
+                      </p>
+                      <button
+                        className="home-demo-expand"
+                        type="button"
+                        aria-label={surface === "agent" ? "Return to homepage terminal" : "Open full-screen agent"}
+                        title={surface === "agent" ? "Return to homepage terminal" : "Open full-screen agent"}
+                        onClick={surface === "agent" ? collapseAgent : () => navigateToSurface("agent")}
+                      >
+                        {surface === "agent" ? <Minimize2 aria-hidden="true" /> : <Maximize2 aria-hidden="true" />}
+                        <span>{surface === "agent" ? "collapse" : "expand"}</span>
+                      </button>
+                    </div>
                   </header>
                   <Suspense fallback={null}>
-                    <AgentTerminal theme={theme} />
+                    <AgentTerminal
+                      mode={
+                        surface === "agent"
+                          ? "full"
+                          : surface === "home"
+                            ? "preview"
+                            : "hidden"
+                      }
+                      theme={theme}
+                    />
                   </Suspense>
                 </section>
 
-                <section className="home-summary" aria-label="What Nanocodex is">
+                <section
+                  className="home-summary"
+                  aria-label="What Nanocodex is"
+                  hidden={surface === "agent"}
+                >
                   <p>
                     Nanocodex is a headless Rust agents SDK. It owns the coding
                     loop—sessions, typed history, tools, retries, branches,
@@ -655,35 +829,43 @@ function NanocodexShell() {
                     skills, authorization, durable index, and memory system.
                   </p>
                   <nav className="home-links" aria-label="Nanocodex links">
-                    <a href="/docs">docs</a>
-                    <a href="/docs/sdks/javascript">JavaScript</a>
-                    <a href="/docs/sdks/python">Python</a>
-                    <a href="/docs/examples/tact">Tact case study</a>
+                    <a href="/docs" onFocus={() => preloadSurface("docs")} onPointerEnter={() => preloadSurface("docs")} onClick={(event) => handlePathClick(event, "/docs")}>docs</a>
+                    <a href="/docs/sdks/javascript" onFocus={() => preloadSurface("docs")} onPointerEnter={() => preloadSurface("docs")} onClick={(event) => handlePathClick(event, "/docs/sdks/javascript")}>JavaScript</a>
+                    <a href="/docs/sdks/python" onFocus={() => preloadSurface("docs")} onPointerEnter={() => preloadSurface("docs")} onClick={(event) => handlePathClick(event, "/docs/sdks/python")}>Python</a>
+                    <a href="/docs/examples/tact" onFocus={() => preloadSurface("docs")} onPointerEnter={() => preloadSurface("docs")} onClick={(event) => handlePathClick(event, "/docs/examples/tact")}>Tact case study</a>
                     <a href="https://github.com/gakonst/nanocodex" target="_blank" rel="noreferrer">source</a>
                   </nav>
                 </section>
 
-                <nav className="home-surfaces" aria-label="Explore Nanocodex product surfaces">
-                  <a href={threadSurfacePath("code")} onClick={(event) => { event.preventDefault(); navigateToSurface("code"); }}>
+                <nav
+                  className="home-surfaces"
+                  aria-label="Explore Nanocodex product surfaces"
+                  hidden={surface === "agent"}
+                >
+                  <a href={threadSurfacePath("code")} onFocus={() => preloadSurface("code")} onPointerEnter={() => preloadSurface("code")} onClick={(event) => handleSurfaceClick(event, "code")}>
                     <small>01 · source</small><strong>Code</strong>
                     <span>Browse the actual SDK, bindings, adapters, and examples powering this page.</span>
                     <em>Inspect the library →</em>
                   </a>
-                  <a href={threadSurfacePath("commits")} onClick={(event) => { event.preventDefault(); navigateToSurface("commits"); }}>
+                  <a href={threadSurfacePath("commits")} onFocus={() => preloadSurface("commits")} onPointerEnter={() => preloadSurface("commits")} onClick={(event) => handleSurfaceClick(event, "commits")}>
                     <small>02 · evolution</small><strong>Commits</strong>
                     <span>Read the implementation as a continuous rendered diff, not a marketing changelog.</span>
                     <em>Follow every change →</em>
                   </a>
-                  <a href={threadSurfacePath("evals")} onFocus={preloadEvalOverview} onPointerEnter={preloadEvalOverview} onClick={(event) => { event.preventDefault(); navigateToSurface("evals"); }}>
+                  <a href={threadSurfacePath("evals")} onFocus={() => preloadSurface("evals")} onPointerEnter={() => preloadSurface("evals")} onClick={(event) => handleSurfaceClick(event, "evals")}>
                     <small>03 · evidence</small><strong>Evals</strong>
                     <span>Inspect retained worksets, frontier charts, trajectories, usage, and verifier output.</span>
                     <em>Open the evidence →</em>
                   </a>
                 </nav>
 
-                <div className="home-divider" aria-hidden="true" />
+                <div className="home-divider" aria-hidden="true" hidden={surface === "agent"} />
 
-                <section className="home-facts" aria-label="Nanocodex capabilities">
+                <section
+                  className="home-facts"
+                  aria-label="Nanocodex capabilities"
+                  hidden={surface === "agent"}
+                >
                   <header className="home-section-head">
                     <div><p className="rail-label">Capability surface</p><h2>Small core. Serious range.</h2></div>
                   </header>
@@ -708,18 +890,22 @@ function NanocodexShell() {
                     <p>Memory is explicit product policy, not hidden context injection. Tact demonstrates versioned keys, scan-before-put behavior, and root-write/child-read authority.</p>
                   </article>
                   <article>
-                    <h2>Verifier-backed evals</h2>
-                    <p>39/39 latency gates, 0.267 ms median local overhead, and a retained 13/20 Terminal-Bench slice—with trajectories, verifier output, usage, and artifacts.</p>
-                    <a href={threadSurfacePath("evals")} onFocus={preloadEvalOverview} onPointerEnter={preloadEvalOverview} onClick={(event) => { event.preventDefault(); navigateToSurface("evals"); }}>inspect live evals</a>
+                    <h2>Measured performance + evals</h2>
+                    <p>Performance evidence: 39/39 pinned latency gates and 0.267 ms median local overhead in a paired 70-turn workload. Eval evidence: a historical four-task Terminal-Bench slice scored 13/20, with trajectories and verifier output retained.</p>
+                    <a href={threadSurfacePath("evals")} onFocus={() => preloadSurface("evals")} onPointerEnter={() => preloadSurface("evals")} onClick={(event) => handleSurfaceClick(event, "evals")}>inspect live evals</a>
                   </article>
                 </section>
 
-                <section className="home-start" aria-label="Install Nanocodex">
+                <section
+                  className="home-start"
+                  aria-label="Install Nanocodex"
+                  hidden={surface === "agent"}
+                >
+                  <p className="rail-label">Published core bindings</p>
                   <code>$ cargo add nanocodex</code>
                   <code>$ npm install nanocodex</code>
-                  <code>$ npm install nanocodex-terminal @xterm/xterm</code>
                   <nav>
-                    <a href="/docs/getting-started">get started</a>
+                    <a href="/docs/getting-started" onFocus={() => preloadSurface("docs")} onPointerEnter={() => preloadSurface("docs")} onClick={(event) => handlePathClick(event, "/docs/getting-started")}>get started</a>
                     <a href="https://github.com/gakonst/nanocodex/tree/master/examples/vercel-workflows" target="_blank" rel="noreferrer">wterm example</a>
                     <a href="https://github.com/gakonst/nanocodex/releases/latest" target="_blank" rel="noreferrer">releases</a>
                   </nav>
@@ -728,7 +914,9 @@ function NanocodexShell() {
             </section>
             </HomeFrame>
             </Suspense>
-          ) : surface === "docs" ? (
+          ) : null}
+
+          {surface === "home" || surface === "agent" ? null : surface === "docs" ? (
             <Suspense fallback={null}>
               <Docs />
             </Suspense>

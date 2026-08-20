@@ -53,8 +53,9 @@ UI protocol every embedding must adopt.
 ## Install
 
 Choose the host language; each path runs the Rust-owned agent lifecycle. The
-Rust and JavaScript packages are registry releases. The Python binding is
-currently built from the repository checkout.
+Rust crates and core JavaScript `nanocodex` binding are registry releases. The
+Python binding and JavaScript companion packages under `js/` are currently
+built from the repository checkout.
 
 ```sh
 # Rust
@@ -188,9 +189,10 @@ compare-and-append. Rust owns the journal format and every recovery decision.
 
 The layer implements the agent's neutral execution-policy seam; the core agent
 does not depend on it. Lower-level consumers can use `DurableSession` directly
-with caller-owned operation, step, checkpoint, and output types. Read the
-[durability guide](crates/nanocodex-durability/README.md) or the
-[API documentation](https://docs.rs/nanocodex-durability).
+with caller-owned operation, step, checkpoint, and output types. It currently
+ships from repository source; read the
+[durability guide](crates/nanocodex-durability/README.md) and pin a Git revision
+when adopting it outside this workspace.
 
 ### Tools, Code Mode, and MCP
 
@@ -271,8 +273,11 @@ without requiring the host to declare a DAG. The executable examples are
 
 ## JavaScript: Node, browser, and WASM
 
-The `nanocodex` npm package exposes viem-style `Agent`, `Actions`, and
-`Transport` namespaces for Node and browser hosts. The Rust/WASM engine still
+The repository's `nanocodex` package exposes viem-style `Agent`, `Actions`, and
+`Transport` namespaces for Node and browser hosts. The current registry release
+contains the core root, Node, browser, and WASM entrypoints; newer browser-tool
+and subagent exports shown below currently require a pinned checkout. The
+Rust/WASM engine still
 owns prompt ordering, history, tool calls, branching, snapshots, and cleanup;
 JavaScript owns WebSocket creation, credentials, UI, persistence, and ordinary
 application tools.
@@ -382,6 +387,11 @@ terminal emulator authoritative. Choose the highest-level consumer that helps:
   renderer with streaming, steering, queues, branches, and image paste; or
 - raw typed events can feed wterm, xterm.js, Ink, a design-system transcript,
   persistence, or telemetry directly.
+
+The React, artifacts, TUI, and terminal companion packages currently ship from
+this repository workspace rather than as independent npm releases. Their APIs
+and runnable examples are source-level integration surfaces until they are
+added to the release pipeline.
 
 The adapter owns ANSI presentation, line editing, prompt history, steering,
 cancellation, and terminal subscriptions. Your application still owns the
@@ -615,12 +625,12 @@ tracing, and benchmark gates; stable crates never depend on them.
 | --- | --- | --- |
 | [`nanocodex`](crates/nanocodex/README.md) | Stable, published | Thin Alloy-style facade and canonical imports; no runtime implementation. |
 | [`nanocodex-agent`](crates/nanocodex-agent/README.md) | Stable, published | Owned driver, turns/results/events, history policy, snapshots, compaction, branches, and cancellation. |
-| [`nanocodex-durability`](crates/nanocodex-durability/README.md) | Stable, published, optional | Append-only execution journal, deduplication, replay and recovery policy, checkpoints, and memory/SQLite/Postgres/host stores. |
+| [`nanocodex-durability`](crates/nanocodex-durability/README.md) | Stable, source/Git-only, optional | Append-only execution journal, deduplication, replay and recovery policy, checkpoints, and memory/SQLite/Postgres/host stores. |
 | [`nanocodex-oai-api`](crates/nanocodex-oai-api/README.md) | Stable, published | OpenAI auth, typed Responses and Realtime boundaries, persistent transports, managed context, retry, pricing, and Tower client. |
 | [`nanocodex-tools`](crates/nanocodex-tools/README.md) | Stable, published | Tool contract, standard tools, shell/process lifecycle, Code Mode, deferred search, MCP, and remote dispatch. |
-| [`nanocodex-subagents`](crates/nanocodex-subagents/README.md) | Optional workspace extension | Task-tree lifecycle and the seven canonical child-agent tools above the core. |
+| [`nanocodex-subagents`](crates/nanocodex-subagents/README.md) | Source/Git-only optional workspace extension | Task-tree lifecycle and the seven canonical child-agent tools above the core. |
 | [`nanocodex-observability`](crates/nanocodex-observability/README.md) | Stable, published, optional | Full-fidelity tracing and application-owned OpenTelemetry initialization. |
-| [`nanocodex` for JavaScript](js/bindings/README.md) | Published language binding | Node/browser hosts around the Rust/WASM agent, plus React, artifacts, and TUI packages under [`js/`](js/README.md). |
+| [`nanocodex` for JavaScript](js/bindings/README.md) | Published core binding; source-only companions | Node/browser hosts around the Rust/WASM agent, plus React, artifacts, TUI, and terminal packages under [`js/`](js/README.md). |
 | [`nanocodex` for Python](py/bindings/README.md) | Source-distributed language binding | Native PyO3 consumer of the Rust-owned lifecycle, built and tested with Maturin. |
 | [`nanocodex-browser`](crates/experimental/nanocodex-browser/README.md) | Experimental, unpublished | Deterministic Chromium control and optional headed browser VM. |
 | [`nanocodex-vm`](crates/experimental/nanocodex-vm/README.md) | Experimental, unpublished | libkrun images, retained/ephemeral guests, and canonical VM-backed workspace tools. |

@@ -39,9 +39,10 @@ namespaces. Nested calls can run concurrently with `Promise.all`; the host
 retains ordering, notifications, cancellation, and tool observations.
 
 Use `ToolExposure::DirectAndCodeMode` when the model should see tools both
-directly and inside cells. Per-tool exposure can be direct, Code Mode, both,
-hidden, or deferred. Exposure changes model-visible declarations, not registry
-dispatch.
+directly and inside cells. Ordinary per-tool exposure has four modes: Code Mode
+only, direct and Code Mode, direct only, or hidden. Exposure changes
+model-visible declarations, not registry dispatch. Deferred discovery is a
+separate provider policy used by MCP and other dynamic catalogs.
 
 Native Code Mode uses the owned runtime. Browser and other JavaScript hosts use
 the portable `hosted::CodeModeHost` boundary while preserving the same nested

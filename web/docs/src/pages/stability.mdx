@@ -11,7 +11,7 @@ in the repository.
 
 ## Supported library surface
 
-The published foundation is:
+The supported foundation is:
 
 - `nanocodex`, the thin Alloy-style facade;
 - `nanocodex-agent`, the owned session, events, results, snapshots, and branches;
@@ -23,10 +23,15 @@ The published foundation is:
 - the optional `nanocodex-observability` integration; and
 - the optional `nanocodex-subagents` task-tree extension.
 
-The Node/browser WASM package, Python/PyO3 package, React store/hooks, and TUI
-packages are promoted thin consumers of that lifecycle. Their language-specific
-ergonomics can evolve, but they must not reshape the underlying session
-contract. See the [component map](https://github.com/gakonst/nanocodex/blob/master/README.md#components)
+The facade, agent, OpenAI, tools, macros, and observability crates are registry
+releases. Durability and subagents currently ship from repository source; pin a
+Git revision when using either outside this workspace.
+
+The published Node/browser WASM package and the source-distributed Python/PyO3,
+React, artifacts, TUI, and terminal packages are promoted thin consumers of
+that lifecycle. Their language-specific ergonomics can evolve, but they must
+not reshape the underlying session contract. See the
+[component map](https://github.com/gakonst/nanocodex/blob/master/README.md#components)
 and [executable crate-boundary check](https://github.com/gakonst/nanocodex/blob/master/scripts/check-crate-boundaries.sh).
 
 ## Experimental and opt-in

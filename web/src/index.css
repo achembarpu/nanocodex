@@ -33,7 +33,7 @@
   --on-positive: var(--white);
   --on-negative: var(--white);
   --on-accent: var(--black);
-  --header-height: 52px;
+  --header-height: 64px;
   --shell-header-height: var(--header-height);
   --page-margin: 36px;
   --gutter: 36px;
@@ -66,6 +66,10 @@ html[data-theme="dark"] {
 
 * {
   box-sizing: border-box;
+}
+
+[hidden] {
+  display: none !important;
 }
 
 html {
@@ -170,8 +174,8 @@ svg {
 }
 
 .page-grid {
-  width: min(calc(100% - (var(--page-margin) * 2)), var(--wide-max));
-  margin-inline: auto;
+  width: 100%;
+  padding-inline: var(--page-margin);
 }
 
 .site-header {
@@ -179,57 +183,65 @@ svg {
   z-index: 30;
   top: 0;
   display: grid;
-  grid-template-columns: 1fr auto 1fr;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  gap: 36px;
   flex: 0 0 var(--header-height);
   align-items: center;
   height: var(--header-height);
-  padding-inline: max(var(--page-margin), calc((100vw - var(--wide-max)) / 2));
-  background: color-mix(in srgb, var(--surface) 94%, transparent);
+  padding-inline: var(--page-margin);
+  background: var(--surface);
   border-bottom: 1px solid var(--border-soft);
   backdrop-filter: none;
 }
 
 .wordmark {
   display: flex;
-  gap: 7px;
-  align-items: baseline;
+  align-items: center;
   justify-self: start;
   font-family: var(--font-display);
-  font-size: 20px;
+  font-size: 19px;
   letter-spacing: -0.04em;
 }
 
-.wordmark span {
-  color: var(--text-muted);
-  font-family: var(--font-mono);
-  font-size: 9px;
-  letter-spacing: 0;
+.wordmark::after {
+  width: 4px;
+  height: 4px;
+  margin-left: 7px;
+  background: var(--blue);
+  border-radius: 50%;
+  content: "";
+  opacity: 0;
+}
+
+.wordmark:hover::after,
+.wordmark:focus-visible::after,
+.wordmark.is-active::after {
+  opacity: 1;
 }
 
 .header-center {
   display: flex;
   align-items: center;
-  justify-self: center;
+  min-width: 0;
+  justify-self: start;
 }
 
 .surface-switch {
   display: flex;
-  gap: 2px;
-  padding: 2px;
-  background: var(--surface-subtle);
-  border-radius: var(--radius-medium);
+  gap: clamp(16px, 2.2vw, 30px);
+  align-items: center;
 }
 
 .surface-switch a {
+  position: relative;
   display: flex;
-  gap: 6px;
   align-items: center;
-  height: 26px;
-  padding: 0 9px;
+  height: var(--header-height);
+  padding: 0;
   color: var(--text-muted);
   background: transparent;
-  border-radius: calc(var(--radius-medium) - 2px);
   cursor: pointer;
+  font-size: 12px;
 }
 
 .surface-switch a:hover,
@@ -239,21 +251,43 @@ svg {
 }
 
 .surface-switch a.is-active {
-  background: var(--surface-raised);
-  box-shadow: inset 0 0 0 1px var(--border-soft);
-  font-weight: 600;
+  font-weight: 500;
 }
 
-.surface-switch a span {
-  color: var(--text-muted);
-  font-size: 9px;
+.surface-switch a.is-active::after {
+  position: absolute;
+  right: 0;
+  bottom: -1px;
+  left: 0;
+  height: 1px;
+  background: currentColor;
+  content: "";
 }
 
 .header-actions {
   display: flex;
-  gap: 8px;
+  gap: 18px;
   align-items: center;
   justify-self: end;
+}
+
+.header-source {
+  display: inline-flex;
+  gap: 5px;
+  align-items: center;
+  min-height: 44px;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.header-source:hover,
+.header-source:focus-visible {
+  color: var(--text);
+}
+
+.header-source svg {
+  width: 11px;
+  height: 11px;
 }
 
 .text-action,
@@ -266,8 +300,10 @@ svg {
   display: inline-flex;
   gap: 6px;
   align-items: center;
-  height: 30px;
-  padding: 0 8px;
+  width: 34px;
+  height: 34px;
+  justify-content: center;
+  padding: 0;
   background: transparent;
   border-radius: var(--radius-medium);
 }
@@ -2447,14 +2483,14 @@ html[data-theme="dark"] .tui-syntax .shiki span {
   :root {
     --page-margin: 16px;
     --gutter: 16px;
-    --mobile-header-height: calc(48px + env(safe-area-inset-top));
+    --mobile-header-height: calc(64px + env(safe-area-inset-top));
     --shell-header-height: var(--mobile-header-height);
   }
 
   .site-header {
     grid-template-columns: auto minmax(0, 1fr) auto;
-    grid-template-rows: 48px;
-    gap: 0 8px;
+    grid-template-rows: 64px;
+    gap: 0 10px;
     height: var(--mobile-header-height);
     flex-basis: var(--mobile-header-height);
     padding-top: env(safe-area-inset-top);
@@ -2467,7 +2503,7 @@ html[data-theme="dark"] .tui-syntax .shiki span {
     grid-row: 1;
     min-height: 44px;
     align-items: center;
-    font-size: 18px;
+    font-size: 17px;
   }
 
   .header-center {
@@ -2488,27 +2524,20 @@ html[data-theme="dark"] .tui-syntax .shiki span {
   .surface-switch {
     flex: 0 0 auto;
     min-width: max-content;
+    gap: 12px;
     padding: 0;
   }
 
   .surface-switch a {
     min-height: 44px;
-    padding-inline: 8px;
+    height: 64px;
+    padding: 0;
     font-size: 10px;
     white-space: nowrap;
   }
 
-  .surface-switch a span {
-    display: none;
-  }
-
-  .text-action > span:not(.keycap),
-  .text-action .keycap,
-  .header-propose span {
-    display: none;
-  }
-
-  .header-propose {
+  .surface-switch .nav-optional,
+  .header-source {
     display: none;
   }
 
@@ -2645,14 +2674,16 @@ html[data-theme="dark"] .tui-syntax .shiki span {
 
 /* Compact full-height workspaces for Code and Commits. */
 .surface-code,
-.surface-commits {
+.surface-commits,
+.surface-agent {
   height: 100dvh;
   min-height: 0;
   overflow: hidden;
 }
 
 .surface-code > main,
-.surface-commits > main {
+.surface-commits > main,
+.surface-agent > main {
   flex: 1 1 auto;
   min-height: 0;
   overflow: hidden;
@@ -2661,10 +2692,9 @@ html[data-theme="dark"] .tui-syntax .shiki span {
 .code-workspace,
 .commits-workspace {
   display: grid;
-  width: min(100%, var(--wide-max));
+  width: 100%;
   height: 100%;
   min-height: 0;
-  margin-inline: auto;
   overflow: hidden;
 }
 
@@ -3500,23 +3530,17 @@ html[data-theme="dark"] .tui-syntax .shiki span {
 
 @media (max-width: 420px) {
   .site-header {
-    gap: 0 6px;
+    gap: 0 8px;
     padding-right: max(12px, env(safe-area-inset-right));
     padding-left: max(12px, env(safe-area-inset-left));
   }
 
   .wordmark {
-    gap: 5px;
-    font-size: 17px;
+    font-size: 16px;
   }
 
-  .wordmark span {
-    font-size: 8px;
-  }
-
-  .surface-switch a {
-    padding-inline: 6px;
-    font-size: 9px;
+  .surface-switch {
+    gap: 10px;
   }
 
 }

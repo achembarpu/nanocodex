@@ -77,6 +77,8 @@ test("published repository surfaces load the public snapshot and commit index", 
   assert.deepEqual(snapshot.commits, [commit]);
   assert.equal(snapshot.commitPatchUrl(commit), `/api/repository/commit/${head}.patch`);
   assert.equal(await snapshot.readFile(snapshot.tree[0]), "# Nanocodex\n");
+  assert.equal(await snapshot.readFile(snapshot.tree[0]), "# Nanocodex\n");
+  assert.equal(requests.filter((url) => url === document.tree[0].contentUrl).length, 1);
 });
 
 test("the Code surface does not fetch commit history", async () => {

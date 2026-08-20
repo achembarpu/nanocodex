@@ -5,8 +5,9 @@ import test from "node:test";
 const css = readFileSync(new URL("../src/evals.css", import.meta.url), "utf8");
 const analytics = readFileSync(new URL("../src/EvalAnalytics.tsx", import.meta.url), "utf8");
 
-test("the eval shell shares the centered wide layout and resolved header height", () => {
-  assert.match(css, /width:\s*min\(calc\(100% - \(var\(--page-margin\) \* 2\)\), var\(--wide-max\)\)/);
+test("the eval shell uses the full-width layout and resolved header height", () => {
+  assert.match(css, /\.live-evals \{[^}]*width:\s*100%/);
+  assert.doesNotMatch(css, /\.live-evals \{[^}]*width:\s*min\(/);
   assert.match(css, /100svh - var\(--shell-header-height\)/);
 });
 

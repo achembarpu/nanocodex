@@ -10,8 +10,9 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { useLocation } from "react-router";
+import { Link, useLocation } from "react-router";
 import { parseDocument, type MarkdownBlock } from "./docsMarkdown";
+import { highlightDocsCode } from "./docsSyntax";
 import "./Docs.css";
 
 const sources = import.meta.glob("../docs/src/pages/**/*.mdx", {
@@ -88,7 +89,7 @@ export function Docs() {
     setCopied(false);
     window.requestAnimationFrame(() => {
       const target = location.hash
-        ? window.document.getElementById(decodeURIComponent(location.hash.slice(1)))
+        ? window.document.getElementById(decodeHash(location.hash))
         : null;
       if (target) target.scrollIntoView();
       else window.scrollTo({ top: 0 });
@@ -145,7 +146,7 @@ export function Docs() {
       <section className="docs-not-found">
         <p className="eyebrow">Nanocodex docs</p>
         <h1>That page is not in the manual.</h1>
-        <a href="/docs">Browse the documentation</a>
+        <Link to="/docs">Browse the documentation</Link>
       </section>
     );
   }
@@ -193,16 +194,16 @@ export function Docs() {
           </article>
           <nav className="docs-pagination" aria-label="Adjacent documentation pages">
             {previous ? (
-              <a href={previous[1]}>
+              <Link to={previous[1]}>
                 <ChevronLeft aria-hidden="true" />
                 <span><small>Previous</small>{previous[0]}</span>
-              </a>
+              </Link>
             ) : <span />}
             {next ? (
-              <a href={next[1]}>
+              <Link to={next[1]}>
                 <span><small>Next</small>{next[0]}</span>
                 <ChevronRight aria-hidden="true" />
-              </a>
+              </Link>
             ) : null}
           </nav>
         </div>
@@ -210,7 +211,7 @@ export function Docs() {
         <aside className="docs-on-this-page" aria-label="On this page">
           <p>On this page</p>
           {headings.map((heading) => (
-            <a href={`#${heading.id}`} key={heading.id}>{stripMarkdown(heading.text)}</a>
+            <Link to={`#${heading.id}`} key={heading.id}>{stripMarkdown(heading.text)}</Link>
           ))}
         </aside>
       </div>
@@ -237,7 +238,7 @@ export function Docs() {
                 <X aria-hidden="true" />
               </button>
             </header>
-            <DocsNavigation path={path} />
+            <DocsNavigation path={path} onNavigate={() => setBrowseOpen(false)} />
           </div>
         </div>
       ) : null}
@@ -245,16 +246,21 @@ export function Docs() {
   );
 }
 
-function DocsNavigation({ path }: { path: string }) {
+function DocsNavigation({ path, onNavigate }: { path: string; onNavigate?(): void }) {
   return (
     <nav aria-label="Documentation">
       {navGroups.map((group) => (
         <section key={group.label}>
           <p>{group.label}</p>
           {group.pages.map(([label, href]) => (
-            <a href={href} aria-current={href === path ? "page" : undefined} key={href}>
+            <Link
+              to={href}
+              aria-current={href === path ? "page" : undefined}
+              key={href}
+              onClick={onNavigate}
+            >
               {label}
-            </a>
+            </Link>
           ))}
         </section>
       ))}
@@ -276,7 +282,7 @@ function MarkdownBlockView({ block }: { block: MarkdownBlock }) {
     return createElement(
       `h${block.depth}`,
       { id: block.id },
-      block.depth > 1 ? <a href={`#${block.id}`}>{inline(block.text)}</a> : inline(block.text),
+      block.depth > 1 ? <Link to={`#${block.id}`}>{inline(block.text)}</Link> : inline(block.text),
     );
   }
   if (block.type === "paragraph") return <p>{inline(block.text)}</p>;
@@ -316,7 +322,7 @@ function CodeBlock({ code, language }: { code: string; language: string }) {
       >
         {copied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
       </button>
-      <pre tabIndex={0}><code>{code}</code></pre>
+      <pre tabIndex={0}><code>{highlightDocsCode(code, language)}</code></pre>
     </div>
   );
 }
@@ -332,16 +338,18 @@ function inline(value: string): ReactNode[] {
     const link = token.match(/^\[([^\]]+)\]\(([^)]+)\)$/);
     if (link) {
       const href = docsHref(link[2]);
-      nodes.push(
+      nodes.push(isInternalHref(href) ? (
+        <Link to={href} key={`${start}-${href}`}>{link[1]}</Link>
+      ) : (
         <a
           href={href}
-          target={/^https?:/.test(href) ? "_blank" : undefined}
-          rel={/^https?:/.test(href) ? "noreferrer" : undefined}
+          target={/^https?:\/\//i.test(href) ? "_blank" : undefined}
+          rel={/^https?:\/\//i.test(href) ? "noreferrer" : undefined}
           key={`${start}-${href}`}
         >
           {link[1]}
-        </a>,
-      );
+        </a>
+      ));
     } else if (token.startsWith("`")) {
       nodes.push(<code key={start}>{token.slice(1, -1)}</code>);
     } else {
@@ -363,9 +371,30 @@ function normalizePath(pathname: string) {
   return path || "/docs";
 }
 
+function decodeHash(hash: string) {
+  try {
+    return decodeURIComponent(hash.slice(1));
+  } catch {
+    return hash.slice(1);
+  }
+}
+
 function docsHref(href: string) {
-  if (!href.startsWith("/") || href.startsWith("/docs")) return href;
+  if (
+    href.startsWith("#") ||
+    href.startsWith("/docs") ||
+    isExternalHref(href) ||
+    !href.startsWith("/")
+  ) return href;
   return `/docs${href}`;
+}
+
+function isInternalHref(href: string) {
+  return !isExternalHref(href) && (href.startsWith("/") || href.startsWith("#"));
+}
+
+function isExternalHref(href: string) {
+  return /^(?:[a-z][a-z\d+.-]*:|\/\/)/i.test(href);
 }
 
 function stripMarkdown(value: string) {

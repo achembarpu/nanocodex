@@ -21,14 +21,14 @@ test("terminal and application controls share the compact phone policy", () => {
   assert.match(auth, /min-height:\s*44px/);
   assert.match(shell, /100dvh/);
   assert.match(shell, /env\(safe-area-inset-bottom\)/);
-  assert.match(shell, /min-height:\s*420px/);
+  assert.match(shell, /min-height:\s*280px/);
 });
 
 test("the shared phone header stays in one compact row on every surface", () => {
   const phone = indexCss.indexOf("@media (max-width: 740px) {", indexCss.indexOf("@media (max-width: 1023px)"));
   const header = ruleBlock(indexCss, ".site-header {", phone);
   assert.match(header, /grid-template-columns:\s*auto minmax\(0, 1fr\) auto/);
-  assert.match(header, /grid-template-rows:\s*48px/);
+  assert.match(header, /grid-template-rows:\s*64px/);
   assert.match(header, /height:\s*var\(--mobile-header-height\)/);
   assert.doesNotMatch(indexCss, /\.surface-code \.header-actions/);
   assert.doesNotMatch(indexCss, /\.surface-commits \.header-actions/);
@@ -43,9 +43,12 @@ test("portrait commits still collapse to an in-viewport viewer column", () => {
 test("the phone home surface explains the live agent before mounting it", () => {
   const phone = terminalCss.lastIndexOf("@media (max-width: 740px) {");
   assert.ok(application.indexOf('id="home-title"') < application.indexOf('id="agent-demo"'));
-  assert.ok(application.indexOf('id="agent-demo-title"') < application.indexOf("<AgentTerminal theme={theme}"));
+  assert.ok(application.indexOf('id="agent-demo-title"') < application.indexOf("<AgentTerminal"));
   assert.ok(phone < 0, "the compact terminal policy is shared across phone orientations");
-  assert.match(application, /<AgentTerminal theme=\{theme\}/);
+  assert.match(application, /<AgentTerminal[\s\S]*?mode=\{[\s\S]*?"full"[\s\S]*?"preview"[\s\S]*?"hidden"[\s\S]*?theme=\{theme\}/);
+  assert.equal(matches(application, /<AgentTerminal\b/g), 1);
+  assert.match(application, /hidden=\{surface !== "home" && surface !== "agent"\}/);
+  assert.match(application, /inert=\{surface !== "home" && surface !== "agent" \? true : undefined\}/);
   assert.match(terminal, /<XtermSurface/);
   assert.match(terminal, /theme=\{theme\}/);
   assert.match(terminal, /instance\.current\.options\.theme = terminalTheme\(theme\)/);
@@ -68,6 +71,8 @@ test("terminal interaction is renderer-neutral and resize-driven", () => {
   assert.match(terminal, /new FitAddon\(\)/);
   assert.match(terminal, /encodeXtermKeyEvent/);
   assert.match(terminal, /new ResizeObserver\(\(\) => \{[\s\S]*?fit\.fit\(\)/);
+  assert.match(terminal, /if \(latest\.current\.mode === "full"\) terminal\.focus\(\)/);
+  assert.match(terminal, /if \(mode === "full"\) terminal\.focus\(\)/);
   assert.match(terminal, /aria-label", "Nanocodex terminal input"/);
   assert.match(terminal, /type: "terminalInput"/);
   assert.match(terminal, /type: "terminalResize"/);
@@ -146,4 +151,8 @@ function ruleBlock(css: string, selector: string, from: number): string {
   const open = css.indexOf("{", start);
   const close = css.indexOf("}", open);
   return css.slice(start, close + 1);
+}
+
+function matches(value: string, pattern: RegExp) {
+  return [...value.matchAll(pattern)].length;
 }
