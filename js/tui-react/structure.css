@@ -256,6 +256,14 @@
   padding-right: 9ch;
 }
 
+.agent-tui-mobile-actions {
+  display: contents;
+}
+
+.agent-tui-mobile-only {
+  display: none;
+}
+
 .agent-tui-voice {
   position: absolute;
   right: 0.6ch;
@@ -362,13 +370,26 @@
   }
 
   .agent-tui-composer:has(.agent-tui-voice) textarea {
-    padding-right: 52px;
+    padding-right: 1ch;
+  }
+
+  .agent-tui-mobile-actions {
+    display: flex;
+    gap: 6px;
+    justify-content: flex-end;
+  }
+
+  .agent-tui-mobile-actions button,
+  .agent-tui-mobile-only {
+    display: block;
+    min-width: 52px;
+    height: 44px;
+    padding: 0 10px;
   }
 
   .agent-tui-voice {
-    right: 4px;
-    bottom: 4px;
-    min-width: 44px;
+    position: static;
+    min-width: 72px !important;
     height: 44px;
   }
 

@@ -45,6 +45,12 @@ import {
   useNanocodex,
   useNanocodexMessage,
 } from "nanocodex-react";
+import {
+  BrowserVoiceSession,
+  CHATGPT_VOICES,
+  parseVoiceArgument,
+  type ChatGptVoice,
+} from "./browserVoice.js";
 import { SyntaxCode } from "./SyntaxCode.js";
 
 type Target = TuiTarget;
@@ -92,7 +98,7 @@ export type NanocodexVoiceOptions = {
   /** Opens the workspace used to build bounded Realtime startup context. */
   workspace(): Promise<Workspace>;
   /** Default ChatGPT output voice. */
-  defaultVoice?: import("./browserVoice.js").ChatGptVoice;
+  defaultVoice?: ChatGptVoice;
   /** Authenticated endpoint that creates one browser Realtime call. */
   callUrl?: string | URL;
   /** Optional authenticated sideband URL builder. */
@@ -187,7 +193,7 @@ export function NanocodexTui({
   const eventQueue = useRef<Array<{ target: Target; event: AgentEvent }>>([]);
   const animationFrame = useRef<number | undefined>(undefined);
   const transcriptControllers = useRef(new Map<string, TranscriptController>());
-  const voiceSession = useRef<import("./browserVoice.js").BrowserVoiceSession | undefined>(undefined);
+  const voiceSession = useRef<BrowserVoiceSession | undefined>(undefined);
   const voiceStarting = useRef(false);
   const voiceGeneration = useRef(0);
   const voiceLifecycleRequests = useRef(new Map<number, VoiceLifecycleRequest>());
@@ -410,84 +416,83 @@ export function NanocodexTui({
     if (!voiceOptions) return;
     if (voiceStarting.current) return;
     voiceStarting.current = true;
-    const generation = voiceGeneration.current;
-    void import("./browserVoice.js").then(({ BrowserVoiceSession, CHATGPT_VOICES, parseVoiceArgument }) => {
-      if (generation !== voiceGeneration.current) return;
-      const command = parseVoiceArgument(argument);
-      if (command.action === "list") {
-        voiceStarting.current = false;
-        setVoiceStatus(`ChatGPT voices (default ${voiceOptions.defaultVoice ?? "cove"}): ${CHATGPT_VOICES.join(", ")}`);
-        return;
-      }
-      if (command.action === "invalid") {
-        voiceStarting.current = false;
-        setVoiceStatus(`Voice: ${command.message}`);
-        return;
-      }
-      if (command.action === "stop" || (command.action === "toggle" && voiceSession.current)) {
-        voiceStarting.current = false;
-        const active = voiceSession.current;
-        voiceSession.current = undefined;
-        setVoiceActive(false);
-        void active?.close().catch((error) => {
-          setVoiceStatus(`Voice: ${error instanceof Error ? error.message : String(error)}`);
-        });
-        return;
-      }
-      if (voiceSession.current) {
-        voiceStarting.current = false;
-        setVoiceStatus("Voice is already active; use /voice off before changing it");
-        return;
-      }
-      const sessionId = sessionIdForTarget(tui, voiceTarget);
-      if (!sessionId || workerStatus !== "ready") {
-        voiceStarting.current = false;
-        setVoiceStatus("Voice is waiting for this branch session to become ready");
-        return;
-      }
-      const selectedVoice = command.action === "start"
-        ? command.voice
-        : voiceOptions.defaultVoice ?? "cove";
-      const next = new BrowserVoiceSession({
-        sessionId,
-        target: voiceTarget,
-        voice: selectedVoice,
-        callUrl: voiceOptions.callUrl,
-        sidebandUrl: voiceOptions.sidebandUrl,
-        workspace: voiceOptions.workspace,
-        async onStart() {
-          const context = await runVoiceLifecycle("start", voiceTarget);
-          if (!context) throw new Error("voice lifecycle start omitted the agent context");
-          return context;
-        },
-        async onStop() {
-          await runVoiceLifecycle("stop", voiceTarget);
-        },
-        onDelegation(delegation) {
-          dispatch({
-            type: "voicePrompt",
-            target: voiceTarget,
-            id: nextVoicePromptId.current++,
-            delegation,
-          });
-        },
-        onStatus: setVoiceStatus,
-        onTranscript(speaker, text) {
-          dispatch({ type: "voiceTranscript", target: voiceTarget, speaker, text });
-        },
-      });
-      voiceSession.current = next;
+    const command = parseVoiceArgument(argument);
+    if (command.action === "list") {
       voiceStarting.current = false;
-      setVoiceActive(true);
-      void next.start().catch(async (error) => {
-        if (voiceSession.current !== next) return;
-        await next.close().catch(() => {});
-        voiceSession.current = undefined;
-        setVoiceActive(false);
+      setVoiceStatus(`ChatGPT voices (default ${voiceOptions.defaultVoice ?? "cove"}): ${CHATGPT_VOICES.join(", ")}`);
+      return;
+    }
+    if (command.action === "invalid") {
+      voiceStarting.current = false;
+      setVoiceStatus(`Voice: ${command.message}`);
+      return;
+    }
+    if (command.action === "stop" || (command.action === "toggle" && voiceSession.current)) {
+      voiceStarting.current = false;
+      const active = voiceSession.current;
+      voiceSession.current = undefined;
+      setVoiceActive(false);
+      void active?.close().catch((error) => {
         setVoiceStatus(`Voice: ${error instanceof Error ? error.message : String(error)}`);
       });
-    }).catch((error) => {
+      return;
+    }
+    if (voiceSession.current) {
       voiceStarting.current = false;
+      setVoiceStatus("Voice is already active; use /voice off before changing it");
+      return;
+    }
+    const sessionId = sessionIdForTarget(tui, voiceTarget);
+    if (!sessionId || workerStatus !== "ready") {
+      voiceStarting.current = false;
+      setVoiceStatus("Voice is waiting for this branch session to become ready");
+      return;
+    }
+    const selectedVoice = command.action === "start"
+      ? command.voice
+      : voiceOptions.defaultVoice ?? "cove";
+    const next = new BrowserVoiceSession({
+      sessionId,
+      target: voiceTarget,
+      voice: selectedVoice,
+      callUrl: voiceOptions.callUrl,
+      sidebandUrl: voiceOptions.sidebandUrl,
+      workspace: voiceOptions.workspace,
+      async onStart() {
+        const context = await runVoiceLifecycle("start", voiceTarget);
+        if (!context) throw new Error("voice lifecycle start omitted the agent context");
+        return context;
+      },
+      async onStop() {
+        await runVoiceLifecycle("stop", voiceTarget);
+      },
+      onDelegation(delegation) {
+        dispatch({
+          type: "voicePrompt",
+          target: voiceTarget,
+          id: nextVoicePromptId.current++,
+          delegation,
+        });
+      },
+      onStatus: setVoiceStatus,
+      onTerminated(status) {
+        if (voiceSession.current !== next) return;
+        voiceSession.current = undefined;
+        voiceStarting.current = false;
+        setVoiceActive(false);
+        setVoiceStatus(status);
+      },
+      onTranscript(speaker, text) {
+        dispatch({ type: "voiceTranscript", target: voiceTarget, speaker, text });
+      },
+    });
+    voiceSession.current = next;
+    voiceStarting.current = false;
+    setVoiceActive(true);
+    void next.start().catch(async (error) => {
+      if (voiceSession.current !== next) return;
+      await next.close().catch(() => {});
+      voiceSession.current = undefined;
       setVoiceActive(false);
       setVoiceStatus(`Voice: ${error instanceof Error ? error.message : String(error)}`);
     });
@@ -946,7 +951,9 @@ export function NanocodexTui({
       }}
       onClick={(event) => {
         onClick?.(event);
-        if (!event.defaultPrevented) composerRef.current?.focus();
+        if (!event.defaultPrevented && !window.matchMedia("(pointer: coarse)").matches) {
+          composerRef.current?.focus();
+        }
       }}
     >
       <header className="agent-tui-header" data-nc-part="header">
@@ -1032,17 +1039,43 @@ export function NanocodexTui({
               rows={1}
               spellCheck={false}
             />
-            {voiceOptions ? (
+            <div className="agent-tui-mobile-actions">
+              {voiceOptions ? (
+                <button
+                  type="button"
+                  className="agent-tui-voice"
+                  disabled={!ready || stopped || !enabled}
+                  aria-label={voiceActive ? "Stop voice mode" : "Start voice mode"}
+                  aria-pressed={voiceActive}
+                  title={voiceActive ? "Stop voice mode (/voice off)" : "Start voice mode (/voice)"}
+                  onClick={() => controlVoice(undefined, target)}
+                >🎙 {voiceActive ? "Stop" : "Voice"}</button>
+              ) : null}
               <button
                 type="button"
-                className="agent-tui-voice"
+                className="agent-tui-mobile-only"
                 disabled={!ready || stopped || !enabled}
-                aria-label={voiceActive ? "Stop voice mode" : "Start voice mode"}
-                aria-pressed={voiceActive}
-                title={voiceActive ? "Stop voice mode (/voice off)" : "Start voice mode (/voice)"}
-                onClick={() => controlVoice(undefined, target)}
-              >🎙 {voiceActive ? "Stop" : "Voice"}</button>
-            ) : null}
+                aria-label="Insert a new line"
+                onClick={() => {
+                  updateDraft(`${draft}\n`);
+                  composerRef.current?.focus();
+                }}
+              >↵</button>
+              {conversation.running ? (
+                <button
+                  type="button"
+                  className="agent-tui-mobile-only"
+                  disabled={!ready || stopped || !enabled}
+                  onClick={cancelTurn}
+                >Stop</button>
+              ) : null}
+              <button
+                type="button"
+                className="agent-tui-mobile-only"
+                disabled={(!draft.trim() && !images.length) || !ready || stopped || !enabled}
+                onClick={() => submit("immediate")}
+              >{conversation.running ? "Steer" : "Send"}</button>
+            </div>
           </>
         )}
       </fieldset>

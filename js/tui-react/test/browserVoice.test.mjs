@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import {
   CHATGPT_VOICES,
+  BrowserVoiceSession,
   HandoffStream,
   parseVoiceArgument,
   preferredPhysicalInput,
@@ -34,7 +35,7 @@ test("replaces a virtual default input with the built-in microphone", () => {
   assert.equal(preferredPhysicalInput(devices, "USB microphone"), undefined);
 });
 
-test("retries blocked speaker playback from the next pointer gesture", async () => {
+test("retries blocked speaker playback from the next activating click", async () => {
   let attempts = 0;
   let resume;
   const statuses = [];
@@ -49,11 +50,11 @@ test("retries blocked speaker playback from the next pointer gesture", async () 
   };
   const gestures = {
     addEventListener(type, listener) {
-      assert.equal(type, "pointerdown");
+      assert.equal(type, "click");
       resume = listener;
     },
     removeEventListener(type, listener) {
-      assert.equal(type, "pointerdown");
+      assert.equal(type, "click");
       if (resume === listener) resume = undefined;
     },
   };
@@ -65,11 +66,46 @@ test("retries blocked speaker playback from the next pointer gesture", async () 
   assert.match(statuses.at(-1) ?? "", /tap once/);
   assert.equal(typeof resume, "function");
 
-  resume({ type: "pointerdown" });
+  resume({ type: "click" });
   await Promise.resolve();
   assert.equal(attempts, 2);
   playback.close();
   assert.equal(speaker.srcObject, null);
+});
+
+test("requests the microphone before waiting for the agent lifecycle", async () => {
+  const order = [];
+  let resolveLifecycle;
+  let stopped = 0;
+  const microphone = {
+    getAudioTracks: () => [],
+    getTracks: () => [{ stop: () => { stopped += 1; } }],
+  };
+  const session = new BrowserVoiceSession({
+    sessionId: "mobile-session",
+    target: { pane: "main", branchId: 0 },
+    voice: "cove",
+    captureMicrophone() {
+      order.push("microphone");
+      return Promise.resolve(microphone);
+    },
+    workspace: async () => ({ root: "/workspace", list: async () => [] }),
+    onStart() {
+      order.push("lifecycle");
+      return new Promise((resolve) => { resolveLifecycle = resolve; });
+    },
+    onStop: async () => {},
+    onDelegation() {},
+    onStatus() {},
+    onTranscript() {},
+  });
+
+  const starting = session.start();
+  assert.deepEqual(order, ["microphone", "lifecycle"]);
+  session.abort();
+  resolveLifecycle({ workspace: "/workspace", history: [] });
+  await starting;
+  assert.equal(stopped, 1);
 });
 
 test("builds bounded startup context from the main agent history and browser workspace", async () => {

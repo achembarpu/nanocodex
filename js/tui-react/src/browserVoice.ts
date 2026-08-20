@@ -31,11 +31,14 @@ export type BrowserVoiceOptions = {
   voice: ChatGptVoice;
   callUrl?: string | URL;
   sidebandUrl?(callId: string, sessionId: string): string | URL;
+  /** Acquires the microphone. Called synchronously from start() so mobile browsers retain the user gesture. */
+  captureMicrophone?(): Promise<MediaStream>;
   workspace(): Promise<Workspace>;
   onStart(): Promise<VoiceSessionContext>;
   onStop(): Promise<void>;
   onDelegation(delegation: BrowserVoiceDelegation): void;
   onStatus(status: string): void;
+  onTerminated?(status: string): void;
   onTranscript(speaker: "user" | "assistant", text: string): void;
 };
 
@@ -83,17 +86,17 @@ export class SpeakerPlayback {
       const resume: EventListener = () => {
         if (this.#resume !== resume) return;
         this.#resume = undefined;
-        this.#gestures.removeEventListener("pointerdown", resume, true);
+        this.#gestures.removeEventListener("click", resume, true);
         this.#play();
       };
       this.#resume = resume;
-      this.#gestures.addEventListener("pointerdown", resume, { capture: true, once: true });
+      this.#gestures.addEventListener("click", resume, { capture: true, once: true });
     });
   }
 
   #disarm(): void {
     if (!this.#resume) return;
-    this.#gestures.removeEventListener("pointerdown", this.#resume, true);
+    this.#gestures.removeEventListener("click", this.#resume, true);
     this.#resume = undefined;
   }
 }
@@ -134,33 +137,35 @@ export class BrowserVoiceSession {
   }
 
   async start(): Promise<void> {
+    if (!this.#options.captureMicrophone && !navigator.mediaDevices?.getUserMedia) {
+      throw new Error("this browser does not expose microphone capture");
+    }
+    const microphoneCapture = (
+      this.#options.captureMicrophone?.() ?? capturePreferredMicrophone()
+    ).then((microphone) => {
+      if (this.#closed) stopStream(microphone);
+      else this.#microphone = microphone;
+      return microphone;
+    });
     const lifecycleStart = this.#options.onStart();
     this.#lifecycleStart = lifecycleStart;
-    const context = await lifecycleStart;
+    const [context, microphone] = await Promise.all([lifecycleStart, microphoneCapture]);
     if (this.#closed) return;
     const workspace = await this.#options.workspace().catch(() => undefined);
     const startupContext = await browserVoiceStartupContext(context, workspace);
     if (this.#closed) return;
-    if (!navigator.mediaDevices?.getUserMedia) {
-      throw new Error("this browser does not expose microphone capture");
-    }
-    let microphone = await captureMicrophone({ audio: voiceAudioConstraints() });
-    const devices = await navigator.mediaDevices.enumerateDevices();
-    const initialTrack = microphone.getAudioTracks()[0];
-    const physicalInput = preferredPhysicalInput(devices, initialTrack?.label);
-    if (initialTrack && isVirtualAudioInput(initialTrack.label) && physicalInput) {
-      const physicalMicrophone = await captureMicrophone({
-        audio: { ...voiceAudioConstraints(), deviceId: { exact: physicalInput.deviceId } },
+    for (const track of microphone.getAudioTracks()) {
+      track.contentHint = "speech";
+      track.addEventListener("mute", () => {
+        if (!this.#closed) this.#options.onStatus("Voice paused — microphone interrupted");
       });
-      stopStream(microphone);
-      microphone = physicalMicrophone;
+      track.addEventListener("unmute", () => {
+        if (!this.#closed) this.#options.onStatus(`Voice active (${this.#options.voice})`);
+      });
+      track.addEventListener("ended", () => {
+        this.#terminate("Voice microphone ended — tap Voice to reconnect");
+      });
     }
-    if (this.#closed) {
-      stopStream(microphone);
-      return;
-    }
-    this.#microphone = microphone;
-    for (const track of microphone.getAudioTracks()) track.contentHint = "speech";
 
     const peer = new RTCPeerConnection();
     this.#peer = peer;
@@ -176,7 +181,7 @@ export class BrowserVoiceSession {
     });
     peer.addEventListener("connectionstatechange", () => {
       if (peer.connectionState === "failed" || peer.connectionState === "disconnected") {
-        this.#options.onStatus(`Voice ${peer.connectionState}`);
+        this.#terminate(`Voice ${peer.connectionState} — tap Voice to reconnect`);
       }
     });
 
@@ -218,11 +223,7 @@ export class BrowserVoiceSession {
     this.#sideband = sideband;
     sideband.addEventListener("message", (event) => this.#onRealtimeMessage(event.data));
     sideband.addEventListener("close", () => {
-      if (!this.#closed) {
-        void this.close().catch((error) => {
-          this.#options.onStatus(`Voice: ${error instanceof Error ? error.message : String(error)}`);
-        });
-      }
+      this.#terminate("Voice disconnected — tap Voice to reconnect");
     });
     await waitForWebSocket(sideband);
     if (!this.#closed) {
@@ -306,6 +307,16 @@ export class BrowserVoiceSession {
     this.#speaker?.close();
   }
 
+  #terminate(status: string): void {
+    if (this.#closed) return;
+    const closing = this.close();
+    this.#options.onStatus(status);
+    this.#options.onTerminated?.(status);
+    void closing.catch((error) => {
+      this.#options.onStatus(`Voice: ${error instanceof Error ? error.message : String(error)}`);
+    });
+  }
+
   async #finishLifecycle(tail: VoiceTranscriptEntry[]): Promise<void> {
     if (!this.#lifecycleStart) return;
     try {
@@ -330,10 +341,7 @@ export class BrowserVoiceSession {
     if (event.type === "error") {
       const error = asRecord(event.error);
       const status = typeof error?.message === "string" ? `Voice: ${error.message}` : "Voice failed";
-      void this.close().then(
-        () => this.#options.onStatus(status),
-        () => this.#options.onStatus(status),
-      );
+      this.#terminate(status);
       return;
     }
     if (event.type === "input_audio_buffer.speech_started" || event.type === "speech_started") {
@@ -619,6 +627,25 @@ async function captureMicrophone(constraints: MediaStreamConstraints): Promise<M
     }
     throw error;
   }
+}
+
+async function capturePreferredMicrophone(): Promise<MediaStream> {
+  let microphone = await captureMicrophone({ audio: voiceAudioConstraints() });
+  const devices = await navigator.mediaDevices.enumerateDevices().catch(() => []);
+  const initialTrack = microphone.getAudioTracks()[0];
+  const physicalInput = preferredPhysicalInput(devices, initialTrack?.label);
+  if (initialTrack && isVirtualAudioInput(initialTrack.label) && physicalInput) {
+    try {
+      const physicalMicrophone = await captureMicrophone({
+        audio: { ...voiceAudioConstraints(), deviceId: { exact: physicalInput.deviceId } },
+      });
+      stopStream(microphone);
+      microphone = physicalMicrophone;
+    } catch {
+      // The original capture remains usable; exact-device reselection is only a desktop convenience.
+    }
+  }
+  return microphone;
 }
 
 export function preferredPhysicalInput(

@@ -6,6 +6,8 @@ const indexCss = source("../src/index.css");
 const terminalCss = source("../src/AgentTerminal.css");
 const artifactDock = source("../src/ArtifactDock.tsx");
 const artifactRuntime = source("../src/artifactRuntime.tsx");
+const terminal = source("../src/AgentTerminal.tsx");
+const tui = source("../../js/tui-react/src/NanocodexTui.tsx");
 const tuiCss = source("../../js/tui-react/structure.css");
 const compactQuery = "(max-width: 740px), (pointer: coarse) and (orientation: landscape) and (max-width: 950px)";
 
@@ -30,8 +32,36 @@ test("compact workspace removes the phantom header offset and fixed height floor
   const shell = ruleBlock(terminalCss, ".agent-workspace-shell,", terminalCss.indexOf(`@media ${compactQuery}`));
   assert.match(nav, /top:\s*0/);
   assert.match(nav, /min-height:\s*44px/);
-  assert.match(shell, /height:\s*calc\(100dvh - 50px - env\(safe-area-inset-bottom\)\)/);
+  assert.match(shell, /height:\s*calc\(var\(--nc-mobile-workspace-height,\s*calc\(100dvh - 50px\)\) - env\(safe-area-inset-bottom\)\)/);
   assert.doesNotMatch(shell, /max\(480px/);
+});
+
+test("the phone home surface puts the working agent before marketing content", () => {
+  const phone = terminalCss.lastIndexOf("@media (max-width: 740px) {");
+  const article = ruleBlock(terminalCss, ".home-article {", phone);
+  const demo = ruleBlock(terminalCss, ".home-demo {", phone);
+  const heading = ruleBlock(terminalCss, ".home-demo > .home-section-heading {", phone);
+  assert.match(article, /display:\s*flex/);
+  assert.match(article, /flex-direction:\s*column/);
+  assert.match(demo, /order:\s*-1/);
+  assert.match(demo, /margin-top:\s*0/);
+  assert.match(heading, /display:\s*none/);
+
+  const shell = ruleBlock(terminalCss, ".agent-workspace-shell,", phone);
+  assert.match(shell, /--nc-mobile-workspace-height/);
+  assert.match(shell, /100dvh - var\(--mobile-header-height\) - 172px/);
+});
+
+test("mobile interaction follows the visual viewport and exposes touch actions", () => {
+  assert.match(terminal, /window\.visualViewport/);
+  assert.match(terminal, /--nc-mobile-workspace-height/);
+  assert.match(tui, /matchMedia\("\(pointer: coarse\)"\)/);
+  assert.match(tui, /className="agent-tui-mobile-only"[\s\S]*?>Stop<\/button>/);
+  assert.match(tui, /conversation\.running \? "Steer" : "Send"/);
+  const compact = tuiCss.indexOf(`@media ${compactQuery}`);
+  const actions = ruleBlock(tuiCss, ".agent-tui-mobile-actions {", compact);
+  assert.match(actions, /display:\s*flex/);
+  assert.match(actions, /gap:\s*6px/);
 });
 
 test("short compact workspaces keep transcript, composer, and file controls in their grids", () => {
@@ -67,7 +97,7 @@ test("phone text controls and prioritized touch targets meet mobile baselines", 
   ]) assert.ok(terminalCss.includes(declaration), declaration);
 
   for (const declaration of [
-    "min-width: 44px;\n    height: 44px;",
+    "min-width: 52px;\n    height: 44px;",
     ".agent-tui-composer {\n    min-height: 52px !important;",
     ".agent-tui-editor textarea {\n    font-size: 16px;",
   ]) assert.ok(tuiCss.includes(declaration), declaration);

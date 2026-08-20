@@ -5,6 +5,7 @@ import {
   useCallback,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import {
@@ -54,6 +55,7 @@ function AgentTerminalDemo() {
   const [payment, setPayment] = useState<PaymentStatus>();
   const [jsonl, setJsonl] = useState<string[]>([]);
   const [mobilePane, setMobilePane] = useState<"files" | "agent" | "ui">("agent");
+  const workspaceShell = useRef<HTMLDivElement>(null);
   useNanocodexMessage<WebTuiMessage>((message) => {
     if (message.type === "mppPayment") setPayment(message.payment);
     if (message.type === "mppJsonl") {
@@ -68,6 +70,27 @@ function AgentTerminalDemo() {
     }
     const id = setTimeout(prewarm, 1_000);
     return () => clearTimeout(id);
+  }, []);
+  useEffect(() => {
+    const shell = workspaceShell.current;
+    const viewport = window.visualViewport;
+    if (!shell || !viewport) return;
+    const measure = () => {
+      const top = Math.max(0, shell.getBoundingClientRect().top - viewport.offsetTop);
+      shell.style.setProperty("--nc-mobile-workspace-height", `${Math.max(0, Math.floor(viewport.height - top))}px`);
+    };
+    measure();
+    viewport.addEventListener("resize", measure);
+    viewport.addEventListener("scroll", measure);
+    window.addEventListener("scroll", measure, { passive: true });
+    const observer = typeof ResizeObserver === "undefined" ? undefined : new ResizeObserver(measure);
+    observer?.observe(shell.parentElement ?? shell);
+    return () => {
+      viewport.removeEventListener("resize", measure);
+      viewport.removeEventListener("scroll", measure);
+      window.removeEventListener("scroll", measure);
+      observer?.disconnect();
+    };
   }, []);
   useEffect(() => {
     setPayment(undefined);
@@ -144,7 +167,7 @@ function AgentTerminalDemo() {
         <button type="button" aria-pressed={mobilePane === "agent"} onClick={() => setMobilePane("agent")}>Agent</button>
         <button type="button" aria-pressed={mobilePane === "ui"} onClick={() => setMobilePane("ui")}>UI</button>
       </nav>
-      <div className={`agent-workspace-shell mobile-pane-${mobilePane}`}>
+      <div ref={workspaceShell} className={`agent-workspace-shell mobile-pane-${mobilePane}`}>
         <Suspense fallback={null}><WorkspacePanel /></Suspense>
         <NanocodexTui
           key={transport}
