@@ -6,6 +6,7 @@ export function createConfig(options) {
   const messageListeners = new Set();
   let snapshot = Object.freeze({ status: "idle", error: undefined });
   let worker;
+  let readyMessage;
   let mounts = 0;
   let generation = 0;
 
@@ -33,7 +34,10 @@ export function createConfig(options) {
       worker = current;
       current.onmessage = ({ data }) => {
         if (worker !== current || generation !== currentGeneration) return;
-        if (data?.type === "ready") setSnapshot("ready");
+        if (data?.type === "ready") {
+          readyMessage = data;
+          setSnapshot("ready");
+        }
         if (data?.type === "fatal") {
           closeWorker();
           setSnapshot("error", typeof data.message === "string" ? data.message : "Agent worker failed");
@@ -54,6 +58,7 @@ export function createConfig(options) {
   function closeWorker() {
     const current = worker;
     worker = undefined;
+    readyMessage = undefined;
     generation += 1;
     if (!current) return;
     current.onmessage = null;
@@ -73,6 +78,7 @@ export function createConfig(options) {
     },
     subscribeMessages(listener) {
       messageListeners.add(listener);
+      if (readyMessage !== undefined) listener(readyMessage);
       return () => messageListeners.delete(listener);
     },
     mount() {

@@ -208,3 +208,40 @@ test("fatal and replacement Workers cannot mutate the current session", () => {
   assert.throws(() => config.dispatch({ type: "prompt" }), /not running/);
   unmount();
 });
+
+test("late message consumers rehydrate the current ready session", () => {
+  const workers = [];
+  const config = createConfig({
+    autoStart: false,
+    worker() {
+      const worker = {
+        onmessage: null,
+        postMessage() {},
+        terminate() {},
+      };
+      workers.push(worker);
+      return worker;
+    },
+  });
+
+  const unmount = config.mount();
+  config.start();
+  workers[0].onmessage({ data: { type: "ready", sessionId: "first" } });
+
+  const firstMessages = [];
+  const unsubscribeFirst = config.subscribeMessages((message) => firstMessages.push(message));
+  assert.deepEqual(firstMessages, [{ type: "ready", sessionId: "first" }]);
+
+  config.restart();
+  const replacementMessages = [];
+  const unsubscribeReplacement = config.subscribeMessages((message) => replacementMessages.push(message));
+  assert.deepEqual(replacementMessages, []);
+
+  workers[1].onmessage({ data: { type: "ready", sessionId: "second" } });
+  assert.deepEqual(firstMessages.at(-1), { type: "ready", sessionId: "second" });
+  assert.deepEqual(replacementMessages, [{ type: "ready", sessionId: "second" }]);
+
+  unsubscribeFirst();
+  unsubscribeReplacement();
+  unmount();
+});
