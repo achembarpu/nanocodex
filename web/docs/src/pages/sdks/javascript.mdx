@@ -65,9 +65,28 @@ const config = createConfig({
 `nanocodex-tui` is a framework-independent reducer and controller protocol.
 `nanocodex-tui-react` adds an accessible virtualized renderer with streaming,
 steering, queueing, cancellation, branches, image paste, and optional theme.
-Both are consumers, not required agent infrastructure. You can instead watch
-the same typed Worker events and render them with wterm, xterm.js, Ink, your
-design system, or ordinary DOM. The durable
+`nanocodex-terminal` is the smaller terminal-shaped consumer: give it one
+retained agent and a host with `write`, `onData`, `onResize`, `cols`, and
+`rows`. It handles ANSI rendering, input, prompt history, steering, and
+cancellation. Adapters for xterm.js and WTerm are included; native TTYs,
+WebSockets, and headless tests can implement the host directly.
+
+```js
+import { createAgentTerminal, xtermAdapter } from "nanocodex-terminal";
+
+const attachment = createAgentTerminal({
+  agent,
+  terminal: xtermAdapter(xterm),
+});
+
+await attachment.ready;
+// Detaches the terminal only; the embedding application still owns the agent.
+attachment.dispose();
+```
+
+All three packages are consumers, not required agent infrastructure. You can
+also watch the same typed events and render them with Ink, your design system,
+ordinary DOM, storage, or telemetry. The durable
 [Vercel Workflow example](https://github.com/gakonst/nanocodex/tree/master/examples/vercel-workflows)
 does exactly that: a local race-safe bridge projects its replayable client
 snapshot to sanitized ANSI for `@wterm/react`, without changing the headless
@@ -75,7 +94,8 @@ agent or promoting page-specific UI state into the SDK.
 
 See [React](https://github.com/gakonst/nanocodex/blob/master/js/react/README.md),
 [TUI state](https://github.com/gakonst/nanocodex/blob/master/js/tui/README.md), and
-[React TUI](https://github.com/gakonst/nanocodex/blob/master/js/tui-react/README.md).
+[React TUI](https://github.com/gakonst/nanocodex/blob/master/js/tui-react/README.md),
+or the [terminal adapter](https://github.com/gakonst/nanocodex/blob/master/js/terminal/README.md).
 
 For a complete app, start with the
 [React/Vite example](https://github.com/gakonst/nanocodex/tree/master/examples/react-vite)

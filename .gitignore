@@ -29,6 +29,7 @@ js/tui/node_modules/
 js/tui/dist/
 js/tui-react/node_modules/
 js/tui-react/dist/
+js/terminal/node_modules/
 js/bindings/pkg-node/
 js/bindings/pkg-web/
 examples/node/node_modules/

@@ -10,6 +10,9 @@
   state and event reduction.
 - [`tui-react`](tui-react) publishes `nanocodex-tui-react`: the accessible,
   virtualized, unstyled-by-default terminal renderer and optional theme.
+- [`terminal`](terminal) publishes `nanocodex-terminal`: a five-method host
+  contract that attaches one retained agent to xterm.js, WTerm, a native TTY,
+  a WebSocket, or a headless test without changing agent semantics.
 
 Applications consume package entrypoints. Generated `wasm-bindgen` output
 stays private to `nanocodex` and is produced by `just build-wasm`.

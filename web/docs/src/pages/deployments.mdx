@@ -58,25 +58,29 @@ These examples are runnable integration proofs, not portability guarantees for
 platform APIs. Pin versions and test the recovery semantics that matter to your
 product.
 
-## Replace the TUI: wterm, xterm.js, or your interface
+## Attach the agent to any terminal
 
-The Vercel example intentionally does not mount `nanocodex-tui-react`. Its
-durable, client-safe agent snapshot feeds a small ANSI projection and a real
-`@wterm/react` terminal. The agent and its replay semantics do not know which
-renderer consumed them. The same snapshot can drive xterm.js, a bespoke React
-transcript, a native terminal, logs, or storage.
+`nanocodex-terminal` turns the UI seam into a reusable package. It attaches a
+retained Nanocodex agent to a deliberately tiny host contract: `write`,
+`onData`, `onResize`, `cols`, and `rows`. Use the included xterm.js or WTerm
+adapter, or implement those five members for a native terminal, WebSocket,
+headless harness, or another browser emulator.
 
 This is the UI replacement seam, not another agent protocol:
 
 1. Nanocodex emits ordered typed events independently from the awaited result.
-2. The application projects the subset its clients may see into durable state.
-3. A local presenter maps that snapshot to ANSI, terminal rows, or components.
-4. The chosen renderer redraws without taking ownership of agent history.
+2. The terminal adapter reduces those events and maps prompts back to the same
+   retained agent.
+3. The terminal host carries only bytes, input, and size changes.
+4. The application keeps ownership of tools, transport, persistence,
+   authorization, and agent shutdown.
 
-Keep that last projection local until more than one real consumer needs the
-same opinion. `nanocodex-tui` is already an optional framework-independent
-reducer; `nanocodex-tui-react` is one complete accessible renderer, not a UI
-requirement imposed by the SDK.
+The [Vercel Workflow example](https://github.com/gakonst/nanocodex/tree/master/examples/vercel-workflows)
+also proves the seam across durable, client-safe snapshots and `@wterm/react`.
+That deployment predates the generic adapter, so its local ANSI projection is
+useful evidence rather than a second required protocol. `nanocodex-tui-react`
+remains the richer React transcript when a terminal emulator is not the right
+interface.
 
 The example also keeps three runtime lifecycles deliberately separate:
 

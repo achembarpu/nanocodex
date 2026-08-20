@@ -1,0 +1,31 @@
+{
+  "name": "nanocodex-terminal",
+  "version": "0.1.0",
+  "description": "Attach a Nanocodex agent to xterm, wterm, or any terminal host",
+  "type": "module",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "types": "./index.d.mts",
+      "import": "./index.mjs"
+    }
+  },
+  "files": [
+    "index.d.mts",
+    "index.mjs",
+    "README.md"
+  ],
+  "scripts": {
+    "test": "node --test test/*.test.mjs"
+  },
+  "dependencies": {
+    "nanocodex-tui": "file:../tui"
+  },
+  "peerDependencies": {
+    "nanocodex": "^0.5.0"
+  },
+  "engines": {
+    "node": ">=22.13.0"
+  },
+  "license": "MIT OR Apache-2.0"
+}

@@ -373,22 +373,30 @@ tools. Read their exact contracts and bounds in
 independently from `Turn.result()`. The SDK does not make a DOM transcript or
 terminal emulator authoritative. Choose the highest-level consumer that helps:
 
+- `nanocodex-terminal` attaches one retained agent to any host with `write`,
+  `onData`, `onResize`, `cols`, and `rows`; built-in adapters cover xterm.js
+  and WTerm while native TTYs, WebSockets, and tests can implement the same
+  five-method boundary;
 - `nanocodex-tui` is a framework-independent state reducer and controller;
 - `nanocodex-tui-react` is the complete accessible, virtualized React
   renderer with streaming, steering, queues, branches, and image paste; or
 - raw typed events can feed wterm, xterm.js, Ink, a design-system transcript,
   persistence, or telemetry directly.
 
-The [Vercel Workflow example](examples/vercel-workflows/README.md) proves the
-replacement seam with a real alternative renderer. A durable, replayable
-client snapshot is projected to sanitized ANSI and drawn by `@wterm/react`.
-The headless JS agent, Rust journal, result contract, and reconnect behavior do
-not change. A separate wterm instance attaches to the caller-owned Sandbox PTY;
-agent events and shell bytes remain two different lifecycles.
+The adapter owns ANSI presentation, line editing, prompt history, steering,
+cancellation, and terminal subscriptions. Your application still owns the
+agent, tools, transport, persistence, authorization, and shutdown. The
+[Vercel Workflow example](examples/vercel-workflows/README.md) proves the same
+replacement seam across a durable replay journal and `@wterm/react`; its
+separate Sandbox PTY remains a distinct shell-byte lifecycle.
 
-That adapter stays in the application because one real presentation does not
-justify a generic core abstraction. Replace its ANSI projection with xterm.js
-rows or React components without replacing the agent.
+```js
+import { createAgentTerminal, xtermAdapter } from "nanocodex-terminal";
+
+const attached = createAgentTerminal({ agent, terminal: xtermAdapter(xterm) });
+await attached.ready;
+// attached.dispose() detaches the UI; it does not destroy the agent.
+```
 
 ## Python
 
