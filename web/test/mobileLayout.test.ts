@@ -4,6 +4,7 @@ import test from "node:test";
 
 const indexCss = source("../src/index.css");
 const terminalCss = source("../src/AgentTerminal.css");
+const application = source("../src/NanocodexApp.tsx");
 const artifactDock = source("../src/ArtifactDock.tsx");
 const artifactRuntime = source("../src/artifactRuntime.tsx");
 const terminal = source("../src/AgentTerminal.tsx");
@@ -36,16 +37,12 @@ test("compact workspace removes the phantom header offset and fixed height floor
   assert.doesNotMatch(shell, /max\(480px/);
 });
 
-test("the phone home surface puts the working agent before marketing content", () => {
+test("the phone home surface explains the live agent before mounting it", () => {
   const phone = terminalCss.lastIndexOf("@media (max-width: 740px) {");
-  const article = ruleBlock(terminalCss, ".home-article {", phone);
-  const demo = ruleBlock(terminalCss, ".home-demo {", phone);
-  const heading = ruleBlock(terminalCss, ".home-demo > .home-section-heading {", phone);
-  assert.match(article, /display:\s*flex/);
-  assert.match(article, /flex-direction:\s*column/);
-  assert.match(demo, /order:\s*-1/);
-  assert.match(demo, /margin-top:\s*0/);
-  assert.match(heading, /display:\s*none/);
+  assert.ok(application.indexOf('id="home-title"') < application.indexOf('id="agent-demo"'));
+  assert.ok(application.indexOf('id="agent-demo-title"') < application.indexOf("<AgentTerminal />"));
+  assert.doesNotMatch(terminalCss.slice(phone), /\.agent-auth-privacy\s*\{[^}]*display:\s*none/);
+  assert.doesNotMatch(terminalCss.slice(phone), /\.home-demo\s*\{[^}]*order:\s*-1/);
 
   const shell = ruleBlock(terminalCss, ".agent-workspace-shell,", phone);
   assert.match(shell, /--nc-mobile-workspace-height/);

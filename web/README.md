@@ -1,8 +1,10 @@
-# nanocodex
+# Nanocodex web
 
-A from-scratch Codex rewrite for the latest generation of models. The experiment is to keep the
-same tools and behavior while making the runtime much smaller; nanocodex makes the implementation
-and evaluation record legible.
+The public product site, native documentation, live browser-agent consumer,
+repository browser, and evaluation evidence for Nanocodex. The coding agent is
+the library; this application proves that the same owned Rust lifecycle can sit
+behind an opinionated web interface without turning that interface into an SDK
+protocol.
 
 ## Stack
 
@@ -38,12 +40,13 @@ the same Cloudflare Vite-plugin layout as Tempo's React MPP examples.
 
 ### Documentation
 
-The product guide lives in `docs/src/pages` and uses Vocs with full-static
-rendering under `/docs`. Run `npm run docs:dev` while writing, or `npm run
-docs:build` to generate the site, install it into `dist/client/docs`, and check
-every route plus `llms.txt` and `llms-full.txt`. The normal `npm run build`
-composes the Vite application and Vocs output into the one Cloudflare asset
-tree; the docs are not a second service or runtime.
+The product guide lives in `docs/src/pages` and is rendered by the lazy native
+Docs surface under `/docs`. The Markdown stays the source of truth; the Vite
+application supplies the shared shell, responsive navigation, heading links,
+code copy controls, and route-aware reading layout. `npm run build` checks that
+every page entered the Docs bundle and generates `llms.txt` plus
+`llms-full.txt` in the Cloudflare asset tree. The docs are not a second service,
+generator, or visual system.
 
 In development, Vite reads repository metadata from Git, serves working-tree
 files on demand, and streams history directly from Git only when the commit

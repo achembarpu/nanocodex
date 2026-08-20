@@ -1,14 +1,16 @@
 ---
 title: Nanocodex
-description: A complete OpenAI coding agent, embedded in your product.
+description: The coding agent is the library.
 ---
 
-# A complete OpenAI coding agent, embedded in your product.
+# The coding agent is the library.
 
 Nanocodex is a library-first Rust SDK for putting a real coding-agent lifecycle
-inside your application. Build one agent, send ordered prompts through a cheap
-cloneable handle, await typed results, and optionally reduce a separate stream
-of typed events into your own terminal, web interface, logs, or storage.
+inside your application. It owns retained OpenAI Responses sessions, typed
+history, tools, branches, retries, and cleanup. Build one agent, send ordered
+prompts through a cheap cloneable handle, await typed results, and optionally
+reduce a separate stream of typed events into your own terminal, web interface,
+logs, or storage.
 
 ```rust
 use nanocodex::{Nanocodex, OpenAi};

@@ -174,11 +174,7 @@
 }
 
 @media (max-width: 740px) {
-  .home-article { display: flex; flex-direction: column; }
-  .home-demo { order: -1; margin-top: 0; }
-  .home-demo > .home-section-heading { display: none; }
   .agent-transport { margin-top: 0; }
-  .agent-auth-privacy { display: none; }
 
   .agent-workspace-shell,
   .agent-workspace-shell:has(.workspace-panel.is-collapsed) {

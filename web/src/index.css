@@ -339,38 +339,6 @@ html[data-theme="dark"] .button--medium:focus-visible {
   height: 11px;
 }
 
-.home-page {
-  display: flex;
-  align-items: flex-start;
-  justify-content: center;
-  min-height: calc(100svh - var(--header-height));
-  padding: 64px 24px 96px;
-  background: color-mix(in srgb, var(--surface) 96%, var(--text));
-}
-
-.home-article {
-  width: min(100%, 1080px);
-  margin: auto;
-  font-size: 14px;
-  line-height: 1.55;
-}
-
-.home-intro h1 {
-  margin-top: 12px;
-  font-size: clamp(44px, 6vw, 68px);
-  line-height: 0.98;
-}
-
-.home-intro > p:nth-of-type(2) {
-  margin-top: 22px;
-  color: var(--text-muted);
-  font-size: 16px;
-}
-
-.home-actions {
-  margin-top: 28px;
-}
-
 .agent-demo-slot {
   min-height: calc(clamp(560px, 72svh, 720px) + 130px);
 }
@@ -1947,148 +1915,6 @@ html[data-theme="dark"] .tui-syntax .shiki span {
   }
 }
 
-.home-copy {
-  display: grid;
-  grid-template-columns: 1fr;
-  gap: 28px;
-  margin-top: 72px;
-  color: var(--text-muted);
-}
-
-.home-copy h2,
-.home-release-section h2 {
-  color: var(--text);
-  font-size: 24px;
-  line-height: 1;
-}
-
-.home-api-grid {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
-}
-
-.home-release-section {
-  margin-top: 72px;
-  padding: 18px;
-  background: var(--surface-raised);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-medium);
-}
-
-.home-release-heading {
-  display: flex;
-  gap: 20px;
-  align-items: flex-end;
-  justify-content: space-between;
-}
-
-.home-release-heading h2 {
-  margin-top: 4px;
-}
-
-.home-release-heading > a,
-.home-release-grid article > a {
-  display: inline-flex;
-  gap: 5px;
-  align-items: center;
-}
-
-.home-release-heading > a {
-  padding-bottom: 2px;
-  color: var(--text-muted);
-  font-size: 11px;
-}
-
-.home-release-heading a:hover,
-.home-release-heading a:focus-visible,
-.home-release-grid article > a:hover,
-.home-release-grid article > a:focus-visible {
-  color: var(--blue);
-}
-
-.home-release-heading svg,
-.home-release-grid article > a svg {
-  width: 12px;
-  height: 12px;
-}
-
-.home-install-command {
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  gap: 10px;
-  align-items: center;
-  margin-top: 14px;
-  padding: 10px 10px 10px 12px;
-  background: var(--surface-subtle);
-  border-radius: var(--radius-small);
-}
-
-.home-install-command code {
-  min-width: 0;
-  overflow: hidden;
-  font-size: 11px;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.home-install-command button {
-  display: inline-flex;
-  gap: 6px;
-  align-items: center;
-  min-height: 28px;
-  padding: 0 9px;
-  background: var(--surface-raised);
-  border: 1px solid var(--border-soft);
-  border-radius: var(--radius-small);
-  cursor: pointer;
-}
-
-.home-install-command button:hover,
-.home-install-command button:focus-visible {
-  border-color: var(--border);
-}
-
-.home-install-command button svg {
-  width: 12px;
-  height: 12px;
-}
-
-.home-release-grid {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 16px;
-  margin-top: 16px;
-}
-
-.home-release-grid article {
-  display: grid;
-  align-content: start;
-  gap: 5px;
-  min-width: 0;
-}
-
-.home-release-grid article > span {
-  color: var(--text-muted);
-  font-size: 9px;
-  letter-spacing: 0.04em;
-  text-transform: uppercase;
-}
-
-.home-release-grid article > code,
-.home-release-grid article > a {
-  min-width: 0;
-  overflow: hidden;
-  color: var(--text);
-  font-size: 11px;
-  font-weight: 600;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.home-release-grid article > p {
-  color: var(--text-muted);
-  font-size: 10px;
-  line-height: 1.4;
-}
 
 .icon-button {
   display: grid;
@@ -2790,23 +2616,6 @@ html[data-theme="dark"] .tui-syntax .shiki span {
     grid-column: 2;
   }
 
-  .home-page {
-    align-items: flex-start;
-    min-height: calc(100svh - var(--mobile-header-height));
-    padding: 28px 18px max(48px, calc(30px + env(safe-area-inset-bottom)));
-    background: var(--surface);
-  }
-
-  .home-article {
-    font-size: 13px;
-    overflow-wrap: anywhere;
-  }
-
-  .home-intro h1 {
-    font-size: clamp(28px, 8vw, 32px);
-    line-height: 1.02;
-  }
-
   .agent-terminal {
     width: calc(100vw - 20px);
     margin-top: 24px;
@@ -2846,19 +2655,6 @@ html[data-theme="dark"] .tui-syntax .shiki span {
 
   .agent-terminal-footer > span:nth-child(2) {
     display: none;
-  }
-
-  .home-copy h2,
-  .home-release-section h2 {
-    font-size: 22px;
-  }
-
-  .home-capability-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .home-api-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
   .requests-empty {
@@ -3822,37 +3618,4 @@ html[data-theme="dark"] .tui-syntax .shiki span {
     font-size: 9px;
   }
 
-  .home-page {
-    padding: 24px 16px max(42px, calc(26px + env(safe-area-inset-bottom)));
-  }
-
-  .home-intro h1 {
-    font-size: 28px;
-  }
-
-  .home-intro > p:nth-of-type(2) {
-    line-height: 1.5;
-  }
-
-  .home-api-grid {
-    grid-template-columns: 1fr;
-  }
-
-  .home-release-section {
-    padding: 15px;
-  }
-
-  .home-release-heading {
-    align-items: flex-start;
-  }
-
-  .home-release-grid {
-    grid-template-columns: 1fr;
-    gap: 14px;
-  }
-
-  .home-install-command code {
-    white-space: normal;
-    overflow-wrap: anywhere;
-  }
 }

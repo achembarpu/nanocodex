@@ -2,12 +2,12 @@
 
 <h1>Nanocodex</h1>
 
-<p><strong>A complete OpenAI coding agent, embedded in your product.</strong></p>
+<p><strong>The coding agent is the library.</strong></p>
 
 <p>
-Nanocodex owns the model session, conversation history, tool loop, Code Mode,
-retries, branching, cancellation, and cleanup. You keep the product, interface,
-tools, deployment, and policy.
+Embed the complete OpenAI Responses loop—retained sessions, typed history,
+tools, Code Mode, branches, events, retries, and cleanup. Keep your interface,
+data, memory, infrastructure, and policy.
 </p>
 
 [![CI](https://img.shields.io/github/actions/workflow/status/gakonst/nanocodex/ci.yml?branch=master)][ci]
@@ -44,6 +44,11 @@ caller does **not** have to rebuild:
 - no coupling between receiving a typed result and consuming an event stream;
 - no orphaned shell sessions or subprocess trees when a turn is cancelled; and
 - no second orchestration runtime when an agent forks or delegates work.
+
+The interface is deliberately not part of that list. Consume ordered typed
+events in a native TUI, wterm, xterm.js, React, logs, or something that only
+your product could have. The included renderers are complete consumers, not a
+UI protocol every embedding must adopt.
 
 ## Install
 
@@ -362,6 +367,29 @@ public Parquet/JSONL/Hugging Face dataset queries, and live React artifact
 tools. Read their exact contracts and bounds in
 [`js/bindings/README.md`](js/bindings/README.md#standard-web-and-browser-tools).
 
+### Bring any terminal or product interface
+
+`agent.events.watch()` and the headless React store expose ordered typed data
+independently from `Turn.result()`. The SDK does not make a DOM transcript or
+terminal emulator authoritative. Choose the highest-level consumer that helps:
+
+- `nanocodex-tui` is a framework-independent state reducer and controller;
+- `nanocodex-tui-react` is the complete accessible, virtualized React
+  renderer with streaming, steering, queues, branches, and image paste; or
+- raw typed events can feed wterm, xterm.js, Ink, a design-system transcript,
+  persistence, or telemetry directly.
+
+The [Vercel Workflow example](examples/vercel-workflows/README.md) proves the
+replacement seam with a real alternative renderer. A durable, replayable
+client snapshot is projected to sanitized ANSI and drawn by `@wterm/react`.
+The headless JS agent, Rust journal, result contract, and reconnect behavior do
+not change. A separate wterm instance attaches to the caller-owned Sandbox PTY;
+agent events and shell bytes remain two different lifecycles.
+
+That adapter stays in the application because one real presentation does not
+justify a generic core abstraction. Replace its ANSI projection with xterm.js
+rows or React components without replacing the agent.
+
 ## Python
 
 The Python wheel embeds the native Rust runtime through PyO3. Blocking result
@@ -560,7 +588,7 @@ client projection, and sandbox policy while reusing one agent lifecycle:
 | [Cloudflare Durable Object](examples/cloudflare-workers/README.md) | One SQLite-backed object owns WASM history and hibernatable clients; a separate Sandbox container and R2 prefix provide per-session tools and files. |
 | [Cloudflare fetch + MCP](examples/cloudflare-fetch-mcp/README.md) | CSP-safe QuickJS Code Mode, deferred remote MCP, and caller-owned paid transport inside a serialized Durable Object. |
 | [Rivet Actor](examples/rivet-actors/README.md) | Durable SQLite snapshots and idempotent turns around the WASM driver, with an actor-owned AgentOS workspace and previews. |
-| [Vercel Workflow actor](examples/vercel-workflows/README.md) | A Rust-owned journal between stateless steps, replayable multi-client streams, and a persistent caller-owned Vercel Sandbox; wterm attaches an ephemeral operator shell to that same workspace. |
+| [Vercel Workflow actor](examples/vercel-workflows/README.md) | A Rust-owned journal between stateless steps, replayable multi-client streams rendered through a replaceable wterm agent UI, and a persistent caller-owned Vercel Sandbox with a separate ephemeral wterm operator shell. |
 | [exe.dev](examples/exe-dev/README.md) | Both a retained native session inside a VM and the inverse: a host agent controlling one exact remote VM through narrow tools. |
 | [Python](examples/python) and [Node](examples/node/README.md) | Thin language bindings over the same results, events, history, snapshots, branches, and shutdown semantics. |
 

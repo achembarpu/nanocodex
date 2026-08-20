@@ -23,8 +23,8 @@ state, clients, and sandbox policy in that application.
 - [Vercel Workflows](https://github.com/gakonst/nanocodex/tree/master/examples/vercel-workflows)
   models the agent as a durable Workflow actor, retains the opaque Rust journal
   and replayable client stream, owns a persistent Vercel Sandbox, synchronizes
-  native WebSocket clients, and attaches a wterm operator shell to the same
-  workspace.
+  native WebSocket clients, renders the headless agent stream through wterm,
+  and separately attaches a wterm workspace shell to the same Sandbox.
 - [Cloudflare Workers](https://github.com/gakonst/nanocodex/tree/master/examples/cloudflare-workers)
   uses a SQLite-backed Durable Object, Sandbox container, R2-backed workspace,
   and hibernation-safe session recovery.
@@ -58,13 +58,32 @@ These examples are runnable integration proofs, not portability guarantees for
 platform APIs. Pin versions and test the recovery semantics that matter to your
 product.
 
-## Vercel Workflow, Sandbox, and wterm
+## Replace the TUI: wterm, xterm.js, or your interface
 
-The Vercel example keeps three lifecycles deliberately separate:
+The Vercel example intentionally does not mount `nanocodex-tui-react`. Its
+durable, client-safe agent snapshot feeds a small ANSI projection and a real
+`@wterm/react` terminal. The agent and its replay semantics do not know which
+renderer consumed them. The same snapshot can drive xterm.js, a bespoke React
+transcript, a native terminal, logs, or storage.
+
+This is the UI replacement seam, not another agent protocol:
+
+1. Nanocodex emits ordered typed events independently from the awaited result.
+2. The application projects the subset its clients may see into durable state.
+3. A local presenter maps that snapshot to ANSI, terminal rows, or components.
+4. The chosen renderer redraws without taking ownership of agent history.
+
+Keep that last projection local until more than one real consumer needs the
+same opinion. `nanocodex-tui` is already an optional framework-independent
+reducer; `nanocodex-tui-react` is one complete accessible renderer, not a UI
+requirement imposed by the SDK.
+
+The example also keeps three runtime lifecycles deliberately separate:
 
 - Workflow retains the Nanocodex Rust journal and replayable typed event stream;
 - one named persistent Vercel Sandbox retains `/workspace`; and
-- `@wterm/react` renders an operator PTY created by `Sandbox.openInteractive()`.
+- a second `@wterm/react` instance renders an operator PTY created by
+  `Sandbox.openInteractive()`.
 
 The terminal uses Vercel's controller protocol directly: the browser sends one
 JSON start frame for `bash -l`, binary UTF-8 input, JSON resize frames, and
@@ -76,8 +95,9 @@ Agent history is reconstructed from the journal and files survive Sandbox
 snapshots. The
 interactive shell is ephemeral per attachment and must request a fresh token
 after disconnect; persistent files do not imply PTY process continuity. This
-operator terminal is therefore not a second agent protocol and does not require
-an AI SDK Harness adapter. See the [implementation and security notes](https://github.com/gakonst/nanocodex/tree/master/examples/vercel-workflows#workspace-terminal-wterm--vercel-sandbox).
+operator terminal is independent from the wterm-rendered agent transcript: one
+presents agent events; the other carries shell bytes. Neither requires an AI
+SDK Harness adapter. See the [implementation and security notes](https://github.com/gakonst/nanocodex/tree/master/examples/vercel-workflows#workspace-terminal-wterm--vercel-sandbox).
 
 ## Recovery boundary
 

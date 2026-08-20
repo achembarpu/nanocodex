@@ -1,37 +1,72 @@
-import { access, readFile, readdir } from "node:fs/promises";
+import { access, mkdir, readFile, readdir, writeFile } from "node:fs/promises";
 
-import { docsBasePath } from "../docs/site.js";
-
-const docs = new URL("../dist/client/docs/", import.meta.url);
 const sourcePages = new URL("../docs/src/pages/", import.meta.url);
-const pages = [
-  ...await mdxRoutes(sourcePages),
-  "llms.txt",
-  "llms-full.txt",
-];
+const client = new URL("../dist/client/", import.meta.url);
+const docsOutput = new URL("docs/", client);
+const pages = await markdownPages(sourcePages);
 
-await Promise.all(pages.map((page) => access(new URL(page, docs))));
+await access(new URL("index.html", client));
+const assets = await readdir(new URL("assets/", client));
+const JavaScript = assets.filter((name) => name.endsWith(".js"));
+const bundled = (await Promise.all(
+  JavaScript.map((name) => readFile(new URL(`assets/${name}`, client), "utf8")),
+)).join("\n");
 
-const index = await readFile(new URL("index.html", docs), "utf8");
-assert(index.includes(`href="${docsBasePath}/getting-started"`), "docs navigation is not base-path aware");
-assert(index.includes(`href="${docsBasePath}/#vocs-content"`), "skip link escapes the docs base path");
-assert(!index.includes('href="/#vocs-content"'), "unscoped skip link remains in docs HTML");
+assert(bundled.includes("Copy markdown"), "the native documentation surface is missing");
+assert(bundled.includes("That page is not in the manual"), "the docs not-found boundary is missing");
+for (const page of pages) {
+  assert(bundled.includes(page.title), `the docs bundle omits ${page.route}`);
+}
 
-const llms = await readFile(new URL("llms.txt", docs), "utf8");
-assert(llms.includes(`](${docsBasePath}/getting-started)`), "llms.txt links are not base-path aware");
-assert(!/\]\(\/(?!docs(?:\/|\)))/.test(llms), "llms.txt contains a root-scoped docs link");
+await mkdir(docsOutput, { recursive: true });
+const index = [
+  "# Nanocodex documentation",
+  "",
+  "A library-first Rust agent SDK with JavaScript, browser, and Python bindings.",
+  "",
+  ...pages.map(({ title, description, route }) =>
+    `- [${title}](${route})${description ? ` — ${description}` : ""}`
+  ),
+  "",
+].join("\n");
+const full = pages.map(({ route, source }) =>
+  `Source: ${route}\n\n${rewriteLinks(stripFrontmatter(source))}`
+).join("\n\n---\n\n");
+await writeFile(new URL("llms.txt", docsOutput), index);
+await writeFile(new URL("llms-full.txt", docsOutput), full);
 
-async function mdxRoutes(directory, prefix = "") {
+async function markdownPages(directory, prefix = "") {
   const entries = await readdir(directory, { withFileTypes: true });
-  const routes = await Promise.all(entries.map(async (entry) => {
+  const pages = await Promise.all(entries.map(async (entry) => {
     if (entry.isDirectory()) {
-      return mdxRoutes(new URL(`${entry.name}/`, directory), `${prefix}${entry.name}/`);
+      return markdownPages(new URL(`${entry.name}/`, directory), `${prefix}${entry.name}/`);
     }
     if (!entry.name.endsWith(".mdx")) return [];
-    const stem = entry.name.slice(0, -".mdx".length);
-    return [`${prefix}${stem === "index" ? "" : `${stem}/`}index.html`];
+    const source = await readFile(new URL(entry.name, directory), "utf8");
+    const stem = entry.name.slice(0, -4);
+    const relative = `${prefix}${stem}`;
+    return [{
+      route: relative === "index" ? "/docs" : `/docs/${relative}`,
+      title: frontmatter(source, "title") ?? relative,
+      description: frontmatter(source, "description") ?? "",
+      source,
+    }];
   }));
-  return routes.flat();
+  return pages.flat().sort((left, right) => left.route.localeCompare(right.route));
+}
+
+function frontmatter(source, name) {
+  return source.match(new RegExp(`^${name}:\\s*(.+)$`, "m"))?.[1]
+    ?.trim()
+    .replace(/^(["'])(.*)\1$/, "$2");
+}
+
+function stripFrontmatter(source) {
+  return source.replace(/^---\n[\s\S]*?\n---\n/, "");
+}
+
+function rewriteLinks(source) {
+  return source.replace(/\]\(\/(?!docs(?:\/|\)))/g, "](/docs/");
 }
 
 function assert(condition, message) {

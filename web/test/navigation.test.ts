@@ -4,12 +4,13 @@ import { pathForSurface, surfaceFromUrl } from "../src/navigation.ts";
 
 test("maps every Nanocodex surface to a stable application route", () => {
   assert.deepEqual(
-    ["home", "code", "commits", "requests", "evals"].map((surface) => [
+    ["home", "docs", "code", "commits", "requests", "evals"].map((surface) => [
       surface,
       pathForSurface(surface as Parameters<typeof pathForSurface>[0]),
     ]),
     [
       ["home", "/"],
+      ["docs", "/docs"],
       ["code", "/code"],
       ["commits", "/commits"],
       ["requests", "/requests"],
@@ -25,6 +26,7 @@ test("resolves direct routes and legacy view links", () => {
     "evals",
   );
   assert.equal(surfaceFromUrl(new URL("https://nanocodex.test/code/")), "code");
+  assert.equal(surfaceFromUrl(new URL("https://nanocodex.test/docs/core/owned-agent")), "docs");
   assert.equal(surfaceFromUrl(new URL("https://nanocodex.test/?view=commits")), "commits");
   assert.equal(surfaceFromUrl(new URL("https://nanocodex.test/unknown")), "home");
 });

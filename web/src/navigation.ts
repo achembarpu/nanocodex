@@ -1,7 +1,8 @@
-export type Surface = "home" | "code" | "commits" | "requests" | "evals";
+export type Surface = "home" | "docs" | "code" | "commits" | "requests" | "evals";
 
 const surfacePaths: Record<Surface, string> = {
   home: "/",
+  docs: "/docs",
   code: "/code",
   commits: "/commits",
   requests: "/requests",
@@ -20,6 +21,7 @@ export function surfaceFromUrl(url: Pick<URL, "pathname" | "searchParams">): Sur
   if (pathname === "/" && legacyView && surfaces.has(legacyView)) return legacyView;
 
   if (pathname === "/evals" || pathname.startsWith("/evals/")) return "evals";
+  if (pathname === "/docs" || pathname.startsWith("/docs/")) return "docs";
 
   const pathMatch = (Object.entries(surfacePaths) as Array<[Surface, string]>).find(
     ([, path]) => path === pathname,

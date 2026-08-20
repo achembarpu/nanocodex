@@ -65,6 +65,14 @@ const config = createConfig({
 `nanocodex-tui` is a framework-independent reducer and controller protocol.
 `nanocodex-tui-react` adds an accessible virtualized renderer with streaming,
 steering, queueing, cancellation, branches, image paste, and optional theme.
+Both are consumers, not required agent infrastructure. You can instead watch
+the same typed Worker events and render them with wterm, xterm.js, Ink, your
+design system, or ordinary DOM. The durable
+[Vercel Workflow example](https://github.com/gakonst/nanocodex/tree/master/examples/vercel-workflows)
+does exactly that: a local race-safe bridge projects its replayable client
+snapshot to sanitized ANSI for `@wterm/react`, without changing the headless
+agent or promoting page-specific UI state into the SDK.
+
 See [React](https://github.com/gakonst/nanocodex/blob/master/js/react/README.md),
 [TUI state](https://github.com/gakonst/nanocodex/blob/master/js/tui/README.md), and
 [React TUI](https://github.com/gakonst/nanocodex/blob/master/js/tui-react/README.md).
