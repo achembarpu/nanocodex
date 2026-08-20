@@ -282,7 +282,7 @@ function XtermSurface({
   useEffect(() => {
     if (status === "ready" || status === "starting" || !instance.current) return;
     instance.current.write(
-      `\x1b[3J\x1b[2J\x1b[H\x1b[1mnanocodex\x1b[0m\r\n\r\n\x1b[2m${inactiveMessage}\x1b[0m\r\n\r\n> `,
+      `\x1b[3J\x1b[2J\x1b[H\x1b[?25l\x1b[1mnanocodex\x1b[0m\r\n\r\n\x1b[2m${inactiveMessage}\x1b[0m\r\n\r\n> `,
     );
   }, [inactiveMessage, status]);
 

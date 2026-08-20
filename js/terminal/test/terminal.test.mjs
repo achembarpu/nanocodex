@@ -92,6 +92,7 @@ test("terminal controls steer, cancel, edit history, and detach without owning t
   assert.equal(turn.cancelled, true);
 
   terminal.dispose();
+  assert.equal(host.writes.at(-1), "\x1b[?25h");
   host.data("ignored\r");
   assert.equal(agent.turns.length, 1);
 });
@@ -103,6 +104,7 @@ test("ANSI rendering neutralizes transcript control bytes", () => {
   };
   const rendered = renderTerminal({ state });
   assert.equal(rendered.slice("\x1b[3J\x1b[2J\x1b[H".length).includes("\x1b[2J"), false);
+  assert.ok(rendered.startsWith("\x1b[3J\x1b[2J\x1b[H\x1b[?25l"));
   assert.match(rendered, /safe�\[2Jstill safe/);
 });
 

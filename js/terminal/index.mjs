@@ -9,6 +9,8 @@ import {
 } from "nanocodex-tui";
 
 const CLEAR_SCREEN = "\x1b[3J\x1b[2J\x1b[H";
+const HIDE_CURSOR = "\x1b[?25l";
+const SHOW_CURSOR = "\x1b[?25h";
 const RESET = "\x1b[0m";
 const BOLD = "\x1b[1m";
 const DIM = "\x1b[2m";
@@ -296,6 +298,13 @@ export function createAgentTerminal(options) {
     for (const release of listeners.splice(0)) {
       try { release?.(); } catch (error) { emit("terminal.cleanup_error", { error }); }
     }
+    try {
+      void Promise.resolve(terminal.write(SHOW_CURSOR)).catch((error) => {
+        emit("terminal.cleanup_error", { error });
+      });
+    } catch (error) {
+      emit("terminal.cleanup_error", { error });
+    }
     resolveReady();
     emit("terminal.detached");
   }
@@ -330,7 +339,7 @@ export function renderTerminal({ state, input = "", cursor = input.length, cols 
   const after = terminalText(input.slice(safeCursor + 1));
   lines.push(`${BOLD}>${RESET} ${before}\x1b[7m${at}${RESET}${after}`);
   lines.push(`${DIM}${rule(cols)}  Enter send · Shift+Enter newline · /help${RESET}`);
-  return `${CLEAR_SCREEN}${lines.join("\r\n\r\n")}\r\n`;
+  return `${CLEAR_SCREEN}${HIDE_CURSOR}${lines.join("\r\n\r\n")}\r\n`;
 }
 
 export function encodeXtermKeyEvent(event) {
