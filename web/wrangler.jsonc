@@ -17,7 +17,8 @@
     }
   },
   "assets": {
-    "not_found_handling": "single-page-application",
+    "binding": "ASSETS",
+    "not_found_handling": "none",
     "run_worker_first": ["/api/*", "/v1/*", "/git/*", "/.well-known/urpc/consumer.json"]
   },
   "durable_objects": {

@@ -73,6 +73,7 @@ const GIT_SHA_PATTERN = /^[0-9a-f]{40}$/;
 
 type WorkerEnv = GitStorageEnv & ThreadGitStorageEnv & EvalStorageEnv & ChatGptEgressEnv
   & PublicSecurityEnv & CredentialVaultEnv & {
+  ASSETS?: Fetcher;
   ENVIRONMENT: string;
   DEPLOYMENT_SHA?: string;
   OPENAI_API_KEY?: string;
@@ -191,9 +192,24 @@ export default {
       );
     }
 
+    if (isDocumentNavigation(request) && env.ASSETS) {
+      return env.ASSETS.fetch(new Request(new URL("/", url), {
+        headers: request.headers,
+        method: request.method,
+      }));
+    }
     return json({ error: "not_found" }, { status: 404 });
   },
 };
+
+function isDocumentNavigation(request: Request): boolean {
+  if (request.method !== "GET" && request.method !== "HEAD") return false;
+  const destination = request.headers.get("sec-fetch-dest");
+  if (destination && destination !== "document") return false;
+  const mode = request.headers.get("sec-fetch-mode");
+  if (mode) return mode === "navigate";
+  return request.headers.get("accept")?.includes("text/html") === true;
+}
 
 function consumerDiscovery(url: URL): Response {
   return Response.json(

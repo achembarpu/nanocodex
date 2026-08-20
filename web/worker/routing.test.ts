@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
+import worker from "./index.ts";
+
 test("Cloudflare routes protocol endpoints through the Worker before SPA assets", async () => {
   const config = JSON.parse(await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8"));
   assert.deepEqual(config.assets.run_worker_first, [
@@ -10,4 +12,42 @@ test("Cloudflare routes protocol endpoints through the Worker before SPA assets"
     "/git/*",
     "/.well-known/urpc/consumer.json",
   ]);
+  assert.equal(config.assets.binding, "ASSETS");
+  assert.equal(config.assets.not_found_handling, "none");
+});
+
+test("SPA fallback serves only documents and missing immutable assets stay real 404s", async () => {
+  const assetRequests: Request[] = [];
+  const env = {
+    ASSETS: {
+      fetch(request: Request) {
+        assetRequests.push(request);
+        return Promise.resolve(new Response("<!doctype html><title>Nanocodex</title>", {
+          headers: { "content-type": "text/html" },
+        }));
+      },
+    },
+    ENVIRONMENT: "production",
+  };
+
+  const document = await worker.fetch(new Request("https://demo.test/agent", {
+    headers: {
+      accept: "text/html,application/xhtml+xml",
+      "sec-fetch-dest": "document",
+      "sec-fetch-mode": "navigate",
+    },
+  }), env as never);
+  assert.equal(document.status, 200);
+  assert.match(document.headers.get("content-type") ?? "", /text\/html/);
+  assert.equal(assetRequests.length, 1);
+  assert.equal(new URL(assetRequests[0]!.url).pathname, "/");
+
+  const missingAsset = await worker.fetch(new Request(
+    "https://demo.test/assets/removed-build-chunk.js",
+    { headers: { accept: "*/*", "sec-fetch-dest": "script", "sec-fetch-mode": "no-cors" } },
+  ), env as never);
+  assert.equal(missingAsset.status, 404);
+  assert.match(missingAsset.headers.get("content-type") ?? "", /application\/json/);
+  assert.equal(missingAsset.headers.get("cache-control"), "no-store");
+  assert.equal(assetRequests.length, 1);
 });

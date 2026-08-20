@@ -55,6 +55,9 @@ test("mobile interaction follows the visual viewport and exposes touch actions",
   assert.match(tui, /matchMedia\("\(pointer: coarse\)"\)/);
   assert.match(tui, /className="agent-tui-mobile-only"[\s\S]*?>Stop<\/button>/);
   assert.match(tui, /conversation\.running \? "Steer" : "Send"/);
+  assert.match(terminal, /event\.persisted/);
+  assert.match(terminal, /sha !== deploymentSha/);
+  assert.match(terminal, /window\.location\.reload\(\)/);
   const compact = tuiCss.indexOf(`@media ${compactQuery}`);
   const actions = ruleBlock(tuiCss, ".agent-tui-mobile-actions {", compact);
   assert.match(actions, /display:\s*flex/);
