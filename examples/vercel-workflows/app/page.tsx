@@ -1,5 +1,9 @@
+import Script from "next/script";
+
 import { AgentTerminal } from "./agent-terminal";
 import { WorkspaceTerminal } from "./workspace-terminal";
+
+export const dynamic = "force-dynamic";
 
 export default function Home() {
   return (
@@ -47,7 +51,7 @@ export default function Home() {
         <span id="activity">idle</span>
         <span>Rust/WASM · Workflow actor · Vercel WebSockets</span>
       </footer>
-      <script src="/app.js" defer />
+      <Script src="/app.js" strategy="afterInteractive" />
     </main>
   );
 }

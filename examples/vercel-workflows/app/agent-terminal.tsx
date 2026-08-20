@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Terminal, useTerminal } from "@wterm/react";
+import { Terminal, useTerminal, type WTerm } from "@wterm/react";
 import "@wterm/react/css";
 
 import {
@@ -12,6 +12,7 @@ import {
   type AgentTerminalSnapshot,
 } from "@/lib/agent-terminal";
 import { errorMessage } from "@/lib/validation";
+import { labelWtermInput } from "@/lib/wterm-accessibility";
 
 const EMPTY_SNAPSHOT: AgentTerminalSnapshot = { messages: [], streamedText: "" };
 
@@ -64,9 +65,15 @@ export function AgentTerminal() {
         {mounted ? (
           <Terminal
             ref={ref}
+            role="group"
+            aria-label="Agent terminal"
+            aria-multiline={undefined}
             autoResize
             cursorBlink={false}
-            onReady={() => setReady(true)}
+            onReady={(terminal: WTerm) => {
+              labelWtermInput(terminal, "Agent terminal input");
+              setReady(true);
+            }}
             onError={(terminalError) => setError(errorMessage(terminalError))}
           />
         ) : null}

@@ -13,6 +13,7 @@ import {
   terminalStartFrame,
 } from "@/lib/terminal-protocol";
 import { errorMessage } from "@/lib/validation";
+import { labelWtermInput } from "@/lib/wterm-accessibility";
 
 const BROWSER_STATE_KEY = "nanocodex.vercel.workflow.web.v1";
 
@@ -202,9 +203,13 @@ export function WorkspaceTerminal() {
         {mounted ? (
           <Terminal
             ref={ref}
+            role="group"
+            aria-label="Workspace terminal"
+            aria-multiline={undefined}
             autoResize
             cursorBlink
             onReady={(terminal) => {
+              labelWtermInput(terminal, "Workspace terminal input");
               terminalRef.current = terminal;
               setReady(true);
             }}

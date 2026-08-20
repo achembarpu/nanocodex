@@ -9,10 +9,6 @@ const repositoryRoot = process.env.VERCEL ? exampleRoot : resolve(exampleRoot, "
 
 const securityHeaders = [
   { key: "Cache-Control", value: "no-store" },
-  {
-    key: "Content-Security-Policy",
-    value: "default-src 'self'; connect-src 'self' ws: wss:; img-src 'self'; script-src 'self'; style-src 'self'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'",
-  },
   { key: "Cross-Origin-Opener-Policy", value: "same-origin" },
   { key: "Permissions-Policy", value: "camera=(), microphone=(), geolocation=()" },
   { key: "Referrer-Policy", value: "no-referrer" },
