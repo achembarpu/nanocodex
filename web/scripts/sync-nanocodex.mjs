@@ -51,7 +51,14 @@ const [head, branch, remote] = await Promise.all([
   git(["remote", "get-url", "origin"], { optional: true }),
 ]);
 const identity = parseRepositoryIdentity(remote);
-const repositoryBranch = branch || "detached";
+const publicBranch = process.env.NANOCODEX_PUBLIC_BRANCH?.trim();
+if (
+  publicBranch !== undefined &&
+  !/^[A-Za-z0-9][A-Za-z0-9._\/-]*$/.test(publicBranch)
+) {
+  throw new Error("NANOCODEX_PUBLIC_BRANCH is invalid");
+}
+const repositoryBranch = publicBranch ?? (branch || "detached");
 
 if (
   !forceSync &&
@@ -95,7 +102,11 @@ const [
   git(["show", "-s", "--format=%cI", head]),
 ]);
 
-const commits = combineCommitLogs(numstatLog, statusLog);
+const commits = projectCommitRefs(
+  combineCommitLogs(numstatLog, statusLog),
+  head,
+  publicBranch,
+);
 const treeEntries = parseTree(rawTree).filter(
   ({ path }) => !generatedDataPrefixes.some((prefix) => path.startsWith(prefix)),
 );
@@ -232,6 +243,14 @@ function combineCommitLogs(numstatLog, statusLog) {
       },
     };
   });
+}
+
+function projectCommitRefs(commits, head, publicBranch) {
+  if (publicBranch == null) return commits;
+  return commits.map((commit) => ({
+    ...commit,
+    refs: commit.hash === head ? [`HEAD -> ${publicBranch}`] : [],
+  }));
 }
 
 function parseLogRecords(output) {

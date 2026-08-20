@@ -24,6 +24,7 @@ const repositoryPath = resolve(
 );
 const uploadConcurrency = 12;
 const repositoryPackPartBytes = 16 * 1024 * 1024;
+const publicationBranch = "master";
 
 async function main() {
   const origin = requiredEnvironment("NANOCODEX_GIT_ORIGIN").replace(/\/$/, "");
@@ -50,19 +51,23 @@ async function main() {
         NANOCODEX_DATA_DIR: dataDirectory,
         NANOCODEX_EMIT_OBJECTS: "1",
         NANOCODEX_FORCE_SYNC: "1",
+        NANOCODEX_PUBLIC_BRANCH: publicationBranch,
         NANOCODEX_REPO: repositoryPath,
       },
     });
 
-    const [snapshot, commits, refs, blobNames, patchNames, commitPageNames] = await Promise.all([
+    const [snapshot, commits, blobNames, patchNames, commitPageNames] = await Promise.all([
       readJson(resolve(dataDirectory, "repository.json")),
       readJson(resolve(dataDirectory, "commits.json")),
-      readRefs(),
       listObjectNames(resolve(dataDirectory, "blobs"), ".txt"),
       listObjectNames(resolve(dataDirectory, "patches"), ".patch"),
       listObjectNames(resolve(dataDirectory, "commit-pages"), ".json"),
     ]);
-    if (snapshot.repository?.head !== head) {
+    const refs = [{ name: `refs/heads/${publicationBranch}`, oid: head }];
+    if (
+      snapshot.repository?.head !== head ||
+      snapshot.repository?.branch !== publicationBranch
+    ) {
       throw new Error("repository changed while its publication was being built");
     }
     const gitArtifacts = await buildGitArtifacts({
@@ -123,7 +128,7 @@ async function main() {
     const publication = {
       version: 1,
       head,
-      branch: snapshot.repository.branch,
+      branch: publicationBranch,
       refs,
       snapshotKey: `${generationPrefix}/repository.json`,
       commitsKey: `${generationPrefix}/commits.json`,
@@ -558,26 +563,6 @@ async function gitWithInput(args, input, repository, maximumBytes = 64 * 1024 * 
   if (bytes > maximumBytes) throw new Error(`git ${args[0]} output exceeded ${maximumBytes} bytes`);
   if (code !== 0) throw new Error(stderr.trim() || `git ${args[0]} exited with ${code}`);
   return Buffer.concat(chunks, bytes);
-}
-
-async function readRefs() {
-  const output = await git([
-    "for-each-ref",
-    "--format=%(refname)%00%(objectname)%00%(*objectname)",
-    "refs/heads",
-    "refs/tags",
-  ]);
-  return output.split("\n").filter(Boolean).map((row) => {
-    const [name, oid, peeled] = row.split("\0");
-    if (
-      !name ||
-      !/^[a-f0-9]{40}$/.test(oid ?? "") ||
-      (peeled !== "" && !/^[a-f0-9]{40}$/.test(peeled ?? ""))
-    ) {
-      throw new Error(`invalid Git ref row: ${row}`);
-    }
-    return peeled === "" ? { name, oid } : { name, oid, peeled };
-  });
 }
 
 async function uploadFile(origin, token, remote, local, range) {

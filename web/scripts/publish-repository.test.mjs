@@ -71,6 +71,8 @@ test("the publisher CLI initializes its module before building a generation", as
     await git(["add", "README.md"], repository);
     await git(["commit", "-qm", "initial fixture"], repository);
     const head = await git(["rev-parse", "HEAD"], repository);
+    await git(["branch", "private-preview"], repository);
+    await git(["tag", "v0-test"], repository);
     deploymentSha = head;
 
     server.listen(0, "127.0.0.1");
@@ -101,6 +103,10 @@ test("the publisher CLI initializes its module before building a generation", as
     const publication = JSON.parse(publicationRequest.body);
     assert.equal(publication.expectedHead, null);
     assert.equal(publication.publication.head, head);
+    assert.equal(publication.publication.branch, "master");
+    assert.deepEqual(publication.publication.refs, [
+      { name: "refs/heads/master", oid: head },
+    ]);
     assert.ok(publication.publication.packParts.length > 0);
     assert.equal("packKey" in publication.publication, false);
     assert.ok(publication.publication.packParts.every(({ key, size }) =>
@@ -110,6 +116,14 @@ test("the publisher CLI initializes its module before building a generation", as
       size <= 16 * 1024 * 1024
     ));
     assert.equal(requests.some(({ url }) => url?.endsWith("/repository.pack")), false);
+    const snapshotUpload = requests.find(({ url }) =>
+      url === `/api/git/objects/generations/${head}/repository.json`
+    );
+    const commitsUpload = requests.find(({ url }) =>
+      url === `/api/git/objects/generations/${head}/commits.json`
+    );
+    assert.equal(JSON.parse(snapshotUpload.body).repository.branch, "master");
+    assert.deepEqual(JSON.parse(commitsUpload.body)[0].refs, ["HEAD -> master"]);
     assert.ok(requests.some(({ url }) =>
       url === `/api/git/objects/generations/${head}/commits/0000.json`
     ));
