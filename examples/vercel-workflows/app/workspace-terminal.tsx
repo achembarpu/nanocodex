@@ -24,12 +24,17 @@ export function WorkspaceTerminal() {
   const terminalRef = useRef<WTerm | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const generationRef = useRef(0);
+  const [mounted, setMounted] = useState(false);
   const [sessionId, setSessionId] = useState("");
   const [accessToken, setAccessToken] = useState("");
   const [status, setStatus] = useState<TerminalStatus>("detached");
   const [error, setError] = useState("");
   const [ready, setReady] = useState(false);
   const [attaching, setAttaching] = useState(false);
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   const closeSocket = useCallback((reason: string) => {
     generationRef.current += 1;
@@ -194,21 +199,23 @@ export function WorkspaceTerminal() {
       </div>
       {error ? <p className="terminal-error" role="alert">{error}</p> : null}
       <div className="terminal-screen">
-        <Terminal
-          ref={ref}
-          autoResize
-          cursorBlink
-          onReady={(terminal) => {
-            terminalRef.current = terminal;
-            setReady(true);
-          }}
-          onData={onData}
-          onResize={onResize}
-          onError={(terminalError) => {
-            setStatus("failed");
-            setError(errorMessage(terminalError));
-          }}
-        />
+        {mounted ? (
+          <Terminal
+            ref={ref}
+            autoResize
+            cursorBlink
+            onReady={(terminal) => {
+              terminalRef.current = terminal;
+              setReady(true);
+            }}
+            onData={onData}
+            onResize={onResize}
+            onError={(terminalError) => {
+              setStatus("failed");
+              setError(errorMessage(terminalError));
+            }}
+          />
+        ) : null}
       </div>
     </section>
   );

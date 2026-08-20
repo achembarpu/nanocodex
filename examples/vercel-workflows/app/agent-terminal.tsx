@@ -17,9 +17,14 @@ const EMPTY_SNAPSHOT: AgentTerminalSnapshot = { messages: [], streamedText: "" }
 
 export function AgentTerminal() {
   const { ref, write } = useTerminal();
+  const [mounted, setMounted] = useState(false);
   const [ready, setReady] = useState(false);
   const [snapshot, setSnapshot] = useState(EMPTY_SNAPSHOT);
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    setMounted(true);
+  }, []);
 
   useEffect(() => {
     const receiveSnapshot = (event: Event) => {
@@ -56,13 +61,15 @@ export function AgentTerminal() {
       </div>
       {error ? <p className="terminal-error" role="alert">{error}</p> : null}
       <div className="terminal-screen">
-        <Terminal
-          ref={ref}
-          autoResize
-          cursorBlink={false}
-          onReady={() => setReady(true)}
-          onError={(terminalError) => setError(errorMessage(terminalError))}
-        />
+        {mounted ? (
+          <Terminal
+            ref={ref}
+            autoResize
+            cursorBlink={false}
+            onReady={() => setReady(true)}
+            onError={(terminalError) => setError(errorMessage(terminalError))}
+          />
+        ) : null}
       </div>
     </section>
   );

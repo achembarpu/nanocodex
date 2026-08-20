@@ -24,8 +24,10 @@ describe("browser demo", () => {
       "utf8",
     );
     expect(page).toContain("<AgentTerminal />");
+    expect(page).toContain('htmlFor="prompt"');
     expect(page).not.toContain('id="transcript"');
     expect(terminal).toContain('from "@wterm/react"');
+    expect(terminal).toContain("mounted ? (");
     expect(terminal).toContain("renderAgentTerminal");
     expect(terminal).not.toContain("nanocodex-tui-react");
   });
