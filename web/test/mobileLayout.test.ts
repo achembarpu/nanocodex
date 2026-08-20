@@ -64,8 +64,9 @@ test("mobile interaction follows the visual viewport and exposes touch actions",
 test("mobile actions wait for the active branch session generation", () => {
   assert.match(
     tui,
-    /const ready = workerStatus === "ready" && Boolean\(activeBranch\.sessionId\)/,
+    /const target = activeTarget\(tui\);\s+const ready = workerStatus === "ready" && Boolean\(sessionIdForTarget\(tui, target\)\)/,
   );
+  assert.match(tui, /if \(workerStatus !== "ready" \|\| !sessionId\)/);
   assert.match(
     terminal,
     /key=\{`\$\{transport\}:\$\{credentialSource \?\? "signed-out"\}`\}/,
