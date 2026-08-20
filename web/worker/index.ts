@@ -394,7 +394,7 @@ function openRealtimeCall(
   startupContext: string,
 ): Promise<Response> {
   const endpoint = `${chatGptApiBaseUrl(env)}/realtime/calls?intent=quicksilver&architecture=avas`;
-  return fetch(endpoint, {
+  return fetchChatGpt(env, endpoint, {
     method: "POST",
     headers: {
       ...openAiHeaders(credential),
@@ -417,7 +417,7 @@ function openRealtimeCall(
         delegation: { type: "client" },
       },
     }),
-  });
+  }, credential.sessionId);
 }
 
 async function upgradeRealtimeSideband(

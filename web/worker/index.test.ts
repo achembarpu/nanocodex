@@ -77,6 +77,25 @@ function createChatGptSessions() {
   return { deleted, namespace: namespace as unknown as DurableObjectNamespace };
 }
 
+function createChatGptEgress(response: () => Response) {
+  const requests: Request[] = [];
+  const namespace = {
+    idFromName(name: string) {
+      assert.equal(name, `session:${"a".repeat(43)}`);
+      return { name };
+    },
+    get() {
+      return {
+        async fetch(request: Request) {
+          requests.push(request);
+          return response();
+        },
+      };
+    },
+  };
+  return { requests, namespace: namespace as unknown as DurableObjectNamespace };
+}
+
 test("Tempo discovers a request-origin-bound uRPC consumer document", async () => {
   const response = await worker.fetch(
     new Request("https://preview.nanocodex.example/.well-known/urpc/consumer.json"),
@@ -472,6 +491,46 @@ test("Realtime calls keep subscription credentials server-side and bind the agen
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+test("production Realtime call creation uses the per-session ChatGPT egress", async () => {
+  const { namespace: sessions } = createChatGptSessions();
+  const { namespace: egress, requests } = createChatGptEgress(() => new Response(
+    "v=0\r\na=answer\r\n",
+    {
+      status: 201,
+      headers: { location: "/backend-api/codex/realtime/calls/rtc_test" },
+    },
+  ));
+  const cookie = `__Secure-nanocodex_chatgpt_v2=${"a".repeat(43)}`;
+  const response = await worker.fetch(new Request("https://demo.test/api/realtime/calls", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      origin: "https://demo.test",
+      cookie,
+    },
+    body: JSON.stringify({
+      sdp: "v=0\r\na=offer\r\n",
+      session_id: "session-1",
+      voice: "cove",
+    }),
+  }), {
+    ENVIRONMENT: "production",
+    CHATGPT_SESSIONS: sessions,
+    CHATGPT_EGRESS: egress,
+    AGENT_SOCKET_LIMIT: { async limit() { return { success: true }; } },
+  });
+
+  assert.equal(response.status, 200);
+  assert.equal(requests.length, 1);
+  assert.equal(
+    requests[0]?.url,
+    "https://chatgpt-egress.internal/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas",
+  );
+  assert.equal(requests[0]?.headers.get("authorization"), "Bearer subscription-secret");
+  assert.equal(requests[0]?.headers.get("chatgpt-account-id"), "account-1");
+  assert.equal((await requests[0]?.json() as { sdp?: string }).sdp, "v=0\r\na=offer\r\n");
 });
 
 test("eval routes require a configured coordinator origin", async () => {
