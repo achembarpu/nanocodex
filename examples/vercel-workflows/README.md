@@ -49,6 +49,14 @@ journal, not from an in-turn model or tool boundary. Deployments that need
 mid-step crash recovery should back the same `DurabilityStore` interface with
 an external atomic compare-and-append service instead of this in-step adapter.
 
+The browser intentionally does not mount `nanocodex-tui-react`. Its agent
+transcript is an `@wterm/react` terminal fed by a small ANSI renderer over the
+same replayable, client-safe Workflow event stream. That consumer boundary is
+the replacement seam: an application can render the snapshot with xterm.js or
+ordinary React without changing the headless Nanocodex agent, its durable
+journal, or its transport. The example keeps the adapter local because no new
+core UI abstraction is needed to drive a real alternative renderer.
+
 Every Workflow actor also owns a named Vercel Sandbox. The caller-defined
 `sandbox_exec`, `sandbox_start_process`, `sandbox_read_file`,
 `sandbox_write_file`, `sandbox_list_files`, and `sandbox_preview` tools use its
@@ -61,7 +69,7 @@ its port before requesting a preview. The demo exposes ports 3000, 5173, 8000,
 and 8080. Vercel OIDC authenticates Sandbox SDK calls inside the deployment, so
 no Vercel access token is passed to Nanocodex or the guest VM.
 
-The optional workspace terminal uses `@wterm/react` as the browser renderer and
+The separate optional workspace terminal also uses `@wterm/react` as its browser renderer and
 `Sandbox.openInteractive()` as the PTY owner. The attach route resolves exactly
 the same `nanocodex-<workflow-run-id>` Sandbox used by the agent tools, then
 returns the SDK's short-lived controller WebSocket URL and token. Terminal stdin
@@ -168,8 +176,9 @@ the local machine—served the response.
 2. Copy its `wrun_...` session ID.
 3. Open the deployment in a separate browser profile and join that ID.
 4. Send a prompt from either client.
-5. Detach or reload during inference; both clients resume the same durable
-   stream and terminal result.
+5. Watch the agent response stream in the wterm-based agent terminal. Detach or
+   reload during inference; both clients resume the same durable stream and
+   terminal result.
 6. Ask it to use `sandbox_start_process` for a server on port 3000, then use
    `sandbox_preview`; open the returned `vercel.run` URL.
 7. Enter the separately shared terminal token and attach. The shell starts in

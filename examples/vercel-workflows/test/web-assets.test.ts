@@ -11,9 +11,23 @@ describe("browser demo", () => {
     expect(source).toContain("window.addEventListener(\"storage\"");
     expect(source).toContain("assistant.delta");
     expect(source).toContain("nanocodex:workflow-session");
+    expect(source).toContain("nanocodex:agent-terminal-snapshot");
     expect(source).not.toContain("CHATGPT_ACCESS_TOKEN");
     expect(source).not.toContain("OPENAI_API_KEY");
     expect(source).not.toContain("cloud_api_");
+  });
+
+  it("renders the agent stream through wterm instead of the bundled TUI", async () => {
+    const page = await readFile(new URL("../app/page.tsx", import.meta.url), "utf8");
+    const terminal = await readFile(
+      new URL("../app/agent-terminal.tsx", import.meta.url),
+      "utf8",
+    );
+    expect(page).toContain("<AgentTerminal />");
+    expect(page).not.toContain('id="transcript"');
+    expect(terminal).toContain('from "@wterm/react"');
+    expect(terminal).toContain("renderAgentTerminal");
+    expect(terminal).not.toContain("nanocodex-tui-react");
   });
 
   it("keeps the PTY attachment separate from the replayable agent stream", async () => {

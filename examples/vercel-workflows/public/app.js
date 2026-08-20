@@ -1,6 +1,8 @@
 const STORAGE_KEY = "nanocodex.vercel.workflow.web.v1";
 const CLIENT_KEY = "nanocodex.vercel.workflow.client";
 const TERMINAL_SESSION_EVENT = "nanocodex:workflow-session";
+const AGENT_TERMINAL_EVENT = "nanocodex:agent-terminal-snapshot";
+const AGENT_TERMINAL_READY_EVENT = "nanocodex:agent-terminal-ready";
 const MAX_STREAMED_TEXT = 1024 * 1024;
 const byId = (id) => document.getElementById(id);
 const ui = {
@@ -16,7 +18,6 @@ const ui = {
   session: byId("session"),
   sessionId: byId("session-id"),
   status: byId("status"),
-  transcript: byId("transcript"),
 };
 
 let state = loadState() ?? freshState();
@@ -41,6 +42,7 @@ if (state.sessionId) connect();
 window.addEventListener("storage", (event) => {
   if (event.key === STORAGE_KEY) syncStoredState(event.newValue);
 });
+window.addEventListener(AGENT_TERMINAL_READY_EVENT, renderMessages);
 
 ui.newSession.addEventListener("click", () => void createSession());
 ui.joinSession.addEventListener("click", () => joinSession(ui.sessionId.value.trim()));
@@ -262,34 +264,12 @@ function renderState() {
 }
 
 function renderMessages() {
-  ui.transcript.replaceChildren();
-  if (!state.messages.length && !streamedText) {
-    const empty = document.createElement("article");
-    empty.className = "system";
-    empty.textContent = "Send a prompt, detach during inference, then reconnect this or another client to the same Workflow stream.";
-    ui.transcript.append(empty);
-  }
-  for (const message of state.messages) {
-    const article = document.createElement("article");
-    article.className = message.role;
-    const label = document.createElement("strong");
-    label.textContent = message.role;
-    const text = document.createElement("div");
-    text.textContent = message.text;
-    article.append(label, text);
-    ui.transcript.append(article);
-  }
-  if (streamedText) {
-    const article = document.createElement("article");
-    article.className = "agent live";
-    const label = document.createElement("strong");
-    label.textContent = "agent · live";
-    const text = document.createElement("div");
-    text.textContent = streamedText;
-    article.append(label, text);
-    ui.transcript.append(article);
-  }
-  ui.transcript.scrollTop = ui.transcript.scrollHeight;
+  window.dispatchEvent(new CustomEvent(AGENT_TERMINAL_EVENT, {
+    detail: {
+      messages: state.messages.map(({ role, text }) => ({ role, text })),
+      streamedText,
+    },
+  }));
 }
 
 function renderControls() {

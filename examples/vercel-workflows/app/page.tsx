@@ -1,3 +1,4 @@
+import { AgentTerminal } from "./agent-terminal";
 import { WorkspaceTerminal } from "./workspace-terminal";
 
 export default function Home() {
@@ -32,9 +33,7 @@ export default function Home() {
         inside the Vercel Function step.
       </p>
 
-      <section id="transcript" className="transcript" aria-live="polite">
-        <article className="system">Create a workflow session, then send a prompt. You can detach, reload, or join it from another client.</article>
-      </section>
+      <AgentTerminal />
 
       <form id="prompt-form">
         <textarea id="prompt" rows={3} maxLength={1_048_576} placeholder="Ask the durable workflow actor…" required />
