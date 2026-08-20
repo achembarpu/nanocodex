@@ -245,3 +245,31 @@ test("late message consumers rehydrate the current ready session", () => {
   unsubscribeReplacement();
   unmount();
 });
+
+test("worker errors clear stale ready sessions and disable dispatch", () => {
+  const worker = {
+    onerror: null,
+    onmessage: null,
+    onmessageerror: null,
+    postMessage() {},
+    terminate() {},
+  };
+  const config = createConfig({ worker: () => worker });
+  const unmount = config.mount();
+  worker.onmessage({ data: { type: "ready", sessionId: "root" } });
+
+  worker.onerror({ message: "mobile worker was discarded" });
+
+  assert.deepEqual(config.getSnapshot(), {
+    status: "error",
+    error: "mobile worker was discarded",
+  });
+  assert.equal(worker.onmessage, null);
+  assert.equal(worker.onerror, null);
+  assert.equal(worker.onmessageerror, null);
+  assert.throws(() => config.dispatch({ type: "prompt" }), /not running/);
+  const late = [];
+  config.subscribeMessages((message) => late.push(message));
+  assert.deepEqual(late, []);
+  unmount();
+});

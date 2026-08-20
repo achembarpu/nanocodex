@@ -44,6 +44,18 @@ export function createConfig(options) {
         }
         for (const listener of messageListeners) listener(data);
       };
+      current.onerror = (event) => {
+        if (worker !== current || generation !== currentGeneration) return;
+        closeWorker();
+        setSnapshot("error", typeof event?.message === "string" && event.message
+          ? event.message
+          : "Agent worker failed");
+      };
+      current.onmessageerror = () => {
+        if (worker !== current || generation !== currentGeneration) return;
+        closeWorker();
+        setSnapshot("error", "Agent worker returned an unreadable message");
+      };
       current.postMessage(command);
     } catch (error) {
       if (worker === current) closeWorker();
@@ -62,6 +74,8 @@ export function createConfig(options) {
     generation += 1;
     if (!current) return;
     current.onmessage = null;
+    current.onerror = null;
+    current.onmessageerror = null;
     current.terminate();
   }
 

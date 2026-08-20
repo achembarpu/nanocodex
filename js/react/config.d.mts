@@ -14,6 +14,8 @@ export type WorkerLike<
   Message extends WorkerMessage = WorkerMessage,
 > = {
   onmessage: ((event: MessageEvent<Message>) => void) | null;
+  onerror?: ((event: ErrorEvent) => void) | null;
+  onmessageerror?: ((event: MessageEvent<unknown>) => void) | null;
   postMessage(message: Command): void;
   terminate(): void;
 };
