@@ -23,11 +23,19 @@ export declare namespace create {
     /** Caller-owned rooted filesystem mounted through standard workspace tools. */
     filesystem?: Workspace | undefined;
     module?: unknown;
-    tools?: ToolConfiguration<SubagentTool> | undefined;
     transport: Transport;
   } & (
-    | { durability?: undefined; durabilityId?: undefined }
-    | { durability: DurabilityStore; durabilityId: string }
+    | {
+      durability?: undefined;
+      durabilityId?: undefined;
+      tools?: ToolConfiguration<SubagentTool> | undefined;
+    }
+    | {
+      durability: DurabilityStore;
+      durabilityId: string;
+      /** Durable agents accept caller tools, but not runtime-owned subagent extensions. */
+      tools?: ToolConfiguration | undefined;
+    }
   );
   type ReturnType = Agent;
 }

@@ -62,6 +62,12 @@ inside an operation. An unfinished step is classified from its retry policy:
 retry-safe steps can start another attempt, while an unfinished unsafe step is
 reported as ambiguous and is never silently repeated.
 
+Completed tool outputs are replayed only while the recovered agent still owns
+the named tool. If a deployment removes a runtime-owned tool, recovery emits an
+explicit failed tool result rather than returning an opaque handle whose owner
+no longer exists. Child agents need independent execution policies; the root
+policy is never silently discarded during `spawn` or `fork`.
+
 The runtime follows the same ownership model as the agent SDK. A
 `DurableSession` is a cheap channel handle; one spawned task owns its reducer,
 live claims, revision, and store. The store itself is moved into that task.

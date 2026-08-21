@@ -120,6 +120,15 @@ pub enum NanocodexError {
     #[error("invalid execution policy state: {0}")]
     InvalidExecutionPolicy(String),
 
+    /// A child agent was requested from an execution-policy-owned session.
+    #[error(
+        "cannot {operation} from an agent with an attached execution policy; build the child with its own execution policy"
+    )]
+    ExecutionPolicyBranchUnsupported {
+        /// Requested child operation.
+        operation: &'static str,
+    },
+
     /// A typed execution boundary could not be encoded or decoded.
     #[error("execution policy payload is invalid: {0}")]
     ExecutionPayload(#[source] serde_json::Error),

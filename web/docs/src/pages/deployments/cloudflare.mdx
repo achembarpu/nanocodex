@@ -40,7 +40,7 @@ Rust/WASM owns operation deduplication, checkpoint reconstruction, committed
 step-output replay, and ambiguous unsafe-tool classification.
 
 ```ts
-import { Agent, Subagents } from "nanocodex/host";
+import { Agent } from "nanocodex/host";
 
 const agent = await Agent.create({
   transport,
@@ -48,12 +48,19 @@ const agent = await Agent.create({
   sessionId,
   durability: this.#durabilityStore(),
   durabilityId: sessionId,
-  tools: [...sandboxTools, ...Subagents.create()],
+  tools: [...sandboxTools],
 });
 ```
 
 That SQLite store is why the restart claim is durable. An in-memory store would
 not survive object eviction.
+
+This durable root deliberately omits `Subagents.create()`. The subagent
+registry and child drivers belong to one live runtime and cannot be reconstructed
+from the root journal after Durable Object eviction. The SDK rejects an attached
+execution policy before spawning a child, and a completed tool result is not
+replayed when its handler is absent from the recovered runtime; neither boundary
+can emit a ghost child ID.
 
 ## Hibernation boundary
 

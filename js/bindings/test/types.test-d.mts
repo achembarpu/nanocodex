@@ -243,6 +243,20 @@ async function check() {
   await HostAgent.create({ transport: HostTransport.openAi({ apiKey }), durability });
   // @ts-expect-error durability and durabilityId are one required pair.
   await HostAgent.create({ transport: HostTransport.openAi({ apiKey }), durabilityId: "journal-1" });
+  await HostAgent.create({
+    transport: HostTransport.openAi({ apiKey }),
+    durability,
+    durabilityId: "journal-1",
+    // @ts-expect-error runtime-owned subagents cannot be reconstructed by a durable Agent.
+    tools: [...BrowserSubagents.create()],
+  });
+  // @ts-expect-error runtime-owned subagents cannot be reconstructed by a durable Agent.
+  await Agent.create({
+    transport: Transport.openAi({ apiKey }),
+    durability,
+    durabilityId: "journal-1",
+    tools: [...Subagents.create()],
+  });
   // @ts-expect-error a function-valued durability store cannot cross the package Worker boundary.
   await BrowserAgent.create({ transport: workerTransport, durability, durabilityId: "journal-1" });
   const socketRequest = {} as BrowserWebSocketRequest;

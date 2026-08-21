@@ -1,3 +1,4 @@
+import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import vm from "node:vm";
@@ -18,4 +19,10 @@ test("the emitted inline browser client is valid JavaScript", async () => {
   const response = loaded.exports.webAsset("/app.js");
   const app = await response.text();
   new vm.Script(app, { filename: "app.js" });
+});
+
+test("the durable root omits runtime-owned subagents", async () => {
+  const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
+  assert.match(source, /durability:\s*this\.#durabilityStore\(\)/);
+  assert.doesNotMatch(source, /Subagents\.create|spawn_agent/);
 });

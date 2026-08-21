@@ -20,9 +20,9 @@ pub(in crate::agent) struct AgentOrigin {
     pub(in crate::agent) parent_session_id: Option<Arc<str>>,
 }
 
-impl<S> Clone for BranchSpawner<S> {
-    fn clone(&self) -> Self {
-        Self {
+impl<S> BranchSpawner<S> {
+    fn for_new_thread(&self, operation: &'static str) -> Result<Self> {
+        Ok(Self {
             config: Arc::clone(&self.config),
             tools: self.tools.clone(),
             lineage_id: Arc::clone(&self.lineage_id),
@@ -31,9 +31,9 @@ impl<S> Clone for BranchSpawner<S> {
             context_config: self.context_config.clone(),
             context_source: self.context_source.clone(),
             depth: self.depth,
-            execution: self.execution.for_new_thread(),
+            execution: self.execution.for_new_thread(operation)?,
             service_factory: Arc::clone(&self.service_factory),
-        }
+        })
     }
 }
 
@@ -53,7 +53,7 @@ where
     ) -> Result<(Nanocodex, AgentEvents)> {
         let session_id = SessionId::new();
         let workspace = Some(Arc::<str>::from(checkpoint.model().workspace()));
-        let mut spawner = self.clone();
+        let mut spawner = self.for_new_thread("fork")?;
         spawner.context_source = spawner.context_config.build();
         let mut config = (*spawner.config).clone();
         config.model = model;
@@ -104,7 +104,7 @@ where
             context_config: self.context_config.clone(),
             context_source: self.context_config.build(),
             depth,
-            execution: self.execution.for_new_thread(),
+            execution: self.execution.for_new_thread("spawn")?,
             service_factory: Arc::clone(&self.service_factory),
         };
         let service = (spawner.service_factory)(Arc::clone(&spawner.config));

@@ -1,6 +1,6 @@
 export const subagentsBrand = Symbol("nanocodex.subagents");
 
-export function resolveTools(configuration) {
+export function resolveTools(configuration, durable = false) {
   if (!Array.isArray(configuration)) {
     return { tools: configuration, subagents: undefined };
   }
@@ -20,6 +20,11 @@ export function resolveTools(configuration) {
     const { name, ...tool } = entry;
     if (Object.hasOwn(tools, name)) throw new Error(`tool is already configured: ${name}`);
     tools[name] = tool;
+  }
+  if (durable && subagents) {
+    throw new TypeError(
+      "Subagents.create() cannot be combined with durability because child agents are runtime-owned and cannot be reconstructed after recovery",
+    );
   }
   return { tools, subagents };
 }

@@ -124,6 +124,13 @@ step is replayed from the journal after Worker loss. A tool start without a
 committed completion stops with an explicit ambiguous-outcome error so the
 application can reconcile the external system before retrying.
 
+The example intentionally does not install `Subagents.create()`. Subagent
+registries and child drivers are owned by one live agent runtime, while this
+Durable Object reconstructs its root from SQLite after eviction. Combining the
+two would let a journaled `spawn_agent` result outlive the child it names.
+Nanocodex rejects that composition instead of silently dropping the child's
+execution policy or returning a ghost child ID after recovery.
+
 `smoke:sandbox` bypasses the model and directly attacks the same bounded tool
 handlers used by the agent. It checks write/exec/read/list behavior, non-zero
 exits, output and timeout limits, path traversal and oversized-write rejection,

@@ -29,12 +29,20 @@ export declare namespace create {
     executionEnvironment?: ExecutionEnvironment | undefined;
     /** Optional CSP-compatible Code Mode evaluator, such as createQuickJsEvaluator(). */
     codeEvaluator?: CodeEvaluator | undefined;
-    tools?: ToolConfiguration<SubagentTool> | undefined;
     /** Defaults to the same-origin Nanocodex `/api/responses` proxy. */
     transport?: Transport | undefined;
   } & (
-    | { durability?: undefined; durabilityId?: undefined }
-    | { durability: DurabilityStore; durabilityId: string }
+    | {
+      durability?: undefined;
+      durabilityId?: undefined;
+      tools?: ToolConfiguration<SubagentTool> | undefined;
+    }
+    | {
+      durability: DurabilityStore;
+      durabilityId: string;
+      /** Durable agents accept caller tools, but not runtime-owned subagent extensions. */
+      tools?: ToolConfiguration | undefined;
+    }
   );
   type ReturnType = Agent;
 }

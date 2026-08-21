@@ -51,7 +51,10 @@ export function create(options = {}) {
     apiBaseUrl,
     websocketWarmup,
   } = resolveResponsesTransport(transport);
-  const { tools: hostTools, subagents: subagentConfig } = resolveTools(tools);
+  const { tools: hostTools, subagents: subagentConfig } = resolveTools(
+    tools,
+    durability !== undefined || durabilityId !== undefined,
+  );
   const events = createEventChannel();
   if (filesystem && workspace !== undefined && workspace !== filesystem.root) {
     throw new TypeError("workspace must match filesystem.root when both are provided");

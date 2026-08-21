@@ -180,6 +180,7 @@ where
                 async move {
                     let started_at = active.started_at;
                     let step_id = format!("tool-{call_index}-{}", call.call_id);
+                    let unavailable = unsupported_tool_message(tools, &call).is_some();
                     let recovered = if let Some(steps) = &execution_steps {
                         match steps
                             .begin::<_, CompletedToolCall>(
@@ -197,7 +198,11 @@ where
                         None
                     };
                     let (result, executed) = if let Some(completed) = recovered {
-                        (Ok(completed), false)
+                        if unavailable {
+                            (Ok(Self::unavailable_recovered_tool_call(&active)), false)
+                        } else {
+                            (Ok(completed), false)
+                        }
                     } else {
                         let dispatch = async {
                             if supports_parallel {
@@ -429,6 +434,32 @@ where
             success: false,
             duration_ns,
             work_duration_ns: Self::completed_tool_work_duration(active),
+            output,
+            structured_result,
+            metadata: None,
+            response_items: vec![response_item],
+        }
+    }
+
+    fn unavailable_recovered_tool_call(active: &ActiveToolCall) -> CompletedToolCall {
+        let output = ToolOutputBody::Text(format!(
+            "cannot replay completed tool call `{}` because the tool is unavailable in the recovered agent runtime",
+            active.name
+        ));
+        let structured_result = output.structured_result();
+        let duration_ns = elapsed_ns(active.started_at);
+        record_tool_span_terminal(&active.span, "failed", "ERROR", duration_ns, &output);
+        let response_item = match active.kind {
+            CodeCallKind::Custom => custom_tool_output(active.call_id.clone(), output.clone()),
+            CodeCallKind::Function => function_tool_output(active.call_id.clone(), output.clone()),
+            CodeCallKind::ToolSearch => tool_search_output(active.call_id.clone(), Vec::new()),
+        };
+        CompletedToolCall {
+            call_id: active.call_id.clone(),
+            tool: active.name.clone(),
+            success: false,
+            duration_ns,
+            work_duration_ns: 0,
             output,
             structured_result,
             metadata: None,

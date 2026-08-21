@@ -16,7 +16,6 @@ import {
 } from "nanocodex/durability";
 import {
   Agent,
-  Subagents,
   Transport,
   type BrowserWebSocketRequest,
 } from "nanocodex/host";
@@ -509,7 +508,7 @@ export class NanocodexSession extends DurableObject<Env> {
       durability: this.#durabilityStore(),
       durabilityId: session.session_id,
       workspace: "/workspace",
-      instructions: "You are Nanocodex running inside a Cloudflare Durable Object. Use the sandbox_* tools for code, files, and previews; their /workspace is isolated and persisted in R2 for this session. Delegate independent work with spawn_agent and use the task-tree communication tools to coordinate children.",
+      instructions: "You are Nanocodex running inside a Cloudflare Durable Object. Use the sandbox_* tools for code, files, and previews; their /workspace is isolated and persisted in R2 for this session.",
       // Workers forbid eval/new Function. Direct mode keeps caller-defined
       // tools in the WASM lifecycle while dispatching handlers through the
       // typed host bridge without dynamic code generation.
@@ -534,9 +533,6 @@ export class NanocodexSession extends DurableObject<Env> {
             workspace: "/workspace",
           }),
         },
-        // The imported module contains nanocodex-subagents; this spread enables
-        // its Rust-owned tools for this Durable Object's agent family.
-        ...Subagents.create({ maxConcurrency: 8 }),
       ],
     });
     this.#events = agent.events.watch();

@@ -206,12 +206,14 @@ impl ExecutionConfig {
         self.policy = Some(policy);
     }
 
-    #[cfg_attr(target_family = "wasm", allow(clippy::missing_const_for_fn))]
-    pub(crate) fn for_new_thread(&self) -> Self {
-        Self {
+    pub(crate) fn for_new_thread(&self, operation: &'static str) -> Result<Self> {
+        if self.policy.is_some() {
+            return Err(NanocodexError::ExecutionPolicyBranchUnsupported { operation });
+        }
+        Ok(Self {
             platform: self.platform.for_new_thread(),
             policy: None,
-        }
+        })
     }
 
     #[allow(clippy::too_many_arguments)]
