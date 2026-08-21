@@ -3,6 +3,7 @@ import { test } from "node:test";
 
 import worker from "./index.ts";
 import { CHATGPT_REALTIME_INSTRUCTIONS } from "nanocodex/browser/realtime";
+import { imageGeneration, web } from "nanocodex/tools";
 
 const TEST_BYOK_SESSION_ID = "a".repeat(43);
 const TEST_BYOK_COOKIE = `__Secure-nanocodex_byok_v2=${TEST_BYOK_SESSION_ID}`;
@@ -164,6 +165,83 @@ test("tool proxies keep credentials server-side and preserve native request shap
     });
     assert.deepEqual(JSON.parse(String(upstream[1]?.init?.body)), {
       prompt: "a tiny robot",
+      background: "auto",
+      model: "gpt-image-2",
+      quality: "auto",
+      size: "auto",
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("browser tools join every web operation and workspace image edits to the Worker proxy", async () => {
+  const originalFetch = globalThis.fetch;
+  const upstream: Array<{ body: unknown; url: string }> = [];
+  globalThis.fetch = (async (input: string | URL | Request, init?: RequestInit) => {
+    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
+    upstream.push({ body: JSON.parse(String(init?.body)), url });
+    return url.endsWith("/alpha/search")
+      ? Response.json({ output: "all operations reached search" })
+      : Response.json({ data: [{ b64_json: "ZWRpdGVk" }] });
+  }) as typeof fetch;
+
+  try {
+    const { credentials, namespace } = createByokSessions();
+    credentials.set(TEST_BYOK_SESSION_ID, "server-secret");
+    const env = { ENVIRONMENT: "test", BYOK_SESSIONS: namespace };
+    const hostFetch: typeof fetch = async (input, init) => {
+      const requestUrl = input instanceof Request
+        ? input.url
+        : new URL(String(input), "https://demo.test").href;
+      const headers = new Headers(init?.headers ?? (input instanceof Request ? input.headers : undefined));
+      headers.set("origin", "https://demo.test");
+      headers.set("cookie", TEST_BYOK_COOKIE);
+      return worker.fetch(new Request(requestUrl, { ...init, headers }), env);
+    };
+    const context = Object.freeze({
+      callId: "tool-call-1",
+      parentCallId: "",
+      sessionId: "browser-session-1",
+      signal: new AbortController().signal,
+    });
+    const commands = {
+      search_query: [{ q: "nanocodex" }],
+      image_query: [{ q: "rust wasm" }],
+      open: [{ ref_id: "turn0search0" }],
+      click: [{ ref_id: "turn0search0", id: 1 }],
+      find: [{ ref_id: "turn0search0", pattern: "WASM" }],
+      finance: [{ ticker: "AMD", type: "equity", market: "USA" }],
+      weather: [{ location: "Athens" }],
+      sports: [{ fn: "standings", league: "nba" }],
+      time: [{ utc_offset: "+03:00" }],
+      response_length: "medium",
+    };
+    assert.equal(
+      await web({ fetch: hostFetch }).handler(commands, context),
+      "all operations reached search",
+    );
+
+    const edited = await imageGeneration({
+      fetch: hostFetch,
+      workspace: {
+        async readFile(path: string) {
+          assert.equal(path, "/workspace/pixel.png");
+          return Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+        },
+      },
+    }).handler({
+      prompt: "make the pixel glow",
+      referenced_image_paths: ["/workspace/pixel.png"],
+    }, context);
+    assert.deepEqual(edited, { image_url: "data:image/png;base64,ZWRpdGVk" });
+
+    assert.equal(upstream[0]?.url, "https://api.openai.com/v1/alpha/search");
+    assert.deepEqual((upstream[0]?.body as { commands?: unknown }).commands, commands);
+    assert.equal(upstream[1]?.url, "https://api.openai.com/v1/images/edits");
+    assert.deepEqual(upstream[1]?.body, {
+      images: [{ image_url: "data:image/png;base64,iVBORw0KGgo=" }],
+      prompt: "make the pixel glow",
       background: "auto",
       model: "gpt-image-2",
       quality: "auto",

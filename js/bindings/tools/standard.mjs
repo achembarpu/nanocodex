@@ -165,6 +165,12 @@ export function updatePlan() {
       plans.set(context.sessionId, structuredClone(value));
       return { updated: true };
     },
+    releaseSession(sessionId) {
+      plans.delete(sessionId);
+    },
+    dispose() {
+      plans.clear();
+    },
   });
 }
 

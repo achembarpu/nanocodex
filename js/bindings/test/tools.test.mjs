@@ -112,6 +112,48 @@ test("each factory returns an immutable named tool for direct array composition"
   assert.equal(viewImage({ workspace: { readFile: async () => new Uint8Array() } }).name, "view_image");
 });
 
+test("update_plan validates active work and releases session-owned state", async () => {
+  const tool = updatePlan();
+  const plan = {
+    explanation: "ship the browser",
+    plan: [
+      { step: "wire", status: "completed" },
+      { step: "verify", status: "in_progress" },
+    ],
+  };
+  assert.deepEqual(await tool.handler(plan, context), { updated: true });
+  plan.plan[1].step = "mutated after publish";
+  await assert.rejects(
+    tool.handler({
+      plan: [
+        { step: "one", status: "in_progress" },
+        { step: "two", status: "in_progress" },
+      ],
+    }, context),
+    /at most one plan step/,
+  );
+  tool.releaseSession?.(context.sessionId);
+  tool.dispose?.();
+});
+
+test("view_image rejects unsupported and oversized workspace files", async () => {
+  const unsupported = viewImage({
+    workspace: { readFile: async () => new TextEncoder().encode("plain text") },
+  });
+  await assert.rejects(
+    unsupported.handler({ path: "/workspace/readme.txt" }, context),
+    /supports PNG, JPEG, GIF, WebP, and SVG/,
+  );
+
+  const oversized = viewImage({
+    workspace: { readFile: async () => new Uint8Array(10 * 1024 * 1024 + 1) },
+  });
+  await assert.rejects(
+    oversized.handler({ path: "/workspace/huge.png" }, context),
+    /exceeds 10 MiB/,
+  );
+});
+
 test("the code runtime forwards session and host lifecycle to stateful tools", () => {
   const released = [];
   let disposals = 0;
