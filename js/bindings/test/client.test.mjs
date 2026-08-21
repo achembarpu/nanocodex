@@ -194,11 +194,11 @@ test("the headless client exposes matching direct and standalone actions", async
     { workspace: "/workspace", history: [{ type: "message", role: "developer" }] },
   );
   assert.equal(
-    agent.session.realtime.delegation("ship", [{ role: "user", text: "now" }]),
+    await agent.session.realtime.delegation("ship", [{ role: "user", text: "now" }]),
     "delegated:ship:user: now",
   );
   assert.equal(
-    agent.session.realtime.tailDelegation([{ role: "assistant", text: "done" }]),
+    await agent.session.realtime.tailDelegation([{ role: "assistant", text: "done" }]),
     "tail:assistant: done",
   );
 

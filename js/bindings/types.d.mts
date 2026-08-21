@@ -255,8 +255,13 @@ export type AgentActions = {
     realtime: {
       start(): Promise<AgentSessionContext>;
       end(): Promise<AgentSessionContext>;
-      delegation(input: string, transcript?: readonly RealtimeTranscriptEntry[]): string;
-      tailDelegation(transcript: readonly RealtimeTranscriptEntry[]): string | undefined;
+      delegation(
+        input: string,
+        transcript?: readonly RealtimeTranscriptEntry[],
+      ): Promise<string>;
+      tailDelegation(
+        transcript: readonly RealtimeTranscriptEntry[],
+      ): Promise<string | undefined>;
     };
   };
   turn: {

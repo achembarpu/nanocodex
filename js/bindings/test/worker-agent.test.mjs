@@ -421,10 +421,14 @@ test("session, branching, realtime, and graceful lifecycle remain DefaultAgent-s
   await root.session.realtime.start();
   await root.session.realtime.end();
   assert.equal(
-    root.session.realtime.delegation("fix <x>", [{ role: "user", text: "yes & now" }]),
-    "<realtime_delegation>\n  <input>fix &lt;x&gt;</input>\n  <transcript_delta>user: yes &amp; now</transcript_delta>\n</realtime_delegation>",
+    await root.session.realtime.delegation("fix <x>", [{ role: "user", text: "yes & now" }]),
+    "canonical:fix <x>:user: yes & now",
   );
-  assert.equal(root.session.realtime.tailDelegation([]), undefined);
+  assert.equal(await root.session.realtime.tailDelegation([]), undefined);
+  assert.equal(
+    fixture.log.some(([kind]) => kind === "realtime-delegation"),
+    true,
+  );
 
   const first = root.turn.prompt({ input: "first" });
   const firstResult = first.result();
@@ -1016,6 +1020,16 @@ function createFixture(options = {}) {
       async endRealtimeConversation() {
         log.push(["realtime-end", sessionId]);
         return JSON.stringify({ workspace: `/workspace/${sessionId}`, history: [] });
+      },
+      realtimeDelegation(input, transcript) {
+        const entries = JSON.parse(transcript);
+        log.push(["realtime-delegation", sessionId, input, entries]);
+        return `canonical:${input}:${entries.map(({ role, text }) => `${role}: ${text}`).join("\n")}`;
+      },
+      realtimeTailDelegation(transcript) {
+        const entries = JSON.parse(transcript);
+        log.push(["realtime-tail", sessionId, entries]);
+        return entries.length ? "canonical-tail" : undefined;
       },
       async shutdown() { log.push(["shutdown", sessionId]); },
       free() {

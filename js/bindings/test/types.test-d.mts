@@ -177,10 +177,10 @@ async function check() {
   );
   sessionContext.history;
   const realtimeContext: AgentSessionContext = await agent.session.realtime.start();
-  const realtimeDelegation: string = agent.session.realtime.delegation("inspect the workspace", [
+  const realtimeDelegation: string = await agent.session.realtime.delegation("inspect the workspace", [
     { role: "user", text: "Please inspect it." },
   ]);
-  const realtimeTail: string | undefined = agent.session.realtime.tailDelegation([
+  const realtimeTail: string | undefined = await agent.session.realtime.tailDelegation([
     { role: "assistant", text: "I will hand this back." },
   ]);
   await agent.session.realtime.end();

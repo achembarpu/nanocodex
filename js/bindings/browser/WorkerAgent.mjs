@@ -16,7 +16,6 @@ export const WORKER_EVENT_BATCH_MAX_BYTES = 256 * 1024;
 const PREWARM_TIMEOUT_MS = 15_000;
 const PREWARM_RETENTION_MS = 30_000;
 const PROTOCOL = "nanocodex.worker-agent.v1";
-const REALTIME_TAIL_INSTRUCTION = "The user just ended their realtime session. Here is the remaining handoff/transcript tail. You probably do not have to do anything; acknowledge the handoff unless the transcript itself asks for something.";
 const eventEncoder = new TextEncoder();
 const eventDecoder = new TextDecoder("utf-8", { fatal: true });
 const recentImages = new Map();
@@ -496,6 +495,12 @@ async function dispatch(message, state) {
   if (method === "agent.appendDeveloperMessage") return agent.session.appendDeveloperMessage(args[1]);
   if (method === "agent.realtime.start") return agent.session.realtime.start();
   if (method === "agent.realtime.end") return agent.session.realtime.end();
+  if (method === "agent.realtime.delegation") {
+    return agent.session.realtime.delegation(args[1], JSON.parse(args[2]));
+  }
+  if (method === "agent.realtime.tailDelegation") {
+    return agent.session.realtime.tailDelegation(JSON.parse(args[1]));
+  }
   if (method === "agent.shutdown") {
     state.moveWatcherFrom(args[0]);
     return agent.session.shutdown();
@@ -611,8 +616,8 @@ class WorkerConnection {
       appendDeveloperMessage: async (text) => JSON.stringify(await connection.rpc("agent.appendDeveloperMessage", [agentId, text])),
       startRealtimeConversation: async () => JSON.stringify(await connection.rpc("agent.realtime.start", [agentId])),
       endRealtimeConversation: async () => JSON.stringify(await connection.rpc("agent.realtime.end", [agentId])),
-      realtimeDelegation: (input, transcript) => formatRealtimeDelegation(input, JSON.parse(transcript)),
-      realtimeTailDelegation: (transcript) => formatRealtimeTail(JSON.parse(transcript)),
+      realtimeDelegation: (input, transcript) => connection.rpc("agent.realtime.delegation", [agentId, input, transcript]),
+      realtimeTailDelegation: (transcript) => connection.rpc("agent.realtime.tailDelegation", [agentId, transcript]),
       shutdown: () => connection.rpc("agent.shutdown", [agentId]),
       free() {},
     };
@@ -1090,33 +1095,6 @@ function assertCloneable(value, label) {
   catch (error) { throw new TypeError(`${label} must be structured-clone-safe`, { cause: error }); }
 }
 
-function formatRealtimeDelegation(input, transcript = []) {
-  if (typeof input !== "string") throw new TypeError("realtime delegation input must be a string");
-  const escapedInput = escapeXml(input);
-  const delta = transcriptText(transcript);
-  return delta
-    ? `<realtime_delegation>\n  <input>${escapedInput}</input>\n  <transcript_delta>${delta}</transcript_delta>\n</realtime_delegation>`
-    : `<realtime_delegation>\n  <input>${escapedInput}</input>\n</realtime_delegation>`;
-}
-
-function formatRealtimeTail(transcript) {
-  const delta = transcriptText(transcript);
-  return delta
-    ? `<realtime_delegation>\n  <source>transcript_tail_flush</source>\n  <input>${escapeXml(REALTIME_TAIL_INSTRUCTION)}</input>\n  <transcript_delta>${delta}</transcript_delta>\n</realtime_delegation>`
-    : undefined;
-}
-
-function transcriptText(transcript) {
-  if (!Array.isArray(transcript)) throw new TypeError("realtime transcript must be an array");
-  return escapeXml(transcript.map((entry) => {
-    if (!entry || (entry.role !== "user" && entry.role !== "assistant") || typeof entry.text !== "string") {
-      throw new TypeError("realtime transcript entries require a user/assistant role and string text");
-    }
-    return `${entry.role}: ${entry.text}`;
-  }).join("\n"));
-}
-
-function escapeXml(value) { return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;"); }
 function eventBytes(event, encoded) {
   return eventEncoder.encode(encoded ?? JSON.stringify(event)).byteLength;
 }

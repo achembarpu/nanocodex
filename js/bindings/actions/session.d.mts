@@ -17,13 +17,13 @@ export function realtimeDelegation(
   agent: Agent<object>,
   input: string,
   transcript?: readonly RealtimeTranscriptEntry[],
-): string;
+): Promise<string>;
 
 /** Formats an unconsumed transcript tail, or returns undefined for an empty tail. */
 export function realtimeTailDelegation(
   agent: Agent<object>,
   transcript: readonly RealtimeTranscriptEntry[],
-): string | undefined;
+): Promise<string | undefined>;
 
 /** Compacts retained history immediately without fabricating a user prompt. */
 export function compact(agent: Agent<object>): Promise<void>;

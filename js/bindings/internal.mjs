@@ -144,11 +144,11 @@ export async function endRealtimeConversation(agent) {
   return parseSessionContext(await agentState(agent).raw.endRealtimeConversation());
 }
 
-export function realtimeDelegation(agent, input, transcript = []) {
+export async function realtimeDelegation(agent, input, transcript = []) {
   return agentState(agent).raw.realtimeDelegation(input, JSON.stringify(transcript));
 }
 
-export function realtimeTailDelegation(agent, transcript) {
+export async function realtimeTailDelegation(agent, transcript) {
   return agentState(agent).raw.realtimeTailDelegation(JSON.stringify(transcript));
 }
 
