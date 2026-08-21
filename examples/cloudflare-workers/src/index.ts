@@ -75,6 +75,7 @@ export interface Env {
   NANOCODEX_AUTH: DurableObjectNamespace<NanocodexSubscriptionAuth>;
   OPENAI_API_KEY?: string;
   NANOCODEX_ADMIN_TOKEN: string;
+  NANOCODEX_CAPABILITY_SECRET: string;
   NANOCODEX_AUTH_MODE?: string;
   AGENT_IDLE_TIMEOUT_MS?: string;
   OPENAI_WEBSOCKET_URL?: string;
@@ -179,10 +180,15 @@ export default {
       if (!env.NANOCODEX_ADMIN_TOKEN) {
         return json({ error: "NANOCODEX_ADMIN_TOKEN is not configured" }, { status: 503 });
       }
+      const capabilitySecret = configuredCapabilitySecret(env);
+      if (!capabilitySecret) {
+        return json({ error: "NANOCODEX_CAPABILITY_SECRET must contain at least 32 bytes" }, { status: 503 });
+      }
       if (!authorized(request, env.NANOCODEX_ADMIN_TOKEN)) {
         return json({ error: "unauthorized" }, { status: 401 });
       }
       const agentId = uuidV7();
+      const routeId = `${agentId}.${await signAgentCapability(agentId, capabilitySecret)}`;
       const stub = env.NANOCODEX_SESSIONS.getByName(agentId);
       const initialized = await stub.fetch("https://session.internal/initialize", {
         method: "PUT",
@@ -191,12 +197,15 @@ export default {
       });
       if (!initialized.ok) return json({ error: "agent initialization failed" }, { status: 503 });
       const routeBase = url.pathname === "/sessions" ? "/sessions" : "/v1/agents";
-      const websocketUrl = new URL(`${routeBase}/${agentId}/ws`, url);
+      const agentUrl = new URL(`${routeBase}/${routeId}`, url);
+      const websocketUrl = new URL(`${routeBase}/${routeId}/ws`, url);
       websocketUrl.protocol = websocketUrl.protocol === "https:" ? "wss:" : "ws:";
       return json({
         agent_id: agentId,
         session_id: agentId,
-        events_url: new URL(`${routeBase}/${agentId}/events`, url).href,
+        agent_url: agentUrl.href,
+        session_url: agentUrl.href,
+        events_url: new URL(`${routeBase}/${routeId}/events`, url).href,
         websocket_url: websocketUrl.href,
       }, { status: 201 });
     }
@@ -212,10 +221,15 @@ export default {
       return json({ error: "method_not_allowed" }, { status: 405 });
     }
     const match = url.pathname.match(/^\/(?:v1\/agents|sessions)\/([^/]+)(?:\/(.*))?$/);
-    if (!match || !SESSION_ID.test(match[1] ?? "")) {
+    if (!match) {
       return json({ error: "not_found" }, { status: 404 });
     }
-    const agentId = match[1]!;
+    const capabilitySecret = configuredCapabilitySecret(env);
+    if (!capabilitySecret) {
+      return json({ error: "NANOCODEX_CAPABILITY_SECRET is not configured" }, { status: 503 });
+    }
+    const agentId = await verifyAgentCapability(match[1] ?? "", capabilitySecret);
+    if (!agentId) return json({ error: "not_found" }, { status: 404 });
     const resource = match[2] ?? "";
     const stub = env.NANOCODEX_SESSIONS.getByName(agentId);
     const publicOrigin = `public_origin=${encodeURIComponent(url.origin)}`;
@@ -1672,6 +1686,57 @@ function modelAuthMode(env: Env): ModelAuthMode {
 function authorized(request: Request, expected: string): boolean {
   const value = request.headers.get("authorization");
   return value !== null && value === `Bearer ${expected}`;
+}
+
+let agentCapabilityKeyCache:
+  | { secret: string; key: Promise<CryptoKey> }
+  | undefined;
+
+function configuredCapabilitySecret(env: Env): string | undefined {
+  const secret = env.NANOCODEX_CAPABILITY_SECRET?.trim();
+  return secret && encoder.encode(secret).byteLength >= 32 ? secret : undefined;
+}
+
+function agentCapabilityKey(secret: string): Promise<CryptoKey> {
+  if (agentCapabilityKeyCache?.secret === secret) return agentCapabilityKeyCache.key;
+  const key = crypto.subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign", "verify"],
+  );
+  agentCapabilityKeyCache = { secret, key };
+  return key;
+}
+
+async function signAgentCapability(agentId: string, secret: string): Promise<string> {
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    await agentCapabilityKey(secret),
+    encoder.encode(agentId),
+  );
+  return [...new Uint8Array(signature)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+async function verifyAgentCapability(routeId: string, secret: string): Promise<string | undefined> {
+  const match = routeId.match(/^([0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.([0-9a-f]{64})$/);
+  if (!match) return undefined;
+  const agentId = match[1]!;
+  const encodedSignature = match[2]!;
+  const signature = new Uint8Array(32);
+  for (let offset = 0; offset < encodedSignature.length; offset += 2) {
+    signature[offset / 2] = Number.parseInt(encodedSignature.slice(offset, offset + 2), 16);
+  }
+  const valid = await crypto.subtle.verify(
+    "HMAC",
+    await agentCapabilityKey(secret),
+    signature,
+    encoder.encode(agentId),
+  );
+  return valid ? agentId : undefined;
 }
 
 function validPublicOrigin(value: string): boolean {

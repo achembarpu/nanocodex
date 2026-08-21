@@ -107,9 +107,11 @@ not read the Codex auth file or persist credentials.
 
 ## Managed REST and resumable SSE
 
-Create an agent with the router credential. The returned UUIDv7 is an unguessable
-bearer capability for every route below, so applications should keep it out of
-logs and replace this example router with their own authorization policy.
+Create an agent with the router credential. The returned route URLs contain an
+HMAC-sealed bearer capability, verified before any Durable Object lookup. This
+prevents arbitrary UUID-shaped requests from allocating empty objects. Keep the
+URLs out of logs and replace this example router with application authorization
+where appropriate.
 
 ```sh
 curl -fsS -X POST \
@@ -117,16 +119,16 @@ curl -fsS -X POST \
   http://127.0.0.1:8787/v1/agents
 ```
 
-The receipt contains `agent_id`, `events_url`, and `websocket_url`. Start the
-event stream at cursor zero, or resume after the last event your consumer fully
-processed:
+The receipt contains the plain stable `agent_id` plus sealed `agent_url`,
+`events_url`, and `websocket_url` capabilities. Start the event stream at cursor
+zero, or resume after the last event your consumer fully processed:
 
 ```sh
 curl -N -H 'Accept: text/event-stream' \
-  'http://127.0.0.1:8787/v1/agents/<agent-id>/events?cursor=0'
+  'http://127.0.0.1:8787/v1/agents/<agent-capability>/events?cursor=0'
 
 curl -N -H 'Last-Event-ID: <last-processed-cursor>' \
-  'http://127.0.0.1:8787/v1/agents/<agent-id>/events'
+  'http://127.0.0.1:8787/v1/agents/<agent-capability>/events'
 ```
 
 Every frame has the durable decimal cursor in both `id:` and `data.cursor`, and
@@ -143,16 +145,16 @@ curl -fsS -X POST \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: incoming-request-42' \
   --data '{"id":"turn-42","input":"Use exec_command to inspect /workspace"}' \
-  http://127.0.0.1:8787/v1/agents/<agent-id>/turns
+  http://127.0.0.1:8787/v1/agents/<agent-capability>/turns
 
 curl -fsS \
-  http://127.0.0.1:8787/v1/agents/<agent-id>/turns/turn-42
+  http://127.0.0.1:8787/v1/agents/<agent-capability>/turns/turn-42
 
 curl -fsS -X POST \
-  http://127.0.0.1:8787/v1/agents/<agent-id>/turns/turn-42/cancel
+  http://127.0.0.1:8787/v1/agents/<agent-capability>/turns/turn-42/cancel
 
 curl -fsS -X DELETE \
-  http://127.0.0.1:8787/v1/agents/<agent-id>
+  http://127.0.0.1:8787/v1/agents/<agent-capability>
 ```
 
 Cancellation first persists `turn_cancelling`, publishes its cursor, and only
@@ -218,11 +220,12 @@ their `NANOCODEX_*` environment variables to change the workload.
 
 For deterministic transport and subscription-refresh development without model
 usage, run `npm run mock:openai`, set
-`OPENAI_WEBSOCKET_URL=ws://127.0.0.1:8790` in API-key mode, and run the same
-probes. The mock speaks the actual streamed Responses protocol. In ChatGPT mode
-it also validates the bearer/account headers and serves rotating OAuth tokens,
-so the full Rust/WASM driver, snapshot, idle shutdown, restore, and auth-retry
-paths execute.
+`OPENAI_WEBSOCKET_URL=ws://127.0.0.1:8790` in API-key mode, provide any
+development-only `NANOCODEX_CAPABILITY_SECRET` of at least 32 bytes to Wrangler,
+and run the same probes. The mock speaks the actual streamed Responses protocol.
+In ChatGPT mode it also validates the bearer/account headers and serves rotating
+OAuth tokens, so the full Rust/WASM driver, snapshot, idle shutdown, restore,
+and auth-retry paths execute.
 
 The Worker selects the WASM binding's CSP-safe direct-tool mode because Workers
 forbid `eval` and `new Function`. This retains Nanocodex's typed Rust tool
@@ -245,6 +248,7 @@ npx wrangler secret put CHATGPT_ACCESS_TOKEN
 npx wrangler secret put CHATGPT_REFRESH_TOKEN
 npx wrangler secret put CHATGPT_ACCOUNT_ID
 npx wrangler secret put NANOCODEX_ADMIN_TOKEN
+npx wrangler secret put NANOCODEX_CAPABILITY_SECRET
 npx wrangler deploy
 NANOCODEX_WORKER_URL=https://nanocodex-durable-agent.<subdomain>.workers.dev \
 NANOCODEX_ADMIN_TOKEN=<admin-token> npm run smoke:managed
@@ -297,8 +301,10 @@ by this demo.
 Wrangler to build the complete WASM deployment without uploading it.
 
 `POST /sessions` requires `Authorization: Bearer $NANOCODEX_ADMIN_TOKEN` and
-returns a random session ID plus WebSocket URL. The session ID is then a bearer
-capability: do not log or expose it. Production applications can replace this
+returns a random session ID plus HMAC-sealed session and WebSocket URLs. A sealed
+URL is a bearer capability: do not log or expose it. Rotating
+`NANOCODEX_CAPABILITY_SECRET` intentionally invalidates outstanding URLs.
+Production applications can replace this
 small router policy with their own authentication while leaving the object and
 Nanocodex lifecycle unchanged.
 

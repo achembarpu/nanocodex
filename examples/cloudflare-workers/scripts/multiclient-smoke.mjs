@@ -76,7 +76,7 @@ try {
   }));
 } finally {
   for (const socket of sockets) socket.terminate();
-  await fetch(`${baseUrl}/sessions/${session.session_id}`, { method: "DELETE" }).catch(() => {});
+  await fetch(session.session_url, { method: "DELETE" }).catch(() => {});
 }
 
 function deferred() {

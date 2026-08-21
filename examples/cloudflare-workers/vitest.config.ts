@@ -15,6 +15,7 @@ export default defineConfig({
           CHATGPT_REFRESH_TOKEN: "test-refresh-token",
           CHATGPT_ISSUER: "http://127.0.0.1:8799",
           NANOCODEX_ADMIN_TOKEN: "test-admin-token",
+          NANOCODEX_CAPABILITY_SECRET: "test-capability-secret-at-least-32-bytes",
           NANOCODEX_AUTH_MODE: "api_key",
           OPENAI_API_KEY: "test-openai-key",
         },

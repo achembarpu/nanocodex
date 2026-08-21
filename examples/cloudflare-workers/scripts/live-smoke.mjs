@@ -137,7 +137,7 @@ try {
 } finally {
   inbox.close();
   socket.close(1000, "smoke complete");
-  await fetch(`${baseUrl}/sessions/${session.session_id}`, { method: "DELETE" }).catch(() => {});
+  await fetch(session.session_url, { method: "DELETE" }).catch(() => {});
 }
 
 function progress(stage) {
@@ -159,7 +159,7 @@ async function createSession() {
 }
 
 async function state() {
-  const response = await fetch(`${baseUrl}/sessions/${session.session_id}`);
+  const response = await fetch(session.session_url);
   if (!response.ok) {
     throw Object.assign(
       new Error(`state failed with HTTP ${response.status}: ${await response.text()}`),

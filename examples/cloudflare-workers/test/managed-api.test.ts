@@ -8,13 +8,21 @@ const admin = { authorization: `Bearer ${testEnv.NANOCODEX_ADMIN_TOKEN}` };
 const createdAgents = new Set<string>();
 
 afterEach(async () => {
-  await Promise.all([...createdAgents].map(async (id) => {
-    await SELF.fetch(`https://example.test/v1/agents/${id}`, { method: "DELETE" });
-    createdAgents.delete(id);
+  await Promise.all([...createdAgents].map(async (agentUrl) => {
+    await SELF.fetch(agentUrl, { method: "DELETE" });
+    createdAgents.delete(agentUrl);
   }));
 });
 
 describe("managed agents REST and resumable SSE", () => {
+  it("verifies signed capabilities before looking up a Durable Object", async () => {
+    const agent = await createAgent();
+    expect((await SELF.fetch(agent.agent_url)).status).toBe(200);
+    expect((await SELF.fetch(`https://example.test/v1/agents/${agent.agent_id}`)).status).toBe(404);
+    const tampered = `${agent.agent_url.slice(0, -1)}${agent.agent_url.endsWith("0") ? "1" : "0"}`;
+    expect((await SELF.fetch(tampered)).status).toBe(404);
+  });
+
   it("requires stable identifiers and strictly validates structured prompt content", async () => {
     const agent = await createAgent();
     const turnsUrl = agent.events_url.replace(/\/events$/, "/turns");
@@ -211,9 +219,8 @@ describe("managed agents REST and resumable SSE", () => {
 
   it("persists cursors across eviction and tails strictly after the acknowledged cursor", async () => {
     const agent = await createAgent();
-    const id = new URL(agent.events_url).pathname.split("/").at(-2)!;
     await within(
-      evictDurableObject(testEnv.NANOCODEX_SESSIONS.getByName(id)),
+      evictDurableObject(testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id)),
       "durable object eviction",
     );
 
@@ -244,10 +251,9 @@ describe("managed agents REST and resumable SSE", () => {
   it("replays multi-digit cursors in numeric rather than lexical order", async () => {
     const agent = await createAgent();
     await submit(agent, "ordered-turn", "produce a complete event lifecycle");
-    const agentUrl = agent.events_url.replace(/\/events$/, "");
     let latest = 0n;
     for (let attempt = 0; attempt < 80 && latest < 12n; attempt += 1) {
-      const state = await (await SELF.fetch(agentUrl)).json<{ latest_event_cursor: string }>();
+      const state = await (await SELF.fetch(agent.agent_url)).json<{ latest_event_cursor: string }>();
       latest = BigInt(state.latest_event_cursor);
       if (latest < 12n) await new Promise((resolve) => setTimeout(resolve, 25));
     }
@@ -282,11 +288,10 @@ describe("managed agents REST and resumable SSE", () => {
     })).status).toBe(413);
 
     await submit(agent, "turn-delete", "delete me");
-    const id = new URL(agent.events_url).pathname.split("/").at(-2)!;
-    const deleted = await SELF.fetch(`https://example.test/v1/agents/${id}`, { method: "DELETE" });
+    const deleted = await SELF.fetch(agent.agent_url, { method: "DELETE" });
     expect(deleted.status).toBe(204);
-    createdAgents.delete(id);
-    expect((await SELF.fetch(`https://example.test/v1/agents/${id}`)).status).toBe(404);
+    createdAgents.delete(agent.agent_url);
+    expect((await SELF.fetch(agent.agent_url)).status).toBe(404);
     expect((await SELF.fetch(agent.events_url)).status).toBe(404);
   });
 
@@ -311,6 +316,7 @@ describe("managed agents REST and resumable SSE", () => {
 
 type AgentReceipt = {
   agent_id: string;
+  agent_url: string;
   events_url: string;
 };
 
@@ -329,7 +335,7 @@ async function createAgent(): Promise<AgentReceipt> {
   });
   expect(response.status).toBe(201);
   const receipt = await response.json<AgentReceipt>();
-  createdAgents.add(receipt.agent_id);
+  createdAgents.add(receipt.agent_url);
   return receipt;
 }
 

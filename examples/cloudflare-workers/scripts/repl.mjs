@@ -23,6 +23,7 @@ if (!state) {
   state = {
     base_url: baseUrl,
     session_id: session.session_id,
+    session_url: session.session_url,
     websocket_url: session.websocket_url,
   };
   await saveState();
@@ -161,7 +162,7 @@ async function createSession() {
 }
 
 async function sessionStatus() {
-  const response = await fetch(`${baseUrl}/sessions/${state.session_id}`);
+  const response = await fetch(state.session_url);
   if (!response.ok) throw new Error(`session status failed with HTTP ${response.status}: ${await response.text()}`);
   return response.json();
 }
@@ -171,6 +172,7 @@ async function loadState() {
     const parsed = JSON.parse(await readFile(statePath, "utf8"));
     if (typeof parsed.base_url !== "string"
       || typeof parsed.session_id !== "string"
+      || typeof parsed.session_url !== "string"
       || typeof parsed.websocket_url !== "string") {
       throw new Error("missing Worker URL or session capability");
     }

@@ -22,8 +22,9 @@ try {
   await requireStatus(created.response, 201, "create agent");
   agent = await created.response.json();
   assert(typeof agent.agent_id === "string", "create agent omitted agent_id");
+  assert(typeof agent.agent_url === "string", "create agent omitted agent_url");
   assert(typeof agent.events_url === "string", "create agent omitted events_url");
-  const agentUrl = agent.events_url.replace(/\/events$/, "");
+  const agentUrl = agent.agent_url;
   const turnsUrl = `${agentUrl}/turns`;
 
   stage = "open-initial-stream";
@@ -163,8 +164,8 @@ try {
   throw error;
 } finally {
   await stream?.cancel().catch(() => {});
-  if (agent?.agent_id) {
-    await fetch(new URL(`/v1/agents/${agent.agent_id}`, baseUrl), { method: "DELETE" }).catch(() => {});
+  if (agent?.agent_url) {
+    await fetch(agent.agent_url, { method: "DELETE" }).catch(() => {});
   }
 }
 

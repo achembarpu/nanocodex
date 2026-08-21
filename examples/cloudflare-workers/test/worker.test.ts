@@ -35,9 +35,12 @@ describe("Nanocodex Durable Object Worker", () => {
 
     const created = await createSession();
     expect(created.session_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
-    expect(created.websocket_url).toBe(`wss://example.test/sessions/${created.session_id}/ws`);
+    expect(created.session_url).toMatch(new RegExp(
+      `^https://example\\.test/sessions/${created.session_id}\\.[0-9a-f]{64}$`,
+    ));
+    expect(created.websocket_url).toBe(`${created.session_url.replace("https:", "wss:")}/ws`);
 
-    const before = await SELF.fetch(`https://example.test/sessions/${created.session_id}`);
+    const before = await SELF.fetch(created.session_url);
     expect(await before.json()).toMatchObject({
       session_id: created.session_id,
       has_snapshot: false,
@@ -48,7 +51,7 @@ describe("Nanocodex Durable Object Worker", () => {
     const stub = workerEnv.NANOCODEX_SESSIONS.getByName(created.session_id);
     await evictDurableObject(stub);
 
-    const after = await SELF.fetch(`https://example.test/sessions/${created.session_id}`);
+    const after = await SELF.fetch(created.session_url);
     expect(await after.json()).toMatchObject({
       session_id: created.session_id,
       has_snapshot: false,
@@ -99,11 +102,11 @@ describe("Nanocodex Durable Object Worker", () => {
     expect((await SELF.fetch(
       `https://example.test/sandbox-preview/${created.session_id}/80/`,
     )).status).toBe(404);
-    const deleted = await SELF.fetch(`https://example.test/sessions/${created.session_id}`, {
+    const deleted = await SELF.fetch(created.session_url, {
       method: "DELETE",
     });
     expect(deleted.status).toBe(204);
-    expect((await SELF.fetch(`https://example.test/sessions/${created.session_id}`)).status).toBe(404);
+    expect((await SELF.fetch(created.session_url)).status).toBe(404);
   });
 
   it("keeps subscription credentials behind the singleton auth object", async () => {
@@ -174,7 +177,11 @@ describe("Nanocodex Durable Object Worker", () => {
   });
 });
 
-async function createSession(): Promise<{ session_id: string; websocket_url: string }> {
+async function createSession(): Promise<{
+  session_id: string;
+  session_url: string;
+  websocket_url: string;
+}> {
   const response = await SELF.fetch("https://example.test/sessions", {
     method: "POST",
     headers: authorization,

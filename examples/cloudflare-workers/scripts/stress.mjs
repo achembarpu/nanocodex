@@ -55,7 +55,7 @@ try {
   }));
 } finally {
   for (const socket of sockets) socket.close(1000, "stress complete");
-  await fetch(`${baseUrl}/sessions/${session.session_id}`, { method: "DELETE" }).catch(() => {});
+  await fetch(session.session_url, { method: "DELETE" }).catch(() => {});
 }
 
 function onceMessage(socket, predicate, timeoutMs) {

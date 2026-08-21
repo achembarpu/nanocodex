@@ -44,8 +44,8 @@ try {
     }
   }));
 
-  const states = await Promise.all(sessions.map(async ({ session_id }) => {
-    const response = await fetch(`${baseUrl}/sessions/${session_id}`);
+  const states = await Promise.all(sessions.map(async ({ session_url }) => {
+    const response = await fetch(session_url);
     if (!response.ok) throw new Error(`state failed with HTTP ${response.status}`);
     return response.json();
   }));
@@ -63,7 +63,7 @@ try {
   }));
 } finally {
   for (const socket of sockets) socket.terminate();
-  await Promise.all(sessions.map(({ session_id }) => fetch(`${baseUrl}/sessions/${session_id}`, {
+  await Promise.all(sessions.map(({ session_url }) => fetch(session_url, {
     method: "DELETE",
   }).catch(() => {})));
 }

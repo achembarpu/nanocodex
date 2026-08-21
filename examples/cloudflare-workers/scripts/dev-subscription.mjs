@@ -12,6 +12,8 @@ const codexHome = process.env.CODEX_HOME ?? join(homedir(), ".codex");
 const authPath = resolve(process.env.NANOCODEX_CODEX_AUTH_FILE ?? join(codexHome, "auth.json"));
 const workerUrl = (process.env.NANOCODEX_WORKER_URL ?? "http://127.0.0.1:8787").replace(/\/$/, "");
 const adminToken = process.env.NANOCODEX_ADMIN_TOKEN ?? "local-admin-token";
+const capabilitySecret = process.env.NANOCODEX_CAPABILITY_SECRET
+  ?? "local-capability-secret-for-development-only";
 const auth = await readCodexSubscription(authPath);
 const temporaryDirectory = await mkdtemp(join(tmpdir(), "nanocodex-cloudflare-subscription-"));
 const envPath = join(temporaryDirectory, "subscription.env");
@@ -28,6 +30,7 @@ await writeFile(envPath, [
   envLine("CHATGPT_ACCOUNT_ID", auth.accountId),
   envLine("CHATGPT_FEDRAMP", String(auth.fedramp)),
   envLine("NANOCODEX_ADMIN_TOKEN", adminToken),
+  envLine("NANOCODEX_CAPABILITY_SECRET", capabilitySecret),
   envLine("NANOCODEX_AUTH_MODE", "chatgpt"),
   envLine("OPENAI_WEBSOCKET_URL", egress.url),
   envLine("AGENT_IDLE_TIMEOUT_MS", process.env.AGENT_IDLE_TIMEOUT_MS ?? "1000"),
