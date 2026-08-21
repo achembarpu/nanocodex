@@ -71,7 +71,7 @@ function linkPreviewMetadata(): Plugin {
       handler(html, context) {
         const origin = context.server?.resolvedUrls?.local[0] ?? "https://localhost:5173";
         const url = new URL(context.path, origin);
-        return renderLinkPreviewDocument(html, url, { ENVIRONMENT: "development" });
+        return renderLinkPreviewDocument(html, url);
       },
     },
   };

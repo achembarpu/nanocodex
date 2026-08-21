@@ -10,11 +10,10 @@ const template = `<!doctype html><html><head>
 <!-- nanocodex:link-preview:start --><title>stale</title><!-- nanocodex:link-preview:end -->
 </head><body></body></html>`;
 
-function assetEnv(environment = "preview") {
+function assetEnv() {
   const requests: Request[] = [];
   return {
     env: {
-      ENVIRONMENT: environment,
       ASSETS: {
         async fetch(request: Request) {
           requests.push(request);
@@ -29,7 +28,7 @@ function assetEnv(environment = "preview") {
 }
 
 test("crawler documents contain complete route-aware production metadata", async () => {
-  const { env, requests } = assetEnv("production");
+  const { env, requests } = assetEnv();
   const request = new Request("https://nanocodex-preview.workers.dev/code?path=src%2F%3Cdriver%3E.rs", {
     headers: { accept: "text/html", "user-agent": "Twitterbot/1.0" },
   });
@@ -41,7 +40,7 @@ test("crawler documents contain complete route-aware production metadata", async
   assert.equal(response.headers.get("cache-control"), "public, max-age=0, must-revalidate");
   assert.equal(response.headers.has("etag"), false);
   assert.equal(requests[0]?.url, "https://nanocodex-preview.workers.dev/");
-  assert.match(html, /<link rel="canonical" href="https:\/\/nanocodex\.paradigm\.xyz\/code\?path=src%2F%3Cdriver%3E\.rs" \/>/);
+  assert.match(html, /<link rel="canonical" href="https:\/\/nanocodex-preview\.workers\.dev\/code\?path=src%2F%3Cdriver%3E\.rs" \/>/);
   assert.match(html, /<meta property="og:type" content="website" \/>/);
   assert.match(html, /<meta property="og:site_name" content="Nanocodex" \/>/);
   assert.match(html, /<meta property="og:image:width" content="1200" \/>/);

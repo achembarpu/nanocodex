@@ -1,7 +1,6 @@
 import { docsPreview } from "./docsPreview.ts";
 
 const SITE_NAME = "Nanocodex";
-const PRODUCTION_ORIGIN = "https://nanocodex.paradigm.xyz";
 const IMAGE_WIDTH = 1200;
 const IMAGE_HEIGHT = 630;
 const METADATA_START = "<!-- nanocodex:link-preview:start -->";
@@ -9,7 +8,6 @@ const METADATA_END = "<!-- nanocodex:link-preview:end -->";
 
 type LinkPreviewEnv = {
   ASSETS?: Fetcher;
-  ENVIRONMENT?: string;
   EVALS_DB?: D1Database;
 };
 
@@ -54,11 +52,11 @@ export async function routeLinkPreview(
 export async function renderLinkPreviewDocument(
   document: string,
   url: URL,
-  env: Pick<LinkPreviewEnv, "ENVIRONMENT" | "EVALS_DB"> = {},
+  env: Pick<LinkPreviewEnv, "EVALS_DB"> = {},
   resolved?: Preview,
 ): Promise<string> {
   const preview = resolved ?? await previewForUrl(url, env);
-  const origin = canonicalOrigin(url, env);
+  const origin = url.origin;
   const canonicalUrl = new URL(preview.canonicalPath, origin).href;
   const imagePath = new URL("/og.png", origin);
   imagePath.searchParams.set("path", preview.canonicalPath);
@@ -235,10 +233,6 @@ function injectMetadata(document: string, metadata: string): string {
     return `${document.slice(0, start)}${metadata}${document.slice(end + METADATA_END.length)}`;
   }
   return document.replace("</head>", `${metadata}\n  </head>`);
-}
-
-function canonicalOrigin(url: URL, env: LinkPreviewEnv): string {
-  return env.ENVIRONMENT === "production" ? PRODUCTION_ORIGIN : url.origin;
 }
 
 function normalizePath(pathname: string): string {
