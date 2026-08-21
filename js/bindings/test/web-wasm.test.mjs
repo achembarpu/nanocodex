@@ -4,6 +4,10 @@ import { test } from "node:test";
 import WebSocket, { WebSocketServer } from "ws";
 
 import { Agent, Transport } from "../host/index.mjs";
+import { artifact } from "../tools/artifact.mjs";
+import { bindBrowser } from "../tools/browser/index.mjs";
+import * as datasets from "../tools/dataset.mjs";
+import * as standard from "../tools/standard.mjs";
 
 const createWarmAgent = ({
   apiKey,
@@ -453,6 +457,454 @@ text(await tools[selected.name]({ message: "hello" }));`,
   }
 });
 
+test("web-target WASM executes the complete browser harness tool contract", async () => {
+  const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
+  await new Promise((resolve, reject) => {
+    server.once("listening", resolve);
+    server.once("error", reject);
+  });
+  const connection = new Promise((resolve) => server.once("connection", resolve));
+  const wasm = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
+  const png = Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+  const datasetBytes = new TextEncoder().encode(
+    '{"id":1,"label":"alpha"}\n{"id":2,"label":"beta"}\n',
+  );
+  const workspace = memoryWorkspace({
+    "/workspace/note.txt": "before\n",
+    "/workspace/pixel.png": png,
+  });
+  const effects = {
+    artifacts: [],
+    datasetRequests: [],
+    hostCalls: [],
+    images: [],
+    mcp: [],
+    rememberedImages: [],
+    web: [],
+  };
+  const runtime = bindBrowser({
+    datasets,
+    origin: "https://demo.test",
+    standard,
+    threadId: "browser-harness-e2e",
+    shell: {
+      artifactTool: artifact({
+        workspace,
+        onArtifact: (document) => effects.artifacts.push(document),
+      }),
+      execTool: {
+        description: "Run deterministic browser bash.",
+        parameters: {
+          type: "object",
+          properties: { cmd: { type: "string" } },
+          required: ["cmd"],
+          additionalProperties: false,
+        },
+        outputSchema: {
+          type: "object",
+          properties: {
+            exit_code: { type: "integer" },
+            output: { type: "string" },
+            wall_time_seconds: { type: "number" },
+          },
+          required: ["exit_code", "output", "wall_time_seconds"],
+          additionalProperties: false,
+        },
+        handler: async ({ cmd }) => ({
+          exit_code: 0,
+          output: "browser-shell:" + cmd,
+          wall_time_seconds: 0,
+        }),
+      },
+      instructions: "deterministic browser harness",
+      projectInstructions: "deterministic browser project",
+      workspace,
+    },
+  }, {
+    dataset: {
+      fetch: objectFetch(
+        new Map([["https://data.example/browser-tools.jsonl", datasetBytes]]),
+        effects.datasetRequests,
+      ),
+    },
+    images: {
+      fetch: async (url, init) => {
+        effects.images.push({ url: String(url), body: JSON.parse(init.body) });
+        return Response.json({
+          image_url: "data:image/png;base64,Z2VuZXJhdGVk",
+          output_hint: "fixture image generated",
+        });
+      },
+    },
+    rememberImage: (sessionId, imageUrl) => {
+      effects.rememberedImages.push({ sessionId, imageUrl });
+    },
+    web: {
+      fetch: async (url, init) => {
+        effects.web.push({ url: String(url), body: JSON.parse(init.body) });
+        return Response.json({ output: "fixture web result" });
+      },
+    },
+  });
+  const tools = runtime.tools.map((tool) => Object.freeze({
+    ...tool,
+    async handler(input, context) {
+      effects.hostCalls.push({
+        name: tool.name,
+        input: structuredClone(input),
+        parentCallId: context.parentCallId,
+      });
+      return tool.handler(input, context);
+    },
+  }));
+  const mcpClient = {
+    async listTools() {
+      return {
+        tools: [{
+          name: "echo",
+          description: "Echo one deterministic fixture message.",
+          inputSchema: {
+            type: "object",
+            properties: { message: { type: "string" } },
+            required: ["message"],
+            additionalProperties: false,
+          },
+        }],
+      };
+    },
+    async listResources(params) {
+      effects.mcp.push({ name: "listResources", input: params ?? null });
+      return params?.cursor
+        ? { resources: [{ uri: "fixture://two", name: "Two" }] }
+        : {
+            resources: [{ uri: "fixture://one", name: "One" }],
+            nextCursor: "second-page",
+          };
+    },
+    async listResourceTemplates(params) {
+      effects.mcp.push({ name: "listResourceTemplates", input: params ?? null });
+      return {
+        resourceTemplates: [{
+          uriTemplate: "fixture://{slug}",
+          name: "Fixture template",
+        }],
+      };
+    },
+    async readResource({ uri }) {
+      effects.mcp.push({ name: "readResource", input: { uri } });
+      return { contents: [{ uri, text: "fixture resource body" }] };
+    },
+    async callTool({ name, arguments: input }) {
+      effects.mcp.push({ name: "callTool", input: { name, arguments: input } });
+      return {
+        content: [{ type: "text", text: "fixture:" + input.message }],
+        isError: false,
+      };
+    },
+  };
+  const events = [];
+  const agent = await createWarmAgent({
+    apiKey: "test-key",
+    WebSocketImpl: WebSocket,
+    module: wasm,
+    filesystem: runtime.filesystem,
+    filesystemTools: false,
+    instructions: runtime.instructions,
+    executionEnvironment: {
+      currentDate: "2026-08-18",
+      timezone: "Europe/Athens",
+      projectInstructions: runtime.projectInstructions,
+    },
+    mcp: {
+      fixture: {
+        client: mcpClient,
+        description: "Deterministic MCP resources and deferred tools.",
+      },
+    },
+    sessionId: "018f1f9a-7b3c-7a07-8000-000000000011",
+    thinking: "low",
+    tools,
+    websocketUrl: "ws://127.0.0.1:" + server.address().port,
+  });
+  const watch = agent.events.watch();
+  watch.onEvent((event) => events.push(event));
+  let turn;
+  try {
+    turn = agent.turn.prompt({ input: "Exercise the configured browser tools." });
+    const socket = await connection;
+    const reader = messageReader(socket);
+    const warmup = await reader.next();
+    const toolPrefix = warmup.input.find((item) => item.type === "additional_tools");
+    assert.deepEqual(toolPrefix.tools.map((tool) => tool.name ?? tool.type), [
+      "exec",
+      "exec_command",
+      "update_plan",
+      "apply_patch",
+      "view_image",
+      "tool_search",
+    ]);
+    assert.equal(toolPrefix.tools[0].type, "custom");
+    assert.equal(toolPrefix.tools.at(-1).type, "tool_search");
+    send(socket, { type: "response.completed", response: { id: "combined-warmup", usage: null } });
+
+    const generation = await reader.next();
+    assert.equal(generation.previous_response_id, "combined-warmup");
+    send(socket, {
+      type: "response.completed",
+      response: {
+        id: "combined-direct",
+        status: "completed",
+        output: [
+          {
+            type: "function_call",
+            call_id: "call-shell",
+            name: "exec_command",
+            arguments: '{"cmd":"pwd"}',
+          },
+          {
+            type: "function_call",
+            call_id: "call-plan",
+            name: "update_plan",
+            arguments: '{"explanation":"fixture","plan":[{"step":"exercise tools","status":"completed"}]}',
+          },
+          {
+            type: "custom_tool_call",
+            call_id: "call-patch",
+            name: "apply_patch",
+            input: "*** Begin Patch\n*** Update File: note.txt\n@@\n-before\n+after\n*** End Patch",
+          },
+          {
+            type: "function_call",
+            call_id: "call-view",
+            name: "view_image",
+            arguments: '{"path":"/workspace/pixel.png","detail":"original"}',
+          },
+        ],
+        usage: null,
+      },
+    });
+
+    const direct = await reader.next();
+    assert.equal(direct.previous_response_id, "combined-direct");
+    assert.deepEqual(direct.input.map(({ type, call_id }) => ({ type, call_id })), [
+      { type: "function_call_output", call_id: "call-shell" },
+      { type: "function_call_output", call_id: "call-plan" },
+      { type: "custom_tool_call_output", call_id: "call-patch" },
+      { type: "function_call_output", call_id: "call-view" },
+    ]);
+    assert.deepEqual(JSON.parse(direct.input[0].output), {
+      exit_code: 0,
+      output: "browser-shell:pwd",
+      wall_time_seconds: 0,
+    });
+    assert.deepEqual(JSON.parse(direct.input[1].output), { updated: true });
+    assert.match(direct.input[2].output, /Success.*M note\.txt/s);
+    assert.deepEqual(JSON.parse(direct.input[3].output), {
+      detail: "original",
+      image_url: "data:image/png;base64,iVBORw0KGgo=",
+    });
+    assert.equal(await workspace.readText("/workspace/note.txt"), "after\n");
+
+    send(socket, {
+      type: "response.completed",
+      response: {
+        id: "combined-search",
+        status: "completed",
+        output: [{
+          type: "tool_search_call",
+          call_id: "call-search",
+          execution: "client",
+          arguments: { query: "deterministic fixture echo", limit: 1 },
+        }],
+        usage: null,
+      },
+    });
+    const searched = await reader.next();
+    assert.equal(searched.previous_response_id, "combined-search");
+    assert.deepEqual(searched.input.map(({ type, call_id }) => ({ type, call_id })), [{
+      type: "tool_search_output",
+      call_id: "call-search",
+    }]);
+    assert.deepEqual(
+      searched.input[0].tools.map((namespace) => ({
+        name: namespace.name,
+        tools: namespace.tools.map((tool) => tool.name),
+      })),
+      [{ name: "mcp__fixture__", tools: ["echo"] }],
+    );
+
+    const code = [
+      'const web = await tools.web__run({ search_query: [{ q: "browser tools" }] });',
+      'const generated = await tools.image_gen__imagegen({ prompt: "fixture image" });',
+      "generatedImage(generated);",
+      "const opened = await tools.dataset({ operation: \"open\", source: { kind: \"url\", url: \"https://data.example/browser-tools.jsonl\", format: \"jsonl\" } });",
+      "const queried = await tools.dataset({ operation: \"query\", dataset_id: opened.datasetId, columns: [\"id\"], filters: [{ column: \"label\", op: \"eq\", value: \"beta\" }], limit: 1 });",
+      "const closed = await tools.dataset({ operation: \"close\", dataset_id: opened.datasetId });",
+      "const rendered = await tools.render_artifact({ id: \"combined\", title: \"Combined\", source: \"function App() { return React.createElement('main', null, 'combined'); }\" });",
+      "const resources = await tools.list_mcp_resources({});",
+      "const templates = await tools.list_mcp_resource_templates({ server: \"fixture\" });",
+      "const resource = await tools.read_mcp_resource({ server: \"fixture\", uri: \"fixture://one\" });",
+      "const remote = await tools.mcp__fixture__echo({ message: \"nested\" });",
+      "text(JSON.stringify({ web, image: generated.image_url, rows: queried.rows, closed: closed.closed, rendered, resourceUris: resources.resources.map((entry) => entry.uri), template: templates.resourceTemplates[0].uriTemplate, resourceText: resource.contents[0].text, remote: remote.content[0].text }));",
+    ].join("\n");
+    send(socket, {
+      type: "response.completed",
+      response: {
+        id: "combined-exec",
+        status: "completed",
+        output: [{
+          type: "custom_tool_call",
+          call_id: "call-exec",
+          name: "exec",
+          input: code,
+        }],
+        usage: null,
+      },
+    });
+
+    const executed = await reader.next();
+    assert.equal(executed.previous_response_id, "combined-exec");
+    assert.deepEqual(executed.input.map(({ type, call_id }) => ({ type, call_id })), [{
+      type: "custom_tool_call_output",
+      call_id: "call-exec",
+    }]);
+    assert(Array.isArray(executed.input[0].output));
+    assert.deepEqual(
+      executed.input[0].output.find((item) => item.type === "input_image"),
+      {
+        type: "input_image",
+        image_url: "data:image/png;base64,Z2VuZXJhdGVk",
+      },
+    );
+    const summaryItem = executed.input[0].output.find((item) =>
+      item.type === "input_text" && item.text.startsWith("{"));
+    assert.deepEqual(JSON.parse(summaryItem.text), {
+      web: "fixture web result",
+      image: "data:image/png;base64,Z2VuZXJhdGVk",
+      rows: [{ id: 2 }],
+      closed: true,
+      rendered: {
+        artifactId: "combined",
+        path: "/workspace/.nanocodex/artifacts/combined.json",
+        title: "Combined",
+        runtime: "react",
+      },
+      resourceUris: ["fixture://one", "fixture://two"],
+      template: "fixture://{slug}",
+      resourceText: "fixture resource body",
+      remote: "fixture:nested",
+    });
+    send(socket, {
+      type: "response.completed",
+      response: {
+        id: "combined-final",
+        status: "completed",
+        output: [{
+          type: "message",
+          role: "assistant",
+          content: [{ type: "output_text", text: "COMBINED_TOOLS_OK" }],
+        }],
+        usage: null,
+      },
+    });
+
+    const result = await turn.result();
+    try {
+      assert.equal(result.finalMessage, "COMBINED_TOOLS_OK");
+    } finally {
+      result.dispose();
+    }
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.deepEqual(effects.hostCalls.map((call) => call.name), [
+      "exec_command",
+      "update_plan",
+      "view_image",
+      "web__run",
+      "image_gen__imagegen",
+      "dataset",
+      "dataset",
+      "dataset",
+      "render_artifact",
+    ]);
+    assert.deepEqual(
+      effects.hostCalls.filter((call) => call.parentCallId === "call-exec")
+        .map((call) => call.name),
+      [
+        "web__run",
+        "image_gen__imagegen",
+        "dataset",
+        "dataset",
+        "dataset",
+        "render_artifact",
+      ],
+    );
+    assert.deepEqual(effects.mcp, [
+      { name: "listResources", input: null },
+      { name: "listResources", input: { cursor: "second-page" } },
+      { name: "listResourceTemplates", input: null },
+      { name: "readResource", input: { uri: "fixture://one" } },
+      {
+        name: "callTool",
+        input: { name: "echo", arguments: { message: "nested" } },
+      },
+    ]);
+    assert.deepEqual(effects.web, [{
+      url: "/api/tools/web-search",
+      body: {
+        commands: { search_query: [{ q: "browser tools" }] },
+        session_id: agent.sessionId,
+      },
+    }]);
+    assert.deepEqual(effects.images, [{
+      url: "/api/tools/image-generation",
+      body: { images: [], prompt: "fixture image" },
+    }]);
+    assert.deepEqual(effects.rememberedImages, [{
+      sessionId: agent.sessionId,
+      imageUrl: "data:image/png;base64,Z2VuZXJhdGVk",
+    }]);
+    assert.equal(effects.artifacts.length, 1);
+    assert.equal(effects.artifacts[0].id, "combined");
+    assert.deepEqual(
+      JSON.parse(await workspace.readText("/workspace/.nanocodex/artifacts/combined.json")),
+      effects.artifacts[0],
+    );
+    assert.ok(effects.datasetRequests.length >= 2);
+    assert.deepEqual(
+      events.filter((event) => event.type === "tool.call").map((event) => event.payload.tool),
+      [
+        "exec_command",
+        "update_plan",
+        "apply_patch",
+        "view_image",
+        "tool_search",
+        "exec",
+        "web__run",
+        "image_gen__imagegen",
+        "dataset",
+        "dataset",
+        "dataset",
+        "render_artifact",
+        "list_mcp_resources",
+        "list_mcp_resource_templates",
+        "read_mcp_resource",
+        "mcp__fixture__echo",
+      ],
+    );
+    assert.equal(
+      events.filter((event) => event.type === "tool.result")
+        .every((event) => event.payload.status === "completed"),
+      true,
+    );
+  } finally {
+    turn?.dispose();
+    watch.off();
+    await agent.session.shutdown();
+    for (const socket of server.clients) socket.terminate();
+    await new Promise((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+  }
+});
+
 function messageReader(socket) {
   const messages = [];
   let waiter;
@@ -476,4 +928,91 @@ function messageReader(socket) {
 
 function send(socket, value) {
   socket.send(JSON.stringify(value));
+}
+
+function memoryWorkspace(initial = {}) {
+  const encoder = new TextEncoder();
+  const decoder = new TextDecoder();
+  const files = new Map(Object.entries(initial).map(([path, contents]) => [
+    resolveWorkspacePath(path),
+    typeof contents === "string" ? encoder.encode(contents) : new Uint8Array(contents),
+  ]));
+  const directories = new Set(["/workspace"]);
+  return {
+    root: "/workspace",
+    async list() {
+      return [
+        ...[...directories].filter((path) => path !== "/workspace")
+          .map((path) => ({ kind: "directory", path })),
+        ...[...files].map(([path, contents]) => ({
+          kind: "file",
+          path,
+          size: contents.byteLength,
+        })),
+      ];
+    },
+    async readFile(path) {
+      const contents = files.get(resolveWorkspacePath(path));
+      if (!contents) throw Object.assign(new Error("not found"), { code: "ENOENT" });
+      return contents;
+    },
+    async readText(path) {
+      return decoder.decode(await this.readFile(path));
+    },
+    async writeFile(path, contents) {
+      const bytes = typeof contents === "string"
+        ? encoder.encode(contents)
+        : contents instanceof ArrayBuffer
+          ? new Uint8Array(contents)
+          : new Uint8Array(contents.buffer, contents.byteOffset, contents.byteLength);
+      files.set(resolveWorkspacePath(path), bytes);
+    },
+    async remove(path) {
+      const resolved = resolveWorkspacePath(path);
+      if (!files.delete(resolved)) throw Object.assign(new Error("not found"), { code: "ENOENT" });
+    },
+    async mkdir(path) {
+      directories.add(resolveWorkspacePath(path));
+    },
+  };
+}
+
+function resolveWorkspacePath(path) {
+  const value = String(path).replace(/^\.\//, "");
+  return value.startsWith("/") ? value : "/workspace/" + value;
+}
+
+function objectFetch(objects, calls) {
+  return async (input, init) => {
+    const url = String(input);
+    const bytes = objects.get(url);
+    const method = init?.method ?? "GET";
+    const range = new Headers(init?.headers).get("range");
+    calls.push({ url, method, range });
+    if (!bytes) return new Response("not found", { status: 404 });
+    if (method === "HEAD") {
+      return new Response(null, {
+        status: 200,
+        headers: { "content-length": String(bytes.byteLength) },
+      });
+    }
+    if (range) {
+      const match = range.match(/^bytes=(\d+)-(\d+)$/);
+      if (!match) return new Response("bad range", { status: 416 });
+      const start = Number(match[1]);
+      const end = Number(match[2]);
+      const body = bytes.slice(start, end + 1);
+      return new Response(body, {
+        status: 206,
+        headers: {
+          "content-length": String(body.byteLength),
+          "content-range": "bytes " + start + "-" + end + "/" + bytes.byteLength,
+        },
+      });
+    }
+    return new Response(bytes, {
+      status: 200,
+      headers: { "content-length": String(bytes.byteLength) },
+    });
+  };
 }
