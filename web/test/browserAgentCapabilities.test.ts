@@ -68,7 +68,7 @@ test("coarse-pointer Safari keeps native IME composition separate from send", ()
   assert.match(surface, /onCompositionStart=\{\(\) => \{ composing\.current = true; \}\}/);
   assert.match(surface, /onCompositionEnd=\{\(\) => \{ composing\.current = false; \}\}/);
   assert.match(surface, /isTerminalSubmitKeyEvent\(event\.nativeEvent, composing\.current\)/);
-  assert.match(terminal, /active\.current\.submit\(input, \{ intent \}\)/);
+  assert.match(terminal, /active\.current\.submit\(input, \{ intent, submittedAt \}\)/);
 });
 
 function source(path: string): string {
