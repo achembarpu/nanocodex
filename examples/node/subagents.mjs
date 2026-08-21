@@ -23,8 +23,15 @@ const agent = await Agent.create({
 try {
   const goal = process.argv.slice(2).join(" ").trim()
     || "Use two specialists to review this repository's JS API, let them coordinate if their findings overlap, then synthesize the highest-value next improvement.";
-  const result = await agent.turn.prompt({ input: goal }).result();
-  console.log(result.finalMessage);
+  const turn = agent.turn.prompt({ input: goal });
+  let result;
+  try {
+    result = await turn.result();
+    console.log(result.finalMessage);
+  } finally {
+    result?.dispose();
+    turn.dispose();
+  }
 } finally {
   // Rust closes the complete subagent subtree before the root driver exits.
   await agent.session.shutdown();

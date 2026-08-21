@@ -74,6 +74,8 @@ test("the example Worker owns follow-ons, optional events, results, and payment 
   ]);
   assert.equal(harness.turns[0]?.disposed, 1);
   assert.equal(harness.turns[1]?.disposed, 1);
+  assert.equal(harness.turns[0]?.resultDisposed, 1);
+  assert.equal(harness.turns[1]?.resultDisposed, 1);
   await controller.dispose();
   assert.equal(harness.agents[0]?.disposed, 1);
   assert.equal(harness.watchOffs, 1);
@@ -166,6 +168,7 @@ test("restart releases active Turns and stale event listeners exactly once", asy
   harness.turns[0]!.complete("late");
   await settle();
   assert.equal(harness.turns[0]?.disposed, 1);
+  assert.equal(harness.turns[0]?.resultDisposed, 1);
   assert.deepEqual(messages, [{ type: "ready", transport: "openai" }]);
   await controller.dispose();
 });
@@ -197,6 +200,10 @@ test("a 2,000-turn burst has bounded live control ownership", async () => {
   const elapsed = performance.now() - startedAt;
   assert.equal(
     harness.turns.reduce((sum, turn) => sum + turn.disposed, 0),
+    2_000,
+  );
+  assert.equal(
+    harness.turns.reduce((sum, turn) => sum + turn.resultDisposed, 0),
     2_000,
   );
   assert.ok(
@@ -397,6 +404,7 @@ class FakeAgent {
 class FakeTurn {
   cancelled = 0;
   disposed = 0;
+  resultDisposed = 0;
   readonly input: string;
   private readonly resultError?: Error;
   private resolve!: (value: FakeTurnResult) => void;
@@ -418,7 +426,9 @@ class FakeTurn {
   }
 
   complete(value: string) {
-    this.resolve(turnResult(value, this.input));
+    this.resolve(turnResult(value, this.input, () => {
+      this.resultDisposed += 1;
+    }));
   }
 
   fail(error: unknown) {
@@ -436,9 +446,10 @@ class FakeTurn {
 
 type FakeTurnResult = ReturnType<typeof turnResult>;
 
-function turnResult(finalMessage: string, input: string) {
+function turnResult(finalMessage: string, input: string, dispose = () => {}) {
   return {
     finalMessage,
+    dispose,
     snapshot: {
       version: 1,
       model: "gpt-5.6-sol",

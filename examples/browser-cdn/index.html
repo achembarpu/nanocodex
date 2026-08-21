@@ -36,10 +36,12 @@
         try {
           const current = await getAgent();
           const turn = current.turn.prompt({ input });
+          let completed;
           try {
-            const completed = await turn.result();
+            completed = await turn.result();
             result.textContent = completed.finalMessage;
           } finally {
+            completed?.dispose();
             turn.dispose();
           }
         } catch (error) {

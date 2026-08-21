@@ -104,21 +104,25 @@ export function createExampleAgentController({
       .then(() => turn.result())
       .then(
         (result) => {
-          if (disposed || turnGeneration !== generation) return;
-          postMessage({
-            type: "result",
-            id: command.id,
-            message: result.finalMessage,
-            payment: payment
-              ? {
-                  channelId: payment.channelId,
-                  cumulative: payment.cumulative(),
-                  ...(payment.mcpCumulative
-                    ? { mcpCumulative: payment.mcpCumulative() }
-                    : {}),
-                }
-              : undefined,
-          });
+          try {
+            if (disposed || turnGeneration !== generation) return;
+            postMessage({
+              type: "result",
+              id: command.id,
+              message: result.finalMessage,
+              payment: payment
+                ? {
+                    channelId: payment.channelId,
+                    cumulative: payment.cumulative(),
+                    ...(payment.mcpCumulative
+                      ? { mcpCumulative: payment.mcpCumulative() }
+                      : {}),
+                  }
+                : undefined,
+            });
+          } finally {
+            result.dispose();
+          }
         },
         (error) => {
           if (disposed || turnGeneration !== generation) return;

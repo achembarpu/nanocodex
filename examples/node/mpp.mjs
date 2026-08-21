@@ -87,6 +87,7 @@ const mpp = tempo.session.manager({
 });
 let agent;
 let turn;
+let completed;
 let watch;
 let unwatch;
 
@@ -107,8 +108,8 @@ try {
   const customPrompt = process.argv.slice(2).filter((argument) => argument !== "--close").join(" ").trim();
   const prompt = customPrompt || "Reply with exactly MPP_JS_OK and nothing else.";
   turn = agent.turn.prompt({ input: prompt });
-  const result = await turn.result();
-  const output = result.finalMessage;
+  completed = await turn.result();
+  const output = completed.finalMessage;
   if (!customPrompt && output.trim() !== "MPP_JS_OK") {
     throw new Error(`unexpected model output: ${JSON.stringify(output)}`);
   }
@@ -116,6 +117,7 @@ try {
   console.error(`Authorized cumulative payment: ${mpp.cumulative}`);
   console.error(`MPP channel: ${mpp.channelId}`);
 } finally {
+  completed?.dispose();
   turn?.dispose();
   unwatch?.();
   watch?.off();
