@@ -344,6 +344,7 @@ test("terminal result cleanup releases the package Worker liveness lease", async
     turn: {
       prompt() {
         return {
+          async accepted() { return "worker-request"; },
           async result() {
             return {
               finalMessage: "worker done",
