@@ -261,13 +261,12 @@ For a break-glass production deployment, start from a clean commit and preserve
 the same attestation contract before running `publish:repository`:
 
 ```bash
-revision=$(git rev-parse HEAD)
-npm run build
-npx wrangler deploy --strict \
-  --tag "$revision" \
-  --message "gakonst/nanocodex@$revision" \
-  --var "DEPLOYMENT_SHA:$revision"
+npm run deploy
 ```
+
+The deploy command requires `HEAD` to equal the fetched `origin/master`, binds
+that full commit SHA into the Worker version, and does not return successfully
+until the live health endpoint attests the same revision.
 
 Do not publish repository data until the hosted `/api/health` reports that
 exact `deployment_sha`. The publisher enforces this ordering independently. An

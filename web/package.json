@@ -27,7 +27,8 @@
     "smoke:mcp": "node --experimental-strip-types scripts/smoke-mcp.mjs",
     "smoke:safari": "node scripts/safari-browser-smoke.mjs",
     "preview": "vite preview",
-    "deploy": "npm run build && wrangler deploy"
+    "deploy": "npm run build && npm run deploy:built",
+    "deploy:built": "node scripts/deploy-worker.mjs"
   },
   "dependencies": {
     "@cloudflare/containers": "0.3.7",
