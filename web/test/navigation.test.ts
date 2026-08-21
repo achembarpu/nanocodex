@@ -91,6 +91,57 @@ test("every primary route begins preloading on touch or pointer intent", () => {
   assert.match(application, /onPointerDown=\{\(\) => preloadSurface\("home"\)\}/);
 });
 
+test("a direct visit waits for its complete route preload before mounting the shell", () => {
+  assert.match(
+    entry,
+    /const application = loadNanocodexApp\(\);[\s\S]*?Promise\.all\(\[\s*application,\s*preloadDirectSurface\(directUrl\),\s*\]\)\.then\([\s\S]*?renderApp\(module\.NanocodexApp, preparedRoute\)/,
+  );
+  assert.doesNotMatch(
+    entry.slice(entry.indexOf("if (directPath"), entry.indexOf("function preloadDirectSurface")),
+    /renderApp\(\)/,
+  );
+
+  const preload = entry.slice(
+    entry.indexOf("function preloadDirectSurface"),
+    entry.indexOf("function renderApp"),
+  );
+  assert.doesNotMatch(preload, /\bvoid\b|\.catch\(/);
+  assert.match(preload, /const surface = surfaceFromUrl\(url\)/);
+  assert.doesNotMatch(entry, /lazy\(loadNanocodexApp\)/);
+  assert.match(
+    entry,
+    /<Suspense fallback=\{null\}>\s*<NanocodexApp preparedRoute=\{preparedRoute\} \/>/,
+  );
+  assert.doesNotMatch(application, /<Suspense/);
+  assert.match(application, /preparedRoute\.DocsComponent \?\? null/);
+  assert.match(application, /preparedRoute\.repositorySnapshot/);
+});
+
+test("direct preloading selects only the work owned by the resolved route", () => {
+  const preload = entry.slice(
+    entry.indexOf("function preloadDirectSurface"),
+    entry.indexOf("function renderApp"),
+  );
+  assert.match(
+    preload,
+    /surface === "home" \|\| surface === "agent"[\s\S]*?import\("\.\/HomeFrame"\)[\s\S]*?import\("\.\/AgentExperience"\)/,
+  );
+  assert.match(preload, /surface === "changelog"[\s\S]*?preloadChangelog\(\)/);
+  assert.match(preload, /surface === "docs"[\s\S]*?preloadDocsRoute\(url\.pathname\)/);
+  assert.match(
+    preload,
+    /surface === "code"[\s\S]*?preloadPublishedRepositorySnapshot\(false\)[\s\S]*?preloadPreferredPublishedFile/,
+  );
+  assert.match(
+    preload,
+    /surface === "commits"[\s\S]*?preloadPublishedRepositorySnapshot\(true\)[\s\S]*?preloadPublishedRepositoryPatch/,
+  );
+  assert.match(
+    preload,
+    /surface === "requests"\) return Promise\.resolve\(\{\}\);\s*surface satisfies "evals";\s*return import\("\.\/Evals"\)\.then\(\(\) => \(\{\}\)\)/,
+  );
+});
+
 test("Fast Refresh reuses the existing React root", () => {
   assert.match(entry, /container\.__nanocodexRoot \?\?= createRoot\(container\)/);
 });

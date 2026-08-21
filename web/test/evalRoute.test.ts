@@ -6,6 +6,7 @@ import { evalRouteFromPath } from "../src/evalRoute.ts";
 const evalsSource = source("../src/Evals.tsx");
 const liveEvalsSource = source("../src/LiveEvals.tsx");
 const appSource = source("../src/NanocodexApp.tsx");
+const entrySource = source("../src/main.tsx");
 
 test("every hosted Evals subview has an exact typed route", () => {
   assert.deepEqual(evalRouteFromPath("/evals"), { kind: "overview" });
@@ -38,7 +39,11 @@ test("Evals route data is fetched in parallel and committed through one Suspense
   assert.match(evalsSource, /const pathname = useDeferredValue\(location\.pathname\)/);
   assert.doesNotMatch(evalsSource, /isPending|Loading|aria-busy|fallback=/);
   assert.match(appSource, /if \(nextSurface === "evals"\) preloadEvalOverview\(\)/);
-  assert.match(appSource, /<Suspense fallback=\{null\}>\s*<Evals \/>/);
+  assert.doesNotMatch(appSource, /<Suspense/);
+  assert.match(
+    entrySource,
+    /<Suspense fallback=\{null\}>\s*<NanocodexApp preparedRoute=\{preparedRoute\} \/>/,
+  );
   assert.doesNotMatch(appSource, /Loading evals/);
 });
 

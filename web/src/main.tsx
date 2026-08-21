@@ -1,34 +1,47 @@
 import { createRoot, type Root } from "react-dom/client";
-import { Suspense, lazy } from "react";
+import { Suspense } from "react";
 import { BrowserRouter } from "react-router";
+import { surfaceFromUrl } from "./navigation";
+import type {
+  NanocodexApp as NanocodexAppComponent,
+  PreparedDirectRoute,
+} from "./NanocodexApp";
 
-const loadNanocodexApp = () =>
-  import("./NanocodexApp").then((module) => ({ default: module.NanocodexApp }));
-const NanocodexApp = lazy(loadNanocodexApp);
+const loadNanocodexApp = () => import("./NanocodexApp");
 
-const directPath = window.location.pathname === "/"
+const directUrl = new URL(window.location.href);
+const directPath = directUrl.pathname === "/"
   ? "/"
-  : window.location.pathname.replace(/\/+$/, "");
+  : directUrl.pathname.replace(/\/+$/, "");
 
 if (directPath === "/artifact-runtime") {
   void import("./artifactRuntime");
-} else if (directPath === "/docs" || directPath.startsWith("/docs/")) {
-  void Promise.all([
-    loadNanocodexApp(),
-    import("./Docs").then((module) => module.preloadDocsRoute(directPath)),
-  ]).then(renderApp, renderApp);
 } else {
-  preloadDirectSurface(directPath);
-  renderApp();
+  const application = loadNanocodexApp();
+  void Promise.all([
+    application,
+    preloadDirectSurface(directUrl),
+  ]).then(
+    ([module, preparedRoute]) =>
+      renderApp(module.NanocodexApp, preparedRoute),
+    () => {
+      // A failed route preparation must not strand the document. The normal
+      // route lifecycle owns its actionable failure state and retry policy.
+      void application.then((module) => renderApp(module.NanocodexApp, {}));
+    },
+  );
 }
 
-function preloadDirectSurface(pathname: string) {
-  if (pathname === "/" || pathname === "/agent") {
-    void Promise.all([import("./HomeFrame"), import("./AgentExperience")]).catch(() => undefined);
-    return;
+function preloadDirectSurface(url: URL): Promise<PreparedDirectRoute> {
+  const surface = surfaceFromUrl(url);
+  if (surface === "home" || surface === "agent") {
+    return Promise.all([
+      import("./HomeFrame"),
+      import("./AgentExperience"),
+    ]).then(() => ({}));
   }
-  if (pathname === "/code") {
-    void Promise.all([
+  if (surface === "code") {
+    return Promise.all([
       import("./CodeBrowser"),
       import("./PierreWorkerProvider").then((module) =>
         module.preloadPierreWorker()
@@ -36,18 +49,23 @@ function preloadDirectSurface(pathname: string) {
       import("./publishedRepository").then(async (module) => {
         const snapshot = await module.preloadPublishedRepositorySnapshot(false);
         await module.preloadPreferredPublishedFile(snapshot);
+        return snapshot;
       }),
-    ]).catch(() => undefined);
-    return;
+    ]).then(([, , repositorySnapshot]) => ({ repositorySnapshot }));
   }
-  if (pathname === "/changelog") {
-    void import("./Changelog")
+  if (surface === "changelog") {
+    return import("./Changelog")
       .then((module) => module.preloadChangelog())
-      .catch(() => undefined);
-    return;
+      .then(() => ({}));
   }
-  if (pathname === "/commits") {
-    void Promise.all([
+  if (surface === "docs") {
+    return import("./Docs").then(async (module) => {
+      await module.preloadDocsRoute(url.pathname);
+      return { DocsComponent: module.Docs };
+    });
+  }
+  if (surface === "commits") {
+    return Promise.all([
       import("./CommitCodeStream"),
       import("./PierreWorkerProvider").then((module) =>
         module.preloadPierreWorker()
@@ -56,18 +74,19 @@ function preloadDirectSurface(pathname: string) {
       import("./publishedRepository").then(async (module) => {
         const snapshot = await module.preloadPublishedRepositorySnapshot(true);
         await module.preloadPublishedRepositoryPatch(snapshot.commitPatchUrl);
+        return snapshot;
       }),
-    ]).catch(() => undefined);
-    return;
+    ]).then(([, , , repositorySnapshot]) => ({ repositorySnapshot }));
   }
-  if (pathname === "/evals" || pathname.startsWith("/evals/")) {
-    void import("./Evals").catch(() => undefined);
-    return;
-  }
-  void Promise.all([import("./HomeFrame"), import("./AgentExperience")]).catch(() => undefined);
+  if (surface === "requests") return Promise.resolve({});
+  surface satisfies "evals";
+  return import("./Evals").then(() => ({}));
 }
 
-function renderApp() {
+function renderApp(
+  NanocodexApp: typeof NanocodexAppComponent,
+  preparedRoute: PreparedDirectRoute,
+) {
   const container = document.getElementById("root") as RootContainer | null;
   if (!container) throw new Error("Nanocodex root container is missing");
 
@@ -78,7 +97,7 @@ function renderApp() {
   root.render(
     <BrowserRouter useTransitions={false}>
       <Suspense fallback={null}>
-        <NanocodexApp />
+        <NanocodexApp preparedRoute={preparedRoute} />
       </Suspense>
     </BrowserRouter>,
   );

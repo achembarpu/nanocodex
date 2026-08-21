@@ -13,7 +13,6 @@ import {
 } from "lucide-react";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
-  Suspense,
   lazy,
   startTransition,
   useCallback,
@@ -214,15 +213,24 @@ function RepositorySurfaceError({
   );
 }
 
-export function NanocodexApp() {
+export type PreparedDirectRoute = {
+  DocsComponent?: ComponentType;
+  repositorySnapshot?: PublishedRepositorySnapshot;
+};
+
+type NanocodexAppProps = {
+  preparedRoute?: PreparedDirectRoute;
+};
+
+export function NanocodexApp({ preparedRoute = {} }: NanocodexAppProps) {
   return (
     <QueryClientProvider client={queryClient}>
-      <NanocodexShell />
+      <NanocodexShell preparedRoute={preparedRoute} />
     </QueryClientProvider>
   );
 }
 
-function NanocodexShell() {
+function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
   useDeploymentRollover();
   const location = useLocation();
   const navigate = useNavigate();
@@ -235,7 +243,9 @@ function NanocodexShell() {
       ?.setAttribute("content", initial === "dark" ? "#161616" : "#ffffff");
     return initial;
   });
-  const [DocsComponent, setDocsComponent] = useState<ComponentType | null>(null);
+  const [DocsComponent, setDocsComponent] = useState<ComponentType | null>(
+    preparedRoute.DocsComponent ?? null,
+  );
   const surface = surfaceFromUrl({
     pathname: location.pathname,
     searchParams: new URLSearchParams(location.search),
@@ -243,7 +253,9 @@ function NanocodexShell() {
   const [threadId, setThreadId] = useState<string | undefined>(() =>
     surface === "docs" ? undefined : getBrowserThread().id
   );
-  const [snapshot, setSnapshot] = useState<PublishedRepositorySnapshot>();
+  const [snapshot, setSnapshot] = useState<PublishedRepositorySnapshot | undefined>(
+    preparedRoute.repositorySnapshot,
+  );
   const [repositoryLoadError, setRepositoryLoadError] = useState(false);
   const [scope, setScope] = useState<Scope>("all");
   const [query, setQuery] = useState("");
@@ -718,7 +730,6 @@ function NanocodexShell() {
           {surface === "home" ||
           surface === "agent" ||
           agentExperienceMounted ? (
-            <Suspense fallback={null}>
             <HomeFrame>
             <section
               className={
@@ -784,53 +795,45 @@ function NanocodexShell() {
                       <span>{surface === "agent" ? "collapse" : "expand"}</span>
                     </button>
                   </header>
-                  <Suspense fallback={null}>
-                    <AgentExperience
-                      mode={
-                        surface === "agent"
-                          ? "full"
-                          : surface === "home"
-                            ? "preview"
-                            : "hidden"
-                      }
-                      theme={theme}
-                    />
-                  </Suspense>
+                  <AgentExperience
+                    mode={
+                      surface === "agent"
+                        ? "full"
+                        : surface === "home"
+                          ? "preview"
+                          : "hidden"
+                    }
+                    theme={theme}
+                  />
                 </section>
               </article>
             </section>
             </HomeFrame>
-            </Suspense>
           ) : null}
 
           {surface === "home" || surface === "agent" ? null : surface === "changelog" ? (
-            <Suspense fallback={null}>
-              <Changelog />
-            </Suspense>
+            <Changelog />
           ) : surface === "docs" ? (
             DocsComponent ? <DocsComponent /> : null
           ) : surface === "code" ? snapshot ? (
-            <Suspense fallback={null}>
-              <PierreWorkerProvider>
-                  <CodeBrowser
-                    key={snapshot.repository.head}
-                    ref={codeBrowserRef}
-                    files={snapshot.tree}
-                    branch={snapshot.repository.branch}
-                    head={snapshot.repository.head}
-                    readFile={snapshot.readFile}
-                    theme={theme}
-                  />
-              </PierreWorkerProvider>
-            </Suspense>
+            <PierreWorkerProvider>
+              <CodeBrowser
+                key={snapshot.repository.head}
+                ref={codeBrowserRef}
+                files={snapshot.tree}
+                branch={snapshot.repository.branch}
+                head={snapshot.repository.head}
+                readFile={snapshot.readFile}
+                theme={theme}
+              />
+            </PierreWorkerProvider>
           ) : (
             <RepositorySurfaceError
               failed={repositoryLoadError}
               onRetry={refreshRepository}
             />
           ) : surface === "commits" ? snapshot?.historyLoaded ? (
-            <Suspense fallback={null}>
-              <PierreWorkerProvider>
+            <PierreWorkerProvider>
                 <section
                   className="commits-workspace"
                   aria-label="Repository commits"
@@ -917,27 +920,22 @@ function NanocodexShell() {
                     </div>
                   ) : null}
 
-                  <Suspense fallback={null}>
-                    <VirtualCommitList
-                      commits={filteredCommits}
-                      selectedHash={selected?.hash}
-                      onClearSearch={() => setQuery("")}
-                      onSelectCommit={selectCommit}
-                    />
-                  </Suspense>
-                </aside>
-                <Suspense fallback={null}>
-                  <CommitCodeStream
-                    ref={commitStreamRef}
-                    commits={commits}
-                    onOpenCommitRail={() => setCommitRailOpen(true)}
-                    patchUrl={snapshot.commitPatchUrl}
-                    theme={theme}
+                  <VirtualCommitList
+                    commits={filteredCommits}
+                    selectedHash={selected?.hash}
+                    onClearSearch={() => setQuery("")}
+                    onSelectCommit={selectCommit}
                   />
-                </Suspense>
+                </aside>
+                <CommitCodeStream
+                  ref={commitStreamRef}
+                  commits={commits}
+                  onOpenCommitRail={() => setCommitRailOpen(true)}
+                  patchUrl={snapshot.commitPatchUrl}
+                  theme={theme}
+                />
                 </section>
-              </PierreWorkerProvider>
-            </Suspense>
+            </PierreWorkerProvider>
           ) : (
             <RepositorySurfaceError
               failed={repositoryLoadError}
@@ -957,9 +955,7 @@ function NanocodexShell() {
               </p>
             </section>
           ) : (
-            <Suspense fallback={null}>
-              <Evals />
-            </Suspense>
+            <Evals />
           )}
         </main>
 
