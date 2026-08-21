@@ -282,6 +282,31 @@ mod tests {
     }
 
     #[test]
+    fn trace_bounds_ignore_zero_timestamp_metadata_from_another_clock_domain() {
+        let absolute_start = 163_962_202_000.0;
+        let events = vec![
+            json!({"name": "thread_name", "ph": "M", "ts": 0.0}),
+            json!({"name": "navigationStart", "ts": absolute_start}),
+            json!({
+                "name": "RunTask",
+                "ts": absolute_start + 1_000_000.0,
+                "dur": 120_305.0
+            }),
+            json!({"name": "trace_end", "ts": absolute_start + 2_030_000.0}),
+        ];
+
+        let trace = summarize(&events, PathBuf::from("trace.json"), &[], &empty_context());
+
+        assert_eq!(trace.duration_ms, 2_030.0);
+        assert_eq!(trace.longest_task_ms, 120.305);
+        assert!(trace.insights.iter().any(|insight| matches!(
+            insight,
+            BrowserPerformanceInsight::LongTask { start_ms, duration_ms, .. }
+                if *start_ms == 1_000.0 && *duration_ms == 120.305
+        )));
+    }
+
+    #[test]
     fn time_based_insights_are_relative_to_large_trace_timestamps() {
         let absolute_start = 159_432_556_000.0;
         let events = vec![
@@ -524,6 +549,9 @@ fn summarize(
 fn trace_time_bounds(events: &[Value]) -> Option<(f64, f64)> {
     let mut bounds: Option<(f64, f64)> = None;
     for object in events.iter().filter_map(Value::as_object) {
+        if object.get("ph").and_then(Value::as_str) == Some("M") {
+            continue;
+        }
         let Some(timestamp) = event_timestamp(object) else {
             continue;
         };

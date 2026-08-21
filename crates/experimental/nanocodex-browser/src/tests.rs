@@ -846,6 +846,38 @@ async fn mobile_device_state_and_audit_are_page_observable() -> Result<()> {
         })
         .await?;
 
+    let BrowserActionResult::Box {
+        bounds: Some(bounds),
+        ..
+    } = browser
+        .execute(BrowserAction::GetBox {
+            target: BrowserTarget::css("input[aria-label='message']"),
+        })
+        .await?
+    else {
+        return Err(eyre!("expected input bounds"));
+    };
+    browser
+        .execute(BrowserAction::TouchTap {
+            x: (bounds.x + bounds.width / 2.0).round() as i32,
+            y: (bounds.y + bounds.height / 2.0).round() as i32,
+        })
+        .await?;
+    browser
+        .execute(BrowserAction::InsertText {
+            text: "touch input proof".to_owned(),
+        })
+        .await?;
+    let BrowserActionResult::Value { value, .. } = browser
+        .execute(BrowserAction::GetValue {
+            target: BrowserTarget::css("input[aria-label='message']"),
+        })
+        .await?
+    else {
+        return Err(eyre!("expected input value"));
+    };
+    assert_eq!(value.as_deref(), Some("touch input proof"));
+
     let BrowserActionResult::MobileState { state, .. } =
         browser.execute(BrowserAction::MobileState).await?
     else {

@@ -5,25 +5,26 @@ use std::{
 };
 
 use chromiumoxide::{
-    Page,
+    Command, Method, Page,
     cdp::{
         browser_protocol::{
             dom::GetContentQuadsParams,
             input::{
                 DispatchDragEventParams, DispatchDragEventType, DispatchKeyEventParams,
                 DispatchKeyEventType, DispatchMouseEventParams, DispatchMouseEventType,
-                DispatchTouchEventParams, DispatchTouchEventType, DragData, DragDataItem,
-                EventDragIntercepted, InsertTextParams, MouseButton as CdpMouseButton,
-                SetInterceptDragsParams, TouchPoint,
+                DispatchTouchEventParams, DispatchTouchEventReturns, DispatchTouchEventType,
+                DragData, DragDataItem, EventDragIntercepted, InsertTextParams,
+                MouseButton as CdpMouseButton, SetInterceptDragsParams, TouchPoint,
             },
         },
         js_protocol::runtime::{EvaluateParams, ReleaseObjectParams},
     },
     keys,
     layout::Point,
+    types::MethodId,
 };
 use futures_util::StreamExt;
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use tokio::time::{sleep, timeout};
 
 use crate::{
@@ -39,6 +40,33 @@ use super::{
 const ACTION_SETTLE: Duration = Duration::from_millis(100);
 const ACTION_NETWORK_TIMEOUT: Duration = Duration::from_secs(5);
 const POLL_INTERVAL: Duration = Duration::from_millis(25);
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TouchEventParams {
+    #[serde(rename = "type")]
+    event_type: DispatchTouchEventType,
+    touch_points: Vec<TouchPoint>,
+}
+
+impl TouchEventParams {
+    const fn new(event_type: DispatchTouchEventType, touch_points: Vec<TouchPoint>) -> Self {
+        Self {
+            event_type,
+            touch_points,
+        }
+    }
+}
+
+impl Method for TouchEventParams {
+    fn identifier(&self) -> MethodId {
+        DispatchTouchEventParams::IDENTIFIER.into()
+    }
+}
+
+impl Command for TouchEventParams {
+    type Response = DispatchTouchEventReturns;
+}
 
 #[derive(Clone, Copy)]
 pub(super) enum Actionability {
@@ -239,12 +267,12 @@ pub(super) async fn dispatch_mouse_wheel(
 }
 
 pub(super) async fn dispatch_touch_tap(page: &Page, point: Point) -> Result<(), BrowserError> {
-    page.execute(DispatchTouchEventParams::new(
+    page.execute(TouchEventParams::new(
         DispatchTouchEventType::TouchStart,
         vec![TouchPoint::new(point.x, point.y)],
     ))
     .await?;
-    page.execute(DispatchTouchEventParams::new(
+    page.execute(TouchEventParams::new(
         DispatchTouchEventType::TouchEnd,
         Vec::new(),
     ))
@@ -259,7 +287,7 @@ pub(super) async fn dispatch_touch_swipe(
     duration: Duration,
     steps: u16,
 ) -> Result<(), BrowserError> {
-    page.execute(DispatchTouchEventParams::new(
+    page.execute(TouchEventParams::new(
         DispatchTouchEventType::TouchStart,
         vec![TouchPoint::new(from.x, from.y)],
     ))
@@ -267,7 +295,7 @@ pub(super) async fn dispatch_touch_swipe(
     let step_delay = duration / u32::from(steps);
     for step in 1..=steps {
         let progress = f64::from(step) / f64::from(steps);
-        page.execute(DispatchTouchEventParams::new(
+        page.execute(TouchEventParams::new(
             DispatchTouchEventType::TouchMove,
             vec![TouchPoint::new(
                 from.x + (to.x - from.x) * progress,
@@ -277,7 +305,7 @@ pub(super) async fn dispatch_touch_swipe(
         .await?;
         sleep(step_delay).await;
     }
-    page.execute(DispatchTouchEventParams::new(
+    page.execute(TouchEventParams::new(
         DispatchTouchEventType::TouchEnd,
         Vec::new(),
     ))
@@ -923,9 +951,21 @@ fn leading_spaces(line: &str) -> usize {
 mod tests {
     use std::collections::BTreeMap;
 
+    use chromiumoxide::cdp::browser_protocol::input::DispatchTouchEventType;
+
     use crate::BrowserElementReference;
 
-    use super::snapshot_matches;
+    use super::{TouchEventParams, snapshot_matches};
+
+    #[test]
+    fn touch_end_serializes_required_empty_touch_points() {
+        let event = TouchEventParams::new(DispatchTouchEventType::TouchEnd, Vec::new());
+
+        assert_eq!(
+            serde_json::to_value(event).expect("touch event serializes"),
+            serde_json::json!({"type": "touchEnd", "touchPoints": []})
+        );
+    }
 
     #[test]
     fn snapshot_search_returns_context_and_only_visible_references() {
