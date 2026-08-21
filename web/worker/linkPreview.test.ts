@@ -121,7 +121,7 @@ test("eval entity names are read safely with deterministic fallbacks", async () 
   assert.match(await fallback!.text(), /Evaluation run · Nanocodex/);
 });
 
-test("generated PNGs are cacheable, deterministic, bounded, and conditional", async () => {
+test("generated PNG images are cacheable, deterministic, bounded, and conditional", async () => {
   const request = new Request("https://preview.test/og.png?path=%2Fdocs%2Fcore%2Fowned-agent");
   const response = await routeLinkPreview(request, {}, new URL(request.url));
   const bytes = new Uint8Array(await response!.arrayBuffer());

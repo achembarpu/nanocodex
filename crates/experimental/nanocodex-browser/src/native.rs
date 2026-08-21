@@ -2610,21 +2610,24 @@ impl Drop for NativeBrowser {
     }
 }
 
+#[cfg(target_os = "macos")]
 fn preferred_automation_executable(explicit: Option<PathBuf>) -> Option<PathBuf> {
-    #[cfg(target_os = "macos")]
-    {
-        if explicit.is_some() || std::env::var_os("CHROME").is_some() {
-            return explicit;
-        }
-        if let Some(executable) = headless_shell_on_path().or_else(cached_headless_shell) {
-            info!(
-                target: "nanocodex_browser",
-                path = %executable.display(),
-                "selected headless shell to avoid macOS browser-profile services"
-            );
-            return Some(executable);
-        }
+    if explicit.is_some() || std::env::var_os("CHROME").is_some() {
+        return explicit;
     }
+    if let Some(executable) = headless_shell_on_path().or_else(cached_headless_shell) {
+        info!(
+            target: "nanocodex_browser",
+            path = %executable.display(),
+            "selected headless shell to avoid macOS browser-profile services"
+        );
+        return Some(executable);
+    }
+    explicit
+}
+
+#[cfg(not(target_os = "macos"))]
+const fn preferred_automation_executable(explicit: Option<PathBuf>) -> Option<PathBuf> {
     explicit
 }
 
@@ -5167,7 +5170,9 @@ fn decode_attributes(
         ));
     }
     attributes
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .map(|pair| {
             Ok((
                 snapshot_string(strings, pair[0])?.to_owned(),
@@ -6263,7 +6268,7 @@ return new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(
             reason: "element has an invalid rendered border box".to_owned(),
         });
     }
-    let mut points = coordinates.chunks_exact(2);
+    let mut points = coordinates.as_chunks::<2>().0.iter();
     let first = points.next().ok_or_else(|| BrowserError::Actionability {
         selector: target.query.display(),
         reason: "element has no rendered border box".to_owned(),

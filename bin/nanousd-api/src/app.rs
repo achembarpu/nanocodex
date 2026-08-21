@@ -195,11 +195,10 @@ async fn create_order(
         package,
         OrderStatus::Created,
     )?;
-    let order;
-    match state.config.payment_mode {
+    let order = match state.config.payment_mode {
         PaymentMode::Mock => {
             state.database.mark_mock_paid(&id)?;
-            order = state.database.order(&id)?.ok_or(AppError::OrderNotFound)?;
+            state.database.order(&id)?.ok_or(AppError::OrderNotFound)?
         }
         PaymentMode::Stripe => {
             let stripe = state
@@ -213,9 +212,9 @@ async fn create_order(
             state
                 .database
                 .set_checkout(&id, &checkout.id, &checkout_url)?;
-            order = state.database.order(&id)?.ok_or(AppError::OrderNotFound)?;
+            state.database.order(&id)?.ok_or(AppError::OrderNotFound)?
         }
-    }
+    };
     Ok((
         StatusCode::CREATED,
         Json(CreateOrderResponse { order, order_token }),
