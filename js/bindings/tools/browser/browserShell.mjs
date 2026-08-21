@@ -104,6 +104,7 @@ export async function prepareBrowserShell(threadId, origin) {
             validateSource: validateBrowserArtifactSource,
         }),
         execTool: {
+            supportsParallelToolCalls: true,
             description: "Run a bash command in the browser thread workspace.",
             parameters: {
                 type: "object",

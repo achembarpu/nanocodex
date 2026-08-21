@@ -17,6 +17,7 @@ const createWarmAgent = ({
   ...options
 }) => Agent.create({
   ...options,
+  codeEvaluator: options.codeEvaluator ?? evaluateInTestRealm,
   transport: Transport.openAi({
     apiKey,
     createWebSocket,
@@ -25,6 +26,26 @@ const createWarmAgent = ({
     websocketWarmup: true,
   }),
 });
+
+async function evaluateInTestRealm(source, environment) {
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  const script = new AsyncFunction(
+    "tools", "ALL_TOOLS", "text", "image", "generatedImage", "store", "load", "exit",
+    "require", "console", source,
+  );
+  await script(
+    environment.tools,
+    environment.toolDefinitions,
+    environment.text,
+    environment.image,
+    environment.generatedImage,
+    environment.store,
+    environment.load,
+    environment.exit,
+    environment.require,
+    environment.console,
+  );
+}
 
 test("web-target WASM runs the shared model loop through the browser host", async () => {
   const server = new WebSocketServer({ host: "127.0.0.1", port: 0 });
@@ -546,7 +567,11 @@ test("web-target WASM executes the complete browser harness tool contract", asyn
       },
     },
   });
-  const tools = runtime.tools.map((tool) => Object.freeze({
+  let lifecycleStarted;
+  let releaseLifecycle;
+  const lifecycleStart = new Promise((resolve) => { lifecycleStarted = resolve; });
+  const lifecycleRelease = new Promise((resolve) => { releaseLifecycle = resolve; });
+  const tools = [...runtime.tools.map((tool) => Object.freeze({
     ...tool,
     async handler(input, context) {
       effects.hostCalls.push({
@@ -556,20 +581,37 @@ test("web-target WASM executes the complete browser harness tool contract", asyn
       });
       return tool.handler(input, context);
     },
-  }));
+  })), Object.freeze({
+    name: "lifecycle_probe",
+    description: "Wait until the browser test releases this lifecycle probe.",
+    parameters: { type: "object", additionalProperties: false },
+    async handler() {
+      lifecycleStarted();
+      await lifecycleRelease;
+      return { released: true };
+    },
+  })];
   const mcpClient = {
     async listTools() {
       return {
-        tools: [{
-          name: "echo",
-          description: "Echo one deterministic fixture message.",
-          inputSchema: {
-            type: "object",
-            properties: { message: { type: "string" } },
-            required: ["message"],
-            additionalProperties: false,
+        tools: [
+          {
+            name: "echo",
+            description: "Echo one deterministic fixture message.",
+            annotations: { readOnlyHint: true },
+            inputSchema: {
+              type: "object",
+              properties: { message: { type: "string" } },
+              required: ["message"],
+              additionalProperties: false,
+            },
           },
-        }],
+          {
+            name: "fail",
+            description: "Return one deterministic MCP failure.",
+            inputSchema: { type: "object", additionalProperties: false },
+          },
+        ],
       };
     },
     async listResources(params) {
@@ -596,6 +638,12 @@ test("web-target WASM executes the complete browser harness tool contract", asyn
     },
     async callTool({ name, arguments: input }) {
       effects.mcp.push({ name: "callTool", input: { name, arguments: input } });
+      if (name === "fail") {
+        return {
+          content: [{ type: "text", text: "fixture remote failure" }],
+          isError: true,
+        };
+      }
       return {
         content: [{ type: "text", text: "fixture:" + input.message }],
         isError: false,
@@ -699,10 +747,10 @@ test("web-target WASM executes the complete browser harness tool contract", asyn
     });
     assert.deepEqual(JSON.parse(direct.input[1].output), { updated: true });
     assert.match(direct.input[2].output, /Success.*M note\.txt/s);
-    assert.deepEqual(JSON.parse(direct.input[3].output), {
-      detail: "original",
+    assert.deepEqual(direct.input[3].output, [{
+      type: "input_image",
       image_url: "data:image/png;base64,iVBORw0KGgo=",
-    });
+    }]);
     assert.equal(await workspace.readText("/workspace/note.txt"), "after\n");
 
     send(socket, {
@@ -734,6 +782,9 @@ test("web-target WASM executes the complete browser harness tool contract", asyn
     );
 
     const code = [
+      "await tools.lifecycle_probe({});",
+      "const patched = await tools.apply_patch(\"*** Begin Patch\\n*** Update File: note.txt\\n@@\\n-after\\n+nested\\n*** End Patch\");",
+      'const viewed = await tools.view_image({ path: "/workspace/pixel.png", detail: "original" });',
       'const web = await tools.web__run({ search_query: [{ q: "browser tools" }] });',
       'const generated = await tools.image_gen__imagegen({ prompt: "fixture image" });',
       "generatedImage(generated);",
@@ -745,7 +796,8 @@ test("web-target WASM executes the complete browser harness tool contract", asyn
       "const templates = await tools.list_mcp_resource_templates({ server: \"fixture\" });",
       "const resource = await tools.read_mcp_resource({ server: \"fixture\", uri: \"fixture://one\" });",
       "const remote = await tools.mcp__fixture__echo({ message: \"nested\" });",
-      "text(JSON.stringify({ web, image: generated.image_url, rows: queried.rows, closed: closed.closed, rendered, resourceUris: resources.resources.map((entry) => entry.uri), template: templates.resourceTemplates[0].uriTemplate, resourceText: resource.contents[0].text, remote: remote.content[0].text }));",
+      "let remoteFailed = false; try { await tools.mcp__fixture__fail({}); } catch (error) { remoteFailed = error.isError === true; }",
+      "text(JSON.stringify({ patched: patched.includes('M note.txt'), viewed: viewed.detail, web, image: generated.image_url, rows: queried.rows, closed: closed.closed, rendered, resourceUris: resources.resources.map((entry) => entry.uri), template: templates.resourceTemplates[0].uriTemplate, resourceText: resource.contents[0].text, remote: remote.content[0].text, remoteFailed }));",
     ].join("\n");
     send(socket, {
       type: "response.completed",
@@ -761,6 +813,13 @@ test("web-target WASM executes the complete browser harness tool contract", asyn
         usage: null,
       },
     });
+
+    await lifecycleStart;
+    await waitFor(() => events.some((event) =>
+      event.type === "tool.call" && event.payload.tool === "lifecycle_probe"));
+    assert.equal(events.some((event) =>
+      event.type === "tool.result" && event.payload.tool === "lifecycle_probe"), false);
+    releaseLifecycle();
 
     const executed = await reader.next();
     assert.equal(executed.previous_response_id, "combined-exec");
@@ -779,6 +838,8 @@ test("web-target WASM executes the complete browser harness tool contract", asyn
     const summaryItem = executed.input[0].output.find((item) =>
       item.type === "input_text" && item.text.startsWith("{"));
     assert.deepEqual(JSON.parse(summaryItem.text), {
+      patched: true,
+      viewed: "original",
       web: "fixture web result",
       image: "data:image/png;base64,Z2VuZXJhdGVk",
       rows: [{ id: 2 }],
@@ -793,7 +854,9 @@ test("web-target WASM executes the complete browser harness tool contract", asyn
       template: "fixture://{slug}",
       resourceText: "fixture resource body",
       remote: "fixture:nested",
+      remoteFailed: true,
     });
+    assert.equal(await workspace.readText("/workspace/note.txt"), "nested\n");
     send(socket, {
       type: "response.completed",
       response: {
@@ -819,6 +882,7 @@ test("web-target WASM executes the complete browser harness tool contract", asyn
       "exec_command",
       "update_plan",
       "view_image",
+      "view_image",
       "web__run",
       "image_gen__imagegen",
       "dataset",
@@ -830,6 +894,7 @@ test("web-target WASM executes the complete browser harness tool contract", asyn
       effects.hostCalls.filter((call) => call.parentCallId === "call-exec")
         .map((call) => call.name),
       [
+        "view_image",
         "web__run",
         "image_gen__imagegen",
         "dataset",
@@ -846,6 +911,10 @@ test("web-target WASM executes the complete browser harness tool contract", asyn
       {
         name: "callTool",
         input: { name: "echo", arguments: { message: "nested" } },
+      },
+      {
+        name: "callTool",
+        input: { name: "fail", arguments: {} },
       },
     ]);
     assert.deepEqual(effects.web, [{
@@ -879,6 +948,9 @@ test("web-target WASM executes the complete browser harness tool contract", asyn
         "view_image",
         "tool_search",
         "exec",
+        "lifecycle_probe",
+        "apply_patch",
+        "view_image",
         "web__run",
         "image_gen__imagegen",
         "dataset",
@@ -889,10 +961,18 @@ test("web-target WASM executes the complete browser harness tool contract", asyn
         "list_mcp_resource_templates",
         "read_mcp_resource",
         "mcp__fixture__echo",
+        "mcp__fixture__fail",
       ],
     );
+    const toolResults = events.filter((event) => event.type === "tool.result");
+    const remoteFailure = toolResults.find((event) => event.payload.tool === "mcp__fixture__fail");
+    assert.equal(remoteFailure.payload.status, "failed");
+    assert.deepEqual(remoteFailure.payload.metadata, {
+      mcp_server: "fixture",
+      mcp_tool: "fail",
+    });
     assert.equal(
-      events.filter((event) => event.type === "tool.result")
+      toolResults.filter((event) => event !== remoteFailure)
         .every((event) => event.payload.status === "completed"),
       true,
     );
@@ -928,6 +1008,14 @@ function messageReader(socket) {
 
 function send(socket, value) {
   socket.send(JSON.stringify(value));
+}
+
+async function waitFor(predicate, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("condition was not observed before the deadline");
+    await new Promise((resolve) => setImmediate(resolve));
+  }
 }
 
 function memoryWorkspace(initial = {}) {

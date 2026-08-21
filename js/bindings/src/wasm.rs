@@ -24,8 +24,8 @@ use nanocodex::{
         ToolContext, ToolDefinition, ToolInput, ToolOutput,
         contract::ToolOutputWire,
         hosted::{
-            CodeModeExecution, CodeModeHost, CodeModeHostError, HostFuture, HostedToolMode,
-            HostedTools,
+            CodeModeExecution, CodeModeHost, CodeModeHostError, CodeModeObserver, CodeModeUpdate,
+            HostFuture, HostedToolMode, HostedTools, NestedToolCall,
         },
         standard::StandardTool,
     },
@@ -56,6 +56,9 @@ extern "C" {
     #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = executeCode)]
     fn host_execute_code(source: &str, session_id: &str, call_id: &str)
     -> Result<Promise, JsValue>;
+
+    #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = nextCodeUpdate)]
+    fn host_next_code_update(session_id: &str, call_id: &str) -> Result<Promise, JsValue>;
 
     #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = executeTool)]
     fn host_execute_tool(
@@ -90,7 +93,7 @@ extern "C" {
     #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = writeWorkspaceFile)]
     fn host_write_workspace_file(
         path: &str,
-        contents: &str,
+        contents: &js_sys::Uint8Array,
         session_id: &str,
     ) -> Result<Promise, JsValue>;
 
@@ -334,6 +337,18 @@ struct JavaScriptCodeModeHost {
     mode: HostedToolMode,
 }
 
+#[derive(Deserialize)]
+struct JavaScriptNestedCallStarted {
+    call_id: String,
+    name: String,
+    input: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+struct JavaScriptNestedCallCompleted {
+    call: NestedToolCall,
+}
+
 impl JavaScriptCodeModeHost {
     fn new(definition_host_id: u32) -> Self {
         Self {
@@ -381,21 +396,16 @@ impl CodeModeHost for JavaScriptCodeModeHost {
         source: &'a str,
         context: ToolContext<'a>,
     ) -> HostFuture<'a, Result<CodeModeExecution, CodeModeHostError>> {
-        Box::pin(async move {
-            let promise = host_execute_code(source, context.session_id(), context.call_id())
-                .map_err(|error| CodeModeHostError::new(host_error_message(&error)))?;
-            let value = JsFuture::from(promise)
-                .await
-                .map_err(|error| CodeModeHostError::new(host_error_message(&error)))?;
-            let encoded = value.as_string().ok_or_else(|| {
-                CodeModeHostError::new("JavaScript Code Mode host returned a non-string result")
-            })?;
-            serde_json::from_str(&encoded).map_err(|error| {
-                CodeModeHostError::new(format!(
-                    "JavaScript Code Mode host returned invalid execution JSON: {error}"
-                ))
-            })
-        })
+        Box::pin(execute_javascript_code(source, context, None))
+    }
+
+    fn execute_with_updates<'a>(
+        &'a self,
+        source: &'a str,
+        context: ToolContext<'a>,
+        observer: &'a mut dyn CodeModeObserver,
+    ) -> HostFuture<'a, Result<CodeModeExecution, CodeModeHostError>> {
+        Box::pin(execute_javascript_code(source, context, Some(observer)))
     }
 
     fn execute_tool<'a>(
@@ -441,35 +451,126 @@ impl CodeModeHost for JavaScriptCodeModeHost {
     }
 }
 
+async fn execute_javascript_code(
+    source: &str,
+    context: ToolContext<'_>,
+    mut observer: Option<&mut dyn CodeModeObserver>,
+) -> Result<CodeModeExecution, CodeModeHostError> {
+    let execution = host_execute_code(source, context.session_id(), context.call_id())
+        .map_err(|error| CodeModeHostError::new(host_error_message(&error)))?;
+    loop {
+        let update = host_next_code_update(context.session_id(), context.call_id())
+            .map_err(|error| CodeModeHostError::new(host_error_message(&error)))?;
+        let value = JsFuture::from(update)
+            .await
+            .map_err(|error| CodeModeHostError::new(host_error_message(&error)))?;
+        if value.is_null() || value.is_undefined() {
+            break;
+        }
+        let encoded = value.as_string().ok_or_else(|| {
+            CodeModeHostError::new("JavaScript Code Mode host returned a non-string nested update")
+        })?;
+        let value = serde_json::from_str::<serde_json::Value>(&encoded).map_err(|error| {
+            CodeModeHostError::new(format!(
+                "JavaScript Code Mode host returned invalid nested update JSON: {error}"
+            ))
+        })?;
+        match value.get("type").and_then(serde_json::Value::as_str) {
+            Some("nested_call_started") => {
+                let update = serde_json::from_value::<JavaScriptNestedCallStarted>(value).map_err(
+                    |error| {
+                        CodeModeHostError::new(format!(
+                            "JavaScript Code Mode host returned invalid nested start: {error}"
+                        ))
+                    },
+                )?;
+                if let Some(observer) = observer.as_deref_mut() {
+                    observer.update(CodeModeUpdate::NestedCallStarted {
+                        call_id: &update.call_id,
+                        name: &update.name,
+                        input: &update.input,
+                    });
+                }
+            }
+            Some("nested_call_completed") => {
+                let update = serde_json::from_value::<JavaScriptNestedCallCompleted>(value)
+                    .map_err(|error| {
+                        CodeModeHostError::new(format!(
+                            "JavaScript Code Mode host returned invalid nested completion: {error}"
+                        ))
+                    })?;
+                if let Some(observer) = observer.as_deref_mut() {
+                    observer.update(CodeModeUpdate::NestedCallCompleted(&update.call));
+                }
+            }
+            _ => {
+                return Err(CodeModeHostError::new(
+                    "JavaScript Code Mode host returned an unknown nested update",
+                ));
+            }
+        }
+    }
+    let value = JsFuture::from(execution)
+        .await
+        .map_err(|error| CodeModeHostError::new(host_error_message(&error)))?;
+    decode_code_execution(value)
+}
+
+fn decode_code_execution(value: JsValue) -> Result<CodeModeExecution, CodeModeHostError> {
+    let encoded = value.as_string().ok_or_else(|| {
+        CodeModeHostError::new("JavaScript Code Mode host returned a non-string result")
+    })?;
+    serde_json::from_str(&encoded).map_err(|error| {
+        CodeModeHostError::new(format!(
+            "JavaScript Code Mode host returned invalid execution JSON: {error}"
+        ))
+    })
+}
+
 async fn execute_browser_apply_patch(
     input: ToolInput,
     session_id: &str,
 ) -> Result<ToolOutput, CodeModeHostError> {
-    use nanocodex::tools::apply_patch::{PatchOperation, plan, required_files};
-
     let patch = input
         .into_freeform()
         .map_err(|error| CodeModeHostError::new(format!("invalid apply_patch input: {error}")))?;
+    let summary = apply_browser_patch_plan(&patch, session_id).await?;
+    Ok(ToolOutput::text(summary).with_structured_result(serde_json::json!({})))
+}
+
+async fn apply_browser_patch_plan(
+    patch: &str,
+    session_id: &str,
+) -> Result<String, CodeModeHostError> {
+    use nanocodex::tools::apply_patch::{PatchOperation, plan, required_files};
+
     let mut files = HashMap::new();
-    for path in required_files(&patch).map_err(CodeModeHostError::new)? {
+    for path in required_files(patch).map_err(CodeModeHostError::new)? {
         let display = path.to_string_lossy().into_owned();
         let promise = host_read_workspace_file(&display, session_id)
             .map_err(|error| CodeModeHostError::new(host_error_message(&error)))?;
         let value = JsFuture::from(promise)
             .await
             .map_err(|error| CodeModeHostError::new(host_error_message(&error)))?;
-        let contents = value.as_string().ok_or_else(|| {
-            CodeModeHostError::new(format!(
-                "browser workspace returned non-text data for {display}"
-            ))
-        })?;
+        if !value.is_instance_of::<js_sys::Uint8Array>() {
+            return Err(CodeModeHostError::new(format!(
+                "browser workspace returned non-byte data for {display}"
+            )));
+        }
+        let contents =
+            String::from_utf8(js_sys::Uint8Array::new(&value).to_vec()).map_err(|error| {
+                CodeModeHostError::new(format!(
+                    "browser workspace returned non-UTF-8 data for {display}: {error}"
+                ))
+            })?;
         files.insert(PathBuf::from(display), contents);
     }
-    let plan = plan(&patch, &files).map_err(CodeModeHostError::new)?;
+    let plan = plan(patch, &files).map_err(CodeModeHostError::new)?;
     for operation in plan.operations() {
         let promise = match operation {
             PatchOperation::Write { path, contents } => {
-                host_write_workspace_file(&path.to_string_lossy(), contents, session_id)
+                let bytes = js_sys::Uint8Array::from(contents.as_bytes());
+                host_write_workspace_file(&path.to_string_lossy(), &bytes, session_id)
             }
             PatchOperation::Delete { path } => {
                 host_remove_workspace_file(&path.to_string_lossy(), session_id)
@@ -480,7 +581,18 @@ async fn execute_browser_apply_patch(
             .await
             .map_err(|error| CodeModeHostError::new(host_error_message(&error)))?;
     }
-    Ok(ToolOutput::text(plan.summary().to_owned()).with_structured_result(serde_json::json!({})))
+    Ok(plan.summary().to_owned())
+}
+
+/// Applies a browser-workspace patch through the canonical Rust planner.
+///
+/// The browser host uses this internal binding for nested Code Mode calls so
+/// they share the direct `apply_patch` tool's verification and mutation path.
+#[wasm_bindgen(js_name = applyBrowserPatch)]
+pub async fn apply_browser_patch(patch: &str, session_id: &str) -> Result<String, JsValue> {
+    apply_browser_patch_plan(patch, session_id)
+        .await
+        .map_err(js_error)
 }
 
 #[derive(Deserialize)]

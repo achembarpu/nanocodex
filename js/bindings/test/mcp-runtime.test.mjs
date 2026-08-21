@@ -142,6 +142,7 @@ test("remote MCP stays deferred behind tool_search and executes through Code Mod
   assert.equal(searched.success, true);
   assert.equal(searched.structured_result[0].name, "mcp__mercator__");
   assert.equal(searched.structured_result[0].tools[0].defer_loading, true);
+  assert.equal(JSON.parse(searched.output).tools[0].supports_parallel_tool_calls, false);
 
   const execution = JSON.parse(await runtime.executeCode(
     `const searchDefinition = ALL_TOOLS.find((tool) => tool.name === "tool_search");
@@ -239,6 +240,21 @@ test("remote MCP failures are reported by tool_search without breaking agent cre
   assert.deepEqual(JSON.parse(result.output).failed_servers, {
     unavailable: "connection refused",
   });
+  const resources = JSON.parse(await runtime.executeTool(
+    "list_mcp_resources",
+    JSON.stringify({}),
+  ));
+  assert.deepEqual(JSON.parse(resources.output), {
+    resources: [],
+    pending_servers: 0,
+    failed_servers: { unavailable: "connection refused" },
+  });
+  const explicit = JSON.parse(await runtime.executeTool(
+    "list_mcp_resources",
+    JSON.stringify({ server: "unavailable" }),
+  ));
+  assert.equal(explicit.success, false);
+  assert.match(explicit.output, /discovery failed: unavailable: connection refused/);
 });
 
 test("MCP discovery runs behind agent readiness and reports pending catalogs", async () => {
@@ -259,6 +275,21 @@ test("MCP discovery runs behind agent readiness and reports pending catalogs", a
     JSON.stringify({ query: "documentation" }),
   ));
   assert.equal(JSON.parse(pending.output).pending_servers, 1);
+  const pendingResources = JSON.parse(await runtime.executeTool(
+    "list_mcp_resources",
+    JSON.stringify({}),
+  ));
+  assert.deepEqual(JSON.parse(pendingResources.output), {
+    resources: [],
+    pending_servers: 1,
+    failed_servers: {},
+  });
+  const explicitPending = JSON.parse(await runtime.executeTool(
+    "list_mcp_resources",
+    JSON.stringify({ server: "docs" }),
+  ));
+  assert.equal(explicitPending.success, false);
+  assert.match(explicitPending.output, /discovery is still pending: docs/);
 
   finishDiscovery({
     tools: [{
@@ -368,6 +399,82 @@ test("remote MCP tools retry payment challenges through McpClient.wrap", async (
   const result = await mcp.resolve("mcp__mercator__premium").handler({});
   assert.equal(credentials, 1);
   assert.equal(calls.length, 2);
-  assert.equal(result.content[0].text, "paid MCP result");
-  assert.equal(result.receipt.status, "success");
+  assert.equal(result.value.content[0].text, "paid MCP result");
+  assert.equal(result.value.receipt.status, "success");
+});
+
+test("MCP isError is a failed tool result with server and remote-tool provenance", async () => {
+  const mcp = await createMcpRuntime({
+    fixture: {
+      client: {
+        async listTools() {
+          return {
+            tools: [{
+              name: "fail",
+              annotations: { readOnlyHint: true },
+              inputSchema: { type: "object" },
+            }],
+          };
+        },
+        async callTool() {
+          return {
+            content: [{ type: "text", text: "remote failure" }],
+            isError: true,
+          };
+        },
+      },
+    },
+  });
+  await mcp.settled();
+  const runtime = createCodeRuntime();
+  runtime.addProvider(mcp);
+
+  const direct = JSON.parse(await runtime.executeTool(
+    "mcp__fixture__fail",
+    "{}",
+    "mcp-failure",
+    "direct-failure",
+  ));
+  assert.equal(direct.success, false);
+  assert.deepEqual(direct.metadata, { mcp_server: "fixture", mcp_tool: "fail" });
+  assert.equal(JSON.parse(direct.output).isError, true);
+
+  const nested = JSON.parse(await runtime.executeCode(`
+    try { await tools.mcp__fixture__fail({}); } catch (error) { text(error.isError); }
+  `, "mcp-failure", "nested-failure"));
+  assert.equal(nested.success, true);
+  assert.equal(nested.nested_calls[0].success, false);
+  assert.deepEqual(nested.nested_calls[0].metadata, {
+    mcp_server: "fixture",
+    mcp_tool: "fail",
+  });
+  assert.match(JSON.stringify(nested.output), /true/);
+});
+
+test("MCP parallel safety requires an annotation or explicit server policy", async () => {
+  const client = {
+    async listTools() {
+      return { tools: [
+        { name: "default", inputSchema: { type: "object" } },
+        { name: "allowlisted", inputSchema: { type: "object" } },
+        {
+          name: "annotated",
+          annotations: { readOnlyHint: true },
+          inputSchema: { type: "object" },
+        },
+      ] };
+    },
+  };
+  const selective = await createMcpRuntime({
+    selective: { client, parallelTools: ["allowlisted"] },
+  });
+  const global = await createMcpRuntime({
+    global: { client, supportsParallelToolCalls: true },
+  });
+  await Promise.all([selective.settled(), global.settled()]);
+
+  assert.equal(selective.resolve("mcp__selective__default").parallelSafe, false);
+  assert.equal(selective.resolve("mcp__selective__allowlisted").parallelSafe, true);
+  assert.equal(selective.resolve("mcp__selective__annotated").parallelSafe, true);
+  assert.equal(global.resolve("mcp__global__default").parallelSafe, true);
 });

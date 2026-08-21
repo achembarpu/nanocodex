@@ -68,9 +68,10 @@ export async function createMcpRuntime(configuration, options = {}) {
   }));
   const toolSearch = {
     name: "tool_search",
+    parallelSafe: true,
     handler: ({ query, limit }) => searchTools(query, limit),
   };
-  const resourceTools = createResourceTools(connectedServers);
+  const resourceTools = createResourceTools(connectedServers, pendingServers, failures);
 
   function searchTools(query, limit = DEFAULT_SEARCH_LIMIT) {
     if (typeof query !== "string" || !query.trim()) {
@@ -90,6 +91,7 @@ export async function createMcpRuntime(configuration, options = {}) {
         server: entry.server.name,
         tool: entry.remoteName,
         description: entry.description,
+        supports_parallel_tool_calls: entry.parallelSafe,
         input_schema: entry.inputSchema,
       })),
       pending_servers: pendingServers.size,
@@ -115,6 +117,7 @@ export async function createMcpRuntime(configuration, options = {}) {
       if (!entry) return undefined;
       return {
         name,
+        parallelSafe: entry.parallelSafe,
         handler: (input, context) => callRemoteTool(entry, input, context),
       };
     },
@@ -240,6 +243,13 @@ function normalizeServers(configuration) {
     if (server.disabledTools && !isStringArray(server.disabledTools)) {
       throw new TypeError(`MCP server ${name} disabledTools must be an array of strings`);
     }
+    if (server.parallelTools && !isStringArray(server.parallelTools)) {
+      throw new TypeError(`MCP server ${name} parallelTools must be an array of strings`);
+    }
+    if (server.supportsParallelToolCalls !== undefined
+      && typeof server.supportsParallelToolCalls !== "boolean") {
+      throw new TypeError(`MCP server ${name} supportsParallelToolCalls must be boolean`);
+    }
     if (server.timeoutMs !== undefined
       && (!Number.isFinite(server.timeoutMs) || server.timeoutMs <= 0)) {
       throw new TypeError(`MCP server ${name} timeoutMs must be a positive number`);
@@ -264,7 +274,7 @@ function isStringArray(value) {
   return Array.isArray(value) && value.every((item) => typeof item === "string");
 }
 
-function createResourceTools(connectedServers) {
+function createResourceTools(connectedServers, pendingServers, failures) {
   const byServer = connectedServers;
   return [
     {
@@ -274,7 +284,15 @@ function createResourceTools(connectedServers) {
         "Lists resources provided by MCP servers. Resources allow servers to share data that provides context to language models, such as files, database schemas, or application-specific information. Prefer resources over web search when possible.",
         "resources",
       ),
-      handler: (input, context) => listMcpEntries(byServer, input, "resources", context?.signal),
+      handler: (input, context) => listMcpEntries(
+        byServer,
+        pendingServers,
+        failures,
+        input,
+        "resources",
+        context?.signal,
+      ),
+      parallelSafe: true,
     },
     {
       name: "list_mcp_resource_templates",
@@ -284,7 +302,15 @@ function createResourceTools(connectedServers) {
         "resource templates",
       ),
       handler: (input, context) =>
-        listMcpEntries(byServer, input, "resourceTemplates", context?.signal),
+        listMcpEntries(
+          byServer,
+          pendingServers,
+          failures,
+          input,
+          "resourceTemplates",
+          context?.signal,
+        ),
+      parallelSafe: true,
     },
     {
       name: "read_mcp_resource",
@@ -310,6 +336,7 @@ function createResourceTools(connectedServers) {
         },
       },
       handler: (input, context) => readMcpResource(byServer, input, context?.signal),
+      parallelSafe: true,
     },
   ];
 }
@@ -337,9 +364,15 @@ function listResourcesDefinition(name, description, noun) {
   };
 }
 
-async function listMcpEntries(byServer, input, kind, signal) {
+async function listMcpEntries(byServer, pendingServers, failures, input, kind, signal) {
   const { cursor, server } = normalizeListInput(input);
   if (server) {
+    if (pendingServers.has(server)) {
+      throw new Error(`MCP server discovery is still pending: ${server}`);
+    }
+    if (failures[server]) {
+      throw new Error(`MCP server discovery failed: ${server}: ${failures[server]}`);
+    }
     const connection = requiredMcpConnection(byServer, server);
     const result = await listMcpPage(connection, kind, cursor, signal);
     return {
@@ -353,6 +386,10 @@ async function listMcpEntries(byServer, input, kind, signal) {
     tagMcpEntries(await listAllMcpEntries(connection, kind, signal), name)));
   return {
     [kind]: pages.flatMap((page) => page.status === "fulfilled" ? page.value : []),
+    ...(pendingServers.size || Object.keys(failures).length ? {
+      pending_servers: pendingServers.size,
+      failed_servers: { ...failures },
+    } : {}),
   };
 }
 
@@ -446,6 +483,9 @@ function createEntry(server, client, tool) {
     description,
     inputSchema,
     remoteName,
+    parallelSafe: server.supportsParallelToolCalls === true
+      || server.parallelTools?.includes(remoteName) === true
+      || tool.annotations?.readOnlyHint === true,
     searchText: [
       canonicalName,
       server.name,
@@ -469,18 +509,25 @@ function createSearchIndex(entries) {
 }
 
 async function callRemoteTool(entry, input, context) {
-  return withMcpRequest(entry.server, context?.signal, async (requestOptions) => {
+  const result = await withMcpRequest(entry.server, context?.signal, async (requestOptions) => {
     const options = {
       ...requestOptions,
       ...(entry.server.payment?.context !== undefined
         ? { context: entry.server.payment.context }
         : {}),
     };
-    return await entry.client.callTool(
+    return entry.client.callTool(
       { name: entry.remoteName, arguments: input ?? {} },
       undefined,
       options,
     );
+  });
+  return toolResult(result, result, {
+    success: result?.isError !== true,
+    metadata: {
+      mcp_server: entry.server.name,
+      mcp_tool: entry.remoteName,
+    },
   });
 }
 

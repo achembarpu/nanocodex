@@ -42,6 +42,7 @@ test("QuickJS keeps Promise.all tool calls concurrent through map and reduce", a
   const runtime = createCodeRuntime({
     exec_command: {
       description: "Run one bounded command.",
+      supportsParallelToolCalls: true,
       parameters: { type: "object" },
       outputSchema: {
         type: "object",
@@ -97,10 +98,12 @@ test("QuickJS evaluator reports guest failures as Code Mode failures", async () 
 
 test("Code Mode cancellation aborts active nested tools", async () => {
   let started;
+  let nestedSignal;
   const toolStarted = new Promise((resolve) => { started = resolve; });
   const runtime = createCodeRuntime({
     blocked: {
       async handler(_input, context) {
+        nestedSignal = context.signal;
         started();
         await new Promise((resolve, reject) => {
           context.signal.addEventListener("abort", () => reject(new Error("nested tool cancelled")), {
@@ -115,5 +118,24 @@ test("Code Mode cancellation aborts active nested tools", async () => {
   runtime.cancel();
   const result = JSON.parse(await execution);
   assert.equal(result.success, false);
-  assert.match(result.output, /nested tool cancelled/);
+  assert.match(result.output, /Code Mode execution was cancelled/);
+  assert.equal(nestedSignal.aborted, true);
+});
+
+test("cancelling a never-settling QuickJS cell leaves its serialized evaluator reusable", async () => {
+  const runtime = createCodeRuntime({}, { evaluate: createQuickJsEvaluator(quickJs) });
+  const pending = runtime.executeCode("await new Promise(() => {});", "wedged", "exec-wedged");
+  await new Promise((resolve) => setImmediate(resolve));
+  runtime.cancel("wedged");
+  const cancelled = JSON.parse(await pending);
+  assert.equal(cancelled.success, false);
+  assert.match(cancelled.output, /Code Mode execution was cancelled/);
+
+  const recovered = JSON.parse(await runtime.executeCode(
+    'text("RECOVERED");',
+    "wedged",
+    "exec-recovered",
+  ));
+  assert.equal(recovered.success, true);
+  assert.match(JSON.stringify(recovered.output), /RECOVERED/);
 });

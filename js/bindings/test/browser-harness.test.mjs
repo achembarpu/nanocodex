@@ -73,10 +73,13 @@ test("the default browser harness exposes one exact model-visible tool set", asy
   assert.deepEqual(await byName.image_gen__imagegen.handler({ prompt: "draw" }, context), {
     image_url: "data:image/png;base64,Z2VuZXJhdGVk",
   });
-  assert.equal(
-    (await byName.view_image.handler({ path: "/workspace/pixel.png" }, context)).image_url,
-    "data:image/png;base64,iVBORw0KGgo=",
-  );
+  const viewed = await byName.view_image.handler({ path: "/workspace/pixel.png" }, context);
+  assert.deepEqual(viewed.output, [{
+    type: "input_image",
+    image_url: "data:image/png;base64,iVBORw0KGgo=",
+    detail: "high",
+  }]);
+  assert.equal(viewed.structuredResult.image_url, "data:image/png;base64,iVBORw0KGgo=");
   assert.deepEqual(await byName.update_plan.handler({ plan: [] }, context), { updated: true });
   const opened = await byName.dataset.handler({
     operation: "open",

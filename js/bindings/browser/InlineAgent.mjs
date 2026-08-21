@@ -1,4 +1,4 @@
-import { Nanocodex } from "../pkg-web/nanocodex.js";
+import { applyBrowserPatch, Nanocodex } from "../pkg-web/nanocodex.js";
 
 import { agentActions } from "../actions/index.mjs";
 import {
@@ -85,6 +85,7 @@ export async function create(options = {}) {
       ? undefined
       : tempoMcp ? { ...tempoMcp, ...mcp } : mcp,
     codeEvaluator,
+    applyPatch: applyBrowserPatch,
     websocketPreconnect,
     websocketUrl,
     onDispose: () => releaseDefinitionHost(hostDefinitionId),

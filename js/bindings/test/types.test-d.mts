@@ -5,10 +5,12 @@ import {
   ChatGptSubscription,
   type AccountsWallet,
   type CostStatus,
+  type McpServer,
   createTempoProviderFromAccounts,
   createMemoryChatGptSubscriptionStore,
   Subagents,
   type SessionSnapshot,
+  type Tool,
   Transport,
   type Turn,
   type TurnResult,
@@ -95,6 +97,20 @@ async function check() {
   await createWorkerAgent(workerResource);
   // @ts-expect-error non-disabled preparation requires one stable harness identity.
   await prepareWorkerAgent({ origin: "https://example.com" });
+  const parallelTool: Tool = {
+    description: "Parallel read-only fixture.",
+    supportsParallelToolCalls: true,
+    handler: async (_input, context) => context.signal.aborted,
+  };
+  const parallelMcp: McpServer = {
+    url: "https://mcp.example.com",
+    supportsParallelToolCalls: false,
+    parallelTools: ["lookup"],
+  };
+  // @ts-expect-error per-tool parallel safety is boolean.
+  parallelTool.supportsParallelToolCalls = "yes";
+  // @ts-expect-error MCP parallel allowlists contain remote tool names.
+  parallelMcp.parallelTools = [1];
   const storedJournal: DurabilityStoredJournal = {
     revision: durabilityRevision(0n),
     batches: [],
@@ -264,6 +280,9 @@ async function check() {
   await BrowserAgent.create({ transport: workerTransport });
   await HostAgent.create({
     transport: HostTransport.openAi({ apiKey }),
+    codeEvaluator: async (_source, environment) => {
+      environment.signal.throwIfAborted();
+    },
     filesystem: browserWorkspace,
     tools: [
       web({ url: "https://example.com/tools/web" }),

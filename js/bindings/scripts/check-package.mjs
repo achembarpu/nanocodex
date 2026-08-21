@@ -45,6 +45,8 @@ const requiredFiles = [
   "worker/index.d.mts",
   "runtime/workspace.mjs",
   "runtime/workspace.d.mts",
+  "runtime/code-evaluator.worker.mjs",
+  "runtime/worker-evaluator.mjs",
   "runtime/postgres-durability-store.mjs",
   "runtime/postgres-durability-store.d.mts",
   "tools/index.mjs",

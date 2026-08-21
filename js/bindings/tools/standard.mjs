@@ -1,5 +1,6 @@
 import { IMAGE_DESCRIPTION, WEB_DESCRIPTION } from "./standardDescriptions.mjs";
 import { namedTool } from "./namedTool.mjs";
+import { toolResult } from "../runtime/code-runtime.mjs";
 
 export { namedTool };
 
@@ -10,6 +11,7 @@ const DEFAULT_IMAGE_URL = "/api/tools/image-generation";
 export function web(options = {}) {
   const request = jsonRequester(options, DEFAULT_WEB_URL);
   return namedTool("web__run", {
+    supportsParallelToolCalls: true,
     description: WEB_DESCRIPTION,
     parameters: webParameters,
     outputSchema: { type: "string" },
@@ -88,6 +90,7 @@ export function imageGeneration(options = {}) {
 
 export function viewImage(options) {
   return namedTool("view_image", {
+    supportsParallelToolCalls: true,
     description: "View an image file from the browser workspace.",
     parameters: {
       type: "object",
@@ -120,7 +123,12 @@ export function viewImage(options) {
       }
       const mimeType = imageMimeType(bytes);
       if (!mimeType) throw new Error("view_image supports PNG, JPEG, GIF, WebP, and SVG files");
-      return { detail, image_url: `data:${mimeType};base64,${base64(bytes)}` };
+      const result = { detail, image_url: `data:${mimeType};base64,${base64(bytes)}` };
+      return toolResult([{
+        type: "input_image",
+        image_url: result.image_url,
+        detail,
+      }], result, { value: result });
     },
   });
 }

@@ -1,6 +1,6 @@
 use std::{
     collections::{HashMap, HashSet},
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
 };
 
 #[cfg(not(target_family = "wasm"))]
@@ -153,6 +153,13 @@ pub fn plan(patch: &str, initial_files: &HashMap<PathBuf, String>) -> Result<Pat
                     .ok_or_else(|| format!("Failed to read file to update {}", path.display()))?;
                 let updated = apply_chunks(original, &chunks, &path)?;
                 if let Some(destination) = move_path {
+                    if destination == path {
+                        return Err(format!(
+                            "Move destination {} aliases source path {}",
+                            destination.display(),
+                            path.display()
+                        ));
+                    }
                     files.remove(&path);
                     files.insert(destination.clone(), updated.clone());
                     operations.push(PatchOperation::Write {
@@ -237,7 +244,51 @@ fn parse(patch: &str) -> Result<Vec<Hunk>, String> {
     if hunks.is_empty() {
         return Err("No files were modified.".to_owned());
     }
-    Ok(hunks)
+    Ok(hunks.into_iter().map(normalize_hunk_paths).collect())
+}
+
+fn normalize_hunk_paths(hunk: Hunk) -> Hunk {
+    match hunk {
+        Hunk::AddFile { path, contents } => Hunk::AddFile {
+            path: normalize_path(&path),
+            contents,
+        },
+        Hunk::DeleteFile { path } => Hunk::DeleteFile {
+            path: normalize_path(&path),
+        },
+        Hunk::UpdateFile {
+            path,
+            move_path,
+            chunks,
+        } => Hunk::UpdateFile {
+            path: normalize_path(&path),
+            move_path: move_path.map(|path| normalize_path(&path)),
+            chunks,
+        },
+    }
+}
+
+fn normalize_path(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::CurDir => {}
+            Component::ParentDir
+                if matches!(
+                    normalized.components().next_back(),
+                    Some(Component::Normal(_))
+                ) =>
+            {
+                normalized.pop();
+            }
+            Component::ParentDir if normalized.has_root() => {}
+            Component::ParentDir => normalized.push(component.as_os_str()),
+            Component::Prefix(_) | Component::RootDir | Component::Normal(_) => {
+                normalized.push(component.as_os_str());
+            }
+        }
+    }
+    normalized
 }
 
 fn apply_chunks(original: &str, chunks: &[UpdateFileChunk], path: &Path) -> Result<String, String> {
@@ -432,6 +483,27 @@ mod tests {
             error,
             "invalid hunk at line 2, Update file hunk for path 'file.txt' is empty"
         );
+        std::fs::remove_dir_all(root)?;
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_move_to_a_lexical_alias_without_mutating_the_file()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = test_root("aliased-move")?;
+        std::fs::write(root.join("file.txt"), "before\n")?;
+
+        let error = apply(
+            "*** Begin Patch\n*** Update File: file.txt\n*** Move to: ./folder/../file.txt\n@@\n-before\n+after\n*** End Patch",
+            &root,
+        )
+        .expect_err("an aliased move must fail before mutation");
+
+        assert_eq!(
+            error,
+            "Move destination file.txt aliases source path file.txt"
+        );
+        assert_eq!(std::fs::read_to_string(root.join("file.txt"))?, "before\n");
         std::fs::remove_dir_all(root)?;
         Ok(())
     }

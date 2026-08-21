@@ -10,8 +10,8 @@ use nanocodex_oai_api::{
 };
 
 use super::{
-    CodeModeExecution, CodeModeHost, CodeModeNotification, CodeModeObserver, CodeModeUpdate,
-    HostedToolMode, NestedToolCall, OwnedToolContext,
+    CodeModeExecution, CodeModeHost, CodeModeNotification, CodeModeObserver, HostedToolMode,
+    NestedToolCall, OwnedToolContext,
 };
 use crate::runtime_config::{ImageGenerationConfig, WebSearchConfig};
 
@@ -371,16 +371,24 @@ impl HostedToolRuntime {
         self.execute_code(source, context.as_context()).await
     }
 
-    /// Executes Code Mode and replays its nested calls to an observer.
+    /// Executes Code Mode and streams nested calls to an observer when the
+    /// embedding host supports live updates.
     pub async fn execute_code_owned_with_updates(
         &self,
         source: &str,
         context: OwnedToolContext,
         observer: &mut dyn CodeModeObserver,
     ) -> CodeModeExecution {
-        let execution = self.execute_code_owned(source, context).await;
-        replay_nested_updates(&execution, observer);
-        execution
+        let Some(host) = &self.host else {
+            return failed("no hosted Code Mode adapter is configured");
+        };
+        match host
+            .execute_with_updates(source, context.as_context(), observer)
+            .await
+        {
+            Ok(execution) => execution,
+            Err(error) => failed(&error.to_string()),
+        }
     }
 
     /// Returns a failed result because hosted cells cannot currently yield.
@@ -396,16 +404,14 @@ impl HostedToolRuntime {
         failed("background code-mode cells are unavailable in a hosted runtime")
     }
 
-    /// Waits for Code Mode and replays nested calls to an observer.
+    /// Waits for hosted Code Mode, which cannot currently yield nested work.
     pub async fn wait_for_code_with_updates(
         &self,
         input: &str,
         context: ToolContext<'_>,
-        observer: &mut dyn CodeModeObserver,
+        _observer: &mut dyn CodeModeObserver,
     ) -> CodeModeExecution {
-        let execution = self.wait_for_code(input, context).await;
-        replay_nested_updates(&execution, observer);
-        execution
+        self.wait_for_code(input, context).await
     }
 }
 
@@ -458,17 +464,6 @@ impl HostedToolRuntimeControl {
                 "hosted Code Mode cancellation failed"
             );
         }
-    }
-}
-
-fn replay_nested_updates(execution: &CodeModeExecution, observer: &mut dyn CodeModeObserver) {
-    for call in &execution.nested_calls {
-        observer.update(CodeModeUpdate::NestedCallStarted {
-            call_id: &call.call_id,
-            name: &call.name,
-            input: &call.input,
-        });
-        observer.update(CodeModeUpdate::NestedCallCompleted(call));
     }
 }
 

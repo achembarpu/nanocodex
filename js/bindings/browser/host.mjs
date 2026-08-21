@@ -1,4 +1,5 @@
-import { createCodeRuntime } from "../runtime/code-runtime.mjs";
+import { createCodeRuntime, toolResult } from "../runtime/code-runtime.mjs";
+import { createWorkerEvaluator } from "../runtime/worker-evaluator.mjs";
 import { openHostManagedWebSocket } from "./hostManagedWebSocket.mjs";
 
 const DEFAULT_MAX_QUEUED_MESSAGES = 4_096;
@@ -17,16 +18,24 @@ export function createBrowserHost(options = {}) {
     throw new Error("WebSocket is unavailable in this runtime");
   }
   const connections = new Map();
-  const code = createCodeRuntime(options.tools, {
-    evaluate: options.codeEvaluator,
-  });
+  const codeEvaluator = options.codeEvaluator
+    ?? (typeof globalThis.Worker === "function"
+      ? createWorkerEvaluator()
+      : () => Promise.reject(new Error(
+          "browser Code Mode requires a child Worker or an explicit codeEvaluator",
+        )));
+  const code = createCodeRuntime(options.tools, { evaluate: codeEvaluator });
   if (options.filesystem && options.filesystemTools === false) {
     code.addTools({
       apply_patch: {
         description: "Apply a Rust-verified patch to the browser workspace.",
         parameters: { type: "object", additionalProperties: false },
-        handler() {
-          throw new Error("apply_patch must be dispatched by the Rust workspace runtime");
+        async handler(input, context) {
+          if (typeof options.applyPatch !== "function") {
+            throw new Error("the Rust browser apply_patch planner is unavailable");
+          }
+          const summary = await options.applyPatch(input, context.sessionId);
+          return toolResult(summary, {});
         },
       },
     });
@@ -328,13 +337,17 @@ export function createBrowserHost(options = {}) {
     next,
     close,
     sleep: (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds)),
-    executeCode: code.executeCode,
+    executeCode: code.executeCodeObserved,
+    nextCodeUpdate: code.nextCodeUpdate,
     executeTool: code.executeTool,
     cancelCode: code.cancel,
     readWorkspaceFile: async (path) => {
       if (!options.filesystem) throw new Error("browser workspace is unavailable");
-      return new TextDecoder("utf-8", { fatal: true })
-        .decode(await options.filesystem.readFile(path));
+      const contents = await options.filesystem.readFile(path);
+      if (!(contents instanceof Uint8Array)) {
+        throw new TypeError("browser workspace readFile() must return Uint8Array");
+      }
+      return contents;
     },
     writeWorkspaceFile: async (path, contents) => {
       if (!options.filesystem) throw new Error("browser workspace is unavailable");

@@ -364,6 +364,9 @@ const hostBridge = Object.freeze({
   executeCode(source, sessionId, callId) {
     return requiredSessionHost(sessionId).executeCode(source, sessionId, callId);
   },
+  nextCodeUpdate(sessionId, callId) {
+    return requiredSessionHost(sessionId).nextCodeUpdate(sessionId, callId);
+  },
   executeTool(name, input, sessionId, callId) {
     return requiredSessionHost(sessionId).executeTool(name, input, sessionId, callId);
   },

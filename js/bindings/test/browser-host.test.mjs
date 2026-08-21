@@ -1,7 +1,40 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { createBrowserHost } from "../browser/host.mjs";
+import { createBrowserHost as createProductionBrowserHost } from "../browser/host.mjs";
+
+const createBrowserHost = (options = {}) => createProductionBrowserHost({
+  codeEvaluator: evaluateInTestRealm,
+  ...options,
+});
+
+async function evaluateInTestRealm(source, environment) {
+  const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
+  const script = new AsyncFunction(
+    "tools", "ALL_TOOLS", "text", "image", "generatedImage", "store", "load", "exit",
+    "require", "console", source,
+  );
+  await script(
+    environment.tools,
+    environment.toolDefinitions,
+    environment.text,
+    environment.image,
+    environment.generatedImage,
+    environment.store,
+    environment.load,
+    environment.exit,
+    environment.require,
+    environment.console,
+  );
+}
+
+test("browser Code Mode fails closed when an evaluator Worker is unavailable", async () => {
+  assert.equal(typeof globalThis.Worker, "undefined");
+  const host = createProductionBrowserHost({ WebSocketImpl: FakeWebSocket });
+  const execution = JSON.parse(await host.executeCode("while (true) {}"));
+  assert.equal(execution.success, false);
+  assert.match(execution.output, /requires a child Worker or an explicit codeEvaluator/);
+});
 
 test("browser host carries ordered frames and application tools", async () => {
   const events = [];

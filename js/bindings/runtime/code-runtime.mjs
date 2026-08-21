@@ -1,5 +1,9 @@
+const MAX_CONCURRENT_NESTED_CALLS = 128;
+const CANCELLATION_MESSAGE = "Code Mode execution was cancelled";
+
 export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
   const activeExecutions = new Set();
+  const codeObservations = new Map();
   const stores = new Map();
   const providers = [];
   let nextCallId = 1;
@@ -76,7 +80,12 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
         callId,
         signal: controller.signal,
       });
-      return encodeToolOutput(outputBody(result), true, structuredResult(result, `tool ${name} result`));
+      return encodeToolOutput(
+        outputBody(result),
+        toolSucceeded(result),
+        structuredResult(result, `tool ${name} result`),
+        toolMetadata(result, `tool ${name} metadata`),
+      );
     } catch (error) {
       return encodeToolOutput(errorMessage(error), false, null);
     } finally {
@@ -84,7 +93,7 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
     }
   }
 
-  async function executeCode(source, sessionId = "default", parentCallId = "exec") {
+  async function executeCode(source, sessionId = "default", parentCallId = "exec", observer) {
     const startedAt = performance.now();
     const content = [];
     const stored = stores.get(sessionId) || new Map();
@@ -96,8 +105,20 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
     const tools = Object.create(null);
     const availableTools = currentTools();
     const availableDefinitions = currentCodeDefinitions();
-    for (const { handler, name } of availableTools) {
-      tools[name] = async (input) => {
+    const nestedInvocations = [];
+    const nestedCallPermits = new AsyncSemaphore(MAX_CONCURRENT_NESTED_CALLS);
+    const parallelExecution = new AsyncReadWriteGate();
+    for (const { handler, name, parallelSafe } of availableTools) {
+      tools[name] = (input) => {
+        const invocation = executeNestedTool(input);
+        // Attach a rejection handler immediately so a discarded guest Promise
+        // cannot become an unhandled rejection before the cell reaches its
+        // quiescence boundary.
+        nestedInvocations.push(invocation.then(() => undefined, () => undefined));
+        return invocation;
+      };
+
+      async function executeNestedTool(input) {
         const callId = `${parentCallId}/code-${nextCallId++}`;
         const toolStartedAt = performance.now();
         const startedAfterNs = Math.max(
@@ -114,25 +135,34 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
           success: false,
           started_after_ns: startedAfterNs,
           duration_ns: 0,
+          metadata: null,
         };
         // Rust records nested calls in invocation order even when parallel
         // siblings finish out of order. Reserve the slot before dispatch.
         nestedCalls.push(recordedCall);
+        observer?.({
+          type: "nested_call_started",
+          call_id: callId,
+          name,
+          input: recordedInput,
+        });
+        let result;
         try {
-          if (controller.signal.aborted) throw new Error("Code Mode execution was cancelled");
-          const result = await handler(input, {
-            sessionId,
-            parentCallId,
-            callId,
-            signal: controller.signal,
-          });
-          Object.assign(recordedCall, {
-            output: outputBody(result),
-            structured_result: structuredResult(result, `tool ${name} result`),
-            success: true,
-            duration_ns: elapsedNs(toolStartedAt),
-          });
-          return isToolResult(result) ? result.output : result;
+          controller.signal.throwIfAborted();
+          const releasePermit = await nestedCallPermits.acquire(controller.signal);
+          let releaseExecution;
+          try {
+            releaseExecution = await parallelExecution.acquire(parallelSafe, controller.signal);
+            result = await handler(input, {
+              sessionId,
+              parentCallId,
+              callId,
+              signal: controller.signal,
+            });
+          } finally {
+            releaseExecution?.();
+            releasePermit();
+          }
         } catch (error) {
           const message = errorMessage(error);
           Object.assign(recordedCall, {
@@ -141,9 +171,40 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
             success: false,
             duration_ns: elapsedNs(toolStartedAt),
           });
+          observer?.({ type: "nested_call_completed", call: recordedCall });
           throw error;
         }
-      };
+        let structured;
+        let output;
+        let metadata;
+        let success;
+        try {
+          structured = structuredResult(result, `tool ${name} result`);
+          output = outputBody(result);
+          metadata = toolMetadata(result, `tool ${name} metadata`);
+          success = toolSucceeded(result);
+        } catch (error) {
+          const message = errorMessage(error);
+          Object.assign(recordedCall, {
+            output: message,
+            structured_result: message,
+            success: false,
+            duration_ns: elapsedNs(toolStartedAt),
+          });
+          observer?.({ type: "nested_call_completed", call: recordedCall });
+          throw error;
+        }
+        Object.assign(recordedCall, {
+          output,
+          structured_result: structured,
+          success,
+          duration_ns: elapsedNs(toolStartedAt),
+          metadata,
+        });
+        observer?.({ type: "nested_call_completed", call: recordedCall });
+        if (!success) throw toolValue(result);
+        return toolValue(result);
+      }
     }
     Object.freeze(tools);
     const EXIT = Symbol("exit");
@@ -185,18 +246,29 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
 
     try {
       try {
-        await (extras.evaluate || evaluateNative)(source, {
-          tools,
-          toolDefinitions: availableDefinitions,
-          text,
-          image,
-          generatedImage,
-          store,
-          load,
-          exit,
-          require: extras.require,
-          console: extras.console || console,
-        });
+        await abortableEvaluation((async () => {
+          try {
+            await (extras.evaluate || evaluateNative)(source, {
+              tools,
+              toolDefinitions: availableDefinitions,
+              text,
+              image,
+              generatedImage,
+              store,
+              load,
+              exit,
+              require: extras.require,
+              console: extras.console || console,
+              signal: controller.signal,
+              storedEntries: [...stored],
+            });
+          } finally {
+            // A guest may discard a tool Promise or call exit(). The cell still
+            // owns that work: do not report completion or drop its cancellation
+            // controller until every invocation reaches a terminal boundary.
+            await Promise.allSettled(nestedInvocations);
+          }
+        })(), controller.signal);
       } catch (error) {
         if (error !== EXIT) throw error;
       }
@@ -216,6 +288,73 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
     }
   }
 
+  function executeCodeObserved(source, sessionId = "default", parentCallId = "exec") {
+    const key = codeObservationKey(sessionId, parentCallId);
+    codeObservations.get(key)?.close();
+    const observation = createCodeObservation(sessionId);
+    codeObservations.set(key, observation);
+    let execution;
+    try {
+      execution = executeCode(
+        source,
+        sessionId,
+        parentCallId,
+        (update) => observation.push(JSON.stringify(update)),
+      );
+    } catch (error) {
+      observation.close();
+      throw error;
+    }
+    void Promise.resolve(execution).then(
+      () => observation.close(),
+      () => observation.close(),
+    );
+    return execution;
+  }
+
+  async function nextCodeUpdate(sessionId, parentCallId) {
+    const key = codeObservationKey(sessionId, parentCallId);
+    const observation = codeObservations.get(key);
+    if (!observation) throw new Error(`unknown Code Mode observation: ${parentCallId}`);
+    const update = await observation.next();
+    if (update === null && codeObservations.get(key) === observation) {
+      codeObservations.delete(key);
+    }
+    return update;
+  }
+
+  function closeCodeObservations(sessionId) {
+    for (const [key, observation] of codeObservations) {
+      if (sessionId !== undefined && observation.sessionId !== sessionId) continue;
+      codeObservations.delete(key);
+      observation.close();
+    }
+  }
+
+  function cancel(sessionId) {
+    for (const execution of activeExecutions) {
+      if (sessionId === undefined || execution.sessionId === sessionId) {
+        execution.controller.abort(new Error(CANCELLATION_MESSAGE));
+      }
+    }
+    closeCodeObservations(sessionId);
+  }
+
+  function releaseSession(sessionId) {
+    stores.delete(sessionId);
+    for (const tool of configuredTools) tool.releaseSession?.(sessionId);
+    closeCodeObservations(sessionId);
+  }
+
+  function reset() {
+    for (const execution of activeExecutions) {
+      execution.controller.abort(new Error(CANCELLATION_MESSAGE));
+    }
+    stores.clear();
+    for (const tool of configuredTools) tool.dispose?.();
+    closeCodeObservations();
+  }
+
   return Object.freeze({
     addTools,
     addProvider(provider) {
@@ -225,24 +364,13 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
       providers.push(provider);
     },
     executeCode,
+    executeCodeObserved,
     executeTool,
-    cancel(sessionId) {
-      for (const execution of activeExecutions) {
-        if (sessionId === undefined || execution.sessionId === sessionId) {
-          execution.controller.abort();
-        }
-      }
-    },
+    nextCodeUpdate,
+    cancel,
     toolDefinitions: () => JSON.stringify(currentDefinitions()),
-    releaseSession(sessionId) {
-      stores.delete(sessionId);
-      for (const tool of configuredTools) tool.releaseSession?.(sessionId);
-    },
-    reset() {
-      for (const execution of activeExecutions) execution.controller.abort();
-      stores.clear();
-      for (const tool of configuredTools) tool.dispose?.();
-    },
+    releaseSession,
+    reset,
   });
 }
 
@@ -254,6 +382,7 @@ function addTool(name, tool, collection) {
     dispose: typeof tool.dispose === "function" ? tool.dispose : undefined,
     handler: tool.handler,
     name,
+    parallelSafe: tool.supportsParallelToolCalls === true,
     releaseSession: typeof tool.releaseSession === "function" ? tool.releaseSession : undefined,
   });
   collection.configuredTools.push(configured);
@@ -303,12 +432,12 @@ async function evaluateNative(source, environment) {
   );
 }
 
-function encodeToolOutput(output, success, structuredResult) {
+function encodeToolOutput(output, success, structuredResult, metadata = null) {
   return JSON.stringify({
     output,
     success,
     structured_result: structuredResult,
-    metadata: null,
+    metadata,
     process_trace: null,
   });
 }
@@ -349,10 +478,35 @@ function structuredResult(value, label) {
   return value === undefined ? null : jsonSnapshot(value, label);
 }
 
+function toolMetadata(value, label) {
+  if (!isToolResult(value) || value.metadata == null) return null;
+  return jsonSnapshot(value.metadata, label);
+}
+
+function toolSucceeded(value) {
+  return !isToolResult(value) || value.success;
+}
+
+function toolValue(value) {
+  return isToolResult(value) ? value.value : value;
+}
+
 const TOOL_RESULT = Symbol("nanocodex.toolResult");
 
-export function toolResult(output, structuredResult = output) {
-  return Object.freeze({ [TOOL_RESULT]: true, output, structuredResult });
+export function toolResult(output, structuredResult = output, options = {}) {
+  const success = options.success ?? true;
+  if (typeof success !== "boolean") throw new TypeError("tool result success must be boolean");
+  const value = Object.prototype.hasOwnProperty.call(options, "value")
+    ? options.value
+    : output;
+  return Object.freeze({
+    [TOOL_RESULT]: true,
+    metadata: options.metadata ?? null,
+    output,
+    structuredResult,
+    success,
+    value,
+  });
 }
 
 function isToolResult(value) {
@@ -382,4 +536,162 @@ function withStatus(status, startedAt, content) {
   const heading = `${status}\nWall time ${wallTime(startedAt)} seconds\nOutput:\n`;
   if (!content.length) return heading;
   return [{ type: "input_text", text: heading }, ...content];
+}
+
+function abortableEvaluation(evaluation, signal) {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(signal.reason ?? new Error(CANCELLATION_MESSAGE));
+    const settle = (callback, value) => {
+      signal.removeEventListener("abort", onAbort);
+      callback(value);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    Promise.resolve(evaluation).then(
+      (value) => settle(resolve, value),
+      (error) => settle(reject, error),
+    );
+  });
+}
+
+class AsyncSemaphore {
+  constructor(permits) {
+    this.permits = permits;
+    this.waiters = [];
+  }
+
+  acquire(signal) {
+    if (signal.aborted) return Promise.reject(signal.reason);
+    if (this.permits > 0 && this.waiters.length === 0) {
+      this.permits -= 1;
+      return Promise.resolve(once(() => this.release()));
+    }
+    return new Promise((resolve, reject) => {
+      const waiter = { resolve, reject, signal };
+      waiter.abort = () => {
+        const index = this.waiters.indexOf(waiter);
+        if (index >= 0) this.waiters.splice(index, 1);
+        reject(signal.reason ?? new Error(CANCELLATION_MESSAGE));
+      };
+      signal.addEventListener("abort", waiter.abort, { once: true });
+      this.waiters.push(waiter);
+    });
+  }
+
+  release() {
+    while (this.waiters.length) {
+      const waiter = this.waiters.shift();
+      waiter.signal.removeEventListener("abort", waiter.abort);
+      if (waiter.signal.aborted) continue;
+      waiter.resolve(once(() => this.release()));
+      return;
+    }
+    this.permits += 1;
+  }
+}
+
+class AsyncReadWriteGate {
+  constructor() {
+    this.readers = 0;
+    this.writer = false;
+    this.waiters = [];
+  }
+
+  acquire(parallelSafe, signal) {
+    if (signal.aborted) return Promise.reject(signal.reason);
+    if (this.canAcquireImmediately(parallelSafe)) {
+      return Promise.resolve(this.grant(parallelSafe));
+    }
+    return new Promise((resolve, reject) => {
+      const waiter = { parallelSafe, resolve, reject, signal };
+      waiter.abort = () => {
+        const index = this.waiters.indexOf(waiter);
+        if (index >= 0) this.waiters.splice(index, 1);
+        reject(signal.reason ?? new Error(CANCELLATION_MESSAGE));
+        this.drain();
+      };
+      signal.addEventListener("abort", waiter.abort, { once: true });
+      this.waiters.push(waiter);
+    });
+  }
+
+  canAcquireImmediately(parallelSafe) {
+    return this.waiters.length === 0
+      && !this.writer
+      && (parallelSafe || this.readers === 0);
+  }
+
+  grant(parallelSafe) {
+    if (parallelSafe) this.readers += 1;
+    else this.writer = true;
+    return once(() => {
+      if (parallelSafe) this.readers -= 1;
+      else this.writer = false;
+      this.drain();
+    });
+  }
+
+  drain() {
+    if (this.writer || this.waiters.length === 0) return;
+    const first = this.waiters[0];
+    if (!first.parallelSafe) {
+      if (this.readers !== 0) return;
+      this.waiters.shift();
+      first.signal.removeEventListener("abort", first.abort);
+      if (first.signal.aborted) {
+        first.reject(first.signal.reason ?? new Error(CANCELLATION_MESSAGE));
+        this.drain();
+      } else {
+        first.resolve(this.grant(false));
+      }
+      return;
+    }
+    while (!this.writer && this.waiters[0]?.parallelSafe) {
+      const waiter = this.waiters.shift();
+      waiter.signal.removeEventListener("abort", waiter.abort);
+      if (waiter.signal.aborted) {
+        waiter.reject(waiter.signal.reason ?? new Error(CANCELLATION_MESSAGE));
+      } else {
+        waiter.resolve(this.grant(true));
+      }
+    }
+  }
+}
+
+function once(callback) {
+  let active = true;
+  return () => {
+    if (!active) return;
+    active = false;
+    callback();
+  };
+}
+
+function codeObservationKey(sessionId, callId) {
+  return JSON.stringify([sessionId, callId]);
+}
+
+function createCodeObservation(sessionId) {
+  const queued = [];
+  const waiters = [];
+  let closed = false;
+  return Object.freeze({
+    sessionId,
+    push(update) {
+      if (closed) return;
+      const resolve = waiters.shift();
+      if (resolve) resolve(update);
+      else queued.push(update);
+    },
+    close() {
+      if (closed) return;
+      closed = true;
+      while (waiters.length) waiters.shift()(null);
+    },
+    next() {
+      if (queued.length) return Promise.resolve(queued.shift());
+      if (closed) return Promise.resolve(null);
+      return new Promise((resolve) => waiters.push(resolve));
+    },
+  });
 }

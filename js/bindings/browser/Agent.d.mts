@@ -13,6 +13,8 @@ type WorkerMcpServer = Readonly<{
   headers?: Readonly<Record<string, string>> | readonly (readonly [string, string])[] | undefined;
   enabledTools?: readonly string[] | undefined;
   disabledTools?: readonly string[] | undefined;
+  supportsParallelToolCalls?: boolean | undefined;
+  parallelTools?: readonly string[] | undefined;
   startupTimeoutMs?: number | undefined;
   timeoutMs?: number | undefined;
 }>;

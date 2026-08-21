@@ -304,6 +304,8 @@ export type ToolContext = {
 
 export type Tool = {
   description: string;
+  /** Explicitly permits concurrent nested calls; otherwise the tool is exclusive. */
+  supportsParallelToolCalls?: boolean | undefined;
   /** Runtime JSON Schema for model-generated input. Defaults to an open object. */
   parameters?: Record<string, unknown> | undefined;
   /** Runtime JSON Schema for the resolved handler value shown to Code Mode. */
@@ -335,6 +337,8 @@ export type CodeEvaluatorEnvironment = {
   exit(): never;
   require?: unknown;
   console?: Console;
+  /** Aborts the exact active Code Mode cell and all nested tool calls. */
+  signal: AbortSignal;
 };
 
 export type CodeEvaluator = (
@@ -388,6 +392,9 @@ export type McpTool = {
   title?: string | undefined;
   description?: string | undefined;
   inputSchema?: Record<string, unknown> | undefined;
+  annotations?: Readonly<Record<string, unknown>> & {
+    readOnlyHint?: boolean | undefined;
+  } | undefined;
 };
 
 export type McpServer = {
@@ -401,6 +408,10 @@ export type McpServer = {
   payment?: McpPayment | undefined;
   enabledTools?: readonly string[] | undefined;
   disabledTools?: readonly string[] | undefined;
+  /** Declares every remote tool on this server safe for concurrent nested calls. */
+  supportsParallelToolCalls?: boolean | undefined;
+  /** Declares specific remote tool names safe for concurrent nested calls. */
+  parallelTools?: readonly string[] | undefined;
   startupTimeoutMs?: number | undefined;
   timeoutMs?: number | undefined;
 };

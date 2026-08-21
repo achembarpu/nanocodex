@@ -20,13 +20,17 @@ export function createQuickJsEvaluator(quickJs, options = {}) {
 }
 
 async function evaluate(quickJs, source, environment, options) {
+  environment.signal?.throwIfAborted();
   const vm = quickJs.newContext();
   const runtime = vm.runtime;
   runtime.setMemoryLimit(options.memoryLimitBytes ?? DEFAULT_MEMORY_LIMIT_BYTES);
   runtime.setMaxStackSize(options.stackLimitBytes ?? DEFAULT_STACK_LIMIT_BYTES);
   let interruptCycles = 0;
   const maxInterruptCycles = options.maxInterruptCycles ?? DEFAULT_INTERRUPT_CYCLES;
-  runtime.setInterruptHandler(() => ++interruptCycles > maxInterruptCycles);
+  let aborted = environment.signal?.aborted === true;
+  const onAbort = () => { aborted = true; };
+  environment.signal?.addEventListener("abort", onAbort, { once: true });
+  runtime.setInterruptHandler(() => aborted || ++interruptCycles > maxInterruptCycles);
   let closed = false;
 
   try {
@@ -77,15 +81,33 @@ async function evaluate(quickJs, source, environment, options) {
     try {
       const settling = vm.resolvePromise(promise);
       runtime.executePendingJobs().unwrap();
-      const settled = await settling;
+      const settled = await abortable(settling, environment.signal);
       unwrap(vm, settled).dispose();
     } finally {
       promise.dispose();
     }
   } finally {
     closed = true;
+    environment.signal?.removeEventListener("abort", onAbort);
     vm.dispose();
   }
+}
+
+function abortable(promise, signal) {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise((resolve, reject) => {
+    const onAbort = () => reject(signal.reason ?? new Error("Code Mode execution was cancelled"));
+    const settle = (callback, value) => {
+      signal.removeEventListener("abort", onAbort);
+      callback(value);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    Promise.resolve(promise).then(
+      (value) => settle(resolve, value),
+      (error) => settle(reject, error),
+    );
+  });
 }
 
 function expose(vm, name, handler) {
