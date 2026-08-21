@@ -173,7 +173,10 @@ export type ChatGptSubscriptionOptions = Readonly<{
   store: ChatGptSubscriptionStore;
   /** Generic bounded HTTP capability; defaults to global fetch. */
   fetch?: typeof globalThis.fetch | undefined;
-  /** Trusted initial credentials, typically imported from Codex auth.json. */
+  /**
+   * Trusted initial credentials, typically imported from Codex auth.json.
+   * A same-account seed repairs stored access-only credentials; refreshable durable state wins.
+   */
   seed?: ChatGptCredentialSeed | undefined;
   /** Test-only local issuer override. */
   issuer?: string | undefined;

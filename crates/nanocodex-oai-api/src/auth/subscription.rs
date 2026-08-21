@@ -383,7 +383,8 @@ struct ExpClaims {
 impl ChatGptSubscription {
     /// Opens one subscription over generic host persistence and HTTP capabilities.
     ///
-    /// When storage is empty, `seed` is imported atomically. Existing durable state always wins.
+    /// When storage is empty, `seed` is imported atomically. A same-account seed may repair an
+    /// existing credential that has no refresh token; otherwise durable state always wins.
     pub async fn open(
         host: impl ChatGptSubscriptionHost,
         key: impl Into<Arc<str>>,
@@ -420,6 +421,11 @@ impl ChatGptSubscription {
         let loaded = subscription.load().await?;
         if let Some(credential) = &loaded.state.credential {
             validate_credential(credential)?;
+            if let Some(seed) = seed {
+                subscription
+                    .repair_unrefreshable_credential(loaded, seed)
+                    .await?;
+            }
             subscription.set_known_authenticated(true);
         } else if let Some(seed) = seed {
             let credential = credential_from_seed(seed)?;
@@ -439,6 +445,50 @@ impl ChatGptSubscription {
             }
         }
         Ok(subscription)
+    }
+
+    async fn repair_unrefreshable_credential(
+        &self,
+        loaded: LoadedState,
+        seed: ChatGptCredentialSeed,
+    ) -> Result<(), ChatGptSubscriptionError> {
+        let current = loaded
+            .state
+            .credential
+            .as_ref()
+            .ok_or(ChatGptSubscriptionError::NotAuthenticated)?;
+        if !current.refresh_token.trim().is_empty() || seed.refresh_token.trim().is_empty() {
+            return Ok(());
+        }
+        let mut replacement = credential_from_seed(seed)?;
+        if replacement.account_id != current.account_id {
+            return Err(ChatGptSubscriptionError::Invalid(Arc::from(
+                "credential seed changed the stored ChatGPT account",
+            )));
+        }
+        replacement.generation = current.generation.wrapping_add(1);
+        let account_id = replacement.account_id.clone();
+        let state = PersistedState {
+            credential: Some(replacement),
+            pending: None,
+        };
+        match self.commit(loaded.revision, &state).await? {
+            SubscriptionCommit::Committed(_) => Ok(()),
+            SubscriptionCommit::Conflict(_) => {
+                let current = self
+                    .load()
+                    .await?
+                    .state
+                    .credential
+                    .ok_or(ChatGptSubscriptionError::Contended)?;
+                validate_credential(&current)?;
+                if current.account_id == account_id && !current.refresh_token.trim().is_empty() {
+                    Ok(())
+                } else {
+                    Err(ChatGptSubscriptionError::Contended)
+                }
+            }
+        }
     }
 
     /// Returns managed authorization for an agent.
@@ -1147,6 +1197,86 @@ mod tests {
                     .ok_or_else(|| SubscriptionHostError::new("unexpected request"))
             })
         }
+    }
+
+    #[tokio::test]
+    async fn same_account_seed_repairs_only_non_refreshable_durable_credentials() {
+        let expiry = unix_millis() / 1_000 + 3_600;
+        let host = Arc::new(MemoryHost::default());
+        ChatGptSubscription::open(
+            Arc::clone(&host),
+            "account",
+            Some(ChatGptCredentialSeed::new(
+                jwt(expiry, None, None),
+                "",
+                "account-1",
+                false,
+            )),
+        )
+        .await
+        .unwrap();
+
+        let mismatch = ChatGptSubscription::open(
+            Arc::clone(&host),
+            "account",
+            Some(ChatGptCredentialSeed::new(
+                jwt(expiry, None, None),
+                "refresh-other",
+                "account-2",
+                false,
+            )),
+        )
+        .await
+        .unwrap_err();
+        assert!(
+            mismatch
+                .to_string()
+                .contains("changed the stored ChatGPT account")
+        );
+
+        let fresh_access = jwt(expiry + 1, None, None);
+        let repaired = ChatGptSubscription::open(
+            Arc::clone(&host),
+            "account",
+            Some(ChatGptCredentialSeed::new(
+                fresh_access.clone(),
+                "refresh-1",
+                "account-1",
+                true,
+            )),
+        )
+        .await
+        .unwrap();
+        let credential = repaired.credential().await.unwrap();
+        assert_eq!(credential.access_token(), fresh_access);
+        assert_eq!(credential.revision(), 1);
+        assert!(credential.is_fedramp());
+
+        let stale_access = jwt(expiry - 1, None, None);
+        let reopened = ChatGptSubscription::open(
+            Arc::clone(&host),
+            "account",
+            Some(ChatGptCredentialSeed::new(
+                stale_access,
+                "refresh-stale",
+                "account-1",
+                false,
+            )),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            reopened.credential().await.unwrap().access_token(),
+            fresh_access
+        );
+
+        let stored = host.stored.lock().unwrap();
+        assert_eq!(stored.revision, 2);
+        let state: PersistedState =
+            serde_json::from_str(stored.payload.as_deref().unwrap()).unwrap();
+        let stored = state.credential.unwrap();
+        assert_eq!(stored.refresh_token, "refresh-1");
+        assert_eq!(stored.generation, 1);
     }
 
     #[tokio::test]

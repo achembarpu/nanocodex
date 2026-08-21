@@ -254,6 +254,11 @@ NANOCODEX_WORKER_URL=https://nanocodex-durable-agent.<subdomain>.workers.dev \
 NANOCODEX_ADMIN_TOKEN=<admin-token> npm run smoke:managed
 ```
 
+If an earlier deployment seeded only an access token, the Rust subscription
+manager atomically repairs that same-account durable credential when the refresh
+secret first appears. After it becomes refreshable, rotating durable state wins
+over stale deployment seeds.
+
 At the time this example was validated, the ChatGPT edge rejected direct
 Cloudflare Worker egress with HTTP 403. That is an upstream egress-policy
 boundary, not a WASM or Durable Object failure. A deployed subscription demo

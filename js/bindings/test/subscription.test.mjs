@@ -37,6 +37,54 @@ test("Rust owns hosted ChatGPT credential state over a generic store", async () 
   subscription.dispose();
 });
 
+test("a same-account host seed repairs durable credentials created without refresh", async () => {
+  const id = "subscription-repair";
+  const store = createMemoryChatGptSubscriptionStore(id);
+  const expiry = Math.floor(Date.now() / 1_000) + 3_600;
+  const initial = await ChatGptSubscription.open({
+    id,
+    store,
+    seed: {
+      accessToken: jwt(expiry),
+      accountId: "account-1",
+    },
+  });
+  initial.dispose();
+
+  const accessToken = jwt(expiry + 1);
+  const repaired = await ChatGptSubscription.open({
+    id,
+    store,
+    seed: {
+      accessToken,
+      refreshToken: "refresh-current",
+      accountId: "account-1",
+    },
+  });
+  assert.deepEqual(await repaired.credential(), {
+    kind: "chatgpt",
+    accessToken,
+    accountId: "account-1",
+    fedramp: false,
+    revision: subscriptionRevision(1n),
+  });
+  assert.equal(store.snapshot().revision, subscriptionRevision(2n));
+  repaired.dispose();
+
+  const reopened = await ChatGptSubscription.open({
+    id,
+    store,
+    seed: {
+      accessToken: jwt(expiry - 1),
+      refreshToken: "refresh-stale",
+      accountId: "account-1",
+    },
+  });
+  assert.equal((await reopened.credential()).accessToken, accessToken);
+  assert.equal(store.snapshot().revision, subscriptionRevision(2n));
+  reopened.dispose();
+});
+
 test("memory subscription store rejects stale compare-and-swap writes", () => {
   const store = createMemoryChatGptSubscriptionStore("subscription-2");
   assert.deepEqual(store.compareAndSwap("subscription-2", {
