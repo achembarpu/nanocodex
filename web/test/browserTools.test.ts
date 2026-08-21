@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import { viewImage } from "nanocodex/tools";
 
-test("view_image returns browser workspace images to Code Mode", async () => {
+test("view_image returns browser workspace images to the model and Code Mode", async () => {
   const tool = viewImage({
     workspace: {
       async readFile(path) {
@@ -20,7 +20,17 @@ test("view_image returns browser workspace images to Code Mode", async () => {
       sessionId: "session-1",
       signal: new AbortController().signal,
     },
-  ) as { detail: string; image_url: string };
-  assert.equal(result.detail, "original");
-  assert.equal(result.image_url, "data:image/png;base64,iVBORw0KGgo=");
+  ) as {
+    output: Array<{ detail: string; image_url: string; type: string }>;
+    structuredResult: { detail: string; image_url: string };
+  };
+  assert.deepEqual(result.output, [{
+    detail: "original",
+    image_url: "data:image/png;base64,iVBORw0KGgo=",
+    type: "input_image",
+  }]);
+  assert.deepEqual(result.structuredResult, {
+    detail: "original",
+    image_url: "data:image/png;base64,iVBORw0KGgo=",
+  });
 });
