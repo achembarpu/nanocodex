@@ -16,7 +16,7 @@ mod transcript;
 mod view;
 
 use std::{
-    collections::VecDeque,
+    collections::{HashMap, HashSet, VecDeque},
     path::PathBuf,
     process::{Command, Stdio},
     sync::Arc,
@@ -55,7 +55,10 @@ use self::{
     terminal::TerminalSession,
     transcript::TranscriptItem,
 };
-use crate::config::AgentArgs;
+use crate::{
+    config::AgentArgs,
+    subagents::{AgentId, AgentStatus, AgentUpdate, ScopedAgentUpdate},
+};
 
 pub(crate) use eval_attach::attach_evaluation;
 pub(crate) use resume_picker::select_resume_session;
@@ -71,6 +74,47 @@ const DEFAULT_JAEGER_UI_URL: &str = "http://127.0.0.1:16686";
 const JAEGER_UI_URL_ENV: &str = "NANOCODEX_JAEGER_UI_URL";
 const MOUSE_SCROLL_ROWS: usize = 3;
 const MAX_AGENT_EVENTS_PER_BATCH: usize = 256;
+
+#[derive(Default)]
+struct SubagentCompletionTracker {
+    direct_children: HashMap<String, HashSet<AgentId>>,
+    completed: HashMap<String, HashSet<AgentId>>,
+}
+
+impl SubagentCompletionTracker {
+    fn observe(&mut self, update: &ScopedAgentUpdate) -> Option<AgentId> {
+        let root_session_id = &update.root_session_id;
+        match &update.update {
+            AgentUpdate::Added(agent) => {
+                let direct_children = self
+                    .direct_children
+                    .entry(root_session_id.clone())
+                    .or_default();
+                if agent.parent.is_none() {
+                    direct_children.insert(agent.id);
+                } else {
+                    direct_children.remove(&agent.id);
+                }
+                None
+            }
+            AgentUpdate::Status { id, status } => {
+                let completed = self.completed.entry(root_session_id.clone()).or_default();
+                if !matches!(status, AgentStatus::Completed { .. }) {
+                    completed.remove(id);
+                    return None;
+                }
+                let newly_completed = completed.insert(*id);
+                (newly_completed
+                    && self
+                        .direct_children
+                        .get(root_session_id)
+                        .is_some_and(|children| children.contains(id)))
+                .then_some(*id)
+            }
+            AgentUpdate::Event { .. } | AgentUpdate::Message(_) => None,
+        }
+    }
+}
 
 pub(crate) struct InitialPrompt {
     display: String,
@@ -611,6 +655,7 @@ pub(crate) async fn run(
     let mut agent_events = configured.events;
     let realtime = configured.realtime;
     let root_session_id = Arc::<str>::from(agent_events.request_id());
+    let mut subagent_updates = configured.subagent_updates;
     let child_agents = configured.child_agents;
     let mpp_adapter = configured.mpp_adapter;
     let mcp = configured.mcp;
@@ -656,6 +701,7 @@ pub(crate) async fn run(
     let mut stream_telemetry = StreamTelemetry::default();
     let mut view_telemetry = ViewTelemetry::new(Arc::clone(&root_session_id));
     let mut notifier = Notifier::from_env();
+    let mut subagent_completion_tracker = SubagentCompletionTracker::default();
 
     submit_initial_prompt(&mut ui.app, &root_session_id, &worker_tx, initial_prompt)?;
 
@@ -726,6 +772,21 @@ pub(crate) async fn run(
                 }
                 if apply_update(update, &mut scheduler) {
                     break Ok(());
+                }
+            }
+            update = receive_subagent_update(&mut subagent_updates) => {
+                if let Some(update) = update {
+                    if handle_subagent_update(
+                        &mut subagent_completion_tracker,
+                        update,
+                        &mut ui.app,
+                        &root_session_id,
+                        &worker_tx,
+                    )? {
+                        scheduler.request_immediate(Instant::now());
+                    }
+                } else {
+                    subagent_updates = None;
                 }
             }
             _ = ticker.tick(), if ui.app.main.running
@@ -924,6 +985,55 @@ fn ui_ticker() -> tokio::time::Interval {
     let mut ticker = interval(ANIMATION_TICK_INTERVAL);
     ticker.set_missed_tick_behavior(MissedTickBehavior::Skip);
     ticker
+}
+
+async fn receive_subagent_update(
+    updates: &mut Option<mpsc::UnboundedReceiver<ScopedAgentUpdate>>,
+) -> Option<ScopedAgentUpdate> {
+    match updates {
+        Some(updates) => updates.recv().await,
+        None => std::future::pending().await,
+    }
+}
+
+fn handle_subagent_update(
+    tracker: &mut SubagentCompletionTracker,
+    update: ScopedAgentUpdate,
+    app: &mut App,
+    initial_root_session_id: &str,
+    commands: &mpsc::UnboundedSender<WorkerCommand>,
+) -> Result<bool> {
+    let Some(agent_id) = tracker.observe(&update) else {
+        return Ok(false);
+    };
+    let active_root_session_id = app
+        .main_branch_request_id()
+        .unwrap_or(initial_root_session_id);
+    if update.root_session_id != active_root_session_id || !app.main_accepts_automatic_prompt() {
+        return Ok(false);
+    }
+
+    let display = format!("[Subagent {agent_id} completed]");
+    let mut prompt = SubmittedPrompt::text(display.clone());
+    prompt.set_instruction(format!(
+        "A direct subagent completed after the previous turn ended. Continue the current task by \
+         inspecting its structured result. Call list_agents with include_completed=true, find agent \
+         {agent_id}, integrate and verify the relevant findings, finish any remaining work, and then \
+         respond to the user. Do not merely repeat the raw subagent result.\n\n\
+         <subagent_completion agent_id=\"{agent_id}\" />"
+    ));
+    let prompt_id = app
+        .queue_prompt(PaneId::Main, display)
+        .ok_or_else(|| eyre::eyre!("main conversation disappeared before subagent continuation"))?;
+    send_command(
+        commands,
+        WorkerCommand::Prompt {
+            target: PaneId::Main,
+            prompt_id,
+            prompt,
+        },
+    )?;
+    Ok(true)
 }
 
 fn handle_worker_telemetry(update: &WorkerEvent, telemetry: &mut StreamTelemetry) -> bool {
@@ -2946,18 +3056,20 @@ mod tests {
         agent::events::AgentEventKind,
         oai::{__private::EventSink, PromptInput},
     };
+    use nanocodex_subagents::AgentDescriptor;
     use nanocodex_voice::RealtimeVoice;
     use serde_json::{Value, json};
     use tokio::{net::TcpListener, sync::mpsc, time::timeout};
     use tokio_tungstenite::{WebSocketStream, accept_async, tungstenite::Message};
 
     use super::{
-        BTW_BOUNDARY, PaneId, RedrawPriority, Submission, TerminalAction, UiAction, UiModel,
-        UiUpdate, VoiceControl, WorkerCommand, WorkerEvent, active_session_id,
-        apply_main_agent_event_batch, classify_submission, handle_key, handle_worker_update,
-        paste_clipboard_image, prepare_btw_prompt, report_cancel_outcome, session_trace_url,
-        spawn_agent_worker,
+        BTW_BOUNDARY, PaneId, RedrawPriority, SubagentCompletionTracker, Submission,
+        TerminalAction, UiAction, UiModel, UiUpdate, VoiceControl, WorkerCommand, WorkerEvent,
+        active_session_id, apply_main_agent_event_batch, classify_submission, handle_key,
+        handle_subagent_update, handle_worker_update, paste_clipboard_image, prepare_btw_prompt,
+        report_cancel_outcome, session_trace_url, spawn_agent_worker,
     };
+    use crate::subagents::{AgentId, AgentStatus, AgentUpdate, ScopedAgentUpdate};
     use crate::tui::{
         app::App,
         scheduler::{RenderScheduler, STREAM_FRAME_INTERVAL},
@@ -2971,6 +3083,158 @@ mod tests {
             row: 0,
             modifiers: KeyModifiers::NONE,
         })
+    }
+
+    fn agent_id(value: u64) -> AgentId {
+        serde_json::from_value(json!(value)).expect("agent id must deserialize")
+    }
+
+    fn scoped_agent_update(root_session_id: &str, update: AgentUpdate) -> ScopedAgentUpdate {
+        ScopedAgentUpdate {
+            root_session_id: root_session_id.to_owned(),
+            update,
+        }
+    }
+
+    fn added_agent(
+        root_session_id: &str,
+        id: AgentId,
+        parent: Option<AgentId>,
+    ) -> ScopedAgentUpdate {
+        scoped_agent_update(
+            root_session_id,
+            AgentUpdate::Added(AgentDescriptor {
+                id,
+                session_id: format!("agent-{id}"),
+                role: "reviewer".to_owned(),
+                task: "review the change".to_owned(),
+                parent,
+            }),
+        )
+    }
+
+    fn completed_agent(root_session_id: &str, id: AgentId) -> ScopedAgentUpdate {
+        scoped_agent_update(
+            root_session_id,
+            AgentUpdate::Status {
+                id,
+                status: AgentStatus::Completed {
+                    output: json!({ "result": "private structured output" }),
+                },
+            },
+        )
+    }
+
+    #[test]
+    fn subagent_completion_wakes_an_idle_root_once() {
+        let root_session_id = "root-session";
+        let id = agent_id(7);
+        let mut tracker = SubagentCompletionTracker::default();
+        assert_eq!(
+            tracker.observe(&added_agent(root_session_id, id, None)),
+            None
+        );
+
+        let mut app = App::new(PathBuf::from("."));
+        let (commands, mut worker) = mpsc::unbounded_channel();
+        assert!(
+            handle_subagent_update(
+                &mut tracker,
+                completed_agent(root_session_id, id),
+                &mut app,
+                root_session_id,
+                &commands,
+            )
+            .unwrap()
+        );
+        assert_eq!(app.main.pending_turns, 1);
+
+        let WorkerCommand::Prompt {
+            target,
+            prompt_id: _,
+            prompt,
+        } = worker.try_recv().unwrap()
+        else {
+            panic!("completion must submit a root prompt");
+        };
+        assert_eq!(target, PaneId::Main);
+        assert_eq!(prompt.display(), "[Subagent 7 completed]");
+        let prompt = format!("{prompt:?}");
+        assert!(prompt.contains("list_agents"));
+        assert!(prompt.contains("agent_id=\\\"7\\\""));
+        assert!(!prompt.contains("private structured output"));
+
+        assert_eq!(tracker.observe(&completed_agent(root_session_id, id)), None);
+    }
+
+    #[test]
+    fn subagent_completion_does_not_latch_while_root_is_busy() {
+        let root_session_id = "root-session";
+        let id = agent_id(8);
+        let mut tracker = SubagentCompletionTracker::default();
+        tracker.observe(&added_agent(root_session_id, id, None));
+        let mut app = App::new(PathBuf::from("."));
+        app.main.running = true;
+        let (commands, mut worker) = mpsc::unbounded_channel();
+
+        assert!(
+            !handle_subagent_update(
+                &mut tracker,
+                completed_agent(root_session_id, id),
+                &mut app,
+                root_session_id,
+                &commands,
+            )
+            .unwrap()
+        );
+        app.main.running = false;
+        assert!(
+            !handle_subagent_update(
+                &mut tracker,
+                completed_agent(root_session_id, id),
+                &mut app,
+                root_session_id,
+                &commands,
+            )
+            .unwrap()
+        );
+        assert!(worker.try_recv().is_err());
+    }
+
+    #[test]
+    fn nested_or_inactive_root_completions_do_not_wake_the_root() {
+        let active_root = "active-root";
+        let inactive_root = "inactive-root";
+        let parent = agent_id(9);
+        let nested = agent_id(10);
+        let direct = agent_id(11);
+        let mut tracker = SubagentCompletionTracker::default();
+        tracker.observe(&added_agent(active_root, nested, Some(parent)));
+        tracker.observe(&added_agent(inactive_root, direct, None));
+        let mut app = App::new(PathBuf::from("."));
+        let (commands, mut worker) = mpsc::unbounded_channel();
+
+        assert!(
+            !handle_subagent_update(
+                &mut tracker,
+                completed_agent(active_root, nested),
+                &mut app,
+                active_root,
+                &commands,
+            )
+            .unwrap()
+        );
+        assert!(
+            !handle_subagent_update(
+                &mut tracker,
+                completed_agent(inactive_root, direct),
+                &mut app,
+                active_root,
+                &commands,
+            )
+            .unwrap()
+        );
+        assert!(worker.try_recv().is_err());
     }
 
     #[test]

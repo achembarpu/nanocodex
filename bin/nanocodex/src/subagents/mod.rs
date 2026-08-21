@@ -3,10 +3,10 @@
 mod simplify;
 
 use nanocodex::{Tools, agent::AgentHandle, tools::ToolsBuildError};
+use nanocodex_subagents::SubagentControl;
 pub(crate) use nanocodex_subagents::{
-    AgentId, AgentStatus, DEFAULT_MAX_SUBAGENTS, Registry, channel,
+    AgentId, AgentStatus, AgentUpdate, DEFAULT_MAX_SUBAGENTS, Registry, ScopedAgentUpdate, channel,
 };
-use nanocodex_subagents::{ScopedAgentUpdate, SubagentControl};
 use std::sync::Arc;
 use tokio::{sync::mpsc, task::JoinHandle};
 
@@ -60,13 +60,15 @@ impl ChildAgents {
     pub(crate) fn new(
         root_session_id: String,
         control: SubagentControl,
-        mut updates: mpsc::UnboundedReceiver<ScopedAgentUpdate>,
+        updates: Option<mpsc::UnboundedReceiver<ScopedAgentUpdate>>,
     ) -> Arc<Self> {
-        let update_task = tokio::spawn(async move { while updates.recv().await.is_some() {} });
+        let update_task = updates.map(|mut updates| {
+            tokio::spawn(async move { while updates.recv().await.is_some() {} })
+        });
         Arc::new(Self {
             root_session_id,
             control,
-            update_task: tokio::sync::Mutex::new(Some(update_task)),
+            update_task: tokio::sync::Mutex::new(update_task),
         })
     }
 

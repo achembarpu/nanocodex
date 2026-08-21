@@ -2329,6 +2329,13 @@ impl App {
             .is_some_and(|conversation| conversation.running)
     }
 
+    pub(super) const fn main_accepts_automatic_prompt(&self) -> bool {
+        !self.main.running
+            && self.main.pending_turns == 0
+            && self.pending_historical_edit.is_none()
+            && self.pending_branch_switch.is_none()
+    }
+
     pub(super) fn has_input(&self) -> bool {
         !self.input.chars().all(char::is_whitespace)
     }

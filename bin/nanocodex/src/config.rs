@@ -36,6 +36,8 @@ pub(crate) struct ConfiguredAgent {
     pub(crate) events: AgentEvents,
     pub(crate) realtime: Option<OpenAi>,
     pub(crate) child_agents: Option<Arc<ChildAgents>>,
+    pub(crate) subagent_updates:
+        Option<tokio::sync::mpsc::UnboundedReceiver<nanocodex_subagents::ScopedAgentUpdate>>,
     pub(crate) mpp_adapter: Option<MppAdapter>,
     pub(crate) mcp: Option<McpHandle>,
     pub(crate) browser: Option<ConfiguredBrowser>,
@@ -302,7 +304,7 @@ impl AgentArgs {
         self,
         durable: Option<DurableSession>,
         vm: VmArgs,
-        simplify_workflow: bool,
+        tui: bool,
     ) -> Result<ConfiguredAgent> {
         let thinking = self.thinking();
         let web_search = self.web_search();
@@ -380,7 +382,7 @@ impl AgentArgs {
         }
         let tools = tools.build()?;
         let generic_subagents = self.subagents;
-        let subagent_tools = selected_subagent_tools(generic_subagents, simplify_workflow);
+        let subagent_tools = selected_subagent_tools(generic_subagents, tui);
         let subagent_runtime = subagent_tools.map(|_| subagents::channel(self.max_subagents));
         let mut builder = Nanocodex::builder(openai)
             .model(self.model)
@@ -421,14 +423,28 @@ impl AgentArgs {
             builder
         };
         let (handle, events) = builder.build()?;
-        let child_agents = subagent_runtime.map(|(_, control, updates)| {
-            ChildAgents::new(handle.session_id().to_string(), control, updates)
-        });
+        let (child_agents, subagent_updates) =
+            subagent_runtime.map_or((None, None), |(_, control, updates)| {
+                let (drain_updates, subagent_updates) = if tui {
+                    (None, Some(updates))
+                } else {
+                    (Some(updates), None)
+                };
+                (
+                    Some(ChildAgents::new(
+                        handle.session_id().to_string(),
+                        control,
+                        drain_updates,
+                    )),
+                    subagent_updates,
+                )
+            });
         Ok(ConfiguredAgent {
             handle,
             events,
             realtime,
             child_agents,
+            subagent_updates,
             mpp_adapter,
             mcp: mcp_handle,
             browser: configured_browser,
