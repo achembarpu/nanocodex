@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { GenerationRequestOwner } from "./agentTerminalLifecycle";
 import type { AgentStatus } from "./agentTerminalSurface";
+import { deploymentHealth } from "./deploymentHealth";
 
 export type CredentialSource = "subscription" | "user" | null;
 export type ChatGptStatus =
@@ -145,6 +146,7 @@ function useChatGptSession({
   const [status, setStatus] = useState<ChatGptStatus>();
   const [busy, setBusy] = useState(false);
   const authGeneration = useRef(0);
+  const bootstrapComplete = useRef(false);
   const statusRef = useRef<ChatGptStatus | undefined>(undefined);
   const refreshRequests = useRef(new GenerationRequestOwner<void>());
   const publishStatus = useCallback((next: ChatGptStatus) => {
@@ -155,6 +157,21 @@ function useChatGptSession({
   const refreshStatus = useCallback(() => {
     const generation = authGeneration.current;
     return refreshRequests.current.run(generation, async () => {
+      let bootstrapSource: CredentialSource | undefined;
+      if (!bootstrapComplete.current) {
+        try {
+          bootstrapSource = (await deploymentHealth.read()).credentialSource;
+          if (generation !== authGeneration.current) return;
+          bootstrapComplete.current = true;
+          onSourceChange(bootstrapSource);
+          if (bootstrapSource === "user") {
+            publishStatus({ state: "signed_out" });
+            return;
+          }
+        } catch {
+          // The ChatGPT session route can still establish a subscription.
+        }
+      }
       try {
         const response = await fetch("/api/auth/chatgpt", {
           cache: "no-store",
@@ -169,7 +186,9 @@ function useChatGptSession({
         } else if (next.state === "pending") {
           onSourceChange(null);
         } else {
-          const health = await readHealthSession();
+          const health = bootstrapSource === undefined
+            ? (await deploymentHealth.refresh()).credentialSource
+            : bootstrapSource;
           if (generation === authGeneration.current) {
             onSourceChange(health);
           }
@@ -189,7 +208,9 @@ function useChatGptSession({
           return;
         }
         try {
-          const health = await readHealthSession();
+          const health = bootstrapSource === undefined
+            ? (await deploymentHealth.refresh()).credentialSource
+            : bootstrapSource;
           if (generation !== authGeneration.current) return;
           if (health === "subscription") {
             publishStatus({ state: "authenticated" });
@@ -287,6 +308,7 @@ function useChatGptSession({
       if (generation !== authGeneration.current) return;
       // Invalidate refreshes that may have started while the DELETE was in flight.
       authGeneration.current += 1;
+      deploymentHealth.invalidate();
       publishStatus({ state: "signed_out" });
       await refreshStatus();
     } catch (cause) {
@@ -367,20 +389,4 @@ function retryDelayMs(cause: unknown, previousDelayMs: number): number {
     ? (cause as Error & { retryAfterMs?: number }).retryAfterMs
     : undefined;
   return Math.min(30_000, Math.max(1_000, retryAfterMs ?? previousDelayMs * 2));
-}
-
-async function readHealthSession(): Promise<CredentialSource> {
-  const health = await fetch("/api/health", {
-    cache: "no-store",
-    credentials: "same-origin",
-  });
-  if (!health.ok) throw new Error(`Could not check the agent session (HTTP ${health.status})`);
-  const payload = await health.json() as {
-    agent_configured?: boolean;
-    credential_source?: unknown;
-  };
-  return payload.agent_configured === true && (
-    payload.credential_source === "subscription"
-    || payload.credential_source === "user"
-  ) ? payload.credential_source : null;
 }
