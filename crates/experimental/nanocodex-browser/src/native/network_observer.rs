@@ -44,6 +44,7 @@ const COMMAND_CAPACITY: usize = 32;
 
 pub(super) struct NetworkObserver {
     commands: mpsc::Sender<ObserverCommand>,
+    task: JoinHandle<()>,
 }
 
 pub(super) struct NetworkBody {
@@ -54,7 +55,7 @@ pub(super) struct NetworkBody {
 enum ObserverCommand {
     Activate {
         target_id: String,
-        response: oneshot::Sender<()>,
+        response: oneshot::Sender<Result<(), String>>,
     },
     Body {
         session_id: String,
@@ -76,7 +77,7 @@ struct AttachedTargets {
     configured_targets: HashSet<String>,
     session_targets: HashMap<String, String>,
     session_roots: HashMap<String, String>,
-    activation_waiters: HashMap<String, Vec<oneshot::Sender<()>>>,
+    activation_waiters: HashMap<String, Vec<oneshot::Sender<Result<(), String>>>>,
 }
 
 impl NetworkObserver {
@@ -98,7 +99,8 @@ impl NetworkObserver {
             })?
             .map_err(|_| BrowserError::NetworkObserver {
                 message: "the observer dropped an activation response".to_owned(),
-            })
+            })?
+            .map_err(|message| BrowserError::NetworkObserver { message })
     }
 
     pub(super) async fn body(
@@ -125,13 +127,27 @@ impl NetworkObserver {
             })?
             .map_err(|message| BrowserError::NetworkObserver { message })
     }
+
+    pub(super) fn is_finished(&self) -> bool {
+        self.task.is_finished()
+    }
+
+    pub(super) fn abort(&self) {
+        self.task.abort();
+    }
+}
+
+impl Drop for NetworkObserver {
+    fn drop(&mut self) {
+        self.task.abort();
+    }
 }
 
 pub(super) async fn start(
     websocket_address: &str,
     target_id: TargetId,
     diagnostics: Arc<StdMutex<Diagnostics>>,
-) -> Result<(NetworkObserver, JoinHandle<()>), BrowserError> {
+) -> Result<NetworkObserver, BrowserError> {
     let mut connection = Connection::<CdpEventMessage>::connect(websocket_address).await?;
     let filter = TargetFilter::new(vec![
         FilterEntry::builder().r#type("page").exclude(false).build(),
@@ -156,7 +172,7 @@ pub(super) async fn start(
         diagnostics,
     ));
     match timeout(INITIALIZATION_TIMEOUT, ready_rx).await {
-        Ok(Ok(Ok(()))) => Ok((NetworkObserver { commands }, task)),
+        Ok(Ok(Ok(()))) => Ok(NetworkObserver { commands, task }),
         Ok(Ok(Err(message))) => {
             task.abort();
             Err(BrowserError::NetworkObserver { message })
@@ -188,6 +204,7 @@ async fn run(
     ready: oneshot::Sender<Result<(), String>>,
     diagnostics: Arc<StdMutex<Diagnostics>>,
 ) {
+    let mut stop_reason = "the observer task stopped".to_owned();
     let mut ready = Some(ready);
     let mut pending_bodies = HashMap::<CallId, PendingBody>::new();
     let mut targets = AttachedTargets::default();
@@ -199,7 +216,8 @@ async fn run(
         tokio::select! {
             message = connection.next() => {
                 let Some(message) = message else {
-                    fail_ready(&mut ready, "the DevTools connection closed");
+                    stop_reason = "the DevTools connection closed".to_owned();
+                    fail_ready(&mut ready, &stop_reason);
                     break;
                 };
                 let message = match message {
@@ -213,7 +231,8 @@ async fn run(
                         continue;
                     }
                     Err(error) => {
-                        fail_ready(&mut ready, &error.to_string());
+                        stop_reason = error.to_string();
+                        fail_ready(&mut ready, &stop_reason);
                         warn!(target: "nanocodex_browser", %error, "network observer stopped");
                         break;
                     }
@@ -223,6 +242,7 @@ async fn run(
                     Message::Response(response) => {
                         if response.id == attach_call {
                             if let Err(message) = response_result::<SetAutoAttachReturns>(response) {
+                                stop_reason.clone_from(&message);
                                 fail_ready(&mut ready, &message);
                                 break;
                             }
@@ -263,7 +283,7 @@ async fn run(
                     } => {
                         active_target_id.clone_from(&target_id);
                         if targets.configured_targets.contains(&target_id) {
-                            let _ = response.send(());
+                            let _ = response.send(Ok(()));
                         } else {
                             targets
                                 .activation_waiters
@@ -297,10 +317,24 @@ async fn run(
         }
     }
 
+    fail_ready(&mut ready, &stop_reason);
+    for waiters in targets.activation_waiters.into_values() {
+        for waiter in waiters {
+            let _ = waiter.send(Err(stop_reason.clone()));
+        }
+    }
     for (_, pending) in pending_bodies {
-        let _ = pending
-            .response
-            .send(Err("the observer task stopped".to_owned()));
+        let _ = pending.response.send(Err(stop_reason.clone()));
+    }
+    while let Ok(command) = commands.try_recv() {
+        match command {
+            ObserverCommand::Activate { response, .. } => {
+                let _ = response.send(Err(stop_reason.clone()));
+            }
+            ObserverCommand::Body { response, .. } => {
+                let _ = response.send(Err(stop_reason.clone()));
+            }
+        }
     }
 }
 
@@ -559,6 +593,7 @@ fn handle_event(
             }
             Ok(()) => {}
             Err(message) => {
+                fail_activation(targets, attached.target_info.target_id.as_ref(), &message);
                 warn!(
                     target: "nanocodex_browser",
                     target_type = %attached.target_info.r#type,
@@ -775,7 +810,15 @@ fn handle_event(
 fn complete_activation(targets: &mut AttachedTargets, target_id: &str) {
     if let Some(waiters) = targets.activation_waiters.remove(target_id) {
         for waiter in waiters {
-            let _ = waiter.send(());
+            let _ = waiter.send(Ok(()));
+        }
+    }
+}
+
+fn fail_activation(targets: &mut AttachedTargets, target_id: &str, message: &str) {
+    if let Some(waiters) = targets.activation_waiters.remove(target_id) {
+        for waiter in waiters {
+            let _ = waiter.send(Err(message.to_owned()));
         }
     }
 }

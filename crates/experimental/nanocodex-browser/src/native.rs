@@ -2,7 +2,10 @@ use std::{
     collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
     io::{self, Write},
     path::{Path, PathBuf},
-    sync::{Arc, Mutex as StdMutex},
+    sync::{
+        Arc, Mutex as StdMutex,
+        atomic::{AtomicBool, Ordering},
+    },
     time::{Duration, Instant},
 };
 
@@ -74,7 +77,7 @@ use chromiumoxide::{
             ReleaseObjectParams, RemoteObject, StackTrace,
         },
     },
-    error::CdpError,
+    error::{CdpError, ChannelError},
     layout::Point,
 };
 use futures_util::StreamExt;
@@ -110,6 +113,8 @@ use credential_store::VirtualCredentialStore;
 
 const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(25);
 const DEFAULT_NAVIGATION_TIMEOUT: Duration = Duration::from_secs(5);
+const BROWSER_LAUNCH_TIMEOUT: Duration = Duration::from_secs(10);
+const SESSION_DISCARD_TIMEOUT: Duration = Duration::from_secs(3);
 const MAIN_CONTEXT_RETRY_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_EXPLICIT_WAIT: Duration = Duration::from_secs(30);
 const MAX_SCRIPT_EVALUATION: Duration = Duration::from_secs(30);
@@ -442,6 +447,33 @@ struct Session {
     ffmpeg_executable: Option<PathBuf>,
     lighthouse_executable: Option<PathBuf>,
     crux_client: Option<BrowserCruxClient>,
+    poisoned: Arc<AtomicBool>,
+}
+
+struct ActionLease {
+    poisoned: Arc<AtomicBool>,
+    completed: bool,
+}
+
+impl ActionLease {
+    const fn new(poisoned: Arc<AtomicBool>) -> Self {
+        Self {
+            poisoned,
+            completed: false,
+        }
+    }
+
+    const fn complete(&mut self) {
+        self.completed = true;
+    }
+}
+
+impl Drop for ActionLease {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.poisoned.store(true, Ordering::Release);
+        }
+    }
 }
 
 #[derive(Default)]
@@ -952,6 +984,7 @@ impl Session {
             let mut config = BrowserConfig::builder()
                 .user_data_dir(&profile)
                 .window_size(1280, 720)
+                .launch_timeout(BROWSER_LAUNCH_TIMEOUT)
                 .new_headless_mode();
             #[cfg(target_os = "macos")]
             {
@@ -1029,13 +1062,12 @@ impl Session {
             network_control::start(&page, network_controls.clone(), Arc::clone(&diagnostics))
                 .await?,
         );
-        let (network_observer, network_task) = network_observer::start(
+        let network_observer = network_observer::start(
             browser.websocket_address(),
             page.target_id().clone(),
             Arc::clone(&diagnostics),
         )
         .await?;
-        browser_tasks.push(network_task);
         let egress_targets = HashSet::from([page.target_id().as_ref().to_owned()]);
 
         Ok(Self {
@@ -1080,11 +1112,13 @@ impl Session {
             ffmpeg_executable: owner.ffmpeg_executable.clone(),
             lighthouse_executable: owner.lighthouse_executable.clone(),
             crux_client: owner.crux_client.clone(),
+            poisoned: Arc::new(AtomicBool::new(false)),
         })
     }
 
     async fn close(mut self) -> Result<(), BrowserError> {
         let credential_sync = self.synchronize_virtual_credentials().await;
+        self.network_observer.abort();
         for task in &self.browser_tasks {
             task.abort();
         }
@@ -1097,19 +1131,32 @@ impl Session {
     }
 
     fn driver_finished(&self) -> bool {
-        self.handler.is_finished()
+        self.handler.is_finished() || self.network_observer.is_finished()
+    }
+
+    fn unusable(&self) -> bool {
+        self.driver_finished() || self.poisoned.load(Ordering::Acquire)
     }
 
     async fn discard(mut self) -> Result<(), BrowserError> {
         self.handler.abort();
+        self.network_observer.abort();
         for task in &self.browser_tasks {
             task.abort();
         }
         for task in &self.page_tasks {
             task.abort();
         }
-        if let Some(result) = self.browser.kill().await {
-            result?;
+        match timeout(SESSION_DISCARD_TIMEOUT, self.browser.kill()).await {
+            Ok(Some(result)) => result?,
+            Ok(None) => {}
+            Err(_) => {
+                warn!(
+                    target: "nanocodex_browser",
+                    timeout_ms = SESSION_DISCARD_TIMEOUT.as_millis(),
+                    "timed out killing a discarded browser session"
+                );
+            }
         }
         Ok(())
     }
@@ -2563,6 +2610,74 @@ impl Drop for NativeBrowser {
     }
 }
 
+fn preferred_automation_executable(explicit: Option<PathBuf>) -> Option<PathBuf> {
+    #[cfg(target_os = "macos")]
+    {
+        if explicit.is_some() || std::env::var_os("CHROME").is_some() {
+            return explicit;
+        }
+        if let Some(executable) = headless_shell_on_path().or_else(cached_headless_shell) {
+            info!(
+                target: "nanocodex_browser",
+                path = %executable.display(),
+                "selected headless shell to avoid macOS browser-profile services"
+            );
+            return Some(executable);
+        }
+    }
+    explicit
+}
+
+#[cfg(target_os = "macos")]
+fn headless_shell_on_path() -> Option<PathBuf> {
+    let path = std::env::var_os("PATH")?;
+    for directory in std::env::split_paths(&path) {
+        for name in ["chrome-headless-shell", "headless_shell"] {
+            let candidate = directory.join(name);
+            if candidate.is_file() {
+                return Some(candidate);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "macos")]
+fn cached_headless_shell() -> Option<PathBuf> {
+    let mut roots = Vec::new();
+    if let Some(root) = std::env::var_os("PLAYWRIGHT_BROWSERS_PATH")
+        && root != "0"
+    {
+        roots.push(PathBuf::from(root));
+    }
+    if let Some(home) = std::env::var_os("HOME") {
+        roots.push(PathBuf::from(&home).join("Library/Caches/ms-playwright"));
+        roots.push(PathBuf::from(home).join(".cache/ms-playwright"));
+    }
+    roots.into_iter().find_map(|root| {
+        let mut installations = std::fs::read_dir(root)
+            .ok()?
+            .filter_map(Result::ok)
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with("chromium_headless_shell-")
+            })
+            .collect::<Vec<_>>();
+        installations.sort_unstable_by_key(std::fs::DirEntry::file_name);
+        installations.into_iter().rev().find_map(|entry| {
+            [
+                "chrome-headless-shell-mac-arm64/chrome-headless-shell",
+                "chrome-headless-shell-mac-x64/chrome-headless-shell",
+            ]
+            .into_iter()
+            .map(|relative| entry.path().join(relative))
+            .find(|candidate| candidate.is_file())
+        })
+    })
+}
+
 impl NativeBrowser {
     #[allow(
         clippy::too_many_arguments,
@@ -2584,6 +2699,7 @@ impl NativeBrowser {
         lighthouse_executable: Option<PathBuf>,
         crux_client: Option<BrowserCruxClient>,
     ) -> Result<Arc<Self>, BrowserBuildError> {
+        let executable = preferred_automation_executable(executable);
         Ok(Arc::new(Self {
             runtime_dir: tempfile::Builder::new()
                 .prefix("nanocodex-browser-")
@@ -2641,6 +2757,7 @@ impl NativeBrowser {
                 .session
                 .as_mut()
                 .ok_or(BrowserError::SessionUnavailable)?;
+            let mut action_lease = ActionLease::new(Arc::clone(&session.poisoned));
             if !matches!(&action, BrowserAction::Open { .. }) {
                 session.sync_virtual_authenticators().await?;
             }
@@ -2671,10 +2788,12 @@ impl NativeBrowser {
                 Ok::<_, BrowserError>(result)
             }
             .await;
-            let credential_sync = session.synchronize_virtual_credentials().await;
-            let execution = match (execution, credential_sync) {
-                (Ok(result), Ok(())) => Ok(result),
-                (Ok(_), Err(error)) | (Err(error), _) => Err(error),
+            let execution = match execution {
+                Ok(result) => session
+                    .synchronize_virtual_credentials()
+                    .await
+                    .map(|()| result),
+                Err(error) => Err(error),
             };
             let duration = started.elapsed();
             let result = match execution {
@@ -2690,20 +2809,50 @@ impl NativeBrowser {
                             )
                             .await?;
                     }
+                    action_lease.complete();
                     result
                 }
                 Err(error) => {
-                    if let Some(trace) = session.action_trace.as_mut() {
-                        trace
-                            .record_failure(sequence, duration, trace_action, error.to_string())
-                            .await?;
-                    }
+                    let stopped = session_stopped(&error, session.driver_finished());
                     info!(
                         target: "nanocodex_browser",
                         sequence,
                         error = %error,
                         "browser action failed"
                     );
+                    if let Some(outcome_unknown) = stopped {
+                        if let Some(trace) = session.action_trace.as_mut()
+                            && let Err(trace_error) = trace
+                                .record_failure(sequence, duration, trace_action, error.to_string())
+                                .await
+                        {
+                            warn!(
+                                target: "nanocodex_browser",
+                                sequence,
+                                %trace_error,
+                                "failed to record a stopped browser action"
+                            );
+                        }
+                        let poisoned = state
+                            .session
+                            .take()
+                            .ok_or(BrowserError::SessionUnavailable)?;
+                        if let Err(discard_error) = poisoned.discard().await {
+                            warn!(
+                                target: "nanocodex_browser",
+                                sequence,
+                                %discard_error,
+                                "failed to clean up a stopped browser session"
+                            );
+                        }
+                        return Err(BrowserError::SessionStopped { outcome_unknown });
+                    }
+                    if let Some(trace) = session.action_trace.as_mut() {
+                        trace
+                            .record_failure(sequence, duration, trace_action, error.to_string())
+                            .await?;
+                    }
+                    action_lease.complete();
                     return Err(error);
                 }
             };
@@ -2780,15 +2929,21 @@ impl NativeBrowser {
     }
 
     async fn ensure_session(&self, state: &mut BrowserState) -> Result<(), BrowserError> {
-        if state.session.as_ref().is_some_and(Session::driver_finished) {
+        if state.session.as_ref().is_some_and(Session::unusable) {
             let session = state
                 .session
                 .take()
                 .ok_or(BrowserError::SessionUnavailable)?;
-            session.discard().await?;
+            if let Err(error) = session.discard().await {
+                warn!(
+                    target: "nanocodex_browser",
+                    %error,
+                    "failed to clean up an unusable browser session"
+                );
+            }
             warn!(
                 target: "nanocodex_browser",
-                "restarting browser after the DevTools driver stopped"
+                "restarting unusable browser session"
             );
         }
         if state.session.is_none() {
@@ -2899,6 +3054,19 @@ impl NativeBrowser {
         session.sync_virtual_authenticators().await?;
         session.synchronize_virtual_credentials().await?;
         session.virtual_credentials().await
+    }
+}
+
+const fn session_stopped(error: &BrowserError, driver_finished: bool) -> Option<bool> {
+    match error {
+        BrowserError::Cdp(CdpError::ChannelSendError(ChannelError::Send(_))) => Some(false),
+        BrowserError::Cdp(CdpError::ChannelSendError(ChannelError::Canceled(_)))
+        | BrowserError::Cdp(CdpError::Timeout)
+        | BrowserError::NetworkObserver { .. }
+        | BrowserError::NavigationTimeout { .. }
+        | BrowserError::EvaluationTimeout { .. } => Some(true),
+        _ if driver_finished => Some(true),
+        _ => None,
     }
 }
 
@@ -6728,6 +6896,10 @@ pub enum BrowserError {
     SessionUnavailable,
     #[error("browser session is closed")]
     Closed,
+    #[error(
+        "browser session became unusable during the action (the action may have executed: {outcome_unknown}); the session was discarded and the next action will start cleanly"
+    )]
+    SessionStopped { outcome_unknown: bool },
     #[error("browser diagnostics collector is unavailable")]
     DiagnosticsUnavailable,
     #[error("browser source-map registry is unavailable")]
@@ -7315,6 +7487,7 @@ const REMOVE_ANNOTATIONS_SCRIPT: &str =
 #[cfg(test)]
 mod tests {
     use std::sync::{Arc, Mutex as StdMutex};
+    use std::time::Duration;
 
     use chromiumoxide::cdp::browser_protocol::network::{
         Cookie, CookieParam, CookiePriority, CookieSourceScheme, TimeSinceEpoch,
@@ -7325,7 +7498,8 @@ mod tests {
         BrowserConfig, Chromium, Diagnostics, GateSignals, MAX_ACTION_INPUT_BYTES,
         MAX_CONSOLE_ENTRIES, MAX_DIAGNOSTIC_TEXT_BYTES, MAX_NETWORK_REQUESTS, NetworkSource,
         allowed_cookie_params, build_config, classify_gate, close_chromium, cookie_param,
-        diagnostic_limit, profile_launch_config, trace_browser_configuration, validate_url,
+        diagnostic_limit, profile_launch_config, session_stopped, trace_browser_configuration,
+        validate_url,
     };
     use crate::{
         BraveSession, Browser, BrowserAction, BrowserActionResult, BrowserConsoleEntry,
@@ -7591,6 +7765,36 @@ mod tests {
         assert_eq!(parameters[1].domain.as_deref(), Some("sibling.example.net"));
     }
 
+    #[test]
+    fn in_flight_timeouts_discard_the_session() {
+        assert_eq!(
+            session_stopped(
+                &BrowserError::EvaluationTimeout {
+                    maximum: Duration::from_secs(1),
+                },
+                false,
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            session_stopped(
+                &BrowserError::NavigationTimeout {
+                    url: "https://example.com".to_owned(),
+                    milliseconds: 1_000,
+                },
+                false,
+            ),
+            Some(true)
+        );
+        assert_eq!(
+            session_stopped(
+                &BrowserError::Cdp(chromiumoxide::error::CdpError::Timeout),
+                false,
+            ),
+            Some(true)
+        );
+    }
+
     #[tokio::test]
     #[ignore = "requires a local Chrome or Chromium installation"]
     async fn browser_recovers_after_the_devtools_driver_stops()
@@ -7630,6 +7834,185 @@ mod tests {
             return Err(std::io::Error::other("expected evaluation result").into());
         };
         assert_eq!(value.as_i64(), Some(2));
+        browser.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a local Chrome headless shell or Chromium installation"]
+    async fn browser_recovers_after_the_network_observer_stops()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let browser = Browser::new()?;
+        browser.start().await?;
+        {
+            let state = browser.inner.state.lock().await;
+            state
+                .session
+                .as_ref()
+                .expect("started browser has a session")
+                .network_observer
+                .abort();
+        }
+        for _ in 0..100 {
+            let finished = {
+                let state = browser.inner.state.lock().await;
+                state
+                    .session
+                    .as_ref()
+                    .expect("started browser has a session")
+                    .driver_finished()
+            };
+            if finished {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+
+        let result = browser
+            .execute(BrowserAction::Evaluate {
+                expression: "2 + 2".to_owned(),
+            })
+            .await?;
+        let BrowserActionResult::Evaluation { value, .. } = result else {
+            return Err(std::io::Error::other("expected evaluation result").into());
+        };
+        assert_eq!(value.as_i64(), Some(4));
+        browser.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a local Chrome headless shell or Chromium installation"]
+    async fn browser_repeatedly_recovers_from_driver_task_loss()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const RECOVERIES: i64 = 20;
+        const RECOVERY_TIMEOUT: Duration = Duration::from_secs(3);
+
+        let browser = Browser::new()?;
+        browser.start().await?;
+        for expected in 0..RECOVERIES {
+            {
+                let state = browser.inner.state.lock().await;
+                let session = state
+                    .session
+                    .as_ref()
+                    .expect("started browser has a session");
+                if expected % 2 == 0 {
+                    session.handler.abort();
+                } else {
+                    session.network_observer.abort();
+                }
+            }
+
+            tokio::time::timeout(RECOVERY_TIMEOUT, async {
+                loop {
+                    let finished = {
+                        let state = browser.inner.state.lock().await;
+                        state
+                            .session
+                            .as_ref()
+                            .expect("started browser has a session")
+                            .driver_finished()
+                    };
+                    if finished {
+                        break;
+                    }
+                    tokio::task::yield_now().await;
+                }
+            })
+            .await?;
+
+            let result = tokio::time::timeout(
+                RECOVERY_TIMEOUT,
+                browser.execute(BrowserAction::Evaluate {
+                    expression: expected.to_string(),
+                }),
+            )
+            .await??;
+            let BrowserActionResult::Evaluation { value, .. } = result else {
+                return Err(std::io::Error::other("expected evaluation result").into());
+            };
+            assert_eq!(value.as_i64(), Some(expected));
+        }
+        browser.close().await?;
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a local Chrome headless shell or Chromium installation"]
+    async fn browser_discards_a_session_after_a_cancelled_action()
+    -> Result<(), Box<dyn std::error::Error>> {
+        const ACTION_TIMEOUT: Duration = Duration::from_secs(3);
+
+        let browser = Browser::new()?;
+        browser.start().await?;
+        let (original_target, original_page) = {
+            let state = browser.inner.state.lock().await;
+            let page = state
+                .session
+                .as_ref()
+                .expect("started browser has a session")
+                .page
+                .clone();
+            (page.target_id().as_ref().to_owned(), page)
+        };
+        let cancelled_browser = browser.clone();
+        let cancelled = tokio::spawn(async move {
+            cancelled_browser
+                .execute(BrowserAction::Evaluate {
+                    expression: r#"(async () => {
+                        document.title = "action started";
+                        setTimeout(() => { document.title = "late mutation"; }, 100);
+                        await new Promise((resolve) => setTimeout(resolve, 1_000));
+                        return 1;
+                    })()"#
+                        .to_owned(),
+                })
+                .await
+        });
+        tokio::time::timeout(ACTION_TIMEOUT, async {
+            loop {
+                if matches!(
+                    original_page.get_title().await,
+                    Ok(Some(title)) if title == "action started"
+                ) {
+                    break;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await?;
+        cancelled.abort();
+        assert!(
+            cancelled
+                .await
+                .expect_err("action should be cancelled")
+                .is_cancelled()
+        );
+
+        let result = tokio::time::timeout(
+            ACTION_TIMEOUT,
+            browser.execute(BrowserAction::Evaluate {
+                expression: "document.title".to_owned(),
+            }),
+        )
+        .await??;
+        let BrowserActionResult::Evaluation { value, .. } = result else {
+            return Err(std::io::Error::other("expected evaluation result").into());
+        };
+        assert_eq!(value.as_str(), Some(""));
+        let replacement_target = {
+            let state = browser.inner.state.lock().await;
+            state
+                .session
+                .as_ref()
+                .expect("recovered browser has a session")
+                .page
+                .target_id()
+                .as_ref()
+                .to_owned()
+        };
+        assert_ne!(replacement_target, original_target);
         browser.close().await?;
         Ok(())
     }
