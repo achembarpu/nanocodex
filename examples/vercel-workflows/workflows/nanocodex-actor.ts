@@ -30,7 +30,7 @@ export function promptHookToken(sessionId: string): string {
   return `nanocodex_actor:${sessionId}`;
 }
 
-export async function nanocodexActor(agentSessionId: string): Promise<never> {
+export async function nanocodexActor(): Promise<never> {
   "use workflow";
 
   const sessionId = getWorkflowMetadata().workflowRunId;
@@ -52,7 +52,7 @@ export async function nanocodexActor(agentSessionId: string): Promise<never> {
       input: request.input,
       replayed: seen.has(request.id),
     });
-    const outcome = await runNanocodexTurn(agentSessionId, request);
+    const outcome = await runNanocodexTurn(sessionId, request);
     seen.add(request.id);
     if (!outcome.ok) {
       await writeSessionEvent({
