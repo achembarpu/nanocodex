@@ -3,13 +3,8 @@ import { resolve } from "node:path";
 
 import {
   type DefaultAgent,
-  type DurabilityStoredJournal,
   type EventWatcher,
 } from "nanocodex";
-import {
-  createMemoryDurabilityStore,
-  durabilityRevision,
-} from "nanocodex/durability";
 import { defineHook, getWorkflowMetadata, getWritable } from "workflow";
 
 import type {
@@ -22,6 +17,7 @@ import {
   openApiKeyWebSocket,
   openSubscriptionWebSocket,
 } from "./model-websocket";
+import { postgresDurabilityStore } from "./postgres-durability";
 import { vercelSandboxTools } from "./sandbox-tools";
 
 const CHATGPT_WEBSOCKET_URL = "wss://chatgpt.com/backend-api/codex/responses";
@@ -41,7 +37,6 @@ export async function nanocodexActor(agentSessionId: string): Promise<never> {
   const receivePrompt = nanocodexPromptHook.create({
     token: promptHookToken(sessionId),
   });
-  let journal: DurabilityStoredJournal = { revision: durabilityRevision(0n), batches: [] };
   const seen = new Set<string>();
 
   await writeSessionEvent({
@@ -57,8 +52,7 @@ export async function nanocodexActor(agentSessionId: string): Promise<never> {
       input: request.input,
       replayed: seen.has(request.id),
     });
-    const outcome = await runNanocodexTurn(agentSessionId, request, journal);
-    journal = outcome.journal;
+    const outcome = await runNanocodexTurn(agentSessionId, request);
     seen.add(request.id);
     if (!outcome.ok) {
       await writeSessionEvent({
@@ -90,7 +84,6 @@ export async function writeSessionEvent(event: SessionEvent): Promise<void> {
 export async function runNanocodexTurn(
   sessionId: string,
   request: PromptRequest,
-  initialJournal: DurabilityStoredJournal,
 ): Promise<TurnOutcome> {
   "use step";
 
@@ -99,7 +92,7 @@ export async function runNanocodexTurn(
   const writable = getWritable<SessionEvent>();
   const writer = writable.getWriter();
   let eventWrites = Promise.resolve();
-  const durability = createMemoryDurabilityStore(sessionId, initialJournal);
+  const durability = postgresDurabilityStore();
 
   try {
     const { Agent, Transport } = await import("nanocodex/host");
@@ -167,14 +160,13 @@ export async function runNanocodexTurn(
           final_message: result.finalMessage,
           usage: result.usage,
         },
-        journal: durability.snapshot(),
       };
     } finally {
       turn.dispose();
     }
   } catch (error) {
     await eventWrites.catch(() => {});
-    return { ok: false, error: errorMessage(error), journal: durability.snapshot() };
+    return { ok: false, error: errorMessage(error) };
   } finally {
     events?.off();
     writer.releaseLock();

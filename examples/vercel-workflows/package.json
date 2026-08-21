@@ -25,6 +25,7 @@
     "@wterm/react": "0.3.4",
     "nanocodex": "file:../../js/bindings",
     "next": "16.3.1",
+    "pg": "8.23.0",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "uuid": "14.0.2",
@@ -32,7 +33,9 @@
     "ws": "8.21.3"
   },
   "devDependencies": {
+    "@electric-sql/pglite": "0.5.5",
     "@types/node": "22.19.15",
+    "@types/pg": "8.23.1",
     "@types/react": "19.2.11",
     "@types/react-dom": "19.2.3",
     "@types/ws": "8.18.1",

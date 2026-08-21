@@ -6,8 +6,8 @@ Vercel Workflows and native Vercel Function WebSockets.
 Each Workflow run is one agent session:
 
 - a typed Workflow hook accepts prompts and processes them sequentially;
-- each Function step uses Nanocodex's built-in memory durability store and
-  returns its opaque journal to the Workflow event log for the next step;
+- each Function step opens the same application-owned PostgreSQL journal through
+  the `DATABASE_URL` injected by a Vercel Marketplace database integration;
 - every accepted prompt, typed agent event, and terminal result is appended to
   the Workflow's resumable stream;
 - each WebSocket Function independently tails that durable stream, so clients
@@ -32,6 +32,7 @@ browser B ─ WebSocket Function ─┘             │
                                               ▼
                                   Nanocodex WASM Function step
                                      ├─ Responses WebSocket → OpenAI
+                                     ├─ atomic journal append → PostgreSQL
                                      └─ named persistent Vercel Sandbox
                                           └─ files, commands, preview domains
 
@@ -40,14 +41,22 @@ browser terminal ─ controller PTY WebSocket ─ same named Vercel Sandbox
 ```
 
 The WebSocket connection itself is disposable and bounded by the Vercel
-Function duration. The browser reconnects automatically. The Workflow run,
-Rust journal, prompt hook, and output stream are the durable pieces. Vercel
-persists the coarse Function-step result; within that step Rust/WASM still owns
-deduplication, checkpoint reconstruction, and model/tool recovery policy.
-A Function crash before the step returns therefore retries from the preceding
-journal, not from an in-turn model or tool boundary. Deployments that need
-mid-step crash recovery should back the same `DurabilityStore` interface with
-an external atomic compare-and-append service instead of this in-step adapter.
+Function duration. The browser reconnects automatically. Workflow durably owns
+prompt serialization and the replayable client event stream; PostgreSQL stores
+the opaque Rust journal at model, tool, and terminal boundaries. A replacement
+Function step reconstructs the agent from that journal, so Rust/WASM retains
+deduplication, checkpoint reconstruction, and recovery policy without a second
+JavaScript state machine.
+
+The adapter creates one `pg` pool and schema lazily per warm Function instance
+and immediately registers the pool with `attachDatabasePool`. A fixed
+transaction-scoped PostgreSQL advisory lock serializes schema creation across
+cold instances. Revisions are
+`NUMERIC(20,0)` values read and written as unsigned decimal strings, preserving
+Rust's complete `u64` range. Compare-and-append conditionally advances the head
+and inserts the opaque batch in one transaction. A rejected `COMMIT` is an
+unknown outcome: the adapter throws, Rust poisons and stops that live journal
+owner, and a new step reloads the database before doing more work.
 
 The browser keeps its agent transcript in application code: an `@wterm/react`
 terminal fed by a small ANSI renderer over the replayable, client-safe Workflow
@@ -79,7 +88,8 @@ Workflow socket never carries terminal bytes.
 
 These lifetimes are intentionally different:
 
-- the Workflow actor and Rust journal retain committed conversation state;
+- PostgreSQL retains the opaque Rust journal and committed conversation state;
+- the Workflow actor serializes prompts and retains replayable client events;
 - the named persistent Sandbox retains files across VM stop/resume;
 - each terminal attachment owns one ephemeral login shell; reconnecting requests
   a fresh credential and starts a fresh shell; and
@@ -94,6 +104,19 @@ Build the repository's WASM package and install this consumer:
 just build-wasm
 npm ci --prefix examples/vercel-workflows
 ```
+
+Attach a PostgreSQL provider from the Vercel Marketplace to the Vercel project.
+The integration must expose its pooled connection string as `DATABASE_URL` in
+the environments where the Workflow runs. For local development, pull the
+linked project's variables with Vercel CLI or set an equivalent database URL:
+
+```sh
+npx vercel env pull examples/vercel-workflows/.env.local
+# or: export DATABASE_URL=postgresql://...
+```
+
+Importing or building the application does not open a database connection. The
+first durability load or append creates the pool and current schema.
 
 For API-key authentication, use Vercel CLI's local runtime because native
 WebSocket upgrades require Vercel's Function adapter:
@@ -145,6 +168,10 @@ The deployment helper:
    temporary deployment directory; and
 5. deploys that staged app to Production without committing generated WASM or
 credentials.
+
+The linked project must already have its Marketplace PostgreSQL integration
+enabled for Production. `DATABASE_URL` is application infrastructure and is not
+copied into the staged source or Workflow history.
 
 Fluid Compute applies to the Next.js Functions that host WebSocket tails and
 Workflow steps. Vercel Sandbox is a separate persistent Firecracker service;
@@ -213,9 +240,18 @@ experimental. Connections are expected to close when a Function reaches its
 maximum duration; automatic cursor-based reconnection is part of the demo's
 normal lifecycle.
 
+The focused durability tests run the production PostgreSQL SQL against PGlite,
+a deterministic WASM PostgreSQL build. They cover schema-lock acquisition,
+expected-revision conflicts, numeric load order, the exact `u64` maximum,
+confirmed rollback, commit ambiguity, and recreation from the retained journal
+without requiring external credentials. Live multi-session contention remains
+a deployment smoke against the selected Marketplace provider.
+
 References:
 
 - [Vercel Workflow actor pattern](https://github.com/vercel/workflow-examples/tree/main/actors)
 - [Workflow multi-turn session modeling](https://workflow-sdk.dev/docs/ai/chat-session-modeling)
 - [Workflow resumable streams](https://workflow-sdk.dev/docs/ai/resumable-streams)
 - [Vercel native WebSocket chat guide](https://vercel.com/kb/guide/real-time-chat-websockets)
+- [Vercel Postgres Marketplace integrations](https://vercel.com/docs/postgres)
+- [Vercel Function database pool management](https://vercel.com/docs/functions/functions-api-reference/vercel-functions-package#attachdatabasepool)

@@ -20,7 +20,7 @@ const nextConfig: NextConfig = {
   outputFileTracingIncludes: {
     "/*": ["./workflows/nanocodex.wasm"],
   },
-  serverExternalPackages: ["@vercel/functions", "nanocodex", "ws"],
+  serverExternalPackages: ["@vercel/functions", "nanocodex", "pg", "ws"],
   turbopack: { root: repositoryRoot },
   async headers() {
     return [{ source: "/(.*)", headers: securityHeaders }];
