@@ -159,10 +159,10 @@ export function createAgentConfig(options = {}, runtime) {
       if (destroyed) return () => {};
       const key = parameters.threadId ?? "";
       const entry = entries.get(key) ?? createEntry(parameters);
-      prepare(entry);
       entry.listeners.add(listener);
       const enabled = parameters.enabled !== false;
       if (enabled) {
+        prepare(entry);
         entry.activeSubscribers += 1;
         start(entry);
       }

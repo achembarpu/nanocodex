@@ -32,7 +32,7 @@ test("snapshot reads and refetch stay pure until a subscriber creates the entry"
   await config.destroy();
 });
 
-test("disabled consumers prewarm without creating an Agent", async () => {
+test("disabled consumers stay cold without creating an Agent", async () => {
   const calls = [];
   const config = createAgentConfig({}, {
     async create(options) { calls.push(["create", options]); },
@@ -46,7 +46,7 @@ test("disabled consumers prewarm without creating an Agent", async () => {
     error: undefined,
     status: "idle",
   });
-  assert.deepEqual(calls, [["prepare", { threadId: "demo" }]]);
+  assert.deepEqual(calls, []);
   unsubscribe();
   await config.destroy();
 });
@@ -67,10 +67,10 @@ test("preparation deduplicates and shares the exact stable descriptor with creat
   });
 
   const first = config.subscribeAgent({ enabled: false }, () => {});
-  await waitFor(() => prepared.length === 1);
+  await tick();
   const second = config.subscribeAgent({ enabled: false }, () => {});
   await tick();
-  assert.equal(prepared.length, 1);
+  assert.equal(prepared.length, 0);
   assert.equal(created.length, 0);
 
   const third = config.subscribeAgent({}, () => {});
