@@ -24,6 +24,7 @@ import {
   type ComponentType,
   type MouseEvent as ReactMouseEvent,
 } from "react";
+import { flushSync } from "react-dom";
 import { useLocation, useNavigate } from "react-router";
 import type { CodeBrowserHandle } from "./CodeBrowser";
 import type { CommitCodeStreamHandle } from "./CommitCodeStream";
@@ -60,6 +61,7 @@ const AgentExperience = lazy(loadAgentExperience);
 const loadPierreWorkerProvider = () =>
   import("./PierreWorkerProvider").then((module) => ({
     default: module.PierreWorkerProvider,
+    preloadPierreWorker: module.preloadPierreWorker,
   }));
 const PierreWorkerProvider = lazy(loadPierreWorkerProvider);
 const loadCodeBrowser = () =>
@@ -146,6 +148,66 @@ function loadRepositorySnapshot(
   if (includeHistory) repositoryHistoryRequest = request;
   else repositorySnapshotRequest = request;
   return request;
+}
+
+type RepositorySurface = Extract<Surface, "code" | "commits">;
+
+function preparePierreWorker() {
+  return loadPierreWorkerProvider().then((module) => {
+    module.preloadPierreWorker();
+  });
+}
+
+function prepareRepositorySurface(
+  nextSurface: RepositorySurface,
+): Promise<PublishedRepositorySnapshot> {
+  if (nextSurface === "code") {
+    return Promise.all([
+      preparePierreWorker(),
+      loadCodeBrowser(),
+      loadRepositorySnapshot(false),
+    ]).then(([, , preparedSnapshot]) => preparedSnapshot);
+  }
+  return Promise.all([
+    preparePierreWorker(),
+    loadCommitCodeStream(),
+    loadVirtualCommitList(),
+    loadRepositorySnapshot(true),
+  ]).then(([, , , preparedSnapshot]) => preparedSnapshot);
+}
+
+type RepositoryNavigationIntent<T> = {
+  navigationId: number;
+  latestNavigationId(): number;
+  preparation: Promise<T>;
+  onPrepared(prepared: T): void;
+  onFailure(): void;
+  navigate(): void;
+};
+
+export async function settleRepositoryNavigationIntent<T>({
+  navigationId,
+  latestNavigationId,
+  preparation,
+  onPrepared,
+  onFailure,
+  navigate,
+}: RepositoryNavigationIntent<T>): Promise<"ready" | "failed" | "stale"> {
+  let prepared: T;
+  try {
+    prepared = await preparation;
+  } catch {
+    if (latestNavigationId() !== navigationId) return "stale";
+    onFailure();
+    if (latestNavigationId() !== navigationId) return "stale";
+    navigate();
+    return "failed";
+  }
+  if (latestNavigationId() !== navigationId) return "stale";
+  onPrepared(prepared);
+  if (latestNavigationId() !== navigationId) return "stale";
+  navigate();
+  return "ready";
 }
 
 const scopes: Array<{ id: Scope; label: string }> = [
@@ -256,7 +318,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
   const [snapshot, setSnapshot] = useState<PublishedRepositorySnapshot | undefined>(
     preparedRoute.repositorySnapshot,
   );
-  const [repositoryLoadError, setRepositoryLoadError] = useState(false);
+  const [repositoryLoadError, setRepositoryLoadError] = useState<RepositorySurface | null>(null);
   const [scope, setScope] = useState<Scope>("all");
   const [query, setQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
@@ -375,44 +437,60 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
     [commits, queryTokens, searchOpen],
   );
 
-  const requestRepository = useCallback((includeHistory: boolean) => {
-    const requestId = ++repositoryRequestId.current;
-    setRepositoryLoadError(false);
-    void loadRepositorySnapshot(includeHistory).then(
-      (loaded) => {
-        if (repositoryRequestId.current !== requestId) return;
-        setSnapshot((current) =>
-          current?.historyLoaded && !loaded.historyLoaded ? current : loaded
-        );
-        setSelectedHash((current) => current && loaded.commits.some(({ hash }) => hash === current)
-          ? current
-          : loaded.repository.head);
-      },
-      () => {
-        if (
-          repositoryRequestId.current === requestId
-        ) {
-          setRepositoryLoadError(true);
-        }
-      },
+  const commitRepositorySnapshot = useCallback((loaded: PublishedRepositorySnapshot) => {
+    setSnapshot((current) =>
+      current?.historyLoaded && !loaded.historyLoaded ? current : loaded
+    );
+    setSelectedHash((current) =>
+      current && loaded.commits.some(({ hash }) => hash === current)
+        ? current
+        : loaded.repository.head
     );
   }, []);
 
+  const requestRepository = useCallback((nextSurface: RepositorySurface) => {
+    const requestId = ++repositoryRequestId.current;
+    void prepareRepositorySurface(nextSurface).then(
+      (loaded) => {
+        if (repositoryRequestId.current !== requestId) return;
+        startTransition(() => {
+          commitRepositorySnapshot(loaded);
+          setRepositoryLoadError((current) => current === nextSurface ? null : current);
+        });
+      },
+      () => {
+        if (repositoryRequestId.current === requestId) {
+          setRepositoryLoadError(nextSurface);
+        }
+      },
+    );
+  }, [commitRepositorySnapshot]);
+
   const refreshRepository = useCallback(() => {
     if (!needsRepository) return;
-    requestRepository(needsRepositoryHistory);
+    requestRepository(needsRepositoryHistory ? "commits" : "code");
   }, [needsRepository, needsRepositoryHistory, requestRepository]);
+
+  useLayoutEffect(() => {
+    surfaceNavigationId.current++;
+  }, [location.key]);
 
   useLayoutEffect(() => {
     retainAgentExperience(surface);
   }, [retainAgentExperience, surface]);
 
   useEffect(() => {
-    if (!needsRepository) return;
+    if (!needsRepository || repositoryLoadError === surface) return;
     if (!snapshot || (needsRepositoryHistory && !snapshot.historyLoaded)) {
       refreshRepository();
     }
-  }, [needsRepository, needsRepositoryHistory, refreshRepository, snapshot]);
+  }, [
+    needsRepository,
+    needsRepositoryHistory,
+    refreshRepository,
+    repositoryLoadError,
+    snapshot,
+  ]);
 
   useEffect(() => {
     if (!requestedCommit) return;
@@ -427,6 +505,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
 
   useEffect(() => () => {
     repositoryRequestId.current++;
+    surfaceNavigationId.current++;
   }, []);
 
   useEffect(() => {
@@ -472,22 +551,12 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
         .catch(() => undefined);
       return;
     }
-    if (nextSurface === "code") {
-      void Promise.all([loadPierreWorkerProvider(), loadCodeBrowser()]).catch(() => undefined);
-      if (!snapshot) requestRepository(false);
-      return;
-    }
-    if (nextSurface === "commits") {
-      void Promise.all([
-        loadPierreWorkerProvider(),
-        loadCommitCodeStream(),
-        loadVirtualCommitList(),
-      ]).catch(() => undefined);
-      if (!snapshot?.historyLoaded) requestRepository(true);
+    if (nextSurface === "code" || nextSurface === "commits") {
+      void prepareRepositorySurface(nextSurface).catch(() => undefined);
       return;
     }
     if (nextSurface === "evals") preloadEvalOverview();
-  }, [requestRepository, snapshot]);
+  }, []);
 
   const navigateToSurface = useCallback((nextSurface: Surface) => {
     retainAgentExperience(nextSurface);
@@ -496,6 +565,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
     if (nextSurface === "docs") {
       const destination = pathForSurface(nextSurface);
       if (`${location.pathname}${location.search}` === destination) return;
+      repositoryRequestId.current++;
       // The Docs route resolves its small source document as part of intent.
       // Keep the complete current surface visible until that atomic page is
       // ready, then navigate outside React's lower-priority transition lane.
@@ -511,11 +581,42 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
       return;
     }
     const nextThreadId = threadId ?? getBrowserThread().id;
-    if (!threadId) setThreadId(nextThreadId);
     const destination = `${pathForSurface(nextSurface)}?thread=${nextThreadId}`;
     if (`${location.pathname}${location.search}` === destination) return;
+    repositoryRequestId.current++;
+    if (nextSurface === "code" || nextSurface === "commits") {
+      void settleRepositoryNavigationIntent({
+        navigationId,
+        latestNavigationId: () => surfaceNavigationId.current,
+        preparation: prepareRepositorySurface(nextSurface),
+        onPrepared: (preparedSnapshot) => {
+          flushSync(() => {
+            if (!threadId) setThreadId(nextThreadId);
+            commitRepositorySnapshot(preparedSnapshot);
+            setRepositoryLoadError((current) => current === nextSurface ? null : current);
+          });
+        },
+        onFailure: () => {
+          flushSync(() => {
+            if (!threadId) setThreadId(nextThreadId);
+            setRepositoryLoadError(nextSurface);
+          });
+        },
+        navigate: () => startTransition(() => navigate(destination)),
+      });
+      return;
+    }
+    if (!threadId) setThreadId(nextThreadId);
     startTransition(() => navigate(destination));
-  }, [location.pathname, location.search, navigate, preloadSurface, retainAgentExperience, threadId]);
+  }, [
+    commitRepositorySnapshot,
+    location.pathname,
+    location.search,
+    navigate,
+    preloadSurface,
+    retainAgentExperience,
+    threadId,
+  ]);
 
   const handleSurfaceClick = useCallback((
     event: ReactMouseEvent<HTMLAnchorElement>,
@@ -815,7 +916,12 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
             <Changelog />
           ) : surface === "docs" ? (
             DocsComponent ? <DocsComponent /> : null
-          ) : surface === "code" ? snapshot ? (
+          ) : surface === "code" ? repositoryLoadError === "code" ? (
+            <RepositorySurfaceError
+              failed
+              onRetry={refreshRepository}
+            />
+          ) : snapshot ? (
             <PierreWorkerProvider>
               <CodeBrowser
                 key={snapshot.repository.head}
@@ -827,12 +933,12 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
                 theme={theme}
               />
             </PierreWorkerProvider>
-          ) : (
+          ) : null : surface === "commits" ? repositoryLoadError === "commits" ? (
             <RepositorySurfaceError
-              failed={repositoryLoadError}
+              failed
               onRetry={refreshRepository}
             />
-          ) : surface === "commits" ? snapshot?.historyLoaded ? (
+          ) : snapshot?.historyLoaded ? (
             <PierreWorkerProvider>
                 <section
                   className="commits-workspace"
@@ -936,12 +1042,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
                 />
                 </section>
             </PierreWorkerProvider>
-          ) : (
-            <RepositorySurfaceError
-              failed={repositoryLoadError}
-              onRetry={refreshRepository}
-            />
-          ) : surface === "requests" ? (
+          ) : null : surface === "requests" ? (
             <section
               className="requests-empty page-grid"
               aria-labelledby="requests-title"

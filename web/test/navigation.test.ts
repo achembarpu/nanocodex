@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { createServer } from "vite";
 import {
   pathForCommit,
   pathForSurface,
@@ -11,6 +12,41 @@ import {
 const application = readFileSync(new URL("../src/NanocodexApp.tsx", import.meta.url), "utf8");
 const entry = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8");
 const css = readFileSync(new URL("../src/index.css", import.meta.url), "utf8");
+
+type RepositoryIntentSettler = <T>(options: {
+  navigationId: number;
+  latestNavigationId(): number;
+  preparation: Promise<T>;
+  onPrepared(prepared: T): void;
+  onFailure(): void;
+  navigate(): void;
+}) => Promise<"ready" | "failed" | "stale">;
+
+async function loadRepositoryIntentSettler(): Promise<RepositoryIntentSettler> {
+  const server = await createServer({
+    appType: "custom",
+    configFile: false,
+    logLevel: "silent",
+    root: new URL("..", import.meta.url).pathname,
+    server: { middlewareMode: true },
+  });
+  try {
+    const module = await server.ssrLoadModule("/src/NanocodexApp.tsx");
+    return module.settleRepositoryNavigationIntent as RepositoryIntentSettler;
+  } finally {
+    await server.close();
+  }
+}
+
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  let reject!: (reason?: unknown) => void;
+  const promise = new Promise<T>((resolvePromise, rejectPromise) => {
+    resolve = resolvePromise;
+    reject = rejectPromise;
+  });
+  return { promise, reject, resolve };
+}
 
 test("maps every Nanocodex surface to a stable application route", () => {
   assert.deepEqual(
@@ -89,6 +125,119 @@ test("every primary route begins preloading on touch or pointer intent", () => {
   assert.match(application, /productNavigation\.map/);
   assert.match(application, /onPointerDown=\{\(\) => preloadSurface\(item\.surface\)\}/);
   assert.match(application, /onPointerDown=\{\(\) => preloadSurface\("home"\)\}/);
+});
+
+test("Source and Commits navigation prepares exact route state before navigating", () => {
+  const preparation = application.slice(
+    application.indexOf("function prepareRepositorySurface"),
+    application.indexOf("const scopes"),
+  );
+  assert.match(
+    preparation,
+    /nextSurface === "code"[\s\S]*?preparePierreWorker\(\)[\s\S]*?loadCodeBrowser\(\)[\s\S]*?loadRepositorySnapshot\(false\)/,
+  );
+  assert.match(
+    preparation,
+    /loadCommitCodeStream\(\)[\s\S]*?loadVirtualCommitList\(\)[\s\S]*?loadRepositorySnapshot\(true\)/,
+  );
+
+  const prefetch = application.slice(
+    application.indexOf("const preloadSurface"),
+    application.indexOf("const navigateToSurface"),
+  );
+  assert.match(
+    prefetch,
+    /nextSurface === "code" \|\| nextSurface === "commits"[\s\S]*?void prepareRepositorySurface\(nextSurface\)\.catch/,
+  );
+  assert.doesNotMatch(prefetch, /setSnapshot|navigate\(/);
+
+  const navigation = application.slice(
+    application.indexOf("const navigateToSurface"),
+    application.indexOf("const handleSurfaceClick"),
+  );
+  assert.match(
+    navigation,
+    /nextSurface === "code" \|\| nextSurface === "commits"[\s\S]*?settleRepositoryNavigationIntent\(\{[\s\S]*?preparation: prepareRepositorySurface\(nextSurface\)/,
+  );
+  assert.match(
+    navigation,
+    /latestNavigationId: \(\) => surfaceNavigationId\.current/,
+  );
+  assert.match(
+    navigation,
+    /onPrepared:[\s\S]*?flushSync\([\s\S]*?commitRepositorySnapshot\(preparedSnapshot\)[\s\S]*?navigate: \(\) => startTransition/,
+  );
+  assert.match(
+    navigation,
+    /onFailure:[\s\S]*?flushSync\([\s\S]*?setRepositoryLoadError\(nextSurface\)[\s\S]*?navigate: \(\) => startTransition/,
+  );
+  assert.match(
+    application,
+    /if \(!needsRepository \|\| repositoryLoadError === surface\) return;/,
+  );
+  assert.match(
+    application,
+    /repositoryRequestId\.current !== requestId[\s\S]*?startTransition\(\(\) => \{[\s\S]*?commitRepositorySnapshot\(loaded\)[\s\S]*?setRepositoryLoadError\(\(current\) => current === nextSurface \? null : current\)/,
+  );
+  assert.match(
+    application,
+    /surface === "code" \? repositoryLoadError === "code" \?[\s\S]*?surface === "commits" \? repositoryLoadError === "commits" \?/,
+  );
+});
+
+test("deferred repository navigation is owned by the latest intent", async () => {
+  const settle = await loadRepositoryIntentSettler();
+  const source = deferred<string>();
+  const commits = deferred<string>();
+  const transitions: string[] = [];
+  let latestNavigationId = 1;
+
+  const staleSource = settle({
+    navigationId: 1,
+    latestNavigationId: () => latestNavigationId,
+    preparation: source.promise,
+    onPrepared: (snapshot) => transitions.push(`commit:${snapshot}`),
+    onFailure: () => transitions.push("failure:source"),
+    navigate: () => transitions.push("navigate:source"),
+  });
+  await Promise.resolve();
+  assert.deepEqual(transitions, []);
+
+  latestNavigationId = 2;
+  const currentCommits = settle({
+    navigationId: 2,
+    latestNavigationId: () => latestNavigationId,
+    preparation: commits.promise,
+    onPrepared: (snapshot) => transitions.push(`commit:${snapshot}`),
+    onFailure: () => transitions.push("failure:commits"),
+    navigate: () => transitions.push("navigate:commits"),
+  });
+  commits.resolve("history");
+  assert.equal(await currentCommits, "ready");
+  assert.deepEqual(transitions, ["commit:history", "navigate:commits"]);
+
+  source.resolve("snapshot");
+  assert.equal(await staleSource, "stale");
+  assert.deepEqual(transitions, ["commit:history", "navigate:commits"]);
+
+  const failed = deferred<string>();
+  latestNavigationId = 3;
+  const currentFailure = settle({
+    navigationId: 3,
+    latestNavigationId: () => latestNavigationId,
+    preparation: failed.promise,
+    onPrepared: (snapshot) => transitions.push(`commit:${snapshot}`),
+    onFailure: () => transitions.push("failure:repository"),
+    navigate: () => transitions.push("navigate:error"),
+  });
+  failed.reject(new Error("repository unavailable"));
+  assert.equal(await currentFailure, "failed");
+  assert.deepEqual(transitions, [
+    "commit:history",
+    "navigate:commits",
+    "failure:repository",
+    "navigate:error",
+  ]);
 });
 
 test("a direct visit waits for its complete route preload before mounting the shell", () => {
