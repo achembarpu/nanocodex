@@ -47,7 +47,7 @@ function preloadDirectSurface(url: URL): Promise<PreparedDirectRoute> {
         module.preloadPierreWorker()
       ),
       import("./publishedRepository").then(async (module) => {
-        const snapshot = await module.preloadPublishedRepositorySnapshot(false);
+        const snapshot = await module.preloadPublishedRepositorySnapshot();
         await module.preloadPreferredPublishedFile(snapshot);
         return snapshot;
       }),
@@ -72,11 +72,17 @@ function preloadDirectSurface(url: URL): Promise<PreparedDirectRoute> {
       ),
       import("./VirtualCommitList"),
       import("./publishedRepository").then(async (module) => {
-        const snapshot = await module.preloadPublishedRepositorySnapshot(true);
-        await module.preloadPublishedRepositoryPatch(snapshot.commitPatchUrl);
-        return snapshot;
+        const requestedHash = url.searchParams.get("commit")?.toLowerCase();
+        const history = await module.loadPublishedCommitHistory(
+          requestedHash && /^[a-f0-9]{40}$/.test(requestedHash)
+            ? requestedHash
+            : undefined,
+        );
+        void module.preloadPublishedRepositoryPatch(history.initialPage.patchUrl)
+          ?.catch(() => undefined);
+        return history;
       }),
-    ]).then(([, , , repositorySnapshot]) => ({ repositorySnapshot }));
+    ]).then(([, , , commitHistory]) => ({ commitHistory }));
   }
   if (surface === "requests") return Promise.resolve({});
   surface satisfies "evals";

@@ -48,6 +48,35 @@ test("generation-pinned commit pages bypass mutable publication state", async ()
   assert.equal(response?.headers.get("cache-control"), "public, max-age=31536000, immutable");
 });
 
+test("generation-pinned commit patch pages bypass mutable publication state", async () => {
+  let requestedKey = "";
+  const bucket = {
+    get: async (key: string) => {
+      requestedKey = key;
+      return {
+        body: new Response(`From ${head} Mon Sep 17 00:00:00 2001\n`).body,
+        httpEtag: '"patch-page"',
+        writeHttpMetadata: () => {},
+      };
+    },
+  } as unknown as R2Bucket;
+  const request = new Request(
+    `https://nanocodex.example/api/repository/commits/${head}/0002.diff`,
+  );
+
+  const response = await handleGitRequest(
+    request,
+    { GIT_OBJECTS: bucket },
+    new URL(request.url),
+  );
+
+  assert.equal(response?.status, 200);
+  assert.equal(requestedKey, `generations/${head}/commit-patches/0002.diff`);
+  assert.equal(response?.headers.get("x-repository-generation"), head);
+  assert.equal(response?.headers.get("cache-control"), "public, max-age=31536000, immutable");
+  assert.equal(response?.headers.get("content-type"), "text/x-diff; charset=utf-8");
+});
+
 test("generation-pinned aggregate commit patches stream immutable R2 bodies without mutable state", async () => {
   const firstPart = new Uint8Array(16 * 1024 * 1024);
   const finalPart = new TextEncoder().encode(
@@ -301,7 +330,88 @@ test("repository publication forwards an explicit invalid-state replacement", as
   });
 });
 
-test("repository publication requires the aggregate commit patch before cutover", async () => {
+test("repository publication gates commit indexes and every metadata page before cutover", async () => {
+  const shardKey = `generations/${head}/objects/0000.pack`;
+  const generationPrefix = `generations/${head}`;
+  const publication = {
+    version: 1 as const,
+    head,
+    branch: "master",
+    refs: [{ name: "refs/heads/master", oid: head }],
+    snapshotKey: `${generationPrefix}/repository.json`,
+    commitsKey: `${generationPrefix}/commits.json`,
+    commitPatchParts: [0, 1].map((page) => ({
+      key: `${generationPrefix}/commit-patches/${String(page).padStart(4, "0")}.diff`,
+      size: 1,
+    })),
+    commitPatchSize: 2,
+    inventoryKey: `${generationPrefix}/inventory.json`,
+    packParts: [{ key: `${generationPrefix}/packs/${packHash}/0000.pack`, size: 1 }],
+    packSize: 1,
+    objectManifestKey: `${generationPrefix}/objects.json`,
+    packHash,
+    publishedAt: "2026-08-18T00:00:00.000Z",
+  };
+  const objectManifest = {
+    version: 1,
+    head,
+    shards: [{ key: shardKey, size: 1 }],
+    objects: { [head]: [1, 0, 0, 1, []] },
+  };
+  const missingKeys = [
+    `${generationPrefix}/commit-index.json`,
+    `${generationPrefix}/commits/0001.json`,
+  ];
+
+  for (const missingKey of missingKeys) {
+    let forwarded = false;
+    const namespace = {
+      idFromName: () => ({}) as DurableObjectId,
+      get: () => ({
+        fetch: async () => {
+          forwarded = true;
+          return Response.json(publication);
+        },
+      }),
+    } as unknown as DurableObjectNamespace;
+    const bucket = {
+      get: async (key: string) => ({
+        json: async () => key.endsWith("commit-patches.json")
+          ? commitPatchManifest(publication)
+          : objectManifest,
+      }),
+      head: async (key: string) =>
+        key === missingKey ? null : { httpEtag: '"present"', size: 1 },
+    } as unknown as R2Bucket;
+    const request = new Request("https://nanocodex.example/api/git/publish", {
+      method: "PUT",
+      headers: {
+        authorization: "Bearer mirror-token",
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ expectedHead: null, publication }),
+    });
+
+    const response = await handleGitRequest(
+      request,
+      {
+        GIT_OBJECTS: bucket,
+        GIT_REPOSITORY: namespace,
+        GIT_MIRROR_TOKEN: "mirror-token",
+      },
+      new URL(request.url),
+    );
+
+    assert.equal(response?.status, 409, missingKey);
+    assert.equal(forwarded, false, missingKey);
+    assert.deepEqual(await response?.json(), {
+      error: "publication_objects_missing",
+      missing: [missingKey],
+    });
+  }
+});
+
+test("repository publication requires every commit patch page before cutover", async () => {
   const shardKey = `generations/${head}/objects/0000.pack`;
   const publication = {
     version: 1 as const,

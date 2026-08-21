@@ -1,4 +1,4 @@
-import { COMMIT_HASH_METADATA_PATTERN } from "./commitPatchMetadata";
+import { COMMIT_HASH_METADATA_PATTERN } from "./commitPatchMetadata.ts";
 
 const GIT_FILE_BOUNDARY = "diff --git ";
 const GIT_FILE_BOUNDARY_WITH_NEWLINE = `\n${GIT_FILE_BOUNDARY}`;

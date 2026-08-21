@@ -144,12 +144,12 @@ export function isRepositoryPublication(
   }
   const prefix = `generations/${publication.head}/`;
   if (
-    !areCanonicalParts(
+    !areCanonicalPatchPages(
       publication.commitPatchParts,
       publication.commitPatchSize,
       (index) => `${prefix}commit-patches/${String(index).padStart(4, "0")}.diff`,
     ) ||
-    !areCanonicalParts(
+    !areCanonicalByteParts(
       publication.packParts,
       publication.packSize,
       (index) =>
@@ -172,7 +172,7 @@ export function isCommitPatchManifest(
   const manifest = value as Partial<RepositoryPartsManifest>;
   return manifest.version === 1 &&
     manifest.head === expectedHead &&
-    areCanonicalParts(
+    areCanonicalPatchPages(
       manifest.parts,
       manifest.size,
       (index) =>
@@ -180,10 +180,27 @@ export function isCommitPatchManifest(
     );
 }
 
+function areCanonicalPatchPages(
+  value: unknown,
+  totalSize: unknown,
+  keyAt: (index: number) => string,
+): value is RepositoryPart[] {
+  return areCanonicalParts(value, totalSize, keyAt, false);
+}
+
+function areCanonicalByteParts(
+  value: unknown,
+  totalSize: unknown,
+  keyAt: (index: number) => string,
+): value is RepositoryPart[] {
+  return areCanonicalParts(value, totalSize, keyAt, true);
+}
+
 function areCanonicalParts(
   value: unknown,
   totalSize: unknown,
   keyAt: (index: number) => string,
+  requireFullIntermediateParts: boolean,
 ): value is RepositoryPart[] {
   if (
     !Array.isArray(value) ||
@@ -203,7 +220,9 @@ function areCanonicalParts(
       !Number.isSafeInteger(part.size) ||
       part.size <= 0 ||
       part.size > REPOSITORY_PART_BYTES ||
-      (index < value.length - 1 && part.size !== REPOSITORY_PART_BYTES)
+      (requireFullIntermediateParts &&
+        index < value.length - 1 &&
+        part.size !== REPOSITORY_PART_BYTES)
     ) {
       return false;
     }

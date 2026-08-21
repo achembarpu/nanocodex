@@ -39,6 +39,22 @@ test("publication validation pins every mutable view to one generation", () => {
       },
     ],
     commitPatchSize: 2,
+  }), true);
+  assert.equal(isRepositoryPublication({
+    ...publication(firstHash),
+    commitPatchParts: [
+      { key: `generations/${firstHash}/commit-patches/0000.diff`, size: 1 },
+      { key: `generations/${firstHash}/commit-patches/0002.diff`, size: 1 },
+    ],
+    commitPatchSize: 2,
+  }), false);
+  assert.equal(isRepositoryPublication({
+    ...publication(firstHash),
+    commitPatchParts: [{
+      key: `generations/${firstHash}/commit-patches/0000.diff`,
+      size: REPOSITORY_PART_BYTES + 1,
+    }],
+    commitPatchSize: REPOSITORY_PART_BYTES + 1,
   }), false);
   const current = publication(firstHash);
   const { packParts: _packParts, packSize: _packSize, ...legacy } = current;
@@ -96,6 +112,14 @@ test("commit patch manifests are immutable generation maps", () => {
     ...manifest,
     parts: [{ key: `generations/${secondHash}/commit-patches/0000.diff`, size: 1 }],
   }, firstHash), false);
+  assert.equal(isCommitPatchManifest({
+    ...manifest,
+    parts: [
+      { key: `generations/${firstHash}/commit-patches/0000.diff`, size: 1 },
+      { key: `generations/${firstHash}/commit-patches/0001.diff`, size: 2 },
+    ],
+    size: 3,
+  }, firstHash), true);
 });
 
 test("publication uses compare-and-swap so stale mirrors cannot win", async () => {

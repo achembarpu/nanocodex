@@ -99,6 +99,20 @@ export function repositoryDevServer(): Plugin {
             sendJson(response, snapshot);
             return;
           }
+          if (url.pathname === `${endpointPrefix}/commit-index`) {
+            const [snapshot, commits] = await Promise.all([
+              buildRepositorySnapshot(),
+              getCommitMetadata(),
+            ]);
+            sendJson(response, {
+              version: 1,
+              repository: snapshot.repository,
+              generatedAt: snapshot.generatedAt,
+              hashes: commits.map(({ hash }) => hash),
+              scopeCounts: buildCommitScopeCounts(commits),
+            });
+            return;
+          }
           if (url.pathname === `${endpointPrefix}/commits`) {
             const commits = await getCommitMetadata();
             const rawPage = url.searchParams.get("page");
@@ -247,6 +261,19 @@ function combineCommitLogs(numstatLog: string, statusLog: string) {
       },
     };
   });
+}
+
+function buildCommitScopeCounts(
+  commits: Array<{ subject: string }>,
+): Record<"all" | "eval" | "fix" | "docs" | "perf", number> {
+  const counts = { all: commits.length, eval: 0, fix: 0, docs: 0, perf: 0 };
+  for (const { subject } of commits) {
+    const scope = subject.match(/^([a-z]+)(?:\([^)]*\))?:/i)?.[1]?.toLowerCase();
+    if (scope === "eval" || scope === "fix" || scope === "docs" || scope === "perf") {
+      counts[scope]++;
+    }
+  }
+  return counts;
 }
 
 function parseLogRecords(output: string): LogRecord[] {

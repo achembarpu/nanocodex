@@ -12,6 +12,14 @@ const budgets = Object.freeze({
   // Includes compact Code/Commits controls for portrait and phone landscape.
   initialCss: 60_500,
   initialCssGzip: 12_000,
+  // Direct signed-out routes include the document, their complete static JS/CSS
+  // closure, and only the route-owned repository data requests.
+  sourceRouteRequests: 26,
+  sourceRouteJavaScriptGzip: 335_000,
+  sourceRouteCssGzip: 12_200,
+  commitsRouteRequests: 25,
+  commitsRouteJavaScriptGzip: 292_000,
+  commitsRouteCssGzip: 12_000,
   agentJavaScript: 830_000,
   // OPFS, artifacts, durability, typed voice lifecycle routing, subscription auth, and paid MCP stay in the Worker.
   // The app-local ANSI terminal bridge stays in a lazy chunk loaded only after
@@ -78,6 +86,19 @@ const applicationStatic = importClosure(applicationKey, false);
 const homeFrameStatic = importClosure(homeFrameKey, false);
 const experienceStatic = importClosure(experienceKey, false);
 const agentStatic = importClosure(agentKey, false);
+const sourceRoute = await directRouteStats([
+  "index.html",
+  "src/NanocodexApp.tsx",
+  "src/CodeBrowser.tsx",
+  "src/publishedRepository.ts",
+], 2);
+const commitsRoute = await directRouteStats([
+  "index.html",
+  "src/NanocodexApp.tsx",
+  "src/CommitCodeStream.tsx",
+  "src/VirtualCommitList.tsx",
+  "src/publishedRepository.ts",
+], 3);
 const signedOutStatic = new Set([
   ...initialStatic,
   ...applicationStatic,
@@ -141,6 +162,36 @@ within(
 withinCount("initial CSS files", initialCss.fileCount, budgets.initialCssFiles);
 within("initial CSS", initialCss.bytes, budgets.initialCss);
 within("initial CSS gzip", initialCss.gzipBytes, budgets.initialCssGzip);
+withinCount(
+  "signed-out Source route requests",
+  sourceRoute.requestCount,
+  budgets.sourceRouteRequests,
+);
+within(
+  "signed-out Source route JavaScript gzip",
+  sourceRoute.javascript.gzipBytes,
+  budgets.sourceRouteJavaScriptGzip,
+);
+within(
+  "signed-out Source route CSS gzip",
+  sourceRoute.css.gzipBytes,
+  budgets.sourceRouteCssGzip,
+);
+withinCount(
+  "signed-out Commits route requests",
+  commitsRoute.requestCount,
+  budgets.commitsRouteRequests,
+);
+within(
+  "signed-out Commits route JavaScript gzip",
+  commitsRoute.javascript.gzipBytes,
+  budgets.commitsRouteJavaScriptGzip,
+);
+within(
+  "signed-out Commits route CSS gzip",
+  commitsRoute.css.gzipBytes,
+  budgets.commitsRouteCssGzip,
+);
 within("Agent JavaScript", agentJavaScript.bytes, budgets.agentJavaScript);
 
 const html = await readFile(join(clientDirectory, "index.html"), "utf8");
@@ -414,6 +465,10 @@ console.log(JSON.stringify({
     javascriptGzipBytes: signedOutJavaScript.gzipBytes,
     staticChunks: [...signedOutStatic],
   },
+  signedOutRoutes: {
+    source: routeReport(sourceRoute),
+    commits: routeReport(commitsRoute),
+  },
   agent: {
     javascriptBytes: agentJavaScript.bytes,
     workerFiles: worker.fileCount,
@@ -474,6 +529,36 @@ function cssClosure(keys) {
     for (const file of manifest[key]?.css ?? []) files.add(file);
   }
   return [...files];
+}
+
+async function directRouteStats(rootSuffixes, dataRequests) {
+  const staticChunks = new Set();
+  for (const suffix of rootSuffixes) {
+    for (const key of importClosure(manifestKey(suffix), false)) {
+      staticChunks.add(key);
+    }
+  }
+  const javascript = await closureStats(staticChunks, "file");
+  const css = await fileStats(cssClosure(staticChunks));
+  return {
+    css,
+    dataRequests,
+    javascript,
+    requestCount: 1 + javascript.fileCount + css.fileCount + dataRequests,
+    staticChunks,
+  };
+}
+
+function routeReport(route) {
+  return {
+    requests: route.requestCount,
+    dataRequests: route.dataRequests,
+    javascriptFiles: route.javascript.fileCount,
+    javascriptGzipBytes: route.javascript.gzipBytes,
+    cssFiles: route.css.fileCount,
+    cssGzipBytes: route.css.gzipBytes,
+    staticChunks: [...route.staticChunks],
+  };
 }
 
 async function closureStats(keys, field) {

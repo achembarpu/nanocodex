@@ -56,20 +56,57 @@ async function main() {
       },
     });
 
-    const commitPatchPath = resolve(dataDirectory, "commits.diff");
-    const [snapshot, commits, blobNames, patchNames, commitPageNames, commitPatchFile] = await Promise.all([
+    const [
+      snapshot,
+      commits,
+      commitIndex,
+      blobNames,
+      patchNames,
+      commitPageNames,
+      commitPatchPageNames,
+    ] = await Promise.all([
       readJson(resolve(dataDirectory, "repository.json")),
       readJson(resolve(dataDirectory, "commits.json")),
+      readJson(resolve(dataDirectory, "commit-index.json")),
       listObjectNames(resolve(dataDirectory, "blobs"), ".txt"),
       listObjectNames(resolve(dataDirectory, "patches"), ".patch"),
       listObjectNames(resolve(dataDirectory, "commit-pages"), ".json"),
-      stat(commitPatchPath),
+      listObjectNames(resolve(dataDirectory, "commit-patch-pages"), ".diff"),
     ]);
-    const commitPatchParts = buildCommitPatchParts(head, commitPatchFile.size);
+    const commitPatchParts = buildCommitPatchParts(
+      head,
+      await Promise.all(commitPatchPageNames.map(async (name) => {
+        const path = resolve(dataDirectory, "commit-patch-pages", `${name}.diff`);
+        return { name, path, size: (await stat(path)).size };
+      })),
+    );
+    const commitPatchSize = commitPatchParts.reduce(
+      (total, part) => total + part.size,
+      0,
+    );
     const refs = [{ name: `refs/heads/${publicationBranch}`, oid: head }];
+    const publishedPageSize = snapshot.repository?.commitPageSize;
+    if (!Number.isSafeInteger(publishedPageSize) || publishedPageSize <= 0) {
+      throw new Error("published commit page size is invalid");
+    }
+    const expectedCommitPageNames = Array.from(
+      {
+        length: Math.ceil(
+          commits.length / publishedPageSize,
+        ),
+      },
+      (_, page) => String(page).padStart(4, "0"),
+    );
     if (
       snapshot.repository?.head !== head ||
-      snapshot.repository?.branch !== publicationBranch
+      snapshot.repository?.branch !== publicationBranch ||
+      snapshot.repository?.indexedCommits !== commits.length ||
+      commitIndex.repository?.head !== head ||
+      commitIndex.repository?.commitPageSize !== publishedPageSize ||
+      JSON.stringify(commitIndex.hashes) !==
+        JSON.stringify(commits.map(({ hash }) => hash)) ||
+      JSON.stringify(commitPageNames) !== JSON.stringify(expectedCommitPageNames) ||
+      JSON.stringify(commitPatchPageNames) !== JSON.stringify(expectedCommitPageNames)
     ) {
       throw new Error("repository changed while its publication was being built");
     }
@@ -114,7 +151,7 @@ async function main() {
       version: 1,
       head,
       parts: commitPatchParts.map(({ key, size }) => ({ key, size })),
-      size: commitPatchFile.size,
+      size: commitPatchSize,
     };
     await Promise.all([
       writeFile(inventoryPath, `${JSON.stringify(inventory)}\n`),
@@ -123,9 +160,10 @@ async function main() {
     await Promise.all([
       uploadFile(origin, token, `${generationPrefix}/repository.json`, resolve(dataDirectory, "repository.json")),
       uploadFile(origin, token, `${generationPrefix}/commits.json`, resolve(dataDirectory, "commits.json")),
+      uploadFile(origin, token, `${generationPrefix}/commit-index.json`, resolve(dataDirectory, "commit-index.json")),
       uploadFile(origin, token, `${generationPrefix}/commit-patches.json`, commitPatchManifestPath),
       mapConcurrent(commitPatchParts, 2, (part) =>
-        uploadFile(origin, token, part.key, commitPatchPath, part)
+        uploadFile(origin, token, part.key, part.path)
       ),
       uploadFile(origin, token, `${generationPrefix}/inventory.json`, inventoryPath),
       uploadFile(origin, token, `${generationPrefix}/objects.json`, gitArtifacts.manifestPath),
@@ -150,7 +188,7 @@ async function main() {
       snapshotKey: `${generationPrefix}/repository.json`,
       commitsKey: `${generationPrefix}/commits.json`,
       commitPatchParts: commitPatchParts.map(({ key, size }) => ({ key, size })),
-      commitPatchSize: commitPatchFile.size,
+      commitPatchSize,
       inventoryKey: `${generationPrefix}/inventory.json`,
       packParts: gitArtifacts.packParts.map(({ key, size }) => ({ key, size })),
       packSize: gitArtifacts.packSize,
@@ -316,14 +354,28 @@ export function buildRepositoryPackParts(head, packHash, packSize) {
   );
 }
 
-export function buildCommitPatchParts(head, patchSize) {
+export function buildCommitPatchParts(head, pages) {
   if (!/^[a-f0-9]{40}$/.test(head)) throw new Error("commit patch head is invalid");
-  return buildBoundedParts(
-    patchSize,
-    (index) =>
-      `generations/${head}/commit-patches/${String(index).padStart(4, "0")}.diff`,
-    "commit patch",
-  );
+  if (!Array.isArray(pages) || pages.length === 0 || pages.length > 256) {
+    throw new Error("commit patch page count is invalid");
+  }
+  return pages.map((page, index) => {
+    const name = String(index).padStart(4, "0");
+    if (
+      page?.name !== name ||
+      typeof page.path !== "string" ||
+      !Number.isSafeInteger(page.size) ||
+      page.size <= 0 ||
+      page.size > repositoryPackPartBytes
+    ) {
+      throw new Error(`commit patch page ${name} is invalid`);
+    }
+    return {
+      key: `generations/${head}/commit-patches/${name}.diff`,
+      path: page.path,
+      size: page.size,
+    };
+  });
 }
 
 function buildBoundedParts(totalSize, keyAt, description) {

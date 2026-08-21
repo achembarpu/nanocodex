@@ -74,6 +74,19 @@ test("the publisher CLI initializes its module before building a generation", as
     await writeFile(resolve(repository, "README.md"), "# publisher fixture\n\nsecond commit\n");
     await git(["add", "README.md"], repository);
     await git(["commit", "-qm", "second fixture"], repository);
+    for (let index = 2; index < 33; index++) {
+      await writeFile(
+        resolve(repository, "README.md"),
+        `# publisher fixture\n\ncommit ${index}\n`,
+      );
+      await git(["add", "README.md"], repository);
+      const subject = index === 2
+        ? "perf(web): page commit patches"
+        : index === 3
+        ? "fix(worker): gate publications"
+        : `chore: fixture ${index}`;
+      await git(["commit", "-qm", subject], repository);
+    }
     const head = await git(["rev-parse", "HEAD"], repository);
     await git(["branch", "private-preview"], repository);
     await git(["tag", "v0-test"], repository);
@@ -111,7 +124,7 @@ test("the publisher CLI initializes its module before building a generation", as
     assert.deepEqual(publication.publication.refs, [
       { name: "refs/heads/master", oid: head },
     ]);
-    assert.ok(publication.publication.commitPatchParts.length > 0);
+    assert.equal(publication.publication.commitPatchParts.length, 2);
     assert.equal(
       publication.publication.commitPatchParts.reduce(
         (total, part) => total + part.size,
@@ -155,11 +168,19 @@ test("the publisher CLI initializes its module before building a generation", as
     const commitsUpload = requests.find(({ url }) =>
       url === `/api/git/objects/generations/${head}/commits.json`
     );
+    const commitIndexUpload = requests.find(({ url }) =>
+      url === `/api/git/objects/generations/${head}/commit-index.json`
+    );
     const commitPatchBody = publication.publication.commitPatchParts
       .map(({ key }) => requests.find(({ url }) => url === `/api/git/objects/${key}`)?.body)
       .join("");
     assert.equal(JSON.parse(snapshotUpload.body).repository.branch, "master");
     const publishedCommits = JSON.parse(commitsUpload.body);
+    const publishedCommitIndex = JSON.parse(commitIndexUpload.body);
+    assert.equal(publishedCommitIndex.hashes.length, 33);
+    assert.equal(publishedCommitIndex.scopeCounts.all, 33);
+    assert.equal(publishedCommitIndex.scopeCounts.perf, 1);
+    assert.equal(publishedCommitIndex.scopeCounts.fix, 1);
     assert.deepEqual(publishedCommits[0].refs, ["HEAD -> master"]);
     assert.deepEqual(
       [...commitPatchBody.matchAll(/^From ([a-f0-9]{40}) Mon Sep 17 00:00:00 2001$/gm)]
@@ -168,6 +189,9 @@ test("the publisher CLI initializes its module before building a generation", as
     );
     assert.ok(requests.some(({ url }) =>
       url === `/api/git/objects/generations/${head}/commits/0000.json`
+    ));
+    assert.ok(requests.some(({ url }) =>
+      url === `/api/git/objects/generations/${head}/commits/0001.json`
     ));
     assert.equal(requests.some(({ url }) =>
       url === `/api/git/objects/generations/${head}/commits/0000`
@@ -230,29 +254,43 @@ test("repository packs are divided into canonical bounded upload parts", () => {
   ]);
 });
 
-test("aggregate commit patches are divided into canonical bounded upload parts", () => {
+test("commit-aligned patch pages retain contiguous bounded descriptors", () => {
   const head = "a".repeat(40);
   const partBytes = 16 * 1024 * 1024;
-  const patchSize = 37_248_679;
-  const parts = buildCommitPatchParts(head, patchSize);
+  const pages = [
+    { name: "0000", path: "/tmp/0000.diff", size: 476_879 },
+    { name: "0001", path: "/tmp/0001.diff", size: 2_105_727 },
+  ];
+  const parts = buildCommitPatchParts(head, pages);
 
   assert.deepEqual(parts, [
     {
       key: `generations/${head}/commit-patches/0000.diff`,
-      offset: 0,
-      size: partBytes,
+      path: "/tmp/0000.diff",
+      size: 476_879,
     },
     {
       key: `generations/${head}/commit-patches/0001.diff`,
-      offset: partBytes,
-      size: partBytes,
-    },
-    {
-      key: `generations/${head}/commit-patches/0002.diff`,
-      offset: partBytes * 2,
-      size: patchSize - (partBytes * 2),
+      path: "/tmp/0001.diff",
+      size: 2_105_727,
     },
   ]);
+  assert.throws(
+    () => buildCommitPatchParts(head, [pages[0], { ...pages[1], name: "0002" }]),
+    /page 0001 is invalid/,
+  );
+  assert.throws(
+    () => buildCommitPatchParts(head, [{ ...pages[0], size: partBytes + 1 }]),
+    /page 0000 is invalid/,
+  );
+  assert.throws(
+    () => buildCommitPatchParts(head, Array.from({ length: 257 }, (_, index) => ({
+      name: String(index).padStart(4, "0"),
+      path: `/tmp/${index}.diff`,
+      size: 1,
+    }))),
+    /page count is invalid/,
+  );
 });
 
 test("repository uploads retry bounded transient responses and transport failures", () => {

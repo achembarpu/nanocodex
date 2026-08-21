@@ -4,6 +4,10 @@ import test from "node:test";
 
 const loaderUrl = new URL("../src/useCommitStreamLoader.ts", import.meta.url);
 const streamUrl = new URL("../src/CommitCodeStream.tsx", import.meta.url);
+const virtualCommitListUrl = new URL(
+  "../src/VirtualCommitList.tsx",
+  import.meta.url,
+);
 const commitsCssUrl = new URL("../src/Commits.css", import.meta.url);
 const publishedRepositoryUrl = new URL(
   "../src/publishedRepository.ts",
@@ -18,10 +22,10 @@ test("stream batches retry pending commit jumps after publication", async () => 
   ]);
 
   assert.match(loader, /onItemsPublished\?\.\(\)/);
-  assert.equal(loader.match(/onItemsPublished\?\.\(\)/g)?.length, 2);
+  assert.equal(loader.match(/onItemsPublished\?\.\(\)/g)?.length, 1);
   assert.match(
     loader,
-    /viewer\.addItems\(pendingItems\)[\s\S]*await yieldToBrowser\(\);[\s\S]*onItemsPublished\?\.\(\)/,
+    /viewer\.addItems\(pendingItems\)[\s\S]*await yieldToBrowser\(\);[\s\S]*publishItems\(\)/,
   );
   assert.match(
     stream,
@@ -29,7 +33,7 @@ test("stream batches retry pending commit jumps after publication", async () => 
   );
   assert.match(
     stream,
-    /tryApplyPendingCommitJump\([\s\S]*pendingJumpRef,[\s\S]*viewerRef\.current,[\s\S]*commits/,
+    /tryApplyPendingCommitJump\([\s\S]*pendingJumpRef,[\s\S]*viewerRef\.current/,
   );
 });
 
@@ -47,30 +51,49 @@ test("retry retains published items and renders a tail error", async () => {
   );
   assert.match(stream, /errorMode === "tail"/);
   assert.match(stream, /className="commit-stream-tail-error" role="alert"/);
-  assert.match(stream, /onClick=\{retryLoad\}/);
+  assert.match(stream, /errorMode === "tail" \|\| windowError/);
+  assert.match(stream, /retryLoad\(\)/);
 });
 
-test("production Commit streaming retains one aggregate request", async () => {
-  const [loader, publishedRepository] = await Promise.all([
+test("production Commit streaming retains one bounded page request at a time", async () => {
+  const [loader, stream, publishedRepository] = await Promise.all([
     readFile(loaderUrl, "utf8"),
+    readFile(streamUrl, "utf8"),
     readFile(publishedRepositoryUrl, "utf8"),
   ]);
 
-  assert.match(loader, /if \(typeof patchUrl === "string"\) \{/);
+  assert.match(loader, /if \(typeof page\.patchUrl === "string"\) \{/);
   assert.match(
     loader,
-    /fetchPublishedRepositoryPatch\([\s\S]*patchUrl,[\s\S]*controller\.signal/,
+    /fetchPublishedRepositoryPatch\([\s\S]*page\.patchUrl,[\s\S]*controller\.signal/,
   );
+  assert.match(loader, /MAX_PATCH_SHARD_BYTES = 16 \* 1024 \* 1024/);
+  assert.match(loader, /nextPageRequested[\s\S]*history\.loadPage\(nextPageIndex\)/);
   assert.match(
     publishedRepository,
     /return fetch\(patchUrl, \{ cache: "default", signal \}\)/,
   );
   assert.doesNotMatch(
     loader.slice(
-      loader.indexOf('if (typeof patchUrl === "string")'),
-      loader.indexOf("} else {", loader.indexOf('if (typeof patchUrl === "string")')),
+      loader.indexOf('if (typeof page.patchUrl === "string")'),
+      loader.indexOf("} else {", loader.indexOf('if (typeof page.patchUrl === "string")')),
     ),
     /streamCommitPatches|patchUrl\(commit\)/,
+  );
+  assert.doesNotMatch(publishedRepository, /commits\/\$\{index\.repository\.head\}\.diff/);
+  assert.match(
+    stream,
+    /windowRequestIdRef\.current !== requestId\) return;[\s\S]*preloadPublishedRepositoryPatch\(page\.patchUrl\)/,
+  );
+});
+
+test("a deep-link metadata window fills toward page zero even without a scrollbar", async () => {
+  const virtualCommitList = await readFile(virtualCommitListUrl, "utf8");
+
+  assert.match(virtualCommitList, /window\.requestAnimationFrame/);
+  assert.match(
+    virtualCommitList,
+    /list\.scrollHeight > list\.clientHeight \+ 240[\s\S]*onLoadMore\(\)/,
   );
 });
 
@@ -81,7 +104,7 @@ test("the first Commit diff is isolated before background ingestion", async () =
   ]);
 
   assert.match(pierre, /COMMIT_INITIAL_BATCH_COUNT = 1/);
-  assert.match(loader, /initialPublishFileBatchSize = COMMIT_INITIAL_BATCH_COUNT/);
+  assert.match(loader, /publishFileBatchSize = hasPublishedInitialItems[\s\S]*COMMIT_INITIAL_BATCH_COUNT/);
   assert.match(
     loader,
     /if \(isInitialPublish\) \{[\s\S]*await waitForViewer\(viewerRef, controller\.signal\)/,

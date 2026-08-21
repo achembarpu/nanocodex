@@ -38,7 +38,11 @@ import {
   type Surface,
 } from "./navigation";
 import { COMPACT_WORKSPACE_QUERY } from "./pierreCodeView";
-import type { PublishedRepositorySnapshot } from "./publishedRepository";
+import type {
+  PublishedCommitHistory,
+  PublishedCommitPage,
+  PublishedRepositorySnapshot,
+} from "./publishedRepository";
 import type { HarnessCommit } from "./threadRepositorySnapshot";
 import { getBrowserThread } from "nanocodex/tools/browser";
 import { useDeploymentRollover } from "./useDeploymentRollover";
@@ -82,11 +86,16 @@ const VirtualCommitList = lazy(loadVirtualCommitList);
 export type Theme = "light" | "dark";
 type Scope = "all" | "eval" | "fix" | "docs" | "perf";
 const emptyCommits: HarnessCommit[] = [];
+const emptyCommitPages: PublishedCommitPage[] = [];
 const COMMIT_HASH_PATTERN = /^[0-9a-f]{40}$/;
 
 function commitHashFromSearch(search: string): string | undefined {
   const hash = new URLSearchParams(search).get("commit")?.toLowerCase();
   return hash && COMMIT_HASH_PATTERN.test(hash) ? hash : undefined;
+}
+
+function commitHashFromDestination(destination: string): string | undefined {
+  return commitHashFromSearch(new URL(destination, "https://nanocodex.invalid").search);
 }
 
 const MODAL_FOCUSABLE_SELECTOR = [
@@ -165,39 +174,29 @@ function preloadEvalOverview() {
 }
 
 let repositorySnapshotRequest: Promise<PublishedRepositorySnapshot> | undefined;
-let repositoryHistoryRequest: Promise<PublishedRepositorySnapshot> | undefined;
 
-function loadRepositorySnapshot(
-  includeHistory: boolean,
-): Promise<PublishedRepositorySnapshot> {
-  if (includeHistory && repositoryHistoryRequest) return repositoryHistoryRequest;
-  if (!includeHistory && repositoryHistoryRequest) return repositoryHistoryRequest;
-  if (!includeHistory && repositorySnapshotRequest) return repositorySnapshotRequest;
+function loadRepositorySnapshot(): Promise<PublishedRepositorySnapshot> {
+  if (repositorySnapshotRequest) return repositorySnapshotRequest;
 
   const request = import("./publishedRepository")
-    .then((module) => module.loadPublishedRepositorySnapshot(includeHistory))
+    .then((module) => module.loadPublishedRepositorySnapshot())
     .then((loaded) => {
-      if (loaded.historyLoaded) repositorySnapshotRequest = Promise.resolve(loaded);
-      if (!includeHistory) {
-        const requestedPath = new URLSearchParams(window.location.search).get("path");
-        const preferredFile = loaded.tree.find((file) =>
-          file.path === requestedPath && file.contentUrl != null
-        ) ?? loaded.tree.find((file) =>
-          file.path === "src/main.rs" && file.contentUrl != null
-        ) ?? loaded.tree.find((file) =>
-          file.path === "README.md" && file.contentUrl != null
-        ) ?? loaded.tree.find((file) => file.contentUrl != null);
-        if (preferredFile) void loaded.readFile(preferredFile).catch(() => undefined);
-      }
+      const requestedPath = new URLSearchParams(window.location.search).get("path");
+      const preferredFile = loaded.tree.find((file) =>
+        file.path === requestedPath && file.contentUrl != null
+      ) ?? loaded.tree.find((file) =>
+        file.path === "src/main.rs" && file.contentUrl != null
+      ) ?? loaded.tree.find((file) =>
+        file.path === "README.md" && file.contentUrl != null
+      ) ?? loaded.tree.find((file) => file.contentUrl != null);
+      if (preferredFile) void loaded.readFile(preferredFile).catch(() => undefined);
       return loaded;
     })
     .catch((error) => {
-      if (includeHistory) repositoryHistoryRequest = undefined;
-      else repositorySnapshotRequest = undefined;
+      repositorySnapshotRequest = undefined;
       throw error;
     });
-  if (includeHistory) repositoryHistoryRequest = request;
-  else repositorySnapshotRequest = request;
+  repositorySnapshotRequest = request;
   return request;
 }
 
@@ -209,22 +208,29 @@ function preparePierreWorker() {
   });
 }
 
+type PreparedRepositorySurface =
+  | { surface: "code"; snapshot: PublishedRepositorySnapshot }
+  | { surface: "commits"; history: PublishedCommitHistory };
+
 function prepareRepositorySurface(
   nextSurface: RepositorySurface,
-): Promise<PublishedRepositorySnapshot> {
+  requestedCommit?: string,
+): Promise<PreparedRepositorySurface> {
   if (nextSurface === "code") {
     return Promise.all([
       preparePierreWorker(),
       loadCodeBrowser(),
-      loadRepositorySnapshot(false),
-    ]).then(([, , preparedSnapshot]) => preparedSnapshot);
+      loadRepositorySnapshot(),
+    ]).then(([, , snapshot]) => ({ surface: "code", snapshot }));
   }
   return Promise.all([
     preparePierreWorker(),
     loadCommitCodeStream(),
     loadVirtualCommitList(),
-    loadRepositorySnapshot(true),
-  ]).then(([, , , preparedSnapshot]) => preparedSnapshot);
+    import("./publishedRepository").then((module) =>
+      module.loadPublishedCommitHistory(requestedCommit)
+    ),
+  ]).then(([, , , history]) => ({ surface: "commits", history }));
 }
 
 type RepositoryNavigationIntent<T> = {
@@ -270,7 +276,7 @@ const scopes: Array<{ id: Scope; label: string }> = [
 ];
 
 function subjectScope(subject: string) {
-  const prefix = subject.split(":", 1)[0].toLowerCase();
+  const prefix = subject.match(/^([a-z]+)(?:\([^)]*\))?:/i)?.[1]?.toLowerCase();
   return scopes.some(({ id }) => id === prefix) ? (prefix as Scope) : "other";
 }
 
@@ -329,6 +335,7 @@ function RepositorySurfaceError({
 }
 
 export type PreparedDirectRoute = {
+  commitHistory?: PublishedCommitHistory;
   DocsComponent?: ComponentType;
   repositorySnapshot?: PublishedRepositorySnapshot;
 };
@@ -371,7 +378,16 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
   const [snapshot, setSnapshot] = useState<PublishedRepositorySnapshot | undefined>(
     preparedRoute.repositorySnapshot,
   );
+  const [commitHistory, setCommitHistory] = useState<PublishedCommitHistory | undefined>(
+    preparedRoute.commitHistory,
+  );
+  const [commitPages, setCommitPages] = useState<PublishedCommitPage[]>(() =>
+    preparedRoute.commitHistory
+      ? [preparedRoute.commitHistory.initialPage]
+      : emptyCommitPages
+  );
   const [repositoryLoadError, setRepositoryLoadError] = useState<RepositorySurface | null>(null);
+  const [commitMetadataError, setCommitMetadataError] = useState(false);
   const [scope, setScope] = useState<Scope>("all");
   const [query, setQuery] = useState("");
   const [searchOpen, setSearchOpen] = useState(false);
@@ -385,7 +401,6 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
     surface === "home" || surface === "agent",
   );
   const needsRepository = surface === "code" || surface === "commits";
-  const needsRepositoryHistory = surface === "commits";
   const searchInputRef = useRef<HTMLInputElement>(null);
   const searchDialogRef = useRef<HTMLElement>(null);
   const searchOpenerRef = useRef<HTMLElement | null>(null);
@@ -398,6 +413,8 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
   const commitStreamRef = useRef<CommitCodeStreamHandle>(null);
   const repositoryRequestId = useRef(0);
   const surfaceNavigationId = useRef(0);
+  const commitHistoryHeadRef = useRef(commitHistory?.repository.head);
+  commitHistoryHeadRef.current = commitHistory?.repository.head;
   const commitRailModalOpen = surface === "commits" && commitRailOpen;
   const commitSearchModalOpen = surface === "commits" && searchOpen;
   const commitModalOpen = commitRailModalOpen || commitSearchModalOpen;
@@ -422,7 +439,15 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
     }
   }, []);
 
-  const commits = snapshot?.commits ?? emptyCommits;
+  const commits = useMemo(
+    () => commitPages.length === 0
+      ? emptyCommits
+      : commitPages
+        .slice()
+        .sort((left, right) => left.index - right.index)
+        .flatMap((page) => page.commits),
+    [commitPages],
+  );
 
   const copyHeaderInstall = useCallback((command: string, target: InstallTarget) => {
     void navigator.clipboard.writeText(command).then(() => {
@@ -453,24 +478,13 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
   const requestedCommit = surface === "commits"
     ? commitHashFromSearch(location.search)
     : undefined;
-  const scopeCounts = useMemo(
-    () =>
-      commits.reduce<Record<Scope, number>>(
-        (counts, commit) => {
-          const commitScope = subjectScope(commit.subject);
-          if (commitScope !== "other") counts[commitScope] += 1;
-          return counts;
-        },
-        {
-          all: commits.length,
-          eval: 0,
-          fix: 0,
-          docs: 0,
-          perf: 0,
-        },
-      ),
-    [commits],
-  );
+  const scopeCounts = commitHistory?.scopeCounts ?? {
+    all: commits.length,
+    eval: 0,
+    fix: 0,
+    docs: 0,
+    perf: 0,
+  };
   const queryTokens = useMemo(
     () => query.trim().toLowerCase().split(/\s+/).filter(Boolean),
     [query],
@@ -513,24 +527,41 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
     [commits, queryTokens, searchOpen],
   );
 
-  const commitRepositorySnapshot = useCallback((loaded: PublishedRepositorySnapshot) => {
-    setSnapshot((current) =>
-      current?.historyLoaded && !loaded.historyLoaded ? current : loaded
-    );
-    setSelectedHash((current) =>
-      current && loaded.commits.some(({ hash }) => hash === current)
-        ? current
-        : loaded.repository.head
-    );
+  const commitPreparedRepository = useCallback((loaded: PreparedRepositorySurface) => {
+    if (loaded.surface === "code") {
+      setSnapshot(loaded.snapshot);
+      return;
+    }
+    commitHistoryHeadRef.current = loaded.history.repository.head;
+    setCommitHistory(loaded.history);
+    setCommitPages([loaded.history.initialPage]);
+    setCommitMetadataError(false);
+    setSelectedHash(loaded.history.initialCommitHash);
   }, []);
 
-  const requestRepository = useCallback((nextSurface: RepositorySurface) => {
+  const commitLoadedPage = useCallback((page: PublishedCommitPage) => {
+    if (page.generation !== commitHistoryHeadRef.current) return;
+    setCommitPages((current) => {
+      const existing = current.findIndex(({ index }) => index === page.index);
+      if (existing < 0) return [...current, page];
+      if (current[existing] === page) return current;
+      const next = current.slice();
+      next[existing] = page;
+      return next;
+    });
+    setCommitMetadataError(false);
+  }, []);
+
+  const requestRepository = useCallback((
+    nextSurface: RepositorySurface,
+    requestedCommit?: string,
+  ) => {
     const requestId = ++repositoryRequestId.current;
-    void prepareRepositorySurface(nextSurface).then(
+    void prepareRepositorySurface(nextSurface, requestedCommit).then(
       (loaded) => {
         if (repositoryRequestId.current !== requestId) return;
         startTransition(() => {
-          commitRepositorySnapshot(loaded);
+          commitPreparedRepository(loaded);
           setRepositoryLoadError((current) => current === nextSurface ? null : current);
         });
       },
@@ -540,12 +571,15 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
         }
       },
     );
-  }, [commitRepositorySnapshot]);
+  }, [commitPreparedRepository]);
 
   const refreshRepository = useCallback(() => {
     if (!needsRepository) return;
-    requestRepository(needsRepositoryHistory ? "commits" : "code");
-  }, [needsRepository, needsRepositoryHistory, requestRepository]);
+    requestRepository(
+      surface === "commits" ? "commits" : "code",
+      surface === "commits" ? requestedCommit : undefined,
+    );
+  }, [needsRepository, requestRepository, requestedCommit, surface]);
 
   useLayoutEffect(() => {
     surfaceNavigationId.current++;
@@ -557,27 +591,94 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
 
   useEffect(() => {
     if (!needsRepository || repositoryLoadError === surface) return;
-    if (!snapshot || (needsRepositoryHistory && !snapshot.historyLoaded)) {
+    if (
+      (surface === "code" && !snapshot) ||
+      (surface === "commits" && !commitHistory)
+    ) {
       refreshRepository();
     }
   }, [
+    commitHistory,
     needsRepository,
-    needsRepositoryHistory,
     refreshRepository,
     repositoryLoadError,
     snapshot,
+    surface,
   ]);
 
   useEffect(() => {
-    if (!requestedCommit) return;
-    const index = commits.findIndex(({ hash }) => hash === requestedCommit);
-    if (index < 0) return;
+    if (!requestedCommit || !commitHistory) return;
+    const pageIndex = commitHistory.pageForCommit(requestedCommit);
+    if (pageIndex == null) {
+      setCommitMetadataError(true);
+      return;
+    }
     setSelectedHash(requestedCommit);
-    const frame = window.requestAnimationFrame(() => {
-      commitStreamRef.current?.scrollToCommit(index);
+    let active = true;
+    void commitHistory.loadPage(pageIndex).then((page) => {
+      if (!active) return;
+      commitLoadedPage(page);
+      const frame = window.requestAnimationFrame(() => {
+        commitStreamRef.current?.scrollToCommit(requestedCommit);
+      });
+      if (!active) window.cancelAnimationFrame(frame);
+    }).catch(() => {
+      if (active) setCommitMetadataError(true);
     });
-    return () => window.cancelAnimationFrame(frame);
-  }, [commits, requestedCommit]);
+    return () => {
+      active = false;
+    };
+  }, [commitHistory, commitLoadedPage, requestedCommit]);
+
+  const loadAllCommitMetadata = useCallback(() => {
+    if (!commitHistory) return;
+    const generation = commitHistory.repository.head;
+    setCommitMetadataError(false);
+    void commitHistory.loadAllPages().then((pages) => {
+      if (
+        commitHistoryHeadRef.current !== generation ||
+        pages.some((page) => page.generation !== generation)
+      ) {
+        return;
+      }
+      setCommitPages(pages);
+    }).catch(() => {
+      if (commitHistoryHeadRef.current === generation) {
+        setCommitMetadataError(true);
+      }
+    });
+  }, [commitHistory]);
+
+  const loadNextCommitMetadataPage = useCallback(() => {
+    if (!commitHistory || commitPages.length === 0) return;
+    const loadedPages = new Set(commitPages.map(({ index }) => index));
+    const maximumLoadedPage = Math.max(...loadedPages);
+    const nextPage = maximumLoadedPage + 1 < commitHistory.pageCount
+      ? maximumLoadedPage + 1
+      : Array.from(
+        { length: commitHistory.pageCount },
+        (_, page) => page,
+      ).find((page) => !loadedPages.has(page));
+    if (nextPage == null) return;
+    const generation = commitHistory.repository.head;
+    void commitHistory.loadPage(nextPage).then(commitLoadedPage).catch(() => {
+      if (commitHistoryHeadRef.current === generation) {
+        setCommitMetadataError(true);
+      }
+    });
+  }, [commitHistory, commitLoadedPage, commitPages]);
+
+  useEffect(() => {
+    if (!searchOpen && scope === "all") return;
+    if (commitPages.length >= (commitHistory?.pageCount ?? 0)) return;
+    loadAllCommitMetadata();
+  }, [
+    commitHistory?.pageCount,
+    commitPages.length,
+    loadAllCommitMetadata,
+    scope,
+    searchOpen,
+  ]);
 
   useEffect(() => () => {
     repositoryRequestId.current++;
@@ -643,11 +744,16 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
     void settleRepositoryNavigationIntent({
       navigationId,
       latestNavigationId: () => surfaceNavigationId.current,
-      preparation: prepareRepositorySurface(nextSurface),
-      onPrepared: (preparedSnapshot) => {
+      preparation: prepareRepositorySurface(
+        nextSurface,
+        nextSurface === "commits"
+          ? commitHashFromDestination(destination)
+          : undefined,
+      ),
+      onPrepared: (preparedRepository) => {
         flushSync(() => {
           if (!threadId) setThreadId(nextThreadId);
-          commitRepositorySnapshot(preparedSnapshot);
+          commitPreparedRepository(preparedRepository);
           setRepositoryLoadError((current) => current === nextSurface ? null : current);
         });
       },
@@ -659,7 +765,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
       },
       navigate: () => startTransition(() => navigate(destination)),
     });
-  }, [commitRepositorySnapshot, navigate, threadId]);
+  }, [commitPreparedRepository, navigate, threadId]);
 
   const navigateToSurface = useCallback((nextSurface: Surface) => {
     retainAgentExperience(nextSurface);
@@ -721,7 +827,6 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
     const destination = pathForCommit(hash);
     if (`${location.pathname}${location.search}` === destination) return;
     retainAgentExperience("commits");
-    preloadSurface("commits");
     const navigationId = ++surfaceNavigationId.current;
     const nextThreadId = threadId ?? getBrowserThread().id;
     repositoryRequestId.current++;
@@ -730,7 +835,6 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
     location.pathname,
     location.search,
     navigateToPreparedRepository,
-    preloadSurface,
     retainAgentExperience,
     threadId,
   ]);
@@ -947,15 +1051,12 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
   ]);
 
   const selectCommit = (commit: HarnessCommit) => {
-    const index = commits.findIndex(
-      (candidate) => candidate.hash === commit.hash
-    );
     setSelectedHash(commit.hash);
     closeCommitSearch();
     closeCommitRail();
     setQuery("");
     navigate(pathForCommit(commit.hash), { replace: true });
-    if (index >= 0) commitStreamRef.current?.scrollToCommit(index);
+    commitStreamRef.current?.scrollToCommit(commit.hash);
   };
 
   return (
@@ -1165,7 +1266,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
               failed
               onRetry={refreshRepository}
             />
-          ) : snapshot?.historyLoaded ? (
+          ) : commitHistory ? (
             <PierreWorkerProvider>
                 <section
                   ref={commitWorkspaceRef}
@@ -1201,7 +1302,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
                       <strong id="history-title">Jump to commit</strong>
                       <span>
                         <GitBranch aria-hidden="true" />{" "}
-                        {snapshot.repository.branch} · {snapshot.commits.length}
+                        {commitHistory.repository.branch} · {commitHistory.hashes.length}
                       </span>
                     </div>
                     <nav
@@ -1262,17 +1363,32 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
 
                   <VirtualCommitList
                     commits={filteredCommits}
+                    hasMore={
+                      scope === "all" &&
+                      !query &&
+                      commitPages.length < commitHistory.pageCount
+                    }
                     selectedHash={selected?.hash}
                     onClearSearch={() => setQuery("")}
+                    onLoadMore={loadNextCommitMetadataPage}
                     onSelectCommit={selectCommit}
                   />
+                  {commitMetadataError ? (
+                    <div className="commit-stream-tail-error" role="alert">
+                      <span>Couldn’t load complete commit metadata.</span>
+                      <button type="button" onClick={loadAllCommitMetadata}>
+                        Try again
+                      </button>
+                    </div>
+                  ) : null}
                 </aside>
                 <CommitCodeStream
+                  key={`${commitHistory.repository.head}:${commitHistory.initialPage.index}`}
                   ref={commitStreamRef}
-                  commits={commits}
                   commitRailOpen={commitRailModalOpen}
+                  history={commitHistory}
+                  onPageLoaded={commitLoadedPage}
                   onOpenCommitRail={openCommitRail}
-                  patchUrl={snapshot.commitPatchUrl}
                   theme={theme}
                 />
                 </section>
@@ -1343,9 +1459,16 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
                       <ChevronRight aria-hidden="true" />
                     </button>
                   ))
-                ) : (
+                ) : commitMetadataError ? (
+                  <div className="search-empty" role="alert">
+                    <p>Couldn’t load complete commit metadata.</p>
+                    <button type="button" onClick={loadAllCommitMetadata}>
+                      Try again
+                    </button>
+                  </div>
+                ) : commitPages.length >= (commitHistory?.pageCount ?? 0) ? (
                   <p className="search-empty">No commits found.</p>
-                )}
+                ) : null}
               </div>
               <footer className="search-footer">
                 <span>{searchResults.length} results</span>

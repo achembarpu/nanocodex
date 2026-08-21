@@ -1,13 +1,15 @@
 import { useVirtualizer } from "@tanstack/react-virtual";
 import { ChevronRight } from "lucide-react";
-import { memo, useRef } from "react";
+import { memo, useEffect, useRef } from "react";
 import type { HarnessCommit } from "./threadRepositorySnapshot";
 import "./Commits.css";
 
 type VirtualCommitListProps = {
   commits: HarnessCommit[];
+  hasMore: boolean;
   selectedHash?: string;
   onClearSearch(): void;
+  onLoadMore(): void;
   onSelectCommit(commit: HarnessCommit): void;
 };
 
@@ -34,11 +36,14 @@ function relativeDate(value: string) {
 
 export const VirtualCommitList = memo(function VirtualCommitList({
   commits,
+  hasMore,
   selectedHash,
   onClearSearch,
+  onLoadMore,
   onSelectCommit,
 }: VirtualCommitListProps) {
   const listRef = useRef<HTMLDivElement>(null);
+  const loadMoreRequestedRef = useRef(false);
   const virtualizer = useVirtualizer({
     count: commits.length,
     getScrollElement: () => listRef.current,
@@ -47,8 +52,44 @@ export const VirtualCommitList = memo(function VirtualCommitList({
     overscan: 8,
   });
 
+  useEffect(() => {
+    loadMoreRequestedRef.current = false;
+  }, [commits.length]);
+
+  useEffect(() => {
+    const frame = window.requestAnimationFrame(() => {
+      const list = listRef.current;
+      if (
+        !hasMore ||
+        list == null ||
+        loadMoreRequestedRef.current ||
+        list.scrollHeight > list.clientHeight + 240
+      ) {
+        return;
+      }
+      loadMoreRequestedRef.current = true;
+      onLoadMore();
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [commits.length, hasMore, onLoadMore]);
+
   return (
-    <div className="commit-list" ref={listRef}>
+    <div
+      className="commit-list"
+      ref={listRef}
+      onScroll={(event) => {
+        const list = event.currentTarget;
+        if (
+          !hasMore ||
+          loadMoreRequestedRef.current ||
+          list.scrollTop + list.clientHeight < list.scrollHeight - 240
+        ) {
+          return;
+        }
+        loadMoreRequestedRef.current = true;
+        onLoadMore();
+      }}
+    >
       {commits.length ? (
         <div
           style={{

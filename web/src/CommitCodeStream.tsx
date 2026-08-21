@@ -29,36 +29,44 @@ import { COMPACT_WORKSPACE_QUERY } from "./pierreCodeView";
 import { Switch } from "./Switch";
 import {
   getCommitStreamErrorMode,
+  shouldRequestNextCommitPage,
   tryApplyPendingCommitJump,
   useCommitStreamLoader,
 } from "./useCommitStreamLoader";
 import type { Theme } from "./NanocodexApp";
-import type { HarnessCommit } from "./threadRepositorySnapshot";
+import {
+  preloadPublishedRepositoryPatch,
+  type PublishedCommitHistory,
+  type PublishedCommitPage,
+} from "./publishedRepository";
 import "./Commits.css";
 
 type CommitCodeStreamProps = {
-  commits: HarnessCommit[];
   commitRailOpen?: boolean;
+  history: PublishedCommitHistory;
+  onPageLoaded(page: PublishedCommitPage): void;
   onOpenCommitRail?: () => void;
-  patchUrl: string | ((commit: HarnessCommit) => string);
   theme: Theme;
 };
 
 export type CommitCodeStreamHandle = {
-  scrollToCommit(index: number): void;
+  scrollToCommit(hash: string): void;
 };
 
 const CommitCodeStreamComponent = forwardRef<
   CommitCodeStreamHandle,
   CommitCodeStreamProps
 >(function CommitCodeStream(
-  { commits, commitRailOpen, onOpenCommitRail, patchUrl, theme },
+  { commitRailOpen, history, onOpenCommitRail, onPageLoaded, theme },
   forwardedRef,
 ) {
   const renderer = usePierreRenderer();
   const scrollRef = useRef<HTMLDivElement>(null);
   const viewerRef = useRef<CodeViewHandle<undefined> | null>(null);
-  const pendingJumpRef = useRef<number | null>(null);
+  const pendingJumpRef = useRef<string | null>(history.initialCommitHash);
+  const windowRequestIdRef = useRef(0);
+  const [windowPage, setWindowPage] = useState(history.initialPage);
+  const [windowError, setWindowError] = useState(false);
   const [diffStyle, setDiffStyle] = useState<"split" | "unified">("split");
   const [collapseMode, setCollapseMode] = useState<
     "expanded" | "collapsed"
@@ -70,21 +78,40 @@ const CommitCodeStreamComponent = forwardRef<
   const [lineNumbers, setLineNumbers] = useState(true);
 
   const tryApplyPendingJump = useCallback(() => {
-    tryApplyPendingCommitJump(
+    return tryApplyPendingCommitJump(
       pendingJumpRef,
       viewerRef.current,
-      commits,
     );
-  }, [commits]);
+  }, []);
 
   const scrollToCommit = useCallback(
-    (index: number) => {
-      if (commits[index] == null) return;
-      pendingJumpRef.current = index;
-      tryApplyPendingJump();
+    (hash: string) => {
+      if (history.pageForCommit(hash) == null) return;
+      pendingJumpRef.current = hash;
+      if (tryApplyPendingJump()) return;
+
+      const pageIndex = history.pageForCommit(hash);
+      if (pageIndex == null) return;
+      const requestId = ++windowRequestIdRef.current;
+      setWindowError(false);
+      void history.loadPage(pageIndex).then((page) => {
+        if (windowRequestIdRef.current !== requestId) return;
+        void preloadPublishedRepositoryPatch(page.patchUrl)?.catch(() => undefined);
+        onPageLoaded(page);
+        setWindowPage(page);
+      }).catch(() => {
+        if (windowRequestIdRef.current === requestId) setWindowError(true);
+      });
     },
-    [commits, tryApplyPendingJump],
+    [history, onPageLoaded, tryApplyPendingJump],
   );
+
+  useEffect(() => {
+    windowRequestIdRef.current++;
+    pendingJumpRef.current = history.initialCommitHash;
+    setWindowPage(history.initialPage);
+    setWindowError(false);
+  }, [history]);
 
   useEffect(() => {
     const mediaQuery = window.matchMedia(COMPACT_WORKSPACE_QUERY);
@@ -104,15 +131,32 @@ const CommitCodeStreamComponent = forwardRef<
     applyCollapseModeToLoaded,
     initialItems,
     loadState,
+    requestNextPage,
     retryLoad,
     viewerKey,
   } = useCommitStreamLoader({
     collapseMode,
-    commits,
+    history,
+    initialPage: windowPage,
     onItemsPublished: tryApplyPendingJump,
-    patchUrl,
+    onPageLoaded,
     viewerRef,
   });
+
+  const handleViewerScroll = useCallback((
+    scrollTop: number,
+    viewer: { getHeight(): number; getScrollHeight(): number },
+  ) => {
+    if (
+      shouldRequestNextCommitPage(
+        scrollTop,
+        viewer.getHeight(),
+        viewer.getScrollHeight(),
+      )
+    ) {
+      requestNextPage();
+    }
+  }, [requestNextPage]);
 
   const handleToggleCollapseMode = useCallback(() => {
     const next = collapseMode === "expanded" ? "collapsed" : "expanded";
@@ -152,7 +196,7 @@ const CommitCodeStreamComponent = forwardRef<
     <>
       <CommitStreamToolbar
         collapseMode={collapseMode}
-        commitCount={commits.length}
+        commitCount={history.hashes.length}
         diffIndicators={diffIndicators}
         diffStyle={diffStyle}
         lineNumbers={lineNumbers}
@@ -177,25 +221,48 @@ const CommitCodeStreamComponent = forwardRef<
             disableWorkerPool={renderer.disableWorkerPool}
             initialItems={initialItems}
             lineNumbers={lineNumbers}
+            onScroll={handleViewerScroll}
             overflow={overflow}
             scrollRef={scrollRef}
             showBackgrounds={showBackgrounds}
             theme={theme}
             viewerRef={viewerRef}
           />
-          {errorMode === "tail" ? (
+          {errorMode === "tail" || windowError ? (
             <div className="commit-stream-tail-error" role="alert">
-              <span>Commit stream stopped before all changes loaded.</span>
-              <button type="button" onClick={retryLoad}>
+              <span>
+                {windowError
+                  ? "Couldn’t load that commit window."
+                  : "Commit stream stopped before all changes loaded."}
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  if (windowError && pendingJumpRef.current != null) {
+                    scrollToCommit(pendingJumpRef.current);
+                  } else {
+                    retryLoad();
+                  }
+                }}
+              >
                 Try again
               </button>
             </div>
           ) : null}
         </>
-      ) : errorMode === "cold" ? (
+      ) : errorMode === "cold" || windowError ? (
         <div className="commit-stream-error" role="alert">
           <p>Couldn’t load commits.</p>
-          <button type="button" onClick={retryLoad}>
+          <button
+            type="button"
+            onClick={() => {
+              if (windowError && pendingJumpRef.current != null) {
+                scrollToCommit(pendingJumpRef.current);
+              } else {
+                retryLoad();
+              }
+            }}
+          >
             Try again
           </button>
         </div>

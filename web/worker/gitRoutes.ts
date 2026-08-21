@@ -20,7 +20,7 @@ import {
 } from "./gitRepository.ts";
 
 const SHA1_PATTERN = /^[a-f0-9]{40}$/;
-const generationFilePattern = /^(repository\.json|commits\.json|commit-patches\.json|inventory\.json|objects\.json)$/;
+const generationFilePattern = /^(repository\.json|commits\.json|commit-index\.json|commit-patches\.json|inventory\.json|objects\.json)$/;
 const generationCommitPagePattern = /^commits\/(\d{4})\.json$/;
 const generationCommitPatchPartPattern = /^commit-patches\/(\d{4})\.diff$/;
 const generationObjectShardPattern = /^objects\/(\d{4})\.pack$/;
@@ -41,6 +41,14 @@ export async function handleGitRequest(
 ): Promise<Response | undefined> {
   if (request.method === "GET" && url.pathname === "/api/repository/snapshot") {
     return servePublishedObject(request, env, context, "snapshotKey", false);
+  }
+  if (request.method === "GET" && url.pathname === "/api/repository/commit-index") {
+    return servePublishedGenerationObject(
+      request,
+      env,
+      context,
+      "commit-index.json",
+    );
   }
   if (request.method === "GET" && url.pathname === "/api/repository/commits") {
     const page = url.searchParams.get("page");
@@ -63,6 +71,18 @@ export async function handleGitRequest(
   );
   if (request.method === "GET" && commitPatchMatch) {
     return serveCommitPatch(env, commitPatchMatch[1]);
+  }
+  const commitPatchPageMatch = url.pathname.match(
+    /^\/api\/repository\/commits\/([a-f0-9]{40})\/(\d{4})\.diff$/,
+  );
+  if (request.method === "GET" && commitPatchPageMatch) {
+    return serveCommitPatchPage(
+      request,
+      env,
+      context,
+      commitPatchPageMatch[1],
+      Number(commitPatchPageMatch[2]),
+    );
   }
   if (
     request.method === "GET" &&
@@ -144,11 +164,20 @@ export async function handleGitRequest(
       return Response.json({ error: "invalid_publication" }, { status: 400 });
     }
     const publication = body.publication;
+    const generationPrefix = `generations/${publication.head}`;
+    const commitPatchManifestKey = `${generationPrefix}/commit-patches.json`;
+    const commitIndexKey = `${generationPrefix}/commit-index.json`;
+    const commitPageKeys = publication.commitPatchParts.map(
+      (_, index) => `${generationPrefix}/commits/${String(index).padStart(4, "0")}.json`,
+    );
     const requiredKeys = [
       publication.snapshotKey,
       publication.commitsKey,
+      commitIndexKey,
       publication.inventoryKey,
-      `generations/${publication.head}/commit-patches.json`,
+      commitPatchManifestKey,
+      publication.objectManifestKey,
+      ...commitPageKeys,
       ...publication.commitPatchParts.map((part) => part.key),
       ...publication.packParts.map((part) => part.key),
     ];
@@ -157,9 +186,12 @@ export async function handleGitRequest(
     if (missing.length > 0) {
       return Response.json({ error: "publication_objects_missing", missing }, { status: 409 });
     }
+    const objectByKey = new Map(
+      requiredKeys.map((key, index) => [key, objects[index]] as const),
+    );
     let commitPatchManifest: unknown;
     try {
-      const storedManifest = await requireBucket(env).get(requiredKeys[3]!);
+      const storedManifest = await requireBucket(env).get(commitPatchManifestKey);
       commitPatchManifest = storedManifest == null ? undefined : await storedManifest.json();
     } catch {
       return storageFailure("published commit patch manifest is invalid");
@@ -173,9 +205,8 @@ export async function handleGitRequest(
         { status: 409 },
       );
     }
-    const commitPatchOffset = 4;
     const invalidCommitPatchParts = publication.commitPatchParts
-      .filter((part, index) => objects[commitPatchOffset + index]?.size !== part.size)
+      .filter((part) => objectByKey.get(part.key)?.size !== part.size)
       .map((part) => part.key);
     if (invalidCommitPatchParts.length > 0) {
       return Response.json(
@@ -183,9 +214,8 @@ export async function handleGitRequest(
         { status: 409 },
       );
     }
-    const packOffset = commitPatchOffset + publication.commitPatchParts.length;
     const invalidPackParts = publication.packParts
-      .filter((part, index) => objects[packOffset + index]?.size !== part.size)
+      .filter((part) => objectByKey.get(part.key)?.size !== part.size)
       .map((part) => part.key);
     if (invalidPackParts.length > 0) {
       return Response.json(
@@ -388,6 +418,27 @@ async function servePublishedObject(
   );
 }
 
+async function servePublishedGenerationObject(
+  request: Request,
+  env: GitStorageEnv,
+  context: ExecutionContext | undefined,
+  name: string,
+): Promise<Response> {
+  const cached = await matchEdgeCache(request);
+  if (cached != null) return cached;
+  const publication = await getPublication(env);
+  if (publication instanceof Response) return publication;
+  return serveObject(
+    request,
+    env,
+    context,
+    `generations/${publication.head}/${name}`,
+    false,
+    publication.head,
+    false,
+  );
+}
+
 async function servePublishedCommitPage(
   request: Request,
   env: GitStorageEnv,
@@ -421,6 +472,23 @@ function serveCommitPage(
     env,
     context,
     `generations/${generation}/commits/${String(page).padStart(4, "0")}.json`,
+    true,
+    generation,
+  );
+}
+
+function serveCommitPatchPage(
+  request: Request,
+  env: GitStorageEnv,
+  context: ExecutionContext | undefined,
+  generation: string,
+  page: number,
+): Promise<Response> {
+  return serveObject(
+    request,
+    env,
+    context,
+    `generations/${generation}/commit-patches/${String(page).padStart(4, "0")}.diff`,
     true,
     generation,
   );

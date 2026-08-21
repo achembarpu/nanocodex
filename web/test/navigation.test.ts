@@ -85,7 +85,7 @@ test("commit deep links stay inside the product", () => {
   const hash = "a".repeat(40);
   assert.equal(pathForCommit(hash), `/commits?commit=${hash}`);
   assert.match(application, /commitHashFromSearch\(location\.search\)/);
-  assert.match(application, /scrollToCommit\(index\)/);
+  assert.match(application, /scrollToCommit\(requestedCommit\)/);
 });
 
 test("deep product links retain prepared client navigation", () => {
@@ -141,12 +141,14 @@ test("Source and Commits navigation prepares exact route state before navigating
   );
   assert.match(
     preparation,
-    /nextSurface === "code"[\s\S]*?preparePierreWorker\(\)[\s\S]*?loadCodeBrowser\(\)[\s\S]*?loadRepositorySnapshot\(false\)/,
+    /nextSurface === "code"[\s\S]*?preparePierreWorker\(\)[\s\S]*?loadCodeBrowser\(\)[\s\S]*?loadRepositorySnapshot\(\)/,
   );
   assert.match(
     preparation,
-    /loadCommitCodeStream\(\)[\s\S]*?loadVirtualCommitList\(\)[\s\S]*?loadRepositorySnapshot\(true\)/,
+    /loadCommitCodeStream\(\)[\s\S]*?loadVirtualCommitList\(\)[\s\S]*?loadPublishedCommitHistory\(requestedCommit\)/,
   );
+  assert.doesNotMatch(preparation, /window\.location\.search/);
+  assert.doesNotMatch(preparation, /preloadPublishedRepositoryPatch/);
 
   const prefetch = application.slice(
     application.indexOf("const preloadSurface"),
@@ -164,7 +166,7 @@ test("Source and Commits navigation prepares exact route state before navigating
   );
   assert.match(
     navigation,
-    /const navigateToPreparedRepository[\s\S]*?settleRepositoryNavigationIntent\(\{[\s\S]*?preparation: prepareRepositorySurface\(nextSurface\)/,
+    /const navigateToPreparedRepository[\s\S]*?settleRepositoryNavigationIntent\(\{[\s\S]*?preparation: prepareRepositorySurface\(\s*nextSurface/,
   );
   assert.match(
     navigation,
@@ -176,7 +178,7 @@ test("Source and Commits navigation prepares exact route state before navigating
   );
   assert.match(
     navigation,
-    /onPrepared:[\s\S]*?flushSync\([\s\S]*?commitRepositorySnapshot\(preparedSnapshot\)[\s\S]*?navigate: \(\) => startTransition/,
+    /onPrepared:[\s\S]*?flushSync\([\s\S]*?commitPreparedRepository\(preparedRepository\)[\s\S]*?navigate: \(\) => startTransition/,
   );
   assert.match(
     navigation,
@@ -188,7 +190,11 @@ test("Source and Commits navigation prepares exact route state before navigating
   );
   assert.match(
     application,
-    /repositoryRequestId\.current !== requestId[\s\S]*?startTransition\(\(\) => \{[\s\S]*?commitRepositorySnapshot\(loaded\)[\s\S]*?setRepositoryLoadError\(\(current\) => current === nextSurface \? null : current\)/,
+    /repositoryRequestId\.current !== requestId[\s\S]*?startTransition\(\(\) => \{[\s\S]*?commitPreparedRepository\(loaded\)[\s\S]*?setRepositoryLoadError\(\(current\) => current === nextSurface \? null : current\)/,
+  );
+  assert.match(
+    navigation,
+    /commitHashFromDestination\(destination\)/,
   );
   assert.match(
     application,
@@ -265,7 +271,8 @@ test("a direct visit waits for its complete route preload before mounting the sh
     entry.indexOf("function preloadDirectSurface"),
     entry.indexOf("function renderApp"),
   );
-  assert.doesNotMatch(preload, /\bvoid\b|\.catch\(/);
+  assert.doesNotMatch(preload, /loadPublished(?:RepositorySnapshot|CommitHistory)\([^)]*\)\.catch/);
+  assert.match(preload, /preloadPublishedRepositoryPatch[\s\S]*?\.catch\(\(\) => undefined\)/);
   assert.match(preload, /const surface = surfaceFromUrl\(url\)/);
   assert.doesNotMatch(entry, /lazy\(loadNanocodexApp\)/);
   assert.match(
@@ -275,6 +282,7 @@ test("a direct visit waits for its complete route preload before mounting the sh
   assert.doesNotMatch(application, /<Suspense/);
   assert.match(application, /preparedRoute\.DocsComponent \?\? null/);
   assert.match(application, /preparedRoute\.repositorySnapshot/);
+  assert.match(application, /preparedRoute\.commitHistory/);
 });
 
 test("direct preloading selects only the work owned by the resolved route", () => {
@@ -290,11 +298,11 @@ test("direct preloading selects only the work owned by the resolved route", () =
   assert.match(preload, /surface === "docs"[\s\S]*?preloadDocsRoute\(url\.pathname\)/);
   assert.match(
     preload,
-    /surface === "code"[\s\S]*?preloadPublishedRepositorySnapshot\(false\)[\s\S]*?preloadPreferredPublishedFile/,
+    /surface === "code"[\s\S]*?preloadPublishedRepositorySnapshot\(\)[\s\S]*?preloadPreferredPublishedFile/,
   );
   assert.match(
     preload,
-    /surface === "commits"[\s\S]*?preloadPublishedRepositorySnapshot\(true\)[\s\S]*?preloadPublishedRepositoryPatch/,
+    /surface === "commits"[\s\S]*?url\.searchParams\.get\("commit"\)[\s\S]*?loadPublishedCommitHistory\([\s\S]*?preloadPublishedRepositoryPatch/,
   );
   assert.match(
     preload,

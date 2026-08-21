@@ -12,7 +12,7 @@ import { fileURLToPath } from "node:url";
 import { redactPublicText } from "./public-redaction.mjs";
 
 const execFileAsync = promisify(execFile);
-const generatorVersion = 7;
+const generatorVersion = 8;
 const commitPageSize = 32;
 const projectRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryPath = resolve(
@@ -23,8 +23,12 @@ const generatedDataDirectory = resolve(
 );
 const outputPath = resolve(generatedDataDirectory, "repository.json");
 const commitsOutputPath = resolve(generatedDataDirectory, "commits.json");
-const commitPatchOutputPath = resolve(generatedDataDirectory, "commits.diff");
+const commitIndexOutputPath = resolve(generatedDataDirectory, "commit-index.json");
 const commitPagesDirectory = resolve(generatedDataDirectory, "commit-pages");
+const commitPatchPagesDirectory = resolve(
+  generatedDataDirectory,
+  "commit-patch-pages",
+);
 const commitLimit = parseCommitLimit(process.env.NANOCODEX_COMMIT_LIMIT);
 const forceSync = process.env.NANOCODEX_FORCE_SYNC === "1";
 const emitObjects = process.env.NANOCODEX_EMIT_OBJECTS === "1";
@@ -147,6 +151,13 @@ const snapshot = {
   generatedAt,
   tree,
 };
+const commitIndex = {
+  version: 1,
+  repository: snapshot.repository,
+  generatedAt,
+  hashes: commits.map(({ hash }) => hash),
+  scopeCounts: buildCommitScopeCounts(commits),
+};
 
 await rm(generatedDataDirectory, { recursive: true, force: true });
 await mkdir(generatedDataDirectory, { recursive: true });
@@ -154,6 +165,10 @@ await mkdir(commitPagesDirectory, { recursive: true });
 const writes = [
   writeIfChanged(outputPath, Buffer.from(`${JSON.stringify(snapshot)}\n`, "utf8")),
   writeIfChanged(commitsOutputPath, Buffer.from(`${JSON.stringify(commits)}\n`, "utf8")),
+  writeIfChanged(
+    commitIndexOutputPath,
+    Buffer.from(`${JSON.stringify(commitIndex)}\n`, "utf8"),
+  ),
   ...Array.from(
     { length: Math.ceil(commits.length / commitPageSize) },
     (_, page) => writeIfChanged(
@@ -172,11 +187,21 @@ if (emitObjects) {
   await Promise.all([
     mkdir(resolve(generatedDataDirectory, "blobs"), { recursive: true }),
     mkdir(resolve(generatedDataDirectory, "patches"), { recursive: true }),
+    mkdir(commitPatchPagesDirectory, { recursive: true }),
   ]);
   writes.push(
-    writeIfChanged(
-      commitPatchOutputPath,
-      Buffer.from(patches.map(({ contents }) => contents).join("\n"), "utf8"),
+    ...Array.from(
+      { length: Math.ceil(patches.length / commitPageSize) },
+      (_, page) => writeIfChanged(
+        resolve(commitPatchPagesDirectory, `${String(page).padStart(4, "0")}.diff`),
+        Buffer.from(
+          patches
+            .slice(page * commitPageSize, (page + 1) * commitPageSize)
+            .map(({ contents }) => contents)
+            .join("\n"),
+          "utf8",
+        ),
+      ),
     ),
     ...blobFiles.map(({ objectId, contents }) =>
       writeIfChanged(resolve(generatedDataDirectory, "blobs", `${objectId}.txt`), contents),
@@ -213,10 +238,23 @@ async function generatedSnapshotIsCurrent(repository) {
     return false;
   }
   try {
+    const pageCount = Math.ceil(snapshot.repository.indexedCommits / commitPageSize);
+    const pageNames = Array.from(
+      { length: pageCount },
+      (_, page) => String(page).padStart(4, "0"),
+    );
     await Promise.all([
       access(outputPath),
       access(commitsOutputPath),
-      ...(emitObjects ? [access(commitPatchOutputPath)] : []),
+      access(commitIndexOutputPath),
+      ...pageNames.map((name) =>
+        access(resolve(commitPagesDirectory, `${name}.json`))
+      ),
+      ...(emitObjects
+        ? pageNames.map((name) =>
+          access(resolve(commitPatchPagesDirectory, `${name}.diff`))
+        )
+        : []),
     ]);
     return true;
   } catch (error) {
@@ -259,6 +297,15 @@ function projectCommitRefs(commits, head, publicBranch) {
     ...commit,
     refs: commit.hash === head ? [`HEAD -> ${publicBranch}`] : [],
   }));
+}
+
+function buildCommitScopeCounts(commits) {
+  const counts = { all: commits.length, eval: 0, fix: 0, docs: 0, perf: 0 };
+  for (const { subject } of commits) {
+    const scope = subject.match(/^([a-z]+)(?:\([^)]*\))?:/i)?.[1]?.toLowerCase();
+    if (scope != null && Object.hasOwn(counts, scope) && scope !== "all") counts[scope]++;
+  }
+  return counts;
 }
 
 function parseLogRecords(output) {
