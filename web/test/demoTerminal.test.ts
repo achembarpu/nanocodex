@@ -16,12 +16,17 @@ import {
 } from "../src/agentTranscript.ts";
 import {
   encodeXtermKeyEvent,
+  bufferedXtermAdapter,
   isTerminalSubmitKeyEvent,
   xtermAdapter,
 } from "../src/agentTerminalXterm.ts";
+import {
+  createWorkerAgent,
+  installWorkerAgentRuntime,
+} from "../../js/bindings/browser/WorkerAgent.mjs";
 
 function fakeTerminal() {
-  let onData = (_data: string) => {};
+  let onData = (_data: string, _receivedAt: number) => {};
   let onResize = (_size: { cols: number; rows: number }) => {};
   let onVisibilityChange = () => {};
   let visible = true;
@@ -33,7 +38,7 @@ function fakeTerminal() {
     write(data: string | Uint8Array) {
       writes.push(typeof data === "string" ? data : new TextDecoder().decode(data));
     },
-    onData(listener: (data: string) => void) {
+    onData(listener: (data: string, receivedAt: number) => void) {
       onData = listener;
       return () => { onData = () => {}; };
     },
@@ -46,7 +51,7 @@ function fakeTerminal() {
       onVisibilityChange = listener;
       return () => { onVisibilityChange = () => {}; };
     },
-    data(value: string) { onData(value); },
+    data(value: string, receivedAt = performance.now()) { onData(value, receivedAt); },
     resize(cols: number, rows: number) {
       this.cols = cols;
       this.rows = rows;
@@ -63,28 +68,42 @@ function fakeAgent() {
   let listener = (_event: AgentEvent) => {};
   const turns: Array<ReturnType<typeof createTurn>> = [];
   function createTurn(input: string) {
-    let resolve!: (result: { finalMessage: string; snapshot: object; usage: object }) => void;
+    type Result = {
+      finalMessage: string;
+      snapshot(): Promise<object>;
+      usage(): Promise<object>;
+      dispose(): void;
+    };
+    let resolve!: (result: Result) => void;
     let reject!: (error: unknown) => void;
-    const result = new Promise<{ finalMessage: string; snapshot: object; usage: object }>(
-      (next, fail) => {
-        resolve = next;
-        reject = fail;
-      },
-    );
+    const result = new Promise<Result>((next, fail) => {
+      resolve = next;
+      reject = fail;
+    });
     const turn = {
       input,
       cancelled: false,
+      disposals: 0,
+      resultDisposals: 0,
       steers: [] as string[],
       result: () => result,
       steer: async ({ input: steer }: { input: string }) => { turn.steers.push(steer); },
       cancel: async () => { turn.cancelled = true; },
-      dispose() {},
-      complete(message: string) { resolve({ finalMessage: message, snapshot: {}, usage: {} }); },
+      dispose() { turn.disposals += 1; },
+      complete(message: string) {
+        resolve({
+          finalMessage: message,
+          snapshot: async () => ({}),
+          usage: async () => ({}),
+          dispose() { turn.resultDisposals += 1; },
+        });
+      },
       fail(error: unknown) { reject(error); },
     };
     return turn;
   }
   return {
+    sessionId: "session",
     turns,
     events: {
       watch() {
@@ -153,10 +172,15 @@ function fakeAnimationFrames() {
   };
 }
 
-test("the app-local terminal drives one retained agent and renders its result", async () => {
+test("the app-local terminal copies and releases each successful result exactly once", async () => {
   const host = fakeTerminal();
   const agent = fakeAgent();
-  const terminal = createAgentTerminal({ agent: agent as never, terminal: host });
+  const events: Array<Record<string, unknown>> = [];
+  const terminal = createAgentTerminal({
+    agent: agent as never,
+    terminal: host,
+    onEvent: (event) => events.push(event),
+  });
   await terminal.ready;
 
   host.data("explain this\r");
@@ -167,7 +191,194 @@ test("the app-local terminal drives one retained agent and renders its result", 
   agent.turns[0]?.complete("done");
   await settle();
   assert.match(host.writes.at(-1)!, /done/);
+  assert.equal(agent.turns[0]?.resultDisposals, 1);
+  assert.equal(agent.turns[0]?.disposals, 1);
+  const completed = events.find((entry) => entry.type === "prompt.completed");
+  assert.equal(completed?.finalMessage, "done");
+  assert.equal("result" in completed!, false);
   terminal.dispose();
+});
+
+test("settled records are removed without losing cancellation of older live turns", async () => {
+  const host = fakeTerminal();
+  const agent = fakeAgent();
+  const terminal = createAgentTerminal({ agent: agent as never, terminal: host });
+
+  await terminal.submit("first");
+  await terminal.submit("second");
+  await terminal.submit("third");
+  agent.turns[2]?.complete("third done");
+  await settle();
+
+  await terminal.cancel();
+  assert.equal(agent.turns[1]?.cancelled, true);
+  assert.equal(agent.turns[0]?.cancelled, false);
+  agent.turns[1]?.complete("second done");
+  await settle();
+
+  await terminal.cancel();
+  assert.equal(agent.turns[0]?.cancelled, true);
+  agent.turns[0]?.complete("first done");
+  await settle();
+  assert.deepEqual(agent.turns.map((turn) => turn.disposals), [1, 1, 1]);
+  terminal.dispose();
+});
+
+test("prompt history retains only the configured bounded tail", async () => {
+  const host = fakeTerminal();
+  const agent = fakeAgent();
+  const terminal = createAgentTerminal({
+    agent: agent as never,
+    maxHistory: 2,
+    terminal: host,
+  });
+
+  for (const prompt of ["one", "two", "three"]) {
+    await terminal.submit(prompt);
+    agent.turns.at(-1)?.complete(`${prompt} done`);
+    await settle();
+  }
+  host.data("\x1b[A");
+  host.data("\x1b[A");
+  host.data("\x1b[A");
+  host.data("\r");
+  await settle();
+
+  assert.equal(agent.turns[3]?.input, "two");
+  agent.turns[3]?.complete("history done");
+  await settle();
+  terminal.dispose();
+});
+
+test("first-token timing follows root run FIFO and ignores child or empty deltas", async () => {
+  const host = fakeTerminal();
+  const agent = fakeAgent();
+  const events: Array<Record<string, unknown>> = [];
+  const terminal = createAgentTerminal({
+    agent: agent as never,
+    terminal: host,
+    onEvent: (next) => events.push(next),
+  });
+  await terminal.submit("first", { submittedAt: 11 });
+  await terminal.submit("second", { submittedAt: 22 });
+
+  agent.event(event(1, "run.started", {}, "child-session"));
+  agent.event(event(2, "assistant.delta", { text: "child" }, "child-session"));
+  agent.event(event(3, "assistant.delta", { text: "unowned" }));
+  agent.event(event(4, "run.started"));
+  agent.event(event(5, "assistant.delta", { text: "" }));
+  agent.event(event(6, "assistant.delta", { text: "first byte" }));
+  agent.event(event(7, "assistant.delta", { text: "more" }));
+  agent.event(event(8, "run.completed"));
+  agent.event(event(9, "run.started"));
+  agent.event(event(10, "reasoning.summary.delta", { text: "second byte" }));
+
+  const timings = events.filter((entry) => entry.type === "prompt.first_output");
+  assert.deepEqual(timings.map(({ id, submittedAt, eventSeq, sessionId }) => ({
+    eventSeq,
+    id,
+    sessionId,
+    submittedAt,
+  })), [
+    { eventSeq: 6, id: 1, sessionId: "session", submittedAt: 11 },
+    { eventSeq: 10, id: 2, sessionId: "session", submittedAt: 22 },
+  ]);
+  assert.equal(timings.every((entry) => Number(entry.timestamp) >= Number(entry.runStartedAt)), true);
+
+  agent.turns[0]?.complete("first done");
+  agent.turns[1]?.complete("second done");
+  await settle();
+  terminal.dispose();
+});
+
+test("cold buffered xterm input preserves the Enter timestamp through Agent startup", async () => {
+  let receiveData = (_data: string) => {};
+  let now = 7;
+  const xterm = {
+    cols: 80,
+    rows: 24,
+    write() {},
+    onData(listener: (data: string) => void) {
+      receiveData = listener;
+      return { dispose() { receiveData = () => {}; } };
+    },
+    onResize() { return { dispose() {} }; },
+  };
+  const buffered = bufferedXtermAdapter(xterm, () => now);
+  receiveData("\x1b[200~cold");
+  now = 9;
+  receiveData("\nprompt\x1b[201~");
+  now = 11;
+  receiveData("\r");
+  now = 100;
+
+  const agent = fakeAgent();
+  const events: Array<Record<string, unknown>> = [];
+  const terminal = createAgentTerminal({
+    agent: agent as never,
+    terminal: buffered.host,
+    onEvent: (event) => events.push(event),
+  });
+  await settle();
+
+  assert.equal(agent.turns[0]?.input, "cold\nprompt");
+  assert.equal(
+    events.find((event) => event.type === "prompt.accepted")?.submittedAt,
+    11,
+  );
+  agent.turns[0]?.complete("done");
+  await settle();
+  terminal.dispose();
+  buffered.dispose();
+});
+
+test("terminal result cleanup releases the package Worker liveness lease", async () => {
+  let resultReleases = 0;
+  const worker = new DemoLoopbackWorker(async ({ sessionId = "worker-root" } = {}) => ({
+    sessionId,
+    events: {
+      watch() {
+        return { onEvent() { return () => {}; }, off() {} };
+      },
+    },
+    turn: {
+      prompt() {
+        return {
+          async result() {
+            return {
+              finalMessage: "worker done",
+              async snapshot() { return {}; },
+              async usage() { return {}; },
+              dispose() { resultReleases += 1; },
+            };
+          },
+          async steer() {},
+          async cancel() {},
+          dispose() {},
+        };
+      },
+    },
+    dispose() {},
+  }));
+  const agent = await createWorkerAgent(
+    { harness: false, sessionId: "worker-root" },
+    { worker },
+  );
+  const terminal = createAgentTerminal({
+    agent,
+    terminal: fakeTerminal(),
+  });
+
+  await terminal.submit("release the result");
+  await settle();
+  assert.equal(resultReleases, 1);
+  assert.equal(worker.terminated, 0);
+  terminal.dispose();
+  agent.dispose();
+  await settle();
+
+  assert.equal(resultReleases, 1);
+  assert.equal(worker.terminated, 1);
 });
 
 test("public and keyboard submissions share history, steering, and cancellation", async () => {
@@ -224,6 +435,8 @@ test("connection failures stay concise and return to the composer", async () => 
   const frame = host.writes.at(-1)!;
   assert.match(frame, /Could not connect to the agent\. Try again\./);
   assert.doesNotMatch(frame, /WebSocket|noisy stack|Turn failed/);
+  assert.equal(agent.turns[0]?.resultDisposals, 0);
+  assert.equal(agent.turns[0]?.disposals, 1);
   terminal.dispose();
 });
 
@@ -479,10 +692,49 @@ test("an initial host write failure rejects terminal readiness", async () => {
   terminal.dispose();
 });
 
-function event(seq: number, type: string, payload: Record<string, unknown> = {}): AgentEvent {
+class DemoLoopbackWorker {
+  onmessage: ((event: { data: unknown }) => void) | null = null;
+  onerror: ((event: { message?: string }) => void) | null = null;
+  onmessageerror: (() => void) | null = null;
+  terminated = 0;
+  private readonly runtime: { dispose(): void };
+  private readonly scope: {
+    onmessage: ((event: { data: unknown }) => void) | null;
+    postMessage(data: unknown): void;
+  };
+
+  constructor(createAgent: (options?: { sessionId?: string }) => Promise<unknown>) {
+    this.scope = {
+      onmessage: null,
+      postMessage: (data) => {
+        const cloned = structuredClone(data);
+        queueMicrotask(() => this.onmessage?.({ data: cloned }));
+      },
+    };
+    this.runtime = installWorkerAgentRuntime(this.scope, { createAgent });
+  }
+
+  postMessage(data: unknown) {
+    const cloned = structuredClone(data);
+    queueMicrotask(() => this.scope.onmessage?.({ data: cloned }));
+  }
+
+  terminate() {
+    if (this.terminated) return;
+    this.terminated += 1;
+    this.runtime.dispose();
+  }
+}
+
+function event(
+  seq: number,
+  type: string,
+  payload: Record<string, unknown> = {},
+  requestId = "session",
+): AgentEvent {
   return {
     protocol_version: 1,
-    request_id: "session",
+    request_id: requestId,
     seq,
     type,
     payload,

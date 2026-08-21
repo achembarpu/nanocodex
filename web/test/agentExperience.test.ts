@@ -51,7 +51,7 @@ test("an artifact action queues exactly one contextual follow-on on the retained
   assert.match(submit, /const retainedTerminal = active\.current/);
   assert.equal(matches(submit, /retainedTerminal\.submit\(/g), 1);
   assert.match(submit, /artifactFollowOnPrompt\(artifact, path, prompt\)/);
-  assert.match(submit, /\{ intent: "queue" \}/);
+  assert.match(submit, /\{ intent: "queue", submittedAt: performance\.now\(\) \}/);
   const contextualPrompt = section(terminal, "function artifactFollowOnPrompt", "function markAgentTiming");
   assert.match(contextualPrompt, /JSON\.stringify\(artifact\.id\)/);
   assert.match(contextualPrompt, /JSON\.stringify\(path\)/);

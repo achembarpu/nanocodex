@@ -10,7 +10,6 @@ import {
   createConfig,
   NanocodexProvider,
   useAgent,
-  useAgentEvents,
   type Config,
 } from "nanocodex-react";
 import type { ArtifactDocument } from "nanocodex/tools/artifact";
@@ -92,6 +91,7 @@ function AgentTerminalDemo({
   const [pendingTouchSubmission, setPendingTouchSubmission] = useState<{
     input: string;
     intent: "queue" | "steer";
+    submittedAt: number;
   }>();
   const [terminalRunning, setTerminalRunning] = useState(false);
   const [terminalHost, setTerminalHost] = useState<TerminalHost>();
@@ -105,9 +105,7 @@ function AgentTerminalDemo({
     isSuccess,
     refetch,
   } = useAgent({ enabled: true, threadId: thread?.id });
-  const promptStartedAt = useRef(new Map<number, number>());
   const activePromptIds = useRef(new Set<number>());
-  const firstTokenReported = useRef(new Set<number>());
   const agentStatus: AgentStatus = isError
     ? "error"
     : isSuccess && terminalReady
@@ -122,18 +120,10 @@ function AgentTerminalDemo({
     onStateChange({ error: agentError, retry: retryAgent, status: agentStatus });
   }, [agentError, agentStatus, onStateChange, retryAgent]);
 
-  useAgentEvents(agent, (event) => {
-    if (event.type !== "assistant.delta" && event.type !== "reasoning.summary.delta") return;
-    const promptId = activePromptIds.current.values().next().value;
-    const startedAt = promptId === undefined ? undefined : promptStartedAt.current.get(promptId);
-    if (promptId === undefined || startedAt === undefined || firstTokenReported.current.has(promptId)) return;
-    firstTokenReported.current.add(promptId);
-    markAgentTiming("prompt.first_token", performance.now() - startedAt);
-  }, { includeAllSessions: true });
-
   useEffect(() => {
     setTerminalRunning(false);
     setTerminalReady(false);
+    activePromptIds.current.clear();
     active.current = undefined;
     if (!terminalHost || !agent) return;
     let cancelled = false;
@@ -145,16 +135,36 @@ function AgentTerminalDemo({
         if (cancelled) return;
         if (event.type === "prompt.accepted" && typeof event.id === "number") {
           activePromptIds.current.add(event.id);
-          promptStartedAt.current.set(event.id, performance.now());
           markAgentTiming("prompt.accepted");
           setTerminalRunning(true);
+        } else if (
+          event.type === "prompt.first_output"
+          && typeof event.id === "number"
+          && event.sessionId === agent.sessionId
+          && typeof event.eventSeq === "number"
+          && typeof event.submittedAt === "number"
+          && typeof event.runStartedAt === "number"
+        ) {
+          const timingContext = {
+            eventSeq: event.eventSeq,
+            promptId: event.id,
+            sessionId: event.sessionId,
+          };
+          markAgentTiming(
+            "prompt.submit_to_first_token",
+            Math.max(0, event.timestamp - event.submittedAt),
+            timingContext,
+          );
+          markAgentTiming(
+            "prompt.run_started_to_first_token",
+            Math.max(0, event.timestamp - event.runStartedAt),
+            timingContext,
+          );
         } else if (
           (event.type === "prompt.completed" || event.type === "prompt.failed")
           && typeof event.id === "number"
         ) {
           activePromptIds.current.delete(event.id);
-          promptStartedAt.current.delete(event.id);
-          firstTokenReported.current.delete(event.id);
           setTerminalRunning(activePromptIds.current.size > 0);
         }
       },
@@ -167,6 +177,7 @@ function AgentTerminalDemo({
     });
     return () => {
       cancelled = true;
+      activePromptIds.current.clear();
       if (active.current === attached) active.current = undefined;
       attached.dispose();
     };
@@ -189,17 +200,19 @@ function AgentTerminalDemo({
   });
   const submitTouchPrompt = useCallback((input: string, intent: "queue" | "steer") => {
     if (!input.trim()) return;
+    const submittedAt = performance.now();
     if (agentStatus !== "ready" || !active.current) {
-      setPendingTouchSubmission({ input, intent });
+      setPendingTouchSubmission({ input, intent, submittedAt });
       return;
     }
-    void active.current.submit(input, { intent });
+    void active.current.submit(input, { intent, submittedAt });
     setTouchDraft("");
   }, [agentStatus]);
   useEffect(() => {
     if (agentStatus !== "ready" || !pendingTouchSubmission || !active.current) return;
     void active.current.submit(pendingTouchSubmission.input, {
       intent: pendingTouchSubmission.intent,
+      submittedAt: pendingTouchSubmission.submittedAt,
     });
     setPendingTouchSubmission(undefined);
     setTouchDraft("");
@@ -217,7 +230,7 @@ function AgentTerminalDemo({
     if (!retainedTerminal) return;
     void retainedTerminal.submit(
       artifactFollowOnPrompt(artifact, path, prompt),
-      { intent: "queue" },
+      { intent: "queue", submittedAt: performance.now() },
     );
   }, [agentStatus]);
 
@@ -270,8 +283,12 @@ function artifactFollowOnPrompt(
   ].join("\n");
 }
 
-function markAgentTiming(stage: string, durationMs?: number) {
-  const detail = { stage, ...(durationMs === undefined ? {} : { durationMs }) };
+function markAgentTiming(
+  stage: string,
+  durationMs?: number,
+  context: Record<string, unknown> = {},
+) {
+  const detail = { stage, ...(durationMs === undefined ? {} : { durationMs }), ...context };
   performance.mark(`nanocodex:${stage}`, { detail });
   console.info(`nanocodex:${stage}`, detail);
 }

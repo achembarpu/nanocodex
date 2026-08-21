@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const terminal = source("../src/AgentTerminal.tsx");
+const demoTerminal = source("../src/demoTerminal.ts");
 const experience = source("../src/AgentExperience.tsx");
 const session = source("../src/chatGptSession.tsx");
 const health = source("../src/deploymentHealth.ts");
@@ -51,18 +52,29 @@ test("starting and failure states repaint the terminal while the native mobile c
   assert.match(surface, /onCompositionStart/);
   assert.match(surface, /isTerminalSubmitKeyEvent\(event\.nativeEvent, composing\.current\)/);
   assert.doesNotMatch(surface, /aria-label="Message Nanocodex"[\s\S]{0,120}disabled=\{!ready\}/);
-  assert.match(terminal, /setPendingTouchSubmission\(\{ input, intent \}\)/);
+  assert.match(terminal, /setPendingTouchSubmission\(\{ input, intent, submittedAt \}\)/);
   assert.match(terminal, /agentStatus !== "ready" \|\| !pendingTouchSubmission \|\| !active\.current/);
   assert.match(terminalCss, /\.agent-touch-composer textarea \{[\s\S]*?font:\s*400 16px\/22px/);
 });
 
 test("the React package owns browser Agent startup through its raw hook contract", () => {
-  assert.match(terminal, /import \{[\s\S]*?createConfig,[\s\S]*?NanocodexProvider,[\s\S]*?useAgent,[\s\S]*?useAgentEvents,[\s\S]*?type Config,[\s\S]*?\} from "nanocodex-react"/);
+  assert.match(terminal, /import \{[\s\S]*?createConfig,[\s\S]*?NanocodexProvider,[\s\S]*?useAgent,[\s\S]*?type Config,[\s\S]*?\} from "nanocodex-react"/);
   assert.match(terminal, /<NanocodexProvider config=\{agentConfig\}>/);
   assert.match(terminal, /data: agent,[\s\S]*?\} = useAgent\(\{ enabled: true, threadId: thread\?\.id \}\)/);
-  assert.match(terminal, /useAgentEvents\(agent,/);
   assert.match(terminal, /createAgentTerminal\(\{[\s\S]*?agent,[\s\S]*?terminal: terminalHost/);
+  assert.doesNotMatch(terminal, /useAgentEvents|includeAllSessions/);
   assert.doesNotMatch(terminal, /agent\.agent|createDemoAgent|prewarmDemoAgent/);
+});
+
+test("TTFT spans user submission through exact root first output", () => {
+  assert.match(terminal, /const submittedAt = performance\.now\(\)/);
+  assert.match(terminal, /submittedAt: pendingTouchSubmission\.submittedAt/);
+  assert.match(terminal, /prompt\.submit_to_first_token/);
+  assert.match(terminal, /prompt\.run_started_to_first_token/);
+  assert.doesNotMatch(terminal, /prompt\.first_token/);
+  assert.match(demoTerminal, /event\.request_id !== agent\.sessionId/);
+  assert.match(demoTerminal, /event\.type === "run\.started"/);
+  assert.match(demoTerminal, /eventSeq: event\.seq/);
 });
 
 test("terminal adapter replacement ignores stale readiness and disposes its local attachment", () => {

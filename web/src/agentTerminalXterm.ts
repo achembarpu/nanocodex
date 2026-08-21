@@ -1,5 +1,7 @@
 type TerminalSize = Readonly<{ cols: number; rows: number }>;
 const MAX_BUFFERED_INPUT = 64 * 1024;
+const BRACKETED_PASTE_START = "\x1b[200~";
+const BRACKETED_PASTE_END = "\x1b[201~";
 
 type XtermLike = {
   write(data: string): void;
@@ -30,7 +32,7 @@ export function isTerminalSubmitKeyEvent(
 }
 
 /** App-local xterm subscription adapter for the website Agent surface. */
-export function xtermAdapter(term: XtermLike) {
+export function xtermAdapter(term: XtermLike, now: () => number = performanceNow) {
   if (!term?.write || !term?.onData || !term?.onResize) {
     throw new TypeError("xtermAdapter requires an xterm.js Terminal");
   }
@@ -44,12 +46,13 @@ export function xtermAdapter(term: XtermLike) {
   return {
     write: (data: string | Uint8Array) =>
       term.write(typeof data === "string" ? data : new TextDecoder().decode(data)),
-    onData(callback: (data: string) => void) {
-      const data = term.onData(callback);
-      keyDataHandler = callback;
+    onData(callback: (data: string, receivedAt: number) => void) {
+      const receive = (data: string) => callback(data, now());
+      const data = term.onData(receive);
+      keyDataHandler = receive;
       return () => {
         data.dispose();
-        if (keyDataHandler === callback) keyDataHandler = undefined;
+        if (keyDataHandler === receive) keyDataHandler = undefined;
       };
     },
     get cols() { return term.cols; },
@@ -62,18 +65,20 @@ export function xtermAdapter(term: XtermLike) {
 }
 
 /** Own xterm immediately so input typed while Agent.create runs is not lost. */
-export function bufferedXtermAdapter(term: XtermLike) {
-  const xterm = xtermAdapter(term);
-  const dataListeners = new Set<(data: string) => void>();
+export function bufferedXtermAdapter(term: XtermLike, now: () => number = performanceNow) {
+  const xterm = xtermAdapter(term, now);
+  const dataListeners = new Set<(data: string, receivedAt: number) => void>();
   const resizeListeners = new Set<(size: TerminalSize) => void>();
-  let bufferedInput = "";
+  let bufferedCharacters = 0;
+  let bufferedInput: Array<{ data: string; receivedAt: number }> = [];
+  let replayScheduled = false;
   let disposed = false;
-  const releaseData = xterm.onData((data) => {
-    if (!dataListeners.size) {
-      bufferedInput = `${bufferedInput}${data}`.slice(-MAX_BUFFERED_INPUT);
+  const releaseData = xterm.onData((data, receivedAt) => {
+    if (!dataListeners.size || replayScheduled) {
+      retainBufferedInput(data, receivedAt);
       return;
     }
-    for (const listener of dataListeners) listener(data);
+    for (const listener of dataListeners) listener(data, receivedAt);
   });
   const releaseResize = xterm.onResize((size) => {
     for (const listener of resizeListeners) listener(size);
@@ -81,14 +86,22 @@ export function bufferedXtermAdapter(term: XtermLike) {
   return Object.freeze({
     host: Object.freeze({
       write: xterm.write,
-      onData(listener: (data: string) => void) {
+      onData(listener: (data: string, receivedAt: number) => void) {
         if (disposed) return () => {};
         dataListeners.add(listener);
-        if (bufferedInput) {
-          const input = bufferedInput;
-          bufferedInput = "";
+        if (bufferedInput.length && !replayScheduled) {
+          replayScheduled = true;
           queueMicrotask(() => {
-            if (dataListeners.has(listener)) listener(input);
+            replayScheduled = false;
+            if (disposed) return;
+            const input = replayChunks(bufferedInput);
+            bufferedInput = [];
+            bufferedCharacters = 0;
+            for (const chunk of input) {
+              for (const current of dataListeners) {
+                current(chunk.data, chunk.receivedAt);
+              }
+            }
           });
         }
         return () => dataListeners.delete(listener);
@@ -104,11 +117,61 @@ export function bufferedXtermAdapter(term: XtermLike) {
     dispose() {
       if (disposed) return;
       disposed = true;
-      bufferedInput = "";
+      bufferedInput = [];
+      bufferedCharacters = 0;
+      replayScheduled = false;
       dataListeners.clear();
       resizeListeners.clear();
       releaseData();
       releaseResize();
     },
   });
+
+  function retainBufferedInput(data: string, receivedAt: number) {
+    if (!data) return;
+    bufferedInput.push({ data, receivedAt });
+    bufferedCharacters += data.length;
+    let overflow = bufferedCharacters - MAX_BUFFERED_INPUT;
+    while (overflow > 0 && bufferedInput.length) {
+      const first = bufferedInput[0]!;
+      if (first.data.length <= overflow) {
+        overflow -= first.data.length;
+        bufferedCharacters -= first.data.length;
+        bufferedInput.shift();
+        continue;
+      }
+      first.data = first.data.slice(overflow);
+      bufferedCharacters -= overflow;
+      overflow = 0;
+    }
+  }
+
+  function replayChunks(chunks: Array<{ data: string; receivedAt: number }>) {
+    const replay: Array<{ data: string; receivedAt: number }> = [];
+    let paste: { data: string; receivedAt: number } | undefined;
+    for (const chunk of chunks) {
+      if (!paste && !chunk.data.startsWith(BRACKETED_PASTE_START)) {
+        replay.push(chunk);
+        continue;
+      }
+      paste = {
+        data: `${paste?.data ?? ""}${chunk.data}`,
+        receivedAt: chunk.receivedAt,
+      };
+      const end = paste.data.indexOf(BRACKETED_PASTE_END);
+      if (end < 0) continue;
+      const boundary = end + BRACKETED_PASTE_END.length;
+      replay.push({ data: paste.data.slice(0, boundary), receivedAt: paste.receivedAt });
+      if (boundary < paste.data.length) {
+        replay.push({ data: paste.data.slice(boundary), receivedAt: paste.receivedAt });
+      }
+      paste = undefined;
+    }
+    if (paste) replay.push(paste);
+    return replay;
+  }
+}
+
+function performanceNow(): number {
+  return globalThis.performance?.now?.() ?? Date.now();
 }

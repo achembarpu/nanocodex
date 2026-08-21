@@ -175,7 +175,7 @@ test("touch terminals use one native IME-safe composer and one contextual action
   assert.match(composer, /min-height:\s*calc\(60px \+ env\(safe-area-inset-bottom\)\)/);
   assert.match(composer, /env\(safe-area-inset-left\)/);
   assert.match(composer, /env\(safe-area-inset-right\)/);
-  assert.match(terminal, /active\.current\.submit\(input, \{ intent \}\)/);
+  assert.match(terminal, /active\.current\.submit\(input, \{ intent, submittedAt \}\)/);
   assert.match(terminal, /active\.current\?\.cancel\(\)/);
 });
 

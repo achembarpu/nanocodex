@@ -19,10 +19,11 @@ const BOLD = "\x1b[1m";
 const DIM = "\x1b[2m";
 const RED = "\x1b[31m";
 const MAX_ENTRY_CHARACTERS = 8_000;
+const DEFAULT_MAX_PROMPT_HISTORY = 200;
 
 export type TerminalHost = Readonly<{
   write(data: string | Uint8Array): void | Promise<void>;
-  onData(listener: (data: string) => void): () => void;
+  onData(listener: (data: string, receivedAt: number) => void): () => void;
   onResize(listener: (size: { cols: number; rows: number }) => void): () => void;
   isVisible?(): boolean;
   onVisibilityChange?(listener: () => void): () => void;
@@ -40,7 +41,10 @@ export type AgentTerminalInputMode = "xterm" | "composer";
 
 export type AgentTerminal = Readonly<{
   ready: Promise<void>;
-  submit(input: string, options?: { intent?: "queue" | "steer" }): Promise<Turn | undefined>;
+  submit(input: string, options?: {
+    intent?: "queue" | "steer";
+    submittedAt?: number;
+  }): Promise<Turn | undefined>;
   cancel(): Promise<void>;
   render(): void;
   resize(): void;
@@ -48,7 +52,17 @@ export type AgentTerminal = Readonly<{
   dispose(): void;
 }>;
 
-type ActiveTurn = { turn: Turn; settled: boolean };
+type ActiveTurn = {
+  timing: PromptTiming;
+  turn: Turn;
+};
+
+type PromptTiming = {
+  id: number;
+  firstOutputReported: boolean;
+  runStartedAt?: number;
+  submittedAt: number;
+};
 
 /** App-local terminal presentation used only by the website demo. */
 export function createAgentTerminal(options: {
@@ -56,7 +70,8 @@ export function createAgentTerminal(options: {
   terminal: TerminalHost;
   inputMode?: AgentTerminalInputMode;
   maxEntries?: number;
-  onEvent?(event: AgentTerminalEvent & { result?: TurnResult }): void;
+  maxHistory?: number;
+  onEvent?(event: AgentTerminalEvent): void;
 }): AgentTerminal {
   const { agent, terminal } = options;
   validateTerminal(terminal);
@@ -72,8 +87,11 @@ export function createAgentTerminal(options: {
   let cancelScheduledRender: (() => void) | undefined;
   let nextPromptId = 1;
   const history: string[] = [];
-  const activeTurns: ActiveTurn[] = [];
+  const activeTurns = new Set<ActiveTurn>();
+  const pendingRootPrompts: PromptTiming[] = [];
+  let currentRootPrompt: PromptTiming | undefined;
   const maxEntries = positiveInteger(options.maxEntries, 200);
+  const maxHistory = positiveInteger(options.maxHistory, DEFAULT_MAX_PROMPT_HISTORY);
   const surface = terminalSurface(terminal);
   const watcher = agent.events.watch();
   const listeners: Array<() => void> = [];
@@ -136,19 +154,21 @@ export function createAgentTerminal(options: {
   };
 
   listeners.push(watcher.onEvent((event) => {
-    if (disposed) return;
+    if (disposed || event.request_id !== agent.sessionId) return;
+    observeRootTurnEvent(event);
     state = boundedTerminalState(applyAgentEvents(state, [event]), maxEntries);
     render();
   }));
 
   async function submit(
     value: string,
-    submitOptions: { intent?: "queue" | "steer" } = {},
+    submitOptions: { intent?: "queue" | "steer"; submittedAt?: number } = {},
   ): Promise<Turn | undefined> {
+    const submittedAt = finiteTimestamp(submitOptions.submittedAt) ?? performanceNow();
     const submitted = String(value);
     const prompt = submitted.trim();
     if (!prompt || disposed) return undefined;
-    if (history.at(-1) !== submitted) history.push(submitted);
+    retainPromptHistory(history, submitted, maxHistory);
     if (prompt === "/clear") {
       state = boundedTerminalState({ ...state, entries: [] }, maxEntries);
       render();
@@ -196,28 +216,54 @@ export function createAgentTerminal(options: {
       return undefined;
     }
     state = boundedTerminalState(queuePrompt(state, id, prompt), maxEntries);
-    const record = { turn, settled: false };
-    activeTurns.push(record);
-    emit("prompt.accepted", { id });
+    const timing: PromptTiming = {
+      id,
+      firstOutputReported: false,
+      submittedAt,
+    };
+    const record: ActiveTurn = { timing, turn };
+    activeTurns.add(record);
+    pendingRootPrompts.push(timing);
+    emit("prompt.accepted", { id, sessionId: agent.sessionId, submittedAt });
     render();
-    void turn.result().then((result) => {
+    void finishTurn(record);
+    return turn;
+  }
+
+  async function finishTurn(record: ActiveTurn) {
+    let result: TurnResult | undefined;
+    try {
+      result = await record.turn.result();
+      const completed = { finalMessage: result.finalMessage };
       state = boundedTerminalState(
-        turnFinished(state, undefined, result.finalMessage),
+        turnFinished(state, undefined, completed.finalMessage),
         maxEntries,
       );
-      emit("prompt.completed", { id, result });
-    }, (error) => {
+      emit("prompt.completed", { id: record.timing.id, ...completed });
+    } catch (error) {
       state = boundedTerminalState(
         turnFinished(state, terminalErrorMessage(error)),
         maxEntries,
       );
-      emit("prompt.failed", { error, id });
-    }).finally(() => {
-      record.settled = true;
-      turn.dispose();
+      emit("prompt.failed", { error, id: record.timing.id });
+    } finally {
+      if (result) {
+        try {
+          result.dispose();
+        } catch (error) {
+          emit("terminal.cleanup_error", { error });
+        }
+      }
+      activeTurns.delete(record);
+      const pendingIndex = pendingRootPrompts.indexOf(record.timing);
+      if (pendingIndex >= 0) pendingRootPrompts.splice(pendingIndex, 1);
+      try {
+        record.turn.dispose();
+      } catch (error) {
+        emit("terminal.cleanup_error", { error });
+      }
       render();
-    });
-    return turn;
+    }
   }
 
   async function cancel() {
@@ -236,23 +282,49 @@ export function createAgentTerminal(options: {
   }
 
   function latestActiveTurn(): ActiveTurn | undefined {
-    for (let index = activeTurns.length - 1; index >= 0; index -= 1) {
-      const record = activeTurns[index];
-      if (record && !record.settled) return record;
-    }
-    return undefined;
+    let latest: ActiveTurn | undefined;
+    for (const record of activeTurns) latest = record;
+    return latest;
   }
 
-  const commitInput = () => {
+  function observeRootTurnEvent(event: {
+    payload?: Record<string, unknown>;
+    seq?: number;
+    type: string;
+  }) {
+    if (event.type === "run.started") {
+      currentRootPrompt = pendingRootPrompts.shift();
+      if (currentRootPrompt) currentRootPrompt.runStartedAt = performanceNow();
+      return;
+    }
+    if (event.type === "run.completed" || event.type === "run.failed") {
+      currentRootPrompt = undefined;
+      return;
+    }
+    if (event.type !== "assistant.delta" && event.type !== "reasoning.summary.delta") return;
+    if (typeof event.payload?.text !== "string" || event.payload.text.length === 0) return;
+    const current = currentRootPrompt;
+    if (!current || current.firstOutputReported || current.runStartedAt === undefined) return;
+    current.firstOutputReported = true;
+    emit("prompt.first_output", {
+      eventSeq: event.seq,
+      id: current.id,
+      runStartedAt: current.runStartedAt,
+      sessionId: agent.sessionId,
+      submittedAt: current.submittedAt,
+    });
+  }
+
+  const commitInput = (submittedAt: number) => {
     const value = input;
     input = "";
     cursor = 0;
     historyIndex = undefined;
-    if (value.trim()) void submit(value);
+    if (value.trim()) void submit(value, { submittedAt });
     else render();
   };
 
-  const onData = (data: string) => {
+  const onData = (data: string, receivedAt: number) => {
     if (disposed || inputMode !== "xterm" || typeof data !== "string") return;
     if (data === "\x1b[13;2u") {
       insert("\n");
@@ -287,9 +359,9 @@ export function createAgentTerminal(options: {
     }
     for (const character of data) {
       if (character === "\r" || character === "\n") {
-        commitInput();
+        commitInput(receivedAt);
       } else if (character === "\x03") {
-        if (activeTurns.some((record) => !record.settled)) void cancel();
+        if (activeTurns.size > 0) void cancel();
         else {
           input = "";
           cursor = 0;
@@ -376,6 +448,9 @@ export function createAgentTerminal(options: {
     cancelScheduledRender?.();
     cancelScheduledRender = undefined;
     renderScheduled = false;
+    history.length = 0;
+    pendingRootPrompts.length = 0;
+    currentRootPrompt = undefined;
     watcher.off();
     for (const release of listeners.splice(0)) {
       try {
@@ -540,6 +615,19 @@ function footerHint(cols: number): string {
 
 function positiveInteger(value: number | undefined, fallback: number): number {
   return Number.isSafeInteger(value) && value! > 0 ? value! : fallback;
+}
+
+function finiteTimestamp(value: number | undefined): number | undefined {
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function retainPromptHistory(history: string[], submitted: string, maxHistory: number) {
+  const retained = submitted.length > MAX_ENTRY_CHARACTERS
+    ? submitted.slice(0, MAX_ENTRY_CHARACTERS)
+    : submitted;
+  if (history.at(-1) === retained) return;
+  history.push(retained);
+  if (history.length > maxHistory) history.splice(0, history.length - maxHistory);
 }
 
 function boundedTerminalState(state: TerminalState, maxEntries: number): TerminalState {
