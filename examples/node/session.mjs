@@ -32,9 +32,12 @@ export async function runOwnedSession(
       firstResult = await first.result();
       firstMessage = firstResult.finalMessage;
     } finally {
-      firstResult?.dispose();
-      firstResult = undefined;
-      unfinishedTurns.delete(first);
+      try {
+        firstResult?.dispose();
+      } finally {
+        firstResult = undefined;
+        unfinishedTurns.delete(first);
+      }
     }
     log("first:", firstMessage);
 
@@ -50,9 +53,12 @@ export async function runOwnedSession(
       secondResult = await second.result();
       secondMessage = secondResult.finalMessage;
     } finally {
-      secondResult?.dispose();
-      secondResult = undefined;
-      unfinishedTurns.delete(second);
+      try {
+        secondResult?.dispose();
+      } finally {
+        secondResult = undefined;
+        unfinishedTurns.delete(second);
+      }
     }
     log("second:", secondMessage);
 

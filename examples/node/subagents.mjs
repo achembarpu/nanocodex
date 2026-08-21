@@ -29,8 +29,11 @@ try {
     result = await turn.result();
     console.log(result.finalMessage);
   } finally {
-    result?.dispose();
-    turn.dispose();
+    try {
+      result?.dispose();
+    } finally {
+      turn.dispose();
+    }
   }
 } finally {
   // Rust closes the complete subagent subtree before the root driver exits.

@@ -117,8 +117,11 @@ try {
   console.error(`Authorized cumulative payment: ${mpp.cumulative}`);
   console.error(`MPP channel: ${mpp.channelId}`);
 } finally {
-  completed?.dispose();
-  turn?.dispose();
+  try {
+    completed?.dispose();
+  } finally {
+    turn?.dispose();
+  }
   unwatch?.();
   watch?.off();
   const cleanupErrors = [];

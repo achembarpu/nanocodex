@@ -41,8 +41,11 @@
             completed = await turn.result();
             result.textContent = completed.finalMessage;
           } finally {
-            completed?.dispose();
-            turn.dispose();
+            try {
+              completed?.dispose();
+            } finally {
+              turn.dispose();
+            }
           }
         } catch (error) {
           result.textContent = error instanceof Error ? error.message : String(error);
