@@ -24,6 +24,8 @@ export type TerminalHost = Readonly<{
   write(data: string | Uint8Array): void | Promise<void>;
   onData(listener: (data: string) => void): () => void;
   onResize(listener: (size: { cols: number; rows: number }) => void): () => void;
+  isVisible?(): boolean;
+  onVisibilityChange?(listener: () => void): () => void;
   readonly cols: number;
   readonly rows: number;
 }>;
@@ -61,10 +63,13 @@ export function createAgentTerminal(options: {
   let historyIndex: number | undefined;
   let disposed = false;
   let renderScheduled = false;
+  let projectionDirty = true;
+  let cancelScheduledRender: (() => void) | undefined;
   let nextPromptId = 1;
   const history: string[] = [];
   const activeTurns: ActiveTurn[] = [];
   const maxEntries = positiveInteger(options.maxEntries, 200);
+  const surface = terminalSurface(terminal);
   const watcher = agent.events.watch();
   const listeners: Array<() => void> = [];
   let resolveReady!: () => void;
@@ -83,12 +88,12 @@ export function createAgentTerminal(options: {
   };
 
   const writeFrame = () => {
-    if (disposed) return;
     renderScheduled = false;
+    cancelScheduledRender = undefined;
+    if (disposed || !projectionDirty || !surface.isVisible()) return;
+    projectionDirty = false;
     const frame = renderTerminal({
-      state: state.entries.length > maxEntries
-        ? { ...state, entries: state.entries.slice(-maxEntries) }
-        : state,
+      state,
       input,
       cursor,
       cols: terminal.cols,
@@ -106,14 +111,27 @@ export function createAgentTerminal(options: {
   };
 
   const render = () => {
-    if (disposed || renderScheduled) return;
+    if (disposed) return;
+    projectionDirty = true;
+    if (renderScheduled || !surface.isVisible()) return;
     renderScheduled = true;
-    queueMicrotask(writeFrame);
+    cancelScheduledRender = scheduleFrame(writeFrame);
+  };
+
+  const visibilityChanged = () => {
+    if (disposed) return;
+    if (!surface.isVisible()) {
+      cancelScheduledRender?.();
+      cancelScheduledRender = undefined;
+      renderScheduled = false;
+      return;
+    }
+    if (projectionDirty) render();
   };
 
   listeners.push(watcher.onEvent((event) => {
     if (disposed) return;
-    state = applyAgentEvents(state, [event]);
+    state = boundedTerminalState(applyAgentEvents(state, [event]), maxEntries);
     render();
   }));
 
@@ -126,7 +144,7 @@ export function createAgentTerminal(options: {
     if (!prompt || disposed) return undefined;
     if (history.at(-1) !== submitted) history.push(submitted);
     if (prompt === "/clear") {
-      state = { ...state, entries: [] };
+      state = boundedTerminalState({ ...state, entries: [] }, maxEntries);
       render();
       return undefined;
     }
@@ -146,14 +164,17 @@ export function createAgentTerminal(options: {
     const id = nextPromptId++;
     const current = latestActiveTurn();
     if (submitOptions.intent === "steer" && current) {
-      state = queueSteer(state, id, prompt);
+      state = boundedTerminalState(queueSteer(state, id, prompt), maxEntries);
       render();
       try {
         await current.turn.steer({ input: prompt });
-        state = steerAdmitted(state, id);
+        state = boundedTerminalState(steerAdmitted(state, id), maxEntries);
         emit("prompt.steered", { id });
       } catch (error) {
-        state = steerFailed(state, id, terminalErrorMessage(error));
+        state = boundedTerminalState(
+          steerFailed(state, id, terminalErrorMessage(error)),
+          maxEntries,
+        );
         emit("prompt.steer_error", { error, id });
       }
       render();
@@ -168,16 +189,22 @@ export function createAgentTerminal(options: {
       emit("prompt.rejected", { error, id });
       return undefined;
     }
-    state = queuePrompt(state, id, prompt);
+    state = boundedTerminalState(queuePrompt(state, id, prompt), maxEntries);
     const record = { turn, settled: false };
     activeTurns.push(record);
     emit("prompt.accepted", { id });
     render();
     void turn.result().then((result) => {
-      state = turnFinished(state, undefined, result.finalMessage);
+      state = boundedTerminalState(
+        turnFinished(state, undefined, result.finalMessage),
+        maxEntries,
+      );
       emit("prompt.completed", { id, result });
     }, (error) => {
-      state = turnFinished(state, terminalErrorMessage(error));
+      state = boundedTerminalState(
+        turnFinished(state, terminalErrorMessage(error)),
+        maxEntries,
+      );
       emit("prompt.failed", { error, id });
     }).finally(() => {
       record.settled = true;
@@ -295,7 +322,7 @@ export function createAgentTerminal(options: {
 
   function appendLocal(text: string) {
     const syntheticId = state.syntheticId + 1;
-    state = {
+    state = boundedTerminalState({
       ...state,
       syntheticId,
       entries: [...state.entries, {
@@ -304,20 +331,20 @@ export function createAgentTerminal(options: {
         text,
         streaming: false,
       }],
-    };
+    }, maxEntries);
     render();
   }
 
   function appendTerminalError(text: string) {
     const syntheticId = state.syntheticId + 1;
-    state = {
+    state = boundedTerminalState({
       ...state,
       syntheticId,
       entries: [
         ...state.entries,
         { id: `terminal-error-${syntheticId}`, kind: "error", text },
       ],
-    };
+    }, maxEntries);
     render();
   }
 
@@ -329,6 +356,9 @@ export function createAgentTerminal(options: {
   function dispose() {
     if (disposed) return;
     disposed = true;
+    cancelScheduledRender?.();
+    cancelScheduledRender = undefined;
+    renderScheduled = false;
     watcher.off();
     for (const release of listeners.splice(0)) {
       try {
@@ -338,9 +368,11 @@ export function createAgentTerminal(options: {
       }
     }
     try {
-      void Promise.resolve(terminal.write(SHOW_CURSOR)).catch((error) => {
-        emit("terminal.cleanup_error", { error });
-      });
+      if (surface.isVisible()) {
+        void Promise.resolve(terminal.write(SHOW_CURSOR)).catch((error) => {
+          emit("terminal.cleanup_error", { error });
+        });
+      }
     } catch (error) {
       emit("terminal.cleanup_error", { error });
     }
@@ -348,10 +380,11 @@ export function createAgentTerminal(options: {
     emit("terminal.detached");
   }
 
+  listeners.push(surface.onVisibilityChange(visibilityChanged));
   listeners.push(terminal.onData(onData));
   listeners.push(terminal.onResize(resize));
   emit("terminal.attached", { cols: terminal.cols, rows: terminal.rows });
-  writeFrame();
+  render();
 
   return Object.freeze({ ready, submit, cancel, render, resize, dispose });
 }
@@ -488,6 +521,130 @@ function footerHint(cols: number): string {
 
 function positiveInteger(value: number | undefined, fallback: number): number {
   return Number.isSafeInteger(value) && value! > 0 ? value! : fallback;
+}
+
+function boundedTerminalState(state: TerminalState, maxEntries: number): TerminalState {
+  const retained = state.entries.length > maxEntries
+    ? state.entries.slice(-maxEntries)
+    : state.entries;
+  let ownsEntries = retained !== state.entries;
+  let entries = retained;
+  for (let index = 0; index < entries.length; index += 1) {
+    const entry = entries[index]!;
+    if (!("text" in entry) || entry.text.length <= MAX_ENTRY_CHARACTERS + 1) continue;
+    if (!ownsEntries) {
+      entries = entries.slice();
+      ownsEntries = true;
+    }
+    entries[index] = { ...entry, text: entry.text.slice(0, MAX_ENTRY_CHARACTERS + 1) };
+  }
+  return ownsEntries ? { ...state, entries } : state;
+}
+
+function scheduleFrame(callback: () => void): () => void {
+  let active = true;
+  if (typeof globalThis.requestAnimationFrame === "function") {
+    try {
+      const frame = globalThis.requestAnimationFrame(() => {
+        if (!active) return;
+        active = false;
+        callback();
+      });
+      return () => {
+        if (!active) return;
+        active = false;
+        try {
+          globalThis.cancelAnimationFrame?.(frame);
+        } catch {
+          // The active guard still cancels the callback for partial DOM shims.
+        }
+      };
+    } catch {
+      // Test and non-window DOM shims fall through to the microtask scheduler.
+    }
+  }
+  queueMicrotask(() => {
+    if (!active) return;
+    active = false;
+    callback();
+  });
+  return () => { active = false; };
+}
+
+function terminalSurface(terminal: TerminalHost): {
+  isVisible(): boolean;
+  onVisibilityChange(listener: () => void): () => void;
+} {
+  const browser = browserTerminalSurface();
+  const isVisible = () => {
+    try {
+      return terminal.isVisible ? terminal.isVisible() : browser.isVisible();
+    } catch {
+      return false;
+    }
+  };
+  return {
+    isVisible,
+    onVisibilityChange(listener) {
+      return terminal.onVisibilityChange
+        ? terminal.onVisibilityChange(listener)
+        : browser.onVisibilityChange(listener);
+    },
+  };
+}
+
+function browserTerminalSurface(): {
+  isVisible(): boolean;
+  onVisibilityChange(listener: () => void): () => void;
+} {
+  const document = globalThis.document;
+  if (!document) {
+    return { isVisible: () => true, onVisibilityChange: () => () => {} };
+  }
+  let element = document.querySelector<HTMLElement>(".agent-xterm");
+  let owner = element?.closest<HTMLElement>(".nanocodex-demo");
+  const isVisible = () => {
+    if (!element?.isConnected) {
+      element = document.querySelector<HTMLElement>(".agent-xterm");
+      owner = element?.closest<HTMLElement>(".nanocodex-demo");
+    }
+    return document.visibilityState !== "hidden"
+      && element?.isConnected === true
+      && owner?.classList.contains("is-hidden") !== true
+      && element.closest("[hidden], [aria-hidden=\"true\"]") === null;
+  };
+  return {
+    isVisible,
+    onVisibilityChange(listener) {
+      let visible = isVisible();
+      const notify = () => {
+        const next = isVisible();
+        if (next === visible) return;
+        visible = next;
+        listener();
+      };
+      document.addEventListener("visibilitychange", notify);
+      const observer = typeof globalThis.MutationObserver === "function"
+        ? new globalThis.MutationObserver(notify)
+        : undefined;
+      const modeObserver = typeof globalThis.MutationObserver === "function"
+        ? new globalThis.MutationObserver(notify)
+        : undefined;
+      observer?.observe(document.documentElement, {
+        attributes: true,
+        attributeFilter: ["hidden", "aria-hidden"],
+        subtree: true,
+      });
+      if (owner) {
+        modeObserver?.observe(owner, { attributes: true, attributeFilter: ["class"] });
+      }
+      return () => {
+        document.removeEventListener("visibilitychange", notify);
+        observer?.disconnect();
+        modeObserver?.disconnect();
+      };
+    },
+  };
 }
 
 function validateTerminal(terminal: TerminalHost): void {

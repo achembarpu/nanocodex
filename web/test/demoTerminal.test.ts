@@ -23,6 +23,8 @@ import {
 function fakeTerminal() {
   let onData = (_data: string) => {};
   let onResize = (_size: { cols: number; rows: number }) => {};
+  let onVisibilityChange = () => {};
+  let visible = true;
   const writes: string[] = [];
   return {
     cols: 80,
@@ -39,11 +41,20 @@ function fakeTerminal() {
       onResize = listener;
       return () => { onResize = () => {}; };
     },
+    isVisible() { return visible; },
+    onVisibilityChange(listener: () => void) {
+      onVisibilityChange = listener;
+      return () => { onVisibilityChange = () => {}; };
+    },
     data(value: string) { onData(value); },
     resize(cols: number, rows: number) {
       this.cols = cols;
       this.rows = rows;
       onResize({ cols, rows });
+    },
+    setVisible(next: boolean) {
+      visible = next;
+      onVisibilityChange();
     },
   };
 }
@@ -99,6 +110,49 @@ function fakeAgent() {
 
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 
+function fakeAnimationFrames() {
+  const requestDescriptor = Object.getOwnPropertyDescriptor(globalThis, "requestAnimationFrame");
+  const cancelDescriptor = Object.getOwnPropertyDescriptor(globalThis, "cancelAnimationFrame");
+  const callbacks = new Map<number, (timestamp: number) => void>();
+  let nextFrame = 1;
+  let cancellations = 0;
+  Object.defineProperty(globalThis, "requestAnimationFrame", {
+    configurable: true,
+    value(callback: (timestamp: number) => void) {
+      const frame = nextFrame++;
+      callbacks.set(frame, callback);
+      return frame;
+    },
+  });
+  Object.defineProperty(globalThis, "cancelAnimationFrame", {
+    configurable: true,
+    value(frame: number) {
+      cancellations += Number(callbacks.delete(frame));
+    },
+  });
+  return {
+    get cancellations() { return cancellations; },
+    get pending() { return callbacks.size; },
+    flush() {
+      const pending = [...callbacks.values()];
+      callbacks.clear();
+      for (const callback of pending) callback(performance.now());
+    },
+    restore() {
+      if (requestDescriptor) {
+        Object.defineProperty(globalThis, "requestAnimationFrame", requestDescriptor);
+      } else {
+        Reflect.deleteProperty(globalThis, "requestAnimationFrame");
+      }
+      if (cancelDescriptor) {
+        Object.defineProperty(globalThis, "cancelAnimationFrame", cancelDescriptor);
+      } else {
+        Reflect.deleteProperty(globalThis, "cancelAnimationFrame");
+      }
+    },
+  };
+}
+
 test("the app-local terminal drives one retained agent and renders its result", async () => {
   const host = fakeTerminal();
   const agent = fakeAgent();
@@ -147,6 +201,110 @@ test("connection failures stay concise and return to the composer", async () => 
   assert.match(frame, /Could not connect to the agent\. Try again\./);
   assert.doesNotMatch(frame, /WebSocket|noisy stack|Turn failed/);
   terminal.dispose();
+});
+
+test("streaming bursts coalesce into one animation-frame projection", async () => {
+  const frames = fakeAnimationFrames();
+  const host = fakeTerminal();
+  const agent = fakeAgent();
+  const terminal = createAgentTerminal({ agent: agent as never, terminal: host });
+  try {
+    assert.equal(frames.pending, 1);
+    frames.flush();
+    await terminal.ready;
+    host.writes.length = 0;
+
+    agent.event(event(1, "run.started"));
+    for (let seq = 2; seq <= 101; seq += 1) {
+      agent.event(event(seq, "assistant.delta", { text: String(seq % 10) }));
+    }
+
+    assert.equal(host.writes.length, 0);
+    assert.equal(frames.pending, 1);
+    frames.flush();
+    assert.equal(host.writes.length, 1);
+    assert.match(host.writes[0]!, /2345678901/);
+  } finally {
+    terminal.dispose();
+    frames.restore();
+  }
+});
+
+test("hidden streaming reduces state without TerminalHost writes", async () => {
+  const frames = fakeAnimationFrames();
+  const host = fakeTerminal();
+  const agent = fakeAgent();
+  const terminal = createAgentTerminal({ agent: agent as never, terminal: host });
+  try {
+    frames.flush();
+    await terminal.ready;
+    host.writes.length = 0;
+    host.setVisible(false);
+
+    agent.event(event(1, "run.started"));
+    for (let seq = 2; seq <= 25; seq += 1) {
+      agent.event(event(seq, "assistant.delta", { text: "hidden " }));
+    }
+    frames.flush();
+
+    assert.equal(frames.pending, 0);
+    assert.deepEqual(host.writes, []);
+  } finally {
+    terminal.dispose();
+    frames.restore();
+  }
+});
+
+test("a visible surface receives one consolidated catch-up frame", async () => {
+  const frames = fakeAnimationFrames();
+  const host = fakeTerminal();
+  const agent = fakeAgent();
+  const terminal = createAgentTerminal({ agent: agent as never, terminal: host });
+  try {
+    frames.flush();
+    await terminal.ready;
+    host.writes.length = 0;
+    host.setVisible(false);
+    agent.event(event(1, "run.started"));
+    agent.event(event(2, "assistant.delta", { text: "kept " }));
+    agent.event(event(3, "assistant.delta", { text: "current" }));
+    assert.deepEqual(host.writes, []);
+
+    host.setVisible(true);
+    assert.equal(frames.pending, 1);
+    assert.deepEqual(host.writes, []);
+    frames.flush();
+
+    assert.equal(host.writes.length, 1);
+    assert.match(host.writes[0]!, /kept current/);
+  } finally {
+    terminal.dispose();
+    frames.restore();
+  }
+});
+
+test("disposal cancels an outstanding animation-frame projection", async () => {
+  const frames = fakeAnimationFrames();
+  const host = fakeTerminal();
+  const agent = fakeAgent();
+  const terminal = createAgentTerminal({ agent: agent as never, terminal: host });
+  try {
+    frames.flush();
+    await terminal.ready;
+    host.writes.length = 0;
+    agent.event(event(1, "assistant.delta", { text: "never rendered" }));
+    assert.equal(frames.pending, 1);
+
+    terminal.dispose();
+    assert.equal(frames.pending, 0);
+    assert.equal(frames.cancellations, 1);
+    assert.deepEqual(host.writes, ["\x1b[?25h"]);
+    frames.flush();
+    assert.deepEqual(host.writes, ["\x1b[?25h"]);
+  } finally {
+    terminal.dispose();
+    frames.restore();
+  }
 });
 
 test("streaming reduction preserves queue/steer ordering and tool completion", () => {
