@@ -130,6 +130,15 @@ function restoreModalFocus(opener: { current: HTMLElement | null }) {
   if (target?.isConnected && !target.closest("[inert]")) target.focus();
 }
 
+function isPlainProductNavigation(event: ReactMouseEvent<HTMLAnchorElement>): boolean {
+  return !event.defaultPrevented
+    && event.button === 0
+    && !event.metaKey
+    && !event.ctrlKey
+    && !event.shiftKey
+    && !event.altKey;
+}
+
 const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
@@ -290,6 +299,8 @@ function commitSearchScore(commit: HarnessCommit, tokens: readonly string[]) {
 }
 
 const installCommand = "curl -fsSL https://nanocodex.paradigm.xyz | bash";
+const terminalBenchWorksetPath =
+  "/evals/worksets/e1c16fd7df8f171e69052a66cb59b8bd52bc43017297d748eb19866e7593570d";
 const installOptions = [
   { id: "rust", label: "Rust", command: "cargo add nanocodex" },
   { id: "javascript", label: "JavaScript", command: "npm install nanocodex" },
@@ -623,6 +634,33 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
     if (nextSurface === "evals") preloadEvalOverview();
   }, []);
 
+  const navigateToPreparedRepository = useCallback((
+    nextSurface: RepositorySurface,
+    destination: string,
+    navigationId: number,
+    nextThreadId: string,
+  ) => {
+    void settleRepositoryNavigationIntent({
+      navigationId,
+      latestNavigationId: () => surfaceNavigationId.current,
+      preparation: prepareRepositorySurface(nextSurface),
+      onPrepared: (preparedSnapshot) => {
+        flushSync(() => {
+          if (!threadId) setThreadId(nextThreadId);
+          commitRepositorySnapshot(preparedSnapshot);
+          setRepositoryLoadError((current) => current === nextSurface ? null : current);
+        });
+      },
+      onFailure: () => {
+        flushSync(() => {
+          if (!threadId) setThreadId(nextThreadId);
+          setRepositoryLoadError(nextSurface);
+        });
+      },
+      navigate: () => startTransition(() => navigate(destination)),
+    });
+  }, [commitRepositorySnapshot, navigate, threadId]);
+
   const navigateToSurface = useCallback((nextSurface: Surface) => {
     retainAgentExperience(nextSurface);
     preloadSurface(nextSurface);
@@ -650,34 +688,16 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
     if (`${location.pathname}${location.search}` === destination) return;
     repositoryRequestId.current++;
     if (nextSurface === "code" || nextSurface === "commits") {
-      void settleRepositoryNavigationIntent({
-        navigationId,
-        latestNavigationId: () => surfaceNavigationId.current,
-        preparation: prepareRepositorySurface(nextSurface),
-        onPrepared: (preparedSnapshot) => {
-          flushSync(() => {
-            if (!threadId) setThreadId(nextThreadId);
-            commitRepositorySnapshot(preparedSnapshot);
-            setRepositoryLoadError((current) => current === nextSurface ? null : current);
-          });
-        },
-        onFailure: () => {
-          flushSync(() => {
-            if (!threadId) setThreadId(nextThreadId);
-            setRepositoryLoadError(nextSurface);
-          });
-        },
-        navigate: () => startTransition(() => navigate(destination)),
-      });
+      navigateToPreparedRepository(nextSurface, destination, navigationId, nextThreadId);
       return;
     }
     if (!threadId) setThreadId(nextThreadId);
     startTransition(() => navigate(destination));
   }, [
-    commitRepositorySnapshot,
     location.pathname,
     location.search,
     navigate,
+    navigateToPreparedRepository,
     preloadSurface,
     retainAgentExperience,
     threadId,
@@ -687,17 +707,53 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
     event: ReactMouseEvent<HTMLAnchorElement>,
     nextSurface: Surface,
   ) => {
-    if (
-      event.defaultPrevented ||
-      event.button !== 0 ||
-      event.metaKey ||
-      event.ctrlKey ||
-      event.shiftKey ||
-      event.altKey
-    ) return;
+    if (!isPlainProductNavigation(event)) return;
     event.preventDefault();
     navigateToSurface(nextSurface);
   }, [navigateToSurface]);
+
+  const handleCommitClick = useCallback((
+    event: ReactMouseEvent<HTMLAnchorElement>,
+    hash: string,
+  ) => {
+    if (!isPlainProductNavigation(event)) return;
+    event.preventDefault();
+    const destination = pathForCommit(hash);
+    if (`${location.pathname}${location.search}` === destination) return;
+    retainAgentExperience("commits");
+    preloadSurface("commits");
+    const navigationId = ++surfaceNavigationId.current;
+    const nextThreadId = threadId ?? getBrowserThread().id;
+    repositoryRequestId.current++;
+    navigateToPreparedRepository("commits", destination, navigationId, nextThreadId);
+  }, [
+    location.pathname,
+    location.search,
+    navigateToPreparedRepository,
+    preloadSurface,
+    retainAgentExperience,
+    threadId,
+  ]);
+
+  const handleEvalPathClick = useCallback((
+    event: ReactMouseEvent<HTMLAnchorElement>,
+    destination: string,
+  ) => {
+    if (!isPlainProductNavigation(event)) return;
+    event.preventDefault();
+    if (`${location.pathname}${location.search}` === destination) return;
+    retainAgentExperience("evals");
+    preloadSurface("evals");
+    surfaceNavigationId.current++;
+    repositoryRequestId.current++;
+    startTransition(() => navigate(destination));
+  }, [
+    location.pathname,
+    location.search,
+    navigate,
+    preloadSurface,
+    retainAgentExperience,
+  ]);
 
   const collapseAgent = useCallback(() => {
     navigateToSurface("home");
@@ -1041,7 +1097,13 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
                   <p className="home-meta">
                     <span>optimized WASM · 1.3 MB gzip</span>
                     <span aria-hidden="true"> · </span>
-                    <a href="/evals/worksets/e1c16fd7df8f171e69052a66cb59b8bd52bc43017297d748eb19866e7593570d">
+                    <a
+                      href={terminalBenchWorksetPath}
+                      onClick={(event) => handleEvalPathClick(event, terminalBenchWorksetPath)}
+                      onFocus={() => preloadSurface("evals")}
+                      onPointerEnter={() => preloadSurface("evals")}
+                      onPointerDown={() => preloadSurface("evals")}
+                    >
                       Terminal-Bench 2.1 high: Nanocodex 82.2% vs Codex 79.6% · 890/890 runs
                     </a>
                   </p>
@@ -1078,7 +1140,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
           ) : null}
 
           {surface === "home" || surface === "agent" ? null : surface === "changelog" ? (
-            <Changelog />
+            <Changelog onCommitClick={handleCommitClick} />
           ) : surface === "docs" ? (
             DocsComponent ? <DocsComponent /> : null
           ) : surface === "code" ? repositoryLoadError === "code" ? (

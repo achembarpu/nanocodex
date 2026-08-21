@@ -172,7 +172,9 @@ test("renders no loading copy and exposes an actionable failure state", async ()
   assert.doesNotMatch(source, /if \(entries\.length === 0\) return null/);
   assert.match(source, /className="changelog-empty">No entries\./);
   assert.match(source, /href=\{pathForCommit\(changelog\.revision\)\}/);
+  assert.match(source, /onClick=\{\(event\) => onCommitClick\(event, changelog\.revision\)\}/);
   assert.match(source, /href=\{pathForCommit\(entry\.hash\)\}/);
+  assert.match(source, /onClick=\{\(event\) => onCommitClick\(event, entry\.hash\)\}/);
   assert.doesNotMatch(source, /github\.com\/.*\/commit/);
   assert.doesNotMatch(styles, /line-clamp|text-overflow|max-height/);
   assert.match(styles, /\.changelog-categories p[\s\S]*overflow:\s*visible[\s\S]*white-space:\s*normal/);

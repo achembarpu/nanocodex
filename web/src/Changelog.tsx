@@ -1,4 +1,9 @@
-import { startTransition, use, useState } from "react";
+import {
+  startTransition,
+  use,
+  useState,
+  type MouseEvent as ReactMouseEvent,
+} from "react";
 import {
   loadNightlyChangelog,
   type ChangelogCategory,
@@ -25,7 +30,11 @@ export function preloadChangelog(): Promise<ChangelogResult> {
     .catch(() => ({ state: "failed" as const }));
 }
 
-export function Changelog() {
+export function Changelog({
+  onCommitClick,
+}: {
+  onCommitClick(event: ReactMouseEvent<HTMLAnchorElement>, hash: string): void;
+}) {
   const [request, setRequest] = useState(preloadChangelog);
   const result = use(request);
 
@@ -59,6 +68,7 @@ export function Changelog() {
           <time dateTime={changelog.date}>{formatDate(changelog.date)}</time>
           <a
             href={pathForCommit(changelog.revision)}
+            onClick={(event) => onCommitClick(event, changelog.revision)}
           >
             revision {changelog.revision.slice(0, 7)}
           </a>
@@ -78,6 +88,7 @@ export function Changelog() {
                         <p>
                           <a
                             href={pathForCommit(entry.hash)}
+                            onClick={(event) => onCommitClick(event, entry.hash)}
                           >
                             <strong>{entry.title}:</strong>
                           </a>{" "}

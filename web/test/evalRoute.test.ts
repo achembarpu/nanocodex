@@ -77,7 +77,7 @@ test("case evidence replaces the inspector only after the request completes", ()
 test("Evals keeps the application main as the only main landmark", () => {
   assert.doesNotMatch(evalsSource, /<main\b/);
   assert.doesNotMatch(liveEvalsSource, /<main\b/);
-  assert.match(appSource, /<main id="top">/);
+  assert.match(appSource, /<main[\s\S]*?id="top"/);
 });
 
 function source(path: string) {

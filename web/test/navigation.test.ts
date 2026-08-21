@@ -88,6 +88,13 @@ test("commit deep links stay inside the product", () => {
   assert.match(application, /scrollToCommit\(index\)/);
 });
 
+test("deep product links retain prepared client navigation", () => {
+  assert.match(application, /<Changelog onCommitClick=\{handleCommitClick\} \/>/);
+  assert.match(application, /handleCommitClick[\s\S]*?navigateToPreparedRepository\("commits", destination/);
+  assert.match(application, /handleEvalPathClick[\s\S]*?preloadSurface\("evals"\)[\s\S]*?startTransition\(\(\) => navigate\(destination\)\)/);
+  assert.match(application, /href=\{terminalBenchWorksetPath\}[\s\S]*?onClick=\{\(event\) => handleEvalPathClick\(event, terminalBenchWorksetPath\)\}[\s\S]*?Terminal-Bench 2\.1 high:/);
+});
+
 test("the shared shell presents Source without changing the stable Code route", () => {
   assert.deepEqual(productNavigation.at(-1), {
     surface: "code",
@@ -143,7 +150,7 @@ test("Source and Commits navigation prepares exact route state before navigating
 
   const prefetch = application.slice(
     application.indexOf("const preloadSurface"),
-    application.indexOf("const navigateToSurface"),
+    application.indexOf("const navigateToPreparedRepository"),
   );
   assert.match(
     prefetch,
@@ -152,12 +159,16 @@ test("Source and Commits navigation prepares exact route state before navigating
   assert.doesNotMatch(prefetch, /setSnapshot|navigate\(/);
 
   const navigation = application.slice(
-    application.indexOf("const navigateToSurface"),
+    application.indexOf("const navigateToPreparedRepository"),
     application.indexOf("const handleSurfaceClick"),
   );
   assert.match(
     navigation,
-    /nextSurface === "code" \|\| nextSurface === "commits"[\s\S]*?settleRepositoryNavigationIntent\(\{[\s\S]*?preparation: prepareRepositorySurface\(nextSurface\)/,
+    /const navigateToPreparedRepository[\s\S]*?settleRepositoryNavigationIntent\(\{[\s\S]*?preparation: prepareRepositorySurface\(nextSurface\)/,
+  );
+  assert.match(
+    navigation,
+    /nextSurface === "code" \|\| nextSurface === "commits"[\s\S]*?navigateToPreparedRepository\(nextSurface, destination, navigationId, nextThreadId\)/,
   );
   assert.match(
     navigation,

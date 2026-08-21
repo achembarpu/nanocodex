@@ -7,7 +7,7 @@ import {
   type QueryClient,
 } from "@tanstack/react-query";
 import { Component, useDeferredValue, type ErrorInfo, type ReactNode } from "react";
-import { useLocation } from "react-router";
+import { Link, useLocation } from "react-router";
 import { evalRouteFromPath, type EvalRoute } from "./evalRoute";
 import { evalApi, type EvalSummary, type EvalWorksetDetail } from "./evalApi";
 import {
@@ -63,7 +63,7 @@ class EvalRouteErrorBoundary extends Component<
           >
             Retry
           </button>
-          <a href="/evals">All evals</a>
+          <Link to="/evals">All evals</Link>
         </div>
       </div>
     );
@@ -224,7 +224,7 @@ function UnknownRoute() {
       <p className="eyebrow">Nanocodex · durable evaluations</p>
       <h1>Eval view not found</h1>
       <p>Return to Evals and choose a retained workset.</p>
-      <div className="eval-error-actions"><a href="/evals">All evals</a></div>
+      <div className="eval-error-actions"><Link to="/evals">All evals</Link></div>
     </div>
   );
 }
