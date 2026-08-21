@@ -127,12 +127,14 @@ export class ChatGptSession {
   }
 
   async #openManager(): Promise<ChatGptSubscriptionHandle> {
-    const runtime = this.#runtime ?? (await import("nanocodex/worker")).ChatGptSubscription;
-    return runtime.open({
+    const options = {
       id: `chatgpt:${this.#state.id?.toString() ?? "test"}`,
       store: this.#store,
       ...(this.#issuer === undefined ? {} : { issuer: this.#issuer }),
-    });
+    };
+    if (this.#runtime) return this.#runtime.open(options);
+    const { openChatGptSubscription } = await import("./subscriptionRuntime.ts");
+    return openChatGptSubscription(options);
   }
 
   async #consume(operation: ChatGptOperation, leaseId: unknown): Promise<boolean> {

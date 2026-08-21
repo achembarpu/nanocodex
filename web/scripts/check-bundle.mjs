@@ -439,17 +439,17 @@ within("Nanocodex WASM gzip", wasm.gzipBytes, budgets.wasmGzip);
 const workerManifest = JSON.parse(
   await readFile(join(workerDirectory, ".vite", "manifest.json"), "utf8"),
 );
-const subscriptionWorkerKey = exactlyOne(
+const subscriptionRuntimeKey = exactlyOne(
   Object.entries(workerManifest).filter(([key, entry]) =>
-    key.endsWith("/worker/index.mjs")
-    && entry.name === "worker"
+    key.endsWith("worker/subscriptionRuntime.ts")
+    && entry.name === "subscriptionRuntime"
     && entry.isDynamicEntry === true
   ).map(([key]) => key),
-  "Cloudflare subscription Worker entry",
+  "Cloudflare subscription runtime entry",
 );
-const subscriptionWorker = workerManifest[subscriptionWorkerKey];
-const subscriptionWorkerSource = await readFile(
-  join(workerDirectory, subscriptionWorker.file),
+const subscriptionRuntime = workerManifest[subscriptionRuntimeKey];
+const subscriptionRuntimeSource = await readFile(
+  join(workerDirectory, subscriptionRuntime.file),
   "utf8",
 );
 const workerAssets = await readdir(join(workerDirectory, "assets"));
@@ -458,13 +458,18 @@ const workerWasmFile = exactlyOne(
   "Cloudflare subscription WASM module",
 );
 assert(
-  subscriptionWorkerSource.includes(`./${workerWasmFile}`),
-  "the subscription Worker must import its compiled WASM module",
+  subscriptionRuntimeSource.includes(`./${workerWasmFile}`),
+  "the subscription runtime must import its compiled WASM module",
 );
 assert.match(
-  subscriptionWorkerSource,
-  /module_or_path:\s*wasmModule/,
-  "the subscription Worker must instantiate its compiled module through wasm-bindgen",
+  subscriptionRuntimeSource,
+  /module:\s*wasmModule/,
+  "the subscription runtime must pass its compiled module to the host-generic API",
+);
+assert.match(
+  subscriptionRuntimeSource,
+  /module_or_path:\s*module/,
+  "the subscription runtime must instantiate its compiled module through wasm-bindgen",
 );
 
 console.log(JSON.stringify({
