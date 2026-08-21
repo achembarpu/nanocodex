@@ -23,6 +23,7 @@ test("the emitted inline browser client is valid JavaScript", async () => {
 
 test("the durable root omits runtime-owned subagents", async () => {
   const source = await readFile(new URL("../src/index.ts", import.meta.url), "utf8");
-  assert.match(source, /durability:\s*this\.#durabilityStore\(\)/);
+  assert.match(source, /this\.#durability = createCloudflareDurabilityStore\(this\.ctx\.storage\)/);
+  assert.match(source, /durability:\s*this\.#durability/);
   assert.doesNotMatch(source, /Subagents\.create|spawn_agent/);
 });

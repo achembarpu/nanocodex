@@ -613,6 +613,26 @@ opaque Rust journal. See `examples/cloudflare-workers`,
 `examples/vercel-workflows`, and `examples/rivet-actors` for all three host
 shapes.
 
+Cloudflare Durable Objects can bind their colocated SQLite and initialize the
+canonical schema in one call. The adapter is structural and adds no Workers
+runtime dependency:
+
+```js
+import { createCloudflareDurabilityStore } from "nanocodex/durability/cloudflare";
+
+const durability = createCloudflareDurabilityStore(this.ctx.storage);
+const agent = await Agent.create({
+  module: env.NANOCODEX_WASM,
+  transport,
+  durability,
+  durabilityId: sessionId,
+});
+```
+
+Vercel and other PostgreSQL hosts use `createPostgresDurabilityStore(pool)`
+from `nanocodex/durability/postgres`; connection ownership and secret policy
+remain in the application.
+
 Node embedders whose bundler relocates package assets may compile and pass the
 web-target artifact explicitly. The runtime still uses the Node host for
 WebSockets and Code Mode:

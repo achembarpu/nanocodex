@@ -73,10 +73,14 @@ import {
   type PostgresDurabilityQueryResult,
   UnknownPostgresCommitOutcomeError,
 } from "../runtime/postgres-durability-store.mjs";
+import {
+  createCloudflareDurabilityStore,
+} from "../runtime/cloudflare-durability-store.mjs";
 
 declare const apiKey: string;
 declare const accountsWallet: AccountsWallet;
 declare const postgresPool: PostgresDurabilityPool;
+declare const cloudflareStorage: Parameters<typeof createCloudflareDurabilityStore>[0];
 
 // @ts-expect-error durability-only types are exported from nanocodex/durability.
 type RootDurabilityStore = RootPublicTypes.DurabilityStore;
@@ -135,6 +139,7 @@ async function check() {
   };
   await durabilityStore.load("typed-leaf");
   const postgresStore: DurabilityStore = createPostgresDurabilityStore(postgresPool);
+  const cloudflareStore: DurabilityStore = createCloudflareDurabilityStore(cloudflareStorage);
   const postgresClient: PostgresDurabilityClient = await postgresPool.connect();
   const postgresResult: PostgresDurabilityQueryResult<{ revision: string }> =
     await postgresClient.query<{ revision: string }>(
@@ -144,6 +149,7 @@ async function check() {
   new UnknownPostgresCommitOutcomeError("typed-leaf", new Error("connection closed"));
   void postgresStore;
   void postgresResult;
+  void cloudflareStore;
   const datasetOptions: DatasetOptions = { fetch: globalThis.fetch };
   leafDataset(datasetOptions);
   const nodeWorkspace = await Workspace.open({ path: "/tmp/nanocodex" });

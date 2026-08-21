@@ -12,14 +12,7 @@ import type {
   PromptInput,
   Turn,
 } from "nanocodex";
-import {
-  createSqliteDurabilityStore,
-  sqliteDurabilitySchema,
-  type DurabilitySqliteQuery,
-  type DurabilitySqliteRow,
-  type DurabilitySqliteValue,
-  type DurabilityStore,
-} from "nanocodex/durability";
+import { createCloudflareDurabilityStore } from "nanocodex/durability/cloudflare";
 import {
   Agent,
   Transport,
@@ -309,6 +302,7 @@ export class NanocodexSession extends DurableComputerSession {
   #agentPromise?: Promise<DefaultAgent>;
   #events?: EventWatcher;
   readonly #eventLog: DurableEventLog<StreamMessage>;
+  readonly #durability: ReturnType<typeof createCloudflareDurabilityStore>;
   readonly #turns = new Map<string, Turn>();
   readonly #eventTurnQueue: string[] = [];
   #eventTurnId?: string;
@@ -359,7 +353,7 @@ export class NanocodexSession extends DurableComputerSession {
         ON managed_turns(request_key) WHERE request_key IS NOT NULL;
     `);
     this.#eventLog = new DurableEventLog<StreamMessage>(this.ctx.storage);
-    for (const statement of sqliteDurabilitySchema) this.ctx.storage.sql.exec(statement);
+    this.#durability = createCloudflareDurabilityStore(this.ctx.storage);
     const sessionColumns = new Set(this.ctx.storage.sql.exec<{ name: string }>(
       "PRAGMA table_info(session_state)",
     ).toArray().map((column) => column.name));
@@ -1002,7 +996,7 @@ export class NanocodexSession extends DurableComputerSession {
         transport,
         module: nanocodexWasm,
         sessionId: session.session_id,
-        durability: this.#durabilityStore(),
+        durability: this.#durability,
         durabilityId: session.session_id,
         workspace: "/workspace",
         filesystem: shell.filesystem,
@@ -1299,7 +1293,7 @@ export class NanocodexSession extends DurableComputerSession {
     return this.#managedTurns("WHERE request_key = ?", requestKey)[0];
   }
 
-  #managedTurns(clause: string, ...args: DurabilitySqliteValue[]): ManagedTurnRow[] {
+  #managedTurns(clause: string, ...args: (string | number | null)[]): ManagedTurnRow[] {
     return this.ctx.storage.sql.exec<ManagedTurnRow>(
       `SELECT id, request_key, request_hash, input_json, state,
               CAST(accepted_cursor AS TEXT) AS accepted_cursor,
@@ -1351,19 +1345,6 @@ export class NanocodexSession extends DurableComputerSession {
     this.#inFlight.add(task);
     void task.finally(() => this.#inFlight.delete(task)).catch(() => {});
     return task;
-  }
-
-  #durabilityStore(): DurabilityStore {
-    const query = this.#durabilityQuery();
-    return createSqliteDurabilityStore({
-      transaction: (callback) => this.ctx.storage.transactionSync(() => callback(query)),
-    });
-  }
-
-  #durabilityQuery(): DurabilitySqliteQuery {
-    return <Row extends DurabilitySqliteRow>(sql: string, args: readonly DurabilitySqliteValue[]) => (
-      this.ctx.storage.sql.exec<Row>(sql, ...args).toArray()
-    );
   }
 
   #activeTurnIds(): string[] {

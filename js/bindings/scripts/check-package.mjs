@@ -47,6 +47,8 @@ const requiredFiles = [
   "runtime/workspace.d.mts",
   "runtime/code-evaluator.worker.mjs",
   "runtime/worker-evaluator.mjs",
+  "runtime/cloudflare-durability-store.mjs",
+  "runtime/cloudflare-durability-store.d.mts",
   "runtime/postgres-durability-store.mjs",
   "runtime/postgres-durability-store.d.mts",
   "tools/index.mjs",
@@ -88,6 +90,10 @@ export async function checkPackage(packageRoot = root) {
   assert.equal(packageJson.exports?.["./browser/workspace"]?.import, "./browser/workspace.mjs");
   assert.equal(packageJson.exports?.["./host"]?.import, "./host/index.mjs");
   assert.equal(packageJson.exports?.["./durability"]?.import, "./runtime/durability-store.mjs");
+  assert.equal(
+    packageJson.exports?.["./durability/cloudflare"]?.import,
+    "./runtime/cloudflare-durability-store.mjs",
+  );
   assert.equal(
     packageJson.exports?.["./durability/postgres"]?.import,
     "./runtime/postgres-durability-store.mjs",

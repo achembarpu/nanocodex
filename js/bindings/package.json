@@ -55,6 +55,10 @@
       "types": "./runtime/postgres-durability-store.d.mts",
       "import": "./runtime/postgres-durability-store.mjs"
     },
+    "./durability/cloudflare": {
+      "types": "./runtime/cloudflare-durability-store.d.mts",
+      "import": "./runtime/cloudflare-durability-store.mjs"
+    },
     "./subagents": {
       "types": "./runtime/subagents.d.mts",
       "import": "./runtime/subagents.mjs"
