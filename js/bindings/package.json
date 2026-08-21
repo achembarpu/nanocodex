@@ -47,6 +47,10 @@
       "types": "./runtime/durability-store.d.mts",
       "import": "./runtime/durability-store.mjs"
     },
+    "./durability/postgres": {
+      "types": "./runtime/postgres-durability-store.d.mts",
+      "import": "./runtime/postgres-durability-store.mjs"
+    },
     "./subagents": {
       "types": "./runtime/subagents.d.mts",
       "import": "./runtime/subagents.mjs"

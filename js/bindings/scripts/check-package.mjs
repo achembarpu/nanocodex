@@ -45,6 +45,8 @@ const requiredFiles = [
   "worker/index.d.mts",
   "runtime/workspace.mjs",
   "runtime/workspace.d.mts",
+  "runtime/postgres-durability-store.mjs",
+  "runtime/postgres-durability-store.d.mts",
   "tools/index.mjs",
   "tools/index.d.mts",
   "tools/dataset.mjs",
@@ -84,6 +86,14 @@ export async function checkPackage(packageRoot = root) {
   assert.equal(packageJson.exports?.["./browser/workspace"]?.import, "./browser/workspace.mjs");
   assert.equal(packageJson.exports?.["./host"]?.import, "./host/index.mjs");
   assert.equal(packageJson.exports?.["./durability"]?.import, "./runtime/durability-store.mjs");
+  assert.equal(
+    packageJson.exports?.["./durability/postgres"]?.import,
+    "./runtime/postgres-durability-store.mjs",
+  );
+  assert.equal(
+    packageJson.exports?.["./durability/postgres"]?.types,
+    "./runtime/postgres-durability-store.d.mts",
+  );
   assert.equal(packageJson.exports?.["./node"]?.import, "./node/index.mjs");
   assert.equal(packageJson.exports?.["./node/workspace"]?.import, "./node/workspace.mjs");
   assert.equal(packageJson.exports?.["./worker"]?.import, "./worker/index.mjs");

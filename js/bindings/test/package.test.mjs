@@ -3,6 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import { execFile } from "node:child_process";
 import { checkDocumentedBrowserVersion } from "../scripts/check-package.mjs";
@@ -66,6 +67,10 @@ test("the packed package installs and runs every public entry point", async () =
       import { fileURLToPath } from "node:url";
       import { Actions } from "nanocodex";
       import { createMemoryDurabilityStore, durabilityRevision } from "nanocodex/durability";
+      import {
+        createPostgresDurabilityStore,
+        UnknownPostgresCommitOutcomeError,
+      } from "nanocodex/durability/postgres";
       import { Agent as HostAgent, Transport as HostTransport } from "nanocodex/host";
       import { dataset as aggregateDataset, web } from "nanocodex/tools";
       import { dataset } from "nanocodex/tools/dataset";
@@ -76,6 +81,23 @@ test("the packed package installs and runs every public entry point", async () =
       assert.equal(typeof Actions.turn.prompt, "function");
       assert.equal(durabilityRevision(1n), "1");
       assert.equal(createMemoryDurabilityStore("package-journal").journalId, "package-journal");
+      let postgresCalls = 0;
+      const postgresStore = createPostgresDurabilityStore({
+        connect() {
+          postgresCalls += 1;
+          throw new Error("package smoke must stay cold");
+        },
+        query() {
+          postgresCalls += 1;
+          throw new Error("package smoke must stay cold");
+        },
+      });
+      assert.equal(Object.isFrozen(postgresStore), true);
+      assert.equal(postgresCalls, 0);
+      const commitCause = new Error("connection closed");
+      const commitError = new UnknownPostgresCommitOutcomeError("package-journal", commitCause);
+      assert.equal(commitError.name, "UnknownPostgresCommitOutcomeError");
+      assert.equal(commitError.cause, commitCause);
       assert.equal(typeof NodeWorkspace.open, "function");
       assert.equal(typeof BrowserWorkspace.open, "function");
       assert.equal(web({ url: "https://example.test/tools/web" }).name, "web__run");
@@ -141,6 +163,43 @@ test("the packed package installs and runs every public entry point", async () =
     await exec(process.execPath, [join(temporary, "package-smoke.mjs")], {
       cwd: temporary,
     });
+    await writeFile(join(temporary, "package-smoke.mts"), `
+      import type { DurabilityStore } from "nanocodex/durability";
+      import {
+        createPostgresDurabilityStore,
+        type PostgresDurabilityClient,
+        type PostgresDurabilityPool,
+        type PostgresDurabilityQueryResult,
+        UnknownPostgresCommitOutcomeError,
+      } from "nanocodex/durability/postgres";
+
+      declare const pool: PostgresDurabilityPool;
+      const store: DurabilityStore = createPostgresDurabilityStore(pool);
+      async function query(client: PostgresDurabilityClient) {
+        const result: PostgresDurabilityQueryResult<{ revision: string }> =
+          await client.query<{ revision: string }>("SELECT revision::text AS revision");
+        client.release(true);
+        return result.rows[0]?.revision;
+      }
+      const error = new UnknownPostgresCommitOutcomeError("typed-journal", new Error("closed"));
+      void store;
+      void query;
+      void error;
+    `);
+    await exec(process.execPath, [
+      fileURLToPath(new URL("node_modules/typescript/bin/tsc", packageRoot)),
+      "--noEmit",
+      "--strict",
+      "--target",
+      "ES2022",
+      "--module",
+      "NodeNext",
+      "--moduleResolution",
+      "NodeNext",
+      "--lib",
+      "ES2022,DOM,DOM.Iterable",
+      join(temporary, "package-smoke.mts"),
+    ], { cwd: temporary });
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }

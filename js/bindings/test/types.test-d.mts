@@ -48,9 +48,17 @@ import {
   type DurabilityStore,
   type DurabilityStoredJournal,
 } from "../runtime/durability-store.mjs";
+import {
+  createPostgresDurabilityStore,
+  type PostgresDurabilityClient,
+  type PostgresDurabilityPool,
+  type PostgresDurabilityQueryResult,
+  UnknownPostgresCommitOutcomeError,
+} from "../runtime/postgres-durability-store.mjs";
 
 declare const apiKey: string;
 declare const accountsWallet: AccountsWallet;
+declare const postgresPool: PostgresDurabilityPool;
 
 async function check() {
   const storedJournal: DurabilityStoredJournal = {
@@ -65,6 +73,16 @@ async function check() {
     }),
   };
   await durabilityStore.load("typed-leaf");
+  const postgresStore: DurabilityStore = createPostgresDurabilityStore(postgresPool);
+  const postgresClient: PostgresDurabilityClient = await postgresPool.connect();
+  const postgresResult: PostgresDurabilityQueryResult<{ revision: string }> =
+    await postgresClient.query<{ revision: string }>(
+      "SELECT revision::text AS revision",
+    );
+  postgresClient.release(true);
+  new UnknownPostgresCommitOutcomeError("typed-leaf", new Error("connection closed"));
+  void postgresStore;
+  void postgresResult;
   const datasetOptions: DatasetOptions = { fetch: globalThis.fetch };
   leafDataset(datasetOptions);
   const nodeWorkspace = await Workspace.open({ path: "/tmp/nanocodex" });
