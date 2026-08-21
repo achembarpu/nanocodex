@@ -43,7 +43,7 @@ test("crawler documents contain complete route-aware production metadata", async
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("content-type"), "text/html; charset=utf-8");
   assert.equal(response.headers.get("cache-control"), "public, max-age=0, must-revalidate");
-  assert.match(response.headers.get("etag") ?? "", /^"page-[0-9a-f]+"$/);
+  assert.match(response.headers.get("etag") ?? "", /^W\/"page-[0-9a-f]+"$/);
   assert.equal(requests[0]?.url, "https://nanocodex-preview.workers.dev/");
   assert.match(html, /<link rel="canonical" href="https:\/\/nanocodex-preview\.workers\.dev\/code\?path=src%2F%3Cdriver%3E\.rs" \/>/);
   assert.match(html, /<meta property="og:type" content="website" \/>/);
@@ -97,6 +97,10 @@ test("every declared document route and the internal artifact runtime retain the
     headers: { "sec-fetch-dest": "iframe", "sec-fetch-mode": "navigate" },
   }), env as never);
   assert.equal(artifact.status, 200);
+  assert.equal(artifact.headers.get("access-control-allow-origin"), "*");
+  assert.match(artifact.headers.get("content-security-policy") ?? "", /default-src 'none'/);
+  assert.match(artifact.headers.get("content-security-policy") ?? "", /connect-src 'none'/);
+  assert.match(artifact.headers.get("content-security-policy") ?? "", /frame-ancestors 'self'/);
   assert.match(await artifact.text(), /Nanocodex — high-performance Codex SDK/);
   assert.equal(requests.length, knownPaths.size + 1);
   assert.ok(requests.every((request) => new URL(request.url).pathname === "/"));
@@ -117,7 +121,7 @@ test("requests is a public route with canonical metadata and matching GET, HEAD,
   assert.match(html, /<meta property="og:url" content="https:\/\/preview\.test\/requests" \/>/);
   assert.match(html, /<meta property="og:image" content="https:\/\/preview\.test\/og\.png\?path=%2Frequests" \/>/);
   assert.doesNotMatch(html, /thread=private/);
-  assert.match(etag ?? "", /^"page-[0-9a-f]+"$/);
+  assert.match(etag ?? "", /^W\/"page-[0-9a-f]+"$/);
 
   const head = await worker.fetch(new Request(request.url, { method: "HEAD" }), env as never);
   assert.equal(head.status, 200);
@@ -126,7 +130,7 @@ test("requests is a public route with canonical metadata and matching GET, HEAD,
 
   const conditionalHead = await worker.fetch(new Request(request, {
     method: "HEAD",
-    headers: { "if-none-match": `W/${etag}` },
+    headers: { "if-none-match": etag!.replace(/^W\//, "") },
   }), env as never);
   assert.equal(conditionalHead.status, 304);
   assert.equal(conditionalHead.headers.get("etag"), etag);
@@ -206,7 +210,7 @@ test("documents without an asset validator still honor the rendered page ETag", 
   const response = await worker.fetch(browserRequest, env as never);
   const etag = response.headers.get("etag");
   assert.equal(response.status, 200);
-  assert.match(etag ?? "", /^"page-[0-9a-f]+"$/);
+  assert.match(etag ?? "", /^W\/"page-[0-9a-f]+"$/);
 
   const notModified = await worker.fetch(new Request(browserRequest, {
     headers: { ...Object.fromEntries(browserRequest.headers), "if-none-match": etag! },
@@ -272,8 +276,33 @@ test("generated PNG images are cacheable, deterministic, bounded, and conditiona
 
 test("Cloudflare routes every preview-owning document and image through the Worker", async () => {
   const config = JSON.parse(await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8"));
-  assert.deepEqual(config.assets.run_worker_first.slice(0, 10), [
-    "/", "/agent", "/changelog", "/code", "/commits", "/docs", "/docs/*", "/evals", "/evals/*", "/og.png",
+  assert.deepEqual(config.assets.run_worker_first.slice(0, 12), [
+    "/", "/agent", "/artifact-runtime", "/changelog", "/code", "/commits",
+    "/requests", "/docs", "/docs/*", "/evals", "/evals/*", "/og.png",
+  ]);
+});
+
+test("agent-readable documentation bypasses document rendering and reaches static assets", async () => {
+  const requests: Request[] = [];
+  const env = {
+    ASSETS: {
+      async fetch(request: Request) {
+        requests.push(request);
+        return new Response("Nanocodex docs", {
+          headers: { "content-type": "text/plain; charset=utf-8" },
+        });
+      },
+    },
+  };
+  for (const path of ["/docs/llms.txt", "/docs/llms-full.txt"]) {
+    const response = await worker.fetch(new Request(`https://preview.test${path}`), env as never);
+    assert.equal(response.status, 200, path);
+    assert.equal(response.headers.get("content-type"), "text/plain; charset=utf-8", path);
+    assert.equal(await response.text(), "Nanocodex docs", path);
+  }
+  assert.deepEqual(requests.map((request) => new URL(request.url).pathname), [
+    "/docs/llms.txt",
+    "/docs/llms-full.txt",
   ]);
 });
 

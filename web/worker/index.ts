@@ -108,6 +108,8 @@ export default {
     context?: ExecutionContext,
   ): Promise<Response> {
     const url = new URL(request.url);
+    const insecure = enforceHttps(request, env, url);
+    if (insecure) return insecure;
     const evalMutation = await routeEvalMutation(request, env, url);
     if (evalMutation != null) return evalMutation;
     const evalRead = await routeEvalRead(request, env, url, context);
@@ -184,6 +186,26 @@ export default {
     return json({ error: "not_found" }, { status: 404 });
   },
 };
+
+function enforceHttps(request: Request, env: WorkerEnv, url: URL): Response | null {
+  if (
+    url.protocol === "https:"
+    || (env.ENVIRONMENT !== "production" && env.ENVIRONMENT !== "preview")
+  ) return null;
+
+  const headers = new Headers({
+    "cache-control": "no-store",
+    "x-content-type-options": "nosniff",
+  });
+  if (request.method === "GET" || request.method === "HEAD") {
+    const secure = new URL(url);
+    secure.protocol = "https:";
+    headers.set("location", secure.href);
+    return new Response(null, { headers, status: 308 });
+  }
+  headers.set("content-type", "text/plain; charset=utf-8");
+  return new Response("HTTPS required", { headers, status: 426 });
+}
 
 async function proxyWebSearch(request: Request, env: WorkerEnv, url: URL): Promise<Response> {
   const credential = await validateToolRequest(request, env, url, "search");

@@ -5,6 +5,18 @@ const IMAGE_WIDTH = 1200;
 const IMAGE_HEIGHT = 630;
 const METADATA_START = "<!-- nanocodex:link-preview:start -->";
 const METADATA_END = "<!-- nanocodex:link-preview:end -->";
+const AGENT_DOC_PATHS = new Set(["/docs/llms.txt", "/docs/llms-full.txt"]);
+const ARTIFACT_RUNTIME_CSP = [
+  "default-src 'none'",
+  "script-src 'self' 'unsafe-eval'",
+  "style-src 'self' 'unsafe-inline'",
+  "img-src data: blob:",
+  "connect-src 'none'",
+  "font-src 'none'",
+  "base-uri 'none'",
+  "form-action 'none'",
+  "frame-ancestors 'self'",
+].join("; ");
 
 type LinkPreviewEnv = {
   ASSETS?: Fetcher;
@@ -23,6 +35,13 @@ export async function routeLinkPreview(
   env: LinkPreviewEnv,
   url: URL,
 ): Promise<Response | null> {
+  if (
+    AGENT_DOC_PATHS.has(url.pathname)
+    && (request.method === "GET" || request.method === "HEAD")
+    && env.ASSETS
+  ) {
+    return env.ASSETS.fetch(request);
+  }
   if (url.pathname === "/og.png" && (request.method === "GET" || request.method === "HEAD")) {
     return previewImage(request, env, url);
   }
@@ -30,7 +49,11 @@ export async function routeLinkPreview(
   const documentStatus = documentStatusForPath(pathname);
   const internalNavigation = pathname === "/artifact-runtime" && isIframeNavigation(request);
   const routeHead = request.method === "HEAD" && documentStatus != null;
-  if ((!isDocumentNavigation(request) && !internalNavigation && !routeHead) || !env.ASSETS) return null;
+  const genericKnownDocument = documentStatus != null && isGenericDocumentGet(request);
+  if (
+    (!isDocumentNavigation(request) && !genericKnownDocument && !internalNavigation && !routeHead)
+    || !env.ASSETS
+  ) return null;
   if (documentStatus == null) return documentNotFound(request);
 
   const preview = await previewForUrl(url, env);
@@ -49,6 +72,10 @@ export async function routeLinkPreview(
   headers.set("x-content-type-options", "nosniff");
   headers.delete("content-encoding");
   headers.delete("content-length");
+  if (pathname === "/artifact-runtime") {
+    headers.set("access-control-allow-origin", "*");
+    headers.set("content-security-policy", ARTIFACT_RUNTIME_CSP);
+  }
   if (documentStatus === 404) {
     headers.set("cache-control", "no-store");
     headers.delete("etag");
@@ -72,7 +99,7 @@ export async function routeLinkPreview(
   }
 
   const html = await renderLinkPreviewDocument(await assetResponse.text(), url, env, preview);
-  etag ??= `"page-${fnv1a(html)}"`;
+  etag ??= pageEtag(fnv1a(html));
   headers.set("etag", etag);
   if (etagMatches(request.headers.get("if-none-match"), etag)) {
     return new Response(null, { headers, status: 304 });
@@ -164,22 +191,36 @@ async function previewImage(request: Request, env: LinkPreviewEnv, url: URL): Pr
 }
 
 function documentEtag(assetEtag: string, preview: Preview, url: URL): string {
-  return `"page-${fnv1a([
+  return pageEtag(fnv1a([
     assetEtag,
     url.origin,
     preview.canonicalPath,
     preview.eyebrow,
     preview.title,
     preview.description,
-  ].join("\n"))}"`;
+  ].join("\n")));
+}
+
+function pageEtag(hash: string): string {
+  // Cloudflare may Brotli-compress HTML at the edge. A weak validator remains
+  // correct across content codings and therefore survives that delivery path.
+  return `W/"page-${hash}"`;
 }
 
 function etagMatches(value: string | null, etag: string): boolean {
   if (!value) return false;
+  const expected = etag.replace(/^W\//, "");
   return value.split(",").some((candidate) => {
     const normalized = candidate.trim();
-    return normalized === "*" || normalized === etag || normalized === `W/${etag}`;
+    return normalized === "*" || normalized.replace(/^W\//, "") === expected;
   });
+}
+
+function isGenericDocumentGet(request: Request): boolean {
+  if (request.method !== "GET" && request.method !== "HEAD") return false;
+  if (request.headers.has("sec-fetch-dest") || request.headers.has("sec-fetch-mode")) return false;
+  const accept = request.headers.get("accept")?.toLowerCase();
+  return accept == null || accept.includes("*/*");
 }
 
 async function previewForUrl(url: URL, env: LinkPreviewEnv): Promise<Preview> {

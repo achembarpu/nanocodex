@@ -798,3 +798,30 @@ test("eval reads require Cloudflare storage and never proxy a host", async () =>
     globalThis.fetch = originalFetch;
   }
 });
+
+test("production redirects safe plaintext requests and rejects plaintext mutations", async () => {
+  for (const method of ["GET", "HEAD"]) {
+    const response = await worker.fetch(
+      new Request("http://demo.test/api/health?probe=1", { method }),
+      { ENVIRONMENT: "production" },
+    );
+    assert.equal(response.status, 308);
+    assert.equal(response.headers.get("location"), "https://demo.test/api/health?probe=1");
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.equal(await response.text(), "");
+  }
+
+  const mutation = await worker.fetch(
+    new Request("http://demo.test/api/auth/chatgpt", { method: "POST" }),
+    { ENVIRONMENT: "production" },
+  );
+  assert.equal(mutation.status, 426);
+  assert.equal(mutation.headers.get("cache-control"), "no-store");
+  assert.equal(await mutation.text(), "HTTPS required");
+
+  const development = await worker.fetch(
+    new Request("http://demo.test/api/health"),
+    { ENVIRONMENT: "development" },
+  );
+  assert.equal(development.status, 200);
+});

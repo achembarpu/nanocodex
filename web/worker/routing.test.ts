@@ -9,9 +9,11 @@ test("Cloudflare routes preview documents, images, and protocol endpoints throug
   assert.deepEqual(config.assets.run_worker_first, [
     "/",
     "/agent",
+    "/artifact-runtime",
     "/changelog",
     "/code",
     "/commits",
+    "/requests",
     "/docs",
     "/docs/*",
     "/evals",
@@ -52,6 +54,13 @@ test("SPA fallback serves only documents and missing immutable assets stay real 
   assert.equal(assetRequests.length, 1);
   assert.equal(new URL(assetRequests[0]!.url).pathname, "/");
 
+  const genericDocument = await worker.fetch(new Request("https://demo.test/", {
+    headers: { accept: "*/*" },
+  }), env as never);
+  assert.equal(genericDocument.status, 200);
+  assert.match(genericDocument.headers.get("content-type") ?? "", /text\/html/);
+  assert.equal(assetRequests.length, 2);
+
   const missingAsset = await worker.fetch(new Request(
     "https://demo.test/assets/removed-build-chunk.js",
     { headers: { accept: "*/*", "sec-fetch-dest": "script", "sec-fetch-mode": "no-cors" } },
@@ -59,5 +68,5 @@ test("SPA fallback serves only documents and missing immutable assets stay real 
   assert.equal(missingAsset.status, 404);
   assert.match(missingAsset.headers.get("content-type") ?? "", /application\/json/);
   assert.equal(missingAsset.headers.get("cache-control"), "no-store");
-  assert.equal(assetRequests.length, 1);
+  assert.equal(assetRequests.length, 2);
 });

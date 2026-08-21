@@ -145,6 +145,12 @@ within("Agent JavaScript", agentJavaScript.bytes, budgets.agentJavaScript);
 
 const html = await readFile(join(clientDirectory, "index.html"), "utf8");
 const headers = await readFile(join(clientDirectory, "_headers"), "utf8");
+const assetsIgnore = await readFile(join(clientDirectory, ".assetsignore"), "utf8");
+assert.match(
+  assetsIgnore,
+  /^\.vite\/$/m,
+  "build-only Vite metadata must stay out of deployed assets",
+);
 assert.match(
   headers,
   /\/assets\/\*[\s\S]*Cache-Control: public, max-age=31536000, immutable/,
