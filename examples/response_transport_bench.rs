@@ -1351,7 +1351,7 @@ async fn cleanup_responses(config: &BenchConfig, response_ids: &[String]) {
     );
 }
 
-fn median(values: &[f64]) -> f64 {
+const fn median(values: &[f64]) -> f64 {
     match values.len() {
         0 => 0.0,
         len if len % 2 == 1 => values[len / 2],
