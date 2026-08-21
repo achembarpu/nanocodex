@@ -5,6 +5,7 @@ import { test } from "node:test";
 
 import { Actions } from "../index.mjs";
 import { Agent as HostAgent, Transport as HostTransport } from "../host/index.mjs";
+import { initializeBrowserEngine } from "../browser/engine.mjs";
 import {
   createAgentClient,
   defineRuntime,
@@ -16,6 +17,7 @@ const LIMITS = Object.freeze({
   coldNodeAgentMs: 250,
   warmAgentP50Ms: 1.5,
   warmAgentP95Ms: 10,
+  browserLinearMemoryBytes: 2_500_000,
   actionNanoseconds: 5_000,
   bufferedEventsMs: 50,
   codeModeMicroseconds: 250,
@@ -93,6 +95,8 @@ test("a precompiled browser module instantiates once across isolated agents", as
       module,
     });
     const coldMs = performance.now() - coldStarted;
+    const engine = await initializeBrowserEngine({ module });
+    const coldLinearMemoryBytes = engine.memory.buffer.byteLength;
     cold.dispose();
     for (let index = 0; index < 16; index += 1) {
       const agent = await HostAgent.create({
@@ -114,14 +118,22 @@ test("a precompiled browser module instantiates once across isolated agents", as
     }
     const p50 = percentile(samples, 0.5);
     const p95 = percentile(samples, 0.95);
+    const retainedLinearMemoryBytes = engine.memory.buffer.byteLength;
     context.diagnostic(JSON.stringify({
       cold_ms: round(coldMs),
+      cold_linear_memory_bytes: coldLinearMemoryBytes,
       module_instantiations: instantiations,
+      retained_linear_memory_bytes: retainedLinearMemoryBytes,
       warm_p50_ms: round(p50),
       warm_p95_ms: round(p95),
     }));
 
     assert.equal(instantiations, 1);
+    assert.equal(retainedLinearMemoryBytes, coldLinearMemoryBytes);
+    assert.ok(
+      retainedLinearMemoryBytes <= LIMITS.browserLinearMemoryBytes,
+      `browser WASM retained ${retainedLinearMemoryBytes} linear-memory bytes`,
+    );
     assert.ok(coldMs <= LIMITS.coldNodeAgentMs, `cold browser Agent.create took ${coldMs} ms`);
     assert.ok(p50 <= LIMITS.warmAgentP50Ms, `warm browser Agent.create p50 was ${p50} ms`);
     assert.ok(p95 <= LIMITS.warmAgentP95Ms, `warm browser Agent.create p95 was ${p95} ms`);
