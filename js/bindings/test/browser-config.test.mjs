@@ -478,6 +478,119 @@ test("destroy publishes idle once and makes outstanding unsubscribes harmless", 
   assert.deepEqual(closed, ["active"]);
 });
 
+test("destroy notifies duplicate callback subscriptions exactly once each", async () => {
+  const closed = [];
+  const config = createAgentConfig({}, {
+    async create() { return fakeAgent("shared", closed); },
+    async prepare() {},
+  });
+  const statuses = [];
+  const listener = () => statuses.push(config.getAgent().status);
+  const first = config.subscribeAgent({}, listener);
+  const second = config.subscribeAgent({}, listener);
+  await waitFor(() => config.getAgent().status === "success");
+  statuses.length = 0;
+
+  await config.destroy();
+
+  assert.deepEqual(statuses, ["idle", "idle"]);
+  assert.deepEqual(closed, ["shared"]);
+  first();
+  first();
+  second();
+  second();
+  assert.deepEqual(statuses, ["idle", "idle"]);
+});
+
+test("duplicate callback subscriptions unsubscribe independently", async () => {
+  const creation = deferred();
+  const closed = [];
+  const config = createAgentConfig({}, {
+    create() { return creation.promise; },
+    async prepare() {},
+  });
+  const statuses = [];
+  const listener = () => statuses.push(config.getAgent().status);
+  const first = config.subscribeAgent({}, listener);
+  const second = config.subscribeAgent({}, listener);
+
+  first();
+  first();
+  statuses.length = 0;
+  creation.resolve(fakeAgent("remaining", closed));
+  await waitFor(() => config.getAgent().status === "success");
+
+  assert.deepEqual(statuses, ["success"]);
+  second();
+  second();
+  await waitFor(() => closed.length === 1);
+  assert.deepEqual(closed, ["remaining"]);
+  await config.destroy();
+});
+
+test("concurrent destroy calls join the same Agent shutdown", async () => {
+  const shutdown = deferred();
+  let notifications = 0;
+  let shutdowns = 0;
+  const config = createAgentConfig({}, {
+    async create() {
+      return {
+        session: {
+          shutdown() {
+            shutdowns += 1;
+            return shutdown.promise;
+          },
+        },
+      };
+    },
+    async prepare() {},
+  });
+  const unsubscribe = config.subscribeAgent({}, () => { notifications += 1; });
+  await waitFor(() => config.getAgent().status === "success");
+  notifications = 0;
+
+  const first = config.destroy();
+  const second = config.destroy();
+
+  assert.equal(first, second);
+  assert.equal(notifications, 1);
+  let settled = false;
+  void second.then(() => { settled = true; });
+  await tick();
+  assert.equal(shutdowns, 1);
+  assert.equal(settled, false);
+
+  shutdown.resolve();
+  await first;
+  assert.equal(settled, true);
+  unsubscribe();
+  unsubscribe();
+  assert.equal(notifications, 1);
+});
+
+test("destroy from a pending notification prevents preparation and creation", async () => {
+  const calls = [];
+  const config = createAgentConfig({}, {
+    async create() { calls.push("create"); },
+    async prepare() { calls.push("prepare"); },
+  });
+  const statuses = [];
+  let destruction;
+  const unsubscribe = config.subscribeAgent({}, () => {
+    const status = config.getAgent().status;
+    statuses.push(status);
+    if (status === "pending") destruction = config.destroy();
+  });
+
+  await destruction;
+  await tick();
+
+  assert.deepEqual(statuses, ["pending", "idle"]);
+  assert.deepEqual(calls, []);
+  unsubscribe();
+  unsubscribe();
+});
+
 function fakeAgent(id, closed) {
   return {
     session: {

@@ -25,6 +25,7 @@ export function createAgentConfig(options = {}, runtime) {
   const retryDelay = options.retryDelay ?? ((attempt) => 400 * attempt);
   if (typeof retryDelay !== "function") throw new TypeError("retryDelay must be a function");
   let destroyed = false;
+  let destruction;
 
   function resolveThreadId(parameters = {}) {
     return nonEmptyString(parameters.threadId) ?? defaultThreadId;
@@ -43,7 +44,7 @@ export function createAgentConfig(options = {}, runtime) {
       createOptions,
       generation: 0,
       key: threadId,
-      listeners: new Set(),
+      subscriptions: new Set(),
       operation: undefined,
       snapshot: IDLE_SNAPSHOT,
     };
@@ -59,7 +60,14 @@ export function createAgentConfig(options = {}, runtime) {
       && entry.snapshot.error === snapshot.error
     ) return;
     entry.snapshot = snapshot;
-    for (const listener of entry.listeners) listener();
+    notify(entry.subscriptions);
+  }
+
+  function notify(subscriptions) {
+    for (const subscription of [...subscriptions]) {
+      if (!subscription.subscribed) continue;
+      try { subscription.listener(); } catch (error) { reportError(error); }
+    }
   }
 
   async function close(agent) {
@@ -106,6 +114,7 @@ export function createAgentConfig(options = {}, runtime) {
     entry.operation = operation;
     const closing = retireAgent(entry);
     publish(entry, "pending", undefined, undefined);
+    if (!isCurrent(entry, operation)) return;
     try {
       void Promise.resolve(runtime.prepare(entry.createOptions, {
         signal: operation.controller.signal,
@@ -185,7 +194,7 @@ export function createAgentConfig(options = {}, runtime) {
         if (
           entries.get(entry.key) === entry
           && entry.activeSubscribers === 0
-          && entry.listeners.size === 0
+          && entry.subscriptions.size === 0
         ) entries.delete(entry.key);
       });
     });
@@ -201,20 +210,20 @@ export function createAgentConfig(options = {}, runtime) {
       if (destroyed) return () => {};
       const threadId = resolveThreadId(parameters);
       const entry = entries.get(threadId) ?? createEntry(threadId);
-      entry.listeners.add(listener);
       const enabled = parameters.enabled !== false;
+      const subscription = { listener, subscribed: true };
+      entry.subscriptions.add(subscription);
       if (enabled) {
         entry.activeSubscribers += 1;
         start(entry);
       }
-      let subscribed = true;
       return () => {
-        if (!subscribed) return;
-        subscribed = false;
+        if (!subscription.subscribed) return;
+        subscription.subscribed = false;
         if (destroyed) return;
-        entry.listeners.delete(listener);
+        entry.subscriptions.delete(subscription);
         if (!enabled) {
-          if (entry.listeners.size === 0 && entry.activeSubscribers === 0) entries.delete(entry.key);
+          if (entry.subscriptions.size === 0 && entry.activeSubscribers === 0) entries.delete(entry.key);
           return;
         }
         entry.activeSubscribers -= 1;
@@ -229,26 +238,47 @@ export function createAgentConfig(options = {}, runtime) {
       const entry = entries.get(resolveThreadId(parameters));
       if (entry !== undefined) start(entry, true);
     },
-    async destroy() {
-      if (destroyed) return;
+    destroy() {
+      if (destruction !== undefined) return destruction;
+      let rejectDestruction;
+      let resolveDestruction;
+      destruction = new Promise((resolve, reject) => {
+        rejectDestruction = reject;
+        resolveDestruction = resolve;
+      });
       destroyed = true;
       const closures = [];
-      for (const entry of entries.values()) {
-        cancelGeneration(entry);
-        entry.snapshot = IDLE_SNAPSHOT;
-        const listeners = [...entry.listeners];
-        entry.listeners.clear();
-        entry.activeSubscribers = 0;
-        for (const listener of listeners) {
-          try { listener(); } catch (error) { reportError(error); }
+      const notifications = [];
+      try {
+        for (const entry of entries.values()) {
+          cancelGeneration(entry);
+          entry.snapshot = IDLE_SNAPSHOT;
+          const subscriptions = [...entry.subscriptions];
+          entry.subscriptions.clear();
+          entry.activeSubscribers = 0;
+          for (const subscription of subscriptions) {
+            subscription.subscribed = false;
+          }
+          notifications.push(subscriptions);
+          closures.push(retireAgent(entry));
         }
-        closures.push(retireAgent(entry));
+        entries.clear();
+      } catch (error) {
+        rejectDestruction(error);
+        return destruction;
       }
-      entries.clear();
-      await Promise.all(closures);
+      Promise.all(closures).then(resolveDestruction, rejectDestruction);
+      for (const subscriptions of notifications) notifyDestroyed(subscriptions);
+      return destruction;
     },
   };
   return Object.freeze(config);
+}
+
+function notifyDestroyed(subscriptions) {
+  for (const subscription of subscriptions) {
+    try { subscription.listener(); } catch (error) { reportError(error); }
+  }
 }
 
 function reportError(error) {

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { createElement } from "react";
+import { createElement, useLayoutEffect } from "react";
 import { act, create } from "react-test-renderer";
 
 import { createAgentConfig } from "../../bindings/browser/config.mjs";
@@ -173,7 +173,7 @@ test("useAgent refetch cancels hung startup and unmount releases its replacement
   await config.destroy();
 });
 
-test("useAgentEvents commits listener changes without resubscribing", async () => {
+test("useAgentEvents commits listener changes before layout without resubscribing", async () => {
   const callbacks = new Set();
   const watchOptions = [];
   let releases = 0;
@@ -198,12 +198,18 @@ test("useAgentEvents commits listener changes without resubscribing", async () =
   const first = [];
   const second = [];
 
-  function Consumer({ emitDuringRender = false, listener }) {
+  function Consumer({ emitDuringLayout = false, emitDuringRender = false, listener }) {
     useAgentEvents(agent, listener, { includeAllSessions: true });
     if (emitDuringRender) {
       for (const callback of callbacks) callback({ seq: 2 });
     }
-    return null;
+    return createElement(LayoutEmitter, {
+      emit: emitDuringLayout
+        ? () => {
+            for (const callback of callbacks) callback({ seq: 3 });
+          }
+        : undefined,
+    });
   }
 
   let root;
@@ -214,15 +220,16 @@ test("useAgentEvents commits listener changes without resubscribing", async () =
 
   await act(async () => {
     root.update(createElement(Consumer, {
+      emitDuringLayout: true,
       emitDuringRender: true,
       listener: (event) => second.push(event.seq),
     }));
   });
-  for (const callback of callbacks) callback({ seq: 3 });
+  for (const callback of callbacks) callback({ seq: 4 });
 
   assert.deepEqual(watchOptions, [{ includeAllSessions: true }]);
   assert.deepEqual(first, [1, 2]);
-  assert.deepEqual(second, [3]);
+  assert.deepEqual(second, [3, 4]);
   assert.equal(releases, 0);
   assert.equal(offs, 0);
 
@@ -230,6 +237,50 @@ test("useAgentEvents commits listener changes without resubscribing", async () =
   assert.equal(releases, 1);
   assert.equal(offs, 1);
   assert.equal(callbacks.size, 0);
+});
+
+test("useAgentEvents rejects stale events from a watcher retiring after commit", async () => {
+  const first = createEventAgent();
+  const second = createEventAgent();
+  const firstEvents = [];
+  const secondEvents = [];
+
+  function Consumer({ agent, listener, staleAgent }) {
+    useAgentEvents(agent, listener);
+    return createElement(LayoutEmitter, {
+      emit: staleAgent === undefined
+        ? undefined
+        : () => staleAgent.emit({ seq: 2 }),
+    });
+  }
+
+  let root;
+  await act(async () => {
+    root = create(createElement(Consumer, {
+      agent: first.agent,
+      listener: (event) => firstEvents.push(event.seq),
+    }));
+  });
+  first.emit({ seq: 1 });
+
+  await act(async () => {
+    root.update(createElement(Consumer, {
+      agent: second.agent,
+      listener: (event) => secondEvents.push(event.seq),
+      staleAgent: first,
+    }));
+  });
+  second.emit({ seq: 3 });
+
+  assert.deepEqual(firstEvents, [1]);
+  assert.deepEqual(secondEvents, [3]);
+  assert.equal(first.releases, 1);
+  assert.equal(first.offs, 1);
+  assert.equal(second.callbacks.size, 1);
+
+  await act(async () => root.unmount());
+  assert.equal(second.releases, 1);
+  assert.equal(second.offs, 1);
 });
 
 function createStore() {
@@ -267,6 +318,40 @@ function createStore() {
     subscriptions,
     get unsubscribed() { return unsubscribed; },
   };
+}
+
+function createEventAgent() {
+  const callbacks = new Set();
+  let releases = 0;
+  let offs = 0;
+  return {
+    agent: {
+      events: {
+        watch() {
+          return {
+            onEvent(listener) {
+              callbacks.add(listener);
+              return () => {
+                if (callbacks.delete(listener)) releases += 1;
+              };
+            },
+            off() { offs += 1; },
+          };
+        },
+      },
+    },
+    callbacks,
+    emit(event) {
+      for (const callback of callbacks) callback(event);
+    },
+    get offs() { return offs; },
+    get releases() { return releases; },
+  };
+}
+
+function LayoutEmitter({ emit }) {
+  useLayoutEffect(() => emit?.(), [emit]);
+  return null;
 }
 
 function tick() {

@@ -51,7 +51,7 @@ export async function createWorkerAgent(options = {}, workerOptions = {}) {
 /** Starts the exact module Worker and browser harness consumed by the next Agent.create. */
 export function prepareWorkerAgent(options = {}, workerOptions = {}) {
   workerOptions.signal?.throwIfAborted();
-  const harness = options.harness === false ? false : harnessDescriptor(options);
+  const harness = options.harness === false ? false : harnessDescriptor(options, true);
   const key = harnessKey(harness);
   if (prewarmedWorker?.key === key) {
     const entry = prewarmedWorker;
@@ -1119,9 +1119,13 @@ function positiveInteger(value, label) {
 }
 function randomId() { return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`; }
 function nonEmptyString(value) { return typeof value === "string" && value ? value : undefined; }
-function harnessDescriptor(options = {}) {
+function harnessDescriptor(options = {}, requireIdentity = false) {
+  const threadId = nonEmptyString(options.threadId) ?? nonEmptyString(options.sessionId);
+  if (requireIdentity && threadId === undefined) {
+    throw new TypeError("preparing an Agent Worker requires a stable threadId or sessionId");
+  }
   return {
-    threadId: nonEmptyString(options.threadId) ?? nonEmptyString(options.sessionId) ?? randomId(),
+    threadId: threadId ?? randomId(),
     origin: nonEmptyString(options.origin) ?? globalThis.location?.origin,
   };
 }

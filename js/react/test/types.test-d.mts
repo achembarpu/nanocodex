@@ -29,6 +29,9 @@ if (snapshot.status === "success") {
 // @ts-expect-error the application owns exactly one explicit Config lifecycle.
 const missingConfig: ComponentProps<typeof NanocodexProvider> = { children: null };
 void missingConfig;
+// @ts-expect-error undefined does not transfer Config lifecycle ownership to the provider.
+const undefinedConfig: ComponentProps<typeof NanocodexProvider> = { children: null, config: undefined };
+void undefinedConfig;
 
 function Consumer() {
   const resolved = useConfig();

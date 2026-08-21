@@ -1,6 +1,21 @@
 import type { DefaultAgent } from "../types.mjs";
 import type { create as createBrowserAgent } from "./Agent.mjs";
 
+type WorkerAgentResourceOptions = Readonly<createBrowserAgent.Options & {
+  /** Origin retained in the private browser harness resource identity. */
+  origin?: string | undefined;
+}>;
+type WorkerAgentIdentityOptions = Pick<
+  WorkerAgentResourceOptions,
+  "origin" | "sessionId" | "threadId"
+>;
+type WorkerAgentPreparationOptions =
+  | Readonly<WorkerAgentIdentityOptions & { harness: false }>
+  | Readonly<WorkerAgentIdentityOptions & { harness?: undefined } & (
+      | { threadId: string }
+      | { sessionId: string }
+    )>;
+
 export type WorkerLike = {
   onmessage: ((event: { data: unknown }) => void) | null;
   onerror: ((event: { message?: string }) => void) | null;
@@ -19,16 +34,15 @@ export type WorkerAgentOptions = Readonly<{
 
 /** Internal package seam used by browser/Agent.mjs to preserve Agent.create. */
 export function createWorkerAgent(
-  options?: createBrowserAgent.Options,
+  options?: WorkerAgentResourceOptions,
   workerOptions?: WorkerAgentOptions,
 ): Promise<DefaultAgent>;
 
 /** Internal package preparation used by browser config. */
-export function prepareWorkerAgent(options?: Readonly<{
-  harness?: false | undefined;
-  threadId?: string | undefined;
-  origin?: string | undefined;
-}>, workerOptions?: WorkerAgentOptions): Promise<void>;
+export function prepareWorkerAgent(
+  options: WorkerAgentPreparationOptions,
+  workerOptions?: WorkerAgentOptions,
+): Promise<void>;
 
 export type WorkerAgentRuntime = Readonly<{ dispose(): void }>;
 export type WorkerAgentScope = WorkerLike;

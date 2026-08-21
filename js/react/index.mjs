@@ -6,6 +6,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useInsertionEffect,
   useMemo,
   useRef,
   useSyncExternalStore,
@@ -64,16 +65,25 @@ export function useAgent(parameters = {}) {
 
 /** Subscribes to ordered typed Agent events without retaining UI state in the SDK. */
 export function useAgentEvents(agent, listener, options = {}) {
-  const latest = useRef(undefined);
-  useEffect(() => {
-    latest.current = listener;
-    return () => { latest.current = undefined; };
-  }, [listener]);
+  const committed = useRef(undefined);
   const includeAllSessions = options.includeAllSessions ?? false;
+  useInsertionEffect(() => {
+    const descriptor = { agent, includeAllSessions, listener };
+    committed.current = descriptor;
+    return () => {
+      if (committed.current === descriptor) committed.current = undefined;
+    };
+  }, [agent, includeAllSessions, listener]);
   useEffect(() => {
     if (!agent) return;
     const watcher = agent.events.watch({ includeAllSessions });
-    const release = watcher.onEvent((event) => latest.current?.(event));
+    const release = watcher.onEvent((event) => {
+      const current = committed.current;
+      if (
+        current?.agent === agent
+        && current.includeAllSessions === includeAllSessions
+      ) current.listener(event);
+    });
     return () => {
       release();
       watcher.off();

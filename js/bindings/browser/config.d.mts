@@ -24,7 +24,7 @@ export type Config = Readonly<{
 export type CreateConfigParameters = Readonly<{
   /** Defaults inherited by every Agent created by this config. */
   agent?: createAgent.Options | undefined;
-  /** Origin used while privately preparing the package Worker. */
+  /** Stable origin included in both preparation and creation of the browser harness. */
   origin?: string | undefined;
   /** Agent startup retries after the first attempt. Defaults to 2. */
   retry?: number | undefined;

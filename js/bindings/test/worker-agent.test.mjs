@@ -654,6 +654,44 @@ test("private Worker preparation replaces stale ownership and is claimed by Agen
   assert.equal(claimed.terminated, 1);
 });
 
+test("preparation deduplicates and creation claims the exact complete harness identity", async () => {
+  const worker = new HarnessWorker();
+  const options = {
+    origin: "https://nanocodex.test",
+    sessionId: "session-1",
+    threadId: "thread-1",
+  };
+
+  const firstPreparation = prepareWorkerAgent(options, { worker });
+  const secondPreparation = prepareWorkerAgent(options);
+
+  assert.equal(firstPreparation, secondPreparation);
+  await firstPreparation;
+  assert.equal(worker.incoming.filter(({ type }) => type === "prewarm").length, 1);
+
+  const agent = await createWorkerAgent(options);
+  const prewarm = worker.incoming.find(({ type }) => type === "prewarm");
+  const boot = worker.incoming.find(({ type }) => type === "boot");
+  const harness = {
+    origin: "https://nanocodex.test",
+    threadId: "thread-1",
+  };
+
+  assert.deepEqual(prewarm.harness, harness);
+  assert.deepEqual(boot.config.harness, harness);
+  assert.equal(boot.config.sessionId, "session-1");
+  assert.equal(agent.sessionId, "session-1");
+  agent.dispose();
+  assert.equal(worker.terminated, 1);
+});
+
+test("non-disabled preparation rejects an incomplete resource identity", () => {
+  assert.throws(
+    () => prepareWorkerAgent({ origin: "https://nanocodex.test" }),
+    /requires a stable threadId or sessionId/,
+  );
+});
+
 test("preparation stays abort-owned until claim and leaves the next prewarm claimable", { timeout: 2_000 }, async () => {
   const controller = new AbortController();
   const silent = new SilentWorker();
@@ -699,6 +737,41 @@ class SilentWorker {
   }
 
   postMessage(data) { this.incoming.push(data); }
+  terminate() { this.terminated += 1; }
+}
+
+class HarnessWorker {
+  constructor() {
+    this.onmessage = null;
+    this.onerror = null;
+    this.onmessageerror = null;
+    this.incoming = [];
+    this.terminated = 0;
+  }
+
+  postMessage(data) {
+    const message = structuredClone(data);
+    this.incoming.push(message);
+    if (message.type === "prewarm") {
+      queueMicrotask(() => this.onmessage?.({
+        data: {
+          channel: message.channel,
+          protocol: message.protocol,
+          type: "prewarmed",
+        },
+      }));
+    } else if (message.type === "boot") {
+      queueMicrotask(() => this.onmessage?.({
+        data: {
+          channel: message.channel,
+          protocol: message.protocol,
+          root: { agentId: "agent-1", sessionId: message.config.sessionId },
+          type: "ready",
+        },
+      }));
+    }
+  }
+
   terminate() { this.terminated += 1; }
 }
 

@@ -32,6 +32,10 @@ import type * as NodePublicTypes from "../node/index.mjs";
 import type { WorkspaceEntry as BrowserWorkspaceEntry } from "../browser/workspace.mjs";
 import type { WorkspaceEntry as NodeWorkspaceEntry } from "../node/workspace.mjs";
 import {
+  createWorkerAgent,
+  prepareWorkerAgent,
+} from "../browser/WorkerAgent.mjs";
+import {
   dataset,
   imageGeneration,
   updatePlan,
@@ -82,6 +86,15 @@ type HostDurabilityStore = HostPublicTypes.DurabilityStore;
 type NodeDurabilityStore = NodePublicTypes.DurabilityStore;
 
 async function check() {
+  const workerResource = {
+    origin: "https://example.com",
+    sessionId: "session-1",
+    threadId: "thread-1",
+  } as const;
+  await prepareWorkerAgent(workerResource);
+  await createWorkerAgent(workerResource);
+  // @ts-expect-error non-disabled preparation requires one stable harness identity.
+  await prepareWorkerAgent({ origin: "https://example.com" });
   const storedJournal: DurabilityStoredJournal = {
     revision: durabilityRevision(0n),
     batches: [],

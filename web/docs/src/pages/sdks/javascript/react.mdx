@@ -35,10 +35,10 @@ function App() {
 
 The vanilla `createConfig` store owns the package Worker, retries, replacement,
 and graceful shutdown. Active hooks with the same thread ID share exactly one
-Agent. A disabled hook prepares the Worker and browser workspace without
-creating an Agent. `useAgent` exposes a Wagmi-style status snapshot and
+Agent. A disabled hook stays idle without preparing or creating an Agent.
+`useAgent` exposes a Wagmi-style status snapshot and
 `refetch`; `useAgentEvents` subscribes to the ordered typed event stream while
-always calling the latest React listener.
+always calling the latest committed React listener.
 
 Create exactly one explicit config. Pass Worker-safe Agent defaults when the
 application needs them:
