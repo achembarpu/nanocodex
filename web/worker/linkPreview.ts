@@ -67,7 +67,7 @@ export async function routeLinkPreview(
   if (!assetResponse.ok) return assetResponse;
 
   const headers = new Headers(assetResponse.headers);
-  headers.set("cache-control", "public, max-age=0, must-revalidate");
+  headers.set("cache-control", "public, max-age=0, must-revalidate, no-transform");
   headers.set("content-type", "text/html; charset=utf-8");
   headers.set("x-content-type-options", "nosniff");
   headers.delete("content-encoding");
@@ -86,21 +86,10 @@ export async function routeLinkPreview(
     return new Response(html, { headers, status: 404 });
   }
 
-  const assetEtag = headers.get("etag");
-  let etag = assetEtag ? documentEtag(assetEtag, preview, url) : null;
-  if (etag) {
-    headers.set("etag", etag);
-    if (etagMatches(request.headers.get("if-none-match"), etag)) {
-      return new Response(null, { headers, status: 304 });
-    }
-    if (request.method === "HEAD") {
-      return new Response(null, { headers, status: assetResponse.status });
-    }
-  }
-
   const html = await renderLinkPreviewDocument(await assetResponse.text(), url, env, preview);
-  etag ??= pageEtag(fnv1a(html));
+  const etag = pageEtag(fnv1a(html));
   headers.set("etag", etag);
+  headers.set("content-length", String(new TextEncoder().encode(html).byteLength));
   if (etagMatches(request.headers.get("if-none-match"), etag)) {
     return new Response(null, { headers, status: 304 });
   }
@@ -190,21 +179,10 @@ async function previewImage(request: Request, env: LinkPreviewEnv, url: URL): Pr
   return new Response(png.buffer as ArrayBuffer, { headers });
 }
 
-function documentEtag(assetEtag: string, preview: Preview, url: URL): string {
-  return pageEtag(fnv1a([
-    assetEtag,
-    url.origin,
-    preview.canonicalPath,
-    preview.eyebrow,
-    preview.title,
-    preview.description,
-  ].join("\n")));
-}
-
 function pageEtag(hash: string): string {
-  // Cloudflare may Brotli-compress HTML at the edge. A weak validator remains
-  // correct across content codings and therefore survives that delivery path.
-  return `W/"page-${hash}"`;
+  // no-transform keeps the final bytes stable across the edge, so clients can
+  // use a strong validator without redownloading the application shell.
+  return `"page-${hash}"`;
 }
 
 function etagMatches(value: string | null, etag: string): boolean {

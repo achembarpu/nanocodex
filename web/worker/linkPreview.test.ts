@@ -42,8 +42,15 @@ test("crawler documents contain complete route-aware production metadata", async
 
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("content-type"), "text/html; charset=utf-8");
-  assert.equal(response.headers.get("cache-control"), "public, max-age=0, must-revalidate");
-  assert.match(response.headers.get("etag") ?? "", /^W\/"page-[0-9a-f]+"$/);
+  assert.equal(
+    response.headers.get("cache-control"),
+    "public, max-age=0, must-revalidate, no-transform",
+  );
+  assert.match(response.headers.get("etag") ?? "", /^"page-[0-9a-f]+"$/);
+  assert.equal(
+    response.headers.get("content-length"),
+    String(new TextEncoder().encode(html).byteLength),
+  );
   assert.equal(requests[0]?.url, "https://nanocodex-preview.workers.dev/");
   assert.match(html, /<link rel="canonical" href="https:\/\/nanocodex-preview\.workers\.dev\/code\?path=src%2F%3Cdriver%3E\.rs" \/>/);
   assert.match(html, /<meta property="og:type" content="website" \/>/);
@@ -121,7 +128,7 @@ test("requests is a public route with canonical metadata and matching GET, HEAD,
   assert.match(html, /<meta property="og:url" content="https:\/\/preview\.test\/requests" \/>/);
   assert.match(html, /<meta property="og:image" content="https:\/\/preview\.test\/og\.png\?path=%2Frequests" \/>/);
   assert.doesNotMatch(html, /thread=private/);
-  assert.match(etag ?? "", /^W\/"page-[0-9a-f]+"$/);
+  assert.match(etag ?? "", /^"page-[0-9a-f]+"$/);
 
   const head = await worker.fetch(new Request(request.url, { method: "HEAD" }), env as never);
   assert.equal(head.status, 200);
@@ -210,7 +217,7 @@ test("documents without an asset validator still honor the rendered page ETag", 
   const response = await worker.fetch(browserRequest, env as never);
   const etag = response.headers.get("etag");
   assert.equal(response.status, 200);
-  assert.match(etag ?? "", /^W\/"page-[0-9a-f]+"$/);
+  assert.match(etag ?? "", /^"page-[0-9a-f]+"$/);
 
   const notModified = await worker.fetch(new Request(browserRequest, {
     headers: { ...Object.fromEntries(browserRequest.headers), "if-none-match": etag! },
