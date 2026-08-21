@@ -41,6 +41,11 @@ function loadAgentTerminal(): Promise<AuthenticatedAgentTerminal> {
   return request;
 }
 
+/** Warms the authenticated terminal boundary without creating an Agent or UI. */
+export function preloadAgentTerminal(): Promise<void> {
+  return loadAgentTerminal().then(() => undefined);
+}
+
 /** Lightweight credential shell that keeps the authenticated runtime off signed-out startup. */
 export const AgentExperience = memo(function AgentExperience({
   mode,

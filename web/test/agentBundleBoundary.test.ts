@@ -56,6 +56,13 @@ test("authenticated credential readiness is the sole terminal import gate", () =
   );
   assert.match(experience, /source === "subscription" \|\| source === "user"/);
   assert.match(terminal, /useAgent\(\{ enabled: true, threadId: thread\?\.id \}\)/);
+
+  assert.match(experience, /export function preloadAgentTerminal\(\)/);
+  assert.match(
+    routeLoaders,
+    /const experience = loadAgentExperience\(\)[\s\S]*?deploymentHealth\.read\(\)\.then[\s\S]*?health\.credentialSource !== null[\s\S]*?preloadAgentTerminal\(\)/,
+  );
+  assert.match(routeLoaders, /await Promise\.all\(\[loadHomeFrame\(\), experience\]\)/);
 });
 
 test("signed-out and runtime-import states retain complete terminal geometry without loading UI", () => {

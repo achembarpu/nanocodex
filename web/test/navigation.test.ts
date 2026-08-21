@@ -286,7 +286,7 @@ test("direct preloading selects only the work owned by the resolved route", () =
   const preload = routeLoaders.slice(routeLoaders.indexOf("export async function preloadDirectSurface"));
   assert.match(
     preload,
-    /surface === "home" \|\| surface === "agent"[\s\S]*?deploymentHealth\.read\(\)[\s\S]*?loadHomeFrame\(\)[\s\S]*?loadAgentExperience\(\)/,
+    /surface === "home" \|\| surface === "agent"[\s\S]*?const experience = loadAgentExperience\(\)[\s\S]*?deploymentHealth\.read\(\)[\s\S]*?Promise\.all\(\[loadHomeFrame\(\), experience\]\)/,
   );
   assert.match(preload, /surface === "changelog"[\s\S]*?preloadChangelog\(\)/);
   assert.match(preload, /surface === "docs"[\s\S]*?preloadDocsRoute\(url\.pathname\)/);

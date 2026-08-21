@@ -166,15 +166,6 @@ svg {
   min-height: 100vh;
 }
 
-.app-boot {
-  display: grid;
-  min-height: 100svh;
-  color: color-mix(in srgb, var(--text) 55%, transparent);
-  background: var(--surface);
-  font-size: 10px;
-  place-content: center;
-}
-
 .page-grid {
   width: 100%;
   padding-inline: var(--page-margin);

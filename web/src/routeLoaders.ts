@@ -41,6 +41,7 @@ export const loadHomeFrame = () =>
 export const loadAgentExperience = () =>
   import("./AgentExperience").then((module) => ({
     default: module.AgentExperience,
+    preloadAgentTerminal: module.preloadAgentTerminal,
   }));
 export const loadPierreWorkerProvider = () =>
   import("./PierreWorkerProvider").then((module) => ({
@@ -115,10 +116,16 @@ function loadRepositorySnapshot(): Promise<PublishedRepositorySnapshot> {
 export async function preloadDirectSurface(url: URL): Promise<PreparedDirectRoute> {
   const surface = surfaceFromUrl(url);
   if (surface === "home" || surface === "agent") {
-    // Start the sole credential lookup while the React shell and route modules
-    // are still in flight. Rendering never waits for this network request.
-    void deploymentHealth.read().catch(() => undefined);
-    await Promise.all([loadHomeFrame(), loadAgentExperience()]);
+    const experience = loadAgentExperience();
+    // The sole credential lookup starts beside the React shell. A configured
+    // browser also fetches the authenticated terminal in that same window,
+    // while signed-out startup never touches the Agent graph.
+    void deploymentHealth.read().then(async (health) => {
+      if (health.credentialSource !== null) {
+        await (await experience).preloadAgentTerminal();
+      }
+    }).catch(() => undefined);
+    await Promise.all([loadHomeFrame(), experience]);
     return {};
   }
   if (surface === "code") {
