@@ -32,7 +32,7 @@ export type UseAgentReturnType = Readonly<{
 
 export function NanocodexProvider(props: {
   children: ReactNode;
-  config?: Config | undefined;
+  config: Config;
 }): ReactNode;
 export function useConfig(parameters?: { config?: Config | undefined }): Config;
 export function useAgent(options?: UseAgentParameters): UseAgentReturnType;

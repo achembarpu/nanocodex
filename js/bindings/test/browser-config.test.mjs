@@ -3,6 +3,35 @@ import test from "node:test";
 
 import { createAgentConfig } from "../browser/config.mjs";
 
+test("snapshot reads and refetch stay pure until a subscriber creates the entry", async () => {
+  const calls = [];
+  const closed = [];
+  const config = createAgentConfig({}, {
+    async create(options) {
+      calls.push(["create", options]);
+      return fakeAgent("agent", closed);
+    },
+    async prepare(options) { calls.push(["prepare", options]); },
+  });
+
+  const first = config.getAgent({ threadId: "render-only" });
+  const second = config.getAgent({ threadId: "render-only" });
+  config.refetchAgent({ threadId: "render-only" });
+  await tick();
+
+  assert.equal(first, second);
+  assert.equal(first.status, "idle");
+  assert.deepEqual(calls, []);
+
+  const unsubscribe = config.subscribeAgent({ threadId: "render-only" }, () => {});
+  await waitFor(() => config.getAgent({ threadId: "render-only" }).status === "success");
+  assert.deepEqual(calls.map(([kind]) => kind), ["prepare", "create"]);
+
+  unsubscribe();
+  await waitFor(() => closed.length === 1);
+  await config.destroy();
+});
+
 test("disabled consumers prewarm without creating an Agent", async () => {
   const calls = [];
   const config = createAgentConfig({}, {
@@ -19,6 +48,50 @@ test("disabled consumers prewarm without creating an Agent", async () => {
   });
   assert.deepEqual(calls, [["prepare", { threadId: "demo" }]]);
   unsubscribe();
+  await config.destroy();
+});
+
+test("preparation deduplicates and shares the exact stable descriptor with creation", async () => {
+  const prepared = [];
+  const created = [];
+  const closed = [];
+  const config = createAgentConfig({
+    agent: { thinking: "high" },
+    origin: "https://example.test",
+  }, {
+    async create(options) {
+      created.push(options);
+      return fakeAgent("shared", closed);
+    },
+    async prepare(options) { prepared.push(options); },
+  });
+
+  const first = config.subscribeAgent({ enabled: false }, () => {});
+  await waitFor(() => prepared.length === 1);
+  const second = config.subscribeAgent({ enabled: false }, () => {});
+  await tick();
+  assert.equal(prepared.length, 1);
+  assert.equal(created.length, 0);
+
+  const third = config.subscribeAgent({}, () => {});
+  await waitFor(() => config.getAgent().status === "success");
+  const fourth = config.subscribeAgent({}, () => {});
+  await tick();
+
+  assert.equal(prepared.length, 1);
+  assert.equal(created.length, 1);
+  assert.equal(prepared[0], created[0]);
+  assert.equal(Object.isFrozen(created[0]), true);
+  assert.equal(created[0].thinking, "high");
+  assert.equal(created[0].origin, "https://example.test");
+  assert.equal(typeof created[0].threadId, "string");
+  assert.notEqual(created[0].threadId, "");
+
+  first();
+  second();
+  third();
+  fourth();
+  await waitFor(() => closed.length === 1);
   await config.destroy();
 });
 
@@ -140,6 +213,161 @@ test("startup publishes an error after the configured retry budget", async () =>
   await config.destroy();
 });
 
+test("retry policy failures publish a terminal error", async (context) => {
+  const thrown = new Error("retry policy failed");
+  const cases = [
+    {
+      name: "throwing callback",
+      retryDelay() { throw thrown; },
+      verify(error) { assert.equal(error, thrown); },
+    },
+    {
+      name: "invalid callback result",
+      retryDelay() { return Number.POSITIVE_INFINITY; },
+      verify(error) { assert.match(error.message, /non-negative finite number/); },
+    },
+  ];
+
+  for (const current of cases) {
+    await context.test(current.name, async () => {
+      let attempts = 0;
+      const statuses = [];
+      const config = createAgentConfig({ retry: 1, retryDelay: current.retryDelay }, {
+        async create() {
+          attempts += 1;
+          throw new Error("startup failed");
+        },
+        async prepare() {},
+      });
+      const unsubscribe = config.subscribeAgent({}, () => statuses.push(config.getAgent().status));
+      await waitFor(() => config.getAgent().status === "error");
+
+      assert.equal(attempts, 1);
+      assert.deepEqual(statuses, ["pending", "error"]);
+      current.verify(config.getAgent().error);
+
+      unsubscribe();
+      await config.destroy();
+    });
+  }
+});
+
+test("a refetch during retry backoff suppresses the stale generation", async () => {
+  const backoffStarted = deferred();
+  const closed = [];
+  let attempts = 0;
+  const config = createAgentConfig({
+    retry: 1,
+    retryDelay() {
+      backoffStarted.resolve();
+      return 20;
+    },
+  }, {
+    async create() {
+      attempts += 1;
+      if (attempts === 1) throw new Error("transient");
+      return fakeAgent("replacement", closed);
+    },
+    async prepare() {},
+  });
+  const unsubscribe = config.subscribeAgent({}, () => {});
+  await backoffStarted.promise;
+  config.refetchAgent();
+  await sleep(30);
+  await waitFor(() => config.getAgent().status === "success");
+
+  assert.equal(attempts, 2);
+  unsubscribe();
+  await waitFor(() => closed.length === 1);
+  await config.destroy();
+});
+
+test("the last unsubscribe during retry backoff prevents another creation", async () => {
+  const backoffStarted = deferred();
+  let attempts = 0;
+  const config = createAgentConfig({
+    retry: 1,
+    retryDelay() {
+      backoffStarted.resolve();
+      return 20;
+    },
+  }, {
+    async create() {
+      attempts += 1;
+      throw new Error("transient");
+    },
+    async prepare() {},
+  });
+  const unsubscribe = config.subscribeAgent({}, () => {});
+  await backoffStarted.promise;
+  unsubscribe();
+  await sleep(30);
+  await waitFor(() => config.getAgent().status === "idle");
+
+  assert.equal(attempts, 1);
+  await config.destroy();
+});
+
+test("destroy during retry backoff prevents another creation", async () => {
+  const backoffStarted = deferred();
+  let attempts = 0;
+  const config = createAgentConfig({
+    retry: 1,
+    retryDelay() {
+      backoffStarted.resolve();
+      return 20;
+    },
+  }, {
+    async create() {
+      attempts += 1;
+      throw new Error("transient");
+    },
+    async prepare() {},
+  });
+  const unsubscribe = config.subscribeAgent({}, () => {});
+  await backoffStarted.promise;
+  await config.destroy();
+
+  assert.equal(attempts, 1);
+  unsubscribe();
+  unsubscribe();
+});
+
+test("destroy publishes idle once and makes outstanding unsubscribes harmless", async () => {
+  const closed = [];
+  const config = createAgentConfig({}, {
+    async create() { return fakeAgent("active", closed); },
+    async prepare() {},
+  });
+  const firstStatuses = [];
+  const secondStatuses = [];
+  let first;
+  first = config.subscribeAgent({}, () => {
+    const status = config.getAgent().status;
+    firstStatuses.push(status);
+    if (status === "idle") first();
+  });
+  const second = config.subscribeAgent({}, () => secondStatuses.push(config.getAgent().status));
+  await waitFor(() => config.getAgent().status === "success");
+  firstStatuses.length = 0;
+  secondStatuses.length = 0;
+
+  await config.destroy();
+
+  assert.deepEqual(firstStatuses, ["idle"]);
+  assert.deepEqual(secondStatuses, ["idle"]);
+  assert.equal(config.getAgent().status, "idle");
+  assert.deepEqual(closed, ["active"]);
+
+  first();
+  second();
+  second();
+  await config.destroy();
+  assert.deepEqual(firstStatuses, ["idle"]);
+  assert.deepEqual(secondStatuses, ["idle"]);
+  assert.deepEqual(closed, ["active"]);
+});
+
 function fakeAgent(id, closed) {
   return {
     session: {
@@ -160,6 +388,10 @@ function deferred() {
 
 function tick() {
   return new Promise((resolve) => setImmediate(resolve));
+}
+
+function sleep(duration) {
+  return new Promise((resolve) => setTimeout(resolve, duration));
 }
 
 async function waitFor(predicate) {

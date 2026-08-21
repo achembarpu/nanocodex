@@ -9,10 +9,12 @@ Use `nanocodex-react` to read the browser SDK's vanilla external store without
 coupling turn completion or agent ownership to a component tree.
 
 ```tsx
-import { NanocodexProvider, useAgent, useAgentEvents } from "nanocodex-react";
+import { createConfig, NanocodexProvider, useAgent, useAgentEvents } from "nanocodex-react";
+
+const config = createConfig();
 
 root.render(
-  <NanocodexProvider>
+  <NanocodexProvider config={config}>
     <App />
   </NanocodexProvider>,
 );
@@ -38,7 +40,8 @@ creating an Agent. `useAgent` exposes a Wagmi-style status snapshot and
 `refetch`; `useAgentEvents` subscribes to the ordered typed event stream while
 always calling the latest React listener.
 
-Pass an explicit config only when changing Worker-safe defaults:
+Create exactly one explicit config. Pass Worker-safe Agent defaults when the
+application needs them:
 
 ```tsx
 import { Transport } from "nanocodex/browser";

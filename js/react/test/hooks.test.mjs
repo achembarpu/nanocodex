@@ -13,6 +13,13 @@ import {
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
+test("NanocodexProvider requires one explicit caller-owned config", () => {
+  assert.throws(
+    () => NanocodexProvider({ children: null }),
+    /requires a config/,
+  );
+});
+
 test("useAgent follows the vanilla external store without duplicating Agent ownership", async () => {
   const store = createStore();
   let resource;

@@ -24,16 +24,25 @@ export function createAgentConfig(options = {}, runtime) {
   if (typeof retryDelay !== "function") throw new TypeError("retryDelay must be a function");
   let destroyed = false;
 
-  function getEntry(parameters = {}) {
+  function createEntry(parameters = {}) {
     const key = parameters.threadId ?? "";
-    let entry = entries.get(key);
-    if (entry) return entry;
-    entry = {
+    const threadId = nonEmptyString(key)
+      ?? nonEmptyString(agentOptions.threadId)
+      ?? nonEmptyString(agentOptions.sessionId)
+      ?? randomId();
+    const createOptions = Object.freeze({
+      ...agentOptions,
+      threadId,
+      ...(options.origin === undefined ? {} : { origin: options.origin }),
+    });
+    const entry = {
       activeSubscribers: 0,
       agent: undefined,
+      createOptions,
       generation: 0,
       key,
       listeners: new Set(),
+      preparation: undefined,
       snapshot: IDLE_SNAPSHOT,
       tail: Promise.resolve(),
     };
@@ -82,11 +91,9 @@ export function createAgentConfig(options = {}, runtime) {
 
       let candidate;
       for (let attempt = 0; attempt <= retry; attempt += 1) {
+        if (generation !== entry.generation || entry.activeSubscribers === 0 || destroyed) return;
         try {
-          candidate = await runtime.create({
-            ...agentOptions,
-            ...(entry.key === "" ? {} : { threadId: entry.key }),
-          });
+          candidate = await runtime.create(entry.createOptions);
           break;
         } catch (error) {
           if (generation !== entry.generation || entry.activeSubscribers === 0 || destroyed) return;
@@ -94,8 +101,17 @@ export function createAgentConfig(options = {}, runtime) {
             publish(entry, "error", undefined, error);
             return;
           }
-          const delay = nonNegativeNumber(retryDelay(attempt + 1, error), "retryDelay result");
+          let delay;
+          try {
+            delay = nonNegativeNumber(retryDelay(attempt + 1, error), "retryDelay result");
+          } catch (retryError) {
+            if (generation === entry.generation && entry.activeSubscribers > 0 && !destroyed) {
+              publish(entry, "error", undefined, retryError);
+            }
+            return;
+          }
           if (delay > 0) await wait(delay);
+          if (generation !== entry.generation || entry.activeSubscribers === 0 || destroyed) return;
         }
       }
       if (candidate === undefined) return;
@@ -109,9 +125,10 @@ export function createAgentConfig(options = {}, runtime) {
   }
 
   function prepare(entry) {
-    void runtime.prepare({
-      ...(entry.key === "" ? {} : { threadId: entry.key }),
-      ...(options.origin === undefined ? {} : { origin: options.origin }),
+    if (entry.agent !== undefined || entry.preparation !== undefined) return;
+    entry.preparation = Promise.resolve().then(() => {
+      if (destroyed || entries.get(entry.key) !== entry) return;
+      return runtime.prepare(entry.createOptions);
     }).catch(() => {
       // Agent.create reports an actionable error if warmup cannot be reused.
     });
@@ -135,12 +152,13 @@ export function createAgentConfig(options = {}, runtime) {
   const config = {
     getAgent(parameters = {}) {
       if (parameters.enabled === false || destroyed) return IDLE_SNAPSHOT;
-      return getEntry(parameters).snapshot;
+      return entries.get(parameters.threadId ?? "")?.snapshot ?? IDLE_SNAPSHOT;
     },
     subscribeAgent(parameters = {}, listener) {
       if (typeof listener !== "function") throw new TypeError("subscribeAgent requires a listener");
       if (destroyed) return () => {};
-      const entry = getEntry(parameters);
+      const key = parameters.threadId ?? "";
+      const entry = entries.get(key) ?? createEntry(parameters);
       prepare(entry);
       entry.listeners.add(listener);
       const enabled = parameters.enabled !== false;
@@ -152,6 +170,7 @@ export function createAgentConfig(options = {}, runtime) {
       return () => {
         if (!subscribed) return;
         subscribed = false;
+        if (destroyed) return;
         entry.listeners.delete(listener);
         if (!enabled) {
           if (entry.listeners.size === 0 && entry.activeSubscribers === 0) entries.delete(entry.key);
@@ -163,7 +182,8 @@ export function createAgentConfig(options = {}, runtime) {
     },
     refetchAgent(parameters = {}) {
       if (parameters.enabled === false || destroyed) return;
-      start(getEntry(parameters), true);
+      const entry = entries.get(parameters.threadId ?? "");
+      if (entry !== undefined) start(entry, true);
     },
     async destroy() {
       if (destroyed) return;
@@ -171,8 +191,13 @@ export function createAgentConfig(options = {}, runtime) {
       const closures = [];
       for (const entry of entries.values()) {
         entry.generation += 1;
+        entry.snapshot = IDLE_SNAPSHOT;
+        const listeners = [...entry.listeners];
         entry.listeners.clear();
         entry.activeSubscribers = 0;
+        for (const listener of listeners) {
+          try { listener(); } catch (error) { reportError(error); }
+        }
         closures.push(enqueue(entry, async () => {
           const current = entry.agent;
           entry.agent = undefined;
@@ -203,6 +228,14 @@ function nonNegativeNumber(value, name) {
     throw new TypeError(`${name} must be a non-negative finite number`);
   }
   return value;
+}
+
+function nonEmptyString(value) {
+  return typeof value === "string" && value.length > 0 ? value : undefined;
+}
+
+function randomId() {
+  return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
 }
 
 function wait(duration) {

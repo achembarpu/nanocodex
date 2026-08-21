@@ -5,10 +5,12 @@ Worker, Rust/WASM Agent, persistent workspace, and cleanup. React only reads
 that external state and binds event subscriptions.
 
 ```tsx
-import { NanocodexProvider, useAgent } from "nanocodex-react";
+import { createConfig, NanocodexProvider, useAgent } from "nanocodex-react";
+
+const config = createConfig();
 
 root.render(
-  <NanocodexProvider>
+  <NanocodexProvider config={config}>
     <App />
   </NanocodexProvider>,
 );
@@ -24,5 +26,5 @@ vanilla config creates one Agent for active subscribers, shares it, and shuts it
 down after the last subscriber leaves. `useAgentEvents` is the narrow hook for
 ordered typed events.
 
-Advanced applications may pass `createConfig({ agent: { ... } })` to the
-provider. Defaults require no setup.
+Create the config once, outside React. Applications can pass Agent defaults to
+`createConfig({ agent: { ... } })` without adding another lifecycle owner.

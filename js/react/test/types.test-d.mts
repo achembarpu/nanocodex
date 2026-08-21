@@ -15,6 +15,9 @@ const config = createConfig({
 });
 const provider: ComponentProps<typeof NanocodexProvider> = { children: null, config };
 void provider;
+// @ts-expect-error the application owns exactly one explicit Config lifecycle.
+const missingConfig: ComponentProps<typeof NanocodexProvider> = { children: null };
+void missingConfig;
 
 function Consumer() {
   const resolved = useConfig();

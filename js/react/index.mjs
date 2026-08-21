@@ -1,3 +1,5 @@
+"use client";
+
 import {
   createContext,
   createElement,
@@ -8,18 +10,16 @@ import {
   useRef,
   useSyncExternalStore,
 } from "react";
-import { createConfig as createBrowserConfig } from "nanocodex/browser";
 
 export { createConfig } from "nanocodex/browser";
 
 const NanocodexContext = createContext(null);
 
-/** Supplies one stable vanilla browser config to Nanocodex hooks. */
+/** Supplies one caller-owned vanilla browser config to Nanocodex hooks. */
 export function NanocodexProvider({ children, config }) {
-  const fallback = useRef();
-  if (!config && !fallback.current) fallback.current = createBrowserConfig();
+  if (!config) throw new TypeError("NanocodexProvider requires a config");
   return createElement(NanocodexContext.Provider, {
-    value: config ?? fallback.current,
+    value: config,
   }, children);
 }
 
