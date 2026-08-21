@@ -69,6 +69,84 @@ test("Worker Agent preserves synchronous prompt handles, independent results, an
   assert.equal(worker.terminated, 1);
 });
 
+test("a prompt-created Turn keeps its Worker alive after Agent disposal", async () => {
+  const fixture = createFixture();
+  const worker = new LoopbackWorker(fixture.createAgent);
+  const agent = await createWorkerAgent({ sessionId: "root", harness: false }, { worker });
+  const turn = agent.turn.prompt({ input: "finish independently" });
+
+  agent.dispose();
+  assert.equal(worker.terminated, 0);
+  const pendingResult = turn.result();
+  await tick();
+  assert.equal(fixture.disposedAgents.has("root"), true);
+
+  fixture.complete("root", "still completed");
+  const result = await pendingResult;
+  assert.equal(result.finalMessage, "still completed");
+  assert.equal(worker.terminated, 0);
+  assert.equal(fixture.log.filter(([kind]) => kind === "turn-dispose").length, 1);
+  assert.equal(worker.incoming.filter((message) => message.method === "turn.dispose").length, 0);
+
+  turn.dispose();
+  turn.dispose();
+  result.dispose();
+  result.dispose();
+  await tick();
+  assert.equal(worker.terminated, 1);
+  assert.equal(fixture.resultStats.released, 1);
+  assert.equal(worker.incoming.filter((message) => message.method === "result.dispose").length, 1);
+});
+
+test("disposing a result-started Turn before prompt acceptance preserves its result", async () => {
+  const fixture = createFixture();
+  const worker = new LoopbackWorker(fixture.createAgent);
+  const agent = await createWorkerAgent({ sessionId: "root", harness: false }, { worker });
+  const turn = agent.turn.prompt({ input: "accept before disposal" });
+  const pendingResult = turn.result();
+
+  turn.dispose();
+  turn.dispose();
+  agent.dispose();
+  assert.equal(worker.terminated, 0);
+  assert.equal(worker.incoming.filter((message) => message.method === "turn.dispose").length, 0);
+
+  await tick();
+  fixture.complete("root", "accepted result");
+  const result = await pendingResult;
+  assert.equal(result.finalMessage, "accepted result");
+  assert.equal(fixture.log.filter(([kind]) => kind === "turn-dispose").length, 1);
+  assert.equal(worker.incoming.filter((message) => message.method === "turn.dispose").length, 0);
+  assert.equal(worker.terminated, 0);
+
+  result.dispose();
+  result.dispose();
+  await tick();
+  assert.equal(worker.terminated, 1);
+  assert.equal(fixture.resultStats.released, 1);
+  assert.equal(worker.incoming.filter((message) => message.method === "result.dispose").length, 1);
+});
+
+test("disposing an unawaited Turn releases its Worker lease exactly once", async () => {
+  const fixture = createFixture();
+  const worker = new LoopbackWorker(fixture.createAgent);
+  const agent = await createWorkerAgent({ sessionId: "root", harness: false }, { worker });
+  const turn = agent.turn.prompt({ input: "release without a result" });
+  await tick();
+
+  agent.dispose();
+  assert.equal(worker.terminated, 0);
+  turn.dispose();
+  turn.dispose();
+  agent.dispose();
+  await tick();
+
+  assert.equal(worker.terminated, 1);
+  assert.equal(worker.incoming.filter((message) => message.method === "turn.dispose").length, 1);
+  assert.equal(fixture.log.filter(([kind]) => kind === "turn-dispose").length, 1);
+  assert.equal(fixture.resultStats.released, 0);
+});
+
 test("completed results survive Turn and Agent disposal until their own async work settles", async () => {
   const fixture = createFixture({ holdSnapshot: true });
   const worker = new LoopbackWorker(fixture.createAgent);

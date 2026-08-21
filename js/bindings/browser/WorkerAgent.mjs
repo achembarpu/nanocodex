@@ -544,6 +544,7 @@ class WorkerConnection {
     this.listeners = new Set();
     this.chunkedEvent = undefined;
     this.agents = 0;
+    this.turns = 0;
     this.results = 0;
     this.operations = 0;
     this.closed = false;
@@ -617,13 +618,20 @@ class WorkerConnection {
     const turnId = `turn-${this.nextTurn++}`;
     const accepted = this.pendingCall(turnId);
     void accepted.catch(() => {});
+    this.turns += 1;
     try { this.send({ type: "prompt", id: turnId, agentId, turnId, options }); }
     catch (error) { this.rejectPending(turnId, error); }
     let result;
     let disposed = false;
+    let retained = true;
     return {
       result() {
-        result ||= accepted.then(() => connectionResult(thisConnection(), turnId));
+        if (disposed && !result) {
+          return Promise.reject(new Error("the Nanocodex turn has been disposed"));
+        }
+        result ||= accepted
+          .then(() => connectionResult(thisConnection(), turnId))
+          .finally(release);
         return result;
       },
       steer(input) { return accepted.then(() => thisConnection().rpc("turn.steer", [turnId, { input }])); },
@@ -632,10 +640,18 @@ class WorkerConnection {
       free() {
         if (disposed) return;
         disposed = true;
+        if (result) return;
         thisConnection().sendBestEffort("turn.dispose", [turnId]);
+        release();
       },
     };
     function thisConnection() { return connection; }
+    function release() {
+      if (!retained) return;
+      retained = false;
+      connection.turns -= 1;
+      connection.closeIfIdle();
+    }
   }
 
   rpc(method, args) {
@@ -672,7 +688,7 @@ class WorkerConnection {
   }
 
   closeIfIdle() {
-    if (this.agents === 0 && this.results === 0 && this.operations === 0) {
+    if (this.agents === 0 && this.turns === 0 && this.results === 0 && this.operations === 0) {
       this.close(new Error("the Nanocodex Agent Worker has been disposed"));
     }
   }
