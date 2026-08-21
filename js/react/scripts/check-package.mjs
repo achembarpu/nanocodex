@@ -10,3 +10,4 @@ assert.equal(typeof react.useAgentEvents, "function");
 assert.equal(typeof react.useConfig, "function");
 assert.equal(typeof react.createConfig, "function");
 assert.equal(entry.split("\n", 1)[0], '"use client";');
+assert.match(entry, /const getServerSnapshot = useCallback\(\(\) => IDLE_AGENT_SNAPSHOT, \[\]\);/);

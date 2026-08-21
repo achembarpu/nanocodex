@@ -3,11 +3,11 @@ import type { create as createAgent } from "./Agent.mjs";
 
 export type AgentStatus = "idle" | "pending" | "success" | "error";
 
-export type AgentSnapshot = Readonly<{
-  data?: DefaultAgent | undefined;
-  error?: unknown;
-  status: AgentStatus;
-}>;
+export type AgentSnapshot =
+  | Readonly<{ data: undefined; error: undefined; status: "idle" }>
+  | Readonly<{ data: undefined; error: undefined; status: "pending" }>
+  | Readonly<{ data: DefaultAgent; error: undefined; status: "success" }>
+  | Readonly<{ data: undefined; error: unknown; status: "error" }>;
 
 export type AgentParameters = Readonly<{
   enabled?: boolean | undefined;

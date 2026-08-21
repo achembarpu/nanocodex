@@ -18,17 +18,19 @@ export function createConfig(options = {}) {
 export function createAgentConfig(options = {}, runtime) {
   const entries = new Map();
   const agentOptions = Object.freeze({ ...(options.agent ?? {}) });
+  const defaultThreadId = nonEmptyString(agentOptions.threadId)
+    ?? nonEmptyString(agentOptions.sessionId)
+    ?? randomId();
   const retry = nonNegativeInteger(options.retry ?? 2, "retry");
   const retryDelay = options.retryDelay ?? ((attempt) => 400 * attempt);
   if (typeof retryDelay !== "function") throw new TypeError("retryDelay must be a function");
   let destroyed = false;
 
-  function createEntry(parameters = {}) {
-    const key = parameters.threadId ?? "";
-    const threadId = nonEmptyString(key)
-      ?? nonEmptyString(agentOptions.threadId)
-      ?? nonEmptyString(agentOptions.sessionId)
-      ?? randomId();
+  function resolveThreadId(parameters = {}) {
+    return nonEmptyString(parameters.threadId) ?? defaultThreadId;
+  }
+
+  function createEntry(threadId) {
     const createOptions = Object.freeze({
       ...agentOptions,
       threadId,
@@ -40,12 +42,12 @@ export function createAgentConfig(options = {}, runtime) {
       closing: Promise.resolve(),
       createOptions,
       generation: 0,
-      key,
+      key: threadId,
       listeners: new Set(),
       operation: undefined,
       snapshot: IDLE_SNAPSHOT,
     };
-    entries.set(key, entry);
+    entries.set(threadId, entry);
     return entry;
   }
 
@@ -192,13 +194,13 @@ export function createAgentConfig(options = {}, runtime) {
   const config = {
     getAgent(parameters = {}) {
       if (parameters.enabled === false || destroyed) return IDLE_SNAPSHOT;
-      return entries.get(parameters.threadId ?? "")?.snapshot ?? IDLE_SNAPSHOT;
+      return entries.get(resolveThreadId(parameters))?.snapshot ?? IDLE_SNAPSHOT;
     },
     subscribeAgent(parameters = {}, listener) {
       if (typeof listener !== "function") throw new TypeError("subscribeAgent requires a listener");
       if (destroyed) return () => {};
-      const key = parameters.threadId ?? "";
-      const entry = entries.get(key) ?? createEntry(parameters);
+      const threadId = resolveThreadId(parameters);
+      const entry = entries.get(threadId) ?? createEntry(threadId);
       entry.listeners.add(listener);
       const enabled = parameters.enabled !== false;
       if (enabled) {
@@ -224,7 +226,7 @@ export function createAgentConfig(options = {}, runtime) {
     },
     refetchAgent(parameters = {}) {
       if (parameters.enabled === false || destroyed) return;
-      const entry = entries.get(parameters.threadId ?? "");
+      const entry = entries.get(resolveThreadId(parameters));
       if (entry !== undefined) start(entry, true);
     },
     async destroy() {

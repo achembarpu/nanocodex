@@ -76,6 +76,56 @@ test("useAgent follows the vanilla external store without duplicating Agent owne
   assert.equal(store.unsubscribed, 2);
 });
 
+test("useAgent selectors suppress updates while their selected value stays equal", async () => {
+  const store = createStore();
+  let renders = 0;
+  let selection;
+
+  function Consumer() {
+    renders += 1;
+    selection = useAgent({
+      selector: (resource) => ({ ready: resource.isSuccess }),
+      equalityFn: (previous, next) => previous.ready === next.ready,
+    });
+    return null;
+  }
+
+  let root;
+  await act(async () => {
+    root = create(createElement(
+      NanocodexProvider,
+      { config: store.config },
+      createElement(Consumer),
+    ));
+  });
+  const initialRenders = renders;
+  const idleSelection = selection;
+
+  store.publish({ status: "pending" });
+  await act(async () => store.flush());
+  store.publish({ error: new Error("unavailable"), status: "error" });
+  await act(async () => store.flush());
+
+  assert.equal(renders, initialRenders);
+  assert.equal(selection, idleSelection);
+  assert.deepEqual(selection, { ready: false });
+
+  store.publish({ data: Object.freeze({ sessionId: "thread-1" }), status: "success" });
+  await act(async () => store.flush());
+  assert.equal(renders, initialRenders + 1);
+  assert.deepEqual(selection, { ready: true });
+  const successSelection = selection;
+
+  store.publish({ data: Object.freeze({ sessionId: "thread-2" }), status: "success" });
+  await act(async () => store.flush());
+  assert.equal(renders, initialRenders + 1);
+  assert.equal(selection, successSelection);
+  assert.equal(store.subscriptions.length, 1);
+
+  await act(async () => root.unmount());
+  assert.equal(store.unsubscribed, 1);
+});
+
 test("useAgent refetch cancels hung startup and unmount releases its replacement", { timeout: 2_000 }, async () => {
   const signals = [];
   const closed = [];
@@ -123,7 +173,7 @@ test("useAgent refetch cancels hung startup and unmount releases its replacement
   await config.destroy();
 });
 
-test("useAgentEvents keeps the latest listener without resubscribing", async () => {
+test("useAgentEvents commits listener changes without resubscribing", async () => {
   const callbacks = new Set();
   const watchOptions = [];
   let releases = 0;
@@ -148,8 +198,11 @@ test("useAgentEvents keeps the latest listener without resubscribing", async () 
   const first = [];
   const second = [];
 
-  function Consumer({ listener }) {
+  function Consumer({ emitDuringRender = false, listener }) {
     useAgentEvents(agent, listener, { includeAllSessions: true });
+    if (emitDuringRender) {
+      for (const callback of callbacks) callback({ seq: 2 });
+    }
     return null;
   }
 
@@ -160,13 +213,16 @@ test("useAgentEvents keeps the latest listener without resubscribing", async () 
   for (const callback of callbacks) callback({ seq: 1 });
 
   await act(async () => {
-    root.update(createElement(Consumer, { listener: (event) => second.push(event.seq) }));
+    root.update(createElement(Consumer, {
+      emitDuringRender: true,
+      listener: (event) => second.push(event.seq),
+    }));
   });
-  for (const callback of callbacks) callback({ seq: 2 });
+  for (const callback of callbacks) callback({ seq: 3 });
 
   assert.deepEqual(watchOptions, [{ includeAllSessions: true }]);
-  assert.deepEqual(first, [1]);
-  assert.deepEqual(second, [2]);
+  assert.deepEqual(first, [1, 2]);
+  assert.deepEqual(second, [3]);
   assert.equal(releases, 0);
   assert.equal(offs, 0);
 

@@ -10,32 +10,76 @@ export {
   type CreateConfigParameters,
 } from "nanocodex/browser";
 
-export type UseAgentParameters = Readonly<{
-  /** Defaults to true. Disabled hooks privately prepare the package Worker. */
+export type UseAgentParameters<Selection = UseAgentReturnType> = Readonly<{
+  /** Defaults to true. Disabled hooks stay idle and do not prepare or create an Agent. */
   enabled?: boolean | undefined;
-  /** Stable OPFS/Git workspace identity. Defaults to a generated UUID. */
+  /** Stable OPFS/Git workspace identity. Omitted or empty values use the config's stable default. */
   threadId?: string | undefined;
   /** Optional provider bypass for libraries and isolated consumers. */
   config?: Config | undefined;
+  /** Selects the value observed by this component. Defaults to the full Agent resource. */
+  selector?: ((resource: UseAgentReturnType) => Selection) | undefined;
+  /** Controls whether two selected values are observably different. Defaults to Object.is. */
+  equalityFn?: ((previous: Selection, next: Selection) => boolean) | undefined;
 }>;
 
-export type UseAgentReturnType = Readonly<{
-  data?: DefaultAgent | undefined;
-  error?: unknown;
-  status: "idle" | "pending" | "success" | "error";
-  isError: boolean;
-  isIdle: boolean;
-  isPending: boolean;
-  isSuccess: boolean;
-  refetch(): void;
-}>;
+export type UseAgentReturnType =
+  | Readonly<{
+    data: undefined;
+    error: undefined;
+    status: "idle";
+    isError: false;
+    isIdle: true;
+    isPending: false;
+    isSuccess: false;
+    refetch(): void;
+  }>
+  | Readonly<{
+    data: undefined;
+    error: undefined;
+    status: "pending";
+    isError: false;
+    isIdle: false;
+    isPending: true;
+    isSuccess: false;
+    refetch(): void;
+  }>
+  | Readonly<{
+    data: DefaultAgent;
+    error: undefined;
+    status: "success";
+    isError: false;
+    isIdle: false;
+    isPending: false;
+    isSuccess: true;
+    refetch(): void;
+  }>
+  | Readonly<{
+    data: undefined;
+    error: unknown;
+    status: "error";
+    isError: true;
+    isIdle: false;
+    isPending: false;
+    isSuccess: false;
+    refetch(): void;
+  }>;
 
 export function NanocodexProvider(props: {
   children: ReactNode;
   config: Config;
 }): ReactNode;
 export function useConfig(parameters?: { config?: Config | undefined }): Config;
-export function useAgent(options?: UseAgentParameters): UseAgentReturnType;
+export function useAgent<Selection>(
+  options: UseAgentParameters<Selection> & {
+    selector: (resource: UseAgentReturnType) => Selection;
+  },
+): Selection;
+export function useAgent(
+  options?: Omit<UseAgentParameters<UseAgentReturnType>, "selector"> & {
+    selector?: undefined;
+  },
+): UseAgentReturnType;
 export function useAgentEvents(
   agent: DefaultAgent | undefined,
   listener: (event: AgentEvent) => void,

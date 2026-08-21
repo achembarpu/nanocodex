@@ -32,6 +32,44 @@ test("snapshot reads and refetch stay pure until a subscriber creates the entry"
   await config.destroy();
 });
 
+test("the resolved default identity is canonical and stable across remounts", async () => {
+  const createdThreadIds = [];
+  const closed = [];
+  const config = createAgentConfig({}, {
+    async create(options) {
+      createdThreadIds.push(options.threadId);
+      return fakeAgent(`agent-${createdThreadIds.length}`, closed);
+    },
+    async prepare() {},
+  });
+
+  const omitted = config.subscribeAgent({}, () => {});
+  await waitFor(() => config.getAgent().status === "success");
+  const resolvedDefault = createdThreadIds[0];
+  const empty = config.subscribeAgent({ threadId: "" }, () => {});
+  const matching = config.subscribeAgent({ threadId: resolvedDefault }, () => {});
+  await tick();
+
+  assert.equal(typeof resolvedDefault, "string");
+  assert.notEqual(resolvedDefault, "");
+  assert.deepEqual(createdThreadIds, [resolvedDefault]);
+  assert.equal(config.getAgent(), config.getAgent({ threadId: "" }));
+  assert.equal(config.getAgent(), config.getAgent({ threadId: resolvedDefault }));
+
+  omitted();
+  empty();
+  matching();
+  await waitFor(() => closed.length === 1);
+
+  const remounted = config.subscribeAgent({}, () => {});
+  await waitFor(() => createdThreadIds.length === 2 && config.getAgent().status === "success");
+  assert.deepEqual(createdThreadIds, [resolvedDefault, resolvedDefault]);
+
+  remounted();
+  await waitFor(() => closed.length === 2);
+  await config.destroy();
+});
+
 test("disabled consumers stay cold without creating an Agent", async () => {
   const calls = [];
   const config = createAgentConfig({}, {

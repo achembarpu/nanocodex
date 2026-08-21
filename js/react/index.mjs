@@ -14,6 +14,12 @@ import {
 export { createConfig } from "nanocodex/browser";
 
 const NanocodexContext = createContext(null);
+const IDLE_AGENT_SNAPSHOT = Object.freeze({
+  data: undefined,
+  error: undefined,
+  status: "idle",
+});
+const identity = (value) => value;
 
 /** Supplies one caller-owned vanilla browser config to Nanocodex hooks. */
 export function NanocodexProvider({ children, config }) {
@@ -28,6 +34,10 @@ export function useAgent(parameters = {}) {
   const config = useConfig(parameters);
   const enabled = parameters.enabled ?? true;
   const threadId = parameters.threadId;
+  const selector = parameters.selector ?? identity;
+  const equalityFn = parameters.equalityFn ?? Object.is;
+  if (typeof selector !== "function") throw new TypeError("useAgent selector must be a function");
+  if (typeof equalityFn !== "function") throw new TypeError("useAgent equalityFn must be a function");
   const resource = useMemo(() => ({ enabled, threadId }), [enabled, threadId]);
   const subscribe = useCallback(
     (listener) => config.subscribeAgent(resource, listener),
@@ -37,27 +47,33 @@ export function useAgent(parameters = {}) {
     () => config.getAgent(resource),
     [config, resource],
   );
-  const snapshot = useSyncExternalStore(subscribe, getSnapshot, getSnapshot);
+  const getServerSnapshot = useCallback(() => IDLE_AGENT_SNAPSHOT, []);
   const refetch = useCallback(() => config.refetchAgent(resource), [config, resource]);
-  return useMemo(() => Object.freeze({
-    ...snapshot,
-    isError: snapshot.status === "error",
-    isIdle: snapshot.status === "idle",
-    isPending: snapshot.status === "pending",
-    isSuccess: snapshot.status === "success",
-    refetch,
-  }), [refetch, snapshot]);
+  const selectSnapshot = useCallback(
+    (snapshot) => selector(agentResource(snapshot, refetch)),
+    [refetch, selector],
+  );
+  return useExternalStoreSelector(
+    subscribe,
+    getSnapshot,
+    getServerSnapshot,
+    selectSnapshot,
+    equalityFn,
+  );
 }
 
 /** Subscribes to ordered typed Agent events without retaining UI state in the SDK. */
 export function useAgentEvents(agent, listener, options = {}) {
-  const latest = useRef(listener);
-  latest.current = listener;
+  const latest = useRef(undefined);
+  useEffect(() => {
+    latest.current = listener;
+    return () => { latest.current = undefined; };
+  }, [listener]);
   const includeAllSessions = options.includeAllSessions ?? false;
   useEffect(() => {
     if (!agent) return;
     const watcher = agent.events.watch({ includeAllSessions });
-    const release = watcher.onEvent((event) => latest.current(event));
+    const release = watcher.onEvent((event) => latest.current?.(event));
     return () => {
       release();
       watcher.off();
@@ -70,4 +86,69 @@ export function useConfig(parameters = {}) {
   const config = parameters.config ?? context;
   if (!config) throw new Error("Nanocodex hooks must be used inside NanocodexProvider");
   return config;
+}
+
+function agentResource(snapshot, refetch) {
+  return Object.freeze({
+    data: snapshot.data,
+    error: snapshot.error,
+    status: snapshot.status,
+    isError: snapshot.status === "error",
+    isIdle: snapshot.status === "idle",
+    isPending: snapshot.status === "pending",
+    isSuccess: snapshot.status === "success",
+    refetch,
+  });
+}
+
+function useExternalStoreSelector(
+  subscribe,
+  getSnapshot,
+  getServerSnapshot,
+  selector,
+  equalityFn,
+) {
+  const committed = useRef({ hasValue: false, value: undefined });
+  const [getSelectedSnapshot, getSelectedServerSnapshot] = useMemo(() => {
+    let hasMemo = false;
+    let memoizedSnapshot;
+    let memoizedSelection;
+
+    function select(nextSnapshot) {
+      if (!hasMemo) {
+        hasMemo = true;
+        memoizedSnapshot = nextSnapshot;
+        const nextSelection = selector(nextSnapshot);
+        if (
+          committed.current.hasValue
+          && equalityFn(committed.current.value, nextSelection)
+        ) {
+          memoizedSelection = committed.current.value;
+          return memoizedSelection;
+        }
+        memoizedSelection = nextSelection;
+        return memoizedSelection;
+      }
+      if (Object.is(memoizedSnapshot, nextSnapshot)) return memoizedSelection;
+      const nextSelection = selector(nextSnapshot);
+      memoizedSnapshot = nextSnapshot;
+      if (equalityFn(memoizedSelection, nextSelection)) return memoizedSelection;
+      memoizedSelection = nextSelection;
+      return memoizedSelection;
+    }
+
+    return [
+      () => select(getSnapshot()),
+      () => select(getServerSnapshot()),
+    ];
+  }, [equalityFn, getServerSnapshot, getSnapshot, selector]);
+  const selection = useSyncExternalStore(
+    subscribe,
+    getSelectedSnapshot,
+    getSelectedServerSnapshot,
+  );
+  useEffect(() => {
+    committed.current = { hasValue: true, value: selection };
+  }, [selection]);
+  return selection;
 }

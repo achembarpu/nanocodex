@@ -23,8 +23,23 @@ function App() {
 
 `useAgent({ threadId, enabled })` follows an external-store lifecycle: the
 vanilla config creates one Agent for active subscribers, shares it, and shuts it
-down after the last subscriber leaves. `useAgentEvents` is the narrow hook for
-ordered typed events.
+down after the last subscriber leaves. Disabled hooks stay idle and do not
+prepare or create an Agent. Omitted and empty thread IDs resolve to one stable
+config-owned default, including across React remounts. Server rendering always
+observes the idle snapshot and then reconciles with the live client resource.
+
+Components that need only part of the resource can select it without rerendering
+for unrelated state changes:
+
+```tsx
+const sessionId = useAgent({
+  selector: (resource) => resource.data?.sessionId,
+  equalityFn: Object.is,
+});
+```
+
+Without a selector, `useAgent` returns the full query-like resource shown above.
+`useAgentEvents` is the narrow hook for ordered typed events.
 
 Create the config once, outside React. Applications can pass Agent defaults to
 `createConfig({ agent: { ... } })` without adding another lifecycle owner.
