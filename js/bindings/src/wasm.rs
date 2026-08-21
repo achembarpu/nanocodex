@@ -798,10 +798,10 @@ impl WasmNanocodex {
     /// Enables or disables the optional JavaScript event crossing for this handle.
     #[wasm_bindgen(js_name = setEventForwarding)]
     pub fn set_event_forwarding(&self, enabled: bool) {
-        if self.event_forwarding.replace(enabled) != enabled {
-            if let Some(subagents) = &self.subagents {
-                subagents.set_event_forwarding(enabled);
-            }
+        if self.event_forwarding.replace(enabled) != enabled
+            && let Some(subagents) = &self.subagents
+        {
+            subagents.set_event_forwarding(enabled);
         }
     }
 
@@ -1010,10 +1010,10 @@ impl WasmNanocodex {
 
 impl Drop for WasmNanocodex {
     fn drop(&mut self) {
-        if self.event_forwarding.replace(false) {
-            if let Some(subagents) = &self.subagents {
-                subagents.set_event_forwarding(false);
-            }
+        if self.event_forwarding.replace(false)
+            && let Some(subagents) = &self.subagents
+        {
+            subagents.set_event_forwarding(false);
         }
     }
 }
@@ -1254,14 +1254,14 @@ fn forward_subagent_updates(
                         .insert((root_session_id, descriptor.id), descriptor.session_id);
                 }
                 SubagentUpdate::Event { event, .. } => {
-                    if event_forwarders.get() > 0 {
-                        if let Ok(encoded) = serde_json::to_string(&event) {
-                            host_emit_event(
-                                event.request_id.as_ref(),
-                                &encoded,
-                                u32::try_from(encoded.len()).unwrap_or(u32::MAX),
-                            );
-                        }
+                    if event_forwarders.get() > 0
+                        && let Ok(encoded) = serde_json::to_string(&event)
+                    {
+                        host_emit_event(
+                            event.request_id.as_ref(),
+                            &encoded,
+                            u32::try_from(encoded.len()).unwrap_or(u32::MAX),
+                        );
                     }
                 }
                 SubagentUpdate::Status {
