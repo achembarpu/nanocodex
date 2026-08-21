@@ -103,7 +103,12 @@ test("the phone home surface leads directly from thesis to install, metadata, an
   assert.match(application, /live agent · browser WASM/);
   assert.match(application, /optimized WASM · 1\.3 MB gzip/);
   assert.match(application, /Terminal-Bench 2\.1 high: Nanocodex 82\.2% vs Codex 79\.6% · 890\/890 runs/);
-  assert.match(application, /href="\/evals\/worksets\/e1c16fd7df8f171e69052a66cb59b8bd52bc43017297d748eb19866e7593570d"/);
+  assert.match(
+    application,
+    /const terminalBenchWorksetPath =\s*"\/evals\/worksets\/e1c16fd7df8f171e69052a66cb59b8bd52bc43017297d748eb19866e7593570d"/,
+  );
+  assert.match(application, /href=\{terminalBenchWorksetPath\}/);
+  assert.match(application, /handleEvalPathClick\(event, terminalBenchWorksetPath\)/);
   assert.doesNotMatch(homepage, /retained proof|39\/39 gates|13\/20 verifier passes|Frozen Terminal-Bench|experimental/i);
   assert.match(homeCss, /\.home-install code[\s\S]*?overflow-wrap:\s*anywhere/);
   assert.doesNotMatch(homeCss, /\.home-proof|\.home-summary|\.home-evidence|\.home-facts|\.home-surfaces|\.home-divider/);
