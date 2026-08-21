@@ -33,7 +33,10 @@ export function getInitialBatchSize(): number {
   );
 }
 
-export function observePierreCodeScrollRegions(container: HTMLElement): () => void {
+export function observePierreCodeScrollRegions(
+  container: HTMLElement,
+  onPublish?: () => void,
+): () => void {
   const shadowObservers = new Map<ShadowRoot, MutationObserver>();
   let animationFrame: number | undefined;
 
@@ -63,7 +66,10 @@ export function observePierreCodeScrollRegions(container: HTMLElement): () => vo
       }
       exposeColumns(root);
       if (shadowObservers.has(root)) continue;
-      const observer = new MutationObserver(() => exposeColumns(root));
+      const observer = new MutationObserver(() => {
+        exposeColumns(root);
+        onPublish?.();
+      });
       observer.observe(root, {
         attributes: true,
         attributeFilter: ["tabindex"],
@@ -72,6 +78,7 @@ export function observePierreCodeScrollRegions(container: HTMLElement): () => vo
       });
       shadowObservers.set(root, observer);
     }
+    onPublish?.();
   };
 
   exposeDiffs();

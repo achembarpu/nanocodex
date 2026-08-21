@@ -33,12 +33,32 @@ test("unknown and malformed Evals paths never start a partial data surface", () 
 });
 
 test("Evals route data is fetched in parallel and committed through one Suspense boundary", () => {
-  assert.equal(matches(evalsSource, /useSuspenseQueries\s*\(/g), 3);
+  assert.equal(matches(evalsSource, /useSuspenseQueries\s*\(/g), 2);
+  assert.equal(matches(evalsSource, /useSuspenseQuery\s*\(/g), 1);
   assert.match(evalsSource, /const pathname = useDeferredValue\(location\.pathname\)/);
   assert.doesNotMatch(evalsSource, /isPending|Loading|aria-busy|fallback=/);
   assert.match(appSource, /if \(nextSurface === "evals"\) preloadEvalOverview\(\)/);
   assert.match(appSource, /<Suspense fallback=\{null\}>\s*<Evals \/>/);
   assert.doesNotMatch(appSource, /Loading evals/);
+});
+
+test("task routes own one coherent snapshot query and pause polling while hidden", () => {
+  const taskRoute = evalsSource.slice(
+    evalsSource.indexOf("function TaskRoute"),
+    evalsSource.indexOf("function UnknownRoute"),
+  );
+  assert.equal(matches(taskRoute, /queryKey:/g), 1);
+  assert.match(taskRoute, /snapshot: taskQuery\.data/);
+  assert.match(taskRoute, /refetchIntervalInBackground: false/);
+  assert.doesNotMatch(taskRoute, /taskResults|task-results|worksetQuery|resultsQuery/);
+  assert.doesNotMatch(liveEvalsSource, /data\.results/);
+});
+
+test("refetch failures retain complete data and expose an explicit retry", () => {
+  assert.match(evalsSource, /isRefetchError/);
+  assert.match(liveEvalsSource, /Refresh failed/);
+  assert.match(liveEvalsSource, /<button type="button" onClick=\{status\.retry\}>Retry<\/button>/);
+  assert.doesNotMatch(liveEvalsSource, /Loading|spinner|skeleton|aria-busy/);
 });
 
 test("case evidence replaces the inspector only after the request completes", () => {

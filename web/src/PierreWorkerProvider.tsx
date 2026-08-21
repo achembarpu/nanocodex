@@ -6,21 +6,25 @@ import {
 } from "@pierre/diffs/react";
 import DiffWorker from "@pierre/diffs/worker/worker.js?worker";
 import type { ReactNode } from "react";
-import { useEffect, useRef, useState } from "react";
-import { CODE_VIEW_THEMES } from "./pierreCodeView";
-
-const poolOptions: WorkerPoolOptions = {
-  poolSize: 1,
-  totalASTLRUCacheSize: 100,
-  workerFactory: () => new DiffWorker(),
-};
+import { useEffect, useMemo, useRef, useState } from "react";
+import { CODE_VIEW_THEMES, COMPACT_WORKSPACE_QUERY } from "./pierreCodeView";
 
 const highlighterOptions: WorkerInitializationRenderOptions = {
   theme: CODE_VIEW_THEMES,
   preferredHighlighter: "shiki-js",
 };
 
+export function sourceHighlightCacheSize(): number {
+  if (typeof window === "undefined") return 100;
+  return window.matchMedia(COMPACT_WORKSPACE_QUERY).matches ? 10 : 100;
+}
+
 export function PierreWorkerProvider({ children }: { children: ReactNode }) {
+  const poolOptions = useMemo<WorkerPoolOptions>(() => ({
+    poolSize: 1,
+    totalASTLRUCacheSize: sourceHighlightCacheSize(),
+    workerFactory: () => new DiffWorker(),
+  }), []);
   return (
     <WorkerPoolContextProvider
       poolOptions={poolOptions}

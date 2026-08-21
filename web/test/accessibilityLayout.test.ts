@@ -14,20 +14,24 @@ test("source and commit workspaces expose headings and keyboard-scrollable code"
   assert.match(application, /<h1 className="sr-only">Nanocodex repository commits<\/h1>/);
   assert.match(codeBrowser, /container\.tabIndex = 0/);
   assert.match(diffViewer, /container\.tabIndex = 0/);
-  assert.match(codeBrowser, /observePierreCodeScrollRegions\(container\)/);
+  assert.match(codeBrowser, /observePierreCodeScrollRegions\(container, applyLineTarget\)/);
   assert.match(diffViewer, /observePierreCodeScrollRegions\(container\)/);
   assert.match(pierreCodeView, /column\.tabIndex = 0/);
   assert.match(pierreCodeView, /new MutationObserver\(exposeDiffs\)/);
   assert.match(pierreCodeView, /container\.contains\(root\.host\)/);
   assert.match(pierreCodeView, /\[data-code\]:focus-visible/);
-  assert.match(codeBrowser, /aria-label="Jump to file"/);
+  assert.match(codeBrowser, /aria-label="Search repository files"/);
 });
 
-test("the Pierre file-tree adapter exposes only file rows as the ARIA tree", () => {
-  assert.match(codeBrowser, /treeRoot\.removeAttribute\("role"\)/);
-  assert.match(codeBrowser, /treeRows\.setAttribute\("role", "tree"\)/);
-  assert.match(codeBrowser, /searchInput\.setAttribute\("aria-controls", rowsId\)/);
-  assert.match(codeBrowser, /new MutationObserver\(exposeTree\)/);
+test("the Source tree exposes only Pierre's virtualized rows as the ARIA tree", () => {
+  assert.match(codeBrowser, /root\.removeAttribute\("role"\)/);
+  assert.match(codeBrowser, /rows\.setAttribute\("role", "tree"\)/);
+  assert.match(codeBrowser, /rows\.setAttribute\("aria-label", "Repository files"\)/);
+  assert.doesNotMatch(codeBrowser, /new MutationObserver\(exposeVirtualizedRows\)/);
+  assert.match(codeBrowser, /<header className="pierre-tree-heading source-tree-toolbar">/);
+  assert.match(codeBrowser, /<FileTree[\s\S]*?model=\{model\}[\s\S]*?style=\{treeTheme\}/);
+  assert.doesNotMatch(codeBrowser, /<FileTree[\s\S]*?header=/);
+  assert.match(codeBrowser, /themeToTreeStyles/);
   assert.match(codeBrowser, /role="group"[\s\S]*?File path:/);
 });
 

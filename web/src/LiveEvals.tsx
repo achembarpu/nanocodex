@@ -10,9 +10,8 @@ import {
   X,
 } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
-import { startTransition, useEffect, useMemo, useRef, useState } from "react";
+import { lazy, startTransition, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router";
-import { EvalAnalytics } from "./EvalAnalytics";
 import {
   evalApi,
   type EvalAnalyticsPoint,
@@ -26,15 +25,31 @@ import {
   type EvalSummary,
   type EvalTask,
   type EvalTaskOverview,
+  type EvalTaskSnapshot,
   type EvalTreatment,
   type EvalWorksetAnalytics,
   type EvalWorksetDetail,
-  type EvalWorksetResults,
 } from "./evalApi";
 import "./evals.css";
 
 type MatrixFilter = "all" | "active" | "issues" | "complete";
 type AnalyticsView = "frontier" | "runs";
+
+let evalAnalyticsRequest: Promise<{
+  default: typeof import("./EvalAnalytics").EvalAnalytics;
+}> | undefined;
+
+function loadEvalAnalytics() {
+  return evalAnalyticsRequest ??= import("./EvalAnalytics").then((module) => ({
+    default: module.EvalAnalytics,
+  }));
+}
+
+export function preloadEvalAnalytics() {
+  return loadEvalAnalytics();
+}
+
+const EvalAnalytics = lazy(loadEvalAnalytics);
 
 const initialTaskRows = 50;
 
@@ -52,6 +67,14 @@ function formatWorksetDate(milliseconds: number) {
     day: "numeric",
     hour: "2-digit",
     minute: "2-digit",
+  }).format(new Date(milliseconds));
+}
+
+function formatObservedAt(milliseconds: number) {
+  return new Intl.DateTimeFormat(undefined, {
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
   }).format(new Date(milliseconds));
 }
 
@@ -139,7 +162,11 @@ function ClusterView({ cluster }: { cluster: EvalCluster }) {
         <div><p className="rail-label">Runtime</p><h2 id="cluster-heading">Cluster</h2></div>
         <span>{cluster.nodes.length} node{cluster.nodes.length === 1 ? "" : "s"}</span>
       </header>
-      {cluster.nodes.map((node) => <ClusterNode node={node} key={node.id} />)}
+      {cluster.nodes.length ? (
+        cluster.nodes.map((node) => <ClusterNode node={node} key={node.id} />)
+      ) : (
+        <p className="eval-cluster-state">No cluster nodes are reporting.</p>
+      )}
     </section>
   );
 }
@@ -325,13 +352,30 @@ export type LiveEvalsData =
     }
   | {
       kind: "task";
-      detail: EvalWorksetDetail;
-      task: { task: EvalTask };
-      results: EvalWorksetResults;
-      taskId: string;
+      snapshot: EvalTaskSnapshot;
     };
 
-export function LiveEvals({ data }: { data: LiveEvalsData }) {
+export type EvalSurfaceStatus = {
+  observedAtMs: number;
+  error: string | null;
+  retry: () => void;
+};
+
+function Freshness({ status }: { status: EvalSurfaceStatus }) {
+  return (
+    <div className={status.error ? "eval-freshness is-error" : "eval-freshness"}>
+      <span>Updated {formatObservedAt(status.observedAtMs)}</span>
+      {status.error ? (
+        <span role="alert">
+          Refresh failed · {status.error}
+          <button type="button" onClick={status.retry}>Retry</button>
+        </span>
+      ) : null}
+    </div>
+  );
+}
+
+export function LiveEvals({ data, status }: { data: LiveEvalsData; status: EvalSurfaceStatus }) {
   const navigate = useNavigate();
   const queryClient = useQueryClient();
   const [selectedCell, setSelectedCell] = useState<{
@@ -345,8 +389,8 @@ export function LiveEvals({ data }: { data: LiveEvalsData }) {
   const [shownTaskRows, setShownTaskRows] = useState(initialTaskRows);
   const detailRef = useRef<HTMLDivElement>(null);
   const caseRequestId = useRef(0);
-  const detail = data.kind === "overview" ? null : data.detail;
-  const selectedWorkset = detail?.workset ?? null;
+  const detail = data.kind === "workset" ? data.detail : null;
+  const selectedWorkset = data.kind === "task" ? data.snapshot.workset : detail?.workset ?? null;
   const selectedWorksetId = selectedWorkset?.id ?? null;
   const tasks = detail?.tasks ?? [];
   const normalizedQuery = query.trim().toLowerCase();
@@ -372,11 +416,8 @@ export function LiveEvals({ data }: { data: LiveEvalsData }) {
     ),
     [data],
   );
-  const selectedTaskId = data.kind === "task" ? data.taskId : null;
-  const selectedTaskOverview = selectedTaskId
-    ? tasks.find((task) => task.id === selectedTaskId) ?? null
-    : null;
-  const selectedTask: EvalTask | null = data.kind === "task" ? data.task.task : null;
+  const selectedTaskOverview = data.kind === "task" ? data.snapshot.taskSummary : null;
+  const selectedTask: EvalTask | null = data.kind === "task" ? data.snapshot.task : null;
   const repetitions = [
     ...new Set(selectedTask?.treatments.flatMap((treatment) =>
       treatment.cells.map((cell) => cell.repetition)) ?? []),
@@ -445,8 +486,11 @@ export function LiveEvals({ data }: { data: LiveEvalsData }) {
             <h1>Evals</h1>
             <p>Durable benchmark progress and retained result artifacts.</p>
           </div>
+          <div className="eval-head-status">
+            <ProgressBar summary={data.overview.summary} label="All retained evaluations progress" />
+            <Freshness status={status} />
+          </div>
         </section>
-        <ClusterView cluster={data.cluster} />
         <section className="eval-full-table" aria-labelledby="worksets-heading">
           <header><p className="rail-label">Benchmarks</p><h2 id="worksets-heading">Worksets</h2></header>
           <div className="eval-table-heading eval-workset-grid" aria-hidden="true">
@@ -468,6 +512,7 @@ export function LiveEvals({ data }: { data: LiveEvalsData }) {
           ))}
           {!orderedWorksets.length ? <p className="eval-empty-list">No durable worksets yet.</p> : null}
         </section>
+        <ClusterView cluster={data.cluster} />
       </div>
     );
   }
@@ -483,7 +528,10 @@ export function LiveEvals({ data }: { data: LiveEvalsData }) {
             <h1>{workset.profile}</h1>
             <p>{workset.taskCount} tasks across the retained harness, model, thinking, and repetition sweep.</p>
           </div>
-          <ProgressBar summary={workset.summary} label={`${workset.profile} progress`} />
+          <div className="eval-head-status">
+            <ProgressBar summary={workset.summary} label={`${workset.profile} progress`} />
+            <Freshness status={status} />
+          </div>
         </section>
         <Analytics points={data.analytics.points} taskCount={data.analytics.taskCount} />
         <section className="eval-full-table" aria-labelledby="tasks-heading">
@@ -523,7 +571,7 @@ export function LiveEvals({ data }: { data: LiveEvalsData }) {
     );
   }
 
-  const taskWorkset = data.detail.workset;
+  const taskWorkset = data.snapshot.workset;
   return (
     <div className="live-evals">
       <section className="eval-page-head eval-detail-head">
@@ -533,9 +581,14 @@ export function LiveEvals({ data }: { data: LiveEvalsData }) {
           <h1>{selectedTaskOverview?.label ?? selectedTask?.label}</h1>
           <p>{selectedTaskOverview?.name ?? selectedTask?.name}</p>
         </div>
-        {selectedTaskOverview ? <ProgressBar summary={selectedTaskOverview.summary} label={`${selectedTaskOverview.label} progress`} /> : null}
+        {selectedTaskOverview ? (
+          <div className="eval-head-status">
+            <ProgressBar summary={selectedTaskOverview.summary} label={`${selectedTaskOverview.label} progress`} />
+            <Freshness status={status} />
+          </div>
+        ) : null}
       </section>
-      <Analytics points={data.results.points} view="runs" />
+      <Analytics points={data.snapshot.points} view="runs" />
       <section className="eval-run-section" aria-labelledby="treatments-heading">
         {selectedTask ? (
           <>

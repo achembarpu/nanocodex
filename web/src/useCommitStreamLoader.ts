@@ -47,12 +47,46 @@ export type CommitStreamLoadState =
 interface UseCommitStreamLoaderOptions {
   collapseMode: "expanded" | "collapsed";
   commits: HarnessCommit[];
+  onItemsPublished?(): void;
   patchUrl: string | ((commit: HarnessCommit) => string);
   viewerRef: RefObject<CodeViewHandle<undefined> | null>;
 }
 
+export type CommitStreamErrorMode = "none" | "cold" | "tail";
+
+export interface PendingCommitJumpRef {
+  current: number | null;
+}
+
 function commitItemId(commit: HarnessCommit): string {
   return `commit:${commit.hash}`;
+}
+
+export function getCommitStreamErrorMode(
+  loadState: CommitStreamLoadState,
+  hasPublishedItems: boolean,
+): CommitStreamErrorMode {
+  if (loadState !== "error") return "none";
+  return hasPublishedItems ? "tail" : "cold";
+}
+
+export function tryApplyPendingCommitJump(
+  pendingJump: PendingCommitJumpRef,
+  viewer: Pick<CodeViewHandle<undefined>, "getItem" | "scrollTo"> | null,
+  commits: readonly HarnessCommit[],
+): boolean {
+  const index = pendingJump.current;
+  if (index == null || viewer == null) return false;
+  const commit = commits[index];
+  if (commit == null) {
+    pendingJump.current = null;
+    return false;
+  }
+  const itemId = commitItemId(commit);
+  if (viewer.getItem(itemId) == null) return false;
+  viewer.scrollTo({ type: "item", id: itemId, align: "start" });
+  pendingJump.current = null;
+  return true;
 }
 
 function createCommitItem(commit: HarnessCommit): CommitStreamItem {
@@ -72,6 +106,7 @@ function createCommitItem(commit: HarnessCommit): CommitStreamItem {
 export function useCommitStreamLoader({
   collapseMode,
   commits,
+  onItemsPublished,
   patchUrl,
   viewerRef,
 }: UseCommitStreamLoaderOptions) {
@@ -89,10 +124,11 @@ export function useCommitStreamLoader({
 
   const prepareItemsForViewer = (
     items: readonly CodeViewItem<undefined>[],
+    loadedItemIds = loadedItemIdsRef.current,
   ): void => {
     const targetCollapsed = collapseModeRef.current === "collapsed";
     for (const item of items) {
-      loadedItemIdsRef.current.add(item.id);
+      loadedItemIds.add(item.id);
       if (item.type === "diff") item.collapsed = targetCollapsed;
     }
   };
@@ -135,11 +171,10 @@ export function useCommitStreamLoader({
     const requestId = ++requestIdRef.current;
     const isCurrentRequest = () =>
       requestIdRef.current === requestId && !controller.signal.aborted;
+    const nextLoadedItemIds = new Set<string>();
 
-    loadedItemIdsRef.current = new Set();
-    setViewerKey(requestId);
-    setInitialItems([]);
     setLoadState("fetching");
+    markCommitPerformance("patch-request-start", { requestId });
 
     async function loadPatch() {
       try {
@@ -193,10 +228,17 @@ export function useCommitStreamLoader({
           }
 
           if (!isCurrentRequest()) return;
-          prepareItemsForViewer(accumulator.items);
+          prepareItemsForViewer(accumulator.items, nextLoadedItemIds);
+          loadedItemIdsRef.current = nextLoadedItemIds;
+          setViewerKey(requestId);
           setInitialItems(accumulator.items);
           setLoadState("ready");
+          markCommitPerformance("patch-initial-publish", {
+            itemCount: accumulator.items.length,
+            requestId,
+          });
           await yieldToBrowser();
+          if (isCurrentRequest()) onItemsPublished?.();
         }
 
         let responseBody: ReadableStream<Uint8Array>;
@@ -208,6 +250,10 @@ export function useCommitStreamLoader({
           if (!response.ok) {
             throw new Error(`Patch request failed (${response.status}).`);
           }
+          markCommitPerformance("patch-response-headers", {
+            requestId,
+            status: response.status,
+          });
           if (response.body == null) {
             await commitFullPatch(await response.text());
             return;
@@ -219,6 +265,7 @@ export function useCommitStreamLoader({
             patchUrl,
             controller.signal,
           );
+          markCommitPerformance("patch-development-stream-open", { requestId });
         }
 
         setLoadState("streaming");
@@ -232,6 +279,7 @@ export function useCommitStreamLoader({
         let activeCommit: HarnessCommit | undefined;
         let pendingPublishFileCount = 0;
         let hasPublishedInitialItems = false;
+        let hasReceivedFirstStreamedFile = false;
         let lastPublishTime = performance.now();
         let lastWorkYieldTime = lastPublishTime;
         const initialPublishFileBatchSize = getInitialBatchSize();
@@ -248,16 +296,27 @@ export function useCommitStreamLoader({
           pendingPublishFileCount = 0;
           lastPublishTime = performance.now();
           const pendingItems = takePendingCommitItems(accumulator);
-          prepareItemsForViewer(pendingItems);
+          prepareItemsForViewer(pendingItems, nextLoadedItemIds);
           if (!hasPublishedInitialItems) {
             hasPublishedInitialItems = true;
+            loadedItemIdsRef.current = nextLoadedItemIds;
+            setViewerKey(requestId);
             setInitialItems(pendingItems);
+            markCommitPerformance("patch-initial-publish", {
+              itemCount: pendingItems.length,
+              requestId,
+            });
           } else {
             const viewer = viewerRef.current;
             if (viewer != null) viewer.addItems(pendingItems);
             else setInitialItems((previous) => [...previous, ...pendingItems]);
+            markCommitPerformance("patch-batch-publish", {
+              itemCount: pendingItems.length,
+              requestId,
+            });
           }
           await yieldToBrowser();
+          if (isCurrentRequest()) onItemsPublished?.();
           lastWorkYieldTime = performance.now();
         };
 
@@ -289,6 +348,10 @@ export function useCommitStreamLoader({
         };
 
         const appendStreamedFile = async (fileText: string) => {
+          if (!hasReceivedFirstStreamedFile) {
+            hasReceivedFirstStreamedFile = true;
+            markCommitPerformance("patch-first-file", { requestId });
+          }
           const patchMetadata = getStreamedPatchMetadata(fileText);
           if (patchMetadata != null) {
             const patchIndex = streamPatchIndex++;
@@ -317,8 +380,8 @@ export function useCommitStreamLoader({
           );
           if (itemIdRename != null) {
             applyCommitItemIdRename(viewerRef.current, itemIdRename);
-            if (loadedItemIdsRef.current.delete(itemIdRename.oldId)) {
-              loadedItemIdsRef.current.add(itemIdRename.newId);
+            if (nextLoadedItemIds.delete(itemIdRename.oldId)) {
+              nextLoadedItemIds.add(itemIdRename.newId);
             }
           }
           pendingPublishFileCount++;
@@ -347,16 +410,21 @@ export function useCommitStreamLoader({
           return;
         }
         setLoadState("ready");
+        markCommitPerformance("patch-stream-ready", {
+          itemCount: accumulator.items.length,
+          requestId,
+        });
       } catch (error) {
         if (!isCurrentRequest()) return;
         console.warn("Failed to load commit diff", error);
         setLoadState("error");
+        markCommitPerformance("patch-stream-error", { requestId });
       }
     }
 
     void loadPatch();
     return () => controller.abort();
-  }, [commits, loadAttempt, patchUrl, viewerRef]);
+  }, [commits, loadAttempt, onItemsPublished, patchUrl, viewerRef]);
 
   const retryLoad = useCallback(() => {
     setLoadAttempt((attempt) => attempt + 1);
@@ -414,6 +482,14 @@ function applyCommitItemIdRename(
 
 function getNextItemVersion(item: { version?: string | number }): number {
   return typeof item.version === "number" ? item.version + 1 : 1;
+}
+
+function markCommitPerformance(
+  name: string,
+  detail?: Record<string, number>,
+): void {
+  if (typeof performance === "undefined") return;
+  performance.mark(`nanocodex:commits:${name}`, { detail });
 }
 
 function yieldToBrowser(): Promise<void> {

@@ -72,13 +72,52 @@ test("published repository surfaces load the public snapshot and commit index", 
     "/api/repository/snapshot",
     "/api/repository/commits",
   ]);
-  assert.deepEqual(cacheModes, ["no-store", "no-store"]);
+  assert.deepEqual(cacheModes, ["default", "default"]);
   assert.equal(snapshot.repository.fullName, "gakonst/nanocodex");
   assert.deepEqual(snapshot.commits, [commit]);
   assert.equal(snapshot.commitPatchUrl, `/api/repository/commits/${head}.diff`);
   assert.equal(await snapshot.readFile(snapshot.tree[0]), "# Nanocodex\n");
   assert.equal(await snapshot.readFile(snapshot.tree[0]), "# Nanocodex\n");
   assert.equal(requests.filter((url) => url === document.tree[0].contentUrl).length, 1);
+  assert.equal(requests.filter((url) => url.endsWith(".diff")).length, 0);
+});
+
+test("snapshot and commit aliases start concurrently", async () => {
+  const requests: string[] = [];
+  let resolveSnapshot: (response: Response) => void = () => undefined;
+  let resolveCommits: (response: Response) => void = () => undefined;
+  const snapshotResponse = new Promise<Response>((resolve) => {
+    resolveSnapshot = resolve;
+  });
+  const commitsResponse = new Promise<Response>((resolve) => {
+    resolveCommits = resolve;
+  });
+  const request = (input: string | URL | Request) => {
+    const url = String(input);
+    requests.push(url);
+    return url.endsWith("/snapshot") ? snapshotResponse : commitsResponse;
+  };
+
+  const loading = loadPublishedRepositorySnapshot(
+    true,
+    request as typeof fetch,
+    false,
+  );
+
+  assert.deepEqual(requests, [
+    "/api/repository/snapshot",
+    "/api/repository/commits",
+  ]);
+  resolveCommits(Response.json([commit], {
+    headers: { "x-repository-generation": head },
+  }));
+  resolveSnapshot(Response.json(document, {
+    headers: { "x-repository-generation": head },
+  }));
+
+  const snapshot = await loading;
+  assert.equal(snapshot.commits.length, 1);
+  assert.equal(requests.length, 2);
 });
 
 test("development repository history retains callable per-commit patches", async () => {

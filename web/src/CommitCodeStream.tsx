@@ -27,9 +27,14 @@ import {
 import { usePierreRenderer } from "./PierreWorkerProvider";
 import { COMPACT_WORKSPACE_QUERY } from "./pierreCodeView";
 import { Switch } from "./Switch";
-import { useCommitStreamLoader } from "./useCommitStreamLoader";
+import {
+  getCommitStreamErrorMode,
+  tryApplyPendingCommitJump,
+  useCommitStreamLoader,
+} from "./useCommitStreamLoader";
 import type { Theme } from "./NanocodexApp";
 import type { HarnessCommit } from "./threadRepositorySnapshot";
+import "./Commits.css";
 
 type CommitCodeStreamProps = {
   commits: HarnessCommit[];
@@ -41,10 +46,6 @@ type CommitCodeStreamProps = {
 export type CommitCodeStreamHandle = {
   scrollToCommit(index: number): void;
 };
-
-function commitItemId(commit: HarnessCommit): string {
-  return `commit:${commit.hash}`;
-}
 
 const CommitCodeStreamComponent = forwardRef<
   CommitCodeStreamHandle,
@@ -66,6 +67,23 @@ const CommitCodeStreamComponent = forwardRef<
   const [diffIndicators, setDiffIndicators] =
     useState<DiffIndicators>("bars");
   const [lineNumbers, setLineNumbers] = useState(true);
+
+  const tryApplyPendingJump = useCallback(() => {
+    tryApplyPendingCommitJump(
+      pendingJumpRef,
+      viewerRef.current,
+      commits,
+    );
+  }, [commits]);
+
+  const scrollToCommit = useCallback(
+    (index: number) => {
+      if (commits[index] == null) return;
+      pendingJumpRef.current = index;
+      tryApplyPendingJump();
+    },
+    [commits, tryApplyPendingJump],
+  );
 
   useEffect(() => {
     const mediaQuery = window.matchMedia(COMPACT_WORKSPACE_QUERY);
@@ -90,6 +108,7 @@ const CommitCodeStreamComponent = forwardRef<
   } = useCommitStreamLoader({
     collapseMode,
     commits,
+    onItemsPublished: tryApplyPendingJump,
     patchUrl,
     viewerRef,
   });
@@ -108,24 +127,6 @@ const CommitCodeStreamComponent = forwardRef<
     setOverflow(checked ? "wrap" : "scroll");
   }, []);
 
-  const scrollToCommit = useCallback(
-    (index: number) => {
-      const commit = commits[index];
-      if (commit == null) return;
-
-      const viewer = viewerRef.current;
-      const itemId = commitItemId(commit);
-      if (viewer == null || viewer.getItem(itemId) == null) {
-        pendingJumpRef.current = index;
-        return;
-      }
-
-      pendingJumpRef.current = null;
-      viewer.scrollTo({ type: "item", id: itemId, align: "start" });
-    },
-    [commits],
-  );
-
   useImperativeHandle(
     forwardedRef,
     () => ({ scrollToCommit }),
@@ -133,14 +134,18 @@ const CommitCodeStreamComponent = forwardRef<
   );
 
   useEffect(() => {
-    if (loadState !== "ready" || pendingJumpRef.current == null) return;
-    scrollToCommit(pendingJumpRef.current);
-  }, [loadState, scrollToCommit]);
+    if (!renderer.ready || initialItems.length === 0) return;
+    const frame = window.requestAnimationFrame(tryApplyPendingJump);
+    return () => window.cancelAnimationFrame(frame);
+  }, [initialItems.length, renderer.ready, tryApplyPendingJump, viewerKey]);
 
   const viewerAvailable =
     renderer.ready &&
-    (loadState === "ready" ||
-      (loadState === "streaming" && initialItems.length > 0));
+    (initialItems.length > 0 || loadState === "ready");
+  const errorMode = getCommitStreamErrorMode(
+    loadState,
+    initialItems.length > 0,
+  );
 
   return (
     <>
@@ -162,20 +167,30 @@ const CommitCodeStreamComponent = forwardRef<
       />
 
       {viewerAvailable ? (
-        <DiffsHubViewer
-          key={viewerKey}
-          diffIndicators={diffIndicators}
-          diffStyle={diffStyle}
-          disableWorkerPool={renderer.disableWorkerPool}
-          initialItems={initialItems}
-          lineNumbers={lineNumbers}
-          overflow={overflow}
-          scrollRef={scrollRef}
-          showBackgrounds={showBackgrounds}
-          theme={theme}
-          viewerRef={viewerRef}
-        />
-      ) : loadState === "error" ? (
+        <>
+          <DiffsHubViewer
+            key={viewerKey}
+            diffIndicators={diffIndicators}
+            diffStyle={diffStyle}
+            disableWorkerPool={renderer.disableWorkerPool}
+            initialItems={initialItems}
+            lineNumbers={lineNumbers}
+            overflow={overflow}
+            scrollRef={scrollRef}
+            showBackgrounds={showBackgrounds}
+            theme={theme}
+            viewerRef={viewerRef}
+          />
+          {errorMode === "tail" ? (
+            <div className="commit-stream-tail-error" role="alert">
+              <span>Commit stream stopped before all changes loaded.</span>
+              <button type="button" onClick={retryLoad}>
+                Try again
+              </button>
+            </div>
+          ) : null}
+        </>
+      ) : errorMode === "cold" ? (
         <div className="commit-stream-error" role="alert">
           <p>Couldn’t load commits.</p>
           <button type="button" onClick={retryLoad}>

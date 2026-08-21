@@ -3,46 +3,42 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover, interactive-widget=resizes-content" />
-    <meta name="theme-color" content="#ffffff" />
+    <link rel="icon" href="/paradigm-favicon.svg" type="image/svg+xml" sizes="any" />
+    <meta name="theme-color" content="#161616" />
     <script>
       (() => {
         try {
           const stored = localStorage.getItem("nanocodex-theme");
-          const theme = stored === "dark" ? "dark" : "light";
+          const theme = stored === "light" ? "light" : "dark";
           document.documentElement.dataset.theme = theme;
           document
             .querySelector('meta[name="theme-color"]')
             ?.setAttribute("content", theme === "dark" ? "#161616" : "#ffffff");
         } catch {
-          document.documentElement.dataset.theme = "light";
+          document.documentElement.dataset.theme = "dark";
         }
       })();
     </script>
-    <meta
-      name="description"
-      content="The coding agent is the library. Embed one owned OpenAI Responses lifecycle through Rust, JavaScript, browser applications, or Python."
-    />
-    <meta
-      property="og:title"
-      content="Nanocodex — the coding agent is the library"
-    />
-    <meta
-      property="og:description"
-      content="Own the interface; embed the complete loop: retained sessions, tools, Code Mode, branches, subagents, browser workspaces, and evidence-backed evals."
-    />
+    <!-- nanocodex:link-preview:start -->
+    <title>Nanocodex — high-performance Codex SDK</title>
+    <link rel="canonical" href="https://nanocodex.paradigm.xyz/" />
+    <meta name="description" content="High-performance Codex SDK. Runs anywhere. Terminal-Bench 2.1 high: 82.2% vs Codex 79.6%; 890/890 runs." />
     <meta property="og:type" content="website" />
-    <meta property="og:image" content="/og.png" />
+    <meta property="og:url" content="https://nanocodex.paradigm.xyz/" />
+    <meta property="og:site_name" content="Nanocodex" />
+    <meta property="og:title" content="Nanocodex — high-performance Codex SDK" />
+    <meta property="og:description" content="High-performance Codex SDK. Runs anywhere. Terminal-Bench 2.1 high: 82.2% vs Codex 79.6%; 890/890 runs." />
+    <meta property="og:image" content="https://nanocodex.paradigm.xyz/og.png?path=%2F" />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta property="og:image:type" content="image/png" />
+    <meta property="og:image:alt" content="Nanocodex — Nanocodex link preview" />
     <meta name="twitter:card" content="summary_large_image" />
-    <meta
-      name="twitter:title"
-      content="Nanocodex — the coding agent is the library"
-    />
-    <meta
-      name="twitter:description"
-      content="One owned OpenAI Responses agent for Rust, JavaScript, browser applications, and Python. Bring your own product interface."
-    />
-    <meta name="twitter:image" content="/og.png" />
-    <title>Nanocodex — the coding agent is the library</title>
+    <meta name="twitter:title" content="Nanocodex — high-performance Codex SDK" />
+    <meta name="twitter:description" content="High-performance Codex SDK. Runs anywhere. Terminal-Bench 2.1 high: 82.2% vs Codex 79.6%; 890/890 runs." />
+    <meta name="twitter:image" content="https://nanocodex.paradigm.xyz/og.png?path=%2F" />
+    <meta name="twitter:image:alt" content="Nanocodex — Nanocodex link preview" />
+    <!-- nanocodex:link-preview:end -->
     <link rel="stylesheet" href="/src/index.css" />
   </head>
   <body>

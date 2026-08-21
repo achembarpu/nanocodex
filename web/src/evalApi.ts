@@ -120,13 +120,6 @@ export type EvalResultPoint = {
   costUsd: number | null;
 };
 
-export type EvalWorksetResults = {
-  schemaVersion: number;
-  observedAtMs: number;
-  worksetId: string;
-  points: EvalResultPoint[];
-};
-
 export type EvalAnalyticsPoint = {
   harness: string;
   model: string;
@@ -149,11 +142,14 @@ export type EvalWorksetAnalytics = {
   points: EvalAnalyticsPoint[];
 };
 
-export type EvalTaskDetail = {
+export type EvalTaskSnapshot = {
   schemaVersion: number;
   observedAtMs: number;
   worksetId: string;
+  workset: EvalWorkset;
+  taskSummary: EvalTaskOverview;
   task: EvalTask;
+  points: EvalResultPoint[];
 };
 
 export type EvalCoordinateOutcome = {
@@ -204,7 +200,6 @@ export class EvalApiError extends Error {
 async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
   const response = await fetch(path, {
     headers: { accept: "application/json" },
-    cache: "no-store",
     signal,
   });
   if (!response.ok) {
@@ -235,15 +230,8 @@ export class EvalApiClient {
     );
   }
 
-  taskResults(worksetId: string, taskId: string, signal?: AbortSignal) {
-    return getJson<EvalWorksetResults>(
-      `/api/evals/worksets/${encodeURIComponent(worksetId)}/tasks/${encodeURIComponent(taskId)}/results`,
-      signal,
-    );
-  }
-
   task(worksetId: string, taskId: string, signal?: AbortSignal) {
-    return getJson<EvalTaskDetail>(
+    return getJson<EvalTaskSnapshot>(
       `/api/evals/worksets/${encodeURIComponent(worksetId)}/tasks/${encodeURIComponent(taskId)}`,
       signal,
     );

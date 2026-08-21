@@ -1,15 +1,30 @@
 export type Surface =
   | "home"
   | "agent"
+  | "changelog"
   | "docs"
   | "code"
   | "commits"
   | "requests"
   | "evals";
 
+export const productNavigation = [
+  { surface: "agent", label: "Agent", shortcut: "A" },
+  { surface: "changelog", label: "Changelog", shortcut: "H" },
+  { surface: "commits", label: "Commits", shortcut: "C" },
+  { surface: "docs", label: "Docs", shortcut: "D" },
+  { surface: "evals", label: "Evals", shortcut: "E" },
+  { surface: "code", label: "Source", shortcut: "S" },
+] as const satisfies ReadonlyArray<{
+  surface: Surface;
+  label: string;
+  shortcut: string;
+}>;
+
 const surfacePaths: Record<Surface, string> = {
   home: "/",
   agent: "/agent",
+  changelog: "/changelog",
   docs: "/docs",
   code: "/code",
   commits: "/commits",
@@ -21,6 +36,10 @@ const surfaces = new Set<Surface>(Object.keys(surfacePaths) as Surface[]);
 
 export function pathForSurface(surface: Surface) {
   return surfacePaths[surface];
+}
+
+export function pathForCommit(hash: string) {
+  return `${surfacePaths.commits}?${new URLSearchParams({ commit: hash })}`;
 }
 
 export function surfaceFromUrl(url: Pick<URL, "pathname" | "searchParams">): Surface {

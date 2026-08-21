@@ -81,6 +81,16 @@ export const DiffsHubViewer = memo(function DiffsHubViewer({
     return observePierreCodeScrollRegions(container);
   }, [scrollRef]);
 
+  useEffect(() => {
+    if (initialItems.length === 0) return;
+    const frame = window.requestAnimationFrame(() => {
+      performance.mark("nanocodex:commits:viewer-frame", {
+        detail: { itemCount: initialItems.length },
+      });
+    });
+    return () => window.cancelAnimationFrame(frame);
+  }, [initialItems.length]);
+
   const renderHeaderPrefix = useStableCallback(
     (item: CodeViewItem<undefined>) => {
       if (item.type !== "diff") return null;

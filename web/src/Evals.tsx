@@ -1,23 +1,31 @@
 import {
+  QueryErrorResetBoundary,
   queryOptions,
   useQueryClient,
   useSuspenseQueries,
+  useSuspenseQuery,
   type QueryClient,
 } from "@tanstack/react-query";
 import { Component, useDeferredValue, type ErrorInfo, type ReactNode } from "react";
 import { useLocation } from "react-router";
 import { evalRouteFromPath, type EvalRoute } from "./evalRoute";
 import { evalApi, type EvalSummary, type EvalWorksetDetail } from "./evalApi";
-import { LiveEvals } from "./LiveEvals";
+import {
+  LiveEvals,
+  preloadEvalAnalytics,
+  type EvalSurfaceStatus,
+} from "./LiveEvals";
 
 const activeOverviewPollMs = 2_000;
 const quietOverviewPollMs = 30_000;
 const detailPollMs = 15_000;
 const resultStaleMs = 30_000;
 const resultCacheMs = 30 * 60_000;
+const hoverFreshMs = 2_000;
 
 type EvalRouteErrorBoundaryProps = {
   children: ReactNode;
+  onReset: () => void;
 };
 
 type EvalRouteErrorBoundaryState = {
@@ -45,6 +53,18 @@ class EvalRouteErrorBoundary extends Component<
         <p className="eyebrow">Nanocodex · durable evaluations</p>
         <h1>Evals unavailable</h1>
         <p>{this.state.error.message}</p>
+        <div className="eval-error-actions">
+          <button
+            type="button"
+            onClick={() => {
+              this.props.onReset();
+              this.setState({ error: null });
+            }}
+          >
+            Retry
+          </button>
+          <a href="/evals">All evals</a>
+        </div>
       </div>
     );
   }
@@ -63,6 +83,28 @@ function cachedWorksetComplete(worksetId: string, queryClient: QueryClient) {
   return detail ? summaryComplete(detail.workset.summary) : false;
 }
 
+function errorMessage(error: unknown) {
+  return error instanceof Error ? error.message : "Evaluation refresh failed.";
+}
+
+function surfaceStatus(
+  observedAtMs: number,
+  queries: Array<{
+    error: unknown;
+    isRefetchError: boolean;
+    refetch: () => Promise<unknown>;
+  }>,
+): EvalSurfaceStatus {
+  const failed = queries.find((query) => query.isRefetchError);
+  return {
+    observedAtMs,
+    error: failed ? errorMessage(failed.error) : null,
+    retry() {
+      void Promise.all(queries.map((query) => query.refetch()));
+    },
+  };
+}
+
 function OverviewRoute() {
   const [overviewQuery, clusterQuery] = useSuspenseQueries({
     queries: [
@@ -76,16 +118,18 @@ function OverviewRoute() {
             : activeOverviewPollMs;
         },
         refetchIntervalInBackground: false,
-        refetchOnMount: "always" as const,
+        refetchOnMount: true,
         refetchOnWindowFocus: "always" as const,
         refetchOnReconnect: "always" as const,
-        staleTime: 0,
+        staleTime: hoverFreshMs,
       }),
       queryOptions({
         queryKey: ["evals", "cluster"],
         queryFn: ({ signal }) => evalApi.cluster(signal),
         refetchInterval: 10_000,
         refetchIntervalInBackground: false,
+        refetchOnWindowFocus: "always" as const,
+        refetchOnReconnect: "always" as const,
         staleTime: 5_000,
       }),
     ],
@@ -97,6 +141,10 @@ function OverviewRoute() {
         overview: overviewQuery.data,
         cluster: clusterQuery.data,
       }}
+      status={surfaceStatus(
+        Math.min(overviewQuery.data.observedAtMs, clusterQuery.data.observedAtMs),
+        [overviewQuery, clusterQuery],
+      )}
     />
   );
 }
@@ -113,6 +161,8 @@ function WorksetRoute({ route }: { route: Extract<EvalRoute, { kind: "workset" }
           return data && summaryComplete(data.workset.summary) ? false : 10_000;
         },
         refetchIntervalInBackground: false,
+        refetchOnWindowFocus: "always" as const,
+        refetchOnReconnect: "always" as const,
       }),
       queryOptions({
         queryKey: ["evals", "analytics", route.worksetId],
@@ -122,7 +172,9 @@ function WorksetRoute({ route }: { route: Extract<EvalRoute, { kind: "workset" }
           : detailPollMs,
         staleTime: resultStaleMs,
         gcTime: resultCacheMs,
-        refetchOnWindowFocus: false,
+        refetchOnWindowFocus: "always" as const,
+        refetchIntervalInBackground: false,
+        refetchOnReconnect: "always" as const,
       }),
     ],
   });
@@ -133,55 +185,35 @@ function WorksetRoute({ route }: { route: Extract<EvalRoute, { kind: "workset" }
         detail: worksetQuery.data,
         analytics: analyticsQuery.data,
       }}
+      status={surfaceStatus(
+        Math.min(worksetQuery.data.observedAtMs, analyticsQuery.data.observedAtMs),
+        [worksetQuery, analyticsQuery],
+      )}
     />
   );
 }
 
 function TaskRoute({ route }: { route: Extract<EvalRoute, { kind: "task" }> }) {
-  const queryClient = useQueryClient();
-  const [worksetQuery, taskQuery, resultsQuery] = useSuspenseQueries({
-    queries: [
-      queryOptions({
-        queryKey: ["evals", "workset", route.worksetId],
-        queryFn: ({ signal }) => evalApi.workset(route.worksetId, signal),
-        refetchInterval: (query) => {
-          const data = query.state.data;
-          return data && summaryComplete(data.workset.summary) ? false : 10_000;
-        },
-        refetchIntervalInBackground: false,
-      }),
-      queryOptions({
-        queryKey: ["evals", "task", route.worksetId, route.taskId],
-        queryFn: ({ signal }) => evalApi.task(route.worksetId, route.taskId, signal),
-        refetchInterval: () => cachedWorksetComplete(route.worksetId, queryClient)
-          ? false
-          : detailPollMs,
-        refetchIntervalInBackground: true,
-        staleTime: resultStaleMs,
-        gcTime: resultCacheMs,
-        refetchOnWindowFocus: false,
-      }),
-      queryOptions({
-        queryKey: ["evals", "task-results", route.worksetId, route.taskId],
-        queryFn: ({ signal }) => evalApi.taskResults(route.worksetId, route.taskId, signal),
-        refetchInterval: () => cachedWorksetComplete(route.worksetId, queryClient)
-          ? false
-          : detailPollMs,
-        staleTime: resultStaleMs,
-        gcTime: resultCacheMs,
-        refetchOnWindowFocus: false,
-      }),
-    ],
+  const taskQuery = useSuspenseQuery({
+    queryKey: ["evals", "task", route.worksetId, route.taskId],
+    queryFn: ({ signal }) => evalApi.task(route.worksetId, route.taskId, signal),
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      return data && summaryComplete(data.workset.summary) ? false : detailPollMs;
+    },
+    refetchIntervalInBackground: false,
+    staleTime: resultStaleMs,
+    gcTime: resultCacheMs,
+    refetchOnWindowFocus: "always",
+    refetchOnReconnect: "always",
   });
   return (
     <LiveEvals
       data={{
         kind: "task",
-        detail: worksetQuery.data,
-        task: taskQuery.data,
-        results: resultsQuery.data,
-        taskId: route.taskId,
+        snapshot: taskQuery.data,
       }}
+      status={surfaceStatus(taskQuery.data.observedAtMs, [taskQuery])}
     />
   );
 }
@@ -192,14 +224,21 @@ function UnknownRoute() {
       <p className="eyebrow">Nanocodex · durable evaluations</p>
       <h1>Eval view not found</h1>
       <p>Return to Evals and choose a retained workset.</p>
+      <div className="eval-error-actions"><a href="/evals">All evals</a></div>
     </div>
   );
 }
 
 function EvalsContent({ route }: { route: EvalRoute }) {
   if (route.kind === "overview") return <OverviewRoute />;
-  if (route.kind === "workset") return <WorksetRoute route={route} />;
-  if (route.kind === "task") return <TaskRoute route={route} />;
+  if (route.kind === "workset") {
+    void preloadEvalAnalytics().catch(() => undefined);
+    return <WorksetRoute route={route} />;
+  }
+  if (route.kind === "task") {
+    void preloadEvalAnalytics().catch(() => undefined);
+    return <TaskRoute route={route} />;
+  }
   return <UnknownRoute />;
 }
 
@@ -207,8 +246,12 @@ export function Evals() {
   const location = useLocation();
   const pathname = useDeferredValue(location.pathname);
   return (
-    <EvalRouteErrorBoundary key={pathname}>
-      <EvalsContent route={evalRouteFromPath(pathname)} />
-    </EvalRouteErrorBoundary>
+    <QueryErrorResetBoundary>
+      {({ reset }) => (
+        <EvalRouteErrorBoundary key={pathname} onReset={reset}>
+          <EvalsContent route={evalRouteFromPath(pathname)} />
+        </EvalRouteErrorBoundary>
+      )}
+    </QueryErrorResetBoundary>
   );
 }

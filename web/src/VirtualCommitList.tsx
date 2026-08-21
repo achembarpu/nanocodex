@@ -2,6 +2,7 @@ import { useVirtualizer } from "@tanstack/react-virtual";
 import { ChevronRight } from "lucide-react";
 import { memo, useRef } from "react";
 import type { HarnessCommit } from "./threadRepositorySnapshot";
+import "./Commits.css";
 
 type VirtualCommitListProps = {
   commits: HarnessCommit[];
@@ -41,7 +42,7 @@ export const VirtualCommitList = memo(function VirtualCommitList({
   const virtualizer = useVirtualizer({
     count: commits.length,
     getScrollElement: () => listRef.current,
-    estimateSize: () => 108,
+    estimateSize: () => 80,
     getItemKey: (index) => commits[index]?.hash ?? index,
     overscan: 8,
   });
@@ -79,8 +80,24 @@ export const VirtualCommitList = memo(function VirtualCommitList({
                 </span>
                 <strong>{commit.subject}</strong>
                 <span className="commit-byline">
-                  {commit.author} · {commit.stats.files} file
-                  {commit.stats.files === 1 ? "" : "s"}
+                  <span>
+                    {commit.author} · {commit.stats.files} file
+                    {commit.stats.files === 1 ? "" : "s"}
+                  </span>
+                  <span className="commit-diff-stats">
+                    <span
+                      className="commit-additions"
+                      aria-label={`${commit.stats.additions} additions`}
+                    >
+                      +{commit.stats.additions}
+                    </span>
+                    <span
+                      className="commit-deletions"
+                      aria-label={`${commit.stats.deletions} deletions`}
+                    >
+                      −{commit.stats.deletions}
+                    </span>
+                  </span>
                 </span>
                 <ChevronRight className="commit-chevron" aria-hidden="true" />
               </button>

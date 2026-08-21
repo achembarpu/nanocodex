@@ -39,21 +39,37 @@ export async function loadPublishedRepositorySnapshot(
   const base = development
     ? "/__nanocodex/repository"
     : "/api/repository";
-  const snapshotResponse = await request(`${base}/snapshot`, {
-    cache: "no-store",
+  const aliasCache: RequestCache = development ? "no-store" : "default";
+  markCommitPerformance("repository-request-start", { includeHistory });
+  const snapshotRequest = request(`${base}/snapshot`, {
+    cache: aliasCache,
+  }).then((response) => {
+    markCommitPerformance("repository-snapshot-headers");
+    return response;
   });
+  const commitsRequest = includeHistory
+    ? request(`${base}/commits`, { cache: aliasCache }).then((response) => {
+        markCommitPerformance("repository-commits-headers");
+        return response;
+      })
+    : Promise.resolve<Response | undefined>(undefined);
+  const [snapshotResponse, commitsResponse] = await Promise.all([
+    snapshotRequest,
+    commitsRequest,
+  ]);
   if (!snapshotResponse.ok) {
     throw new Error(`Repository request failed (${snapshotResponse.status})`);
   }
   const snapshot = await snapshotResponse.json() as PublishedRepositoryDocument;
   requireRepositoryDocument(snapshot);
   requireGeneration(snapshotResponse, snapshot.repository.head);
+  markCommitPerformance("repository-snapshot-parsed");
 
   let commits: HarnessCommit[] = [];
   if (includeHistory) {
-    const commitsResponse = await request(`${base}/commits`, {
-      cache: "no-store",
-    });
+    if (commitsResponse == null) {
+      throw new Error("Repository commit request is missing");
+    }
     if (!commitsResponse.ok) {
       throw new Error(`Commit request failed (${commitsResponse.status})`);
     }
@@ -61,6 +77,9 @@ export async function loadPublishedRepositorySnapshot(
     const body: unknown = await commitsResponse.json();
     if (!Array.isArray(body)) throw new Error("Repository commits are invalid");
     commits = body as HarnessCommit[];
+    markCommitPerformance("repository-commits-parsed", {
+      commitCount: commits.length,
+    });
   }
 
   const fileContents = new Map<string, Promise<string>>();
@@ -98,6 +117,14 @@ export async function loadPublishedRepositorySnapshot(
       ? (commit) => `${base}/commits.diff?hash=${commit.hash}`
       : `${base}/commits/${snapshot.repository.head}.diff`,
   };
+}
+
+function markCommitPerformance(
+  name: string,
+  detail?: Record<string, boolean | number>,
+): void {
+  if (typeof performance === "undefined") return;
+  performance.mark(`nanocodex:commits:${name}`, { detail });
 }
 
 function requireRepositoryDocument(

@@ -1,28 +1,43 @@
-import { type CodeViewItem, type CodeViewOptions } from "@pierre/diffs";
-import { CodeView } from "@pierre/diffs/react";
-import { prepareFileTreeInput, type FileTreePreparedInput } from "@pierre/trees";
+import pierreDark from "@pierre/theme/pierre-dark-soft";
+import pierreLight from "@pierre/theme/pierre-light";
+import {
+  type CodeViewItem,
+  type CodeViewOptions,
+  type SelectedLineRange,
+} from "@pierre/diffs";
+import { CodeView, type CodeViewHandle } from "@pierre/diffs/react";
+import {
+  prepareFileTreeInput,
+  themeToTreeStyles,
+  type FileTreePreparedInput,
+} from "@pierre/trees";
 import { FileTree, useFileTree } from "@pierre/trees/react";
-import { ChevronRight, FileQuestion, GitBranch, PanelLeft, Search, X } from "lucide-react";
+import { ChevronRight, FileQuestion, GitBranch, PanelLeft, RefreshCw, Search, X } from "lucide-react";
 import {
   forwardRef,
   memo,
+  useCallback,
   useEffect,
   useImperativeHandle,
   useMemo,
   useRef,
   useState,
+  type CSSProperties,
   type ForwardedRef,
 } from "react";
-import { fuzzyScore } from "./fuzzy";
+import { useLocation, useNavigate } from "react-router";
 import { usePierreRenderer } from "./PierreWorkerProvider";
 import {
   CODE_VIEW_CUSTOM_CSS,
   CODE_VIEW_LAYOUT,
   CODE_VIEW_THEMES,
+  COMPACT_WORKSPACE_QUERY,
+  getInitialBatchSize,
   observePierreCodeScrollRegions,
 } from "./pierreCodeView";
 import { syntaxLanguageForFile } from "./syntax";
 import type { RepositoryFile } from "./threadRepositorySnapshot";
+import "./SourceBrowser.css";
 
 type CodeBrowserProps = {
   files: RepositoryFile[];
@@ -37,6 +52,35 @@ export type CodeBrowserHandle = {
   openFileSearch(): void;
   openTreeSearch(): void;
 };
+
+export type SourceLineRange = {
+  start: number;
+  end: number;
+};
+
+type SourceFileError = {
+  file: RepositoryFile;
+  kind: "request" | "unsupported";
+};
+
+type SourceLocation = {
+  path: string;
+  range: SourceLineRange | null;
+};
+
+type CodeViewSelection = {
+  id: string;
+  range: SelectedLineRange;
+};
+
+const FOCUSABLE_SELECTOR = [
+  "a[href]",
+  "button:not([disabled])",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  '[tabindex]:not([tabindex="-1"])',
+].join(",");
 
 function formatBytes(value: number | null) {
   if (value === null) return "—";
@@ -55,10 +99,99 @@ function countLines(contents: string | null): number | null {
   return lines;
 }
 
+export function parseSourceLineHash(hash: string): SourceLineRange | null {
+  const match = /^#L([1-9]\d*)(?:-L?([1-9]\d*))?$/.exec(hash);
+  if (!match) return null;
+  const first = Number(match[1]);
+  const second = match[2] ? Number(match[2]) : first;
+  if (!Number.isSafeInteger(first) || !Number.isSafeInteger(second)) return null;
+  return {
+    start: Math.min(first, second),
+    end: Math.max(first, second),
+  };
+}
+
+export function classifySourceFileError(error: unknown): SourceFileError["kind"] {
+  const message = error instanceof Error ? error.message : String(error);
+  return /not (?:a text file|available as published text)|binary|unsupported/i.test(message)
+    ? "unsupported"
+    : "request";
+}
+
+function readSourceLocation(
+  filePaths: ReadonlySet<string>,
+  defaultPath: string,
+  search: string,
+  hash: string,
+): SourceLocation {
+  const requestedPath = new URLSearchParams(search).get("path");
+  const validPath = requestedPath == null || filePaths.has(requestedPath);
+  return {
+    path: requestedPath != null && validPath
+      ? requestedPath
+      : defaultPath,
+    range: validPath ? parseSourceLineHash(hash) : null,
+  };
+}
+
+function normalizeLineRange(
+  range: SourceLineRange,
+  totalLines: number | null,
+): SourceLineRange | null {
+  if (totalLines === 0) return null;
+  const maximum = totalLines == null ? Number.MAX_SAFE_INTEGER : Math.max(1, totalLines);
+  const start = Math.max(1, Math.min(maximum, range.start));
+  const end = Math.max(start, Math.min(maximum, range.end));
+  return { start, end };
+}
+
+function currentCompactWorkspace(): boolean {
+  return typeof window !== "undefined" && window.matchMedia(COMPACT_WORKSPACE_QUERY).matches;
+}
+
+function useCompactWorkspace(): boolean {
+  const [compact, setCompact] = useState(currentCompactWorkspace);
+  useEffect(() => {
+    const media = window.matchMedia(COMPACT_WORKSPACE_QUERY);
+    const update = () => setCompact(media.matches);
+    update();
+    media.addEventListener("change", update);
+    return () => media.removeEventListener("change", update);
+  }, []);
+  return compact;
+}
+
+function deepActiveElement(root: Document | ShadowRoot): Element | null {
+  let active = root.activeElement;
+  while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+  return active;
+}
+
+function isWithinDeepRoot(container: Element, element: Element | null): boolean {
+  let current = element;
+  while (current) {
+    if (container.contains(current)) return true;
+    const root = current.getRootNode();
+    current = root instanceof ShadowRoot ? root.host : null;
+  }
+  return false;
+}
+
+function focusableElements(root: Document | ShadowRoot | HTMLElement): HTMLElement[] {
+  const elements = Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
+    .filter((element) => !element.hidden && element.getAttribute("aria-hidden") !== "true");
+  for (const host of root.querySelectorAll<HTMLElement>("*")) {
+    if (host.shadowRoot) elements.push(...focusableElements(host.shadowRoot));
+  }
+  return elements;
+}
+
 function CodeBrowserComponent(
   { files, branch, head, readFile, theme }: CodeBrowserProps,
   ref: ForwardedRef<CodeBrowserHandle>,
 ) {
+  const location = useLocation();
+  const navigate = useNavigate();
   const defaultPath = useMemo(
     () =>
       files.find((file) => file.path === "src/main.rs")?.path ??
@@ -67,7 +200,17 @@ function CodeBrowserComponent(
       "",
     [files],
   );
-  const [selectedPath, setSelectedPath] = useState(defaultPath);
+  const fileByPath = useMemo(
+    () => new Map(files.map((file) => [file.path, file])),
+    [files],
+  );
+  const filePaths = useMemo(() => new Set(fileByPath.keys()), [fileByPath]);
+  const initialLocation = useMemo(
+    () => readSourceLocation(filePaths, defaultPath, location.search, location.hash),
+    [defaultPath, filePaths, location.hash, location.search],
+  );
+  const [selectedPath, setSelectedPath] = useState(initialLocation.path);
+  const [lineTarget, setLineTarget] = useState<SourceLineRange | null>(initialLocation.range);
   const selectedPathRef = useRef(selectedPath);
   selectedPathRef.current = selectedPath;
   const readFileRef = useRef(readFile);
@@ -76,15 +219,18 @@ function CodeBrowserComponent(
     contents: string;
     file: RepositoryFile;
   } | null>(null);
-  const [fileError, setFileError] = useState<string | null>(null);
+  const [fileError, setFileError] = useState<SourceFileError | null>(null);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [treeOpen, setTreeOpen] = useState(false);
-  const [fileSearchOpen, setFileSearchOpen] = useState(false);
-  const [fileQuery, setFileQuery] = useState("");
-  const [activeFileIndex, setActiveFileIndex] = useState(0);
-  const fileSearchInputRef = useRef<HTMLInputElement>(null);
-  const treePanelRef = useRef<HTMLElement>(null);
+  const compact = useCompactWorkspace();
+  const treePanelRef = useRef<HTMLDivElement>(null);
+  const treeCloseRef = useRef<HTMLButtonElement>(null);
+  const treeOpenerRef = useRef<HTMLButtonElement>(null);
   const codeViewContainerRef = useRef<HTMLDivElement>(null);
+  const codeViewRef = useRef<CodeViewHandle<undefined>>(null);
+  const suppressTreeSelectionRef = useRef(false);
   const renderer = usePierreRenderer();
+  const initialVisibleRowCount = useMemo(getInitialBatchSize, []);
   const treeInput = useMemo(
     () => prepareFileTreeInput(files.map((file) => file.path), {
       flattenEmptyDirectories: true,
@@ -95,7 +241,7 @@ function CodeBrowserComponent(
     preparedInput: treeInput as unknown as FileTreePreparedInput,
     flattenEmptyDirectories: true,
     initialExpansion: 1,
-    initialSelectedPaths: defaultPath ? [defaultPath] : [],
+    initialSelectedPaths: initialLocation.path ? [initialLocation.path] : [],
     initialSearchQuery: null,
     fileTreeSearchMode: "hide-non-matches",
     search: true,
@@ -103,211 +249,147 @@ function CodeBrowserComponent(
     stickyFolders: true,
     density: "compact",
     icons: { set: "standard", colored: false },
+    initialVisibleRowCount,
+    overscan: 10,
   });
-  const selected = files.find((file) => file.path === selectedPath) ?? files[0];
+  const selected = fileByPath.get(selectedPath) ?? files[0];
   const displayed = loaded?.file;
   const contents = loaded?.contents ?? null;
   const viewFile = displayed ?? selected;
   const codeReady = loaded != null && renderer.ready;
-  const fileSearchResults = useMemo(() => {
-    const tokens = fileQuery.trim().split(/\s+/).filter(Boolean);
-    const matches = files
-      .map((file) => {
-        const basename = file.path.split("/").at(-1) ?? file.path;
-        let score = 0;
-        for (const token of tokens) {
-          const pathScore = fuzzyScore(file.path, token);
-          const basenameScore = fuzzyScore(basename, token);
-          const best = Math.max(pathScore ?? -Infinity, (basenameScore ?? -Infinity) + 80);
-          if (!Number.isFinite(best)) return null;
-          score += best;
+  const lineCount = useMemo(() => countLines(contents), [contents]);
+  const normalizedLineTarget = useMemo(
+    () => lineTarget == null ? null : normalizeLineRange(lineTarget, lineCount),
+    [lineCount, lineTarget],
+  );
+  const codeItemId = loaded ? `file:${loaded.file.objectId}` : "";
+  const selectedLines = useMemo<CodeViewSelection | null>(
+    () => codeReady && loaded?.file.path === selectedPath && normalizedLineTarget
+      ? {
+          id: codeItemId,
+          range: {
+            start: normalizedLineTarget.start,
+            end: normalizedLineTarget.end,
+          },
         }
-        if (file.path === selectedPath) score += tokens.length ? 15 : 1_000;
-        return { file, score };
-      })
-      .filter((match): match is { file: RepositoryFile; score: number } => match !== null)
-      .sort((left, right) => right.score - left.score || left.file.path.localeCompare(right.file.path));
-    return matches.slice(0, 16);
-  }, [fileQuery, files, selectedPath]);
+      : null,
+    [codeItemId, codeReady, loaded?.file.path, normalizedLineTarget, selectedPath],
+  );
+  const treeTheme = useMemo(
+    () => themeToTreeStyles(theme === "dark" ? pierreDark : pierreLight) as CSSProperties,
+    [theme],
+  );
+  const locationRef = useRef(location);
+  locationRef.current = location;
+  const writeSourceLocation = useCallback((
+    path: string,
+    range: SourceLineRange | null,
+    mode: "push" | "replace",
+  ) => {
+    const current = locationRef.current;
+    const search = new URLSearchParams(current.search);
+    if (path) search.set("path", path);
+    else search.delete("path");
+    const encodedSearch = search.toString();
+    const hash = range == null
+      ? ""
+      : range.start === range.end
+        ? `#L${range.start}`
+        : `#L${range.start}-L${range.end}`;
+    void navigate({
+      pathname: current.pathname,
+      search: encodedSearch ? `?${encodedSearch}` : "",
+      hash,
+    }, {
+      replace: mode === "replace",
+      preventScrollReset: true,
+    });
+  }, [navigate]);
 
-  const openTreeSearch = () => {
-    setFileSearchOpen(false);
-    setTreeOpen(true);
-    model.openSearch();
-  };
-
-  const openFileSearch = () => {
+  const closeTree = useCallback(() => {
     model.closeSearch();
-    setFileQuery("");
-    setActiveFileIndex(0);
-    setFileSearchOpen(true);
-  };
-
-  const closeSearches = () => {
-    model.closeSearch();
-    setFileSearchOpen(false);
     setTreeOpen(false);
-  };
+  }, [model]);
+
+  const openTreeSearch = useCallback(() => {
+    if (compact) setTreeOpen(true);
+    model.openSearch();
+  }, [compact, model]);
+
+  const closeSearches = useCallback(() => {
+    model.closeSearch();
+    setTreeOpen(false);
+  }, [model]);
 
   useImperativeHandle(
     ref,
-    () => ({ closeSearches, openFileSearch, openTreeSearch }),
-    [model],
+    () => ({
+      closeSearches,
+      // Compatibility for the shell's existing handle; Source now has one search.
+      openFileSearch: openTreeSearch,
+      openTreeSearch,
+    }),
+    [closeSearches, openTreeSearch],
   );
 
-  const selectFile = (path: string) => {
-    selectedPathRef.current = path;
-    model.closeSearch();
-    for (const selectedFile of model.getSelectedPaths()) {
-      if (selectedFile !== path) model.getItem(selectedFile)?.deselect();
+  const syncTreeSelection = useCallback((path: string) => {
+    suppressTreeSelectionRef.current = true;
+    try {
+      for (const selectedFile of model.getSelectedPaths()) {
+        if (selectedFile !== path) model.getItem(selectedFile)?.deselect();
+      }
+      model.getItem(path)?.select();
+      model.focusPath(path);
+      model.scrollToPath(path, { offset: "center" });
+    } finally {
+      suppressTreeSelectionRef.current = false;
     }
-    model.getItem(path)?.select();
-    model.focusPath(path);
-    model.scrollToPath(path, { offset: "center" });
-    setSelectedPath(path);
-    setFileSearchOpen(false);
-    setFileQuery("");
-    setTreeOpen(false);
-  };
-  const treeHeader = useMemo(
-    () => (
-      <div className="pierre-tree-heading">
-        <div>
-          <strong>Files</strong>
-          <span>
-            <GitBranch aria-hidden="true" /> {branch} · {head.slice(0, 7)}
-          </span>
-        </div>
-        <div>
-          <span>{files.length}</span>
-          <button
-            className="tree-search-trigger"
-            type="button"
-            onClick={openTreeSearch}
-            aria-label="Search files in tree"
-          >
-            <Search aria-hidden="true" />
-            <kbd>Ctrl P</kbd>
-          </button>
-          <button
-            className="tree-close-button"
-            type="button"
-            onClick={() => setTreeOpen(false)}
-            aria-label="Close file tree"
-          >
-            <X aria-hidden="true" />
-          </button>
-        </div>
-      </div>
-    ),
-    [branch, files.length, head, model],
-  );
-
-  useEffect(() => {
-    if (fileSearchOpen) requestAnimationFrame(() => fileSearchInputRef.current?.focus());
-  }, [fileSearchOpen]);
-
-  useEffect(() => {
-    const panel = treePanelRef.current;
-    if (!panel) return;
-    let animationFrame: number | undefined;
-    let observedRoot: ShadowRoot | undefined;
-    let rootObserver: MutationObserver | undefined;
-    let stopped = false;
-
-    const exposeTree = () => {
-      const treeRoot = observedRoot?.querySelector<HTMLElement>(
-        "[data-file-tree-virtualized-root]",
-      );
-      const treeRows = treeRoot?.querySelector<HTMLElement>(
-        "[data-file-tree-virtualized-scroll]",
-      );
-      if (!treeRoot || !treeRows) return;
-
-      // Pierre owns keyboard events on the root but also renders its header and
-      // search there. Keep only the actual file rows inside the ARIA tree.
-      if (treeRoot.hasAttribute("role")) treeRoot.removeAttribute("role");
-      if (treeRoot.hasAttribute("aria-label")) treeRoot.removeAttribute("aria-label");
-      if (treeRows.getAttribute("role") !== "tree") treeRows.setAttribute("role", "tree");
-      if (treeRows.getAttribute("aria-label") !== "Repository files") {
-        treeRows.setAttribute("aria-label", "Repository files");
-      }
-
-      const searchInput = treeRoot.querySelector<HTMLInputElement>(
-        "[data-file-tree-search-input]",
-      );
-      if (searchInput) {
-        const rowsId = `${treeRoot.id || "repository-file-tree"}__rows`;
-        if (treeRows.id !== rowsId) treeRows.id = rowsId;
-        if (searchInput.getAttribute("aria-controls") !== rowsId) {
-          searchInput.setAttribute("aria-controls", rowsId);
-        }
-      }
-    };
-    const attachTree = () => {
-      if (stopped) return;
-      const root = panel.querySelector("file-tree-container")?.shadowRoot;
-      if (!root) {
-        if (animationFrame === undefined) {
-          animationFrame = requestAnimationFrame(() => {
-            animationFrame = undefined;
-            attachTree();
-          });
-        }
-        return;
-      }
-      if (root !== observedRoot) {
-        rootObserver?.disconnect();
-        observedRoot = root;
-        rootObserver = new MutationObserver(exposeTree);
-        rootObserver.observe(root, {
-          attributes: true,
-          attributeFilter: ["aria-controls", "aria-label", "id", "role"],
-          childList: true,
-          subtree: true,
-        });
-      }
-      exposeTree();
-    };
-
-    attachTree();
-    const panelObserver = new MutationObserver(attachTree);
-    panelObserver.observe(panel, { childList: true, subtree: true });
-    return () => {
-      stopped = true;
-      panelObserver.disconnect();
-      rootObserver?.disconnect();
-      if (animationFrame !== undefined) cancelAnimationFrame(animationFrame);
-    };
   }, [model]);
 
   useEffect(() => {
-    const container = codeViewContainerRef.current;
-    if (!container || !viewFile || !codeReady) return;
-    container.tabIndex = 0;
-    container.setAttribute("role", "region");
-    container.setAttribute("aria-label", `${viewFile.path} source code`);
-    return observePierreCodeScrollRegions(container);
-  }, [codeReady, viewFile]);
-
-  useEffect(() => {
-    setActiveFileIndex(0);
-  }, [fileQuery]);
+    const requestedPath = new URLSearchParams(location.search).get("path");
+    const next = readSourceLocation(
+      filePaths,
+      defaultPath,
+      location.search,
+      location.hash,
+    );
+    selectedPathRef.current = next.path;
+    setSelectedPath(next.path);
+    setLineTarget(next.range);
+    setFileError(null);
+    if (next.path) syncTreeSelection(next.path);
+    closeTree();
+    if (requestedPath != null && !filePaths.has(requestedPath) && defaultPath) {
+      writeSourceLocation(defaultPath, null, "replace");
+    }
+  }, [
+    closeTree,
+    defaultPath,
+    filePaths,
+    location.hash,
+    location.search,
+    syncTreeSelection,
+    writeSourceLocation,
+  ]);
 
   useEffect(() => {
     return model.subscribe(() => {
+      if (suppressTreeSelectionRef.current) return;
       const nextPath = model
         .getSelectedPaths()
         .slice()
         .reverse()
-        .find((path) => files.some((file) => file.path === path));
-      if (nextPath && nextPath !== selectedPathRef.current) {
-        selectedPathRef.current = nextPath;
-        setSelectedPath(nextPath);
-        setTreeOpen(false);
-      }
+        .find((path) => fileByPath.has(path));
+      if (!nextPath || nextPath === selectedPathRef.current) return;
+      selectedPathRef.current = nextPath;
+      setSelectedPath(nextPath);
+      setLineTarget(null);
+      setFileError(null);
+      writeSourceLocation(nextPath, null, "push");
+      closeTree();
     });
-  }, [files, model]);
+  }, [closeTree, fileByPath, model, writeSourceLocation]);
 
   useEffect(() => {
     if (!selected) {
@@ -322,23 +404,148 @@ function CodeBrowserComponent(
         setLoaded({ contents: nextContents, file: selected });
         setFileError(null);
       })
-      .catch(() => {
+      .catch((error: unknown) => {
         if (!active) return;
-        setLoaded(null);
-        setFileError(selected.path);
+        setFileError({ file: selected, kind: classifySourceFileError(error) });
       });
     return () => {
       active = false;
     };
-  }, [selected?.objectId, selected?.path]);
+  }, [loadAttempt, selected?.objectId, selected?.path]);
 
-  const lineCount = useMemo(() => countLines(contents), [contents]);
+  const applyLineTarget = useCallback(() => {
+    if (!selectedLines) return;
+    codeViewRef.current?.scrollTo({
+      type: "range",
+      id: selectedLines.id,
+      range: selectedLines.range,
+      align: "center",
+      behavior: "instant",
+    });
+  }, [selectedLines]);
+
+  useEffect(() => {
+    applyLineTarget();
+  }, [applyLineTarget]);
+
+  useEffect(() => {
+    const container = codeViewContainerRef.current;
+    if (!container || !viewFile || !codeReady) return;
+    container.tabIndex = 0;
+    container.setAttribute("role", "region");
+    container.setAttribute("aria-label", `${viewFile.path} source code`);
+    return observePierreCodeScrollRegions(container, applyLineTarget);
+  }, [applyLineTarget, codeReady, viewFile]);
+
+  useEffect(() => {
+    const panel = treePanelRef.current;
+    if (!panel) return;
+    let frame: number | undefined;
+    let stopped = false;
+
+    const exposeVirtualizedRows = (): boolean => {
+      const shadowRoot = panel.querySelector("file-tree-container")?.shadowRoot;
+      const root = shadowRoot?.querySelector<HTMLElement>(
+        "[data-file-tree-virtualized-root]",
+      );
+      const rows = root?.querySelector<HTMLElement>(
+        "[data-file-tree-virtualized-scroll]",
+      );
+      if (!root || !rows) return false;
+
+      if (root.hasAttribute("role")) root.removeAttribute("role");
+      if (root.hasAttribute("aria-label")) root.removeAttribute("aria-label");
+      if (rows.getAttribute("role") !== "tree") rows.setAttribute("role", "tree");
+      if (rows.getAttribute("aria-label") !== "Repository files") {
+        rows.setAttribute("aria-label", "Repository files");
+      }
+      const rowsId = `${root.id || "repository-file-tree"}__rows`;
+      if (rows.id !== rowsId) rows.id = rowsId;
+      const searchInput = root.querySelector<HTMLInputElement>(
+        "[data-file-tree-search-input]",
+      );
+      if (searchInput?.getAttribute("aria-controls") !== rowsId) {
+        searchInput?.setAttribute("aria-controls", rowsId);
+      }
+      return true;
+    };
+
+    const attach = () => {
+      if (stopped) return;
+      if (exposeVirtualizedRows()) return;
+      frame = window.requestAnimationFrame(attach);
+    };
+
+    attach();
+    return () => {
+      stopped = true;
+      if (frame !== undefined) window.cancelAnimationFrame(frame);
+    };
+  }, [model]);
+
+  useEffect(() => {
+    if (!treeOpen || !compact) return;
+    const root = window.document.documentElement;
+    const body = window.document.body;
+    const previousRootOverflow = root.style.overflow;
+    const previousRootOverscroll = root.style.overscrollBehavior;
+    const previousBodyOverflow = body.style.overflow;
+    root.style.overflow = "hidden";
+    root.style.overscrollBehavior = "none";
+    body.style.overflow = "hidden";
+
+    model.openSearch();
+    const focusFrame = window.requestAnimationFrame(() => {
+      if (!treePanelRef.current || !isWithinDeepRoot(
+        treePanelRef.current,
+        deepActiveElement(window.document),
+      )) {
+        treeCloseRef.current?.focus();
+      }
+    });
+    const containDrawerFocus = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        closeTree();
+        return;
+      }
+      if (event.key !== "Tab") return;
+      const panel = treePanelRef.current;
+      if (!panel) return;
+      const focusable = focusableElements(panel);
+      const first = focusable[0];
+      const last = focusable.at(-1);
+      const active = deepActiveElement(window.document);
+      if (!first || !last) return;
+      if (event.shiftKey && (active === first || !isWithinDeepRoot(panel, active))) {
+        event.preventDefault();
+        last.focus();
+      } else if (!event.shiftKey && (active === last || !isWithinDeepRoot(panel, active))) {
+        event.preventDefault();
+        first.focus();
+      }
+    };
+    window.addEventListener("keydown", containDrawerFocus);
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      window.removeEventListener("keydown", containDrawerFocus);
+      root.style.overflow = previousRootOverflow;
+      root.style.overscrollBehavior = previousRootOverscroll;
+      body.style.overflow = previousBodyOverflow;
+      treeOpenerRef.current?.focus();
+    };
+  }, [closeTree, compact, model, treeOpen]);
+
+  useEffect(() => {
+    if (!compact && treeOpen) closeTree();
+  }, [closeTree, compact, treeOpen]);
+
   const codeItems = useMemo<CodeViewItem<undefined>[]>(
     () =>
       codeReady && loaded
         ? [
             {
-              id: `file:${loaded.file.objectId}`,
+              id: codeItemId,
               type: "file",
               file: {
                 name: loaded.file.path,
@@ -349,7 +556,7 @@ function CodeBrowserComponent(
             },
           ]
         : [],
-    [codeReady, loaded],
+    [codeItemId, codeReady, loaded],
   );
   const codeViewOptions = useMemo<CodeViewOptions<undefined>>(
     () => ({
@@ -366,35 +573,94 @@ function CodeBrowserComponent(
     [theme],
   );
 
+  const handleSelectedLinesChange = useCallback((selection: CodeViewSelection | null) => {
+    if (!loaded || loaded.file.path !== selectedPathRef.current) return;
+    const next = selection == null
+      ? null
+      : normalizeLineRange({
+          start: selection.range.start,
+          end: selection.range.end,
+        }, lineCount);
+    setLineTarget(next);
+    writeSourceLocation(loaded.file.path, next, "replace");
+  }, [lineCount, loaded, writeSourceLocation]);
+
+  const modalOpen = compact && treeOpen;
+  const errorCopy = fileError?.kind === "unsupported"
+    ? `${fileError.file.path} is not available as text.`
+    : fileError
+      ? `Couldn’t load ${fileError.file.path}.`
+      : "";
+
   return (
-    <section className="code-workspace" aria-label="Code browser">
+    <section className="code-workspace source-browser" aria-label="Code browser">
       <h1 className="sr-only">Nanocodex source code</h1>
-      <button
-        className={treeOpen ? "workspace-backdrop is-visible" : "workspace-backdrop"}
-        type="button"
-        aria-label="Close file tree"
-        onClick={() => setTreeOpen(false)}
+      <div
+        className={modalOpen ? "workspace-backdrop is-visible" : "workspace-backdrop"}
+        aria-hidden="true"
+        onPointerDown={closeTree}
       />
-      <aside
+      <div
         ref={treePanelRef}
-        className={treeOpen ? "code-tree-panel is-mobile-open" : "code-tree-panel"}
-        aria-label="Repository files"
+        id="source-file-tree"
+        className={modalOpen ? "code-tree-panel is-mobile-open" : "code-tree-panel"}
+        aria-labelledby="source-tree-title"
+        role={modalOpen ? "dialog" : "complementary"}
+        aria-modal={modalOpen ? true : undefined}
       >
-        <FileTree className="pierre-file-tree" model={model} header={treeHeader} />
-      </aside>
+        <header className="pierre-tree-heading source-tree-toolbar">
+          <div className="source-tree-identity">
+            <strong id="source-tree-title">Files</strong>
+            <span>
+              <GitBranch aria-hidden="true" /> {branch} · {head.slice(0, 7)}
+            </span>
+          </div>
+          <div className="source-tree-actions">
+            <span className="source-file-count">{files.length}</span>
+            <button
+              className="tree-search-trigger"
+              type="button"
+              onClick={openTreeSearch}
+              aria-label="Search repository files"
+              aria-keyshortcuts="Meta+P Control+P"
+            >
+              <Search aria-hidden="true" />
+              <kbd>⌘/Ctrl P</kbd>
+            </button>
+            <button
+              ref={treeCloseRef}
+              className="tree-close-button"
+              type="button"
+              onClick={closeTree}
+              aria-label="Close file tree"
+            >
+              <X aria-hidden="true" />
+            </button>
+          </div>
+        </header>
+        <FileTree
+          className="pierre-file-tree"
+          model={model}
+          style={treeTheme}
+        />
+      </div>
 
       <article
         className="code-file"
         aria-label={viewFile?.path ?? "File viewer"}
+        inert={modalOpen ? true : undefined}
       >
         {viewFile ? (
           <>
             <header className="code-file-header">
               <button
+                ref={treeOpenerRef}
                 className="mobile-tree-toggle"
                 type="button"
-                onClick={() => setTreeOpen(true)}
-                aria-label="Open file tree"
+                onClick={openTreeSearch}
+                aria-label="Open file tree and search files"
+                aria-controls="source-file-tree"
+                aria-expanded={modalOpen}
               >
                 <PanelLeft aria-hidden="true" />
               </button>
@@ -411,39 +677,42 @@ function CodeBrowserComponent(
                 ))}
               </div>
               <div className="code-file-meta">
-                <button
-                  className="code-file-search"
-                  type="button"
-                  aria-label="Jump to file"
-                  onClick={openFileSearch}
-                >
-                  <Search aria-hidden="true" />
-                  <span>Jump to file</span>
-                  <kbd>Ctrl F</kbd>
-                </button>
                 <span>{formatBytes(viewFile.size)}</span>
                 {lineCount !== null ? <span>{lineCount} lines</span> : null}
               </div>
             </header>
-            {fileError ? (
+            {fileError && loaded ? (
               <div className="code-file-tail-error" role="alert">
-                Couldn’t display {fileError}.
+                <span>{errorCopy}</span>
+                {fileError.kind === "request" ? (
+                  <button type="button" onClick={() => setLoadAttempt((attempt) => attempt + 1)}>
+                    <RefreshCw aria-hidden="true" /> Retry
+                  </button>
+                ) : null}
               </div>
             ) : null}
             {codeReady ? (
               <CodeView
+                ref={codeViewRef}
                 key={renderer.disableWorkerPool ? "main" : "workers"}
                 items={codeItems}
                 className="code-file-frame code-view cv-scrollbar"
                 containerRef={codeViewContainerRef}
                 disableWorkerPool={renderer.disableWorkerPool}
                 options={codeViewOptions}
+                selectedLines={selectedLines}
+                onSelectedLinesChange={handleSelectedLinesChange}
               />
             ) : fileError ? (
               <div className="code-file-frame">
-                <div className="code-file-message">
+                <div className="code-file-message" role="alert">
                   <FileQuestion aria-hidden="true" />
-                  <p>This file cannot be displayed as text.</p>
+                  <p>{errorCopy}</p>
+                  {fileError.kind === "request" ? (
+                    <button type="button" onClick={() => setLoadAttempt((attempt) => attempt + 1)}>
+                      <RefreshCw aria-hidden="true" /> Retry
+                    </button>
+                  ) : null}
                 </div>
               </div>
             ) : null}
@@ -452,85 +721,6 @@ function CodeBrowserComponent(
           <div className="code-file-message">This snapshot has no files.</div>
         )}
       </article>
-
-      {fileSearchOpen ? (
-        <div className="overlay" role="presentation" onMouseDown={() => setFileSearchOpen(false)}>
-          <section
-            className="search-dialog file-search-dialog"
-            role="dialog"
-            aria-modal="true"
-            aria-label="Jump to file"
-            onMouseDown={(event) => event.stopPropagation()}
-          >
-            <div className="search-field">
-              <Search aria-hidden="true" />
-              <input
-                ref={fileSearchInputRef}
-                value={fileQuery}
-                onChange={(event) => setFileQuery(event.target.value)}
-                onKeyDown={(event) => {
-                  if (event.key === "ArrowDown") {
-                    event.preventDefault();
-                    setActiveFileIndex((current) =>
-                      Math.min(current + 1, Math.max(0, fileSearchResults.length - 1)),
-                    );
-                  } else if (event.key === "ArrowUp") {
-                    event.preventDefault();
-                    setActiveFileIndex((current) => Math.max(0, current - 1));
-                  } else if (event.key === "Enter") {
-                    const match = fileSearchResults[activeFileIndex];
-                    if (match) {
-                      event.preventDefault();
-                      selectFile(match.file.path);
-                    }
-                  }
-                }}
-                placeholder="Fuzzy search every file"
-                aria-label="Fuzzy file search"
-              />
-              <button
-                type="button"
-                onClick={() => setFileSearchOpen(false)}
-                aria-label="Close file search"
-              >
-                <X aria-hidden="true" />
-              </button>
-            </div>
-            <div className="search-results file-search-results">
-              {fileSearchResults.length ? (
-                fileSearchResults.map(({ file }, index) => {
-                  const parts = file.path.split("/");
-                  const basename = parts.pop() ?? file.path;
-                  const directory = parts.length ? `${parts.join("/")}/` : "Repository root";
-                  return (
-                    <button
-                      className={
-                        index === activeFileIndex
-                          ? "search-result file-search-result is-active"
-                          : "search-result file-search-result"
-                      }
-                      type="button"
-                      key={file.path}
-                      onMouseEnter={() => setActiveFileIndex(index)}
-                      onClick={() => selectFile(file.path)}
-                    >
-                      <strong>{basename}</strong>
-                      <small>{directory}</small>
-                      <ChevronRight aria-hidden="true" />
-                    </button>
-                  );
-                })
-              ) : (
-                <p className="search-empty">No files found.</p>
-              )}
-            </div>
-            <footer className="search-footer">
-              <span>{fileSearchResults.length} results</span>
-              <span>↑↓ move · Enter open · Esc close</span>
-            </footer>
-          </section>
-        </div>
-      ) : null}
     </section>
   );
 }
