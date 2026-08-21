@@ -153,6 +153,75 @@ test("refetch serializes shutdown before replacement", async () => {
   await config.destroy();
 });
 
+test("refetch aborts a hung generation and starts its replacement immediately", { timeout: 2_000 }, async () => {
+  const first = deferred();
+  const closed = [];
+  const createSignals = [];
+  const prepareSignals = [];
+  let attempts = 0;
+  const config = createAgentConfig({}, {
+    create(_options, { signal }) {
+      createSignals.push(signal);
+      attempts += 1;
+      if (attempts === 1) return first.promise;
+      return Promise.resolve(fakeAgent("replacement", closed));
+    },
+    prepare(_options, { signal }) {
+      prepareSignals.push(signal);
+      return new Promise(() => {});
+    },
+  });
+  const unsubscribe = config.subscribeAgent({}, () => {});
+  await waitFor(() => attempts === 1);
+
+  config.refetchAgent();
+  assert.equal(createSignals[0].aborted, true);
+  assert.equal(prepareSignals[0], createSignals[0]);
+  await waitFor(() => config.getAgent().status === "success");
+
+  assert.equal(attempts, 2);
+  assert.equal(prepareSignals[1], createSignals[1]);
+  assert.equal(createSignals[1].aborted, false);
+  first.resolve(fakeAgent("stale", closed));
+  await waitFor(() => closed.includes("stale"));
+  assert.equal(config.getAgent().data.session !== undefined, true);
+
+  unsubscribe();
+  await waitFor(() => closed.includes("replacement"));
+  assert.equal(createSignals[1].aborted, true);
+  await config.destroy();
+});
+
+test("release and destroy promptly abort create calls that never resolve", { timeout: 2_000 }, async (context) => {
+  for (const lifecycle of ["release", "destroy"]) {
+    await context.test(lifecycle, async () => {
+      const started = deferred();
+      let signal;
+      const config = createAgentConfig({}, {
+        create(_options, workerOptions) {
+          signal = workerOptions.signal;
+          started.resolve();
+          return new Promise(() => {});
+        },
+        async prepare() {},
+      });
+      const unsubscribe = config.subscribeAgent({}, () => {});
+      await started.promise;
+
+      if (lifecycle === "release") {
+        unsubscribe();
+        assert.equal(signal.aborted, true);
+        await waitFor(() => config.getAgent().status === "idle");
+        await config.destroy();
+      } else {
+        await config.destroy();
+        assert.equal(signal.aborted, true);
+        unsubscribe();
+      }
+    });
+  }
+});
+
 test("an Agent that resolves after unsubscribe is immediately shut down", async () => {
   const creation = deferred();
   const started = deferred();
@@ -252,18 +321,20 @@ test("retry policy failures publish a terminal error", async (context) => {
   }
 });
 
-test("a refetch during retry backoff suppresses the stale generation", async () => {
+test("a refetch aborts retry backoff and starts the replacement", { timeout: 2_000 }, async () => {
   const backoffStarted = deferred();
   const closed = [];
+  const signals = [];
   let attempts = 0;
   const config = createAgentConfig({
     retry: 1,
     retryDelay() {
       backoffStarted.resolve();
-      return 20;
+      return 60_000;
     },
   }, {
-    async create() {
+    async create(_options, { signal }) {
+      signals.push(signal);
       attempts += 1;
       if (attempts === 1) throw new Error("transient");
       return fakeAgent("replacement", closed);
@@ -273,10 +344,11 @@ test("a refetch during retry backoff suppresses the stale generation", async () 
   const unsubscribe = config.subscribeAgent({}, () => {});
   await backoffStarted.promise;
   config.refetchAgent();
-  await sleep(30);
   await waitFor(() => config.getAgent().status === "success");
 
   assert.equal(attempts, 2);
+  assert.equal(signals[0].aborted, true);
+  assert.equal(signals[1].aborted, false);
   unsubscribe();
   await waitFor(() => closed.length === 1);
   await config.destroy();

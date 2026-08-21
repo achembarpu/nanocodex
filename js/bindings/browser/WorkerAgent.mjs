@@ -23,13 +23,25 @@ let prewarmedWorker;
 
 /** Creates a DefaultAgent whose owned driver and browser host live in one module Worker. */
 export async function createWorkerAgent(options = {}, workerOptions = {}) {
+  workerOptions.signal?.throwIfAborted();
   const config = serializeConfig(options);
-  const worker = await claimWorker(config.harness, workerOptions);
-  const connection = new WorkerConnection(worker, workerOptions);
+  const claimed = claimWorker(config.harness, workerOptions);
+  const worker = claimed instanceof Promise ? await claimed : claimed;
+  let connection;
+  try {
+    connection = new WorkerConnection(worker, workerOptions);
+  } catch (error) {
+    disposeWorker(worker);
+    throw error;
+  }
+  const stopAbort = listenForAbort(workerOptions.signal, (error) => connection.fail(error));
   try {
     const root = await connection.boot(config);
+    workerOptions.signal?.throwIfAborted();
+    stopAbort();
     return createAgentClient(connection.runtime(), root);
   } catch (error) {
+    stopAbort();
     connection.fail(error);
     throw error;
   }
@@ -37,19 +49,32 @@ export async function createWorkerAgent(options = {}, workerOptions = {}) {
 
 /** Starts the exact module Worker and browser harness consumed by the next Agent.create. */
 export function prepareWorkerAgent(options = {}, workerOptions = {}) {
+  workerOptions.signal?.throwIfAborted();
   const harness = options.harness === false ? false : harnessDescriptor(options);
   const key = harnessKey(harness);
-  if (prewarmedWorker?.key === key) return prewarmedWorker.ready;
+  if (prewarmedWorker?.key === key) {
+    const entry = prewarmedWorker;
+    return entry.prepare(workerOptions.signal);
+  }
   prewarmedWorker?.cancel(new Error("Nanocodex Agent Worker prewarm was replaced"));
   const worker = createWorker(workerOptions);
   const channel = randomId();
   let claimed = false;
+  let disposed = false;
   let expiryTimer;
   let startupTimer;
-  let dispose;
+  let cancel;
+  const preparationAborts = new Set();
+  const clearPreparationAborts = () => {
+    for (const stopAbort of preparationAborts) stopAbort();
+    preparationAborts.clear();
+  };
   const ready = new Promise((resolve, reject) => {
     let settled = false;
-    dispose = (error) => {
+    cancel = (error) => {
+      if (disposed) return;
+      disposed = true;
+      clearPreparationAborts();
       clearTimeout(expiryTimer);
       clearTimeout(startupTimer);
       if (prewarmedWorker?.worker === worker) prewarmedWorker = undefined;
@@ -65,7 +90,7 @@ export function prepareWorkerAgent(options = {}, workerOptions = {}) {
     worker.onmessage = ({ data }) => {
       if (data?.protocol !== PROTOCOL || data.channel !== channel) return;
       if (data.type === "prewarmed") {
-        if (settled) return;
+        if (settled || disposed) return;
         settled = true;
         clearTimeout(startupTimer);
         worker.onmessage = null;
@@ -73,32 +98,50 @@ export function prepareWorkerAgent(options = {}, workerOptions = {}) {
         worker.onmessageerror = null;
         if (!claimed) {
           expiryTimer = setTimeout(
-            () => dispose(new Error("Nanocodex prepared Agent Worker expired")),
+            () => cancel(new Error("Nanocodex prepared Agent Worker expired")),
             PREWARM_RETENTION_MS,
           );
         }
         resolve();
       } else if (data.type === "fatal") {
-        dispose(decodeError(data.error));
+        cancel(decodeError(data.error));
       }
     };
-    worker.onerror = (event) => dispose(new Error(event?.message || "Nanocodex Agent Worker prewarm failed"));
-    worker.onmessageerror = () => dispose(new Error("Nanocodex Agent Worker returned an unreadable prewarm message"));
-    startupTimer = setTimeout(() => dispose(new Error("Nanocodex Agent Worker prewarm timed out")), PREWARM_TIMEOUT_MS);
+    worker.onerror = (event) => cancel(new Error(event?.message || "Nanocodex Agent Worker prewarm failed"));
+    worker.onmessageerror = () => cancel(new Error("Nanocodex Agent Worker returned an unreadable prewarm message"));
+    startupTimer = setTimeout(() => cancel(new Error("Nanocodex Agent Worker prewarm timed out")), PREWARM_TIMEOUT_MS);
     try { worker.postMessage({ protocol: PROTOCOL, channel, type: "prewarm", harness }); }
-    catch (error) { dispose(error); }
+    catch (error) { cancel(error); }
   });
-  prewarmedWorker = {
-    cancel: dispose,
-    claim() {
+  const entry = {
+    cancel,
+    get claimed() { return claimed; },
+    claim(signal) {
       claimed = true;
+      clearPreparationAborts();
       clearTimeout(expiryTimer);
+      return abortable(ready, signal, (error) => cancel(error)).then(() => {
+        if (disposed) throw new Error("Nanocodex prepared Agent Worker was disposed");
+        return worker;
+      });
+    },
+    prepare(signal) {
+      if (signal !== undefined) {
+        let stopAbort = () => {};
+        stopAbort = listenForAbort(signal, (error) => {
+          preparationAborts.delete(stopAbort);
+          if (!claimed) cancel(error);
+        });
+        if (!signal.aborted) preparationAborts.add(stopAbort);
+      }
+      return ready;
     },
     key,
     ready,
     worker,
   };
-  return ready;
+  if (!disposed) prewarmedWorker = entry;
+  return entry.prepare(workerOptions.signal);
 }
 
 /**
@@ -168,6 +211,7 @@ export function installWorkerAgentRuntime(scope = globalThis, options = {}) {
       agents.set(agentId, agent);
       post({ type: "ready", root: describeAgent(agentId, agent) }, currentGeneration);
     } catch (error) {
+      if (currentGeneration !== generation) return;
       post({ type: "fatal", error: encodeError(error) }, currentGeneration);
       cleanup();
     }
@@ -345,14 +389,23 @@ export function installWorkerAgentRuntime(scope = globalThis, options = {}) {
   scope.onmessage = ({ data: message }) => {
     if (message?.protocol !== PROTOCOL) return;
     if (message.type === "prewarm") {
+      const currentGeneration = generation;
       void Promise.resolve().then(() => prewarmLocal(message.harness)).then(
-        () => scope.postMessage({ protocol: PROTOCOL, channel: message.channel, type: "prewarmed" }),
-        (error) => scope.postMessage({
-          protocol: PROTOCOL,
-          channel: message.channel,
-          type: "fatal",
-          error: encodeError(error),
-        }),
+        () => {
+          if (currentGeneration === generation) {
+            scope.postMessage({ protocol: PROTOCOL, channel: message.channel, type: "prewarmed" });
+          }
+        },
+        (error) => {
+          if (currentGeneration === generation) {
+            scope.postMessage({
+              protocol: PROTOCOL,
+              channel: message.channel,
+              type: "fatal",
+              error: encodeError(error),
+            });
+          }
+        },
       );
       return;
     }
@@ -837,16 +890,67 @@ function createWorker(options) {
   return new Worker(new URL("./agent.worker.mjs", import.meta.url), { type: "module", name: "nanocodex-agent" });
 }
 
-async function claimWorker(harness, options) {
+function claimWorker(harness, options) {
+  options.signal?.throwIfAborted();
   if (options.worker !== undefined || options.workerFactory !== undefined) {
     return createWorker(options);
   }
   const entry = prewarmedWorker;
   if (!entry || entry.key !== harnessKey(harness)) return createWorker(options);
   prewarmedWorker = undefined;
-  entry.claim();
-  await entry.ready;
-  return entry.worker;
+  return entry.claim(options.signal);
+}
+
+function disposeWorker(worker) {
+  worker.onmessage = null;
+  worker.onerror = null;
+  worker.onmessageerror = null;
+  worker.terminate?.();
+}
+
+function abortable(promise, signal, abort) {
+  if (signal === undefined) return promise;
+  if (signal.aborted) {
+    abort(signal.reason);
+    return Promise.reject(signal.reason);
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    let stopAbort = () => {};
+    stopAbort = listenForAbort(signal, (error) => {
+      abort(error);
+      settle(reject, error);
+    });
+    Promise.resolve(promise).then(
+      (value) => settle(resolve, value),
+      (error) => settle(reject, error),
+    );
+
+    function settle(complete, value) {
+      if (settled) return;
+      settled = true;
+      stopAbort();
+      complete(value);
+    }
+  });
+}
+
+function listenForAbort(signal, listener) {
+  if (signal === undefined) return () => {};
+  let listening = true;
+  const onAbort = () => {
+    if (!listening) return;
+    listening = false;
+    signal.removeEventListener("abort", onAbort);
+    listener(signal.reason);
+  };
+  if (signal.aborted) onAbort();
+  else signal.addEventListener("abort", onAbort, { once: true });
+  return () => {
+    if (!listening) return;
+    listening = false;
+    signal.removeEventListener("abort", onAbort);
+  };
 }
 
 function serializeConfig(options) {

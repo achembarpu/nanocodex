@@ -4,6 +4,7 @@ import test from "node:test";
 import { createElement } from "react";
 import { act, create } from "react-test-renderer";
 
+import { createAgentConfig } from "../../bindings/browser/config.mjs";
 import {
   NanocodexProvider,
   useAgent,
@@ -73,6 +74,53 @@ test("useAgent follows the vanilla external store without duplicating Agent owne
 
   await act(async () => root.unmount());
   assert.equal(store.unsubscribed, 2);
+});
+
+test("useAgent refetch cancels hung startup and unmount releases its replacement", { timeout: 2_000 }, async () => {
+  const signals = [];
+  const closed = [];
+  let attempts = 0;
+  const config = createAgentConfig({}, {
+    create(_options, { signal }) {
+      signals.push(signal);
+      attempts += 1;
+      if (attempts === 1) return new Promise(() => {});
+      return Promise.resolve({
+        session: {
+          async shutdown() { closed.push("replacement"); },
+        },
+      });
+    },
+    async prepare() {},
+  });
+  let resource;
+
+  function Consumer() {
+    resource = useAgent();
+    return null;
+  }
+
+  let root;
+  await act(async () => {
+    root = create(createElement(
+      NanocodexProvider,
+      { config },
+      createElement(Consumer),
+    ));
+  });
+  await waitFor(() => attempts === 1);
+
+  await act(async () => resource.refetch());
+  assert.equal(signals[0].aborted, true);
+  await act(async () => waitFor(() => resource.isSuccess));
+  assert.equal(attempts, 2);
+  assert.equal(signals[1].aborted, false);
+
+  await act(async () => root.unmount());
+  await waitFor(() => closed.length === 1);
+  assert.equal(signals[1].aborted, true);
+  assert.deepEqual(closed, ["replacement"]);
+  await config.destroy();
 });
 
 test("useAgentEvents keeps the latest listener without resubscribing", async () => {
@@ -163,4 +211,16 @@ function createStore() {
     subscriptions,
     get unsubscribed() { return unsubscribed; },
   };
+}
+
+function tick() {
+  return new Promise((resolve) => setImmediate(resolve));
+}
+
+async function waitFor(predicate) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (predicate()) return;
+    await tick();
+  }
+  assert.fail("condition was not reached");
 }

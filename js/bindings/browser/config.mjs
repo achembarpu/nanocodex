@@ -1,5 +1,4 @@
-import * as Agent from "./Agent.mjs";
-import { prepareWorkerAgent } from "./WorkerAgent.mjs";
+import { createWorkerAgent, prepareWorkerAgent } from "./WorkerAgent.mjs";
 
 const IDLE_SNAPSHOT = Object.freeze({
   data: undefined,
@@ -10,7 +9,7 @@ const IDLE_SNAPSHOT = Object.freeze({
 /** Creates the stable browser runtime consumed by framework bindings. */
 export function createConfig(options = {}) {
   return createAgentConfig(options, {
-    create: Agent.create,
+    create: createWorkerAgent,
     prepare: prepareWorkerAgent,
   });
 }
@@ -38,13 +37,13 @@ export function createAgentConfig(options = {}, runtime) {
     const entry = {
       activeSubscribers: 0,
       agent: undefined,
+      closing: Promise.resolve(),
       createOptions,
       generation: 0,
       key,
       listeners: new Set(),
-      preparation: undefined,
+      operation: undefined,
       snapshot: IDLE_SNAPSHOT,
-      tail: Promise.resolve(),
     };
     entries.set(key, entry);
     return entry;
@@ -61,90 +60,131 @@ export function createAgentConfig(options = {}, runtime) {
     for (const listener of entry.listeners) listener();
   }
 
-  function enqueue(entry, operation) {
-    const result = entry.tail.then(operation);
-    entry.tail = result.then(() => undefined, () => undefined);
-    return result;
-  }
-
   async function close(agent) {
     if (agent !== undefined) await agent.session.shutdown();
   }
 
+  function retireAgent(entry) {
+    const agent = entry.agent;
+    entry.agent = undefined;
+    if (agent === undefined) return entry.closing;
+    const closing = entry.closing.then(() => close(agent));
+    entry.closing = closing.catch(() => {});
+    return closing;
+  }
+
+  function cancelGeneration(entry) {
+    entry.generation += 1;
+    const operation = entry.operation;
+    entry.operation = undefined;
+    operation?.controller.abort();
+  }
+
+  function isCurrent(entry, operation) {
+    return !destroyed
+      && entry.operation === operation
+      && entry.generation === operation.generation
+      && entry.activeSubscribers > 0;
+  }
+
+  function finishGeneration(entry, operation) {
+    if (entry.operation !== operation) return;
+    entry.operation = undefined;
+    operation.controller.abort();
+  }
+
   function start(entry, force = false) {
     if (destroyed || entry.activeSubscribers === 0) return;
-    if (!force && (entry.snapshot.status === "pending" || entry.agent !== undefined)) return;
-    const generation = ++entry.generation;
+    if (!force && (entry.operation !== undefined || entry.agent !== undefined)) return;
+    cancelGeneration(entry);
+    const operation = {
+      controller: new AbortController(),
+      generation: ++entry.generation,
+    };
+    entry.operation = operation;
+    const closing = retireAgent(entry);
     publish(entry, "pending", undefined, undefined);
-    void enqueue(entry, async () => {
-      const previous = entry.agent;
-      entry.agent = undefined;
+    try {
+      void Promise.resolve(runtime.prepare(entry.createOptions, {
+        signal: operation.controller.signal,
+      })).catch(() => {
+        // Agent.create reports an actionable error if warmup cannot be reused.
+      });
+    } catch {
+      // Agent.create reports an actionable error if warmup cannot be reused.
+    }
+    void runGeneration(entry, operation, closing);
+  }
+
+  async function runGeneration(entry, operation, closing) {
+    try {
       try {
-        await close(previous);
+        await closing;
       } catch (error) {
-        if (generation === entry.generation && entry.activeSubscribers > 0) {
-          publish(entry, "error", undefined, error);
-        }
+        if (isCurrent(entry, operation)) publish(entry, "error", undefined, error);
+        finishGeneration(entry, operation);
         return;
       }
-      if (generation !== entry.generation || entry.activeSubscribers === 0 || destroyed) return;
+      if (!isCurrent(entry, operation)) return;
 
       let candidate;
       for (let attempt = 0; attempt <= retry; attempt += 1) {
-        if (generation !== entry.generation || entry.activeSubscribers === 0 || destroyed) return;
+        if (!isCurrent(entry, operation)) return;
         try {
-          candidate = await runtime.create(entry.createOptions);
+          candidate = await runtime.create(entry.createOptions, {
+            signal: operation.controller.signal,
+          });
           break;
         } catch (error) {
-          if (generation !== entry.generation || entry.activeSubscribers === 0 || destroyed) return;
+          if (!isCurrent(entry, operation)) return;
           if (attempt === retry) {
             publish(entry, "error", undefined, error);
+            finishGeneration(entry, operation);
             return;
           }
           let delay;
           try {
             delay = nonNegativeNumber(retryDelay(attempt + 1, error), "retryDelay result");
           } catch (retryError) {
-            if (generation === entry.generation && entry.activeSubscribers > 0 && !destroyed) {
-              publish(entry, "error", undefined, retryError);
-            }
+            if (isCurrent(entry, operation)) publish(entry, "error", undefined, retryError);
+            finishGeneration(entry, operation);
             return;
           }
-          if (delay > 0) await wait(delay);
-          if (generation !== entry.generation || entry.activeSubscribers === 0 || destroyed) return;
+          if (delay > 0) {
+            try {
+              await wait(delay, operation.controller.signal);
+            } catch {
+              return;
+            }
+          }
         }
       }
       if (candidate === undefined) return;
-      if (generation !== entry.generation || entry.activeSubscribers === 0 || destroyed) {
+      if (!isCurrent(entry, operation)) {
         await close(candidate).catch(reportError);
         return;
       }
       entry.agent = candidate;
       publish(entry, "success", candidate, undefined);
-    });
-  }
-
-  function prepare(entry) {
-    if (entry.agent !== undefined || entry.preparation !== undefined) return;
-    entry.preparation = Promise.resolve().then(() => {
-      if (destroyed || entries.get(entry.key) !== entry) return;
-      return runtime.prepare(entry.createOptions);
-    }).catch(() => {
-      // Agent.create reports an actionable error if warmup cannot be reused.
-    });
+    } catch (error) {
+      if (isCurrent(entry, operation)) {
+        publish(entry, "error", undefined, error);
+        finishGeneration(entry, operation);
+      }
+    }
   }
 
   function release(entry) {
     queueMicrotask(() => {
       if (entry.activeSubscribers > 0 || destroyed) return;
-      const generation = ++entry.generation;
-      void enqueue(entry, async () => {
-        const current = entry.agent;
-        entry.agent = undefined;
-        await close(current).catch(reportError);
-        if (generation !== entry.generation || entry.activeSubscribers > 0) return;
-        publish(entry, "idle", undefined, undefined);
-        if (entry.listeners.size === 0) entries.delete(entry.key);
+      const closing = retireAgent(entry);
+      publish(entry, "idle", undefined, undefined);
+      void closing.catch(reportError).finally(() => {
+        if (
+          entries.get(entry.key) === entry
+          && entry.activeSubscribers === 0
+          && entry.listeners.size === 0
+        ) entries.delete(entry.key);
       });
     });
   }
@@ -162,7 +202,6 @@ export function createAgentConfig(options = {}, runtime) {
       entry.listeners.add(listener);
       const enabled = parameters.enabled !== false;
       if (enabled) {
-        prepare(entry);
         entry.activeSubscribers += 1;
         start(entry);
       }
@@ -177,7 +216,10 @@ export function createAgentConfig(options = {}, runtime) {
           return;
         }
         entry.activeSubscribers -= 1;
-        if (entry.activeSubscribers === 0) release(entry);
+        if (entry.activeSubscribers === 0) {
+          cancelGeneration(entry);
+          release(entry);
+        }
       };
     },
     refetchAgent(parameters = {}) {
@@ -190,7 +232,7 @@ export function createAgentConfig(options = {}, runtime) {
       destroyed = true;
       const closures = [];
       for (const entry of entries.values()) {
-        entry.generation += 1;
+        cancelGeneration(entry);
         entry.snapshot = IDLE_SNAPSHOT;
         const listeners = [...entry.listeners];
         entry.listeners.clear();
@@ -198,11 +240,7 @@ export function createAgentConfig(options = {}, runtime) {
         for (const listener of listeners) {
           try { listener(); } catch (error) { reportError(error); }
         }
-        closures.push(enqueue(entry, async () => {
-          const current = entry.agent;
-          entry.agent = undefined;
-          await close(current);
-        }));
+        closures.push(retireAgent(entry));
       }
       entries.clear();
       await Promise.all(closures);
@@ -238,6 +276,20 @@ function randomId() {
   return globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random()}`;
 }
 
-function wait(duration) {
-  return new Promise((resolve) => setTimeout(resolve, duration));
+function wait(duration, signal) {
+  signal.throwIfAborted();
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => settle(resolve), duration);
+    const onAbort = () => settle(reject, signal.reason);
+    signal.addEventListener("abort", onAbort, { once: true });
+
+    function settle(complete, value) {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal.removeEventListener("abort", onAbort);
+      complete(value);
+    }
+  });
 }

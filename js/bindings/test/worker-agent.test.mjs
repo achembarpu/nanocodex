@@ -341,6 +341,33 @@ test("Worker failures reject every pending operation and stale messages stay iso
   agent.dispose();
 });
 
+test("aborting a boot that never resolves terminates its Worker and permits replacement", { timeout: 2_000 }, async () => {
+  const controller = new AbortController();
+  const worker = new SilentWorker();
+  const pending = createWorkerAgent(
+    { sessionId: "hung", harness: false },
+    { signal: controller.signal, worker },
+  );
+  assert.equal(worker.incoming.at(-1).type, "boot");
+
+  controller.abort();
+  await assert.rejects(pending, { name: "AbortError" });
+  assert.equal(worker.terminated, 1);
+  assert.equal(worker.onmessage, null);
+  assert.equal(worker.onerror, null);
+  assert.equal(worker.onmessageerror, null);
+
+  const fixture = createFixture();
+  const replacementWorker = new LoopbackWorker(fixture.createAgent);
+  const replacement = await createWorkerAgent(
+    { sessionId: "replacement", harness: false },
+    { worker: replacementWorker },
+  );
+  assert.equal(replacement.sessionId, "replacement");
+  replacement.dispose();
+  assert.equal(replacementWorker.terminated, 1);
+});
+
 test("pending RPCs and structured-clone configuration fail closed at explicit bounds", async () => {
   await assert.rejects(
     createWorkerAgent({ tools: { custom: () => {} } }, { worker: () => { throw new Error("must not construct"); } }),
@@ -403,6 +430,44 @@ test("rebooting a runtime disposes the replaced Agent and suppresses stale compl
   assert.equal(outgoing.at(-1).channel, "new");
   runtime.dispose();
   assert.equal(created[1].fixture.disposedAgents.has("new"), true);
+});
+
+test("a stale boot rejection cannot dispose the ready replacement", async () => {
+  const first = deferred();
+  const replacement = createFixture();
+  const outgoing = [];
+  const scope = { onmessage: null, postMessage: (message) => outgoing.push(message) };
+  let attempts = 0;
+  const runtime = installWorkerAgentRuntime(scope, {
+    createAgent(options) {
+      attempts += 1;
+      return attempts === 1 ? first.promise : replacement.createAgent(options);
+    },
+  });
+  scope.onmessage({ data: {
+    protocol: "nanocodex.worker-agent.v1",
+    channel: "old",
+    type: "boot",
+    config: { sessionId: "old", harness: false },
+  } });
+  await tick();
+  scope.onmessage({ data: {
+    protocol: "nanocodex.worker-agent.v1",
+    channel: "new",
+    type: "boot",
+    config: { sessionId: "new", harness: false },
+  } });
+  await tick();
+  assert.equal(outgoing.at(-1).type, "ready");
+  assert.equal(outgoing.at(-1).channel, "new");
+
+  first.reject(new Error("late boot failure"));
+  await tick();
+  assert.equal(replacement.disposedAgents.has("new"), false);
+  assert.equal(outgoing.at(-1).type, "ready");
+
+  runtime.dispose();
+  assert.equal(replacement.disposedAgents.has("new"), true);
 });
 
 test("a historical fork completing across reboot disposes its stale child", async () => {
@@ -510,6 +575,54 @@ test("private Worker preparation replaces stale ownership and is claimed by Agen
   agent.dispose();
   assert.equal(claimed.terminated, 1);
 });
+
+test("preparation stays abort-owned until claim and leaves the next prewarm claimable", { timeout: 2_000 }, async () => {
+  const controller = new AbortController();
+  const silent = new SilentWorker();
+  const pending = prepareWorkerAgent(
+    { harness: false },
+    { signal: controller.signal, worker: silent },
+  );
+  assert.equal(silent.incoming.at(-1).type, "prewarm");
+
+  controller.abort();
+  await assert.rejects(pending, { name: "AbortError" });
+  assert.equal(silent.terminated, 1);
+  assert.equal(silent.onmessage, null);
+  assert.equal(silent.onerror, null);
+  assert.equal(silent.onmessageerror, null);
+
+  const readyController = new AbortController();
+  const readyFixture = createFixture();
+  const readyWorker = new LoopbackWorker(readyFixture.createAgent, { prewarmLocal() {} });
+  await prepareWorkerAgent(
+    { harness: false },
+    { signal: readyController.signal, worker: readyWorker },
+  );
+  assert.equal(readyWorker.terminated, 0);
+  readyController.abort();
+  assert.equal(readyWorker.terminated, 1);
+
+  const fixture = createFixture();
+  const replacementWorker = new LoopbackWorker(fixture.createAgent, { prewarmLocal() {} });
+  await prepareWorkerAgent({ harness: false }, { worker: replacementWorker });
+  const replacement = await createWorkerAgent({ harness: false });
+  replacement.dispose();
+  assert.equal(replacementWorker.terminated, 1);
+});
+
+class SilentWorker {
+  constructor() {
+    this.onmessage = null;
+    this.onerror = null;
+    this.onmessageerror = null;
+    this.incoming = [];
+    this.terminated = 0;
+  }
+
+  postMessage(data) { this.incoming.push(data); }
+  terminate() { this.terminated += 1; }
+}
 
 class LoopbackWorker {
   constructor(createAgent, runtimeOptions = {}) {
@@ -707,6 +820,16 @@ function cloneMessage(data, transfer) {
   return transfer?.length
     ? structuredClone(data, { transfer })
     : structuredClone(data);
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((next, fail) => {
+    resolve = next;
+    reject = fail;
+  });
+  return { promise, reject, resolve };
 }
 
 function tick() { return new Promise((resolve) => setImmediate(resolve)); }

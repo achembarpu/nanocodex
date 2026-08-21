@@ -13,6 +13,8 @@ export type WorkerAgentOptions = Readonly<{
   worker?: WorkerLike | (() => WorkerLike) | undefined;
   workerFactory?: (() => WorkerLike) | undefined;
   maxPendingRpcs?: number | undefined;
+  /** Cancels private Worker preparation or boot; it does not govern a ready Agent. */
+  signal?: AbortSignal | undefined;
 }>;
 
 /** Internal package seam used by browser/Agent.mjs to preserve Agent.create. */
