@@ -1,7 +1,6 @@
 import {
   createResponsesTransport,
   nonEmpty,
-  resolveResponsesTransport,
 } from "../runtime/responses-transport.mjs";
 import { defaultHostManagedWebSocketUrl } from "./hostManagedWebSocket.mjs";
 
@@ -43,8 +42,6 @@ export function mpp(options) {
     ...connection(options),
   });
 }
-
-export { resolveResponsesTransport as resolve };
 
 function connection(options = {}) {
   return {

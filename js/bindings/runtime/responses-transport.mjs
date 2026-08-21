@@ -1,17 +1,17 @@
-const RESPONSES_TRANSPORT = Symbol("nanocodex.responsesTransport");
+const responsesTransports = new WeakMap();
 
 export function createResponsesTransport(setup) {
-  return Object.freeze({
-    [RESPONSES_TRANSPORT]: () => setup,
-  });
+  const transport = Object.freeze({});
+  responsesTransports.set(transport, Object.freeze({ ...setup }));
+  return transport;
 }
 
 export function resolveResponsesTransport(transport) {
-  const resolve = transport?.[RESPONSES_TRANSPORT];
-  if (typeof resolve !== "function") {
+  const setup = responsesTransports.get(transport);
+  if (setup === undefined) {
     throw new TypeError("Agent.create requires a Responses transport");
   }
-  return resolve();
+  return setup;
 }
 
 export function nonEmpty(value, label) {

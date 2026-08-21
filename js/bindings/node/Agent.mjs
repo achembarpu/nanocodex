@@ -17,8 +17,8 @@ import {
   toWasmConfig,
 } from "../internal.mjs";
 import { createNodeHost } from "./host.mjs";
+import { resolveResponsesTransport } from "../runtime/responses-transport.mjs";
 import { resolveTools } from "../runtime/tool-configuration.mjs";
-import { resolve as resolveTransport } from "./Transport.mjs";
 
 let initializedWeb;
 let NodeNanocodex;
@@ -50,7 +50,7 @@ export function create(options = {}) {
     websocketUrl,
     apiBaseUrl,
     websocketWarmup,
-  } = resolveTransport(transport);
+  } = resolveResponsesTransport(transport);
   const { tools: hostTools, subagents: subagentConfig } = resolveTools(tools);
   const events = createEventChannel();
   if (filesystem && workspace !== undefined && workspace !== filesystem.root) {

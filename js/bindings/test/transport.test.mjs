@@ -12,29 +12,15 @@ test("Responses transports own authentication and connection setup", () => {
     websocketUrl: "wss://responses.test",
     websocketWarmup: true,
   });
-  assert.deepEqual(NodeTransport.resolve(openAi), {
-    apiKey: "sk-test",
-    apiBaseUrl: undefined,
-    websocketUrl: "wss://responses.test",
-    websocketWarmup: true,
-  });
   assert.equal(Object.isFrozen(openAi), true);
+  assert.deepEqual(Reflect.ownKeys(openAi), []);
+  assert.equal("resolve" in NodeTransport, false);
 
   const createWebSocket = () => ({ socket: {} });
-  assert.deepEqual(
-    BrowserTransport.resolve(BrowserTransport.hostManaged({ createWebSocket })),
-    {
-      WebSocketImpl: undefined,
-      apiBaseUrl: undefined,
-      createWebSocket,
-      hostAuth: true,
-      hostManagedProtocol: true,
-      websocketUrl: undefined,
-      websocketPreconnect: true,
-      websocketWarmup: undefined,
-    },
-  );
-  assert.throws(() => NodeTransport.resolve({}), /Responses transport/);
+  const hostManaged = BrowserTransport.hostManaged({ createWebSocket });
+  assert.equal(Object.isFrozen(hostManaged), true);
+  assert.deepEqual(Reflect.ownKeys(hostManaged), []);
+  assert.equal("resolve" in BrowserTransport, false);
   assert.throws(() => NodeTransport.openAi({ apiKey: " " }), /non-empty/);
 });
 

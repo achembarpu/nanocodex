@@ -7,6 +7,7 @@ import {
   getEncodedTurnUsage,
   reportError,
 } from "../internal.mjs";
+import { resolveResponsesTransport } from "../runtime/responses-transport.mjs";
 
 const DEFAULT_MAX_PENDING_RPCS = 1_024;
 const MAX_RETAINED_RESULTS = 1_024;
@@ -973,10 +974,12 @@ function serializeConfig(options) {
   const config = { ...options };
   const transport = options.transport;
   if (transport !== undefined) {
-    const symbols = Object.getOwnPropertySymbols(transport);
-    const resolver = symbols.map((symbol) => transport[symbol]).find((value) => typeof value === "function");
-    if (!resolver) throw new TypeError("Worker Agent requires a Nanocodex Responses transport");
-    const setup = resolver();
+    let setup;
+    try {
+      setup = resolveResponsesTransport(transport);
+    } catch {
+      throw new TypeError("Worker Agent requires a Nanocodex Responses transport");
+    }
     if (setup.subscription !== undefined || setup.mpp !== undefined) {
       throw new TypeError("Worker Agent does not support function-backed ChatGPT or MPP transports");
     }

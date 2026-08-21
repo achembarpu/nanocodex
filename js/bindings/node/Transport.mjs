@@ -1,7 +1,6 @@
 import {
   createResponsesTransport,
   nonEmpty,
-  resolveResponsesTransport,
 } from "../runtime/responses-transport.mjs";
 
 export function openAi(options) {
@@ -31,8 +30,6 @@ export function mpp(options) {
     ...endpoints(options),
   });
 }
-
-export { resolveResponsesTransport as resolve };
 
 function endpoints(options = {}) {
   return {

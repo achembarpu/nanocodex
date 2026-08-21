@@ -17,10 +17,10 @@ import {
 } from "../internal.mjs";
 import { createBrowserHost } from "./host.mjs";
 import { initializeBrowserEngine } from "./engine.mjs";
+import { resolveResponsesTransport } from "../runtime/responses-transport.mjs";
 import { resolveTools } from "../runtime/tool-configuration.mjs";
 import {
   hostManaged as defaultHostManagedTransport,
-  resolve as resolveTransport,
 } from "./Transport.mjs";
 
 /** Creates the Rust/WASM Agent in the current Web API host isolate. */
@@ -58,7 +58,7 @@ export async function create(options = {}) {
     websocketWarmup,
     WebSocketImpl,
     createWebSocket,
-  } = resolveTransport(transport ?? defaultHostManagedTransport());
+  } = resolveResponsesTransport(transport ?? defaultHostManagedTransport());
   const { tools: hostTools, subagents: subagentConfig } = resolveTools(tools);
   if (filesystem && workspace !== undefined && workspace !== filesystem.root) {
     throw new TypeError("workspace must match filesystem.root when both are provided");
