@@ -24,6 +24,7 @@
     "build": "tsc --noEmit && vite build && npm run check:docs && npm run check:bundle",
     "build:from-wasm": "tsc --noEmit && vite build && npm run check:docs && npm run check:bundle",
     "check:bundle": "node scripts/check-bundle.mjs",
+    "smoke:mcp": "node --experimental-strip-types scripts/smoke-mcp.mjs",
     "smoke:safari": "node scripts/safari-browser-smoke.mjs",
     "preview": "vite preview",
     "deploy": "npm run build && wrangler deploy"

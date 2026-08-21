@@ -2,7 +2,7 @@ export const DEFAULT_BROWSER_MCP_SERVERS = Object.freeze({
   openaiDeveloperDocs: {
     path: "/api/mcp/openai-developer-docs",
     description: "Search OpenAI developer documentation.",
-    enabledTools: ["fetch_openai_doc", "search_openai_docs"],
+    enabledTools: ["search_openai_docs"],
   },
   cloudflare: {
     path: "/api/mcp/cloudflare",
@@ -12,12 +12,12 @@ export const DEFAULT_BROWSER_MCP_SERVERS = Object.freeze({
   viem: {
     path: "/api/mcp/viem",
     description: "Search Viem developer documentation.",
-    enabledTools: ["list_pages", "read_page", "search_docs", "search_source"],
+    enabledTools: ["search_docs"],
   },
   vocs: {
     path: "/api/mcp/vocs",
     description: "Search Vocs developer documentation.",
-    enabledTools: ["list_pages", "read_page", "search_docs", "search_source"],
+    enabledTools: ["search_docs"],
   },
 });
 
