@@ -2,13 +2,14 @@ import { readFile } from "node:fs/promises";
 import { resolve } from "node:path";
 
 import {
-  createMemoryDurabilityStore,
-  durabilityRevision,
   type DefaultAgent,
   type DurabilityStoredJournal,
   type EventWatcher,
 } from "nanocodex";
-import { Transport } from "nanocodex/browser";
+import {
+  createMemoryDurabilityStore,
+  durabilityRevision,
+} from "nanocodex/durability";
 import { defineHook, getWorkflowMetadata, getWritable } from "workflow";
 
 import type {
@@ -101,7 +102,7 @@ export async function runNanocodexTurn(
   const durability = createMemoryDurabilityStore(sessionId, initialJournal);
 
   try {
-    const { Agent } = await import("nanocodex/browser");
+    const { Agent, Transport } = await import("nanocodex/host");
     const mode = modelAuthMode();
     const websocketUrl = process.env.OPENAI_WEBSOCKET_URL
       ?? (mode === "chatgpt" ? CHATGPT_WEBSOCKET_URL : undefined);

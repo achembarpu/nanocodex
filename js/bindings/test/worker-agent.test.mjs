@@ -155,7 +155,7 @@ test("rebooting a runtime disposes the replaced Agent and suppresses stale compl
   const outgoing = [];
   const scope = { onmessage: null, postMessage: (message) => outgoing.push(message) };
   const runtime = installWorkerAgentRuntime(scope, {
-    async createLocalAgent({ sessionId }) {
+    async createAgent({ sessionId }) {
       const fixture = createFixture();
       const agent = await fixture.createAgent({ sessionId });
       created.push({ agent, fixture });
@@ -219,7 +219,7 @@ test("private Worker preparation replaces stale ownership and is claimed by Agen
 });
 
 class LoopbackWorker {
-  constructor(createLocalAgent, runtimeOptions = {}) {
+  constructor(createAgent, runtimeOptions = {}) {
     this.onmessage = null;
     this.onerror = null;
     this.onmessageerror = null;
@@ -228,7 +228,7 @@ class LoopbackWorker {
       onmessage: null,
       postMessage: (data) => queueMicrotask(() => this.onmessage?.({ data })),
     };
-    this.runtime = installWorkerAgentRuntime(this.scope, { createLocalAgent, ...runtimeOptions });
+    this.runtime = installWorkerAgentRuntime(this.scope, { createAgent, ...runtimeOptions });
   }
 
   postMessage(data) { queueMicrotask(() => this.scope.onmessage?.({ data })); }

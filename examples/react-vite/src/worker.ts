@@ -1,4 +1,4 @@
-import { Agent, Transport } from "nanocodex/browser";
+import { Agent, Transport } from "nanocodex/host";
 
 import {
   createExampleAgentController,

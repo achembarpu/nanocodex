@@ -1,11 +1,14 @@
+export * as Actions from "../actions/index.mjs";
 export {
-  Actions,
   createMemoryDurabilityStore,
-  createMemoryChatGptSubscriptionStore,
   createSqliteDurabilityStore,
   durabilityRevision,
+  sqliteDurabilitySchema,
+} from "../runtime/durability-store.mjs";
+export {
+  createMemoryChatGptSubscriptionStore,
   subscriptionRevision,
-} from "../index.mjs";
+} from "../runtime/subscription-store.mjs";
 export { createQuickJsEvaluator } from "../runtime/quickjs-evaluator.mjs";
 export {
   createTempoProvider,
@@ -84,3 +87,7 @@ export {
   openHostManagedWebSocket,
   type HostManagedWebSocketOptions,
 } from "./hostManagedWebSocket.mjs";
+export type {
+  BrowserWebSocketConnection,
+  BrowserWebSocketRequest,
+} from "./host.mjs";

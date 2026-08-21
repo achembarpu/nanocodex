@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 import WebSocket, { WebSocketServer } from "ws";
 
-import { Agent, Transport } from "../browser/index.mjs";
+import { Agent, Transport } from "../host/index.mjs";
 
 const createWarmAgent = ({
   apiKey,
@@ -11,7 +11,7 @@ const createWarmAgent = ({
   WebSocketImpl,
   websocketUrl,
   ...options
-}) => Agent.createInline({
+}) => Agent.create({
   ...options,
   transport: Transport.openAi({
     apiKey,

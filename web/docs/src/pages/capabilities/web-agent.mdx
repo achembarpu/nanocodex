@@ -34,20 +34,13 @@ Rivet, exe.dev, or libkrun sandbox. A hosted sandbox remains useful when work
 needs arbitrary native Linux packages or stronger isolation.
 
 ```js
-import { Agent, Subagents, Transport } from "nanocodex/browser";
-import { browser } from "nanocodex/tools/browser";
+import { Agent, Transport } from "nanocodex/browser";
 
-const runtime = await browser({
-  threadId: "a7f9c210-5a3e-4b16-9d82-7b57cbb0845a",
-});
 const agent = await Agent.create({
+  threadId: "a7f9c210-5a3e-4b16-9d82-7b57cbb0845a",
   transport: Transport.hostManaged({
     websocketUrl: "/api/responses",
-    createWebSocket: (url) => new WebSocket(url),
   }),
-  filesystem: runtime.filesystem,
-  instructions: runtime.instructions,
-  tools: [...runtime.tools, ...Subagents.create()],
 });
 ```
 

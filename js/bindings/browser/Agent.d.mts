@@ -1,20 +1,11 @@
 import type {
   AgentOptions,
-  CodeEvaluator,
   DefaultAgent,
-  DurabilityStore,
   ExecutionEnvironment,
-  McpServers,
-  ToolConfiguration,
 } from "../types.mjs";
-import type { Transport, WorkerTransport } from "./Transport.mjs";
-import type { Tool as SubagentTool } from "../runtime/subagents.mjs";
-import type { Workspace } from "./workspace.mjs";
+import type { WorkerTransport } from "./Transport.mjs";
 
 export type Agent = DefaultAgent;
-type ToolExposureOptions =
-  | { mcp?: false | undefined; toolMode?: "code" | "direct" | undefined }
-  | { mcp: McpServers; toolMode?: "code" | undefined };
 
 type WorkerMcpServer = Readonly<{
   url?: string | URL | undefined;
@@ -47,33 +38,3 @@ export declare namespace create {
   };
   type ReturnType = Agent;
 }
-
-/** Advanced inline seam for function-valued tools and custom browser hosts. */
-export function createInline(options?: createInline.Options): Promise<createInline.ReturnType>;
-export declare namespace createInline {
-  type Options = AgentOptions & ToolExposureOptions & {
-    /** Caller-owned persistent filesystem mounted through standard workspace tools. */
-    filesystem?: Workspace | undefined;
-    /** Disable the legacy list/read/write workspace functions when a shell owns filesystem access. */
-    filesystemTools?: boolean | undefined;
-    module?: unknown;
-    /** Fixed browser workspace facts, including its AGENTS.md snapshot. */
-    executionEnvironment?: ExecutionEnvironment | undefined;
-    /** Optional CSP-compatible Code Mode evaluator, such as createQuickJsEvaluator(). */
-    codeEvaluator?: CodeEvaluator | undefined;
-    tools?: ToolConfiguration<SubagentTool> | undefined;
-    /** Defaults to the same-origin Nanocodex `/api/responses` proxy. */
-    transport?: Transport | undefined;
-    /** Stable OPFS/Git workspace identity for the default browser harness. */
-    threadId?: string | undefined;
-    /** Set false to omit the default OPFS, shell, web, image, plan, and artifact tools. */
-    harness?: false | undefined;
-  } & (
-    | { durability?: undefined; durabilityId?: undefined }
-    | { durability: DurabilityStore; durabilityId: string }
-  );
-  type ReturnType = Agent;
-}
-
-/** Internal package Worker seam. Prefer create() or createInline(). */
-export function createLocal(options?: createInline.Options): Promise<createInline.ReturnType>;

@@ -1,5 +1,5 @@
 export {
   createMemoryChatGptSubscriptionStore,
   subscriptionRevision,
-} from "../index.mjs";
+} from "../runtime/subscription-store.mjs";
 export * as ChatGptSubscription from "./ChatGptSubscription.mjs";

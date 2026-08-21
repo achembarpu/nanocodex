@@ -255,6 +255,7 @@ struct JavaScriptStoredBatch {
 enum JavaScriptAppendResult {
     Appended { revision: String },
     Conflict { actual_revision: String },
+    NotCommitted { message: String },
 }
 
 impl JournalStore for JavaScriptDurabilityStore {
@@ -315,6 +316,9 @@ impl JournalStore for JavaScriptDurabilityStore {
                     expected: expected_revision,
                     actual: parse_revision(&actual_revision)?,
                 }),
+                JavaScriptAppendResult::NotCommitted { message } => {
+                    Err(StoreError::NotCommitted(message))
+                }
             }
         })
     }

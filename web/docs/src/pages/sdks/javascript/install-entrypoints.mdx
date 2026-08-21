@@ -1,6 +1,6 @@
 ---
 title: Install TypeScript and JavaScript
-description: Choose the published Node or browser entrypoint and keep generated WASM internals private.
+description: Choose the published Node, package Worker, or Web API host entrypoint and keep generated WASM internals private.
 ---
 
 # Install TypeScript and JavaScript
@@ -22,13 +22,24 @@ import { Agent, Actions, Transport, Workspace } from "nanocodex/node";
 import { Agent, Subagents, Transport, Workspace } from "nanocodex/browser";
 ```
 
-Both entrypoints expose the same Rust-owned session behavior. Host-specific
-exports supply WebSocket and workspace adapters; generated wasm-bindgen handles
-remain package internals.
+`nanocodex/browser` owns a module Worker and accepts only structured-clone-safe
+configuration. For a caller-owned browser Worker, Cloudflare Worker, Vercel
+Function, or another Web API isolate with function-valued tools, sockets, or
+durability, import the current-isolate host:
+
+```js
+import { Agent, Subagents, Transport } from "nanocodex/host";
+import { createMemoryDurabilityStore } from "nanocodex/durability";
+```
+
+All three entrypoints expose the same Rust-owned session behavior and
+`Agent.create(...)` shape. Host-specific exports supply socket and workspace
+adapters; generated wasm-bindgen handles remain package internals.
 
 ## Know what is published
 
-The registry package contains the core root, Node, browser, and WASM entrypoints.
+The registry package contains the core root, Node, browser, host, durability,
+and WASM entrypoints.
 The intentionally narrow React Context/hooks and artifact companion packages
 currently ship from repository source. Pin a repository revision when adopting
 a source-distributed package so its bindings and generated WASM stay coherent.

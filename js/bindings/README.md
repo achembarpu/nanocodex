@@ -1,9 +1,9 @@
 # Nanocodex for JavaScript
 
-The Node and browser entrypoints expose the same viem-v3-style API over the
-same Rust/WASM agent. A required Responses `Transport` owns authentication and
-socket setup; `Agent.create(...)` owns agent policy, tools, and lifecycle.
-Generated WASM handles and host routing remain private.
+The Node, browser, and Web API host entrypoints expose the same viem-v3-style
+API over the same Rust/WASM agent. A required Responses `Transport` owns
+authentication and socket setup; `Agent.create(...)` owns agent policy, tools,
+and lifecycle. Generated WASM handles and host routing remain private.
 
 ```js
 import { Actions, Agent, Transport } from "nanocodex/node";
@@ -51,7 +51,16 @@ Transport.chatGpt({ subscription });
 Transport.mpp({ session: paymentSession });
 ```
 
-The browser entrypoint additionally exposes `Transport.hostManaged(...)` for a
+Choose the entrypoint by execution owner:
+
+- `nanocodex/browser` creates and owns a package module Worker. Its options are
+  structured-clone-safe and its default harness includes the browser workspace.
+- `nanocodex/host` runs in the current Web API isolate. Use it inside a
+  caller-owned browser Worker, Cloudflare Worker, Vercel Function, or similar
+  host when transports, tools, filesystems, or durability contain functions.
+- `nanocodex/node` runs in the current Node process with Node host adapters.
+
+The browser transports additionally expose `Transport.hostManaged(...)` for a
 Worker, Durable Object, or application proxy that owns rotating credentials.
 Authentication modes are constructors rather than a union of mutually
 exclusive fields on `Agent.create`.
@@ -61,8 +70,11 @@ native and WASM consumers run the same Rust implementation and receive the
 same seven tools: `spawn_agent`, `submit_result`, `send_agent_message`,
 `list_agents`, `wait_agent`, `interrupt_agent`, and `close_agent`.
 
+Inside a caller-owned Worker or server isolate, host capabilities stay as
+ordinary functions without crossing another compatibility protocol:
+
 ```js
-import { Agent, Subagents, Transport } from "nanocodex/browser";
+import { Agent, Subagents, Transport } from "nanocodex/host";
 import nanocodexWasm from "./nanocodex.wasm";
 
 const myApplicationTool = {
@@ -101,7 +113,7 @@ runtime. Each factory returns an entry that can sit beside application tools
 and Rust/WASM extensions in the same array:
 
 ```js
-import { Agent, Subagents, Transport } from "nanocodex/browser";
+import { Agent, Subagents, Transport } from "nanocodex/host";
 import {
   dataset,
   imageGeneration,
@@ -182,7 +194,7 @@ if (page.nextCursor) {
 This same adapter works inside a Cloudflare Worker or Durable Object:
 
 ```js
-import { Agent, Subagents, Transport } from "nanocodex/browser";
+import { Agent, Subagents, Transport } from "nanocodex/host";
 import { web } from "nanocodex/tools";
 
 const agent = await Agent.create({
@@ -202,11 +214,12 @@ const agent = await Agent.create({
 });
 ```
 
-For a browser Agent Worker, `browser(...)` composes the same tools with one
-persistent OPFS workspace and a lazy WASM-backed shell (Python through Pyodide,
-C/C++ through wasm-clang, plus browser Git and bounded commands):
+For a caller-owned browser Worker, `browser(...)` composes the same tools with
+one persistent OPFS workspace and a lazy WASM-backed shell (Python through
+Pyodide, C/C++ through wasm-clang, plus browser Git and bounded commands):
 
 ```js
+import { Agent, Subagents } from "nanocodex/host";
 import { browser } from "nanocodex/tools/browser";
 
 const runtime = await browser({
@@ -320,7 +333,8 @@ adapter roots the same operations in an ordinary directory and refuses path
 traversal and symbolic-link escapes.
 
 ```js
-import { Agent, Transport, Workspace } from "nanocodex/browser";
+import { Workspace } from "nanocodex/browser/workspace";
+import { Agent, Transport } from "nanocodex/host";
 
 const workspace = await Workspace.open({ name: "my-notebook" });
 const agent = await Agent.create({
@@ -501,7 +515,7 @@ keeps deferred MCP plus Code Mode functional in Cloudflare Workers:
 
 ```js
 import asyncVariant from "@jitl/quickjs-wasmfile-release-asyncify";
-import { Agent, createQuickJsEvaluator, createTempoProvider, Transport } from "nanocodex/browser";
+import { Agent, createQuickJsEvaluator, createTempoProvider, Transport } from "nanocodex/host";
 import { newQuickJSAsyncWASMModuleFromVariant } from "quickjs-emscripten-core";
 
 const quickJs = await newQuickJSAsyncWASMModuleFromVariant(asyncVariant);
@@ -542,8 +556,10 @@ model replay, tool ambiguity, operation deduplication, and checkpoint recovery
 remain in Rust/WASM:
 
 ```js
+import { Agent, Transport } from "nanocodex/host";
+
 const agent = await Agent.create({
-  apiKey: process.env.OPENAI_API_KEY,
+  transport: Transport.openAi({ apiKey: process.env.OPENAI_API_KEY }),
   durability: {
     async load(journalId) {
       return database.loadJournal(journalId);
@@ -552,6 +568,7 @@ const agent = await Agent.create({
       return database.compareAndAppend(journalId, expectedRevision, payload);
       // { status: "appended", revision: "8" }
       // or { status: "conflict", actualRevision: "8" }
+      // or { status: "not_committed", message: "transaction rolled back" }
     },
   },
   durabilityId: "customer-agent-123",
@@ -565,13 +582,12 @@ console.log((await turn.result()).finalMessage);
 ```
 
 Revisions are unsigned decimal strings so JavaScript preserves Rust's full
-`u64` range. TypeScript exposes them as a nominal `DurabilityRevision`; use the
-exported `durabilityRevision(value)` validator when converting database text or
-incremented `bigint`s. Durable step hosts can use
-`createMemoryDurabilityStore(journalId, priorSnapshot)` and carry its
-`snapshot()` into the next step. SQLite hosts can use
-`createSqliteDurabilityStore({ transaction })`; the transaction's query adapter
-is the only platform-specific code. See `examples/cloudflare-workers`,
+`u64` range. Import `durabilityRevision`, `createMemoryDurabilityStore`,
+`createSqliteDurabilityStore`, and `sqliteDurabilitySchema` from the small
+`nanocodex/durability` leaf. Durable step hosts can carry the memory store's
+`snapshot()` into the next step. SQLite hosts provide one transaction query
+adapter and execute the canonical schema; the platform never interprets the
+opaque Rust journal. See `examples/cloudflare-workers`,
 `examples/vercel-workflows`, and `examples/rivet-actors` for all three host
 shapes.
 
@@ -657,7 +673,8 @@ const extended = agent.extend((client) => ({
 extended.inspect.session();
 ```
 
-Browser Workers use the identical shape:
+The package-owned browser Worker accepts the same transport policy without
+function-valued callbacks:
 
 ```js
 import { Agent, Transport } from "nanocodex/browser";
@@ -665,26 +682,23 @@ import { Agent, Transport } from "nanocodex/browser";
 const agent = await Agent.create({
   transport: Transport.hostManaged({
     websocketUrl: signedOrCookieAuthorizedEndpoint,
-    createWebSocket(endpoint, sessionId) {
-      const url = new URL(endpoint);
-      url.searchParams.set("session_id", sessionId);
-      return new WebSocket(url);
-    },
   }),
-  tools,
+  threadId,
 });
 ```
 
-Server-side Worker runtimes can await a `fetch()`-based WebSocket upgrade. The
-third callback argument is a discriminated authorization request plus connection
-metadata. With `Transport.openAi`, `authorization` is `"bearer"` and
-`bearerToken` is present. With `Transport.hostManaged`, it is `"host_managed"`;
-the host must resolve
-credentials without exposing them to WASM. Do not retain or log bearer tokens.
-Return the socket alone or a descriptor containing response metadata:
+Caller-owned browser Workers and server isolates import `nanocodex/host` when
+they need function-valued tools or socket construction. Server-side runtimes
+can await a `fetch()`-based WebSocket upgrade. The third callback argument is a
+discriminated authorization request plus connection metadata, including the
+eager `preconnect` request. With `Transport.openAi`, `authorization` is
+`"bearer"` and `bearerToken` is present. With `Transport.hostManaged`, it is
+`"host_managed"`; the host must resolve credentials without exposing them to
+WASM. Do not retain or log bearer tokens. Return the socket alone or a
+descriptor containing response metadata:
 
 ```js
-import { Agent, Transport } from "nanocodex/browser";
+import { Agent, Transport } from "nanocodex/host";
 import module from "nanocodex/wasm";
 
 const agent = await Agent.create({
@@ -716,12 +730,12 @@ on 401. Bound and reject upgrade work in the callback: until it returns a
 socket, there is no connection handle for Nanocodex to close. Selecting one
 transport makes authentication modes mutually exclusive by construction.
 
-After publication, a browser can load the same entrypoint without a package
-manager or build step:
+After publication, a browser can load the current-isolate host without a
+package manager or build step:
 
 ```html
 <script type="module">
-  import { Agent, Transport } from "https://cdn.jsdelivr.net/npm/nanocodex@0.5.0/browser/index.mjs";
+  import { Agent, Transport } from "https://cdn.jsdelivr.net/npm/nanocodex@0.5.0/host/index.mjs";
   const agent = await Agent.create({
     transport: Transport.hostManaged({
       websocketUrl: "/api/responses",
@@ -740,9 +754,11 @@ manager or build step:
 ```
 
 Pin the package version in production. The adjacent WASM file is part of the
-npm package and is resolved relative to the browser module. The endpoint must
-be authorized by the embedding application because browser WebSockets cannot
-attach OpenAI's upgrade authorization header.
+npm package and is resolved relative to the host module. This no-build path
+runs in the current page isolate; bundled applications should prefer the
+package-owned Worker from `nanocodex/browser`. The endpoint must be authorized
+by the embedding application because browser WebSockets cannot attach OpenAI's
+upgrade authorization header.
 
 The owned Rust session retains follow-on history, response state, tool output,
 its WebSocket, and stable prompt-cache identity. Typed browser content accepts

@@ -5,48 +5,34 @@ description: Run the Rust agent in a Worker with persistent OPFS, browser tools,
 
 # Browser Worker and workspace
 
-Create the agent inside a module Worker so model turns, WASM, and browser tools
-stay off the page thread. Open one stable OPFS workspace name for each durable
-application thread.
+Let the browser entrypoint create a module Worker so model turns, WASM, and
+browser tools stay off the page thread. Give it one stable UUID for each
+durable application thread.
 
 ```js
-import { Agent, Subagents, Transport } from "nanocodex/browser";
-import { browser } from "nanocodex/tools/browser";
-
-const runtime = await browser({
-  threadId: "a7f9c210-5a3e-4b16-9d82-7b57cbb0845a",
-  recentImages,
-  rememberImage,
-});
+import { Agent, Transport } from "nanocodex/browser";
 
 const agent = await Agent.create({
+  threadId: "a7f9c210-5a3e-4b16-9d82-7b57cbb0845a",
   transport: Transport.hostManaged({
     websocketUrl: "/api/responses",
-    createWebSocket: (endpoint) => new WebSocket(endpoint),
   }),
-  filesystem: runtime.filesystem,
-  instructions: runtime.instructions,
-  executionEnvironment: {
-    currentDate: "2026-08-20",
-    timezone: "America/Los_Angeles",
-    projectInstructions: runtime.projectInstructions,
-  },
-  tools: [...runtime.tools, ...Subagents.create({ maxConcurrency: 8 })],
 });
 ```
 
-`browser(...)` composes persistent OPFS, a lazy WASM-backed shell, browser Git,
-bounded workspace commands, web and image tools, datasets, and React artifacts.
-The shell loads Python or C/C++-to-WASI support only when a tool first needs it.
-`threadId` must be a UUID. Persist one UUID per application thread and reuse it
-after page or Worker restart.
+Inside that package Worker, the default harness composes persistent OPFS, a
+lazy WASM-backed shell, browser Git, bounded workspace commands, web and image
+tools, datasets, and React artifacts. The shell loads Python or C/C++-to-WASI
+support only when a tool first needs it. Persist the UUID and reuse it after a
+page or Worker restart.
 
 ## Share one workspace contract
 
-The returned filesystem remains application-owned. A file browser, editor,
-upload/download flow, Git view, and agent can use the same files without copying
-them into conversation state. Reopening the stable name after a Worker, page, or
-agent restart reuses the OPFS contents.
+The filesystem remains application-owned. A file browser, editor,
+upload/download flow, Git view, and agent can use the same files without
+copying them into conversation state. `openThreadWorkspace(threadId)` from
+`nanocodex/tools/browser` opens the exact workspace used by the package Worker;
+reopening it after a Worker, page, or agent restart reuses the OPFS contents.
 
 OPFS and in-browser command execution are browser capabilities, not a security
 sandbox for untrusted generated code. Use remote caller-defined tools, a hosted
@@ -55,10 +41,11 @@ isolation or native system behavior.
 
 ## Keep server isolates smaller
 
-`browser(...)` requires browser Worker capabilities. In a server-side Cloudflare
-Worker, compose individual tool factories such as `web`, `dataset`, `artifact`,
-and application tools instead. The same Rust/WASM agent lifecycle runs in both
-hosts; only the surrounding capabilities differ.
+The default browser harness requires browser Worker capabilities. In a
+server-side Cloudflare Worker, import `nanocodex/host` and compose individual
+tool factories such as `web`, `dataset`, `artifact`, and application tools
+instead. The same Rust/WASM agent lifecycle runs in both hosts; only the
+surrounding capabilities differ.
 
 Inspect the [production web agent](/capabilities/web-agent) and
 [React/Vite example](https://github.com/gakonst/nanocodex/tree/master/examples/react-vite)

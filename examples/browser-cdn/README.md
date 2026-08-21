@@ -1,8 +1,10 @@
 # Browser CDN PoC
 
-This page runs the Rust/WASM agent directly from the published npm package. It
-has no package manifest, dependency installation, bundler, or framework. Any
-static host, including a PHP application, can serve `index.html` unchanged.
+This page runs the Rust/WASM agent in the page's Web API isolate directly from
+the published npm package. It has no package manifest, dependency installation,
+bundler, or framework. Any static host, including a PHP application, can serve
+`index.html` unchanged. Bundled applications should use `nanocodex/browser` to
+keep the same work in the package-owned module Worker.
 
 The page expects an application-authorized Responses WebSocket at
 `/api/responses`. Browser WebSockets cannot attach OpenAI's authorization

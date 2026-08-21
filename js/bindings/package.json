@@ -39,6 +39,14 @@
       "types": "./browser/realtimePrompt.d.mts",
       "import": "./browser/realtimePrompt.mjs"
     },
+    "./host": {
+      "types": "./host/index.d.mts",
+      "import": "./host/index.mjs"
+    },
+    "./durability": {
+      "types": "./runtime/durability-store.d.mts",
+      "import": "./runtime/durability-store.mjs"
+    },
     "./subagents": {
       "types": "./runtime/subagents.d.mts",
       "import": "./runtime/subagents.mjs"
@@ -75,6 +83,7 @@
   "files": [
     "actions",
     "browser",
+    "host",
     "node",
     "worker",
     "pkg-node",

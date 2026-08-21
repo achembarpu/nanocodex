@@ -65,13 +65,17 @@ test("the packed package installs and runs every public entry point", async () =
       import { dirname, resolve } from "node:path";
       import { fileURLToPath } from "node:url";
       import { Actions } from "nanocodex";
+      import { createMemoryDurabilityStore, durabilityRevision } from "nanocodex/durability";
+      import { Agent as HostAgent, Transport as HostTransport } from "nanocodex/host";
       import { dataset as aggregateDataset, web } from "nanocodex/tools";
       import { dataset } from "nanocodex/tools/dataset";
       import { nanocodexTools } from "nanocodex/tools/vite";
       import { Agent as NodeAgent, Subagents as NodeSubagents, Transport as NodeTransport, Workspace as NodeWorkspace } from "nanocodex/node";
-      import { Agent as BrowserAgent, Subagents as BrowserSubagents, Transport as BrowserTransport, Workspace as BrowserWorkspace } from "nanocodex/browser";
+      import { Subagents as BrowserSubagents, Workspace as BrowserWorkspace } from "nanocodex/browser";
 
       assert.equal(typeof Actions.turn.prompt, "function");
+      assert.equal(durabilityRevision(1n), "1");
+      assert.equal(createMemoryDurabilityStore("package-journal").journalId, "package-journal");
       assert.equal(typeof NodeWorkspace.open, "function");
       assert.equal(typeof BrowserWorkspace.open, "function");
       assert.equal(web({ url: "https://example.test/tools/web" }).name, "web__run");
@@ -114,8 +118,8 @@ test("the packed package installs and runs every public entry point", async () =
         dirname(browserEntry),
         "../pkg-web/nanocodex_bg.wasm",
       ));
-      const browserAgent = await BrowserAgent.createLocal({
-        transport: BrowserTransport.openAi({
+      const browserAgent = await HostAgent.create({
+        transport: HostTransport.openAi({
           apiKey: "package-test",
           WebSocketImpl: class {},
         }),

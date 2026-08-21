@@ -1,15 +1,8 @@
 import WebSocket from "ws";
+import type { BrowserWebSocketRequest } from "nanocodex/host";
 
 const OPENAI_WEBSOCKET_BETA = "responses_websockets=2026-02-06";
 const MAX_ERROR_BODY_BYTES = 4 * 1024;
-
-export type BrowserAuthRequest = {
-  accountId?: string | undefined;
-  authorization: "bearer" | "host_managed";
-  bearerToken?: string | undefined;
-  fedramp?: boolean | undefined;
-  turnState?: string | undefined;
-};
 
 type SocketDescriptor = {
   socket: globalThis.WebSocket;
@@ -23,7 +16,7 @@ type SocketDescriptor = {
 export async function openApiKeyWebSocket(
   endpoint: string,
   sessionId: string,
-  request: BrowserAuthRequest,
+  request: BrowserWebSocketRequest,
 ): Promise<SocketDescriptor> {
   if (request.authorization !== "bearer" || !request.bearerToken) {
     throw new Error("the API-key WebSocket requires bearer authorization");
@@ -39,9 +32,9 @@ export async function openApiKeyWebSocket(
 export async function openSubscriptionWebSocket(
   endpoint: string,
   sessionId: string,
-  request: BrowserAuthRequest,
+  request: BrowserWebSocketRequest,
 ): Promise<SocketDescriptor> {
-  if (request.authorization !== "host_managed") {
+  if (request.authorization !== "host_managed" && request.authorization !== "preconnect") {
     throw new Error("the ChatGPT WebSocket requires host-managed authorization");
   }
   return upgrade(endpoint, sessionId, {

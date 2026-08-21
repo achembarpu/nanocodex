@@ -20,7 +20,7 @@
     <output id="result">Ready.</output>
 
     <script type="module">
-      import { Agent } from "https://cdn.jsdelivr.net/npm/nanocodex@0.5.0/browser/index.mjs";
+      import { Agent, Transport } from "https://cdn.jsdelivr.net/npm/nanocodex@0.5.0/host/index.mjs";
 
       const form = document.querySelector("#prompt-form");
       const prompt = document.querySelector("#prompt");
@@ -33,7 +33,6 @@
       form.addEventListener("submit", async (event) => {
         event.preventDefault();
         const input = prompt.value;
-        result.textContent = "Running…";
         try {
           const current = await getAgent();
           const turn = current.turn.prompt({ input });
@@ -64,12 +63,14 @@
         if (!agentPromise) {
           const pending = Promise.resolve()
             .then(() => Agent.create({
-              websocketUrl: websocketEndpoint(),
-              createWebSocket(endpoint, sessionId) {
-                const url = new URL(endpoint);
-                url.searchParams.set("session_id", sessionId);
-                return new WebSocket(url);
-              },
+              transport: Transport.hostManaged({
+                websocketUrl: websocketEndpoint(),
+                createWebSocket(endpoint, sessionId) {
+                  const url = new URL(endpoint);
+                  url.searchParams.set("session_id", sessionId);
+                  return new WebSocket(url);
+                },
+              }),
             }))
             .then(async (created) => {
               if (closing) {

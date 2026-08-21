@@ -72,7 +72,13 @@ export async function append(journalId, expectedRevision, payload) {
       actual_revision: revision(result.actualRevision, "durability conflict revision"),
     });
   }
-  throw new TypeError("durability.append() must return an appended or conflict result");
+  if (result?.status === "not_committed") {
+    return JSON.stringify({
+      status: "not_committed",
+      message: requiredString(result.message, "durability not-committed message"),
+    });
+  }
+  throw new TypeError("durability.append() must return an appended, conflict, or not_committed result");
 }
 
 function requiredStore(journalId) {

@@ -1,7 +1,7 @@
 export {
   createMemoryChatGptSubscriptionStore,
   subscriptionRevision,
-} from "../index.mjs";
+} from "../runtime/subscription-store.mjs";
 export type {
   ChatGptCredential,
   ChatGptCredentialSeed,

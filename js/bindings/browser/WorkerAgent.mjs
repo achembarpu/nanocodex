@@ -97,7 +97,7 @@ export function installWorkerAgentRuntime(scope = globalThis, options = {}) {
   if (!scope || typeof scope.postMessage !== "function") {
     throw new TypeError("the Worker Agent runtime requires a Worker-like scope");
   }
-  const createLocalAgent = options.createLocalAgent ?? loadLocalAgent;
+  const createAgent = options.createAgent ?? loadAgent;
   const prewarmLocal = options.prewarmLocal ?? prewarmLocalRuntime;
   let generation = 0;
   let channel;
@@ -136,7 +136,7 @@ export function installWorkerAgentRuntime(scope = globalThis, options = {}) {
     channel = message.channel;
     nextAgent = 1;
     try {
-      const agent = await createLocalAgent(await hydrateConfig(message.config));
+      const agent = await createAgent(await hydrateConfig(message.config));
       if (currentGeneration !== generation) {
         agent.dispose();
         return;
@@ -569,12 +569,12 @@ async function hydrateConfig(config) {
   return options;
 }
 
-async function loadLocalAgent(options) {
-  const Agent = await import("./Agent.mjs");
-  if (typeof Agent.createLocal !== "function") {
-    throw new Error("browser/Agent.mjs must expose createLocal(options) for the package Worker entry");
+async function loadAgent(options) {
+  const Agent = await import("./InlineAgent.mjs");
+  if (typeof Agent.create !== "function") {
+    throw new Error("browser/InlineAgent.mjs must expose create(options) for the package Worker entry");
   }
-  return Agent.createLocal(options);
+  return Agent.create(options);
 }
 
 async function prewarmLocalRuntime(harness) {

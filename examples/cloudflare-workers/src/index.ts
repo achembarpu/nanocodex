@@ -11,8 +11,14 @@ import type {
   Turn,
   TurnResult,
 } from "nanocodex";
-import { createSqliteDurabilityStore } from "nanocodex";
-import { Agent, Subagents, Transport } from "nanocodex/browser";
+import {
+  Agent,
+  createSqliteDurabilityStore,
+  sqliteDurabilitySchema,
+  Subagents,
+  Transport,
+  type BrowserWebSocketRequest,
+} from "nanocodex/host";
 import { web } from "nanocodex/tools";
 import nanocodexWasm from "./nanocodex.wasm";
 import {
@@ -82,14 +88,6 @@ type SessionStatusRow = {
   has_snapshot: number;
   completed_turns: number;
   last_active: number;
-};
-
-type BrowserAuthRequest = {
-  accountId?: string;
-  authorization: "bearer" | "host_managed";
-  bearerToken?: string;
-  fedramp?: boolean;
-  turnState?: string;
 };
 
 type ModelAuthMode = "api_key" | "chatgpt";
@@ -254,21 +252,12 @@ export class NanocodexSession extends DurableObject<Env> {
         completed_turns INTEGER NOT NULL DEFAULT 0,
         last_active INTEGER NOT NULL
       );
-      CREATE TABLE IF NOT EXISTS durability_journals (
-        journal_id TEXT PRIMARY KEY,
-        revision TEXT NOT NULL
-      );
-      CREATE TABLE IF NOT EXISTS durability_batches (
-        journal_id TEXT NOT NULL,
-        revision TEXT NOT NULL,
-        payload TEXT NOT NULL,
-        PRIMARY KEY (journal_id, revision)
-      );
       CREATE TABLE IF NOT EXISTS completed_operations (
         id TEXT PRIMARY KEY,
         completed_at INTEGER NOT NULL
       );
     `);
+    for (const statement of sqliteDurabilitySchema) this.ctx.storage.sql.exec(statement);
     const sessionColumns = this.ctx.storage.sql.exec<{ name: string }>(
       "PRAGMA table_info(session_state)",
     ).toArray();
@@ -342,8 +331,8 @@ export class NanocodexSession extends DurableObject<Env> {
       await this.#stop();
       for (const socket of this.ctx.getWebSockets()) closeSocket(socket, 1000, "session deleted");
       this.ctx.storage.transactionSync(() => {
-        this.ctx.storage.sql.exec("DELETE FROM durability_batches");
-        this.ctx.storage.sql.exec("DELETE FROM durability_journals");
+        this.ctx.storage.sql.exec("DELETE FROM nanocodex_journal_batches");
+        this.ctx.storage.sql.exec("DELETE FROM nanocodex_journals");
         this.ctx.storage.sql.exec("DELETE FROM completed_operations");
         this.ctx.storage.sql.exec("DELETE FROM session_state");
       });
@@ -709,7 +698,7 @@ function cloudflareWebTools(env: Env) {
 async function openAiWebSocket(
   endpoint: string,
   sessionId: string,
-  request: BrowserAuthRequest,
+  request: BrowserWebSocketRequest,
 ) {
   if (request.authorization !== "bearer" || !request.bearerToken) {
     throw new Error("the API-key WebSocket requires bearer authorization");
@@ -726,9 +715,9 @@ async function openSubscriptionWebSocket(
   auth: DurableObjectStub<NanocodexSubscriptionAuth>,
   endpoint: string,
   sessionId: string,
-  request: BrowserAuthRequest,
+  request: BrowserWebSocketRequest,
 ) {
-  if (request.authorization !== "host_managed") {
+  if (request.authorization !== "host_managed" && request.authorization !== "preconnect") {
     throw new Error("the ChatGPT WebSocket requires host-managed authorization");
   }
   let snapshot = await subscriptionSnapshot(auth, "/snapshot");

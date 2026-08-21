@@ -8,7 +8,7 @@ import {
   type ChatGptSubscriptionStore,
   type SubscriptionCommitRequest,
   type SubscriptionStoredValue,
-} from "nanocodex/browser";
+} from "nanocodex/worker";
 
 import nanocodexWasm from "./nanocodex.wasm";
 

@@ -24,8 +24,8 @@ client -> Worker router -> NanocodexSession Durable Object
 npm install nanocodex
 ```
 
-Import the browser/server-isolate entrypoint inside your Durable Object and
-give that object exclusive ownership of one live agent. The concrete
+Import `nanocodex/host` inside your Durable Object and give that object
+exclusive ownership of one live agent. The concrete
 [Cloudflare reference consumer](https://github.com/gakonst/nanocodex/tree/master/examples/cloudflare-workers)
 shows the SQLite host store, Sandbox tools, R2 workspace, client routing, and
 API-key or ChatGPT credential owners. It is reference application code, not a
@@ -40,6 +40,8 @@ Rust/WASM owns operation deduplication, checkpoint reconstruction, committed
 step-output replay, and ambiguous unsafe-tool classification.
 
 ```ts
+import { Agent, Subagents } from "nanocodex/host";
+
 const agent = await Agent.create({
   transport,
   module: nanocodexWasm,

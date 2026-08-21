@@ -20,6 +20,12 @@ import {
   Transport as BrowserTransport,
   Workspace as BrowserWorkspace,
 } from "../browser/index.mjs";
+import {
+  Agent as HostAgent,
+  createMemoryDurabilityStore,
+  type BrowserWebSocketRequest,
+  Transport as HostTransport,
+} from "../host/index.mjs";
 import type { WorkspaceEntry as BrowserWorkspaceEntry } from "../browser/workspace.mjs";
 import type { WorkspaceEntry as NodeWorkspaceEntry } from "../node/workspace.mjs";
 import {
@@ -131,10 +137,10 @@ async function check() {
   await agent.session.shutdown();
   await Actions.session.shutdown(agent);
 
-  // @ts-expect-error function-backed transports require the explicit inline host.
+  // @ts-expect-error function-backed transports require the current-isolate host.
   await BrowserAgent.create({ transport: BrowserTransport.hostManaged({ createWebSocket: () => ({} as WebSocket) }) });
-  await BrowserAgent.createInline({
-    transport: BrowserTransport.hostManaged({
+  await HostAgent.create({
+    transport: HostTransport.hostManaged({
       websocketUrl: "wss://example.com",
       createWebSocket: () => ({} as WebSocket),
     }),
@@ -142,9 +148,23 @@ async function check() {
   const workerTransport: BrowserTransport.WorkerTransport = BrowserTransport.hostManaged({
     websocketUrl: "wss://example.com/api/responses",
   });
+  const durability = createMemoryDurabilityStore("journal-1");
+  await HostAgent.create({
+    transport: HostTransport.openAi({ apiKey }),
+    durability,
+    durabilityId: "journal-1",
+  });
+  // @ts-expect-error durability and durabilityId are one required pair.
+  await HostAgent.create({ transport: HostTransport.openAi({ apiKey }), durability });
+  // @ts-expect-error durability and durabilityId are one required pair.
+  await HostAgent.create({ transport: HostTransport.openAi({ apiKey }), durabilityId: "journal-1" });
+  // @ts-expect-error a function-valued durability store cannot cross the package Worker boundary.
+  await BrowserAgent.create({ transport: workerTransport, durability, durabilityId: "journal-1" });
+  const socketRequest = {} as BrowserWebSocketRequest;
+  if (socketRequest.authorization === "preconnect") socketRequest.turnState;
   await BrowserAgent.create({ transport: workerTransport });
-  await BrowserAgent.createInline({
-    transport: BrowserTransport.openAi({ apiKey }),
+  await HostAgent.create({
+    transport: HostTransport.openAi({ apiKey }),
     filesystem: browserWorkspace,
     tools: [
       web({ url: "https://example.com/tools/web" }),
@@ -168,8 +188,8 @@ async function check() {
     recentImages: () => [],
     rememberImage: () => {},
   });
-  await BrowserAgent.createInline({
-    transport: BrowserTransport.openAi({ apiKey }),
+  await HostAgent.create({
+    transport: HostTransport.openAi({ apiKey }),
     filesystem: browserRuntime.filesystem,
     instructions: browserRuntime.instructions,
     tools: [...browserRuntime.tools, ...BrowserSubagents.create()],
@@ -179,12 +199,12 @@ async function check() {
   await Agent.create({ transport: Transport.openAi({ apiKey }), tools: [{ maxConcurrency: 8 }] });
   // @ts-expect-error function-backed MPP transports cannot cross the package Worker boundary.
   await BrowserAgent.create({ transport: BrowserTransport.mpp({ session: { async ws() { return {} as WebSocket; } } }) });
-  await BrowserAgent.createInline({
-    transport: BrowserTransport.mpp({ session: { async ws() { return {} as WebSocket; } } }),
+  await HostAgent.create({
+    transport: HostTransport.mpp({ session: { async ws() { return {} as WebSocket; } } }),
   });
   // @ts-expect-error subscription handles cannot cross the package Worker boundary.
   await BrowserAgent.create({ transport: BrowserTransport.chatGpt({ subscription }) });
-  await BrowserAgent.createInline({ transport: BrowserTransport.chatGpt({ subscription }) });
+  await HostAgent.create({ transport: HostTransport.chatGpt({ subscription }) });
   // @ts-expect-error authentication is not an Agent.create option.
   await BrowserAgent.create({ transport: BrowserTransport.openAi({ apiKey }), hostAuth: true });
   // @ts-expect-error a transport cannot be fabricated from an arbitrary object.

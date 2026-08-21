@@ -19,7 +19,7 @@ export const docsPreview = {
   "/docs/core/branching": ["Branches and subagents", "Clone cheap handles, fork retained context, or delegate through an optional task tree."],
   "/docs/core/durability": ["Durable execution", "Resume accepted work with Rust-owned journaling over a tiny host store contract."],
   "/docs/sdks/javascript": ["TypeScript and JavaScript SDK", "Run the Rust-owned headless agent lifecycle from Node, browser Workers, or React-owned Workers."],
-  "/docs/sdks/javascript/install-entrypoints": ["Install TypeScript and JavaScript", "Choose the published Node or browser entrypoint and keep generated WASM internals private."],
+  "/docs/sdks/javascript/install-entrypoints": ["Install TypeScript and JavaScript", "Choose the published Node, package Worker, or Web API host entrypoint and keep generated WASM internals private."],
   "/docs/sdks/javascript/agent-lifecycle": ["TypeScript agent lifecycle", "Submit retained turns, watch events independently, and release every JavaScript and Rust owner."],
   "/docs/sdks/javascript/tools-code-mode-subagents": ["TypeScript tools, Code Mode, and subagents", "Register host tools, compose them in Code Mode, and select the linked Rust task-tree extension."],
   "/docs/sdks/javascript/transports-auth": ["TypeScript transports and authentication", "Choose who owns credentials and WebSocket creation for one OpenAI Responses lifecycle."],

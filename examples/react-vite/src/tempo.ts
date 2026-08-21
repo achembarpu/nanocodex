@@ -1,6 +1,6 @@
 import { Provider, Storage } from "accounts";
 import { createJsonChannelStore } from "mppx/client";
-import { createTempoProviderFromAccounts } from "nanocodex/browser";
+import { createTempoProviderFromAccounts } from "nanocodex/host";
 import { parseUnits } from "viem";
 import { PATH_USD, USDC_E } from "./tempo-policy";
 

@@ -1,6 +1,5 @@
 import type {
   CodeEvaluator,
-  DurabilityStore,
   McpServers,
   MppSession,
   ToolMap,
@@ -67,7 +66,6 @@ export function createBrowserHost(options?: {
   mcp?: McpServers;
   codeEvaluator?: CodeEvaluator;
   toolMode?: "code" | "direct";
-  durability?: DurabilityStore;
   maxQueuedMessages?: number;
   maxQueuedBytes?: number;
   maxBufferedSendBytes?: number;

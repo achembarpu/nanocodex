@@ -5,10 +5,10 @@ description: Run the Rust-owned headless agent lifecycle from Node, browser Work
 
 # TypeScript and JavaScript SDK
 
-The `nanocodex` package exposes typed Node and browser entrypoints over the same
-Rust/WASM driver. JavaScript owns transport construction, application tools,
-workspace placement, and presentation. Rust still owns prompt ordering,
-history, model/tool turns, branches, and cleanup.
+The `nanocodex` package exposes typed Node, package-Worker, and Web API host
+entrypoints over the same Rust/WASM driver. JavaScript owns transport
+construction, application tools, workspace placement, and presentation. Rust
+still owns prompt ordering, history, model/tool turns, branches, and cleanup.
 
 ```sh
 npm install nanocodex
@@ -51,9 +51,11 @@ and transport state.
 ## One lifecycle, several hosts
 
 Use `nanocodex/node` with a real guarded directory and a Node WebSocket host.
-Use `nanocodex/browser` inside a browser Worker or server isolate. The browser
-entrypoint can share a persistent OPFS workspace with your file browser,
-uploads, Git client, and agent tools.
+Use `nanocodex/browser` when the package should own a browser module Worker and
+persistent OPFS harness. Use `nanocodex/host` inside a caller-owned browser
+Worker or server isolate when capabilities contain functions. Each entrypoint
+uses the same `Agent.create(...)` lifecycle; the execution owner is explicit in
+the import instead of a compatibility option.
 
 OpenAI API keys, managed ChatGPT credentials, host-managed sockets, and MPP are
 transport and authentication choices for the same supported OpenAI Responses

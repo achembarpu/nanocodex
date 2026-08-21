@@ -139,8 +139,8 @@ async function loadExample(Agent) {
 
   const source = moduleSource
     .replace(
-      /import \{ Agent \} from "[^"]+";/,
-      "const Agent = globalThis.__nanocodexTestAgent;",
+      /import \{ Agent, Transport \} from "[^"]+";/,
+      "const Agent = globalThis.__nanocodexTestAgent; const Transport = { hostManaged: (options) => options };",
     )
     .concat(`\n// deterministic test module ${moduleId++}`);
   await import(`data:text/javascript;base64,${Buffer.from(source).toString("base64")}`);

@@ -1,21 +1,14 @@
 export * as Actions from "./actions/index.mjs";
-export declare function durabilityRevision(
-  value: string | bigint,
-): import("./types.mjs").DurabilityRevision;
-export declare function subscriptionRevision(
-  value: string | bigint,
-): import("./types.mjs").SubscriptionRevision;
-export declare function createMemoryChatGptSubscriptionStore(
-  id: string,
-  initial?: import("./types.mjs").SubscriptionStoredValue,
-): import("./types.mjs").MemoryChatGptSubscriptionStore;
-export declare function createMemoryDurabilityStore(
-  journalId: string,
-  initial?: import("./types.mjs").DurabilityStoredJournal,
-): import("./types.mjs").MemoryDurabilityStore;
-export declare function createSqliteDurabilityStore(
-  options: import("./types.mjs").SqliteDurabilityStoreOptions,
-): import("./types.mjs").DurabilityStore;
+export {
+  createMemoryDurabilityStore,
+  createSqliteDurabilityStore,
+  durabilityRevision,
+  sqliteDurabilitySchema,
+} from "./runtime/durability-store.mjs";
+export {
+  createMemoryChatGptSubscriptionStore,
+  subscriptionRevision,
+} from "./runtime/subscription-store.mjs";
 export { createQuickJsEvaluator } from "./runtime/quickjs-evaluator.mjs";
 export type { AsyncQuickJsModule, QuickJsEvaluatorOptions } from "./runtime/quickjs-evaluator.mjs";
 export {

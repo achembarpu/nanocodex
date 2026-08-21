@@ -59,9 +59,10 @@ Install the published core package on Node.js 22.13 or newer:
 npm install nanocodex
 ```
 
-The package exports `nanocodex/node`, `nanocodex/browser`, browser workspace
-helpers, transports, tools, and the compiled WASM module. Pick the host-specific
-entrypoint in [Install from npm](/sdks/javascript/install-entrypoints).
+The package exports `nanocodex/node`, the package-owned
+`nanocodex/browser` Worker, the current-isolate `nanocodex/host`, shared
+durability helpers, browser workspaces, tools, and the compiled WASM module.
+Pick the execution owner in [Install from npm](/sdks/javascript/install-entrypoints).
 
 ## What to run next
 

@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
 import {
-  createSqliteDurabilityStore,
   type AgentEvent,
   type DefaultAgent,
   type DurabilitySqliteQuery,
@@ -11,7 +10,13 @@ import {
   type Turn,
   type TurnUsage,
 } from "nanocodex";
-import { Agent, Transport } from "nanocodex/browser";
+import {
+  Agent,
+  createSqliteDurabilityStore,
+  sqliteDurabilitySchema,
+  Transport,
+  type BrowserWebSocketRequest,
+} from "nanocodex/host";
 import { agentOS } from "@rivet-dev/agentos";
 import { event, UserError } from "rivetkit";
 import type { RawAccess } from "rivetkit/db";
@@ -19,11 +24,7 @@ import type { RawAccess } from "rivetkit/db";
 import type { SubscriptionSnapshot, SubscriptionStatus } from "./auth.js";
 import { type AuthCapabilityProof, createCapabilityProof } from "./auth-capability.js";
 import { createCodexAuthFileProvider } from "./codex-auth-file.js";
-import {
-  type BrowserAuthRequest,
-  openApiKeyWebSocket,
-  openSubscriptionWebSocket,
-} from "./model-websocket.js";
+import { openApiKeyWebSocket, openSubscriptionWebSocket } from "./model-websocket.js";
 import {
   type AgentOsActionContext,
   agentOsPreviewOptions,
@@ -194,8 +195,8 @@ export const nanocodex = agentOS({
       await shutdown(c);
       await c.db.transaction(async (transaction: RawAccess) => {
         await transaction.execute("DELETE FROM completed_operations");
-        await transaction.execute("DELETE FROM durability_batches");
-        await transaction.execute("DELETE FROM durability_journals");
+        await transaction.execute("DELETE FROM nanocodex_journal_batches");
+        await transaction.execute("DELETE FROM nanocodex_journals");
         await transaction.execute("UPDATE session_state SET last_active = 0 WHERE singleton = 1");
       });
     },
@@ -357,7 +358,7 @@ async function createAgent(context: SessionContext): Promise<DefaultAgent> {
       transport: Transport.hostManaged({
         apiBaseUrl: CHATGPT_API_BASE_URL,
         websocketUrl,
-        createWebSocket: (endpoint: string, sessionId: string, request: BrowserAuthRequest) =>
+        createWebSocket: (endpoint: string, sessionId: string, request: BrowserWebSocketRequest) =>
           openSubscriptionWebSocket(auth, endpoint, sessionId, request),
       }),
     });
@@ -382,20 +383,7 @@ async function migrateSessionDatabase(database: RawAccess): Promise<void> {
       completed_at INTEGER NOT NULL
     )
   `);
-  await database.execute(`
-    CREATE TABLE IF NOT EXISTS durability_journals (
-      journal_id TEXT PRIMARY KEY,
-      revision TEXT NOT NULL
-    )
-  `);
-  await database.execute(`
-    CREATE TABLE IF NOT EXISTS durability_batches (
-      journal_id TEXT NOT NULL,
-      revision TEXT NOT NULL,
-      payload TEXT NOT NULL,
-      PRIMARY KEY (journal_id, revision)
-    )
-  `);
+  for (const statement of sqliteDurabilitySchema) await database.execute(statement);
   await database.execute(
     "INSERT OR IGNORE INTO session_state (singleton, last_active) VALUES (1, 0)",
   );

@@ -31,7 +31,7 @@ export function prepareWorkerAgent(options?: Readonly<{
 export type WorkerAgentRuntime = Readonly<{ dispose(): void }>;
 export type WorkerAgentScope = WorkerLike;
 export type WorkerAgentRuntimeOptions = Readonly<{
-  createLocalAgent?: (options: import("./Agent.mjs").createInline.Options) => Promise<DefaultAgent> | DefaultAgent;
+  createAgent?: (options: import("../host/Agent.mjs").create.Options) => Promise<DefaultAgent> | DefaultAgent;
   prewarmLocal?: (options: { threadId: string; origin?: string | undefined }) => Promise<void> | void;
 }>;
 

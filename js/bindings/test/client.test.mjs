@@ -5,6 +5,8 @@ import {
   Actions,
   createMemoryDurabilityStore,
   createSqliteDurabilityStore,
+  durabilityRevision,
+  sqliteDurabilitySchema,
 } from "../index.mjs";
 import {
   activateHost,
@@ -35,6 +37,23 @@ test("the memory durability store carries opaque Rust batches across host steps"
     batches: [{ revision: "1", payload: "{\"entry\":1}" }],
   });
   assert.throws(() => store.load("other"), /unknown durability journal/);
+  assert.equal(durabilityRevision("18446744073709551615"), "18446744073709551615");
+  assert.throws(
+    () => durabilityRevision("18446744073709551616"),
+    /unsigned 64-bit decimal string/,
+  );
+  const exhausted = createMemoryDurabilityStore("exhausted", {
+    revision: "18446744073709551615",
+    batches: [],
+  });
+  assert.deepEqual(exhausted.append("exhausted", {
+    expectedRevision: "18446744073709551615",
+    payload: "never-written",
+  }), {
+    status: "not_committed",
+    message: "in-memory durability revision overflow",
+  });
+  assert.equal(exhausted.snapshot().revision, "18446744073709551615");
 });
 
 test("the SQLite durability store owns revision validation and compare-and-append", () => {
@@ -42,18 +61,18 @@ test("the SQLite durability store owns revision validation and compare-and-appen
   const batches = [];
   const query = (sql, args) => {
     const [journalId, revision, payload] = args;
-    if (sql.startsWith("SELECT revision FROM durability_journals")) {
+    if (sql.startsWith("SELECT revision FROM nanocodex_journals")) {
       const stored = revisions.get(journalId);
       return stored === undefined ? [] : [{ revision: stored }];
     }
-    if (sql.startsWith("SELECT revision, payload FROM durability_batches")) {
+    if (sql.startsWith("SELECT revision, payload FROM nanocodex_journal_batches")) {
       return batches.filter((batch) => batch.journalId === journalId);
     }
-    if (sql.startsWith("INSERT INTO durability_journals")) {
+    if (sql.startsWith("INSERT INTO nanocodex_journals")) {
       revisions.set(journalId, revision);
       return [];
     }
-    if (sql.startsWith("INSERT INTO durability_batches")) {
+    if (sql.startsWith("INSERT INTO nanocodex_journal_batches")) {
       batches.push({ journalId, revision, payload });
       return [];
     }
@@ -62,6 +81,7 @@ test("the SQLite durability store owns revision validation and compare-and-appen
   const store = createSqliteDurabilityStore({
     transaction: (callback) => callback(query),
   });
+  assert.equal(sqliteDurabilitySchema.length, 2);
 
   assert.deepEqual(store.load("journal-1"), { revision: "0", batches: [] });
   assert.deepEqual(store.append("journal-1", {
@@ -72,6 +92,15 @@ test("the SQLite durability store owns revision validation and compare-and-appen
     expectedRevision: "0",
     payload: "stale",
   }), { status: "conflict", actualRevision: "1" });
+  revisions.set("exhausted", "18446744073709551615");
+  assert.deepEqual(store.append("exhausted", {
+    expectedRevision: "18446744073709551615",
+    payload: "never-written",
+  }), {
+    status: "not_committed",
+    message: "SQLite durability revision overflow",
+  });
+  assert.equal(batches.some((batch) => batch.journalId === "exhausted"), false);
   assert.deepEqual(store.load("journal-1"), {
     revision: "1",
     batches: [{ revision: "1", payload: "opaque" }],
@@ -181,6 +210,9 @@ test("the WASM host bridge preserves typed decimal durability revisions", async 
     durability: {
       load: () => ({ revision: String(batches.length), batches }),
       append(_journalId, { expectedRevision, payload }) {
+        if (payload === "definite-failure") {
+          return { status: "not_committed", message: "transaction rolled back" };
+        }
         if (expectedRevision !== String(batches.length)) {
           return { status: "conflict", actualRevision: String(batches.length) };
         }
@@ -214,6 +246,14 @@ test("the WASM host bridge preserves typed decimal durability revisions", async 
         "stale",
       )),
       { status: "conflict", actual_revision: "1" },
+    );
+    assert.deepEqual(
+      JSON.parse(await globalThis.nanocodexHost.durabilityAppend(
+        "journal-1",
+        "1",
+        "definite-failure",
+      )),
+      { status: "not_committed", message: "transaction rolled back" },
     );
     releaseDurabilityHost(host, "journal-1");
     assert.equal(

@@ -4,7 +4,7 @@ import { performance } from "node:perf_hooks";
 import { test } from "node:test";
 
 import { Actions } from "../index.mjs";
-import { Agent as BrowserAgent, Transport as BrowserTransport } from "../browser/index.mjs";
+import { Agent as HostAgent, Transport as HostTransport } from "../host/index.mjs";
 import {
   createAgentClient,
   defineRuntime,
@@ -21,7 +21,7 @@ const LIMITS = Object.freeze({
   codeModeMicroseconds: 250,
 });
 const nodeTransport = NodeTransport.openAi({ apiKey: "performance-test" });
-const browserTransport = BrowserTransport.openAi({
+const browserTransport = HostTransport.openAi({
   apiKey: "performance-test",
   WebSocketImpl: class {},
 });
@@ -88,14 +88,14 @@ test("a precompiled browser module instantiates once across isolated agents", as
   };
   try {
     const coldStarted = performance.now();
-    const cold = await BrowserAgent.createInline({
+    const cold = await HostAgent.create({
       transport: browserTransport,
       module,
     });
     const coldMs = performance.now() - coldStarted;
     cold.dispose();
     for (let index = 0; index < 16; index += 1) {
-      const agent = await BrowserAgent.createInline({
+      const agent = await HostAgent.create({
         transport: browserTransport,
         module,
       });
@@ -105,7 +105,7 @@ test("a precompiled browser module instantiates once across isolated agents", as
     const samples = [];
     for (let index = 0; index < 64; index += 1) {
       const started = performance.now();
-      const agent = await BrowserAgent.createInline({
+      const agent = await HostAgent.create({
         transport: browserTransport,
         module,
       });

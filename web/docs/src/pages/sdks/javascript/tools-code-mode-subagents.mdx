@@ -13,6 +13,8 @@ alongside that execution entrypoint.
 ## Register a typed host tool
 
 ```js
+import { Agent } from "nanocodex/host";
+
 const lookupOrder = {
   name: "lookup_order",
   description: "Look up one order.",
@@ -61,7 +63,7 @@ not the Rust-owned agent lifecycle or tool contract.
 ## Select Rust-backed subagents
 
 ```js
-import { Agent, Subagents } from "nanocodex/browser";
+import { Agent, Subagents } from "nanocodex/host";
 
 const agent = await Agent.create({
   transport,

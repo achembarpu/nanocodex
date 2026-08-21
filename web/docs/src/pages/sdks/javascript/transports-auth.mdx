@@ -22,8 +22,22 @@ family; Nanocodex is not a provider abstraction.
 
 ## Keep browser credentials behind a host
 
-The browser entrypoint also provides a host-managed transport for an application
-Worker, Durable Object, or proxy that rotates credentials:
+The package-owned browser Worker accepts a host-managed endpoint as clone-safe
+data:
+
+```js
+const transport = Transport.hostManaged({
+  websocketUrl: "/api/responses",
+});
+```
+
+The browser sees only the application endpoint. The host owns credentials,
+authorization, rate limits, and tenant routing. A host-managed socket must still
+preserve the Responses WebSocket contract expected by the Rust driver.
+
+When a caller-owned Worker or server isolate must construct the socket itself,
+import `Transport` with `Agent` from `nanocodex/host` and provide the function
+there:
 
 ```js
 const transport = Transport.hostManaged({
@@ -31,10 +45,6 @@ const transport = Transport.hostManaged({
   createWebSocket: (endpoint) => new WebSocket(endpoint),
 });
 ```
-
-The browser sees only the application endpoint. The host owns credentials,
-authorization, rate limits, and tenant routing. A host-managed socket must still
-preserve the Responses WebSocket contract expected by the Rust driver.
 
 Do not place API keys or bearer credentials in URLs, local storage, React state,
 or generated WASM configuration. Treat any durable session identifier that

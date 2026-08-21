@@ -29,5 +29,5 @@ function Consumer() {
 }
 void Consumer;
 
-// @ts-expect-error function-backed transports require Agent.createInline and cannot configure the Worker store.
+// @ts-expect-error function-backed transports require nanocodex/host and cannot configure the Worker store.
 createConfig({ agent: { transport: Transport.hostManaged({ createWebSocket() { return {} as WebSocket; } }) } });

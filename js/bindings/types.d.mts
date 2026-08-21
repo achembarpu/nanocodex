@@ -58,7 +58,8 @@ export type DurabilityAppendRequest = Readonly<{
 
 export type DurabilityAppendResult =
   | Readonly<{ status: "appended"; revision: DurabilityRevision }>
-  | Readonly<{ status: "conflict"; actualRevision: DurabilityRevision }>;
+  | Readonly<{ status: "conflict"; actualRevision: DurabilityRevision }>
+  | Readonly<{ status: "not_committed"; message: string }>;
 
 /** Host capability consumed by the Rust/WASM durability driver. */
 export type DurabilityStore = Readonly<{

@@ -6,9 +6,9 @@ const root = new URL("../", import.meta.url);
 
 export function checkDocumentedBrowserVersion(readme, packageVersion) {
   const documentedVersion = readme.match(
-    /nanocodex@([^/"'\s]+)\/browser\/index\.mjs/,
+    /nanocodex@([^/"'\s]+)\/host\/index\.mjs/,
   )?.[1];
-  assert.ok(documentedVersion, "README must pin the browser CDN import");
+  assert.ok(documentedVersion, "README must pin the host CDN import");
 
   // pkg-pr-new rewrites package.json immediately before npm pack without
   // rewriting the source README. The README should remain pinned to the latest
@@ -22,6 +22,7 @@ export function checkDocumentedBrowserVersion(readme, packageVersion) {
 const requiredFiles = [
   "browser/index.mjs",
   "browser/index.d.mts",
+  "browser/InlineAgent.mjs",
   "browser/config.mjs",
   "browser/config.d.mts",
   "browser/engine.mjs",
@@ -32,6 +33,10 @@ const requiredFiles = [
   "browser/agent.worker.mjs",
   "browser/workspace.mjs",
   "browser/workspace.d.mts",
+  "host/Agent.mjs",
+  "host/Agent.d.mts",
+  "host/index.mjs",
+  "host/index.d.mts",
   "node/index.mjs",
   "node/index.d.mts",
   "node/workspace.mjs",
@@ -77,6 +82,8 @@ export async function checkPackage(packageRoot = root) {
   assert.equal(packageJson.exports?.["./browser"]?.import, "./browser/index.mjs");
   assert.equal(packageJson.exports?.["./browser/client"], undefined);
   assert.equal(packageJson.exports?.["./browser/workspace"]?.import, "./browser/workspace.mjs");
+  assert.equal(packageJson.exports?.["./host"]?.import, "./host/index.mjs");
+  assert.equal(packageJson.exports?.["./durability"]?.import, "./runtime/durability-store.mjs");
   assert.equal(packageJson.exports?.["./node"]?.import, "./node/index.mjs");
   assert.equal(packageJson.exports?.["./node/workspace"]?.import, "./node/workspace.mjs");
   assert.equal(packageJson.exports?.["./worker"]?.import, "./worker/index.mjs");

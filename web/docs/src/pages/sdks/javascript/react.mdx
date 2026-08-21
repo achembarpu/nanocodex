@@ -56,9 +56,9 @@ root.render(<NanocodexProvider config={config}><App /></NanocodexProvider>);
 Credentials, health checks, transport choice, durable thread identity, and
 presentation remain application concerns. The default package Worker accepts
 only structured-clone-safe configuration. Function-valued tools, custom socket
-constructors, and caller-owned filesystems stay behind the explicit
-`Agent.createInline` advanced seam instead of being serialized through a
-compatibility protocol.
+constructors, and caller-owned filesystems belong in a caller-owned Worker that
+imports `nanocodex/host`; they are not serialized through a compatibility
+protocol.
 
 Render the typed Agent event stream with application-owned components or a
 terminal renderer. UI frameworks and terminal renderers remain application

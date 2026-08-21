@@ -2,7 +2,7 @@ import git from "isomorphic-git";
 import {
   Agent as BrowserAgent,
   Transport as BrowserTransport,
-} from "nanocodex/browser";
+} from "nanocodex/host";
 import {
   createBrowserBash,
   createOpfsGitFs,
