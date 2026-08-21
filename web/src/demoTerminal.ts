@@ -36,12 +36,15 @@ export type AgentTerminalEvent = Readonly<{
   [key: string]: unknown;
 }>;
 
+export type AgentTerminalInputMode = "xterm" | "composer";
+
 export type AgentTerminal = Readonly<{
   ready: Promise<void>;
   submit(input: string, options?: { intent?: "queue" | "steer" }): Promise<Turn | undefined>;
   cancel(): Promise<void>;
   render(): void;
   resize(): void;
+  setInputMode(mode: AgentTerminalInputMode): void;
   dispose(): void;
 }>;
 
@@ -51,6 +54,7 @@ type ActiveTurn = { turn: Turn; settled: boolean };
 export function createAgentTerminal(options: {
   agent: DefaultAgent;
   terminal: TerminalHost;
+  inputMode?: AgentTerminalInputMode;
   maxEntries?: number;
   onEvent?(event: AgentTerminalEvent & { result?: TurnResult }): void;
 }): AgentTerminal {
@@ -61,6 +65,7 @@ export function createAgentTerminal(options: {
   let input = "";
   let cursor = 0;
   let historyIndex: number | undefined;
+  let inputMode = options.inputMode ?? "xterm";
   let disposed = false;
   let renderScheduled = false;
   let projectionDirty = true;
@@ -98,6 +103,7 @@ export function createAgentTerminal(options: {
       cursor,
       cols: terminal.cols,
       rows: terminal.rows,
+      inputMode,
     });
     try {
       Promise.resolve(terminal.write(frame)).then(resolveReady, (error) => {
@@ -247,7 +253,7 @@ export function createAgentTerminal(options: {
   };
 
   const onData = (data: string) => {
-    if (disposed || typeof data !== "string") return;
+    if (disposed || inputMode !== "xterm" || typeof data !== "string") return;
     if (data === "\x1b[13;2u") {
       insert("\n");
       return;
@@ -353,6 +359,17 @@ export function createAgentTerminal(options: {
     render();
   }
 
+  function setInputMode(next: AgentTerminalInputMode) {
+    if (inputMode === next) return;
+    inputMode = next;
+    if (next === "composer") {
+      input = "";
+      cursor = 0;
+      historyIndex = undefined;
+    }
+    render();
+  }
+
   function dispose() {
     if (disposed) return;
     disposed = true;
@@ -368,7 +385,7 @@ export function createAgentTerminal(options: {
       }
     }
     try {
-      if (surface.isVisible()) {
+      if (surface.isVisible() && inputMode === "xterm") {
         void Promise.resolve(terminal.write(SHOW_CURSOR)).catch((error) => {
           emit("terminal.cleanup_error", { error });
         });
@@ -386,7 +403,7 @@ export function createAgentTerminal(options: {
   emit("terminal.attached", { cols: terminal.cols, rows: terminal.rows });
   render();
 
-  return Object.freeze({ ready, submit, cancel, render, resize, dispose });
+  return Object.freeze({ ready, submit, cancel, render, resize, setInputMode, dispose });
 }
 
 export function renderTerminal({
@@ -395,22 +412,24 @@ export function renderTerminal({
   cursor = input.length,
   cols = 80,
   rows = 24,
+  inputMode = "xterm",
 }: {
   state: TerminalState;
   input?: string;
   cursor?: number;
   cols?: number;
   rows?: number;
+  inputMode?: AgentTerminalInputMode;
 }): string {
   const content = [`${BOLD}nanocodex${RESET}`, renderTranscript(state.entries, cols)]
     .filter(Boolean)
     .join("\r\n\r\n");
+  if (inputMode === "composer") return `${CLEAR_SCREEN}${HIDE_CURSOR}${content}`;
   const safeCursor = Math.max(0, Math.min(input.length, cursor));
   const before = terminalText(input.slice(0, safeCursor));
   const at = terminalText(input.slice(safeCursor, safeCursor + 1) || " ");
   const after = terminalText(input.slice(safeCursor + 1));
   const footer = [
-    ...(state.running ? [`${DIM}  · ${state.status || "working"}${RESET}`] : []),
     `${DIM}│${RESET} ${before}\x1b[7m${at}${RESET}${after}`,
     `${DIM}  ${footerHint(cols)}${RESET}`,
   ].join("\r\n");

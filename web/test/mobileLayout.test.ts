@@ -138,17 +138,28 @@ test("terminal interaction is renderer-neutral and resize-driven", () => {
   assert.doesNotMatch(terminalSurface, /\\r\\n\\r\\n> /);
 });
 
-test("touch terminals use a native IME-safe composer and typed commands", () => {
+test("touch terminals use one native IME-safe composer and one contextual action", () => {
+  const touchComposer = terminalSurface.slice(
+    terminalSurface.indexOf("export function TouchTerminalComposer"),
+    terminalSurface.indexOf("export function useTouchInput"),
+  );
   assert.match(terminalSurface, /TOUCH_INPUT_QUERY = "\(pointer: coarse\), \(any-pointer: coarse\)"/);
-  assert.match(terminalSurface, /<textarea[\s\S]*?aria-label="Message Nanocodex"/);
-  assert.match(terminalSurface, /value=\{draft\}[\s\S]*?onChange=\{\(event\) => onChange\(event\.currentTarget\.value\)\}/);
-  assert.match(terminalSurface, /onCompositionStart=\{\(\) => \{ composing\.current = true; \}\}/);
-  assert.match(terminalSurface, /isTerminalSubmitKeyEvent\(event\.nativeEvent, composing\.current\)/);
-  assert.match(terminalSurface, /onSubmit\(draft, running \? "steer" : "queue"\)/);
-  assert.match(terminalSurface, />Stop<\/button>/);
-  assert.match(terminalSurface, /running \? "Steer" : "Send"/);
-  assert.match(terminalSurface, />│<\/span>/);
-  assert.doesNotMatch(terminalSurface, /\x1b\[200~|bracketed-paste/i);
+  assert.equal(matches(terminal, /<TouchTerminalComposer\b/g), 1);
+  assert.match(touchComposer, /<textarea[\s\S]*?aria-label="Message Nanocodex"/);
+  assert.match(touchComposer, /value=\{draft\}[\s\S]*?onChange=\{\(event\) => onChange\(event\.currentTarget\.value\)\}/);
+  assert.match(touchComposer, /onCompositionStart=\{\(\) => \{ composing\.current = true; \}\}/);
+  assert.match(touchComposer, /isTerminalSubmitKeyEvent\(event\.nativeEvent, composing\.current\)/);
+  assert.match(touchComposer, /onSubmit\(draft, running \? "steer" : "queue"\)/);
+  assert.match(touchComposer, /\{running \? \([\s\S]*?>Stop<\/button>[\s\S]*?\) : \([\s\S]*?>Send<\/button>[\s\S]*?\)\}/);
+  assert.equal(matches(touchComposer, /className="agent-touch-actions"/g), 1);
+  assert.doesNotMatch(touchComposer, />Steer<|>Queued</);
+  assert.equal(matches(touchComposer, /enter send · shift\+enter newline/g), 1);
+  assert.match(touchComposer, />│<\/span>/);
+  assert.doesNotMatch(touchComposer, /\x1b\[200~|bracketed-paste/i);
+  assert.match(terminal, /inputMode: touchInput \? "composer" : "xterm"/);
+  assert.match(terminal, /active\.current\?\.setInputMode\(touchInput \? "composer" : "xterm"\)/);
+  assert.match(demoTerminal, /if \(inputMode === "composer"\) return `\$\{CLEAR_SCREEN\}\$\{HIDE_CURSOR\}\$\{content\}`/);
+  assert.match(demoTerminal, /inputMode !== "xterm"/);
 
   const touchCss = terminalCss.indexOf("@media (pointer: coarse), (any-pointer: coarse)");
   assert.notEqual(touchCss, -1);

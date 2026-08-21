@@ -247,10 +247,11 @@ export function TouchTerminalComposer({
         }}
       />
       <div className="agent-touch-actions">
-        {running ? <button type="button" disabled={status !== "ready"} onClick={onCancel}>Stop</button> : null}
-        <button type="submit" disabled={pending || !draft.trim()}>
-          {pending ? "Queued" : running ? "Steer" : "Send"}
-        </button>
+        {running ? (
+          <button type="button" disabled={status !== "ready"} onClick={onCancel}>Stop</button>
+        ) : (
+          <button type="submit" disabled={pending || !draft.trim()}>Send</button>
+        )}
       </div>
       <small>enter send · shift+enter newline</small>
     </form>

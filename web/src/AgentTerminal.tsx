@@ -139,6 +139,7 @@ function AgentTerminalDemo({
     let cancelled = false;
     const attached = createAgentTerminal({
       agent,
+      inputMode: touchInput ? "composer" : "xterm",
       terminal: terminalHost,
       onEvent(event) {
         if (cancelled) return;
@@ -174,6 +175,10 @@ function AgentTerminalDemo({
   useEffect(() => {
     setTerminalRunning((running) => terminalRunningForStatus(agentStatus, running));
   }, [agentStatus]);
+
+  useEffect(() => {
+    active.current?.setInputMode(touchInput ? "composer" : "xterm");
+  }, [touchInput]);
 
   const unavailableMessage = inactiveTerminalMessage({
     agentError,

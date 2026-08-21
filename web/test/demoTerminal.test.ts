@@ -187,6 +187,30 @@ test("public and keyboard submissions share history, steering, and cancellation"
   assert.equal(host.writes.at(-1), "\x1b[?25h");
 });
 
+test("native composer mode is the only input path and can return to desktop xterm input", async () => {
+  const host = fakeTerminal();
+  const agent = fakeAgent();
+  const terminal = createAgentTerminal({
+    agent: agent as never,
+    inputMode: "composer",
+    terminal: host,
+  });
+  await terminal.ready;
+
+  host.data("ignored legacy prompt\r");
+  await settle();
+  assert.equal(agent.turns.length, 0);
+
+  await terminal.submit("native composer prompt");
+  assert.equal(agent.turns[0]?.input, "native composer prompt");
+
+  terminal.setInputMode("xterm");
+  host.data("desktop prompt\r");
+  await settle();
+  assert.equal(agent.turns[1]?.input, "desktop prompt");
+  terminal.dispose();
+});
+
 test("connection failures stay concise and return to the composer", async () => {
   const host = fakeTerminal();
   const agent = fakeAgent();
@@ -363,6 +387,45 @@ test("ANSI rendering neutralizes control bytes and wraps narrow user turns", () 
   });
   const rows = wrapped.match(/\x1b\[2m│\x1b\[0m \x1b\[1m[^\r]+/g) ?? [];
   assert.equal(rows.length, 2);
+});
+
+test("composer rendering keeps transcript output without xterm input chrome or transient copy", () => {
+  const state = {
+    ...initialTerminalState(),
+    running: true,
+    status: "Connecting...",
+    entries: [
+      {
+        id: "streaming",
+        kind: "assistant" as const,
+        text: "streaming output",
+        streaming: true,
+      },
+      {
+        id: "completed",
+        kind: "assistant" as const,
+        text: "completed output",
+        streaming: false,
+      },
+    ],
+  };
+  const composerFrame = renderTerminal({
+    state,
+    input: "legacy xterm draft",
+    inputMode: "composer",
+  });
+
+  assert.match(composerFrame, /streaming output/);
+  assert.match(composerFrame, /completed output/);
+  assert.doesNotMatch(composerFrame, /Connecting/);
+  assert.doesNotMatch(composerFrame, /legacy xterm draft/);
+  assert.doesNotMatch(composerFrame, /enter send|shift\+enter newline/);
+  assert.doesNotMatch(composerFrame, /\x1b\[7m/);
+
+  const desktopFrame = renderTerminal({ state, input: "desktop draft" });
+  assert.match(desktopFrame, /desktop draft/);
+  assert.match(desktopFrame, /enter send · shift\+enter newline/);
+  assert.doesNotMatch(desktopFrame, /Connecting/);
 });
 
 test("xterm and native keyboard helpers preserve exactly-once submit behavior", () => {
