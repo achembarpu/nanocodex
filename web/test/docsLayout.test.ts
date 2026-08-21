@@ -5,7 +5,6 @@ import test from "node:test";
 const css = readFileSync(new URL("../src/Docs.css", import.meta.url), "utf8");
 const source = readFileSync(new URL("../src/Docs.tsx", import.meta.url), "utf8");
 const modal = readFileSync(new URL("../src/modalBoundary.ts", import.meta.url), "utf8");
-const modalHook = readFileSync(new URL("../src/useModalBoundary.ts", import.meta.url), "utf8");
 const syntax = readFileSync(new URL("../src/docsSyntax.tsx", import.meta.url), "utf8");
 
 test("documentation uses a full-width shell and restrained heading scale", () => {
@@ -35,7 +34,7 @@ test("documentation drawers and pagination keep mobile targets and focus contain
   assert.match(source, /fallbackFocusRef: desktopFocusRef/);
   assert.match(modal, /containModalFocus/);
   assert.match(modal, /wrappedModalFocusIndex/);
-  assert.match(modalHook, /document\.addEventListener\("focusin", onFocusIn, \{ capture: true \}\)/);
+  assert.match(modal, /document\.addEventListener\("focusin", onFocusIn, true\)/);
   assert.match(source, /matchMedia\("\(min-width: 901px\)"\)/);
 });
 

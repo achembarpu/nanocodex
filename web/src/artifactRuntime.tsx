@@ -2,12 +2,14 @@ import React from "react";
 import { createRoot } from "react-dom/client";
 import htm from "htm";
 import {
-  deepActiveElement,
-  modalFocusableElements,
   modalFrameBoundaryMessage,
   modalFrameBoundaryReadyMessage,
   modalFrameTabBoundaryKey,
   readModalFrameBoundaryState,
+} from "./artifactModalBoundary";
+import {
+  deepActiveElement,
+  modalFocusableElements,
 } from "./modalBoundary";
 
 const html = htm.bind(React.createElement);

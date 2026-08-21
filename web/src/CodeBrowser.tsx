@@ -14,7 +14,7 @@ import {
   type FileTreePreparedInput,
 } from "@pierre/trees";
 import { FileTree as FileTreeView } from "@pierre/trees/react";
-import { ChevronRight, FileQuestion, GitBranch, PanelLeft, RefreshCw, Search, X } from "lucide-react";
+import { ChevronRight, FileQuestion, GitBranch, PanelLeft, RefreshCw, Search } from "lucide-react";
 import {
   forwardRef,
   memo,
@@ -48,7 +48,7 @@ import {
 } from "./pierreCodeView";
 import { syntaxLanguageForFile } from "./syntax";
 import type { RepositoryFile } from "./threadRepositorySnapshot";
-import { useModalBoundary } from "./useModalBoundary";
+import { useModalBoundary } from "./modalBoundary";
 import "./SourceBrowser.css";
 
 type CodeBrowserProps = {
@@ -764,7 +764,7 @@ function CodeBrowserComponent(
               onClick={closeTree}
               aria-label="Close file tree"
             >
-              <X aria-hidden="true" />
+              <span aria-hidden="true">×</span>
             </button>
           </div>
         </header>

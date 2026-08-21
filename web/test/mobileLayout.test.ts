@@ -17,7 +17,7 @@ const artifactDock = source("../src/ArtifactDock.tsx");
 const chatGptSession = source("../src/chatGptSession.tsx");
 const docs = source("../src/Docs.tsx");
 const modalBoundary = source("../src/modalBoundary.ts");
-const useModalBoundary = source("../src/useModalBoundary.ts");
+const modalFrameBoundary = source("../src/useModalFrameBoundary.ts");
 const mobileInteraction = source("../src/mobileInteraction.ts");
 const deploymentRollover = source("../src/useDeploymentRollover.ts");
 const demoTerminal = source("../src/demoTerminal.ts");
@@ -79,11 +79,9 @@ test("the Source drawer is modal, scroll-locked, and touch-sized", () => {
   assert.match(sourceBrowser, /useModalBoundary\(\{[\s\S]*?onDismiss: closeTree,[\s\S]*?returnFocusRef: treeOpenerRef/);
   assert.match(sourceBrowser, /fallbackFocusRef: workspaceRef/);
   assert.match(modalBoundary, /createOutsideInertOwner/);
-  assert.match(modalBoundary, /root\.style\.overflow = "hidden"/);
-  assert.match(modalBoundary, /root\.style\.overscrollBehavior = "none"/);
-  assert.match(modalBoundary, /body\.style\.overflow = "hidden"/);
-  assert.match(modalBoundary, /body\.style\.overscrollBehavior = "none"/);
-  assert.match(useModalBoundary, /event\.key === "Escape"/);
+  assert.match(modalBoundary, /rootStyle\.overflow = bodyStyle\.overflow = "hidden"/);
+  assert.match(modalBoundary, /rootStyle\.overscrollBehavior = bodyStyle\.overscrollBehavior = "none"/);
+  assert.match(modalBoundary, /event\.key === "Escape"/);
   assert.match(sourceBrowserCss, /\.source-browser \.source-tree-toolbar button,[\s\S]*?min-width:\s*44px/);
   assert.match(sourceBrowserCss, /\.source-browser \.code-file-tail-error button,[\s\S]*?min-height:\s*44px/);
 });
@@ -94,13 +92,14 @@ test("compact Artifact, Source, and Docs overlays share complete modal ownership
   assert.match(artifactDock, /aria-modal=\{modalOpen \? true : undefined\}/);
   assert.match(artifactDock, /className="artifact-dock-backdrop"/);
   assert.match(artifactDock, /useModalBoundary\(\{[\s\S]*?onDismiss: collapse,[\s\S]*?returnFocusRef: toggleRef/);
+  assert.match(artifactDock, /useModalFrameBoundary\(\{[\s\S]*?onDismiss: collapse/);
   assert.match(docs, /role="dialog"[\s\S]*?aria-modal="true"/);
   assert.match(docs, /useModalBoundary\(\{[\s\S]*?onDismiss: closeBrowse,[\s\S]*?returnFocusRef: browseButtonRef/);
   assert.match(docs, /fallbackFocusRef: desktopFocusRef/);
-  assert.match(useModalBoundary, /new MutationObserver\(inertOwner\.refresh\)/);
-  assert.match(useModalBoundary, /document\.addEventListener\("focusin", onFocusIn, \{ capture: true \}\)/);
-  assert.match(useModalBoundary, /candidate\.contentWindow === event\.source/);
-  assert.match(modalBoundary, /"iframe"/);
+  assert.match(modalBoundary, /new MutationObserver\(inertOwner\.refresh\)/);
+  assert.match(modalBoundary, /document\.addEventListener\("focusin", onFocusIn, true\)/);
+  assert.match(modalFrameBoundary, /frame\.contentWindow !== event\.source/);
+  assert.match(modalBoundary, /iframe/);
   assert.match(modalBoundary, /contenteditable/);
   assert.match(modalBoundary, /summary:first-of-type/);
   assert.match(modalBoundary, /orderModalTabSequence/);
@@ -109,8 +108,8 @@ test("compact Artifact, Source, and Docs overlays share complete modal ownership
   assert.match(artifactRuntime, /modalFrameBoundaryMessage\("Escape"\)/);
   assert.match(artifactRuntime, /modalFrameTabBoundaryKey\(\{/);
   assert.match(artifactRuntime, /!modalBoundaryActive/);
-  assert.match(useModalBoundary, /setFrameBoundaryState\(true\)/);
-  assert.match(useModalBoundary, /setFrameBoundaryState\(false\)/);
+  assert.match(modalFrameBoundary, /setState\(true\)/);
+  assert.match(modalFrameBoundary, /setState\(false\)/);
 });
 
 test("the phone home surface leads directly from thesis to install, metadata, and agent", () => {

@@ -1,16 +1,20 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  createOutsideInertOwner,
-  isModalFrameBoundaryReadyMessage,
-  lockDocumentScroll,
   modalFrameBoundaryMessage,
   modalFrameBoundaryReadyMessage,
-  modalFrameBoundaryStateMessage,
   modalFrameTabBoundaryKey,
-  orderModalTabSequence,
-  readModalFrameBoundaryKey,
   readModalFrameBoundaryState,
+} from "../src/artifactModalBoundary.ts";
+import {
+  isModalFrameBoundaryReadyMessage,
+  modalFrameBoundaryStateMessage,
+  readModalFrameBoundaryKey,
+} from "../src/useModalFrameBoundary.ts";
+import {
+  createOutsideInertOwner,
+  lockDocumentScroll,
+  orderModalTabSequence,
   restoreModalFocus,
   wrappedModalFocusIndex,
 } from "../src/modalBoundary.ts";

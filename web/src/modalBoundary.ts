@@ -1,25 +1,9 @@
-const MODAL_FOCUSABLE_SELECTOR = [
-  "a[href]",
-  "area[href]",
-  "audio[controls]",
-  "button:not(:disabled)",
-  '[contenteditable]:not([contenteditable="false"])',
-  "details > summary:first-of-type",
-  "embed",
-  "iframe",
-  'input:not(:disabled):not([type="hidden"])',
-  "object",
-  "select:not(:disabled)",
-  "textarea:not(:disabled)",
-  "video[controls]",
-  '[tabindex]:not([tabindex="-1"])',
-].join(",");
+import {
+  useLayoutEffect,
+  type RefObject,
+} from "react";
 
-export const MODAL_FRAME_BOUNDARY_MESSAGE = "nanocodex-modal-boundary-key";
-export const MODAL_FRAME_BOUNDARY_READY_MESSAGE = "nanocodex-modal-boundary-ready";
-export const MODAL_FRAME_BOUNDARY_STATE_MESSAGE = "nanocodex-modal-boundary-state";
-
-export type ModalFrameBoundaryKey = "Escape" | "TabBackward" | "TabForward";
+const MODAL_FOCUSABLE_SELECTOR = 'a[href],area[href],audio[controls],button:not(:disabled),[contenteditable]:not([contenteditable="false"]),details > summary:first-of-type,embed,iframe,input:not(:disabled):not([type="hidden"]),object,select:not(:disabled),textarea:not(:disabled),video[controls],[tabindex]:not([tabindex="-1"])';
 
 type ScrollStyle = {
   overflow: string;
@@ -39,21 +23,21 @@ export function lockDocumentScroll(
   root: ScrollOwner,
   body: ScrollOwner,
 ): () => void {
-  const previous = {
-    rootOverflow: root.style.overflow,
-    rootOverscroll: root.style.overscrollBehavior,
-    bodyOverflow: body.style.overflow,
-    bodyOverscroll: body.style.overscrollBehavior,
-  };
-  root.style.overflow = "hidden";
-  root.style.overscrollBehavior = "none";
-  body.style.overflow = "hidden";
-  body.style.overscrollBehavior = "none";
+  const rootStyle = root.style;
+  const bodyStyle = body.style;
+  const previous = [
+    rootStyle.overflow,
+    rootStyle.overscrollBehavior,
+    bodyStyle.overflow,
+    bodyStyle.overscrollBehavior,
+  ];
+  rootStyle.overflow = bodyStyle.overflow = "hidden";
+  rootStyle.overscrollBehavior = bodyStyle.overscrollBehavior = "none";
   return () => {
-    root.style.overflow = previous.rootOverflow;
-    root.style.overscrollBehavior = previous.rootOverscroll;
-    body.style.overflow = previous.bodyOverflow;
-    body.style.overscrollBehavior = previous.bodyOverscroll;
+    rootStyle.overflow = previous[0];
+    rootStyle.overscrollBehavior = previous[1];
+    bodyStyle.overflow = previous[2];
+    bodyStyle.overscrollBehavior = previous[3];
   };
 }
 
@@ -63,17 +47,15 @@ export function createOutsideInertOwner(
   exemptions: readonly HTMLElement[] = [],
 ): OutsideInertOwner {
   const previous = new Map<HTMLElement, boolean>();
-  const exempt = new Set(exemptions);
   const refresh = () => {
     let current: HTMLElement | null = boundary;
     while (current && current !== root) {
       const parent: HTMLElement | null = current.parentElement;
       if (!parent) break;
-      const siblings = Array.from(parent.children) as Element[];
-      for (const sibling of siblings) {
+      for (const sibling of parent.children) {
         if (
           sibling === current
-          || exempt.has(sibling as HTMLElement)
+          || exemptions.includes(sibling as HTMLElement)
           || !("inert" in sibling)
         ) continue;
         const element = sibling as HTMLElement;
@@ -109,60 +91,6 @@ export function wrappedModalFocusIndex({
   return undefined;
 }
 
-export function modalFrameTabBoundaryKey({
-  activeIndex,
-  focusableCount,
-  shiftKey,
-}: {
-  activeIndex: number;
-  focusableCount: number;
-  shiftKey: boolean;
-}): ModalFrameBoundaryKey | undefined {
-  if (focusableCount <= 0) return shiftKey ? "TabBackward" : "TabForward";
-  if (shiftKey && activeIndex <= 0) return "TabBackward";
-  if (!shiftKey && activeIndex === focusableCount - 1) return "TabForward";
-  return undefined;
-}
-
-export function modalFrameBoundaryMessage(key: ModalFrameBoundaryKey) {
-  return { type: MODAL_FRAME_BOUNDARY_MESSAGE, key } as const;
-}
-
-export function modalFrameBoundaryReadyMessage() {
-  return { type: MODAL_FRAME_BOUNDARY_READY_MESSAGE } as const;
-}
-
-export function modalFrameBoundaryStateMessage(active: boolean) {
-  return { type: MODAL_FRAME_BOUNDARY_STATE_MESSAGE, active } as const;
-}
-
-export function isModalFrameBoundaryReadyMessage(value: unknown): boolean {
-  return isRecordWithType(value, MODAL_FRAME_BOUNDARY_READY_MESSAGE);
-}
-
-export function readModalFrameBoundaryState(value: unknown): boolean | undefined {
-  if (!isRecordWithType(value, MODAL_FRAME_BOUNDARY_STATE_MESSAGE)) {
-    return undefined;
-  }
-  const active = (value as Record<string, unknown>).active;
-  return typeof active === "boolean" ? active : undefined;
-}
-
-export function readModalFrameBoundaryKey(
-  value: unknown,
-): ModalFrameBoundaryKey | undefined {
-  if (typeof value !== "object" || value === null || Array.isArray(value)) {
-    return undefined;
-  }
-  const message = value as Record<string, unknown>;
-  if (message.type !== MODAL_FRAME_BOUNDARY_MESSAGE) return undefined;
-  return message.key === "Escape"
-    || message.key === "TabBackward"
-    || message.key === "TabForward"
-    ? message.key
-    : undefined;
-}
-
 export function containModalFocus(event: KeyboardEvent, panel: HTMLElement) {
   if (event.key !== "Tab") return;
   const focusable = modalFocusableElements(panel);
@@ -175,25 +103,6 @@ export function containModalFocus(event: KeyboardEvent, panel: HTMLElement) {
   });
   if (nextIndex === undefined) return;
   event.preventDefault();
-  focusable[nextIndex]?.focus();
-}
-
-export function focusAdjacentToModalFrame(
-  panel: HTMLElement,
-  frame: HTMLIFrameElement,
-  direction: "TabBackward" | "TabForward",
-) {
-  const focusable = modalFocusableElements(panel);
-  if (focusable.length === 0) {
-    panel.focus();
-    return;
-  }
-  const frameIndex = focusable.findIndex((element) => element === frame);
-  const offset = direction === "TabBackward" ? -1 : 1;
-  const origin = frameIndex < 0
-    ? direction === "TabBackward" ? 0 : focusable.length - 1
-    : frameIndex;
-  const nextIndex = (origin + offset + focusable.length) % focusable.length;
   focusable[nextIndex]?.focus();
 }
 
@@ -213,7 +122,7 @@ export function restoreModalFocus(
   primary?: HTMLElement | null,
   fallback?: HTMLElement | null,
 ): boolean {
-  for (const target of new Set([primary, fallback])) {
+  for (const target of [primary, fallback]) {
     if (!target || !canRestoreModalFocus(target)) continue;
     target.focus({ preventScroll: true });
     const active = deepActiveElement(target.ownerDocument);
@@ -226,7 +135,7 @@ export function modalFocusableElements(
   root: Document | ShadowRoot | HTMLElement,
 ): HTMLElement[] {
   const elements: HTMLElement[] = [];
-  for (const element of Array.from(root.querySelectorAll<HTMLElement>("*"))) {
+  for (const element of root.querySelectorAll<HTMLElement>("*")) {
     if (
       element.matches(MODAL_FOCUSABLE_SELECTOR)
       && element.tabIndex >= 0
@@ -243,19 +152,13 @@ export function modalFocusableElements(
 export function orderModalTabSequence<T extends { tabIndex: number }>(
   elements: readonly T[],
 ): T[] {
-  return elements
-    .map((element, index) => ({ element, index }))
+  return [...elements]
     .sort((left, right) => {
-      const leftPositive = left.element.tabIndex > 0;
-      const rightPositive = right.element.tabIndex > 0;
+      const leftPositive = left.tabIndex > 0;
+      const rightPositive = right.tabIndex > 0;
       if (leftPositive !== rightPositive) return leftPositive ? -1 : 1;
-      if (
-        leftPositive
-        && left.element.tabIndex !== right.element.tabIndex
-      ) return left.element.tabIndex - right.element.tabIndex;
-      return left.index - right.index;
-    })
-    .map(({ element }) => element);
+      return leftPositive ? left.tabIndex - right.tabIndex : 0;
+    });
 }
 
 export function deepActiveElement(root: Document | ShadowRoot): Element | null {
@@ -316,9 +219,78 @@ function isElementLike(value: unknown): value is Element {
     && "getRootNode" in value;
 }
 
-function isRecordWithType(value: unknown, type: string): boolean {
-  return typeof value === "object"
-    && value !== null
-    && !Array.isArray(value)
-    && (value as Record<string, unknown>).type === type;
+export function useModalBoundary({
+  backdropRef,
+  fallbackFocusRef,
+  initialFocusRef,
+  onDismiss,
+  open,
+  panelRef,
+  returnFocusRef,
+}: {
+  backdropRef?: RefObject<HTMLElement | null>;
+  fallbackFocusRef?: RefObject<HTMLElement | null>;
+  initialFocusRef?: RefObject<HTMLElement | null>;
+  onDismiss(): void;
+  open: boolean;
+  panelRef: RefObject<HTMLElement | null>;
+  returnFocusRef?: RefObject<HTMLElement | null>;
+}) {
+  useLayoutEffect(() => {
+    if (!open) return;
+    const panel = panelRef.current;
+    if (!panel) return;
+    const document = panel.ownerDocument;
+    const window = document.defaultView;
+    if (!window) return;
+
+    const restoreScroll = lockDocumentScroll(
+      document.documentElement,
+      document.body,
+    );
+    const backdrop = backdropRef?.current;
+    const inertOwner = createOutsideInertOwner(
+      panel,
+      document.body,
+      backdrop ? [backdrop] : [],
+    );
+    const observer = new MutationObserver(inertOwner.refresh);
+    observer.observe(document.body, { childList: true, subtree: true });
+    const focusFrame = window.requestAnimationFrame(() => {
+      focusModal(panel, initialFocusRef?.current);
+    });
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        event.preventDefault();
+        event.stopPropagation();
+        onDismiss();
+        return;
+      }
+      containModalFocus(event, panel);
+    };
+    const onFocusIn = (event: FocusEvent) => {
+      if (!modalContainsFocus(panel, event)) {
+        focusModal(panel, initialFocusRef?.current);
+      }
+    };
+    window.addEventListener("keydown", onKeyDown, true);
+    document.addEventListener("focusin", onFocusIn, true);
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      window.removeEventListener("keydown", onKeyDown, true);
+      document.removeEventListener("focusin", onFocusIn, true);
+      observer.disconnect();
+      inertOwner.restore();
+      restoreScroll();
+      restoreModalFocus(returnFocusRef?.current, fallbackFocusRef?.current);
+    };
+  }, [
+    backdropRef,
+    fallbackFocusRef,
+    initialFocusRef,
+    onDismiss,
+    open,
+    panelRef,
+    returnFocusRef,
+  ]);
 }

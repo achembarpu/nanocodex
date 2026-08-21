@@ -20,7 +20,8 @@ import {
   openKernelWorkspace,
   subscribeThreadWorkspaceChanges,
 } from "nanocodex/tools/browser";
-import { useModalBoundary } from "./useModalBoundary";
+import { useModalBoundary } from "./modalBoundary";
+import { useModalFrameBoundary } from "./useModalFrameBoundary";
 
 export const COMPACT_WORKSPACE_MEDIA_QUERY = "(max-width: 740px), (pointer: coarse) and (orientation: landscape) and (max-width: 950px)";
 
@@ -178,6 +179,11 @@ export const ArtifactDock = memo(function ArtifactDock({
     open: modalOpen,
     panelRef: dockRef,
     returnFocusRef: toggleRef,
+  });
+  useModalFrameBoundary({
+    onDismiss: collapse,
+    open: modalOpen,
+    panelRef: dockRef,
   });
 
   if (collapsed) {

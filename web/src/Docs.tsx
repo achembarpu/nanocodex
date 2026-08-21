@@ -1,6 +1,6 @@
 "use client";
 
-import { Check, ChevronLeft, ChevronRight, Copy, Menu, X } from "lucide-react";
+import { Check, ChevronLeft, ChevronRight, Copy, Menu } from "lucide-react";
 import {
   Fragment,
   createElement,
@@ -25,7 +25,7 @@ import {
   type DocsPage,
 } from "./docsNavigation";
 import { highlightDocsCode } from "./docsSyntax";
-import { useModalBoundary } from "./useModalBoundary";
+import { useModalBoundary } from "./modalBoundary";
 import "./Docs.css";
 
 type ResolvedPage =
@@ -288,7 +288,7 @@ export function Docs() {
             <header>
               <span>Documentation</span>
               <button ref={drawerCloseRef} type="button" aria-label="Close" onClick={closeBrowse}>
-                <X aria-hidden="true" />
+                <span aria-hidden="true">×</span>
               </button>
             </header>
             <DocsNavigation path={displayPath} onNavigate={closeBrowse} />
