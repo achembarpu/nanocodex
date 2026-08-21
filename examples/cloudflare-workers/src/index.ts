@@ -9,7 +9,6 @@ import type {
   EventWatcher,
   PromptInput,
   Turn,
-  TurnResult,
 } from "nanocodex";
 import {
   Agent,
@@ -41,9 +40,9 @@ import {
   type ClientCommand,
   ProtocolError,
   type ServerMessage,
-  type TurnCompleted,
   parseCommand,
 } from "./protocol";
+import { materializeTurnTerminal } from "./turn-completion";
 
 const MAX_CLIENT_MESSAGE_BYTES = 1024 * 1024;
 const MAX_ACTIVE_TURNS = 16;
@@ -545,19 +544,11 @@ export class NanocodexSession extends DurableObject<Env> {
 
   async #complete(id: string, turn: Turn): Promise<void> {
     try {
-      let result: TurnResult;
-      try {
-        result = await turn.result();
-      } catch (error) {
-        this.#broadcast({ type: "turn_failed", id, error: errorMessage(error) });
+      const terminal = await materializeTurnTerminal(id, turn);
+      if (terminal.type === "turn_failed") {
+        this.#broadcast(terminal);
         return;
       }
-      const terminal: TurnCompleted = {
-        type: "turn_completed",
-        id,
-        final_message: result.finalMessage,
-        usage: result.usage,
-      };
       const payload = JSON.stringify(terminal);
       const completedAt = Date.now();
       try {

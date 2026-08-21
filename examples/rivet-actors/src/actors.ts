@@ -267,22 +267,26 @@ async function runPrompt(
     turn = agent.turn.prompt({ id: request.id, input: request.input });
     context.vars.turns.set(request.id, turn);
     const result = await turn.result();
-    const completed: TurnCompleted = {
-      type: "turn_completed",
-      id: request.id,
-      final_message: result.finalMessage,
-      usage: result.usage,
-    };
-    const completedAt = Date.now();
-    let firstCompletion: boolean;
     try {
-      firstCompletion = await recordCompletion(context.db, request.id, completedAt);
-    } catch (error) {
-      await shutdown(context);
-      throw new Error(`completion telemetry failed: ${errorMessage(error)}`);
+      const completed: TurnCompleted = {
+        type: "turn_completed",
+        id: request.id,
+        final_message: result.finalMessage,
+        usage: await result.usage(),
+      };
+      const completedAt = Date.now();
+      let firstCompletion: boolean;
+      try {
+        firstCompletion = await recordCompletion(context.db, request.id, completedAt);
+      } catch (error) {
+        await shutdown(context);
+        throw new Error(`completion telemetry failed: ${errorMessage(error)}`);
+      }
+      if (firstCompletion) context.broadcast("turnCompleted", completed);
+      return completed;
+    } finally {
+      result.dispose();
     }
-    if (firstCompletion) context.broadcast("turnCompleted", completed);
-    return completed;
   } catch (error) {
     const failed: TurnFailed = {
       type: "turn_failed",

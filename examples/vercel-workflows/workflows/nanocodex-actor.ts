@@ -151,16 +151,21 @@ export async function runNanocodexTurn(
     const turn = agent.turn.prompt({ id: request.id, input: request.input });
     try {
       const result = await turn.result();
-      await eventWrites;
-      return {
-        ok: true,
-        completed: {
-          type: "turn_completed",
-          id: request.id,
-          final_message: result.finalMessage,
-          usage: result.usage,
-        },
-      };
+      try {
+        await eventWrites;
+        const usage = await result.usage();
+        return {
+          ok: true,
+          completed: {
+            type: "turn_completed",
+            id: request.id,
+            final_message: result.finalMessage,
+            usage,
+          },
+        };
+      } finally {
+        result.dispose();
+      }
     } finally {
       turn.dispose();
     }

@@ -140,16 +140,20 @@ export class HostedNanocodex extends DurableObject<Env> {
       const turn = agent.turn.prompt({ input: input.prompt });
       try {
         const result = await turn.result();
-        const mercatorCumulative = [...mcpChannels.values()]
-          .reduce((total, amount) => total + amount, 0n);
-        return json({
-          final_message: result.finalMessage,
-          usage: result.usage,
-          payments: {
-            model_cumulative: formatUnits(modelMpp.cumulative, 6),
-            mercator_cumulative: formatUnits(mercatorCumulative, 6),
-          },
-        });
+        try {
+          const mercatorCumulative = [...mcpChannels.values()]
+            .reduce((total, amount) => total + amount, 0n);
+          return json({
+            final_message: result.finalMessage,
+            usage: await result.usage(),
+            payments: {
+              model_cumulative: formatUnits(modelMpp.cumulative, 6),
+              mercator_cumulative: formatUnits(mercatorCumulative, 6),
+            },
+          });
+        } finally {
+          result.dispose();
+        }
       } finally {
         turn.dispose();
       }

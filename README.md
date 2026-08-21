@@ -304,12 +304,21 @@ const agent = await Agent.create({
   }],
 });
 
-const turn = agent.turn.prompt({ input: "Fix issue 42." });
-const result = await turn.result();
-console.log(result.finalMessage, result.usage);
-turn.dispose();
-
-await agent.session.shutdown();
+try {
+  const turn = agent.turn.prompt({ input: "Fix issue 42." });
+  try {
+    const result = await turn.result();
+    try {
+      console.log(result.finalMessage, await result.usage());
+    } finally {
+      result.dispose();
+    }
+  } finally {
+    turn.dispose();
+  }
+} finally {
+  await agent.session.shutdown();
+}
 ```
 
 Use `Transport.chatGpt({ subscription })` for a caller-owned ChatGPT

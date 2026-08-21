@@ -26,7 +26,11 @@ const agent = await Agent.create({
 const turn = agent.turn.prompt({ input: "Summarize this repository." });
 try {
   const result = await turn.result();
-  console.log(result.finalMessage);
+  try {
+    console.log(result.finalMessage, await result.usage());
+  } finally {
+    result.dispose();
+  }
 } finally {
   turn.dispose();
   await agent.session.shutdown();
@@ -35,7 +39,10 @@ try {
 
 `Agent.create` returns one retained session. `turn.result()` does not depend on
 an event consumer, and a second prompt automatically reuses committed history
-and transport state.
+and transport state. The result is an opaque completed-turn handle: its final
+message is eager, while `await result.usage()` and `await result.snapshot()`
+materialize immutable values on demand. Call `result.dispose()` after its last
+materialization or historical fork.
 
 ## Build in order
 

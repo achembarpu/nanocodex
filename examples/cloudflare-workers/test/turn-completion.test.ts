@@ -1,0 +1,62 @@
+import { describe, expect, it, vi } from "vitest";
+
+import type { Turn, TurnResult, TurnUsage } from "nanocodex";
+import { materializeTurnTerminal } from "../src/turn-completion";
+
+const usage = {
+  input_tokens: 10,
+  cached_input_tokens: 2,
+  cache_write_input_tokens: 0,
+  output_tokens: 3,
+  reasoning_output_tokens: 1,
+  total_tokens: 13,
+  estimated_cost: null,
+  cost_status: "usage_not_reported",
+} satisfies TurnUsage;
+
+describe("materializeTurnTerminal", () => {
+  it("awaits usage, preserves the protocol shape, and releases the result", async () => {
+    const dispose = vi.fn();
+    const result = turnResult({ dispose, usage: vi.fn(async () => usage) });
+
+    await expect(materializeTurnTerminal("turn-1", turnWith(result))).resolves.toEqual({
+      type: "turn_completed",
+      id: "turn-1",
+      final_message: "done",
+      usage,
+    });
+    expect(result.usage).toHaveBeenCalledOnce();
+    expect(dispose).toHaveBeenCalledOnce();
+  });
+
+  it("turns lazy usage failures into one terminal failure and releases the result", async () => {
+    const dispose = vi.fn();
+    const result = turnResult({
+      dispose,
+      usage: vi.fn(async () => { throw new Error("usage payload is invalid"); }),
+    });
+
+    await expect(materializeTurnTerminal("turn-2", turnWith(result))).resolves.toEqual({
+      type: "turn_failed",
+      id: "turn-2",
+      error: "usage payload is invalid",
+    });
+    expect(result.usage).toHaveBeenCalledOnce();
+    expect(dispose).toHaveBeenCalledOnce();
+  });
+});
+
+function turnResult(overrides: {
+  dispose(): void;
+  usage(): Promise<TurnUsage>;
+}): TurnResult {
+  return {
+    finalMessage: "done",
+    snapshot: async () => { throw new Error("snapshot should not be materialized"); },
+    ...overrides,
+  } as unknown as TurnResult;
+}
+
+function turnWith(result: TurnResult): Turn {
+  return { result: async () => result } as unknown as Turn;
+}

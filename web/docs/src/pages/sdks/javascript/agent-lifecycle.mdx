@@ -19,11 +19,21 @@ const turns = [];
 try {
   const first = agent.turn.prompt({ input: "Remember identifier COBALT_7." });
   turns.push(first);
-  console.log((await first.result()).finalMessage);
+  const firstResult = await first.result();
+  try {
+    console.log(firstResult.finalMessage);
+  } finally {
+    firstResult.dispose();
+  }
 
   const second = agent.turn.prompt({ input: "Return the identifier." });
   turns.push(second);
-  console.log((await second.result()).finalMessage);
+  const secondResult = await second.result();
+  try {
+    console.log(secondResult.finalMessage);
+  } finally {
+    secondResult.dispose();
+  }
 } finally {
   for (const turn of turns) turn.dispose();
   unwatch();
@@ -40,13 +50,15 @@ then dispose the wrapper.
 
 `turn.steer(instruction)` adds input at the next safe model boundary.
 `turn.cancel()` targets that exact active or queued turn. `turn.result()` returns
-the typed committed result, including final message, response items, usage,
-cost status, and snapshot.
+an opaque committed result handle. Its final message is eager; await `usage()`
+or `snapshot()` to materialize those immutable values, then call
+`result.dispose()` after its last materialization or historical fork.
 
 Use `agent.session.fork({ at: result })` for an independent session at a
-completed historical boundary. A branch owns its own event watcher and must be
-shut down. The root session shuts down Rust-backed subagent children it owns;
-applications should not maintain a parallel JavaScript scheduler.
+completed historical boundary, and keep the result alive until that asynchronous
+fork resolves. A branch owns its own event watcher and must be shut down. The
+root session shuts down Rust-backed subagent children it owns; applications
+should not maintain a parallel JavaScript scheduler.
 
 ## Use decorated or standalone actions
 
@@ -56,9 +68,17 @@ functional composition:
 
 ```js
 const turn = Actions.turn.prompt(agent, { input: "Explain the current state." });
-const result = await Actions.turn.getResult(turn);
-console.log(result.finalMessage);
-turn.dispose();
+try {
+  const result = await Actions.turn.getResult(turn);
+  try {
+    const usage = await Actions.turn.getUsage(result);
+    console.log(result.finalMessage, usage);
+  } finally {
+    result.dispose();
+  }
+} finally {
+  turn.dispose();
+}
 ```
 
 Read the complete
