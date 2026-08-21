@@ -16,9 +16,10 @@ protocol.
 - TanStack Virtual for the commit quick-jump and evaluation indexes
 - Derived job, trial, trajectory, and verifier views
 
-The visual system follows the local Paradigm website's semantic tokens,
-typography roles, grid, controls, and search treatment while using system font
-fallbacks rather than the site's proprietary font files.
+The visual and content direction is captured in [`DESIGN.md`](DESIGN.md): a
+Berkeley Mono-first, black-and-white simplification inspired by fx.sh and shaped
+around Nanocodex's library ownership model. Treat that brief as the north star
+while the existing surfaces are recomposed incrementally.
 
 ## Development
 
@@ -176,9 +177,19 @@ working tree and open in a fullscreen dock. Reusing an artifact ID replaces the
 interface in place, so voice or text turns can continuously retheme and extend
 it. Generated code has no imports, network access, or access to the parent page;
 explicit `sendPrompt` actions re-enter the normal queued prompt lifecycle.
-A user key takes precedence over the optional deployment-owned
-`OPENAI_API_KEY`; forgetting or expiring it falls back to that deployment key
-when present.
+A user key or ChatGPT session takes precedence over optional deployment-sponsored
+guest access. Guest access still uses the normal Responses WebSocket, typed
+session, Code Mode, and browser-tool lifecycle; it is not the unrelated
+logged-out ChatGPT backend. The Worker enables the deployment `OPENAI_API_KEY`
+only when `GUEST_ACCESS_ENABLED=true`, the request matches
+`GUEST_ACCESS_ORIGIN`, and production has every configured global and
+pseudonymous-client quota binding. Socket opens, every `response.create`, web
+tool calls, and image calls are metered before upstream work. Edge minute
+limits absorb floods; the `GUEST_QUOTA` Durable Object serializes hard per-client
+and deployment-wide daily sponsor budgets, so a retained socket cannot create
+unbounded model spend. A presented user
+or ChatGPT session that cannot be read fails explicitly instead of silently
+spending the sponsor credential.
 
 The reusable `browser(...)` tool bundle gives the browser agent a bounded
 `dataset` tool. It can inspect public
@@ -231,10 +242,21 @@ Tempo Wallet iframe require a secure context; trusted local HTTPS exercises the
 same embedded flow as production.
 
 Local development reads the optional ignored root `.env` through the repository
-workflow. For a shared demo fallback, configure the deployed Worker with
-`wrangler secret put OPENAI_API_KEY`. BYOK itself uses the `BYOK_SESSIONS`
-Durable Object binding declared in `wrangler.jsonc` and does not require a
+workflow. To sponsor the bounded guest path, configure the deployed Worker with
+`wrangler secret put OPENAI_API_KEY` and deliberately set its canonical
+`GUEST_ACCESS_ORIGIN`; `wrangler.jsonc` owns the explicit enable flag and quota
+bindings. Signed-out browsers start that guest session automatically when it is
+available and always retain a direct upgrade to ChatGPT sign-in. BYOK itself
+uses the `BYOK_SESSIONS` Durable Object binding and does not require a
 deployment-owned OpenAI key.
+
+The browser agent does not use JavaScript Promise Integration (JSPI). Its
+consumer startup gate checks only the platform APIs used by the shipped path:
+a secure context, module Worker support, WebAssembly, WebSocket,
+`crypto.randomUUID`, OPFS, and Web Locks. These are normal current stable
+Safari/iPhone Safari capabilities; the real wasm-bindgen initialization remains
+the authority for the shipped module and reports an actionable failure instead
+of requiring Safari Technology Preview or a beta-only JSPI API.
 
 Streaming events are coalesced once per animation frame before updating the
 semantic transcript, and each independently scrolling transcript is

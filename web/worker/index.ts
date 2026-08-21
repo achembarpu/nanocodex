@@ -22,15 +22,20 @@ import {
 } from "./threadRoutes.ts";
 import { ThreadGitRepository } from "./threadRepository.ts";
 import {
+  GUEST_QUOTA,
+  GuestQuota,
   apiKeyActorId,
+  guestProtectionConfigured,
   limitAgentOperation,
+  limitGuestOperation,
   limitLoginStart,
   limitSessionPoll,
   type PublicSecurityEnv,
 } from "./publicSecurity.ts";
 import { CHATGPT_REALTIME_INSTRUCTIONS } from "nanocodex/browser/realtime";
+import { routeLinkPreview } from "./linkPreview.ts";
 
-export { ChatGptSession, EvalCoordinator, GitRepository, ThreadGitRepository };
+export { ChatGptSession, EvalCoordinator, GitRepository, GuestQuota, ThreadGitRepository };
 
 const json = (body: unknown, init?: ResponseInit) =>
   Response.json(body, {
@@ -59,6 +64,10 @@ const CODEX_ORIGINATOR = "codex_cli_rs";
 const CODEX_USER_AGENT = "codex_cli_rs/0.0.0";
 const MAX_JSON_BODY_CHARS = 32 * 1024 * 1024;
 const MAX_SEARCH_OUTPUT_CHARS = 1024 * 1024;
+const MAX_WEB_OPERATION_ITEMS = 16;
+const MAX_IMAGE_INPUT_CHARS = 8 * 1024 * 1024;
+const MAX_IMAGE_INPUT_TOTAL_CHARS = 20 * 1024 * 1024;
+const MAX_IMAGE_PROMPT_CHARS = 16 * 1024;
 const MAX_API_KEY_CHARS = 1_024;
 const MAX_REALTIME_SDP_CHARS = 1024 * 1024;
 const MAX_REALTIME_STARTUP_CONTEXT_BYTES = 24 * 1024;
@@ -76,6 +85,8 @@ type WorkerEnv = GitStorageEnv & ThreadGitStorageEnv & EvalStorageEnv & ChatGptE
   ASSETS?: Fetcher;
   ENVIRONMENT: string;
   DEPLOYMENT_SHA?: string;
+  GUEST_ACCESS_ENABLED?: string;
+  GUEST_ACCESS_ORIGIN?: string;
   OPENAI_API_KEY?: string;
   CHATGPT_ISSUER?: string;
   BYOK_SESSIONS?: DurableObjectNamespace;
@@ -123,7 +134,8 @@ export default {
 
     if (url.pathname === "/api/health" && request.method === "GET") {
       const resolved = await resolveCredential(request, env, "health");
-      const credential = resolved instanceof Response ? undefined : resolved;
+      if (resolved instanceof Response) return resolved;
+      const credential = resolved;
       if (credential?.kind === "chatgpt" && context) {
         context.waitUntil(warmChatGptEgress(env, credential.sessionId));
       }
@@ -133,6 +145,7 @@ export default {
         deployment_sha: GIT_SHA_PATTERN.test(env.DEPLOYMENT_SHA ?? "")
           ? env.DEPLOYMENT_SHA
           : null,
+        guest_access: guestAccessHealth(request, env),
         service: "nanocodex",
         runtime: "cloudflare-workers",
         status: "ok",
@@ -192,24 +205,12 @@ export default {
       );
     }
 
-    if (isDocumentNavigation(request) && env.ASSETS) {
-      return env.ASSETS.fetch(new Request(new URL("/", url), {
-        headers: request.headers,
-        method: request.method,
-      }));
-    }
+    const linkPreview = await routeLinkPreview(request, env, url);
+    if (linkPreview != null) return linkPreview;
+
     return json({ error: "not_found" }, { status: 404 });
   },
 };
-
-function isDocumentNavigation(request: Request): boolean {
-  if (request.method !== "GET" && request.method !== "HEAD") return false;
-  const destination = request.headers.get("sec-fetch-dest");
-  if (destination && destination !== "document") return false;
-  const mode = request.headers.get("sec-fetch-mode");
-  if (mode) return mode === "navigate";
-  return request.headers.get("accept")?.includes("text/html") === true;
-}
 
 function consumerDiscovery(url: URL): Response {
   return Response.json(
@@ -246,6 +247,11 @@ async function proxyWebSearch(request: Request, env: WorkerEnv, url: URL): Promi
   if (queries === 4 && !["medium", "long"].includes(String(commands.response_length))) {
     return json({ error: "four search queries require medium or long response_length" }, { status: 400 });
   }
+  if (webOperationItemCount(commands) > MAX_WEB_OPERATION_ITEMS) {
+    return json({ error: "web__run accepts at most 16 operation items per request" }, { status: 400 });
+  }
+  const limited = await limitCredentialOperation(request, env, credential, "search");
+  if (limited) return limited;
   const upstreamUrl = credential.kind === "chatgpt"
     ? `${chatGptApiBaseUrl(env)}/alpha/search`
     : WEB_SEARCH_URL;
@@ -279,12 +285,23 @@ async function proxyImageGeneration(request: Request, env: WorkerEnv, url: URL):
   if (decoded instanceof Response) return decoded;
   const prompt = typeof decoded.prompt === "string" ? decoded.prompt.trim() : "";
   if (!prompt) return json({ error: "image prompt must not be empty" }, { status: 400 });
+  if (prompt.length > MAX_IMAGE_PROMPT_CHARS) {
+    return json({ error: "image prompt exceeded 16 KiB" }, { status: 400 });
+  }
   const images = Array.isArray(decoded.images)
     ? decoded.images.filter((image): image is string => typeof image === "string")
     : [];
   if (images.length > 5 || images.some((image) => !image.startsWith("data:image/"))) {
     return json({ error: "image edits require at most five data-image inputs" }, { status: 400 });
   }
+  if (
+    images.some((image) => image.length > MAX_IMAGE_INPUT_CHARS)
+    || images.reduce((total, image) => total + image.length, 0) > MAX_IMAGE_INPUT_TOTAL_CHARS
+  ) {
+    return json({ error: "image edit inputs exceeded the 8 MiB each / 20 MiB total limit" }, { status: 413 });
+  }
+  const limited = await limitCredentialOperation(request, env, credential, "image");
+  if (limited) return limited;
   const imageUrl = credential.kind === "chatgpt"
     ? `${chatGptApiBaseUrl(env)}/images/${images.length ? "edits" : "generations"}`
     : images.length ? IMAGE_EDIT_URL : IMAGE_GENERATION_URL;
@@ -549,7 +566,18 @@ async function validateToolRequest(
   const resolved = await resolveCredential(request, env, operation);
   if (resolved instanceof Response) return resolved;
   if (!resolved) return json({ error: "OpenAI credentials are not configured" }, { status: 503 });
-  return await limitAgentOperation(env, resolved.actorId, operation) ?? resolved;
+  return resolved;
+}
+
+async function limitCredentialOperation(
+  request: Request,
+  env: WorkerEnv,
+  credential: Credential,
+  operation: "socket" | "search" | "image",
+): Promise<Response | undefined> {
+  return credential.source === "deployment"
+    ? limitGuestOperation(request, env, operation)
+    : limitAgentOperation(env, credential.actorId, operation);
 }
 
 async function readJsonBody(request: Request): Promise<Record<string, unknown> | Response> {
@@ -566,6 +594,11 @@ async function readJsonBody(request: Request): Promise<Record<string, unknown> |
 function hasWebOperation(commands: Record<string, unknown>): boolean {
   return ["search_query", "image_query", "open", "click", "find", "finance", "weather", "sports", "time"]
     .some((key) => Array.isArray(commands[key]) && commands[key].length > 0);
+}
+
+function webOperationItemCount(commands: Record<string, unknown>): number {
+  return ["search_query", "image_query", "open", "click", "find", "finance", "weather", "sports", "time"]
+    .reduce((total, key) => total + (Array.isArray(commands[key]) ? commands[key].length : 0), 0);
 }
 
 function openAiHeaders(credential: Credential): Record<string, string> {
@@ -675,7 +708,7 @@ async function setupResponsesWebSocket(
       return;
     }
     if (downstreamClosed) return;
-    const limited = await limitAgentOperation(env, credential.actorId, "socket");
+    const limited = await limitCredentialOperation(request, env, credential, "socket");
     if (limited) {
       await rejectResponsesWebSocket(downstream, limited);
       return;
@@ -716,7 +749,9 @@ async function setupResponsesWebSocket(
       const release = releaseLease();
       if (context) context.waitUntil(release);
       else void release;
-    });
+    }, credential.source === "deployment"
+      ? (frame) => limitGuestResponseFrame(request, env, frame)
+      : undefined);
     bridged = true;
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
@@ -951,16 +986,39 @@ async function clearByokSession(
 ): Promise<Response> {
   if (!sameOrigin(request, url, env)) return json({ error: "forbidden" }, { status: 403 });
   await deleteSession(request, env);
-  const credential = deploymentCredentialEnabled(env)
+  const credential = deploymentCredentialEnabled(request, env)
     ? { agent_configured: true, credential_source: "deployment" }
     : { agent_configured: false, credential_source: null };
   return json(credential, { headers: { "set-cookie": clearSessionCookie(url) } });
 }
 
-function deploymentCredentialEnabled(env: WorkerEnv): boolean {
-  return Boolean(env.OPENAI_API_KEY)
-    && env.ENVIRONMENT !== "production"
-    && env.ENVIRONMENT !== "preview";
+function deploymentCredentialEnabled(request: Request, env: WorkerEnv): boolean {
+  if (env.GUEST_ACCESS_ENABLED !== "true" || !env.OPENAI_API_KEY) return false;
+  let requestOrigin: string;
+  try {
+    requestOrigin = new URL(request.url).origin;
+  } catch {
+    return false;
+  }
+  if (!env.GUEST_ACCESS_ORIGIN || requestOrigin !== env.GUEST_ACCESS_ORIGIN) return false;
+  return guestProtectionConfigured(env);
+}
+
+function guestAccessHealth(request: Request, env: WorkerEnv) {
+  if (deploymentCredentialEnabled(request, env)) {
+    return {
+      state: "available",
+      quota: GUEST_QUOTA,
+    } as const;
+  }
+  return {
+    state: "unavailable",
+    reason: env.GUEST_ACCESS_ENABLED === "true" && env.OPENAI_API_KEY
+      ? env.GUEST_ACCESS_ORIGIN !== new URL(request.url).origin
+        ? "origin_not_allowed"
+        : "abuse_protection_unavailable"
+      : "not_configured",
+  } as const;
 }
 
 async function resolveCredential(
@@ -972,7 +1030,10 @@ async function resolveCredential(
   const subscription = await resolveSubscriptionCredential(request, env, operation, leaseId);
   if (subscription) return subscription;
   const sessionId = sessionIdFromRequest(request);
-  if (sessionId && env.BYOK_SESSIONS) {
+  if (sessionId) {
+    if (!env.BYOK_SESSIONS) {
+      return json({ error: "BYOK session storage is unavailable" }, { status: 503 });
+    }
     try {
       const stub = env.BYOK_SESSIONS.get(env.BYOK_SESSIONS.idFromName(sessionId));
       const response = await stub.fetch("https://byok.internal/credential");
@@ -986,10 +1047,18 @@ async function resolveCredential(
             source: "user",
           };
         }
+        return json({ error: "BYOK session credential is unavailable" }, { status: 503 });
       }
-    } catch { /* Fall through to a development-only deployment credential. */ }
+      if (response.status !== 404 && response.status !== 401) {
+        await response.body?.cancel();
+        return json({ error: "BYOK session lookup failed" }, { status: 503 });
+      }
+      await response.body?.cancel();
+    } catch {
+      return json({ error: "BYOK session lookup failed" }, { status: 503 });
+    }
   }
-  return deploymentCredentialEnabled(env)
+  return deploymentCredentialEnabled(request, env)
     ? {
         kind: "api_key",
         apiKey: env.OPENAI_API_KEY!,
@@ -1006,7 +1075,10 @@ async function resolveSubscriptionCredential(
   leaseId?: string,
 ): Promise<SubscriptionCredential | Response | undefined> {
   const sessionId = chatGptSessionIdFromRequest(request);
-  if (!sessionId || !env.CHATGPT_SESSIONS) return undefined;
+  if (!sessionId) return undefined;
+  if (!env.CHATGPT_SESSIONS) {
+    return json({ error: "ChatGPT session storage is unavailable" }, { status: 503 });
+  }
   try {
     const response = await chatGptStub(env, sessionId).fetch("https://chatgpt.internal/credential", {
       method: "POST",
@@ -1024,21 +1096,26 @@ async function resolveSubscriptionCredential(
           },
         });
       }
+      if (response.status !== 404 && response.status !== 401) {
+        await response.body?.cancel();
+        return json({ error: "ChatGPT session lookup failed" }, { status: 503 });
+      }
       await response.body?.cancel();
       return undefined;
     }
     const credential = await response.json<ChatGptCredential>();
-    return isChatGptCredential(credential)
-      ? {
-          ...credential,
-          actorId: `chatgpt:${credential.accountId}`,
-          sessionId,
-          ...(leaseId ? { leaseId } : {}),
-          source: "subscription",
-        }
-      : undefined;
+    if (!isChatGptCredential(credential)) {
+      return json({ error: "ChatGPT session credential is invalid" }, { status: 503 });
+    }
+    return {
+      ...credential,
+      actorId: `chatgpt:${credential.accountId}`,
+      sessionId,
+      ...(leaseId ? { leaseId } : {}),
+      source: "subscription",
+    };
   } catch {
-    return undefined;
+    return json({ error: "ChatGPT session lookup failed" }, { status: 503 });
   }
 }
 
@@ -1200,18 +1277,32 @@ function matchesRequestOrigin(value: string, url: URL, allowLoopback: boolean): 
   }
 }
 
-function bridge(left: WebSocket, right: WebSocket, onClose: () => void): void {
+type FrameGuard = (frame: string) => Promise<Response | undefined>;
+
+function bridge(
+  left: WebSocket,
+  right: WebSocket,
+  onClose: () => void,
+  leftGuard?: FrameGuard,
+): void {
   let closed = false;
   const close = () => {
     if (closed) return;
     closed = true;
     onClose();
   };
-  forward(left, right, close);
+  forward(left, right, close, leftGuard);
   forward(right, left, close);
 }
 
-function forward(source: WebSocket, destination: WebSocket, onClose: () => void): void {
+function forward(
+  source: WebSocket,
+  destination: WebSocket,
+  onClose: () => void,
+  guard?: FrameGuard,
+): void {
+  let forwarding = Promise.resolve();
+  let stopped = false;
   source.addEventListener("message", (event) => {
     if (typeof event.data !== "string") {
       closeSocket(source, 1003, "text frames required");
@@ -1223,7 +1314,21 @@ function forward(source: WebSocket, destination: WebSocket, onClose: () => void)
       closeSocket(destination, 1009, "message too large");
       return;
     }
-    if (destination.readyState === WebSocket.OPEN) destination.send(event.data);
+    const frame = event.data;
+    forwarding = forwarding.then(async () => {
+      if (stopped) return;
+      const rejection = await guard?.(frame);
+      if (rejection) {
+        stopped = true;
+        await rejectGuestResponseFrame(source, destination, rejection);
+        return;
+      }
+      if (destination.readyState === WebSocket.OPEN) destination.send(frame);
+    }).catch(() => {
+      stopped = true;
+      closeSocket(source, 1011, "frame policy failed");
+      closeSocket(destination, 1011, "frame policy failed");
+    });
   });
   source.addEventListener("close", (event) => {
     onClose();
@@ -1233,6 +1338,84 @@ function forward(source: WebSocket, destination: WebSocket, onClose: () => void)
     onClose();
     closeSocket(destination, 1011, "peer WebSocket failed");
   });
+}
+
+async function limitGuestResponseFrame(
+  request: Request,
+  env: WorkerEnv,
+  frame: string,
+): Promise<Response | undefined> {
+  let value: Record<string, unknown> | undefined;
+  try {
+    value = asObject(JSON.parse(frame));
+  } catch {
+    return undefined;
+  }
+  if (value?.type !== "response.create") return undefined;
+  if (value.model !== "gpt-5.6-sol") {
+    return guestFramePolicyRejection(
+      "Sponsored guest sessions support only the deployment's gpt-5.6-sol model.",
+    );
+  }
+  if (value.service_tier !== undefined) {
+    return guestFramePolicyRejection(
+      "Sponsored guest sessions do not allow a paid service tier. Sign in with ChatGPT to use account-specific routing.",
+    );
+  }
+  if (value.background === true) {
+    return guestFramePolicyRejection(
+      "Sponsored guest sessions do not allow detached background responses.",
+    );
+  }
+  return limitGuestOperation(request, env, "turn");
+}
+
+function guestFramePolicyRejection(error: string): Response {
+  return Response.json({ error, code: "guest_request_rejected" }, {
+    status: 400,
+    headers: {
+      "cache-control": "no-store",
+      "x-content-type-options": "nosniff",
+    },
+  });
+}
+
+async function rejectGuestResponseFrame(
+  source: WebSocket,
+  destination: WebSocket,
+  response: Response,
+): Promise<void> {
+  const retryAfter = Number(response.headers.get("retry-after"));
+  const exhausted = response.status === 429;
+  const detail = await response.json().catch(() => undefined) as {
+    code?: unknown;
+    error?: unknown;
+  } | undefined;
+  const message = typeof detail?.error === "string"
+    ? detail.error
+    : exhausted
+      ? "Guest model quota is exhausted. Retry later or sign in with ChatGPT."
+      : "Guest model access is temporarily unavailable. Sign in with ChatGPT or try again later.";
+  try {
+    source.send(JSON.stringify({
+      type: "error",
+      error: {
+        type: typeof detail?.code === "string"
+          ? detail.code
+          : exhausted ? "guest_quota_exhausted" : "guest_access_unavailable",
+        code: exhausted
+          ? "insufficient_quota"
+          : response.status === 400 ? "invalid_request_error" : "server_error",
+        message,
+        ...(Number.isFinite(retryAfter) ? { retry_after: retryAfter } : {}),
+      },
+    }));
+  } finally {
+    try { source.close(1013, exhausted ? "guest quota exhausted" : "guest access unavailable"); }
+    catch { /* The browser may already have left. */ }
+    try { destination.close(1013, "guest response rejected"); }
+    catch { /* The upstream may already have closed. */ }
+  }
 }
 
 function closeSocket(socket: WebSocket, code: number, reason: string): void {

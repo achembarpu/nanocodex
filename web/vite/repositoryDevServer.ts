@@ -55,6 +55,27 @@ const sourcePathspec = [
 
 export function repositoryDevServer(): Plugin {
   let allowedFiles = new Set<string>();
+  let commitMetadataCache:
+    | { head: string; commits: Awaited<ReturnType<typeof buildCommitMetadata>> }
+    | undefined;
+  let commitMetadataRequest:
+    | { head: string; promise: ReturnType<typeof buildCommitMetadata> }
+    | undefined;
+
+  async function getCommitMetadata() {
+    const head = await git(["rev-parse", "HEAD"]);
+    if (commitMetadataCache?.head === head) return commitMetadataCache.commits;
+    if (commitMetadataRequest?.head === head) return commitMetadataRequest.promise;
+
+    const promise = buildCommitMetadata().then((commits) => {
+      commitMetadataCache = { head, commits };
+      return commits;
+    }).finally(() => {
+      if (commitMetadataRequest?.promise === promise) commitMetadataRequest = undefined;
+    });
+    commitMetadataRequest = { head, promise };
+    return promise;
+  }
 
   return {
     name: "nanocodex-repository-dev-server",
@@ -79,7 +100,7 @@ export function repositoryDevServer(): Plugin {
             return;
           }
           if (url.pathname === `${endpointPrefix}/commits`) {
-            const commits = await buildCommitMetadata();
+            const commits = await getCommitMetadata();
             const rawPage = url.searchParams.get("page");
             if (rawPage == null) {
               sendJson(response, commits);

@@ -59,5 +59,9 @@ export type WtermLike = {
 };
 
 export function encodeXtermKeyEvent(event: KeyboardEvent): string | null;
+export function isTerminalSubmitKeyEvent(
+  event: Pick<KeyboardEvent, "key" | "shiftKey" | "isComposing" | "keyCode">,
+  composing?: boolean,
+): boolean;
 export function xtermAdapter(terminal: XtermLike): TerminalHost;
 export function wtermAdapter(terminal: WtermLike): TerminalHost;

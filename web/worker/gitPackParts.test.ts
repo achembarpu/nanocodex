@@ -16,16 +16,16 @@ test("repository parts stream the exact stored bytes in order", async () => {
   const bytes = new Uint8Array(await new Response(stream).arrayBuffer());
 
   assert.deepEqual(bytes, new Uint8Array([1, 2, 3, 4, 5, 6]));
-  assert.ok(bucket.maxConcurrentHeads > 1);
-  assert.ok(bucket.maxConcurrentHeads <= 4);
+  assert.equal(bucket.headCalls, 0);
 });
 
-test("repository parts reject missing and size-mismatched objects before streaming", async () => {
+test("repository parts reject missing and size-mismatched objects while streaming", async () => {
   const missing = new MemoryBucket(new Map());
   await assert.rejects(
-    createRepositoryPartsStream(missing as unknown as R2Bucket, [
-      { key: "packs/0000.pack", size: 1 },
-    ]),
+    new Response(await createRepositoryPartsStream(
+      missing as unknown as R2Bucket,
+      [{ key: "packs/0000.pack", size: 1 }],
+    )).arrayBuffer(),
     /missing/,
   );
 
@@ -33,9 +33,10 @@ test("repository parts reject missing and size-mismatched objects before streami
     ["packs/0000.pack", new Uint8Array([1, 2])],
   ]));
   await assert.rejects(
-    createRepositoryPartsStream(mismatched as unknown as R2Bucket, [
-      { key: "packs/0000.pack", size: 1 },
-    ]),
+    new Response(await createRepositoryPartsStream(
+      mismatched as unknown as R2Bucket,
+      [{ key: "packs/0000.pack", size: 1 }],
+    )).arrayBuffer(),
     /invalid size/,
   );
 });
@@ -83,23 +84,16 @@ test("repository part cancellation reaches the active R2 body", async () => {
 
 class MemoryBucket {
   readonly objects: Map<string, Uint8Array>;
-  maxConcurrentHeads = 0;
-  #activeHeads = 0;
+  headCalls = 0;
 
   constructor(objects: Map<string, Uint8Array>) {
     this.objects = objects;
   }
 
   async head(key: string) {
-    this.#activeHeads++;
-    this.maxConcurrentHeads = Math.max(this.maxConcurrentHeads, this.#activeHeads);
-    await new Promise<void>((resolve) => setImmediate(resolve));
-    try {
-      const bytes = this.objects.get(key);
-      return bytes == null ? null : { size: bytes.byteLength };
-    } finally {
-      this.#activeHeads--;
-    }
+    this.headCalls++;
+    const bytes = this.objects.get(key);
+    return bytes == null ? null : { size: bytes.byteLength };
   }
 
   async get(key: string) {

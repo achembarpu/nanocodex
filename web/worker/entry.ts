@@ -6,6 +6,7 @@ export {
   ChatGptSession,
   EvalCoordinator,
   GitRepository,
+  GuestQuota,
   ThreadGitRepository,
 } from "./index.ts";
 

@@ -21,7 +21,9 @@ export async function createWorkerManagedWebSocket(
     | { agent_configured?: boolean }
     | undefined;
   if (!health?.agent_configured) {
-    throw new Error("Connect to start the agent");
+    throw new Error(
+      "Guest access is unavailable on this deployment. Sign in with ChatGPT to start the agent.",
+    );
   }
 
   socketUrl.searchParams.set("session_id", sessionId);

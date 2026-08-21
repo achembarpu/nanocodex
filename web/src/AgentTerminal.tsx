@@ -8,6 +8,7 @@ import {
   useMemo,
   useRef,
   useState,
+  type ReactNode,
 } from "react";
 import {
   NanocodexProvider,
@@ -16,7 +17,7 @@ import {
 } from "nanocodex-react";
 import { Terminal as Xterm, type Terminal as XtermInstance } from "@xterm/xterm";
 import { FitAddon } from "@xterm/addon-fit";
-import { encodeXtermKeyEvent } from "nanocodex-terminal";
+import { encodeXtermKeyEvent, isTerminalSubmitKeyEvent } from "nanocodex-terminal";
 import type { Address } from "viem";
 import "@xterm/xterm/css/xterm.css";
 import "./AgentTerminal.css";
@@ -31,10 +32,17 @@ import {
   type WebWorkerMessage,
 } from "./nanocodex";
 import { getBrowserThread } from "nanocodex/tools/browser";
+import { browserAgentCapabilityError } from "./browserAgentCapabilities";
+import {
+  availableVisualHeight,
+  GenerationRequestOwner,
+  terminalRunningForStatus,
+} from "./agentTerminalLifecycle";
 
 const MppControls = lazy(async () => ({
   default: (await import("./MppControls")).MppControls,
 }));
+const TOUCH_INPUT_QUERY = "(pointer: coarse), (any-pointer: coarse)";
 
 export type AgentTerminalMode = "preview" | "full" | "hidden";
 
@@ -61,21 +69,39 @@ function AgentTerminalDemo({
   theme: "light" | "dark";
 }) {
   const agent = useNanocodex<WebWorkerCommand>();
-  const thread = useMemo(getBrowserThread, []);
+  const capabilityError = useMemo(() => browserAgentCapabilityError(), []);
+  const thread = useMemo(() => capabilityError ? undefined : getBrowserThread(), [capabilityError]);
   const [transport, setTransport] = useState<AgentTransport>("openai");
   const [credentialSource, setCredentialSource] = useState<CredentialSource | undefined>();
   const [payment, setPayment] = useState<PaymentStatus>();
   const [jsonl, setJsonl] = useState<string[]>([]);
+  const [touchDraft, setTouchDraft] = useState("");
+  const [terminalRunning, setTerminalRunning] = useState(false);
+  const [chatGptStatus, setChatGptStatus] = useState<ChatGptStatus>();
+  const [automaticRetryPending, setAutomaticRetryPending] = useState(false);
+  const [workerRecoveryAttempt, setWorkerRecoveryAttempt] = useState(0);
+  const touchInput = useTouchInput();
   const workerRecoveryAttempts = useRef(0);
   const terminal = useRef<XtermInstance | undefined>(undefined);
+  const pendingTerminalFrame = useRef<string | undefined>(undefined);
   useNanocodexMessage<WebWorkerMessage>((message) => {
     if (message.type === "mppPayment") setPayment(message.payment);
     if (message.type === "mppJsonl") {
       setJsonl((current) => [...current.slice(-99), message.line]);
     }
-    if (message.type === "terminalWrite") terminal.current?.write(message.data);
+    if (message.type === "terminalWrite") {
+      if (terminal.current) {
+        terminal.current.write(message.data);
+      } else {
+        // Worker frames repaint the complete terminal, so the newest frame is
+        // sufficient if startup wins the race with xterm mounting.
+        pendingTerminalFrame.current = message.data;
+      }
+    }
+    if (message.type === "terminalActivity") setTerminalRunning(message.running);
   });
   useEffect(() => {
+    if (capabilityError) return;
     const prewarm = () => prewarmNanocodexWorker();
     if ("requestIdleCallback" in window) {
       const id = window.requestIdleCallback(prewarm, { timeout: 1_500 });
@@ -83,7 +109,7 @@ function AgentTerminalDemo({
     }
     const id = setTimeout(prewarm, 1_000);
     return () => clearTimeout(id);
-  }, []);
+  }, [capabilityError]);
   useEffect(() => {
     let active = true;
     let deploymentSha: string | undefined;
@@ -119,7 +145,14 @@ function AgentTerminalDemo({
   useEffect(() => {
     setPayment(undefined);
     setJsonl([]);
-    if (transport !== "openai") return;
+    setTerminalRunning(false);
+    setAutomaticRetryPending(false);
+    setWorkerRecoveryAttempt(0);
+    workerRecoveryAttempts.current = 0;
+    if (transport !== "openai" || !thread) {
+      nanocodexConfig.disconnect();
+      return;
+    }
     if (credentialSource === "subscription") {
       nanocodexConfig.restart(startCommand("chatgpt", thread.id));
     } else if (credentialSource === "user" || credentialSource === "deployment") {
@@ -127,15 +160,19 @@ function AgentTerminalDemo({
     } else {
       nanocodexConfig.disconnect();
     }
-  }, [credentialSource, thread.id, transport]);
+  }, [credentialSource, thread, transport]);
   useEffect(() => {
     if (agent.status === "ready") {
       workerRecoveryAttempts.current = 0;
+      setAutomaticRetryPending(false);
+      setWorkerRecoveryAttempt(0);
       return;
     }
+    setTerminalRunning((running) => terminalRunningForStatus(agent.status, running));
     if (
       agent.status !== "error"
       || transport !== "openai"
+      || !thread
       || workerRecoveryAttempts.current >= 2
     ) return;
     const nextTransport = credentialSource === "subscription"
@@ -145,23 +182,58 @@ function AgentTerminalDemo({
         : undefined;
     if (!nextTransport) return;
     workerRecoveryAttempts.current += 1;
+    const attempt = workerRecoveryAttempts.current;
+    setWorkerRecoveryAttempt(attempt);
+    setAutomaticRetryPending(true);
     const timer = window.setTimeout(() => {
+      setAutomaticRetryPending(false);
       nanocodexConfig.restart(startCommand(nextTransport, thread.id));
-    }, 250);
-    return () => window.clearTimeout(timer);
-  }, [agent.status, credentialSource, thread.id, transport]);
+    }, 400 * attempt);
+    return () => {
+      window.clearTimeout(timer);
+      setAutomaticRetryPending(false);
+    };
+  }, [agent.status, credentialSource, thread, transport]);
   const startMpp = useCallback((payerAddress: Address, accessKeyAddress: Address) => {
+    if (!thread) return;
     nanocodexConfig.restart(startCommand("mpp", thread.id, payerAddress, accessKeyAddress));
-  }, [thread.id]);
+  }, [thread]);
   const disconnectMpp = useCallback(() => nanocodexConfig.disconnect(), []);
   const selectTransport = (next: AgentTransport) => {
     if (next === transport) return;
     nanocodexConfig.disconnect();
     setTransport(next);
   };
-  const unavailableMessage = transport !== "openai" && agent.status === "error"
-    ? "Could not connect. Try again."
-    : "Connect to start.";
+  const retryAgent = useCallback(() => {
+    if (!thread) return;
+    const nextTransport = credentialSource === "subscription"
+      ? "chatgpt"
+      : credentialSource === "user" || credentialSource === "deployment"
+        ? "openai"
+        : undefined;
+    if (!nextTransport) return;
+    workerRecoveryAttempts.current = 0;
+    setWorkerRecoveryAttempt(0);
+    setAutomaticRetryPending(false);
+    nanocodexConfig.restart(startCommand(nextTransport, thread.id));
+  }, [credentialSource, thread]);
+  const unavailableMessage = inactiveTerminalMessage({
+    agentError: agent.error,
+    agentStatus: agent.status,
+    authStatus: chatGptStatus,
+    automaticRetryPending,
+    capabilityError,
+    source: credentialSource,
+    transport,
+  });
+  const submitTouchPrompt = useCallback((input: string, intent: "queue" | "steer") => {
+    if (agent.status !== "ready" || !input.trim()) return;
+    agent.dispatch({ type: "terminalSubmit", input, intent });
+    setTouchDraft("");
+  }, [agent]);
+  const cancelTouchTurn = useCallback(() => {
+    if (agent.status === "ready") agent.dispatch({ type: "terminalCancel" });
+  }, [agent]);
   useEffect(() => {
     if (agent.status !== "ready" || !terminal.current) return;
     agent.dispatch({
@@ -172,11 +244,17 @@ function AgentTerminalDemo({
   }, [agent]);
 
   return (
-    <div className="nanocodex-demo">
+    <div className={`nanocodex-demo is-${mode}`}>
       <SubscriptionBar
         agentStatus={agent.status}
+        agentError={agent.error}
         source={credentialSource}
         transport={transport}
+        automaticRetryPending={automaticRetryPending}
+        capabilityError={capabilityError}
+        recoveryAttempt={workerRecoveryAttempt}
+        onAuthStatusChange={setChatGptStatus}
+        onRetryAgent={retryAgent}
         onSelectTransport={selectTransport}
         onSourceChange={setCredentialSource}
       />
@@ -191,12 +269,28 @@ function AgentTerminalDemo({
         </Suspense>
       ) : null}
       <XtermSurface
+        composer={touchInput ? (
+          <TouchTerminalComposer
+            draft={touchDraft}
+            inactiveMessage={unavailableMessage}
+            running={terminalRunning}
+            status={agent.status}
+            onCancel={cancelTouchTurn}
+            onChange={setTouchDraft}
+            onSubmit={submitTouchPrompt}
+          />
+        ) : null}
         inactiveMessage={unavailableMessage}
         mode={mode}
         status={agent.status}
         theme={theme}
+        touchInput={touchInput}
         onReady={(instance) => {
           terminal.current = instance;
+          if (pendingTerminalFrame.current !== undefined) {
+            instance.write(pendingTerminalFrame.current);
+            pendingTerminalFrame.current = undefined;
+          }
           if (agent.status === "ready") {
             agent.dispatch({
               type: "terminalResize",
@@ -217,18 +311,22 @@ function AgentTerminalDemo({
 }
 
 function XtermSurface({
+  composer,
   inactiveMessage,
   mode,
   status,
   theme,
+  touchInput,
   onReady,
   onData,
   onResize,
 }: {
+  composer?: ReactNode;
   inactiveMessage: string;
   mode: AgentTerminalMode;
   status: "idle" | "starting" | "ready" | "stopped" | "error";
   theme: "light" | "dark";
+  touchInput: boolean;
   onReady(terminal: XtermInstance): void;
   onData(data: string): void;
   onResize(size: { cols: number; rows: number }): void;
@@ -267,20 +365,20 @@ function XtermSurface({
       latest.current.onData(data);
       return false;
     });
-    element.current.querySelector("textarea")?.setAttribute("aria-label", "Nanocodex terminal input");
+    configureXtermTextarea(terminal, touchInput);
     const data = terminal.onData((value) => latest.current.onData(value));
     const resize = terminal.onResize((size) => latest.current.onResize(size));
     const observer = new ResizeObserver(() => {
       if (latest.current.mode === "hidden") return;
       fit.fit();
       const current = latest.current;
-      if (current.status !== "ready" && current.status !== "starting") {
+      if (current.status !== "ready") {
         writeInactiveFrame(terminal, current.inactiveMessage);
       }
     });
     observer.observe(element.current);
     latest.current.onReady(terminal);
-    if (latest.current.mode === "full") terminal.focus();
+    if (latest.current.mode === "full" && !touchInput) terminal.focus();
     return () => {
       observer.disconnect();
       data.dispose();
@@ -291,13 +389,17 @@ function XtermSurface({
     };
   }, []);
 
+  useEffect(() => {
+    if (instance.current) configureXtermTextarea(instance.current, touchInput);
+  }, [touchInput]);
+
   useLayoutEffect(() => {
     const terminal = instance.current;
     const fit = fitAddon.current;
     const host = element.current;
     if (!terminal || !fit || !host) return;
     if (mode === "hidden") {
-      if (host.contains(window.document.activeElement)) {
+      if (host.parentElement?.contains(window.document.activeElement)) {
         (window.document.activeElement as HTMLElement | null)?.blur();
       }
       return;
@@ -306,25 +408,181 @@ function XtermSurface({
       if (!host.isConnected || host.offsetParent === null) return;
       fit.fit();
       latest.current.onResize({ cols: terminal.cols, rows: terminal.rows });
-      if (mode === "full") terminal.focus();
+      if (mode === "full" && !touchInput) terminal.focus();
     });
     return () => window.cancelAnimationFrame(frame);
-  }, [mode]);
+  }, [mode, touchInput]);
 
   useEffect(() => {
     if (instance.current) instance.current.options.theme = terminalTheme(theme);
   }, [theme]);
 
   useEffect(() => {
-    if (status === "ready" || status === "starting" || !instance.current) return;
+    const host = element.current;
+    const terminal = instance.current;
+    const fit = fitAddon.current;
+    const root = host?.closest<HTMLElement>(".nanocodex-demo");
+    const shell = host?.parentElement;
+    if (!host || !terminal || !fit || !root || !shell) return;
+    const viewport = window.visualViewport;
+    let frame = 0;
+    const measure = () => {
+      window.cancelAnimationFrame(frame);
+      frame = window.requestAnimationFrame(() => {
+        if (!host.isConnected || mode === "hidden") return;
+        if (viewport) {
+          const available = availableVisualHeight({
+            elementTop: root.getBoundingClientRect().top,
+            viewportHeight: viewport.height,
+            viewportOffsetTop: viewport.offsetTop,
+          });
+          root.style.setProperty("--terminal-visual-height", `${available}px`);
+          if (mode === "full") {
+            root.style.height = `${available}px`;
+          }
+          if (
+            touchInput
+            && (mode === "preview" || mode === "full")
+            && shell.contains(window.document.activeElement)
+          ) {
+            shell.style.removeProperty("height");
+            const naturalHeight = shell.getBoundingClientRect().height;
+            const shellAvailable = availableVisualHeight({
+              elementTop: shell.getBoundingClientRect().top,
+              minimum: 60,
+              viewportHeight: viewport.height,
+              viewportOffsetTop: viewport.offsetTop,
+            });
+            shell.style.height = `${Math.min(naturalHeight, shellAvailable)}px`;
+          } else if (mode === "preview" || mode === "full") {
+            shell.style.removeProperty("height");
+          }
+        } else if (mode === "full") {
+          root.style.height = "100%";
+        }
+        if (host.offsetParent === null) return;
+        fit.fit();
+        latest.current.onResize({ cols: terminal.cols, rows: terminal.rows });
+      });
+    };
+    measure();
+    viewport?.addEventListener("resize", measure);
+    viewport?.addEventListener("scroll", measure);
+    root.addEventListener("focusin", measure);
+    root.addEventListener("focusout", measure);
+    window.addEventListener("orientationchange", measure);
+    window.addEventListener("resize", measure);
+    return () => {
+      window.cancelAnimationFrame(frame);
+      viewport?.removeEventListener("resize", measure);
+      viewport?.removeEventListener("scroll", measure);
+      root.removeEventListener("focusin", measure);
+      root.removeEventListener("focusout", measure);
+      window.removeEventListener("orientationchange", measure);
+      window.removeEventListener("resize", measure);
+      root.style.removeProperty("--terminal-visual-height");
+      shell.style.removeProperty("height");
+      if (mode === "full") root.style.removeProperty("height");
+    };
+  }, [mode, touchInput]);
+
+  useEffect(() => {
+    if (status === "ready" || !instance.current) return;
     writeInactiveFrame(instance.current, inactiveMessage);
   }, [inactiveMessage, status]);
 
   return (
     <section className="agent-terminal-shell" aria-label="Live Nanocodex terminal">
       <div ref={element} className="agent-xterm" />
+      {composer}
     </section>
   );
+}
+
+function configureXtermTextarea(terminal: XtermInstance, touchInput: boolean) {
+  const textarea = terminal.textarea;
+  if (!textarea) return;
+  textarea.setAttribute("aria-label", "Nanocodex terminal input");
+  textarea.readOnly = touchInput;
+  textarea.disabled = touchInput;
+  textarea.inert = touchInput;
+  textarea.tabIndex = touchInput ? -1 : 0;
+  if (touchInput) {
+    textarea.setAttribute("aria-hidden", "true");
+    if (textarea === window.document.activeElement) textarea.blur();
+  } else {
+    textarea.removeAttribute("aria-hidden");
+  }
+}
+
+function TouchTerminalComposer({
+  draft,
+  inactiveMessage,
+  running,
+  status,
+  onCancel,
+  onChange,
+  onSubmit,
+}: {
+  draft: string;
+  inactiveMessage: string;
+  running: boolean;
+  status: "idle" | "starting" | "ready" | "stopped" | "error";
+  onCancel(): void;
+  onChange(value: string): void;
+  onSubmit(value: string, intent: "queue" | "steer"): void;
+}) {
+  const composing = useRef(false);
+  const ready = status === "ready";
+  const submit = () => {
+    if (!ready || !draft.trim()) return;
+    onSubmit(draft, running ? "steer" : "queue");
+  };
+  return (
+    <form
+      className={`agent-touch-composer${running ? " is-running" : ""}`}
+      aria-label="Nanocodex message composer"
+      onSubmit={(event) => {
+        event.preventDefault();
+        submit();
+      }}
+    >
+      <span className="agent-touch-rail" aria-hidden="true">│</span>
+      <textarea
+        aria-label="Message Nanocodex"
+        disabled={!ready}
+        enterKeyHint="send"
+        placeholder={ready ? "Message Nanocodex" : inactiveMessage}
+        rows={1}
+        value={draft}
+        onChange={(event) => onChange(event.currentTarget.value)}
+        onCompositionStart={() => { composing.current = true; }}
+        onCompositionEnd={() => { composing.current = false; }}
+        onKeyDown={(event) => {
+          if (!isTerminalSubmitKeyEvent(event.nativeEvent, composing.current)) return;
+          event.preventDefault();
+          submit();
+        }}
+      />
+      <div className="agent-touch-actions">
+        {running ? <button type="button" disabled={!ready} onClick={onCancel}>Stop</button> : null}
+        <button type="submit" disabled={!ready || !draft.trim()}>{running ? "Steer" : "Send"}</button>
+      </div>
+      <small>enter send · shift+enter newline</small>
+    </form>
+  );
+}
+
+function useTouchInput() {
+  const [matches, setMatches] = useState(() => window.matchMedia(TOUCH_INPUT_QUERY).matches);
+  useEffect(() => {
+    const query = window.matchMedia(TOUCH_INPUT_QUERY);
+    const update = () => setMatches(query.matches);
+    update();
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, []);
+  return matches;
 }
 
 function writeInactiveFrame(terminal: XtermInstance, message: string) {
@@ -398,6 +656,21 @@ function startCommand(
 }
 
 type CredentialSource = "subscription" | "user" | "deployment" | null;
+type GuestAccess =
+  | {
+      state: "available";
+      quota: {
+        periodSeconds: number;
+        sessionStarts: number;
+        modelResponses: number;
+        toolRequests: number;
+        imageRequests: number;
+      };
+    }
+  | {
+      state: "unavailable";
+      reason: "not_configured" | "abuse_protection_unavailable" | "origin_not_allowed";
+    };
 type ChatGptStatus =
   | { state: "signed_out" }
   | {
@@ -412,53 +685,116 @@ type ChatGptStatus =
   | { state: "error"; error: string };
 
 function SubscriptionBar({
+  agentError,
   agentStatus,
+  automaticRetryPending,
+  capabilityError,
+  recoveryAttempt,
   source,
   transport,
+  onAuthStatusChange,
+  onRetryAgent,
   onSelectTransport,
   onSourceChange,
 }: {
+  agentError: string | undefined;
   agentStatus: "idle" | "starting" | "ready" | "stopped" | "error";
+  automaticRetryPending: boolean;
+  capabilityError: string | undefined;
+  recoveryAttempt: number;
   source: CredentialSource | undefined;
   transport: AgentTransport;
+  onAuthStatusChange(status: ChatGptStatus): void;
+  onRetryAgent(): void;
   onSelectTransport(transport: AgentTransport): void;
   onSourceChange(source: CredentialSource): void;
 }) {
   const [status, setStatus] = useState<ChatGptStatus>();
+  const [guestAccess, setGuestAccess] = useState<GuestAccess>();
   const [busy, setBusy] = useState(false);
-  const refreshStatus = useCallback(async () => {
-    try {
-      const response = await fetch("/api/auth/chatgpt", {
-        credentials: "same-origin",
-      });
-      if (!response.ok) throw new Error(await credentialError(response));
-      const next = await response.json() as ChatGptStatus;
-      setStatus(next);
-      if (next.state === "authenticated") {
-        onSourceChange("subscription");
-      } else if (next.state === "pending") {
-        onSourceChange(null);
-      } else {
-        const health = await fetch("/api/health", { credentials: "same-origin" });
-        const payload = health.ok
-          ? await health.json() as { agent_configured?: boolean; credential_source?: unknown }
-          : undefined;
-        onSourceChange(payload?.agent_configured === true
-          && (payload.credential_source === "user" || payload.credential_source === "deployment")
-          ? payload.credential_source
-          : null);
+  const authGeneration = useRef(0);
+  const statusRef = useRef<ChatGptStatus | undefined>(undefined);
+  const refreshRequests = useRef(new GenerationRequestOwner<void>());
+  const publishStatus = useCallback((next: ChatGptStatus) => {
+    statusRef.current = next;
+    setStatus(next);
+    onAuthStatusChange(next);
+  }, [onAuthStatusChange]);
+  const refreshStatus = useCallback(() => {
+    const generation = authGeneration.current;
+    return refreshRequests.current.run(generation, async () => {
+      try {
+        const response = await fetch("/api/auth/chatgpt", {
+          cache: "no-store",
+          credentials: "same-origin",
+        });
+        if (!response.ok) throw await credentialRequestError(response);
+        const next = await response.json() as ChatGptStatus;
+        if (generation !== authGeneration.current) return;
+        publishStatus(next);
+        if (next.state === "authenticated") {
+          onSourceChange("subscription");
+        } else if (next.state === "pending") {
+          if (source !== "deployment") onSourceChange(null);
+        } else {
+          const health = await readHealthSession();
+          if (generation === authGeneration.current) {
+            setGuestAccess(health.guestAccess);
+            onSourceChange(health.source);
+          }
+        }
+      } catch (cause) {
+        if (generation !== authGeneration.current) return;
+        const current = statusRef.current;
+        if (current?.state === "pending") {
+          publishStatus({
+            ...current,
+            pollAfterMs: retryDelayMs(cause, current.pollAfterMs),
+          });
+          return;
+        }
+        if (current?.state === "authenticated") {
+          onSourceChange("subscription");
+          return;
+        }
+        try {
+          const health = await readHealthSession();
+          if (generation !== authGeneration.current) return;
+          setGuestAccess(health.guestAccess);
+          if (health.source === "subscription") {
+            publishStatus({ state: "authenticated" });
+            onSourceChange(health.source);
+            return;
+          }
+          onSourceChange(health.source);
+        } catch {
+          onSourceChange(null);
+        }
+        const next = {
+          state: "error",
+          error: cause instanceof Error ? cause.message : "Could not check the ChatGPT login.",
+        } satisfies ChatGptStatus;
+        publishStatus(next);
       }
-    } catch (cause) {
-      setStatus({
-        state: "error",
-        error: cause instanceof Error ? cause.message : "Could not check the ChatGPT login.",
-      });
-      onSourceChange(null);
-    }
-  }, [onSourceChange]);
+    });
+  }, [onSourceChange, publishStatus, source]);
 
   useEffect(() => {
     void refreshStatus();
+  }, [refreshStatus]);
+
+  useEffect(() => {
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === "visible") void refreshStatus();
+    };
+    window.addEventListener("focus", refreshWhenVisible);
+    window.addEventListener("pageshow", refreshWhenVisible);
+    document.addEventListener("visibilitychange", refreshWhenVisible);
+    return () => {
+      window.removeEventListener("focus", refreshWhenVisible);
+      window.removeEventListener("pageshow", refreshWhenVisible);
+      document.removeEventListener("visibilitychange", refreshWhenVisible);
+    };
   }, [refreshStatus]);
 
   useEffect(() => {
@@ -469,6 +805,7 @@ function SubscriptionBar({
   }, [refreshStatus, status]);
 
   const startLogin = async () => {
+    const generation = ++authGeneration.current;
     const authWindow = window.open("about:blank", "nanocodex-chatgpt-login");
     setBusy(true);
     try {
@@ -478,25 +815,38 @@ function SubscriptionBar({
       });
       if (!response.ok) throw new Error(await credentialError(response));
       const next = await response.json() as ChatGptStatus;
+      if (generation !== authGeneration.current) return;
       if (next.state !== "pending") throw new Error("ChatGPT did not return a login code.");
-      setStatus(next);
-      onSourceChange(null);
+      publishStatus(next);
+      if (source !== "deployment") onSourceChange(null);
       if (authWindow) {
         authWindow.opener = null;
         authWindow.location.href = next.verificationUrl;
       }
     } catch (cause) {
+      if (generation !== authGeneration.current) return;
       authWindow?.close();
-      setStatus({
+      const next = {
         state: "error",
         error: cause instanceof Error ? cause.message : "Could not start ChatGPT login.",
-      });
+      } satisfies ChatGptStatus;
+      publishStatus(next);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const retrySession = async () => {
+    setBusy(true);
+    try {
+      await refreshStatus();
     } finally {
       setBusy(false);
     }
   };
 
   const signOut = async () => {
+    const generation = ++authGeneration.current;
     setBusy(true);
     try {
       const response = await fetch("/api/auth/chatgpt", {
@@ -504,26 +854,34 @@ function SubscriptionBar({
         credentials: "same-origin",
       });
       if (!response.ok) throw new Error(await credentialError(response));
-      setStatus({ state: "signed_out" });
+      if (generation !== authGeneration.current) return;
+      // Invalidate refreshes that may have started while the DELETE was in flight.
+      authGeneration.current += 1;
+      publishStatus({ state: "signed_out" });
       await refreshStatus();
     } catch (cause) {
-      setStatus({
+      if (generation !== authGeneration.current) return;
+      const next = {
         state: "error",
         error: cause instanceof Error ? cause.message : "Could not sign out of ChatGPT.",
-      });
+      } satisfies ChatGptStatus;
+      publishStatus(next);
     } finally {
       setBusy(false);
     }
   };
 
-  const ready = transport === "mpp" ? agentStatus === "ready" : source !== null && source !== undefined;
-  const label = ready
-    ? "ready"
-    : status?.state === "pending"
-      ? "finish sign-in"
-      : source === undefined
-        ? "checking"
-        : "connect to run";
+  const ready = agentStatus === "ready";
+  const hasCredential = source !== null && source !== undefined;
+  const label = sessionLabel({
+    agentStatus,
+    authStatus: status,
+    automaticRetryPending,
+    capabilityError,
+    recoveryAttempt,
+    source,
+    transport,
+  });
 
   return (
     <div className="agent-session-shell">
@@ -533,13 +891,21 @@ function SubscriptionBar({
           {label}
         </span>
         <div className="agent-session-actions">
-          {transport === "openai" && !ready ? (
+          {transport === "openai" && (source === null || source === "deployment")
+            && (status?.state === "signed_out" || status?.state === "expired") ? (
             <button
               type="button"
-              aria-label="Connect with ChatGPT"
+              aria-label="Sign in with ChatGPT"
               onClick={startLogin}
-              disabled={busy || status?.state === "pending"}
-            >connect</button>
+              disabled={busy}
+            >sign in</button>
+          ) : null}
+          {transport === "openai" && !hasCredential && status?.state === "error" ? (
+            <button type="button" onClick={retrySession} disabled={busy}>retry session</button>
+          ) : null}
+          {transport === "openai" && agentStatus === "error" && hasCredential
+            && !automaticRetryPending ? (
+            <button type="button" onClick={onRetryAgent}>retry agent</button>
           ) : null}
           <details className="agent-session-menu">
             <summary aria-label="Connection options">session</summary>
@@ -563,6 +929,9 @@ function SubscriptionBar({
           </details>
         </div>
       </div>
+      {capabilityError ? (
+        <p className="agent-byok-error" role="alert">{capabilityError}</p>
+      ) : null}
       {status?.state === "pending" ? (
         <div className="agent-oauth-code">
           <span>Enter code <strong>{status.userCode}</strong> at ChatGPT.</span>
@@ -572,15 +941,194 @@ function SubscriptionBar({
           <a href={status.verificationUrl} target="_blank" rel="noreferrer">Open login page</a>
         </div>
       ) : null}
-      {status?.state === "error" ? <p className="agent-byok-error" role="alert">{status.error}</p> : null}
+      {status?.state === "error" && !hasCredential ? (
+        <p className="agent-byok-error" role="alert">{status.error}</p>
+      ) : null}
+      {agentStatus === "error" && !automaticRetryPending && agentError ? (
+        <p className="agent-byok-error" role="alert">
+          {agentStartFailure(agentError, source)}
+        </p>
+      ) : null}
       {status?.state === "expired" ? (
         <p className="agent-byok-error" role="status">The login code expired. Start sign-in again.</p>
+      ) : null}
+      {transport === "openai" && status?.state === "signed_out" && source === null ? (
+        <p className="agent-session-note" role="status">
+          {guestAccess?.state === "unavailable"
+            && guestAccess.reason === "abuse_protection_unavailable"
+            ? "Guest access is temporarily unavailable because its quota service is not ready. Sign in with ChatGPT to continue."
+            : "Guest access is not configured on this deployment. Sign in with ChatGPT to continue. A CLI login is separate."}
+        </p>
+      ) : null}
+      {transport === "openai" && source === "deployment" ? (
+        <p className="agent-session-note" role="status">
+          Guest access is sponsored by this deployment and keeps the full Nanocodex session and
+          tool runtime. {guestAccess?.state === "available"
+            ? `Up to ${guestAccess.quota.modelResponses} model responses, ${guestAccess.quota.toolRequests} web tool calls, and ${guestAccess.quota.imageRequests} image request per minute in this browser.`
+            : "Usage is bounded by deployment quotas."} Sign in anytime to use your ChatGPT subscription.
+        </p>
       ) : null}
     </div>
   );
 }
 
+type SessionPresentation = {
+  agentError?: string;
+  agentStatus: "idle" | "starting" | "ready" | "stopped" | "error";
+  authStatus: ChatGptStatus | undefined;
+  automaticRetryPending: boolean;
+  capabilityError?: string;
+  source: CredentialSource | undefined;
+  transport: AgentTransport;
+};
+
+function sessionLabel({
+  agentStatus,
+  authStatus,
+  automaticRetryPending,
+  capabilityError,
+  recoveryAttempt,
+  source,
+  transport,
+}: SessionPresentation & { recoveryAttempt: number }): string {
+  if (capabilityError) return "browser unsupported";
+  if (automaticRetryPending) return `retrying agent ${recoveryAttempt}/2`;
+  if (agentStatus === "starting") return source === "deployment" ? "starting guest" : "starting agent";
+  if (agentStatus === "ready") {
+    if (transport === "mpp") return "Tempo ready";
+    if (source === "subscription") return "ChatGPT ready";
+    if (source === "user") return "API key ready";
+    if (source === "deployment") return "guest ready";
+    return "ready";
+  }
+  if (agentStatus === "error" && source) return "agent unavailable";
+  if (transport === "mpp") return "Tempo not connected";
+  if (source === undefined || authStatus === undefined) return "checking session";
+  if (authStatus.state === "pending") return "finish ChatGPT sign-in";
+  if (authStatus.state === "error") return "session check failed";
+  if (authStatus.state === "expired") return "sign-in expired";
+  if (authStatus.state === "authenticated") return "preparing agent";
+  return "signed out";
+}
+
+function inactiveTerminalMessage({
+  agentError,
+  agentStatus,
+  authStatus,
+  automaticRetryPending,
+  capabilityError,
+  source,
+  transport,
+}: SessionPresentation): string {
+  if (capabilityError) return capabilityError;
+  if (automaticRetryPending) return "The connection failed. Retrying automatically…";
+  if (agentStatus === "starting") {
+    return source === "deployment" ? "Starting the guest session…" : "Starting your agent…";
+  }
+  if (agentStatus === "error" && source) return agentStartFailure(agentError, source);
+  if (transport === "mpp") {
+    return agentStatus === "error"
+      ? "Could not start the Tempo session. Reconnect from the session controls."
+      : "Connect a Tempo account from the session controls to start.";
+  }
+  if (source === undefined || authStatus === undefined) return "Checking this browser's session…";
+  if (authStatus.state === "pending") {
+    return "Finish ChatGPT sign-in in the opened tab. This terminal will start automatically.";
+  }
+  if (authStatus.state === "error") return "Could not check the browser session. Use Retry above.";
+  if (authStatus.state === "expired") return "The ChatGPT sign-in code expired. Start sign-in again.";
+  if (source === null) {
+    return "Sign in with ChatGPT to start. Guest access is not enabled on this deployment.";
+  }
+  return "Preparing your agent…";
+}
+
+function agentStartFailure(error: string | undefined, source: CredentialSource | undefined): string {
+  if (source === "deployment" && error?.includes("429")) {
+    return "Guest capacity is exhausted. Retry in a minute or sign in with ChatGPT.";
+  }
+  if (source === "deployment" && error?.includes("503")) {
+    return "Guest access is temporarily unavailable. Sign in with ChatGPT or retry later.";
+  }
+  if (error && /WebAssembly|CompileError|wasm/i.test(error)) {
+    return "The browser agent could not initialize WebAssembly. Reload once, then update Safari or use another current browser if it continues.";
+  }
+  if (error && /Origin Private File System|OPFS|Web Locks/i.test(error)) {
+    return "The browser agent could not open its private workspace. Allow website storage, close duplicate tabs, and retry.";
+  }
+  return error ? `Agent start failed: ${error}` : "Could not start the agent. Use Retry agent above.";
+}
+
 async function credentialError(response: Response): Promise<string> {
   const payload = await response.json().catch(() => undefined) as { error?: unknown } | undefined;
   return typeof payload?.error === "string" ? payload.error : `Request failed with HTTP ${response.status}`;
+}
+
+async function credentialRequestError(response: Response): Promise<Error> {
+  const error = new Error(await credentialError(response)) as Error & { retryAfterMs?: number };
+  const retryAfterSeconds = Number(response.headers.get("retry-after"));
+  if (Number.isFinite(retryAfterSeconds) && retryAfterSeconds >= 0) {
+    error.retryAfterMs = Math.min(30_000, retryAfterSeconds * 1_000);
+  }
+  return error;
+}
+
+function retryDelayMs(cause: unknown, previousDelayMs: number): number {
+  const retryAfterMs = cause instanceof Error
+    ? (cause as Error & { retryAfterMs?: number }).retryAfterMs
+    : undefined;
+  return Math.min(30_000, Math.max(1_000, retryAfterMs ?? previousDelayMs * 2));
+}
+
+async function readHealthSession(): Promise<{
+  source: CredentialSource;
+  guestAccess: GuestAccess;
+}> {
+  const health = await fetch("/api/health", {
+    cache: "no-store",
+    credentials: "same-origin",
+  });
+  if (!health.ok) throw new Error(`Could not check the agent session (HTTP ${health.status})`);
+  const payload = await health.json() as {
+    agent_configured?: boolean;
+    credential_source?: unknown;
+    guest_access?: unknown;
+  };
+  const source = payload.agent_configured === true && (
+    payload.credential_source === "subscription"
+    || payload.credential_source === "user"
+    || payload.credential_source === "deployment"
+  ) ? payload.credential_source : null;
+  return {
+    source,
+    guestAccess: parseGuestAccess(payload.guest_access),
+  };
+}
+
+function parseGuestAccess(value: unknown): GuestAccess {
+  if (typeof value !== "object" || value === null) {
+    return { state: "unavailable", reason: "not_configured" };
+  }
+  const guest = value as Record<string, unknown>;
+  const quota = guest.quota as Record<string, unknown> | undefined;
+  if (guest.state === "available" && quota) {
+    return {
+      state: "available",
+      quota: {
+        periodSeconds: Number(quota.periodSeconds),
+        sessionStarts: Number(quota.sessionStarts),
+        modelResponses: Number(quota.modelResponses),
+        toolRequests: Number(quota.toolRequests),
+        imageRequests: Number(quota.imageRequests),
+      },
+    };
+  }
+  return {
+    state: "unavailable",
+    reason: guest.reason === "abuse_protection_unavailable"
+      ? "abuse_protection_unavailable"
+      : guest.reason === "origin_not_allowed"
+        ? "origin_not_allowed"
+        : "not_configured",
+  };
 }

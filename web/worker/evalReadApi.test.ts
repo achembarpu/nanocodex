@@ -117,3 +117,100 @@ test("status is scoped to a requested profile and rejects a missing board", asyn
   assert.equal(response?.status, 404);
   assert.deepEqual(await response?.json(), { error: "evaluation profile was not found" });
 });
+
+test("task snapshots use one request and one coordinate read", async () => {
+  const statements: string[] = [];
+  let coordinateReads = 0;
+  const metadata = {
+    workset_id: 7,
+    profile: "terminal-bench",
+    workset_digest: "workset-digest",
+    created_at_ms: 1_700_000_000_000,
+    workset_task_count: 12,
+    workset_total: 20,
+    workset_unclaimed: 2,
+    workset_running: 1,
+    workset_success: 16,
+    workset_failed: 1,
+    task_id: 9,
+    public_id: "task-public",
+    name: "terminal-bench/fix-git",
+    task_digest: "task-digest",
+    treatment_count: 1,
+    task_total: 2,
+    task_unclaimed: 0,
+    task_running: 0,
+    task_success: 1,
+    task_failed: 1,
+  };
+  const coordinates = [
+    {
+      id: 1,
+      public_id: "coordinate-1",
+      task_public_id: "task-public",
+      task_name: "terminal-bench/fix-git",
+      task_digest: "task-digest",
+      family_key: "nanocodex-gpt-high",
+      harness: "nanocodex",
+      model: "gpt-5",
+      thinking: "high",
+      repetition: 1,
+      state: "success",
+      started_at_ms: 100,
+      finished_at_ms: 180,
+      error: null,
+      case_key: "cases/workset/coordinate-1.json",
+      status: "passed",
+      outcome: "passed",
+      input_tokens: 1000,
+      cached_input_tokens: 500,
+      output_tokens: 120,
+      reasoning_output_tokens: 80,
+      total_tokens: 1120,
+      cost_usd: 0.02,
+      agent_duration_ms: 80,
+    },
+  ];
+  const env = {
+    EVALS_DB: {
+      prepare(sql: string) {
+        statements.push(sql);
+        if (sql.includes("task_rows AS MATERIALIZED")) {
+          return {
+            bind() {
+              return { async first() { return metadata; } };
+            },
+          };
+        }
+        assert.match(sql, /FROM eval_tasks e JOIN task_definitions d/);
+        coordinateReads += 1;
+        return {
+          bind() {
+            return { async all() { return { results: coordinates }; } };
+          },
+        };
+      },
+    } as unknown as D1Database,
+    EVALS_ARTIFACTS: {} as R2Bucket,
+  };
+  const url = new URL(
+    "https://nanocodex.test/api/evals/worksets/workset-digest/tasks/task-public",
+  );
+
+  const response = await routeEvalRead(new Request(url), env, url);
+  const body = await response?.json() as Record<string, any>;
+
+  assert.equal(response?.status, 200);
+  assert.equal(statements.length, 2);
+  assert.equal(coordinateReads, 1);
+  assert.equal(body.schemaVersion, 5);
+  assert.equal(body.workset.summary.running, 1);
+  assert.equal(body.taskSummary.summary.success, 1);
+  assert.equal(body.task.treatments[0].cells[0].detailId, "coordinate-1");
+  assert.equal(body.points[0].outputTokens, 120);
+
+  const retired = new URL(`${url}/results`);
+  const retiredResponse = await routeEvalRead(new Request(retired), env, retired);
+  assert.equal(retiredResponse?.status, 404);
+  assert.equal(statements.length, 2);
+});

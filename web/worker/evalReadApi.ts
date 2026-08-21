@@ -1,6 +1,6 @@
 import { validImportKey, type EvalStorageEnv } from "./evalCoordinator.ts";
 
-const API_SCHEMA_VERSION = 4;
+const API_SCHEMA_VERSION = 5;
 const JSON_HEADERS = {
   "cache-control": "no-store",
   "content-type": "application/json; charset=utf-8",
@@ -33,6 +33,29 @@ type WorksetTaskRow = Summary & {
   name: string | null;
   task_digest: string | null;
   treatment_count: number;
+};
+
+type TaskSnapshotRow = {
+  workset_id: number;
+  profile: string;
+  workset_digest: string;
+  created_at_ms: number;
+  workset_task_count: number;
+  workset_total: number;
+  workset_unclaimed: number;
+  workset_running: number;
+  workset_success: number;
+  workset_failed: number;
+  task_id: number;
+  public_id: string;
+  name: string;
+  task_digest: string;
+  treatment_count: number;
+  task_total: number;
+  task_unclaimed: number;
+  task_running: number;
+  task_success: number;
+  task_failed: number;
 };
 
 type AnalyticsRow = {
@@ -100,12 +123,10 @@ export async function routeEvalRead(
     if (caseMatch) return evalCase(request, env, decodeURIComponent(caseMatch[1]), context);
     const analytics = url.pathname.match(/^\/api\/evals\/worksets\/([^/]+)\/analytics$/);
     if (analytics) return worksetAnalytics(env.EVALS_DB, decodeURIComponent(analytics[1]));
-    const results = url.pathname.match(/^\/api\/evals\/worksets\/([^/]+)\/tasks\/([^/]+)\/results$/);
-    if (results) return taskResults(env.EVALS_DB, decodeURIComponent(results[1]), decodeURIComponent(results[2]));
     const outcomes = url.pathname.match(/^\/api\/evals\/worksets\/([^/]+)\/tasks\/([^/]+)\/outcomes$/);
     if (outcomes) return taskOutcomes(env.EVALS_DB, decodeURIComponent(outcomes[1]), decodeURIComponent(outcomes[2]), url);
     const task = url.pathname.match(/^\/api\/evals\/worksets\/([^/]+)\/tasks\/([^/]+)$/);
-    if (task) return taskDetail(env.EVALS_DB, decodeURIComponent(task[1]), decodeURIComponent(task[2]));
+    if (task) return taskSnapshot(env.EVALS_DB, decodeURIComponent(task[1]), decodeURIComponent(task[2]));
     const workset = url.pathname.match(/^\/api\/evals\/worksets\/([^/]+)$/);
     if (workset) return worksetDetail(env.EVALS_DB, decodeURIComponent(workset[1]));
     return json({ error: "not_found" }, 404);
@@ -196,14 +217,45 @@ async function worksetDetail(db: D1Database, digest: string): Promise<Response> 
   });
 }
 
-async function taskDetail(db: D1Database, digest: string, taskId: string): Promise<Response> {
-  const workset = await findWorksetMetadata(db, digest);
-  if (!workset) return json({ error: "evaluation workset was not found" }, 404);
-  const task = await db.prepare(
-    "SELECT id, public_id, name, digest FROM task_definitions WHERE workset_id = ?1 AND public_id = ?2",
-  ).bind(workset.id, taskId).first<{ id: number; public_id: string; name: string; digest: string }>();
-  if (!task) return json({ error: "evaluation task was not found" }, 404);
-  const coordinates = await readCoordinates(db, workset.id, task.id);
+async function taskSnapshot(db: D1Database, digest: string, taskId: string): Promise<Response> {
+  const metadata = await db.prepare(
+    `WITH target AS MATERIALIZED (
+      SELECT w.id AS workset_id, w.profile, w.digest AS workset_digest, w.created_at_ms,
+        d.id AS task_id, d.public_id, d.name, d.digest AS task_digest
+      FROM worksets w
+      JOIN task_definitions d ON d.workset_id = w.id
+      WHERE w.state = 'ready' AND w.digest = ?1 AND d.public_id = ?2
+    ), task_rows AS MATERIALIZED (
+      SELECT e.definition_id, COUNT(DISTINCT e.family_key) AS treatment_count,
+        ${summaryColumns("e")}
+      FROM eval_tasks e
+      JOIN target ON target.workset_id = e.workset_id
+      GROUP BY e.definition_id
+    ), board AS (
+      SELECT COALESCE(SUM(total), 0) AS total,
+        COALESCE(SUM(unclaimed), 0) AS unclaimed,
+        COALESCE(SUM(running), 0) AS running,
+        COALESCE(SUM(success), 0) AS success,
+        COALESCE(SUM(failed), 0) AS failed
+      FROM task_rows
+    )
+    SELECT target.*,
+      (SELECT COUNT(*) FROM task_definitions d WHERE d.workset_id = target.workset_id) AS workset_task_count,
+      board.total AS workset_total, board.unclaimed AS workset_unclaimed,
+      board.running AS workset_running, board.success AS workset_success,
+      board.failed AS workset_failed,
+      COALESCE(task_rows.treatment_count, 0) AS treatment_count,
+      COALESCE(task_rows.total, 0) AS task_total,
+      COALESCE(task_rows.unclaimed, 0) AS task_unclaimed,
+      COALESCE(task_rows.running, 0) AS task_running,
+      COALESCE(task_rows.success, 0) AS task_success,
+      COALESCE(task_rows.failed, 0) AS task_failed
+    FROM target
+    CROSS JOIN board
+    LEFT JOIN task_rows ON task_rows.definition_id = target.task_id`,
+  ).bind(digest, taskId).first<TaskSnapshotRow>();
+  if (!metadata) return json({ error: "evaluation task was not found" }, 404);
+  const coordinates = await readCoordinates(db, metadata.workset_id, metadata.task_id);
   const treatments = new Map<string, {
     id: string;
     label: string;
@@ -245,45 +297,32 @@ async function taskDetail(db: D1Database, digest: string, taskId: string): Promi
     schemaVersion: API_SCHEMA_VERSION,
     observedAtMs: Date.now(),
     worksetId: digest,
+    workset: {
+      id: metadata.workset_digest,
+      profile: metadata.profile,
+      digest: metadata.workset_digest,
+      createdAtMs: metadata.created_at_ms,
+      taskCount: Number(metadata.workset_task_count),
+      summary: prefixedSummary(metadata, "workset"),
+    },
+    taskSummary: {
+      id: metadata.public_id,
+      name: metadata.name,
+      label: shortName(metadata.name),
+      digest: metadata.task_digest,
+      treatmentCount: Number(metadata.treatment_count),
+      summary: prefixedSummary(metadata, "task"),
+    },
     task: {
-      id: task.public_id,
-      name: task.name,
-      label: shortName(task.name),
-      digest: task.digest,
+      id: metadata.public_id,
+      name: metadata.name,
+      label: shortName(metadata.name),
+      digest: metadata.task_digest,
       treatments: [...treatments.values()].sort((left, right) => left.label.localeCompare(right.label)),
     },
-  });
-}
-
-async function taskResults(db: D1Database, digest: string, taskId: string): Promise<Response> {
-  const found = await findWorksetAndTask(db, digest, taskId);
-  if (!found) return json({ error: "evaluation task was not found" }, 404);
-  const rows = (await readCoordinates(db, found.worksetId, found.taskId))
-    .filter(({ state }) => state === "success" || state === "failed");
-  return json({
-    schemaVersion: API_SCHEMA_VERSION,
-    observedAtMs: Date.now(),
-    worksetId: digest,
-    points: rows.map((row) => ({
-      id: row.public_id,
-      taskId: row.task_public_id,
-      taskName: row.task_name,
-      taskLabel: shortName(row.task_name),
-      state: row.state,
-      harness: row.harness,
-      model: row.model,
-      thinking: row.thinking,
-      repetition: row.repetition,
-      status: row.status,
-      outcome: row.outcome,
-      durationMs: duration(row),
-      inputTokens: row.input_tokens,
-      cachedInputTokens: row.cached_input_tokens,
-      outputTokens: row.output_tokens,
-      reasoningOutputTokens: row.reasoning_output_tokens,
-      totalTokens: row.total_tokens,
-      costUsd: row.cost_usd,
-    })),
+    points: coordinates
+      .filter(({ state }) => state === "success" || state === "failed")
+      .map(publicResultPoint),
   });
 }
 
@@ -583,6 +622,16 @@ function summary(row: Summary): Summary {
   };
 }
 
+function prefixedSummary(row: TaskSnapshotRow, prefix: "workset" | "task"): Summary {
+  return {
+    total: Number(prefix === "workset" ? row.workset_total : row.task_total),
+    unclaimed: Number(prefix === "workset" ? row.workset_unclaimed : row.task_unclaimed),
+    running: Number(prefix === "workset" ? row.workset_running : row.task_running),
+    success: Number(prefix === "workset" ? row.workset_success : row.task_success),
+    failed: Number(prefix === "workset" ? row.workset_failed : row.task_failed),
+  };
+}
+
 function emptySummary(): Summary {
   return { total: 0, unclaimed: 0, running: 0, success: 0, failed: 0 };
 }
@@ -598,6 +647,29 @@ function addSummary(total: Summary, row: Summary): Summary {
 
 function duration(row: Pick<CoordinateRow, "agent_duration_ms">): number | null {
   return row.agent_duration_ms == null ? null : Math.max(0, row.agent_duration_ms);
+}
+
+function publicResultPoint(row: CoordinateRow) {
+  return {
+    id: row.public_id,
+    taskId: row.task_public_id,
+    taskName: row.task_name,
+    taskLabel: shortName(row.task_name),
+    state: row.state,
+    harness: row.harness,
+    model: row.model,
+    thinking: row.thinking,
+    repetition: row.repetition,
+    status: row.status,
+    outcome: row.outcome,
+    durationMs: duration(row),
+    inputTokens: row.input_tokens,
+    cachedInputTokens: row.cached_input_tokens,
+    outputTokens: row.output_tokens,
+    reasoningOutputTokens: row.reasoning_output_tokens,
+    totalTokens: row.total_tokens,
+    costUsd: row.cost_usd,
+  };
 }
 
 async function publicId(...parts: string[]): Promise<string> {

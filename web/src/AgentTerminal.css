@@ -145,6 +145,15 @@
   padding: 0 12px 10px;
 }
 
+.agent-session-note {
+  margin: 0;
+  padding: 7px 10px;
+  color: var(--terminal-muted);
+  font-size: 11px;
+  line-height: 1.45;
+  border-top: 1px solid var(--terminal-border);
+}
+
 .agent-oauth-code {
   flex-wrap: wrap;
 }
@@ -191,6 +200,7 @@
 }
 
 .agent-terminal-shell {
+  position: relative;
   width: 100%;
   height: clamp(300px, 36svh, 380px);
   overflow: hidden;
@@ -221,6 +231,138 @@
 
 .agent-xterm .xterm-screen canvas {
   image-rendering: auto;
+}
+
+.agent-touch-composer {
+  display: none;
+}
+
+@media (pointer: coarse), (any-pointer: coarse) {
+  .agent-terminal-shell {
+    display: grid;
+    grid-template-rows: minmax(0, 1fr) auto;
+  }
+
+  .agent-xterm {
+    min-height: 0;
+  }
+
+  .agent-session-bar,
+  .agent-byok-summary,
+  .agent-session-actions button,
+  .agent-session-menu summary,
+  .agent-byok-summary button,
+  .agent-oauth-code button {
+    min-height: 44px;
+  }
+
+  .agent-session-actions button,
+  .agent-session-menu summary,
+  .agent-byok-summary button,
+  .agent-oauth-code button {
+    min-width: 44px;
+  }
+
+  .nanocodex-demo.is-preview .agent-terminal-shell:focus-within,
+  .nanocodex-demo.is-full .agent-terminal-shell:focus-within {
+    min-height: 120px;
+  }
+
+  .agent-touch-composer {
+    position: relative;
+    z-index: 6;
+    display: grid;
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    grid-template-rows: 44px 16px;
+    gap: 0 8px;
+    align-items: center;
+    min-height: calc(60px + env(safe-area-inset-bottom));
+    padding:
+      0
+      max(8px, env(safe-area-inset-right))
+      env(safe-area-inset-bottom)
+      max(8px, env(safe-area-inset-left));
+    color: var(--terminal-foreground);
+    background: var(--terminal-background);
+    border-top: 1px solid var(--terminal-border);
+    font-family: var(--font-mono);
+  }
+
+  .agent-touch-rail {
+    grid-column: 1;
+    grid-row: 1;
+    color: var(--terminal-muted);
+    font-size: 16px;
+  }
+
+  .agent-touch-composer textarea {
+    grid-column: 2;
+    grid-row: 1;
+    width: 100%;
+    min-width: 0;
+    height: 44px;
+    min-height: 44px;
+    max-height: 44px;
+    margin: 0;
+    padding: 11px 0 9px;
+    overflow-y: auto;
+    color: var(--terminal-foreground);
+    caret-color: var(--terminal-foreground);
+    font: 400 16px/22px var(--font-mono);
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    outline: 0;
+    resize: none;
+    white-space: pre-wrap;
+  }
+
+  .agent-touch-composer textarea::placeholder,
+  .agent-touch-composer textarea:disabled {
+    color: var(--terminal-muted);
+    opacity: 1;
+  }
+
+  .agent-touch-actions {
+    display: flex;
+    grid-column: 3;
+    grid-row: 1;
+    gap: 4px;
+  }
+
+  .agent-touch-actions button {
+    min-width: 52px;
+    min-height: 44px;
+    padding: 0 8px;
+    color: var(--terminal-foreground);
+    font: 600 11px var(--font-mono);
+    background: transparent;
+    border: 0;
+    cursor: pointer;
+    touch-action: manipulation;
+  }
+
+  .agent-touch-actions button:focus-visible {
+    outline: 1px solid var(--terminal-foreground);
+    outline-offset: -2px;
+  }
+
+  .agent-touch-actions button:disabled {
+    color: var(--terminal-muted);
+    cursor: default;
+  }
+
+  .agent-touch-composer small {
+    grid-column: 2 / 4;
+    grid-row: 2;
+    align-self: start;
+    overflow: hidden;
+    color: var(--terminal-muted);
+    font-size: 9px;
+    line-height: 12px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 }
 
 @media (max-width: 740px), (pointer: coarse) and (orientation: landscape) and (max-width: 950px) {
@@ -258,6 +400,9 @@
   .agent-terminal-shell {
     height: min(320px, calc(100dvh - var(--mobile-header-height, 64px) - 132px));
     min-height: 280px;
+  }
+
+  .nanocodex-demo.is-preview .agent-terminal-shell {
     margin-bottom: max(24px, env(safe-area-inset-bottom));
   }
 

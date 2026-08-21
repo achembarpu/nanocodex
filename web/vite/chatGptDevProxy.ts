@@ -16,7 +16,7 @@ export function chatGptDevProxy(): Plugin {
   return {
     name: "nanocodex-chatgpt-dev-proxy",
     apply: "serve",
-    configureServer(vite) {
+    async configureServer(vite) {
       const proxy = createServer(proxyHttpRequest);
       const downstreamServer = new WebSocketServer({ noServer: true });
       proxy.on("upgrade", (request, socket, head) => {
@@ -27,13 +27,25 @@ export function chatGptDevProxy(): Plugin {
       proxy.on("clientError", (_error, socket) => {
         socket.end("HTTP/1.1 400 Bad Request\r\nConnection: close\r\n\r\n");
       });
+      const previous = proxyGlobal.__nanocodexChatGptDevProxy;
+      if (previous?.listening) {
+        await new Promise<void>((resolve, reject) => {
+          previous.close((error) => error ? reject(error) : resolve());
+        });
+      }
+      await new Promise<void>((resolve, reject) => {
+        const handleError = (error: Error) => reject(new Error(
+          `ChatGPT development proxy could not bind ${CHATGPT_DEV_PROXY_ORIGIN}: ${error.message}`,
+        ));
+        proxy.once("error", handleError);
+        proxy.listen(Number(new URL(CHATGPT_DEV_PROXY_ORIGIN).port), "127.0.0.1", () => {
+          proxy.off("error", handleError);
+          resolve();
+        });
+      });
       proxy.on("error", (error) => {
         vite.config.logger.error(`ChatGPT development proxy failed: ${error.message}`);
       });
-      const listen = () => proxy.listen(Number(new URL(CHATGPT_DEV_PROXY_ORIGIN).port), "127.0.0.1");
-      const previous = proxyGlobal.__nanocodexChatGptDevProxy;
-      if (previous?.listening) previous.close(listen);
-      else listen();
       proxyGlobal.__nanocodexChatGptDevProxy = proxy;
 
       vite.httpServer?.once("close", () => {

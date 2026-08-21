@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   createAgentTerminal,
+  isTerminalSubmitKeyEvent,
   renderTerminal,
   wtermAdapter,
   xtermAdapter,
@@ -112,6 +113,49 @@ test("terminal controls steer, cancel, edit history, and detach without owning t
   host.data("ignored\r");
   assert.equal(agent.turns.length, 1);
 });
+
+test("public and keyboard submissions share exactly-once prompt history", async () => {
+  const host = fakeTerminal();
+  const agent = fakeAgent();
+  const terminal = createAgentTerminal({ agent, terminal: host });
+
+  const touchTurn = await terminal.submit("from touch");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.match(host.writes.at(-1), /from touch/);
+  touchTurn.complete("visible touch output");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.match(host.writes.at(-1), /visible touch output/);
+  host.data("from desktop\r");
+  await new Promise((resolve) => setImmediate(resolve));
+  host.data("\x1b[A");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(renderedComposerInput(host.writes.at(-1)), "│ from desktop");
+  host.data("\x1b[A");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(renderedComposerInput(host.writes.at(-1)), "│ from touch");
+  host.data("\x1b[A");
+  host.data("\x1b[B");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(renderedComposerInput(host.writes.at(-1)), "│ from desktop");
+  terminal.dispose();
+});
+
+test("native composer submission waits for IME completion and preserves shifted newlines", () => {
+  const enter = { key: "Enter", shiftKey: false, isComposing: false, keyCode: 13 };
+  assert.equal(isTerminalSubmitKeyEvent(enter), true);
+  assert.equal(isTerminalSubmitKeyEvent({ ...enter, shiftKey: true }), false);
+  assert.equal(isTerminalSubmitKeyEvent({ ...enter, isComposing: true }), false);
+  assert.equal(isTerminalSubmitKeyEvent({ ...enter, keyCode: 229 }), false);
+  assert.equal(isTerminalSubmitKeyEvent(enter, true), false);
+});
+
+function renderedComposerInput(frame) {
+  return frame
+    .split("\r\n")
+    .at(-2)
+    .replace(/\x1b\[[0-9;]*m/g, "")
+    .trimEnd();
+}
 
 test("ANSI rendering neutralizes transcript control bytes", () => {
   const state = {

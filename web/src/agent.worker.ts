@@ -53,17 +53,35 @@ worker.onmessage = ({ data }: MessageEvent<IncomingMessage>) => {
     terminalHost?.resize(data.cols, data.rows);
     return;
   }
+  if (data.type === "terminalSubmit") {
+    commands = commands
+      .then(async () => {
+        await attachedTerminal?.submit(data.input, { intent: data.intent });
+      })
+      .catch(reportCommandError);
+    return;
+  }
+  if (data.type === "terminalCancel") {
+    commands = commands
+      .then(async () => {
+        await attachedTerminal?.cancel();
+      })
+      .catch(reportCommandError);
+    return;
+  }
   commands = commands
     .then(() => data.type === "start" && "surface" in data && data.surface === "terminal"
       ? startTerminal(data)
       : controller.handle(data))
-    .catch((error) => {
-      worker.postMessage({
-        type: "fatal",
-        message: errorMessage(error),
-      });
-    });
+    .catch(reportCommandError);
 };
+
+function reportCommandError(error: unknown) {
+  worker.postMessage({
+    type: "fatal",
+    message: errorMessage(error),
+  });
+}
 
 async function startTerminal(command: Extract<WebTerminalCommand, { type: "start" }>) {
   const { createAgentTerminal } = await import("nanocodex-terminal");
@@ -100,10 +118,22 @@ async function startTerminal(command: Extract<WebTerminalCommand, { type: "start
   const payment = "payment" in created ? created.payment : undefined;
   terminalAgent = created.agent;
   terminalHost = createWorkerTerminalHost();
+  const activePromptIds = new Set<number>();
+  worker.postMessage({ type: "terminalActivity", running: false });
   attachedTerminal = createAgentTerminal({
     agent: created.agent,
     terminal: terminalHost.host,
     onEvent(event) {
+      if (event.type === "prompt.accepted" && typeof event.id === "number") {
+        activePromptIds.add(event.id);
+        worker.postMessage({ type: "terminalActivity", running: true });
+      } else if (
+        (event.type === "prompt.completed" || event.type === "prompt.failed")
+        && typeof event.id === "number"
+      ) {
+        activePromptIds.delete(event.id);
+        worker.postMessage({ type: "terminalActivity", running: activePromptIds.size > 0 });
+      }
       if (event.type === "prompt.completed") postPaymentStatus(payment);
     },
   });

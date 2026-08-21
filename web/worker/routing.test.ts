@@ -4,9 +4,19 @@ import test from "node:test";
 
 import worker from "./index.ts";
 
-test("Cloudflare routes protocol endpoints through the Worker before SPA assets", async () => {
+test("Cloudflare routes preview documents, images, and protocol endpoints through the Worker", async () => {
   const config = JSON.parse(await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8"));
   assert.deepEqual(config.assets.run_worker_first, [
+    "/",
+    "/agent",
+    "/changelog",
+    "/code",
+    "/commits",
+    "/docs",
+    "/docs/*",
+    "/evals",
+    "/evals/*",
+    "/og.png",
     "/api/*",
     "/v1/*",
     "/git/*",

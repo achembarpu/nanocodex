@@ -94,8 +94,10 @@ export function createAgentTerminal(options) {
   listeners.push(watcher.onEvent(onAgentEvent));
 
   async function submit(value, submitOptions = {}) {
-    const prompt = String(value).trim();
+    const submitted = String(value);
+    const prompt = submitted.trim();
     if (!prompt || disposed) return undefined;
+    if (history.at(-1) !== submitted) history.push(submitted);
     if (prompt === "/clear") {
       state = { ...state, entries: [] };
       render();
@@ -179,7 +181,6 @@ export function createAgentTerminal(options) {
     cursor = 0;
     historyIndex = undefined;
     if (value.trim()) {
-      if (history.at(-1) !== value) history.push(value);
       void submit(value);
     } else {
       render();
@@ -352,6 +353,15 @@ export function encodeXtermKeyEvent(event) {
   if (event.type !== "keydown" || event.altKey || event.ctrlKey) return null;
   if (event.key === "Enter" && event.shiftKey && !event.metaKey) return "\x1b[13;2u";
   return null;
+}
+
+/** Whether a native textarea key event should submit a terminal composer. */
+export function isTerminalSubmitKeyEvent(event, composing = false) {
+  return event?.key === "Enter"
+    && !event.shiftKey
+    && !event.isComposing
+    && event.keyCode !== 229
+    && !composing;
 }
 
 export function xtermAdapter(term) {

@@ -19,7 +19,22 @@
   "assets": {
     "binding": "ASSETS",
     "not_found_handling": "none",
-    "run_worker_first": ["/api/*", "/v1/*", "/git/*", "/.well-known/urpc/consumer.json"]
+    "run_worker_first": [
+      "/",
+      "/agent",
+      "/changelog",
+      "/code",
+      "/commits",
+      "/docs",
+      "/docs/*",
+      "/evals",
+      "/evals/*",
+      "/og.png",
+      "/api/*",
+      "/v1/*",
+      "/git/*",
+      "/.well-known/urpc/consumer.json"
+    ]
   },
   "durable_objects": {
     "bindings": [
@@ -42,6 +57,10 @@
       {
         "name": "EVAL_COORDINATOR",
         "class_name": "EvalCoordinator"
+      },
+      {
+        "name": "GUEST_QUOTA",
+        "class_name": "GuestQuota"
       },
       {
         "name": "CHATGPT_EGRESS",
@@ -73,6 +92,10 @@
     {
       "tag": "v6",
       "new_sqlite_classes": ["ThreadGitRepository"]
+    },
+    {
+      "tag": "v7",
+      "new_sqlite_classes": ["GuestQuota"]
     }
   ],
   "containers": [
@@ -113,6 +136,31 @@
       "name": "AGENT_IMAGE_LIMIT",
       "namespace_id": "987606",
       "simple": { "limit": 4, "period": 60 }
+    },
+    {
+      "name": "GUEST_SOCKET_LIMIT",
+      "namespace_id": "987607",
+      "simple": { "limit": 2, "period": 60 }
+    },
+    {
+      "name": "GUEST_TURN_GLOBAL_LIMIT",
+      "namespace_id": "987608",
+      "simple": { "limit": 60, "period": 60 }
+    },
+    {
+      "name": "GUEST_TURN_LIMIT",
+      "namespace_id": "987609",
+      "simple": { "limit": 6, "period": 60 }
+    },
+    {
+      "name": "GUEST_TOOL_LIMIT",
+      "namespace_id": "987610",
+      "simple": { "limit": 8, "period": 60 }
+    },
+    {
+      "name": "GUEST_IMAGE_LIMIT",
+      "namespace_id": "987611",
+      "simple": { "limit": 1, "period": 60 }
     }
   ],
   "r2_buckets": [
@@ -134,7 +182,9 @@
     }
   ],
   "vars": {
-    "ENVIRONMENT": "production"
+    "ENVIRONMENT": "production",
+    "GUEST_ACCESS_ENABLED": "true",
+    "GUEST_ACCESS_ORIGIN": "https://nanocodex.me-7fb.workers.dev"
   },
   "env": {
     "development": {
@@ -146,6 +196,7 @@
           { "name": "GIT_REPOSITORY", "class_name": "GitRepository" },
           { "name": "THREAD_GIT_REPOSITORY", "class_name": "ThreadGitRepository" },
           { "name": "EVAL_COORDINATOR", "class_name": "EvalCoordinator" },
+          { "name": "GUEST_QUOTA", "class_name": "GuestQuota" },
           { "name": "CHATGPT_EGRESS", "class_name": "ChatGptEgress" }
         ]
       },
@@ -163,22 +214,30 @@
         { "name": "SESSION_POLL_LIMIT", "namespace_id": "987603", "simple": { "limit": 120, "period": 60 } },
         { "name": "AGENT_SOCKET_LIMIT", "namespace_id": "987604", "simple": { "limit": 12, "period": 60 } },
         { "name": "AGENT_TOOL_LIMIT", "namespace_id": "987605", "simple": { "limit": 30, "period": 60 } },
-        { "name": "AGENT_IMAGE_LIMIT", "namespace_id": "987606", "simple": { "limit": 4, "period": 60 } }
+        { "name": "AGENT_IMAGE_LIMIT", "namespace_id": "987606", "simple": { "limit": 4, "period": 60 } },
+        { "name": "GUEST_SOCKET_LIMIT", "namespace_id": "987607", "simple": { "limit": 2, "period": 60 } },
+        { "name": "GUEST_TURN_GLOBAL_LIMIT", "namespace_id": "987608", "simple": { "limit": 60, "period": 60 } },
+        { "name": "GUEST_TURN_LIMIT", "namespace_id": "987609", "simple": { "limit": 6, "period": 60 } },
+        { "name": "GUEST_TOOL_LIMIT", "namespace_id": "987610", "simple": { "limit": 8, "period": 60 } },
+        { "name": "GUEST_IMAGE_LIMIT", "namespace_id": "987611", "simple": { "limit": 1, "period": 60 } }
       ],
       "r2_buckets": [
-        { "binding": "GIT_OBJECTS", "bucket_name": "nanocodex-git" },
-        { "binding": "EVALS_ARTIFACTS", "bucket_name": "nanocodex-evals" }
+        { "binding": "GIT_OBJECTS", "bucket_name": "nanocodex-git", "remote": true },
+        { "binding": "EVALS_ARTIFACTS", "bucket_name": "nanocodex-evals", "remote": true }
       ],
       "d1_databases": [
         {
           "binding": "EVALS_DB",
           "database_name": "nanocodex-evals",
           "database_id": "b5a4b6e9-8e9f-489a-b0af-b1813d97dcd5",
-          "migrations_dir": "migrations"
+          "migrations_dir": "migrations",
+          "remote": true
         }
       ],
       "vars": {
-        "ENVIRONMENT": "development"
+        "ENVIRONMENT": "development",
+        "GUEST_ACCESS_ENABLED": "true",
+        "GUEST_ACCESS_ORIGIN": "https://localhost:5173"
       }
     }
   }

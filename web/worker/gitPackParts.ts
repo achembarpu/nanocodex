@@ -1,24 +1,9 @@
 import type { RepositoryPart } from "./gitRepository.ts";
 
-const PART_HEAD_CONCURRENCY = 4;
-
 export async function createRepositoryPartsStream(
   bucket: R2Bucket,
   parts: readonly RepositoryPart[],
 ): Promise<ReadableStream<Uint8Array>> {
-  for (let offset = 0; offset < parts.length; offset += PART_HEAD_CONCURRENCY) {
-    const batch = parts.slice(offset, offset + PART_HEAD_CONCURRENCY);
-    const objects = await Promise.all(batch.map((part) => bucket.head(part.key)));
-    for (let index = 0; index < batch.length; index++) {
-      const part = batch[index]!;
-      const object = objects[index];
-      if (object == null) throw new Error(`repository part is missing: ${part.key}`);
-      if (object.size !== part.size) {
-        throw new Error(`repository part has an invalid size: ${part.key}`);
-      }
-    }
-  }
-
   let partIndex = 0;
   let currentPart: RepositoryPart | undefined;
   let currentBytes = 0;
