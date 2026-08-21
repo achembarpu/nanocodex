@@ -38,7 +38,7 @@ test("crawler documents contain complete route-aware production metadata", async
   assert.equal(response.status, 200);
   assert.equal(response.headers.get("content-type"), "text/html; charset=utf-8");
   assert.equal(response.headers.get("cache-control"), "public, max-age=0, must-revalidate");
-  assert.equal(response.headers.has("etag"), false);
+  assert.match(response.headers.get("etag") ?? "", /^"page-[0-9a-f]+"$/);
   assert.equal(requests[0]?.url, "https://nanocodex-preview.workers.dev/");
   assert.match(html, /<link rel="canonical" href="https:\/\/nanocodex-preview\.workers\.dev\/code\?path=src%2F%3Cdriver%3E\.rs" \/>/);
   assert.match(html, /<meta property="og:type" content="website" \/>/);
@@ -49,6 +49,14 @@ test("crawler documents contain complete route-aware production metadata", async
   assert.match(html, /<meta name="twitter:card" content="summary_large_image" \/>/);
   assert.match(html, /src\/&lt;driver&gt;\.rs · Nanocodex/);
   assert.doesNotMatch(html, /<driver>/);
+
+  const conditional = new Request(request, {
+    headers: { ...Object.fromEntries(request.headers), "if-none-match": response.headers.get("etag")! },
+  });
+  const notModified = await worker.fetch(conditional, env as never);
+  assert.equal(notModified.status, 304);
+  assert.equal(await notModified.text(), "");
+  assert.equal(requests.length, 2);
 });
 
 test("document routing handles browser navigation, HEAD, and unknown paths", async () => {

@@ -35,14 +35,26 @@ export async function routeLinkPreview(
   }));
   if (!assetResponse.ok) return assetResponse;
 
-  const html = await renderLinkPreviewDocument(await assetResponse.text(), url, env, preview);
   const headers = new Headers(assetResponse.headers);
   headers.set("cache-control", "public, max-age=0, must-revalidate");
   headers.set("content-type", "text/html; charset=utf-8");
   headers.set("x-content-type-options", "nosniff");
   headers.delete("content-encoding");
   headers.delete("content-length");
-  headers.delete("etag");
+  const assetEtag = headers.get("etag");
+  if (assetEtag) {
+    const etag = documentEtag(assetEtag, preview, url);
+    headers.set("etag", etag);
+    if (etagMatches(request.headers.get("if-none-match"), etag)) {
+      return new Response(null, { headers, status: 304 });
+    }
+    if (request.method === "HEAD") {
+      return new Response(null, { headers, status: assetResponse.status });
+    }
+  }
+
+  const html = await renderLinkPreviewDocument(await assetResponse.text(), url, env, preview);
+  headers.set("etag", assetEtag ? documentEtag(assetEtag, preview, url) : `"page-${fnv1a(html)}"`);
   return new Response(request.method === "HEAD" ? null : html, {
     headers,
     status: assetResponse.status,
@@ -90,6 +102,25 @@ async function previewImage(request: Request, env: LinkPreviewEnv, url: URL): Pr
   if (request.method === "HEAD") return new Response(null, { headers });
   const png = await renderPng(preview);
   return new Response(png.buffer as ArrayBuffer, { headers });
+}
+
+function documentEtag(assetEtag: string, preview: Preview, url: URL): string {
+  return `"page-${fnv1a([
+    assetEtag,
+    url.origin,
+    preview.canonicalPath,
+    preview.eyebrow,
+    preview.title,
+    preview.description,
+  ].join("\n"))}"`;
+}
+
+function etagMatches(value: string | null, etag: string): boolean {
+  if (!value) return false;
+  return value.split(",").some((candidate) => {
+    const normalized = candidate.trim();
+    return normalized === "*" || normalized === etag || normalized === `W/${etag}`;
+  });
 }
 
 async function previewForUrl(url: URL, env: LinkPreviewEnv): Promise<Preview> {
