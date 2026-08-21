@@ -56,10 +56,6 @@ const applicationKey = manifestKey("src/NanocodexApp.tsx");
 const homeFrameKey = manifestKey("src/HomeFrame.tsx");
 const experienceKey = manifestKey("src/AgentExperience.tsx");
 const agentKey = manifestKey("src/AgentTerminal.tsx");
-const workerAgentKey = exactlyOne(
-  Object.keys(manifest).filter((key) => manifest[key]?.name === "WorkerAgent"),
-  "browser WorkerAgent wrapper",
-);
 const entry = manifest[entryKey];
 const experience = manifest[experienceKey];
 const agent = manifest[agentKey];
@@ -97,14 +93,6 @@ assert(
   "the signed-out credential experience must not statically import the Agent terminal",
 );
 assert(
-  !signedOutStatic.has(workerAgentKey),
-  "the signed-out credential experience must not include the WorkerAgent wrapper",
-);
-assert(
-  agentStatic.has(workerAgentKey),
-  "the authenticated Agent terminal must include the WorkerAgent wrapper",
-);
-assert(
   importClosure(experienceKey, true).has(agentKey),
   "the authenticated credential path must dynamically reach the Agent terminal",
 );
@@ -115,6 +103,15 @@ const initialCss = await fileStats(initialCssFiles);
 const agentJavaScript = await closureStats(agentStatic, "file");
 const signedOutSource = await closureSource(signedOutStatic);
 const agentSource = await closureSource(agentStatic);
+const workerAgentMarker = "nanocodex.worker-agent.v1";
+assert(
+  !signedOutSource.includes(workerAgentMarker),
+  "the signed-out credential experience must not include the WorkerAgent wrapper",
+);
+assert(
+  agentSource.includes(workerAgentMarker),
+  "the authenticated Agent terminal must include the WorkerAgent wrapper",
+);
 assert(
   !signedOutSource.includes("Nanocodex terminal input")
     && !signedOutSource.includes("xterm-accessibility"),
