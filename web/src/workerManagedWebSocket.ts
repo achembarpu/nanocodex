@@ -22,7 +22,7 @@ export async function createWorkerManagedWebSocket(
     | undefined;
   if (!health?.agent_configured) {
     throw new Error(
-      "Guest access is unavailable on this deployment. Sign in with ChatGPT to start the agent.",
+      "No browser credential is active. Sign in with ChatGPT to start the agent.",
     );
   }
 

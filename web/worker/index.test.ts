@@ -4,19 +4,8 @@ import { test } from "node:test";
 import worker from "./index.ts";
 import { CHATGPT_REALTIME_INSTRUCTIONS } from "nanocodex/browser/realtime";
 
-const guestQuota = {
-  periodSeconds: 60,
-  sessionStarts: 2,
-  modelResponses: 6,
-  toolRequests: 8,
-  imageRequests: 1,
-  daily: { modelResponses: 12, toolRequests: 20, imageRequests: 1 },
-  deploymentDaily: { modelResponses: 200, toolRequests: 400, imageRequests: 20 },
-};
-
-function allowLimit() {
-  return { async limit() { return { success: true }; } };
-}
+const TEST_BYOK_SESSION_ID = "a".repeat(43);
+const TEST_BYOK_COOKIE = `__Secure-nanocodex_byok_v2=${TEST_BYOK_SESSION_ID}`;
 
 async function waitFor(predicate: () => boolean): Promise<void> {
   for (let attempt = 0; attempt < 50; attempt += 1) {
@@ -24,31 +13,6 @@ async function waitFor(predicate: () => boolean): Promise<void> {
     await new Promise((resolve) => setTimeout(resolve, 1));
   }
   assert.fail("timed out waiting for asynchronous Worker setup");
-}
-
-function productionGuestEnv() {
-  const allow = allowLimit();
-  const quota = {
-    idFromName(name: string) { return { name }; },
-    get() {
-      return { async fetch() { return new Response(null, { status: 204 }); } };
-    },
-  } as unknown as DurableObjectNamespace;
-  return {
-    ENVIRONMENT: "production",
-    GUEST_ACCESS_ENABLED: "true",
-    GUEST_ACCESS_ORIGIN: "https://demo.test",
-    OPENAI_API_KEY: "deployment-secret",
-    AGENT_SOCKET_LIMIT: allow,
-    AGENT_TOOL_LIMIT: allow,
-    AGENT_IMAGE_LIMIT: allow,
-    GUEST_SOCKET_LIMIT: allow,
-    GUEST_TURN_GLOBAL_LIMIT: allow,
-    GUEST_TURN_LIMIT: allow,
-    GUEST_TOOL_LIMIT: allow,
-    GUEST_IMAGE_LIMIT: allow,
-    GUEST_QUOTA: quota,
-  };
 }
 
 function createByokSessions() {
@@ -178,17 +142,15 @@ test("tool proxies keep credentials server-side and preserve native request shap
   }) as typeof fetch;
 
   try {
-    const env = {
-      ...productionGuestEnv(),
-      ENVIRONMENT: "test",
-      OPENAI_API_KEY: "server-secret",
-    };
+    const { credentials, namespace } = createByokSessions();
+    credentials.set(TEST_BYOK_SESSION_ID, "server-secret");
+    const env = { ENVIRONMENT: "test", BYOK_SESSIONS: namespace };
     const search = await worker.fetch(new Request("https://demo.test/api/tools/web-search", {
       method: "POST",
       headers: {
         "content-type": "application/json",
         origin: "https://demo.test",
-        "cf-connecting-ip": "203.0.113.2",
+        cookie: TEST_BYOK_COOKIE,
       },
       body: JSON.stringify({
         session_id: "session-1",
@@ -203,7 +165,7 @@ test("tool proxies keep credentials server-side and preserve native request shap
       headers: {
         "content-type": "application/json",
         origin: "https://demo.test",
-        "cf-connecting-ip": "203.0.113.2",
+        cookie: TEST_BYOK_COOKIE,
       },
       body: JSON.stringify({ prompt: "a tiny robot", images: [] }),
     }), env);
@@ -231,72 +193,12 @@ test("tool proxies keep credentials server-side and preserve native request shap
   }
 });
 
-test("guest tool quotas are charged only after bounded request validation", async () => {
-  const originalFetch = globalThis.fetch;
-  const globalKeys: string[] = [];
-  const clientKeys: string[] = [];
-  globalThis.fetch = (async () => {
-    throw new Error("quota rejection must happen before upstream fetch");
-  }) as typeof fetch;
-  const env = {
-    ...productionGuestEnv(),
-    AGENT_TOOL_LIMIT: {
-      async limit({ key }: { key: string }) {
-        globalKeys.push(key);
-        return { success: true };
-      },
-    },
-    GUEST_TOOL_LIMIT: {
-      async limit({ key }: { key: string }) {
-        clientKeys.push(key);
-        return { success: false };
-      },
-    },
-  };
-  try {
-    const invalid = await worker.fetch(new Request("https://demo.test/api/tools/web-search", {
-      method: "POST",
-      headers: { "content-type": "application/json", origin: "https://demo.test" },
-      body: JSON.stringify({
-        session_id: "session-1",
-        commands: { open: Array.from({ length: 17 }, (_, index) => ({ ref_id: `result-${index}` })) },
-      }),
-    }), env);
-    assert.equal(invalid.status, 400);
-    assert.equal(globalKeys.length, 0);
-    assert.equal(clientKeys.length, 0);
-
-    const exhausted = await worker.fetch(new Request("https://demo.test/api/tools/web-search", {
-      method: "POST",
-      headers: {
-        "content-type": "application/json",
-        origin: "https://demo.test",
-        "cf-connecting-ip": "203.0.113.7",
-      },
-      body: JSON.stringify({
-        session_id: "session-1",
-        commands: { search_query: [{ q: "nanocodex" }] },
-      }),
-    }), env);
-    assert.equal(exhausted.status, 429);
-    assert.deepEqual(await exhausted.json(), {
-      error: "Guest quota is exhausted. Retry in a minute or sign in with ChatGPT.",
-      code: "guest_quota_exhausted",
-      reset_after_seconds: 60,
-    });
-    assert.deepEqual(globalKeys, ["guest:search:global"]);
-    assert.equal(clientKeys.length, 1);
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
-});
-
 test("tool proxies reject cross-origin calls before using the credential", async () => {
   const response = await worker.fetch(new Request("https://demo.test/api/tools/web-search", {
     method: "POST",
     headers: { "content-type": "application/json", origin: "https://evil.test" },
     body: "{}",
-  }), { ENVIRONMENT: "test", OPENAI_API_KEY: "server-secret" });
+  }), { ENVIRONMENT: "test" });
   assert.equal(response.status, 403);
 });
 
@@ -319,14 +221,9 @@ test("same-origin Fetch Metadata admits MCP GET streams without a referrer", asy
   }
 });
 
-test("BYOK sessions keep the key behind an opaque HttpOnly cookie and take precedence", async () => {
+test("BYOK sessions keep the key behind an opaque HttpOnly cookie", async () => {
   const { credentials, namespace } = createByokSessions();
-  const env = {
-    ...productionGuestEnv(),
-    ENVIRONMENT: "test",
-    OPENAI_API_KEY: "deployment-secret",
-    BYOK_SESSIONS: namespace,
-  };
+  const env = { ENVIRONMENT: "test", BYOK_SESSIONS: namespace };
   const created = await worker.fetch(new Request("https://demo.test/api/auth/openai", {
     method: "PUT",
     headers: { "content-type": "application/json", origin: "https://demo.test" },
@@ -353,7 +250,6 @@ test("BYOK sessions keep the key behind an opaque HttpOnly cookie and take prece
     agent_configured: true,
     credential_source: "user",
     deployment_sha: null,
-    guest_access: { state: "available", quota: guestQuota },
     service: "nanocodex",
     runtime: "cloudflare-workers",
     status: "ok",
@@ -388,8 +284,8 @@ test("BYOK sessions keep the key behind an opaque HttpOnly cookie and take prece
   assert.match(cleared.headers.get("set-cookie") ?? "", /Max-Age=0/);
   assert.equal(credentials.size, 0);
   assert.deepEqual(await cleared.json(), {
-    agent_configured: true,
-    credential_source: "deployment",
+    agent_configured: false,
+    credential_source: null,
   });
 });
 
@@ -404,7 +300,7 @@ test("BYOK creation rejects cross-origin requests before storing a key", async (
   assert.equal(credentials.size, 0);
 });
 
-test("a presented session outage never falls through to sponsored guest spend", async () => {
+test("a presented BYOK session outage fails closed", async () => {
   const namespace = {
     idFromName(name: string) { return { name }; },
     get() {
@@ -413,7 +309,7 @@ test("a presented session outage never falls through to sponsored guest spend", 
   } as unknown as DurableObjectNamespace;
   const response = await worker.fetch(new Request("https://demo.test/api/health", {
     headers: { cookie: `__Secure-nanocodex_byok_v2=${"a".repeat(43)}` },
-  }), { ...productionGuestEnv(), BYOK_SESSIONS: namespace });
+  }), { ENVIRONMENT: "test", BYOK_SESSIONS: namespace });
   assert.equal(response.status, 503);
   assert.deepEqual(await response.json(), { error: "BYOK session lookup failed" });
 });
@@ -494,145 +390,9 @@ test("Responses WebSocket reports a missing credential through the accepted prox
   }
 });
 
-test("deployment guests charge every response.create before forwarding it upstream", async () => {
-  const originalFetch = globalThis.fetch;
-  const OriginalResponse = globalThis.Response;
-  const OriginalWebSocketPair = (globalThis as any).WebSocketPair;
-  const downstream: FakeWorkerSocket[] = [];
-  const turnKeys: string[] = [];
-  let upstreamPeer: FakeWorkerSocket | undefined;
-  class FakeWorkerSocket {
-    peer?: FakeWorkerSocket;
-    messages: string[] = [];
-    listeners = new Map<string, Set<(event: any) => void>>();
-    readyState = 1;
-    closeCode?: number;
-    accept() {}
-    addEventListener(type: string, listener: (event: any) => void) {
-      const listeners = this.listeners.get(type) ?? new Set();
-      listeners.add(listener);
-      this.listeners.set(type, listeners);
-    }
-    removeEventListener(type: string, listener: (event: any) => void) {
-      this.listeners.get(type)?.delete(listener);
-    }
-    emit(type: string, event: any) {
-      for (const listener of this.listeners.get(type) ?? []) listener(event);
-    }
-    send(message: string) { this.peer?.messages.push(message); }
-    close(code?: number) {
-      if (this.readyState === 3) return;
-      this.readyState = 3;
-      this.closeCode = code;
-    }
-  }
-  class WorkerTestResponse extends OriginalResponse {
-    webSocket: WebSocket | null = null;
-    constructor(body?: BodyInit | null, init?: ResponseInit & { webSocket?: WebSocket }) {
-      const websocket = init?.webSocket;
-      super(body, init?.status === 101 ? { ...init, status: 200 } : init);
-      if (init?.status === 101) Object.defineProperty(this, "status", { value: 101 });
-      this.webSocket = websocket ?? null;
-    }
-  }
-  (globalThis as any).Response = WorkerTestResponse;
-  (globalThis as any).WebSocketPair = class {
-    0: FakeWorkerSocket;
-    1: FakeWorkerSocket;
-    constructor() {
-      this[0] = new FakeWorkerSocket();
-      this[1] = new FakeWorkerSocket();
-      this[0].peer = this[1];
-      this[1].peer = this[0];
-      downstream.push(this[0], this[1]);
-    }
-  };
-  globalThis.fetch = (async (input: string | URL | Request) => {
-    const url = typeof input === "string" ? input : input instanceof URL ? input.href : input.url;
-    assert.equal(url, "https://api.openai.com/v1/responses");
-    const workerSocket = new FakeWorkerSocket();
-    upstreamPeer = new FakeWorkerSocket();
-    workerSocket.peer = upstreamPeer;
-    upstreamPeer.peer = workerSocket;
-    return new WorkerTestResponse(null, {
-      status: 101,
-      webSocket: workerSocket as unknown as WebSocket,
-    });
-  }) as typeof fetch;
-  const allow = allowLimit();
-  try {
-    const response = await worker.fetch(new Request(
-      "https://demo.test/api/responses?session_id=guest-session",
-      {
-        headers: {
-          origin: "https://demo.test",
-          upgrade: "websocket",
-          "cf-connecting-ip": "203.0.113.10",
-          "user-agent": "browser",
-        },
-      },
-    ), {
-      ...productionGuestEnv(),
-      GUEST_TURN_GLOBAL_LIMIT: allow,
-      GUEST_TURN_LIMIT: {
-        async limit({ key }: { key: string }) {
-          turnKeys.push(key);
-          return { success: false };
-        },
-      },
-    });
-    assert.equal(response.status, 101);
-    await waitFor(() => downstream[0]?.messages.length === 1);
-    assert.deepEqual(JSON.parse(downstream[0]?.messages[0] ?? "null"), {
-      type: "nanocodex.proxy.ready",
-    });
-
-    downstream[1]?.emit("message", {
-      data: JSON.stringify({ type: "response.create", model: "gpt-5.6-sol", generate: false }),
-    });
-    await waitFor(() => downstream[0]?.messages.length === 2);
-
-    assert.equal(turnKeys.length, 1);
-    assert.match(turnKeys[0] ?? "", /^guest:turn:/);
-    assert.deepEqual(upstreamPeer?.messages, []);
-    const rejection = JSON.parse(downstream[0]?.messages[1] ?? "null");
-    assert.equal(rejection.type, "error");
-    assert.equal(rejection.error.code, "insufficient_quota");
-    assert.equal(rejection.error.type, "guest_quota_exhausted");
-    assert.equal(rejection.error.retry_after, 60);
-    assert.equal(downstream[1]?.closeCode, 1013);
-
-    const forgedResponse = await worker.fetch(new Request(
-      "https://demo.test/api/responses?session_id=forged-guest-session",
-      {
-        headers: {
-          origin: "https://demo.test",
-          upgrade: "websocket",
-          "cf-connecting-ip": "203.0.113.11",
-          "user-agent": "browser",
-        },
-      },
-    ), productionGuestEnv());
-    assert.equal(forgedResponse.status, 101);
-    await waitFor(() => downstream[2]?.messages.length === 1);
-    downstream[3]?.emit("message", {
-      data: JSON.stringify({ type: "response.create", model: "gpt-4o" }),
-    });
-    await waitFor(() => downstream[2]?.messages.length === 2);
-    assert.deepEqual(upstreamPeer?.messages, []);
-    const policyRejection = JSON.parse(downstream[2]?.messages[1] ?? "null");
-    assert.equal(policyRejection.error.type, "guest_request_rejected");
-    assert.equal(policyRejection.error.code, "invalid_request_error");
-    assert.match(policyRejection.error.message, /gpt-5\.6-sol/);
-    assert.equal(downstream[3]?.closeCode, 1013);
-  } finally {
-    globalThis.fetch = originalFetch;
-    globalThis.Response = OriginalResponse;
-    (globalThis as any).WebSocketPair = OriginalWebSocketPair;
-  }
-});
-
 test("Responses proxy closes an upstream opened after the browser leaves during setup", async () => {
+  const { credentials, namespace } = createByokSessions();
+  credentials.set(TEST_BYOK_SESSION_ID, "user-secret");
   const originalFetch = globalThis.fetch;
   const OriginalResponse = globalThis.Response;
   const OriginalWebSocketPair = (globalThis as any).WebSocketPair;
@@ -698,16 +458,13 @@ test("Responses proxy closes an upstream opened after the browser leaves during 
       "https://demo.test/api/responses?session_id=session-1",
       {
         headers: {
+          cookie: TEST_BYOK_COOKIE,
           origin: "https://demo.test",
           upgrade: "websocket",
           "cf-connecting-ip": "203.0.113.3",
         },
       },
-    ), {
-      ...productionGuestEnv(),
-      ENVIRONMENT: "test",
-      OPENAI_API_KEY: "deployment-secret",
-    });
+    ), { ENVIRONMENT: "test", BYOK_SESSIONS: namespace });
     assert.equal(response.status, 101);
     await dialStarted;
     sockets[0]?.close();
@@ -727,32 +484,15 @@ test("Responses proxy closes an upstream opened after the browser leaves during 
   }
 });
 
-test("production guest access fails closed without explicit origin and quota policy", async () => {
+test("production health remains unauthenticated without a user session", async () => {
   const response = await worker.fetch(
     new Request("https://demo.test/api/health"),
-    { ENVIRONMENT: "production", OPENAI_API_KEY: "must-stay-disabled" },
+    { ENVIRONMENT: "production" },
   );
   assert.deepEqual(await response.json(), {
     agent_configured: false,
     credential_source: null,
     deployment_sha: null,
-    guest_access: { state: "unavailable", reason: "not_configured" },
-    service: "nanocodex",
-    runtime: "cloudflare-workers",
-    status: "ok",
-  });
-});
-
-test("production exposes an explicitly enabled and fully bounded deployment guest", async () => {
-  const response = await worker.fetch(
-    new Request("https://demo.test/api/health"),
-    productionGuestEnv(),
-  );
-  assert.deepEqual(await response.json(), {
-    agent_configured: true,
-    credential_source: "deployment",
-    deployment_sha: null,
-    guest_access: { state: "available", quota: guestQuota },
     service: "nanocodex",
     runtime: "cloudflare-workers",
     status: "ok",
@@ -820,7 +560,6 @@ test("ChatGPT login exposes only device state while subscription credentials sta
     agent_configured: true,
     credential_source: "subscription",
     deployment_sha: null,
-    guest_access: { state: "unavailable", reason: "not_configured" },
     service: "nanocodex",
     runtime: "cloudflare-workers",
     status: "ok",

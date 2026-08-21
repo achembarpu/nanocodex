@@ -22,12 +22,8 @@ import {
 } from "./threadRoutes.ts";
 import { ThreadGitRepository } from "./threadRepository.ts";
 import {
-  GUEST_QUOTA,
-  GuestQuota,
   apiKeyActorId,
-  guestProtectionConfigured,
   limitAgentOperation,
-  limitGuestOperation,
   limitLoginStart,
   limitSessionPoll,
   type PublicSecurityEnv,
@@ -35,7 +31,7 @@ import {
 import { CHATGPT_REALTIME_INSTRUCTIONS } from "nanocodex/browser/realtime";
 import { routeLinkPreview } from "./linkPreview.ts";
 
-export { ChatGptSession, EvalCoordinator, GitRepository, GuestQuota, ThreadGitRepository };
+export { ChatGptSession, EvalCoordinator, GitRepository, ThreadGitRepository };
 
 const json = (body: unknown, init?: ResponseInit) =>
   Response.json(body, {
@@ -85,9 +81,6 @@ type WorkerEnv = GitStorageEnv & ThreadGitStorageEnv & EvalStorageEnv & ChatGptE
   ASSETS?: Fetcher;
   ENVIRONMENT: string;
   DEPLOYMENT_SHA?: string;
-  GUEST_ACCESS_ENABLED?: string;
-  GUEST_ACCESS_ORIGIN?: string;
-  OPENAI_API_KEY?: string;
   CHATGPT_ISSUER?: string;
   BYOK_SESSIONS?: DurableObjectNamespace;
   CHATGPT_SESSIONS?: DurableObjectNamespace;
@@ -97,7 +90,7 @@ type ApiKeyCredential = {
   kind: "api_key";
   apiKey: string;
   actorId: string;
-  source: "user" | "deployment";
+  source: "user";
 };
 type SubscriptionCredential = ChatGptCredential & {
   actorId: string;
@@ -145,7 +138,6 @@ export default {
         deployment_sha: GIT_SHA_PATTERN.test(env.DEPLOYMENT_SHA ?? "")
           ? env.DEPLOYMENT_SHA
           : null,
-        guest_access: guestAccessHealth(request, env),
         service: "nanocodex",
         runtime: "cloudflare-workers",
         status: "ok",
@@ -250,7 +242,7 @@ async function proxyWebSearch(request: Request, env: WorkerEnv, url: URL): Promi
   if (webOperationItemCount(commands) > MAX_WEB_OPERATION_ITEMS) {
     return json({ error: "web__run accepts at most 16 operation items per request" }, { status: 400 });
   }
-  const limited = await limitCredentialOperation(request, env, credential, "search");
+  const limited = await limitAgentOperation(env, credential.actorId, "search");
   if (limited) return limited;
   const upstreamUrl = credential.kind === "chatgpt"
     ? `${chatGptApiBaseUrl(env)}/alpha/search`
@@ -300,7 +292,7 @@ async function proxyImageGeneration(request: Request, env: WorkerEnv, url: URL):
   ) {
     return json({ error: "image edit inputs exceeded the 8 MiB each / 20 MiB total limit" }, { status: 413 });
   }
-  const limited = await limitCredentialOperation(request, env, credential, "image");
+  const limited = await limitAgentOperation(env, credential.actorId, "image");
   if (limited) return limited;
   const imageUrl = credential.kind === "chatgpt"
     ? `${chatGptApiBaseUrl(env)}/images/${images.length ? "edits" : "generations"}`
@@ -569,17 +561,6 @@ async function validateToolRequest(
   return resolved;
 }
 
-async function limitCredentialOperation(
-  request: Request,
-  env: WorkerEnv,
-  credential: Credential,
-  operation: "socket" | "search" | "image",
-): Promise<Response | undefined> {
-  return credential.source === "deployment"
-    ? limitGuestOperation(request, env, operation)
-    : limitAgentOperation(env, credential.actorId, operation);
-}
-
 async function readJsonBody(request: Request): Promise<Record<string, unknown> | Response> {
   const body = await request.text();
   if (body.length > MAX_JSON_BODY_CHARS) return json({ error: "request body is too large" }, { status: 413 });
@@ -708,7 +689,7 @@ async function setupResponsesWebSocket(
       return;
     }
     if (downstreamClosed) return;
-    const limited = await limitCredentialOperation(request, env, credential, "socket");
+    const limited = await limitAgentOperation(env, credential.actorId, "socket");
     if (limited) {
       await rejectResponsesWebSocket(downstream, limited);
       return;
@@ -749,9 +730,7 @@ async function setupResponsesWebSocket(
       const release = releaseLease();
       if (context) context.waitUntil(release);
       else void release;
-    }, credential.source === "deployment"
-      ? (frame) => limitGuestResponseFrame(request, env, frame)
-      : undefined);
+    });
     bridged = true;
   } catch (error) {
     const detail = error instanceof Error ? error.message : String(error);
@@ -986,39 +965,10 @@ async function clearByokSession(
 ): Promise<Response> {
   if (!sameOrigin(request, url, env)) return json({ error: "forbidden" }, { status: 403 });
   await deleteSession(request, env);
-  const credential = deploymentCredentialEnabled(request, env)
-    ? { agent_configured: true, credential_source: "deployment" }
-    : { agent_configured: false, credential_source: null };
-  return json(credential, { headers: { "set-cookie": clearSessionCookie(url) } });
-}
-
-function deploymentCredentialEnabled(request: Request, env: WorkerEnv): boolean {
-  if (env.GUEST_ACCESS_ENABLED !== "true" || !env.OPENAI_API_KEY) return false;
-  let requestOrigin: string;
-  try {
-    requestOrigin = new URL(request.url).origin;
-  } catch {
-    return false;
-  }
-  if (!env.GUEST_ACCESS_ORIGIN || requestOrigin !== env.GUEST_ACCESS_ORIGIN) return false;
-  return guestProtectionConfigured(env);
-}
-
-function guestAccessHealth(request: Request, env: WorkerEnv) {
-  if (deploymentCredentialEnabled(request, env)) {
-    return {
-      state: "available",
-      quota: GUEST_QUOTA,
-    } as const;
-  }
-  return {
-    state: "unavailable",
-    reason: env.GUEST_ACCESS_ENABLED === "true" && env.OPENAI_API_KEY
-      ? env.GUEST_ACCESS_ORIGIN !== new URL(request.url).origin
-        ? "origin_not_allowed"
-        : "abuse_protection_unavailable"
-      : "not_configured",
-  } as const;
+  return json(
+    { agent_configured: false, credential_source: null },
+    { headers: { "set-cookie": clearSessionCookie(url) } },
+  );
 }
 
 async function resolveCredential(
@@ -1058,14 +1008,7 @@ async function resolveCredential(
       return json({ error: "BYOK session lookup failed" }, { status: 503 });
     }
   }
-  return deploymentCredentialEnabled(request, env)
-    ? {
-        kind: "api_key",
-        apiKey: env.OPENAI_API_KEY!,
-        actorId: await apiKeyActorId(env.OPENAI_API_KEY!),
-        source: "deployment",
-      }
-    : undefined;
+  return undefined;
 }
 
 async function resolveSubscriptionCredential(
@@ -1277,13 +1220,10 @@ function matchesRequestOrigin(value: string, url: URL, allowLoopback: boolean): 
   }
 }
 
-type FrameGuard = (frame: string) => Promise<Response | undefined>;
-
 function bridge(
   left: WebSocket,
   right: WebSocket,
   onClose: () => void,
-  leftGuard?: FrameGuard,
 ): void {
   let closed = false;
   const close = () => {
@@ -1291,7 +1231,7 @@ function bridge(
     closed = true;
     onClose();
   };
-  forward(left, right, close, leftGuard);
+  forward(left, right, close);
   forward(right, left, close);
 }
 
@@ -1299,10 +1239,7 @@ function forward(
   source: WebSocket,
   destination: WebSocket,
   onClose: () => void,
-  guard?: FrameGuard,
 ): void {
-  let forwarding = Promise.resolve();
-  let stopped = false;
   source.addEventListener("message", (event) => {
     if (typeof event.data !== "string") {
       closeSocket(source, 1003, "text frames required");
@@ -1314,21 +1251,7 @@ function forward(
       closeSocket(destination, 1009, "message too large");
       return;
     }
-    const frame = event.data;
-    forwarding = forwarding.then(async () => {
-      if (stopped) return;
-      const rejection = await guard?.(frame);
-      if (rejection) {
-        stopped = true;
-        await rejectGuestResponseFrame(source, destination, rejection);
-        return;
-      }
-      if (destination.readyState === WebSocket.OPEN) destination.send(frame);
-    }).catch(() => {
-      stopped = true;
-      closeSocket(source, 1011, "frame policy failed");
-      closeSocket(destination, 1011, "frame policy failed");
-    });
+    if (destination.readyState === WebSocket.OPEN) destination.send(event.data);
   });
   source.addEventListener("close", (event) => {
     onClose();
@@ -1338,84 +1261,6 @@ function forward(
     onClose();
     closeSocket(destination, 1011, "peer WebSocket failed");
   });
-}
-
-async function limitGuestResponseFrame(
-  request: Request,
-  env: WorkerEnv,
-  frame: string,
-): Promise<Response | undefined> {
-  let value: Record<string, unknown> | undefined;
-  try {
-    value = asObject(JSON.parse(frame));
-  } catch {
-    return undefined;
-  }
-  if (value?.type !== "response.create") return undefined;
-  if (value.model !== "gpt-5.6-sol") {
-    return guestFramePolicyRejection(
-      "Sponsored guest sessions support only the deployment's gpt-5.6-sol model.",
-    );
-  }
-  if (value.service_tier !== undefined) {
-    return guestFramePolicyRejection(
-      "Sponsored guest sessions do not allow a paid service tier. Sign in with ChatGPT to use account-specific routing.",
-    );
-  }
-  if (value.background === true) {
-    return guestFramePolicyRejection(
-      "Sponsored guest sessions do not allow detached background responses.",
-    );
-  }
-  return limitGuestOperation(request, env, "turn");
-}
-
-function guestFramePolicyRejection(error: string): Response {
-  return Response.json({ error, code: "guest_request_rejected" }, {
-    status: 400,
-    headers: {
-      "cache-control": "no-store",
-      "x-content-type-options": "nosniff",
-    },
-  });
-}
-
-async function rejectGuestResponseFrame(
-  source: WebSocket,
-  destination: WebSocket,
-  response: Response,
-): Promise<void> {
-  const retryAfter = Number(response.headers.get("retry-after"));
-  const exhausted = response.status === 429;
-  const detail = await response.json().catch(() => undefined) as {
-    code?: unknown;
-    error?: unknown;
-  } | undefined;
-  const message = typeof detail?.error === "string"
-    ? detail.error
-    : exhausted
-      ? "Guest model quota is exhausted. Retry later or sign in with ChatGPT."
-      : "Guest model access is temporarily unavailable. Sign in with ChatGPT or try again later.";
-  try {
-    source.send(JSON.stringify({
-      type: "error",
-      error: {
-        type: typeof detail?.code === "string"
-          ? detail.code
-          : exhausted ? "guest_quota_exhausted" : "guest_access_unavailable",
-        code: exhausted
-          ? "insufficient_quota"
-          : response.status === 400 ? "invalid_request_error" : "server_error",
-        message,
-        ...(Number.isFinite(retryAfter) ? { retry_after: retryAfter } : {}),
-      },
-    }));
-  } finally {
-    try { source.close(1013, exhausted ? "guest quota exhausted" : "guest access unavailable"); }
-    catch { /* The browser may already have left. */ }
-    try { destination.close(1013, "guest response rejected"); }
-    catch { /* The upstream may already have closed. */ }
-  }
 }
 
 function closeSocket(socket: WebSocket, code: number, reason: string): void {

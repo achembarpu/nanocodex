@@ -3,8 +3,6 @@
 // Runtime types generated with workerd@1.20260811.1 2026-05-22 nodejs_compat
 interface __BaseEnv_Env {
 	ENVIRONMENT: "development" | "preview" | "production";
-	GUEST_ACCESS_ENABLED: "true";
-	GUEST_ACCESS_ORIGIN: "https://localhost:5173" | "https://nanocodex.me-7fb.workers.dev";
 	GIT_OBJECTS?: R2Bucket;
 	EVALS_ARTIFACTS?: R2Bucket;
 	EVALS_DB?: D1Database;
@@ -14,12 +12,6 @@ interface __BaseEnv_Env {
 	AGENT_SOCKET_LIMIT?: RateLimit;
 	AGENT_TOOL_LIMIT?: RateLimit;
 	AGENT_IMAGE_LIMIT?: RateLimit;
-	GUEST_SOCKET_LIMIT?: RateLimit;
-	GUEST_TURN_GLOBAL_LIMIT?: RateLimit;
-	GUEST_TURN_LIMIT?: RateLimit;
-	GUEST_TOOL_LIMIT?: RateLimit;
-	GUEST_IMAGE_LIMIT?: RateLimit;
-	GUEST_QUOTA?: DurableObjectNamespace<import("./worker/entry").GuestQuota>;
 	BYOK_SESSIONS?: DurableObjectNamespace<import("./worker/entry").ByokSession>;
 	CHATGPT_SESSIONS?: DurableObjectNamespace<import("./worker/entry").ChatGptSession>;
 	GIT_REPOSITORY?: DurableObjectNamespace<import("./worker/entry").GitRepository>;
@@ -30,7 +22,7 @@ interface __BaseEnv_Env {
 declare namespace Cloudflare {
 	interface GlobalProps {
 		mainModule: typeof import("./worker/entry");
-		durableNamespaces: "ByokSession" | "ChatGptSession" | "GitRepository" | "EvalCoordinator" | "GuestQuota" | "ChatGptEgress" | "ThreadGitRepository";
+		durableNamespaces: "ByokSession" | "ChatGptSession" | "GitRepository" | "EvalCoordinator" | "ChatGptEgress" | "ThreadGitRepository";
 	}
 	interface DevelopmentEnv {
 		ENVIRONMENT: "development";

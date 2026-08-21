@@ -155,7 +155,7 @@ function AgentTerminalDemo({
     }
     if (credentialSource === "subscription") {
       nanocodexConfig.restart(startCommand("chatgpt", thread.id));
-    } else if (credentialSource === "user" || credentialSource === "deployment") {
+    } else if (credentialSource === "user") {
       nanocodexConfig.restart(startCommand("openai", thread.id));
     } else {
       nanocodexConfig.disconnect();
@@ -177,7 +177,7 @@ function AgentTerminalDemo({
     ) return;
     const nextTransport = credentialSource === "subscription"
       ? "chatgpt"
-      : credentialSource === "user" || credentialSource === "deployment"
+      : credentialSource === "user"
         ? "openai"
         : undefined;
     if (!nextTransport) return;
@@ -208,7 +208,7 @@ function AgentTerminalDemo({
     if (!thread) return;
     const nextTransport = credentialSource === "subscription"
       ? "chatgpt"
-      : credentialSource === "user" || credentialSource === "deployment"
+      : credentialSource === "user"
         ? "openai"
         : undefined;
     if (!nextTransport) return;
@@ -655,22 +655,7 @@ function startCommand(
   };
 }
 
-type CredentialSource = "subscription" | "user" | "deployment" | null;
-type GuestAccess =
-  | {
-      state: "available";
-      quota: {
-        periodSeconds: number;
-        sessionStarts: number;
-        modelResponses: number;
-        toolRequests: number;
-        imageRequests: number;
-      };
-    }
-  | {
-      state: "unavailable";
-      reason: "not_configured" | "abuse_protection_unavailable" | "origin_not_allowed";
-    };
+type CredentialSource = "subscription" | "user" | null;
 type ChatGptStatus =
   | { state: "signed_out" }
   | {
@@ -710,7 +695,6 @@ function SubscriptionBar({
   onSourceChange(source: CredentialSource): void;
 }) {
   const [status, setStatus] = useState<ChatGptStatus>();
-  const [guestAccess, setGuestAccess] = useState<GuestAccess>();
   const [busy, setBusy] = useState(false);
   const authGeneration = useRef(0);
   const statusRef = useRef<ChatGptStatus | undefined>(undefined);
@@ -735,12 +719,11 @@ function SubscriptionBar({
         if (next.state === "authenticated") {
           onSourceChange("subscription");
         } else if (next.state === "pending") {
-          if (source !== "deployment") onSourceChange(null);
+          onSourceChange(null);
         } else {
           const health = await readHealthSession();
           if (generation === authGeneration.current) {
-            setGuestAccess(health.guestAccess);
-            onSourceChange(health.source);
+            onSourceChange(health);
           }
         }
       } catch (cause) {
@@ -760,13 +743,12 @@ function SubscriptionBar({
         try {
           const health = await readHealthSession();
           if (generation !== authGeneration.current) return;
-          setGuestAccess(health.guestAccess);
-          if (health.source === "subscription") {
+          if (health === "subscription") {
             publishStatus({ state: "authenticated" });
-            onSourceChange(health.source);
+            onSourceChange(health);
             return;
           }
-          onSourceChange(health.source);
+          onSourceChange(health);
         } catch {
           onSourceChange(null);
         }
@@ -777,7 +759,7 @@ function SubscriptionBar({
         publishStatus(next);
       }
     });
-  }, [onSourceChange, publishStatus, source]);
+  }, [onSourceChange, publishStatus]);
 
   useEffect(() => {
     void refreshStatus();
@@ -818,7 +800,7 @@ function SubscriptionBar({
       if (generation !== authGeneration.current) return;
       if (next.state !== "pending") throw new Error("ChatGPT did not return a login code.");
       publishStatus(next);
-      if (source !== "deployment") onSourceChange(null);
+      onSourceChange(null);
       if (authWindow) {
         authWindow.opener = null;
         authWindow.location.href = next.verificationUrl;
@@ -891,7 +873,7 @@ function SubscriptionBar({
           {label}
         </span>
         <div className="agent-session-actions">
-          {transport === "openai" && (source === null || source === "deployment")
+          {transport === "openai" && source === null
             && (status?.state === "signed_out" || status?.state === "expired") ? (
             <button
               type="button"
@@ -954,18 +936,7 @@ function SubscriptionBar({
       ) : null}
       {transport === "openai" && status?.state === "signed_out" && source === null ? (
         <p className="agent-session-note" role="status">
-          {guestAccess?.state === "unavailable"
-            && guestAccess.reason === "abuse_protection_unavailable"
-            ? "Guest access is temporarily unavailable because its quota service is not ready. Sign in with ChatGPT to continue."
-            : "Guest access is not configured on this deployment. Sign in with ChatGPT to continue. A CLI login is separate."}
-        </p>
-      ) : null}
-      {transport === "openai" && source === "deployment" ? (
-        <p className="agent-session-note" role="status">
-          Guest access is sponsored by this deployment and keeps the full Nanocodex session and
-          tool runtime. {guestAccess?.state === "available"
-            ? `Up to ${guestAccess.quota.modelResponses} model responses, ${guestAccess.quota.toolRequests} web tool calls, and ${guestAccess.quota.imageRequests} image request per minute in this browser.`
-            : "Usage is bounded by deployment quotas."} Sign in anytime to use your ChatGPT subscription.
+          Sign in with ChatGPT to start the browser agent.
         </p>
       ) : null}
     </div>
@@ -993,12 +964,11 @@ function sessionLabel({
 }: SessionPresentation & { recoveryAttempt: number }): string {
   if (capabilityError) return "browser unsupported";
   if (automaticRetryPending) return `retrying agent ${recoveryAttempt}/2`;
-  if (agentStatus === "starting") return source === "deployment" ? "starting guest" : "starting agent";
+  if (agentStatus === "starting") return "starting agent";
   if (agentStatus === "ready") {
     if (transport === "mpp") return "Tempo ready";
     if (source === "subscription") return "ChatGPT ready";
     if (source === "user") return "API key ready";
-    if (source === "deployment") return "guest ready";
     return "ready";
   }
   if (agentStatus === "error" && source) return "agent unavailable";
@@ -1023,7 +993,7 @@ function inactiveTerminalMessage({
   if (capabilityError) return capabilityError;
   if (automaticRetryPending) return "The connection failed. Retrying automatically…";
   if (agentStatus === "starting") {
-    return source === "deployment" ? "Starting the guest session…" : "Starting your agent…";
+    return "Starting your agent…";
   }
   if (agentStatus === "error" && source) return agentStartFailure(agentError, source);
   if (transport === "mpp") {
@@ -1038,18 +1008,12 @@ function inactiveTerminalMessage({
   if (authStatus.state === "error") return "Could not check the browser session. Use Retry above.";
   if (authStatus.state === "expired") return "The ChatGPT sign-in code expired. Start sign-in again.";
   if (source === null) {
-    return "Sign in with ChatGPT to start. Guest access is not enabled on this deployment.";
+    return "Sign in with ChatGPT to start the browser agent.";
   }
   return "Preparing your agent…";
 }
 
-function agentStartFailure(error: string | undefined, source: CredentialSource | undefined): string {
-  if (source === "deployment" && error?.includes("429")) {
-    return "Guest capacity is exhausted. Retry in a minute or sign in with ChatGPT.";
-  }
-  if (source === "deployment" && error?.includes("503")) {
-    return "Guest access is temporarily unavailable. Sign in with ChatGPT or retry later.";
-  }
+function agentStartFailure(error: string | undefined, _source: CredentialSource | undefined): string {
   if (error && /WebAssembly|CompileError|wasm/i.test(error)) {
     return "The browser agent could not initialize WebAssembly. Reload once, then update Safari or use another current browser if it continues.";
   }
@@ -1080,10 +1044,7 @@ function retryDelayMs(cause: unknown, previousDelayMs: number): number {
   return Math.min(30_000, Math.max(1_000, retryAfterMs ?? previousDelayMs * 2));
 }
 
-async function readHealthSession(): Promise<{
-  source: CredentialSource;
-  guestAccess: GuestAccess;
-}> {
+async function readHealthSession(): Promise<CredentialSource> {
   const health = await fetch("/api/health", {
     cache: "no-store",
     credentials: "same-origin",
@@ -1092,43 +1053,10 @@ async function readHealthSession(): Promise<{
   const payload = await health.json() as {
     agent_configured?: boolean;
     credential_source?: unknown;
-    guest_access?: unknown;
   };
   const source = payload.agent_configured === true && (
     payload.credential_source === "subscription"
     || payload.credential_source === "user"
-    || payload.credential_source === "deployment"
   ) ? payload.credential_source : null;
-  return {
-    source,
-    guestAccess: parseGuestAccess(payload.guest_access),
-  };
-}
-
-function parseGuestAccess(value: unknown): GuestAccess {
-  if (typeof value !== "object" || value === null) {
-    return { state: "unavailable", reason: "not_configured" };
-  }
-  const guest = value as Record<string, unknown>;
-  const quota = guest.quota as Record<string, unknown> | undefined;
-  if (guest.state === "available" && quota) {
-    return {
-      state: "available",
-      quota: {
-        periodSeconds: Number(quota.periodSeconds),
-        sessionStarts: Number(quota.sessionStarts),
-        modelResponses: Number(quota.modelResponses),
-        toolRequests: Number(quota.toolRequests),
-        imageRequests: Number(quota.imageRequests),
-      },
-    };
-  }
-  return {
-    state: "unavailable",
-    reason: guest.reason === "abuse_protection_unavailable"
-      ? "abuse_protection_unavailable"
-      : guest.reason === "origin_not_allowed"
-        ? "origin_not_allowed"
-        : "not_configured",
-  };
+  return source;
 }

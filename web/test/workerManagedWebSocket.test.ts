@@ -18,7 +18,7 @@ test("an absent server credential fails clearly before WebSocket retries", async
       async () => Response.json({ agent_configured: false, credential_source: null }),
       FakeWebSocket as unknown as typeof WebSocket,
     ),
-    /Guest access is unavailable[\s\S]*Sign in with ChatGPT/,
+    /No browser credential is active[\s\S]*Sign in with ChatGPT/,
   );
   assert.equal(socketCreated, false);
 });

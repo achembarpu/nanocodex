@@ -83,18 +83,6 @@ process protocol that applications must adopt. See
 [`bin/nanocodex`](bin/nanocodex), the [examples index](examples/README.md), and
 the [release switcher documentation](bin/nanocodex/src/update.rs).
 
-The hosted website's signed-out guest is currently browser-only. The native
-CLI does not pretend that a public marker is an API key and does not route
-through ChatGPT's unrelated logged-out backend. Its Responses client sends
-session identity in headers, begins with a native `response.create`, and may
-fall back to HTTPS; the website relay currently requires a same-origin cookie
-flow, a query-string session ID, a private readiness prelude, and WebSocket-only
-operation. A real `nanocodex --guest` therefore requires that deployment to
-expose the exact native Responses WebSocket and HTTPS contracts, including the
-same hard sponsor quota, before the CLI can add an explicit entry flag. Until
-then use `nanocodex auth login` or `OPENAI_API_KEY`; no generic Nanocodex app
-server or false anonymous-Codex compatibility path is introduced.
-
 ## Rust: start here
 
 Build one agent, submit ordered prompts through its cheap handle, and await a

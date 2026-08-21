@@ -177,19 +177,9 @@ working tree and open in a fullscreen dock. Reusing an artifact ID replaces the
 interface in place, so voice or text turns can continuously retheme and extend
 it. Generated code has no imports, network access, or access to the parent page;
 explicit `sendPrompt` actions re-enter the normal queued prompt lifecycle.
-A user key or ChatGPT session takes precedence over optional deployment-sponsored
-guest access. Guest access still uses the normal Responses WebSocket, typed
-session, Code Mode, and browser-tool lifecycle; it is not the unrelated
-logged-out ChatGPT backend. The Worker enables the deployment `OPENAI_API_KEY`
-only when `GUEST_ACCESS_ENABLED=true`, the request matches
-`GUEST_ACCESS_ORIGIN`, and production has every configured global and
-pseudonymous-client quota binding. Socket opens, every `response.create`, web
-tool calls, and image calls are metered before upstream work. Edge minute
-limits absorb floods; the `GUEST_QUOTA` Durable Object serializes hard per-client
-and deployment-wide daily sponsor budgets, so a retained socket cannot create
-unbounded model spend. A presented user
-or ChatGPT session that cannot be read fails explicitly instead of silently
-spending the sponsor credential.
+The browser agent requires an explicit user OpenAI key or ChatGPT session. A
+presented session that cannot be read fails explicitly instead of falling back
+to another credential.
 
 The reusable `browser(...)` tool bundle gives the browser agent a bounded
 `dataset` tool. It can inspect public
@@ -242,13 +232,8 @@ Tempo Wallet iframe require a secure context; trusted local HTTPS exercises the
 same embedded flow as production.
 
 Local development reads the optional ignored root `.env` through the repository
-workflow. To sponsor the bounded guest path, configure the deployed Worker with
-`wrangler secret put OPENAI_API_KEY` and deliberately set its canonical
-`GUEST_ACCESS_ORIGIN`; `wrangler.jsonc` owns the explicit enable flag and quota
-bindings. Signed-out browsers start that guest session automatically when it is
-available and always retain a direct upgrade to ChatGPT sign-in. BYOK itself
-uses the `BYOK_SESSIONS` Durable Object binding and does not require a
-deployment-owned OpenAI key.
+workflow. BYOK uses the `BYOK_SESSIONS` Durable Object binding; ChatGPT login
+uses its separate server-owned session boundary.
 
 The browser agent does not use JavaScript Promise Integration (JSPI). Its
 consumer startup gate checks only the platform APIs used by the shipped path:

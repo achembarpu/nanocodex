@@ -31,13 +31,10 @@ test("credential presence is distinct from agent readiness and exhausted retries
   assert.doesNotMatch(terminal, /Connect to start\./);
 });
 
-test("signed-out sponsored guests auto-start and retain a ChatGPT upgrade path", () => {
-  assert.match(terminal, /A CLI login is separate/);
-  assert.match(terminal, /credentialSource === "user" \|\| credentialSource === "deployment"[\s\S]*?startCommand\("openai"/);
-  assert.match(terminal, /Guest access is sponsored by this deployment/);
-  assert.match(terminal, /Sign in anytime to use your ChatGPT subscription/);
-  assert.match(terminal, /Guest capacity is exhausted[\s\S]*?sign in with ChatGPT/);
-  assert.doesNotMatch(terminal, /backend-anon|anonymous (?:OpenAI|ChatGPT|Codex)/i);
+test("signed-out browsers wait for explicit ChatGPT authentication", () => {
+  assert.match(terminal, /credentialSource === "user"[\s\S]*?startCommand\("openai"/);
+  assert.match(terminal, /Sign in with ChatGPT to start the browser agent/);
+  assert.doesNotMatch(terminal, /guest|sponsor|"deployment"|backend-anon|anonymous (?:OpenAI|ChatGPT|Codex)/i);
 });
 
 test("starting and failure states repaint the terminal while the native mobile composer remains intact", () => {
