@@ -155,8 +155,8 @@ test("streaming reduction preserves queue/steer ordering and tool completion", (
   state = queueSteer(state, 2, "correction");
   state = steerAdmitted(state, 2);
   state = applyAgentEvents(state, [
-    event(2, "assistant.delta", { text: "hel" }),
-    event(3, "assistant.delta", { text: "lo" }),
+    event(2, "assistant.delta", { text: "hello " }),
+    event(3, "assistant.delta", { text: "world" }),
     event(4, "run.steered"),
     event(5, "tool.call", { call_id: "call-1", tool: "exec_command", arguments: { cmd: "pwd" } }),
     event(6, "tool.result", {
@@ -171,7 +171,7 @@ test("streaming reduction preserves queue/steer ordering and tool completion", (
     state.entries.map((entry) => entry.kind),
     ["user", "assistant", "user", "tool"],
   );
-  assert.equal(state.entries[1]?.kind === "assistant" && state.entries[1].text, "hello");
+  assert.equal(state.entries[1]?.kind === "assistant" && state.entries[1].text, "hello world");
   assert.equal(state.entries[2]?.kind === "user" && state.entries[2].text, "correction");
   assert.equal(state.entries[3]?.kind === "tool" && state.entries[3].tool.status, "completed");
   assert.equal(state.running, false);
