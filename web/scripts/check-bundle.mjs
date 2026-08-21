@@ -5,27 +5,30 @@ import { fileURLToPath } from "node:url";
 import { gzipSync } from "node:zlib";
 
 const budgets = Object.freeze({
-  initialJavaScriptFiles: 2,
-  initialJavaScript: 260_000,
-  initialJavaScriptGzip: 83_000,
+  initialJavaScriptFiles: 1,
+  initialJavaScript: 10_000,
+  initialJavaScriptGzip: 4_000,
+  signedOutJavaScriptFiles: 10,
+  signedOutJavaScript: 280_000,
+  signedOutJavaScriptGzip: 91_000,
   initialCssFiles: 2,
   // Includes compact Code/Commits controls for portrait and phone landscape.
   initialCss: 60_500,
   initialCssGzip: 12_000,
   // Direct signed-out routes include the document, their complete static JS/CSS
   // closure, and only the route-owned repository data requests.
-  sourceRouteRequests: 26,
-  sourceRouteJavaScriptGzip: 335_000,
+  sourceRouteRequests: 21,
+  sourceRouteJavaScriptGzip: 330_000,
   sourceRouteCssGzip: 12_200,
-  commitsRouteRequests: 25,
-  commitsRouteJavaScriptGzip: 292_000,
+  commitsRouteRequests: 19,
+  commitsRouteJavaScriptGzip: 285_000,
   commitsRouteCssGzip: 12_000,
-  agentJavaScript: 830_000,
+  agentJavaScript: 680_000,
   // OPFS, artifacts, durability, typed voice lifecycle routing, subscription auth, and paid MCP stay in the Worker.
   // The app-local ANSI terminal bridge stays in a lazy chunk loaded only after
   // an authenticated terminal starts.
-  agentWorker: 58_500,
-  agentWorkerGzip: 18_200,
+  agentWorker: 24_000,
+  agentWorkerGzip: 8_000,
   // Includes the model-visible schema so Agent startup pays one request for
   // the complete lazy facade instead of fetching a second contract chunk.
   datasetFacadeJavaScript: 2_500,
@@ -162,6 +165,21 @@ within(
 withinCount("initial CSS files", initialCss.fileCount, budgets.initialCssFiles);
 within("initial CSS", initialCss.bytes, budgets.initialCss);
 within("initial CSS gzip", initialCss.gzipBytes, budgets.initialCssGzip);
+withinCount(
+  "signed-out JavaScript chunks",
+  signedOutJavaScript.fileCount,
+  budgets.signedOutJavaScriptFiles,
+);
+within(
+  "signed-out JavaScript",
+  signedOutJavaScript.bytes,
+  budgets.signedOutJavaScript,
+);
+within(
+  "signed-out JavaScript gzip",
+  signedOutJavaScript.gzipBytes,
+  budgets.signedOutJavaScriptGzip,
+);
 withinCount(
   "signed-out Source route requests",
   sourceRoute.requestCount,

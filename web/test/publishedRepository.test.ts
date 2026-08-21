@@ -270,21 +270,24 @@ test("a route-intent patch prefetch is consumed without a duplicate request", as
 });
 
 test("top-level Source and Commits are wired independently from thread Git", async () => {
-  const [app, entry] = await Promise.all([
+  const [app, entry, routeLoaders] = await Promise.all([
     readFile(new URL("../src/NanocodexApp.tsx", import.meta.url), "utf8"),
     readFile(new URL("../src/main.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../src/routeLoaders.ts", import.meta.url), "utf8"),
   ]);
 
-  assert.match(app, /loadPublishedRepositorySnapshot\(\)/);
-  assert.match(app, /loadPublishedCommitHistory\(requestedCommit\)/);
-  assert.doesNotMatch(app, /loadThreadRepositorySnapshot/);
-  assert.doesNotMatch(app, /subscribeThreadGitChanges/);
+  assert.match(app, /prepareRepositorySurface\(/);
+  assert.match(routeLoaders, /module\.loadPublishedRepositorySnapshot\(\)/);
+  assert.match(routeLoaders, /loadPublishedCommitHistory\(requestedCommit\)/);
+  assert.doesNotMatch(`${app}\n${routeLoaders}`, /loadThreadRepositorySnapshot/);
+  assert.doesNotMatch(`${app}\n${routeLoaders}`, /subscribeThreadGitChanges/);
   assert.match(
-    entry,
-    /preloadPublishedRepositorySnapshot\(\)[\s\S]*preloadPreferredPublishedFile/,
+    routeLoaders,
+    /loadRepositorySnapshot\(\)[\s\S]*preloadPreferredPublishedFile/,
   );
   assert.match(
-    entry,
-    /loadPublishedCommitHistory\([\s\S]*?requestedHash[\s\S]*?preloadPublishedRepositoryPatch/,
+    routeLoaders,
+    /commitHashFromUrl\(url\)[\s\S]*?preloadPublishedRepositoryPatch/,
   );
+  assert.match(entry, /preloadDirectSurface\(directUrl\)/);
 });

@@ -106,11 +106,21 @@ export default defineConfig({
     manifest: true,
     rolldownOptions: {
       output: {
-        // Rolldown otherwise promotes tiny helpers shared with lazy routes into
-        // separate startup requests. Merge sub-10 KiB chunks while preserving
-        // the large route boundaries that keep Agent code off startup.
+        // Rolldown otherwise promotes shared runtime and shell-icon helpers into
+        // individual startup requests. Coalesce only those exact modules while
+        // preserving the route boundaries that keep Agent code off startup.
         codeSplitting: {
-          groups: [{ name: "initial-deps", tags: ["$initial"] }],
+          groups: [
+            { name: "initial-deps", tags: ["$initial"] },
+            {
+              name: "application-runtime",
+              test: /node_modules[\\/](?:react|react-dom|react-router)[\\/]/,
+            },
+            {
+              name: "shell-icons",
+              test: /node_modules[\\/]lucide-react[\\/]dist[\\/]esm[\\/](?:createLucideIcon|icons[\\/](?:check|chevron-right|copy|git-branch|git-pull-request|maximize-2|minimize-2|search|x))\.mjs$/,
+            },
+          ],
         },
       },
     },

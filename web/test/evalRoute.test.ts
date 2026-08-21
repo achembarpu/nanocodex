@@ -7,6 +7,7 @@ const evalsSource = source("../src/Evals.tsx");
 const liveEvalsSource = source("../src/LiveEvals.tsx");
 const appSource = source("../src/NanocodexApp.tsx");
 const entrySource = source("../src/main.tsx");
+const routeLoadersSource = source("../src/routeLoaders.ts");
 
 test("every hosted Evals subview has an exact typed route", () => {
   assert.deepEqual(evalRouteFromPath("/evals"), { kind: "overview" });
@@ -38,12 +39,22 @@ test("Evals route data is fetched in parallel and committed through one Suspense
   assert.equal(matches(evalsSource, /useSuspenseQuery\s*\(/g), 1);
   assert.match(evalsSource, /const pathname = useDeferredValue\(location\.pathname\)/);
   assert.doesNotMatch(evalsSource, /isPending|Loading|aria-busy|fallback=/);
-  assert.match(appSource, /if \(nextSurface === "evals"\) preloadEvalOverview\(\)/);
-  assert.doesNotMatch(appSource, /<Suspense/);
+  assert.match(appSource, /nextSurface === "evals"[\s\S]*?preloadEvalOverview\(\)/);
+  assert.match(routeLoadersSource, /surface === "evals"[\s\S]*?preloadEvalOverview\(\)/);
   assert.match(
-    entrySource,
+    evalsSource,
+    /preloadEvalOverview[\s\S]*?overviewQueryOptions\(\)[\s\S]*?prefetchQuery\(overview\)[\s\S]*?prefetchQuery\(cluster\)/,
+  );
+  assert.match(
+    evalsSource,
+    /function OverviewRoute[\s\S]*?queries: overviewQueryOptions\(\)/,
+  );
+  assert.equal(matches(appSource, /<Suspense/g), 1);
+  assert.match(
+    appSource,
     /<Suspense fallback=\{null\}>\s*<NanocodexApp preparedRoute=\{preparedRoute\} \/>/,
   );
+  assert.doesNotMatch(entrySource, /<Suspense/);
   assert.doesNotMatch(appSource, /Loading evals/);
 });
 

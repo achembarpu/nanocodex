@@ -11,9 +11,9 @@ import {
   Search,
   X,
 } from "lucide-react";
-import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import {
   lazy,
+  Suspense,
   startTransition,
   useCallback,
   useEffect,
@@ -25,10 +25,10 @@ import {
   type MouseEvent as ReactMouseEvent,
 } from "react";
 import { flushSync } from "react-dom";
-import { useLocation, useNavigate } from "react-router";
+import { createRoot, type Root } from "react-dom/client";
+import { BrowserRouter, useLocation, useNavigate } from "react-router";
 import type { CodeBrowserHandle } from "./CodeBrowser";
 import type { CommitCodeStreamHandle } from "./CommitCodeStream";
-import { evalApi } from "./evalApi";
 import { fuzzyScore } from "./fuzzy";
 import {
   pathForCommit,
@@ -46,41 +46,31 @@ import type {
 import type { HarnessCommit } from "./threadRepositorySnapshot";
 import { getBrowserThread } from "nanocodex/tools/browser";
 import { useDeploymentRollover } from "./useDeploymentRollover";
+import {
+  loadAgentExperience,
+  loadChangelog,
+  loadCodeBrowser,
+  loadCommitCodeStream,
+  loadDocs,
+  loadEvals,
+  loadHomeFrame,
+  loadPierreWorkerProvider,
+  loadVirtualCommitList,
+  preloadEvalOverview,
+  prepareRepositorySurface,
+  type PreparedDirectRoute,
+  type PreparedRepositorySurface,
+} from "./routeLoaders";
 
-const loadEvals = () =>
-  import("./Evals").then((module) => ({ default: module.Evals }));
 const Evals = lazy(loadEvals);
-const loadChangelog = () => import("./Changelog");
 const Changelog = lazy(() =>
   loadChangelog().then((module) => ({ default: module.Changelog }))
 );
-const loadDocs = () => import("./Docs");
-const loadHomeFrame = () =>
-  import("./HomeFrame").then((module) => ({ default: module.HomeFrame }));
 const HomeFrame = lazy(loadHomeFrame);
-const loadAgentExperience = () =>
-  import("./AgentExperience").then((module) => ({
-    default: module.AgentExperience,
-  }));
 const AgentExperience = lazy(loadAgentExperience);
-const loadPierreWorkerProvider = () =>
-  import("./PierreWorkerProvider").then((module) => ({
-    default: module.PierreWorkerProvider,
-    preloadPierreWorker: module.preloadPierreWorker,
-  }));
 const PierreWorkerProvider = lazy(loadPierreWorkerProvider);
-const loadCodeBrowser = () =>
-  import("./CodeBrowser").then((module) => ({ default: module.CodeBrowser }));
 const CodeBrowser = lazy(loadCodeBrowser);
-const loadCommitCodeStream = () =>
-  import("./CommitCodeStream").then((module) => ({
-    default: module.CommitCodeStream,
-  }));
 const CommitCodeStream = lazy(loadCommitCodeStream);
-const loadVirtualCommitList = () =>
-  import("./VirtualCommitList").then((module) => ({
-    default: module.VirtualCommitList,
-  }));
 const VirtualCommitList = lazy(loadVirtualCommitList);
 
 export type Theme = "light" | "dark";
@@ -148,90 +138,7 @@ function isPlainProductNavigation(event: ReactMouseEvent<HTMLAnchorElement>): bo
     && !event.altKey;
 }
 
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      gcTime: 30 * 60 * 1_000,
-      refetchOnWindowFocus: false,
-      retry: 2,
-    },
-  },
-});
-
-function preloadEvalOverview() {
-  void loadEvals().catch(() => undefined);
-  void Promise.all([
-    queryClient.prefetchQuery({
-      queryKey: ["evals", "overview"],
-      queryFn: ({ signal }) => evalApi.overview(signal),
-    }),
-    queryClient.prefetchQuery({
-      queryKey: ["evals", "cluster"],
-      queryFn: ({ signal }) => evalApi.cluster(signal),
-      staleTime: 5_000,
-    }),
-  ]).catch(() => undefined);
-}
-
-let repositorySnapshotRequest: Promise<PublishedRepositorySnapshot> | undefined;
-
-function loadRepositorySnapshot(): Promise<PublishedRepositorySnapshot> {
-  if (repositorySnapshotRequest) return repositorySnapshotRequest;
-
-  const request = import("./publishedRepository")
-    .then((module) => module.loadPublishedRepositorySnapshot())
-    .then((loaded) => {
-      const requestedPath = new URLSearchParams(window.location.search).get("path");
-      const preferredFile = loaded.tree.find((file) =>
-        file.path === requestedPath && file.contentUrl != null
-      ) ?? loaded.tree.find((file) =>
-        file.path === "src/main.rs" && file.contentUrl != null
-      ) ?? loaded.tree.find((file) =>
-        file.path === "README.md" && file.contentUrl != null
-      ) ?? loaded.tree.find((file) => file.contentUrl != null);
-      if (preferredFile) void loaded.readFile(preferredFile).catch(() => undefined);
-      return loaded;
-    })
-    .catch((error) => {
-      repositorySnapshotRequest = undefined;
-      throw error;
-    });
-  repositorySnapshotRequest = request;
-  return request;
-}
-
 type RepositorySurface = Extract<Surface, "code" | "commits">;
-
-function preparePierreWorker() {
-  return loadPierreWorkerProvider().then((module) => {
-    module.preloadPierreWorker();
-  });
-}
-
-type PreparedRepositorySurface =
-  | { surface: "code"; snapshot: PublishedRepositorySnapshot }
-  | { surface: "commits"; history: PublishedCommitHistory };
-
-function prepareRepositorySurface(
-  nextSurface: RepositorySurface,
-  requestedCommit?: string,
-): Promise<PreparedRepositorySurface> {
-  if (nextSurface === "code") {
-    return Promise.all([
-      preparePierreWorker(),
-      loadCodeBrowser(),
-      loadRepositorySnapshot(),
-    ]).then(([, , snapshot]) => ({ surface: "code", snapshot }));
-  }
-  return Promise.all([
-    preparePierreWorker(),
-    loadCommitCodeStream(),
-    loadVirtualCommitList(),
-    import("./publishedRepository").then((module) =>
-      module.loadPublishedCommitHistory(requestedCommit)
-    ),
-  ]).then(([, , , history]) => ({ surface: "commits", history }));
-}
 
 type RepositoryNavigationIntent<T> = {
   navigationId: number;
@@ -334,23 +241,31 @@ function RepositorySurfaceError({
   );
 }
 
-export type PreparedDirectRoute = {
-  commitHistory?: PublishedCommitHistory;
-  DocsComponent?: ComponentType;
-  repositorySnapshot?: PublishedRepositorySnapshot;
-};
-
 type NanocodexAppProps = {
   preparedRoute?: PreparedDirectRoute;
 };
 
 export function NanocodexApp({ preparedRoute = {} }: NanocodexAppProps) {
-  return (
-    <QueryClientProvider client={queryClient}>
-      <NanocodexShell preparedRoute={preparedRoute} />
-    </QueryClientProvider>
+  return <NanocodexShell preparedRoute={preparedRoute} />;
+}
+
+export function mountNanocodexApp(preparedRoute: PreparedDirectRoute) {
+  const container = document.getElementById("root") as RootContainer | null;
+  if (!container) throw new Error("Nanocodex root container is missing");
+
+  // Fast Refresh may briefly re-evaluate this module before replacing the
+  // document. Keep one React owner on the DOM node across that handoff.
+  const root = container.__nanocodexRoot ??= createRoot(container);
+  root.render(
+    <BrowserRouter useTransitions={false}>
+      <Suspense fallback={null}>
+        <NanocodexApp preparedRoute={preparedRoute} />
+      </Suspense>
+    </BrowserRouter>,
   );
 }
+
+type RootContainer = HTMLElement & { __nanocodexRoot?: Root };
 
 function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
   useDeploymentRollover();
@@ -732,7 +647,9 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
       void prepareRepositorySurface(nextSurface).catch(() => undefined);
       return;
     }
-    if (nextSurface === "evals") preloadEvalOverview();
+    if (nextSurface === "evals") {
+      void preloadEvalOverview().catch(() => undefined);
+    }
   }, []);
 
   const navigateToPreparedRepository = useCallback((

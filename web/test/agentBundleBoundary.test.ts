@@ -4,15 +4,19 @@ import test from "node:test";
 
 const application = source("../src/NanocodexApp.tsx");
 const entry = source("../src/main.tsx");
+const routeLoaders = source("../src/routeLoaders.ts");
 const experience = source("../src/AgentExperience.tsx");
+const evals = source("../src/Evals.tsx");
 const terminal = source("../src/AgentTerminal.tsx");
 const terminalCss = source("../src/AgentTerminal.css");
 
 test("home routes preload only the lightweight credential experience", () => {
-  assert.match(entry, /import\("\.\/AgentExperience"\)/);
+  assert.match(entry, /preloadDirectSurface/);
   assert.doesNotMatch(entry, /import\("\.\/AgentTerminal"\)/);
-  assert.match(application, /import\("\.\/AgentExperience"\)/);
+  assert.match(routeLoaders, /import\("\.\/AgentExperience"\)/);
+  assert.match(application, /loadAgentExperience/);
   assert.doesNotMatch(application, /import\("\.\/AgentTerminal"\)/);
+  assert.doesNotMatch(routeLoaders, /import\("\.\/AgentTerminal"\)/);
 
   assert.doesNotMatch(
     experience,
@@ -22,6 +26,13 @@ test("home routes preload only the lightweight credential experience", () => {
   assert.match(terminal, /from "\.\/agentTerminalSurface"/);
   assert.match(terminal, /from "\.\/ArtifactDock"/);
   assert.match(terminal, /from "\.\/browserMcp"/);
+});
+
+test("evaluation query state stays behind the Evals route", () => {
+  assert.doesNotMatch(`${entry}\n${application}\n${routeLoaders}`, /from "@tanstack\/react-query"/);
+  assert.match(evals, /QueryClientProvider client=\{queryClient\}/);
+  assert.match(evals, /export async function preloadEvalOverview/);
+  assert.match(routeLoaders, /surface === "evals"[\s\S]*?preloadEvalOverview\(\)/);
 });
 
 test("authenticated credential readiness is the sole terminal import gate", () => {

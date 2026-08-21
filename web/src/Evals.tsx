@@ -1,10 +1,11 @@
 import {
+  QueryClient,
+  QueryClientProvider,
   QueryErrorResetBoundary,
   queryOptions,
   useQueryClient,
   useSuspenseQueries,
   useSuspenseQuery,
-  type QueryClient,
 } from "@tanstack/react-query";
 import { Component, useDeferredValue, type ErrorInfo, type ReactNode } from "react";
 import { Link, useLocation } from "react-router";
@@ -22,6 +23,24 @@ const detailPollMs = 15_000;
 const resultStaleMs = 30_000;
 const resultCacheMs = 30 * 60_000;
 const hoverFreshMs = 2_000;
+
+const queryClient = new QueryClient({
+  defaultOptions: {
+    queries: {
+      gcTime: 30 * 60 * 1_000,
+      refetchOnWindowFocus: false,
+      retry: 2,
+    },
+  },
+});
+
+export async function preloadEvalOverview(): Promise<void> {
+  const [overview, cluster] = overviewQueryOptions();
+  await Promise.all([
+    queryClient.prefetchQuery(overview),
+    queryClient.prefetchQuery(cluster),
+  ]);
+}
 
 type EvalRouteErrorBoundaryProps = {
   children: ReactNode;
@@ -74,6 +93,35 @@ function summaryComplete(summary: EvalSummary) {
   return summary.running === 0 && summary.unclaimed === 0;
 }
 
+function overviewQueryOptions() {
+  return [
+    queryOptions({
+      queryKey: ["evals", "overview"],
+      queryFn: ({ signal }) => evalApi.overview(signal),
+      refetchInterval: (query) => {
+        const data = query.state.data;
+        return data && summaryComplete(data.summary)
+          ? quietOverviewPollMs
+          : activeOverviewPollMs;
+      },
+      refetchIntervalInBackground: false,
+      refetchOnMount: true,
+      refetchOnWindowFocus: "always" as const,
+      refetchOnReconnect: "always" as const,
+      staleTime: hoverFreshMs,
+    }),
+    queryOptions({
+      queryKey: ["evals", "cluster"],
+      queryFn: ({ signal }) => evalApi.cluster(signal),
+      refetchInterval: 10_000,
+      refetchIntervalInBackground: false,
+      refetchOnWindowFocus: "always" as const,
+      refetchOnReconnect: "always" as const,
+      staleTime: 5_000,
+    }),
+  ] as const;
+}
+
 function cachedWorksetComplete(worksetId: string, queryClient: QueryClient) {
   const detail = queryClient.getQueryData<EvalWorksetDetail>([
     "evals",
@@ -107,32 +155,7 @@ function surfaceStatus(
 
 function OverviewRoute() {
   const [overviewQuery, clusterQuery] = useSuspenseQueries({
-    queries: [
-      queryOptions({
-        queryKey: ["evals", "overview"],
-        queryFn: ({ signal }) => evalApi.overview(signal),
-        refetchInterval: (query) => {
-          const data = query.state.data;
-          return data && summaryComplete(data.summary)
-            ? quietOverviewPollMs
-            : activeOverviewPollMs;
-        },
-        refetchIntervalInBackground: false,
-        refetchOnMount: true,
-        refetchOnWindowFocus: "always" as const,
-        refetchOnReconnect: "always" as const,
-        staleTime: hoverFreshMs,
-      }),
-      queryOptions({
-        queryKey: ["evals", "cluster"],
-        queryFn: ({ signal }) => evalApi.cluster(signal),
-        refetchInterval: 10_000,
-        refetchIntervalInBackground: false,
-        refetchOnWindowFocus: "always" as const,
-        refetchOnReconnect: "always" as const,
-        staleTime: 5_000,
-      }),
-    ],
+    queries: overviewQueryOptions(),
   });
   return (
     <LiveEvals
@@ -246,12 +269,14 @@ export function Evals() {
   const location = useLocation();
   const pathname = useDeferredValue(location.pathname);
   return (
-    <QueryErrorResetBoundary>
-      {({ reset }) => (
-        <EvalRouteErrorBoundary key={pathname} onReset={reset}>
-          <EvalsContent route={evalRouteFromPath(pathname)} />
-        </EvalRouteErrorBoundary>
-      )}
-    </QueryErrorResetBoundary>
+    <QueryClientProvider client={queryClient}>
+      <QueryErrorResetBoundary>
+        {({ reset }) => (
+          <EvalRouteErrorBoundary key={pathname} onReset={reset}>
+            <EvalsContent route={evalRouteFromPath(pathname)} />
+          </EvalRouteErrorBoundary>
+        )}
+      </QueryErrorResetBoundary>
+    </QueryClientProvider>
   );
 }
