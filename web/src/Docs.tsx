@@ -5,88 +5,115 @@ import {
   Fragment,
   createElement,
   useEffect,
+  useId,
   useMemo,
   useRef,
   useState,
   type ReactNode,
 } from "react";
-import { Link, useLocation } from "react-router";
-import { parseDocument, type MarkdownBlock } from "./docsMarkdown";
+import { Link, useLocation, useNavigate } from "react-router";
+import {
+  parseDocument,
+  type MarkdownBlock,
+  type ParsedDoc,
+} from "./docsMarkdown";
+import {
+  docsNavigation,
+  docsPageOrder,
+  hasDocsSource,
+  loadDocsSource,
+  normalizeDocsPath,
+  type DocsPage,
+  type DocsSection,
+} from "./docsNavigation";
 import { highlightDocsCode } from "./docsSyntax";
 import "./Docs.css";
 
-const sources = import.meta.glob("../docs/src/pages/**/*.mdx", {
-  eager: true,
-  import: "default",
-  query: "?raw",
-}) as Record<string, string>;
+type ResolvedPage =
+  | { kind: "document"; path: string; source: string; doc: ParsedDoc }
+  | { kind: "missing"; path: string }
+  | { kind: "error"; path: string };
 
-type NavPage = readonly [label: string, href: string];
-type NavGroup = { label: string; pages: readonly NavPage[] };
+const resolvedPageCache = new Map<string, ResolvedPage>();
 
-const navGroups: readonly NavGroup[] = [
-  {
-    label: "Start",
-    pages: [
-      ["Overview", "/docs"],
-      ["Getting started", "/docs/getting-started"],
-      ["Stability and scope", "/docs/stability"],
-    ],
-  },
-  {
-    label: "Core",
-    pages: [
-      ["The owned agent", "/docs/core/owned-agent"],
-      ["Durable execution", "/docs/core/durability"],
-      ["Tools and Code Mode", "/docs/core/tools-code-mode"],
-      ["Branches and subagents", "/docs/core/branching"],
-    ],
-  },
-  {
-    label: "SDKs",
-    pages: [
-      ["Rust", "/docs/sdks/rust"],
-      ["JavaScript", "/docs/sdks/javascript"],
-      ["Python", "/docs/sdks/python"],
-    ],
-  },
-  {
-    label: "Capabilities",
-    pages: [
-      ["Web agent", "/docs/capabilities/web-agent"],
-      ["VMs and sandboxes", "/docs/capabilities/vm-sandboxes"],
-      ["Voice", "/docs/capabilities/voice"],
-      ["Deployment patterns", "/docs/deployments"],
-    ],
-  },
-  {
-    label: "Proof",
-    pages: [
-      ["Evaluation", "/docs/evals"],
-      ["Built with Nanocodex: Tact", "/docs/examples/tact"],
-    ],
-  },
-] as const;
+export async function preloadDocsRoute(pathname: string) {
+  const path = normalizeDocsPath(pathname);
+  if (resolvedPageCache.has(path)) return;
+  if (!hasDocsSource(path)) {
+    resolvedPageCache.set(path, { kind: "missing", path });
+    return;
+  }
 
-const pageOrder: NavPage[] = navGroups.flatMap(({ pages }) => [...pages]);
-const documents = new Map(
-  Object.entries(sources).map(([file, source]) => [routeForSource(file), source]),
-);
+  const source = await loadDocsSource(path);
+  if (source == null) return;
+  const doc = parseDocument(source);
+  for (const block of doc.blocks) {
+    if (block.type === "code") highlightDocsCode(block.code, block.language);
+  }
+  resolvedPageCache.set(path, {
+    kind: "document",
+    path,
+    source,
+    doc,
+  });
+}
 
 export function Docs() {
   const location = useLocation();
-  const path = normalizePath(location.pathname);
-  const source = documents.get(path);
-  const doc = useMemo(() => source ? parseDocument(source) : undefined, [source]);
+  const navigate = useNavigate();
+  const path = normalizeDocsPath(location.pathname);
+  const [resolved, setResolved] = useState<ResolvedPage | undefined>(() =>
+    resolvedPageCache.get(path)
+  );
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [browseOpen, setBrowseOpen] = useState(false);
   const [copied, setCopied] = useState(false);
   const browseButtonRef = useRef<HTMLButtonElement>(null);
+  const docsPageRef = useRef<HTMLDivElement>(null);
   const drawerRef = useRef<HTMLDivElement>(null);
   const drawerCloseRef = useRef<HTMLButtonElement>(null);
+  const displayPath = resolved?.path ?? path;
+  const currentIndex = docsPageOrder.findIndex(({ href }) => href === displayPath);
+  const previous = currentIndex > 0 ? docsPageOrder[currentIndex - 1] : undefined;
+  const next = currentIndex >= 0 ? docsPageOrder[currentIndex + 1] : undefined;
+
+  useEffect(() => {
+    let active = true;
+    if (!hasDocsSource(path)) {
+      setResolved({ kind: "missing", path });
+      return () => {
+        active = false;
+      };
+    }
+
+    const cached = resolvedPageCache.get(path);
+    if (cached) {
+      setResolved(cached);
+      return () => {
+        active = false;
+      };
+    }
+
+    void preloadDocsRoute(path).then(() => {
+      if (!active) return;
+      const next = resolvedPageCache.get(path);
+      if (next) setResolved(next);
+    }).catch(() => {
+      if (active) setResolved({ kind: "error", path });
+    });
+
+    return () => {
+      active = false;
+    };
+  }, [loadAttempt, path]);
 
   useEffect(() => {
     setBrowseOpen(false);
     setCopied(false);
+  }, [path]);
+
+  useEffect(() => {
+    if (!resolved || resolved.path !== path) return;
     window.requestAnimationFrame(() => {
       const target = location.hash
         ? window.document.getElementById(decodeHash(location.hash))
@@ -94,8 +121,10 @@ export function Docs() {
       if (target) target.scrollIntoView();
       else window.scrollTo({ top: 0 });
     });
-    window.document.title = doc ? `${doc.title} · Nanocodex docs` : "Docs · Nanocodex";
-  }, [doc, location.hash, path]);
+    window.document.title = resolved.kind === "document"
+      ? `${resolved.doc.title} · Nanocodex docs`
+      : "Docs · Nanocodex";
+  }, [location.hash, path, resolved]);
 
   useEffect(() => {
     if (!browseOpen) return;
@@ -141,7 +170,33 @@ export function Docs() {
     return () => desktop.removeEventListener("change", closeDrawerOnDesktop);
   }, []);
 
-  if (!doc || !source) {
+  useEffect(() => {
+    const pageWithKeyboardShortcuts = (event: KeyboardEvent) => {
+      if (
+        !event.shiftKey ||
+        event.altKey ||
+        event.ctrlKey ||
+        event.metaKey ||
+        event.defaultPrevented
+      ) return;
+
+      const destination = event.key === "ArrowLeft"
+        ? previous
+        : event.key === "ArrowRight"
+          ? next
+          : undefined;
+      if (!destination || !isDocsPagingTarget(event.target, docsPageRef.current)) return;
+
+      event.preventDefault();
+      navigate(destination.href);
+    };
+    window.addEventListener("keydown", pageWithKeyboardShortcuts);
+    return () => window.removeEventListener("keydown", pageWithKeyboardShortcuts);
+  }, [navigate, next, previous]);
+
+  if (!resolved) return null;
+
+  if (resolved.kind === "missing") {
     return (
       <section className="docs-not-found">
         <p className="eyebrow">Nanocodex docs</p>
@@ -151,13 +206,23 @@ export function Docs() {
     );
   }
 
+  if (resolved.kind === "error") {
+    return (
+      <section className="docs-not-found">
+        <p className="eyebrow">Nanocodex docs</p>
+        <h1>The documentation could not be loaded.</h1>
+        <button type="button" onClick={() => setLoadAttempt((attempt) => attempt + 1)}>
+          Try again
+        </button>
+      </section>
+    );
+  }
+
+  const { doc, source } = resolved;
   const headings = doc.blocks.filter(
     (block): block is Extract<MarkdownBlock, { type: "heading" }> =>
       block.type === "heading" && block.depth === 2,
   );
-  const currentIndex = pageOrder.findIndex(([, href]) => href === path);
-  const previous = currentIndex > 0 ? pageOrder[currentIndex - 1] : undefined;
-  const next = currentIndex >= 0 ? pageOrder[currentIndex + 1] : undefined;
   const copyMarkdown = () => {
     void navigator.clipboard.writeText(source).then(() => {
       setCopied(true);
@@ -166,7 +231,7 @@ export function Docs() {
   };
 
   return (
-    <div className="docs-page">
+    <div className="docs-page" ref={docsPageRef}>
       <div className="docs-mobile-toolbar">
         <button
           ref={browseButtonRef}
@@ -182,7 +247,7 @@ export function Docs() {
 
       <div className="docs-layout">
         <aside className="docs-sidebar">
-          <DocsNavigation path={path} />
+          <DocsNavigation path={displayPath} />
         </aside>
 
         <div className="docs-reading-column">
@@ -194,14 +259,22 @@ export function Docs() {
           </article>
           <nav className="docs-pagination" aria-label="Adjacent documentation pages">
             {previous ? (
-              <Link to={previous[1]}>
+              <Link
+                to={previous.href}
+                aria-keyshortcuts="Shift+ArrowLeft"
+                title="Previous page (Shift + Left Arrow)"
+              >
                 <ChevronLeft aria-hidden="true" />
-                <span><small>Previous</small>{previous[0]}</span>
+                <span><small>Previous</small>{previous.label}</span>
               </Link>
             ) : <span />}
             {next ? (
-              <Link to={next[1]}>
-                <span><small>Next</small>{next[0]}</span>
+              <Link
+                to={next.href}
+                aria-keyshortcuts="Shift+ArrowRight"
+                title="Next page (Shift + Right Arrow)"
+              >
+                <span><small>Next</small>{next.label}</span>
                 <ChevronRight aria-hidden="true" />
               </Link>
             ) : null}
@@ -238,7 +311,7 @@ export function Docs() {
                 <X aria-hidden="true" />
               </button>
             </header>
-            <DocsNavigation path={path} onNavigate={() => setBrowseOpen(false)} />
+            <DocsNavigation path={displayPath} onNavigate={() => setBrowseOpen(false)} />
           </div>
         </div>
       ) : null}
@@ -246,25 +319,136 @@ export function Docs() {
   );
 }
 
+const docsPagingIgnoredTarget = [
+  "input",
+  "textarea",
+  "select",
+  "button",
+  "iframe",
+  '[contenteditable]:not([contenteditable="false"])',
+  '[role="textbox"]',
+  '[role="combobox"]',
+  ".monaco-editor",
+  ".cm-editor",
+  ".CodeMirror",
+  "[data-code-editor]",
+].join(", ");
+
+function isDocsPagingTarget(target: EventTarget | null, docsPage: HTMLElement | null) {
+  if (!docsPage) return false;
+  const element = target instanceof Element ? target : window.document.activeElement;
+  if (!element) return false;
+  if (element === window.document.body || element === window.document.documentElement) return true;
+  return docsPage.contains(element) && !element.closest(docsPagingIgnoredTarget);
+}
+
 function DocsNavigation({ path, onNavigate }: { path: string; onNavigate?(): void }) {
+  const instanceId = useId().replaceAll(":", "");
+  const activeSections = useMemo(
+    () => docsNavigation.flatMap(({ items }) =>
+      items.filter((item): item is DocsSection =>
+        item.type === "section" && item.pages.some((page) => page.href === path)
+      ).map((section) => section.id)
+    ),
+    [path],
+  );
+  const [expanded, setExpanded] = useState<ReadonlySet<string>>(
+    () => new Set(activeSections),
+  );
+
+  useEffect(() => {
+    if (activeSections.length === 0) return;
+    setExpanded((current) => new Set([...current, ...activeSections]));
+  }, [activeSections]);
+
   return (
     <nav aria-label="Documentation">
-      {navGroups.map((group) => (
-        <section key={group.label}>
+      {docsNavigation.map((group) => (
+        <section className="docs-nav-group" key={group.label}>
           <p>{group.label}</p>
-          {group.pages.map(([label, href]) => (
-            <Link
-              to={href}
-              aria-current={href === path ? "page" : undefined}
-              key={href}
-              onClick={onNavigate}
-            >
-              {label}
-            </Link>
-          ))}
+          <ul className="docs-nav-items">
+            {group.items.map((item) => item.type === "page" ? (
+              <li key={item.href}><DocsNavLink page={item} path={path} onNavigate={onNavigate} /></li>
+            ) : (
+              <DocsNavSection
+                expanded={expanded.has(item.id)}
+                instanceId={instanceId}
+                key={item.id}
+                onNavigate={onNavigate}
+                onToggle={() => {
+                  setExpanded((current) => {
+                    const next = new Set(current);
+                    if (next.has(item.id)) next.delete(item.id);
+                    else next.add(item.id);
+                    return next;
+                  });
+                }}
+                path={path}
+                section={item}
+              />
+            ))}
+          </ul>
         </section>
       ))}
     </nav>
+  );
+}
+
+function DocsNavSection({
+  expanded,
+  instanceId,
+  onNavigate,
+  onToggle,
+  path,
+  section,
+}: {
+  expanded: boolean;
+  instanceId: string;
+  onNavigate?(): void;
+  onToggle(): void;
+  path: string;
+  section: DocsSection;
+}) {
+  const controls = `docs-nav-${instanceId}-${section.id}`;
+  return (
+    <li className="docs-nav-section">
+      <button
+        type="button"
+        aria-controls={controls}
+        aria-expanded={expanded}
+        onClick={onToggle}
+      >
+        <span>{section.label}</span>
+        <span className="docs-nav-section-state" aria-hidden="true">
+          {expanded ? "hide" : "show"}
+        </span>
+      </button>
+      <ul className="docs-nav-children" id={controls} hidden={!expanded}>
+        {section.pages.map((page) => (
+          <li key={page.href}><DocsNavLink page={page} path={path} onNavigate={onNavigate} /></li>
+        ))}
+      </ul>
+    </li>
+  );
+}
+
+function DocsNavLink({
+  onNavigate,
+  page,
+  path,
+}: {
+  onNavigate?(): void;
+  page: DocsPage;
+  path: string;
+}) {
+  return (
+    <Link
+      to={page.href}
+      aria-current={page.href === path ? "page" : undefined}
+      onClick={onNavigate}
+    >
+      {page.label}
+    </Link>
   );
 }
 
@@ -359,16 +543,6 @@ function inline(value: string): ReactNode[] {
   }
   if (cursor < value.length) nodes.push(value.slice(cursor));
   return nodes.map((node, index) => <Fragment key={index}>{node}</Fragment>);
-}
-
-function routeForSource(file: string) {
-  const relative = file.split("/pages/")[1].replace(/\.mdx$/, "");
-  return relative === "index" ? "/docs" : `/docs/${relative}`;
-}
-
-function normalizePath(pathname: string) {
-  const path = pathname.replace(/\/+$/, "");
-  return path || "/docs";
 }
 
 function decodeHash(hash: string) {

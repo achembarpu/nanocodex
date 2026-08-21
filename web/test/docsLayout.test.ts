@@ -6,16 +6,16 @@ const css = readFileSync(new URL("../src/Docs.css", import.meta.url), "utf8");
 const source = readFileSync(new URL("../src/Docs.tsx", import.meta.url), "utf8");
 const syntax = readFileSync(new URL("../src/docsSyntax.tsx", import.meta.url), "utf8");
 
-test("documentation uses a full-width shell and readable heading scale", () => {
-  assert.match(css, /\.docs-layout \{[\s\S]*?width:\s*100%;[\s\S]*?padding:\s*56px var\(--page-margin\) 112px/);
-  assert.match(css, /\.docs-article h1 \{[\s\S]*?font-size:\s*28px/);
-  assert.match(css, /\.docs-article h2 \{[\s\S]*?font-size:\s*20px/);
+test("documentation uses a full-width shell and restrained heading scale", () => {
+  assert.match(css, /\.docs-layout \{[\s\S]*?width:\s*100%;[\s\S]*?padding:\s*40px var\(--page-margin\) 96px/);
+  assert.match(css, /\.docs-article h1 \{[\s\S]*?font-size:\s*22px/);
+  assert.match(css, /\.docs-article h2 \{[\s\S]*?font-size:\s*16px/);
 });
 
 test("documentation navigation stays client-side and code uses themed syntax tokens", () => {
-  assert.match(source, /import \{ Link, useLocation \} from "react-router"/);
-  assert.match(source, /<Link to=\{previous\[1\]\}>/);
-  assert.match(source, /<Link to=\{href\}/);
+  assert.match(source, /import \{ Link, useLocation, useNavigate \} from "react-router"/);
+  assert.match(source, /\{previous \? \([\s\S]*?<Link[\s\S]*?to=\{previous\.href\}/);
+  assert.match(source, /to=\{page\.href\}/);
   assert.doesNotMatch(source, /<a href="\/docs"/);
   assert.match(source, /highlightDocsCode\(code, language\)/);
   assert.match(syntax, /createHighlighterCoreSync/);
@@ -28,8 +28,37 @@ test("documentation navigation stays client-side and code uses themed syntax tok
 test("documentation drawers and pagination keep mobile targets and focus containment", () => {
   assert.match(css, /\.docs-drawer nav a \{[\s\S]*?min-height:\s*44px/);
   assert.match(css, /\.docs-pagination > a \{[\s\S]*?min-height:\s*44px/);
+  assert.match(css, /@media \(pointer: coarse\), \(any-pointer: coarse\) \{[\s\S]*?\.docs-sidebar a,[\s\S]*?min-height:\s*44px/);
   assert.match(source, /event\.key !== "Tab"/);
   assert.match(source, /last\.focus\(\)/);
   assert.match(source, /first\.focus\(\)/);
   assert.match(source, /matchMedia\("\(min-width: 901px\)"\)/);
+});
+
+test("documentation loads one Markdown source at a time and swaps only complete pages", () => {
+  const navigation = readFileSync(new URL("../src/docsNavigation.ts", import.meta.url), "utf8");
+  assert.match(navigation, /import\.meta\.glob\("\.\.\/docs\/src\/pages\/\*\*\/\*\.mdx"/);
+  assert.doesNotMatch(navigation, /eager:\s*true/);
+  assert.match(navigation, /sourceCache = new Map/);
+  assert.match(source, /if \(!resolved\) return null/);
+  assert.match(source, /if \(!resolved \|\| resolved\.path !== path\) return/);
+  assert.match(source, /const doc = parseDocument\(source\)/);
+  assert.match(source, /block\.type === "code"[\s\S]*?highlightDocsCode\(block\.code, block\.language\)/);
+  assert.match(source, /resolvedPageCache\.set\(path, \{[\s\S]*?doc,/);
+  assert.match(source, /if \(next\) setResolved\(next\)/);
+});
+
+test("SDK text disclosures are accessible and active pages are bold without arrows", () => {
+  const navigation = readFileSync(new URL("../src/docsNavigation.ts", import.meta.url), "utf8");
+  assert.match(navigation, /label: "JavaScript \/ TypeScript"/);
+  assert.match(source, /aria-controls=\{controls\}/);
+  assert.match(source, /aria-expanded=\{expanded\}/);
+  assert.match(source, /className="docs-nav-section-state"/);
+  assert.doesNotMatch(source.slice(source.indexOf("function DocsNavSection"), source.indexOf("function DocsNavLink")), /<ChevronRight/);
+  assert.match(source, /new Set\(\[\.\.\.current, \.\.\.activeSections\]\)/);
+  assert.match(css, /\.docs-nav-section > button \{[\s\S]*?min-height:\s*44px/);
+  assert.match(css, /a\[aria-current="page"\][\s\S]*?font-weight:\s*700/);
+  assert.doesNotMatch(css, /aria-current="page"\]\s*::before/);
+  assert.match(css, /\.docs-drawer \{[\s\S]*?border-right:\s*1px solid var\(--border-soft\)/);
+  assert.doesNotMatch(css, /\.docs-drawer \{[\s\S]*?box-shadow:/);
 });

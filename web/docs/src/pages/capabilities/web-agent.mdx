@@ -1,25 +1,28 @@
 ---
 title: Web agent
-description: A complete coding workspace running in a browser Worker.
+description: Run the Codex lifecycle and common coding tools locally in a browser Worker.
 ---
 
 # Web agent
 
-The browser package runs the Rust/WASM agent in a module Worker. The current web
-consumer adds a persistent browser-native workspace and product UI; the remote
-host is needed for authenticated OpenAI and hosted web/image routes, not for a
-basic shell or browser-native filesystem.
+Run the Rust/WASM Codex lifecycle in a module Worker and keep common coding work
+inside the tab. The browser package provides a persistent browser-native
+workspace. A remote host keeps API-key or managed ChatGPT routing off the page
+and serves hosted web/image tools; a caller-owned MPP session can connect
+directly. None of those routes is needed for the filesystem, Git, shell, Python,
+or compiler tools.
 
-## Browser-native workspace
+## Work locally first
 
 `browser({ threadId })` composes:
 
 - persistent origin-private filesystem (OPFS), reusable across Worker and page
   restarts;
-- lazy just-bash execution, with Python through Pyodide and C/C++ through
-  wasm-clang;
+- lazy just-bash execution, with Python through Pyodide and C/C++-to-WASI
+  compilation through wasm-clang;
 - Rust/WASM `apply_patch` using the canonical tool contract;
-- browser Git and `gh` compatibility, with real Git-backed file and commit views;
+- bounded browser Git and `gh` commands, with real Git-backed file and commit
+  views;
 - upload/download and bounded workspace operations;
 - web search, image generation, `update_plan`, and application tools;
 - public HTTPS Parquet, JSONL, and Hugging Face dataset inspection with bounded
@@ -34,7 +37,9 @@ needs arbitrary native Linux packages or stronger isolation.
 import { Agent, Subagents, Transport } from "nanocodex/browser";
 import { browser } from "nanocodex/tools/browser";
 
-const runtime = await browser({ threadId: "thread-1" });
+const runtime = await browser({
+  threadId: "a7f9c210-5a3e-4b16-9d82-7b57cbb0845a",
+});
 const agent = await Agent.create({
   transport: Transport.hostManaged({
     websocketUrl: "/api/responses",
@@ -52,18 +57,11 @@ and [web architecture](https://github.com/gakonst/nanocodex/blob/master/web/READ
 
 ## Current web application
 
-The application splits presentation (`AgentTerminal`), UI lifecycle
-(`agentController`), Worker hosting (`agent.worker`), SDK adaptation
-(`nanocodex`), and authenticated Worker routes. Rust/WASM still owns history and
-the tool loop. Code, Commits, Requests, and Evals are separate application
-surfaces. Inspect the [web source](https://github.com/gakonst/nanocodex/tree/master/web/src)
-or run it:
-
-```sh
-cd web
-npm install
-npm run dev
-```
+The production web application splits presentation, UI lifecycle, Worker
+hosting, SDK adaptation, and authenticated Worker routes. Rust/WASM still owns
+history and the tool loop. Code, commits, requests, and evals remain separate
+application surfaces. Use the [browser workspace guide](/sdks/javascript/browser-workspace)
+to compose those boundaries in your product.
 
 The web app and browser composition are experimental consumers, not the stable
 core library contract. Treat storage quotas, cross-origin isolation, CORS,

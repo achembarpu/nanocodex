@@ -1,81 +1,60 @@
 ---
 title: Rust SDK
-description: The canonical Nanocodex facade and lower-level component crates.
+description: Build one retained coding-agent session with the canonical Nanocodex facade.
 ---
 
 # Rust SDK
 
-Add the Alloy-style facade for the normal path:
+Use the `nanocodex` facade when your application needs the complete owned agent
+lifecycle. It composes the OpenAI Responses client, tools, retained history,
+typed events and results, branches, and cleanup without adding an app-server
+protocol.
 
 ```sh
-cargo add nanocodex
+cargo add nanocodex tokio --features tokio/full
 ```
 
 ```rust
-use nanocodex::{Nanocodex, OpenAi, Thinking, Tools};
+use nanocodex::{Nanocodex, OpenAi};
 
-let tools = Tools::builder().build()?;
 let openai = OpenAi::new(std::env::var("OPENAI_API_KEY")?)?;
-let (agent, events) = Nanocodex::builder(openai)
+let (agent, _events) = Nanocodex::builder(openai)
+    .instructions("Inspect before editing. Preserve unrelated work.")
     .workspace(std::env::current_dir()?)
-    .thinking(Thinking::High)
-    .tools(tools)
     .build()?;
+
+let result = agent.prompt("Summarize this repository.").await?.await?;
+println!("{}", result.final_message());
+
+agent.shutdown().await?;
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
-Common types are at the crate root. Detailed APIs live under `agent`, `oai`, and
-`tools`; avoid sibling convenience paths. The
-[facade README](https://github.com/gakonst/nanocodex/blob/master/crates/nanocodex/README.md)
-is the canonical import guide.
+The first `await` accepts and orders the prompt. The second waits for its typed
+`TurnResult`. A follow-on prompt reuses the same history, WebSocket, tools,
+cache identity, and shell sessions automatically.
+
+## Learn by task
+
+- [Build and shut down an agent](/sdks/rust/agent-lifecycle).
+- [Stream events, steer, or cancel a turn](/sdks/rust/turns-events-control).
+- [Add tools, Code Mode, and MCP](/sdks/rust/tools-code-mode-mcp).
+- [Choose handles, fork context, or install subagents](/sdks/rust/handles-forks-subagents).
+- [Recover accepted work with a journal](/sdks/rust/durability).
 
 ## Choose the lowest owner
 
-- Use `nanocodex-agent` for the complete coding-agent lifecycle.
-- Use `nanocodex-oai-api` for a managed typed Responses session or a concrete
-  Tower service without the tool loop.
-- Use `nanocodex-tools` for tools, Code Mode, MCP, or a hosted runtime without
-  an agent.
-- Add `nanocodex-observability` or `nanocodex-subagents` only when needed.
+Use `nanocodex-agent` directly for the same complete lifecycle without facade
+reexports. Use `nanocodex-oai-api` for a managed typed Responses session or
+concrete Tower service without the tool loop. Use `nanocodex-tools` for tools,
+Code Mode, MCP, or a hosted tool runtime without an agent.
 
-One Tower call is one complete streamed Responses attempt through completion or
-typed failure. `ResponsesClient<S>` remains generic over the concrete service,
-so caller layers can add deadlines, concurrency, load shedding, tracing, or
-metrics while the SDK remains the only retry owner. See
-[the Tower design](https://github.com/gakonst/nanocodex/blob/master/docs/RESPONSES_TOWER.md).
+The facade keeps common types at the crate root and detailed APIs under
+`agent`, `oai`, and `tools`. The
+[facade README](https://github.com/gakonst/nanocodex/blob/master/crates/nanocodex/README.md)
+is the canonical import map; docs.rs is the exhaustive API reference.
 
-## Complete examples
-
-Run from the repository root:
-
-```sh
-export OPENAI_API_KEY="..."
-cargo run -p nanocodex-examples --bin minimal
-cargo run -p nanocodex-examples --bin follow-on
-cargo run -p nanocodex-examples --bin lifecycle
-cargo run -p nanocodex-examples --bin resume
-```
-
-Browse [all Rust examples](https://github.com/gakonst/nanocodex/tree/master/examples)
-for custom tools, MCP, forks, subagents, voice, VM tools, and egress.
-
-## Rust integration guidance
-
-Move owned protocol and tool values rather than cloning them to satisfy a
-borrowed interface. Keep `Value` at genuinely dynamic boundaries and use typed
-wire shapes or `RawValue` for retained opaque payloads. Runtime paths return
-contextual errors instead of silently falling back. The builder exposes policy
-such as model, instructions, workspace, tools, execution environment, and
-Tower layers; queue capacities, socket tasks, replay bookkeeping, and mutable
-run state stay private.
-
-For remote tools, supply one coherent `ExecutionEnvironment` describing date,
-timezone, and project instructions. Otherwise the native builder discovers
-those facts on the embedding host, which is wrong when the tool filesystem
-lives elsewhere. For agent-relative tools, prefer `tools_factory` to a shared
-registry. At shutdown, stop child trees and drop tool capabilities before
-joining their external VM or process owner.
-
-The public API is async and runtime-owned, but the lower crates remain useful
-independently. This makes it possible to unit-test a tool registry or Tower
-service without constructing a second fake agent loop.
+The [public examples](https://github.com/gakonst/nanocodex/tree/master/examples)
+show complete consumers for custom tools, MCP, snapshots, forks, and subagents.
+Use them as API references; the installed crate is the starting artifact for
+your application.

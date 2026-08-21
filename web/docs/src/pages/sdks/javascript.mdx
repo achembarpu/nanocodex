@@ -1,15 +1,18 @@
 ---
-title: JavaScript SDK
-description: One Rust/WASM lifecycle for Node, browser Workers, React, and browser TUIs.
+title: TypeScript and JavaScript SDK
+description: Run the Rust-owned agent lifecycle from Node, browser Workers, React, or a terminal UI.
 ---
 
-# JavaScript SDK
+# TypeScript and JavaScript SDK
 
-The repository's `nanocodex` package exposes viem-style Node and browser
-entrypoints over the same Rust/WASM driver. The current registry release
-contains the core root, Node, browser, and WASM entrypoints; newer browser-tool
-and subagent exports in this guide currently require a pinned checkout.
-Transport is explicit; generated WASM handles stay private.
+The `nanocodex` package exposes typed Node and browser entrypoints over the same
+Rust/WASM driver. JavaScript owns transport construction, application tools,
+workspace placement, and presentation. Rust still owns prompt ordering,
+history, model/tool turns, branches, and cleanup.
+
+```sh
+npm install nanocodex
+```
 
 ```js
 import { Agent, Transport } from "nanocodex/node";
@@ -30,96 +33,41 @@ try {
 }
 ```
 
-Use `nanocodex/node` with a real directory and Node WebSocket host;
-`nanocodex/browser` runs in a browser Worker or server isolate. Supported
-transport constructors include OpenAI, ChatGPT subscription, MPP, and the
-browser-only host-managed socket. They route the same OpenAI Responses
-lifecycle, not different provider implementations.
+`Agent.create` returns one retained session. `turn.result()` does not depend on
+an event consumer, and a second prompt automatically reuses committed history
+and transport state.
 
-## Node and browser state
+## Build in order
 
-`Agent.create` owns policy and lifecycle. `agent.turn.prompt` returns immediate
-turn control; `result()` awaits the typed result. `agent.events.watch()` is an
-independent stream. `agent.session` exposes thinking/fast-mode updates,
-compaction, fork, snapshots, and shutdown. Read the complete
-[binding guide](https://github.com/gakonst/nanocodex/blob/master/js/bindings/README.md)
-and [owned Node example](https://github.com/gakonst/nanocodex/blob/master/examples/node/session.mjs).
+- [Install the right entrypoint](/sdks/javascript/install-entrypoints).
+- [Own turns, events, and cleanup](/sdks/javascript/agent-lifecycle).
+- [Choose authentication and socket routing](/sdks/javascript/transports-auth).
+- [Build a browser Worker and persistent workspace](/sdks/javascript/browser-workspace).
+- [Own a browser Worker from React](/sdks/javascript/react).
+- [Add tools, Code Mode, and Rust-backed subagents](/sdks/javascript/tools-code-mode-subagents).
+- Deploy through a concrete [Cloudflare](/deployments/cloudflare) or
+  [Vercel](/deployments/vercel) owner.
 
-`Workspace.open({ path })` uses a guarded Node directory.
-`Workspace.open({ name })` uses persistent OPFS in a browser. Application file
-browsers and agents can share the returned workspace handle.
+## One lifecycle, several hosts
 
-## React and terminal UI
+Use `nanocodex/node` with a real guarded directory and a Node WebSocket host.
+Use `nanocodex/browser` inside a browser Worker or server isolate. The browser
+entrypoint can share a persistent OPFS workspace with your file browser,
+uploads, Git client, and agent tools.
 
-The core `nanocodex` binding is registry-published. The React, artifacts, TUI,
-and terminal companions below currently ship from repository source; consume
-their package entrypoints from a pinned checkout until they join the release
-pipeline.
+OpenAI API keys, managed ChatGPT credentials, host-managed sockets, and MPP are
+transport and authentication choices for the same supported OpenAI Responses
+lifecycle. They are not alternate provider implementations.
 
-`nanocodex-react` owns a browser Worker's lifecycle and typed external store:
+## Thin interface packages
 
-```tsx
-const config = createConfig({
-  worker: () => new Worker(new URL("./agent.worker.ts", import.meta.url), {
-    type: "module",
-  }),
-  thinking: "high",
-});
+`nanocodex-react` owns a module Worker and typed external store.
+`nanocodex-tui` reduces events without choosing a renderer.
+`nanocodex-tui-react` renders that state accessibly, and
+`nanocodex-terminal` attaches one retained agent to xterm.js, WTerm, or another
+terminal-shaped host. These are consumers, not required agent infrastructure.
 
-<NanocodexProvider config={config}><App /></NanocodexProvider>
-```
-
-`nanocodex-tui` is a framework-independent reducer and controller protocol.
-`nanocodex-tui-react` adds an accessible virtualized renderer with streaming,
-steering, queueing, cancellation, branches, image paste, and optional theme.
-`nanocodex-terminal` is the smaller terminal-shaped consumer: give it one
-retained agent and a host with `write`, `onData`, `onResize`, `cols`, and
-`rows`. It handles ANSI rendering, input, prompt history, steering, and
-cancellation. Adapters for xterm.js and WTerm are included; native TTYs,
-WebSockets, and headless tests can implement the host directly.
-
-```js
-import { createAgentTerminal, xtermAdapter } from "nanocodex-terminal";
-
-const attachment = createAgentTerminal({
-  agent,
-  terminal: xtermAdapter(xterm),
-});
-
-await attachment.ready;
-// Detaches the terminal only; the embedding application still owns the agent.
-attachment.dispose();
-```
-
-All three packages are consumers, not required agent infrastructure. You can
-also watch the same typed events and render them with Ink, your design system,
-ordinary DOM, storage, or telemetry. The durable
-[Vercel Workflow example](https://github.com/gakonst/nanocodex/tree/master/examples/vercel-workflows)
-does exactly that: a local race-safe bridge projects its replayable client
-snapshot to sanitized ANSI for `@wterm/react`, without changing the headless
-agent or promoting page-specific UI state into the SDK.
-
-See [React](https://github.com/gakonst/nanocodex/blob/master/js/react/README.md),
-[TUI state](https://github.com/gakonst/nanocodex/blob/master/js/tui/README.md), and
-[React TUI](https://github.com/gakonst/nanocodex/blob/master/js/tui-react/README.md),
-or the [terminal adapter](https://github.com/gakonst/nanocodex/blob/master/js/terminal/README.md).
-
-For a complete app, start with the
-[React/Vite example](https://github.com/gakonst/nanocodex/tree/master/examples/react-vite)
-or [one-file browser CDN example](https://github.com/gakonst/nanocodex/tree/master/examples/browser-cdn).
-
-## Tools and extensions
-
-JavaScript tools are ordinary objects with `name`, `description`, an optional
-JSON Schema `parameters`, and a handler. Add `outputSchema` when Code Mode needs
-an exact TypeScript return declaration. The browser package also exports named
-web, image, dataset, artifact, and planning factories. Spreading
-`Subagents.create()` selects the Rust task-tree implementation already linked
-into the WASM module; it does not recreate seven orchestration handlers in
-JavaScript.
-
-Dispose finished `Turn` wrappers, detach event watches, and call session
-shutdown in short-lived programs. Long-lived applications normally retain one
-agent per durable thread. Generated WASM bindings and host adapters are package
-internals; import only documented Node, browser, Worker, tools, React, and TUI
-entrypoints.
+The [binding guide](https://github.com/gakonst/nanocodex/blob/master/js/bindings/README.md)
+documents the complete API. Start with the runnable
+[Node session](https://github.com/gakonst/nanocodex/blob/master/examples/node/session.mjs)
+or [React/Vite Worker](https://github.com/gakonst/nanocodex/tree/master/examples/react-vite).

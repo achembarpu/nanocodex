@@ -1,0 +1,48 @@
+---
+title: React integration
+description: Let React own a module Worker and external store without making presentation part of the agent SDK.
+---
+
+# React integration
+
+Use `nanocodex-react` when a React application should own the Worker lifecycle
+and subscribe to typed state without coupling the agent to a component tree.
+
+```tsx
+import { createConfig, NanocodexProvider } from "nanocodex-react";
+
+const config = createConfig({
+  worker: () => new Worker(new URL("./agent.worker.ts", import.meta.url), {
+    type: "module",
+  }),
+  reasoningMode: "pro",
+  thinking: "high",
+});
+
+root.render(
+  <NanocodexProvider config={config}>
+    <App />
+  </NanocodexProvider>,
+);
+```
+
+The provider owns Worker startup, shutdown, and an external store.
+`useNanocodex()` returns status plus `dispatch` and `stop`.
+`useNanocodexMessage()` subscribes to ordered Worker messages, and `useConfig()`
+exposes the headless store for advanced composition.
+
+## Keep policy in the application
+
+Credentials, health checks, transport choice, durable thread identity, and
+presentation remain application concerns. Supply command and message unions as
+generics when your Worker adds application-specific operations; do not turn the
+page protocol into a second model/tool runtime.
+
+Render the typed event stream with your own components, the framework-neutral
+`nanocodex-tui` reducer, `nanocodex-tui-react`, or a terminal adapter. Results
+remain independent from rendering, so a hidden or suspended component must not
+be required for an accepted turn to complete.
+
+The [React/Vite Worker example](https://github.com/gakonst/nanocodex/tree/master/examples/react-vite)
+shows the full Worker command boundary. The [React package guide](https://github.com/gakonst/nanocodex/blob/master/js/react/README.md)
+documents its deliberately small public surface.

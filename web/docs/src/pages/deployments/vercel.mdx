@@ -1,0 +1,68 @@
+---
+title: Vercel Workflows
+description: Reconstruct Rust/WASM in Function steps while Workflow retains the journal and event stream.
+---
+
+# Vercel Workflows
+
+The Vercel example models one agent session as one Workflow actor. Workflow
+serializes prompts and retains a replayable client stream. Each Function step
+constructs Nanocodex Rust/WASM, runs one prompt, and returns the updated opaque
+journal. A named persistent Vercel Sandbox owns `/workspace`.
+
+```text
+clients -> WebSocket Functions -> Workflow stream
+                                  |
+                                  `-> Nanocodex Function step
+                                      |- Rust/WASM agent + journal
+                                      `- named Vercel Sandbox
+```
+
+## Adopt the pattern
+
+```sh
+npm install nanocodex
+```
+
+Create the agent inside a Function step and return its updated opaque journal
+to Workflow. The concrete
+[Vercel reference consumer](https://github.com/gakonst/nanocodex/tree/master/examples/vercel-workflows)
+shows the Workflow hook, Function WebSockets, API-key and ChatGPT credential
+paths, Sandbox tools, and terminal route. Those pieces remain application
+policy; the npm package supplies the agent lifecycle.
+
+## Durable boundary
+
+The durable pieces are the Workflow run, completed Function-step results,
+opaque Rust journal, prompt hook, and replayable output stream. Function memory
+and client WebSockets are disposable.
+
+The example uses Nanocodex's memory journal inside one Function step, then
+returns that journal as part of the completed step result. Vercel Workflow is
+the persistent store across steps. If a Function crashes before returning, the
+Workflow restarts from the preceding journal. It cannot recover an uncommitted
+mid-step boundary.
+
+For mid-step recovery, implement the same host `DurabilityStore` contract on an
+external store with atomic compare-and-append. Do not add a JavaScript recovery
+state machine that guesses whether Rust completed a model or tool step.
+
+## Sandbox and terminal
+
+The named Vercel Sandbox snapshots files across VM stop/resume. Processes do
+not survive that boundary. The optional workspace terminal opens an ephemeral
+PTY against the same Sandbox and obtains a fresh short-lived controller token
+after reconnect.
+
+Keep three streams separate:
+
+- Workflow retains Nanocodex events and committed conversation state.
+- Sandbox retains workspace files.
+- The terminal WebSocket carries PTY bytes only.
+
+The browser terminal does not become the agent protocol, and durable files do
+not imply durable shell processes.
+
+This adapter proves one Vercel composition. It does not promise that arbitrary
+Functions keep a resident agent or that Nanocodex is portable across every
+serverless runtime without platform code.

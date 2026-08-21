@@ -1,13 +1,14 @@
 ---
 title: The owned agent
-description: One driver owns conversation, transport, tools, and ordered turns.
+description: Embed the Rust-owned Codex lifecycle behind one cheap command handle.
 ---
 
 # The owned agent
 
-One private driver is the sole owner of mutable conversation, model, transport,
-tool-runtime, and process state. Your application receives a cheap cloneable
-`Nanocodex` command handle and an independent optional `AgentEvents` stream.
+Embed one high-performance Codex lifecycle without adopting an app server. One
+private Rust driver owns mutable conversation, model, transport, tool-runtime,
+and process state. Your application receives a cheap cloneable `Nanocodex`
+command handle and an independent optional `AgentEvents` stream.
 
 ```text
 application ── prompt/steer/cancel ──> private driver ──> OpenAI Responses
@@ -19,6 +20,12 @@ application ── prompt/steer/cancel ──> private driver ──> OpenAI Res
 This ownership prevents two callers from racing response IDs, history, tool
 results, or a WebSocket. The implementation is in
 [`nanocodex-agent`](https://github.com/gakonst/nanocodex/tree/master/crates/nanocodex-agent).
+
+The handle exposes deliberate policy and typed control while queue capacities,
+socket tasks, replay bookkeeping, and mutable run state stay private. Rust
+applications extend the compiled lifecycle with typed tools, concrete Tower
+layers, and optional component crates instead of loading a runtime plugin
+protocol.
 
 ## Prompt, control, result
 

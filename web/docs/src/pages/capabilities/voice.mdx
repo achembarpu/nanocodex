@@ -12,10 +12,9 @@ steering, and cleanup.
 
 ## Default devices
 
-```sh
-nanocodex auth login
-cargo run -p nanocodex-examples --bin voice
-```
+The voice crate is experimental and unpublished. Applications that adopt it
+must pin a coherent revision and use ChatGPT authentication for the Realtime
+session; the public CLI installer does not add voice as an embeddable package.
 
 ```rust
 let (mut voice, mut voice_events) = VoiceSessionBuilder::new(openai, agent.clone())
@@ -27,15 +26,11 @@ let (mut voice, mut voice_events) = VoiceSessionBuilder::new(openai, agent.clone
 report connection, start, transcripts, failure, and stop. The application can
 stop or shut down voice independently and keep reducing ordinary agent events.
 
-## Unix PCM boundary
+## PCM boundary
 
-The lower example reads and writes 24 kHz mono PCM16 little-endian audio, with
-transcripts and diagnostics on stderr:
-
-```sh
-cargo run -p nanocodex-examples --bin realtime-pipe \
-  < microphone.pcm > speaker.pcm
-```
+The lower device-neutral boundary reads and writes 24 kHz mono PCM16
+little-endian audio. An application may own capture and playback instead of
+using the default-device adapter.
 
 A spoken request starts a turn while idle. A follow-up during active work uses
 the agent's routing boundary to steer at the next safe model boundary. Device,

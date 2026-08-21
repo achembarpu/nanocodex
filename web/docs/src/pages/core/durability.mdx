@@ -1,14 +1,15 @@
 ---
 title: Durable execution
-description: Rust-owned journaling, deduplication, checkpoints, and recovery over a tiny host store contract.
+description: Resume accepted work with Rust-owned journaling over a tiny host store contract.
 ---
 
 # Durable execution
 
-`nanocodex-durability` is an optional layer over the owned agent. It journals
-accepted operations and their internal steps so a host can deduplicate prompts,
-reconstruct checkpoints, replay completed effects, and classify interrupted
-work without moving recovery policy into a framework adapter.
+Use `nanocodex-durability` when an accepted prompt must survive a process or
+platform restart. The optional layer journals operations and their internal
+steps so a host can deduplicate prompts, reconstruct checkpoints, replay
+committed step outputs, and classify interrupted work without moving recovery
+policy into a framework adapter.
 
 ```text
 nanocodex-oai-api <- nanocodex-tools <- nanocodex-agent
@@ -43,6 +44,10 @@ println!("{}", turn.request_id().unwrap_or("generated at admission"));
 # Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
+This smallest composition example is process-local; `MemoryStore` does not
+survive restart. Use the optional SQLite or Postgres store, or implement the
+host store contract, for durable recovery.
+
 Callers may provide a stable request ID for end-to-end idempotency or let
 durable admission generate one. The selected identity is exposed on both the
 `Turn` and completed `TurnResult`.
@@ -71,9 +76,10 @@ The host store contract has only two operations:
    revision and appends an opaque payload.
 
 Hosts do not deserialize model outputs, tool results, journal entries, or
-snapshots. Use `MemoryStore` on every target, enable the native `sqlite` or
-`postgres` feature, or implement the same compare-and-append contract through
-the JavaScript/WASM host bridge.
+snapshots. `MemoryStore` is process-local and useful for tests or ephemeral
+sessions. For restart recovery, enable the native `sqlite` or `postgres`
+feature, or implement the same compare-and-append contract through the
+JavaScript/WASM host bridge.
 
 `DurableSession` is independently useful below the agent adapter: an
 application can define its own operation, step, checkpoint, and output types

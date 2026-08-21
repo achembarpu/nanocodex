@@ -1,0 +1,66 @@
+---
+title: TypeScript agent lifecycle
+description: Submit retained turns, watch events independently, and release every JavaScript and Rust owner.
+---
+
+# TypeScript agent lifecycle
+
+Retain one `Agent` for each application conversation. A turn starts immediately,
+its result completes without an event watcher, and follow-on turns reuse the
+same Rust-owned history and connection.
+
+```js
+const watch = agent.events.watch();
+const unwatch = watch.onEvent((event) => {
+  if (event.type === "tool.call") console.error(event.payload.tool);
+});
+
+const turns = [];
+try {
+  const first = agent.turn.prompt({ input: "Remember identifier COBALT_7." });
+  turns.push(first);
+  console.log((await first.result()).finalMessage);
+
+  const second = agent.turn.prompt({ input: "Return the identifier." });
+  turns.push(second);
+  console.log((await second.result()).finalMessage);
+} finally {
+  for (const turn of turns) turn.dispose();
+  unwatch();
+  watch.off();
+  await agent.session.shutdown();
+}
+```
+
+`turn.dispose()` releases the JavaScript/WASM wrapper. It does not cancel work
+that Rust already accepted. Await `turn.cancel()` when unfinished work must stop,
+then dispose the wrapper.
+
+## Control one turn
+
+`turn.steer(instruction)` adds input at the next safe model boundary.
+`turn.cancel()` targets that exact active or queued turn. `turn.result()` returns
+the typed committed result, including final message, response items, usage,
+cost status, and snapshot.
+
+Use `agent.session.fork({ at: result })` for an independent session at a
+completed historical boundary. A branch owns its own event watcher and must be
+shut down. The root session shuts down Rust-backed subagent children it owns;
+applications should not maintain a parallel JavaScript scheduler.
+
+## Use decorated or standalone actions
+
+The decorated API keeps related actions discoverable on `agent`, `turn`, and
+`result`. The standalone `Actions` namespace exposes the same operations for
+functional composition:
+
+```js
+const turn = Actions.turn.prompt(agent, { input: "Explain the current state." });
+const result = await Actions.turn.getResult(turn);
+console.log(result.finalMessage);
+turn.dispose();
+```
+
+Read the complete
+[owned Node session](https://github.com/gakonst/nanocodex/blob/master/examples/node/session.mjs)
+for cancellation and cleanup around partial failure.

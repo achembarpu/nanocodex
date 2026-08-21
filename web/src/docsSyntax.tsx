@@ -30,6 +30,8 @@ const highlighter = createHighlighterCoreSync({
   langs: [...bash, ...javascript, ...python, ...rust, ...tsx],
   themes: [toShikiTheme(pierreLight), toShikiTheme(pierreDark)],
 });
+const highlightCache = new Map<string, ReactNode>();
+const MAX_HIGHLIGHT_CACHE_ENTRIES = 200;
 
 function toShikiTheme(theme: typeof pierreLight) {
   return {
@@ -53,6 +55,9 @@ export function resolveDocsLanguage(language: string): DocsLanguage | undefined 
 export function highlightDocsCode(code: string, language: string): ReactNode {
   const resolved = resolveDocsLanguage(language);
   if (!resolved) return code;
+  const cacheKey = `${resolved}\0${code}`;
+  const cached = highlightCache.get(cacheKey);
+  if (cached !== undefined) return cached;
 
   try {
     const { tokens } = highlighter.codeToTokens(code, {
@@ -63,7 +68,7 @@ export function highlightDocsCode(code: string, language: string): ReactNode {
         light: "pierre-light",
       },
     });
-    return tokens.map((line, lineIndex) => (
+    const highlighted = tokens.map((line, lineIndex) => (
       <Fragment key={lineIndex}>
         {line.map((token) => (
           <span
@@ -81,6 +86,12 @@ export function highlightDocsCode(code: string, language: string): ReactNode {
         {lineIndex < tokens.length - 1 ? "\n" : null}
       </Fragment>
     ));
+    highlightCache.set(cacheKey, highlighted);
+    if (highlightCache.size > MAX_HIGHLIGHT_CACHE_ENTRIES) {
+      const oldest = highlightCache.keys().next().value;
+      if (oldest !== undefined) highlightCache.delete(oldest);
+    }
+    return highlighted;
   } catch {
     return code;
   }

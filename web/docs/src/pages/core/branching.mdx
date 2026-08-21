@@ -1,12 +1,13 @@
 ---
 title: Branches and subagents
-description: Snapshots, clean children, contextual forks, and optional task trees.
+description: Clone cheap handles, fork retained context, or delegate through an optional task tree.
 ---
 
 # Branches and subagents
 
-Nanocodex separates conversation topology from orchestration policy.
+Choose the cheapest topology that preserves the context a task needs.
 
+- `clone()` creates another cheap command handle to the same owned driver.
 - `spawn()` creates a clean sibling with the configured model and tools but no
   parent conversation.
 - `fork()` branches from the latest safe committed checkpoint.
@@ -17,6 +18,9 @@ Nanocodex separates conversation topology from orchestration policy.
 Each child is an independent owned driver with its own history, response chain,
 WebSocket, results, and event stream. A `tools_factory` creates fresh
 agent-relative handlers so a fork never inherits a tool bound to its parent.
+The factory receives a cheap, weak `AgentHandle`: a tool can spawn or fork a
+child without keeping the parent driver alive or gaining access to its mutable
+state.
 
 ## Snapshots and resume
 

@@ -1,13 +1,16 @@
 ---
 title: Tools and Code Mode
-description: Typed application tools, nested JavaScript calls, workspace tools, and deferred MCP.
+description: Make Code Mode the default, then add typed Rust, hosted, or deferred MCP tools.
 ---
 
 # Tools and Code Mode
 
-`nanocodex-tools` owns typed caller tools, the heterogeneous registry, standard
-workspace tools, Code Mode, web and image tools, MCP transports, and deferred
-tool search. It is useful without importing the agent crate.
+Code Mode is the default tool surface. The model composes typed tools through
+`exec` instead of receiving every registered schema as a direct model tool.
+`wait`, deferred search, and deliberately direct tools remain alongside it when
+configured. `nanocodex-tools` owns that runtime, typed caller tools, standard
+workspace tools, web and image tools, MCP transports, and deferred tool search
+without importing the agent crate.
 
 ## Define a Rust tool
 
@@ -31,10 +34,13 @@ Implement `Tool` directly when execution needs `ToolContext`, freeform input,
 multimodal output, or a handwritten schema. `ToolContext` carries output budget
 and agent-relative context; bound output while it is produced.
 
-## Code Mode
+The `#[tool]` macro compiles a typed `Tool` implementation. `Tools` selects those
+compiled handlers into the runtime registry. Hosted JavaScript handlers use the
+same registry contract when a browser or server isolate owns execution.
 
-The default exposure is Code Mode only. The model sees a compact `exec`
-surface, writes JavaScript, and invokes typed tools through `tools.*` or their
+## Compose tools in Code Mode
+
+The model writes JavaScript and invokes typed tools through `tools.*` or their
 namespaces. Nested calls can run concurrently with `Promise.all`; the host
 retains ordering, notifications, cancellation, and tool observations.
 

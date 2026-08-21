@@ -1,13 +1,16 @@
 ---
 title: Stability and scope
-description: Know which Nanocodex contracts are supported, optional, or experimental.
+description: Adopt the supported OpenAI lifecycle without assuming provider portability.
 ---
 
 # Stability and scope
 
-Nanocodex is intentionally narrow. Stability applies to owned lifecycle and
-component boundaries, not to every example application or experimental runtime
-in the repository.
+Nanocodex deliberately commits to one OpenAI model family and the Responses
+WebSocket lifecycle. That narrow scope keeps the Codex behavior, typed history,
+tool loop, and retry ownership coherent across native Rust and WASM instead of
+introducing a provider abstraction. Stability applies to those owned component
+boundaries, not every example application or experimental runtime in the
+repository.
 
 ## Supported library surface
 
@@ -23,9 +26,10 @@ The supported foundation is:
 - the optional `nanocodex-observability` integration; and
 - the optional `nanocodex-subagents` task-tree extension.
 
-The facade, agent, OpenAI, tools, macros, and observability crates are registry
-releases. Durability and subagents currently ship from repository source; pin a
-Git revision when using either outside this workspace.
+The Rust release set includes the facade, agent, OpenAI, tools, macros,
+observability, durability, and subagents crates. The release script publishes
+them in dependency order. Check the selected version's registry metadata before
+depending on a newly added crate.
 
 The published Node/browser WASM package and the source-distributed Python/PyO3,
 React, artifacts, TUI, and terminal packages are promoted thin consumers of
