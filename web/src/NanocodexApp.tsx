@@ -53,11 +53,11 @@ const loadDocs = () => import("./Docs");
 const loadHomeFrame = () =>
   import("./HomeFrame").then((module) => ({ default: module.HomeFrame }));
 const HomeFrame = lazy(loadHomeFrame);
-const loadAgentTerminal = () =>
-  import("./AgentTerminal").then((module) => ({
-    default: module.AgentTerminal,
+const loadAgentExperience = () =>
+  import("./AgentExperience").then((module) => ({
+    default: module.AgentExperience,
   }));
-const AgentTerminal = lazy(loadAgentTerminal);
+const AgentExperience = lazy(loadAgentExperience);
 const loadPierreWorkerProvider = () =>
   import("./PierreWorkerProvider").then((module) => ({
     default: module.PierreWorkerProvider,
@@ -442,7 +442,7 @@ function NanocodexShell() {
 
   const preloadSurface = useCallback((nextSurface: Surface) => {
     if (nextSurface === "home" || nextSurface === "agent") {
-      void Promise.all([loadHomeFrame(), loadAgentTerminal()]).catch(() => undefined);
+      void Promise.all([loadHomeFrame(), loadAgentExperience()]).catch(() => undefined);
       return;
     }
     if (nextSurface === "changelog") {
@@ -785,7 +785,7 @@ function NanocodexShell() {
                     </button>
                   </header>
                   <Suspense fallback={null}>
-                    <AgentTerminal
+                    <AgentExperience
                       mode={
                         surface === "agent"
                           ? "full"

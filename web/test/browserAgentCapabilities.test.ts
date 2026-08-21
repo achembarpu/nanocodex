@@ -49,12 +49,15 @@ test("only capabilities used by the Worker, transport, thread, and workspace are
 });
 
 test("the terminal fails before thread or Worker creation and exposes the capability error", () => {
+  const experience = source("../src/AgentExperience.tsx");
   const terminal = source("../src/AgentTerminal.tsx");
   const session = source("../src/chatGptSession.tsx");
-  assert.match(terminal, /if \(capabilityError\) \{[\s\S]*?role="alert">\{capabilityError\}/);
+  assert.match(experience, /const capabilityError = useMemo\(\(\) => browserAgentCapabilityError\(\), \[\]\)/);
+  assert.match(experience, /if \(!hasCredential \|\| capabilityError\) \{[\s\S]*?return;/);
+  assert.match(experience, /hasCredential && !capabilityError && AgentTerminal/);
   assert.match(terminal, /const thread = useMemo\(\(\) => getBrowserThread\(\), \[\]\)/);
   assert.match(terminal, /<NanocodexProvider config=\{agentConfig\}>[\s\S]*?<AgentTerminalDemo/);
-  assert.match(terminal, /role="alert">\{capabilityError\}/);
+  assert.match(session, /<p className="agent-byok-error" role="alert">\{capabilityError\}<\/p>/);
   assert.match(session, /if \(capabilityError\) return "browser unsupported"/);
 });
 

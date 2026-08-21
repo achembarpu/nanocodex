@@ -90,10 +90,10 @@ test("the phone home surface leads directly from thesis to install, metadata, an
   assert.ok(application.indexOf("High-performance Codex SDK. Runs anywhere.") < application.indexOf('className="home-install"'));
   assert.ok(application.indexOf("curl -fsSL https://nanocodex.paradigm.xyz | bash") < application.indexOf('className="home-meta"'));
   assert.ok(application.indexOf('className="home-meta"') < application.indexOf('id="agent-demo"'));
-  assert.ok(application.indexOf('id="agent-demo-title"') < application.indexOf("<AgentTerminal"));
+  assert.ok(application.indexOf('id="agent-demo-title"') < application.indexOf("<AgentExperience"));
   assert.ok(phone < 0, "the compact terminal policy is shared across phone orientations");
-  assert.match(application, /<AgentTerminal[\s\S]*?mode=\{[\s\S]*?"full"[\s\S]*?"preview"[\s\S]*?"hidden"[\s\S]*?theme=\{theme\}/);
-  assert.equal(matches(application, /<AgentTerminal\b/g), 1);
+  assert.match(application, /<AgentExperience[\s\S]*?mode=\{[\s\S]*?"full"[\s\S]*?"preview"[\s\S]*?"hidden"[\s\S]*?theme=\{theme\}/);
+  assert.equal(matches(application, /<AgentExperience\b/g), 1);
   assert.match(application, /hidden=\{surface !== "home" && surface !== "agent"\}/);
   assert.match(application, /inert=\{surface !== "home" && surface !== "agent" \? true : undefined\}/);
   assert.match(terminal, /<XtermSurface/);

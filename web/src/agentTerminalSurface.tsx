@@ -9,13 +9,13 @@ import { FitAddon } from "@xterm/addon-fit";
 import { Terminal as Xterm, type Terminal as XtermInstance } from "@xterm/xterm";
 import { availableVisualHeight } from "./agentTerminalLifecycle";
 import { bufferedXtermAdapter, isTerminalSubmitKeyEvent } from "./agentTerminalXterm";
+import type { AgentStatus, AgentTerminalMode } from "./agentTerminalTypes";
 import type { TerminalHost } from "./demoTerminal";
 import "@xterm/xterm/css/xterm.css";
 
 const TOUCH_INPUT_QUERY = "(pointer: coarse), (any-pointer: coarse)";
 
-export type AgentTerminalMode = "preview" | "full" | "hidden";
-export type AgentStatus = "idle" | "starting" | "ready" | "stopped" | "error";
+export type { AgentStatus, AgentTerminalMode } from "./agentTerminalTypes";
 
 export function XtermSurface({
   composer,

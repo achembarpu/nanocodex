@@ -180,6 +180,16 @@
   border: 1px solid var(--terminal-border);
 }
 
+.agent-terminal-standby {
+  margin: 0;
+  padding: 12px;
+  color: var(--terminal-muted);
+  font-family: var(--font-mono);
+  font-size: 14px;
+  line-height: 1.25;
+  white-space: pre-wrap;
+}
+
 .agent-xterm,
 .agent-xterm > .xterm {
   width: 100%;

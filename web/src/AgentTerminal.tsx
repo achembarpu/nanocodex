@@ -20,12 +20,13 @@ import {
   TouchTerminalComposer,
   XtermSurface,
   useTouchInput,
-  type AgentStatus,
-  type AgentTerminalMode,
 } from "./agentTerminalSurface";
-import { browserAgentCapabilityError } from "./browserAgentCapabilities";
+import type {
+  AgentStatus,
+  AgentTerminalMode,
+  AgentTerminalState,
+} from "./agentTerminalTypes";
 import {
-  AgentSessionBar,
   inactiveTerminalMessage,
   type ChatGptStatus,
   type CredentialSource,
@@ -37,9 +38,8 @@ import {
 } from "./demoTerminal";
 import { ArtifactDock } from "./ArtifactDock";
 import { browserMcpConfiguration } from "./browserMcp";
-import "./AgentTerminal.css";
 
-export type { AgentTerminalMode } from "./agentTerminalSurface";
+export type { AgentTerminalMode, AgentTerminalState } from "./agentTerminalTypes";
 
 const agentConfig: Config = createConfig({
   agent: {
@@ -47,76 +47,80 @@ const agentConfig: Config = createConfig({
   },
 });
 
-/** Website policy around the headless Agent SDK, app-local xterm, and credentials. */
+/** Authenticated website policy around the headless Agent SDK and app-local xterm. */
 export const AgentTerminal = memo(function AgentTerminal({
+  authStatus,
   mode,
+  onStateChange,
+  source,
   theme,
 }: {
+  authStatus: ChatGptStatus | undefined;
   mode: AgentTerminalMode;
+  onStateChange(state: AgentTerminalState): void;
+  source: Exclude<CredentialSource, null>;
   theme: "light" | "dark";
 }) {
-  const capabilityError = useMemo(() => browserAgentCapabilityError(), []);
-  if (capabilityError) {
-    return (
-      <div className={`nanocodex-demo is-${mode}`}>
-        <p className="agent-byok-error" role="alert">{capabilityError}</p>
-        <XtermSurface
-          inactiveMessage={capabilityError}
-          mode={mode}
-          status="idle"
-          theme={theme}
-          touchInput={false}
-          onReady={() => {}}
-        />
-      </div>
-    );
-  }
   return (
     <NanocodexProvider config={agentConfig}>
-      <AgentTerminalDemo mode={mode} theme={theme} />
+      <AgentTerminalDemo
+        authStatus={authStatus}
+        mode={mode}
+        onStateChange={onStateChange}
+        source={source}
+        theme={theme}
+      />
     </NanocodexProvider>
   );
 });
 
 function AgentTerminalDemo({
+  authStatus,
   mode,
+  onStateChange,
+  source,
   theme,
 }: {
+  authStatus: ChatGptStatus | undefined;
   mode: AgentTerminalMode;
+  onStateChange(state: AgentTerminalState): void;
+  source: Exclude<CredentialSource, null>;
   theme: "light" | "dark";
 }) {
   const thread = useMemo(() => getBrowserThread(), []);
-  const [credentialSource, setCredentialSource] = useState<CredentialSource | undefined>();
   const [touchDraft, setTouchDraft] = useState("");
   const [pendingTouchSubmission, setPendingTouchSubmission] = useState<{
     input: string;
     intent: "queue" | "steer";
   }>();
   const [terminalRunning, setTerminalRunning] = useState(false);
-  const [chatGptStatus, setChatGptStatus] = useState<ChatGptStatus>();
   const [terminalHost, setTerminalHost] = useState<TerminalHost>();
   const [terminalReady, setTerminalReady] = useState(false);
   const touchInput = useTouchInput();
   const active = useRef<DemoTerminal | undefined>(undefined);
-  const enabled = credentialSource === "subscription" || credentialSource === "user";
   const {
     data: agent,
     error,
     isError,
     isSuccess,
     refetch,
-  } = useAgent({ enabled, threadId: thread?.id });
+  } = useAgent({ enabled: true, threadId: thread?.id });
   const promptStartedAt = useRef(new Map<number, number>());
   const activePromptIds = useRef(new Set<number>());
   const firstTokenReported = useRef(new Set<number>());
-  const agentStatus: AgentStatus = !enabled
-    ? "idle"
-    : isError
-      ? "error"
-      : isSuccess && terminalReady
-        ? "ready"
-        : "starting";
+  const agentStatus: AgentStatus = isError
+    ? "error"
+    : isSuccess && terminalReady
+      ? "ready"
+      : "starting";
   const agentError = error === undefined ? undefined : errorMessage(error);
+  const retryAgent = useCallback(() => {
+    refetch();
+  }, [refetch]);
+
+  useEffect(() => {
+    onStateChange({ error: agentError, retry: retryAgent, status: agentStatus });
+  }, [agentError, agentStatus, onStateChange, retryAgent]);
 
   useAgentEvents(agent, (event) => {
     if (event.type !== "assistant.delta" && event.type !== "reasoning.summary.delta") return;
@@ -171,15 +175,12 @@ function AgentTerminalDemo({
     setTerminalRunning((running) => terminalRunningForStatus(agentStatus, running));
   }, [agentStatus]);
 
-  const retryAgent = useCallback(() => {
-    refetch();
-  }, [refetch]);
   const unavailableMessage = inactiveTerminalMessage({
     agentError,
     agentStatus,
-    authStatus: chatGptStatus,
+    authStatus,
     capabilityError: undefined,
-    source: credentialSource,
+    source,
   });
   const submitTouchPrompt = useCallback((input: string, intent: "queue" | "steer") => {
     if (!input.trim()) return;
@@ -240,28 +241,15 @@ function AgentTerminalDemo({
     />
   );
 
-  return (
-    <div className={`nanocodex-demo is-${mode}`}>
-      <AgentSessionBar
-        agentStatus={agentStatus}
-        agentError={agentError}
-        source={credentialSource}
-        capabilityError={undefined}
-        onAuthStatusChange={setChatGptStatus}
-        onRetryAgent={retryAgent}
-        onSourceChange={setCredentialSource}
+  return mode === "full" ? (
+    <div className="agent-terminal-workspace">
+      {terminal}
+      <ArtifactDock
+        agentReady={agentStatus === "ready"}
+        onPrompt={submitArtifactPrompt}
       />
-      {mode === "full" ? (
-        <div className="agent-terminal-workspace">
-          {terminal}
-          <ArtifactDock
-            agentReady={agentStatus === "ready"}
-            onPrompt={submitArtifactPrompt}
-          />
-        </div>
-      ) : terminal}
     </div>
-  );
+  ) : terminal;
 }
 
 function artifactFollowOnPrompt(

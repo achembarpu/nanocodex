@@ -9,7 +9,7 @@ const dock = source("../src/ArtifactDock.tsx");
 const terminalCss = source("../src/AgentTerminal.css");
 
 test("one app-lifetime Config supplies clone-safe MCP servers to the retained Agent", () => {
-  const declaration = section(terminal, "const agentConfig: Config", "/** Website policy");
+  const declaration = section(terminal, "const agentConfig: Config", "/** Authenticated website policy");
   assert.equal(matches(terminal, /createConfig\(/g), 1);
   assert.ok(terminal.indexOf("const agentConfig: Config") < terminal.indexOf("export const AgentTerminal"));
   assert.match(declaration, /createConfig\(\{[\s\S]*?agent: \{[\s\S]*?mcp: browserMcpConfiguration\(location\.origin\)/);

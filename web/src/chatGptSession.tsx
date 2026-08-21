@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { GenerationRequestOwner } from "./agentTerminalLifecycle";
-import type { AgentStatus } from "./agentTerminalSurface";
+import type { AgentStatus } from "./agentTerminalTypes";
 import { deploymentHealth } from "./deploymentHealth";
 
 export type CredentialSource = "subscription" | "user" | null;

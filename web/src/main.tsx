@@ -24,7 +24,7 @@ if (directPath === "/artifact-runtime") {
 
 function preloadDirectSurface(pathname: string) {
   if (pathname === "/" || pathname === "/agent") {
-    void Promise.all([import("./HomeFrame"), import("./AgentTerminal")]).catch(() => undefined);
+    void Promise.all([import("./HomeFrame"), import("./AgentExperience")]).catch(() => undefined);
     return;
   }
   if (pathname === "/code") {
@@ -64,7 +64,7 @@ function preloadDirectSurface(pathname: string) {
     void import("./Evals").catch(() => undefined);
     return;
   }
-  void Promise.all([import("./HomeFrame"), import("./AgentTerminal")]).catch(() => undefined);
+  void Promise.all([import("./HomeFrame"), import("./AgentExperience")]).catch(() => undefined);
 }
 
 function renderApp() {

@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const terminal = source("../src/AgentTerminal.tsx");
+const experience = source("../src/AgentExperience.tsx");
 const session = source("../src/chatGptSession.tsx");
 const health = source("../src/deploymentHealth.ts");
 const surface = source("../src/agentTerminalSurface.tsx");
@@ -38,9 +39,10 @@ test("credential presence is distinct from agent readiness and failures are manu
 });
 
 test("signed-out browsers wait for explicit ChatGPT authentication", () => {
-  assert.match(terminal, /credentialSource === "subscription" \|\| credentialSource === "user"/);
+  assert.match(experience, /source === "subscription" \|\| source === "user"/);
+  assert.match(experience, /if \(!hasCredential \|\| capabilityError\)/);
   assert.match(session, /Sign in with ChatGPT to start the browser agent/);
-  assert.doesNotMatch(`${terminal}\n${session}`, /guest|sponsor|"deployment"|backend-anon|anonymous (?:OpenAI|ChatGPT|Codex)/i);
+  assert.doesNotMatch(`${experience}\n${terminal}\n${session}`, /guest|sponsor|"deployment"|backend-anon|anonymous (?:OpenAI|ChatGPT|Codex)/i);
 });
 
 test("starting and failure states repaint the terminal while the native mobile composer remains intact", () => {
@@ -57,7 +59,7 @@ test("starting and failure states repaint the terminal while the native mobile c
 test("the React package owns browser Agent startup through its raw hook contract", () => {
   assert.match(terminal, /import \{[\s\S]*?createConfig,[\s\S]*?NanocodexProvider,[\s\S]*?useAgent,[\s\S]*?useAgentEvents,[\s\S]*?type Config,[\s\S]*?\} from "nanocodex-react"/);
   assert.match(terminal, /<NanocodexProvider config=\{agentConfig\}>/);
-  assert.match(terminal, /data: agent,[\s\S]*?\} = useAgent\(\{ enabled, threadId: thread\?\.id \}\)/);
+  assert.match(terminal, /data: agent,[\s\S]*?\} = useAgent\(\{ enabled: true, threadId: thread\?\.id \}\)/);
   assert.match(terminal, /useAgentEvents\(agent,/);
   assert.match(terminal, /createAgentTerminal\(\{[\s\S]*?agent,[\s\S]*?terminal: terminalHost/);
   assert.doesNotMatch(terminal, /agent\.agent|createDemoAgent|prewarmDemoAgent/);
@@ -76,9 +78,9 @@ test("touch terminals keep xterm output readable without hiding a focusable text
 });
 
 test("app-local modules own ChatGPT policy and xterm presentation", () => {
-  assert.match(terminal, /from "\.\/chatGptSession"/);
+  assert.match(experience, /from "\.\/chatGptSession"/);
   assert.match(terminal, /from "\.\/agentTerminalSurface"/);
-  assert.doesNotMatch(terminal, /new Xterm|\/api\/auth\/chatgpt|deployment_sha|pageshow/);
+  assert.doesNotMatch(`${experience}\n${terminal}`, /new Xterm|\/api\/auth\/chatgpt|deployment_sha|pageshow/);
   assert.match(session, /function useChatGptSession/);
   assert.match(surface, /export function XtermSurface/);
 });

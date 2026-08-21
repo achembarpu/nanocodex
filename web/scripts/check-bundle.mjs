@@ -52,28 +52,79 @@ const manifest = JSON.parse(
 );
 
 const entryKey = manifestKey("index.html");
+const applicationKey = manifestKey("src/NanocodexApp.tsx");
+const homeFrameKey = manifestKey("src/HomeFrame.tsx");
+const experienceKey = manifestKey("src/AgentExperience.tsx");
 const agentKey = manifestKey("src/AgentTerminal.tsx");
+const workerAgentKey = exactlyOne(
+  Object.keys(manifest).filter((key) => manifest[key]?.name === "WorkerAgent"),
+  "browser WorkerAgent wrapper",
+);
 const entry = manifest[entryKey];
+const experience = manifest[experienceKey];
 const agent = manifest[agentKey];
 
 assert(entry?.isEntry, "the browser entry is missing from the Vite manifest");
+assert(experience?.isDynamicEntry, "the credential experience must remain a dynamic entry");
 assert(agent?.isDynamicEntry, "the Agent terminal must remain a dynamic entry");
 
 const allEntryImports = importClosure(entryKey, true);
+assert(
+  allEntryImports.has(experienceKey),
+  "the credential experience is no longer reachable from the browser entry",
+);
 assert(
   allEntryImports.has(agentKey),
   "the Agent terminal is no longer reachable from the browser entry",
 );
 const initialStatic = importClosure(entryKey, false);
+const applicationStatic = importClosure(applicationKey, false);
+const homeFrameStatic = importClosure(homeFrameKey, false);
+const experienceStatic = importClosure(experienceKey, false);
 const agentStatic = importClosure(agentKey, false);
+const signedOutStatic = new Set([
+  ...initialStatic,
+  ...applicationStatic,
+  ...homeFrameStatic,
+  ...experienceStatic,
+]);
 assert(
   !initialStatic.has(agentKey),
   "the initial route must not statically import the Agent terminal",
 );
+assert(
+  !experienceStatic.has(agentKey),
+  "the signed-out credential experience must not statically import the Agent terminal",
+);
+assert(
+  !signedOutStatic.has(workerAgentKey),
+  "the signed-out credential experience must not include the WorkerAgent wrapper",
+);
+assert(
+  agentStatic.has(workerAgentKey),
+  "the authenticated Agent terminal must include the WorkerAgent wrapper",
+);
+assert(
+  importClosure(experienceKey, true).has(agentKey),
+  "the authenticated credential path must dynamically reach the Agent terminal",
+);
 const initialJavaScript = await closureStats(initialStatic, "file");
+const signedOutJavaScript = await closureStats(signedOutStatic, "file");
 const initialCssFiles = cssClosure(initialStatic);
 const initialCss = await fileStats(initialCssFiles);
 const agentJavaScript = await closureStats(agentStatic, "file");
+const signedOutSource = await closureSource(signedOutStatic);
+const agentSource = await closureSource(agentStatic);
+assert(
+  !signedOutSource.includes("Nanocodex terminal input")
+    && !signedOutSource.includes("xterm-accessibility"),
+  "the signed-out credential experience must not include xterm",
+);
+assert(
+  agentSource.includes("Nanocodex terminal input")
+    && agentSource.includes("xterm-accessibility"),
+  "the authenticated Agent terminal must include xterm",
+);
 
 withinCount(
   "initial JavaScript chunks",
@@ -107,6 +158,14 @@ const assets = await readdir(assetsDirectory);
 const workerFile = exactlyOne(
   assets.filter((file) => /^agent\.worker-.*\.js$/.test(file)),
   "browser Agent Worker entry",
+);
+assert(
+  !signedOutSource.includes(workerFile),
+  "the signed-out credential experience must not reference the Agent Worker",
+);
+assert(
+  agentSource.includes(workerFile),
+  "the authenticated Agent terminal must reference the Agent Worker",
 );
 const workerFiles = await staticAssetClosure(workerFile);
 const workerSource = await assetSource(workerFiles);
@@ -283,6 +342,14 @@ const wasmImports = WebAssembly.Module.imports(
 );
 const workerReachableFiles = await reachableAssetClosure(workerFile);
 const workerReachableSource = await assetSource(workerReachableFiles);
+assert(
+  !signedOutSource.includes(wasmFile),
+  "the signed-out credential experience must not reference Nanocodex WASM",
+);
+assert(
+  workerReachableSource.includes(wasmFile),
+  "the authenticated Agent Worker must reach Nanocodex WASM",
+);
 const missingWasmImports = wasmImports.filter((entry) =>
   entry.module !== "./nanocodex_bg.js"
   || entry.kind !== "function"
@@ -337,6 +404,12 @@ console.log(JSON.stringify({
     cssBytes: initialCss.bytes,
     cssGzipBytes: initialCss.gzipBytes,
     staticChunks: [...initialStatic],
+  },
+  signedOut: {
+    javascriptFiles: signedOutJavaScript.fileCount,
+    javascriptBytes: signedOutJavaScript.bytes,
+    javascriptGzipBytes: signedOutJavaScript.gzipBytes,
+    staticChunks: [...signedOutStatic],
   },
   agent: {
     javascriptBytes: agentJavaScript.bytes,
