@@ -7,11 +7,13 @@ import {
 } from "@pierre/diffs";
 import { CodeView, type CodeViewHandle } from "@pierre/diffs/react";
 import {
+  FileTree as PierreFileTree,
   prepareFileTreeInput,
   themeToTreeStyles,
+  type FileTreeOptions,
   type FileTreePreparedInput,
 } from "@pierre/trees";
-import { FileTree, useFileTree } from "@pierre/trees/react";
+import { FileTree as FileTreeView } from "@pierre/trees/react";
 import { ChevronRight, FileQuestion, GitBranch, PanelLeft, RefreshCw, Search, X } from "lucide-react";
 import {
   forwardRef,
@@ -19,14 +21,23 @@ import {
   useCallback,
   useEffect,
   useImperativeHandle,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
   type CSSProperties,
   type ForwardedRef,
+  type RefObject,
 } from "react";
 import { useLocation, useNavigate } from "react-router";
 import { usePierreRenderer } from "./PierreWorkerProvider";
+import {
+  COARSE_POINTER_QUERY,
+  observeMediaQueryMatch,
+  retainedSourceTreeState,
+  scaledSourceTreeScrollTop,
+  sourceTreeItemHeight,
+} from "./mobileInteraction";
 import {
   CODE_VIEW_CUSTOM_CSS,
   CODE_VIEW_LAYOUT,
@@ -37,6 +48,7 @@ import {
 } from "./pierreCodeView";
 import { syntaxLanguageForFile } from "./syntax";
 import type { RepositoryFile } from "./threadRepositorySnapshot";
+import { useModalBoundary } from "./useModalBoundary";
 import "./SourceBrowser.css";
 
 type CodeBrowserProps = {
@@ -72,15 +84,6 @@ type CodeViewSelection = {
   id: string;
   range: SelectedLineRange;
 };
-
-const FOCUSABLE_SELECTOR = [
-  "a[href]",
-  "button:not([disabled])",
-  "input:not([disabled])",
-  "select:not([disabled])",
-  "textarea:not([disabled])",
-  '[tabindex]:not([tabindex="-1"])',
-].join(",");
 
 function formatBytes(value: number | null) {
   if (value === null) return "—";
@@ -149,6 +152,10 @@ function currentCompactWorkspace(): boolean {
   return typeof window !== "undefined" && window.matchMedia(COMPACT_WORKSPACE_QUERY).matches;
 }
 
+function currentCoarsePointer(): boolean {
+  return typeof window !== "undefined" && window.matchMedia(COARSE_POINTER_QUERY).matches;
+}
+
 function useCompactWorkspace(): boolean {
   const [compact, setCompact] = useState(currentCompactWorkspace);
   useEffect(() => {
@@ -161,35 +168,184 @@ function useCompactWorkspace(): boolean {
   return compact;
 }
 
-function deepActiveElement(root: Document | ShadowRoot): Element | null {
-  let active = root.activeElement;
-  while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
-  return active;
+function useCoarsePointer(): boolean {
+  const [coarse, setCoarse] = useState(currentCoarsePointer);
+  useEffect(() => {
+    return observeMediaQueryMatch(
+      window.matchMedia(COARSE_POINTER_QUERY),
+      setCoarse,
+    );
+  }, []);
+  return coarse;
 }
 
-function isWithinDeepRoot(container: Element, element: Element | null): boolean {
-  let current = element;
-  while (current) {
-    if (container.contains(current)) return true;
-    const root = current.getRootNode();
-    current = root instanceof ShadowRoot ? root.host : null;
+function sourceDirectoryPaths(files: readonly RepositoryFile[]): readonly string[] {
+  const directories = new Set<string>();
+  for (const file of files) {
+    for (
+      let index = file.path.indexOf("/");
+      index >= 0;
+      index = file.path.indexOf("/", index + 1)
+    ) {
+      directories.add(file.path.slice(0, index));
+    }
   }
-  return false;
+  return [...directories];
 }
 
-function focusableElements(root: Document | ShadowRoot | HTMLElement): HTMLElement[] {
-  const elements = Array.from(root.querySelectorAll<HTMLElement>(FOCUSABLE_SELECTOR))
-    .filter((element) => !element.hidden && element.getAttribute("aria-hidden") !== "true");
-  for (const host of root.querySelectorAll<HTMLElement>("*")) {
-    if (host.shadowRoot) elements.push(...focusableElements(host.shadowRoot));
+type SourceTreeDomState = {
+  focusedPath: string | null;
+  focusedViewportOffset: number | null;
+  ownsFocus: boolean;
+  scaledScrollTop: number | null;
+  searchOwnsFocus: boolean;
+};
+
+function captureSourceTreeDomState(
+  model: PierreFileTree,
+  nextItemHeight: number,
+): SourceTreeDomState {
+  const container = model.getFileTreeContainer();
+  const shadow = container?.shadowRoot;
+  const active = shadow?.activeElement as HTMLElement | null | undefined;
+  const scroll = shadow?.querySelector<HTMLElement>(
+    "[data-file-tree-virtualized-scroll]",
+  );
+  const focusedPath = active?.closest<HTMLElement>("[data-item-path]")?.dataset.itemPath
+    ?? model.getFocusedPath();
+  const focusedRow = focusedPath
+    ? Array.from(shadow?.querySelectorAll<HTMLElement>("[data-item-path]") ?? [])
+      .find((element) => element.dataset.itemPath === focusedPath)
+    : undefined;
+  return {
+    focusedPath,
+    focusedViewportOffset: focusedRow && scroll
+      ? focusedRow.getBoundingClientRect().top - scroll.getBoundingClientRect().top
+      : null,
+    ownsFocus: container?.ownerDocument.activeElement === container,
+    scaledScrollTop: scroll
+      ? scaledSourceTreeScrollTop({
+          itemHeight: model.getItemHeight(),
+          nextItemHeight,
+          scrollTop: scroll.scrollTop,
+        })
+      : null,
+    searchOwnsFocus: active?.matches("[data-file-tree-search-input]") === true,
+  };
+}
+
+function restoreSourceTreeDomState(
+  model: PierreFileTree,
+  state: SourceTreeDomState,
+): boolean {
+  const shadow = model.getFileTreeContainer()?.shadowRoot;
+  if (!shadow) return false;
+  const scroll = shadow.querySelector<HTMLElement>(
+    "[data-file-tree-virtualized-scroll]",
+  );
+  if (scroll && state.scaledScrollTop !== null) {
+    scroll.scrollTop = state.scaledScrollTop;
   }
-  return elements;
+  const focusedRow = state.focusedPath
+    ? Array.from(shadow.querySelectorAll<HTMLElement>("[data-item-path]"))
+      .find((element) => element.dataset.itemPath === state.focusedPath)
+    : undefined;
+  if (state.focusedViewportOffset !== null && scroll && !focusedRow) return false;
+  if (state.focusedViewportOffset !== null && scroll && focusedRow) {
+    scroll.scrollTop += focusedRow.getBoundingClientRect().top
+      - scroll.getBoundingClientRect().top
+      - state.focusedViewportOffset;
+  }
+  if (!state.ownsFocus) return true;
+  const target = state.searchOwnsFocus
+    ? shadow.querySelector<HTMLElement>("[data-file-tree-search-input]")
+    : focusedRow;
+  if (!target) return false;
+  target.focus({ preventScroll: true });
+  return true;
+}
+
+function useResponsiveFileTree(
+  options: FileTreeOptions,
+  itemHeight: number,
+  directoryPaths: readonly string[],
+  focusFallbackRef: RefObject<HTMLElement | null>,
+): PierreFileTree {
+  const initialOptions = useRef(options);
+  const cleanupTimers = useRef(new Map<PierreFileTree, number>());
+  const [model, setModel] = useState(
+    () => new PierreFileTree({ ...options, itemHeight }),
+  );
+  const currentModel = useRef(model);
+  const pendingDomState = useRef<SourceTreeDomState | null>(null);
+
+  const cancelCleanup = (candidate: PierreFileTree) => {
+    const timer = cleanupTimers.current.get(candidate);
+    if (timer === undefined) return;
+    window.clearTimeout(timer);
+    cleanupTimers.current.delete(candidate);
+  };
+  const scheduleCleanup = (candidate: PierreFileTree) => {
+    if (cleanupTimers.current.has(candidate)) return;
+    const timer = window.setTimeout(() => {
+      candidate.cleanUp();
+      cleanupTimers.current.delete(candidate);
+    }, 1);
+    cleanupTimers.current.set(candidate, timer);
+  };
+
+  useLayoutEffect(() => {
+    const previous = currentModel.current;
+    if (previous.getItemHeight() === itemHeight) return;
+    const retained = retainedSourceTreeState(previous, directoryPaths);
+    const domState = captureSourceTreeDomState(previous, itemHeight);
+    const next = new PierreFileTree({
+      ...initialOptions.current,
+      initialExpandedPaths: retained.expandedPaths,
+      initialExpansion: "closed",
+      initialSearchQuery: retained.searchQuery,
+      initialSelectedPaths: retained.selectedPaths,
+      itemHeight,
+    });
+    if (retained.focusedPath) next.focusPath(retained.focusedPath);
+    if (domState.ownsFocus) focusFallbackRef.current?.focus({ preventScroll: true });
+    pendingDomState.current = domState;
+    currentModel.current = next;
+    scheduleCleanup(previous);
+    setModel(next);
+  }, [directoryPaths, itemHeight]);
+
+  useLayoutEffect(() => {
+    if (!pendingDomState.current) return;
+    let frame = 0;
+    let attempts = 0;
+    const restore = () => {
+      const pending = pendingDomState.current;
+      if (!pending) return;
+      if (restoreSourceTreeDomState(model, pending) || attempts >= 2) {
+        pendingDomState.current = null;
+        return;
+      }
+      attempts += 1;
+      frame = window.requestAnimationFrame(restore);
+    };
+    frame = window.requestAnimationFrame(restore);
+    return () => window.cancelAnimationFrame(frame);
+  }, [model]);
+
+  useEffect(() => {
+    cancelCleanup(model);
+    return () => scheduleCleanup(model);
+  }, [model]);
+
+  return model;
 }
 
 function CodeBrowserComponent(
   { files, branch, head, readFile, theme }: CodeBrowserProps,
   ref: ForwardedRef<CodeBrowserHandle>,
 ) {
+  const coarsePointer = useCoarsePointer();
   const location = useLocation();
   const navigate = useNavigate();
   const defaultPath = useMemo(
@@ -223,6 +379,9 @@ function CodeBrowserComponent(
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [treeOpen, setTreeOpen] = useState(false);
   const compact = useCompactWorkspace();
+  const modalOpen = compact && treeOpen;
+  const workspaceRef = useRef<HTMLElement>(null);
+  const backdropRef = useRef<HTMLDivElement>(null);
   const treePanelRef = useRef<HTMLDivElement>(null);
   const treeCloseRef = useRef<HTMLButtonElement>(null);
   const treeOpenerRef = useRef<HTMLButtonElement>(null);
@@ -237,7 +396,8 @@ function CodeBrowserComponent(
     }),
     [files],
   );
-  const { model } = useFileTree({
+  const directoryPaths = useMemo(() => sourceDirectoryPaths(files), [files]);
+  const model = useResponsiveFileTree({
     preparedInput: treeInput as unknown as FileTreePreparedInput,
     flattenEmptyDirectories: true,
     initialExpansion: 1,
@@ -251,7 +411,9 @@ function CodeBrowserComponent(
     icons: { set: "standard", colored: false },
     initialVisibleRowCount,
     overscan: 10,
-  });
+  }, sourceTreeItemHeight(coarsePointer), directoryPaths, workspaceRef);
+  const modelRef = useRef(model);
+  modelRef.current = model;
   const selected = fileByPath.get(selectedPath) ?? files[0];
   const displayed = loaded?.file;
   const contents = loaded?.contents ?? null;
@@ -307,19 +469,19 @@ function CodeBrowserComponent(
   }, [navigate]);
 
   const closeTree = useCallback(() => {
-    model.closeSearch();
+    modelRef.current.closeSearch();
     setTreeOpen(false);
-  }, [model]);
+  }, []);
 
   const openTreeSearch = useCallback(() => {
     if (compact) setTreeOpen(true);
-    model.openSearch();
-  }, [compact, model]);
+    modelRef.current.openSearch();
+  }, [compact]);
 
   const closeSearches = useCallback(() => {
-    model.closeSearch();
+    modelRef.current.closeSearch();
     setTreeOpen(false);
-  }, [model]);
+  }, []);
 
   useImperativeHandle(
     ref,
@@ -333,18 +495,19 @@ function CodeBrowserComponent(
   );
 
   const syncTreeSelection = useCallback((path: string) => {
+    const current = modelRef.current;
     suppressTreeSelectionRef.current = true;
     try {
-      for (const selectedFile of model.getSelectedPaths()) {
-        if (selectedFile !== path) model.getItem(selectedFile)?.deselect();
+      for (const selectedFile of current.getSelectedPaths()) {
+        if (selectedFile !== path) current.getItem(selectedFile)?.deselect();
       }
-      model.getItem(path)?.select();
-      model.focusPath(path);
-      model.scrollToPath(path, { offset: "center" });
+      current.getItem(path)?.select();
+      current.focusPath(path);
+      current.scrollToPath(path, { offset: "center" });
     } finally {
       suppressTreeSelectionRef.current = false;
     }
-  }, [model]);
+  }, []);
 
   useEffect(() => {
     const requestedPath = new URLSearchParams(location.search).get("path");
@@ -484,57 +647,18 @@ function CodeBrowserComponent(
   }, [model]);
 
   useEffect(() => {
-    if (!treeOpen || !compact) return;
-    const root = window.document.documentElement;
-    const body = window.document.body;
-    const previousRootOverflow = root.style.overflow;
-    const previousRootOverscroll = root.style.overscrollBehavior;
-    const previousBodyOverflow = body.style.overflow;
-    root.style.overflow = "hidden";
-    root.style.overscrollBehavior = "none";
-    body.style.overflow = "hidden";
+    if (modalOpen && !model.isSearchOpen()) model.openSearch();
+  }, [modalOpen, model]);
 
-    model.openSearch();
-    const focusFrame = window.requestAnimationFrame(() => {
-      if (!treePanelRef.current || !isWithinDeepRoot(
-        treePanelRef.current,
-        deepActiveElement(window.document),
-      )) {
-        treeCloseRef.current?.focus();
-      }
-    });
-    const containDrawerFocus = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        closeTree();
-        return;
-      }
-      if (event.key !== "Tab") return;
-      const panel = treePanelRef.current;
-      if (!panel) return;
-      const focusable = focusableElements(panel);
-      const first = focusable[0];
-      const last = focusable.at(-1);
-      const active = deepActiveElement(window.document);
-      if (!first || !last) return;
-      if (event.shiftKey && (active === first || !isWithinDeepRoot(panel, active))) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && (active === last || !isWithinDeepRoot(panel, active))) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    window.addEventListener("keydown", containDrawerFocus);
-    return () => {
-      window.cancelAnimationFrame(focusFrame);
-      window.removeEventListener("keydown", containDrawerFocus);
-      root.style.overflow = previousRootOverflow;
-      root.style.overscrollBehavior = previousRootOverscroll;
-      body.style.overflow = previousBodyOverflow;
-      treeOpenerRef.current?.focus();
-    };
-  }, [closeTree, compact, model, treeOpen]);
+  useModalBoundary({
+    backdropRef,
+    fallbackFocusRef: workspaceRef,
+    initialFocusRef: treeCloseRef,
+    onDismiss: closeTree,
+    open: modalOpen,
+    panelRef: treePanelRef,
+    returnFocusRef: treeOpenerRef,
+  });
 
   useEffect(() => {
     if (!compact && treeOpen) closeTree();
@@ -585,7 +709,6 @@ function CodeBrowserComponent(
     writeSourceLocation(loaded.file.path, next, "replace");
   }, [lineCount, loaded, writeSourceLocation]);
 
-  const modalOpen = compact && treeOpen;
   const errorCopy = fileError?.kind === "unsupported"
     ? `${fileError.file.path} is not available as text.`
     : fileError
@@ -593,9 +716,15 @@ function CodeBrowserComponent(
       : "";
 
   return (
-    <section className="code-workspace source-browser" aria-label="Code browser">
+    <section
+      ref={workspaceRef}
+      className="code-workspace source-browser"
+      aria-label="Code browser"
+      tabIndex={-1}
+    >
       <h1 className="sr-only">Nanocodex source code</h1>
       <div
+        ref={backdropRef}
         className={modalOpen ? "workspace-backdrop is-visible" : "workspace-backdrop"}
         aria-hidden="true"
         onPointerDown={closeTree}
@@ -607,6 +736,7 @@ function CodeBrowserComponent(
         aria-labelledby="source-tree-title"
         role={modalOpen ? "dialog" : "complementary"}
         aria-modal={modalOpen ? true : undefined}
+        tabIndex={modalOpen ? -1 : undefined}
       >
         <header className="pierre-tree-heading source-tree-toolbar">
           <div className="source-tree-identity">
@@ -638,7 +768,7 @@ function CodeBrowserComponent(
             </button>
           </div>
         </header>
-        <FileTree
+        <FileTreeView
           className="pierre-file-tree"
           model={model}
           style={treeTheme}
@@ -648,7 +778,6 @@ function CodeBrowserComponent(
       <article
         className="code-file"
         aria-label={viewFile?.path ?? "File viewer"}
-        inert={modalOpen ? true : undefined}
       >
         {viewFile ? (
           <>

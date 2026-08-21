@@ -11,9 +11,13 @@ import { availableVisualHeight } from "./agentTerminalLifecycle";
 import { bufferedXtermAdapter, isTerminalSubmitKeyEvent } from "./agentTerminalXterm";
 import type { AgentStatus, AgentTerminalMode } from "./agentTerminalTypes";
 import type { TerminalHost } from "./demoTerminal";
+import {
+  COARSE_POINTER_QUERY,
+  cssPixelValue,
+  observeMediaQueryMatch,
+  terminalComposerMinimumHeight,
+} from "./mobileInteraction";
 import "@xterm/xterm/css/xterm.css";
-
-const TOUCH_INPUT_QUERY = "(pointer: coarse), (any-pointer: coarse)";
 
 export type { AgentStatus, AgentTerminalMode } from "./agentTerminalTypes";
 
@@ -148,9 +152,16 @@ export function XtermSurface({
           ) {
             shell.style.removeProperty("height");
             const naturalHeight = shell.getBoundingClientRect().height;
+            const composer = shell.querySelector<HTMLElement>(".agent-touch-composer");
+            const composerMinimum = terminalComposerMinimumHeight({
+              measuredComposerHeight: composer?.getBoundingClientRect().height ?? 0,
+              safeAreaInsetBottom: composer
+                ? cssPixelValue(window.getComputedStyle(composer).paddingBottom)
+                : 0,
+            });
             const shellAvailable = availableVisualHeight({
               elementTop: shell.getBoundingClientRect().top,
-              minimum: 60,
+              minimum: composerMinimum,
               viewportHeight: viewport.height,
               viewportOffsetTop: viewport.offsetTop,
             });
@@ -259,13 +270,10 @@ export function TouchTerminalComposer({
 }
 
 export function useTouchInput() {
-  const [matches, setMatches] = useState(() => window.matchMedia(TOUCH_INPUT_QUERY).matches);
+  const [matches, setMatches] = useState(() => window.matchMedia(COARSE_POINTER_QUERY).matches);
   useEffect(() => {
-    const query = window.matchMedia(TOUCH_INPUT_QUERY);
-    const update = () => setMatches(query.matches);
-    update();
-    query.addEventListener("change", update);
-    return () => query.removeEventListener("change", update);
+    const query = window.matchMedia(COARSE_POINTER_QUERY);
+    return observeMediaQueryMatch(query, setMatches);
   }, []);
   return matches;
 }

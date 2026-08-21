@@ -4,6 +4,7 @@ import { Check, ChevronLeft, ChevronRight, Copy, Menu, X } from "lucide-react";
 import {
   Fragment,
   createElement,
+  useCallback,
   useEffect,
   useRef,
   useState,
@@ -24,6 +25,7 @@ import {
   type DocsPage,
 } from "./docsNavigation";
 import { highlightDocsCode } from "./docsSyntax";
+import { useModalBoundary } from "./useModalBoundary";
 import "./Docs.css";
 
 type ResolvedPage =
@@ -67,12 +69,15 @@ export function Docs() {
   const [copied, setCopied] = useState(false);
   const browseButtonRef = useRef<HTMLButtonElement>(null);
   const docsPageRef = useRef<HTMLDivElement>(null);
+  const desktopFocusRef = useRef<HTMLDivElement>(null);
+  const drawerBackdropRef = useRef<HTMLButtonElement>(null);
   const drawerRef = useRef<HTMLDivElement>(null);
   const drawerCloseRef = useRef<HTMLButtonElement>(null);
   const displayPath = resolved?.path ?? path;
   const currentIndex = docsPageOrder.findIndex(({ href }) => href === displayPath);
   const previous = currentIndex > 0 ? docsPageOrder[currentIndex - 1] : undefined;
   const next = currentIndex >= 0 ? docsPageOrder[currentIndex + 1] : undefined;
+  const closeBrowse = useCallback(() => setBrowseOpen(false), []);
 
   useEffect(() => {
     let active = true;
@@ -123,40 +128,15 @@ export function Docs() {
       : "Docs · Nanocodex";
   }, [location.hash, path, resolved]);
 
-  useEffect(() => {
-    if (!browseOpen) return;
-    const overflow = window.document.documentElement.style.overflow;
-    window.document.documentElement.style.overflow = "hidden";
-    drawerCloseRef.current?.focus();
-    const containDrawerFocus = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        setBrowseOpen(false);
-        return;
-      }
-      if (event.key !== "Tab") return;
-      const focusable = Array.from(
-        drawerRef.current?.querySelectorAll<HTMLElement>(
-          'a[href], button:not([disabled]), [tabindex]:not([tabindex="-1"])',
-        ) ?? [],
-      );
-      const first = focusable[0];
-      const last = focusable.at(-1);
-      if (!first || !last) return;
-      if (event.shiftKey && window.document.activeElement === first) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && window.document.activeElement === last) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    window.addEventListener("keydown", containDrawerFocus);
-    return () => {
-      window.removeEventListener("keydown", containDrawerFocus);
-      window.document.documentElement.style.overflow = overflow;
-      browseButtonRef.current?.focus();
-    };
-  }, [browseOpen]);
+  useModalBoundary({
+    backdropRef: drawerBackdropRef,
+    fallbackFocusRef: desktopFocusRef,
+    initialFocusRef: drawerCloseRef,
+    onDismiss: closeBrowse,
+    open: browseOpen,
+    panelRef: drawerRef,
+    returnFocusRef: browseButtonRef,
+  });
 
   useEffect(() => {
     const desktop = window.matchMedia("(min-width: 901px)");
@@ -247,7 +227,7 @@ export function Docs() {
           <DocsNavigation path={displayPath} />
         </aside>
 
-        <div className="docs-reading-column">
+        <div className="docs-reading-column" ref={desktopFocusRef} tabIndex={-1}>
           <CopyMarkdownButton copied={copied} onClick={copyMarkdown} />
           <article className="docs-article" id="docs-content">
             {doc.blocks.map((block, index) => (
@@ -289,10 +269,12 @@ export function Docs() {
       {browseOpen ? (
         <div className="docs-drawer-layer">
           <button
+            ref={drawerBackdropRef}
             className="docs-drawer-backdrop"
             type="button"
-            aria-label="Close documentation navigation"
-            onClick={() => setBrowseOpen(false)}
+            aria-hidden="true"
+            tabIndex={-1}
+            onClick={closeBrowse}
           />
           <div
             className="docs-drawer"
@@ -301,14 +283,15 @@ export function Docs() {
             role="dialog"
             aria-modal="true"
             aria-label="Documentation navigation"
+            tabIndex={-1}
           >
             <header>
               <span>Documentation</span>
-              <button ref={drawerCloseRef} type="button" aria-label="Close" onClick={() => setBrowseOpen(false)}>
+              <button ref={drawerCloseRef} type="button" aria-label="Close" onClick={closeBrowse}>
                 <X aria-hidden="true" />
               </button>
             </header>
-            <DocsNavigation path={displayPath} onNavigate={() => setBrowseOpen(false)} />
+            <DocsNavigation path={displayPath} onNavigate={closeBrowse} />
           </div>
         </div>
       ) : null}

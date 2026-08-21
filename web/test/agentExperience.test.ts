@@ -30,7 +30,7 @@ test("the full Agent experience alone mounts a collapsed, counted artifact dock"
   assert.match(dock, /aria-expanded=\{false\}/);
   assert.match(dock, /aria-label=\{`Open artifacts, \$\{artifactCount\}`\}/);
   assert.match(dock, /<span aria-hidden="true">\{artifacts\.length\}<\/span>/);
-  assert.match(dock, /const expand = \(\) => \{[\s\S]*?setCollapsed\(false\)/);
+  assert.match(dock, /const expand = useCallback\(\(\) => \{[\s\S]*?setCollapsed\(false\)/);
   assert.match(dock, /onClick=\{expand\}/);
   assert.match(dock, /label="Collapse artifacts"[\s\S]*?onClick=\{collapse\}/);
   assert.match(dock, /subscribeThreadWorkspaceChanges\([\s\S]*?getBrowserThread\(\)\.id,[\s\S]*?refresh\(store\)/);

@@ -13,7 +13,12 @@ const application = source("../src/NanocodexApp.tsx");
 const artifactRuntime = source("../src/artifactRuntime.tsx");
 const terminal = source("../src/AgentTerminal.tsx");
 const terminalSurface = source("../src/agentTerminalSurface.tsx");
+const artifactDock = source("../src/ArtifactDock.tsx");
 const chatGptSession = source("../src/chatGptSession.tsx");
+const docs = source("../src/Docs.tsx");
+const modalBoundary = source("../src/modalBoundary.ts");
+const useModalBoundary = source("../src/useModalBoundary.ts");
+const mobileInteraction = source("../src/mobileInteraction.ts");
 const deploymentRollover = source("../src/useDeploymentRollover.ts");
 const demoTerminal = source("../src/demoTerminal.ts");
 const compactQuery = "(max-width: 740px), (pointer: coarse) and (orientation: landscape) and (max-width: 950px)";
@@ -71,15 +76,41 @@ test("the Source drawer is modal, scroll-locked, and touch-sized", () => {
   const sourceBrowser = source("../src/CodeBrowser.tsx");
   assert.match(sourceBrowser, /role=\{modalOpen \? "dialog" : "complementary"\}/);
   assert.match(sourceBrowser, /aria-modal=\{modalOpen \? true : undefined\}/);
-  assert.match(sourceBrowser, /inert=\{modalOpen \? true : undefined\}/);
-  assert.match(sourceBrowser, /root\.style\.overflow = "hidden"/);
-  assert.match(sourceBrowser, /root\.style\.overscrollBehavior = "none"/);
-  assert.match(sourceBrowser, /body\.style\.overflow = "hidden"/);
-  assert.match(sourceBrowser, /focusableElements\(panel\)/);
-  assert.match(sourceBrowser, /treeOpenerRef\.current\?\.focus\(\)/);
-  assert.match(sourceBrowser, /event\.key === "Escape"/);
+  assert.match(sourceBrowser, /useModalBoundary\(\{[\s\S]*?onDismiss: closeTree,[\s\S]*?returnFocusRef: treeOpenerRef/);
+  assert.match(sourceBrowser, /fallbackFocusRef: workspaceRef/);
+  assert.match(modalBoundary, /createOutsideInertOwner/);
+  assert.match(modalBoundary, /root\.style\.overflow = "hidden"/);
+  assert.match(modalBoundary, /root\.style\.overscrollBehavior = "none"/);
+  assert.match(modalBoundary, /body\.style\.overflow = "hidden"/);
+  assert.match(modalBoundary, /body\.style\.overscrollBehavior = "none"/);
+  assert.match(useModalBoundary, /event\.key === "Escape"/);
   assert.match(sourceBrowserCss, /\.source-browser \.source-tree-toolbar button,[\s\S]*?min-width:\s*44px/);
   assert.match(sourceBrowserCss, /\.source-browser \.code-file-tail-error button,[\s\S]*?min-height:\s*44px/);
+});
+
+test("compact Artifact, Source, and Docs overlays share complete modal ownership", () => {
+  assert.match(artifactDock, /const modalOpen = compact && !collapsed/);
+  assert.match(artifactDock, /role=\{modalOpen \? "dialog" : "complementary"\}/);
+  assert.match(artifactDock, /aria-modal=\{modalOpen \? true : undefined\}/);
+  assert.match(artifactDock, /className="artifact-dock-backdrop"/);
+  assert.match(artifactDock, /useModalBoundary\(\{[\s\S]*?onDismiss: collapse,[\s\S]*?returnFocusRef: toggleRef/);
+  assert.match(docs, /role="dialog"[\s\S]*?aria-modal="true"/);
+  assert.match(docs, /useModalBoundary\(\{[\s\S]*?onDismiss: closeBrowse,[\s\S]*?returnFocusRef: browseButtonRef/);
+  assert.match(docs, /fallbackFocusRef: desktopFocusRef/);
+  assert.match(useModalBoundary, /new MutationObserver\(inertOwner\.refresh\)/);
+  assert.match(useModalBoundary, /document\.addEventListener\("focusin", onFocusIn, \{ capture: true \}\)/);
+  assert.match(useModalBoundary, /candidate\.contentWindow === event\.source/);
+  assert.match(modalBoundary, /"iframe"/);
+  assert.match(modalBoundary, /contenteditable/);
+  assert.match(modalBoundary, /summary:first-of-type/);
+  assert.match(modalBoundary, /orderModalTabSequence/);
+  assert.match(modalBoundary, /isRadioTabStop/);
+  assert.match(modalBoundary, /contentVisibility !== "hidden"/);
+  assert.match(artifactRuntime, /modalFrameBoundaryMessage\("Escape"\)/);
+  assert.match(artifactRuntime, /modalFrameTabBoundaryKey\(\{/);
+  assert.match(artifactRuntime, /!modalBoundaryActive/);
+  assert.match(useModalBoundary, /setFrameBoundaryState\(true\)/);
+  assert.match(useModalBoundary, /setFrameBoundaryState\(false\)/);
 });
 
 test("the phone home surface leads directly from thesis to install, metadata, and agent", () => {
@@ -148,7 +179,8 @@ test("touch terminals use one native IME-safe composer and one contextual action
     terminalSurface.indexOf("export function TouchTerminalComposer"),
     terminalSurface.indexOf("export function useTouchInput"),
   );
-  assert.match(terminalSurface, /TOUCH_INPUT_QUERY = "\(pointer: coarse\), \(any-pointer: coarse\)"/);
+  assert.match(mobileInteraction, /COARSE_POINTER_QUERY = "\(pointer: coarse\), \(any-pointer: coarse\)"/);
+  assert.match(terminalSurface, /window\.matchMedia\(COARSE_POINTER_QUERY\)/);
   assert.equal(matches(terminal, /<TouchTerminalComposer\b/g), 1);
   assert.match(touchComposer, /<textarea[\s\S]*?aria-label="Message Nanocodex"/);
   assert.match(touchComposer, /value=\{draft\}[\s\S]*?onChange=\{\(event\) => onChange\(event\.currentTarget\.value\)\}/);
@@ -172,7 +204,8 @@ test("touch terminals use one native IME-safe composer and one contextual action
   assert.match(ruleBlock(terminalCss, ".agent-touch-actions button {", touchCss), /min-height:\s*44px/);
   const composer = ruleBlock(terminalCss, ".agent-touch-composer {", touchCss);
   assert.match(composer, /position:\s*relative/);
-  assert.match(composer, /min-height:\s*calc\(60px \+ env\(safe-area-inset-bottom\)\)/);
+  assert.match(composer, /min-height:\s*var\(--terminal-composer-min-height\)/);
+  assert.match(terminalCss, /--terminal-composer-min-height:\s*calc\(60px \+ env\(safe-area-inset-bottom\)\)/);
   assert.match(composer, /env\(safe-area-inset-left\)/);
   assert.match(composer, /env\(safe-area-inset-right\)/);
   assert.match(terminal, /active\.current\.submit\(input, \{ intent, submittedAt \}\)/);
@@ -185,6 +218,9 @@ test("touch terminal geometry follows the visual viewport without weakening hidd
   assert.match(terminalSurface, /viewport\?\.addEventListener\("scroll", measure\)/);
   assert.match(terminalSurface, /window\.addEventListener\("orientationchange", measure\)/);
   assert.match(terminalSurface, /root\.style\.height = `\$\{available\}px`/);
+  assert.match(terminalSurface, /composer\?\.getBoundingClientRect\(\)\.height/);
+  assert.match(terminalSurface, /getComputedStyle\(composer\)\.paddingBottom/);
+  assert.match(terminalSurface, /minimum: composerMinimum/);
   assert.match(terminalSurface, /shell\.style\.height = `\$\{Math\.min\(naturalHeight, shellAvailable\)\}px`/);
   assert.match(terminalCss, /\.nanocodex-demo\.is-full \.agent-terminal-shell:focus-within/);
   const touchCss = terminalCss.indexOf("@media (pointer: coarse), (any-pointer: coarse)");
@@ -246,6 +282,20 @@ test("phone auth controls and other application targets meet mobile baselines", 
 
   assert.match(ruleBlock(indexCss, ".search-field button {", phone), /width:\s*44px[\s\S]*?height:\s*44px/);
   assert.match(ruleBlock(indexCss, ".search-result {", phone), /min-height:\s*44px/);
+
+  const coarseTerminal = terminalCss.indexOf(`@media ${coarseQuery}`);
+  assert.match(ruleBlock(terminalCss, ".agent-oauth-code a,", coarseTerminal), /min-height:\s*var\(--coarse-target-size\)/);
+  assert.match(ruleBlock(terminalCss, ".artifact-dock-header > select {", coarseTerminal), /height:\s*var\(--coarse-target-size\)/);
+  assert.match(ruleBlock(terminalCss, ".artifact-preview-button {", coarseTerminal), /min-height:\s*var\(--coarse-target-size\)/);
+  const coarseApplication = indexCss.indexOf(`@media ${coarseQuery}`);
+  assert.match(
+    ruleBlock(indexCss, ".requests-empty .button,", coarseApplication),
+    /min-height:\s*var\(--coarse-target-size\)/,
+  );
+  assert.match(
+    ruleBlock(indexCss, ".commit-stream-tail-error button,", coarseApplication),
+    /min-height:\s*var\(--coarse-target-size\)/,
+  );
 });
 
 test("expanded artifact docks stay inside every safe-area edge", () => {

@@ -1,6 +1,7 @@
 .nanocodex-demo {
   position: relative;
   width: 100%;
+  --terminal-composer-min-height: calc(60px + env(safe-area-inset-bottom));
   --terminal-background: var(--surface);
   --terminal-foreground: var(--text);
   --terminal-muted: color-mix(in srgb, var(--text) 56%, transparent);
@@ -258,7 +259,7 @@
     grid-template-rows: 44px 16px;
     gap: 0 8px;
     align-items: center;
-    min-height: calc(60px + env(safe-area-inset-bottom));
+    min-height: var(--terminal-composer-min-height);
     padding:
       0
       max(8px, env(safe-area-inset-right))
@@ -332,6 +333,27 @@
   .agent-touch-actions button:disabled {
     color: var(--terminal-muted);
     cursor: default;
+  }
+
+  .agent-oauth-code a,
+  .artifact-dock-header > select,
+  .artifact-preview-button {
+    min-height: var(--coarse-target-size);
+  }
+
+  .agent-oauth-code a,
+  .artifact-preview-button {
+    display: inline-flex;
+    align-items: center;
+  }
+
+  .agent-oauth-code a {
+    min-width: var(--coarse-target-size);
+    padding-inline: 8px;
+  }
+
+  .artifact-dock-header > select {
+    height: var(--coarse-target-size);
   }
 
   .agent-touch-composer small {
@@ -408,6 +430,12 @@
   margin: 0;
 }
 
+@media (pointer: coarse), (any-pointer: coarse) {
+  .nanocodex-demo.is-full .agent-terminal-workspace > .agent-terminal-shell {
+    min-height: var(--terminal-composer-min-height);
+  }
+}
+
 .nanocodex-demo.is-full .artifact-dock {
   position: absolute;
   z-index: 10;
@@ -464,6 +492,18 @@
     max(18px, env(safe-area-inset-left));
   width: auto;
   height: auto;
+}
+
+.artifact-dock-backdrop {
+  position: fixed;
+  z-index: 99;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  padding: 0;
+  background: color-mix(in srgb, var(--black) 36%, transparent);
+  cursor: pointer;
+  touch-action: none;
 }
 
 @media (max-width: 740px), (pointer: coarse) and (orientation: landscape) and (max-width: 950px) {

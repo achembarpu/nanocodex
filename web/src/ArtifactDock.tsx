@@ -20,6 +20,7 @@ import {
   openKernelWorkspace,
   subscribeThreadWorkspaceChanges,
 } from "nanocodex/tools/browser";
+import { useModalBoundary } from "./useModalBoundary";
 
 export const COMPACT_WORKSPACE_MEDIA_QUERY = "(max-width: 740px), (pointer: coarse) and (orientation: landscape) and (max-width: 950px)";
 
@@ -39,8 +40,11 @@ export const ArtifactDock = memo(function ArtifactDock({
   const [selectedId, setSelectedId] = useState<string>();
   const [collapsed, setCollapsed] = useState(true);
   const [fullscreen, setFullscreen] = useState(false);
+  const [compact, setCompact] = useState(compactWorkspace);
   const [message, setMessage] = useState("");
   const refreshEpoch = useRef(0);
+  const backdropRef = useRef<HTMLButtonElement>(null);
+  const dockRef = useRef<HTMLElement>(null);
   const toggleRef = useRef<HTMLButtonElement>(null);
   const refocusToggle = useRef(false);
   const canvasId = useId();
@@ -97,13 +101,14 @@ export const ArtifactDock = memo(function ArtifactDock({
   }, [refresh, store]);
 
   useEffect(() => {
-    const compact = window.matchMedia(COMPACT_WORKSPACE_MEDIA_QUERY);
-    const exitFullscreen = () => {
-      if (compact.matches) setFullscreen(false);
+    const query = window.matchMedia(COMPACT_WORKSPACE_MEDIA_QUERY);
+    const updateCompactWorkspace = () => {
+      setCompact(query.matches);
+      if (query.matches) setFullscreen(false);
     };
-    exitFullscreen();
-    compact.addEventListener("change", exitFullscreen);
-    return () => compact.removeEventListener("change", exitFullscreen);
+    updateCompactWorkspace();
+    query.addEventListener("change", updateCompactWorkspace);
+    return () => query.removeEventListener("change", updateCompactWorkspace);
   }, []);
 
   useEffect(() => {
@@ -154,16 +159,26 @@ export const ArtifactDock = memo(function ArtifactDock({
     }
   };
 
-  const collapse = () => {
+  const collapse = useCallback(() => {
     refocusToggle.current = true;
     setFullscreen(false);
     setCollapsed(true);
-  };
+  }, []);
 
-  const expand = () => {
+  const expand = useCallback(() => {
     refocusToggle.current = true;
     setCollapsed(false);
-  };
+  }, []);
+
+  const modalOpen = compact && !collapsed;
+  useModalBoundary({
+    backdropRef,
+    initialFocusRef: toggleRef,
+    onDismiss: collapse,
+    open: modalOpen,
+    panelRef: dockRef,
+    returnFocusRef: toggleRef,
+  });
 
   if (collapsed) {
     return (
@@ -186,48 +201,67 @@ export const ArtifactDock = memo(function ArtifactDock({
   }
 
   return (
-    <aside className={`artifact-dock${fullscreen ? " is-fullscreen" : ""}`} aria-label="Artifacts">
-      <header className="artifact-dock-header">
-        <Sparkles aria-hidden="true" />
-        {artifacts.length > 1 ? (
-          <select value={selected?.id} onChange={(event) => setSelectedId(event.target.value)} aria-label="Selected artifact">
-            {artifacts.map((artifact) => <option key={artifact.id} value={artifact.id}>{artifact.title}</option>)}
-          </select>
-        ) : <strong>{selected?.title ?? "Artifacts"}</strong>}
-        <div>
-          <DockAction label="Refresh artifacts" onClick={() => void refresh(store)}><RefreshCw /></DockAction>
-          <DockAction label="Download artifact" disabled={!selected} onClick={download}><Download /></DockAction>
-          <DockAction label="Delete artifact" disabled={!selected} onClick={() => void remove()}><Trash2 /></DockAction>
-          <DockAction label={fullscreen ? "Exit fullscreen" : "View fullscreen"} onClick={() => setFullscreen((value) => !value)}>
-            {fullscreen ? <Minimize2 /> : <Maximize2 />}
-          </DockAction>
-          <DockAction
-            buttonRef={toggleRef}
-            className="artifact-dock-toggle"
-            controls={canvasId}
-            expanded
-            label="Collapse artifacts"
-            onClick={collapse}
-          >
-            <PanelRightClose />
-          </DockAction>
-        </div>
-      </header>
-      <div className="artifact-canvas" id={canvasId}>
-        {selected ? (
-          <LiveReactArtifact artifact={selected} onAction={ask} />
-        ) : (
-          <div className="artifact-empty">
-            <PanelRightOpen aria-hidden="true" />
-            {message ? <p>{message}</p> : null}
-            <button className="artifact-preview-button" type="button" onClick={() => void createExample()}>
-              Preview custom UI
-            </button>
+    <>
+      {modalOpen ? (
+        <button
+          ref={backdropRef}
+          className="artifact-dock-backdrop"
+          type="button"
+          aria-hidden="true"
+          tabIndex={-1}
+          onPointerDown={collapse}
+        />
+      ) : null}
+      <aside
+        ref={dockRef}
+        className={`artifact-dock${fullscreen ? " is-fullscreen" : ""}`}
+        aria-label="Artifacts"
+        aria-modal={modalOpen ? true : undefined}
+        role={modalOpen ? "dialog" : "complementary"}
+        tabIndex={modalOpen ? -1 : undefined}
+      >
+        <header className="artifact-dock-header">
+          <Sparkles aria-hidden="true" />
+          {artifacts.length > 1 ? (
+            <select value={selected?.id} onChange={(event) => setSelectedId(event.target.value)} aria-label="Selected artifact">
+              {artifacts.map((artifact) => <option key={artifact.id} value={artifact.id}>{artifact.title}</option>)}
+            </select>
+          ) : <strong>{selected?.title ?? "Artifacts"}</strong>}
+          <div>
+            <DockAction label="Refresh artifacts" onClick={() => void refresh(store)}><RefreshCw /></DockAction>
+            <DockAction label="Download artifact" disabled={!selected} onClick={download}><Download /></DockAction>
+            <DockAction label="Delete artifact" disabled={!selected} onClick={() => void remove()}><Trash2 /></DockAction>
+            <DockAction label={fullscreen ? "Exit fullscreen" : "View fullscreen"} onClick={() => setFullscreen((value) => !value)}>
+              {fullscreen ? <Minimize2 /> : <Maximize2 />}
+            </DockAction>
+            <DockAction
+              buttonRef={toggleRef}
+              className="artifact-dock-toggle"
+              controls={canvasId}
+              expanded
+              label="Collapse artifacts"
+              onClick={collapse}
+            >
+              <PanelRightClose />
+            </DockAction>
           </div>
-        )}
-      </div>
-      {message && selected ? <p className="artifact-dock-status" role="status">{message}</p> : null}
-    </aside>
+        </header>
+        <div className="artifact-canvas" id={canvasId}>
+          {selected ? (
+            <LiveReactArtifact artifact={selected} onAction={ask} />
+          ) : (
+            <div className="artifact-empty">
+              <PanelRightOpen aria-hidden="true" />
+              {message ? <p>{message}</p> : null}
+              <button className="artifact-preview-button" type="button" onClick={() => void createExample()}>
+                Preview custom UI
+              </button>
+            </div>
+          )}
+        </div>
+        {message && selected ? <p className="artifact-dock-status" role="status">{message}</p> : null}
+      </aside>
+    </>
   );
 });
 

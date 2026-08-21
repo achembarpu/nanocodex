@@ -1,6 +1,14 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import htm from "htm";
+import {
+  deepActiveElement,
+  modalFocusableElements,
+  modalFrameBoundaryMessage,
+  modalFrameBoundaryReadyMessage,
+  modalFrameTabBoundaryKey,
+  readModalFrameBoundaryState,
+} from "./modalBoundary";
 
 const html = htm.bind(React.createElement);
 document.documentElement.classList.add("artifact-runtime-page");
@@ -8,9 +16,15 @@ const container = document.getElementById("root");
 if (!container) throw new Error("artifact runtime root is missing");
 const root = createRoot(container);
 let artifactId = "";
+let modalBoundaryActive = false;
 
 window.addEventListener("message", (event) => {
   if (event.source !== window.parent) return;
+  const boundaryState = readModalFrameBoundaryState(event.data);
+  if (boundaryState !== undefined) {
+    modalBoundaryActive = boundaryState;
+    return;
+  }
   const value = asRecord(event.data);
   if (value?.type !== "render-artifact" || typeof value.source !== "string" || typeof value.artifactId !== "string") return;
   artifactId = value.artifactId;
@@ -34,6 +48,29 @@ window.addEventListener("message", (event) => {
 });
 
 window.parent.postMessage({ type: "artifact-runtime-ready" }, "*");
+window.parent.postMessage(modalFrameBoundaryReadyMessage(), "*");
+
+window.addEventListener("keydown", (event) => {
+  if (window.parent === window || !modalBoundaryActive) return;
+  if (event.key === "Escape") {
+    event.preventDefault();
+    event.stopPropagation();
+    window.parent.postMessage(modalFrameBoundaryMessage("Escape"), "*");
+    return;
+  }
+  if (event.key !== "Tab") return;
+  const focusable = modalFocusableElements(document);
+  const active = deepActiveElement(document);
+  const key = modalFrameTabBoundaryKey({
+    activeIndex: focusable.findIndex((element) => element === active),
+    focusableCount: focusable.length,
+    shiftKey: event.shiftKey,
+  });
+  if (!key) return;
+  event.preventDefault();
+  event.stopPropagation();
+  window.parent.postMessage(modalFrameBoundaryMessage(key), "*");
+}, { capture: true });
 
 window.addEventListener("error", (event) => {
   root.render(React.createElement(RuntimeError, { error: event.message || "generated React failed" }));

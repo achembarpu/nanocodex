@@ -45,6 +45,7 @@
   --font-mono: var(--font-site);
   --content-max: 1120px;
   --wide-max: 1440px;
+  --coarse-target-size: 44px;
 }
 
 html[data-theme="light"] {
@@ -3470,6 +3471,14 @@ html[data-theme="dark"] .tui-syntax .shiki span {
   .commit-sidebar-header .icon-button,
   .commit-scope-tabs button {
     min-width: 44px;
+  }
+
+  .requests-empty .button,
+  .commit-stream-error button,
+  .commit-stream-tail-error button,
+  .commit-list-tail-error button,
+  .empty-state button {
+    min-height: var(--coarse-target-size);
   }
 }
 

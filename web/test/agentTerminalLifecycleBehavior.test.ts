@@ -7,6 +7,14 @@ import {
   SerializedReplacementOwner,
   terminalRunningForStatus,
 } from "../src/agentTerminalLifecycle.ts";
+import {
+  cssPixelValue,
+  observeMediaQueryMatch,
+  retainedSourceTreeState,
+  scaledSourceTreeScrollTop,
+  sourceTreeItemHeight,
+  terminalComposerMinimumHeight,
+} from "../src/mobileInteraction.ts";
 
 test("auth refreshes deduplicate only within the current mutation generation", async () => {
   const owner = new GenerationRequestOwner<string>();
@@ -163,6 +171,82 @@ test("visual viewport height retains negative relative tops after keyboard panni
     viewportHeight: 320,
     viewportOffsetTop: 40,
   }), 60);
+});
+
+test("visual viewport floors include the measured composer and bottom safe area", () => {
+  const minimum = terminalComposerMinimumHeight({
+    measuredComposerHeight: 86.2,
+    safeAreaInsetBottom: cssPixelValue("34px"),
+  });
+  assert.equal(minimum, 94);
+  assert.equal(availableVisualHeight({
+    elementTop: 480,
+    minimum,
+    viewportHeight: 320,
+    viewportOffsetTop: 40,
+  }), 94);
+  assert.equal(terminalComposerMinimumHeight({
+    measuredComposerHeight: 112.1,
+    safeAreaInsetBottom: 34,
+  }), 113, "a taller measured composer remains authoritative");
+});
+
+test("coarse Source rows resolve to a complete target without changing fine density", () => {
+  assert.equal(sourceTreeItemHeight(false), 24);
+  assert.equal(sourceTreeItemHeight(true), 44);
+});
+
+test("coarse target policy follows live pointer media changes and detaches cleanly", () => {
+  let listener: (() => void) | undefined;
+  const query = {
+    matches: false,
+    addEventListener(_type: string, next: () => void) {
+      listener = next;
+    },
+    removeEventListener(_type: string, next: () => void) {
+      if (listener === next) listener = undefined;
+    },
+  };
+  const heights: number[] = [];
+  const stop = observeMediaQueryMatch(
+    query as unknown as MediaQueryList,
+    (coarse) => heights.push(sourceTreeItemHeight(coarse)),
+  );
+  query.matches = true;
+  listener?.();
+  stop();
+  query.matches = false;
+  listener?.();
+
+  assert.deepEqual(heights, [24, 44]);
+  assert.equal(listener, undefined);
+});
+
+test("Source tree density swaps retain expansion, search, selection, and focus state", () => {
+  const selectedPaths = ["src/main.rs"];
+  const retained = retainedSourceTreeState({
+    getFocusedPath: () => "src/lib.rs",
+    getItem: (path) => ({
+      isDirectory: () => true,
+      isExpanded: () => path === "src",
+    }),
+    getSearchValue: () => "modal",
+    getSelectedPaths: () => selectedPaths,
+    isSearchOpen: () => true,
+  }, ["src", "web"]);
+  selectedPaths.push("web/src/main.tsx");
+
+  assert.deepEqual(retained, {
+    expandedPaths: ["src"],
+    focusedPath: "src/lib.rs",
+    searchQuery: "modal",
+    selectedPaths: ["src/main.rs"],
+  });
+  assert.equal(scaledSourceTreeScrollTop({
+    itemHeight: 24,
+    nextItemHeight: 44,
+    scrollTop: 120,
+  }), 220, "the same logical row stays at the viewport boundary");
 });
 
 test("terminal activity is cleared whenever its Worker is not ready", () => {

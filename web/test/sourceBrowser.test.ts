@@ -44,6 +44,16 @@ test("Source uses one Pierre search and a viewport-sized monochrome tree", () =>
   assert.doesNotMatch(browser, /fuzzyScore|fileSearchOpen|fileSearchResults/);
   assert.match(browser, /icons: \{ set: "standard", colored: false \}/);
   assert.match(browser, /initialVisibleRowCount/);
+  assert.match(browser, /observeMediaQueryMatch\([\s\S]*?COARSE_POINTER_QUERY/);
+  assert.match(browser, /useResponsiveFileTree\(\{/);
+  assert.match(browser, /sourceTreeItemHeight\(coarsePointer\), directoryPaths/);
+  assert.match(browser, /retainedSourceTreeState\(previous, directoryPaths\)/);
+  assert.match(browser, /captureSourceTreeDomState\(previous, itemHeight\)/);
+  assert.match(browser, /restoreSourceTreeDomState\(model, pending\)/);
+  assert.match(browser, /modalOpen && !model\.isSearchOpen\(\)/);
+  assert.match(browser, /const modelRef = useRef\(model\)/);
+  assert.match(browser, /const closeTree = useCallback\(\(\) => \{[\s\S]*?modelRef\.current\.closeSearch\(\)[\s\S]*?\}, \[\]\)/);
+  assert.doesNotMatch(browser, /key=\{coarsePointer \? "coarse" : "fine"\}/);
   assert.match(browser, /overscan: 10/);
   assert.match(styles, /--trees-bg-override:\s*transparent/);
   assert.match(styles, /--trees-selected-bg-override:\s*color-mix/);
