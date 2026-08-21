@@ -2,9 +2,12 @@ use clap::{Args, builder::NonEmptyStringValueParser};
 use eyre::{Result, eyre};
 use nanocodex::AgentEvents;
 use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio::time::{Duration, timeout};
 
 use crate::config::AgentArgs;
 use crate::vm::VmArgs;
+
+const TURN_SETTLE_TIMEOUT: Duration = Duration::from_secs(5);
 
 #[derive(Args)]
 pub(crate) struct Run {
@@ -28,9 +31,35 @@ impl Run {
                 let turn = handle.prompt(self.prompt.clone()).await?;
                 let control = turn.control();
                 let completion = async {
-                    write_turn_jsonl(&mut events, &mut stdout).await?;
-                    turn.result().await?;
-                    Ok::<(), eyre::Report>(())
+                    let events_result = write_turn_jsonl(&mut events, &mut stdout);
+                    let turn_result = turn.result();
+                    tokio::pin!(events_result);
+                    tokio::pin!(turn_result);
+                    tokio::select! {
+                        result = &mut turn_result => {
+                            let terminal = timeout(TURN_SETTLE_TIMEOUT, &mut events_result).await;
+                            result?;
+                            terminal
+                                .map_err(|_| eyre!("terminal event did not settle after the turn completed"))??;
+                        }
+                        result = &mut events_result => match result {
+                            Ok(()) => {
+                                timeout(TURN_SETTLE_TIMEOUT, &mut turn_result)
+                                    .await
+                                    .map_err(|_| eyre!("turn result did not settle after its terminal event"))??;
+                            }
+                            Err(event_error) => {
+                                let _ = timeout(TURN_SETTLE_TIMEOUT, control.cancel()).await;
+                                if let Ok(Err(turn_error)) =
+                                    timeout(TURN_SETTLE_TIMEOUT, &mut turn_result).await
+                                {
+                                    return Err(turn_error.into());
+                                }
+                                return Err(event_error);
+                            }
+                        }
+                    }
+                    Ok(())
                 };
                 tokio::pin!(completion);
                 tokio::select! {
