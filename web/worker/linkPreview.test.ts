@@ -10,15 +10,20 @@ const template = `<!doctype html><html><head>
 <!-- nanocodex:link-preview:start --><title>stale</title><!-- nanocodex:link-preview:end -->
 </head><body></body></html>`;
 
-function assetEnv() {
+function assetEnv(assetEtag: string | null = '"asset"') {
   const requests: Request[] = [];
   return {
     env: {
       ASSETS: {
         async fetch(request: Request) {
           requests.push(request);
+          if (assetEtag && (request.headers.has("if-none-match") || request.headers.has("if-modified-since"))) {
+            return new Response(null, { status: 304, headers: { etag: assetEtag } });
+          }
+          const headers = new Headers({ "content-type": "text/html" });
+          if (assetEtag) headers.set("etag", assetEtag);
           return new Response(template, {
-            headers: { "content-type": "text/html", etag: '"asset"' },
+            headers,
           });
         },
       },
@@ -51,42 +56,165 @@ test("crawler documents contain complete route-aware production metadata", async
   assert.doesNotMatch(html, /<driver>/);
 
   const conditional = new Request(request, {
-    headers: { ...Object.fromEntries(request.headers), "if-none-match": response.headers.get("etag")! },
+    headers: {
+      ...Object.fromEntries(request.headers),
+      "if-modified-since": "Thu, 01 Jan 1970 00:00:00 GMT",
+      "if-none-match": response.headers.get("etag")!,
+    },
   });
   const notModified = await worker.fetch(conditional, env as never);
   assert.equal(notModified.status, 304);
+  assert.equal(notModified.headers.get("etag"), response.headers.get("etag"));
   assert.equal(await notModified.text(), "");
   assert.equal(requests.length, 2);
+  assert.equal(requests[1]?.headers.get("if-modified-since"), null);
+  assert.equal(requests[1]?.headers.get("if-none-match"), null);
 });
 
-test("document routing handles browser navigation, HEAD, and unknown paths", async () => {
-  const { env } = assetEnv();
-  const browserRequest = new Request("https://preview.test/changelog", {
-    headers: { "sec-fetch-dest": "document", "sec-fetch-mode": "navigate" },
-  });
-  const browserResponse = await routeLinkPreview(browserRequest, env as never, new URL(browserRequest.url));
-  assert.match(await browserResponse!.text(), /Changelog · Nanocodex/);
+test("every declared document route and the internal artifact runtime retain the SPA fallback", async () => {
+  const { env, requests } = assetEnv();
+  const knownPaths = new Set([
+    "/",
+    "/agent",
+    "/changelog",
+    "/code",
+    "/commits",
+    "/requests",
+    "/evals",
+    ...Object.keys(docsPreview),
+    "/evals/worksets/suite-one",
+    "/evals/worksets/suite-one/tasks/fix-git",
+  ]);
+  for (const path of knownPaths) {
+    const response = await worker.fetch(new Request(`https://preview.test${path}`, {
+      headers: { "sec-fetch-dest": "document", "sec-fetch-mode": "navigate" },
+    }), env as never);
+    assert.equal(response.status, 200, path);
+    assert.match(response.headers.get("content-type") ?? "", /text\/html/, path);
+  }
 
-  const headRequest = new Request("https://preview.test/docs/unknown-page", {
+  const artifact = await worker.fetch(new Request("https://preview.test/artifact-runtime?embedded=1", {
+    headers: { "sec-fetch-dest": "iframe", "sec-fetch-mode": "navigate" },
+  }), env as never);
+  assert.equal(artifact.status, 200);
+  assert.match(await artifact.text(), /Nanocodex — high-performance Codex SDK/);
+  assert.equal(requests.length, knownPaths.size + 1);
+  assert.ok(requests.every((request) => new URL(request.url).pathname === "/"));
+});
+
+test("requests is a public route with canonical metadata and matching GET, HEAD, and 304 validators", async () => {
+  const { env, requests } = assetEnv();
+  const request = new Request("https://preview.test/requests?thread=private", {
+    headers: { accept: "text/html" },
+  });
+  const response = await worker.fetch(request, env as never);
+  const html = await response.text();
+  const etag = response.headers.get("etag");
+
+  assert.equal(response.status, 200);
+  assert.match(html, /<title>Requests · Nanocodex<\/title>/);
+  assert.match(html, /<link rel="canonical" href="https:\/\/preview\.test\/requests" \/>/);
+  assert.match(html, /<meta property="og:url" content="https:\/\/preview\.test\/requests" \/>/);
+  assert.match(html, /<meta property="og:image" content="https:\/\/preview\.test\/og\.png\?path=%2Frequests" \/>/);
+  assert.doesNotMatch(html, /thread=private/);
+  assert.match(etag ?? "", /^"page-[0-9a-f]+"$/);
+
+  const head = await worker.fetch(new Request(request.url, { method: "HEAD" }), env as never);
+  assert.equal(head.status, 200);
+  assert.equal(head.headers.get("etag"), etag);
+  assert.equal(await head.text(), "");
+
+  const conditionalHead = await worker.fetch(new Request(request, {
+    method: "HEAD",
+    headers: { "if-none-match": `W/${etag}` },
+  }), env as never);
+  assert.equal(conditionalHead.status, 304);
+  assert.equal(conditionalHead.headers.get("etag"), etag);
+  assert.equal(await conditionalHead.text(), "");
+  assert.equal(requests.length, 3);
+  assert.ok(requests.every((backing) => !backing.headers.has("if-none-match")));
+});
+
+test("genuinely unknown document routes return uncached 404s without consuming the SPA asset", async () => {
+  const { env, requests } = assetEnv();
+  for (const path of [
+    "/definitely-not-a-route",
+    "//agent",
+    "/agent/child",
+    "/requests/open",
+  ]) {
+    const response = await worker.fetch(new Request(`https://preview.test${path}`, {
+      headers: { accept: "text/html", "if-none-match": '"page-deadbeef"' },
+    }), env as never);
+    assert.equal(response.status, 404, path);
+    assert.equal(response.headers.get("cache-control"), "no-store", path);
+    assert.equal(response.headers.get("content-type"), "text/plain; charset=utf-8", path);
+    assert.equal(response.headers.get("etag"), null, path);
+    assert.equal(await response.text(), "Not found", path);
+  }
+
+  const head = await worker.fetch(new Request("https://preview.test/not-an-app-route", {
     method: "HEAD",
     headers: { accept: "text/html" },
-  });
-  const headResponse = await routeLinkPreview(headRequest, env as never, new URL(headRequest.url));
-  assert.equal(headResponse?.status, 200);
-  assert.equal(await headResponse?.text(), "");
-
-  const unknownRequest = new Request("https://preview.test/not-an-app-route", {
-    headers: { accept: "text/html" },
-  });
-  const unknownResponse = await routeLinkPreview(unknownRequest, env as never, new URL(unknownRequest.url));
-  const unknownHtml = await unknownResponse!.text();
-  assert.match(unknownHtml, /href="https:\/\/preview\.test\/"/);
-  assert.match(unknownHtml, /Nanocodex — high-performance Codex SDK/);
+  }), env as never);
+  assert.equal(head.status, 404);
+  assert.equal(await head.text(), "");
+  assert.equal(requests.length, 0);
 
   const scriptRequest = new Request("https://preview.test/docs.js", {
     headers: { accept: "application/javascript", "sec-fetch-dest": "script" },
   });
   assert.equal(await routeLinkPreview(scriptRequest, env as never, new URL(scriptRequest.url)), null);
+});
+
+test("missing docs and eval routes retain their client fallback with a real 404 status", async () => {
+  const { env, requests } = assetEnv();
+  for (const path of [
+    "/docs/unknown-page",
+    "/docs//getting-started",
+    "/evals/worksets",
+    "/evals/worksets/%E0%A4%A/tasks/run",
+  ]) {
+    const response = await worker.fetch(new Request(`https://preview.test${path}`, {
+      headers: { accept: "text/html", "if-none-match": '"page-deadbeef"' },
+    }), env as never);
+    const html = await response.text();
+    assert.equal(response.status, 404, path);
+    assert.equal(response.headers.get("cache-control"), "no-store", path);
+    assert.equal(response.headers.get("content-type"), "text/html; charset=utf-8", path);
+    assert.equal(response.headers.get("etag"), null, path);
+    assert.match(html, new RegExp(`property="og:url" content="https://preview\\.test${path.replaceAll("/", "\\/")}"`), path);
+    assert.doesNotMatch(html, /property="og:url" content="https:\/\/preview\.test\/" \/>/, path);
+  }
+
+  const head = await worker.fetch(new Request("https://preview.test/docs/unknown-page", {
+    method: "HEAD",
+    headers: { accept: "text/html", "if-none-match": '"page-deadbeef"' },
+  }), env as never);
+  assert.equal(head.status, 404);
+  assert.equal(head.headers.get("etag"), null);
+  assert.equal(await head.text(), "");
+  assert.equal(requests.length, 5);
+  assert.ok(requests.every((backing) => !backing.headers.has("if-none-match")));
+});
+
+test("documents without an asset validator still honor the rendered page ETag", async () => {
+  const { env, requests } = assetEnv(null);
+  const browserRequest = new Request("https://preview.test/changelog", {
+    headers: { "sec-fetch-dest": "document", "sec-fetch-mode": "navigate" },
+  });
+  const response = await worker.fetch(browserRequest, env as never);
+  const etag = response.headers.get("etag");
+  assert.equal(response.status, 200);
+  assert.match(etag ?? "", /^"page-[0-9a-f]+"$/);
+
+  const notModified = await worker.fetch(new Request(browserRequest, {
+    headers: { ...Object.fromEntries(browserRequest.headers), "if-none-match": etag! },
+  }), env as never);
+  assert.equal(notModified.status, 304);
+  assert.equal(notModified.headers.get("etag"), etag);
+  assert.equal(await notModified.text(), "");
+  assert.equal(requests.length, 2);
 });
 
 test("eval entity names are read safely with deterministic fallbacks", async () => {
@@ -119,13 +247,6 @@ test("eval entity names are read safely with deterministic fallbacks", async () 
   assert.deepEqual(values, [["suite one", "fix/git"]]);
   assert.match(html, /fix &lt;unsafe&gt; &amp; ship · Nanocodex/);
   assert.match(html, /retained terminal-bench treatments/);
-
-  const malformed = new Request(
-    "https://preview.test/evals/worksets/%E0%A4%A/tasks/run",
-    { headers: { accept: "text/html" } },
-  );
-  const fallback = await routeLinkPreview(malformed, assetEnv().env as never, new URL(malformed.url));
-  assert.match(await fallback!.text(), /Evaluation run · Nanocodex/);
 });
 
 test("generated PNG images are cacheable, deterministic, bounded, and conditional", async () => {

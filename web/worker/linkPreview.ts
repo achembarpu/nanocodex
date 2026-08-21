@@ -26,11 +26,19 @@ export async function routeLinkPreview(
   if (url.pathname === "/og.png" && (request.method === "GET" || request.method === "HEAD")) {
     return previewImage(request, env, url);
   }
-  if (!isDocumentNavigation(request) || !env.ASSETS) return null;
+  const pathname = normalizePath(url.pathname);
+  const documentStatus = statusForDocumentPath(pathname);
+  const internalNavigation = pathname === "/artifact-runtime" && isIframeNavigation(request);
+  const routeHead = request.method === "HEAD" && documentStatus != null;
+  if ((!isDocumentNavigation(request) && !internalNavigation && !routeHead) || !env.ASSETS) return null;
+  if (documentStatus == null) return documentNotFound(request);
 
   const preview = await previewForUrl(url, env);
+  const assetHeaders = new Headers(request.headers);
+  assetHeaders.delete("if-modified-since");
+  assetHeaders.delete("if-none-match");
   const assetResponse = await env.ASSETS.fetch(new Request(new URL("/", url), {
-    headers: request.headers,
+    headers: assetHeaders,
     method: "GET",
   }));
   if (!assetResponse.ok) return assetResponse;
@@ -41,9 +49,19 @@ export async function routeLinkPreview(
   headers.set("x-content-type-options", "nosniff");
   headers.delete("content-encoding");
   headers.delete("content-length");
+  if (documentStatus === 404) {
+    headers.set("cache-control", "no-store");
+    headers.delete("etag");
+    headers.delete("last-modified");
+    const html = request.method === "HEAD"
+      ? null
+      : await renderLinkPreviewDocument(await assetResponse.text(), url, env, preview);
+    return new Response(html, { headers, status: 404 });
+  }
+
   const assetEtag = headers.get("etag");
-  if (assetEtag) {
-    const etag = documentEtag(assetEtag, preview, url);
+  let etag = assetEtag ? documentEtag(assetEtag, preview, url) : null;
+  if (etag) {
     headers.set("etag", etag);
     if (etagMatches(request.headers.get("if-none-match"), etag)) {
       return new Response(null, { headers, status: 304 });
@@ -54,7 +72,11 @@ export async function routeLinkPreview(
   }
 
   const html = await renderLinkPreviewDocument(await assetResponse.text(), url, env, preview);
-  headers.set("etag", assetEtag ? documentEtag(assetEtag, preview, url) : `"page-${fnv1a(html)}"`);
+  etag ??= `"page-${fnv1a(html)}"`;
+  headers.set("etag", etag);
+  if (etagMatches(request.headers.get("if-none-match"), etag)) {
+    return new Response(null, { headers, status: 304 });
+  }
   return new Response(request.method === "HEAD" ? null : html, {
     headers,
     status: assetResponse.status,
@@ -82,6 +104,42 @@ export function isDocumentNavigation(request: Request): boolean {
   const mode = request.headers.get("sec-fetch-mode");
   if (mode) return mode === "navigate";
   return request.headers.get("accept")?.toLowerCase().includes("text/html") === true;
+}
+
+function isIframeNavigation(request: Request): boolean {
+  return (request.method === "GET" || request.method === "HEAD")
+    && request.headers.get("sec-fetch-dest") === "iframe";
+}
+
+function statusForDocumentPath(pathname: string): 200 | 404 | null {
+  if (pathname === "/" || pathname === "/agent" || pathname === "/artifact-runtime"
+    || pathname === "/changelog" || pathname === "/code" || pathname === "/commits"
+    || pathname === "/requests") return 200;
+  if (Object.hasOwn(docsPreview, pathname) || isEvalDocumentPath(pathname)) return 200;
+  if (pathname.startsWith("/docs/") || pathname.startsWith("/evals/")) return 404;
+  return null;
+}
+
+function isEvalDocumentPath(pathname: string): boolean {
+  const segments = pathname.split("/").filter(Boolean);
+  if (segments.length === 1 && segments[0] === "evals") return true;
+  if (segments.length === 3 && segments[0] === "evals" && segments[1] === "worksets") {
+    return decodeSegment(segments[2]) != null;
+  }
+  return segments.length === 5 && segments[0] === "evals" && segments[1] === "worksets"
+    && segments[3] === "tasks" && decodeSegment(segments[2]) != null
+    && decodeSegment(segments[4]) != null;
+}
+
+function documentNotFound(request: Request): Response {
+  return new Response(request.method === "HEAD" ? null : "Not found", {
+    status: 404,
+    headers: {
+      "cache-control": "no-store",
+      "content-type": "text/plain; charset=utf-8",
+      "x-content-type-options": "nosniff",
+    },
+  });
 }
 
 async function previewImage(request: Request, env: LinkPreviewEnv, url: URL): Promise<Response> {
@@ -136,6 +194,7 @@ async function previewForUrl(url: URL, env: LinkPreviewEnv): Promise<Preview> {
   if (pathname === "/agent") return fixed(pathname, "Browser agent", "Run the Rust-owned Codex lifecycle locally in a browser Worker.");
   if (pathname === "/changelog") return fixed(pathname, "Changelog", "Follow focused Nanocodex SDK, runtime, tooling, and evaluation changes.");
   if (pathname === "/commits") return fixed(pathname, "Commits", "Inspect the published Nanocodex source history and focused patches.");
+  if (pathname === "/requests") return fixed(pathname, "Requests", "Track proposed changes to the published Nanocodex source tree.", "REQUESTS");
   if (pathname === "/code") {
     const sourcePath = boundedText(url.searchParams.get("path"), 240);
     const canonical = new URL("https://canonical.invalid/code");
@@ -267,7 +326,7 @@ function injectMetadata(document: string, metadata: string): string {
 }
 
 function normalizePath(pathname: string): string {
-  const path = pathname.replace(/\/{2,}/g, "/").replace(/\/$/, "");
+  const path = pathname.replace(/\/+$/, "");
   return path || "/";
 }
 

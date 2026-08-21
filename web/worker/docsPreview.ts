@@ -1,5 +1,5 @@
-// Compact Worker-owned projection of docs frontmatter. Unknown/new pages still
-// receive a deterministic slug title until this projection is refreshed.
+// Compact Worker-owned projection of docs frontmatter and the public docs route
+// set. The focused sync test keeps it aligned with every source page.
 export const docsPreview = {
   "/docs": ["Quick start", "Install Nanocodex, authenticate, and run your first coding-agent turn."],
   "/docs/getting-started": ["Installation and authentication", "Install a published Nanocodex artifact and choose an explicit user-facing auth path."],
@@ -28,7 +28,7 @@ export const docsPreview = {
   "/docs/capabilities/web-agent": ["Web agent", "Run the Codex lifecycle and common coding tools locally in a browser Worker."],
   "/docs/deployments": ["Deployment patterns", "Run one owned agent in a CLI, browser, server isolate, durable actor, or cloud sandbox."],
   "/docs/deployments/cloudflare": ["Cloudflare Durable Objects", "Run Rust/WASM inside one SQLite-backed Durable Object with an R2-backed Sandbox workspace."],
-  "/docs/deployments/vercel": ["Vercel Workflows", "Reconstruct Rust/WASM in Function steps while Workflow retains the journal and event stream."],
+  "/docs/deployments/vercel": ["Vercel Workflows", "Reconstruct Rust/WASM in Function steps from an application-owned PostgreSQL journal."],
   "/docs/sdks/python": ["Python SDK", "A thin PyO3 binding over the native owned Rust lifecycle."],
   "/docs/capabilities/vm-sandboxes": ["VMs and sandboxes", "Keep fast local tools, then escape to a retained VM or hosted sandbox when needed."],
   "/docs/capabilities/voice": ["Voice", "Realtime audio delegates coding work into one retained agent session."],
