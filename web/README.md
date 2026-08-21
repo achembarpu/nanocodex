@@ -265,8 +265,9 @@ npm run deploy
 ```
 
 The deploy command requires `HEAD` to equal the fetched `origin/master`, binds
-that full commit SHA into the Worker version, and does not return successfully
-until the live health endpoint attests the same revision.
+that full commit SHA into the Worker version, rolls only that version to 100%
+without rebuilding unchanged containers, and does not return successfully until
+the live health endpoint attests the same revision.
 
 Do not publish repository data until the hosted `/api/health` reports that
 exact `deployment_sha`. The publisher enforces this ordering independently. An

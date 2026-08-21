@@ -6,10 +6,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const webDirectory = fileURLToPath(new URL("../", import.meta.url));
 const repositoryDirectory = fileURLToPath(new URL("../../", import.meta.url));
 
-export function deploymentArguments(revision) {
+export function uploadArguments(revision) {
   assert.match(revision, /^[0-9a-f]{40}$/, "deployment revision must be a full commit SHA");
   return [
-    "deploy",
+    "versions",
+    "upload",
     "--config",
     "dist/nanocodex/wrangler.json",
     "--strict",
@@ -20,6 +21,29 @@ export function deploymentArguments(revision) {
     "--var",
     `DEPLOYMENT_SHA:${revision}`,
   ];
+}
+
+export function rolloutArguments(workerVersionId) {
+  assert.match(
+    workerVersionId,
+    /^[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}$/,
+    "Worker version ID must be a UUID",
+  );
+  return [
+    "versions",
+    "deploy",
+    `${workerVersionId}@100%`,
+    "--config",
+    "dist/nanocodex/wrangler.json",
+    "--yes",
+  ];
+}
+
+export function parseWorkerVersionId(output) {
+  const workerVersionId = output.match(/Worker Version ID:\s+([0-9a-f-]{36})/)?.[1];
+  assert.ok(workerVersionId, "wrangler upload must report its Worker version ID");
+  rolloutArguments(workerVersionId);
+  return workerVersionId;
 }
 
 export function assertDeploymentHealth(health, revision) {
@@ -43,12 +67,15 @@ export async function deployWorker({
     "refusing to deploy a revision that is not the fetched origin/master",
   );
 
-  await run(deploymentArguments(revision));
+  const uploaded = await run(uploadArguments(revision));
+  const workerVersionId = parseWorkerVersionId(uploaded);
+  await run(rolloutArguments(workerVersionId));
   const health = await waitForDeployment(fetchImpl, origin, revision);
   process.stdout.write(`${JSON.stringify({
     deploymentSha: health.deployment_sha,
     origin: new URL(origin).origin,
     status: health.status,
+    workerVersionId,
   }, null, 2)}\n`);
   return health;
 }
@@ -90,13 +117,19 @@ function runWrangler(args) {
     import.meta.url,
   ));
   return new Promise((resolve, reject) => {
+    let output = "";
     const child = spawn(executable, args, {
       cwd: webDirectory,
-      stdio: "inherit",
+      stdio: ["inherit", "pipe", "inherit"],
+    });
+    child.stdout.setEncoding("utf8");
+    child.stdout.on("data", (chunk) => {
+      output += chunk;
+      process.stdout.write(chunk);
     });
     child.once("error", reject);
     child.once("exit", (code, signal) => {
-      if (code === 0) resolve();
+      if (code === 0) resolve(output);
       else reject(new Error(`wrangler exited with ${code ?? signal}`));
     });
   });

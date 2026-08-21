@@ -3,16 +3,19 @@ import test from "node:test";
 
 import {
   assertDeploymentHealth,
-  deploymentArguments,
+  parseWorkerVersionId,
+  rolloutArguments,
+  uploadArguments,
 } from "./deploy-worker.mjs";
 
 const revision = "a".repeat(40);
 
 test("deployment arguments bind the exact tagged commit to Worker health", () => {
-  const arguments_ = deploymentArguments(revision);
+  const arguments_ = uploadArguments(revision);
 
-  assert.deepEqual(arguments_.slice(0, 4), [
-    "deploy",
+  assert.deepEqual(arguments_.slice(0, 5), [
+    "versions",
+    "upload",
     "--config",
     "dist/nanocodex/wrangler.json",
     "--strict",
@@ -20,6 +23,23 @@ test("deployment arguments bind the exact tagged commit to Worker health", () =>
   assert.ok(arguments_.includes(revision));
   assert.ok(arguments_.includes(`gakonst/nanocodex@${revision}`));
   assert.ok(arguments_.includes(`DEPLOYMENT_SHA:${revision}`));
+});
+
+test("deployment rolls only the uploaded Worker version to production", () => {
+  const workerVersionId = "12345678-1234-1234-1234-123456789abc";
+  assert.equal(
+    parseWorkerVersionId(`Uploaded\nWorker Version ID: ${workerVersionId}\n`),
+    workerVersionId,
+  );
+  assert.deepEqual(rolloutArguments(workerVersionId), [
+    "versions",
+    "deploy",
+    `${workerVersionId}@100%`,
+    "--config",
+    "dist/nanocodex/wrangler.json",
+    "--yes",
+  ]);
+  assert.throws(() => parseWorkerVersionId("Uploaded without an ID"));
 });
 
 test("deployment health accepts only the exact revision", () => {
