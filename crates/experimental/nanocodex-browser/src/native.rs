@@ -41,10 +41,10 @@ use chromiumoxide::{
                 StringIndex,
             },
             emulation::{
-                MediaFeature, SetCpuThrottlingRateParams, SetDeviceMetricsOverrideParams,
-                SetEmulatedMediaParams, SetGeolocationOverrideParams, SetLocaleOverrideParams,
-                SetTimezoneOverrideParams, SetTouchEmulationEnabledParams,
-                SetUserAgentOverrideParams,
+                MediaFeature, ScreenOrientation, ScreenOrientationType, SetCpuThrottlingRateParams,
+                SetDeviceMetricsOverrideParams, SetEmulatedMediaParams,
+                SetGeolocationOverrideParams, SetLocaleOverrideParams, SetTimezoneOverrideParams,
+                SetTouchEmulationEnabledParams, SetUserAgentOverrideParams,
             },
             network::{
                 Cookie, CookieParam, CookieSameSite, EmulateNetworkConditionsByRuleParams,
@@ -97,7 +97,12 @@ use crate::{
     BrowserReactEvent, BrowserReactStatus, BrowserStorageState, BrowserTab, BrowserTarget,
     BrowserTargetIndex, BrowserWebSocketDirection, BrowserWebSocketMessage, MAX_VIEWPORT_DIMENSION,
     ReactDiagnostics, VirtualAuthenticator, VirtualCredential,
-    features::{BrowserColorScheme, BrowserContext, BrowserPermission, BrowserReducedMotion},
+    features::{
+        BrowserColorScheme, BrowserContext, BrowserDeviceDescriptor, BrowserDevicePreset,
+        BrowserMobileAudit, BrowserMobileAuditSample, BrowserMobileFinding,
+        BrowserMobileFindingSeverity, BrowserMobileState, BrowserOrientation, BrowserPermission,
+        BrowserReducedMotion, BrowserViewport,
+    },
     session::cookie_applies_to,
     trace_serialized,
 };
@@ -163,6 +168,234 @@ struct BrowserState {
     next_sequence: u64,
     session: Option<Session>,
     closed: bool,
+}
+
+const DEFAULT_MOBILE_AUDIT_DEVICES: [BrowserDevicePreset; 4] = [
+    BrowserDevicePreset::IphoneSe,
+    BrowserDevicePreset::Iphone15Pro,
+    BrowserDevicePreset::Pixel8,
+    BrowserDevicePreset::GalaxyS24,
+];
+const MAX_MOBILE_AUDIT_DEVICES: usize = 8;
+
+fn mobile_audit_devices(
+    devices: Vec<BrowserDevicePreset>,
+) -> Result<Vec<BrowserDevicePreset>, BrowserError> {
+    let devices = if devices.is_empty() {
+        DEFAULT_MOBILE_AUDIT_DEVICES.to_vec()
+    } else {
+        devices
+    };
+    if devices.len() > MAX_MOBILE_AUDIT_DEVICES {
+        return Err(BrowserError::TooManyMobileAuditDevices {
+            count: devices.len(),
+            maximum: MAX_MOBILE_AUDIT_DEVICES,
+        });
+    }
+    Ok(devices)
+}
+
+fn mobile_audit_orientations(
+    orientations: Vec<BrowserOrientation>,
+) -> Result<Vec<BrowserOrientation>, BrowserError> {
+    let orientations = if orientations.is_empty() {
+        vec![BrowserOrientation::Portrait]
+    } else {
+        orientations
+    };
+    if orientations.len() > 2 {
+        return Err(BrowserError::TooManyMobileAuditOrientations {
+            count: orientations.len(),
+        });
+    }
+    Ok(orientations)
+}
+
+async fn apply_device_profile(
+    page: &Page,
+    descriptor: &BrowserDeviceDescriptor,
+) -> Result<(), BrowserError> {
+    let mut metrics = SetDeviceMetricsOverrideParams::new(
+        i64::from(descriptor.width),
+        i64::from(descriptor.height),
+        descriptor.device_scale_factor,
+        descriptor.mobile,
+    );
+    metrics.screen_width = Some(i64::from(descriptor.width));
+    metrics.screen_height = Some(i64::from(descriptor.height));
+    metrics.screen_orientation = Some(ScreenOrientation {
+        r#type: match descriptor.orientation {
+            BrowserOrientation::Portrait => ScreenOrientationType::PortraitPrimary,
+            BrowserOrientation::Landscape => ScreenOrientationType::LandscapePrimary,
+        },
+        angle: match descriptor.orientation {
+            BrowserOrientation::Portrait => 0,
+            BrowserOrientation::Landscape => 90,
+        },
+    });
+    page.execute(metrics).await?;
+    let mut touch = SetTouchEmulationEnabledParams::new(descriptor.touch);
+    touch.max_touch_points = Some(i64::from(descriptor.max_touch_points));
+    page.execute(touch).await?;
+    let mut user_agent = SetUserAgentOverrideParams::new(descriptor.user_agent.clone());
+    user_agent.platform = Some(descriptor.platform.clone());
+    page.execute(user_agent).await?;
+    Ok(())
+}
+
+async fn override_navigator_platform(page: &Page, platform: &str) -> Result<(), BrowserError> {
+    let platform = serde_json::to_string(platform)?;
+    let source = format!(
+        "(() => {{ Object.defineProperty(Navigator.prototype, 'platform', {{ configurable: true, get: () => {platform} }}); return true; }})()"
+    );
+    page.evaluate(source).await?;
+    Ok(())
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MobileStateWire {
+    url: String,
+    viewport_width: f64,
+    viewport_height: f64,
+    visual_viewport_width: Option<f64>,
+    visual_viewport_height: Option<f64>,
+    visual_viewport_scale: Option<f64>,
+    screen_width: f64,
+    screen_height: f64,
+    device_pixel_ratio: f64,
+    user_agent: String,
+    platform: String,
+    max_touch_points: u64,
+    coarse_pointer: bool,
+    no_hover: bool,
+    orientation: String,
+    meta_viewport: Option<String>,
+}
+
+async fn read_mobile_state(
+    page: &Page,
+    context: &BrowserContext,
+) -> Result<BrowserMobileState, BrowserError> {
+    let wire: MobileStateWire = evaluate_typed(page, format!("({MOBILE_STATE_SCRIPT})()")).await?;
+    let mut mismatches = Vec::new();
+    if let Some(expected) = context.viewport {
+        if (wire.screen_width - f64::from(expected.width)).abs() > 1.0
+            || (wire.screen_height - f64::from(expected.height)).abs() > 1.0
+        {
+            mismatches.push(format!(
+                "screen is {}x{}, expected {}x{}",
+                wire.screen_width, wire.screen_height, expected.width, expected.height
+            ));
+        }
+        if (wire.device_pixel_ratio - expected.device_scale_factor).abs() > 0.01 {
+            mismatches.push(format!(
+                "devicePixelRatio is {}, expected {}",
+                wire.device_pixel_ratio, expected.device_scale_factor
+            ));
+        }
+        if expected.touch && wire.max_touch_points == 0 {
+            mismatches.push("touch emulation is not page-visible".to_owned());
+        }
+        if expected.mobile && (!wire.coarse_pointer || !wire.no_hover) {
+            mismatches.push("mobile pointer media features are not active".to_owned());
+        }
+    }
+    if let Some(expected) = &context.user_agent
+        && &wire.user_agent != expected
+    {
+        mismatches.push("navigator.userAgent does not match the active profile".to_owned());
+    }
+    if let Some(expected) = &context.platform
+        && &wire.platform != expected
+    {
+        mismatches.push(format!(
+            "navigator.platform is {:?}, expected {:?}",
+            wire.platform, expected
+        ));
+    }
+    Ok(BrowserMobileState {
+        provider: "chromium_emulation".to_owned(),
+        engine: "chromium".to_owned(),
+        url: wire.url,
+        viewport_width: wire.viewport_width,
+        viewport_height: wire.viewport_height,
+        visual_viewport_width: wire.visual_viewport_width,
+        visual_viewport_height: wire.visual_viewport_height,
+        visual_viewport_scale: wire.visual_viewport_scale,
+        screen_width: wire.screen_width,
+        screen_height: wire.screen_height,
+        device_pixel_ratio: wire.device_pixel_ratio,
+        user_agent: wire.user_agent,
+        platform: wire.platform,
+        max_touch_points: wire.max_touch_points,
+        coarse_pointer: wire.coarse_pointer,
+        no_hover: wire.no_hover,
+        orientation: wire.orientation,
+        meta_viewport: wire.meta_viewport,
+        verified: mismatches.is_empty(),
+        mismatches,
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MobileAuditWire {
+    document_width: f64,
+    horizontal_overflow: f64,
+    interactive_elements: usize,
+    findings: Vec<MobileFindingWire>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct MobileFindingWire {
+    rule: String,
+    severity: BrowserMobileFindingSeverity,
+    message: String,
+    selector: Option<String>,
+    measured_width: Option<f64>,
+    measured_height: Option<f64>,
+}
+
+async fn mobile_audit_sample(
+    page: &Page,
+    device: BrowserDeviceDescriptor,
+    context: &BrowserContext,
+) -> Result<BrowserMobileAuditSample, BrowserError> {
+    let state = read_mobile_state(page, context).await?;
+    let wire: MobileAuditWire = evaluate_typed(page, format!("({MOBILE_AUDIT_SCRIPT})()")).await?;
+    let mut findings = wire
+        .findings
+        .into_iter()
+        .map(|finding| BrowserMobileFinding {
+            rule: finding.rule,
+            severity: finding.severity,
+            message: finding.message,
+            selector: finding.selector,
+            measured_width: finding.measured_width,
+            measured_height: finding.measured_height,
+        })
+        .collect::<Vec<_>>();
+    for mismatch in &state.mismatches {
+        findings.push(BrowserMobileFinding {
+            rule: "emulation-state".to_owned(),
+            severity: BrowserMobileFindingSeverity::Error,
+            message: mismatch.clone(),
+            selector: None,
+            measured_width: None,
+            measured_height: None,
+        });
+    }
+    Ok(BrowserMobileAuditSample {
+        device_name: device.name.clone(),
+        device: Some(device),
+        state,
+        document_width: wire.document_width,
+        horizontal_overflow: wire.horizontal_overflow,
+        interactive_elements: wire.interactive_elements,
+        findings,
+    })
 }
 
 #[allow(
@@ -720,6 +953,12 @@ impl Session {
                 .user_data_dir(&profile)
                 .window_size(1280, 720)
                 .new_headless_mode();
+            #[cfg(target_os = "macos")]
+            {
+                // A headless process cannot service an interactive Keychain prompt. Without
+                // these Chrome can remain alive without ever opening its DevTools socket.
+                config = config.arg("use-mock-keychain").arg("password-store=basic");
+            }
             if opens_brave_profile {
                 config = profile_launch_config(config).arg("restore-last-session");
             }
@@ -1990,13 +2229,27 @@ async fn apply_browser_context(
     context: &BrowserContext,
 ) -> Result<(), BrowserError> {
     if let Some(viewport) = context.viewport {
-        page.execute(SetDeviceMetricsOverrideParams::new(
+        let mut metrics = SetDeviceMetricsOverrideParams::new(
             i64::from(viewport.width),
             i64::from(viewport.height),
             viewport.device_scale_factor,
             viewport.mobile,
-        ))
-        .await?;
+        );
+        metrics.screen_width = Some(i64::from(viewport.width));
+        metrics.screen_height = Some(i64::from(viewport.height));
+        metrics.screen_orientation = Some(ScreenOrientation {
+            r#type: if viewport.width <= viewport.height {
+                ScreenOrientationType::PortraitPrimary
+            } else {
+                ScreenOrientationType::LandscapePrimary
+            },
+            angle: if viewport.width <= viewport.height {
+                0
+            } else {
+                90
+            },
+        });
+        page.execute(metrics).await?;
         let mut touch = SetTouchEmulationEnabledParams::new(viewport.touch);
         if viewport.touch {
             touch.max_touch_points = Some(i64::from(viewport.max_touch_points));
@@ -2036,6 +2289,9 @@ async fn apply_browser_context(
         params.accept_language = accept_language.cloned();
         params.platform.clone_from(&context.platform);
         page.execute(params).await?;
+        if let Some(platform) = &context.platform {
+            override_navigator_platform(page, platform).await?;
+        }
     }
 
     let mut media_features = Vec::with_capacity(2);
@@ -2660,12 +2916,18 @@ async fn execute_action(
             validate_url(&url)?;
             session.validate_navigation(&Url::parse(&url)?)?;
             navigate(&session.page, &url).await?;
+            if let Some(platform) = &session.context.platform {
+                override_navigator_platform(&session.page, platform).await?;
+            }
             session.sync_virtual_authenticators().await?;
             session.refs.clear();
             Ok(action_result(sequence, BrowserActionName::Open))
         }
         BrowserAction::Reload => {
             reload(&session.page).await?;
+            if let Some(platform) = &session.context.platform {
+                override_navigator_platform(&session.page, platform).await?;
+            }
             session.sync_virtual_authenticators().await?;
             session.refs.clear();
             Ok(action_result(sequence, BrowserActionName::Reload))
@@ -3116,7 +3378,91 @@ return element.checked;"#
                     false,
                 ))
                 .await?;
+            session
+                .page
+                .execute(SetTouchEmulationEnabledParams::new(false))
+                .await?;
+            session.context.viewport = Some(BrowserViewport::desktop(width, height));
             Ok(action_result(sequence, BrowserActionName::SetViewport))
+        }
+        BrowserAction::SetDevice {
+            device,
+            orientation,
+        } => {
+            let descriptor = device.descriptor(orientation);
+            apply_device_profile(&session.page, &descriptor).await?;
+            session.context.viewport = Some(descriptor.viewport());
+            session.context.user_agent = Some(descriptor.user_agent);
+            session.context.platform = Some(descriptor.platform);
+            session.refs.clear();
+            Ok(action_result(sequence, BrowserActionName::SetDevice))
+        }
+        BrowserAction::MobileState => {
+            let state = read_mobile_state(&session.page, &session.context).await?;
+            Ok(BrowserActionResult::MobileState {
+                sequence,
+                executed: true,
+                state,
+            })
+        }
+        BrowserAction::MobileAudit {
+            devices,
+            orientations,
+            ready,
+        } => {
+            let devices = mobile_audit_devices(devices)?;
+            let orientations = mobile_audit_orientations(orientations)?;
+            let url = session.page.url().await?.unwrap_or_default();
+            if url.is_empty() || url == "about:blank" {
+                return Err(BrowserError::MobileAuditRequiresPage);
+            }
+            let mut samples = Vec::with_capacity(devices.len() * orientations.len());
+            for device in devices {
+                for orientation in orientations.iter().copied() {
+                    let descriptor = device.descriptor(orientation);
+                    apply_device_profile(&session.page, &descriptor).await?;
+                    session.context.viewport = Some(descriptor.viewport());
+                    session.context.user_agent = Some(descriptor.user_agent.clone());
+                    session.context.platform = Some(descriptor.platform.clone());
+                    reload(&session.page).await?;
+                    override_navigator_platform(&session.page, &descriptor.platform).await?;
+                    session.refs.clear();
+                    if let Some(ready) = ready.as_ref() {
+                        let target = session.target_for_wait(ready).await?;
+                        interaction::wait_for_selector(
+                            &session.page,
+                            &target,
+                            crate::BrowserWaitForSelectorState::Visible,
+                        )
+                        .await?;
+                    }
+                    samples.push(
+                        mobile_audit_sample(&session.page, descriptor, &session.context).await?,
+                    );
+                }
+            }
+            let error_count = samples
+                .iter()
+                .flat_map(|sample| &sample.findings)
+                .filter(|finding| finding.severity == BrowserMobileFindingSeverity::Error)
+                .count();
+            let warning_count = samples
+                .iter()
+                .flat_map(|sample| &sample.findings)
+                .filter(|finding| finding.severity == BrowserMobileFindingSeverity::Warning)
+                .count();
+            Ok(BrowserActionResult::MobileAudit {
+                sequence,
+                executed: true,
+                audit: BrowserMobileAudit {
+                    url,
+                    provider: "chromium_emulation".to_owned(),
+                    passed: error_count == 0,
+                    samples,
+                    error_count,
+                    warning_count,
+                },
+            })
         }
         BrowserAction::GoBack => {
             navigate_history(&session.page, -1).await?;
@@ -6033,6 +6379,7 @@ const fn requires_action_completion(action: BrowserActionName) -> bool {
             | BrowserActionName::Drag
             | BrowserActionName::UploadFiles
             | BrowserActionName::SetViewport
+            | BrowserActionName::SetDevice
             | BrowserActionName::GoBack
             | BrowserActionName::GoForward
             | BrowserActionName::HandleDialog
@@ -6604,9 +6951,118 @@ pub enum BrowserError {
     NavigationTimeout { url: String, milliseconds: u128 },
     #[error("browser wait of {milliseconds}ms exceeds the maximum of {maximum}ms")]
     WaitTooLong { milliseconds: u64, maximum: u128 },
+    #[error("mobile audit requires an open page")]
+    MobileAuditRequiresPage,
+    #[error("mobile audit requested {count} devices; the maximum is {maximum}")]
+    TooManyMobileAuditDevices { count: usize, maximum: usize },
+    #[error("mobile audit requested {count} orientations; the maximum is 2")]
+    TooManyMobileAuditOrientations { count: usize },
     #[error("browser JavaScript evaluation exceeded the {maximum:?} deadline")]
     EvaluationTimeout { maximum: Duration },
 }
+
+const MOBILE_STATE_SCRIPT: &str = r#"function() {
+  const viewport = document.querySelector('meta[name="viewport" i]');
+  const ua = navigator.userAgent;
+  return {
+    url: location.href,
+    viewportWidth: window.innerWidth,
+    viewportHeight: window.innerHeight,
+    visualViewportWidth: window.visualViewport?.width ?? null,
+    visualViewportHeight: window.visualViewport?.height ?? null,
+    visualViewportScale: window.visualViewport?.scale ?? null,
+    screenWidth: window.screen.width,
+    screenHeight: window.screen.height,
+    devicePixelRatio: window.devicePixelRatio,
+    userAgent: ua,
+    platform: navigator.platform,
+    maxTouchPoints: navigator.maxTouchPoints || 0,
+    coarsePointer: matchMedia('(pointer: coarse)').matches,
+    noHover: matchMedia('(hover: none)').matches,
+    orientation: screen.orientation?.type || (innerWidth > innerHeight ? 'landscape' : 'portrait'),
+    metaViewport: viewport?.getAttribute('content') ?? null
+  };
+}"#;
+
+const MOBILE_AUDIT_SCRIPT: &str = r#"function() {
+  const findings = [];
+  const visible = element => {
+    const style = getComputedStyle(element);
+    const rect = element.getBoundingClientRect();
+    return style.display !== 'none' && style.visibility !== 'hidden' &&
+      Number(style.opacity || 1) !== 0 && rect.width > 0 && rect.height > 0;
+  };
+  const selector = element => {
+    if (element.id) return `#${CSS.escape(element.id)}`;
+    const testId = element.getAttribute('data-testid');
+    if (testId) return `[data-testid="${CSS.escape(testId)}"]`;
+    const parts = [];
+    let current = element;
+    while (current && current.nodeType === 1 && parts.length < 4) {
+      let part = current.tagName.toLowerCase();
+      if (current.parentElement) {
+        const peers = Array.from(current.parentElement.children).filter(peer => peer.tagName === current.tagName);
+        if (peers.length > 1) part += `:nth-of-type(${peers.indexOf(current) + 1})`;
+      }
+      parts.unshift(part);
+      current = current.parentElement;
+    }
+    return parts.join(' > ');
+  };
+  const meta = document.querySelector('meta[name="viewport" i]');
+  if (!meta) findings.push({
+    rule: 'meta-viewport', severity: 'error',
+    message: 'Missing <meta name="viewport">; mobile layout will use a desktop-width viewport.',
+    selector: 'head', measuredWidth: null, measuredHeight: null
+  });
+  const root = document.documentElement;
+  const body = document.body;
+  const viewportWidth = window.visualViewport?.width ?? window.innerWidth;
+  const documentWidth = Math.max(root?.scrollWidth || 0, body?.scrollWidth || 0);
+  const overflow = Math.max(0, documentWidth - viewportWidth);
+  if (overflow > 1) findings.push({
+    rule: 'horizontal-overflow', severity: 'error',
+    message: `Document is ${Math.round(overflow)} CSS px wider than the viewport.`,
+    selector: 'html', measuredWidth: documentWidth, measuredHeight: null
+  });
+  const all = Array.from(document.querySelectorAll('body *')).filter(visible);
+  for (const element of all) {
+    if (findings.length >= 80) break;
+    const rect = element.getBoundingClientRect();
+    if (rect.right > viewportWidth + 1 && rect.left < viewportWidth && rect.width < documentWidth) {
+      findings.push({
+        rule: 'element-overflow', severity: 'warning',
+        message: 'Visible element extends beyond the right edge of the viewport.',
+        selector: selector(element), measuredWidth: rect.width, measuredHeight: rect.height
+      });
+    }
+  }
+  const interactiveSelector = 'a[href],button,input,select,textarea,[role="button"],[role="link"],[role="checkbox"],[role="radio"],[tabindex]';
+  const interactive = Array.from(document.querySelectorAll(interactiveSelector)).filter(visible);
+  for (const element of interactive) {
+    if (findings.length >= 80) break;
+    const rect = element.getBoundingClientRect();
+    if (rect.width < 44 || rect.height < 44) findings.push({
+      rule: 'touch-target-size', severity: 'warning',
+      message: `Interactive target is ${Math.round(rect.width)}x${Math.round(rect.height)} CSS px; expected at least 44x44.`,
+      selector: selector(element), measuredWidth: rect.width, measuredHeight: rect.height
+    });
+    if (element.matches('input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),textarea,select')) {
+      const fontSize = Number.parseFloat(getComputedStyle(element).fontSize);
+      if (fontSize < 16) findings.push({
+        rule: 'input-font-size', severity: 'warning',
+        message: `Editable control uses ${fontSize}px text; iOS may zoom the page on focus below 16px.`,
+        selector: selector(element), measuredWidth: rect.width, measuredHeight: rect.height
+      });
+    }
+  }
+  return {
+    documentWidth,
+    horizontalOverflow: overflow,
+    interactiveElements: interactive.length,
+    findings
+  };
+}"#;
 
 const DETECT_GATE_SCRIPT: &str = r#"function() {
   const visible = (element) => {

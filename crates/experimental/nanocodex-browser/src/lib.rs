@@ -3,6 +3,7 @@
 
 mod cookie_source;
 mod features;
+mod ios;
 mod native;
 mod session;
 #[cfg(any(
@@ -66,20 +67,26 @@ pub use features::{
     BrowserCruxClient, BrowserCruxCollectionPeriod, BrowserCruxFormFactor, BrowserCruxFraction,
     BrowserCruxHistogramBin, BrowserCruxMetric, BrowserCruxReport, BrowserCruxScope,
     BrowserCssProperty, BrowserCssRule, BrowserCssSourceRange, BrowserDebuggerFrame,
-    BrowserDebuggerPause, BrowserDebuggerScope, BrowserDialog, BrowserDialogKind, BrowserDownload,
-    BrowserEgressPolicy, BrowserEventListener, BrowserFrame, BrowserGeolocation,
-    BrowserHarArtifact, BrowserHeapClass, BrowserHeapClassDelta, BrowserHeapComparison,
-    BrowserHeapDuplicateString, BrowserHeapInspection, BrowserHeapNode, BrowserHeapRetainerNode,
-    BrowserHeapRetainers, BrowserHeapSnapshot, BrowserImageArtifact, BrowserIndexedDbDatabase,
-    BrowserLighthouseCategory, BrowserLighthouseCategoryScore, BrowserLighthouseFinding,
-    BrowserLighthouseFormFactor, BrowserLighthouseReport, BrowserMatchedStyles, BrowserModelImage,
-    BrowserNetworkConditions, BrowserOriginStorage, BrowserPauseOnExceptions, BrowserPdfArtifact,
+    BrowserDebuggerPause, BrowserDebuggerScope, BrowserDeviceDescriptor, BrowserDevicePreset,
+    BrowserDialog, BrowserDialogKind, BrowserDownload, BrowserEgressPolicy, BrowserEventListener,
+    BrowserFrame, BrowserGeolocation, BrowserHarArtifact, BrowserHeapClass, BrowserHeapClassDelta,
+    BrowserHeapComparison, BrowserHeapDuplicateString, BrowserHeapInspection, BrowserHeapNode,
+    BrowserHeapRetainerNode, BrowserHeapRetainers, BrowserHeapSnapshot, BrowserImageArtifact,
+    BrowserIndexedDbDatabase, BrowserLighthouseCategory, BrowserLighthouseCategoryScore,
+    BrowserLighthouseFinding, BrowserLighthouseFormFactor, BrowserLighthouseReport,
+    BrowserMatchedStyles, BrowserMobileAudit, BrowserMobileAuditSample, BrowserMobileFinding,
+    BrowserMobileFindingSeverity, BrowserMobileState, BrowserModelImage, BrowserNetworkConditions,
+    BrowserOrientation, BrowserOriginStorage, BrowserPauseOnExceptions, BrowserPdfArtifact,
     BrowserPerformanceInsight, BrowserPerformanceSource, BrowserPerformanceTrace,
     BrowserPermission, BrowserPseudoClass, BrowserReducedMotion, BrowserRouteHeader,
     BrowserRouteResponse, BrowserScriptCoverage, BrowserServiceWorker, BrowserSessionTrace,
     BrowserStorageReport, BrowserStorageState, BrowserTab, BrowserVideoArtifact, BrowserViewport,
     BrowserVisualAnomaly, BrowserVisualAnomalyKind, BrowserVisualDiff, BrowserVisualTrace,
     BrowserWebVitals,
+};
+pub use ios::{
+    BrowserIosConfig, BrowserIosDevice, BrowserIosDeviceInventory, BrowserIosDeviceKind,
+    BrowserIosDeviceSelector, BrowserIosError, IosBrowser,
 };
 pub use native::{BrowserBuildError, BrowserError};
 pub use session::{BraveSession, BraveSessionError, BrowserProfileKind};
@@ -143,6 +150,20 @@ For pixel calibration, first use `set_viewport` with an explicit
 `device_scale_factor`, then pass the same element `target` to `screenshot`,
 `visual_baseline`, and `visual_diff`. Targeted captures crop to the element's
 rendered border box and cannot be combined with `full_page`.
+For mobile work use `set_device`, not `set_viewport`: it atomically applies a
+pinned viewport, screen orientation, DPR, touch capability, user agent, and
+platform. Follow it with `mobile_state` to prove what the page observes, then
+exercise controls with `touch_tap` and native `insert_text`. `mobile_audit`
+reloads the current URL across a bounded device/orientation matrix and reports
+emulation mismatches, missing viewport metadata, horizontal overflow,
+undersized touch targets, and iOS input-zoom risks. Supply `ready` for a
+client-rendered app so each reload waits for visible application content and
+cannot report a blank boot shell as a clean page. Its provider and engine
+fields deliberately distinguish Chromium emulation from real Safari hardware.
+When the harness explicitly supplies an Appium/XCUITest backend, the same
+mobile state/audit, raw touch, IME text, evaluation, URL/title, and plain
+screenshot actions run against real Mobile Safari. CDP-only actions fail as
+unsupported instead of silently launching or falling back to Chromium.
 Use `visual_baseline` plus `visual_diff` for deterministic before/after
 comparison. Use `visual_trace_start` and `visual_trace_stop` around an
 interaction to detect flashes, blank intermediate frames, and large visual
@@ -371,6 +392,29 @@ pub enum BrowserAction {
         height: u32,
         /// Device pixels per CSS pixel. Defaults to 1.0.
         device_scale_factor: Option<f64>,
+    },
+    /// Atomically apply a pinned mobile viewport, user agent, platform, and touch profile.
+    SetDevice {
+        device: BrowserDevicePreset,
+        /// Defaults to portrait.
+        #[serde(default)]
+        orientation: BrowserOrientation,
+    },
+    /// Read and verify the mobile capabilities visible to the active page.
+    MobileState,
+    /// Reload and audit the current URL across a bounded mobile device matrix.
+    /// The final audited profile remains active for follow-up touch and typing checks.
+    MobileAudit {
+        /// Empty selects the default phone matrix: iPhone SE, iPhone 15 Pro, Pixel 8, and Galaxy S24.
+        #[serde(default)]
+        devices: Vec<BrowserDevicePreset>,
+        /// Empty selects portrait only. At most two orientations are accepted.
+        #[serde(default)]
+        orientations: Vec<BrowserOrientation>,
+        /// After each reload, wait for this target to become visible before collecting evidence.
+        /// Use this for client-rendered applications so an empty boot shell cannot pass the audit.
+        #[serde(default)]
+        ready: Option<BrowserTarget>,
     },
     /// Navigate to the preceding history entry when one exists.
     GoBack,
@@ -758,6 +802,9 @@ impl BrowserAction {
             Self::Drag { .. } => BrowserActionName::Drag,
             Self::UploadFiles { .. } => BrowserActionName::UploadFiles,
             Self::SetViewport { .. } => BrowserActionName::SetViewport,
+            Self::SetDevice { .. } => BrowserActionName::SetDevice,
+            Self::MobileState => BrowserActionName::MobileState,
+            Self::MobileAudit { .. } => BrowserActionName::MobileAudit,
             Self::GoBack => BrowserActionName::GoBack,
             Self::GoForward => BrowserActionName::GoForward,
             Self::WaitForSelector { .. } => BrowserActionName::WaitForSelector,
@@ -873,6 +920,9 @@ pub enum BrowserActionName {
     Drag,
     UploadFiles,
     SetViewport,
+    SetDevice,
+    MobileState,
+    MobileAudit,
     GoBack,
     GoForward,
     WaitForSelector,
@@ -2321,6 +2371,16 @@ pub enum BrowserActionResult {
         executed: bool,
         audit: BrowserAccessibilityAudit,
     },
+    MobileState {
+        sequence: u64,
+        executed: bool,
+        state: BrowserMobileState,
+    },
+    MobileAudit {
+        sequence: u64,
+        executed: bool,
+        audit: BrowserMobileAudit,
+    },
     Axe {
         sequence: u64,
         executed: bool,
@@ -2406,6 +2466,8 @@ impl BrowserActionResult {
             Self::Dialog { .. } => BrowserActionName::Dialog,
             Self::Har { .. } => BrowserActionName::ExportHar,
             Self::Accessibility { .. } => BrowserActionName::AccessibilityAudit,
+            Self::MobileState { .. } => BrowserActionName::MobileState,
+            Self::MobileAudit { .. } => BrowserActionName::MobileAudit,
             Self::Axe { .. } => BrowserActionName::AxeAudit,
             Self::Lighthouse { .. } => BrowserActionName::LighthouseAudit,
             Self::Crux { .. } => BrowserActionName::Crux,
@@ -3057,6 +3119,44 @@ fn recording_result(
                 violations: Vec::new(),
             },
         },
+        BrowserAction::MobileState => BrowserActionResult::MobileState {
+            sequence,
+            executed,
+            state: BrowserMobileState {
+                provider: "chromium_emulation".to_owned(),
+                engine: "chromium".to_owned(),
+                url: current_url.to_owned(),
+                viewport_width: 0.0,
+                viewport_height: 0.0,
+                visual_viewport_width: None,
+                visual_viewport_height: None,
+                visual_viewport_scale: None,
+                screen_width: 0.0,
+                screen_height: 0.0,
+                device_pixel_ratio: 0.0,
+                user_agent: String::new(),
+                platform: String::new(),
+                max_touch_points: 0,
+                coarse_pointer: false,
+                no_hover: false,
+                orientation: String::new(),
+                meta_viewport: None,
+                verified: false,
+                mismatches: vec!["recording backend did not execute emulation".to_owned()],
+            },
+        },
+        BrowserAction::MobileAudit { .. } => BrowserActionResult::MobileAudit {
+            sequence,
+            executed,
+            audit: BrowserMobileAudit {
+                url: current_url.to_owned(),
+                provider: "chromium_emulation".to_owned(),
+                samples: Vec::new(),
+                error_count: 0,
+                warning_count: 0,
+                passed: false,
+            },
+        },
         BrowserAction::AxeAudit => BrowserActionResult::Axe {
             sequence,
             executed,
@@ -3169,6 +3269,7 @@ fn recording_result(
         | BrowserAction::Drag { .. }
         | BrowserAction::UploadFiles { .. }
         | BrowserAction::SetViewport { .. }
+        | BrowserAction::SetDevice { .. }
         | BrowserAction::GoBack
         | BrowserAction::GoForward
         | BrowserAction::WaitForSelector { .. }
@@ -3208,6 +3309,7 @@ pub enum BrowserRecordingError {
 
 enum BrowserBackend {
     Managed(Browser),
+    Ios(IosBrowser),
     Recording(BrowserRecording),
 }
 
@@ -3838,6 +3940,17 @@ impl BrowserTool {
         }
     }
 
+    /// Wraps an explicit Appium/XCUITest Mobile Safari session as the browser tool.
+    ///
+    /// Keep a clone of `browser` when the harness needs to call
+    /// [`IosBrowser::close`] before shutting down its external Appium server.
+    #[must_use]
+    pub const fn from_ios(browser: IosBrowser) -> Self {
+        Self {
+            backend: BrowserBackend::Ios(browser),
+        }
+    }
+
     /// Creates a no-op browser tool and a handle for inspecting its calls.
     #[must_use]
     pub fn recording() -> (Self, BrowserRecording) {
@@ -3871,6 +3984,7 @@ impl Tool for BrowserTool {
         let action = input.decode_json::<BrowserAction>()?;
         let result = match &self.backend {
             BrowserBackend::Managed(browser) => browser.execute(action).await?,
+            BrowserBackend::Ios(browser) => browser.execute(action).await?,
             BrowserBackend::Recording(recording) => recording.record(action)?,
         };
         let mut content = Vec::new();

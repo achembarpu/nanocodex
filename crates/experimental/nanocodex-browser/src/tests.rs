@@ -15,13 +15,15 @@ use tokio::{
 use super::{
     BraveSession, Browser, BrowserAction, BrowserActionName, BrowserActionResult,
     BrowserAfterAction, BrowserBuildError, BrowserClickOptions, BrowserColorScheme, BrowserContext,
-    BrowserCookie, BrowserCruxClient, BrowserCruxScope, BrowserDocumentReadyState,
-    BrowserEgressPolicy, BrowserError, BrowserKeyModifier, BrowserLighthouseCategory,
+    BrowserCookie, BrowserCruxClient, BrowserCruxScope, BrowserDevicePreset,
+    BrowserDocumentReadyState, BrowserEgressPolicy, BrowserError, BrowserIosConfig,
+    BrowserIosDeviceSelector, BrowserKeyModifier, BrowserLighthouseCategory,
     BrowserLighthouseFormFactor, BrowserLoadState, BrowserNetworkBodyKind, BrowserNetworkContext,
-    BrowserOriginStorage, BrowserPasskeyMode, BrowserPerformanceInsight, BrowserPostActionSnapshot,
-    BrowserPseudoClass, BrowserReactEventKind, BrowserReducedMotion, BrowserRouteHeader,
-    BrowserRouteResponse, BrowserStorageState, BrowserTarget, BrowserTool, BrowserViewport,
-    BrowserWaitForSelectorState, ReactDiagnostics, VirtualAuthenticator, browser_tool_builder,
+    BrowserOrientation, BrowserOriginStorage, BrowserPasskeyMode, BrowserPerformanceInsight,
+    BrowserPostActionSnapshot, BrowserPseudoClass, BrowserReactEventKind, BrowserReducedMotion,
+    BrowserRouteHeader, BrowserRouteResponse, BrowserStorageState, BrowserTarget, BrowserTool,
+    BrowserViewport, BrowserWaitForSelectorState, IosBrowser, ReactDiagnostics,
+    VirtualAuthenticator, browser_tool_builder,
 };
 
 #[test]
@@ -497,6 +499,84 @@ fn recording_browser_exposes_model_controlled_passkey_modes() -> Result<()> {
     Ok(())
 }
 
+#[test]
+fn mobile_device_profiles_are_pinned_and_orientation_aware() {
+    let portrait = BrowserDevicePreset::Iphone15Pro.descriptor(BrowserOrientation::Portrait);
+    let landscape = BrowserDevicePreset::Iphone15Pro.descriptor(BrowserOrientation::Landscape);
+
+    assert_eq!((portrait.width, portrait.height), (393, 852));
+    assert_eq!((landscape.width, landscape.height), (852, 393));
+    assert_eq!(portrait.device_scale_factor, 3.0);
+    assert!(portrait.mobile && portrait.touch);
+    assert_eq!(portrait.max_touch_points, 5);
+    assert_eq!(portrait.platform, "iPhone");
+}
+
+#[test]
+fn recording_browser_exposes_mobile_state_and_audit_contracts() -> Result<()> {
+    let (_browser, recording) = BrowserTool::recording();
+
+    let configured = recording.record(BrowserAction::SetDevice {
+        device: BrowserDevicePreset::Pixel8,
+        orientation: BrowserOrientation::Landscape,
+    })?;
+    let state = recording.record(BrowserAction::MobileState)?;
+    let audit = recording.record(BrowserAction::MobileAudit {
+        devices: vec![BrowserDevicePreset::IphoneSe],
+        orientations: vec![BrowserOrientation::Portrait],
+        ready: None,
+    })?;
+
+    assert!(matches!(
+        configured,
+        BrowserActionResult::Action {
+            action: BrowserActionName::SetDevice,
+            executed: false,
+            ..
+        }
+    ));
+    assert!(matches!(
+        state,
+        BrowserActionResult::MobileState {
+            executed: false,
+            state,
+            ..
+        } if state.provider == "chromium_emulation" && !state.verified
+    ));
+    assert!(matches!(
+        audit,
+        BrowserActionResult::MobileAudit {
+            executed: false,
+            audit,
+            ..
+        } if audit.samples.is_empty() && !audit.passed
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn ios_backend_uses_explicit_appium_session_and_reports_real_engine() -> Result<()> {
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+    let endpoint = url::Url::parse(&format!("http://{}/", listener.local_addr()?))?;
+    let server = tokio::spawn(serve_appium_fixture(listener));
+    let browser = IosBrowser::new(BrowserIosConfig::new(
+        endpoint,
+        BrowserIosDeviceSelector::ExactName("iPhone 16 Pro".to_owned()),
+    )?)?;
+
+    let BrowserActionResult::MobileState { state, .. } =
+        browser.execute(BrowserAction::MobileState).await?
+    else {
+        return Err(eyre!("expected iOS mobile state"));
+    };
+    assert_eq!(state.provider, "ios_webdriver");
+    assert_eq!(state.engine, "webkit");
+    assert!(state.verified);
+    browser.close().await?;
+    server.await??;
+    Ok(())
+}
+
 #[tokio::test]
 async fn code_mode_description_exposes_browser_action_schema() -> Result<()> {
     let (browser, _recording) = BrowserTool::recording();
@@ -528,6 +608,11 @@ async fn code_mode_description_exposes_browser_action_schema() -> Result<()> {
     assert!(description.contains(r#"action: "get_styles""#));
     assert!(description.contains(r#"action: "screenshot""#));
     assert!(description.contains("device_scale_factor?: number"));
+    assert!(description.contains(r#"action: "set_device""#));
+    assert!(description.contains(r#"action: "mobile_state""#));
+    assert!(description.contains(r#"action: "mobile_audit""#));
+    assert!(description.contains(r#"device: "iphone_se" | "iphone15_pro""#));
+    assert!(description.contains("horizontalOverflow: number"));
     assert!(description.contains("target?:"));
     assert!(description.contains(r#"action: "pdf""#));
     assert!(description.contains(r#"action: "session_trace_start""#));
@@ -732,6 +817,68 @@ async fn targeted_screenshots_honor_device_pixel_ratio() -> Result<()> {
             .await,
         Err(BrowserError::TargetWithFullPage)
     ));
+    browser.close().await?;
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "requires a local Chrome or Chromium installation"]
+async fn mobile_device_state_and_audit_are_page_observable() -> Result<()> {
+    let macos_chrome =
+        std::path::Path::new("/Applications/Google Chrome.app/Contents/MacOS/Google Chrome");
+    let test_chrome = std::env::var_os("NANOCODEX_TEST_CHROME").map(std::path::PathBuf::from);
+    let browser = if let Some(test_chrome) = test_chrome {
+        Browser::with_executable(test_chrome)?
+    } else if macos_chrome.is_file() {
+        Browser::with_executable(macos_chrome)?
+    } else {
+        Browser::new()?
+    };
+    browser
+        .execute(BrowserAction::SetDevice {
+            device: BrowserDevicePreset::IphoneSe,
+            orientation: BrowserOrientation::Portrait,
+        })
+        .await?;
+    browser
+        .execute(BrowserAction::Open {
+            url: "data:text/html,<meta name='viewport' content='width=device-width,initial-scale=1'><style>body{margin:0}button{width:20px;height:20px}input{font-size:12px}.wide{width:450px;height:1px}</style><button id='small'>x</button><input aria-label='message'><div class='wide'></div>".to_owned(),
+        })
+        .await?;
+
+    let BrowserActionResult::MobileState { state, .. } =
+        browser.execute(BrowserAction::MobileState).await?
+    else {
+        return Err(eyre!("expected mobile state"));
+    };
+    assert!(state.verified, "{:?}", state.mismatches);
+    assert_eq!(state.screen_width, 375.0);
+    assert_eq!(state.screen_height, 667.0);
+    assert_eq!(state.device_pixel_ratio, 2.0);
+    assert_eq!(state.max_touch_points, 5);
+    assert!(state.coarse_pointer && state.no_hover);
+
+    let BrowserActionResult::MobileAudit { audit, .. } = browser
+        .execute(BrowserAction::MobileAudit {
+            devices: vec![BrowserDevicePreset::IphoneSe],
+            orientations: vec![BrowserOrientation::Portrait],
+            ready: None,
+        })
+        .await?
+    else {
+        return Err(eyre!("expected mobile audit"));
+    };
+    assert_eq!(audit.samples.len(), 1);
+    assert!(audit.error_count >= 1, "{audit:#?}");
+    assert!(audit.warning_count >= 2, "{audit:#?}");
+    let rules = audit.samples[0]
+        .findings
+        .iter()
+        .map(|finding| finding.rule.as_str())
+        .collect::<Vec<_>>();
+    assert!(rules.contains(&"horizontal-overflow"));
+    assert!(rules.contains(&"touch-target-size"));
+    assert!(rules.contains(&"input-font-size"));
     browser.close().await?;
     Ok(())
 }
@@ -2679,6 +2826,73 @@ worker.onmessage = ({ data }) => {
         stream.write_all(response.as_bytes()).await?;
         stream.shutdown().await?;
     }
+}
+
+async fn serve_appium_fixture(listener: TcpListener) -> std::io::Result<()> {
+    let responses = [
+        serde_json::json!({"value":{"ready":true}}),
+        serde_json::json!({"value":{"sessionId":"ios-session","capabilities":{}}}),
+        serde_json::json!({"value":{
+            "provider":"ios_webdriver","engine":"webkit","url":"https://example.com/",
+            "viewportWidth":393.0,"viewportHeight":852.0,
+            "visualViewportWidth":393.0,"visualViewportHeight":852.0,"visualViewportScale":1.0,
+            "screenWidth":393.0,"screenHeight":852.0,"devicePixelRatio":3.0,
+            "userAgent":"Mozilla/5.0 (iPhone) AppleWebKit/605.1.15 Mobile Safari/604.1",
+            "platform":"iPhone","maxTouchPoints":5,"coarsePointer":true,"noHover":true,
+            "orientation":"portrait","metaViewport":"width=device-width,initial-scale=1",
+            "verified":true,"mismatches":[]
+        }}),
+        serde_json::json!({"value":null}),
+    ];
+    for (index, response) in responses.into_iter().enumerate() {
+        let (mut stream, _) = listener.accept().await?;
+        let mut request = Vec::new();
+        let mut buffer = [0_u8; 4096];
+        loop {
+            let read = stream.read(&mut buffer).await?;
+            if read == 0 {
+                break;
+            }
+            request.extend_from_slice(&buffer[..read]);
+            if request.windows(4).any(|window| window == b"\r\n\r\n") {
+                let headers = String::from_utf8_lossy(&request);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length:")
+                            .and_then(|value| value.trim().parse::<usize>().ok())
+                    })
+                    .unwrap_or(0);
+                let body_start = request
+                    .windows(4)
+                    .position(|window| window == b"\r\n\r\n")
+                    .map_or(request.len(), |position| position + 4);
+                if request.len().saturating_sub(body_start) >= content_length {
+                    break;
+                }
+            }
+        }
+        let request = String::from_utf8_lossy(&request);
+        match index {
+            0 => assert!(request.starts_with("GET /status ")),
+            1 => {
+                assert!(request.starts_with("POST /session "));
+                assert!(request.contains(r#""appium:automationName":"XCUITest""#));
+                assert!(request.contains(r#""appium:deviceName":"iPhone 16 Pro""#));
+            }
+            2 => assert!(request.starts_with("POST /session/ios-session/execute/sync ")),
+            3 => assert!(request.starts_with("DELETE /session/ios-session ")),
+            _ => unreachable!(),
+        }
+        let body = response.to_string();
+        let response = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        );
+        stream.write_all(response.as_bytes()).await?;
+    }
+    Ok(())
 }
 
 const MANAGED_BROWSER_SOURCE: &str = r#"

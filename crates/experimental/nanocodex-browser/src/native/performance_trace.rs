@@ -214,15 +214,21 @@ impl Write for ByteCounter {
 }
 
 #[cfg(test)]
-mod retention_tests {
-    use std::sync::{
-        Mutex,
-        atomic::{AtomicU64, Ordering},
+mod tests {
+    use std::{
+        collections::BTreeSet,
+        path::PathBuf,
+        sync::{
+            Mutex,
+            atomic::{AtomicU64, Ordering},
+        },
     };
 
     use serde_json::json;
 
-    use super::retain_events_with_limits;
+    use crate::BrowserPerformanceInsight;
+
+    use super::{PerformanceContext, retain_events_with_limits, summarize};
 
     #[test]
     fn trace_retention_enforces_count_and_encoded_byte_budgets() {
@@ -247,6 +253,103 @@ mod retention_tests {
         ));
         assert_eq!(retained.lock().expect("retained trace").len(), 1);
         assert_eq!(dropped.load(Ordering::Relaxed), 2);
+    }
+
+    #[test]
+    fn trace_bounds_ignore_metadata_without_timestamps() {
+        let absolute_start = 159_432_556_000.0;
+        let events = vec![
+            json!({"name": "thread_name", "ph": "M"}),
+            json!({"name": "process_name", "ph": "M", "ts": null}),
+            json!({
+                "name": "RunTask",
+                "ts": absolute_start,
+                "dur": 7_000_000.0
+            }),
+        ];
+
+        let trace = summarize(&events, PathBuf::from("trace.json"), &[], &empty_context());
+
+        assert_eq!(trace.event_count, 3);
+        assert_eq!(trace.duration_ms, 7_000.0);
+        assert_eq!(trace.long_task_count, 1);
+        assert_eq!(trace.longest_task_ms, 7_000.0);
+        assert!(trace.insights.iter().any(|insight| matches!(
+            insight,
+            BrowserPerformanceInsight::LongTask { start_ms, duration_ms, .. }
+                if *start_ms == 0.0 && *duration_ms == 7_000.0
+        )));
+    }
+
+    #[test]
+    fn time_based_insights_are_relative_to_large_trace_timestamps() {
+        let absolute_start = 159_432_556_000.0;
+        let events = vec![
+            json!({"name": "navigationStart", "ts": absolute_start}),
+            json!({
+                "name": "Layout",
+                "ts": absolute_start + 1_000.0,
+                "dur": 2_000.0,
+                "args": {
+                    "beginData": {
+                        "stackTrace": [{
+                            "scriptId": "7",
+                            "functionName": "layout",
+                            "url": "https://example.test/app.js",
+                            "lineNumber": 0,
+                            "columnNumber": 1
+                        }]
+                    }
+                }
+            }),
+            json!({
+                "name": "LayoutShift",
+                "ts": absolute_start + 2_000.0,
+                "args": {"data": {"score": 0.01, "hadRecentInput": false}}
+            }),
+            json!({
+                "name": "largestContentfulPaint::Candidate",
+                "ts": absolute_start + 3_000.0,
+                "args": {"data": {"size": 42.0, "nodeName": "IMG"}}
+            }),
+            json!({
+                "name": "RunTask",
+                "ts": absolute_start + 4_000.0,
+                "dur": 60_000.0
+            }),
+        ];
+
+        let trace = summarize(&events, PathBuf::from("trace.json"), &[], &empty_context());
+
+        assert_eq!(trace.duration_ms, 64.0);
+        assert_eq!(trace.rendering_ms, 2.0);
+        assert!(trace.insights.iter().any(|insight| matches!(
+            insight,
+            BrowserPerformanceInsight::ForcedReflow { start_ms, .. } if *start_ms == 1.0
+        )));
+        assert!(trace.insights.iter().any(|insight| matches!(
+            insight,
+            BrowserPerformanceInsight::LayoutShift { start_ms, .. } if *start_ms == 2.0
+        )));
+        assert!(trace.insights.iter().any(|insight| matches!(
+            insight,
+            BrowserPerformanceInsight::LargestContentfulPaint { start_ms, .. }
+                if *start_ms == 3.0
+        )));
+        assert!(trace.insights.iter().any(|insight| matches!(
+            insight,
+            BrowserPerformanceInsight::LongTask { start_ms, .. } if *start_ms == 4.0
+        )));
+    }
+
+    fn empty_context() -> PerformanceContext {
+        PerformanceContext {
+            origin: "https://example.test".to_owned(),
+            nodes: 1,
+            maximum_depth: 1,
+            maximum_children: 0,
+            blocking_urls: BTreeSet::new(),
+        }
     }
 }
 
@@ -312,8 +415,8 @@ fn summarize(
     requests: &[BrowserNetworkRequest],
     context: &PerformanceContext,
 ) -> BrowserPerformanceTrace {
-    let mut first_timestamp = f64::INFINITY;
-    let mut final_timestamp = 0.0_f64;
+    let trace_bounds = trace_time_bounds(events);
+    let first_timestamp = trace_bounds.map(|(first, _)| first);
     let mut scripting = 0.0_f64;
     let mut rendering = 0.0_f64;
     let mut painting = 0.0_f64;
@@ -325,15 +428,13 @@ fn summarize(
         let Some(object) = event.as_object() else {
             continue;
         };
-        let timestamp = object.get("ts").and_then(Value::as_f64).unwrap_or(0.0);
-        let duration = object.get("dur").and_then(Value::as_f64).unwrap_or(0.0);
+        let timestamp = event_timestamp(object);
+        let duration = event_duration(object);
         let duration_ms = duration / 1_000.0;
         let name = object
             .get("name")
             .and_then(Value::as_str)
             .unwrap_or_default();
-        first_timestamp = first_timestamp.min(timestamp);
-        final_timestamp = final_timestamp.max(timestamp + duration);
         if is_scripting(name) {
             scripting += duration_ms;
         } else if is_rendering(name) {
@@ -344,27 +445,31 @@ fn summarize(
         if name == "RunTask" && duration_ms > 50.0 {
             long_task_count = long_task_count.saturating_add(1);
             longest_task = longest_task.max(duration_ms);
-            insights.push(BrowserPerformanceInsight::LongTask {
-                start_ms: timestamp / 1_000.0,
-                duration_ms,
-                source: trace_source(object),
-            });
+            if let Some(start_ms) = relative_start_ms(timestamp, first_timestamp) {
+                insights.push(BrowserPerformanceInsight::LongTask {
+                    start_ms,
+                    duration_ms,
+                    source: trace_source(object),
+                });
+            }
         }
         if name == "Layout"
             && duration_ms > 0.0
             && let Some(source) = trace_source(object)
+            && let Some(start_ms) = relative_start_ms(timestamp, first_timestamp)
         {
             insights.push(BrowserPerformanceInsight::ForcedReflow {
-                start_ms: timestamp / 1_000.0,
+                start_ms,
                 duration_ms,
                 source: Some(source),
             });
         }
         if name == "LayoutShift"
             && let Some(data) = object_path(object, &["args", "data"]).and_then(Value::as_object)
+            && let Some(start_ms) = relative_start_ms(timestamp, first_timestamp)
         {
             insights.push(BrowserPerformanceInsight::LayoutShift {
-                start_ms: timestamp / 1_000.0,
+                start_ms,
                 score: data.get("score").and_then(Value::as_f64).unwrap_or(0.0),
                 had_recent_input: data
                     .get("had_recent_input")
@@ -376,9 +481,10 @@ fn summarize(
         if name.to_ascii_lowercase().contains("largestcontentfulpaint")
             && name.to_ascii_lowercase().contains("candidate")
             && let Some(data) = object_path(object, &["args", "data"]).and_then(Value::as_object)
+            && let Some(start_ms) = relative_start_ms(timestamp, first_timestamp)
         {
             insights.push(BrowserPerformanceInsight::LargestContentfulPaint {
-                start_ms: timestamp / 1_000.0,
+                start_ms,
                 size: data.get("size").and_then(Value::as_f64),
                 element: data
                     .get("nodeName")
@@ -399,11 +505,9 @@ fn summarize(
     insights.sort_by(|left, right| insight_weight(right).total_cmp(&insight_weight(left)));
     insights.truncate(100);
 
-    let duration_ms = if first_timestamp.is_finite() {
-        (final_timestamp - first_timestamp).max(0.0) / 1_000.0
-    } else {
-        0.0
-    };
+    let duration_ms = trace_bounds.map_or(0.0, |(first, final_timestamp)| {
+        (final_timestamp - first).max(0.0) / 1_000.0
+    });
     BrowserPerformanceTrace {
         path,
         event_count: events.len(),
@@ -415,6 +519,42 @@ fn summarize(
         longest_task_ms: longest_task,
         insights,
     }
+}
+
+fn trace_time_bounds(events: &[Value]) -> Option<(f64, f64)> {
+    let mut bounds: Option<(f64, f64)> = None;
+    for object in events.iter().filter_map(Value::as_object) {
+        let Some(timestamp) = event_timestamp(object) else {
+            continue;
+        };
+        let end = timestamp + event_duration(object);
+        let end = if end.is_finite() { end } else { timestamp };
+        bounds = Some(match bounds {
+            Some((first, final_timestamp)) => (first.min(timestamp), final_timestamp.max(end)),
+            None => (timestamp, end),
+        });
+    }
+    bounds
+}
+
+fn event_timestamp(object: &serde_json::Map<String, Value>) -> Option<f64> {
+    object
+        .get("ts")
+        .and_then(Value::as_f64)
+        .filter(|timestamp| timestamp.is_finite())
+}
+
+fn event_duration(object: &serde_json::Map<String, Value>) -> f64 {
+    object
+        .get("dur")
+        .and_then(Value::as_f64)
+        .filter(|duration| duration.is_finite())
+        .unwrap_or(0.0)
+}
+
+fn relative_start_ms(timestamp: Option<f64>, first_timestamp: Option<f64>) -> Option<f64> {
+    let start_ms = (timestamp? - first_timestamp?) / 1_000.0;
+    start_ms.is_finite().then_some(start_ms)
 }
 
 fn collect_selector_insights(

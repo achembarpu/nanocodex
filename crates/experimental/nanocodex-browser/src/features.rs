@@ -215,6 +215,198 @@ impl BrowserViewport {
     }
 }
 
+/// A named, reproducible mobile device profile.
+///
+/// Profiles emulate the device's layout, pixel density, user agent, platform,
+/// and touch capabilities in Chromium. They do not turn Chromium into Safari;
+/// [`BrowserMobileState::engine`] always reports the actual browser engine.
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserDevicePreset {
+    IphoneSe,
+    Iphone15Pro,
+    Pixel8,
+    GalaxyS24,
+    IpadMini,
+}
+
+impl BrowserDevicePreset {
+    /// Returns the pinned descriptor behind this preset.
+    #[must_use]
+    pub fn descriptor(self, orientation: BrowserOrientation) -> BrowserDeviceDescriptor {
+        let (name, width, height, device_scale_factor, user_agent, platform) = match self {
+            Self::IphoneSe => (
+                "iPhone SE",
+                375,
+                667,
+                2.0,
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
+                "iPhone",
+            ),
+            Self::Iphone15Pro => (
+                "iPhone 15 Pro",
+                393,
+                852,
+                3.0,
+                "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
+                "iPhone",
+            ),
+            Self::Pixel8 => (
+                "Pixel 8",
+                412,
+                915,
+                2.625,
+                "Mozilla/5.0 (Linux; Android 15; Pixel 8) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36",
+                "Linux armv8l",
+            ),
+            Self::GalaxyS24 => (
+                "Galaxy S24",
+                360,
+                780,
+                3.0,
+                "Mozilla/5.0 (Linux; Android 14; SM-S921B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/128.0.0.0 Mobile Safari/537.36",
+                "Linux armv8l",
+            ),
+            Self::IpadMini => (
+                "iPad mini",
+                744,
+                1133,
+                2.0,
+                "Mozilla/5.0 (iPad; CPU OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1",
+                "iPad",
+            ),
+        };
+        let (width, height) = match orientation {
+            BrowserOrientation::Portrait => (width, height),
+            BrowserOrientation::Landscape => (height, width),
+        };
+        BrowserDeviceDescriptor {
+            preset: self,
+            name: name.to_owned(),
+            orientation,
+            width,
+            height,
+            device_scale_factor,
+            user_agent: user_agent.to_owned(),
+            platform: platform.to_owned(),
+            mobile: true,
+            touch: true,
+            max_touch_points: 5,
+        }
+    }
+}
+
+/// Orientation applied to a mobile device profile.
+#[derive(Clone, Copy, Debug, Default, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserOrientation {
+    #[default]
+    Portrait,
+    Landscape,
+}
+
+/// Complete pinned settings for one emulated device.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserDeviceDescriptor {
+    pub preset: BrowserDevicePreset,
+    pub name: String,
+    pub orientation: BrowserOrientation,
+    pub width: u32,
+    pub height: u32,
+    pub device_scale_factor: f64,
+    pub user_agent: String,
+    pub platform: String,
+    pub mobile: bool,
+    pub touch: bool,
+    pub max_touch_points: u8,
+}
+
+impl BrowserDeviceDescriptor {
+    pub(crate) const fn viewport(&self) -> BrowserViewport {
+        BrowserViewport {
+            width: self.width,
+            height: self.height,
+            device_scale_factor: self.device_scale_factor,
+            mobile: self.mobile,
+            touch: self.touch,
+            max_touch_points: self.max_touch_points,
+        }
+    }
+}
+
+/// Browser-visible state used to prove that mobile emulation actually took effect.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserMobileState {
+    pub provider: String,
+    pub engine: String,
+    pub url: String,
+    pub viewport_width: f64,
+    pub viewport_height: f64,
+    pub visual_viewport_width: Option<f64>,
+    pub visual_viewport_height: Option<f64>,
+    pub visual_viewport_scale: Option<f64>,
+    pub screen_width: f64,
+    pub screen_height: f64,
+    pub device_pixel_ratio: f64,
+    pub user_agent: String,
+    pub platform: String,
+    pub max_touch_points: u64,
+    pub coarse_pointer: bool,
+    pub no_hover: bool,
+    pub orientation: String,
+    pub meta_viewport: Option<String>,
+    pub verified: bool,
+    pub mismatches: Vec<String>,
+}
+
+/// Severity of a deterministic mobile usability finding.
+#[derive(Clone, Copy, Debug, Deserialize, JsonSchema, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BrowserMobileFindingSeverity {
+    Error,
+    Warning,
+}
+
+/// One concrete mobile layout, input, or viewport problem.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserMobileFinding {
+    pub rule: String,
+    pub severity: BrowserMobileFindingSeverity,
+    pub message: String,
+    pub selector: Option<String>,
+    pub measured_width: Option<f64>,
+    pub measured_height: Option<f64>,
+}
+
+/// Results for one device/orientation in a mobile audit matrix.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserMobileAuditSample {
+    /// Present for Chromium emulation and absent for real-device providers.
+    pub device: Option<BrowserDeviceDescriptor>,
+    pub device_name: String,
+    pub state: BrowserMobileState,
+    pub document_width: f64,
+    pub horizontal_overflow: f64,
+    pub interactive_elements: usize,
+    pub findings: Vec<BrowserMobileFinding>,
+}
+
+/// A bounded, deterministic audit across mobile device profiles.
+#[derive(Clone, Debug, Deserialize, JsonSchema, PartialEq, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BrowserMobileAudit {
+    pub url: String,
+    pub provider: String,
+    pub samples: Vec<BrowserMobileAuditSample>,
+    pub error_count: usize,
+    pub warning_count: usize,
+    pub passed: bool,
+}
+
 /// CSS `prefers-color-scheme` override.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BrowserColorScheme {

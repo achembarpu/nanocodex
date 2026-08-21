@@ -136,6 +136,62 @@ browser.close().await?;
 # }
 ```
 
+Mobile audits use pinned Chromium profiles and verify page-visible state before
+reporting layout and input findings:
+
+```no_run
+use nanocodex_browser::{
+    Browser, BrowserAction, BrowserDevicePreset, BrowserOrientation, BrowserTarget,
+};
+
+# async fn run() -> Result<(), Box<dyn std::error::Error>> {
+let browser = Browser::new()?;
+browser.execute(BrowserAction::SetDevice {
+    device: BrowserDevicePreset::Iphone15Pro,
+    orientation: BrowserOrientation::Portrait,
+}).await?;
+browser.execute(BrowserAction::Open {
+    url: "https://example.com/".to_owned(),
+}).await?;
+let report = browser.execute(BrowserAction::MobileAudit {
+    devices: vec![],
+    orientations: vec![],
+    ready: Some(BrowserTarget::css("#app > *")),
+}).await?;
+println!("{report:?}");
+browser.close().await?;
+# Ok(())
+# }
+```
+
+Real Mobile Safari is an explicit Appium/XCUITest backend. The harness chooses
+an exact device name or UDID and owns the external Appium server lifecycle:
+
+```no_run
+use nanocodex_browser::{
+    BrowserIosConfig, BrowserIosDeviceSelector, BrowserTool, IosBrowser,
+};
+
+# async fn run() -> Result<(), Box<dyn std::error::Error>> {
+let config = BrowserIosConfig::new(
+    "http://127.0.0.1:4723/".parse()?,
+    BrowserIosDeviceSelector::ExactName("iPhone 16 Pro".to_owned()),
+)?;
+let ios = IosBrowser::new(config)?;
+let tool = BrowserTool::from_ios(ios.clone());
+// Pass `tool` to `Tools::builder().provider(tool)`.
+drop(tool);
+ios.close().await?;
+# Ok(())
+# }
+```
+
+`BrowserIosDeviceInventory::discover().await` reports Xcode simulators and USB
+devices while preserving discovery failures separately from a successful empty
+inventory. iOS supports mobile state/audit, raw tap/swipe, active-element text,
+evaluation, URL/title, navigation/reload, and plain screenshots. CDP-only
+actions return a typed unsupported error; there is no Chromium fallback.
+
 ## Capabilities
 
 - Chromium navigation and interaction through semantic references, CSS, roles,
@@ -147,6 +203,8 @@ browser.close().await?;
   inspection, accessibility/axe, Lighthouse, and CrUX actions.
 - Harness-owned cookies/storage, virtual passkeys, allowlisted source-browser handoff,
   upload roots, browser egress policy, remote CDP, and libkrun VM composition.
+- Pinned Chromium mobile profiles, verified audit matrices, and an explicit
+  real-Safari Appium/XCUITest backend with Xcode device discovery.
 
 The Nanocodex CLI prefers a private Brave session and falls back to an
 installed Chrome, Chromium, or Edge when Brave is not installed. If none is
@@ -191,9 +249,11 @@ profile.
 
 ## Current boundaries
 
-- This package is unpublished and its API is not stable. It currently targets
-  native Unix hosts and Chromium's DevTools protocol; it is not a Firefox,
-  Safari, WebDriver, WASM, Node, or Python browser adapter.
+- This package is unpublished and its API is not stable. Its complete backend
+  targets native Unix hosts and Chromium's DevTools protocol. The focused iOS
+  backend targets Mobile Safari through an operator-managed Appium/XCUITest
+  server; it does not claim CDP feature parity. Firefox, WASM, Node, and Python
+  are not browser backends.
 - Local mode is a private browser profile, not an OS sandbox. VM mode requires a
   prepared ext4 image, VMM entry point, gvproxy, and libkrun firmware. Its
   default network lease permits internet access; callers must supply their
