@@ -63,6 +63,7 @@ for (const [label, source] of [
       }]);
 
       const result = turn.result();
+      void result.catch(() => {});
       await within(started.promise, 2_000, "Code Mode tool start");
       await within(turn.cancel(), 1_000, "turn cancellation");
       await assert.rejects(
@@ -123,6 +124,7 @@ test("compiled Worker Agent aborts active nested work and reuses the tool runtim
     }]);
 
     const result = turn.result();
+    void result.catch(() => {});
     await within(blocker.started.promise, 2_000, "nested request start");
     await within(turn.cancel(), 1_000, "nested turn cancellation");
     await within(blocker.aborted.promise, 1_000, "nested request abort");
