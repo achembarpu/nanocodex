@@ -3,13 +3,6 @@ import type { ToolMap } from "nanocodex";
 
 import { cloudflareSandboxTools, destroyCloudflareSandbox } from "./sandbox-tools";
 
-const context = {
-  callId: "smoke",
-  parentCallId: "smoke",
-  sessionId: "smoke",
-  signal: new AbortController().signal,
-};
-
 export async function cloudflareSandboxSmokeSetup(
   namespace: DurableObjectNamespace<Sandbox>,
   probeId: string,
@@ -159,7 +152,12 @@ export async function cloudflareSandboxSmokeFinish(
 async function invoke(tools: ToolMap, name: string, input: unknown): Promise<unknown> {
   const tool = tools[name];
   if (!tool) throw new Error(`missing tool: ${name}`);
-  return tool.handler(input, context);
+  return tool.handler(input, {
+    callId: "smoke",
+    parentCallId: "smoke",
+    sessionId: "smoke",
+    signal: new AbortController().signal,
+  });
 }
 
 async function rejectedMessage(operation: Promise<unknown>): Promise<string> {

@@ -86,14 +86,14 @@ try {
   socket.send(JSON.stringify({
     type: "prompt",
     id: toolId,
-    input: "Use sandbox_write_file to write SANDBOX_OK to probe.txt, use sandbox_exec to run cat on it, and verify it with sandbox_read_file. Then reply with exactly SANDBOX_OK.",
+    input: "E2E_MANAGED_TOOLS. Call runtimeInfo, then use exec_command to write MANAGED_WORKSPACE_OK to durable.txt, read it, and print the working directory. Reply with exactly MANAGED_TOOLS_OK.",
   }));
   const toolTurn = await terminal(inbox, toolId, terminalTimeoutMs);
   progress("tool-turn-completed");
-  if (String(toolTurn.final_message).trim() !== "SANDBOX_OK") {
-    throw new Error(`sandbox tools returned an unexpected answer: ${toolTurn.final_message}`);
+  if (String(toolTurn.final_message).trim() !== "MANAGED_TOOLS_OK") {
+    throw new Error(`managed tools returned an unexpected answer: ${toolTurn.final_message}`);
   }
-  const requiredTools = ["sandbox_write_file", "sandbox_exec", "sandbox_read_file"];
+  const requiredTools = ["runtimeInfo", "exec_command"];
   for (const tool of requiredTools) {
     const toolCall = agentEvents.find((event) =>
       event.type === "tool.call" && event.payload?.tool === tool);

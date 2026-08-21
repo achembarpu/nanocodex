@@ -29,7 +29,7 @@ describe("materializeTurnTerminal", () => {
     expect(dispose).toHaveBeenCalledOnce();
   });
 
-  it("turns lazy usage failures into one terminal failure and releases the result", async () => {
+  it("keeps a completed result terminal when lazy usage materialization fails", async () => {
     const dispose = vi.fn();
     const result = turnResult({
       dispose,
@@ -37,9 +37,11 @@ describe("materializeTurnTerminal", () => {
     });
 
     await expect(materializeTurnTerminal("turn-2", turnWith(result))).resolves.toEqual({
-      type: "turn_failed",
+      type: "turn_completed",
       id: "turn-2",
-      error: "usage payload is invalid",
+      final_message: "done",
+      usage: null,
+      usage_error: "usage payload is invalid",
     });
     expect(result.usage).toHaveBeenCalledOnce();
     expect(dispose).toHaveBeenCalledOnce();

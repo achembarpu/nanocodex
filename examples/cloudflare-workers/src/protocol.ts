@@ -11,7 +11,8 @@ export type TurnCompleted = {
   type: "turn_completed";
   id: string;
   final_message: string;
-  usage: TurnUsage;
+  usage: TurnUsage | null;
+  usage_error?: string;
 };
 
 export type ActiveTurn = {
@@ -19,18 +20,34 @@ export type ActiveTurn = {
   input: PromptInput;
 };
 
-export type ServerMessage =
-  | { type: "ready"; session_id: string; restored: boolean; active_turns: string[]; active_turn_details: ActiveTurn[] }
+export type AgentCapabilities = Readonly<{
+  durable_turns: true;
+  resumable_events: true;
+  live_steer: true;
+  live_cancel: true;
+  workspace: "cloudflare-computer";
+  sandbox_escalation: boolean;
+}>;
+
+export type ServerMessage = (
+  | { type: "ready"; session_id: string; restored: boolean; active_turns: string[]; active_turn_details: ActiveTurn[]; capabilities: AgentCapabilities }
+  | { type: "agent_created"; agent_id: string; capabilities: AgentCapabilities }
   | { type: "turn_accepted"; id: string; input: PromptInput; replayed: boolean }
+  | { type: "turn_cancelling"; id: string; error?: string; retry_at?: number }
   | TurnCompleted
+  | { type: "turn_cancelled"; id: string }
+  | { type: "turn_retryable"; id: string; error: string }
+  | { type: "turn_blocked"; id: string; error: string }
   | { type: "turn_failed"; id: string; error: string }
   | { type: "event"; event: AgentEvent }
+  | { type: "stream_failed"; error: string }
   | { type: "status"; active_turns: string[]; active_turn_details: ActiveTurn[]; agent_loaded: boolean; connected_clients: number }
   | { type: "pong"; nonce?: string }
-  | { type: "error"; code: string; message: string };
+  | { type: "error"; code: string; message: string }
+) & { cursor?: string; turn_id?: string | null };
 
 const TURN_ID = /^[A-Za-z0-9._:-]{1,128}$/;
-const PROMPT_ITEM_TYPES = new Set(["text", "image", "audio"]);
+const IMAGE_DETAILS = new Set(["auto", "low", "high", "original"]);
 
 export function parseCommand(encoded: string): ClientCommand {
   let value: unknown;
@@ -58,11 +75,11 @@ export function parseCommand(encoded: string): ClientCommand {
   }
   const type = command.type as "prompt" | "steer" | "cancel";
   if (command.type === "cancel") return { type: "cancel", id: command.id };
-  validateInput(command.input);
+  validatePromptInput(command.input);
   return { type, id: command.id, input: command.input as PromptInput };
 }
 
-function validateInput(input: unknown): void {
+export function validatePromptInput(input: unknown): asserts input is PromptInput {
   if (typeof input === "string") {
     if (!input.trim()) throw new ProtocolError("empty_prompt", "prompt input must not be empty");
     return;
@@ -74,10 +91,39 @@ function validateInput(input: unknown): void {
     if (!item || typeof item !== "object" || Array.isArray(item)) {
       throw new ProtocolError("invalid_prompt", "prompt content entries must be objects");
     }
-    const type = (item as Record<string, unknown>).type;
-    if (!PROMPT_ITEM_TYPES.has(String(type))) {
-      throw new ProtocolError("invalid_prompt", "prompt content supports text, image, and audio entries");
+    const value = item as Record<string, unknown>;
+    if (value.type === "text") {
+      exactKeys(value, ["type", "text"]);
+      if (typeof value.text !== "string" || !value.text.trim()) {
+        throw new ProtocolError("invalid_prompt", "text prompt entries require non-empty text");
+      }
+      continue;
     }
+    if (value.type === "image") {
+      exactKeys(value, ["type", "image_url", "detail"]);
+      if (typeof value.image_url !== "string" || !value.image_url.trim()) {
+        throw new ProtocolError("invalid_prompt", "image prompt entries require image_url");
+      }
+      if (value.detail !== undefined && !IMAGE_DETAILS.has(String(value.detail))) {
+        throw new ProtocolError("invalid_prompt", "image detail must be auto, low, high, or original");
+      }
+      continue;
+    }
+    if (value.type === "audio") {
+      exactKeys(value, ["type", "audio_url"]);
+      if (typeof value.audio_url !== "string" || !value.audio_url.trim()) {
+        throw new ProtocolError("invalid_prompt", "audio prompt entries require audio_url");
+      }
+      continue;
+    }
+    throw new ProtocolError("invalid_prompt", "prompt content supports text, image, and audio entries");
+  }
+}
+
+function exactKeys(value: Record<string, unknown>, allowed: readonly string[]): void {
+  const fields = new Set(allowed);
+  if (Object.keys(value).some((key) => !fields.has(key))) {
+    throw new ProtocolError("invalid_prompt", `unsupported fields for ${String(value.type)} prompt entry`);
   }
 }
 

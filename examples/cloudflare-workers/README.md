@@ -6,18 +6,18 @@ creation and routes capability URLs; the object owns the agent, OpenAI
 Responses WebSocket, client sockets, typed history, tools, and durable commits.
 
 ```text
-client WebSocket ──> Worker router ──> one NanocodexSession object per session
-                                         ├─ Rust/WASM Nanocodex driver
-                                         ├─ persistent model WebSocket
-                                         ├─ hibernatable client sockets
-                                         ├─ opaque Rust journal batches in SQLite
-                                         └─ Cloudflare Sandbox DO + container
-                                              └─ /workspace mounted to per-session R2 prefix
+REST turns + resumable SSE ─┐
+hibernatable WebSocket ─────┴─> Worker router ─> one NanocodexSession per agent
+                                                   ├─ Rust/WASM Nanocodex driver
+                                                   ├─ persistent Responses WebSocket
+                                                   ├─ opaque Rust journal in SQLite
+                                                   ├─ durable turn + cursor log in SQLite
+                                                   ├─ Cloudflare Computer SQLite filesystem
+                                                   │    └─ bounded in-isolate Just Bash
+                                                   └─ caller-defined remote tools when needed
 
-preview capability ──> Worker router ──> session Sandbox container port
-
-ChatGPT subscription ───────────────> one NanocodexSubscriptionAuth object
-                                         └─ SQLite token rotation + 401 recovery
+ChatGPT subscription ──────────────────────────> singleton auth Durable Object
+                                                   └─ token rotation + 401 recovery
 ```
 
 Hot follow-on turns reuse the same WASM agent, cache identity, typed history,
@@ -28,6 +28,13 @@ completed client turn ID returns the Rust-journaled terminal result without
 another model call; an unsafe tool whose completion was not committed is
 reported as ambiguous and is never silently executed twice.
 
+The managed REST API durably commits a normalized request hash, turn row, and
+`turn_accepted` cursor before returning HTTP 202. Terminal state and its event
+cursor are committed together. `GET /events` first replays SQLite rows strictly
+after the supplied cursor and then tails the same log; live publication is only
+a wake-up signal. `Last-Event-ID` takes precedence over the query cursor, so a
+standard EventSource reconnect cannot miss the replay-to-live handoff.
+
 An outbound WebSocket prevents a Durable Object from hibernating while it is
 retained. A one-shot idle alarm therefore shuts down Nanocodex after 30 seconds
 (configurable), closing the OpenAI socket. Client WebSockets use Cloudflare's
@@ -37,15 +44,18 @@ rebuilds complete client-owned typed history from the Rust journal in SQLite. Se
 and [WebSocket hibernation](https://developers.cloudflare.com/durable-objects/best-practices/websockets/)
 documentation for the underlying behavior.
 
-The caller-defined `sandbox_exec`, `sandbox_start_process`, `sandbox_read_file`,
-`sandbox_write_file`, `sandbox_list_files`, and `sandbox_preview` tools run
-untrusted work in a separate Cloudflare Sandbox container. The Sandbox uses the
-current RPC transport, scopes its R2 mount to the Nanocodex session ID, and
-proxies opaque capability-scoped preview URLs through the existing Worker
-hostname. The authenticated preview token reveals neither the session capability
-nor server credentials, and avoids requiring wildcard DNS or a separate Quick
-Tunnel process. Nanocodex remains the only model and tool-loop owner; the
-Sandbox SDK supplies execution isolation and storage.
+The default shell has no process, container, host filesystem, PTY, or network
+access. Cloudflare Computer supplies only durable SQLite-backed files; the SDK's
+host-generic Just Bash adapter mounts that one `/workspace` handle with bounded
+commands, file sizes, output, execution time, and entry count. Symbolic links
+and every lexical or persisted path escape are rejected. This keeps the common
+agent path cheap while preserving files across agent unload and reconstruction.
+
+Container escalation is intentionally absent from the primary Worker graph: a
+disabled container SDK still adds megabytes of JavaScript and forces image work
+on every deployment. Applications that truly need Linux can register their own
+remote tool or deploy the retained `sandbox-tools.ts` adapter as a separate
+service. Nanocodex remains the only model and tool-loop owner either way.
 
 ## Run locally
 
@@ -57,10 +67,9 @@ just build-wasm
 npm ci --prefix examples/cloudflare-workers
 ```
 
-Docker must be running because Wrangler builds the Sandbox container. Local
-R2 bindings are emulated by Wrangler; set `NANOCODEX_SANDBOX_LOCAL=true` in a
-local `.dev.vars` file when you want the mounted workspace synchronized through
-the local R2 binding path.
+The default deployment has no Docker, container, Worker Loader, or R2
+requirement. Wrangler emulates the Durable Object and its Computer filesystem
+directly.
 
 Sign in once with Codex, then start the subscription-backed Worker:
 
@@ -96,11 +105,68 @@ random-capability, loopback-only WebSocket bridge for model egress. The bridge
 forwards bounded frames and only the explicit Codex handshake headers; it does
 not read the Codex auth file or persist credentials.
 
+## Managed REST and resumable SSE
+
+Create an agent with the router credential. The returned UUIDv7 is an unguessable
+bearer capability for every route below, so applications should keep it out of
+logs and replace this example router with their own authorization policy.
+
+```sh
+curl -fsS -X POST \
+  -H 'Authorization: Bearer local-admin-token' \
+  http://127.0.0.1:8787/v1/agents
+```
+
+The receipt contains `agent_id`, `events_url`, and `websocket_url`. Start the
+event stream at cursor zero, or resume after the last event your consumer fully
+processed:
+
+```sh
+curl -N -H 'Accept: text/event-stream' \
+  'http://127.0.0.1:8787/v1/agents/<agent-id>/events?cursor=0'
+
+curl -N -H 'Last-Event-ID: <last-processed-cursor>' \
+  'http://127.0.0.1:8787/v1/agents/<agent-id>/events'
+```
+
+Every frame has the durable decimal cursor in both `id:` and `data.cursor`, and
+its typed message name in `event:`. Delivery is exclusive: cursor 42 resumes at
+the first available event greater than 42. A cursor ahead of durable storage is
+HTTP 409 rather than a silent wait.
+
+Submit a stable turn ID and/or `Idempotency-Key`. A new request returns 202 only
+after durable acceptance; an identical replay returns 200 with the original
+turn and cursors; reusing either identifier with different input returns 409.
+
+```sh
+curl -fsS -X POST \
+  -H 'Content-Type: application/json' \
+  -H 'Idempotency-Key: incoming-request-42' \
+  --data '{"id":"turn-42","input":"Use exec_command to inspect /workspace"}' \
+  http://127.0.0.1:8787/v1/agents/<agent-id>/turns
+
+curl -fsS \
+  http://127.0.0.1:8787/v1/agents/<agent-id>/turns/turn-42
+
+curl -fsS -X POST \
+  http://127.0.0.1:8787/v1/agents/<agent-id>/turns/turn-42/cancel
+
+curl -fsS -X DELETE \
+  http://127.0.0.1:8787/v1/agents/<agent-id>
+```
+
+Cancellation first persists `turn_cancelling`, publishes its cursor, and only
+then returns 202. Retryable admission/cancellation failures retain a durable
+attempt count and exponential retry time; an ambiguous operation becomes
+`turn_blocked` and fences later work until the application explicitly replaces
+the agent. Deletion clears the journal, managed rows, event log, and Computer
+workspace.
+
 Start workerd in one terminal and run the live probes in another:
 
 ```sh
+npm run smoke:managed --prefix examples/cloudflare-workers
 npm run repl --prefix examples/cloudflare-workers
-npm run smoke:sandbox --prefix examples/cloudflare-workers
 npm run smoke --prefix examples/cloudflare-workers
 npm run multiclient --prefix examples/cloudflare-workers
 npm run stress --prefix examples/cloudflare-workers
@@ -131,18 +197,17 @@ two would let a journaled `spawn_agent` result outlive the child it names.
 Nanocodex rejects that composition instead of silently dropping the child's
 execution policy or returning a ghost child ID after recovery.
 
-`smoke:sandbox` bypasses the model and directly attacks the same bounded tool
-handlers used by the agent. It checks write/exec/read/list behavior, non-zero
-exits, output and timeout limits, path traversal and oversized-write rejection,
-a managed port-8000 process and preview, and R2 persistence across container
-destruction. Its fixed `POST`/`DELETE /admin/sandbox-smoke` flow requires the
-admin bearer token; the external probe fetches the preview like a browser, then
-the finish request destroys the disposable container and verifies the remount.
+`smoke:managed` drives the complete REST/SSE contract: durable acceptance,
+idempotent replay and conflict, strict monotonic cursors, standard
+`Last-Event-ID` resume, cold and restored turn timing, `runtimeInfo`, bounded
+`exec_command`, Computer workspace persistence across idle agent teardown, and
+durable cancellation. It prints one JSON timing record suitable for before/after
+TTFT comparisons and deletes its agent in a `finally` block.
 
 The model smoke performs real model turns, verifies duplicate suppression,
 detaches its client, waits for idle teardown, reconnects to the durable snapshot,
-proves that a follow-on remembers history, and requires completed write, exec,
-and read tool call/result pairs.
+proves that a follow-on remembers history, and requires completed `runtimeInfo`
+and durable `exec_command` tool call/result pairs.
 `multiclient` attaches at least two clients before prompting and requires every
 client to receive the same accepted turn, assistant-delta stream, event count,
 and terminal result without reconnecting.
@@ -176,24 +241,14 @@ Worker graph.
 ```sh
 npm run check --prefix examples/cloudflare-workers
 cd examples/cloudflare-workers
-npx wrangler r2 bucket create nanocodex-sandbox-workspaces
 npx wrangler secret put CHATGPT_ACCESS_TOKEN
 npx wrangler secret put CHATGPT_REFRESH_TOKEN
 npx wrangler secret put CHATGPT_ACCOUNT_ID
 npx wrangler secret put NANOCODEX_ADMIN_TOKEN
 npx wrangler deploy
 NANOCODEX_WORKER_URL=https://nanocodex-durable-agent.<subdomain>.workers.dev \
-NANOCODEX_ADMIN_TOKEN=<admin-token> npm run smoke:sandbox
+NANOCODEX_ADMIN_TOKEN=<admin-token> npm run smoke:managed
 ```
-
-Create the R2 bucket once per Cloudflare account. Each actor receives only its
-`/sessions/<session-id>/` prefix inside the mounted `/workspace`; model
-credentials remain in the Worker and are not injected into the container.
-After deployment, ask the agent to create a small server on port 8080 in the
-background and call `sandbox_preview` to get a public URL on the same Worker
-origin. HTTP and WebSocket preview traffic is forwarded to that exact per-session
-container and port. The opaque URL is a bearer capability for the preview only;
-rotating `NANOCODEX_ADMIN_TOKEN` invalidates outstanding preview URLs.
 
 At the time this example was validated, the ChatGPT edge rejected direct
 Cloudflare Worker egress with HTTP 403. That is an upstream egress-policy
@@ -258,5 +313,8 @@ Client WebSocket commands are JSON objects:
 ```
 
 The object streams contractual Nanocodex events as `{ "type": "event", ... }`
-and emits exactly one application terminal message, `turn_completed` or
-`turn_failed`, for each accepted client turn.
+and emits exactly one application terminal message, `turn_completed`,
+`turn_cancelled`, or `turn_failed`, for each accepted client turn. A
+`turn_blocked` state is deliberately nonterminal and fences subsequent work
+because the application must reconcile the ambiguous side effect or replace the
+agent.

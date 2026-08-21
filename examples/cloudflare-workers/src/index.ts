@@ -1,6 +1,12 @@
 import { DurableObject } from "cloudflare:workers";
-import { ContainerProxy, Sandbox } from "@cloudflare/sandbox";
+import {
+  getWorkspace,
+  withWorkspace,
+  WorkspaceServiceProxy,
+  type DurableObjectStorageLike,
+} from "@cloudflare/computer";
 import type {
+  AgentEvent,
   DefaultAgent,
   EventWatcher,
   PromptInput,
@@ -20,13 +26,15 @@ import {
   type BrowserWebSocketRequest,
 } from "nanocodex/host";
 import { web } from "nanocodex/tools";
+import { justBash } from "nanocodex/tools/bash";
 import nanocodexWasm from "./nanocodex.wasm";
+import { createComputerFilesystem } from "./computer-workspace";
 import {
-  cloudflareSandboxTools,
-  openSandboxPreviewCapability,
-  proxyCloudflareSandboxPreview,
-} from "./sandbox-tools";
-import { cloudflareSandboxSmokeFinish, cloudflareSandboxSmokeSetup } from "./sandbox-smoke";
+  DurableEventLog,
+  EventLogCapacityError,
+  parseCursor,
+  type DurableEvent,
+} from "./durable-events";
 import { webAsset } from "./web";
 import {
   NanocodexSubscriptionAuth,
@@ -34,38 +42,41 @@ import {
 } from "./subscription-auth";
 
 export { NanocodexSubscriptionAuth } from "./subscription-auth";
-export { ContainerProxy, Sandbox };
+export { WorkspaceServiceProxy };
 
 import {
   type ActiveTurn,
+  type AgentCapabilities,
   type ClientCommand,
   ProtocolError,
   type ServerMessage,
   parseCommand,
+  validatePromptInput,
 } from "./protocol";
-import { materializeTurnTerminal } from "./turn-completion";
+import { materializeTurnTerminal, type TurnTerminal } from "./turn-completion";
 
 const MAX_CLIENT_MESSAGE_BYTES = 1024 * 1024;
 const MAX_ACTIVE_TURNS = 16;
 const MAX_CLIENT_CONNECTIONS = 64;
+const MAX_REQUEST_BODY_BYTES = 1024 * 1024;
+const MAX_RETRY_ATTEMPTS = 8;
+const MAX_RETRY_DELAY_MS = 60_000;
 const OPENAI_WEBSOCKET_BETA = "responses_websockets=2026-02-06";
 const CHATGPT_WEBSOCKET_URL = "wss://chatgpt.com/backend-api/codex/responses";
 const CHATGPT_API_BASE_URL = "https://chatgpt.com/backend-api/codex";
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const PROBE_ID = /^probe-[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const TURN_ID = /^[A-Za-z0-9._:-]{1,128}$/;
+const IDEMPOTENCY_KEY = /^[\x21-\x7e]{1,256}$/;
 const encoder = new TextEncoder();
 const ENCODED_PONG = JSON.stringify({ type: "pong" });
 
 export interface Env {
   NANOCODEX_SESSIONS: DurableObjectNamespace<NanocodexSession>;
   NANOCODEX_AUTH: DurableObjectNamespace<NanocodexSubscriptionAuth>;
-  Sandbox: DurableObjectNamespace<Sandbox>;
-  NANOCODEX_WORKSPACES: R2Bucket;
   OPENAI_API_KEY?: string;
   NANOCODEX_ADMIN_TOKEN: string;
   NANOCODEX_AUTH_MODE?: string;
   AGENT_IDLE_TIMEOUT_MS?: string;
-  NANOCODEX_SANDBOX_LOCAL?: string;
   OPENAI_WEBSOCKET_URL?: string;
   CHATGPT_ACCESS_TOKEN?: string;
   CHATGPT_ACCOUNT_ID?: string;
@@ -81,6 +92,7 @@ type SessionRow = {
   public_origin: string;
   completed_turns: number;
   last_active: number;
+  stream_error: string | null;
 };
 
 type SessionStatusRow = {
@@ -88,9 +100,65 @@ type SessionStatusRow = {
   has_snapshot: number;
   completed_turns: number;
   last_active: number;
+  stream_error: string | null;
 };
 
+type ManagedTurnState =
+  | "accepted"
+  | "cancelling"
+  | "retryable"
+  | "blocked"
+  | "completed"
+  | "cancelled"
+  | "failed";
+
+type ManagedTurnRow = {
+  accepted_at: number | null;
+  accepted_cursor: string | null;
+  created_at: number;
+  error: string | null;
+  id: string;
+  input_json: string;
+  request_hash: string;
+  request_key: string | null;
+  attempt_count: number;
+  retry_at: number | null;
+  state: ManagedTurnState;
+  terminal_cursor: string | null;
+  terminal_json: string | null;
+  updated_at: number;
+};
+
+type StreamMessage = Extract<ServerMessage,
+  | { type: "agent_created" }
+  | { type: "turn_accepted" }
+  | { type: "turn_cancelling" }
+  | { type: "turn_completed" }
+  | { type: "turn_cancelled" }
+  | { type: "turn_retryable" }
+  | { type: "turn_blocked" }
+  | { type: "turn_failed" }
+  | { type: "event" }
+  | { type: "stream_failed" }
+>;
+
+type ManagedTurnSubmission = {
+  created: boolean;
+  row: ManagedTurnRow;
+};
+
+type ManagedTransition = TurnTerminal | Extract<StreamMessage, { type: "turn_cancelling" }>;
+
 type ModelAuthMode = "api_key" | "chatgpt";
+
+const AGENT_CAPABILITIES = Object.freeze({
+  durable_turns: true,
+  resumable_events: true,
+  live_steer: true,
+  live_cancel: true,
+  workspace: "cloudflare-computer",
+  sandbox_escalation: false,
+}) satisfies AgentCapabilities;
 
 const json = (body: unknown, init: ResponseInit = {}) => Response.json(body, {
   ...init,
@@ -107,24 +175,30 @@ export default {
     if (request.method === "GET" && url.pathname === "/health") {
       return json({ service: "nanocodex", runtime: "cloudflare-durable-objects", status: "ok" });
     }
-    if (request.method === "POST" && url.pathname === "/sessions") {
+    if (request.method === "POST" && (url.pathname === "/v1/agents" || url.pathname === "/sessions")) {
       if (!env.NANOCODEX_ADMIN_TOKEN) {
         return json({ error: "NANOCODEX_ADMIN_TOKEN is not configured" }, { status: 503 });
       }
       if (!authorized(request, env.NANOCODEX_ADMIN_TOKEN)) {
         return json({ error: "unauthorized" }, { status: 401 });
       }
-      const sessionId = uuidV7();
-      const stub = env.NANOCODEX_SESSIONS.getByName(sessionId);
+      const agentId = uuidV7();
+      const stub = env.NANOCODEX_SESSIONS.getByName(agentId);
       const initialized = await stub.fetch("https://session.internal/initialize", {
         method: "PUT",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ session_id: sessionId, public_origin: url.origin }),
+        body: JSON.stringify({ session_id: agentId, public_origin: url.origin }),
       });
-      if (!initialized.ok) return json({ error: "session initialization failed" }, { status: 503 });
-      const websocketUrl = new URL(`/sessions/${sessionId}/ws`, url);
+      if (!initialized.ok) return json({ error: "agent initialization failed" }, { status: 503 });
+      const routeBase = url.pathname === "/sessions" ? "/sessions" : "/v1/agents";
+      const websocketUrl = new URL(`${routeBase}/${agentId}/ws`, url);
       websocketUrl.protocol = websocketUrl.protocol === "https:" ? "wss:" : "ws:";
-      return json({ session_id: sessionId, websocket_url: websocketUrl.href }, { status: 201 });
+      return json({
+        agent_id: agentId,
+        session_id: agentId,
+        events_url: new URL(`${routeBase}/${agentId}/events`, url).href,
+        websocket_url: websocketUrl.href,
+      }, { status: 201 });
     }
     if (url.pathname === "/auth/chatgpt") {
       if (!env.NANOCODEX_ADMIN_TOKEN || !authorized(request, env.NANOCODEX_ADMIN_TOKEN)) {
@@ -137,109 +211,101 @@ export default {
       }
       return json({ error: "method_not_allowed" }, { status: 405 });
     }
-    if (url.pathname === "/admin/sandbox-smoke") {
-      if (!env.NANOCODEX_ADMIN_TOKEN || !authorized(request, env.NANOCODEX_ADMIN_TOKEN)) {
-        return json({ error: "unauthorized" }, { status: 401 });
-      }
-      const localBucket = env.NANOCODEX_SANDBOX_LOCAL === "true";
-      if (request.method === "POST") {
-        const probeId = `probe-${uuidV7()}`;
-        try {
-          return json(await cloudflareSandboxSmokeSetup(
-            env.Sandbox,
-            probeId,
-            localBucket,
-            url.origin,
-            env.NANOCODEX_ADMIN_TOKEN,
-          ));
-        } catch (error) {
-          return json({ status: "failed", probe_id: probeId, error: errorMessage(error) }, { status: 503 });
-        }
-      }
-      if (request.method === "DELETE") {
-        const body = await request.text();
-        if (body.length > 2048) return json({ error: "invalid_probe" }, { status: 400 });
-        let probeId: unknown;
-        try {
-          probeId = (JSON.parse(body) as { probe_id?: unknown }).probe_id;
-        } catch {
-          return json({ error: "invalid_probe" }, { status: 400 });
-        }
-        if (typeof probeId !== "string" || !PROBE_ID.test(probeId)) {
-          return json({ error: "invalid_probe" }, { status: 400 });
-        }
-        try {
-          return json(await cloudflareSandboxSmokeFinish(env.Sandbox, probeId, localBucket));
-        } catch (error) {
-          return json({ status: "failed", probe_id: probeId, error: errorMessage(error) }, { status: 503 });
-        }
-      }
-      return json({ error: "method_not_allowed" }, { status: 405 });
-    }
-
-    const previewMatch = url.pathname.match(/^\/sandbox-preview\/([A-Za-z0-9_-]{64,256})(\/.*)?$/);
-    if (previewMatch) {
-      let preview: { sessionId: string; port: number };
-      try {
-        preview = await openSandboxPreviewCapability(
-          env.NANOCODEX_ADMIN_TOKEN,
-          previewMatch[1]!,
-        );
-      } catch {
-        return json({ error: "not_found" }, { status: 404 });
-      }
-      if (!SESSION_ID.test(preview.sessionId) && !PROBE_ID.test(preview.sessionId)) {
-        return json({ error: "not_found" }, { status: 404 });
-      }
-      try {
-        return await proxyCloudflareSandboxPreview(
-          env.Sandbox,
-          preview.sessionId,
-          preview.port,
-          request,
-          previewMatch[2] ?? "/",
-        );
-      } catch {
-        return json({ error: "sandbox_preview_unavailable" }, { status: 502 });
-      }
-    }
-
-    if (url.pathname.startsWith("/sandbox-preview/")) {
-      return json({ error: "not_found" }, { status: 404 });
-    }
-
-    const match = url.pathname.match(/^\/sessions\/([^/]+)(?:\/(ws))?$/);
+    const match = url.pathname.match(/^\/(?:v1\/agents|sessions)\/([^/]+)(?:\/(.*))?$/);
     if (!match || !SESSION_ID.test(match[1] ?? "")) {
       return json({ error: "not_found" }, { status: 404 });
     }
-    const sessionId = match[1]!;
-    const stub = env.NANOCODEX_SESSIONS.getByName(sessionId);
-    if (match[2] === "ws") {
+    const agentId = match[1]!;
+    const resource = match[2] ?? "";
+    const stub = env.NANOCODEX_SESSIONS.getByName(agentId);
+    const publicOrigin = `public_origin=${encodeURIComponent(url.origin)}`;
+    if (resource === "ws") {
       if (request.method !== "GET" || request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
         return new Response("Expected WebSocket upgrade", { status: 426 });
       }
       return stub.fetch(
-        `https://session.internal/socket?public_origin=${encodeURIComponent(url.origin)}`,
+        `https://session.internal/socket?${publicOrigin}`,
         request,
       );
     }
-    if (request.method === "GET") {
+    if (resource === "events") {
+      if (request.method !== "GET") return json({ error: "method_not_allowed" }, { status: 405 });
+      const query = new URLSearchParams(url.searchParams);
+      query.set("public_origin", url.origin);
+      return stub.fetch(`https://session.internal/events?${query}`, {
+        headers: request.headers,
+        signal: request.signal,
+      });
+    }
+    if (resource === "turns") {
+      if (request.method !== "POST") return json({ error: "method_not_allowed" }, { status: 405 });
+      return stub.fetch(`https://session.internal/turns?${publicOrigin}`, {
+        method: "POST",
+        headers: request.headers,
+        body: request.body,
+      });
+    }
+    const turnMatch = resource.match(/^turns\/([A-Za-z0-9._:-]{1,128})(?:\/(steer|cancel))?$/);
+    if (turnMatch) {
+      const action = turnMatch[2];
+      const expectedMethod = action === undefined ? "GET" : "POST";
+      if (request.method !== expectedMethod) {
+        return json({ error: "method_not_allowed" }, { status: 405 });
+      }
       return stub.fetch(
-        `https://session.internal/state?public_origin=${encodeURIComponent(url.origin)}`,
+        `https://session.internal/turns/${turnMatch[1]}${action ? `/${action}` : ""}?${publicOrigin}`,
+        {
+          method: request.method,
+          headers: request.headers,
+          ...(request.method === "POST" ? { body: request.body } : {}),
+        },
       );
     }
-    if (request.method === "DELETE") return stub.fetch("https://session.internal/session", { method: "DELETE" });
+    if (!resource && request.method === "GET") {
+      return stub.fetch(
+        `https://session.internal/state?${publicOrigin}`,
+      );
+    }
+    if (!resource && request.method === "DELETE") {
+      return stub.fetch("https://session.internal/session", { method: "DELETE" });
+    }
     return json({ error: "method_not_allowed" }, { status: 405 });
   },
 };
 
-export class NanocodexSession extends DurableObject<Env> {
+class DurableComputerObject extends DurableObject<Env> {
+  get computerContext(): DurableObjectState { return this.ctx; }
+}
+
+// Keep the class identity declared by migration v2 without pulling the
+// container-backed Sandbox SDK into the primary managed-agent runtime. There
+// is intentionally no binding or route to this historical class.
+export class Sandbox extends DurableObject<Env> {}
+
+const DurableComputerSession = withWorkspace(
+  DurableComputerObject,
+  (self) => ({
+    storage: self.computerContext.storage as unknown as DurableObjectStorageLike,
+    sessionId: self.computerContext.id.toString(),
+  }),
+);
+
+export class NanocodexSession extends DurableComputerSession {
   #agent?: DefaultAgent;
   #agentPromise?: Promise<DefaultAgent>;
   #events?: EventWatcher;
+  readonly #eventLog: DurableEventLog<StreamMessage>;
   readonly #turns = new Map<string, Turn>();
+  readonly #eventTurnQueue: string[] = [];
+  #eventTurnId?: string;
   readonly #pendingTurnIds = new Set<string>();
   readonly #turnInputs = new Map<string, PromptInput>();
+  readonly #admissionTasks = new Map<string, Promise<ManagedTurnRow>>();
+  readonly #cancellationTasks = new Map<string, Promise<void>>();
+  readonly #inFlight = new Set<Promise<unknown>>();
+  #recoveryTask?: Promise<void>;
+  #streamError?: string;
+  #deleting = false;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -250,22 +316,52 @@ export class NanocodexSession extends DurableObject<Env> {
         session_id TEXT NOT NULL UNIQUE,
         public_origin TEXT NOT NULL DEFAULT '',
         completed_turns INTEGER NOT NULL DEFAULT 0,
+        stream_error TEXT,
         last_active INTEGER NOT NULL
       );
       CREATE TABLE IF NOT EXISTS completed_operations (
         id TEXT PRIMARY KEY,
         completed_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS managed_turns (
+        id TEXT PRIMARY KEY,
+        request_key TEXT,
+        request_hash TEXT NOT NULL,
+        input_json TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (
+          state IN ('accepted', 'cancelling', 'retryable', 'blocked', 'completed', 'cancelled', 'failed')
+        ),
+        accepted_cursor INTEGER NOT NULL,
+        terminal_json TEXT,
+        terminal_cursor INTEGER,
+        error TEXT,
+        attempt_count INTEGER NOT NULL DEFAULT 0,
+        retry_at INTEGER,
+        created_at INTEGER NOT NULL,
+        accepted_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
+      CREATE UNIQUE INDEX IF NOT EXISTS managed_turns_request_key
+        ON managed_turns(request_key) WHERE request_key IS NOT NULL;
     `);
+    this.#eventLog = new DurableEventLog<StreamMessage>(this.ctx.storage);
     for (const statement of sqliteDurabilitySchema) this.ctx.storage.sql.exec(statement);
-    const sessionColumns = this.ctx.storage.sql.exec<{ name: string }>(
+    const sessionColumns = new Set(this.ctx.storage.sql.exec<{ name: string }>(
       "PRAGMA table_info(session_state)",
-    ).toArray();
-    if (!sessionColumns.some((column) => column.name === "public_origin")) {
+    ).toArray().map((column) => column.name));
+    if (!sessionColumns.has("public_origin")) {
       this.ctx.storage.sql.exec(
         "ALTER TABLE session_state ADD COLUMN public_origin TEXT NOT NULL DEFAULT ''",
       );
     }
+    if (!sessionColumns.has("stream_error")) {
+      this.ctx.storage.sql.exec("ALTER TABLE session_state ADD COLUMN stream_error TEXT");
+    }
+    this.#streamError = this.#session()?.stream_error ?? undefined;
+    // Durable state and SSE replay are immediately usable after eviction.
+    // Re-admission may load WASM and open a model socket, so it never sits on
+    // the object's request-readiness boundary.
+    this.#scheduleRecovery();
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -297,12 +393,21 @@ export class NanocodexSession extends DurableObject<Env> {
       const currentId = this.#sessionId();
       if (currentId && currentId !== sessionId) return new Response(null, { status: 409 });
       if (!currentId) {
-        this.ctx.storage.sql.exec(
-          "INSERT INTO session_state (singleton, session_id, public_origin, last_active) VALUES (1, ?, ?, ?)",
-          sessionId,
-          publicOrigin,
-          Date.now(),
-        );
+        let event: DurableEvent<StreamMessage> | undefined;
+        this.ctx.storage.transactionSync(() => {
+          this.ctx.storage.sql.exec(
+            "INSERT INTO session_state (singleton, session_id, public_origin, last_active) VALUES (1, ?, ?, ?)",
+            sessionId,
+            publicOrigin,
+            Date.now(),
+          );
+          event = this.#eventLog.append({
+            type: "agent_created",
+            agent_id: sessionId,
+            capabilities: this.#capabilities(),
+          }, null, true);
+        });
+        this.#publish(event!);
       } else {
         this.ctx.storage.sql.exec(
           "UPDATE session_state SET public_origin = ? WHERE singleton = 1",
@@ -312,10 +417,38 @@ export class NanocodexSession extends DurableObject<Env> {
       return new Response(null, { status: 204 });
     }
     if (request.method === "GET" && url.pathname === "/socket") return this.#upgrade();
+    if (request.method === "GET" && url.pathname === "/events") {
+      if (!this.#sessionId()) return json({ error: "not_found" }, { status: 404 });
+      const requested = request.headers.get("last-event-id")
+        ?? url.searchParams.get("cursor")
+        ?? url.searchParams.get("after");
+      const cursor = parseCursor(requested);
+      if (cursor === undefined) return json({ error: "invalid_cursor" }, { status: 400 });
+      return this.#eventLog.stream(cursor, request.signal);
+    }
+    if (request.method === "POST" && url.pathname === "/turns") {
+      return this.#submitHttpTurn(request);
+    }
+    const turnRoute = url.pathname.match(/^\/turns\/([A-Za-z0-9._:-]{1,128})(?:\/(steer|cancel))?$/);
+    if (turnRoute) {
+      const turnId = turnRoute[1]!;
+      if (request.method === "GET" && turnRoute[2] === undefined) {
+        const row = this.#managedTurn(turnId);
+        return row ? json(managedTurnView(row)) : json({ error: "turn_not_found" }, { status: 404 });
+      }
+      if (request.method === "POST" && turnRoute[2] === "steer") {
+        return this.#steerHttpTurn(turnId, request);
+      }
+      if (request.method === "POST" && turnRoute[2] === "cancel") {
+        return this.#cancelHttpTurn(turnId);
+      }
+      return json({ error: "method_not_allowed" }, { status: 405 });
+    }
     if (request.method === "GET" && url.pathname === "/state") {
       const session = this.#sessionStatus();
       if (!session) return json({ error: "not_found" }, { status: 404 });
       return json({
+        agent_id: session.session_id,
         session_id: session.session_id,
         has_snapshot: session.has_snapshot !== 0,
         completed_turns: session.completed_turns,
@@ -325,14 +458,28 @@ export class NanocodexSession extends DurableObject<Env> {
         agent_loaded: this.#agent !== undefined,
         connected_clients: this.ctx.getWebSockets().length,
         auth_mode: modelAuthMode(this.env),
+        capabilities: this.#capabilities(),
+        latest_event_cursor: this.#eventLog.latestCursor(),
+        stream_error: session.stream_error,
       });
     }
     if (request.method === "DELETE" && url.pathname === "/session") {
+      this.#deleting = true;
       await this.#stop();
+      await Promise.allSettled([...this.#inFlight]);
       for (const socket of this.ctx.getWebSockets()) closeSocket(socket, 1000, "session deleted");
+      try {
+        const workspace = await getWorkspace(this);
+        await workspace.fs.rm("/workspace", { recursive: true, force: true });
+        workspace[Symbol.dispose]();
+      } catch (error) {
+        console.error("failed to remove Cloudflare Computer workspace", errorMessage(error));
+      }
       this.ctx.storage.transactionSync(() => {
         this.ctx.storage.sql.exec("DELETE FROM nanocodex_journal_batches");
         this.ctx.storage.sql.exec("DELETE FROM nanocodex_journals");
+        this.ctx.storage.sql.exec("DELETE FROM managed_turns");
+        this.#eventLog.clear();
         this.ctx.storage.sql.exec("DELETE FROM completed_operations");
         this.ctx.storage.sql.exec("DELETE FROM session_state");
       });
@@ -372,11 +519,13 @@ export class NanocodexSession extends DurableObject<Env> {
   }
 
   async alarm(): Promise<void> {
+    if (this.#deleting) return;
     if (this.#turns.size > 0 || this.#pendingTurnIds.size > 0 || this.#agentPromise) {
       await this.ctx.storage.setAlarm(Date.now() + this.#idleTimeoutMs());
       return;
     }
     await this.#shutdownAgent();
+    this.#scheduleRecovery();
   }
 
   #upgrade(): Response {
@@ -395,11 +544,16 @@ export class NanocodexSession extends DurableObject<Env> {
       restored: session.has_snapshot !== 0,
       active_turns: this.#activeTurnIds(),
       active_turn_details: this.#activeTurnDetails(),
+      capabilities: this.#capabilities(),
     });
     return new Response(null, { status: 101, webSocket: client });
   }
 
   async #dispatch(socket: WebSocket, command: ClientCommand): Promise<void> {
+    if (this.#deleting) {
+      this.#send(socket, { type: "error", code: "agent_deleting", message: "the agent is being deleted" });
+      return;
+    }
     if (command.type === "ping") {
       if (command.nonce === undefined) this.#sendEncoded(socket, ENCODED_PONG);
       else this.#send(socket, { type: "pong", nonce: command.nonce });
@@ -415,56 +569,375 @@ export class NanocodexSession extends DurableObject<Env> {
       });
       return;
     }
-    if (command.type === "steer" || command.type === "cancel") {
+    if (command.type === "cancel") {
+      try {
+        const row = this.#managedTurn(command.id);
+        if (!row) throw new ManagedRequestError(404, "turn_not_found", `turn ${command.id} does not exist`);
+        if (isTerminalState(row.state)) {
+          this.#send(socket, messageForManagedTurn(row));
+          return;
+        }
+        const cancelling = this.#markCancelling(command.id);
+        this.#scheduleCancellation(cancelling.id);
+      } catch (error) {
+        const failure = managedHttpError(error, "cancel_failed");
+        this.#send(socket, { type: "error", code: failure.code, message: failure.message });
+      }
+      return;
+    }
+    if (command.type === "steer") {
       const turn = this.#turns.get(command.id);
       if (!turn) {
         this.#send(socket, { type: "error", code: "turn_not_active", message: `turn ${command.id} is not active` });
         return;
       }
       try {
-        if (command.type === "steer") await turn.steer({ input: command.input });
-        else await turn.cancel();
+        await turn.steer({ input: command.input });
       } catch (error) {
-        this.#send(socket, { type: "error", code: `${command.type}_failed`, message: errorMessage(error) });
+        this.#send(socket, { type: "error", code: "steer_failed", message: errorMessage(error) });
       }
       return;
+    }
+    try {
+      const requestHash = await hashManagedInput(command.input);
+      const submission = this.#submitManagedTurn(command.id, command.input, requestHash, null);
+      if (!submission.created) this.#send(socket, messageForManagedTurn(submission.row));
+    } catch (error) {
+      const failure = managedHttpError(error);
+      this.#send(socket, { type: "error", code: failure.code, message: failure.message });
+    }
+  }
+
+  async #submitHttpTurn(request: Request): Promise<Response> {
+    if (this.#deleting) return json({ error: "agent_deleting" }, { status: 409 });
+    let encoded: string;
+    try {
+      encoded = await readBoundedRequestText(request, MAX_REQUEST_BODY_BYTES);
+    } catch (error) {
+      return managedErrorResponse(error);
+    }
+    let value: unknown;
+    try {
+      value = JSON.parse(encoded);
+    } catch {
+      return json({ error: "invalid_json" }, { status: 400 });
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return json({ error: "invalid_request", message: "turn request must be a JSON object" }, { status: 400 });
+    }
+    const body = value as Record<string, unknown>;
+    if (Object.keys(body).some((key) => key !== "id" && key !== "input")) {
+      return json({ error: "invalid_request", message: "supported fields are id and input" }, { status: 400 });
+    }
+    try {
+      validatePromptInput(body.input);
+    } catch (error) {
+      const protocol = error instanceof ProtocolError ? error : new ProtocolError("invalid_prompt", errorMessage(error));
+      return json({ error: protocol.code, message: protocol.message }, { status: 400 });
+    }
+    if (body.id !== undefined && (typeof body.id !== "string" || !TURN_ID.test(body.id))) {
+      return json({ error: "invalid_turn_id", message: "turn id must be 1-128 safe ASCII characters" }, { status: 400 });
+    }
+    const requestKey = request.headers.get("idempotency-key");
+    if (requestKey !== null && !IDEMPOTENCY_KEY.test(requestKey)) {
+      return json({ error: "invalid_idempotency_key" }, { status: 400 });
+    }
+    if (body.id === undefined && requestKey === null) {
+      return json({
+        error: "idempotency_required",
+        message: "provide a stable turn id or Idempotency-Key",
+      }, { status: 400 });
     }
 
-    if (this.#turns.has(command.id) || this.#pendingTurnIds.has(command.id)) {
-      const input = this.#turnInputs.get(command.id);
-      if (input !== undefined && JSON.stringify(input) !== JSON.stringify(command.input)) {
-        this.#send(socket, {
-          type: "error",
-          code: "turn_id_conflict",
-          message: `turn ${command.id} is already active with different input`,
-        });
-        return;
+    try {
+      const input = body.input;
+      const id = typeof body.id === "string" ? body.id : uuidV7();
+      const requestHash = await hashManagedInput(input);
+      const submission = this.#submitManagedTurn(id, input, requestHash, requestKey, body.id !== undefined);
+      const view = managedTurnView(submission.row);
+      return json(view, { status: submission.created ? 202 : 200 });
+    } catch (error) {
+      return managedErrorResponse(error);
+    }
+  }
+
+  async #steerHttpTurn(id: string, request: Request): Promise<Response> {
+    const row = this.#managedTurn(id);
+    if (!row) return json({ error: "turn_not_found" }, { status: 404 });
+    if (row.state !== "accepted") {
+      return json({ error: "turn_not_steerable", state: row.state }, { status: 409 });
+    }
+    const turn = this.#turns.get(id);
+    if (!turn) return json({ error: "turn_not_active", state: row.state }, { status: 409 });
+    try {
+      const encoded = await readBoundedRequestText(request, MAX_REQUEST_BODY_BYTES);
+      const value = JSON.parse(encoded) as { input?: unknown };
+      if (!value || typeof value !== "object" || Array.isArray(value)) {
+        throw new ProtocolError("invalid_request", "steer request must be a JSON object");
       }
-      this.#send(socket, { type: "turn_accepted", id: command.id, input: input ?? command.input, replayed: true });
-      return;
+      validatePromptInput(value.input);
+      await turn.steer({ input: value.input });
+      return json({ turn_id: id, state: "steering" }, { status: 202 });
+    } catch (error) {
+      if (error instanceof SyntaxError) return json({ error: "invalid_json" }, { status: 400 });
+      if (error instanceof ProtocolError) {
+        return json({ error: error.code, message: error.message }, { status: 400 });
+      }
+      return managedErrorResponse(error, "steer_failed");
     }
-    if (this.#turns.size + this.#pendingTurnIds.size >= MAX_ACTIVE_TURNS) {
-      this.#send(socket, { type: "error", code: "turn_queue_full", message: `at most ${MAX_ACTIVE_TURNS} turns may be active` });
-      return;
+  }
+
+  async #cancelHttpTurn(id: string): Promise<Response> {
+    const row = this.#managedTurn(id);
+    if (!row) return json({ error: "turn_not_found" }, { status: 404 });
+    if (isTerminalState(row.state)) return json(managedTurnView(row));
+    if (row.state === "blocked") {
+      return json({
+        error: "turn_blocked",
+        message: row.error ?? "the durable operation requires explicit reconciliation",
+      }, { status: 409 });
     }
-    this.#pendingTurnIds.add(command.id);
-    this.#turnInputs.set(command.id, command.input);
-    this.#broadcast({ type: "turn_accepted", id: command.id, input: command.input, replayed: false });
+    try {
+      const cancelling = this.#markCancelling(id);
+      this.#scheduleCancellation(cancelling.id);
+      return json({ turn_id: id, state: "cancelling" }, { status: 202 });
+    } catch (error) {
+      return managedErrorResponse(error, "cancel_failed");
+    }
+  }
+
+  #submitManagedTurn(
+    id: string,
+    input: PromptInput,
+    requestHash: string,
+    requestKey: string | null,
+    explicitId = true,
+  ): ManagedTurnSubmission {
+    const keyed = requestKey === null ? undefined : this.#managedTurnByRequestKey(requestKey);
+    if (keyed && explicitId && keyed.id !== id) {
+      throw new ManagedRequestError(409, "idempotency_conflict", "idempotency key is already bound to another turn");
+    }
+    const identified = this.#managedTurn(id);
+    if (keyed && identified && keyed.id !== identified.id) {
+      throw new ManagedRequestError(409, "idempotency_conflict", "turn id and idempotency key identify different turns");
+    }
+    const existing = keyed ?? identified;
+    if (existing) {
+      if (existing.request_hash !== requestHash) {
+        throw new ManagedRequestError(409, "idempotency_conflict", "the idempotent request has different input");
+      }
+      if (requestKey !== null && existing.request_key !== requestKey) {
+        throw new ManagedRequestError(409, "idempotency_conflict", "turn is bound to a different idempotency key");
+      }
+      if (existing.state === "cancelling") {
+        this.#scheduleCancellation(existing.id);
+      } else if (!isTerminalState(existing.state) && existing.state !== "blocked") {
+        this.#scheduleAdmission(existing, true);
+      }
+      return { created: false, row: existing };
+    }
+    if (this.#streamError) {
+      throw new ManagedRequestError(503, "event_stream_failed", this.#streamError);
+    }
+    const blocked = this.#managedTurns("WHERE state = 'blocked' ORDER BY updated_at LIMIT 1")[0];
+    if (blocked) {
+      throw new ManagedRequestError(
+        409,
+        "agent_blocked",
+        `turn ${blocked.id} requires reconciliation before new work`,
+      );
+    }
+    if (this.#unfinishedTurnCount() >= MAX_ACTIVE_TURNS) {
+      throw new ManagedRequestError(429, "turn_queue_full", `at most ${MAX_ACTIVE_TURNS} turns may be unfinished`);
+    }
+    if (!this.#eventLog.canAcceptTurn()) {
+      throw new ManagedRequestError(507, "event_log_full", "delete or replace this agent before submitting more work");
+    }
+
+    const now = Date.now();
+    const accepted: StreamMessage = { type: "turn_accepted", id, input, replayed: false };
+    let event: DurableEvent<StreamMessage> | undefined;
+    this.ctx.storage.transactionSync(() => {
+      event = this.#eventLog.append(accepted, id);
+      this.ctx.storage.sql.exec(
+        `INSERT INTO managed_turns (
+           id, request_key, request_hash, input_json, state,
+           accepted_cursor, created_at, accepted_at, updated_at
+         ) VALUES (?, ?, ?, ?, 'accepted', CAST(? AS INTEGER), ?, ?, ?)`,
+        id,
+        requestKey,
+        requestHash,
+        JSON.stringify(input),
+        event.cursor,
+        now,
+        now,
+        now,
+      );
+    });
+    this.#publish(event!);
+    const row = this.#managedTurn(id);
+    if (!row) throw new Error("managed turn disappeared after acceptance");
+    this.#scheduleAdmission(row, false);
+    return { created: true, row };
+  }
+
+  #scheduleAdmission(row: ManagedTurnRow, replayed: boolean): void {
+    if (this.#deleting || this.#turns.has(row.id) || this.#pendingTurnIds.has(row.id)) return;
+    const task = Promise.resolve().then(() => this.#admitManagedTurn(row, replayed));
+    this.ctx.waitUntil(task.then(() => undefined, (error) => {
+      console.error("managed turn admission failed", row.id, errorMessage(error));
+    }));
+  }
+
+  #markCancelling(id: string): ManagedTurnRow {
+    const current = this.#managedTurn(id);
+    if (!current) throw new ManagedRequestError(404, "turn_not_found", `turn ${id} does not exist`);
+    if (isTerminalState(current.state) || current.state === "cancelling") return current;
+    if (current.state === "blocked") {
+      throw new ManagedRequestError(409, "turn_blocked", current.error ?? "turn requires reconciliation");
+    }
+    const message: StreamMessage = { type: "turn_cancelling", id };
+    let event: DurableEvent<StreamMessage> | undefined;
+    this.ctx.storage.transactionSync(() => {
+      const row = this.#managedTurn(id);
+      if (!row || isTerminalState(row.state) || row.state === "cancelling") return;
+      event = this.#eventLog.append(message, id, true);
+      this.ctx.storage.sql.exec(
+        `UPDATE managed_turns
+         SET state = 'cancelling', error = NULL, retry_at = NULL, updated_at = ?
+         WHERE id = ? AND state IN ('accepted', 'retryable')`,
+        Date.now(),
+        id,
+      );
+    });
+    if (event) this.#publish(event);
+    return this.#managedTurn(id) ?? current;
+  }
+
+  #scheduleCancellation(id: string): void {
+    if (this.#deleting || this.#cancellationTasks.has(id)) return;
+    const task = Promise.resolve().then(() => this.#cancelManagedTurn(id));
+    this.#cancellationTasks.set(id, task);
+    void task.finally(() => {
+      if (this.#cancellationTasks.get(id) === task) this.#cancellationTasks.delete(id);
+    }).catch(() => {});
+    this.ctx.waitUntil(task.catch(async (error) => {
+      console.error("managed turn cancellation failed", id, errorMessage(error));
+      await this.#scheduleNextAlarm();
+    }));
+  }
+
+  async #cancelManagedTurn(id: string): Promise<void> {
+    let row = this.#managedTurn(id);
+    if (!row || isTerminalState(row.state) || row.state === "blocked") return;
+    let turn = this.#turns.get(id);
+    if (!turn) {
+      row = await this.#admitManagedTurn(row, true);
+      if (isTerminalState(row.state) || row.state === "blocked") return;
+      turn = this.#turns.get(id);
+    }
+    if (!turn) throw retryableError(`turn ${id} is not active yet`);
+    await turn.cancel();
+    await this.#scheduleNextAlarm();
+  }
+
+  async #admitManagedTurn(row: ManagedTurnRow, replayed: boolean): Promise<ManagedTurnRow> {
+    const current = this.#admissionTasks.get(row.id);
+    if (current) return current;
+    const task = this.#track(this.#startManagedTurn(row, replayed));
+    this.#admissionTasks.set(row.id, task);
+    try {
+      return await task;
+    } finally {
+      if (this.#admissionTasks.get(row.id) === task) this.#admissionTasks.delete(row.id);
+    }
+  }
+
+  async #startManagedTurn(row: ManagedTurnRow, replayed: boolean): Promise<ManagedTurnRow> {
+    const latest = this.#managedTurn(row.id);
+    if (!latest || isTerminalState(latest.state) || latest.state === "blocked") return latest ?? row;
+    row = latest;
+    let turn: Turn | undefined;
+    const input = JSON.parse(row.input_json) as PromptInput;
+    this.#pendingTurnIds.add(row.id);
+    this.#turnInputs.set(row.id, input);
     try {
       const agent = await this.#ensureAgent();
-      if (this.#agent !== agent) throw new Error("agent became unavailable while accepting the turn");
-      const turn = agent.turn.prompt({ id: command.id, input: command.input });
-      this.#turns.set(command.id, turn);
-      this.#pendingTurnIds.delete(command.id);
-      this.ctx.waitUntil(this.#complete(command.id, turn));
+      if (this.#deleting || this.#agent !== agent) throw retryableError("agent became unavailable during admission");
+      this.#eventTurnQueue.push(row.id);
+      turn = agent.turn.prompt({ id: row.id, input });
+      const durableId = await turn.accepted();
+      if (durableId !== undefined && durableId !== row.id) {
+        throw new Error(`durable admission returned unexpected turn id ${durableId}`);
+      }
+      if (this.#deleting) {
+        try { await turn.cancel(); } catch { /* Deletion owns shutdown. */ }
+        throw retryableError("agent was deleted during admission");
+      }
+      this.#turns.set(row.id, turn);
+      this.#pendingTurnIds.delete(row.id);
+      this.ctx.storage.sql.exec(
+        `UPDATE managed_turns
+         SET state = CASE WHEN state = 'cancelling' THEN 'cancelling' ELSE 'accepted' END,
+             error = NULL, retry_at = NULL, updated_at = ?
+         WHERE id = ? AND state IN ('accepted', 'retryable', 'cancelling')`,
+        Date.now(),
+        row.id,
+      );
+      this.ctx.waitUntil(this.#track(this.#complete(row.id, turn)));
+      if (this.#managedTurn(row.id)?.state === "cancelling") this.#scheduleCancellation(row.id);
+      return this.#managedTurn(row.id) ?? row;
     } catch (error) {
-      this.#pendingTurnIds.delete(command.id);
-      this.#turnInputs.delete(command.id);
-      this.#broadcast({ type: "turn_failed", id: command.id, error: errorMessage(error) });
-      if (this.#turns.size === 0 && this.#agent) {
-        await this.ctx.storage.setAlarm(Date.now() + this.#idleTimeoutMs());
+      this.#releaseEventTurn(row.id);
+      if (turn && this.#turns.get(row.id) !== turn) turn.dispose();
+      this.#pendingTurnIds.delete(row.id);
+      this.#turnInputs.delete(row.id);
+      if (this.#deleting) return this.#managedTurn(row.id) ?? row;
+      const failed = this.#commitManagedFailure(row.id, error, replayed);
+      await this.#scheduleNextAlarm();
+      return failed;
+    }
+  }
+
+  #scheduleRecovery(): void {
+    if (this.#deleting || this.#recoveryTask) return;
+    const task = Promise.resolve().then(() => this.#runRecovery());
+    this.#recoveryTask = task;
+    void task.finally(() => {
+      if (this.#recoveryTask === task) this.#recoveryTask = undefined;
+    }).catch(() => {});
+    this.ctx.waitUntil(task.catch((error) => {
+      console.error("managed turn recovery failed", errorMessage(error));
+    }));
+  }
+
+  async #runRecovery(): Promise<void> {
+    if (this.#deleting || !this.#sessionId() || this.#streamError) return;
+    const rows = this.#managedTurns(
+      `WHERE state IN ('accepted', 'cancelling')
+          OR (state = 'retryable' AND COALESCE(retry_at, 0) <= ?)
+       ORDER BY created_at, rowid`,
+      Date.now(),
+    );
+    for (const row of rows) {
+      if (this.#deleting) return;
+      if (this.#turns.has(row.id)
+        || this.#pendingTurnIds.has(row.id)
+        || this.#admissionTasks.has(row.id)) continue;
+      const current = this.#managedTurn(row.id);
+      if (!current || isTerminalState(current.state) || current.state === "blocked") continue;
+      if (current.state === "cancelling") {
+        this.#scheduleCancellation(current.id);
+        continue;
+      }
+      try {
+        validatePromptInput(JSON.parse(current.input_json));
+        await this.#admitManagedTurn(current, true);
+      } catch (error) {
+        this.#commitManagedFailure(current.id, error, true);
       }
     }
+    await this.#scheduleNextAlarm();
   }
 
   async #ensureAgent(): Promise<DefaultAgent> {
@@ -501,80 +974,255 @@ export class NanocodexSession extends DurableObject<Env> {
           createWebSocket: (endpoint, id, request) =>
             openSubscriptionWebSocket(auth, endpoint, id, request),
         });
-    const agent = await Agent.create({
-      transport,
-      module: nanocodexWasm,
-      sessionId: session.session_id,
-      durability: this.#durabilityStore(),
-      durabilityId: session.session_id,
-      workspace: "/workspace",
-      instructions: "You are Nanocodex running inside a Cloudflare Durable Object. Use the sandbox_* tools for code, files, and previews; their /workspace is isolated and persisted in R2 for this session.",
-      // Workers forbid eval/new Function. Direct mode keeps caller-defined
-      // tools in the WASM lifecycle while dispatching handlers through the
-      // typed host bridge without dynamic code generation.
-      toolMode: "direct",
-      tools: [
-        ...cloudflareWebTools(this.env),
-        ...Object.entries(cloudflareSandboxTools(
-          this.env.Sandbox,
-          session.session_id,
-          this.env.NANOCODEX_SANDBOX_LOCAL === "true",
-          session.public_origin || undefined,
-          this.env.NANOCODEX_ADMIN_TOKEN,
-        )).map(([name, tool]) => ({ name, ...tool })),
-        {
-          name: "runtimeInfo",
-          description: "Return information about the current agent runtime.",
-          parameters: { type: "object", additionalProperties: false },
-          handler: () => ({
-            runtime: "cloudflare-durable-object",
-            sandbox: "cloudflare-container-r2-workspace",
-            session_id: session.session_id,
-            workspace: "/workspace",
-          }),
-        },
-      ],
+    const workspace = await getWorkspace(this);
+    const filesystem = await createComputerFilesystem(workspace);
+    const shell = await justBash({
+      filesystem,
+      maxEntries: 2_000,
+      maxOutputTokens: 10_000,
+      network: false,
     });
+    let agent: DefaultAgent;
+    try {
+      agent = await Agent.create({
+        transport,
+        module: nanocodexWasm,
+        sessionId: session.session_id,
+        durability: this.#durabilityStore(),
+        durabilityId: session.session_id,
+        workspace: "/workspace",
+        filesystem: shell.filesystem,
+        filesystemTools: false,
+        instructions: [
+          "You are Nanocodex running as a durable managed agent on Cloudflare Workers.",
+          "Your /workspace filesystem is durable Cloudflare Computer storage backed by this agent's Durable Object.",
+          shell.instructions,
+          "No process sandbox is attached. Bounded Just Bash is the complete local execution boundary.",
+        ].join("\n\n"),
+        // Workers forbid eval/new Function. Direct mode keeps caller-defined
+        // tools in the WASM lifecycle while dispatching handlers through the
+        // typed host bridge without dynamic code generation.
+        toolMode: "direct",
+        tools: [
+          shell.tool,
+          ...cloudflareWebTools(this.env),
+          {
+            name: "runtimeInfo",
+            description: "Return information about the current durable agent runtime.",
+            parameters: { type: "object", additionalProperties: false },
+            handler: () => ({
+              runtime: "cloudflare-durable-object",
+              shell: "nanocodex-just-bash",
+              shell_network: "disabled",
+              sandbox: "disabled",
+              session_id: session.session_id,
+              workspace: "/workspace",
+            }),
+          },
+        ],
+      });
+    } catch (error) {
+      workspace[Symbol.dispose]();
+      throw error;
+    }
     this.#events = agent.events.watch();
-    this.#events.onEvent((event) => this.#broadcast({ type: "event", event }));
+    this.#events.onEvent((event) => this.#recordAgentEvent(event));
     return agent;
   }
 
   async #complete(id: string, turn: Turn): Promise<void> {
     try {
-      const terminal = await materializeTurnTerminal(id, turn);
-      if (terminal.type === "turn_failed") {
-        this.#broadcast(terminal);
-        return;
-      }
-      const payload = JSON.stringify(terminal);
-      const completedAt = Date.now();
+      const materialized = await materializeTurnTerminal(id, turn);
+      // Once Rust accepted an operation, an unclassified failure is not safely
+      // terminal: its journal may still contain unresolved work. Keep it
+      // blocked for explicit reconciliation rather than letting later turns
+      // silently overtake it.
+      const outcome: TurnTerminal = materialized.type === "turn_failed"
+        ? { type: "turn_blocked", id, error: materialized.error }
+        : materialized;
       try {
-        this.ctx.storage.transactionSync(() => {
-          this.ctx.storage.sql.exec(
-            "INSERT OR IGNORE INTO completed_operations (id, completed_at) VALUES (?, ?)",
-            id,
-            completedAt,
-          );
-          this.ctx.storage.sql.exec(
-            `UPDATE session_state
-             SET completed_turns = (SELECT COUNT(*) FROM completed_operations), last_active = ?
-             WHERE singleton = 1`,
-            completedAt,
-          );
-        });
+        this.#commitManagedMessage(id, outcome);
       } catch (error) {
-        console.error("failed to update session telemetry", errorMessage(error));
+        try {
+          this.#commitManagedMessage(id, {
+            type: "turn_retryable",
+            id,
+            error: `terminal projection failed: ${errorMessage(error)}`,
+          });
+        } catch (retryError) {
+          this.#failEventStream(retryError);
+        }
       }
-      this.#broadcastEncoded(payload);
     } finally {
       this.#turns.delete(id);
       this.#turnInputs.delete(id);
+      this.#releaseEventTurn(id);
       turn.dispose();
-      if (this.#turns.size === 0) {
-        await this.ctx.storage.setAlarm(Date.now() + this.#idleTimeoutMs());
+      if (!this.#deleting) {
+        this.#scheduleRecovery();
+        await this.#scheduleNextAlarm();
       }
     }
+  }
+
+  #commitManagedFailure(id: string, error: unknown, _replayed: boolean): ManagedTurnRow {
+    const failure = classifyManagedFailure(id, error);
+    const row = this.#managedTurn(id);
+    if (row?.state === "cancelling"
+      && failure.type !== "turn_cancelled"
+      && failure.type !== "turn_blocked") {
+      return this.#commitManagedMessage(id, {
+        type: "turn_cancelling",
+        id,
+        error: "error" in failure ? failure.error : errorMessage(error),
+      });
+    }
+    return this.#commitManagedMessage(id, failure);
+  }
+
+  #commitManagedMessage(id: string, requested: ManagedTransition): ManagedTurnRow {
+    const original = this.#managedTurn(id);
+    if (!original) throw new Error(`managed turn ${id} does not exist`);
+    const now = Date.now();
+    let event: DurableEvent<StreamMessage> | undefined;
+    let committed = original;
+    this.ctx.storage.transactionSync(() => {
+      const row = this.#managedTurn(id);
+      if (!row) throw new Error(`managed turn ${id} disappeared`);
+      if (isTerminalState(row.state) || row.state === "blocked") {
+        committed = row;
+        return;
+      }
+
+      let message: ManagedTransition = requested;
+      let state = managedStateForMessage(message);
+      if (row.state === "cancelling" && state === "retryable") {
+        message = {
+          type: "turn_cancelling",
+          id,
+          error: "error" in requested ? requested.error : "cancellation will be retried",
+        };
+        state = "cancelling";
+      }
+      let attemptCount = row.attempt_count;
+      let retryAt: number | null = null;
+      const retrying = state === "retryable"
+        || (state === "cancelling" && "error" in message && message.error !== undefined);
+      if (retrying) {
+        const detail = "error" in message ? message.error ?? null : null;
+        if (row.state === state && row.error === detail && row.retry_at !== null && row.retry_at > now) {
+          committed = row;
+          return;
+        }
+        attemptCount += 1;
+        if (attemptCount >= MAX_RETRY_ATTEMPTS) {
+          message = {
+            type: "turn_blocked",
+            id,
+            error: `${detail ?? "operation failed"} (retry limit reached)`,
+          };
+          state = "blocked";
+        } else {
+          retryAt = now + retryDelayMs(attemptCount);
+          if (message.type === "turn_cancelling") message = { ...message, retry_at: retryAt };
+        }
+      }
+
+      const terminal = isTerminalState(state);
+      const detail = "error" in message ? message.error ?? null : null;
+      const encoded = terminal ? JSON.stringify(message) : null;
+      event = this.#eventLog.append(message, id, true);
+      this.ctx.storage.sql.exec(
+        `UPDATE managed_turns
+         SET state = ?, terminal_json = ?, terminal_cursor = ?, error = ?,
+             attempt_count = ?, retry_at = ?, updated_at = ?
+         WHERE id = ? AND state NOT IN ('completed', 'cancelled', 'failed')`,
+        state,
+        encoded,
+        terminal ? event.cursor : null,
+        detail,
+        attemptCount,
+        retryAt,
+        now,
+        id,
+      );
+      if (state === "completed") {
+        this.ctx.storage.sql.exec(
+          "INSERT OR IGNORE INTO completed_operations (id, completed_at) VALUES (?, ?)",
+          id,
+          now,
+        );
+      }
+      this.ctx.storage.sql.exec(
+        `UPDATE session_state
+         SET completed_turns = (SELECT COUNT(*) FROM managed_turns WHERE state = 'completed'),
+             last_active = ?
+         WHERE singleton = 1`,
+        now,
+      );
+      committed = this.#managedTurn(id) ?? row;
+    });
+    if (event) this.#publish(event);
+    return committed;
+  }
+
+  #recordAgentEvent(event: AgentEvent): void {
+    let turnId = this.#eventTurnId;
+    if (event.type === "run.started") {
+      turnId = this.#eventTurnQueue.shift();
+      this.#eventTurnId = turnId;
+    }
+    this.#recordAndBroadcast({ type: "event", event }, turnId ?? null);
+    if (event.type === "run.completed" || event.type === "run.failed") {
+      this.#eventTurnId = undefined;
+    }
+  }
+
+  #releaseEventTurn(id: string): void {
+    if (this.#eventTurnId === id) this.#eventTurnId = undefined;
+    const queued = this.#eventTurnQueue.indexOf(id);
+    if (queued >= 0) this.#eventTurnQueue.splice(queued, 1);
+  }
+
+  #recordAndBroadcast(message: StreamMessage, turnId: string | null = null): void {
+    if (this.#streamError) return;
+    try {
+      const event = this.ctx.storage.transactionSync(() => this.#eventLog.append(message, turnId));
+      this.#publish(event);
+    } catch (error) {
+      this.#failEventStream(error);
+    }
+  }
+
+  #failEventStream(error: unknown): void {
+    if (this.#streamError) return;
+    const detail = `event projection failed: ${errorMessage(error)}`;
+    this.#streamError = detail;
+    console.error(detail);
+    let event: DurableEvent<StreamMessage> | undefined;
+    try {
+      this.ctx.storage.transactionSync(() => {
+        this.ctx.storage.sql.exec(
+          "UPDATE session_state SET stream_error = ?, last_active = ? WHERE singleton = 1",
+          detail,
+          Date.now(),
+        );
+        event = this.#eventLog.append({ type: "stream_failed", error: detail }, null, true);
+      });
+    } catch (projectionError) {
+      console.error("failed to persist event stream failure", errorMessage(projectionError));
+      return;
+    }
+    this.#publish(event!);
+  }
+
+  #publish(event: DurableEvent<StreamMessage>): void {
+    this.#eventLog.publish(event);
+    this.#broadcast({
+      ...event.message,
+      cursor: event.cursor,
+      ...(event.turn_id === null ? {} : { turn_id: event.turn_id }),
+    });
   }
 
   async #stop(): Promise<void> {
@@ -582,8 +1230,11 @@ export class NanocodexSession extends DurableObject<Env> {
       try { await turn.cancel(); } catch { /* A terminal turn needs no cancellation. */ }
     });
     await Promise.all(cancellations);
+    await Promise.allSettled([...this.#inFlight]);
     await this.#shutdownAgent();
     this.#turns.clear();
+    this.#eventTurnQueue.length = 0;
+    this.#eventTurnId = undefined;
     this.#pendingTurnIds.clear();
     this.#turnInputs.clear();
   }
@@ -591,22 +1242,24 @@ export class NanocodexSession extends DurableObject<Env> {
   async #shutdownAgent(): Promise<void> {
     let agent = this.#agent;
     if (!agent && this.#agentPromise) {
-      try { agent = await this.#agentPromise; } catch { return; }
+      try { agent = await this.#agentPromise; } catch { /* Construction cleanup runs below. */ }
     }
     this.#agent = undefined;
     this.#events?.off();
     this.#events = undefined;
-    if (!agent) return;
-    try {
-      await agent.session.shutdown();
-    } catch (error) {
-      console.error("Nanocodex idle shutdown failed", errorMessage(error));
+    if (agent) {
+      try {
+        await agent.session.shutdown();
+      } catch (error) {
+        console.error("Nanocodex idle shutdown failed", errorMessage(error));
+      }
     }
   }
 
   #session(): SessionRow | undefined {
     return this.ctx.storage.sql.exec<SessionRow>(
-      "SELECT session_id, public_origin, completed_turns, last_active FROM session_state WHERE singleton = 1",
+      `SELECT session_id, public_origin, completed_turns, last_active, stream_error
+       FROM session_state WHERE singleton = 1`,
     ).toArray()[0];
   }
 
@@ -618,9 +1271,72 @@ export class NanocodexSession extends DurableObject<Env> {
 
   #sessionStatus(): SessionStatusRow | undefined {
     return this.ctx.storage.sql.exec<SessionStatusRow>(
-      `SELECT session_id, completed_turns > 0 AS has_snapshot, completed_turns, last_active
+      `SELECT session_id, completed_turns > 0 AS has_snapshot, completed_turns,
+              last_active, stream_error
        FROM session_state WHERE singleton = 1`,
     ).toArray()[0];
+  }
+
+  #managedTurn(id: string): ManagedTurnRow | undefined {
+    return this.#managedTurns("WHERE id = ?", id)[0];
+  }
+
+  #managedTurnByRequestKey(requestKey: string): ManagedTurnRow | undefined {
+    return this.#managedTurns("WHERE request_key = ?", requestKey)[0];
+  }
+
+  #managedTurns(clause: string, ...args: DurabilitySqliteValue[]): ManagedTurnRow[] {
+    return this.ctx.storage.sql.exec<ManagedTurnRow>(
+      `SELECT id, request_key, request_hash, input_json, state,
+              CAST(accepted_cursor AS TEXT) AS accepted_cursor,
+              terminal_json, CAST(terminal_cursor AS TEXT) AS terminal_cursor,
+              error, attempt_count, CAST(retry_at AS INTEGER) AS retry_at,
+              created_at, accepted_at, updated_at
+       FROM managed_turns ${clause}`,
+      ...args,
+    ).toArray();
+  }
+
+  #unfinishedTurnCount(): number {
+    return this.ctx.storage.sql.exec<{ count: number }>(
+      "SELECT COUNT(*) AS count FROM managed_turns WHERE state IN ('accepted', 'cancelling', 'retryable', 'blocked')",
+    ).toArray()[0]?.count ?? 0;
+  }
+
+  async #scheduleNextAlarm(): Promise<void> {
+    if (this.#deleting || !this.#sessionId()) return;
+    const now = Date.now();
+    const targets: number[] = [];
+    if (this.#agent || this.#agentPromise || this.#turns.size > 0 || this.#pendingTurnIds.size > 0) {
+      targets.push(now + this.#idleTimeoutMs());
+    }
+    if (!this.#streamError) {
+      for (const row of this.#managedTurns(
+        "WHERE state IN ('accepted', 'cancelling', 'retryable') ORDER BY created_at",
+      )) {
+        if (this.#turns.has(row.id)
+          || this.#pendingTurnIds.has(row.id)
+          || this.#admissionTasks.has(row.id)
+          || this.#cancellationTasks.has(row.id)) continue;
+        if (row.state === "retryable" && row.retry_at !== null) targets.push(row.retry_at);
+        else targets.push(now + 1);
+      }
+    }
+    if (targets.length === 0) {
+      await this.ctx.storage.deleteAlarm();
+      return;
+    }
+    await this.ctx.storage.setAlarm(Math.max(now + 1, Math.min(...targets)));
+  }
+
+  #capabilities(): AgentCapabilities {
+    return AGENT_CAPABILITIES;
+  }
+
+  #track<Result>(task: Promise<Result>): Promise<Result> {
+    this.#inFlight.add(task);
+    void task.finally(() => this.#inFlight.delete(task)).catch(() => {});
+    return task;
   }
 
   #durabilityStore(): DurabilityStore {
@@ -668,6 +1384,163 @@ export class NanocodexSession extends DurableObject<Env> {
     if (socket.readyState !== WebSocket.OPEN) return;
     try { socket.send(encoded); } catch { closeSocket(socket, 1011, "send failed"); }
   }
+}
+
+class ManagedRequestError extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+function managedTurnView(row: ManagedTurnRow) {
+  return {
+    turn_id: row.id,
+    state: row.state,
+    input: JSON.parse(row.input_json) as PromptInput,
+    accepted_cursor: row.accepted_cursor,
+    terminal_cursor: row.terminal_cursor,
+    created_at: row.created_at,
+    accepted_at: row.accepted_at,
+    updated_at: row.updated_at,
+    attempt_count: row.attempt_count,
+    retry_at: row.retry_at,
+    ...(row.error === null ? {} : { error: row.error }),
+    ...(row.terminal_json === null
+      ? {}
+      : { terminal: JSON.parse(row.terminal_json) as TurnTerminal }),
+  };
+}
+
+function messageForManagedTurn(row: ManagedTurnRow): ServerMessage {
+  if (row.terminal_json !== null) {
+    return {
+      ...(JSON.parse(row.terminal_json) as TurnTerminal),
+      ...(row.terminal_cursor === null ? {} : { cursor: row.terminal_cursor }),
+    };
+  }
+  const input = JSON.parse(row.input_json) as PromptInput;
+  if (row.state === "retryable") {
+    return { type: "turn_retryable", id: row.id, error: row.error ?? "turn will be retried" };
+  }
+  if (row.state === "blocked") {
+    return { type: "turn_blocked", id: row.id, error: row.error ?? "turn requires reconciliation" };
+  }
+  if (row.state === "cancelling") {
+    return {
+      type: "turn_cancelling",
+      id: row.id,
+      ...(row.error === null ? {} : { error: row.error }),
+      ...(row.retry_at === null ? {} : { retry_at: row.retry_at }),
+    };
+  }
+  return {
+    type: "turn_accepted",
+    id: row.id,
+    input,
+    replayed: true,
+    ...(row.accepted_cursor === null ? {} : { cursor: row.accepted_cursor }),
+  };
+}
+
+function isTerminalState(state: ManagedTurnState): boolean {
+  return state === "completed" || state === "cancelled" || state === "failed";
+}
+
+function managedStateForMessage(message: ManagedTransition): ManagedTurnState {
+  switch (message.type) {
+    case "turn_cancelling": return "cancelling";
+    case "turn_completed": return "completed";
+    case "turn_cancelled": return "cancelled";
+    case "turn_retryable": return "retryable";
+    case "turn_blocked": return "blocked";
+    case "turn_failed": return "failed";
+  }
+}
+
+function classifyManagedFailure(id: string, error: unknown): TurnTerminal {
+  const message = errorMessage(error);
+  const code = (error as { code?: unknown } | null)?.code;
+  if (code === "cancelled" || /\bturn was cancelled\b/i.test(message)) {
+    return { type: "turn_cancelled", id };
+  }
+  if (code === "blocked" || /ambiguous outcome/i.test(message)) {
+    return { type: "turn_blocked", id, error: message };
+  }
+  if (code === "retryable"
+    || /blocked by unfinished operation|already active|agent stopped|turn completed|durability (?:store|driver)|transport|websocket/i.test(message)) {
+    return { type: "turn_retryable", id, error: message };
+  }
+  return { type: "turn_failed", id, error: message };
+}
+
+function retryableError(message: string): Error {
+  return Object.assign(new Error(message), { code: "retryable" });
+}
+
+function retryDelayMs(attempt: number): number {
+  return Math.min(MAX_RETRY_DELAY_MS, 1_000 * (2 ** Math.max(0, attempt - 1)));
+}
+
+function managedHttpError(error: unknown, fallbackCode = "managed_request_failed") {
+  if (error instanceof ManagedRequestError) {
+    return { status: error.status, code: error.code, message: error.message };
+  }
+  if (error instanceof EventLogCapacityError) {
+    return { status: 507, code: error.code, message: error.message };
+  }
+  const code = (error as { code?: unknown } | null)?.code;
+  if (code === "invalid_request") return { status: 400, code, message: errorMessage(error) };
+  if (code === "conflict") return { status: 409, code, message: errorMessage(error) };
+  if (code === "blocked") return { status: 409, code, message: errorMessage(error) };
+  if (code === "retryable") return { status: 503, code, message: errorMessage(error) };
+  return { status: 500, code: fallbackCode, message: errorMessage(error) };
+}
+
+function managedErrorResponse(error: unknown, fallbackCode?: string): Response {
+  const failure = managedHttpError(error, fallbackCode);
+  return json({ error: failure.code, message: failure.message }, { status: failure.status });
+}
+
+async function readBoundedRequestText(request: Request, limit: number): Promise<string> {
+  const declared = Number(request.headers.get("content-length"));
+  if (Number.isFinite(declared) && declared > limit) {
+    throw new ManagedRequestError(413, "request_too_large", `request exceeds ${limit} bytes`);
+  }
+  if (!request.body) return "";
+  const reader = request.body.getReader();
+  const decoder = new TextDecoder();
+  let total = 0;
+  let text = "";
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) return text + decoder.decode();
+    total += value.byteLength;
+    if (total > limit) {
+      await reader.cancel();
+      throw new ManagedRequestError(413, "request_too_large", `request exceeds ${limit} bytes`);
+    }
+    text += decoder.decode(value, { stream: true });
+  }
+}
+
+async function hashManagedInput(input: PromptInput): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", encoder.encode(canonicalJson(input)));
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, "0"))
+    .join("");
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  const object = value as Record<string, unknown>;
+  return `{${Object.keys(object).sort().map((key) => (
+    `${JSON.stringify(key)}:${canonicalJson(object[key])}`
+  )).join(",")}}`;
 }
 
 function cloudflareWebTools(env: Env) {

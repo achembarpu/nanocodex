@@ -21,7 +21,7 @@
     "relay:subscription": "node scripts/subscription-egress-relay.mjs",
     "repl": "node scripts/repl.mjs",
     "smoke": "node scripts/live-smoke.mjs",
-    "smoke:sandbox": "node scripts/sandbox-smoke.mjs",
+    "smoke:managed": "node scripts/managed-api-smoke.mjs",
     "soak": "node scripts/soak.mjs",
     "stress": "node scripts/stress.mjs",
     "pretest": "npm run prepare:wasm",
@@ -31,6 +31,7 @@
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
+    "@cloudflare/computer": "0.2.1",
     "@cloudflare/sandbox": "0.12.4",
     "nanocodex": "file:../../js/bindings"
   },
