@@ -8,18 +8,12 @@ import mkcert from "vite-plugin-mkcert";
 import { chatGptDevProxy } from "./vite/chatGptDevProxy.ts";
 import { rewriteDocsDevModuleUrl } from "./vite/docsDevModules.ts";
 import { repositoryDevServer } from "./vite/repositoryDevServer.ts";
-import { renderLinkPreviewDocument } from "./worker/linkPreview.ts";
+import {
+  documentStatusForPath,
+  renderLinkPreviewDocument,
+} from "./worker/linkPreview.ts";
 
 const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
-const applicationRoutes = new Set([
-  "/",
-  "/agent",
-  "/changelog",
-  "/code",
-  "/commits",
-  "/docs",
-  "/evals",
-]);
 
 function applicationRouteFallback(): Plugin {
   return {
@@ -40,17 +34,18 @@ function applicationRouteFallback(): Plugin {
           next();
           return;
         }
-        const route = [...applicationRoutes].find(
-          (candidate) => url.pathname === candidate || url.pathname.startsWith(`${candidate}/`),
-        );
-        if (route == null) {
-          next();
+        const status = documentStatusForPath(url.pathname);
+        if (status == null) {
+          response.statusCode = 404;
+          response.setHeader("cache-control", "no-store");
+          response.setHeader("content-type", "text/plain; charset=utf-8");
+          response.end(request.method === "HEAD" ? undefined : "Not found");
           return;
         }
         try {
           const template = await readFile(new URL("./index.html", import.meta.url), "utf8");
-          const html = await vite.transformIndexHtml(url.pathname, template);
-          response.statusCode = 200;
+          const html = await vite.transformIndexHtml(`${url.pathname}${url.search}`, template);
+          response.statusCode = status;
           response.setHeader("cache-control", "no-store");
           response.setHeader("content-type", "text/html; charset=utf-8");
           response.end(request.method === "HEAD" ? undefined : html);

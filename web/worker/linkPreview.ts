@@ -27,7 +27,7 @@ export async function routeLinkPreview(
     return previewImage(request, env, url);
   }
   const pathname = normalizePath(url.pathname);
-  const documentStatus = statusForDocumentPath(pathname);
+  const documentStatus = documentStatusForPath(pathname);
   const internalNavigation = pathname === "/artifact-runtime" && isIframeNavigation(request);
   const routeHead = request.method === "HEAD" && documentStatus != null;
   if ((!isDocumentNavigation(request) && !internalNavigation && !routeHead) || !env.ASSETS) return null;
@@ -111,7 +111,8 @@ function isIframeNavigation(request: Request): boolean {
     && request.headers.get("sec-fetch-dest") === "iframe";
 }
 
-function statusForDocumentPath(pathname: string): 200 | 404 | null {
+export function documentStatusForPath(pathname: string): 200 | 404 | null {
+  pathname = normalizePath(pathname);
   if (pathname === "/" || pathname === "/agent" || pathname === "/artifact-runtime"
     || pathname === "/changelog" || pathname === "/code" || pathname === "/commits"
     || pathname === "/requests") return 200;
