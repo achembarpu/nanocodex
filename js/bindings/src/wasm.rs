@@ -1,4 +1,9 @@
-use std::{cell::RefCell, collections::HashMap, path::PathBuf, rc::Rc};
+use std::{
+    cell::{Cell, RefCell},
+    collections::HashMap,
+    path::PathBuf,
+    rc::Rc,
+};
 
 use js_sys::Promise;
 use nanocodex::{
@@ -46,7 +51,7 @@ use transport::JavaScriptResponsesHost;
 #[wasm_bindgen]
 extern "C" {
     #[wasm_bindgen(js_namespace = ["globalThis", "nanocodexHost"], js_name = emitEvent)]
-    fn host_emit_event(event: &str);
+    fn host_emit_event(session_id: &str, event: &str, encoded_bytes: u32);
 
     #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = executeCode)]
     fn host_execute_code(source: &str, session_id: &str, call_id: &str)
@@ -638,12 +643,14 @@ fn encode_subscription_credential(
 pub struct WasmNanocodex {
     inner: RustNanocodex,
     subagents: Option<WasmSubagents>,
+    event_forwarding: Rc<Cell<bool>>,
 }
 
 #[derive(Clone)]
 struct WasmSubagents {
     control: SubagentControl,
     sessions: Rc<RefCell<HashMap<(String, SubagentId), String>>>,
+    event_forwarders: Rc<Cell<usize>>,
 }
 
 impl WasmSubagents {
@@ -652,8 +659,22 @@ impl WasmSubagents {
         updates: tokio::sync::mpsc::UnboundedReceiver<ScopedAgentUpdate>,
     ) -> Self {
         let sessions = Rc::new(RefCell::new(HashMap::new()));
-        forward_subagent_updates(updates, Rc::clone(&sessions));
-        Self { control, sessions }
+        let event_forwarders = Rc::new(Cell::new(0));
+        forward_subagent_updates(updates, Rc::clone(&sessions), Rc::clone(&event_forwarders));
+        Self {
+            control,
+            sessions,
+            event_forwarders,
+        }
+    }
+
+    fn set_event_forwarding(&self, enabled: bool) {
+        let active = self.event_forwarders.get();
+        self.event_forwarders.set(if enabled {
+            active.saturating_add(1)
+        } else {
+            active.saturating_sub(1)
+        });
     }
 
     async fn close_all(&self, root_session_id: &str) -> std::io::Result<()> {
@@ -772,6 +793,16 @@ impl WasmNanocodex {
     #[must_use]
     pub fn session_id(&self) -> String {
         self.inner.session_id().to_string()
+    }
+
+    /// Enables or disables the optional JavaScript event crossing for this handle.
+    #[wasm_bindgen(js_name = setEventForwarding)]
+    pub fn set_event_forwarding(&self, enabled: bool) {
+        if self.event_forwarding.replace(enabled) != enabled {
+            if let Some(subagents) = &self.subagents {
+                subagents.set_event_forwarding(enabled);
+            }
+        }
     }
 
     /// Accepts a text prompt and returns its independently awaitable turn.
@@ -967,8 +998,23 @@ impl WasmNanocodex {
         events: AgentEvents,
         subagents: Option<WasmSubagents>,
     ) -> Self {
-        forward_events(events);
-        Self { inner, subagents }
+        let event_forwarding = Rc::new(Cell::new(false));
+        forward_events(events, Rc::clone(&event_forwarding));
+        Self {
+            inner,
+            subagents,
+            event_forwarding,
+        }
+    }
+}
+
+impl Drop for WasmNanocodex {
+    fn drop(&mut self) {
+        if self.event_forwarding.replace(false) {
+            if let Some(subagents) = &self.subagents {
+                subagents.set_event_forwarding(false);
+            }
+        }
     }
 }
 
@@ -1175,11 +1221,18 @@ async fn append_developer_context(agent: &RustNanocodex, text: &str) -> Result<S
     .map_err(js_error)
 }
 
-fn forward_events(mut events: AgentEvents) {
+fn forward_events(mut events: AgentEvents, forwarding: Rc<Cell<bool>>) {
     spawn_local(async move {
         while let Some(event) = events.recv().await {
+            if !forwarding.get() {
+                continue;
+            }
             if let Ok(encoded) = serde_json::to_string(&event) {
-                host_emit_event(&encoded);
+                host_emit_event(
+                    event.request_id.as_ref(),
+                    &encoded,
+                    u32::try_from(encoded.len()).unwrap_or(u32::MAX),
+                );
             }
         }
     });
@@ -1188,6 +1241,7 @@ fn forward_events(mut events: AgentEvents) {
 fn forward_subagent_updates(
     mut updates: tokio::sync::mpsc::UnboundedReceiver<ScopedAgentUpdate>,
     sessions: Rc<RefCell<HashMap<(String, SubagentId), String>>>,
+    event_forwarders: Rc<Cell<usize>>,
 ) {
     spawn_local(async move {
         while let Some(scoped) = updates.recv().await {
@@ -1200,8 +1254,14 @@ fn forward_subagent_updates(
                         .insert((root_session_id, descriptor.id), descriptor.session_id);
                 }
                 SubagentUpdate::Event { event, .. } => {
-                    if let Ok(encoded) = serde_json::to_string(&event) {
-                        host_emit_event(&encoded);
+                    if event_forwarders.get() > 0 {
+                        if let Ok(encoded) = serde_json::to_string(&event) {
+                            host_emit_event(
+                                event.request_id.as_ref(),
+                                &encoded,
+                                u32::try_from(encoded.len()).unwrap_or(u32::MAX),
+                            );
+                        }
                     }
                 }
                 SubagentUpdate::Status {

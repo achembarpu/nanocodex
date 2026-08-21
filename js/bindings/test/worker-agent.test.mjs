@@ -5,6 +5,8 @@ import {
   createWorkerAgent,
   installWorkerAgentRuntime,
   prepareWorkerAgent,
+  WORKER_EVENT_BATCH_MAX_BYTES,
+  WORKER_EVENT_BATCH_MAX_EVENTS,
 } from "../browser/WorkerAgent.mjs";
 import * as Transport from "../browser/Transport.mjs";
 
@@ -44,6 +46,144 @@ test("Worker Agent preserves synchronous prompt handles, independent results, an
   turn.dispose();
   watch.off();
   agent.dispose();
+  assert.equal(worker.terminated, 1);
+});
+
+test("Worker event forwarding follows first/last demand with filtering, order, and immutable fan-out", async () => {
+  const fixture = createFixture();
+  const worker = new LoopbackWorker(fixture.createAgent);
+  const root = await createWorkerAgent({ sessionId: "root", harness: false }, { worker });
+  const child = await root.session.spawn();
+
+  fixture.emit("root", 0);
+  await tick();
+  assert.equal(fixture.watcherStats.created, 0);
+  assert.equal(worker.outgoing.some((message) => message.type === "event.batch"), false);
+
+  const rootEvents = [];
+  const allEvents = [];
+  const childEvents = [];
+  const rootWatch = root.events.watch();
+  rootWatch.onEvent((event) => {
+    assert.equal(Object.isFrozen(event), true);
+    assert.equal(Object.isFrozen(event.payload), true);
+    assert.equal(Object.isFrozen(event.payload.nested), true);
+    assert.throws(() => { event.payload.nested.value = "changed"; }, TypeError);
+  });
+  rootWatch.onEvent((event) => rootEvents.push([event.seq, event.payload.nested.value]));
+  const allWatch = root.events.watch({ includeAllSessions: true });
+  allWatch.onEvent((event) => allEvents.push([event.request_id, event.seq]));
+  const childWatch = child.events.watch();
+  childWatch.onEvent((event) => childEvents.push(event.seq));
+  await tick();
+
+  assert.equal(fixture.watcherStats.created, 1);
+  assert.equal(fixture.watcherStats.active, 1);
+  assert.deepEqual(fixture.watcherStats.options, [{ includeAllSessions: true }]);
+  fixture.emit("root", 1, { nested: { value: "root" } });
+  fixture.emit("root-spawn", 2, { nested: { value: "child" } });
+  fixture.emit("root", 3, { nested: { value: "root-again" } });
+  await tick();
+
+  assert.deepEqual(rootEvents, [[1, "root"], [3, "root-again"]]);
+  assert.deepEqual(allEvents, [["root", 1], ["root-spawn", 2], ["root", 3]]);
+  assert.deepEqual(childEvents, [2]);
+
+  rootWatch.off();
+  allWatch.off();
+  await tick();
+  assert.equal(fixture.watcherStats.active, 1);
+  childWatch.off();
+  await tick();
+  assert.equal(fixture.watcherStats.active, 0);
+  assert.equal(fixture.watcherStats.released, 1);
+  const forwardedMessages = worker.outgoing.filter((message) => message.type.startsWith("event.")).length;
+  fixture.emit("root", 4, { nested: { value: "unsubscribed" } });
+  await tick();
+  assert.equal(worker.outgoing.filter((message) => message.type.startsWith("event.")).length, forwardedMessages);
+
+  const resumed = root.events.watch();
+  resumed.onEvent(() => {});
+  await tick();
+  assert.equal(fixture.watcherStats.created, 2);
+  assert.equal(fixture.watcherStats.active, 1);
+  resumed.off();
+  await tick();
+  assert.equal(fixture.watcherStats.active, 0);
+
+  child.dispose();
+  root.dispose();
+  assert.equal(worker.terminated, 1);
+});
+
+test("Worker batches 4,096 ordered events under hard count and encoded-byte message bounds", async () => {
+  const fixture = createFixture();
+  const worker = new LoopbackWorker(fixture.createAgent);
+  const agent = await createWorkerAgent({ sessionId: "root", harness: false }, { worker });
+  const received = [];
+  const watch = agent.events.watch();
+  watch.onEvent((event) => received.push(event));
+  await tick();
+
+  const blob = "x".repeat(2_048);
+  for (let seq = 0; seq < 4_096; seq += 1) fixture.emit("root", seq, { blob });
+  await tick();
+
+  const batches = worker.outgoing.filter((message) => message.type === "event.batch");
+  assert.equal(received.length, 4_096);
+  assert.deepEqual(received.map((event) => event.seq), Array.from({ length: 4_096 }, (_, index) => index));
+  assert.equal(batches.length > 1, true);
+  assert.equal(batches.some((message) => message.events.length < WORKER_EVENT_BATCH_MAX_EVENTS), true);
+  assert.equal(batches.reduce((count, message) => count + message.events.length, 0), 4_096);
+  for (const message of batches) {
+    assert.equal(message.events.length <= WORKER_EVENT_BATCH_MAX_EVENTS, true);
+    assert.equal(message.encodedBytes <= WORKER_EVENT_BATCH_MAX_BYTES, true);
+    assert.equal(
+      message.encodedBytes,
+      message.events.reduce((bytes, entry) => bytes + entry.encodedBytes, 0),
+    );
+  }
+
+  const oversized = "y".repeat(WORKER_EVENT_BATCH_MAX_BYTES + 1_024);
+  fixture.emit("root", 4_096, { blob: oversized });
+  await tick();
+  const chunks = worker.outgoing.filter((message) => message.type === "event.chunk");
+  assert.equal(chunks.length > 1, true);
+  assert.equal(chunks.every((message) => message.chunk.byteLength <= WORKER_EVENT_BATCH_MAX_BYTES), true);
+  assert.equal(received.at(-1).seq, 4_096);
+  assert.equal(received.at(-1).payload.blob, oversized);
+  assert.equal(Object.isFrozen(received.at(-1).payload), true);
+
+  watch.off();
+  await tick();
+  const eventMessageCount = worker.outgoing.filter((message) => message.type.startsWith("event.")).length;
+  fixture.emit("root", 4_097, { blob: "not-forwarded" });
+  await tick();
+  assert.equal(
+    worker.outgoing.filter((message) => message.type.startsWith("event.")).length,
+    eventMessageCount,
+  );
+  agent.dispose();
+});
+
+test("turn cancellation followed by graceful shutdown releases Worker event demand", async () => {
+  const fixture = createFixture();
+  const worker = new LoopbackWorker(fixture.createAgent);
+  const agent = await createWorkerAgent({ sessionId: "root", harness: false }, { worker });
+  const watch = agent.events.watch();
+  watch.onEvent(() => {});
+  await tick();
+  assert.equal(fixture.watcherStats.active, 1);
+
+  const turn = agent.turn.prompt({ input: "cancel me" });
+  await turn.cancel();
+  turn.dispose();
+  await agent.session.shutdown();
+  await tick();
+
+  assert.equal(fixture.log.some(([kind]) => kind === "cancel"), true);
+  assert.equal(fixture.log.some(([kind]) => kind === "shutdown"), true);
+  assert.equal(fixture.watcherStats.active, 0);
   assert.equal(worker.terminated, 1);
 });
 
@@ -224,14 +364,24 @@ class LoopbackWorker {
     this.onerror = null;
     this.onmessageerror = null;
     this.terminated = 0;
+    this.incoming = [];
+    this.outgoing = [];
     this.scope = {
       onmessage: null,
-      postMessage: (data) => queueMicrotask(() => this.onmessage?.({ data })),
+      postMessage: (data, transfer) => {
+        const cloned = cloneMessage(data, transfer);
+        this.outgoing.push(cloned);
+        queueMicrotask(() => this.onmessage?.({ data: cloned }));
+      },
     };
     this.runtime = installWorkerAgentRuntime(this.scope, { createAgent, ...runtimeOptions });
   }
 
-  postMessage(data) { queueMicrotask(() => this.scope.onmessage?.({ data })); }
+  postMessage(data) {
+    const cloned = cloneMessage(data);
+    this.incoming.push(cloned);
+    queueMicrotask(() => this.scope.onmessage?.({ data: cloned }));
+  }
   terminate() {
     if (this.terminated) return;
     this.terminated += 1;
@@ -241,14 +391,20 @@ class LoopbackWorker {
 }
 
 function createFixture(options = {}) {
-  const listeners = new Set();
+  const watchers = new Set();
   const completions = new Map();
   const log = [];
+  const watcherStats = { active: 0, created: 0, released: 0, options: [] };
   const fixture = {
     log,
-    emit(requestId, seq) {
-      const event = { protocol_version: 1, request_id: requestId, seq, type: "test", payload: {} };
-      for (const listener of listeners) listener(event);
+    watcherStats,
+    emit(requestId, seq, payload = {}) {
+      const event = { protocol_version: 1, request_id: requestId, seq, type: "test", payload };
+      const encoded = JSON.stringify(event);
+      const encodedBytes = Buffer.byteLength(encoded);
+      for (const watcher of watchers) {
+        for (const listener of watcher.listeners) listener(event, encodedBytes, encoded);
+      }
     },
     complete(sessionId, finalMessage) {
       const completion = completions.get(sessionId);
@@ -285,11 +441,26 @@ function createFixture(options = {}) {
       sessionId,
       disposed: false,
       events: {
-        watch() {
+        watch(watchOptions = {}) {
           let active = true;
+          const watcher = { listeners: new Set() };
+          watchers.add(watcher);
+          watcherStats.active += 1;
+          watcherStats.created += 1;
+          watcherStats.options.push(watchOptions);
           return {
-            onEvent(listener) { listeners.add(listener); return () => listeners.delete(listener); },
-            off() { if (!active) return; active = false; listeners.clear(); },
+            onEvent(listener) {
+              watcher.listeners.add(listener);
+              return () => watcher.listeners.delete(listener);
+            },
+            off() {
+              if (!active) return;
+              active = false;
+              watcher.listeners.clear();
+              watchers.delete(watcher);
+              watcherStats.active -= 1;
+              watcherStats.released += 1;
+            },
             async *[Symbol.asyncIterator]() {},
           };
         },
@@ -326,6 +497,12 @@ function createFixture(options = {}) {
     return agent;
   }
   return fixture;
+}
+
+function cloneMessage(data, transfer) {
+  return transfer?.length
+    ? structuredClone(data, { transfer })
+    : structuredClone(data);
 }
 
 function tick() { return new Promise((resolve) => setImmediate(resolve)); }

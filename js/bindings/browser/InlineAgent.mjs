@@ -137,13 +137,16 @@ export async function create(options = {}) {
       try {
         durabilityOwner?.retain();
         bindHostSession(host, raw.sessionId);
+        events.addSource(raw);
       } catch (error) {
+        events.removeSource(raw);
         durabilityOwner?.release();
         releaseHost(host);
         throw error;
       }
     },
     release(raw) {
+      events.removeSource(raw);
       host.releaseSession(raw.sessionId);
       releaseHostSession(host, raw.sessionId);
       durabilityOwner?.release();

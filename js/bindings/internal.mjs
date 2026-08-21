@@ -204,16 +204,39 @@ export function toWasmConfig(options = {}) {
 
 export function createEventChannel() {
   const listeners = new Set();
+  const sources = new Set();
   return Object.freeze({
-    emit(eventJson) {
+    emit(eventJson, encodedBytes) {
       if (!listeners.size) return;
-      const event = typeof eventJson === "string" ? JSON.parse(eventJson) : eventJson;
-      const encodedLength = typeof eventJson === "string" ? eventJson.length : undefined;
-      for (const listener of listeners) listener(event, encodedLength);
+      const event = freezeJson(typeof eventJson === "string" ? JSON.parse(eventJson) : eventJson);
+      const encodedLength = Number.isSafeInteger(encodedBytes) && encodedBytes >= 0
+        ? encodedBytes
+        : undefined;
+      for (const listener of listeners) listener(event, encodedLength, eventJson);
     },
     subscribe(listener) {
+      const activate = listeners.size === 0;
       listeners.add(listener);
-      return () => listeners.delete(listener);
+      if (activate) {
+        for (const source of sources) source.setEventForwarding?.(true);
+      }
+      let active = true;
+      return () => {
+        if (!active) return;
+        active = false;
+        listeners.delete(listener);
+        if (listeners.size === 0) {
+          for (const source of sources) source.setEventForwarding?.(false);
+        }
+      };
+    },
+    addSource(source) {
+      sources.add(source);
+      if (listeners.size) source.setEventForwarding?.(true);
+    },
+    removeSource(source) {
+      if (!sources.delete(source)) return;
+      source.setEventForwarding?.(false);
     },
   });
 }
@@ -369,9 +392,8 @@ const hostBridge = Object.freeze({
       payload,
     );
   },
-  emitEvent(eventJson) {
-    const event = JSON.parse(eventJson);
-    requiredSessionHost(event.request_id).emitEvent(eventJson);
+  emitEvent(sessionId, eventJson, encodedBytes) {
+    requiredSessionHost(sessionId).emitEvent(eventJson, encodedBytes);
   },
 });
 
@@ -638,7 +660,7 @@ function throwCleanupErrors(errors) {
   }
 }
 
-function freezeJson(value) {
+export function freezeJson(value) {
   if (!value || typeof value !== "object") return value;
   const pending = [value];
   while (pending.length) {

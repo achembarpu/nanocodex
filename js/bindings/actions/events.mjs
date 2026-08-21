@@ -1,7 +1,8 @@
 import { reportError, subscribeAgentEvents } from "../internal.mjs";
 
 const MAX_BUFFERED_EVENTS = 4_096;
-const MAX_BUFFERED_EVENT_CHARACTERS = 32 * 1024 * 1024;
+const MAX_BUFFERED_EVENT_BYTES = 32 * 1024 * 1024;
+const eventEncoder = new TextEncoder();
 
 export function watch(agent, options = {}) {
   const listeners = new Set();
@@ -9,10 +10,10 @@ export function watch(agent, options = {}) {
   let unsubscribe;
   let closed = false;
 
-  const emit = (event, encodedLength) => {
+  const emit = (event, encodedLength, encodedEvent) => {
     for (const listener of listeners) {
       try {
-        listener(event);
+        listener(event, encodedLength, encodedEvent);
       } catch (error) {
         reportError(error);
       }
@@ -68,7 +69,7 @@ export function watch(agent, options = {}) {
 function eventIterator(onEnd) {
   const queue = [];
   let head = 0;
-  let bufferedCharacters = 0;
+  let bufferedBytes = 0;
   const pending = [];
   let pendingHead = 0;
   let ended = false;
@@ -93,20 +94,20 @@ function eventIterator(onEnd) {
         }
         resolve({ done: false, value: event });
       } else {
-        const characters = encodedLength ?? JSON.stringify(event).length;
+        const bytes = encodedLength ?? eventEncoder.encode(JSON.stringify(event)).byteLength;
         if (
           queue.length - head >= MAX_BUFFERED_EVENTS
-          || bufferedCharacters + characters > MAX_BUFFERED_EVENT_CHARACTERS
+          || bufferedBytes + bytes > MAX_BUFFERED_EVENT_BYTES
         ) {
           failure = new RangeError(
             `event iterator exceeded its private buffer of ${MAX_BUFFERED_EVENTS} events or `
-              + `${MAX_BUFFERED_EVENT_CHARACTERS} serialized characters`,
+              + `${MAX_BUFFERED_EVENT_BYTES} encoded bytes`,
           );
           detach();
           return;
         }
-        queue.push({ characters, event });
-        bufferedCharacters += characters;
+        queue.push({ bytes, event });
+        bufferedBytes += bytes;
       }
     },
     end() {
@@ -120,12 +121,12 @@ function eventIterator(onEnd) {
       pendingHead = 0;
       queue.length = 0;
       head = 0;
-      bufferedCharacters = 0;
+      bufferedBytes = 0;
     },
     next() {
       if (head < queue.length) {
         const entry = queue[head++];
-        bufferedCharacters -= entry.characters;
+        bufferedBytes -= entry.bytes;
         if (head === queue.length) {
           queue.length = 0;
           head = 0;

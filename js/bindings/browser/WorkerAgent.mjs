@@ -1,11 +1,20 @@
 import { agentActions } from "../actions/index.mjs";
-import { createAgentClient, defineRuntime, reportError } from "../internal.mjs";
+import {
+  createAgentClient,
+  defineRuntime,
+  freezeJson,
+  reportError,
+} from "../internal.mjs";
 
 const DEFAULT_MAX_PENDING_RPCS = 1_024;
+export const WORKER_EVENT_BATCH_MAX_EVENTS = 256;
+export const WORKER_EVENT_BATCH_MAX_BYTES = 256 * 1024;
 const PREWARM_TIMEOUT_MS = 15_000;
 const PREWARM_RETENTION_MS = 30_000;
 const PROTOCOL = "nanocodex.worker-agent.v1";
 const REALTIME_TAIL_INSTRUCTION = "The user just ended their realtime session. Here is the remaining handoff/transcript tail. You probably do not have to do anything; acknowledge the handoff unless the transcript itself asks for something.";
+const eventEncoder = new TextEncoder();
+const eventDecoder = new TextDecoder("utf-8", { fatal: true });
 const recentImages = new Map();
 let prewarmedWorker;
 
@@ -104,20 +113,27 @@ export function installWorkerAgentRuntime(scope = globalThis, options = {}) {
   let bootPromise;
   let watcher;
   let watcherAgentId;
+  let eventsEnabled = false;
+  let eventQueue = [];
+  let eventQueueBytes = 0;
+  let eventFlushScheduled = false;
+  let eventDeliveryGeneration = 0;
   let nextAgent = 1;
+  let nextChunkedEvent = 1;
   const agents = new Map();
   const turns = new Map();
   const results = new Map();
 
-  const post = (message, expectedGeneration = generation) => {
+  const post = (message, expectedGeneration = generation, transfer) => {
     if (expectedGeneration !== generation) return;
-    scope.postMessage({ protocol: PROTOCOL, channel, ...message });
+    const envelope = { protocol: PROTOCOL, channel, ...message };
+    if (transfer) scope.postMessage(envelope, transfer);
+    else scope.postMessage(envelope);
   };
 
   const cleanup = () => {
-    watcher?.off();
-    watcher = undefined;
-    watcherAgentId = undefined;
+    eventsEnabled = false;
+    stopWatching();
     for (const turn of turns.values()) {
       try { turn.dispose(); } catch (error) { reportError(error); }
     }
@@ -143,7 +159,6 @@ export function installWorkerAgentRuntime(scope = globalThis, options = {}) {
       }
       const agentId = `agent-${nextAgent++}`;
       agents.set(agentId, agent);
-      watchAgent(agentId, agent, currentGeneration);
       post({ type: "ready", root: describeAgent(agentId, agent) }, currentGeneration);
     } catch (error) {
       post({ type: "fatal", error: encodeError(error) }, currentGeneration);
@@ -159,6 +174,7 @@ export function installWorkerAgentRuntime(scope = globalThis, options = {}) {
         results,
         allocateAgent,
         moveWatcherFrom,
+        setEventsEnabled,
       });
       if (!message.noReply) post({ type: "resolve", id: message.id, value }, currentGeneration);
     } catch (error) {
@@ -169,13 +185,123 @@ export function installWorkerAgentRuntime(scope = globalThis, options = {}) {
   function allocateAgent(agent) {
     const id = `agent-${nextAgent++}`;
     agents.set(id, agent);
+    if (eventsEnabled && !watcher) watchAgent(id, agent);
     return describeAgent(id, agent);
   }
 
   function watchAgent(agentId, agent, expectedGeneration = generation) {
+    if (!eventsEnabled || watcher) return;
     watcherAgentId = agentId;
     watcher = agent.events.watch({ includeAllSessions: true });
-    watcher.onEvent((event) => post({ type: "event", event }, expectedGeneration));
+    watcher.onEvent((event, encodedBytes, encodedEvent) => {
+      enqueueEvent(event, encodedBytes, encodedEvent, expectedGeneration);
+    });
+  }
+
+  function stopWatching() {
+    watcher?.off();
+    watcher = undefined;
+    watcherAgentId = undefined;
+    eventQueue.length = 0;
+    eventQueue = [];
+    eventQueueBytes = 0;
+    eventFlushScheduled = false;
+    eventDeliveryGeneration += 1;
+  }
+
+  function setEventsEnabled(enabled) {
+    if (typeof enabled !== "boolean") throw new TypeError("Worker Agent event demand must be boolean");
+    if (eventsEnabled === enabled) return;
+    eventsEnabled = enabled;
+    if (!enabled) {
+      stopWatching();
+      return;
+    }
+    for (const [agentId, agent] of agents) {
+      watchAgent(agentId, agent);
+      break;
+    }
+  }
+
+  function enqueueEvent(event, encodedBytes, encodedEvent, expectedGeneration) {
+    if (!eventsEnabled || expectedGeneration !== generation) return;
+    const immutable = freezeJson(event);
+    const encoded = typeof encodedEvent === "string" ? encodedEvent : undefined;
+    const bytes = Number.isSafeInteger(encodedBytes) && encodedBytes >= 0
+      ? encodedBytes
+      : eventBytes(immutable, encoded);
+    if (
+      eventQueue.length
+      && (
+        eventQueue.length >= WORKER_EVENT_BATCH_MAX_EVENTS
+        || eventQueueBytes + bytes > WORKER_EVENT_BATCH_MAX_BYTES
+      )
+    ) {
+      flushEvents(expectedGeneration, eventDeliveryGeneration);
+    }
+    eventQueue.push({ bytes, encoded, event: immutable });
+    eventQueueBytes += bytes;
+    if (
+      eventQueue.length >= WORKER_EVENT_BATCH_MAX_EVENTS
+      || eventQueueBytes >= WORKER_EVENT_BATCH_MAX_BYTES
+    ) {
+      flushEvents(expectedGeneration, eventDeliveryGeneration);
+      return;
+    }
+    if (eventFlushScheduled) return;
+    eventFlushScheduled = true;
+    const deliveryGeneration = eventDeliveryGeneration;
+    queueMicrotask(() => flushEvents(expectedGeneration, deliveryGeneration));
+  }
+
+  function flushEvents(expectedGeneration, deliveryGeneration) {
+    if (
+      expectedGeneration !== generation
+      || deliveryGeneration !== eventDeliveryGeneration
+      || !eventsEnabled
+    ) return;
+    const pending = eventQueue;
+    eventQueue = [];
+    eventQueueBytes = 0;
+    eventFlushScheduled = false;
+    let head = 0;
+    while (head < pending.length) {
+      const first = pending[head];
+      if (first.bytes > WORKER_EVENT_BATCH_MAX_BYTES) {
+        postChunkedEvent(first, expectedGeneration);
+        head += 1;
+        continue;
+      }
+      const events = [];
+      let encodedBytes = 0;
+      while (head < pending.length && events.length < WORKER_EVENT_BATCH_MAX_EVENTS) {
+        const entry = pending[head];
+        if (entry.bytes > WORKER_EVENT_BATCH_MAX_BYTES) break;
+        if (events.length && encodedBytes + entry.bytes > WORKER_EVENT_BATCH_MAX_BYTES) break;
+        events.push({ encodedBytes: entry.bytes, event: entry.event });
+        encodedBytes += entry.bytes;
+        head += 1;
+      }
+      post({ type: "event.batch", encodedBytes, events }, expectedGeneration);
+    }
+  }
+
+  function postChunkedEvent(entry, expectedGeneration) {
+    const encoded = eventEncoder.encode(entry.encoded ?? JSON.stringify(entry.event));
+    const id = `event-${nextChunkedEvent++}`;
+    for (let offset = 0, index = 0; offset < encoded.byteLength; index += 1) {
+      const end = Math.min(offset + WORKER_EVENT_BATCH_MAX_BYTES, encoded.byteLength);
+      const chunk = encoded.slice(offset, end);
+      post({
+        type: "event.chunk",
+        chunk,
+        encodedBytes: encoded.byteLength,
+        id,
+        index,
+        last: end === encoded.byteLength,
+      }, expectedGeneration, [chunk.buffer]);
+      offset = end;
+    }
   }
 
   function moveWatcherFrom(agentId) {
@@ -227,6 +353,10 @@ async function dispatch(message, state) {
       const turn = agent.turn.prompt(message.options);
       if (turns.has(message.turnId)) throw new Error(`duplicate Worker Agent turn: ${message.turnId}`);
       turns.set(message.turnId, turn);
+      return undefined;
+    }
+    case "events": {
+      state.setEventsEnabled(message.enabled);
       return undefined;
     }
     case "rpc": break;
@@ -294,6 +424,7 @@ class WorkerConnection {
     this.nextTurn = 1;
     this.pending = new Map();
     this.listeners = new Set();
+    this.chunkedEvent = undefined;
     this.agents = 0;
     this.closed = false;
     worker.onmessage = ({ data }) => this.receive(data);
@@ -314,7 +445,7 @@ class WorkerConnection {
       name: "Nanocodex Browser Worker WASM",
       type: "browser",
       create: (descriptor) => this.rawAgent(descriptor),
-      subscribe: (listener) => { this.listeners.add(listener); return () => this.listeners.delete(listener); },
+      subscribe: (listener) => this.subscribe(listener),
       adopt: () => { this.agents += 1; },
       dispose: (raw) => {
         if (!raw.released) {
@@ -397,6 +528,28 @@ class WorkerConnection {
     try { this.send({ type: "rpc", id, method, args, noReply: true }); } catch {}
   }
 
+  subscribe(listener) {
+    this.assertOpen();
+    const enable = this.listeners.size === 0;
+    this.listeners.add(listener);
+    if (enable) {
+      try { this.send({ type: "events", enabled: true, noReply: true }); }
+      catch (error) {
+        this.listeners.delete(listener);
+        throw error;
+      }
+    }
+    let active = true;
+    return () => {
+      if (!active) return;
+      active = false;
+      this.listeners.delete(listener);
+      if (this.listeners.size === 0 && !this.closed) {
+        try { this.send({ type: "events", enabled: false, noReply: true }); } catch {}
+      }
+    };
+  }
+
   pendingCall(id) {
     this.assertOpen();
     if (this.pending.size >= this.maxPending) {
@@ -412,8 +565,36 @@ class WorkerConnection {
 
   receive(message) {
     if (this.closed || message?.protocol !== PROTOCOL || message.channel !== this.channel) return;
-    if (message.type === "event") {
-      for (const listener of this.listeners) listener(message.event);
+    if (message.type === "event.batch") {
+      if (!Array.isArray(message.events)
+        || message.events.length > WORKER_EVENT_BATCH_MAX_EVENTS
+        || !Number.isSafeInteger(message.encodedBytes)
+        || message.encodedBytes < 0
+        || message.encodedBytes > WORKER_EVENT_BATCH_MAX_BYTES) {
+        this.fail(new Error("Nanocodex Agent Worker returned an invalid event batch"));
+        return;
+      }
+      let encodedBytes = 0;
+      for (const entry of message.events) {
+        if (
+          !Number.isSafeInteger(entry?.encodedBytes)
+          || entry.encodedBytes < 0
+          || entry.encodedBytes > WORKER_EVENT_BATCH_MAX_BYTES
+        ) {
+          this.fail(new Error("Nanocodex Agent Worker returned an invalid event size"));
+          return;
+        }
+        encodedBytes += entry.encodedBytes;
+      }
+      if (encodedBytes !== message.encodedBytes) {
+        this.fail(new Error("Nanocodex Agent Worker returned inconsistent event batch bytes"));
+        return;
+      }
+      for (const entry of message.events) this.emitEvent(entry.event, entry.encodedBytes);
+      return;
+    }
+    if (message.type === "event.chunk") {
+      this.receiveEventChunk(message);
       return;
     }
     if (message.type === "ready") return this.resolvePending("boot", message.root);
@@ -436,6 +617,68 @@ class WorkerConnection {
     pending.reject(error);
   }
 
+  emitEvent(event, encodedBytes) {
+    const immutable = freezeJson(event);
+    for (const listener of this.listeners) listener(immutable, encodedBytes);
+  }
+
+  receiveEventChunk(message) {
+    const chunk = message.chunk instanceof Uint8Array
+      ? message.chunk
+      : message.chunk instanceof ArrayBuffer ? new Uint8Array(message.chunk) : undefined;
+    if (
+      !chunk
+      || chunk.byteLength > WORKER_EVENT_BATCH_MAX_BYTES
+      || !Number.isSafeInteger(message.encodedBytes)
+      || message.encodedBytes <= WORKER_EVENT_BATCH_MAX_BYTES
+      || !Number.isSafeInteger(message.index)
+      || message.index < 0
+      || typeof message.id !== "string"
+      || typeof message.last !== "boolean"
+    ) {
+      this.fail(new Error("Nanocodex Agent Worker returned an invalid chunked event"));
+      return;
+    }
+    let entry = this.chunkedEvent;
+    if (message.index === 0) {
+      if (entry) {
+        this.fail(new Error("Nanocodex Agent Worker interleaved chunked events"));
+        return;
+      }
+      entry = { chunks: [], encodedBytes: message.encodedBytes, id: message.id, receivedBytes: 0 };
+      this.chunkedEvent = entry;
+    }
+    if (
+      !entry
+      || entry.id !== message.id
+      || entry.encodedBytes !== message.encodedBytes
+      || entry.chunks.length !== message.index
+      || entry.receivedBytes + chunk.byteLength > entry.encodedBytes
+    ) {
+      this.fail(new Error("Nanocodex Agent Worker returned an out-of-order chunked event"));
+      return;
+    }
+    entry.chunks.push(chunk);
+    entry.receivedBytes += chunk.byteLength;
+    if (!message.last) return;
+    if (entry.receivedBytes !== entry.encodedBytes) {
+      this.fail(new Error("Nanocodex Agent Worker returned an incomplete chunked event"));
+      return;
+    }
+    const encoded = new Uint8Array(entry.encodedBytes);
+    let offset = 0;
+    for (const part of entry.chunks) {
+      encoded.set(part, offset);
+      offset += part.byteLength;
+    }
+    this.chunkedEvent = undefined;
+    try {
+      this.emitEvent(JSON.parse(eventDecoder.decode(encoded)), entry.encodedBytes);
+    } catch (error) {
+      this.fail(new Error("Nanocodex Agent Worker returned an invalid encoded event", { cause: error }));
+    }
+  }
+
   assertOpen() {
     if (this.closed) throw new Error("the Nanocodex Agent Worker has been disposed");
   }
@@ -453,6 +696,7 @@ class WorkerConnection {
     for (const pending of this.pending.values()) pending.reject(error);
     this.pending.clear();
     this.listeners.clear();
+    this.chunkedEvent = undefined;
   }
 }
 
@@ -628,6 +872,9 @@ function transcriptText(transcript) {
 }
 
 function escapeXml(value) { return value.replaceAll("&", "&amp;").replaceAll("<", "&lt;").replaceAll(">", "&gt;"); }
+function eventBytes(event, encoded) {
+  return eventEncoder.encode(encoded ?? JSON.stringify(event)).byteLength;
+}
 function positiveInteger(value, label) {
   if (!Number.isSafeInteger(value) || value <= 0) throw new TypeError(`${label} must be a positive safe integer`);
   return value;
