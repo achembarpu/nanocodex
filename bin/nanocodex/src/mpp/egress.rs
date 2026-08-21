@@ -601,7 +601,7 @@ mod tests {
             let mut observations = observations.lock().unwrap().clone();
             observations.sort_unstable_by(|left, right| left.0.cmp(&right.0));
             assert_eq!(observations.len(), REQUESTS * 2);
-            for pair in observations.chunks_exact(2) {
+            for pair in observations.as_chunks::<2>().0 {
                 assert_eq!(pair[0].0, pair[1].0);
                 assert_eq!(pair[0].1, pair[1].1);
                 assert_ne!(pair[0].2, pair[1].2);

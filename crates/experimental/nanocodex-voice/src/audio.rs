@@ -145,8 +145,8 @@ impl Playback {
     }
 
     fn push(&mut self, audio: &RealtimeAudio) {
-        let source = audio.as_bytes().chunks_exact(2).map(|sample| {
-            let sample = i16::from_le_bytes([sample[0], sample[1]]);
+        let source = audio.as_bytes().as_chunks::<2>().0.iter().map(|sample| {
+            let sample = i16::from_le_bytes(*sample);
             f32::from(sample) / f32::from(i16::MAX)
         });
         self.resampler.push_into(source, &mut self.resampled);
