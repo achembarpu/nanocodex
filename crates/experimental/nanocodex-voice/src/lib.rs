@@ -1322,13 +1322,13 @@ impl HandoffStream {
             if self.buffered_text.is_empty() {
                 return None;
             }
-            let text = self.buffered_text.drain(..).collect::<String>();
+            let text = std::mem::take(&mut self.buffered_text);
             self.sent_bytes = self.sent_bytes.saturating_add(text.len());
             return Some(text);
         }
 
-        let head = self.buffered_text.drain(..).collect::<String>();
-        let tail = self.tail_text.drain(..).collect::<String>();
+        let head = std::mem::take(&mut self.buffered_text);
+        let tail = std::mem::take(&mut self.tail_text);
         let text = format!("{head}{HANDOFF_STREAM_TRUNCATION_MARKER}{tail}");
         self.sent_bytes = self.sent_bytes.saturating_add(text.len());
         Some(text)

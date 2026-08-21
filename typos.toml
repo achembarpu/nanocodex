@@ -16,6 +16,8 @@ ba = "ba"
 # Apple and Appium use UDID as the canonical device identifier name.
 udid = "udid"
 Udid = "Udid"
+# PNG is the canonical image format acronym; plural prose uses PNGs.
+PNGs = "PNGs"
 # `CMO` abbreviates the differential evaluator's code-mode-only profile.
 CMO = "CMO"
 # `caf` is the hexadecimal middle of the reviewed Codex commit
