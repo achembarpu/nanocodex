@@ -429,12 +429,17 @@ const unwatch = events.onEvent((event) => {
   process.stdout.write(`${JSON.stringify(event)}\n`);
 });
 let turn;
+let result;
 try {
   turn = agent.turn.prompt({ input: "Build the thing." });
-  const result = await turn.result();
+  result = await turn.result();
   console.error(result.finalMessage);
 } finally {
-  turn?.dispose();
+  try {
+    result?.dispose();
+  } finally {
+    turn?.dispose();
+  }
   unwatch();
   events.off();
   const cleanupErrors = [];
@@ -584,7 +589,18 @@ const agent = await Agent.create({
 // only when an external retry must identify the same logical operation.
 const turn = agent.turn.prompt({ input: "Build the thing." });
 // const turn = agent.turn.prompt({ id: "request-7", input: "Build the thing." });
-console.log((await turn.result()).finalMessage);
+let result;
+try {
+  result = await turn.result();
+  console.log(result.finalMessage);
+} finally {
+  try {
+    result?.dispose();
+  } finally {
+    turn.dispose();
+    await agent.session.shutdown();
+  }
+}
 ```
 
 Revisions are unsigned decimal strings so JavaScript preserves Rust's full
@@ -760,13 +776,17 @@ package manager or build step:
     }),
   });
   const turn = agent.turn.prompt({ input: "Hello." });
+  let result;
   try {
-    const result = await turn.result();
+    result = await turn.result();
     console.log(result.finalMessage);
-    result.dispose();
   } finally {
-    turn.dispose();
-    await agent.session.shutdown();
+    try {
+      result?.dispose();
+    } finally {
+      turn.dispose();
+      await agent.session.shutdown();
+    }
   }
 </script>
 ```
