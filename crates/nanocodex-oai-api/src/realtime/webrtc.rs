@@ -477,7 +477,8 @@ fn spawn_microphone_encoder(
         let mut pcm = Vec::with_capacity(WEBRTC_INPUT_FRAME_SAMPLES);
         let mut encoded = vec![0_u8; OPUS_PACKET_CAPACITY];
         while let Some(audio) = input.recv().await {
-            pending.extend(audio.as_bytes().chunks_exact(2).map(|sample| {
+            let (samples, _) = audio.as_bytes().as_chunks::<2>();
+            pending.extend(samples.iter().map(|sample| {
                 f32::from(i16::from_le_bytes([sample[0], sample[1]])) / f32::from(i16::MAX)
             }));
             while pending.len() >= WEBRTC_INPUT_FRAME_SAMPLES {

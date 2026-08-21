@@ -87,7 +87,7 @@ fn parse_decimal_usd(value: &str) -> Result<u64, &'static str> {
     if value.is_empty() {
         return Err("USD amount must not be empty");
     }
-    let (whole, fractional) = value.split_once('.').map_or((value, ""), |parts| parts);
+    let (whole, fractional) = value.split_once('.').unwrap_or((value, ""));
     if whole.is_empty()
         || !whole.bytes().all(|byte| byte.is_ascii_digit())
         || !fractional.bytes().all(|byte| byte.is_ascii_digit())
