@@ -227,6 +227,24 @@ test("phone auth controls and other application targets meet mobile baselines", 
   assert.match(surfaces, /min-height:\s*44px/);
   assert.match(brand, /min-height:\s*44px/);
   assert.match(install, /min-height:\s*44px/);
+
+  assert.match(ruleBlock(indexCss, ".search-field button {", phone), /width:\s*44px[\s\S]*?height:\s*44px/);
+  assert.match(ruleBlock(indexCss, ".search-result {", phone), /min-height:\s*44px/);
+});
+
+test("expanded artifact docks stay inside every safe-area edge", () => {
+  const fullscreen = ruleBlock(terminalCss, ".nanocodex-demo.is-full .artifact-dock.is-fullscreen {", 0);
+  const compact = terminalCss.indexOf(`@media ${compactQuery}`);
+  const mobile = ruleBlock(
+    terminalCss,
+    ".nanocodex-demo.is-full .artifact-dock:not(.is-collapsed) {",
+    compact,
+  );
+
+  for (const inset of ["top", "right", "bottom", "left"]) {
+    assert.match(fullscreen, new RegExp(`max\\(18px, env\\(safe-area-inset-${inset}\\)\\)`));
+    assert.match(mobile, new RegExp(`max\\(10px, env\\(safe-area-inset-${inset}\\)\\)`));
+  }
 });
 
 test("portrait coarse-pointer tablets retain 44px controls without changing layout", () => {

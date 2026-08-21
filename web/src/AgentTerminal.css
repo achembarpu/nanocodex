@@ -457,7 +457,11 @@
 .nanocodex-demo.is-full .artifact-dock.is-fullscreen {
   position: fixed;
   z-index: 100;
-  inset: 18px;
+  inset:
+    max(18px, env(safe-area-inset-top))
+    max(18px, env(safe-area-inset-right))
+    max(18px, env(safe-area-inset-bottom))
+    max(18px, env(safe-area-inset-left));
   width: auto;
   height: auto;
 }
@@ -466,7 +470,11 @@
   .nanocodex-demo.is-full .artifact-dock:not(.is-collapsed) {
     position: fixed;
     z-index: 100;
-    inset: 10px;
+    inset:
+      max(10px, env(safe-area-inset-top))
+      max(10px, env(safe-area-inset-right))
+      max(10px, env(safe-area-inset-bottom))
+      max(10px, env(safe-area-inset-left));
     width: auto;
     height: auto;
   }

@@ -2535,12 +2535,12 @@ html[data-theme="dark"] .tui-syntax .shiki span {
   }
 
   .search-field {
-    grid-template-columns: 18px minmax(0, 1fr) 36px;
+    grid-template-columns: 18px minmax(0, 1fr) 44px;
   }
 
   .search-field button {
-    width: 36px;
-    height: 36px;
+    width: 44px;
+    height: 44px;
   }
 
   .search-field input {
@@ -2549,7 +2549,7 @@ html[data-theme="dark"] .tui-syntax .shiki span {
 
   .search-result {
     grid-template-columns: 58px minmax(0, 1fr) 14px;
-    min-height: 42px;
+    min-height: 44px;
   }
 
   .search-result > small {
