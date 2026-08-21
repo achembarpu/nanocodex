@@ -8,6 +8,8 @@ import {
   WORKER_EVENT_BATCH_MAX_BYTES,
   WORKER_EVENT_BATCH_MAX_EVENTS,
 } from "../browser/WorkerAgent.mjs";
+import { agentActions } from "../actions/index.mjs";
+import { createAgentClient, defineRuntime } from "../internal.mjs";
 import * as Transport from "../browser/Transport.mjs";
 
 test("Worker Agent preserves synchronous prompt handles, independent results, and ordered events", async () => {
@@ -41,12 +43,102 @@ test("Worker Agent preserves synchronous prompt handles, independent results, an
   fixture.complete("root", "done");
   const result = await pending;
   assert.equal(result.finalMessage, "done");
-  assert.equal(result.snapshot.workspace, "/workspace/root");
-  assert.equal(result.usage.total_tokens, 3);
+  assert.deepEqual(fixture.resultStats, { snapshots: 0, usages: 0, released: 0 });
+  const completion = worker.outgoing.find((message) => message.value?.resultId);
+  assert.deepEqual(Object.keys(completion.value).sort(), ["finalMessage", "resultId"]);
+  assert.equal(JSON.stringify(completion.value).length < 128, true);
+  assert.throws(() => structuredClone(result), /could not be cloned/i);
+
+  const [snapshot, sameSnapshot] = await Promise.all([result.snapshot(), result.snapshot()]);
+  const [usage, sameUsage] = await Promise.all([result.usage(), result.usage()]);
+  assert.equal(snapshot.workspace, "/workspace/root");
+  assert.equal(usage.total_tokens, 3);
+  assert.strictEqual(sameSnapshot, snapshot);
+  assert.strictEqual(sameUsage, usage);
+  assert.equal(Object.isFrozen(snapshot), true);
+  assert.equal(Object.isFrozen(usage), true);
+  assert.deepEqual(fixture.resultStats, { snapshots: 1, usages: 1, released: 0 });
+  assert.equal(worker.incoming.filter((message) => message.method === "result.snapshot").length, 1);
+  assert.equal(worker.incoming.filter((message) => message.method === "result.usage").length, 1);
+  result.dispose();
+  await assert.rejects(result.snapshot(), /disposed/);
+  await assert.rejects(result.usage(), /disposed/);
   turn.dispose();
   watch.off();
   agent.dispose();
   assert.equal(worker.terminated, 1);
+});
+
+test("completed results survive Turn and Agent disposal until their own async work settles", async () => {
+  const fixture = createFixture({ holdSnapshot: true });
+  const worker = new LoopbackWorker(fixture.createAgent);
+  const agent = await createWorkerAgent({ sessionId: "root", harness: false }, { worker });
+  const turn = agent.turn.prompt({ input: "retain the checkpoint" });
+  const pendingResult = turn.result();
+  await tick();
+  fixture.complete("root", "retained");
+  const result = await pendingResult;
+  turn.dispose();
+  await agent.session.shutdown();
+  assert.equal(worker.terminated, 0);
+
+  const pendingSnapshot = result.snapshot();
+  await tick();
+  result.dispose();
+  assert.equal(worker.terminated, 0);
+  fixture.releaseSnapshot();
+  assert.equal((await pendingSnapshot).workspace, "/workspace/root");
+  await tick();
+  assert.equal(worker.terminated, 1);
+  assert.equal(fixture.resultStats.released, 1);
+});
+
+test("historical result identity rejects clones, disposed handles, and another Worker", async () => {
+  const leftFixture = createFixture();
+  const rightFixture = createFixture();
+  const leftWorker = new LoopbackWorker(leftFixture.createAgent);
+  const rightWorker = new LoopbackWorker(rightFixture.createAgent);
+  const left = await createWorkerAgent({ sessionId: "left", harness: false }, { worker: leftWorker });
+  const right = await createWorkerAgent({ sessionId: "right", harness: false }, { worker: rightWorker });
+  const turn = left.turn.prompt({ input: "checkpoint" });
+  const pending = turn.result();
+  await tick();
+  leftFixture.complete("left", "done");
+  const result = await pending;
+  turn.dispose();
+
+  await assert.rejects(right.session.fork({ at: result }), /same Worker Agent/);
+  await assert.rejects(
+    right.session.fork({ at: Object.freeze({ finalMessage: "forged" }) }),
+    /completed Nanocodex turn result/,
+  );
+  result.dispose();
+  await assert.rejects(left.session.fork({ at: result }), /disposed/);
+  left.dispose();
+  right.dispose();
+  assert.equal(leftWorker.terminated, 1);
+  assert.equal(rightWorker.terminated, 1);
+});
+
+test("malformed on-demand result JSON rejects once without poisoning Worker cleanup", async () => {
+  const fixture = createFixture({ invalidSnapshot: true });
+  const worker = new LoopbackWorker(fixture.createAgent);
+  const agent = await createWorkerAgent({ sessionId: "root", harness: false }, { worker });
+  const turn = agent.turn.prompt({ input: "invalid snapshot" });
+  const pending = turn.result();
+  await tick();
+  fixture.complete("root", "done");
+  const result = await pending;
+
+  await assert.rejects(result.snapshot(), SyntaxError);
+  await assert.rejects(result.snapshot(), SyntaxError);
+  assert.equal(fixture.resultStats.snapshots, 1);
+  assert.equal((await result.usage()).total_tokens, 3);
+  result.dispose();
+  turn.dispose();
+  agent.dispose();
+  assert.equal(worker.terminated, 1);
+  assert.equal(fixture.resultStats.released, 1);
 });
 
 test("Worker event forwarding follows first/last demand with filtering, order, and immutable fan-out", async () => {
@@ -209,6 +301,7 @@ test("session, branching, realtime, and graceful lifecycle remain DefaultAgent-s
   await tick();
   fixture.complete("root", "first done");
   const completed = await firstResult;
+  first.dispose();
   const fork = await root.session.fork({ at: completed });
   const spawn = await root.session.spawn();
   assert.equal(fork.sessionId, "root-fork");
@@ -219,7 +312,6 @@ test("session, branching, realtime, and graceful lifecycle remain DefaultAgent-s
   const childWatch = spawn.events.watch();
   childWatch.onEvent((event) => childEvents.push(event.seq));
   fork.dispose();
-  first.dispose();
   await root.session.shutdown();
   fixture.emit("root-spawn", 7);
   await tick();
@@ -227,6 +319,7 @@ test("session, branching, realtime, and graceful lifecycle remain DefaultAgent-s
   await spawn.session.compact();
   childWatch.off();
   spawn.dispose();
+  completed.dispose();
   assert.equal(worker.terminated, 1);
   assert.throws(() => root.turn.prompt({ input: "late" }), /disposed/);
 });
@@ -306,10 +399,70 @@ test("rebooting a runtime disposes the replaced Agent and suppresses stale compl
   await tick();
   scope.onmessage({ data: { protocol: "nanocodex.worker-agent.v1", channel: "new", type: "boot", config: { sessionId: "new", harness: false } } });
   await tick();
-  assert.equal(created[0].agent.disposed, true);
+  assert.equal(created[0].fixture.disposedAgents.has("old"), true);
   assert.equal(outgoing.at(-1).channel, "new");
   runtime.dispose();
-  assert.equal(created[1].agent.disposed, true);
+  assert.equal(created[1].fixture.disposedAgents.has("new"), true);
+});
+
+test("a historical fork completing across reboot disposes its stale child", async () => {
+  const created = [];
+  const outgoing = [];
+  const scope = { onmessage: null, postMessage: (message) => outgoing.push(message) };
+  const runtime = installWorkerAgentRuntime(scope, {
+    async createAgent({ sessionId }) {
+      const fixture = createFixture({ holdBranches: true });
+      const agent = await fixture.createAgent({ sessionId });
+      created.push({ agent, fixture });
+      return agent;
+    },
+  });
+  const envelope = (channel, message) => ({
+    data: { protocol: "nanocodex.worker-agent.v1", channel, ...message },
+  });
+  scope.onmessage(envelope("old", {
+    type: "boot",
+    config: { sessionId: "old", harness: false },
+  }));
+  await tick();
+  scope.onmessage(envelope("old", {
+    type: "prompt",
+    id: "turn-1",
+    agentId: "agent-1",
+    turnId: "turn-1",
+    options: { input: "checkpoint" },
+  }));
+  await tick();
+  scope.onmessage(envelope("old", {
+    type: "rpc",
+    id: "completion",
+    method: "turn.result",
+    args: ["turn-1"],
+  }));
+  created[0].fixture.complete("old", "done");
+  await tick();
+  assert.equal(outgoing.find((message) => message.id === "completion").value.resultId, "result-1");
+
+  scope.onmessage(envelope("old", {
+    type: "rpc",
+    id: "historical-fork",
+    method: "agent.fork",
+    args: ["agent-1", "result-1"],
+  }));
+  await tick();
+  scope.onmessage(envelope("new", {
+    type: "boot",
+    config: { sessionId: "new", harness: false },
+  }));
+  await tick();
+  created[0].fixture.releaseBranch();
+  await tick();
+
+  assert.equal(created[0].fixture.disposedAgents.has("old-fork"), true);
+  assert.equal(outgoing.some((message) => message.id === "historical-fork"), false);
+  assert.equal(outgoing.at(-1).channel, "new");
+  runtime.dispose();
+  assert.equal(created[1].fixture.disposedAgents.has("new"), true);
 });
 
 test("Worker runtime prewarms the engine and exact browser harness before boot", async () => {
@@ -393,10 +546,53 @@ class LoopbackWorker {
 function createFixture(options = {}) {
   const watchers = new Set();
   const completions = new Map();
+  const disposedAgents = new Set();
   const log = [];
+  const resultStats = { snapshots: 0, usages: 0, released: 0 };
+  let releaseSnapshot;
+  let releaseBranch;
   const watcherStats = { active: 0, created: 0, released: 0, options: [] };
+  const runtime = defineRuntime({
+    key: "worker-test",
+    name: "Worker test Agent",
+    type: "test",
+    create: ({ sessionId = "root" } = {}) => rawAgent(sessionId),
+    dispose: (agent) => agent.free(),
+    subscribe(listener) {
+      let active = true;
+      const watcher = { listeners: new Set() };
+      watcher.listeners.add(listener);
+      watchers.add(watcher);
+      watcherStats.active += 1;
+      watcherStats.created += 1;
+      watcherStats.options.push({ includeAllSessions: true });
+      return () => {
+        if (!active) return;
+        active = false;
+        watcher.listeners.clear();
+        watchers.delete(watcher);
+        watcherStats.active -= 1;
+        watcherStats.released += 1;
+      };
+    },
+    decorate: (agent) => agent.extend(agentActions()),
+  });
   const fixture = {
+    disposedAgents,
     log,
+    resultStats,
+    releaseSnapshot() {
+      if (!releaseSnapshot) throw new Error("no retained snapshot request is pending");
+      const release = releaseSnapshot;
+      releaseSnapshot = undefined;
+      release();
+    },
+    releaseBranch() {
+      if (!releaseBranch) throw new Error("no retained branch request is pending");
+      const release = releaseBranch;
+      releaseBranch = undefined;
+      release();
+    },
     watcherStats,
     emit(requestId, seq, payload = {}) {
       const event = { protocol_version: 1, request_id: requestId, seq, type: "test", payload };
@@ -410,91 +606,99 @@ function createFixture(options = {}) {
       const completion = completions.get(sessionId);
       if (!completion) throw new Error(`no pending turn for ${sessionId}`);
       completions.delete(sessionId);
+      const snapshot = Object.freeze({
+        version: 1,
+        model: "gpt-5.6-sol",
+        lineage_id: sessionId,
+        prompt_cache_key: sessionId,
+        workspace: `/workspace/${sessionId}`,
+        canonical_context: {},
+        history: [],
+      });
+      const usage = Object.freeze({
+        input_tokens: 1,
+        cached_input_tokens: 0,
+        cache_write_input_tokens: 0,
+        output_tokens: 2,
+        reasoning_output_tokens: 0,
+        total_tokens: 3,
+        estimated_cost: null,
+        cost_status: "usage_not_reported",
+      });
+      let released = false;
+      const encodedSnapshot = JSON.stringify(snapshot);
       completion({
         finalMessage,
-        snapshot: Object.freeze({
-          version: 1,
-          model: "gpt-5.6-sol",
-          lineage_id: sessionId,
-          prompt_cache_key: sessionId,
-          workspace: `/workspace/${sessionId}`,
-          canonical_context: {},
-          history: [],
-        }),
-        usage: Object.freeze({
-          input_tokens: 1,
-          cached_input_tokens: 0,
-          cache_write_input_tokens: 0,
-          output_tokens: 2,
-          reasoning_output_tokens: 0,
-          total_tokens: 3,
-          estimated_cost: null,
-          cost_status: "usage_not_reported",
-        }),
+        snapshot() {
+          resultStats.snapshots += 1;
+          if (options.invalidSnapshot) return "{";
+          if (!options.holdSnapshot) return encodedSnapshot;
+          return new Promise((resolve) => { releaseSnapshot = () => resolve(encodedSnapshot); });
+        },
+        usage() { resultStats.usages += 1; return JSON.stringify(usage); },
+        free() {
+          if (released) return;
+          released = true;
+          resultStats.released += 1;
+        },
       });
     },
-    async createAgent({ sessionId = "root" } = {}) { return fakeAgent(sessionId); },
+    createAgent(config = {}) { return createAgentClient(runtime, config); },
   };
 
-  function fakeAgent(sessionId) {
+  function rawAgent(sessionId) {
+    let disposed = false;
     const agent = {
       sessionId,
-      disposed: false,
-      events: {
-        watch(watchOptions = {}) {
-          let active = true;
-          const watcher = { listeners: new Set() };
-          watchers.add(watcher);
-          watcherStats.active += 1;
-          watcherStats.created += 1;
-          watcherStats.options.push(watchOptions);
-          return {
-            onEvent(listener) {
-              watcher.listeners.add(listener);
-              return () => watcher.listeners.delete(listener);
-            },
-            off() {
-              if (!active) return;
-              active = false;
-              watcher.listeners.clear();
-              watchers.delete(watcher);
-              watcherStats.active -= 1;
-              watcherStats.released += 1;
-            },
-            async *[Symbol.asyncIterator]() {},
-          };
-        },
+      prompt(input, id) {
+        log.push(["prompt", sessionId, input, id]);
+        let resolve;
+        const result = new Promise((accept) => { resolve = accept; });
+        completions.set(sessionId, resolve);
+        return {
+          result: () => result,
+          async steer(steering) { log.push(["steer", sessionId, steering]); },
+          async cancel() { log.push(["cancel", sessionId]); },
+          free() { log.push(["turn-dispose", sessionId]); },
+        };
       },
-      turn: {
-        prompt({ input, id }) {
-          log.push(["prompt", sessionId, typeof input === "string" ? input : input[0].text, id]);
-          let resolve;
-          const result = new Promise((accept) => { resolve = accept; });
-          completions.set(sessionId, resolve);
-          return {
-            result: () => result,
-            async steer({ input: steering }) { log.push(["steer", sessionId, typeof steering === "string" ? steering : steering[0].text]); },
-            async cancel() { log.push(["cancel", sessionId]); },
-            dispose() { log.push(["turn-dispose", sessionId]); },
-          };
-        },
+      promptContent(input, id) { return agent.prompt(JSON.parse(input)[0].text, id); },
+      async fork() { log.push(["fork", sessionId]); return branch(`${sessionId}-fork`); },
+      async forkFrom(at) { log.push([at ? "fork-at" : "fork", sessionId]); return branch(`${sessionId}-fork`); },
+      async spawn() { log.push(["spawn", sessionId]); return branch(`${sessionId}-spawn`); },
+      compact() {
+        log.push(["compact", sessionId]);
+        return options.holdCompaction ? new Promise(() => {}) : Promise.resolve();
       },
-      session: {
-        async fork({ at } = {}) { log.push([at ? "fork-at" : "fork", sessionId]); return fakeAgent(`${sessionId}-fork`); },
-        async spawn() { log.push(["spawn", sessionId]); return fakeAgent(`${sessionId}-spawn`); },
-        compact() { log.push(["compact", sessionId]); return options.holdCompaction ? new Promise(() => {}) : Promise.resolve(); },
-        async setThinking(value) { log.push(["thinking", sessionId, value]); },
-        async setFastMode(value) { log.push(["fast", sessionId, value]); },
-        async appendDeveloperMessage(text) { log.push(["developer", sessionId, text]); return { workspace: `/workspace/${sessionId}`, history: [] }; },
-        async shutdown() { log.push(["shutdown", sessionId]); agent.dispose(); },
-        realtime: {
-          async start() { log.push(["realtime-start", sessionId]); return { workspace: `/workspace/${sessionId}`, history: [] }; },
-          async end() { log.push(["realtime-end", sessionId]); return { workspace: `/workspace/${sessionId}`, history: [] }; },
-        },
+      async setThinking(value) { log.push(["thinking", sessionId, value]); },
+      async setFastMode(value) { log.push(["fast", sessionId, value]); },
+      async appendDeveloperMessage(text) {
+        log.push(["developer", sessionId, text]);
+        return JSON.stringify({ workspace: `/workspace/${sessionId}`, history: [] });
       },
-      dispose() { if (!agent.disposed) { agent.disposed = true; log.push(["agent-dispose", sessionId]); } },
+      async startRealtimeConversation() {
+        log.push(["realtime-start", sessionId]);
+        return JSON.stringify({ workspace: `/workspace/${sessionId}`, history: [] });
+      },
+      async endRealtimeConversation() {
+        log.push(["realtime-end", sessionId]);
+        return JSON.stringify({ workspace: `/workspace/${sessionId}`, history: [] });
+      },
+      async shutdown() { log.push(["shutdown", sessionId]); },
+      free() {
+        if (disposed) return;
+        disposed = true;
+        disposedAgents.add(sessionId);
+        log.push(["agent-dispose", sessionId]);
+      },
     };
     return agent;
+
+    function branch(childSessionId) {
+      const child = rawAgent(childSessionId);
+      if (!options.holdBranches) return child;
+      return new Promise((resolve) => { releaseBranch = () => resolve(child); });
+    }
   }
   return fixture;
 }

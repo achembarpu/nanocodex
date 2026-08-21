@@ -217,7 +217,7 @@ export type TurnUsage = Readonly<{
   cost_status: CostStatus;
 }>;
 
-export type ForkOptions = { at?: TurnResult | undefined };
+export type ForkOptions = Readonly<{ at?: TurnResult | undefined }>;
 export type WatchEventsOptions = { includeAllSessions?: boolean | undefined };
 
 /** Read-only model context captured at the latest safe agent boundary. */
@@ -285,10 +285,14 @@ export type Turn<agent extends Agent<object> = Agent<object>> = Readonly<{
   dispose(): void;
 }>;
 
+declare const turnResultBrand: unique symbol;
+/** Opaque completed-turn identity. Materialize large values explicitly and release it when done. */
 export type TurnResult = Readonly<{
+  readonly [turnResultBrand]: "NanocodexTurnResult";
   finalMessage: string;
-  snapshot: SessionSnapshot;
-  usage: TurnUsage;
+  snapshot(): Promise<SessionSnapshot>;
+  usage(): Promise<TurnUsage>;
+  dispose(): void;
 }>;
 
 export type ToolContext = {

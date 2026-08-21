@@ -22,9 +22,10 @@ const turn = agent.turn.prompt({ input: "Build the thing." });
 const result = await turn.result();
 turn.dispose();
 console.log(result.finalMessage);
-console.log(result.usage);
-console.log(result.usage.estimated_cost?.usd);
-console.log(result.usage.cost_status);
+const usage = await result.usage();
+console.log(usage);
+console.log(usage.estimated_cost?.usd);
+console.log(usage.cost_status);
 
 await agent.session.setThinking("high");
 await agent.session.setFastMode(true);
@@ -35,10 +36,14 @@ const branchTurn = branch.turn.prompt({ input: "Try another approach." });
 const branchResult = await branchTurn.result();
 branchTurn.dispose();
 console.log(branchResult.finalMessage);
+branchResult.dispose();
 
 const followOn = Actions.turn.prompt(agent, { input: "Now explain it." });
-console.log((await Actions.turn.getResult(followOn)).finalMessage);
+const followResult = await Actions.turn.getResult(followOn);
+console.log(followResult.finalMessage);
 followOn.dispose();
+followResult.dispose();
+result.dispose();
 await branch.session.shutdown();
 await agent.session.shutdown();
 ```
@@ -534,7 +539,8 @@ Completed results can be persisted and resumed by a fresh Node or browser
 agent:
 
 ```js
-const snapshot = result.snapshot;
+const snapshot = await result.snapshot();
+result.dispose();
 await agent.session.shutdown();
 
 const resumed = await Agent.create({
@@ -611,8 +617,8 @@ an owned client decorated with matching domain actions:
 
 - `agent.turn.prompt(...)` / `Actions.turn.prompt(agent, ...)`
 - `turn.result()` / `Actions.turn.getResult(turn)`
-- `result.snapshot` / `Actions.turn.getSnapshot(result)`
-- `result.usage` / `Actions.turn.getUsage(result)`
+- `result.snapshot()` / `Actions.turn.getSnapshot(result)`
+- `result.usage()` / `Actions.turn.getUsage(result)`
 - `agent.session.fork(...)` / `Actions.session.fork(agent, ...)`
 - `agent.session.compact()` / `Actions.session.compact(agent)`
 - `agent.session.setThinking(...)` / `Actions.session.setThinking(agent, ...)`
@@ -621,10 +627,21 @@ an owned client decorated with matching domain actions:
 - `agent.session.spawn()` / `Actions.session.spawn(agent)`
 - `agent.events.watch(...)` / `Actions.events.watch(agent, ...)`
 
-`turn.result()` resolves to a frozen completed `TurnResult`. Its
-`finalMessage` is eager; `usage` and `snapshot` cross the WASM boundary lazily
-once and are then cached. Historical `fork({ at })` accepts this completed
-result, never an unfinished turn or a provider response ID.
+`turn.result()` resolves to a frozen, opaque completed `TurnResult` handle. Its
+`finalMessage` is eager. The async `usage()` and `snapshot()` actions materialize
+immutable values once and cache their promises. A package Worker completes a
+turn with only the message and hidden result identity; Rust-produced snapshot
+JSON crosses the Worker boundary only on first demand and is parsed once in the
+calling isolate. Historical `fork({ at })` consumes the hidden identity directly,
+never an unfinished turn, clone, snapshot, or provider response ID.
+
+The completed result owns its identity independently from the `Turn`, so
+`turn.dispose()` does not invalidate a successful result. Call `result.dispose()`
+after its last fork/materialization; this releases the retained Worker/native
+checkpoint and invalidates future `snapshot()`, `usage()`, and historical forks.
+An undisposed result intentionally keeps its package Worker alive after the last
+Agent shuts down so its lazy values remain available. Garbage collection is only
+a fallback for forgotten handles, not deterministic cleanup.
 
 `turn.dispose()` only releases the JavaScript/WASM handle; like dropping the
 Rust `Turn`, it does not cancel accepted work. Await `turn.cancel()` before
@@ -746,6 +763,7 @@ package manager or build step:
   try {
     const result = await turn.result();
     console.log(result.finalMessage);
+    result.dispose();
   } finally {
     turn.dispose();
     await agent.session.shutdown();

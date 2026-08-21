@@ -3,10 +3,13 @@ import {
   createAgentClient,
   defineRuntime,
   freezeJson,
+  getEncodedTurnSnapshot,
+  getEncodedTurnUsage,
   reportError,
 } from "../internal.mjs";
 
 const DEFAULT_MAX_PENDING_RPCS = 1_024;
+const MAX_RETAINED_RESULTS = 1_024;
 export const WORKER_EVENT_BATCH_MAX_EVENTS = 256;
 export const WORKER_EVENT_BATCH_MAX_BYTES = 256 * 1024;
 const PREWARM_TIMEOUT_MS = 15_000;
@@ -119,6 +122,7 @@ export function installWorkerAgentRuntime(scope = globalThis, options = {}) {
   let eventFlushScheduled = false;
   let eventDeliveryGeneration = 0;
   let nextAgent = 1;
+  let nextResult = 1;
   let nextChunkedEvent = 1;
   const agents = new Map();
   const turns = new Map();
@@ -141,7 +145,9 @@ export function installWorkerAgentRuntime(scope = globalThis, options = {}) {
       try { agent.dispose(); } catch (error) { reportError(error); }
     }
     turns.clear();
-    results.clear();
+    for (const resultId of [...results.keys()]) {
+      try { releaseWorkerResult(results, resultId); } catch (error) { reportError(error); }
+    }
     agents.clear();
   };
 
@@ -151,6 +157,7 @@ export function installWorkerAgentRuntime(scope = globalThis, options = {}) {
     cleanup();
     channel = message.channel;
     nextAgent = 1;
+    nextResult = 1;
     try {
       const agent = await createAgent(await hydrateConfig(message.config));
       if (currentGeneration !== generation) {
@@ -172,7 +179,9 @@ export function installWorkerAgentRuntime(scope = globalThis, options = {}) {
         agents,
         turns,
         results,
-        allocateAgent,
+        allocateAgent: (agent) => allocateAgent(agent, currentGeneration),
+        allocateResult,
+        isCurrent: () => currentGeneration === generation,
         moveWatcherFrom,
         setEventsEnabled,
       });
@@ -182,11 +191,27 @@ export function installWorkerAgentRuntime(scope = globalThis, options = {}) {
     }
   };
 
-  function allocateAgent(agent) {
+  function allocateAgent(agent, expectedGeneration) {
+    if (expectedGeneration !== generation) {
+      agent.dispose();
+      throw new Error("the Worker Agent child belongs to a replaced runtime");
+    }
     const id = `agent-${nextAgent++}`;
     agents.set(id, agent);
     if (eventsEnabled && !watcher) watchAgent(id, agent);
     return describeAgent(id, agent);
+  }
+
+  function allocateResult(result) {
+    if (results.size >= MAX_RETAINED_RESULTS) {
+      result.dispose();
+      throw new RangeError(
+        `Worker Agent exceeded its bound of ${MAX_RETAINED_RESULTS} retained turn results`,
+      );
+    }
+    const id = `result-${nextResult++}`;
+    results.set(id, { active: 0, released: false, result });
+    return id;
   }
 
   function watchAgent(agentId, agent, expectedGeneration = generation) {
@@ -365,23 +390,44 @@ async function dispatch(message, state) {
   const { method, args = [] } = message;
   if (method === "turn.result") {
     const turn = required(turns, args[0], "turn");
-    const result = await turn.result();
-    results.set(args[0], result);
-    return { finalMessage: result.finalMessage, snapshot: result.snapshot, usage: result.usage, resultId: args[0] };
+    let result;
+    try {
+      result = await turn.result();
+    } finally {
+      if (turns.get(args[0]) === turn) turns.delete(args[0]);
+      turn.dispose();
+    }
+    if (!state.isCurrent()) {
+      result.dispose();
+      throw new Error("the Worker Agent completion belongs to a replaced runtime");
+    }
+    const resultId = state.allocateResult(result);
+    return { finalMessage: result.finalMessage, resultId };
   }
   if (method === "turn.steer") return required(turns, args[0], "turn").steer(args[1]);
   if (method === "turn.cancel") return required(turns, args[0], "turn").cancel();
   if (method === "turn.dispose") {
     const turn = turns.get(args[0]);
     turns.delete(args[0]);
-    results.delete(args[0]);
     turn?.dispose();
+    return;
+  }
+  if (method === "result.snapshot") {
+    return withWorkerResult(results, args[0], getEncodedTurnSnapshot);
+  }
+  if (method === "result.usage") {
+    return withWorkerResult(results, args[0], getEncodedTurnUsage);
+  }
+  if (method === "result.dispose") {
+    releaseWorkerResult(results, args[0]);
     return;
   }
   const agent = required(agents, args[0], "agent");
   if (method === "agent.fork") {
-    const at = args[1] === undefined ? undefined : required(results, args[1], "turn result");
-    return state.allocateAgent(await agent.session.fork(at === undefined ? {} : { at }));
+    if (args[1] === undefined) return state.allocateAgent(await agent.session.fork());
+    return withWorkerResult(results, args[1], async (at) => (
+      state.allocateAgent(await agent.session.fork({ at }))
+    ));
   }
   if (method === "agent.spawn") return state.allocateAgent(await agent.session.spawn());
   if (method === "agent.compact") return agent.session.compact();
@@ -409,6 +455,25 @@ function required(map, id, kind) {
   return value;
 }
 
+async function withWorkerResult(results, resultId, action) {
+  const entry = required(results, resultId, "turn result");
+  entry.active += 1;
+  try {
+    return await action(entry.result);
+  } finally {
+    entry.active -= 1;
+    if (entry.released && entry.active === 0) entry.result.dispose();
+  }
+}
+
+function releaseWorkerResult(results, resultId) {
+  const entry = results.get(resultId);
+  if (!entry) return;
+  results.delete(resultId);
+  entry.released = true;
+  if (entry.active === 0) entry.result.dispose();
+}
+
 function describeAgent(agentId, agent) {
   return { agentId, sessionId: agent.sessionId };
 }
@@ -426,6 +491,8 @@ class WorkerConnection {
     this.listeners = new Set();
     this.chunkedEvent = undefined;
     this.agents = 0;
+    this.results = 0;
+    this.operations = 0;
     this.closed = false;
     worker.onmessage = ({ data }) => this.receive(data);
     worker.onerror = (event) => this.fail(new Error(event?.message || "Nanocodex Agent Worker failed"));
@@ -446,20 +513,21 @@ class WorkerConnection {
       type: "browser",
       create: (descriptor) => this.rawAgent(descriptor),
       subscribe: (listener) => this.subscribe(listener),
-      adopt: () => { this.agents += 1; },
       dispose: (raw) => {
         if (!raw.released) {
           raw.released = true;
           this.sendBestEffort("agent.dispose", [raw.agentId]);
           this.agents -= 1;
         }
-        if (this.agents === 0) this.close(new Error("the Nanocodex Agent Worker has been disposed"));
+        this.closeIfIdle();
       },
       decorate: (agent) => agent.extend(agentActions()),
     });
   }
 
   rawAgent(descriptor) {
+    this.assertOpen();
+    this.agents += 1;
     const connection = this;
     const { agentId } = descriptor;
     return {
@@ -469,7 +537,12 @@ class WorkerConnection {
       prompt(input, id) { return connection.prompt(agentId, { input, ...(id === undefined ? {} : { id }) }); },
       promptContent(input, id) { return connection.prompt(agentId, { input: JSON.parse(input), ...(id === undefined ? {} : { id }) }); },
       fork: async () => connection.rawAgent(await connection.rpc("agent.fork", [agentId])),
-      forkFrom: async (result) => connection.rawAgent(await connection.rpc("agent.fork", [agentId, result.resultId])),
+      forkFrom: async (result) => {
+        if (result?.connection !== connection) {
+          throw new TypeError("historical forks require a result from the same Worker Agent");
+        }
+        return connection.rawAgent(await connection.rpc("agent.fork", [agentId, result.resultId]));
+      },
       spawn: async () => connection.rawAgent(await connection.rpc("agent.spawn", [agentId])),
       compact: () => connection.rpc("agent.compact", [agentId]),
       setThinking: (value) => connection.rpc("agent.setThinking", [agentId, value]),
@@ -517,15 +590,38 @@ class WorkerConnection {
     assertCloneable(args, method);
     const id = `rpc-${this.nextRpc++}`;
     const promise = this.pendingCall(id);
+    this.operations += 1;
     try { this.send({ type: "rpc", id, method, args }); }
     catch (error) { this.rejectPending(id, error); }
-    return promise;
+    return promise.finally(() => {
+      if (this.closed) return;
+      this.operations -= 1;
+      queueMicrotask(() => queueMicrotask(() => this.closeIfIdle()));
+    });
   }
 
   sendBestEffort(method, args) {
     if (this.closed) return;
     const id = `rpc-${this.nextRpc++}`;
     try { this.send({ type: "rpc", id, method, args, noReply: true }); } catch {}
+  }
+
+  adoptResult() {
+    this.assertOpen();
+    this.results += 1;
+  }
+
+  releaseResult(resultId) {
+    if (this.results === 0) return;
+    this.sendBestEffort("result.dispose", [resultId]);
+    this.results -= 1;
+    this.closeIfIdle();
+  }
+
+  closeIfIdle() {
+    if (this.agents === 0 && this.results === 0 && this.operations === 0) {
+      this.close(new Error("the Nanocodex Agent Worker has been disposed"));
+    }
   }
 
   subscribe(listener) {
@@ -702,12 +798,31 @@ class WorkerConnection {
 
 async function connectionResult(connection, turnId) {
   const result = await connection.rpc("turn.result", [turnId]);
+  if (!result || typeof result.finalMessage !== "string" || typeof result.resultId !== "string") {
+    if (typeof result?.resultId === "string") {
+      connection.sendBestEffort("result.dispose", [result.resultId]);
+    }
+    throw new TypeError("Nanocodex Agent Worker returned an invalid turn result handle");
+  }
+  let released = false;
+  connection.adoptResult();
   return {
+    connection,
     finalMessage: result.finalMessage,
     resultId: result.resultId,
-    snapshot: () => JSON.stringify(result.snapshot),
-    usage: () => JSON.stringify(result.usage),
-    free() {},
+    snapshot() {
+      if (released) return Promise.reject(new Error("the Nanocodex turn result has been disposed"));
+      return connection.rpc("result.snapshot", [result.resultId]);
+    },
+    usage() {
+      if (released) return Promise.reject(new Error("the Nanocodex turn result has been disposed"));
+      return connection.rpc("result.usage", [result.resultId]);
+    },
+    free() {
+      if (released) return;
+      released = true;
+      connection.releaseResult(result.resultId);
+    },
   };
 }
 

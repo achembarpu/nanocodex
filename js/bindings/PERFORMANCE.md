@@ -21,6 +21,7 @@ installation and lifecycle fixtures cannot contend with microbenchmarks.
 | JavaScript prompt action | 5 µs per call |
 | Enqueue and drain 4,096 ordered events | 50 ms |
 | Hosted Code Mode execution | 250 µs per call |
+| Package-Worker completed-result envelope | 256 encoded bytes |
 | Packed npm tarball | 1.1 MB |
 | Unpacked npm package | 4.9 MB |
 
@@ -28,6 +29,13 @@ The warm measurements include enough unmeasured calls for V8 to tier up the
 WASM constructor. The test separately proves that Node compiles and
 instantiates its module once, and that browser agents reuse one caller-compiled
 module and WASM instance.
+
+The Worker result gate retains an 8 MiB snapshot behind a completed native
+result, awaits `turn.result()`, and requires zero eager snapshot reads plus a
+completion envelope below 256 bytes. Two concurrent `result.snapshot()` calls
+must then share one Worker RPC, one Rust-owned JSON payload, and one immutable
+parsed value. This models retained conversation growth without charging the
+completion path for state the caller may never request.
 
 The npm package intentionally contains separate Node and web glue plus a copy
 of the same optimized Rust artifact beside each entry point. `wasm-bindgen`
@@ -42,6 +50,8 @@ On Apple Silicon with Node 23.6.0, the 2026-07-28 baseline was:
 - Prompt action: 2.8 µs.
 - 4,096 buffered events: 16.7 ms.
 - Hosted Code Mode execution: 76.4 µs.
+- 8 MiB retained Worker snapshot: 45-byte eager envelope, zero eager
+  materializations, one on-demand RPC/materialization.
 - npm package: 980,214 bytes compressed and 4,737,347 bytes unpacked.
 
 Before the bounded indexed event queue, draining 100,000 buffered events took

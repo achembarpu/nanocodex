@@ -222,7 +222,8 @@ test("Node-hosted WASM preserves follow-ons, cache identity, events, and custom 
   const firstTurn = agent.turn.prompt({ input: "Use multiply for 6 × 7." });
   const first = await firstTurn.result();
   assert.equal(first.finalMessage, "42");
-  assert.deepEqual(first.usage, {
+  const usage = await first.usage();
+  assert.deepEqual(usage, {
     input_tokens: 20,
     cached_input_tokens: 10,
     cache_write_input_tokens: 0,
@@ -239,7 +240,7 @@ test("Node-hosted WASM preserves follow-ons, cache identity, events, and custom 
     },
     cost_status: "estimated_from_usage",
   });
-  assert.strictEqual(Actions.turn.getUsage(first), first.usage);
+  assert.strictEqual(await Actions.turn.getUsage(first), usage);
   await agent.session.setThinking("high");
   await agent.session.setFastMode(true);
   const second = await Actions.turn.getResult(
@@ -426,10 +427,10 @@ test("WASM snapshots resume authoritative history in a fresh agent", async () =>
   })();
   const first = await original.turn.prompt({ input: "remember cobalt" }).result();
   assert.equal(first.finalMessage, "stored");
-  const snapshot = first.snapshot;
+  const snapshot = await first.snapshot();
   assert.equal(snapshot.version, 1);
   assert.equal(snapshot.workspace, "/virtual/original-workspace");
-  assert.strictEqual(Actions.turn.getSnapshot(first), snapshot);
+  assert.strictEqual(await Actions.turn.getSnapshot(first), snapshot);
   await originalScenario;
   original.dispose();
   await originalServer.close();

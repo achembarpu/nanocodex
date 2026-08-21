@@ -1,6 +1,11 @@
 const agentStates = new WeakMap();
 const turnStates = new WeakMap();
 const resultStates = new WeakMap();
+const resultFinalizer = typeof FinalizationRegistry === "function"
+  ? new FinalizationRegistry((raw) => {
+      try { raw.free(); } catch (error) { reportError(error); }
+    })
+  : undefined;
 const hostSessions = new Map();
 const hostConnections = new Map();
 const definitionHosts = new Map();
@@ -44,9 +49,13 @@ export function prompt(agent, options) {
 
 export function getTurnResult(turn) {
   const state = turnState(turn);
-  state.result ||= Promise.resolve()
-    .then(() => state.raw.result())
-    .then(createTurnResult);
+  if (!state.result) {
+    try {
+      state.result = Promise.resolve(state.raw.result()).then(createTurnResult);
+    } catch (error) {
+      state.result = Promise.reject(error);
+    }
+  }
   return state.result;
 }
 
@@ -56,6 +65,16 @@ export function getTurnSnapshot(result) {
 
 export function getTurnUsage(result) {
   return resultState(result).usage();
+}
+
+/** Internal Worker seam: preserves the Rust-owned encoding until it reaches its consumer. */
+export function getEncodedTurnSnapshot(result) {
+  return encodedTurnResultValue(resultState(result), "snapshot");
+}
+
+/** Internal Worker seam: preserves the Rust-owned encoding until it reaches its consumer. */
+export function getEncodedTurnUsage(result) {
+  return encodedTurnResultValue(resultState(result), "usage");
 }
 
 export function steer(turn, options) {
@@ -568,30 +587,64 @@ function createTurnResult(raw) {
     || typeof raw.finalMessage !== "string"
     || typeof raw.snapshot !== "function"
     || typeof raw.usage !== "function"
+    || typeof raw.free !== "function"
   ) {
     raw?.free?.();
     throw new TypeError("the runtime returned an invalid Nanocodex turn result");
   }
   const state = {
+    disposed: false,
     raw,
-    snapshotValue: undefined,
-    usageValue: undefined,
+    snapshotPromise: undefined,
+    usagePromise: undefined,
     snapshot() {
-      state.snapshotValue ||= freezeJson(JSON.parse(raw.snapshot()));
-      return state.snapshotValue;
+      if (state.disposed) return Promise.reject(new Error("the Nanocodex turn result has been disposed"));
+      state.snapshotPromise ||= materializeTurnResultValue(state, "snapshot");
+      return state.snapshotPromise;
     },
     usage() {
-      state.usageValue ||= freezeJson(JSON.parse(raw.usage()));
-      return state.usageValue;
+      if (state.disposed) return Promise.reject(new Error("the Nanocodex turn result has been disposed"));
+      state.usagePromise ||= materializeTurnResultValue(state, "usage");
+      return state.usagePromise;
     },
   };
   const result = {
     finalMessage: raw.finalMessage,
-    get snapshot() { return state.snapshot(); },
-    get usage() { return state.usage(); },
+    snapshot: () => state.snapshot(),
+    usage: () => state.usage(),
+    dispose() {
+      if (state.disposed) return;
+      state.disposed = true;
+      resultFinalizer?.unregister(result);
+      state.raw.free();
+    },
   };
   resultStates.set(result, state);
+  resultFinalizer?.register(result, raw, result);
   return Object.freeze(result);
+}
+
+function materializeTurnResultValue(state, method) {
+  let encoded;
+  try {
+    encoded = state.raw[method]();
+  } catch (error) {
+    return Promise.reject(error);
+  }
+  return Promise.resolve(encoded).then((value) => {
+    if (typeof value !== "string") {
+      throw new TypeError(`the runtime returned an invalid encoded turn ${method}`);
+    }
+    return freezeJson(JSON.parse(value));
+  });
+}
+
+async function encodedTurnResultValue(state, method) {
+  const encoded = await state.raw[method]();
+  if (typeof encoded !== "string") {
+    throw new TypeError(`the runtime returned an invalid encoded turn ${method}`);
+  }
+  return encoded;
 }
 
 function agentState(agent) {
@@ -616,6 +669,7 @@ function turnState(turn) {
 function resultState(result) {
   const state = resultStates.get(result);
   if (!state) throw new TypeError("expected a completed Nanocodex turn result");
+  if (state.disposed) throw new Error("the Nanocodex turn result has been disposed");
   return state;
 }
 

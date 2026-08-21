@@ -109,14 +109,16 @@ async function check() {
   const completed: TurnResult = await sameTurn.result();
   const sameResult: Actions.turn.getResult.ReturnType = completed;
   const message: string = completed.finalMessage;
-  const snapshot: SessionSnapshot = completed.snapshot;
-  const usage: Actions.turn.getUsage.ReturnType = completed.usage;
+  const snapshotPromise: Promise<SessionSnapshot> = completed.snapshot();
+  const usagePromise: Promise<Actions.turn.getUsage.ReturnType> = completed.usage();
+  const snapshot: Actions.turn.getSnapshot.ReturnType = await Actions.turn.getSnapshot(completed);
+  const usage: Actions.turn.getUsage.ReturnType = await Actions.turn.getUsage(completed);
   usage.estimated_cost?.usd;
   const costStatus: CostStatus = usage.cost_status;
-  Actions.turn.getSnapshot(completed);
-  Actions.turn.getUsage(completed);
   void message;
   void sameResult;
+  void snapshotPromise;
+  void usagePromise;
   void usage;
   void costStatus;
 
@@ -143,6 +145,7 @@ async function check() {
   await Actions.session.fork(agent, { at: turn });
   // @ts-expect-error snapshots belong to completed results, not active turns.
   turn.snapshot();
+  completed.dispose();
 
   const watch: Actions.events.watch.Watcher = agent.events.watch();
   watch.onEvent((event) => event.payload);

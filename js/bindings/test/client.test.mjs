@@ -126,10 +126,15 @@ test("the headless client exposes matching direct and standalone actions", async
   assert.deepEqual(Object.getOwnPropertySymbols(firstTurn), []);
   assert.deepEqual(Object.getOwnPropertySymbols(first), []);
   assert.equal(Object.isFrozen(first), true);
-  assert.equal(Object.isFrozen(first.usage), true);
-  assert.equal(Object.isFrozen(first.snapshot), true);
-  assert.strictEqual(Actions.turn.getUsage(first), first.usage);
-  assert.strictEqual(Actions.turn.getSnapshot(first), first.snapshot);
+  const [usage, sameUsage] = await Promise.all([first.usage(), Actions.turn.getUsage(first)]);
+  const [snapshot, sameSnapshot] = await Promise.all([
+    first.snapshot(),
+    Actions.turn.getSnapshot(first),
+  ]);
+  assert.equal(Object.isFrozen(usage), true);
+  assert.equal(Object.isFrozen(snapshot), true);
+  assert.strictEqual(sameUsage, usage);
+  assert.strictEqual(sameSnapshot, snapshot);
   const secondTurn = Actions.turn.prompt(agent, { input: "second" });
   const second = await Actions.turn.getResult(secondTurn);
   assert.equal(second.finalMessage, "session-1:second");
@@ -164,6 +169,7 @@ test("the headless client exposes matching direct and standalone actions", async
     (await branch.turn.prompt({ input: "branch" }).result()).finalMessage,
     "session-1-fork:branch",
   );
+  first.dispose();
 
   const fresh = await agent.session.spawn();
   assert.equal(fresh.sessionId, "session-1-spawn");

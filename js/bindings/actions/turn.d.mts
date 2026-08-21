@@ -23,14 +23,14 @@ export declare namespace getResult {
   type ReturnType = TurnResult;
 }
 
-/** Returns a completed result's serializable session snapshot. */
-export function getSnapshot(result: TurnResult): getSnapshot.ReturnType;
+/** Materializes a completed result's serializable session snapshot. */
+export function getSnapshot(result: TurnResult): Promise<getSnapshot.ReturnType>;
 export declare namespace getSnapshot {
   type ReturnType = SessionSnapshot;
 }
 
-/** Returns exact aggregate token usage from a completed result. */
-export function getUsage(result: TurnResult): getUsage.ReturnType;
+/** Materializes exact aggregate token usage from a completed result. */
+export function getUsage(result: TurnResult): Promise<getUsage.ReturnType>;
 export declare namespace getUsage {
   type ReturnType = TurnUsage;
 }
