@@ -492,7 +492,7 @@ fn nanos_ms(nanos: u64) -> f64 {
     std::time::Duration::from_nanos(nanos).as_secs_f64() * 1_000.0
 }
 
-fn median(sorted: &[f64]) -> f64 {
+const fn median(sorted: &[f64]) -> f64 {
     let middle = sorted.len() / 2;
     if sorted.len().is_multiple_of(2) {
         sorted[middle - 1].midpoint(sorted[middle])
