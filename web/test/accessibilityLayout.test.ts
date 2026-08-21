@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const codeBrowser = source("../src/CodeBrowser.tsx");
+const commitStream = source("../src/CommitCodeStream.tsx");
 const diffViewer = source("../src/DiffsHubViewer.tsx");
 const evalAnalytics = source("../src/EvalAnalytics.tsx");
 const evals = source("../src/LiveEvals.tsx");
@@ -33,6 +34,25 @@ test("the Source tree exposes only Pierre's virtualized rows as the ARIA tree", 
   assert.doesNotMatch(codeBrowser, /<FileTree[\s\S]*?header=/);
   assert.match(codeBrowser, /themeToTreeStyles/);
   assert.match(codeBrowser, /role="group"[\s\S]*?File path:/);
+});
+
+test("mobile commit overlays own focus, background interaction, and scroll", () => {
+  assert.match(application, /role=\{commitRailModalOpen \? "dialog" : "complementary"\}/);
+  assert.match(application, /aria-modal=\{commitRailModalOpen \? true : undefined\}/);
+  assert.match(application, /inert=\{commitModalOpen \? true : undefined\}/);
+  assert.match(application, /inert=\{commitSearchModalOpen \? true : undefined\}/);
+  assert.match(application, /root\.style\.overflow = "hidden"/);
+  assert.match(application, /root\.style\.overscrollBehavior = "none"/);
+  assert.match(application, /body\.style\.overflow = "hidden"/);
+  assert.match(application, /new MutationObserver\(inertBackground\)/);
+  assert.match(application, /containModalFocus\(event, commitRailRef\.current\)/);
+  assert.match(application, /containModalFocus\(event, searchDialogRef\.current\)/);
+  assert.match(application, /restoreModalFocus\(commitRailOpenerRef\)/);
+  assert.match(application, /restoreModalFocus\(searchOpenerRef\)/);
+  assert.match(application, /commitRailCloseRef\.current\?\.focus\(\)/);
+  assert.match(application, /searchInputRef\.current\?\.focus\(\)/);
+  assert.match(commitStream, /aria-controls="commit-index"/);
+  assert.match(commitStream, /aria-expanded=\{commitRailOpen \?\? false\}/);
 });
 
 test("eval legends use named groups instead of labels on generic elements", () => {

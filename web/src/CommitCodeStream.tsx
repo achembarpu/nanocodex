@@ -38,6 +38,7 @@ import "./Commits.css";
 
 type CommitCodeStreamProps = {
   commits: HarnessCommit[];
+  commitRailOpen?: boolean;
   onOpenCommitRail?: () => void;
   patchUrl: string | ((commit: HarnessCommit) => string);
   theme: Theme;
@@ -51,7 +52,7 @@ const CommitCodeStreamComponent = forwardRef<
   CommitCodeStreamHandle,
   CommitCodeStreamProps
 >(function CommitCodeStream(
-  { commits, onOpenCommitRail, patchUrl, theme },
+  { commits, commitRailOpen, onOpenCommitRail, patchUrl, theme },
   forwardedRef,
 ) {
   const renderer = usePierreRenderer();
@@ -157,6 +158,7 @@ const CommitCodeStreamComponent = forwardRef<
         lineNumbers={lineNumbers}
         overflow={overflow}
         showBackgrounds={showBackgrounds}
+        commitRailOpen={commitRailOpen}
         onDiffIndicatorsChange={setDiffIndicators}
         onLineNumbersChange={setLineNumbers}
         onOpenCommitRail={onOpenCommitRail}
@@ -210,6 +212,7 @@ interface CommitStreamToolbarProps {
   lineNumbers: boolean;
   overflow: "wrap" | "scroll";
   showBackgrounds: boolean;
+  commitRailOpen?: boolean;
   onDiffIndicatorsChange(value: DiffIndicators): void;
   onLineNumbersChange(checked: boolean): void;
   onOpenCommitRail?: () => void;
@@ -227,6 +230,7 @@ const CommitStreamToolbar = memo(function CommitStreamToolbar({
   lineNumbers,
   overflow,
   showBackgrounds,
+  commitRailOpen,
   onDiffIndicatorsChange,
   onLineNumbersChange,
   onOpenCommitRail,
@@ -244,6 +248,8 @@ const CommitStreamToolbar = memo(function CommitStreamToolbar({
             type="button"
             onClick={onOpenCommitRail}
             aria-label="Open commit index"
+            aria-controls="commit-index"
+            aria-expanded={commitRailOpen ?? false}
           >
             <PanelLeft aria-hidden="true" />
           </button>

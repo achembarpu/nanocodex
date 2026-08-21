@@ -37,6 +37,7 @@ import {
   surfaceFromUrl,
   type Surface,
 } from "./navigation";
+import { COMPACT_WORKSPACE_QUERY } from "./pierreCodeView";
 import type { PublishedRepositorySnapshot } from "./publishedRepository";
 import type { HarnessCommit } from "./threadRepositorySnapshot";
 import { getBrowserThread } from "nanocodex/tools/browser";
@@ -86,6 +87,47 @@ const COMMIT_HASH_PATTERN = /^[0-9a-f]{40}$/;
 function commitHashFromSearch(search: string): string | undefined {
   const hash = new URLSearchParams(search).get("commit")?.toLowerCase();
   return hash && COMMIT_HASH_PATTERN.test(hash) ? hash : undefined;
+}
+
+const MODAL_FOCUSABLE_SELECTOR = [
+  "a[href]",
+  "button:not([disabled])",
+  "input:not([disabled])",
+  "select:not([disabled])",
+  "textarea:not([disabled])",
+  '[tabindex]:not([tabindex="-1"])',
+].join(",");
+
+function modalFocusableElements(panel: HTMLElement): HTMLElement[] {
+  return Array.from(panel.querySelectorAll<HTMLElement>(MODAL_FOCUSABLE_SELECTOR))
+    .filter((element) => !element.hidden && element.tabIndex >= 0);
+}
+
+function containModalFocus(event: KeyboardEvent, panel: HTMLElement | null) {
+  if (event.key !== "Tab" || !panel) return;
+  const focusable = modalFocusableElements(panel);
+  const first = focusable[0];
+  const last = focusable.at(-1);
+  const active = window.document.activeElement;
+  if (!first || !last) return;
+  if (event.shiftKey && (active === first || !panel.contains(active))) {
+    event.preventDefault();
+    last.focus();
+  } else if (!event.shiftKey && (active === last || !panel.contains(active))) {
+    event.preventDefault();
+    first.focus();
+  }
+}
+
+function activeFocusOwner(): HTMLElement | null {
+  const active = window.document.activeElement;
+  return active instanceof HTMLElement && active !== window.document.body ? active : null;
+}
+
+function restoreModalFocus(opener: { current: HTMLElement | null }) {
+  const target = opener.current;
+  opener.current = null;
+  if (target?.isConnected && !target.closest("[inert]")) target.focus();
 }
 
 const queryClient = new QueryClient({
@@ -334,11 +376,34 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
   const needsRepository = surface === "code" || surface === "commits";
   const needsRepositoryHistory = surface === "commits";
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const searchDialogRef = useRef<HTMLElement>(null);
+  const searchOpenerRef = useRef<HTMLElement | null>(null);
   const headerCenterRef = useRef<HTMLDivElement>(null);
   const codeBrowserRef = useRef<CodeBrowserHandle>(null);
+  const commitWorkspaceRef = useRef<HTMLElement>(null);
+  const commitRailRef = useRef<HTMLElement>(null);
+  const commitRailCloseRef = useRef<HTMLButtonElement>(null);
+  const commitRailOpenerRef = useRef<HTMLElement | null>(null);
   const commitStreamRef = useRef<CommitCodeStreamHandle>(null);
   const repositoryRequestId = useRef(0);
   const surfaceNavigationId = useRef(0);
+  const commitRailModalOpen = surface === "commits" && commitRailOpen;
+  const commitSearchModalOpen = surface === "commits" && searchOpen;
+  const commitModalOpen = commitRailModalOpen || commitSearchModalOpen;
+
+  const closeCommitRail = useCallback(() => setCommitRailOpen(false), []);
+  const openCommitRail = useCallback(() => {
+    commitRailOpenerRef.current = activeFocusOwner();
+    setCommitRailOpen(true);
+  }, []);
+  const closeCommitSearch = useCallback(() => setSearchOpen(false), []);
+  const openCommitSearch = useCallback(() => {
+    searchOpenerRef.current = commitRailModalOpen
+      ? commitRailOpenerRef.current
+      : activeFocusOwner();
+    setCommitRailOpen(false);
+    setSearchOpen(true);
+  }, [commitRailModalOpen]);
 
   const retainAgentExperience = useCallback((nextSurface: Surface) => {
     if (nextSurface === "home" || nextSurface === "agent") {
@@ -657,9 +722,83 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
   }, [surface]);
 
   useEffect(() => {
-    if (searchOpen)
-      requestAnimationFrame(() => searchInputRef.current?.focus());
-  }, [searchOpen]);
+    if (surface === "commits") return;
+    setSearchOpen(false);
+    setCommitRailOpen(false);
+  }, [surface]);
+
+  useEffect(() => {
+    const compact = window.matchMedia(COMPACT_WORKSPACE_QUERY);
+    const closeRailOnDesktop = () => {
+      if (!compact.matches) closeCommitRail();
+    };
+    closeRailOnDesktop();
+    compact.addEventListener("change", closeRailOnDesktop);
+    return () => compact.removeEventListener("change", closeRailOnDesktop);
+  }, [closeCommitRail]);
+
+  useEffect(() => {
+    if (!commitModalOpen) return;
+    const root = window.document.documentElement;
+    const body = window.document.body;
+    const previousRootOverflow = root.style.overflow;
+    const previousRootOverscroll = root.style.overscrollBehavior;
+    const previousBodyOverflow = body.style.overflow;
+    root.style.overflow = "hidden";
+    root.style.overscrollBehavior = "none";
+    body.style.overflow = "hidden";
+    return () => {
+      root.style.overflow = previousRootOverflow;
+      root.style.overscrollBehavior = previousRootOverscroll;
+      body.style.overflow = previousBodyOverflow;
+    };
+  }, [commitModalOpen]);
+
+  useEffect(() => {
+    if (!commitRailModalOpen) return;
+    const workspace = commitWorkspaceRef.current;
+    const rail = commitRailRef.current;
+    const background = new Map<HTMLElement, boolean>();
+    const inertBackground = () => {
+      for (const element of Array.from(workspace?.children ?? [])) {
+        if (
+          !(element instanceof HTMLElement)
+          || element === rail
+          || element.classList.contains("workspace-backdrop")
+        ) continue;
+        if (!background.has(element)) background.set(element, element.inert);
+        element.inert = true;
+      }
+    };
+    inertBackground();
+    let backgroundObserver: MutationObserver | undefined;
+    if (workspace) {
+      backgroundObserver = new MutationObserver(inertBackground);
+      backgroundObserver.observe(workspace, { childList: true });
+    }
+    const focusFrame = window.requestAnimationFrame(() => commitRailCloseRef.current?.focus());
+    const trapFocus = (event: KeyboardEvent) => containModalFocus(event, commitRailRef.current);
+    window.addEventListener("keydown", trapFocus);
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      window.removeEventListener("keydown", trapFocus);
+      backgroundObserver?.disconnect();
+      for (const [element, inert] of background) element.inert = inert;
+      restoreModalFocus(commitRailOpenerRef);
+    };
+  }, [commitRailModalOpen]);
+
+  useEffect(() => {
+    if (!commitSearchModalOpen) return;
+    const focusFrame = window.requestAnimationFrame(() => searchInputRef.current?.focus());
+    const trapFocus = (event: KeyboardEvent) => containModalFocus(event, searchDialogRef.current);
+    window.addEventListener("keydown", trapFocus);
+    return () => {
+      window.cancelAnimationFrame(focusFrame);
+      window.removeEventListener("keydown", trapFocus);
+      restoreModalFocus(searchOpenerRef);
+    };
+  }, [commitSearchModalOpen]);
 
   useEffect(() => {
     const onKeyDown = (event: KeyboardEvent) => {
@@ -686,17 +825,28 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
         return;
       }
       if (event.key === "Escape") {
-        setSearchOpen(false);
-        setCommitRailOpen(false);
+        if (commitSearchModalOpen) {
+          event.preventDefault();
+          event.stopPropagation();
+          closeCommitSearch();
+          return;
+        }
+        if (commitRailModalOpen) {
+          event.preventDefault();
+          event.stopPropagation();
+          closeCommitRail();
+          return;
+        }
         codeBrowserRef.current?.closeSearches();
         return;
       }
+      if (commitModalOpen) return;
       if (isTyping || primaryModifier || event.altKey) return;
       if (key === "f") {
         if (surface !== "commits") return;
         event.preventDefault();
         event.stopPropagation();
-        setSearchOpen(true);
+        openCommitSearch();
         return;
       }
       if (key === "m") {
@@ -729,15 +879,24 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
     window.addEventListener("keydown", onKeyDown, { capture: true });
     return () =>
       window.removeEventListener("keydown", onKeyDown, { capture: true });
-  }, [navigateToSurface, surface]);
+  }, [
+    closeCommitRail,
+    closeCommitSearch,
+    commitModalOpen,
+    commitRailModalOpen,
+    commitSearchModalOpen,
+    navigateToSurface,
+    openCommitSearch,
+    surface,
+  ]);
 
   const selectCommit = (commit: HarnessCommit) => {
     const index = commits.findIndex(
       (candidate) => candidate.hash === commit.hash
     );
     setSelectedHash(commit.hash);
-    setSearchOpen(false);
-    setCommitRailOpen(false);
+    closeCommitSearch();
+    closeCommitRail();
     setQuery("");
     navigate(pathForCommit(commit.hash), { replace: true });
     if (index >= 0) commitStreamRef.current?.scrollToCommit(index);
@@ -745,7 +904,10 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
 
   return (
     <div className={`site-shell surface-${surface}`}>
-        <header className="site-header">
+        <header
+          className="site-header"
+          inert={commitModalOpen ? true : undefined}
+        >
           <div className="site-brand">
             <a
               className="brand-parent"
@@ -827,7 +989,10 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
           </nav>
         </header>
 
-        <main id="top">
+        <main
+          id="top"
+          inert={commitSearchModalOpen ? true : undefined}
+        >
           {surface === "home" ||
           surface === "agent" ||
           agentExperienceMounted ? (
@@ -941,27 +1106,33 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
           ) : snapshot?.historyLoaded ? (
             <PierreWorkerProvider>
                 <section
+                  ref={commitWorkspaceRef}
                   className="commits-workspace"
                   aria-label="Repository commits"
                 >
                 <h1 className="sr-only">Nanocodex repository commits</h1>
                 <button
                   className={
-                    commitRailOpen
+                    commitRailModalOpen
                       ? "workspace-backdrop is-visible"
                       : "workspace-backdrop"
                   }
                   type="button"
-                  aria-label="Close commit list"
-                  onClick={() => setCommitRailOpen(false)}
+                  aria-hidden="true"
+                  tabIndex={-1}
+                  onPointerDown={closeCommitRail}
                 />
                 <aside
+                  ref={commitRailRef}
+                  id="commit-index"
                   className={
-                    commitRailOpen
+                    commitRailModalOpen
                       ? "commit-sidebar is-mobile-open"
                       : "commit-sidebar"
                   }
                   aria-labelledby="history-title"
+                  role={commitRailModalOpen ? "dialog" : "complementary"}
+                  aria-modal={commitRailModalOpen ? true : undefined}
                 >
                   <header className="commit-sidebar-header">
                     <div>
@@ -978,16 +1149,17 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
                       <button
                         className="icon-button"
                         type="button"
-                        onClick={() => setSearchOpen(true)}
+                        onClick={openCommitSearch}
                       >
                         <Search aria-hidden="true" />
                         <span className="sr-only">Find commits</span>
                         <kbd>F</kbd>
                       </button>
                       <button
+                        ref={commitRailCloseRef}
                         className="mobile-drawer-close"
                         type="button"
-                        onClick={() => setCommitRailOpen(false)}
+                        onClick={closeCommitRail}
                         aria-label="Close commit index"
                       >
                         <X aria-hidden="true" />
@@ -1036,7 +1208,8 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
                 <CommitCodeStream
                   ref={commitStreamRef}
                   commits={commits}
-                  onOpenCommitRail={() => setCommitRailOpen(true)}
+                  commitRailOpen={commitRailModalOpen}
+                  onOpenCommitRail={openCommitRail}
                   patchUrl={snapshot.commitPatchUrl}
                   theme={theme}
                 />
@@ -1060,30 +1233,32 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
           )}
         </main>
 
-        {searchOpen && surface === "commits" ? (
+        {commitSearchModalOpen ? (
           <div
             className="overlay"
             role="presentation"
-            onMouseDown={() => setSearchOpen(false)}
+            onPointerDown={closeCommitSearch}
           >
             <section
+              ref={searchDialogRef}
               className="search-dialog"
               role="dialog"
               aria-modal="true"
               aria-label="Find commits"
-              onMouseDown={(event) => event.stopPropagation()}
+              onPointerDown={(event) => event.stopPropagation()}
             >
               <div className="search-field">
                 <Search aria-hidden="true" />
                 <input
                   ref={searchInputRef}
+                  aria-label="Find commits"
                   value={query}
                   onChange={(event) => setQuery(event.target.value)}
                   placeholder="Search hashes, messages, authors, and paths"
                 />
                 <button
                   type="button"
-                  onClick={() => setSearchOpen(false)}
+                  onClick={closeCommitSearch}
                   aria-label="Close search"
                 >
                   <X aria-hidden="true" />
