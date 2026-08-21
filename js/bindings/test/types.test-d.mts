@@ -41,11 +41,30 @@ import {
 } from "../tools/dataset.mjs";
 import { browser as browserTools } from "../tools/browser/index.mjs";
 import { nanocodexTools } from "../tools/vite.mjs";
+import {
+  durabilityRevision,
+  type DurabilityAppendRequest,
+  type DurabilityAppendResult,
+  type DurabilityStore,
+  type DurabilityStoredJournal,
+} from "../runtime/durability-store.mjs";
 
 declare const apiKey: string;
 declare const accountsWallet: AccountsWallet;
 
 async function check() {
+  const storedJournal: DurabilityStoredJournal = {
+    revision: durabilityRevision(0n),
+    batches: [],
+  };
+  const durabilityStore: DurabilityStore = {
+    load: () => storedJournal,
+    append: (_journalId: string, request: DurabilityAppendRequest): DurabilityAppendResult => ({
+      status: "not_committed",
+      message: `revision ${request.expectedRevision} was not committed`,
+    }),
+  };
+  await durabilityStore.load("typed-leaf");
   const datasetOptions: DatasetOptions = { fetch: globalThis.fetch };
   leafDataset(datasetOptions);
   const nodeWorkspace = await Workspace.open({ path: "/tmp/nanocodex" });

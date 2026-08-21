@@ -1,3 +1,18 @@
+export type {
+  DurabilityAppendRequest,
+  DurabilityAppendResult,
+  DurabilityRevision,
+  DurabilitySqliteQuery,
+  DurabilitySqliteRow,
+  DurabilitySqliteTransaction,
+  DurabilitySqliteValue,
+  DurabilityStore,
+  DurabilityStoredBatch,
+  DurabilityStoredJournal,
+  MemoryDurabilityStore,
+  SqliteDurabilityStoreOptions,
+} from "../types.mjs";
+
 export declare const sqliteDurabilitySchema: readonly string[];
 
 export declare function durabilityRevision(
