@@ -515,8 +515,15 @@ mod tests {
         let listener = UnixListener::bind(&socket).unwrap();
         let server = std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
-            let mut request = [0_u8; 4 * 1024];
-            let _ = stream.read(&mut request).unwrap();
+            let expected_request = b"POST /services/test HTTP/1.1\r\n\
+                Host: localhost\r\n\
+                Content-Type: application/json\r\n\
+                Content-Length: 2\r\n\
+                Connection: close\r\n\r\n\
+                {}";
+            let mut request = vec![0_u8; expected_request.len()];
+            stream.read_exact(&mut request).unwrap();
+            assert_eq!(request, expected_request);
             stream
                 .write_all(&vec![b'x'; MAX_API_RESPONSE_BYTES + 1])
                 .unwrap();
