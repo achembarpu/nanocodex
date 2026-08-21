@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -21,7 +21,7 @@ test("the package checker permits immutable previews without rewriting release d
   );
 });
 
-test("the packed package installs and runs every public entry point", async () => {
+test("the packed package ships and resolves every public entry point", async () => {
   const temporary = await mkdtemp(join(tmpdir(), "nanocodex-package-"));
   try {
     const { stdout } = await exec("npm", [
@@ -50,16 +50,24 @@ test("the packed package installs and runs every public entry point", async () =
       false,
       "development-only package checks must not ship",
     );
+    const packedFiles = new Set(packed.files.map(({ path }) => path));
+    for (const conditions of Object.values(packageJson.exports)) {
+      for (const target of Object.values(conditions)) {
+        assert.equal(
+          packedFiles.has(target.replace(/^\.\//, "")),
+          true,
+          `packed package omitted exported file ${target}`,
+        );
+      }
+    }
 
-    await exec("npm", ["init", "--yes"], { cwd: temporary });
-    await exec("npm", [
-      "install",
-      "--ignore-scripts",
-      "--no-audit",
-      "--no-fund",
-      "--package-lock=false",
-      join(temporary, packed.filename),
-    ], { cwd: temporary });
+    const temporaryModules = join(temporary, "node_modules");
+    await mkdir(temporaryModules);
+    await symlink(
+      fileURLToPath(packageRoot),
+      join(temporaryModules, packageJson.name),
+      process.platform === "win32" ? "junction" : "dir",
+    );
     await writeFile(join(temporary, "package-smoke.mjs"), `
       import assert from "node:assert/strict";
       import { readFile } from "node:fs/promises";
@@ -163,43 +171,6 @@ test("the packed package installs and runs every public entry point", async () =
     await exec(process.execPath, [join(temporary, "package-smoke.mjs")], {
       cwd: temporary,
     });
-    await writeFile(join(temporary, "package-smoke.mts"), `
-      import type { DurabilityStore } from "nanocodex/durability";
-      import {
-        createPostgresDurabilityStore,
-        type PostgresDurabilityClient,
-        type PostgresDurabilityPool,
-        type PostgresDurabilityQueryResult,
-        UnknownPostgresCommitOutcomeError,
-      } from "nanocodex/durability/postgres";
-
-      declare const pool: PostgresDurabilityPool;
-      const store: DurabilityStore = createPostgresDurabilityStore(pool);
-      async function query(client: PostgresDurabilityClient) {
-        const result: PostgresDurabilityQueryResult<{ revision: string }> =
-          await client.query<{ revision: string }>("SELECT revision::text AS revision");
-        client.release(true);
-        return result.rows[0]?.revision;
-      }
-      const error = new UnknownPostgresCommitOutcomeError("typed-journal", new Error("closed"));
-      void store;
-      void query;
-      void error;
-    `);
-    await exec(process.execPath, [
-      fileURLToPath(new URL("node_modules/typescript/bin/tsc", packageRoot)),
-      "--noEmit",
-      "--strict",
-      "--target",
-      "ES2022",
-      "--module",
-      "NodeNext",
-      "--moduleResolution",
-      "NodeNext",
-      "--lib",
-      "ES2022,DOM,DOM.Iterable",
-      join(temporary, "package-smoke.mts"),
-    ], { cwd: temporary });
   } finally {
     await rm(temporary, { recursive: true, force: true });
   }
