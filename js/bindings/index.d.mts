@@ -1,11 +1,5 @@
 export * as Actions from "./actions/index.mjs";
 export {
-  createMemoryDurabilityStore,
-  createSqliteDurabilityStore,
-  durabilityRevision,
-  sqliteDurabilitySchema,
-} from "./runtime/durability-store.mjs";
-export {
   createMemoryChatGptSubscriptionStore,
   subscriptionRevision,
 } from "./runtime/subscription-store.mjs";
@@ -37,16 +31,6 @@ export type {
   CodeEvaluator,
   CodeEvaluatorEnvironment,
   DefaultAgent,
-  DurabilityAppendRequest,
-  DurabilityAppendResult,
-  DurabilityRevision,
-  DurabilitySqliteQuery,
-  DurabilitySqliteRow,
-  DurabilitySqliteTransaction,
-  DurabilitySqliteValue,
-  DurabilityStore,
-  DurabilityStoredBatch,
-  DurabilityStoredJournal,
   EventWatcher,
   EstimatedUsdCost,
   ExecutionEnvironment,
@@ -57,13 +41,11 @@ export type {
   McpServers,
   McpTool,
   MemoryChatGptSubscriptionStore,
-  MemoryDurabilityStore,
   MppSession,
   PromptInput,
   PromptItem,
   ReasoningMode,
   SessionSnapshot,
-  SqliteDurabilityStoreOptions,
   SubscriptionCommitRequest,
   SubscriptionCommitResult,
   SubscriptionRevision,

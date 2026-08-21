@@ -22,10 +22,13 @@ import {
 } from "../browser/index.mjs";
 import {
   Agent as HostAgent,
-  createMemoryDurabilityStore,
   type BrowserWebSocketRequest,
   Transport as HostTransport,
 } from "../host/index.mjs";
+import type * as RootPublicTypes from "../index.mjs";
+import type * as BrowserPublicTypes from "../browser/index.mjs";
+import type * as HostPublicTypes from "../host/index.mjs";
+import type * as NodePublicTypes from "../node/index.mjs";
 import type { WorkspaceEntry as BrowserWorkspaceEntry } from "../browser/workspace.mjs";
 import type { WorkspaceEntry as NodeWorkspaceEntry } from "../node/workspace.mjs";
 import {
@@ -42,12 +45,21 @@ import {
 import { browser as browserTools } from "../tools/browser/index.mjs";
 import { nanocodexTools } from "../tools/vite.mjs";
 import {
+  createMemoryDurabilityStore,
   durabilityRevision,
   type DurabilityAppendRequest,
   type DurabilityAppendResult,
+  type DurabilityRevision,
+  type DurabilitySqliteQuery,
+  type DurabilitySqliteRow,
+  type DurabilitySqliteTransaction,
+  type DurabilitySqliteValue,
   type DurabilityStore,
+  type DurabilityStoredBatch,
   type DurabilityStoredJournal,
-} from "../runtime/durability-store.mjs";
+  type MemoryDurabilityStore,
+  type SqliteDurabilityStoreOptions,
+} from "nanocodex/durability";
 import {
   createPostgresDurabilityStore,
   type PostgresDurabilityClient,
@@ -60,11 +72,31 @@ declare const apiKey: string;
 declare const accountsWallet: AccountsWallet;
 declare const postgresPool: PostgresDurabilityPool;
 
+// @ts-expect-error durability-only types are exported from nanocodex/durability.
+type RootDurabilityStore = RootPublicTypes.DurabilityStore;
+// @ts-expect-error durability-only types are exported from nanocodex/durability.
+type BrowserDurabilityStore = BrowserPublicTypes.DurabilityStore;
+// @ts-expect-error durability-only types are exported from nanocodex/durability.
+type HostDurabilityStore = HostPublicTypes.DurabilityStore;
+// @ts-expect-error durability-only types are exported from nanocodex/durability.
+type NodeDurabilityStore = NodePublicTypes.DurabilityStore;
+
 async function check() {
   const storedJournal: DurabilityStoredJournal = {
     revision: durabilityRevision(0n),
     batches: [],
   };
+  const revision: DurabilityRevision = storedJournal.revision;
+  const batch: DurabilityStoredBatch | undefined = storedJournal.batches[0];
+  const memoryStore: MemoryDurabilityStore = createMemoryDurabilityStore("typed-memory");
+  const sqliteValue: DurabilitySqliteValue = revision;
+  const sqliteRow: DurabilitySqliteRow = { revision: sqliteValue };
+  const sqliteQuery: DurabilitySqliteQuery = <Row extends DurabilitySqliteRow>() => [] as Row[];
+  const sqliteTransaction: DurabilitySqliteTransaction = (callback) => callback(sqliteQuery);
+  const sqliteOptions: SqliteDurabilityStoreOptions = { transaction: sqliteTransaction };
+  void batch;
+  void memoryStore;
+  void sqliteOptions;
   const durabilityStore: DurabilityStore = {
     load: () => storedJournal,
     append: (_journalId: string, request: DurabilityAppendRequest): DurabilityAppendResult => ({

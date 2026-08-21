@@ -1,10 +1,4 @@
 export * as Actions from "../actions/index.mjs";
-export {
-  createMemoryDurabilityStore,
-  createSqliteDurabilityStore,
-  durabilityRevision,
-  sqliteDurabilitySchema,
-} from "../runtime/durability-store.mjs";
 export { createQuickJsEvaluator } from "../runtime/quickjs-evaluator.mjs";
 export {
   createTempoProvider,

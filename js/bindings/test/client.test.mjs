@@ -1,13 +1,13 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { Actions } from "../index.mjs";
 import {
-  Actions,
   createMemoryDurabilityStore,
   createSqliteDurabilityStore,
   durabilityRevision,
   sqliteDurabilitySchema,
-} from "../index.mjs";
+} from "nanocodex/durability";
 import {
   activateHost,
   bindHostSession,

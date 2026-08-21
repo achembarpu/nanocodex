@@ -4,16 +4,18 @@ import { readFile } from "node:fs/promises";
 import {
   type AgentEvent,
   type DefaultAgent,
-  type DurabilitySqliteQuery,
-  type DurabilityStore,
   type EventWatcher,
   type Turn,
   type TurnUsage,
 } from "nanocodex";
 import {
-  Agent,
   createSqliteDurabilityStore,
   sqliteDurabilitySchema,
+  type DurabilitySqliteQuery,
+  type DurabilityStore,
+} from "nanocodex/durability";
+import {
+  Agent,
   Transport,
   type BrowserWebSocketRequest,
 } from "nanocodex/host";

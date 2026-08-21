@@ -74,19 +74,46 @@ test("the packed package ships and resolves every public entry point", async () 
       import { dirname, resolve } from "node:path";
       import { fileURLToPath } from "node:url";
       import { Actions } from "nanocodex";
+      import * as rootExports from "nanocodex";
       import { createMemoryDurabilityStore, durabilityRevision } from "nanocodex/durability";
+      import * as durabilityExports from "nanocodex/durability";
       import {
         createPostgresDurabilityStore,
         UnknownPostgresCommitOutcomeError,
       } from "nanocodex/durability/postgres";
       import { Agent as HostAgent, Transport as HostTransport } from "nanocodex/host";
+      import * as hostExports from "nanocodex/host";
       import { dataset as aggregateDataset, web } from "nanocodex/tools";
       import { dataset } from "nanocodex/tools/dataset";
       import { nanocodexTools } from "nanocodex/tools/vite";
       import { Agent as NodeAgent, Subagents as NodeSubagents, Transport as NodeTransport, Workspace as NodeWorkspace } from "nanocodex/node";
+      import * as nodeExports from "nanocodex/node";
       import { Subagents as BrowserSubagents, Workspace as BrowserWorkspace } from "nanocodex/browser";
+      import * as browserExports from "nanocodex/browser";
 
       assert.equal(typeof Actions.turn.prompt, "function");
+      const durabilityValueNames = [
+        "createMemoryDurabilityStore",
+        "createSqliteDurabilityStore",
+        "durabilityRevision",
+        "sqliteDurabilitySchema",
+      ];
+      assert.deepEqual(
+        durabilityValueNames.filter((name) => !Object.hasOwn(durabilityExports, name)),
+        [],
+      );
+      for (const [name, entry] of [
+        ["root", rootExports],
+        ["browser", browserExports],
+        ["host", hostExports],
+        ["node", nodeExports],
+      ]) {
+        assert.deepEqual(
+          durabilityValueNames.filter((exportName) => Object.hasOwn(entry, exportName)),
+          [],
+          \`\${name} entrypoint must not export durability helpers\`,
+        );
+      }
       assert.equal(durabilityRevision(1n), "1");
       assert.equal(createMemoryDurabilityStore("package-journal").journalId, "package-journal");
       let postgresCalls = 0;

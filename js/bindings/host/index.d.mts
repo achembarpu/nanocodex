@@ -1,10 +1,4 @@
 export * as Actions from "../actions/index.mjs";
-export {
-  createMemoryDurabilityStore,
-  createSqliteDurabilityStore,
-  durabilityRevision,
-  sqliteDurabilitySchema,
-} from "../runtime/durability-store.mjs";
 export { createQuickJsEvaluator } from "../runtime/quickjs-evaluator.mjs";
 export {
   createTempoProvider,
@@ -16,7 +10,54 @@ export type {
   AccountsWallet,
   TempoProvider,
 } from "../runtime/tempo-provider.mjs";
-export type * from "../types.mjs";
+export type {
+  AgentActions,
+  AgentEvent,
+  AgentOptions,
+  AgentSessionContext,
+  ChatGptCredential,
+  ChatGptCredentialSeed,
+  ChatGptLoginStatus,
+  ChatGptSubscriptionHandle,
+  ChatGptSubscriptionOptions,
+  ChatGptSubscriptionStore,
+  CodeEvaluator,
+  CodeEvaluatorEnvironment,
+  CostStatus,
+  DefaultAgent,
+  EstimatedUsdCost,
+  EventWatcher,
+  ExecutionEnvironment,
+  ForkOptions,
+  McpClient,
+  McpPayment,
+  McpServer,
+  McpServers,
+  McpTool,
+  MemoryChatGptSubscriptionStore,
+  Model,
+  MppSession,
+  MppWebSocket,
+  NamedTool,
+  PromptInput,
+  PromptItem,
+  RealtimeTranscriptEntry,
+  ReasoningMode,
+  SessionSnapshot,
+  SubscriptionCommitRequest,
+  SubscriptionCommitResult,
+  SubscriptionRevision,
+  SubscriptionStoredValue,
+  Thinking,
+  Tool,
+  ToolConfiguration,
+  ToolContext,
+  ToolMap,
+  Turn,
+  TurnResult,
+  TurnUsage,
+  WatchEventsOptions,
+} from "../types.mjs";
 export * as Agent from "./Agent.mjs";
 export * as Subagents from "../runtime/subagents.mjs";
 export * as Transport from "../browser/Transport.mjs";
