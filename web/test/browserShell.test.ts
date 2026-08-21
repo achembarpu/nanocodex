@@ -243,6 +243,22 @@ test("browser command lookup stays inside the virtual workspace", async () => {
   );
 });
 
+test("browser shell roundtrips gzip beside the local Git worktree", async () => {
+  const root = new MemoryDirectory();
+  const fs = createOpfsGitFs(root as unknown as FileSystemDirectoryHandle);
+  await git.init({ fs, dir: "/workspace", defaultBranch: "nanocodex" });
+  const shell = await createBrowserBash(fs, thread);
+
+  const result = await shell.exec({
+    cmd: "printf 'browser gzip\\n' > input.txt && gzip -c input.txt > input.txt.gz && gzip -dc input.txt.gz && git status --short",
+  });
+
+  assert.equal(result.exit_code, 0);
+  assert.match(result.output, /^browser gzip\n/);
+  assert.match(result.output, /\?\? input\.txt/);
+  assert.match(result.output, /\?\? input\.txt\.gz/);
+});
+
 test("browser compatibility commands expose uname and Fetch-backed curl", async () => {
   const root = new MemoryDirectory();
   const fs = createOpfsGitFs(root as unknown as FileSystemDirectoryHandle);

@@ -91,6 +91,16 @@ test("the packed package installs and runs every public entry point", async () =
       });
       assert.deepEqual(opened.previewRows, [{ id: 1 }]);
       assert.match(nanocodexTools().resolveId("node-rsa"), /unsupportedNodeRsa\.mjs$/);
+      assert.match(nanocodexTools().resolveId("node:zlib"), /browserZlib\.mjs$/);
+      const sprintfCompatibility = nanocodexTools().resolveId("sprintf-js", "/consumer.js");
+      assert.match(sprintfCompatibility, /browserSprintf\.mjs$/);
+      assert.equal(nanocodexTools().resolveId("sprintf-js", sprintfCompatibility), null);
+      const [{ gzipSync, gunzipSync }, { sprintf }] = await Promise.all([
+        import(sprintfCompatibility.replace(/browserSprintf\.mjs$/, "browserZlib.mjs")),
+        import(sprintfCompatibility),
+      ]);
+      assert.equal(new TextDecoder().decode(gunzipSync(gzipSync("package gzip"))), "package gzip");
+      assert.equal(sprintf("package %s", "printf"), "package printf");
       const nodeAgent = await NodeAgent.create({
         transport: NodeTransport.openAi({ apiKey: "package-test" }),
         tools: [...NodeSubagents.create({ maxConcurrency: 2 })],

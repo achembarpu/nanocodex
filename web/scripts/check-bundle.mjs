@@ -30,8 +30,9 @@ const budgets = Object.freeze({
   parquetCompressorsJavaScript: 116_000,
   parquetCompressorsJavaScriptGzip: 75_500,
   // just-bash and its built-in Unix command set stay behind Agent startup.
-  browserShellJavaScript: 1_600_000,
-  browserShellJavaScriptGzip: 450_000,
+  // Includes the package-owned browser zlib implementation used by just-bash.
+  browserShellJavaScript: 1_670_000,
+  browserShellJavaScriptGzip: 470_000,
   // Includes the canonical Rust apply_patch planner and the complete
   // JSON-Schema-backed subagent runtime. Keep these close to the optimized
   // artifact so future growth still fails this gate.
@@ -160,6 +161,18 @@ const browserShellFile = await findLazyAsset(
 assert(browserShellFile, "the Agent Worker must lazy-load the browser shell");
 const browserShellSource = await readFile(join(assetsDirectory, browserShellFile), "utf8");
 const browserShellFiles = await staticAssetClosure(browserShellFile);
+const browserShellClosureSource = await assetSource(browserShellFiles);
+for (const forbidden of [
+  "__vite-browser-external",
+  "node:zlib",
+  "from\"sprintf-js\"",
+  "from'sprintf-js'",
+]) {
+  assert(
+    !browserShellClosureSource.includes(forbidden),
+    `the served browser shell graph contains unresolved compatibility marker ${forbidden}`,
+  );
+}
 const browserShell = await fileStats(
   [...browserShellFiles].map((file) => `assets/${file}`),
 );
@@ -469,6 +482,13 @@ async function closureStats(keys, field) {
 async function closureSource(keys) {
   const sources = await Promise.all(
     [...keys].map((key) => readFile(join(clientDirectory, manifest[key].file))),
+  );
+  return Buffer.concat(sources).toString("utf8");
+}
+
+async function assetSource(files) {
+  const sources = await Promise.all(
+    [...files].map((file) => readFile(join(assetsDirectory, file))),
   );
   return Buffer.concat(sources).toString("utf8");
 }
