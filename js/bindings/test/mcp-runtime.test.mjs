@@ -117,6 +117,7 @@ test("remote MCP stays deferred behind tool_search and executes through Code Mod
       description: "Curated paid services through Mercator.",
     },
   });
+  await mcp.settled();
   const runtime = createCodeRuntime();
   runtime.addProvider(mcp);
 
@@ -183,6 +184,7 @@ test("browser MCP exposes native-compatible resource listing and reads", async (
     },
   };
   const mcp = await createMcpRuntime({ docs: { client } });
+  await mcp.settled();
   const runtime = createCodeRuntime();
   runtime.addProvider(mcp);
 
@@ -226,6 +228,7 @@ test("remote MCP failures are reported by tool_search without breaking agent cre
       },
     },
   });
+  await mcp.settled();
   const runtime = createCodeRuntime();
   runtime.addProvider(mcp);
   const result = JSON.parse(await runtime.executeTool(
@@ -236,6 +239,41 @@ test("remote MCP failures are reported by tool_search without breaking agent cre
   assert.deepEqual(JSON.parse(result.output).failed_servers, {
     unavailable: "connection refused",
   });
+});
+
+test("MCP discovery runs behind agent readiness and reports pending catalogs", async () => {
+  let finishDiscovery;
+  const discovery = new Promise((resolve) => { finishDiscovery = resolve; });
+  const mcp = await createMcpRuntime({
+    docs: {
+      client: {
+        listTools: () => discovery,
+      },
+    },
+  });
+  const runtime = createCodeRuntime();
+  runtime.addProvider(mcp);
+
+  const pending = JSON.parse(await runtime.executeTool(
+    "tool_search",
+    JSON.stringify({ query: "documentation" }),
+  ));
+  assert.equal(JSON.parse(pending.output).pending_servers, 1);
+
+  finishDiscovery({
+    tools: [{
+      name: "search_docs",
+      description: "Search documentation.",
+      inputSchema: { type: "object" },
+    }],
+  });
+  await mcp.settled();
+  const ready = JSON.parse(await runtime.executeTool(
+    "tool_search",
+    JSON.stringify({ query: "documentation" }),
+  ));
+  assert.equal(JSON.parse(ready.output).pending_servers, 0);
+  assert.equal(ready.structured_result[0].tools[0].name, "search_docs");
 });
 
 test("MCP startup timeout bounds complete paginated discovery", async () => {
@@ -258,6 +296,7 @@ test("MCP startup timeout bounds complete paginated discovery", async () => {
       },
     },
   });
+  await mcp.settled();
   const runtime = createCodeRuntime();
   runtime.addProvider(mcp);
   const result = JSON.parse(await runtime.executeTool(
@@ -324,6 +363,7 @@ test("remote MCP tools retry payment challenges through McpClient.wrap", async (
       payment: { methods: [method] },
     },
   });
+  await mcp.settled();
 
   const result = await mcp.resolve("mcp__mercator__premium").handler({});
   assert.equal(credentials, 1);

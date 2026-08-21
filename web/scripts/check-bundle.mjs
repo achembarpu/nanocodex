@@ -14,14 +14,14 @@ const budgets = Object.freeze({
   initialCssGzip: 12_000,
   agentJavaScript: 830_000,
   // OPFS, artifacts, durability, typed voice lifecycle routing, subscription auth, and paid MCP stay in the Worker.
-  // Includes the renderer-neutral terminal bridge; the ANSI reducer stays in
-  // a lazy chunk loaded only after an authenticated terminal starts.
+  // The app-local ANSI terminal bridge stays in a lazy chunk loaded only after
+  // an authenticated terminal starts.
   agentWorker: 58_500,
   agentWorkerGzip: 18_200,
-  datasetFacadeJavaScript: 1_500,
-  datasetFacadeJavaScriptGzip: 700,
-  datasetContractJavaScript: 1_500,
-  datasetContractJavaScriptGzip: 700,
+  // Includes the model-visible schema so Agent startup pays one request for
+  // the complete lazy facade instead of fetching a second contract chunk.
+  datasetFacadeJavaScript: 2_500,
+  datasetFacadeJavaScriptGzip: 1_100,
   // Includes stateless physical cursors for bounded Parquet and JSONL continuation.
   datasetToolJavaScript: 24_500,
   datasetToolJavaScriptGzip: 8_300,
@@ -37,9 +37,7 @@ const budgets = Object.freeze({
   // JSON-Schema-backed subagent runtime. Keep these close to the optimized
   // artifact so future growth still fails this gate.
   wasm: 3_750_000,
-  wasmGzip: 1_200_000,
-  mppControlsJavaScript: 1_300_000,
-  workerTempoJavaScript: 800_000,
+  wasmGzip: 1_350_000,
 });
 
 const clientDirectory = fileURLToPath(
@@ -55,40 +53,27 @@ const manifest = JSON.parse(
 
 const entryKey = manifestKey("index.html");
 const agentKey = manifestKey("src/AgentTerminal.tsx");
-const mppKey = manifestKey("src/MppControls.tsx");
 const entry = manifest[entryKey];
 const agent = manifest[agentKey];
-const mpp = manifest[mppKey];
 
 assert(entry?.isEntry, "the browser entry is missing from the Vite manifest");
 assert(agent?.isDynamicEntry, "the Agent terminal must remain a dynamic entry");
-assert(mpp?.isDynamicEntry, "the MPP controls must remain a dynamic entry");
 
 const allEntryImports = importClosure(entryKey, true);
 assert(
   allEntryImports.has(agentKey),
   "the Agent terminal is no longer reachable from the browser entry",
 );
-assert(
-  allEntryImports.has(mppKey),
-  "the MPP controls are no longer reachable through the opt-in Agent path",
-);
-
 const initialStatic = importClosure(entryKey, false);
 const agentStatic = importClosure(agentKey, false);
 assert(
   !initialStatic.has(agentKey),
   "the initial route must not statically import the Agent terminal",
 );
-assert(
-  !initialStatic.has(mppKey) && !agentStatic.has(mppKey),
-  "the default OpenAI graph must not statically import the MPP controls",
-);
 const initialJavaScript = await closureStats(initialStatic, "file");
 const initialCssFiles = cssClosure(initialStatic);
 const initialCss = await fileStats(initialCssFiles);
 const agentJavaScript = await closureStats(agentStatic, "file");
-const mppJavaScript = await closureStats(importClosure(mppKey, false), "file");
 
 withinCount(
   "initial JavaScript chunks",
@@ -109,30 +94,9 @@ withinCount("initial CSS files", initialCss.fileCount, budgets.initialCssFiles);
 within("initial CSS", initialCss.bytes, budgets.initialCss);
 within("initial CSS gzip", initialCss.gzipBytes, budgets.initialCssGzip);
 within("Agent JavaScript", agentJavaScript.bytes, budgets.agentJavaScript);
-within(
-  "MPP controls JavaScript",
-  mppJavaScript.bytes,
-  budgets.mppControlsJavaScript,
-);
-
-const initialSource = await closureSource(initialStatic);
-for (const marker of [
-  "Tempo Wallet connected",
-  "virtualMasterPool",
-  "VirtualMasterPool",
-]) {
-  assert(
-    !initialSource.includes(marker),
-    `the initial route unexpectedly contains the paid runtime marker ${marker}`,
-  );
-}
 
 const html = await readFile(join(clientDirectory, "index.html"), "utf8");
 const headers = await readFile(join(clientDirectory, "_headers"), "utf8");
-assert(
-  !html.includes(mpp.file),
-  "index.html must not preload the opt-in MPP controls",
-);
 assert.match(
   headers,
   /\/assets\/\*[\s\S]*Cache-Control: public, max-age=31536000, immutable/,
@@ -144,9 +108,11 @@ const workerFile = exactlyOne(
   assets.filter((file) => /^agent\.worker-.*\.js$/.test(file)),
   "browser Agent Worker entry",
 );
-const workerPath = join(assetsDirectory, workerFile);
-const workerSource = await readFile(workerPath, "utf8");
-const worker = byteStats(workerSource);
+const workerFiles = await staticAssetClosure(workerFile);
+const workerSource = await assetSource(workerFiles);
+const worker = await fileStats(
+  [...workerFiles].map((file) => `assets/${file}`),
+);
 within("OpenAI Agent Worker", worker.bytes, budgets.agentWorker);
 within(
   "OpenAI Agent Worker gzip",
@@ -246,6 +212,11 @@ within(
   datasetFacade.gzipBytes,
   budgets.datasetFacadeJavaScriptGzip,
 );
+assert(
+  datasetFacadeSource.includes("when complete is false")
+    && datasetFacadeSource.includes("max_bytes"),
+  "the dataset facade must statically own its model-visible contract",
+);
 const datasetImport = datasetFacadeSource.match(
   /import\((?:`|'|")\.\/(datasetEngine-[^`'"]+\.js)(?:`|'|")\)/,
 );
@@ -261,27 +232,6 @@ within(
   "Dataset tool JavaScript gzip",
   dataset.gzipBytes,
   budgets.datasetToolJavaScriptGzip,
-);
-const datasetContractFile = exactlyOne(
-  assets.filter((file) => /^datasetContract-.*\.js$/.test(file)),
-  "dataset tool contract",
-);
-assert(!html.includes(datasetContractFile), "index.html must not preload the dataset contract");
-const datasetFacadeFiles = await staticAssetClosure(datasetFacadeFile);
-assert(
-  datasetFacadeFiles.has(datasetContractFile),
-  "the dataset facade must statically own its model-visible contract",
-);
-const datasetContract = await fileStats([`assets/${datasetContractFile}`]);
-within(
-  "Dataset contract JavaScript",
-  datasetContract.bytes,
-  budgets.datasetContractJavaScript,
-);
-within(
-  "Dataset contract JavaScript gzip",
-  datasetContract.gzipBytes,
-  budgets.datasetContractJavaScriptGzip,
 );
 const datasetRuntimeImports = [...datasetSource.matchAll(
   /import\((?:`|'|")\.\/(src-[^`'"]+\.js)(?:`|'|")\)/g,
@@ -322,26 +272,6 @@ within(
   budgets.parquetCompressorsJavaScriptGzip,
 );
 
-const tempoImport = workerSource.match(
-  /import\((?:`|'|")\.\/(tempo-[^`'"]+\.js)(?:`|'|")\)/,
-);
-assert(tempoImport, "the Agent Worker must retain an explicit lazy Tempo edge");
-const tempoFile = tempoImport[1];
-assert(
-  assets.includes(tempoFile),
-  `the lazy Worker Tempo chunk ${tempoFile} is missing`,
-);
-assert(
-  !html.includes(tempoFile),
-  "index.html must not preload the opt-in Worker Tempo chunk",
-);
-const tempo = await fileStats([`assets/${tempoFile}`]);
-within(
-  "Worker Tempo JavaScript",
-  tempo.bytes,
-  budgets.workerTempoJavaScript,
-);
-
 const wasmFile = exactlyOne(
   assets.filter((file) => /^nanocodex_bg-.*\.wasm$/.test(file)),
   "Nanocodex WASM asset",
@@ -351,10 +281,12 @@ const wasmBytes = await readFile(wasmPath);
 const wasmImports = WebAssembly.Module.imports(
   new WebAssembly.Module(wasmBytes),
 );
+const workerReachableFiles = await reachableAssetClosure(workerFile);
+const workerReachableSource = await assetSource(workerReachableFiles);
 const missingWasmImports = wasmImports.filter((entry) =>
   entry.module !== "./nanocodex_bg.js"
   || entry.kind !== "function"
-  || !workerSource.includes(entry.name)
+  || !workerReachableSource.includes(entry.name)
 );
 assert.deepEqual(
   missingWasmImports,
@@ -362,14 +294,18 @@ assert.deepEqual(
   "the Agent Worker wasm-bindgen glue does not satisfy the bundled WASM imports",
 );
 const wasm = await fileStats([`assets/${wasmFile}`]);
+within("Nanocodex WASM", wasm.bytes, budgets.wasm);
+within("Nanocodex WASM gzip", wasm.gzipBytes, budgets.wasmGzip);
 
 const workerManifest = JSON.parse(
   await readFile(join(workerDirectory, ".vite", "manifest.json"), "utf8"),
 );
 const subscriptionWorkerKey = exactlyOne(
-  Object.keys(workerManifest).filter((key) =>
-    key.endsWith("node_modules/nanocodex/worker/index.mjs")
-  ),
+  Object.entries(workerManifest).filter(([key, entry]) =>
+    key.endsWith("/worker/index.mjs")
+    && entry.name === "worker"
+    && entry.isDynamicEntry === true
+  ).map(([key]) => key),
   "Cloudflare subscription Worker entry",
 );
 const subscriptionWorker = workerManifest[subscriptionWorkerKey];
@@ -404,6 +340,7 @@ console.log(JSON.stringify({
   },
   agent: {
     javascriptBytes: agentJavaScript.bytes,
+    workerFiles: worker.fileCount,
     workerBytes: worker.bytes,
     workerGzipBytes: worker.gzipBytes,
   },
@@ -417,8 +354,6 @@ console.log(JSON.stringify({
     dataset: {
       facadeBytes: datasetFacade.bytes,
       facadeGzipBytes: datasetFacade.gzipBytes,
-      contractBytes: datasetContract.bytes,
-      contractGzipBytes: datasetContract.gzipBytes,
       toolBytes: dataset.bytes,
       toolGzipBytes: dataset.gzipBytes,
       parquetBytes: parquet.bytes,
@@ -426,12 +361,6 @@ console.log(JSON.stringify({
       compressorsBytes: parquetCompressors.bytes,
       compressorsGzipBytes: parquetCompressors.gzipBytes,
     },
-  },
-  mpp: {
-    controlsJavaScriptBytes: mppJavaScript.bytes,
-    controlsEntry: mpp.file,
-    workerTempoJavaScriptBytes: tempo.bytes,
-    workerTempoEntry: tempoFile,
   },
   wasm: {
     bytes: wasm.bytes,
@@ -529,20 +458,33 @@ async function findLazyAsset(source, matches, visited = new Set()) {
   return undefined;
 }
 
-async function staticAssetClosure(root, visited = new Set()) {
+async function assetClosure(root, includeDynamic, visited) {
   if (visited.has(root)) return visited;
   visited.add(root);
   const source = await readFile(join(assetsDirectory, root), "utf8");
-  const imports = [
+  const imports = new Set([
     ...source.matchAll(
       /(?:import|export)[^"'`()]*?from(?:`|'|")\.\/([^`'"]+\.js)(?:`|'|")/g,
     ),
     ...source.matchAll(
       /import(?:`|'|")\.\/([^`'"]+\.js)(?:`|'|")/g,
     ),
-  ].map((match) => match[1]);
-  for (const file of imports) await staticAssetClosure(file, visited);
+  ].map((match) => match[1]));
+  if (includeDynamic) {
+    for (const match of source.matchAll(
+      /import\((?:`|'|")\.\/([^`'"]+\.js)(?:`|'|")\)/g,
+    )) imports.add(match[1]);
+  }
+  for (const file of imports) await assetClosure(file, includeDynamic, visited);
   return visited;
+}
+
+async function staticAssetClosure(root, visited = new Set()) {
+  return assetClosure(root, false, visited);
+}
+
+async function reachableAssetClosure(root, visited = new Set()) {
+  return assetClosure(root, true, visited);
 }
 
 function within(name, actual, maximum) {

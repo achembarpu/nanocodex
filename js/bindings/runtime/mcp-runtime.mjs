@@ -20,34 +20,52 @@ export async function createMcpRuntime(configuration, options = {}) {
   const entries = [];
   const failures = Object.create(null);
   const ownedClients = [];
-  const connectedServers = [];
+  const connectedServers = new Map();
+  const pendingServers = new Set(servers.map((server) => server.name));
+  const initializationControllers = new Map();
+  const byName = new Map();
+  const search = createSearchIndex(entries);
+  let closed = false;
 
-  await Promise.all(servers.map(async (server) => {
+  const initialization = Promise.allSettled(servers.map(async (server) => {
+    const controller = new AbortController();
+    initializationControllers.set(server.name, controller);
     try {
-      const { connection, tools } = await initializeServer(server, options);
-      if (connection.owned) ownedClients.push(connection.client);
-      connectedServers.push({ client: connection.client, server });
-      for (const tool of tools) {
-        if (!includesTool(server, tool.name)) continue;
-        entries.push(createEntry(server, connection.client, tool));
+      const { connection, tools } = await initializeServer(
+        server,
+        options,
+        controller.signal,
+      );
+      if (closed) {
+        if (connection.owned) await connection.client.close().catch(() => {});
+        return;
       }
+      const nextEntries = tools
+        .filter((tool) => includesTool(server, tool.name))
+        .map((tool) => createEntry(server, connection.client, tool));
+      for (const entry of nextEntries) {
+        const existing = byName.get(entry.canonicalName);
+        if (existing) {
+          throw new Error(
+            `MCP tool name collision: ${existing.server.name}/${existing.remoteName} and ${entry.server.name}/${entry.remoteName} both normalize to ${entry.canonicalName}`,
+          );
+        }
+      }
+      if (connection.owned) ownedClients.push(connection.client);
+      connectedServers.set(server.name, { client: connection.client, server });
+      for (const entry of nextEntries) {
+        entries.push(entry);
+        byName.set(entry.canonicalName, entry);
+        search.add({ id: entry.canonicalName, searchText: entry.searchText });
+      }
+      entries.sort((left, right) => left.canonicalName.localeCompare(right.canonicalName));
     } catch (error) {
-      failures[server.name] = errorMessage(error);
+      if (!closed) failures[server.name] = errorMessage(error);
+    } finally {
+      pendingServers.delete(server.name);
+      initializationControllers.delete(server.name);
     }
   }));
-
-  entries.sort((left, right) => left.canonicalName.localeCompare(right.canonicalName));
-  const byName = new Map();
-  for (const entry of entries) {
-    const existing = byName.get(entry.canonicalName);
-    if (existing) {
-      throw new Error(
-        `MCP tool name collision: ${existing.server.name}/${existing.remoteName} and ${entry.server.name}/${entry.remoteName} both normalize to ${entry.canonicalName}`,
-      );
-    }
-    byName.set(entry.canonicalName, entry);
-  }
-  const search = createSearchIndex(entries);
   const toolSearch = {
     name: "tool_search",
     handler: ({ query, limit }) => searchTools(query, limit),
@@ -74,7 +92,7 @@ export async function createMcpRuntime(configuration, options = {}) {
         description: entry.description,
         input_schema: entry.inputSchema,
       })),
-      pending_servers: 0,
+      pending_servers: pendingServers.size,
       failed_servers: { ...failures },
     };
     return toolResult(result, loadableNamespaces(selected));
@@ -100,14 +118,24 @@ export async function createMcpRuntime(configuration, options = {}) {
         handler: (input, context) => callRemoteTool(entry, input, context),
       };
     },
+    settled() {
+      return initialization.then(() => undefined);
+    },
     async close() {
+      closed = true;
+      for (const controller of initializationControllers.values()) {
+        controller.abort(new Error("MCP runtime closed"));
+      }
       await Promise.allSettled(ownedClients.map((client) => client.close()));
     },
   });
 }
 
-async function initializeServer(server, options) {
+async function initializeServer(server, options, outerSignal) {
   const controller = new AbortController();
+  const abort = () => controller.abort(outerSignal?.reason);
+  if (outerSignal?.aborted) abort();
+  else outerSignal?.addEventListener("abort", abort, { once: true });
   let timeout;
   const deadline = new Promise((_resolve, reject) => {
     timeout = setTimeout(() => {
@@ -140,6 +168,7 @@ async function initializeServer(server, options) {
     throw error;
   } finally {
     clearTimeout(timeout);
+    outerSignal?.removeEventListener("abort", abort);
   }
 }
 
@@ -236,10 +265,7 @@ function isStringArray(value) {
 }
 
 function createResourceTools(connectedServers) {
-  const byServer = new Map(connectedServers.map((connection) => [
-    connection.server.name,
-    connection,
-  ]));
+  const byServer = connectedServers;
   return [
     {
       name: "list_mcp_resources",

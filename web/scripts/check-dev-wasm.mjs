@@ -11,13 +11,6 @@ const requiredFiles = [
   "nanocodex_worker.js",
   "package.json",
 ];
-const requiredDevelopmentFiles = [
-  new URL("../../js/tui/dist/index.js", import.meta.url),
-  new URL("../../js/tui/dist/index.d.ts", import.meta.url),
-  new URL("../../js/tui-react/dist/index.js", import.meta.url),
-  new URL("../../js/tui-react/dist/index.d.ts", import.meta.url),
-];
-
 const missingFiles = [];
 for (const file of requiredFiles) {
   try {
@@ -26,16 +19,6 @@ for (const file of requiredFiles) {
   } catch (error) {
     if (error?.code !== "ENOENT") throw error;
     missingFiles.push(file);
-  }
-}
-
-for (const file of requiredDevelopmentFiles) {
-  try {
-    const metadata = await stat(file);
-    if (!metadata.isFile() || metadata.size === 0) missingFiles.push(file.pathname);
-  } catch (error) {
-    if (error?.code !== "ENOENT") throw error;
-    missingFiles.push(file.pathname);
   }
 }
 
@@ -56,8 +39,7 @@ if (missingFiles.length > 0) {
       "Nanocodex's generated browser WASM package is missing or incomplete.",
       `Missing: ${missingFiles.join(", ")}`,
       "Run `npm run dev:wasm` once, then retry `npm run dev`.",
-      "Run `npm run dev:packages` after changing the local TUI packages.",
-      "For a new checkout, `npm run dev:bootstrap` prepares both boundaries.",
+      "For a new checkout, `npm run dev:bootstrap` prepares the browser package.",
       "Run `npm run dev:rebuild` after Rust changes to rebuild and start in one command.",
     ].join("\n"),
   );

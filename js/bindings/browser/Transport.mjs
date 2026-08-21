@@ -3,6 +3,7 @@ import {
   nonEmpty,
   resolveResponsesTransport,
 } from "../runtime/responses-transport.mjs";
+import { defaultHostManagedWebSocketUrl } from "./hostManagedWebSocket.mjs";
 
 export function openAi(options) {
   const apiKey = nonEmpty(options?.apiKey, "OpenAI API key");
@@ -22,13 +23,14 @@ export function chatGpt(options) {
   });
 }
 
-export function hostManaged(options) {
-  if (typeof options?.createWebSocket !== "function") {
-    throw new TypeError("host-managed transport requires createWebSocket()");
-  }
+export function hostManaged(options = {}) {
+  const websocketUrl = options.websocketUrl
+    ?? (options.createWebSocket ? undefined : defaultHostManagedWebSocketUrl());
   return createResponsesTransport({
     hostAuth: true,
-    ...connection(options),
+    hostManagedProtocol: true,
+    ...connection({ ...options, websocketUrl }),
+    websocketPreconnect: options.websocketPreconnect ?? true,
   });
 }
 
@@ -50,6 +52,7 @@ function connection(options = {}) {
     apiBaseUrl: options.apiBaseUrl,
     createWebSocket: options.createWebSocket,
     websocketUrl: options.websocketUrl,
+    websocketPreconnect: options.websocketPreconnect,
     websocketWarmup: options.websocketWarmup,
   };
 }

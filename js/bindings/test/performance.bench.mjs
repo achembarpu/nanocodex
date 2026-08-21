@@ -88,14 +88,14 @@ test("a precompiled browser module instantiates once across isolated agents", as
   };
   try {
     const coldStarted = performance.now();
-    const cold = await BrowserAgent.create({
+    const cold = await BrowserAgent.createInline({
       transport: browserTransport,
       module,
     });
     const coldMs = performance.now() - coldStarted;
     cold.dispose();
     for (let index = 0; index < 16; index += 1) {
-      const agent = await BrowserAgent.create({
+      const agent = await BrowserAgent.createInline({
         transport: browserTransport,
         module,
       });
@@ -105,7 +105,7 @@ test("a precompiled browser module instantiates once across isolated agents", as
     const samples = [];
     for (let index = 0; index < 64; index += 1) {
       const started = performance.now();
-      const agent = await BrowserAgent.create({
+      const agent = await BrowserAgent.createInline({
         transport: browserTransport,
         module,
       });

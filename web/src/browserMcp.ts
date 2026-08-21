@@ -4,11 +4,6 @@ export const DEFAULT_BROWSER_MCP_SERVERS = Object.freeze({
     description: "Search OpenAI developer documentation.",
     enabledTools: ["fetch_openai_doc", "search_openai_docs"],
   },
-  tempo: {
-    path: "/api/mcp/tempo",
-    description: "Tempo network and protocol tools.",
-    enabledTools: ["code", "search"],
-  },
   cloudflare: {
     path: "/api/mcp/cloudflare",
     description: "Search Cloudflare developer documentation.",

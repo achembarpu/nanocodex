@@ -1,6 +1,6 @@
 ---
 title: TypeScript and JavaScript SDK
-description: Run the Rust-owned agent lifecycle from Node, browser Workers, React, or a terminal UI.
+description: Run the Rust-owned headless agent lifecycle from Node, browser Workers, or React-owned Workers.
 ---
 
 # TypeScript and JavaScript SDK
@@ -59,13 +59,12 @@ OpenAI API keys, managed ChatGPT credentials, host-managed sockets, and MPP are
 transport and authentication choices for the same supported OpenAI Responses
 lifecycle. They are not alternate provider implementations.
 
-## Thin interface packages
+## Keep interfaces in application code
 
-`nanocodex-react` owns a module Worker and typed external store.
-`nanocodex-tui` reduces events without choosing a renderer.
-`nanocodex-tui-react` renders that state accessibly, and
-`nanocodex-terminal` attaches one retained agent to xterm.js, WTerm, or another
-terminal-shaped host. These are consumers, not required agent infrastructure.
+`nanocodex-react` is the intentionally narrow Context/hooks package over a
+module Worker and typed external store. UI frameworks and terminal renderers
+consume Agent events directly and remain application code; the SDK does not
+publish a transcript reducer, TUI renderer, or terminal adapter layer.
 
 The [binding guide](https://github.com/gakonst/nanocodex/blob/master/js/bindings/README.md)
 documents the complete API. Start with the runnable

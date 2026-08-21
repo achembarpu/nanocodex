@@ -22,6 +22,14 @@ export function checkDocumentedBrowserVersion(readme, packageVersion) {
 const requiredFiles = [
   "browser/index.mjs",
   "browser/index.d.mts",
+  "browser/config.mjs",
+  "browser/config.d.mts",
+  "browser/engine.mjs",
+  "browser/hostManagedWebSocket.mjs",
+  "browser/hostManagedWebSocket.d.mts",
+  "browser/WorkerAgent.mjs",
+  "browser/WorkerAgent.d.mts",
+  "browser/agent.worker.mjs",
   "browser/workspace.mjs",
   "browser/workspace.d.mts",
   "node/index.mjs",
@@ -67,6 +75,7 @@ export async function checkPackage(packageRoot = root) {
   assert.equal(packageJson.engines?.node, ">=22.13.0");
   assert.equal(packageJson.publishConfig?.access, "public");
   assert.equal(packageJson.exports?.["./browser"]?.import, "./browser/index.mjs");
+  assert.equal(packageJson.exports?.["./browser/client"], undefined);
   assert.equal(packageJson.exports?.["./browser/workspace"]?.import, "./browser/workspace.mjs");
   assert.equal(packageJson.exports?.["./node"]?.import, "./node/index.mjs");
   assert.equal(packageJson.exports?.["./node/workspace"]?.import, "./node/workspace.mjs");

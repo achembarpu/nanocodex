@@ -14,6 +14,20 @@ const highlighterOptions: WorkerInitializationRenderOptions = {
   preferredHighlighter: "shiki-js",
 };
 
+let preloadedWorker: Worker | undefined;
+
+export function preloadPierreWorker(): void {
+  if (preloadedWorker == null && typeof Worker !== "undefined") {
+    preloadedWorker = new DiffWorker();
+  }
+}
+
+function createDiffWorker(): Worker {
+  const worker = preloadedWorker ?? new DiffWorker();
+  preloadedWorker = undefined;
+  return worker;
+}
+
 export function sourceHighlightCacheSize(): number {
   if (typeof window === "undefined") return 100;
   return window.matchMedia(COMPACT_WORKSPACE_QUERY).matches ? 10 : 100;
@@ -23,7 +37,7 @@ export function PierreWorkerProvider({ children }: { children: ReactNode }) {
   const poolOptions = useMemo<WorkerPoolOptions>(() => ({
     poolSize: 1,
     totalASTLRUCacheSize: sourceHighlightCacheSize(),
-    workerFactory: () => new DiffWorker(),
+    workerFactory: createDiffWorker,
   }), []);
   return (
     <WorkerPoolContextProvider

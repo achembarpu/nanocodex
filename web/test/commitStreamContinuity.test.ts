@@ -5,6 +5,11 @@ import test from "node:test";
 const loaderUrl = new URL("../src/useCommitStreamLoader.ts", import.meta.url);
 const streamUrl = new URL("../src/CommitCodeStream.tsx", import.meta.url);
 const commitsCssUrl = new URL("../src/Commits.css", import.meta.url);
+const publishedRepositoryUrl = new URL(
+  "../src/publishedRepository.ts",
+  import.meta.url,
+);
+const pierreUrl = new URL("../src/pierreCodeView.ts", import.meta.url);
 
 test("stream batches retry pending commit jumps after publication", async () => {
   const [loader, stream] = await Promise.all([
@@ -46,12 +51,19 @@ test("retry retains published items and renders a tail error", async () => {
 });
 
 test("production Commit streaming retains one aggregate request", async () => {
-  const loader = await readFile(loaderUrl, "utf8");
+  const [loader, publishedRepository] = await Promise.all([
+    readFile(loaderUrl, "utf8"),
+    readFile(publishedRepositoryUrl, "utf8"),
+  ]);
 
   assert.match(loader, /if \(typeof patchUrl === "string"\) \{/);
   assert.match(
     loader,
-    /const response = await fetch\(patchUrl, \{[\s\S]*cache: "default",[\s\S]*signal: controller\.signal/,
+    /fetchPublishedRepositoryPatch\([\s\S]*patchUrl,[\s\S]*controller\.signal/,
+  );
+  assert.match(
+    publishedRepository,
+    /return fetch\(patchUrl, \{ cache: "default", signal \}\)/,
   );
   assert.doesNotMatch(
     loader.slice(
@@ -59,6 +71,24 @@ test("production Commit streaming retains one aggregate request", async () => {
       loader.indexOf("} else {", loader.indexOf('if (typeof patchUrl === "string")')),
     ),
     /streamCommitPatches|patchUrl\(commit\)/,
+  );
+});
+
+test("the first Commit diff is isolated before background ingestion", async () => {
+  const [loader, pierre] = await Promise.all([
+    readFile(loaderUrl, "utf8"),
+    readFile(pierreUrl, "utf8"),
+  ]);
+
+  assert.match(pierre, /COMMIT_INITIAL_BATCH_COUNT = 1/);
+  assert.match(loader, /initialPublishFileBatchSize = COMMIT_INITIAL_BATCH_COUNT/);
+  assert.match(
+    loader,
+    /if \(isInitialPublish\) \{[\s\S]*await waitForViewer\(viewerRef, controller\.signal\)/,
+  );
+  assert.match(
+    loader,
+    /while \(!signal\.aborted && viewerRef\.current == null\)/,
   );
 });
 

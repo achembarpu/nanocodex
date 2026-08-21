@@ -8,15 +8,9 @@
     ".": {
       "types": "./index.d.mts",
       "import": "./index.mjs"
-    },
-    "./config": {
-      "types": "./config.d.mts",
-      "import": "./config.mjs"
     }
   },
   "files": [
-    "config.d.mts",
-    "config.mjs",
     "index.d.mts",
     "index.mjs",
     "README.md"
@@ -25,15 +19,19 @@
     "check:pack": "node scripts/check-pack.mjs",
     "check:package": "node scripts/check-package.mjs",
     "prepack": "npm run check:package",
-    "test": "node --test test/*.test.mjs && npm run check:package && npm run check:pack"
+    "test": "node --test test/*.test.mjs && npm run test:typecheck && npm run check:package && npm run check:pack",
+    "test:typecheck": "tsc -p test/tsconfig.json"
   },
   "peerDependencies": {
     "nanocodex": "^0.5.0",
     "react": ">=18"
   },
   "devDependencies": {
+    "@types/react": "^19.2.14",
     "nanocodex": "file:../bindings",
-    "react": "19.2.6"
+    "react": "19.2.6",
+    "react-test-renderer": "^19.2.6",
+    "typescript": "^5.9.3"
   },
   "engines": {
     "node": ">=22.13.0"

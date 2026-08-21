@@ -28,7 +28,9 @@ test("Responses transports own authentication and connection setup", () => {
       apiBaseUrl: undefined,
       createWebSocket,
       hostAuth: true,
+      hostManagedProtocol: true,
       websocketUrl: undefined,
+      websocketPreconnect: true,
       websocketWarmup: undefined,
     },
   );

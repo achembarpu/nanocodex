@@ -12,9 +12,10 @@ const evalsCss = source("../src/evals.css");
 const application = source("../src/NanocodexApp.tsx");
 const artifactRuntime = source("../src/artifactRuntime.tsx");
 const terminal = source("../src/AgentTerminal.tsx");
-const terminalCommands = source("../src/nanocodex.ts");
-const mpp = source("../src/MppControls.tsx");
-const worker = source("../src/agent.worker.ts");
+const terminalSurface = source("../src/agentTerminalSurface.tsx");
+const chatGptSession = source("../src/chatGptSession.tsx");
+const deploymentRollover = source("../src/useDeploymentRollover.ts");
+const demoTerminal = source("../src/demoTerminal.ts");
 const compactQuery = "(max-width: 740px), (pointer: coarse) and (orientation: landscape) and (max-width: 950px)";
 const coarseQuery = "(pointer: coarse), (any-pointer: coarse)";
 
@@ -51,8 +52,11 @@ test("360px headers retain scrollable alphabetic navigation without clipping the
   assert.match(ruleBlock(indexCss, ".wordmark {", narrow), /font-size:\s*10px/);
   assert.match(ruleBlock(indexCss, ".surface-switch {", narrow), /gap:\s*0/);
   assert.match(ruleBlock(indexCss, ".surface-switch a {", narrow), /min-width:\s*44px/);
-  assert.match(ruleBlock(indexCss, ".surface-label {", narrow), /font-size:\s*0/);
-  assert.match(ruleBlock(indexCss, ".surface-key {", narrow), /font-size:\s*10px/);
+  assert.match(ruleBlock(indexCss, ".surface-label {", narrow), /display:\s*none/);
+  assert.match(
+    ruleBlock(indexCss, ".surface-switch a::after {", narrow),
+    /content:\s*attr\(data-mobile-label\)[\s\S]*?font-size:\s*10px/,
+  );
   assert.match(ruleBlock(indexCss, ".header-install-trigger {", narrow), /width:\s*44px/);
   assert.match(ruleBlock(indexCss, ".header-install-trigger span {", narrow), /display:\s*none/);
 });
@@ -94,7 +98,7 @@ test("the phone home surface leads directly from thesis to install, metadata, an
   assert.match(application, /inert=\{surface !== "home" && surface !== "agent" \? true : undefined\}/);
   assert.match(terminal, /<XtermSurface/);
   assert.match(terminal, /theme=\{theme\}/);
-  assert.match(terminal, /instance\.current\.options\.theme = terminalTheme\(theme\)/);
+  assert.match(terminalSurface, /instance\.current\.options\.theme = terminalTheme\(theme\)/);
   assert.match(terminalCss, /--terminal-background:\s*var\(--surface\)/);
   assert.match(application, /live agent · browser WASM/);
   assert.match(application, /optimized WASM · 1\.3 MB gzip/);
@@ -106,39 +110,44 @@ test("the phone home surface leads directly from thesis to install, metadata, an
   assert.doesNotMatch(terminal, /<NanocodexTui|<WorkspacePanel|<ArtifactDock/);
 });
 
-test("the terminal survives deployment rollover and discarded mobile workers", () => {
-  assert.match(terminal, /event\.persisted/);
-  assert.match(terminal, /sha !== deploymentSha/);
-  assert.match(terminal, /window\.location\.reload\(\)/);
-  assert.match(terminal, /workerRecoveryAttempts\.current >= 2/);
-  assert.match(terminal, /nanocodexConfig\.restart\(startCommand\(nextTransport, thread\.id\)\)/);
+test("the app shell owns deployment rollover and agent failures expose only manual retry", () => {
+  assert.match(application, /useDeploymentRollover\(\)/);
+  assert.match(deploymentRollover, /event\.persisted/);
+  assert.match(deploymentRollover, /sha !== deploymentSha/);
+  assert.match(deploymentRollover, /window\.location\.reload\(\)/);
+  assert.match(terminal, /refetch\(\)/);
+  assert.match(chatGptSession, /agentStatus === "error" && hasCredential[\s\S]*?>retry agent<\/button>/);
+  assert.doesNotMatch(`${terminal}\n${chatGptSession}`, /automaticRetry|workerRecoveryAttempts/);
+  assert.doesNotMatch(terminal, /setTimeout\(/);
+  assert.doesNotMatch(terminal, /deployment_sha|pageshow/);
+  assert.doesNotMatch(terminal, /createDemoAgent|setRetryGeneration|sessions\.current\.replace/);
 });
 
 test("terminal interaction is renderer-neutral and resize-driven", () => {
-  assert.match(terminal, /new Xterm\(/);
-  assert.match(terminal, /new FitAddon\(\)/);
-  assert.match(terminal, /encodeXtermKeyEvent/);
-  assert.match(terminal, /new ResizeObserver\(\(\) => \{[\s\S]*?fit\.fit\(\)/);
-  assert.match(terminal, /if \(latest\.current\.mode === "full" && !touchInput\) terminal\.focus\(\)/);
-  assert.match(terminal, /if \(mode === "full" && !touchInput\) terminal\.focus\(\)/);
-  assert.match(terminal, /aria-label", "Nanocodex terminal input"/);
-  assert.match(terminal, /type: "terminalInput"/);
-  assert.match(terminal, /type: "terminalResize"/);
-  assert.match(terminal, /terminal\.rows - 3/);
-  assert.doesNotMatch(terminal, /\\r\\n\\r\\n> /);
+  assert.match(terminalSurface, /new Xterm\(/);
+  assert.match(terminalSurface, /new FitAddon\(\)/);
+  assert.match(terminalSurface, /const terminalHost = bufferedXtermAdapter\(terminal\)/);
+  assert.match(terminalSurface, /new ResizeObserver\(\(\) => \{[\s\S]*?fit\.fit\(\)/);
+  assert.match(terminalSurface, /if \(latest\.current\.mode === "full" && !touchInput\) terminal\.focus\(\)/);
+  assert.match(terminalSurface, /if \(mode === "full" && !touchInput\) terminal\.focus\(\)/);
+  assert.match(terminalSurface, /aria-label", "Nanocodex terminal input"/);
+  assert.match(demoTerminal, /terminal\.onData\(onData\)/);
+  assert.match(demoTerminal, /terminal\.onResize\(resize\)/);
+  assert.match(terminalSurface, /terminal\.rows - 3/);
+  assert.doesNotMatch(terminalSurface, /\\r\\n\\r\\n> /);
 });
 
 test("touch terminals use a native IME-safe composer and typed commands", () => {
-  assert.match(terminal, /TOUCH_INPUT_QUERY = "\(pointer: coarse\), \(any-pointer: coarse\)"/);
-  assert.match(terminal, /<textarea[\s\S]*?aria-label="Message Nanocodex"/);
-  assert.match(terminal, /value=\{draft\}[\s\S]*?onChange=\{\(event\) => onChange\(event\.currentTarget\.value\)\}/);
-  assert.match(terminal, /onCompositionStart=\{\(\) => \{ composing\.current = true; \}\}/);
-  assert.match(terminal, /isTerminalSubmitKeyEvent\(event\.nativeEvent, composing\.current\)/);
-  assert.match(terminal, /onSubmit\(draft, running \? "steer" : "queue"\)/);
-  assert.match(terminal, />Stop<\/button>/);
-  assert.match(terminal, /running \? "Steer" : "Send"/);
-  assert.match(terminal, />│<\/span>/);
-  assert.doesNotMatch(terminal, /\x1b\[200~|bracketed-paste/i);
+  assert.match(terminalSurface, /TOUCH_INPUT_QUERY = "\(pointer: coarse\), \(any-pointer: coarse\)"/);
+  assert.match(terminalSurface, /<textarea[\s\S]*?aria-label="Message Nanocodex"/);
+  assert.match(terminalSurface, /value=\{draft\}[\s\S]*?onChange=\{\(event\) => onChange\(event\.currentTarget\.value\)\}/);
+  assert.match(terminalSurface, /onCompositionStart=\{\(\) => \{ composing\.current = true; \}\}/);
+  assert.match(terminalSurface, /isTerminalSubmitKeyEvent\(event\.nativeEvent, composing\.current\)/);
+  assert.match(terminalSurface, /onSubmit\(draft, running \? "steer" : "queue"\)/);
+  assert.match(terminalSurface, />Stop<\/button>/);
+  assert.match(terminalSurface, /running \? "Steer" : "Send"/);
+  assert.match(terminalSurface, />│<\/span>/);
+  assert.doesNotMatch(terminalSurface, /\x1b\[200~|bracketed-paste/i);
 
   const touchCss = terminalCss.indexOf("@media (pointer: coarse), (any-pointer: coarse)");
   assert.notEqual(touchCss, -1);
@@ -149,19 +158,17 @@ test("touch terminals use a native IME-safe composer and typed commands", () => 
   assert.match(composer, /min-height:\s*calc\(60px \+ env\(safe-area-inset-bottom\)\)/);
   assert.match(composer, /env\(safe-area-inset-left\)/);
   assert.match(composer, /env\(safe-area-inset-right\)/);
-  assert.match(terminalCommands, /type: "terminalSubmit"; input: string; intent: "queue" \| "steer"/);
-  assert.match(terminalCommands, /type: "terminalCancel"/);
-  assert.match(worker, /attachedTerminal\?\.submit\(data\.input, \{ intent: data\.intent \}\)/);
-  assert.match(worker, /attachedTerminal\?\.cancel\(\)/);
+  assert.match(terminal, /active\.current\.submit\(input, \{ intent \}\)/);
+  assert.match(terminal, /active\.current\?\.cancel\(\)/);
 });
 
 test("touch terminal geometry follows the visual viewport without weakening hidden focus", () => {
-  assert.match(terminal, /const viewport = window\.visualViewport/);
-  assert.match(terminal, /viewport\?\.addEventListener\("resize", measure\)/);
-  assert.match(terminal, /viewport\?\.addEventListener\("scroll", measure\)/);
-  assert.match(terminal, /window\.addEventListener\("orientationchange", measure\)/);
-  assert.match(terminal, /root\.style\.height = `\$\{available\}px`/);
-  assert.match(terminal, /shell\.style\.height = `\$\{Math\.min\(naturalHeight, shellAvailable\)\}px`/);
+  assert.match(terminalSurface, /const viewport = window\.visualViewport/);
+  assert.match(terminalSurface, /viewport\?\.addEventListener\("resize", measure\)/);
+  assert.match(terminalSurface, /viewport\?\.addEventListener\("scroll", measure\)/);
+  assert.match(terminalSurface, /window\.addEventListener\("orientationchange", measure\)/);
+  assert.match(terminalSurface, /root\.style\.height = `\$\{available\}px`/);
+  assert.match(terminalSurface, /shell\.style\.height = `\$\{Math\.min\(naturalHeight, shellAvailable\)\}px`/);
   assert.match(terminalCss, /\.nanocodex-demo\.is-full \.agent-terminal-shell:focus-within/);
   const touchCss = terminalCss.indexOf("@media (pointer: coarse), (any-pointer: coarse)");
   assert.match(ruleBlock(terminalCss, ".agent-terminal-shell {", touchCss), /grid-template-rows:\s*minmax\(0, 1fr\) auto/);
@@ -169,26 +176,23 @@ test("touch terminal geometry follows the visual viewport without weakening hidd
     ruleBlock(terminalCss, ".nanocodex-demo.is-preview .agent-terminal-shell:focus-within,", touchCss),
     /min-height:\s*120px/,
   );
-  assert.match(terminal, /host\.parentElement\?\.contains\(window\.document\.activeElement\)/);
-  assert.match(terminal, /textarea\.readOnly = touchInput/);
-  assert.match(terminal, /textarea\.tabIndex = touchInput \? -1 : 0/);
+  assert.match(terminalSurface, /host\.parentElement\?\.contains\(window\.document\.activeElement\)/);
+  assert.match(terminalSurface, /textarea\.readOnly = touchInput/);
+  assert.match(terminalSurface, /textarea\.tabIndex = touchInput \? -1 : 0/);
 });
 
-test("terminal frames survive a Worker/xterm startup race", () => {
-  assert.match(terminal, /const pendingTerminalFrame = useRef<string \| undefined>\(undefined\)/);
-  assert.match(terminal, /pendingTerminalFrame\.current = message\.data/);
-  assert.match(
-    terminal,
-    /if \(pendingTerminalFrame\.current !== undefined\) \{[\s\S]*?instance\.write\(pendingTerminalFrame\.current\)[\s\S]*?pendingTerminalFrame\.current = undefined/,
-  );
+test("terminal input survives the xterm/agent startup race", () => {
+  assert.match(terminalSurface, /const terminalHost = bufferedXtermAdapter\(terminal\)/);
+  assert.match(terminalSurface, /latest\.current\.onReady\(terminalHost\.host\)/);
+  assert.match(terminalSurface, /terminalHost\.dispose\(\)/);
 });
 
-test("the Worker hosts the reusable terminal adapter", () => {
-  assert.match(worker, /createAgentTerminal/);
-  assert.match(worker, /type: "terminalWrite"/);
-  assert.match(worker, /terminalHost\?\.input/);
-  assert.match(worker, /terminalHost\?\.resize/);
-  assert.match(worker, /type: "terminalActivity", running: activePromptIds\.size > 0/);
+  test("the website owns its terminal presentation directly over the SDK", () => {
+  assert.match(terminal, /createAgentTerminal\(\{/);
+  assert.match(terminal, /createAgentTerminal\(\{[\s\S]*?agent,[\s\S]*?terminal: terminalHost/);
+  assert.match(terminal, /setTerminalRunning\(activePromptIds\.current\.size > 0\)/);
+  assert.match(demoTerminal, /agent\.turn\.prompt\(\{ input: prompt \}\)/);
+  assert.doesNotMatch(terminal, /new Worker|postMessage/);
 });
 
 test("the artifact runtime remains independently scrollable", () => {
@@ -239,20 +243,14 @@ test("portrait coarse-pointer tablets retain 44px controls without changing layo
   }
 });
 
-test("the default terminal chrome stays generic while advanced connection paths remain available", () => {
-  assert.doesNotMatch(terminal, /Connected to your ChatGPT subscription/);
-  assert.doesNotMatch(terminal, /The agent runs in your browser/);
-  assert.match(terminal, /aria-live="polite"/);
-  assert.match(terminal, /aria-label="Connection options">session/);
-  assert.match(terminal, /aria-label="Use ChatGPT subscription"/);
-  assert.match(terminal, /aria-label="Use Tempo MPP"/);
-  assert.match(terminal, /aria-pressed=\{transport === "openai"\}/);
-  assert.match(terminal, /aria-pressed=\{transport === "mpp"\}/);
-  assert.match(mpp, /<details className="agent-payment-details">/);
-  assert.match(mpp, /<summary>payment details<\/summary>/);
-  for (const capability of ["authorize", "add funds", "disconnect", "Tempo account", "Model authorized", "Mercator authorized"]) {
-    assert.match(mpp, new RegExp(capability, "i"));
-  }
+test("the terminal chrome retains ChatGPT subscription controls without payment paths", () => {
+  assert.doesNotMatch(chatGptSession, /Connected to your ChatGPT subscription/);
+  assert.doesNotMatch(chatGptSession, /The agent runs in your browser/);
+  assert.match(chatGptSession, /aria-live="polite"/);
+  assert.match(chatGptSession, /aria-label="Sign in with ChatGPT"/);
+  assert.match(chatGptSession, /aria-label="Connection options">session/);
+  assert.match(chatGptSession, />Sign out<\/button>/);
+  assert.doesNotMatch(`${terminal}\n${chatGptSession}`, /Tempo|MPP|payment details|onSelectTransport/);
 });
 
 function source(path: string): string {

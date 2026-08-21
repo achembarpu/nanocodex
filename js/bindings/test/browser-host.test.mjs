@@ -252,6 +252,51 @@ test("browser host awaits Worker upgrades and preserves handshake metadata", asy
   });
 });
 
+test("browser host preconnects once and gives the exact socket to the first model call", async () => {
+  const socket = new FakeWebSocket("wss://api.openai.test/v1/responses");
+  socket.readyState = FakeWebSocket.OPEN;
+  const requests = [];
+  const host = createBrowserHost({
+    createWebSocket(endpoint, sessionId, request) {
+      requests.push({ endpoint, sessionId, request });
+      return socket;
+    },
+  });
+
+  await host.preconnect("wss://api.openai.test/v1/responses", "session-1");
+  const connected = JSON.parse(await host.connect(
+    "wss://api.openai.test/v1/responses",
+    "host-managed",
+    "session-1",
+  ));
+
+  assert.equal(connected.status, 101);
+  assert.deepEqual(requests, [{
+    endpoint: "wss://api.openai.test/v1/responses",
+    sessionId: "session-1",
+    request: { authorization: "preconnect" },
+  }]);
+});
+
+test("disposing a host owns a taken preconnect through handshake completion", async () => {
+  const handshake = deferred();
+  const socket = new FakeWebSocket("wss://api.openai.test/v1/responses");
+  socket.readyState = FakeWebSocket.OPEN;
+  const host = createBrowserHost({ createWebSocket: () => handshake.promise });
+
+  void host.preconnect(socket.url, "session-1").catch(() => {});
+  const connecting = host.connect(socket.url, "host-managed", "session-1");
+  await host.dispose();
+  handshake.resolve(socket);
+
+  await assert.rejects(connecting, /disposed during WebSocket connection/);
+  assert.equal(socket.readyState, 3);
+  await assert.rejects(
+    host.connect(socket.url, "host-managed", "session-1"),
+    /already disposed/,
+  );
+});
+
 test("browser host never exposes its host-managed credential marker", async () => {
   const socket = new FakeWebSocket("wss://chatgpt.test/backend-api/codex/responses");
   socket.readyState = FakeWebSocket.OPEN;
@@ -514,4 +559,14 @@ class FakeWebSocket {
   emit(type, event) {
     for (const listener of this.listeners.get(type) || []) listener(event);
   }
+}
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((next, fail) => {
+    resolve = next;
+    reject = fail;
+  });
+  return { promise, reject, resolve };
 }

@@ -374,39 +374,19 @@ tools. Read their exact contracts and bounds in
 
 ### Bring any terminal or product interface
 
-`agent.events.watch()` and the headless React store expose ordered typed data
-independently from `Turn.result()`. The SDK does not make a DOM transcript or
-terminal emulator authoritative. Choose the highest-level consumer that helps:
+`agent.events.watch()` and the intentionally narrow `nanocodex-react` Context
+and hooks expose ordered typed data independently from `Turn.result()`. The SDK
+does not make a DOM transcript or terminal emulator authoritative. UI
+frameworks and terminal renderers consume Agent events directly and remain
+application code. Those events can feed wterm, xterm.js, Ink, a design-system
+transcript, persistence, or telemetry without adding a UI protocol to the SDK.
 
-- `nanocodex-terminal` attaches one retained agent to any host with `write`,
-  `onData`, `onResize`, `cols`, and `rows`; built-in adapters cover xterm.js
-  and WTerm while native TTYs, WebSockets, and tests can implement the same
-  five-method boundary;
-- `nanocodex-tui` is a framework-independent state reducer and controller;
-- `nanocodex-tui-react` is the complete accessible, virtualized React
-  renderer with streaming, steering, queues, branches, and image paste; or
-- raw typed events can feed wterm, xterm.js, Ink, a design-system transcript,
-  persistence, or telemetry directly.
-
-The React, artifacts, TUI, and terminal companion packages currently ship from
-this repository workspace rather than as independent npm releases. Their APIs
-and runnable examples are source-level integration surfaces until they are
-added to the release pipeline.
-
-The adapter owns ANSI presentation, line editing, prompt history, steering,
-cancellation, and terminal subscriptions. Your application still owns the
+The application owns event reduction, ANSI presentation, line editing, prompt
+history, steering, cancellation, and terminal subscriptions alongside the
 agent, tools, transport, persistence, authorization, and shutdown. The
-[Vercel Workflow example](examples/vercel-workflows/README.md) proves the same
-replacement seam across a durable replay journal and `@wterm/react`; its
-separate Sandbox PTY remains a distinct shell-byte lifecycle.
-
-```js
-import { createAgentTerminal, xtermAdapter } from "nanocodex-terminal";
-
-const attached = createAgentTerminal({ agent, terminal: xtermAdapter(xterm) });
-await attached.ready;
-// attached.dispose() detaches the UI; it does not destroy the agent.
-```
+[Vercel Workflow example](examples/vercel-workflows/README.md) demonstrates
+that application-owned seam with a durable replay journal and `@wterm/react`;
+its separate Sandbox PTY remains a distinct shell-byte lifecycle.
 
 ## Python
 
@@ -630,7 +610,7 @@ tracing, and benchmark gates; stable crates never depend on them.
 | [`nanocodex-tools`](crates/nanocodex-tools/README.md) | Stable, published | Tool contract, standard tools, shell/process lifecycle, Code Mode, deferred search, MCP, and remote dispatch. |
 | [`nanocodex-subagents`](crates/nanocodex-subagents/README.md) | Source/Git-only optional workspace extension | Task-tree lifecycle and the seven canonical child-agent tools above the core. |
 | [`nanocodex-observability`](crates/nanocodex-observability/README.md) | Stable, published, optional | Full-fidelity tracing and application-owned OpenTelemetry initialization. |
-| [`nanocodex` for JavaScript](js/bindings/README.md) | Published core binding; source-only companions | Node/browser hosts around the Rust/WASM agent, plus React, artifacts, TUI, and terminal packages under [`js/`](js/README.md). |
+| [`nanocodex` for JavaScript](js/bindings/README.md) | Published headless core binding; narrow source companions | Node/browser hosts around the Rust/WASM agent, plus the React Context/hooks and artifacts packages under [`js/`](js/README.md). UI frameworks and terminal renderers remain application code. |
 | [`nanocodex` for Python](py/bindings/README.md) | Source-distributed language binding | Native PyO3 consumer of the Rust-owned lifecycle, built and tested with Maturin. |
 | [`nanocodex-browser`](crates/experimental/nanocodex-browser/README.md) | Experimental, unpublished | Deterministic Chromium control and optional headed browser VM. |
 | [`nanocodex-vm`](crates/experimental/nanocodex-vm/README.md) | Experimental, unpublished | libkrun images, retained/ephemeral guests, and canonical VM-backed workspace tools. |

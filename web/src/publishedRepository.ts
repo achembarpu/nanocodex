@@ -31,10 +31,116 @@ export type PublishedRepositorySnapshot = PublishedRepositoryDocument & {
 
 type Fetch = typeof fetch;
 
+type PrefetchedPatch = {
+  controller: AbortController;
+  response: Promise<Response>;
+};
+
+let snapshotPreload: Promise<PublishedRepositorySnapshot> | undefined;
+let historyPreload: Promise<PublishedRepositorySnapshot> | undefined;
+const prefetchedPatches = new Map<string, PrefetchedPatch>();
+
 export async function loadPublishedRepositorySnapshot(
   includeHistory = true,
   request: Fetch = fetch,
   development = import.meta.env?.DEV ?? false,
+): Promise<PublishedRepositorySnapshot> {
+  if (request === fetch && !development) {
+    return preloadPublishedRepositorySnapshot(includeHistory);
+  }
+  return loadPublishedRepositorySnapshotUncached(
+    includeHistory,
+    request,
+    development,
+  );
+}
+
+export function preloadPublishedRepositorySnapshot(
+  includeHistory = true,
+): Promise<PublishedRepositorySnapshot> {
+  if (includeHistory && historyPreload) return historyPreload;
+  if (!includeHistory && historyPreload) return historyPreload;
+  if (!includeHistory && snapshotPreload) return snapshotPreload;
+
+  const loading = loadPublishedRepositorySnapshotUncached(
+    includeHistory,
+    fetch,
+    false,
+  ).then((snapshot) => {
+    if (snapshot.historyLoaded) snapshotPreload = Promise.resolve(snapshot);
+    return snapshot;
+  }).catch((error) => {
+    if (includeHistory) historyPreload = undefined;
+    else snapshotPreload = undefined;
+    throw error;
+  });
+  if (includeHistory) historyPreload = loading;
+  else snapshotPreload = loading;
+  return loading;
+}
+
+export function preloadPreferredPublishedFile(
+  snapshot: PublishedRepositorySnapshot,
+  search = typeof window === "undefined" ? "" : window.location.search,
+): Promise<string> | undefined {
+  const requestedPath = new URLSearchParams(search).get("path");
+  const preferredFile = snapshot.tree.find((file) =>
+    file.path === requestedPath && file.contentUrl != null
+  ) ?? snapshot.tree.find((file) =>
+    file.path === "src/main.rs" && file.contentUrl != null
+  ) ?? snapshot.tree.find((file) =>
+    file.path === "README.md" && file.contentUrl != null
+  ) ?? snapshot.tree.find((file) => file.contentUrl != null);
+  return preferredFile == null ? undefined : snapshot.readFile(preferredFile);
+}
+
+export function preloadPublishedRepositoryPatch(
+  patchUrl: PublishedRepositorySnapshot["commitPatchUrl"],
+): Promise<Response> | undefined {
+  if (typeof patchUrl !== "string") return undefined;
+  const existing = prefetchedPatches.get(patchUrl);
+  if (existing != null) return existing.response;
+  const controller = new AbortController();
+  markCommitPerformance("patch-prefetch-start");
+  const response = fetch(patchUrl, {
+    cache: "default",
+    signal: controller.signal,
+  }).then((result) => {
+    markCommitPerformance("patch-prefetch-headers");
+    return result;
+  }).catch((error) => {
+    prefetchedPatches.delete(patchUrl);
+    throw error;
+  });
+  prefetchedPatches.set(patchUrl, { controller, response });
+  return response;
+}
+
+export function fetchPublishedRepositoryPatch(
+  patchUrl: string,
+  signal: AbortSignal,
+): Promise<Response> {
+  const prefetched = prefetchedPatches.get(patchUrl);
+  if (prefetched == null) {
+    return fetch(patchUrl, { cache: "default", signal });
+  }
+
+  prefetchedPatches.delete(patchUrl);
+  if (signal.aborted) prefetched.controller.abort(signal.reason);
+  else {
+    signal.addEventListener(
+      "abort",
+      () => prefetched.controller.abort(signal.reason),
+      { once: true },
+    );
+  }
+  return prefetched.response;
+}
+
+async function loadPublishedRepositorySnapshotUncached(
+  includeHistory: boolean,
+  request: Fetch,
+  development: boolean,
 ): Promise<PublishedRepositorySnapshot> {
   const base = development
     ? "/__nanocodex/repository"
@@ -64,6 +170,11 @@ export async function loadPublishedRepositorySnapshot(
   requireRepositoryDocument(snapshot);
   requireGeneration(snapshotResponse, snapshot.repository.head);
   markCommitPerformance("repository-snapshot-parsed");
+  if (includeHistory && request === fetch && !development) {
+    void preloadPublishedRepositoryPatch(
+      `${base}/commits/${snapshot.repository.head}.diff`,
+    )?.catch(() => undefined);
+  }
 
   let commits: HarnessCommit[] = [];
   if (includeHistory) {

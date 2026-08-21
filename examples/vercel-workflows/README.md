@@ -49,13 +49,13 @@ journal, not from an in-turn model or tool boundary. Deployments that need
 mid-step crash recovery should back the same `DurabilityStore` interface with
 an external atomic compare-and-append service instead of this in-step adapter.
 
-The browser intentionally does not mount `nanocodex-tui-react`. Its agent
-transcript is an `@wterm/react` terminal fed by a small ANSI renderer over the
-same replayable, client-safe Workflow event stream. That consumer boundary is
-the replacement seam: an application can render the snapshot with xterm.js or
-ordinary React without changing the headless Nanocodex agent, its durable
-journal, or its transport. The example keeps the adapter local because no new
-core UI abstraction is needed to drive a real alternative renderer.
+The browser keeps its agent transcript in application code: an `@wterm/react`
+terminal fed by a small ANSI renderer over the replayable, client-safe Workflow
+event stream. That consumer boundary is the replacement seam: an application
+can render the snapshot with xterm.js or ordinary React without changing the
+headless Nanocodex agent, its durable journal, or its transport. The example
+keeps the adapter local because UI frameworks and terminal renderers consume
+Agent events directly rather than defining a core UI abstraction.
 
 Every Workflow actor also owns a named Vercel Sandbox. The caller-defined
 `sandbox_exec`, `sandbox_start_process`, `sandbox_read_file`,

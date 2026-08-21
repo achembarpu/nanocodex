@@ -18,6 +18,50 @@ export class GenerationRequestOwner<T> {
   }
 }
 
+/** Serializes replacement so two agent lifecycles never own the same browser runtime. */
+export class SerializedReplacementOwner<T> {
+  private readonly closeValue: (value: T) => Promise<void>;
+  private current: T | undefined;
+  private generation = 0;
+  private tail: Promise<void> = Promise.resolve();
+
+  constructor(closeValue: (value: T) => Promise<void>) {
+    this.closeValue = closeValue;
+  }
+
+  replace(create: () => Promise<T>): Promise<T | undefined> {
+    const generation = ++this.generation;
+    return this.enqueue(async () => {
+      await this.closeCurrent();
+      if (generation !== this.generation) return undefined;
+      const candidate = await create();
+      if (generation !== this.generation) {
+        await this.closeValue(candidate);
+        return undefined;
+      }
+      this.current = candidate;
+      return candidate;
+    });
+  }
+
+  clear(): Promise<void> {
+    ++this.generation;
+    return this.enqueue(() => this.closeCurrent());
+  }
+
+  private enqueue<R>(operation: () => Promise<R>): Promise<R> {
+    const result = this.tail.then(operation);
+    this.tail = result.then(() => undefined, () => undefined);
+    return result;
+  }
+
+  private async closeCurrent() {
+    const current = this.current;
+    this.current = undefined;
+    if (current !== undefined) await this.closeValue(current);
+  }
+}
+
 export function availableVisualHeight({
   elementTop,
   minimum = 0,
@@ -38,91 +82,4 @@ export function terminalRunningForStatus(
   running: boolean,
 ): boolean {
   return status === "ready" && running;
-}
-
-type WorkerFactory = () => Worker;
-
-export function createPrewarmedWorkerOwner(
-  createWorker: WorkerFactory,
-  readyTimeoutMs = 45_000,
-) {
-  let claimed = false;
-  let prewarmed: {
-    release(): void;
-    worker: Worker;
-  } | undefined;
-
-  const prewarm = () => {
-    if (claimed || prewarmed) return;
-    const worker = createWorker();
-    const discard = () => {
-      if (prewarmed?.worker !== worker) return;
-      prewarmed.release();
-      prewarmed = undefined;
-      worker.terminate();
-    };
-    const release = () => {
-      worker.removeEventListener("error", discard);
-      worker.removeEventListener("messageerror", discard);
-    };
-    prewarmed = { release, worker };
-    worker.addEventListener("error", discard);
-    worker.addEventListener("messageerror", discard);
-    try {
-      worker.postMessage({ type: "warmup" });
-    } catch (error) {
-      discard();
-      throw error;
-    }
-  };
-
-  const claim = () => {
-    claimed = true;
-    const worker = prewarmed?.worker ?? createWorker();
-    prewarmed?.release();
-    prewarmed = undefined;
-    return withReadyTimeout(worker, readyTimeoutMs);
-  };
-
-  return Object.freeze({ claim, prewarm });
-}
-
-function withReadyTimeout(worker: Worker, timeoutMs: number): Worker {
-  const originalTerminate = worker.terminate.bind(worker);
-  let terminated = false;
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const cleanup = () => {
-    if (timer !== undefined) clearTimeout(timer);
-    timer = undefined;
-    worker.removeEventListener("error", cleanup);
-    worker.removeEventListener("messageerror", cleanup);
-    worker.removeEventListener("message", onMessage);
-  };
-  const onMessage = (event: MessageEvent<unknown>) => {
-    if (!isRecord(event.data)) return;
-    if (event.data.type === "ready" || event.data.type === "fatal") cleanup();
-  };
-  worker.terminate = () => {
-    if (terminated) return;
-    terminated = true;
-    cleanup();
-    originalTerminate();
-  };
-  worker.addEventListener("error", cleanup);
-  worker.addEventListener("messageerror", cleanup);
-  worker.addEventListener("message", onMessage);
-  timer = setTimeout(() => {
-    const onerror = worker.onerror;
-    worker.terminate();
-    if (typeof onerror === "function") {
-      onerror.call(worker, {
-        message: "Agent worker did not become ready in time",
-      } as ErrorEvent);
-    }
-  }, timeoutMs);
-  return worker;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === "object" && value !== null && !Array.isArray(value);
 }

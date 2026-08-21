@@ -50,19 +50,22 @@ test("only capabilities used by the Worker, transport, thread, and workspace are
 
 test("the terminal fails before thread or Worker creation and exposes the capability error", () => {
   const terminal = source("../src/AgentTerminal.tsx");
-  assert.match(terminal, /capabilityError \? undefined : getBrowserThread\(\)/);
-  assert.match(terminal, /if \(capabilityError\) return;[\s\S]*?prewarmNanocodexWorker/);
+  const session = source("../src/chatGptSession.tsx");
+  assert.match(terminal, /if \(capabilityError\) \{[\s\S]*?role="alert">\{capabilityError\}/);
+  assert.match(terminal, /const thread = useMemo\(\(\) => getBrowserThread\(\), \[\]\)/);
+  assert.match(terminal, /<NanocodexProvider>[\s\S]*?<AgentTerminalDemo/);
   assert.match(terminal, /role="alert">\{capabilityError\}/);
-  assert.match(terminal, /if \(capabilityError\) return "browser unsupported"/);
+  assert.match(session, /if \(capabilityError\) return "browser unsupported"/);
 });
 
 test("coarse-pointer Safari keeps native IME composition separate from send", () => {
   const terminal = source("../src/AgentTerminal.tsx");
-  assert.match(terminal, /<textarea[\s\S]*?enterKeyHint="send"/);
-  assert.match(terminal, /onCompositionStart=\{\(\) => \{ composing\.current = true; \}\}/);
-  assert.match(terminal, /onCompositionEnd=\{\(\) => \{ composing\.current = false; \}\}/);
-  assert.match(terminal, /isTerminalSubmitKeyEvent\(event\.nativeEvent, composing\.current\)/);
-  assert.match(terminal, /type: "terminalSubmit", input, intent/);
+  const surface = source("../src/agentTerminalSurface.tsx");
+  assert.match(surface, /<textarea[\s\S]*?enterKeyHint="send"/);
+  assert.match(surface, /onCompositionStart=\{\(\) => \{ composing\.current = true; \}\}/);
+  assert.match(surface, /onCompositionEnd=\{\(\) => \{ composing\.current = false; \}\}/);
+  assert.match(surface, /isTerminalSubmitKeyEvent\(event\.nativeEvent, composing\.current\)/);
+  assert.match(terminal, /active\.current\.submit\(input, \{ intent \}\)/);
 });
 
 function source(path: string): string {

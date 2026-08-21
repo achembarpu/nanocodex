@@ -17,6 +17,7 @@ export const COMPACT_WORKSPACE_QUERY =
 export const CODE_VIEW_FILE_TREE_ITEM_HEIGHT = 24;
 export const CODE_VIEW_BATCH_COUNT = 25;
 export const CODE_VIEW_BATCH_COUNT_MAX = 96;
+export const COMMIT_INITIAL_BATCH_COUNT = 1;
 
 export function getInitialBatchSize(): number {
   const viewportHeight = window.visualViewport?.height ?? window.innerHeight;

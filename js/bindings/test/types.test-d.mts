@@ -131,13 +131,19 @@ async function check() {
   await agent.session.shutdown();
   await Actions.session.shutdown(agent);
 
-  await BrowserAgent.create({
+  // @ts-expect-error function-backed transports require the explicit inline host.
+  await BrowserAgent.create({ transport: BrowserTransport.hostManaged({ createWebSocket: () => ({} as WebSocket) }) });
+  await BrowserAgent.createInline({
     transport: BrowserTransport.hostManaged({
       websocketUrl: "wss://example.com",
       createWebSocket: () => ({} as WebSocket),
     }),
   });
-  await BrowserAgent.create({
+  const workerTransport: BrowserTransport.WorkerTransport = BrowserTransport.hostManaged({
+    websocketUrl: "wss://example.com/api/responses",
+  });
+  await BrowserAgent.create({ transport: workerTransport });
+  await BrowserAgent.createInline({
     transport: BrowserTransport.openAi({ apiKey }),
     filesystem: browserWorkspace,
     tools: [
@@ -162,7 +168,7 @@ async function check() {
     recentImages: () => [],
     rememberImage: () => {},
   });
-  await BrowserAgent.create({
+  await BrowserAgent.createInline({
     transport: BrowserTransport.openAi({ apiKey }),
     filesystem: browserRuntime.filesystem,
     instructions: browserRuntime.instructions,
@@ -171,10 +177,14 @@ async function check() {
   nanocodexTools().resolveId("node-rsa");
   // @ts-expect-error Rust extensions must come from a branded constructor.
   await Agent.create({ transport: Transport.openAi({ apiKey }), tools: [{ maxConcurrency: 8 }] });
-  await BrowserAgent.create({
+  // @ts-expect-error function-backed MPP transports cannot cross the package Worker boundary.
+  await BrowserAgent.create({ transport: BrowserTransport.mpp({ session: { async ws() { return {} as WebSocket; } } }) });
+  await BrowserAgent.createInline({
     transport: BrowserTransport.mpp({ session: { async ws() { return {} as WebSocket; } } }),
   });
+  // @ts-expect-error subscription handles cannot cross the package Worker boundary.
   await BrowserAgent.create({ transport: BrowserTransport.chatGpt({ subscription }) });
+  await BrowserAgent.createInline({ transport: BrowserTransport.chatGpt({ subscription }) });
   // @ts-expect-error authentication is not an Agent.create option.
   await BrowserAgent.create({ transport: BrowserTransport.openAi({ apiKey }), hostAuth: true });
   // @ts-expect-error a transport cannot be fabricated from an arbitrary object.

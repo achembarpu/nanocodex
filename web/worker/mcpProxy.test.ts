@@ -18,7 +18,7 @@ test("default MCP proxy is same-origin, allowlisted, and preserves protocol stat
     });
   }) as typeof fetch;
   try {
-    const url = new URL("https://demo.test/api/mcp/tempo?cursor=next");
+    const url = new URL("https://demo.test/api/mcp/cloudflare?cursor=next");
     const response = await proxyDefaultMcp(new Request(url, {
       method: "POST",
       headers: {
@@ -34,7 +34,7 @@ test("default MCP proxy is same-origin, allowlisted, and preserves protocol stat
     assert.equal(response?.headers.get("content-type"), "text/event-stream");
     assert.equal(response?.headers.get("mcp-session-id"), "session-2");
     assert.equal(response?.headers.get("set-cookie"), null);
-    assert.equal(seen[0]?.url, "https://mcp.tempo.xyz/?cursor=next");
+    assert.equal(seen[0]?.url, "https://docs.mcp.cloudflare.com/mcp?cursor=next");
     assert.equal(seen[0]?.request.headers.get("authorization"), null);
     assert.equal(seen[0]?.request.headers.get("mcp-session-id"), "session-1");
     assert.equal(await seen[0]?.request.text(), "{}");
@@ -44,7 +44,7 @@ test("default MCP proxy is same-origin, allowlisted, and preserves protocol stat
 });
 
 test("default MCP proxy rejects forged origins, unknown servers, and methods", async () => {
-  const url = new URL("https://demo.test/api/mcp/tempo");
+  const url = new URL("https://demo.test/api/mcp/cloudflare");
   assert.equal((await proxyDefaultMcp(new Request(url), url, false))?.status, 403);
 
   const unknown = new URL("https://demo.test/api/mcp/arbitrary");
@@ -62,7 +62,7 @@ test("default MCP proxy rejects declared oversized bodies before upstream fetch"
     return new Response();
   }) as typeof fetch;
   try {
-    const url = new URL("https://demo.test/api/mcp/tempo");
+    const url = new URL("https://demo.test/api/mcp/cloudflare");
     const response = await proxyDefaultMcp(new Request(url, {
       method: "POST",
       headers: { "content-length": String(16 * 1024 * 1024 + 1) },
@@ -95,7 +95,7 @@ test("default MCP proxy cancels chunked bodies at the streaming cap without fetc
         cancelled = true;
       },
     });
-    const url = new URL("https://demo.test/api/mcp/tempo");
+    const url = new URL("https://demo.test/api/mcp/cloudflare");
     const response = await proxyDefaultMcp(new Request(url, {
       method: "POST",
       body,

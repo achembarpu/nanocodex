@@ -1,26 +1,28 @@
 # nanocodex-react
 
-Small React bindings for an application-owned Nanocodex Worker. The package
-owns worker lifecycle and an external store; credentials, health checks,
-transport policy, and presentation stay in the application.
+React hooks over the headless browser SDK. The vanilla config owns the package
+Worker, Rust/WASM Agent, persistent workspace, and cleanup. React only reads
+that external state and binds event subscriptions.
 
 ```tsx
-import { createConfig, NanocodexProvider } from "nanocodex-react";
-
-const config = createConfig({
-  worker: () => new Worker(new URL("./agent.worker.ts", import.meta.url), { type: "module" }),
-  reasoningMode: "pro",
-  thinking: "high",
-});
+import { NanocodexProvider, useAgent } from "nanocodex-react";
 
 root.render(
-  <NanocodexProvider config={config}>
+  <NanocodexProvider>
     <App />
   </NanocodexProvider>,
 );
+
+function App() {
+  const { data: agent, error, isPending, refetch } = useAgent();
+  // `agent` is the normal headless Agent from `nanocodex/browser`.
+}
 ```
 
-`useNanocodex()` returns the worker status plus `dispatch` and `stop`.
-`useNanocodexMessage()` subscribes to ordered worker messages, and `useConfig()`
-exposes the headless store for advanced composition. Command and message unions
-can be supplied as generics to keep the entire Worker boundary typed.
+`useAgent({ threadId, enabled })` follows an external-store lifecycle: the
+vanilla config creates one Agent for active subscribers, shares it, and shuts it
+down after the last subscriber leaves. `useAgentEvents` is the narrow hook for
+ordered typed events.
+
+Advanced applications may pass `createConfig({ agent: { ... } })` to the
+provider. Defaults require no setup.

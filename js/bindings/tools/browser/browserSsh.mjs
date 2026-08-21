@@ -1,4 +1,4 @@
-import { Buffer } from "buffer";
+import { Buffer } from "./browserBuffer.mjs";
 import { CancellationTokenSource, CommandRequestMessage, SshAuthenticationType, SshClientSession, SshSessionConfiguration, WebSocketStream, } from "./devTunnelsSshBrowser.mjs";
 import { importKey } from "@microsoft/dev-tunnels-ssh-keys";
 import { defineCommand, } from "just-bash/browser";

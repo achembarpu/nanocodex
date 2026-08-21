@@ -71,3 +71,16 @@ export * as ChatGptSubscription from "./ChatGptSubscription.mjs";
 export * as Subagents from "../runtime/subagents.mjs";
 export * as Transport from "./Transport.mjs";
 export * as Workspace from "./workspace.mjs";
+export {
+  createConfig,
+  type AgentParameters,
+  type AgentSnapshot,
+  type AgentStatus,
+  type Config,
+  type CreateConfigParameters,
+} from "./config.mjs";
+export {
+  defaultHostManagedWebSocketUrl,
+  openHostManagedWebSocket,
+  type HostManagedWebSocketOptions,
+} from "./hostManagedWebSocket.mjs";

@@ -25,8 +25,9 @@ import {
 } from "./commitPatchMetadata";
 import {
   CODE_VIEW_BATCH_COUNT,
-  getInitialBatchSize,
+  COMMIT_INITIAL_BATCH_COUNT,
 } from "./pierreCodeView";
+import { fetchPublishedRepositoryPatch } from "./publishedRepository";
 import {
   getStreamedPatchMetadata,
   streamGitPatchFiles,
@@ -243,10 +244,10 @@ export function useCommitStreamLoader({
 
         let responseBody: ReadableStream<Uint8Array>;
         if (typeof patchUrl === "string") {
-          const response = await fetch(patchUrl, {
-            cache: "default",
-            signal: controller.signal,
-          });
+          const response = await fetchPublishedRepositoryPatch(
+            patchUrl,
+            controller.signal,
+          );
           if (!response.ok) {
             throw new Error(`Patch request failed (${response.status}).`);
           }
@@ -282,7 +283,7 @@ export function useCommitStreamLoader({
         let hasReceivedFirstStreamedFile = false;
         let lastPublishTime = performance.now();
         let lastWorkYieldTime = lastPublishTime;
-        const initialPublishFileBatchSize = getInitialBatchSize();
+        const initialPublishFileBatchSize = COMMIT_INITIAL_BATCH_COUNT;
 
         const queueCommitSection = (commit: HarnessCommit) => {
           if (queuedCommitHashes.has(commit.hash)) return;
@@ -293,6 +294,7 @@ export function useCommitStreamLoader({
         const publishPendingData = async () => {
           if (pendingPublishFileCount === 0 || !isCurrentRequest()) return;
 
+          const isInitialPublish = !hasPublishedInitialItems;
           pendingPublishFileCount = 0;
           lastPublishTime = performance.now();
           const pendingItems = takePendingCommitItems(accumulator);
@@ -317,6 +319,9 @@ export function useCommitStreamLoader({
           }
           await yieldToBrowser();
           if (isCurrentRequest()) onItemsPublished?.();
+          if (isInitialPublish) {
+            await waitForViewer(viewerRef, controller.signal);
+          }
           lastWorkYieldTime = performance.now();
         };
 
@@ -504,4 +509,13 @@ function yieldToBrowser(): Promise<void> {
     const timeout = window.setTimeout(resolveOnce, 50);
     window.requestAnimationFrame(resolveOnce);
   });
+}
+
+async function waitForViewer(
+  viewerRef: RefObject<CodeViewHandle<undefined> | null>,
+  signal: AbortSignal,
+): Promise<void> {
+  while (!signal.aborted && viewerRef.current == null) {
+    await yieldToBrowser();
+  }
 }

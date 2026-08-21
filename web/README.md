@@ -31,13 +31,13 @@ npm run dev
 
 The homepage consumes the publishable `nanocodex` and `nanocodex-react`
 packages under `../js`; it does not reach into generated WASM artifacts. Its
-React integration follows an external-store pattern: create a
-`createConfig()` once, pass it to `NanocodexProvider`, and consume
-`useNanocodex`, `useNanocodexMessage`, or `useConfig`. React owns no agent
+React integration wraps the terminal in `NanocodexProvider`, creates the
+browser agent with `useAgent({ enabled, threadId })`, and observes its typed
+event stream with `useAgentEvents`. React owns no Worker lifecycle, agent
 history, credential policy, or model-loop state.
 
-The local Worker and Vite client run together at `https://localhost:5173`, using
-the same Cloudflare Vite-plugin layout as Tempo's React MPP examples.
+The local Worker and Vite client run together at `https://localhost:5173` using
+the Cloudflare Vite-plugin layout.
 
 ### Documentation
 
@@ -210,26 +210,8 @@ Run `npm run bench:dataset` in `js/bindings` for the deterministic 100,000-row
 Snappy Parquet/JSONL browser-path benchmark. It reports cold and repeated query
 latency, pulled bytes, range requests, scanned rows, and cache hits.
 
-OpenAI remains the default agent connection. A user can explicitly select
-Tempo MPP instead; only then does React lazy-load Wagmi and Tempo Accounts,
-open the standard embedded Tempo Wallet dialog for its account and passkey flow, and
-authorize a bounded one-day access key in that same Accounts connection
-ceremony. The
-module Worker hydrates that delegated signer from Accounts' IndexedDB storage
-and gives it to an mppx session manager with a durable channel store. Marking
-that manager as Nanocodex's Tempo provider also enables the package's built-in
-Mercator MCP. MPPx pays its charge or session challenges with the same signer,
-limits, and durable store; its tools remain deferred behind `tool_search` and
-Code Mode. The model channel is reused across turns and reloads and is not
-closed by Nanocodex. Wallet, payer, delegated signer, channel, model cumulative,
-Mercator cumulative, and agent event JSONL are shown only while the MPP route
-is selected. The normal OpenAI and ChatGPT routes do not initialize Mercator or
-expose any payment state.
-
-Development uses `vite-plugin-mkcert` because the Accounts SDK intentionally
-falls back to a popup on plain HTTP. Cross-origin passkeys inside the hosted
-Tempo Wallet iframe require a secure context; trusted local HTTPS exercises the
-same embedded flow as production.
+Development uses `vite-plugin-mkcert` so the browser Agent exercises its secure
+context requirements under the same HTTPS boundary as production.
 
 Local development reads the optional ignored root `.env` through the repository
 workflow. BYOK uses the `BYOK_SESSIONS` Durable Object binding; ChatGPT login
@@ -297,6 +279,3 @@ gh workflow run mirror-cloudflare-git.yml --ref master -f revision="$revision"
 
 For the one-time invalid-publication repair, add
 `-f repair_invalid_publication=true` to that dispatch.
-
-The proposal endpoint is intentionally a testnet-preview `402` until a live MPP
-recipient and settlement policy are configured.

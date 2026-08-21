@@ -1,4 +1,4 @@
-import init, { Nanocodex } from "../pkg-web/nanocodex.js";
+import { Nanocodex } from "../pkg-web/nanocodex.js";
 
 import { agentActions } from "../actions/index.mjs";
 import {
@@ -16,21 +16,21 @@ import {
   toWasmConfig,
 } from "../internal.mjs";
 import { createBrowserHost } from "./host.mjs";
+import { initializeBrowserEngine } from "./engine.mjs";
 import { resolveTools } from "../runtime/tool-configuration.mjs";
-import { resolve as resolveTransport } from "./Transport.mjs";
+import {
+  hostManaged as defaultHostManagedTransport,
+  resolve as resolveTransport,
+} from "./Transport.mjs";
 
-let initialized;
-
-export function prewarm(options = {}) {
-  return initialized ||= (options.module === undefined
-    ? init()
-    : init({ module_or_path: options.module })).catch((error) => {
-      initialized = undefined;
-      throw error;
-    });
+/** Create the browser Agent in its package-owned module Worker. */
+export function create(options = {}) {
+  return import("./WorkerAgent.mjs").then(({ createWorkerAgent }) =>
+    createWorkerAgent(options));
 }
 
-export function create(options = {}) {
+/** Advanced inline seam for function-valued tools and custom host integrations. */
+export async function createLocal(options = {}) {
   const {
     transport,
     module,
@@ -55,14 +55,16 @@ export function create(options = {}) {
   const {
     apiKey,
     hostAuth,
+    hostManagedProtocol,
     subscription,
     mpp,
     websocketUrl,
+    websocketPreconnect,
     apiBaseUrl,
     websocketWarmup,
     WebSocketImpl,
     createWebSocket,
-  } = resolveTransport(transport);
+  } = resolveTransport(transport ?? defaultHostManagedTransport());
   const { tools: hostTools, subagents: subagentConfig } = resolveTools(tools);
   if (filesystem && workspace !== undefined && workspace !== filesystem.root) {
     throw new TypeError("workspace must match filesystem.root when both are provided");
@@ -75,6 +77,7 @@ export function create(options = {}) {
     createWebSocket,
     hostAuth: hostAuth === true
       || (apiKey === undefined && mpp === undefined && subscription === undefined),
+    hostManagedProtocol,
     mpp,
     onEvent: events.emit,
     filesystem,
@@ -85,6 +88,8 @@ export function create(options = {}) {
       ? undefined
       : tempoMcp ? { ...tempoMcp, ...mcp } : mcp,
     codeEvaluator,
+    websocketPreconnect,
+    websocketUrl,
     onDispose: () => releaseDefinitionHost(hostDefinitionId),
   });
   let durabilityOwner;
@@ -105,7 +110,7 @@ export function create(options = {}) {
         }
         activateHost(host);
         await host.ready();
-        await prewarm({ module });
+        await initializeBrowserEngine({ module });
         activateHost(host);
         const configJson = JSON.stringify(toWasmConfig({
           apiKey: apiKey ?? (mpp === undefined
@@ -152,7 +157,7 @@ export function create(options = {}) {
     },
     decorate: (agent) => agent.extend(agentActions()),
   });
-  return createAgentClient(runtime, {
+  const agent = await createAgentClient(runtime, {
     model,
     thinking,
     reasoningMode,
@@ -164,7 +169,13 @@ export function create(options = {}) {
     resume,
     durabilityId,
   });
+  if (websocketPreconnect && websocketUrl) {
+    void host.preconnect(websocketUrl, agent.sessionId).catch(reportError);
+  }
+  return agent;
 }
+
+export const createInline = createLocal;
 
 function releaseHost(host) {
   void host.release().catch(reportError);

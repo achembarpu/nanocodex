@@ -5,8 +5,6 @@ import {
   Fragment,
   createElement,
   useEffect,
-  useId,
-  useMemo,
   useRef,
   useState,
   type ReactNode,
@@ -24,7 +22,6 @@ import {
   loadDocsSource,
   normalizeDocsPath,
   type DocsPage,
-  type DocsSection,
 } from "./docsNavigation";
 import { highlightDocsCode } from "./docsSyntax";
 import "./Docs.css";
@@ -343,92 +340,26 @@ function isDocsPagingTarget(target: EventTarget | null, docsPage: HTMLElement | 
 }
 
 function DocsNavigation({ path, onNavigate }: { path: string; onNavigate?(): void }) {
-  const instanceId = useId().replaceAll(":", "");
-  const activeSections = useMemo(
-    () => docsNavigation.flatMap(({ items }) =>
-      items.filter((item): item is DocsSection =>
-        item.type === "section" && item.pages.some((page) => page.href === path)
-      ).map((section) => section.id)
-    ),
-    [path],
-  );
-  const [expanded, setExpanded] = useState<ReadonlySet<string>>(
-    () => new Set(activeSections),
-  );
-
-  useEffect(() => {
-    if (activeSections.length === 0) return;
-    setExpanded((current) => new Set([...current, ...activeSections]));
-  }, [activeSections]);
-
   return (
     <nav aria-label="Documentation">
       {docsNavigation.map((group) => (
         <section className="docs-nav-group" key={group.label}>
           <p>{group.label}</p>
-          <ul className="docs-nav-items">
+          <div className="docs-nav-items">
             {group.items.map((item) => item.type === "page" ? (
-              <li key={item.href}><DocsNavLink page={item} path={path} onNavigate={onNavigate} /></li>
+              <DocsNavLink key={item.href} page={item} path={path} onNavigate={onNavigate} />
             ) : (
-              <DocsNavSection
-                expanded={expanded.has(item.id)}
-                instanceId={instanceId}
-                key={item.id}
-                onNavigate={onNavigate}
-                onToggle={() => {
-                  setExpanded((current) => {
-                    const next = new Set(current);
-                    if (next.has(item.id)) next.delete(item.id);
-                    else next.add(item.id);
-                    return next;
-                  });
-                }}
-                path={path}
-                section={item}
-              />
+              <Fragment key={item.id}>
+                <p className="docs-nav-section-heading">{item.label}</p>
+                {item.pages.map((page) => (
+                  <DocsNavLink key={page.href} page={page} path={path} onNavigate={onNavigate} />
+                ))}
+              </Fragment>
             ))}
-          </ul>
+          </div>
         </section>
       ))}
     </nav>
-  );
-}
-
-function DocsNavSection({
-  expanded,
-  instanceId,
-  onNavigate,
-  onToggle,
-  path,
-  section,
-}: {
-  expanded: boolean;
-  instanceId: string;
-  onNavigate?(): void;
-  onToggle(): void;
-  path: string;
-  section: DocsSection;
-}) {
-  const controls = `docs-nav-${instanceId}-${section.id}`;
-  return (
-    <li className="docs-nav-section">
-      <button
-        type="button"
-        aria-controls={controls}
-        aria-expanded={expanded}
-        onClick={onToggle}
-      >
-        <span>{section.label}</span>
-        <span className="docs-nav-section-state" aria-hidden="true">
-          {expanded ? "hide" : "show"}
-        </span>
-      </button>
-      <ul className="docs-nav-children" id={controls} hidden={!expanded}>
-        {section.pages.map((page) => (
-          <li key={page.href}><DocsNavLink page={page} path={path} onNavigate={onNavigate} /></li>
-        ))}
-      </ul>
-    </li>
   );
 }
 

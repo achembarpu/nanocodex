@@ -11,7 +11,7 @@ const createWarmAgent = ({
   WebSocketImpl,
   websocketUrl,
   ...options
-}) => Agent.create({
+}) => Agent.createInline({
   ...options,
   transport: Transport.openAi({
     apiKey,

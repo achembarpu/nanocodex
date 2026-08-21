@@ -139,8 +139,18 @@ export type BrowserTools = Readonly<{
   tools: readonly NamedTool[];
 }>;
 
+/** Thread-scoped OPFS, Git, shell, and module state reusable across Agent starts. */
+export type PreparedBrowser = Readonly<{
+  origin: string;
+  threadId: string;
+}>;
+
 /** Opens a persistent OPFS workspace and composes its WASM-backed tools. */
 export function browser(options: BrowserOptions): Promise<BrowserTools>;
+export function prepareBrowser(
+  options: Pick<BrowserOptions, "threadId" | "origin">,
+): Promise<PreparedBrowser>;
+export function bindBrowser(prepared: PreparedBrowser, options: BrowserOptions): BrowserTools;
 
 export function browserThread(threadId: string, origin: string): BrowserThread;
 export function getBrowserThread(): BrowserThread;

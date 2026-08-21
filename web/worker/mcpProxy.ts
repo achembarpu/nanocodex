@@ -1,6 +1,5 @@
 const MCP_UPSTREAMS = Object.freeze({
   "openai-developer-docs": "https://developers.openai.com/mcp",
-  tempo: "https://mcp.tempo.xyz",
   cloudflare: "https://docs.mcp.cloudflare.com/mcp",
   viem: "https://viem.sh/api/mcp",
   vocs: "https://vocs.dev/api/mcp",

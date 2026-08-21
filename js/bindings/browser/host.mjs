@@ -1,4 +1,5 @@
 import { createCodeRuntime } from "../runtime/code-runtime.mjs";
+import { openHostManagedWebSocket } from "./hostManagedWebSocket.mjs";
 
 const DEFAULT_MAX_QUEUED_MESSAGES = 4_096;
 const DEFAULT_MAX_QUEUED_BYTES = 32 * 1024 * 1024;
@@ -9,6 +10,8 @@ const WEBSOCKET_OPEN = 1;
 export function createBrowserHost(options = {}) {
   const WebSocketImpl = options.WebSocketImpl ?? globalThis.WebSocket;
   const createWebSocket = options.createWebSocket
+    ?? (options.hostManagedProtocol && ((endpoint, sessionId) =>
+      openHostManagedWebSocket(endpoint, sessionId, { WebSocketImpl })))
     ?? (WebSocketImpl && ((endpoint) => new WebSocketImpl(endpoint)));
   if (!options.mpp && !createWebSocket) {
     throw new Error("WebSocket is unavailable in this runtime");
@@ -52,8 +55,42 @@ export function createBrowserHost(options = {}) {
   let nextHandle = 1;
   let references = 0;
   let disposal;
+  let preconnected;
+
+  function preconnect(endpoint, sessionId) {
+    if (disposal) return Promise.reject(new Error("Nanocodex host is already disposed"));
+    if (preconnected?.endpoint === endpoint && preconnected.sessionId === sessionId) {
+      return preconnected.promise.then(() => undefined);
+    }
+    closePreconnected();
+    const promise = Promise.resolve().then(() => createWebSocket(endpoint, sessionId, {
+      authorization: "preconnect",
+    }));
+    const entry = { endpoint, sessionId, promise };
+    preconnected = entry;
+    void promise.catch(() => {
+      if (preconnected === entry) preconnected = undefined;
+    });
+    return promise.then(() => undefined);
+  }
+
+  function takePreconnected(endpoint, sessionId) {
+    if (preconnected?.endpoint !== endpoint || preconnected.sessionId !== sessionId) {
+      return undefined;
+    }
+    const promise = preconnected.promise;
+    preconnected = undefined;
+    return promise;
+  }
+
+  function closePreconnected() {
+    const entry = preconnected;
+    preconnected = undefined;
+    void entry?.promise.then((opened) => normalizeWebSocketConnection(opened).socket.close()).catch(() => {});
+  }
 
   async function connect(endpoint, apiKey, sessionId, metadata = {}) {
+    if (disposal) throw new Error("Nanocodex host is already disposed");
     if (options.mpp) return connectMpp(endpoint);
     const authorization = options.hostAuth
       ? { authorization: "host_managed" }
@@ -62,8 +99,13 @@ export function createBrowserHost(options = {}) {
     delete request.authorization;
     delete request.bearerToken;
     Object.assign(request, authorization);
-    const opened = await createWebSocket(endpoint, sessionId, request);
+    const opened = await (takePreconnected(endpoint, sessionId)
+      ?? createWebSocket(endpoint, sessionId, request));
     const { socket, ...handshake } = normalizeWebSocketConnection(opened);
+    if (disposal) {
+      socket.close();
+      throw new Error("Nanocodex host was disposed during WebSocket connection");
+    }
     return new Promise((resolve, reject) => {
       let settled = false;
       const connection = {
@@ -119,12 +161,17 @@ export function createBrowserHost(options = {}) {
   }
 
   async function connectMpp(endpoint) {
+    if (disposal) throw new Error("Nanocodex host is already disposed");
     if (typeof options.mpp.ws !== "function") {
       throw new TypeError("mpp must provide ws(endpoint)");
     }
     const socket = await options.mpp.ws(endpoint);
     if (!socket || typeof socket.addEventListener !== "function") {
       throw new TypeError("mpp.ws(endpoint) must return a WebSocket");
+    }
+    if (disposal) {
+      socket.close();
+      throw new Error("Nanocodex host was disposed during WebSocket connection");
     }
     const handle = nextHandle++;
     const connection = {
@@ -257,6 +304,7 @@ export function createBrowserHost(options = {}) {
     if (disposal) return disposal;
     disposal = (async () => {
       for (const handle of [...connections.keys()]) close(handle);
+      closePreconnected();
       code.reset();
       await mcp?.then((provider) => provider.close(), () => {});
       options.onDispose?.();
@@ -275,6 +323,7 @@ export function createBrowserHost(options = {}) {
       return references === 0 ? dispose() : Promise.resolve();
     },
     connect,
+    preconnect,
     send,
     next,
     close,

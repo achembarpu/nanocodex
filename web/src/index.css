@@ -1346,36 +1346,6 @@ html[data-theme="dark"] .button--medium:focus-visible {
   }
 }
 
-.agent-mpp-details {
-  display: grid;
-  grid-template-columns: max-content minmax(0, 1fr);
-  gap: 4px 10px;
-  margin: 0;
-}
-
-.agent-mpp-details dt { color: var(--text); }
-.agent-mpp-details dd {
-  min-width: 0;
-  margin: 0;
-  overflow: hidden;
-  color: var(--text-muted);
-  font-family: var(--nc-font-family, monospace);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.agent-mpp-jsonl summary { cursor: pointer; color: var(--text); }
-.agent-mpp-jsonl pre {
-  max-height: 180px;
-  margin: 8px 0 0;
-  padding: 8px;
-  overflow: auto;
-  font-size: 9px;
-  line-height: 1.45;
-  background: var(--surface);
-  border: 1px solid var(--border-soft);
-}
-
 .agent-tui {
   --nc-color-background: var(--surface-raised);
   --nc-color-surface: var(--surface);
@@ -2028,8 +1998,7 @@ html[data-theme="dark"] .tui-syntax .shiki span {
   backdrop-filter: blur(12px);
 }
 
-.search-dialog,
-.proposal-dialog {
+.search-dialog {
   width: min(100%, 666px);
   overflow: hidden;
   background: var(--surface-raised);
@@ -2136,143 +2105,6 @@ html[data-theme="dark"] .tui-syntax .shiki span {
   color: var(--text-muted);
   font-size: 10px;
   border-top: 1px solid var(--border-soft);
-}
-
-.proposal-dialog {
-  position: relative;
-  width: min(100%, 560px);
-  padding: 28px;
-}
-
-.dialog-close {
-  position: absolute;
-  top: 18px;
-  right: 18px;
-  display: grid;
-  width: 28px;
-  height: 28px;
-  padding: 0;
-  background: var(--surface-subtle);
-  border-radius: var(--radius-small);
-  cursor: pointer;
-  place-items: center;
-}
-
-.dialog-close svg {
-  width: 13px;
-  height: 13px;
-}
-
-.proposal-dialog > h2 {
-  margin-top: 24px;
-  font-size: 44px;
-  line-height: 0.96;
-}
-
-.proposal-intro {
-  max-width: 440px;
-  margin-top: 18px;
-  color: var(--text-muted);
-  line-height: 1.45;
-}
-
-.proposal-dialog label {
-  display: grid;
-  gap: 8px;
-  margin-top: 28px;
-  color: var(--text-muted);
-  font-size: 10px;
-  text-transform: uppercase;
-}
-
-.proposal-dialog label input {
-  height: 42px;
-  padding: 0 12px;
-  color: var(--text);
-  outline: 0;
-  background: var(--surface-subtle);
-  border: 1px solid transparent;
-  border-radius: var(--radius-small);
-  text-transform: none;
-}
-
-.proposal-dialog label input:focus {
-  border-color: var(--border);
-}
-
-.proposal-summary {
-  display: grid;
-  grid-template-columns: 1.5fr 1fr 1fr;
-  gap: 18px;
-  margin-top: 24px;
-  padding: 16px;
-  background: var(--surface-subtle);
-}
-
-.proposal-summary span,
-.proposal-summary strong {
-  display: block;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.proposal-summary span {
-  margin-bottom: 6px;
-  color: var(--text-muted);
-  font-size: 9px;
-  text-transform: uppercase;
-}
-
-.proposal-summary strong {
-  font-size: 10px;
-  font-weight: 400;
-}
-
-.proposal-submit {
-  width: 100%;
-  min-height: 38px;
-  margin-top: 16px;
-}
-
-.proposal-submit svg {
-  width: 12px;
-  height: 12px;
-}
-
-.payment-required {
-  display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  margin-top: 28px;
-}
-
-.payment-mark {
-  display: grid;
-  width: 68px;
-  height: 68px;
-  color: var(--text-inverse);
-  font-family: var(--font-display);
-  font-size: 24px;
-  background: var(--text);
-  border-radius: 50%;
-  place-items: center;
-}
-
-.payment-required h3 {
-  margin-top: 24px;
-  font-size: 26px;
-}
-
-.payment-required p {
-  max-width: 440px;
-  margin-top: 12px;
-  color: var(--text-muted);
-  line-height: 1.5;
-}
-
-.payment-required .button {
-  margin-top: 24px;
 }
 
 .code-surface {
@@ -2706,14 +2538,12 @@ html[data-theme="dark"] .tui-syntax .shiki span {
     grid-template-columns: 18px minmax(0, 1fr) 36px;
   }
 
-  .search-field button,
-  .dialog-close {
+  .search-field button {
     width: 36px;
     height: 36px;
   }
 
-  .search-field input,
-  .proposal-dialog label input {
+  .search-field input {
     font-size: 16px;
   }
 
@@ -2726,27 +2556,6 @@ html[data-theme="dark"] .tui-syntax .shiki span {
     display: none;
   }
 
-  .proposal-dialog {
-    max-height: calc(100dvh - 24px);
-    padding: 22px 18px;
-    overflow: auto;
-  }
-
-  .proposal-submit {
-    min-height: 44px;
-  }
-
-  .proposal-dialog > h2 {
-    font-size: 38px;
-  }
-
-  .proposal-summary {
-    grid-template-columns: 1fr 1fr;
-  }
-
-  .proposal-summary > div:first-child {
-    grid-column: 1 / -1;
-  }
 }
 
 @media (prefers-reduced-motion: reduce) {
@@ -3685,11 +3494,19 @@ html[data-theme="dark"] .tui-syntax .shiki span {
   }
 
   .surface-label {
-    font-size: 0;
+    display: none;
   }
 
-  .surface-key {
+  .surface-switch a::after {
+    content: attr(data-mobile-label);
     font-size: 10px;
+    text-decoration: underline;
+    text-decoration-color: color-mix(in srgb, currentColor 55%, transparent);
+    text-underline-offset: 2px;
+  }
+
+  .surface-switch a.is-active::after {
+    font-weight: 600;
   }
 
   .header-install-trigger {

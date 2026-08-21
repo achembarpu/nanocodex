@@ -30,9 +30,14 @@ export type BrowserWebSocketRequest = BrowserWebSocketMetadata & (
     bearerToken: string;
   }
   | {
-    authorization: "host_managed";
-    bearerToken?: never;
-  }
+      authorization: "host_managed";
+      bearerToken?: never;
+    }
+  | {
+      /** Credential-free eager connection; the later model connect consumes this exact socket. */
+      authorization: "preconnect";
+      bearerToken?: never;
+    }
 );
 
 export type BrowserWebSocketConnection = {
@@ -47,6 +52,7 @@ export type BrowserWebSocketConnection = {
 export function createBrowserHost(options?: {
   WebSocketImpl?: typeof WebSocket;
   hostAuth?: boolean;
+  hostManagedProtocol?: boolean;
   createWebSocket?: (
     endpoint: string,
     sessionId: string,

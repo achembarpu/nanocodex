@@ -1,4 +1,4 @@
-import { Buffer } from "buffer";
+import { Buffer } from "./browserBuffer.mjs";
 import { Deflate, Inflate, constants as pakoConstants } from "pako";
 
 const DEFAULT_CHUNK_BYTES = 64 * 1024;

@@ -2,7 +2,11 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
-import { loadPublishedRepositorySnapshot } from "../src/publishedRepository.ts";
+import {
+  fetchPublishedRepositoryPatch,
+  loadPublishedRepositorySnapshot,
+  preloadPublishedRepositoryPatch,
+} from "../src/publishedRepository.ts";
 
 const head = "a".repeat(40);
 const commit = {
@@ -177,13 +181,43 @@ test("mixed publication generations fail instead of combining repository data", 
   );
 });
 
+test("a route-intent patch prefetch is consumed without a duplicate request", async () => {
+  const originalFetch = globalThis.fetch;
+  const requests: string[] = [];
+  globalThis.fetch = (async (input: string | URL | Request) => {
+    requests.push(String(input));
+    return new Response("diff --git a/README.md b/README.md\n");
+  }) as typeof fetch;
+
+  try {
+    const patchUrl = `/api/repository/commits/${head}.diff`;
+    await preloadPublishedRepositoryPatch(patchUrl);
+    const response = await fetchPublishedRepositoryPatch(
+      patchUrl,
+      new AbortController().signal,
+    );
+    assert.equal(await response.text(), "diff --git a/README.md b/README.md\n");
+    assert.deepEqual(requests, [patchUrl]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
 test("top-level Code and Commits are wired independently from thread Git", async () => {
-  const app = await readFile(
-    new URL("../src/NanocodexApp.tsx", import.meta.url),
-    "utf8",
-  );
+  const [app, entry] = await Promise.all([
+    readFile(new URL("../src/NanocodexApp.tsx", import.meta.url), "utf8"),
+    readFile(new URL("../src/main.tsx", import.meta.url), "utf8"),
+  ]);
 
   assert.match(app, /loadPublishedRepositorySnapshot\(includeHistory\)/);
   assert.doesNotMatch(app, /loadThreadRepositorySnapshot/);
   assert.doesNotMatch(app, /subscribeThreadGitChanges/);
+  assert.match(
+    entry,
+    /preloadPublishedRepositorySnapshot\(false\)[\s\S]*preloadPreferredPublishedFile/,
+  );
+  assert.match(
+    entry,
+    /preloadPublishedRepositorySnapshot\(true\)[\s\S]*preloadPublishedRepositoryPatch/,
+  );
 });

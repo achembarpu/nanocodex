@@ -108,12 +108,6 @@ export default {
     context?: ExecutionContext,
   ): Promise<Response> {
     const url = new URL(request.url);
-    if (
-      request.method === "GET" &&
-      url.pathname === "/.well-known/urpc/consumer.json"
-    ) {
-      return consumerDiscovery(url);
-    }
     const evalMutation = await routeEvalMutation(request, env, url);
     if (evalMutation != null) return evalMutation;
     const evalRead = await routeEvalRead(request, env, url, context);
@@ -184,44 +178,12 @@ export default {
       return proxyImageGeneration(request, env, url);
     }
 
-    if (url.pathname === "/api/proposals" && request.method === "POST") {
-      return json(
-        {
-          status: "payment_required",
-          mode: "testnet_preview",
-          amount: "0.20",
-          currency: "USD",
-          message: "A live MPP challenge will replace this preview response.",
-        },
-        { status: 402 },
-      );
-    }
-
     const linkPreview = await routeLinkPreview(request, env, url);
     if (linkPreview != null) return linkPreview;
 
     return json({ error: "not_found" }, { status: 404 });
   },
 };
-
-function consumerDiscovery(url: URL): Response {
-  return Response.json(
-    {
-      version: "1.0",
-      id: url.hostname,
-      origin: url.origin,
-      name: "Nanocodex",
-      description: "A compact, browser-native Codex agent powered through Tempo MPP.",
-      website_url: url.origin,
-    },
-    {
-      headers: {
-        "cache-control": "public, max-age=3600",
-        "x-content-type-options": "nosniff",
-      },
-    },
-  );
-}
 
 async function proxyWebSearch(request: Request, env: WorkerEnv, url: URL): Promise<Response> {
   const credential = await validateToolRequest(request, env, url, "search");

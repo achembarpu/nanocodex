@@ -48,17 +48,25 @@ test("documentation loads one Markdown source at a time and swaps only complete 
   assert.match(source, /if \(next\) setResolved\(next\)/);
 });
 
-test("SDK text disclosures are accessible and active pages are bold without arrows", () => {
+test("documentation navigation is flat and active pages are bold without decoration", () => {
   const navigation = readFileSync(new URL("../src/docsNavigation.ts", import.meta.url), "utf8");
   assert.match(navigation, /label: "JavaScript \/ TypeScript"/);
-  assert.match(source, /aria-controls=\{controls\}/);
-  assert.match(source, /aria-expanded=\{expanded\}/);
-  assert.match(source, /className="docs-nav-section-state"/);
-  assert.doesNotMatch(source.slice(source.indexOf("function DocsNavSection"), source.indexOf("function DocsNavLink")), /<ChevronRight/);
-  assert.match(source, /new Set\(\[\.\.\.current, \.\.\.activeSections\]\)/);
-  assert.match(css, /\.docs-nav-section > button \{[\s\S]*?min-height:\s*44px/);
+  assert.match(source, /className="docs-nav-section-heading"/);
+  assert.doesNotMatch(source, /function DocsNavSection/);
+  assert.doesNotMatch(source, /className="docs-nav-section-state"/);
+  assert.doesNotMatch(source, /aria-controls=\{controls\}/);
+  assert.doesNotMatch(source, /aria-expanded=\{expanded\}/);
+  assert.doesNotMatch(source, /docs-nav-children/);
   assert.match(css, /a\[aria-current="page"\][\s\S]*?font-weight:\s*700/);
+  assert.match(css, /\.docs-sidebar a,[\s\S]*?text-decoration:\s*none/);
   assert.doesNotMatch(css, /aria-current="page"\]\s*::before/);
+  assert.doesNotMatch(css, /aria-current="page"\][^{]*\{[^}]*background:/);
   assert.match(css, /\.docs-drawer \{[\s\S]*?border-right:\s*1px solid var\(--border-soft\)/);
   assert.doesNotMatch(css, /\.docs-drawer \{[\s\S]*?box-shadow:/);
+});
+
+test("desktop documentation navigation is sticky and independently scrollable", () => {
+  assert.match(css, /\.docs-sidebar,[\s\S]*?position:\s*sticky;[\s\S]*?max-height:\s*calc\(100vh - 56px\);[\s\S]*?overflow-y:\s*auto/);
+  assert.match(css, /\.docs-sidebar \{[\s\S]*?scrollbar-width:\s*none/);
+  assert.match(css, /\.docs-sidebar::\-webkit-scrollbar \{[\s\S]*?display:\s*none/);
 });

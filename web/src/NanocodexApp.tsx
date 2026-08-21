@@ -1,7 +1,6 @@
 "use client";
 
 import {
-  ArrowUpRight,
   Check,
   ChevronRight,
   Copy,
@@ -41,6 +40,7 @@ import {
 import type { PublishedRepositorySnapshot } from "./publishedRepository";
 import type { HarnessCommit } from "./threadRepositorySnapshot";
 import { getBrowserThread } from "nanocodex/tools/browser";
+import { useDeploymentRollover } from "./useDeploymentRollover";
 
 const loadEvals = () =>
   import("./Evals").then((module) => ({ default: module.Evals }));
@@ -79,8 +79,6 @@ const VirtualCommitList = lazy(loadVirtualCommitList);
 
 export type Theme = "light" | "dark";
 type Scope = "all" | "eval" | "fix" | "docs" | "perf";
-type ProposalState = "ready" | "submitting" | "payment-required";
-
 const emptyCommits: HarnessCommit[] = [];
 const COMMIT_HASH_PATTERN = /^[0-9a-f]{40}$/;
 
@@ -225,6 +223,7 @@ export function NanocodexApp() {
 }
 
 function NanocodexShell() {
+  useDeploymentRollover();
   const location = useLocation();
   const navigate = useNavigate();
   const [theme, setTheme] = useState<Theme>(() => {
@@ -252,17 +251,14 @@ function NanocodexShell() {
   const [selectedHash, setSelectedHash] = useState<string | undefined>(() =>
     commitHashFromSearch(location.search)
   );
-  const [proposalOpen, setProposalOpen] = useState(false);
-  const [proposalState, setProposalState] = useState<ProposalState>("ready");
-  const [proposalTitle, setProposalTitle] = useState("");
   const [commitRailOpen, setCommitRailOpen] = useState(false);
   const [installCopied, setInstallCopied] = useState(false);
   const [headerInstallCopied, setHeaderInstallCopied] = useState<InstallTarget | null>(null);
   const [agentExperienceMounted, setAgentExperienceMounted] = useState(
     surface === "home" || surface === "agent",
   );
-  const needsRepository = surface === "code" || surface === "commits" || proposalOpen;
-  const needsRepositoryHistory = surface === "commits" || proposalOpen;
+  const needsRepository = surface === "code" || surface === "commits";
+  const needsRepositoryHistory = surface === "commits";
   const searchInputRef = useRef<HTMLInputElement>(null);
   const headerCenterRef = useRef<HTMLDivElement>(null);
   const codeBrowserRef = useRef<CodeBrowserHandle>(null);
@@ -578,7 +574,6 @@ function NanocodexShell() {
       }
       if (event.key === "Escape") {
         setSearchOpen(false);
-        setProposalOpen(false);
         setCommitRailOpen(false);
         codeBrowserRef.current?.closeSearches();
         return;
@@ -595,13 +590,6 @@ function NanocodexShell() {
         event.preventDefault();
         event.stopPropagation();
         setTheme((current) => (current === "light" ? "dark" : "light"));
-        return;
-      }
-      if (key === "p") {
-        event.preventDefault();
-        event.stopPropagation();
-        setProposalState("ready");
-        setProposalOpen(true);
         return;
       }
       const nextSurface =
@@ -642,24 +630,6 @@ function NanocodexShell() {
     if (index >= 0) commitStreamRef.current?.scrollToCommit(index);
   };
 
-  const submitProposal = async () => {
-    if (!snapshot || !selected) return;
-    setProposalState("submitting");
-    try {
-      await fetch("/api/proposals", {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          repository: snapshot.repository.fullName,
-          base: selected.hash,
-          title: proposalTitle || "Untitled proposal",
-        }),
-      });
-    } finally {
-      setProposalState("payment-required");
-    }
-  };
-
   return (
     <div className={`site-shell surface-${surface}`}>
         <header className="site-header">
@@ -697,6 +667,7 @@ function NanocodexShell() {
                     : threadSurfacePath(item.surface)}
                   aria-current={surface === item.surface ? "page" : undefined}
                   aria-keyshortcuts={item.shortcut}
+                  data-mobile-label={item.label.slice(0, 1)}
                   key={item.surface}
                   title={`${item.label} (${item.shortcut})`}
                   onFocus={() => preloadSurface(item.surface)}
@@ -1050,98 +1021,6 @@ function NanocodexShell() {
           </div>
         ) : null}
 
-        {proposalOpen ? (
-          <div
-            className="overlay"
-            role="presentation"
-            onMouseDown={() => setProposalOpen(false)}
-          >
-            <section
-              className="proposal-dialog"
-              role="dialog"
-              aria-modal="true"
-              aria-labelledby="proposal-title"
-              onMouseDown={(event) => event.stopPropagation()}
-            >
-              <button
-                className="dialog-close"
-                type="button"
-                onClick={() => setProposalOpen(false)}
-              >
-                <X aria-hidden="true" /> <span className="sr-only">Close</span>
-              </button>
-              <p className="eyebrow">MPP proposal gate · testnet preview</p>
-              <h2 id="proposal-title">Propose a change</h2>
-              {!snapshot ? repositoryLoadError ? (
-                <p className="proposal-intro">
-                  The thread repository is unavailable. Return to the agent workspace and retry the pull.
-                </p>
-              ) : null : !selected ? (
-                <p className="proposal-intro">
-                  Commit and push the thread workspace before proposing a change.
-                </p>
-              ) : proposalState === "payment-required" ? (
-                <div className="payment-required">
-                  <div className="payment-mark">402</div>
-                  <h3>Payment challenge ready</h3>
-                  <p>
-                    The Worker returned the preview MPP challenge. No funds
-                    moved; a live recipient and settlement policy still need to
-                    be configured.
-                  </p>
-                  <button
-                    className="button button--high"
-                    type="button"
-                    onClick={() => setProposalOpen(false)}
-                  >
-                    Done
-                  </button>
-                </div>
-              ) : (
-                <>
-                  <p className="proposal-intro">
-                    Submit a patch against <strong>{selected.shortHash}</strong>
-                    . The $0.20 proposal fee is a rate limit, not access to the
-                    repository.
-                  </p>
-                  <label>
-                    Proposal title
-                    <input
-                      value={proposalTitle}
-                      onChange={(event) => setProposalTitle(event.target.value)}
-                      placeholder="What should change?"
-                    />
-                  </label>
-                  <div className="proposal-summary">
-                    <div>
-                      <span>Repository</span>
-                      <strong>nanocodex</strong>
-                    </div>
-                    <div>
-                      <span>Base</span>
-                      <strong>{selected.shortHash}</strong>
-                    </div>
-                    <div>
-                      <span>Preview fee</span>
-                      <strong>$0.20</strong>
-                    </div>
-                  </div>
-                  <button
-                    className="button button--high proposal-submit"
-                    type="button"
-                    disabled={proposalState === "submitting"}
-                    onClick={submitProposal}
-                  >
-                    {proposalState === "submitting"
-                      ? "Requesting challenge…"
-                      : "Continue to payment"}
-                    <ArrowUpRight aria-hidden="true" />
-                  </button>
-                </>
-              )}
-            </section>
-          </div>
-        ) : null}
     </div>
   );
 }

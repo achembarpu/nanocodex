@@ -171,34 +171,6 @@
   color: var(--negative);
 }
 
-.agent-session-panel {
-  padding: 4px 0 8px;
-}
-
-.agent-payment-details {
-  margin: 4px 12px 0;
-}
-
-.agent-payment-details summary {
-  color: var(--terminal-muted);
-  cursor: pointer;
-}
-
-.agent-payment-details .agent-mpp-details,
-.agent-payment-details pre {
-  margin-top: 8px;
-}
-
-.agent-payment-details pre {
-  max-height: 180px;
-  padding: 8px;
-  overflow: auto;
-  font-size: 9px;
-  line-height: 1.45;
-  background: var(--surface-subtle);
-  border: 1px solid var(--terminal-border);
-}
-
 .agent-terminal-shell {
   position: relative;
   width: 100%;

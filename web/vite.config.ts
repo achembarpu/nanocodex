@@ -82,9 +82,8 @@ export default defineConfig({
   // detected shim also contains `env`. The browser has no environment access;
   // make that empty boundary explicit instead of letting a partial shim crash.
   define: { "process.env": "{}" },
-  // Tempo Wallet embeds in an iframe only on HTTPS. A trusted local
-  // certificate keeps the development flow identical to production and lets
-  // the hosted wallet perform cross-origin passkey ceremonies in the embed.
+  // A trusted local certificate keeps secure browser Agent APIs on the same
+  // HTTPS boundary used in production.
   plugins: [
     applicationRouteFallback(),
     linkPreviewMetadata(),
@@ -114,7 +113,7 @@ export default defineConfig({
       output: {
         // Rolldown otherwise promotes tiny helpers shared with lazy routes into
         // separate startup requests. Merge sub-10 KiB chunks while preserving
-        // the large route boundaries that keep Agent and MPP code off startup.
+        // the large route boundaries that keep Agent code off startup.
         codeSplitting: {
           groups: [{ name: "initial-deps", tags: ["$initial"] }],
         },
@@ -122,12 +121,11 @@ export default defineConfig({
     },
   },
   resolve: {
-    preserveSymlinks: true,
     dedupe: [
       "react",
       "react-dom",
+      "nanocodex",
       "nanocodex-react",
-      "nanocodex-tui",
       "@pierre/theme",
       "@shikijs/core",
       "@shikijs/engine-javascript",
@@ -139,13 +137,11 @@ export default defineConfig({
       "streamdown",
     ],
   },
-  // The local nanocodex package is validated immediately before Vite starts.
-  // Its wasm-bindgen glue and WASM binary are one indivisible artifact, so they
-  // must never be split between Vite's persistent dependency cache and the live
-  // package. Serving the package directly keeps both the normal and Tempo MPP
-  // Worker paths on the same freshly generated pair.
+  // Local SDK packages stay live during development. Vite's persistent
+  // dependency cache must not hold an older Worker/React contract after a
+  // package edit, and the WASM glue plus binary are indivisible.
   optimizeDeps: {
-    exclude: ["nanocodex"],
+    exclude: ["nanocodex", "nanocodex-react"],
     // `nanocodex` remains live, but the MCP SDK it contains imports these
     // CommonJS packages from ESM. They still need Vite's interop wrapper.
     include: [

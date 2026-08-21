@@ -1,5 +1,7 @@
 import "./browserBuffer.mjs";
 
+const preparedBrowsers = new Map();
+
 export {
   createOpfsGitFs,
   openOpfsGitFs,
@@ -24,6 +26,11 @@ export {
 } from "./workspace.mjs";
 
 export async function browser(options) {
+  const prepared = options?.prepared ?? await prepareBrowser(options);
+  return bindBrowser(prepared, options);
+}
+
+export function prepareBrowser(options) {
   if (!options || typeof options !== "object" || Array.isArray(options)) {
     throw new TypeError("browser tool options must be an object");
   }
@@ -34,12 +41,40 @@ export async function browser(options) {
   if (typeof origin !== "string" || !origin) {
     throw new TypeError("browser origin is required outside a browser location");
   }
+  const key = `${origin}\n${options.threadId}`;
+  let prepared = preparedBrowsers.get(key);
+  prepared ??= prepareBrowserRuntime(options.threadId, origin).catch((error) => {
+    preparedBrowsers.delete(key);
+    throw error;
+  });
+  preparedBrowsers.set(key, prepared);
+  return prepared;
+}
+
+async function prepareBrowserRuntime(threadId, origin) {
   const [shellModule, standard, datasets] = await Promise.all([
     import("./browserShell.mjs"),
     import("../standard.mjs"),
     import("../dataset.mjs"),
   ]);
-  const shell = await shellModule.prepareBrowserShell(options.threadId, origin);
+  const shell = await shellModule.prepareBrowserShell(threadId, origin);
+  return Object.freeze({
+    origin,
+    threadId,
+    shell,
+    standard,
+    datasets,
+  });
+}
+
+export function bindBrowser(prepared, options = {}) {
+  if (!prepared || typeof prepared !== "object" || Array.isArray(prepared)) {
+    throw new TypeError("prepared browser runtime is required");
+  }
+  if (options.threadId !== undefined && options.threadId !== prepared.threadId) {
+    throw new Error("prepared browser runtime belongs to a different thread");
+  }
+  const { datasets, shell, standard } = prepared;
   return Object.freeze({
     filesystem: shell.workspace,
     instructions: shell.instructions,

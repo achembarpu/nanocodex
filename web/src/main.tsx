@@ -30,8 +30,13 @@ function preloadDirectSurface(pathname: string) {
   if (pathname === "/code") {
     void Promise.all([
       import("./CodeBrowser"),
-      import("./PierreWorkerProvider"),
-      import("./publishedRepository"),
+      import("./PierreWorkerProvider").then((module) =>
+        module.preloadPierreWorker()
+      ),
+      import("./publishedRepository").then(async (module) => {
+        const snapshot = await module.preloadPublishedRepositorySnapshot(false);
+        await module.preloadPreferredPublishedFile(snapshot);
+      }),
     ]).catch(() => undefined);
     return;
   }
@@ -44,9 +49,14 @@ function preloadDirectSurface(pathname: string) {
   if (pathname === "/commits") {
     void Promise.all([
       import("./CommitCodeStream"),
-      import("./PierreWorkerProvider"),
+      import("./PierreWorkerProvider").then((module) =>
+        module.preloadPierreWorker()
+      ),
       import("./VirtualCommitList"),
-      import("./publishedRepository"),
+      import("./publishedRepository").then(async (module) => {
+        const snapshot = await module.preloadPublishedRepositorySnapshot(true);
+        await module.preloadPublishedRepositoryPatch(snapshot.commitPatchUrl);
+      }),
     ]).catch(() => undefined);
     return;
   }

@@ -107,25 +107,6 @@ function createChatGptEgress(response: () => Response) {
   return { requests, namespace: namespace as unknown as DurableObjectNamespace };
 }
 
-test("Tempo discovers a request-origin-bound uRPC consumer document", async () => {
-  const response = await worker.fetch(
-    new Request("https://preview.nanocodex.example/.well-known/urpc/consumer.json"),
-    { ENVIRONMENT: "preview" },
-  );
-
-  assert.equal(response.status, 200);
-  assert.match(response.headers.get("content-type") ?? "", /^application\/json/);
-  assert.equal(response.headers.get("cache-control"), "public, max-age=3600");
-  assert.deepEqual(await response.json(), {
-    version: "1.0",
-    id: "preview.nanocodex.example",
-    origin: "https://preview.nanocodex.example",
-    name: "Nanocodex",
-    description: "A compact, browser-native Codex agent powered through Tempo MPP.",
-    website_url: "https://preview.nanocodex.example",
-  });
-});
-
 test("tool proxies keep credentials server-side and preserve native request shapes", async () => {
   const originalFetch = globalThis.fetch;
   const upstream: Array<{ url: string; init?: RequestInit }> = [];
@@ -208,7 +189,7 @@ test("same-origin Fetch Metadata admits MCP GET streams without a referrer", asy
     headers: { "content-type": "text/event-stream" },
   })) as typeof fetch;
   try {
-    const response = await worker.fetch(new Request("https://demo.test/api/mcp/tempo", {
+    const response = await worker.fetch(new Request("https://demo.test/api/mcp/cloudflare", {
       headers: {
         "sec-fetch-site": "same-origin",
         "x-nanocodex-request": "1",

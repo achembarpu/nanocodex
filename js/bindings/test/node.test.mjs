@@ -24,6 +24,16 @@ const PACKAGE_VERSION = JSON.parse(
   await readFile(new URL("../package.json", import.meta.url), "utf8"),
 ).version;
 
+async function waitForToolDefinition(host, name) {
+  const deadline = performance.now() + 1_000;
+  while (performance.now() < deadline) {
+    const definitions = JSON.parse(host.toolDefinitions());
+    if (definitions.some((definition) => definition.name === name)) return definitions;
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  throw new Error(`MCP discovery did not publish ${name}`);
+}
+
 test("Node host opens application sockets through MPP", async () => {
   const socket = new ManagedSocket();
   const endpoints = [];
@@ -82,7 +92,10 @@ test("Node host loads and calls deferred Mercator MCP tools", async () => {
 
   try {
     await host.ready();
-    const definitions = JSON.parse(host.toolDefinitions());
+    const definitions = await waitForToolDefinition(
+      host,
+      "mcp__mercator__search_services",
+    );
     assert.deepEqual(definitions.map((definition) => definition.name ?? definition.type), [
       "tool_search",
       "list_mcp_resources",

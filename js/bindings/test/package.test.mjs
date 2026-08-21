@@ -114,7 +114,7 @@ test("the packed package installs and runs every public entry point", async () =
         dirname(browserEntry),
         "../pkg-web/nanocodex_bg.wasm",
       ));
-      const browserAgent = await BrowserAgent.create({
+      const browserAgent = await BrowserAgent.createLocal({
         transport: BrowserTransport.openAi({
           apiKey: "package-test",
           WebSocketImpl: class {},

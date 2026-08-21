@@ -3,8 +3,8 @@ import test from "node:test";
 
 import {
   availableVisualHeight,
-  createPrewarmedWorkerOwner,
   GenerationRequestOwner,
+  SerializedReplacementOwner,
   terminalRunningForStatus,
 } from "../src/agentTerminalLifecycle.ts";
 
@@ -46,6 +46,101 @@ test("auth refreshes deduplicate only within the current mutation generation", a
   assert.equal(await current, "current");
 });
 
+test("agent replacements wait for graceful close and coalesce stale startup", async () => {
+  const transitions: string[] = [];
+  const closeFirst = deferred<void>();
+  const owner = new SerializedReplacementOwner<{ name: string }>(async (value) => {
+    transitions.push(`close:${value.name}:start`);
+    if (value.name === "first") await closeFirst.promise;
+    transitions.push(`close:${value.name}:done`);
+  });
+
+  assert.deepEqual(await owner.replace(async () => ({ name: "first" })), { name: "first" });
+  const second = owner.replace(async () => {
+    transitions.push("create:second");
+    return { name: "second" };
+  });
+  const third = owner.replace(async () => {
+    transitions.push("create:third");
+    return { name: "third" };
+  });
+
+  await Promise.resolve();
+  assert.deepEqual(transitions, ["close:first:start"]);
+  closeFirst.resolve();
+  assert.equal(await second, undefined);
+  assert.deepEqual(await third, { name: "third" });
+  assert.deepEqual(transitions, [
+    "close:first:start",
+    "close:first:done",
+    "create:third",
+  ]);
+  await owner.clear();
+  assert.deepEqual(transitions.slice(-2), ["close:third:start", "close:third:done"]);
+});
+
+test("a stale in-flight agent is closed before the current replacement starts", async () => {
+  const creating = deferred<{ name: string }>();
+  const creationStarted = deferred<void>();
+  const transitions: string[] = [];
+  const owner = new SerializedReplacementOwner<{ name: string }>(async (value) => {
+    transitions.push(`close:${value.name}`);
+  });
+
+  const stale = owner.replace(() => {
+    creationStarted.resolve();
+    return creating.promise;
+  });
+  await creationStarted.promise;
+  const current = owner.replace(async () => {
+    transitions.push("create:current");
+    return { name: "current" };
+  });
+  creating.resolve({ name: "stale" });
+
+  assert.equal(await stale, undefined);
+  assert.deepEqual(await current, { name: "current" });
+  assert.deepEqual(transitions, ["close:stale", "create:current"]);
+  await owner.clear();
+});
+
+test("a thousand replacement requests admit only the newest agent", async () => {
+  const closeCurrent = deferred<void>();
+  const created: number[] = [];
+  const owner = new SerializedReplacementOwner<{ id: number }>(async (value) => {
+    if (value.id === 0) await closeCurrent.promise;
+  });
+  await owner.replace(async () => ({ id: 0 }));
+
+  const replacements = Array.from({ length: 1_000 }, (_, index) => owner.replace(async () => {
+    const id = index + 1;
+    created.push(id);
+    return { id };
+  }));
+  closeCurrent.resolve();
+  const results = await Promise.all(replacements);
+
+  assert.deepEqual(created, [1_000]);
+  assert.equal(results.filter((value) => value !== undefined).length, 1);
+  assert.deepEqual(results.at(-1), { id: 1_000 });
+  await owner.clear();
+});
+
+test("a receiver-close failure cannot poison later lifecycle commands", async () => {
+  let failClose = true;
+  const owner = new SerializedReplacementOwner<{ id: number }>(async () => {
+    if (failClose) {
+      failClose = false;
+      throw new Error("receiver channel closed");
+    }
+  });
+  await owner.replace(async () => ({ id: 1 }));
+
+  await assert.rejects(owner.replace(async () => ({ id: 2 })), /receiver channel closed/);
+  assert.deepEqual(await owner.replace(async () => ({ id: 3 })), { id: 3 });
+  await owner.clear();
+});
+
 test("visual viewport height retains negative relative tops after keyboard panning", () => {
   assert.equal(availableVisualHeight({
     elementTop: 80,
@@ -77,40 +172,6 @@ test("terminal activity is cleared whenever its Worker is not ready", () => {
   }
 });
 
-test("a failed unclaimed prewarm is evicted before the Worker is claimed", () => {
-  const workers: FakeWorker[] = [];
-  const owner = createPrewarmedWorkerOwner(() => {
-    const worker = new FakeWorker();
-    workers.push(worker);
-    return worker as unknown as Worker;
-  }, 1_000);
-
-  owner.prewarm();
-  assert.deepEqual(workers[0].messages, [{ type: "warmup" }]);
-  workers[0].emit("error", { message: "discarded" });
-  assert.equal(workers[0].terminations, 1);
-
-  const claimed = owner.claim() as unknown as FakeWorker;
-  assert.equal(workers.length, 2);
-  assert.equal(claimed, workers[1]);
-  claimed.emit("message", { data: { type: "ready" } });
-  claimed.terminate();
-});
-
-test("a claimed Worker that never becomes ready fails within the startup deadline", async () => {
-  const worker = new FakeWorker();
-  const owner = createPrewarmedWorkerOwner(
-    () => worker as unknown as Worker,
-    5,
-  );
-  const claimed = owner.claim() as unknown as FakeWorker;
-  const failure = deferred<string>();
-  claimed.onerror = (event) => failure.resolve(event.message);
-
-  assert.match(await failure.promise, /did not become ready/);
-  assert.equal(worker.terminations, 1);
-});
-
 function deferred<T>() {
   let resolve!: (value: T) => void;
   let reject!: (reason?: unknown) => void;
@@ -119,35 +180,4 @@ function deferred<T>() {
     reject = fail;
   });
   return { promise, reject, resolve };
-}
-
-type FakeWorkerEvent = "error" | "message" | "messageerror";
-
-class FakeWorker {
-  messages: unknown[] = [];
-  onerror: ((event: { message: string }) => void) | null = null;
-  terminations = 0;
-  private listeners = new Map<FakeWorkerEvent, Set<(event: any) => void>>();
-
-  addEventListener(type: FakeWorkerEvent, listener: (event: any) => void) {
-    const listeners = this.listeners.get(type) ?? new Set();
-    listeners.add(listener);
-    this.listeners.set(type, listeners);
-  }
-
-  emit(type: FakeWorkerEvent, event: any) {
-    for (const listener of this.listeners.get(type) ?? []) listener(event);
-  }
-
-  postMessage(message: unknown) {
-    this.messages.push(message);
-  }
-
-  removeEventListener(type: FakeWorkerEvent, listener: (event: any) => void) {
-    this.listeners.get(type)?.delete(listener);
-  }
-
-  terminate() {
-    this.terminations += 1;
-  }
 }

@@ -29,9 +29,11 @@ remain package internals.
 ## Know what is published
 
 The registry package contains the core root, Node, browser, and WASM entrypoints.
-The React, artifact, TUI, and terminal companion packages currently ship from
-repository source. Pin a repository revision when adopting a source-distributed
-package so its bindings and generated WASM stay coherent.
+The intentionally narrow React Context/hooks and artifact companion packages
+currently ship from repository source. Pin a repository revision when adopting
+a source-distributed package so its bindings and generated WASM stay coherent.
+UI frameworks and terminal renderers consume Agent events directly and remain
+application code.
 
 The browser tools composition also uses the package Vite adapter in both the
 page and nested Worker graphs:
