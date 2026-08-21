@@ -18,12 +18,13 @@ installation and lifecycle fixtures cannot contend with microbenchmarks.
 | Cold Node or precompiled-browser `Agent.create` | 250 ms |
 | Warm `Agent.create` p50 | 1.5 ms |
 | Warm `Agent.create` p95 | 10 ms |
+| Retained browser WASM linear memory | 2.5 MB |
 | JavaScript prompt action | 5 µs per call |
 | Enqueue and drain 4,096 ordered events | 50 ms |
 | Hosted Code Mode execution | 250 µs per call |
 | Package-Worker completed-result envelope | 256 encoded bytes |
-| Packed npm tarball | 1.1 MB |
-| Unpacked npm package | 4.9 MB |
+| Packed npm tarball | 2.5 MB |
+| Unpacked npm package | 8.05 MB |
 
 The warm measurements include enough unmeasured calls for V8 to tier up the
 WASM constructor. The test separately proves that Node compiles and
@@ -43,16 +44,17 @@ emits incompatible loading conventions for those targets; duplicating the
 artifact keeps both entry points relocation-safe. The compressed and unpacked
 size gates make that deliberate cost visible.
 
-On Apple Silicon with Node 23.6.0, the 2026-07-28 baseline was:
+On Apple Silicon with Node 22.22.3, the 2026-08-21 baseline was:
 
-- Node cold create: 14.6 ms; warm p50/p95: 0.07/0.46 ms.
-- Browser cold create: 40.8 ms; steady warm creates below 0.1 ms.
-- Prompt action: 2.8 µs.
-- 4,096 buffered events: 16.7 ms.
-- Hosted Code Mode execution: 76.4 µs.
+- Node cold create: 9.884 ms; warm p50/p95: 0.067/0.248 ms.
+- Browser cold create: 6.517 ms; warm p50/p95: 0.038/0.054 ms;
+  retained linear memory: 1,966,080 bytes with no growth across 81 Agents.
+- Prompt action: 0.912 µs.
+- 4,096 buffered events: 13.526 ms.
+- Hosted Code Mode execution: 23.744 µs.
 - 8 MiB retained Worker snapshot: 45-byte eager envelope, zero eager
   materializations, one on-demand RPC/materialization.
-- npm package: 980,214 bytes compressed and 4,737,347 bytes unpacked.
+- npm package: 1,481,428 bytes compressed and 4,182,878 bytes unpacked.
 
 Before the bounded indexed event queue, draining 100,000 buffered events took
 4.64 seconds because each `Array.shift()` moved the remaining queue. Event
