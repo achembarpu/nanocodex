@@ -107,7 +107,8 @@ test("the phone home surface leads directly from thesis to install, metadata, an
   assert.doesNotMatch(homepage, /retained proof|39\/39 gates|13\/20 verifier passes|Frozen Terminal-Bench|experimental/i);
   assert.match(homeCss, /\.home-install code[\s\S]*?overflow-wrap:\s*anywhere/);
   assert.doesNotMatch(homeCss, /\.home-proof|\.home-summary|\.home-evidence|\.home-facts|\.home-surfaces|\.home-divider/);
-  assert.doesNotMatch(terminal, /<NanocodexTui|<WorkspacePanel|<ArtifactDock/);
+  assert.doesNotMatch(terminal, /<NanocodexTui|<WorkspacePanel/);
+  assert.match(terminal, /mode === "full" \? \([\s\S]*?<ArtifactDock[\s\S]*?\) : terminal/);
 });
 
 test("the app shell owns deployment rollover and agent failures expose only manual retry", () => {

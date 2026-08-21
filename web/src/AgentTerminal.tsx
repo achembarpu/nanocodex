@@ -6,7 +6,14 @@ import {
   useRef,
   useState,
 } from "react";
-import { NanocodexProvider, useAgent, useAgentEvents } from "nanocodex-react";
+import {
+  createConfig,
+  NanocodexProvider,
+  useAgent,
+  useAgentEvents,
+  type Config,
+} from "nanocodex-react";
+import type { ArtifactDocument } from "nanocodex/tools/artifact";
 import { getBrowserThread } from "nanocodex/tools/browser";
 import { terminalRunningForStatus } from "./agentTerminalLifecycle";
 import {
@@ -28,9 +35,17 @@ import {
   type AgentTerminal as DemoTerminal,
   type TerminalHost,
 } from "./demoTerminal";
+import { ArtifactDock } from "./ArtifactDock";
+import { browserMcpConfiguration } from "./browserMcp";
 import "./AgentTerminal.css";
 
 export type { AgentTerminalMode } from "./agentTerminalSurface";
+
+const agentConfig: Config = createConfig({
+  agent: {
+    mcp: browserMcpConfiguration(location.origin),
+  },
+});
 
 /** Website policy around the headless Agent SDK, app-local xterm, and credentials. */
 export const AgentTerminal = memo(function AgentTerminal({
@@ -57,7 +72,7 @@ export const AgentTerminal = memo(function AgentTerminal({
     );
   }
   return (
-    <NanocodexProvider>
+    <NanocodexProvider config={agentConfig}>
       <AgentTerminalDemo mode={mode} theme={theme} />
     </NanocodexProvider>
   );
@@ -186,6 +201,44 @@ function AgentTerminalDemo({
   const cancelTouchTurn = useCallback(() => {
     if (agentStatus === "ready") void active.current?.cancel();
   }, [agentStatus]);
+  const submitArtifactPrompt = useCallback((
+    artifact: ArtifactDocument,
+    prompt: string,
+    path: string,
+  ) => {
+    if (agentStatus !== "ready") return;
+    const retainedTerminal = active.current;
+    if (!retainedTerminal) return;
+    void retainedTerminal.submit(
+      artifactFollowOnPrompt(artifact, path, prompt),
+      { intent: "queue" },
+    );
+  }, [agentStatus]);
+
+  const terminal = (
+    <XtermSurface
+      composer={touchInput ? (
+        <TouchTerminalComposer
+          draft={touchDraft}
+          pending={pendingTouchSubmission !== undefined}
+          running={terminalRunning}
+          status={agentStatus}
+          onCancel={cancelTouchTurn}
+          onChange={(value) => {
+            setPendingTouchSubmission(undefined);
+            setTouchDraft(value);
+          }}
+          onSubmit={submitTouchPrompt}
+        />
+      ) : null}
+      inactiveMessage={unavailableMessage}
+      mode={mode}
+      status={agentStatus}
+      theme={theme}
+      touchInput={touchInput}
+      onReady={setTerminalHost}
+    />
+  );
 
   return (
     <div className={`nanocodex-demo is-${mode}`}>
@@ -198,30 +251,30 @@ function AgentTerminalDemo({
         onRetryAgent={retryAgent}
         onSourceChange={setCredentialSource}
       />
-      <XtermSurface
-        composer={touchInput ? (
-          <TouchTerminalComposer
-            draft={touchDraft}
-            pending={pendingTouchSubmission !== undefined}
-            running={terminalRunning}
-            status={agentStatus}
-            onCancel={cancelTouchTurn}
-            onChange={(value) => {
-              setPendingTouchSubmission(undefined);
-              setTouchDraft(value);
-            }}
-            onSubmit={submitTouchPrompt}
+      {mode === "full" ? (
+        <div className="agent-terminal-workspace">
+          {terminal}
+          <ArtifactDock
+            agentReady={agentStatus === "ready"}
+            onPrompt={submitArtifactPrompt}
           />
-        ) : null}
-        inactiveMessage={unavailableMessage}
-        mode={mode}
-        status={agentStatus}
-        theme={theme}
-        touchInput={touchInput}
-        onReady={setTerminalHost}
-      />
+        </div>
+      ) : terminal}
     </div>
   );
+}
+
+function artifactFollowOnPrompt(
+  artifact: ArtifactDocument,
+  path: string,
+  prompt: string,
+): string {
+  return [
+    `Continue the current artifact with id ${JSON.stringify(artifact.id)}.`,
+    `Artifact path: ${JSON.stringify(path)}.`,
+    "",
+    prompt.trim(),
+  ].join("\n");
 }
 
 function markAgentTiming(stage: string, durationMs?: number) {

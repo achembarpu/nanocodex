@@ -4,12 +4,14 @@ import test from "node:test";
 
 const terminal = source("../src/AgentTerminal.tsx");
 const session = source("../src/chatGptSession.tsx");
+const health = source("../src/deploymentHealth.ts");
 const surface = source("../src/agentTerminalSurface.tsx");
 const terminalCss = source("../src/AgentTerminal.css");
 
 test("browser authentication automatically selects the supported agent credential", () => {
   assert.match(session, /next\.state === "authenticated"[\s\S]*?onSourceChange\("subscription"\)/);
-  assert.match(session, /credential_source === "subscription"/);
+  assert.match(health, /payload\.credential_source === "subscription"/);
+  assert.match(session, /deploymentHealth\.read\(\)/);
   assert.match(session, /window\.addEventListener\("focus", refreshWhenVisible\)/);
   assert.match(session, /document\.addEventListener\("visibilitychange", refreshWhenVisible\)/);
   assert.match(session, /This terminal will start automatically/);
@@ -53,7 +55,8 @@ test("starting and failure states repaint the terminal while the native mobile c
 });
 
 test("the React package owns browser Agent startup through its raw hook contract", () => {
-  assert.match(terminal, /import \{ NanocodexProvider, useAgent, useAgentEvents \} from "nanocodex-react"/);
+  assert.match(terminal, /import \{[\s\S]*?createConfig,[\s\S]*?NanocodexProvider,[\s\S]*?useAgent,[\s\S]*?useAgentEvents,[\s\S]*?type Config,[\s\S]*?\} from "nanocodex-react"/);
+  assert.match(terminal, /<NanocodexProvider config=\{agentConfig\}>/);
   assert.match(terminal, /data: agent,[\s\S]*?\} = useAgent\(\{ enabled, threadId: thread\?\.id \}\)/);
   assert.match(terminal, /useAgentEvents\(agent,/);
   assert.match(terminal, /createAgentTerminal\(\{[\s\S]*?agent,[\s\S]*?terminal: terminalHost/);

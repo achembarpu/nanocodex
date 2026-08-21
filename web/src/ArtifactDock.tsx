@@ -8,7 +8,7 @@ import {
   Sparkles,
   Trash2,
 } from "lucide-react";
-import { memo, useCallback, useEffect, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useId, useRef, useState } from "react";
 import type {
   ArtifactStore,
   ArtifactDocument,
@@ -32,16 +32,20 @@ export const ArtifactDock = memo(function ArtifactDock({
   onPrompt,
 }: {
   agentReady: boolean;
-  onPrompt(artifact: ArtifactDocument, prompt: string): void;
+  onPrompt(artifact: ArtifactDocument, prompt: string, path: string): void;
 }) {
-  const initialArtifact = useRef(exampleDocument()).current;
   const [store, setStore] = useState<ArtifactStore>();
-  const [artifacts, setArtifacts] = useState<readonly ArtifactDocument[]>([initialArtifact]);
-  const [selectedId, setSelectedId] = useState(initialArtifact.id);
+  const [artifacts, setArtifacts] = useState<readonly ArtifactDocument[]>([]);
+  const [selectedId, setSelectedId] = useState<string>();
+  const [collapsed, setCollapsed] = useState(true);
   const [fullscreen, setFullscreen] = useState(false);
   const [message, setMessage] = useState("");
   const refreshEpoch = useRef(0);
+  const toggleRef = useRef<HTMLButtonElement>(null);
+  const refocusToggle = useRef(false);
+  const canvasId = useId();
   const selected = artifacts.find((artifact) => artifact.id === selectedId) ?? artifacts[0];
+  const artifactCount = `${artifacts.length} existing artifact${artifacts.length === 1 ? "" : "s"}`;
 
   const refresh = useCallback(async (nextStore: ArtifactStore | undefined) => {
     if (!nextStore) return;
@@ -68,18 +72,12 @@ export const ArtifactDock = memo(function ArtifactDock({
       if (!active) return;
       const nextStore = new ArtifactStore(nextWorkspace);
       setStore(nextStore);
-      const existing = await nextStore.scan();
-      if (!active) return;
-      if (existing.artifacts.length) {
-        await refresh(nextStore);
-        return;
-      }
-      refreshEpoch.current++;
-      setArtifacts([initialArtifact]);
-      setSelectedId(initialArtifact.id);
-      setMessage("Ask the agent to create any custom interface, or preview the live React demo.");
+      await refresh(nextStore);
     }).catch((error) => active && setMessage(errorMessage(error)));
-    return () => { active = false; };
+    return () => {
+      active = false;
+      refreshEpoch.current++;
+    };
   }, [refresh]);
 
   useEffect(() => {
@@ -108,6 +106,12 @@ export const ArtifactDock = memo(function ArtifactDock({
     return () => compact.removeEventListener("change", exitFullscreen);
   }, []);
 
+  useEffect(() => {
+    if (!refocusToggle.current) return;
+    refocusToggle.current = false;
+    toggleRef.current?.focus();
+  }, [collapsed]);
+
   const remove = async () => {
     if (!store || !selected || !window.confirm(`Delete the artifact “${selected.title}”?`)) return;
     try {
@@ -129,29 +133,57 @@ export const ArtifactDock = memo(function ArtifactDock({
   };
 
   const ask = (prompt: string) => {
-    if (!selected) return;
+    if (!selected || !store) return;
     if (!agentReady) {
       setMessage("Connect the agent before running an artifact action.");
       return;
     }
     if (!window.confirm(`Send this artifact action to the agent?\n\n${prompt}`)) return;
-    onPrompt(selected, prompt);
-    setMessage("Artifact action queued for the agent.");
+    onPrompt(selected, prompt, store.path(selected.id));
   };
 
   const createExample = async () => {
     if (!store) return;
     try {
       const artifact = await store.save(exampleArtifact());
-      refreshEpoch.current++;
-      setArtifacts((current) => [artifact, ...current.filter(({ id }) => id !== artifact.id)]);
+      await refresh(store);
       setSelectedId(artifact.id);
       setFullscreen(!compactWorkspace());
-      setMessage("");
     } catch (error) {
       setMessage(errorMessage(error));
     }
   };
+
+  const collapse = () => {
+    refocusToggle.current = true;
+    setFullscreen(false);
+    setCollapsed(true);
+  };
+
+  const expand = () => {
+    refocusToggle.current = true;
+    setCollapsed(false);
+  };
+
+  if (collapsed) {
+    return (
+      <aside className="artifact-dock is-collapsed" aria-label="Artifacts">
+        <button
+          ref={toggleRef}
+          type="button"
+          aria-controls={canvasId}
+          aria-expanded={false}
+          aria-label={`Open artifacts, ${artifactCount}`}
+          title="Open artifacts"
+          onClick={expand}
+        >
+          <PanelRightOpen aria-hidden="true" />
+          <span aria-hidden="true">{artifacts.length}</span>
+        </button>
+        <div id={canvasId} hidden />
+      </aside>
+    );
+  }
 
   return (
     <aside className={`artifact-dock${fullscreen ? " is-fullscreen" : ""}`} aria-label="Artifacts">
@@ -169,10 +201,19 @@ export const ArtifactDock = memo(function ArtifactDock({
           <DockAction label={fullscreen ? "Exit fullscreen" : "View fullscreen"} onClick={() => setFullscreen((value) => !value)}>
             {fullscreen ? <Minimize2 /> : <Maximize2 />}
           </DockAction>
-          <DockAction label="Dock interface" onClick={() => setFullscreen(false)}><PanelRightClose /></DockAction>
+          <DockAction
+            buttonRef={toggleRef}
+            className="artifact-dock-toggle"
+            controls={canvasId}
+            expanded
+            label="Collapse artifacts"
+            onClick={collapse}
+          >
+            <PanelRightClose />
+          </DockAction>
         </div>
       </header>
-      <div className="artifact-canvas">
+      <div className="artifact-canvas" id={canvasId}>
         {selected ? (
           <LiveReactArtifact artifact={selected} onAction={ask} />
         ) : (
@@ -191,18 +232,38 @@ export const ArtifactDock = memo(function ArtifactDock({
 });
 
 function DockAction({
+  buttonRef,
   children,
+  className,
+  controls,
   disabled,
+  expanded,
   label,
   onClick,
 }: {
+  buttonRef?: React.Ref<HTMLButtonElement>;
   children: React.ReactNode;
+  className?: string;
+  controls?: string;
   disabled?: boolean;
+  expanded?: boolean;
   label: string;
   onClick(): void;
 }) {
   return (
-    <button type="button" disabled={disabled} onClick={onClick} aria-label={label} title={label}>{children}</button>
+    <button
+      ref={buttonRef}
+      type="button"
+      className={className}
+      disabled={disabled}
+      aria-controls={controls}
+      aria-expanded={expanded}
+      aria-label={label}
+      title={label}
+      onClick={onClick}
+    >
+      {children}
+    </button>
   );
 }
 
@@ -232,14 +293,5 @@ function App({ sendPrompt }) {
     <button onClick=\${() => sendPrompt("Turn this live interface into an animated mission control dashboard")}>Ask the agent to evolve it</button>
   </main>\`;
 }`,
-  };
-}
-
-function exampleDocument(): ArtifactDocument {
-  return {
-    version: 1,
-    ...exampleArtifact(),
-    createdAt: 0,
-    updatedAt: 0,
   };
 }

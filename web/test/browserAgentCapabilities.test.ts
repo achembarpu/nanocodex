@@ -53,7 +53,7 @@ test("the terminal fails before thread or Worker creation and exposes the capabi
   const session = source("../src/chatGptSession.tsx");
   assert.match(terminal, /if \(capabilityError\) \{[\s\S]*?role="alert">\{capabilityError\}/);
   assert.match(terminal, /const thread = useMemo\(\(\) => getBrowserThread\(\), \[\]\)/);
-  assert.match(terminal, /<NanocodexProvider>[\s\S]*?<AgentTerminalDemo/);
+  assert.match(terminal, /<NanocodexProvider config=\{agentConfig\}>[\s\S]*?<AgentTerminalDemo/);
   assert.match(terminal, /role="alert">\{capabilityError\}/);
   assert.match(session, /if \(capabilityError\) return "browser unsupported"/);
 });
