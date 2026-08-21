@@ -158,6 +158,10 @@ fn try_main() -> Result<()> {
     // requiring shell-specific syntax to load the repository's `.env` file.
     let _ = dotenvy::dotenv();
 
+    if let Err(error) = update::prepare_legacy_nightly_bootstrap() {
+        eprintln!("warning: failed to prepare the Nanocodex updater bootstrap: {error:#}");
+    }
+
     let cli = Cli::parse();
     if let Some(Command::VmRunConfig(command)) = &cli.command {
         return command.run();

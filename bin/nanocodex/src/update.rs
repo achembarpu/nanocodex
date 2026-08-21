@@ -37,6 +37,13 @@ const READ_TIMEOUT: Duration = Duration::from_secs(30);
 const MAX_ARCHIVE_BYTES: u64 = 256 * 1024 * 1024;
 const MAX_BINARY_BYTES: u64 = 256 * 1024 * 1024;
 
+pub(crate) fn prepare_legacy_nightly_bootstrap() -> Result<()> {
+    if version::IS_NIGHTLY {
+        VersionStore::prepare_legacy_nightly_bootstrap()?;
+    }
+    Ok(())
+}
+
 #[derive(Debug, thiserror::Error)]
 enum DownloadError {
     #[error(transparent)]
@@ -113,6 +120,7 @@ impl Update {
         let store = VersionStore::discover()?;
         let manager_key = manager_key(&manager_version);
         store.prepare(&manager_key)?;
+        VersionStore::promote_running_legacy_nightly_manager()?;
         let previous = store.active()?.unwrap_or_else(|| manager_key.clone());
 
         if let Some(path) = &self.path {

@@ -47,7 +47,8 @@ impl VersionStore {
             .wrap_err("failed to locate the running Nanocodex executable")?;
         let contents = fs::read(&executable)
             .wrap_err_with(|| format!("failed to read {}", executable.display()))?;
-        self.prepare_with_contents(manager_version, &contents)
+        self.prepare_with_contents(manager_version, &contents)?;
+        self.seed_running_updater_checksum(&executable, &contents)
     }
 
     fn prepare_with_contents(&self, manager_version: &str, contents: &[u8]) -> Result<()> {
@@ -66,6 +67,7 @@ impl VersionStore {
         }
         if !updater_exists {
             atomic_write(&self.updater_path(), contents, true)?;
+            self.write_updater_checksum(contents)?;
         }
         if active.is_none() {
             self.activate(manager_version)?;
@@ -214,8 +216,109 @@ impl VersionStore {
             let contents = fs::read(self.binary_path(key))
                 .wrap_err_with(|| format!("failed to read Nanocodex version {key}"))?;
             atomic_write(&self.updater_path(), &contents, true)?;
+            self.write_updater_checksum(&contents)?;
         }
 
+        Ok(())
+    }
+
+    #[cfg(unix)]
+    pub(super) fn prepare_legacy_nightly_bootstrap() -> Result<bool> {
+        let executable = std::env::current_exe()
+            .wrap_err("failed to locate the running Nanocodex executable")?;
+        let Some(store) = Self::legacy_nightly_store_for(&executable)? else {
+            return Ok(false);
+        };
+        store.install_launcher()?;
+        Ok(true)
+    }
+
+    #[cfg(not(unix))]
+    pub(super) fn prepare_legacy_nightly_bootstrap() -> Result<bool> {
+        Ok(false)
+    }
+
+    #[cfg(unix)]
+    pub(super) fn promote_running_legacy_nightly_manager() -> Result<bool> {
+        let executable = std::env::current_exe()
+            .wrap_err("failed to locate the running Nanocodex executable")?;
+        let Some(store) = Self::legacy_nightly_store_for(&executable)? else {
+            return Ok(false);
+        };
+        store.promote_manager("nightly")?;
+        Ok(true)
+    }
+
+    #[cfg(not(unix))]
+    pub(super) fn promote_running_legacy_nightly_manager() -> Result<bool> {
+        Ok(false)
+    }
+
+    #[cfg(unix)]
+    fn legacy_nightly_store_for(executable: &Path) -> Result<Option<Self>> {
+        let executable = executable
+            .canonicalize()
+            .wrap_err_with(|| format!("failed to resolve {}", executable.display()))?;
+        let Some(version_directory) = executable.parent() else {
+            return Ok(None);
+        };
+        let Some(versions_directory) = version_directory.parent() else {
+            return Ok(None);
+        };
+        if versions_directory
+            .file_name()
+            .and_then(|name| name.to_str())
+            != Some("versions")
+        {
+            return Ok(None);
+        }
+        let Some(root) = versions_directory.parent() else {
+            return Ok(None);
+        };
+        let store = Self {
+            root: root.to_path_buf(),
+        };
+        if store.active()?.as_deref() != Some("nightly") || store.updater_checksum_path().is_file()
+        {
+            return Ok(None);
+        }
+        let active_binary = match store.binary_path("nightly").canonicalize() {
+            Ok(path) => path,
+            Err(error) if error.kind() == ErrorKind::NotFound => return Ok(None),
+            Err(error) => {
+                return Err(error).wrap_err("failed to resolve the active nightly Nanocodex");
+            }
+        };
+        if executable != active_binary {
+            return Ok(None);
+        }
+
+        Ok(Some(store))
+    }
+
+    fn write_updater_checksum(&self, contents: &[u8]) -> Result<()> {
+        let checksum = hex::encode(Sha256::digest(contents));
+        atomic_write(
+            &self.updater_checksum_path(),
+            format!("{checksum}\n").as_bytes(),
+            false,
+        )
+    }
+
+    fn seed_running_updater_checksum(&self, executable: &Path, contents: &[u8]) -> Result<()> {
+        if self.updater_checksum_path().is_file() {
+            return Ok(());
+        }
+        let executable = executable
+            .canonicalize()
+            .wrap_err_with(|| format!("failed to resolve {}", executable.display()))?;
+        let updater = self
+            .updater_path()
+            .canonicalize()
+            .wrap_err("failed to resolve the Nanocodex updater")?;
+        if executable == updater {
+            self.write_updater_checksum(contents)?;
+        }
         Ok(())
     }
 
@@ -237,6 +340,10 @@ impl VersionStore {
 
     fn updater_path(&self) -> PathBuf {
         self.root.join("updater").join(BINARY_NAME)
+    }
+
+    fn updater_checksum_path(&self) -> PathBuf {
+        self.root.join("updater").join(CHECKSUM_FILE)
     }
 
     #[cfg(unix)]
@@ -273,9 +380,9 @@ case "$0" in
 esac
 bin_dir=$(CDPATH= cd -- "$(dirname -- "$launcher")" && pwd -P)
 install_root=$(dirname -- "$bin_dir")
+export NANOCODEX_DIR="$install_root"
 
-if [ "${1-}" = "update" ]; then
-    export NANOCODEX_DIR="$install_root"
+if [ "${1-}" = "update" ] && [ -f "$install_root/updater/nanocodex.sha256" ]; then
     exec "$install_root/updater/nanocodex" "$@"
 fi
 exec "$install_root/current/nanocodex" "$@"
@@ -365,6 +472,9 @@ mod tests {
         assert_eq!(store.active().unwrap().as_deref(), Some("0.3.0"));
         assert_eq!(fs::read(store.binary_path("0.3.0")).unwrap(), b"current");
         assert_eq!(fs::read(store.updater_path()).unwrap(), b"current");
+        assert!(
+            file_matches_checksum(&store.updater_path(), &store.updater_checksum_path()).unwrap()
+        );
         let launcher = fs::read_to_string(directory.path().join("bin/nanocodex")).unwrap();
         assert!(launcher.contains("updater/nanocodex"));
         assert!(launcher.contains("export NANOCODEX_DIR"));
@@ -375,6 +485,59 @@ mod tests {
         assert_eq!(store.active().unwrap().as_deref(), Some("0.2.0"));
         assert_eq!(fs::read(store.binary_path("0.2.0")).unwrap(), b"previous");
         assert_eq!(fs::read(store.binary_path("0.3.0")).unwrap(), b"current");
+    }
+
+    #[test]
+    fn active_nightly_bootstraps_a_legacy_updater_without_copying_it() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = VersionStore::at(directory.path());
+        store.prepare_with_contents("0.3.0", b"legacy").unwrap();
+        store.install("nightly", b"nightly").unwrap();
+        store.activate("nightly").unwrap();
+        fs::remove_file(store.updater_checksum_path()).unwrap();
+
+        assert!(
+            VersionStore::legacy_nightly_store_for(&store.binary_path("nightly"))
+                .unwrap()
+                .is_some()
+        );
+        store.install_launcher().unwrap();
+        assert_eq!(fs::read(store.updater_path()).unwrap(), b"legacy");
+        let launcher = fs::read_to_string(directory.path().join("bin/nanocodex")).unwrap();
+        assert!(launcher.contains("updater/nanocodex.sha256"));
+        assert!(launcher.contains("updater/nanocodex"));
+        assert!(launcher.contains("current/nanocodex"));
+
+        VersionStore::legacy_nightly_store_for(&store.binary_path("nightly"))
+            .unwrap()
+            .unwrap()
+            .promote_manager("nightly")
+            .unwrap();
+        assert_eq!(fs::read(store.updater_path()).unwrap(), b"nightly");
+        assert!(store.updater_checksum_path().is_file());
+
+        store.install("local-build", b"local").unwrap();
+        store.activate("local-build").unwrap();
+        assert_eq!(fs::read(store.updater_path()).unwrap(), b"nightly");
+        assert!(
+            file_matches_checksum(&store.updater_path(), &store.updater_checksum_path()).unwrap()
+        );
+    }
+
+    #[test]
+    fn running_legacy_updater_seeds_its_checksum_marker() {
+        let directory = tempfile::tempdir().unwrap();
+        let store = VersionStore::at(directory.path());
+        store.prepare_with_contents("0.3.0", b"legacy").unwrap();
+        fs::remove_file(store.updater_checksum_path()).unwrap();
+
+        store
+            .seed_running_updater_checksum(&store.updater_path(), b"legacy")
+            .unwrap();
+
+        assert!(
+            file_matches_checksum(&store.updater_path(), &store.updater_checksum_path()).unwrap()
+        );
     }
 
     #[test]

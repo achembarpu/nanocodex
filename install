@@ -98,6 +98,7 @@ mkdir -p "$bin_dir" "$version_dir" "$updater_dir"
 install -m 755 "$temporary_dir/$binary" "$version_dir/nanocodex"
 printf '%s\n' "$binary_checksum" > "$version_dir/nanocodex.sha256"
 install -m 755 "$temporary_dir/$binary" "$updater_dir/nanocodex"
+printf '%s\n' "$binary_checksum" > "$updater_dir/nanocodex.sha256"
 
 ln -sfn "versions/$version" "$install_root/current"
 
@@ -111,9 +112,9 @@ case "$0" in
 esac
 bin_dir=$(CDPATH= cd -- "$(dirname -- "$launcher")" && pwd -P)
 install_root=$(dirname -- "$bin_dir")
+export NANOCODEX_DIR="$install_root"
 
-if [ "${1-}" = "update" ]; then
-    export NANOCODEX_DIR="$install_root"
+if [ "${1-}" = "update" ] && [ -f "$install_root/updater/nanocodex.sha256" ]; then
     exec "$install_root/updater/nanocodex" "$@"
 fi
 exec "$install_root/current/nanocodex" "$@"
