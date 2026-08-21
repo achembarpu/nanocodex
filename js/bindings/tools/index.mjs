@@ -14,3 +14,4 @@ export {
   web,
 } from "./standard.mjs";
 export { dataset } from "./dataset.mjs";
+export { justBash } from "./bash.mjs";

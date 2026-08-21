@@ -7,8 +7,8 @@ use std::{
 
 use js_sys::Promise;
 use nanocodex::{
-    AgentEvents, DurableAgentExt, Model, Nanocodex as RustNanocodex, OpenAi, ReasoningMode,
-    Thinking, TurnControl, TurnResult,
+    AgentEvents, DurableAgentExt, Model, Nanocodex as RustNanocodex, NanocodexError, OpenAi,
+    ReasoningMode, Thinking, TurnControl, TurnResult,
     agent::{
         ExecutionEnvironment, PromptRequest,
         durability::{JournalStore, StoreError, StoreFuture, StoredBatch, StoredJournal},
@@ -1131,9 +1131,16 @@ impl Drop for WasmNanocodex {
 }
 
 struct TurnState {
+    accepted: Option<Result<Option<String>, TurnAcceptanceFailure>>,
     control: Option<TurnControl>,
     completed: Option<Result<TurnResult, String>>,
     waiters: Vec<oneshot::Sender<()>>,
+}
+
+#[derive(Clone)]
+struct TurnAcceptanceFailure {
+    code: &'static str,
+    message: String,
 }
 
 impl TurnState {
@@ -1152,6 +1159,18 @@ pub struct WasmTurn {
 
 #[wasm_bindgen(js_class = Turn)]
 impl WasmTurn {
+    /// Waits until the Rust driver has durably admitted this turn.
+    ///
+    /// Returns the durable request identity selected during admission, or
+    /// `undefined` when the agent has no execution policy.
+    ///
+    /// # Errors
+    ///
+    /// Rejects with a stable `code` describing an admission failure.
+    pub async fn accepted(&self) -> Result<Option<String>, JsValue> {
+        self.acceptance().await.map_err(js_turn_acceptance_error)
+    }
+
     /// Injects text input at the active turn's next safe model boundary.
     ///
     /// # Errors
@@ -1215,6 +1234,7 @@ impl WasmTurn {
 impl WasmTurn {
     fn accept(agent: RustNanocodex, prompt: Prompt, operation_id: Option<String>) -> Self {
         let state = Rc::new(RefCell::new(TurnState {
+            accepted: None,
             control: None,
             completed: None,
             waiters: Vec::new(),
@@ -1230,12 +1250,20 @@ impl WasmTurn {
                 Ok(turn) => {
                     {
                         let mut state = task_state.borrow_mut();
+                        state.accepted = Some(Ok(turn.request_id().map(str::to_owned)));
                         state.control = Some(turn.control());
                         state.notify();
                     }
                     turn.await.map_err(|error| error.to_string())
                 }
-                Err(error) => Err(error.to_string()),
+                Err(error) => {
+                    let failure = turn_acceptance_failure(&error);
+                    let mut state = task_state.borrow_mut();
+                    state.accepted = Some(Err(failure));
+                    state.completed = Some(Err(error.to_string()));
+                    state.notify();
+                    return;
+                }
             };
             let mut state = task_state.borrow_mut();
             state.control = None;
@@ -1243,6 +1271,24 @@ impl WasmTurn {
             state.notify();
         });
         Self { state }
+    }
+
+    async fn acceptance(&self) -> Result<Option<String>, TurnAcceptanceFailure> {
+        loop {
+            let notified = {
+                let mut state = self.state.borrow_mut();
+                if let Some(accepted) = &state.accepted {
+                    return accepted.clone();
+                }
+                let (notify, notified) = oneshot::channel();
+                state.waiters.push(notify);
+                notified
+            };
+            notified.await.map_err(|_| TurnAcceptanceFailure {
+                code: "retryable",
+                message: "the turn stopped before it was accepted".to_owned(),
+            })?;
+        }
     }
 
     async fn control(&self) -> Result<TurnControl, String> {
@@ -1285,6 +1331,53 @@ impl WasmTurn {
                 .map_err(|_| "the turn stopped before it completed".to_owned())?;
         }
     }
+}
+
+fn turn_acceptance_failure(error: &NanocodexError) -> TurnAcceptanceFailure {
+    let code = match error {
+        NanocodexError::TurnCancelled => "cancelled",
+        NanocodexError::InvalidRequest(_) | NanocodexError::ExecutionPolicyNotConfigured => {
+            "invalid_request"
+        }
+        NanocodexError::AgentStopped | NanocodexError::TurnStopped => "retryable",
+        NanocodexError::ExecutionPolicy { source, .. } => source
+            .as_ref()
+            .downcast_ref::<nanocodex::durability::Error>()
+            .map_or("failed", durability_acceptance_failure_code),
+        NanocodexError::Response(_)
+            if error
+                .responses_error()
+                .is_some_and(|source| source.retry_advice().is_some()) =>
+        {
+            "retryable"
+        }
+        NanocodexError::Shutdown(source) => return turn_acceptance_failure(source),
+        _ => "failed",
+    };
+    TurnAcceptanceFailure {
+        code,
+        message: error.to_string(),
+    }
+}
+
+const fn durability_acceptance_failure_code(error: &nanocodex::durability::Error) -> &'static str {
+    use nanocodex::durability::Error;
+
+    match error {
+        Error::AmbiguousStep { .. } => "blocked",
+        Error::OperationConflict { .. } => "conflict",
+        Error::Store(_)
+        | Error::OperationBlocked { .. }
+        | Error::OperationActive { .. }
+        | Error::DriverStopped => "retryable",
+        _ => "failed",
+    }
+}
+
+fn js_turn_acceptance_error(failure: TurnAcceptanceFailure) -> JsValue {
+    let error = js_sys::Error::new(&failure.message);
+    let _ = js_sys::Reflect::set(&error, &"code".into(), &failure.code.into());
+    error.into()
 }
 
 /// JavaScript binding over one completed Rust turn result.

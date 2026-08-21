@@ -185,6 +185,8 @@ async function check() {
   const options: Actions.turn.prompt.Options = { input: "hello" };
   const turn: Turn = agent.turn.prompt(options);
   const sameTurn: Actions.turn.prompt.ReturnType = Actions.turn.prompt(agent, options);
+  const acceptedId: string | undefined = await turn.accepted();
+  const sameAcceptedId: Actions.turn.accepted.ReturnType = await Actions.turn.accepted(sameTurn);
   const completed: TurnResult = await sameTurn.result();
   const sameResult: Actions.turn.getResult.ReturnType = completed;
   const message: string = completed.finalMessage;
@@ -195,6 +197,8 @@ async function check() {
   usage.estimated_cost?.usd;
   const costStatus: CostStatus = usage.cost_status;
   void message;
+  void acceptedId;
+  void sameAcceptedId;
   void sameResult;
   void snapshotPromise;
   void usagePromise;

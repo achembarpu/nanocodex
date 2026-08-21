@@ -39,6 +39,10 @@
       "types": "./browser/realtimePrompt.d.mts",
       "import": "./browser/realtimePrompt.mjs"
     },
+    "./workspace": {
+      "types": "./runtime/workspace.d.mts",
+      "import": "./runtime/workspace.mjs"
+    },
     "./host": {
       "types": "./host/index.d.mts",
       "import": "./host/index.mjs"
@@ -66,6 +70,10 @@
     "./tools/artifact": {
       "types": "./tools/artifact.d.mts",
       "import": "./tools/artifact.mjs"
+    },
+    "./tools/bash": {
+      "types": "./tools/bash.d.mts",
+      "import": "./tools/bash.mjs"
     },
     "./tools/browser": {
       "types": "./tools/browser/index.d.mts",

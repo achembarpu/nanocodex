@@ -69,6 +69,58 @@ test("Worker Agent preserves synchronous prompt handles, independent results, an
   assert.equal(worker.terminated, 1);
 });
 
+test("Worker prompt acknowledgement waits for durable turn admission", async () => {
+  const fixture = createFixture({ holdAcceptance: true });
+  const worker = new LoopbackWorker(fixture.createAgent);
+  const agent = await createWorkerAgent({ sessionId: "root", harness: false }, { worker });
+  const turn = agent.turn.prompt({ input: "admit durably", id: "operation-7" });
+  let settled = false;
+  const accepted = turn.accepted().then((requestId) => {
+    settled = true;
+    return requestId;
+  });
+  const pendingResult = turn.result();
+
+  await tick();
+  assert.equal(settled, false);
+  assert.equal(worker.incoming.some((message) => message.method === "turn.result"), false);
+
+  fixture.accept("root", "operation-7");
+  assert.equal(await accepted, "operation-7");
+  await tick();
+  assert.equal(worker.incoming.some((message) => message.method === "turn.result"), true);
+
+  fixture.complete("root", "admitted");
+  const result = await pendingResult;
+  assert.equal(result.finalMessage, "admitted");
+  result.dispose();
+  turn.dispose();
+  agent.dispose();
+  assert.equal(worker.terminated, 1);
+});
+
+test("Worker turn admission preserves stable error codes", async () => {
+  const fixture = createFixture({
+    acceptanceError: Object.assign(new Error("durable input conflict"), { code: "conflict" }),
+  });
+  const worker = new LoopbackWorker(fixture.createAgent);
+  const agent = await createWorkerAgent({ sessionId: "root", harness: false }, { worker });
+  const turn = agent.turn.prompt({ input: "conflicting input", id: "operation-7" });
+
+  await assert.rejects(
+    turn.accepted(),
+    (error) => error instanceof Error
+      && error.message === "durable input conflict"
+      && error.code === "conflict",
+  );
+  await assert.rejects(turn.result(), (error) => error?.code === "conflict");
+  assert.equal(fixture.log.filter(([kind]) => kind === "turn-dispose").length, 1);
+
+  turn.dispose();
+  agent.dispose();
+  assert.equal(worker.terminated, 1);
+});
+
 test("a prompt-created Turn keeps its Worker alive after Agent disposal", async () => {
   const fixture = createFixture();
   const worker = new LoopbackWorker(fixture.createAgent);
@@ -810,6 +862,7 @@ class LoopbackWorker {
 function createFixture(options = {}) {
   const watchers = new Set();
   const completions = new Map();
+  const acceptances = new Map();
   const disposedAgents = new Set();
   const log = [];
   const resultStats = { snapshots: 0, usages: 0, released: 0 };
@@ -858,6 +911,12 @@ function createFixture(options = {}) {
       release();
     },
     watcherStats,
+    accept(sessionId, requestId) {
+      const acceptance = acceptances.get(sessionId);
+      if (!acceptance) throw new Error(`no pending acceptance for ${sessionId}`);
+      acceptances.delete(sessionId);
+      acceptance.resolve(requestId);
+    },
     emit(requestId, seq, payload = {}) {
       const event = { protocol_version: 1, request_id: requestId, seq, type: "test", payload };
       const encoded = JSON.stringify(event);
@@ -919,7 +978,17 @@ function createFixture(options = {}) {
         let resolve;
         const result = new Promise((accept) => { resolve = accept; });
         completions.set(sessionId, resolve);
+        let acceptance;
+        if (options.holdAcceptance) {
+          acceptance = new Promise((resolveAcceptance) => {
+            acceptances.set(sessionId, { resolve: resolveAcceptance });
+          });
+        }
         return {
+          accepted() {
+            if (options.acceptanceError) throw options.acceptanceError;
+            return acceptance ?? id;
+          },
           result: () => result,
           async steer(steering) { log.push(["steer", sessionId, steering]); },
           async cancel() { log.push(["cancel", sessionId]); },

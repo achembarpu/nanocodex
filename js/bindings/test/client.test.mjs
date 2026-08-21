@@ -209,6 +209,45 @@ test("the headless client exposes matching direct and standalone actions", async
   agent.dispose();
 });
 
+test("turn acceptance forwards durable IDs and remains optional for custom runtimes", async () => {
+  const legacyRuntime = defineRuntime({
+    create: () => rawAgent("legacy-session"),
+    decorate: (agent) => agent.extend(Actions.agentActions()),
+  });
+  const legacy = await createAgentClient(legacyRuntime);
+  const legacyTurn = legacy.turn.prompt({ input: "legacy" });
+  assert.equal(await legacyTurn.accepted(), undefined);
+  legacyTurn.dispose();
+  legacy.dispose();
+
+  let acceptanceCalls = 0;
+  const runtime = defineRuntime({
+    create() {
+      const raw = rawAgent("durable-session");
+      const prompt = raw.prompt;
+      raw.prompt = (input, id) => {
+        const turn = prompt(input, id);
+        turn.accepted = () => {
+          acceptanceCalls += 1;
+          return id;
+        };
+        return turn;
+      };
+      return raw;
+    },
+    decorate: (agent) => agent.extend(Actions.agentActions()),
+  });
+  const agent = await createAgentClient(runtime);
+  const turn = agent.turn.prompt({ input: "durable", id: "request-7" });
+  const accepted = turn.accepted();
+  assert.strictEqual(turn.accepted(), accepted);
+  assert.strictEqual(Actions.turn.accepted(turn), accepted);
+  assert.equal(await accepted, "request-7");
+  assert.equal(acceptanceCalls, 1);
+  turn.dispose();
+  agent.dispose();
+});
+
 test("the WASM host bridge preserves typed decimal durability revisions", async () => {
   const batches = [];
   const host = {

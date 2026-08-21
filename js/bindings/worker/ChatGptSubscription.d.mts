@@ -4,4 +4,6 @@ import type {
 } from "../types.mjs";
 
 /** Opens the Rust-owned ChatGPT lifecycle in a module Worker. */
-export function open(options: ChatGptSubscriptionOptions): Promise<ChatGptSubscriptionHandle>;
+export function open(
+  options: Omit<ChatGptSubscriptionOptions, "module"> & { module: WebAssembly.Module },
+): Promise<ChatGptSubscriptionHandle>;

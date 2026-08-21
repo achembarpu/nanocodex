@@ -17,6 +17,12 @@ export declare namespace prompt {
   type ReturnType<agent extends Agent<object> = Agent<object>> = Turn<agent>;
 }
 
+/** Waits for durable admission and returns its request ID when one was assigned. */
+export function accepted(turn: Turn): Promise<accepted.ReturnType>;
+export declare namespace accepted {
+  type ReturnType = string | undefined;
+}
+
 /** Waits for a Turn's typed completed result. */
 export function getResult(turn: Turn): Promise<getResult.ReturnType>;
 export declare namespace getResult {

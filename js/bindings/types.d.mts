@@ -278,6 +278,12 @@ export type DefaultAgent = Agent<AgentActions>;
 
 export type Turn<agent extends Agent<object> = Agent<object>> = Readonly<{
   readonly agent: agent;
+  /**
+   * Waits for execution-policy admission and returns its durable request ID.
+   * Rejections are Errors whose `code` is `cancelled`, `blocked`, `conflict`,
+   * `retryable`, `invalid_request`, or `failed`.
+   */
+  accepted(): Promise<string | undefined>;
   result(): Promise<TurnResult>;
   steer(options: { input: PromptInput }): Promise<void>;
   cancel(): Promise<void>;

@@ -432,7 +432,13 @@ async function dispatch(message, state) {
       const turn = agent.turn.prompt(message.options);
       if (turns.has(message.turnId)) throw new Error(`duplicate Worker Agent turn: ${message.turnId}`);
       turns.set(message.turnId, turn);
-      return undefined;
+      try {
+        return await turn.accepted();
+      } catch (error) {
+        if (turns.get(message.turnId) === turn) turns.delete(message.turnId);
+        turn.dispose();
+        throw error;
+      }
     }
     case "events": {
       state.setEventsEnabled(message.enabled);
@@ -626,6 +632,7 @@ class WorkerConnection {
     let disposed = false;
     let retained = true;
     return {
+      accepted() { return accepted; },
       result() {
         if (disposed && !result) {
           return Promise.reject(new Error("the Nanocodex turn has been disposed"));
@@ -1133,5 +1140,5 @@ function harnessKey(harness) { return `${harness?.origin ?? ""}\n${harness?.thre
 function localDate(date) {
   return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
 }
-function encodeError(error) { return { name: error?.name || "Error", message: error?.message || String(error), stack: error?.stack }; }
-function decodeError(encoded = {}) { const error = encoded.name === "RangeError" ? new RangeError(encoded.message) : encoded.name === "TypeError" ? new TypeError(encoded.message) : new Error(encoded.message || "Worker Agent failed"); if (encoded.stack) error.stack = encoded.stack; return error; }
+function encodeError(error) { return { name: error?.name || "Error", message: error?.message || String(error), stack: error?.stack, ...(typeof error?.code === "string" ? { code: error.code } : {}) }; }
+function decodeError(encoded = {}) { const error = encoded.name === "RangeError" ? new RangeError(encoded.message) : encoded.name === "TypeError" ? new TypeError(encoded.message) : new Error(encoded.message || "Worker Agent failed"); if (encoded.stack) error.stack = encoded.stack; if (typeof encoded.code === "string") error.code = encoded.code; return error; }

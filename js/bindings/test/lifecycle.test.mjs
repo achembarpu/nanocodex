@@ -4,6 +4,7 @@ import { test } from "node:test";
 
 import { Actions } from "../index.mjs";
 import { Agent, Transport } from "../node/index.mjs";
+import { createMemoryDurabilityStore } from "../runtime/durability-store.mjs";
 import {
   deferred,
   messageReader,
@@ -22,6 +23,7 @@ const SESSION_IDS = Object.freeze({
   fork: "018f1f9a-7b3c-7a15-8000-000000000015",
   reconnect: "018f1f9a-7b3c-7a16-8000-000000000016",
   shutdown: "018f1f9a-7b3c-7a17-8000-000000000017",
+  durability: "018f1f9a-7b3c-7a18-8000-000000000018",
 });
 
 const createWarmAgent = ({ apiKey, websocketUrl, ...options }) => Agent.create({
@@ -69,6 +71,7 @@ test("prompt acceptance is separate from results and healthy follow-ons reuse on
 
   const first = agent.turn.prompt({ input: "first owned prompt" });
   assert.equal(typeof first.result, "function");
+  assert.equal(await first.accepted(), undefined);
   const firstResult = first.result();
   await firstSeen.promise;
   assert.equal(
@@ -95,6 +98,47 @@ test("prompt acceptance is separate from results and healthy follow-ons reuse on
   watch.off();
   agent.dispose();
   await socketClosed;
+  await server.close();
+});
+
+test("durable acceptance exposes its request ID and classifies conflicts", async () => {
+  const server = await startResponsesServer();
+  const durabilityId = "lifecycle-acceptance";
+  const agent = await createWarmAgent({
+    apiKey: "test-key",
+    websocketUrl: server.url,
+    thinking: "none",
+    sessionId: SESSION_IDS.durability,
+    durability: createMemoryDurabilityStore(durabilityId),
+    durabilityId,
+  });
+  const scenario = (async () => {
+    const socket = await server.nextConnection();
+    const reader = messageReader(socket);
+    await reader.next();
+    sendWarmup(socket, "resp-durable-warmup");
+    const request = await reader.next();
+    assert.match(JSON.stringify(request.input), /durable input/);
+    sendFinal(socket, "resp-durable", "DURABLE");
+  })();
+
+  const turn = agent.turn.prompt({ input: "durable input", id: "operation-7" });
+  assert.equal(await turn.accepted(), "operation-7");
+  const result = await turn.result();
+  assert.equal(result.finalMessage, "DURABLE");
+  await scenario;
+
+  const conflict = agent.turn.prompt({ input: "different input", id: "operation-7" });
+  await assert.rejects(
+    conflict.accepted(),
+    (error) => error instanceof Error && error.code === "conflict",
+  );
+  await assert.rejects(conflict.result(), /already has different input/);
+
+  conflict.dispose();
+  result.dispose();
+  turn.dispose();
+  agent.dispose();
   await server.close();
 });
 

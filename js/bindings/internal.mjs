@@ -59,6 +59,20 @@ export function getTurnResult(turn) {
   return state.result;
 }
 
+export function awaitTurnAcceptance(turn) {
+  const state = turnState(turn);
+  if (!state.acceptance) {
+    try {
+      state.acceptance = typeof state.raw.accepted === "function"
+        ? Promise.resolve(state.raw.accepted())
+        : Promise.resolve(undefined);
+    } catch (error) {
+      state.acceptance = Promise.reject(error);
+    }
+  }
+  return state.acceptance;
+}
+
 export function getTurnSnapshot(result) {
   return resultState(result).snapshot();
 }
@@ -568,9 +582,10 @@ function createTurn(raw, agent) {
   if (!raw || typeof raw.result !== "function") {
     throw new TypeError("the runtime returned an invalid Nanocodex turn handle");
   }
-  const state = { raw, agent, result: undefined, disposed: false };
+  const state = { raw, agent, acceptance: undefined, result: undefined, disposed: false };
   const turn = {
     get agent() { return state.agent; },
+    accepted: () => awaitTurnAcceptance(turn),
     result: () => getTurnResult(turn),
     steer: (input) => steer(turn, input),
     cancel: () => cancel(turn),

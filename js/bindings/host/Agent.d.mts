@@ -9,7 +9,7 @@ import type {
 } from "../types.mjs";
 import type { Transport } from "../browser/Transport.mjs";
 import type { Tool as SubagentTool } from "../runtime/subagents.mjs";
-import type { Workspace } from "../browser/workspace.mjs";
+import type { Workspace } from "../runtime/workspace.mjs";
 
 export type Agent = DefaultAgent;
 type ToolExposureOptions =

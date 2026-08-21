@@ -632,6 +632,7 @@ context, and typed history.
 an owned client decorated with matching domain actions:
 
 - `agent.turn.prompt(...)` / `Actions.turn.prompt(agent, ...)`
+- `turn.accepted()` / `Actions.turn.accepted(turn)`
 - `turn.result()` / `Actions.turn.getResult(turn)`
 - `result.snapshot()` / `Actions.turn.getSnapshot(result)`
 - `result.usage()` / `Actions.turn.getUsage(result)`
@@ -642,6 +643,12 @@ an owned client decorated with matching domain actions:
 - `agent.session.shutdown()` / `Actions.session.shutdown(agent)`
 - `agent.session.spawn()` / `Actions.session.spawn(agent)`
 - `agent.events.watch(...)` / `Actions.events.watch(agent, ...)`
+
+`turn.accepted()` resolves when Rust has admitted the prompt. A durable agent
+returns its stable request ID; a custom runtime without durable admission
+returns `undefined`. Managed HTTP hosts can await this narrow boundary before
+acknowledging a request without waiting for model execution or materializing a
+result.
 
 `turn.result()` resolves to a frozen, opaque completed `TurnResult` handle. Its
 `finalMessage` is eager. The async `usage()` and `snapshot()` actions materialize

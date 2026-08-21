@@ -1,4 +1,5 @@
 import {
+  awaitTurnAcceptance,
   cancel as cancelTurn,
   getTurnResult,
   getTurnSnapshot,
@@ -13,6 +14,10 @@ export function prompt(agent, options) {
 
 export function getResult(turn) {
   return getTurnResult(turn);
+}
+
+export function accepted(turn) {
+  return awaitTurnAcceptance(turn);
 }
 
 export function getSnapshot(result) {
