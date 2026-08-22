@@ -100,6 +100,16 @@ browser.close().await?;
 # }
 ```
 
+On macOS, the private in-process browser selects chrome-headless-shell when it
+is available, avoiding macOS application/profile services entirely. It also
+recognizes Chrome for Testing installations created by `agent-browser install`
+or Playwright and always uses a fresh temporary profile with the noninteractive
+mock Keychain/basic password store. If no dedicated automation browser is
+installed, construction fails with an actionable configuration error instead
+of silently launching personal Chrome, an ambient `CHROME` executable, or the
+login Keychain. Explicit profile import, an explicit executable, and remote CDP
+remain caller-owned policies.
+
 The browser starts lazily on its first local action. Use `Browser::builder()`
 for deterministic browser context, egress policy, storage state, diagnostics,
 or an explicitly managed CDP endpoint.

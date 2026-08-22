@@ -2611,9 +2611,11 @@ impl Drop for NativeBrowser {
 }
 
 #[cfg(target_os = "macos")]
-fn preferred_automation_executable(explicit: Option<PathBuf>) -> Option<PathBuf> {
-    if explicit.is_some() || std::env::var_os("CHROME").is_some() {
-        return explicit;
+fn preferred_automation_executable(
+    explicit: Option<PathBuf>,
+) -> Result<Option<PathBuf>, BrowserBuildError> {
+    if let Some(executable) = explicit {
+        return Ok(Some(executable));
     }
     if let Some(executable) = headless_shell_on_path().or_else(cached_headless_shell) {
         info!(
@@ -2621,21 +2623,46 @@ fn preferred_automation_executable(explicit: Option<PathBuf>) -> Option<PathBuf>
             path = %executable.display(),
             "selected headless shell to avoid macOS browser-profile services"
         );
-        return Some(executable);
+        return Ok(Some(executable));
     }
-    explicit
+    if let Some(executable) = chrome_for_testing_on_path()
+        .or_else(installed_chrome_for_testing)
+        .or_else(cached_chrome_for_testing)
+    {
+        info!(
+            target: "nanocodex_browser",
+            path = %executable.display(),
+            "selected Chrome for Testing for the private browser session"
+        );
+        return Ok(Some(executable));
+    }
+    Err(BrowserBuildError::Configuration {
+        message: "a private browser on macOS requires chrome-headless-shell or Chrome for Testing; install one or use `BrowserBuilder::executable` for a deliberate override".to_owned(),
+    })
 }
 
 #[cfg(not(target_os = "macos"))]
-const fn preferred_automation_executable(explicit: Option<PathBuf>) -> Option<PathBuf> {
-    explicit
+const fn preferred_automation_executable(
+    explicit: Option<PathBuf>,
+) -> Result<Option<PathBuf>, BrowserBuildError> {
+    Ok(explicit)
+}
+
+#[cfg(target_os = "macos")]
+fn chrome_for_testing_on_path() -> Option<PathBuf> {
+    executable_on_path(&["google-chrome-for-testing", "chrome-for-testing"])
 }
 
 #[cfg(target_os = "macos")]
 fn headless_shell_on_path() -> Option<PathBuf> {
+    executable_on_path(&["chrome-headless-shell", "headless_shell"])
+}
+
+#[cfg(target_os = "macos")]
+fn executable_on_path(names: &[&str]) -> Option<PathBuf> {
     let path = std::env::var_os("PATH")?;
     for directory in std::env::split_paths(&path) {
-        for name in ["chrome-headless-shell", "headless_shell"] {
+        for name in names {
             let candidate = directory.join(name);
             if candidate.is_file() {
                 return Some(candidate);
@@ -2643,6 +2670,92 @@ fn headless_shell_on_path() -> Option<PathBuf> {
         }
     }
     None
+}
+
+#[cfg(target_os = "macos")]
+fn installed_chrome_for_testing() -> Option<PathBuf> {
+    let relative =
+        Path::new("Google Chrome for Testing.app").join("Contents/MacOS/Google Chrome for Testing");
+    let system = Path::new("/Applications").join(&relative);
+    if system.is_file() {
+        return Some(system);
+    }
+    std::env::var_os("HOME")
+        .map(PathBuf::from)
+        .map(|home| home.join("Applications").join(relative))
+        .filter(|candidate| candidate.is_file())
+}
+
+#[cfg(target_os = "macos")]
+fn cached_chrome_for_testing() -> Option<PathBuf> {
+    let home = std::env::var_os("HOME").map(PathBuf::from);
+    let agent_browser = home.as_ref().and_then(|home| {
+        latest_versioned_executable(
+            &home.join(".agent-browser/browsers"),
+            "chrome-",
+            &["Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"],
+        )
+    });
+    if agent_browser.is_some() {
+        return agent_browser;
+    }
+
+    let mut playwright_roots = Vec::new();
+    if let Some(root) = std::env::var_os("PLAYWRIGHT_BROWSERS_PATH")
+        && root != "0"
+    {
+        playwright_roots.push(PathBuf::from(root));
+    }
+    if let Some(home) = home {
+        playwright_roots.push(home.join("Library/Caches/ms-playwright"));
+        playwright_roots.push(home.join(".cache/ms-playwright"));
+    }
+    playwright_roots.into_iter().find_map(|root| {
+        latest_versioned_executable(
+            &root,
+            "chromium-",
+            &[
+                "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+                "chrome-mac-x64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing",
+            ],
+        )
+    })
+}
+
+#[cfg(target_os = "macos")]
+fn latest_versioned_executable(
+    root: &Path,
+    prefix: &str,
+    relative_candidates: &[&str],
+) -> Option<PathBuf> {
+    let mut installations = std::fs::read_dir(root)
+        .ok()?
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let name = entry.file_name();
+            let version = numeric_version(name.to_str()?, prefix)?;
+            relative_candidates
+                .iter()
+                .map(|relative| entry.path().join(relative))
+                .find(|candidate| candidate.is_file())
+                .map(|executable| (version, executable))
+        })
+        .collect::<Vec<_>>();
+    installations.sort_unstable_by(|left, right| left.0.cmp(&right.0));
+    installations.pop().map(|(_, executable)| executable)
+}
+
+#[cfg(target_os = "macos")]
+fn numeric_version(name: &str, prefix: &str) -> Option<Vec<u64>> {
+    let version = name.strip_prefix(prefix)?;
+    if version.is_empty() {
+        return None;
+    }
+    version
+        .split('.')
+        .map(str::parse)
+        .collect::<Result<_, _>>()
+        .ok()
 }
 
 #[cfg(target_os = "macos")]
@@ -2658,26 +2771,14 @@ fn cached_headless_shell() -> Option<PathBuf> {
         roots.push(PathBuf::from(home).join(".cache/ms-playwright"));
     }
     roots.into_iter().find_map(|root| {
-        let mut installations = std::fs::read_dir(root)
-            .ok()?
-            .filter_map(Result::ok)
-            .filter(|entry| {
-                entry
-                    .file_name()
-                    .to_string_lossy()
-                    .starts_with("chromium_headless_shell-")
-            })
-            .collect::<Vec<_>>();
-        installations.sort_unstable_by_key(std::fs::DirEntry::file_name);
-        installations.into_iter().rev().find_map(|entry| {
-            [
+        latest_versioned_executable(
+            &root,
+            "chromium_headless_shell-",
+            &[
                 "chrome-headless-shell-mac-arm64/chrome-headless-shell",
                 "chrome-headless-shell-mac-x64/chrome-headless-shell",
-            ]
-            .into_iter()
-            .map(|relative| entry.path().join(relative))
-            .find(|candidate| candidate.is_file())
-        })
+            ],
+        )
     })
 }
 
@@ -2702,7 +2803,7 @@ impl NativeBrowser {
         lighthouse_executable: Option<PathBuf>,
         crux_client: Option<BrowserCruxClient>,
     ) -> Result<Arc<Self>, BrowserBuildError> {
-        let executable = preferred_automation_executable(executable);
+        let executable = preferred_automation_executable(executable)?;
         Ok(Arc::new(Self {
             runtime_dir: tempfile::Builder::new()
                 .prefix("nanocodex-browser-")
@@ -7797,6 +7898,34 @@ mod tests {
                 false,
             ),
             Some(true)
+        );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn automation_executable_cache_uses_the_newest_chrome_for_testing() -> std::io::Result<()> {
+        let root = tempfile::tempdir()?;
+        let relative = "Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing";
+        for version in ["99.0.9999.9", "152.0.7977.54", "not-a-version"] {
+            let executable = root.path().join(format!("chrome-{version}")).join(relative);
+            std::fs::create_dir_all(executable.parent().expect("executable has parent"))?;
+            std::fs::write(executable, [])?;
+        }
+
+        let executable = super::latest_versioned_executable(root.path(), "chrome-", &[relative])
+            .expect("Chrome for Testing installation");
+        assert!(executable.starts_with(root.path().join("chrome-152.0.7977.54")));
+        Ok(())
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn explicit_automation_executable_remains_caller_owned() {
+        let explicit = std::path::PathBuf::from("/caller/selected/chrome");
+        assert_eq!(
+            super::preferred_automation_executable(Some(explicit.clone()))
+                .expect("explicit executable"),
+            Some(explicit)
         );
     }
 

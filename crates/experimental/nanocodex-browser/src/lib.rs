@@ -3751,10 +3751,14 @@ impl Browser {
     ///
     /// Chromium starts on the first action. All clones address the same page,
     /// reference map, diagnostics, and monotonic action sequence.
+    /// On macOS, automatic selection is limited to chrome-headless-shell or
+    /// Chrome for Testing and never falls back to personal Chrome or an ambient
+    /// `CHROME` executable.
     ///
     /// # Errors
     ///
-    /// Returns an error when the private runtime directory cannot be created.
+    /// Returns an error when the private runtime directory cannot be created or
+    /// macOS has no dedicated automation browser installed.
     pub fn new() -> Result<Self, BrowserBuildError> {
         Self::builder().build()
     }
@@ -3912,8 +3916,8 @@ impl BrowserTool {
     /// # Errors
     ///
     /// Returns an error when the private runtime configuration cannot be
-    /// created. A missing Chrome or Chromium installation is reported by the
-    /// first tool call.
+    /// created. On macOS, a missing dedicated automation browser is reported
+    /// here instead of falling back to personal Chrome.
     pub fn new() -> Result<Self, BrowserBuildError> {
         Ok(Self::from_browser(browser_tool_builder().build()?))
     }
