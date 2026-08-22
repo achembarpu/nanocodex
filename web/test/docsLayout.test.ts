@@ -19,7 +19,11 @@ test("documentation navigation stays client-side and code uses themed syntax tok
   assert.match(source, /to=\{page\.href\}/);
   assert.doesNotMatch(source, /<a href="\/docs"/);
   assert.match(source, /highlightDocsCode\(code, language\)/);
-  assert.match(syntax, /createHighlighterCoreSync/);
+  assert.match(syntax, /createHighlighterCore\(\{/);
+  assert.doesNotMatch(syntax, /createHighlighterCoreSync|from "@shikijs\/langs\//);
+  for (const language of ["bash", "javascript", "python", "rust", "tsx"]) {
+    assert.match(syntax, new RegExp(`import\\("@shikijs/langs/${language}"\\)`));
+  }
   assert.match(syntax, /pierre-light/);
   assert.match(syntax, /pierre-dark-soft/);
   assert.match(css, /--shiki-light/);
@@ -46,7 +50,10 @@ test("documentation loads one Markdown source at a time and swaps only complete 
   assert.match(source, /if \(!resolved\) return null/);
   assert.match(source, /if \(!resolved \|\| resolved\.path !== path\) return/);
   assert.match(source, /const doc = parseDocument\(source\)/);
-  assert.match(source, /block\.type === "code"[\s\S]*?highlightDocsCode\(block\.code, block\.language\)/);
+  assert.match(source, /import\("\.\/docsSyntax"\)/);
+  assert.match(source, /await syntax\.prepareDocsLanguages\(codeBlocks\.map\(\(block\) => block\.language\)\)/);
+  assert.match(source, /for \(const block of codeBlocks\) syntax\.highlightDocsCode\(block\.code, block\.language\)/);
+  assert.match(source, /resolvedPageRequests\.get\(path\)[\s\S]*?resolvedPageRequests\.set\(path, request\)/);
   assert.match(source, /resolvedPageCache\.set\(path, \{[\s\S]*?doc,/);
   assert.match(source, /if \(next\) setResolved\(next\)/);
 });

@@ -24,7 +24,6 @@ import {
   normalizeDocsPath,
   type DocsPage,
 } from "./docsNavigation";
-import { highlightDocsCode } from "./docsSyntax";
 import { useModalBoundary } from "./modalBoundary";
 import "./Docs.css";
 
@@ -34,6 +33,10 @@ type ResolvedPage =
   | { kind: "error"; path: string };
 
 const resolvedPageCache = new Map<string, ResolvedPage>();
+const resolvedPageRequests = new Map<string, Promise<void>>();
+type DocsSyntax = typeof import("./docsSyntax");
+let docsSyntax: DocsSyntax | undefined;
+let docsSyntaxRequest: Promise<DocsSyntax> | undefined;
 
 export async function preloadDocsRoute(pathname: string) {
   const path = normalizeDocsPath(pathname);
@@ -42,19 +45,47 @@ export async function preloadDocsRoute(pathname: string) {
     resolvedPageCache.set(path, { kind: "missing", path });
     return;
   }
+  const existing = resolvedPageRequests.get(path);
+  if (existing) return existing;
+  const request = resolveDocsPage(path);
+  resolvedPageRequests.set(path, request);
+  const release = () => {
+    if (resolvedPageRequests.get(path) === request) resolvedPageRequests.delete(path);
+  };
+  void request.then(release, release);
+  return request;
+}
 
+async function resolveDocsPage(path: string): Promise<void> {
+  const syntaxRequest = loadDocsSyntax();
   const source = await loadDocsSource(path);
   if (source == null) return;
   const doc = parseDocument(source);
-  for (const block of doc.blocks) {
-    if (block.type === "code") highlightDocsCode(block.code, block.language);
-  }
-  resolvedPageCache.set(path, {
-    kind: "document",
-    path,
-    source,
-    doc,
+  const syntax = await syntaxRequest;
+  const codeBlocks = doc.blocks.filter(
+    (block): block is Extract<MarkdownBlock, { type: "code" }> => block.type === "code",
+  );
+  await syntax.prepareDocsLanguages(codeBlocks.map((block) => block.language));
+  for (const block of codeBlocks) syntax.highlightDocsCode(block.code, block.language);
+  resolvedPageCache.set(path, { kind: "document", path, source, doc });
+}
+
+function loadDocsSyntax(): Promise<DocsSyntax> {
+  if (docsSyntax) return Promise.resolve(docsSyntax);
+  if (docsSyntaxRequest) return docsSyntaxRequest;
+  const request = import("./docsSyntax").then((module) => {
+    docsSyntax = module;
+    return module;
   });
+  docsSyntaxRequest = request;
+  void request.catch(() => {
+    if (docsSyntaxRequest === request) docsSyntaxRequest = undefined;
+  });
+  return request;
+}
+
+function highlightDocsCode(code: string, language: string): ReactNode {
+  return docsSyntax?.highlightDocsCode(code, language) ?? code;
 }
 
 export function Docs() {

@@ -23,6 +23,17 @@ const budgets = Object.freeze({
   commitsRouteRequests: 19,
   commitsRouteJavaScriptGzip: 285_000,
   commitsRouteCssGzip: 12_000,
+  // The overview prepares its complete highlighted page with only the shell
+  // grammar; other documentation grammars stay route-specific.
+  docsRouteRequests: 19,
+  docsRouteJavaScriptGzip: 165_000,
+  docsRouteCssGzip: 15_000,
+  changelogRouteRequests: 15,
+  changelogRouteJavaScriptGzip: 90_000,
+  changelogRouteCssGzip: 14_000,
+  evalsRouteRequests: 14,
+  evalsRouteJavaScriptGzip: 107_000,
+  evalsRouteCssGzip: 15_500,
   agentJavaScript: 680_000,
   // Worker/WASM preparation must begin from this small graph while the much
   // larger terminal UI downloads in parallel.
@@ -75,6 +86,11 @@ const applicationKey = manifestKey("src/NanocodexApp.tsx");
 const homeFrameKey = manifestKey("src/HomeFrame.tsx");
 const experienceKey = manifestKey("src/AgentExperience.tsx");
 const agentKey = manifestKey("src/AgentTerminal.tsx");
+const docsSyntaxKey = manifestKey("src/docsSyntax.tsx");
+const docsOverviewLanguageKey = exactlyOne(
+  Object.keys(manifest).filter((key) => manifest[key]?.name === "shellscript"),
+  "documentation overview shell grammar",
+);
 const agentRuntimeKey = exactlyOne(
   Object.keys(manifest).filter((key) => manifest[key]?.name === "agentRuntime"),
   "authenticated Agent runtime chunk",
@@ -115,6 +131,21 @@ const commitsRoute = await directRouteStats([
   "src/VirtualCommitList.tsx",
   "src/publishedRepository.ts",
 ], 3);
+const docsRoute = await directRouteStats([
+  "index.html",
+  "src/NanocodexApp.tsx",
+  "src/Docs.tsx",
+], 1, [docsSyntaxKey, docsOverviewLanguageKey]);
+const changelogRoute = await directRouteStats([
+  "index.html",
+  "src/NanocodexApp.tsx",
+  "src/Changelog.tsx",
+], 4);
+const evalsRoute = await directRouteStats([
+  "index.html",
+  "src/NanocodexApp.tsx",
+  "src/Evals.tsx",
+], 2);
 const signedOutStatic = new Set([
   ...initialStatic,
   ...applicationStatic,
@@ -137,6 +168,23 @@ assert(
   importClosure(experienceKey, true).has(agentRuntimeKey),
   "the authenticated credential path must independently reach the Agent runtime",
 );
+assert(
+  !importClosure(manifestKey("src/Docs.tsx"), false).has(docsSyntaxKey),
+  "documentation syntax must load only while preparing a concrete page",
+);
+for (const language of ["javascript", "python", "rust", "tsx"]) {
+  const key = exactlyOne(
+    Object.keys(manifest).filter((candidate) =>
+      manifest[candidate]?.name === language
+      && (candidate.includes("node_modules/@shikijs/langs/") || candidate.startsWith(`_${language}-`))
+    ),
+    `lazy documentation ${language} grammar`,
+  );
+  assert(
+    !docsRoute.staticChunks.has(key),
+    `the documentation overview must not load its unused ${language} grammar`,
+  );
+}
 assert(
   agentStatic.has(agentRuntimeKey) && !agentRuntimeStatic.has(agentKey),
   "the terminal must consume the shared Agent runtime without entering its prewarm graph",
@@ -212,36 +260,31 @@ within(
   signedOutJavaScript.gzipBytes,
   budgets.signedOutJavaScriptGzip,
 );
-withinCount(
-  "signed-out Source route requests",
-  sourceRoute.requestCount,
-  budgets.sourceRouteRequests,
-);
-within(
-  "signed-out Source route JavaScript gzip",
-  sourceRoute.javascript.gzipBytes,
-  budgets.sourceRouteJavaScriptGzip,
-);
-within(
-  "signed-out Source route CSS gzip",
-  sourceRoute.css.gzipBytes,
-  budgets.sourceRouteCssGzip,
-);
-withinCount(
-  "signed-out Commits route requests",
-  commitsRoute.requestCount,
-  budgets.commitsRouteRequests,
-);
-within(
-  "signed-out Commits route JavaScript gzip",
-  commitsRoute.javascript.gzipBytes,
-  budgets.commitsRouteJavaScriptGzip,
-);
-within(
-  "signed-out Commits route CSS gzip",
-  commitsRoute.css.gzipBytes,
-  budgets.commitsRouteCssGzip,
-);
+withinRoute("Source", sourceRoute, {
+  requests: budgets.sourceRouteRequests,
+  javascriptGzip: budgets.sourceRouteJavaScriptGzip,
+  cssGzip: budgets.sourceRouteCssGzip,
+});
+withinRoute("Commits", commitsRoute, {
+  requests: budgets.commitsRouteRequests,
+  javascriptGzip: budgets.commitsRouteJavaScriptGzip,
+  cssGzip: budgets.commitsRouteCssGzip,
+});
+withinRoute("Docs", docsRoute, {
+  requests: budgets.docsRouteRequests,
+  javascriptGzip: budgets.docsRouteJavaScriptGzip,
+  cssGzip: budgets.docsRouteCssGzip,
+});
+withinRoute("Changelog", changelogRoute, {
+  requests: budgets.changelogRouteRequests,
+  javascriptGzip: budgets.changelogRouteJavaScriptGzip,
+  cssGzip: budgets.changelogRouteCssGzip,
+});
+withinRoute("Evals", evalsRoute, {
+  requests: budgets.evalsRouteRequests,
+  javascriptGzip: budgets.evalsRouteJavaScriptGzip,
+  cssGzip: budgets.evalsRouteCssGzip,
+});
 within("Agent JavaScript", agentJavaScript.bytes, budgets.agentJavaScript);
 withinCount(
   "Agent runtime JavaScript chunks",
@@ -556,6 +599,9 @@ console.log(JSON.stringify({
   signedOutRoutes: {
     source: routeReport(sourceRoute),
     commits: routeReport(commitsRoute),
+    docs: routeReport(docsRoute),
+    changelog: routeReport(changelogRoute),
+    evals: routeReport(evalsRoute),
   },
   agent: {
     javascriptBytes: agentJavaScript.bytes,
@@ -624,10 +670,11 @@ function cssClosure(keys) {
   return [...files];
 }
 
-async function directRouteStats(rootSuffixes, dataRequests) {
+async function directRouteStats(rootSuffixes, dataRequests, additionalRoots = []) {
   const staticChunks = new Set();
-  for (const suffix of rootSuffixes) {
-    for (const key of importClosure(manifestKey(suffix), false)) {
+  const roots = [...rootSuffixes.map(manifestKey), ...additionalRoots];
+  for (const root of roots) {
+    for (const key of importClosure(root, false)) {
       staticChunks.add(key);
     }
   }
@@ -652,6 +699,16 @@ function routeReport(route) {
     cssGzipBytes: route.css.gzipBytes,
     staticChunks: [...route.staticChunks],
   };
+}
+
+function withinRoute(name, route, budget) {
+  withinCount(`signed-out ${name} route requests`, route.requestCount, budget.requests);
+  within(
+    `signed-out ${name} route JavaScript gzip`,
+    route.javascript.gzipBytes,
+    budget.javascriptGzip,
+  );
+  within(`signed-out ${name} route CSS gzip`, route.css.gzipBytes, budget.cssGzip);
 }
 
 async function closureStats(keys, field) {
