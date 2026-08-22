@@ -14,15 +14,28 @@ const highlighterOptions: WorkerInitializationRenderOptions = {
   preferredHighlighter: "shiki-js",
 };
 
+const PRELOADED_WORKER_RETENTION_MS = 30_000;
 let preloadedWorker: Worker | undefined;
+let preloadedWorkerExpiry: ReturnType<typeof setTimeout> | undefined;
 
 export function preloadPierreWorker(): void {
-  if (preloadedWorker == null && typeof Worker !== "undefined") {
+  if (preloadedWorker == null) {
+    if (typeof Worker === "undefined") return;
     preloadedWorker = new DiffWorker();
   }
+  clearTimeout(preloadedWorkerExpiry);
+  const expiry = setTimeout(() => {
+    if (preloadedWorkerExpiry !== expiry) return;
+    preloadedWorker?.terminate();
+    preloadedWorker = undefined;
+    preloadedWorkerExpiry = undefined;
+  }, PRELOADED_WORKER_RETENTION_MS);
+  preloadedWorkerExpiry = expiry;
 }
 
 function createDiffWorker(): Worker {
+  clearTimeout(preloadedWorkerExpiry);
+  preloadedWorkerExpiry = undefined;
   const worker = preloadedWorker ?? new DiffWorker();
   preloadedWorker = undefined;
   return worker;

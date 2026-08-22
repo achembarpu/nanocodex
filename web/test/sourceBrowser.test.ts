@@ -68,6 +68,10 @@ test("the Source worker remains single-threaded with a bounded responsive cache"
   assert.match(provider, /matchMedia\(COMPACT_WORKSPACE_QUERY\)\.matches \? 10 : 100/);
   assert.match(provider, /preferredHighlighter: "shiki-js"/);
   assert.match(provider, /preloadPierreWorker/);
+  assert.match(provider, /PRELOADED_WORKER_RETENTION_MS = 30_000/);
+  assert.match(provider, /preloadedWorkerExpiry !== expiry/);
+  assert.match(provider, /preloadedWorker\?\.terminate\(\)/);
+  assert.match(provider, /createDiffWorker[\s\S]*?clearTimeout\(preloadedWorkerExpiry\)/);
   assert.match(provider, /const worker = preloadedWorker \?\? new DiffWorker\(\)/);
   assert.match(provider, /workerFactory: createDiffWorker/);
 });
