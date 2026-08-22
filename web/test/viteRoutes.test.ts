@@ -25,6 +25,8 @@ test("the SPA fallback leaves Vite raw documentation modules untouched", () => {
 test("the local HTML fallback shares production document status", () => {
   assert.equal(documentStatusForPath("/"), 200);
   assert.equal(documentStatusForPath("/requests"), 200);
+  assert.equal(documentStatusForPath("/multiplayer"), 200);
+  assert.equal(documentStatusForPath("/world"), 200);
   assert.equal(documentStatusForPath("/artifact-runtime"), 200);
   assert.equal(documentStatusForPath("/docs/unknown"), 404);
   assert.equal(documentStatusForPath("/agent/child"), null);

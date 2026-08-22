@@ -6,7 +6,9 @@ export type RoutePreloadKey =
   | "docs"
   | "evals"
   | "home"
-  | "requests";
+  | "multiplayer"
+  | "requests"
+  | "world";
 
 const ROUTE_PRELOAD_ATTRIBUTE = "data-nanocodex-route-preload";
 const routePreloadPattern = new RegExp(
@@ -20,6 +22,8 @@ const routePreloadAttributePattern = new RegExp(
 export function routePreloadKeyForPath(pathname: string): RoutePreloadKey | undefined {
   const path = pathname === "/" ? "/" : pathname.replace(/\/+$/, "");
   if (path === "/" || path === "/agent") return "home";
+  if (path === "/multiplayer") return "multiplayer";
+  if (path === "/world") return "world";
   if (path === "/artifact-runtime") return "artifact";
   if (path === "/changelog") return "changelog";
   if (path === "/code") return "code";

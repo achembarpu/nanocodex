@@ -10,6 +10,9 @@ export type PublicSecurityEnv = {
   AGENT_SOCKET_LIMIT?: RateLimitBinding;
   AGENT_TOOL_LIMIT?: RateLimitBinding;
   AGENT_IMAGE_LIMIT?: RateLimitBinding;
+  MULTIPLAYER_CREATE_LIMIT?: RateLimitBinding;
+  MULTIPLAYER_GLOBAL_LIMIT?: RateLimitBinding;
+  MULTIPLAYER_ROUTE_LIMIT?: RateLimitBinding;
 };
 
 export type MeteredOperation = "socket" | "search" | "image";
@@ -24,6 +27,25 @@ export async function limitLoginStart(
   ].join("\n"));
   return await enforce(env, env.AUTH_GLOBAL_LIMIT, "login:global")
     ?? await enforce(env, env.AUTH_START_LIMIT, `login:${fingerprint}`);
+}
+
+export async function limitMultiplayerCreate(
+  request: Request,
+  env: PublicSecurityEnv,
+): Promise<Response | undefined> {
+  const fingerprint = await digestKey([
+    request.headers.get("cf-connecting-ip") ?? "unknown-ip",
+  ].join("\n"));
+  return await enforce(env, env.MULTIPLAYER_CREATE_LIMIT, `multiplayer:${fingerprint}`)
+    ?? await enforce(env, env.MULTIPLAYER_GLOBAL_LIMIT, "multiplayer:global");
+}
+
+export async function limitMultiplayerRoute(
+  request: Request,
+  env: PublicSecurityEnv,
+): Promise<Response | undefined> {
+  const actor = await digestKey(request.headers.get("cf-connecting-ip") ?? "unknown-ip");
+  return enforce(env, env.MULTIPLAYER_ROUTE_LIMIT, `multiplayer-route:${actor}`);
 }
 
 export async function limitSessionPoll(

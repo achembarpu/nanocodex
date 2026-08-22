@@ -22,6 +22,8 @@
     "run_worker_first": [
       "/",
       "/agent",
+      "/multiplayer",
+      "/world",
       "/artifact-runtime",
       "/changelog",
       "/code",
@@ -38,6 +40,12 @@
       "/.well-known/urpc/consumer.json"
     ]
   },
+  "services": [
+    {
+      "binding": "MULTIPLAYER_BACKEND",
+      "service": "nanocodex-durable-agent"
+    }
+  ],
   "durable_objects": {
     "bindings": [
       {
@@ -138,6 +146,21 @@
       "name": "AGENT_IMAGE_LIMIT",
       "namespace_id": "987606",
       "simple": { "limit": 4, "period": 60 }
+    },
+    {
+      "name": "MULTIPLAYER_CREATE_LIMIT",
+      "namespace_id": "987607",
+      "simple": { "limit": 4, "period": 60 }
+    },
+    {
+      "name": "MULTIPLAYER_GLOBAL_LIMIT",
+      "namespace_id": "987608",
+      "simple": { "limit": 120, "period": 60 }
+    },
+    {
+      "name": "MULTIPLAYER_ROUTE_LIMIT",
+      "namespace_id": "987609",
+      "simple": { "limit": 240, "period": 60 }
     }
   ],
   "r2_buckets": [
@@ -164,6 +187,13 @@
   "env": {
     "development": {
       "name": "nanocodex-development",
+      "services": [
+        {
+          "binding": "MULTIPLAYER_BACKEND",
+          "service": "nanocodex-durable-agent",
+          "remote": true
+        }
+      ],
       "durable_objects": {
         "bindings": [
           { "name": "BYOK_SESSIONS", "class_name": "ByokSession" },
@@ -188,7 +218,10 @@
         { "name": "SESSION_POLL_LIMIT", "namespace_id": "987603", "simple": { "limit": 120, "period": 60 } },
         { "name": "AGENT_SOCKET_LIMIT", "namespace_id": "987604", "simple": { "limit": 12, "period": 60 } },
         { "name": "AGENT_TOOL_LIMIT", "namespace_id": "987605", "simple": { "limit": 30, "period": 60 } },
-        { "name": "AGENT_IMAGE_LIMIT", "namespace_id": "987606", "simple": { "limit": 4, "period": 60 } }
+        { "name": "AGENT_IMAGE_LIMIT", "namespace_id": "987606", "simple": { "limit": 4, "period": 60 } },
+        { "name": "MULTIPLAYER_CREATE_LIMIT", "namespace_id": "987607", "simple": { "limit": 4, "period": 60 } },
+        { "name": "MULTIPLAYER_GLOBAL_LIMIT", "namespace_id": "987608", "simple": { "limit": 120, "period": 60 } },
+        { "name": "MULTIPLAYER_ROUTE_LIMIT", "namespace_id": "987609", "simple": { "limit": 240, "period": 60 } }
       ],
       "r2_buckets": [
         { "binding": "GIT_OBJECTS", "bucket_name": "nanocodex-git", "remote": true },

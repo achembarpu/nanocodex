@@ -51,13 +51,15 @@ function deferred<T>() {
 
 test("maps every Nanocodex surface to a stable application route", () => {
   assert.deepEqual(
-    ["home", "agent", "changelog", "docs", "code", "commits", "requests", "evals"].map((surface) => [
+    ["home", "agent", "multiplayer", "world", "changelog", "docs", "code", "commits", "requests", "evals"].map((surface) => [
       surface,
       pathForSurface(surface as Parameters<typeof pathForSurface>[0]),
     ]),
     [
       ["home", "/"],
       ["agent", "/agent"],
+      ["multiplayer", "/multiplayer"],
+      ["world", "/world"],
       ["changelog", "/changelog"],
       ["docs", "/docs"],
       ["code", "/code"],
@@ -77,6 +79,8 @@ test("resolves direct routes and legacy view links", () => {
   assert.equal(surfaceFromUrl(new URL("https://nanocodex.test/code/")), "code");
   assert.equal(surfaceFromUrl(new URL("https://nanocodex.test/changelog")), "changelog");
   assert.equal(surfaceFromUrl(new URL("https://nanocodex.test/agent?thread=demo")), "agent");
+  assert.equal(surfaceFromUrl(new URL("https://nanocodex.test/multiplayer?room=demo")), "multiplayer");
+  assert.equal(surfaceFromUrl(new URL("https://nanocodex.test/world?thread=demo")), "world");
   assert.equal(surfaceFromUrl(new URL("https://nanocodex.test/docs/core/owned-agent")), "docs");
   assert.equal(surfaceFromUrl(new URL("https://nanocodex.test/?view=commits")), "commits");
   assert.equal(surfaceFromUrl(new URL("https://nanocodex.test/unknown")), "home");
@@ -113,10 +117,13 @@ test("the shared shell presents Source without changing the stable Code route", 
 test("global product shortcuts are visible and browser Find remains native", () => {
   assert.deepEqual(
     productNavigation.map(({ label, shortcut }) => [label, shortcut]),
-    [["Agent", "A"], ["Changelog", "H"], ["Commits", "C"], ["Docs", "D"], ["Evals", "E"], ["Source", "S"]],
+    [["Agent", "A"], ["Multiplayer", "P"], ["World", "W"], ["Changelog", "H"], ["Commits", "C"], ["Docs", "D"], ["Evals", "E"], ["Source", "S"]],
   );
   assert.match(application, /title=\{`\$\{item\.label\} \(\$\{item\.shortcut\}\)`\}/);
   assert.match(application, /key === "h"[\s\S]*?\? "changelog"/);
+  assert.match(application, /key === "p"[\s\S]*?\? "multiplayer"/);
+  assert.match(application, /key === "w"[\s\S]*?\? "world"/);
+  assert.match(application, /surface === "world" && \["w", "a", "s", "d"\]\.includes\(key\)/);
   assert.doesNotMatch(application, /aria-keyshortcuts="H"[\s\S]*Nanocodex home/);
   assert.doesNotMatch(
     application,
@@ -301,6 +308,8 @@ test("direct preloading selects only the work owned by the resolved route", () =
     preload,
     /surface === "home" \|\| surface === "agent"[\s\S]*?const experience = loadAgentExperience\(\)[\s\S]*?deploymentHealth\.read\(\)[\s\S]*?Promise\.all\(\[loadHomeFrame\(\), experience\]\)/,
   );
+  assert.match(preload, /surface === "multiplayer"[\s\S]*?loadMultiplayer\(\)/);
+  assert.match(preload, /surface === "world"[\s\S]*?loadMonsterWorld\(\)/);
   assert.match(preload, /surface === "changelog"[\s\S]*?preloadChangelog\(\)/);
   assert.match(preload, /surface === "docs"[\s\S]*?preloadDocsRoute\(url\.pathname\)/);
   assert.match(

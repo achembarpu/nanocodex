@@ -135,7 +135,8 @@ function isIframeNavigation(request: Request): boolean {
 
 export function documentStatusForPath(pathname: string): 200 | 404 | null {
   pathname = normalizePath(pathname);
-  if (pathname === "/" || pathname === "/agent" || pathname === "/artifact-runtime"
+  if (pathname === "/" || pathname === "/agent" || pathname === "/multiplayer"
+    || pathname === "/world" || pathname === "/artifact-runtime"
     || pathname === "/changelog" || pathname === "/code" || pathname === "/commits"
     || pathname === "/requests") return 200;
   if (Object.hasOwn(docsPreview, pathname) || isEvalDocumentPath(pathname)) return 200;
@@ -218,6 +219,8 @@ async function previewForUrl(url: URL, env: LinkPreviewEnv): Promise<Preview> {
     };
   }
   if (pathname === "/agent") return fixed(pathname, "Browser agent", "Run the Rust-owned Codex lifecycle locally in a browser Worker.");
+  if (pathname === "/multiplayer") return fixed(pathname, "Multiplayer", "Join a durable room with many humans and one secretless managed Nanocodex agent.", "DURABLE MULTIPLAYER");
+  if (pathname === "/world") return fixed(pathname, "Springleaf Town", "Watch Nanocodex inhabitants act inside a living pixel world.", "MONSTER WORLD");
   if (pathname === "/changelog") return fixed(pathname, "Changelog", "Follow focused Nanocodex SDK, runtime, tooling, and evaluation changes.");
   if (pathname === "/commits") return fixed(pathname, "Commits", "Inspect the published Nanocodex source history and focused patches.");
   if (pathname === "/requests") return fixed(pathname, "Requests", "Track proposed changes to the published Nanocodex source tree.", "REQUESTS");

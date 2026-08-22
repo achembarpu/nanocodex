@@ -9,6 +9,8 @@ test("Cloudflare routes preview documents, images, and protocol endpoints throug
   assert.deepEqual(config.assets.run_worker_first, [
     "/",
     "/agent",
+    "/multiplayer",
+    "/world",
     "/artifact-runtime",
     "/changelog",
     "/code",

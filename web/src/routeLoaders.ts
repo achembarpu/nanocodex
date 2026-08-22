@@ -59,6 +59,10 @@ export const loadAgentExperience = () =>
     default: module.AgentExperience,
     preloadAgentTerminal: module.preloadAgentTerminal,
   }));
+export const loadMultiplayer = () =>
+  import("./Multiplayer").then((module) => ({ default: module.Multiplayer }));
+export const loadMonsterWorld = () =>
+  import("./MonsterWorld").then((module) => ({ default: module.MonsterWorld }));
 export const loadPierreWorkerProvider = () =>
   import("./PierreWorkerProvider").then((module) => ({
     default: module.PierreWorkerProvider,
@@ -242,6 +246,14 @@ export async function preloadDirectSurface(url: URL): Promise<PreparedDirectRout
       }
     }).catch(() => undefined);
     await Promise.all([loadHomeFrame(), experience]);
+    return {};
+  }
+  if (surface === "multiplayer") {
+    await loadMultiplayer();
+    return {};
+  }
+  if (surface === "world") {
+    await loadMonsterWorld();
     return {};
   }
   if (surface === "code") {

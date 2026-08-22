@@ -6,6 +6,45 @@ the library; this application proves that the same owned Rust lifecycle can sit
 behind an opinionated web interface without turning that interface into an SDK
 protocol.
 
+The public demo family is explicit in the shared navigation:
+
+- **Home** explains the library and links the independent proofs.
+- **Agent** is one player using the browser-owned Rust/WASM agent in the TUI.
+- **Multiplayer** is many humans in one ordered, replayable Durable Object room
+  with one private, host-invoked, tool-free managed agent.
+- **World** is one human in a game world populated by many browser-owned AI
+  residents.
+
+Multiplayer is the managed-agent deployment proof rather than another browser
+agent. The website Worker forwards only `/v1/rooms` through its
+`MULTIPLAYER_BACKEND` Service Binding. Invite capabilities stay in URL
+fragments until exchanged for room-scoped HttpOnly cookies; the browser sees
+room cursors and final agent replies, never managed agent/turn capabilities or
+provider credentials. The managed runtime, in turn, has only a private
+credential-broker Service Binding and fixed placeholders for both OAuth and
+normal OpenAI API-key modes.
+
+Exact `POST /v1/rooms` requests receive a create-room-only capability from the
+website Worker's `MULTIPLAYER_ALLOCATOR_TOKEN` secret. The proxy strips every
+browser-supplied `Authorization` header, and the Multiplayer page never asks
+for or stores a deployment credential. Configure it to the same random value
+as the private managed Worker's `NANOCODEX_ROOM_ALLOCATOR_TOKEN`; it is
+deliberately distinct from `NANOCODEX_ADMIN_TOKEN` and cannot create, inspect,
+prompt, or delete raw managed agents:
+
+```bash
+cd web
+npx wrangler secret put MULTIPLAYER_ALLOCATOR_TOKEN
+```
+
+The managed Worker remains `workers_dev = false`; its
+`MULTIPLAYER_BACKEND` Service Binding is the production entry point. Production
+also fails closed unless the checked-in per-client and global room-allocation
+rate-limit bindings are available; cross-origin allocation requests are
+rejected before the server capability is used. A singleton backend quota object
+adds the authoritative cross-location ceiling: 16 active two-hour rooms, 32
+allocations/hour, and 240 admitted agent turns/hour across the deployment.
+
 ## Stack
 
 - Vite + React
@@ -38,6 +77,14 @@ history, credential policy, or model-loop state.
 
 The local Worker and Vite client run together at `https://localhost:5173` using
 the Cloudflare Vite-plugin layout.
+
+Local Multiplayer development uses the remote `nanocodex-durable-agent`
+Service Binding, so it requires Cloudflare authentication, a deployed private
+managed Worker, and a local `MULTIPLAYER_ALLOCATOR_TOKEN` matching that
+Worker's `NANOCODEX_ROOM_ALLOCATOR_TOKEN`. Keep the default HTTPS development
+origin so room cookies remain Secure and sockets use `wss`; see the
+[Cloudflare Worker example](../examples/cloudflare-workers/README.md#multiplayer-managed-agent-rooms)
+for the deployment and live-smoke workflow.
 
 ### Documentation
 

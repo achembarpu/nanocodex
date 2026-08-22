@@ -11,6 +11,8 @@ type ChunkWithViteMetadata = OutputChunk & {
 const routeModules = {
   shell: ["/src/NanocodexApp.tsx"],
   home: ["/src/HomeFrame.tsx", "/src/AgentExperience.tsx"],
+  multiplayer: ["/src/Multiplayer.tsx"],
+  world: ["/src/MonsterWorld.tsx"],
   changelog: ["/src/Changelog.tsx"],
   code: [
     "/src/CodeBrowser.tsx",

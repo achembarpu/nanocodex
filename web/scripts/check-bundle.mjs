@@ -85,6 +85,8 @@ const entryKey = manifestKey("index.html");
 const applicationKey = manifestKey("src/NanocodexApp.tsx");
 const homeFrameKey = manifestKey("src/HomeFrame.tsx");
 const experienceKey = manifestKey("src/AgentExperience.tsx");
+const multiplayerKey = manifestKey("src/Multiplayer.tsx");
+const worldKey = manifestKey("src/MonsterWorld.tsx");
 const agentKey = manifestKey("src/AgentTerminal.tsx");
 const docsSyntaxKey = manifestKey("src/docsSyntax.tsx");
 const docsOverviewLanguageKey = exactlyOne(
@@ -97,10 +99,14 @@ const agentRuntimeKey = exactlyOne(
 );
 const entry = manifest[entryKey];
 const experience = manifest[experienceKey];
+const multiplayer = manifest[multiplayerKey];
+const world = manifest[worldKey];
 const agent = manifest[agentKey];
 
 assert(entry?.isEntry, "the browser entry is missing from the Vite manifest");
 assert(experience?.isDynamicEntry, "the credential experience must remain a dynamic entry");
+assert(multiplayer?.isDynamicEntry, "Multiplayer must remain a dynamic route entry");
+assert(world?.isDynamicEntry, "World must remain a dynamic route entry");
 assert(agent?.isDynamicEntry, "the Agent terminal must remain a dynamic entry");
 
 const allEntryImports = importClosure(entryKey, true);
@@ -112,6 +118,8 @@ assert(
   allEntryImports.has(agentKey),
   "the Agent terminal is no longer reachable from the browser entry",
 );
+assert(allEntryImports.has(multiplayerKey), "Multiplayer is no longer reachable from the browser entry");
+assert(allEntryImports.has(worldKey), "World is no longer reachable from the browser entry");
 const initialStatic = importClosure(entryKey, false);
 const applicationStatic = importClosure(applicationKey, false);
 const homeFrameStatic = importClosure(homeFrameKey, false);
@@ -156,6 +164,10 @@ assert(
   !initialStatic.has(agentKey),
   "the initial route must not statically import the Agent terminal",
 );
+assert(!initialStatic.has(multiplayerKey), "the initial route must not statically import Multiplayer");
+assert(!initialStatic.has(worldKey), "the initial route must not statically import World");
+assert(!signedOutStatic.has(multiplayerKey), "the signed-out home route must not load Multiplayer");
+assert(!signedOutStatic.has(worldKey), "the signed-out home route must not load World");
 assert(
   !experienceStatic.has(agentKey),
   "the signed-out credential experience must not statically import the Agent terminal",
@@ -316,6 +328,8 @@ assert(
 );
 assertRoutePreloadClosure("shell", [applicationKey]);
 assertRoutePreloadClosure("home", [homeFrameKey, experienceKey]);
+assertRoutePreloadClosure("multiplayer", [multiplayerKey]);
+assertRoutePreloadClosure("world", [worldKey]);
 assertRoutePreloadClosure("code", [
   manifestKey("src/CodeBrowser.tsx"),
   manifestKey("src/publishedRepository.ts"),

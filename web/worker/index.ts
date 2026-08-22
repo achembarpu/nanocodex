@@ -30,6 +30,7 @@ import {
 } from "./publicSecurity.ts";
 import { CHATGPT_REALTIME_INSTRUCTIONS } from "nanocodex/browser/realtime";
 import { routeLinkPreview } from "./linkPreview.ts";
+import { routeMultiplayer } from "./multiplayerProxy.ts";
 
 export { ChatGptSession, EvalCoordinator, GitRepository, ThreadGitRepository };
 
@@ -84,6 +85,8 @@ type WorkerEnv = GitStorageEnv & ThreadGitStorageEnv & EvalStorageEnv & ChatGptE
   CHATGPT_ISSUER?: string;
   BYOK_SESSIONS?: DurableObjectNamespace;
   CHATGPT_SESSIONS?: DurableObjectNamespace;
+  MULTIPLAYER_BACKEND?: Fetcher;
+  MULTIPLAYER_ALLOCATOR_TOKEN?: string;
 };
 
 type ApiKeyCredential = {
@@ -110,6 +113,8 @@ export default {
     const url = new URL(request.url);
     const insecure = enforceHttps(request, env, url);
     if (insecure) return insecure;
+    const multiplayer = await routeMultiplayer(request, env, url);
+    if (multiplayer != null) return multiplayer;
     const evalMutation = await routeEvalMutation(request, env, url);
     if (evalMutation != null) return evalMutation;
     const evalRead = await routeEvalRead(request, env, url, context);
