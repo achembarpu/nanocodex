@@ -179,6 +179,13 @@ describe("Cloudflare service-bound egress", () => {
       refreshState: "ready",
     });
 
+    const mismatchedRecovery = await stub.fetch("https://codex-oauth.internal/v1/recover", {
+      method: "POST",
+      body: JSON.stringify({ revision: Number(stored?.revision) + 1 }),
+    });
+    expect(mismatchedRecovery.status).toBe(422);
+    expect(await mismatchedRecovery.json()).toMatchObject({ error: "credential_dead" });
+
     let upstreamCalls = 0;
     const subsequent = await handleEgress(
       codexRequest({ requestId: "after-dead" }),

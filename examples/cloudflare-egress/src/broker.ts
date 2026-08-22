@@ -88,7 +88,7 @@ export class CodexOAuthBroker extends DurableObject<BrokerEnv> {
       }
       const current = this.#credential;
       if (!current) return json({ error: "not_bootstrapped" }, { status: 503 });
-      if (current.revision !== body.revision) return credentialResponse(current);
+      if (current.revision !== body.revision) return this.#serveToken(false);
       return this.#serveToken(true);
     }
     return json({ error: "not_found" }, { status: 404 });
