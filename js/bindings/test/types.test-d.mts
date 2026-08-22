@@ -79,6 +79,7 @@ import {
 
 declare const apiKey: string;
 declare const accountsWallet: AccountsWallet;
+declare const browserModule: WebAssembly.Module;
 declare const postgresPool: PostgresDurabilityPool;
 declare const cloudflareStorage: Parameters<typeof createCloudflareDurabilityStore>[0];
 
@@ -93,6 +94,7 @@ type NodeDurabilityStore = NodePublicTypes.DurabilityStore;
 
 async function check() {
   const workerResource = {
+    module: browserModule,
     origin: "https://example.com",
     sessionId: "session-1",
     threadId: "thread-1",

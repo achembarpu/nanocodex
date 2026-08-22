@@ -668,9 +668,10 @@ test("a historical fork completing across reboot disposes its stale child", asyn
 test("Worker runtime prewarms the engine and exact browser harness before boot", async () => {
   const outgoing = [];
   const warmed = [];
+  const module = emptyWasmModule();
   const scope = { onmessage: null, postMessage: (message) => outgoing.push(message) };
   const runtime = installWorkerAgentRuntime(scope, {
-    prewarmLocal(harness) { warmed.push(harness); },
+    prewarmLocal(harness, options) { warmed.push({ harness, options }); },
   });
 
   scope.onmessage({ data: {
@@ -678,16 +679,21 @@ test("Worker runtime prewarms the engine and exact browser harness before boot",
     channel: "warm",
     type: "prewarm",
     harness: { threadId: "thread-1", origin: "https://nanocodex.test" },
+    module,
   } });
   await tick();
 
-  assert.deepEqual(warmed, [{ threadId: "thread-1", origin: "https://nanocodex.test" }]);
+  assert.deepEqual(warmed, [{
+    harness: { threadId: "thread-1", origin: "https://nanocodex.test" },
+    options: { module },
+  }]);
   assert.equal(outgoing.at(-1).type, "prewarmed");
   runtime.dispose();
 });
 
 test("Worker runtime overlaps WASM initialization and browser harness restoration", async () => {
   const harness = { threadId: "thread-1", origin: "https://nanocodex.test" };
+  const module = emptyWasmModule();
   const started = [];
   let finishEngine;
   let finishBrowser;
@@ -697,6 +703,7 @@ test("Worker runtime overlaps WASM initialization and browser harness restoratio
   const prewarming = prewarmWorkerRuntime(
     harness,
     {
+      module,
       async loadAgent() {
         started.push("agent");
       },
@@ -711,7 +718,8 @@ test("Worker runtime overlaps WASM initialization and browser harness restoratio
       },
       async loadEngine() {
         return {
-          async initializeBrowserEngine() {
+          async initializeBrowserEngine(options) {
+            assert.strictEqual(options.module, module);
             started.push("engine");
             await engineReady;
           },
@@ -767,7 +775,9 @@ test("private Worker preparation replaces stale ownership and is claimed by Agen
 
 test("preparation deduplicates and creation claims the exact complete harness identity", async () => {
   const worker = new HarnessWorker();
+  const module = emptyWasmModule();
   const options = {
+    module,
     origin: "https://nanocodex.test",
     sessionId: "session-1",
     threadId: "thread-1",
@@ -789,11 +799,29 @@ test("preparation deduplicates and creation claims the exact complete harness id
   };
 
   assert.deepEqual(prewarm.harness, harness);
+  assert(prewarm.module instanceof WebAssembly.Module);
   assert.deepEqual(boot.config.harness, harness);
+  assert(boot.config.module instanceof WebAssembly.Module);
   assert.equal(boot.config.sessionId, "session-1");
   assert.equal(agent.sessionId, "session-1");
   agent.dispose();
   assert.equal(worker.terminated, 1);
+});
+
+test("preparation replaces a matching harness warmed with a different WASM module", async () => {
+  const harness = { harness: false, sessionId: "session-1" };
+  const first = new HarnessWorker();
+  await prepareWorkerAgent({ ...harness, module: emptyWasmModule() }, { worker: first });
+
+  const second = new HarnessWorker();
+  const module = emptyWasmModule();
+  await prepareWorkerAgent({ ...harness, module }, { worker: second });
+
+  assert.equal(first.terminated, 1);
+  const agent = await createWorkerAgent({ ...harness, module });
+  assert.equal(agent.sessionId, "session-1");
+  agent.dispose();
+  assert.equal(second.terminated, 1);
 });
 
 test("non-disabled preparation rejects an incomplete resource identity", () => {
@@ -1103,6 +1131,10 @@ function createFixture(options = {}) {
     }
   }
   return fixture;
+}
+
+function emptyWasmModule() {
+  return new WebAssembly.Module(new Uint8Array([0, 97, 115, 109, 1, 0, 0, 0]));
 }
 
 function cloneMessage(data, transfer) {

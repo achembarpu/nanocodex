@@ -26,7 +26,7 @@ let prewarmedWorker;
 export async function createWorkerAgent(options = {}, workerOptions = {}) {
   workerOptions.signal?.throwIfAborted();
   const config = serializeConfig(options);
-  const claimed = claimWorker(config.harness, workerOptions);
+  const claimed = claimWorker(config.harness, config.module, workerOptions);
   const worker = claimed instanceof Promise ? await claimed : claimed;
   let connection;
   try {
@@ -53,7 +53,8 @@ export function prepareWorkerAgent(options = {}, workerOptions = {}) {
   workerOptions.signal?.throwIfAborted();
   const harness = options.harness === false ? false : harnessDescriptor(options, true);
   const key = harnessKey(harness);
-  if (prewarmedWorker?.key === key) {
+  const module = options.module;
+  if (prewarmedWorker?.key === key && prewarmedWorker.module === module) {
     const entry = prewarmedWorker;
     return entry.prepare(workerOptions.signal);
   }
@@ -111,7 +112,7 @@ export function prepareWorkerAgent(options = {}, workerOptions = {}) {
     worker.onerror = (event) => cancel(new Error(event?.message || "Nanocodex Agent Worker prewarm failed"));
     worker.onmessageerror = () => cancel(new Error("Nanocodex Agent Worker returned an unreadable prewarm message"));
     startupTimer = setTimeout(() => cancel(new Error("Nanocodex Agent Worker prewarm timed out")), PREWARM_TIMEOUT_MS);
-    try { worker.postMessage({ protocol: PROTOCOL, channel, type: "prewarm", harness }); }
+    try { worker.postMessage({ protocol: PROTOCOL, channel, type: "prewarm", harness, module }); }
     catch (error) { cancel(error); }
   });
   const entry = {
@@ -138,6 +139,7 @@ export function prepareWorkerAgent(options = {}, workerOptions = {}) {
       return ready;
     },
     key,
+    module,
     ready,
     worker,
   };
@@ -391,7 +393,9 @@ export function installWorkerAgentRuntime(scope = globalThis, options = {}) {
     if (message?.protocol !== PROTOCOL) return;
     if (message.type === "prewarm") {
       const currentGeneration = generation;
-      void Promise.resolve().then(() => prewarmLocal(message.harness)).then(
+      void Promise.resolve().then(() => prewarmLocal(message.harness, {
+        module: message.module,
+      })).then(
         () => {
           if (currentGeneration === generation) {
             scope.postMessage({ protocol: PROTOCOL, channel: message.channel, type: "prewarmed" });
@@ -920,13 +924,17 @@ function createWorker(options) {
   return new Worker(new URL("./agent.worker.mjs", import.meta.url), { type: "module", name: "nanocodex-agent" });
 }
 
-function claimWorker(harness, options) {
+function claimWorker(harness, module, options) {
   options.signal?.throwIfAborted();
   if (options.worker !== undefined || options.workerFactory !== undefined) {
     return createWorker(options);
   }
   const entry = prewarmedWorker;
-  if (!entry || entry.key !== harnessKey(harness)) return createWorker(options);
+  if (
+    !entry
+    || entry.key !== harnessKey(harness)
+    || entry.module !== module
+  ) return createWorker(options);
   prewarmedWorker = undefined;
   return entry.claim(options.signal);
 }
@@ -1076,13 +1084,14 @@ async function loadAgent(options) {
 export async function prewarmWorkerRuntime(
   harness,
   {
+    module,
     loadAgent = () => import("./InlineAgent.mjs"),
     loadBrowser = () => import("../tools/browser/index.mjs"),
     loadEngine = () => import("./engine.mjs"),
   } = {},
 ) {
   const resources = [
-    loadEngine().then(({ initializeBrowserEngine }) => initializeBrowserEngine()),
+    loadEngine().then(({ initializeBrowserEngine }) => initializeBrowserEngine({ module })),
     loadAgent(),
   ];
   if (harness !== false) {

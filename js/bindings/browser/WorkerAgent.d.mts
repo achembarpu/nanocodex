@@ -7,7 +7,7 @@ type WorkerAgentResourceOptions = Readonly<createBrowserAgent.Options & {
 }>;
 type WorkerAgentIdentityOptions = Pick<
   WorkerAgentResourceOptions,
-  "origin" | "sessionId" | "threadId"
+  "module" | "origin" | "sessionId" | "threadId"
 >;
 type WorkerAgentPreparationOptions =
   | Readonly<WorkerAgentIdentityOptions & { harness: false }>
@@ -48,7 +48,10 @@ export type WorkerAgentRuntime = Readonly<{ dispose(): void }>;
 export type WorkerAgentScope = WorkerLike;
 export type WorkerAgentRuntimeOptions = Readonly<{
   createAgent?: (options: import("../host/Agent.mjs").create.Options) => Promise<DefaultAgent> | DefaultAgent;
-  prewarmLocal?: (options: { threadId: string; origin?: string | undefined }) => Promise<void> | void;
+  prewarmLocal?: (
+    harness: false | { threadId: string; origin?: string | undefined },
+    options: { module?: WebAssembly.Module | undefined },
+  ) => Promise<void> | void;
 }>;
 
 /** Installs the package-owned RPC runtime in a module Worker global scope. */
