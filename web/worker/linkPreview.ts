@@ -116,7 +116,7 @@ export async function renderLinkPreviewDocument(
 export function isDocumentNavigation(request: Request): boolean {
   if (request.method !== "GET" && request.method !== "HEAD") return false;
   const destination = request.headers.get("sec-fetch-dest");
-  if (destination && destination !== "document") return false;
+  if (destination) return destination === "document";
   const mode = request.headers.get("sec-fetch-mode");
   if (mode) return mode === "navigate";
   return request.headers.get("accept")?.toLowerCase().includes("text/html") === true;

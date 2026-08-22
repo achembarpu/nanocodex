@@ -100,6 +100,12 @@ test("every declared document route and the internal artifact runtime retain the
     assert.match(response.headers.get("content-type") ?? "", /text\/html/, path);
   }
 
+  const releaseProbe = await worker.fetch(new Request("https://preview.test/", {
+    headers: { "sec-fetch-dest": "document", "sec-fetch-mode": "cors" },
+  }), env as never);
+  assert.equal(releaseProbe.status, 200);
+  assert.match(releaseProbe.headers.get("content-type") ?? "", /text\/html/);
+
   const artifact = await worker.fetch(new Request("https://preview.test/artifact-runtime?embedded=1", {
     headers: { "sec-fetch-dest": "iframe", "sec-fetch-mode": "navigate" },
   }), env as never);
@@ -109,7 +115,7 @@ test("every declared document route and the internal artifact runtime retain the
   assert.match(artifact.headers.get("content-security-policy") ?? "", /connect-src 'none'/);
   assert.match(artifact.headers.get("content-security-policy") ?? "", /frame-ancestors 'self'/);
   assert.match(await artifact.text(), /Nanocodex — high-performance Codex SDK/);
-  assert.equal(requests.length, knownPaths.size + 1);
+  assert.equal(requests.length, knownPaths.size + 2);
   assert.ok(requests.every((request) => new URL(request.url).pathname === "/"));
 });
 

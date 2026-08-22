@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  assertDeploymentDocument,
+  assertDeploymentEntry,
   assertDeploymentHealth,
   parseWorkerVersionId,
   rolloutArguments,
@@ -55,4 +57,33 @@ test("deployment health accepts only the exact revision", () => {
     deployment_sha: revision,
     status: "error",
   }, revision));
+});
+
+test("deployment delivery requires a complete homepage and immutable entry module", () => {
+  const document = [
+    "<!doctype html>",
+    '<script type="module" crossorigin src="/assets/index-Ab_9.js"></script>',
+    '<div id="root"></div>',
+  ].join("\n");
+  const response = new Response(document, {
+    headers: { "content-type": "text/html; charset=utf-8" },
+  });
+  assert.equal(assertDeploymentDocument(response, document), "/assets/index-Ab_9.js");
+  assert.throws(() => assertDeploymentDocument(new Response("not found", {
+    status: 404,
+    headers: { "content-type": "text/plain" },
+  }), "not found"));
+
+  assert.doesNotThrow(() => assertDeploymentEntry(new Response("export {};", {
+    headers: {
+      "cache-control": "public, max-age=31536000, immutable",
+      "content-type": "text/javascript",
+    },
+  })));
+  assert.throws(() => assertDeploymentEntry(new Response("export {};", {
+    headers: {
+      "cache-control": "no-store",
+      "content-type": "text/javascript",
+    },
+  })));
 });

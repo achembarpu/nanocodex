@@ -55,6 +55,39 @@ export function assertDeploymentHealth(health, revision) {
   );
 }
 
+export function assertDeploymentDocument(response, document) {
+  assert.equal(response.status, 200, `deployed homepage returned HTTP ${response.status}`);
+  assert.match(
+    response.headers.get("content-type") ?? "",
+    /^text\/html\b/,
+    "deployed homepage must be HTML",
+  );
+  assert.match(document, /<div id="root"><\/div>/, "deployed homepage must contain the React root");
+  const entry = document.match(
+    /<script\b(?=[^>]*\btype="module")(?=[^>]*\bsrc="([^"]+)")[^>]*>/,
+  )?.[1];
+  assert.match(
+    entry ?? "",
+    /^\/assets\/[A-Za-z0-9_-]+\.js$/,
+    "deployed homepage must load a hashed entry module",
+  );
+  return entry;
+}
+
+export function assertDeploymentEntry(response) {
+  assert.equal(response.status, 200, `deployed entry module returned HTTP ${response.status}`);
+  assert.match(
+    response.headers.get("content-type") ?? "",
+    /^(?:application|text)\/javascript\b/,
+    "deployed entry module must be JavaScript",
+  );
+  assert.match(
+    response.headers.get("cache-control") ?? "",
+    /(?:^|,)\s*immutable(?:,|$)/,
+    "deployed entry module must be immutable",
+  );
+}
+
 export async function deployWorker({
   fetchImpl = globalThis.fetch,
   origin = process.env.NANOCODEX_WEB_ORIGIN ?? "https://nanocodex.me-7fb.workers.dev",
@@ -95,6 +128,29 @@ async function waitForDeployment(fetchImpl, origin, revision) {
       assert.equal(response.status, 200, `deployment health returned HTTP ${response.status}`);
       const health = await response.json();
       assertDeploymentHealth(health, revision);
+
+      const documentResponse = await fetchImpl(new URL("/", origin), {
+        cache: "no-store",
+        headers: {
+          accept: "text/html,application/xhtml+xml",
+          "sec-fetch-dest": "document",
+          "sec-fetch-mode": "navigate",
+        },
+        signal: AbortSignal.timeout(5_000),
+      });
+      const document = await documentResponse.text();
+      const entry = assertDeploymentDocument(documentResponse, document);
+      const entryResponse = await fetchImpl(new URL(entry, origin), {
+        cache: "no-store",
+        method: "HEAD",
+        headers: {
+          accept: "*/*",
+          "sec-fetch-dest": "script",
+          "sec-fetch-mode": "no-cors",
+        },
+        signal: AbortSignal.timeout(5_000),
+      });
+      assertDeploymentEntry(entryResponse);
       return health;
     } catch (error) {
       failure = error;
