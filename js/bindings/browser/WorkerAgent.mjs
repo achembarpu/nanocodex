@@ -8,6 +8,7 @@ import {
   reportError,
 } from "../internal.mjs";
 import { resolveResponsesTransport } from "../runtime/responses-transport.mjs";
+import { utf8ByteLength } from "../runtime/utf8.mjs";
 
 const DEFAULT_MAX_PENDING_RPCS = 1_024;
 const MAX_RETAINED_RESULTS = 1_024;
@@ -1096,7 +1097,7 @@ function assertCloneable(value, label) {
 }
 
 function eventBytes(event, encoded) {
-  return eventEncoder.encode(encoded ?? JSON.stringify(event)).byteLength;
+  return utf8ByteLength(encoded ?? JSON.stringify(event));
 }
 function positiveInteger(value, label) {
   if (!Number.isSafeInteger(value) || value <= 0) throw new TypeError(`${label} must be a positive safe integer`);

@@ -126,7 +126,10 @@ test("Node host preserves structured WebSocket handshake rejection detail", asyn
       "content-type": "application/json",
       "retry-after": "3",
     });
-    response.end('{"error":"slow down"}');
+    const body = new TextEncoder().encode('{"error":"slow 🤖"}');
+    const emoji = body.indexOf(0xf0);
+    response.write(body.subarray(0, emoji + 2));
+    response.end(body.subarray(emoji + 2));
   });
   await new Promise((resolve, reject) => {
     server.listen(0, "127.0.0.1", resolve);
@@ -139,7 +142,7 @@ test("Node host preserves structured WebSocket handshake rejection detail", asyn
       createNodeHost().connect(endpoint, "test-key", SESSION_IDS.primary),
       (error) => {
         assert.equal(error.status, 429);
-        assert.equal(error.body, '{"error":"slow down"}');
+        assert.equal(error.body, '{"error":"slow 🤖"}');
         assert.equal(error.retryAfter, 3);
         return true;
       },

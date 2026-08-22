@@ -1,4 +1,5 @@
 import { createCodeRuntime, toolResult } from "../runtime/code-runtime.mjs";
+import { utf8ByteLength } from "../runtime/utf8.mjs";
 import { createWorkerEvaluator } from "../runtime/worker-evaluator.mjs";
 import { openHostManagedWebSocket } from "./hostManagedWebSocket.mjs";
 
@@ -60,7 +61,6 @@ export function createBrowserHost(options = {}) {
   const maxQueuedMessages = options.maxQueuedMessages ?? DEFAULT_MAX_QUEUED_MESSAGES;
   const maxQueuedBytes = options.maxQueuedBytes ?? DEFAULT_MAX_QUEUED_BYTES;
   const maxBufferedSendBytes = options.maxBufferedSendBytes ?? DEFAULT_MAX_BUFFERED_SEND_BYTES;
-  const encoder = new TextEncoder();
   let nextHandle = 1;
   let references = 0;
   let disposal;
@@ -231,7 +231,7 @@ export function createBrowserHost(options = {}) {
         connection.socket.send(JSON.stringify({ mpp: "message", data: message }));
         return Promise.resolve(JSON.stringify({ ok: true }));
       }
-      const frameBytes = encoder.encode(message).byteLength;
+      const frameBytes = utf8ByteLength(message);
       if (frameBytes > maxBufferedSendBytes
         || connection.socket.bufferedAmount + frameBytes > maxBufferedSendBytes) {
         return Promise.resolve(JSON.stringify({
@@ -290,7 +290,7 @@ export function createBrowserHost(options = {}) {
       connection.waiter(message);
       return;
     }
-    const bytes = encoder.encode(message.kind === "text" ? message.text : JSON.stringify(message)).byteLength;
+    const bytes = utf8ByteLength(message.kind === "text" ? message.text : JSON.stringify(message));
     if (connection.queue.length >= maxQueuedMessages || connection.queuedBytes + bytes > maxQueuedBytes) {
       connection.queue.length = 0;
       connection.queuedBytes = 0;
@@ -299,7 +299,7 @@ export function createBrowserHost(options = {}) {
         kind: "error",
         detail: `receive queue exceeded ${maxQueuedMessages} messages or ${maxQueuedBytes} bytes`,
       };
-      const errorBytes = encoder.encode(JSON.stringify(error)).byteLength;
+      const errorBytes = utf8ByteLength(JSON.stringify(error));
       connection.queue.push({ message: error, bytes: errorBytes });
       connection.queuedBytes = errorBytes;
       connection.socket.close(1009, "receive queue exceeded configured bounds");

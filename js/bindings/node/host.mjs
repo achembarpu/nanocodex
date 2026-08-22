@@ -6,6 +6,7 @@ import packageMetadata from "../package.json" with { type: "json" };
 
 import { createCodeRuntime } from "../runtime/code-runtime.mjs";
 import { createMcpRuntime } from "../runtime/mcp-runtime.mjs";
+import { utf8ByteLength } from "../runtime/utf8.mjs";
 
 const RESPONSES_WEBSOCKETS_BETA = "responses_websockets=2026-02-06";
 const USER_AGENT = `nanocodex-wasm/${packageMetadata.version}`;
@@ -76,12 +77,13 @@ export function createNodeHost(options = {}) {
       socket.on("unexpected-response", (_request, response) => {
         if (settled) return;
         settled = true;
+        response.setEncoding("utf8");
         const chunks = [];
-        response.on("data", (chunk) => chunks.push(Buffer.from(chunk)));
+        response.on("data", (chunk) => chunks.push(chunk));
         response.on("end", () => {
           const error = new Error(`WebSocket handshake was rejected with HTTP ${response.statusCode}`);
           error.status = response.statusCode;
-          error.body = chunks.length ? Buffer.concat(chunks).toString("utf8") : "empty response body";
+          error.body = chunks.length ? chunks.join("") : "empty response body";
           const retryAfter = Number(header(response.headers, "retry-after"));
           if (Number.isFinite(retryAfter) && retryAfter >= 0) error.retryAfter = retryAfter;
           reject(error);
@@ -314,7 +316,7 @@ function header(headers, name) {
 }
 
 function messageBytes(message) {
-  return Buffer.byteLength(message.kind === "text" ? message.text : JSON.stringify(message), "utf8");
+  return utf8ByteLength(message.kind === "text" ? message.text : JSON.stringify(message));
 }
 
 function errorMessage(error) {
