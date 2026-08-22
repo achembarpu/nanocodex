@@ -119,6 +119,11 @@ test("the prepared browser harness observes workspace writes before its first la
   const fs = createOpfsGitFs(root as unknown as FileSystemDirectoryHandle);
   await git.init({ fs, dir: "/workspace", defaultBranch: "nanocodex" });
   await fs.promises.writeFile("/workspace/AGENTS.md", "lazy browser harness\n");
+  const gitDirectory = root.entriesByName.get(".git");
+  assert(gitDirectory instanceof MemoryDirectory);
+  const configFile = gitDirectory.entriesByName.get("config");
+  assert(configFile instanceof MemoryFile);
+  const initialConfigWrites = configFile.writes;
 
   const previousStorage = Object.getOwnPropertyDescriptor(globalThis.navigator, "storage");
   Object.defineProperty(globalThis.navigator, "storage", {
@@ -134,6 +139,14 @@ test("the prepared browser harness observes workspace writes before its first la
   try {
     const shell = await prepareBrowserShell(thread.id, "https://example.test");
     assert.equal(statusScans, 0);
+    assert(configFile.writes > initialConfigWrites);
+    assert.equal(
+      await git.getConfig({ fs, dir: "/workspace", path: "nanocodex.remote" }),
+      `https://example.test/git/thread-${thread.id}`,
+    );
+    const configuredWrites = configFile.writes;
+    await prepareBrowserShell(thread.id, "https://example.test");
+    assert.equal(configFile.writes, configuredWrites);
     assert.equal(shell.projectInstructions, "lazy browser harness\n");
     await shell.workspace.writeFile("/workspace/before-bash.txt", "visible on first command\n");
     const result = await shell.execTool.handler({
@@ -655,6 +668,7 @@ class MemoryFile {
   modifiedAt = Date.now();
   readonly sliceRequests: Array<[number, number | undefined]> = [];
   readonly materializedByteLengths: number[] = [];
+  writes = 0;
 
   async getFile() {
     const bytes = this.bytes.slice();
@@ -701,6 +715,7 @@ class MemoryFile {
       close: async () => {
         this.bytes = bytes;
         this.modifiedAt = Date.now();
+        this.writes += 1;
       },
       abort: async () => undefined,
     };

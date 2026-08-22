@@ -6,6 +6,7 @@ export const THREAD_GIT_DIRECTORY = "/workspace";
 export const THREAD_GIT_AUTHOR = { name: "Nanocodex", email: "agent@nanocodex.dev" };
 const directory = THREAD_GIT_DIRECTORY;
 const author = THREAD_GIT_AUTHOR;
+const configuredRemotePath = "nanocodex.remote";
 export function browserThread(threadId, origin) {
     if (!/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/.test(threadId)) {
         throw new Error("invalid browser thread id");
@@ -147,6 +148,8 @@ async function restoreRemote(fs, thread) {
     await git.checkout({ fs, dir: directory, ref: thread.branch, force: true });
 }
 async function configureRemote(fs, thread) {
+    if (await git.getConfig({ fs, dir: directory, path: configuredRemotePath }) === thread.remoteUrl)
+        return;
     await git.addRemote({ fs, dir: directory, remote: "origin", url: thread.remoteUrl, force: true });
     await git.setConfig({ fs, dir: directory, path: `branch.${thread.branch}.remote`, value: "origin" });
     await git.setConfig({
@@ -157,6 +160,7 @@ async function configureRemote(fs, thread) {
     });
     await git.setConfig({ fs, dir: directory, path: "user.name", value: author.name });
     await git.setConfig({ fs, dir: directory, path: "user.email", value: author.email });
+    await git.setConfig({ fs, dir: directory, path: configuredRemotePath, value: thread.remoteUrl });
 }
 async function status(fs, thread) {
     const matrix = await git.statusMatrix({ fs, dir: directory });
