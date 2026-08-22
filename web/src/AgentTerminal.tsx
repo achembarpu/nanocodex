@@ -46,6 +46,11 @@ const agentConfig: Config = createConfig({
   },
 });
 
+/** Prewarms the exact authenticated Worker/WASM resource owned by this terminal. */
+export function prepareAgentTerminal(): Promise<void> {
+  return agentConfig.prepareAgent({ threadId: getBrowserThread().id });
+}
+
 /** Authenticated website policy around the headless Agent SDK and app-local xterm. */
 export const AgentTerminal = memo(function AgentTerminal({
   authStatus,

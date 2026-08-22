@@ -59,6 +59,11 @@ test("authenticated credential readiness is the sole terminal import gate", () =
 
   assert.match(experience, /export function preloadAgentTerminal\(\)/);
   assert.match(
+    experience,
+    /browserAgentCapabilityError\(\) !== undefined[\s\S]*?loadAgentTerminal\(\)\.then\(\(module\) => module\.prepareAgentTerminal\(\)\)/,
+  );
+  assert.match(terminal, /agentConfig\.prepareAgent\(\{ threadId: getBrowserThread\(\)\.id \}\)/);
+  assert.match(
     routeLoaders,
     /const experience = loadAgentExperience\(\)[\s\S]*?deploymentHealth\.read\(\)\.then[\s\S]*?health\.credentialSource !== null[\s\S]*?preloadAgentTerminal\(\)/,
   );

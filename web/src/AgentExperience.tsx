@@ -29,11 +29,16 @@ type AuthenticatedAgentTerminal = ComponentType<{
   theme: "light" | "dark";
 }>;
 
-let agentTerminalRequest: Promise<AuthenticatedAgentTerminal> | undefined;
+type AuthenticatedAgentTerminalModule = {
+  AgentTerminal: AuthenticatedAgentTerminal;
+  prepareAgentTerminal(): Promise<void>;
+};
 
-function loadAgentTerminal(): Promise<AuthenticatedAgentTerminal> {
+let agentTerminalRequest: Promise<AuthenticatedAgentTerminalModule> | undefined;
+
+function loadAgentTerminal(): Promise<AuthenticatedAgentTerminalModule> {
   if (agentTerminalRequest) return agentTerminalRequest;
-  const request = import("./AgentTerminal").then((module) => module.AgentTerminal);
+  const request = import("./AgentTerminal");
   agentTerminalRequest = request;
   void request.catch(() => {
     if (agentTerminalRequest === request) agentTerminalRequest = undefined;
@@ -43,7 +48,8 @@ function loadAgentTerminal(): Promise<AuthenticatedAgentTerminal> {
 
 /** Warms the authenticated terminal boundary without creating an Agent or UI. */
 export function preloadAgentTerminal(): Promise<void> {
-  return loadAgentTerminal().then(() => undefined);
+  if (browserAgentCapabilityError() !== undefined) return Promise.resolve();
+  return loadAgentTerminal().then((module) => module.prepareAgentTerminal());
 }
 
 /** Lightweight credential shell that keeps the authenticated runtime off signed-out startup. */
@@ -81,8 +87,8 @@ export const AgentExperience = memo(function AgentExperience({
     let current = true;
     setAgentTerminalError(undefined);
     void loadAgentTerminal().then(
-      (terminal) => {
-        if (current) setAgentTerminal(() => terminal);
+      (module) => {
+        if (current) setAgentTerminal(() => module.AgentTerminal);
       },
       (cause) => {
         if (current) setAgentTerminalError(errorMessage(cause));

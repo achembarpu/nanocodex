@@ -54,6 +54,13 @@ const config = createConfig({
 root.render(<NanocodexProvider config={config}><App /></NanocodexProvider>);
 ```
 
+Credential-gated route loaders can overlap Worker startup and WASM compilation
+with navigation without creating an Agent or publishing a transient state:
+
+```ts
+await config.prepareAgent({ threadId });
+```
+
 ## Keep policy in the application
 
 Credentials, health checks, transport choice, durable thread identity, and

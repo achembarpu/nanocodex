@@ -32,6 +32,32 @@ test("snapshot reads and refetch stay pure until a subscriber creates the entry"
   await config.destroy();
 });
 
+test("explicit preparation warms the stable resource without creating an Agent", async () => {
+  const prepared = [];
+  let creates = 0;
+  const config = createAgentConfig({
+    agent: { thinking: "high" },
+    origin: "https://example.test",
+  }, {
+    async create() { creates += 1; },
+    async prepare(options, { signal }) { prepared.push({ options, signal }); },
+  });
+
+  await config.prepareAgent({ threadId: "warm-thread" });
+
+  assert.equal(creates, 0);
+  assert.equal(config.getAgent({ threadId: "warm-thread" }).status, "idle");
+  assert.deepEqual(prepared[0].options, {
+    origin: "https://example.test",
+    thinking: "high",
+    threadId: "warm-thread",
+  });
+  assert.equal(prepared[0].signal.aborted, false);
+
+  await config.destroy();
+  assert.equal(prepared[0].signal.aborted, true);
+});
+
 test("the resolved default identity is canonical and stable across remounts", async () => {
   const createdThreadIds = [];
   const closed = [];

@@ -16,6 +16,7 @@ const config = createConfig({
 });
 const provider: ComponentProps<typeof NanocodexProvider> = { children: null, config };
 void provider;
+void config.prepareAgent({ threadId: "thread-1" });
 const snapshot = config.getAgent();
 if (snapshot.status === "success") {
   const agent: DefaultAgent = snapshot.data;

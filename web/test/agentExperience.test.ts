@@ -13,6 +13,10 @@ test("one app-lifetime Config supplies clone-safe MCP servers to the retained Ag
   assert.equal(matches(terminal, /createConfig\(/g), 1);
   assert.ok(terminal.indexOf("const agentConfig: Config") < terminal.indexOf("export const AgentTerminal"));
   assert.match(declaration, /createConfig\(\{[\s\S]*?agent: \{[\s\S]*?mcp: browserMcpConfiguration\(location\.origin\)/);
+  assert.match(
+    declaration,
+    /export function prepareAgentTerminal\(\)[\s\S]*?agentConfig\.prepareAgent\(\{ threadId: getBrowserThread\(\)\.id \}\)/,
+  );
   assert.match(terminal, /<NanocodexProvider config=\{agentConfig\}>/);
 
   const configuration = browserMcpConfiguration("https://agent.test/path");

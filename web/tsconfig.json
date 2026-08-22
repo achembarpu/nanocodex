@@ -14,6 +14,16 @@
     "preserveSymlinks": true,
     "baseUrl": ".",
     "paths": {
+      "nanocodex": ["../js/bindings/index.d.mts"],
+      "nanocodex/browser": ["../js/bindings/browser/index.d.mts"],
+      "nanocodex/browser/realtime": ["../js/bindings/browser/realtimePrompt.d.mts"],
+      "nanocodex/browser/workspace": ["../js/bindings/browser/workspace.d.mts"],
+      "nanocodex/tools": ["../js/bindings/tools/index.d.mts"],
+      "nanocodex/tools/artifact": ["../js/bindings/tools/artifact.d.mts"],
+      "nanocodex/tools/browser": ["../js/bindings/tools/browser/index.d.mts"],
+      "nanocodex/tools/vite": ["../js/bindings/tools/vite.d.mts"],
+      "nanocodex/worker": ["../js/bindings/worker/index.d.mts"],
+      "nanocodex-react": ["../js/react/index.d.mts"],
       "react": ["./node_modules/@types/react/index.d.ts"],
       "react/*": ["./node_modules/@types/react/*"]
     },

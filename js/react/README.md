@@ -43,3 +43,10 @@ Without a selector, `useAgent` returns the full query-like resource shown above.
 
 Create the config once, outside React. Applications can pass Agent defaults to
 `createConfig({ agent: { ... } })` without adding another lifecycle owner.
+
+An authenticated route loader may hide Worker startup and WASM compilation
+before React mounts without creating an Agent:
+
+```ts
+await config.prepareAgent({ threadId });
+```

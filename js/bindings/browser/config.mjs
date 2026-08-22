@@ -24,6 +24,7 @@ export function createAgentConfig(options = {}, runtime) {
   const retry = nonNegativeInteger(options.retry ?? 2, "retry");
   const retryDelay = options.retryDelay ?? ((attempt) => 400 * attempt);
   if (typeof retryDelay !== "function") throw new TypeError("retryDelay must be a function");
+  const preparationController = new AbortController();
   let destroyed = false;
   let destruction;
 
@@ -201,6 +202,14 @@ export function createAgentConfig(options = {}, runtime) {
   }
 
   const config = {
+    async prepareAgent(parameters = {}) {
+      if (parameters.enabled === false || destroyed) return;
+      const threadId = resolveThreadId(parameters);
+      const entry = entries.get(threadId) ?? createEntry(threadId);
+      await runtime.prepare(entry.createOptions, {
+        signal: preparationController.signal,
+      });
+    },
     getAgent(parameters = {}) {
       if (parameters.enabled === false || destroyed) return IDLE_SNAPSHOT;
       return entries.get(resolveThreadId(parameters))?.snapshot ?? IDLE_SNAPSHOT;
@@ -247,6 +256,7 @@ export function createAgentConfig(options = {}, runtime) {
         resolveDestruction = resolve;
       });
       destroyed = true;
+      preparationController.abort();
       const closures = [];
       const notifications = [];
       try {
