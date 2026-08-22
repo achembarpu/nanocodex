@@ -27,6 +27,10 @@ export async function initializeThreadGit(thread) {
         return status(fs, thread);
     });
 }
+/** Ensures the repository exists without scanning its complete worktree. */
+export function prepareThreadGit(thread) {
+    return inspectThreadGit(thread, async () => undefined);
+}
 export async function inspectThreadGit(thread, inspect) {
     return withThreadGitLock(thread, async () => {
         const fs = await openOpfsGitFs(thread.workspaceName);

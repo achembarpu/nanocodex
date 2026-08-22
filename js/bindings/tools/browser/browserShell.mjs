@@ -3,7 +3,7 @@ import git from "isomorphic-git";
 import http from "isomorphic-git/http/web";
 import { artifact } from "../artifact.mjs";
 import { createOpfsGitFs, openOpfsWorkspaceRoot, } from "./opfsGit.mjs";
-import { browserThread, initializeThreadGit, notifyThreadGitChanged, THREAD_GIT_AUTHOR, THREAD_GIT_DIRECTORY, withThreadGitLock, } from "./threadGit.mjs";
+import { browserThread, notifyThreadGitChanged, prepareThreadGit, THREAD_GIT_AUTHOR, THREAD_GIT_DIRECTORY, withThreadGitLock, } from "./threadGit.mjs";
 import { openThreadWorkspace } from "./workspace.mjs";
 const utf8 = new TextEncoder();
 const utf8Decoder = new TextDecoder();
@@ -53,7 +53,7 @@ export function validateBrowserArtifactSource(source) {
 }
 export async function prepareBrowserShell(threadId, origin) {
     const thread = browserThread(threadId, origin);
-    await initializeThreadGit(thread);
+    await prepareThreadGit(thread);
     const workspaceRoot = await openOpfsWorkspaceRoot(thread.workspaceName);
     const rawFs = createOpfsGitFs(workspaceRoot);
     const projectInstructions = await loadBrowserProjectInstructions(rawFs);

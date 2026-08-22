@@ -125,8 +125,15 @@ test("the prepared browser harness observes workspace writes before its first la
     configurable: true,
     value: { getDirectory: async () => origin },
   });
+  const statusMatrix = git.statusMatrix;
+  let statusScans = 0;
+  git.statusMatrix = (...args) => {
+    statusScans += 1;
+    return statusMatrix(...args);
+  };
   try {
     const shell = await prepareBrowserShell(thread.id, "https://example.test");
+    assert.equal(statusScans, 0);
     assert.equal(shell.projectInstructions, "lazy browser harness\n");
     await shell.workspace.writeFile("/workspace/before-bash.txt", "visible on first command\n");
     const result = await shell.execTool.handler({
@@ -139,6 +146,7 @@ test("the prepared browser harness observes workspace writes before its first la
       "created by bash\n",
     );
   } finally {
+    git.statusMatrix = statusMatrix;
     if (previousStorage) Object.defineProperty(globalThis.navigator, "storage", previousStorage);
     else Reflect.deleteProperty(globalThis.navigator, "storage");
   }
