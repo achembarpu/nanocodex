@@ -1,4 +1,4 @@
-import { env, SELF, evictDurableObject } from "cloudflare:test";
+import { env, SELF as RAW_SELF, evictDurableObject } from "cloudflare:test";
 import { afterEach, describe, expect, it } from "vitest";
 
 import type { Env } from "../src/index";
@@ -6,21 +6,64 @@ import type { Env } from "../src/index";
 const testEnv = env as unknown as Env;
 const admin = { authorization: `Bearer ${testEnv.NANOCODEX_ADMIN_TOKEN}` };
 const createdAgents = new Set<string>();
+const agentTokens = new Map<string, string>();
+const SELF = { fetch: managedFetch };
 
 afterEach(async () => {
-  await Promise.all([...createdAgents].map(async (agentUrl) => {
-    await SELF.fetch(agentUrl, { method: "DELETE" });
-    createdAgents.delete(agentUrl);
+  await Promise.all([...createdAgents].map(async (id) => {
+    await SELF.fetch(`https://example.test/v1/agents/${id}`, { method: "DELETE" });
+    createdAgents.delete(id);
+    agentTokens.delete(id);
   }));
 });
 
 describe("managed agents REST and resumable SSE", () => {
-  it("verifies signed capabilities before looking up a Durable Object", async () => {
+  it("does not let the website room allocator mint managed agents", async () => {
+    const response = await RAW_SELF.fetch("https://example.test/v1/agents", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${testEnv.NANOCODEX_ROOM_ALLOCATOR_TOKEN}`,
+      },
+    });
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "unauthorized" });
+  });
+
+  it("requires a scoped bearer in addition to the routing UUID", async () => {
     const agent = await createAgent();
-    expect((await SELF.fetch(agent.agent_url)).status).toBe(200);
-    expect((await SELF.fetch(`https://example.test/v1/agents/${agent.agent_id}`)).status).toBe(404);
-    const tampered = `${agent.agent_url.slice(0, -1)}${agent.agent_url.endsWith("0") ? "1" : "0"}`;
-    expect((await SELF.fetch(tampered)).status).toBe(404);
+    const stateUrl = agent.events_url.replace(/\/events$/, "");
+    const missing = await RAW_SELF.fetch(stateUrl);
+    expect(missing.status).toBe(401);
+    expect(await missing.json()).toEqual({ error: "unauthorized" });
+    const wrong = await RAW_SELF.fetch(stateUrl, {
+      headers: { authorization: "Bearer AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA" },
+    });
+    expect(wrong.status).toBe(401);
+    expect(agent.agent_token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(agent.agent_token).not.toBe(agent.agent_id);
+    expect((await SELF.fetch(stateUrl)).status).toBe(200);
+    expect((await RAW_SELF.fetch(stateUrl, {
+      headers: { cookie: agent.cookie.split(";", 1)[0]! },
+    })).status).toBe(200);
+  });
+
+  it("requires the exact public Origin when a browser cookie upgrades a managed socket", async () => {
+    const agent = await createAgent();
+    const websocketUrl = agent.websocket_url.replace("wss:", "https:");
+    const cookie = agent.cookie.split(";", 1)[0]!;
+    for (const origin of [undefined, "https://attacker.test"]) {
+      const headers = new Headers({ cookie, upgrade: "websocket" });
+      if (origin) headers.set("origin", origin);
+      const denied = await RAW_SELF.fetch(websocketUrl, { headers });
+      expect(denied.status).toBe(403);
+      expect(await denied.json()).toEqual({ error: "forbidden_origin" });
+    }
+    const accepted = await RAW_SELF.fetch(websocketUrl, {
+      headers: { cookie, origin: "https://example.test", upgrade: "websocket" },
+    });
+    expect(accepted.status).toBe(101);
+    accepted.webSocket?.accept();
+    accepted.webSocket?.close(1000, "done");
   });
 
   it("requires stable identifiers and strictly validates structured prompt content", async () => {
@@ -219,8 +262,9 @@ describe("managed agents REST and resumable SSE", () => {
 
   it("persists cursors across eviction and tails strictly after the acknowledged cursor", async () => {
     const agent = await createAgent();
+    const id = new URL(agent.events_url).pathname.split("/").at(-2)!;
     await within(
-      evictDurableObject(testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id)),
+      evictDurableObject(testEnv.NANOCODEX_SESSIONS.getByName(id)),
       "durable object eviction",
     );
 
@@ -251,9 +295,10 @@ describe("managed agents REST and resumable SSE", () => {
   it("replays multi-digit cursors in numeric rather than lexical order", async () => {
     const agent = await createAgent();
     await submit(agent, "ordered-turn", "produce a complete event lifecycle");
+    const agentUrl = agent.events_url.replace(/\/events$/, "");
     let latest = 0n;
     for (let attempt = 0; attempt < 80 && latest < 12n; attempt += 1) {
-      const state = await (await SELF.fetch(agent.agent_url)).json<{ latest_event_cursor: string }>();
+      const state = await (await SELF.fetch(agentUrl)).json<{ latest_event_cursor: string }>();
       latest = BigInt(state.latest_event_cursor);
       if (latest < 12n) await new Promise((resolve) => setTimeout(resolve, 25));
     }
@@ -288,11 +333,13 @@ describe("managed agents REST and resumable SSE", () => {
     })).status).toBe(413);
 
     await submit(agent, "turn-delete", "delete me");
-    const deleted = await SELF.fetch(agent.agent_url, { method: "DELETE" });
+    const id = new URL(agent.events_url).pathname.split("/").at(-2)!;
+    const deleted = await SELF.fetch(`https://example.test/v1/agents/${id}`, { method: "DELETE" });
     expect(deleted.status).toBe(204);
-    createdAgents.delete(agent.agent_url);
-    expect((await SELF.fetch(agent.agent_url)).status).toBe(404);
+    createdAgents.delete(id);
+    expect((await SELF.fetch(`https://example.test/v1/agents/${id}`)).status).toBe(404);
     expect((await SELF.fetch(agent.events_url)).status).toBe(404);
+    agentTokens.delete(id);
   });
 
   it("bounds concurrent resumable event subscribers", async () => {
@@ -316,8 +363,10 @@ describe("managed agents REST and resumable SSE", () => {
 
 type AgentReceipt = {
   agent_id: string;
-  agent_url: string;
+  agent_token: string;
+  cookie: string;
   events_url: string;
+  websocket_url: string;
 };
 
 type ManagedTurnView = {
@@ -334,9 +383,25 @@ async function createAgent(): Promise<AgentReceipt> {
     headers: admin,
   });
   expect(response.status).toBe(201);
-  const receipt = await response.json<AgentReceipt>();
-  createdAgents.add(receipt.agent_url);
+  const cookie = response.headers.get("set-cookie");
+  expect(cookie).toBeTruthy();
+  const receipt = {
+    ...(await response.json<Omit<AgentReceipt, "cookie">>()),
+    cookie: cookie!,
+  };
+  createdAgents.add(receipt.agent_id);
+  agentTokens.set(receipt.agent_id, receipt.agent_token);
   return receipt;
+}
+
+async function managedFetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+  const request = new Request(input, init);
+  const match = new URL(request.url).pathname.match(/^\/(?:v1\/agents|sessions)\/([^/]+)/);
+  const token = match ? agentTokens.get(match[1]!) : undefined;
+  if (!token) return RAW_SELF.fetch(request);
+  const headers = new Headers(request.headers);
+  headers.set("authorization", `Bearer ${token}`);
+  return RAW_SELF.fetch(new Request(request, { headers }));
 }
 
 async function submit(agent: AgentReceipt, id: string, input: string): Promise<ManagedTurnView> {

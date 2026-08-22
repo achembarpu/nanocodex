@@ -30,11 +30,15 @@ import {
 } from "./durable-events";
 import { webAsset } from "./web";
 import {
-  NanocodexSubscriptionAuth,
-  type SubscriptionSnapshot,
-} from "./subscription-auth";
-
-export { NanocodexSubscriptionAuth } from "./subscription-auth";
+  MultiplayerRoom,
+  roomCookieName,
+} from "./multiplayer-room";
+export { MultiplayerRoom } from "./multiplayer-room";
+import {
+  MULTIPLAYER_ROOM_LEASE_MS,
+  MultiplayerQuota,
+} from "./multiplayer-quota";
+export { MultiplayerQuota } from "./multiplayer-quota";
 export { WorkspaceServiceProxy };
 
 import {
@@ -55,28 +59,28 @@ const MAX_REQUEST_BODY_BYTES = 1024 * 1024;
 const MAX_RETRY_ATTEMPTS = 8;
 const MAX_RETRY_DELAY_MS = 60_000;
 const OPENAI_WEBSOCKET_BETA = "responses_websockets=2026-02-06";
+const OPENAI_WEBSOCKET_URL = "wss://api.openai.com/v1/responses";
+const OPENAI_API_BASE_URL = "https://api.openai.com/v1";
 const CHATGPT_WEBSOCKET_URL = "wss://chatgpt.com/backend-api/codex/responses";
 const CHATGPT_API_BASE_URL = "https://chatgpt.com/backend-api/codex";
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const ROOM_ROUTE_ID = /^([0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})~([A-Za-z0-9_-]{43})$/;
+const AGENT_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 const TURN_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const IDEMPOTENCY_KEY = /^[\x21-\x7e]{1,256}$/;
 const encoder = new TextEncoder();
 const ENCODED_PONG = JSON.stringify({ type: "pong" });
+const SESSION_DELETING_KEY = "nanocodex:session-deleting";
 
 export interface Env {
   NANOCODEX_SESSIONS: DurableObjectNamespace<NanocodexSession>;
-  NANOCODEX_AUTH: DurableObjectNamespace<NanocodexSubscriptionAuth>;
-  OPENAI_API_KEY?: string;
+  NANOCODEX_ROOMS: DurableObjectNamespace<MultiplayerRoom>;
+  NANOCODEX_MULTIPLAYER_QUOTA: DurableObjectNamespace<MultiplayerQuota>;
+  EGRESS: Fetcher;
   NANOCODEX_ADMIN_TOKEN: string;
-  NANOCODEX_CAPABILITY_SECRET: string;
+  NANOCODEX_ROOM_ALLOCATOR_TOKEN?: string;
   NANOCODEX_AUTH_MODE?: string;
   AGENT_IDLE_TIMEOUT_MS?: string;
-  OPENAI_WEBSOCKET_URL?: string;
-  CHATGPT_ACCESS_TOKEN?: string;
-  CHATGPT_ACCOUNT_ID?: string;
-  CHATGPT_FEDRAMP?: string;
-  CHATGPT_REFRESH_TOKEN?: string;
-  CHATGPT_ISSUER?: string;
   WEB_TOOL_URL?: string;
   WEB_TOOL_TOKEN?: string;
 }
@@ -84,6 +88,7 @@ export interface Env {
 type SessionRow = {
   session_id: string;
   public_origin: string;
+  runtime_profile: AgentRuntimeProfile;
   completed_turns: number;
   last_active: number;
   stream_error: string | null;
@@ -144,6 +149,7 @@ type ManagedTurnSubmission = {
 type ManagedTransition = TurnTerminal | Extract<StreamMessage, { type: "turn_cancelling" }>;
 
 type ModelAuthMode = "api_key" | "chatgpt";
+type AgentRuntimeProfile = "managed" | "multiplayer";
 
 const AGENT_CAPABILITIES = Object.freeze({
   durable_turns: true,
@@ -169,19 +175,185 @@ export default {
     if (request.method === "GET" && url.pathname === "/health") {
       return json({ service: "nanocodex", runtime: "cloudflare-durable-objects", status: "ok" });
     }
+    if (request.method === "POST" && url.pathname === "/v1/rooms") {
+      if (!env.NANOCODEX_ADMIN_TOKEN || !env.NANOCODEX_ROOM_ALLOCATOR_TOKEN) {
+        return json({ error: "multiplayer is not configured" }, { status: 503 });
+      }
+      if (!authorized(request, env.NANOCODEX_ROOM_ALLOCATOR_TOKEN)
+        && !authorized(request, env.NANOCODEX_ADMIN_TOKEN)) {
+        return json({ error: "unauthorized" }, { status: 401 });
+      }
+      let ownerName = "Host";
+      if (request.body) {
+        let body: unknown;
+        try {
+          body = JSON.parse(await readBoundedRequestText(request, 4_096));
+        } catch {
+          return json({ error: "invalid_request" }, { status: 400 });
+        }
+        if (!body || typeof body !== "object" || Array.isArray(body)
+          || Object.keys(body).some((key) => key !== "display_name")
+          || typeof (body as { display_name?: unknown }).display_name !== "string") {
+          return json({ error: "invalid_request" }, { status: 400 });
+        }
+        ownerName = (body as { display_name: string }).display_name;
+      }
+      const roomUuid = uuidV7();
+      const roomId = await signedRoomRouteId(env.NANOCODEX_ADMIN_TOKEN, roomUuid);
+      const agentId = uuidV7();
+      const quota = env.NANOCODEX_MULTIPLAYER_QUOTA.getByName("global");
+      let reserved: Response;
+      try {
+        reserved = await quota.fetch("https://quota.internal/rooms", {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            room_id: roomId,
+            expires_at: Date.now() + MULTIPLAYER_ROOM_LEASE_MS,
+          }),
+        });
+      } catch {
+        return json({ error: "multiplayer_capacity_unavailable" }, { status: 503 });
+      }
+      if (!reserved.ok) {
+        const status = reserved.status === 429 ? 429 : 503;
+        const retryAfter = reserved.headers.get("retry-after");
+        await reserved.body?.cancel();
+        return json({ error: status === 429 ? "multiplayer_capacity_reached" : "multiplayer_capacity_unavailable" }, {
+          status,
+          ...(retryAfter ? { headers: { "retry-after": retryAfter } } : {}),
+        });
+      }
+      await reserved.body?.cancel();
+      const room = env.NANOCODEX_ROOMS.getByName(roomId);
+      let initialized: Response;
+      try {
+        initialized = await room.fetch("https://room.internal/initialize", {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            room_id: roomId,
+            agent_id: agentId,
+            public_origin: url.origin,
+            owner_name: ownerName,
+          }),
+        });
+      } catch {
+        await Promise.allSettled([
+          room.fetch("https://room.internal/admin", { method: "DELETE" }),
+          releaseRoomQuota(quota, roomId),
+        ]);
+        return json({ error: "room_initialization_failed" }, { status: 503 });
+      }
+      if (!initialized.ok) {
+        const status = initialized.status;
+        await initialized.body?.cancel();
+        await Promise.allSettled([
+          room.fetch("https://room.internal/admin", { method: "DELETE" }),
+          releaseRoomQuota(quota, roomId),
+        ]);
+        return json({ error: "room_initialization_failed" }, { status: status >= 500 ? 503 : 400 });
+      }
+      let receipt: {
+        room_id: string;
+        invite: string;
+        member_id: string;
+        member_token: string;
+        auth_mode: ModelAuthMode;
+      };
+      try {
+        receipt = await initialized.json<typeof receipt>();
+      } catch {
+        await Promise.allSettled([
+          room.fetch("https://room.internal/admin", { method: "DELETE" }),
+          releaseRoomQuota(quota, roomId),
+        ]);
+        return json({ error: "room_initialization_failed" }, { status: 503 });
+      }
+      const websocketUrl = new URL(`/v1/rooms/${roomId}/ws`, url);
+      websocketUrl.protocol = websocketUrl.protocol === "https:" ? "wss:" : "ws:";
+      return json({
+        room_id: roomId,
+        member_id: receipt.member_id,
+        invite: receipt.invite,
+        invite_url: new URL(`/multiplayer?room=${encodeURIComponent(roomId)}#invite=${encodeURIComponent(receipt.invite)}`, url).href,
+        websocket_url: websocketUrl.href,
+        auth_mode: receipt.auth_mode,
+      }, {
+        status: 201,
+        headers: { "set-cookie": roomMemberCookie(roomId, receipt.member_token, url) },
+      });
+    }
+    const roomMatch = url.pathname.match(/^\/v1\/rooms\/([^/]+)(?:\/(join|ws))?$/);
+    if (roomMatch) {
+      if (!env.NANOCODEX_ADMIN_TOKEN) {
+        return json({ error: "multiplayer is not configured" }, { status: 503 });
+      }
+      const roomId = roomMatch[1]!;
+      if (!await validSignedRoomRouteId(env.NANOCODEX_ADMIN_TOKEN, roomId)) {
+        return json({ error: "not_found" }, { status: 404 });
+      }
+      const resource = roomMatch[2];
+      const room = env.NANOCODEX_ROOMS.getByName(roomId);
+      if (resource === "join") {
+        if (request.method !== "POST") return json({ error: "method_not_allowed" }, { status: 405 });
+        const joined = await room.fetch("https://room.internal/join", {
+          method: "POST",
+          headers: request.headers,
+          body: request.body,
+        });
+        if (!joined.ok) return joined;
+        const receipt = await joined.json<{
+          room_id: string;
+          member_id: string;
+          member_token: string;
+          auth_mode: ModelAuthMode;
+        }>();
+        const websocketUrl = new URL(`/v1/rooms/${roomId}/ws`, url);
+        websocketUrl.protocol = websocketUrl.protocol === "https:" ? "wss:" : "ws:";
+        return json({
+          room_id: roomId,
+          member_id: receipt.member_id,
+          websocket_url: websocketUrl.href,
+          auth_mode: receipt.auth_mode,
+        }, {
+          status: 201,
+          headers: { "set-cookie": roomMemberCookie(roomId, receipt.member_token, url) },
+        });
+      }
+      if (resource === "ws") {
+        if (request.method !== "GET" || request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+          return new Response("Expected WebSocket upgrade", { status: 426 });
+        }
+        const cursor = url.searchParams.get("cursor") ?? "0";
+        return room.fetch(`https://room.internal/socket?cursor=${encodeURIComponent(cursor)}`, request);
+      }
+      if (request.method === "GET") {
+        return room.fetch("https://room.internal/state", { headers: request.headers });
+      }
+      if (request.method === "DELETE") {
+        const administrator = Boolean(
+          env.NANOCODEX_ADMIN_TOKEN && authorized(request, env.NANOCODEX_ADMIN_TOKEN),
+        );
+        return room.fetch(
+          administrator ? "https://room.internal/admin" : "https://room.internal/room",
+          { method: "DELETE", headers: request.headers },
+        );
+      }
+      return json({ error: "method_not_allowed" }, { status: 405 });
+    }
     if (request.method === "POST" && (url.pathname === "/v1/agents" || url.pathname === "/sessions")) {
       if (!env.NANOCODEX_ADMIN_TOKEN) {
         return json({ error: "NANOCODEX_ADMIN_TOKEN is not configured" }, { status: 503 });
-      }
-      const capabilitySecret = configuredCapabilitySecret(env);
-      if (!capabilitySecret) {
-        return json({ error: "NANOCODEX_CAPABILITY_SECRET must contain at least 32 bytes" }, { status: 503 });
       }
       if (!authorized(request, env.NANOCODEX_ADMIN_TOKEN)) {
         return json({ error: "unauthorized" }, { status: 401 });
       }
       const agentId = uuidV7();
-      const routeId = `${agentId}.${await signAgentCapability(agentId, capabilitySecret)}`;
+      const agentToken = await scopedCapability(
+        env.NANOCODEX_ADMIN_TOKEN,
+        `nanocodex-managed-agent:${agentId}`,
+      );
       const stub = env.NANOCODEX_SESSIONS.getByName(agentId);
       const initialized = await stub.fetch("https://session.internal/initialize", {
         method: "PUT",
@@ -190,45 +362,44 @@ export default {
       });
       if (!initialized.ok) return json({ error: "agent initialization failed" }, { status: 503 });
       const routeBase = url.pathname === "/sessions" ? "/sessions" : "/v1/agents";
-      const agentUrl = new URL(`${routeBase}/${routeId}`, url);
-      const websocketUrl = new URL(`${routeBase}/${routeId}/ws`, url);
+      const websocketUrl = new URL(`${routeBase}/${agentId}/ws`, url);
       websocketUrl.protocol = websocketUrl.protocol === "https:" ? "wss:" : "ws:";
       return json({
         agent_id: agentId,
         session_id: agentId,
-        agent_url: agentUrl.href,
-        session_url: agentUrl.href,
-        events_url: new URL(`${routeBase}/${routeId}/events`, url).href,
+        agent_token: agentToken,
+        events_url: new URL(`${routeBase}/${agentId}/events`, url).href,
         websocket_url: websocketUrl.href,
-      }, { status: 201 });
-    }
-    if (url.pathname === "/auth/chatgpt") {
-      if (!env.NANOCODEX_ADMIN_TOKEN || !authorized(request, env.NANOCODEX_ADMIN_TOKEN)) {
-        return json({ error: "unauthorized" }, { status: 401 });
-      }
-      const auth = env.NANOCODEX_AUTH.getByName("subscription");
-      if (request.method === "GET") return auth.fetch("https://auth.internal/status");
-      if (request.method === "DELETE") {
-        return auth.fetch("https://auth.internal/credentials", { method: "DELETE" });
-      }
-      return json({ error: "method_not_allowed" }, { status: 405 });
+      }, {
+        status: 201,
+        headers: { "set-cookie": agentCookie(routeBase, agentId, agentToken, url) },
+      });
     }
     const match = url.pathname.match(/^\/(?:v1\/agents|sessions)\/([^/]+)(?:\/(.*))?$/);
-    if (!match) {
+    if (!match || !SESSION_ID.test(match[1] ?? "")) {
       return json({ error: "not_found" }, { status: 404 });
     }
-    const capabilitySecret = configuredCapabilitySecret(env);
-    if (!capabilitySecret) {
-      return json({ error: "NANOCODEX_CAPABILITY_SECRET is not configured" }, { status: 503 });
-    }
-    const agentId = await verifyAgentCapability(match[1] ?? "", capabilitySecret);
-    if (!agentId) return json({ error: "not_found" }, { status: 404 });
+    const agentId = match[1]!;
     const resource = match[2] ?? "";
+    if (!env.NANOCODEX_ADMIN_TOKEN) {
+      return json({ error: "NANOCODEX_ADMIN_TOKEN is not configured" }, { status: 503 });
+    }
+    const agentToken = await scopedCapability(
+      env.NANOCODEX_ADMIN_TOKEN,
+      `nanocodex-managed-agent:${agentId}`,
+    );
+    const agentAuthorization = authorizeAgent(request, agentId, agentToken);
+    if (!agentAuthorization) {
+      return json({ error: "unauthorized" }, { status: 401 });
+    }
     const stub = env.NANOCODEX_SESSIONS.getByName(agentId);
     const publicOrigin = `public_origin=${encodeURIComponent(url.origin)}`;
     if (resource === "ws") {
       if (request.method !== "GET" || request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
         return new Response("Expected WebSocket upgrade", { status: 426 });
+      }
+      if (agentAuthorization === "cookie" && request.headers.get("origin") !== url.origin) {
+        return json({ error: "forbidden_origin" }, { status: 403 });
       }
       return stub.fetch(
         `https://session.internal/socket?${publicOrigin}`,
@@ -314,6 +485,8 @@ export class NanocodexSession extends DurableComputerSession {
   #recoveryTask?: Promise<void>;
   #streamError?: string;
   #deleting = false;
+  #deletionMarkerTask?: Promise<void>;
+  #deletionTask?: Promise<void>;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -323,6 +496,7 @@ export class NanocodexSession extends DurableComputerSession {
         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
         session_id TEXT NOT NULL UNIQUE,
         public_origin TEXT NOT NULL DEFAULT '',
+        runtime_profile TEXT NOT NULL DEFAULT 'managed' CHECK (runtime_profile IN ('managed', 'multiplayer')),
         completed_turns INTEGER NOT NULL DEFAULT 0,
         stream_error TEXT,
         last_active INTEGER NOT NULL
@@ -365,26 +539,44 @@ export class NanocodexSession extends DurableComputerSession {
     if (!sessionColumns.has("stream_error")) {
       this.ctx.storage.sql.exec("ALTER TABLE session_state ADD COLUMN stream_error TEXT");
     }
+    if (!sessionColumns.has("runtime_profile")) {
+      this.ctx.storage.sql.exec(
+        "ALTER TABLE session_state ADD COLUMN runtime_profile TEXT NOT NULL DEFAULT 'managed'",
+      );
+    }
     this.#streamError = this.#session()?.stream_error ?? undefined;
-    // Durable state and SSE replay are immediately usable after eviction.
-    // Re-admission may load WASM and open a model socket, so it never sits on
-    // the object's request-readiness boundary.
-    this.#scheduleRecovery();
+    this.ctx.blockConcurrencyWhile(async () => {
+      this.#deleting = await this.ctx.storage.get<boolean>(SESSION_DELETING_KEY) === true;
+      // Durable state and SSE replay are immediately usable after eviction.
+      // Re-admission or deletion may load external resources, so neither sits
+      // on the object's request-readiness boundary.
+      if (this.#deleting) this.#scheduleDeletion();
+      else this.#scheduleRecovery();
+    });
   }
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     const forwardedOrigin = url.searchParams.get("public_origin");
-    if (forwardedOrigin !== null && validPublicOrigin(forwardedOrigin) && this.#sessionId()) {
+    if (!this.#deleting
+      && forwardedOrigin !== null
+      && validPublicOrigin(forwardedOrigin)
+      && this.#sessionId()) {
       this.ctx.storage.sql.exec(
         "UPDATE session_state SET public_origin = ? WHERE singleton = 1",
         forwardedOrigin,
       );
     }
     if (request.method === "PUT" && url.pathname === "/initialize") {
+      if (this.#deleting) return new Response(null, { status: 409 });
       const body = await request.text();
+      if (this.#deleting) return new Response(null, { status: 409 });
       if (body.length > 2048) return new Response(null, { status: 400 });
-      let initialization: { session_id?: unknown; public_origin?: unknown };
+      let initialization: {
+        session_id?: unknown;
+        public_origin?: unknown;
+        runtime_profile?: unknown;
+      };
       try {
         initialization = JSON.parse(body) as typeof initialization;
       } catch {
@@ -392,21 +584,31 @@ export class NanocodexSession extends DurableComputerSession {
       }
       const sessionId = initialization.session_id;
       const publicOrigin = initialization.public_origin;
+      const runtimeProfile = initialization.runtime_profile ?? "managed";
       if (typeof sessionId !== "string"
         || !SESSION_ID.test(sessionId)
         || typeof publicOrigin !== "string"
-        || !validPublicOrigin(publicOrigin)) {
+        || !validPublicOrigin(publicOrigin)
+        || (runtimeProfile !== "managed" && runtimeProfile !== "multiplayer")) {
         return new Response(null, { status: 400 });
       }
-      const currentId = this.#sessionId();
+      const current = this.#session();
+      const currentId = current?.session_id;
       if (currentId && currentId !== sessionId) return new Response(null, { status: 409 });
+      if (current && current.runtime_profile !== runtimeProfile) return new Response(null, { status: 409 });
       if (!currentId) {
         let event: DurableEvent<StreamMessage> | undefined;
         this.ctx.storage.transactionSync(() => {
+          if (this.#deleting || this.#sessionId()) {
+            throw new ManagedRequestError(409, "agent_deleting", "the agent is being deleted or initialized");
+          }
           this.ctx.storage.sql.exec(
-            "INSERT INTO session_state (singleton, session_id, public_origin, last_active) VALUES (1, ?, ?, ?)",
+            `INSERT INTO session_state
+               (singleton, session_id, public_origin, runtime_profile, last_active)
+             VALUES (1, ?, ?, ?, ?)`,
             sessionId,
             publicOrigin,
+            runtimeProfile,
             Date.now(),
           );
           event = this.#eventLog.append({
@@ -417,6 +619,7 @@ export class NanocodexSession extends DurableComputerSession {
         });
         this.#publish(event!);
       } else {
+        if (this.#deleting) return new Response(null, { status: 409 });
         this.ctx.storage.sql.exec(
           "UPDATE session_state SET public_origin = ? WHERE singleton = 1",
           publicOrigin,
@@ -426,6 +629,7 @@ export class NanocodexSession extends DurableComputerSession {
     }
     if (request.method === "GET" && url.pathname === "/socket") return this.#upgrade();
     if (request.method === "GET" && url.pathname === "/events") {
+      if (this.#deleting) return json({ error: "agent_deleting" }, { status: 409 });
       if (!this.#sessionId()) return json({ error: "not_found" }, { status: 404 });
       const requested = request.headers.get("last-event-id")
         ?? url.searchParams.get("cursor")
@@ -439,6 +643,7 @@ export class NanocodexSession extends DurableComputerSession {
     }
     const turnRoute = url.pathname.match(/^\/turns\/([A-Za-z0-9._:-]{1,128})(?:\/(steer|cancel))?$/);
     if (turnRoute) {
+      if (this.#deleting) return json({ error: "agent_deleting" }, { status: 409 });
       const turnId = turnRoute[1]!;
       if (request.method === "GET" && turnRoute[2] === undefined) {
         const row = this.#managedTurn(turnId);
@@ -453,6 +658,7 @@ export class NanocodexSession extends DurableComputerSession {
       return json({ error: "method_not_allowed" }, { status: 405 });
     }
     if (request.method === "GET" && url.pathname === "/state") {
+      if (this.#deleting) return json({ error: "agent_deleting" }, { status: 409 });
       const session = this.#sessionStatus();
       if (!session) return json({ error: "not_found" }, { status: 404 });
       return json({
@@ -472,26 +678,18 @@ export class NanocodexSession extends DurableComputerSession {
       });
     }
     if (request.method === "DELETE" && url.pathname === "/session") {
-      this.#deleting = true;
-      await this.#stop();
-      await Promise.allSettled([...this.#inFlight]);
-      for (const socket of this.ctx.getWebSockets()) closeSocket(socket, 1000, "session deleted");
       try {
-        const workspace = await getWorkspace(this);
-        await workspace.fs.rm("/workspace", { recursive: true, force: true });
-        workspace[Symbol.dispose]();
+        if (!this.#sessionId() && !this.#deleting) return new Response(null, { status: 204 });
+        await this.#beginDeletion();
+        await this.#deleteOwnedSession();
       } catch (error) {
-        console.error("failed to remove Cloudflare Computer workspace", errorMessage(error));
+        console.error("managed session cleanup remains pending", errorMessage(error));
+        try { await this.ctx.storage.setAlarm(Date.now() + 1_000); } catch { /* Durable marker retains ownership. */ }
+        return json({ error: "session_cleanup_pending" }, {
+          status: 503,
+          headers: { "retry-after": "1" },
+        });
       }
-      this.ctx.storage.transactionSync(() => {
-        this.ctx.storage.sql.exec("DELETE FROM nanocodex_journal_batches");
-        this.ctx.storage.sql.exec("DELETE FROM nanocodex_journals");
-        this.ctx.storage.sql.exec("DELETE FROM managed_turns");
-        this.#eventLog.clear();
-        this.ctx.storage.sql.exec("DELETE FROM completed_operations");
-        this.ctx.storage.sql.exec("DELETE FROM session_state");
-      });
-      await this.ctx.storage.deleteAlarm();
       return new Response(null, { status: 204 });
     }
     return json({ error: "not_found" }, { status: 404 });
@@ -527,7 +725,15 @@ export class NanocodexSession extends DurableComputerSession {
   }
 
   async alarm(): Promise<void> {
-    if (this.#deleting) return;
+    if (this.#deleting) {
+      try {
+        await this.#deleteOwnedSession();
+      } catch (error) {
+        console.error("managed session alarm cleanup remains pending", errorMessage(error));
+        await this.ctx.storage.setAlarm(Date.now() + 1_000);
+      }
+      return;
+    }
     if (this.#turns.size > 0 || this.#pendingTurnIds.size > 0 || this.#agentPromise) {
       await this.ctx.storage.setAlarm(Date.now() + this.#idleTimeoutMs());
       return;
@@ -537,6 +743,7 @@ export class NanocodexSession extends DurableComputerSession {
   }
 
   #upgrade(): Response {
+    if (this.#deleting) return new Response("Agent is being deleted", { status: 409 });
     const session = this.#sessionStatus();
     if (!session) return new Response("Unknown session", { status: 404 });
     if (this.ctx.getWebSockets("client").length >= MAX_CLIENT_CONNECTIONS) {
@@ -721,6 +928,9 @@ export class NanocodexSession extends DurableComputerSession {
     requestKey: string | null,
     explicitId = true,
   ): ManagedTurnSubmission {
+    if (this.#deleting) {
+      throw new ManagedRequestError(409, "agent_deleting", "the agent is being deleted");
+    }
     const keyed = requestKey === null ? undefined : this.#managedTurnByRequestKey(requestKey);
     if (keyed && explicitId && keyed.id !== id) {
       throw new ManagedRequestError(409, "idempotency_conflict", "idempotency key is already bound to another turn");
@@ -766,6 +976,9 @@ export class NanocodexSession extends DurableComputerSession {
     const accepted: StreamMessage = { type: "turn_accepted", id, input, replayed: false };
     let event: DurableEvent<StreamMessage> | undefined;
     this.ctx.storage.transactionSync(() => {
+      if (this.#deleting || !this.#sessionId()) {
+        throw new ManagedRequestError(409, "agent_deleting", "the agent is being deleted");
+      }
       event = this.#eventLog.append(accepted, id);
       this.ctx.storage.sql.exec(
         `INSERT INTO managed_turns (
@@ -907,6 +1120,80 @@ export class NanocodexSession extends DurableComputerSession {
     }
   }
 
+  async #beginDeletion(): Promise<void> {
+    if (this.#deletionMarkerTask) return this.#deletionMarkerTask;
+    if (this.#deleting) return;
+    this.#deleting = true;
+    const task = this.ctx.storage.transaction(async (transaction) => {
+      await transaction.put(SESSION_DELETING_KEY, true);
+      await transaction.setAlarm(Date.now() + 1);
+    });
+    this.#deletionMarkerTask = task;
+    try {
+      await task;
+    } catch (error) {
+      this.#deleting = false;
+      throw error;
+    } finally {
+      if (this.#deletionMarkerTask === task) this.#deletionMarkerTask = undefined;
+    }
+  }
+
+  #scheduleDeletion(): void {
+    const task = this.#deleteOwnedSession();
+    this.ctx.waitUntil(task.catch(async (error) => {
+      console.error("managed session deletion recovery failed", errorMessage(error));
+      try { await this.ctx.storage.setAlarm(Date.now() + 1_000); } catch { /* Marker retains ownership. */ }
+    }));
+  }
+
+  #deleteOwnedSession(): Promise<void> {
+    if (this.#deletionTask) return this.#deletionTask;
+    const task = this.#performOwnedSessionDeletion();
+    this.#deletionTask = task;
+    void task.finally(() => {
+      if (this.#deletionTask === task) this.#deletionTask = undefined;
+    }).catch(() => {});
+    return task;
+  }
+
+  async #performOwnedSessionDeletion(): Promise<void> {
+    this.#deleting = true;
+    const runtimeProfile = this.#session()?.runtime_profile;
+    await this.#stop(true);
+    await Promise.allSettled([...this.#inFlight]);
+    for (const socket of this.ctx.getWebSockets()) closeSocket(socket, 1000, "session deleted");
+    if (runtimeProfile !== "multiplayer") {
+      const workspace = await getWorkspace(this);
+      try {
+        await workspace.fs.rm("/workspace", { recursive: true, force: true });
+      } finally {
+        workspace[Symbol.dispose]();
+      }
+    }
+    // A socket or admission event may have resumed while external cleanup was
+    // awaited. The durable deletion marker makes those paths fail closed; close
+    // once more before dropping the owned journal and event history.
+    for (const socket of this.ctx.getWebSockets()) closeSocket(socket, 1000, "session deleted");
+    this.ctx.storage.transactionSync(() => {
+      this.ctx.storage.sql.exec("DELETE FROM nanocodex_journal_batches");
+      this.ctx.storage.sql.exec("DELETE FROM nanocodex_journals");
+      this.ctx.storage.sql.exec("DELETE FROM managed_turns");
+      this.#eventLog.clear();
+      this.ctx.storage.sql.exec("DELETE FROM completed_operations");
+      this.ctx.storage.sql.exec("DELETE FROM session_state");
+    });
+    await this.ctx.storage.delete(SESSION_DELETING_KEY);
+    this.#deleting = false;
+    try {
+      await this.ctx.storage.deleteAlarm();
+    } catch (error) {
+      // Cleanup is already complete and the durable deletion marker is gone;
+      // a stale alarm is harmless and will observe an empty session.
+      console.error("failed to clear stale managed-session alarm", errorMessage(error));
+    }
+  }
+
   #scheduleRecovery(): void {
     if (this.#deleting || this.#recoveryTask) return;
     const task = Promise.resolve().then(() => this.#runRecovery());
@@ -963,56 +1250,57 @@ export class NanocodexSession extends DurableComputerSession {
   async #createAgent(): Promise<DefaultAgent> {
     const session = this.#session();
     if (!session) throw new Error("session is not initialized");
+    const runtimeSessionId = await scopedRuntimeId(
+      this.env.NANOCODEX_ADMIN_TOKEN,
+      `nanocodex-runtime-session:${session.session_id}`,
+    );
     const authMode = modelAuthMode(this.env);
-    if (authMode === "api_key" && !this.env.OPENAI_API_KEY) {
-      throw new Error("OPENAI_API_KEY is not configured");
-    }
-    const auth = this.env.NANOCODEX_AUTH.getByName("subscription");
-    const websocketUrl = this.env.OPENAI_WEBSOCKET_URL
-      ?? (authMode === "chatgpt" ? CHATGPT_WEBSOCKET_URL : undefined);
-    const transport = authMode === "api_key"
-      ? Transport.openAi({
-          apiKey: this.env.OPENAI_API_KEY!,
-          websocketUrl,
-          createWebSocket: openAiWebSocket,
-        })
-      : Transport.hostManaged({
-          apiBaseUrl: CHATGPT_API_BASE_URL,
-          websocketUrl,
-          createWebSocket: (endpoint, id, request) =>
-            openSubscriptionWebSocket(auth, endpoint, id, request),
-        });
-    const workspace = await getWorkspace(this);
-    const filesystem = await createComputerFilesystem(workspace);
-    const shell = await justBash({
+    const transport = Transport.hostManaged({
+      apiBaseUrl: authMode === "chatgpt" ? CHATGPT_API_BASE_URL : OPENAI_API_BASE_URL,
+      websocketUrl: authMode === "chatgpt" ? CHATGPT_WEBSOCKET_URL : OPENAI_WEBSOCKET_URL,
+      createWebSocket: (endpoint, id, request) =>
+        openBrokeredWebSocket(this.env.EGRESS, authMode, endpoint, id, request),
+    });
+    const multiplayer = session.runtime_profile === "multiplayer";
+    const workspace = multiplayer ? undefined : await getWorkspace(this);
+    const filesystem = workspace ? await createComputerFilesystem(workspace) : undefined;
+    const shell = filesystem ? await justBash({
       filesystem,
       maxEntries: 2_000,
       maxOutputTokens: 10_000,
       network: false,
-    });
+    }) : undefined;
     let agent: DefaultAgent;
     try {
       agent = await Agent.create({
         transport,
         module: nanocodexWasm,
-        sessionId: session.session_id,
+        sessionId: runtimeSessionId,
         durability: this.#durability,
         durabilityId: session.session_id,
-        workspace: "/workspace",
-        filesystem: shell.filesystem,
-        filesystemTools: false,
-        instructions: [
-          "You are Nanocodex running as a durable managed agent on Cloudflare Workers.",
-          "Your /workspace filesystem is durable Cloudflare Computer storage backed by this agent's Durable Object.",
-          shell.instructions,
-          "No process sandbox is attached. Bounded Just Bash is the complete local execution boundary.",
-        ].join("\n\n"),
+        ...(shell ? {
+          workspace: "/workspace",
+          filesystem: shell.filesystem,
+          filesystemTools: false,
+        } : {}),
+        instructions: multiplayer
+          ? [
+            "You are the shared Nanocodex participant in a short-lived Multiplayer chat room.",
+            "Reply conversationally and concisely to the room message. You have no tools, shell, web access, or workspace authority.",
+            "Never claim to have performed an external action and never expose internal runtime, routing, credential, or correlation identifiers.",
+          ].join("\n\n")
+          : [
+            "You are Nanocodex running as a durable managed agent on Cloudflare Workers.",
+            "Your /workspace filesystem is durable Cloudflare Computer storage backed by this agent's Durable Object.",
+            shell!.instructions,
+            "No process sandbox is attached. Bounded Just Bash is the complete local execution boundary.",
+          ].join("\n\n"),
         // Workers forbid eval/new Function. Direct mode keeps caller-defined
         // tools in the WASM lifecycle while dispatching handlers through the
         // typed host bridge without dynamic code generation.
         toolMode: "direct",
-        tools: [
-          shell.tool,
+        tools: multiplayer ? [] : [
+          shell!.tool,
           ...cloudflareWebTools(this.env),
           {
             name: "runtimeInfo",
@@ -1023,14 +1311,13 @@ export class NanocodexSession extends DurableComputerSession {
               shell: "nanocodex-just-bash",
               shell_network: "disabled",
               sandbox: "disabled",
-              session_id: session.session_id,
               workspace: "/workspace",
             }),
           },
         ],
       });
     } catch (error) {
-      workspace[Symbol.dispose]();
+      workspace?.[Symbol.dispose]();
       throw error;
     }
     this.#events = agent.events.watch();
@@ -1175,6 +1462,7 @@ export class NanocodexSession extends DurableComputerSession {
   }
 
   #recordAgentEvent(event: AgentEvent): void {
+    if (this.#deleting) return;
     let turnId = this.#eventTurnId;
     if (event.type === "run.started") {
       turnId = this.#eventTurnQueue.shift();
@@ -1193,7 +1481,7 @@ export class NanocodexSession extends DurableComputerSession {
   }
 
   #recordAndBroadcast(message: StreamMessage, turnId: string | null = null): void {
-    if (this.#streamError) return;
+    if (this.#deleting || this.#streamError) return;
     try {
       const event = this.ctx.storage.transactionSync(() => this.#eventLog.append(message, turnId));
       this.#publish(event);
@@ -1233,13 +1521,13 @@ export class NanocodexSession extends DurableComputerSession {
     });
   }
 
-  async #stop(): Promise<void> {
+  async #stop(strictShutdown = false): Promise<void> {
     const cancellations = [...this.#turns.values()].map(async (turn) => {
       try { await turn.cancel(); } catch { /* A terminal turn needs no cancellation. */ }
     });
     await Promise.all(cancellations);
     await Promise.allSettled([...this.#inFlight]);
-    await this.#shutdownAgent();
+    await this.#shutdownAgent(strictShutdown);
     this.#turns.clear();
     this.#eventTurnQueue.length = 0;
     this.#eventTurnId = undefined;
@@ -1247,26 +1535,27 @@ export class NanocodexSession extends DurableComputerSession {
     this.#turnInputs.clear();
   }
 
-  async #shutdownAgent(): Promise<void> {
+  async #shutdownAgent(strict = false): Promise<void> {
     let agent = this.#agent;
     if (!agent && this.#agentPromise) {
       try { agent = await this.#agentPromise; } catch { /* Construction cleanup runs below. */ }
     }
-    this.#agent = undefined;
-    this.#events?.off();
-    this.#events = undefined;
     if (agent) {
       try {
         await agent.session.shutdown();
       } catch (error) {
+        if (strict) throw error;
         console.error("Nanocodex idle shutdown failed", errorMessage(error));
       }
     }
+    this.#agent = undefined;
+    this.#events?.off();
+    this.#events = undefined;
   }
 
   #session(): SessionRow | undefined {
     return this.ctx.storage.sql.exec<SessionRow>(
-      `SELECT session_id, public_origin, completed_turns, last_active, stream_error
+      `SELECT session_id, public_origin, runtime_profile, completed_turns, last_active, stream_error
        FROM session_state WHERE singleton = 1`,
     ).toArray()[0];
   }
@@ -1552,89 +1841,45 @@ function cloudflareWebTools(env: Env) {
   })];
 }
 
-async function openAiWebSocket(
+async function openBrokeredWebSocket(
+  egress: Fetcher,
+  authMode: ModelAuthMode,
   endpoint: string,
-  sessionId: string,
-  request: BrowserWebSocketRequest,
-) {
-  if (request.authorization !== "bearer" || !request.bearerToken) {
-    throw new Error("the API-key WebSocket requires bearer authorization");
-  }
-  return upgradeOpenAiWebSocket(endpoint, sessionId, {
-    bearerToken: request.bearerToken,
-    accountId: request.accountId,
-    fedramp: request.fedramp,
-    turnState: request.turnState,
-  });
-}
-
-async function openSubscriptionWebSocket(
-  auth: DurableObjectStub<NanocodexSubscriptionAuth>,
-  endpoint: string,
-  sessionId: string,
+  correlationId: string,
   request: BrowserWebSocketRequest,
 ) {
   if (request.authorization !== "host_managed" && request.authorization !== "preconnect") {
-    throw new Error("the ChatGPT WebSocket requires host-managed authorization");
+    throw new Error("brokered Responses WebSockets require host-managed authorization");
   }
-  let snapshot = await subscriptionSnapshot(auth, "/snapshot");
-  try {
-    return await upgradeOpenAiWebSocket(endpoint, sessionId, { ...snapshot, turnState: request.turnState });
-  } catch (error) {
-    if (Number((error as { status?: unknown })?.status) !== 401) throw error;
-    snapshot = await subscriptionSnapshot(auth, "/recover", snapshot.revision);
-    return upgradeOpenAiWebSocket(endpoint, sessionId, { ...snapshot, turnState: request.turnState });
-  }
-}
-
-async function subscriptionSnapshot(
-  auth: DurableObjectStub<NanocodexSubscriptionAuth>,
-  path: "/snapshot" | "/recover",
-  revision?: string,
-): Promise<SubscriptionSnapshot> {
-  const response = await auth.fetch(`https://auth.internal${path}`, {
-    method: "POST",
-    ...(revision === undefined ? {} : {
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ revision }),
-    }),
-  });
-  if (!response.ok) {
-    const detail = await readBoundedText(response, 4_096);
-    throw new Error(`ChatGPT authorization failed with HTTP ${response.status}: ${detail}`);
-  }
-  return response.json<SubscriptionSnapshot>();
-}
-
-async function upgradeOpenAiWebSocket(
-  endpoint: string,
-  sessionId: string,
-  request: { bearerToken: string; accountId?: string; fedramp?: boolean; turnState?: string },
-) {
   const url = new URL(endpoint);
+  const expected = authMode === "chatgpt" ? CHATGPT_WEBSOCKET_URL : OPENAI_WEBSOCKET_URL;
+  if (url.href !== expected) throw new Error("the managed transport requested an unexpected endpoint");
   if (url.protocol === "wss:") url.protocol = "https:";
   if (url.protocol === "ws:") url.protocol = "http:";
   const headers = new Headers({
-    Authorization: `Bearer ${request.bearerToken}`,
+    Authorization: authMode === "chatgpt"
+      ? "Bearer NANOCODEX_CODEX_OAUTH"
+      : "Bearer NANOCODEX_OPENAI_API_KEY",
     Upgrade: "websocket",
     "OpenAI-Beta": OPENAI_WEBSOCKET_BETA,
     "x-openai-internal-codex-responses-lite": "true",
-    "session-id": sessionId,
-    "thread-id": sessionId,
-    "x-client-request-id": sessionId,
+    "session-id": correlationId,
+    "thread-id": correlationId,
+    "x-client-request-id": correlationId,
     "x-responsesapi-include-timing-metrics": "true",
     "User-Agent": "nanocodex-cloudflare-workers/0.1.0",
   });
-  if (request.accountId) headers.set("ChatGPT-Account-ID", request.accountId);
-  if (request.fedramp) headers.set("X-OpenAI-Fedramp", "true");
+  if (authMode === "chatgpt") {
+    headers.set("ChatGPT-Account-ID", "NANOCODEX_CODEX_ACCOUNT");
+  }
   if (request.turnState) headers.set("x-codex-turn-state", request.turnState);
-  const response = await fetch(url, { headers });
+  const response = await egress.fetch(url, { headers });
   const socket = response.webSocket;
   if (!socket) {
-    const body = await readBoundedText(response, 4_096);
+    await response.body?.cancel();
     const error = Object.assign(
-      new Error(`OpenAI WebSocket upgrade failed with HTTP ${response.status}: ${body}`),
-      { status: response.status, body },
+      new Error(`credential broker rejected the Responses WebSocket with HTTP ${response.status}`),
+      { status: response.status, body: "credential_broker_rejected" },
     );
     const retryAfterHeader = response.headers.get("retry-after");
     const retryAfter = Number(retryAfterHeader);
@@ -1669,55 +1914,107 @@ function authorized(request: Request, expected: string): boolean {
   return value !== null && value === `Bearer ${expected}`;
 }
 
-let agentCapabilityKeyCache:
-  | { secret: string; key: Promise<CryptoKey> }
-  | undefined;
-
-function configuredCapabilitySecret(env: Env): string | undefined {
-  const secret = env.NANOCODEX_CAPABILITY_SECRET?.trim();
-  return secret && encoder.encode(secret).byteLength >= 32 ? secret : undefined;
+async function releaseRoomQuota(quota: DurableObjectStub, roomId: string): Promise<void> {
+  const response = await quota.fetch(
+    `https://quota.internal/rooms/${encodeURIComponent(roomId)}`,
+    { method: "DELETE" },
+  );
+  if (!response.ok && response.status !== 404) {
+    await response.body?.cancel();
+    throw new Error(`room quota release returned HTTP ${response.status}`);
+  }
+  await response.body?.cancel();
 }
 
-function agentCapabilityKey(secret: string): Promise<CryptoKey> {
-  if (agentCapabilityKeyCache?.secret === secret) return agentCapabilityKeyCache.key;
-  const key = crypto.subtle.importKey(
+function authorizeAgent(
+  request: Request,
+  agentId: string,
+  expected: string,
+): "bearer" | "cookie" | undefined {
+  if (authorized(request, expected)) return "bearer";
+  if (cookieValue(request.headers.get("cookie"), agentCookieName(agentId)) === expected) return "cookie";
+  return undefined;
+}
+
+async function signedRoomRouteId(secret: string, roomUuid: string): Promise<string> {
+  return `${roomUuid}~${await scopedCapability(secret, `nanocodex-room-route:${roomUuid}`)}`;
+}
+
+async function validSignedRoomRouteId(secret: string, roomId: string): Promise<boolean> {
+  const match = ROOM_ROUTE_ID.exec(roomId);
+  if (!match) return false;
+  let signature: Uint8Array;
+  try {
+    const encoded = match[2]!.replaceAll("-", "+").replaceAll("_", "/");
+    const binary = atob(`${encoded}${"=".repeat((4 - encoded.length % 4) % 4)}`);
+    signature = Uint8Array.from(binary, (character) => character.charCodeAt(0));
+  } catch {
+    return false;
+  }
+  const key = await crypto.subtle.importKey(
     "raw",
     encoder.encode(secret),
     { name: "HMAC", hash: "SHA-256" },
     false,
-    ["sign", "verify"],
+    ["verify"],
   );
-  agentCapabilityKeyCache = { secret, key };
-  return key;
-}
-
-async function signAgentCapability(agentId: string, secret: string): Promise<string> {
-  const signature = await crypto.subtle.sign(
+  return crypto.subtle.verify(
     "HMAC",
-    await agentCapabilityKey(secret),
-    encoder.encode(agentId),
-  );
-  return [...new Uint8Array(signature)]
-    .map((byte) => byte.toString(16).padStart(2, "0"))
-    .join("");
-}
-
-async function verifyAgentCapability(routeId: string, secret: string): Promise<string | undefined> {
-  const match = routeId.match(/^([0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})\.([0-9a-f]{64})$/);
-  if (!match) return undefined;
-  const agentId = match[1]!;
-  const encodedSignature = match[2]!;
-  const signature = new Uint8Array(32);
-  for (let offset = 0; offset < encodedSignature.length; offset += 2) {
-    signature[offset / 2] = Number.parseInt(encodedSignature.slice(offset, offset + 2), 16);
-  }
-  const valid = await crypto.subtle.verify(
-    "HMAC",
-    await agentCapabilityKey(secret),
+    key,
     signature,
-    encoder.encode(agentId),
+    encoder.encode(`nanocodex-room-route:${match[1]}`),
   );
-  return valid ? agentId : undefined;
+}
+
+async function scopedCapability(secret: string, scope: string): Promise<string> {
+  const signature = await scopedSignature(secret, scope);
+  let binary = "";
+  for (const byte of signature) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+}
+
+async function scopedRuntimeId(secret: string, scope: string): Promise<string> {
+  const bytes = (await scopedSignature(secret, scope)).slice(0, 16);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x70;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+async function scopedSignature(secret: string, scope: string): Promise<Uint8Array> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    encoder.encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  return new Uint8Array(await crypto.subtle.sign("HMAC", key, encoder.encode(scope)));
+}
+
+function agentCookie(routeBase: string, agentId: string, token: string, url: URL): string {
+  const secure = url.protocol === "https:";
+  return `${agentCookieName(agentId)}=${token}; Path=${routeBase}/${agentId}; HttpOnly; SameSite=Strict; Max-Age=604800${secure ? "; Secure" : ""}`;
+}
+
+function agentCookieName(agentId: string): string {
+  return `nanocodex_agent_${agentId}`;
+}
+
+function cookieValue(encoded: string | null, name: string): string | undefined {
+  if (!encoded) return undefined;
+  for (const field of encoded.split(";")) {
+    const separator = field.indexOf("=");
+    if (separator < 0 || field.slice(0, separator).trim() !== name) continue;
+    const value = field.slice(separator + 1).trim();
+    return AGENT_TOKEN.test(value) ? value : undefined;
+  }
+  return undefined;
+}
+
+function roomMemberCookie(roomId: string, token: string, url: URL): string {
+  const secure = url.protocol === "https:";
+  return `${roomCookieName(roomId)}=${token}; Path=/v1/rooms/${roomId}; HttpOnly; SameSite=Strict; Max-Age=604800${secure ? "; Secure" : ""}`;
 }
 
 function validPublicOrigin(value: string): boolean {

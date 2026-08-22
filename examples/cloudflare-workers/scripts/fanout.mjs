@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import WebSocket from "ws";
 
+import { managedAgentFetch, managedAgentWebSocketOptions } from "./managed-agent-auth.mjs";
+
 const baseUrl = process.env.NANOCODEX_WORKER_URL ?? "http://127.0.0.1:8787";
 const adminToken = process.env.NANOCODEX_ADMIN_TOKEN ?? "local-admin-token";
 const clients = Number(process.env.NANOCODEX_FANOUT_CLIENTS ?? 64);
@@ -20,7 +22,10 @@ const sockets = [];
 
 try {
   const receivers = await Promise.all(Array.from({ length: clients }, async () => {
-    const socket = new WebSocket(session.websocket_url);
+    const socket = new WebSocket(
+      session.websocket_url,
+      managedAgentWebSocketOptions(session),
+    );
     sockets.push(socket);
     let events = 0;
     const ready = deferred();
@@ -64,7 +69,9 @@ try {
   }));
 } finally {
   for (const socket of sockets) socket.terminate();
-  await fetch(session.session_url, { method: "DELETE" }).catch(() => {});
+  await managedAgentFetch(session, `${baseUrl}/sessions/${session.session_id}`, {
+    method: "DELETE",
+  }).catch(() => {});
 }
 
 function deferred() {

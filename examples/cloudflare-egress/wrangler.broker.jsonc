@@ -1,0 +1,35 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "nanocodex-egress-broker-example",
+  "main": "src/egress.ts",
+  "compatibility_date": "2026-07-29",
+  "compatibility_flags": ["global_fetch_strictly_public"],
+  "workers_dev": false,
+  "minify": true,
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true,
+      "persist": true
+    }
+  },
+  "vars": {
+    "AGENT_ID": "managed-agent-example",
+    "ALLOWED_POLICIES": "codex"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "CODEX_OAUTH",
+        "class_name": "CodexOAuthBroker"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["CodexOAuthBroker"]
+    }
+  ]
+}

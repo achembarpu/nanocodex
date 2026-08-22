@@ -1,7 +1,67 @@
 import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
 import { defineConfig } from "vitest/config";
 
-let initialRefreshConsumed = false;
+const TEST_BROKER = `
+export default {
+  fetch(request) {
+    const url = new URL(request.url);
+    const authorization = request.headers.get("authorization");
+    const codex = url.href === "https://chatgpt.com/backend-api/codex/responses"
+      && authorization === "Bearer NANOCODEX_CODEX_OAUTH"
+      && request.headers.get("chatgpt-account-id") === "NANOCODEX_CODEX_ACCOUNT";
+    const openai = url.href === "https://api.openai.com/v1/responses"
+      && authorization === "Bearer NANOCODEX_OPENAI_API_KEY";
+    if (request.method !== "GET"
+      || request.headers.get("upgrade")?.toLowerCase() !== "websocket"
+      || request.headers.get("openai-beta") !== "responses_websockets=2026-02-06"
+      || (!codex && !openai)) {
+      return Response.json({ error: "test_broker_denied" }, { status: 403 });
+    }
+    const pair = new WebSocketPair();
+    const [client, server] = Object.values(pair);
+    server.accept();
+    let pendingResponse;
+    server.addEventListener("message", (event) => {
+      let command;
+      try { command = JSON.parse(String(event.data)); } catch { return; }
+      if (command.type === "response.cancel") {
+        if (pendingResponse !== undefined) clearTimeout(pendingResponse);
+        pendingResponse = undefined;
+        return;
+      }
+      const input = Array.isArray(command.input) ? command.input : [];
+      const messages = input.filter((item) => item?.type === "message" && item.role === "user");
+      const latest = messages.at(-1);
+      const content = Array.isArray(latest?.content) ? latest.content : [];
+      const text = content.map((item) => item?.text ?? "").join("").trim();
+      pendingResponse = setTimeout(() => {
+        pendingResponse = undefined;
+        server.send(JSON.stringify({
+          type: "response.completed",
+          response: {
+            id: crypto.randomUUID(),
+            status: "completed",
+            output: [{
+              type: "message",
+              role: "assistant",
+              content: [{ type: "output_text", text: "ROOM_AGENT_OK: " + text.slice(-160) }],
+            }],
+            usage: null,
+          },
+        }));
+      }, 500);
+    });
+    server.addEventListener("close", () => {
+      if (pendingResponse !== undefined) clearTimeout(pendingResponse);
+    });
+    return new Response(null, {
+      status: 101,
+      webSocket: client,
+      headers: { "openai-model": "test-model", "x-request-id": crypto.randomUUID() },
+    });
+  },
+};
+`;
 
 export default defineConfig({
   plugins: [
@@ -10,34 +70,15 @@ export default defineConfig({
       miniflare: {
         bindings: {
           AGENT_IDLE_TIMEOUT_MS: "1000",
-          CHATGPT_ACCESS_TOKEN: "e30.eyJleHAiOjF9.test",
-          CHATGPT_ACCOUNT_ID: "test-account-id",
-          CHATGPT_REFRESH_TOKEN: "test-refresh-token",
-          CHATGPT_ISSUER: "http://127.0.0.1:8799",
           NANOCODEX_ADMIN_TOKEN: "test-admin-token",
-          NANOCODEX_CAPABILITY_SECRET: "test-capability-secret-at-least-32-bytes",
+          NANOCODEX_ROOM_ALLOCATOR_TOKEN: "test-room-allocator-token",
           NANOCODEX_AUTH_MODE: "api_key",
-          OPENAI_API_KEY: "test-openai-key",
         },
-        outboundService: async (request) => {
-          const url = new URL(request.url);
-          if (request.method !== "POST" || url.href !== "http://127.0.0.1:8799/oauth/token") {
-            return new Response("not found", { status: 404 });
-          }
-          const payload = await request.json<{ refresh_token?: unknown }>();
-          if (payload.refresh_token !== "test-refresh-token" || initialRefreshConsumed) {
-            return Response.json({ error: { code: "refresh_token_invalidated" } }, { status: 401 });
-          }
-          initialRefreshConsumed = true;
-          await new Promise((resolve) => setTimeout(resolve, 25));
-          return Response.json({
-            access_token: testJwt({ exp: 4_102_444_800 }),
-            refresh_token: "test-rotated-refresh-token",
-            id_token: testJwt({
-              "https://api.openai.com/auth": { chatgpt_account_id: "test-account-id" },
-            }),
-          });
-        },
+        workers: [{
+          name: "nanocodex-egress-broker-example",
+          modules: true,
+          script: TEST_BROKER,
+        }],
       },
     }),
   ],
@@ -46,8 +87,3 @@ export default defineConfig({
     testTimeout: 15_000,
   },
 });
-
-function testJwt(payload: Record<string, unknown>): string {
-  const encode = (value: unknown) => Buffer.from(JSON.stringify(value)).toString("base64url");
-  return `${encode({ alg: "none" })}.${encode(payload)}.test`;
-}

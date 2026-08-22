@@ -35,12 +35,12 @@ describe("Nanocodex Durable Object Worker", () => {
 
     const created = await createSession();
     expect(created.session_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
-    expect(created.session_url).toMatch(new RegExp(
-      `^https://example\\.test/sessions/${created.session_id}\\.[0-9a-f]{64}$`,
-    ));
-    expect(created.websocket_url).toBe(`${created.session_url.replace("https:", "wss:")}/ws`);
+    expect(created.websocket_url).toBe(`wss://example.test/sessions/${created.session_id}/ws`);
 
-    const before = await SELF.fetch(created.session_url);
+    expect((await SELF.fetch(`https://example.test/sessions/${created.session_id}`)).status).toBe(401);
+    const before = await SELF.fetch(`https://example.test/sessions/${created.session_id}`, {
+      headers: sessionHeaders(created),
+    });
     expect(await before.json()).toMatchObject({
       session_id: created.session_id,
       has_snapshot: false,
@@ -51,7 +51,9 @@ describe("Nanocodex Durable Object Worker", () => {
     const stub = workerEnv.NANOCODEX_SESSIONS.getByName(created.session_id);
     await evictDurableObject(stub);
 
-    const after = await SELF.fetch(created.session_url);
+    const after = await SELF.fetch(`https://example.test/sessions/${created.session_id}`, {
+      headers: sessionHeaders(created),
+    });
     expect(await after.json()).toMatchObject({
       session_id: created.session_id,
       has_snapshot: false,
@@ -63,7 +65,7 @@ describe("Nanocodex Durable Object Worker", () => {
   it("hibernates client sockets and validates the bounded protocol without loading WASM", async () => {
     const created = await createSession();
     const response = await SELF.fetch(created.websocket_url.replace("wss:", "https:"), {
-      headers: { Upgrade: "websocket" },
+      headers: sessionHeaders(created, { Upgrade: "websocket" }),
     });
     expect(response.status).toBe(101);
     const socket = response.webSocket!;
@@ -102,45 +104,14 @@ describe("Nanocodex Durable Object Worker", () => {
     expect((await SELF.fetch(
       `https://example.test/sandbox-preview/${created.session_id}/80/`,
     )).status).toBe(404);
-    const deleted = await SELF.fetch(created.session_url, {
+    const deleted = await SELF.fetch(`https://example.test/sessions/${created.session_id}`, {
       method: "DELETE",
+      headers: sessionHeaders(created),
     });
     expect(deleted.status).toBe(204);
-    expect((await SELF.fetch(created.session_url)).status).toBe(404);
-  });
-
-  it("keeps subscription credentials behind the singleton auth object", async () => {
-    const denied = await SELF.fetch("https://example.test/auth/chatgpt");
-    expect(denied.status).toBe(401);
-
-    const auth = workerEnv.NANOCODEX_AUTH.getByName("subscription");
-    const snapshots = await Promise.all([
-      auth.fetch("https://auth.internal/snapshot", { method: "POST" }),
-      auth.fetch("https://auth.internal/snapshot", { method: "POST" }),
-    ]);
-    expect(await snapshots[0]!.json()).toMatchObject({
-      accountId: "test-account-id",
-      fedramp: false,
-      revision: "1",
-    });
-    expect(await snapshots[1]!.json()).toMatchObject({ revision: "1" });
-
-    const staleRecovery = await auth.fetch("https://auth.internal/recover", {
-      method: "POST",
-      body: JSON.stringify({ revision: "0" }),
-    });
-    expect(await staleRecovery.json()).toMatchObject({ revision: "1" });
-
-    const status = await SELF.fetch("https://example.test/auth/chatgpt", { headers: authorization });
-    expect(await status.json()).toMatchObject({
-      state: "authenticated",
-      accountId: "test-account-id",
-    });
-    const reset = await SELF.fetch("https://example.test/auth/chatgpt", {
-      method: "DELETE",
-      headers: authorization,
-    });
-    expect(reset.status).toBe(204);
+    expect((await SELF.fetch(`https://example.test/sessions/${created.session_id}`, {
+      headers: sessionHeaders(created),
+    })).status).toBe(404);
   });
 
   it("bounds connection amplification and rejects binary and oversized frames", async () => {
@@ -149,7 +120,7 @@ describe("Nanocodex Durable Object Worker", () => {
     try {
       for (let index = 0; index < 64; index += 1) {
         const response = await SELF.fetch(created.websocket_url.replace("wss:", "https:"), {
-          headers: { Upgrade: "websocket" },
+          headers: sessionHeaders(created, { Upgrade: "websocket" }),
         });
         expect(response.status).toBe(101);
         const socket = response.webSocket!;
@@ -158,7 +129,7 @@ describe("Nanocodex Durable Object Worker", () => {
         sockets.push(socket);
       }
       const overflow = await SELF.fetch(created.websocket_url.replace("wss:", "https:"), {
-        headers: { Upgrade: "websocket" },
+        headers: sessionHeaders(created, { Upgrade: "websocket" }),
       });
       expect(overflow.status).toBe(429);
 
@@ -177,17 +148,31 @@ describe("Nanocodex Durable Object Worker", () => {
   });
 });
 
-async function createSession(): Promise<{
+type SessionReceipt = {
+  agent_token: string;
   session_id: string;
-  session_url: string;
   websocket_url: string;
-}> {
+};
+
+async function createSession(): Promise<SessionReceipt> {
   const response = await SELF.fetch("https://example.test/sessions", {
     method: "POST",
     headers: authorization,
   });
   expect(response.status).toBe(201);
-  return response.json();
+  const receipt = await response.json<SessionReceipt>();
+  expect(receipt.agent_token).toMatch(/^[A-Za-z0-9_-]{43}$/);
+  expect(receipt.agent_token).not.toBe(receipt.session_id);
+  return receipt;
+}
+
+function sessionHeaders(
+  session: SessionReceipt,
+  initial?: HeadersInit,
+): Headers {
+  const headers = new Headers(initial);
+  headers.set("authorization", `Bearer ${session.agent_token}`);
+  return headers;
 }
 
 function nextMessage(socket: WebSocket): Promise<Record<string, unknown>> {

@@ -22,7 +22,10 @@ test("subscription egress proxy is capability-gated and relays headers and frame
 
   const proxy = await startSubscriptionEgressProxy({
     capability: "test-capability-0000000000000000000000000000",
-    upstreamUrl: `ws://127.0.0.1:${address.port}/responses`,
+    openUpstream(url, options) {
+      assert.equal(url, "wss://chatgpt.com/backend-api/codex/responses");
+      return new WebSocket(`ws://127.0.0.1:${address.port}/responses`, options);
+    },
   });
   try {
     assert.match(proxy.url, /\/v1\/test-capability-0000000000000000000000000000$/);
@@ -56,6 +59,13 @@ test("subscription egress proxy rejects weak configured capabilities", async () 
   );
 });
 
+test("subscription egress proxy rejects a configurable credential destination", async () => {
+  await assert.rejects(
+    startSubscriptionEgressProxy({ upstreamUrl: "wss://attacker.test/collect" }),
+    /upstream is fixed/,
+  );
+});
+
 test("an upstream rejection settles once and leaves the proxy alive", async () => {
   const upstream = createServer((_request, response) => {
     response.writeHead(403, { "content-type": "text/plain" });
@@ -68,7 +78,10 @@ test("an upstream rejection settles once and leaves the proxy alive", async () =
   const address = upstream.address();
   assert(address && typeof address !== "string");
   const proxy = await startSubscriptionEgressProxy({
-    upstreamUrl: `ws://127.0.0.1:${address.port}/responses`,
+    openUpstream(url, options) {
+      assert.equal(url, "wss://chatgpt.com/backend-api/codex/responses");
+      return new WebSocket(`ws://127.0.0.1:${address.port}/responses`, options);
+    },
   });
   try {
     assert.equal(await rejected(proxy.url), 403);

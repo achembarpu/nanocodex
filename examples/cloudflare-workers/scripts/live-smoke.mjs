@@ -1,18 +1,38 @@
 import { randomUUID } from "node:crypto";
 import WebSocket from "ws";
 
-const baseUrl = process.env.NANOCODEX_WORKER_URL ?? "http://127.0.0.1:8787";
+import { deleteWith503Retry } from "./cleanup-resource.mjs";
+import { credentialSafeHttpOrigin, credentialSafeUrl } from "./credential-origin.mjs";
+import {
+  managedAgentFetch,
+  managedAgentToken,
+  managedAgentWebSocketOptions,
+} from "./managed-agent-auth.mjs";
+
+const baseUrl = credentialSafeHttpOrigin(
+  process.env.NANOCODEX_WORKER_URL ?? "http://127.0.0.1:8787",
+  "NANOCODEX_WORKER_URL",
+).origin;
 const adminToken = process.env.NANOCODEX_ADMIN_TOKEN ?? "local-admin-token";
 const terminalTimeoutMs = Number(process.env.NANOCODEX_SMOKE_TIMEOUT_MS ?? 180_000);
 const idleTimeoutMs = Number(process.env.NANOCODEX_SMOKE_IDLE_TIMEOUT_MS ?? 45_000);
+const cleanupTimeoutMs = positiveInteger("NANOCODEX_SMOKE_CLEANUP_TIMEOUT_MS", 30_000);
 let currentStage = "create-session";
 
-const session = await createSession();
-progress("session-created");
 const agentEvents = [];
-let { socket, inbox } = connectClient();
+let session;
+let socket;
+let inbox;
+let failure;
+let result;
 
 try {
+  session = await createSession();
+  managedAgentToken(session);
+  credentialSafeUrl(session.websocket_url, "managed agent WebSocket URL");
+  progress("session-created");
+  ({ socket, inbox } = connectClient());
+
   currentStage = "websocket-ready";
   await inbox.next((message) => message.type === "ready", 10_000);
   progress("websocket-ready");
@@ -103,14 +123,22 @@ try {
       throw new Error(`${tool} did not produce a completed tool.call/tool.result event pair`);
     }
   }
+  const runtimeResult = agentEvents.find((event) => {
+    const runtimeCall = agentEvents.find((candidate) =>
+      candidate.type === "tool.call" && candidate.payload?.tool === "runtimeInfo");
+    return event.type === "tool.result" && event.payload?.call_id === runtimeCall?.payload?.call_id;
+  });
+  const runtimePayload = JSON.stringify(runtimeResult?.payload);
+  if (runtimePayload.includes(session.session_id) || runtimePayload.includes(session.agent_token)) {
+    throw new Error("runtimeInfo exposed a managed-agent routing capability");
+  }
 
   const finalState = await state();
   if (finalState.completed_turns !== 3 || finalState.has_snapshot !== true) {
     throw new Error(`unexpected final state: ${JSON.stringify(finalState)}`);
   }
 
-  const authStatus = finalState.auth_mode === "chatgpt" ? await subscriptionStatus() : undefined;
-  console.log(JSON.stringify({
+  result = {
     session_id: session.session_id,
     first_turn_ms: Math.round(firstMs),
     idle_shutdown_ms: Math.round(idleShutdownMs),
@@ -119,11 +147,14 @@ try {
     tool_calls: requiredTools,
     completed_turns: finalState.completed_turns,
     idle_state: idleState.agent_loaded ? "loaded" : "unloaded",
-    ...(authStatus === undefined ? {} : { auth_revision: authStatus.revision }),
+    auth_mode: finalState.auth_mode,
+    credential_boundary: "private-egress-service-binding",
     status: "ok",
-  }));
+  };
 } catch (error) {
-  const diagnosticState = await state().catch((stateError) => ({ error: errorMessage(stateError) }));
+  const diagnosticState = session
+    ? await state().catch((stateError) => ({ error: errorMessage(stateError) }))
+    : undefined;
   const eventTypes = Object.entries(Object.groupBy(agentEvents, (event) => event.type))
     .map(([type, events]) => [type, events.length]);
   console.error(JSON.stringify({
@@ -133,12 +164,30 @@ try {
     event_types: Object.fromEntries(eventTypes),
     last_event: agentEvents.at(-1)?.type,
   }));
-  throw error;
+  failure = error;
 } finally {
-  inbox.close();
-  socket.close(1000, "smoke complete");
-  await fetch(session.session_url, { method: "DELETE" }).catch(() => {});
+  inbox?.close();
+  if (socket) await disconnect(socket);
+  if (session?.session_id) {
+    try {
+      const cleanup = await deleteWith503Retry(
+        (signal) => managedAgentFetch(session, `${baseUrl}/sessions/${session.session_id}`, {
+          method: "DELETE",
+          signal,
+        }),
+        { description: "managed agent cleanup", timeoutMs: cleanupTimeoutMs },
+      );
+      if (result) result.cleanup_status = cleanup.status === 404 ? "already_absent" : "deleted";
+    } catch (error) {
+      failure = failure
+        ? new AggregateError([failure, error], "Live smoke and cleanup failed")
+        : error;
+    }
+  }
 }
+
+if (failure) throw failure;
+console.log(JSON.stringify(result));
 
 function progress(stage) {
   currentStage = stage;
@@ -147,6 +196,14 @@ function progress(stage) {
 
 function errorMessage(error) {
   return error instanceof Error ? error.message : String(error);
+}
+
+function positiveInteger(name, fallback) {
+  const value = Number(process.env[name] ?? fallback);
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return value;
 }
 
 async function createSession() {
@@ -159,21 +216,13 @@ async function createSession() {
 }
 
 async function state() {
-  const response = await fetch(session.session_url);
+  const response = await managedAgentFetch(session, `${baseUrl}/sessions/${session.session_id}`);
   if (!response.ok) {
     throw Object.assign(
       new Error(`state failed with HTTP ${response.status}: ${await response.text()}`),
       { status: response.status },
     );
   }
-  return response.json();
-}
-
-async function subscriptionStatus() {
-  const response = await fetch(`${baseUrl}/auth/chatgpt`, {
-    headers: { authorization: `Bearer ${adminToken}` },
-  });
-  if (!response.ok) throw new Error(`auth status failed with HTTP ${response.status}: ${await response.text()}`);
   return response.json();
 }
 
@@ -198,7 +247,10 @@ async function pollState(predicate, timeoutMs) {
 }
 
 function connectClient() {
-  const socket = new WebSocket(session.websocket_url);
+  const socket = new WebSocket(
+    session.websocket_url,
+    managedAgentWebSocketOptions(session),
+  );
   const inbox = createInbox(socket, (message) => {
     if (message.type === "event") agentEvents.push(message.event);
   });
@@ -222,10 +274,13 @@ function disconnect(socket) {
 
 async function terminal(inbox, id, timeoutMs) {
   const message = await inbox.next(
-    (candidate) => ["turn_completed", "turn_failed"].includes(candidate.type) && candidate.id === id,
+    (candidate) => ["turn_completed", "turn_failed", "turn_blocked", "turn_cancelled"].includes(candidate.type)
+      && candidate.id === id,
     timeoutMs,
   );
   if (message.type === "turn_failed") throw new Error(`turn ${id} failed: ${message.error}`);
+  if (message.type === "turn_blocked") throw new Error(`turn ${id} was blocked: ${message.error}`);
+  if (message.type === "turn_cancelled") throw new Error(`turn ${id} was cancelled`);
   return message;
 }
 

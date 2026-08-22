@@ -4,6 +4,7 @@
   "main": "src/index.ts",
   "compatibility_date": "2026-07-29",
   "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
   "minify": true,
   "rules": [
     {
@@ -20,6 +21,12 @@
       "persist": true
     }
   },
+  "services": [
+    {
+      "binding": "EGRESS",
+      "service": "nanocodex-egress-broker-example"
+    }
+  ],
   "durable_objects": {
     "bindings": [
       {
@@ -27,8 +34,12 @@
         "class_name": "NanocodexSession"
       },
       {
-        "name": "NANOCODEX_AUTH",
-        "class_name": "NanocodexSubscriptionAuth"
+        "name": "NANOCODEX_ROOMS",
+        "class_name": "MultiplayerRoom"
+      },
+      {
+        "name": "NANOCODEX_MULTIPLAYER_QUOTA",
+        "class_name": "MultiplayerQuota"
       }
     ]
   },
@@ -40,6 +51,18 @@
     {
       "tag": "v2",
       "new_sqlite_classes": ["Sandbox"]
+    },
+    {
+      "tag": "v3",
+      "deleted_classes": ["NanocodexSubscriptionAuth", "Sandbox"]
+    },
+    {
+      "tag": "v4",
+      "new_sqlite_classes": ["MultiplayerRoom"]
+    },
+    {
+      "tag": "v5",
+      "new_sqlite_classes": ["MultiplayerQuota"]
     }
   ],
   "vars": {

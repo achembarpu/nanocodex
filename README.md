@@ -592,7 +592,8 @@ client projection, and sandbox policy while reusing one agent lifecycle:
 | [Native CLI and Ratatui TUI](bin/nanocodex) | Interactive sessions, JSONL one-shot adapter, branching UI, MCP, browser, VM, voice, and full lifecycle cleanup. |
 | [Static browser CDN page](examples/browser-cdn/README.md) | One HTML file runs the Rust/WASM agent from the npm package with no framework, bundler, or install step. |
 | [React + Vite Worker](examples/react-vite/README.md) | A browser Worker owns one persistent session and React consumes ordered events without reshaping the contract. |
-| [Cloudflare Durable Object](examples/cloudflare-workers/README.md) | One SQLite-backed object owns WASM history and hibernatable clients; a separate Sandbox container and R2 prefix provide per-session tools and files. |
+| [Cloudflare managed agents + Multiplayer](examples/cloudflare-workers/README.md) | Signed room objects add ordered N-human chat, bounded replay, a tool-free host-owned agent, and a global durable spend/allocation quota; provider credentials stay behind a private broker binding. |
+| [Cloudflare credential broker](examples/cloudflare-egress/README.md) | Two ordinary Workers use a private Service Binding for exact API-key or OAuth replacement and a singleton rotating Codex OAuth broker. |
 | [Cloudflare fetch + MCP](examples/cloudflare-fetch-mcp/README.md) | CSP-safe QuickJS Code Mode, deferred remote MCP, and caller-owned paid transport inside a serialized Durable Object. |
 | [Rivet Actor](examples/rivet-actors/README.md) | Durable SQLite snapshots and idempotent turns around the WASM driver, with an actor-owned AgentOS workspace and previews. |
 | [Vercel Workflow actor](examples/vercel-workflows/README.md) | A Rust-owned journal between stateless steps, replayable multi-client streams rendered through a replaceable wterm agent UI, and a persistent caller-owned Vercel Sandbox with a separate ephemeral wterm operator shell. |

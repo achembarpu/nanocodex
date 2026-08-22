@@ -1,5 +1,7 @@
 import WebSocket from "ws";
 
+import { managedAgentFetch, managedAgentWebSocketOptions } from "./managed-agent-auth.mjs";
+
 const baseUrl = process.env.NANOCODEX_WORKER_URL ?? "http://127.0.0.1:8787";
 const adminToken = process.env.NANOCODEX_ADMIN_TOKEN ?? "local-admin-token";
 const clients = Number(process.env.NANOCODEX_STRESS_CLIENTS ?? 32);
@@ -21,7 +23,10 @@ const sockets = [];
 
 try {
   await Promise.all(Array.from({ length: clients }, async () => {
-    const socket = new WebSocket(session.websocket_url);
+    const socket = new WebSocket(
+      session.websocket_url,
+      managedAgentWebSocketOptions(session),
+    );
     await onceMessage(socket, (message) => message.type === "ready", 10_000);
     sockets.push(socket);
   }));
@@ -55,7 +60,9 @@ try {
   }));
 } finally {
   for (const socket of sockets) socket.close(1000, "stress complete");
-  await fetch(session.session_url, { method: "DELETE" }).catch(() => {});
+  await managedAgentFetch(session, `${baseUrl}/sessions/${session.session_id}`, {
+    method: "DELETE",
+  }).catch(() => {});
 }
 
 function onceMessage(socket, predicate, timeoutMs) {

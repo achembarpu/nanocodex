@@ -17,8 +17,14 @@ All language consumers live at this repository boundary:
 - Rivet Actors: `rivet-actors/` runs the same harness as a durable,
   SQLite-backed Rivet Actor with an actor-owned AgentOS sandbox.
 - Cloudflare Workers: `cloudflare-workers/` runs the Rust/WASM harness inside a
-  SQLite-backed Durable Object, with a Sandbox container and R2-backed
-  workspace, and proves hibernation-safe session recovery.
+  SQLite-backed managed-agent Durable Object and adds an N-human Multiplayer
+  room over another object. The public room uses a tool-free owner-invoked
+  profile and a global durable allocation/turn quota; full managed agents may
+  use Cloudflare Computer for bounded files. A private Service Binding delegates
+  all provider credential use to the broker.
+- Cloudflare credential broker: `cloudflare-egress/` uses two ordinary Workers
+  and a private Service Binding for default-deny credential routing, exact
+  API-key or OAuth replacement, and a rotating Codex OAuth owner.
 - Cloudflare fetch + MCP: `cloudflare-fetch-mcp/` exposes one authenticated HTTP
   fetch endpoint backed by Rust/WASM, Tempo MPP, deferred Mercator MCP tools,
   and QuickJS Code Mode inside a serialized Durable Object wallet owner.
@@ -54,6 +60,7 @@ npm run subagents --prefix examples/node -- "Review the JS API"
 just build-react-example
 just build-rivet-example
 just build-cloudflare-example
+npm run check --prefix examples/cloudflare-egress
 just build-vercel-example
 ```
 

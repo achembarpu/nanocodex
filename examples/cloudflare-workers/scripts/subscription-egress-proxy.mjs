@@ -20,7 +20,9 @@ const FORWARDED_HEADERS = [
 ];
 
 export async function startSubscriptionEgressProxy(options = {}) {
-  const upstreamUrl = options.upstreamUrl ?? DEFAULT_UPSTREAM;
+  if (options.upstreamUrl !== undefined) {
+    throw new Error("subscription proxy upstream is fixed and cannot be configured");
+  }
   const capability = options.capability ?? randomBytes(32).toString("base64url");
   if (!/^[A-Za-z0-9_-]{43,}$/.test(capability)) {
     throw new Error("subscription proxy capability must be at least 32 random bytes encoded as base64url");
@@ -59,11 +61,14 @@ export async function startSubscriptionEgressProxy(options = {}) {
       return;
     }
 
-    const upstream = new WebSocket(upstreamUrl, {
+    const upstreamOptions = {
       handshakeTimeout: 15_000,
       headers: forwardedHeaders(request.headers),
       maxPayload: MAX_BUFFERED_BYTES,
-    });
+    };
+    const upstream = options.openUpstream
+      ? options.openUpstream(DEFAULT_UPSTREAM, upstreamOptions)
+      : new WebSocket(DEFAULT_UPSTREAM, upstreamOptions);
     let upgraded = false;
     let settled = false;
     upstream.once("open", () => {

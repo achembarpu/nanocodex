@@ -5,7 +5,17 @@ import { createInterface } from "node:readline";
 
 import WebSocket from "ws";
 
-const baseUrl = (process.env.NANOCODEX_WORKER_URL ?? "http://127.0.0.1:8787").replace(/\/$/, "");
+import { credentialSafeHttpOrigin, credentialSafeUrl } from "./credential-origin.mjs";
+import {
+  managedAgentFetch,
+  managedAgentToken,
+  managedAgentWebSocketOptions,
+} from "./managed-agent-auth.mjs";
+
+const baseUrl = credentialSafeHttpOrigin(
+  process.env.NANOCODEX_WORKER_URL ?? "http://127.0.0.1:8787",
+  "NANOCODEX_WORKER_URL",
+).origin;
 const adminToken = process.env.NANOCODEX_ADMIN_TOKEN ?? "local-admin-token";
 const statePath = resolve(process.env.NANOCODEX_REPL_STATE ?? ".nanocodex/cloudflare-repl.json");
 let state = await loadState();
@@ -20,10 +30,12 @@ if (state && state.base_url !== baseUrl) {
 }
 if (!state) {
   const session = await createSession();
+  managedAgentToken(session);
+  credentialSafeUrl(session.websocket_url, "managed agent WebSocket URL");
   state = {
     base_url: baseUrl,
+    agent_token: session.agent_token,
     session_id: session.session_id,
-    session_url: session.session_url,
     websocket_url: session.websocket_url,
   };
   await saveState();
@@ -42,7 +54,7 @@ const detach = () => {
 process.once("SIGINT", detach);
 
 try {
-  client = connect(state.websocket_url);
+  client = connect(state.websocket_url, state);
   const ready = await client.ready;
   process.stdout.write(
     `Nanocodex Cloudflare REPL (${state.session_id}${ready.restored ? ", restored" : ""})\n`,
@@ -91,11 +103,18 @@ async function completePending(pending, resumed) {
   if (terminal.type === "turn_failed") {
     throw new Error(`turn ${terminal.id} failed: ${terminal.error}`);
   }
+  if (terminal.type === "turn_blocked") {
+    throw new Error(`turn ${terminal.id} was blocked: ${terminal.error}`);
+  }
+  if (terminal.type === "turn_cancelled") {
+    throw new Error(`turn ${terminal.id} was cancelled`);
+  }
   process.stdout.write(`${terminal.final_message}\n`);
 }
 
-function connect(url) {
-  const socket = new WebSocket(url);
+function connect(url, agent) {
+  credentialSafeUrl(url, "managed agent WebSocket URL");
+  const socket = new WebSocket(url, managedAgentWebSocketOptions(agent));
   let readySettled = false;
   let resolveReady;
   let rejectReady;
@@ -112,7 +131,9 @@ function connect(url) {
       resolveReady(message);
       return;
     }
-    if (message.type !== "turn_completed" && message.type !== "turn_failed") return;
+    if (!["turn_completed", "turn_failed", "turn_blocked", "turn_cancelled"].includes(message.type)) {
+      return;
+    }
     const waiter = waiters.get(message.id);
     if (!waiter) return;
     waiters.delete(message.id);
@@ -162,7 +183,7 @@ async function createSession() {
 }
 
 async function sessionStatus() {
-  const response = await fetch(state.session_url);
+  const response = await managedAgentFetch(state, `${baseUrl}/sessions/${state.session_id}`);
   if (!response.ok) throw new Error(`session status failed with HTTP ${response.status}: ${await response.text()}`);
   return response.json();
 }
@@ -171,11 +192,14 @@ async function loadState() {
   try {
     const parsed = JSON.parse(await readFile(statePath, "utf8"));
     if (typeof parsed.base_url !== "string"
+      || typeof parsed.agent_token !== "string"
       || typeof parsed.session_id !== "string"
-      || typeof parsed.session_url !== "string"
       || typeof parsed.websocket_url !== "string") {
       throw new Error("missing Worker URL or session capability");
     }
+    managedAgentToken(parsed);
+    credentialSafeHttpOrigin(parsed.base_url, "saved Worker origin");
+    credentialSafeUrl(parsed.websocket_url, "saved managed agent WebSocket URL");
     if (parsed.pending && (
       typeof parsed.pending.id !== "string" || typeof parsed.pending.input !== "string"
     )) {

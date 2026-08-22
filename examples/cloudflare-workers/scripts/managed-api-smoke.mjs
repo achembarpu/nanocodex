@@ -1,13 +1,23 @@
 import { randomUUID } from "node:crypto";
 
-const baseUrl = new URL(process.env.NANOCODEX_WORKER_URL ?? "http://127.0.0.1:8787");
+import { deleteWith503Retry } from "./cleanup-resource.mjs";
+import { credentialSafeHttpOrigin, credentialSafeUrl } from "./credential-origin.mjs";
+import { managedAgentFetch, managedAgentHeaders, managedAgentToken } from "./managed-agent-auth.mjs";
+
+const baseUrl = credentialSafeHttpOrigin(
+  process.env.NANOCODEX_WORKER_URL ?? "http://127.0.0.1:8787",
+  "NANOCODEX_WORKER_URL",
+);
 const adminToken = process.env.NANOCODEX_ADMIN_TOKEN ?? "local-admin-token";
 const terminalTimeoutMs = numberFromEnv("NANOCODEX_SMOKE_TIMEOUT_MS", 180_000);
 const idleTimeoutMs = numberFromEnv("NANOCODEX_SMOKE_IDLE_TIMEOUT_MS", 45_000);
+const cleanupTimeoutMs = numberFromEnv("NANOCODEX_SMOKE_CLEANUP_TIMEOUT_MS", 30_000);
 const skipIdle = process.env.NANOCODEX_SMOKE_SKIP_IDLE === "true";
 let agent;
 let stream;
 let stage = "health";
+let failure;
+let result;
 
 try {
   const health = await timedRequest(new URL("/health", baseUrl));
@@ -22,9 +32,11 @@ try {
   await requireStatus(created.response, 201, "create agent");
   agent = await created.response.json();
   assert(typeof agent.agent_id === "string", "create agent omitted agent_id");
-  assert(typeof agent.agent_url === "string", "create agent omitted agent_url");
   assert(typeof agent.events_url === "string", "create agent omitted events_url");
-  const agentUrl = agent.agent_url;
+  managedAgentToken(agent);
+  credentialSafeUrl(agent.events_url, "managed agent events URL");
+  assert(agent.agent_token !== agent.agent_id, "agent capability aliases its routing id");
+  const agentUrl = agent.events_url.replace(/\/events$/, "");
   const turnsUrl = `${agentUrl}/turns`;
 
   stage = "open-initial-stream";
@@ -67,10 +79,13 @@ try {
   const tool = await waitForTerminal(stream, toolId, toolStarted, terminalTimeoutMs);
   assert(tool.terminal.type === "turn_completed", terminalFailure("tool turn", tool.terminal));
   assert(String(tool.terminal.final_message).includes("MANAGED_TOOLS_OK"), "tool turn returned the wrong answer");
-  requireCompletedTool(tool.messages, toolId, "runtimeInfo");
+  const runtimeInfo = requireCompletedTool(tool.messages, toolId, "runtimeInfo");
   requireCompletedTool(tool.messages, toolId, "exec_command");
+  const runtimeInfoPayload = JSON.stringify(runtimeInfo.event.payload);
+  assert(!runtimeInfoPayload.includes(agent.agent_id), "runtimeInfo exposed the agent routing id");
+  assert(!runtimeInfoPayload.includes(agent.agent_token), "runtimeInfo exposed the scoped agent capability");
 
-  const toolStateResponse = await fetch(`${turnsUrl}/${toolId}`);
+  const toolStateResponse = await managedAgentFetch(agent, `${turnsUrl}/${toolId}`);
   await requireStatus(toolStateResponse, 200, "tool state");
   const toolState = await toolStateResponse.json();
   assert(toolState.state === "completed", `tool state was ${toolState.state}`);
@@ -81,7 +96,7 @@ try {
     stage = "idle-shutdown";
     const idleStarted = performance.now();
     await poll(async () => {
-      const response = await fetch(agentUrl);
+      const response = await managedAgentFetch(agent, agentUrl);
       if (!response.ok) return false;
       return (await response.json()).agent_loaded === false;
     }, idleTimeoutMs, "agent idle shutdown");
@@ -128,20 +143,22 @@ try {
     `request-${cancelId}`,
   );
   await requireStatus(cancelAcceptance.response, 202, "cancel acceptance");
-  const cancelResponse = await fetch(`${turnsUrl}/${cancelId}/cancel`, { method: "POST" });
+  const cancelResponse = await managedAgentFetch(agent, `${turnsUrl}/${cancelId}/cancel`, {
+    method: "POST",
+  });
   await requireStatus(cancelResponse, 202, "cancel intent");
   assert((await cancelResponse.json()).state === "cancelling", "cancel intent was not durably acknowledged");
   const cancelled = await waitForTerminal(stream, cancelId, cancelStarted, terminalTimeoutMs);
   assert(cancelled.terminal.type === "turn_cancelled", terminalFailure("cancelled turn", cancelled.terminal));
 
   stage = "final-state";
-  const finalStateResponse = await fetch(agentUrl);
+  const finalStateResponse = await managedAgentFetch(agent, agentUrl);
   await requireStatus(finalStateResponse, 200, "final state");
   const finalState = await finalStateResponse.json();
   assert(finalState.completed_turns === 3, `expected 3 completed turns, got ${finalState.completed_turns}`);
   assert(finalState.stream_error === null, `event stream is fenced: ${finalState.stream_error}`);
 
-  console.log(JSON.stringify({
+  result = {
     agent_id: agent.agent_id,
     status: "ok",
     health_ms: rounded(health.elapsedMs),
@@ -158,19 +175,35 @@ try {
     latest_cursor: finalState.latest_event_cursor,
     completed_turns: finalState.completed_turns,
     tested_tools: ["runtimeInfo", "exec_command"],
-  }));
+  };
 } catch (error) {
   console.error(JSON.stringify({ stage, error: errorMessage(error), agent_id: agent?.agent_id }));
-  throw error;
+  failure = error;
 } finally {
   await stream?.cancel().catch(() => {});
-  if (agent?.agent_url) {
-    await fetch(agent.agent_url, { method: "DELETE" }).catch(() => {});
+  if (agent?.agent_id) {
+    try {
+      const cleanup = await deleteWith503Retry(
+        (signal) => managedAgentFetch(agent, new URL(`/v1/agents/${agent.agent_id}`, baseUrl), {
+          method: "DELETE",
+          signal,
+        }),
+        { description: "managed agent cleanup", timeoutMs: cleanupTimeoutMs },
+      );
+      if (result) result.cleanup_status = cleanup.status === 404 ? "already_absent" : "deleted";
+    } catch (error) {
+      failure = failure
+        ? new AggregateError([failure, error], "Managed API smoke and cleanup failed")
+        : error;
+    }
   }
 }
 
+if (failure) throw failure;
+console.log(JSON.stringify(result));
+
 async function submitTurn(turnsUrl, id, input, idempotencyKey) {
-  return timedRequest(turnsUrl, {
+  return timedAgentRequest(turnsUrl, {
     method: "POST",
     headers: {
       "content-type": "application/json",
@@ -183,8 +216,8 @@ async function submitTurn(turnsUrl, id, input, idempotencyKey) {
 async function openEventStream(url, { cursor, lastEventId } = {}) {
   const target = new URL(url);
   if (cursor !== undefined) target.searchParams.set("cursor", cursor);
-  const response = await fetch(target, {
-    headers: lastEventId === undefined ? {} : { "last-event-id": lastEventId },
+  const response = await managedAgentFetch(agent, target, {
+    headers: lastEventId === undefined ? undefined : { "last-event-id": lastEventId },
   });
   await requireStatus(response, 200, "event stream");
   assert(response.headers.get("content-type")?.startsWith("text/event-stream"), "events endpoint did not return SSE");
@@ -258,6 +291,7 @@ function requireCompletedTool(messages, turnId, tool) {
   );
   assert(result, `${tool} did not emit tool.result`);
   assert(result.event.payload.status === "completed", `${tool} finished as ${result.event.payload.status}`);
+  return result;
 }
 
 function parseSse(frame) {
@@ -280,6 +314,15 @@ function parseSse(frame) {
 async function timedRequest(url, init) {
   const startedAt = performance.now();
   const response = await fetch(url, init);
+  return { response, elapsedMs: performance.now() - startedAt };
+}
+
+async function timedAgentRequest(url, init) {
+  const startedAt = performance.now();
+  const response = await fetch(url, {
+    ...init,
+    headers: managedAgentHeaders(agent, init?.headers),
+  });
   return { response, elapsedMs: performance.now() - startedAt };
 }
 
@@ -320,7 +363,7 @@ function terminalFailure(action, terminal) {
 
 function numberFromEnv(name, fallback) {
   const value = Number(process.env[name] ?? fallback);
-  if (!Number.isFinite(value) || value <= 0) throw new Error(`${name} must be positive`);
+  if (!Number.isSafeInteger(value) || value <= 0) throw new Error(`${name} must be a positive integer`);
   return value;
 }
 

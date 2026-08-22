@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import WebSocket from "ws";
 
+import { managedAgentFetch, managedAgentWebSocketOptions } from "./managed-agent-auth.mjs";
+
 const baseUrl = process.env.NANOCODEX_WORKER_URL ?? "http://127.0.0.1:8787";
 const adminToken = process.env.NANOCODEX_ADMIN_TOKEN ?? "local-admin-token";
 const sessionCount = Number(process.env.NANOCODEX_SOAK_SESSIONS ?? 16);
@@ -18,7 +20,10 @@ try {
     sessions.push(await createSession());
   }));
   const clients = await Promise.all(sessions.map(async (session, index) => {
-    const socket = new WebSocket(session.websocket_url);
+    const socket = new WebSocket(
+      session.websocket_url,
+      managedAgentWebSocketOptions(session),
+    );
     sockets.push(socket);
     const inbox = createInbox(socket);
     await inbox.next((message) => message.type === "ready", 10_000);
@@ -44,8 +49,11 @@ try {
     }
   }));
 
-  const states = await Promise.all(sessions.map(async ({ session_url }) => {
-    const response = await fetch(session_url);
+  const states = await Promise.all(sessions.map(async (session) => {
+    const response = await managedAgentFetch(
+      session,
+      `${baseUrl}/sessions/${session.session_id}`,
+    );
     if (!response.ok) throw new Error(`state failed with HTTP ${response.status}`);
     return response.json();
   }));
@@ -63,9 +71,11 @@ try {
   }));
 } finally {
   for (const socket of sockets) socket.terminate();
-  await Promise.all(sessions.map(({ session_url }) => fetch(session_url, {
-    method: "DELETE",
-  }).catch(() => {})));
+  await Promise.all(sessions.map((session) => managedAgentFetch(
+    session,
+    `${baseUrl}/sessions/${session.session_id}`,
+    { method: "DELETE" },
+  ).catch(() => {})));
 }
 
 async function createSession() {
