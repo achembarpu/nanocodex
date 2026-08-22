@@ -304,6 +304,35 @@ test("repository uploads retry bounded transient responses and transport failure
   assert.equal(isRetriableUploadError(new Error("invalid local input")), false);
 });
 
+test("repository state reads retry a transient secret-rollout response", async () => {
+  let attempts = 0;
+  const server = createServer((request, response) => {
+    attempts += 1;
+    assert.equal(request.headers.authorization, "Bearer mirror-token");
+    if (attempts === 1) {
+      response.writeHead(500, { "content-type": "text/html" });
+      response.end("transient Worker rollout");
+      return;
+    }
+    response.writeHead(200, { "content-type": "application/json" });
+    response.end(JSON.stringify({ publication: { head: "current" } }));
+  });
+  try {
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    const state = await readRemoteState(
+      `http://127.0.0.1:${address.port}`,
+      "mirror-token",
+    );
+    assert.deepEqual(state, { publication: { head: "current" } });
+    assert.equal(attempts, 2);
+  } finally {
+    if (server.listening) await new Promise((resolveClose) => server.close(resolveClose));
+  }
+});
+
 test("invalid publication repair requires an explicit operator opt-in", async () => {
   let authorization;
   const server = createServer(async (request, response) => {

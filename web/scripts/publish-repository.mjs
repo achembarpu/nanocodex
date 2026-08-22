@@ -247,27 +247,41 @@ export function buildUploadPlan(inventory, previousInventory) {
 }
 
 export async function readRemoteState(origin, token, repairInvalid = false) {
-  const response = await authenticatedFetch(`${origin}/api/git/state`, token);
-  if (response.status === 404) return null;
-  if (response.status === 503) {
-    let failure;
+  for (let attempt = 1; attempt <= 6; attempt += 1) {
+    let response;
     try {
-      failure = await response.clone().json();
-    } catch {
-      // The normal response error below retains the bounded raw response body.
+      response = await authenticatedFetch(`${origin}/api/git/state`, token);
+    } catch (error) {
+      if (!isRetriableUploadError(error) || attempt === 6) throw error;
+      await delay(250 * (2 ** (attempt - 1)));
+      continue;
     }
-    if (failure?.error === "repository publication is invalid") {
-      if (!repairInvalid) {
-        throw new Error(
-          "Cloudflare repository publication is invalid; set NANOCODEX_REPAIR_INVALID_PUBLICATION=1 to atomically replace it with the current format",
-        );
+    if (response.status === 404) return null;
+    if (response.status === 503) {
+      let failure;
+      try {
+        failure = await response.clone().json();
+      } catch {
+        // The normal response error below retains the bounded raw response body.
       }
-      console.log("Replacing invalid Cloudflare repository publication with the current format");
-      return { replaceInvalid: true };
+      if (failure?.error === "repository publication is invalid") {
+        if (!repairInvalid) {
+          throw new Error(
+            "Cloudflare repository publication is invalid; set NANOCODEX_REPAIR_INVALID_PUBLICATION=1 to atomically replace it with the current format",
+          );
+        }
+        console.log("Replacing invalid Cloudflare repository publication with the current format");
+        return { replaceInvalid: true };
+      }
     }
+    if (response.ok) return response.json();
+    if (!isRetriableUploadStatus(response.status) || attempt === 6) {
+      throw new Error(await responseError("read state", response));
+    }
+    if (response.body) await response.body.cancel().catch(() => undefined);
+    await delay(250 * (2 ** (attempt - 1)));
   }
-  if (!response.ok) throw new Error(await responseError("read state", response));
-  return response.json();
+  throw new Error("read state exhausted its retry policy");
 }
 
 const objectShardTargetBytes = 4 * 1024 * 1024;
