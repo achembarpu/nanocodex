@@ -63,6 +63,7 @@ that may affect the current run, while `Tab` creates a later queued turn.
 | --- | --- |
 | `/btw <question>` | Fork the latest safe mainline checkpoint into a side pane and submit the question there. Partial model output and unmatched tool calls are excluded. |
 | `/btw` | Open an empty side fork, or focus the existing side pane. |
+| `/split` | Move an idle, completed `/btw` into a right-hand tmux, Zellij, WezTerm, or iTerm2 pane when available, otherwise into a detected terminal window. The fork is durably closed before `nanocodex resume <thread-id>` starts, and the main TUI is freed for another `/btw`. |
 | `/close` | Close the `/btw` pane once it is idle. A busy pane is retained and reports why it cannot close. |
 | `/cancel` | Cancel the focused turn without the two-stage Escape gesture. |
 | `/trace` | Open Jaeger filtered to the focused session. A `/btw` trace becomes available after its fork has produced a session ID. |

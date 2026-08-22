@@ -557,7 +557,7 @@ fn render_footer(frame: &mut Frame<'_>, app: &App, area: Rect) {
     };
     let help = if app.btw.is_some() {
         format!(
-            "  BackTab switch · {tool_help} · Ctrl+V image · /close dismiss · Enter send/steer · Tab queue · {escape_help} · Ctrl+C quit"
+            "  BackTab switch · {tool_help} · Ctrl+V image · /split detach · /close dismiss · Enter send/steer · Tab queue · {escape_help} · Ctrl+C quit"
         )
     } else {
         format!(

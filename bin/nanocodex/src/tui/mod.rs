@@ -10,6 +10,7 @@ mod resume_picker;
 mod scheduler;
 mod selection;
 mod simplify;
+mod split;
 mod telemetry;
 mod terminal;
 mod transcript;
@@ -17,7 +18,7 @@ mod view;
 
 use std::{
     collections::{HashMap, HashSet, VecDeque},
-    path::PathBuf,
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::Arc,
     time::{Duration, Instant},
@@ -165,6 +166,10 @@ enum WorkerCommand {
     CloseBtw {
         id: u64,
     },
+    SplitBtw {
+        id: u64,
+        cwd: PathBuf,
+    },
     EditHistorical {
         source_branch_id: u64,
         new_branch_id: u64,
@@ -252,6 +257,15 @@ enum WorkerEvent {
     BtwEventStreamClosed {
         id: u64,
     },
+    BtwSplitCompleted {
+        id: u64,
+        destination: &'static str,
+    },
+    BtwSplitFailed {
+        id: u64,
+        error: String,
+        detached: bool,
+    },
     MainBranchOpened {
         id: u64,
         parent_id: u64,
@@ -332,6 +346,7 @@ struct BtwWorker {
     request_id: Arc<str>,
     agent: Nanocodex,
     first_prompt: bool,
+    has_durable_turn: bool,
     turns: VecDeque<TrackedTurn>,
 }
 
@@ -605,6 +620,7 @@ enum Submission {
     Prompt(SubmittedPrompt),
     Btw(Option<SubmittedPrompt>),
     CloseBtw,
+    SplitBtw,
     Cancel,
     Trace,
     Fast(Option<bool>),
@@ -1134,10 +1150,18 @@ fn handle_worker_update(
             let _ = app.on_agent_event(PaneId::Btw(id), &event.event);
         }
         WorkerEvent::BtwEventStreamClosed { id } => {
-            if app.btw_id() == Some(id) {
+            if app.btw_id() == Some(id) && !app.btw_splitting(id) {
                 app.btw_failed(id, "BTW event stream closed".to_owned());
             }
         }
+        WorkerEvent::BtwSplitCompleted { id, destination } => {
+            app.btw_split_completed(id, destination);
+        }
+        WorkerEvent::BtwSplitFailed {
+            id,
+            error,
+            detached,
+        } => app.btw_split_failed(id, error, detached),
         WorkerEvent::MainBranchOpened {
             id,
             parent_id,
@@ -1342,6 +1366,7 @@ impl AgentWorker {
                     self.btw = None;
                 }
             }
+            WorkerCommand::SplitBtw { id, cwd } => self.split_btw(id, &cwd).await,
             WorkerCommand::EditHistorical {
                 source_branch_id,
                 new_branch_id,
@@ -1800,6 +1825,7 @@ impl AgentWorker {
                     request_id,
                     agent,
                     first_prompt: true,
+                    has_durable_turn: false,
                     turns: VecDeque::new(),
                 };
                 if let Some(prompt) = prompt {
@@ -1839,6 +1865,87 @@ impl AgentWorker {
                     error: error.to_string(),
                 }));
             }
+        }
+    }
+
+    async fn split_btw(&mut self, id: u64, cwd: &Path) {
+        let Some(branch) = self.btw.as_ref().filter(|branch| branch.id == id) else {
+            drop(self.updates.send(WorkerEvent::BtwSplitFailed {
+                id,
+                error: "BTW branch is not available".to_owned(),
+                detached: false,
+            }));
+            return;
+        };
+        if !branch.turns.is_empty() {
+            drop(self.updates.send(WorkerEvent::BtwSplitFailed {
+                id,
+                error: "BTW has an active turn; wait for it to finish before /split".to_owned(),
+                detached: false,
+            }));
+            return;
+        }
+        if !branch.has_durable_turn {
+            drop(
+                self.updates.send(WorkerEvent::BtwSplitFailed {
+                    id,
+                    error:
+                        "BTW needs one completed turn before it can be resumed in another terminal"
+                            .to_owned(),
+                    detached: false,
+                }),
+            );
+            return;
+        }
+        let Some(rollout) = branch.agent.rollout() else {
+            drop(
+                self.updates.send(WorkerEvent::BtwSplitFailed {
+                    id,
+                    error: "/split requires rollout recording; restart without `--rollouts false`"
+                        .to_owned(),
+                    detached: false,
+                }),
+            );
+            return;
+        };
+        let thread_id = rollout.thread_id().to_owned();
+        let prepared = match split::PreparedSplit::detect(cwd) {
+            Ok(prepared) => prepared,
+            Err(error) => {
+                drop(self.updates.send(WorkerEvent::BtwSplitFailed {
+                    id,
+                    error: error.to_string(),
+                    detached: false,
+                }));
+                return;
+            }
+        };
+
+        let Some(branch) = self.btw.take() else {
+            return;
+        };
+        if let Err(error) = branch.agent.shutdown().await {
+            drop(self.updates.send(WorkerEvent::BtwSplitFailed {
+                id,
+                error: format!(
+                    "failed to shut down BTW thread {thread_id}: {error}; try `nanocodex resume {thread_id}` manually"
+                ),
+                detached: true,
+            }));
+            return;
+        }
+        match prepared.launch(&thread_id) {
+            Ok(destination) => drop(
+                self.updates
+                    .send(WorkerEvent::BtwSplitCompleted { id, destination }),
+            ),
+            Err(error) => drop(self.updates.send(WorkerEvent::BtwSplitFailed {
+                id,
+                error: format!(
+                    "{error}; thread {thread_id} is saved — run `nanocodex resume {thread_id}` manually"
+                ),
+                detached: true,
+            })),
         }
     }
 
@@ -1984,6 +2091,7 @@ impl AgentWorker {
 
     fn finish_turn(&mut self, finished: FinishedTurn) {
         let main_branch_id = finished.main_branch_id;
+        let completed_durably = finished.result.is_some() && finished.error.is_none();
         match finished.target {
             PaneId::Main => {
                 let branch_id = main_branch_id.unwrap_or(self.main.id);
@@ -2004,6 +2112,7 @@ impl AgentWorker {
             PaneId::Btw(id) => {
                 if let Some(branch) = self.btw.as_mut().filter(|branch| branch.id == id) {
                     remove_finished(&mut branch.turns, finished.id);
+                    branch.has_durable_turn |= completed_durably;
                 }
             }
         }
@@ -2761,6 +2870,12 @@ fn submit(
     commands: &mpsc::UnboundedSender<WorkerCommand>,
     intent: SubmitIntent,
 ) -> Result<()> {
+    if let PaneId::Btw(id) = app.focus
+        && app.btw_splitting(id)
+    {
+        app.set_active_status("Moving BTW to another terminal");
+        return Ok(());
+    }
     let Some(input) = app.take_submission() else {
         return Ok(());
     };
@@ -2823,6 +2938,24 @@ fn submit(
                 }
             }
         }
+        Submission::SplitBtw => {
+            let Some(id) = app.btw_id() else {
+                app.push_active_error("/split requires an open /btw thread");
+                app.set_active_status("No BTW to split");
+                return Ok(());
+            };
+            if app.btw_busy() {
+                app.reject_btw_split_while_busy();
+            } else if app.begin_btw_split(id) {
+                send_command(
+                    commands,
+                    WorkerCommand::SplitBtw {
+                        id,
+                        cwd: app.cwd.clone(),
+                    },
+                )?;
+            }
+        }
         Submission::Cancel => {
             let target = app.focus;
             app.cancel_pending(target);
@@ -2882,6 +3015,12 @@ fn classify_submission(input: impl Into<SubmittedPrompt>) -> Submission {
     }
     if trimmed == "/close" {
         return Submission::CloseBtw;
+    }
+    if trimmed == "/split" {
+        return Submission::SplitBtw;
+    }
+    if trimmed.starts_with("/split ") {
+        return Submission::InvalidCommand("Usage: /split".to_owned());
     }
     if trimmed == "/cancel" {
         return Submission::Cancel;
@@ -3063,11 +3202,11 @@ mod tests {
     use tokio_tungstenite::{WebSocketStream, accept_async, tungstenite::Message};
 
     use super::{
-        BTW_BOUNDARY, PaneId, RedrawPriority, SubagentCompletionTracker, Submission,
+        BTW_BOUNDARY, PaneId, RedrawPriority, SubagentCompletionTracker, Submission, SubmitIntent,
         TerminalAction, UiAction, UiModel, UiUpdate, VoiceControl, WorkerCommand, WorkerEvent,
         active_session_id, apply_main_agent_event_batch, classify_submission, handle_key,
         handle_subagent_update, handle_worker_update, paste_clipboard_image, prepare_btw_prompt,
-        report_cancel_outcome, session_trace_url, spawn_agent_worker,
+        report_cancel_outcome, session_trace_url, spawn_agent_worker, submit,
     };
     use crate::subagents::{AgentId, AgentStatus, AgentUpdate, ScopedAgentUpdate};
     use crate::tui::{
@@ -3251,6 +3390,11 @@ mod tests {
             classify_submission("/close".to_owned()),
             Submission::CloseBtw
         );
+        assert_eq!(classify_submission(" /split "), Submission::SplitBtw);
+        assert_eq!(
+            classify_submission("/split right"),
+            Submission::InvalidCommand("Usage: /split".to_owned())
+        );
         assert_eq!(
             classify_submission("/cancel".to_owned()),
             Submission::Cancel
@@ -3334,6 +3478,10 @@ mod tests {
             Submission::Prompt("/btw-not-a-command".into())
         );
         assert_eq!(
+            classify_submission("/splitwise"),
+            Submission::Prompt("/splitwise".into())
+        );
+        assert_eq!(
             classify_submission("/simplify-this"),
             Submission::Prompt("/simplify-this".into())
         );
@@ -3349,6 +3497,25 @@ mod tests {
             classify_submission("/modeling"),
             Submission::Prompt("/modeling".into())
         );
+    }
+
+    #[test]
+    fn split_submission_marks_the_btw_and_requests_a_worker_handoff() {
+        let (commands, mut worker) = mpsc::unbounded_channel();
+        let mut app = App::new("/workspace".into());
+        let id = app.begin_btw();
+        app.btw_opened(id, Arc::from("btw-thread"));
+        app.input = "/split".to_owned();
+        app.cursor = app.input.len();
+
+        submit(&mut app, "main-thread", &commands, SubmitIntent::Immediate).unwrap();
+
+        assert!(app.btw_splitting(id));
+        assert!(matches!(
+            worker.try_recv(),
+            Ok(WorkerCommand::SplitBtw { id: split_id, cwd })
+                if split_id == id && cwd == PathBuf::from("/workspace")
+        ));
     }
 
     #[test]

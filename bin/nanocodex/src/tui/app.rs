@@ -1038,6 +1038,7 @@ fn smooth_scroll_drain(pending_rows: usize) -> usize {
 pub(super) struct BtwPane {
     pub(super) id: u64,
     pub(super) request_id: Option<Arc<str>>,
+    splitting: bool,
     pub(super) conversation: Conversation,
 }
 
@@ -2108,6 +2109,7 @@ impl App {
         self.btw = Some(BtwPane {
             id,
             request_id: None,
+            splitting: false,
             conversation,
         });
         if !self.tool_details_expanded
@@ -2146,17 +2148,80 @@ impl App {
     }
 
     pub(super) fn btw_busy(&self) -> bool {
+        self.btw.as_ref().is_some_and(|btw| {
+            btw.splitting || btw.conversation.running || btw.conversation.pending_turns > 0
+        })
+    }
+
+    pub(super) fn btw_splitting(&self, id: u64) -> bool {
         self.btw
             .as_ref()
-            .is_some_and(|btw| btw.conversation.running || btw.conversation.pending_turns > 0)
+            .is_some_and(|btw| btw.id == id && btw.splitting)
     }
 
     pub(super) fn reject_btw_close_while_busy(&mut self) {
         if let Some(btw) = self.btw.as_mut() {
+            let (error, status) = if btw.splitting {
+                ("BTW is already moving to another terminal", "Moving BTW")
+            } else {
+                (
+                    "BTW has an active or queued turn; wait for it to finish before /close",
+                    "BTW still running",
+                )
+            };
+            btw.conversation
+                .push_output(TranscriptItem::Error(error.to_owned()));
+            status.clone_into(&mut btw.conversation.status);
+        }
+    }
+
+    pub(super) fn reject_btw_split_while_busy(&mut self) {
+        if let Some(btw) = self.btw.as_mut() {
             btw.conversation.push_output(TranscriptItem::Error(
-                "BTW has an active or queued turn; wait for it to finish before /close".to_owned(),
+                "BTW has an active or queued turn; wait for it to finish before /split".to_owned(),
             ));
             "BTW still running".clone_into(&mut btw.conversation.status);
+        }
+    }
+
+    pub(super) fn begin_btw_split(&mut self, id: u64) -> bool {
+        let Some(btw) = self.btw.as_mut().filter(|btw| btw.id == id) else {
+            return false;
+        };
+        if btw.request_id.is_none() {
+            btw.conversation.push_output(TranscriptItem::Error(
+                "wait for the BTW fork to finish opening before /split".to_owned(),
+            ));
+            "BTW still opening".clone_into(&mut btw.conversation.status);
+            return false;
+        }
+        btw.splitting = true;
+        "Moving BTW to another terminal".clone_into(&mut btw.conversation.status);
+        true
+    }
+
+    pub(super) fn btw_split_completed(&mut self, id: u64, destination: &str) {
+        if self.btw_id() != Some(id) {
+            return;
+        }
+        self.close_btw(id);
+        self.main.status = format!("BTW moved to {destination}");
+    }
+
+    pub(super) fn btw_split_failed(&mut self, id: u64, error: String, detached: bool) {
+        if self.btw_id() != Some(id) {
+            return;
+        }
+        if detached {
+            self.close_btw(id);
+            self.main.push_output(TranscriptItem::Error(error));
+            "BTW detached; terminal launch failed".clone_into(&mut self.main.status);
+            return;
+        }
+        if let Some(btw) = self.btw.as_mut() {
+            btw.splitting = false;
+            btw.conversation.push_output(TranscriptItem::Error(error));
+            "Split unavailable".clone_into(&mut btw.conversation.status);
         }
     }
 
@@ -3703,6 +3768,34 @@ mod tests {
         app.close_btw(id);
         assert_eq!(app.focus, PaneId::Main);
         assert!(app.btw.is_none());
+    }
+
+    #[test]
+    fn btw_split_state_retains_preflight_failures_and_closes_detached_threads() {
+        let mut app = App::new("/workspace".into());
+        let id = app.begin_btw();
+        assert!(!app.begin_btw_split(id));
+        assert!(!app.btw_splitting(id));
+
+        app.btw_opened(id, Arc::from("btw-thread"));
+        assert!(app.begin_btw_split(id));
+        assert!(app.btw_busy());
+        app.btw_split_failed(id, "no terminal".to_owned(), false);
+        assert_eq!(app.btw_id(), Some(id));
+        assert!(!app.btw_splitting(id));
+
+        assert!(app.begin_btw_split(id));
+        app.btw_split_completed(id, "the right tmux pane");
+        assert!(app.btw.is_none());
+        assert_eq!(app.focus, PaneId::Main);
+        assert_eq!(app.main.status, "BTW moved to the right tmux pane");
+
+        let id = app.begin_btw();
+        app.btw_opened(id, Arc::from("second-btw-thread"));
+        assert!(app.begin_btw_split(id));
+        app.btw_split_failed(id, "launch failed; resume manually".to_owned(), true);
+        assert!(app.btw.is_none());
+        assert_eq!(app.main.status, "BTW detached; terminal launch failed");
     }
 
     #[test]

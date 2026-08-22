@@ -98,6 +98,10 @@ criterion.workspace = true
 name = "tui_render"
 harness = false
 
+[[test]]
+name = "tui_split"
+path = "tests/tui_split.rs"
+
 [[bin]]
 name = "nanocodex"
 path = "src/main.rs"
