@@ -25,6 +25,10 @@ const repositoryPath = resolve(
 const uploadConcurrency = 12;
 const repositoryPackPartBytes = 16 * 1024 * 1024;
 const publicationBranch = "master";
+const uploadAttemptTimeoutMs = positiveIntegerEnvironment(
+  "NANOCODEX_GIT_UPLOAD_TIMEOUT_MS",
+  60_000,
+);
 
 async function main() {
   const origin = requiredEnvironment("NANOCODEX_GIT_ORIGIN").replace(/\/$/, "");
@@ -694,7 +698,13 @@ async function uploadFile(origin, token, remote, local, range) {
       response = await authenticatedFetch(
         `${origin}/api/git/objects/${remote}`,
         token,
-        { method: "PUT", headers, body, duplex: "half" },
+        {
+          method: "PUT",
+          headers,
+          body,
+          duplex: "half",
+          signal: AbortSignal.timeout(uploadAttemptTimeoutMs),
+        },
       );
     } catch (error) {
       lastError = new Error(
@@ -731,7 +741,7 @@ export function isRetriableUploadStatus(status) {
 }
 
 export function isRetriableUploadError(error) {
-  return error instanceof TypeError;
+  return error instanceof TypeError || error?.name === "TimeoutError";
 }
 
 function delay(milliseconds) {
@@ -793,6 +803,16 @@ function requiredEnvironment(name) {
   const value = process.env[name]?.trim();
   if (!value) throw new Error(`${name} is required`);
   return value;
+}
+
+function positiveIntegerEnvironment(name, fallback) {
+  const value = process.env[name]?.trim();
+  if (!value) return fallback;
+  const parsed = Number(value);
+  if (!Number.isSafeInteger(parsed) || parsed <= 0) {
+    throw new Error(`${name} must be a positive integer`);
+  }
+  return parsed;
 }
 
 if (resolve(process.argv[1] ?? "") === scriptPath) {
