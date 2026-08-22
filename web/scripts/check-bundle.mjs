@@ -40,10 +40,13 @@ const budgets = Object.freeze({
   parquetJavaScriptGzip: 18_000,
   parquetCompressorsJavaScript: 116_000,
   parquetCompressorsJavaScriptGzip: 75_500,
-  // just-bash and its built-in Unix command set stay behind Agent startup.
-  // Includes the package-owned browser zlib implementation used by just-bash.
-  browserShellJavaScript: 1_670_000,
-  browserShellJavaScriptGzip: 470_000,
+  // Git restoration, project instructions, and the model-visible browser tool
+  // contracts are ready with the Agent. The much larger Bash interpreter is
+  // fetched only if exec_command is invoked.
+  browserShellJavaScript: 320_000,
+  browserShellJavaScriptGzip: 98_000,
+  browserBashJavaScript: 1_340_000,
+  browserBashJavaScriptGzip: 370_000,
   // Includes the canonical Rust apply_patch planner and the complete
   // JSON-Schema-backed subagent runtime. Keep these close to the optimized
   // artifact so future growth still fails this gate.
@@ -284,6 +287,24 @@ within(
   budgets.browserShellJavaScriptGzip,
 );
 
+const browserBashFile = await findLazyAsset(
+  browserShellSource,
+  (_file, source) => source.includes("bug in just-bash"),
+);
+assert(browserBashFile, "the browser shell must lazy-load Bash on first exec_command");
+assert(
+  !browserShellFiles.has(browserBashFile),
+  "the Bash interpreter must not enter authenticated Agent startup",
+);
+assert(!html.includes(browserBashFile), "index.html must not preload the Bash interpreter");
+const browserBash = await fileStats([`assets/${browserBashFile}`]);
+within("Browser Bash JavaScript", browserBash.bytes, budgets.browserBashJavaScript);
+within(
+  "Browser Bash JavaScript gzip",
+  browserBash.gzipBytes,
+  budgets.browserBashJavaScriptGzip,
+);
+
 const pythonFile = await findLazyAsset(
   browserShellSource,
   (_file, source) => source.includes("Python worker failed"),
@@ -502,6 +523,8 @@ console.log(JSON.stringify({
     shellFiles: browserShell.fileCount,
     shellBytes: browserShell.bytes,
     shellGzipBytes: browserShell.gzipBytes,
+    bashBytes: browserBash.bytes,
+    bashGzipBytes: browserBash.gzipBytes,
     pythonEntry: pythonFile,
     compilerEntry: compilerFile,
     sshEntry: sshFile,

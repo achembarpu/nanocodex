@@ -1,8 +1,6 @@
 import "./browserBuffer.mjs";
-import { createTwoFilesPatch } from "diff";
 import git from "isomorphic-git";
 import http from "isomorphic-git/http/web";
-import { Bash, defineCommand, } from "just-bash/browser";
 import { artifact } from "../artifact.mjs";
 import { createOpfsGitFs, openOpfsWorkspaceRoot, } from "./opfsGit.mjs";
 import { browserThread, initializeThreadGit, notifyThreadGitChanged, THREAD_GIT_AUTHOR, THREAD_GIT_DIRECTORY, withThreadGitLock, } from "./threadGit.mjs";
@@ -58,11 +56,42 @@ export async function prepareBrowserShell(threadId, origin) {
     await initializeThreadGit(thread);
     const workspaceRoot = await openOpfsWorkspaceRoot(thread.workspaceName);
     const rawFs = createOpfsGitFs(workspaceRoot);
-    const { exec, filesystem: shellFs } = await createBrowserBash(rawFs, thread, {
-        workspaceRoot,
-    });
     const projectInstructions = await loadBrowserProjectInstructions(rawFs);
     const workspace = await openThreadWorkspace(threadId);
+    let shellFs;
+    let shellDirty = false;
+    let shellRequest;
+    const loadShell = () => {
+        if (shellRequest)
+            return shellRequest;
+        // The shell's first path scan observes every mutation completed before
+        // creation. Only mutations racing that scan require a second refresh.
+        shellDirty = false;
+        const loading = createBrowserBash(rawFs, thread, { workspaceRoot }).then(async (shell) => {
+            shellFs = shell.filesystem;
+            if (shellDirty) {
+                shellDirty = false;
+                await shellFs.refreshPaths();
+            }
+            return shell;
+        }).catch((error) => {
+            if (shellRequest === loading) {
+                shellRequest = undefined;
+                shellFs = undefined;
+                shellDirty = true;
+            }
+            throw error;
+        });
+        shellRequest = loading;
+        return loading;
+    };
+    const recordShellMutation = (operation, path) => {
+        if (!shellFs) {
+            shellDirty = true;
+            return;
+        }
+        shellFs[operation](path);
+    };
     const notifyingWorkspace = Object.freeze({
         root: workspace.root,
         list: workspace.list,
@@ -70,7 +99,7 @@ export async function prepareBrowserShell(threadId, origin) {
         async writeFile(path, contents) {
             await workspace.writeFile(path, contents);
             try {
-                shellFs.recordExternalWrite(path);
+                recordShellMutation("recordExternalWrite", path);
             }
             finally {
                 notifyThreadGitChanged(thread);
@@ -79,7 +108,7 @@ export async function prepareBrowserShell(threadId, origin) {
         async remove(path, options) {
             await workspace.remove(path, options);
             try {
-                shellFs.recordExternalRemove(path);
+                recordShellMutation("recordExternalRemove", path);
             }
             finally {
                 notifyThreadGitChanged(thread);
@@ -88,7 +117,7 @@ export async function prepareBrowserShell(threadId, origin) {
         async mkdir(path) {
             await workspace.mkdir(path);
             try {
-                shellFs.recordExternalWrite(path);
+                recordShellMutation("recordExternalWrite", path);
             }
             finally {
                 notifyThreadGitChanged(thread);
@@ -113,7 +142,9 @@ export async function prepareBrowserShell(threadId, origin) {
                 additionalProperties: true,
             },
             outputSchema: UNIFIED_EXEC_OUTPUT_SCHEMA,
-            handler: exec,
+            async handler(input, context) {
+                return (await loadShell()).exec(input, context);
+            },
         },
     };
 }
@@ -155,6 +186,10 @@ export async function loadBrowserProjectInstructions(rawFs) {
 }
 /** Builds the browser shell over an already-open OPFS Git adapter. */
 export async function createBrowserBash(rawFs, thread, options = {}) {
+    const [{ Bash, defineCommand }, { createTwoFilesPatch }] = await Promise.all([
+        import("just-bash/browser"),
+        import("diff"),
+    ]);
     const filesystem = new OpfsShellFileSystem(rawFs);
     await filesystem.refreshPaths();
     const executionTimeoutMs = options.executionTimeoutMs ?? MAX_EXECUTION_MS;
@@ -180,9 +215,9 @@ export async function createBrowserBash(rawFs, thread, options = {}) {
         fs: filesystem,
         fetch: options.fetch ?? browserSecureFetch,
         customCommands: [
-            gitCommand(rawFs, thread, filesystem),
-            ghCommand(rawFs, thread),
-            unameCommand(),
+            gitCommand(rawFs, thread, filesystem, defineCommand, createTwoFilesPatch),
+            ghCommand(rawFs, thread, defineCommand),
+            unameCommand(defineCommand),
             ...["python3", "python"].map((name) => ({
                 name,
                 load: () => loadPython(name),
@@ -255,7 +290,7 @@ const browserSecureFetch = async (target, options = {}) => {
         options.signal?.removeEventListener("abort", abort);
     }
 };
-function unameCommand() {
+function unameCommand(defineCommand) {
     return defineCommand("uname", async (args) => {
         const fields = {
             s: "Nanocodex",
@@ -339,7 +374,7 @@ async function execute(bash, shellFs, thread, input, onChanged, signal, executio
         ...(truncated ? { original_token_count: Math.ceil(combined.length / 4) } : {}),
     };
 }
-function gitCommand(fs, thread, shellFs) {
+function gitCommand(fs, thread, shellFs, defineCommand, createTwoFilesPatch) {
     return defineCommand("git", async (args, context) => {
         try {
             const command = args[0];
@@ -370,7 +405,7 @@ function gitCommand(fs, thread, shellFs) {
                 case "log":
                     return ok(await gitLog(fs, args.slice(1)));
                 case "diff":
-                    return ok(await gitDiff(fs, args.slice(1)));
+                    return ok(await gitDiff(fs, args.slice(1), createTwoFilesPatch));
                 case "branch":
                     return ok(gitBranch(thread, args.slice(1)));
                 case "rev-parse":
@@ -388,7 +423,7 @@ function gitCommand(fs, thread, shellFs) {
         }
     });
 }
-function ghCommand(fs, thread) {
+function ghCommand(fs, thread, defineCommand) {
     return defineCommand("gh", async (args) => {
         try {
             if (args[0] === "repo" && args[1] === "view") {
@@ -534,7 +569,7 @@ async function gitLog(fs, args) {
         "",
     ].join("\n")).join("\n");
 }
-async function gitDiff(fs, args) {
+async function gitDiff(fs, args, createTwoFilesPatch) {
     if (args.includes("--cached") || args.includes("--staged")) {
         throw new Error("--cached is not implemented by browser git yet");
     }
@@ -560,7 +595,7 @@ async function gitDiff(fs, args) {
             beforeBytes?.includes(0) ||
             afterBytes?.includes(0)
             ? binaryFilePatch(filepath, headStatus, workdirStatus)
-            : textFilePatch(filepath, headStatus, workdirStatus, beforeBytes, afterBytes);
+            : textFilePatch(filepath, headStatus, workdirStatus, beforeBytes, afterBytes, createTwoFilesPatch);
         const separatorLength = patches.length ? 1 : 0;
         const remaining = MAX_OUTPUT_BYTES - outputLength - separatorLength;
         if (patch.length > remaining) {
@@ -577,7 +612,7 @@ async function gitDiff(fs, args) {
     }
     return patches.join("\n");
 }
-function textFilePatch(filepath, headStatus, workdirStatus, beforeBytes, afterBytes) {
+function textFilePatch(filepath, headStatus, workdirStatus, beforeBytes, afterBytes, createTwoFilesPatch) {
     let before;
     let after;
     try {

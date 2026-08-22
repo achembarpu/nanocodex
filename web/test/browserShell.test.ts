@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import git from "isomorphic-git";
 import { createCodeRuntime } from "../../js/bindings/runtime/code-runtime.mjs";
+import { prepareBrowserShell } from "../../js/bindings/tools/browser/browserShell.mjs";
 import { artifact as artifactTool } from "nanocodex/tools";
 
 import {
@@ -108,6 +109,39 @@ test("browser project instruction read failures warn without falling through or 
   assert.equal(warnings.value, undefined);
   assert.equal(warnings.messages.length, 1);
   assert.match(String(warnings.messages[0]?.[0]), /failed to read project AGENTS\.md/);
+});
+
+test("the prepared browser harness observes workspace writes before its first lazy command", async () => {
+  const origin = new MemoryDirectory();
+  const workspaces = await origin.getDirectoryHandle("nanocodex-workspaces", { create: true });
+  const workspaceName = `nanocodex-thread-${thread.id}`;
+  const root = await workspaces.getDirectoryHandle(encodeURIComponent(workspaceName), { create: true });
+  const fs = createOpfsGitFs(root as unknown as FileSystemDirectoryHandle);
+  await git.init({ fs, dir: "/workspace", defaultBranch: "nanocodex" });
+  await fs.promises.writeFile("/workspace/AGENTS.md", "lazy browser harness\n");
+
+  const previousStorage = Object.getOwnPropertyDescriptor(globalThis.navigator, "storage");
+  Object.defineProperty(globalThis.navigator, "storage", {
+    configurable: true,
+    value: { getDirectory: async () => origin },
+  });
+  try {
+    const shell = await prepareBrowserShell(thread.id, "https://example.test");
+    assert.equal(shell.projectInstructions, "lazy browser harness\n");
+    await shell.workspace.writeFile("/workspace/before-bash.txt", "visible on first command\n");
+    const result = await shell.execTool.handler({
+      cmd: "cat before-bash.txt && printf 'created by bash\\n' > after-bash.txt",
+    }, { signal: new AbortController().signal });
+    assert.equal(result.exit_code, 0);
+    assert.equal(result.output, "visible on first command\n");
+    assert.equal(
+      new TextDecoder().decode(await shell.workspace.readFile("/workspace/after-bash.txt")),
+      "created by bash\n",
+    );
+  } finally {
+    if (previousStorage) Object.defineProperty(globalThis.navigator, "storage", previousStorage);
+    else Reflect.deleteProperty(globalThis.navigator, "storage");
+  }
 });
 
 test("browser shell indexes the worktree once and notifies only for mutations", async () => {

@@ -18,8 +18,9 @@ or compiler tools.
 
 - persistent origin-private filesystem (OPFS), reusable across Worker and page
   restarts;
-- lazy just-bash execution, with Python through Pyodide and C/C++-to-WASI
-  compilation through wasm-clang;
+- Git and project instructions prepared with the Agent, while the larger
+  just-bash interpreter loads only on the first `exec_command`; Python through
+  Pyodide and C/C++-to-WASI compilation through wasm-clang stay lazy too;
 - Rust/WASM `apply_patch` using the canonical tool contract;
 - bounded browser Git and `gh` commands, with real Git-backed file and commit
   views;
