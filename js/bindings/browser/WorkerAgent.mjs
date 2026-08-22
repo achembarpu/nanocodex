@@ -154,7 +154,7 @@ export function installWorkerAgentRuntime(scope = globalThis, options = {}) {
     throw new TypeError("the Worker Agent runtime requires a Worker-like scope");
   }
   const createAgent = options.createAgent ?? loadAgent;
-  const prewarmLocal = options.prewarmLocal ?? prewarmLocalRuntime;
+  const prewarmLocal = options.prewarmLocal ?? prewarmWorkerRuntime;
   let generation = 0;
   let channel;
   let bootPromise;
@@ -1072,13 +1072,23 @@ async function loadAgent(options) {
   return Agent.create(options);
 }
 
-async function prewarmLocalRuntime(harness) {
-  const [{ initializeBrowserEngine }] = await Promise.all([
-    import("./engine.mjs"),
-    import("../tools/browser/index.mjs").then(({ prepareBrowser }) =>
-      prepareBrowser(harness)),
-  ]);
-  await initializeBrowserEngine();
+/** @internal Starts independent Worker resources on the same critical path. */
+export async function prewarmWorkerRuntime(
+  harness,
+  {
+    loadAgent = () => import("./InlineAgent.mjs"),
+    loadBrowser = () => import("../tools/browser/index.mjs"),
+    loadEngine = () => import("./engine.mjs"),
+  } = {},
+) {
+  const resources = [
+    loadEngine().then(({ initializeBrowserEngine }) => initializeBrowserEngine()),
+    loadAgent(),
+  ];
+  if (harness !== false) {
+    resources.push(loadBrowser().then(({ prepareBrowser }) => prepareBrowser(harness)));
+  }
+  await Promise.all(resources);
 }
 
 function assertNoFunctions(value, label, seen = new Set(), path = label) {
