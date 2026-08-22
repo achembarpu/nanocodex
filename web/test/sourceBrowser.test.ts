@@ -37,6 +37,10 @@ test("Source retains completed code, separates unsupported files, and retries re
   assert.match(browser, /not \(\?:a text file\|available as published text\)/);
   assert.match(browser, /setLoadAttempt\(\(attempt\) => attempt \+ 1\)/);
   assert.match(browser, /fileError && loaded/);
+  assert.match(browser, /await renderer\.prepareItems\(\[sourceCodeViewItem/);
+  assert.match(browser, /if \(!active\) return;[\s\S]*?await renderer\.prepareItems/);
+  assert.match(browser, /initialFile\?\.file\.path === initialLocation\.path/);
+  assert.match(provider, /pool\.primeFileHighlightCache\(item\.file\)/);
 });
 
 test("Source uses one Pierre search and a viewport-sized monochrome tree", () => {

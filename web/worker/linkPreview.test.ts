@@ -13,11 +13,13 @@ const template = `<!doctype html><html><head>
 <link rel="modulepreload" href="/assets/code.js" data-nanocodex-route-preload="code">
 <link rel="modulepreload" href="/assets/artifact.js" data-nanocodex-route-preload="artifact">
 </head><body></body></html>`;
+const deploymentSha = "d".repeat(40);
 
 function assetEnv(assetEtag: string | null = '"asset"') {
   const requests: Request[] = [];
   return {
     env: {
+      DEPLOYMENT_SHA: deploymentSha,
       ASSETS: {
         async fetch(request: Request) {
           requests.push(request);
@@ -63,6 +65,10 @@ test("crawler documents contain complete route-aware production metadata", async
   assert.match(html, /<meta property="og:image:height" content="630" \/>/);
   assert.match(html, /<meta property="og:image:type" content="image\/png" \/>/);
   assert.match(html, /<meta name="twitter:card" content="summary_large_image" \/>/);
+  assert.match(
+    html,
+    new RegExp(`<meta name="nanocodex-deployment-sha" content="${deploymentSha}" \\/>`),
+  );
   assert.match(html, /src\/&lt;driver&gt;\.rs · Nanocodex/);
   assert.doesNotMatch(html, /<driver>/);
   assert.match(html, /\/assets\/app\.js/);

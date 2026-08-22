@@ -5,8 +5,9 @@ import test from "node:test";
 import {
   fetchPublishedRepositoryPatch,
   loadPublishedCommitHistory,
-  loadPublishedRepositorySnapshot,
   preloadPublishedRepositoryPatch,
+  loadPublishedRepositorySnapshot,
+  preloadPublishedRepositoryPatchBody,
 } from "../src/publishedRepository.ts";
 
 const head = "a".repeat(40);
@@ -86,6 +87,38 @@ test("the Source surface loads only the public snapshot", async () => {
   assert.equal(await snapshot.readFile(snapshot.tree[0]!), "# Nanocodex\n");
   assert.equal(await snapshot.readFile(snapshot.tree[0]!), "# Nanocodex\n");
   assert.equal(requests.filter((url) => url === document.tree[0]!.contentUrl).length, 1);
+});
+
+test("deployment-pinned Source metadata bypasses mutable publication lookup", async () => {
+  const requests: string[] = [];
+  const request = async (input: string | URL | Request) => {
+    const url = String(input);
+    requests.push(url);
+    return Response.json(document, {
+      headers: { "x-repository-generation": head },
+    });
+  };
+
+  await loadPublishedRepositorySnapshot(request as typeof fetch, false, head);
+  assert.deepEqual(requests, [`/api/repository/snapshot?generation=${head}`]);
+});
+
+test("a deployment ahead of repository publication falls back once to mutable metadata", async () => {
+  const requests: string[] = [];
+  const request = async (input: string | URL | Request) => {
+    const url = String(input);
+    requests.push(url);
+    if (url.includes("?generation=")) return new Response(null, { status: 404 });
+    return Response.json(document, {
+      headers: { "x-repository-generation": head },
+    });
+  };
+
+  await loadPublishedRepositorySnapshot(request as typeof fetch, false, head);
+  assert.deepEqual(requests, [
+    `/api/repository/snapshot?generation=${head}`,
+    "/api/repository/snapshot",
+  ]);
 });
 
 test("an exact commit deep link loads only its generation-qualified metadata page", async () => {
@@ -247,23 +280,85 @@ test("the current commit index format caps pages at 32 commits", async () => {
   );
 });
 
-test("a route-intent patch prefetch is consumed without a duplicate request", async () => {
+test("a buffered route-intent patch is consumed without a duplicate request", async () => {
   const originalFetch = globalThis.fetch;
   const requests: string[] = [];
   globalThis.fetch = (async (input: string | URL | Request) => {
     requests.push(String(input));
-    return new Response("diff --git a/README.md b/README.md\n");
+    return new Response("diff --git a/README.md b/README.md\n", {
+      headers: { "x-patch-generation": head },
+    });
   }) as typeof fetch;
 
   try {
     const patchUrl = `/api/repository/commits/${head}/0001.diff`;
-    await preloadPublishedRepositoryPatch(patchUrl);
+    await preloadPublishedRepositoryPatchBody(patchUrl);
     const response = await fetchPublishedRepositoryPatch(
       patchUrl,
       new AbortController().signal,
     );
+    assert.equal(response.headers.get("x-patch-generation"), head);
     assert.equal(await response.text(), "diff --git a/README.md b/README.md\n");
     assert.deepEqual(requests, [patchUrl]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("an adopted slow patch preload survives the speculative deadline", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const originalFetch = globalThis.fetch;
+  let resolveFetch!: (response: Response) => void;
+  let requestSignal: AbortSignal | undefined;
+  globalThis.fetch = ((_: string | URL | Request, init?: RequestInit) => {
+    requestSignal = init?.signal ?? undefined;
+    return new Promise<Response>((resolve) => {
+      resolveFetch = resolve;
+    });
+  }) as typeof fetch;
+
+  try {
+    const patchUrl = `/api/repository/commits/${head}/slow-claimed.diff`;
+    const loading = preloadPublishedRepositoryPatchBody(
+      patchUrl,
+      Promise.resolve(),
+    );
+    await Promise.resolve();
+    t.mock.timers.tick(30_000);
+    assert.equal(requestSignal?.aborted, false);
+
+    resolveFetch(new Response("diff --git a/slow b/slow\n"));
+    await loading;
+    const response = await fetchPublishedRepositoryPatch(
+      patchUrl,
+      new AbortController().signal,
+    );
+    assert.equal(await response.text(), "diff --git a/slow b/slow\n");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("an unused slow patch preload is aborted at its retention deadline", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const originalFetch = globalThis.fetch;
+  let requestSignal: AbortSignal | undefined;
+  globalThis.fetch = ((_: string | URL | Request, init?: RequestInit) => {
+    requestSignal = init?.signal ?? undefined;
+    return new Promise<Response>((_, reject) => {
+      requestSignal?.addEventListener("abort", () => reject(requestSignal?.reason), {
+        once: true,
+      });
+    });
+  }) as typeof fetch;
+
+  try {
+    const patchUrl = `/api/repository/commits/${head}/slow-unused.diff`;
+    const response = preloadPublishedRepositoryPatch(patchUrl);
+    assert.ok(response);
+    t.mock.timers.tick(30_000);
+    assert.equal(requestSignal?.aborted, true);
+    await assert.rejects(response, /unused patch preload expired/);
   } finally {
     globalThis.fetch = originalFetch;
   }
@@ -287,7 +382,7 @@ test("top-level Source and Commits are wired independently from thread Git", asy
   );
   assert.match(
     routeLoaders,
-    /commitHashFromUrl\(url\)[\s\S]*?preloadPublishedRepositoryPatch/,
+    /loadPublishedCommitHistory\(requestedCommit\)[\s\S]*?preloadPublishedRepositoryPatchBody/,
   );
   assert.match(entry, /preloadDirectSurface\(directUrl\)/);
 });

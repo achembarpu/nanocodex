@@ -7,6 +7,50 @@ import { handleGitRequest, readGitProtocolRequest } from "./gitRoutes.ts";
 const head = "a".repeat(40);
 const packHash = "b".repeat(40);
 
+for (const [route, name] of [
+  ["snapshot", "repository.json"],
+  ["commit-index", "commit-index.json"],
+] as const) {
+  test(`generation-pinned ${route} bypasses mutable publication state`, async () => {
+    let requestedKey = "";
+    let publicationReads = 0;
+    const bucket = {
+      get: async (key: string) => {
+        requestedKey = key;
+        return {
+          body: new Response("{}").body,
+          httpEtag: '"metadata"',
+          writeHttpMetadata: () => {},
+        };
+      },
+    } as unknown as R2Bucket;
+    const namespace = {
+      idFromName: () => ({}) as DurableObjectId,
+      get: () => ({
+        fetch: async () => {
+          publicationReads += 1;
+          return new Response(null, { status: 500 });
+        },
+      }),
+    } as unknown as DurableObjectNamespace;
+    const request = new Request(
+      `https://nanocodex.example/api/repository/${route}?generation=${head}`,
+    );
+
+    const response = await handleGitRequest(
+      request,
+      { GIT_OBJECTS: bucket, GIT_REPOSITORY: namespace },
+      new URL(request.url),
+    );
+
+    assert.equal(response?.status, 200);
+    assert.equal(requestedKey, `generations/${head}/${name}`);
+    assert.equal(publicationReads, 0);
+    assert.equal(response?.headers.get("x-repository-generation"), head);
+    assert.equal(response?.headers.get("cache-control"), "public, max-age=31536000, immutable");
+  });
+}
+
 function commitPatchManifest(publication: {
   head: string;
   commitPatchParts: Array<{ key: string; size: number }>;

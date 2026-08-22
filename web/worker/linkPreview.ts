@@ -7,6 +7,7 @@ const IMAGE_HEIGHT = 630;
 const METADATA_START = "<!-- nanocodex:link-preview:start -->";
 const METADATA_END = "<!-- nanocodex:link-preview:end -->";
 const AGENT_DOC_PATHS = new Set(["/docs/llms.txt", "/docs/llms-full.txt"]);
+const GIT_SHA_PATTERN = /^[0-9a-f]{40}$/;
 const ARTIFACT_RUNTIME_CSP = [
   "default-src 'none'",
   "script-src 'self' 'unsafe-eval'",
@@ -21,6 +22,7 @@ const ARTIFACT_RUNTIME_CSP = [
 
 type LinkPreviewEnv = {
   ASSETS?: Fetcher;
+  DEPLOYMENT_SHA?: string;
   EVALS_DB?: D1Database;
 };
 
@@ -103,7 +105,7 @@ export async function routeLinkPreview(
 export async function renderLinkPreviewDocument(
   document: string,
   url: URL,
-  env: Pick<LinkPreviewEnv, "EVALS_DB"> = {},
+  env: Pick<LinkPreviewEnv, "DEPLOYMENT_SHA" | "EVALS_DB"> = {},
   resolved?: Preview,
 ): Promise<string> {
   const preview = resolved ?? await previewForUrl(url, env);
@@ -113,7 +115,7 @@ export async function renderLinkPreviewDocument(
   imagePath.searchParams.set("path", preview.canonicalPath);
   return injectMetadata(
     selectRoutePreloads(document, url.pathname),
-    metadataHtml(preview, canonicalUrl, imagePath.href),
+    metadataHtml(preview, canonicalUrl, imagePath.href, env.DEPLOYMENT_SHA),
   );
 }
 
@@ -314,12 +316,21 @@ function fixed(path: string, title: string, description: string, eyebrow = SITE_
   return { canonicalPath: path, description, eyebrow, title };
 }
 
-function metadataHtml(preview: Preview, canonicalUrl: string, imageUrl: string): string {
+function metadataHtml(
+  preview: Preview,
+  canonicalUrl: string,
+  imageUrl: string,
+  deploymentSha?: string,
+): string {
   const title = preview.title === SITE_NAME ? "Nanocodex — high-performance Codex SDK" : `${preview.title} · Nanocodex`;
   const alt = `${preview.title} — Nanocodex link preview`;
   const values = { alt, canonicalUrl, description: preview.description, imageUrl, title };
+  const deploymentMetadata = GIT_SHA_PATTERN.test(deploymentSha ?? "")
+    ? `\n    <meta name="nanocodex-deployment-sha" content="${deploymentSha}" />`
+    : "";
   return `${METADATA_START}
     <title>${html(values.title)}</title>
+    ${deploymentMetadata}
     <link rel="canonical" href="${html(values.canonicalUrl)}" />
     <meta name="description" content="${html(values.description)}" />
     <meta property="og:type" content="website" />

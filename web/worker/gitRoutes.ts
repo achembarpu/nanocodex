@@ -40,9 +40,25 @@ export async function handleGitRequest(
   context?: ExecutionContext,
 ): Promise<Response | undefined> {
   if (request.method === "GET" && url.pathname === "/api/repository/snapshot") {
+    const pinned = servePinnedGeneration(
+      request,
+      env,
+      context,
+      url,
+      "repository.json",
+    );
+    if (pinned) return pinned;
     return servePublishedObject(request, env, context, "snapshotKey", false);
   }
   if (request.method === "GET" && url.pathname === "/api/repository/commit-index") {
+    const pinned = servePinnedGeneration(
+      request,
+      env,
+      context,
+      url,
+      "commit-index.json",
+    );
+    if (pinned) return pinned;
     return servePublishedGenerationObject(
       request,
       env,
@@ -338,6 +354,36 @@ export async function handleGitRequest(
   }
 
   return undefined;
+}
+
+function servePinnedGeneration(
+  request: Request,
+  env: GitStorageEnv,
+  context: ExecutionContext | undefined,
+  url: URL,
+  objectName: "repository.json" | "commit-index.json",
+): Response | Promise<Response> | undefined {
+  const generation = requestedGeneration(url);
+  if (generation instanceof Response) return generation;
+  return generation == null
+    ? undefined
+    : serveObject(
+        request,
+        env,
+        context,
+        `generations/${generation}/${objectName}`,
+        true,
+        generation,
+      );
+}
+
+function requestedGeneration(url: URL): string | null | Response {
+  const generation = url.searchParams.get("generation");
+  if (generation == null) return null;
+  if (!SHA1_PATTERN.test(generation)) {
+    return Response.json({ error: "invalid_repository_generation" }, { status: 400 });
+  }
+  return generation;
 }
 
 function immutableUploadResponse(key: string, object: R2Object, stored: boolean): Response {

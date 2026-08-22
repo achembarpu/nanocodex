@@ -37,6 +37,11 @@ export type PublishedRepositorySnapshot = PublishedRepositoryDocument & {
   readFile(file: RepositoryFile): Promise<string>;
 };
 
+export type PreparedPublishedFile = {
+  contents: string;
+  file: RepositoryFile;
+};
+
 export type PublishedCommitPatchUrl =
   | string
   | ((commit: HarnessCommit) => string);
@@ -63,8 +68,18 @@ export type PublishedCommitHistory = PublishedRepositoryMetadata & {
 type Fetch = typeof fetch;
 
 type PrefetchedPatch = {
+  body?: Promise<BufferedPublishedPatch | undefined>;
+  claimed?: boolean;
   controller: AbortController;
+  expiry?: ReturnType<typeof setTimeout>;
   response: Promise<Response>;
+};
+
+type BufferedPublishedPatch = {
+  body: ArrayBuffer;
+  headers: Headers;
+  status: number;
+  statusText: string;
 };
 
 const SHA1_PATTERN = /^[a-f0-9]{40}$/;
@@ -73,6 +88,8 @@ const MAX_COMMIT_INDEX_BYTES = 512 * 1024;
 const MAX_COMMIT_PAGE_BYTES = 2 * 1024 * 1024;
 const MAX_COMMIT_PAGE_COUNT = 256;
 const MAX_COMMIT_PAGE_SIZE = 32;
+const PREFETCHED_PATCH_RETENTION_MS = 30_000;
+const DEPLOYMENT_META_NAME = "nanocodex-deployment-sha";
 
 let snapshotPreload: Promise<PublishedRepositorySnapshot> | undefined;
 let commitIndexPreload: Promise<PublishedCommitIndexDocument> | undefined;
@@ -82,16 +99,21 @@ const prefetchedPatches = new Map<string, PrefetchedPatch>();
 export async function loadPublishedRepositorySnapshot(
   request: Fetch = fetch,
   development = import.meta.env?.DEV ?? false,
+  generation = publishedRepositoryGeneration(),
 ): Promise<PublishedRepositorySnapshot> {
   if (request === fetch && !development) {
     return preloadPublishedRepositorySnapshot();
   }
-  return loadPublishedRepositorySnapshotUncached(request, development);
+  return loadPublishedRepositorySnapshotUncached(request, development, generation);
 }
 
 export function preloadPublishedRepositorySnapshot(): Promise<PublishedRepositorySnapshot> {
   if (snapshotPreload) return snapshotPreload;
-  const loading = loadPublishedRepositorySnapshotUncached(fetch, false).catch(
+  const loading = loadPublishedRepositorySnapshotUncached(
+    fetch,
+    false,
+    publishedRepositoryGeneration(),
+  ).catch(
     (error) => {
       if (snapshotPreload === loading) snapshotPreload = undefined;
       throw error;
@@ -104,7 +126,7 @@ export function preloadPublishedRepositorySnapshot(): Promise<PublishedRepositor
 export function preloadPreferredPublishedFile(
   snapshot: PublishedRepositorySnapshot,
   search = typeof window === "undefined" ? "" : window.location.search,
-): Promise<string> | undefined {
+): Promise<PreparedPublishedFile> | undefined {
   const requestedPath = new URLSearchParams(search).get("path");
   const preferredFile = snapshot.tree.find((file) =>
     file.path === requestedPath && file.contentUrl != null
@@ -113,17 +135,23 @@ export function preloadPreferredPublishedFile(
   ) ?? snapshot.tree.find((file) =>
     file.path === "README.md" && file.contentUrl != null
   ) ?? snapshot.tree.find((file) => file.contentUrl != null);
-  return preferredFile == null ? undefined : snapshot.readFile(preferredFile);
+  return preferredFile == null
+    ? undefined
+    : snapshot.readFile(preferredFile).then((contents) => ({
+        contents,
+        file: preferredFile,
+      }));
 }
 
 export async function loadPublishedCommitHistory(
   requestedHash?: string,
   request: Fetch = fetch,
   development = import.meta.env?.DEV ?? false,
+  generation = publishedRepositoryGeneration(),
 ): Promise<PublishedCommitHistory> {
   const index = request === fetch && !development
     ? await preloadPublishedCommitIndex()
-    : await loadPublishedCommitIndexUncached(request, development);
+    : await loadPublishedCommitIndexUncached(request, development, generation);
   const base = development
     ? "/__nanocodex/repository"
     : "/api/repository";
@@ -139,6 +167,13 @@ export async function loadPublishedCommitHistory(
   const initialPageIndex = pageByHash.get(initialCommitHash);
   if (initialPageIndex == null) {
     throw new Error(`Published commit ${initialCommitHash} was not found`);
+  }
+
+  const initialPatchUrl = development
+    ? undefined
+    : `${base}/commits/${index.repository.head}/${String(initialPageIndex).padStart(4, "0")}.diff`;
+  if (request === fetch && initialPatchUrl != null) {
+    void preloadPublishedRepositoryPatchBody(initialPatchUrl).catch(() => undefined);
   }
 
   const localPages = new Map<number, Promise<PublishedCommitPage>>();
@@ -219,7 +254,10 @@ export function preloadPublishedRepositoryPatch(
 ): Promise<Response> | undefined {
   if (typeof patchUrl !== "string") return undefined;
   const existing = prefetchedPatches.get(patchUrl);
-  if (existing != null) return existing.response;
+  if (existing != null) {
+    retainPrefetchedPatch(patchUrl, existing);
+    return existing.response;
+  }
   const controller = new AbortController();
   markCommitPerformance("patch-prefetch-start");
   const response = fetch(patchUrl, {
@@ -232,8 +270,65 @@ export function preloadPublishedRepositoryPatch(
     prefetchedPatches.delete(patchUrl);
     throw error;
   });
-  prefetchedPatches.set(patchUrl, { controller, response });
+  const prefetched = { controller, response } satisfies PrefetchedPatch;
+  prefetchedPatches.set(patchUrl, prefetched);
+  retainPrefetchedPatch(patchUrl, prefetched);
   return response;
+}
+
+function retainPrefetchedPatch(patchUrl: string, prefetched: PrefetchedPatch): void {
+  clearTimeout(prefetched.expiry);
+  prefetched.expiry = undefined;
+  if (prefetched.claimed) return;
+  prefetched.expiry = setTimeout(() => {
+    if (prefetchedPatches.get(patchUrl) !== prefetched) return;
+    prefetched.controller.abort("unused patch preload expired");
+    prefetchedPatches.delete(patchUrl);
+  }, PREFETCHED_PATCH_RETENTION_MS);
+}
+
+function claimPrefetchedPatch(patchUrl: string, prefetched: PrefetchedPatch): void {
+  if (prefetchedPatches.get(patchUrl) !== prefetched) return;
+  prefetched.claimed = true;
+  clearTimeout(prefetched.expiry);
+  prefetched.expiry = undefined;
+}
+
+export async function preloadPublishedRepositoryPatchBody(
+  patchUrl: PublishedCommitPatchUrl,
+  adopted?: Promise<void>,
+): Promise<void> {
+  if (typeof patchUrl !== "string") return;
+  preloadPublishedRepositoryPatch(patchUrl);
+  const prefetched = prefetchedPatches.get(patchUrl);
+  if (prefetched == null) return;
+  retainPrefetchedPatch(patchUrl, prefetched);
+  if (adopted != null) {
+    void adopted.then(() => claimPrefetchedPatch(patchUrl, prefetched));
+  }
+  prefetched.body ??= prefetched.response.then(async (response) => {
+    const buffered = response.ok
+      ? {
+          body: await response.arrayBuffer(),
+          headers: new Headers(response.headers),
+          status: response.status,
+          statusText: response.statusText,
+        } satisfies BufferedPublishedPatch
+      : undefined;
+    if (buffered != null) markCommitPerformance("patch-prefetch-body");
+    if (prefetchedPatches.get(patchUrl) === prefetched) {
+      prefetched.claimed = false;
+      retainPrefetchedPatch(patchUrl, prefetched);
+    }
+    return buffered;
+  }).catch((error) => {
+    if (prefetchedPatches.get(patchUrl) === prefetched) {
+      prefetchedPatches.delete(patchUrl);
+    }
+    clearTimeout(prefetched.expiry);
+    throw error;
+  });
+  await prefetched.body;
 }
 
 export function fetchPublishedRepositoryPatch(
@@ -246,6 +341,7 @@ export function fetchPublishedRepositoryPatch(
   }
 
   prefetchedPatches.delete(patchUrl);
+  clearTimeout(prefetched.expiry);
   if (signal.aborted) prefetched.controller.abort(signal.reason);
   else {
     signal.addEventListener(
@@ -254,20 +350,34 @@ export function fetchPublishedRepositoryPatch(
       { once: true },
     );
   }
-  return prefetched.response;
+  if (prefetched.body == null) return prefetched.response;
+  return prefetched.body.then((buffered) =>
+    buffered == null
+      ? prefetched.response
+      : new Response(buffered.body, {
+          headers: buffered.headers,
+          status: buffered.status,
+          statusText: buffered.statusText,
+        })
+  );
 }
 
 async function loadPublishedRepositorySnapshotUncached(
   request: Fetch,
   development: boolean,
+  generation?: string,
 ): Promise<PublishedRepositorySnapshot> {
   const base = development
     ? "/__nanocodex/repository"
     : "/api/repository";
   markCommitPerformance("repository-request-start");
-  const response = await request(`${base}/snapshot`, {
-    cache: development ? "no-store" : "default",
-  });
+  const mutableUrl = `${base}/snapshot`;
+  const response = await requestPublishedMetadata(
+    request,
+    generation == null ? mutableUrl : `${mutableUrl}?generation=${generation}`,
+    mutableUrl,
+    development,
+  );
   if (!response.ok) {
     throw new Error(`Repository request failed (${response.status})`);
   }
@@ -309,7 +419,11 @@ async function loadPublishedRepositorySnapshotUncached(
 
 function preloadPublishedCommitIndex(): Promise<PublishedCommitIndexDocument> {
   if (commitIndexPreload) return commitIndexPreload;
-  const loading = loadPublishedCommitIndexUncached(fetch, false).catch((error) => {
+  const loading = loadPublishedCommitIndexUncached(
+    fetch,
+    false,
+    publishedRepositoryGeneration(),
+  ).catch((error) => {
     if (commitIndexPreload === loading) commitIndexPreload = undefined;
     throw error;
   });
@@ -320,14 +434,19 @@ function preloadPublishedCommitIndex(): Promise<PublishedCommitIndexDocument> {
 async function loadPublishedCommitIndexUncached(
   request: Fetch,
   development: boolean,
+  generation?: string,
 ): Promise<PublishedCommitIndexDocument> {
   const base = development
     ? "/__nanocodex/repository"
     : "/api/repository";
   markCommitPerformance("repository-commit-index-request-start");
-  const response = await request(`${base}/commit-index`, {
-    cache: development ? "no-store" : "default",
-  });
+  const mutableUrl = `${base}/commit-index`;
+  const response = await requestPublishedMetadata(
+    request,
+    generation == null ? mutableUrl : `${mutableUrl}?generation=${generation}`,
+    mutableUrl,
+    development,
+  );
   if (!response.ok) {
     throw new Error(`Commit index request failed (${response.status})`);
   }
@@ -342,6 +461,31 @@ async function loadPublishedCommitIndexUncached(
     commitCount: index.hashes.length,
   });
   return index;
+}
+
+async function requestPublishedMetadata(
+  request: Fetch,
+  url: string,
+  mutableUrl: string,
+  development: boolean,
+): Promise<Response> {
+  const init: RequestInit = {
+    cache: development ? "no-store" : "default",
+  };
+  const response = await request(url, init);
+  return response.status === 404 && url !== mutableUrl
+    ? request(mutableUrl, init)
+    : response;
+}
+
+export function publishedRepositoryGeneration(): string | undefined {
+  if (typeof document === "undefined") return undefined;
+  const generation = document
+    .querySelector<HTMLMetaElement>(`meta[name="${DEPLOYMENT_META_NAME}"]`)
+    ?.content;
+  return generation != null && SHA1_PATTERN.test(generation)
+    ? generation
+    : undefined;
 }
 
 async function mapConcurrentPages(

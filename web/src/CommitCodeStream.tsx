@@ -140,6 +140,8 @@ const CommitCodeStreamComponent = forwardRef<
     initialPage: windowPage,
     onItemsPublished: tryApplyPendingJump,
     onPageLoaded,
+    preparationBatchSize: renderer.preparationBatchSize,
+    prepareItems: renderer.prepareItems,
     viewerRef,
   });
 

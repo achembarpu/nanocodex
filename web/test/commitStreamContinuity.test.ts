@@ -25,7 +25,7 @@ test("stream batches retry pending commit jumps after publication", async () => 
   assert.equal(loader.match(/onItemsPublished\?\.\(\)/g)?.length, 1);
   assert.match(
     loader,
-    /viewer\.addItems\(pendingItems\)[\s\S]*await yieldToBrowser\(\);[\s\S]*publishItems\(\)/,
+    /viewer\.addItems\(preparedItems\)[\s\S]*await yieldToBrowser\(\);[\s\S]*publishItems\(\)/,
   );
   assert.match(
     stream,

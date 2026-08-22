@@ -46,7 +46,8 @@ import {
   getInitialBatchSize,
   observePierreCodeScrollRegions,
 } from "./pierreCodeView";
-import { syntaxLanguageForFile } from "./syntax";
+import type { PreparedPublishedFile } from "./publishedRepository";
+import { sourceCodeViewItem } from "./sourceHighlight";
 import type { RepositoryFile } from "./threadRepositorySnapshot";
 import { useModalBoundary } from "./modalBoundary";
 import "./SourceBrowser.css";
@@ -55,6 +56,7 @@ type CodeBrowserProps = {
   files: RepositoryFile[];
   branch: string;
   head: string;
+  initialFile?: PreparedPublishedFile;
   readFile(file: RepositoryFile): Promise<string>;
   theme: "light" | "dark";
 };
@@ -342,7 +344,7 @@ function useResponsiveFileTree(
 }
 
 function CodeBrowserComponent(
-  { files, branch, head, readFile, theme }: CodeBrowserProps,
+  { files, branch, head, initialFile, readFile, theme }: CodeBrowserProps,
   ref: ForwardedRef<CodeBrowserHandle>,
 ) {
   const coarsePointer = useCoarsePointer();
@@ -371,10 +373,12 @@ function CodeBrowserComponent(
   selectedPathRef.current = selectedPath;
   const readFileRef = useRef(readFile);
   readFileRef.current = readFile;
-  const [loaded, setLoaded] = useState<{
-    contents: string;
-    file: RepositoryFile;
-  } | null>(null);
+  const [loaded, setLoaded] = useState<PreparedPublishedFile | null>(() =>
+    initialFile?.file.path === initialLocation.path
+      && fileByPath.get(initialLocation.path)?.objectId === initialFile.file.objectId
+      ? initialFile
+      : null
+  );
   const [fileError, setFileError] = useState<SourceFileError | null>(null);
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [treeOpen, setTreeOpen] = useState(false);
@@ -418,13 +422,17 @@ function CodeBrowserComponent(
   const displayed = loaded?.file;
   const contents = loaded?.contents ?? null;
   const viewFile = displayed ?? selected;
+  const codeItems = useMemo<CodeViewItem<undefined>[]>(
+    () => loaded ? [sourceCodeViewItem(loaded.file, loaded.contents)] : [],
+    [loaded],
+  );
   const codeReady = loaded != null && renderer.ready;
   const lineCount = useMemo(() => countLines(contents), [contents]);
   const normalizedLineTarget = useMemo(
     () => lineTarget == null ? null : normalizeLineRange(lineTarget, lineCount),
     [lineCount, lineTarget],
   );
-  const codeItemId = loaded ? `file:${loaded.file.objectId}` : "";
+  const codeItemId = codeItems[0]?.id ?? "";
   const selectedLines = useMemo<CodeViewSelection | null>(
     () => codeReady && loaded?.file.path === selectedPath && normalizedLineTarget
       ? {
@@ -559,10 +567,19 @@ function CodeBrowserComponent(
       setFileError(null);
       return;
     }
+    if (
+      loaded?.file.path === selected.path
+      && loaded.file.objectId === selected.objectId
+    ) {
+      setFileError(null);
+      return;
+    }
     let active = true;
     setFileError(null);
     readFileRef.current(selected)
-      .then((nextContents) => {
+      .then(async (nextContents) => {
+        if (!active) return;
+        await renderer.prepareItems([sourceCodeViewItem(selected, nextContents)]);
         if (!active) return;
         setLoaded({ contents: nextContents, file: selected });
         setFileError(null);
@@ -574,7 +591,14 @@ function CodeBrowserComponent(
     return () => {
       active = false;
     };
-  }, [loadAttempt, selected?.objectId, selected?.path]);
+  }, [
+    loadAttempt,
+    loaded?.file.objectId,
+    loaded?.file.path,
+    renderer.prepareItems,
+    selected?.objectId,
+    selected?.path,
+  ]);
 
   const applyLineTarget = useCallback(() => {
     if (!selectedLines) return;
@@ -664,24 +688,6 @@ function CodeBrowserComponent(
     if (!compact && treeOpen) closeTree();
   }, [closeTree, compact, treeOpen]);
 
-  const codeItems = useMemo<CodeViewItem<undefined>[]>(
-    () =>
-      codeReady && loaded
-        ? [
-            {
-              id: codeItemId,
-              type: "file",
-              file: {
-                name: loaded.file.path,
-                contents: loaded.contents,
-                cacheKey: loaded.file.objectId,
-                lang: syntaxLanguageForFile(loaded.file.path, loaded.contents),
-              },
-            },
-          ]
-        : [],
-    [codeItemId, codeReady, loaded],
-  );
   const codeViewOptions = useMemo<CodeViewOptions<undefined>>(
     () => ({
       layout: CODE_VIEW_LAYOUT,

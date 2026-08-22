@@ -56,6 +56,8 @@ interface UseCommitStreamLoaderOptions {
   initialPage: PublishedCommitPage;
   onItemsPublished?(): void;
   onPageLoaded?(page: PublishedCommitPage): void;
+  preparationBatchSize: number;
+  prepareItems(items: readonly CodeViewItem<undefined>[]): Promise<void>;
   viewerRef: RefObject<CodeViewHandle<undefined> | null>;
 }
 
@@ -127,6 +129,8 @@ export function useCommitStreamLoader({
   initialPage,
   onItemsPublished,
   onPageLoaded,
+  preparationBatchSize,
+  prepareItems,
   viewerRef,
 }: UseCommitStreamLoaderOptions) {
   const [initialItems, setInitialItems] = useState<CodeViewItem<undefined>[]>(
@@ -145,6 +149,8 @@ export function useCommitStreamLoader({
   const publishPage = useStableCallback((page: PublishedCommitPage) =>
     onPageLoaded?.(page)
   );
+  const preparePendingItems = useStableCallback(prepareItems);
+  const preparedItemBatchSize = Math.max(1, Math.floor(preparationBatchSize));
 
   const prepareItemsForViewer = (
     items: readonly CodeViewItem<undefined>[],
@@ -222,35 +228,40 @@ export function useCommitStreamLoader({
     const publishPendingData = async () => {
       if (accumulator.pendingItems.length === 0 || !isCurrentRequest()) return;
 
-      const isInitialPublish = !hasPublishedInitialItems;
       pendingPublishFileCount = 0;
       lastPublishTime = performance.now();
       const pendingItems = takePendingCommitItems(accumulator);
-      prepareItemsForViewer(pendingItems, nextLoadedItemIds);
-      if (isInitialPublish) {
-        hasPublishedInitialItems = true;
-        loadedItemIdsRef.current = nextLoadedItemIds;
-        setViewerKey(requestId);
-        setInitialItems(pendingItems);
-        markCommitPerformance("patch-initial-publish", {
-          itemCount: pendingItems.length,
-          requestId,
-        });
-      } else {
-        const viewer = viewerRef.current;
-        if (viewer != null) viewer.addItems(pendingItems);
-        else setInitialItems((previous) => [...previous, ...pendingItems]);
-        markCommitPerformance("patch-batch-publish", {
-          itemCount: pendingItems.length,
-          requestId,
-        });
+      for (let offset = 0; offset < pendingItems.length; offset += preparedItemBatchSize) {
+        const preparedItems = pendingItems.slice(offset, offset + preparedItemBatchSize);
+        await preparePendingItems(preparedItems);
+        if (!isCurrentRequest()) return;
+        prepareItemsForViewer(preparedItems, nextLoadedItemIds);
+        const isInitialPublish = !hasPublishedInitialItems;
+        if (isInitialPublish) {
+          hasPublishedInitialItems = true;
+          loadedItemIdsRef.current = nextLoadedItemIds;
+          setViewerKey(requestId);
+          setInitialItems(preparedItems);
+          markCommitPerformance("patch-initial-publish", {
+            itemCount: preparedItems.length,
+            requestId,
+          });
+        } else {
+          const viewer = viewerRef.current;
+          if (viewer != null) viewer.addItems(preparedItems);
+          else setInitialItems((previous) => [...previous, ...preparedItems]);
+          markCommitPerformance("patch-batch-publish", {
+            itemCount: preparedItems.length,
+            requestId,
+          });
+        }
+        await yieldToBrowser();
+        if (isCurrentRequest()) publishItems();
+        if (isInitialPublish) {
+          await waitForViewer(viewerRef, controller.signal);
+        }
+        lastWorkYieldTime = performance.now();
       }
-      await yieldToBrowser();
-      if (isCurrentRequest()) publishItems();
-      if (isInitialPublish) {
-        await waitForViewer(viewerRef, controller.signal);
-      }
-      lastWorkYieldTime = performance.now();
     };
 
     const publishPendingDataIfNeeded = async () => {
@@ -518,7 +529,15 @@ export function useCommitStreamLoader({
       requestNextPageRef.current = () => undefined;
       controller.abort();
     };
-  }, [history, initialPage, loadAttempt, publishItems, publishPage, viewerRef]);
+  }, [
+    history,
+    initialPage,
+    loadAttempt,
+    preparedItemBatchSize,
+    publishItems,
+    publishPage,
+    viewerRef,
+  ]);
 
   const requestNextPage = useStableCallback(() => {
     requestNextPageRef.current();

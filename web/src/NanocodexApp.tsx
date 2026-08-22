@@ -41,6 +41,7 @@ import { COMPACT_WORKSPACE_QUERY } from "./pierreCodeView";
 import type {
   PublishedCommitHistory,
   PublishedCommitPage,
+  PreparedPublishedFile,
   PublishedRepositorySnapshot,
 } from "./publishedRepository";
 import type { HarnessCommit } from "./threadRepositorySnapshot";
@@ -293,6 +294,9 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
   const [snapshot, setSnapshot] = useState<PublishedRepositorySnapshot | undefined>(
     preparedRoute.repositorySnapshot,
   );
+  const [sourceFile, setSourceFile] = useState<PreparedPublishedFile | undefined>(
+    preparedRoute.sourceFile,
+  );
   const [commitHistory, setCommitHistory] = useState<PublishedCommitHistory | undefined>(
     preparedRoute.commitHistory,
   );
@@ -445,6 +449,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
   const commitPreparedRepository = useCallback((loaded: PreparedRepositorySurface) => {
     if (loaded.surface === "code") {
       setSnapshot(loaded.snapshot);
+      setSourceFile(loaded.sourceFile);
       return;
     }
     commitHistoryHeadRef.current = loaded.history.repository.head;
@@ -472,7 +477,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
     requestedCommit?: string,
   ) => {
     const requestId = ++repositoryRequestId.current;
-    void prepareRepositorySurface(nextSurface, requestedCommit).then(
+    void prepareRepositorySurface(nextSurface, requestedCommit, true).then(
       (loaded) => {
         if (repositoryRequestId.current !== requestId) return;
         startTransition(() => {
@@ -658,14 +663,16 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
     navigationId: number,
     nextThreadId: string,
   ) => {
+    const requestedCommit = nextSurface === "commits"
+      ? commitHashFromDestination(destination)
+      : undefined;
     void settleRepositoryNavigationIntent({
       navigationId,
       latestNavigationId: () => surfaceNavigationId.current,
       preparation: prepareRepositorySurface(
         nextSurface,
-        nextSurface === "commits"
-          ? commitHashFromDestination(destination)
-          : undefined,
+        requestedCommit,
+        true,
       ),
       onPrepared: (preparedRepository) => {
         flushSync(() => {
@@ -1174,6 +1181,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
                 files={snapshot.tree}
                 branch={snapshot.repository.branch}
                 head={snapshot.repository.head}
+                initialFile={sourceFile}
                 readFile={snapshot.readFile}
                 theme={theme}
               />
