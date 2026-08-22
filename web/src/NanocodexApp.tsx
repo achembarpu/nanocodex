@@ -938,8 +938,11 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
       }
       if (commitModalOpen) return;
       if (isTyping || primaryModifier || event.altKey) return;
-      if (surface === "world" && ["w", "a", "s", "d"].includes(key)) {
-        // The World surface owns WASD while it is mounted.
+      if (surface === "world"
+        && target === document.activeElement
+        && target?.matches(".monster-world-stage canvas")
+        && ["w", "a", "s", "d"].includes(key)) {
+        // The World surface owns WASD only while its game canvas has focus.
         return;
       }
       if (key === "f") {

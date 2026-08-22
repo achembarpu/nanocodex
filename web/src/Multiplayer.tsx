@@ -63,6 +63,7 @@ export function Multiplayer() {
   const reconnectAttempt = useRef(0);
   const pendingRoomRef = useRef<PendingRoom | undefined>(undefined);
   const mounted = useRef(true);
+  const lifecycleAbort = useRef(new AbortController());
   const transcriptRef = useRef<HTMLOListElement>(null);
 
   const commitRoom = useCallback((next: MultiplayerRoomState) => {
@@ -71,6 +72,7 @@ export function Multiplayer() {
   }, []);
 
   const connect = useCallback((receipt: PendingRoom, isReconnect = false) => {
+    if (!mounted.current) return;
     window.clearTimeout(reconnectTimer.current);
     const generation = ++socketGeneration.current;
     socketRef.current?.close(1000, "replaced connection");
@@ -81,7 +83,9 @@ export function Multiplayer() {
     pendingRoomRef.current = receipt;
 
     socket.addEventListener("message", (event) => {
-      if (generation !== socketGeneration.current || typeof event.data !== "string") return;
+      if (!mounted.current
+        || generation !== socketGeneration.current
+        || typeof event.data !== "string") return;
       try {
         const message = decodeMultiplayerMessage(event.data);
         if (message.type === "ready") {
@@ -143,6 +147,7 @@ export function Multiplayer() {
     });
 
     socket.addEventListener("error", () => {
+      if (!mounted.current || generation !== socketGeneration.current) return;
       if (!isReconnect && !roomRef.current) {
         setRoomError(undefined);
       }
@@ -151,8 +156,12 @@ export function Multiplayer() {
 
   useEffect(() => {
     mounted.current = true;
+    if (lifecycleAbort.current.signal.aborted) {
+      lifecycleAbort.current = new AbortController();
+    }
     return () => {
       mounted.current = false;
+      lifecycleAbort.current.abort();
       socketGeneration.current++;
       window.clearTimeout(reconnectTimer.current);
       socketRef.current?.close(1000, "surface closed");
@@ -209,6 +218,7 @@ export function Multiplayer() {
 
   const createRoom = async (event: FormEvent) => {
     event.preventDefault();
+    const signal = lifecycleAbort.current.signal;
     const name = displayName.trim();
     if (!name) {
       setLobby({ kind: "create", error: "Enter a display name." });
@@ -225,14 +235,17 @@ export function Multiplayer() {
           "content-type": "application/json",
         },
         body: JSON.stringify({ display_name: name }),
+        signal,
       });
       if (!response.ok) throw new Error(createRoomError(response.status));
       const receipt = decodeRoomReceipt(await response.json<unknown>(), true);
+      if (signal.aborted || !mounted.current) return;
       writeDisplayName(name);
       const inviteUrl = multiplayerInviteUrl(window.location.origin, receipt.roomId, receipt.invite!);
       window.history.replaceState(window.history.state, "", multiplayerRoomPath(receipt.roomId));
       connect({ ...receipt, inviteUrl });
     } catch (error) {
+      if (signal.aborted || !mounted.current) return;
       setPending(false);
       setLobby({
         kind: "create",
@@ -244,6 +257,7 @@ export function Multiplayer() {
   const joinRoom = async (event: FormEvent) => {
     event.preventDefault();
     if (lobby.kind !== "join") return;
+    const signal = lifecycleAbort.current.signal;
     const name = displayName.trim();
     if (!name) {
       setLobby({ ...lobby, error: "Enter a display name." });
@@ -257,13 +271,16 @@ export function Multiplayer() {
         credentials: "same-origin",
         headers: { accept: "application/json", "content-type": "application/json" },
         body: JSON.stringify({ invite: lobby.invite, display_name: name }),
+        signal,
       });
       if (!response.ok) throw new Error(joinRoomError(response.status));
       const receipt = decodeRoomReceipt(await response.json<unknown>(), false);
+      if (signal.aborted || !mounted.current) return;
       writeDisplayName(name);
       window.history.replaceState(window.history.state, "", multiplayerRoomPath(receipt.roomId));
       connect(receipt);
     } catch (error) {
+      if (signal.aborted || !mounted.current) return;
       setPending(false);
       setLobby({
         ...lobby,

@@ -680,6 +680,7 @@ test("the World surface stays lazy, bounded, stoppable, and semantically observa
   assert.match(component, /type="range"/);
   assert.match(component, /onPointerDown=\{handleCanvasPointerDown\}/);
   assert.match(component, /Autonomous entries marked <b>nanocodex<\/b> come only from completed Luna batches/);
+  assert.match(application, /surface === "world"[\s\S]*?target === document\.activeElement[\s\S]*?target\?\.matches\("\.monster-world-stage canvas"\)/);
   assert.match(worldCss, /prefers-reduced-motion: reduce/);
   assert.match(worldCss, /monster-world-population input\[type="range"\]/);
   assert.doesNotMatch(worldCss, /grayscale\(/);

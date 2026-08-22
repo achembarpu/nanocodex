@@ -98,6 +98,9 @@ test("the public protocol rejects private managed-agent fields", () => {
   assert.doesNotMatch(source, /agent_id|access_token|refresh_token|OPENAI_API_KEY|CODEX_OAUTH/);
   assert.match(source, /private Service Binding/);
   assert.match(source, /fixed placeholder/);
+  assert.match(source, /lifecycleAbort\.current\.abort\(\)/);
+  assert.match(source, /signal\.aborted \|\| !mounted\.current/);
+  assert.match(source, /const connect = useCallback[\s\S]*?if \(!mounted\.current\) return/);
 });
 
 test("the public protocol preserves definitive managed-agent quota failures", () => {

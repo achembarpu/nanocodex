@@ -123,7 +123,10 @@ test("global product shortcuts are visible and browser Find remains native", () 
   assert.match(application, /key === "h"[\s\S]*?\? "changelog"/);
   assert.match(application, /key === "p"[\s\S]*?\? "multiplayer"/);
   assert.match(application, /key === "w"[\s\S]*?\? "world"/);
-  assert.match(application, /surface === "world" && \["w", "a", "s", "d"\]\.includes\(key\)/);
+  assert.match(
+    application,
+    /surface === "world"[\s\S]{0,180}target === document\.activeElement[\s\S]{0,180}target\?\.matches\("\.monster-world-stage canvas"\)/,
+  );
   assert.doesNotMatch(application, /aria-keyshortcuts="H"[\s\S]*Nanocodex home/);
   assert.doesNotMatch(
     application,
