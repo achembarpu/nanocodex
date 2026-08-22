@@ -74,7 +74,7 @@ test("generation-pinned commit patch pages bypass mutable publication state", as
   assert.equal(requestedKey, `generations/${head}/commit-patches/0002.diff`);
   assert.equal(response?.headers.get("x-repository-generation"), head);
   assert.equal(response?.headers.get("cache-control"), "public, max-age=31536000, immutable");
-  assert.equal(response?.headers.get("content-type"), "text/x-diff; charset=utf-8");
+  assert.equal(response?.headers.get("content-type"), "text/plain; charset=utf-8");
 });
 
 test("generation-pinned aggregate commit patches stream immutable R2 bodies without mutable state", async () => {
@@ -140,7 +140,7 @@ test("generation-pinned aggregate commit patches stream immutable R2 bodies with
   assert.equal(response?.status, 200);
   assert.equal(response?.headers.get("x-repository-generation"), head);
   assert.equal(response?.headers.get("cache-control"), "public, max-age=31536000, immutable");
-  assert.equal(response?.headers.get("content-type"), "text/x-diff; charset=utf-8");
+  assert.equal(response?.headers.get("content-type"), "text/plain; charset=utf-8");
   assert.equal(response?.headers.get("content-length"), String(publication.commitPatchSize));
   const body = new Uint8Array(await response!.arrayBuffer());
   assert.equal(manifestReads, 1);

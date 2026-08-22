@@ -524,7 +524,7 @@ async function serveCommitPatch(
   const headers = new Headers({
     "cache-control": immutableCacheControl,
     "content-length": String(manifest.size),
-    "content-type": "text/x-diff; charset=utf-8",
+    "content-type": "text/plain; charset=utf-8",
     "x-content-type-options": "nosniff",
     "x-repository-generation": generation,
   });
@@ -663,7 +663,10 @@ function objectKeyFromUploadPath(pathname: string): string | null {
 
 function contentTypeForKey(key: string): string {
   if (key.endsWith(".json")) return "application/json; charset=utf-8";
-  if (key.endsWith(".diff") || key.endsWith(".patch")) return "text/x-diff; charset=utf-8";
+  // `text/x-diff` is not in Cloudflare's default compression allowlist. These
+  // are UTF-8 text streams, so use the standard text type and let the edge
+  // negotiate Brotli/gzip without buffering or recompressing in the Worker.
+  if (key.endsWith(".diff") || key.endsWith(".patch")) return "text/plain; charset=utf-8";
   if (key.endsWith(".pack") || key.endsWith(".idx")) return "application/octet-stream";
   return "text/plain; charset=utf-8";
 }
