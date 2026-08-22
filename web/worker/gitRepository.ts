@@ -1,6 +1,7 @@
 const SHA1_PATTERN = /^[a-f0-9]{40}$/;
 const REF_PATTERN = /^refs\/(heads|tags)\/[A-Za-z0-9][A-Za-z0-9._\/-]*$/;
-export const REPOSITORY_PART_BYTES = 16 * 1024 * 1024;
+export const MAX_REPOSITORY_PART_BYTES = 16 * 1024 * 1024;
+const MIN_REPOSITORY_MULTIPART_BYTES = 1024 * 1024;
 
 export type RepositoryRef = {
   name: string;
@@ -200,7 +201,7 @@ function areCanonicalParts(
   value: unknown,
   totalSize: unknown,
   keyAt: (index: number) => string,
-  requireFullIntermediateParts: boolean,
+  requireCanonicalByteParts: boolean,
 ): value is RepositoryPart[] {
   if (
     !Array.isArray(value) ||
@@ -212,6 +213,7 @@ function areCanonicalParts(
     return false;
   }
   let observedSize = 0;
+  let canonicalBytePartSize: number | undefined;
   for (const [index, part] of value.entries()) {
     if (
       part == null ||
@@ -219,12 +221,20 @@ function areCanonicalParts(
       part.key !== keyAt(index) ||
       !Number.isSafeInteger(part.size) ||
       part.size <= 0 ||
-      part.size > REPOSITORY_PART_BYTES ||
-      (requireFullIntermediateParts &&
-        index < value.length - 1 &&
-        part.size !== REPOSITORY_PART_BYTES)
+      part.size > MAX_REPOSITORY_PART_BYTES
     ) {
       return false;
+    }
+    if (requireCanonicalByteParts) {
+      const bytePartSize = canonicalBytePartSize ?? part.size;
+      canonicalBytePartSize = bytePartSize;
+      if (
+        (value.length > 1 && bytePartSize < MIN_REPOSITORY_MULTIPART_BYTES) ||
+        (index < value.length - 1 && part.size !== bytePartSize) ||
+        (index === value.length - 1 && part.size > bytePartSize)
+      ) {
+        return false;
+      }
     }
     observedSize += part.size;
   }

@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import {
   GitRepository,
-  REPOSITORY_PART_BYTES,
+  MAX_REPOSITORY_PART_BYTES,
   isCommitPatchManifest,
   isRepositoryPublication,
   type RepositoryPublication,
@@ -52,9 +52,9 @@ test("publication validation pins every mutable view to one generation", () => {
     ...publication(firstHash),
     commitPatchParts: [{
       key: `generations/${firstHash}/commit-patches/0000.diff`,
-      size: REPOSITORY_PART_BYTES + 1,
+      size: MAX_REPOSITORY_PART_BYTES + 1,
     }],
-    commitPatchSize: REPOSITORY_PART_BYTES + 1,
+    commitPatchSize: MAX_REPOSITORY_PART_BYTES + 1,
   }), false);
   const current = publication(firstHash);
   const { packParts: _packParts, packSize: _packSize, ...legacy } = current;
@@ -79,9 +79,9 @@ test("publication validation pins every mutable view to one generation", () => {
     ...publication(firstHash),
     packParts: [{
       key: `generations/${firstHash}/packs/${packHash}/0000.pack`,
-      size: REPOSITORY_PART_BYTES + 1,
+      size: MAX_REPOSITORY_PART_BYTES + 1,
     }],
-    packSize: REPOSITORY_PART_BYTES + 1,
+    packSize: MAX_REPOSITORY_PART_BYTES + 1,
   }), false);
   assert.equal(isRepositoryPublication({
     ...publication(firstHash),
@@ -90,6 +90,34 @@ test("publication validation pins every mutable view to one generation", () => {
       { key: `generations/${firstHash}/packs/${packHash}/0001.pack`, size: 1 },
     ],
     packSize: 2,
+  }), false);
+  const uploadPartBytes = 4 * 1024 * 1024;
+  assert.equal(isRepositoryPublication({
+    ...publication(firstHash),
+    packParts: [
+      {
+        key: `generations/${firstHash}/packs/${packHash}/0000.pack`,
+        size: uploadPartBytes,
+      },
+      {
+        key: `generations/${firstHash}/packs/${packHash}/0001.pack`,
+        size: uploadPartBytes,
+      },
+      { key: `generations/${firstHash}/packs/${packHash}/0002.pack`, size: 1 },
+    ],
+    packSize: (uploadPartBytes * 2) + 1,
+  }), true);
+  assert.equal(isRepositoryPublication({
+    ...publication(firstHash),
+    packParts: [
+      {
+        key: `generations/${firstHash}/packs/${packHash}/0000.pack`,
+        size: uploadPartBytes,
+      },
+      { key: `generations/${firstHash}/packs/${packHash}/0001.pack`, size: 1 },
+      { key: `generations/${firstHash}/packs/${packHash}/0002.pack`, size: 1 },
+    ],
+    packSize: uploadPartBytes + 2,
   }), false);
   assert.equal(isRepositoryPublication({
     ...publication(firstHash),

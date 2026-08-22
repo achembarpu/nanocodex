@@ -136,7 +136,7 @@ test("the publisher CLI initializes its module before building a generation", as
       requests.some(({ url }) => url === `/api/git/objects/${key}`) &&
       Number.isSafeInteger(size) &&
       size > 0 &&
-      size <= 16 * 1024 * 1024
+      size <= 4 * 1024 * 1024
     ));
     assert.equal(
       requests.some(({ url }) =>
@@ -159,7 +159,7 @@ test("the publisher CLI initializes its module before building a generation", as
       requests.some(({ url }) => url === `/api/git/objects/${key}`) &&
       Number.isSafeInteger(size) &&
       size > 0 &&
-      size <= 16 * 1024 * 1024
+      size <= 4 * 1024 * 1024
     ));
     assert.equal(requests.some(({ url }) => url?.endsWith("/repository.pack")), false);
     const snapshotUpload = requests.find(({ url }) =>
@@ -239,7 +239,7 @@ test("repository publication uploads only content absent from the prior inventor
 test("repository packs are divided into canonical bounded upload parts", () => {
   const head = "a".repeat(40);
   const packHash = "b".repeat(40);
-  const partBytes = 16 * 1024 * 1024;
+  const partBytes = 4 * 1024 * 1024;
   const packSize = (partBytes * 4) + 1_100_465;
   const parts = buildRepositoryPackParts(head, packHash, packSize);
 
@@ -256,7 +256,7 @@ test("repository packs are divided into canonical bounded upload parts", () => {
 
 test("commit-aligned patch pages retain contiguous bounded descriptors", () => {
   const head = "a".repeat(40);
-  const partBytes = 16 * 1024 * 1024;
+  const partBytes = 4 * 1024 * 1024;
   const pages = [
     { name: "0000", path: "/tmp/0000.diff", size: 476_879 },
     { name: "0001", path: "/tmp/0001.diff", size: 2_105_727 },

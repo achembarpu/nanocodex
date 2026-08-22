@@ -23,7 +23,7 @@ const repositoryPath = resolve(
   process.env.NANOCODEX_REPO ?? resolve(projectRoot, ".."),
 );
 const uploadConcurrency = 12;
-const repositoryPackPartBytes = 16 * 1024 * 1024;
+const repositoryUploadPartBytes = 4 * 1024 * 1024;
 const publicationBranch = "master";
 const uploadAttemptTimeoutMs = positiveIntegerEnvironment(
   "NANOCODEX_GIT_UPLOAD_TIMEOUT_MS",
@@ -288,7 +288,6 @@ export async function readRemoteState(origin, token, repairInvalid = false) {
   throw new Error("read state exhausted its retry policy");
 }
 
-const objectShardTargetBytes = 4 * 1024 * 1024;
 const objectShardCompactionThreshold = 128;
 const gitObjectTypes = { commit: 1, tree: 2, blob: 3, tag: 4 };
 
@@ -384,7 +383,7 @@ export function buildCommitPatchParts(head, pages) {
       typeof page.path !== "string" ||
       !Number.isSafeInteger(page.size) ||
       page.size <= 0 ||
-      page.size > repositoryPackPartBytes
+      page.size > repositoryUploadPartBytes
     ) {
       throw new Error(`commit patch page ${name} is invalid`);
     }
@@ -400,14 +399,14 @@ function buildBoundedParts(totalSize, keyAt, description) {
   if (!Number.isSafeInteger(totalSize) || totalSize <= 0) {
     throw new Error(`${description} size is invalid`);
   }
-  const count = Math.ceil(totalSize / repositoryPackPartBytes);
+  const count = Math.ceil(totalSize / repositoryUploadPartBytes);
   if (count > 256) throw new Error(`${description} part count exceeds 256`);
   return Array.from({ length: count }, (_, index) => {
-    const offset = index * repositoryPackPartBytes;
+    const offset = index * repositoryUploadPartBytes;
     return {
       key: keyAt(index),
       offset,
-      size: Math.min(repositoryPackPartBytes, totalSize - offset),
+      size: Math.min(repositoryUploadPartBytes, totalSize - offset),
     };
   });
 }
@@ -491,7 +490,7 @@ async function buildObjectShards({
       let shardSize = 0;
       while (entryIndex < entries.length) {
         const entry = entries[entryIndex];
-        if (shardSize > 0 && shardSize + entry.length > objectShardTargetBytes) break;
+        if (shardSize > 0 && shardSize + entry.length > repositoryUploadPartBytes) break;
         shardEntries.push(entry);
         shardSize += entry.length;
         entryIndex += 1;
