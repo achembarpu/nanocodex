@@ -157,6 +157,9 @@ export function installWorkerAgentRuntime(scope = globalThis, options = {}) {
   }
   const createAgent = options.createAgent ?? loadAgent;
   const prewarmLocal = options.prewarmLocal ?? prewarmWorkerRuntime;
+  const prewarmBoot = options.createAgent === undefined || options.prewarmLocal !== undefined
+    ? prewarmLocal
+    : undefined;
   let generation = 0;
   let channel;
   let bootPromise;
@@ -205,7 +208,12 @@ export function installWorkerAgentRuntime(scope = globalThis, options = {}) {
     nextAgent = 1;
     nextResult = 1;
     try {
-      const agent = await createAgent(await hydrateConfig(message.config));
+      const hydration = hydrateConfig(message.config);
+      const preparation = prewarmBoot?.(message.config.harness, {
+        module: message.config.module,
+      });
+      const [config] = await Promise.all([hydration, preparation]);
+      const agent = await createAgent(config);
       if (currentGeneration !== generation) {
         agent.dispose();
         return;

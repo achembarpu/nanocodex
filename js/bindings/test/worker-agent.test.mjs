@@ -736,6 +736,44 @@ test("Worker runtime overlaps WASM initialization and browser harness restoratio
   await prewarming;
 });
 
+test("cold Worker boot awaits package preparation before creating its Agent", async () => {
+  const outgoing = [];
+  const warmed = [];
+  const module = emptyWasmModule();
+  const ready = deferred();
+  const fixture = createFixture();
+  let creations = 0;
+  const scope = { onmessage: null, postMessage: (message) => outgoing.push(message) };
+  const runtime = installWorkerAgentRuntime(scope, {
+    createAgent(options) {
+      creations += 1;
+      return fixture.createAgent(options);
+    },
+    prewarmLocal(harness, options) {
+      warmed.push({ harness, options });
+      return ready.promise;
+    },
+  });
+
+  scope.onmessage({ data: {
+    protocol: "nanocodex.worker-agent.v1",
+    channel: "cold",
+    type: "boot",
+    config: { harness: false, module, sessionId: "cold" },
+  } });
+  await tick();
+
+  assert.deepEqual(warmed, [{ harness: false, options: { module } }]);
+  assert.equal(creations, 0);
+  assert.equal(outgoing.length, 0);
+
+  ready.resolve();
+  await tick();
+  assert.equal(creations, 1);
+  assert.equal(outgoing.at(-1).type, "ready");
+  runtime.dispose();
+});
+
 test("Worker runtime prewarms a harness-free Agent without loading browser tools", async () => {
   const started = [];
   await prewarmWorkerRuntime(false, {
