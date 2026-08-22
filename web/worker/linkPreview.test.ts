@@ -8,6 +8,10 @@ import { routeLinkPreview } from "./linkPreview.ts";
 
 const template = `<!doctype html><html><head>
 <!-- nanocodex:link-preview:start --><title>stale</title><!-- nanocodex:link-preview:end -->
+<link rel="modulepreload" href="/assets/app.js" data-nanocodex-route-preload="shell">
+<link rel="modulepreload" href="/assets/home.js" data-nanocodex-route-preload="home">
+<link rel="modulepreload" href="/assets/code.js" data-nanocodex-route-preload="code">
+<link rel="modulepreload" href="/assets/artifact.js" data-nanocodex-route-preload="artifact">
 </head><body></body></html>`;
 
 function assetEnv(assetEtag: string | null = '"asset"') {
@@ -61,6 +65,10 @@ test("crawler documents contain complete route-aware production metadata", async
   assert.match(html, /<meta name="twitter:card" content="summary_large_image" \/>/);
   assert.match(html, /src\/&lt;driver&gt;\.rs · Nanocodex/);
   assert.doesNotMatch(html, /<driver>/);
+  assert.match(html, /\/assets\/app\.js/);
+  assert.match(html, /\/assets\/code\.js/);
+  assert.doesNotMatch(html, /\/assets\/(?:home|artifact)\.js/);
+  assert.doesNotMatch(html, /data-nanocodex-route-preload/);
 
   const conditional = new Request(request, {
     headers: {
@@ -114,7 +122,10 @@ test("every declared document route and the internal artifact runtime retain the
   assert.match(artifact.headers.get("content-security-policy") ?? "", /default-src 'none'/);
   assert.match(artifact.headers.get("content-security-policy") ?? "", /connect-src 'none'/);
   assert.match(artifact.headers.get("content-security-policy") ?? "", /frame-ancestors 'self'/);
-  assert.match(await artifact.text(), /Nanocodex — high-performance Codex SDK/);
+  const artifactHtml = await artifact.text();
+  assert.match(artifactHtml, /Nanocodex — high-performance Codex SDK/);
+  assert.match(artifactHtml, /\/assets\/artifact\.js/);
+  assert.doesNotMatch(artifactHtml, /\/assets\/(?:app|home|code)\.js/);
   assert.equal(requests.length, knownPaths.size + 2);
   assert.ok(requests.every((request) => new URL(request.url).pathname === "/"));
 });

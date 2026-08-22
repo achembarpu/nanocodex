@@ -8,6 +8,7 @@ import mkcert from "vite-plugin-mkcert";
 import { chatGptDevProxy } from "./vite/chatGptDevProxy.ts";
 import { rewriteDocsDevModuleUrl } from "./vite/docsDevModules.ts";
 import { repositoryDevServer } from "./vite/repositoryDevServer.ts";
+import { routePreloads } from "./vite/routePreloads.ts";
 import {
   documentStatusForPath,
   renderLinkPreviewDocument,
@@ -82,6 +83,7 @@ export default defineConfig({
   plugins: [
     applicationRouteFallback(),
     linkPreviewMetadata(),
+    routePreloads(),
     nanocodexTools(),
     mkcert(),
     react(),

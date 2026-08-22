@@ -305,6 +305,42 @@ within(
 const html = await readFile(join(clientDirectory, "index.html"), "utf8");
 const headers = await readFile(join(clientDirectory, "_headers"), "utf8");
 const assetsIgnore = await readFile(join(clientDirectory, ".assetsignore"), "utf8");
+const routePreloadFiles = new Map(
+  [...html.matchAll(
+    /<link\b[^>]*\bhref="([^"]+)"[^>]*\bdata-nanocodex-route-preload="([^"]+)"[^>]*>/g,
+  )].map((match) => [match[1].replace(/^\//, ""), new Set(match[2].split(","))]),
+);
+assert(
+  html.indexOf("<meta charset=") < html.indexOf("data-nanocodex-route-preload="),
+  "route hints must not move the encoding declaration out of the early document",
+);
+assertRoutePreloadClosure("shell", [applicationKey]);
+assertRoutePreloadClosure("home", [homeFrameKey, experienceKey]);
+assertRoutePreloadClosure("code", [
+  manifestKey("src/CodeBrowser.tsx"),
+  manifestKey("src/publishedRepository.ts"),
+]);
+assertRoutePreloadClosure("commits", [
+  manifestKey("src/CommitCodeStream.tsx"),
+  manifestKey("src/VirtualCommitList.tsx"),
+  manifestKey("src/publishedRepository.ts"),
+]);
+assertRoutePreloadClosure("docs", [manifestKey("src/Docs.tsx")]);
+assertRoutePreloadClosure("changelog", [manifestKey("src/Changelog.tsx")]);
+assertRoutePreloadClosure("evals", [manifestKey("src/Evals.tsx")]);
+assertRoutePreloadClosure("artifact", [manifestKey("src/artifactRuntime.tsx")]);
+for (const forbidden of [agentKey, agentRuntimeKey]) {
+  assert(
+    !routePreloadFiles.has(manifest[forbidden].file),
+    `${manifest[forbidden].file} must remain outside document preloads`,
+  );
+  for (const css of manifest[forbidden].css ?? []) {
+    assert(
+      !routePreloadFiles.has(css),
+      `${css} must remain outside document preloads`,
+    );
+  }
+}
 assert.match(
   assetsIgnore,
   /^\.vite\/$/m,
@@ -668,6 +704,26 @@ function cssClosure(keys) {
     for (const file of manifest[key]?.css ?? []) files.add(file);
   }
   return [...files];
+}
+
+function assertRoutePreloadClosure(audience, roots) {
+  const chunks = new Set();
+  for (const root of roots) {
+    for (const key of importClosure(root, false)) chunks.add(key);
+  }
+  chunks.delete(entryKey);
+  for (const key of chunks) {
+    const file = manifest[key]?.file;
+    if (file) assertRoutePreload(file, audience);
+  }
+  for (const css of cssClosure(chunks)) assertRoutePreload(css, audience);
+}
+
+function assertRoutePreload(file, audience) {
+  assert(
+    routePreloadFiles.get(file)?.has(audience),
+    `${file} must be parser-discoverable for ${audience}`,
+  );
 }
 
 async function directRouteStats(rootSuffixes, dataRequests, additionalRoots = []) {
