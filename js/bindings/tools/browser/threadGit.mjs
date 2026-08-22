@@ -1,7 +1,7 @@
 import "./browserBuffer.mjs";
 import git from "isomorphic-git";
 import http from "isomorphic-git/http/web";
-import { openOpfsGitFs } from "./opfsGit.mjs";
+import { createOpfsGitFs, openOpfsGitFs, openOpfsWorkspaceRoot } from "./opfsGit.mjs";
 export const THREAD_GIT_DIRECTORY = "/workspace";
 export const THREAD_GIT_AUTHOR = { name: "Nanocodex", email: "agent@nanocodex.dev" };
 const directory = THREAD_GIT_DIRECTORY;
@@ -30,16 +30,20 @@ export async function initializeThreadGit(thread) {
 }
 /** Ensures the repository exists without scanning its complete worktree. */
 export function prepareThreadGit(thread) {
-    return inspectThreadGit(thread, async () => undefined);
+    return inspectPreparedThreadGit(thread, (rawFs, workspaceRoot) => ({ rawFs, workspaceRoot }));
 }
-export async function inspectThreadGit(thread, inspect) {
+export function inspectThreadGit(thread, inspect) {
+    return inspectPreparedThreadGit(thread, (rawFs) => inspect(rawFs));
+}
+async function inspectPreparedThreadGit(thread, inspect) {
     return withThreadGitLock(thread, async () => {
-        const fs = await openOpfsGitFs(thread.workspaceName);
+        const workspaceRoot = await openOpfsWorkspaceRoot(thread.workspaceName);
+        const fs = createOpfsGitFs(workspaceRoot);
         if (!(await exists(fs, `${directory}/.git/config`))) {
             await initializeOrRestore(fs, thread);
         }
         await configureRemote(fs, thread);
-        return inspect(fs);
+        return inspect(fs, workspaceRoot);
     });
 }
 export async function threadGitStatus(thread) {

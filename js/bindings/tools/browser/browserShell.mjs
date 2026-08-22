@@ -2,7 +2,6 @@ import "./browserBuffer.mjs";
 import git from "isomorphic-git";
 import http from "isomorphic-git/http/web";
 import { artifact } from "../artifact.mjs";
-import { createOpfsGitFs, openOpfsWorkspaceRoot, } from "./opfsGit.mjs";
 import { browserThread, notifyThreadGitChanged, prepareThreadGit, THREAD_GIT_AUTHOR, THREAD_GIT_DIRECTORY, withThreadGitLock, } from "./threadGit.mjs";
 import { openThreadWorkspace } from "./workspace.mjs";
 const utf8 = new TextEncoder();
@@ -53,11 +52,11 @@ export function validateBrowserArtifactSource(source) {
 }
 export async function prepareBrowserShell(threadId, origin) {
     const thread = browserThread(threadId, origin);
-    await prepareThreadGit(thread);
-    const workspaceRoot = await openOpfsWorkspaceRoot(thread.workspaceName);
-    const rawFs = createOpfsGitFs(workspaceRoot);
+    const [{ rawFs, workspaceRoot }, workspace] = await Promise.all([
+        prepareThreadGit(thread),
+        openThreadWorkspace(threadId),
+    ]);
     const projectInstructions = await loadBrowserProjectInstructions(rawFs);
-    const workspace = await openThreadWorkspace(threadId);
     let shellFs;
     let shellDirty = false;
     let shellRequest;

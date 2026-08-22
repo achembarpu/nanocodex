@@ -126,9 +126,19 @@ test("the prepared browser harness observes workspace writes before its first la
   const initialConfigWrites = configFile.writes;
 
   const previousStorage = Object.getOwnPropertyDescriptor(globalThis.navigator, "storage");
+  let storageOpens = 0;
+  let releaseGitStorage!: () => void;
+  const gitStorage = new Promise<MemoryDirectory>((resolve) => {
+    releaseGitStorage = () => resolve(origin);
+  });
   Object.defineProperty(globalThis.navigator, "storage", {
     configurable: true,
-    value: { getDirectory: async () => origin },
+    value: {
+      getDirectory: async () => {
+        storageOpens += 1;
+        return storageOpens === 1 ? gitStorage : origin;
+      },
+    },
   });
   const statusMatrix = git.statusMatrix;
   let statusScans = 0;
@@ -137,7 +147,11 @@ test("the prepared browser harness observes workspace writes before its first la
     return statusMatrix(...args);
   };
   try {
-    const shell = await prepareBrowserShell(thread.id, "https://example.test");
+    const preparingShell = prepareBrowserShell(thread.id, "https://example.test");
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(storageOpens, 2);
+    releaseGitStorage();
+    const shell = await preparingShell;
     assert.equal(statusScans, 0);
     assert(configFile.writes > initialConfigWrites);
     assert.equal(
@@ -146,6 +160,7 @@ test("the prepared browser harness observes workspace writes before its first la
     );
     const configuredWrites = configFile.writes;
     await prepareBrowserShell(thread.id, "https://example.test");
+    assert.equal(storageOpens, 3);
     assert.equal(configFile.writes, configuredWrites);
     assert.equal(shell.projectInstructions, "lazy browser harness\n");
     await shell.workspace.writeFile("/workspace/before-bash.txt", "visible on first command\n");
