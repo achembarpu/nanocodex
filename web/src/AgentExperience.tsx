@@ -31,10 +31,10 @@ type AuthenticatedAgentTerminal = ComponentType<{
 
 type AuthenticatedAgentTerminalModule = {
   AgentTerminal: AuthenticatedAgentTerminal;
-  prepareAgentTerminal(): Promise<void>;
 };
 
 let agentTerminalRequest: Promise<AuthenticatedAgentTerminalModule> | undefined;
+let agentRuntimeRequest: Promise<void> | undefined;
 
 function loadAgentTerminal(): Promise<AuthenticatedAgentTerminalModule> {
   if (agentTerminalRequest) return agentTerminalRequest;
@@ -46,10 +46,21 @@ function loadAgentTerminal(): Promise<AuthenticatedAgentTerminalModule> {
   return request;
 }
 
-/** Warms the authenticated terminal boundary without creating an Agent or UI. */
+function prepareAgentRuntime(): Promise<void> {
+  if (agentRuntimeRequest) return agentRuntimeRequest;
+  const request = import("./agentRuntime")
+    .then((module) => module.prepareAgentRuntime());
+  agentRuntimeRequest = request;
+  void request.catch(() => {
+    if (agentRuntimeRequest === request) agentRuntimeRequest = undefined;
+  });
+  return request;
+}
+
+/** Fetches UI while Worker/WASM preparation runs on an independent critical path. */
 export function preloadAgentTerminal(): Promise<void> {
   if (browserAgentCapabilityError() !== undefined) return Promise.resolve();
-  return loadAgentTerminal().then((module) => module.prepareAgentTerminal());
+  return Promise.all([loadAgentTerminal(), prepareAgentRuntime()]).then(() => undefined);
 }
 
 /** Lightweight credential shell that keeps the authenticated runtime off signed-out startup. */

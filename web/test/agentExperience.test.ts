@@ -5,18 +5,19 @@ import test from "node:test";
 import { browserMcpConfiguration } from "../src/browserMcp.ts";
 
 const terminal = source("../src/AgentTerminal.tsx");
+const runtime = source("../src/agentRuntime.ts");
 const dock = source("../src/ArtifactDock.tsx");
 const terminalCss = source("../src/AgentTerminal.css");
 
 test("one app-lifetime Config supplies clone-safe MCP servers to the retained Agent", () => {
-  const declaration = section(terminal, "const agentConfig: Config", "/** Authenticated website policy");
-  assert.equal(matches(terminal, /createConfig\(/g), 1);
-  assert.ok(terminal.indexOf("const agentConfig: Config") < terminal.indexOf("export const AgentTerminal"));
+  const declaration = section(runtime, "export const agentConfig: Config", "/** Starts the exact authenticated Worker");
+  assert.equal(matches(runtime, /createConfig\(/g), 1);
   assert.match(declaration, /createConfig\(\{[\s\S]*?agent: \{[\s\S]*?mcp: browserMcpConfiguration\(location\.origin\)/);
   assert.match(
-    declaration,
-    /export function prepareAgentTerminal\(\)[\s\S]*?agentConfig\.prepareAgent\(\{ threadId: getBrowserThread\(\)\.id \}\)/,
+    runtime,
+    /export function prepareAgentRuntime\(\)[\s\S]*?agentConfig\.prepareAgent\(\{ threadId: getBrowserThread\(\)\.id \}\)/,
   );
+  assert.match(terminal, /import \{ agentConfig \} from "\.\/agentRuntime"/);
   assert.match(terminal, /<NanocodexProvider config=\{agentConfig\}>/);
 
   const configuration = browserMcpConfiguration("https://agent.test/path");

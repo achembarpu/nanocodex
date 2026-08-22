@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const terminal = source("../src/AgentTerminal.tsx");
+const runtime = source("../src/agentRuntime.ts");
 const demoTerminal = source("../src/demoTerminal.ts");
 const experience = source("../src/AgentExperience.tsx");
 const session = source("../src/chatGptSession.tsx");
@@ -58,7 +59,8 @@ test("starting and failure states repaint the terminal while the native mobile c
 });
 
 test("the React package owns browser Agent startup through its raw hook contract", () => {
-  assert.match(terminal, /import \{[\s\S]*?createConfig,[\s\S]*?NanocodexProvider,[\s\S]*?useAgent,[\s\S]*?type Config,[\s\S]*?\} from "nanocodex-react"/);
+  assert.match(runtime, /import \{ createConfig, type Config \} from "nanocodex-react"/);
+  assert.match(terminal, /import \{[\s\S]*?NanocodexProvider,[\s\S]*?useAgent,[\s\S]*?\} from "nanocodex-react"/);
   assert.match(terminal, /<NanocodexProvider config=\{agentConfig\}>/);
   assert.match(terminal, /data: agent,[\s\S]*?\} = useAgent\(\{ enabled: true, threadId: thread\?\.id \}\)/);
   assert.match(terminal, /createAgentTerminal\(\{[\s\S]*?agent,[\s\S]*?terminal: terminalHost/);

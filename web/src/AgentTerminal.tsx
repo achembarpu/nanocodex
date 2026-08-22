@@ -7,10 +7,8 @@ import {
   useState,
 } from "react";
 import {
-  createConfig,
   NanocodexProvider,
   useAgent,
-  type Config,
 } from "nanocodex-react";
 import type { ArtifactDocument } from "nanocodex/tools/artifact";
 import { getBrowserThread } from "nanocodex/tools/browser";
@@ -36,20 +34,9 @@ import {
   type TerminalHost,
 } from "./demoTerminal";
 import { ArtifactDock } from "./ArtifactDock";
-import { browserMcpConfiguration } from "./browserMcp";
+import { agentConfig } from "./agentRuntime";
 
 export type { AgentTerminalMode, AgentTerminalState } from "./agentTerminalTypes";
-
-const agentConfig: Config = createConfig({
-  agent: {
-    mcp: browserMcpConfiguration(location.origin),
-  },
-});
-
-/** Prewarms the exact authenticated Worker/WASM resource owned by this terminal. */
-export function prepareAgentTerminal(): Promise<void> {
-  return agentConfig.prepareAgent({ threadId: getBrowserThread().id });
-}
 
 /** Authenticated website policy around the headless Agent SDK and app-local xterm. */
 export const AgentTerminal = memo(function AgentTerminal({

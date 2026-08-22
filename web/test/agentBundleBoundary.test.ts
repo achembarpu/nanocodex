@@ -8,6 +8,7 @@ const routeLoaders = source("../src/routeLoaders.ts");
 const experience = source("../src/AgentExperience.tsx");
 const evals = source("../src/Evals.tsx");
 const terminal = source("../src/AgentTerminal.tsx");
+const runtime = source("../src/agentRuntime.ts");
 const terminalCss = source("../src/AgentTerminal.css");
 
 test("home routes preload only the lightweight credential experience", () => {
@@ -20,12 +21,13 @@ test("home routes preload only the lightweight credential experience", () => {
 
   assert.doesNotMatch(
     experience,
-    /from "nanocodex-react"|from "\.\/agentTerminalSurface"|from "\.\/ArtifactDock"|from "\.\/browserMcp"/,
+    /from "nanocodex-react"|from "\.\/agentTerminalSurface"|from "\.\/ArtifactDock"|from "\.\/agentRuntime"|from "\.\/browserMcp"/,
   );
   assert.match(terminal, /from "nanocodex-react"/);
   assert.match(terminal, /from "\.\/agentTerminalSurface"/);
   assert.match(terminal, /from "\.\/ArtifactDock"/);
-  assert.match(terminal, /from "\.\/browserMcp"/);
+  assert.match(terminal, /from "\.\/agentRuntime"/);
+  assert.match(runtime, /from "\.\/browserMcp"/);
 });
 
 test("evaluation query state stays behind the Evals route", () => {
@@ -60,9 +62,10 @@ test("authenticated credential readiness is the sole terminal import gate", () =
   assert.match(experience, /export function preloadAgentTerminal\(\)/);
   assert.match(
     experience,
-    /browserAgentCapabilityError\(\) !== undefined[\s\S]*?loadAgentTerminal\(\)\.then\(\(module\) => module\.prepareAgentTerminal\(\)\)/,
+    /browserAgentCapabilityError\(\) !== undefined[\s\S]*?Promise\.all\(\[loadAgentTerminal\(\), prepareAgentRuntime\(\)\]\)/,
   );
-  assert.match(terminal, /agentConfig\.prepareAgent\(\{ threadId: getBrowserThread\(\)\.id \}\)/);
+  assert.match(experience, /import\("\.\/agentRuntime"\)[\s\S]*?module\.prepareAgentRuntime\(\)/);
+  assert.match(runtime, /agentConfig\.prepareAgent\(\{ threadId: getBrowserThread\(\)\.id \}\)/);
   assert.match(
     routeLoaders,
     /const experience = loadAgentExperience\(\)[\s\S]*?deploymentHealth\.read\(\)\.then[\s\S]*?health\.credentialSource !== null[\s\S]*?preloadAgentTerminal\(\)/,

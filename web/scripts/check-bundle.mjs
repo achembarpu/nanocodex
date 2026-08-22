@@ -24,6 +24,11 @@ const budgets = Object.freeze({
   commitsRouteJavaScriptGzip: 285_000,
   commitsRouteCssGzip: 12_000,
   agentJavaScript: 680_000,
+  // Worker/WASM preparation must begin from this small graph while the much
+  // larger terminal UI downloads in parallel.
+  agentRuntimeJavaScriptFiles: 4,
+  agentRuntimeJavaScript: 45_000,
+  agentRuntimeJavaScriptGzip: 15_000,
   // OPFS, artifacts, durability, typed voice lifecycle routing, subscription auth, and paid MCP stay in the Worker.
   // The app-local ANSI terminal bridge stays in a lazy chunk loaded only after
   // an authenticated terminal starts.
@@ -70,6 +75,10 @@ const applicationKey = manifestKey("src/NanocodexApp.tsx");
 const homeFrameKey = manifestKey("src/HomeFrame.tsx");
 const experienceKey = manifestKey("src/AgentExperience.tsx");
 const agentKey = manifestKey("src/AgentTerminal.tsx");
+const agentRuntimeKey = exactlyOne(
+  Object.keys(manifest).filter((key) => manifest[key]?.name === "agentRuntime"),
+  "authenticated Agent runtime chunk",
+);
 const entry = manifest[entryKey];
 const experience = manifest[experienceKey];
 const agent = manifest[agentKey];
@@ -92,6 +101,7 @@ const applicationStatic = importClosure(applicationKey, false);
 const homeFrameStatic = importClosure(homeFrameKey, false);
 const experienceStatic = importClosure(experienceKey, false);
 const agentStatic = importClosure(agentKey, false);
+const agentRuntimeStatic = importClosure(agentRuntimeKey, false);
 const sourceRoute = await directRouteStats([
   "index.html",
   "src/NanocodexApp.tsx",
@@ -123,13 +133,23 @@ assert(
   importClosure(experienceKey, true).has(agentKey),
   "the authenticated credential path must dynamically reach the Agent terminal",
 );
+assert(
+  importClosure(experienceKey, true).has(agentRuntimeKey),
+  "the authenticated credential path must independently reach the Agent runtime",
+);
+assert(
+  agentStatic.has(agentRuntimeKey) && !agentRuntimeStatic.has(agentKey),
+  "the terminal must consume the shared Agent runtime without entering its prewarm graph",
+);
 const initialJavaScript = await closureStats(initialStatic, "file");
 const signedOutJavaScript = await closureStats(signedOutStatic, "file");
 const initialCssFiles = cssClosure(initialStatic);
 const initialCss = await fileStats(initialCssFiles);
 const agentJavaScript = await closureStats(agentStatic, "file");
+const agentRuntimeJavaScript = await closureStats(agentRuntimeStatic, "file");
 const signedOutSource = await closureSource(signedOutStatic);
 const agentSource = await closureSource(agentStatic);
+const agentRuntimeSource = await closureSource(agentRuntimeStatic);
 const workerAgentMarker = "nanocodex.worker-agent.v1";
 assert(
   !signedOutSource.includes(workerAgentMarker),
@@ -140,6 +160,10 @@ assert(
   "the authenticated Agent terminal must include the WorkerAgent wrapper",
 );
 assert(
+  agentRuntimeSource.includes(workerAgentMarker),
+  "the independent prewarm graph must include the WorkerAgent wrapper",
+);
+assert(
   !signedOutSource.includes("Nanocodex terminal input")
     && !signedOutSource.includes("xterm-accessibility"),
   "the signed-out credential experience must not include xterm",
@@ -148,6 +172,11 @@ assert(
   agentSource.includes("Nanocodex terminal input")
     && agentSource.includes("xterm-accessibility"),
   "the authenticated Agent terminal must include xterm",
+);
+assert(
+  !agentRuntimeSource.includes("Nanocodex terminal input")
+    && !agentRuntimeSource.includes("xterm-accessibility"),
+  "terminal presentation must stay out of the Worker/WASM prewarm graph",
 );
 
 withinCount(
@@ -214,6 +243,21 @@ within(
   budgets.commitsRouteCssGzip,
 );
 within("Agent JavaScript", agentJavaScript.bytes, budgets.agentJavaScript);
+withinCount(
+  "Agent runtime JavaScript chunks",
+  agentRuntimeJavaScript.fileCount,
+  budgets.agentRuntimeJavaScriptFiles,
+);
+within(
+  "Agent runtime JavaScript",
+  agentRuntimeJavaScript.bytes,
+  budgets.agentRuntimeJavaScript,
+);
+within(
+  "Agent runtime JavaScript gzip",
+  agentRuntimeJavaScript.gzipBytes,
+  budgets.agentRuntimeJavaScriptGzip,
+);
 
 const html = await readFile(join(clientDirectory, "index.html"), "utf8");
 const headers = await readFile(join(clientDirectory, "_headers"), "utf8");
@@ -515,6 +559,9 @@ console.log(JSON.stringify({
   },
   agent: {
     javascriptBytes: agentJavaScript.bytes,
+    runtimeFiles: agentRuntimeJavaScript.fileCount,
+    runtimeBytes: agentRuntimeJavaScript.bytes,
+    runtimeGzipBytes: agentRuntimeJavaScript.gzipBytes,
     workerFiles: worker.fileCount,
     workerBytes: worker.bytes,
     workerGzipBytes: worker.gzipBytes,
