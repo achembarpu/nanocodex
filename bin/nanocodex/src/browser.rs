@@ -40,7 +40,8 @@ enum CookieSource {
 pub(crate) struct BrowserArgs {
     /// Select the private browser exposed to Code Mode as `tools.browser`.
     ///
-    /// By default, Nanocodex prefers Brave, falls back to another installed
+    /// By default, Nanocodex uses a dedicated automation browser on macOS. On
+    /// other platforms it prefers Brave, falls back to another installed
     /// Chromium-family browser, and disables browser tools when none is
     /// available. Pass `brave` to require the standard Brave installation,
     /// `chromium` to skip Brave, or `none` to disable browser tools.
@@ -56,18 +57,19 @@ pub(crate) struct BrowserArgs {
 
     /// Copy cookies from a standard desktop browser profile into the private session.
     ///
-    /// The default `all` copies every cookie from an automatically selected
-    /// installed profile. Pass a browser name to select its profile or `none`
-    /// to start with an empty cookie jar.
+    /// macOS defaults to `none` so an unattended private browser never opens
+    /// the login Keychain. Other platforms default to `all`. Pass a browser
+    /// name to select its profile or `none` to start with an empty cookie jar.
     #[arg(
         long,
         env = "NANOCODEX_BROWSER_COOKIES",
         value_enum,
         num_args = 0..=1,
-        default_value = "all",
         default_missing_value = "all",
         require_equals = true
     )]
+    #[cfg_attr(target_os = "macos", arg(default_value = "none"))]
+    #[cfg_attr(not(target_os = "macos"), arg(default_value = "all"))]
     cookies: Option<CookieSourceKind>,
 
     /// Chrome or Chromium executable used by the browser tool.
@@ -79,7 +81,7 @@ impl Default for BrowserArgs {
     fn default() -> Self {
         Self {
             browser: None,
-            cookies: Some(CookieSourceKind::All),
+            cookies: Some(default_cookie_source()),
             browser_executable: None,
         }
     }
@@ -195,23 +197,35 @@ fn resolve_browser_launch(
         }));
     }
     match requested {
-        None => Ok([
-            BrowserProfileKind::Brave,
-            BrowserProfileKind::Chrome,
-            BrowserProfileKind::Chromium,
-            BrowserProfileKind::Edge,
-        ]
-        .into_iter()
-        .find_map(|profile| {
-            standard_profile(profile).ok().map(|session| BrowserLaunch {
-                kind: if profile == BrowserProfileKind::Brave {
-                    BrowserKind::Brave
-                } else {
-                    BrowserKind::Chromium
-                },
-                executable: Some(session.executable().to_path_buf()),
-            })
-        })),
+        None => {
+            #[cfg(target_os = "macos")]
+            {
+                Ok(Some(BrowserLaunch {
+                    kind: BrowserKind::Chromium,
+                    executable: None,
+                }))
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                Ok([
+                    BrowserProfileKind::Brave,
+                    BrowserProfileKind::Chrome,
+                    BrowserProfileKind::Chromium,
+                    BrowserProfileKind::Edge,
+                ]
+                .into_iter()
+                .find_map(|profile| {
+                    standard_profile(profile).ok().map(|session| BrowserLaunch {
+                        kind: if profile == BrowserProfileKind::Brave {
+                            BrowserKind::Brave
+                        } else {
+                            BrowserKind::Chromium
+                        },
+                        executable: Some(session.executable().to_path_buf()),
+                    })
+                }))
+            }
+        }
         Some(BrowserKind::Chromium) => Ok(Some(BrowserLaunch {
             kind: BrowserKind::Chromium,
             executable: None,
@@ -228,6 +242,16 @@ fn resolve_browser_launch(
             unreachable!("disabled browsers return before launch resolution")
         }
     }
+}
+
+#[cfg(target_os = "macos")]
+const fn default_cookie_source() -> CookieSourceKind {
+    CookieSourceKind::None
+}
+
+#[cfg(not(target_os = "macos"))]
+const fn default_cookie_source() -> CookieSourceKind {
+    CookieSourceKind::All
 }
 
 fn cookie_source(source: CookieSourceKind, target: BrowserKind) -> Result<CookieSource> {
@@ -309,14 +333,18 @@ impl ConfiguredBrowser {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(not(target_os = "macos"))]
     use std::path::Path;
 
     use nanocodex::Tools;
-    use nanocodex_browser::{BraveSession, BraveSessionError, BrowserProfileKind};
+    use nanocodex_browser::BraveSessionError;
+    #[cfg(not(target_os = "macos"))]
+    use nanocodex_browser::{BraveSession, BrowserProfileKind};
     use nanocodex_tools::runtime::ToolRuntime;
 
     use super::{BrowserArgs, BrowserKind, resolve_browser_launch};
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn automatic_browser_falls_back_when_brave_is_not_installed() {
         let launch = resolve_browser_launch(None, None, |profile| {
@@ -337,6 +365,7 @@ mod tests {
         );
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn automatic_browser_is_disabled_when_none_is_installed() {
         let launch = resolve_browser_launch(None, None, |profile| {
@@ -349,6 +378,7 @@ mod tests {
         assert!(launch.is_none());
     }
 
+    #[cfg(not(target_os = "macos"))]
     #[test]
     fn automatic_browser_prefers_an_installed_brave() {
         let launch = resolve_browser_launch(None, None, |_| {
@@ -362,6 +392,19 @@ mod tests {
             launch.executable.as_deref(),
             Some(Path::new("/installed/brave"))
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn automatic_browser_leaves_private_runtime_selection_to_the_library() {
+        let launch = resolve_browser_launch(None, None, |_| {
+            panic!("automatic macOS browser selection must not inspect desktop profiles")
+        })
+        .unwrap()
+        .unwrap();
+
+        assert_eq!(launch.kind, BrowserKind::Chromium);
+        assert!(launch.executable.is_none());
     }
 
     #[test]

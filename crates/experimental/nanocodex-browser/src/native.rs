@@ -986,14 +986,10 @@ impl Session {
                 .window_size(1280, 720)
                 .launch_timeout(BROWSER_LAUNCH_TIMEOUT)
                 .new_headless_mode();
-            #[cfg(target_os = "macos")]
-            {
-                // A headless process cannot service an interactive Keychain prompt. Without
-                // these Chrome can remain alive without ever opening its DevTools socket.
-                config = config.arg("use-mock-keychain").arg("password-store=basic");
-            }
             if opens_brave_profile {
                 config = profile_launch_config(config).arg("restore-last-session");
+            } else {
+                config = isolated_launch_config(config);
             }
             if let Some(executable) = executable {
                 config = config.chrome_executable(executable);
@@ -6778,6 +6774,21 @@ fn build_config(builder: BrowserConfigBuilder) -> Result<BrowserConfig, BrowserE
         .map_err(|message| BrowserError::Configuration { message })
 }
 
+#[cfg(target_os = "macos")]
+fn isolated_launch_config(builder: BrowserConfigBuilder) -> BrowserConfigBuilder {
+    // Private automation must never wait for an interactive credential prompt
+    // before opening its DevTools socket. Spell out chromiumoxide's launch
+    // defaults so this invariant is independent from its default-argument set.
+    profile_launch_config(builder)
+        .arg(("password-store", "basic"))
+        .arg("use-mock-keychain")
+}
+
+#[cfg(not(target_os = "macos"))]
+fn isolated_launch_config(builder: BrowserConfigBuilder) -> BrowserConfigBuilder {
+    builder
+}
+
 fn profile_launch_config(builder: BrowserConfigBuilder) -> BrowserConfigBuilder {
     // Chromiumoxide's Puppeteer-derived defaults select `password-store=basic`
     // and `use-mock-keychain`. Those are appropriate for an empty automation
@@ -7604,8 +7615,8 @@ mod tests {
         BrowserConfig, Chromium, Diagnostics, GateSignals, MAX_ACTION_INPUT_BYTES,
         MAX_CONSOLE_ENTRIES, MAX_DIAGNOSTIC_TEXT_BYTES, MAX_NETWORK_REQUESTS, NetworkSource,
         allowed_cookie_params, build_config, classify_gate, close_chromium, cookie_param,
-        diagnostic_limit, profile_launch_config, session_stopped, trace_browser_configuration,
-        validate_url,
+        diagnostic_limit, isolated_launch_config, profile_launch_config, session_stopped,
+        trace_browser_configuration, validate_url,
     };
     use crate::{
         BraveSession, Browser, BrowserAction, BrowserActionResult, BrowserConsoleEntry,
@@ -7927,6 +7938,57 @@ mod tests {
                 .expect("explicit executable"),
             Some(explicit)
         );
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    async fn isolated_launch_is_noninteractive_but_profile_import_uses_the_keychain()
+    -> Result<(), Box<dyn std::error::Error>> {
+        use std::os::unix::fs::PermissionsExt;
+
+        let directory = tempfile::tempdir()?;
+        let executable = directory.path().join("browser-args");
+        let output = directory.path().join("args.txt");
+        std::fs::write(
+            &executable,
+            "#!/bin/sh\nprintf '%s\\n' \"$@\" > \"$NANOCODEX_TEST_BROWSER_ARGS\"\n",
+        )?;
+        let mut permissions = std::fs::metadata(&executable)?.permissions();
+        permissions.set_mode(0o755);
+        std::fs::set_permissions(&executable, permissions)?;
+
+        let mut isolated = build_config(
+            isolated_launch_config(BrowserConfig::builder())
+                .chrome_executable(&executable)
+                .env(
+                    "NANOCODEX_TEST_BROWSER_ARGS",
+                    output.to_string_lossy().into_owned(),
+                ),
+        )?
+        .launch()?;
+        assert!(isolated.wait().await?.success());
+        let arguments = std::fs::read_to_string(&output)?;
+        assert!(arguments.lines().any(|arg| arg == "--use-mock-keychain"));
+        assert!(arguments.lines().any(|arg| arg == "--password-store=basic"));
+
+        let mut profile = build_config(
+            profile_launch_config(BrowserConfig::builder())
+                .chrome_executable(&executable)
+                .env(
+                    "NANOCODEX_TEST_BROWSER_ARGS",
+                    output.to_string_lossy().into_owned(),
+                ),
+        )?
+        .launch()?;
+        assert!(profile.wait().await?.success());
+        let arguments = std::fs::read_to_string(output)?;
+        assert!(!arguments.lines().any(|arg| arg == "--use-mock-keychain"));
+        assert!(
+            !arguments
+                .lines()
+                .any(|arg| arg.starts_with("--password-store="))
+        );
+        Ok(())
     }
 
     #[tokio::test]

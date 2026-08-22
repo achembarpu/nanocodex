@@ -324,9 +324,12 @@ mod tests {
     }
 
     #[test]
-    fn browser_and_cookie_selection_are_enabled_by_default() {
+    fn browser_and_cookie_selection_follow_platform_defaults() {
         let tui = Cli::try_parse_from(["nanocodex"]).unwrap();
         assert!(tui.agent.browser_enabled());
+        #[cfg(target_os = "macos")]
+        assert!(!tui.agent.copies_all_browser_cookies());
+        #[cfg(not(target_os = "macos"))]
         assert!(tui.agent.copies_all_browser_cookies());
 
         let tui = Cli::try_parse_from(["nanocodex", "--browser"]).unwrap();
