@@ -543,7 +543,7 @@ async function serveObject(
   const edgeCache = typeof caches === "undefined"
     ? undefined
     : (caches as CacheStorage & { default: Cache }).default;
-  const cacheKey = new Request(request.url, { method: "GET" });
+  const cacheKey = repositoryCacheKey(request, key);
   if (checkCache) {
     const cached = await edgeCache?.match(cacheKey);
     if (cached != null) return cached;
@@ -565,6 +565,14 @@ async function serveObject(
     context.waitUntil(edgeCache.put(cacheKey, response.clone()));
   }
   return response;
+}
+
+function repositoryCacheKey(request: Request, key: string): Request {
+  const url = new URL(request.url);
+  if (key.endsWith(".diff") || key.endsWith(".patch")) {
+    url.searchParams.set("__nanocodex_patch", "text");
+  }
+  return new Request(url, { method: "GET" });
 }
 
 async function matchEdgeCache(request: Request): Promise<Response | undefined> {
