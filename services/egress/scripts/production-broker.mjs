@@ -67,8 +67,11 @@ export function buildProductionBrokerConfig(base, { mainPath }) {
   if (!bindings.some((binding) => binding.name === "USER_CREDENTIALS"
       && binding.class_name === "UserCredentialBroker")
     || !bindings.some((binding) => binding.name === "AGENT_SUBJECTS"
-      && binding.class_name === "AgentSubjectDirectory")) {
-    throw new Error("production broker requires user credential and subject DO bindings");
+      && binding.class_name === "AgentSubjectDirectory")
+    || !bindings.some((binding) => binding.name === "CHATGPT_EGRESS"
+      && binding.class_name === "ChatGptEgress"
+      && binding.script_name === "nanocodex")) {
+    throw new Error("production broker requires credential, subject, and ChatGPT relay DO bindings");
   }
   const creates = base.migrations?.find((migration) => migration.tag === "v2");
   const deletes = base.migrations?.find((migration) => migration.tag === "v3");
@@ -82,17 +85,6 @@ export function buildProductionBrokerConfig(base, { mainPath }) {
     main: mainPath,
     workers_dev: false,
     routes: undefined,
-    durable_objects: {
-      ...base.durable_objects,
-      bindings: [
-        ...bindings,
-        {
-          name: "CHATGPT_EGRESS",
-          class_name: "ChatGptEgress",
-          script_name: "nanocodex",
-        },
-      ],
-    },
     vars: { ENVIRONMENT: "production" },
   };
 }

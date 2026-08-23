@@ -26,6 +26,11 @@
       {
         "name": "AGENT_SUBJECTS",
         "class_name": "AgentSubjectDirectory"
+      },
+      {
+        "name": "CHATGPT_EGRESS",
+        "class_name": "ChatGptEgress",
+        "script_name": "nanocodex"
       }
     ]
   },

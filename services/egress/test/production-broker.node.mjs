@@ -73,18 +73,35 @@ test("Wrangler child environment can use the local OAuth session", () => {
   });
 });
 
-test("production config is private and keeps both current DO bindings", async () => {
+test("the base and generated production configs keep every required DO binding", async () => {
   const base = JSON.parse(await readFile(new URL("../wrangler.broker.jsonc", import.meta.url)));
   const config = buildProductionBrokerConfig(base, { mainPath: "/fixed/egress.ts" });
   assert.equal(config.workers_dev, false);
   assert.equal(config.routes, undefined);
   assert.deepEqual(config.vars, { ENVIRONMENT: "production" });
   assert.equal(config.main, "/fixed/egress.ts");
-  assert.deepEqual(config.durable_objects.bindings.at(-1), {
+  const relay = {
     name: "CHATGPT_EGRESS",
     class_name: "ChatGptEgress",
     script_name: "nanocodex",
-  });
+  };
+  assert.deepEqual(base.durable_objects.bindings.at(-1), relay);
+  assert.equal(config.durable_objects.bindings.filter((binding) => (
+    binding.name === "CHATGPT_EGRESS"
+  )).length, 1);
+  assert.deepEqual(config.durable_objects.bindings.at(-1), relay);
+  assert.throws(
+    () => buildProductionBrokerConfig({
+      ...base,
+      durable_objects: {
+        ...base.durable_objects,
+        bindings: base.durable_objects.bindings.filter((binding) => (
+          binding.name !== "CHATGPT_EGRESS"
+        )),
+      },
+    }, { mainPath: "/fixed/egress.ts" }),
+    /ChatGPT relay DO bindings/,
+  );
   assert.throws(
     () => buildProductionBrokerConfig({ ...base, migrations: [] }, { mainPath: "/fixed/egress.ts" }),
     /v2\/v3 DO migration chain/,
