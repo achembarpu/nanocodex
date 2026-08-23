@@ -106,6 +106,15 @@ pub enum Entry {
         /// Opaque completed result returned to duplicate submissions.
         output: EncodedPayload,
     },
+    /// An operation failed and advanced the durable session checkpoint.
+    OperationFailed {
+        /// Accepted operation identity.
+        operation_id: String,
+        /// Opaque resumable agent checkpoint.
+        checkpoint: EncodedPayload,
+        /// Stable terminal failure detail.
+        error: String,
+    },
     /// An operation was explicitly cancelled.
     OperationCancelled {
         /// Accepted operation identity.
@@ -125,6 +134,13 @@ pub enum OperationStatus {
         /// Result returned to duplicate submissions.
         output: EncodedPayload,
     },
+    /// Work failed with a resumable checkpoint and retained diagnostic.
+    Failed {
+        /// Resumable checkpoint committed atomically with the failure.
+        checkpoint: EncodedPayload,
+        /// Failure returned to duplicate submissions.
+        error: String,
+    },
     /// Work was explicitly cancelled.
     Cancelled,
 }
@@ -133,7 +149,10 @@ impl OperationStatus {
     /// Returns whether this operation cannot execute again.
     #[must_use]
     pub const fn is_terminal(&self) -> bool {
-        matches!(self, Self::Completed { .. } | Self::Cancelled)
+        matches!(
+            self,
+            Self::Completed { .. } | Self::Failed { .. } | Self::Cancelled
+        )
     }
 }
 
@@ -224,13 +243,16 @@ impl JournalState {
             .map(|(id, operation)| (id.as_str(), operation))
     }
 
-    /// Returns the latest completed checkpoint in operation order.
+    /// Returns the latest terminal checkpoint in operation order.
     #[must_use]
     pub fn latest_checkpoint(&self) -> Option<&EncodedPayload> {
         self.operations
             .values()
             .filter_map(|operation| match &operation.status {
                 OperationStatus::Completed { checkpoint, .. } => {
+                    Some((operation.accepted_order, checkpoint))
+                }
+                OperationStatus::Failed { checkpoint, .. } => {
                     Some((operation.accepted_order, checkpoint))
                 }
                 OperationStatus::Pending | OperationStatus::Cancelled => None,
@@ -314,6 +336,7 @@ impl JournalState {
                 }
             }
             Entry::OperationCompleted { operation_id, .. }
+            | Entry::OperationFailed { operation_id, .. }
             | Entry::OperationCancelled { operation_id } => {
                 self.ensure_prior_operations_terminal(operation_id)?;
                 self.pending_operation(operation_id)?;
@@ -418,6 +441,17 @@ impl JournalState {
                     output: output.clone(),
                 };
             }
+            Entry::OperationFailed {
+                operation_id,
+                checkpoint,
+                error,
+            } => {
+                self.ensure_prior_operations_terminal(operation_id)?;
+                self.pending_operation_mut(operation_id)?.status = OperationStatus::Failed {
+                    checkpoint: checkpoint.clone(),
+                    error: error.clone(),
+                };
+            }
             Entry::OperationCancelled { operation_id } => {
                 self.ensure_prior_operations_terminal(operation_id)?;
                 self.pending_operation_mut(operation_id)?.status = OperationStatus::Cancelled;
@@ -476,6 +510,7 @@ impl Entry {
             | Self::StepCompleted { operation_id, .. }
             | Self::AttemptFailed { operation_id, .. }
             | Self::OperationCompleted { operation_id, .. }
+            | Self::OperationFailed { operation_id, .. }
             | Self::OperationCancelled { operation_id } => operation_id,
         }
     }

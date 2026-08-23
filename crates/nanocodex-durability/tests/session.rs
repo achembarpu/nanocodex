@@ -132,6 +132,48 @@ async fn replays_completed_operations_and_steps_after_reopen() {
 }
 
 #[tokio::test]
+async fn failed_operations_replay_their_error_and_do_not_block_follow_on_work() {
+    let store = MemoryStore::new().unwrap();
+    let session = DurableSession::open(store.clone(), "failed-session")
+        .await
+        .unwrap();
+    let input = PromptInput {
+        prompt: "bad image".to_owned(),
+    };
+    session.admit("turn-1", &input).await.unwrap();
+    session.begin_attempt("turn-1").await.unwrap();
+    session
+        .fail("turn-1", &Checkpoint { version: 2 }, "invalid image")
+        .await
+        .unwrap();
+
+    let replay = session
+        .admit_typed::<_, Checkpoint, TurnOutput>("turn-1", &input)
+        .await
+        .unwrap();
+    let Admission::Failed { checkpoint, error } = replay else {
+        panic!("failed operation must replay its terminal checkpoint and error");
+    };
+    assert_eq!(checkpoint, Checkpoint { version: 2 });
+    assert_eq!(error, "invalid image");
+
+    session.admit("turn-2", &"continue").await.unwrap();
+    session.begin_attempt("turn-2").await.unwrap();
+    session.cancel("turn-2").await.unwrap();
+
+    let reopened = DurableSession::open(store, "failed-session").await.unwrap();
+    let checkpoint = reopened
+        .latest_checkpoint()
+        .await
+        .unwrap()
+        .expect("failed operation checkpoint");
+    assert_eq!(
+        checkpoint.decode::<Checkpoint>().unwrap(),
+        Checkpoint { version: 2 }
+    );
+}
+
+#[tokio::test]
 async fn refuses_to_repeat_an_ambiguous_unsafe_step() {
     let store = MemoryStore::new().unwrap();
     let session = DurableSession::open(store.clone(), "session")

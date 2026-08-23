@@ -290,6 +290,15 @@ impl ManagedSessionState {
         self.context.commit_tail();
     }
 
+    /// Replaces image inputs after the provider rejects their encoded data.
+    ///
+    /// The returned count is the number of image parts replaced with a stable
+    /// text diagnostic so a later full replay cannot resend poisoned bytes.
+    #[doc(hidden)]
+    pub fn replace_rejected_images(&mut self) -> usize {
+        self.context.replace_rejected_images()
+    }
+
     /// Commits the active tail without changing continuation state.
     ///
     /// The agent uses this only when publishing a safe in-turn fork boundary.

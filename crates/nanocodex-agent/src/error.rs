@@ -137,6 +137,10 @@ pub enum NanocodexError {
     #[error("a policy-replayed result cannot be used as an in-process fork checkpoint")]
     ReplayedCheckpointUnavailable,
 
+    /// A previously failed identified operation was replayed from its durable terminal record.
+    #[error("durable operation previously failed: {0}")]
+    ReplayedExecutionFailed(String),
+
     /// Agent construction was attempted outside an active Tokio runtime.
     #[error("building an agent requires an active Tokio runtime")]
     TokioRuntimeUnavailable,

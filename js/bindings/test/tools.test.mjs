@@ -137,13 +137,18 @@ test("update_plan validates active work and releases session-owned state", async
 });
 
 test("view_image rejects unsupported and oversized workspace files", async () => {
-  const unsupported = viewImage({
-    workspace: { readFile: async () => new TextEncoder().encode("plain text") },
-  });
-  await assert.rejects(
-    unsupported.handler({ path: "/workspace/readme.txt" }, context),
-    /supports PNG, JPEG, GIF, WebP, and SVG/,
-  );
+  for (const [path, contents] of [
+    ["/workspace/readme.txt", "plain text"],
+    ["/workspace/vector.svg", '<svg xmlns="http://www.w3.org/2000/svg"/>'],
+  ]) {
+    const unsupported = viewImage({
+      workspace: { readFile: async () => new TextEncoder().encode(contents) },
+    });
+    await assert.rejects(
+      unsupported.handler({ path }, context),
+      /supports PNG, JPEG, GIF, and WebP/,
+    );
+  }
 
   const oversized = viewImage({
     workspace: { readFile: async () => new Uint8Array(10 * 1024 * 1024 + 1) },

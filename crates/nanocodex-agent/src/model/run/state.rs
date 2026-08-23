@@ -204,6 +204,10 @@ impl ConversationState {
         self.managed.commit_interrupted();
     }
 
+    pub(super) fn replace_rejected_images(&mut self) -> usize {
+        self.managed.replace_rejected_images()
+    }
+
     pub(super) fn commit_tail(&mut self) {
         self.managed.commit_tail();
     }

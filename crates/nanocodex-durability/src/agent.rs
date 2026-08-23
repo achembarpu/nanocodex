@@ -166,6 +166,20 @@ impl ExecutionPolicy for DurableExecution {
                 .map_err(agent_error)
         })
     }
+
+    fn fail<'a>(
+        &'a self,
+        operation_id: String,
+        snapshot: SessionSnapshot,
+        error: String,
+    ) -> ExecutionFuture<'a, AgentResult<()>> {
+        Box::pin(async move {
+            self.journal
+                .fail(operation_id, &snapshot, error)
+                .await
+                .map_err(agent_error)
+        })
+    }
 }
 
 fn map_admission(admission: Admission<SessionSnapshot, ExecutionOutput>) -> ExecutionAdmission {
@@ -174,6 +188,10 @@ fn map_admission(admission: Admission<SessionSnapshot, ExecutionOutput>) -> Exec
         Admission::Completed { checkpoint, output } => ExecutionAdmission::Completed {
             snapshot: checkpoint,
             output,
+        },
+        Admission::Failed { checkpoint, error } => ExecutionAdmission::Failed {
+            snapshot: checkpoint,
+            error,
         },
         Admission::Cancelled => ExecutionAdmission::Cancelled,
     }

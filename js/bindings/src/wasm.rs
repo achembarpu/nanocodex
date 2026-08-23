@@ -1131,14 +1131,14 @@ impl Drop for WasmNanocodex {
 }
 
 struct TurnState {
-    accepted: Option<Result<Option<String>, TurnAcceptanceFailure>>,
+    accepted: Option<Result<Option<String>, TurnFailure>>,
     control: Option<TurnControl>,
-    completed: Option<Result<TurnResult, String>>,
+    completed: Option<Result<TurnResult, TurnFailure>>,
     waiters: Vec<oneshot::Sender<()>>,
 }
 
 #[derive(Clone)]
-struct TurnAcceptanceFailure {
+struct TurnFailure {
     code: &'static str,
     message: String,
 }
@@ -1168,7 +1168,7 @@ impl WasmTurn {
     ///
     /// Rejects with a stable `code` describing an admission failure.
     pub async fn accepted(&self) -> Result<Option<String>, JsValue> {
-        self.acceptance().await.map_err(js_turn_acceptance_error)
+        self.acceptance().await.map_err(js_turn_error)
     }
 
     /// Injects text input at the active turn's next safe model boundary.
@@ -1222,12 +1222,12 @@ impl WasmTurn {
     ///
     /// # Errors
     ///
-    /// Rejects when the model run or driver fails.
+    /// Rejects with a stable `code` when the model run or driver fails.
     pub async fn result(&self) -> Result<WasmTurnResult, JsValue> {
         self.completion()
             .await
             .map(|inner| WasmTurnResult { inner })
-            .map_err(js_error)
+            .map_err(js_turn_error)
     }
 }
 
@@ -1254,13 +1254,13 @@ impl WasmTurn {
                         state.control = Some(turn.control());
                         state.notify();
                     }
-                    turn.await.map_err(|error| error.to_string())
+                    turn.await.map_err(|error| turn_failure(&error))
                 }
                 Err(error) => {
-                    let failure = turn_acceptance_failure(&error);
+                    let failure = turn_failure(&error);
                     let mut state = task_state.borrow_mut();
-                    state.accepted = Some(Err(failure));
-                    state.completed = Some(Err(error.to_string()));
+                    state.accepted = Some(Err(failure.clone()));
+                    state.completed = Some(Err(failure));
                     state.notify();
                     return;
                 }
@@ -1273,7 +1273,7 @@ impl WasmTurn {
         Self { state }
     }
 
-    async fn acceptance(&self) -> Result<Option<String>, TurnAcceptanceFailure> {
+    async fn acceptance(&self) -> Result<Option<String>, TurnFailure> {
         loop {
             let notified = {
                 let mut state = self.state.borrow_mut();
@@ -1284,7 +1284,7 @@ impl WasmTurn {
                 state.waiters.push(notify);
                 notified
             };
-            notified.await.map_err(|_| TurnAcceptanceFailure {
+            notified.await.map_err(|_| TurnFailure {
                 code: "retryable",
                 message: "the turn stopped before it was accepted".to_owned(),
             })?;
@@ -1302,7 +1302,7 @@ impl WasmTurn {
                     return Err(completed
                         .as_ref()
                         .err()
-                        .cloned()
+                        .map(|failure| failure.message.clone())
                         .unwrap_or_else(|| "the turn is already complete".to_owned()));
                 }
                 let (notify, notified) = oneshot::channel();
@@ -1315,7 +1315,7 @@ impl WasmTurn {
         }
     }
 
-    async fn completion(&self) -> Result<TurnResult, String> {
+    async fn completion(&self) -> Result<TurnResult, TurnFailure> {
         loop {
             let notified = {
                 let mut state = self.state.borrow_mut();
@@ -1326,14 +1326,15 @@ impl WasmTurn {
                 state.waiters.push(notify);
                 notified
             };
-            notified
-                .await
-                .map_err(|_| "the turn stopped before it completed".to_owned())?;
+            notified.await.map_err(|_| TurnFailure {
+                code: "retryable",
+                message: "the turn stopped before it completed".to_owned(),
+            })?;
         }
     }
 }
 
-fn turn_acceptance_failure(error: &NanocodexError) -> TurnAcceptanceFailure {
+fn turn_failure(error: &NanocodexError) -> TurnFailure {
     let code = match error {
         NanocodexError::TurnCancelled => "cancelled",
         NanocodexError::InvalidRequest(_) | NanocodexError::ExecutionPolicyNotConfigured => {
@@ -1351,10 +1352,10 @@ fn turn_acceptance_failure(error: &NanocodexError) -> TurnAcceptanceFailure {
         {
             "retryable"
         }
-        NanocodexError::Shutdown(source) => return turn_acceptance_failure(source),
+        NanocodexError::Shutdown(source) => return turn_failure(source),
         _ => "failed",
     };
-    TurnAcceptanceFailure {
+    TurnFailure {
         code,
         message: error.to_string(),
     }
@@ -1374,7 +1375,7 @@ const fn durability_acceptance_failure_code(error: &nanocodex::durability::Error
     }
 }
 
-fn js_turn_acceptance_error(failure: TurnAcceptanceFailure) -> JsValue {
+fn js_turn_error(failure: TurnFailure) -> JsValue {
     let error = js_sys::Error::new(&failure.message);
     let _ = js_sys::Reflect::set(&error, &"code".into(), &failure.code.into());
     error.into()

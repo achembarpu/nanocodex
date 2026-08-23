@@ -88,6 +88,9 @@ match journal.admit_typed::<_, String, String>("request-7", &"hello").await? {
     Admission::Completed { checkpoint, output } => {
         assert_eq!((checkpoint, output), ("checkpoint".to_owned(), "answer".to_owned()));
     }
+    Admission::Failed { checkpoint, error } => {
+        assert_eq!((checkpoint, error), ("checkpoint".to_owned(), "provider rejected input".to_owned()));
+    }
     Admission::Cancelled => {}
 }
 # Ok(())

@@ -476,8 +476,15 @@ where
                                 checkpoint,
                             ));
                             latest_fork_checkpoint = Some(Arc::clone(&checkpoint));
+                            let retryable = error
+                                .responses_error()
+                                .is_some_and(|source| source.retry_advice().is_some())
+                                || matches!(&error, NanocodexError::ExecutionPolicy { .. });
                             self.execution
-                                .persist(&checkpoint, execution_turn.failed())
+                                .persist(
+                                    &checkpoint,
+                                    execution_turn.failed(error.to_string(), retryable),
+                                )
                                 .instrument(span.clone())
                                 .await?;
                             Err(error)
@@ -793,6 +800,7 @@ where
             };
             drop(execution);
             model.set_events(self.events.clone());
+            let mut terminal_failure_committed = false;
             let (outcome, was_cancelled): (Result<TurnResult>, bool) = match completed {
                 Ok(ModelTurnOutcome::Completed(completed)) => {
                     let CompletedModelTurn {
@@ -847,13 +855,20 @@ where
                         thread_model,
                         checkpoint,
                     ));
-                    let execution_turn = execution_turn.failed();
+                    let retryable = error
+                        .responses_error()
+                        .is_some_and(|source| source.retry_advice().is_some())
+                        || matches!(&error, NanocodexError::ExecutionPolicy { .. });
+                    let execution_turn = execution_turn.failed(error.to_string(), retryable);
                     let persisted = self
                         .execution
                         .persist(&checkpoint, execution_turn)
                         .instrument(turn_span.clone())
                         .await;
-                    latest_fork_checkpoint = Some(checkpoint);
+                    if persisted.is_ok() && !retryable {
+                        latest_fork_checkpoint = Some(checkpoint);
+                        terminal_failure_committed = true;
+                    }
                     (persisted.and(Err(error)), false)
                 }
                 Err(error) => {
@@ -870,6 +885,7 @@ where
                 }
             };
             if outcome.is_err()
+                && !terminal_failure_committed
                 && let Some(base_checkpoint) = execution_base_checkpoint
             {
                 latest_fork_checkpoint = base_checkpoint.clone();
@@ -1016,6 +1032,11 @@ async fn accept_execution_command(execution: &Execution, command: Command) -> Op
                 usage: output.usage,
                 checkpoint: TurnCheckpoint::Replayed(snapshot),
             })));
+            None
+        }
+        Ok((operation_id, AdmittedExecution::Failed { error })) => {
+            drop(accepted.send(Ok(operation_id)));
+            drop(result.send(Err(NanocodexError::ReplayedExecutionFailed(error))));
             None
         }
         Ok((_, AdmittedExecution::Cancelled)) => {

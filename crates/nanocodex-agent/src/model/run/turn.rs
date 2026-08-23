@@ -258,6 +258,11 @@ where
                     // observed the failed request without returning a usable
                     // continuation.
                     if let Some(session) = &mut self.session {
+                        if error.responses_error().is_some_and(|source| {
+                            matches!(source, ResponsesError::InvalidImageRequest { .. })
+                        }) {
+                            session.conversation.replace_rejected_images();
+                        }
                         session.conversation.commit_interrupted();
                         session.preserve_inherited_delta = false;
                     }

@@ -62,6 +62,21 @@ describe("materializeTurnTerminal", () => {
       error: "Agent connection rejected with HTTP 503: credential_broker_rejected",
     });
   });
+
+  it.each([
+    ["retryable", "turn_retryable"],
+    ["blocked", "turn_blocked"],
+    ["failed", "turn_failed"],
+  ] as const)("preserves the WASM %s completion class", async (code, type) => {
+    const error = Object.assign(new Error(`${code} turn`), { code });
+    const turn = { result: async () => { throw error; } } as unknown as Turn;
+
+    await expect(materializeTurnTerminal("turn-4", turn)).resolves.toEqual({
+      type,
+      id: "turn-4",
+      error: `${code} turn`,
+    });
+  });
 });
 
 function turnResult(overrides: {

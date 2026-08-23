@@ -24,6 +24,13 @@ pub enum Admission<C = EncodedPayload, O = EncodedPayload> {
         /// Previously completed result.
         output: O,
     },
+    /// The operation already failed after committing a safe checkpoint.
+    Failed {
+        /// Checkpoint committed with the failure.
+        checkpoint: C,
+        /// Previously retained failure detail.
+        error: String,
+    },
     /// The operation was explicitly cancelled.
     Cancelled,
 }
@@ -65,6 +72,10 @@ enum StoredAdmission {
         checkpoint: EncodedPayload,
         output: EncodedPayload,
     },
+    Failed {
+        checkpoint: EncodedPayload,
+        error: String,
+    },
     Cancelled,
 }
 
@@ -74,6 +85,7 @@ impl StoredAdmission {
             Self::Accepted => Admission::Accepted,
             Self::Pending => Admission::Pending,
             Self::Completed { checkpoint, output } => Admission::Completed { checkpoint, output },
+            Self::Failed { checkpoint, error } => Admission::Failed { checkpoint, error },
             Self::Cancelled => Admission::Cancelled,
         }
     }
@@ -89,6 +101,10 @@ impl StoredAdmission {
             Self::Completed { checkpoint, output } => Ok(Admission::Completed {
                 checkpoint: checkpoint.decode()?,
                 output: output.decode()?,
+            }),
+            Self::Failed { checkpoint, error } => Ok(Admission::Failed {
+                checkpoint: checkpoint.decode()?,
+                error,
             }),
             Self::Cancelled => Ok(Admission::Cancelled),
         }
@@ -142,6 +158,12 @@ enum Command {
         operation_id: String,
         checkpoint: EncodedPayload,
         output: EncodedPayload,
+        result: oneshot::Sender<Result<()>>,
+    },
+    Fail {
+        operation_id: String,
+        checkpoint: EncodedPayload,
+        error: String,
         result: oneshot::Sender<Result<()>>,
     },
     FailAttempt {
@@ -229,6 +251,15 @@ impl Driver {
                     let outcome = self.complete(operation_id, checkpoint, output).await;
                     drop(result.send(outcome));
                 }
+                Command::Fail {
+                    operation_id,
+                    checkpoint,
+                    error,
+                    result,
+                } => {
+                    let outcome = self.fail(operation_id, checkpoint, error).await;
+                    drop(result.send(outcome));
+                }
                 Command::FailAttempt {
                     operation_id,
                     error,
@@ -284,6 +315,10 @@ impl Driver {
                         output: output.clone(),
                     })
                 }
+                OperationStatus::Failed { checkpoint, error } => Ok(StoredAdmission::Failed {
+                    checkpoint: checkpoint.clone(),
+                    error: error.clone(),
+                }),
                 OperationStatus::Cancelled => Ok(StoredAdmission::Cancelled),
             };
         }
@@ -435,6 +470,23 @@ impl Driver {
         outcome
     }
 
+    async fn fail(
+        &mut self,
+        operation_id: String,
+        checkpoint: EncodedPayload,
+        error: String,
+    ) -> Result<()> {
+        let outcome = self
+            .append(Entry::OperationFailed {
+                operation_id: operation_id.clone(),
+                checkpoint,
+                error,
+            })
+            .await;
+        self.claimed.remove(&operation_id);
+        outcome
+    }
+
     async fn append(&mut self, entry: Entry) -> Result<()> {
         let expected_revision = self.state.revision().checked_add(1).ok_or_else(|| {
             Error::InvalidJournal("journal revision exceeded the u64 range".to_owned())
@@ -535,7 +587,7 @@ impl DurableSession {
         receiver.await.map_err(|_| Error::DriverStopped)
     }
 
-    /// Copies the latest completed checkpoint from the owning driver without
+    /// Copies the latest terminal checkpoint from the owning driver without
     /// cloning the rest of the reduced journal.
     pub async fn latest_checkpoint(&self) -> Result<Option<EncodedPayload>> {
         let (result, receiver) = oneshot::channel();
@@ -781,6 +833,24 @@ impl DurableSession {
             operation_id: operation_id.into(),
             checkpoint: EncodedPayload::encode(checkpoint)?,
             output: EncodedPayload::encode(output)?,
+            result,
+        })
+        .await?;
+        receive(receiver).await
+    }
+
+    /// Atomically terminalizes a failed operation with its safe checkpoint.
+    pub async fn fail<C: Serialize + ?Sized>(
+        &self,
+        operation_id: impl Into<String>,
+        checkpoint: &C,
+        error: impl Into<String>,
+    ) -> Result<()> {
+        let (result, receiver) = oneshot::channel();
+        self.send(Command::Fail {
+            operation_id: operation_id.into(),
+            checkpoint: EncodedPayload::encode(checkpoint)?,
+            error: error.into(),
             result,
         })
         .await?;

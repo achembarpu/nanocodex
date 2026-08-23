@@ -105,6 +105,44 @@ impl ContextManager {
         }
     }
 
+    pub fn replace_rejected_images(&mut self) -> usize {
+        let mut replaced = 0;
+        let mut items = self.flattened_items();
+        for item in &mut items {
+            match item {
+                ResponseItem::Message { content, .. } => {
+                    for content in content {
+                        if matches!(content, ContentItem::InputImage { .. }) {
+                            *content = ContentItem::input_text(
+                                "[image omitted after the provider rejected its data]",
+                            );
+                            replaced += 1;
+                        }
+                    }
+                }
+                ResponseItem::FunctionCallOutput { output, .. }
+                | ResponseItem::CustomToolCallOutput { output, .. } => {
+                    let FunctionOutputBody::Content(content) = output else {
+                        continue;
+                    };
+                    for content in content {
+                        if matches!(content, FunctionOutputContent::InputImage { .. }) {
+                            *content = FunctionOutputContent::InputText {
+                                text: "[image omitted after the provider rejected its data]".into(),
+                            };
+                            replaced += 1;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        if replaced > 0 {
+            self.replace_and_recompute(items, &[]);
+        }
+        replaced
+    }
+
     pub fn replace_and_recompute(&mut self, mut items: Vec<ResponseItem>, prefix: &[ResponseItem]) {
         assign_missing_response_item_ids(&mut items);
         self.items.replace(items);
@@ -839,6 +877,30 @@ mod tests {
         assert!(
             matches!(&output[2], FunctionOutputContent::InputText { text } if text.as_ref() == "[omitted 1 text items ...]")
         );
+    }
+
+    #[test]
+    fn rejected_images_are_replaced_before_full_history_replay() {
+        let mut context = ContextManager::new(vec![
+            ResponseItem::message(
+                MessageRole::User,
+                [ContentItem::input_image("data:image/png;base64,bad")],
+            ),
+            ResponseItem::custom_tool_output(
+                "call".to_owned(),
+                None,
+                FunctionOutputBody::Content(vec![FunctionOutputContent::InputImage {
+                    image_url: "data:image/gif;base64,bad".into(),
+                    detail: None,
+                }]),
+            ),
+        ]);
+
+        assert_eq!(context.replace_rejected_images(), 2);
+        let encoded = serde_json::to_string(&context.flattened_items()).unwrap();
+        assert!(!encoded.contains("input_image"));
+        assert!(!encoded.contains("base64,bad"));
+        assert!(encoded.contains("provider rejected its data"));
     }
 
     #[test]

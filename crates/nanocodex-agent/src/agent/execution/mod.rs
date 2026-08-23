@@ -38,6 +38,13 @@ pub enum ExecutionAdmission {
         /// Previously completed turn output.
         output: ExecutionOutput,
     },
+    /// Return an already failed operation without executing it again.
+    Failed {
+        /// Session boundary committed with the failure.
+        snapshot: SessionSnapshot,
+        /// Previously retained failure detail.
+        error: String,
+    },
     /// The operation was explicitly cancelled.
     Cancelled,
 }
@@ -132,6 +139,14 @@ pub trait ExecutionPolicy: Send + Sync {
         operation_id: String,
         error: String,
     ) -> ExecutionFuture<'a, Result<()>>;
+
+    /// Atomically commits a failed turn and its resumable boundary.
+    fn fail<'a>(
+        &'a self,
+        operation_id: String,
+        snapshot: SessionSnapshot,
+        error: String,
+    ) -> ExecutionFuture<'a, Result<()>>;
 }
 
 /// Optional higher-layer policy for admitting executions and intercepting effects.
@@ -186,6 +201,13 @@ pub trait ExecutionPolicy: Send + Sync {
     fn fail_attempt<'a>(
         &'a self,
         operation_id: String,
+        error: String,
+    ) -> ExecutionFuture<'a, Result<()>>;
+    /// Commits a failed turn and resumable boundary.
+    fn fail<'a>(
+        &'a self,
+        operation_id: String,
+        snapshot: SessionSnapshot,
         error: String,
     ) -> ExecutionFuture<'a, Result<()>>;
 }
@@ -251,6 +273,9 @@ pub(crate) enum AdmittedExecution {
     Completed {
         output: ExecutionOutput,
         snapshot: SessionSnapshot,
+    },
+    Failed {
+        error: String,
     },
     Cancelled,
 }
@@ -364,7 +389,7 @@ impl Execution {
             policy,
             operation_id,
             ..
-        } = turn.failed();
+        } = turn.failed("agent turn failed before checkpointing", true);
         let (Some(policy), Some(operation_id)) = (policy, operation_id) else {
             return Ok(());
         };
@@ -392,6 +417,7 @@ fn map_admission(admission: ExecutionAdmission) -> AdmittedExecution {
         ExecutionAdmission::Completed { snapshot, output } => {
             AdmittedExecution::Completed { output, snapshot }
         }
+        ExecutionAdmission::Failed { snapshot: _, error } => AdmittedExecution::Failed { error },
         ExecutionAdmission::Cancelled => AdmittedExecution::Cancelled,
     }
 }
@@ -450,7 +476,7 @@ enum ExecutionOutcome {
     Started,
     Completed(ExecutionOutput),
     Interrupted,
-    Failed,
+    Failed { error: String, retryable: bool },
 }
 
 pub(crate) struct ExecutionTurn {
@@ -502,9 +528,12 @@ impl ExecutionTurn {
         self
     }
 
-    pub(crate) fn failed(mut self) -> Self {
+    pub(crate) fn failed(mut self, error: impl Into<String>, retryable: bool) -> Self {
         self.platform = self.platform.failed();
-        self.outcome = ExecutionOutcome::Failed;
+        self.outcome = ExecutionOutcome::Failed {
+            error: error.into(),
+            retryable,
+        };
         self
     }
 }
@@ -525,10 +554,14 @@ async fn persist_operation(
                 .await
         }
         ExecutionOutcome::Interrupted => policy.cancel(operation_id).await,
-        ExecutionOutcome::Failed => {
-            policy
-                .fail_attempt(operation_id, "agent turn failed".to_owned())
-                .await
+        ExecutionOutcome::Failed { error, retryable } => {
+            if retryable {
+                policy.fail_attempt(operation_id, error).await
+            } else {
+                policy
+                    .fail(operation_id, checkpoint.snapshot(), error)
+                    .await
+            }
         }
         ExecutionOutcome::Started => Err(NanocodexError::InvalidExecutionPolicy(
             "an operation reached persistence without a terminal attempt outcome".to_owned(),

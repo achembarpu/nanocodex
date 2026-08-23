@@ -1293,15 +1293,8 @@ export class NanocodexSession extends DurableComputerSession {
   async #complete(id: string, turn: Turn): Promise<void> {
     try {
       const materialized = await materializeTurnTerminal(id, turn);
-      // Once Rust accepted an operation, an unclassified failure is not safely
-      // terminal: its journal may still contain unresolved work. Keep it
-      // blocked for explicit reconciliation rather than letting later turns
-      // silently overtake it.
-      const outcome: TurnTerminal = materialized.type === "turn_failed"
-        ? { type: "turn_blocked", id, error: materialized.error }
-        : materialized;
       try {
-        this.#commitManagedMessage(id, outcome);
+        this.#commitManagedMessage(id, materialized);
       } catch (error) {
         try {
           this.#commitManagedMessage(id, {

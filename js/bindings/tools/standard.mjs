@@ -122,7 +122,7 @@ export function viewImage(options) {
         throw new Error("view_image input exceeds 10 MiB");
       }
       const mimeType = imageMimeType(bytes);
-      if (!mimeType) throw new Error("view_image supports PNG, JPEG, GIF, WebP, and SVG files");
+      if (!mimeType) throw new Error("view_image supports PNG, JPEG, GIF, and WebP files");
       const result = { detail, image_url: `data:${mimeType};base64,${base64(bytes)}` };
       return toolResult([{
         type: "input_image",
@@ -310,10 +310,6 @@ function imageMimeType(bytes) {
   if (startsWith(bytes, [0x47, 0x49, 0x46, 0x38])) return "image/gif";
   if (startsWith(bytes, [0x52, 0x49, 0x46, 0x46])
     && startsWith(bytes.subarray(8), [0x57, 0x45, 0x42, 0x50])) return "image/webp";
-  const prefix = new TextDecoder().decode(bytes.subarray(0, 1024)).trimStart();
-  if (prefix.startsWith("<svg") || (/^<\?xml\b/.test(prefix) && prefix.includes("<svg"))) {
-    return "image/svg+xml";
-  }
   return undefined;
 }
 
