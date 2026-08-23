@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { realpathSync } from "node:fs";
+import { readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const webDirectory = fileURLToPath(new URL("../", import.meta.url));
 const repositoryDirectory = fileURLToPath(new URL("../../", import.meta.url));
+export const PRODUCTION_ORIGIN = JSON.parse(
+  readFileSync(new URL("../production.json", import.meta.url), "utf8"),
+).origin;
 
 export function uploadArguments(revision) {
   assert.match(revision, /^[0-9a-f]{40}$/, "deployment revision must be a full commit SHA");
@@ -90,7 +93,7 @@ export function assertDeploymentEntry(response) {
 
 export async function deployWorker({
   fetchImpl = globalThis.fetch,
-  origin = process.env.NANOCODEX_WEB_ORIGIN ?? "https://nanocodex.me-7fb.workers.dev",
+  origin = process.env.NANOCODEX_WEB_ORIGIN ?? PRODUCTION_ORIGIN,
   run = runWrangler,
 } = {}) {
   const revision = git("rev-parse", "HEAD");

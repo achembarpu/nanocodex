@@ -6,11 +6,16 @@ import {
   assertDeploymentEntry,
   assertDeploymentHealth,
   parseWorkerVersionId,
+  PRODUCTION_ORIGIN,
   rolloutArguments,
   uploadArguments,
 } from "./deploy-worker.mjs";
 
 const revision = "a".repeat(40);
+
+test("deployment defaults to the canonical production Worker", () => {
+  assert.equal(PRODUCTION_ORIGIN, "https://nanocodex.gakonst.workers.dev");
+});
 
 test("deployment arguments bind the exact tagged commit to Worker health", () => {
   const arguments_ = uploadArguments(revision);

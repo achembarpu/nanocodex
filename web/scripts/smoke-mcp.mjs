@@ -1,11 +1,15 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 
 import { browserMcpConfiguration } from "../src/browserMcp.ts";
 
+const productionOrigin = JSON.parse(
+  readFileSync(new URL("../production.json", import.meta.url), "utf8"),
+).origin;
 const origin = new URL(
   process.argv[2]
     ?? process.env.NANOCODEX_WEB_ORIGIN
-    ?? "https://nanocodex.me-7fb.workers.dev",
+    ?? productionOrigin,
 ).origin;
 const expectedDeploymentSha = process.env.NANOCODEX_DEPLOYMENT_SHA;
 const encoder = new TextEncoder();

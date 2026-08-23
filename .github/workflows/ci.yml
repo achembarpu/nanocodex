@@ -419,13 +419,18 @@ jobs:
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           TARGET_SHA: ${{ github.sha }}
         run: npm run deploy:production:web --prefix services/managed
+      - name: Resolve the production origin
+        if: steps.production.outputs.current == 'true'
+        id: production_origin
+        run: echo "origin=$(node -p \"require('./web/production.json').origin\")" >> "$GITHUB_OUTPUT"
       - name: Verify the active Worker revision
         if: steps.production.outputs.current == 'true'
         env:
+          NANOCODEX_WEB_ORIGIN: ${{ steps.production_origin.outputs.origin }}
           TARGET_SHA: ${{ github.sha }}
         run: |
           for attempt in $(seq 1 12); do
-            if body="$(curl -fsS "https://nanocodex.me-7fb.workers.dev/api/health?revision=$TARGET_SHA")" && \
+            if body="$(curl -fsS "$NANOCODEX_WEB_ORIGIN/api/health?revision=$TARGET_SHA")" && \
               DEPLOYMENT_HEALTH="$body" node -e '
                 const health = JSON.parse(process.env.DEPLOYMENT_HEALTH);
                 if (health.status !== "ok" || health.deployment_sha !== process.env.TARGET_SHA) process.exit(1);
@@ -451,18 +456,19 @@ jobs:
         if: steps.production.outputs.current == 'true'
         working-directory: web
         env:
-          NANOCODEX_GIT_ORIGIN: https://nanocodex.me-7fb.workers.dev
+          NANOCODEX_GIT_ORIGIN: ${{ steps.production_origin.outputs.origin }}
           NANOCODEX_GIT_TOKEN: ${{ secrets.NANOCODEX_GIT_TOKEN }}
         run: npm run publish:repository
       - name: Verify the repository snapshot and Git endpoint
         if: steps.production.outputs.current == 'true'
         env:
+          NANOCODEX_GIT_ORIGIN: ${{ steps.production_origin.outputs.origin }}
           TARGET_SHA: ${{ github.sha }}
         run: |
           snapshot_ready=false
           for attempt in $(seq 1 12); do
             if curl -fsS \
-              "https://nanocodex.me-7fb.workers.dev/api/repository/snapshot?revision=$TARGET_SHA" \
+              "$NANOCODEX_GIT_ORIGIN/api/repository/snapshot?revision=$TARGET_SHA" \
               -o "$RUNNER_TEMP/nanocodex-repository.json" && \
               node -e '
                 const fs = require("node:fs");
@@ -482,7 +488,7 @@ jobs:
 
           for attempt in $(seq 1 12); do
             if remote_shas="$(git ls-remote \
-              https://nanocodex.me-7fb.workers.dev/git \
+              "$NANOCODEX_GIT_ORIGIN/git" \
               HEAD refs/heads/master | awk '{print $1}' | sort -u)" && \
               [ "$remote_shas" = "$TARGET_SHA" ]
             then

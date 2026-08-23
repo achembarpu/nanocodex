@@ -177,7 +177,7 @@ same complete Git SHA before it makes an authenticated request or uploads an
 object:
 
 ```bash
-NANOCODEX_GIT_ORIGIN=https://nanocodex.me-7fb.workers.dev \
+NANOCODEX_GIT_ORIGIN=https://nanocodex.gakonst.workers.dev \
 NANOCODEX_GIT_TOKEN=... \
 npm run publish:repository
 ```
@@ -187,7 +187,7 @@ stops before uploading anything. Repair it atomically after deploying the
 current Worker by explicitly opting into a current-format replacement:
 
 ```bash
-NANOCODEX_GIT_ORIGIN=https://nanocodex.me-7fb.workers.dev \
+NANOCODEX_GIT_ORIGIN=https://nanocodex.gakonst.workers.dev \
 NANOCODEX_GIT_TOKEN=... \
 NANOCODEX_REPAIR_INVALID_PUBLICATION=1 \
 npm run publish:repository
@@ -198,7 +198,7 @@ cannot overwrite a valid generation or bypass its compare-and-swap head.
 
 Production serves the website indexes, immutable file and patch objects, and a
 read-only Git protocol-v2 endpoint from that publication. Clone the mirror with
-`git clone https://nanocodex.me-7fb.workers.dev/git`. GitHub remains the write
+`git clone https://nanocodex.gakonst.workers.dev/git`. GitHub remains the write
 remote. After each current `master` commit passes CI, the website job deploys
 the exact tested Worker with that SHA, waits for `/api/health` to return it as
 `deployment_sha`, publishes the repository generation, and verifies both the

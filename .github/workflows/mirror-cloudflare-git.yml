@@ -33,6 +33,9 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
           ref: master
+      - name: Resolve the production origin
+        id: production_origin
+        run: echo "origin=$(node -p \"require('./web/production.json').origin\")" >> "$GITHUB_OUTPUT"
       - name: Require an exact master revision
         env:
           TARGET_SHA: ${{ inputs.revision }}
@@ -49,16 +52,17 @@ jobs:
       - name: Publish the attested repository generation
         working-directory: web
         env:
-          NANOCODEX_GIT_ORIGIN: https://nanocodex.me-7fb.workers.dev
+          NANOCODEX_GIT_ORIGIN: ${{ steps.production_origin.outputs.origin }}
           NANOCODEX_GIT_TOKEN: ${{ secrets.NANOCODEX_GIT_TOKEN }}
           NANOCODEX_REPAIR_INVALID_PUBLICATION: ${{ inputs.repair_invalid_publication && '1' || '0' }}
         run: npm run publish:repository
       - name: Verify the repository snapshot and Git endpoint
         env:
+          NANOCODEX_GIT_ORIGIN: ${{ steps.production_origin.outputs.origin }}
           TARGET_SHA: ${{ inputs.revision }}
         run: |
           curl -fsS \
-            "https://nanocodex.me-7fb.workers.dev/api/repository/snapshot?revision=$TARGET_SHA" \
+            "$NANOCODEX_GIT_ORIGIN/api/repository/snapshot?revision=$TARGET_SHA" \
             -o "$RUNNER_TEMP/nanocodex-repository.json"
           node -e '
             const fs = require("node:fs");
@@ -66,6 +70,6 @@ jobs:
             if (snapshot.repository?.head !== process.env.TARGET_SHA) process.exit(1);
           ' "$RUNNER_TEMP/nanocodex-repository.json"
           remote_shas="$(git ls-remote \
-            https://nanocodex.me-7fb.workers.dev/git \
+            "$NANOCODEX_GIT_ORIGIN/git" \
             HEAD refs/heads/master | awk '{print $1}' | sort -u)"
           test "$remote_shas" = "$TARGET_SHA"
