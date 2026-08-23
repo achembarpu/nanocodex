@@ -7,6 +7,7 @@ const demoTerminal = source("../src/demoTerminal.ts");
 const experience = source("../src/AgentExperience.tsx");
 const session = source("../src/modelSession.tsx");
 const health = source("../src/deploymentHealth.ts");
+const localCredential = source("../src/localDevelopmentCredential.ts");
 const surface = source("../src/agentTerminalSurface.tsx");
 const terminalCss = source("../src/AgentTerminal.css");
 
@@ -17,6 +18,15 @@ test("account authentication naturally selects the private broker", () => {
   assert.match(session, /window\.addEventListener\("focus", refreshAfterInactivity\)/);
   assert.match(session, /if \(!event\.persisted\) return/);
   assert.match(session, /nanocodex:model-credential-changed/);
+});
+
+test("localhost credential import is a barrier before either agent runtime starts", () => {
+  assert.match(session, /await localDevelopmentCredential\.ensure\(account\.id\)/);
+  assert.match(session, /if \(claimed\) deploymentHealth\.invalidate\(\)/);
+  assert.match(localCredential, /LOOPBACK_HOSTS\.has\(hostname\)/);
+  assert.match(localCredential, /current\?\.userId === userId/);
+  assert.match(localCredential, /Local development credential claim failed/);
+  assert.doesNotMatch(localCredential, /nanocodex\.gakonst|workers\.dev/);
 });
 
 test("credential presence is distinct from agent readiness and failures are manually actionable", () => {
@@ -32,7 +42,7 @@ test("credential presence is distinct from agent readiness and failures are manu
 
 test("signed-out browsers wait for the account-owned model connection", () => {
   assert.match(experience, /source === "brokered"/);
-  assert.match(experience, /hasCredential && !capabilityError \? \(/);
+  assert.match(experience, /hasCredential && !activeCapabilityError \? \(/);
   assert.match(session, /Sign in with a passkey to start the browser agent/);
   assert.doesNotMatch(`${experience}\n${terminal}\n${session}`, /guest|sponsor|"deployment"|backend-anon|anonymous (?:OpenAI|ChatGPT|Codex)/i);
 });

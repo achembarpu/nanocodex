@@ -3,6 +3,7 @@ import { useAccountSession } from "./AccountSession";
 import { GenerationRequestOwner } from "./agentTerminalLifecycle";
 import type { AgentStatus } from "./agentTerminalTypes";
 import { deploymentHealth } from "./deploymentHealth";
+import { localDevelopmentCredential } from "./localDevelopmentCredential";
 
 export type CredentialSource = "brokered" | null;
 export type ModelSessionStatus =
@@ -132,6 +133,8 @@ function useModelSession({
         return;
       }
       try {
+        const claimed = await localDevelopmentCredential.ensure(account.id);
+        if (claimed) deploymentHealth.invalidate();
         const health = await deploymentHealth.refresh();
         if (generation.current !== current) return;
         publish({ state: "ready", ready: health.agentConfigured },

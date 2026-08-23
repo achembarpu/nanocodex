@@ -8,6 +8,8 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { deploymentHealth } from "./deploymentHealth";
+import { localDevelopmentCredential } from "./localDevelopmentCredential";
 
 export type AuthenticatedAccount = Readonly<{
   id: string;
@@ -66,7 +68,7 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
       setUser(nextUser);
       setStatus("ready");
       setError(null);
-      if (nextUser) void claimLocalCredential();
+      if (nextUser) void claimLocalCredential(nextUser.id);
     } catch (cause) {
       if (requestId.current !== currentRequest) return;
       setStatus("error");
@@ -99,7 +101,7 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
       requestId.current++;
       setUser(nextUser);
       setStatus("ready");
-      void claimLocalCredential();
+      void claimLocalCredential(nextUser.id);
     } catch (cause) {
       setError(accountFailure(
         cause,
@@ -176,18 +178,14 @@ async function getCurrentUser(): Promise<AuthenticatedAccount | null> {
   return { id, persistent };
 }
 
-async function claimLocalCredential(): Promise<void> {
-  if (window.location.hostname !== "localhost" && window.location.hostname !== "127.0.0.1") return;
-  await fetch("/v1/credentials/local-claim", {
-    method: "POST",
-    credentials: "same-origin",
-  }).then(async (response) => {
-    await response.body?.cancel();
-    if (response.ok) notifyModelCredentialChanged();
+async function claimLocalCredential(userId: string): Promise<void> {
+  await localDevelopmentCredential.ensure(userId).then((claimed) => {
+    if (claimed) notifyModelCredentialChanged();
   }).catch(() => {});
 }
 
 function notifyModelCredentialChanged(): void {
+  deploymentHealth.invalidate();
   window.dispatchEvent(new Event("nanocodex:model-credential-changed"));
 }
 
