@@ -13,7 +13,8 @@ const surface = source("../src/agentTerminalSurface.tsx");
 const terminalCss = source("../src/AgentTerminal.css");
 
 test("account authentication naturally selects the private broker", () => {
-  assert.match(session, /useAccountSession\(\)\.account/);
+  assert.match(session, /const accountSession = useAccountSession\(\)/);
+  assert.match(session, /if \(accountSession\.status !== "ready"\) \{\s*generation\.current\+\+;\s*return;/);
   assert.match(health, /payload\.credential_source === "brokered"/);
   assert.match(session, /fresh\s*\? deploymentHealth\.refresh\(\)\s*:\s*deploymentHealth\.read\(\)/);
   assert.match(session, /previousAccountId !== undefined && previousAccountId !== account\.id/);
@@ -25,8 +26,8 @@ test("account authentication naturally selects the private broker", () => {
 
 test("AccountSession solely owns localhost credential import and invalidation", () => {
   assert.match(accountSession, /localDevelopmentCredential\.ensure\(userId\)/);
-  assert.match(accountSession, /if \(localClaimAccountId\.current === userId && claimed\)/);
-  assert.match(accountSession, /if \(localClaimAccountId\.current === userId\) return/);
+  assert.match(accountSession, /if \(localClaim\.current\?\.userId === userId\) return localClaim\.current\.promise/);
+  assert.match(accountSession, /await claimLocalCredential\(nextUser\.id\);\s*if \(requestId\.current !== currentRequest\) return;/);
   assert.match(accountSession, /deploymentHealth\.invalidate\(\)/);
   assert.doesNotMatch(session, /localDevelopmentCredential|deploymentHealth\.invalidate\(\)/);
   assert.match(localCredential, /LOOPBACK_HOSTS\.has\(hostname\)/);

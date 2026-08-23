@@ -114,7 +114,8 @@ function useModelSession({
   onStatusChange(status: ModelSessionStatus): void;
   onSourceChange(source: CredentialSource): void;
 }) {
-  const account = useAccountSession().account;
+  const accountSession = useAccountSession();
+  const account = accountSession.account;
   const [status, setStatus] = useState<ModelSessionStatus>();
   const [busy, setBusy] = useState(false);
   const generation = useRef(0);
@@ -128,6 +129,7 @@ function useModelSession({
   const readStatus = useCallback((fresh: boolean) => {
     const current = ++generation.current;
     return requests.current.run(current, async () => {
+      if (accountSession.status !== "ready") return;
       if (!account) {
         publish({ state: "signed_out" }, null);
         return;
@@ -147,9 +149,13 @@ function useModelSession({
         }, null);
       }
     });
-  }, [account, publish]);
+  }, [account, accountSession.status, publish]);
 
   useEffect(() => {
+    if (accountSession.status !== "ready") {
+      generation.current++;
+      return;
+    }
     if (!account) {
       generation.current++;
       publish({ state: "signed_out" }, null);
@@ -160,7 +166,7 @@ function useModelSession({
     void readStatus(
       previousAccountId !== undefined && previousAccountId !== account.id,
     );
-  }, [account, publish, readStatus]);
+  }, [account, accountSession.status, publish, readStatus]);
   useEffect(() => {
     let inactive = false;
     const becameInactive = () => { inactive = true; };

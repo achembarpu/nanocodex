@@ -60,20 +60,25 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
   const [operation, setOperation] = useState<AccountOperation | null>(null);
   const requestId = useRef(0);
   const refreshRequest = useRef<Promise<void> | undefined>(undefined);
-  const localClaimAccountId = useRef<string | undefined>(undefined);
+  const localClaim = useRef<Readonly<{
+    userId: string;
+    promise: Promise<void>;
+  }> | undefined>(undefined);
 
   const claimLocalCredential = useCallback((userId: string) => {
-    if (localClaimAccountId.current === userId) return;
-    localClaimAccountId.current = userId;
-    void localDevelopmentCredential.ensure(userId).then((claimed) => {
-      if (localClaimAccountId.current === userId && claimed) {
+    if (localClaim.current?.userId === userId) return localClaim.current.promise;
+    let current!: Promise<void>;
+    current = localDevelopmentCredential.ensure(userId).then((claimed) => {
+      if (localClaim.current?.promise === current && claimed) {
         notifyModelCredentialChanged();
       }
     }, () => {
-      if (localClaimAccountId.current === userId) {
-        localClaimAccountId.current = undefined;
+      if (localClaim.current?.promise === current) {
+        localClaim.current = undefined;
       }
     });
+    localClaim.current = { userId, promise: current };
+    return current;
   }, []);
 
   const refresh = useCallback((): Promise<void> => {
@@ -81,13 +86,16 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
     const currentRequest = ++requestId.current;
     let current!: Promise<void>;
     current = getCurrentUser().then(
-      (nextUser) => {
+      async (nextUser) => {
         if (requestId.current !== currentRequest) return;
+        if (nextUser) {
+          await claimLocalCredential(nextUser.id);
+          if (requestId.current !== currentRequest) return;
+        }
         setUser(nextUser);
         setStatus("ready");
         setError(null);
-        if (nextUser) claimLocalCredential(nextUser.id);
-        else localClaimAccountId.current = undefined;
+        if (!nextUser) localClaim.current = undefined;
       },
       (cause: unknown) => {
         if (requestId.current !== currentRequest) return;
@@ -123,10 +131,10 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
         : { method: "wallet_connect" });
       const nextUser = await getCurrentUser();
       if (!nextUser) throw new Error("The account session was not created.");
+      await claimLocalCredential(nextUser.id);
       requestId.current++;
       setUser(nextUser);
       setStatus("ready");
-      claimLocalCredential(nextUser.id);
     } catch (cause) {
       setError(accountFailure(
         cause,
@@ -147,11 +155,11 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
     try {
       await (await accountProvider()).request({ method: "wallet_disconnect" });
       const nextUser = await getCurrentUser();
+      if (nextUser) await claimLocalCredential(nextUser.id);
       requestId.current++;
       setUser(nextUser);
       setStatus("ready");
-      if (nextUser) claimLocalCredential(nextUser.id);
-      else localClaimAccountId.current = undefined;
+      if (!nextUser) localClaim.current = undefined;
     } catch (cause) {
       setError(accountFailure(cause, "Couldn’t sign out. Try again."));
     } finally {
