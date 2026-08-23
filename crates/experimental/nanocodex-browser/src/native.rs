@@ -6785,7 +6785,7 @@ fn isolated_launch_config(builder: BrowserConfigBuilder) -> BrowserConfigBuilder
 }
 
 #[cfg(not(target_os = "macos"))]
-fn isolated_launch_config(builder: BrowserConfigBuilder) -> BrowserConfigBuilder {
+const fn isolated_launch_config(builder: BrowserConfigBuilder) -> BrowserConfigBuilder {
     builder
 }
 
@@ -7611,12 +7611,14 @@ mod tests {
     };
     use futures_util::StreamExt;
 
+    #[cfg(target_os = "macos")]
+    use super::isolated_launch_config;
     use super::{
         BrowserConfig, Chromium, Diagnostics, GateSignals, MAX_ACTION_INPUT_BYTES,
         MAX_CONSOLE_ENTRIES, MAX_DIAGNOSTIC_TEXT_BYTES, MAX_NETWORK_REQUESTS, NetworkSource,
         allowed_cookie_params, build_config, classify_gate, close_chromium, cookie_param,
-        diagnostic_limit, isolated_launch_config, profile_launch_config, session_stopped,
-        trace_browser_configuration, validate_url,
+        diagnostic_limit, profile_launch_config, session_stopped, trace_browser_configuration,
+        validate_url,
     };
     use crate::{
         BraveSession, Browser, BrowserAction, BrowserActionResult, BrowserConsoleEntry,
