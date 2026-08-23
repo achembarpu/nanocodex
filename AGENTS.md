@@ -40,6 +40,67 @@
   otherwise render nothing until the boundary is ready. Show explicit,
   actionable failure states only after an operation actually fails.
 
+## Browser verification
+
+- Every change to a web interface, browser runtime, route, Worker-backed browser
+  API, or local web development path must be exercised through the host-managed
+  browser against the real running application. Unit tests, source assertions,
+  typechecks, builds, curl, and protocol probes are supporting evidence; they
+  never substitute for the browser pass.
+- Keep a browser verifier running in parallel with web implementation whenever
+  practical. After each coherent change, cold-start the owned local stack and
+  exercise the affected user journey through visible controls. Inspect page and
+  console errors, failed network requests, and WebSocket traffic before
+  continuing.
+- A web task is not complete and must not be described as working until the
+  exact changed flow passes in the browser on its canonical direct URL. For
+  navigation or layout changes, test desktop and a representative touch/mobile
+  device. For durable or multi-client behavior, use independent tabs or browser
+  contexts and verify reload and reconnect behavior.
+- Treat a browser-discovered failure as authoritative. Stop downstream
+  validation, fix the highest owning boundary, restart from a clean stack when
+  required, and rerun the browser journey. Do not dismiss a browser failure
+  because lower-level tests pass.
+- Authentication and secret-routing browser checks must also prove absence:
+  managed and localhost flows must not open or render interactive OAuth or
+  device-code UI, and browser network traffic or storage must never receive
+  provider credentials.
+
+## Web architecture and performance
+
+- Start from conventional React and Vite ownership. Each HTML entry has exactly
+  one `createRoot` and one declarative component tree. Internal surfaces such as
+  the artifact runtime are ordinary components or routes in that tree. Do not
+  add imperative sub-root mounting, manual mount/unmount helpers, or parallel
+  render paths for application features.
+- Let Vite own the module graph, dependency optimization, hashing, preload
+  generation, tree shaking, and chunk production. Do not add application-level
+  module registries, cached `loadX()` wrappers, component `prepareX()` or
+  `preloadX()` APIs, manual dynamic-import fan-out, manifest walking, preload
+  filtering, or hand-authored chunk groups. If browser evidence requires route
+  splitting, use the router or framework's canonical declarative route boundary
+  and let Vite compile it; do not build a second loader system around it.
+- React owns rendering and lifecycle. Use normal components, hooks, context,
+  effects, and transitions at the boundary that owns the state. Do not use
+  `Promise.resolve`, microtasks, idle callbacks, timers, or home-grown promise
+  caches merely to stage imports, mounting, navigation, or paint order. Every
+  asynchronous boundary must correspond to real I/O, a real Worker operation,
+  or a framework-owned lifecycle.
+- Optimize from measurements in the real browser, not from source-text tests,
+  aesthetic bundle scripts, or speculative chunk diagrams. Record cold FCP,
+  LCP, blocking time, transferred bytes, and the network waterfall; record
+  warm navigation latency, visual stability, and interaction latency across the
+  primary routes. Preserve both fast cold start and instant warm navigation
+  unless an explicit product decision chooses one tradeoff.
+- Keep the canonical development server alive during normal iteration. Use HMR
+  or reload the page and preserve the browser session; restart the stack only
+  when configuration or corrupt external state actually requires it. A clean
+  browser navigation is not a reason to kill the services.
+- Prefer behavioral browser and component tests over regular expressions that
+  pin incidental implementation text. Static architecture tests may enforce a
+  small public invariant such as one React root or the absence of a forbidden
+  loader layer, but they must not force bespoke orchestration to survive.
+
 ## Frontier eval iteration
 
 - Optimize for wall-clock time from an idea to evidence from the real benchmark
