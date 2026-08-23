@@ -31,3 +31,37 @@ test("browser conversation catalog survives selection and records the first prom
     else Reflect.deleteProperty(globalThis, "localStorage");
   }
 });
+
+test("browser conversation catalog rejects IDs the browser workspace cannot select", () => {
+  const values = new Map<string, string>();
+  const original = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  Object.defineProperty(globalThis, "localStorage", {
+    configurable: true,
+    value: {
+      getItem: (key: string) => values.get(key) ?? null,
+      setItem: (key: string, value: string) => values.set(key, value),
+    },
+  });
+  const currentId = "018f1f9a-7b3c-4a18-8000-000000000018";
+  const selectableId = "018f1f9a-7b3c-5a18-8000-000000000019";
+  const unsupportedId = "018f1f9a-7b3c-7a18-8000-000000000020";
+  values.set("nanocodex.local-conversations.v1", JSON.stringify({
+    version: 1,
+    conversations: [
+      conversation(selectableId, 2),
+      conversation(unsupportedId, 3),
+    ],
+  }));
+
+  try {
+    const loaded = loadLocalConversations(currentId);
+    assert.deepEqual(new Set(loaded.map(({ id }) => id)), new Set([currentId, selectableId]));
+  } finally {
+    if (original) Object.defineProperty(globalThis, "localStorage", original);
+    else Reflect.deleteProperty(globalThis, "localStorage");
+  }
+});
+
+function conversation(id: string, updatedAt: number) {
+  return { id, title: "Retained", createdAt: 1, updatedAt, turnCount: 0 };
+}

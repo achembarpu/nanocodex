@@ -80,12 +80,34 @@ test("IndexedDB durability has no browser-global import-time dependency", () => 
   assert.throws(() => createIndexedDbDurabilityStore(), /requires IndexedDB/);
 });
 
+test("IndexedDB durability retries failed opens and reopens after version changes", async () => {
+  const indexedDB = createFakeIndexedDb();
+  const store = createIndexedDbDurabilityStore({ indexedDB, databaseName: "reopen" });
+  indexedDB.failNextOpen("reopen");
+
+  await assert.rejects(store.load("thread"), /injected open failure/);
+  assert.deepEqual(await store.load("thread"), { revision: "0", batches: [] });
+  assert.equal(indexedDB.openCount("reopen"), 2, "a rejected open is not cached");
+
+  indexedDB.triggerVersionChange("reopen");
+  assert.deepEqual(await store.load("thread"), { revision: "0", batches: [] });
+  assert.equal(indexedDB.openCount("reopen"), 3, "a closed connection is not cached");
+});
+
 function createFakeIndexedDb() {
   const databases = new Map();
+  const failedOpens = new Set();
+  const openCounts = new Map();
   return {
     open(name) {
       const request = fakeRequest();
+      openCounts.set(name, (openCounts.get(name) ?? 0) + 1);
       queueMicrotask(() => {
+        if (failedOpens.delete(name)) {
+          request.error = new Error("injected open failure");
+          request.onerror?.();
+          return;
+        }
         let database = databases.get(name);
         if (!database) {
           database = new FakeDatabase();
@@ -93,11 +115,21 @@ function createFakeIndexedDb() {
           request.result = database;
           request.onupgradeneeded?.();
         } else {
+          database.closed = false;
           request.result = database;
         }
         queueMicrotask(() => request.onsuccess?.());
       });
       return request;
+    },
+    failNextOpen(name) {
+      failedOpens.add(name);
+    },
+    openCount(name) {
+      return openCounts.get(name) ?? 0;
+    },
+    triggerVersionChange(name) {
+      databases.get(name).onversionchange?.();
     },
     seed(name, journalId, revision, batches) {
       const database = databases.get(name);
@@ -117,6 +149,7 @@ function createFakeIndexedDb() {
 class FakeDatabase {
   constructor() {
     this.stores = new Map();
+    this.closed = false;
     this.failNextBatchAdd = false;
     this.objectStoreNames = { contains: (name) => this.stores.has(name) };
     this.writeTail = Promise.resolve();
@@ -133,10 +166,11 @@ class FakeDatabase {
   }
 
   transaction(names, mode) {
+    if (this.closed) throw new Error("database connection is closed");
     return new FakeTransaction(this, names, mode);
   }
 
-  close() {}
+  close() { this.closed = true; }
 }
 
 class FakeTransaction {

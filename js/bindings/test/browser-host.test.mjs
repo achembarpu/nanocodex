@@ -109,6 +109,30 @@ test("browser host never flattens remote MCP tools into direct mode", () => {
   );
 });
 
+test("browser host readiness waits for stable MCP tool discovery", async () => {
+  let releaseDiscovery;
+  const discovery = new Promise((resolve) => { releaseDiscovery = resolve; });
+  const host = createBrowserHost({
+    mcp: {
+      fixture: {
+        client: {
+          close: async () => {},
+          listTools: () => discovery,
+        },
+      },
+    },
+  });
+  let ready = false;
+  const waiting = host.ready().then(() => { ready = true; });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(ready, false, "the model prefix cannot snapshot partial discovery");
+  releaseDiscovery({ tools: [{ name: "lookup", inputSchema: { type: "object" } }] });
+  await waiting;
+  assert.equal(ready, true);
+  assert.match(host.toolDefinitions(), /mcp__fixture__lookup/);
+  await host.dispose();
+});
+
 test("browser host reports non-JSON tool results as failures", async () => {
   const host = createBrowserHost({
     tools: {

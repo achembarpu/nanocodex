@@ -7,7 +7,7 @@ export type LocalConversation = Readonly<{
 }>;
 
 const CATALOG_KEY = "nanocodex.local-conversations.v1";
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const BROWSER_THREAD_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
 export function loadLocalConversations(currentId: string): readonly LocalConversation[] {
   const retained = decodeCatalog(safeGet(CATALOG_KEY));
@@ -69,7 +69,7 @@ function decodeCatalog(raw: string | null): readonly LocalConversation[] {
     return data.flatMap((item) => {
       if (!item || typeof item !== "object" || Array.isArray(item)) return [];
       const value = item as Partial<LocalConversation>;
-      return typeof value.id === "string" && UUID.test(value.id)
+      return typeof value.id === "string" && BROWSER_THREAD_ID.test(value.id)
         && typeof value.title === "string"
         && typeof value.createdAt === "number" && Number.isFinite(value.createdAt)
         && typeof value.updatedAt === "number" && Number.isFinite(value.updatedAt)
