@@ -5,23 +5,19 @@ Worker, Rust/WASM Agent, persistent workspace, and cleanup. React only reads
 that external state and binds event subscriptions.
 
 ```tsx
-import { createConfig, NanocodexProvider, useAgent } from "nanocodex-react";
+import { createConfig, useNanocodex } from "nanocodex-react";
 
 const config = createConfig();
 
-root.render(
-  <NanocodexProvider config={config}>
-    <App />
-  </NanocodexProvider>,
-);
-
 function App() {
-  const { data: agent, error, isPending, refetch } = useAgent();
+  const { data: agent, error, isPending, refetch } = useNanocodex({ config });
   // `agent` is the normal headless Agent from `nanocodex/browser`.
 }
+
+root.render(<App />);
 ```
 
-`useAgent({ threadId, enabled })` follows an external-store lifecycle: the
+`useNanocodex({ config, threadId, enabled })` follows an external-store lifecycle: the
 vanilla config creates one Agent for active subscribers, shares it, and shuts it
 down after the last subscriber leaves. Disabled hooks stay idle and do not
 prepare or create an Agent. Omitted and empty thread IDs resolve to one stable
@@ -32,21 +28,21 @@ Components that need only part of the resource can select it without rerendering
 for unrelated state changes:
 
 ```tsx
-const sessionId = useAgent({
+const sessionId = useNanocodex({
+  config,
   selector: (resource) => resource.data?.sessionId,
   equalityFn: Object.is,
 });
 ```
 
-Without a selector, `useAgent` returns the full query-like resource shown above.
+Without a selector, `useNanocodex` returns the full query-like resource shown above.
 `useAgentEvents` is the narrow hook for ordered typed events.
 
-Create the config once, outside React. Applications can pass Agent defaults to
-`createConfig({ agent: { ... } })` without adding another lifecycle owner.
-
-An authenticated route loader may hide Worker startup and WASM compilation
-before React mounts without creating an Agent:
+Create the config once, outside React. Applications with many consumers can put
+it in `NanocodexProvider` and omit `config` from each hook. Agent defaults belong
+in `createConfig({ agent: { ... } })`; React does not need a separate preload or
+preparation lifecycle.
 
 ```ts
-await config.prepareAgent({ threadId });
+const config = createConfig({ agent: { /* tools and policy */ } });
 ```

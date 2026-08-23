@@ -4,10 +4,10 @@ import { Transport, type AgentStatus } from "nanocodex/browser";
 import {
   NanocodexProvider,
   createConfig,
-  useAgent,
+  useNanocodex,
   useAgentEvents,
   useConfig,
-  type UseAgentReturnType,
+  type UseNanocodexReturnType,
 } from "../index.mjs";
 
 const config = createConfig({
@@ -16,7 +16,6 @@ const config = createConfig({
 });
 const provider: ComponentProps<typeof NanocodexProvider> = { children: null, config };
 void provider;
-void config.prepareAgent({ threadId: "thread-1" });
 const snapshot = config.getAgent();
 if (snapshot.status === "success") {
   const agent: DefaultAgent = snapshot.data;
@@ -36,7 +35,7 @@ void undefinedConfig;
 
 function Consumer() {
   const resolved = useConfig();
-  const result: UseAgentReturnType = useAgent({
+  const result: UseNanocodexReturnType = useNanocodex({
     config: resolved,
     enabled: true,
     threadId: "thread-1",
@@ -48,7 +47,7 @@ function Consumer() {
 void Consumer;
 
 function SelectedConsumer() {
-  const selectedStatus: AgentStatus = useAgent({
+  const selectedStatus: AgentStatus = useNanocodex({
     selector: (resource) => resource.status,
     equalityFn(previous, next) {
       const previousStatus: AgentStatus = previous;
@@ -56,17 +55,17 @@ function SelectedConsumer() {
       return previousStatus === nextStatus;
     },
   });
-  const sessionId: string | undefined = useAgent({
+  const sessionId: string | undefined = useNanocodex({
     selector: (resource) => resource.data?.sessionId,
   });
-  const fullResource: UseAgentReturnType = useAgent({
+  const fullResource: UseNanocodexReturnType = useNanocodex({
     equalityFn: (previous, next) => previous.status === next.status,
   });
   return selectedStatus === "success" ? sessionId : fullResource.data?.sessionId;
 }
 void SelectedConsumer;
 
-function narrowResource(resource: UseAgentReturnType) {
+function narrowResource(resource: UseNanocodexReturnType) {
   if (resource.status === "success") {
     const data: DefaultAgent = resource.data;
     const error: undefined = resource.error;

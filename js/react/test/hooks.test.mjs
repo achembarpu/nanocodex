@@ -7,7 +7,7 @@ import { act, create } from "react-test-renderer";
 import { createAgentConfig } from "../../bindings/browser/config.mjs";
 import {
   NanocodexProvider,
-  useAgent,
+  useNanocodex,
   useAgentEvents,
   useConfig,
 } from "../index.mjs";
@@ -21,14 +21,14 @@ test("NanocodexProvider requires one explicit caller-owned config", () => {
   );
 });
 
-test("useAgent follows the vanilla external store without duplicating Agent ownership", async () => {
+test("useNanocodex follows the vanilla external store without duplicating Agent ownership", async () => {
   const store = createStore();
   let resource;
   let resolvedConfig;
 
   function Consumer({ enabled = true, threadId }) {
     resolvedConfig = useConfig();
-    resource = useAgent({ enabled, threadId });
+    resource = useNanocodex({ enabled, threadId });
     return null;
   }
 
@@ -76,14 +76,14 @@ test("useAgent follows the vanilla external store without duplicating Agent owne
   assert.equal(store.unsubscribed, 2);
 });
 
-test("useAgent selectors suppress updates while their selected value stays equal", async () => {
+test("useNanocodex selectors suppress updates while their selected value stays equal", async () => {
   const store = createStore();
   let renders = 0;
   let selection;
 
   function Consumer() {
     renders += 1;
-    selection = useAgent({
+    selection = useNanocodex({
       selector: (resource) => ({ ready: resource.isSuccess }),
       equalityFn: (previous, next) => previous.ready === next.ready,
     });
@@ -126,7 +126,7 @@ test("useAgent selectors suppress updates while their selected value stays equal
   assert.equal(store.unsubscribed, 1);
 });
 
-test("useAgent refetch cancels hung startup and unmount releases its replacement", { timeout: 2_000 }, async () => {
+test("useNanocodex refetch cancels hung startup and unmount releases its replacement", { timeout: 2_000 }, async () => {
   const signals = [];
   const closed = [];
   let attempts = 0;
@@ -146,7 +146,7 @@ test("useAgent refetch cancels hung startup and unmount releases its replacement
   let resource;
 
   function Consumer() {
-    resource = useAgent();
+    resource = useNanocodex();
     return null;
   }
 

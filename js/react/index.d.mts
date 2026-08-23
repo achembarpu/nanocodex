@@ -10,7 +10,7 @@ export {
   type CreateConfigParameters,
 } from "nanocodex/browser";
 
-export type UseAgentParameters<Selection = UseAgentReturnType> = Readonly<{
+export type UseNanocodexParameters<Selection = UseNanocodexReturnType> = Readonly<{
   /** Defaults to true. Disabled hooks stay idle and do not prepare or create an Agent. */
   enabled?: boolean | undefined;
   /** Stable OPFS/Git workspace identity. Omitted or empty values use the config's stable default. */
@@ -18,12 +18,12 @@ export type UseAgentParameters<Selection = UseAgentReturnType> = Readonly<{
   /** Optional provider bypass for libraries and isolated consumers. */
   config?: Config | undefined;
   /** Selects the value observed by this component. Defaults to the full Agent resource. */
-  selector?: ((resource: UseAgentReturnType) => Selection) | undefined;
+  selector?: ((resource: UseNanocodexReturnType) => Selection) | undefined;
   /** Controls whether two selected values are observably different. Defaults to Object.is. */
   equalityFn?: ((previous: Selection, next: Selection) => boolean) | undefined;
 }>;
 
-export type UseAgentReturnType =
+export type UseNanocodexReturnType =
   | Readonly<{
     data: undefined;
     error: undefined;
@@ -70,16 +70,16 @@ export function NanocodexProvider(props: {
   config: Config;
 }): ReactNode;
 export function useConfig(parameters?: { config?: Config | undefined }): Config;
-export function useAgent<Selection>(
-  options: UseAgentParameters<Selection> & {
-    selector: (resource: UseAgentReturnType) => Selection;
+export function useNanocodex<Selection>(
+  options: UseNanocodexParameters<Selection> & {
+    selector: (resource: UseNanocodexReturnType) => Selection;
   },
 ): Selection;
-export function useAgent(
-  options?: Omit<UseAgentParameters<UseAgentReturnType>, "selector"> & {
+export function useNanocodex(
+  options?: Omit<UseNanocodexParameters<UseNanocodexReturnType>, "selector"> & {
     selector?: undefined;
   },
-): UseAgentReturnType;
+): UseNanocodexReturnType;
 export function useAgentEvents(
   agent: DefaultAgent | undefined,
   listener: (event: AgentEvent) => void,

@@ -30,15 +30,15 @@ export function NanocodexProvider({ children, config }) {
   }, children);
 }
 
-/** Returns the Agent resource owned by the stable vanilla config. */
-export function useAgent(parameters = {}) {
+/** Returns the Nanocodex Agent resource owned by the stable vanilla config. */
+export function useNanocodex(parameters = {}) {
   const config = useConfig(parameters);
   const enabled = parameters.enabled ?? true;
   const threadId = parameters.threadId;
   const selector = parameters.selector ?? identity;
   const equalityFn = parameters.equalityFn ?? Object.is;
-  if (typeof selector !== "function") throw new TypeError("useAgent selector must be a function");
-  if (typeof equalityFn !== "function") throw new TypeError("useAgent equalityFn must be a function");
+  if (typeof selector !== "function") throw new TypeError("useNanocodex selector must be a function");
+  if (typeof equalityFn !== "function") throw new TypeError("useNanocodex equalityFn must be a function");
   const resource = useMemo(() => ({ enabled, threadId }), [enabled, threadId]);
   const subscribe = useCallback(
     (listener) => config.subscribeAgent(resource, listener),
