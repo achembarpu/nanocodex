@@ -22,9 +22,10 @@ const MAX_ENTRY_CHARACTERS = 8_000;
 const DEFAULT_MAX_PROMPT_HISTORY = 200;
 
 export type TerminalHost = Readonly<{
-  write(data: string | Uint8Array): void | Promise<void>;
+  write(data: string | Uint8Array, options?: { preserveScroll?: boolean }): void | Promise<void>;
   onData(listener: (data: string, receivedAt: number) => void): () => void;
   onResize(listener: (size: { cols: number; rows: number }) => void): () => void;
+  onScroll?(listener: (position: { baseY: number; viewportY: number }) => void): () => void;
   isVisible?(): boolean;
   onVisibilityChange?(listener: () => void): () => void;
   readonly cols: number;
@@ -65,6 +66,8 @@ export type TerminalAgent = Readonly<{
   events: Readonly<{
     watch(): Readonly<{
       onEvent(listener: (event: AgentEvent) => void): () => void;
+      onHistory?(listener: (events: readonly AgentEvent[]) => void): () => void;
+      loadOlder?(): Promise<boolean>;
       off(): void;
     }>;
   }>;
@@ -102,6 +105,8 @@ export function createAgentTerminal(options: {
   let disposed = false;
   let renderScheduled = false;
   let projectionDirty = true;
+  let preserveScroll = false;
+  let projectedHistoryEntryIds = new Set<string>();
   let cancelScheduledRender: (() => void) | undefined;
   let nextPromptId = 1;
   const history: string[] = [];
@@ -142,7 +147,7 @@ export function createAgentTerminal(options: {
       inputMode,
     });
     try {
-      Promise.resolve(terminal.write(frame)).then(resolveReady, (error) => {
+      Promise.resolve(terminal.write(frame, { preserveScroll })).then(resolveReady, (error) => {
         emit("terminal.write_error", { error });
         rejectReady(error);
       });
@@ -150,6 +155,7 @@ export function createAgentTerminal(options: {
       emit("terminal.write_error", { error });
       rejectReady(error);
     }
+    preserveScroll = false;
   };
 
   const render = () => {
@@ -181,6 +187,38 @@ export function createAgentTerminal(options: {
     }
     render();
   }));
+  if (watcher.onHistory) {
+    listeners.push(watcher.onHistory((events) => {
+      if (disposed) return;
+      const historical = applyAgentEvents(initialTerminalState(), events);
+      const historicalIds = new Set(historical.entries.map((entry) => entry.id));
+      const localEntries = state.entries.filter((entry) =>
+        !projectedHistoryEntryIds.has(entry.id) && !historicalIds.has(entry.id)
+      );
+      projectedHistoryEntryIds = historicalIds;
+      state = { ...state, entries: [...historical.entries, ...localEntries] };
+      preserveScroll = true;
+      render();
+    }));
+  }
+  if (terminal.onScroll && watcher.loadOlder) {
+    // The blank xterm viewport reports position zero during attachment. Arm
+    // only after a rendered transcript has placed the viewport away from the
+    // top, so startup cannot masquerade as an upward user scroll.
+    let loadArmed = false;
+    let loadingOlder = false;
+    listeners.push(terminal.onScroll(({ viewportY }) => {
+      const nextNearTop = viewportY <= Math.max(8, terminal.rows);
+      if (!nextNearTop) {
+        if (!loadingOlder) loadArmed = true;
+        return;
+      }
+      if (!loadArmed || loadingOlder) return;
+      loadArmed = false;
+      loadingOlder = true;
+      void watcher.loadOlder?.().finally(() => { loadingOlder = false; });
+    }));
+  }
 
   async function submit(
     value: string,

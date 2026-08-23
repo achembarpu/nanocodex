@@ -1,4 +1,5 @@
 const REPLAY_PAGE_SIZE = 16;
+export const MAX_HISTORY_PAGE_SIZE = 256;
 const KEEPALIVE_MS = 15_000;
 const MAX_EVENT_BYTES = 2 * 1024 * 1024;
 const MAX_EVENT_LOG_BYTES = 64 * 1024 * 1024;
@@ -21,6 +22,12 @@ export type DurableEvent<Message> = Readonly<{
   created_at: number;
   message: Message;
   turn_id: string | null;
+}>;
+
+export type DurableEventHistory<Message> = Readonly<{
+  data: DurableEvent<Message>[];
+  has_more: boolean;
+  latest_cursor: string;
 }>;
 
 export class EventLogCapacityError extends Error {
@@ -149,6 +156,39 @@ export class DurableEventLog<Message extends { type: string }> {
       message: JSON.parse(row.message_json) as Message,
       turn_id: row.turn_id,
     }));
+  }
+
+  /** Returns a newest-first storage query in chronological presentation order. */
+  history(before: string | undefined, limit: number): DurableEventHistory<Message> {
+    const rows = (before === undefined
+      ? this.#storage.sql.exec<EventRow>(
+        `SELECT CAST(cursor AS TEXT) AS cursor, turn_id, message_json, created_at
+         FROM managed_events
+         ORDER BY managed_events.cursor DESC
+         LIMIT ?`,
+        limit + 1,
+      )
+      : this.#storage.sql.exec<EventRow>(
+        `SELECT CAST(cursor AS TEXT) AS cursor, turn_id, message_json, created_at
+         FROM managed_events
+         WHERE cursor < CAST(? AS INTEGER)
+         ORDER BY managed_events.cursor DESC
+         LIMIT ?`,
+        before,
+        limit + 1,
+      )).toArray();
+    const hasMore = rows.length > limit;
+    if (hasMore) rows.pop();
+    return {
+      data: rows.reverse().map((row) => ({
+        cursor: row.cursor,
+        created_at: row.created_at,
+        message: JSON.parse(row.message_json) as Message,
+        turn_id: row.turn_id,
+      })),
+      has_more: hasMore,
+      latest_cursor: this.latestCursor(),
+    };
   }
 
   stream(after: string, signal?: AbortSignal): Response {

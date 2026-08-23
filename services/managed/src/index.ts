@@ -23,6 +23,7 @@ import { createComputerFilesystem } from "./computer-workspace";
 import {
   DurableEventLog,
   EventLogCapacityError,
+  MAX_HISTORY_PAGE_SIZE,
   parseCursor,
   type DurableEvent,
 } from "./durable-events";
@@ -357,11 +358,11 @@ export default {
         new Request(request, { headers: sessionHeaders }),
       );
     }
-    if (resource === "events") {
+    if (resource === "events" || resource === "events/history") {
       if (request.method !== "GET") return json({ error: "method_not_allowed" }, { status: 405 });
       const query = new URLSearchParams(url.searchParams);
       query.set("public_origin", url.origin);
-      return stub.fetch(`https://session.internal/events?${query}`, {
+      return stub.fetch(`https://session.internal/${resource}?${query}`, {
         headers: sessionHeaders,
         signal: request.signal,
       });
@@ -619,6 +620,32 @@ export class NanocodexSession extends DurableComputerSession {
       const cursor = parseCursor(requested);
       if (cursor === undefined) return json({ error: "invalid_cursor" }, { status: 400 });
       return this.#eventLog.stream(cursor, request.signal);
+    }
+    if (request.method === "GET" && url.pathname === "/events/history") {
+      if (this.#deleting) return json({ error: "agent_deleting" }, { status: 409 });
+      if (!this.#sessionId()) return json({ error: "not_found" }, { status: 404 });
+      const requestedBefore = url.searchParams.get("before");
+      const before = requestedBefore === null ? undefined : parseCursor(requestedBefore);
+      const requestedLimit = url.searchParams.get("limit") ?? "128";
+      if ((requestedBefore !== null && (before === undefined || before === "0"))
+        || !/^[1-9][0-9]*$/.test(requestedLimit)) {
+        return json({ error: "invalid_history_page" }, { status: 400 });
+      }
+      const limit = Number(requestedLimit);
+      if (!Number.isSafeInteger(limit) || limit > MAX_HISTORY_PAGE_SIZE) {
+        return json({ error: "invalid_history_page" }, { status: 400 });
+      }
+      const page = this.#eventLog.history(before, limit);
+      return json({
+        data: page.data.map((event) => ({
+          cursor: event.cursor,
+          created_at: event.created_at,
+          turn_id: event.turn_id,
+          ...event.message,
+        })),
+        has_more: page.has_more,
+        latest_cursor: page.latest_cursor,
+      }, { headers: { "cache-control": "no-store" } });
     }
     if (request.method === "POST" && url.pathname === "/turns") {
       return this.#submitHttpTurn(request);

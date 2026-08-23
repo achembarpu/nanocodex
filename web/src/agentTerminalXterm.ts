@@ -4,9 +4,12 @@ const BRACKETED_PASTE_START = "\x1b[200~";
 const BRACKETED_PASTE_END = "\x1b[201~";
 
 type XtermLike = {
-  write(data: string): void;
+  write(data: string, callback?: () => void): void;
   onData(listener: (data: string) => void): { dispose(): void };
   onResize(listener: (size: TerminalSize) => void): { dispose(): void };
+  onScroll?(listener: (viewportY: number) => void): { dispose(): void };
+  scrollToLine?(line: number): void;
+  readonly buffer?: { active: { baseY: number; viewportY: number } };
   attachCustomKeyEventHandler?(listener: (event: KeyboardEvent) => boolean): void;
   readonly cols: number;
   readonly rows: number;
@@ -44,8 +47,20 @@ export function xtermAdapter(term: XtermLike, now: () => number = performanceNow
     return false;
   });
   return {
-    write: (data: string | Uint8Array) =>
-      term.write(typeof data === "string" ? data : new TextDecoder().decode(data)),
+    write(data: string | Uint8Array, options: { preserveScroll?: boolean } = {}) {
+      const bottomOffset = options.preserveScroll && term.buffer
+        ? term.buffer.active.baseY - term.buffer.active.viewportY
+        : undefined;
+      return new Promise<void>((resolve) => term.write(
+        typeof data === "string" ? data : new TextDecoder().decode(data),
+        () => {
+          if (bottomOffset !== undefined && term.buffer && term.scrollToLine) {
+            term.scrollToLine(Math.max(0, term.buffer.active.baseY - bottomOffset));
+          }
+          resolve();
+        },
+      ));
+    },
     onData(callback: (data: string, receivedAt: number) => void) {
       const receive = (data: string) => callback(data, now());
       const data = term.onData(receive);
@@ -59,6 +74,14 @@ export function xtermAdapter(term: XtermLike, now: () => number = performanceNow
     get rows() { return term.rows; },
     onResize(callback: (size: TerminalSize) => void) {
       const disposable = term.onResize(({ cols, rows }) => callback({ cols, rows }));
+      return () => disposable.dispose();
+    },
+    onScroll(callback: (position: { baseY: number; viewportY: number }) => void) {
+      if (!term.onScroll || !term.buffer) return () => {};
+      const disposable = term.onScroll((viewportY) => callback({
+        baseY: term.buffer!.active.baseY,
+        viewportY,
+      }));
       return () => disposable.dispose();
     },
   };
@@ -111,6 +134,7 @@ export function bufferedXtermAdapter(term: XtermLike, now: () => number = perfor
         resizeListeners.add(listener);
         return () => resizeListeners.delete(listener);
       },
+      onScroll: xterm.onScroll,
       get cols() { return xterm.cols; },
       get rows() { return xterm.rows; },
     }),

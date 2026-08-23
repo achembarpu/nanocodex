@@ -77,6 +77,33 @@ test("managed server authentication sends only an ncx_live bearer and omits cook
   );
 });
 
+test("managed event history requests one bounded chronological page before a cursor", async () => {
+  const requests = [];
+  const agent = await Agent.create({
+    baseUrl: origin,
+    fetch: async (input, init) => {
+      const request = new Request(input, init);
+      requests.push(request);
+      const url = new URL(request.url);
+      if (request.method === "POST") return Response.json({ agent_id: agentId }, { status: 201 });
+      return Response.json({
+        data: [eventData("7"), eventData("8")],
+        has_more: true,
+        latest_cursor: "12",
+      });
+    },
+  });
+
+  const page = await agent.events.page({ before: "9", limit: 2 });
+  assert.deepEqual(page.data.map((event) => event.cursor), ["7", "8"]);
+  assert.equal(page.hasMore, true);
+  assert.equal(page.latestCursor, "12");
+  assert.equal(new URL(requests[1].url).search, "?limit=2&before=9");
+  assert.equal(requests.length, 2, "one create plus one history request");
+  await assert.rejects(() => agent.events.page({ before: "0" }), /positive decimal/);
+  await assert.rejects(() => agent.events.page({ limit: 257 }), /1 through 256/);
+});
+
 test("prompts and a watcher multiplex one active managed event request without stealing events", async () => {
   const connections = [];
   let activeConnections = 0;
@@ -346,6 +373,16 @@ function eventStream(parts) {
   return new Response(parts.join(""), {
     headers: { "content-type": "text/event-stream; charset=utf-8" },
   });
+}
+
+function eventData(cursor) {
+  return {
+    cursor,
+    created_at: Number(cursor),
+    turn_id: null,
+    type: "event",
+    event: { type: "assistant.message", payload: { text: cursor } },
+  };
 }
 
 function controlledEventStream(signal, onClose) {

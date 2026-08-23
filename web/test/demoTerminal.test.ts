@@ -29,6 +29,7 @@ function fakeTerminal() {
   let onData = (_data: string, _receivedAt: number) => {};
   let onResize = (_size: { cols: number; rows: number }) => {};
   let onVisibilityChange = () => {};
+  let onScroll = (_position: { baseY: number; viewportY: number }) => {};
   let visible = true;
   const writes: string[] = [];
   return {
@@ -51,6 +52,10 @@ function fakeTerminal() {
       onVisibilityChange = listener;
       return () => { onVisibilityChange = () => {}; };
     },
+    onScroll(listener: (position: { baseY: number; viewportY: number }) => void) {
+      onScroll = listener;
+      return () => { onScroll = () => {}; };
+    },
     data(value: string, receivedAt = performance.now()) { onData(value, receivedAt); },
     resize(cols: number, rows: number) {
       this.cols = cols;
@@ -61,6 +66,7 @@ function fakeTerminal() {
       visible = next;
       onVisibilityChange();
     },
+    scroll(baseY: number, viewportY: number) { onScroll({ baseY, viewportY }); },
   };
 }
 
@@ -466,6 +472,108 @@ test("streaming bursts coalesce into one animation-frame projection", async () =
     terminal.dispose();
     frames.restore();
   }
+});
+
+test("managed history loads once per transition into the top threshold", async () => {
+  const host = fakeTerminal();
+  let loadCalls = 0;
+  let releaseFirstLoad!: () => void;
+  const firstLoad = new Promise<void>((resolve) => { releaseFirstLoad = resolve; });
+  const agent = fakeAgent();
+  agent.events.watch = () => ({
+    onEvent() { return () => {}; },
+    onHistory(listener: (events: readonly AgentEvent[]) => void) {
+      listener([event(1, "assistant.message", { text: "recent" })]);
+      return () => {};
+    },
+    async loadOlder() {
+      loadCalls += 1;
+      if (loadCalls === 1) await firstLoad;
+      return true;
+    },
+    off() {},
+  });
+  const terminal = createAgentTerminal({ agent: agent as never, terminal: host });
+  await terminal.ready;
+
+  host.scroll(0, 0);
+  await settle();
+  assert.equal(loadCalls, 0, "the blank attachment viewport does not load older history");
+  host.scroll(100, 50);
+  host.scroll(100, 20);
+  host.scroll(100, 10);
+  await settle();
+  assert.equal(loadCalls, 1);
+  host.scroll(200, 80);
+  host.scroll(200, 0);
+  await settle();
+  assert.equal(loadCalls, 1, "programmatic redraw scrolls do not chain another page");
+  releaseFirstLoad();
+  await settle();
+  host.scroll(200, 0);
+  await settle();
+  assert.equal(loadCalls, 1, "remaining at the top does not re-arm history loading");
+  host.scroll(100, 40);
+  host.scroll(100, 0);
+  await settle();
+  assert.equal(loadCalls, 2);
+  terminal.dispose();
+});
+
+test("older history replaces a streamed tail whose first event identity moved", async () => {
+  const host = fakeTerminal();
+  let historyListener = (_events: readonly AgentEvent[]) => {};
+  const agent = fakeAgent();
+  agent.events.watch = () => ({
+    onEvent() { return () => {}; },
+    onHistory(listener: (events: readonly AgentEvent[]) => void) {
+      historyListener = listener;
+      listener([
+        event(2, "assistant.delta", { text: "two" }),
+        event(3, "assistant.message", { text: "two" }),
+      ]);
+      return () => {};
+    },
+    off() {},
+  });
+  const frames = fakeAnimationFrames();
+  try {
+    const terminal = createAgentTerminal({ agent: agent as never, terminal: host });
+    frames.flush();
+    await terminal.ready;
+    historyListener([
+      event(1, "assistant.delta", { text: "one" }),
+      event(2, "assistant.delta", { text: "two" }),
+      event(3, "assistant.message", { text: "onetwo" }),
+    ]);
+    frames.flush();
+    const frame = host.writes.at(-1) ?? "";
+    assert.equal(frame.match(/onetwo/g)?.length, 1);
+    assert.equal(frame.match(/\btwo\b/g)?.length ?? 0, 0);
+    terminal.dispose();
+  } finally {
+    frames.restore();
+  }
+});
+
+test("xterm history redraw restores the previous distance from the buffer bottom", async () => {
+  let restored: number | undefined;
+  const active = { baseY: 100, viewportY: 60 };
+  const adapter = xtermAdapter({
+    cols: 80,
+    rows: 24,
+    buffer: { active },
+    write(_data: string, callback?: () => void) {
+      active.baseY = 140;
+      active.viewportY = 140;
+      callback?.();
+    },
+    scrollToLine(line: number) { restored = line; },
+    onData() { return { dispose() {} }; },
+    onResize() { return { dispose() {} }; },
+  });
+  await adapter.write("older frame", { preserveScroll: true });
+  assert.equal(restored, 100);
 });
 
 test("hidden streaming reduces state without TerminalHost writes", async () => {

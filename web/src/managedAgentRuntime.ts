@@ -6,6 +6,7 @@ import type {
 } from "nanocodex/managed";
 import type { TerminalAgent, TerminalTurn } from "./demoTerminal";
 
+const MANAGED_HISTORY_PAGE_SIZE = 128;
 const RETAINED_AGENT_KEY = "nanocodex.managed-agent.v1";
 
 export async function loadManagedTerminalAgent(): Promise<TerminalAgent> {
@@ -25,7 +26,7 @@ export async function loadManagedTerminalAgent(): Promise<TerminalAgent> {
   return managedTerminalAgent(managed);
 }
 
-function managedTerminalAgent(managed: ManagedAgent): TerminalAgent {
+export function managedTerminalAgent(managed: ManagedAgent): TerminalAgent {
   const submitted = new Set<string>();
   return Object.freeze({
     sessionId: managed.id,
@@ -60,15 +61,50 @@ function managedEventWatcher(
 ): ReturnType<TerminalAgent["events"]["watch"]> {
   const controller = new AbortController();
   const listeners = new Set<(event: AgentEvent) => void>();
+  const historyListeners = new Set<(events: readonly AgentEvent[]) => void>();
+  const envelopes: ManagedEvent[] = [];
+  const seen = new Set<string>();
+  const sequences = new Map<string, number>();
   let sequence = 0;
+  let hasOlder = false;
+  let loadingOlder: Promise<boolean> | undefined;
   const emit = (event: AgentEvent) => {
     for (const listener of listeners) listener(event);
   };
+  const project = (envelope: ManagedEvent) => terminalEvent(
+    envelope,
+    managed.id,
+    submitted,
+    sequences.get(envelope.cursor) ?? sequence,
+  );
+  const emitHistory = () => {
+    const events = envelopes.flatMap((envelope) => {
+      const event = project(envelope);
+      return event ? [event] : [];
+    });
+    for (const listener of historyListeners) listener(events);
+  };
+  const retain = (envelope: ManagedEvent, prepend = false) => {
+    if (seen.has(envelope.cursor)) return false;
+    seen.add(envelope.cursor);
+    sequences.set(envelope.cursor, ++sequence);
+    if (prepend) envelopes.unshift(envelope);
+    else envelopes.push(envelope);
+    return true;
+  };
   void (async () => {
     try {
-      for await (const envelope of managed.events.watch({ cursor: "0", signal: controller.signal })) {
+      const initial = await managed.events.page({ limit: MANAGED_HISTORY_PAGE_SIZE });
+      for (const envelope of initial.data) retain(envelope);
+      hasOlder = initial.hasMore;
+      emitHistory();
+      for await (const envelope of managed.events.watch({
+        cursor: initial.latestCursor,
+        signal: controller.signal,
+      })) {
         if (controller.signal.aborted) return;
-        const event = terminalEvent(envelope, managed.id, submitted, ++sequence);
+        if (!retain(envelope)) continue;
+        const event = project(envelope);
         if (event) emit(event);
       }
     } catch (error) {
@@ -94,9 +130,34 @@ function managedEventWatcher(
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
+    onHistory(listener: (events: readonly AgentEvent[]) => void) {
+      historyListeners.add(listener);
+      if (envelopes.length > 0) listener(envelopes.flatMap((envelope) => {
+        const event = project(envelope);
+        return event ? [event] : [];
+      }));
+      return () => historyListeners.delete(listener);
+    },
+    loadOlder() {
+      if (!hasOlder || controller.signal.aborted) return Promise.resolve(false);
+      if (loadingOlder) return loadingOlder;
+      const before = envelopes[0]?.cursor;
+      if (!before) return Promise.resolve(false);
+      loadingOlder = managed.events.page({ before, limit: MANAGED_HISTORY_PAGE_SIZE }).then((page) => {
+        let added = false;
+        for (let index = page.data.length - 1; index >= 0; index -= 1) {
+          added = retain(page.data[index]!, true) || added;
+        }
+        hasOlder = page.hasMore;
+        if (added) emitHistory();
+        return added;
+      }).finally(() => { loadingOlder = undefined; });
+      return loadingOlder;
+    },
     off() {
       controller.abort();
       listeners.clear();
+      historyListeners.clear();
     },
   });
 }

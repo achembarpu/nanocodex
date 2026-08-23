@@ -51,6 +51,7 @@ function agentHandle(client, id) {
   validateAgentId(id);
   const eventStream = replayableEventStream(client, id);
   const events = Object.freeze({
+    page: (options = {}) => eventHistoryPage(client, id, options),
     watch: (options = {}) => eventStream.subscribe(options),
   });
   const agent = {
@@ -67,6 +68,34 @@ function agentHandle(client, id) {
     },
   };
   return Object.freeze(agent);
+}
+
+async function eventHistoryPage(client, agentId, options) {
+  if (!options || typeof options !== "object" || Array.isArray(options)) {
+    throw new TypeError("managed event history options must be an object");
+  }
+  const before = options.before;
+  if (before !== undefined && (typeof before !== "string" || !CURSOR.test(before) || before === "0")) {
+    throw new TypeError("managed event history cursor must be a positive decimal string");
+  }
+  const limit = options.limit ?? 128;
+  if (!Number.isSafeInteger(limit) || limit < 1 || limit > 256) {
+    throw new TypeError("managed event history limit must be an integer from 1 through 256");
+  }
+  const query = new URLSearchParams({ limit: String(limit) });
+  if (before !== undefined) query.set("before", before);
+  const body = await client.json(`${agentPath(agentId)}/events/history?${query}`);
+  if (!body || !Array.isArray(body.data) || typeof body.has_more !== "boolean") {
+    throw new ManagedError("invalid_response", "managed event history is malformed");
+  }
+  const latestCursor = requiredCursor(body, "latest_cursor");
+  const data = body.data.map((event) => managedEvent(event));
+  if (data.length > limit || data.some((event, index) =>
+    (index > 0 && !cursorBefore(data[index - 1].cursor, event.cursor))
+    || (before !== undefined && !cursorBefore(event.cursor, before)))) {
+    throw new ManagedError("invalid_response", "managed event history ordering is malformed");
+  }
+  return Object.freeze({ data: Object.freeze(data), hasMore: body.has_more, latestCursor });
 }
 
 function managedTurn(client, agentId, eventStream, options) {
@@ -378,13 +407,7 @@ async function* readEvents(client, agentId, initialCursor, signal) {
           const data = parseEventData(parsed.data);
           const eventCursor = parsed.id ?? requiredCursor(data, "cursor");
           cursor = eventCursor;
-          yield Object.freeze({
-            cursor: eventCursor,
-            createdAt: typeof data.created_at === "number" ? data.created_at : undefined,
-            turnId: typeof data.turn_id === "string" ? data.turn_id : null,
-            type: typeof data.type === "string" ? data.type : parsed.event,
-            data: Object.freeze(data),
-          });
+          yield managedEvent(data, eventCursor, parsed.event);
         }
       }
     } finally {
@@ -392,6 +415,19 @@ async function* readEvents(client, agentId, initialCursor, signal) {
     }
     if (!signal?.aborted) await delay(reconnectDelay, signal);
   }
+}
+
+function managedEvent(data, cursor = requiredCursor(data, "cursor"), fallbackType = "message") {
+  if (!data || typeof data !== "object" || Array.isArray(data) || typeof data.type !== "string") {
+    throw new ManagedError("invalid_response", "managed event history contains a malformed event");
+  }
+  return Object.freeze({
+    cursor,
+    createdAt: typeof data.created_at === "number" ? data.created_at : undefined,
+    turnId: typeof data.turn_id === "string" ? data.turn_id : null,
+    type: typeof data.type === "string" ? data.type : fallbackType,
+    data: Object.freeze(data),
+  });
 }
 
 function cursorBefore(left, right) {

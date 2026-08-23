@@ -102,6 +102,20 @@ export type WatchEventsOptions = Readonly<{
   signal?: AbortSignal | undefined;
 }>;
 
+export type EventHistoryOptions = Readonly<{
+  /** Fetch events strictly before this durable cursor. Omit for the newest page. */
+  before?: string | undefined;
+  /** Page size from 1 through 256. Defaults to 128. */
+  limit?: number | undefined;
+}>;
+
+export type EventHistoryPage = Readonly<{
+  data: readonly Event[];
+  hasMore: boolean;
+  /** Cursor captured with the page; attach the live watcher strictly after it. */
+  latestCursor: string;
+}>;
+
 export type PromptOptions = Readonly<{
   input: PromptInput;
   /** Stable request key. A random key is generated when omitted. */
@@ -133,6 +147,7 @@ export type Agent = Readonly<{
   id: string;
   turn: Readonly<{ prompt(options: PromptOptions): Turn }>;
   events: Readonly<{
+    page(options?: EventHistoryOptions): Promise<EventHistoryPage>;
     watch(options?: WatchEventsOptions): AsyncIterableIterator<Event>;
   }>;
   state(): Promise<State>;

@@ -569,6 +569,39 @@ describe("managed agents REST and resumable SSE", () => {
     await replay.cancel();
   });
 
+  it("pages a bounded recent event window and then strictly older history", async () => {
+    const agent = await createAgent();
+    for (let index = 0; index < 4; index += 1) {
+      await submit(agent, `history-${index}`, `history prompt ${index}`);
+    }
+
+    const recentResponse = await SELF.fetch(`${agent.events_url}/history?limit=2`);
+    expect(recentResponse.status).toBe(200);
+    expect(recentResponse.headers.get("cache-control")).toContain("no-store");
+    const recent = await recentResponse.json<{
+      data: Array<{ cursor: string }>;
+      has_more: boolean;
+      latest_cursor: string;
+    }>();
+    expect(recent.data).toHaveLength(2);
+    expect(recent.has_more).toBe(true);
+    expect(recent.data.map((event) => BigInt(event.cursor))).toEqual(
+      [...recent.data].map((event) => BigInt(event.cursor)).sort((a, b) => a < b ? -1 : 1),
+    );
+    expect(recent.latest_cursor).toBe(recent.data.at(-1)?.cursor);
+
+    const before = recent.data[0]!.cursor;
+    const older = await (await SELF.fetch(
+      `${agent.events_url}/history?before=${before}&limit=2`,
+    )).json<{ data: Array<{ cursor: string }> }>();
+    expect(older.data).toHaveLength(2);
+    expect(older.data.every((event) => BigInt(event.cursor) < BigInt(before))).toBe(true);
+    expect(new Set([...older.data, ...recent.data].map((event) => event.cursor)).size).toBe(4);
+
+    expect((await SELF.fetch(`${agent.events_url}/history?before=0&limit=2`)).status).toBe(400);
+    expect((await SELF.fetch(`${agent.events_url}/history?limit=257`)).status).toBe(400);
+  });
+
   it("bounds request bodies and clears managed state on deletion", async () => {
     const agent = await createAgent();
     const turnsUrl = agent.events_url.replace(/\/events$/, "/turns");
