@@ -101,7 +101,7 @@ function managedEventWatcher(
   });
 }
 
-function terminalEvent(
+export function terminalEvent(
   envelope: ManagedEvent,
   sessionId: string,
   submitted: Set<string>,
