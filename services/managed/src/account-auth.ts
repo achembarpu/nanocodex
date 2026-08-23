@@ -79,12 +79,10 @@ export async function routeAccountRequest(
   if (url.pathname === "/v1/me" && request.method === "GET") {
     const resolved = await resolveOrCreateBrowserAccount(request, env, url);
     const principal = resolved.principal;
-    const account = await readAccount(env, principal.userId);
-    if (!account) return unauthorized();
     return json({
       user: {
         id: principal.userId,
-        persistent: account.persistent,
+        persistent: resolved.persistent,
       },
       authentication: principal.kind,
     }, resolved.cookie ? { headers: { "set-cookie": resolved.cookie } } : undefined);
@@ -258,9 +256,17 @@ async function resolveOrCreateBrowserAccount(
   request: Request,
   env: AccountAuthEnv,
   url: URL,
-): Promise<{ principal: Principal; cookie?: string }> {
+): Promise<{ principal: Principal; persistent: boolean; cookie?: string }> {
   const principal = await authenticate(request, env, url);
-  if (principal) return { principal };
+  if (principal) {
+    const cookie = cookieValue(request, ACCOUNT_COOKIE);
+    if (principal.kind === "account_session") {
+      return { principal, persistent: !cookie?.startsWith("a_") };
+    }
+    const account = await readAccount(env, principal.userId);
+    if (!account) throw new Error("API key account is unavailable");
+    return { principal, persistent: account.persistent };
+  }
 
   const userId = crypto.randomUUID();
   const issuedAt = Math.floor(Date.now() / 1_000);
@@ -275,6 +281,7 @@ async function resolveOrCreateBrowserAccount(
   ]);
   return {
     principal: { kind: "account_session", userId },
+    persistent: false,
     cookie: serializeAccountCookie(token, new URL(request.url).protocol),
   };
 }

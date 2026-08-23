@@ -16,7 +16,7 @@ const HTTP_OPERATIONS = Object.freeze({
   search: "https://nanocodex.internal/v1/search",
 });
 
-const MODEL_STATUS_URL = "https://broker.internal/.well-known/nanocodex/model-status";
+const CREDENTIAL_STATUS_URL = "https://managed.internal/v1/credentials";
 
 /** Resolves the deployment-owned model boundary without reading a provider credential. */
 export function managedModelAccess(
@@ -43,7 +43,7 @@ export function managedModelAccess(
 /** Checks broker policy/credential availability without opening a provider connection. */
 export async function managedModelReady(access: ManagedModelAccess): Promise<boolean> {
   try {
-    const response = await access.binding.fetch(new Request(MODEL_STATUS_URL));
+    const response = await access.binding.fetch(new Request(CREDENTIAL_STATUS_URL));
     if (response.status !== 200
       || response.headers.get("cache-control") !== "no-store"
       || !response.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
@@ -51,12 +51,12 @@ export async function managedModelReady(access: ManagedModelAccess): Promise<boo
       return false;
     }
     const encoded = await response.text();
-    if (encoded.length > 128) return false;
+    if (encoded.length > 1_024) return false;
     const value = JSON.parse(encoded) as Record<string, unknown>;
     return value !== null
       && !Array.isArray(value)
-      && Object.keys(value).length === 1
-      && value.ready === true;
+      && value.ready === true
+      && (value.active === "chatgpt" || value.active === "openai");
   } catch {
     return false;
   }

@@ -26,17 +26,17 @@ test("broker health is structural and provider-neutral", async () => {
   const access = managedModelAccess(browserRequest(), {
     NANOCODEX_BACKEND: binding(async (request) => {
       requests.push(request);
-      return Response.json({ ready: true }, {
+      return Response.json({ ready: true, active: "chatgpt" }, {
         headers: { "cache-control": "no-store" },
       });
     }),
   })!;
   assert.equal(await managedModelReady(access), true);
-  assert.equal(requests[0]?.url, "https://broker.internal/.well-known/nanocodex/model-status");
+  assert.equal(requests[0]?.url, "https://managed.internal/v1/credentials");
   assert.equal(requests[0]?.method, "GET");
 
   const providerLeaking = managedModelAccess(browserRequest(), {
-    NANOCODEX_BACKEND: binding(async () => Response.json({ ready: true, auth_mode: "chatgpt" }, {
+    NANOCODEX_BACKEND: binding(async () => Response.json({ ready: true, active: "provider-secret" }, {
       headers: { "cache-control": "no-store" },
     })),
   })!;

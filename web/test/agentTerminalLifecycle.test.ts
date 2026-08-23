@@ -14,7 +14,8 @@ test("account authentication naturally selects the private broker", () => {
   assert.match(session, /useAccountSession\(\)\.account/);
   assert.match(health, /payload\.credential_source === "brokered"/);
   assert.match(session, /deploymentHealth\.refresh\(\)/);
-  assert.match(session, /window\.addEventListener\("focus", refresh\)/);
+  assert.match(session, /window\.addEventListener\("focus", refreshAfterInactivity\)/);
+  assert.match(session, /if \(!event\.persisted\) return/);
   assert.match(session, /nanocodex:model-credential-changed/);
 });
 

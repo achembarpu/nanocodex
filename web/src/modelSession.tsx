@@ -148,18 +148,34 @@ function useModelSession({
 
   useEffect(() => { void refreshStatus(); }, [refreshStatus]);
   useEffect(() => {
-    const refresh = () => {
-      if (document.visibilityState === "visible") void refreshStatus();
+    let inactive = false;
+    const becameInactive = () => { inactive = true; };
+    const refreshAfterInactivity = () => {
+      if (!inactive || document.visibilityState !== "visible") return;
+      inactive = false;
+      void refreshStatus();
     };
-    window.addEventListener("focus", refresh);
-    window.addEventListener("pageshow", refresh);
-    window.addEventListener("nanocodex:model-credential-changed", refresh);
-    document.addEventListener("visibilitychange", refresh);
+    const visibilityChanged = () => {
+      if (document.visibilityState === "hidden") becameInactive();
+      else refreshAfterInactivity();
+    };
+    const pageShown = (event: PageTransitionEvent) => {
+      if (!event.persisted) return;
+      inactive = false;
+      void refreshStatus();
+    };
+    const credentialChanged = () => { void refreshStatus(); };
+    window.addEventListener("blur", becameInactive);
+    window.addEventListener("focus", refreshAfterInactivity);
+    window.addEventListener("pageshow", pageShown);
+    window.addEventListener("nanocodex:model-credential-changed", credentialChanged);
+    document.addEventListener("visibilitychange", visibilityChanged);
     return () => {
-      window.removeEventListener("focus", refresh);
-      window.removeEventListener("pageshow", refresh);
-      window.removeEventListener("nanocodex:model-credential-changed", refresh);
-      document.removeEventListener("visibilitychange", refresh);
+      window.removeEventListener("blur", becameInactive);
+      window.removeEventListener("focus", refreshAfterInactivity);
+      window.removeEventListener("pageshow", pageShown);
+      window.removeEventListener("nanocodex:model-credential-changed", credentialChanged);
+      document.removeEventListener("visibilitychange", visibilityChanged);
     };
   }, [refreshStatus]);
 
