@@ -177,6 +177,8 @@ async function main() {
   let shutdown;
 
   try {
+    await ensureLocalDependencies(toolEnvironment);
+
     await run(process.execPath, [
       resolve(webRoot, "node_modules/wrangler/bin/wrangler.js"),
       "d1",
@@ -187,8 +189,6 @@ async function main() {
       "--env",
       "development",
     ], { cwd: webRoot, env: { ...toolEnvironment, CI: "true" } });
-
-    await ensureLocalDependencies(toolEnvironment);
 
     const relayLaunch = localChatGptRelayChildLaunch(toolEnvironment);
     const relayChild = spawn(
