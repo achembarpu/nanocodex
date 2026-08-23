@@ -222,7 +222,7 @@ describe("per-user credential broker", () => {
     });
   });
 
-  it("claims a local bootstrap once, without provider material in the request or response", async () => {
+  it("provides the local bootstrap to every development account without exposing it", async () => {
     const failed = await handleEgress(
       new Request("https://broker.test/users/failed-local-user/credentials/chatgpt/local-claim", {
         method: "POST",
@@ -249,10 +249,14 @@ describe("per-user credential broker", () => {
     const status = await claim.json<Record<string, unknown>>();
     expect(status).toMatchObject({ active: "chatgpt", chatgpt: { connected: true } });
     expect(JSON.stringify(status)).not.toContain("local-access");
-    expect((await SELF.fetch(
+    const otherClaim = await SELF.fetch(
       "https://broker.test/users/other-local-user/credentials/chatgpt/local-claim",
       { method: "POST" },
-    )).status).toBe(409);
+    );
+    expect(otherClaim.status).toBe(200);
+    const otherStatus = await otherClaim.json<Record<string, unknown>>();
+    expect(otherStatus).toMatchObject({ active: "chatgpt", chatgpt: { connected: true } });
+    expect(JSON.stringify(otherStatus)).not.toContain("local-access");
   });
 
   it("hides the local bootstrap claim route outside local development", async () => {

@@ -214,23 +214,9 @@ async function handleControl(request: Request, url: URL, env: EgressEnv): Promis
   if (operation === "chatgpt/local-claim") {
     if (request.method !== "POST") return jsonError(405, "method_not_allowed");
     if (!localClaimEnabled(env)) return jsonError(404, "not_found");
-    const claim = await directory(env).fetch("https://subjects.internal/v1/claim-local-bootstrap", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ user_id: userId }),
-    });
-    if (!claim.ok) return claim;
-    await claim.body?.cancel();
-    const imported = await userBroker(env, userId).fetch("https://credentials.internal/v1/chatgpt/local-claim", {
+    return userBroker(env, userId).fetch("https://credentials.internal/v1/chatgpt/local-claim", {
       method: "POST",
     });
-    if (imported.ok) return imported;
-    await directory(env).fetch("https://subjects.internal/v1/release-local-bootstrap", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ user_id: userId }),
-    });
-    return imported;
   }
 
   if (!operation && request.method === "GET") {

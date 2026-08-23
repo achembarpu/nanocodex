@@ -109,29 +109,6 @@ export class AgentSubjectDirectory extends DurableObject<BrokerEnv> {
       const userId = await this.#state.storage.get<string>(`subject:${subject}`);
       return userId ? json({ user_id: userId }, 200) : jsonError(404, "subject_not_bound");
     }
-    if (request.method === "POST" && url.pathname === "/v1/claim-local-bootstrap") {
-      const userId = stringField(body, "user_id");
-      if (!USER_ID.test(userId ?? "")) return jsonError(400, "invalid_user_id");
-      const owner = await this.#state.storage.transaction(async (transaction) => {
-        const current = await transaction.get<string>("local-bootstrap-owner");
-        if (current && current !== userId) return "conflict" as const;
-        if (!current) await transaction.put("local-bootstrap-owner", userId!);
-        return "claimed" as const;
-      });
-      return owner === "conflict"
-        ? jsonError(409, "local_bootstrap_already_claimed")
-        : json({ status: owner }, 200);
-    }
-    if (request.method === "POST" && url.pathname === "/v1/release-local-bootstrap") {
-      const userId = stringField(body, "user_id");
-      if (!USER_ID.test(userId ?? "")) return jsonError(400, "invalid_user_id");
-      await this.#state.storage.transaction(async (transaction) => {
-        if (await transaction.get<string>("local-bootstrap-owner") === userId) {
-          await transaction.delete("local-bootstrap-owner");
-        }
-      });
-      return new Response(null, { status: 204, headers: noStoreHeaders() });
-    }
     return jsonError(404, "not_found");
   }
 }
