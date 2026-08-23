@@ -88,6 +88,7 @@ test("the packed package ships and resolves every public entry point", async () 
       import { dataset as aggregateDataset, web } from "nanocodex/tools";
       import { dataset } from "nanocodex/tools/dataset";
       import { nanocodexTools } from "nanocodex/tools/vite";
+      import { nanocodex } from "nanocodex/vite";
       import { Agent as NodeAgent, Subagents as NodeSubagents, Transport as NodeTransport, Workspace as NodeWorkspace } from "nanocodex/node";
       import * as nodeExports from "nanocodex/node";
       import { Subagents as BrowserSubagents, Workspace as BrowserWorkspace } from "nanocodex/browser";
@@ -172,6 +173,9 @@ test("the packed package ships and resolves every public entry point", async () 
       const sprintfCompatibility = nanocodexTools().resolveId("sprintf-js", "/consumer.js");
       assert.match(sprintfCompatibility, /browserSprintf\.mjs$/);
       assert.equal(nanocodexTools().resolveId("sprintf-js", sprintfCompatibility), null);
+      const vitePlugin = nanocodex({ chatGpt: false });
+      assert.equal(vitePlugin.name, "nanocodex");
+      assert.match(vitePlugin.resolveId("node:zlib"), /browserZlib\.mjs$/);
       const [{ gzipSync, gunzipSync }, { sprintf }] = await Promise.all([
         import(sprintfCompatibility.replace(/browserSprintf\.mjs$/, "browserZlib.mjs")),
         import(sprintfCompatibility),

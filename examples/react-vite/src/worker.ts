@@ -78,22 +78,8 @@ async function createAgent(data: StartMessage) {
   return {
     agent: await Agent.create({
       ...common,
-      transport: Transport.openAi({
-        apiKey: "worker-managed",
-        websocketUrl: workerEndpoint(),
-        createWebSocket: (endpoint: string, sessionId: string) => {
-          const url = new URL(endpoint);
-          url.searchParams.set("session_id", sessionId);
-          return new WebSocket(url);
-        },
-      }),
     }),
   };
-}
-
-function workerEndpoint(): string {
-  const protocol = self.location.protocol === "https:" ? "wss:" : "ws:";
-  return `${protocol}//${self.location.host}/api/responses`;
 }
 
 function errorMessage(error: unknown): string {
