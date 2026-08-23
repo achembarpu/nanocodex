@@ -47,10 +47,29 @@ test("web forwards the complete command object through a caller-owned host adapt
     session_id: "session-1",
   });
   assert.equal(requests[0].init.headers.authorization, "Bearer host");
-  assert.equal(requests[0].init.redirect, "error");
+  assert.equal(requests[0].init.redirect, "manual");
   assert.equal(requests[0].init.signal, context.signal);
   assert.deepEqual(tool.parameters.properties.search_query.items.required, ["q"]);
   assert.deepEqual(tool.parameters.properties.response_length.enum, ["short", "medium", "long"]);
+});
+
+test("web rejects host redirects without forwarding credentials", async () => {
+  const requests = [];
+  const tool = web({
+    url: "https://host.test/tools/web",
+    headers: { authorization: "Bearer host" },
+    async fetch(url, init) {
+      requests.push({ url, init });
+      return new Response(null, { status: 302, headers: { location: "https://other.test" } });
+    },
+  });
+
+  await assert.rejects(
+    tool.handler({ search_query: [{ q: "nanocodex" }] }, context),
+    /redirects are not allowed/,
+  );
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].init.redirect, "manual");
 });
 
 test("web repairs common non-array model argument shapes before host dispatch", async () => {

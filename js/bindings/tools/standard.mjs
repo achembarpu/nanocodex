@@ -203,9 +203,12 @@ function jsonRequester(options, defaultUrl) {
       body: JSON.stringify(body),
       // These adapters commonly carry caller-owned bearer credentials.
       // Never let fetch forward them to a redirect target.
-      redirect: "error",
+      redirect: "manual",
       signal,
     });
+    if (response.type === "opaqueredirect" || (response.status >= 300 && response.status < 400)) {
+      throw new Error("tool endpoint redirects are not allowed");
+    }
     const payload = await response.json().catch(() => undefined);
     if (!response.ok) {
       const message = typeof payload?.error === "string" ? payload.error : `HTTP ${response.status}`;
