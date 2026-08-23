@@ -8,7 +8,6 @@ import {
 test("local managed development uses one credential-free auxiliary Worker", () => {
   const environment = {
     NANOCODEX_LOCAL_MODEL_ACCESS: "managed",
-    NANOCODEX_LOCAL_MODEL_AUTH_MODE: "chatgpt",
     NANOCODEX_LOCAL_ADMIN_TOKEN: "admin-token",
     NANOCODEX_LOCAL_ROOM_ALLOCATOR_TOKEN: "allocator-token",
     NANOCODEX_LOCAL_AGENT_IDLE_TIMEOUT_MS: "750",
@@ -25,7 +24,6 @@ test("local managed development uses one credential-free auxiliary Worker", () =
       EXISTING: "kept",
       AGENT_IDLE_TIMEOUT_MS: "750",
       NANOCODEX_ADMIN_TOKEN: "admin-token",
-      NANOCODEX_AUTH_MODE: "chatgpt",
       NANOCODEX_ROOM_ALLOCATOR_TOKEN: "allocator-token",
     },
   });
@@ -40,7 +38,6 @@ test("local web-only development has no managed auxiliary Worker", () => {
 test("local managed Worker credentials are complete and distinct", () => {
   const base = {
     NANOCODEX_LOCAL_MODEL_ACCESS: "managed",
-    NANOCODEX_LOCAL_MODEL_AUTH_MODE: "api_key",
     NANOCODEX_LOCAL_ADMIN_TOKEN: "same-token",
     NANOCODEX_LOCAL_ROOM_ALLOCATOR_TOKEN: "same-token",
   };

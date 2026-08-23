@@ -95,9 +95,6 @@ type WorkerEnv = GitStorageEnv & ThreadGitStorageEnv & EvalStorageEnv & ChatGptE
   EGRESS?: Fetcher;
   MULTIPLAYER_BACKEND?: Fetcher;
   MULTIPLAYER_ALLOCATOR_TOKEN?: string;
-  NANOCODEX_AUTH_MODE?: string;
-  NANOCODEX_MODEL_ACCESS?: string;
-  NANOCODEX_PUBLIC_ORIGIN?: string;
 };
 
 type ApiKeyCredential = {
@@ -144,13 +141,10 @@ export default {
         const ready = await managedModelReady(managed);
         return json({
           agent_configured: ready,
-          auth_mode: managed.authMode,
-          credential_source: ready ? "managed" : null,
+          credential_source: ready ? "brokered" : null,
           deployment_sha: GIT_SHA_PATTERN.test(env.DEPLOYMENT_SHA ?? "")
             ? env.DEPLOYMENT_SHA
             : null,
-          interactive_auth: false,
-          model_access_mode: "managed",
           service: "nanocodex",
           runtime: "cloudflare-workers",
           status: "ok",
@@ -175,37 +169,22 @@ export default {
     }
 
     if (url.pathname === "/api/auth/chatgpt" && request.method === "POST") {
-      const managed = managedAccess(env);
-      if (managed instanceof Response) return managed;
-      if (managed) return interactiveAuthDisabled();
       return startChatGptSession(request, env, url);
     }
 
     if (url.pathname === "/api/auth/chatgpt" && request.method === "GET") {
-      const managed = managedAccess(env);
-      if (managed instanceof Response) return managed;
-      if (managed) return interactiveAuthDisabled();
       return chatGptSessionStatus(request, env, context);
     }
 
     if (url.pathname === "/api/auth/chatgpt" && request.method === "DELETE") {
-      const managed = managedAccess(env);
-      if (managed instanceof Response) return managed;
-      if (managed) return interactiveAuthDisabled();
       return clearChatGptSession(request, env, url);
     }
 
     if (url.pathname === "/api/auth/openai" && request.method === "PUT") {
-      const managed = managedAccess(env);
-      if (managed instanceof Response) return managed;
-      if (managed) return interactiveAuthDisabled();
       return createByokSession(request, env, url);
     }
 
     if (url.pathname === "/api/auth/openai" && request.method === "DELETE") {
-      const managed = managedAccess(env);
-      if (managed instanceof Response) return managed;
-      if (managed) return interactiveAuthDisabled();
       return clearByokSession(request, env, url);
     }
 
@@ -264,14 +243,8 @@ function managedAccess(env: WorkerEnv): ManagedModelAccess | Response | undefine
   }
 }
 
-function interactiveAuthDisabled(): Response {
-  return json({ error: "interactive authentication is disabled for managed model access" }, {
-    status: 409,
-  });
-}
-
 function isManagedAccess(value: Credential | ManagedModelAccess): value is ManagedModelAccess {
-  return "authMode" in value && "binding" in value;
+  return "binding" in value;
 }
 
 async function proxyWebSearch(request: Request, env: WorkerEnv, url: URL): Promise<Response> {

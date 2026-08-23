@@ -102,18 +102,9 @@ export default defineConfig({
           ...(process.env.NANOCODEX_LOCAL_DEPLOYMENT_SHA
             ? { DEPLOYMENT_SHA: process.env.NANOCODEX_LOCAL_DEPLOYMENT_SHA }
             : {}),
-          ...(process.env.NANOCODEX_LOCAL_PUBLIC_ORIGIN
-            ? { NANOCODEX_PUBLIC_ORIGIN: process.env.NANOCODEX_LOCAL_PUBLIC_ORIGIN }
+          ...(localAllocatorToken
+            ? { MULTIPLAYER_ALLOCATOR_TOKEN: localAllocatorToken }
             : {}),
-          ...(process.env.NANOCODEX_LOCAL_MODEL_ACCESS === "managed"
-            && process.env.NANOCODEX_LOCAL_MODEL_AUTH_MODE
-            && localAllocatorToken
-            ? {
-                MULTIPLAYER_ALLOCATOR_TOKEN: localAllocatorToken,
-                NANOCODEX_AUTH_MODE: process.env.NANOCODEX_LOCAL_MODEL_AUTH_MODE,
-                NANOCODEX_MODEL_ACCESS: "managed",
-              }
-            : { NANOCODEX_MODEL_ACCESS: "per_user" }),
         },
         dev: {
           ...config.dev,

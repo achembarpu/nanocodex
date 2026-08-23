@@ -105,5 +105,5 @@ function ReservedTerminal({
 function isAuthenticatedCredential(
   source: CredentialSource | undefined,
 ): source is Exclude<CredentialSource, null> {
-  return source === "managed" || source === "subscription" || source === "user";
+  return source === "brokered" || source === "subscription" || source === "user";
 }

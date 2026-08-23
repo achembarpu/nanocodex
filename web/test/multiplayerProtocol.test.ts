@@ -168,7 +168,6 @@ test("the room decoder and reducer require a contiguous durable event stream", (
     members: [{ id: memberId, name: "Ada" }],
     online_member_ids: [memberId],
     latest_cursor: "2",
-    auth_mode: "api_key",
     can_target_agent: true,
     can_end_room: true,
   }));
@@ -225,7 +224,6 @@ test("the public protocol rejects private managed-agent fields", () => {
     members: [],
     online_member_ids: [],
     latest_cursor: "0",
-    auth_mode: "chatgpt",
     can_target_agent: false,
     can_end_room: false,
     agent_id: "private",

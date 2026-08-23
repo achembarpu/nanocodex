@@ -1,6 +1,5 @@
 export const MULTIPLAYER_MAX_MESSAGE_BYTES = 16 * 1024;
 
-export type MultiplayerAuthMode = "api_key" | "chatgpt";
 export type MultiplayerTarget = "room" | "agent";
 
 export type MultiplayerMember = Readonly<{
@@ -33,7 +32,6 @@ export type MultiplayerServerMessage =
       members: MultiplayerMember[];
       online_member_ids: string[];
       latest_cursor: string;
-      auth_mode: MultiplayerAuthMode;
       can_target_agent: boolean;
       can_end_room: boolean;
     }
@@ -62,7 +60,6 @@ export type MultiplayerRoomState = Readonly<{
   onlineMemberIds: string[];
   cursor: string;
   latestCursor: string;
-  authMode: MultiplayerAuthMode;
   canTargetAgent: boolean;
   canEndRoom: boolean;
   timeline: MultiplayerTimelineItem[];
@@ -414,7 +411,6 @@ export function decodeMultiplayerMessage(encoded: string): MultiplayerServerMess
       "members",
       "online_member_ids",
       "latest_cursor",
-      "auth_mode",
       "can_target_agent",
       "can_end_room",
     ]);
@@ -423,9 +419,6 @@ export function decodeMultiplayerMessage(encoded: string): MultiplayerServerMess
     const members = memberArray(value.members);
     const onlineMemberIds = memberIdArray(value.online_member_ids);
     assertCursor(value.latest_cursor);
-    if (value.auth_mode !== "api_key" && value.auth_mode !== "chatgpt") {
-      throw new MultiplayerProtocolError("room sent an invalid authentication mode");
-    }
     if (typeof value.can_target_agent !== "boolean") {
       throw new MultiplayerProtocolError("room sent invalid agent authority");
     }
@@ -439,7 +432,6 @@ export function decodeMultiplayerMessage(encoded: string): MultiplayerServerMess
       members,
       online_member_ids: onlineMemberIds,
       latest_cursor: value.latest_cursor,
-      auth_mode: value.auth_mode,
       can_target_agent: value.can_target_agent,
       can_end_room: value.can_end_room,
     };
@@ -519,7 +511,6 @@ export function reduceMultiplayerMessage(
       members: message.members,
       onlineMemberIds: message.online_member_ids,
       latestCursor: message.latest_cursor,
-      authMode: message.auth_mode,
       canTargetAgent: message.can_target_agent,
       canEndRoom: message.can_end_room,
     };
@@ -573,7 +564,6 @@ export function createMultiplayerRoomState(
     onlineMemberIds: ready.online_member_ids,
     cursor,
     latestCursor: ready.latest_cursor,
-    authMode: ready.auth_mode,
     canTargetAgent: ready.can_target_agent,
     canEndRoom: ready.can_end_room,
     timeline: options.timeline ?? [],

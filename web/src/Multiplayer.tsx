@@ -30,7 +30,6 @@ import {
   writeMultiplayerCreateAttempt,
   writeMultiplayerJoinAttempt,
   writeMultiplayerPendingSend,
-  type MultiplayerAuthMode,
   type MultiplayerCreateAttempt,
   type MultiplayerJoinAttempt,
   type MultiplayerPendingSend,
@@ -48,7 +47,6 @@ type LobbyState =
 type RoomReceipt = {
   roomId: string;
   memberId: string;
-  authMode: MultiplayerAuthMode;
   invite?: string;
 };
 
@@ -280,10 +278,9 @@ export function Multiplayer() {
     }).then(async (response) => {
       if (!response.ok) throw new Error("membership_missing");
       const state = await response.json<unknown>();
-      const decoded = decodeRoomState(state, lobby.roomId);
+      decodeRoomState(state, lobby.roomId);
       const receipt: PendingRoom = {
         roomId: lobby.roomId,
-        authMode: decoded.authMode,
       };
       connect(receipt);
     }).catch((error) => {
@@ -802,7 +799,7 @@ export function Multiplayer() {
           <section className="multiplayer-credential-boundary" aria-labelledby="credential-boundary-title">
             <header>
               <p>credential boundary</p>
-              <strong>{room.authMode === "chatgpt" ? "OAuth" : "API key"}</strong>
+              <strong>Brokered</strong>
             </header>
             <h2 id="credential-boundary-title">Secretless agent</h2>
             <p>
@@ -813,7 +810,7 @@ export function Multiplayer() {
             <dl>
               <div><dt>Browser</dt><dd>room cookie</dd></div>
               <div><dt>Agent</dt><dd>placeholder</dd></div>
-              <div><dt>Broker</dt><dd>{room.authMode === "chatgpt" ? "OAuth owner" : "API key"}</dd></div>
+              <div><dt>Broker</dt><dd>credential owner</dd></div>
             </dl>
           </section>
         </aside>
@@ -868,10 +865,8 @@ function decodeRoomReceipt(value: unknown, creator: boolean): RoomReceipt {
   const receipt = asRecord(value);
   const roomId = receipt?.room_id;
   const memberId = receipt?.member_id;
-  const authMode = receipt?.auth_mode;
   const invite = receipt?.invite;
   if (typeof roomId !== "string" || typeof memberId !== "string"
-    || (authMode !== "api_key" && authMode !== "chatgpt")
     || (creator && typeof invite !== "string")) {
     throw new Error("The room returned an invalid creation receipt.");
   }
@@ -879,19 +874,17 @@ function decodeRoomReceipt(value: unknown, creator: boolean): RoomReceipt {
   return {
     roomId,
     memberId,
-    authMode,
     ...(typeof invite === "string" ? { invite } : {}),
   };
 }
 
-function decodeRoomState(value: unknown, roomId: string): { authMode: MultiplayerAuthMode } {
+function decodeRoomState(value: unknown, roomId: string): void {
   const state = asRecord(value);
-  if (state?.room_id !== roomId || (state.auth_mode !== "api_key" && state.auth_mode !== "chatgpt")) {
+  if (state?.room_id !== roomId) {
     throw new Error("invalid_room_state");
   }
   // The authenticated state route deliberately omits member identity. The
   // hibernatable socket returns it after validating the HttpOnly room cookie.
-  return { authMode: state.auth_mode };
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

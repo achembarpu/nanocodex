@@ -1,57 +1,30 @@
-import { cloudflareEgress } from "nanocodex/cloudflare";
-
-export type ManagedModelAuthMode = "api_key" | "chatgpt";
+import { cloudflareEgress } from "nanocodex/cloudflare/egress";
 
 export type ManagedModelEnv = {
   EGRESS?: Fetcher;
-  NANOCODEX_AUTH_MODE?: string;
-  NANOCODEX_MODEL_ACCESS?: string;
 };
 
 export type ManagedModelAccess = Readonly<{
-  authMode: ManagedModelAuthMode;
   binding: Fetcher;
 }>;
 
 type ManagedHttpOperation = "image_edit" | "image_generation" | "search";
 
-const HTTP_PROFILES = Object.freeze({
-  api_key: Object.freeze({
-    authorization: "Bearer NANOCODEX_OPENAI_API_KEY",
-    urls: Object.freeze({
-      image_edit: "https://api.openai.com/v1/images/edits",
-      image_generation: "https://api.openai.com/v1/images/generations",
-      search: "https://api.openai.com/v1/alpha/search",
-    }),
-  }),
-  chatgpt: Object.freeze({
-    authorization: "Bearer NANOCODEX_CODEX_OAUTH",
-    account: "NANOCODEX_CODEX_ACCOUNT",
-    urls: Object.freeze({
-      image_edit: "https://chatgpt.com/backend-api/codex/images/edits",
-      image_generation: "https://chatgpt.com/backend-api/codex/images/generations",
-      search: "https://chatgpt.com/backend-api/codex/alpha/search",
-    }),
-  }),
+const HTTP_OPERATIONS = Object.freeze({
+  image_edit: "https://nanocodex.internal/v1/images/edits",
+  image_generation: "https://nanocodex.internal/v1/images/generations",
+  search: "https://nanocodex.internal/v1/search",
 });
 
 const MODEL_STATUS_URL = "https://broker.internal/.well-known/nanocodex/model-status";
 
 /** Resolves the deployment-owned model boundary without reading a provider credential. */
 export function managedModelAccess(env: ManagedModelEnv): ManagedModelAccess | undefined {
-  const access = env.NANOCODEX_MODEL_ACCESS?.trim() || "per_user";
-  if (access === "per_user") return undefined;
-  if (access !== "managed") {
-    throw new Error("NANOCODEX_MODEL_ACCESS must be managed or per_user");
+  if (env.EGRESS === undefined) return undefined;
+  if (typeof env.EGRESS.fetch !== "function") {
+    throw new Error("model access requires the private EGRESS Service Binding");
   }
-  const mode = env.NANOCODEX_AUTH_MODE?.trim();
-  if (mode !== "api_key" && mode !== "chatgpt") {
-    throw new Error("managed model access requires NANOCODEX_AUTH_MODE=api_key or chatgpt");
-  }
-  if (!env.EGRESS || typeof env.EGRESS.fetch !== "function") {
-    throw new Error("managed model access requires the private EGRESS Service Binding");
-  }
-  return Object.freeze({ authMode: mode, binding: env.EGRESS });
+  return Object.freeze({ binding: env.EGRESS });
 }
 
 /** Checks broker policy/credential availability without opening a provider connection. */
@@ -69,9 +42,8 @@ export async function managedModelReady(access: ManagedModelAccess): Promise<boo
     const value = JSON.parse(encoded) as Record<string, unknown>;
     return value !== null
       && !Array.isArray(value)
-      && Object.keys(value).length === 2
-      && value.ready === true
-      && value.auth_mode === access.authMode;
+      && Object.keys(value).length === 1
+      && value.ready === true;
   } catch {
     return false;
   }
@@ -83,7 +55,6 @@ export function openManagedResponsesWebSocket(
   sessionId: string,
 ) {
   const endpoint = cloudflareEgress({
-    authMode: access.authMode,
     binding: access.binding,
   });
   return endpoint.createWebSocket(endpoint.websocketUrl, sessionId, {
@@ -97,19 +68,12 @@ export function fetchManagedModel(
   operation: ManagedHttpOperation,
   body: string,
 ): Promise<Response> {
-  const profile = HTTP_PROFILES[access.authMode];
   const headers = new Headers({
-    authorization: profile.authorization,
+    authorization: "Bearer NANOCODEX_PROVIDER_CREDENTIAL",
     "content-type": "application/json",
-    "user-agent": access.authMode === "chatgpt"
-      ? "codex_cli_rs/0.0.0"
-      : "nanocodex-web/0.1.0",
+    "user-agent": "nanocodex-web/0.1.0",
   });
-  if (access.authMode === "chatgpt") {
-    headers.set("chatgpt-account-id", HTTP_PROFILES.chatgpt.account);
-    headers.set("originator", "codex_cli_rs");
-  }
-  return access.binding.fetch(new Request(profile.urls[operation], {
+  return access.binding.fetch(new Request(HTTP_OPERATIONS[operation], {
     method: "POST",
     headers,
     body,
@@ -119,8 +83,7 @@ export function fetchManagedModel(
 /** Stable, non-secret quota identity for one browser using a shared deployment credential. */
 export function managedModelActorId(request: Request, access: ManagedModelAccess): string {
   return [
-    "managed",
-    access.authMode,
+    "brokered",
     request.headers.get("cf-connecting-ip") ?? "unknown-ip",
     request.headers.get("user-agent") ?? "unknown-agent",
   ].join(":");

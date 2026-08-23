@@ -419,7 +419,7 @@ export function MonsterWorld() {
   const startAgents = useCallback(() => {
     if (
       capabilityError
-      || (credentialSource !== "managed"
+      || (credentialSource !== "brokered"
         && credentialSource !== "subscription"
         && credentialSource !== "user")
       || runtimeStatusRef.current === "starting"
@@ -715,7 +715,7 @@ export function MonsterWorld() {
     invalidateWorld();
   };
 
-  const hasCredential = credentialSource === "managed"
+  const hasCredential = credentialSource === "brokered"
     || credentialSource === "subscription"
     || credentialSource === "user";
   const agentStatus: AgentStatus = capabilityError || !hasCredential

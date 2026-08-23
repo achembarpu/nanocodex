@@ -42,10 +42,6 @@
   },
   "services": [
     {
-      "binding": "EGRESS",
-      "service": "nanocodex-egress-broker-example"
-    },
-    {
       "binding": "MULTIPLAYER_BACKEND",
       "service": "nanocodex-durable-agent"
     }
@@ -181,14 +177,12 @@
     {
       "binding": "EVALS_DB",
       "database_name": "nanocodex-evals",
-      "database_id": "b5a4b6e9-8e9f-489a-b0af-b1813d97dcd5",
+      "database_id": "0e02b65e-9d95-447f-bbf3-e0ae39b54e44",
       "migrations_dir": "migrations"
     }
   ],
   "vars": {
-    "ENVIRONMENT": "production",
-    "NANOCODEX_AUTH_MODE": "chatgpt",
-    "NANOCODEX_MODEL_ACCESS": "managed"
+    "ENVIRONMENT": "production"
   },
   "env": {
     "development": {
@@ -245,15 +239,13 @@
         {
           "binding": "EVALS_DB",
           "database_name": "nanocodex-evals",
-          "database_id": "b5a4b6e9-8e9f-489a-b0af-b1813d97dcd5",
+          "database_id": "0e02b65e-9d95-447f-bbf3-e0ae39b54e44",
           "migrations_dir": "migrations"
         }
       ],
       "vars": {
         "ENVIRONMENT": "development",
-        "MULTIPLAYER_ALLOCATOR_TOKEN": "local-room-allocator-token",
-        "NANOCODEX_AUTH_MODE": "chatgpt",
-        "NANOCODEX_MODEL_ACCESS": "per_user"
+        "MULTIPLAYER_ALLOCATOR_TOKEN": "local-room-allocator-token"
       }
     }
   }

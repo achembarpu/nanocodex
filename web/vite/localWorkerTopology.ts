@@ -23,10 +23,6 @@ export function localManagedAuxiliaryWorkers(
 ): AuxiliaryWorker[] {
   if (environment.NANOCODEX_LOCAL_MODEL_ACCESS !== "managed") return [];
 
-  const authMode = exact(environment, "NANOCODEX_LOCAL_MODEL_AUTH_MODE");
-  if (authMode !== "api_key" && authMode !== "chatgpt") {
-    throw new Error("local managed Worker auth mode must be api_key or chatgpt");
-  }
   const adminToken = exact(environment, "NANOCODEX_LOCAL_ADMIN_TOKEN");
   const roomAllocatorToken = exact(environment, "NANOCODEX_LOCAL_ROOM_ALLOCATOR_TOKEN");
   if (adminToken === roomAllocatorToken) {
@@ -49,7 +45,6 @@ export function localManagedAuxiliaryWorkers(
         ...configuration.vars,
         AGENT_IDLE_TIMEOUT_MS: idleTimeout,
         NANOCODEX_ADMIN_TOKEN: adminToken,
-        NANOCODEX_AUTH_MODE: authMode,
         NANOCODEX_ROOM_ALLOCATOR_TOKEN: roomAllocatorToken,
       },
     }),

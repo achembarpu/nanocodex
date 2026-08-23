@@ -3,9 +3,8 @@ import { GenerationRequestOwner } from "./agentTerminalLifecycle";
 import type { AgentStatus } from "./agentTerminalTypes";
 import { deploymentHealth } from "./deploymentHealth";
 
-export type CredentialSource = "managed" | "subscription" | "user" | null;
+export type CredentialSource = "brokered" | "subscription" | "user" | null;
 export type ChatGptStatus =
-  | { state: "managed"; ready: boolean; authMode: "api_key" | "chatgpt" }
   | { state: "signed_out" }
   | {
       state: "pending";
@@ -37,9 +36,6 @@ export function inactiveTerminalMessage({
   if (agentStatus === "starting") return "";
   if (agentStatus === "error" && source) return agentStartFailure(agentError, source);
   if (source === undefined || authStatus === undefined) return "";
-  if (authStatus.state === "managed" && !authStatus.ready) {
-    return "The private model broker is unavailable. Use Retry above after fixing the managed stack.";
-  }
   if (authStatus.state === "pending") {
     return "Finish ChatGPT sign-in in the opened tab. This terminal will start automatically.";
   }
@@ -111,14 +107,13 @@ export function AgentSessionBar({
               disabled={busy}
             >sign in</button>
           ) : null}
-          {!hasCredential && (status?.state === "error"
-            || (status?.state === "managed" && !status.ready)) ? (
+          {!hasCredential && status?.state === "error" ? (
             <button type="button" onClick={retrySession} disabled={busy}>retry session</button>
           ) : null}
           {agentStatus === "error" && hasCredential ? (
             <button type="button" onClick={onRetryAgent}>retry agent</button>
           ) : null}
-          {status?.state === "authenticated" ? (
+          {status?.state === "authenticated" && source === "subscription" ? (
             <details className="agent-session-menu">
               <summary aria-label="Connection options">session</summary>
               <div role="group" aria-label="Agent connection">
@@ -142,11 +137,6 @@ export function AgentSessionBar({
       ) : null}
       {status?.state === "error" && !hasCredential ? (
         <p className="agent-byok-error" role="alert">{status.error}</p>
-      ) : null}
-      {status?.state === "managed" && !status.ready ? (
-        <p className="agent-byok-error" role="alert">
-          The private model broker is unavailable. Fix the local managed stack and retry.
-        </p>
       ) : null}
       {agentStatus === "error" && agentError ? (
         <p className="agent-byok-error" role="alert">
@@ -176,7 +166,6 @@ function useChatGptSession({
   const [busy, setBusy] = useState(false);
   const authGeneration = useRef(0);
   const bootstrapComplete = useRef(false);
-  const managedAccess = useRef(false);
   const statusRef = useRef<ChatGptStatus | undefined>(undefined);
   const refreshRequests = useRef(new GenerationRequestOwner<void>());
   const publishStatus = useCallback((next: ChatGptStatus) => {
@@ -188,38 +177,15 @@ function useChatGptSession({
     const generation = authGeneration.current;
     return refreshRequests.current.run(generation, async () => {
       let bootstrapSource: CredentialSource | undefined;
-      if (managedAccess.current) {
-        try {
-          const health = await deploymentHealth.refresh();
-          if (generation !== authGeneration.current) return;
-          const source = health.agentConfigured ? "managed" : null;
-          onSourceChange(source);
-          publishStatus({
-            state: "managed",
-            ready: health.agentConfigured,
-            authMode: health.authMode ?? "chatgpt",
-          });
-        } catch {
-          if (generation !== authGeneration.current) return;
-          onSourceChange(null);
-          publishStatus({ state: "managed", ready: false, authMode: "chatgpt" });
-        }
-        return;
-      }
       if (!bootstrapComplete.current) {
         try {
           const health = await deploymentHealth.read();
           bootstrapSource = health.credentialSource;
           if (generation !== authGeneration.current) return;
           bootstrapComplete.current = true;
-          if (health.modelAccessMode === "managed") {
-            managedAccess.current = true;
+          if (bootstrapSource === "brokered") {
             onSourceChange(bootstrapSource);
-            publishStatus({
-              state: "managed",
-              ready: health.agentConfigured,
-              authMode: health.authMode ?? "chatgpt",
-            });
+            publishStatus({ state: "authenticated" });
             return;
           }
           onSourceChange(bootstrapSource);
@@ -315,7 +281,6 @@ function useChatGptSession({
   }, [refreshStatus, status]);
 
   const startLogin = async () => {
-    if (managedAccess.current) return;
     const generation = ++authGeneration.current;
     const authWindow = window.open("about:blank", "nanocodex-chatgpt-login");
     setBusy(true);
@@ -357,7 +322,6 @@ function useChatGptSession({
   };
 
   const signOut = async () => {
-    if (managedAccess.current) return;
     const generation = ++authGeneration.current;
     setBusy(true);
     try {
@@ -395,22 +359,19 @@ function sessionLabel({
 }: SessionPresentation): string {
   if (capabilityError) return "browser unsupported";
   if (agentStatus === "starting") {
-    if (source === "managed") return "Managed agent";
+    if (source === "brokered") return "Brokered session";
     if (source === "subscription") return "ChatGPT";
     if (source === "user") return "API key";
     return "";
   }
   if (agentStatus === "ready") {
-    if (source === "managed") return "Managed agent ready";
+    if (source === "brokered") return "Brokered session ready";
     if (source === "subscription") return "ChatGPT ready";
     if (source === "user") return "API key ready";
     return "ready";
   }
   if (agentStatus === "error" && source) return "agent unavailable";
   if (source === undefined || authStatus === undefined) return "";
-  if (authStatus.state === "managed") {
-    return authStatus.ready ? "Managed agent" : "Managed agent unavailable";
-  }
   if (authStatus.state === "pending") return "finish ChatGPT sign-in";
   if (authStatus.state === "error") return "session check failed";
   if (authStatus.state === "expired") return "sign-in expired";

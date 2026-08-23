@@ -7,7 +7,6 @@ import {
 type MultiplayerProxyEnv = {
   MULTIPLAYER_BACKEND?: Fetcher;
   MULTIPLAYER_ALLOCATOR_TOKEN?: string;
-  NANOCODEX_PUBLIC_ORIGIN?: string;
 } & PublicSecurityEnv;
 
 const ROOM_ROUTE = /^\/v1\/rooms(?:\/([0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}~[A-Za-z0-9_-]{43})(?:\/(join|ws))?)?$/;
@@ -44,14 +43,13 @@ export async function routeMultiplayer(
   if (routeLimited) return routeLimited;
   const createRoom = route.kind === "create";
   const publicOrigin = createRoom
-    ? roomPublicOrigin(env, url)
+    ? roomPublicOrigin(env, url, request)
     : undefined;
   if (createRoom && (!env.MULTIPLAYER_ALLOCATOR_TOKEN || !publicOrigin)) {
     console.error(JSON.stringify({
       type: "multiplayer.create_configuration_missing",
       allocator: Boolean(env.MULTIPLAYER_ALLOCATOR_TOKEN),
       public_origin: Boolean(publicOrigin),
-      configured_public_origin: env.NANOCODEX_PUBLIC_ORIGIN ?? null,
     }));
     return Response.json({ error: "multiplayer_unavailable" }, {
       status: 503,
@@ -119,12 +117,13 @@ function validateRoomCreationOrigin(
 ): Response | undefined {
   if (route.kind !== "create") return undefined;
   const origin = request.headers.get("origin");
-  if (origin === url.origin) return undefined;
+  const expected = roomPublicOrigin(env, url, request);
+  if (expected !== undefined && origin === expected) return undefined;
   if (
     origin === null
     && env.ENVIRONMENT === "development"
     && url.protocol === "http:"
-    && (url.hostname === "127.0.0.1" || url.hostname === "localhost")
+    && isLoopbackHostname(url.hostname)
   ) return undefined;
   return roomError("forbidden", 403);
 }
@@ -319,25 +318,35 @@ function roomError(error: string, status: number, headers: HeadersInit = {}): Re
   });
 }
 
-function roomPublicOrigin(env: MultiplayerProxyEnv, url: URL): string | undefined {
+function roomPublicOrigin(env: MultiplayerProxyEnv, url: URL, request: Request): string | undefined {
   if (env.ENVIRONMENT !== "development") return url.origin;
-  const configured = env.NANOCODEX_PUBLIC_ORIGIN;
-  if (!configured) return undefined;
+  const browserOrigin = request.headers.get("origin");
+  if (browserOrigin === null) {
+    return url.protocol === "http:"
+      && Boolean(url.port)
+      && isLoopbackHostname(url.hostname)
+      ? url.origin
+      : undefined;
+  }
   try {
-    const publicUrl = new URL(configured);
+    const publicUrl = new URL(browserOrigin);
     if (
-      publicUrl.protocol !== "http:"
+      (publicUrl.protocol !== "http:" && publicUrl.protocol !== "https:")
       || !publicUrl.port
-      || (publicUrl.hostname !== "127.0.0.1" && publicUrl.hostname !== "localhost")
+      || !isLoopbackHostname(publicUrl.hostname)
       || publicUrl.username
       || publicUrl.password
       || publicUrl.pathname !== "/"
       || publicUrl.search
       || publicUrl.hash
-      || publicUrl.origin !== configured
+      || publicUrl.origin !== browserOrigin
     ) return undefined;
     return publicUrl.origin;
   } catch {
     return undefined;
   }
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "[::1]";
 }

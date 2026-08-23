@@ -1,22 +1,15 @@
-export type DeploymentCredentialSource = "managed" | "subscription" | "user" | null;
-export type DeploymentModelAccessMode = "managed" | "per_user";
+export type DeploymentCredentialSource = "brokered" | "subscription" | "user" | null;
 
 export type DeploymentHealth = Readonly<{
   agentConfigured: boolean;
-  authMode: "api_key" | "chatgpt" | undefined;
   credentialSource: DeploymentCredentialSource;
   deploymentSha: string | undefined;
-  interactiveAuth: boolean;
-  modelAccessMode: DeploymentModelAccessMode;
 }>;
 
 type HealthPayload = {
   agent_configured?: unknown;
-  auth_mode?: unknown;
   credential_source?: unknown;
   deployment_sha?: unknown;
-  interactive_auth?: unknown;
-  model_access_mode?: unknown;
 };
 
 /** One app-owned, single-flight view of the Worker health boundary. */
@@ -41,24 +34,14 @@ export function createDeploymentHealthResource(
       const credentialSource = payload.agent_configured === true && (
         payload.credential_source === "subscription"
         || payload.credential_source === "user"
-        || payload.credential_source === "managed"
+        || payload.credential_source === "brokered"
       ) ? payload.credential_source : null;
-      const modelAccessMode = payload.model_access_mode === "managed"
-        ? "managed"
-        : "per_user";
       return Object.freeze({
         agentConfigured: credentialSource !== null,
-        authMode: payload.auth_mode === "api_key" || payload.auth_mode === "chatgpt"
-          ? payload.auth_mode
-          : undefined,
         credentialSource,
         deploymentSha: typeof payload.deployment_sha === "string"
           ? payload.deployment_sha
           : undefined,
-        interactiveAuth: modelAccessMode === "managed"
-          ? false
-          : payload.interactive_auth !== false,
-        modelAccessMode,
       });
     });
     inFlight = current;

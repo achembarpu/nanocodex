@@ -161,15 +161,14 @@ test("room allocation authority is injected by the website Worker only", async (
     headers: {
       authorization: "Bearer browser-supplied-token",
       "content-type": "application/json",
-      origin: "https://nanocodex.test",
-      referer: "https://nanocodex.test/multiplayer",
+      origin: "http://localhost:55173",
+      referer: "http://localhost:55173/multiplayer",
     },
     body: JSON.stringify({ create_id: createId, display_name: "Ada" }),
   });
   const response = await routeMultiplayer(request, {
     ENVIRONMENT: "development",
     MULTIPLAYER_ALLOCATOR_TOKEN: "server-only-router-token",
-    NANOCODEX_PUBLIC_ORIGIN: "http://localhost:55173",
     MULTIPLAYER_BACKEND: {
       async fetch(forwardedRequest: Request) {
         forwarded.push(forwardedRequest);
@@ -193,7 +192,6 @@ test("room allocation requires and verbatim forwards one 43-character create id"
   const env = {
     ENVIRONMENT: "development",
     MULTIPLAYER_ALLOCATOR_TOKEN: "server-only-router-token",
-    NANOCODEX_PUBLIC_ORIGIN: "http://localhost:55173",
     MULTIPLAYER_BACKEND: {
       async fetch(request: Request) {
         forwardedBodies.push(await request.json());
@@ -204,7 +202,7 @@ test("room allocation requires and verbatim forwards one 43-character create id"
   for (let attempt = 0; attempt < 2; attempt += 1) {
     const request = new Request("https://nanocodex.test/v1/rooms", {
       method: "POST",
-      headers: { origin: "https://nanocodex.test" },
+      headers: { origin: "http://localhost:55173" },
       body: JSON.stringify({ create_id: createId, display_name: "Ada" }),
     });
     assert.equal(
@@ -227,7 +225,7 @@ test("room allocation requires and verbatim forwards one 43-character create id"
   ]) {
     const request = new Request("https://nanocodex.test/v1/rooms", {
       method: "POST",
-      headers: { origin: "https://nanocodex.test" },
+      headers: { origin: "http://localhost:55173" },
       body: JSON.stringify(body),
     });
     assert.equal(
@@ -248,7 +246,6 @@ test("local room allocation retains an exact browser-visible origin and port", a
   const response = await routeMultiplayer(request, {
     ENVIRONMENT: "development",
     MULTIPLAYER_ALLOCATOR_TOKEN: "server-only-router-token",
-    NANOCODEX_PUBLIC_ORIGIN: "http://127.0.0.1:55173",
     MULTIPLAYER_BACKEND: {
       async fetch(serviceRequest: Request) {
         forwarded = serviceRequest;
@@ -278,7 +275,6 @@ test("browser metadata cannot choose or cross the server-owned room origin", asy
   const response = await routeMultiplayer(request, {
     ENVIRONMENT: "development",
     MULTIPLAYER_ALLOCATOR_TOKEN: "server-only-router-token",
-    NANOCODEX_PUBLIC_ORIGIN: "http://127.0.0.1:55173",
     MULTIPLAYER_BACKEND: {
       async fetch(serviceRequest: Request) {
         forwarded = serviceRequest;
@@ -323,7 +319,6 @@ test("loopback room allocation needs no browser-synthesized security headers", a
   const response = await routeMultiplayer(request, {
     ENVIRONMENT: "development",
     MULTIPLAYER_ALLOCATOR_TOKEN: "server-only-router-token",
-    NANOCODEX_PUBLIC_ORIGIN: "http://localhost:55173",
     MULTIPLAYER_BACKEND: {
       async fetch(serviceRequest: Request) {
         forwarded = serviceRequest;

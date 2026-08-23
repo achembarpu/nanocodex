@@ -108,19 +108,17 @@ function createChatGptEgress(response: () => Response) {
   return { requests, namespace: namespace as unknown as DurableObjectNamespace };
 }
 
-test("managed website access never falls back to browser credentials", async () => {
+test("brokered website access stays credentialless without disabling user sessions", async () => {
   const egressRequests: Request[] = [];
   let credentialSessionCalls = 0;
   const env = {
     ENVIRONMENT: "development",
-    NANOCODEX_AUTH_MODE: "chatgpt",
-    NANOCODEX_MODEL_ACCESS: "managed",
     EGRESS: {
       async fetch(input: RequestInfo | URL, init?: RequestInit) {
         const request = new Request(input, init);
         egressRequests.push(request);
         if (new URL(request.url).pathname === "/.well-known/nanocodex/model-status") {
-          return Response.json({ ready: true, auth_mode: "chatgpt" }, {
+          return Response.json({ ready: true }, {
             headers: { "cache-control": "no-store" },
           });
         }
@@ -138,22 +136,19 @@ test("managed website access never falls back to browser credentials", async () 
   const health = await worker.fetch(new Request("https://demo.test/api/health"), env);
   assert.deepEqual(await health.json(), {
     agent_configured: true,
-    auth_mode: "chatgpt",
-    credential_source: "managed",
+    credential_source: "brokered",
     deployment_sha: null,
-    interactive_auth: false,
-    model_access_mode: "managed",
     service: "nanocodex",
     runtime: "cloudflare-workers",
     status: "ok",
   });
 
-  for (const method of ["GET", "POST", "DELETE"]) {
+  for (const method of ["GET", "DELETE"]) {
     const response = await worker.fetch(new Request("https://demo.test/api/auth/chatgpt", {
       method,
       headers: { origin: "https://demo.test" },
     }), env);
-    assert.equal(response.status, 409);
+    assert.equal(response.status, 200);
   }
 
   const search = await worker.fetch(new Request("https://demo.test/api/tools/web-search", {
@@ -165,10 +160,10 @@ test("managed website access never falls back to browser credentials", async () 
     }),
   }), env);
   assert.deepEqual(await search.json(), { output: "brokered search" });
-  const upstream = egressRequests.find((request) => request.url.endsWith("/alpha/search"));
-  assert.equal(upstream?.url, "https://chatgpt.com/backend-api/codex/alpha/search");
-  assert.equal(upstream?.headers.get("authorization"), "Bearer NANOCODEX_CODEX_OAUTH");
-  assert.equal(upstream?.headers.get("chatgpt-account-id"), "NANOCODEX_CODEX_ACCOUNT");
+  const upstream = egressRequests.find((request) => request.url.endsWith("/v1/search"));
+  assert.equal(upstream?.url, "https://nanocodex.internal/v1/search");
+  assert.equal(upstream?.headers.get("authorization"), "Bearer NANOCODEX_PROVIDER_CREDENTIAL");
+  assert.equal(upstream?.headers.get("chatgpt-account-id"), null);
   assert.equal(credentialSessionCalls, 0);
 });
 
