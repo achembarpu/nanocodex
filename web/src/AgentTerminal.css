@@ -249,6 +249,12 @@
 }
 
 @media (pointer: coarse), (any-pointer: coarse) {
+  .agent-runtime-switch button {
+    min-width: 44px;
+    min-height: 44px;
+    flex: 1 1 0;
+  }
+
   .agent-terminal-shell {
     display: grid;
     grid-template-rows: minmax(0, 1fr) auto;
@@ -256,6 +262,10 @@
 
   .agent-xterm {
     min-height: 0;
+  }
+
+  .agent-xterm .xterm-helper-textarea {
+    display: none;
   }
 
   .agent-session-bar,
@@ -297,6 +307,10 @@
     background: var(--terminal-background);
     border-top: 1px solid var(--terminal-border);
     font-family: var(--font-mono);
+  }
+
+  .nanocodex-demo.is-full .agent-touch-composer {
+    padding-right: max(60px, env(safe-area-inset-right));
   }
 
   .agent-touch-rail {
