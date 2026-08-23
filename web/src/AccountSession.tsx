@@ -1,4 +1,3 @@
-import { Provider, Storage, webAuthn } from "accounts";
 import {
   createContext,
   useCallback,
@@ -12,8 +11,7 @@ import {
 
 export type AuthenticatedAccount = Readonly<{
   id: string;
-  address: `0x${string}`;
-  chainId: number;
+  persistent: boolean;
 }>;
 
 type SessionStatus = "checking" | "ready" | "error";
@@ -31,16 +29,16 @@ type AccountSession = Readonly<{
 }>;
 
 const AccountSessionContext = createContext<AccountSession | null>(null);
-const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+const USER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
-function createAccountProvider() {
+async function createAccountProvider() {
+  const { Provider, Storage, webAuthn } = await import("accounts");
   return Provider.create({
     adapter: webAuthn({
       auth: "/webauthn",
       name: "Nanocodex",
       rdns: "xyz.paradigm.nanocodex",
     }),
-    auth: "/auth",
     maxAccounts: 1,
     mpp: false,
     storage: Storage.idb({ key: "nanocodex" }),
@@ -49,7 +47,10 @@ function createAccountProvider() {
 
 export function AccountSessionProvider({ children }: { children: ReactNode }) {
   const providerRef = useRef<ReturnType<typeof createAccountProvider> | null>(null);
-  if (!providerRef.current) providerRef.current = createAccountProvider();
+  const accountProvider = useCallback(() => {
+    providerRef.current ??= createAccountProvider();
+    return providerRef.current;
+  }, []);
 
   const [status, setStatus] = useState<SessionStatus>("checking");
   const [user, setUser] = useState<AuthenticatedAccount | null>(null);
@@ -63,9 +64,9 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
       const nextUser = await getCurrentUser();
       if (requestId.current !== currentRequest) return;
       setUser(nextUser);
-      if (nextUser) await claimLocalCredential();
       setStatus("ready");
       setError(null);
+      if (nextUser) void claimLocalCredential();
     } catch (cause) {
       if (requestId.current !== currentRequest) return;
       setStatus("error");
@@ -82,18 +83,23 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
     setOperation(nextOperation);
     setError(null);
     try {
-      await providerRef.current!.request(method === "register"
+      if (method === "register" && !user) throw new Error("The browser identity is not ready.");
+      await (await accountProvider()).request(method === "register"
         ? {
             method: "wallet_connect",
-            params: [{ capabilities: { method, name: "Nanocodex" } }],
+            params: [{ capabilities: {
+              method,
+              name: `Nanocodex ${user!.id}`,
+              userId: user!.id,
+            } }],
           }
         : { method: "wallet_connect" });
       const nextUser = await getCurrentUser();
       if (!nextUser) throw new Error("The account session was not created.");
       requestId.current++;
       setUser(nextUser);
-      await claimLocalCredential();
       setStatus("ready");
+      void claimLocalCredential();
     } catch (cause) {
       setError(accountFailure(
         cause,
@@ -104,7 +110,7 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
     } finally {
       setOperation(null);
     }
-  }, []);
+  }, [accountProvider, user]);
 
   const register = useCallback(() => connect("register"), [connect]);
   const signIn = useCallback(() => connect("login"), [connect]);
@@ -112,24 +118,17 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
     setOperation("sign-out");
     setError(null);
     try {
-      const response = await fetch("/auth/logout", {
-        method: "POST",
-        credentials: "same-origin",
-      });
-      if (!response.ok) throw await responseFailure(response, "Couldn’t sign out.");
-      await response.body?.cancel();
-      await providerRef.current!.request({ method: "wallet_disconnect" });
+      await (await accountProvider()).request({ method: "wallet_disconnect" });
       const nextUser = await getCurrentUser();
-      if (nextUser) throw new Error("The account session is still active.");
       requestId.current++;
-      setUser(null);
+      setUser(nextUser);
       setStatus("ready");
     } catch (cause) {
       setError(accountFailure(cause, "Couldn’t sign out. Try again."));
     } finally {
       setOperation(null);
     }
-  }, []);
+  }, [accountProvider]);
 
   const value = useMemo<AccountSession>(() => ({
     account: user,
@@ -168,15 +167,13 @@ async function getCurrentUser(): Promise<AuthenticatedAccount | null> {
   if (!response.ok) throw await responseFailure(response, "Account service unavailable.");
   const body: unknown = await response.json();
   if (!isRecord(body) || !isRecord(body.user)) throw new Error("Invalid account response.");
-  const { id, address, chain_id: chainId } = body.user;
+  const { id, persistent } = body.user;
   if (
     typeof id !== "string"
-    || typeof address !== "string"
-    || !ADDRESS.test(address)
-    || typeof chainId !== "number"
-    || !Number.isSafeInteger(chainId)
+    || !USER_ID.test(id)
+    || typeof persistent !== "boolean"
   ) throw new Error("Invalid account response.");
-  return { id, address: address as `0x${string}`, chainId };
+  return { id, persistent };
 }
 
 async function claimLocalCredential(): Promise<void> {

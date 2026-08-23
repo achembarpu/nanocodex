@@ -9,7 +9,7 @@ export default {
     const subjectRoute = url.pathname.match(/^\\/subjects\\/([A-Za-z0-9_-]{43,128})$/);
     if (subjectRoute && request.method === "PUT") {
       const body = await request.json();
-      if (!/^0x[0-9a-f]{40}$/.test(body?.user_id ?? "")) {
+      if (!/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(body?.user_id ?? "")) {
         return Response.json({ error: "invalid_request" }, { status: 400 });
       }
       subjects.add(subjectRoute[1]);

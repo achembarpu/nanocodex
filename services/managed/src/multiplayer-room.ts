@@ -19,6 +19,7 @@ import {
   type RoomTarget,
 } from "./multiplayer-protocol";
 import { bindAgentCredential, unbindAgentCredential } from "./credentials";
+import { isUserId } from "./account-auth";
 
 const ROOM_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}~[A-Za-z0-9_-]{43}$/;
 const AGENT_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
@@ -382,7 +383,7 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
     }
     if (typeof body.room_id !== "string" || !ROOM_ID.test(body.room_id)
       || typeof body.agent_id !== "string" || !AGENT_ID.test(body.agent_id)
-      || typeof body.owner_id !== "string" || !/^0x[0-9a-f]{40}$/.test(body.owner_id)
+      || !isUserId(body.owner_id)
       || body.room_id === body.agent_id
       || typeof body.public_origin !== "string" || !validPublicOrigin(body.public_origin)) {
       return roomJson({ error: "invalid_request" }, { status: 400 });

@@ -246,6 +246,8 @@ export function AccountMenu() {
 
   const startChatGpt = async () => {
     if (providerOperation) return;
+    const popup = window.open("about:blank", "nanocodex-chatgpt-login");
+    if (popup) popup.opener = null;
     setProviderOperation("chatgpt");
     setCredentialError(null);
     try {
@@ -256,8 +258,10 @@ export function AccountMenu() {
         ...current,
         chatgpt: { ...current.chatgpt, login },
       } : null);
-      window.open(login.verificationUrl, "_blank", "noopener,noreferrer");
+      if (popup) popup.location.href = login.verificationUrl;
+      else window.open(login.verificationUrl, "_blank", "noopener,noreferrer");
     } catch (cause) {
+      popup?.close();
       setCredentialError(failureMessage(cause, "Couldn’t start ChatGPT sign-in."));
     } finally {
       setProviderOperation(null);
@@ -281,8 +285,7 @@ export function AccountMenu() {
     }
   };
 
-  if (session.status === "checking") return null;
-  const accountLabel = session.account ? shortAddress(session.account.address) : "account";
+  const accountLabel = session.account?.persistent ? shortIdentity(session.account.id) : "account";
 
   return (
     <div className="account-menu" ref={menuRef}>
@@ -296,12 +299,14 @@ export function AccountMenu() {
         <CircleUserRound aria-hidden="true" />
         <span>{accountLabel}</span>
       </button>
-      {open ? (
+      {open && session.status !== "checking" ? (
         <section className="account-panel" aria-label="Nanocodex account">
           <header className="account-panel-header">
             <div>
               <span>Nanocodex account</span>
-              {session.account ? <strong>{session.account.address}</strong> : null}
+              {session.account ? <strong>{session.account.persistent
+                ? shortIdentity(session.account.id)
+                : "This browser"}</strong> : null}
             </div>
             <button type="button" aria-label="Close account panel" onClick={close}>
               <X aria-hidden="true" />
@@ -318,16 +323,39 @@ export function AccountMenu() {
           {session.account ? (
             <>
               <div className="account-summary">
-                <span>Passkey session</span>
-                <span>Chain {session.account.chainId}</span>
-                <button
-                  type="button"
-                  disabled={session.operation !== null}
-                  onClick={() => void session.signOut()}
-                >
-                  Sign out
-                </button>
+                <span>{session.account.persistent ? "Passkey identity" : "Browser session"}</span>
+                <span>{session.account.persistent ? "Available across devices" : "Add a passkey to keep it"}</span>
+                {session.account.persistent ? (
+                  <button
+                    type="button"
+                    disabled={session.operation !== null}
+                    onClick={() => void session.signOut()}
+                  >
+                    Sign out
+                  </button>
+                ) : null}
               </div>
+
+              {!session.account.persistent ? (
+                <div className="account-auth-actions">
+                  <p>Connect ChatGPT now, or add a passkey to keep this identity across devices.</p>
+                  <button
+                    className="account-primary-action"
+                    type="button"
+                    disabled={session.operation !== null}
+                    onClick={() => void session.register()}
+                  >
+                    Add passkey
+                  </button>
+                  <button
+                    type="button"
+                    disabled={session.operation !== null}
+                    onClick={() => void session.signIn()}
+                  >
+                    Use existing passkey
+                  </button>
+                </div>
+              ) : null}
 
               {credentials ? (
                 <section className="api-key-panel account-connections" aria-labelledby="connections-heading">
@@ -567,8 +595,8 @@ function decodeChatGptLogin(value: unknown): NonNullable<CredentialStatus["chatg
   };
 }
 
-function shortAddress(address: string): string {
-  return `${address.slice(0, 6)}…${address.slice(-4)}`;
+function shortIdentity(id: string): string {
+  return `${id.slice(0, 8)}…${id.slice(-4)}`;
 }
 
 function failureMessage(cause: unknown, fallback: string): string {

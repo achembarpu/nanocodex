@@ -13,7 +13,7 @@ import { MultiplayerRoom } from "../src/multiplayer-room";
 const ORIGIN = "https://example.test";
 const admin = { authorization: "Bearer test-admin-token" };
 const testEnv = env as unknown as Env;
-const USER_ID = `0x${"2".repeat(40)}`;
+const USER_ID = "22222222-2222-4222-8222-222222222222";
 const API_KEY = `ncx_live_${"r".repeat(12)}_${"m".repeat(43)}`;
 const allocator = {
   authorization: `Bearer ${API_KEY}`,
@@ -1656,11 +1656,13 @@ async function seedApiKey(userId: string, token: string): Promise<void> {
     {
       method: "PUT",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ address: userId, chainId: 42431 }),
+      body: JSON.stringify({ id: userId, persistent: true }),
     },
   );
   expect(account.ok).toBe(true);
-  const record = await testEnv.NANOCODEX_API_KEYS.getByName(digest).fetch(
+  const key = testEnv.NANOCODEX_API_KEYS.getByName(digest);
+  await key.fetch("https://api-key.internal/record", { method: "DELETE" });
+  const record = await key.fetch(
     "https://api-key.internal/record",
     {
       method: "PUT",
@@ -1675,7 +1677,7 @@ async function seedApiKey(userId: string, token: string): Promise<void> {
       }),
     },
   );
-  expect([201, 409]).toContain(record.status);
+  expect(record.status).toBe(201);
 }
 
 async function joinRoom(room: RoomReceipt, displayName: string): Promise<MemberReceipt> {

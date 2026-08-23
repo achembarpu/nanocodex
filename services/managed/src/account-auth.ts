@@ -3,8 +3,13 @@ import { Handler, Kv } from "accounts/server";
 
 const ACCOUNT_COOKIE = "nanocodex_account";
 const SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
-const ADDRESS = /^0x[0-9a-f]{40}$/;
+const USER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const API_KEY = /^ncx_live_([A-Za-z0-9_-]{12})_([A-Za-z0-9_-]{43})$/;
+const accountSessionKey = (token: string) => `session:${token}`;
+
+export function isUserId(value: unknown): value is string {
+  return typeof value === "string" && USER_ID.test(value);
+}
 
 export const NonceStorage = Kv.NonceStorage;
 
@@ -20,10 +25,16 @@ export type Principal = Readonly<{
 }>;
 
 type UserRecord = Readonly<{
-  address: string;
-  chainId: number;
+  id: string;
+  persistent: boolean;
   createdAt: number;
   lastAuthenticatedAt: number;
+}>;
+
+type AccountSessionPayload = Readonly<{
+  userId: string;
+  issuedAt: number;
+  expiresAt: number;
 }>;
 
 type ApiKeyMetadata = Readonly<{
@@ -44,24 +55,39 @@ export async function routeAccountRequest(
   url: URL,
 ): Promise<Response | undefined> {
   if (url.pathname === "/auth" || url.pathname.startsWith("/auth/")) {
-    return accountHandler(request, env, url).fetch(request);
+    return json({ error: "not_found" }, { status: 404 });
   }
   if (url.pathname.startsWith("/webauthn/")) {
+    const originFailure = requireBrowserOrigin(request, url);
+    if (originFailure) return originFailure;
+    if (url.pathname === "/webauthn/register/options") {
+      const principal = await authenticate(request, env, url);
+      if (!principal || principal.kind !== "account_session") return unauthorized();
+      const body = await readJson(request);
+      if (body instanceof Response) return body;
+      request = new Request(request, {
+        body: JSON.stringify({
+          excludeCredentialIds: body.excludeCredentialIds,
+          name: "Nanocodex",
+          userId: principal.userId,
+        }),
+        headers: { ...Object.fromEntries(request.headers), "content-type": "application/json" },
+      });
+    }
     return webAuthnHandler(env, url).fetch(request);
   }
   if (url.pathname === "/v1/me" && request.method === "GET") {
-    const principal = await authenticate(request, env, url);
-    if (!principal) return unauthorized();
+    const resolved = await resolveOrCreateBrowserAccount(request, env, url);
+    const principal = resolved.principal;
     const account = await readAccount(env, principal.userId);
     if (!account) return unauthorized();
     return json({
       user: {
         id: principal.userId,
-        address: account.address,
-        chain_id: account.chainId,
+        persistent: account.persistent,
       },
       authentication: principal.kind,
-    });
+    }, resolved.cookie ? { headers: { "set-cookie": resolved.cookie } } : undefined);
   }
   if (url.pathname === "/v1/api-keys") {
     const principal = await authenticate(request, env, url);
@@ -100,9 +126,16 @@ export async function authenticate(
   env: AccountAuthEnv,
   url = new URL(request.url),
 ): Promise<Principal | undefined> {
-  const session = await accountHandler(request, env, url).getSession(request);
-  if (session && ADDRESS.test(session.address.toLowerCase())) {
-    return { kind: "account_session", userId: session.address.toLowerCase() };
+  const cookie = cookieValue(request, ACCOUNT_COOKIE);
+  if (cookie?.startsWith("a_")) {
+    const session = await readBrowserSession(request, env);
+    if (session) return { kind: "account_session", userId: session.userId };
+  } else {
+    const passkey = await webAuthnHandler(env, url).getSession(request);
+    const passkeyUserId = passkey?.userId ? decodeUserId(passkey.userId) : undefined;
+    if (isUserId(passkeyUserId)) {
+      return { kind: "account_session", userId: passkeyUserId };
+    }
   }
   const authorization = request.headers.get("authorization");
   if (!authorization?.startsWith("Bearer ")) return undefined;
@@ -116,7 +149,7 @@ export async function authenticate(
     return undefined;
   }
   const record = await response.json<StoredApiKey>();
-  if (record.digest !== digest || !ADDRESS.test(record.userId)) return undefined;
+  if (record.digest !== digest || !isUserId(record.userId)) return undefined;
   return { kind: "api_key", userId: record.userId };
 }
 
@@ -163,27 +196,31 @@ export async function detachAgent(
   await response.body?.cancel();
 }
 
-function accountHandler(request: Request, env: AccountAuthEnv, url: URL) {
-  return Handler.auth({
-    cookieName: ACCOUNT_COOKIE,
-    origin: url.origin,
-    path: "/auth",
-    statement: "Sign in to Nanocodex.",
-    store: authStore(env, "siwe"),
-    ttl: { session: SESSION_TTL_SECONDS },
-    onAuthenticate: async ({ address, chainId }) => {
-      await ensureAccount(env, address.toLowerCase(), chainId);
-    },
-  });
-}
-
 function webAuthnHandler(env: AccountAuthEnv, url: URL) {
   return Handler.webAuthn({
+    cookieName: ACCOUNT_COOKIE,
     kv: authStore(env, "webauthn"),
     origin: url.origin,
     path: "/webauthn",
     rpId: url.hostname,
-    session: false,
+    ttl: { session: SESSION_TTL_SECONDS },
+    onRegister: async ({ request, userId }) => {
+      const decoded = userId ? decodeUserId(userId) : undefined;
+      const current = await readBrowserSession(request, env);
+      if (!decoded || !current || decoded !== current.userId) {
+        throw new Error("passkey identity does not match this browser session");
+      }
+      await ensureAccount(env, decoded, true);
+      const anonymousToken = cookieValue(request, ACCOUNT_COOKIE);
+      if (anonymousToken) {
+        await authStore(env, "account").delete(accountSessionKey(anonymousToken));
+      }
+    },
+    onAuthenticate: async ({ userId }) => {
+      const decoded = userId ? decodeUserId(userId) : undefined;
+      if (!isUserId(decoded)) throw new Error("unknown passkey identity");
+      await ensureAccount(env, decoded, true);
+    },
   });
 }
 
@@ -192,8 +229,8 @@ function authStore(env: AccountAuthEnv, name: string): Kv.Kv {
   return Kv.durableObject(namespace, { name });
 }
 
-async function ensureAccount(env: AccountAuthEnv, userId: string, chainId: number): Promise<void> {
-  if (!ADDRESS.test(userId) || !Number.isSafeInteger(chainId) || chainId < 0) {
+async function ensureAccount(env: AccountAuthEnv, userId: string, persistent: boolean): Promise<void> {
+  if (!isUserId(userId)) {
     throw new Error("invalid account identity");
   }
   const response = await env.NANOCODEX_USERS.getByName(userId).fetch(
@@ -201,7 +238,7 @@ async function ensureAccount(env: AccountAuthEnv, userId: string, chainId: numbe
     {
       method: "PUT",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ address: userId, chainId }),
+      body: JSON.stringify({ id: userId, persistent }),
     },
   );
   if (!response.ok) throw new Error("account provisioning failed");
@@ -215,6 +252,81 @@ async function readAccount(env: AccountAuthEnv, userId: string): Promise<UserRec
     return undefined;
   }
   return response.json<UserRecord>();
+}
+
+async function resolveOrCreateBrowserAccount(
+  request: Request,
+  env: AccountAuthEnv,
+  url: URL,
+): Promise<{ principal: Principal; cookie?: string }> {
+  const principal = await authenticate(request, env, url);
+  if (principal) return { principal };
+
+  const userId = crypto.randomUUID();
+  const issuedAt = Math.floor(Date.now() / 1_000);
+  const token = `a_${randomBase64Url(32)}`;
+  await Promise.all([
+    ensureAccount(env, userId, false),
+    authStore(env, "account").set(accountSessionKey(token), {
+      userId,
+      issuedAt,
+      expiresAt: issuedAt + SESSION_TTL_SECONDS,
+    } satisfies AccountSessionPayload, { ttl: SESSION_TTL_SECONDS }),
+  ]);
+  return {
+    principal: { kind: "account_session", userId },
+    cookie: serializeAccountCookie(token, new URL(request.url).protocol),
+  };
+}
+
+async function readBrowserSession(
+  request: Request,
+  env: AccountAuthEnv,
+): Promise<AccountSessionPayload | undefined> {
+  const token = cookieValue(request, ACCOUNT_COOKIE);
+  if (!token) return undefined;
+  const session = await authStore(env, "account").get<AccountSessionPayload>(accountSessionKey(token));
+  if (!session || !isUserId(session.userId) || session.expiresAt <= Date.now() / 1_000) {
+    return undefined;
+  }
+  return session;
+}
+
+function decodeUserId(value: string): string | undefined {
+  try {
+    const base64 = value.replaceAll("-", "+").replaceAll("_", "/");
+    const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, "=");
+    return new TextDecoder().decode(Uint8Array.from(atob(padded), (character) => character.charCodeAt(0)));
+  } catch {
+    return undefined;
+  }
+}
+
+function cookieValue(request: Request, name: string): string | undefined {
+  for (const part of request.headers.get("cookie")?.split(";") ?? []) {
+    const separator = part.indexOf("=");
+    if (separator < 0 || part.slice(0, separator).trim() !== name) continue;
+    const value = part.slice(separator + 1).trim();
+    if (/^(?:a_)?[A-Za-z0-9_-]{43}$/.test(value)) return value;
+  }
+  return undefined;
+}
+
+function serializeAccountCookie(token: string, protocol: string): string {
+  return [
+    `${ACCOUNT_COOKIE}=${token}`,
+    "Path=/",
+    `Max-Age=${SESSION_TTL_SECONDS}`,
+    "HttpOnly",
+    "SameSite=Lax",
+    ...(protocol === "https:" ? ["Secure"] : []),
+  ].join("; ");
+}
+
+function requireBrowserOrigin(request: Request, url: URL): Response | undefined {
+  return request.headers.get("origin") === url.origin
+    ? undefined
+    : json({ error: "forbidden_origin" }, { status: 403 });
 }
 
 async function listApiKeys(env: AccountAuthEnv, userId: string): Promise<ApiKeyMetadata[]> {
@@ -282,17 +394,16 @@ export class UserAccount extends DurableObject<AccountAuthEnv> {
     const url = new URL(request.url);
     if (url.pathname === "/account") {
       if (request.method === "PUT") {
-        const body = await request.json<{ address?: unknown; chainId?: unknown }>();
-        const address = typeof body.address === "string" ? body.address.toLowerCase() : "";
-        const chainId = body.chainId;
-        if (typeof chainId !== "number" || !ADDRESS.test(address) || !Number.isSafeInteger(chainId) || chainId < 0) {
+        const body = await request.json<{ id?: unknown; persistent?: unknown }>();
+        const id = typeof body.id === "string" ? body.id.toLowerCase() : "";
+        if (!isUserId(id) || typeof body.persistent !== "boolean") {
           return json({ error: "invalid_account" }, { status: 400 });
         }
         const now = Date.now();
         const current = await this.ctx.storage.get<UserRecord>("account");
         const record: UserRecord = {
-          address,
-          chainId: Number(chainId),
+          id,
+          persistent: current?.persistent === true || body.persistent,
           createdAt: current?.createdAt ?? now,
           lastAuthenticatedAt: now,
         };
@@ -368,7 +479,7 @@ export class ApiKeyRecord extends DurableObject<AccountAuthEnv> {
     if (url.pathname === "/record" && request.method === "PUT") {
       if (await this.ctx.storage.get("record")) return json({ error: "conflict" }, { status: 409 });
       const record = await request.json<StoredApiKey>();
-      if (!ADDRESS.test(record.userId) || !/^[A-Za-z0-9_-]{43}$/.test(record.digest)) {
+      if (!isUserId(record.userId) || !/^[A-Za-z0-9_-]{43}$/.test(record.digest)) {
         return json({ error: "invalid_api_key" }, { status: 400 });
       }
       await this.ctx.storage.put("record", record);

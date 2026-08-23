@@ -58,6 +58,7 @@ import {
   attachAgent,
   authenticate,
   detachAgent,
+  isUserId,
   listAgents,
   requireSameOriginMutation,
   routeAccountRequest,
@@ -569,8 +570,7 @@ export class NanocodexSession extends DurableComputerSession {
       const runtimeProfile = initialization.runtime_profile ?? "managed";
       if (typeof sessionId !== "string"
         || !SESSION_ID.test(sessionId)
-        || typeof ownerId !== "string"
-        || !/^0x[0-9a-f]{40}$/.test(ownerId)
+        || !isUserId(ownerId)
         || typeof publicOrigin !== "string"
         || !validPublicOrigin(publicOrigin)
         || (runtimeProfile !== "managed" && runtimeProfile !== "multiplayer")) {

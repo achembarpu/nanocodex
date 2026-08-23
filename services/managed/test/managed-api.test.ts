@@ -4,9 +4,9 @@ import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import type { Env } from "../src/index";
 
 const testEnv = env as unknown as Env;
-const USER_ID = `0x${"1".repeat(40)}`;
+const USER_ID = "11111111-1111-4111-8111-111111111111";
 const API_KEY = `ncx_live_${"k".repeat(12)}_${"s".repeat(43)}`;
-const OTHER_USER_ID = `0x${"3".repeat(40)}`;
+const OTHER_USER_ID = "33333333-3333-4333-8333-333333333333";
 const OTHER_API_KEY = `ncx_live_${"o".repeat(12)}_${"p".repeat(43)}`;
 const createdAgents = new Set<string>();
 const SELF = { fetch: managedFetch };
@@ -24,6 +24,48 @@ afterEach(async () => {
 });
 
 describe("managed agents REST and resumable SSE", () => {
+  it("bootstraps one browser identity and binds passkey options to it", async () => {
+    const first = await RAW_SELF.fetch("https://example.test/v1/me");
+    expect(first.status).toBe(200);
+    const cookie = first.headers.get("set-cookie");
+    expect(cookie).toMatch(/^nanocodex_account=a_[A-Za-z0-9_-]{43};/);
+    const account = await first.json<{
+      user: { id: string; persistent: boolean };
+      authentication: string;
+    }>();
+    expect(account).toMatchObject({
+      user: { persistent: false },
+      authentication: "account_session",
+    });
+
+    const cookieHeader = cookie!.split(";", 1)[0]!;
+    const repeated = await RAW_SELF.fetch("https://example.test/v1/me", {
+      headers: { cookie: cookieHeader },
+    });
+    expect((await repeated.json<{ user: { id: string } }>()).user.id).toBe(account.user.id);
+    expect(repeated.headers.get("set-cookie")).toBeNull();
+
+    const options = await RAW_SELF.fetch("https://example.test/webauthn/register/options", {
+      method: "POST",
+      headers: {
+        cookie: cookieHeader,
+        "content-type": "application/json",
+        origin: "https://example.test",
+      },
+      body: JSON.stringify({ name: "attacker", userId: crypto.randomUUID() }),
+    });
+    expect(options.status).toBe(200);
+    const creation = await options.json<{ options: { publicKey?: { user: { id: string } } } }>();
+    const encodedUserId = creation.options.publicKey?.user.id;
+    expect(encodedUserId).toBeTruthy();
+    const base64UserId = encodedUserId!.replaceAll("-", "+").replaceAll("_", "/");
+    const decodedUserId = new TextDecoder().decode(
+      Uint8Array.from(atob(base64UserId.padEnd(Math.ceil(base64UserId.length / 4) * 4, "=")),
+        (character) => character.charCodeAt(0)),
+    );
+    expect(decodedUserId).toBe(account.user.id);
+  });
+
   it("does not let an unrelated bearer mint managed agents", async () => {
     const response = await RAW_SELF.fetch("https://example.test/v1/agents", {
       method: "POST",
@@ -400,10 +442,12 @@ async function seedApiKey(userId: string, token: string): Promise<void> {
   const provisioned = await account.fetch("https://user.internal/account", {
     method: "PUT",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ address: userId, chainId: 42431 }),
+    body: JSON.stringify({ id: userId, persistent: true }),
   });
   expect(provisioned.ok).toBe(true);
-  const record = await testEnv.NANOCODEX_API_KEYS.getByName(digest).fetch(
+  const key = testEnv.NANOCODEX_API_KEYS.getByName(digest);
+  await key.fetch("https://api-key.internal/record", { method: "DELETE" });
+  const record = await key.fetch(
     "https://api-key.internal/record",
     {
       method: "PUT",
@@ -418,7 +462,7 @@ async function seedApiKey(userId: string, token: string): Promise<void> {
       }),
     },
   );
-  expect([201, 409]).toContain(record.status);
+  expect(record.status).toBe(201);
 }
 
 async function submit(agent: AgentReceipt, id: string, input: string): Promise<ManagedTurnView> {
