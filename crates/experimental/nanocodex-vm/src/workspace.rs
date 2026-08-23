@@ -430,8 +430,11 @@ fn ext4_bootstrap(workspace: &str, resolver: Option<&str>) -> String {
 
 fn resolver_bootstrap(resolver: Option<&str>) -> String {
     resolver.map_or_else(String::new, |resolver| {
-        let resolver = shell_word(&resolver.replace("\\n", "\n"));
-        format!("rm -f /etc/resolv.conf; printf '%s' {resolver} > /etc/resolv.conf; ")
+        // Guest argv is carried in libkrun's kernel command line and therefore
+        // must remain printable ASCII. The resolver is already represented with
+        // escaped newlines; let the guest's printf materialize them after boot.
+        let resolver = shell_word(resolver);
+        format!("rm -f /etc/resolv.conf; printf '%b' {resolver} > /etc/resolv.conf; ")
     })
 }
 
@@ -480,6 +483,12 @@ mod tests {
         let offline = ext4_bootstrap("/workspace", None);
 
         assert!(ext4.contains("192.0.2.1"));
+        assert!(ext4.contains("printf '%b'"));
+        assert!(!ext4.contains('\n'));
+        assert!(
+            ext4.bytes()
+                .all(|byte| byte.is_ascii_graphic() || byte == b' ')
+        );
         assert!(ext4.contains("> /etc/resolv.conf"));
         assert!(!offline.contains("resolv.conf"));
     }
