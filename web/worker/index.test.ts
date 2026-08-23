@@ -117,8 +117,8 @@ test("brokered website access stays credentialless and disables legacy browser s
       async fetch(input: RequestInfo | URL, init?: RequestInit) {
         const request = new Request(input, init);
         egressRequests.push(request);
-        if (new URL(request.url).pathname === "/.well-known/nanocodex/model-status") {
-          return Response.json({ ready: true }, {
+        if (new URL(request.url).pathname === "/v1/credentials") {
+          return Response.json({ ready: true, active: "chatgpt" }, {
             headers: { "cache-control": "no-store" },
           });
         }
