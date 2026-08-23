@@ -1371,6 +1371,7 @@ impl RealtimeCallAttachmentBuilder {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_connected_session(
     socket: Socket,
     protocol: RealtimeProtocol,
@@ -1932,6 +1933,7 @@ fn session_update(instructions: &str, voice: RealtimeVoice) -> ClientEvent<'_> {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn configured_session_update(
     instructions: &str,
     model: &str,
