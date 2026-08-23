@@ -47,8 +47,8 @@ test("credential presence is distinct from agent readiness and failures are manu
 });
 
 test("signed-out browsers wait for the account-owned model connection", () => {
-  assert.match(experience, /source === "brokered"/);
-  assert.match(experience, /hasCredential && !activeCapabilityError \? \(/);
+  assert.match(experience, /credentialSource === "brokered"/);
+  assert.match(experience, /hasCredential && !activeCapabilityError && \(runtime === "local" \|\| managedConversationId\)/);
   assert.match(session, /Sign in with a passkey to start the browser agent/);
   assert.doesNotMatch(`${experience}\n${terminal}\n${session}`, /guest|sponsor|"deployment"|backend-anon|anonymous (?:OpenAI|ChatGPT|Codex)/i);
 });
@@ -66,7 +66,7 @@ test("starting and failure states repaint the terminal while the native mobile c
 
 test("the React package owns browser Agent startup through useNanocodex", () => {
   assert.match(terminal, /import \{[\s\S]*?createConfig,[\s\S]*?useNanocodex,[\s\S]*?\} from "nanocodex-react"/);
-  assert.match(terminal, /data: agent,[\s\S]*?\} = useNanocodex\(\{ config: agentConfig, threadId: thread\?\.id \}\)/);
+  assert.match(terminal, /data: agent,[\s\S]*?\} = useNanocodex\(\{ config: agentConfig, threadId \}\)/);
   assert.match(terminal, /createAgentTerminal\(\{[\s\S]*?agent,[\s\S]*?terminal: terminalHost/);
   assert.doesNotMatch(terminal, /useAgentEvents|includeAllSessions/);
   assert.doesNotMatch(terminal, /NanocodexProvider|agent\.agent|createDemoAgent|prewarmDemoAgent|prepareAgent/);

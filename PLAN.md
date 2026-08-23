@@ -8,6 +8,12 @@ ownership, tools, performance, and observability. The embeddable APIs are the
 product; the CLI, Ratatui application, hosted WASM deployments, managed-agent
 service, and evaluation harnesses are concrete consumers that prove those APIs.
 
+The active product mode is fully embedded: the website and managed-agent
+platform are the primary end-to-end proving ground for browser-local agents,
+account-owned durable agents, identity, retained conversations, tools, and the
+public JavaScript bindings. They consume the same owned SDK lifecycle rather
+than introducing a parallel app-server agent contract.
+
 Every stable crate must remain useful independently, documented from its own
 README, tested through its public paths, benchmarked at the boundaries it can
 affect, and observable without adopting the Nanocodex CLI. Experimental crates
@@ -58,7 +64,7 @@ instructions with the classifications already recorded in
 and classify every intervening commit as port/evaluate/defer/out-of-scope. Do
 not let an unreviewed upstream change silently redefine Nanocodex behavior.
 
-## Immediate working slice: authenticated managed agents
+## Immediate working slice: embedded web and authenticated managed agents
 
 The managed-agent product is the active vertical slice. The evaluation
 controller continues as an isolated side track and must not shape this

@@ -555,7 +555,6 @@ test("older history replaces a streamed tail whose first event identity moved", 
     frames.restore();
   }
 });
-
 test("xterm history redraw restores the previous distance from the buffer bottom", async () => {
   let restored: number | undefined;
   const active = { baseY: 100, viewportY: 60 };

@@ -154,6 +154,7 @@ export function bindBrowser(prepared: PreparedBrowser, options: BrowserOptions):
 
 export function browserThread(threadId: string, origin: string): BrowserThread;
 export function getBrowserThread(): BrowserThread;
+export function selectBrowserThread(threadId: string): BrowserThread;
 export function openKernelWorkspace(): Promise<Workspace>;
 export function openThreadWorkspace(threadId: string): Promise<Workspace>;
 export function subscribeThreadWorkspaceChanges(threadId: string, listener: () => void): () => void;

@@ -16,7 +16,7 @@ test("one app-lifetime Config supplies clone-safe MCP servers to the retained Ag
   assert.match(declaration, /createConfig\(\{[\s\S]*?agent: \{[\s\S]*?mcp: browserMcpConfiguration\(location\.origin\)/);
   assert.match(
     terminal,
-    /useNanocodex\(\{ config: agentConfig, threadId: thread\?\.id \}\)/,
+    /useNanocodex\(\{ config: agentConfig, threadId \}\)/,
   );
   assert.doesNotMatch(terminal, /prepareAgentRuntime|NanocodexProvider/);
 
@@ -69,9 +69,17 @@ test("credential-gated terminal uses the normal static Vite graph", () => {
   assert.doesNotMatch(viteConfig, /optimizeDeps:[\s\S]*?include:/);
   assert.match(
     experience,
-    /import \{ AgentTerminal \} from "\.\/AgentTerminal"/,
+    /import \{ AgentTerminal, ManagedAgentTerminal \} from "\.\/AgentTerminal"/,
   );
   assert.doesNotMatch(experience, /import\(|\blazy\b|loadAgentTerminal|preloadAgentTerminal|prepareAgentRuntime/);
+});
+
+test("managed conversation selection is invalidated when account ownership changes", () => {
+  assert.match(
+    experience,
+    /useEffect\(\(\) => \{\s*setManagedConversations\(\[\]\);\s*setManagedConversationId\(undefined\);\s*setRuntimeState\(undefined\);\s*\}, \[account\.account\?\.id\]\)/,
+  );
+  assert.match(experience, /managedSelectionKey\(accountId\)/);
 });
 
 function source(path: string): string {

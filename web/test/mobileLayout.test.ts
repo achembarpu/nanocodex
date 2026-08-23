@@ -130,7 +130,7 @@ test("the phone home surface leads directly from thesis to install, metadata, an
   assert.match(terminal, /theme=\{theme\}/);
   assert.match(terminalSurface, /instance\.current\.options\.theme = terminalTheme\(theme\)/);
   assert.match(terminalCss, /--terminal-background:\s*var\(--surface\)/);
-  assert.match(application, /live agent · browser WASM/);
+  assert.match(application, /live agent · local or durable/);
   assert.match(application, /optimized WASM · 1\.3 MB gzip/);
   assert.match(application, /Terminal-Bench 2\.1 high: Nanocodex 82\.2% vs Codex 79\.6% · 890\/890 runs/);
   assert.match(

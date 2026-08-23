@@ -14,11 +14,11 @@ test("Vite owns one static application graph without manual module loaders", () 
   assert.match(application, /import \{ AgentExperience \} from "\.\/AgentExperience"/);
   assert.match(
     experience,
-    /import \{ AgentTerminal \} from "\.\/AgentTerminal"/,
+    /import \{ AgentTerminal, ManagedAgentTerminal \} from "\.\/AgentTerminal"/,
   );
   assert.match(
     experience,
-    /hasCredential && !capabilityError \? \([\s\S]*?<AgentTerminal/,
+    /hasCredential && !activeCapabilityError && \(runtime === "local" \|\| managedConversationId\)[\s\S]*?<AgentTerminal[\s\S]*?<ManagedAgentTerminal/,
   );
   assert.doesNotMatch(
     `${entry}\n${application}\n${experience}\n${routeLoaders}`,
@@ -31,15 +31,14 @@ test("the authenticated terminal consumes the public React hook directly", () =>
   assert.match(terminal, /const agentConfig = createConfig\(\{/);
   assert.match(
     terminal,
-    /useNanocodex\(\{ config: agentConfig, threadId: thread\?\.id \}\)/,
+    /useNanocodex\(\{ config: agentConfig, threadId \}\)/,
   );
   assert.doesNotMatch(terminal, /NanocodexProvider|prepareAgent|preload/);
 });
 
 test("signed-out state retains terminal geometry without loading copy", () => {
-  const reserve = section(experience, "function ReservedTerminal", "function isAuthenticatedCredential");
+  const reserve = section(experience, "function ReservedTerminal", "function managedSelectionKey");
   assert.match(reserve, /className="agent-terminal-shell"/);
-  assert.match(reserve, /mode === "full"[\s\S]*?className="agent-terminal-workspace"/);
   assert.match(terminalCss, /\.agent-terminal-shell \{[\s\S]*?height:\s*clamp\(300px, 36svh, 380px\)/);
   assert.doesNotMatch(experience, /loading|spinner|skeleton/i);
 });

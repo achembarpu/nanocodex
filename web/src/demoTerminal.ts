@@ -284,7 +284,7 @@ export function createAgentTerminal(options: {
     const record: ActiveTurn = { timing, turn };
     activeTurns.add(record);
     pendingRootPrompts.push(timing);
-    emit("prompt.accepted", { id, sessionId: agent.sessionId, submittedAt });
+    emit("prompt.accepted", { id, input: prompt, sessionId: agent.sessionId, submittedAt });
     render();
     void finishTurn(record);
     return turn;

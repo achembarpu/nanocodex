@@ -889,6 +889,75 @@ test("Worker runtime prewarms the engine and exact browser harness before boot",
   runtime.dispose();
 });
 
+test("stable browser harness identity opts into Worker-owned durability", async () => {
+  const durableWorker = new HarnessWorker();
+  const durableAgent = await createWorkerAgent({
+    sessionId: "model-session",
+    threadId: "browser-thread",
+  }, { worker: durableWorker });
+  const durableConfig = durableWorker.incoming.find(({ type }) => type === "boot").config;
+  assert.equal(durableConfig.workerDurabilityId, "browser-thread");
+  assert.equal(Object.hasOwn(durableConfig, "threadId"), false);
+  durableAgent.dispose();
+
+  const harnessFreeWorker = new HarnessWorker();
+  const harnessFreeAgent = await createWorkerAgent({
+    harness: false,
+    sessionId: "model-session",
+  }, { worker: harnessFreeWorker });
+  const harnessFreeConfig = harnessFreeWorker.incoming.find(({ type }) => type === "boot").config;
+  assert.equal(Object.hasOwn(harnessFreeConfig, "workerDurabilityId"), false);
+  harnessFreeAgent.dispose();
+
+  const explicitWorker = new HarnessWorker();
+  const explicitAgent = await createWorkerAgent({
+    durabilityId: "caller-owned",
+    threadId: "browser-thread",
+  }, { worker: explicitWorker });
+  const explicitConfig = explicitWorker.incoming.find(({ type }) => type === "boot").config;
+  assert.equal(Object.hasOwn(explicitConfig, "workerDurabilityId"), false);
+  assert.equal(explicitConfig.durabilityId, "caller-owned");
+  explicitAgent.dispose();
+});
+
+test("Worker hydration constructs default durability inside its own isolate", async () => {
+  const outgoing = [];
+  const fixture = createFixture();
+  const durability = Object.freeze({ load() {}, append() {} });
+  let createdOptions;
+  let durabilityCreations = 0;
+  const scope = { onmessage: null, postMessage: (message) => outgoing.push(message) };
+  const runtime = installWorkerAgentRuntime(scope, {
+    createAgent(options) {
+      createdOptions = options;
+      return fixture.createAgent(options);
+    },
+    createDurabilityStore() {
+      durabilityCreations += 1;
+      return durability;
+    },
+  });
+
+  scope.onmessage({ data: {
+    protocol: "nanocodex.worker-agent.v1",
+    channel: "durable",
+    type: "boot",
+    config: {
+      harness: false,
+      sessionId: "model-session",
+      workerDurabilityId: "browser-thread",
+    },
+  } });
+  await tick();
+
+  assert.equal(outgoing.at(-1).type, "ready");
+  assert.equal(durabilityCreations, 1);
+  assert.strictEqual(createdOptions.durability, durability);
+  assert.equal(createdOptions.durabilityId, "browser-thread");
+  assert.equal(Object.hasOwn(createdOptions, "workerDurabilityId"), false);
+  runtime.dispose();
+});
+
 test("Worker runtime overlaps WASM initialization and browser harness restoration", async () => {
   const harness = { threadId: "thread-1", origin: "https://nanocodex.test" };
   const module = emptyWasmModule();

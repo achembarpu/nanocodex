@@ -50,6 +50,8 @@ export type WorkerAgentRuntime = Readonly<{ dispose(): void }>;
 export type WorkerAgentScope = WorkerLike;
 export type WorkerAgentRuntimeOptions = Readonly<{
   createAgent?: (options: import("../host/Agent.mjs").create.Options) => Promise<DefaultAgent> | DefaultAgent;
+  /** Test/integration seam for the Worker-owned browser durability capability. */
+  createDurabilityStore?: () => import("../types.mjs").DurabilityStore;
   prewarmLocal?: (
     harness: false | { threadId: string; origin?: string | undefined },
     options: { module?: WebAssembly.Module | undefined },

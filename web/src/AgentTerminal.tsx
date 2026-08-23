@@ -2,7 +2,6 @@ import {
   memo,
   useCallback,
   useEffect,
-  useMemo,
   useRef,
   useState,
 } from "react";
@@ -11,7 +10,6 @@ import {
   useNanocodex,
 } from "nanocodex-react";
 import type { ArtifactDocument } from "nanocodex/tools/artifact";
-import { getBrowserThread } from "nanocodex/tools/browser";
 import { terminalRunningForStatus } from "./agentTerminalLifecycle";
 import {
   TouchTerminalComposer,
@@ -50,23 +48,26 @@ const agentConfig = createConfig({
 export const AgentTerminal = memo(function AgentTerminal({
   authStatus,
   mode,
+  onConversationActivity,
   onStateChange,
   source,
   theme,
+  threadId,
 }: {
   authStatus: ModelSessionStatus | undefined;
   mode: AgentTerminalMode;
+  onConversationActivity(input: string): void;
   onStateChange(state: AgentTerminalState): void;
   source: Exclude<CredentialSource, null>;
   theme: "light" | "dark";
+  threadId: string;
 }) {
-  const thread = useMemo(() => getBrowserThread(), []);
   const {
     data: agent,
     error,
     isError,
     refetch,
-  } = useNanocodex({ config: agentConfig, threadId: thread?.id });
+  } = useNanocodex({ config: agentConfig, threadId });
   const retryAgent = useCallback(() => {
     refetch();
   }, [refetch]);
@@ -76,6 +77,7 @@ export const AgentTerminal = memo(function AgentTerminal({
       agentError={isError ? errorMessage(error) : undefined}
       authStatus={authStatus}
       mode={mode}
+      onConversationActivity={onConversationActivity}
       onStateChange={onStateChange}
       retryAgent={retryAgent}
       source={source}
@@ -85,14 +87,18 @@ export const AgentTerminal = memo(function AgentTerminal({
 });
 
 export const ManagedAgentTerminal = memo(function ManagedAgentTerminal({
+  agentId,
   authStatus,
   mode,
+  onConversationActivity,
   onStateChange,
   source,
   theme,
 }: {
+  agentId: string;
   authStatus: ModelSessionStatus | undefined;
   mode: AgentTerminalMode;
+  onConversationActivity(input: string): void;
   onStateChange(state: AgentTerminalState): void;
   source: Exclude<CredentialSource, null>;
   theme: "light" | "dark";
@@ -102,14 +108,15 @@ export const ManagedAgentTerminal = memo(function ManagedAgentTerminal({
   const [agentError, setAgentError] = useState<string>();
   useEffect(() => {
     let cancelled = false;
+    setAgent(undefined);
     setAgentError(undefined);
-    void loadManagedTerminalAgent().then((loaded) => {
+    void loadManagedTerminalAgent(agentId).then((loaded) => {
       if (!cancelled) setAgent(loaded);
     }, (error) => {
       if (!cancelled) setAgentError(errorMessage(error));
     });
     return () => { cancelled = true; };
-  }, [attempt]);
+  }, [agentId, attempt]);
   const retryAgent = useCallback(() => {
     setAgent(undefined);
     setAttempt((value) => value + 1);
@@ -120,6 +127,7 @@ export const ManagedAgentTerminal = memo(function ManagedAgentTerminal({
       agentError={agentError}
       authStatus={authStatus}
       mode={mode}
+      onConversationActivity={onConversationActivity}
       onStateChange={onStateChange}
       retryAgent={retryAgent}
       source={source}
@@ -133,6 +141,7 @@ function AgentTerminalView({
   agentError,
   authStatus,
   mode,
+  onConversationActivity,
   onStateChange,
   retryAgent,
   source,
@@ -142,6 +151,7 @@ function AgentTerminalView({
   agentError: string | undefined;
   authStatus: ModelSessionStatus | undefined;
   mode: AgentTerminalMode;
+  onConversationActivity(input: string): void;
   onStateChange(state: AgentTerminalState): void;
   retryAgent(): void;
   source: Exclude<CredentialSource, null>;
@@ -186,6 +196,7 @@ function AgentTerminalView({
           setTerminalRunning(event.running || activePromptIds.current.size > 0);
         } else if (event.type === "prompt.accepted" && typeof event.id === "number") {
           activePromptIds.current.add(event.id);
+          if (typeof event.input === "string") onConversationActivity(event.input);
           markAgentTiming("prompt.accepted");
           setTerminalRunning(true);
         } else if (
@@ -232,7 +243,7 @@ function AgentTerminalView({
       if (active.current === attached) active.current = undefined;
       attached.dispose();
     };
-  }, [agent, terminalHost]);
+  }, [agent, onConversationActivity, terminalHost]);
 
   useEffect(() => {
     setTerminalRunning((running) => terminalRunningForStatus(agentStatus, running));

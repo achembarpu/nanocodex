@@ -675,6 +675,7 @@ export class NanocodexSession extends DurableComputerSession {
         session_id: session.session_id,
         has_snapshot: session.has_snapshot !== 0,
         completed_turns: session.completed_turns,
+        first_prompt: this.#firstPrompt(),
         last_active: session.last_active,
         active_turns: this.#activeTurnIds(),
         active_turn_details: this.#activeTurnDetails(),
@@ -1563,6 +1564,15 @@ export class NanocodexSession extends DurableComputerSession {
     return this.#managedTurns("WHERE id = ?", id)[0];
   }
 
+  #firstPrompt(): string {
+    const row = this.ctx.storage.sql.exec<{ input_json: string }>(
+      "SELECT input_json FROM managed_turns ORDER BY created_at, id LIMIT 1",
+    ).toArray()[0];
+    if (!row) return "";
+    try { return promptInputText(JSON.parse(row.input_json) as PromptInput); }
+    catch { return ""; }
+  }
+
   #managedTurnByRequestKey(requestKey: string): ManagedTurnRow | undefined {
     return this.#managedTurns("WHERE request_key = ?", requestKey)[0];
   }
@@ -1682,6 +1692,18 @@ function managedTurnView(row: ManagedTurnRow) {
       ? {}
       : { terminal: JSON.parse(row.terminal_json) as TurnTerminal }),
   };
+}
+
+function promptInputText(input: PromptInput): string {
+  if (typeof input === "string") return input;
+  return input.flatMap((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return [];
+    const value = item as unknown as Record<string, unknown>;
+    if (value.type === "text" && typeof value.text === "string") return [value.text];
+    if (value.type === "image") return ["[image]"];
+    if (value.type === "audio") return ["[audio]"];
+    return [];
+  }).join("\n");
 }
 
 function messageForManagedTurn(row: ManagedTurnRow): ServerMessage {

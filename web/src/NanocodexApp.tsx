@@ -1183,7 +1183,9 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
                           ? "preview"
                           : "hidden"
                     }
+                    onThreadChange={setThreadId}
                     theme={theme}
+                    threadId={threadId ?? getBrowserThread().id}
                   />
                 </section>
               </article>

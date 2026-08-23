@@ -39,6 +39,26 @@ export function getBrowserThread() {
     };
     return browserThread;
 }
+export function selectBrowserThread(threadId) {
+    const id = threadId?.toLowerCase();
+    if (typeof id !== "string" || !THREAD_PATTERN.test(id))
+        throw new TypeError("browser thread id must be a UUID");
+    const url = new URL(window.location.href);
+    url.searchParams.set("thread", id);
+    try { window.localStorage.setItem(THREAD_STORAGE_KEY, id); }
+    catch { /* The URL remains authoritative. */ }
+    if (window.location.href !== url.toString())
+        window.history.replaceState(window.history.state, "", url);
+    browserThread = {
+        id,
+        workspaceName: `nanocodex-thread-${id}`,
+        repositoryName: `thread-${id}`,
+        branch: "nanocodex",
+        remoteUrl: `${window.location.origin}/git/thread-${id}`,
+        shareUrl: url.toString(),
+    };
+    return browserThread;
+}
 export function openKernelWorkspace() {
     return openThreadWorkspace(getBrowserThread().id);
 }

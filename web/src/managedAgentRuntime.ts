@@ -7,23 +7,44 @@ import type {
 import type { TerminalAgent, TerminalTurn } from "./demoTerminal";
 
 const MANAGED_HISTORY_PAGE_SIZE = 128;
-const RETAINED_AGENT_KEY = "nanocodex.managed-agent.v1";
 
-export async function loadManagedTerminalAgent(): Promise<TerminalAgent> {
-  const { Agent, ManagedError } = await import("nanocodex/managed");
-  const retainedId = localStorage.getItem(RETAINED_AGENT_KEY);
-  let managed: ManagedAgent | undefined;
-  if (retainedId) {
-    try {
-      managed = await Agent.get(retainedId);
-    } catch (error) {
-      if (!(error instanceof ManagedError) || error.status !== 404) throw error;
-      localStorage.removeItem(RETAINED_AGENT_KEY);
-    }
-  }
-  managed ??= await Agent.create();
-  localStorage.setItem(RETAINED_AGENT_KEY, managed.id);
-  return managedTerminalAgent(managed);
+export type ManagedConversation = Readonly<{
+  id: string;
+  title: string;
+  updatedAt?: number;
+  turnCount?: number;
+}>;
+
+export async function listManagedConversations(): Promise<readonly ManagedConversation[]> {
+  const { Agent } = await import("nanocodex/managed");
+  const agents = await Agent.list();
+  const conversations = await Promise.all(agents.map(async (agent) => {
+    const raw: unknown = await agent.state();
+    const state = raw && typeof raw === "object" && !Array.isArray(raw)
+      ? raw as Record<string, unknown> : {};
+    const updatedAt = typeof state.last_active === "number" ? state.last_active : undefined;
+    const turnCount = Number.isSafeInteger(state.completed_turns) && Number(state.completed_turns) >= 0
+      ? Number(state.completed_turns) : undefined;
+    const prompt = typeof state.first_prompt === "string" ? state.first_prompt : "";
+    return Object.freeze({
+      id: agent.id,
+      title: titleFromPrompt(prompt) || `Conversation ${agent.id.slice(0, 8)}`,
+      ...(updatedAt === undefined ? {} : { updatedAt }),
+      ...(turnCount === undefined ? {} : { turnCount }),
+    });
+  }));
+  return Object.freeze(conversations.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0)));
+}
+
+export async function createManagedConversation(): Promise<ManagedConversation> {
+  const { Agent } = await import("nanocodex/managed");
+  const agent = await Agent.create();
+  return Object.freeze({ id: agent.id, title: "New conversation", updatedAt: Date.now(), turnCount: 0 });
+}
+
+export async function loadManagedTerminalAgent(agentId: string): Promise<TerminalAgent> {
+  const { Agent } = await import("nanocodex/managed");
+  return managedTerminalAgent(await Agent.get(agentId));
 }
 
 export function managedTerminalAgent(managed: ManagedAgent): TerminalAgent {
@@ -205,4 +226,10 @@ function promptText(input: unknown): string {
           ? ["[audio]"]
           : [];
   }).join("\n");
+}
+
+function titleFromPrompt(input: string): string {
+  const text = input.replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  return text.length > 56 ? `${text.slice(0, 55).trimEnd()}…` : text;
 }

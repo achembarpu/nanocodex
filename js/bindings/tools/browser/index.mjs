@@ -20,6 +20,7 @@ export {
 } from "./threadGit.mjs";
 export {
   getBrowserThread,
+  selectBrowserThread,
   openKernelWorkspace,
   openThreadWorkspace,
   subscribeThreadWorkspaceChanges,

@@ -9,6 +9,7 @@ import {
 } from "../internal.mjs";
 import { resolveResponsesTransport } from "../runtime/responses-transport.mjs";
 import { utf8ByteLength } from "../runtime/utf8.mjs";
+import { createIndexedDbDurabilityStore } from "./indexeddb-durability-store.mjs";
 
 const DEFAULT_MAX_PENDING_RPCS = 1_024;
 const MAX_RETAINED_RESULTS = 1_024;
@@ -159,6 +160,8 @@ export function installWorkerAgentRuntime(scope = globalThis, options = {}) {
     throw new TypeError("the Worker Agent runtime requires a Worker-like scope");
   }
   const createAgent = options.createAgent ?? loadAgent;
+  const createDurabilityStore = options.createDurabilityStore
+    ?? (() => createIndexedDbDurabilityStore());
   const prewarmLocal = options.prewarmLocal ?? prewarmWorkerRuntime;
   const prewarmBoot = options.createAgent === undefined || options.prewarmLocal !== undefined
     ? prewarmLocal
@@ -211,7 +214,7 @@ export function installWorkerAgentRuntime(scope = globalThis, options = {}) {
     nextAgent = 1;
     nextResult = 1;
     try {
-      const hydration = hydrateConfig(message.config);
+      const hydration = hydrateConfig(message.config, createDurabilityStore);
       const preparation = prewarmBoot?.(message.config.harness, {
         module: message.config.module,
       });
@@ -1084,6 +1087,7 @@ function listenForAbort(signal, listener) {
 
 function serializeConfig(options) {
   const config = { ...options };
+  const stableThreadId = nonEmptyString(options.threadId) ?? nonEmptyString(options.sessionId);
   const transport = options.transport;
   if (transport !== undefined) {
     let setup;
@@ -1111,15 +1115,22 @@ function serializeConfig(options) {
       config.transport = { kind: "openai", options: { apiKey, ...connection } };
     }
   }
-  if (config.harness !== false) config.harness = harnessDescriptor(config);
+  if (config.harness !== false) {
+    config.harness = harnessDescriptor(config);
+    if (
+      stableThreadId !== undefined
+      && config.durability === undefined
+      && config.durabilityId === undefined
+    ) config.workerDurabilityId = stableThreadId;
+  }
   delete config.threadId;
   assertNoFunctions(config, "Agent options");
   assertCloneable(config, "Agent options");
   return config;
 }
 
-async function hydrateConfig(config) {
-  const { harness, ...options } = config;
+async function hydrateConfig(config, createDurabilityStore) {
+  const { harness, workerDurabilityId, ...options } = config;
   const [Transport, runtime] = await Promise.all([
     import("./Transport.mjs"),
     harness === false || harness === undefined
@@ -1142,6 +1153,17 @@ async function hydrateConfig(config) {
     options.transport = Transport.openAi(options.transport.options);
   } else if (options.transport?.kind === "host-managed") {
     options.transport = Transport.hostManaged(options.transport.options);
+  }
+  if (
+    workerDurabilityId !== undefined
+    && options.durability === undefined
+    && options.durabilityId === undefined
+  ) {
+    if (typeof workerDurabilityId !== "string" || !workerDurabilityId) {
+      throw new TypeError("Worker-owned durability requires a stable thread ID");
+    }
+    options.durability = await createDurabilityStore();
+    options.durabilityId = workerDurabilityId;
   }
   if (runtime) {
     const now = new Date();
