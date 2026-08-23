@@ -422,7 +422,7 @@ jobs:
       - name: Resolve the production origin
         if: steps.production.outputs.current == 'true'
         id: production_origin
-        run: echo "origin=$(node -p \"require('./web/production.json').origin\")" >> "$GITHUB_OUTPUT"
+        run: node -e 'process.stdout.write("origin=" + require("./web/production.json").origin + "\n")' >> "$GITHUB_OUTPUT"
       - name: Verify the active Worker revision
         if: steps.production.outputs.current == 'true'
         env:

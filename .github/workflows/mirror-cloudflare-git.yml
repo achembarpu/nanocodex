@@ -35,7 +35,7 @@ jobs:
           ref: master
       - name: Resolve the production origin
         id: production_origin
-        run: echo "origin=$(node -p \"require('./web/production.json').origin\")" >> "$GITHUB_OUTPUT"
+        run: node -e 'process.stdout.write("origin=" + require("./web/production.json").origin + "\n")' >> "$GITHUB_OUTPUT"
       - name: Require an exact master revision
         env:
           TARGET_SHA: ${{ inputs.revision }}
