@@ -18,6 +18,10 @@ const routeLoaders = readFileSync(
   new URL("../src/routeLoaders.ts", import.meta.url),
   "utf8",
 );
+const world = readFileSync(
+  new URL("../src/MonsterWorld.tsx", import.meta.url),
+  "utf8",
+);
 
 test("route failures preserve the retained Agent and replace only the active route", () => {
   const main = application.slice(
@@ -48,10 +52,15 @@ test("route failures preserve the retained Agent and replace only the active rou
   assert.doesNotMatch(boundary, /spinner|skeleton|loading\.\.\./i);
 });
 
-test("direct route data and World assets reject into the route boundary", () => {
+test("direct route data and mounted World assets reject into the route boundary", () => {
   assert.doesNotMatch(routeLoaders, /Promise\.allSettled/);
   assert.doesNotMatch(routeLoaders, /import\(/);
-  assert.match(routeLoaders, /surface === "world"[\s\S]*?await loadWorldAssets\(\)/);
+  assert.match(routeLoaders, /surface === "world"\) \{\s*return \{\};\s*\}/);
+  assert.doesNotMatch(routeLoaders, /loadWorldAssets/);
+  assert.match(
+    world,
+    /loadWorldAssets\(\)\.then\([\s\S]*?setAssetError\([\s\S]*?if \(assetError\) throw assetError/,
+  );
   assert.match(
     application,
     /preloadDocsRoute\(destination\)\.then\([\s\S]*?setRouteLoadFailure\(routeLoadError\(error, "docs"\)\)[\s\S]*?navigate\(destination\)/,

@@ -668,7 +668,8 @@ test("resident actions use isolated retained Luna sessions with bounded turn sch
 
 test("the World surface stays statically available, stoppable, and semantically observable", () => {
   assert.doesNotMatch(routeLoaders, /import\(/);
-  assert.match(routeLoaders, /surface === "world"[\s\S]*?await loadWorldAssets\(\)/);
+  assert.match(routeLoaders, /surface === "world"\) \{\s*return \{\};\s*\}/);
+  assert.doesNotMatch(routeLoaders, /loadWorldAssets/);
   assert.match(application, /import \{ MonsterWorld \} from "\.\/MonsterWorld"/);
   assert.match(component, /new Worker\(new URL\("\.\/monsterWorldAgent\.worker\.ts"/);
   assert.match(component, /document\.visibilityState === "hidden"[\s\S]*?stopAgents\(\)/);
