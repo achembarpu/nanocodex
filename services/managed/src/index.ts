@@ -916,7 +916,7 @@ export class NanocodexSession extends DurableComputerSession {
         status: submission.created ? 202 : 200,
         headers: submission.created ? {
           "x-nanocodex-turn-created": "1",
-          "x-nanocodex-turn-summary": JSON.stringify(summary),
+          "x-nanocodex-turn-summary": asciiJsonHeaderValue(summary),
         } : undefined,
       });
     } catch (error) {
@@ -1763,6 +1763,12 @@ function conversationTitle(input: string): string {
   const text = input.replace(/\s+/g, " ").trim();
   if (!text) return "";
   return text.length > 56 ? `${text.slice(0, 55).trimEnd()}…` : text;
+}
+
+function asciiJsonHeaderValue(value: unknown): string {
+  return JSON.stringify(value).replace(/[^\x20-\x7e]/g, (character) => (
+    `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`
+  ));
 }
 
 function messageForManagedTurn(row: ManagedTurnRow): ServerMessage {

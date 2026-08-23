@@ -363,6 +363,32 @@ describe("managed agents REST and resumable SSE", () => {
     expect(summary).toMatchObject({ title: "Build the measured thing", turn_count: 1 });
   });
 
+  it("carries Unicode conversation summaries through an ASCII-only internal header", async () => {
+    const agent = await createAgent();
+    const prompt = "Ship 🦀 a durable conversation title that is deliberately longer than fifty-six characters";
+    const response = await testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id).fetch(
+      "https://session.internal/turns?public_origin=https%3A%2F%2Fexample.test",
+      {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "request-unicode-summary-turn",
+          "x-nanocodex-owner-id": USER_ID,
+        },
+        body: JSON.stringify({ id: "unicode-summary-turn", input: prompt }),
+      },
+    );
+
+    expect(response.status).toBe(202);
+    const header = response.headers.get("x-nanocodex-turn-summary");
+    expect(header).toMatch(/^[\x20-\x7e]+$/);
+    expect(JSON.parse(header!)).toMatchObject({
+      title: expect.stringMatching(/^Ship 🦀 .+…$/u),
+      turnCount: 1,
+    });
+    await response.body?.cancel();
+  });
+
   it("reports acceptance for prompts containing lone UTF-16 surrogates", async () => {
     const agent = await createAgent();
     const response = await SELF.fetch(agent.events_url.replace(/\/events$/, "/turns"), {
