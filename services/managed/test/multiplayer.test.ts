@@ -81,19 +81,16 @@ describe("durable Multiplayer rooms", () => {
       creation: state.storage.sql.exec<{
         create_id_hash: string;
         request_hash: string;
-        claim_hash: string;
-        receipt_nonce: string;
-        receipt_ciphertext: string;
       }>(
-        `SELECT create_id_hash, request_hash, claim_hash, receipt_nonce, receipt_ciphertext
-         FROM multiplayer_room_creations WHERE room_id = ?`,
+        `SELECT create_id_hash, request_hash
+         FROM multiplayer_room_reservations WHERE room_id = ?`,
         firstReceipt.room_id,
       ).toArray()[0]!,
       creationColumns: state.storage.sql.exec<{ name: string }>(
-        "PRAGMA table_info(multiplayer_room_creations)",
+        "PRAGMA table_info(multiplayer_room_reservations)",
       ).toArray().map((column) => column.name),
       creationCount: state.storage.sql.exec<{ count: number }>(
-        "SELECT COUNT(*) AS count FROM multiplayer_room_creations WHERE room_id = ?",
+        "SELECT COUNT(*) AS count FROM multiplayer_room_reservations WHERE room_id = ?",
         firstReceipt.room_id,
       ).toArray()[0]!.count,
       leaseCount: state.storage.sql.exec<{ count: number }>(
@@ -103,9 +100,6 @@ describe("durable Multiplayer rooms", () => {
     }));
     expect(durable.creation.create_id_hash).toMatch(/^[0-9a-f]{64}$/);
     expect(durable.creation.request_hash).toMatch(/^[0-9a-f]{64}$/);
-    expect(durable.creation.claim_hash).toMatch(/^[0-9a-f]{64}$/);
-    expect(durable.creation.receipt_nonce).toMatch(/^[A-Za-z0-9_-]{16}$/);
-    expect(durable.creation.receipt_ciphertext).toMatch(/^[A-Za-z0-9_-]+$/);
     expect(JSON.stringify(durable.creation)).not.toContain(createId);
     expect(JSON.stringify(durable.creation)).not.toContain(firstReceipt.invite);
     expect(JSON.stringify(durable.creation)).not.toContain(cookiePair(firstCookie!).split("=", 2)[1]);
@@ -114,10 +108,6 @@ describe("durable Multiplayer rooms", () => {
       "create_id_hash",
       "request_hash",
       "room_id",
-      "claim_hash",
-      "claim_deadline",
-      "receipt_nonce",
-      "receipt_ciphertext",
       "created_at",
       "expires_at",
     ]);
@@ -250,7 +240,7 @@ describe("durable Multiplayer rooms", () => {
     expect(await invalid.json()).toEqual({ error: "invalid_request" });
   });
 
-  it("takes over a fenced pending creation after reservation-response loss and restart", async () => {
+  it("retries a lost idempotent reservation without another allocation", async () => {
     const originalQuota = testEnv.NANOCODEX_MULTIPLAYER_QUOTA;
     const createId = randomCreateId();
     let roomId: string | undefined;
@@ -292,14 +282,7 @@ describe("durable Multiplayer rooms", () => {
     const room = testEnv.NANOCODEX_ROOMS.getByName(roomId!);
     expect(await quotaLeaseCount(roomId!)).toBe(1);
     expect(await roomCleanupState(room)).toEqual({ alarm: null, rooms: 0, status: null });
-    const quota = originalQuota.getByName("global");
-    await runInDurableObject(quota, (_instance, state) => {
-      state.storage.sql.exec(
-        "UPDATE multiplayer_room_creations SET claim_deadline = 0 WHERE room_id = ?",
-        roomId!,
-      );
-    });
-    await evictDurableObject(quota);
+    await evictDurableObject(originalQuota.getByName("global"));
 
     const recovered = await createRoomResponse("Ada", createId);
     expect(recovered.status).toBe(201);
@@ -373,90 +356,39 @@ describe("durable Multiplayer rooms", () => {
     expect(await quotaLeaseCount(roomId)).toBe(0);
   });
 
-  it("fences a stale creation owner before takeover cleanup or receipt publication", async () => {
+  it("keeps one quota lease for an exact reservation replay and conflicts changed identity", async () => {
     const { roomId } = testRoomIdentity();
     const quota = testEnv.NANOCODEX_MULTIPLAYER_QUOTA.getByName("global");
     const createIdHash = randomHash();
     const requestHash = randomHash();
-    const staleClaimHash = randomHash();
-    const takeoverClaimHash = randomHash();
     const reservation = {
       room_id: roomId,
       expires_at: Date.now() + 60_000,
       create_id_hash: createIdHash,
       request_hash: requestHash,
-      claim_deadline: Date.now() + 30_000,
-      allow_takeover: true,
     };
     const first = await quota.fetch("https://quota.internal/rooms", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ ...reservation, claim_hash: staleClaimHash }),
+      body: JSON.stringify(reservation),
     });
     expect(first.status).toBe(201);
-    expect(await first.json()).toMatchObject({
-      creation: { state: "pending", role: "owner" },
-    });
-    await runInDurableObject(quota, (_instance, state) => {
-      state.storage.sql.exec(
-        "UPDATE multiplayer_room_creations SET claim_deadline = 0 WHERE create_id_hash = ?",
-        createIdHash,
-      );
-    });
-    const takeover = await quota.fetch("https://quota.internal/rooms", {
+    expect(await first.json()).toMatchObject({ room_id: roomId, replayed: false });
+    const replay = await quota.fetch("https://quota.internal/rooms", {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ ...reservation, claim_hash: takeoverClaimHash }),
+      body: JSON.stringify(reservation),
     });
-    expect(takeover.status).toBe(200);
-    expect(await takeover.json()).toMatchObject({
-      creation: { state: "pending", role: "takeover" },
+    expect(replay.status).toBe(200);
+    expect(await replay.json()).toMatchObject({ room_id: roomId, replayed: true });
+    const conflict = await quota.fetch("https://quota.internal/rooms", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ ...reservation, request_hash: randomHash() }),
     });
-
-    const staleReceipt = await quota.fetch(
-      `https://quota.internal/room-creations/${createIdHash}`,
-      {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          room_id: roomId,
-          request_hash: requestHash,
-          claim_hash: staleClaimHash,
-          receipt_nonce: "n".repeat(16),
-          receipt_ciphertext: "x".repeat(32),
-        }),
-      },
-    );
-    expect(staleReceipt.status).toBe(409);
-    await staleReceipt.body?.cancel();
-    const staleCleanup = await quota.fetch(
-      `https://quota.internal/room-creations/${createIdHash}/cleanup`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          room_id: roomId,
-          request_hash: requestHash,
-          claim_hash: staleClaimHash,
-        }),
-      },
-    );
-    expect(staleCleanup.status).toBe(409);
-    await staleCleanup.body?.cancel();
-    const authorized = await quota.fetch(
-      `https://quota.internal/room-creations/${createIdHash}/cleanup`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          room_id: roomId,
-          request_hash: requestHash,
-          claim_hash: takeoverClaimHash,
-        }),
-      },
-    );
-    expect(authorized.status).toBe(204);
-    await authorized.body?.cancel();
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toEqual({ error: "create_id_conflict" });
+    expect(await quotaLeaseCount(roomId)).toBe(1);
     expect((await quota.fetch(
       `https://quota.internal/rooms/${encodeURIComponent(roomId)}`,
       { method: "DELETE" },
@@ -486,6 +418,11 @@ describe("durable Multiplayer rooms", () => {
         owner_id: USER_ID,
         public_origin: ORIGIN,
         owner_name: "Ada",
+        create_id_hash: randomHash(),
+        request_hash: randomHash(),
+        invite: "i".repeat(43),
+        member_id: crypto.randomUUID(),
+        member_token: "m".repeat(43),
       });
       let bodyReadStarted!: () => void;
       const started = new Promise<void>((resolve) => {
@@ -535,7 +472,7 @@ describe("durable Multiplayer rooms", () => {
     rooms.delete(roomId);
   });
 
-  it("keeps an ambiguously initialized room leased when room-owned cleanup fails", async () => {
+  it("keeps an ambiguously initialized room leased for exact create replay", async () => {
     const originalFetch = MultiplayerRoom.prototype.fetch;
     let roomId: string | undefined;
     let agentId: string | undefined;
@@ -562,10 +499,6 @@ describe("durable Multiplayer rooms", () => {
           }
           return response;
         }
-        if (request.method === "DELETE" && path === "/admin" && roomId) {
-          cleanupOrder.push("room_cleanup_failed");
-          return Response.json({ error: "injected_cleanup_failure" }, { status: 503 });
-        }
         return originalFetch.call(this, request);
       },
     );
@@ -582,7 +515,7 @@ describe("durable Multiplayer rooms", () => {
     }
     expect(creation!.status).toBe(503);
     expect(await creation!.json()).toEqual({ error: "room_initialization_failed" });
-    expect(cleanupOrder).toEqual(["initialization_committed", "room_cleanup_failed"]);
+    expect(cleanupOrder).toEqual(["initialization_committed"]);
     expect(roomId).toBeTruthy();
     expect(agentId).toBeTruthy();
     rooms.add(roomId!);
@@ -712,11 +645,7 @@ describe("durable Multiplayer rooms", () => {
     expect(await quotaLeaseCount(owner.room_id)).toBe(0);
     expect(await sessionStateCount(agentId)).toBe(0);
     expect(quotaReleaseAttempts).toBe(3);
-    expect(childDeletes).toEqual([
-      { agentId, status: 204 },
-      { agentId, status: 204 },
-      { agentId, status: 204 },
-    ]);
+    expect(childDeletes).toEqual([{ agentId, status: 204 }]);
     rooms.delete(owner.room_id);
   });
 

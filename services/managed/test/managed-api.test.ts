@@ -1,7 +1,7 @@
 import { env, SELF as RAW_SELF, evictDurableObject } from "cloudflare:test";
-import { afterEach, beforeAll, describe, expect, it } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
-import type { Env } from "../src/index";
+import { NanocodexSession, type Env } from "../src/index";
 
 const testEnv = env as unknown as Env;
 const USER_ID = "11111111-1111-4111-8111-111111111111";
@@ -214,6 +214,92 @@ describe("managed agents REST and resumable SSE", () => {
     } });
     expect(wrong.status).toBe(401);
     expect((await SELF.fetch(stateUrl)).status).toBe(200);
+  });
+
+  it("forwards one owner-asserted session request and overwrites caller assertions", async () => {
+    const agent = await createAgent();
+    const stateUrl = agent.events_url.replace(/\/events$/, "");
+    const originalFetch = NanocodexSession.prototype.fetch;
+    const forwarded: Array<{ owner: string | null; path: string }> = [];
+    const fetchSpy = vi.spyOn(NanocodexSession.prototype, "fetch").mockImplementation(
+      async function (this: NanocodexSession, request: Request): Promise<Response> {
+        forwarded.push({
+          owner: request.headers.get("x-nanocodex-owner-id"),
+          path: new URL(request.url).pathname,
+        });
+        return originalFetch.call(this, request);
+      },
+    );
+    try {
+      const owner = await SELF.fetch(stateUrl, {
+        headers: { "x-nanocodex-owner-id": OTHER_USER_ID },
+      });
+      expect(owner.status).toBe(200);
+      expect(forwarded).toEqual([{ owner: USER_ID, path: "/state" }]);
+
+      forwarded.length = 0;
+      const other = await RAW_SELF.fetch(stateUrl, {
+        headers: {
+          authorization: `Bearer ${OTHER_API_KEY}`,
+          "x-nanocodex-owner-id": USER_ID,
+        },
+      });
+      expect(other.status).toBe(404);
+      expect(await other.json()).toEqual({ error: "not_found" });
+      expect(forwarded).toEqual([{ owner: OTHER_USER_ID, path: "/state" }]);
+    } finally {
+      fetchSpy.mockRestore();
+    }
+  });
+
+  it("starts credential binding and session initialization before either settles", async () => {
+    const originalBroker = testEnv.NANOCODEX;
+    const originalSessions = testEnv.NANOCODEX_SESSIONS;
+    const started = new Set<"binding" | "initialization">();
+    let release!: () => void;
+    const bothStarted = new Promise<void>((resolve) => { release = resolve; });
+    const markStarted = async (operation: "binding" | "initialization") => {
+      started.add(operation);
+      if (started.size === 2) release();
+      await bothStarted;
+    };
+    testEnv.NANOCODEX = {
+      async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+        const request = new Request(input, init);
+        if (request.method === "PUT" && new URL(request.url).pathname.startsWith("/subjects/")) {
+          await markStarted("binding");
+        }
+        return originalBroker.fetch(input, init);
+      },
+    } as Fetcher;
+    testEnv.NANOCODEX_SESSIONS = {
+      idFromName(name: string) {
+        return originalSessions.idFromName(name);
+      },
+      getByName(name: string) {
+        const session = originalSessions.getByName(name);
+        return {
+          async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+            const request = new Request(input, init);
+            if (request.method === "PUT" && new URL(request.url).pathname === "/initialize") {
+              await markStarted("initialization");
+            }
+            return session.fetch(input, init);
+          },
+        } as DurableObjectStub;
+      },
+    } as Env["NANOCODEX_SESSIONS"];
+
+    try {
+      const response = await SELF.fetch("https://example.test/v1/agents", { method: "POST" });
+      expect(response.status).toBe(201);
+      const receipt = await response.json<AgentReceipt>();
+      createdAgents.add(receipt.agent_id);
+      expect(started).toEqual(new Set(["binding", "initialization"]));
+    } finally {
+      testEnv.NANOCODEX = originalBroker;
+      testEnv.NANOCODEX_SESSIONS = originalSessions;
+    }
   });
 
   it("lists only the current user's agents and hides them from other users", async () => {

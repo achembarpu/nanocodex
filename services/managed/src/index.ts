@@ -37,7 +37,6 @@ import {
   validateDisplayName,
 } from "./multiplayer-protocol";
 import {
-  MULTIPLAYER_CREATION_CLAIM_MS,
   MULTIPLAYER_ROOM_LEASE_MS,
   MultiplayerQuota,
 } from "./multiplayer-quota";
@@ -82,13 +81,12 @@ const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9
 const ROOM_ROUTE_ID = /^([0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})~([A-Za-z0-9_-]{43})$/;
 const AGENT_TOKEN = /^[A-Za-z0-9_-]{43}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const RECEIPT_NONCE = /^[A-Za-z0-9_-]{16}$/;
-const SEALED_RECEIPT = /^[A-Za-z0-9_-]{32,4096}$/;
 const TURN_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const IDEMPOTENCY_KEY = /^[\x21-\x7e]{1,256}$/;
 const encoder = new TextEncoder();
 const ENCODED_PONG = JSON.stringify({ type: "pong" });
 const SESSION_DELETING_KEY = "nanocodex:session-deleting";
+const SESSION_OWNER_ASSERTION = "x-nanocodex-owner-id";
 
 export interface Env extends AccountAuthEnv {
   NANOCODEX_SESSIONS: DurableObjectNamespace<NanocodexSession>;
@@ -171,22 +169,6 @@ type RoomInitializationReceipt = {
   member_id: string;
   member_token: string;
   public_origin: string;
-};
-
-type SealedRoomCreationReceipt = {
-  receipt_nonce: string;
-  receipt_ciphertext: string;
-};
-
-type RoomQuotaReservation = {
-  room_id: string;
-  expires_at: number;
-  creation: {
-    state: "pending" | "complete";
-    role: "owner" | "follower" | "takeover" | "replay";
-    receipt_nonce?: string;
-    receipt_ciphertext?: string;
-  };
 };
 
 const AGENT_CAPABILITIES = Object.freeze({
@@ -304,23 +286,33 @@ export default {
       const agentId = uuidV7();
       const subject = env.NANOCODEX_SESSIONS.idFromName(agentId).toString();
       const stub = env.NANOCODEX_SESSIONS.getByName(agentId);
-      try {
-        await bindAgentCredential(env.NANOCODEX, subject, principal.userId);
-      } catch {
-        return json({ error: "credential_broker_unavailable" }, { status: 503 });
-      }
-      const initialized = await stub.fetch("https://session.internal/initialize", {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          session_id: agentId,
-          owner_id: principal.userId,
-          public_origin: url.origin,
+      const [credentialBinding, initialization] = await Promise.allSettled([
+        bindAgentCredential(env.NANOCODEX, subject, principal.userId),
+        stub.fetch("https://session.internal/initialize", {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            session_id: agentId,
+            owner_id: principal.userId,
+            public_origin: url.origin,
+          }),
         }),
-      });
-      if (!initialized.ok) {
-        await unbindAgentCredential(env.NANOCODEX, subject, principal.userId).catch(() => {});
-        return json({ error: "agent initialization failed" }, { status: 503 });
+      ]);
+      if (initialization.status === "fulfilled") {
+        await initialization.value.body?.cancel();
+      }
+      if (credentialBinding.status === "rejected"
+        || initialization.status === "rejected"
+        || !initialization.value.ok) {
+        await Promise.all([
+          stub.fetch("https://session.internal/session", { method: "DELETE" })
+            .then((response) => response.body?.cancel())
+            .catch(() => {}),
+          unbindAgentCredential(env.NANOCODEX, subject, principal.userId).catch(() => {}),
+        ]);
+        return credentialBinding.status === "rejected"
+          ? json({ error: "credential_broker_unavailable" }, { status: 503 })
+          : json({ error: "agent initialization failed" }, { status: 503 });
       }
       try {
         await attachAgent(env, principal.userId, agentId);
@@ -350,15 +342,8 @@ export default {
     const principal = await authenticate(request, env, url);
     if (!principal) return json({ error: "unauthorized" }, { status: 401 });
     const stub = env.NANOCODEX_SESSIONS.getByName(agentId);
-    const owner = await stub.fetch("https://session.internal/owner");
-    if (!owner.ok) {
-      await owner.body?.cancel();
-      return json({ error: "not_found" }, { status: 404 });
-    }
-    const ownership = await owner.json<{ owner_id?: unknown }>();
-    if (ownership.owner_id !== principal.userId) {
-      return json({ error: "not_found" }, { status: 404 });
-    }
+    const sessionHeaders = new Headers(request.headers);
+    sessionHeaders.set(SESSION_OWNER_ASSERTION, principal.userId);
     const publicOrigin = `public_origin=${encodeURIComponent(url.origin)}`;
     if (resource === "ws") {
       if (request.method !== "GET" || request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
@@ -369,7 +354,7 @@ export default {
       }
       return stub.fetch(
         `https://session.internal/socket?${publicOrigin}`,
-        request,
+        new Request(request, { headers: sessionHeaders }),
       );
     }
     if (resource === "events") {
@@ -377,7 +362,7 @@ export default {
       const query = new URLSearchParams(url.searchParams);
       query.set("public_origin", url.origin);
       return stub.fetch(`https://session.internal/events?${query}`, {
-        headers: request.headers,
+        headers: sessionHeaders,
         signal: request.signal,
       });
     }
@@ -387,7 +372,7 @@ export default {
       if (originFailure) return originFailure;
       return stub.fetch(`https://session.internal/turns?${publicOrigin}`, {
         method: "POST",
-        headers: request.headers,
+        headers: sessionHeaders,
         body: request.body,
       });
     }
@@ -406,7 +391,7 @@ export default {
         `https://session.internal/turns/${turnMatch[1]}${action ? `/${action}` : ""}?${publicOrigin}`,
         {
           method: request.method,
-          headers: request.headers,
+          headers: sessionHeaders,
           ...(request.method === "POST" ? { body: request.body } : {}),
         },
       );
@@ -414,12 +399,16 @@ export default {
     if (!resource && request.method === "GET") {
       return stub.fetch(
         `https://session.internal/state?${publicOrigin}`,
+        { headers: sessionHeaders },
       );
     }
     if (!resource && request.method === "DELETE") {
       const originFailure = requireSameOriginMutation(request, url, principal);
       if (originFailure) return originFailure;
-      const deleted = await stub.fetch("https://session.internal/session", { method: "DELETE" });
+      const deleted = await stub.fetch("https://session.internal/session", {
+        method: "DELETE",
+        headers: sessionHeaders,
+      });
       if (deleted.ok) {
         await Promise.all([
           detachAgent(env, principal.userId, agentId),
@@ -541,6 +530,10 @@ export class NanocodexSession extends DurableComputerSession {
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    const ownerAssertion = request.headers.get(SESSION_OWNER_ASSERTION);
+    if (ownerAssertion !== null && ownerAssertion !== this.#session()?.owner_id) {
+      return json({ error: "not_found" }, { status: 404 });
+    }
     const forwardedOrigin = url.searchParams.get("public_origin");
     if (!this.#deleting
       && forwardedOrigin !== null
@@ -615,12 +608,6 @@ export class NanocodexSession extends DurableComputerSession {
         );
       }
       return new Response(null, { status: 204 });
-    }
-    if (request.method === "GET" && url.pathname === "/owner") {
-      const session = this.#session();
-      return session
-        ? json({ owner_id: session.owner_id })
-        : json({ error: "not_found" }, { status: 404 });
     }
     if (request.method === "GET" && url.pathname === "/socket") return this.#upgrade();
     if (request.method === "GET" && url.pathname === "/events") {
@@ -1936,8 +1923,15 @@ async function createMultiplayerRoom(
   }
   const publicOrigin = url.origin;
 
-  const claim = randomCapability();
-  const [roomUuid, agentId, createIdHash, requestHash, claimHash] = await Promise.all([
+  const [
+    roomUuid,
+    agentId,
+    creatorMemberId,
+    invite,
+    memberToken,
+    createIdHash,
+    requestHash,
+  ] = await Promise.all([
     scopedRuntimeId(
       env.NANOCODEX_ADMIN_TOKEN,
       `nanocodex-multiplayer-create-room-v1:${createId}`,
@@ -1946,31 +1940,38 @@ async function createMultiplayerRoom(
       env.NANOCODEX_ADMIN_TOKEN,
       `nanocodex-multiplayer-create-agent-v1:${createId}`,
     ),
+    scopedRuntimeId(
+      env.NANOCODEX_ADMIN_TOKEN,
+      `nanocodex-multiplayer-create-member-v1:${createId}`,
+    ),
+    scopedCapability(
+      env.NANOCODEX_ADMIN_TOKEN,
+      `nanocodex-multiplayer-create-invite-v1:${createId}`,
+    ),
+    scopedCapability(
+      env.NANOCODEX_ADMIN_TOKEN,
+      `nanocodex-multiplayer-create-member-cookie-v1:${createId}`,
+    ),
     hashText(`nanocodex-multiplayer-create-id-v1\n${createId}`),
     hashText(`nanocodex-multiplayer-create-request-v1\n${ownerId}\n${publicOrigin}\n${ownerName}`),
-    hashText(`nanocodex-multiplayer-create-claim-v1\n${claim}`),
   ]);
   const roomId = await signedRoomRouteId(env.NANOCODEX_ADMIN_TOKEN, roomUuid);
   const quota = env.NANOCODEX_MULTIPLAYER_QUOTA.getByName("global");
   const room = env.NANOCODEX_ROOMS.getByName(roomId);
-  const reservationBody = {
-    room_id: roomId,
-    expires_at: Date.now() + MULTIPLAYER_ROOM_LEASE_MS,
-    create_id_hash: createIdHash,
-    request_hash: requestHash,
-    claim_hash: claimHash,
-    claim_deadline: Date.now() + MULTIPLAYER_CREATION_CLAIM_MS,
-    allow_takeover: true,
-  };
   let reserved: Response;
   try {
-    reserved = await reserveMultiplayerRoom(quota, reservationBody);
+    reserved = await quota.fetch("https://quota.internal/rooms", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        room_id: roomId,
+        expires_at: Date.now() + MULTIPLAYER_ROOM_LEASE_MS,
+        create_id_hash: createIdHash,
+        request_hash: requestHash,
+      }),
+    });
   } catch {
-    try {
-      reserved = await reserveMultiplayerRoom(quota, reservationBody);
-    } catch {
-      return json({ error: "multiplayer_capacity_unavailable" }, { status: 503 });
-    }
+    return json({ error: "multiplayer_capacity_unavailable" }, { status: 503 });
   }
   if (!reserved.ok) {
     if (reserved.status === 409) {
@@ -1990,96 +1991,15 @@ async function createMultiplayerRoom(
     });
   }
 
-  let reservation: RoomQuotaReservation;
   try {
-    reservation = await decodeRoomQuotaReservation(reserved, roomId);
+    const reservation = await reserved.json<unknown>();
+    if (!reservation || typeof reservation !== "object" || Array.isArray(reservation)
+      || (reservation as Record<string, unknown>).room_id !== roomId
+      || !Number.isSafeInteger((reservation as Record<string, unknown>).expires_at)) {
+      throw new Error("invalid quota response");
+    }
   } catch {
     return json({ error: "multiplayer_capacity_unavailable" }, { status: 503 });
-  }
-  if (reservation.creation.state === "complete") {
-    const receipt = await openRoomCreationReceipt(
-      env.NANOCODEX_ADMIN_TOKEN,
-      createId,
-      createIdHash,
-      requestHash,
-      roomId,
-      reservation.creation,
-    );
-    return receipt
-      ? roomCreationResponse(receipt, 201)
-      : json({ error: "room_receipt_unavailable" }, { status: 503 });
-  }
-  if (reservation.creation.role === "follower") {
-    const receipt = await awaitRoomCreationReceipt(
-      quota,
-      reservationBody,
-      env.NANOCODEX_ADMIN_TOKEN,
-      createId,
-      createIdHash,
-      requestHash,
-      roomId,
-      request.signal,
-      160,
-    );
-    if (receipt) return roomCreationResponse(receipt, 201);
-    if (request.signal.aborted) {
-      return json({ error: "room_creation_pending" }, { status: 503 });
-    }
-    reservationBody.claim_deadline = Date.now() + MULTIPLAYER_CREATION_CLAIM_MS;
-    try {
-      reserved = await reserveMultiplayerRoom(quota, reservationBody, true);
-      if (!reserved.ok) {
-        await reserved.body?.cancel();
-        return json({ error: "room_creation_pending" }, { status: 503 });
-      }
-      reservation = await decodeRoomQuotaReservation(reserved, roomId);
-    } catch {
-      return json({ error: "room_creation_pending" }, { status: 503 });
-    }
-    if (reservation.creation.state === "complete") {
-      const replayed = await openRoomCreationReceipt(
-        env.NANOCODEX_ADMIN_TOKEN,
-        createId,
-        createIdHash,
-        requestHash,
-        roomId,
-        reservation.creation,
-      );
-      return replayed
-        ? roomCreationResponse(replayed, 201)
-        : json({ error: "room_receipt_unavailable" }, { status: 503 });
-    }
-    if (reservation.creation.role !== "takeover") {
-      return json({ error: "room_creation_pending" }, { status: 503 });
-    }
-  }
-  if (reservation.creation.role === "takeover") {
-    const cleanupAuthorization = await authorizeRoomCreationCleanup(
-      quota,
-      createIdHash,
-      requestHash,
-      roomId,
-      claimHash,
-    );
-    if (cleanupAuthorization === "rejected"
-      || !await compensateRoomInitialization(room, roomId, true)) {
-      return json({ error: "room_initialization_failed" }, { status: 503 });
-    }
-    reservationBody.claim_deadline = Date.now() + MULTIPLAYER_CREATION_CLAIM_MS;
-    try {
-      reserved = await reserveMultiplayerRoom(quota, reservationBody);
-      if (!reserved.ok) {
-        await reserved.body?.cancel();
-        return json({ error: "room_initialization_failed" }, { status: 503 });
-      }
-      reservation = await decodeRoomQuotaReservation(reserved, roomId);
-    } catch {
-      return json({ error: "room_initialization_failed" }, { status: 503 });
-    }
-    if (reservation.creation.state !== "pending"
-      || reservation.creation.role !== "owner") {
-      return json({ error: "room_initialization_failed" }, { status: 503 });
-    }
   }
 
   let initialized: Response;
@@ -2093,18 +2013,14 @@ async function createMultiplayerRoom(
         owner_id: ownerId,
         public_origin: publicOrigin,
         owner_name: ownerName,
+        create_id_hash: createIdHash,
+        request_hash: requestHash,
+        invite,
+        member_id: creatorMemberId,
+        member_token: memberToken,
       }),
     });
   } catch {
-    await compensateClaimedRoomInitialization(
-      quota,
-      room,
-      createIdHash,
-      requestHash,
-      roomId,
-      claimHash,
-      false,
-    );
     return json({ error: "room_initialization_failed" }, { status: 503 });
   }
   if (!initialized.ok) {
@@ -2112,35 +2028,13 @@ async function createMultiplayerRoom(
     try {
       await initialized.body?.cancel();
     } catch {
-      // Cleanup below owns the ambiguous initialization outcome.
+      // The Room's durable state and alarm own any ambiguous initialization.
     }
-    if (status === 409) {
-      const recovered = await awaitRoomCreationReceipt(
-        quota,
-        reservationBody,
-        env.NANOCODEX_ADMIN_TOKEN,
-        createId,
-        createIdHash,
-        requestHash,
-        roomId,
-        request.signal,
-      );
-      return recovered
-        ? roomCreationResponse(recovered, 201)
-        : json({ error: "room_creation_pending" }, { status: 503 });
-    }
-    await compensateClaimedRoomInitialization(
-      quota,
-      room,
-      createIdHash,
-      requestHash,
-      roomId,
-      claimHash,
-      true,
-    );
-    return json({ error: "room_initialization_failed" }, {
-      status: status >= 500 ? 503 : 400,
-    });
+    return status === 409
+      ? json({ error: "create_id_conflict" }, { status: 409 })
+      : json({ error: "room_initialization_failed" }, {
+        status: status >= 500 ? 503 : 400,
+      });
   }
 
   let receipt: RoomInitializationReceipt;
@@ -2150,272 +2044,15 @@ async function createMultiplayerRoom(
       roomId,
       publicOrigin,
     );
+    if (receipt.invite !== invite
+      || receipt.member_id !== creatorMemberId
+      || receipt.member_token !== memberToken) {
+      throw new Error("room receipt does not match deterministic credentials");
+    }
   } catch {
-    await compensateClaimedRoomInitialization(
-      quota,
-      room,
-      createIdHash,
-      requestHash,
-      roomId,
-      claimHash,
-      false,
-    );
-    return json({ error: "room_initialization_failed" }, { status: 503 });
-  }
-  const sealed = await sealRoomCreationReceipt(
-    env.NANOCODEX_ADMIN_TOKEN,
-    createId,
-    createIdHash,
-    requestHash,
-    roomId,
-    receipt,
-  );
-  let completed = false;
-  try {
-    const completion = await quota.fetch(
-      `https://quota.internal/room-creations/${createIdHash}`,
-      {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          room_id: roomId,
-          request_hash: requestHash,
-          claim_hash: claimHash,
-          ...sealed,
-        }),
-      },
-    );
-    completed = completion.ok;
-    await completion.body?.cancel();
-  } catch {
-    // The checked replay read below resolves an ambiguously committed receipt.
-  }
-  if (!completed) {
-    const recovered = await awaitRoomCreationReceipt(
-      quota,
-      reservationBody,
-      env.NANOCODEX_ADMIN_TOKEN,
-      createId,
-      createIdHash,
-      requestHash,
-      roomId,
-      request.signal,
-      8,
-    );
-    if (recovered) return roomCreationResponse(recovered, 201);
     return json({ error: "room_initialization_failed" }, { status: 503 });
   }
   return roomCreationResponse(receipt, 201);
-}
-
-function reserveMultiplayerRoom(
-  quota: DurableObjectStub,
-  reservation: {
-    room_id: string;
-    expires_at: number;
-    create_id_hash: string;
-    request_hash: string;
-    claim_hash: string;
-    claim_deadline: number;
-    allow_takeover: boolean;
-  },
-  allowTakeover = reservation.allow_takeover,
-): Promise<Response> {
-  return quota.fetch("https://quota.internal/rooms", {
-    method: "POST",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({
-      ...reservation,
-      expires_at: Date.now() + MULTIPLAYER_ROOM_LEASE_MS,
-      claim_deadline: Math.max(
-        reservation.claim_deadline,
-        Date.now() + MULTIPLAYER_CREATION_CLAIM_MS,
-      ),
-      allow_takeover: allowTakeover,
-    }),
-  });
-}
-
-async function decodeRoomQuotaReservation(
-  response: Response,
-  expectedRoomId: string,
-): Promise<RoomQuotaReservation> {
-  const value = await response.json<unknown>();
-  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("invalid quota response");
-  const reservation = value as Record<string, unknown>;
-  const creation = reservation.creation;
-  if (reservation.room_id !== expectedRoomId
-    || !Number.isSafeInteger(reservation.expires_at)
-    || !creation || typeof creation !== "object" || Array.isArray(creation)) {
-    throw new Error("invalid quota response");
-  }
-  const receipt = creation as Record<string, unknown>;
-  const role = receipt.role;
-  if (!["owner", "follower", "takeover", "replay"].includes(String(role))) {
-    throw new Error("invalid quota receipt role");
-  }
-  if (receipt.state === "pending") {
-    if (role === "replay"
-      || Object.keys(receipt).some((key) => !["state", "role"].includes(key))) {
-      throw new Error("invalid pending quota receipt");
-    }
-    return {
-      room_id: expectedRoomId,
-      expires_at: reservation.expires_at as number,
-      creation: {
-        state: "pending",
-        role: role as "owner" | "follower" | "takeover",
-      },
-    };
-  }
-  if (receipt.state !== "complete"
-    || role !== "replay"
-    || typeof receipt.receipt_nonce !== "string" || !RECEIPT_NONCE.test(receipt.receipt_nonce)
-    || typeof receipt.receipt_ciphertext !== "string" || !SEALED_RECEIPT.test(receipt.receipt_ciphertext)
-    || Object.keys(receipt).some((key) => ![
-      "state",
-      "role",
-      "receipt_nonce",
-      "receipt_ciphertext",
-    ].includes(key))) {
-    throw new Error("invalid complete quota receipt");
-  }
-  return {
-    room_id: expectedRoomId,
-    expires_at: reservation.expires_at as number,
-    creation: {
-      state: "complete",
-      role: "replay",
-      receipt_nonce: receipt.receipt_nonce,
-      receipt_ciphertext: receipt.receipt_ciphertext,
-    },
-  };
-}
-
-async function awaitRoomCreationReceipt(
-  quota: DurableObjectStub,
-  reservationBody: {
-    room_id: string;
-    expires_at: number;
-    create_id_hash: string;
-    request_hash: string;
-    claim_hash: string;
-    claim_deadline: number;
-    allow_takeover: boolean;
-  },
-  secret: string,
-  createId: string,
-  createIdHash: string,
-  requestHash: string,
-  roomId: string,
-  signal: AbortSignal,
-  attempts = 80,
-): Promise<RoomInitializationReceipt | undefined> {
-  for (let attempt = 0; attempt < attempts && !signal.aborted; attempt += 1) {
-    if (attempt > 0) {
-      await new Promise((resolve) => setTimeout(resolve, Math.min(250, 10 * attempt)));
-      if (signal.aborted) return undefined;
-    }
-    let response: Response;
-    try {
-      response = await reserveMultiplayerRoom(quota, reservationBody, false);
-    } catch {
-      continue;
-    }
-    if (!response.ok) {
-      await response.body?.cancel();
-      return undefined;
-    }
-    let reservation: RoomQuotaReservation;
-    try {
-      reservation = await decodeRoomQuotaReservation(response, roomId);
-    } catch {
-      return undefined;
-    }
-    if (reservation.creation.state !== "complete") continue;
-    return openRoomCreationReceipt(
-      secret,
-      createId,
-      createIdHash,
-      requestHash,
-      roomId,
-      reservation.creation,
-    );
-  }
-  return undefined;
-}
-
-async function sealRoomCreationReceipt(
-  secret: string,
-  createId: string,
-  createIdHash: string,
-  requestHash: string,
-  roomId: string,
-  receipt: RoomInitializationReceipt,
-): Promise<SealedRoomCreationReceipt> {
-  const nonce = crypto.getRandomValues(new Uint8Array(12));
-  const ciphertext = await crypto.subtle.encrypt(
-    {
-      name: "AES-GCM",
-      iv: nonce,
-      additionalData: roomCreationReceiptAad(createIdHash, requestHash, roomId),
-    },
-    await roomCreationReceiptKey(secret, createId),
-    encoder.encode(JSON.stringify(receipt)),
-  );
-  return {
-    receipt_nonce: base64UrlEncode(nonce),
-    receipt_ciphertext: base64UrlEncode(new Uint8Array(ciphertext)),
-  };
-}
-
-async function openRoomCreationReceipt(
-  secret: string,
-  createId: string,
-  createIdHash: string,
-  requestHash: string,
-  roomId: string,
-  sealed: {
-    receipt_nonce?: string;
-    receipt_ciphertext?: string;
-  },
-): Promise<RoomInitializationReceipt | undefined> {
-  if (!sealed.receipt_nonce || !sealed.receipt_ciphertext) return undefined;
-  try {
-    const plaintext = await crypto.subtle.decrypt(
-      {
-        name: "AES-GCM",
-        iv: base64UrlDecode(sealed.receipt_nonce),
-        additionalData: roomCreationReceiptAad(createIdHash, requestHash, roomId),
-      },
-      await roomCreationReceiptKey(secret, createId),
-      base64UrlDecode(sealed.receipt_ciphertext),
-    );
-    return validateRoomInitializationReceipt(
-      JSON.parse(new TextDecoder().decode(plaintext)) as unknown,
-      roomId,
-    );
-  } catch {
-    return undefined;
-  }
-}
-
-async function roomCreationReceiptKey(secret: string, createId: string): Promise<CryptoKey> {
-  const material = await scopedSignature(
-    secret,
-    `nanocodex-multiplayer-create-receipt-v1:${createId}`,
-  );
-  return crypto.subtle.importKey("raw", material, "AES-GCM", false, ["encrypt", "decrypt"]);
-}
-
-function roomCreationReceiptAad(
-  createIdHash: string,
-  requestHash: string,
-  roomId: string,
-): Uint8Array {
-  return encoder.encode(
-    `nanocodex-multiplayer-create-receipt-v1\n${createIdHash}\n${requestHash}\n${roomId}`,
-  );
 }
 
 function validateRoomInitializationReceipt(
@@ -2471,97 +2108,6 @@ async function hashText(value: string): Promise<string> {
   return [...new Uint8Array(digest)]
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
-}
-
-function base64UrlEncode(value: Uint8Array): string {
-  let binary = "";
-  for (const byte of value) binary += String.fromCharCode(byte);
-  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
-}
-
-function base64UrlDecode(value: string): Uint8Array {
-  const encoded = value.replaceAll("-", "+").replaceAll("_", "/");
-  const binary = atob(`${encoded}${"=".repeat((4 - encoded.length % 4) % 4)}`);
-  return Uint8Array.from(binary, (character) => character.charCodeAt(0));
-}
-
-function randomCapability(): string {
-  return base64UrlEncode(crypto.getRandomValues(new Uint8Array(32)));
-}
-
-async function compensateRoomInitialization(
-  room: DurableObjectStub,
-  roomId: string,
-  releaseIfAbsent: boolean,
-): Promise<boolean> {
-  let cleanup: Response;
-  try {
-    const url = releaseIfAbsent
-      ? `https://room.internal/admin?room_id=${encodeURIComponent(roomId)}`
-      : "https://room.internal/admin";
-    cleanup = await room.fetch(url, { method: "DELETE" });
-  } catch {
-    return false;
-  }
-  try {
-    await cleanup.body?.cancel();
-  } catch {
-    // The room's durable state and alarm remain the cleanup authority.
-  }
-  return cleanup.ok;
-}
-
-async function authorizeRoomCreationCleanup(
-  quota: DurableObjectStub,
-  createIdHash: string,
-  requestHash: string,
-  roomId: string,
-  claimHash: string,
-): Promise<"authorized" | "ambiguous" | "rejected"> {
-  let response: Response;
-  try {
-    response = await quota.fetch(
-      `https://quota.internal/room-creations/${createIdHash}/cleanup`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({
-          room_id: roomId,
-          request_hash: requestHash,
-          claim_hash: claimHash,
-        }),
-      },
-    );
-  } catch {
-    return "ambiguous";
-  }
-  const authorized = response.ok;
-  try {
-    await response.body?.cancel();
-  } catch {
-    return authorized ? "authorized" : "rejected";
-  }
-  return authorized ? "authorized" : "rejected";
-}
-
-async function compensateClaimedRoomInitialization(
-  quota: DurableObjectStub,
-  room: DurableObjectStub,
-  createIdHash: string,
-  requestHash: string,
-  roomId: string,
-  claimHash: string,
-  releaseIfAbsent: boolean,
-): Promise<boolean> {
-  const authorization = await authorizeRoomCreationCleanup(
-    quota,
-    createIdHash,
-    requestHash,
-    roomId,
-    claimHash,
-  );
-  if (authorization === "rejected") return false;
-  return compensateRoomInitialization(room, roomId, releaseIfAbsent);
 }
 
 function authorizeAgent(

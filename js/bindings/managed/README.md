@@ -31,7 +31,9 @@ const agent = await Agent.get(process.env.NANOCODEX_AGENT_ID, {
 `agent.delete()` removes the agent and its retained state. `agent.events.watch`
 is an async iterator over durable events. Pass its last decimal `cursor` to a
 later watcher to resume strictly after the acknowledged event. Network endings
-reconnect automatically from that cursor.
+reconnect automatically from that cursor. Watchers and independently awaitable
+turn results on one agent handle share one replayable event connection; each
+subscriber keeps its own cursor, so consuming one never steals another's events.
 
 The managed API never accepts model-provider credentials, egress bindings,
 runtime environment objects, credential grants, or arbitrary request headers.

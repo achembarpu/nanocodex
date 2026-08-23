@@ -10,6 +10,7 @@ const TERMINAL_TYPES = new Set([
   "turn_blocked",
   "turn_failed",
 ]);
+const TERMINAL_CACHE_CAPACITY = 256;
 const ALLOWED_OPTIONS = new Set(["apiKey", "baseUrl", "fetch"]);
 
 /** Create a new managed agent owned by the authenticated account. */
@@ -48,23 +49,27 @@ export { remove as delete };
 
 function agentHandle(client, id) {
   validateAgentId(id);
+  const eventStream = replayableEventStream(client, id);
   const events = Object.freeze({
-    watch: (options = {}) => watchEvents(client, id, options),
+    watch: (options = {}) => eventStream.subscribe(options),
   });
   const agent = {
     type: "managed",
     id,
     events,
     turn: Object.freeze({
-      prompt: (options) => managedTurn(client, id, options),
+      prompt: (options) => managedTurn(client, id, eventStream, options),
     }),
     state: () => client.json(agentPath(id)),
-    delete: () => client.empty(agentPath(id), { method: "DELETE" }),
+    delete: async () => {
+      await client.empty(agentPath(id), { method: "DELETE" });
+      eventStream.close();
+    },
   };
   return Object.freeze(agent);
 }
 
-function managedTurn(client, agentId, options) {
+function managedTurn(client, agentId, eventStream, options) {
   if (!options || typeof options !== "object" || Array.isArray(options)) {
     throw new TypeError("managed prompt options must be an object");
   }
@@ -106,7 +111,7 @@ function managedTurn(client, agentId, options) {
         signal,
       });
     },
-    result: () => result ??= waitForResult(client, agentId, submission, signal),
+    result: () => result ??= waitForResult(eventStream, submission, signal),
   };
   return Object.freeze(turn);
 }
@@ -133,18 +138,25 @@ async function retrySubmission(client, agentId, options) {
   throw failure;
 }
 
-async function waitForResult(client, agentId, submission, signal) {
+async function waitForResult(eventStream, submission, signal) {
   const accepted = await submission;
   const turnId = requiredString(accepted, "turn_id");
   if (accepted.terminal) return terminalResult(turnId, accepted.terminal, accepted.terminal_cursor);
   const cursor = requiredCursor(accepted, "accepted_cursor");
-  for await (const event of watchEvents(client, agentId, { cursor, signal })) {
-    const data = event.data;
-    if (data.type === "stream_failed") {
-      throw new ManagedError("stream_failed", stringOr(data.error, "managed event stream failed"));
+  const events = eventStream.subscribe({ cursor, signal });
+  try {
+    const retained = eventStream.terminal(turnId, cursor);
+    if (retained) return terminalResult(turnId, retained.data, retained.cursor);
+    for await (const event of events) {
+      const data = event.data;
+      if (data.type === "stream_failed") {
+        throw new ManagedError("stream_failed", stringOr(data.error, "managed event stream failed"));
+      }
+      if (data.turn_id !== turnId && data.id !== turnId) continue;
+      if (TERMINAL_TYPES.has(data.type)) return terminalResult(turnId, data, event.cursor);
     }
-    if (data.turn_id !== turnId && data.id !== turnId) continue;
-    if (TERMINAL_TYPES.has(data.type)) return terminalResult(turnId, data, event.cursor);
+  } finally {
+    await events.return();
   }
   if (signal?.aborted) throw abortError(signal.reason);
   throw new ManagedError("event_stream_ended", "managed event stream ended before the turn completed");
@@ -171,15 +183,160 @@ function terminalResult(turnId, terminal, cursor) {
   throw new ManagedError(code, message);
 }
 
-async function* watchEvents(client, agentId, options) {
-  if (!options || typeof options !== "object" || Array.isArray(options)) {
-    throw new TypeError("managed event options must be an object");
-  }
-  let cursor = options.cursor ?? "0";
-  if (typeof cursor !== "string" || !CURSOR.test(cursor)) {
-    throw new TypeError("managed event cursor must be an unsigned decimal string");
-  }
-  const signal = options.signal;
+function replayableEventStream(client, agentId) {
+  const subscribers = new Set();
+  const terminals = new Map();
+  let connection;
+  let connectionCursor;
+  let closed = false;
+
+  const remove = (subscriber) => {
+    if (!subscribers.delete(subscriber)) return;
+    subscriber.signal?.removeEventListener("abort", subscriber.onAbort);
+    if (subscribers.size === 0) connection?.controller.abort();
+  };
+
+  const finish = (subscriber, error) => {
+    if (subscriber.done) return;
+    subscriber.done = true;
+    subscriber.error = error;
+    if (subscriber.pending) {
+      const pending = subscriber.pending;
+      subscriber.pending = undefined;
+      if (error) pending.reject(error);
+      else pending.resolve({ value: undefined, done: true });
+    }
+  };
+
+  const unsubscribe = (subscriber) => {
+    finish(subscriber);
+    remove(subscriber);
+    return Promise.resolve({ value: undefined, done: true });
+  };
+
+  const start = () => {
+    if (closed || connection || subscribers.size === 0) return;
+    const cursor = [...subscribers].reduce(
+      (lowest, subscriber) => cursorBefore(subscriber.cursor, lowest) ? subscriber.cursor : lowest,
+      [...subscribers][0].cursor,
+    );
+    const controller = new AbortController();
+    connectionCursor = cursor;
+    const running = (async () => {
+      try {
+        for await (const event of readEvents(client, agentId, cursor, controller.signal)) {
+          connectionCursor = event.cursor;
+          const turnId = event.data.turn_id ?? event.data.id;
+          if (typeof turnId === "string" && TERMINAL_TYPES.has(event.data.type)) {
+            const retained = terminals.get(turnId);
+            if (!retained || cursorBefore(retained.cursor, event.cursor)) {
+              terminals.delete(turnId);
+              terminals.set(turnId, event);
+              if (terminals.size > TERMINAL_CACHE_CAPACITY) {
+                terminals.delete(terminals.keys().next().value);
+              }
+            }
+          }
+          for (const subscriber of subscribers) {
+            if (!cursorBefore(subscriber.cursor, event.cursor)) continue;
+            subscriber.cursor = event.cursor;
+            if (subscriber.pending) {
+              const pending = subscriber.pending;
+              subscriber.pending = undefined;
+              pending.resolve({ value: event, done: false });
+            } else {
+              subscriber.queue.push(event);
+            }
+          }
+        }
+      } catch (error) {
+        if (!controller.signal.aborted) {
+          for (const subscriber of subscribers) finish(subscriber, error);
+          for (const subscriber of [...subscribers]) remove(subscriber);
+        }
+      }
+    })();
+    connection = { controller, running };
+    running.finally(() => {
+      if (connection?.running !== running) return;
+      connection = undefined;
+      connectionCursor = undefined;
+      start();
+    });
+  };
+
+  const subscribe = (options = {}) => {
+    if (!options || typeof options !== "object" || Array.isArray(options)) {
+      throw new TypeError("managed event options must be an object");
+    }
+    const cursor = options.cursor ?? "0";
+    if (typeof cursor !== "string" || !CURSOR.test(cursor)) {
+      throw new TypeError("managed event cursor must be an unsigned decimal string");
+    }
+    if (closed) throw new ManagedError("agent_closed", "managed agent event stream is closed");
+
+    const subscriber = {
+      cursor,
+      queue: [],
+      pending: undefined,
+      done: false,
+      error: undefined,
+      signal: options.signal,
+      onAbort: undefined,
+    };
+    const iterator = {
+      next() {
+        if (subscriber.queue.length > 0) {
+          return Promise.resolve({ value: subscriber.queue.shift(), done: false });
+        }
+        if (subscriber.error) return Promise.reject(subscriber.error);
+        if (subscriber.done) return Promise.resolve({ value: undefined, done: true });
+        if (subscriber.pending) {
+          return Promise.reject(new TypeError("managed event iterator already has a pending read"));
+        }
+        return new Promise((resolve, reject) => { subscriber.pending = { resolve, reject }; });
+      },
+      return: () => unsubscribe(subscriber),
+      throw(error) {
+        unsubscribe(subscriber);
+        return Promise.reject(error);
+      },
+      [Symbol.asyncIterator]() { return this; },
+    };
+    if (subscriber.signal?.aborted) {
+      subscriber.done = true;
+      return Object.freeze(iterator);
+    }
+    subscriber.onAbort = () => unsubscribe(subscriber);
+    subscriber.signal?.addEventListener("abort", subscriber.onAbort, { once: true });
+    subscribers.add(subscriber);
+    if (connectionCursor !== undefined && cursorBefore(cursor, connectionCursor)) {
+      connection?.controller.abort();
+    } else {
+      start();
+    }
+    return Object.freeze(iterator);
+  };
+
+  return Object.freeze({
+    subscribe,
+    terminal(turnId, afterCursor) {
+      const event = terminals.get(turnId);
+      return event && cursorBefore(afterCursor, event.cursor) ? event : undefined;
+    },
+    close() {
+      if (closed) return;
+      closed = true;
+      connection?.controller.abort();
+      for (const subscriber of subscribers) finish(subscriber);
+      for (const subscriber of [...subscribers]) remove(subscriber);
+      terminals.clear();
+    },
+  });
+}
+
+async function* readEvents(client, agentId, initialCursor, signal) {
+  let cursor = initialCursor;
   let reconnectDelay = 1_000;
 
   while (!signal?.aborted) {
@@ -235,6 +392,10 @@ async function* watchEvents(client, agentId, options) {
     }
     if (!signal?.aborted) await delay(reconnectDelay, signal);
   }
+}
+
+function cursorBefore(left, right) {
+  return left.length !== right.length ? left.length < right.length : left < right;
 }
 
 function parseEventFrame(frame) {

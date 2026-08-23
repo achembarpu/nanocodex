@@ -77,7 +77,161 @@ test("managed server authentication sends only an ncx_live bearer and omits cook
   );
 });
 
-test("prompt preserves its idempotency key and result reconnects after the durable cursor", async () => {
+test("prompts and a watcher multiplex one active managed event request without stealing events", async () => {
+  const connections = [];
+  let activeConnections = 0;
+  let maximumActiveConnections = 0;
+  let eventRequests = 0;
+  const fetch = async (input, init) => {
+    const request = new Request(input, init);
+    const url = new URL(request.url);
+    if (request.method === "POST" && url.pathname === "/v1/agents") {
+      return Response.json({ agent_id: agentId }, { status: 201 });
+    }
+    if (request.method === "POST" && url.pathname.endsWith("/turns")) {
+      const body = await request.json();
+      return Response.json({
+        turn_id: body.id,
+        state: "accepted",
+        accepted_cursor: "0",
+        terminal_cursor: null,
+      }, { status: 202 });
+    }
+    if (request.method === "GET" && url.pathname.endsWith("/events")) {
+      eventRequests += 1;
+      activeConnections += 1;
+      maximumActiveConnections = Math.max(maximumActiveConnections, activeConnections);
+      const connection = controlledEventStream(request.signal, () => { activeConnections -= 1; });
+      connections.push(connection);
+      return connection.response;
+    }
+    return Response.json({ error: "not_found" }, { status: 404 });
+  };
+
+  const agent = await Agent.create({ baseUrl: origin, fetch });
+  const watched = [];
+  const watching = (async () => {
+    for await (const event of agent.events.watch()) {
+      watched.push(event);
+      if (watched.length === 3) break;
+    }
+  })();
+  const turns = [1, 2, 3].map((number) => agent.turn.prompt({
+    id: `turn-${number}`,
+    input: `prompt ${number}`,
+    idempotencyKey: `request-${number}`,
+  }));
+  const results = turns.map((turn) => turn.result());
+  await Promise.all(turns.map((turn) => turn.accepted()));
+  await waitFor(() => connections.length === 1);
+  connections[0].send([1, 2, 3].map((number) => sse(String(number), "turn_completed", {
+    cursor: String(number),
+    created_at: number,
+    turn_id: `turn-${number}`,
+    type: "turn_completed",
+    id: `turn-${number}`,
+    final_message: `done ${number}`,
+    usage: null,
+  })).join(""));
+
+  assert.deepEqual((await Promise.all(results)).map((result) => result.finalMessage), [
+    "done 1",
+    "done 2",
+    "done 3",
+  ]);
+  await watching;
+  assert.deepEqual(watched.map((event) => event.data.id), ["turn-1", "turn-2", "turn-3"]);
+  assert.equal(eventRequests, 1);
+  assert.equal(maximumActiveConnections, 1);
+  await waitFor(() => activeConnections === 0);
+});
+
+test("shared event replay reconnect resolves one turn and delivers each cursor exactly once", async () => {
+  const connections = [];
+  const requestedCursors = [];
+  let activeConnections = 0;
+  let maximumActiveConnections = 0;
+  const fetch = async (input, init) => {
+    const request = new Request(input, init);
+    const url = new URL(request.url);
+    if (request.method === "POST" && url.pathname === "/v1/agents") {
+      return Response.json({ agent_id: agentId }, { status: 201 });
+    }
+    if (request.method === "POST" && url.pathname.endsWith("/turns")) {
+      return Response.json({
+        turn_id: "turn-1",
+        state: "accepted",
+        accepted_cursor: "5",
+        terminal_cursor: null,
+      }, { status: 202 });
+    }
+    if (request.method === "GET" && url.pathname.endsWith("/events")) {
+      requestedCursors.push(url.searchParams.get("cursor"));
+      activeConnections += 1;
+      maximumActiveConnections = Math.max(maximumActiveConnections, activeConnections);
+      const connection = controlledEventStream(request.signal, () => { activeConnections -= 1; });
+      connections.push(connection);
+      return connection.response;
+    }
+    return Response.json({ error: "not_found" }, { status: 404 });
+  };
+
+  const agent = await Agent.create({ baseUrl: origin, fetch });
+  const observed = [];
+  const watching = (async () => {
+    for await (const event of agent.events.watch({ cursor: "5" })) {
+      observed.push(event.cursor);
+      if (event.type === "turn_completed") break;
+    }
+  })();
+  const turn = agent.turn.prompt({
+    id: "turn-1",
+    input: "hello",
+    idempotencyKey: "request-1",
+  });
+  const firstResult = turn.result();
+  await turn.accepted();
+  await waitFor(() => connections.length === 1);
+  connections[0].send(`retry: 0\n\n${sse("6", "event", {
+    cursor: "6",
+    created_at: 10,
+    turn_id: "turn-1",
+    type: "event",
+    event: { type: "reasoning" },
+  })}`);
+  connections[0].close();
+  await waitFor(() => connections.length === 2);
+  connections[1].send(`${sse("6", "event", {
+    cursor: "6",
+    created_at: 10,
+    turn_id: "turn-1",
+    type: "event",
+    event: { type: "reasoning" },
+  })}${sse("7", "turn_completed", {
+    cursor: "7",
+    created_at: 11,
+    turn_id: "turn-1",
+    type: "turn_completed",
+    id: "turn-1",
+    final_message: "done",
+    usage: null,
+  })}`);
+
+  assert.deepEqual(await firstResult, {
+    turnId: "turn-1",
+    finalMessage: "done",
+    usage: null,
+    cursor: "7",
+  });
+  assert.strictEqual(await turn.result(), await turn.result());
+  await watching;
+  assert.deepEqual(requestedCursors, ["5", "6"]);
+  assert.deepEqual(observed, ["6", "7"]);
+  assert.equal(maximumActiveConnections, 1);
+  await waitFor(() => activeConnections === 0);
+});
+
+test("turn result without an event watcher opens one shared stream and preserves idempotency", async () => {
   const requests = [];
   let eventConnections = 0;
   const fetch = async (input, init) => {
@@ -192,6 +346,38 @@ function eventStream(parts) {
   return new Response(parts.join(""), {
     headers: { "content-type": "text/event-stream; charset=utf-8" },
   });
+}
+
+function controlledEventStream(signal, onClose) {
+  let controller;
+  let closed = false;
+  const finish = () => {
+    if (closed) return;
+    closed = true;
+    signal.removeEventListener("abort", finish);
+    onClose();
+    try { controller.close(); } catch {}
+  };
+  const body = new ReadableStream({
+    start(value) { controller = value; },
+    cancel: finish,
+  });
+  signal.addEventListener("abort", finish, { once: true });
+  return {
+    response: new Response(body, { headers: { "content-type": "text/event-stream" } }),
+    send(value) {
+      if (!closed) controller.enqueue(new TextEncoder().encode(value));
+    },
+    close: finish,
+  };
+}
+
+async function waitFor(predicate) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  assert.fail("timed out waiting for managed event state");
 }
 
 function sse(id, event, data) {
