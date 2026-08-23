@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  assertBuildAttestation,
   assertDeploymentDocument,
   assertDeploymentEntry,
   assertDeploymentHealth,
@@ -15,6 +16,17 @@ const revision = "a".repeat(40);
 
 test("deployment defaults to the canonical production Worker", () => {
   assert.equal(PRODUCTION_ORIGIN, "https://nanocodex.gakonst.workers.dev");
+});
+
+test("deployment rejects a stale build revision or Wrangler config", () => {
+  const config = Buffer.from('{"name":"nanocodex"}\n');
+  const attestation = {
+    revision,
+    wranglerConfigSha256: "9600b209414abcc5d304884f6ff5f1e1bcee00a1c3487dc6253b9f7a4b1f0de2",
+  };
+  assert.doesNotThrow(() => assertBuildAttestation(attestation, revision, config));
+  assert.throws(() => assertBuildAttestation(attestation, "b".repeat(40), config));
+  assert.throws(() => assertBuildAttestation(attestation, revision, Buffer.from("stale")));
 });
 
 test("deployment arguments bind the exact tagged commit to Worker health", () => {

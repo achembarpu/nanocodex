@@ -1,7 +1,9 @@
 import { cloudflare } from "@cloudflare/vite-plugin";
 import react from "@vitejs/plugin-react";
 import { nanocodexTools } from "nanocodex/tools/vite";
-import { readFile } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
+import { readFile, writeFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { defineConfig, type Plugin } from "vite";
 import { rewriteDocsDevModuleUrl } from "./vite/docsDevModules.ts";
@@ -69,6 +71,27 @@ function linkPreviewMetadata(): Plugin {
   };
 }
 
+function deploymentBuildAttestation(): Plugin {
+  return {
+    name: "nanocodex-deployment-build-attestation",
+    apply: "build" as const,
+    async closeBundle() {
+      const config = await readFile(new URL("./wrangler.jsonc", import.meta.url));
+      const revision = execFileSync("git", ["rev-parse", "HEAD"], {
+        cwd: repositoryRoot,
+        encoding: "utf8",
+      }).trim();
+      await writeFile(
+        new URL("./dist/nanocodex/build-attestation.json", import.meta.url),
+        `${JSON.stringify({
+          revision,
+          wranglerConfigSha256: createHash("sha256").update(config).digest("hex"),
+        })}\n`,
+      );
+    },
+  };
+}
+
 export default defineConfig({
   // Some browser dependencies feature-detect `process` but assume that a
   // detected shim also contains `env`. The browser has no environment access;
@@ -77,6 +100,7 @@ export default defineConfig({
   plugins: [
     applicationRouteFallback(),
     linkPreviewMetadata(),
+    deploymentBuildAttestation(),
     nanocodexTools(),
     react(),
     cloudflare({

@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import { readFileSync, realpathSync } from "node:fs";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -58,6 +59,13 @@ export function assertDeploymentHealth(health, revision) {
   );
 }
 
+export function assertBuildAttestation(attestation, revision, wranglerConfig) {
+  assert.deepEqual(attestation, {
+    revision,
+    wranglerConfigSha256: createHash("sha256").update(wranglerConfig).digest("hex"),
+  }, "deployment build must match the current revision and Wrangler config");
+}
+
 export function assertDeploymentDocument(response, document) {
   assert.equal(response.status, 200, `deployed homepage returned HTTP ${response.status}`);
   assert.match(
@@ -101,6 +109,11 @@ export async function deployWorker({
     git("rev-parse", "origin/master"),
     revision,
     "refusing to deploy a revision that is not the fetched origin/master",
+  );
+  assertBuildAttestation(
+    JSON.parse(readFileSync(new URL("../dist/nanocodex/build-attestation.json", import.meta.url))),
+    revision,
+    readFileSync(new URL("../wrangler.jsonc", import.meta.url)),
   );
 
   const uploaded = await run(uploadArguments(revision));
