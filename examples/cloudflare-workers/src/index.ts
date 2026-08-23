@@ -374,11 +374,6 @@ class DurableComputerObject extends DurableObject<Env> {
   get computerContext(): DurableObjectState { return this.ctx; }
 }
 
-// Keep the class identity declared by migration v2 without pulling the
-// container-backed Sandbox SDK into the primary managed-agent runtime. There
-// is intentionally no binding or route to this historical class.
-export class Sandbox extends DurableObject<Env> {}
-
 const DurableComputerSession = withWorkspace(
   DurableComputerObject,
   (self) => ({

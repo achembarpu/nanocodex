@@ -95,16 +95,13 @@ export function buildManagedProductionConfig(baseConfig, {
       throw new Error(`production managed Worker requires ${name}`);
     }
   }
-  for (const [tag, className] of [
-    ["v4", "MultiplayerRoom"],
-    ["v5", "MultiplayerQuota"],
-  ]) {
-    if (!baseConfig.migrations?.some(
-      (migration) => migration?.tag === tag
-        && migration.new_sqlite_classes?.includes(className),
+  const currentMigration = baseConfig.migrations?.[0];
+  if (baseConfig.migrations?.length !== 1
+    || currentMigration?.tag !== "v1"
+    || !["NanocodexSession", "MultiplayerRoom", "MultiplayerQuota"].every(
+      (className) => currentMigration.new_sqlite_classes?.includes(className),
     )) {
-      throw new Error(`production managed Worker requires migration ${tag}`);
-    }
+    throw new Error("production managed Worker requires the single current migration");
   }
   assertNoProviderConfiguration(baseConfig, "managed config");
 
@@ -317,7 +314,7 @@ export async function deployProductionManaged(environment = process.env) {
 
   const result = {
     component: "private-managed",
-    migrations: ["v4", "v5"],
+    migrations: ["v1"],
     revision,
     status: "deployed",
   };

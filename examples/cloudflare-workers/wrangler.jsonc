@@ -39,23 +39,7 @@
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["NanocodexSession", "NanocodexSubscriptionAuth"]
-    },
-    {
-      "tag": "v2",
-      "new_sqlite_classes": ["Sandbox"]
-    },
-    {
-      "tag": "v3",
-      "deleted_classes": ["NanocodexSubscriptionAuth", "Sandbox"]
-    },
-    {
-      "tag": "v4",
-      "new_sqlite_classes": ["MultiplayerRoom"]
-    },
-    {
-      "tag": "v5",
-      "new_sqlite_classes": ["MultiplayerQuota"]
+      "new_sqlite_classes": ["NanocodexSession", "MultiplayerRoom", "MultiplayerQuota"]
     }
   ],
   "vars": {

@@ -77,35 +77,14 @@
   "migrations": [
     {
       "tag": "v1",
-      "new_sqlite_classes": ["ByokSession"]
-    },
-    {
-      "tag": "v2",
-      "new_sqlite_classes": ["ChatGptSession"]
-    },
-    {
-      "tag": "v3",
-      "new_sqlite_classes": ["GitRepository"]
-    },
-    {
-      "tag": "v4",
-      "new_sqlite_classes": ["EvalCoordinator"]
-    },
-    {
-      "tag": "v5",
-      "new_sqlite_classes": ["ChatGptEgress"]
-    },
-    {
-      "tag": "v6",
-      "new_sqlite_classes": ["ThreadGitRepository"]
-    },
-    {
-      "tag": "v7",
-      "new_sqlite_classes": ["GuestQuota"]
-    },
-    {
-      "tag": "v8",
-      "deleted_classes": ["GuestQuota"]
+      "new_sqlite_classes": [
+        "ByokSession",
+        "ChatGptSession",
+        "GitRepository",
+        "ThreadGitRepository",
+        "EvalCoordinator",
+        "ChatGptEgress"
+      ]
     }
   ],
   "containers": [

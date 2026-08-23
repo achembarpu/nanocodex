@@ -95,14 +95,10 @@ test("managed production config retains private bindings and Durable Object migr
   assert.deepEqual(config.services, [
     { binding: "NANOCODEX", service: "nanocodex-egress-broker-example" },
   ]);
-  assert.ok(config.migrations.some(
-    (migration) => migration.tag === "v4"
-      && migration.new_sqlite_classes?.includes("MultiplayerRoom"),
-  ));
-  assert.ok(config.migrations.some(
-    (migration) => migration.tag === "v5"
-      && migration.new_sqlite_classes?.includes("MultiplayerQuota"),
-  ));
+  assert.deepEqual(config.migrations, [{
+    tag: "v1",
+    new_sqlite_classes: ["NanocodexSession", "MultiplayerRoom", "MultiplayerQuota"],
+  }]);
   assert.doesNotMatch(
     JSON.stringify(config),
     /OPENAI_API_KEY|CODEX_OAUTH_BOOTSTRAP|CODEX_RELAY_URL/,
