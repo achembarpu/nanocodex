@@ -28,12 +28,35 @@ export default {
       && subjects.has(subject)
       && request.headers.get("chatgpt-account-id") === null;
     if (search) {
+      const body = await request.text();
+      let value;
+      try { value = JSON.parse(body); } catch {}
+      if (typeof value?.id === "string"
+        && value?.model === "gpt-5.6-sol"
+        && value?.commands?.search_query?.[0]?.q === "managed web"
+        && value?.settings?.allowed_callers?.[0] === "direct"
+        && value?.settings?.external_web_access === true
+        && value?.max_output_tokens === 10000) {
+        return Response.json({ output: "MANAGED_WEB_SEARCH_OK" });
+      }
       return Response.json({
-        body: await request.text(),
+        body,
         cookie: request.headers.get("cookie"),
         origin: request.headers.get("origin"),
         subject,
       });
+    }
+    const image = url.href === "https://nanocodex.internal/v1/images/generations"
+      && request.method === "POST"
+      && authorization === "Bearer NANOCODEX_PROVIDER_CREDENTIAL"
+      && typeof subject === "string"
+      && subjects.has(subject);
+    if (image) {
+      const value = await request.json();
+      if (value?.model === "gpt-image-2" && value?.prompt === "draw managed") {
+        return Response.json({ data: [{ b64_json: "TUFOQUdFRF9JTUFHRV9PSw==" }] });
+      }
+      return Response.json({ error: { message: "invalid managed image request" } }, { status: 400 });
     }
     const responses = url.href === "https://nanocodex.internal/v1/responses"
       && authorization === "Bearer NANOCODEX_PROVIDER_CREDENTIAL"
@@ -63,8 +86,54 @@ export default {
       const latest = messages.at(-1);
       const content = Array.isArray(latest?.content) ? latest.content : [];
       const text = content.map((item) => item?.text ?? "").join("").trim();
+      const toolOutput = input.find((item) => (
+        item?.type === "function_call_output" && item.call_id === "managed-web"
+      ));
+      const imageOutput = input.find((item) => (
+        item?.type === "function_call_output" && item.call_id === "managed-image"
+      ));
       pendingResponse = setTimeout(() => {
         pendingResponse = undefined;
+        if (toolOutput && imageOutput) {
+          const valid = String(toolOutput.output).includes("MANAGED_WEB_SEARCH_OK")
+            && String(imageOutput.output).includes("TUFOQUdFRF9JTUFHRV9PSw==");
+          server.send(JSON.stringify({
+            type: "response.completed",
+            response: {
+              id: crypto.randomUUID(),
+              status: "completed",
+              output: [{
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: valid ? "MANAGED_WEB_OK" : "MANAGED_WEB_BAD" }],
+              }],
+              usage: null,
+            },
+          }));
+          return;
+        }
+        if (text === "E2E_MANAGED_WEB") {
+          server.send(JSON.stringify({
+            type: "response.completed",
+            response: {
+              id: crypto.randomUUID(),
+              status: "completed",
+              output: [{
+                type: "function_call",
+                call_id: "managed-web",
+                name: "web__run",
+                arguments: JSON.stringify({ search_query: [{ q: "managed web" }] }),
+              }, {
+                type: "function_call",
+                call_id: "managed-image",
+                name: "image_gen__imagegen",
+                arguments: JSON.stringify({ prompt: "draw managed" }),
+              }],
+              usage: null,
+            },
+          }));
+          return;
+        }
         server.send(JSON.stringify({
           type: "response.completed",
           response: {

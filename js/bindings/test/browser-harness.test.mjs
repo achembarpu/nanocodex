@@ -14,6 +14,7 @@ const context = Object.freeze({
 });
 
 test("the default browser harness exposes one exact model-visible tool set", async () => {
+  const requests = [];
   const workspace = {
     async readFile(path) {
       assert.equal(path, "/workspace/pixel.png");
@@ -43,10 +44,16 @@ test("the default browser harness exposes one exact model-visible tool set", asy
       fetch: async () => new Response('{"id":1}\n'),
     },
     images: {
-      fetch: async () => Response.json({ image_url: "data:image/png;base64,Z2VuZXJhdGVk" }),
+      fetch: async (input, init) => {
+        requests.push(new Request(input, init).url);
+        return Response.json({ image_url: "data:image/png;base64,Z2VuZXJhdGVk" });
+      },
     },
     web: {
-      fetch: async () => Response.json({ output: "searched" }),
+      fetch: async (input, init) => {
+        requests.push(new Request(input, init).url);
+        return Response.json({ output: "searched" });
+      },
     },
   });
 
@@ -73,6 +80,10 @@ test("the default browser harness exposes one exact model-visible tool set", asy
   assert.deepEqual(await byName.image_gen__imagegen.handler({ prompt: "draw" }, context), {
     image_url: "data:image/png;base64,Z2VuZXJhdGVk",
   });
+  assert.deepEqual(requests, [
+    "https://demo.test/api/tools/web-search",
+    "https://demo.test/api/tools/image-generation",
+  ]);
   const viewed = await byName.view_image.handler({ path: "/workspace/pixel.png" }, context);
   assert.deepEqual(viewed.output, [{
     type: "input_image",
@@ -92,3 +103,47 @@ test("the default browser harness exposes one exact model-visible tool set", asy
   assert.deepEqual(opened.previewRows, [{ id: 1 }]);
   assert.deepEqual(await byName.render_artifact.handler({}, context), { artifactId: "ui" });
 });
+
+test("the browser harness preserves explicit tool URLs", async () => {
+  const urls = [];
+  const runtime = bindBrowser(preparedBrowser(), {
+    web: {
+      url: "https://tools.test/search",
+      fetch: async (input) => {
+        urls.push(String(input));
+        return Response.json({ output: "searched" });
+      },
+    },
+    images: {
+      url: "https://tools.test/images",
+      fetch: async (input) => {
+        urls.push(String(input));
+        return Response.json({ image_url: "data:image/png;base64,Z2VuZXJhdGVk" });
+      },
+    },
+  });
+  const byName = Object.fromEntries(runtime.tools.map((tool) => [tool.name, tool]));
+  await byName.web__run.handler({ search_query: [{ q: "override" }] }, context);
+  await byName.image_gen__imagegen.handler({ prompt: "override" }, context);
+  assert.deepEqual(urls, ["https://tools.test/search", "https://tools.test/images"]);
+});
+
+function preparedBrowser() {
+  const workspace = { async readFile() { return new Uint8Array(); } };
+  return {
+    datasets,
+    origin: "https://demo.test",
+    standard,
+    threadId: "browser-harness-overrides",
+    shell: {
+      artifactTool: namedTool("render_artifact", {
+        description: "Render an artifact.",
+        handler: async () => ({ artifactId: "ui" }),
+      }),
+      execTool: { description: "Run a command.", handler: async () => ({}) },
+      instructions: "browser harness",
+      projectInstructions: "project instructions",
+      workspace,
+    },
+  };
+}

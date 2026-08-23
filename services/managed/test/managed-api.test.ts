@@ -174,6 +174,24 @@ describe("managed agents REST and resumable SSE", () => {
     }
   });
 
+  it("runs the default network tools inside a managed durable agent", async () => {
+    const agent = await createAgent();
+    const accepted = await submit(agent, "turn-managed-web", "E2E_MANAGED_WEB");
+    const events = sseReader(await SELF.fetch(
+      `${agent.events_url}?cursor=${accepted.accepted_cursor}`,
+    ));
+    let event;
+    do {
+      event = await nextWithin(events, "managed web tool completion");
+    } while (event.data.type !== "turn_completed");
+    expect(event.data).toMatchObject({
+      id: "turn-managed-web",
+      final_message: "MANAGED_WEB_OK",
+      type: "turn_completed",
+    });
+    await events.cancel();
+  });
+
   it("does not let an unrelated bearer mint managed agents", async () => {
     const response = await RAW_SELF.fetch("https://example.test/v1/agents", {
       method: "POST",

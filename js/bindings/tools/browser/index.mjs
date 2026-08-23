@@ -75,15 +75,23 @@ export function bindBrowser(prepared, options = {}) {
     throw new Error("prepared browser runtime belongs to a different thread");
   }
   const { datasets, shell, standard } = prepared;
+  const web = {
+    url: new URL("/api/tools/web-search", prepared.origin),
+    ...options.web,
+  };
+  const images = {
+    url: new URL("/api/tools/image-generation", prepared.origin),
+    ...options.images,
+  };
   return Object.freeze({
     filesystem: shell.workspace,
     instructions: shell.instructions,
     projectInstructions: shell.projectInstructions,
     tools: Object.freeze([
       standard.namedTool("exec_command", shell.execTool),
-      standard.web(options.web),
+      standard.web(web),
       standard.imageGeneration({
-        ...options.images,
+        ...images,
         recentImages: options.recentImages,
         rememberImage: options.rememberImage,
         workspace: shell.workspace,

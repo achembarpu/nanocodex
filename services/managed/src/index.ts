@@ -1269,8 +1269,12 @@ export class NanocodexSession extends DurableComputerSession {
           ].join("\n\n"),
         tools: multiplayer ? [] : [
           shell!.tool,
-          web({ fetch: managedWebFetch(this.env, this.ctx.id.toString()) }),
+          web({
+            url: "https://managed-tools.internal/web-search",
+            fetch: managedWebFetch(this.env, this.ctx.id.toString()),
+          }),
           imageGeneration({
+            url: "https://managed-tools.internal/image-generation",
             fetch: managedImageFetch(this.env, this.ctx.id.toString()),
             workspace: shell!.filesystem,
           }),

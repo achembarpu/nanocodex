@@ -918,14 +918,14 @@ test("web-target WASM executes the complete browser harness tool contract", asyn
       },
     ]);
     assert.deepEqual(effects.web, [{
-      url: "/api/tools/web-search",
+      url: "https://demo.test/api/tools/web-search",
       body: {
         commands: { search_query: [{ q: "browser tools" }] },
         session_id: agent.sessionId,
       },
     }]);
     assert.deepEqual(effects.images, [{
-      url: "/api/tools/image-generation",
+      url: "https://demo.test/api/tools/image-generation",
       body: { images: [], prompt: "fixture image" },
     }]);
     assert.deepEqual(effects.rememberedImages, [{
