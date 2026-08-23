@@ -344,7 +344,6 @@ jobs:
           npm ci --prefix examples/cloudflare-egress --ignore-scripts
           npm ci --prefix examples/cloudflare-workers --ignore-scripts
           npm ci --prefix web --ignore-scripts
-          npm run prepare:wasm --prefix examples/cloudflare-workers
       - name: Select the current production revision
         id: production
         env:
@@ -365,30 +364,18 @@ jobs:
           NANOCODEX_ADMIN_TOKEN: ${{ secrets.NANOCODEX_ADMIN_TOKEN }}
           NANOCODEX_BROKER_PROBE_TOKEN_CONFIGURED: ${{ secrets.NANOCODEX_BROKER_PROBE_TOKEN != '' }}
           NANOCODEX_GIT_TOKEN_CONFIGURED: ${{ secrets.NANOCODEX_GIT_TOKEN != '' }}
-          NANOCODEX_MANAGED_AUTH_MODE: ${{ vars.NANOCODEX_MANAGED_AUTH_MODE }}
           NANOCODEX_MANAGED_CODEX_OAUTH_BOOTSTRAP_CONFIGURED: ${{ secrets.NANOCODEX_MANAGED_CODEX_OAUTH_BOOTSTRAP != '' }}
           NANOCODEX_MANAGED_CODEX_RELAY_URL_CONFIGURED: ${{ secrets.NANOCODEX_MANAGED_CODEX_RELAY_URL != '' }}
-          NANOCODEX_MANAGED_OPENAI_API_KEY_CONFIGURED: ${{ secrets.NANOCODEX_MANAGED_OPENAI_API_KEY != '' }}
           NANOCODEX_ROOM_ALLOCATOR_TOKEN: ${{ secrets.NANOCODEX_ROOM_ALLOCATOR_TOKEN }}
+          SESSION_CREDENTIAL_KEY_CONFIGURED: ${{ secrets.SESSION_CREDENTIAL_KEY != '' }}
           TARGET_SHA: ${{ github.sha }}
         run: npm run deploy:production:preflight --prefix examples/cloudflare-workers
-      - name: Deploy the private credential broker (API key)
-        if: steps.production.outputs.current == 'true' && vars.NANOCODEX_MANAGED_AUTH_MODE == 'api_key'
+      - name: Deploy the private credential broker
+        if: steps.production.outputs.current == 'true'
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           NANOCODEX_BROKER_PROBE_TOKEN: ${{ secrets.NANOCODEX_BROKER_PROBE_TOKEN }}
-          NANOCODEX_MANAGED_AUTH_MODE: ${{ vars.NANOCODEX_MANAGED_AUTH_MODE }}
-          NANOCODEX_MANAGED_OPENAI_API_KEY: ${{ secrets.NANOCODEX_MANAGED_OPENAI_API_KEY }}
-          TARGET_SHA: ${{ github.sha }}
-        run: npm run deploy:production:broker --prefix examples/cloudflare-egress
-      - name: Deploy the private credential broker (ChatGPT)
-        if: steps.production.outputs.current == 'true' && vars.NANOCODEX_MANAGED_AUTH_MODE == 'chatgpt'
-        env:
-          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
-          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          NANOCODEX_BROKER_PROBE_TOKEN: ${{ secrets.NANOCODEX_BROKER_PROBE_TOKEN }}
-          NANOCODEX_MANAGED_AUTH_MODE: ${{ vars.NANOCODEX_MANAGED_AUTH_MODE }}
           NANOCODEX_MANAGED_CODEX_OAUTH_BOOTSTRAP: ${{ secrets.NANOCODEX_MANAGED_CODEX_OAUTH_BOOTSTRAP }}
           NANOCODEX_MANAGED_CODEX_RELAY_URL: ${{ secrets.NANOCODEX_MANAGED_CODEX_RELAY_URL }}
           TARGET_SHA: ${{ github.sha }}
@@ -409,7 +396,6 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           NANOCODEX_ADMIN_TOKEN: ${{ secrets.NANOCODEX_ADMIN_TOKEN }}
-          NANOCODEX_MANAGED_AUTH_MODE: ${{ vars.NANOCODEX_MANAGED_AUTH_MODE }}
           NANOCODEX_ROOM_ALLOCATOR_TOKEN: ${{ secrets.NANOCODEX_ROOM_ALLOCATOR_TOKEN }}
           TARGET_SHA: ${{ github.sha }}
         run: npm run deploy:production:managed --prefix examples/cloudflare-workers
@@ -419,7 +405,6 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           NANOCODEX_BROKER_PROBE_TOKEN: ${{ secrets.NANOCODEX_BROKER_PROBE_TOKEN }}
-          NANOCODEX_MANAGED_AUTH_MODE: ${{ vars.NANOCODEX_MANAGED_AUTH_MODE }}
           NANOCODEX_ROOM_ALLOCATOR_TOKEN: ${{ secrets.NANOCODEX_ROOM_ALLOCATOR_TOKEN }}
           TARGET_SHA: ${{ github.sha }}
         run: npm run verify:production:boundary --prefix examples/cloudflare-workers
@@ -438,8 +423,9 @@ jobs:
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          NANOCODEX_MANAGED_AUTH_MODE: ${{ vars.NANOCODEX_MANAGED_AUTH_MODE }}
           NANOCODEX_ROOM_ALLOCATOR_TOKEN: ${{ secrets.NANOCODEX_ROOM_ALLOCATOR_TOKEN }}
+          SESSION_CREDENTIAL_KEY: ${{ secrets.SESSION_CREDENTIAL_KEY }}
+          SESSION_CREDENTIAL_KEY_PREVIOUS: ${{ secrets.SESSION_CREDENTIAL_KEY_PREVIOUS }}
           TARGET_SHA: ${{ github.sha }}
         run: npm run deploy:production:web --prefix examples/cloudflare-workers
       - name: Verify the active Worker revision

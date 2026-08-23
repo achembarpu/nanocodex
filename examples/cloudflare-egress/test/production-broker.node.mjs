@@ -4,7 +4,6 @@ import test from "node:test";
 
 import {
   brokerWranglerEnvironment,
-  brokerPolicyForProductionMode,
   buildProductionBrokerConfig,
   inactiveProductionBrokerSecrets,
   productionBrokerSecrets,
@@ -20,40 +19,18 @@ const oauthBootstrap = JSON.stringify({
 });
 const probeToken = "probe-" + "p".repeat(32);
 
-test("production auth modes select one fixed broker policy and secret payload", () => {
-  const apiKey = productionBrokerSecrets({
-    NANOCODEX_MANAGED_AUTH_MODE: "api_key",
-    NANOCODEX_MANAGED_OPENAI_API_KEY: "sk-production-example",
-    NANOCODEX_MANAGED_CODEX_OAUTH_BOOTSTRAP: "must-not-be-selected",
-    NANOCODEX_BROKER_PROBE_TOKEN: probeToken,
-  });
-  assert.equal(apiKey.policy, "openai");
-  assert.deepEqual(apiKey.secrets, {
-    NANOCODEX_BROKER_PROBE_TOKEN: probeToken,
-    OPENAI_API_KEY: "sk-production-example",
-  });
-
-  const chatgpt = productionBrokerSecrets({
-    NANOCODEX_MANAGED_AUTH_MODE: "chatgpt",
+test("production broker keeps provider credentials inside its fixed private deployment", () => {
+  const secrets = productionBrokerSecrets({
     NANOCODEX_MANAGED_CODEX_OAUTH_BOOTSTRAP: oauthBootstrap,
     NANOCODEX_MANAGED_CODEX_RELAY_URL: "https://relay.example/v1/capability",
-    NANOCODEX_MANAGED_OPENAI_API_KEY: "must-not-be-selected",
     NANOCODEX_BROKER_PROBE_TOKEN: probeToken,
   });
-  assert.equal(chatgpt.policy, "codex");
-  assert.deepEqual(chatgpt.secrets, {
+  assert.deepEqual(secrets, {
     CODEX_OAUTH_BOOTSTRAP: oauthBootstrap,
     CODEX_RELAY_URL: "https://relay.example/v1/capability",
     NANOCODEX_BROKER_PROBE_TOKEN: probeToken,
   });
-  assert.equal(brokerPolicyForProductionMode("api_key"), "openai");
-  assert.equal(brokerPolicyForProductionMode("chatgpt"), "codex");
-  assert.deepEqual(inactiveProductionBrokerSecrets("api_key"), {
-    CODEX_OAUTH_BOOTSTRAP: null,
-    CODEX_RELAY_URL: null,
-    GITHUB_READ_TOKEN: null,
-  });
-  assert.deepEqual(inactiveProductionBrokerSecrets("chatgpt"), {
+  assert.deepEqual(inactiveProductionBrokerSecrets(), {
     OPENAI_API_KEY: null,
     GITHUB_READ_TOKEN: null,
   });
@@ -78,27 +55,25 @@ test("broker Wrangler environment strips ambient provider and deployment selecti
 
 test("production broker prerequisites fail closed for missing or unsafe credentials", () => {
   assert.throws(
-    () => productionBrokerSecrets({ NANOCODEX_MANAGED_AUTH_MODE: "api_key" }),
+    () => productionBrokerSecrets({}),
     /NANOCODEX_BROKER_PROBE_TOKEN must be 32-512/,
   );
   assert.throws(
     () => productionBrokerSecrets({
       NANOCODEX_BROKER_PROBE_TOKEN: ` ${probeToken}`,
-      NANOCODEX_MANAGED_AUTH_MODE: "api_key",
-      NANOCODEX_MANAGED_OPENAI_API_KEY: "sk-production-example",
+      NANOCODEX_MANAGED_CODEX_OAUTH_BOOTSTRAP: oauthBootstrap,
+      NANOCODEX_MANAGED_CODEX_RELAY_URL: "https://relay.example/v1/capability",
     }),
     /NANOCODEX_BROKER_PROBE_TOKEN must be 32-512/,
   );
   assert.throws(
     () => productionBrokerSecrets({
       NANOCODEX_BROKER_PROBE_TOKEN: probeToken,
-      NANOCODEX_MANAGED_AUTH_MODE: "api_key",
     }),
-    /NANOCODEX_MANAGED_OPENAI_API_KEY is required/,
+    /NANOCODEX_MANAGED_CODEX_OAUTH_BOOTSTRAP is required/,
   );
   assert.throws(
     () => productionBrokerSecrets({
-      NANOCODEX_MANAGED_AUTH_MODE: "chatgpt",
       NANOCODEX_BROKER_PROBE_TOKEN: probeToken,
       NANOCODEX_MANAGED_CODEX_OAUTH_BOOTSTRAP: "{}",
       NANOCODEX_MANAGED_CODEX_RELAY_URL: "https://relay.example/v1/capability",
@@ -107,39 +82,23 @@ test("production broker prerequisites fail closed for missing or unsafe credenti
   );
   assert.throws(
     () => productionBrokerSecrets({
-      NANOCODEX_MANAGED_AUTH_MODE: "chatgpt",
       NANOCODEX_BROKER_PROBE_TOKEN: probeToken,
       NANOCODEX_MANAGED_CODEX_OAUTH_BOOTSTRAP: oauthBootstrap,
       NANOCODEX_MANAGED_CODEX_RELAY_URL: "https://relay.example/?capability=leak",
     }),
     /HTTPS capability path/,
   );
-  assert.throws(
-    () => productionBrokerSecrets({
-      NANOCODEX_BROKER_PROBE_TOKEN: probeToken,
-      NANOCODEX_MANAGED_AUTH_MODE: "auto",
-    }),
-    /must be api_key or chatgpt/,
-  );
 });
 
-test("production broker config stays private and contains exactly one policy", async () => {
+test("production broker config stays private with one fixed internal policy", async () => {
   const base = JSON.parse(await readFile(new URL("../wrangler.broker.jsonc", import.meta.url)));
-  const apiKey = buildProductionBrokerConfig(base, {
-    authMode: "api_key",
+  const config = buildProductionBrokerConfig(base, {
     mainPath: "/fixed/egress.ts",
   });
-  const chatgpt = buildProductionBrokerConfig(base, {
-    authMode: "chatgpt",
-    mainPath: "/fixed/egress.ts",
-  });
-  assert.equal(apiKey.workers_dev, false);
-  assert.equal(apiKey.vars.ALLOWED_POLICIES, "openai");
-  assert.equal(chatgpt.vars.ALLOWED_POLICIES, "codex");
-  assert.doesNotMatch(apiKey.vars.ALLOWED_POLICIES, /,/);
-  assert.doesNotMatch(chatgpt.vars.ALLOWED_POLICIES, /,/);
-  assert.equal(apiKey.routes, undefined);
-  assert.equal(apiKey.main, "/fixed/egress.ts");
+  assert.equal(config.workers_dev, false);
+  assert.equal(config.vars.ALLOWED_POLICIES, "codex");
+  assert.equal(config.routes, undefined);
+  assert.equal(config.main, "/fixed/egress.ts");
 });
 
 test("temporary broker config and secrets are mode 0600 and removed after failure", async () => {

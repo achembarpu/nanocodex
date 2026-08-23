@@ -6,7 +6,6 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   buildProductionBrokerConfig,
-  productionAuthMode,
 } from "../../cloudflare-egress/scripts/production-broker.mjs";
 import {
   isMissingWorkerDeleteError,
@@ -20,7 +19,6 @@ const brokerRoot = resolve(workersRoot, "../cloudflare-egress");
 const managedConfigPath = resolve(workersRoot, "wrangler.jsonc");
 const brokerConfigPath = resolve(brokerRoot, "wrangler.broker.jsonc");
 const webArtifactConfigPath = resolve(webRoot, "dist/nanocodex/wrangler.json");
-const managedWasmPath = resolve(workersRoot, "src/nanocodex.wasm");
 const wranglerPath = resolve(workersRoot, "node_modules/wrangler/bin/wrangler.js");
 const webWranglerPath = resolve(webRoot, "node_modules/wrangler/bin/wrangler.js");
 const managedMainPath = resolve(workersRoot, "src/index.ts");
@@ -45,31 +43,26 @@ const APPLICATION_SECRET_NAMES = [
   "NANOCODEX_ROOM_ALLOCATOR_TOKEN",
   "MULTIPLAYER_ALLOCATOR_TOKEN",
   "NANOCODEX_BOUNDARY_PROBE_TOKEN",
+  "SESSION_CREDENTIAL_KEY",
+  "SESSION_CREDENTIAL_KEY_PREVIOUS",
 ];
 
 export function assertProductionPreflight(environment) {
-  const mode = productionAuthMode(environment.NANOCODEX_MANAGED_AUTH_MODE?.trim());
   const revision = productionRevision(environment.TARGET_SHA);
   requiredEnvironment(environment, "CLOUDFLARE_ACCOUNT_ID");
   requireConfigured(environment, "CLOUDFLARE_API_TOKEN_CONFIGURED");
   requireConfigured(environment, "NANOCODEX_BROKER_PROBE_TOKEN_CONFIGURED");
   requireConfigured(environment, "NANOCODEX_GIT_TOKEN_CONFIGURED");
+  requireConfigured(environment, "NANOCODEX_MANAGED_CODEX_OAUTH_BOOTSTRAP_CONFIGURED");
+  requireConfigured(environment, "NANOCODEX_MANAGED_CODEX_RELAY_URL_CONFIGURED");
+  requireConfigured(environment, "SESSION_CREDENTIAL_KEY_CONFIGURED");
   const tokens = productionApplicationTokens(environment);
-
-  if (mode === "api_key") {
-    requireConfigured(environment, "NANOCODEX_MANAGED_OPENAI_API_KEY_CONFIGURED");
-  } else {
-    requireConfigured(environment, "NANOCODEX_MANAGED_CODEX_OAUTH_BOOTSTRAP_CONFIGURED");
-    requireConfigured(environment, "NANOCODEX_MANAGED_CODEX_RELAY_URL_CONFIGURED");
-  }
-  return { mode, revision, ...tokens };
+  return { revision, ...tokens };
 }
 
 export function buildManagedProductionConfig(baseConfig, {
-  authMode,
   mainPath = managedMainPath,
 } = {}) {
-  const mode = productionAuthMode(authMode);
   assertRecord(baseConfig, "managed config");
   if (baseConfig.name !== MANAGED_NAME) {
     throw new Error("production managed config has an unexpected Worker name");
@@ -79,7 +72,7 @@ export function buildManagedProductionConfig(baseConfig, {
   }
   assertExactService(
     baseConfig.services,
-    "EGRESS",
+    "NANOCODEX",
     BROKER_NAME,
     "production managed Worker",
   );
@@ -118,11 +111,6 @@ export function buildManagedProductionConfig(baseConfig, {
   return {
     ...baseConfig,
     main: resolve(mainPath),
-    rules: [{ type: "CompiledWasm", globs: ["**/*.wasm"], fallthrough: true }],
-    vars: {
-      ...baseConfig.vars,
-      NANOCODEX_AUTH_MODE: mode,
-    },
   };
 }
 
@@ -135,12 +123,10 @@ export function managedSecretPayload(adminToken, allocatorToken) {
 }
 
 export function buildBoundaryProbeConfig({
-  authMode,
   name,
   revision,
   mainPath = probeMainPath,
 } = {}) {
-  const mode = productionAuthMode(authMode);
   if (typeof name !== "string"
     || !/^nanocodex-boundary-[a-z0-9-]{12,48}$/.test(name)
     || name.length > 63) {
@@ -168,18 +154,15 @@ export function buildBoundaryProbeConfig({
     },
     vars: {
       DEPLOYMENT_SHA: productionRevision(revision),
-      EXPECTED_AUTH_MODE: mode,
       PUBLIC_ORIGIN: productionWebOrigin,
     },
   };
 }
 
 export function buildWebProductionConfig(baseConfig, {
-  authMode,
   artifactDirectory,
   currentWebRoot = webRoot,
 } = {}) {
-  const mode = productionAuthMode(authMode);
   assertRecord(baseConfig, "website artifact config");
   if (baseConfig.name !== WEB_NAME) {
     throw new Error("production website artifact has an unexpected Worker name");
@@ -212,6 +195,7 @@ export function buildWebProductionConfig(baseConfig, {
   const { configPath: _configPath, userConfigPath: _userConfigPath, ...portable } = baseConfig;
   return {
     ...portable,
+    services: [{ binding: "MULTIPLAYER_BACKEND", service: MANAGED_NAME }],
     main: resolve(configDirectory, baseConfig.main),
     assets: {
       ...baseConfig.assets,
@@ -228,17 +212,29 @@ export function buildWebProductionConfig(baseConfig, {
         ? { migrations_dir: resolve(configDirectory, database.migrations_dir) }
         : {}),
     })),
-    vars: {
-      ...baseConfig.vars,
-      NANOCODEX_AUTH_MODE: mode,
-      NANOCODEX_MODEL_ACCESS: "managed",
-    },
   };
 }
 
-export function webSecretPayload(allocatorToken) {
+export function webSecretPayload(
+  allocatorToken,
+  sessionCredentialKey,
+  sessionCredentialKeyPrevious,
+) {
   assertTokenStrength(allocatorToken, "NANOCODEX_ROOM_ALLOCATOR_TOKEN");
-  return { MULTIPLAYER_ALLOCATOR_TOKEN: allocatorToken };
+  assertSessionCredentialKey(sessionCredentialKey, "SESSION_CREDENTIAL_KEY");
+  if (sessionCredentialKeyPrevious !== undefined) {
+    assertSessionCredentialKey(
+      sessionCredentialKeyPrevious,
+      "SESSION_CREDENTIAL_KEY_PREVIOUS",
+    );
+  }
+  return {
+    MULTIPLAYER_ALLOCATOR_TOKEN: allocatorToken,
+    SESSION_CREDENTIAL_KEY: sessionCredentialKey,
+    ...(sessionCredentialKeyPrevious === undefined
+      ? {}
+      : { SESSION_CREDENTIAL_KEY_PREVIOUS: sessionCredentialKeyPrevious }),
+  };
 }
 
 export async function withPrivateRolloutFiles(values, callback, {
@@ -270,21 +266,17 @@ export async function withPrivateRolloutFiles(values, callback, {
 
 export async function preflightProductionRollout(environment = process.env) {
   const selection = assertProductionPreflight(environment);
-  const [brokerBase, managedBase, webBase, managedWasm] = await Promise.all([
+  const [brokerBase, managedBase, webBase] = await Promise.all([
     readJson(brokerConfigPath),
     readJson(managedConfigPath),
     readJson(webArtifactConfigPath),
-    readFile(managedWasmPath),
   ]);
-  assertManagedWasmArtifact(managedWasm);
-  buildProductionBrokerConfig(brokerBase, { authMode: selection.mode });
-  buildManagedProductionConfig(managedBase, { authMode: selection.mode });
+  buildProductionBrokerConfig(brokerBase);
+  buildManagedProductionConfig(managedBase);
   buildWebProductionConfig(webBase, {
-    authMode: selection.mode,
     artifactDirectory: dirname(webArtifactConfigPath),
   });
   const result = {
-    auth_mode: selection.mode,
     components: ["private-broker", "private-managed", "website"],
     revision: selection.revision,
     status: "ready",
@@ -296,10 +288,9 @@ export async function preflightProductionRollout(environment = process.env) {
 export async function deployProductionManaged(environment = process.env) {
   const cloudflare = cloudflareCredentials(environment);
   const revision = productionRevision(environment.TARGET_SHA);
-  const mode = productionAuthMode(environment.NANOCODEX_MANAGED_AUTH_MODE?.trim());
   const tokens = productionApplicationTokens(environment);
   const baseConfig = await readJson(managedConfigPath);
-  const config = buildManagedProductionConfig(baseConfig, { authMode: mode });
+  const config = buildManagedProductionConfig(baseConfig);
   const secrets = managedSecretPayload(tokens.adminToken, tokens.allocatorToken);
   const redactions = [cloudflare.apiToken, tokens.adminToken, tokens.allocatorToken];
 
@@ -325,7 +316,6 @@ export async function deployProductionManaged(environment = process.env) {
   });
 
   const result = {
-    auth_mode: mode,
     component: "private-managed",
     migrations: ["v4", "v5"],
     revision,
@@ -340,13 +330,12 @@ export async function verifyProductionBoundary(environment = process.env, {
 } = {}) {
   const cloudflare = cloudflareCredentials(environment);
   const revision = productionRevision(environment.TARGET_SHA);
-  const mode = productionAuthMode(environment.NANOCODEX_MANAGED_AUTH_MODE?.trim());
   const allocatorToken = requiredSecret(environment, "NANOCODEX_ROOM_ALLOCATOR_TOKEN");
   const brokerProbeToken = requiredBrokerProbeToken(environment);
   assertTokenStrength(allocatorToken, "NANOCODEX_ROOM_ALLOCATOR_TOKEN");
   const probeToken = randomBytes(32).toString("base64url");
   const name = `nanocodex-boundary-${revision.slice(0, 12)}-${randomBytes(5).toString("hex")}`;
-  const config = buildBoundaryProbeConfig({ authMode: mode, name, revision });
+  const config = buildBoundaryProbeConfig({ name, revision });
   const redactions = [cloudflare.apiToken, allocatorToken, brokerProbeToken, probeToken];
   const childEnvironment = productionWranglerEnvironment(environment, cloudflare);
   let deploymentIntent = false;
@@ -422,7 +411,6 @@ export async function verifyProductionBoundary(environment = process.env, {
   const result = {
     active_rooms_after: verified.active_rooms_after,
     active_rooms_before: verified.active_rooms_before,
-    auth_mode: mode,
     boundary: verified.boundary,
     broker_ready: verified.broker_ready,
     component: "private-managed",
@@ -436,15 +424,27 @@ export async function verifyProductionBoundary(environment = process.env, {
 export async function deployProductionWeb(environment = process.env) {
   const cloudflare = cloudflareCredentials(environment);
   const revision = productionRevision(environment.TARGET_SHA);
-  const mode = productionAuthMode(environment.NANOCODEX_MANAGED_AUTH_MODE?.trim());
   const allocatorToken = requiredSecret(environment, "NANOCODEX_ROOM_ALLOCATOR_TOKEN");
+  const sessionCredentialKey = requiredSecret(environment, "SESSION_CREDENTIAL_KEY");
+  const sessionCredentialKeyPrevious = optionalSecret(
+    environment,
+    "SESSION_CREDENTIAL_KEY_PREVIOUS",
+  );
   const baseConfig = await readJson(webArtifactConfigPath);
   const config = buildWebProductionConfig(baseConfig, {
-    authMode: mode,
     artifactDirectory: dirname(webArtifactConfigPath),
   });
-  const secrets = webSecretPayload(allocatorToken);
-  const redactions = [cloudflare.apiToken, allocatorToken];
+  const secrets = webSecretPayload(
+    allocatorToken,
+    sessionCredentialKey,
+    sessionCredentialKeyPrevious,
+  );
+  const redactions = [
+    cloudflare.apiToken,
+    allocatorToken,
+    sessionCredentialKey,
+    sessionCredentialKeyPrevious,
+  ];
 
   await withPrivateRolloutFiles({
     "web-config.json": config,
@@ -474,7 +474,6 @@ export async function deployProductionWeb(environment = process.env) {
   });
 
   const result = {
-    auth_mode: mode,
     component: "website",
     revision,
     status: "deployed",
@@ -516,19 +515,14 @@ function cloudflareCredentials(environment) {
 
 export function productionWranglerEnvironment(environment, cloudflare) {
   const child = { ...environment };
-  for (const name of [...PROVIDER_NAMES, ...APPLICATION_SECRET_NAMES]) delete child[name];
+  for (const name of [
+    ...PROVIDER_NAMES,
+    ...APPLICATION_SECRET_NAMES,
+  ]) delete child[name];
   delete child.CLOUDFLARE_ENV;
   child.CLOUDFLARE_ACCOUNT_ID = cloudflare.accountId;
   child.CLOUDFLARE_API_TOKEN = cloudflare.apiToken;
   return child;
-}
-
-export function assertManagedWasmArtifact(wasm) {
-  const magicAndVersion = [0x00, 0x61, 0x73, 0x6d, 0x01, 0x00, 0x00, 0x00];
-  if (!(wasm instanceof Uint8Array) || wasm.byteLength <= magicAndVersion.length
-    || magicAndVersion.some((byte, index) => wasm[index] !== byte)) {
-    throw new Error("managed nanocodex.wasm is missing or invalid");
-  }
 }
 
 function runWrangler(arguments_, {
@@ -591,6 +585,15 @@ function requiredSecret(environment, name) {
   return value.trim();
 }
 
+function optionalSecret(environment, name) {
+  const value = environment[name];
+  if (value === undefined || value === "") return undefined;
+  if (typeof value !== "string" || value.trim() !== value) {
+    throw new Error(`${name} must not contain surrounding whitespace`);
+  }
+  return value;
+}
+
 function requiredBrokerProbeToken(environment) {
   const token = environment.NANOCODEX_BROKER_PROBE_TOKEN;
   if (typeof token !== "string" || token.length < 32 || token.length > 512
@@ -639,6 +642,13 @@ function assertNoProviderConfiguration(value, label) {
   const encoded = JSON.stringify(value);
   if (/OPENAI_API_KEY|CODEX_OAUTH_BOOTSTRAP|CODEX_RELAY_URL/.test(encoded)) {
     throw new Error(`${label} must not contain provider secret configuration`);
+  }
+}
+
+function assertSessionCredentialKey(value, name) {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(value)
+    || Buffer.from(value, "base64url").byteLength !== 32) {
+    throw new Error(`${name} must be an unpadded base64url encoding of exactly 32 bytes`);
   }
 }
 

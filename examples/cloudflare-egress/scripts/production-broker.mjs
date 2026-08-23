@@ -20,55 +20,15 @@ const PROVIDER_ENVIRONMENT_NAMES = [
   "NANOCODEX_MANAGED_CODEX_RELAY_URL",
 ];
 
-export function productionAuthMode(value) {
-  if (value === "api_key" || value === "chatgpt") return value;
-  throw new Error("NANOCODEX_MANAGED_AUTH_MODE must be api_key or chatgpt");
-}
-
-export function brokerPolicyForProductionMode(mode) {
-  if (mode === "api_key") return "openai";
-  if (mode === "chatgpt") return "codex";
-  throw new Error("production broker mode must be api_key or chatgpt");
-}
-
-export function inactiveProductionBrokerSecrets(mode) {
-  const policy = brokerPolicyForProductionMode(mode);
-  const active = policy === "openai"
-    ? new Set(["OPENAI_API_KEY"])
-    : new Set(["CODEX_OAUTH_BOOTSTRAP", "CODEX_RELAY_URL"]);
-  return Object.fromEntries(
-    [
-      "OPENAI_API_KEY",
-      "CODEX_OAUTH_BOOTSTRAP",
-      "CODEX_RELAY_URL",
-      "GITHUB_READ_TOKEN",
-    ]
-      .filter((name) => !active.has(name))
-      .map((name) => [name, null]),
-  );
+export function inactiveProductionBrokerSecrets() {
+  return {
+    GITHUB_READ_TOKEN: null,
+    OPENAI_API_KEY: null,
+  };
 }
 
 export function productionBrokerSecrets(environment) {
-  const mode = productionAuthMode(environment.NANOCODEX_MANAGED_AUTH_MODE?.trim());
   const probeToken = requiredProbeToken(environment);
-  if (mode === "api_key") {
-    const apiKey = requiredSecret(
-      environment,
-      "NANOCODEX_MANAGED_OPENAI_API_KEY",
-    );
-    if (apiKey.includes("\n") || apiKey.includes("\r")) {
-      throw new Error("NANOCODEX_MANAGED_OPENAI_API_KEY must be one line");
-    }
-    return {
-      mode,
-      policy: brokerPolicyForProductionMode(mode),
-      secrets: {
-        NANOCODEX_BROKER_PROBE_TOKEN: probeToken,
-        OPENAI_API_KEY: apiKey,
-      },
-    };
-  }
-
   const bootstrap = requiredSecret(
     environment,
     "NANOCODEX_MANAGED_CODEX_OAUTH_BOOTSTRAP",
@@ -80,21 +40,15 @@ export function productionBrokerSecrets(environment) {
   );
   validateRelayUrl(relay);
   return {
-    mode,
-    policy: brokerPolicyForProductionMode(mode),
-    secrets: {
-      CODEX_OAUTH_BOOTSTRAP: bootstrap,
-      CODEX_RELAY_URL: relay,
-      NANOCODEX_BROKER_PROBE_TOKEN: probeToken,
-    },
+    CODEX_OAUTH_BOOTSTRAP: bootstrap,
+    CODEX_RELAY_URL: relay,
+    NANOCODEX_BROKER_PROBE_TOKEN: probeToken,
   };
 }
 
 export function buildProductionBrokerConfig(baseConfig, {
-  authMode,
   mainPath = brokerMainPath,
 } = {}) {
-  const mode = productionAuthMode(authMode);
   assertRecord(baseConfig, "broker config");
   if (baseConfig.name !== "nanocodex-egress-broker-example") {
     throw new Error("production broker config has an unexpected Worker name");
@@ -108,6 +62,9 @@ export function buildProductionBrokerConfig(baseConfig, {
   assertRecord(baseConfig.vars, "broker vars");
   if (typeof baseConfig.vars.AGENT_ID !== "string" || baseConfig.vars.AGENT_ID.length === 0) {
     throw new Error("production broker requires a fixed AGENT_ID");
+  }
+  if (baseConfig.vars.ALLOWED_POLICIES !== "codex") {
+    throw new Error("production broker requires its fixed internal policy");
   }
   const oauthBinding = baseConfig.durable_objects?.bindings?.filter(
     (binding) => binding?.name === "CODEX_OAUTH",
@@ -127,10 +84,6 @@ export function buildProductionBrokerConfig(baseConfig, {
   return {
     ...baseConfig,
     main: resolve(mainPath),
-    vars: {
-      ...baseConfig.vars,
-      ALLOWED_POLICIES: brokerPolicyForProductionMode(mode),
-    },
   };
 }
 
@@ -165,15 +118,13 @@ export async function deployProductionBroker(environment = process.env) {
   const accountId = requiredEnvironment(environment, "CLOUDFLARE_ACCOUNT_ID");
   const apiToken = requiredEnvironment(environment, "CLOUDFLARE_API_TOKEN");
   const revision = productionRevision(environment.TARGET_SHA);
-  const selection = productionBrokerSecrets(environment);
+  const secrets = productionBrokerSecrets(environment);
   const baseConfig = JSON.parse(await readFile(brokerConfigPath, "utf8"));
-  const config = buildProductionBrokerConfig(baseConfig, {
-    authMode: selection.mode,
-  });
+  const config = buildProductionBrokerConfig(baseConfig);
   await withPrivateBrokerFiles({
     "broker-config.json": config,
-    "broker-inactive-secrets.json": inactiveProductionBrokerSecrets(selection.mode),
-    "broker-secrets.json": selection.secrets,
+    "broker-inactive-secrets.json": inactiveProductionBrokerSecrets(),
+    "broker-secrets.json": secrets,
   }, async (paths) => {
     const childEnvironment = brokerWranglerEnvironment(environment, accountId, apiToken);
     await runWrangler([
@@ -202,9 +153,7 @@ export async function deployProductionBroker(environment = process.env) {
   });
 
   const result = {
-    auth_mode: selection.mode,
     component: "private-broker",
-    policy: selection.policy,
     revision,
     status: "deployed",
   };
@@ -272,7 +221,7 @@ function requiredEnvironment(environment, name) {
 function requiredSecret(environment, name) {
   const value = environment[name];
   if (typeof value !== "string" || value.trim().length === 0) {
-    throw new Error(`${name} is required for the selected production auth mode`);
+    throw new Error(`${name} is required for production broker deployment`);
   }
   return value.trim();
 }

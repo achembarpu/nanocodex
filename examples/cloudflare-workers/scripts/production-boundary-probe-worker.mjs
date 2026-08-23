@@ -12,8 +12,7 @@ export default {
     }
     if (!env.BROKER || !env.NANOCODEX_BROKER_PROBE_TOKEN
       || !env.MULTIPLAYER_ALLOCATOR_TOKEN || !env.MULTIPLAYER_BACKEND
-      || !env.MULTIPLAYER_QUOTA || !validPublicOrigin(env.PUBLIC_ORIGIN)
-      || (env.EXPECTED_AUTH_MODE !== "api_key" && env.EXPECTED_AUTH_MODE !== "chatgpt")) {
+      || !env.MULTIPLAYER_QUOTA || !validPublicOrigin(env.PUBLIC_ORIGIN)) {
       return json({ error: "probe_not_configured" }, 503);
     }
 
@@ -46,8 +45,7 @@ export default {
         roomId = receipt.room_id;
         ownerCookie = exactOwnerCookie(created.headers.get("set-cookie"), roomId);
       }
-      if (!roomId || receipt.auth_mode !== env.EXPECTED_AUTH_MODE
-        || Object.hasOwn(receipt, "agent_id")) {
+      if (!roomId || !exactPublicRoomReceipt(receipt)) {
         throw new Error("room creation receipt was invalid");
       }
       if (!ownerCookie) throw new Error("room creation omitted its owner cookie");
@@ -84,6 +82,12 @@ export default {
     }
   },
 };
+
+function exactPublicRoomReceipt(receipt) {
+  return receipt && typeof receipt === "object" && !Array.isArray(receipt)
+    && Object.keys(receipt).sort().join(",")
+      === "invite,invite_url,member_id,room_id,websocket_url";
+}
 
 async function requireBrokerReadiness(broker, token) {
   const response = await broker.fetch(
