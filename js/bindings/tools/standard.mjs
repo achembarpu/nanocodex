@@ -201,6 +201,9 @@ function jsonRequester(options, defaultUrl) {
       method: "POST",
       headers,
       body: JSON.stringify(body),
+      // These adapters commonly carry caller-owned bearer credentials.
+      // Never let fetch forward them to a redirect target.
+      redirect: "error",
       signal,
     });
     const payload = await response.json().catch(() => undefined);

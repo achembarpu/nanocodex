@@ -47,6 +47,7 @@ test("web forwards the complete command object through a caller-owned host adapt
     session_id: "session-1",
   });
   assert.equal(requests[0].init.headers.authorization, "Bearer host");
+  assert.equal(requests[0].init.redirect, "error");
   assert.equal(requests[0].init.signal, context.signal);
   assert.deepEqual(tool.parameters.properties.search_query.items.required, ["q"]);
   assert.deepEqual(tool.parameters.properties.response_length.enum, ["short", "medium", "long"]);
