@@ -21,6 +21,8 @@ pub const REALTIME_END_INSTRUCTIONS: &str = concat!(
 );
 
 const REALTIME_SESSION_ENDED_HANDOFF_INSTRUCTION: &str = "The user just ended their realtime session. Here is the remaining handoff/transcript tail. You probably do not have to do anything; acknowledge the handoff unless the transcript itself asks for something.";
+const MAX_REALTIME_DELEGATION_FIELD_BYTES: usize = 4 * 1024;
+const TRUNCATION_MARKER: &str = "…";
 
 /// One completed user or assistant transcript entry.
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -45,7 +47,7 @@ impl TranscriptEntry {
 /// Wraps delegated speech and its new transcript using canonical Codex markers.
 #[must_use]
 pub fn realtime_delegation(input: &str, transcript: &[TranscriptEntry]) -> String {
-    let input = escape_xml(input);
+    let input = escape_xml_bounded(input, Retain::Start);
     let transcript = transcript_text(transcript);
     if transcript.is_empty() {
         format!("<realtime_delegation>\n  <input>{input}</input>\n</realtime_delegation>")
@@ -62,7 +64,7 @@ pub fn realtime_tail_delegation(transcript: &[TranscriptEntry]) -> Option<String
     if transcript.is_empty() {
         return None;
     }
-    let input = escape_xml(REALTIME_SESSION_ENDED_HANDOFF_INSTRUCTION);
+    let input = escape_xml_bounded(REALTIME_SESSION_ENDED_HANDOFF_INSTRUCTION, Retain::Start);
     let transcript = transcript_text(transcript);
     Some(format!(
         "<realtime_delegation>\n  <source>transcript_tail_flush</source>\n  <input>{input}</input>\n  <transcript_delta>{transcript}</transcript_delta>\n</realtime_delegation>"
@@ -70,13 +72,44 @@ pub fn realtime_tail_delegation(transcript: &[TranscriptEntry]) -> Option<String
 }
 
 fn transcript_text(transcript: &[TranscriptEntry]) -> String {
-    escape_xml(
+    escape_xml_bounded(
         &transcript
             .iter()
             .map(|entry| format!("{}: {}", entry.role, entry.text))
             .collect::<Vec<_>>()
             .join("\n"),
+        Retain::End,
     )
+}
+
+#[derive(Clone, Copy)]
+enum Retain {
+    Start,
+    End,
+}
+
+fn escape_xml_bounded(text: &str, retain: Retain) -> String {
+    let escaped = escape_xml(text);
+    if escaped.len() <= MAX_REALTIME_DELEGATION_FIELD_BYTES {
+        return escaped;
+    }
+    let retained_bytes = MAX_REALTIME_DELEGATION_FIELD_BYTES - TRUNCATION_MARKER.len();
+    match retain {
+        Retain::Start => {
+            let mut end = retained_bytes;
+            while !escaped.is_char_boundary(end) {
+                end -= 1;
+            }
+            format!("{}{TRUNCATION_MARKER}", &escaped[..end])
+        }
+        Retain::End => {
+            let mut start = escaped.len().saturating_sub(retained_bytes);
+            while !escaped.is_char_boundary(start) {
+                start += 1;
+            }
+            format!("{TRUNCATION_MARKER}{}", &escaped[start..])
+        }
+    }
 }
 
 fn escape_xml(text: &str) -> String {
@@ -87,7 +120,10 @@ fn escape_xml(text: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{TranscriptEntry, realtime_delegation, realtime_tail_delegation};
+    use super::{
+        MAX_REALTIME_DELEGATION_FIELD_BYTES, TranscriptEntry, realtime_delegation,
+        realtime_tail_delegation, transcript_text,
+    };
 
     #[test]
     fn delegation_escapes_structured_input() {
@@ -103,5 +139,24 @@ mod tests {
     #[test]
     fn empty_tail_is_not_routed() {
         assert_eq!(realtime_tail_delegation(&[]), None);
+    }
+
+    #[test]
+    fn delegation_fields_keep_the_codex_bounded_edge() {
+        let input = "start".to_owned() + &"x".repeat(MAX_REALTIME_DELEGATION_FIELD_BYTES) + "end";
+        let delegation = realtime_delegation(&input, &[]);
+        assert!(delegation.contains("<input>start"));
+        assert!(!delegation.contains("end</input>"));
+
+        let transcript = transcript_text(&[TranscriptEntry::new("user", input)]);
+        assert!(transcript.len() <= MAX_REALTIME_DELEGATION_FIELD_BYTES);
+        assert!(transcript.starts_with('…'));
+        assert!(transcript.ends_with("end"));
+
+        let unicode = "é".repeat(MAX_REALTIME_DELEGATION_FIELD_BYTES);
+        let unicode = transcript_text(&[TranscriptEntry::new("assistant", unicode)]);
+        assert!(unicode.len() <= MAX_REALTIME_DELEGATION_FIELD_BYTES);
+        assert!(unicode.starts_with('…'));
+        assert!(unicode.is_char_boundary(unicode.len()));
     }
 }

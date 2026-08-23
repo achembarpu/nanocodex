@@ -1,13 +1,12 @@
 use std::{
-    cmp::Reverse,
     ffi::OsStr,
-    fs::{self, DirEntry, File},
-    io::{BufRead, BufReader},
+    fs::{self, DirEntry},
     path::{Path, PathBuf},
 };
 
 use nanocodex::{
     AgentSessionContext,
+    agent::rollout::RolloutConfig,
     oai::responses::{ContentItem, MessageRole, ResponseItem},
 };
 
@@ -20,7 +19,6 @@ const TURN_BUDGET: usize = 300;
 const APPROX_BYTES_PER_TOKEN: usize = 4;
 const MAX_RECENT_THREADS: usize = 40;
 const MAX_RECENT_GROUPS: usize = 8;
-const MAX_ASK_CHARS: usize = 240;
 const TREE_DEPTH: usize = 2;
 const TREE_ENTRIES: usize = 20;
 const NOISY_DIRS: &[&str] = &[
@@ -156,19 +154,24 @@ fn contextual(text: &str) -> bool {
 }
 
 fn recent_work(rollout: &Path) -> Option<String> {
-    let sessions = rollout.ancestors().nth(4)?.join("sessions");
-    let mut files = Vec::new();
-    collect_rollouts(&sessions, &mut files);
-    files.sort_by_key(|path| Reverse(path.metadata().and_then(|meta| meta.modified()).ok()));
+    let sessions = rollout
+        .ancestors()
+        .find(|path| path.file_name() == Some(OsStr::new("sessions")))?;
+    let codex_home = sessions.parent()?;
+    let sessions = RolloutConfig::new(codex_home).list_sessions().ok()?;
     let mut groups: Vec<(String, Vec<String>)> = Vec::new();
-    for path in files.into_iter().take(MAX_RECENT_THREADS) {
-        let Some((cwd, ask)) = rollout_summary(&path) else {
+    for session in sessions
+        .into_iter()
+        .filter(|session| !session.is_archived())
+        .take(MAX_RECENT_THREADS)
+    {
+        let (Some(cwd), Some(ask)) = (session.workspace(), session.preview()) else {
             continue;
         };
         if let Some((_, asks)) = groups.iter_mut().find(|(group, _)| *group == cwd) {
-            asks.push(ask);
+            asks.push(ask.to_owned());
         } else if groups.len() < MAX_RECENT_GROUPS {
-            groups.push((cwd, vec![ask]));
+            groups.push((cwd.to_owned(), vec![ask.to_owned()]));
         }
     }
     (!groups.is_empty()).then(|| {
@@ -187,43 +190,6 @@ fn recent_work(rollout: &Path) -> Option<String> {
             .collect::<Vec<_>>()
             .join("\n\n")
     })
-}
-
-fn collect_rollouts(root: &Path, output: &mut Vec<PathBuf>) {
-    let Ok(entries) = fs::read_dir(root) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            collect_rollouts(&path, output);
-        } else if path.extension() == Some(OsStr::new("jsonl")) {
-            output.push(path);
-        }
-    }
-}
-
-fn rollout_summary(path: &Path) -> Option<(String, String)> {
-    let mut cwd = None;
-    let mut ask = None;
-    for line in BufReader::new(File::open(path).ok()?)
-        .lines()
-        .map_while(Result::ok)
-    {
-        let Ok(value) = serde_json::from_str::<serde_json::Value>(&line) else {
-            continue;
-        };
-        match value.get("type").and_then(serde_json::Value::as_str) {
-            Some("session_meta") => cwd = value["payload"]["cwd"].as_str().map(str::to_owned),
-            Some("event_msg") if value["payload"]["type"] == "user_message" => {
-                ask = value["payload"]["message"]
-                    .as_str()
-                    .map(|text| text.chars().take(MAX_ASK_CHARS).collect());
-            }
-            _ => {}
-        }
-    }
-    Some((cwd?, ask?))
 }
 
 fn workspace_map(workspace: &Path) -> Option<String> {
@@ -389,5 +355,25 @@ mod tests {
         assert!(context.contains("src/"));
         assert!(context.contains("lib.rs"));
         assert!(!context.contains("target/"));
+    }
+
+    #[test]
+    fn recent_work_discovers_the_canonical_sessions_root() {
+        let directory = tempfile::tempdir().unwrap();
+        let thread_id = "019eb97d-8e9a-7ff3-94b0-ea019babd5d7";
+        let sessions = directory.path().join("sessions/2026/08/23");
+        fs::create_dir_all(&sessions).unwrap();
+        let rollout = sessions.join(format!("rollout-2026-08-23T00-00-00-{thread_id}.jsonl"));
+        fs::write(
+            &rollout,
+            format!(
+                "{{\"type\":\"session_meta\",\"payload\":{{\"id\":\"{thread_id}\",\"cwd\":\"/work/nanocodex\",\"history_mode\":\"legacy\"}}}}\n{{\"type\":\"event_msg\",\"payload\":{{\"type\":\"user_message\",\"message\":\"make voice reconnect\"}}}}\n{{\"type\":\"response_item\",\"payload\":{{}}}}\n"
+            ),
+        )
+        .unwrap();
+
+        let context = recent_work(&rollout).unwrap();
+        assert!(context.contains("### Directory: /work/nanocodex"));
+        assert!(context.contains("- make voice reconnect"));
     }
 }

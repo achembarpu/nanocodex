@@ -5,7 +5,8 @@
 //! concerns; this keeps the library usable with pipes and custom media stacks.
 
 use std::{
-    collections::{BTreeMap, HashMap},
+    borrow::Cow,
+    collections::{BTreeMap, HashMap, VecDeque},
     fmt,
     str::FromStr,
     sync::Arc,
@@ -27,6 +28,7 @@ use tokio_tungstenite::{
         Error as WebSocketError, Message,
         client::IntoClientRequest,
         http::{HeaderValue, header},
+        protocol::frame::coding::CloseCode,
     },
 };
 use tracing::{debug, trace, warn};
@@ -98,6 +100,11 @@ const INITIAL_ITEMS_MAX_TOKENS: usize = 8_192;
 const APPROX_BYTES_PER_TOKEN: usize = 4;
 const AGENT_FINAL_MESSAGE_PREFIX: &str = "\"Agent Final Message\":\n\n";
 const STANDALONE_HANDOFF_ID: &str = "codex";
+const MAX_ACTIVE_TRANSCRIPT_BYTES: usize = 8 * 1024;
+const TRUNCATED_TRANSCRIPT_PREFIX: &str = "…";
+const SIDEBAND_RECONNECT_BASE_DELAY: Duration = Duration::from_millis(200);
+const SIDEBAND_RECONNECT_MAX_DELAY: Duration = Duration::from_secs(5);
+const SIDEBAND_STABLE_CONNECTION_DURATION: Duration = Duration::from_secs(30);
 
 /// Realtime wire protocol version.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
@@ -1002,7 +1009,7 @@ impl RealtimeSessionBuilder {
             handoff_mode: self.codex_response_handoff_mode,
             channel_prefixes: self.codex_response_handoff_channel_prefixes,
         };
-        let (socket, media) = match transport {
+        let (socket, media, sideband) = match transport {
             RealtimeTransport::WebSocket => {
                 let auth = self.auth.snapshot().await?;
                 let endpoint = match self.websocket_url {
@@ -1063,7 +1070,7 @@ impl RealtimeSessionBuilder {
                     &self.initial_items,
                 );
                 send_json(&mut socket, &update).await?;
-                (socket, None)
+                (socket, None, None)
             }
             RealtimeTransport::WebRtc => {
                 let connection = webrtc::connect(webrtc::ConnectConfig {
@@ -1079,7 +1086,11 @@ impl RealtimeSessionBuilder {
                     version,
                 })
                 .await?;
-                (connection.socket, Some(connection.media))
+                (
+                    connection.socket,
+                    Some(connection.media),
+                    Some(connection.sideband),
+                )
             }
         };
 
@@ -1087,7 +1098,16 @@ impl RealtimeSessionBuilder {
         let (event_tx, event_rx) = mpsc::channel(EVENT_CAPACITY);
         let (closed_tx, closed) = watch::channel(false);
         tokio::spawn(async move {
-            run_socket(socket, command_rx, event_tx, protocol, media, output_policy).await;
+            run_socket(
+                socket,
+                command_rx,
+                event_tx,
+                protocol,
+                media,
+                sideband,
+                output_policy,
+            )
+            .await;
             closed_tx.send_replace(true);
         });
         Ok((
@@ -1228,6 +1248,12 @@ pub enum RealtimeError {
     /// A WebSocket operation failed.
     #[error("GPT Realtime WebSocket failed: {0}")]
     WebSocket(String),
+    /// A WebRTC sideband handshake failed with an HTTP response.
+    #[error("GPT Realtime sideband handshake failed with HTTP {status}")]
+    WebSocketHandshake {
+        /// HTTP status returned by the sideband endpoint.
+        status: u16,
+    },
     /// Creating the authenticated Realtime call failed.
     #[error("GPT Realtime HTTP call failed: {0}")]
     Http(String),
@@ -1294,7 +1320,7 @@ struct OutputPolicy {
     channel_prefixes: BTreeMap<String, Vec<String>>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct OutputRoutingState {
     bem_channels: HashMap<String, BemChannelParser>,
 }
@@ -1307,7 +1333,7 @@ struct SocketState {
     output_routing: OutputRoutingState,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct BemChannelParser {
     buffered_text: String,
     phase: Option<MessagePhase>,
@@ -1620,70 +1646,156 @@ async fn run_socket(
     events: mpsc::Sender<RealtimeEvent>,
     protocol: RealtimeProtocol,
     mut media: Option<webrtc::WebRtcMedia>,
+    sideband: Option<webrtc::WebRtcSideband>,
     output_policy: OutputPolicy,
 ) {
     let media_input = media.as_ref().map(webrtc::WebRtcMedia::input);
+    let reconnectable_sideband = sideband.is_some() && protocol == RealtimeProtocol::Frameless;
     let mut state = SocketState::default();
     let mut tail_returned = false;
-    loop {
-        let has_webrtc_media = media.is_some();
-        tokio::select! {
-            command = commands.recv() => {
-                let Some(command) = command else {
-                    if let Err(error) = close_socket(&mut socket, protocol).await {
-                        debug!(%error, "failed to close dropped GPT Realtime session");
-                    }
-                    break;
-                };
-                let result = handle_command(
+    let mut pending_commands = VecDeque::new();
+    let mut rapid_disconnects = 0_u32;
+    'session: loop {
+        let connected_at = Instant::now();
+        let transport_error = loop {
+            if let Some(command) = pending_commands.pop_front() {
+                match handle_socket_command(
                     &mut socket,
-                    command.kind,
+                    command,
                     protocol,
                     media_input.as_ref(),
                     &mut state,
                     &output_policy,
-                ).await;
-                let should_close = matches!(result, Ok(CommandOutcome::Closed(_)));
-                tail_returned = should_close;
-                if let Err(error) = &result {
-                    let _ = events.send(RealtimeEvent::Error(error.to_string())).await;
-                }
-                let failed = result.is_err();
-                let _ = command.result.send(result);
-                if should_close || failed {
-                    break;
-                }
-            }
-            message = socket.next() => {
-                match handle_server_message(
-                    &mut socket,
-                    message,
                     &events,
-                    protocol,
-                    &mut state,
-                    has_webrtc_media,
-                ).await {
-                    Ok(true) => break,
-                    Ok(false) => {}
-                    Err(error) => {
-                        let _ = events.send(RealtimeEvent::Error(error.to_string())).await;
-                        break;
+                    reconnectable_sideband,
+                )
+                .await
+                {
+                    SocketCommandExit::Continue => {}
+                    SocketCommandExit::Terminal { returned_tail } => {
+                        tail_returned = returned_tail;
+                        break 'session;
+                    }
+                    SocketCommandExit::TransportLost { error, command } => {
+                        pending_commands.push_front(command);
+                        break error;
                     }
                 }
             }
-            audio = recv_media(&mut media) => {
-                match audio {
-                    Some(Ok(audio)) => {
-                        if events.send(RealtimeEvent::Audio(audio)).await.is_err() {
-                            break;
+
+            let has_webrtc_media = media.is_some();
+            tokio::select! {
+                command = commands.recv() => {
+                    let Some(command) = command else {
+                        if let Err(error) = close_socket(&mut socket, protocol).await {
+                            debug!(%error, "failed to close dropped GPT Realtime session");
+                        }
+                        break 'session;
+                    };
+                    match handle_socket_command(
+                        &mut socket,
+                        command,
+                        protocol,
+                        media_input.as_ref(),
+                        &mut state,
+                        &output_policy,
+                        &events,
+                        reconnectable_sideband,
+                    ).await {
+                        SocketCommandExit::Continue => {}
+                        SocketCommandExit::Terminal { returned_tail } => {
+                            tail_returned = returned_tail;
+                            break 'session;
+                        }
+                        SocketCommandExit::TransportLost { error, command } => {
+                            pending_commands.push_front(command);
+                            break error;
                         }
                     }
-                    Some(Err(error)) => {
-                        let _ = events.send(RealtimeEvent::Error(error.to_string())).await;
-                        break;
-                    }
-                    None => media = None,
                 }
+                message = socket.next() => {
+                    match handle_server_message(
+                        &mut socket,
+                        message,
+                        &events,
+                        protocol,
+                        &mut state,
+                        has_webrtc_media,
+                    ).await {
+                        Ok(true) => break 'session,
+                        Ok(false) => {}
+                        Err(error) if reconnectable_sideband && sideband_transport_loss(&error) => {
+                            break error;
+                        }
+                        Err(error) => {
+                            let _ = events.send(RealtimeEvent::Error(error.to_string())).await;
+                            break 'session;
+                        }
+                    }
+                }
+                audio = recv_media(&mut media) => {
+                    match audio {
+                        Some(Ok(audio)) => {
+                            if events.send(RealtimeEvent::Audio(audio)).await.is_err() {
+                                break 'session;
+                            }
+                        }
+                        Some(Err(error)) => {
+                            let _ = events.send(RealtimeEvent::Error(error.to_string())).await;
+                            break 'session;
+                        }
+                        None => media = None,
+                    }
+                }
+            }
+        };
+
+        let Some(sideband) = sideband.as_ref() else {
+            let _ = events
+                .send(RealtimeEvent::Error(transport_error.to_string()))
+                .await;
+            break;
+        };
+        if connected_at.elapsed() >= SIDEBAND_STABLE_CONNECTION_DURATION {
+            rapid_disconnects = 0;
+        }
+        rapid_disconnects = rapid_disconnects.saturating_add(1);
+        let delay = sideband_reconnect_delay(rapid_disconnects);
+        warn!(
+            delay_ms = delay.as_millis(),
+            "live Realtime sideband transport lost; reconnecting: {transport_error}"
+        );
+        match reconnect_sideband(
+            sideband,
+            delay,
+            &mut commands,
+            &mut pending_commands,
+            &events,
+            &mut media,
+            media_input.as_ref(),
+            &mut state,
+        )
+        .await
+        {
+            SidebandReconnectExit::Connected(reconnected) => socket = reconnected,
+            SidebandReconnectExit::Terminal { returned_tail } => {
+                tail_returned = returned_tail;
+                break;
+            }
+            SidebandReconnectExit::Failed(error) if webrtc::sideband_session_ended(&error) => {
+                debug!("Realtime sideband session ended while reconnecting");
+                if let Some(command) = pending_commands.pop_front() {
+                    let _ = command.result.send(Err(error));
+                }
+                break;
+            }
+            SidebandReconnectExit::Failed(error) => {
+                let message = error.to_string();
+                if let Some(command) = pending_commands.pop_front() {
+                    let _ = command.result.send(Err(error));
+                }
+                let _ = events.send(RealtimeEvent::Error(message)).await;
+                break;
             }
         }
     }
@@ -1699,6 +1811,178 @@ async fn run_socket(
     debug!("GPT Realtime websocket task stopped");
 }
 
+enum SocketCommandExit {
+    Continue,
+    Terminal {
+        returned_tail: bool,
+    },
+    TransportLost {
+        error: RealtimeError,
+        command: Command,
+    },
+}
+
+enum SidebandReconnectExit {
+    Connected(Socket),
+    Terminal { returned_tail: bool },
+    Failed(RealtimeError),
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn reconnect_sideband(
+    sideband: &webrtc::WebRtcSideband,
+    delay: Duration,
+    commands: &mut mpsc::Receiver<Command>,
+    pending_commands: &mut VecDeque<Command>,
+    events: &mpsc::Sender<RealtimeEvent>,
+    media: &mut Option<webrtc::WebRtcMedia>,
+    media_input: Option<&mpsc::Sender<RealtimeAudio>>,
+    state: &mut SocketState,
+) -> SidebandReconnectExit {
+    let reconnect = async {
+        tokio::time::sleep(delay).await;
+        sideband.reconnect().await
+    };
+    tokio::pin!(reconnect);
+    loop {
+        tokio::select! {
+            result = &mut reconnect => {
+                return match result {
+                    Ok(socket) => SidebandReconnectExit::Connected(socket),
+                    Err(error) => SidebandReconnectExit::Failed(error),
+                };
+            }
+            command = commands.recv(), if pending_commands.len() < COMMAND_CAPACITY => {
+                let Some(command) = command else {
+                    return SidebandReconnectExit::Terminal { returned_tail: false };
+                };
+                match &command.kind {
+                    CommandKind::Audio(audio) => {
+                        let result = send_webrtc_audio(media_input, audio).await;
+                        let failed = result.is_err();
+                        if let Err(error) = &result {
+                            let _ = events.send(RealtimeEvent::Error(error.to_string())).await;
+                        }
+                        let _ = command.result.send(result.map(|()| CommandOutcome::Continue));
+                        if failed {
+                            return SidebandReconnectExit::Terminal { returned_tail: false };
+                        }
+                    }
+                    CommandKind::Close => {
+                        let tail = state.active_transcript.take_tail();
+                        let _ = command.result.send(Ok(CommandOutcome::Closed(tail)));
+                        return SidebandReconnectExit::Terminal { returned_tail: true };
+                    }
+                    _ => pending_commands.push_back(command),
+                }
+            }
+            audio = recv_media(media) => {
+                match audio {
+                    Some(Ok(audio)) => {
+                        if events.send(RealtimeEvent::Audio(audio)).await.is_err() {
+                            return SidebandReconnectExit::Terminal { returned_tail: false };
+                        }
+                    }
+                    Some(Err(error)) => {
+                        let _ = events.send(RealtimeEvent::Error(error.to_string())).await;
+                        return SidebandReconnectExit::Terminal { returned_tail: false };
+                    }
+                    None => *media = None,
+                }
+            }
+        }
+    }
+}
+
+async fn send_webrtc_audio(
+    media_input: Option<&mpsc::Sender<RealtimeAudio>>,
+    audio: &RealtimeAudio,
+) -> Result<(), RealtimeError> {
+    let Some(input) = media_input else {
+        return Err(RealtimeError::Closed);
+    };
+    if audio.is_empty() {
+        return Ok(());
+    }
+    timeout(SEND_TIMEOUT, input.send(audio.clone()))
+        .await
+        .map_err(|_| RealtimeError::SendTimeout)?
+        .map_err(|_| RealtimeError::Closed)
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn handle_socket_command(
+    socket: &mut Socket,
+    command: Command,
+    protocol: RealtimeProtocol,
+    media_input: Option<&mpsc::Sender<RealtimeAudio>>,
+    state: &mut SocketState,
+    output_policy: &OutputPolicy,
+    events: &mpsc::Sender<RealtimeEvent>,
+    reconnectable: bool,
+) -> SocketCommandExit {
+    let replayable = reconnectable && command.kind.replayable_after_sideband_loss();
+    let output_routing_before = replayable.then(|| state.output_routing.clone());
+    let result = handle_command(
+        socket,
+        &command.kind,
+        protocol,
+        media_input,
+        state,
+        output_policy,
+    )
+    .await;
+    let result = match result {
+        Err(error) if replayable && sideband_transport_loss(&error) => {
+            if let Some(output_routing) = output_routing_before {
+                state.output_routing = output_routing;
+            }
+            return SocketCommandExit::TransportLost { error, command };
+        }
+        result => result,
+    };
+    let returned_tail = matches!(result, Ok(CommandOutcome::Closed(_)));
+    let failed = result.is_err();
+    if let Err(error) = &result {
+        let _ = events.send(RealtimeEvent::Error(error.to_string())).await;
+    }
+    let _ = command.result.send(result);
+    if returned_tail || failed {
+        SocketCommandExit::Terminal { returned_tail }
+    } else {
+        SocketCommandExit::Continue
+    }
+}
+
+impl CommandKind {
+    const fn replayable_after_sideband_loss(&self) -> bool {
+        matches!(
+            self,
+            Self::Text { .. }
+                | Self::Speech { .. }
+                | Self::AgentOutput { .. }
+                | Self::AgentProgress { .. }
+                | Self::StandaloneAgentOutput { .. }
+                | Self::AgentComplete { .. }
+                | Self::SilentOutput { .. }
+        )
+    }
+}
+
+const fn sideband_transport_loss(error: &RealtimeError) -> bool {
+    matches!(
+        error,
+        RealtimeError::WebSocket(_) | RealtimeError::SendTimeout | RealtimeError::Closed
+    )
+}
+
+fn sideband_reconnect_delay(rapid_disconnects: u32) -> Duration {
+    let multiplier = 2_u32.saturating_pow(rapid_disconnects.saturating_sub(1));
+    SIDEBAND_RECONNECT_BASE_DELAY
+        .saturating_mul(multiplier)
+        .min(SIDEBAND_RECONNECT_MAX_DELAY)
+}
+
 async fn recv_media(
     media: &mut Option<webrtc::WebRtcMedia>,
 ) -> Option<Result<RealtimeAudio, RealtimeError>> {
@@ -1710,7 +1994,7 @@ async fn recv_media(
 
 async fn handle_command(
     socket: &mut Socket,
-    command: CommandKind,
+    command: &CommandKind,
     protocol: RealtimeProtocol,
     media_input: Option<&mpsc::Sender<RealtimeAudio>>,
     state: &mut SocketState,
@@ -1739,11 +2023,8 @@ async fn handle_command(
                         .await?;
                     }
                     RealtimeProtocol::Frameless => {
-                        if let Some(input) = media_input {
-                            timeout(SEND_TIMEOUT, input.send(audio))
-                                .await
-                                .map_err(|_| RealtimeError::SendTimeout)?
-                                .map_err(|_| RealtimeError::Closed)?;
+                        if media_input.is_some() {
+                            send_webrtc_audio(media_input, audio).await?;
                         } else {
                             send_json(
                                 socket,
@@ -1758,19 +2039,21 @@ async fn handle_command(
             }
             Ok(CommandOutcome::Continue)
         }
-        CommandKind::Text { role, mut text } => {
-            if protocol == RealtimeProtocol::Direct
-                && role == RealtimeInputTextRole::User
+        CommandKind::Text { role, text } => {
+            let text = if protocol == RealtimeProtocol::Direct
+                && *role == RealtimeInputTextRole::User
                 && !text.is_empty()
                 && !text.starts_with("[USER] ")
             {
-                text = format!("[USER] {text}");
-            }
-            send_conversation_text(socket, role, &text).await?;
+                Cow::Owned(format!("[USER] {text}"))
+            } else {
+                Cow::Borrowed(text.as_str())
+            };
+            send_conversation_text(socket, *role, &text).await?;
             Ok(CommandOutcome::Continue)
         }
         CommandKind::Speech { text } => {
-            let text = realtime_backend_output(protocol, text);
+            let text = realtime_backend_output(protocol, text.clone());
             match protocol {
                 RealtimeProtocol::V1 => {
                     send_handoff_append(socket, STANDALONE_HANDOFF_ID, &text).await?;
@@ -1793,14 +2076,14 @@ async fn handle_command(
         CommandKind::AgentOutput { call_id, output } => {
             match protocol {
                 RealtimeProtocol::V1 => {
-                    send_function_output(socket, &call_id, &output).await?;
+                    send_function_output(socket, call_id, output).await?;
                 }
                 RealtimeProtocol::Direct => {
-                    send_function_output(socket, &call_id, &output).await?;
+                    send_function_output(socket, call_id, output).await?;
                     state.response_create.request(socket).await?;
                 }
                 RealtimeProtocol::Frameless => {
-                    send_delegation_context(socket, &call_id, &output, None).await?;
+                    send_delegation_context(socket, call_id, output, None).await?;
                 }
             }
             Ok(CommandOutcome::Continue)
@@ -1812,19 +2095,20 @@ async fn handle_command(
         } => {
             let Some((output, phase)) = route_streamed_output(
                 protocol,
-                &call_id,
-                output,
-                phase,
+                call_id,
+                output.clone(),
+                *phase,
                 output_policy,
                 &mut state.output_routing,
             ) else {
                 return Ok(CommandOutcome::Continue);
             };
-            send_agent_progress(socket, protocol, &call_id, output, phase, output_policy).await?;
+            send_agent_progress(socket, protocol, call_id, output, phase, output_policy).await?;
             Ok(CommandOutcome::Continue)
         }
-        CommandKind::StandaloneAgentOutput { mut output, phase } => {
-            let phase = standalone_output_phase(protocol, &output, phase, output_policy);
+        CommandKind::StandaloneAgentOutput { output, phase } => {
+            let mut output = output.clone();
+            let phase = standalone_output_phase(protocol, &output, *phase, output_policy);
             let channel = output_channel(&output, phase, output_policy);
             output = realtime_backend_output(protocol, output);
             if output_policy.codex_responses_as_items {
@@ -1849,14 +2133,14 @@ async fn handle_command(
             Ok(CommandOutcome::Continue)
         }
         CommandKind::AgentComplete { call_id } => {
-            if let Some(mut parser) = state.output_routing.bem_channels.remove(&call_id) {
+            if let Some(mut parser) = state.output_routing.bem_channels.remove(call_id) {
                 let output = parser.finish();
                 if !output.is_empty() {
                     warn!(%call_id, "BEM output ended before a recognized channel header was received");
                     send_agent_progress(
                         socket,
                         protocol,
-                        &call_id,
+                        call_id,
                         output,
                         Some(MessagePhase::FinalAnswer),
                         output_policy,
@@ -1870,7 +2154,7 @@ async fn handle_command(
                 } else {
                     AGENT_COMPLETE_ACKNOWLEDGEMENT
                 };
-                send_function_output(socket, &call_id, acknowledgement).await?;
+                send_function_output(socket, call_id, acknowledgement).await?;
                 state.response_create.request(socket).await?;
             }
             Ok(CommandOutcome::Continue)
@@ -1878,10 +2162,10 @@ async fn handle_command(
         CommandKind::SilentOutput { call_id } => {
             match protocol {
                 RealtimeProtocol::V1 | RealtimeProtocol::Direct => {
-                    send_function_output(socket, &call_id, "").await?
+                    send_function_output(socket, call_id, "").await?
                 }
                 RealtimeProtocol::Frameless => {
-                    send_delegation_context(socket, &call_id, "", None).await?;
+                    send_delegation_context(socket, call_id, "", None).await?;
                 }
             }
             Ok(CommandOutcome::Continue)
@@ -2209,7 +2493,13 @@ async fn handle_server_message(
     has_webrtc_media: bool,
 ) -> Result<bool, RealtimeError> {
     let Some(message) = message else {
-        return Ok(true);
+        return if protocol == RealtimeProtocol::Frameless {
+            Err(RealtimeError::WebSocket(
+                "Realtime sideband event stream ended unexpectedly".to_owned(),
+            ))
+        } else {
+            Ok(true)
+        };
     };
     match message.map_err(map_websocket_error)? {
         Message::Text(payload) => {
@@ -2251,7 +2541,23 @@ async fn handle_server_message(
             Ok(false)
         }
         Message::Pong(_) | Message::Frame(_) => Ok(false),
-        Message::Close(_) => Ok(true),
+        Message::Close(frame) => {
+            if protocol == RealtimeProtocol::Frameless
+                && !matches!(
+                    frame.as_ref().map(|frame| frame.code),
+                    Some(CloseCode::Normal)
+                )
+            {
+                let detail = frame
+                    .map(|frame| format!("{} ({})", frame.code, frame.reason))
+                    .unwrap_or_else(|| "without a close frame".to_owned());
+                Err(RealtimeError::WebSocket(format!(
+                    "Realtime sideband closed unexpectedly: {detail}"
+                )))
+            } else {
+                Ok(true)
+            }
+        }
         Message::Binary(_) => Err(RealtimeError::Message(
             "unexpected binary WebSocket frame".to_owned(),
         )),
@@ -2376,20 +2682,16 @@ impl ResponseCreateQueue {
 #[derive(Default)]
 struct ActiveTranscript {
     entries: Vec<RealtimeTranscriptEntry>,
-    last_handoff_entry_count: usize,
     new_input_entry: bool,
     new_output_entry: bool,
 }
 
 impl ActiveTranscript {
     fn take_tail(&mut self) -> Vec<RealtimeTranscriptEntry> {
-        let tail = self.entries[self.last_handoff_entry_count..]
-            .iter()
+        std::mem::take(&mut self.entries)
+            .into_iter()
             .filter(|entry| !entry.text.trim().is_empty())
-            .cloned()
-            .collect();
-        self.last_handoff_entry_count = self.entries.len();
-        tail
+            .collect()
     }
 
     fn update(&mut self, event: &mut RealtimeEvent) {
@@ -2420,8 +2722,7 @@ impl ActiveTranscript {
                 prompt, transcript, ..
             } => {
                 append_handoff_input(&mut self.entries, prompt);
-                *transcript = self.entries[self.last_handoff_entry_count..].to_vec();
-                self.last_handoff_entry_count = self.entries.len();
+                *transcript = std::mem::take(&mut self.entries);
                 self.new_input_entry = true;
                 self.new_output_entry = true;
             }
@@ -2433,7 +2734,40 @@ impl ActiveTranscript {
             | RealtimeEvent::TranscriptTail(_)
             | RealtimeEvent::Error(_) => {}
         }
+        truncate_active_transcript(&mut self.entries);
     }
+}
+
+fn truncate_active_transcript(entries: &mut Vec<RealtimeTranscriptEntry>) {
+    let mut total_bytes = transcript_entries_bytes(entries);
+    while total_bytes > MAX_ACTIVE_TRANSCRIPT_BYTES && entries.len() > 1 {
+        total_bytes = total_bytes.saturating_sub(transcript_entry_bytes(&entries[0]));
+        entries.remove(0);
+    }
+    let Some(entry) = entries.first_mut() else {
+        return;
+    };
+    let entry_overhead = entry.role.len() + 3;
+    let max_text_bytes = MAX_ACTIVE_TRANSCRIPT_BYTES.saturating_sub(entry_overhead);
+    if entry.text.len() <= max_text_bytes {
+        return;
+    }
+    let mut start = entry
+        .text
+        .len()
+        .saturating_sub(max_text_bytes.saturating_sub(TRUNCATED_TRANSCRIPT_PREFIX.len()));
+    while !entry.text.is_char_boundary(start) {
+        start += 1;
+    }
+    entry.text = format!("{TRUNCATED_TRANSCRIPT_PREFIX}{}", &entry.text[start..]);
+}
+
+fn transcript_entries_bytes(entries: &[RealtimeTranscriptEntry]) -> usize {
+    entries.iter().map(transcript_entry_bytes).sum()
+}
+
+const fn transcript_entry_bytes(entry: &RealtimeTranscriptEntry) -> usize {
+    entry.role.len() + entry.text.len() + 3
 }
 
 fn append_transcript_delta(
@@ -2786,18 +3120,33 @@ fn map_websocket_error(error: WebSocketError) -> RealtimeError {
 
 #[cfg(test)]
 mod tests {
+    use std::{collections::BTreeMap, time::Duration};
+
     use futures_util::{SinkExt, StreamExt};
-    use tokio::net::TcpListener;
-    use tokio_tungstenite::{accept_async, tungstenite::Message};
+    use tokio::{
+        net::TcpListener,
+        sync::{mpsc, oneshot},
+    };
+    use tokio_tungstenite::{
+        accept_async,
+        tungstenite::{
+            Message,
+            protocol::{CloseFrame, frame::coding::CloseCode},
+        },
+    };
+    use url::Url;
 
     use super::{
         ActiveTranscript, CHATGPT_REALTIME_MODEL, CHATGPT_REALTIME_VOICE, CHATGPT_REALTIME_VOICES,
+        Command, CommandKind, CommandOutcome, MAX_ACTIVE_TRANSCRIPT_BYTES, OutputPolicy,
         PLATFORM_REALTIME_VOICE, PLATFORM_REALTIME_VOICES, RealtimeAgentSteer, RealtimeAudio,
-        RealtimeEvent, RealtimeInitialItem, RealtimeOutputModality, RealtimeProtocol,
-        RealtimeResponseHandoffMode, RealtimeSessionMode, RealtimeTextRole,
+        RealtimeEvent, RealtimeInitialItem, RealtimeInputTextRole, RealtimeOutputModality,
+        RealtimeProtocol, RealtimeResponseHandoffMode, RealtimeSessionMode, RealtimeTextRole,
         RealtimeTranscriptEntry, RealtimeTransport, RealtimeVersion, RealtimeVoice,
-        configured_session_update, context_append_chunks, delegated_prompt, parse_event,
-        realtime_endpoint, session_update, validate_initial_items, validate_realtime_configuration,
+        SIDEBAND_RECONNECT_MAX_DELAY, SocketCommandExit, SocketState, configured_session_update,
+        context_append_chunks, delegated_prompt, handle_socket_command, parse_event,
+        realtime_endpoint, run_socket, session_update, sideband_reconnect_delay,
+        transcript_entries_bytes, validate_initial_items, validate_realtime_configuration,
     };
     use crate::OpenAi;
 
@@ -3124,6 +3473,186 @@ mod tests {
                 ],
             }
         );
+    }
+
+    #[test]
+    fn active_transcript_retains_a_bounded_suffix() {
+        let mut transcript = ActiveTranscript::default();
+        transcript.update(&mut RealtimeEvent::InputTranscriptDelta(format!(
+            "old{}new",
+            "x".repeat(MAX_ACTIVE_TRANSCRIPT_BYTES)
+        )));
+
+        let tail = transcript.take_tail();
+        assert!(transcript_entries_bytes(&tail) <= MAX_ACTIVE_TRANSCRIPT_BYTES);
+        assert!(tail[0].text.starts_with('…'));
+        assert!(tail[0].text.ends_with("new"));
+    }
+
+    #[test]
+    fn sideband_reconnect_delay_backs_off_and_caps() {
+        assert_eq!(sideband_reconnect_delay(1), Duration::from_millis(200));
+        assert_eq!(sideband_reconnect_delay(2), Duration::from_millis(400));
+        assert_eq!(sideband_reconnect_delay(3), Duration::from_millis(800));
+        assert_eq!(sideband_reconnect_delay(10), SIDEBAND_RECONNECT_MAX_DELAY);
+    }
+
+    #[tokio::test]
+    async fn frameless_sideband_reconnects_without_ending_the_session() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (reconnected_tx, reconnected_rx) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut first = accept_async(stream).await.unwrap();
+            first
+                .send(Message::Close(Some(CloseFrame {
+                    code: CloseCode::Away,
+                    reason: "replace sideband".into(),
+                })))
+                .await
+                .unwrap();
+
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut second = accept_async(stream).await.unwrap();
+            reconnected_tx.send(()).unwrap();
+            let message = tokio::time::timeout(Duration::from_secs(2), second.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let Message::Text(payload) = message else {
+                panic!("expected text input after reconnect")
+            };
+            assert!(payload.contains("conversation.item.create"));
+            assert!(payload.contains("after reconnect"));
+            second
+                .send(Message::Close(Some(CloseFrame {
+                    code: CloseCode::Normal,
+                    reason: "done".into(),
+                })))
+                .await
+                .unwrap();
+        });
+
+        let url = format!("ws://{address}/v1/live/rtc_test");
+        let (socket, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let sideband = super::webrtc::WebRtcSideband::for_test(Url::parse(&url).unwrap());
+        let (command_tx, command_rx) = mpsc::channel(4);
+        let (event_tx, _event_rx) = mpsc::channel(4);
+        let socket_task = tokio::spawn(run_socket(
+            socket,
+            command_rx,
+            event_tx,
+            RealtimeProtocol::Frameless,
+            None,
+            Some(sideband),
+            OutputPolicy {
+                codex_responses_as_items: false,
+                codex_response_item_prefix: None,
+                handoff_mode: RealtimeResponseHandoffMode::Thinking,
+                channel_prefixes: BTreeMap::new(),
+            },
+        ));
+
+        tokio::time::timeout(Duration::from_secs(2), reconnected_rx)
+            .await
+            .unwrap()
+            .unwrap();
+        let (result, outcome) = oneshot::channel();
+        command_tx
+            .send(Command {
+                kind: CommandKind::Text {
+                    role: RealtimeInputTextRole::User,
+                    text: "after reconnect".to_owned(),
+                },
+                result,
+            })
+            .await
+            .unwrap();
+        assert!(matches!(
+            outcome.await.unwrap(),
+            Ok(CommandOutcome::Continue)
+        ));
+        tokio::time::timeout(Duration::from_secs(2), socket_task)
+            .await
+            .unwrap()
+            .unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn interrupted_text_command_resolves_after_replay() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            drop(accept_async(stream).await.unwrap());
+
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut replacement = accept_async(stream).await.unwrap();
+            let message = replacement.next().await.unwrap().unwrap();
+            let Message::Text(payload) = message else {
+                panic!("expected replayed text input")
+            };
+            assert!(payload.contains("replay me"));
+        });
+
+        let url = format!("ws://{address}");
+        let (mut failed_socket, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        let _ = failed_socket.next().await;
+        let (result, outcome) = oneshot::channel();
+        let command = Command {
+            kind: CommandKind::Text {
+                role: RealtimeInputTextRole::User,
+                text: "replay me".to_owned(),
+            },
+            result,
+        };
+        let mut state = SocketState::default();
+        let policy = OutputPolicy {
+            codex_responses_as_items: false,
+            codex_response_item_prefix: None,
+            handoff_mode: RealtimeResponseHandoffMode::Thinking,
+            channel_prefixes: BTreeMap::new(),
+        };
+        let (events, _event_rx) = mpsc::channel(1);
+        let command = match handle_socket_command(
+            &mut failed_socket,
+            command,
+            RealtimeProtocol::Frameless,
+            None,
+            &mut state,
+            &policy,
+            &events,
+            true,
+        )
+        .await
+        {
+            SocketCommandExit::TransportLost { command, .. } => command,
+            _ => panic!("transport loss must retain the text command"),
+        };
+
+        let (mut replacement, _) = tokio_tungstenite::connect_async(&url).await.unwrap();
+        assert!(matches!(
+            handle_socket_command(
+                &mut replacement,
+                command,
+                RealtimeProtocol::Frameless,
+                None,
+                &mut state,
+                &policy,
+                &events,
+                true,
+            )
+            .await,
+            SocketCommandExit::Continue
+        ));
+        assert!(matches!(
+            outcome.await.unwrap(),
+            Ok(CommandOutcome::Continue)
+        ));
+        server.await.unwrap();
     }
 
     #[test]

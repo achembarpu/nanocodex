@@ -17,6 +17,13 @@ the final seven are classified in
 latest 232 are classified in
 [`codex-parity/be2e4afc-7ada37a1.md`](codex-parity/be2e4afc-7ada37a1.md).
 
+The global checkpoint remains `7ada37a1`. A focused Realtime voice review also
+screened the 802 later commits through local Codex HEAD
+`50ea8fd411422b3f7bc906bcde6c1c4432019a2e`; its five behavior-adjacent changes
+are dispositioned below. This focused review does not advance the global
+checkpoint because the non-voice commits have not yet been classified
+individually in this ledger.
+
 The classifications mean:
 
 - `port`: the Nanocodex-relevant invariant is implemented and has concrete
@@ -377,25 +384,70 @@ ports the refresh invariants from Codex `6962a2ecae` and the OAuth-relevant
 portion of `a05bcda3db`; unrelated RMCP protocol and server surfaces remain
 outside this claim.
 
+### P41 — recoverable Frameless WebRTC sidebands
+
+[`run_socket`](../crates/nanocodex-oai-api/src/realtime.rs) keeps the owned
+WebRTC peer and media channels alive when a Frameless sideband ends
+unexpectedly. It reconnects after Codex's capped 200 ms, 400 ms, 800 ms, ...,
+5 s delays, resets the rapid-disconnect counter after 30 stable seconds, treats
+HTTP 404 and 410 as an ended call, keeps microphone and playback traffic live
+while reconnecting, and retries the one interrupted text or agent-output
+command. A normal close remains terminal; V1 and direct V2 behavior is
+unchanged.
+
+The same port bounds the active transcript to its newest 8 KiB and bounds each
+escaped Realtime delegation field to 4 KiB, retaining the start of the user
+input and the end of the transcript. The focused regressions
+`frameless_sideband_reconnects_without_ending_the_session`,
+`interrupted_text_command_resolves_after_replay`,
+`active_transcript_retains_a_bounded_suffix`,
+`sideband_reconnect_delay_backs_off_and_caps`, and
+`delegation_fields_keep_the_codex_bounded_edge` cover those invariants. This
+adopts Codex `ecb8013dfa82120d11b02e3b68b7d3a3afd79d39` without importing its
+app-server lifecycle.
+
 ## Reviewed baseline behavior
 
 ### Realtime voice delegation
 
-The experimental Realtime boundary matches Codex's V1, V2, and Frameless/V3
-behavior: lifecycle developer context, bounded 5,300-token startup context,
-typed-turn mirroring, transcript-tail flushing, current model/voice catalogs,
-byte-identical backend instructions, exact tools and acknowledgements, atomic
-steering, queued `response.create`, 200 ms bounded agent updates, 500-byte
-Frameless appends, BEM commentary/speakable routing, responses-as-items, and V2
-audio truncation on interruption. Protocol/transport, transcription/text
-output, client-managed handoffs, initial items, channel prefixes, startup
-context, and tail flushing are explicit builder policies. Shutdown awaits the
-transport/media lifecycle before the agent is stopped.
+The experimental owned-session Realtime boundary matches Codex's V1, V2, and
+Frameless/V3 behavior: lifecycle developer context, bounded 5,300-token startup
+context, typed-turn mirroring, transcript-tail flushing, current model/voice
+catalogs, byte-identical backend instructions, exact tools and
+acknowledgements, atomic steering, queued `response.create`, 200 ms bounded
+agent updates, 500-byte Frameless appends, BEM commentary/speakable routing,
+responses-as-items, V2 audio truncation on interruption, and recoverable
+Frameless sidebands. Protocol/transport, transcription/text output,
+client-managed handoffs, initial items, channel prefixes, startup context, and
+tail flushing are explicit builder policies. Shutdown awaits the
+transport/media lifecycle before the agent is stopped. Recent-work startup
+context discovers the canonical `<CODEX_HOME>/sessions/YYYY/MM/DD` layout
+through the rollout owner rather than scanning a nonexistent nested sessions
+directory.
 
 All Realtime orchestration remains in `nanocodex-voice`; the agent crate exposes
 only protocol-neutral live-input, developer-message, and read-only session
 context hooks. ChatGPT WebRTC uses native Rust WebRTC/Opus with a sideband
 WebSocket, while the host owns device-attestation generation.
+
+The later voice-adjacent commits not imported by this owned-session boundary
+are:
+
+- `13dfaab4469eff5c5b929bb7e1cbc6bba5e0c1be` is `out-of-scope`: it narrates
+  Codex approval, permission, patch-approval, elicitation, and app-owned input
+  requests. Nanocodex deliberately has no approval subsystem or app-server
+  request surface.
+- `536f86e5cc9ec1ff38457d099bf320b9d08eeeba` is `out-of-scope`: it lets a
+  Codex app-server client attach to a call the client created. Nanocodex owns
+  its agent and WebRTC call lifecycle and has no consumer for client-owned call
+  attachment.
+- `d44696065723a56b9de6538cd6348fcbe6c1542e` is `out-of-scope`: it adds a
+  Codex TUI keymap schema entry and Linux version-skew build plumbing, not a
+  Realtime transport behavior. The current local Codex Rust TUI contains no
+  corresponding native microphone implementation to copy.
+- `be6ebb1f6d4cf3bcd70c5c20be2677bb38dec860` is `out-of-scope`: it adds a
+  trace span around Codex's app-server Realtime running-state query without
+  changing session behavior.
 
 ### Responses Lite parallel-tool scheduling
 

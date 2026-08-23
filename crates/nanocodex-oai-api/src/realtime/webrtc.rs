@@ -61,6 +61,58 @@ const ATTESTATION_UNAVAILABLE: &str = r#"{"v":1,"s":1}"#;
 pub(super) struct WebRtcConnection {
     pub(super) socket: Socket,
     pub(super) media: WebRtcMedia,
+    pub(super) sideband: WebRtcSideband,
+}
+
+#[derive(Clone)]
+pub(super) struct WebRtcSideband {
+    auth: OpenAiAuthSnapshot,
+    endpoint: Url,
+    attestation_header: String,
+    session_id: Option<String>,
+    version: RealtimeVersion,
+}
+
+impl WebRtcSideband {
+    fn from_config(
+        config: &ConnectConfig<'_>,
+        auth: OpenAiAuthSnapshot,
+        call_id: &str,
+    ) -> Result<Self, RealtimeError> {
+        Ok(Self {
+            auth,
+            endpoint: sideband_endpoint(config.websocket_url, call_id)?,
+            attestation_header: config
+                .attestation_header
+                .unwrap_or(ATTESTATION_UNAVAILABLE)
+                .to_owned(),
+            session_id: config.session_id.map(str::to_owned),
+            version: config.version,
+        })
+    }
+
+    pub(super) async fn reconnect(&self) -> Result<Socket, RealtimeError> {
+        connect_sideband(self)
+            .await
+            .map(|(socket, _response)| socket)
+    }
+
+    #[cfg(test)]
+    pub(super) fn for_test(endpoint: Url) -> Self {
+        Self {
+            auth: OpenAiAuthSnapshot::new(
+                crate::OpenAiAuthMode::ApiKey,
+                "test",
+                Option::<String>::None,
+                false,
+                0,
+            ),
+            endpoint,
+            attestation_header: ATTESTATION_UNAVAILABLE.to_owned(),
+            session_id: None,
+            version: RealtimeVersion::V3,
+        }
+    }
 }
 
 pub(super) struct WebRtcMedia {
@@ -115,7 +167,8 @@ pub(super) async fn connect(config: ConnectConfig<'_>) -> Result<WebRtcConnectio
     .map_err(|error| RealtimeError::WebRtc(error.to_string()))?;
     debug!(call_id = %call.id, "applied GPT Realtime WebRTC answer");
 
-    let (mut socket, response) = connect_sideband(&config, &auth, &call.id).await?;
+    let sideband = WebRtcSideband::from_config(&config, auth, &call.id)?;
+    let (mut socket, response) = connect_sideband(&sideband).await?;
     debug!(
         status = response.status().as_u16(),
         "connected GPT Realtime WebRTC sideband"
@@ -138,6 +191,7 @@ pub(super) async fn connect(config: ConnectConfig<'_>) -> Result<WebRtcConnectio
     }
     Ok(WebRtcConnection {
         socket,
+        sideband,
         media: WebRtcMedia {
             peer: offer.peer,
             input: offer.input,
@@ -147,9 +201,7 @@ pub(super) async fn connect(config: ConnectConfig<'_>) -> Result<WebRtcConnectio
 }
 
 async fn connect_sideband(
-    config: &ConnectConfig<'_>,
-    auth: &OpenAiAuthSnapshot,
-    call_id: &str,
+    sideband: &WebRtcSideband,
 ) -> Result<
     (
         Socket,
@@ -157,12 +209,11 @@ async fn connect_sideband(
     ),
     RealtimeError,
 > {
-    let endpoint = sideband_endpoint(config.websocket_url, call_id)?;
-    debug!(url = %endpoint, "connecting GPT Realtime WebRTC sideband");
+    debug!(url = %sideband.endpoint, "connecting GPT Realtime WebRTC sideband");
     let mut last_error = None;
     for attempt in 0..=3_u32 {
         let connect_started = tokio::time::Instant::now();
-        let request = sideband_request(config, auth, &endpoint)?;
+        let request = sideband_request(sideband)?;
         match timeout(CONNECT_TIMEOUT, connect_async(request)).await {
             Ok(Ok((socket, response))) => {
                 debug!(
@@ -172,7 +223,13 @@ async fn connect_sideband(
                 );
                 return Ok((socket, response));
             }
-            Ok(Err(error)) => last_error = Some(map_websocket_error(error)),
+            Ok(Err(error)) => {
+                let error = map_sideband_websocket_error(error);
+                if sideband_session_ended(&error) {
+                    return Err(error);
+                }
+                last_error = Some(error);
+            }
             Err(_) => last_error = Some(RealtimeError::ConnectTimeout),
         }
         if attempt < 3 {
@@ -189,23 +246,22 @@ async fn connect_sideband(
 }
 
 fn sideband_request(
-    config: &ConnectConfig<'_>,
-    auth: &OpenAiAuthSnapshot,
-    endpoint: &Url,
+    sideband: &WebRtcSideband,
 ) -> Result<tokio_tungstenite::tungstenite::http::Request<()>, RealtimeError> {
-    let mut request = endpoint
+    let mut request = sideband
+        .endpoint
         .as_str()
         .into_client_request()
         .map_err(|error| RealtimeError::InvalidUrl(error.to_string()))?;
-    add_auth_headers(request.headers_mut(), auth)?;
+    add_auth_headers(request.headers_mut(), &sideband.auth)?;
     request.headers_mut().insert(
         "x-oai-attestation",
-        HeaderValue::from_str(config.attestation_header.unwrap_or(ATTESTATION_UNAVAILABLE))
+        HeaderValue::from_str(&sideband.attestation_header)
             .map_err(|error| RealtimeError::InvalidAuthorization(error.to_string()))?,
     );
     request.headers_mut().insert(
         "openai-alpha",
-        HeaderValue::from_static(alpha_header(config.version)),
+        HeaderValue::from_static(alpha_header(sideband.version)),
     );
     request.headers_mut().insert(
         header::USER_AGENT,
@@ -214,7 +270,7 @@ fn sideband_request(
     request
         .headers_mut()
         .insert("originator", HeaderValue::from_static("nanocodex"));
-    if let Some(session_id) = config.session_id {
+    if let Some(session_id) = sideband.session_id.as_deref() {
         let value = HeaderValue::from_str(session_id)
             .map_err(|error| RealtimeError::InvalidSessionId(error.to_string()))?;
         request.headers_mut().insert("x-session-id", value.clone());
@@ -223,6 +279,24 @@ fn sideband_request(
     }
 
     Ok(request)
+}
+
+fn map_sideband_websocket_error(error: tokio_tungstenite::tungstenite::Error) -> RealtimeError {
+    match error {
+        tokio_tungstenite::tungstenite::Error::Http(response) => {
+            RealtimeError::WebSocketHandshake {
+                status: response.status().as_u16(),
+            }
+        }
+        error => map_websocket_error(error),
+    }
+}
+
+pub(super) const fn sideband_session_ended(error: &RealtimeError) -> bool {
+    matches!(
+        error,
+        RealtimeError::WebSocketHandshake { status: 404 | 410 }
+    )
 }
 
 async fn create_offer() -> Result<Offer, RealtimeError> {
@@ -805,7 +879,7 @@ mod tests {
     use super::{
         ConnectConfig, OPUS_PACKET_CAPACITY, OpusApplication, OpusChannels, OpusDecoder,
         OpusEncoder, OpusSampleRate, WEBRTC_INPUT_FRAME_SAMPLES, call_endpoint, call_id,
-        create_call, inbound_sample_builder, sideband_endpoint,
+        create_call, inbound_sample_builder, sideband_endpoint, sideband_session_ended,
     };
     use crate::{
         OpenAiAuth, OpenAiAuthMode, OpenAiAuthSnapshot,
@@ -845,6 +919,18 @@ mod tests {
             .unwrap(),
             "019eb97d-8e9a-7ff3-94b0-ea019babd5d7"
         );
+    }
+
+    #[test]
+    fn recognizes_terminal_sideband_statuses() {
+        for status in [404, 410] {
+            assert!(sideband_session_ended(
+                &crate::realtime::RealtimeError::WebSocketHandshake { status }
+            ));
+        }
+        assert!(!sideband_session_ended(
+            &crate::realtime::RealtimeError::WebSocketHandshake { status: 500 }
+        ));
     }
 
     #[test]
