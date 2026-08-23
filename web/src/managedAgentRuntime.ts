@@ -7,6 +7,9 @@ import type {
 import type { TerminalAgent, TerminalTurn } from "./demoTerminal";
 
 const MANAGED_HISTORY_PAGE_SIZE = 128;
+const managedAgents = new Map<string, ManagedAgent>();
+const managedLists = new Map<string, Promise<readonly ManagedConversation[]>>();
+const managedCreates = new Map<string, Promise<ManagedConversation>>();
 
 export type ManagedConversation = Readonly<{
   id: string;
@@ -15,36 +18,56 @@ export type ManagedConversation = Readonly<{
   turnCount?: number;
 }>;
 
-export async function listManagedConversations(): Promise<readonly ManagedConversation[]> {
-  const { Agent } = await import("nanocodex/managed");
-  const agents = await Agent.list();
-  const conversations = await Promise.all(agents.map(async (agent) => {
-    const raw: unknown = await agent.state();
-    const state = raw && typeof raw === "object" && !Array.isArray(raw)
-      ? raw as Record<string, unknown> : {};
-    const updatedAt = typeof state.last_active === "number" ? state.last_active : undefined;
-    const turnCount = Number.isSafeInteger(state.completed_turns) && Number(state.completed_turns) >= 0
-      ? Number(state.completed_turns) : undefined;
-    const prompt = typeof state.first_prompt === "string" ? state.first_prompt : "";
-    return Object.freeze({
-      id: agent.id,
-      title: titleFromPrompt(prompt) || `Conversation ${agent.id.slice(0, 8)}`,
-      ...(updatedAt === undefined ? {} : { updatedAt }),
-      ...(turnCount === undefined ? {} : { turnCount }),
+export function listManagedConversations(accountId = "default"): Promise<readonly ManagedConversation[]> {
+  const retained = managedLists.get(accountId);
+  if (retained) return retained;
+  const loading = import("nanocodex/managed").then(async ({ Agent }) => {
+    const agents = await Agent.list();
+    const conversations = agents.map((agent) => {
+      managedAgents.set(agent.id, agent);
+      return Object.freeze({
+        id: agent.id,
+        title: titleFromPrompt(agent.summary?.title ?? "") || `Conversation ${agent.id.slice(0, 8)}`,
+        ...(agent.summary === undefined ? {} : {
+          updatedAt: agent.summary.updatedAt,
+          turnCount: agent.summary.turnCount,
+        }),
+      });
     });
-  }));
-  return Object.freeze(conversations.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0)));
+    return Object.freeze(conversations.sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0)));
+  }).catch((error) => {
+    managedLists.delete(accountId);
+    throw error;
+  });
+  managedLists.set(accountId, loading);
+  return loading;
 }
 
-export async function createManagedConversation(): Promise<ManagedConversation> {
-  const { Agent } = await import("nanocodex/managed");
-  const agent = await Agent.create();
-  return Object.freeze({ id: agent.id, title: "New conversation", updatedAt: Date.now(), turnCount: 0 });
+export function createManagedConversation(accountId = "default"): Promise<ManagedConversation> {
+  const retained = managedCreates.get(accountId);
+  if (retained) return retained;
+  const creating = import("nanocodex/managed").then(async ({ Agent }) => {
+    const agent = await Agent.create();
+    managedAgents.set(agent.id, agent);
+    managedLists.delete(accountId);
+    return Object.freeze({
+      id: agent.id,
+      title: "New conversation",
+      updatedAt: Date.now(),
+      turnCount: 0,
+    });
+  }).finally(() => {
+    if (managedCreates.get(accountId) === creating) managedCreates.delete(accountId);
+  });
+  managedCreates.set(accountId, creating);
+  return creating;
 }
 
 export async function loadManagedTerminalAgent(agentId: string): Promise<TerminalAgent> {
   const { Agent } = await import("nanocodex/managed");
-  return managedTerminalAgent(await Agent.get(agentId));
+  const managed = managedAgents.get(agentId) ?? await Agent.get(agentId);
+  managedAgents.set(agentId, managed);
+  return managedTerminalAgent(managed);
 }
 
 export function managedTerminalAgent(managed: ManagedAgent): TerminalAgent {

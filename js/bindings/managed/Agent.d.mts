@@ -33,6 +33,13 @@ export type State = Readonly<{
   stream_error: string | null;
 }>;
 
+export type Summary = Readonly<{
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  turnCount: number;
+}>;
+
 export type TurnState =
   | "accepted"
   | "cancelling"
@@ -145,6 +152,8 @@ export type Turn = Readonly<{
 export type Agent = Readonly<{
   type: "managed";
   id: string;
+  /** Account-owned list metadata, present on handles returned by `list()`. */
+  summary?: Summary | undefined;
   turn: Readonly<{ prompt(options: PromptOptions): Turn }>;
   events: Readonly<{
     page(options?: EventHistoryOptions): Promise<EventHistoryPage>;

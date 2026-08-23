@@ -66,8 +66,9 @@ export const AgentExperience = memo(function AgentExperience({
     const accountId = account.account.id;
     setConversationPending(true);
     setManagedError(undefined);
-    void listManagedConversations().then(async (listed) => {
-      const next = listed.length || !hasCredential ? listed : [await createManagedConversation()];
+    void listManagedConversations(accountId).then(async (listed) => {
+      if (cancelled) return;
+      const next = listed.length || !hasCredential ? listed : [await createManagedConversation(accountId)];
       if (cancelled) return;
       const retainedId = safeGet(managedSelectionKey(accountId));
       const selected = next.find(({ id }) => id === retainedId)?.id ?? next[0]?.id;
@@ -122,7 +123,7 @@ export const AgentExperience = memo(function AgentExperience({
     if (!account.account) return;
     setConversationPending(true);
     setManagedError(undefined);
-    void createManagedConversation().then((conversation) => {
+    void createManagedConversation(account.account.id).then((conversation) => {
       setManagedConversations((current) => [conversation, ...current]);
       setManagedConversationId(conversation.id);
       safeSet(managedSelectionKey(account.account!.id), conversation.id);

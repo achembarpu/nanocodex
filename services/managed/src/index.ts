@@ -65,6 +65,7 @@ import {
   detachAgent,
   isUserId,
   listAgents,
+  recordAgentActivity,
   requireSameOriginMutation,
   routeAccountRequest,
   type AccountAuthEnv,
@@ -187,7 +188,7 @@ const json = (body: unknown, init: ResponseInit = {}) => Response.json(body, {
 });
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, ctx: ExecutionContext): Promise<Response> {
     const url = new URL(request.url);
     const browserModel = await routeBrowserModel(request, env, url);
     if (browserModel) return browserModel;
@@ -205,7 +206,16 @@ export default {
     if (request.method === "GET" && url.pathname === "/v1/agents") {
       const principal = await authenticate(request, env, url);
       if (!principal) return json({ error: "unauthorized" }, { status: 401 });
-      return json({ data: await listAgents(env, principal.userId) });
+      const agents = await listAgents(env, principal.userId);
+      return json({
+        data: agents.map(({ id }) => id),
+        summaries: Object.fromEntries(agents.filter(({ createdAt }) => createdAt > 0).map(({ id, ...summary }) => [id, {
+          title: summary.title,
+          created_at: summary.createdAt,
+          updated_at: summary.updatedAt,
+          turn_count: summary.turnCount,
+        }])),
+      });
     }
     if (request.method === "POST" && url.pathname === "/v1/rooms") {
       const principal = await authenticate(request, env, url);
@@ -371,11 +381,33 @@ export default {
       if (request.method !== "POST") return json({ error: "method_not_allowed" }, { status: 405 });
       const originFailure = requireSameOriginMutation(request, url, principal);
       if (originFailure) return originFailure;
-      return stub.fetch(`https://session.internal/turns?${publicOrigin}`, {
+      const response = await stub.fetch(`https://session.internal/turns?${publicOrigin}`, {
         method: "POST",
         headers: sessionHeaders,
         body: request.body,
       });
+      const created = response.headers.get("x-nanocodex-turn-created") === "1";
+      const encodedSummary = response.headers.get("x-nanocodex-turn-summary");
+      if (created && encodedSummary !== null) {
+        let title = "";
+        let turnCount = 0;
+        try {
+          const summary = JSON.parse(encodedSummary) as { title?: unknown; turnCount?: unknown };
+          if (typeof summary.title === "string") title = summary.title;
+          if (Number.isSafeInteger(summary.turnCount) && Number(summary.turnCount) >= 0) {
+            turnCount = Number(summary.turnCount);
+          }
+        } catch { /* Session-generated value is best effort. */ }
+        if (turnCount > 0) {
+          ctx.waitUntil(recordAgentActivity(env, principal.userId, agentId, { title, turnCount }).catch((error) => {
+            console.error("managed agent summary update failed", errorMessage(error));
+          }));
+        }
+      }
+      const headers = new Headers(response.headers);
+      headers.delete("x-nanocodex-turn-created");
+      headers.delete("x-nanocodex-turn-summary");
+      return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
     }
     const turnMatch = resource.match(/^turns\/([A-Za-z0-9._:-]{1,128})(?:\/(steer|cancel))?$/);
     if (turnMatch) {
@@ -879,7 +911,14 @@ export class NanocodexSession extends DurableComputerSession {
       const requestHash = await hashManagedInput(input);
       const submission = this.#submitManagedTurn(id, input, requestHash, requestKey, body.id !== undefined);
       const view = managedTurnView(submission.row);
-      return json(view, { status: submission.created ? 202 : 200 });
+      const summary = submission.created ? this.#conversationSummary() : undefined;
+      return json(view, {
+        status: submission.created ? 202 : 200,
+        headers: submission.created ? {
+          "x-nanocodex-turn-created": "1",
+          "x-nanocodex-turn-summary": JSON.stringify(summary),
+        } : undefined,
+      });
     } catch (error) {
       return managedErrorResponse(error);
     }
@@ -1595,6 +1634,20 @@ export class NanocodexSession extends DurableComputerSession {
     ).toArray()[0]?.count ?? 0;
   }
 
+  #conversationSummary(): { title: string; turnCount: number } {
+    const row = this.ctx.storage.sql.exec<{ input_json: string; turn_count: number }>(
+      `SELECT input_json,
+              (SELECT COUNT(*) FROM managed_turns) AS turn_count
+         FROM managed_turns
+        ORDER BY created_at, id
+        LIMIT 1`,
+    ).one();
+    return {
+      title: conversationTitle(promptInputText(JSON.parse(row.input_json) as PromptInput)),
+      turnCount: row.turn_count,
+    };
+  }
+
   async #scheduleNextAlarm(): Promise<void> {
     if (this.#deleting || !this.#sessionId()) return;
     const now = Date.now();
@@ -1704,6 +1757,12 @@ function promptInputText(input: PromptInput): string {
     if (value.type === "audio") return ["[audio]"];
     return [];
   }).join("\n");
+}
+
+function conversationTitle(input: string): string {
+  const text = input.replace(/\s+/g, " ").trim();
+  if (!text) return "";
+  return text.length > 56 ? `${text.slice(0, 55).trimEnd()}…` : text;
 }
 
 function messageForManagedTurn(row: ManagedTurnRow): ServerMessage {

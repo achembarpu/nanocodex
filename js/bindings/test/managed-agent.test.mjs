@@ -17,7 +17,12 @@ test("managed Agent covers account-scoped create, list, get, and delete", async 
       return Response.json({ agent_id: agentId, events_url: "private", websocket_url: "private" }, { status: 201 });
     }
     if (request.method === "GET" && path === "/v1/agents") {
-      return Response.json({ data: [agentId] });
+      return Response.json({
+        data: [agentId],
+        summaries: {
+          [agentId]: { title: "First task", created_at: 10, updated_at: 20, turn_count: 3 },
+        },
+      });
     }
     if (request.method === "GET" && path === `/v1/agents/${agentId}`) {
       return Response.json(agentState());
@@ -37,6 +42,9 @@ test("managed Agent covers account-scoped create, list, get, and delete", async 
 
   const listed = await Agent.list(options);
   assert.deepEqual(listed.map((agent) => agent.id), [agentId]);
+  assert.deepEqual(listed[0].summary, {
+    title: "First task", createdAt: 10, updatedAt: 20, turnCount: 3,
+  });
   assert.equal((await Agent.get(agentId, options)).id, agentId);
   assert.equal((await created.state()).latest_event_cursor, "4");
   await created.delete();

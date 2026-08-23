@@ -27,7 +27,15 @@ export async function list(options = {}) {
   if (!body || !Array.isArray(body.data) || body.data.some((id) => typeof id !== "string")) {
     throw new ManagedError("invalid_response", "managed agent list is malformed");
   }
-  return Object.freeze(body.data.map((id) => agentHandle(client, id)));
+  const summaries = body.summaries === undefined ? {} : body.summaries;
+  if (!summaries || typeof summaries !== "object" || Array.isArray(summaries)) {
+    throw new ManagedError("invalid_response", "managed agent summaries are malformed");
+  }
+  return Object.freeze(body.data.map((id) => agentHandle(
+    client,
+    id,
+    Object.hasOwn(summaries, id) ? managedSummary(summaries[id]) : undefined,
+  )));
 }
 
 /** Resolve one owned managed agent and verify that it exists. */
@@ -47,7 +55,7 @@ export async function remove(id, options = {}) {
 
 export { remove as delete };
 
-function agentHandle(client, id) {
+function agentHandle(client, id, summary) {
   validateAgentId(id);
   const eventStream = replayableEventStream(client, id);
   const events = Object.freeze({
@@ -57,6 +65,7 @@ function agentHandle(client, id) {
   const agent = {
     type: "managed",
     id,
+    ...(summary === undefined ? {} : { summary }),
     events,
     turn: Object.freeze({
       prompt: (options) => managedTurn(client, id, eventStream, options),
@@ -68,6 +77,26 @@ function agentHandle(client, id) {
     },
   };
   return Object.freeze(agent);
+}
+
+function managedSummary(value) {
+  if (!value || typeof value !== "object" || Array.isArray(value)
+    || typeof value.title !== "string"
+    || !nonnegativeNumber(value.created_at)
+    || !nonnegativeNumber(value.updated_at)
+    || !Number.isSafeInteger(value.turn_count) || value.turn_count < 0) {
+    throw new ManagedError("invalid_response", "managed agent summary is malformed");
+  }
+  return Object.freeze({
+    title: value.title,
+    createdAt: value.created_at,
+    updatedAt: value.updated_at,
+    turnCount: value.turn_count,
+  });
+}
+
+function nonnegativeNumber(value) {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
 }
 
 async function eventHistoryPage(client, agentId, options) {

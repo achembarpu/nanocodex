@@ -3,10 +3,90 @@ import test from "node:test";
 
 import type { ManagedEvent } from "nanocodex/managed";
 import {
+  createManagedConversation,
+  listManagedConversations,
   loadManagedTerminalAgent,
   managedTerminalAgent,
   terminalEvent,
 } from "../src/managedAgentRuntime.ts";
+
+test("concurrent managed conversation creation is account-scoped and retryable", async () => {
+  const requests: string[] = [];
+  const originals = {
+    fetch: Object.getOwnPropertyDescriptor(globalThis, "fetch"),
+    location: Object.getOwnPropertyDescriptor(globalThis, "location"),
+  };
+  Object.defineProperties(globalThis, {
+    location: { configurable: true, value: { origin: "https://create.test" } },
+    fetch: {
+      configurable: true,
+      value: async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = new Request(input, init);
+        assert.equal(request.method, "POST");
+        assert.equal(request.url, "https://create.test/v1/agents");
+        requests.push(request.url);
+        return Response.json({
+          agent_id: `018f1f9a-7b3c-7a18-8000-${String(requests.length).padStart(12, "0")}`,
+        });
+      },
+    },
+  });
+
+  try {
+    const first = createManagedConversation("strict-mode-account");
+    const duplicate = createManagedConversation("strict-mode-account");
+    assert.equal(duplicate, first, "concurrent creation shares the in-flight mutation");
+    assert.equal((await duplicate).id, (await first).id);
+    assert.equal(requests.length, 1);
+
+    const later = await createManagedConversation("strict-mode-account");
+    assert.notEqual(later.id, (await first).id, "a settled creation does not block an explicit later one");
+    assert.equal(requests.length, 2);
+  } finally {
+    restore("fetch", originals.fetch);
+    restore("location", originals.location);
+  }
+});
+
+test("managed conversation listing carries summaries without per-agent state requests", async () => {
+  const agentId = "018f1f9a-7b3c-7a18-8000-000000000019";
+  const requests: string[] = [];
+  const originals = {
+    fetch: Object.getOwnPropertyDescriptor(globalThis, "fetch"),
+    location: Object.getOwnPropertyDescriptor(globalThis, "location"),
+  };
+  Object.defineProperties(globalThis, {
+    location: { configurable: true, value: { origin: "https://summary.test" } },
+    fetch: {
+      configurable: true,
+      value: async (input: RequestInfo | URL, init?: RequestInit) => {
+        const request = new Request(input, init);
+        requests.push(request.url);
+        return Response.json({
+          data: [agentId],
+          summaries: {
+            [agentId]: { title: "Persisted task", created_at: 10, updated_at: 20, turn_count: 3 },
+          },
+        });
+      },
+    },
+  });
+
+  try {
+    const [first, second] = await Promise.all([
+      listManagedConversations("summary-account"),
+      listManagedConversations("summary-account"),
+    ]);
+    assert.deepEqual(first, [{ id: agentId, title: "Persisted task", updatedAt: 20, turnCount: 3 }]);
+    assert.equal(second, first);
+    assert.equal(requests.length, 1, "StrictMode-style duplicate loads share one list request");
+    assert.equal((await loadManagedTerminalAgent(agentId)).sessionId, agentId);
+    assert.equal(requests.length, 1, "the selected handle is reused without a state probe");
+  } finally {
+    restore("fetch", originals.fetch);
+    restore("location", originals.location);
+  }
+});
 
 test("an explicitly selected owned managed agent is loaded", async () => {
   const agentId = "018f1f9a-7b3c-7a18-8000-000000000018";

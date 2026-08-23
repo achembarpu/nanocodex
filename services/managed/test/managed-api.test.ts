@@ -169,7 +169,12 @@ describe("managed agents REST and resumable SSE", () => {
       const listed = await RAW_SELF.fetch("https://example.test/v1/agents", {
         headers: { cookie: principal.cookie },
       });
-      expect(await listed.json()).toEqual({ data: [receipt.agent_id] });
+      expect(await listed.json()).toEqual({
+        data: [receipt.agent_id],
+        summaries: {
+          [receipt.agent_id]: expect.objectContaining({ title: "", turn_count: 0 }),
+        },
+      });
       const replay = await RAW_SELF.fetch(receipt.events_url.replace(/\/events$/, ""), {
         headers: { cookie: principal.cookie },
       });
@@ -315,7 +320,12 @@ describe("managed agents REST and resumable SSE", () => {
     const agent = await createAgent();
     const mine = await SELF.fetch("https://example.test/v1/agents");
     expect(mine.status).toBe(200);
-    expect(await mine.json()).toEqual({ data: [agent.agent_id] });
+    expect(await mine.json()).toEqual({
+      data: [agent.agent_id],
+      summaries: {
+        [agent.agent_id]: expect.objectContaining({ title: "", turn_count: 0 }),
+      },
+    });
 
     const other = await RAW_SELF.fetch(agent.events_url.replace(/\/events$/, ""), {
       headers: { authorization: `Bearer ${OTHER_API_KEY}` },
@@ -326,7 +336,46 @@ describe("managed agents REST and resumable SSE", () => {
     const otherList = await RAW_SELF.fetch("https://example.test/v1/agents", {
       headers: { authorization: `Bearer ${OTHER_API_KEY}` },
     });
-    expect(await otherList.json()).toEqual({ data: [] });
+    expect(await otherList.json()).toEqual({ data: [], summaries: {} });
+  });
+
+  it("lists durable conversation summaries without probing every agent session", async () => {
+    const agent = await createAgent();
+    await submit(agent, "summary-turn", "Build the measured thing");
+    const duplicate = await SELF.fetch(agent.events_url.replace(/\/events$/, "/turns"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "request-summary-turn",
+      },
+      body: JSON.stringify({ id: "summary-turn", input: "Build the measured thing" }),
+    });
+    expect(duplicate.status).toBe(200);
+    let summary: { title?: string; turn_count?: number } | undefined;
+    for (let attempt = 0; attempt < 20; attempt += 1) {
+      const listed = await (await SELF.fetch("https://example.test/v1/agents")).json<{
+        summaries: Record<string, { title: string; turn_count: number }>;
+      }>();
+      summary = listed.summaries[agent.agent_id];
+      if (summary?.turn_count === 1) break;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    expect(summary).toMatchObject({ title: "Build the measured thing", turn_count: 1 });
+  });
+
+  it("reports acceptance for prompts containing lone UTF-16 surrogates", async () => {
+    const agent = await createAgent();
+    const response = await SELF.fetch(agent.events_url.replace(/\/events$/, "/turns"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "request-surrogate-turn",
+      },
+      body: JSON.stringify({ id: "surrogate-turn", input: "title \ud800 tail" }),
+    });
+
+    expect(response.status).toBe(202);
+    expect(await response.json<ManagedTurnView>()).toMatchObject({ turn_id: "surrogate-turn" });
   });
 
   it("requires stable identifiers and strictly validates structured prompt content", async () => {

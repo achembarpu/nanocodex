@@ -50,6 +50,14 @@ type StoredApiKey = ApiKeyMetadata & Readonly<{
   userId: string;
 }>;
 
+export type AgentSummary = Readonly<{
+  id: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  turnCount: number;
+}>;
+
 export async function routeAccountRequest(
   request: Request,
   env: AccountAuthEnv,
@@ -164,10 +172,10 @@ export function requireSameOriginMutation(
     : json({ error: "forbidden_origin" }, { status: 403 });
 }
 
-export async function listAgents(env: AccountAuthEnv, userId: string): Promise<string[]> {
+export async function listAgents(env: AccountAuthEnv, userId: string): Promise<AgentSummary[]> {
   const response = await env.NANOCODEX_USERS.getByName(userId).fetch("https://user.internal/agents");
   if (!response.ok) throw new Error("agent listing failed");
-  return response.json<string[]>();
+  return response.json<AgentSummary[]>();
 }
 
 export async function attachAgent(
@@ -177,10 +185,42 @@ export async function attachAgent(
 ): Promise<void> {
   const response = await env.NANOCODEX_USERS.getByName(userId).fetch(
     "https://user.internal/agents",
-    { method: "POST", body: agentId },
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ agentId }),
+    },
   );
   if (!response.ok) throw new Error("agent attachment failed");
   await response.body?.cancel();
+}
+
+export async function recordAgentActivity(
+  env: AccountAuthEnv,
+  userId: string,
+  agentId: string,
+  summary: Readonly<{ title: string; turnCount: number }>,
+): Promise<void> {
+  let failure: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const response = await env.NANOCODEX_USERS.getByName(userId).fetch(
+        `https://user.internal/agents/${agentId}/activity`,
+        {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify(summary),
+        },
+      );
+      if (!response.ok) throw new Error(`agent activity update failed with HTTP ${response.status}`);
+      await response.body?.cancel();
+      return;
+    } catch (error) {
+      failure = error;
+      if (attempt < 2) await scheduler.wait(10 * 2 ** attempt);
+    }
+  }
+  throw failure;
 }
 
 export async function detachAgent(
@@ -458,25 +498,62 @@ export class UserAccount extends DurableObject<AccountAuthEnv> {
     }
     if (url.pathname === "/agents") {
       const agents = await this.ctx.storage.get<string[]>("agents") ?? [];
-      if (request.method === "GET") return json(agents);
+      const summaries = await this.ctx.storage.get<Record<string, AgentSummary>>("agentSummaries") ?? {};
+      if (request.method === "GET") {
+        return json(agents.map((id) => summaries[id] ?? {
+          id,
+          title: "",
+          createdAt: 0,
+          updatedAt: 0,
+          turnCount: 0,
+        }));
+      }
       if (request.method === "POST") {
-        const agentId = await request.text();
+        const body = await request.json<{ agentId?: unknown }>();
+        const agentId = typeof body.agentId === "string" ? body.agentId : "";
         if (!/^[0-9a-f-]{36}$/.test(agentId)) {
           return json({ error: "invalid_agent" }, { status: 400 });
         }
         if (!agents.includes(agentId)) {
           agents.push(agentId);
-          await this.ctx.storage.put("agents", agents);
+          const now = Date.now();
+          summaries[agentId] = { id: agentId, title: "", createdAt: now, updatedAt: now, turnCount: 0 };
+          await this.ctx.storage.put({ agents, agentSummaries: summaries });
         }
         return new Response(null, { status: 204 });
       }
+    }
+    const activityMatch = url.pathname.match(/^\/agents\/([0-9a-f-]{36})\/activity$/);
+    if (activityMatch && request.method === "POST") {
+      const agents = await this.ctx.storage.get<string[]>("agents") ?? [];
+      const agentId = activityMatch[1]!;
+      if (!agents.includes(agentId)) return json({ error: "not_found" }, { status: 404 });
+      const body = await request.json<{ title?: unknown; turnCount?: unknown }>();
+      const title = typeof body.title === "string" ? body.title.trim().slice(0, 56) : "";
+      const turnCount = Number.isSafeInteger(body.turnCount) && Number(body.turnCount) >= 0
+        ? Number(body.turnCount) : undefined;
+      if (turnCount === undefined) return json({ error: "invalid_activity" }, { status: 400 });
+      const summaries = await this.ctx.storage.get<Record<string, AgentSummary>>("agentSummaries") ?? {};
+      const current = summaries[agentId];
+      const now = Date.now();
+      summaries[agentId] = {
+        id: agentId,
+        title: current?.title || title,
+        createdAt: current?.createdAt || now,
+        updatedAt: now,
+        turnCount: Math.max(current?.turnCount ?? 0, turnCount),
+      };
+      await this.ctx.storage.put("agentSummaries", summaries);
+      return new Response(null, { status: 204 });
     }
     const agentMatch = url.pathname.match(/^\/agents\/([0-9a-f-]{36})$/);
     if (agentMatch && request.method === "DELETE") {
       const agents = await this.ctx.storage.get<string[]>("agents") ?? [];
       const next = agents.filter((agent) => agent !== agentMatch[1]);
       if (next.length === agents.length) return json({ error: "not_found" }, { status: 404 });
-      await this.ctx.storage.put("agents", next);
+      const summaries = await this.ctx.storage.get<Record<string, AgentSummary>>("agentSummaries") ?? {};
+      delete summaries[agentMatch[1]!];
+      await this.ctx.storage.put({ agents: next, agentSummaries: summaries });
       return new Response(null, { status: 204 });
     }
     return json({ error: "not_found" }, { status: 404 });
