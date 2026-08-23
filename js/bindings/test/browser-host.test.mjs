@@ -109,7 +109,7 @@ test("browser host never flattens remote MCP tools into direct mode", () => {
   );
 });
 
-test("browser host readiness waits for stable MCP tool discovery", async () => {
+test("browser host readiness installs deferred MCP without waiting for discovery", async () => {
   let releaseDiscovery;
   const discovery = new Promise((resolve) => { releaseDiscovery = resolve; });
   const host = createBrowserHost({
@@ -122,13 +122,16 @@ test("browser host readiness waits for stable MCP tool discovery", async () => {
       },
     },
   });
-  let ready = false;
-  const waiting = host.ready().then(() => { ready = true; });
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.equal(ready, false, "the model prefix cannot snapshot partial discovery");
+  const readiness = await Promise.race([
+    host.ready().then(() => "ready"),
+    new Promise((resolve) => setTimeout(() => resolve("timed out"), 250)),
+  ]);
+  assert.equal(readiness, "ready");
+  assert.match(host.toolDefinitions(), /tool_search/);
+  assert.doesNotMatch(host.toolDefinitions(), /mcp__fixture__lookup/);
+
   releaseDiscovery({ tools: [{ name: "lookup", inputSchema: { type: "object" } }] });
-  await waiting;
-  assert.equal(ready, true);
+  await new Promise((resolve) => setImmediate(resolve));
   assert.match(host.toolDefinitions(), /mcp__fixture__lookup/);
   await host.dispose();
 });

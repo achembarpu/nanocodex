@@ -56,8 +56,10 @@ export function createBrowserHost(options = {}) {
     ? import("../runtime/mcp-runtime.mjs").then(({ createMcpRuntime }) =>
         createMcpRuntime(options.mcp, { clientName: "nanocodex-browser" }))
     : undefined;
-  if (mcp) mcp.then((provider) => code.addProvider(provider), () => {});
-  const mcpReady = mcp?.then((provider) => provider.settled());
+  const mcpInstalled = mcp?.then((provider) => {
+    code.addProvider(provider);
+    return provider;
+  });
   const onEvent = options.onEvent || (() => {});
   const maxQueuedMessages = options.maxQueuedMessages ?? DEFAULT_MAX_QUEUED_MESSAGES;
   const maxQueuedBytes = options.maxQueuedBytes ?? DEFAULT_MAX_QUEUED_BYTES;
@@ -316,14 +318,14 @@ export function createBrowserHost(options = {}) {
       for (const handle of [...connections.keys()]) close(handle);
       closePreconnected();
       code.reset();
-      await mcp?.then((provider) => provider.close(), () => {});
+      await mcpInstalled?.then((provider) => provider.close(), () => {});
       options.onDispose?.();
     })();
     return disposal;
   }
 
   return Object.freeze({
-    ready: async () => { await Promise.all([filesystemReady, mcpReady]); },
+    ready: async () => { await Promise.all([filesystemReady, mcpInstalled]); },
     retain() {
       if (disposal) throw new Error("Nanocodex host is already disposed");
       references += 1;
