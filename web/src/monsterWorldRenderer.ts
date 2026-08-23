@@ -22,6 +22,8 @@ import {
 
 const TILE = WORLD_TILE_SIZE;
 const ASSET_ROOT = "/world/my-pixel-world";
+const WORLD_ASSET_VERSION =
+  "0c334ab5204e71d019abe47e53bffd174cbb7589b8882999c70a0fe37c0e169b";
 const TOWN_ORCHARD_TREES = [
   [4, 27],
   [8, 27],
@@ -53,15 +55,15 @@ let assetRequest: Promise<WorldAssets> | undefined;
 
 export function loadWorldAssets(): Promise<WorldAssets> {
   assetRequest ??= Promise.all([
-    loadImage(`${ASSET_ROOT}/tileset/tileset.png`),
+    loadImage(worldAssetSource("tileset/tileset.png")),
     Promise.all(
       Array.from({ length: 10 }, (_, index) =>
-        loadImage(`${ASSET_ROOT}/character-overworld/ow${index + 1}.png`),
+        loadImage(worldAssetSource(`character-overworld/ow${index + 1}.png`)),
       ),
     ),
     Promise.all(
       Array.from({ length: 16 }, (_, index) =>
-        loadImage(`${ASSET_ROOT}/sprites/sprite${index + 1}_idle.png`),
+        loadImage(worldAssetSource(`sprites/sprite${index + 1}_idle.png`)),
       ),
     ),
   ]).then(([tileset, humans, monsters]) =>
@@ -76,6 +78,10 @@ export function loadWorldAssets(): Promise<WorldAssets> {
     }),
   );
   return assetRequest;
+}
+
+function worldAssetSource(path: string): string {
+  return `${ASSET_ROOT}/${path}?v=${WORLD_ASSET_VERSION}`;
 }
 
 export function drawMonsterWorld(
