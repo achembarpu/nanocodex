@@ -34,7 +34,11 @@ export async function routeBrowserModel(
   authenticationHeaders.delete("authorization");
   authenticationHeaders.delete("x-nanocodex-subject");
   const principal = await authenticate(
-    new Request(request, { headers: authenticationHeaders }),
+    new Request(request.url, {
+      method: request.method,
+      headers: authenticationHeaders,
+      signal: request.signal,
+    }),
     env,
     url,
   );

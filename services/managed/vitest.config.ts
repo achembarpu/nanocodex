@@ -21,6 +21,20 @@ export default {
     }
     const authorization = request.headers.get("authorization");
     const subject = request.headers.get("x-nanocodex-subject");
+    const search = url.href === "https://nanocodex.internal/v1/search"
+      && request.method === "POST"
+      && authorization === "Bearer NANOCODEX_PROVIDER_CREDENTIAL"
+      && typeof subject === "string"
+      && subjects.has(subject)
+      && request.headers.get("chatgpt-account-id") === null;
+    if (search) {
+      return Response.json({
+        body: await request.text(),
+        cookie: request.headers.get("cookie"),
+        origin: request.headers.get("origin"),
+        subject,
+      });
+    }
     const responses = url.href === "https://nanocodex.internal/v1/responses"
       && authorization === "Bearer NANOCODEX_PROVIDER_CREDENTIAL"
       && typeof subject === "string"

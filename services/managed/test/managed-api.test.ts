@@ -66,6 +66,43 @@ describe("managed agents REST and resumable SSE", () => {
     expect(decodedUserId).toBe(account.user.id);
   });
 
+  it("forwards a browser account search body exactly once without leaking its credential", async () => {
+    const session = await RAW_SELF.fetch("https://example.test/v1/me");
+    const cookie = session.headers.get("set-cookie")?.split(";", 1)[0];
+    const account = await session.json<{ user: { id: string } }>();
+    expect(cookie).toMatch(/^nanocodex_account=a_[A-Za-z0-9_-]{43}$/);
+
+    const body = '{\n  "id": "browser-search",\n  "commands": { "search_query": [{ "q": "Rust 🦀" }] }\n}';
+    const response = await RAW_SELF.fetch("https://nanocodex.internal/v1/search", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer NANOCODEX_PROVIDER_CREDENTIAL",
+        cookie: cookie!,
+        "content-type": "application/json",
+        origin: "https://example.test",
+        "x-nanocodex-subject": "browser-controlled-subject",
+      },
+      body,
+    });
+
+    expect(response.status).toBe(200);
+    const forwarded = await response.json<{
+      body: string;
+      cookie: string | null;
+      origin: string | null;
+      subject: string;
+    }>();
+    expect(forwarded).toMatchObject({
+      body,
+      cookie: null,
+      origin: "https://example.test",
+    });
+    expect(forwarded.subject).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(forwarded.subject).not.toBe("browser-controlled-subject");
+    expect(JSON.stringify(forwarded)).not.toContain(cookie!);
+    expect(JSON.stringify(forwarded)).not.toContain(account.user.id);
+  });
+
   it("does not let an unrelated bearer mint managed agents", async () => {
     const response = await RAW_SELF.fetch("https://example.test/v1/agents", {
       method: "POST",
