@@ -79,6 +79,7 @@ export async function routeAccountRequest(
   }
   if (url.pathname === "/v1/me" && request.method === "GET") {
     const resolved = await resolveOrCreateBrowserAccount(request, env, url);
+    if (resolved instanceof Response) return resolved;
     const principal = resolved.principal;
     return json({
       user: {
@@ -257,7 +258,7 @@ async function resolveOrCreateBrowserAccount(
   request: Request,
   env: AccountAuthEnv,
   url: URL,
-): Promise<{ principal: Principal; persistent: boolean; cookie?: string }> {
+): Promise<{ principal: Principal; persistent: boolean; cookie?: string } | Response> {
   const principal = await authenticate(request, env, url);
   if (principal) {
     const cookie = cookieValue(request, ACCOUNT_COOKIE);
@@ -268,6 +269,11 @@ async function resolveOrCreateBrowserAccount(
     if (!account) throw new Error("API key account is unavailable");
     return { principal, persistent: account.persistent };
   }
+
+  // An explicit but invalid credential must not silently become a fresh
+  // browser account. Cookie-free browser bootstrap is only for unauthenticated
+  // requests that did not attempt bearer authentication.
+  if (request.headers.has("authorization")) return unauthorized();
 
   const userId = crypto.randomUUID();
   const issuedAt = Math.floor(Date.now() / 1_000);

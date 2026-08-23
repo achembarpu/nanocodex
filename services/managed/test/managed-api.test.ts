@@ -66,6 +66,15 @@ describe("managed agents REST and resumable SSE", () => {
     expect(decodedUserId).toBe(account.user.id);
   });
 
+  it("rejects malformed bearer authentication instead of minting a browser identity", async () => {
+    const response = await RAW_SELF.fetch("https://example.test/v1/me", {
+      headers: { authorization: "Bearer malformed" },
+    });
+    expect(response.status).toBe(401);
+    expect(await response.json()).toEqual({ error: "unauthorized" });
+    expect(response.headers.get("set-cookie")).toBeNull();
+  });
+
   it("recognizes passkey sessions even when their random token begins with the anonymous prefix", async () => {
     const tokens = ["w".repeat(43), `a_${"w".repeat(41)}`];
     for (const [index, token] of tokens.entries()) {
