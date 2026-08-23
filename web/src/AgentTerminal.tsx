@@ -2,6 +2,7 @@ import {
   memo,
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from "react";
@@ -35,6 +36,7 @@ import {
 import { ArtifactDock } from "./ArtifactDock";
 import { browserMcpConfiguration } from "./browserMcp";
 import { loadManagedTerminalAgent } from "./managedAgentRuntime";
+import { localTerminalAgent } from "./localAgentRuntime";
 
 export type { AgentTerminalMode, AgentTerminalState } from "./agentTerminalTypes";
 
@@ -68,12 +70,16 @@ export const AgentTerminal = memo(function AgentTerminal({
     isError,
     refetch,
   } = useNanocodex({ config: agentConfig, threadId });
+  const terminalAgent = useMemo(
+    () => agent ? localTerminalAgent(agent, threadId) : undefined,
+    [agent, threadId],
+  );
   const retryAgent = useCallback(() => {
     refetch();
   }, [refetch]);
   return (
     <AgentTerminalView
-      agent={agent}
+      agent={terminalAgent}
       agentError={isError ? errorMessage(error) : undefined}
       authStatus={authStatus}
       mode={mode}

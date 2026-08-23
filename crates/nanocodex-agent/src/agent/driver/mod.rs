@@ -266,6 +266,14 @@ where
                     )));
                     continue;
                 }
+                if let Command::Context { result } = command {
+                    drop(result.send(agent_session_context(
+                        latest_fork_checkpoint.as_deref(),
+                        self.workspace.as_deref(),
+                        &self.spawner.context_source,
+                    )));
+                    continue;
+                }
                 if let Command::Compact { parent, result } = command {
                     logical_turn_index = logical_turn_index.saturating_add(1);
                     let span = agent_compact_span(
@@ -394,6 +402,13 @@ where
                                     }
                                     Some(Command::AppendDeveloperMessage { text, result }) => {
                                         pending_developer_messages.push(text);
+                                        drop(result.send(agent_session_context(
+                                            latest_fork_checkpoint.as_deref(),
+                                            self.workspace.as_deref(),
+                                            &self.spawner.context_source,
+                                        )));
+                                    }
+                                    Some(Command::Context { result }) => {
                                         drop(result.send(agent_session_context(
                                             latest_fork_checkpoint.as_deref(),
                                             self.workspace.as_deref(),
@@ -767,6 +782,24 @@ where
                                     &self.spawner.context_source,
                                 )));
                             }
+                            Some(Command::Context { result }) => {
+                                let checkpoint = fork_snapshot_rx
+                                    .borrow_and_update()
+                                    .clone()
+                                    .map(|checkpoint| {
+                                        Arc::new(CommittedSession::new(
+                                            Arc::clone(&self.spawner.lineage_id),
+                                            thread_model,
+                                            checkpoint,
+                                        ))
+                                    })
+                                    .or_else(|| latest_fork_checkpoint.clone());
+                                drop(result.send(agent_session_context(
+                                    checkpoint.as_deref(),
+                                    self.workspace.as_deref(),
+                                    &self.spawner.context_source,
+                                )));
+                            }
                             Some(Command::Compact { parent, result }) => {
                                 pending_compact = Some((parent, result));
                                 if let Some(cancel) = cancel.take() {
@@ -1050,7 +1083,7 @@ async fn accept_execution_command(execution: &Execution, command: Command) -> Op
     }
 }
 
-fn agent_session_context(
+pub(super) fn agent_session_context(
     checkpoint: Option<&CommittedSession>,
     configured_workspace: Option<&str>,
     context_source: &ContextSource,

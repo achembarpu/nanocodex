@@ -189,6 +189,9 @@ pub(super) async fn begin_shutdown(
             Command::AppendDeveloperMessage { result, .. } => {
                 drop(result.send(Err(NanocodexError::AgentStopped)));
             }
+            Command::Context { result } => {
+                drop(result.send(Err(NanocodexError::AgentStopped)));
+            }
             Command::Steer { result, .. }
             | Command::Cancel { result, .. }
             | Command::SetThinking { result, .. }
@@ -267,6 +270,13 @@ pub(super) fn handle_idle_command<S>(
         }
         Command::AppendDeveloperMessage { result, .. } => {
             drop(result.send(Err(NanocodexError::AgentStopped)));
+        }
+        Command::Context { result } => {
+            drop(result.send(super::agent_session_context(
+                latest.map(AsRef::as_ref),
+                workspace.as_deref(),
+                &spawner.context_source,
+            )));
         }
         Command::Prompt { .. } => {}
     }

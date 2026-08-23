@@ -28,6 +28,9 @@ export function realtimeTailDelegation(
 /** Compacts retained history immediately without fabricating a user prompt. */
 export function compact(agent: Agent<object>): Promise<void>;
 
+/** Returns complete read-only model context at the latest safe boundary. */
+export function context(agent: Agent<object>): Promise<AgentSessionContext>;
+
 /** Forks the latest checkpoint, or the exact completed result supplied in `options.at`. */
 export function fork(agent: Agent<object>, options?: fork.Options): Promise<fork.ReturnType>;
 export declare namespace fork {

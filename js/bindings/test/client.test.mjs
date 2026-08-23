@@ -177,6 +177,14 @@ test("the headless client exposes matching direct and standalone actions", async
   await agent.session.compact();
   await Actions.session.compact(agent);
   assert.deepEqual(
+    await agent.session.context(),
+    { workspace: "/workspace", history: [{ type: "message", role: "developer" }] },
+  );
+  assert.deepEqual(
+    await Actions.session.context(agent),
+    { workspace: "/workspace", history: [{ type: "message", role: "developer" }] },
+  );
+  assert.deepEqual(
     await agent.session.appendDeveloperMessage("voice started"),
     { workspace: "/workspace", history: [{ type: "message", role: "developer" }] },
   );
@@ -626,6 +634,12 @@ function rawAgent(sessionId) {
       return rawAgent(`${sessionId}-spawn`);
     },
     async compact() {},
+    async context() {
+      return JSON.stringify({
+        workspace: "/workspace",
+        history: [{ type: "message", role: "developer" }],
+      });
+    },
     async appendDeveloperMessage() {
       return JSON.stringify({
         workspace: "/workspace",

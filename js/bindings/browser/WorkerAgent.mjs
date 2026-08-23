@@ -515,6 +515,7 @@ async function dispatch(message, state) {
   }
   if (method === "agent.spawn") return state.allocateAgent(await agent.session.spawn());
   if (method === "agent.compact") return agent.session.compact();
+  if (method === "agent.context") return agent.session.context();
   if (method === "agent.setThinking") return agent.session.setThinking(args[1]);
   if (method === "agent.setFastMode") return agent.session.setFastMode(args[1]);
   if (method === "agent.appendDeveloperMessage") return agent.session.appendDeveloperMessage(args[1]);
@@ -645,6 +646,7 @@ class WorkerConnection {
       },
       spawn: async () => connection.rawAgent(await connection.rpc("agent.spawn", [agentId])),
       compact: () => connection.rpc("agent.compact", [agentId]),
+      context: async () => JSON.stringify(await connection.rpc("agent.context", [agentId])),
       setThinking: (value) => connection.rpc("agent.setThinking", [agentId, value]),
       setFastMode: (value) => connection.rpc("agent.setFastMode", [agentId, value]),
       appendDeveloperMessage: async (text) => JSON.stringify(await connection.rpc("agent.appendDeveloperMessage", [agentId, text])),

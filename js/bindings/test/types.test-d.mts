@@ -230,6 +230,8 @@ async function check() {
   const sessionContext: AgentSessionContext = await agent.session.appendDeveloperMessage(
     "voice started",
   );
+  const retainedContext: AgentSessionContext = await agent.session.context();
+  const retainedActionContext: AgentSessionContext = await Actions.session.context(agent);
   sessionContext.history;
   const realtimeContext: AgentSessionContext = await agent.session.realtime.start();
   const realtimeDelegation: string = await agent.session.realtime.delegation("inspect the workspace", [

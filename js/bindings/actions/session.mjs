@@ -1,6 +1,7 @@
 import {
   appendDeveloperMessage as appendAgentDeveloperMessage,
   compact as compactAgent,
+  context as agentContext,
   fork as forkAgent,
   setFastMode as setAgentFastMode,
   setThinking as setAgentThinking,
@@ -21,6 +22,10 @@ export function appendDeveloperMessage(agent, text) {
 
 export function compact(agent) {
   return compactAgent(agent);
+}
+
+export function context(agent) {
+  return agentContext(agent);
 }
 
 export function fork(agent, options = {}) {

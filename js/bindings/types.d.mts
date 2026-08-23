@@ -247,6 +247,7 @@ export type AgentActions = {
   session: {
     appendDeveloperMessage(text: string): Promise<AgentSessionContext>;
     compact(): Promise<void>;
+    context(): Promise<AgentSessionContext>;
     fork(options?: ForkOptions): Promise<DefaultAgent>;
     setFastMode(enabled: boolean): Promise<void>;
     setThinking(thinking: Thinking): Promise<void>;

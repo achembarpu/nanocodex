@@ -421,6 +421,7 @@ test("session, branching, realtime, and graceful lifecycle remain DefaultAgent-s
   await root.session.setThinking("high");
   await root.session.setFastMode(true);
   await root.session.compact();
+  assert.equal((await root.session.context()).workspace, "/workspace/root");
   assert.equal((await root.session.appendDeveloperMessage("voice started")).workspace, "/workspace/root");
   await root.session.realtime.start();
   await root.session.realtime.end();
@@ -1429,6 +1430,10 @@ function createFixture(options = {}) {
       compact() {
         log.push(["compact", sessionId]);
         return options.holdCompaction ? new Promise(() => {}) : Promise.resolve();
+      },
+      async context() {
+        log.push(["context", sessionId]);
+        return JSON.stringify({ workspace: `/workspace/${sessionId}`, history: [] });
       },
       async setThinking(value) { log.push(["thinking", sessionId, value]); },
       async setFastMode(value) { log.push(["fast", sessionId, value]); },

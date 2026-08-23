@@ -129,6 +129,10 @@ export function compact(agent) {
   return agentState(agent).raw.compact();
 }
 
+export async function context(agent) {
+  return parseSessionContext(await agentState(agent).raw.context());
+}
+
 export async function appendDeveloperMessage(agent, text) {
   if (typeof text !== "string" || !text.trim()) {
     throw new TypeError("non-empty string");

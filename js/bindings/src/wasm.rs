@@ -7,8 +7,8 @@ use std::{
 
 use js_sys::Promise;
 use nanocodex::{
-    AgentEvents, DurableAgentExt, Model, Nanocodex as RustNanocodex, NanocodexError, OpenAi,
-    ReasoningMode, Thinking, TurnControl, TurnResult,
+    AgentEvents, AgentSessionContext, DurableAgentExt, Model, Nanocodex as RustNanocodex,
+    NanocodexError, OpenAi, ReasoningMode, Thinking, TurnControl, TurnResult,
     agent::{
         ExecutionEnvironment, PromptRequest,
         durability::{JournalStore, StoreError, StoreFuture, StoredBatch, StoredJournal},
@@ -1036,6 +1036,15 @@ impl WasmNanocodex {
         append_developer_context(&self.inner, text).await
     }
 
+    /// Returns complete read-only session context at the latest safe boundary.
+    ///
+    /// # Errors
+    ///
+    /// Rejects after the driver stops or when context serialization fails.
+    pub async fn context(&self) -> Result<String, JsValue> {
+        serialize_session_context(self.inner.context().await.map_err(js_error)?)
+    }
+
     /// Starts the canonical Codex Realtime adapter lifecycle.
     ///
     /// # Errors
@@ -1420,6 +1429,10 @@ async fn append_developer_context(agent: &RustNanocodex, text: &str) -> Result<S
         .append_developer_message(text)
         .await
         .map_err(js_error)?;
+    serialize_session_context(context)
+}
+
+fn serialize_session_context(context: AgentSessionContext) -> Result<String, JsValue> {
     serde_json::to_string(&WasmAgentSessionContext {
         workspace: context.workspace(),
         history: context.history(),

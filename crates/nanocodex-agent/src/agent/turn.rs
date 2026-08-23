@@ -364,6 +364,9 @@ pub(super) enum Command {
         text: String,
         result: oneshot::Sender<Result<AgentSessionContext>>,
     },
+    Context {
+        result: oneshot::Sender<Result<AgentSessionContext>>,
+    },
     Shutdown,
 }
 

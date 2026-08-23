@@ -393,6 +393,19 @@ impl Nanocodex {
         .await
     }
 
+    /// Returns complete model-visible context at the latest safe boundary.
+    ///
+    /// This is a read-only adapter view. The history can contain unredacted
+    /// prompts, responses, reasoning, and tool activity and must be protected
+    /// like a session snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error after the agent driver has stopped.
+    pub async fn context(&self) -> Result<AgentSessionContext> {
+        request_command(&self.commands, |result| Command::Context { result }).await
+    }
+
     /// Starts a clean sibling agent with the same private configuration,
     /// workspace policy, service factory, and tools factory.
     ///
