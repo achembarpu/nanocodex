@@ -89,7 +89,9 @@ pub use ios::{
     BrowserIosDeviceSelector, BrowserIosError, IosBrowser,
 };
 pub use native::{BrowserBuildError, BrowserError};
-pub use session::{BraveSession, BraveSessionError, BrowserProfileKind};
+pub use session::{
+    BraveSession, BraveSessionError, BrowserCookieAuthorization, BrowserProfileKind,
+};
 
 const TOOL_DESCRIPTION: &str = r#"Control one server-managed browser session.
 
@@ -215,6 +217,11 @@ non-secret credential metadata. Before a WebAuthn ceremony, use `passkey_use`
 to expose one saved credential, `passkey_new` to expose an empty authenticator
 for registration, or `passkey_auto` to expose every saved credential and let
 the relying party choose. Persisted private keys never enter tool output.
+When host passkeys are explicitly configured, call `host_passkey_start` on the
+page that needs authentication. Complete the passkey ceremony in the isolated
+visible browser without closing it, then call `host_passkey_resume` to transfer
+the authenticated cookies back into this headless session. The host credential
+never enters Nanocodex or the tool output.
 Use `matched_styles`, `force_pseudo_state`, and `event_listeners` for authored
 CSS and listener provenance. The debugger actions expose source-mapped
 breakpoints, exception policy, pause stacks/scopes, resume, and stepping;
@@ -763,6 +770,10 @@ pub enum BrowserAction {
     PasskeyNew,
     /// Expose every persisted passkey and let the relying party choose.
     PasskeyAuto,
+    /// Open the active page in an isolated visible browser that can use host passkeys.
+    HostPasskeyStart,
+    /// Import the completed host-passkey session and close its visible browser.
+    HostPasskeyResume,
     /// Evaluate JavaScript in the active page.
     Evaluate {
         /// JavaScript expression to evaluate.
@@ -886,6 +897,8 @@ impl BrowserAction {
             Self::PasskeyUse { .. } => BrowserActionName::PasskeyUse,
             Self::PasskeyNew => BrowserActionName::PasskeyNew,
             Self::PasskeyAuto => BrowserActionName::PasskeyAuto,
+            Self::HostPasskeyStart => BrowserActionName::HostPasskeyStart,
+            Self::HostPasskeyResume => BrowserActionName::HostPasskeyResume,
             Self::Evaluate { .. } => BrowserActionName::Evaluate,
         }
     }
@@ -1002,6 +1015,8 @@ pub enum BrowserActionName {
     PasskeyUse,
     PasskeyNew,
     PasskeyAuto,
+    HostPasskeyStart,
+    HostPasskeyResume,
     Evaluate,
 }
 
@@ -2008,6 +2023,32 @@ pub enum BrowserGate {
     JsChallenge { evidence: String },
     /// The page visibly denies access.
     AccessDenied { evidence: String },
+}
+
+/// Explicit access to passkeys provided by the host operating system.
+///
+/// The configured desktop browser is launched only for a model-requested,
+/// user-visible authorization handoff. It receives an isolated temporary
+/// profile and never opens the user's ordinary browser profile. Credential
+/// material remains inside the host authenticator; only resulting browser
+/// cookies are synchronized back into the managed headless session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct HostPasskeyAuthenticator {
+    executable: std::path::PathBuf,
+}
+
+impl HostPasskeyAuthenticator {
+    /// Selects the signed desktop browser application used for host passkey UI.
+    #[must_use]
+    pub fn new(executable: impl Into<std::path::PathBuf>) -> Self {
+        Self {
+            executable: executable.into(),
+        }
+    }
+
+    pub(crate) fn executable(&self) -> &std::path::Path {
+        &self.executable
+    }
 }
 
 /// A virtual platform passkey authenticator owned by the browser session.
@@ -3291,7 +3332,9 @@ fn recording_result(
         | BrowserAction::NetworkRoute { .. }
         | BrowserAction::RemoveNetworkRoute { .. }
         | BrowserAction::ClearNetworkRoutes
-        | BrowserAction::SetOffline { .. } => BrowserActionResult::Action {
+        | BrowserAction::SetOffline { .. }
+        | BrowserAction::HostPasskeyStart
+        | BrowserAction::HostPasskeyResume => BrowserActionResult::Action {
             sequence,
             action: action.name(),
             executed,
@@ -3319,65 +3362,6 @@ pub struct Browser {
     inner: Arc<native::NativeBrowser>,
 }
 
-/// A validated authentication handoff that has not opened the user's Brave yet.
-///
-/// This is a harness operation, not a model-callable [`BrowserAction`]. Opening
-/// consumes this value so callers cannot accidentally open arbitrary pages or
-/// resume a handoff that was never presented to the user.
-pub struct BraveAuthHandoff {
-    browser: Browser,
-    url: url::Url,
-}
-
-/// An authentication page opened in the user's ordinary Brave profile.
-///
-/// After the user completes the passkey or other authentication gate, call
-/// [`resume`](Self::resume) to take a fresh allowlisted cookie snapshot and
-/// reopen the protected URL in the dedicated browser. A local browser is
-/// relaunched with the new snapshot; a remote CDP browser receives refreshed
-/// cookies without restarting.
-pub struct OpenedBraveAuthHandoff {
-    browser: Browser,
-    url: url::Url,
-}
-
-impl BraveAuthHandoff {
-    /// Opens only the validated protected URL in the user's ordinary Brave.
-    ///
-    /// The passkey ceremony remains entirely in the user's browser. Nanocodex
-    /// does not receive credential material or control the visible page.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if Brave cannot be started or the URL is no longer
-    /// allowed by this browser's session policy.
-    pub fn open(self) -> Result<OpenedBraveAuthHandoff, BrowserError> {
-        self.browser.inner.open_auth_handoff(&self.url)?;
-        Ok(OpenedBraveAuthHandoff {
-            browser: self.browser,
-            url: self.url,
-        })
-    }
-}
-
-impl OpenedBraveAuthHandoff {
-    /// Refreshes the private headless session after the caller observes that
-    /// the user has completed authentication.
-    ///
-    /// A fresh filtered cookie snapshot is copied from Brave and the protected
-    /// URL is reopened before this future completes. A locally launched
-    /// browser discards its old private process and profile. A remote CDP
-    /// browser remains alive and receives a replacement cookie set.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the session cannot be refreshed, the fresh snapshot
-    /// cannot be prepared, or the protected page cannot be reopened.
-    pub async fn resume(self) -> Result<(), BrowserError> {
-        self.browser.inner.resume_auth_handoff(self.url).await
-    }
-}
-
 /// Configuration for one isolated [`Browser`] session.
 #[derive(Clone, Debug, Default)]
 pub struct BrowserBuilder {
@@ -3386,6 +3370,7 @@ pub struct BrowserBuilder {
     brave_session: Option<BraveSession>,
     launch_brave_executable: bool,
     virtual_authenticator: Option<VirtualAuthenticator>,
+    host_passkey_authenticator: Option<HostPasskeyAuthenticator>,
     react_diagnostics: Option<ReactDiagnostics>,
     egress_policy: Option<BrowserEgressPolicy>,
     file_root: Option<std::path::PathBuf>,
@@ -3446,6 +3431,16 @@ impl BrowserBuilder {
     #[must_use]
     pub fn virtual_authenticator(mut self, virtual_authenticator: VirtualAuthenticator) -> Self {
         self.virtual_authenticator = Some(virtual_authenticator);
+        self
+    }
+
+    /// Enables explicit interactive use of the host operating system's passkeys.
+    ///
+    /// The selected application receives a fresh isolated profile for each
+    /// handoff. This policy cannot be combined with a virtual authenticator.
+    #[must_use]
+    pub fn host_passkey_authenticator(mut self, authenticator: HostPasskeyAuthenticator) -> Self {
+        self.host_passkey_authenticator = Some(authenticator);
         self
     }
 
@@ -3588,6 +3583,22 @@ impl BrowserBuilder {
                 message: "the virtual credential store path cannot be empty".to_owned(),
             });
         }
+        if self.virtual_authenticator.is_some() && self.host_passkey_authenticator.is_some() {
+            return Err(BrowserBuildError::Configuration {
+                message: "host and virtual passkey authenticators cannot be enabled together"
+                    .to_owned(),
+            });
+        }
+        if let Some(authenticator) = &self.host_passkey_authenticator
+            && !authenticator.executable().is_file()
+        {
+            return Err(BrowserBuildError::Configuration {
+                message: format!(
+                    "host passkey browser executable is unavailable: {}",
+                    authenticator.executable().display()
+                ),
+            });
+        }
         if let Some(client) = &self.crux_client {
             if client.api_key.is_empty() {
                 return Err(BrowserBuildError::Configuration {
@@ -3635,6 +3646,7 @@ impl BrowserBuilder {
                 self.brave_session,
                 self.launch_brave_executable,
                 self.virtual_authenticator,
+                self.host_passkey_authenticator,
                 self.react_diagnostics,
                 egress_policy,
                 file_root,
@@ -3853,26 +3865,6 @@ impl Browser {
         validate_storage_state(&state)
             .map_err(|message| BrowserError::Configuration { message })?;
         self.inner.restore_storage_state(state).await
-    }
-
-    /// Prepares an explicit user authentication handoff for an allowlisted URL.
-    ///
-    /// This is available only for browsers configured with
-    /// [`BrowserBuilder::brave_session`]. It never becomes part of the browser
-    /// tool schema, so a model cannot open arbitrary pages in the user's
-    /// browser. The caller decides when to open the page and when authentication
-    /// has completed.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when no Brave session is configured or the URL's exact
-    /// origin is outside that session's allowlist.
-    pub fn auth_handoff(&self, url: url::Url) -> Result<BraveAuthHandoff, BrowserError> {
-        self.inner.validate_auth_handoff(&url)?;
-        Ok(BraveAuthHandoff {
-            browser: self.clone(),
-            url,
-        })
     }
 
     /// Returns public metadata for credentials in the virtual authenticator.

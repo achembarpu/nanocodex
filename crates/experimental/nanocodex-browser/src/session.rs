@@ -1,6 +1,5 @@
 use std::{
     path::{Component, Path, PathBuf},
-    process::{Command, Stdio},
     time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
@@ -17,6 +16,17 @@ pub enum BrowserProfileKind {
     Chrome,
     Chromium,
     Edge,
+}
+
+/// How a Chromium-family cookie source may access its encrypted cookie store.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum BrowserCookieAuthorization {
+    /// Import cookies without opening a visible browser or credential prompt.
+    #[default]
+    Background,
+    /// If background import cannot decrypt a populated store, open one visible
+    /// temporary copied profile so the user can authorize Keychain access.
+    Interactive,
 }
 
 impl BrowserProfileKind {
@@ -47,6 +57,7 @@ pub struct BraveSession {
     allowed_origins: Vec<Url>,
     copy_all_cookies: bool,
     include_site_data: bool,
+    cookie_authorization: BrowserCookieAuthorization,
 }
 
 impl BraveSession {
@@ -145,6 +156,7 @@ impl BraveSession {
             allowed_origins: Vec::new(),
             copy_all_cookies: false,
             include_site_data: false,
+            cookie_authorization: BrowserCookieAuthorization::Background,
         }
     }
 
@@ -186,6 +198,16 @@ impl BraveSession {
         self
     }
 
+    /// Allows an explicit visible authorization retry for encrypted cookies.
+    ///
+    /// The retry launches the source browser executable with a copied temporary
+    /// profile. It never opens or mutates the ordinary source profile.
+    #[must_use]
+    pub const fn cookie_authorization(mut self, authorization: BrowserCookieAuthorization) -> Self {
+        self.cookie_authorization = authorization;
+        self
+    }
+
     /// Returns the source browser executable selected by this session.
     #[must_use]
     pub fn executable(&self) -> &Path {
@@ -204,6 +226,10 @@ impl BraveSession {
         self.copy_all_cookies
     }
 
+    pub(crate) const fn cookie_authorization_policy(&self) -> BrowserCookieAuthorization {
+        self.cookie_authorization
+    }
+
     pub(crate) fn trace_value(&self) -> serde_json::Value {
         serde_json::json!({
             "executable": self.executable,
@@ -212,49 +238,14 @@ impl BraveSession {
             "allowedOrigins": self.allowed_origins,
             "copyAllCookies": self.copy_all_cookies,
             "includeSiteData": self.include_site_data,
+            "cookieAuthorization": format!("{:?}", self.cookie_authorization),
         })
-    }
-
-    pub(crate) fn validate_handoff_url(&self, url: &Url) -> Result<(), BraveSessionError> {
-        if self.copy_all_cookies
-            && matches!(url.scheme(), "http" | "https")
-            && url.host_str().is_some()
-        {
-            return Ok(());
-        }
-        if self
-            .allowed_origins
-            .iter()
-            .any(|allowed| allowed.origin() == url.origin())
-        {
-            return Ok(());
-        }
-        Err(BraveSessionError::HandoffOriginNotAllowed { url: url.clone() })
-    }
-
-    pub(crate) fn open_handoff(&self, url: &Url) -> Result<(), BraveSessionError> {
-        self.validate_handoff_url(url)?;
-        let mut child = Command::new(&self.executable)
-            .arg(format!("--user-data-dir={}", self.user_data_dir.display()))
-            .arg(format!(
-                "--profile-directory={}",
-                self.profile_directory.display()
-            ))
-            .arg(url.as_str())
-            .stdin(Stdio::null())
-            .stdout(Stdio::null())
-            .stderr(Stdio::null())
-            .spawn()?;
-        std::thread::spawn(move || {
-            let _ = child.wait();
-        });
-        Ok(())
     }
 
     pub(crate) async fn prepare(
         &self,
         target_user_data_dir: &Path,
-    ) -> Result<(), BraveSessionError> {
+    ) -> Result<i64, BraveSessionError> {
         self.validate()?;
         let source_profile = self.user_data_dir.join(&self.profile_directory);
         if self.include_site_data
@@ -286,7 +277,7 @@ impl BraveSession {
                 .map(str::to_owned)
                 .collect::<Vec<_>>()
         });
-        tokio::task::spawn_blocking(move || {
+        let cookie_count = tokio::task::spawn_blocking(move || {
             snapshot_cookies(&source_cookies, &target_cookies, allowed_hosts.as_deref())
         })
         .await
@@ -305,7 +296,7 @@ impl BraveSession {
             .await
             .map_err(BraveSessionError::SnapshotTask)??;
         }
-        Ok(())
+        Ok(cookie_count)
     }
 
     pub(crate) fn validate(&self) -> Result<(), BraveSessionError> {
@@ -355,7 +346,7 @@ fn snapshot_cookies(
     source: &Path,
     target: &Path,
     allowed_hosts: Option<&[String]>,
-) -> Result<(), BraveSessionError> {
+) -> Result<i64, BraveSessionError> {
     let source = Connection::open_with_flags(
         source,
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -398,7 +389,7 @@ fn snapshot_cookies(
         [temporary_cookie_expiry()?],
     )?;
     transaction.commit()?;
-    Ok(())
+    Ok(target.query_row("SELECT COUNT(*) FROM cookies", [], |row| row.get(0))?)
 }
 
 pub(crate) fn cookie_applies_to(cookie_host: &str, allowed_host: &str) -> bool {
@@ -465,8 +456,6 @@ pub enum BraveSessionError {
     MissingAllowedOrigin,
     #[error("profile session origin must contain only a scheme, host, and optional port: {origin}")]
     InvalidOrigin { origin: Url },
-    #[error("authentication handoff URL is outside the profile session allowlist: {url}")]
-    HandoffOriginNotAllowed { url: Url },
     #[error("source cookie database is unavailable under {profile}")]
     CookiesUnavailable { profile: PathBuf },
     #[error(
@@ -493,6 +482,18 @@ mod tests {
     use tempfile::tempdir;
 
     #[test]
+    fn interactive_cookie_authorization_is_explicit_session_policy() {
+        let session = super::BraveSession::new("/brave", "/profile")
+            .cookie_authorization(super::BrowserCookieAuthorization::Interactive);
+
+        assert_eq!(
+            session.cookie_authorization_policy(),
+            super::BrowserCookieAuthorization::Interactive
+        );
+        assert_eq!(session.trace_value()["cookieAuthorization"], "Interactive");
+    }
+
+    #[test]
     fn cookie_domains_are_filtered_by_request_applicability() {
         assert!(super::cookie_applies_to(
             ".example.com",
@@ -507,31 +508,6 @@ mod tests {
             "console.example.com"
         ));
         assert!(!super::cookie_applies_to("notexample.com", "example.com"));
-    }
-
-    #[test]
-    fn handoff_is_limited_to_an_allowed_exact_origin() -> Result<(), Box<dyn Error>> {
-        let session = super::BraveSession::new("/brave", "/profile")
-            .allow_origin(url::Url::parse("https://admin.example.com")?);
-
-        assert!(
-            session
-                .validate_handoff_url(&url::Url::parse(
-                    "https://admin.example.com/passkey?return=%2F"
-                )?)
-                .is_ok()
-        );
-        assert!(
-            session
-                .validate_handoff_url(&url::Url::parse("https://example.com")?)
-                .is_err()
-        );
-        assert!(
-            session
-                .validate_handoff_url(&url::Url::parse("http://admin.example.com")?)
-                .is_err()
-        );
-        Ok(())
     }
 
     #[test]

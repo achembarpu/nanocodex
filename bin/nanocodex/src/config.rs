@@ -259,6 +259,16 @@ impl AgentArgs {
         self.browser.uses_brave()
     }
 
+    #[cfg(test)]
+    pub(crate) const fn uses_interactive_browser_cookie_authorization(&self) -> bool {
+        self.browser.uses_interactive_cookie_authorization()
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn uses_host_browser_passkeys(&self) -> bool {
+        self.browser.uses_host_passkeys()
+    }
+
     pub(crate) fn thinking(&self) -> Thinking {
         self.model_policy.thinking.unwrap_or_default()
     }

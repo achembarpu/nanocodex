@@ -90,16 +90,17 @@ use url::Url;
 use crate::{
     BraveSession, BraveSessionError, BrowserAction, BrowserActionName, BrowserActionOutcome,
     BrowserActionResult, BrowserAfterAction, BrowserClickOptions, BrowserConsoleEntry,
-    BrowserCookie, BrowserCookieSameSite, BrowserCruxClient, BrowserDialog, BrowserDialogKind,
-    BrowserDocumentReadyState, BrowserDomDocument, BrowserDomLayout, BrowserDomNode,
-    BrowserDomRect, BrowserDomSnapshot, BrowserDownload, BrowserEgressPolicy,
-    BrowserElementContext, BrowserElementReference, BrowserFrame, BrowserGate, BrowserHttpHeader,
-    BrowserImageArtifact, BrowserNetworkBodyKind, BrowserNetworkCallFrame, BrowserNetworkContext,
-    BrowserNetworkInitiator, BrowserNetworkRequest, BrowserNetworkTiming, BrowserOriginStorage,
-    BrowserPageError, BrowserPageState, BrowserPasskeyMode, BrowserPostActionSnapshot,
-    BrowserReactEvent, BrowserReactStatus, BrowserStorageState, BrowserTab, BrowserTarget,
-    BrowserTargetIndex, BrowserWebSocketDirection, BrowserWebSocketMessage, MAX_VIEWPORT_DIMENSION,
-    ReactDiagnostics, VirtualAuthenticator, VirtualCredential,
+    BrowserCookie, BrowserCookieAuthorization, BrowserCookieSameSite, BrowserCruxClient,
+    BrowserDialog, BrowserDialogKind, BrowserDocumentReadyState, BrowserDomDocument,
+    BrowserDomLayout, BrowserDomNode, BrowserDomRect, BrowserDomSnapshot, BrowserDownload,
+    BrowserEgressPolicy, BrowserElementContext, BrowserElementReference, BrowserFrame, BrowserGate,
+    BrowserHttpHeader, BrowserImageArtifact, BrowserNetworkBodyKind, BrowserNetworkCallFrame,
+    BrowserNetworkContext, BrowserNetworkInitiator, BrowserNetworkRequest, BrowserNetworkTiming,
+    BrowserOriginStorage, BrowserPageError, BrowserPageState, BrowserPasskeyMode,
+    BrowserPostActionSnapshot, BrowserReactEvent, BrowserReactStatus, BrowserStorageState,
+    BrowserTab, BrowserTarget, BrowserTargetIndex, BrowserWebSocketDirection,
+    BrowserWebSocketMessage, HostPasskeyAuthenticator, MAX_VIEWPORT_DIMENSION, ReactDiagnostics,
+    VirtualAuthenticator, VirtualCredential,
     features::{
         BrowserColorScheme, BrowserContext, BrowserDeviceDescriptor, BrowserDevicePreset,
         BrowserMobileAudit, BrowserMobileAuditSample, BrowserMobileFinding,
@@ -114,6 +115,8 @@ use credential_store::VirtualCredentialStore;
 const DEFAULT_WAIT_TIMEOUT: Duration = Duration::from_secs(25);
 const DEFAULT_NAVIGATION_TIMEOUT: Duration = Duration::from_secs(5);
 const BROWSER_LAUNCH_TIMEOUT: Duration = Duration::from_secs(10);
+const COOKIE_AUTHORIZATION_TIMEOUT: Duration = Duration::from_secs(120);
+const COOKIE_AUTHORIZATION_POLL_INTERVAL: Duration = Duration::from_millis(250);
 const SESSION_DISCARD_TIMEOUT: Duration = Duration::from_secs(3);
 const MAIN_CONTEXT_RETRY_TIMEOUT: Duration = Duration::from_secs(2);
 const MAX_EXPLICIT_WAIT: Duration = Duration::from_secs(30);
@@ -156,6 +159,7 @@ pub(crate) struct NativeBrowser {
     brave_session: Option<BraveSession>,
     launch_brave_executable: bool,
     virtual_authenticator: Option<VirtualAuthenticator>,
+    host_passkey_authenticator: Option<HostPasskeyAuthenticator>,
     react_diagnostics: Option<ReactDiagnostics>,
     egress_policy: Option<BrowserEgressPolicy>,
     file_root: Option<PathBuf>,
@@ -422,6 +426,8 @@ struct Session {
     virtual_authenticator: Option<VirtualAuthenticator>,
     virtual_credential_store: Option<VirtualCredentialStore>,
     passkey_mode: BrowserPasskeyMode,
+    host_passkey_authenticator: Option<HostPasskeyAuthenticator>,
+    host_passkey_broker: Option<HostPasskeyBroker>,
     react_diagnostics_enabled: bool,
     authenticators: HashMap<String, InstalledAuthenticator>,
     closed_targets: HashSet<String>,
@@ -448,6 +454,15 @@ struct Session {
     lighthouse_executable: Option<PathBuf>,
     crux_client: Option<BrowserCruxClient>,
     poisoned: Arc<AtomicBool>,
+}
+
+struct HostPasskeyBroker {
+    browser: Chromium,
+    page: Page,
+    handler: JoinHandle<()>,
+    launcher: tokio::process::Child,
+    _profile: TempDir,
+    return_url: Url,
 }
 
 struct ActionLease {
@@ -917,6 +932,9 @@ fn trace_browser_configuration(owner: &NativeBrowser) {
         "braveSession": owner.brave_session.as_ref().map(BraveSession::trace_value),
         "launchBraveExecutable": owner.launch_brave_executable,
         "virtualAuthenticator": owner.virtual_authenticator.is_some(),
+        "hostPasskeyAuthenticator": owner.host_passkey_authenticator.as_ref().map(|authenticator| {
+            serde_json::json!({ "executable": authenticator.executable() })
+        }),
         "reactDiagnostics": owner.react_diagnostics.map(|diagnostics| {
             serde_json::json!({
                 "includeProfilingHooks": diagnostics.include_profiling_hooks(),
@@ -947,6 +965,7 @@ impl Session {
         let brave_session = owner.brave_session.as_ref();
         let launch_brave_executable = owner.launch_brave_executable;
         let virtual_authenticator = owner.virtual_authenticator.clone();
+        let host_passkey_authenticator = owner.host_passkey_authenticator.clone();
         let virtual_credential_store = virtual_authenticator
             .as_ref()
             .and_then(VirtualAuthenticator::credential_store_path)
@@ -1081,6 +1100,8 @@ impl Session {
             virtual_authenticator,
             virtual_credential_store,
             passkey_mode: BrowserPasskeyMode::Auto,
+            host_passkey_authenticator,
+            host_passkey_broker: None,
             react_diagnostics_enabled: react_diagnostics.is_some(),
             authenticators: HashMap::new(),
             closed_targets: HashSet::new(),
@@ -1114,6 +1135,10 @@ impl Session {
 
     async fn close(mut self) -> Result<(), BrowserError> {
         let credential_sync = self.synchronize_virtual_credentials().await;
+        let host_passkey_shutdown = match self.host_passkey_broker.take() {
+            Some(mut broker) => broker.close().await,
+            None => Ok(()),
+        };
         self.network_observer.abort();
         for task in &self.browser_tasks {
             task.abort();
@@ -1123,6 +1148,7 @@ impl Session {
         }
         let close = close_chromium(&mut self.browser, &self.handler).await;
         credential_sync?;
+        host_passkey_shutdown?;
         close
     }
 
@@ -1154,17 +1180,6 @@ impl Session {
                 );
             }
         }
-        Ok(())
-    }
-
-    async fn refresh_remote_cookies(
-        &mut self,
-        runtime_dir: &Path,
-        brave_session: &BraveSession,
-    ) -> Result<(), BrowserError> {
-        let cookies = export_profile_cookies(runtime_dir, brave_session).await?;
-        trace_serialized("session.refreshed_brave_cookies", &cookies);
-        replace_browser_cookies(&self.browser, cookies).await?;
         Ok(())
     }
 
@@ -2005,6 +2020,160 @@ impl Session {
             credentials: self.persisted_virtual_credentials()?,
         })
     }
+
+    async fn start_host_passkey_authorization(&mut self) -> Result<(), BrowserError> {
+        let authenticator = self
+            .host_passkey_authenticator
+            .as_ref()
+            .ok_or(BrowserError::HostPasskeyAuthenticatorNotConfigured)?;
+        if self.host_passkey_broker.is_some() {
+            return Err(BrowserError::HostPasskeyAuthorizationActive);
+        }
+        let raw_url = self.page.url().await?.unwrap_or_default();
+        validate_url(&raw_url)?;
+        let url = Url::parse(&raw_url)?;
+        self.validate_navigation(&url)?;
+        let cookies = self
+            .browser
+            .get_cookies()
+            .await?
+            .into_iter()
+            .filter_map(cookie_param)
+            .collect();
+        self.host_passkey_broker = Some(
+            HostPasskeyBroker::launch(&self.output_dir, authenticator.executable(), url, cookies)
+                .await?,
+        );
+        Ok(())
+    }
+
+    async fn resume_host_passkey_authorization(&mut self) -> Result<(), BrowserError> {
+        let mut broker = self
+            .host_passkey_broker
+            .take()
+            .ok_or(BrowserError::HostPasskeyAuthorizationNotActive)?;
+        let cookies = broker
+            .browser
+            .get_cookies()
+            .await
+            .map_err(BrowserError::from)
+            .map(|cookies| {
+                cookies
+                    .into_iter()
+                    .filter_map(cookie_param)
+                    .collect::<Vec<_>>()
+            });
+        let return_url = broker
+            .page
+            .url()
+            .await
+            .map_err(BrowserError::from)
+            .map(|url| {
+                url.and_then(|url| Url::parse(&url).ok())
+                    .unwrap_or_else(|| broker.return_url.clone())
+            });
+        let shutdown = broker.close().await;
+        let cookies = cookies?;
+        let return_url = return_url?;
+        shutdown?;
+        self.validate_navigation(&return_url)?;
+        replace_browser_cookies(&self.browser, cookies).await?;
+        navigate(&self.page, return_url.as_str()).await?;
+        self.refs.clear();
+        Ok(())
+    }
+}
+
+impl HostPasskeyBroker {
+    #[cfg(target_os = "macos")]
+    async fn launch(
+        runtime_dir: &Path,
+        executable: &Path,
+        return_url: Url,
+        cookies: Vec<CookieParam>,
+    ) -> Result<Self, BrowserError> {
+        let application =
+            macos_application_bundle(executable).ok_or_else(|| BrowserError::Configuration {
+                message: format!(
+                    "host passkeys require a macOS application bundle; {} is not inside one",
+                    executable.display()
+                ),
+            })?;
+        let profile = tempfile::Builder::new()
+            .prefix("nanocodex-host-passkey-")
+            .tempdir_in(runtime_dir)?;
+        let mut command = tokio::process::Command::new("/usr/bin/open");
+        command
+            .args(host_passkey_broker_arguments(application, profile.path()))
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .kill_on_drop(true);
+        let mut launcher = command.spawn()?;
+        let endpoint = wait_for_macos_broker_endpoint(profile.path(), &mut launcher).await?;
+        let (browser, mut events) = Chromium::connect(endpoint.as_str()).await?;
+        let handler = tokio::spawn(async move {
+            while let Some(event) = events.next().await {
+                if let Err(error) = event {
+                    warn!(
+                        target: "nanocodex_browser",
+                        %error,
+                        "host passkey broker handler stopped"
+                    );
+                    break;
+                }
+            }
+        });
+        replace_browser_cookies(&browser, cookies).await?;
+        let page = match browser.pages().await?.into_iter().next() {
+            Some(page) => page,
+            None => browser.new_page("about:blank").await?,
+        };
+        navigate(&page, return_url.as_str()).await?;
+        info!(
+            target: "nanocodex_browser",
+            url = return_url.as_str(),
+            "opened isolated browser for host passkey authorization"
+        );
+        Ok(Self {
+            browser,
+            page,
+            handler,
+            launcher,
+            _profile: profile,
+            return_url,
+        })
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    async fn launch(
+        _runtime_dir: &Path,
+        _executable: &Path,
+        _return_url: Url,
+        _cookies: Vec<CookieParam>,
+    ) -> Result<Self, BrowserError> {
+        Err(BrowserError::HostPasskeyAuthenticatorUnsupported)
+    }
+
+    async fn close(&mut self) -> Result<(), BrowserError> {
+        let close = self
+            .browser
+            .close()
+            .await
+            .map(drop)
+            .map_err(BrowserError::from);
+        self.handler.abort();
+        let launcher_shutdown = match timeout(SESSION_DISCARD_TIMEOUT, self.launcher.wait()).await {
+            Ok(result) => result.map(drop).map_err(BrowserError::from),
+            Err(_) => {
+                self.launcher.kill().await?;
+                self.launcher.wait().await?;
+                Ok(())
+            }
+        };
+        close?;
+        launcher_shutdown
+    }
 }
 
 fn virtual_credential_metadata(credential: &Credential) -> VirtualCredential {
@@ -2096,17 +2265,65 @@ async fn export_profile_cookies(
     runtime_dir: &Path,
     brave_session: &BraveSession,
 ) -> Result<Vec<CookieParam>, BrowserError> {
+    let (source_cookie_count, cookies) = export_profile_cookies_once(
+        runtime_dir,
+        brave_session,
+        CookieBrokerPresentation::Background,
+    )
+    .await?;
+    if source_cookie_count > 0
+        && cookies.is_empty()
+        && brave_session.cookie_authorization_policy() == BrowserCookieAuthorization::Interactive
+    {
+        warn!(
+            target: "nanocodex_browser",
+            source_cookie_count,
+            timeout_seconds = COOKIE_AUTHORIZATION_TIMEOUT.as_secs(),
+            "opening a visible temporary browser for cookie authorization"
+        );
+        let (interactive_source_count, cookies) = export_profile_cookies_once(
+            runtime_dir,
+            brave_session,
+            CookieBrokerPresentation::Interactive,
+        )
+        .await?;
+        return finish_profile_cookie_export(brave_session, interactive_source_count, cookies);
+    }
+    finish_profile_cookie_export(brave_session, source_cookie_count, cookies)
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CookieBrokerPresentation {
+    Background,
+    Interactive,
+}
+
+async fn export_profile_cookies_once(
+    runtime_dir: &Path,
+    brave_session: &BraveSession,
+    presentation: CookieBrokerPresentation,
+) -> Result<(i64, Vec<Cookie>), BrowserError> {
     let broker_profile = tempfile::Builder::new()
         .prefix("brave-cookie-broker-")
         .tempdir_in(runtime_dir)?;
-    brave_session.prepare(broker_profile.path()).await?;
+    let source_cookie_count = brave_session.prepare(broker_profile.path()).await?;
 
-    let config = profile_launch_config(
-        BrowserConfig::builder()
-            .user_data_dir(broker_profile.path())
-            .new_headless_mode(),
-    )
-    .chrome_executable(brave_session.executable());
+    #[cfg(target_os = "macos")]
+    if presentation == CookieBrokerPresentation::Interactive {
+        let cookies = export_profile_cookies_interactive_macos(
+            broker_profile.path(),
+            brave_session.executable(),
+        )
+        .await?;
+        return Ok((source_cookie_count, cookies));
+    }
+
+    let config = BrowserConfig::builder().user_data_dir(broker_profile.path());
+    let config = match presentation {
+        CookieBrokerPresentation::Background => config.new_headless_mode(),
+        CookieBrokerPresentation::Interactive => config.with_head().window_size(960, 640),
+    };
+    let config = profile_launch_config(config).chrome_executable(brave_session.executable());
     let (mut browser, mut events) = Chromium::launch(build_config(config)?).await?;
     let handler = tokio::spawn(async move {
         while let Some(event) = events.next().await {
@@ -2121,17 +2338,221 @@ async fn export_profile_cookies(
         }
     });
 
-    let exported = browser.get_cookies().await.map_err(BrowserError::from);
+    let exported = match presentation {
+        CookieBrokerPresentation::Background => {
+            browser.get_cookies().await.map_err(BrowserError::from)
+        }
+        CookieBrokerPresentation::Interactive => timeout(COOKIE_AUTHORIZATION_TIMEOUT, async {
+            loop {
+                let cookies = browser.get_cookies().await?;
+                if !cookies.is_empty() {
+                    return Ok::<Vec<Cookie>, CdpError>(cookies);
+                }
+                tokio::time::sleep(COOKIE_AUTHORIZATION_POLL_INTERVAL).await;
+            }
+        })
+        .await
+        .map_err(|_| BrowserError::ProfileCookieAuthorizationTimedOut {
+            seconds: COOKIE_AUTHORIZATION_TIMEOUT.as_secs(),
+        })?
+        .map_err(BrowserError::from),
+    };
     let shutdown = close_chromium(&mut browser, &handler).await;
     let cookies = exported?;
     shutdown?;
 
+    Ok((source_cookie_count, cookies))
+}
+
+#[cfg(target_os = "macos")]
+async fn export_profile_cookies_interactive_macos(
+    broker_profile: &Path,
+    executable: &Path,
+) -> Result<Vec<Cookie>, BrowserError> {
+    let application = macos_application_bundle(executable).ok_or_else(|| {
+        BrowserError::Configuration {
+            message: format!(
+                "interactive cookie authorization requires a macOS application bundle; {} is not inside one",
+                executable.display()
+            ),
+        }
+    })?;
+    let mut launcher = tokio::process::Command::new("/usr/bin/open")
+        .args(interactive_cookie_broker_arguments(
+            application,
+            broker_profile,
+        ))
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()?;
+
+    let endpoint = timeout(BROWSER_LAUNCH_TIMEOUT, async {
+        let active_port = broker_profile.join("DevToolsActivePort");
+        loop {
+            if let Ok(contents) = tokio::fs::read_to_string(&active_port).await {
+                let port = contents
+                    .lines()
+                    .next()
+                    .and_then(|line| line.parse::<u16>().ok())
+                    .filter(|port| *port != 0)
+                    .ok_or_else(|| BrowserError::Configuration {
+                        message: format!(
+                            "interactive cookie broker wrote an invalid {}",
+                            active_port.display()
+                        ),
+                    })?;
+                return Ok(format!("http://127.0.0.1:{port}"));
+            }
+            if let Some(status) = launcher.try_wait()? {
+                return Err(BrowserError::Configuration {
+                    message: format!(
+                        "interactive cookie broker exited before DevTools was ready: {status}"
+                    ),
+                });
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .map_err(|_| BrowserError::Configuration {
+        message: format!(
+            "interactive cookie broker did not expose DevTools within {} seconds",
+            BROWSER_LAUNCH_TIMEOUT.as_secs()
+        ),
+    })??;
+
+    let (mut browser, mut events) = Chromium::connect(endpoint.as_str()).await?;
+    let handler = tokio::spawn(async move {
+        while let Some(event) = events.next().await {
+            if let Err(error) = event {
+                warn!(
+                    target: "nanocodex_browser",
+                    %error,
+                    "interactive cookie broker handler stopped"
+                );
+                break;
+            }
+        }
+    });
+    let exported = timeout(COOKIE_AUTHORIZATION_TIMEOUT, async {
+        loop {
+            let cookies = browser.get_cookies().await?;
+            if !cookies.is_empty() {
+                return Ok::<Vec<Cookie>, CdpError>(cookies);
+            }
+            tokio::time::sleep(COOKIE_AUTHORIZATION_POLL_INTERVAL).await;
+        }
+    })
+    .await
+    .map_err(|_| BrowserError::ProfileCookieAuthorizationTimedOut {
+        seconds: COOKIE_AUTHORIZATION_TIMEOUT.as_secs(),
+    })?
+    .map_err(BrowserError::from);
+    let close = browser.close().await.map(drop).map_err(BrowserError::from);
+    handler.abort();
+    let launcher_shutdown = match timeout(SESSION_DISCARD_TIMEOUT, launcher.wait()).await {
+        Ok(result) => result.map(drop).map_err(BrowserError::from),
+        Err(_) => {
+            launcher.kill().await?;
+            launcher.wait().await?;
+            Ok(())
+        }
+    };
+    let cookies = exported?;
+    close?;
+    launcher_shutdown?;
+    Ok(cookies)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_application_bundle(executable: &Path) -> Option<&Path> {
+    executable
+        .ancestors()
+        .find(|path| path.extension().is_some_and(|extension| extension == "app"))
+}
+
+#[cfg(target_os = "macos")]
+fn interactive_cookie_broker_arguments(
+    application: &Path,
+    broker_profile: &Path,
+) -> Vec<std::ffi::OsString> {
+    [
+        "-n".into(),
+        "-W".into(),
+        "-a".into(),
+        application.as_os_str().to_owned(),
+        "--args".into(),
+        format!("--user-data-dir={}", broker_profile.display()).into(),
+        "--profile-directory=Default".into(),
+        "--remote-debugging-port=0".into(),
+        "--no-first-run".into(),
+        "about:blank".into(),
+    ]
+    .into()
+}
+
+#[cfg(target_os = "macos")]
+fn host_passkey_broker_arguments(
+    application: &Path,
+    broker_profile: &Path,
+) -> Vec<std::ffi::OsString> {
+    interactive_cookie_broker_arguments(application, broker_profile)
+}
+
+#[cfg(target_os = "macos")]
+async fn wait_for_macos_broker_endpoint(
+    broker_profile: &Path,
+    launcher: &mut tokio::process::Child,
+) -> Result<String, BrowserError> {
+    timeout(BROWSER_LAUNCH_TIMEOUT, async {
+        let active_port = broker_profile.join("DevToolsActivePort");
+        loop {
+            if let Ok(contents) = tokio::fs::read_to_string(&active_port).await {
+                let port = contents
+                    .lines()
+                    .next()
+                    .and_then(|line| line.parse::<u16>().ok())
+                    .filter(|port| *port != 0)
+                    .ok_or_else(|| BrowserError::Configuration {
+                        message: format!("browser wrote an invalid {}", active_port.display()),
+                    })?;
+                return Ok(format!("http://127.0.0.1:{port}"));
+            }
+            if let Some(status) = launcher.try_wait()? {
+                return Err(BrowserError::Configuration {
+                    message: format!("browser exited before DevTools was ready: {status}"),
+                });
+            }
+            tokio::time::sleep(Duration::from_millis(100)).await;
+        }
+    })
+    .await
+    .map_err(|_| BrowserError::Configuration {
+        message: format!(
+            "browser did not expose DevTools within {} seconds",
+            BROWSER_LAUNCH_TIMEOUT.as_secs()
+        ),
+    })?
+}
+
+fn finish_profile_cookie_export(
+    brave_session: &BraveSession,
+    source_cookie_count: i64,
+    cookies: Vec<Cookie>,
+) -> Result<Vec<CookieParam>, BrowserError> {
     let cookies = allowed_cookie_params(
         cookies,
         (!brave_session.copies_all_cookies()).then(|| brave_session.allowed_origins()),
     );
+    if source_cookie_count > 0 && cookies.is_empty() {
+        return Err(BrowserError::ProfileCookieExportUnavailable {
+            source_cookie_count,
+        });
+    }
     info!(
         target: "nanocodex_browser",
+        source_cookie_count,
         browser_cookie_count = cookies.len(),
         browser_cookie_origin_count = brave_session.allowed_origins().len(),
         browser_cookie_all_origins = brave_session.copies_all_cookies(),
@@ -2789,6 +3210,7 @@ impl NativeBrowser {
         brave_session: Option<BraveSession>,
         launch_brave_executable: bool,
         virtual_authenticator: Option<VirtualAuthenticator>,
+        host_passkey_authenticator: Option<HostPasskeyAuthenticator>,
         react_diagnostics: Option<ReactDiagnostics>,
         egress_policy: Option<BrowserEgressPolicy>,
         file_root: Option<PathBuf>,
@@ -2809,6 +3231,7 @@ impl NativeBrowser {
             brave_session,
             launch_brave_executable,
             virtual_authenticator,
+            host_passkey_authenticator,
             react_diagnostics,
             egress_policy,
             file_root,
@@ -3064,84 +3487,6 @@ impl NativeBrowser {
         Ok(())
     }
 
-    pub(crate) fn open_auth_handoff(&self, url: &Url) -> Result<(), BrowserError> {
-        let session = self
-            .brave_session
-            .as_ref()
-            .ok_or(BrowserError::BraveSessionNotConfigured)?;
-        session.open_handoff(url)?;
-        info!(
-            target: "nanocodex_browser",
-            url = url.as_str(),
-            "opened authentication handoff in ordinary Brave"
-        );
-        Ok(())
-    }
-
-    pub(crate) fn validate_auth_handoff(&self, url: &Url) -> Result<(), BrowserError> {
-        let session = self
-            .brave_session
-            .as_ref()
-            .ok_or(BrowserError::BraveSessionNotConfigured)?;
-        session.validate_handoff_url(url)?;
-        Ok(())
-    }
-
-    pub(crate) async fn resume_auth_handoff(&self, url: Url) -> Result<(), BrowserError> {
-        let span = info_span!(
-            target: "nanocodex_browser",
-            "browser.auth_handoff.resume"
-        );
-        async {
-            let mut state = self.state.lock().await;
-            if state.closed {
-                return Err(BrowserError::Closed);
-            }
-            let brave_session = self
-                .brave_session
-                .as_ref()
-                .ok_or(BrowserError::BraveSessionNotConfigured)?;
-            brave_session.validate_handoff_url(&url)?;
-            if self.cdp_endpoint.is_some() {
-                if let Some(session) = state.session.as_mut() {
-                    session
-                        .refresh_remote_cookies(self.runtime_dir.path(), brave_session)
-                        .await?;
-                } else {
-                    state.session = Some(Session::launch(self).await?);
-                }
-            } else {
-                if let Some(session) = state.session.take() {
-                    session.close().await?;
-                }
-                let profile = self.runtime_dir.path().join("profile");
-                match tokio::fs::remove_dir_all(&profile).await {
-                    Ok(()) => {}
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-                    Err(error) => return Err(error.into()),
-                }
-                state.session = Some(Session::launch(self).await?);
-            }
-            let session = state
-                .session
-                .as_mut()
-                .ok_or(BrowserError::SessionUnavailable)?;
-            validate_url(url.as_str())?;
-            session.validate_navigation(&url)?;
-            navigate(&session.page, url.as_str()).await?;
-            session.sync_virtual_authenticators().await?;
-            session.refs.clear();
-            info!(
-                target: "nanocodex_browser",
-                url = url.as_str(),
-                "resumed private headless browser after authentication handoff"
-            );
-            Ok(())
-        }
-        .instrument(span)
-        .await
-    }
-
     pub(crate) async fn virtual_credentials(&self) -> Result<Vec<VirtualCredential>, BrowserError> {
         let mut state = self.state.lock().await;
         if state.closed {
@@ -3235,6 +3580,17 @@ async fn execute_action(
             session.passkey_mode = BrowserPasskeyMode::Auto;
             session.apply_passkey_mode().await?;
             session.passkeys_result(sequence, BrowserActionName::PasskeyAuto)
+        }
+        BrowserAction::HostPasskeyStart => {
+            session.start_host_passkey_authorization().await?;
+            Ok(action_result(sequence, BrowserActionName::HostPasskeyStart))
+        }
+        BrowserAction::HostPasskeyResume => {
+            session.resume_host_passkey_authorization().await?;
+            Ok(action_result(
+                sequence,
+                BrowserActionName::HostPasskeyResume,
+            ))
         }
         BrowserAction::Snapshot {
             interactive,
@@ -6975,6 +7331,14 @@ pub enum BrowserError {
     BraveSession(#[from] BraveSessionError),
     #[error("browser configuration is invalid: {message}")]
     Configuration { message: String },
+    #[error(
+        "the source profile contains {source_cookie_count} selected cookies, but its browser exported none; unlock the source browser's credential storage and retry"
+    )]
+    ProfileCookieExportUnavailable { source_cookie_count: i64 },
+    #[error(
+        "interactive source-profile cookie authorization did not complete within {seconds} seconds"
+    )]
+    ProfileCookieAuthorizationTimedOut { seconds: u64 },
     #[error("browser action input is {bytes} bytes, above the {maximum}-byte limit")]
     ActionInputTooLarge { bytes: u64, maximum: u64 },
     #[error("browser action result is {bytes} bytes, above the {maximum}-byte limit")]
@@ -7202,10 +7566,16 @@ pub enum BrowserError {
     AmbiguousVirtualCredential { credential_id: String },
     #[error("virtual credential store {} is invalid: {message}", path.display())]
     VirtualCredentialStore { path: PathBuf, message: String },
-    #[error("this browser was not configured with an authenticated Brave session")]
-    BraveSessionNotConfigured,
     #[error("the virtual authenticator is not ready; navigate to a page first")]
     VirtualAuthenticatorNotReady,
+    #[error("this browser was not configured to use host passkeys")]
+    HostPasskeyAuthenticatorNotConfigured,
+    #[error("host passkeys are currently supported only on macOS")]
+    HostPasskeyAuthenticatorUnsupported,
+    #[error("a host passkey authorization browser is already open")]
+    HostPasskeyAuthorizationActive,
+    #[error("no host passkey authorization browser is open")]
+    HostPasskeyAuthorizationNotActive,
     #[error("selector `{selector}` was not found before the browser timeout")]
     SelectorTimeout { selector: String },
     #[error("selector `{selector}` did not reach state {state:?} before the browser timeout")]
@@ -7933,6 +8303,62 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    fn interactive_cookie_broker_uses_only_the_copied_profile() {
+        let executable =
+            std::path::Path::new("/Applications/Brave Browser.app/Contents/MacOS/Brave Browser");
+        let application = super::macos_application_bundle(executable).unwrap();
+        let copied_profile = std::path::Path::new("/private/tmp/brave-cookie-broker-test");
+        let arguments = super::interactive_cookie_broker_arguments(application, copied_profile)
+            .into_iter()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert_eq!(
+            application,
+            std::path::Path::new("/Applications/Brave Browser.app")
+        );
+        assert!(
+            arguments
+                .iter()
+                .any(|argument| argument == "--user-data-dir=/private/tmp/brave-cookie-broker-test")
+        );
+        assert!(!arguments.iter().any(|argument| {
+            argument.contains("Library/Application Support/BraveSoftware/Brave-Browser")
+                || argument.contains("use-mock-keychain")
+                || argument.contains("password-store=basic")
+                || argument.contains("enable-automation")
+        }));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn host_passkey_broker_uses_an_isolated_real_keychain_profile() {
+        let executable =
+            std::path::Path::new("/Applications/Brave Browser.app/Contents/MacOS/Brave Browser");
+        let application = super::macos_application_bundle(executable).unwrap();
+        let isolated_profile = std::path::Path::new("/private/tmp/nanocodex-host-passkey-test");
+        let arguments = super::host_passkey_broker_arguments(application, isolated_profile)
+            .into_iter()
+            .map(|argument| argument.to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+
+        assert!(
+            arguments
+                .iter()
+                .any(|argument| argument
+                    == "--user-data-dir=/private/tmp/nanocodex-host-passkey-test")
+        );
+        assert!(!arguments.iter().any(|argument| {
+            argument.contains("Library/Application Support/BraveSoftware/Brave-Browser")
+                || argument.contains("headless")
+                || argument.contains("use-mock-keychain")
+                || argument.contains("password-store=basic")
+                || argument.contains("enable-automation")
+        }));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
     fn explicit_automation_executable_remains_caller_owned() {
         let explicit = std::path::PathBuf::from("/caller/selected/chrome");
         assert_eq!(
@@ -8262,22 +8688,6 @@ mod tests {
             .await?;
         let BrowserActionResult::Evaluation { value, .. } = result else {
             return Err(std::io::Error::other("expected evaluation result").into());
-        };
-        assert_eq!(value.as_bool(), Some(true));
-
-        seed_brave_cookie(&executable, &source_profile, "refreshed").await?;
-        browser
-            .inner
-            .resume_auth_handoff(url::Url::parse("https://example.com")?)
-            .await?;
-        let result = browser
-            .execute(BrowserAction::Evaluate {
-                expression: "document.cookie.includes('nanocodex_cookie_bridge=refreshed')"
-                    .to_owned(),
-            })
-            .await?;
-        let BrowserActionResult::Evaluation { value, .. } = result else {
-            return Err(std::io::Error::other("expected refreshed evaluation result").into());
         };
         assert_eq!(value.as_bool(), Some(true));
 

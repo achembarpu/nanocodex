@@ -22,8 +22,8 @@ use super::{
     BrowserOrientation, BrowserOriginStorage, BrowserPasskeyMode, BrowserPerformanceInsight,
     BrowserPostActionSnapshot, BrowserPseudoClass, BrowserReactEventKind, BrowserReducedMotion,
     BrowserRouteHeader, BrowserRouteResponse, BrowserStorageState, BrowserTarget, BrowserTool,
-    BrowserViewport, BrowserWaitForSelectorState, IosBrowser, ReactDiagnostics,
-    VirtualAuthenticator, browser_tool_builder,
+    BrowserViewport, BrowserWaitForSelectorState, HostPasskeyAuthenticator, IosBrowser,
+    ReactDiagnostics, VirtualAuthenticator, browser_tool_builder,
 };
 
 #[test]
@@ -32,6 +32,25 @@ fn browser_tool_enables_virtual_platform_passkeys() {
         browser_tool_builder().virtual_authenticator,
         Some(VirtualAuthenticator::platform_passkey())
     );
+}
+
+#[test]
+fn host_and_virtual_passkey_policies_are_mutually_exclusive() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let executable = directory.path().join("desktop-browser");
+    std::fs::write(&executable, [])?;
+    let error = Browser::builder()
+        .virtual_authenticator(VirtualAuthenticator::platform_passkey())
+        .host_passkey_authenticator(HostPasskeyAuthenticator::new(executable))
+        .build()
+        .err()
+        .ok_or_else(|| eyre!("expected mutually exclusive passkey policies"))?;
+    assert!(matches!(
+        error,
+        BrowserBuildError::Configuration { ref message }
+            if message == "host and virtual passkey authenticators cannot be enabled together"
+    ));
+    Ok(())
 }
 
 #[test]
@@ -337,16 +356,6 @@ async fn virtual_authenticator_is_reused_when_returning_to_a_tab() -> Result<()>
     Ok(())
 }
 
-#[test]
-fn authentication_handoff_requires_an_authenticated_brave_session() -> Result<()> {
-    let browser = Browser::new()?;
-    assert!(matches!(
-        browser.auth_handoff(url::Url::parse("https://example.com")?),
-        Err(BrowserError::BraveSessionNotConfigured)
-    ));
-    Ok(())
-}
-
 #[tokio::test]
 async fn code_mode_calls_record_browser_actions_in_order() -> Result<()> {
     let (browser, recording) = BrowserTool::recording();
@@ -460,6 +469,8 @@ fn recording_browser_exposes_model_controlled_passkey_modes() -> Result<()> {
     })?;
     let fresh = recording.record(BrowserAction::PasskeyNew)?;
     let automatic = recording.record(BrowserAction::PasskeyAuto)?;
+    let host_started = recording.record(BrowserAction::HostPasskeyStart)?;
+    let host_resumed = recording.record(BrowserAction::HostPasskeyResume)?;
 
     assert!(matches!(
         listed,
@@ -493,6 +504,20 @@ fn recording_browser_exposes_model_controlled_passkey_modes() -> Result<()> {
         BrowserActionResult::Passkeys {
             action: BrowserActionName::PasskeyAuto,
             mode: BrowserPasskeyMode::Auto,
+            ..
+        }
+    ));
+    assert!(matches!(
+        host_started,
+        BrowserActionResult::Action {
+            action: BrowserActionName::HostPasskeyStart,
+            ..
+        }
+    ));
+    assert!(matches!(
+        host_resumed,
+        BrowserActionResult::Action {
+            action: BrowserActionName::HostPasskeyResume,
             ..
         }
     ));
@@ -645,6 +670,8 @@ async fn code_mode_description_exposes_browser_action_schema() -> Result<()> {
     assert!(description.contains(r#"action: "passkey_use""#));
     assert!(description.contains(r#"action: "passkey_new""#));
     assert!(description.contains(r#"action: "passkey_auto""#));
+    assert!(description.contains(r#"action: "host_passkey_start""#));
+    assert!(description.contains(r#"action: "host_passkey_resume""#));
     assert!(description.contains(r#"action: "export_har""#));
     assert!(description.contains(r#"action: "list_frames""#));
     assert!(description.contains(r#"action: "list_tabs""#));
@@ -661,7 +688,6 @@ async fn code_mode_description_exposes_browser_action_schema() -> Result<()> {
     assert!(description.contains(r#"by: "role""#));
     assert!(description.contains("Promise.all"));
     assert!(description.contains("Promise<{"));
-    assert!(!description.contains("auth_handoff"));
     Ok(())
 }
 
