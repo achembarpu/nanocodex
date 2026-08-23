@@ -37,7 +37,7 @@ export async function materializeTurnTerminal(
       return { type: "turn_blocked", id, error: message };
     }
     if (code === "retryable"
-      || /agent stopped|turn completed|durability (?:store|driver)|transport|websocket/i.test(message)) {
+      || /agent stopped|turn completed|durability (?:store|driver)|transport|websocket|connection rejected with HTTP 5\d\d/i.test(message)) {
       return { type: "turn_retryable", id, error: message };
     }
     return { type: "turn_failed", id, error: message };

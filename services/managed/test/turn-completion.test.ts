@@ -46,6 +46,22 @@ describe("materializeTurnTerminal", () => {
     expect(result.usage).toHaveBeenCalledOnce();
     expect(dispose).toHaveBeenCalledOnce();
   });
+
+  it("keeps a rejected preflight connection retryable", async () => {
+    const turn = {
+      result: async () => {
+        throw new Error(
+          "Agent connection rejected with HTTP 503: credential_broker_rejected",
+        );
+      },
+    } as unknown as Turn;
+
+    await expect(materializeTurnTerminal("turn-3", turn)).resolves.toEqual({
+      type: "turn_retryable",
+      id: "turn-3",
+      error: "Agent connection rejected with HTTP 503: credential_broker_rejected",
+    });
+  });
 });
 
 function turnResult(overrides: {
