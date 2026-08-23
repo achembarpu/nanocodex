@@ -2,6 +2,23 @@ import { cloudflareTest } from "@cloudflare/vitest-pool-workers";
 import { defineConfig } from "vitest/config";
 
 const TEST_KEY = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY";
+const TEST_CHATGPT_EGRESS = `
+export class ChatGptEgress {
+  fetch(request) {
+    const url = new URL(request.url);
+    url.hostname = "chatgpt.com";
+    return Response.json({
+      url: url.href,
+      credential: request.headers.get("authorization")?.startsWith("Bearer ")
+        ? "chatgpt"
+        : "missing",
+      account: request.headers.get("chatgpt-account-id"),
+      subject: request.headers.get("x-nanocodex-subject"),
+      leaked: request.headers.get("x-should-not-forward"),
+    }, { headers: { authorization: "Bearer reflected-provider-secret" } });
+  }
+}
+`;
 
 export default defineConfig({
   plugins: [
@@ -20,6 +37,12 @@ export default defineConfig({
           }),
           NANOCODEX_BROKER_PROBE_TOKEN: "probe-token-that-is-at-least-thirty-two-bytes",
         },
+        workers: [{
+          name: "nanocodex",
+          modules: true,
+          script: TEST_CHATGPT_EGRESS,
+          durableObjects: { CHATGPT_EGRESS: "ChatGptEgress" },
+        }],
         outboundService: async (request) => {
           const url = new URL(request.url);
           if (request.method === "POST" && url.pathname.endsWith("/deviceauth/usercode")) {
