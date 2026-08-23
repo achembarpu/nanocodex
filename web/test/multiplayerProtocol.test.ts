@@ -40,6 +40,40 @@ test("room invitations keep the capability in the URL fragment", () => {
   assert.equal(multiplayerRoomPath(roomId), `/multiplayer?room=${roomId}`);
 });
 
+test("room resume opens one authoritative WebSocket without a state preflight", () => {
+  const source = readFileSync(new URL("../src/Multiplayer.tsx", import.meta.url), "utf8");
+  const resumeStart = source.indexOf('if (lobby.kind !== "resume"');
+  const resumeEnd = source.indexOf("}, [connect, lobby]);", resumeStart);
+  assert.notEqual(resumeStart, -1);
+  assert.notEqual(resumeEnd, -1);
+  const resumeEffect = source.slice(resumeStart, resumeEnd);
+
+  assert.doesNotMatch(resumeEffect, /fetch\s*\(/);
+  assert.doesNotMatch(resumeEffect, /\/v1\/rooms\/\$\{lobby\.roomId\}/);
+  assert.equal([...resumeEffect.matchAll(/\bconnect\s*\(/g)].length, 1);
+  assert.match(resumeEffect, /connect\(\{ roomId: lobby\.roomId \}\)/);
+
+  const connectStart = source.indexOf("const connect = useCallback");
+  const connectEnd = source.indexOf("\n\n  useEffect(() => {", connectStart);
+  assert.notEqual(connectStart, -1);
+  assert.notEqual(connectEnd, -1);
+  const connect = source.slice(connectStart, connectEnd);
+  assert.equal([...connect.matchAll(/new WebSocket\s*\(/g)].length, 1);
+  assert.match(connect, /invalid or expired[\s\S]*?original invite link/);
+  assert.doesNotMatch(resumeEffect, /invite|hash|searchParams/);
+});
+
+test("create and join canonicalize room history once before ready", () => {
+  const source = readFileSync(new URL("../src/Multiplayer.tsx", import.meta.url), "utf8");
+  assert.equal([...source.matchAll(/multiplayerRoomPath\(receipt\.roomId\)/g)].length, 2);
+
+  const readyStart = source.indexOf('if (message.type === "ready")');
+  const readyEnd = source.indexOf('if (message.type === "replay_paused")', readyStart);
+  assert.notEqual(readyStart, -1);
+  assert.notEqual(readyEnd, -1);
+  assert.doesNotMatch(source.slice(readyStart, readyEnd), /history\.replaceState/);
+});
+
 test("ambiguous room creation reuses one bounded high-entropy receipt across reload", () => {
   const storage = new MemoryStorage();
   const attempt = createMultiplayerCreateAttempt("Ada");

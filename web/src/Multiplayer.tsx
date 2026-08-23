@@ -176,7 +176,6 @@ export function Multiplayer() {
           setConnected(true);
           setRoomError(undefined);
           reconnectAttempt.current = 0;
-          window.history.replaceState(window.history.state, "", multiplayerRoomPath(receipt.roomId));
           resendPendingSend(socket, message.room_id, message.member_id);
           return;
         }
@@ -232,7 +231,7 @@ export function Multiplayer() {
         setLobby({
           kind: "blocked",
           roomId: receipt.roomId,
-          error: "The room connection failed. Retry with this browser's membership cookie or use the original invite link.",
+          error: "The room is unavailable or this browser's membership is invalid or expired. Retry, or use the original invite link to join again.",
         });
         return;
       }
@@ -270,31 +269,7 @@ export function Multiplayer() {
 
   useEffect(() => {
     if (lobby.kind !== "resume" || roomRef.current?.roomId === lobby.roomId) return;
-    const controller = new AbortController();
-    void fetch(`/v1/rooms/${lobby.roomId}`, {
-      credentials: "same-origin",
-      headers: { accept: "application/json" },
-      signal: controller.signal,
-    }).then(async (response) => {
-      if (!response.ok) throw new Error("membership_missing");
-      const state = await response.json<unknown>();
-      decodeRoomState(state, lobby.roomId);
-      const receipt: PendingRoom = {
-        roomId: lobby.roomId,
-      };
-      connect(receipt);
-    }).catch((error) => {
-      if (controller.signal.aborted) return;
-      setPending(false);
-      setLobby({
-        kind: "blocked",
-        roomId: lobby.roomId,
-        error: error instanceof Error && error.message === "membership_missing"
-          ? "This browser has no membership for the room. Open its original invite link to join."
-          : "The room could not be opened. Check the managed Multiplayer deployment and retry.",
-      });
-    });
-    return () => controller.abort();
+    connect({ roomId: lobby.roomId });
   }, [connect, lobby]);
 
   useEffect(() => {
@@ -876,15 +851,6 @@ function decodeRoomReceipt(value: unknown, creator: boolean): RoomReceipt {
     memberId,
     ...(typeof invite === "string" ? { invite } : {}),
   };
-}
-
-function decodeRoomState(value: unknown, roomId: string): void {
-  const state = asRecord(value);
-  if (state?.room_id !== roomId) {
-    throw new Error("invalid_room_state");
-  }
-  // The authenticated state route deliberately omits member identity. The
-  // hibernatable socket returns it after validating the HttpOnly room cookie.
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

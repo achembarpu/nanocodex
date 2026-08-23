@@ -37,11 +37,17 @@ type CredentialStatus = Readonly<{
   };
 }>;
 
+type AccountDataRequest = Readonly<{
+  accountId: string;
+  promise: Promise<void>;
+}>;
+
 const API_KEY_ID = /^[A-Za-z0-9_-]{12}$/;
 
 export function AccountMenu() {
   const session = useAccountSession();
   const refreshSession = session.refresh;
+  const accountId = session.account?.id;
   const [open, setOpen] = useState(false);
   const [keys, setKeys] = useState<ApiKeyMetadata[] | null>(null);
   const [keyError, setKeyError] = useState<string | null>(null);
@@ -54,6 +60,9 @@ export function AccountMenu() {
   const [providerOperation, setProviderOperation] = useState<string | null>(null);
   const [openAiKey, setOpenAiKey] = useState("");
   const menuRef = useRef<HTMLDivElement>(null);
+  const cachedAccountId = useRef<string | undefined>(undefined);
+  const keyRequest = useRef<AccountDataRequest | undefined>(undefined);
+  const credentialRequest = useRef<AccountDataRequest | undefined>(undefined);
 
   const close = useCallback(() => {
     setOpen(false);
@@ -61,39 +70,64 @@ export function AccountMenu() {
     setCopied(false);
   }, []);
 
-  const loadKeys = useCallback(async () => {
-    setKeyError(null);
-    try {
-      const response = await apiRequest("/v1/api-keys");
-      if (response.status === 401) {
-        await response.body?.cancel();
-        await refreshSession();
-        return;
+  const loadKeys = useCallback((): Promise<void> => {
+    if (!accountId) return Promise.resolve();
+    if (keyRequest.current?.accountId === accountId) return keyRequest.current.promise;
+    if (cachedAccountId.current === accountId) setKeyError(null);
+    let current!: Promise<void>;
+    current = (async () => {
+      try {
+        const response = await apiRequest("/v1/api-keys");
+        if (response.status === 401) {
+          await response.body?.cancel();
+          await refreshSession();
+          return;
+        }
+        if (!response.ok) throw await responseFailure(response, "Couldn’t load API keys.");
+        const body: unknown = await response.json();
+        if (!isRecord(body) || !Array.isArray(body.data)) throw new Error("Invalid API key response.");
+        if (cachedAccountId.current === accountId) setKeys(body.data.map(decodeApiKey));
+      } catch (cause) {
+        if (cachedAccountId.current === accountId) {
+          setKeyError(failureMessage(cause, "Couldn’t load API keys."));
+        }
       }
-      if (!response.ok) throw await responseFailure(response, "Couldn’t load API keys.");
-      const body: unknown = await response.json();
-      if (!isRecord(body) || !Array.isArray(body.data)) throw new Error("Invalid API key response.");
-      setKeys(body.data.map(decodeApiKey));
-    } catch (cause) {
-      setKeyError(failureMessage(cause, "Couldn’t load API keys."));
-    }
-  }, [refreshSession]);
+    })().finally(() => {
+      if (keyRequest.current?.promise === current) keyRequest.current = undefined;
+    });
+    keyRequest.current = { accountId, promise: current };
+    return current;
+  }, [accountId, refreshSession]);
 
-  const loadCredentials = useCallback(async () => {
-    setCredentialError(null);
-    try {
-      const response = await apiRequest("/v1/credentials");
-      if (response.status === 401) {
-        await response.body?.cancel();
-        await refreshSession();
-        return;
-      }
-      if (!response.ok) throw await responseFailure(response, "Couldn’t load model connections.");
-      setCredentials(decodeCredentialStatus(await response.json()));
-    } catch (cause) {
-      setCredentialError(failureMessage(cause, "Couldn’t load model connections."));
+  const loadCredentials = useCallback((): Promise<void> => {
+    if (!accountId) return Promise.resolve();
+    if (credentialRequest.current?.accountId === accountId) {
+      return credentialRequest.current.promise;
     }
-  }, [refreshSession]);
+    if (cachedAccountId.current === accountId) setCredentialError(null);
+    let current!: Promise<void>;
+    current = (async () => {
+      try {
+        const response = await apiRequest("/v1/credentials");
+        if (response.status === 401) {
+          await response.body?.cancel();
+          await refreshSession();
+          return;
+        }
+        if (!response.ok) throw await responseFailure(response, "Couldn’t load model connections.");
+        const nextCredentials = decodeCredentialStatus(await response.json());
+        if (cachedAccountId.current === accountId) setCredentials(nextCredentials);
+      } catch (cause) {
+        if (cachedAccountId.current === accountId) {
+          setCredentialError(failureMessage(cause, "Couldn’t load model connections."));
+        }
+      }
+    })().finally(() => {
+      if (credentialRequest.current?.promise === current) credentialRequest.current = undefined;
+    });
+    credentialRequest.current = { accountId, promise: current };
+    return current;
+  }, [accountId, refreshSession]);
 
   const pollChatGpt = useCallback(async () => {
     try {
@@ -116,18 +150,30 @@ export function AccountMenu() {
   }, [loadCredentials]);
 
   useEffect(() => {
-    if (!open || !session.account) return;
-    void Promise.all([loadKeys(), loadCredentials()]);
-  }, [loadCredentials, loadKeys, open, session.account]);
-
-  useEffect(() => {
-    if (session.account) return;
-    setKeys(null);
-    setKeyError(null);
-    setNewKey(null);
-    setCredentials(null);
-    setCredentialError(null);
-  }, [session.account]);
+    if (!accountId) {
+      cachedAccountId.current = undefined;
+      setKeys(null);
+      setKeyError(null);
+      setNewKey(null);
+      setCredentials(null);
+      setCredentialError(null);
+      return;
+    }
+    const accountChanged = cachedAccountId.current !== accountId;
+    if (accountChanged) {
+      cachedAccountId.current = accountId;
+      setKeys(null);
+      setKeyError(null);
+      setNewKey(null);
+      setCredentials(null);
+      setCredentialError(null);
+    }
+    if (!open) return;
+    const missing: Promise<void>[] = [];
+    if (accountChanged || keys === null) missing.push(loadKeys());
+    if (accountChanged || credentials === null) missing.push(loadCredentials());
+    void Promise.all(missing);
+  }, [accountId, credentials, keys, loadCredentials, loadKeys, open]);
 
   useEffect(() => {
     const login = credentials?.chatgpt.login;

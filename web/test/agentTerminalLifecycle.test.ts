@@ -6,6 +6,7 @@ const terminal = source("../src/AgentTerminal.tsx");
 const demoTerminal = source("../src/demoTerminal.ts");
 const experience = source("../src/AgentExperience.tsx");
 const session = source("../src/modelSession.tsx");
+const accountSession = source("../src/AccountSession.tsx");
 const health = source("../src/deploymentHealth.ts");
 const localCredential = source("../src/localDevelopmentCredential.ts");
 const surface = source("../src/agentTerminalSurface.tsx");
@@ -14,15 +15,20 @@ const terminalCss = source("../src/AgentTerminal.css");
 test("account authentication naturally selects the private broker", () => {
   assert.match(session, /useAccountSession\(\)\.account/);
   assert.match(health, /payload\.credential_source === "brokered"/);
-  assert.match(session, /deploymentHealth\.refresh\(\)/);
+  assert.match(session, /fresh\s*\? deploymentHealth\.refresh\(\)\s*:\s*deploymentHealth\.read\(\)/);
+  assert.match(session, /previousAccountId !== undefined && previousAccountId !== account\.id/);
+  assert.match(session, /try \{ await readStatus\(true\); \} finally/);
   assert.match(session, /window\.addEventListener\("focus", refreshAfterInactivity\)/);
   assert.match(session, /if \(!event\.persisted\) return/);
   assert.match(session, /nanocodex:model-credential-changed/);
 });
 
-test("localhost credential import is a barrier before either agent runtime starts", () => {
-  assert.match(session, /await localDevelopmentCredential\.ensure\(account\.id\)/);
-  assert.match(session, /if \(claimed\) deploymentHealth\.invalidate\(\)/);
+test("AccountSession solely owns localhost credential import and invalidation", () => {
+  assert.match(accountSession, /localDevelopmentCredential\.ensure\(userId\)/);
+  assert.match(accountSession, /if \(localClaimAccountId\.current === userId && claimed\)/);
+  assert.match(accountSession, /if \(localClaimAccountId\.current === userId\) return/);
+  assert.match(accountSession, /deploymentHealth\.invalidate\(\)/);
+  assert.doesNotMatch(session, /localDevelopmentCredential|deploymentHealth\.invalidate\(\)/);
   assert.match(localCredential, /LOOPBACK_HOSTS\.has\(hostname\)/);
   assert.match(localCredential, /current\?\.userId === userId/);
   assert.match(localCredential, /Local development credential claim failed/);

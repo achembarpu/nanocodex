@@ -34,6 +34,7 @@ import {
 import {
   drawMonsterWorld,
   loadWorldAssets,
+  worldAssetSource,
   type WorldAssets,
 } from "./monsterWorldRenderer";
 import {
@@ -1096,7 +1097,7 @@ function AgentPortrait({ actor }: Readonly<{ actor: WorldActor }>) {
     return (
       <img
         className="monster-world-portrait"
-        src={`/world/my-pixel-world/menu-sprites/menusprite${actor.sprite}.png`}
+        src={worldAssetSource(`menu-sprites/menusprite${actor.sprite}.png`)}
         alt=""
         width="32"
         height="32"
@@ -1108,7 +1109,7 @@ function AgentPortrait({ actor }: Readonly<{ actor: WorldActor }>) {
       className="monster-world-portrait is-human"
       aria-hidden="true"
       style={{
-        backgroundImage: `url(/world/my-pixel-world/character-overworld/ow${actor.sprite}.png)`,
+        backgroundImage: `url(${worldAssetSource(`character-overworld/ow${actor.sprite}.png`)})`,
       }}
     />
   );

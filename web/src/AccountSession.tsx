@@ -59,22 +59,47 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
   const [error, setError] = useState<string | null>(null);
   const [operation, setOperation] = useState<AccountOperation | null>(null);
   const requestId = useRef(0);
+  const refreshRequest = useRef<Promise<void> | undefined>(undefined);
+  const localClaimAccountId = useRef<string | undefined>(undefined);
 
-  const refresh = useCallback(async () => {
-    const currentRequest = ++requestId.current;
-    try {
-      const nextUser = await getCurrentUser();
-      if (requestId.current !== currentRequest) return;
-      setUser(nextUser);
-      setStatus("ready");
-      setError(null);
-      if (nextUser) void claimLocalCredential(nextUser.id);
-    } catch (cause) {
-      if (requestId.current !== currentRequest) return;
-      setStatus("error");
-      setError(accountFailure(cause, "Couldn’t check your account session."));
-    }
+  const claimLocalCredential = useCallback((userId: string) => {
+    if (localClaimAccountId.current === userId) return;
+    localClaimAccountId.current = userId;
+    void localDevelopmentCredential.ensure(userId).then((claimed) => {
+      if (localClaimAccountId.current === userId && claimed) {
+        notifyModelCredentialChanged();
+      }
+    }, () => {
+      if (localClaimAccountId.current === userId) {
+        localClaimAccountId.current = undefined;
+      }
+    });
   }, []);
+
+  const refresh = useCallback((): Promise<void> => {
+    if (refreshRequest.current) return refreshRequest.current;
+    const currentRequest = ++requestId.current;
+    let current!: Promise<void>;
+    current = getCurrentUser().then(
+      (nextUser) => {
+        if (requestId.current !== currentRequest) return;
+        setUser(nextUser);
+        setStatus("ready");
+        setError(null);
+        if (nextUser) claimLocalCredential(nextUser.id);
+        else localClaimAccountId.current = undefined;
+      },
+      (cause: unknown) => {
+        if (requestId.current !== currentRequest) return;
+        setStatus("error");
+        setError(accountFailure(cause, "Couldn’t check your account session."));
+      },
+    ).finally(() => {
+      if (refreshRequest.current === current) refreshRequest.current = undefined;
+    });
+    refreshRequest.current = current;
+    return current;
+  }, [claimLocalCredential]);
 
   useEffect(() => {
     void refresh();
@@ -101,7 +126,7 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
       requestId.current++;
       setUser(nextUser);
       setStatus("ready");
-      void claimLocalCredential(nextUser.id);
+      claimLocalCredential(nextUser.id);
     } catch (cause) {
       setError(accountFailure(
         cause,
@@ -112,7 +137,7 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
     } finally {
       setOperation(null);
     }
-  }, [accountProvider, user]);
+  }, [accountProvider, claimLocalCredential, user]);
 
   const register = useCallback(() => connect("register"), [connect]);
   const signIn = useCallback(() => connect("login"), [connect]);
@@ -125,12 +150,14 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
       requestId.current++;
       setUser(nextUser);
       setStatus("ready");
+      if (nextUser) claimLocalCredential(nextUser.id);
+      else localClaimAccountId.current = undefined;
     } catch (cause) {
       setError(accountFailure(cause, "Couldn’t sign out. Try again."));
     } finally {
       setOperation(null);
     }
-  }, [accountProvider]);
+  }, [accountProvider, claimLocalCredential]);
 
   const value = useMemo<AccountSession>(() => ({
     account: user,
@@ -176,12 +203,6 @@ async function getCurrentUser(): Promise<AuthenticatedAccount | null> {
     || typeof persistent !== "boolean"
   ) throw new Error("Invalid account response.");
   return { id, persistent };
-}
-
-async function claimLocalCredential(userId: string): Promise<void> {
-  await localDevelopmentCredential.ensure(userId).then((claimed) => {
-    if (claimed) notifyModelCredentialChanged();
-  }).catch(() => {});
 }
 
 function notifyModelCredentialChanged(): void {

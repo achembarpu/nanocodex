@@ -14,6 +14,7 @@ import {
 
 const application = readFileSync(new URL("../src/NanocodexApp.tsx", import.meta.url), "utf8");
 const entry = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8");
+const monsterWorld = readFileSync(new URL("../src/MonsterWorld.tsx", import.meta.url), "utf8");
 const routeLoaders = readFileSync(new URL("../src/routeLoaders.ts", import.meta.url), "utf8");
 const viteConfig = readFileSync(new URL("../vite.config.ts", import.meta.url), "utf8");
 const css = readFileSync(new URL("../src/index.css", import.meta.url), "utf8");
@@ -354,7 +355,7 @@ test("exact commit preparation stays authoritative and plain history targets HEA
   );
 });
 
-test("a direct visit waits for its complete route preload before mounting the shell", () => {
+test("a direct visit adopts its prepared route before mounting the shell", () => {
   assert.match(
     entry,
     /function BrowserApplication[\s\S]*?useEffect\(\(\) => \{[\s\S]*?preloadDirectSurface\(url\)\.then\([\s\S]*?setPreparedRoute\(prepared\)/,
@@ -381,7 +382,10 @@ test("direct preloading selects only the work owned by the resolved route", () =
     /surface === "home" \|\| surface === "agent"\) \{\s*return \{\};/,
   );
   assert.match(preload, /surface === "multiplayer"\) \{\s*return \{\};/);
-  assert.match(preload, /surface === "world"[\s\S]*?await loadWorldAssets\(\)/);
+  assert.match(preload, /surface === "world"\) \{\s*return \{\};/);
+  assert.doesNotMatch(routeLoaders, /loadWorldAssets/);
+  assert.match(monsterWorld, /void loadWorldAssets\(\)\.then\(/);
+  assert.match(monsterWorld, /drawMonsterWorld\(context, activeWorld, assetsRef\.current/);
   assert.match(preload, /surface === "changelog"[\s\S]*?preloadChangelog\(\)/);
   assert.match(preload, /surface === "docs"[\s\S]*?preloadDocsRoute\(url\.pathname\)/);
   assert.match(

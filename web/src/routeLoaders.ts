@@ -1,7 +1,6 @@
 import { preloadChangelog } from "./Changelog";
 import { preloadDocsRoute } from "./Docs";
 import { preloadEvalOverview } from "./Evals";
-import { loadWorldAssets } from "./monsterWorldRenderer";
 import { surfaceFromUrl, type Surface } from "./navigation";
 import {
   loadPublishedCommitHistory,
@@ -203,7 +202,6 @@ export async function preloadDirectSurface(url: URL): Promise<PreparedDirectRout
     return {};
   }
   if (surface === "world") {
-    await loadWorldAssets();
     return {};
   }
   if (surface === "code") {

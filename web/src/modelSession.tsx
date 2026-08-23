@@ -3,7 +3,6 @@ import { useAccountSession } from "./AccountSession";
 import { GenerationRequestOwner } from "./agentTerminalLifecycle";
 import type { AgentStatus } from "./agentTerminalTypes";
 import { deploymentHealth } from "./deploymentHealth";
-import { localDevelopmentCredential } from "./localDevelopmentCredential";
 
 export type CredentialSource = "brokered" | null;
 export type ModelSessionStatus =
@@ -119,13 +118,14 @@ function useModelSession({
   const [status, setStatus] = useState<ModelSessionStatus>();
   const [busy, setBusy] = useState(false);
   const generation = useRef(0);
+  const observedAccountId = useRef<string | undefined>(undefined);
   const requests = useRef(new GenerationRequestOwner<void>());
   const publish = useCallback((next: ModelSessionStatus, source: CredentialSource) => {
     setStatus(next);
     onStatusChange(next);
     onSourceChange(source);
   }, [onSourceChange, onStatusChange]);
-  const refreshStatus = useCallback(() => {
+  const readStatus = useCallback((fresh: boolean) => {
     const current = ++generation.current;
     return requests.current.run(current, async () => {
       if (!account) {
@@ -133,9 +133,9 @@ function useModelSession({
         return;
       }
       try {
-        const claimed = await localDevelopmentCredential.ensure(account.id);
-        if (claimed) deploymentHealth.invalidate();
-        const health = await deploymentHealth.refresh();
+        const health = await (fresh
+          ? deploymentHealth.refresh()
+          : deploymentHealth.read());
         if (generation.current !== current) return;
         publish({ state: "ready", ready: health.agentConfigured },
           health.agentConfigured ? "brokered" : null);
@@ -149,14 +149,25 @@ function useModelSession({
     });
   }, [account, publish]);
 
-  useEffect(() => { void refreshStatus(); }, [refreshStatus]);
+  useEffect(() => {
+    if (!account) {
+      generation.current++;
+      publish({ state: "signed_out" }, null);
+      return;
+    }
+    const previousAccountId = observedAccountId.current;
+    observedAccountId.current = account.id;
+    void readStatus(
+      previousAccountId !== undefined && previousAccountId !== account.id,
+    );
+  }, [account, publish, readStatus]);
   useEffect(() => {
     let inactive = false;
     const becameInactive = () => { inactive = true; };
     const refreshAfterInactivity = () => {
       if (!inactive || document.visibilityState !== "visible") return;
       inactive = false;
-      void refreshStatus();
+      void readStatus(true);
     };
     const visibilityChanged = () => {
       if (document.visibilityState === "hidden") becameInactive();
@@ -165,9 +176,9 @@ function useModelSession({
     const pageShown = (event: PageTransitionEvent) => {
       if (!event.persisted) return;
       inactive = false;
-      void refreshStatus();
+      void readStatus(true);
     };
-    const credentialChanged = () => { void refreshStatus(); };
+    const credentialChanged = () => { void readStatus(true); };
     window.addEventListener("blur", becameInactive);
     window.addEventListener("focus", refreshAfterInactivity);
     window.addEventListener("pageshow", pageShown);
@@ -180,11 +191,11 @@ function useModelSession({
       window.removeEventListener("nanocodex:model-credential-changed", credentialChanged);
       document.removeEventListener("visibilitychange", visibilityChanged);
     };
-  }, [refreshStatus]);
+  }, [readStatus]);
 
   const retrySession = async () => {
     setBusy(true);
-    try { await refreshStatus(); } finally { setBusy(false); }
+    try { await readStatus(true); } finally { setBusy(false); }
   };
   return { busy, retrySession, status };
 }

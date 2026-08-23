@@ -80,7 +80,7 @@ export function loadWorldAssets(): Promise<WorldAssets> {
   return assetRequest;
 }
 
-function worldAssetSource(path: string): string {
+export function worldAssetSource(path: string): string {
   return `${ASSET_ROOT}/${path}?v=${WORLD_ASSET_VERSION}`;
 }
 
