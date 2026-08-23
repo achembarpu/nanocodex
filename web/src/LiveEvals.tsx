@@ -10,8 +10,9 @@ import {
   X,
 } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
-import { lazy, startTransition, useEffect, useMemo, useRef, useState } from "react";
+import { startTransition, useEffect, useMemo, useRef, useState } from "react";
 import { useNavigate } from "react-router";
+import { EvalAnalytics } from "./EvalAnalytics";
 import {
   evalApi,
   type EvalAnalyticsPoint,
@@ -34,22 +35,6 @@ import "./evals.css";
 
 type MatrixFilter = "all" | "active" | "issues" | "complete";
 type AnalyticsView = "frontier" | "runs";
-
-let evalAnalyticsRequest: Promise<{
-  default: typeof import("./EvalAnalytics").EvalAnalytics;
-}> | undefined;
-
-function loadEvalAnalytics() {
-  return evalAnalyticsRequest ??= import("./EvalAnalytics").then((module) => ({
-    default: module.EvalAnalytics,
-  }));
-}
-
-export function preloadEvalAnalytics() {
-  return loadEvalAnalytics();
-}
-
-const EvalAnalytics = lazy(loadEvalAnalytics);
 
 const initialTaskRows = 50;
 

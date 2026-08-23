@@ -174,6 +174,7 @@ export function portalDestinationAt(value: WorldPosition): WorldPosition | undef
 export function findWorldRoute(
   start: WorldPosition,
   goal: WorldPosition,
+  temporarilyBlocked?: (position: WorldPosition) => boolean,
 ): readonly WorldPosition[] {
   if (isWorldPositionBlocked(start) || isWorldPositionBlocked(goal)) return Object.freeze([]);
   if (samePosition(start, goal)) return Object.freeze([]);
@@ -189,7 +190,11 @@ export function findWorldRoute(
     if (!current) continue;
     for (const next of routeNeighbors(current)) {
       const key = positionKey(next);
-      if (previous.has(key) || isWorldPositionBlocked(next)) continue;
+      if (
+        previous.has(key)
+        || isWorldPositionBlocked(next)
+        || (!samePosition(next, goal) && temporarilyBlocked?.(next) === true)
+      ) continue;
       previous.set(key, positionKey(current));
       points.set(key, next);
       if (samePosition(next, goal)) {

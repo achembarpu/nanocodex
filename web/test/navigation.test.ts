@@ -1,7 +1,10 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
-import { createServer } from "vite";
+import {
+  commitPreparationMatchesIntent,
+  settleRepositoryNavigationIntent,
+} from "../src/commitRouteState.ts";
 import {
   pathForCommit,
   pathForSurface,
@@ -12,32 +15,8 @@ import {
 const application = readFileSync(new URL("../src/NanocodexApp.tsx", import.meta.url), "utf8");
 const entry = readFileSync(new URL("../src/main.tsx", import.meta.url), "utf8");
 const routeLoaders = readFileSync(new URL("../src/routeLoaders.ts", import.meta.url), "utf8");
+const viteConfig = readFileSync(new URL("../vite.config.ts", import.meta.url), "utf8");
 const css = readFileSync(new URL("../src/index.css", import.meta.url), "utf8");
-
-type RepositoryIntentSettler = <T>(options: {
-  navigationId: number;
-  latestNavigationId(): number;
-  preparation: Promise<T>;
-  onPrepared(prepared: T): void;
-  onFailure(): void;
-  navigate(): void;
-}) => Promise<"ready" | "failed" | "stale">;
-
-async function loadRepositoryIntentSettler(): Promise<RepositoryIntentSettler> {
-  const server = await createServer({
-    appType: "custom",
-    configFile: false,
-    logLevel: "silent",
-    root: new URL("..", import.meta.url).pathname,
-    server: { middlewareMode: true },
-  });
-  try {
-    const module = await server.ssrLoadModule("/src/NanocodexApp.tsx");
-    return module.settleRepositoryNavigationIntent as RepositoryIntentSettler;
-  } finally {
-    await server.close();
-  }
-}
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -107,6 +86,8 @@ test("the shared shell presents Source without changing the stable Code route", 
     shortcut: "S",
   });
   assert.match(application, /aria-keyshortcuts=\{item\.shortcut\}/);
+  assert.match(application, /data-mobile-label=\{item\.shortcut\}/);
+  assert.doesNotMatch(application, /data-mobile-label=\{item\.label\.slice/);
   assert.match(application, /<ProductNavigationLabel/);
   assert.match(application, /key === "s"[\s\S]*?\? "code"/);
   assert.doesNotMatch(application, /key === "t"[\s\S]*?\? "code"/);
@@ -141,8 +122,58 @@ test("the active navigation item is bold without a selection underline", () => {
 
 test("every primary route begins preloading on touch or pointer intent", () => {
   assert.match(application, /productNavigation\.map/);
+  assert.match(application, /onFocus=\{\(\) => preloadSurface\(item\.surface\)\}/);
+  assert.match(application, /onPointerEnter=\{\(\) => preloadSurface\(item\.surface\)\}/);
   assert.match(application, /onPointerDown=\{\(\) => preloadSurface\(item\.surface\)\}/);
+  assert.match(application, /onFocus=\{\(\) => preloadSurface\("home"\)\}/);
+  assert.match(application, /onPointerEnter=\{\(\) => preloadSurface\("home"\)\}/);
   assert.match(application, /onPointerDown=\{\(\) => preloadSurface\("home"\)\}/);
+});
+
+test("Vite owns one static application graph", () => {
+  assert.doesNotMatch(viteConfig, /routePreloads|codeSplitting|manualChunks/);
+  assert.doesNotMatch(`${entry}\n${application}\n${routeLoaders}`, /import\(/);
+  for (const component of [
+    "AgentExperience",
+    "Changelog",
+    "CodeBrowser",
+    "CommitCodeStream",
+    "Docs",
+    "Evals",
+    "MonsterWorld",
+    "Multiplayer",
+    "PierreWorkerProvider",
+    "VirtualCommitList",
+  ]) assert.match(application, new RegExp(`import \\{[^}]*\\b${component}\\b`));
+});
+
+test("the mounted shell prefetches route data without module-loader orchestration", () => {
+  assert.doesNotMatch(
+    application,
+    /preloadProductSurfaces|PRODUCT_WARMUP_IDLE_TIMEOUT_MS|requestIdleCallback|scheduleIdleWarmup/,
+  );
+  assert.doesNotMatch(
+    routeLoaders,
+    /ProductSurfaceWarmup|productSurfaceWarmup|preloadProductSurfaces|Promise\.allSettled/,
+  );
+
+  const navigation = application.slice(
+    application.indexOf("const navigateToSurface"),
+    application.indexOf("const handleSurfaceClick"),
+  );
+  assert.match(
+    navigation,
+    /if \(nextSurface === "docs"\)[\s\S]*?preloadDocsRoute\(destination\)\.then\([\s\S]*?navigate\(destination\)/,
+  );
+  assert.match(
+    navigation,
+    /const ready = nextSurface === "code"[\s\S]*?commitPreparationMatchesIntent\([\s\S]*?commitHistoryTargetRef\.current,[\s\S]*?undefined[\s\S]*?if \(ready\)[\s\S]*?navigate\(destination\)/,
+  );
+  assert.match(css, /\.surface-switch a\s*\{[^}]*touch-action:\s*manipulation/);
+  assert.match(
+    css,
+    /@media \(max-width: 420px\)[\s\S]*?--mobile-header-height: calc\(96px \+ env\(safe-area-inset-top\)\)[\s\S]*?\.header-center \{[\s\S]*?grid-row: 2;[\s\S]*?grid-column: 1 \/ -1;[\s\S]*?\.surface-switch \{[\s\S]*?min-width: 352px/,
+  );
 });
 
 test("Source and Commits navigation prepares exact route state before navigating", () => {
@@ -152,15 +183,19 @@ test("Source and Commits navigation prepares exact route state before navigating
   );
   assert.match(
     preparation,
-    /const snapshotRequest = loadRepositorySnapshot\(\)[\s\S]*?const pierreRequest = preparePierreWorker\(\)[\s\S]*?Promise\.all\(\[repositoryRequest, snapshotRequest\]\)[\s\S]*?preloadPreferredPublishedFile[\s\S]*?Promise\.all\(\[pierreRequest, sourceFileRequest\]\)[\s\S]*?preloadPierreFile[\s\S]*?loadCodeBrowser\(\)/,
+    /const snapshotRequest = loadRepositorySnapshot\(\)[\s\S]*?preloadPierreWorker\(\)[\s\S]*?snapshotRequest\.then[\s\S]*?preloadPreferredPublishedFile[\s\S]*?preloadPierreFile[\s\S]*?Promise\.all\(\[[\s\S]*?snapshotRequest,[\s\S]*?preparedSourceFileRequest/,
   );
   assert.match(
     routeLoaders,
-    /const preparePierreWorker[\s\S]*?preloadPierreWorker\(\)/,
+    /import \{[\s\S]*?preloadPierreWorker,[\s\S]*?\} from "\.\/pierreWorkerResource"/,
   );
   assert.match(
     preparation,
-    /loadPublishedCommitHistory\(requestedCommit\)[\s\S]*?const patchRequest = Promise\.all\(\[repositoryRequest, historyRequest\]\)[\s\S]*?preloadPublishedRepositoryPatchBody[\s\S]*?const syntaxRequest = Promise\.all\(\[pierreRequest, historyRequest\]\)[\s\S]*?preloadPierrePaths[\s\S]*?loadCommitCodeStream\(\)[\s\S]*?loadVirtualCommitList\(\)/,
+    /loadPublishedCommitHistory\(requestedCommit\)[\s\S]*?preloadPierreWorker\(\)[\s\S]*?const patchRequest = historyRequest[\s\S]*?preloadPublishedRepositoryPatchBody[\s\S]*?const syntaxRequest = historyRequest[\s\S]*?preloadPierrePaths[\s\S]*?Promise\.all\(\[[\s\S]*?historyRequest,[\s\S]*?patchRequest,[\s\S]*?syntaxRequest/,
+  );
+  assert.doesNotMatch(
+    preparation,
+    /import\(|loadCodeBrowser|loadCommitCodeStream|loadVirtualCommitList|preparePierreWorker/,
   );
   assert.match(
     preparation,
@@ -213,7 +248,7 @@ test("Source and Commits navigation prepares exact route state before navigating
   );
   assert.match(
     application,
-    /if \(!needsRepository \|\| repositoryLoadError === surface\) return;/,
+    /if \(!needsRepository\) return;[\s\S]*?commitPreparationMatchesIntent\([\s\S]*?commitHistoryTargetRef\.current,[\s\S]*?requestedCommit[\s\S]*?failureIsCurrent/,
   );
   assert.match(
     application,
@@ -230,7 +265,7 @@ test("Source and Commits navigation prepares exact route state before navigating
 });
 
 test("deferred repository navigation is owned by the latest intent", async () => {
-  const settle = await loadRepositoryIntentSettler();
+  const settle = settleRepositoryNavigationIntent;
   const source = deferred<string>();
   const commits = deferred<string>();
   const transitions: string[] = [];
@@ -284,22 +319,56 @@ test("deferred repository navigation is owned by the latest intent", async () =>
   ]);
 });
 
+test("exact commit preparation stays authoritative and plain history targets HEAD", () => {
+  const exact = "a".repeat(40);
+  assert.equal(commitPreparationMatchesIntent(exact, exact), true);
+  assert.equal(commitPreparationMatchesIntent(undefined, undefined), true);
+  assert.equal(commitPreparationMatchesIntent(undefined, exact), false);
+  assert.equal(commitPreparationMatchesIntent(exact, undefined), false);
+  assert.doesNotMatch(application, /export function commitPreparationMatchesIntent/);
+  assert.doesNotMatch(application, /export async function settleRepositoryNavigationIntent/);
+
+  assert.match(
+    routeLoaders,
+    /surface: "commits";[\s\S]*?requestedCommit\?: string/,
+  );
+  assert.match(
+    routeLoaders,
+    /return \{\s*surface: "commits",\s*history,\s*requestedCommit,\s*\}/,
+  );
+  assert.match(
+    application,
+    /commitHistoryTargetRef = useRef[\s\S]*?commitIntentTargetRef = useRef/,
+  );
+  assert.match(
+    application,
+    /useLayoutEffect\(\(\) => \{\s*surfaceNavigationId\.current\+\+;\s*commitIntentTargetRef\.current = surface === "commits" \? requestedCommit : undefined;/,
+  );
+  assert.match(
+    application,
+    /commitHistory[\s\S]*?commitPreparationMatchesIntent\(\s*commitHistoryTargetRef\.current,\s*requestedCommit/,
+  );
+  assert.match(
+    application,
+    /commitIntentTargetRef\.current = commit\.hash;\s*commitHistoryTargetRef\.current = commit\.hash;\s*setSelectedHash\(commit\.hash\)/,
+  );
+});
+
 test("a direct visit waits for its complete route preload before mounting the shell", () => {
   assert.match(
     entry,
-    /const application = import\("\.\/NanocodexApp"\);[\s\S]*?Promise\.all\(\[\s*application,\s*preloadDirectSurface\(directUrl\),\s*\]\)\.then\([\s\S]*?module\.mountNanocodexApp\(preparedRoute\)/,
+    /function BrowserApplication[\s\S]*?useEffect\(\(\) => \{[\s\S]*?preloadDirectSurface\(url\)\.then\([\s\S]*?setPreparedRoute\(prepared\)/,
   );
 
   const preload = routeLoaders.slice(routeLoaders.indexOf("export async function preloadDirectSurface"));
   assert.doesNotMatch(preload, /loadPublished(?:RepositorySnapshot|CommitHistory)\([^)]*\)\.catch/);
   assert.match(preload, /sourceFile: prepared\.sourceFile/);
   assert.match(preload, /const surface = surfaceFromUrl\(url\)/);
-  assert.doesNotMatch(entry, /lazy\(/);
+  assert.doesNotMatch(entry, /import\(|lazy\(/);
   assert.match(
-    application,
+    entry,
     /<Suspense fallback=\{null\}>\s*<NanocodexApp preparedRoute=\{preparedRoute\} \/>/,
   );
-  assert.match(application, /preparedRoute\.DocsComponent \?\? null/);
   assert.match(application, /preparedRoute\.repositorySnapshot/);
   assert.match(application, /preparedRoute\.sourceFile/);
   assert.match(application, /preparedRoute\.commitHistory/);
@@ -309,10 +378,10 @@ test("direct preloading selects only the work owned by the resolved route", () =
   const preload = routeLoaders.slice(routeLoaders.indexOf("export async function preloadDirectSurface"));
   assert.match(
     preload,
-    /surface === "home" \|\| surface === "agent"[\s\S]*?const experience = loadAgentExperience\(\)[\s\S]*?deploymentHealth\.read\(\)[\s\S]*?Promise\.all\(\[loadHomeFrame\(\), experience\]\)/,
+    /surface === "home" \|\| surface === "agent"\) \{\s*return \{\};/,
   );
-  assert.match(preload, /surface === "multiplayer"[\s\S]*?loadMultiplayer\(\)/);
-  assert.match(preload, /surface === "world"[\s\S]*?loadMonsterWorld\(\)/);
+  assert.match(preload, /surface === "multiplayer"\) \{\s*return \{\};/);
+  assert.match(preload, /surface === "world"[\s\S]*?await loadWorldAssets\(\)/);
   assert.match(preload, /surface === "changelog"[\s\S]*?preloadChangelog\(\)/);
   assert.match(preload, /surface === "docs"[\s\S]*?preloadDocsRoute\(url\.pathname\)/);
   assert.match(
@@ -329,10 +398,11 @@ test("direct preloading selects only the work owned by the resolved route", () =
   );
 });
 
-test("Fast Refresh reuses the existing React root", () => {
-  assert.match(application, /container\.__nanocodexRoot \?\?= createRoot\(container\)/);
+test("the application has one standard React root", () => {
+  assert.equal([...entry.matchAll(/createRoot\(/g)].length, 1);
+  assert.doesNotMatch(application, /mountNanocodexApp|createRoot|BrowserRouter|Suspense/);
 });
 
 test("the router leaves transition policy to each prepared surface", () => {
-  assert.match(application, /<BrowserRouter useTransitions=\{false\}>/);
+  assert.match(entry, /<BrowserRouter useTransitions=\{false\}>/);
 });

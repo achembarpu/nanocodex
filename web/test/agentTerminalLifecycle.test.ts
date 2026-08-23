@@ -3,7 +3,6 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const terminal = source("../src/AgentTerminal.tsx");
-const runtime = source("../src/agentRuntime.ts");
 const demoTerminal = source("../src/demoTerminal.ts");
 const experience = source("../src/AgentExperience.tsx");
 const session = source("../src/chatGptSession.tsx");
@@ -42,7 +41,7 @@ test("credential presence is distinct from agent readiness and failures are manu
 
 test("signed-out browsers wait for explicit ChatGPT authentication", () => {
   assert.match(experience, /source === "subscription" \|\| source === "user"/);
-  assert.match(experience, /if \(!hasCredential \|\| capabilityError\)/);
+  assert.match(experience, /hasCredential && !capabilityError \? \(/);
   assert.match(session, /Sign in with ChatGPT to start the browser agent/);
   assert.doesNotMatch(`${experience}\n${terminal}\n${session}`, /guest|sponsor|"deployment"|backend-anon|anonymous (?:OpenAI|ChatGPT|Codex)/i);
 });
@@ -58,14 +57,12 @@ test("starting and failure states repaint the terminal while the native mobile c
   assert.match(terminalCss, /\.agent-touch-composer textarea \{[\s\S]*?font:\s*400 16px\/22px/);
 });
 
-test("the React package owns browser Agent startup through its raw hook contract", () => {
-  assert.match(runtime, /import \{ createConfig, type Config \} from "nanocodex-react"/);
-  assert.match(terminal, /import \{[\s\S]*?NanocodexProvider,[\s\S]*?useAgent,[\s\S]*?\} from "nanocodex-react"/);
-  assert.match(terminal, /<NanocodexProvider config=\{agentConfig\}>/);
-  assert.match(terminal, /data: agent,[\s\S]*?\} = useAgent\(\{ enabled: true, threadId: thread\?\.id \}\)/);
+test("the React package owns browser Agent startup through useNanocodex", () => {
+  assert.match(terminal, /import \{[\s\S]*?createConfig,[\s\S]*?useNanocodex,[\s\S]*?\} from "nanocodex-react"/);
+  assert.match(terminal, /data: agent,[\s\S]*?\} = useNanocodex\(\{ config: agentConfig, threadId: thread\?\.id \}\)/);
   assert.match(terminal, /createAgentTerminal\(\{[\s\S]*?agent,[\s\S]*?terminal: terminalHost/);
   assert.doesNotMatch(terminal, /useAgentEvents|includeAllSessions/);
-  assert.doesNotMatch(terminal, /agent\.agent|createDemoAgent|prewarmDemoAgent/);
+  assert.doesNotMatch(terminal, /NanocodexProvider|agent\.agent|createDemoAgent|prewarmDemoAgent|prepareAgent/);
 });
 
 test("TTFT spans user submission through exact root first output", () => {

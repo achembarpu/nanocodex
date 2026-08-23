@@ -82,6 +82,30 @@ test("deterministic routes reach every landmark and cross both room boundaries",
   assert.ok(shopToGuild.some(({ scene }) => scene === "guild_hall"));
 });
 
+test("temporary actor claims reroute a path without making its destination unreachable", () => {
+  const start = pos("town", 38, 20);
+  const goal = pos("town", 44, 20);
+  const direct = findWorldRoute(start, goal);
+  const claimed = direct[1];
+  assert.ok(claimed);
+
+  const rerouted = findWorldRoute(start, goal, (step) =>
+    step.scene === claimed.scene && step.x === claimed.x && step.y === claimed.y
+  );
+  assert.deepEqual(rerouted.at(-1), goal);
+  assert.equal(rerouted.some((step) =>
+    step.scene === claimed.scene && step.x === claimed.x && step.y === claimed.y
+  ), false);
+  assert.ok(rerouted.length > direct.length);
+
+  assert.deepEqual(
+    findWorldRoute(start, goal, (step) =>
+      step.scene === goal.scene && step.x === goal.x && step.y === goal.y
+    ),
+    direct,
+  );
+});
+
 test("camera clamps at town corners and pointer conversion shares its origin", () => {
   assert.deepEqual(cameraForPosition(pos("town", 1, 2)), { scene: "town", x: 0, y: 0 });
   assert.deepEqual(cameraForPosition(pos("town", 62, 46)), { scene: "town", x: 32, y: 24 });

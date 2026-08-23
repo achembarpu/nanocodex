@@ -35,6 +35,7 @@ export type MultiplayerServerMessage =
       latest_cursor: string;
       auth_mode: MultiplayerAuthMode;
       can_target_agent: boolean;
+      can_end_room: boolean;
     }
   | {
       type: "room_event";
@@ -46,7 +47,7 @@ export type MultiplayerServerMessage =
   | { type: "replay_paused"; cursor: string; latest_cursor: string }
   | { type: "presence"; online_member_ids: string[] }
   | { type: "pong"; nonce?: string }
-  | { type: "error"; code: string; message: string };
+  | { type: "error"; code: string; message: string; id?: string };
 
 export type MultiplayerTimelineItem = Readonly<{
   cursor: string;
@@ -63,6 +64,7 @@ export type MultiplayerRoomState = Readonly<{
   latestCursor: string;
   authMode: MultiplayerAuthMode;
   canTargetAgent: boolean;
+  canEndRoom: boolean;
   timeline: MultiplayerTimelineItem[];
   inviteUrl?: string;
 }>;
@@ -72,12 +74,108 @@ export type MultiplayerInvitation = Readonly<{
   invite?: string;
 }>;
 
+export type MultiplayerCreateAttempt = Readonly<{
+  createId: string;
+  displayName: string;
+}>;
+
+export type MultiplayerJoinAttempt = Readonly<{
+  roomId: string;
+  invite: string;
+  displayName: string;
+  joinId: string;
+}>;
+
+export type MultiplayerPendingSend = Readonly<{
+  roomId: string;
+  memberId: string;
+  id: string;
+  encoded: string;
+  text: string;
+  target: MultiplayerTarget;
+}>;
+
+export type MultiplayerSessionStorage = Pick<Storage, "getItem" | "setItem" | "removeItem">;
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const ROOM_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}~[A-Za-z0-9_-]{43}$/;
 const TOKEN = /^[A-Za-z0-9_-]{43}$/;
 const MESSAGE_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const CURSOR = /^(?:0|[1-9][0-9]*)$/;
 const MAX_TIMELINE_ITEMS = 1_000;
+const MAX_CREATE_STORAGE_BYTES = 256;
+const MAX_JOIN_STORAGE_BYTES = 512;
+const MAX_SEND_STORAGE_BYTES = (MULTIPLAYER_MAX_MESSAGE_BYTES * 6) + 2_048;
+const CREATE_STORAGE_KEY = "nanocodex-multiplayer-create-v1";
+const JOIN_STORAGE_PREFIX = "nanocodex-multiplayer-join-v1";
+const SEND_STORAGE_PREFIX = "nanocodex-multiplayer-send-v1";
+const storageEncoder = new TextEncoder();
+
+export function createMultiplayerCreateAttempt(
+  displayName: string,
+): MultiplayerCreateAttempt {
+  return {
+    createId: randomCapability(),
+    displayName: normalizedDisplayName(displayName),
+  };
+}
+
+export function readMultiplayerCreateAttempt(
+  storage: MultiplayerSessionStorage,
+): MultiplayerCreateAttempt | undefined {
+  const value = readStoredRecord(storage, CREATE_STORAGE_KEY, MAX_CREATE_STORAGE_BYTES);
+  if (!value) return undefined;
+  try {
+    exactKeys(value, ["version", "create_id", "display_name"]);
+    if (value.version !== 1) {
+      throw new MultiplayerProtocolError("saved room creation changed version");
+    }
+    assertCreateId(value.create_id);
+    return {
+      createId: value.create_id,
+      displayName: normalizedDisplayName(value.display_name),
+    };
+  } catch {
+    removeStoredValue(storage, CREATE_STORAGE_KEY);
+    return undefined;
+  }
+}
+
+export function writeMultiplayerCreateAttempt(
+  storage: MultiplayerSessionStorage,
+  attempt: MultiplayerCreateAttempt,
+): boolean {
+  try {
+    assertCreateId(attempt.createId);
+    const displayName = normalizedDisplayName(attempt.displayName);
+    const current = readMultiplayerCreateAttempt(storage);
+    if (current && (
+      current.createId !== attempt.createId
+      || current.displayName !== displayName
+    )) return false;
+    const encoded = JSON.stringify({
+      version: 1,
+      create_id: attempt.createId,
+      display_name: displayName,
+    });
+    if (storageEncoder.encode(encoded).byteLength > MAX_CREATE_STORAGE_BYTES) return false;
+    storage.setItem(CREATE_STORAGE_KEY, encoded);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function clearMultiplayerCreateAttempt(
+  storage: MultiplayerSessionStorage,
+  attempt: MultiplayerCreateAttempt,
+): void {
+  const current = readMultiplayerCreateAttempt(storage);
+  if (current?.createId === attempt.createId
+    && current.displayName === attempt.displayName) {
+    removeStoredValue(storage, CREATE_STORAGE_KEY);
+  }
+}
 
 export function multiplayerInvitation(url: Pick<URL, "searchParams" | "hash">): MultiplayerInvitation {
   const room = url.searchParams.get("room") ?? undefined;
@@ -112,6 +210,191 @@ export function multiplayerSocketUrl(origin: string, roomId: string, cursor: str
   return url.href;
 }
 
+export function createMultiplayerJoinAttempt(
+  roomId: string,
+  invite: string,
+  displayName: string,
+): MultiplayerJoinAttempt {
+  assertRoomId(roomId);
+  if (!TOKEN.test(invite)) throw new MultiplayerProtocolError("invalid room invitation");
+  return {
+    roomId,
+    invite,
+    displayName: normalizedDisplayName(displayName),
+    joinId: randomCapability(),
+  };
+}
+
+export function readMultiplayerJoinAttempt(
+  storage: MultiplayerSessionStorage,
+  roomId: string,
+  invite: string,
+): MultiplayerJoinAttempt | undefined {
+  assertRoomId(roomId);
+  if (!TOKEN.test(invite)) return undefined;
+  const key = joinStorageKey(roomId);
+  const value = readStoredRecord(storage, key, MAX_JOIN_STORAGE_BYTES);
+  if (!value) return undefined;
+  try {
+    exactKeys(value, ["version", "room_id", "invite", "display_name", "join_id"]);
+    if (value.version !== 1 || value.room_id !== roomId || value.invite !== invite) {
+      throw new MultiplayerProtocolError("saved join attempt changed identity");
+    }
+    assertJoinId(value.join_id);
+    return {
+      roomId,
+      invite,
+      displayName: normalizedDisplayName(value.display_name),
+      joinId: value.join_id,
+    };
+  } catch {
+    removeStoredValue(storage, key);
+    return undefined;
+  }
+}
+
+export function writeMultiplayerJoinAttempt(
+  storage: MultiplayerSessionStorage,
+  attempt: MultiplayerJoinAttempt,
+): boolean {
+  assertRoomId(attempt.roomId);
+  if (!TOKEN.test(attempt.invite)) return false;
+  try {
+    assertJoinId(attempt.joinId);
+    const encoded = JSON.stringify({
+      version: 1,
+      room_id: attempt.roomId,
+      invite: attempt.invite,
+      display_name: normalizedDisplayName(attempt.displayName),
+      join_id: attempt.joinId,
+    });
+    if (storageEncoder.encode(encoded).byteLength > MAX_JOIN_STORAGE_BYTES) return false;
+    storage.setItem(joinStorageKey(attempt.roomId), encoded);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function clearMultiplayerJoinAttempt(
+  storage: MultiplayerSessionStorage,
+  attempt: MultiplayerJoinAttempt,
+): void {
+  const current = readMultiplayerJoinAttempt(storage, attempt.roomId, attempt.invite);
+  if (current?.joinId === attempt.joinId && current.displayName === attempt.displayName) {
+    removeStoredValue(storage, joinStorageKey(attempt.roomId));
+  }
+}
+
+export function createMultiplayerPendingSend(
+  roomId: string,
+  memberId: string,
+  text: string,
+  target: MultiplayerTarget,
+): MultiplayerPendingSend {
+  assertRoomId(roomId);
+  assertMemberId(memberId);
+  const normalized = text.trim();
+  if (!normalized || storageEncoder.encode(normalized).byteLength > MULTIPLAYER_MAX_MESSAGE_BYTES) {
+    throw new MultiplayerProtocolError("invalid room message text");
+  }
+  if (target !== "room" && target !== "agent") {
+    throw new MultiplayerProtocolError("invalid room message target");
+  }
+  const id = `message-${randomCapability()}`;
+  return {
+    roomId,
+    memberId,
+    id,
+    encoded: JSON.stringify({ type: "say", id, text: normalized, target }),
+    text: normalized,
+    target,
+  };
+}
+
+export function readMultiplayerPendingSend(
+  storage: MultiplayerSessionStorage,
+  roomId: string,
+): MultiplayerPendingSend | undefined {
+  assertRoomId(roomId);
+  const key = sendStorageKey(roomId);
+  const value = readStoredRecord(storage, key, MAX_SEND_STORAGE_BYTES);
+  if (!value) return undefined;
+  try {
+    exactKeys(value, ["version", "room_id", "member_id", "id", "encoded"]);
+    if (value.version !== 1 || value.room_id !== roomId || typeof value.encoded !== "string") {
+      throw new MultiplayerProtocolError("saved room command changed identity");
+    }
+    assertMemberId(value.member_id);
+    assertMessageId(value.id);
+    const command = decodeSayCommand(value.encoded);
+    if (command.id !== value.id) {
+      throw new MultiplayerProtocolError("saved room command id changed");
+    }
+    return {
+      roomId,
+      memberId: value.member_id,
+      id: value.id,
+      encoded: value.encoded,
+      text: command.text,
+      target: command.target,
+    };
+  } catch {
+    removeStoredValue(storage, key);
+    return undefined;
+  }
+}
+
+export function writeMultiplayerPendingSend(
+  storage: MultiplayerSessionStorage,
+  pending: MultiplayerPendingSend,
+): boolean {
+  try {
+    assertRoomId(pending.roomId);
+    assertMemberId(pending.memberId);
+    assertMessageId(pending.id);
+    const command = decodeSayCommand(pending.encoded);
+    if (command.id !== pending.id
+      || command.text !== pending.text
+      || command.target !== pending.target) return false;
+    const encoded = JSON.stringify({
+      version: 1,
+      room_id: pending.roomId,
+      member_id: pending.memberId,
+      id: pending.id,
+      encoded: pending.encoded,
+    });
+    if (storageEncoder.encode(encoded).byteLength > MAX_SEND_STORAGE_BYTES) return false;
+    storage.setItem(sendStorageKey(pending.roomId), encoded);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export function clearMultiplayerPendingSend(
+  storage: MultiplayerSessionStorage,
+  pending: MultiplayerPendingSend,
+): void {
+  const current = readMultiplayerPendingSend(storage, pending.roomId);
+  if (current?.memberId === pending.memberId
+    && current.id === pending.id
+    && current.encoded === pending.encoded) {
+    removeStoredValue(storage, sendStorageKey(pending.roomId));
+  }
+}
+
+export function multiplayerPendingSendSettled(
+  pending: MultiplayerPendingSend,
+  message: MultiplayerServerMessage,
+): boolean {
+  if (message.type === "accepted") return message.id === pending.id;
+  return message.type === "room_event"
+    && message.event.type === "member_message"
+    && message.event.id === pending.id
+    && message.event.member.id === pending.memberId;
+}
+
 export function decodeMultiplayerMessage(encoded: string): MultiplayerServerMessage {
   let decoded: unknown;
   try {
@@ -133,6 +416,7 @@ export function decodeMultiplayerMessage(encoded: string): MultiplayerServerMess
       "latest_cursor",
       "auth_mode",
       "can_target_agent",
+      "can_end_room",
     ]);
     assertRoomId(value.room_id);
     assertMemberId(value.member_id);
@@ -145,6 +429,9 @@ export function decodeMultiplayerMessage(encoded: string): MultiplayerServerMess
     if (typeof value.can_target_agent !== "boolean") {
       throw new MultiplayerProtocolError("room sent invalid agent authority");
     }
+    if (typeof value.can_end_room !== "boolean") {
+      throw new MultiplayerProtocolError("room sent invalid owner authority");
+    }
     return {
       type: "ready",
       room_id: value.room_id,
@@ -154,6 +441,7 @@ export function decodeMultiplayerMessage(encoded: string): MultiplayerServerMess
       latest_cursor: value.latest_cursor,
       auth_mode: value.auth_mode,
       can_target_agent: value.can_target_agent,
+      can_end_room: value.can_end_room,
     };
   }
   if (value.type === "room_event") {
@@ -205,11 +493,14 @@ export function decodeMultiplayerMessage(encoded: string): MultiplayerServerMess
       : { type: "pong", nonce: value.nonce };
   }
   if (value.type === "error") {
-    exactKeys(value, ["type", "code", "message"]);
+    exactKeys(value, ["type", "code", "message", "id"]);
     if (!boundedString(value.code, 128) || !boundedString(value.message, 1_024)) {
       throw new MultiplayerProtocolError("room sent an invalid error");
     }
-    return { type: "error", code: value.code, message: value.message };
+    if (value.id !== undefined) assertMessageId(value.id);
+    return value.id === undefined
+      ? { type: "error", code: value.code, message: value.message }
+      : { type: "error", code: value.code, message: value.message, id: value.id };
   }
   throw new MultiplayerProtocolError("room sent an unknown message");
 }
@@ -230,6 +521,7 @@ export function reduceMultiplayerMessage(
       latestCursor: message.latest_cursor,
       authMode: message.auth_mode,
       canTargetAgent: message.can_target_agent,
+      canEndRoom: message.can_end_room,
     };
   }
   if (message.type === "presence") {
@@ -283,6 +575,7 @@ export function createMultiplayerRoomState(
     latestCursor: ready.latest_cursor,
     authMode: ready.auth_mode,
     canTargetAgent: ready.can_target_agent,
+    canEndRoom: ready.can_end_room,
     timeline: options.timeline ?? [],
     ...(options.inviteUrl ? { inviteUrl: options.inviteUrl } : {}),
   };
@@ -392,6 +685,18 @@ function assertMessageId(value: unknown): asserts value is string {
   }
 }
 
+function assertJoinId(value: unknown): asserts value is string {
+  if (typeof value !== "string" || !TOKEN.test(value)) {
+    throw new MultiplayerProtocolError("invalid multiplayer join id");
+  }
+}
+
+function assertCreateId(value: unknown): asserts value is string {
+  if (typeof value !== "string" || !TOKEN.test(value)) {
+    throw new MultiplayerProtocolError("invalid multiplayer create id");
+  }
+}
+
 function assertCursor(value: unknown): asserts value is string {
   if (typeof value !== "string" || !CURSOR.test(value)) {
     throw new MultiplayerProtocolError("invalid room cursor");
@@ -400,6 +705,93 @@ function assertCursor(value: unknown): asserts value is string {
 
 function boundedString(value: unknown, maxLength: number): value is string {
   return typeof value === "string" && value.length <= maxLength;
+}
+
+function normalizedDisplayName(value: unknown): string {
+  if (typeof value !== "string") throw new MultiplayerProtocolError("invalid display name");
+  const name = value.trim();
+  if (!name || name !== value || storageEncoder.encode(name).byteLength > 64 || /\p{C}/u.test(name)) {
+    throw new MultiplayerProtocolError("invalid display name");
+  }
+  return name;
+}
+
+function decodeSayCommand(encoded: string): {
+  id: string;
+  text: string;
+  target: MultiplayerTarget;
+} {
+  if (storageEncoder.encode(encoded).byteLength > (MULTIPLAYER_MAX_MESSAGE_BYTES * 6) + 512) {
+    throw new MultiplayerProtocolError("saved room command is too large");
+  }
+  let decoded: unknown;
+  try {
+    decoded = JSON.parse(encoded);
+  } catch {
+    throw new MultiplayerProtocolError("saved room command is invalid");
+  }
+  const command = record(decoded);
+  if (!command) throw new MultiplayerProtocolError("saved room command is invalid");
+  exactKeys(command, ["type", "id", "text", "target"]);
+  if (command.type !== "say") throw new MultiplayerProtocolError("saved room command is invalid");
+  assertMessageId(command.id);
+  if (typeof command.text !== "string"
+    || !command.text
+    || command.text !== command.text.trim()
+    || storageEncoder.encode(command.text).byteLength > MULTIPLAYER_MAX_MESSAGE_BYTES
+    || (command.target !== "room" && command.target !== "agent")) {
+    throw new MultiplayerProtocolError("saved room command is invalid");
+  }
+  return { id: command.id, text: command.text, target: command.target };
+}
+
+function randomCapability(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+}
+
+function joinStorageKey(roomId: string): string {
+  return `${JOIN_STORAGE_PREFIX}:${roomId}`;
+}
+
+function sendStorageKey(roomId: string): string {
+  return `${SEND_STORAGE_PREFIX}:${roomId}`;
+}
+
+function readStoredRecord(
+  storage: MultiplayerSessionStorage,
+  key: string,
+  maxBytes: number,
+): Record<string, unknown> | undefined {
+  let encoded: string | null;
+  try {
+    encoded = storage.getItem(key);
+  } catch {
+    return undefined;
+  }
+  if (encoded === null) return undefined;
+  if (storageEncoder.encode(encoded).byteLength > maxBytes) {
+    removeStoredValue(storage, key);
+    return undefined;
+  }
+  try {
+    const value = record(JSON.parse(encoded));
+    if (!value) throw new Error("stored value is not an object");
+    return value;
+  } catch {
+    removeStoredValue(storage, key);
+    return undefined;
+  }
+}
+
+function removeStoredValue(storage: MultiplayerSessionStorage, key: string): void {
+  try {
+    storage.removeItem(key);
+  } catch {
+    // Session storage is a retry optimization; callers retain their in-memory value.
+  }
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {

@@ -1,5 +1,4 @@
 import { docsPreview } from "./docsPreview.ts";
-import { selectRoutePreloads } from "../src/routePreloads.ts";
 
 const SITE_NAME = "Nanocodex";
 const IMAGE_WIDTH = 1200;
@@ -114,7 +113,7 @@ export async function renderLinkPreviewDocument(
   const imagePath = new URL("/og.png", origin);
   imagePath.searchParams.set("path", preview.canonicalPath);
   return injectMetadata(
-    selectRoutePreloads(document, url.pathname),
+    document,
     metadataHtml(preview, canonicalUrl, imagePath.href, env.DEPLOYMENT_SHA),
   );
 }

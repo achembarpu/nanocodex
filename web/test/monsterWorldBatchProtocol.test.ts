@@ -4,6 +4,8 @@ import {
   AUTONOMOUS_AGENT_IDS,
   EMPTY_WORLD_RESIDENT_MEMORY,
   WORLD_PROTOCOL,
+  coordinationBasisFor,
+  decodeResidentDecision,
   decodeStagedBatch,
   isWorldAgentCommand,
   isWorldAgentMessage,
@@ -19,8 +21,12 @@ const observation = (agentId: "cinder" | "june"): WorldObservation => ({
   self: {
     id: agentId,
     name: agentId === "cinder" ? "Cinder" : "June",
+    role: agentId === "cinder" ? "Rescue scout" : "Courier",
     kind: agentId === "cinder" ? "monster" : "human",
     scene: "town",
+    x: agentId === "cinder" ? 16 : 18,
+    y: 11,
+    direction: "down",
     location: "Guild Plaza",
     energy: 80,
     curiosity: 75,
@@ -113,7 +119,7 @@ test("staged batches require exactly one versioned plan and bounded memory per r
     type: "batch_result",
     batchId: "batch-1",
     decisions,
-    usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+    usage: { modelTurns: 2, inputTokens: 10, outputTokens: 5, totalTokens: 15 },
   }), true);
 
   assert.throws(() => decodeStagedBatch({
@@ -159,6 +165,71 @@ test("batch settlements carry a typed breaker reason", () => {
   }), false);
 });
 
+test("one resident decision is bound to its session identity and advances only its memory", () => {
+  const previous = Object.freeze({
+    summary: "Cinder keeps watch at Bell Bridge.",
+    goals: Object.freeze(["Protect the bridge"]),
+    relationships: Object.freeze(["June carries guild dispatches"]),
+    recentDecisions: Object.freeze(["Waited by the bridge"]),
+    lastBoardMessageId: 12,
+  });
+  const decision = decodeResidentDecision({
+    summary: "takes the eastern circle slot",
+    steps: [{ kind: "move_relative", anchor: "player", dx_pixels: 64, dy_pixels: 0 }],
+    memory_note: "Scout asked the group to hold a circle.",
+  }, {
+    requestId: "cinder-circle",
+    agentId: "cinder",
+    stateVersion: 7,
+    memory: previous,
+  });
+
+  assert.equal(decision.plan.requestId, "cinder-circle");
+  assert.equal(decision.plan.agentId, "cinder");
+  assert.deepEqual(decision.memory.goals, previous.goals);
+  assert.deepEqual(decision.memory.relationships, previous.relationships);
+  assert.deepEqual(decision.memory.recentDecisions, [
+    "Scout asked the group to hold a circle.",
+    "Waited by the bridge",
+  ]);
+  const spoofed = decodeResidentDecision({
+    summary: "impersonates June",
+    steps: [{ kind: "move", target: "plaza" }],
+    agent_id: "june",
+  }, {
+    requestId: "cinder-circle",
+    agentId: "cinder",
+    stateVersion: 7,
+  });
+  assert.equal(spoofed.plan.agentId, "cinder");
+  assert.equal(spoofed.plan.requestId, "cinder-circle");
+});
+
+test("stable co-listener ordering yields unique circle and mirrored two-side slots", () => {
+  const listeners = ["cinder", "moss", "rill", "luma", "iris", "rook"] as const;
+  const bases = listeners.map((id) => coordinationBasisFor(listeners, id));
+
+  assert.deepEqual(bases.map((basis) => basis?.radial), [
+    { dxPixels: 64, dyPixels: 0 },
+    { dxPixels: 32, dyPixels: 56 },
+    { dxPixels: -32, dyPixels: 56 },
+    { dxPixels: -64, dyPixels: 0 },
+    { dxPixels: -32, dyPixels: -56 },
+    { dxPixels: 32, dyPixels: -56 },
+  ]);
+  assert.deepEqual(bases.map((basis) => basis?.twoSides), [
+    { side: "left", dxPixels: -64, dyPixels: -32 },
+    { side: "left", dxPixels: -64, dyPixels: 0 },
+    { side: "left", dxPixels: -64, dyPixels: 32 },
+    { side: "right", dxPixels: 64, dyPixels: -32 },
+    { side: "right", dxPixels: 64, dyPixels: 0 },
+    { side: "right", dxPixels: 64, dyPixels: 32 },
+  ]);
+  assert.equal(new Set(bases.map((basis) => JSON.stringify(basis?.radial))).size, listeners.length);
+  assert.deepEqual(coordinationBasisFor(listeners, "cinder"), bases[0]);
+  assert.equal(coordinationBasisFor(listeners, "june"), undefined);
+});
+
 test("runtime plan and batch guards reject sparse and duplicate decisions", () => {
   const cinder = runtimeDecision("cinder", "cinder-7", 7);
   const june = runtimeDecision("june", "june-11", 11);
@@ -178,6 +249,14 @@ test("runtime plan and batch guards reject sparse and duplicate decisions", () =
     runtimeDecision("cinder", "cinder-8", 8),
   ])), false, "duplicate residents");
   assert.equal(isWorldAgentMessage(batchResult([cinder, june])), true);
+  assert.equal(isWorldAgentMessage({
+    ...batchResult([cinder]),
+    usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+  }), false, "resident-turn accounting is required");
+  assert.equal(isWorldAgentMessage({
+    ...batchResult([cinder]),
+    usage: { modelTurns: 0, inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+  }), false, "resident-turn accounting must be positive");
 });
 
 test("cancel selectors are real bounded arrays of nonempty unique ids", () => {
@@ -244,6 +323,8 @@ test("think batches deeply reject malformed observations", () => {
     { ...valid, playerOrder: { id: 4, text: "", requestedTarget: "plaza" } },
     { ...valid, playerOrder: { id: 4, text: "Go", requestedTarget: "nowhere" } },
     { ...valid, guildCall: { ...valid.guildCall, requestedTarget: "nowhere" } },
+    { ...valid, guildCall: { ...valid.guildCall, coListeners: [] } },
+    { ...valid, guildCall: { ...valid.guildCall, coListeners: ["cinder", "cinder"] } },
     { ...valid, guildBoard: [{ ...board, fromName: 9 }] },
     { ...valid, recentEvents: ["Bell rang", 7] },
     { ...valid, availableTargets: ["plaza", "nowhere"] },
@@ -290,7 +371,7 @@ function batchResult(decisions: unknown) {
     type: "batch_result",
     batchId: "batch-malicious",
     decisions,
-    usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
+    usage: { modelTurns: 2, inputTokens: 10, outputTokens: 5, totalTokens: 15 },
   } as const;
 }
 
@@ -301,7 +382,13 @@ function detailedObservation(): WorldObservation {
       id: "player",
       name: "Scout",
       kind: "player",
+      scene: "town",
+      x: 16,
+      y: 13,
+      relativeX: 0,
+      relativeY: 2,
       distance: 2.5,
+      direction: "up",
       activity: "checking the board",
     }],
     roster: [{
@@ -311,6 +398,7 @@ function detailedObservation(): WorldObservation {
       scene: "town",
       x: 16,
       y: 11,
+      direction: "down",
       location: "Guild Plaza",
       activity: "waiting",
     }],
@@ -321,6 +409,7 @@ function detailedObservation(): WorldObservation {
       distance: 2.5,
       radius: 12,
       guildWide: false,
+      coListeners: ["cinder", "june"],
       requestedTarget: "bridge",
     },
     guildBoard: [{

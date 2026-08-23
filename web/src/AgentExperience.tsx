@@ -1,17 +1,16 @@
 import {
   memo,
   useCallback,
-  useEffect,
   useMemo,
   useRef,
   useState,
-  type ComponentType,
 } from "react";
 import type {
   AgentStatus,
   AgentTerminalMode,
   AgentTerminalState,
 } from "./agentTerminalTypes";
+import { AgentTerminal } from "./AgentTerminal";
 import { browserAgentCapabilityError } from "./browserAgentCapabilities";
 import {
   AgentSessionBar,
@@ -20,48 +19,7 @@ import {
   type CredentialSource,
 } from "./chatGptSession";
 import "./AgentTerminal.css";
-
-type AuthenticatedAgentTerminal = ComponentType<{
-  authStatus: ChatGptStatus | undefined;
-  mode: AgentTerminalMode;
-  onStateChange(state: AgentTerminalState): void;
-  source: Exclude<CredentialSource, null>;
-  theme: "light" | "dark";
-}>;
-
-type AuthenticatedAgentTerminalModule = {
-  AgentTerminal: AuthenticatedAgentTerminal;
-};
-
-let agentTerminalRequest: Promise<AuthenticatedAgentTerminalModule> | undefined;
-let agentRuntimeRequest: Promise<void> | undefined;
-
-function loadAgentTerminal(): Promise<AuthenticatedAgentTerminalModule> {
-  if (agentTerminalRequest) return agentTerminalRequest;
-  const request = import("./AgentTerminal");
-  agentTerminalRequest = request;
-  void request.catch(() => {
-    if (agentTerminalRequest === request) agentTerminalRequest = undefined;
-  });
-  return request;
-}
-
-function prepareAgentRuntime(): Promise<void> {
-  if (agentRuntimeRequest) return agentRuntimeRequest;
-  const request = import("./agentRuntime")
-    .then((module) => module.prepareAgentRuntime());
-  agentRuntimeRequest = request;
-  void request.catch(() => {
-    if (agentRuntimeRequest === request) agentRuntimeRequest = undefined;
-  });
-  return request;
-}
-
-/** Fetches UI while Worker/WASM preparation runs on an independent critical path. */
-export function preloadAgentTerminal(): Promise<void> {
-  if (browserAgentCapabilityError() !== undefined) return Promise.resolve();
-  return Promise.all([loadAgentTerminal(), prepareAgentRuntime()]).then(() => undefined);
-}
+import "./Home.css";
 
 /** Lightweight credential shell that keeps the authenticated runtime off signed-out startup. */
 export const AgentExperience = memo(function AgentExperience({
@@ -75,9 +33,6 @@ export const AgentExperience = memo(function AgentExperience({
   const [authStatus, setAuthStatus] = useState<ChatGptStatus>();
   const [credentialSource, setCredentialSource] = useState<CredentialSource>();
   const credentialSourceRef = useRef<CredentialSource | undefined>(undefined);
-  const [AgentTerminal, setAgentTerminal] = useState<AuthenticatedAgentTerminal>();
-  const [agentTerminalError, setAgentTerminalError] = useState<string>();
-  const [loadAttempt, setLoadAttempt] = useState(0);
   const [runtimeState, setRuntimeState] = useState<AgentTerminalState>();
   const hasCredential = isAuthenticatedCredential(credentialSource);
 
@@ -89,41 +44,13 @@ export const AgentExperience = memo(function AgentExperience({
     setCredentialSource(source);
   }, []);
 
-  useEffect(() => {
-    if (!hasCredential || capabilityError) {
-      setAgentTerminal(undefined);
-      setAgentTerminalError(undefined);
-      return;
-    }
-    let current = true;
-    setAgentTerminalError(undefined);
-    void loadAgentTerminal().then(
-      (module) => {
-        if (current) setAgentTerminal(() => module.AgentTerminal);
-      },
-      (cause) => {
-        if (current) setAgentTerminalError(errorMessage(cause));
-      },
-    );
-    return () => {
-      current = false;
-    };
-  }, [capabilityError, hasCredential, loadAttempt]);
-
   const agentStatus: AgentStatus = !hasCredential || capabilityError
     ? "idle"
-    : agentTerminalError !== undefined
-      ? "error"
-      : runtimeState?.status ?? "starting";
-  const agentError = agentTerminalError ?? runtimeState?.error;
+    : runtimeState?.status ?? "starting";
+  const agentError = runtimeState?.error;
   const retryAgent = useCallback(() => {
-    if (agentTerminalError !== undefined) {
-      setAgentTerminalError(undefined);
-      setLoadAttempt((attempt) => attempt + 1);
-      return;
-    }
     runtimeState?.retry();
-  }, [agentTerminalError, runtimeState]);
+  }, [runtimeState]);
   const inactiveMessage = inactiveTerminalMessage({
     agentError,
     agentStatus,
@@ -143,7 +70,7 @@ export const AgentExperience = memo(function AgentExperience({
         onRetryAgent={retryAgent}
         onSourceChange={changeCredentialSource}
       />
-      {hasCredential && !capabilityError && AgentTerminal ? (
+      {hasCredential && !capabilityError ? (
         <AgentTerminal
           authStatus={authStatus}
           mode={mode}
@@ -178,9 +105,5 @@ function ReservedTerminal({
 function isAuthenticatedCredential(
   source: CredentialSource | undefined,
 ): source is Exclude<CredentialSource, null> {
-  return source === "subscription" || source === "user";
-}
-
-function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return source === "managed" || source === "subscription" || source === "user";
 }

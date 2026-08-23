@@ -115,6 +115,8 @@ type WorldTask = {
   orderId?: number;
   goal?: WorldPosition;
   path?: WorldPosition[];
+  rerouteAtMs?: number;
+  blockedSinceMs?: number;
   remainingMs?: number;
 };
 
@@ -801,7 +803,7 @@ export function movePlayer(state: WorldState, direction: Direction): boolean {
     x: player.x + offset.x,
     y: player.y + offset.y,
   } satisfies WorldPosition;
-  if (isWorldPositionBlocked(destination)) return false;
+  if (isWorldPositionBlocked(destination) || !worldStepAvailable(state, player, destination)) return false;
   player.movement = {
     from: actorWorldPosition(player),
     to: destination,
@@ -862,7 +864,6 @@ export function playerSpeak(
       if (actor.presence === "active") {
         preemptActorOrder(state, actor, "superseded");
         actor.tasks = [];
-        actor.movement = undefined;
         actor.activity = "interpreting Scout's order";
         actor.intent = `interpret Scout's words: ${text}`;
         actor.lastOrigin = "player";
@@ -875,17 +876,22 @@ export function playerSpeak(
     state.playerOrders[id] = Object.freeze({
       id: callId,
       text,
+      coListeners: Object.freeze([...liveAddressed]),
       ...(requestedTarget === undefined ? {} : { requestedTarget }),
     });
     if (heardBy.includes(id)) {
-      const distance = Math.round(actorDistance(player, state.actors[id]) * 10) / 10;
+      const listener = state.actors[id];
+      const distance = listener.scene === player.scene
+        ? Math.round(actorDistance(player, listener) * 10) / 10
+        : undefined;
       state.heardCalls[id] = Object.freeze({
         id: callId,
         text,
         voice,
-        distance,
+        ...(distance === undefined ? {} : { distance }),
         radius,
         guildWide,
+        coListeners: Object.freeze([...liveAddressed]),
         ...(requestedTarget === undefined ? {} : { requestedTarget }),
       });
     } else {
@@ -994,6 +1000,10 @@ function queuePlayerOrder(
   const assignments: WorldOrderAssignment[] = [];
   for (const [actorId, directive] of directives) {
     const { target, interaction } = directive;
+    const group = [...directives].filter(([, candidate]) =>
+      candidate.target === target && candidate.interaction === interaction
+    );
+    const groupIndex = group.findIndex(([candidateId]) => candidateId === actorId);
     const actor = state.actors[actorId];
     state.decisionVersions[actorId] += 1;
     if (actor.presence !== "active") {
@@ -1012,15 +1022,26 @@ function queuePlayerOrder(
     actor.tasks = [];
     actor.movement = undefined;
     actor.departure = undefined;
-    const goal = Object.freeze({ ...targetPosition(state, actor, target) });
-    const start = actorWorldPosition(actor);
-    const path = findWorldRoute(start, goal);
-    if (path.length === 0 && !samePosition(start, goal)) {
+    const targetGoal = targetPosition(state, actor, target);
+    const desiredGoal = interaction === undefined && group.length > 1
+      ? coordinatedOrderGoal(
+          targetGoal,
+          groupIndex,
+          group.length,
+          group.map(([memberId]) => actorWorldPosition(state.actors[memberId])),
+        )
+      : targetGoal;
+    const route = safeOrderRoute(
+      state,
+      actor,
+      desiredGoal,
+      interaction === undefined ? Math.max(2, Math.ceil(group.length / 4)) : 0,
+    );
+    if (!route) {
       assignments.push({
         actorId,
         target,
         ...(interaction === undefined ? {} : { interaction }),
-        goal,
         status: "rejected",
         completedAtMs: state.elapsedMs,
         reason: "unreachable",
@@ -1030,6 +1051,7 @@ function queuePlayerOrder(
       actor.lastOrigin = "player";
       continue;
     }
+    const { goal, path } = route;
 
     const assignment: WorldOrderAssignment = {
       actorId,
@@ -1091,6 +1113,78 @@ function queuePlayerOrder(
         : []
     )),
   });
+}
+
+function coordinatedOrderGoal(
+  anchor: WorldPosition,
+  index: number,
+  count: number,
+  origins: readonly WorldPosition[],
+): WorldPosition {
+  if (count <= 4) {
+    const sameScene = origins.filter(({ scene }) => scene === anchor.scene);
+    const averageX = sameScene.reduce((total, point) => total + point.x, 0) / Math.max(sameScene.length, 1);
+    const averageY = sameScene.reduce((total, point) => total + point.y, 0) / Math.max(sameScene.length, 1);
+    const rank = Math.max(index, 0) - (count - 1) / 2;
+    if (Math.abs(averageX - anchor.x) >= Math.abs(averageY - anchor.y)) {
+      return Object.freeze({
+        scene: anchor.scene,
+        x: anchor.x + (averageX < anchor.x ? -2 : 2),
+        y: anchor.y + Math.round(rank * 2),
+      });
+    }
+    return Object.freeze({
+      scene: anchor.scene,
+      x: anchor.x + Math.round(rank * 2),
+      y: anchor.y + (averageY < anchor.y ? -2 : 2),
+    });
+  }
+  const radius = Math.max(2, Math.ceil(count / 5));
+  const angle = (Math.PI * 2 * Math.max(index, 0)) / Math.max(count, 1);
+  return Object.freeze({
+    scene: anchor.scene,
+    x: anchor.x + Math.round(radius * Math.cos(angle)),
+    y: anchor.y + Math.round(radius * Math.sin(angle)),
+  });
+}
+
+function safeOrderRoute(
+  state: WorldState,
+  actor: WorldActor,
+  desired: WorldPosition,
+  maximumRadius: number,
+): Readonly<{ goal: WorldPosition; path: readonly WorldPosition[] }> | undefined {
+  const start = actorWorldPosition(actor);
+  const candidates: WorldPosition[] = [];
+  for (let radius = 0; radius <= maximumRadius; radius += 1) {
+    for (let yOffset = -radius; yOffset <= radius; yOffset += 1) {
+      for (let xOffset = -radius; xOffset <= radius; xOffset += 1) {
+        if (Math.max(Math.abs(xOffset), Math.abs(yOffset)) !== radius) continue;
+        const goal = Object.freeze({
+          scene: desired.scene,
+          x: desired.x + xOffset,
+          y: desired.y + yOffset,
+        });
+        if (
+          isWorldPositionBlocked(goal)
+          || portalDestinationAt(goal) !== undefined
+          || positionClaimedByOther(state, actor.id, goal)
+        ) continue;
+        candidates.push(goal);
+      }
+    }
+  }
+  candidates.sort((left, right) =>
+    positionDistance(desired, left) - positionDistance(desired, right)
+    || positionDistance(start, left) - positionDistance(start, right)
+  );
+  for (const goal of candidates) {
+    const path = findWorldRoute(start, goal);
+    if (path.length > 0 || samePosition(start, goal)) {
+      return Object.freeze({ goal, path });
+    }
+  }
+  return undefined;
 }
 
 function commandTargetOccurrences(state: WorldState, text: string): TargetOccurrence[] {
@@ -1233,6 +1327,43 @@ function samePosition(left: WorldPosition, right: WorldPosition): boolean {
   return left.scene === right.scene && left.x === right.x && left.y === right.y;
 }
 
+function observedDestination(actor: WorldActor): WorldPosition | undefined {
+  const destination = actor.tasks[0]?.goal ?? actor.movement?.to;
+  return destination === undefined ? undefined : Object.freeze({ ...destination });
+}
+
+function positionClaimedByOther(
+  state: WorldState,
+  actorId: ActorId,
+  candidate: WorldPosition,
+): boolean {
+  return ACTOR_IDS.some((otherId) => {
+    if (otherId === actorId) return false;
+    const other = state.actors[otherId];
+    if (other.presence !== "active" && otherId !== "player") return false;
+    return samePosition(actorWorldPosition(other), candidate)
+      || (other.movement !== undefined && samePosition(other.movement.to, candidate))
+      || (other.tasks[0]?.goal !== undefined && samePosition(other.tasks[0].goal, candidate));
+  });
+}
+
+function worldStepAvailable(
+  state: WorldState,
+  actor: WorldActor,
+  destination: WorldPosition,
+): boolean {
+  const origin = actorWorldPosition(actor);
+  return ACTOR_IDS.every((otherId) => {
+    if (otherId === actor.id) return true;
+    const other = state.actors[otherId];
+    if (other.presence !== "active" && otherId !== "player") return true;
+    if (samePosition(actorWorldPosition(other), destination)) return false;
+    if (other.movement === undefined) return true;
+    if (samePosition(other.movement.to, destination)) return false;
+    return !(samePosition(other.movement.from, destination) && samePosition(other.movement.to, origin));
+  });
+}
+
 export function isGuildRelayActive(state: WorldState): boolean {
   return positionDistance(actorWorldPosition(state.actors.player), WORLD_POIS.plaza)
     <= GUILD_RELAY_RADIUS;
@@ -1372,22 +1503,33 @@ function actionTargetsPresent(state: WorldState, action: WorldAction): boolean {
 
 export function observationFor(state: WorldState, agentId: ResidentId): WorldObservation {
   const actor = state.actors[agentId];
+  const selfPoint = actorRenderPoint(actor);
   const nearby = ACTOR_IDS
     .filter((id) => id !== agentId)
     .filter((id) => id === "player" || state.actors[id].presence === "active")
     .map((id) => {
       const other = state.actors[id];
+      const point = actorRenderPoint(other);
+      const movingTo = observedDestination(other);
       return {
         id,
         name: other.name,
         kind: other.kind,
+        scene: other.scene,
+        x: Math.round(point.x * 10) / 10,
+        y: Math.round(point.y * 10) / 10,
+        relativeX: Math.round((point.x - selfPoint.x) * 10) / 10,
+        relativeY: Math.round((point.y - selfPoint.y) * 10) / 10,
         distance: Math.round(actorDistance(actor, other) * 10) / 10,
+        direction: other.direction,
+        ...(movingTo === undefined ? {} : { movingTo }),
         activity: other.activity,
+        ...(other.intent === undefined ? {} : { intent: other.intent }),
       };
     })
-    .filter(({ distance }) => distance <= 12)
+    .filter(({ distance }) => distance <= VOICE_RADIUS.shout)
     .sort((left, right) => left.distance - right.distance)
-    .slice(0, 6);
+    .map((entry) => Object.freeze(entry));
   const guildCall = hasUnansweredGuildCall(state, agentId)
     ? state.heardCalls[agentId]
     : undefined;
@@ -1401,6 +1543,7 @@ export function observationFor(state: WorldState, agentId: ResidentId): WorldObs
   );
   const roster = actorsInPaintOrder(state).map((other) => {
     const point = actorRenderPoint(other);
+    const movingTo = observedDestination(other);
     return Object.freeze({
       id: other.id,
       name: other.name,
@@ -1408,6 +1551,8 @@ export function observationFor(state: WorldState, agentId: ResidentId): WorldObs
       scene: other.scene,
       x: Math.round(point.x * 10) / 10,
       y: Math.round(point.y * 10) / 10,
+      direction: other.direction,
+      ...(movingTo === undefined ? {} : { movingTo }),
       location: locationFor(other),
       activity: other.activity,
     });
@@ -1419,15 +1564,20 @@ export function observationFor(state: WorldState, agentId: ResidentId): WorldObs
     self: Object.freeze({
       id: agentId,
       name: actor.name,
+      role: actor.role,
       kind: actor.kind === "human" ? "human" : "monster",
       scene: actor.scene,
+      x: Math.round(selfPoint.x * 10) / 10,
+      y: Math.round(selfPoint.y * 10) / 10,
+      direction: actor.direction,
+      ...(observedDestination(actor) === undefined ? {} : { movingTo: observedDestination(actor) }),
       location: locationFor(actor),
       energy: Math.round(actor.energy),
       curiosity: Math.round(actor.curiosity),
       social: Math.round(actor.social),
       ...(actor.carrying === undefined ? {} : { carrying: actor.carrying }),
     }),
-    nearby: Object.freeze(nearby.map((entry) => Object.freeze(entry))),
+    nearby: Object.freeze(nearby),
     roster: Object.freeze(roster),
     ...(playerOrder === undefined ? {} : { playerOrder }),
     ...(guildCall === undefined ? {} : { guildCall }),
@@ -1652,6 +1802,7 @@ function updateActor(state: WorldState, actor: WorldActor, deltaMs: number): voi
     return;
   }
   if (actor.presence === "entering") return;
+  if (traversePortalAtCurrentPosition(state, actor)) return;
   if (actor.id === "player") return;
   const task = actor.tasks[0];
   if (!task) {
@@ -1660,6 +1811,10 @@ function updateActor(state: WorldState, actor: WorldActor, deltaMs: number): voi
     if (!state.agentsOnline && state.elapsedMs >= actor.routineDueMs) {
       scheduleRoutine(state, actor as WorldActor & { id: ResidentId });
     }
+    return;
+  }
+  if (playerOrderGoalStillNeeded(state, actor, task)) {
+    actor.activity = "holding a clear approach for Scout's group order";
     return;
   }
   if (task.action.kind === "move") {
@@ -1731,6 +1886,34 @@ function updateActor(state: WorldState, actor: WorldActor, deltaMs: number): voi
   if (task.remainingMs <= 0) actor.tasks.shift();
 }
 
+function playerOrderGoalStillNeeded(
+  state: WorldState,
+  actor: WorldActor,
+  task: WorldTask,
+): boolean {
+  if (task.orderId === undefined || task.goal === undefined) return false;
+  const order = state.orders.find(({ id }) => id === task.orderId);
+  const ownIndex = order?.assignments.findIndex(({ actorId }) => actorId === actor.id) ?? -1;
+  const goal = task.goal;
+  return ACTOR_IDS.some((otherId) => {
+    if (otherId === actor.id) return false;
+    const other = state.actors[otherId];
+    const otherTask = other.tasks[0];
+    if (
+      otherTask?.orderId !== task.orderId
+      || otherTask.path?.some((step) => samePosition(step, goal)) !== true
+    ) return false;
+    const reciprocal = otherTask.goal !== undefined
+      && (
+        samePosition(actorWorldPosition(actor), otherTask.goal)
+        || task.path?.some((step) => samePosition(step, otherTask.goal as WorldPosition)) === true
+      );
+    if (!reciprocal) return true;
+    const otherIndex = order?.assignments.findIndex(({ actorId }) => actorId === otherId) ?? -1;
+    return otherIndex >= 0 && (ownIndex < 0 || otherIndex < ownIndex);
+  });
+}
+
 function updateDeparture(state: WorldState, actor: WorldActor): void {
   const departure = actor.departure;
   if (!departure || actor.movement) return;
@@ -1745,13 +1928,20 @@ function updateDeparture(state: WorldState, actor: WorldActor): void {
   }
   departure.path ??= findWorldRoute(actorWorldPosition(actor), departure.inside)
     .map((position) => ({ ...position }));
-  const next = departure.path.shift();
+  const next = departure.path[0];
   if (next) {
     const from = actorWorldPosition(actor);
-    if (next.scene !== actor.scene) {
-      traverseDeclaredPortal(state, actor, next);
+    if (!worldStepAvailable(state, actor, next)) {
+      const rerouted = routeAroundActors(state, actor, departure.inside);
+      if (rerouted) departure.path = rerouted;
+      actor.activity = "waiting for a clear route out of town";
       return;
     }
+    if (next.scene !== actor.scene) {
+      if (!traverseDeclaredPortal(state, actor, next)) departure.path = [];
+      return;
+    }
+    departure.path.shift();
     actor.direction = directionBetween(from, next);
     actor.movement = { from, to: next, progress: 0, durationMs: tileDuration(actor, 175) };
     return;
@@ -1786,7 +1976,11 @@ function traverseDeclaredPortal(
   destination: WorldPosition,
 ): boolean {
   const declared = portalDestinationAt(actorWorldPosition(actor));
-  if (declared === undefined || !samePosition(declared, destination)) return false;
+  if (
+    declared === undefined
+    || !samePosition(declared, destination)
+    || !worldStepAvailable(state, actor, destination)
+  ) return false;
   actor.scene = destination.scene;
   actor.x = destination.x;
   actor.y = destination.y;
@@ -1911,7 +2105,7 @@ function walkTowardRelativeTask(
     return;
   }
   if (!task.goal) {
-    task.goal = safeRelativeGoal(actorWorldPosition(actor), actorWorldPosition(anchor), action);
+    task.goal = safeRelativeGoal(state, actor, actorWorldPosition(anchor), action);
     if (!task.goal) {
       actor.tasks.shift();
       actor.activity = `could not find a safe tile ${label}`;
@@ -1920,9 +2114,13 @@ function walkTowardRelativeTask(
       return;
     }
   }
-  task.path ??= findWorldRoute(actorWorldPosition(actor), task.goal)
+  task.path ??= findWorldRoute(
+    actorWorldPosition(actor),
+    task.goal,
+    dynamicBlocker(state, actor),
+  )
     .map((position) => ({ ...position }));
-  const next = task.path.shift();
+  const next = task.path[0];
   if (!next) {
     const reached = samePosition(actorWorldPosition(actor), task.goal);
     actor.tasks.shift();
@@ -1935,17 +2133,38 @@ function walkTowardRelativeTask(
     return;
   }
   const from = actorWorldPosition(actor);
+  if (!worldStepAvailable(state, actor, next)) {
+    task.blockedSinceMs ??= state.elapsedMs;
+    if (state.elapsedMs >= (task.rerouteAtMs ?? 0)) {
+      const rerouted = routeAroundActors(state, actor, task.goal);
+      if (rerouted) task.path = rerouted;
+      task.rerouteAtMs = state.elapsedMs + 2_000;
+    }
+    if (state.elapsedMs - task.blockedSinceMs >= 10_000) {
+      actor.tasks.shift();
+      actor.activity = `could not find a clear path ${label}`;
+      actor.intent = undefined;
+      addActivity(state, task.origin, `${actor.name} gave up a blocked relative route.`, actor.id);
+      return;
+    }
+    actor.activity = `waiting for a clear path ${label}`;
+    return;
+  }
+  task.rerouteAtMs = undefined;
+  task.blockedSinceMs = undefined;
   if (next.scene !== actor.scene) {
     if (!traverseDeclaredPortal(state, actor, next)) task.path = [];
     return;
   }
+  task.path.shift();
   actor.direction = directionBetween(from, next);
   actor.movement = { from, to: next, progress: 0, durationMs: tileDuration(actor, 205) };
   actor.activity = `moving ${label}`;
 }
 
 function safeRelativeGoal(
-  start: WorldPosition,
+  state: WorldState,
+  actor: WorldActor,
   anchor: WorldPosition,
   action: Extract<WorldPrimitiveAction, { kind: "move_relative" }>,
 ): WorldPosition | undefined {
@@ -1963,8 +2182,13 @@ function safeRelativeGoal(
           x: desired.x + xOffset,
           y: desired.y + yOffset,
         });
-        if (isWorldPositionBlocked(candidate) || portalDestinationAt(candidate) !== undefined) continue;
-        const path = findWorldRoute(start, candidate);
+        if (
+          isWorldPositionBlocked(candidate)
+          || portalDestinationAt(candidate) !== undefined
+          || positionClaimedByOther(state, actor.id, candidate)
+        ) continue;
+        const start = actorWorldPosition(actor);
+        const path = findWorldRoute(start, candidate, dynamicBlocker(state, actor));
         if (path.length > 0 || samePosition(start, candidate)) return candidate;
       }
     }
@@ -2002,7 +2226,7 @@ function walkTowardTask(
     task.path = findWorldRoute(actorWorldPosition(actor), task.goal)
       .map((position) => ({ ...position }));
   }
-  const next = task.path.shift();
+  const next = task.path[0];
   if (!next) {
     if (finishAtDestination && task.orderId !== undefined && task.goal) {
       actor.tasks.shift();
@@ -2029,13 +2253,61 @@ function walkTowardTask(
   }
   if (task.orderId !== undefined) markPlayerOrderMoving(state, actor, task.orderId);
   const from = actorWorldPosition(actor);
+  if (!worldStepAvailable(state, actor, next)) {
+    task.blockedSinceMs ??= state.elapsedMs;
+    if (state.elapsedMs >= (task.rerouteAtMs ?? 0)) {
+      const rerouted = routeAroundActors(state, actor, task.goal);
+      if (rerouted) task.path = rerouted;
+      task.rerouteAtMs = state.elapsedMs + 2_000;
+    }
+    if (task.orderId === undefined && state.elapsedMs - task.blockedSinceMs >= 10_000) {
+      actor.tasks.shift();
+      actor.activity = `could not find a clear route to ${targetLabel(state, target)}`;
+      actor.intent = undefined;
+      return;
+    }
+    actor.activity = `waiting for a clear route to ${targetLabel(state, target)}`;
+    return;
+  }
+  task.rerouteAtMs = undefined;
+  task.blockedSinceMs = undefined;
   if (next.scene !== actor.scene) {
     if (!traverseDeclaredPortal(state, actor, next)) task.path = [];
     return;
   }
+  task.path.shift();
   actor.direction = directionBetween(from, next);
   actor.movement = { from, to: next, progress: 0, durationMs: tileDuration(actor, 205) };
   actor.activity = `heading to ${targetLabel(state, target)}`;
+}
+
+function routeAroundActors(
+  state: WorldState,
+  actor: WorldActor,
+  goal: WorldPosition,
+): WorldPosition[] | undefined {
+  const route = findWorldRoute(
+    actorWorldPosition(actor),
+    goal,
+    dynamicBlocker(state, actor),
+  ).map((position) => ({ ...position }));
+  return route.length > 0 ? route : undefined;
+}
+
+function dynamicBlocker(state: WorldState, actor: WorldActor) {
+  const claims = new Set<string>();
+  for (const otherId of ACTOR_IDS) {
+    if (otherId === actor.id) continue;
+    const other = state.actors[otherId];
+    if (other.presence !== "active" && otherId !== "player") continue;
+    claims.add(worldPositionKey(actorWorldPosition(other)));
+    if (other.movement !== undefined) claims.add(worldPositionKey(other.movement.to));
+  }
+  return (position: WorldPosition): boolean => claims.has(worldPositionKey(position));
+}
+
+function worldPositionKey(position: WorldPosition): string {
+  return `${position.scene}:${position.x},${position.y}`;
 }
 
 function markPlayerOrderMoving(state: WorldState, actor: WorldActor, orderId: number): void {

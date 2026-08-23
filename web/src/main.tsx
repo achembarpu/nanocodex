@@ -1,23 +1,50 @@
-import { preloadDirectSurface } from "./routeLoaders";
+import { Suspense, useEffect, useState } from "react";
+import { createRoot } from "react-dom/client";
+import { BrowserRouter } from "react-router";
+import { NanocodexApp } from "./NanocodexApp";
+import { ArtifactRuntime } from "./artifactRuntime";
+import {
+  preloadDirectSurface,
+  type PreparedDirectRoute,
+} from "./routeLoaders";
 
 const directUrl = new URL(window.location.href);
 const directPath = directUrl.pathname === "/"
   ? "/"
   : directUrl.pathname.replace(/\/+$/, "");
+const container = document.getElementById("root");
+if (!container) throw new Error("Nanocodex root container is missing");
 
-if (directPath === "/artifact-runtime") {
-  void import("./artifactRuntime");
-} else {
-  const application = import("./NanocodexApp");
-  void Promise.all([
-    application,
-    preloadDirectSurface(directUrl),
-  ]).then(
-    ([module, preparedRoute]) => module.mountNanocodexApp(preparedRoute),
-    () => {
-      // A failed route preparation must not strand the document. The normal
-      // route lifecycle owns its actionable failure state and retry policy.
-      void application.then((module) => module.mountNanocodexApp({}));
-    },
+createRoot(container).render(
+  directPath === "/artifact-runtime"
+    ? <ArtifactRuntime />
+    : <BrowserApplication url={directUrl} />,
+);
+
+function BrowserApplication({ url }: { url: URL }) {
+  const [preparedRoute, setPreparedRoute] = useState<PreparedDirectRoute | null>(null);
+
+  useEffect(() => {
+    let active = true;
+    void preloadDirectSurface(url).then(
+      (prepared) => {
+        if (active) setPreparedRoute(prepared);
+      },
+      () => {
+        if (active) setPreparedRoute({});
+      },
+    );
+    return () => {
+      active = false;
+    };
+  }, [url]);
+
+  if (!preparedRoute) return null;
+  return (
+    <BrowserRouter useTransitions={false}>
+      <Suspense fallback={null}>
+        <NanocodexApp preparedRoute={preparedRoute} />
+      </Suspense>
+    </BrowserRouter>
   );
 }

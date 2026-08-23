@@ -1,18 +1,28 @@
-import type { ComponentType } from "react";
-import { deploymentHealth } from "./deploymentHealth";
+import { preloadChangelog } from "./Changelog";
+import { preloadDocsRoute } from "./Docs";
+import { preloadEvalOverview } from "./Evals";
+import { loadWorldAssets } from "./monsterWorldRenderer";
 import { surfaceFromUrl, type Surface } from "./navigation";
-import type {
-  PublishedCommitHistory,
-  PreparedPublishedFile,
-  PublishedRepositorySnapshot,
+import {
+  loadPublishedCommitHistory,
+  loadPublishedRepositorySnapshot,
+  preloadPreferredPublishedFile,
+  preloadPublishedRepositoryPatchBody,
+  type PublishedCommitHistory,
+  type PreparedPublishedFile,
+  type PublishedRepositorySnapshot,
 } from "./publishedRepository";
+import {
+  preloadPierreFile,
+  preloadPierrePaths,
+  preloadPierreWorker,
+} from "./pierreWorkerResource";
 
 const COMMIT_HASH_PATTERN = /^[0-9a-f]{40}$/;
 const PREPARED_SURFACE_RETENTION_MS = 25_000;
 
 export type PreparedDirectRoute = {
   commitHistory?: PublishedCommitHistory;
-  DocsComponent?: ComponentType;
   sourceFile?: PreparedPublishedFile;
   repositorySnapshot?: PublishedRepositorySnapshot;
 };
@@ -23,7 +33,11 @@ export type PreparedRepositorySurface =
       snapshot: PublishedRepositorySnapshot;
       sourceFile?: PreparedPublishedFile;
     }
-  | { surface: "commits"; history: PublishedCommitHistory };
+  | {
+      surface: "commits";
+      history: PublishedCommitHistory;
+      requestedCommit?: string;
+    };
 
 type PreparedCodeSurface = Extract<
   PreparedRepositorySurface,
@@ -45,52 +59,7 @@ type PreparedRepositoryRequest = {
 let repositorySnapshotRequest: Promise<PublishedRepositorySnapshot> | undefined;
 const repositorySurfaceRequests = new Map<string, PreparedRepositoryRequest>();
 
-const loadEvalsModule = () => import("./Evals");
-const loadPublishedRepository = () => import("./publishedRepository");
-
-export const loadEvals = () =>
-  loadEvalsModule().then((module) => ({ default: module.Evals }));
-export const loadChangelog = () => import("./Changelog");
-export const loadDocs = () => import("./Docs");
-export const loadHomeFrame = () =>
-  import("./HomeFrame").then((module) => ({ default: module.HomeFrame }));
-export const loadAgentExperience = () =>
-  import("./AgentExperience").then((module) => ({
-    default: module.AgentExperience,
-    preloadAgentTerminal: module.preloadAgentTerminal,
-  }));
-export const loadMultiplayer = () =>
-  import("./Multiplayer").then((module) => ({ default: module.Multiplayer }));
-export const loadMonsterWorld = () =>
-  import("./MonsterWorld").then((module) => ({ default: module.MonsterWorld }));
-export const loadPierreWorkerProvider = () =>
-  import("./PierreWorkerProvider").then((module) => ({
-    default: module.PierreWorkerProvider,
-    preloadPierreFile: module.preloadPierreFile,
-    preloadPierrePaths: module.preloadPierrePaths,
-    preloadPierreWorker: module.preloadPierreWorker,
-  }));
-
-const preparePierreWorker = () =>
-  loadPierreWorkerProvider().then((pierre) => {
-    pierre.preloadPierreWorker();
-    return pierre;
-  });
-export const loadCodeBrowser = () =>
-  import("./CodeBrowser").then((module) => ({ default: module.CodeBrowser }));
-export const loadCommitCodeStream = () =>
-  import("./CommitCodeStream").then((module) => ({
-    default: module.CommitCodeStream,
-  }));
-export const loadVirtualCommitList = () =>
-  import("./VirtualCommitList").then((module) => ({
-    default: module.VirtualCommitList,
-  }));
-
-export async function preloadEvalOverview(): Promise<void> {
-  const module = await loadEvalsModule();
-  await module.preloadEvalOverview();
-}
+export { preloadEvalOverview };
 
 export function prepareRepositorySurface(
   surface: Extract<Surface, "code" | "commits">,
@@ -162,24 +131,21 @@ function preparedRepositoryKey(
 }
 
 async function prepareCodeSurface(search?: string): Promise<PreparedCodeSurface> {
-  const repositoryRequest = loadPublishedRepository();
   const snapshotRequest = loadRepositorySnapshot();
-  const pierreRequest = preparePierreWorker();
-  const sourceFileRequest = Promise.all([repositoryRequest, snapshotRequest])
-    .then(([repository, snapshot]) =>
-      repository.preloadPreferredPublishedFile(snapshot, search)
-    );
-  const preparedSourceFileRequest = Promise.all([pierreRequest, sourceFileRequest])
-    .then(async ([pierre, sourceFile]) => {
+  preloadPierreWorker();
+  const sourceFileRequest = snapshotRequest.then((snapshot) =>
+    preloadPreferredPublishedFile(snapshot, search)
+  );
+  const preparedSourceFileRequest = sourceFileRequest
+    .then(async (sourceFile) => {
       if (sourceFile) {
-        await pierre.preloadPierreFile(sourceFile.file, sourceFile.contents);
+        await preloadPierreFile(sourceFile.file, sourceFile.contents);
       }
       return sourceFile;
     });
   const [snapshot, sourceFile] = await Promise.all([
     snapshotRequest,
     preparedSourceFileRequest,
-    loadCodeBrowser(),
   ]);
   return { sourceFile, surface: "code", snapshot };
 }
@@ -188,41 +154,36 @@ async function prepareCommitSurface(
   requestedCommit?: string,
   adopted: Promise<void> = Promise.resolve(),
 ): Promise<PreparedCommitSurface> {
-  const repositoryRequest = loadPublishedRepository();
-  const historyRequest = repositoryRequest.then((repository) =>
-    repository.loadPublishedCommitHistory(requestedCommit)
-  );
-  const pierreRequest = preparePierreWorker();
-  const patchRequest = Promise.all([repositoryRequest, historyRequest])
-    .then(([repository, history]) =>
-      repository.preloadPublishedRepositoryPatchBody(
+  const historyRequest = loadPublishedCommitHistory(requestedCommit);
+  preloadPierreWorker();
+  const patchRequest = historyRequest
+    .then((history) =>
+      preloadPublishedRepositoryPatchBody(
         history.initialPage.patchUrl,
         adopted,
       )
     );
-  const syntaxRequest = Promise.all([pierreRequest, historyRequest])
-    .then(([pierre, history]) => {
+  const syntaxRequest = historyRequest
+    .then((history) => {
       const initialPaths = history.initialPage.commits[0]?.files
         .map(({ path }) => path) ?? [];
-      return pierre.preloadPierrePaths(initialPaths);
+      return preloadPierrePaths(initialPaths);
     });
   const [history] = await Promise.all([
     historyRequest,
     patchRequest,
     syntaxRequest,
-    loadCommitCodeStream(),
-    loadVirtualCommitList(),
   ]);
   return {
     surface: "commits",
     history,
+    requestedCommit,
   };
 }
 
 function loadRepositorySnapshot(): Promise<PublishedRepositorySnapshot> {
   if (repositorySnapshotRequest) return repositorySnapshotRequest;
-  const loading = loadPublishedRepository()
-    .then((module) => module.loadPublishedRepositorySnapshot())
+  const loading = loadPublishedRepositorySnapshot()
     .catch((error) => {
       if (repositorySnapshotRequest === loading) {
         repositorySnapshotRequest = undefined;
@@ -236,24 +197,13 @@ function loadRepositorySnapshot(): Promise<PublishedRepositorySnapshot> {
 export async function preloadDirectSurface(url: URL): Promise<PreparedDirectRoute> {
   const surface = surfaceFromUrl(url);
   if (surface === "home" || surface === "agent") {
-    const experience = loadAgentExperience();
-    // The sole credential lookup starts beside the React shell. A configured
-    // browser also fetches the authenticated terminal in that same window,
-    // while signed-out startup never touches the Agent graph.
-    void deploymentHealth.read().then(async (health) => {
-      if (health.credentialSource !== null) {
-        await (await experience).preloadAgentTerminal();
-      }
-    }).catch(() => undefined);
-    await Promise.all([loadHomeFrame(), experience]);
     return {};
   }
   if (surface === "multiplayer") {
-    await loadMultiplayer();
     return {};
   }
   if (surface === "world") {
-    await loadMonsterWorld();
+    await loadWorldAssets();
     return {};
   }
   if (surface === "code") {
@@ -268,14 +218,12 @@ export async function preloadDirectSurface(url: URL): Promise<PreparedDirectRout
     return { commitHistory: prepared.history };
   }
   if (surface === "changelog") {
-    const module = await loadChangelog();
-    await module.preloadChangelog();
+    await preloadChangelog();
     return {};
   }
   if (surface === "docs") {
-    const module = await loadDocs();
-    await module.preloadDocsRoute(url.pathname);
-    return { DocsComponent: module.Docs };
+    await preloadDocsRoute(url.pathname);
+    return {};
   }
   if (surface === "evals") await preloadEvalOverview();
   return {};

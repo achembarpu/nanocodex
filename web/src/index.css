@@ -264,6 +264,7 @@ svg {
   cursor: pointer;
   font-size: 11px;
   line-height: 1;
+  touch-action: manipulation;
 }
 
 .surface-switch a:hover,
@@ -3474,10 +3475,20 @@ html[data-theme="dark"] .tui-syntax .shiki span {
 }
 
 @media (max-width: 420px) {
+  :root {
+    --mobile-header-height: calc(96px + env(safe-area-inset-top));
+  }
+
   .site-header {
+    grid-template-rows: 48px 48px;
     gap: 0 8px;
     padding-right: max(12px, env(safe-area-inset-right));
     padding-left: max(12px, env(safe-area-inset-left));
+  }
+
+  .header-center {
+    grid-row: 2;
+    grid-column: 1 / -1;
   }
 
   .wordmark {
@@ -3485,6 +3496,9 @@ html[data-theme="dark"] .tui-syntax .shiki span {
   }
 
   .surface-switch {
+    justify-content: space-between;
+    width: 100%;
+    min-width: 352px;
     gap: 0;
   }
 

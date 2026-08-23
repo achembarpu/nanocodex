@@ -334,6 +334,26 @@ test("repository state reads retry a transient secret-rollout response", async (
   }
 });
 
+test("a fresh repository Durable Object is an empty publication", async () => {
+  const server = createServer((request, response) => {
+    assert.equal(request.headers.authorization, "Bearer mirror-token");
+    response.writeHead(503, { "content-type": "application/json" });
+    response.end(JSON.stringify({ error: "repository_not_published" }));
+  });
+  try {
+    server.listen(0, "127.0.0.1");
+    await once(server, "listening");
+    const address = server.address();
+    assert.ok(address && typeof address === "object");
+    assert.equal(
+      await readRemoteState(`http://127.0.0.1:${address.port}`, "mirror-token"),
+      null,
+    );
+  } finally {
+    if (server.listening) await new Promise((resolveClose) => server.close(resolveClose));
+  }
+});
+
 test("invalid publication repair requires an explicit operator opt-in", async () => {
   let authorization;
   const server = createServer(async (request, response) => {

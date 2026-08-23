@@ -9,18 +9,13 @@ Use `nanocodex-react` to read the browser SDK's vanilla external store without
 coupling turn completion or agent ownership to a component tree.
 
 ```tsx
-import { createConfig, NanocodexProvider, useAgent, useAgentEvents } from "nanocodex-react";
+import { createConfig, useAgentEvents, useNanocodex } from "nanocodex-react";
 
 const config = createConfig();
 
-root.render(
-  <NanocodexProvider config={config}>
-    <App />
-  </NanocodexProvider>,
-);
-
 function App() {
-  const { data: agent, error, isError, isSuccess, refetch } = useAgent({
+  const { data: agent, error, isError, isSuccess, refetch } = useNanocodex({
+    config,
     threadId: "project-1",
   });
   useAgentEvents(agent, (event) => {
@@ -31,12 +26,14 @@ function App() {
   if (!isSuccess) return null;
   return <Composer agent={agent} />;
 }
+
+root.render(<App />);
 ```
 
 The vanilla `createConfig` store owns the package Worker, retries, replacement,
 and graceful shutdown. Active hooks with the same thread ID share exactly one
 Agent. A disabled hook stays idle without preparing or creating an Agent.
-`useAgent` exposes a Wagmi-style status snapshot and
+`useNanocodex` exposes a Wagmi-style status snapshot and
 `refetch`; `useAgentEvents` subscribes to the ordered typed event stream while
 always calling the latest committed React listener.
 
@@ -45,21 +42,21 @@ application needs them:
 
 ```tsx
 import { Transport } from "nanocodex/browser";
-import { NanocodexProvider, createConfig } from "nanocodex-react";
+import { createConfig, useNanocodex } from "nanocodex-react";
 
 const config = createConfig({
   agent: { transport: Transport.hostManaged({ websocketUrl: "/api/responses" }) },
 });
 
-root.render(<NanocodexProvider config={config}><App /></NanocodexProvider>);
+function App() {
+  const { data: agent } = useNanocodex({ config });
+  return agent ? <Composer agent={agent} /> : null;
+}
 ```
 
-Credential-gated route loaders can overlap Worker startup and WASM compilation
-with navigation without creating an Agent or publishing a transient state:
-
-```ts
-await config.prepareAgent({ threadId });
-```
+For many consumers, put the same config in `NanocodexProvider` and omit the
+`config` option from each hook. No React-specific prepare or preload step is
+required.
 
 ## Keep policy in the application
 

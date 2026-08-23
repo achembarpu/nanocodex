@@ -13,7 +13,6 @@ import { evalRouteFromPath, type EvalRoute } from "./evalRoute";
 import { evalApi, type EvalSummary, type EvalWorksetDetail } from "./evalApi";
 import {
   LiveEvals,
-  preloadEvalAnalytics,
   type EvalSurfaceStatus,
 } from "./LiveEvals";
 
@@ -255,11 +254,9 @@ function UnknownRoute() {
 function EvalsContent({ route }: { route: EvalRoute }) {
   if (route.kind === "overview") return <OverviewRoute />;
   if (route.kind === "workset") {
-    void preloadEvalAnalytics().catch(() => undefined);
     return <WorksetRoute route={route} />;
   }
   if (route.kind === "task") {
-    void preloadEvalAnalytics().catch(() => undefined);
     return <TaskRoute route={route} />;
   }
   return <UnknownRoute />;

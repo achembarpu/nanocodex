@@ -1,6 +1,7 @@
 import {
   useCallback,
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type FormEvent,
@@ -9,14 +10,30 @@ import {
 import {
   MULTIPLAYER_MAX_MESSAGE_BYTES,
   MultiplayerProtocolError,
+  clearMultiplayerCreateAttempt,
+  clearMultiplayerJoinAttempt,
+  clearMultiplayerPendingSend,
+  createMultiplayerCreateAttempt,
+  createMultiplayerJoinAttempt,
+  createMultiplayerPendingSend,
   createMultiplayerRoomState,
   decodeMultiplayerMessage,
   multiplayerInvitation,
   multiplayerInviteUrl,
+  multiplayerPendingSendSettled,
   multiplayerRoomPath,
   multiplayerSocketUrl,
+  readMultiplayerCreateAttempt,
+  readMultiplayerJoinAttempt,
+  readMultiplayerPendingSend,
   reduceMultiplayerMessage,
+  writeMultiplayerCreateAttempt,
+  writeMultiplayerJoinAttempt,
+  writeMultiplayerPendingSend,
   type MultiplayerAuthMode,
+  type MultiplayerCreateAttempt,
+  type MultiplayerJoinAttempt,
+  type MultiplayerPendingSend,
   type MultiplayerRoomState,
   type MultiplayerTarget,
 } from "./multiplayerProtocol";
@@ -39,15 +56,29 @@ type PendingRoom = Omit<RoomReceipt, "memberId"> & { memberId?: string; inviteUr
 
 const encoder = new TextEncoder();
 const RECONNECT_DELAYS = [500, 1_000, 2_000, 4_000, 8_000];
+const TRANSCRIPT_FOLLOW_THRESHOLD_PX = 80;
 
 export function Multiplayer() {
   const initial = useRef(multiplayerInvitation(new URL(window.location.href))).current;
+  const initialCreateAttempt = useRef(!initial.roomId
+    ? readMultiplayerCreateAttempt(window.sessionStorage)
+    : undefined).current;
+  const initialJoinAttempt = useRef(initial.roomId && initial.invite
+    ? readMultiplayerJoinAttempt(window.sessionStorage, initial.roomId, initial.invite)
+    : undefined).current;
+  const initialPendingSend = useRef(initial.roomId
+    ? readMultiplayerPendingSend(window.sessionStorage, initial.roomId)
+    : undefined).current;
   const [lobby, setLobby] = useState<LobbyState>(() => initial.roomId && initial.invite
     ? { kind: "join", roomId: initial.roomId, invite: initial.invite }
     : initial.roomId
       ? { kind: "resume", roomId: initial.roomId }
       : { kind: "create" });
-  const [displayName, setDisplayName] = useState(readDisplayName);
+  const [displayName, setDisplayName] = useState(() => (
+    initialJoinAttempt?.displayName
+    ?? initialCreateAttempt?.displayName
+    ?? readDisplayName()
+  ));
   const [pending, setPending] = useState(false);
   const [room, setRoom] = useState<MultiplayerRoomState>();
   const [connected, setConnected] = useState(false);
@@ -56,20 +87,65 @@ export function Multiplayer() {
   const [roomError, setRoomError] = useState<string>();
   const [inviteCopied, setInviteCopied] = useState(false);
   const [endingRoom, setEndingRoom] = useState(false);
+  const [unreadCount, setUnreadCount] = useState(0);
+  const [pendingSend, setPendingSend] = useState<MultiplayerPendingSend | undefined>(initialPendingSend);
   const roomRef = useRef<MultiplayerRoomState | undefined>(undefined);
   const socketRef = useRef<WebSocket | undefined>(undefined);
   const socketGeneration = useRef(0);
   const reconnectTimer = useRef<number | undefined>(undefined);
   const reconnectAttempt = useRef(0);
   const pendingRoomRef = useRef<PendingRoom | undefined>(undefined);
+  const createAttemptRef = useRef<MultiplayerCreateAttempt | undefined>(initialCreateAttempt);
+  const joinAttemptRef = useRef<MultiplayerJoinAttempt | undefined>(initialJoinAttempt);
+  const pendingSendRef = useRef<MultiplayerPendingSend | undefined>(initialPendingSend);
   const mounted = useRef(true);
   const lifecycleAbort = useRef(new AbortController());
   const transcriptRef = useRef<HTMLOListElement>(null);
+  const followTranscript = useRef(true);
+  const transcriptSnapshot = useRef<{ roomId?: string; timelineLength: number }>({ timelineLength: 0 });
 
   const commitRoom = useCallback((next: MultiplayerRoomState) => {
+    const transcript = transcriptRef.current;
+    if (transcript) followTranscript.current = isNearTranscriptEnd(transcript);
     roomRef.current = next;
     setRoom(next);
   }, []);
+
+  const forgetPendingSend = useCallback((pendingCommand: MultiplayerPendingSend) => {
+    clearMultiplayerPendingSend(window.sessionStorage, pendingCommand);
+    const current = pendingSendRef.current;
+    if (current?.roomId === pendingCommand.roomId
+      && current.memberId === pendingCommand.memberId
+      && current.id === pendingCommand.id
+      && current.encoded === pendingCommand.encoded) {
+      pendingSendRef.current = undefined;
+      setPendingSend(undefined);
+    }
+  }, []);
+
+  const resendPendingSend = useCallback((
+    socket: WebSocket,
+    roomId: string,
+    memberId: string,
+  ) => {
+    let pendingCommand = pendingSendRef.current;
+    if (!pendingCommand || pendingCommand.roomId !== roomId) {
+      pendingCommand = readMultiplayerPendingSend(window.sessionStorage, roomId);
+    }
+    if (!pendingCommand) return;
+    pendingSendRef.current = pendingCommand;
+    setPendingSend(pendingCommand);
+    if (pendingCommand.memberId !== memberId) {
+      forgetPendingSend(pendingCommand);
+      setRoomError("A pending command belonged to a different room membership and was not resent.");
+      return;
+    }
+    try {
+      socket.send(pendingCommand.encoded);
+    } catch {
+      setRoomError("The pending command remains saved and will be retried after reconnecting.");
+    }
+  }, [forgetPendingSend]);
 
   const connect = useCallback((receipt: PendingRoom, isReconnect = false) => {
     if (!mounted.current) return;
@@ -103,6 +179,7 @@ export function Multiplayer() {
           setRoomError(undefined);
           reconnectAttempt.current = 0;
           window.history.replaceState(window.history.state, "", multiplayerRoomPath(receipt.roomId));
+          resendPendingSend(socket, message.room_id, message.member_id);
           return;
         }
         const current = roomRef.current;
@@ -114,10 +191,35 @@ export function Multiplayer() {
           return;
         }
         if (message.type === "error") {
+          const pendingCommand = pendingSendRef.current;
+          if (message.id !== undefined
+            && pendingCommand
+            && pendingCommand.roomId === receipt.roomId
+            && message.id === pendingCommand.id) {
+            forgetPendingSend(pendingCommand);
+            setDraft(pendingCommand.text);
+            setTarget(pendingCommand.target);
+          }
           setRoomError(roomOperationError(message.code));
           return;
         }
-        commitRoom(reduceMultiplayerMessage(current, message));
+        if (message.type === "accepted") {
+          const pendingCommand = pendingSendRef.current;
+          if (pendingCommand
+            && pendingCommand.roomId === receipt.roomId
+            && multiplayerPendingSendSettled(pendingCommand, message)) {
+            forgetPendingSend(pendingCommand);
+          }
+          return;
+        }
+        const next = reduceMultiplayerMessage(current, message);
+        commitRoom(next);
+        const pendingCommand = pendingSendRef.current;
+        if (pendingCommand
+          && pendingCommand.roomId === receipt.roomId
+          && multiplayerPendingSendSettled(pendingCommand, message)) {
+          forgetPendingSend(pendingCommand);
+        }
       } catch {
         setRoomError("The room stream was invalid. Reconnect to replay its last durable cursor.");
         socket.close(1002, "invalid room protocol");
@@ -152,7 +254,7 @@ export function Multiplayer() {
         setRoomError(undefined);
       }
     });
-  }, [commitRoom]);
+  }, [commitRoom, forgetPendingSend, resendPendingSend]);
 
   useEffect(() => {
     mounted.current = true;
@@ -207,10 +309,31 @@ export function Multiplayer() {
     return () => window.clearInterval(timer);
   }, []);
 
-  useEffect(() => {
+  useLayoutEffect(() => {
+    if (!room) {
+      transcriptSnapshot.current = { timelineLength: 0 };
+      followTranscript.current = true;
+      setUnreadCount(0);
+      return;
+    }
+
+    const previous = transcriptSnapshot.current;
+    const newRoom = previous.roomId !== room.roomId;
+    const added = newRoom
+      ? room.timeline.length
+      : Math.max(0, room.timeline.length - previous.timelineLength);
+    transcriptSnapshot.current = { roomId: room.roomId, timelineLength: room.timeline.length };
+
     const transcript = transcriptRef.current;
-    if (transcript) transcript.scrollTop = transcript.scrollHeight;
-  }, [room?.cursor]);
+    if (!transcript) return;
+    if (newRoom || followTranscript.current) {
+      followTranscript.current = true;
+      transcript.scrollTop = transcript.scrollHeight;
+      setUnreadCount(0);
+    } else if (added > 0) {
+      setUnreadCount((current) => current + added);
+    }
+  }, [room?.roomId, room?.timeline.length]);
 
   useEffect(() => {
     if (room && !room.canTargetAgent && target === "agent") setTarget("room");
@@ -224,6 +347,28 @@ export function Multiplayer() {
       setLobby({ kind: "create", error: "Enter a display name." });
       return;
     }
+    let attempt = createAttemptRef.current;
+    if (attempt && attempt.displayName !== name) {
+      setPending(false);
+      setDisplayName(attempt.displayName);
+      setLobby({
+        kind: "create",
+        error: `Retry the pending room creation as ${attempt.displayName} so its durable receipt stays identical.`,
+      });
+      return;
+    }
+    if (!attempt) {
+      attempt = createMultiplayerCreateAttempt(name);
+      if (!writeMultiplayerCreateAttempt(window.sessionStorage, attempt)) {
+        setPending(false);
+        setLobby({
+          kind: "create",
+          error: "This browser could not retain a safe room-creation receipt. Enable session storage and retry.",
+        });
+        return;
+      }
+      createAttemptRef.current = attempt;
+    }
     setPending(true);
     setLobby({ kind: "create" });
     try {
@@ -234,15 +379,22 @@ export function Multiplayer() {
           accept: "application/json",
           "content-type": "application/json",
         },
-        body: JSON.stringify({ display_name: name }),
+        body: JSON.stringify({
+          create_id: attempt.createId,
+          display_name: attempt.displayName,
+        }),
         signal,
       });
       if (!response.ok) throw new Error(createRoomError(response.status));
       const receipt = decodeRoomReceipt(await response.json<unknown>(), true);
       if (signal.aborted || !mounted.current) return;
-      writeDisplayName(name);
+      writeDisplayName(attempt.displayName);
       const inviteUrl = multiplayerInviteUrl(window.location.origin, receipt.roomId, receipt.invite!);
       window.history.replaceState(window.history.state, "", multiplayerRoomPath(receipt.roomId));
+      clearMultiplayerCreateAttempt(window.sessionStorage, attempt);
+      if (createAttemptRef.current?.createId === attempt.createId) {
+        createAttemptRef.current = undefined;
+      }
       connect({ ...receipt, inviteUrl });
     } catch (error) {
       if (signal.aborted || !mounted.current) return;
@@ -265,18 +417,54 @@ export function Multiplayer() {
     }
     setPending(true);
     setLobby({ ...lobby, error: undefined });
+    let attempt = joinAttemptRef.current;
+    if (attempt
+      && (attempt.roomId !== lobby.roomId || attempt.invite !== lobby.invite)) {
+      attempt = undefined;
+      joinAttemptRef.current = undefined;
+    }
+    if (attempt && attempt.displayName !== name) {
+      setPending(false);
+      setDisplayName(attempt.displayName);
+      setLobby({
+        ...lobby,
+        error: `Retry the pending join as ${attempt.displayName} so its durable receipt stays identical.`,
+      });
+      return;
+    }
+    if (!attempt) {
+      attempt = createMultiplayerJoinAttempt(lobby.roomId, lobby.invite, name);
+      if (!writeMultiplayerJoinAttempt(window.sessionStorage, attempt)) {
+        setPending(false);
+        setLobby({ ...lobby, error: "This browser could not retain a safe join receipt. Enable session storage and retry." });
+        return;
+      }
+      joinAttemptRef.current = attempt;
+    }
     try {
       const response = await fetch(`/v1/rooms/${lobby.roomId}/join`, {
         method: "POST",
         credentials: "same-origin",
         headers: { accept: "application/json", "content-type": "application/json" },
-        body: JSON.stringify({ invite: lobby.invite, display_name: name }),
+        body: JSON.stringify({
+          invite: attempt.invite,
+          display_name: attempt.displayName,
+          join_id: attempt.joinId,
+        }),
         signal,
       });
-      if (!response.ok) throw new Error(joinRoomError(response.status));
+      if (!response.ok) {
+        if (response.status < 500) {
+          clearMultiplayerJoinAttempt(window.sessionStorage, attempt);
+          if (joinAttemptRef.current?.joinId === attempt.joinId) joinAttemptRef.current = undefined;
+        }
+        throw new Error(joinRoomError(response.status));
+      }
       const receipt = decodeRoomReceipt(await response.json<unknown>(), false);
       if (signal.aborted || !mounted.current) return;
-      writeDisplayName(name);
+      clearMultiplayerJoinAttempt(window.sessionStorage, attempt);
+      if (joinAttemptRef.current?.joinId === attempt.joinId) joinAttemptRef.current = undefined;
+      writeDisplayName(attempt.displayName);
       window.history.replaceState(window.history.state, "", multiplayerRoomPath(receipt.roomId));
       connect(receipt);
     } catch (error) {
@@ -294,7 +482,7 @@ export function Multiplayer() {
     const text = draft.trim();
     if (!text) return;
     if (target === "agent" && !roomRef.current?.canTargetAgent) {
-      setRoomError("Only the room host can ask the managed agent.");
+      setRoomError("This room does not currently allow managed-agent turns.");
       setTarget("room");
       return;
     }
@@ -307,14 +495,31 @@ export function Multiplayer() {
       setRoomError("The room is offline. Retry the connection before sending.");
       return;
     }
-    socket.send(JSON.stringify({
-      type: "say",
-      id: `message-${crypto.randomUUID()}`,
+    if (pendingSendRef.current) {
+      setRoomError("Wait for the pending message's durable receipt before sending another.");
+      return;
+    }
+    const current = roomRef.current;
+    if (!current) return;
+    const pendingCommand = createMultiplayerPendingSend(
+      current.roomId,
+      current.memberId,
       text,
       target,
-    }));
+    );
+    if (!writeMultiplayerPendingSend(window.sessionStorage, pendingCommand)) {
+      setRoomError("This browser could not retain the command for safe retry. Enable session storage and resend.");
+      return;
+    }
+    pendingSendRef.current = pendingCommand;
+    setPendingSend(pendingCommand);
+    try {
+      socket.send(pendingCommand.encoded);
+      setRoomError(undefined);
+    } catch {
+      setRoomError("The command remains saved and will be retried after reconnecting.");
+    }
     setDraft("");
-    setRoomError(undefined);
   };
 
   const handleComposerKey = (event: ReactKeyboardEvent<HTMLTextAreaElement>) => {
@@ -322,6 +527,21 @@ export function Multiplayer() {
     event.preventDefault();
     event.currentTarget.form?.requestSubmit();
   };
+
+  const handleTranscriptScroll = useCallback(() => {
+    const transcript = transcriptRef.current;
+    if (!transcript) return;
+    followTranscript.current = isNearTranscriptEnd(transcript);
+    if (followTranscript.current) setUnreadCount(0);
+  }, []);
+
+  const jumpToLatest = useCallback(() => {
+    const transcript = transcriptRef.current;
+    if (!transcript) return;
+    followTranscript.current = true;
+    transcript.scrollTop = transcript.scrollHeight;
+    setUnreadCount(0);
+  }, []);
 
   const retryRoom = () => {
     const receipt = pendingRoomRef.current;
@@ -341,14 +561,24 @@ export function Multiplayer() {
     setConnected(false);
     roomRef.current = undefined;
     pendingRoomRef.current = undefined;
+    const joinAttempt = joinAttemptRef.current;
+    if (joinAttempt) clearMultiplayerJoinAttempt(window.sessionStorage, joinAttempt);
+    joinAttemptRef.current = undefined;
+    const pendingCommand = pendingSendRef.current;
+    if (pendingCommand) clearMultiplayerPendingSend(window.sessionStorage, pendingCommand);
+    pendingSendRef.current = undefined;
+    setPendingSend(undefined);
     setRoom(undefined);
     setRoomError(undefined);
+    setUnreadCount(0);
+    followTranscript.current = true;
+    transcriptSnapshot.current = { timelineLength: 0 };
     setLobby({ kind: "create" });
     window.history.replaceState(window.history.state, "", multiplayerRoomPath());
   };
 
   const endRoom = async () => {
-    if (!room?.canTargetAgent || endingRoom) return;
+    if (!room?.canEndRoom || endingRoom) return;
     setEndingRoom(true);
     try {
       const response = await fetch(`/v1/rooms/${room.roomId}`, {
@@ -447,7 +677,7 @@ export function Multiplayer() {
             <div>
               <span>02</span>
               <h2>Agent</h2>
-              <p>One private, tool-free managed agent retains WASM history. Only the host can admit a metered turn.</p>
+              <p>One private, tool-free managed agent retains WASM history. Every room member can admit a quota-bound turn.</p>
             </div>
             <div>
               <span>03</span>
@@ -473,7 +703,7 @@ export function Multiplayer() {
           {room.inviteUrl ? (
             <button type="button" onClick={copyInvite}>{inviteCopied ? "Invite copied" : "Copy invite"}</button>
           ) : null}
-          {room.canTargetAgent ? (
+          {room.canEndRoom ? (
             <button type="button" disabled={endingRoom} onClick={() => void endRoom()}>End room</button>
           ) : null}
           <button type="button" onClick={leaveRoom}>Leave</button>
@@ -482,7 +712,12 @@ export function Multiplayer() {
 
       <div className="multiplayer-room-grid">
         <div className="multiplayer-chat">
-          <ol ref={transcriptRef} aria-live="polite" aria-label="Room transcript">
+          <ol
+            ref={transcriptRef}
+            aria-live="polite"
+            aria-label="Room transcript"
+            onScroll={handleTranscriptScroll}
+          >
             {room.timeline.map((item) => (
               <TimelineItem
                 key={item.cursor}
@@ -491,6 +726,16 @@ export function Multiplayer() {
               />
             ))}
           </ol>
+          {unreadCount > 0 ? (
+            <button
+              className="multiplayer-unread"
+              type="button"
+              aria-live="polite"
+              onClick={jumpToLatest}
+            >
+              {unreadCount} unread {unreadCount === 1 ? "update" : "updates"} · Jump to latest
+            </button>
+          ) : null}
           {roomError ? (
             <div className="multiplayer-room-error" role="alert">
               <span>{roomError}</span>
@@ -525,9 +770,9 @@ export function Multiplayer() {
               value={draft}
               onChange={(event) => setDraft(event.target.value)}
               onKeyDown={handleComposerKey}
-              disabled={!connected}
+              disabled={!connected || pendingSend !== undefined}
             />
-            <button type="submit" disabled={!connected || !draft.trim()}>Send</button>
+            <button type="submit" disabled={!connected || pendingSend !== undefined || !draft.trim()}>Send</button>
           </form>
         </div>
 
@@ -575,6 +820,11 @@ export function Multiplayer() {
       </div>
     </section>
   );
+}
+
+function isNearTranscriptEnd(transcript: HTMLOListElement): boolean {
+  const remaining = transcript.scrollHeight - transcript.clientHeight - transcript.scrollTop;
+  return remaining <= TRANSCRIPT_FOLLOW_THRESHOLD_PX;
 }
 
 function TimelineItem({
@@ -652,6 +902,7 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
 
 function createRoomError(status: number): string {
   if (status === 401) return "The deployment rejected room allocation.";
+  if (status === 409) return "That room-creation receipt conflicts with an earlier attempt in this tab.";
   if (status === 429) return "Room creation is temporarily limited. Try again later.";
   if (status === 503) return "The managed Multiplayer deployment is unavailable.";
   return "The room could not be created.";
@@ -660,15 +911,15 @@ function createRoomError(status: number): string {
 function joinRoomError(status: number): string {
   if (status === 401) return "This invite is invalid or no longer available.";
   if (status === 404) return "This room is no longer available.";
+  if (status === 409) return "That join receipt conflicts with an earlier attempt in this tab.";
+  if (status === 410) return "This invite has expired or reached its use limit.";
   if (status === 429) return "This room has reached its member limit.";
   return "The room could not be joined.";
 }
 
 function roomOperationError(code: string): string {
   if (code === "agent_queue_full") return "The managed agent queue is full. Let its current room turns finish first.";
-  if (code === "owner_required" || code === "agent_owner_required") {
-    return "Only the room host can ask the managed agent.";
-  }
+  if (code === "owner_required") return "Only the room host can end this room.";
   if (code === "agent_rate_limited") return "The room's managed-agent budget is temporarily exhausted.";
   if (code === "agent_capacity_unavailable") return "The deployment-wide managed-agent budget is temporarily unavailable.";
   if (code === "chat_rate_limited") return "Room chat is temporarily rate limited. Wait before sending again.";

@@ -9,7 +9,7 @@ import {
   Trash2,
 } from "lucide-react";
 import { memo, useCallback, useEffect, useId, useRef, useState } from "react";
-import type {
+import {
   ArtifactStore,
   ArtifactDocument,
   ArtifactInput,
@@ -70,10 +70,7 @@ export const ArtifactDock = memo(function ArtifactDock({
 
   useEffect(() => {
     let active = true;
-    void Promise.all([
-      openKernelWorkspace(),
-      import("nanocodex/tools/artifact"),
-    ]).then(async ([nextWorkspace, { ArtifactStore }]) => {
+    void openKernelWorkspace().then(async (nextWorkspace) => {
       if (!active) return;
       const nextStore = new ArtifactStore(nextWorkspace);
       setStore(nextStore);

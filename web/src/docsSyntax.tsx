@@ -1,5 +1,10 @@
 import pierreDark from "@pierre/theme/pierre-dark-soft";
 import pierreLight from "@pierre/theme/pierre-light";
+import bash from "@shikijs/langs/bash";
+import javascript from "@shikijs/langs/javascript";
+import python from "@shikijs/langs/python";
+import rust from "@shikijs/langs/rust";
+import tsx from "@shikijs/langs/tsx";
 import { Fragment, type CSSProperties, type ReactNode } from "react";
 import { createHighlighterCore } from "shiki/core";
 import { createJavaScriptRegexEngine } from "shiki/engine/javascript";
@@ -19,6 +24,13 @@ const languageAliases: Record<string, DocsLanguage | undefined> = {
   shell: "bash",
   shellscript: "bash",
   tsx: "tsx",
+};
+const languageInputs: Record<DocsLanguage, LanguageInput[]> = {
+  bash,
+  javascript,
+  python,
+  rust,
+  tsx,
 };
 
 type DocsHighlighter = Awaited<ReturnType<typeof createHighlighterCore>>;
@@ -65,11 +77,8 @@ export function prepareDocsLanguages(languages: readonly string[]): Promise<void
   const request = languageLoadSequence.then(async () => {
     const missing = required.filter((language) => !loadedLanguages.has(language));
     if (missing.length === 0) return;
-    const [highlighter, grammars] = await Promise.all([
-      highlighterRequest,
-      Promise.all(missing.map(importLanguage)),
-    ]);
-    await highlighter.loadLanguage(...grammars.flat());
+    const highlighter = await highlighterRequest;
+    await highlighter.loadLanguage(...missing.flatMap((language) => languageInputs[language]));
     for (const language of missing) loadedLanguages.add(language);
   });
   languageLoadSequence = request.catch(() => undefined);
@@ -119,20 +128,5 @@ export function highlightDocsCode(code: string, language: string): ReactNode {
     return highlighted;
   } catch {
     return code;
-  }
-}
-
-function importLanguage(language: DocsLanguage): Promise<LanguageInput[]> {
-  switch (language) {
-    case "bash":
-      return import("@shikijs/langs/bash").then((module) => module.default);
-    case "javascript":
-      return import("@shikijs/langs/javascript").then((module) => module.default);
-    case "python":
-      return import("@shikijs/langs/python").then((module) => module.default);
-    case "rust":
-      return import("@shikijs/langs/rust").then((module) => module.default);
-    case "tsx":
-      return import("@shikijs/langs/tsx").then((module) => module.default);
   }
 }

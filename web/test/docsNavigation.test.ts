@@ -74,6 +74,7 @@ test("documentation source checker proves manifest parity, frontmatter, H1s, and
 test("navigation intent prepares the parsed overview, not only the Docs component", () => {
   assert.match(docs, /resolvedPageCache/);
   assert.match(docs, /export async function preloadDocsRoute/);
-  assert.match(application, /module\.preloadDocsRoute\("\/docs"\)/);
-  assert.match(application, /surfaceNavigationId\.current === navigationId/);
+  assert.match(application, /preloadDocsRoute\("\/docs"\)/);
+  assert.doesNotMatch(application, /\bloadDocs|import\(/);
+  assert.match(application, /surfaceNavigationId\.current !== navigationId/);
 });

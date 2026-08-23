@@ -12,8 +12,6 @@ import {
   X,
 } from "lucide-react";
 import {
-  lazy,
-  Suspense,
   startTransition,
   useCallback,
   useEffect,
@@ -21,14 +19,26 @@ import {
   useMemo,
   useRef,
   useState,
-  type ComponentType,
   type MouseEvent as ReactMouseEvent,
 } from "react";
 import { flushSync } from "react-dom";
-import { createRoot, type Root } from "react-dom/client";
-import { BrowserRouter, useLocation, useNavigate } from "react-router";
+import { useLocation, useNavigate } from "react-router";
+import { AgentExperience } from "./AgentExperience";
+import { Changelog, preloadChangelog } from "./Changelog";
+import { CodeBrowser } from "./CodeBrowser";
+import { CommitCodeStream } from "./CommitCodeStream";
+import { Docs, preloadDocsRoute } from "./Docs";
+import { Evals, preloadEvalOverview } from "./Evals";
+import { MonsterWorld } from "./MonsterWorld";
+import { Multiplayer } from "./Multiplayer";
+import { PierreWorkerProvider } from "./PierreWorkerProvider";
+import { VirtualCommitList } from "./VirtualCommitList";
 import type { CodeBrowserHandle } from "./CodeBrowser";
 import type { CommitCodeStreamHandle } from "./CommitCodeStream";
+import {
+  commitPreparationMatchesIntent,
+  settleRepositoryNavigationIntent,
+} from "./commitRouteState";
 import { fuzzyScore } from "./fuzzy";
 import {
   pathForCommit,
@@ -38,6 +48,7 @@ import {
   type Surface,
 } from "./navigation";
 import { COMPACT_WORKSPACE_QUERY } from "./pierreCodeView";
+import { RouteErrorBoundary } from "./RouteErrorBoundary";
 import type {
   PublishedCommitHistory,
   PublishedCommitPage,
@@ -45,38 +56,14 @@ import type {
   PublishedRepositorySnapshot,
 } from "./publishedRepository";
 import type { HarnessCommit } from "./threadRepositorySnapshot";
+import { loadWorldAssets } from "./monsterWorldRenderer";
 import { getBrowserThread } from "nanocodex/tools/browser";
 import { useDeploymentRollover } from "./useDeploymentRollover";
 import {
-  loadAgentExperience,
-  loadChangelog,
-  loadCodeBrowser,
-  loadCommitCodeStream,
-  loadDocs,
-  loadEvals,
-  loadHomeFrame,
-  loadMonsterWorld,
-  loadMultiplayer,
-  loadPierreWorkerProvider,
-  loadVirtualCommitList,
-  preloadEvalOverview,
   prepareRepositorySurface,
   type PreparedDirectRoute,
   type PreparedRepositorySurface,
 } from "./routeLoaders";
-
-const Evals = lazy(loadEvals);
-const Changelog = lazy(() =>
-  loadChangelog().then((module) => ({ default: module.Changelog }))
-);
-const HomeFrame = lazy(loadHomeFrame);
-const AgentExperience = lazy(loadAgentExperience);
-const Multiplayer = lazy(loadMultiplayer);
-const MonsterWorld = lazy(loadMonsterWorld);
-const PierreWorkerProvider = lazy(loadPierreWorkerProvider);
-const CodeBrowser = lazy(loadCodeBrowser);
-const CommitCodeStream = lazy(loadCommitCodeStream);
-const VirtualCommitList = lazy(loadVirtualCommitList);
 
 export type Theme = "light" | "dark";
 type Scope = "all" | "eval" | "fix" | "docs" | "perf";
@@ -145,38 +132,21 @@ function isPlainProductNavigation(event: ReactMouseEvent<HTMLAnchorElement>): bo
 
 type RepositorySurface = Extract<Surface, "code" | "commits">;
 
-type RepositoryNavigationIntent<T> = {
-  navigationId: number;
-  latestNavigationId(): number;
-  preparation: Promise<T>;
-  onPrepared(prepared: T): void;
-  onFailure(): void;
-  navigate(): void;
+type RouteLoadFailure = {
+  error: Error;
+  surface: Surface;
 };
 
-export async function settleRepositoryNavigationIntent<T>({
-  navigationId,
-  latestNavigationId,
-  preparation,
-  onPrepared,
-  onFailure,
-  navigate,
-}: RepositoryNavigationIntent<T>): Promise<"ready" | "failed" | "stale"> {
-  let prepared: T;
-  try {
-    prepared = await preparation;
-  } catch {
-    if (latestNavigationId() !== navigationId) return "stale";
-    onFailure();
-    if (latestNavigationId() !== navigationId) return "stale";
-    navigate();
-    return "failed";
-  }
-  if (latestNavigationId() !== navigationId) return "stale";
-  onPrepared(prepared);
-  if (latestNavigationId() !== navigationId) return "stale";
-  navigate();
-  return "ready";
+type RepositoryFailureTarget = {
+  requestedCommit?: string;
+  surface: RepositorySurface;
+};
+
+function routeLoadError(error: unknown, surface: Surface): RouteLoadFailure {
+  return {
+    error: error instanceof Error ? error : new Error(`${surface} route failed to load`),
+    surface,
+  };
 }
 
 const scopes: Array<{ id: Scope; label: string }> = [
@@ -254,24 +224,6 @@ export function NanocodexApp({ preparedRoute = {} }: NanocodexAppProps) {
   return <NanocodexShell preparedRoute={preparedRoute} />;
 }
 
-export function mountNanocodexApp(preparedRoute: PreparedDirectRoute) {
-  const container = document.getElementById("root") as RootContainer | null;
-  if (!container) throw new Error("Nanocodex root container is missing");
-
-  // Fast Refresh may briefly re-evaluate this module before replacing the
-  // document. Keep one React owner on the DOM node across that handoff.
-  const root = container.__nanocodexRoot ??= createRoot(container);
-  root.render(
-    <BrowserRouter useTransitions={false}>
-      <Suspense fallback={null}>
-        <NanocodexApp preparedRoute={preparedRoute} />
-      </Suspense>
-    </BrowserRouter>,
-  );
-}
-
-type RootContainer = HTMLElement & { __nanocodexRoot?: Root };
-
 function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
   useDeploymentRollover();
   const location = useLocation();
@@ -285,13 +237,13 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
       ?.setAttribute("content", initial === "dark" ? "#161616" : "#ffffff");
     return initial;
   });
-  const [DocsComponent, setDocsComponent] = useState<ComponentType | null>(
-    preparedRoute.DocsComponent ?? null,
-  );
   const surface = surfaceFromUrl({
     pathname: location.pathname,
     searchParams: new URLSearchParams(location.search),
   });
+  const requestedCommit = surface === "commits"
+    ? commitHashFromSearch(location.search)
+    : undefined;
   const [threadId, setThreadId] = useState<string | undefined>(() =>
     surface === "docs" ? undefined : getBrowserThread().id
   );
@@ -310,6 +262,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
       : emptyCommitPages
   );
   const [repositoryLoadError, setRepositoryLoadError] = useState<RepositorySurface | null>(null);
+  const [routeLoadFailure, setRouteLoadFailure] = useState<RouteLoadFailure | null>(null);
   const [commitMetadataError, setCommitMetadataError] = useState(false);
   const [scope, setScope] = useState<Scope>("all");
   const [query, setQuery] = useState("");
@@ -336,6 +289,11 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
   const commitStreamRef = useRef<CommitCodeStreamHandle>(null);
   const repositoryRequestId = useRef(0);
   const surfaceNavigationId = useRef(0);
+  const commitHistoryTargetRef = useRef<string | undefined>(
+    preparedRoute.commitHistory && surface === "commits" ? requestedCommit : undefined,
+  );
+  const commitIntentTargetRef = useRef<string | undefined>(requestedCommit);
+  const repositoryFailureTargetRef = useRef<RepositoryFailureTarget | undefined>(undefined);
   const commitHistoryHeadRef = useRef(commitHistory?.repository.head);
   commitHistoryHeadRef.current = commitHistory?.repository.head;
   const commitRailModalOpen = surface === "commits" && commitRailOpen;
@@ -381,16 +339,6 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
     });
   }, []);
 
-  useEffect(() => {
-    if (surface !== "docs" || DocsComponent) return;
-    let active = true;
-    void loadDocs().then((module) => {
-      if (active) setDocsComponent(() => module.Docs);
-    });
-    return () => {
-      active = false;
-    };
-  }, [DocsComponent, surface]);
   const selected = useMemo(
     () =>
       commits.find((commit) => commit.hash === selectedHash) ??
@@ -398,9 +346,6 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
       null,
     [commits, selectedHash],
   );
-  const requestedCommit = surface === "commits"
-    ? commitHashFromSearch(location.search)
-    : undefined;
   const scopeCounts = commitHistory?.scopeCounts ?? {
     all: commits.length,
     eval: 0,
@@ -456,6 +401,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
       setSourceFile(loaded.sourceFile);
       return;
     }
+    commitHistoryTargetRef.current = loaded.requestedCommit;
     commitHistoryHeadRef.current = loaded.history.repository.head;
     setCommitHistory(loaded.history);
     setCommitPages([loaded.history.initialPage]);
@@ -484,15 +430,30 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
     void prepareRepositorySurface(nextSurface, requestedCommit, true).then(
       (loaded) => {
         if (repositoryRequestId.current !== requestId) return;
+        if (
+          loaded.surface === "commits"
+          && !commitPreparationMatchesIntent(
+            loaded.requestedCommit,
+            commitIntentTargetRef.current,
+          )
+        ) return;
         startTransition(() => {
           commitPreparedRepository(loaded);
+          repositoryFailureTargetRef.current = undefined;
           setRepositoryLoadError((current) => current === nextSurface ? null : current);
         });
       },
       () => {
-        if (repositoryRequestId.current === requestId) {
-          setRepositoryLoadError(nextSurface);
-        }
+        if (repositoryRequestId.current !== requestId) return;
+        if (
+          nextSurface === "commits"
+          && !commitPreparationMatchesIntent(
+            requestedCommit,
+            commitIntentTargetRef.current,
+          )
+        ) return;
+        repositoryFailureTargetRef.current = { requestedCommit, surface: nextSurface };
+        setRepositoryLoadError(nextSurface);
       },
     );
   }, [commitPreparedRepository]);
@@ -507,25 +468,44 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
 
   useLayoutEffect(() => {
     surfaceNavigationId.current++;
-  }, [location.key]);
+    commitIntentTargetRef.current = surface === "commits" ? requestedCommit : undefined;
+  }, [location.key, requestedCommit, surface]);
 
   useLayoutEffect(() => {
     retainAgentExperience(surface);
   }, [retainAgentExperience, surface]);
 
   useEffect(() => {
-    if (!needsRepository || repositoryLoadError === surface) return;
-    if (
-      (surface === "code" && !snapshot) ||
-      (surface === "commits" && !commitHistory)
-    ) {
-      refreshRepository();
+    if (!needsRepository) return;
+    const ready = surface === "code"
+      ? Boolean(snapshot)
+      : Boolean(
+          commitHistory
+          && commitPreparationMatchesIntent(
+            commitHistoryTargetRef.current,
+            requestedCommit,
+          )
+        );
+    if (ready) return;
+
+    const failed = repositoryFailureTargetRef.current;
+    const failureIsCurrent = failed?.surface === surface
+      && (
+        surface === "code"
+        || commitPreparationMatchesIntent(failed.requestedCommit, requestedCommit)
+      );
+    if (repositoryLoadError === surface && failureIsCurrent) return;
+    if (repositoryLoadError === surface) {
+      repositoryFailureTargetRef.current = undefined;
+      setRepositoryLoadError(null);
     }
+    refreshRepository();
   }, [
     commitHistory,
     needsRepository,
     refreshRepository,
     repositoryLoadError,
+    requestedCommit,
     snapshot,
     surface,
   ]);
@@ -634,30 +614,21 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
 
   const preloadSurface = useCallback((nextSurface: Surface) => {
     if (nextSurface === "home" || nextSurface === "agent") {
-      void Promise.all([loadHomeFrame(), loadAgentExperience()]).catch(() => undefined);
       return;
     }
     if (nextSurface === "multiplayer") {
-      void loadMultiplayer().catch(() => undefined);
       return;
     }
     if (nextSurface === "world") {
-      void loadMonsterWorld().catch(() => undefined);
+      void loadWorldAssets().catch(() => undefined);
       return;
     }
     if (nextSurface === "changelog") {
-      void loadChangelog()
-        .then((module) => module.preloadChangelog())
-        .catch(() => undefined);
+      void preloadChangelog().catch(() => undefined);
       return;
     }
     if (nextSurface === "docs") {
-      void loadDocs()
-        .then((module) => {
-          setDocsComponent(() => module.Docs);
-          return module.preloadDocsRoute("/docs");
-        })
-        .catch(() => undefined);
+      void preloadDocsRoute("/docs").catch(() => undefined);
       return;
     }
     if (nextSurface === "code" || nextSurface === "commits") {
@@ -678,6 +649,9 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
     const requestedCommit = nextSurface === "commits"
       ? commitHashFromDestination(destination)
       : undefined;
+    if (nextSurface === "commits") {
+      commitIntentTargetRef.current = requestedCommit;
+    }
     void settleRepositoryNavigationIntent({
       navigationId,
       latestNavigationId: () => surfaceNavigationId.current,
@@ -690,12 +664,14 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
         flushSync(() => {
           if (!threadId) setThreadId(nextThreadId);
           commitPreparedRepository(preparedRepository);
+          repositoryFailureTargetRef.current = undefined;
           setRepositoryLoadError((current) => current === nextSurface ? null : current);
         });
       },
       onFailure: () => {
         flushSync(() => {
           if (!threadId) setThreadId(nextThreadId);
+          repositoryFailureTargetRef.current = { requestedCommit, surface: nextSurface };
           setRepositoryLoadError(nextSurface);
         });
       },
@@ -714,15 +690,22 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
       // The Docs route resolves its small source document as part of intent.
       // Keep the complete current surface visible until that atomic page is
       // ready, then navigate outside React's lower-priority transition lane.
-      void loadDocs()
-        .then((module) => {
-          setDocsComponent(() => module.Docs);
-          return module.preloadDocsRoute(destination);
-        })
-        .catch(() => undefined)
-        .then(() => {
-          if (surfaceNavigationId.current === navigationId) navigate(destination);
-        });
+      void preloadDocsRoute(destination).then(
+          () => {
+            if (surfaceNavigationId.current !== navigationId) return;
+            flushSync(() => {
+              setRouteLoadFailure((current) =>
+                current?.surface === "docs" ? null : current
+              );
+            });
+            navigate(destination);
+          },
+          (error: unknown) => {
+            if (surfaceNavigationId.current !== navigationId) return;
+            flushSync(() => setRouteLoadFailure(routeLoadError(error, "docs")));
+            navigate(destination);
+          },
+        );
       return;
     }
     const nextThreadId = threadId ?? getBrowserThread().id;
@@ -730,18 +713,35 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
     if (`${location.pathname}${location.search}` === destination) return;
     repositoryRequestId.current++;
     if (nextSurface === "code" || nextSurface === "commits") {
+      const ready = nextSurface === "code"
+        ? Boolean(snapshot)
+        : Boolean(
+            commitHistory
+            && commitPreparationMatchesIntent(
+              commitHistoryTargetRef.current,
+              undefined,
+            )
+          );
+      if (ready) {
+        if (nextSurface === "commits") commitIntentTargetRef.current = undefined;
+        if (!threadId) setThreadId(nextThreadId);
+        startTransition(() => navigate(destination));
+        return;
+      }
       navigateToPreparedRepository(nextSurface, destination, navigationId, nextThreadId);
       return;
     }
     if (!threadId) setThreadId(nextThreadId);
     startTransition(() => navigate(destination));
   }, [
+    commitHistory,
     location.pathname,
     location.search,
     navigate,
     navigateToPreparedRepository,
     preloadSurface,
     retainAgentExperience,
+    snapshot,
     threadId,
   ]);
 
@@ -998,6 +998,8 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
   ]);
 
   const selectCommit = (commit: HarnessCommit) => {
+    commitIntentTargetRef.current = commit.hash;
+    commitHistoryTargetRef.current = commit.hash;
     setSelectedHash(commit.hash);
     closeCommitSearch();
     closeCommitRail();
@@ -1046,7 +1048,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
                     : threadSurfacePath(item.surface)}
                   aria-current={surface === item.surface ? "page" : undefined}
                   aria-keyshortcuts={item.shortcut}
-                  data-mobile-label={item.label.slice(0, 1)}
+                  data-mobile-label={item.shortcut}
                   key={item.surface}
                   title={`${item.label} (${item.shortcut})`}
                   onFocus={() => preloadSurface(item.surface)}
@@ -1097,10 +1099,10 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
           id="top"
           inert={commitSearchModalOpen ? true : undefined}
         >
+          <RouteErrorBoundary surface={agentExperienceMounted ? "agent" : "home"}>
           {surface === "home" ||
           surface === "agent" ||
           agentExperienceMounted ? (
-            <HomeFrame>
             <section
               className={
                 surface === "home"
@@ -1184,17 +1186,27 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
                 </section>
               </article>
             </section>
-            </HomeFrame>
           ) : null}
+          </RouteErrorBoundary>
 
-          {surface === "home" || surface === "agent" ? null : surface === "multiplayer" ? (
+          {surface === "home" || surface === "agent" ? null : (
+          <RouteErrorBoundary
+            key={surface}
+            failure={
+              routeLoadFailure?.surface === surface
+                ? routeLoadFailure.error
+                : undefined
+            }
+            surface={surface}
+          >
+          {surface === "multiplayer" ? (
             <Multiplayer />
           ) : surface === "world" ? (
             <MonsterWorld />
           ) : surface === "changelog" ? (
             <Changelog onCommitClick={handleCommitClick} />
           ) : surface === "docs" ? (
-            DocsComponent ? <DocsComponent /> : null
+            <Docs />
           ) : surface === "code" ? repositoryLoadError === "code" ? (
             <RepositorySurfaceError
               failed
@@ -1360,6 +1372,8 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
             </section>
           ) : (
             <Evals />
+          )}
+          </RouteErrorBoundary>
           )}
         </main>
 

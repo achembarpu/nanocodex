@@ -34,9 +34,7 @@ export async function loadNightlyChangelog(
   request: Fetch = fetch,
   development = import.meta.env?.DEV ?? false,
 ): Promise<NightlyChangelog> {
-  const base = development
-    ? "/__nanocodex/repository"
-    : "/api/repository";
+  const base = "/api/repository";
   const snapshotResponse = await request(`${base}/snapshot`, {
     cache: development ? "no-store" : "default",
   });

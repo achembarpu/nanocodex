@@ -25,6 +25,7 @@ import {
   type DocsPage,
 } from "./docsNavigation";
 import { useModalBoundary } from "./modalBoundary";
+import * as docsSyntax from "./docsSyntax";
 import "./Docs.css";
 
 type ResolvedPage =
@@ -34,10 +35,6 @@ type ResolvedPage =
 
 const resolvedPageCache = new Map<string, ResolvedPage>();
 const resolvedPageRequests = new Map<string, Promise<void>>();
-type DocsSyntax = typeof import("./docsSyntax");
-let docsSyntax: DocsSyntax | undefined;
-let docsSyntaxRequest: Promise<DocsSyntax> | undefined;
-
 export async function preloadDocsRoute(pathname: string) {
   const path = normalizeDocsPath(pathname);
   if (resolvedPageCache.has(path)) return;
@@ -57,35 +54,19 @@ export async function preloadDocsRoute(pathname: string) {
 }
 
 async function resolveDocsPage(path: string): Promise<void> {
-  const syntaxRequest = loadDocsSyntax();
   const source = await loadDocsSource(path);
   if (source == null) return;
   const doc = parseDocument(source);
-  const syntax = await syntaxRequest;
   const codeBlocks = doc.blocks.filter(
     (block): block is Extract<MarkdownBlock, { type: "code" }> => block.type === "code",
   );
-  await syntax.prepareDocsLanguages(codeBlocks.map((block) => block.language));
-  for (const block of codeBlocks) syntax.highlightDocsCode(block.code, block.language);
+  await docsSyntax.prepareDocsLanguages(codeBlocks.map((block) => block.language));
+  for (const block of codeBlocks) docsSyntax.highlightDocsCode(block.code, block.language);
   resolvedPageCache.set(path, { kind: "document", path, source, doc });
 }
 
-function loadDocsSyntax(): Promise<DocsSyntax> {
-  if (docsSyntax) return Promise.resolve(docsSyntax);
-  if (docsSyntaxRequest) return docsSyntaxRequest;
-  const request = import("./docsSyntax").then((module) => {
-    docsSyntax = module;
-    return module;
-  });
-  docsSyntaxRequest = request;
-  void request.catch(() => {
-    if (docsSyntaxRequest === request) docsSyntaxRequest = undefined;
-  });
-  return request;
-}
-
 function highlightDocsCode(code: string, language: string): ReactNode {
-  return docsSyntax?.highlightDocsCode(code, language) ?? code;
+  return docsSyntax.highlightDocsCode(code, language);
 }
 
 export function Docs() {

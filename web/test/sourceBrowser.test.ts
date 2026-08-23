@@ -4,6 +4,7 @@ import test from "node:test";
 
 const browser = source("../src/CodeBrowser.tsx");
 const provider = source("../src/PierreWorkerProvider.tsx");
+const workerResource = source("../src/pierreWorkerResource.ts");
 const pierre = source("../src/pierreCodeView.ts");
 const styles = source("../src/SourceBrowser.css");
 
@@ -40,7 +41,7 @@ test("Source retains completed code, separates unsupported files, and retries re
   assert.match(browser, /await renderer\.prepareItems\(\[sourceCodeViewItem/);
   assert.match(browser, /if \(!active\) return;[\s\S]*?await renderer\.prepareItems/);
   assert.match(browser, /initialFile\?\.file\.path === initialLocation\.path/);
-  assert.match(provider, /pool\.primeFileHighlightCache\(item\.file\)/);
+  assert.match(workerResource, /pool\.primeFileHighlightCache\(item\.file\)/);
 });
 
 test("Source uses one Pierre search and a viewport-sized monochrome tree", () => {
@@ -68,16 +69,20 @@ test("Source uses one Pierre search and a viewport-sized monochrome tree", () =>
 });
 
 test("the Source worker remains single-threaded with a bounded responsive cache", () => {
-  assert.match(provider, /poolSize: 1/);
-  assert.match(provider, /matchMedia\(COMPACT_WORKSPACE_QUERY\)\.matches \? 10 : 100/);
-  assert.match(provider, /preferredHighlighter: "shiki-js"/);
-  assert.match(provider, /preloadPierreWorker/);
-  assert.match(provider, /PRELOADED_WORKER_RETENTION_MS = 30_000/);
-  assert.match(provider, /preloadedWorkerExpiry !== expiry/);
-  assert.match(provider, /preloadedWorker\?\.terminate\(\)/);
-  assert.match(provider, /createDiffWorker[\s\S]*?clearTimeout\(preloadedWorkerExpiry\)/);
-  assert.match(provider, /const worker = preloadedWorker \?\? new DiffWorker\(\)/);
-  assert.match(provider, /workerFactory: createDiffWorker/);
+  assert.match(workerResource, /poolSize: 1/);
+  assert.match(workerResource, /matchMedia\(COMPACT_WORKSPACE_QUERY\)\.matches \? 10 : 100/);
+  assert.match(workerResource, /preferredHighlighter: "shiki-js"/);
+  assert.match(workerResource, /preloadPierreWorker/);
+  assert.match(workerResource, /PRELOADED_WORKER_RETENTION_MS = 30_000/);
+  assert.match(workerResource, /preloadedWorkerExpiry !== expiry/);
+  assert.match(workerResource, /preloadedWorker\?\.terminate\(\)/);
+  assert.match(workerResource, /createDiffWorker[\s\S]*?clearTimeout\(preloadedWorkerExpiry\)/);
+  assert.match(workerResource, /const worker = preloadedWorker \?\? new DiffWorker\(\)/);
+  assert.match(workerResource, /workerFactory: createDiffWorker/);
+  assert.deepEqual(
+    [...provider.matchAll(/^export function (\w+)/gm)].map((match) => match[1]),
+    ["PierreWorkerProvider", "usePierreRenderer"],
+  );
 });
 
 function source(path: string): string {

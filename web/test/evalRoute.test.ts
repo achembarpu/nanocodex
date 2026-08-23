@@ -49,12 +49,11 @@ test("Evals route data is fetched in parallel and committed through one Suspense
     evalsSource,
     /function OverviewRoute[\s\S]*?queries: overviewQueryOptions\(\)/,
   );
-  assert.equal(matches(appSource, /<Suspense/g), 1);
   assert.match(
-    appSource,
-    /<Suspense fallback=\{null\}>\s*<NanocodexApp preparedRoute=\{preparedRoute\} \/>/,
+    entrySource,
+    /<Suspense fallback=\{null\}>/,
   );
-  assert.doesNotMatch(entrySource, /<Suspense/);
+  assert.doesNotMatch(appSource, /<Suspense/);
   assert.doesNotMatch(appSource, /Loading evals/);
 });
 

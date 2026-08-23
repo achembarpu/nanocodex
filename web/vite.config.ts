@@ -4,18 +4,18 @@ import { nanocodexTools } from "nanocodex/tools/vite";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { defineConfig, type Plugin } from "vite";
-import mkcert from "vite-plugin-mkcert";
-import { chatGptDevProxy } from "./vite/chatGptDevProxy.ts";
 import { rewriteDocsDevModuleUrl } from "./vite/docsDevModules.ts";
-import { repositoryDevServer } from "./vite/repositoryDevServer.ts";
-import { routePreloads } from "./vite/routePreloads.ts";
+import {
+  localManagedAuxiliaryWorkers,
+  localRoomAllocatorToken,
+} from "./vite/localWorkerTopology.ts";
 import {
   documentStatusForPath,
   renderLinkPreviewDocument,
 } from "./worker/linkPreview.ts";
 
 const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
-
+const localAllocatorToken = localRoomAllocatorToken();
 function applicationRouteFallback(): Plugin {
   return {
     name: "nanocodex-application-route-fallback",
@@ -65,7 +65,7 @@ function linkPreviewMetadata(): Plugin {
     transformIndexHtml: {
       order: "post",
       handler(html, context) {
-        const origin = context.server?.resolvedUrls?.local[0] ?? "https://localhost:5173";
+        const origin = context.server?.resolvedUrls?.local[0] ?? "http://localhost:5173";
         const url = new URL(context.path, origin);
         return renderLinkPreviewDocument(html, url);
       },
@@ -78,21 +78,49 @@ export default defineConfig({
   // detected shim also contains `env`. The browser has no environment access;
   // make that empty boundary explicit instead of letting a partial shim crash.
   define: { "process.env": "{}" },
-  // A trusted local certificate keeps secure browser Agent APIs on the same
-  // HTTPS boundary used in production.
   plugins: [
     applicationRouteFallback(),
     linkPreviewMetadata(),
-    routePreloads(),
     nanocodexTools(),
-    mkcert(),
     react(),
-    repositoryDevServer(),
-    chatGptDevProxy(),
     cloudflare({
+      auxiliaryWorkers: localManagedAuxiliaryWorkers(),
       config: (config) => ({
+        // `npm run dev` mints this one-use bootstrap credential after rejecting
+        // local env files. Wrangler's required-secret loader cannot consume
+        // process.env while env-file loading is disabled, so bind this exact
+        // non-provider token explicitly to the local Worker.
+        ...(process.env.CLOUDFLARE_ENV === "development"
+          ? { secrets: undefined }
+          : {}),
+        vars: {
+          ...config.vars,
+          ...(process.env.CLOUDFLARE_ENV === "development"
+            && process.env.GIT_MIRROR_TOKEN
+            ? { GIT_MIRROR_TOKEN: process.env.GIT_MIRROR_TOKEN }
+            : {}),
+          ...(process.env.NANOCODEX_LOCAL_DEPLOYMENT_SHA
+            ? { DEPLOYMENT_SHA: process.env.NANOCODEX_LOCAL_DEPLOYMENT_SHA }
+            : {}),
+          ...(process.env.NANOCODEX_LOCAL_PUBLIC_ORIGIN
+            ? { NANOCODEX_PUBLIC_ORIGIN: process.env.NANOCODEX_LOCAL_PUBLIC_ORIGIN }
+            : {}),
+          ...(process.env.NANOCODEX_LOCAL_MODEL_ACCESS === "managed"
+            && process.env.NANOCODEX_LOCAL_MODEL_AUTH_MODE
+            && localAllocatorToken
+            ? {
+                MULTIPLAYER_ALLOCATOR_TOKEN: localAllocatorToken,
+                NANOCODEX_AUTH_MODE: process.env.NANOCODEX_LOCAL_MODEL_AUTH_MODE,
+                NANOCODEX_MODEL_ACCESS: "managed",
+              }
+            : { NANOCODEX_MODEL_ACCESS: "per_user" }),
+        },
         dev: {
           ...config.dev,
+          // Every local Worker asks the OS for an ephemeral inspector port.
+          // The website, broker, and managed Worker can then start together
+          // even when another checkout already has an inspector open.
+          inspector_port: 0,
           // The website, Worker APIs, Durable Objects, D1, and R2 do not need
           // Docker. Opt into the ChatGPT egress container only while working
           // on that boundary so the normal visual loop starts immediately.
@@ -101,32 +129,6 @@ export default defineConfig({
       }),
     }),
   ],
-  build: {
-    // The production graph gate consumes this manifest so it measures complete
-    // static import closures instead of whichever output chunk happens to keep
-    // the entry-point name.
-    manifest: true,
-    rolldownOptions: {
-      output: {
-        // Rolldown otherwise promotes shared runtime and shell-icon helpers into
-        // individual startup requests. Coalesce only those exact modules while
-        // preserving the route boundaries that keep Agent code off startup.
-        codeSplitting: {
-          groups: [
-            { name: "initial-deps", tags: ["$initial"] },
-            {
-              name: "application-runtime",
-              test: /node_modules[\\/](?:react|react-dom|react-router)[\\/]/,
-            },
-            {
-              name: "shell-icons",
-              test: /node_modules[\\/]lucide-react[\\/]dist[\\/]esm[\\/](?:createLucideIcon|icons[\\/](?:check|chevron-right|copy|git-branch|git-pull-request|maximize-2|minimize-2|search|x))\.mjs$/,
-            },
-          ],
-        },
-      },
-    },
-  },
   resolve: {
     dedupe: [
       "react",
@@ -149,19 +151,6 @@ export default defineConfig({
   // package edit, and the WASM glue plus binary are indivisible.
   optimizeDeps: {
     exclude: ["nanocodex", "nanocodex-react"],
-    // `nanocodex` remains live, but the MCP SDK it contains imports these
-    // CommonJS packages from ESM. They still need Vite's interop wrapper.
-    include: [
-      "nanocodex > ajv",
-      "nanocodex > ajv-formats",
-      "nanocodex > async-lock",
-      "nanocodex > content-type",
-      "nanocodex > eventemitter3",
-      "nanocodex > buffer",
-      "nanocodex > isomorphic-git",
-      "nanocodex > sha.js",
-      "nanocodex > sha.js/sha1.js",
-    ],
   },
   worker: {
     format: "es",

@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  RESIDENT_IDS,
+  coordinationBasisFor,
   decodeStagedPlan,
   type ResidentId,
   type WorldInteraction,
@@ -68,6 +70,21 @@ test("Scout traverses both room doors in both directions without bouncing", () =
     state.activities.filter(({ text }) => text === "Scout entered Trail Shop.").length,
     1,
   );
+});
+
+test("unequal-speed residents reserve a room-door handoff before crossing scenes", () => {
+  const ids = ["cinder", "moss"] as const;
+  const state = formationWorld(ids);
+  relocate(state, "cinder", "town", 6, 8);
+  relocate(state, "moss", "town", 5, 7);
+  state.actors.cinder.energy = 0;
+  state.actors.moss.energy = 100;
+  applyMovePlan(state, "cinder", "guild", "slow-guild-door");
+  applyMovePlan(state, "moss", "guild", "fast-guild-door");
+
+  advanceFormation(state, ids);
+  assert.ok(ids.every((id) => state.actors[id].scene === "guild_hall"));
+  assert.equal(new Set(ids.map((id) => positionKey(actorWorldPosition(state.actors[id])))).size, ids.length);
 });
 
 test("nonlegacy plans and exact Scout orders retain fixed cross-scene goals", () => {
@@ -272,15 +289,117 @@ test("observations and hearing are scene-aware while the public board and roster
   assert.notStrictEqual(cinder.supplies, state.supplies);
 
   const moss = observationFor(state, "moss");
+  assert.equal(moss.self.role, state.actors.moss.role);
+  assert.deepEqual({ x: moss.self.x, y: moss.self.y, direction: moss.self.direction }, {
+    x: 41,
+    y: 20,
+    direction: state.actors.moss.direction,
+  });
+  assert.deepEqual(
+    moss.nearby.find(({ id }) => id === "player"),
+    {
+      id: "player",
+      name: state.actors.player.name,
+      kind: "player",
+      scene: "town",
+      x: 40,
+      y: 20,
+      relativeX: -1,
+      relativeY: 0,
+      distance: 1,
+      direction: state.actors.player.direction,
+      activity: state.actors.player.activity,
+    },
+  );
   assert.equal(moss.nearby.some(({ id }) => id === "player"), true);
   const speech = playerSpeak(state, "Fresh weather report", "whisper");
   assert.ok(speech);
+  assert.deepEqual(observationFor(state, "moss").playerOrder?.coListeners, speech.liveAddressed);
+  assert.deepEqual(observationFor(state, "moss").guildCall?.coListeners, speech.liveAddressed);
   assert.equal(speech.heardBy.includes("moss"), true);
   assert.equal(speech.heardBy.includes("cinder"), false);
   assert.equal(observationFor(state, "cinder").guildCall, undefined);
   assert.equal(
     observationFor(state, "cinder").guildBoard.some(({ text }) => text === "Fresh weather report"),
     true,
+  );
+});
+
+test("six situated residents execute stable circle and two-side slots without collisions or swaps", () => {
+  const listeners = ["cinder", "moss", "rill", "luma", "iris", "rook"] as const;
+  for (const formation of ["radial", "twoSides"] as const) {
+    const state = formationWorld(listeners);
+    for (const id of listeners) {
+      const basis = coordinationBasisFor(listeners, id);
+      assert.ok(basis);
+      const offset = basis[formation];
+      applyRelativePlan(
+        state,
+        id,
+        offset.dxPixels,
+        offset.dyPixels,
+        `${formation}-${id}`,
+      );
+    }
+
+    advanceFormation(state, listeners);
+    const destinations = listeners.map((id) => actorWorldPosition(state.actors[id]));
+    assert.equal(new Set(destinations.map(positionKey)).size, listeners.length);
+    assert.deepEqual(destinations, listeners.map((id) => {
+      const basis = coordinationBasisFor(listeners, id);
+      assert.ok(basis);
+      const offset = basis[formation];
+      return {
+        scene: "town",
+        x: state.actors.player.x + offset.dxPixels / 8,
+        y: state.actors.player.y + offset.dyPixels / 8,
+      };
+    }));
+  }
+});
+
+test("a newly occupied route tile causes a resident to reroute and preserve its claimed goal", () => {
+  const state = formationWorld(["cinder"]);
+  state.actors.guest01.presence = "active";
+  relocate(state, "guest01", "town", 60, 20);
+  applyRelativePlan(state, "cinder", 64, 0, "cinder-reroute");
+  updateWorld(state, 100);
+
+  const task = state.actors.cinder.tasks[0];
+  const blockerStep = task?.path?.[0];
+  const goal = task?.goal;
+  assert.ok(blockerStep && goal);
+  relocate(state, "guest01", blockerStep.scene, blockerStep.x, blockerStep.y);
+  const blockedKey = positionKey(blockerStep);
+  let rerouted = false;
+  for (let index = 0; index < 1_000; index += 1) {
+    updateWorld(state, 100);
+    assertPhysicalExclusion(state, ["cinder", "guest01"]);
+    const currentTask = state.actors.cinder.tasks[0];
+    if (currentTask?.path && currentTask.path.every((step) => positionKey(step) !== blockedKey)) {
+      rerouted = true;
+    }
+    if (!currentTask && !state.actors.cinder.movement) break;
+  }
+  assert.equal(rerouted, true);
+  assert.deepEqual(actorWorldPosition(state.actors.cinder), goal);
+  assert.deepEqual(actorWorldPosition(state.actors.guest01), blockerStep);
+});
+
+test("residents proposing the same relative destination receive distinct physical claims", () => {
+  const ids = ["cinder", "moss"] as const;
+  const state = formationWorld(ids);
+  applyRelativePlan(state, "cinder", 64, 0, "shared-claim-cinder");
+  applyRelativePlan(state, "moss", 64, 0, "shared-claim-moss");
+  updateWorld(state, 100);
+
+  const goals = ids.map((id) => state.actors[id].tasks[0]?.goal);
+  assert.ok(goals.every((goal) => goal !== undefined));
+  assert.equal(new Set(goals.map((goal) => positionKey(goal!))).size, ids.length);
+  advanceFormation(state, ids);
+  assert.equal(
+    new Set(ids.map((id) => positionKey(actorWorldPosition(state.actors[id])))).size,
+    ids.length,
   );
 });
 
@@ -365,6 +484,101 @@ function quietWorld(): WorldState {
   const state = createWorldState();
   setWorldAgentsOnline(state, true);
   return state;
+}
+
+function formationWorld(ids: readonly ResidentId[]): WorldState {
+  const state = quietWorld();
+  for (const id of RESIDENT_IDS) {
+    if (ids.includes(id)) continue;
+    Object.assign(state.actors[id], {
+      presence: "absent",
+      movement: undefined,
+      tasks: [],
+      departure: undefined,
+    });
+  }
+  relocate(state, "player", "town", 32, 24);
+  ids.forEach((id, index) => relocate(state, id, "town", 10 + index * 2, 20));
+  return state;
+}
+
+function applyRelativePlan(
+  state: WorldState,
+  actorId: ResidentId,
+  dxPixels: number,
+  dyPixels: number,
+  requestId: string,
+): void {
+  const observation = observationFor(state, actorId);
+  const plan = decodeStagedPlan({
+    request_id: requestId,
+    agent_id: actorId,
+    state_version: observation.stateVersion,
+    summary: "takes a distinct situated coordination slot",
+    steps: [{
+      kind: "move_relative",
+      anchor: "player",
+      dx_pixels: dxPixels,
+      dy_pixels: dyPixels,
+    }],
+  }, {
+    requestId,
+    agentId: actorId,
+    stateVersion: observation.stateVersion,
+  });
+  assert.deepEqual(applyWorldPlan(state, plan), { accepted: true });
+}
+
+function applyMovePlan(
+  state: WorldState,
+  actorId: ResidentId,
+  target: WorldTarget,
+  requestId: string,
+): void {
+  const observation = observationFor(state, actorId);
+  const plan = decodeStagedPlan({
+    request_id: requestId,
+    agent_id: actorId,
+    state_version: observation.stateVersion,
+    summary: `moves to ${target}`,
+    steps: [{ kind: "move", target }],
+  }, {
+    requestId,
+    agentId: actorId,
+    stateVersion: observation.stateVersion,
+  });
+  assert.deepEqual(applyWorldPlan(state, plan), { accepted: true });
+}
+
+function advanceFormation(state: WorldState, ids: readonly ResidentId[]): void {
+  for (let index = 0; index < 1_000; index += 1) {
+    updateWorld(state, 100);
+    assertPhysicalExclusion(state, ids);
+    if (ids.every((id) => state.actors[id].tasks.length === 0 && !state.actors[id].movement)) return;
+  }
+  assert.fail("formation did not settle within 1,000 ticks");
+}
+
+function assertPhysicalExclusion(state: WorldState, ids: readonly ResidentId[]): void {
+  const actors = ids.map((id) => state.actors[id]);
+  assert.equal(new Set(actors.map((actor) => positionKey(actorWorldPosition(actor)))).size, actors.length);
+  const moving = actors.filter((actor) => actor.movement !== undefined);
+  assert.equal(new Set(moving.map((actor) => positionKey(actor.movement!.to))).size, moving.length);
+  for (let left = 0; left < moving.length; left += 1) {
+    for (let right = left + 1; right < moving.length; right += 1) {
+      const a = moving[left]?.movement;
+      const b = moving[right]?.movement;
+      assert.ok(a && b);
+      assert.equal(
+        positionKey(a.from) === positionKey(b.to) && positionKey(a.to) === positionKey(b.from),
+        false,
+      );
+    }
+  }
+}
+
+function positionKey(position: { scene: string; x: number; y: number }): string {
+  return `${position.scene}:${position.x},${position.y}`;
 }
 
 function relocate(

@@ -7,8 +7,8 @@ import {
   useState,
 } from "react";
 import {
-  NanocodexProvider,
-  useAgent,
+  createConfig,
+  useNanocodex,
 } from "nanocodex-react";
 import type { ArtifactDocument } from "nanocodex/tools/artifact";
 import { getBrowserThread } from "nanocodex/tools/browser";
@@ -34,38 +34,18 @@ import {
   type TerminalHost,
 } from "./demoTerminal";
 import { ArtifactDock } from "./ArtifactDock";
-import { agentConfig } from "./agentRuntime";
+import { browserMcpConfiguration } from "./browserMcp";
 
 export type { AgentTerminalMode, AgentTerminalState } from "./agentTerminalTypes";
 
-/** Authenticated website policy around the headless Agent SDK and app-local xterm. */
-export const AgentTerminal = memo(function AgentTerminal({
-  authStatus,
-  mode,
-  onStateChange,
-  source,
-  theme,
-}: {
-  authStatus: ChatGptStatus | undefined;
-  mode: AgentTerminalMode;
-  onStateChange(state: AgentTerminalState): void;
-  source: Exclude<CredentialSource, null>;
-  theme: "light" | "dark";
-}) {
-  return (
-    <NanocodexProvider config={agentConfig}>
-      <AgentTerminalDemo
-        authStatus={authStatus}
-        mode={mode}
-        onStateChange={onStateChange}
-        source={source}
-        theme={theme}
-      />
-    </NanocodexProvider>
-  );
+const agentConfig = createConfig({
+  agent: {
+    mcp: browserMcpConfiguration(location.origin),
+  },
 });
 
-function AgentTerminalDemo({
+/** Authenticated website policy around the headless Agent SDK and app-local xterm. */
+export const AgentTerminal = memo(function AgentTerminal({
   authStatus,
   mode,
   onStateChange,
@@ -96,7 +76,7 @@ function AgentTerminalDemo({
     isError,
     isSuccess,
     refetch,
-  } = useAgent({ enabled: true, threadId: thread?.id });
+  } = useNanocodex({ config: agentConfig, threadId: thread?.id });
   const activePromptIds = useRef(new Set<number>());
   const agentStatus: AgentStatus = isError
     ? "error"
@@ -260,7 +240,7 @@ function AgentTerminalDemo({
       />
     </div>
   ) : terminal;
-}
+});
 
 function artifactFollowOnPrompt(
   artifact: ArtifactDocument,

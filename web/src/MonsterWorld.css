@@ -1,5 +1,5 @@
 .monster-world {
-  min-height: calc(100dvh - var(--header-height));
+  min-height: calc(100dvh - var(--shell-header-height));
   padding: clamp(22px, 3.4vw, 48px) var(--page-margin) 56px;
   color: var(--text);
   background:
@@ -1067,6 +1067,34 @@
 
   .monster-world-agent-actions button:first-child {
     grid-column: 1 / -1;
+  }
+}
+
+@media (pointer: coarse), (any-pointer: coarse) {
+  .monster-world-dpad {
+    grid-template-columns: repeat(3, var(--coarse-target-size));
+    grid-template-rows: repeat(3, var(--coarse-target-size));
+  }
+
+  .monster-world-dpad button,
+  .monster-world-agent-actions button,
+  .monster-world-talk input,
+  .monster-world-talk button,
+  .monster-world-voice button,
+  .monster-world-population input[type="range"],
+  .monster-world-resident-exit select,
+  .monster-world-resident-exit button,
+  .monster-world .agent-session-actions button,
+  .monster-world .agent-session-menu summary,
+  .monster-world .agent-oauth-code button,
+  .monster-world .agent-oauth-code a {
+    min-height: var(--coarse-target-size);
+    touch-action: manipulation;
+  }
+
+  .monster-world-population input[type="range"] {
+    height: var(--coarse-target-size);
+    padding: 13px 0;
   }
 }
 

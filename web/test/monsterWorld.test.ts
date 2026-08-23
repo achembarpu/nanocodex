@@ -578,7 +578,7 @@ test("an unfinished Nanocodex plan cannot be overwritten before its board post e
   });
   assert.deepEqual(applyWorldPlan(state, second), { accepted: false, reason: "stale" });
 
-  for (let index = 0; index < 220; index += 1) updateWorld(state, 100);
+  for (let index = 0; index < 320; index += 1) updateWorld(state, 100);
   assert.equal(
     state.guildMessages.filter(({ text }) => text === "Bridge reached. The route is clear.").length,
     1,
@@ -638,30 +638,38 @@ test("population changes enter from outside, remain physical, and cross an edge 
   assert.ok(RESIDENT_IDS.every((id) => state.actors[id].scene === "guild_hall"));
 });
 
-test("all resident actions are batched through bounded retained Luna lanes and commit only after completion", () => {
+test("resident actions use isolated retained Luna sessions with bounded turn scheduling", () => {
   assert.match(worker, /from "nanocodex\/host"/);
   assert.match(worker, /toolMode: "direct"/);
   assert.doesNotMatch(worker, /harness|exec_command|web__run|image_gen/);
-  assert.match(worker, /result = await turn\.result\(\)[\s\S]*?const decisions = stagedBatches\.get\(batchId\)[\s\S]*?type: "batch_result"/);
-  assert.match(worker, /decodeStagedBatch\(input, active\.expected\)/);
-  assert.match(worker, /const LANE_COUNT = 3/);
-  assert.match(worker, /const MAX_BATCH_SIZE = 4/);
-  assert.match(worker, /MAX_COMPLETED_TURNS = 24/);
-  assert.match(worker, /MAX_TOTAL_TOKENS = 60_000/);
+  assert.match(worker, /const residentAgents = new Map<ResidentId, DefaultAgent>\(\)/);
+  assert.match(worker, /const residentBoots = new Map<ResidentId, Promise<DefaultAgent>>\(\)/);
+  assert.match(worker, /async function residentAgentFor[\s\S]*?residentBoots\.get[\s\S]*?residentBoots\.set[\s\S]*?residentAgents\.set/);
+  assert.match(worker, /async function createResidentAgent[\s\S]*?return Agent\.create/);
+  assert.match(worker, /decodeResidentDecision\(input, active\.expected\)/);
+  assert.match(worker, /result = await turn\.result\(\)[\s\S]*?const decision = stagedDecisions\.get\(entry\.requestId\)/);
+  assert.match(worker, /agent\.turn\.prompt\(\{ input: residentPrompt\(active\.batchId, entry\) \}\)/);
+  assert.doesNotMatch(worker, /agent\.turn\.prompt\(\{\s*id:/);
+  assert.match(worker, /const MAX_CONCURRENT_RESIDENT_TURNS = 6/);
+  assert.match(worker, /slice\(offset, offset \+ MAX_CONCURRENT_RESIDENT_TURNS\)[\s\S]*?runResidentTurn/);
+  assert.doesNotMatch(worker, /MAX_(?:COMPLETED|ATTEMPTED)_TURNS|MAX_TOTAL_TOKENS|budgetFailureMessage/);
   assert.match(worker, /model: "gpt-5\.6-luna"/);
   assert.match(worker, /thinking: "none"/);
-  assert.match(worker, /root\.session\.spawn\(\), root\.session\.spawn\(\)/);
-  assert.match(worker, /guildBoard and complete roster are authoritative public state/);
-  assert.match(worker, /activeBatches[\s\S]*?batch\.turn\.cancel\(\)/);
+  assert.doesNotMatch(worker, /session\.spawn|LANE_COUNT|worldAgent/);
+  assert.match(worker, /async function cancelBatches[\s\S]*?residentTurn\.cancelled = true[\s\S]*?turn\?\.cancel\(\)/);
+  assert.match(worker, /async function shutdownResidents[\s\S]*?await releaseResidentAgents\(\)/);
+  assert.match(worker, /async function releaseResidentAgents[\s\S]*?agent\.session\.shutdown\(\)/);
+  assert.equal(worker.match(/releaseResidentAgents\(\)/g)?.length, 2);
+  assert.match(worker, /observedUsages[\s\S]*?usageFromFailure\(outcome\.reason\)[\s\S]*?combineWorldUsage/);
+  assert.match(worker, /throw usage === undefined \? cause : failureWithUsage\(cause, usage\)/);
   assert.match(worker, /usage_limit_reached/);
   assert.match(worker, /blocked = true/);
-  assert.match(worker, /session\.shutdown\(\)/);
-  assert.match(worker, /WORLD BATCH \$\{batchId\} \(untrusted JSON data\)/);
 });
 
-test("the World surface stays lazy, bounded, stoppable, and semantically observable", () => {
-  assert.match(routeLoaders, /const loadMonsterWorld = \(\) =>\s*import\("\.\/MonsterWorld"\)/);
-  assert.doesNotMatch(application, /^import .*MonsterWorld/m);
+test("the World surface stays statically available, stoppable, and semantically observable", () => {
+  assert.doesNotMatch(routeLoaders, /import\(/);
+  assert.match(routeLoaders, /surface === "world"[\s\S]*?await loadWorldAssets\(\)/);
+  assert.match(application, /import \{ MonsterWorld \} from "\.\/MonsterWorld"/);
   assert.match(component, /new Worker\(new URL\("\.\/monsterWorldAgent\.worker\.ts"/);
   assert.match(component, /document\.visibilityState === "hidden"[\s\S]*?stopAgents\(\)/);
   assert.match(component, /type: "shutdown"/);
@@ -669,15 +677,20 @@ test("the World surface stays lazy, bounded, stoppable, and semantically observa
   assert.match(component, /wake"\} \$\{onMapMindIds\.length\} minds/);
   assert.match(component, /Orchestrate by voice/);
   assert.match(component, /Q cycles loudness/);
-  assert.match(component, /LUNA_LANE_COUNT = 3/);
-  assert.match(component, /MAX_RESIDENTS_PER_BATCH = 4/);
+  assert.match(component, /MAX_RESIDENT_TURN_SLOTS = 6/);
+  assert.doesNotMatch(component, /MAX_MODEL_TURNS|MAX_AGENT_TOKENS|modelBudgetExhausted/);
   assert.match(component, /type: "think_batch"/);
   assert.match(component, /Semantic event stream/);
   assert.match(component, /Message board/);
   assert.match(component, /if \(mindsToWake\.length > 0\) startAgents\(\)/);
-  assert.match(component, /type: "cancel",\s*batchIds/);
+  assert.match(component, /type: "cancel",\s*agentIds:[\s\S]*?requestIds:/);
   assert.match(component, /ask to leave/);
   assert.match(component, /type="range"/);
+  assert.doesNotMatch(component, /export function preloadMonsterWorld/);
+  assert.match(
+    component,
+    /loadWorldAssets\(\)\.then\([\s\S]*?setAssetError\([\s\S]*?World assets could not be loaded[\s\S]*?if \(assetError\) throw assetError/,
+  );
   assert.match(component, /onPointerDown=\{handleCanvasPointerDown\}/);
   assert.match(component, /Autonomous entries marked <b>nanocodex<\/b> come only from completed Luna batches/);
   assert.match(application, /surface === "world"[\s\S]*?target === document\.activeElement[\s\S]*?target\?\.matches\("\.monster-world-stage canvas"\)/);
@@ -685,6 +698,38 @@ test("the World surface stays lazy, bounded, stoppable, and semantically observa
   assert.match(worldCss, /monster-world-population input\[type="range"\]/);
   assert.doesNotMatch(worldCss, /grayscale\(/);
   assert.doesNotMatch(component, /spinner|skeleton|Suspense|dangerouslySetInnerHTML/i);
+});
+
+test("the World canvas renders only for active animation or explicit invalidation", () => {
+  assert.match(component, /const WORLD_RENDER_INTERVAL_MS = 50/);
+  assert.match(
+    component,
+    /let dirty = true;[\s\S]*?const requestRender = \(\) => \{\s*dirty = true;\s*scheduleFrame\(\);\s*\}/,
+  );
+  assert.match(
+    component,
+    /updateWorld\(activeWorld, delta\);\s*if \(now >= nextCanvasDraw\) dirty = true;[\s\S]*?if \(activeWorld && dirty\) \{[\s\S]*?drawMonsterWorld\([\s\S]*?dirty = false;\s*nextCanvasDraw = now \+ WORLD_RENDER_INTERVAL_MS/,
+  );
+  assert.match(component, /if \(activeWorld && !paused\) scheduleFrame\(\);/);
+  assert.match(
+    component,
+    /document\.visibilityState !== "visible"[\s\S]*?cancelFrame\(\);[\s\S]*?requestRender\(\)/,
+  );
+  assert.match(component, /const resizeObserver = new ResizeObserver\(requestRender\)/);
+  assert.match(component, /assetsRef\.current = assets;\s*requestWorldRender\(\)/);
+  assert.match(
+    component,
+    /heldDirections\.current\.add\(direction\);\s*requestWorldRender\(\)/,
+  );
+  assert.match(component, /const nudgePlayer[\s\S]*?movePlayer[\s\S]*?requestWorldRender\(\)/);
+  assert.match(
+    component,
+    /disposed = true;[\s\S]*?resizeObserver\.disconnect\(\);\s*cancelFrame\(\)/,
+  );
+  assert.doesNotMatch(
+    component,
+    /frame = requestAnimationFrame\(render\);\s*\};\s*frame = requestAnimationFrame\(render\)/,
+  );
 });
 
 test("worker messages reject malformed cross-isolate payloads", () => {
@@ -732,7 +777,7 @@ function advanceOrderToTerminal(
   state: ReturnType<typeof createWorldState>,
   orderId: number | undefined,
 ): void {
-  for (let index = 0; index < 500; index += 1) {
+  for (let index = 0; index < 2_000; index += 1) {
     if (orderById(state, orderId).completionEmitted) return;
     updateWorld(state, 100);
   }

@@ -1,4 +1,4 @@
-export const WORLD_PROTOCOL = "nanocodex.monster-world.v3" as const;
+export const WORLD_PROTOCOL = "nanocodex.monster-world.v4" as const;
 
 export const WORLD_SCENE_IDS = ["town", "guild_hall", "trail_shop"] as const;
 export const WORLD_ITEM_KINDS = ["sunberry", "supply_pack"] as const;
@@ -168,15 +168,17 @@ export type HeardGuildCall = Readonly<{
   id: number;
   text: string;
   voice: VoiceLevel;
-  distance: number;
+  distance?: number;
   radius: number;
   guildWide: boolean;
+  coListeners: readonly ResidentId[];
   requestedTarget?: WorldTarget;
 }>;
 
 export type WorldPlayerOrder = Readonly<{
   id: number;
   text: string;
+  coListeners: readonly ResidentId[];
   requestedTarget?: WorldTarget;
 }>;
 
@@ -199,8 +201,13 @@ export type WorldObservation = Readonly<{
   self: Readonly<{
     id: ResidentId;
     name: string;
+    role: string;
     kind: "monster" | "human";
     scene: WorldSceneId;
+    x: number;
+    y: number;
+    direction: Direction;
+    movingTo?: WorldPosition;
     location: string;
     energy: number;
     curiosity: number;
@@ -211,8 +218,16 @@ export type WorldObservation = Readonly<{
     id: ActorId;
     name: string;
     kind: "player" | "monster" | "human";
+    scene: WorldSceneId;
+    x: number;
+    y: number;
+    relativeX: number;
+    relativeY: number;
     distance: number;
+    direction: Direction;
+    movingTo?: WorldPosition;
     activity: string;
+    intent?: string;
   }>[];
   roster: readonly Readonly<{
     id: ActorId;
@@ -221,6 +236,8 @@ export type WorldObservation = Readonly<{
     scene: WorldSceneId;
     x: number;
     y: number;
+    direction: Direction;
+    movingTo?: WorldPosition;
     location: string;
     activity: string;
   }>[];
@@ -233,6 +250,7 @@ export type WorldObservation = Readonly<{
 }>;
 
 export type WorldUsage = Readonly<{
+  modelTurns: number;
   inputTokens: number;
   outputTokens: number;
   totalTokens: number;
@@ -349,6 +367,7 @@ export type ExpectedWorldDecision = Readonly<{
   requestId: string;
   agentId: ResidentId;
   stateVersion: number;
+  memory?: WorldResidentMemory;
   heardCallId?: number;
   requestedTarget?: WorldTarget;
 }>;
@@ -454,6 +473,88 @@ export function decodeStagedBatch(
   return Object.freeze(decisions);
 }
 
+export function decodeResidentDecision(
+  value: unknown,
+  expected: ExpectedWorldDecision,
+): WorldBatchDecision {
+  const input = object(value, "resident world plan");
+  const plan = decodeStagedPlan({
+    request_id: expected.requestId,
+    agent_id: expected.agentId,
+    state_version: expected.stateVersion,
+    summary: input.summary,
+    steps: input.steps,
+  }, expected);
+  return Object.freeze({
+    plan,
+    memory: memoryAfterDecision(
+      expected.memory ?? EMPTY_WORLD_RESIDENT_MEMORY,
+      plan.summary,
+      optionalText(input.memory_note, "memory_note", 160),
+    ),
+  });
+}
+
+function memoryAfterDecision(
+  previous: WorldResidentMemory,
+  planSummary: string,
+  note: string,
+): WorldResidentMemory {
+  const remembered = note || planSummary;
+  return Object.freeze({
+    summary: note || previous.summary,
+    goals: Object.freeze([...previous.goals]),
+    relationships: Object.freeze([...previous.relationships]),
+    recentDecisions: Object.freeze([
+      remembered,
+      ...previous.recentDecisions.filter((entry) => entry !== remembered),
+    ].slice(0, 6)),
+    lastBoardMessageId: previous.lastBoardMessageId,
+  });
+}
+
+export type ResidentCoordinationBasis = Readonly<{
+  index: number;
+  count: number;
+  radial: Readonly<{ dxPixels: number; dyPixels: number }>;
+  twoSides: Readonly<{
+    side: "left" | "right";
+    dxPixels: number;
+    dyPixels: number;
+  }>;
+}>;
+
+export function coordinationBasisFor(
+  coListeners: readonly ResidentId[],
+  residentId: ResidentId,
+): ResidentCoordinationBasis | undefined {
+  const index = coListeners.indexOf(residentId);
+  const count = coListeners.length;
+  if (index < 0 || count < 1) return undefined;
+  const angle = (Math.PI * 2 * index) / count;
+  const leftSize = Math.ceil(count / 2);
+  const left = index < leftSize;
+  const rank = left ? index : index - leftSize;
+  const groupSize = left ? leftSize : count - leftSize;
+  return Object.freeze({
+    index,
+    count,
+    radial: Object.freeze({
+      dxPixels: roundToEight(64 * Math.cos(angle)),
+      dyPixels: roundToEight(64 * Math.sin(angle)),
+    }),
+    twoSides: Object.freeze({
+      side: left ? "left" : "right",
+      dxPixels: left ? -64 : 64,
+      dyPixels: roundToEight(32 * (rank - (groupSize - 1) / 2)),
+    }),
+  });
+}
+
+function roundToEight(value: number): number {
+  return Math.round(value / 8) * 8;
+}
+
 export function isWorldPlan(value: unknown): value is WorldPlan {
   if (!value || typeof value !== "object") return false;
   const plan = value as Partial<WorldPlan>;
@@ -543,7 +644,7 @@ export function isWorldAgentCommand(value: unknown): value is WorldAgentCommand 
       || !command.batchId
       || !Array.isArray(command.entries)
       || command.entries.length < 1
-      || command.entries.length > 4
+      || command.entries.length > AUTONOMOUS_AGENT_IDS.length
     ) return false;
     const requestIds = new Set<string>();
     const agentIds = new Set<ResidentId>();
@@ -599,7 +700,9 @@ export function isWorldUsageLimitMessage(message: string): boolean {
 function isWorldUsage(value: unknown): value is WorldUsage {
   if (!value || typeof value !== "object") return false;
   const usage = value as Partial<WorldUsage>;
-  return Number.isSafeInteger(usage.inputTokens)
+  return Number.isSafeInteger(usage.modelTurns)
+    && (usage.modelTurns as number) >= 1
+    && Number.isSafeInteger(usage.inputTokens)
     && (usage.inputTokens as number) >= 0
     && Number.isSafeInteger(usage.outputTokens)
     && (usage.outputTokens as number) >= 0
@@ -624,7 +727,7 @@ function isWorldBatchDecisions(value: unknown): value is readonly WorldBatchDeci
   if (
     !Array.isArray(value)
     || value.length < 1
-    || value.length > 4
+    || value.length > AUTONOMOUS_AGENT_IDS.length
     || !isDenseArray(value)
   ) return false;
   const requestIds = new Set<string>();
@@ -666,8 +769,13 @@ function isWorldObservationSelf(
   const self = value as Partial<WorldObservation["self"]>;
   return self.id === agentId
     && typeof self.name === "string"
+    && typeof self.role === "string"
     && (self.kind === "monster" || self.kind === "human")
     && isWorldSceneId(self.scene)
+    && isFiniteNumber(self.x)
+    && isFiniteNumber(self.y)
+    && isDirection(self.direction)
+    && (self.movingTo === undefined || isWorldPosition(self.movingTo))
     && typeof self.location === "string"
     && isFiniteNumber(self.energy)
     && isFiniteNumber(self.curiosity)
@@ -681,8 +789,16 @@ function isWorldNearbyActor(value: unknown): value is WorldObservation["nearby"]
   return isActorId(actor.id)
     && typeof actor.name === "string"
     && isWorldActorKind(actor.kind)
+    && isWorldSceneId(actor.scene)
+    && isFiniteNumber(actor.x)
+    && isFiniteNumber(actor.y)
+    && isFiniteNumber(actor.relativeX)
+    && isFiniteNumber(actor.relativeY)
     && isFiniteNonNegativeNumber(actor.distance)
-    && typeof actor.activity === "string";
+    && isDirection(actor.direction)
+    && (actor.movingTo === undefined || isWorldPosition(actor.movingTo))
+    && typeof actor.activity === "string"
+    && (actor.intent === undefined || typeof actor.intent === "string");
 }
 
 function isWorldRosterActor(value: unknown): value is WorldObservation["roster"][number] {
@@ -694,6 +810,8 @@ function isWorldRosterActor(value: unknown): value is WorldObservation["roster"]
     && isWorldSceneId(actor.scene)
     && isFiniteNumber(actor.x)
     && isFiniteNumber(actor.y)
+    && isDirection(actor.direction)
+    && (actor.movingTo === undefined || isWorldPosition(actor.movingTo))
     && typeof actor.location === "string"
     && typeof actor.activity === "string";
 }
@@ -705,9 +823,10 @@ function isHeardGuildCall(value: unknown): value is HeardGuildCall {
     && (call.id as number) >= 0
     && typeof call.text === "string"
     && isVoiceLevel(call.voice)
-    && isFiniteNonNegativeNumber(call.distance)
+    && (call.distance === undefined || isFiniteNonNegativeNumber(call.distance))
     && isFiniteNonNegativeNumber(call.radius)
     && typeof call.guildWide === "boolean"
+    && isUniqueResidentList(call.coListeners)
     && (call.requestedTarget === undefined || isWorldTarget(call.requestedTarget));
 }
 
@@ -719,6 +838,7 @@ function isWorldPlayerOrder(value: unknown): value is WorldPlayerOrder {
     && typeof order.text === "string"
     && order.text.length > 0
     && order.text.length <= 140
+    && isUniqueResidentList(order.coListeners)
     && (order.requestedTarget === undefined || isWorldTarget(order.requestedTarget));
 }
 
@@ -739,6 +859,26 @@ function isWorldBoardMessage(value: unknown): value is WorldBoardMessage {
 
 function isWorldSceneId(value: unknown): value is WorldSceneId {
   return typeof value === "string" && (WORLD_SCENE_IDS as readonly string[]).includes(value);
+}
+
+function isDirection(value: unknown): value is Direction {
+  return value === "up" || value === "down" || value === "left" || value === "right";
+}
+
+function isWorldPosition(value: unknown): value is WorldPosition {
+  if (!isJsonObject(value)) return false;
+  const position = value as Partial<WorldPosition>;
+  return isWorldSceneId(position.scene)
+    && Number.isInteger(position.x)
+    && Number.isInteger(position.y);
+}
+
+function isUniqueResidentList(value: unknown): value is readonly ResidentId[] {
+  return Array.isArray(value)
+    && value.length > 0
+    && isDenseArray(value)
+    && value.every(isResidentId)
+    && new Set(value).size === value.length;
 }
 
 function isWorldItemKind(value: unknown): value is WorldItemKind {

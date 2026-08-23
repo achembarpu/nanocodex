@@ -152,9 +152,7 @@ export async function loadPublishedCommitHistory(
   const index = request === fetch && !development
     ? await preloadPublishedCommitIndex()
     : await loadPublishedCommitIndexUncached(request, development, generation);
-  const base = development
-    ? "/__nanocodex/repository"
-    : "/api/repository";
+  const base = "/api/repository";
   const pageSize = index.repository.commitPageSize;
   const pageCount = Math.ceil(index.hashes.length / pageSize);
   const pageByHash = new Map(
@@ -169,9 +167,7 @@ export async function loadPublishedCommitHistory(
     throw new Error(`Published commit ${initialCommitHash} was not found`);
   }
 
-  const initialPatchUrl = development
-    ? undefined
-    : `${base}/commits/${index.repository.head}/${String(initialPageIndex).padStart(4, "0")}.diff`;
+  const initialPatchUrl = `${base}/commits/${index.repository.head}/${String(initialPageIndex).padStart(4, "0")}.diff`;
   if (request === fetch && initialPatchUrl != null) {
     void preloadPublishedRepositoryPatchBody(initialPatchUrl).catch(() => undefined);
   }
@@ -198,7 +194,7 @@ export async function loadPublishedCommitHistory(
       if (!response.ok) {
         throw new Error(`Commit page request failed (${response.status})`);
       }
-      requireGeneration(response, index.repository.head, development);
+      requireGeneration(response, index.repository.head, false);
       const body = await readBoundedJson(
         response,
         MAX_COMMIT_PAGE_BYTES,
@@ -216,10 +212,7 @@ export async function loadPublishedCommitHistory(
         generation: index.repository.head,
         index: page,
         commits: body,
-        patchUrl: development
-          ? (commit: HarnessCommit) =>
-            `${base}/commits.diff?hash=${commit.hash}`
-          : `${base}/commits/${index.repository.head}/${String(page).padStart(4, "0")}.diff`,
+        patchUrl: `${base}/commits/${index.repository.head}/${String(page).padStart(4, "0")}.diff`,
       } satisfies PublishedCommitPage;
     }).catch((error) => {
       if (commitPagePreloads.get(cacheKey) === loading) {
@@ -367,9 +360,7 @@ async function loadPublishedRepositorySnapshotUncached(
   development: boolean,
   generation?: string,
 ): Promise<PublishedRepositorySnapshot> {
-  const base = development
-    ? "/__nanocodex/repository"
-    : "/api/repository";
+  const base = "/api/repository";
   markCommitPerformance("repository-request-start");
   const mutableUrl = `${base}/snapshot`;
   const response = await requestPublishedMetadata(
@@ -383,7 +374,7 @@ async function loadPublishedRepositorySnapshotUncached(
   }
   const snapshot: unknown = await response.json();
   requireRepositoryDocument(snapshot);
-  requireGeneration(response, snapshot.repository.head, development);
+  requireGeneration(response, snapshot.repository.head, false);
   markCommitPerformance("repository-snapshot-parsed");
 
   const fileContents = new Map<string, Promise<string>>();
@@ -436,9 +427,7 @@ async function loadPublishedCommitIndexUncached(
   development: boolean,
   generation?: string,
 ): Promise<PublishedCommitIndexDocument> {
-  const base = development
-    ? "/__nanocodex/repository"
-    : "/api/repository";
+  const base = "/api/repository";
   markCommitPerformance("repository-commit-index-request-start");
   const mutableUrl = `${base}/commit-index`;
   const response = await requestPublishedMetadata(
@@ -456,7 +445,7 @@ async function loadPublishedCommitIndexUncached(
     "Commit index",
   );
   requireCommitIndex(index);
-  requireGeneration(response, index.repository.head, development);
+  requireGeneration(response, index.repository.head, false);
   markCommitPerformance("repository-commit-index-parsed", {
     commitCount: index.hashes.length,
   });

@@ -42,6 +42,10 @@
   },
   "services": [
     {
+      "binding": "EGRESS",
+      "service": "nanocodex-egress-broker-example"
+    },
+    {
       "binding": "MULTIPLAYER_BACKEND",
       "service": "nanocodex-durable-agent"
     }
@@ -182,16 +186,26 @@
     }
   ],
   "vars": {
-    "ENVIRONMENT": "production"
+    "ENVIRONMENT": "production",
+    "NANOCODEX_AUTH_MODE": "chatgpt",
+    "NANOCODEX_MODEL_ACCESS": "managed"
   },
   "env": {
     "development": {
       "name": "nanocodex-development",
+      "secrets": {
+        "required": ["GIT_MIRROR_TOKEN"]
+      },
       "services": [
+        {
+          "binding": "EGRESS",
+          "service": "nanocodex-egress-broker-example",
+          "remote": false
+        },
         {
           "binding": "MULTIPLAYER_BACKEND",
           "service": "nanocodex-durable-agent",
-          "remote": true
+          "remote": false
         }
       ],
       "durable_objects": {
@@ -224,20 +238,22 @@
         { "name": "MULTIPLAYER_ROUTE_LIMIT", "namespace_id": "987609", "simple": { "limit": 240, "period": 60 } }
       ],
       "r2_buckets": [
-        { "binding": "GIT_OBJECTS", "bucket_name": "nanocodex-git", "remote": true },
-        { "binding": "EVALS_ARTIFACTS", "bucket_name": "nanocodex-evals", "remote": true }
+        { "binding": "GIT_OBJECTS", "bucket_name": "nanocodex-git" },
+        { "binding": "EVALS_ARTIFACTS", "bucket_name": "nanocodex-evals" }
       ],
       "d1_databases": [
         {
           "binding": "EVALS_DB",
           "database_name": "nanocodex-evals",
           "database_id": "b5a4b6e9-8e9f-489a-b0af-b1813d97dcd5",
-          "migrations_dir": "migrations",
-          "remote": true
+          "migrations_dir": "migrations"
         }
       ],
       "vars": {
-        "ENVIRONMENT": "development"
+        "ENVIRONMENT": "development",
+        "MULTIPLAYER_ALLOCATOR_TOKEN": "local-room-allocator-token",
+        "NANOCODEX_AUTH_MODE": "chatgpt",
+        "NANOCODEX_MODEL_ACCESS": "per_user"
       }
     }
   }

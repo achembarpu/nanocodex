@@ -42,8 +42,11 @@ test("deployment health refreshes after invalidation and rejects malformed crede
 
   assert.deepEqual(await resource.read(), {
     agentConfigured: false,
+    authMode: undefined,
     credentialSource: null,
     deploymentSha: undefined,
+    interactiveAuth: true,
+    modelAccessMode: "per_user",
   });
   resource.invalidate();
   assert.equal((await resource.refresh()).credentialSource, "user");
@@ -72,4 +75,26 @@ test("invalidation detaches an obsolete in-flight health request", async () => {
   releases[1]?.();
   assert.equal((await current).credentialSource, "user");
   assert.equal((await resource.read()).credentialSource, "user");
+});
+
+test("managed health disables interactive auth even while the broker is unavailable", async () => {
+  let ready = false;
+  const resource = createDeploymentHealthResource(async () => Response.json({
+    agent_configured: ready,
+    auth_mode: "chatgpt",
+    credential_source: ready ? "managed" : null,
+    interactive_auth: false,
+    model_access_mode: "managed",
+  }));
+  assert.deepEqual(await resource.read(), {
+    agentConfigured: false,
+    authMode: "chatgpt",
+    credentialSource: null,
+    deploymentSha: undefined,
+    interactiveAuth: false,
+    modelAccessMode: "managed",
+  });
+  ready = true;
+  resource.invalidate();
+  assert.equal((await resource.refresh()).credentialSource, "managed");
 });

@@ -5,20 +5,20 @@ import test from "node:test";
 import { browserMcpConfiguration } from "../src/browserMcp.ts";
 
 const terminal = source("../src/AgentTerminal.tsx");
-const runtime = source("../src/agentRuntime.ts");
 const dock = source("../src/ArtifactDock.tsx");
 const terminalCss = source("../src/AgentTerminal.css");
+const experience = source("../src/AgentExperience.tsx");
+const viteConfig = source("../vite.config.ts");
 
 test("one app-lifetime Config supplies clone-safe MCP servers to the retained Agent", () => {
-  const declaration = section(runtime, "export const agentConfig: Config", "/** Starts the exact authenticated Worker");
-  assert.equal(matches(runtime, /createConfig\(/g), 1);
+  const declaration = section(terminal, "const agentConfig = createConfig", "/** Authenticated website policy");
+  assert.equal(matches(terminal, /createConfig\(/g), 1);
   assert.match(declaration, /createConfig\(\{[\s\S]*?agent: \{[\s\S]*?mcp: browserMcpConfiguration\(location\.origin\)/);
   assert.match(
-    runtime,
-    /export function prepareAgentRuntime\(\)[\s\S]*?agentConfig\.prepareAgent\(\{ threadId: getBrowserThread\(\)\.id \}\)/,
+    terminal,
+    /useNanocodex\(\{ config: agentConfig, threadId: thread\?\.id \}\)/,
   );
-  assert.match(terminal, /import \{ agentConfig \} from "\.\/agentRuntime"/);
-  assert.match(terminal, /<NanocodexProvider config=\{agentConfig\}>/);
+  assert.doesNotMatch(terminal, /prepareAgentRuntime|NanocodexProvider/);
 
   const configuration = browserMcpConfiguration("https://agent.test/path");
   assert.deepEqual(structuredClone(configuration), configuration);
@@ -62,6 +62,16 @@ test("an artifact action queues exactly one contextual follow-on on the retained
   assert.match(contextualPrompt, /JSON\.stringify\(path\)/);
   assert.match(contextualPrompt, /prompt\.trim\(\)/);
   assert.doesNotMatch(`${terminal}\n${dock}`, /NanocodexTui|Artifact action queued|loading|spinner|skeleton/i);
+});
+
+test("credential-gated terminal uses the normal static Vite graph", () => {
+  assert.match(viteConfig, /optimizeDeps:\s*\{\s*exclude: \["nanocodex", "nanocodex-react"\]/);
+  assert.doesNotMatch(viteConfig, /optimizeDeps:[\s\S]*?include:/);
+  assert.match(
+    experience,
+    /import \{ AgentTerminal \} from "\.\/AgentTerminal"/,
+  );
+  assert.doesNotMatch(experience, /import\(|\blazy\b|loadAgentTerminal|preloadAgentTerminal|prepareAgentRuntime/);
 });
 
 function source(path: string): string {

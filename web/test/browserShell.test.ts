@@ -135,8 +135,9 @@ test("the prepared browser harness observes workspace writes before its first la
     configurable: true,
     value: {
       getDirectory: async () => {
-        storageOpens += 1;
-        return storageOpens === 1 ? gitStorage : origin;
+        const open = ++storageOpens;
+        if (open === 2) releaseGitStorage();
+        return open === 1 ? gitStorage : origin;
       },
     },
   });
@@ -147,11 +148,8 @@ test("the prepared browser harness observes workspace writes before its first la
     return statusMatrix(...args);
   };
   try {
-    const preparingShell = prepareBrowserShell(thread.id, "https://example.test");
-    await new Promise((resolve) => setImmediate(resolve));
+    const shell = await prepareBrowserShell(thread.id, "https://example.test");
     assert.equal(storageOpens, 2);
-    releaseGitStorage();
-    const shell = await preparingShell;
     assert.equal(statusScans, 0);
     assert(configFile.writes > initialConfigWrites);
     assert.equal(

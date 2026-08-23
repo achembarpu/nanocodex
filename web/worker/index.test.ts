@@ -108,6 +108,70 @@ function createChatGptEgress(response: () => Response) {
   return { requests, namespace: namespace as unknown as DurableObjectNamespace };
 }
 
+test("managed website access never falls back to browser credentials", async () => {
+  const egressRequests: Request[] = [];
+  let credentialSessionCalls = 0;
+  const env = {
+    ENVIRONMENT: "development",
+    NANOCODEX_AUTH_MODE: "chatgpt",
+    NANOCODEX_MODEL_ACCESS: "managed",
+    EGRESS: {
+      async fetch(input: RequestInfo | URL, init?: RequestInit) {
+        const request = new Request(input, init);
+        egressRequests.push(request);
+        if (new URL(request.url).pathname === "/.well-known/nanocodex/model-status") {
+          return Response.json({ ready: true, auth_mode: "chatgpt" }, {
+            headers: { "cache-control": "no-store" },
+          });
+        }
+        return Response.json({ output: "brokered search" });
+      },
+    } as Fetcher,
+    CHATGPT_SESSIONS: {
+      idFromName() { credentialSessionCalls += 1; throw new Error("must not resolve a browser session"); },
+    } as unknown as DurableObjectNamespace,
+    BYOK_SESSIONS: {
+      idFromName() { credentialSessionCalls += 1; throw new Error("must not resolve a browser key"); },
+    } as unknown as DurableObjectNamespace,
+  };
+
+  const health = await worker.fetch(new Request("https://demo.test/api/health"), env);
+  assert.deepEqual(await health.json(), {
+    agent_configured: true,
+    auth_mode: "chatgpt",
+    credential_source: "managed",
+    deployment_sha: null,
+    interactive_auth: false,
+    model_access_mode: "managed",
+    service: "nanocodex",
+    runtime: "cloudflare-workers",
+    status: "ok",
+  });
+
+  for (const method of ["GET", "POST", "DELETE"]) {
+    const response = await worker.fetch(new Request("https://demo.test/api/auth/chatgpt", {
+      method,
+      headers: { origin: "https://demo.test" },
+    }), env);
+    assert.equal(response.status, 409);
+  }
+
+  const search = await worker.fetch(new Request("https://demo.test/api/tools/web-search", {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: "https://demo.test" },
+    body: JSON.stringify({
+      session_id: "session-1",
+      commands: { search_query: [{ q: "nanocodex" }] },
+    }),
+  }), env);
+  assert.deepEqual(await search.json(), { output: "brokered search" });
+  const upstream = egressRequests.find((request) => request.url.endsWith("/alpha/search"));
+  assert.equal(upstream?.url, "https://chatgpt.com/backend-api/codex/alpha/search");
+  assert.equal(upstream?.headers.get("authorization"), "Bearer NANOCODEX_CODEX_OAUTH");
+  assert.equal(upstream?.headers.get("chatgpt-account-id"), "NANOCODEX_CODEX_ACCOUNT");
+  assert.equal(credentialSessionCalls, 0);
+});
+
 test("tool proxies keep credentials server-side and preserve native request shapes", async () => {
   const originalFetch = globalThis.fetch;
   const upstream: Array<{ url: string; init?: RequestInit }> = [];
@@ -657,7 +721,7 @@ test("ChatGPT login exposes only device state while subscription credentials sta
       }),
     }), { ...env, ENVIRONMENT: "development" });
     assert.equal(localResponse.status, 200);
-    assert.equal(upstreamUrl, "http://127.0.0.1:8791/backend-api/codex/alpha/search");
+    assert.equal(upstreamUrl, "https://chatgpt.com/backend-api/codex/alpha/search");
   } finally {
     globalThis.fetch = originalFetch;
   }

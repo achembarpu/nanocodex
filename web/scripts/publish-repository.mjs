@@ -268,6 +268,7 @@ export async function readRemoteState(origin, token, repairInvalid = false) {
       } catch {
         // The normal response error below retains the bounded raw response body.
       }
+      if (failure?.error === "repository_not_published") return null;
       if (failure?.error === "repository publication is invalid") {
         if (!repairInvalid) {
           throw new Error(

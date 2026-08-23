@@ -1,6 +1,6 @@
 .multiplayer-lobby,
 .multiplayer-room {
-  min-height: calc(100dvh - var(--header-height));
+  min-height: calc(100dvh - var(--shell-header-height));
   padding: clamp(24px, 4vw, 56px) var(--page-margin) 56px;
   color: var(--text);
   background:
@@ -241,9 +241,9 @@
 
 .multiplayer-chat {
   display: grid;
-  grid-template-rows: minmax(320px, 1fr) auto auto;
+  grid-template-rows: minmax(320px, 1fr) repeat(3, auto);
   min-width: 0;
-  height: min(720px, calc(100dvh - var(--header-height) - 132px));
+  height: min(720px, calc(100dvh - var(--shell-header-height) - 132px));
   min-height: 520px;
 }
 
@@ -273,6 +273,24 @@
 
 .multiplayer-system.is-error span {
   color: var(--negative);
+}
+
+.multiplayer-unread {
+  min-height: 44px;
+  padding: 0 14px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--positive) 8%, var(--surface));
+  border: 0;
+  border-top: 1px solid color-mix(in srgb, var(--positive) 42%, var(--border));
+  cursor: pointer;
+  font: 600 9px/1 var(--font-mono);
+  text-transform: uppercase;
+}
+
+.multiplayer-unread:hover,
+.multiplayer-unread:focus-visible {
+  color: var(--text-inverse);
+  background: var(--text);
 }
 
 .multiplayer-message {
@@ -511,7 +529,7 @@
   }
 
   .multiplayer-chat {
-    height: min(680px, calc(100dvh - var(--header-height) - 125px));
+    height: min(680px, calc(100dvh - var(--shell-header-height) - 125px));
   }
 
   .multiplayer-sidebar {
@@ -541,7 +559,7 @@
   }
 
   .multiplayer-chat {
-    height: calc(100dvh - var(--header-height) - 168px);
+    height: calc(100dvh - var(--shell-header-height) - 168px);
     min-height: 470px;
   }
 
@@ -560,6 +578,20 @@
 
   .multiplayer-sidebar {
     grid-template-columns: 1fr;
+  }
+}
+
+@media (pointer: coarse), (any-pointer: coarse) {
+  .multiplayer-lobby input,
+  .multiplayer-lobby button,
+  .multiplayer-room button {
+    min-height: var(--coarse-target-size);
+    touch-action: manipulation;
+  }
+
+  .multiplayer-lobby-card input,
+  .multiplayer-composer textarea {
+    font-size: 16px;
   }
 }
 

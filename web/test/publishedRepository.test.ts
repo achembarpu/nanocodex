@@ -168,12 +168,18 @@ test("an exact commit deep link loads only its generation-qualified metadata pag
   assert.equal(requests.some((url) => url === "/api/repository/snapshot"), false);
 });
 
-test("development commit pages retain callable per-commit patches", async () => {
+test("development commit pages use the production Worker publication routes", async () => {
   const request = async (input: string | URL | Request) => {
     const url = String(input);
-    if (url.endsWith("/commit-index")) return Response.json(commitIndex);
+    if (url.endsWith("/commit-index")) {
+      return Response.json(commitIndex, {
+        headers: { "x-repository-generation": head },
+      });
+    }
     if (url.endsWith(`commits?generation=${head}&page=0`)) {
-      return Response.json(commits.slice(0, 32));
+      return Response.json(commits.slice(0, 32), {
+        headers: { "x-repository-generation": head },
+      });
     }
     return new Response(null, { status: 404 });
   };
@@ -184,12 +190,9 @@ test("development commit pages retain callable per-commit patches", async () => 
     true,
   );
 
-  assert.equal(typeof history.initialPage.patchUrl, "function");
   assert.equal(
-    typeof history.initialPage.patchUrl === "function"
-      ? history.initialPage.patchUrl(commits[0]!)
-      : null,
-    `/__nanocodex/repository/commits.diff?hash=${head}`,
+    history.initialPage.patchUrl,
+    `/api/repository/commits/${head}/0000.diff`,
   );
 });
 
@@ -372,8 +375,9 @@ test("top-level Source and Commits are wired independently from thread Git", asy
   ]);
 
   assert.match(app, /prepareRepositorySurface\(/);
-  assert.match(routeLoaders, /module\.loadPublishedRepositorySnapshot\(\)/);
+  assert.match(routeLoaders, /loadPublishedRepositorySnapshot\(\)/);
   assert.match(routeLoaders, /loadPublishedCommitHistory\(requestedCommit\)/);
+  assert.doesNotMatch(routeLoaders, /import\(|loadCodeBrowser|loadCommitCodeStream|loadVirtualCommitList/);
   assert.doesNotMatch(`${app}\n${routeLoaders}`, /loadThreadRepositorySnapshot/);
   assert.doesNotMatch(`${app}\n${routeLoaders}`, /subscribeThreadGitChanges/);
   assert.match(
@@ -384,5 +388,5 @@ test("top-level Source and Commits are wired independently from thread Git", asy
     routeLoaders,
     /loadPublishedCommitHistory\(requestedCommit\)[\s\S]*?preloadPublishedRepositoryPatchBody/,
   );
-  assert.match(entry, /preloadDirectSurface\(directUrl\)/);
+  assert.match(entry, /preloadDirectSurface\(url\)/);
 });

@@ -31,6 +31,14 @@ import {
 import { CHATGPT_REALTIME_INSTRUCTIONS } from "nanocodex/browser/realtime";
 import { routeLinkPreview } from "./linkPreview.ts";
 import { routeMultiplayer } from "./multiplayerProxy.ts";
+import {
+  fetchManagedModel,
+  managedModelAccess,
+  managedModelActorId,
+  managedModelReady,
+  openManagedResponsesWebSocket,
+  type ManagedModelAccess,
+} from "./managedModel.ts";
 
 export { ChatGptSession, EvalCoordinator, GitRepository, ThreadGitRepository };
 
@@ -46,7 +54,6 @@ const json = (body: unknown, init?: ResponseInit) =>
 
 const RESPONSES_UPGRADE_URL = "https://api.openai.com/v1/responses";
 const CHATGPT_API_BASE_URL = "https://chatgpt.com/backend-api/codex";
-const LOCAL_CHATGPT_API_BASE_URL = "http://127.0.0.1:8791/backend-api/codex";
 const RESPONSES_WEBSOCKETS_BETA = "responses_websockets=2026-02-06";
 const WEB_SEARCH_URL = "https://api.openai.com/v1/alpha/search";
 const IMAGE_GENERATION_URL = "https://api.openai.com/v1/images/generations";
@@ -85,8 +92,12 @@ type WorkerEnv = GitStorageEnv & ThreadGitStorageEnv & EvalStorageEnv & ChatGptE
   CHATGPT_ISSUER?: string;
   BYOK_SESSIONS?: DurableObjectNamespace;
   CHATGPT_SESSIONS?: DurableObjectNamespace;
+  EGRESS?: Fetcher;
   MULTIPLAYER_BACKEND?: Fetcher;
   MULTIPLAYER_ALLOCATOR_TOKEN?: string;
+  NANOCODEX_AUTH_MODE?: string;
+  NANOCODEX_MODEL_ACCESS?: string;
+  NANOCODEX_PUBLIC_ORIGIN?: string;
 };
 
 type ApiKeyCredential = {
@@ -127,6 +138,24 @@ export default {
     if (mcpResponse != null) return mcpResponse;
 
     if (url.pathname === "/api/health" && request.method === "GET") {
+      const managed = managedAccess(env);
+      if (managed instanceof Response) return managed;
+      if (managed) {
+        const ready = await managedModelReady(managed);
+        return json({
+          agent_configured: ready,
+          auth_mode: managed.authMode,
+          credential_source: ready ? "managed" : null,
+          deployment_sha: GIT_SHA_PATTERN.test(env.DEPLOYMENT_SHA ?? "")
+            ? env.DEPLOYMENT_SHA
+            : null,
+          interactive_auth: false,
+          model_access_mode: "managed",
+          service: "nanocodex",
+          runtime: "cloudflare-workers",
+          status: "ok",
+        });
+      }
       const resolved = await resolveCredential(request, env, "health");
       if (resolved instanceof Response) return resolved;
       const credential = resolved;
@@ -146,22 +175,37 @@ export default {
     }
 
     if (url.pathname === "/api/auth/chatgpt" && request.method === "POST") {
+      const managed = managedAccess(env);
+      if (managed instanceof Response) return managed;
+      if (managed) return interactiveAuthDisabled();
       return startChatGptSession(request, env, url);
     }
 
     if (url.pathname === "/api/auth/chatgpt" && request.method === "GET") {
+      const managed = managedAccess(env);
+      if (managed instanceof Response) return managed;
+      if (managed) return interactiveAuthDisabled();
       return chatGptSessionStatus(request, env, context);
     }
 
     if (url.pathname === "/api/auth/chatgpt" && request.method === "DELETE") {
+      const managed = managedAccess(env);
+      if (managed instanceof Response) return managed;
+      if (managed) return interactiveAuthDisabled();
       return clearChatGptSession(request, env, url);
     }
 
     if (url.pathname === "/api/auth/openai" && request.method === "PUT") {
+      const managed = managedAccess(env);
+      if (managed instanceof Response) return managed;
+      if (managed) return interactiveAuthDisabled();
       return createByokSession(request, env, url);
     }
 
     if (url.pathname === "/api/auth/openai" && request.method === "DELETE") {
+      const managed = managedAccess(env);
+      if (managed instanceof Response) return managed;
+      if (managed) return interactiveAuthDisabled();
       return clearByokSession(request, env, url);
     }
 
@@ -212,9 +256,27 @@ function enforceHttps(request: Request, env: WorkerEnv, url: URL): Response | nu
   return new Response("HTTPS required", { headers, status: 426 });
 }
 
+function managedAccess(env: WorkerEnv): ManagedModelAccess | Response | undefined {
+  try {
+    return managedModelAccess(env);
+  } catch {
+    return json({ error: "managed model access is misconfigured" }, { status: 503 });
+  }
+}
+
+function interactiveAuthDisabled(): Response {
+  return json({ error: "interactive authentication is disabled for managed model access" }, {
+    status: 409,
+  });
+}
+
+function isManagedAccess(value: Credential | ManagedModelAccess): value is ManagedModelAccess {
+  return "authMode" in value && "binding" in value;
+}
+
 async function proxyWebSearch(request: Request, env: WorkerEnv, url: URL): Promise<Response> {
-  const credential = await validateToolRequest(request, env, url, "search");
-  if (credential instanceof Response) return credential;
+  const access = await validateToolRequest(request, env, url, "search");
+  if (access instanceof Response) return access;
   const decoded = await readJsonBody(request);
   if (decoded instanceof Response) return decoded;
   const sessionId = typeof decoded.session_id === "string" ? decoded.session_id : "";
@@ -231,22 +293,32 @@ async function proxyWebSearch(request: Request, env: WorkerEnv, url: URL): Promi
   if (webOperationItemCount(commands) > MAX_WEB_OPERATION_ITEMS) {
     return json({ error: "web__run accepts at most 16 operation items per request" }, { status: 400 });
   }
-  const limited = await limitAgentOperation(env, credential.actorId, "search");
+  const actorId = isManagedAccess(access)
+    ? managedModelActorId(request, access)
+    : access.actorId;
+  const limited = await limitAgentOperation(env, actorId, "search");
   if (limited) return limited;
-  const upstreamUrl = credential.kind === "chatgpt"
-    ? `${chatGptApiBaseUrl(env)}/alpha/search`
-    : WEB_SEARCH_URL;
-  const upstream = await fetchOpenAi(credential, env, upstreamUrl, {
-      method: "POST",
-      headers: openAiHeaders(credential),
-      body: JSON.stringify({
-        id: sessionId,
-        model: MODEL,
-        commands,
-        settings: { allowed_callers: ["direct"], external_web_access: true },
-        max_output_tokens: 10_000,
-      }),
-    });
+  const upstreamBody = JSON.stringify({
+    id: sessionId,
+    model: MODEL,
+    commands,
+    settings: { allowed_callers: ["direct"], external_web_access: true },
+    max_output_tokens: 10_000,
+  });
+  const upstream = isManagedAccess(access)
+    ? await fetchManagedModel(access, "search", upstreamBody)
+    : await fetchOpenAi(
+        access,
+        env,
+        access.kind === "chatgpt"
+          ? `${chatGptApiBaseUrl(env)}/alpha/search`
+          : WEB_SEARCH_URL,
+        {
+          method: "POST",
+          headers: openAiHeaders(access),
+          body: upstreamBody,
+        },
+      );
   const body = await upstream.text();
   if (body.length > MAX_SEARCH_OUTPUT_CHARS) {
     return json({ error: "web search response exceeded 1 MiB" }, { status: 502 });
@@ -260,8 +332,8 @@ async function proxyWebSearch(request: Request, env: WorkerEnv, url: URL): Promi
 }
 
 async function proxyImageGeneration(request: Request, env: WorkerEnv, url: URL): Promise<Response> {
-  const credential = await validateToolRequest(request, env, url, "image");
-  if (credential instanceof Response) return credential;
+  const access = await validateToolRequest(request, env, url, "image");
+  if (access instanceof Response) return access;
   const decoded = await readJsonBody(request);
   if (decoded instanceof Response) return decoded;
   const prompt = typeof decoded.prompt === "string" ? decoded.prompt.trim() : "";
@@ -281,11 +353,11 @@ async function proxyImageGeneration(request: Request, env: WorkerEnv, url: URL):
   ) {
     return json({ error: "image edit inputs exceeded the 8 MiB each / 20 MiB total limit" }, { status: 413 });
   }
-  const limited = await limitAgentOperation(env, credential.actorId, "image");
+  const actorId = isManagedAccess(access)
+    ? managedModelActorId(request, access)
+    : access.actorId;
+  const limited = await limitAgentOperation(env, actorId, "image");
   if (limited) return limited;
-  const imageUrl = credential.kind === "chatgpt"
-    ? `${chatGptApiBaseUrl(env)}/images/${images.length ? "edits" : "generations"}`
-    : images.length ? IMAGE_EDIT_URL : IMAGE_GENERATION_URL;
   const body = JSON.stringify({
     ...(images.length ? { images: images.map((image_url) => ({ image_url })) } : {}),
     prompt,
@@ -294,11 +366,24 @@ async function proxyImageGeneration(request: Request, env: WorkerEnv, url: URL):
     quality: "auto",
     size: "auto",
   });
-  const upstream = await fetchOpenAi(credential, env, imageUrl, {
-    method: "POST",
-    headers: openAiHeaders(credential),
-    body,
-  });
+  const upstream = isManagedAccess(access)
+    ? await fetchManagedModel(
+        access,
+        images.length ? "image_edit" : "image_generation",
+        body,
+      )
+    : await fetchOpenAi(
+        access,
+        env,
+        access.kind === "chatgpt"
+          ? `${chatGptApiBaseUrl(env)}/images/${images.length ? "edits" : "generations"}`
+          : images.length ? IMAGE_EDIT_URL : IMAGE_GENERATION_URL,
+        {
+          method: "POST",
+          headers: openAiHeaders(access),
+          body,
+        },
+      );
   const payload = await upstream.json().catch(() => undefined) as {
     data?: Array<{ b64_json?: unknown }>;
     error?: { message?: unknown };
@@ -539,11 +624,14 @@ async function validateToolRequest(
   env: WorkerEnv,
   url: URL,
   operation: Extract<ChatGptOperation, "search" | "image">,
-): Promise<Credential | Response> {
+): Promise<Credential | ManagedModelAccess | Response> {
   if (!sameOrigin(request, url, env)) return json({ error: "forbidden" }, { status: 403 });
   if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
     return json({ error: "expected JSON" }, { status: 415 });
   }
+  const managed = managedAccess(env);
+  if (managed instanceof Response) return managed;
+  if (managed) return managed;
   const resolved = await resolveCredential(request, env, operation);
   if (resolved instanceof Response) return resolved;
   if (!resolved) return json({ error: "OpenAI credentials are not configured" }, { status: 503 });
@@ -647,6 +735,7 @@ async function setupResponsesWebSocket(
 ): Promise<void> {
   let credential: Credential | undefined;
   let upstream: WebSocket | undefined;
+  let upstreamAccepted = false;
   let bridged = false;
   let downstreamClosed = false;
   let leaseReleased = false;
@@ -663,55 +752,81 @@ async function setupResponsesWebSocket(
   downstream.addEventListener("close", onDownstreamClose);
   downstream.addEventListener("error", onDownstreamClose);
   try {
-    const leaseId = randomSessionId();
-    const resolved = await resolveCredential(request, env, "socket", leaseId);
-    if (resolved instanceof Response) {
-      await rejectResponsesWebSocket(downstream, resolved);
+    const managed = managedAccess(env);
+    if (managed instanceof Response) {
+      await rejectResponsesWebSocket(downstream, managed);
       return;
     }
-    credential = resolved;
-    if (!credential) {
-      await rejectResponsesWebSocket(
-        downstream,
-        new Response("OpenAI credentials are not configured", { status: 503 }),
+    if (managed) {
+      const limited = await limitAgentOperation(
+        env,
+        managedModelActorId(request, managed),
+        "socket",
       );
-      return;
-    }
-    if (downstreamClosed) return;
-    const limited = await limitAgentOperation(env, credential.actorId, "socket");
-    if (limited) {
-      await rejectResponsesWebSocket(downstream, limited);
-      return;
-    }
-    if (downstreamClosed) return;
-
-    let upstreamResponse = await openResponsesWebSocket(
-      env,
-      credential,
-      sessionId,
-      chatGptApiBaseUrl(env),
-    );
-    if (credential.kind === "chatgpt" && upstreamResponse.status === 401) {
-      const recovered = await recoverSubscriptionCredential(request, env, credential);
-      if (recovered) {
-        await upstreamResponse.body?.cancel();
-        credential = recovered;
-        upstreamResponse = await openResponsesWebSocket(
-          env,
-          credential,
-          sessionId,
-          chatGptApiBaseUrl(env),
+      if (limited) {
+        await rejectResponsesWebSocket(downstream, limited);
+        return;
+      }
+      if (downstreamClosed) return;
+      try {
+        const opened = await openManagedResponsesWebSocket(managed, sessionId);
+        upstream = opened.socket;
+        upstreamAccepted = true;
+      } catch (error) {
+        await rejectResponsesWebSocket(downstream, managedBrokerError(error));
+        return;
+      }
+    } else {
+      const leaseId = randomSessionId();
+      const resolved = await resolveCredential(request, env, "socket", leaseId);
+      if (resolved instanceof Response) {
+        await rejectResponsesWebSocket(downstream, resolved);
+        return;
+      }
+      credential = resolved;
+      if (!credential) {
+        await rejectResponsesWebSocket(
+          downstream,
+          new Response("OpenAI credentials are not configured", { status: 503 }),
         );
+        return;
+      }
+      if (downstreamClosed) return;
+      const limited = await limitAgentOperation(env, credential.actorId, "socket");
+      if (limited) {
+        await rejectResponsesWebSocket(downstream, limited);
+        return;
+      }
+      if (downstreamClosed) return;
+
+      let upstreamResponse = await openResponsesWebSocket(
+        env,
+        credential,
+        sessionId,
+        chatGptApiBaseUrl(env),
+      );
+      if (credential.kind === "chatgpt" && upstreamResponse.status === 401) {
+        const recovered = await recoverSubscriptionCredential(request, env, credential);
+        if (recovered) {
+          await upstreamResponse.body?.cancel();
+          credential = recovered;
+          upstreamResponse = await openResponsesWebSocket(
+            env,
+            credential,
+            sessionId,
+            chatGptApiBaseUrl(env),
+          );
+        }
+      }
+      upstream = upstreamResponse.webSocket ?? undefined;
+      if (!upstream) {
+        console.error("OpenAI WebSocket upgrade rejected", { status: upstreamResponse.status });
+        await rejectResponsesWebSocket(downstream, upstreamResponse);
+        return;
       }
     }
-    upstream = upstreamResponse.webSocket ?? undefined;
-    if (!upstream) {
-      console.error("OpenAI WebSocket upgrade rejected", { status: upstreamResponse.status });
-      await rejectResponsesWebSocket(downstream, upstreamResponse);
-      return;
-    }
     upstream.binaryType = "arraybuffer";
-    upstream.accept();
+    if (!upstreamAccepted) upstream.accept();
     if (downstreamClosed) return;
     downstream.send(JSON.stringify({ type: "nanocodex.proxy.ready" }));
     if (downstreamClosed) return;
@@ -722,12 +837,12 @@ async function setupResponsesWebSocket(
     });
     bridged = true;
   } catch (error) {
-    const detail = error instanceof Error ? error.message : String(error);
-    console.error("OpenAI WebSocket setup failed", { detail });
+    const name = error instanceof Error ? error.name : typeof error;
+    console.error("OpenAI WebSocket setup failed", { name });
     if (!downstreamClosed) {
       await rejectResponsesWebSocket(
         downstream,
-        new Response(`OpenAI WebSocket setup failed: ${detail}`, { status: 502 }),
+        new Response("OpenAI WebSocket setup failed", { status: 502 }),
       );
     }
   } finally {
@@ -737,6 +852,29 @@ async function setupResponsesWebSocket(
       await releaseLease();
     }
   }
+}
+
+function managedBrokerError(error: unknown): Response {
+  const rejected = error as { body?: unknown; retryAfter?: unknown; status?: unknown };
+  const status = Number.isInteger(rejected?.status)
+    && Number(rejected.status) >= 400
+    && Number(rejected.status) <= 599
+    ? Number(rejected.status)
+    : 502;
+  const code = typeof rejected?.body === "string"
+    && /^[a-z0-9_]{1,80}$/.test(rejected.body)
+    ? rejected.body
+    : "credential_broker_rejected";
+  const retryAfter = Number(rejected?.retryAfter);
+  return json(
+    { error: code },
+    {
+      status,
+      ...(Number.isFinite(retryAfter) && retryAfter >= 0
+        ? { headers: { "retry-after": String(retryAfter) } }
+        : {}),
+    },
+  );
 }
 
 async function rejectResponsesWebSocket(socket: WebSocket, response: Response): Promise<void> {
@@ -817,10 +955,8 @@ function openResponsesWebSocket(
     : fetch(RESPONSES_UPGRADE_URL, { headers });
 }
 
-function chatGptApiBaseUrl(env: WorkerEnv): string {
-  return env.ENVIRONMENT === "development"
-    ? LOCAL_CHATGPT_API_BASE_URL
-    : CHATGPT_API_BASE_URL;
+function chatGptApiBaseUrl(_env: WorkerEnv): string {
+  return CHATGPT_API_BASE_URL;
 }
 
 async function startChatGptSession(
@@ -1188,22 +1324,16 @@ function sameOrigin(request: Request, url: URL, env: WorkerEnv): boolean {
     request.headers.get("sec-fetch-site") === "same-origin"
   ) return true;
   const origin = request.headers.get("Origin");
-  if (origin) return matchesRequestOrigin(origin, url, env.ENVIRONMENT === "development");
+  if (origin) return matchesRequestOrigin(origin, url);
   const referer = request.headers.get("Referer");
   return referer !== null
-    && matchesRequestOrigin(referer, url, env.ENVIRONMENT === "development");
+    && matchesRequestOrigin(referer, url);
 }
 
-function matchesRequestOrigin(value: string, url: URL, allowLoopback: boolean): boolean {
+function matchesRequestOrigin(value: string, url: URL): boolean {
   try {
     const source = new URL(value);
-    if (source.origin === url.origin) return true;
-    if (!allowLoopback) return false;
-    const loopback = (hostname: string) => ["localhost", "127.0.0.1", "::1"].includes(hostname);
-    return loopback(source.hostname)
-      && loopback(url.hostname)
-      && ["http:", "https:"].includes(source.protocol)
-      && ["http:", "https:"].includes(url.protocol);
+    return source.origin === url.origin;
   } catch {
     return false;
   }

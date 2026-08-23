@@ -11,7 +11,7 @@ The public demo family is explicit in the shared navigation:
 - **Home** explains the library and links the independent proofs.
 - **Agent** is one player using the browser-owned Rust/WASM agent in the TUI.
 - **Multiplayer** is many humans in one ordered, replayable Durable Object room
-  with one private, host-invoked, tool-free managed agent.
+  with one private, member-invoked, tool-free managed agent.
 - **World** is one human in a game world populated by many browser-owned AI
   residents.
 
@@ -23,6 +23,11 @@ room cursors and final agent replies, never managed agent/turn capabilities or
 provider credentials. The managed runtime, in turn, has only a private
 credential-broker Service Binding and fixed placeholders for both OAuth and
 normal OpenAI API-key modes.
+
+Every authenticated room member can invoke the shared agent; only the room
+owner can end the room. Those turns spend from the one deployment-wide broker
+credential under per-member, room, and global quotas. Membership never exposes
+or selects that credential.
 
 Exact `POST /v1/rooms` requests receive a create-room-only capability from the
 website Worker's `MULTIPLAYER_ALLOCATOR_TOKEN` secret. The proxy strips every
@@ -68,21 +73,62 @@ npm install
 npm run dev
 ```
 
+That one command owns the complete production-shaped local stack. It asks the
+canonical incremental Rust/WASM builder to validate its exact source/tool
+fingerprint and repairs missing, malformed, or stale bindings. On the first run
+it also prepares missing Worker dependencies, applies the local D1 migrations,
+starts the website Worker, and publishes the current committed Git `HEAD`
+through the real repository publisher into local R2 and the repository Durable
+Object. It reports ready only after a generation-pinned Source blob, commit
+metadata and page, patch, Evals, and the read-only `/git` advertisement all
+resolve that `HEAD`. Local Cloudflare state is retained under `.wrangler`, so
+later starts reuse immutable repository objects and are substantially faster.
+
+The orchestrator loads the repository-root `.env` once before it selects auth
+or starts a child. It reconstructs every child environment explicitly: only the
+private managed launcher and its credential broker receive `OPENAI_API_KEY` or
+Codex auth configuration. Vite receives only the derived
+`NANOCODEX_LOCAL_MODEL_ACCESS=managed` and non-secret auth mode; it maps those
+to the website Worker's private `MODEL_EGRESS` binding. Vite and both Workers
+otherwise receive only generated local tokens, secretless bindings, and
+non-secret runtime settings. The legacy credential-bearing development proxy
+is not part of managed localhost.
+Vite env loading is disabled, and website `.dev.vars*` files are rejected; keep
+local development settings in the one root `.env` instead.
+
+When `OPENAI_API_KEY` is configured, `npm run dev` uses it without inspecting
+another credential. Otherwise it automatically discovers an existing, valid `0600`
+Codex login on the host and starts the private credential broker and managed
+Multiplayer Worker in subscription mode. Local startup never opens an OAuth or
+device-code flow: if neither credential exists, it stops with the exact
+`codex login`, root `.env`, and web-only options instead. The website Worker
+receives neither credential: it reaches the managed Worker over a local Service
+Binding, and that Worker can reach only the private broker binding. Managed
+readiness is a private child-process attestation emitted only after the broker
+proves its configured auth with the fixed Responses WebSocket upgrade and the
+managed Worker health check succeeds. The outer launcher then requires website
+health to attest the same managed, non-interactive auth mode and opens one
+same-origin `/api/responses` WebSocket through `MODEL_EGRESS`; it accepts only
+the exact `nanocodex.proxy.ready` frame before reporting ready.
+The explicit variants are:
+
+```bash
+npm run dev:subscription # require the local Codex login
+npm run dev:api-key      # require OPENAI_API_KEY
+npm run dev:web          # omit the managed Multiplayer stack
+```
+
 The homepage consumes the publishable `nanocodex` and `nanocodex-react`
 packages under `../js`; it does not reach into generated WASM artifacts. Its
-React integration wraps the terminal in `NanocodexProvider`, creates the
-browser agent with `useAgent({ enabled, threadId })`, and observes its typed
+React integration creates the browser agent with
+`useNanocodex({ config, threadId })` and observes its typed
 event stream with `useAgentEvents`. React owns no Worker lifecycle, agent
 history, credential policy, or model-loop state.
 
-The local Worker and Vite client run together at `https://localhost:5173` using
-the Cloudflare Vite-plugin layout.
-
-Local Multiplayer development uses the remote `nanocodex-durable-agent`
-Service Binding, so it requires Cloudflare authentication, a deployed private
-managed Worker, and a local `MULTIPLAYER_ALLOCATOR_TOKEN` matching that
-Worker's `NANOCODEX_ROOM_ALLOCATOR_TOKEN`. Keep the default HTTPS development
-origin so room cookies remain Secure and sockets use `wss`; see the
+The local Worker and Vite client run together at `http://localhost:5173` using
+the Cloudflare Vite-plugin layout. No Cloudflare account or remote binding is
+used by the normal development command. Browsers treat `localhost` as a secure
+context, while provider credentials remain behind private Worker bindings; see the
 [Cloudflare Worker example](../examples/cloudflare-workers/README.md#multiplayer-managed-agent-rooms)
 for the deployment and live-smoke workflow.
 
@@ -96,10 +142,12 @@ every page entered the Docs bundle and generates `llms.txt` plus
 `llms-full.txt` in the Cloudflare asset tree. The docs are not a second service,
 generator, or visual system.
 
-In development, Vite reads repository metadata from Git, serves working-tree
-files on demand, and streams history directly from Git only when the commit
-view opens. Startup does not generate or rewrite repository blobs. Set
-`NANOCODEX_REPO` to point the development view at another checkout.
+Development deliberately has no Vite-only Git shortcut. Source and Commits use
+the same generation-qualified `/api/repository` objects and `/git` protocol as
+production, backed by local R2 and the same publication Durable Object. Dirty
+and untracked working-tree files therefore never leak into those surfaces.
+Restart after committing to publish the new `HEAD`; set `NANOCODEX_REPO` before
+startup to exercise a different committed checkout.
 
 `npm run build` does not inspect Git or generate repository assets. Production
 repository data is published separately to R2 by `npm run
@@ -257,8 +305,9 @@ Run `npm run bench:dataset` in `js/bindings` for the deterministic 100,000-row
 Snappy Parquet/JSONL browser-path benchmark. It reports cold and repeated query
 latency, pulled bytes, range requests, scanned rows, and cache hits.
 
-Development uses `vite-plugin-mkcert` so the browser Agent exercises its secure
-context requirements under the same HTTPS boundary as production.
+Development runs on ordinary `http://localhost`, which browsers treat as a
+secure context. Provider credentials remain behind Worker Service Bindings and
+never enter that browser origin.
 
 Local development reads the optional ignored root `.env` through the repository
 workflow. BYOK uses the `BYOK_SESSIONS` Durable Object binding; ChatGPT login
