@@ -92,11 +92,7 @@ async function initialHistory(
     return localTranscriptEvents(retained.turns, agent.sessionId);
   }
   const context = await agent.session.context();
-  const bootstrap = localContextTurns(
-    context.history,
-    threadId,
-    retained.turns[0]?.createdAt ?? Date.now(),
-  );
+  const bootstrap = localContextTurns(context.history, threadId);
   await journal.bootstrap(threadId, bootstrap);
   const durable = await journal.load(threadId);
   return localTranscriptEvents(durable.turns, agent.sessionId);
@@ -105,7 +101,6 @@ async function initialHistory(
 export function localContextTurns(
   history: readonly Record<string, unknown>[],
   threadId: string,
-  before = Date.now(),
 ): readonly LocalTranscriptTurn[] {
   const turns: Array<{ prompt?: string; assistant?: string; turnId: string }> = [];
   for (const item of history) {
@@ -124,7 +119,7 @@ export function localContextTurns(
     else turns.push({ assistant, turnId: `bootstrap-${turns.length}-assistant` });
   }
   const recent = turns.slice(-MAX_LOCAL_TRANSCRIPT_TURNS);
-  const start = before - recent.length;
+  const start = Date.now() - recent.length;
   return Object.freeze(recent.map((turn, index) => Object.freeze({
     ...turn,
     threadId,

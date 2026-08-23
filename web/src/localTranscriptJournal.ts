@@ -103,7 +103,7 @@ export function createLocalTranscriptJournal(options: {
                 finishTurn();
                 return;
               }
-              const added = storedTurns.add(storedTurn(turn));
+              const added = storedTurns.add(storedTurn(turn, true));
               added.onerror = () => reject(added.error ?? new Error("writing transcript bootstrap turn failed"));
               added.onsuccess = finishTurn;
             };
@@ -223,8 +223,15 @@ function recentTurns(
   });
 }
 
-function storedTurn(turn: LocalTranscriptTurn): StoredTurn {
-  return Object.freeze({ ...turn, order: `${String(turn.createdAt).padStart(16, "0")}:${turn.turnId}` });
+function storedTurn(turn: LocalTranscriptTurn, bootstrap = false): StoredTurn {
+  // A first-run context import must sort before prompts that race with it. The
+  // punctuation also keeps the ordering compatible with pre-journal records:
+  // bootstrap (!) < legacy timestamp (0-9) < app-owned live turn (~).
+  const prefix = bootstrap ? "!" : "~";
+  return Object.freeze({
+    ...turn,
+    order: `${prefix}:${String(turn.createdAt).padStart(16, "0")}:${turn.turnId}`,
+  });
 }
 
 function decodeTurn(value: unknown, threadId: string): LocalTranscriptTurn | undefined {

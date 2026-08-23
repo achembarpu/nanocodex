@@ -75,27 +75,33 @@ test("durable app transcript survives a compacted model context", async () => {
   assert.ok(events.every(({ request_id }) => request_id === "ephemeral-session-b"));
 });
 
-test("an uninitialized journal with a raced prompt still bootstraps retained context", async () => {
+test("a prompt recorded while context is loading sorts after bootstrapped history", async () => {
   const journal = memoryJournal();
-  await journal.recordPrompt({
-    threadId: "thread-1",
-    turnId: "raced-turn",
-    createdAt: 10_000,
-    prompt: "new prompt",
-  });
+  let contextStarted!: () => void;
+  let releaseContext!: () => void;
+  const started = new Promise<void>((resolve) => { contextStarted = resolve; });
+  const contextGate = new Promise<void>((resolve) => { releaseContext = resolve; });
   const retained = fakeAgent([
     { type: "message", role: "user", id: "old-turn", content: [{ type: "input_text", text: "old prompt" }] },
     { type: "message", role: "assistant", phase: "final_answer", content: [{ type: "output_text", text: "old answer" }] },
-  ], "unused", [], "ephemeral-session-b");
+  ], "new answer", [], "ephemeral-session-b", async () => {
+    contextStarted();
+    await contextGate;
+  });
 
   const reloaded = localTerminalAgent(retained.agent, "thread-1", journal);
-  const events = await watchedHistory(reloaded);
+  const history = watchedHistory(reloaded);
+  await started;
+  await reloaded.turn.prompt({ input: "new prompt" }).result();
+  releaseContext();
+  const events = await history;
 
   assert.equal(retained.contextCalls(), 1);
   assert.deepEqual(events.map(({ type, payload }) => [type, payload.text]), [
     ["managed.prompt", "old prompt"],
     ["assistant.message", "old answer"],
     ["managed.prompt", "new prompt"],
+    ["assistant.message", "new answer"],
   ]);
 });
 
@@ -141,25 +147,38 @@ test("journal failures do not block live local turns", async () => {
 });
 
 function memoryJournal(): LocalTranscriptJournal {
-  const records = new Map<string, LocalTranscriptTurn>();
+  const records = new Map<string, { order: string; turn: LocalTranscriptTurn }>();
   const initialized = new Set<string>();
   const key = (turn: LocalTranscriptTurn) => `${turn.threadId}:${turn.turnId}`;
+  const ordered = (turn: LocalTranscriptTurn, prefix: "!" | "~") => ({
+    order: `${prefix}:${String(turn.createdAt).padStart(16, "0")}:${turn.turnId}`,
+    turn,
+  });
   return Object.freeze({
     async load(threadId) {
       return {
         initialized: initialized.has(threadId),
         turns: [...records.values()]
-          .filter((turn) => turn.threadId === threadId)
-          .sort((left, right) => left.createdAt - right.createdAt),
+          .filter(({ turn }) => turn.threadId === threadId)
+          .sort((left, right) => left.order.localeCompare(right.order))
+          .map(({ turn }) => turn),
       };
     },
     async bootstrap(threadId, turns) {
       if (initialized.has(threadId)) return;
-      for (const turn of turns) records.set(key(turn), turn);
+      for (const turn of turns) {
+        if (!records.has(key(turn))) records.set(key(turn), ordered(turn, "!"));
+      }
       initialized.add(threadId);
     },
-    async recordPrompt(turn) { records.set(key(turn), turn); },
-    async completeTurn(turn) { records.set(key(turn), { ...records.get(key(turn)), ...turn }); },
+    async recordPrompt(turn) { records.set(key(turn), ordered(turn, "~")); },
+    async completeTurn(turn) {
+      const existing = records.get(key(turn));
+      records.set(key(turn), {
+        order: existing?.order ?? ordered(turn, "~").order,
+        turn: { ...existing?.turn, ...turn },
+      });
+    },
   });
 }
 
@@ -168,13 +187,18 @@ function fakeAgent(
   finalMessage: string,
   calls: string[] = [],
   sessionId = "session-1",
+  beforeContext: () => Promise<void> = async () => {},
 ) {
   let contexts = 0;
   return {
     contextCalls: () => contexts,
     agent: {
       sessionId,
-      session: { async context() { contexts += 1; return { workspace: "", history }; } },
+      session: { async context() {
+        contexts += 1;
+        await beforeContext();
+        return { workspace: "", history };
+      } },
       turn: {
         prompt(options: { input: string; id?: string }) {
           calls.push("prompt");
