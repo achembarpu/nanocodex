@@ -43,7 +43,6 @@ export type RoomServerMessage =
       members: RoomMember[];
       online_member_ids: string[];
       latest_cursor: string;
-      auth_mode: "api_key" | "chatgpt";
       can_target_agent: boolean;
       can_end_room: boolean;
     }

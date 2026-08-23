@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 
-import { create } from "../cloudflare/Agent.mjs";
+import { create, destroy } from "../cloudflare/Agent.mjs";
 
 class MemoryStorage {
   constructor() {
@@ -54,6 +54,14 @@ class MemoryStorage {
       this.journals.set(args[0], args[1]);
     } else if (statement.startsWith("INSERT INTO nanocodex_journal_batches")) {
       this.batches.push({ journalId: args[0], revision: args[1], payload: args[2] });
+    } else if (statement.startsWith("DELETE FROM nanocodex_journal_batches")) {
+      this.batches = this.batches.filter((batch) => batch.journalId !== args[0]);
+    } else if (statement.startsWith("DELETE FROM nanocodex_journals")) {
+      this.journals.delete(args[0]);
+    } else if (statement === "DELETE FROM nanocodex_cloudflare_events") {
+      this.events = [];
+    } else if (statement.startsWith("UPDATE nanocodex_cloudflare_event_meta SET total_bytes = 0")) {
+      this.meta = { total_bytes: 0, stream_error: null };
     } else {
       throw new Error(`unexpected SQL: ${statement}`);
     }
@@ -87,30 +95,44 @@ function egressBinding() {
   };
 }
 
+function durableOwner(storage, binding = egressBinding()) {
+  return {
+    ctx: durableContext(storage),
+    env: { NANOCODEX: binding },
+  };
+}
+
 test("Cloudflare Agent owns credentials, transport, and durability options", async () => {
-  await assert.rejects(create(), /requires options/);
+  const module = new Uint8Array();
+  await assert.rejects(create(module), /requires a Durable Object instance/);
   await assert.rejects(
-    create({ apiKey: "managed-secret" }),
-    /does not accept apiKey; transport, credentials, and durability are managed/,
+    create(module, durableOwner(new MemoryStorage()), { apiKey: "managed-secret" }),
+    /does not accept apiKey; only instructions and tools are configurable/,
   );
   await assert.rejects(
-    create({ CODEX_OAUTH_BOOTSTRAP: "managed-secret" }),
+    create(module, durableOwner(new MemoryStorage()), { CODEX_OAUTH_BOOTSTRAP: "managed-secret" }),
     /does not accept CODEX_OAUTH_BOOTSTRAP/,
   );
   await assert.rejects(
-    create({ transport: {}, authMode: "api_key", egress: { fetch() {} } }),
+    create(module, durableOwner(new MemoryStorage()), { transport: {} }),
     /does not accept transport/,
   );
+  for (const name of ["model", "reasoningMode", "filesystem", "mcp", "codeEvaluator", "toolMode"]) {
+    await assert.rejects(
+      create(module, durableOwner(new MemoryStorage()), { [name]: "forbidden" }),
+      new RegExp(`does not accept ${name}`),
+    );
+  }
   await assert.rejects(
-    create({ context: {}, authMode: "api_key" }),
-    /requires a private EGRESS Service Binding/,
+    create(module, { ctx: durableContext(new MemoryStorage()), env: {} }),
+    /owner\.env\.NANOCODEX Service Binding/,
   );
   await assert.rejects(
-    create({ context: {}, egress: { fetch() {} } }),
-    /authMode must be explicitly set to api_key or chatgpt/,
+    create(module, { env: { NANOCODEX: egressBinding() } }),
+    /requires owner\.ctx/,
   );
   await assert.rejects(
-    create({ context: {}, egress: { fetch() {} }, authMode: "api_key" }),
+    create(module, { ctx: {}, env: { NANOCODEX: egressBinding() } }),
     /requires Durable Object SQLite storage/,
   );
 });
@@ -119,21 +141,32 @@ test("Cloudflare Agent isolates journals per Durable Object and can recreate aft
   const module = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
   const firstStorage = new MemoryStorage();
   const secondStorage = new MemoryStorage();
-  const options = (storage) => ({
-    context: durableContext(storage),
-    egress: egressBinding(),
-    authMode: "api_key",
-    module,
-  });
+  const owner = (storage) => durableOwner(storage);
 
   const [first, second] = await Promise.all([
-    create(options(firstStorage)),
-    create(options(secondStorage)),
+    create(module, owner(firstStorage)),
+    create(module, owner(secondStorage)),
   ]);
   assert.notEqual(first.sessionId, second.sessionId);
   await Promise.all([first.session.shutdown(), second.session.shutdown()]);
 
-  const recreated = await create(options(firstStorage));
+  const recreated = await create(module, owner(firstStorage));
   assert.equal(recreated.sessionId, first.sessionId);
   await recreated.session.shutdown();
+});
+
+test("Cloudflare Agent destroy owns idempotent adapter cleanup", async () => {
+  const module = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
+  const storage = new MemoryStorage();
+  const owner = durableOwner(storage);
+
+  destroy(owner);
+  const agent = await create(module, owner);
+  await agent.session.shutdown();
+  destroy(owner);
+  destroy(owner);
+
+  assert.equal(storage.batches.length, 0);
+  assert.equal(storage.journals.size, 0);
+  assert.equal(storage.events.length, 0);
 });

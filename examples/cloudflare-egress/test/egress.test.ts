@@ -16,14 +16,21 @@ describe("Cloudflare service-bound egress", () => {
     expect(await denied.json()).toEqual({ error: "destination_denied" });
 
     const wrongPath = await egress(
-      codexRequest({ url: "https://chatgpt.com/backend-api/codex/responses/other" }),
+      codexRequest({ url: "https://nanocodex.internal/v1/responses/other" }),
     );
     expect(wrongPath.status).toBe(403);
 
     const query = await egress(
-      codexRequest({ url: "https://chatgpt.com/backend-api/codex/responses?next=evil" }),
+      codexRequest({ url: "https://nanocodex.internal/v1/responses?next=evil" }),
     );
     expect(query.status).toBe(403);
+
+    for (const url of [
+      "https://chatgpt.com/backend-api/codex/responses",
+      "https://api.openai.com/v1/responses",
+    ]) {
+      expect((await egress(codexRequest({ url }))).status).toBe(403);
+    }
   });
 
   it("fails closed for invalid fixed broker policy", async () => {
@@ -149,7 +156,7 @@ describe("Cloudflare service-bound egress", () => {
     expect(upstreamCalls).toBe(0);
   });
 
-  it("reports only the configured model mode through the private status contract", async () => {
+  it("reports structural readiness without exposing provider mode", async () => {
     for (const fixture of [
       {
         environment: {
@@ -157,7 +164,6 @@ describe("Cloudflare service-bound egress", () => {
           ALLOWED_POLICIES: "openai",
           OPENAI_API_KEY: "status-openai-key",
         },
-        mode: "api_key",
       },
       {
         environment: {
@@ -165,7 +171,6 @@ describe("Cloudflare service-bound egress", () => {
           ALLOWED_POLICIES: "codex",
           CODEX_OAUTH: fixedCodexCredential(),
         },
-        mode: "chatgpt",
       },
     ]) {
       const status = await handleEgress(
@@ -174,7 +179,7 @@ describe("Cloudflare service-bound egress", () => {
       );
       expect(status.status).toBe(200);
       expect(status.headers.get("cache-control")).toBe("no-store");
-      expect(await status.json()).toEqual({ ready: true, auth_mode: fixture.mode });
+      expect(await status.json()).toEqual({ ready: true });
     }
 
     const unavailable = await handleEgress(
@@ -191,14 +196,17 @@ describe("Cloudflare service-bound egress", () => {
   });
 
   it("brokers exact API-key search and image routes with replayable bounded bodies", async () => {
-    for (const path of [
-      "/v1/alpha/search",
-      "/v1/images/generations",
-      "/v1/images/edits",
+    for (const fixture of [
+      { operation: "/v1/search", upstream: "/v1/alpha/search" },
+      { operation: "/v1/images/generations", upstream: "/v1/images/generations" },
+      { operation: "/v1/images/edits", upstream: "/v1/images/edits" },
     ]) {
       let observed: Request | undefined;
       const response = await handleEgress(
-        modelHttpRequest(`https://api.openai.com${path}`, "Bearer NANOCODEX_OPENAI_API_KEY"),
+        modelHttpRequest(
+          `https://nanocodex.internal${fixture.operation}`,
+          "Bearer NANOCODEX_PROVIDER_CREDENTIAL",
+        ),
         {
           ...workerEnv,
           ALLOWED_POLICIES: "openai",
@@ -211,7 +219,7 @@ describe("Cloudflare service-bound egress", () => {
         },
       );
       expect(response.status).toBe(200);
-      expect(observed?.url).toBe(`https://api.openai.com${path}`);
+      expect(observed?.url).toBe(`https://api.openai.com${fixture.upstream}`);
       expect(observed?.method).toBe("POST");
       expect(observed?.headers.get("authorization")).toBe("Bearer real-openai-http-key");
       expect(observed?.headers.get("x-should-not-forward")).toBeNull();
@@ -223,9 +231,8 @@ describe("Cloudflare service-bound egress", () => {
     let observed: Request | undefined;
     const response = await handleEgress(
       modelHttpRequest(
-        "https://chatgpt.com/backend-api/codex/alpha/search",
-        "Bearer NANOCODEX_CODEX_OAUTH",
-        "NANOCODEX_CODEX_ACCOUNT",
+        "https://nanocodex.internal/v1/search",
+        "Bearer NANOCODEX_PROVIDER_CREDENTIAL",
       ),
       {
         ...workerEnv,
@@ -245,13 +252,12 @@ describe("Cloudflare service-bound egress", () => {
     );
     expect(observed?.headers.get("authorization")).toBe("Bearer deep-codex-token");
     expect(observed?.headers.get("chatgpt-account-id")).toBe("deep-codex-account");
-    expect([...observed!.headers.values()].join("\n")).not.toContain("NANOCODEX_CODEX");
+    expect([...observed!.headers.values()].join("\n")).not.toContain("NANOCODEX_PROVIDER_CREDENTIAL");
 
     const denied = await handleEgress(
       modelHttpRequest(
-        "https://chatgpt.com/backend-api/codex/alpha/search?destination=evil",
-        "Bearer NANOCODEX_CODEX_OAUTH",
-        "NANOCODEX_CODEX_ACCOUNT",
+        "https://nanocodex.internal/v1/search?destination=evil",
+        "Bearer NANOCODEX_PROVIDER_CREDENTIAL",
       ),
       {
         ...workerEnv,
@@ -298,11 +304,19 @@ describe("Cloudflare service-bound egress", () => {
 
   it("requires exact placeholders before resolving a credential", async () => {
     const response = await egress(
-      codexRequest({ authorization: "Bearer NANOCODEX_CODEX_OAUTH suffix" }),
+      codexRequest({ authorization: "Bearer NANOCODEX_PROVIDER_CREDENTIAL suffix" }),
     );
     expect(response.status).toBe(403);
     expect(await response.json()).toEqual({ error: "credential_placeholder_mismatch" });
     expect(await refreshCount()).toBe(0);
+
+    for (const name of ["chatgpt-account-id", "x-openai-fedramp"]) {
+      const forged = codexRequest();
+      forged.headers.set(name, "caller-controlled");
+      const denied = await egress(forged);
+      expect(denied.status).toBe(403);
+      expect(await denied.json()).toEqual({ error: "provider_header_forbidden" });
+    }
   });
 
   it("single-flights rotating Codex refresh, persists it, and recovers one 401", async () => {
@@ -317,7 +331,7 @@ describe("Cloudflare service-bound egress", () => {
       expect.objectContaining({ account: "account-1", marker: "access-1", leaked: null }),
     ]);
     expect(bodies[0]?.authorization).toMatch(/^Bearer /);
-    expect(bodies[0]?.authorization).not.toContain("NANOCODEX_CODEX_OAUTH");
+    expect(bodies[0]?.authorization).not.toContain("NANOCODEX_PROVIDER_CREDENTIAL");
     expect(bodies[0]?.redirect).toBe("manual");
     expect(await refreshCount()).toBe(1);
 
@@ -364,7 +378,7 @@ describe("Cloudflare service-bound egress", () => {
     expect(response.status).toBe(200);
     expect(observed?.url).toBe("https://relay.example/v1/unguessable-capability");
     expect(observed?.headers.get("authorization")).toMatch(/^Bearer /);
-    expect(observed?.headers.get("authorization")).not.toContain("NANOCODEX_CODEX_OAUTH");
+    expect(observed?.headers.get("authorization")).not.toContain("NANOCODEX_PROVIDER_CREDENTIAL");
     expect(observed?.headers.get("chatgpt-account-id")).toBe("account-1");
 
     const malformed = await egress(codexRequest({ requestId: "bad-relay" }), {
@@ -525,11 +539,10 @@ function codexRequest(options: {
   url?: string;
 } = {}): Request {
   return new Request(
-    options.url ?? "https://chatgpt.com/backend-api/codex/responses",
+    options.url ?? "https://nanocodex.internal/v1/responses",
     {
       headers: {
-        authorization: options.authorization ?? "Bearer NANOCODEX_CODEX_OAUTH",
-        "chatgpt-account-id": "NANOCODEX_CODEX_ACCOUNT",
+        authorization: options.authorization ?? "Bearer NANOCODEX_PROVIDER_CREDENTIAL",
         "openai-beta": "responses_websockets=2026-02-06",
         upgrade: "websocket",
         "user-agent": "test",
@@ -541,9 +554,9 @@ function codexRequest(options: {
 }
 
 function openAiRequest(
-  authorization = "Bearer NANOCODEX_OPENAI_API_KEY",
+  authorization = "Bearer NANOCODEX_PROVIDER_CREDENTIAL",
 ): Request {
-  return new Request("https://api.openai.com/v1/responses", {
+  return new Request("https://nanocodex.internal/v1/responses", {
     headers: {
       authorization,
       "openai-beta": "responses_websockets=2026-02-06",

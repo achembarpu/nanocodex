@@ -51,17 +51,13 @@ const roomEncoder = new TextEncoder();
 export interface MultiplayerRoomEnv {
   NANOCODEX_SESSIONS: DurableObjectNamespace;
   NANOCODEX_MULTIPLAYER_QUOTA: DurableObjectNamespace;
-  NANOCODEX_AUTH_MODE: string;
 }
-
-type AuthMode = "api_key" | "chatgpt";
 
 type RoomRow = {
   room_id: string;
   agent_id: string;
   invite_hash: string;
   public_origin: string;
-  auth_mode: AuthMode;
   status: "initializing" | "ready" | "deleting";
   created_at: number;
   invite_expires_at: number;
@@ -155,7 +151,6 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
         agent_id TEXT NOT NULL UNIQUE,
         invite_hash TEXT NOT NULL,
         public_origin TEXT NOT NULL,
-        auth_mode TEXT NOT NULL CHECK (auth_mode IN ('api_key', 'chatgpt')),
         status TEXT NOT NULL CHECK (status IN ('initializing', 'ready', 'deleting')),
         created_at INTEGER NOT NULL,
         invite_expires_at INTEGER NOT NULL,
@@ -381,7 +376,6 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
       || typeof body.public_origin !== "string" || !validPublicOrigin(body.public_origin)) {
       return roomJson({ error: "invalid_request" }, { status: 400 });
     }
-    const authMode = modelAuthMode(this.env);
     const invite = randomToken();
     const memberToken = randomToken();
     const memberId = crypto.randomUUID();
@@ -401,13 +395,12 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
         this.ctx.storage.sql.exec(
           `INSERT INTO room_state (
              singleton, room_id, agent_id, invite_hash, public_origin,
-             auth_mode, status, created_at, invite_expires_at, expires_at, last_active
-           ) VALUES (1, ?, ?, ?, ?, ?, 'initializing', ?, ?, ?, ?)`,
+             status, created_at, invite_expires_at, expires_at, last_active
+           ) VALUES (1, ?, ?, ?, ?, 'initializing', ?, ?, ?, ?)`,
           body.room_id as string,
           body.agent_id as string,
           inviteHash,
           body.public_origin as string,
-          authMode,
           now,
           inviteExpiresAt,
           expiresAt,
@@ -462,7 +455,6 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
       invite,
       member_id: memberId,
       member_token: memberToken,
-      auth_mode: authMode,
       public_origin: ready.public_origin,
     }, { status: 201 });
   }
@@ -729,7 +721,6 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
       room_id: result.room.room_id,
       member_id: result.member.id,
       member_token: result.memberToken,
-      auth_mode: result.room.auth_mode,
       public_origin: result.room.public_origin,
     }, { status: result.replayed ? 200 : 201 });
   }
@@ -740,7 +731,7 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
     }
     const initialRoom = this.#readyRoom();
     if (!initialRoom) return new Response("Unknown or expired room", { status: 404 });
-    if (request.headers.get("origin") !== initialRoom.public_origin) {
+    if (!sameRoomOrigin(initialRoom.public_origin, request.headers.get("origin"))) {
       console.error(JSON.stringify({
         type: "multiplayer.origin_rejected",
         expected: initialRoom.public_origin,
@@ -762,7 +753,7 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
       ({ room, member } = this.ctx.storage.transactionSync(() => {
         const current = this.#requireReadyRoom(Date.now());
         if (current.room_id !== initialRoom.room_id
-          || request.headers.get("origin") !== current.public_origin) {
+          || !sameRoomOrigin(current.public_origin, request.headers.get("origin"))) {
           throw new RoomMutationError("room_unavailable", "room is unavailable", 404);
         }
         const currentMember = this.#memberByTokenHash(hash);
@@ -839,7 +830,6 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
       members: this.#members(),
       online_member_ids: this.#onlineMemberIds(),
       latest_cursor: this.#events.latestCursor(),
-      auth_mode: room.auth_mode,
       can_target_agent: true,
       can_end_room: member.is_owner === 1,
     });
@@ -871,7 +861,6 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
       members: this.#members(),
       online_member_ids: this.#onlineMemberIds(),
       latest_cursor: this.#events.latestCursor(),
-      auth_mode: room.auth_mode,
     });
   }
 
@@ -1843,7 +1832,7 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
 
   #room(): RoomRow | undefined {
     return this.ctx.storage.sql.exec<RoomRow>(
-      `SELECT room_id, agent_id, invite_hash, public_origin, auth_mode, status,
+      `SELECT room_id, agent_id, invite_hash, public_origin, status,
               created_at,
               MIN(invite_expires_at, created_at + ?) AS invite_expires_at,
               MIN(expires_at, created_at + ?) AS expires_at,
@@ -2197,12 +2186,6 @@ export function roomCookieName(roomId: string): string {
   return `nanocodex_room_${roomId.replaceAll("-", "")}`;
 }
 
-function modelAuthMode(env: MultiplayerRoomEnv): AuthMode {
-  const configured = env.NANOCODEX_AUTH_MODE;
-  if (configured === "api_key" || configured === "chatgpt") return configured;
-  throw new Error("NANOCODEX_AUTH_MODE must be api_key or chatgpt");
-}
-
 function randomToken(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(32));
   return base64Url(bytes);
@@ -2259,6 +2242,26 @@ function validPublicOrigin(value: string): boolean {
   } catch {
     return false;
   }
+}
+
+function sameRoomOrigin(expected: string, received: string | null): boolean {
+  if (received === expected) return true;
+  if (received === null) return false;
+  try {
+    const left = new URL(expected);
+    const right = new URL(received);
+    return left.protocol === "http:"
+      && right.protocol === "http:"
+      && left.port === right.port
+      && isLoopbackHostname(left.hostname)
+      && isLoopbackHostname(right.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function isLoopbackHostname(hostname: string): boolean {
+  return hostname === "127.0.0.1" || hostname === "localhost" || hostname === "[::1]";
 }
 
 function record(value: unknown): Record<string, unknown> | undefined {

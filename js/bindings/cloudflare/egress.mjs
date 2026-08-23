@@ -1,46 +1,30 @@
 const OPENAI_WEBSOCKET_BETA = "responses_websockets=2026-02-06";
-const PROFILES = Object.freeze({
-  api_key: Object.freeze({
-    apiBaseUrl: "https://api.openai.com/v1",
-    websocketUrl: "wss://api.openai.com/v1/responses",
-    authorization: "Bearer NANOCODEX_OPENAI_API_KEY",
-  }),
-  chatgpt: Object.freeze({
-    apiBaseUrl: "https://chatgpt.com/backend-api/codex",
-    websocketUrl: "wss://chatgpt.com/backend-api/codex/responses",
-    authorization: "Bearer NANOCODEX_CODEX_OAUTH",
-  }),
-});
-const OPTION_NAMES = new Set(["authMode", "binding"]);
+const BROKER_API_BASE_URL = "https://nanocodex.internal/v1";
+const BROKER_WEBSOCKET_URL = `${BROKER_API_BASE_URL}/responses`;
+const OPTION_NAMES = new Set(["binding"]);
 
 /**
  * Builds the function-backed endpoint options consumed by Transport.hostManaged.
  * Provider credentials are deliberately not part of this boundary.
  */
 export function cloudflareEgress(options) {
-  const { authMode, binding } = validateOptions(options);
-  const profile = PROFILES[authMode];
+  const { binding } = validateOptions(options);
   return Object.freeze({
-    apiBaseUrl: profile.apiBaseUrl,
-    websocketUrl: profile.websocketUrl,
+    apiBaseUrl: BROKER_API_BASE_URL,
+    websocketUrl: BROKER_WEBSOCKET_URL,
     createWebSocket: (endpoint, sessionId, request) =>
-      openBrokeredWebSocket(binding, profile, authMode, endpoint, sessionId, request),
+      openBrokeredWebSocket(binding, endpoint, sessionId, request),
   });
 }
 
 function validateOptions(options) {
   if (!options || typeof options !== "object" || Array.isArray(options)) {
-    throw new TypeError("Cloudflare EGRESS requires binding and authMode");
+    throw new TypeError("Cloudflare EGRESS requires options");
   }
   const unexpected = Object.keys(options).find((name) => !OPTION_NAMES.has(name));
   if (unexpected) {
     throw new TypeError(
       `Cloudflare EGRESS does not accept ${unexpected}; provider credentials belong in the private broker`,
-    );
-  }
-  if (options.authMode !== "api_key" && options.authMode !== "chatgpt") {
-    throw new TypeError(
-      "Cloudflare EGRESS authMode must be explicitly set to api_key or chatgpt",
     );
   }
   if (!options.binding || typeof options.binding.fetch !== "function") {
@@ -51,8 +35,6 @@ function validateOptions(options) {
 
 async function openBrokeredWebSocket(
   binding,
-  profile,
-  authMode,
   endpoint,
   sessionId,
   request,
@@ -63,10 +45,10 @@ async function openBrokeredWebSocket(
   if (typeof sessionId !== "string" || !sessionId) {
     throw new TypeError("Cloudflare EGRESS requires a non-empty session ID");
   }
-  const url = exactWebSocketEndpoint(endpoint, profile.websocketUrl);
+  const url = exactWebSocketEndpoint(endpoint, BROKER_WEBSOCKET_URL);
   url.protocol = "https:";
   const headers = new Headers({
-    Authorization: profile.authorization,
+    Authorization: "Bearer NANOCODEX_PROVIDER_CREDENTIAL",
     Upgrade: "websocket",
     "OpenAI-Beta": OPENAI_WEBSOCKET_BETA,
     "session-id": sessionId,
@@ -76,9 +58,6 @@ async function openBrokeredWebSocket(
     "x-responsesapi-include-timing-metrics": "true",
     "User-Agent": "nanocodex-js/cloudflare",
   });
-  if (authMode === "chatgpt") {
-    headers.set("ChatGPT-Account-ID", "NANOCODEX_CODEX_ACCOUNT");
-  }
   if (typeof request.turnState === "string" && request.turnState) {
     headers.set("x-codex-turn-state", request.turnState);
   }

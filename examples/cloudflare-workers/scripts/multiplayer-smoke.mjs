@@ -187,7 +187,6 @@ try {
   result = {
     status: "ok",
     room_id: roomId,
-    auth_mode: owner.receipt.auth_mode,
     players: 3,
     latest_cursor: finalCursor,
     durable_replay: true,
@@ -385,7 +384,6 @@ function assertRoomReceipt(receipt, creator) {
   assert(typeof receipt?.room_id === "string", "room receipt omitted room_id");
   assert(typeof receipt?.member_id === "string", "room receipt omitted member_id");
   assert(typeof receipt?.websocket_url === "string", "room receipt omitted websocket_url");
-  assert(["api_key", "chatgpt"].includes(receipt?.auth_mode), "room receipt has invalid auth_mode");
   if (creator) {
     assert(typeof receipt?.invite === "string", "room receipt omitted invite");
     assert(typeof receipt?.invite_url === "string", "room receipt omitted invite_url");

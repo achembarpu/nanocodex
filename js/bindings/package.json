@@ -51,6 +51,10 @@
       "types": "./cloudflare/index.d.mts",
       "import": "./cloudflare/index.mjs"
     },
+    "./cloudflare/egress": {
+      "types": "./cloudflare/egress.d.mts",
+      "import": "./cloudflare/egress.mjs"
+    },
     "./durability": {
       "types": "./runtime/durability-store.d.mts",
       "import": "./runtime/durability-store.mjs"

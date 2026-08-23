@@ -12,26 +12,7 @@ const encoder = new TextEncoder();
 export function createCloudflareEventSocket(context) {
   validateContext(context);
   const storage = context.storage;
-  storage.sql.exec(`
-    CREATE TABLE IF NOT EXISTS nanocodex_cloudflare_events (
-      cursor INTEGER PRIMARY KEY AUTOINCREMENT,
-      event_json TEXT NOT NULL,
-      created_at INTEGER NOT NULL
-    )
-  `);
-  storage.sql.exec(`
-    CREATE TABLE IF NOT EXISTS nanocodex_cloudflare_event_meta (
-      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-      total_bytes INTEGER NOT NULL CHECK (total_bytes >= 0),
-      stream_error TEXT
-    )
-  `);
-  storage.sql.exec(`
-    INSERT OR IGNORE INTO nanocodex_cloudflare_event_meta
-      (singleton, total_bytes, stream_error)
-    SELECT 1, COALESCE(SUM(LENGTH(CAST(event_json AS BLOB))), 0), NULL
-    FROM nanocodex_cloudflare_events
-  `);
+  initializeEventStorage(storage);
   recoverSockets(context);
 
   return Object.freeze({
@@ -53,6 +34,45 @@ export function createCloudflareEventSocket(context) {
       }
     },
   });
+}
+
+/** @internal Clears only the Cloudflare adapter's event projection. */
+export function clearCloudflareEventSocket(context) {
+  validateContext(context);
+  const storage = context.storage;
+  initializeEventStorage(storage);
+  for (const socket of context.getWebSockets(EVENT_TAG)) {
+    close(socket, 1000, "Nanocodex Agent destroyed");
+  }
+  storage.sql.exec("DELETE FROM nanocodex_cloudflare_events");
+  storage.sql.exec(
+    `UPDATE nanocodex_cloudflare_event_meta
+     SET total_bytes = 0, stream_error = NULL
+     WHERE singleton = 1`,
+  );
+}
+
+function initializeEventStorage(storage) {
+  storage.sql.exec(`
+    CREATE TABLE IF NOT EXISTS nanocodex_cloudflare_events (
+      cursor INTEGER PRIMARY KEY AUTOINCREMENT,
+      event_json TEXT NOT NULL,
+      created_at INTEGER NOT NULL
+    )
+  `);
+  storage.sql.exec(`
+    CREATE TABLE IF NOT EXISTS nanocodex_cloudflare_event_meta (
+      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+      total_bytes INTEGER NOT NULL CHECK (total_bytes >= 0),
+      stream_error TEXT
+    )
+  `);
+  storage.sql.exec(`
+    INSERT OR IGNORE INTO nanocodex_cloudflare_event_meta
+      (singleton, total_bytes, stream_error)
+    SELECT 1, COALESCE(SUM(LENGTH(CAST(event_json AS BLOB))), 0), NULL
+    FROM nanocodex_cloudflare_events
+  `);
 }
 
 function validateContext(context) {

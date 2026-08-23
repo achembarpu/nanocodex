@@ -79,18 +79,13 @@ hibernatable socket fan-out, and cursor replay inside the adapter:
 ```js
 import { DurableObject } from "cloudflare:workers";
 import { Agent } from "nanocodex/cloudflare";
-import nanocodexWasm from "./nanocodex.wasm";
 
 export class CodingAgent extends DurableObject {
   #ready;
 
   constructor(context, env) {
     super(context, env);
-    this.#ready = Agent.create({
-      context,
-      egress: env.EGRESS,
-      authMode: env.NANOCODEX_AUTH_MODE,
-      module: nanocodexWasm,
+    this.#ready = Agent.create(this, {
       instructions: "You are a focused coding agent.",
     });
   }

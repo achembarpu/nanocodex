@@ -41,7 +41,6 @@ describe("durable Multiplayer rooms", () => {
       /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}~[A-Za-z0-9_-]{43}$/,
     );
     expect(owner.websocket_url).toBe(`wss://example.test/v1/rooms/${owner.room_id}/ws`);
-    expect(owner.auth_mode).toBe("api_key");
     expect(owner.invite_url).toContain(`/multiplayer?room=${owner.room_id}#invite=`);
     expect(JSON.stringify(owner)).not.toContain("agent_id");
     expect(JSON.stringify(owner)).not.toContain("NANOCODEX_OPENAI_API_KEY");
@@ -172,7 +171,6 @@ describe("durable Multiplayer rooms", () => {
         invite: owner.invite,
         display_name: "Mallory",
         join_id: "j".repeat(43),
-        auth_mode: "api_key",
         endpoint: "https://attacker.test",
       }),
     });
@@ -1568,7 +1566,6 @@ type RoomReceipt = {
   invite: string;
   invite_url: string;
   websocket_url: string;
-  auth_mode: string;
   cookie: string;
 };
 

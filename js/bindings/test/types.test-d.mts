@@ -88,8 +88,9 @@ declare const accountsWallet: AccountsWallet;
 declare const browserModule: WebAssembly.Module;
 declare const postgresPool: PostgresDurabilityPool;
 declare const cloudflareStorage: CloudflareDurableObjectStorage;
-declare const cloudflareBinding: Parameters<typeof CloudflareAgent.create>[0]["egress"];
+declare const cloudflareBinding: import("../cloudflare/egress.mjs").CloudflareEgressBinding;
 declare const cloudflareContext: CloudflareAgent.DurableObjectContext;
+declare const cloudflareOwner: CloudflareAgent.DurableObjectOwner;
 
 // @ts-expect-error durability-only types are exported from nanocodex/durability.
 type RootDurabilityStore = RootPublicTypes.DurabilityStore;
@@ -155,43 +156,34 @@ async function check() {
   const cloudflareStore: DurabilityStore = createCloudflareDurabilityStore(cloudflareStorage);
   HostTransport.hostManaged(cloudflareEgress({
     binding: cloudflareBinding,
-    authMode: "api_key",
   }));
-  const cloudflareAgent: CloudflareAgent.Agent = await CloudflareAgent.create({
-    context: cloudflareContext,
-    egress: cloudflareBinding,
-    authMode: "chatgpt",
-  });
+  const cloudflareAgent: CloudflareAgent.Agent = await CloudflareAgent.create(cloudflareOwner);
   cloudflareAgent.turn.prompt({ input: "hello" });
   cloudflareAgent.events.connect(new Request("https://agent.internal/events"));
   const extendedCloudflareAgent = cloudflareAgent.extend(() => ({ application: true as const }));
   extendedCloudflareAgent.events.connect(new Request("https://agent.internal/events"));
   const cloudflareApplication: true = extendedCloudflareAgent.application;
   void cloudflareApplication;
-  // @ts-expect-error managed Cloudflare agents require an explicit auth mode.
-  await CloudflareAgent.create({ context: cloudflareContext, egress: cloudflareBinding });
-  // @ts-expect-error managed Cloudflare agents accept only the two broker policies.
-  await CloudflareAgent.create({ context: cloudflareContext, egress: cloudflareBinding, authMode: "direct" });
-  await CloudflareAgent.create({
-    context: cloudflareContext,
-    egress: cloudflareBinding,
-    authMode: "api_key",
+  CloudflareAgent.destroy(cloudflareOwner);
+  await CloudflareAgent.create(cloudflareOwner, {
     // @ts-expect-error provider credentials belong to the private EGRESS broker.
     apiKey,
   });
-  await CloudflareAgent.create({
-    context: cloudflareContext,
-    egress: cloudflareBinding,
-    authMode: "api_key",
+  await CloudflareAgent.create(cloudflareOwner, {
     // @ts-expect-error transport and durability are owned by the Cloudflare adapter.
     transport: HostTransport.hostManaged(),
   });
-  await CloudflareAgent.create({
-    context: cloudflareContext,
-    egress: cloudflareBinding,
-    authMode: "api_key",
+  await CloudflareAgent.create(cloudflareOwner, {
     // @ts-expect-error durable Cloudflare agents cannot reconstruct runtime-owned subagents.
     tools: [...BrowserSubagents.create()],
+  });
+  await CloudflareAgent.create(cloudflareOwner, {
+    // @ts-expect-error Cloudflare policy is fixed by the adapter.
+    model: "gpt-5.6-sol",
+  });
+  await CloudflareAgent.create(cloudflareOwner, {
+    // @ts-expect-error Cloudflare filesystem policy is fixed by the adapter.
+    filesystem: BrowserWorkspace.memory(),
   });
   const postgresClient: PostgresDurabilityClient = await postgresPool.connect();
   const postgresResult: PostgresDurabilityQueryResult<{ revision: string }> =

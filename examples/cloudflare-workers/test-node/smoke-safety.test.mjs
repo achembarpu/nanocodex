@@ -44,22 +44,18 @@ test("managed agents have no provider-credential or direct transport path", asyn
   ]);
   const environment = source.match(/export interface Env \{[\s\S]*?\n\}/)?.[0];
   assert.ok(environment, "managed Worker Env declaration was not found");
-  assert.match(environment, /EGRESS: Fetcher/);
+  assert.match(environment, /NANOCODEX: Fetcher/);
   assert.doesNotMatch(
     environment,
     /OPENAI_API_KEY|CODEX_OAUTH|ACCESS_TOKEN|REFRESH_TOKEN|CHATGPT_ACCOUNT_ID/,
   );
-  assert.match(source, /Transport\.hostManaged\(cloudflareEgress\(\{/);
-  assert.match(source, /binding: this\.env\.EGRESS,\s*authMode,/);
+  assert.match(source, /CloudflareAgent\.create\(this, \{/);
   assert.doesNotMatch(source, /Transport\.(?:openAi|chatGpt|mpp)\(/);
-  assert.match(egressSource, /Bearer NANOCODEX_CODEX_OAUTH/);
-  assert.match(egressSource, /Bearer NANOCODEX_OPENAI_API_KEY/);
-  assert.match(egressSource, /wss:\/\/chatgpt\.com\/backend-api\/codex\/responses/);
-  assert.match(egressSource, /wss:\/\/api\.openai\.com\/v1\/responses/);
-  assert.match(source, /const configured = env\.NANOCODEX_AUTH_MODE;/);
-  assert.match(roomSource, /const configured = env\.NANOCODEX_AUTH_MODE;/);
-  assert.doesNotMatch(source, /NANOCODEX_AUTH_MODE \?\?/);
-  assert.doesNotMatch(roomSource, /NANOCODEX_AUTH_MODE \?\?/);
+  assert.match(egressSource, /Bearer NANOCODEX_PROVIDER_CREDENTIAL/);
+  assert.match(egressSource, /https:\/\/nanocodex\.internal\/v1/);
+  assert.doesNotMatch(egressSource, /api_key|chatgpt/);
+  assert.doesNotMatch(source, /NANOCODEX_AUTH_MODE|auth_mode/);
+  assert.doesNotMatch(roomSource, /NANOCODEX_AUTH_MODE|auth_mode/);
 
   const config = JSON.parse(configText);
   const brokerConfig = JSON.parse(brokerConfigText);
@@ -67,12 +63,12 @@ test("managed agents have no provider-credential or direct transport path", asyn
   assert.equal(config.workers_dev, false);
   assert.equal(brokerConfig.workers_dev, false);
   assert.deepEqual(
-    config.services?.filter((service) => service.binding === "EGRESS"),
-    [{ binding: "EGRESS", service: "nanocodex-egress-broker-example" }],
+    config.services?.filter((service) => service.binding === "NANOCODEX"),
+    [{ binding: "NANOCODEX", service: "nanocodex-egress-broker-example" }],
   );
   assert.equal(config.vars?.OPENAI_API_KEY, undefined);
   assert.equal(config.vars?.CODEX_OAUTH_BOOTSTRAP, undefined);
-  assert.equal(config.vars?.NANOCODEX_AUTH_MODE, "chatgpt");
+  assert.equal(config.vars?.NANOCODEX_AUTH_MODE, undefined);
   assert.equal(brokerConfig.vars?.ALLOWED_POLICIES, "codex");
   assert.deepEqual(
     webConfig.services?.filter((service) => service.binding === "MULTIPLAYER_BACKEND"),
@@ -361,7 +357,6 @@ test("multiplayer smoke reaches its RoomClient after async room setup", async ()
         room_id: roomId,
         member_id: "owner",
         websocket_url: `${origin.replace("http:", "ws:")}/v1/rooms/${roomId}/socket`,
-        auth_mode: "api_key",
         invite,
         invite_url: `${origin}/multiplayer?room=${roomId}#invite=${invite}`,
       }, "entrypoint=owner");
@@ -373,7 +368,6 @@ test("multiplayer smoke reaches its RoomClient after async room setup", async ()
         room_id: roomId,
         member_id: `guest-${member}`,
         websocket_url: `${origin.replace("http:", "ws:")}/v1/rooms/${roomId}/socket`,
-        auth_mode: "api_key",
       }, `entrypoint=guest-${member}`);
       return;
     }

@@ -2,33 +2,53 @@ import * as HostAgent from "../host/Agent.mjs";
 import * as Transport from "../browser/Transport.mjs";
 import { createCloudflareDurabilityStore } from "../runtime/cloudflare-durability-store.mjs";
 import { cloudflareEgress } from "./egress.mjs";
-import { createCloudflareEventSocket } from "./event-socket.mjs";
+import {
+  clearCloudflareEventSocket,
+  createCloudflareEventSocket,
+} from "./event-socket.mjs";
 
 const STARTUP_TIMEOUT_MS = 10_000;
-const RESERVED_OPTIONS = new Set([
-  "accessToken",
-  "apiBaseUrl",
-  "apiKey",
-  "bearerToken",
-  "createWebSocket",
-  "credentials",
-  "durability",
-  "durabilityId",
-  "sessionId",
-  "subscription",
-  "token",
-  "transport",
-  "websocketPreconnect",
-  "websocketUrl",
-]);
+const APPLICATION_OPTIONS = new Set(["instructions", "tools"]);
 
-/** Creates one durable, host-managed Nanocodex Agent in a Cloudflare Durable Object. */
-export async function create(options) {
-  const { context, egress, authMode, agentOptions } = splitOptions(options);
+/** @internal Binds the package-owned module to the public Cloudflare namespace. */
+export function bindAgent(module) {
+  return Object.freeze({
+    create: (owner, options) => create(module, owner, options),
+    destroy,
+  });
+}
+
+/** Removes the package-owned durable history for one Cloudflare Agent. */
+export function destroy(owner) {
+  const context = resolveContext(owner);
+  const storage = context.storage;
+  createCloudflareDurabilityStore(storage);
+  initializeAgentStorage(storage);
+  const sessionId = storedSessionId(storage);
+  storage.transactionSync(() => {
+    if (sessionId !== undefined) {
+      const journalId = `cloudflare:${sessionId}`;
+      storage.sql.exec(
+        "DELETE FROM nanocodex_journal_batches WHERE journal_id = ?",
+        journalId,
+      );
+      storage.sql.exec(
+        "DELETE FROM nanocodex_journals WHERE journal_id = ?",
+        journalId,
+      );
+    }
+    clearCloudflareEventSocket(context);
+  });
+}
+
+/** @internal Creates one Agent with an explicitly supplied package module. */
+export async function create(module, owner, options = {}) {
+  const { context, egress } = resolveOwner(owner);
+  const agentOptions = applicationOptions(options);
   const eventSocket = createCloudflareEventSocket(context);
   const durability = createCloudflareDurabilityStore(context.storage);
   const sessionId = durableSessionId(context.storage);
-  const endpoint = cloudflareEgress({ binding: egress, authMode });
+  const endpoint = cloudflareEgress({ binding: egress });
   const startup = deferred();
   const transport = Transport.hostManaged({
     ...endpoint,
@@ -49,6 +69,7 @@ export async function create(options) {
   try {
     agent = await HostAgent.create({
       ...agentOptions,
+      module,
       toolMode: agentOptions.toolMode ?? "direct",
       transport,
       sessionId,
@@ -83,52 +104,71 @@ export async function create(options) {
   }));
 }
 
-function splitOptions(options) {
+function resolveOwner(owner) {
+  const context = resolveContext(owner);
+  const egress = owner.env?.NANOCODEX;
+  if (!egress || typeof egress.fetch !== "function") {
+    throw new TypeError(
+      "Cloudflare Agent.create requires the private owner.env.NANOCODEX Service Binding",
+    );
+  }
+  return { context, egress };
+}
+
+function resolveContext(owner) {
+  if (!owner || (typeof owner !== "object" && typeof owner !== "function")) {
+    throw new TypeError("Cloudflare Agent.create requires a Durable Object instance");
+  }
+  const context = owner.ctx;
+  if (!context || typeof context !== "object") {
+    throw new TypeError("Cloudflare Agent.create requires owner.ctx");
+  }
+  return context;
+}
+
+function applicationOptions(options) {
   if (!options || typeof options !== "object" || Array.isArray(options)) {
-    throw new TypeError("Cloudflare Agent.create requires options");
+    throw new TypeError("Cloudflare Agent.create options must be an object");
   }
   for (const name of Object.keys(options)) {
-    const credentialLike = /(?:api[_-]?key|access[_-]?token|bearer[_-]?token|refresh[_-]?token|oauth|credential|secret)/i
-      .test(name);
-    if (RESERVED_OPTIONS.has(name) || credentialLike) {
+    if (!APPLICATION_OPTIONS.has(name)) {
       throw new TypeError(
-        `Cloudflare Agent.create does not accept ${name}; transport, credentials, and durability are managed by the Durable Object adapter`,
+        `Cloudflare Agent.create does not accept ${name}; only instructions and tools are configurable`,
       );
     }
   }
-  const { context, egress, authMode, ...agentOptions } = options;
-  if (!egress || typeof egress.fetch !== "function") {
-    throw new TypeError("Cloudflare Agent.create requires a private EGRESS Service Binding");
-  }
-  if (authMode !== "api_key" && authMode !== "chatgpt") {
-    throw new TypeError("Cloudflare Agent.create authMode must be explicitly set to api_key or chatgpt");
-  }
-  return { context, egress, authMode, agentOptions };
+  return options;
 }
 
 function durableSessionId(storage) {
-  storage.sql.exec(`
-    CREATE TABLE IF NOT EXISTS nanocodex_cloudflare_agent (
-      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
-      session_id TEXT NOT NULL UNIQUE
-    )
-  `);
-  let sessionId = storage.sql.exec(
-    "SELECT session_id FROM nanocodex_cloudflare_agent WHERE singleton = 1",
-  ).toArray()[0]?.session_id;
+  initializeAgentStorage(storage);
+  let sessionId = storedSessionId(storage);
   if (sessionId !== undefined) return sessionId;
   const generated = uuidV7();
   storage.sql.exec(
     "INSERT OR IGNORE INTO nanocodex_cloudflare_agent (singleton, session_id) VALUES (1, ?)",
     generated,
   );
-  sessionId = storage.sql.exec(
-    "SELECT session_id FROM nanocodex_cloudflare_agent WHERE singleton = 1",
-  ).toArray()[0]?.session_id;
+  sessionId = storedSessionId(storage);
   if (typeof sessionId !== "string" || !sessionId) {
     throw new Error("Cloudflare Agent failed to persist its runtime session ID");
   }
   return sessionId;
+}
+
+function initializeAgentStorage(storage) {
+  storage.sql.exec(`
+    CREATE TABLE IF NOT EXISTS nanocodex_cloudflare_agent (
+      singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+      session_id TEXT NOT NULL UNIQUE
+    )
+  `);
+}
+
+function storedSessionId(storage) {
+  return storage.sql.exec(
+    "SELECT session_id FROM nanocodex_cloudflare_agent WHERE singleton = 1",
+  ).toArray()[0]?.session_id;
 }
 
 function uuidV7() {

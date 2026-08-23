@@ -7,20 +7,13 @@ import {
 } from "@cloudflare/computer";
 import type {
   AgentEvent,
-  DefaultAgent,
   EventWatcher,
   PromptInput,
   Turn,
 } from "nanocodex";
-import { cloudflareEgress } from "nanocodex/cloudflare";
-import { createCloudflareDurabilityStore } from "nanocodex/durability/cloudflare";
-import {
-  Agent,
-  Transport,
-} from "nanocodex/host";
+import { Agent as CloudflareAgent } from "nanocodex/cloudflare";
 import { web } from "nanocodex/tools";
 import { justBash } from "nanocodex/tools/bash";
-import nanocodexWasm from "./nanocodex.wasm";
 import { createComputerFilesystem } from "./computer-workspace";
 import {
   DurableEventLog,
@@ -79,10 +72,9 @@ export interface Env {
   NANOCODEX_SESSIONS: DurableObjectNamespace<NanocodexSession>;
   NANOCODEX_ROOMS: DurableObjectNamespace<MultiplayerRoom>;
   NANOCODEX_MULTIPLAYER_QUOTA: DurableObjectNamespace<MultiplayerQuota>;
-  EGRESS: Fetcher;
+  NANOCODEX: Fetcher;
   NANOCODEX_ADMIN_TOKEN: string;
   NANOCODEX_ROOM_ALLOCATOR_TOKEN?: string;
-  NANOCODEX_AUTH_MODE: string;
   AGENT_IDLE_TIMEOUT_MS?: string;
   WEB_TOOL_URL?: string;
   WEB_TOOL_TOKEN?: string;
@@ -151,7 +143,6 @@ type ManagedTurnSubmission = {
 
 type ManagedTransition = TurnTerminal | Extract<StreamMessage, { type: "turn_cancelling" }>;
 
-type ModelAuthMode = "api_key" | "chatgpt";
 type AgentRuntimeProfile = "managed" | "multiplayer";
 
 type RoomInitializationReceipt = {
@@ -159,7 +150,6 @@ type RoomInitializationReceipt = {
   invite: string;
   member_id: string;
   member_token: string;
-  auth_mode: ModelAuthMode;
   public_origin: string;
 };
 
@@ -231,7 +221,6 @@ export default {
           room_id: string;
           member_id: string;
           member_token: string;
-          auth_mode: ModelAuthMode;
           public_origin: string;
         }>();
         const publicUrl = new URL(receipt.public_origin);
@@ -241,7 +230,6 @@ export default {
           room_id: roomId,
           member_id: receipt.member_id,
           websocket_url: websocketUrl.href,
-          auth_mode: receipt.auth_mode,
         }, {
           status: joinedStatus,
           headers: { "set-cookie": roomMemberCookie(roomId, receipt.member_token, publicUrl) },
@@ -400,11 +388,10 @@ const DurableComputerSession = withWorkspace(
 );
 
 export class NanocodexSession extends DurableComputerSession {
-  #agent?: DefaultAgent;
-  #agentPromise?: Promise<DefaultAgent>;
+  #agent?: CloudflareAgent.Agent;
+  #agentPromise?: Promise<CloudflareAgent.Agent>;
   #events?: EventWatcher;
   readonly #eventLog: DurableEventLog<StreamMessage>;
-  readonly #durability: ReturnType<typeof createCloudflareDurabilityStore>;
   readonly #turns = new Map<string, Turn>();
   readonly #eventTurnQueue: string[] = [];
   #eventTurnId?: string;
@@ -458,7 +445,6 @@ export class NanocodexSession extends DurableComputerSession {
         ON managed_turns(request_key) WHERE request_key IS NOT NULL;
     `);
     this.#eventLog = new DurableEventLog<StreamMessage>(this.ctx.storage);
-    this.#durability = createCloudflareDurabilityStore(this.ctx.storage);
     const sessionColumns = new Set(this.ctx.storage.sql.exec<{ name: string }>(
       "PRAGMA table_info(session_state)",
     ).toArray().map((column) => column.name));
@@ -602,7 +588,6 @@ export class NanocodexSession extends DurableComputerSession {
         active_turn_details: this.#activeTurnDetails(),
         agent_loaded: this.#agent !== undefined,
         connected_clients: this.ctx.getWebSockets().length,
-        auth_mode: modelAuthMode(this.env),
         capabilities: this.#capabilities(),
         latest_event_cursor: this.#eventLog.latestCursor(),
         stream_error: session.stream_error,
@@ -1106,9 +1091,8 @@ export class NanocodexSession extends DurableComputerSession {
     // awaited. The durable deletion marker makes those paths fail closed; close
     // once more before dropping the owned journal and event history.
     for (const socket of this.ctx.getWebSockets()) closeSocket(socket, 1000, "session deleted");
+    CloudflareAgent.destroy(this);
     this.ctx.storage.transactionSync(() => {
-      this.ctx.storage.sql.exec("DELETE FROM nanocodex_journal_batches");
-      this.ctx.storage.sql.exec("DELETE FROM nanocodex_journals");
       this.ctx.storage.sql.exec("DELETE FROM managed_turns");
       this.#eventLog.clear();
       this.ctx.storage.sql.exec("DELETE FROM completed_operations");
@@ -1166,7 +1150,7 @@ export class NanocodexSession extends DurableComputerSession {
     await this.#scheduleNextAlarm();
   }
 
-  async #ensureAgent(): Promise<DefaultAgent> {
+  async #ensureAgent(): Promise<CloudflareAgent.Agent> {
     if (this.#agent) return this.#agent;
     if (this.#agentPromise) return this.#agentPromise;
     this.#agentPromise = this.#createAgent();
@@ -1178,18 +1162,9 @@ export class NanocodexSession extends DurableComputerSession {
     }
   }
 
-  async #createAgent(): Promise<DefaultAgent> {
+  async #createAgent(): Promise<CloudflareAgent.Agent> {
     const session = this.#session();
     if (!session) throw new Error("session is not initialized");
-    const runtimeSessionId = await scopedRuntimeId(
-      this.env.NANOCODEX_ADMIN_TOKEN,
-      `nanocodex-runtime-session:${session.session_id}`,
-    );
-    const authMode = modelAuthMode(this.env);
-    const transport = Transport.hostManaged(cloudflareEgress({
-      binding: this.env.EGRESS,
-      authMode,
-    }));
     const multiplayer = session.runtime_profile === "multiplayer";
     const workspace = multiplayer ? undefined : await getWorkspace(this);
     const filesystem = workspace ? await createComputerFilesystem(workspace) : undefined;
@@ -1199,19 +1174,9 @@ export class NanocodexSession extends DurableComputerSession {
       maxOutputTokens: 10_000,
       network: false,
     }) : undefined;
-    let agent: DefaultAgent;
+    let agent: CloudflareAgent.Agent;
     try {
-      agent = await Agent.create({
-        transport,
-        module: nanocodexWasm,
-        sessionId: runtimeSessionId,
-        durability: this.#durability,
-        durabilityId: session.session_id,
-        ...(shell ? {
-          workspace: "/workspace",
-          filesystem: shell.filesystem,
-          filesystemTools: false,
-        } : {}),
+      agent = await CloudflareAgent.create(this, {
         instructions: multiplayer
           ? [
             "You are the shared Nanocodex participant in a short-lived Multiplayer chat room.",
@@ -1224,10 +1189,6 @@ export class NanocodexSession extends DurableComputerSession {
             shell!.instructions,
             "No process sandbox is attached. Bounded Just Bash is the complete local execution boundary.",
           ].join("\n\n"),
-        // Workers forbid eval/new Function. Direct mode keeps caller-defined
-        // tools in the WASM lifecycle while dispatching handlers through the
-        // typed host bridge without dynamic code generation.
-        toolMode: "direct",
         tools: multiplayer ? [] : [
           shell!.tool,
           ...cloudflareWebTools(this.env),
@@ -1768,12 +1729,6 @@ function cloudflareWebTools(env: Env) {
       ? { authorization: `Bearer ${env.WEB_TOOL_TOKEN}` }
       : undefined,
   })];
-}
-
-function modelAuthMode(env: Env): ModelAuthMode {
-  const configured = env.NANOCODEX_AUTH_MODE;
-  if (configured === "api_key" || configured === "chatgpt") return configured;
-  throw new Error("NANOCODEX_AUTH_MODE must be api_key or chatgpt");
 }
 
 function authorized(request: Request, expected: string): boolean {
@@ -2324,14 +2279,12 @@ function validateRoomInitializationReceipt(
     "invite",
     "member_id",
     "member_token",
-    "auth_mode",
     "public_origin",
   ].includes(key))
     || receipt.room_id !== expectedRoomId
     || typeof receipt.invite !== "string" || !AGENT_TOKEN.test(receipt.invite)
     || typeof receipt.member_id !== "string" || !UUID.test(receipt.member_id)
     || typeof receipt.member_token !== "string" || !AGENT_TOKEN.test(receipt.member_token)
-    || (receipt.auth_mode !== "api_key" && receipt.auth_mode !== "chatgpt")
     || typeof receipt.public_origin !== "string" || !validPublicOrigin(receipt.public_origin)
     || (expectedPublicOrigin !== undefined && receipt.public_origin !== expectedPublicOrigin)) {
     throw new Error("invalid room receipt");
@@ -2352,7 +2305,6 @@ function roomCreationResponse(receipt: RoomInitializationReceipt, status: 200 | 
       publicUrl,
     ).href,
     websocket_url: websocketUrl.href,
-    auth_mode: receipt.auth_mode,
   }, {
     status,
     headers: {

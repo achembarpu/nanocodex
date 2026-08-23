@@ -68,6 +68,7 @@ type Rule = Readonly<{
   id: string;
   policy: string;
   route: Route;
+  upstream?: `https://${string}`;
   requiredHeaders: readonly HeaderRequirement[];
   forwardedHeaders: readonly string[];
   replacements: readonly Replacement[];
@@ -85,53 +86,7 @@ const CODEX_RULE: Rule = {
   policy: "codex",
   route: {
     protocol: "https:",
-    hostname: "chatgpt.com",
-    port: "",
-    methods: ["GET"],
-    path: { kind: "exact", value: "/backend-api/codex/responses" },
-    query: "none",
-  },
-  requiredHeaders: [
-    { name: "upgrade", value: "websocket" },
-    { name: "openai-beta", value: "responses_websockets=2026-02-06" },
-  ],
-  forwardedHeaders: [
-    "authorization",
-    "chatgpt-account-id",
-    "openai-beta",
-    "session-id",
-    "thread-id",
-    "upgrade",
-    "user-agent",
-    "x-client-request-id",
-    "x-codex-turn-state",
-    "x-openai-fedramp",
-    "x-openai-internal-codex-responses-lite",
-    "x-responsesapi-include-timing-metrics",
-  ],
-  replacements: [
-    {
-      location: "header",
-      name: "authorization",
-      placeholder: "Bearer NANOCODEX_CODEX_OAUTH",
-      template: "Bearer {{access_token}}",
-    },
-    {
-      location: "header",
-      name: "chatgpt-account-id",
-      placeholder: "NANOCODEX_CODEX_ACCOUNT",
-      template: "{{account_id}}",
-    },
-  ],
-  credential: { kind: "codex_oauth", id: "openai-codex" },
-};
-
-const OPENAI_RULE: Rule = {
-  id: "openai-responses-websocket",
-  policy: "openai",
-  route: {
-    protocol: "https:",
-    hostname: "api.openai.com",
+    hostname: "nanocodex.internal",
     port: "",
     methods: ["GET"],
     path: { kind: "exact", value: "/v1/responses" },
@@ -157,19 +112,58 @@ const OPENAI_RULE: Rule = {
     {
       location: "header",
       name: "authorization",
-      placeholder: "Bearer NANOCODEX_OPENAI_API_KEY",
+      placeholder: "Bearer NANOCODEX_PROVIDER_CREDENTIAL",
+      template: "Bearer {{access_token}}",
+    },
+  ],
+  upstream: "https://chatgpt.com/backend-api/codex/responses",
+  credential: { kind: "codex_oauth", id: "openai-codex" },
+};
+
+const OPENAI_RULE: Rule = {
+  id: "openai-responses-websocket",
+  policy: "openai",
+  route: {
+    protocol: "https:",
+    hostname: "nanocodex.internal",
+    port: "",
+    methods: ["GET"],
+    path: { kind: "exact", value: "/v1/responses" },
+    query: "none",
+  },
+  requiredHeaders: [
+    { name: "upgrade", value: "websocket" },
+    { name: "openai-beta", value: "responses_websockets=2026-02-06" },
+  ],
+  forwardedHeaders: [
+    "authorization",
+    "openai-beta",
+    "session-id",
+    "thread-id",
+    "upgrade",
+    "user-agent",
+    "x-client-request-id",
+    "x-codex-turn-state",
+    "x-openai-internal-codex-responses-lite",
+    "x-responsesapi-include-timing-metrics",
+  ],
+  replacements: [
+    {
+      location: "header",
+      name: "authorization",
+      placeholder: "Bearer NANOCODEX_PROVIDER_CREDENTIAL",
       template: "Bearer {{secret}}",
     },
   ],
+  upstream: "https://api.openai.com/v1/responses",
   credential: { kind: "static", binding: "OPENAI_API_KEY" },
 };
 
 function modelHttpRule(
   id: string,
   policy: "codex" | "openai",
-  hostname: "chatgpt.com" | "api.openai.com",
-  path: `/${string}`,
-  replacements: readonly Replacement[],
+  path: `/v1/${string}`,
+  upstream: `https://${string}`,
   credential: CredentialSource,
 ): Rule {
   return {
@@ -177,24 +171,21 @@ function modelHttpRule(
     policy,
     route: {
       protocol: "https:",
-      hostname,
+      hostname: "nanocodex.internal",
       port: "",
       methods: ["POST"],
       path: { kind: "exact", value: path },
       query: "none",
     },
     requiredHeaders: [{ name: "content-type", value: "application/json" }],
-    forwardedHeaders: policy === "codex"
-      ? [
-          "authorization",
-          "chatgpt-account-id",
-          "content-type",
-          "originator",
-          "user-agent",
-          "x-openai-fedramp",
-        ]
-      : ["authorization", "content-type", "user-agent"],
-    replacements,
+    forwardedHeaders: ["authorization", "content-type", "user-agent"],
+    replacements: [{
+      location: "header",
+      name: "authorization",
+      placeholder: "Bearer NANOCODEX_PROVIDER_CREDENTIAL",
+      template: policy === "codex" ? "Bearer {{access_token}}" : "Bearer {{secret}}",
+    }],
+    upstream,
     credential,
     maxBodyBytes: MAX_MODEL_HTTP_BODY_BYTES,
   };
@@ -204,25 +195,22 @@ const CODEX_HTTP_RULES: readonly Rule[] = [
   modelHttpRule(
     "codex-web-search",
     "codex",
-    "chatgpt.com",
-    "/backend-api/codex/alpha/search",
-    CODEX_RULE.replacements,
+    "/v1/search",
+    "https://chatgpt.com/backend-api/codex/alpha/search",
     CODEX_RULE.credential,
   ),
   modelHttpRule(
     "codex-image-generation",
     "codex",
-    "chatgpt.com",
-    "/backend-api/codex/images/generations",
-    CODEX_RULE.replacements,
+    "/v1/images/generations",
+    "https://chatgpt.com/backend-api/codex/images/generations",
     CODEX_RULE.credential,
   ),
   modelHttpRule(
     "codex-image-edit",
     "codex",
-    "chatgpt.com",
-    "/backend-api/codex/images/edits",
-    CODEX_RULE.replacements,
+    "/v1/images/edits",
+    "https://chatgpt.com/backend-api/codex/images/edits",
     CODEX_RULE.credential,
   ),
 ];
@@ -231,25 +219,22 @@ const OPENAI_HTTP_RULES: readonly Rule[] = [
   modelHttpRule(
     "openai-web-search",
     "openai",
-    "api.openai.com",
-    "/v1/alpha/search",
-    OPENAI_RULE.replacements,
+    "/v1/search",
+    "https://api.openai.com/v1/alpha/search",
     OPENAI_RULE.credential,
   ),
   modelHttpRule(
     "openai-image-generation",
     "openai",
-    "api.openai.com",
     "/v1/images/generations",
-    OPENAI_RULE.replacements,
+    "https://api.openai.com/v1/images/generations",
     OPENAI_RULE.credential,
   ),
   modelHttpRule(
     "openai-image-edit",
     "openai",
-    "api.openai.com",
     "/v1/images/edits",
-    OPENAI_RULE.replacements,
+    "https://api.openai.com/v1/images/edits",
     OPENAI_RULE.credential,
   ),
 ];
@@ -334,6 +319,10 @@ export async function handleEgress(
   if (!rule) return denied("destination_denied", context, request, started, url);
   if (!headersMatch(rule.requiredHeaders, request.headers)) {
     return denied("required_header_mismatch", context, request, started, url, rule.id);
+  }
+  if (rule.upstream
+    && (request.headers.has("chatgpt-account-id") || request.headers.has("x-openai-fedramp"))) {
+    return denied("provider_header_forbidden", context, request, started, url, rule.id);
   }
   if (!placeholdersMatch(rule.replacements, request, url)) {
     return denied("credential_placeholder_mismatch", context, request, started, url, rule.id);
@@ -457,7 +446,6 @@ async function handleModelStatus(
   }
   return Response.json({
     ready: true,
-    auth_mode: rule.policy === "codex" ? "chatgpt" : "api_key",
   }, {
     status: 200,
     headers: { "cache-control": "no-store" },
@@ -597,6 +585,12 @@ function buildRequest(
     else url.searchParams.set(replacement.name, value);
   }
   if (rule.credential.kind === "codex_oauth") {
+    const accountId = credential.account_id;
+    if (typeof accountId !== "string" || !accountId) {
+      throw new EgressFailure(503, "credential_field_unavailable");
+    }
+    headers.set("chatgpt-account-id", accountId);
+    if (rule.id !== CODEX_RULE.id) headers.set("originator", "codex_cli_rs");
     if (credential.fedramp === "true") headers.set("x-openai-fedramp", "true");
     else headers.delete("x-openai-fedramp");
   }
@@ -654,8 +648,9 @@ async function replayableRequestBody(request: Request, rule: Rule): Promise<Uint
 }
 
 function upstreamTarget(rule: Rule, original: URL, env: EgressEnv): URL {
+  const providerTarget = rule.upstream ? new URL(rule.upstream) : original;
   const configured = env.CODEX_RELAY_URL?.trim();
-  if (rule.credential.kind !== "codex_oauth" || !configured) return original;
+  if (rule.credential.kind !== "codex_oauth" || !configured) return providerTarget;
 
   let relay: URL;
   try {

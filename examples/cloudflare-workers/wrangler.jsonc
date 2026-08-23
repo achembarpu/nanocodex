@@ -6,13 +6,6 @@
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": false,
   "minify": true,
-  "rules": [
-    {
-      "type": "CompiledWasm",
-      "globs": ["src/**/*.wasm"],
-      "fallthrough": true
-    }
-  ],
   "observability": {
     "enabled": true,
     "logs": {
@@ -23,7 +16,7 @@
   },
   "services": [
     {
-      "binding": "EGRESS",
+      "binding": "NANOCODEX",
       "service": "nanocodex-egress-broker-example"
     }
   ],
@@ -66,7 +59,6 @@
     }
   ],
   "vars": {
-    "AGENT_IDLE_TIMEOUT_MS": "30000",
-    "NANOCODEX_AUTH_MODE": "chatgpt"
+    "AGENT_IDLE_TIMEOUT_MS": "30000"
   }
 }

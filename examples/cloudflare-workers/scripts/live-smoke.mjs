@@ -147,7 +147,6 @@ try {
     tool_calls: requiredTools,
     completed_turns: finalState.completed_turns,
     idle_state: idleState.agent_loaded ? "loaded" : "unloaded",
-    auth_mode: finalState.auth_mode,
     credential_boundary: "private-egress-service-binding",
     status: "ok",
   };

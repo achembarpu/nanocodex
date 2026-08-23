@@ -3,9 +3,6 @@ import type {
   BrowserWebSocketRequest,
 } from "../browser/host.mjs";
 
-/** Deployment policy understood by the standard Nanocodex EGRESS broker. */
-export type CloudflareEgressAuthMode = "api_key" | "chatgpt";
-
 /** Structural subset of a private Cloudflare Service Binding. */
 export type CloudflareEgressBinding = Readonly<{
   fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
@@ -14,8 +11,6 @@ export type CloudflareEgressBinding = Readonly<{
 export type CloudflareEgressOptions = Readonly<{
   /** The managed Worker's private EGRESS Service Binding. */
   binding: CloudflareEgressBinding;
-  /** Required deployment policy; no provider mode is inferred. */
-  authMode: CloudflareEgressAuthMode;
   /** Provider credentials are accepted only by the separately deployed broker. */
   apiKey?: never;
   accessToken?: never;

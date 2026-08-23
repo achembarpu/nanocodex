@@ -1,20 +1,19 @@
-import type { create as createHostAgent } from "../host/Agent.mjs";
 import type {
   Agent as BaseAgent,
   AgentActions,
   AgentEvent,
+  ToolConfiguration,
 } from "../types.mjs";
 import type { CloudflareDurableObjectStorage } from "../runtime/cloudflare-durability-store.mjs";
-import type {
-  CloudflareEgressAuthMode,
-  CloudflareEgressBinding,
-} from "./egress.mjs";
 
 export type DurableObjectContext = Readonly<{
   storage: CloudflareDurableObjectStorage;
   acceptWebSocket(socket: WebSocket, tags?: string[]): void;
   getWebSockets(tag?: string): WebSocket[];
 }>;
+
+/** The owning Cloudflare Durable Object instance. Runtime fields remain adapter-private. */
+export type DurableObjectOwner = object;
 
 export type EventFrame = Readonly<{
   cursor: string;
@@ -40,38 +39,16 @@ export type Agent<extended extends object = {}> =
     ): Agent<extended & extension>;
   }>;
 
-type OwnedOption =
-  | "transport"
-  | "durability"
-  | "durabilityId"
-  | "sessionId";
-type ApplicationOptions<Options> = Options extends { durability: unknown }
-  ? Omit<Options, OwnedOption>
-  : never;
+/** Removes the package-owned durable history for one Cloudflare Agent. */
+export function destroy(owner: DurableObjectOwner): void;
 
-/** Creates one durable Agent and validates its private EGRESS WebSocket before returning. */
-export function create(options: create.Options): Promise<create.ReturnType>;
+/** Creates one durable Agent from its owning Durable Object instance. */
+export function create(owner: create.Owner, options?: create.Options): Promise<create.ReturnType>;
 export declare namespace create {
-  type Options = ApplicationOptions<createHostAgent.Options> & Readonly<{
-    context: DurableObjectContext;
-    /** Private EGRESS Service Binding; never a public URL or provider token. */
-    egress: CloudflareEgressBinding;
-    /** Required deployment credential kind; endpoints and placeholders are fixed internally. */
-    authMode: CloudflareEgressAuthMode;
-    transport?: never;
-    durability?: never;
-    durabilityId?: never;
-    sessionId?: never;
-    apiKey?: never;
-    accessToken?: never;
-    bearerToken?: never;
-    token?: never;
-    credentials?: never;
-    subscription?: never;
-    apiBaseUrl?: never;
-    websocketUrl?: never;
-    createWebSocket?: never;
-    websocketPreconnect?: never;
+  type Owner = DurableObjectOwner;
+  type Options = Readonly<{
+    instructions?: string | undefined;
+    tools?: ToolConfiguration | undefined;
   }>;
   type ReturnType = Agent;
 }

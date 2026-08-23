@@ -6,15 +6,13 @@ export default {
   fetch(request) {
     const url = new URL(request.url);
     const authorization = request.headers.get("authorization");
-    const codex = url.href === "https://chatgpt.com/backend-api/codex/responses"
-      && authorization === "Bearer NANOCODEX_CODEX_OAUTH"
-      && request.headers.get("chatgpt-account-id") === "NANOCODEX_CODEX_ACCOUNT";
-    const openai = url.href === "https://api.openai.com/v1/responses"
-      && authorization === "Bearer NANOCODEX_OPENAI_API_KEY";
+    const responses = url.href === "https://nanocodex.internal/v1/responses"
+      && authorization === "Bearer NANOCODEX_PROVIDER_CREDENTIAL"
+      && request.headers.get("chatgpt-account-id") === null;
     if (request.method !== "GET"
       || request.headers.get("upgrade")?.toLowerCase() !== "websocket"
       || request.headers.get("openai-beta") !== "responses_websockets=2026-02-06"
-      || (!codex && !openai)) {
+      || !responses) {
       return Response.json({ error: "test_broker_denied" }, { status: 403 });
     }
     const pair = new WebSocketPair();
@@ -72,7 +70,6 @@ export default defineConfig({
           AGENT_IDLE_TIMEOUT_MS: "1000",
           NANOCODEX_ADMIN_TOKEN: "test-admin-token",
           NANOCODEX_ROOM_ALLOCATOR_TOKEN: "test-room-allocator-token",
-          NANOCODEX_AUTH_MODE: "api_key",
         },
         workers: [{
           name: "nanocodex-egress-broker-example",

@@ -12,44 +12,24 @@ class FakeWebSocket {
   close() { this.closed = true; }
 }
 
-test("Cloudflare EGRESS requires an explicit mode and never accepts provider credentials", () => {
+test("Cloudflare EGRESS owns one broker endpoint and never accepts provider configuration", () => {
   const binding = { fetch: async () => { throw new Error("must stay cold"); } };
-  assert.throws(() => cloudflareEgress(), /requires binding and authMode/);
-  assert.throws(
-    () => cloudflareEgress({ binding }),
-    /authMode must be explicitly set to api_key or chatgpt/,
-  );
+  assert.throws(() => cloudflareEgress(), /requires options/);
   assert.throws(
     () => cloudflareEgress({ binding, authMode: "direct" }),
-    /authMode must be explicitly set to api_key or chatgpt/,
+    /does not accept authMode/,
   );
   assert.throws(
-    () => cloudflareEgress({ binding, authMode: "api_key", apiKey: "managed-secret" }),
+    () => cloudflareEgress({ binding, apiKey: "managed-secret" }),
     /provider credentials belong in the private broker/,
   );
   assert.throws(
-    () => cloudflareEgress({ binding: {}, authMode: "api_key" }),
+    () => cloudflareEgress({ binding: {} }),
     /binding must provide fetch/,
   );
 });
 
-test("Cloudflare EGRESS sends only fixed mode placeholders through the private binding", async () => {
-  for (const fixture of [
-    {
-      authMode: "api_key",
-      apiBaseUrl: "https://api.openai.com/v1",
-      websocketUrl: "wss://api.openai.com/v1/responses",
-      authorization: "Bearer NANOCODEX_OPENAI_API_KEY",
-      account: null,
-    },
-    {
-      authMode: "chatgpt",
-      apiBaseUrl: "https://chatgpt.com/backend-api/codex",
-      websocketUrl: "wss://chatgpt.com/backend-api/codex/responses",
-      authorization: "Bearer NANOCODEX_CODEX_OAUTH",
-      account: "NANOCODEX_CODEX_ACCOUNT",
-    },
-  ]) {
+test("Cloudflare EGRESS sends one fixed placeholder through the private binding", async () => {
     const calls = [];
     const socket = new FakeWebSocket();
     const binding = {
@@ -67,10 +47,10 @@ test("Cloudflare EGRESS sends only fixed mode placeholders through the private b
         };
       },
     };
-    const options = cloudflareEgress({ binding, authMode: fixture.authMode });
+    const options = cloudflareEgress({ binding });
     assert.equal(Object.isFrozen(options), true);
-    assert.equal(options.apiBaseUrl, fixture.apiBaseUrl);
-    assert.equal(options.websocketUrl, fixture.websocketUrl);
+    assert.equal(options.apiBaseUrl, "https://nanocodex.internal/v1");
+    assert.equal(options.websocketUrl, "https://nanocodex.internal/v1/responses");
 
     const connection = await options.createWebSocket(
       options.websocketUrl,
@@ -78,11 +58,11 @@ test("Cloudflare EGRESS sends only fixed mode placeholders through the private b
       { authorization: "host_managed", turnState: "current-state" },
     );
     assert.equal(calls.length, 1);
-    assert.equal(calls[0].input, fixture.websocketUrl.replace("wss:", "https:"));
+    assert.equal(calls[0].input, "https://nanocodex.internal/v1/responses");
     assert.equal(calls[0].init.method, "GET");
     const headers = calls[0].init.headers;
-    assert.equal(headers.get("authorization"), fixture.authorization);
-    assert.equal(headers.get("chatgpt-account-id"), fixture.account);
+    assert.equal(headers.get("authorization"), "Bearer NANOCODEX_PROVIDER_CREDENTIAL");
+    assert.equal(headers.get("chatgpt-account-id"), null);
     assert.equal(headers.get("openai-beta"), "responses_websockets=2026-02-06");
     assert.equal(headers.get("session-id"), "runtime-session-1");
     assert.equal(headers.get("thread-id"), "runtime-session-1");
@@ -99,13 +79,11 @@ test("Cloudflare EGRESS sends only fixed mode placeholders through the private b
       reasoningIncluded: true,
       turnState: "next-state",
     });
-  }
 });
 
 test("Cloudflare EGRESS denies direct authorization and endpoint changes before fetch", async () => {
   let calls = 0;
   const options = cloudflareEgress({
-    authMode: "api_key",
     binding: { async fetch() { calls += 1; } },
   });
   await assert.rejects(
@@ -130,7 +108,6 @@ test("Cloudflare EGRESS denies direct authorization and endpoint changes before 
 test("Cloudflare EGRESS exposes bounded broker rejection metadata without reading its body", async () => {
   let cancelled = 0;
   const options = cloudflareEgress({
-    authMode: "chatgpt",
     binding: {
       async fetch() {
         return {
