@@ -5,6 +5,7 @@ const ACCOUNT_COOKIE = "nanocodex_account";
 const SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
 const USER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const API_KEY = /^ncx_live_([A-Za-z0-9_-]{12})_([A-Za-z0-9_-]{43})$/;
+const ANONYMOUS_SESSION_TOKEN = /^a_[A-Za-z0-9_-]{43}$/;
 const accountSessionKey = (token: string) => `session:${token}`;
 
 export function isUserId(value: unknown): value is string {
@@ -125,7 +126,7 @@ export async function authenticate(
   url = new URL(request.url),
 ): Promise<Principal | undefined> {
   const cookie = cookieValue(request, ACCOUNT_COOKIE);
-  if (cookie?.startsWith("a_")) {
+  if (cookie && ANONYMOUS_SESSION_TOKEN.test(cookie)) {
     const session = await readBrowserSession(request, env);
     if (session) return { kind: "account_session", userId: session.userId };
   } else {
@@ -261,7 +262,7 @@ async function resolveOrCreateBrowserAccount(
   if (principal) {
     const cookie = cookieValue(request, ACCOUNT_COOKIE);
     if (principal.kind === "account_session") {
-      return { principal, persistent: !cookie?.startsWith("a_") };
+      return { principal, persistent: !cookie || !ANONYMOUS_SESSION_TOKEN.test(cookie) };
     }
     const account = await readAccount(env, principal.userId);
     if (!account) throw new Error("API key account is unavailable");

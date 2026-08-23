@@ -66,6 +66,23 @@ describe("managed agents REST and resumable SSE", () => {
     expect(decodedUserId).toBe(account.user.id);
   });
 
+  it("recognizes passkey sessions even when their random token begins with the anonymous prefix", async () => {
+    const tokens = ["w".repeat(43), `a_${"w".repeat(41)}`];
+    for (const [index, token] of tokens.entries()) {
+      const userId = `22222222-2222-4222-8222-22222222222${index}`;
+      await seedPasskeySession(userId, token);
+      const response = await RAW_SELF.fetch("https://example.test/v1/me", {
+        headers: { cookie: `nanocodex_account=${token}` },
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({
+        user: { id: userId, persistent: true },
+        authentication: "account_session",
+      });
+      expect(response.headers.get("set-cookie")).toBeNull();
+    }
+  });
+
   it("forwards a browser account search body exactly once without leaking its credential", async () => {
     const session = await RAW_SELF.fetch("https://example.test/v1/me");
     const cookie = session.headers.get("set-cookie")?.split(";", 1)[0];
@@ -101,6 +118,60 @@ describe("managed agents REST and resumable SSE", () => {
     expect(forwarded.subject).not.toBe("browser-controlled-subject");
     expect(JSON.stringify(forwarded)).not.toContain(cookie!);
     expect(JSON.stringify(forwarded)).not.toContain(account.user.id);
+  });
+
+  it("lets anonymous and passkey cookies use browser-local and managed-durable runtimes", async () => {
+    const anonymous = await RAW_SELF.fetch("https://example.test/v1/me");
+    const anonymousCookie = anonymous.headers.get("set-cookie")?.split(";", 1)[0];
+    expect(anonymousCookie).toMatch(/^nanocodex_account=a_[A-Za-z0-9_-]{43}$/);
+
+    const passkeyUserId = "44444444-4444-4444-8444-444444444444";
+    const passkeyToken = `a_${"z".repeat(41)}`;
+    await seedPasskeySession(passkeyUserId, passkeyToken);
+    const principals = [
+      { kind: "anonymous", cookie: anonymousCookie! },
+      { kind: "passkey", cookie: `nanocodex_account=${passkeyToken}` },
+    ];
+
+    for (const principal of principals) {
+      const search = await RAW_SELF.fetch("https://nanocodex.internal/v1/search", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer NANOCODEX_PROVIDER_CREDENTIAL",
+          cookie: principal.cookie,
+          "content-type": "application/json",
+          origin: "https://example.test",
+        },
+        body: JSON.stringify({ mode: principal.kind }),
+      });
+      expect(search.status).toBe(200);
+      expect(await search.json()).toMatchObject({
+        body: JSON.stringify({ mode: principal.kind }),
+        cookie: null,
+        origin: "https://example.test",
+      });
+
+      const created = await RAW_SELF.fetch("https://example.test/v1/agents", {
+        method: "POST",
+        headers: { cookie: principal.cookie, origin: "https://example.test" },
+      });
+      expect(created.status).toBe(201);
+      const receipt = await created.json<AgentReceipt>();
+      const listed = await RAW_SELF.fetch("https://example.test/v1/agents", {
+        headers: { cookie: principal.cookie },
+      });
+      expect(await listed.json()).toEqual({ data: [receipt.agent_id] });
+      const replay = await RAW_SELF.fetch(receipt.events_url.replace(/\/events$/, ""), {
+        headers: { cookie: principal.cookie },
+      });
+      expect(replay.status).toBe(200);
+      await replay.body?.cancel();
+      const deleted = await RAW_SELF.fetch(receipt.events_url.replace(/\/events$/, ""), {
+        method: "DELETE",
+        headers: { cookie: principal.cookie, origin: "https://example.test" },
+      });
+      expect(deleted.status).toBe(204);
+    }
   });
 
   it("does not let an unrelated bearer mint managed agents", async () => {
@@ -500,6 +571,38 @@ async function seedApiKey(userId: string, token: string): Promise<void> {
     },
   );
   expect(record.status).toBe(201);
+}
+
+async function seedPasskeySession(userId: string, token: string): Promise<void> {
+  const account = testEnv.NANOCODEX_USERS.getByName(userId);
+  const provisioned = await account.fetch("https://user.internal/account", {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ id: userId, persistent: true }),
+  });
+  expect(provisioned.ok).toBe(true);
+
+  const encodedUserId = btoa(userId).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+  const now = Math.floor(Date.now() / 1_000);
+  const auth = testEnv.NANOCODEX_AUTH.getByName("webauthn");
+  const stored = await auth.fetch(
+    `https://do.invalid/set?key=${encodeURIComponent(`session:${token}`)}`,
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        value: {
+          credentialId: `credential-${token}`,
+          publicKey: "0x01",
+          userId: encodedUserId,
+          issuedAt: now,
+          expiresAt: now + 60,
+        },
+        ttl: 60,
+      }),
+    },
+  );
+  expect(stored.ok).toBe(true);
 }
 
 async function submit(agent: AgentReceipt, id: string, input: string): Promise<ManagedTurnView> {
