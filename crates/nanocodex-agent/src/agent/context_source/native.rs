@@ -45,6 +45,12 @@ pub(crate) struct ContextSource {
 
 impl ContextSource {
     pub(crate) fn resolve_workspace(&self, requested: Option<&str>) -> Result<String> {
+        if self.execution_environment.is_some() {
+            // A configured execution environment means model-visible tools run
+            // somewhere other than this process. Preserve its workspace name;
+            // probing it through the embedding host would cross that boundary.
+            return Ok(requested.unwrap_or(".").to_owned());
+        }
         let requested = PathBuf::from(requested.unwrap_or("."));
         let resolved = std::fs::canonicalize(&requested).map_err(|source| {
             NanocodexError::ResolveWorkspace {
@@ -110,6 +116,23 @@ mod tests {
                 .project_instructions(workspace.path().to_str().unwrap())
                 .as_deref(),
             Some("guest instructions")
+        );
+    }
+
+    #[test]
+    fn remote_workspace_is_not_resolved_through_the_native_host() {
+        let mut config = ContextSourceConfig::default();
+        config.set_execution_environment(super::super::ExecutionEnvironment::new(
+            "2026-07-29",
+            "Etc/UTC",
+        ));
+
+        assert_eq!(
+            config
+                .build()
+                .resolve_workspace(Some("/workspace"))
+                .unwrap(),
+            "/workspace"
         );
     }
 }
