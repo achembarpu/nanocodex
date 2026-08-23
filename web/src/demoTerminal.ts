@@ -174,7 +174,11 @@ export function createAgentTerminal(options: {
   listeners.push(watcher.onEvent((event) => {
     if (disposed || event.request_id !== agent.sessionId) return;
     observeRootTurnEvent(event);
+    const wasRunning = state.running;
     state = boundedTerminalState(applyAgentEvents(state, [event]), maxEntries);
+    if (state.running !== wasRunning) {
+      emit("terminal.running_changed", { running: state.running });
+    }
     render();
   }));
 

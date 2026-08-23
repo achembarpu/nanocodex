@@ -112,7 +112,7 @@ function terminalEvent(
     if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
     const event = value as AgentEvent;
     return typeof event.type === "string" && event.payload && typeof event.payload === "object"
-      ? event
+      ? { ...event, request_id: sessionId, seq: sequence }
       : undefined;
   }
   if (envelope.data.type !== "turn_accepted" || submitted.has(envelope.data.id)) {

@@ -182,7 +182,9 @@ function AgentTerminalView({
       terminal: terminalHost,
       onEvent(event) {
         if (cancelled) return;
-        if (event.type === "prompt.accepted" && typeof event.id === "number") {
+        if (event.type === "terminal.running_changed" && typeof event.running === "boolean") {
+          setTerminalRunning(event.running || activePromptIds.current.size > 0);
+        } else if (event.type === "prompt.accepted" && typeof event.id === "number") {
           activePromptIds.current.add(event.id);
           markAgentTiming("prompt.accepted");
           setTerminalRunning(true);
