@@ -109,7 +109,7 @@ export function buildManagedProductionConfig(baseConfig, {
   }
   const v2 = baseConfig.migrations[1];
   for (const className of ["NonceStorage", "UserAccount", "ApiKeyRecord"]) {
-    if (!v2?.new_classes?.includes(className)) {
+    if (!v2?.new_sqlite_classes?.includes(className)) {
       throw new Error(`production managed Worker requires ${className} in migration v2`);
     }
   }
@@ -438,7 +438,9 @@ function assertTokenStrength(value, name) {
 function cloudflareCredentials(environment) {
   return {
     accountId: requiredEnvironment(environment, "CLOUDFLARE_ACCOUNT_ID"),
-    apiToken: requiredSecret(environment, "CLOUDFLARE_API_TOKEN"),
+    apiToken: environment.CLOUDFLARE_API_TOKEN === undefined
+      ? undefined
+      : requiredSecret(environment, "CLOUDFLARE_API_TOKEN"),
   };
 }
 
@@ -450,7 +452,8 @@ export function productionWranglerEnvironment(environment, cloudflare) {
   ]) delete child[name];
   delete child.CLOUDFLARE_ENV;
   child.CLOUDFLARE_ACCOUNT_ID = cloudflare.accountId;
-  child.CLOUDFLARE_API_TOKEN = cloudflare.apiToken;
+  if (cloudflare.apiToken) child.CLOUDFLARE_API_TOKEN = cloudflare.apiToken;
+  else delete child.CLOUDFLARE_API_TOKEN;
   return child;
 }
 
@@ -475,12 +478,16 @@ function runWrangler(arguments_, {
 async function boundedJson(response, limit) {
   const encoded = await response.text();
   if (Buffer.byteLength(encoded) > limit) {
-    throw new Error("boundary probe response exceeded its limit");
+    throw new Error(
+      `boundary probe returned oversized HTTP ${response.status} ${response.headers.get("content-type") ?? "unknown content"}`,
+    );
   }
   try {
     return JSON.parse(encoded);
   } catch {
-    throw new Error("boundary probe returned invalid JSON");
+    throw new Error(
+      `boundary probe returned non-JSON HTTP ${response.status} ${response.headers.get("content-type") ?? "unknown content"}`,
+    );
   }
 }
 

@@ -55,7 +55,7 @@
     },
     {
       "tag": "v2",
-      "new_classes": ["NonceStorage", "UserAccount", "ApiKeyRecord"]
+      "new_sqlite_classes": ["NonceStorage", "UserAccount", "ApiKeyRecord"]
     }
   ],
   "vars": {

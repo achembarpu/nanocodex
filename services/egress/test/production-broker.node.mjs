@@ -66,6 +66,13 @@ test("Wrangler child environment strips all provider and source deployment secre
   });
 });
 
+test("Wrangler child environment can use the local OAuth session", () => {
+  assert.deepEqual(brokerWranglerEnvironment({ PATH: "/usr/bin" }, "account"), {
+    PATH: "/usr/bin",
+    CLOUDFLARE_ACCOUNT_ID: "account",
+  });
+});
+
 test("production config is private and keeps both current DO bindings", async () => {
   const base = JSON.parse(await readFile(new URL("../wrangler.broker.jsonc", import.meta.url)));
   const config = buildProductionBrokerConfig(base, { mainPath: "/fixed/egress.ts" });

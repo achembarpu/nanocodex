@@ -56,7 +56,10 @@ export function brokerWranglerEnvironment(environment, accountId, apiToken) {
     "NANOCODEX_CREDENTIAL_ENCRYPTION_KEY_PREVIOUS",
     "NANOCODEX_BROKER_PROBE_TOKEN",
   ]) delete clean[name];
-  return { ...clean, CLOUDFLARE_ACCOUNT_ID: accountId, CLOUDFLARE_API_TOKEN: apiToken };
+  clean.CLOUDFLARE_ACCOUNT_ID = accountId;
+  if (apiToken) clean.CLOUDFLARE_API_TOKEN = apiToken;
+  else delete clean.CLOUDFLARE_API_TOKEN;
+  return clean;
 }
 
 export function buildProductionBrokerConfig(base, { mainPath }) {
@@ -111,7 +114,9 @@ export async function withPrivateBrokerFiles(files, callback) {
 
 async function deploy() {
   const accountId = required(process.env.CLOUDFLARE_ACCOUNT_ID, "CLOUDFLARE_ACCOUNT_ID");
-  const apiToken = required(process.env.CLOUDFLARE_API_TOKEN, "CLOUDFLARE_API_TOKEN");
+  const apiToken = process.env.CLOUDFLARE_API_TOKEN === undefined
+    ? undefined
+    : required(process.env.CLOUDFLARE_API_TOKEN, "CLOUDFLARE_API_TOKEN");
   const revision = productionRevision(process.env);
   const secrets = productionBrokerSecrets(process.env);
   const base = JSON.parse(await readFile(join(directory, "wrangler.broker.jsonc"), "utf8"));
