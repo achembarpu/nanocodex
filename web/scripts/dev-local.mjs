@@ -188,7 +188,7 @@ async function main() {
       "development",
     ], { cwd: webRoot, env: { ...toolEnvironment, CI: "true" } });
 
-    await ensureManagedDependencies(toolEnvironment);
+    await ensureLocalDependencies(toolEnvironment);
 
     const relayLaunch = localChatGptRelayChildLaunch(toolEnvironment);
     const relayChild = spawn(
@@ -551,16 +551,22 @@ export async function verifyLocalModelPreconnect(
   }
 }
 
-async function ensureManagedDependencies(environment) {
-  const packages = [resolve(managedRoot, "../egress"), managedRoot];
+async function ensureLocalDependencies(environment) {
+  const packages = localDependencyRequirements();
   const missing = [];
-  for (const root of packages) {
-    try {
-      const metadata = await stat(resolve(root, "node_modules/wrangler/bin/wrangler.js"));
-      if (!metadata.isFile() || metadata.size === 0) missing.push(root);
-    } catch (error) {
-      if (error?.code !== "ENOENT") throw error;
-      missing.push(root);
+  for (const { root, requiredFiles } of packages) {
+    for (const requiredFile of requiredFiles) {
+      try {
+        const metadata = await stat(resolve(root, requiredFile));
+        if (!metadata.isFile() || metadata.size === 0) {
+          missing.push(root);
+          break;
+        }
+      } catch (error) {
+        if (error?.code !== "ENOENT") throw error;
+        missing.push(root);
+        break;
+      }
     }
   }
   if (missing.length === 0) return;
@@ -569,6 +575,26 @@ async function ensureManagedDependencies(environment) {
     cwd: repositoryRoot,
     env: environment,
   })));
+}
+
+export function localDependencyRequirements() {
+  return [
+    {
+      root: webRoot,
+      requiredFiles: [
+        "node_modules/accounts/package.json",
+        "node_modules/wrangler/bin/wrangler.js",
+      ],
+    },
+    {
+      root: resolve(managedRoot, "../egress"),
+      requiredFiles: ["node_modules/wrangler/bin/wrangler.js"],
+    },
+    {
+      root: managedRoot,
+      requiredFiles: ["node_modules/wrangler/bin/wrangler.js"],
+    },
+  ];
 }
 
 export async function resolveLocalAuthMode(

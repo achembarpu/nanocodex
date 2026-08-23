@@ -3,13 +3,14 @@ import { execFile, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
 import {
   localDevelopmentOrigin,
+  localDependencyRequirements,
   localStackChildOptions,
   loadRootEnvironment,
   managedChildEnvironment,
@@ -32,6 +33,17 @@ import { prepareDevWasm } from "./check-dev-wasm.mjs";
 
 const execFileAsync = promisify(execFile);
 const devLocalScript = fileURLToPath(new URL("./dev-local.mjs", import.meta.url));
+
+test("local development installs every package required to start the web stack", () => {
+  const requirements = localDependencyRequirements();
+  const web = requirements.find(({ root }) => basename(root) === "web");
+  assert.ok(web);
+  assert.deepEqual(web.requiredFiles, [
+    "node_modules/accounts/package.json",
+    "node_modules/wrangler/bin/wrangler.js",
+  ]);
+  assert.equal(requirements.length, 3);
+});
 
 test("local web environment cannot inherit provider or Cloudflare deployment credentials", () => {
   const environment = providerFreeWebEnvironment({
