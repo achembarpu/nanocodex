@@ -73,10 +73,7 @@ impl ToolRuntime {
         nanocodex_oai_api::transport::install_default_rustls_crypto_provider();
         let workspace = workspace.into();
         let current_turn = Arc::new(AtomicU64::new(0));
-        let sessions = Arc::new(ShellSessions::with_environment_and_turn(
-            process_environment,
-            Arc::clone(&current_turn),
-        ));
+        let sessions = Arc::new(ShellSessions::with_environment(process_environment));
         let default_shell_name = Arc::from(sessions.default_shell_name());
         let working_directory = Arc::from(workspace.to_string_lossy().into_owned());
         let code_mode_workspace = workspace.clone();
@@ -171,6 +168,21 @@ impl ToolRuntime {
     #[must_use]
     pub fn working_directory(&self) -> &str {
         &self.working_directory
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn has_shell_session(&self, session_id: i64) -> bool {
+        self.sessions.contains(session_id).await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn hold_code_mode_admission(&self) -> tokio::sync::OwnedMutexGuard<()> {
+        self.code_mode.hold_admission().await
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn wait_for_code_mode_admission_attempt(&self) {
+        self.code_mode.wait_for_admission_attempt().await;
     }
 
     #[doc(hidden)]
@@ -322,7 +334,8 @@ impl ToolRuntime {
     /// runtime's retained state.
     ///
     /// Shell sessions created by `exec_command` remain available to later
-    /// `write_stdin` calls on the same runtime.
+    /// `write_stdin` calls on the same runtime, including after cancellation
+    /// of the turn that started or last observed them.
     ///
     /// Handler panics become failed `aborted` outputs and never unwind through
     /// the runtime owner.
@@ -392,18 +405,19 @@ impl ToolRuntimeControl {
     #[doc(hidden)]
     pub async fn cancel_turn(&self) {
         let turn_id = self.current_turn.load(Ordering::Acquire);
-        tokio::join!(
-            self.code_mode.terminate_turn(turn_id),
-            self.sessions.terminate_turn(turn_id)
-        );
+        // Shell sessions are owned by this runtime once spawned, not by the
+        // turn that launched or observed them. Full runtime cancellation below
+        // remains their explicit cleanup boundary.
+        self.code_mode.terminate_turn(turn_id).await;
     }
 
     #[doc(hidden)]
     pub async fn cancel(&self) {
-        tokio::join!(
-            self.code_mode.terminate_all(),
-            self.sessions.terminate_all()
-        );
+        // Code Mode cells can still be inside a nested exec_command. Quiesce
+        // and join every producer before draining the session-owned shells so
+        // no late registration can escape the shutdown boundary.
+        let _code_mode_quiescence = self.code_mode.terminate_all().await;
+        self.sessions.terminate_all().await;
     }
 }
 

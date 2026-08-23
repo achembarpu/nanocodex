@@ -238,8 +238,11 @@
   turns, retries, compaction, and reconnects. Stored Responses checkpoints are
   an optional transport optimization for branching; complete client-owned typed
   history remains authoritative and is replayed when a checkpoint is missing.
-- Cancellation and process cleanup are explicit. Timeout or cancellation must
-  terminate subprocess groups and descendants.
+- Turn cancellation stops turn-owned Code Mode work, invalidates Code Mode
+  admissions already waiting at its boundary, and preserves shell processes
+  already retained by the runtime. Explicit shell termination and runtime
+  shutdown must terminate subprocess groups and descendants. Runtime shutdown
+  holds Code Mode admission closed while draining shells.
 
 ## Tower boundary
 

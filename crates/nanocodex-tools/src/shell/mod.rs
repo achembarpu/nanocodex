@@ -102,9 +102,9 @@ pub(crate) struct ExecCommandResult {
 }
 
 pub(crate) struct ShellSessions {
+    lifecycle: Mutex<()>,
     sessions: Mutex<SessionStore>,
     next_session_id: AtomicI64,
-    current_turn: Arc<AtomicU64>,
     default_shell: selection::Shell,
     environment: Arc<Vec<(OsString, OsString)>>,
 }
@@ -115,19 +115,11 @@ impl ShellSessions {
         Self::with_environment(Arc::new(Vec::new()))
     }
 
-    #[cfg(test)]
     pub(crate) fn with_environment(environment: Arc<Vec<(OsString, OsString)>>) -> Self {
-        Self::with_environment_and_turn(environment, Arc::new(AtomicU64::new(0)))
-    }
-
-    pub(crate) fn with_environment_and_turn(
-        environment: Arc<Vec<(OsString, OsString)>>,
-        current_turn: Arc<AtomicU64>,
-    ) -> Self {
         Self {
+            lifecycle: Mutex::new(()),
             sessions: Mutex::new(SessionStore::default()),
             next_session_id: AtomicI64::new(1),
-            current_turn,
             default_shell: selection::default_user_shell(),
             environment,
         }
@@ -136,6 +128,15 @@ impl ShellSessions {
     #[cfg(feature = "native")]
     pub(crate) const fn default_shell_name(&self) -> &'static str {
         self.default_shell.name()
+    }
+
+    #[cfg(test)]
+    pub(crate) async fn contains(&self, session_id: i64) -> bool {
+        self.sessions
+            .lock()
+            .await
+            .sessions
+            .contains_key(&session_id)
     }
 
     pub(crate) async fn execute(
@@ -151,6 +152,10 @@ impl ShellSessions {
             selection::get_shell_by_model_provided_path,
         );
         let (environment, secrets) = process::sanitized_environment(&self.environment);
+        // Registration and full cleanup are one linearized lifecycle. Once a
+        // process has spawned, terminate_all must either observe it in the
+        // store or have completed before this execution began spawning.
+        let lifecycle_guard = self.lifecycle.lock().await;
         let spawned = match process::spawn(
             &command.script,
             &workdir,
@@ -171,20 +176,16 @@ impl ShellSessions {
                 );
             }
         };
-        let session = Session::new(
-            session_id,
-            self.current_turn.load(Ordering::Acquire),
-            spawned,
-            secrets,
-        );
+        let session = Session::new(session_id, spawned, secrets);
         let _interaction_guard = session.interaction.lock().await;
+        let _interaction = session.begin_interaction();
         let pruned = self.sessions.lock().await.insert(Arc::clone(&session));
         if let Some(pruned) = pruned {
             pruned.terminate().await;
         }
+        drop(lifecycle_guard);
 
         let yield_time = duration_ms(command.yield_time_ms, DEFAULT_EXEC_YIELD_MS, 250, 30_000);
-        let _interaction = session.begin_interaction();
         let result = session
             .wait_for_output(yield_time, command.max_output_tokens, started_at)
             .await;
@@ -209,9 +210,6 @@ impl ShellSessions {
         };
 
         let _interaction_guard = session.interaction.lock().await;
-        session
-            .turn_id
-            .store(self.current_turn.load(Ordering::Acquire), Ordering::Release);
         let _interaction = session.begin_interaction();
         if !request.chars.is_empty() {
             let written = if !session.tty {
@@ -250,6 +248,9 @@ impl ShellSessions {
     }
 
     pub(crate) async fn terminate_all(&self) {
+        // Keep concurrent cleanup acknowledgements behind the same boundary,
+        // and do not allow a process to spawn between draining and reaping.
+        let _lifecycle_guard = self.lifecycle.lock().await;
         let sessions = {
             let mut store = self.sessions.lock().await;
             store.recency.clear();
@@ -257,26 +258,6 @@ impl ShellSessions {
                 .sessions
                 .drain()
                 .map(|(_, session)| session)
-                .collect::<Vec<_>>()
-        };
-        for session in sessions {
-            session.terminate().await;
-        }
-    }
-
-    #[cfg(feature = "native")]
-    pub(crate) async fn terminate_turn(&self, turn_id: u64) {
-        let sessions = {
-            let mut store = self.sessions.lock().await;
-            let ids = store
-                .sessions
-                .iter()
-                .filter_map(|(id, session)| {
-                    (session.turn_id.load(Ordering::Acquire) == turn_id).then_some(*id)
-                })
-                .collect::<Vec<_>>();
-            ids.into_iter()
-                .filter_map(|id| store.remove(id))
                 .collect::<Vec<_>>()
         };
         for session in sessions {
@@ -335,7 +316,6 @@ impl SessionStore {
 
 struct Session {
     id: i64,
-    turn_id: AtomicU64,
     tty: bool,
     interaction: Mutex<()>,
     child: Mutex<process::ProcessChild>,
@@ -348,12 +328,7 @@ struct Session {
 }
 
 impl Session {
-    fn new(
-        id: i64,
-        turn_id: u64,
-        spawned: process::SpawnedProcess,
-        secrets: Vec<String>,
-    ) -> Arc<Self> {
+    fn new(id: i64, spawned: process::SpawnedProcess, secrets: Vec<String>) -> Arc<Self> {
         let tty = matches!(spawned.stdin.as_ref(), Some(process::ProcessStdin::Pty(_)));
         let captured = Arc::new(Mutex::new(CapturedOutput::default()));
         let drains = match spawned.output {
@@ -377,7 +352,6 @@ impl Session {
         };
         Arc::new(Self {
             id,
-            turn_id: AtomicU64::new(turn_id),
             tty,
             interaction: Mutex::new(()),
             child: Mutex::new(spawned.child),
@@ -403,7 +377,6 @@ impl Session {
         // Signal first: a direct caller can hold the interaction lock while
         // awaiting this child, and waiting for that lock before terminating
         // would make cancellation wait for the command's full yield timeout.
-        self.stdin.lock().await.take();
         if let Err(error) = self.process_group.lock().await.terminate_and_disarm() {
             tracing::warn!(
                 shell.session.id = self.id,
@@ -415,6 +388,9 @@ impl Session {
         // wait path. Own it before the idempotent reap/drain cleanup so a
         // cancellation acknowledgement is a real process-cleanup boundary.
         let _interaction = self.interaction.lock().await;
+        // No write can remain active after taking the interaction lock, so the
+        // stdin handle can now be dropped without delaying the kill signal.
+        self.stdin.lock().await.take();
         if let Err(error) = self.child.lock().await.wait().await {
             tracing::warn!(
                 shell.session.id = self.id,
@@ -654,7 +630,8 @@ mod tests {
     #[cfg(unix)]
     use std::{
         ffi::OsString,
-        sync::Arc,
+        io::Write,
+        sync::{Arc, Barrier},
         time::{Duration, SystemTime},
     };
 
@@ -939,6 +916,169 @@ mod tests {
             .expect("cancelled direct command should finish")
             .expect("direct command task should not panic");
         assert!(result.exit_code.is_some());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn concurrent_full_cancellations_wait_for_the_same_process_cleanup() {
+        let sessions = Arc::new(ShellSessions::new());
+        let started = sessions
+            .execute(
+                ExecCommand::new(
+                    "sleep 30".to_owned(),
+                    None,
+                    None,
+                    Some(false),
+                    false,
+                    Some(250),
+                    None,
+                ),
+                std::path::Path::new("/"),
+            )
+            .await;
+        assert_eq!(started.session_id, Some(1));
+
+        let session = sessions
+            .sessions
+            .lock()
+            .await
+            .get(1)
+            .expect("yielded shell session should remain registered");
+        let interaction = session.interaction.lock().await;
+        let first = {
+            let sessions = Arc::clone(&sessions);
+            tokio::spawn(async move { sessions.terminate_all().await })
+        };
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while !sessions.sessions.lock().await.sessions.is_empty() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("first cancellation should drain the session store");
+
+        let mut second = {
+            let sessions = Arc::clone(&sessions);
+            tokio::spawn(async move { sessions.terminate_all().await })
+        };
+        assert!(
+            tokio::time::timeout(Duration::from_millis(50), &mut second)
+                .await
+                .is_err(),
+            "a concurrent cancellation acknowledged before process cleanup finished"
+        );
+
+        drop(interaction);
+        tokio::time::timeout(Duration::from_secs(2), first)
+            .await
+            .expect("first cancellation should finish after cleanup is released")
+            .expect("first cancellation task should not panic");
+        tokio::time::timeout(Duration::from_secs(2), second)
+            .await
+            .expect("second cancellation should finish with the first")
+            .expect("second cancellation task should not panic");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn full_cancellation_signals_before_waiting_for_a_blocked_pty_write()
+    -> Result<(), Box<dyn std::error::Error>> {
+        struct BlockingWriter {
+            entered: std::sync::mpsc::SyncSender<()>,
+            release: Arc<Barrier>,
+        }
+
+        impl Write for BlockingWriter {
+            fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+                self.entered
+                    .send(())
+                    .map_err(|error| std::io::Error::other(error.to_string()))?;
+                self.release.wait();
+                Ok(bytes.len())
+            }
+
+            fn flush(&mut self) -> std::io::Result<()> {
+                Ok(())
+            }
+        }
+
+        let nonce = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)?
+            .as_nanos();
+        let directory = std::env::temp_dir().join(format!(
+            "nanocodex-blocked-pty-cancel-{}-{nonce}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&directory)?;
+        let marker = directory.join("escaped");
+        let sessions = Arc::new(ShellSessions::new());
+        let started = sessions
+            .execute(
+                ExecCommand::new(
+                    format!("(sleep 1; printf escaped > '{}') & wait", marker.display()),
+                    None,
+                    None,
+                    Some(false),
+                    true,
+                    Some(250),
+                    None,
+                ),
+                std::path::Path::new("/"),
+            )
+            .await;
+        assert_eq!(started.session_id, Some(1));
+
+        let session = sessions
+            .sessions
+            .lock()
+            .await
+            .get(1)
+            .expect("yielded PTY session should remain registered");
+        let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+        let release = Arc::new(Barrier::new(2));
+        let writer: Box<dyn Write + Send> = Box::new(BlockingWriter {
+            entered: entered_tx,
+            release: Arc::clone(&release),
+        });
+        *session.stdin.lock().await = Some(super::process::ProcessStdin::Pty(Arc::new(
+            std::sync::Mutex::new(writer),
+        )));
+
+        let write = {
+            let sessions = Arc::clone(&sessions);
+            tokio::spawn(async move {
+                sessions
+                    .write_stdin(WriteStdin::new(1, "x".to_owned(), Some(250), None))
+                    .await
+            })
+        };
+        tokio::task::yield_now().await;
+        tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(2)))
+            .await??;
+
+        let cancellation = {
+            let sessions = Arc::clone(&sessions);
+            tokio::spawn(async move { sessions.terminate_all().await })
+        };
+        tokio::time::sleep(Duration::from_millis(1_250)).await;
+        let escaped = marker.exists();
+
+        release.wait();
+        tokio::time::timeout(Duration::from_secs(2), write)
+            .await
+            .expect("blocked write should finish after release")
+            .expect("write task should not panic");
+        tokio::time::timeout(Duration::from_secs(2), cancellation)
+            .await
+            .expect("cancellation should finish after the write releases")
+            .expect("cancellation task should not panic");
+        std::fs::remove_dir_all(directory)?;
+
+        assert!(
+            !escaped,
+            "a blocked PTY write delayed the process-group signal"
+        );
+        Ok(())
     }
 
     #[cfg(unix)]

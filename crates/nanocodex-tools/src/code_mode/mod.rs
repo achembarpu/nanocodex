@@ -50,6 +50,10 @@ const CELL_COMPLETION_CLAIMED: u8 = 2;
 const CELL_CLOSED: u8 = 3;
 
 pub(crate) struct CodeModeRuntime {
+    admission: Arc<Mutex<()>>,
+    admission_epoch: Arc<AtomicU64>,
+    #[cfg(test)]
+    admission_attempts: Arc<Semaphore>,
     cells: Arc<Mutex<CellRegistry>>,
     stored: Arc<Mutex<HashMap<String, Value>>>,
     host: Arc<Mutex<SharedJsHost>>,
@@ -58,8 +62,16 @@ pub(crate) struct CodeModeRuntime {
 
 #[derive(Clone)]
 pub(crate) struct CodeModeControl {
+    admission: Arc<Mutex<()>>,
+    admission_epoch: Arc<AtomicU64>,
+    #[cfg(test)]
+    admission_attempts: Arc<Semaphore>,
     cells: Arc<Mutex<CellRegistry>>,
     host: Arc<Mutex<SharedJsHost>>,
+}
+
+pub(super) struct CodeModeQuiescence {
+    _admission: OwnedMutexGuard<()>,
 }
 
 struct SharedJsHost {
@@ -256,6 +268,10 @@ impl CodeModeRuntime {
 
     pub(super) fn new_with_turn(_workspace: PathBuf, current_turn: Arc<AtomicU64>) -> Self {
         Self {
+            admission: Arc::new(Mutex::new(())),
+            admission_epoch: Arc::new(AtomicU64::new(0)),
+            #[cfg(test)]
+            admission_attempts: Arc::new(Semaphore::new(0)),
             cells: Arc::new(Mutex::new(CellRegistry {
                 next_cell_id: 1,
                 live_cells: HashMap::new(),
@@ -268,9 +284,27 @@ impl CodeModeRuntime {
 
     pub(super) fn control(&self) -> CodeModeControl {
         CodeModeControl {
+            admission: Arc::clone(&self.admission),
+            admission_epoch: Arc::clone(&self.admission_epoch),
+            #[cfg(test)]
+            admission_attempts: Arc::clone(&self.admission_attempts),
             cells: Arc::clone(&self.cells),
             host: Arc::clone(&self.host),
         }
+    }
+
+    #[cfg(test)]
+    pub(super) async fn hold_admission(&self) -> OwnedMutexGuard<()> {
+        Arc::clone(&self.admission).lock_owned().await
+    }
+
+    #[cfg(test)]
+    pub(super) async fn wait_for_admission_attempt(&self) {
+        self.admission_attempts
+            .acquire()
+            .await
+            .expect("test admission semaphore should remain open")
+            .forget();
     }
 
     pub(super) async fn execute(
@@ -337,6 +371,7 @@ impl CodeModeRuntime {
         started_at: Instant,
         observer: &mut dyn CodeModeObserver,
     ) -> CodeModeExecution {
+        let admission_epoch = self.admission_epoch.load(Ordering::Acquire);
         let source = match parse_exec_source(source) {
             Ok(source) => source,
             Err(message) => return failed_execution(started_at, &message, Vec::new()),
@@ -347,8 +382,22 @@ impl CodeModeRuntime {
             .max(1);
         tracing::Span::current().record("output.max_tokens", output_token_budget);
         let context = context.with_output_token_budget(output_token_budget);
+        #[cfg(test)]
+        self.admission_attempts.add_permits(1);
+        let admission = self.admission.lock().await;
+        if self.admission_epoch.load(Ordering::Acquire) != admission_epoch {
+            return observed_execution(
+                "Script terminated",
+                true,
+                started_at,
+                Vec::new(),
+                Some(output_token_budget),
+                Vec::new(),
+                Vec::new(),
+            );
+        }
         let stored = self.stored.lock().await.clone();
-        let (cell, observation) = {
+        let cell = {
             let mut registry = self.cells.lock().await;
             let cell_id = registry.allocate_cell_id();
             tracing::Span::current().record("cell.id", cell_id);
@@ -363,10 +412,11 @@ impl CodeModeRuntime {
                 Arc::clone(&self.host),
                 output_token_budget,
             ));
-            let observation = Arc::clone(&cell.observation).lock_owned().await;
             registry.live_cells.insert(cell_id, Arc::clone(&cell));
-            (cell, observation)
+            cell
         };
+        drop(admission);
+        let observation = Arc::clone(&cell.observation).lock_owned().await;
         let yield_after = source
             .yield_time_ms
             .map_or(INITIAL_YIELD, Duration::from_millis);
@@ -504,6 +554,10 @@ fn observer_yield_timeout(yield_time: Duration) -> Duration {
 
 impl CodeModeControl {
     pub(super) async fn terminate_turn(&self, turn_id: u64) {
+        #[cfg(test)]
+        self.admission_attempts.add_permits(1);
+        let _admission = self.admission.lock().await;
+        self.admission_epoch.fetch_add(1, Ordering::AcqRel);
         let cells = {
             let mut registry = self.cells.lock().await;
             let ids = registry
@@ -525,7 +579,11 @@ impl CodeModeControl {
         }
     }
 
-    pub(super) async fn terminate_all(&self) {
+    pub(super) async fn terminate_all(&self) -> CodeModeQuiescence {
+        #[cfg(test)]
+        self.admission_attempts.add_permits(1);
+        let admission = Arc::clone(&self.admission).lock_owned().await;
+        self.admission_epoch.fetch_add(1, Ordering::AcqRel);
         let cells = {
             let mut registry = self.cells.lock().await;
             std::mem::take(&mut registry.live_cells)
@@ -542,6 +600,10 @@ impl CodeModeControl {
         let mut shared_host = self.host.lock().await;
         if let Some(mut host) = shared_host.host.take() {
             host.terminate().await;
+        }
+        drop(shared_host);
+        CodeModeQuiescence {
+            _admission: admission,
         }
     }
 }

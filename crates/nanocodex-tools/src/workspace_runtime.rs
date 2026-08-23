@@ -6,11 +6,7 @@
 //! handlers without linking Code Mode, MCP, HTTP clients, or provider
 //! transports.
 
-use std::{
-    ffi::OsString,
-    path::PathBuf,
-    sync::{Arc, atomic::AtomicU64},
-};
+use std::{ffi::OsString, path::PathBuf, sync::Arc};
 
 use crate::{
     StandardTool, Tool, ToolContext, ToolInput, ToolOutput,
@@ -84,10 +80,7 @@ impl WorkspaceToolRuntime {
         max_wire_bytes: Option<u64>,
         environment: Arc<Vec<(OsString, OsString)>>,
     ) -> Self {
-        let sessions = Arc::new(ShellSessions::with_environment_and_turn(
-            environment,
-            Arc::new(AtomicU64::new(0)),
-        ));
+        let sessions = Arc::new(ShellSessions::with_environment(environment));
         Self {
             apply_patch: ApplyPatchHandler::new(workspace.clone()),
             exec_command: ExecCommandHandler::new(workspace.clone(), Arc::clone(&sessions)),

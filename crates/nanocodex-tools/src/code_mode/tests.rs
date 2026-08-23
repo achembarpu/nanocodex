@@ -204,7 +204,7 @@ async fn prewarms_embedded_quickjs_host() -> Result<()> {
 
     assert!(runtime.host.lock().await.host.is_some());
 
-    runtime.control().terminate_all().await;
+    drop(runtime.control().terminate_all().await);
     std::fs::remove_dir_all(workspace)?;
     Ok(())
 }
@@ -1297,29 +1297,86 @@ text(completed.output);
     Ok(())
 }
 
+#[cfg(unix)]
 #[tokio::test]
-async fn cancellation_terminates_yielded_code_cells() -> Result<()> {
-    let workspace = temporary_workspace("cancelled-cell")?;
+async fn cancelling_a_turn_stops_its_cell_but_preserves_its_shell_until_shutdown() -> Result<()> {
+    let workspace = temporary_workspace("runtime-owned-shell-cancellation")?;
     let tools = test_tools(&workspace);
     let control = tools.control();
     let history = Vec::new();
-    let execution = tools
+
+    control.begin_turn();
+    let started = tools
         .execute_code(
-            r"
+            r#"
+const command = await tools.exec_command({
+  cmd: "sleep 30",
+  login: false,
+  tty: true,
+  yield_time_ms: 250,
+});
+text(command.session_id);
 await yield_control();
 await new Promise(() => {});
-",
+"#,
             test_context(&history),
         )
         .await;
-    assert!(execution_output(&execution).contains("Script running with cell ID 1"));
+    assert!(started.success, "{}", execution_output(&started));
+    let started = execution_output(&started);
+    assert!(
+        started.contains("Script running with cell ID 1"),
+        "{started}"
+    );
+    assert_eq!(started.lines().last(), Some("1"), "{started}");
 
-    tokio::time::timeout(std::time::Duration::from_secs(2), control.cancel()).await?;
-    let missing = tools
+    control.cancel_turn().await;
+    let missing_cell = tools
         .wait_for_code(r#"{"cell_id":"1"}"#, test_context(&history))
         .await;
+    assert!(!missing_cell.success);
+    assert!(
+        execution_output(&missing_cell).contains("exec cell 1 not found"),
+        "{}",
+        execution_output(&missing_cell)
+    );
+
+    let resumed = tools
+        .execute_tool(
+            "write_stdin",
+            ToolInput::Function(serde_json::value::to_raw_value(&serde_json::json!({
+                "session_id": 1,
+                "chars": "\n",
+                "yield_time_ms": 250
+            }))?),
+            test_context(&history),
+        )
+        .await;
+    assert!(resumed.success);
+    let ToolOutputBody::Text(resumed) = resumed.output else {
+        return Err(eyre!("write_stdin returned non-text output"));
+    };
+    assert!(
+        resumed.contains("Process running with session ID 1"),
+        "{resumed}"
+    );
+
+    control.cancel().await;
+    let missing = tools
+        .execute_tool(
+            "write_stdin",
+            ToolInput::Function(serde_json::value::to_raw_value(&serde_json::json!({
+                "session_id": 1,
+                "chars": ""
+            }))?),
+            test_context(&history),
+        )
+        .await;
     assert!(!missing.success);
-    assert!(execution_output(&missing).contains("exec cell 1 not found"));
+    let ToolOutputBody::Text(missing) = missing.output else {
+        return Err(eyre!("missing-session failure returned non-text output"));
+    };
+    assert!(missing.contains("Unknown process id 1"), "{missing}");
 
     std::fs::remove_dir_all(workspace)?;
     Ok(())
@@ -1327,73 +1384,227 @@ await new Promise(() => {});
 
 #[cfg(unix)]
 #[tokio::test]
-async fn cancelling_a_turn_preserves_prior_turn_shell_sessions() -> Result<()> {
-    let workspace = temporary_workspace("turn-scoped-shell-cancellation")?;
-    let tools = test_tools(&workspace);
+async fn cancelling_during_initial_shell_observation_preserves_the_registered_session() -> Result<()>
+{
+    let workspace = temporary_workspace("cancelled-initial-shell-observation")?;
+    let source = r#"
+const command = await tools.exec_command({
+  cmd: "sleep 30",
+  login: false,
+  tty: true,
+  yield_time_ms: 30000,
+});
+text(command.session_id);
+"#;
+    let tools = Arc::new(test_tools(&workspace));
     let control = tools.control();
-    let history = Vec::new();
 
     control.begin_turn();
-    let prior = tools
-        .execute_code(
-            r#"
-const command = await tools.exec_command({
-  cmd: "sleep 30",
-  login: false,
-  yield_time_ms: 250,
-});
-text(command.session_id);
-"#,
-            test_context(&history),
-        )
-        .await;
-    assert!(prior.success, "{}", execution_output(&prior));
-    assert_eq!(emitted_text(&prior)?, "1");
+    let execution = {
+        let tools = Arc::clone(&tools);
+        tokio::spawn(async move {
+            let history = Vec::new();
+            tools.execute_code(source, test_context(&history)).await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !tools.has_shell_session(1).await {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
 
-    control.begin_turn();
-    let current = tools
-        .execute_code(
-            r#"
-const command = await tools.exec_command({
-  cmd: "sleep 30",
-  login: false,
-  yield_time_ms: 250,
-});
-text(command.session_id);
-"#,
-            test_context(&history),
-        )
-        .await;
-    assert!(current.success, "{}", execution_output(&current));
-    assert_eq!(emitted_text(&current)?, "2");
-
-    control.cancel_turn().await;
-    let result = tools
-        .execute_code(
-            r#"
-const prior = await tools.write_stdin({
-  session_id: 1,
-  chars: "\u0003",
-  yield_time_ms: 1000,
-});
-let currentMissing = false;
-try {
-  await tools.write_stdin({ session_id: 2, chars: "" });
-} catch (error) {
-  currentMissing = String(error) === "write_stdin failed: Unknown process id 2";
-}
-text({ prior_exit_code: prior.exit_code, current_missing: currentMissing });
-"#,
-            test_context(&history),
-        )
-        .await;
-
-    assert!(result.success, "{}", execution_output(&result));
-    assert_eq!(
-        serde_json::from_str::<Value>(emitted_text(&result)?)?,
-        serde_json::json!({ "prior_exit_code": 130, "current_missing": true })
+    tokio::time::timeout(Duration::from_secs(2), control.cancel_turn()).await?;
+    let cancelled = tokio::time::timeout(Duration::from_secs(2), execution).await??;
+    assert!(cancelled.success, "{}", execution_output(&cancelled));
+    assert!(
+        execution_output(&cancelled).contains("Script terminated"),
+        "{}",
+        execution_output(&cancelled)
     );
+
+    let history = Vec::new();
+    let resumed = tools
+        .execute_tool(
+            "write_stdin",
+            ToolInput::Function(serde_json::value::to_raw_value(&serde_json::json!({
+                "session_id": 1,
+                "chars": "\n",
+                "yield_time_ms": 250
+            }))?),
+            test_context(&history),
+        )
+        .await;
+    assert!(resumed.success);
+    let ToolOutputBody::Text(resumed) = resumed.output else {
+        return Err(eyre!("write_stdin returned non-text output"));
+    };
+    assert!(
+        resumed.contains("Process running with session ID 1"),
+        "{resumed}"
+    );
+
     control.cancel().await;
+    std::fs::remove_dir_all(workspace)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn full_shutdown_quiesces_a_shell_producing_cell_before_draining_sessions() -> Result<()> {
+    let workspace = temporary_workspace("shutdown-shell-producing-cell")?;
+    let tools = Arc::new(test_tools(&workspace));
+    let control = tools.control();
+    let source = r#"
+const command = await tools.exec_command({
+  cmd: "sleep 30",
+  login: false,
+  tty: true,
+  yield_time_ms: 30000,
+});
+text(command.session_id);
+"#;
+
+    control.begin_turn();
+    let execution = {
+        let tools = Arc::clone(&tools);
+        tokio::spawn(async move {
+            let history = Vec::new();
+            tools.execute_code(source, test_context(&history)).await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(2), async {
+        while !tools.has_shell_session(1).await {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await?;
+
+    tokio::time::timeout(Duration::from_secs(2), control.cancel()).await?;
+    let terminated = tokio::time::timeout(Duration::from_secs(2), execution).await??;
+    assert!(terminated.success, "{}", execution_output(&terminated));
+    assert!(
+        execution_output(&terminated).contains("Script terminated"),
+        "{}",
+        execution_output(&terminated)
+    );
+
+    let history = Vec::new();
+    let missing = tools
+        .execute_tool(
+            "write_stdin",
+            ToolInput::Function(serde_json::value::to_raw_value(&serde_json::json!({
+                "session_id": 1,
+                "chars": ""
+            }))?),
+            test_context(&history),
+        )
+        .await;
+    assert!(!missing.success);
+    let ToolOutputBody::Text(missing) = missing.output else {
+        return Err(eyre!("missing-session failure returned non-text output"));
+    };
+    assert!(missing.contains("Unknown process id 1"), "{missing}");
+
+    std::fs::remove_dir_all(workspace)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn full_shutdown_invalidates_code_cells_already_waiting_for_admission() -> Result<()> {
+    let workspace = temporary_workspace("shutdown-pending-code-admission")?;
+    let tools = Arc::new(test_tools(&workspace));
+    let control = tools.control();
+    let admission = tools.hold_code_mode_admission().await;
+
+    let cancellation = {
+        let control = control.clone();
+        tokio::spawn(async move { control.cancel().await })
+    };
+    tools.wait_for_code_mode_admission_attempt().await;
+
+    let execution = {
+        let tools = Arc::clone(&tools);
+        tokio::spawn(async move {
+            let history = Vec::new();
+            tools
+                .execute_code(
+                    r#"
+const command = await tools.exec_command({
+  cmd: "sleep 30",
+  login: false,
+  tty: true,
+  yield_time_ms: 250,
+});
+text(command.session_id);
+"#,
+                    test_context(&history),
+                )
+                .await
+        })
+    };
+    tools.wait_for_code_mode_admission_attempt().await;
+    drop(admission);
+
+    tokio::time::timeout(Duration::from_secs(2), cancellation).await??;
+    let rejected = tokio::time::timeout(Duration::from_secs(2), execution).await??;
+    let leaked = tools.has_shell_session(1).await;
+    control.cancel().await;
+
+    assert!(rejected.success, "{}", execution_output(&rejected));
+    assert!(
+        execution_output(&rejected).contains("Script terminated"),
+        "{}",
+        execution_output(&rejected)
+    );
+    assert!(
+        !leaked,
+        "a pre-cancellation Code Mode admission escaped shutdown"
+    );
+
+    std::fs::remove_dir_all(workspace)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn turn_cancellation_invalidates_code_cells_already_waiting_for_admission() -> Result<()> {
+    let workspace = temporary_workspace("turn-cancel-pending-code-admission")?;
+    let tools = Arc::new(test_tools(&workspace));
+    let control = tools.control();
+    control.begin_turn();
+    let admission = tools.hold_code_mode_admission().await;
+
+    let cancellation = {
+        let control = control.clone();
+        tokio::spawn(async move { control.cancel_turn().await })
+    };
+    tools.wait_for_code_mode_admission_attempt().await;
+
+    let execution = {
+        let tools = Arc::clone(&tools);
+        tokio::spawn(async move {
+            let history = Vec::new();
+            tools
+                .execute_code(r#"text("escaped");"#, test_context(&history))
+                .await
+        })
+    };
+    tools.wait_for_code_mode_admission_attempt().await;
+    drop(admission);
+
+    tokio::time::timeout(Duration::from_secs(2), cancellation).await??;
+    let rejected = tokio::time::timeout(Duration::from_secs(2), execution).await??;
+    control.cancel().await;
+
+    assert!(rejected.success, "{}", execution_output(&rejected));
+    assert!(
+        execution_output(&rejected).contains("Script terminated"),
+        "{}",
+        execution_output(&rejected)
+    );
+    assert!(!execution_output(&rejected).contains("escaped"));
+
     std::fs::remove_dir_all(workspace)?;
     Ok(())
 }
