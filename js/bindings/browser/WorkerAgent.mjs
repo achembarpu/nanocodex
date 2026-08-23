@@ -14,6 +14,9 @@ const DEFAULT_MAX_PENDING_RPCS = 1_024;
 const MAX_RETAINED_RESULTS = 1_024;
 export const WORKER_EVENT_BATCH_MAX_EVENTS = 256;
 export const WORKER_EVENT_BATCH_MAX_BYTES = 256 * 1024;
+export const WORKER_HEARTBEAT_INTERVAL_MS = 10_000;
+export const WORKER_HEARTBEAT_TIMEOUT_MS = 30_000;
+const WORKER_HEARTBEAT_MISSES = 2;
 const PREWARM_TIMEOUT_MS = 15_000;
 const PREWARM_RETENTION_MS = 30_000;
 const PROTOCOL = "nanocodex.worker-agent.v1";
@@ -428,6 +431,12 @@ export function installWorkerAgentRuntime(scope = globalThis, options = {}) {
     }
     if (message.channel !== channel || !bootPromise) return;
     const currentGeneration = generation;
+    if (message.type === "liveness.ping") {
+      if (Number.isSafeInteger(message.sequence) && message.sequence > 0) {
+        post({ type: "liveness.pong", sequence: message.sequence }, currentGeneration);
+      }
+      return;
+    }
     void bootPromise.then(() => handle(message, currentGeneration)).catch((error) => {
       post({ type: "reject", id: message.id, error: encodeError(error) }, currentGeneration);
     });
@@ -559,12 +568,17 @@ function describeAgent(agentId, agent) {
 class WorkerConnection {
   constructor(worker, options) {
     this.worker = worker;
+    if (options.onFailure !== undefined && typeof options.onFailure !== "function") {
+      throw new TypeError("onFailure must be a function");
+    }
+    this.onFailure = options.onFailure;
     this.channel = randomId();
     this.maxPending = options.maxPendingRpcs === undefined
       ? DEFAULT_MAX_PENDING_RPCS
       : positiveInteger(options.maxPendingRpcs, "maxPendingRpcs");
     this.nextRpc = 1;
     this.nextTurn = 1;
+    this.nextHeartbeat = 1;
     this.pending = new Map();
     this.listeners = new Set();
     this.chunkedEvent = undefined;
@@ -572,10 +586,14 @@ class WorkerConnection {
     this.turns = 0;
     this.results = 0;
     this.operations = 0;
+    this.heartbeatMisses = 0;
+    this.heartbeatSequence = undefined;
+    this.heartbeatTimer = undefined;
     this.closed = false;
     worker.onmessage = ({ data }) => this.receive(data);
     worker.onerror = (event) => this.fail(new Error(event?.message || "Nanocodex Agent Worker failed"));
     worker.onmessageerror = () => this.fail(new Error("Nanocodex Agent Worker returned an unreadable message"));
+    this.scheduleHeartbeat();
   }
 
   boot(config) {
@@ -756,6 +774,10 @@ class WorkerConnection {
 
   receive(message) {
     if (this.closed || message?.protocol !== PROTOCOL || message.channel !== this.channel) return;
+    if (message.type === "liveness.pong") {
+      this.receiveHeartbeat(message.sequence);
+      return;
+    }
     if (message.type === "event.batch") {
       if (!Array.isArray(message.events)
         || message.events.length > WORKER_EVENT_BATCH_MAX_EVENTS
@@ -806,6 +828,52 @@ class WorkerConnection {
     if (!pending) return;
     this.pending.delete(id);
     pending.reject(error);
+  }
+
+  scheduleHeartbeat() {
+    if (this.closed) return;
+    clearTimeout(this.heartbeatTimer);
+    this.heartbeatTimer = setTimeout(
+      () => this.sendHeartbeat(),
+      WORKER_HEARTBEAT_INTERVAL_MS,
+    );
+  }
+
+  sendHeartbeat() {
+    if (this.closed) return;
+    const sequence = this.nextHeartbeat++;
+    this.heartbeatSequence = sequence;
+    this.heartbeatTimer = setTimeout(
+      () => this.missHeartbeat(sequence),
+      WORKER_HEARTBEAT_TIMEOUT_MS,
+    );
+    try {
+      this.send({ type: "liveness.ping", sequence });
+    } catch (error) {
+      this.fail(error);
+    }
+  }
+
+  receiveHeartbeat(sequence) {
+    if (sequence !== this.heartbeatSequence) return;
+    clearTimeout(this.heartbeatTimer);
+    this.heartbeatSequence = undefined;
+    this.heartbeatMisses = 0;
+    this.scheduleHeartbeat();
+  }
+
+  missHeartbeat(sequence) {
+    if (this.closed || sequence !== this.heartbeatSequence) return;
+    this.heartbeatMisses += 1;
+    if (this.heartbeatMisses < WORKER_HEARTBEAT_MISSES) {
+      this.sendHeartbeat();
+      return;
+    }
+    const error = new Error(
+      "Nanocodex Agent Worker stopped responding; retry to start a fresh Worker",
+    );
+    error.code = "worker_unresponsive";
+    this.fail(error);
   }
 
   emitEvent(event, encodedBytes) {
@@ -874,20 +942,35 @@ class WorkerConnection {
     if (this.closed) throw new Error("the Nanocodex Agent Worker has been disposed");
   }
 
-  fail(error) { this.close(error); }
+  fail(error) {
+    if (this.closed) return;
+    const onFailure = this.onFailure;
+    this.onFailure = undefined;
+    try { this.close(error); } catch (failure) { reportError(failure); }
+    if (onFailure !== undefined) {
+      try { onFailure(error); } catch (failure) { reportError(failure); }
+    }
+  }
 
   close(error) {
     if (this.closed) return;
     this.closed = true;
+    clearTimeout(this.heartbeatTimer);
+    this.heartbeatTimer = undefined;
+    this.heartbeatSequence = undefined;
     const worker = this.worker;
-    worker.onmessage = null;
-    worker.onerror = null;
-    worker.onmessageerror = null;
-    worker.terminate?.();
-    for (const pending of this.pending.values()) pending.reject(error);
-    this.pending.clear();
-    this.listeners.clear();
-    this.chunkedEvent = undefined;
+    try {
+      worker.onmessage = null;
+      worker.onerror = null;
+      worker.onmessageerror = null;
+      worker.terminate?.();
+    } finally {
+      for (const pending of this.pending.values()) pending.reject(error);
+      this.pending.clear();
+      this.listeners.clear();
+      this.chunkedEvent = undefined;
+      this.onFailure = undefined;
+    }
   }
 }
 

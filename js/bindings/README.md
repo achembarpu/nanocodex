@@ -70,6 +70,104 @@ Worker, Durable Object, or application proxy that owns rotating credentials.
 Authentication modes are constructors rather than a union of mutually
 exclusive fields on `Agent.create`.
 
+### Durable Cloudflare Agent
+
+`nanocodex/cloudflare` is the standard Durable Object consumer. It keeps the
+host transport, SQLite journal, private runtime identity, event persistence,
+hibernatable socket fan-out, and cursor replay inside the adapter:
+
+```js
+import { DurableObject } from "cloudflare:workers";
+import { Agent } from "nanocodex/cloudflare";
+import nanocodexWasm from "./nanocodex.wasm";
+
+export class CodingAgent extends DurableObject {
+  #ready;
+
+  constructor(context, env) {
+    super(context, env);
+    this.#ready = Agent.create({
+      context,
+      egress: env.EGRESS,
+      authMode: env.NANOCODEX_AUTH_MODE,
+      module: nanocodexWasm,
+      instructions: "You are a focused coding agent.",
+    });
+  }
+
+  async prompt(input) {
+    const agent = await this.#ready;
+    const turn = agent.turn.prompt({ input });
+    let result;
+    try {
+      result = await turn.result();
+      return result.finalMessage;
+    } finally {
+      try {
+        result?.dispose();
+      } finally {
+        turn.dispose();
+      }
+    }
+  }
+
+  async fetch(request) {
+    return (await this.#ready).events.connect(request);
+  }
+}
+```
+
+The returned value is the normal typed Agent: follow-on prompts reuse its owned
+history, and results remain independently awaitable. `events.connect(request)`
+is only a read-only AgentEvent WebSocket surface; it does not define prompt,
+membership, room, quota, or application routing policy. Event frames are
+`{ cursor, event }`. Replay is bounded; a far-behind client can receive
+`{ type: "replay_paused", cursor, latest_cursor }` followed by close code
+`1013`, then continues by reconnecting with that pause cursor as
+`?cursor=<decimal>`.
+
+Cloudflare Agents default to direct tool mode because Workers prohibit dynamic
+`eval`/`new Function`. Caller-defined tools therefore work without a code
+evaluator. Select `toolMode: "code"` only when also supplying an evaluator that
+is explicitly compatible with the deployed Worker runtime. Runtime-owned
+`Subagents.create()` tools are rejected for durable Agents; child lifecycles
+cannot be reconstructed from the durable journal.
+
+Each Durable Object persists a private runtime identity in its own SQLite
+storage and derives its journal identity from it, so multiple objects in one
+isolate remain independent and eviction reuses the same identity. Before
+replacing an Agent inside a still-live object, await `agent.session.shutdown()`;
+deleting the Durable Object and its retained event/journal rows remains an
+application-owned lifecycle operation.
+
+Internally this constructor uses `Transport.hostManaged` and an exact brokered
+Responses WebSocket. `authMode` is required and accepts only `"api_key"` or
+`"chatgpt"`; URLs and non-secret placeholders are fixed. `Agent.create` awaits
+the private binding's WebSocket upgrade, so a missing binding or a broker whose
+single policy does not match the selected mode rejects startup. The managed
+Worker API deliberately has no provider-key, token, transport, or durability
+option.
+
+The managed Worker needs only the Durable Object and private broker bindings;
+the broker's separate Wrangler configuration owns the real provider secret:
+
+```jsonc
+{
+  "services": [{ "binding": "EGRESS", "service": "my-private-egress-broker" }],
+  "durable_objects": {
+    "bindings": [{ "name": "AGENTS", "class_name": "CodingAgent" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["CodingAgent"] }],
+  "vars": { "NANOCODEX_AUTH_MODE": "chatgpt" }
+}
+```
+
+Do not put `OPENAI_API_KEY`, OAuth material, account IDs, or relay capabilities
+in this managed Worker configuration. A private Service Binding is a
+controlled-code boundary, so the separately deployed broker must still enforce
+one exact destination, one matching credential policy, placeholder replacement,
+header allowlisting, and no public route.
+
 Task-tree orchestration is an optional extension over the core agent. Both
 native and WASM consumers run the same Rust implementation and receive the
 same seven tools: `spawn_agent`, `submit_result`, `send_agent_message`,

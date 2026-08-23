@@ -4,7 +4,7 @@ import type {
   DurabilityStore,
 } from "../types.mjs";
 
-type CloudflareDurableObjectStorage = Readonly<{
+export type CloudflareDurableObjectStorage = Readonly<{
   sql: Readonly<{
     exec<Row extends DurabilitySqliteRow>(
       sql: string,

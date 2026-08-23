@@ -8,7 +8,10 @@ import {
   prewarmWorkerRuntime,
   WORKER_EVENT_BATCH_MAX_BYTES,
   WORKER_EVENT_BATCH_MAX_EVENTS,
+  WORKER_HEARTBEAT_INTERVAL_MS,
+  WORKER_HEARTBEAT_TIMEOUT_MS,
 } from "../browser/WorkerAgent.mjs";
+import { createAgentConfig } from "../browser/config.mjs";
 import { agentActions } from "../actions/index.mjs";
 import { createAgentClient, defineRuntime } from "../internal.mjs";
 import * as Transport from "../browser/Transport.mjs";
@@ -462,7 +465,11 @@ test("session, branching, realtime, and graceful lifecycle remain DefaultAgent-s
 test("Worker failures reject every pending operation and stale messages stay isolated", async () => {
   const fixture = createFixture();
   const worker = new LoopbackWorker(fixture.createAgent);
-  const agent = await createWorkerAgent({ sessionId: "root", harness: false }, { worker });
+  const failures = [];
+  const agent = await createWorkerAgent(
+    { sessionId: "root", harness: false },
+    { worker, onFailure: (error) => failures.push(error) },
+  );
   const turn = agent.turn.prompt({ input: "never completes" });
   const pending = turn.result();
   const staleHandler = worker.onmessage;
@@ -470,10 +477,201 @@ test("Worker failures reject every pending operation and stale messages stay iso
 
   worker.crash("worker exploded");
   await assert.rejects(pending, /worker exploded/);
+  assert.equal(failures.length, 1);
+  assert.match(failures[0].message, /worker exploded/);
   assert.throws(() => agent.session.compact(), /disposed/);
   staleHandler({ data: { protocol: "nanocodex.worker-agent.v1", channel: "stale", type: "resolve", id: "rpc-1" } });
   assert.equal(worker.terminated, 1);
   agent.dispose();
+});
+
+test("Worker failure cleanup survives a throwing terminator", async (t) => {
+  const reported = [];
+  t.mock.method(globalThis.console, "error", (error) => reported.push(error));
+  const fixture = createFixture({ holdCompaction: true });
+  const worker = new LoopbackWorker(fixture.createAgent);
+  const terminate = worker.terminate.bind(worker);
+  const terminationFailure = new Error("terminate failed");
+  worker.terminate = () => {
+    terminate();
+    throw terminationFailure;
+  };
+  const failures = [];
+  const agent = await createWorkerAgent(
+    { sessionId: "root", harness: false },
+    { worker, onFailure: (error) => failures.push(error) },
+  );
+  const pending = [agent.session.compact(), agent.session.compact()];
+  for (const operation of pending) void operation.catch(() => {});
+  await tick();
+
+  worker.crash("worker exploded");
+  const settled = await Promise.allSettled(pending);
+
+  assert.equal(failures.length, 1);
+  assert.match(failures[0].message, /worker exploded/);
+  assert.equal(
+    settled.every(({ status, reason }) => status === "rejected" && reason === failures[0]),
+    true,
+  );
+  assert.deepEqual(reported, [terminationFailure]);
+  assert.equal(worker.terminated, 1);
+  assert.equal(worker.onmessage, null);
+  assert.equal(worker.onerror, null);
+  assert.equal(worker.onmessageerror, null);
+  assert.throws(() => agent.session.compact(), /disposed/);
+  agent.dispose();
+});
+
+test("normal Worker Agent disposal does not report a runtime failure", async () => {
+  const fixture = createFixture();
+  const worker = new LoopbackWorker(fixture.createAgent);
+  const failures = [];
+  const agent = await createWorkerAgent(
+    { sessionId: "root", harness: false },
+    { worker, onFailure: (error) => failures.push(error) },
+  );
+
+  await agent.session.shutdown();
+
+  assert.deepEqual(failures, []);
+  assert.equal(worker.terminated, 1);
+});
+
+test("a synchronous heartbeat pong leaves no timer behind after disposal", async (t) => {
+  let nextTimer = 1;
+  const timers = new Map();
+  t.mock.method(globalThis, "setTimeout", (callback, delay) => {
+    const handle = nextTimer;
+    nextTimer += 1;
+    timers.set(handle, { callback, delay });
+    return handle;
+  });
+  t.mock.method(globalThis, "clearTimeout", (handle) => timers.delete(handle));
+  const worker = new SynchronousHeartbeatWorker();
+  const agent = await createWorkerAgent(
+    { sessionId: "root", harness: false },
+    { worker },
+  );
+  const heartbeat = [...timers.entries()].find(([, timer]) => (
+    timer.delay === WORKER_HEARTBEAT_INTERVAL_MS
+  ));
+  assert.notEqual(heartbeat, undefined);
+
+  timers.delete(heartbeat[0]);
+  heartbeat[1].callback();
+
+  assert.deepEqual(
+    [...timers.values()].map(({ delay }) => delay),
+    [WORKER_HEARTBEAT_INTERVAL_MS],
+  );
+  agent.dispose();
+  assert.equal(timers.size, 0);
+  assert.equal(worker.terminated, 1);
+});
+
+test("a silent Worker hang rejects all pending work once and config retry uses a fresh generation", { timeout: 2_000 }, async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const fixtures = [];
+  const workers = [];
+  const config = createAgentConfig({
+    agent: { harness: false, sessionId: "root" },
+    retry: 0,
+  }, {
+    async create(options, workerOptions) {
+      const fixture = createFixture({ holdCompaction: true });
+      const worker = new LoopbackWorker(fixture.createAgent);
+      fixtures.push(fixture);
+      workers.push(worker);
+      return createWorkerAgent(options, { ...workerOptions, worker });
+    },
+    async prepare() {},
+  });
+  const statuses = [];
+  const unsubscribe = config.subscribeAgent({}, () => statuses.push(config.getAgent().status));
+  await waitFor(() => config.getAgent().status === "success");
+  const original = config.getAgent().data;
+  const turn = original.turn.prompt({ input: "remain pending" });
+  const pending = [turn.result(), original.session.compact(), original.session.compact()];
+  for (const operation of pending) void operation.catch(() => {});
+  await tick();
+
+  workers[0].silence();
+  t.mock.timers.tick(WORKER_HEARTBEAT_INTERVAL_MS);
+  t.mock.timers.tick(WORKER_HEARTBEAT_TIMEOUT_MS);
+  t.mock.timers.tick(WORKER_HEARTBEAT_TIMEOUT_MS);
+  const settled = await Promise.allSettled(pending);
+  await waitFor(() => config.getAgent().status === "error");
+
+  const failure = config.getAgent().error;
+  assert.equal(failure.code, "worker_unresponsive");
+  assert.match(failure.message, /stopped responding; retry to start a fresh Worker/);
+  assert.equal(settled.every(({ status, reason }) => status === "rejected" && reason === failure), true);
+  assert.equal(workers[0].terminated, 1);
+  assert.equal(
+    fixtures[0].log.filter(([kind]) => kind === "agent-dispose").length,
+    1,
+  );
+  assert.deepEqual(statuses, ["pending", "success", "error"]);
+
+  config.refetchAgent();
+  await waitFor(() => workers.length === 2 && config.getAgent().status === "success");
+  assert.notStrictEqual(config.getAgent().data, original);
+  assert.equal(workers[1].terminated, 0);
+  assert.equal(fixtures[0].disposedAgents.has("root"), true);
+  assert.deepEqual(statuses, ["pending", "success", "error", "pending", "success"]);
+
+  turn.dispose();
+  unsubscribe();
+  await waitFor(() => workers[1].terminated === 1);
+  await config.destroy();
+});
+
+test("a healthy Worker stays live throughout a long streamed turn", { timeout: 2_000 }, async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const fixture = createFixture();
+  const worker = new LoopbackWorker(fixture.createAgent);
+  const failures = [];
+  const agent = await createWorkerAgent(
+    { sessionId: "root", harness: false },
+    { worker, onFailure: (error) => failures.push(error) },
+  );
+  const events = [];
+  const watch = agent.events.watch();
+  watch.onEvent((event) => events.push(event.seq));
+  const turn = agent.turn.prompt({ input: "stream for a long time" });
+  const pending = turn.result();
+  await tick();
+
+  for (let minute = 1; minute <= 10; minute += 1) {
+    for (let heartbeat = 0; heartbeat < 6; heartbeat += 1) {
+      t.mock.timers.tick(WORKER_HEARTBEAT_INTERVAL_MS);
+      await tick();
+    }
+    fixture.emit("root", minute);
+    await tick();
+  }
+
+  assert.deepEqual(events, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]);
+  assert.equal(
+    worker.incoming.filter(({ type }) => type === "liveness.ping").length,
+    60,
+  );
+  assert.deepEqual(failures, []);
+  assert.equal(worker.terminated, 0);
+
+  fixture.complete("root", "healthy completion");
+  const result = await pending;
+  assert.equal(result.finalMessage, "healthy completion");
+  result.dispose();
+  turn.dispose();
+  watch.off();
+  agent.dispose();
+  t.mock.timers.tick(
+    WORKER_HEARTBEAT_INTERVAL_MS + (2 * WORKER_HEARTBEAT_TIMEOUT_MS),
+  );
+  assert.equal(worker.terminated, 1);
+  assert.deepEqual(failures, []);
 });
 
 test("aborting a boot that never resolves terminates its Worker and permits replacement", { timeout: 2_000 }, async () => {
@@ -952,11 +1150,45 @@ class HarnessWorker {
   terminate() { this.terminated += 1; }
 }
 
+class SynchronousHeartbeatWorker {
+  constructor() {
+    this.onmessage = null;
+    this.onerror = null;
+    this.onmessageerror = null;
+    this.terminated = 0;
+  }
+
+  postMessage(message) {
+    if (message.type === "boot") {
+      this.onmessage?.({
+        data: {
+          channel: message.channel,
+          protocol: message.protocol,
+          root: { agentId: "root", sessionId: message.config.sessionId },
+          type: "ready",
+        },
+      });
+    } else if (message.type === "liveness.ping") {
+      this.onmessage?.({
+        data: {
+          channel: message.channel,
+          protocol: message.protocol,
+          sequence: message.sequence,
+          type: "liveness.pong",
+        },
+      });
+    }
+  }
+
+  terminate() { this.terminated += 1; }
+}
+
 class LoopbackWorker {
   constructor(createAgent, runtimeOptions = {}) {
     this.onmessage = null;
     this.onerror = null;
     this.onmessageerror = null;
+    this.silent = false;
     this.terminated = 0;
     this.incoming = [];
     this.outgoing = [];
@@ -965,7 +1197,7 @@ class LoopbackWorker {
       postMessage: (data, transfer) => {
         const cloned = cloneMessage(data, transfer);
         this.outgoing.push(cloned);
-        queueMicrotask(() => this.onmessage?.({ data: cloned }));
+        if (!this.silent) queueMicrotask(() => this.onmessage?.({ data: cloned }));
       },
     };
     this.runtime = installWorkerAgentRuntime(this.scope, { createAgent, ...runtimeOptions });
@@ -974,7 +1206,7 @@ class LoopbackWorker {
   postMessage(data) {
     const cloned = cloneMessage(data);
     this.incoming.push(cloned);
-    queueMicrotask(() => this.scope.onmessage?.({ data: cloned }));
+    if (!this.silent) queueMicrotask(() => this.scope.onmessage?.({ data: cloned }));
   }
   terminate() {
     if (this.terminated) return;
@@ -982,6 +1214,7 @@ class LoopbackWorker {
     this.runtime.dispose();
   }
   crash(message) { this.onerror?.({ message }); }
+  silence() { this.silent = true; }
 }
 
 function createFixture(options = {}) {
@@ -1192,3 +1425,11 @@ function deferred() {
 }
 
 function tick() { return new Promise((resolve) => setImmediate(resolve)); }
+
+async function waitFor(predicate) {
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    if (predicate()) return;
+    await tick();
+  }
+  throw new Error("condition did not become true");
+}

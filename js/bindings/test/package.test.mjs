@@ -78,6 +78,7 @@ test("the packed package ships and resolves every public entry point", async () 
       import { createMemoryDurabilityStore, durabilityRevision } from "nanocodex/durability";
       import * as durabilityExports from "nanocodex/durability";
       import { createCloudflareDurabilityStore } from "nanocodex/durability/cloudflare";
+      import { Agent as CloudflareAgent, cloudflareEgress } from "nanocodex/cloudflare";
       import {
         createPostgresDurabilityStore,
         UnknownPostgresCommitOutcomeError,
@@ -129,6 +130,8 @@ test("the packed package ships and resolves every public entry point", async () 
       });
       assert.equal(Object.isFrozen(cloudflareStore), true);
       assert.equal(cloudflareSchemaStatements, 2);
+      assert.equal(typeof CloudflareAgent.create, "function");
+      assert.equal(typeof cloudflareEgress, "function");
       let postgresCalls = 0;
       const postgresStore = createPostgresDurabilityStore({
         connect() {

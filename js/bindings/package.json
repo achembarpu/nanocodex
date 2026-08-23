@@ -47,6 +47,10 @@
       "types": "./host/index.d.mts",
       "import": "./host/index.mjs"
     },
+    "./cloudflare": {
+      "types": "./cloudflare/index.d.mts",
+      "import": "./cloudflare/index.mjs"
+    },
     "./durability": {
       "types": "./runtime/durability-store.d.mts",
       "import": "./runtime/durability-store.mjs"
@@ -99,6 +103,7 @@
   "files": [
     "actions",
     "browser",
+    "cloudflare",
     "host",
     "node",
     "worker",

@@ -15,8 +15,6 @@ export type AgentParameters = Readonly<{
 }>;
 
 export type Config = Readonly<{
-  /** Prewarms the exact Worker, WASM module, and browser harness without creating an Agent. */
-  prepareAgent(parameters?: AgentParameters): Promise<void>;
   getAgent(parameters?: AgentParameters): AgentSnapshot;
   subscribeAgent(parameters: AgentParameters, listener: () => void): () => void;
   refetchAgent(parameters?: AgentParameters): void;

@@ -28,6 +28,8 @@ export type WorkerAgentOptions = Readonly<{
   worker?: WorkerLike | (() => WorkerLike) | undefined;
   workerFactory?: (() => WorkerLike) | undefined;
   maxPendingRpcs?: number | undefined;
+  /** Reports a ready Worker Agent becoming unusable. Called at most once per Worker connection. */
+  onFailure?: ((error: Error) => void) | undefined;
   /** Cancels private Worker preparation or boot; it does not govern a ready Agent. */
   signal?: AbortSignal | undefined;
 }>;

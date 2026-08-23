@@ -33,6 +33,13 @@ const requiredFiles = [
   "browser/agent.worker.mjs",
   "browser/workspace.mjs",
   "browser/workspace.d.mts",
+  "cloudflare/egress.mjs",
+  "cloudflare/egress.d.mts",
+  "cloudflare/event-socket.mjs",
+  "cloudflare/Agent.mjs",
+  "cloudflare/Agent.d.mts",
+  "cloudflare/index.mjs",
+  "cloudflare/index.d.mts",
   "host/Agent.mjs",
   "host/Agent.d.mts",
   "host/index.mjs",
@@ -89,6 +96,7 @@ export async function checkPackage(packageRoot = root) {
   assert.equal(packageJson.exports?.["./browser/client"], undefined);
   assert.equal(packageJson.exports?.["./browser/workspace"]?.import, "./browser/workspace.mjs");
   assert.equal(packageJson.exports?.["./host"]?.import, "./host/index.mjs");
+  assert.equal(packageJson.exports?.["./cloudflare"]?.import, "./cloudflare/index.mjs");
   assert.equal(packageJson.exports?.["./durability"]?.import, "./runtime/durability-store.mjs");
   assert.equal(
     packageJson.exports?.["./durability/cloudflare"]?.import,

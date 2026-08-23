@@ -36,6 +36,7 @@ import type { WorkspaceEntry as NodeWorkspaceEntry } from "../node/workspace.mjs
 import {
   createWorkerAgent,
   prepareWorkerAgent,
+  type WorkerAgentOptions,
 } from "../browser/WorkerAgent.mjs";
 import {
   dataset,
@@ -75,13 +76,20 @@ import {
 } from "../runtime/postgres-durability-store.mjs";
 import {
   createCloudflareDurabilityStore,
-} from "../runtime/cloudflare-durability-store.mjs";
+  type CloudflareDurableObjectStorage,
+} from "nanocodex/durability/cloudflare";
+import {
+  Agent as CloudflareAgent,
+  cloudflareEgress,
+} from "nanocodex/cloudflare";
 
 declare const apiKey: string;
 declare const accountsWallet: AccountsWallet;
 declare const browserModule: WebAssembly.Module;
 declare const postgresPool: PostgresDurabilityPool;
-declare const cloudflareStorage: Parameters<typeof createCloudflareDurabilityStore>[0];
+declare const cloudflareStorage: CloudflareDurableObjectStorage;
+declare const cloudflareBinding: Parameters<typeof CloudflareAgent.create>[0]["egress"];
+declare const cloudflareContext: CloudflareAgent.DurableObjectContext;
 
 // @ts-expect-error durability-only types are exported from nanocodex/durability.
 type RootDurabilityStore = RootPublicTypes.DurabilityStore;
@@ -100,7 +108,10 @@ async function check() {
     threadId: "thread-1",
   } as const;
   await prepareWorkerAgent(workerResource);
-  await createWorkerAgent(workerResource);
+  const workerOptions: WorkerAgentOptions = {
+    onFailure(error) { error.message; },
+  };
+  await createWorkerAgent(workerResource, workerOptions);
   // @ts-expect-error non-disabled preparation requires one stable harness identity.
   await prepareWorkerAgent({ origin: "https://example.com" });
   const parallelTool: Tool = {
@@ -142,6 +153,46 @@ async function check() {
   await durabilityStore.load("typed-leaf");
   const postgresStore: DurabilityStore = createPostgresDurabilityStore(postgresPool);
   const cloudflareStore: DurabilityStore = createCloudflareDurabilityStore(cloudflareStorage);
+  HostTransport.hostManaged(cloudflareEgress({
+    binding: cloudflareBinding,
+    authMode: "api_key",
+  }));
+  const cloudflareAgent: CloudflareAgent.Agent = await CloudflareAgent.create({
+    context: cloudflareContext,
+    egress: cloudflareBinding,
+    authMode: "chatgpt",
+  });
+  cloudflareAgent.turn.prompt({ input: "hello" });
+  cloudflareAgent.events.connect(new Request("https://agent.internal/events"));
+  const extendedCloudflareAgent = cloudflareAgent.extend(() => ({ application: true as const }));
+  extendedCloudflareAgent.events.connect(new Request("https://agent.internal/events"));
+  const cloudflareApplication: true = extendedCloudflareAgent.application;
+  void cloudflareApplication;
+  // @ts-expect-error managed Cloudflare agents require an explicit auth mode.
+  await CloudflareAgent.create({ context: cloudflareContext, egress: cloudflareBinding });
+  // @ts-expect-error managed Cloudflare agents accept only the two broker policies.
+  await CloudflareAgent.create({ context: cloudflareContext, egress: cloudflareBinding, authMode: "direct" });
+  await CloudflareAgent.create({
+    context: cloudflareContext,
+    egress: cloudflareBinding,
+    authMode: "api_key",
+    // @ts-expect-error provider credentials belong to the private EGRESS broker.
+    apiKey,
+  });
+  await CloudflareAgent.create({
+    context: cloudflareContext,
+    egress: cloudflareBinding,
+    authMode: "api_key",
+    // @ts-expect-error transport and durability are owned by the Cloudflare adapter.
+    transport: HostTransport.hostManaged(),
+  });
+  await CloudflareAgent.create({
+    context: cloudflareContext,
+    egress: cloudflareBinding,
+    authMode: "api_key",
+    // @ts-expect-error durable Cloudflare agents cannot reconstruct runtime-owned subagents.
+    tools: [...BrowserSubagents.create()],
+  });
   const postgresClient: PostgresDurabilityClient = await postgresPool.connect();
   const postgresResult: PostgresDurabilityQueryResult<{ revision: string }> =
     await postgresClient.query<{ revision: string }>(

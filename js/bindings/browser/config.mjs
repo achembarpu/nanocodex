@@ -24,7 +24,7 @@ export function createAgentConfig(options = {}, runtime) {
   const retry = nonNegativeInteger(options.retry ?? 2, "retry");
   const retryDelay = options.retryDelay ?? ((attempt) => 400 * attempt);
   if (typeof retryDelay !== "function") throw new TypeError("retryDelay must be a function");
-  const preparationController = new AbortController();
+  const failedAgents = new WeakSet();
   let destroyed = false;
   let destruction;
 
@@ -72,7 +72,34 @@ export function createAgentConfig(options = {}, runtime) {
   }
 
   async function close(agent) {
-    if (agent !== undefined) await agent.session.shutdown();
+    if (agent === undefined) return;
+    if (failedAgents.has(agent)) {
+      disposeFailedAgent(agent);
+      return;
+    }
+    try {
+      await agent.session.shutdown();
+    } catch (error) {
+      if (!failedAgents.has(agent)) throw error;
+    }
+  }
+
+  function disposeFailedAgent(agent) {
+    failedAgents.add(agent);
+    try { agent.dispose(); } catch (error) { reportError(error); }
+  }
+
+  function failAgent(entry, operation, agent, error) {
+    disposeFailedAgent(agent);
+    if (
+      destroyed
+      || entry.operation !== operation
+      || entry.generation !== operation.generation
+      || entry.agent !== agent
+    ) return;
+    entry.agent = undefined;
+    finishGeneration(entry, operation);
+    if (entry.activeSubscribers > 0) publish(entry, "error", undefined, error);
   }
 
   function retireAgent(entry) {
@@ -140,12 +167,24 @@ export function createAgentConfig(options = {}, runtime) {
       if (!isCurrent(entry, operation)) return;
 
       let candidate;
+      let creationFailure;
       for (let attempt = 0; attempt <= retry; attempt += 1) {
         if (!isCurrent(entry, operation)) return;
+        let attemptCandidate;
+        let attemptFailure;
         try {
-          candidate = await runtime.create(entry.createOptions, {
+          attemptCandidate = await runtime.create(entry.createOptions, {
             signal: operation.controller.signal,
+            onFailure(error) {
+              if (attemptCandidate === undefined) {
+                attemptFailure ??= error;
+                return;
+              }
+              failAgent(entry, operation, attemptCandidate, error);
+            },
           });
+          candidate = attemptCandidate;
+          creationFailure = attemptFailure;
           break;
         } catch (error) {
           if (!isCurrent(entry, operation)) return;
@@ -172,6 +211,15 @@ export function createAgentConfig(options = {}, runtime) {
         }
       }
       if (candidate === undefined) return;
+      if (creationFailure !== undefined) {
+        if (!isCurrent(entry, operation)) {
+          disposeFailedAgent(candidate);
+          return;
+        }
+        entry.agent = candidate;
+        failAgent(entry, operation, candidate, creationFailure);
+        return;
+      }
       if (!isCurrent(entry, operation)) {
         await close(candidate).catch(reportError);
         return;
@@ -202,14 +250,6 @@ export function createAgentConfig(options = {}, runtime) {
   }
 
   const config = {
-    async prepareAgent(parameters = {}) {
-      if (parameters.enabled === false || destroyed) return;
-      const threadId = resolveThreadId(parameters);
-      const entry = entries.get(threadId) ?? createEntry(threadId);
-      await runtime.prepare(entry.createOptions, {
-        signal: preparationController.signal,
-      });
-    },
     getAgent(parameters = {}) {
       if (parameters.enabled === false || destroyed) return IDLE_SNAPSHOT;
       return entries.get(resolveThreadId(parameters))?.snapshot ?? IDLE_SNAPSHOT;
@@ -256,7 +296,6 @@ export function createAgentConfig(options = {}, runtime) {
         resolveDestruction = resolve;
       });
       destroyed = true;
-      preparationController.abort();
       const closures = [];
       const notifications = [];
       try {

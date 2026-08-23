@@ -32,32 +32,6 @@ test("snapshot reads and refetch stay pure until a subscriber creates the entry"
   await config.destroy();
 });
 
-test("explicit preparation warms the stable resource without creating an Agent", async () => {
-  const prepared = [];
-  let creates = 0;
-  const config = createAgentConfig({
-    agent: { thinking: "high" },
-    origin: "https://example.test",
-  }, {
-    async create() { creates += 1; },
-    async prepare(options, { signal }) { prepared.push({ options, signal }); },
-  });
-
-  await config.prepareAgent({ threadId: "warm-thread" });
-
-  assert.equal(creates, 0);
-  assert.equal(config.getAgent({ threadId: "warm-thread" }).status, "idle");
-  assert.deepEqual(prepared[0].options, {
-    origin: "https://example.test",
-    thinking: "high",
-    threadId: "warm-thread",
-  });
-  assert.equal(prepared[0].signal.aborted, false);
-
-  await config.destroy();
-  assert.equal(prepared[0].signal.aborted, true);
-});
-
 test("the resolved default identity is canonical and stable across remounts", async () => {
   const createdThreadIds = [];
   const closed = [];
@@ -192,6 +166,148 @@ test("the config owns one Agent shared by every subscriber", async () => {
   await config.destroy();
 });
 
+test("a live Worker failure replaces stale success with the original actionable error", async () => {
+  const failures = [];
+  const disposals = [];
+  const shutdowns = [];
+  const statuses = [];
+  const config = createAgentConfig({}, {
+    async create(_options, { onFailure }) {
+      failures.push(onFailure);
+      const id = failures.length - 1;
+      return {
+        dispose() { disposals.push(id); },
+        session: {
+          async shutdown() { shutdowns.push(id); },
+        },
+      };
+    },
+    async prepare() {},
+  });
+  const unsubscribe = config.subscribeAgent({}, () => statuses.push(config.getAgent().status));
+  await waitFor(() => config.getAgent().status === "success");
+  const original = new Error("provider websocket rejected the credential");
+
+  failures[0](original);
+  await waitFor(() => config.getAgent().status === "error");
+
+  assert.equal(config.getAgent().data, undefined);
+  assert.equal(config.getAgent().error, original);
+  assert.deepEqual(statuses, ["pending", "success", "error"]);
+  assert.deepEqual(disposals, [0]);
+  assert.deepEqual(shutdowns, []);
+
+  config.refetchAgent();
+  await waitFor(() => failures.length === 2 && config.getAgent().status === "success");
+  assert.deepEqual(disposals, [0]);
+  assert.deepEqual(shutdowns, []);
+
+  unsubscribe();
+  await waitFor(() => shutdowns.length === 1);
+  assert.deepEqual(shutdowns, [1]);
+  await config.destroy();
+});
+
+test("a Worker failure before candidate publication becomes terminal", async () => {
+  const failure = new Error("Worker failed during boot");
+  const disposals = [];
+  const shutdowns = [];
+  const statuses = [];
+  const config = createAgentConfig({ retry: 0 }, {
+    async create(_options, { onFailure }) {
+      onFailure(failure);
+      return {
+        dispose() { disposals.push("candidate"); },
+        session: {
+          async shutdown() { shutdowns.push("candidate"); },
+        },
+      };
+    },
+    async prepare() {},
+  });
+  const unsubscribe = config.subscribeAgent({}, () => statuses.push(config.getAgent().status));
+  await waitFor(() => config.getAgent().status === "error");
+
+  assert.equal(config.getAgent().data, undefined);
+  assert.equal(config.getAgent().error, failure);
+  assert.deepEqual(statuses, ["pending", "error"]);
+  assert.deepEqual(disposals, ["candidate"]);
+  assert.deepEqual(shutdowns, []);
+
+  unsubscribe();
+  await config.destroy();
+});
+
+test("a stale failed startup attempt cannot poison its healthy retry", async () => {
+  const failures = [];
+  const disposals = [];
+  const shutdowns = [];
+  const statuses = [];
+  const replacement = {
+    dispose() { disposals.push("replacement"); },
+    session: {
+      async shutdown() { shutdowns.push("replacement"); },
+    },
+  };
+  let attempts = 0;
+  const config = createAgentConfig({ retry: 1, retryDelay: () => 0 }, {
+    async create(_options, { onFailure }) {
+      failures.push(onFailure);
+      attempts += 1;
+      if (attempts === 1) throw new Error("first attempt failed");
+      return replacement;
+    },
+    async prepare() {},
+  });
+  const unsubscribe = config.subscribeAgent({}, () => statuses.push(config.getAgent().status));
+  await waitFor(() => config.getAgent().status === "success");
+
+  failures[0](new Error("late first-attempt failure"));
+  await tick();
+
+  assert.equal(config.getAgent().status, "success");
+  assert.equal(config.getAgent().data, replacement);
+  assert.deepEqual(statuses, ["pending", "success"]);
+  assert.deepEqual(disposals, []);
+
+  unsubscribe();
+  await waitFor(() => shutdowns.length === 1);
+  assert.deepEqual(shutdowns, ["replacement"]);
+  await config.destroy();
+});
+
+test("a stale Worker failure cannot poison an explicit replacement", async () => {
+  const failures = [];
+  const closed = [];
+  const config = createAgentConfig({}, {
+    async create(_options, { onFailure }) {
+      const id = failures.length;
+      failures.push(onFailure);
+      return {
+        dispose() {},
+        session: {
+          async shutdown() { closed.push(id); },
+        },
+      };
+    },
+    async prepare() {},
+  });
+  const unsubscribe = config.subscribeAgent({}, () => {});
+  await waitFor(() => config.getAgent().status === "success");
+  config.refetchAgent();
+  await waitFor(() => failures.length === 2 && config.getAgent().status === "success");
+  const replacement = config.getAgent().data;
+
+  failures[0](new Error("late failure from retired Worker"));
+  await tick();
+
+  assert.equal(config.getAgent().status, "success");
+  assert.equal(config.getAgent().data, replacement);
+  unsubscribe();
+  await waitFor(() => closed.length === 2);
+  await config.destroy();
+});
+
 test("refetch serializes shutdown before replacement", async () => {
   const transitions = [];
   const config = createAgentConfig({}, {
@@ -311,9 +427,13 @@ test("an Agent that resolves after unsubscribe is immediately shut down", async 
 test("startup retries stay inside config and publish only the exhausted failure", async () => {
   let attempts = 0;
   const config = createAgentConfig({ retry: 2, retryDelay: () => 0 }, {
-    async create() {
+    async create(_options, { onFailure }) {
       attempts += 1;
-      if (attempts < 3) throw new Error(`transient ${attempts}`);
+      if (attempts < 3) {
+        const error = new Error(`transient ${attempts}`);
+        onFailure(error);
+        throw error;
+      }
       return fakeAgent("ready", []);
     },
     async prepare() {},
