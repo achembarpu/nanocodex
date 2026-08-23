@@ -3,8 +3,9 @@ use std::path::{Path, PathBuf};
 use clap::{Args, ValueEnum};
 use eyre::{Result, WrapErr, eyre};
 use nanocodex_browser::{
-    BraveSession, BraveSessionError, Browser, BrowserProfileKind, BrowserStorageState, BrowserTool,
-    FirefoxCookieSource, SafariCookieSource, VirtualAuthenticator,
+    BraveSession, BraveSessionError, Browser, BrowserCookieAuthorization, BrowserProfileKind,
+    BrowserStorageState, BrowserTool, FirefoxCookieSource, HostPasskeyAuthenticator,
+    SafariCookieSource, VirtualAuthenticator,
 };
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
@@ -30,6 +31,22 @@ enum CookieSourceKind {
     None,
 }
 
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+enum CookieAuthorizationKind {
+    #[default]
+    Background,
+    Interactive,
+}
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq, ValueEnum)]
+enum PasskeyKind {
+    #[default]
+    Virtual,
+    Host,
+    #[value(alias = "false", alias = "off")]
+    None,
+}
+
 enum CookieSource {
     Chromium(BraveSession),
     State(BrowserStorageState),
@@ -41,16 +58,17 @@ pub(crate) struct BrowserArgs {
     /// Select the private browser exposed to Code Mode as `tools.browser`.
     ///
     /// By default, Nanocodex uses a dedicated automation browser on macOS. On
-    /// other platforms it prefers Brave, falls back to another installed
-    /// Chromium-family browser, and disables browser tools when none is
-    /// available. Pass `brave` to require the standard Brave installation,
-    /// `chromium` to skip Brave, or `none` to disable browser tools.
+    /// other platforms it prefers Brave and falls back to another installed
+    /// Chromium-family browser. Pass `brave` to deliberately use the standard
+    /// Brave application with a private profile, `chromium` to use normal
+    /// private browser discovery, or `none` to disable browser tools. Bare
+    /// `--browser` selects private browser discovery.
     #[arg(
         long,
         env = "NANOCODEX_BROWSER",
         value_enum,
         num_args = 0..=1,
-        default_missing_value = "brave",
+        default_missing_value = "chromium",
         require_equals = true
     )]
     browser: Option<BrowserKind>,
@@ -72,6 +90,31 @@ pub(crate) struct BrowserArgs {
     #[cfg_attr(not(target_os = "macos"), arg(default_value = "all"))]
     cookies: Option<CookieSourceKind>,
 
+    /// Permit a visible temporary browser when macOS must authorize cookie decryption.
+    ///
+    /// `interactive` retries a failed background import with a copied temporary
+    /// profile. It never opens the ordinary source profile or its tabs.
+    #[arg(
+        long = "cookie-auth",
+        env = "NANOCODEX_BROWSER_COOKIE_AUTH",
+        value_enum,
+        default_value = "background"
+    )]
+    cookie_authorization: CookieAuthorizationKind,
+
+    /// Select passkeys owned by Nanocodex or interactively use the macOS host authenticator.
+    ///
+    /// `virtual` persists automation-only passkeys in the Nanocodex state
+    /// directory. `host` exposes explicit start/resume browser actions that use
+    /// a temporary visible desktop browser and the normal Touch ID/iPhone UI.
+    #[arg(
+        long,
+        env = "NANOCODEX_BROWSER_PASSKEYS",
+        value_enum,
+        default_value = "virtual"
+    )]
+    passkeys: PasskeyKind,
+
     /// Chrome or Chromium executable used by the browser tool.
     #[arg(long, env = "NANOCODEX_BROWSER_EXECUTABLE", value_name = "PATH")]
     browser_executable: Option<PathBuf>,
@@ -82,6 +125,8 @@ impl Default for BrowserArgs {
         Self {
             browser: None,
             cookies: Some(default_cookie_source()),
+            cookie_authorization: CookieAuthorizationKind::Background,
+            passkeys: PasskeyKind::Virtual,
             browser_executable: None,
         }
     }
@@ -95,6 +140,8 @@ impl BrowserArgs {
     pub(crate) fn disable(&mut self) {
         self.browser = Some(BrowserKind::None);
         self.cookies = Some(CookieSourceKind::None);
+        self.cookie_authorization = CookieAuthorizationKind::Background;
+        self.passkeys = PasskeyKind::None;
         self.browser_executable = None;
     }
 
@@ -113,6 +160,19 @@ impl BrowserArgs {
         matches!(self.browser, Some(BrowserKind::Brave))
     }
 
+    #[cfg(test)]
+    pub(crate) const fn uses_interactive_cookie_authorization(&self) -> bool {
+        matches!(
+            self.cookie_authorization,
+            CookieAuthorizationKind::Interactive
+        )
+    }
+
+    #[cfg(test)]
+    pub(crate) const fn uses_host_passkeys(&self) -> bool {
+        matches!(self.passkeys, PasskeyKind::Host)
+    }
+
     pub(crate) fn configure(&self, workspace: &Path) -> Result<Option<ConfiguredBrowser>> {
         if self.browser == Some(BrowserKind::None) {
             if self.cookies.is_some_and(|source| {
@@ -122,6 +182,14 @@ impl BrowserArgs {
             }
             if self.browser_executable.is_some() {
                 return Err(eyre!("--browser-executable requires an enabled browser"));
+            }
+            if self.cookie_authorization == CookieAuthorizationKind::Interactive {
+                return Err(eyre!(
+                    "--cookie-auth=interactive requires an enabled browser"
+                ));
+            }
+            if self.passkeys == PasskeyKind::Host {
+                return Err(eyre!("--passkeys=host requires an enabled browser"));
             }
             return Ok(None);
         }
@@ -133,11 +201,17 @@ impl BrowserArgs {
         else {
             return Ok(None);
         };
-        let virtual_authenticator = VirtualAuthenticator::platform_passkey()
-            .credential_store(default_virtual_credential_store()?);
-        let mut builder = Browser::builder()
-            .file_root(workspace)
-            .virtual_authenticator(virtual_authenticator);
+        let mut builder = Browser::builder().file_root(workspace);
+        builder = match self.passkeys {
+            PasskeyKind::Virtual => builder.virtual_authenticator(
+                VirtualAuthenticator::platform_passkey()
+                    .credential_store(default_virtual_credential_store()?),
+            ),
+            PasskeyKind::Host => {
+                builder.host_passkey_authenticator(standard_host_passkey_authenticator()?)
+            }
+            PasskeyKind::None => builder,
+        };
         if let Some(executable) = launch.executable {
             builder = builder.executable(executable);
         }
@@ -146,9 +220,29 @@ impl BrowserArgs {
             .filter(|source| *source != CookieSourceKind::None)
         {
             builder = match cookie_source(source, launch.kind)? {
-                CookieSource::Chromium(source) => builder.cookie_source(source.copy_all_cookies()),
-                CookieSource::State(state) => builder.storage_state(state),
+                CookieSource::Chromium(source) => {
+                    builder.cookie_source(source.copy_all_cookies().cookie_authorization(
+                        match self.cookie_authorization {
+                            CookieAuthorizationKind::Background => {
+                                BrowserCookieAuthorization::Background
+                            }
+                            CookieAuthorizationKind::Interactive => {
+                                BrowserCookieAuthorization::Interactive
+                            }
+                        },
+                    ))
+                }
+                CookieSource::State(state) => {
+                    if self.cookie_authorization == CookieAuthorizationKind::Interactive {
+                        return Err(eyre!(
+                            "--cookie-auth=interactive requires a Chromium-family cookie source"
+                        ));
+                    }
+                    builder.storage_state(state)
+                }
             };
+        } else if self.cookie_authorization == CookieAuthorizationKind::Interactive {
+            return Err(eyre!("--cookie-auth=interactive requires browser cookies"));
         }
         let browser = builder
             .build()
@@ -170,6 +264,32 @@ fn default_virtual_credential_store() -> Result<PathBuf> {
         return Err(eyre!("NANOCODEX_DIR cannot be empty"));
     }
     Ok(root.join("browser/passkeys.json"))
+}
+
+fn standard_host_passkey_authenticator() -> Result<HostPasskeyAuthenticator> {
+    #[cfg(not(target_os = "macos"))]
+    {
+        Err(eyre!(
+            "--passkeys=host is currently supported only on macOS"
+        ))
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        for kind in [
+            BrowserProfileKind::Brave,
+            BrowserProfileKind::Chrome,
+            BrowserProfileKind::Edge,
+            BrowserProfileKind::Chromium,
+        ] {
+            if let Ok(session) = BraveSession::standard_for(kind) {
+                return Ok(HostPasskeyAuthenticator::new(session.executable()));
+            }
+        }
+        Err(eyre!(
+            "--passkeys=host requires an installed Brave, Chrome, Edge, or Chromium application"
+        ))
+    }
 }
 
 struct BrowserLaunch {
@@ -432,6 +552,8 @@ mod tests {
         let browser = BrowserArgs {
             browser: Some(super::BrowserKind::Chromium),
             cookies: None,
+            cookie_authorization: super::CookieAuthorizationKind::Background,
+            passkeys: super::PasskeyKind::Virtual,
             browser_executable: None,
         }
         .configure(workspace.path())
@@ -459,6 +581,8 @@ mod tests {
         let disabled = BrowserArgs {
             browser: Some(super::BrowserKind::None),
             cookies: Some(super::CookieSourceKind::None),
+            cookie_authorization: super::CookieAuthorizationKind::Background,
+            passkeys: super::PasskeyKind::None,
             browser_executable: None,
         }
         .configure(workspace.path())
@@ -468,6 +592,8 @@ mod tests {
         let cookies = BrowserArgs {
             browser: Some(super::BrowserKind::None),
             cookies: Some(super::CookieSourceKind::Chrome),
+            cookie_authorization: super::CookieAuthorizationKind::Background,
+            passkeys: super::PasskeyKind::None,
             browser_executable: None,
         }
         .configure(workspace.path())
@@ -478,6 +604,8 @@ mod tests {
         let executable = BrowserArgs {
             browser: Some(super::BrowserKind::None),
             cookies: Some(super::CookieSourceKind::All),
+            cookie_authorization: super::CookieAuthorizationKind::Background,
+            passkeys: super::PasskeyKind::None,
             browser_executable: Some("/tmp/chromium".into()),
         }
         .configure(workspace.path())
