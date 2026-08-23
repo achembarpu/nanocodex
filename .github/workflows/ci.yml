@@ -152,6 +152,7 @@ jobs:
             js/react/package-lock.json
             examples/node/package-lock.json
             examples/rivet-actors/package-lock.json
+            examples/cloudflare-egress/package-lock.json
             examples/cloudflare-workers/package-lock.json
             examples/vercel-workflows/package-lock.json
             examples/react-vite/package-lock.json
@@ -174,6 +175,7 @@ jobs:
           ./scripts/build-js-package.sh
           npm ci --prefix examples/node
           npm ci --prefix examples/rivet-actors
+          npm ci --prefix examples/cloudflare-egress
           npm ci --prefix examples/cloudflare-workers
           npm ci --prefix examples/vercel-workflows
           npm ci --prefix examples/react-vite
@@ -191,6 +193,7 @@ jobs:
           node --test examples/browser-cdn/*.test.mjs
           npm test --prefix examples/node
           npm run check --prefix examples/rivet-actors
+          npm run check --prefix examples/cloudflare-egress
           npm run check --prefix examples/cloudflare-workers
           npm run check --prefix examples/vercel-workflows
           npm test --prefix examples/react-vite
@@ -309,7 +312,7 @@ jobs:
     if: github.repository == 'gakonst/nanocodex' && github.event_name == 'push' && github.ref == 'refs/heads/master' && vars.CLOUDFLARE_DEPLOY_ENABLED == 'true'
     needs: [test, quality, vm-guest, policy, bindings, python, web, codeql]
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 30
     concurrency:
       group: nanocodex-cloudflare
       cancel-in-progress: false
@@ -324,13 +327,24 @@ jobs:
         with:
           node-version: 22.15.0
           cache: npm
-          cache-dependency-path: web/package-lock.json
+          cache-dependency-path: |
+            examples/cloudflare-egress/package-lock.json
+            examples/cloudflare-workers/package-lock.json
+            web/package-lock.json
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           name: nanocodex-web-deployment
           path: web/dist
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: nanocodex-web-wasm
+          path: js/bindings/pkg-web
       - name: Install deployment tooling
-        run: npm ci --prefix web --ignore-scripts
+        run: |
+          npm ci --prefix examples/cloudflare-egress --ignore-scripts
+          npm ci --prefix examples/cloudflare-workers --ignore-scripts
+          npm ci --prefix web --ignore-scripts
+          npm run prepare:wasm --prefix examples/cloudflare-workers
       - name: Select the current production revision
         id: production
         env:
@@ -343,22 +357,91 @@ jobs:
             echo "current=false" >> "$GITHUB_OUTPUT"
             echo "Skipping obsolete production revision $TARGET_SHA; master is $current_sha"
           fi
-      - name: Deploy the attested Cloudflare Worker
+      - name: Validate the complete production rollout
         if: steps.production.outputs.current == 'true'
-        working-directory: web
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN_CONFIGURED: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
+          NANOCODEX_ADMIN_TOKEN: ${{ secrets.NANOCODEX_ADMIN_TOKEN }}
+          NANOCODEX_BROKER_PROBE_TOKEN_CONFIGURED: ${{ secrets.NANOCODEX_BROKER_PROBE_TOKEN != '' }}
+          NANOCODEX_GIT_TOKEN_CONFIGURED: ${{ secrets.NANOCODEX_GIT_TOKEN != '' }}
+          NANOCODEX_MANAGED_AUTH_MODE: ${{ vars.NANOCODEX_MANAGED_AUTH_MODE }}
+          NANOCODEX_MANAGED_CODEX_OAUTH_BOOTSTRAP_CONFIGURED: ${{ secrets.NANOCODEX_MANAGED_CODEX_OAUTH_BOOTSTRAP != '' }}
+          NANOCODEX_MANAGED_CODEX_RELAY_URL_CONFIGURED: ${{ secrets.NANOCODEX_MANAGED_CODEX_RELAY_URL != '' }}
+          NANOCODEX_MANAGED_OPENAI_API_KEY_CONFIGURED: ${{ secrets.NANOCODEX_MANAGED_OPENAI_API_KEY != '' }}
+          NANOCODEX_ROOM_ALLOCATOR_TOKEN: ${{ secrets.NANOCODEX_ROOM_ALLOCATOR_TOKEN }}
+          TARGET_SHA: ${{ github.sha }}
+        run: npm run deploy:production:preflight --prefix examples/cloudflare-workers
+      - name: Deploy the private credential broker (API key)
+        if: steps.production.outputs.current == 'true' && vars.NANOCODEX_MANAGED_AUTH_MODE == 'api_key'
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          NANOCODEX_BROKER_PROBE_TOKEN: ${{ secrets.NANOCODEX_BROKER_PROBE_TOKEN }}
+          NANOCODEX_MANAGED_AUTH_MODE: ${{ vars.NANOCODEX_MANAGED_AUTH_MODE }}
+          NANOCODEX_MANAGED_OPENAI_API_KEY: ${{ secrets.NANOCODEX_MANAGED_OPENAI_API_KEY }}
+          TARGET_SHA: ${{ github.sha }}
+        run: npm run deploy:production:broker --prefix examples/cloudflare-egress
+      - name: Deploy the private credential broker (ChatGPT)
+        if: steps.production.outputs.current == 'true' && vars.NANOCODEX_MANAGED_AUTH_MODE == 'chatgpt'
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          NANOCODEX_BROKER_PROBE_TOKEN: ${{ secrets.NANOCODEX_BROKER_PROBE_TOKEN }}
+          NANOCODEX_MANAGED_AUTH_MODE: ${{ vars.NANOCODEX_MANAGED_AUTH_MODE }}
+          NANOCODEX_MANAGED_CODEX_OAUTH_BOOTSTRAP: ${{ secrets.NANOCODEX_MANAGED_CODEX_OAUTH_BOOTSTRAP }}
+          NANOCODEX_MANAGED_CODEX_RELAY_URL: ${{ secrets.NANOCODEX_MANAGED_CODEX_RELAY_URL }}
+          TARGET_SHA: ${{ github.sha }}
+        run: npm run deploy:production:broker --prefix examples/cloudflare-egress
+      - name: Require master before managed rollout
+        if: steps.production.outputs.current == 'true'
+        env:
           TARGET_SHA: ${{ github.sha }}
         run: |
-          : "${CLOUDFLARE_ACCOUNT_ID:?configure the CLOUDFLARE_ACCOUNT_ID repository variable}"
-          : "${CLOUDFLARE_API_TOKEN:?configure the CLOUDFLARE_API_TOKEN repository secret}"
-          npx --no-install wrangler deploy \
-            --config dist/nanocodex/wrangler.json \
-            --strict \
-            --tag "$TARGET_SHA" \
-            --message "gakonst/nanocodex@$TARGET_SHA" \
-            --var "DEPLOYMENT_SHA:$TARGET_SHA"
+          current_sha="$(git ls-remote https://github.com/gakonst/nanocodex.git refs/heads/master | cut -f1)"
+          test "$current_sha" = "$TARGET_SHA" || {
+            echo "Master advanced to $current_sha after broker deployment; refusing to deploy the managed Worker" >&2
+            exit 1
+          }
+      - name: Deploy the private managed Worker and migrations
+        if: steps.production.outputs.current == 'true'
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          NANOCODEX_ADMIN_TOKEN: ${{ secrets.NANOCODEX_ADMIN_TOKEN }}
+          NANOCODEX_MANAGED_AUTH_MODE: ${{ vars.NANOCODEX_MANAGED_AUTH_MODE }}
+          NANOCODEX_ROOM_ALLOCATOR_TOKEN: ${{ secrets.NANOCODEX_ROOM_ALLOCATOR_TOKEN }}
+          TARGET_SHA: ${{ github.sha }}
+        run: npm run deploy:production:managed --prefix examples/cloudflare-workers
+      - name: Verify private room creation and owner deletion
+        if: steps.production.outputs.current == 'true'
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          NANOCODEX_BROKER_PROBE_TOKEN: ${{ secrets.NANOCODEX_BROKER_PROBE_TOKEN }}
+          NANOCODEX_MANAGED_AUTH_MODE: ${{ vars.NANOCODEX_MANAGED_AUTH_MODE }}
+          NANOCODEX_ROOM_ALLOCATOR_TOKEN: ${{ secrets.NANOCODEX_ROOM_ALLOCATOR_TOKEN }}
+          TARGET_SHA: ${{ github.sha }}
+        run: npm run verify:production:boundary --prefix examples/cloudflare-workers
+      - name: Require master before website rollout
+        if: steps.production.outputs.current == 'true'
+        env:
+          TARGET_SHA: ${{ github.sha }}
+        run: |
+          current_sha="$(git ls-remote https://github.com/gakonst/nanocodex.git refs/heads/master | cut -f1)"
+          test "$current_sha" = "$TARGET_SHA" || {
+            echo "Master advanced to $current_sha after backend verification; refusing to deploy the website" >&2
+            exit 1
+          }
+      - name: Deploy the attested Cloudflare Worker
+        if: steps.production.outputs.current == 'true'
+        env:
+          CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          NANOCODEX_MANAGED_AUTH_MODE: ${{ vars.NANOCODEX_MANAGED_AUTH_MODE }}
+          NANOCODEX_ROOM_ALLOCATOR_TOKEN: ${{ secrets.NANOCODEX_ROOM_ALLOCATOR_TOKEN }}
+          TARGET_SHA: ${{ github.sha }}
+        run: npm run deploy:production:web --prefix examples/cloudflare-workers
       - name: Verify the active Worker revision
         if: steps.production.outputs.current == 'true'
         env:
