@@ -1,5 +1,5 @@
 import {
-  DEFAULT_RESPONSES_UPGRADE_URL,
+  modelConnection,
   upstreamHeaders,
   validateWebSocketRequest,
 } from "./protocol.mjs";
@@ -8,10 +8,12 @@ export default {
   async fetch(request, env) {
     const rejection = validateWebSocketRequest(request);
     if (rejection) return rejection;
-    if (!env.OPENAI_API_KEY) return new Response("Worker secret is not configured", { status: 500 });
+    const connection = modelConnection(env);
+    if (connection instanceof Response) return connection;
+    const sessionId = new URL(request.url).searchParams.get("session_id");
 
-    const upstreamResponse = await fetch(DEFAULT_RESPONSES_UPGRADE_URL, {
-      headers: upstreamHeaders(env.OPENAI_API_KEY, new URL(request.url).searchParams.get("session_id")),
+    const upstreamResponse = await fetch(connection.url, {
+      headers: upstreamHeaders(connection.credential, sessionId),
     });
     const upstream = upstreamResponse.webSocket;
     if (!upstream) {
@@ -24,6 +26,7 @@ export default {
     upstream.accept();
     server.accept();
     bridge(server, upstream);
+    server.send(JSON.stringify({ type: "nanocodex.proxy.ready" }));
 
     return new Response(null, { status: 101, webSocket: client });
   },

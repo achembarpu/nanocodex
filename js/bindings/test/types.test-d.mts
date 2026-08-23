@@ -51,6 +51,7 @@ import {
 } from "../tools/dataset.mjs";
 import { browser as browserTools } from "../tools/browser/index.mjs";
 import { nanocodexTools } from "../tools/vite.mjs";
+import { nanocodex } from "../vite/index.mjs";
 import {
   createMemoryDurabilityStore,
   durabilityRevision,
@@ -377,6 +378,9 @@ async function check() {
     tools: [...browserRuntime.tools, ...BrowserSubagents.create()],
   });
   nanocodexTools().resolveId("node-rsa");
+  nanocodex().resolveId("node-rsa");
+  // @ts-expect-error Cloudflare composition is selected by the dedicated subpath.
+  nanocodex({ chatGpt: { worker: true } });
   // @ts-expect-error Rust extensions must come from a branded constructor.
   await Agent.create({ transport: Transport.openAi({ apiKey }), tools: [{ maxConcurrency: 8 }] });
   // @ts-expect-error function-backed MPP transports cannot cross the package Worker boundary.

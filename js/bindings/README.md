@@ -340,19 +340,43 @@ const agent = await Agent.create({
 ```
 
 `browser(...)` runs in a browser Worker because OPFS is a browser capability;
-use the individual factories in server-side Cloudflare Workers. Vite consumers
-install the package-owned SSH compatibility adapter in both page and nested
-Worker plugin graphs:
+use the individual factories in server-side Cloudflare Workers. An ordinary
+Vite browser app needs one plugin. `vite dev` reads the current ChatGPT
+subscription from the developer's Codex auth file on the server, owns the
+same-origin `/api/responses` socket, and installs compatibility in both page
+and nested Worker graphs:
 
 ```js
-import { nanocodexTools } from "nanocodex/tools/vite";
+import { nanocodex } from "nanocodex/vite";
 import { defineConfig } from "vite";
 
 export default defineConfig({
-  plugins: [nanocodexTools()],
-  worker: { format: "es", plugins: () => [nanocodexTools()] },
+  plugins: [nanocodex()],
+  worker: { format: "es" },
 });
 ```
+
+Cloudflare applications use the combined entry instead of installing a second
+Cloudflare plugin:
+
+```js
+import { nanocodex } from "nanocodex/vite/cloudflare";
+import react from "@vitejs/plugin-react";
+import { defineConfig } from "vite";
+
+export default defineConfig({
+  plugins: [react(), nanocodex()],
+});
+```
+
+In development, the application Worker remains the sole browser credential
+broker. Nanocodex gives workerd only the current access-token snapshot and a
+capability-scoped loopback egress; it never imports the host process
+environment. `vite build` does not read local auth or include those bindings,
+so the application's production authentication and agent ownership remain
+unchanged. The refresh token, ID token, full auth document, and credentials
+never enter browser code or responses. `nanocodex()` already includes the
+legacy `nanocodexTools()` compatibility plugin; do not install both.
 
 The browser composition includes `render_artifact` as a normal typed tool. For
 other hosts, compose the same factory with any workspace implementing the

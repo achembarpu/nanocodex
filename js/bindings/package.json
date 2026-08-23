@@ -39,6 +39,14 @@
       "types": "./browser/realtimePrompt.d.mts",
       "import": "./browser/realtimePrompt.mjs"
     },
+    "./vite": {
+      "types": "./vite/index.d.mts",
+      "import": "./vite/index.mjs"
+    },
+    "./vite/cloudflare": {
+      "types": "./vite/cloudflare.d.mts",
+      "import": "./vite/cloudflare.mjs"
+    },
     "./workspace": {
       "types": "./runtime/workspace.d.mts",
       "import": "./runtime/workspace.mjs"
@@ -120,6 +128,7 @@
     "pkg-web",
     "runtime",
     "tools",
+    "vite",
     "internal.mjs",
     "index.d.mts",
     "index.mjs",
@@ -163,6 +172,18 @@
     "pkg-pr-new": "0.0.79",
     "quickjs-emscripten-core": "0.32.0",
     "typescript": "5.9.3"
+  },
+  "peerDependencies": {
+    "@cloudflare/vite-plugin": ">=1.47.0",
+    "vite": ">=6.1.0"
+  },
+  "peerDependenciesMeta": {
+    "@cloudflare/vite-plugin": {
+      "optional": true
+    },
+    "vite": {
+      "optional": true
+    }
   },
   "engines": {
     "node": ">=22.13.0"

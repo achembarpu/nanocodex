@@ -79,6 +79,10 @@ const requiredFiles = [
   "tools/browser/index.d.mts",
   "tools/vite.mjs",
   "tools/vite.d.mts",
+  "vite/index.mjs",
+  "vite/index.d.mts",
+  "vite/cloudflare.mjs",
+  "vite/cloudflare.d.mts",
   "wasm.d.mts",
   "pkg-web/nanocodex.js",
   "pkg-web/nanocodex.d.ts",
@@ -126,6 +130,8 @@ export async function checkPackage(packageRoot = root) {
   assert.equal(packageJson.exports?.["./tools/artifact"]?.import, "./tools/artifact.mjs");
   assert.equal(packageJson.exports?.["./tools/browser"]?.import, "./tools/browser/index.mjs");
   assert.equal(packageJson.exports?.["./tools/vite"]?.import, "./tools/vite.mjs");
+  assert.equal(packageJson.exports?.["./vite"]?.import, "./vite/index.mjs");
+  assert.equal(packageJson.exports?.["./vite/cloudflare"]?.import, "./vite/cloudflare.mjs");
   assert.equal(packageJson.exports?.["./wasm"]?.import, "./pkg-web/nanocodex_bg.wasm");
   checkDocumentedBrowserVersion(readme, packageJson.version);
 
