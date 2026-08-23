@@ -64,13 +64,14 @@ export const AgentExperience = memo(function AgentExperience({
     if (runtime !== "managed" || account.status !== "ready" || !account.account) return;
     let cancelled = false;
     const accountId = account.account.id;
+    const retainedId = safeGet(managedSelectionKey(accountId)) ?? undefined;
+    setManagedConversationId(retainedId);
     setConversationPending(true);
     setManagedError(undefined);
     void listManagedConversations(accountId).then(async (listed) => {
       if (cancelled) return;
       const next = listed.length || !hasCredential ? listed : [await createManagedConversation(accountId)];
       if (cancelled) return;
-      const retainedId = safeGet(managedSelectionKey(accountId));
       const selected = next.find(({ id }) => id === retainedId)?.id ?? next[0]?.id;
       setManagedConversations(next);
       setManagedConversationId(selected);

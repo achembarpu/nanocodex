@@ -2,6 +2,7 @@ import { ManagedError } from "./ManagedError.mjs";
 
 const API_KEY = /^ncx_live_[A-Za-z0-9_-]{12}_[A-Za-z0-9_-]{43}$/;
 const CURSOR = /^(?:0|[1-9][0-9]*)$/;
+const LATEST_CURSOR = "latest";
 const IDEMPOTENCY_KEY = /^[\x21-\x7e]{1,256}$/;
 const TURN_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const TERMINAL_TYPES = new Set([
@@ -44,6 +45,12 @@ export async function get(id, options = {}) {
   const client = managedClient(options);
   await client.json(agentPath(id));
   return agentHandle(client, id);
+}
+
+/** Open a managed agent handle without probing retained state first. */
+export function open(id, options = {}) {
+  validateAgentId(id);
+  return agentHandle(managedClient(options), id);
 }
 
 /** Delete one owned managed agent and all of its retained state. */
@@ -296,7 +303,7 @@ function replayableEventStream(client, agentId) {
             }
           }
           for (const subscriber of subscribers) {
-            if (!cursorBefore(subscriber.cursor, event.cursor)) continue;
+            if (!eventAfter(subscriber.cursor, event.cursor)) continue;
             subscriber.cursor = event.cursor;
             if (subscriber.pending) {
               const pending = subscriber.pending;
@@ -328,8 +335,8 @@ function replayableEventStream(client, agentId) {
       throw new TypeError("managed event options must be an object");
     }
     const cursor = options.cursor ?? "0";
-    if (typeof cursor !== "string" || !CURSOR.test(cursor)) {
-      throw new TypeError("managed event cursor must be an unsigned decimal string");
+    if (typeof cursor !== "string" || (cursor !== LATEST_CURSOR && !CURSOR.test(cursor))) {
+      throw new TypeError("managed event cursor must be an unsigned decimal string or latest");
     }
     if (closed) throw new ManagedError("agent_closed", "managed agent event stream is closed");
 
@@ -431,6 +438,7 @@ async function* readEvents(client, agentId, initialCursor, signal) {
           buffer = buffer.slice(boundary + 2);
           if (!parsed) continue;
           if (parsed.retry !== undefined) reconnectDelay = parsed.retry;
+          if (parsed.controlCursor !== undefined) cursor = parsed.controlCursor;
           if (!parsed.data) continue;
           if (parsed.id !== undefined) cursor = parsed.id;
           const data = parseEventData(parsed.data);
@@ -460,16 +468,31 @@ function managedEvent(data, cursor = requiredCursor(data, "cursor"), fallbackTyp
 }
 
 function cursorBefore(left, right) {
+  if (left === LATEST_CURSOR) return false;
+  if (right === LATEST_CURSOR) return true;
   return left.length !== right.length ? left.length < right.length : left < right;
+}
+
+function eventAfter(cursor, eventCursor) {
+  return cursor === LATEST_CURSOR || cursorBefore(cursor, eventCursor);
 }
 
 function parseEventFrame(frame) {
   let event = "message";
   let id;
   let retry;
+  let controlCursor;
   const data = [];
   for (const line of frame.split("\n")) {
-    if (!line || line.startsWith(":")) continue;
+    if (!line) continue;
+    if (line.startsWith(":")) {
+      const comment = line.slice(1).trimStart();
+      if (comment.startsWith("cursor ")) {
+        const value = comment.slice("cursor ".length);
+        if (CURSOR.test(value)) controlCursor = value;
+      }
+      continue;
+    }
     const separator = line.indexOf(":");
     const field = separator < 0 ? line : line.slice(0, separator);
     let value = separator < 0 ? "" : line.slice(separator + 1);
@@ -479,8 +502,8 @@ function parseEventFrame(frame) {
     else if (field === "retry" && /^[0-9]+$/.test(value)) retry = Number(value);
     else if (field === "data") data.push(value);
   }
-  if (data.length === 0 && retry === undefined) return undefined;
-  return { event, id, retry, data: data.length === 0 ? undefined : data.join("\n") };
+  if (data.length === 0 && retry === undefined && controlCursor === undefined) return undefined;
+  return { event, id, retry, controlCursor, data: data.length === 0 ? undefined : data.join("\n") };
 }
 
 function parseEventData(encoded) {

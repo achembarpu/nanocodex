@@ -65,7 +65,7 @@ export function createManagedConversation(accountId = "default"): Promise<Manage
 
 export async function loadManagedTerminalAgent(agentId: string): Promise<TerminalAgent> {
   const { Agent } = await import("nanocodex/managed");
-  const managed = managedAgents.get(agentId) ?? await Agent.get(agentId);
+  const managed = managedAgents.get(agentId) ?? Agent.open(agentId);
   managedAgents.set(agentId, managed);
   return managedTerminalAgent(managed);
 }
@@ -122,28 +122,27 @@ function managedEventWatcher(
     sequences.get(envelope.cursor) ?? sequence,
   );
   const emitHistory = () => {
+    sequences.clear();
+    envelopes.forEach((envelope, index) => sequences.set(envelope.cursor, index + 1));
+    sequence = Math.max(sequence, envelopes.length);
     const events = envelopes.flatMap((envelope) => {
       const event = project(envelope);
       return event ? [event] : [];
     });
     for (const listener of historyListeners) listener(events);
   };
-  const retain = (envelope: ManagedEvent, prepend = false) => {
+  const retain = (envelope: ManagedEvent) => {
     if (seen.has(envelope.cursor)) return false;
     seen.add(envelope.cursor);
     sequences.set(envelope.cursor, ++sequence);
-    if (prepend) envelopes.unshift(envelope);
-    else envelopes.push(envelope);
+    envelopes.push(envelope);
+    envelopes.sort((left, right) => compareManagedCursor(left.cursor, right.cursor));
     return true;
   };
   void (async () => {
     try {
-      const initial = await managed.events.page({ limit: MANAGED_HISTORY_PAGE_SIZE });
-      for (const envelope of initial.data) retain(envelope);
-      hasOlder = initial.hasMore;
-      emitHistory();
       for await (const envelope of managed.events.watch({
-        cursor: initial.latestCursor,
+        cursor: "latest",
         signal: controller.signal,
       })) {
         if (controller.signal.aborted) return;
@@ -169,6 +168,19 @@ function managedEventWatcher(
       });
     }
   })();
+  void managed.events.page({ limit: MANAGED_HISTORY_PAGE_SIZE }).then((initial) => {
+    if (controller.signal.aborted) return;
+    for (const envelope of initial.data) retain(envelope);
+    hasOlder = initial.hasMore;
+    emitHistory();
+  }).catch((error) => {
+    if (!controller.signal.aborted) {
+      console.error("nanocodex:managed.history_failed", {
+        agentId: managed.id,
+        error: error instanceof Error ? error.message : String(error),
+      });
+    }
+  });
   return Object.freeze({
     onEvent(listener: (event: AgentEvent) => void) {
       listeners.add(listener);
@@ -189,9 +201,7 @@ function managedEventWatcher(
       if (!before) return Promise.resolve(false);
       loadingOlder = managed.events.page({ before, limit: MANAGED_HISTORY_PAGE_SIZE }).then((page) => {
         let added = false;
-        for (let index = page.data.length - 1; index >= 0; index -= 1) {
-          added = retain(page.data[index]!, true) || added;
-        }
+        for (const envelope of page.data) added = retain(envelope) || added;
         hasOlder = page.hasMore;
         if (added) emitHistory();
         return added;
@@ -204,6 +214,11 @@ function managedEventWatcher(
       historyListeners.clear();
     },
   });
+}
+
+function compareManagedCursor(left: string, right: string): number {
+  if (left.length !== right.length) return left.length - right.length;
+  return left < right ? -1 : left > right ? 1 : 0;
 }
 
 export function terminalEvent(

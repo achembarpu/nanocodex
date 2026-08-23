@@ -598,6 +598,25 @@ describe("managed agents REST and resumable SSE", () => {
     expect(await ahead.json()).toMatchObject({ error: "cursor_ahead" });
   });
 
+  it("tails atomically from the latest durable cursor", async () => {
+    const agent = await createAgent();
+    const response = await SELF.fetch(`${agent.events_url}?cursor=latest`);
+    expect(response.status).toBe(200);
+    const stream = sseReader(response);
+    await submit(agent, "turn-latest", "after tail attachment");
+
+    let accepted;
+    do {
+      accepted = await nextWithin(stream, "latest turn acceptance");
+    } while (accepted.data.type !== "turn_accepted");
+    expect(accepted).toMatchObject({
+      id: accepted.data.cursor,
+      event: "turn_accepted",
+      data: { id: "turn-latest", type: "turn_accepted" },
+    });
+    await stream.cancel();
+  });
+
   it("persists cursors across eviction and tails strictly after the acknowledged cursor", async () => {
     const agent = await createAgent();
     const id = new URL(agent.events_url).pathname.split("/").at(-2)!;

@@ -9,6 +9,7 @@ declare const apiKey: string;
 
 async function checkManaged() {
   const created: ManagedAgent = await Agent.create();
+  const opened: ManagedAgent = Agent.open("0198d3f0-8844-7000-8000-000000000001");
   const serverAgent = await Agent.get("0198d3f0-8844-7000-8000-000000000001", {
     baseUrl: "https://managed.example",
     apiKey,
@@ -32,6 +33,7 @@ async function checkManaged() {
   }
   await turn.cancel();
   await created.delete();
+  opened.id;
   await Agent.delete(accepted, { baseUrl: "https://managed.example", apiKey });
   new ManagedError("failed", "failed", { status: 500 });
 

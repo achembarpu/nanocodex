@@ -45,6 +45,7 @@ test("managed Agent covers account-scoped create, list, get, and delete", async 
   assert.deepEqual(listed[0].summary, {
     title: "First task", createdAt: 10, updatedAt: 20, turnCount: 3,
   });
+  assert.equal(Agent.open(agentId, options).id, agentId);
   assert.equal((await Agent.get(agentId, options)).id, agentId);
   assert.equal((await created.state()).latest_event_cursor, "4");
   await created.delete();
@@ -54,6 +55,9 @@ test("managed Agent covers account-scoped create, list, get, and delete", async 
     assert.equal(request.credentials, "include");
     assert.equal(request.headers.has("authorization"), false);
   }
+  assert.equal(calls.filter((request) =>
+    request.method === "GET" && new URL(request.url).pathname === `/v1/agents/${agentId}`
+  ).length, 2, "open constructs a handle without adding a state probe");
 });
 
 test("managed server authentication sends only an ncx_live bearer and omits cookies", async () => {
@@ -110,6 +114,40 @@ test("managed event history requests one bounded chronological page before a cur
   assert.equal(requests.length, 2, "one create plus one history request");
   await assert.rejects(() => agent.events.page({ before: "0" }), /positive decimal/);
   await assert.rejects(() => agent.events.page({ limit: 257 }), /1 through 256/);
+});
+
+test("latest event tails adopt the server cursor before reconnecting", async () => {
+  const connections = [];
+  const requestedCursors = [];
+  const agent = await Agent.create({
+    baseUrl: origin,
+    fetch: async (input, init) => {
+      const request = new Request(input, init);
+      const url = new URL(request.url);
+      if (request.method === "POST") return Response.json({ agent_id: agentId }, { status: 201 });
+      requestedCursors.push(url.searchParams.get("cursor"));
+      const connection = controlledEventStream(request.signal, () => {});
+      connections.push(connection);
+      return connection.response;
+    },
+  });
+
+  const observed = [];
+  const watching = (async () => {
+    for await (const event of agent.events.watch({ cursor: "latest" })) {
+      observed.push(event.cursor);
+      break;
+    }
+  })();
+  await waitFor(() => connections.length === 1);
+  connections[0].send("retry: 0\n: cursor 12\n\n");
+  connections[0].close();
+  await waitFor(() => connections.length === 2);
+  connections[1].send(sse("13", "event", eventData("13")));
+
+  await watching;
+  assert.deepEqual(requestedCursors, ["latest", "12"]);
+  assert.deepEqual(observed, ["13"]);
 });
 
 test("prompts and a watcher multiplex one active managed event request without stealing events", async () => {

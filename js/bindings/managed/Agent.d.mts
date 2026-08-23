@@ -104,8 +104,8 @@ export type Event = Readonly<{
 }>;
 
 export type WatchEventsOptions = Readonly<{
-  /** Resume strictly after this durable decimal cursor. Defaults to `"0"`. */
-  cursor?: string | undefined;
+  /** Resume after a durable decimal cursor, or tail atomically from `"latest"`. Defaults to `"0"`. */
+  cursor?: string | "latest" | undefined;
   signal?: AbortSignal | undefined;
 }>;
 
@@ -166,5 +166,7 @@ export type Agent = Readonly<{
 export function create(options?: Options): Promise<Agent>;
 export function list(options?: Options): Promise<readonly Agent[]>;
 export function get(id: string, options?: Options): Promise<Agent>;
+/** Open a handle immediately; each subsequent operation verifies ownership server-side. */
+export function open(id: string, options?: Options): Agent;
 export function remove(id: string, options?: Options): Promise<void>;
 export { remove as delete };

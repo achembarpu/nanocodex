@@ -88,7 +88,7 @@ test("managed conversation listing carries summaries without per-agent state req
   }
 });
 
-test("an explicitly selected owned managed agent is loaded", async () => {
+test("a retained managed agent handle opens without a state probe", async () => {
   const agentId = "018f1f9a-7b3c-7a18-8000-000000000018";
   const requests: Array<{ method: string; url: string }> = [];
   const originals = {
@@ -102,9 +102,7 @@ test("an explicitly selected owned managed agent is loaded", async () => {
       value: async (input: RequestInfo | URL, init?: RequestInit) => {
         const request = new Request(input, init);
         requests.push({ method: request.method, url: request.url });
-        assert.equal(request.method, "GET");
-        assert.equal(request.url, `https://demo.test/v1/agents/${agentId}`);
-        return Response.json({ agent_id: agentId });
+        throw new Error(`unexpected managed request: ${request.method} ${request.url}`);
       },
     },
   });
@@ -112,7 +110,7 @@ test("an explicitly selected owned managed agent is loaded", async () => {
   try {
     const agent = await loadManagedTerminalAgent(agentId);
     assert.equal(agent.sessionId, agentId);
-    assert.deepEqual(requests, [{ method: "GET", url: `https://demo.test/v1/agents/${agentId}` }]);
+    assert.deepEqual(requests, []);
   } finally {
     restore("fetch", originals.fetch);
     restore("location", originals.location);
@@ -151,21 +149,27 @@ test("managed events from another tab project onto the shared session", () => {
   });
 });
 
-test("managed history starts with one bounded page, tails its snapshot, and prepends exact older events", async () => {
+test("managed history tails atomically before hydrating one bounded page and prepends exact older events", async () => {
+  const startupCalls: string[] = [];
   const pageCalls: Array<{ before?: string; limit?: number }> = [];
   const initial = [managedEnvelope("2", "two"), managedEnvelope("3", "three")];
   const older = [managedEnvelope("1", "one"), managedEnvelope("2", "duplicate two")];
+  let releaseLive!: () => void;
+  const liveReady = new Promise<void>((resolve) => { releaseLive = resolve; });
   const managed = {
     id: "shared-agent",
     events: {
       async page(options: { before?: string; limit?: number }) {
+        if (!options.before) startupCalls.push("history");
         pageCalls.push(options);
         return options.before
           ? { data: older, hasMore: false, latestCursor: "4" }
           : { data: initial, hasMore: true, latestCursor: "3" };
       },
       async *watch(options: { cursor: string; signal: AbortSignal }) {
-        assert.equal(options.cursor, "3");
+        startupCalls.push("tail");
+        assert.equal(options.cursor, "latest");
+        await liveReady;
         yield managedEnvelope("4", "live");
         await new Promise<void>((resolve) => options.signal.addEventListener("abort", () => resolve()));
       },
@@ -180,8 +184,11 @@ test("managed history starts with one bounded page, tails its snapshot, and prep
   watcher.onEvent((event) => live.push(String(event.payload.text ?? "")));
   await new Promise((resolve) => setImmediate(resolve));
 
+  assert.deepEqual(startupCalls, ["tail", "history"]);
   assert.deepEqual(pageCalls, [{ limit: 128 }]);
   assert.deepEqual(histories[0]?.map((event) => event.payload.text), ["two", "three"]);
+  releaseLive();
+  await new Promise((resolve) => setImmediate(resolve));
   assert.deepEqual(live, ["live"]);
   assert.equal(await watcher.loadOlder?.(), true);
   assert.deepEqual(pageCalls, [{ limit: 128 }, { before: "2", limit: 128 }]);

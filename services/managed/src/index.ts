@@ -649,7 +649,7 @@ export class NanocodexSession extends DurableComputerSession {
       const requested = request.headers.get("last-event-id")
         ?? url.searchParams.get("cursor")
         ?? url.searchParams.get("after");
-      const cursor = parseCursor(requested);
+      const cursor = requested === "latest" ? this.#eventLog.latestCursor() : parseCursor(requested);
       if (cursor === undefined) return json({ error: "invalid_cursor" }, { status: 400 });
       return this.#eventLog.stream(cursor, request.signal);
     }

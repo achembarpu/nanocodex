@@ -82,10 +82,10 @@ test("managed conversation selection is invalidated when account ownership chang
   assert.match(experience, /managedSelectionKey\(accountId\)/);
 });
 
-test("managed startup checks effect ownership before auto-creating a conversation", () => {
+test("managed startup mounts a retained selection before refreshing the rail", () => {
   assert.match(
     experience,
-    /listManagedConversations\(accountId\)\.then\(async \(listed\) => \{\s*if \(cancelled\) return;\s*const next = listed\.length \|\| !hasCredential \? listed : \[await createManagedConversation\(accountId\)\]/,
+    /const retainedId = safeGet\(managedSelectionKey\(accountId\)\) \?\? undefined;\s*setManagedConversationId\(retainedId\);\s*setConversationPending\(true\);[\s\S]*?listManagedConversations\(accountId\)\.then\(async \(listed\) => \{\s*if \(cancelled\) return;\s*const next = listed\.length \|\| !hasCredential \? listed : \[await createManagedConversation\(accountId\)\]/,
   );
 });
 

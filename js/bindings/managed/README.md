@@ -34,6 +34,13 @@ later watcher to resume strictly after the acknowledged event. Network endings
 reconnect automatically from that cursor. Watchers and independently awaitable
 turn results on one agent handle share one replayable event connection; each
 subscriber keeps its own cursor, so consuming one never steals another's events.
+Pass `cursor: "latest"` to attach atomically at the durable head without
+replaying retained history; a history page can then hydrate independently.
+
+Returning browser clients may use `Agent.open(id)` to construct a retained
+handle without a preliminary state request. The first operation on that handle
+still verifies account ownership at the managed service boundary. Use
+`Agent.get(id)` when an eager existence check is part of the caller's workflow.
 
 The managed API never accepts model-provider credentials, egress bindings,
 runtime environment objects, credential grants, or arbitrary request headers.
