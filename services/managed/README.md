@@ -342,13 +342,11 @@ forbid `eval` and `new Function`. This retains Nanocodex's typed Rust tool
 lifecycle and caller-defined handlers without shipping a JavaScript evaluator.
 Node-based consumers may continue to use Code Mode when their host permits it.
 
-Set `WEB_TOOL_URL` to install the standard `web__run` definition from
-`nanocodex/tools` directly in each Durable Object agent. The binding repairs
-common malformed model argument shapes and posts `{ commands, session_id }` to
-that HTTPS endpoint; the Worker retains endpoint credentials in the optional
-`WEB_TOOL_TOKEN` secret and rejects redirects before a credential can be
-forwarded to another origin. No browser OPFS or shell code enters this server-side
-Worker graph.
+Normal Durable Object agents install the standard `exec_command`, `web__run`,
+`image_gen__imagegen`, `view_image`, and `update_plan` tools. Web and image
+requests go directly through the private `NANOCODEX` Service Binding with the
+agent's opaque broker subject; no provider credential or account cookie enters
+the tool runtime. Multiplayer agents remain intentionally tool-free.
 
 ## Validate and deploy
 

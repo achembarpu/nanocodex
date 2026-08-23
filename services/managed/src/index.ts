@@ -12,7 +12,12 @@ import type {
   Turn,
 } from "nanocodex";
 import { Agent as CloudflareAgent } from "nanocodex/cloudflare";
-import { web } from "nanocodex/tools";
+import {
+  imageGeneration,
+  updatePlan,
+  viewImage,
+  web,
+} from "nanocodex/tools";
 import { justBash } from "nanocodex/tools/bash";
 import { createComputerFilesystem } from "./computer-workspace";
 import {
@@ -92,8 +97,6 @@ export interface Env extends AccountAuthEnv {
   NANOCODEX: Fetcher;
   NANOCODEX_ADMIN_TOKEN: string;
   AGENT_IDLE_TIMEOUT_MS?: string;
-  WEB_TOOL_URL?: string;
-  WEB_TOOL_TOKEN?: string;
 }
 
 type SessionRow = {
@@ -1266,7 +1269,13 @@ export class NanocodexSession extends DurableComputerSession {
           ].join("\n\n"),
         tools: multiplayer ? [] : [
           shell!.tool,
-          ...cloudflareWebTools(this.env),
+          web({ fetch: managedWebFetch(this.env, this.ctx.id.toString()) }),
+          imageGeneration({
+            fetch: managedImageFetch(this.env, this.ctx.id.toString()),
+            workspace: shell!.filesystem,
+          }),
+          viewImage({ workspace: shell!.filesystem }),
+          updatePlan(),
           {
             name: "runtimeInfo",
             description: "Return information about the current durable agent runtime.",
@@ -1792,18 +1801,89 @@ function canonicalJson(value: unknown): string {
   )).join(",")}}`;
 }
 
-function cloudflareWebTools(env: Env) {
-  if (!env.WEB_TOOL_URL) return [];
-  const url = new URL(env.WEB_TOOL_URL);
-  if (url.protocol !== "https:" && url.hostname !== "127.0.0.1" && url.hostname !== "localhost") {
-    throw new Error("WEB_TOOL_URL must use HTTPS outside local development");
-  }
-  return [web({
-    url,
-    headers: env.WEB_TOOL_TOKEN
-      ? { authorization: `Bearer ${env.WEB_TOOL_TOKEN}` }
-      : undefined,
-  })];
+function managedWebFetch(env: Env, subject: string): typeof fetch {
+  return async (input, init) => {
+    const incoming = new Request(input, init);
+    const value = await incoming.json<{
+      commands?: unknown;
+      session_id?: unknown;
+    }>();
+    if (!value.commands || typeof value.commands !== "object" || Array.isArray(value.commands)
+      || typeof value.session_id !== "string" || !value.session_id) {
+      return json({ error: "invalid managed web request" }, { status: 400 });
+    }
+    return fetchManagedTool(env, subject, "/v1/search", {
+      id: value.session_id,
+      model: "gpt-5.6-sol",
+      commands: value.commands,
+      settings: { allowed_callers: ["direct"], external_web_access: true },
+      max_output_tokens: 10_000,
+    });
+  };
+}
+
+function managedImageFetch(env: Env, subject: string): typeof fetch {
+  return async (input, init) => {
+    const incoming = new Request(input, init);
+    const value = await incoming.json<{
+      images?: unknown;
+      prompt?: unknown;
+    }>();
+    const images = Array.isArray(value.images)
+      ? value.images.filter((image): image is string => typeof image === "string")
+      : [];
+    if (typeof value.prompt !== "string" || !value.prompt.trim()
+      || images.length > 5 || images.some((image) => !image.startsWith("data:image/"))) {
+      return json({ error: "invalid managed image request" }, { status: 400 });
+    }
+    const upstream = await fetchManagedTool(
+      env,
+      subject,
+      images.length ? "/v1/images/edits" : "/v1/images/generations",
+      {
+        ...(images.length ? { images: images.map((image_url) => ({ image_url })) } : {}),
+        prompt: value.prompt.trim(),
+        background: "auto",
+        model: "gpt-image-2",
+        quality: "auto",
+        size: "auto",
+      },
+    );
+    const payload = await upstream.json<{
+      data?: Array<{ b64_json?: unknown }>;
+      error?: unknown;
+    }>().catch(() => undefined);
+    if (!upstream.ok) {
+      const error = payload?.error && typeof payload.error === "object"
+        && !Array.isArray(payload.error)
+        && typeof (payload.error as { message?: unknown }).message === "string"
+        ? (payload.error as { message: string }).message
+        : `HTTP ${upstream.status}`;
+      return json({ error: `image generation failed: ${error}` }, { status: 502 });
+    }
+    const encoded = payload?.data?.[0]?.b64_json;
+    return typeof encoded === "string" && encoded
+      ? json({ image_url: `data:image/png;base64,${encoded}` })
+      : json({ error: "image generation returned no image" }, { status: 502 });
+  };
+}
+
+function fetchManagedTool(
+  env: Env,
+  subject: string,
+  path: "/v1/search" | "/v1/images/generations" | "/v1/images/edits",
+  body: unknown,
+): Promise<Response> {
+  return env.NANOCODEX.fetch(new Request(`https://nanocodex.internal${path}`, {
+    method: "POST",
+    headers: {
+      authorization: "Bearer NANOCODEX_PROVIDER_CREDENTIAL",
+      "content-type": "application/json",
+      "user-agent": "nanocodex-managed/0.1.0",
+      "x-nanocodex-subject": subject,
+    },
+    body: JSON.stringify(body),
+  }));
 }
 
 function authorized(request: Request, expected: string): boolean {
