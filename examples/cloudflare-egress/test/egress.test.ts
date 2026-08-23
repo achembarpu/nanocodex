@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { handleEgress, type EgressEnv } from "../src/egress";
 
 const workerEnv = env as unknown as EgressEnv;
+const brokerProbeToken = "broker-probe-token-that-is-long-enough-for-tests";
 
 describe("Cloudflare service-bound egress", () => {
   it("default-denies every unmatched destination before fetch", async () => {
@@ -33,6 +34,256 @@ describe("Cloudflare service-bound egress", () => {
     expect(response.status).toBe(503);
     expect(await response.json()).toEqual({ error: "invalid_broker_configuration" });
     expect(await refreshCount()).toBe(0);
+  });
+
+  it("rejects a broker configured with more than one credential policy", async () => {
+    const response = await egress(codexRequest(), {
+      ...workerEnv,
+      ALLOWED_POLICIES: "codex,openai",
+    });
+    expect(response.status).toBe(503);
+    expect(await response.json()).toEqual({ error: "invalid_broker_configuration" });
+    expect(await refreshCount()).toBe(0);
+  });
+
+  it("deep-proves both configured Responses WebSockets and immediately closes them", async () => {
+    for (const fixture of [
+      {
+        environment: {
+          ...workerEnv,
+          ALLOWED_POLICIES: "openai",
+          NANOCODEX_BROKER_PROBE_TOKEN: brokerProbeToken,
+          OPENAI_API_KEY: "deep-openai-key",
+        },
+        expectedUrl: "https://api.openai.com/v1/responses",
+        expectedAuthorization: "Bearer deep-openai-key",
+        expectedAccount: null,
+        expectedCredentialRequests: 0,
+      },
+      {
+        environment: {
+          ...workerEnv,
+          ALLOWED_POLICIES: "codex",
+          NANOCODEX_BROKER_PROBE_TOKEN: brokerProbeToken,
+          CODEX_RELAY_URL: "https://relay.example/v1/fixed-private-capability",
+          CODEX_OAUTH: fixedCodexCredential(),
+        },
+        expectedUrl: "https://relay.example/v1/fixed-private-capability",
+        expectedAuthorization: "Bearer deep-codex-token",
+        expectedAccount: "deep-codex-account",
+        expectedCredentialRequests: 1,
+      },
+    ]) {
+      const pair = new WebSocketPair();
+      const upstreamSocket = pair[0];
+      const peerSocket = pair[1];
+      peerSocket.accept();
+      const peerClosed = socketClose(peerSocket);
+      let observed: Request | undefined;
+      credentialRequests.length = 0;
+      const ready = await handleEgress(
+        readinessRequest({ body: "" }),
+        fixture.environment,
+        undefined,
+        async (input, init) => {
+          observed = input instanceof Request ? input : new Request(input, init);
+          return new Response(null, { status: 101, webSocket: upstreamSocket });
+        },
+      );
+
+      expect(ready.status).toBe(200);
+      expect(await ready.json()).toEqual({ ready: true });
+      expect(ready.headers.get("cache-control")).toBe("no-store");
+      expect(observed?.url).toBe(fixture.expectedUrl);
+      expect(observed?.method).toBe("GET");
+      expect(observed?.headers.get("upgrade")).toBe("websocket");
+      expect(observed?.headers.get("openai-beta")).toBe("responses_websockets=2026-02-06");
+      expect(observed?.headers.get("authorization")).toBe(fixture.expectedAuthorization);
+      expect(observed?.headers.get("chatgpt-account-id")).toBe(fixture.expectedAccount);
+      expect([...observed!.headers.values()].join("\n")).not.toContain(brokerProbeToken);
+      expect(await peerClosed).toMatchObject({ code: 1000, reason: "readiness_complete" });
+      expect(credentialRequests).toHaveLength(fixture.expectedCredentialRequests);
+    }
+  });
+
+  it("requires the exact private probe request before resolving credentials", async () => {
+    let upstreamCalls = 0;
+    const probeEnv = {
+      ...workerEnv,
+      ALLOWED_POLICIES: "openai",
+      NANOCODEX_BROKER_PROBE_TOKEN: brokerProbeToken,
+      OPENAI_API_KEY: "must-stay-cold",
+    };
+    const malformed = [
+      readinessRequest({ token: "wrong-token-that-is-also-long-enough-to-validate" }),
+      readinessRequest({ method: "GET" }),
+      readinessRequest({ url: "http://broker.test/.well-known/nanocodex/broker-readiness?url=https://example.com" }),
+      readinessRequest({ body: "api_key" }),
+    ];
+    for (const request of malformed) {
+      const concealed = await handleEgress(
+        request,
+        probeEnv,
+        undefined,
+        async () => {
+          upstreamCalls += 1;
+          throw new Error("malformed readiness request reached upstream");
+        },
+      );
+      expect(concealed.status).toBe(404);
+      expect(await concealed.json()).toEqual({ error: "not_found" });
+    }
+    expect(upstreamCalls).toBe(0);
+
+    const invalidConfiguration = await handleEgress(
+      readinessRequest(),
+      { ...probeEnv, ALLOWED_POLICIES: "codex,openai" },
+      undefined,
+      async () => {
+        upstreamCalls += 1;
+        throw new Error("invalid broker configuration reached upstream");
+      },
+    );
+    expect(invalidConfiguration.status).toBe(503);
+    expect(await invalidConfiguration.json()).toEqual({ error: "broker_not_ready" });
+    expect(upstreamCalls).toBe(0);
+  });
+
+  it("reports only the configured model mode through the private status contract", async () => {
+    for (const fixture of [
+      {
+        environment: {
+          ...workerEnv,
+          ALLOWED_POLICIES: "openai",
+          OPENAI_API_KEY: "status-openai-key",
+        },
+        mode: "api_key",
+      },
+      {
+        environment: {
+          ...workerEnv,
+          ALLOWED_POLICIES: "codex",
+          CODEX_OAUTH: fixedCodexCredential(),
+        },
+        mode: "chatgpt",
+      },
+    ]) {
+      const status = await handleEgress(
+        new Request("https://broker.internal/.well-known/nanocodex/model-status"),
+        fixture.environment,
+      );
+      expect(status.status).toBe(200);
+      expect(status.headers.get("cache-control")).toBe("no-store");
+      expect(await status.json()).toEqual({ ready: true, auth_mode: fixture.mode });
+    }
+
+    const unavailable = await handleEgress(
+      new Request("https://broker.internal/.well-known/nanocodex/model-status"),
+      { ...workerEnv, ALLOWED_POLICIES: "openai", OPENAI_API_KEY: "" },
+    );
+    expect(unavailable.status).toBe(503);
+    expect(await unavailable.json()).toEqual({ error: "broker_not_ready" });
+    const malformed = await handleEgress(
+      new Request("https://broker.internal/.well-known/nanocodex/model-status?mode=codex"),
+      { ...workerEnv, ALLOWED_POLICIES: "openai", OPENAI_API_KEY: "status-openai-key" },
+    );
+    expect(malformed.status).toBe(404);
+  });
+
+  it("brokers exact API-key search and image routes with replayable bounded bodies", async () => {
+    for (const path of [
+      "/v1/alpha/search",
+      "/v1/images/generations",
+      "/v1/images/edits",
+    ]) {
+      let observed: Request | undefined;
+      const response = await handleEgress(
+        modelHttpRequest(`https://api.openai.com${path}`, "Bearer NANOCODEX_OPENAI_API_KEY"),
+        {
+          ...workerEnv,
+          ALLOWED_POLICIES: "openai",
+          OPENAI_API_KEY: "real-openai-http-key",
+        },
+        undefined,
+        async (input, init) => {
+          observed = input instanceof Request ? input : new Request(input, init);
+          return Response.json({ ok: true });
+        },
+      );
+      expect(response.status).toBe(200);
+      expect(observed?.url).toBe(`https://api.openai.com${path}`);
+      expect(observed?.method).toBe("POST");
+      expect(observed?.headers.get("authorization")).toBe("Bearer real-openai-http-key");
+      expect(observed?.headers.get("x-should-not-forward")).toBeNull();
+      expect(await observed?.json()).toEqual({ prompt: "safe" });
+    }
+  });
+
+  it("routes exact ChatGPT tools to a capability suffix without exposing placeholders", async () => {
+    let observed: Request | undefined;
+    const response = await handleEgress(
+      modelHttpRequest(
+        "https://chatgpt.com/backend-api/codex/alpha/search",
+        "Bearer NANOCODEX_CODEX_OAUTH",
+        "NANOCODEX_CODEX_ACCOUNT",
+      ),
+      {
+        ...workerEnv,
+        ALLOWED_POLICIES: "codex",
+        CODEX_OAUTH: fixedCodexCredential(),
+        CODEX_RELAY_URL: "https://relay.example/v1/fixed-capability",
+      },
+      undefined,
+      async (input, init) => {
+        observed = input instanceof Request ? input : new Request(input, init);
+        return Response.json({ output: "ok" });
+      },
+    );
+    expect(response.status).toBe(200);
+    expect(observed?.url).toBe(
+      "https://relay.example/v1/fixed-capability/http/codex-web-search",
+    );
+    expect(observed?.headers.get("authorization")).toBe("Bearer deep-codex-token");
+    expect(observed?.headers.get("chatgpt-account-id")).toBe("deep-codex-account");
+    expect([...observed!.headers.values()].join("\n")).not.toContain("NANOCODEX_CODEX");
+
+    const denied = await handleEgress(
+      modelHttpRequest(
+        "https://chatgpt.com/backend-api/codex/alpha/search?destination=evil",
+        "Bearer NANOCODEX_CODEX_OAUTH",
+        "NANOCODEX_CODEX_ACCOUNT",
+      ),
+      {
+        ...workerEnv,
+        ALLOWED_POLICIES: "codex",
+        CODEX_OAUTH: fixedCodexCredential(),
+      },
+    );
+    expect(denied.status).toBe(403);
+  });
+
+  it("rejects shallow HTTP health and sanitizes every deep-probe failure", async () => {
+    const secret = "deep-probe-secret-that-must-never-escape";
+    const privateUrl = "https://private-upstream.example/secret-capability";
+    const unavailable = await handleEgress(
+      readinessRequest(),
+      {
+        ...workerEnv,
+        ALLOWED_POLICIES: "openai",
+        NANOCODEX_BROKER_PROBE_TOKEN: brokerProbeToken,
+        OPENAI_API_KEY: secret,
+      },
+      undefined,
+      async () => new Response(`${secret} ${privateUrl}`, { status: 200 }),
+    );
+    const encoded = await unavailable.text();
+    expect(unavailable.status).toBe(503);
+    expect(JSON.parse(encoded)).toEqual({ error: "broker_not_ready" });
+    expect(unavailable.headers.get("cache-control")).toBe("no-store");
+    expect(encoded).not.toContain(secret);
+    expect(encoded).not.toContain(privateUrl);
+    expect(encoded).not.toContain("openai");
+    expect(encoded).not.toContain(brokerProbeToken);
   });
 
   it("applies the broker's fixed policy rather than a caller-selected policy", async () => {
@@ -301,6 +552,70 @@ function openAiRequest(
       "x-client-request-id": "test",
       "x-should-not-forward": "host-secret",
     },
+  });
+}
+
+function modelHttpRequest(
+  url: string,
+  authorization: string,
+  account?: string,
+): Request {
+  return new Request(url, {
+    method: "POST",
+    headers: {
+      authorization,
+      "content-type": "application/json",
+      ...(account ? { "chatgpt-account-id": account, originator: "codex_cli_rs" } : {}),
+      "user-agent": "test",
+      "x-should-not-forward": "host-secret",
+    },
+    body: JSON.stringify({ prompt: "safe" }),
+  });
+}
+
+function readinessRequest(options: {
+  body?: string;
+  method?: string;
+  token?: string;
+  url?: string;
+} = {}): Request {
+  return new Request(
+    options.url ?? "http://broker.test/.well-known/nanocodex/broker-readiness",
+    {
+      method: options.method ?? "POST",
+      headers: {
+        authorization: `Bearer ${options.token ?? brokerProbeToken}`,
+      },
+      ...(options.body === undefined ? {} : { body: options.body }),
+    },
+  );
+}
+
+const credentialRequests: Request[] = [];
+
+function fixedCodexCredential(): EgressEnv["CODEX_OAUTH"] {
+  return {
+    getByName(name: string) {
+      expect(name).toBe("openai-codex");
+      return {
+        async fetch(input: RequestInfo, init?: RequestInit) {
+          credentialRequests.push(input instanceof Request ? input : new Request(input, init));
+          return Response.json({
+            accessToken: "deep-codex-token",
+            accountId: "deep-codex-account",
+            fedramp: false,
+            expiresAt: 4_102_444_800_000,
+            revision: 7,
+          });
+        },
+      };
+    },
+  } as unknown as EgressEnv["CODEX_OAUTH"];
+}
+
+function socketClose(socket: WebSocket): Promise<CloseEvent> {
+  return new Promise((resolveClose) => {
+    socket.addEventListener("close", resolveClose, { once: true });
   });
 }
 

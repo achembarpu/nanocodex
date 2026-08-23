@@ -12,6 +12,7 @@ import {
 } from "./child-process.mjs";
 import { readCodexSubscription } from "./codex-auth-file.mjs";
 import { credentialSafeHttpOrigin, credentialSafeUrl } from "./credential-origin.mjs";
+import { brokerPolicyForAuthMode } from "./model-auth-mode.mjs";
 import { secretDigestDescriptors } from "./public-secret-scan.mjs";
 import { startSubscriptionEgressProxy } from "./subscription-egress-proxy.mjs";
 
@@ -233,7 +234,7 @@ function brokerConfig() {
     minify: true,
     vars: {
       AGENT_ID: "live-multiplayer-smoke",
-      ALLOWED_POLICIES: authMode === "api_key" ? "openai" : "codex",
+      ALLOWED_POLICIES: brokerPolicyForAuthMode(authMode),
     },
     durable_objects: {
       bindings: [{ name: "CODEX_OAUTH", class_name: "CodexOAuthBroker" }],

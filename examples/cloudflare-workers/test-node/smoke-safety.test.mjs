@@ -17,6 +17,90 @@ import {
   credentialSafeUrl,
 } from "../scripts/credential-origin.mjs";
 import { envLine } from "../scripts/env-file.mjs";
+import { brokerPolicyForAuthMode } from "../scripts/model-auth-mode.mjs";
+import {
+  agentProcessEnvironment,
+  isBrokerReadinessResponse,
+  sendReadinessAttestation,
+  waitForReadiness,
+} from "../scripts/dev-brokered.mjs";
+
+test("each managed auth mode selects exactly one broker policy", () => {
+  assert.equal(brokerPolicyForAuthMode("chatgpt"), "codex");
+  assert.equal(brokerPolicyForAuthMode("api_key"), "openai");
+  assert.throws(() => brokerPolicyForAuthMode("direct"), /must be api_key or chatgpt/);
+});
+
+test("managed agents have no provider-credential or direct transport path", async () => {
+  const [source, roomSource, egressSource, configText, brokerConfigText, webConfigText, packageText, launcher] = await Promise.all([
+    readFile(new URL("../src/index.ts", import.meta.url), "utf8"),
+    readFile(new URL("../src/multiplayer-room.ts", import.meta.url), "utf8"),
+    readFile(new URL("../../../js/bindings/cloudflare/egress.mjs", import.meta.url), "utf8"),
+    readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8"),
+    readFile(new URL("../../cloudflare-egress/wrangler.broker.jsonc", import.meta.url), "utf8"),
+    readFile(new URL("../../../web/wrangler.jsonc", import.meta.url), "utf8"),
+    readFile(new URL("../package.json", import.meta.url), "utf8"),
+    readFile(new URL("../scripts/dev-brokered.mjs", import.meta.url), "utf8"),
+  ]);
+  const environment = source.match(/export interface Env \{[\s\S]*?\n\}/)?.[0];
+  assert.ok(environment, "managed Worker Env declaration was not found");
+  assert.match(environment, /EGRESS: Fetcher/);
+  assert.doesNotMatch(
+    environment,
+    /OPENAI_API_KEY|CODEX_OAUTH|ACCESS_TOKEN|REFRESH_TOKEN|CHATGPT_ACCOUNT_ID/,
+  );
+  assert.match(source, /Transport\.hostManaged\(cloudflareEgress\(\{/);
+  assert.match(source, /binding: this\.env\.EGRESS,\s*authMode,/);
+  assert.doesNotMatch(source, /Transport\.(?:openAi|chatGpt|mpp)\(/);
+  assert.match(egressSource, /Bearer NANOCODEX_CODEX_OAUTH/);
+  assert.match(egressSource, /Bearer NANOCODEX_OPENAI_API_KEY/);
+  assert.match(egressSource, /wss:\/\/chatgpt\.com\/backend-api\/codex\/responses/);
+  assert.match(egressSource, /wss:\/\/api\.openai\.com\/v1\/responses/);
+  assert.match(source, /const configured = env\.NANOCODEX_AUTH_MODE;/);
+  assert.match(roomSource, /const configured = env\.NANOCODEX_AUTH_MODE;/);
+  assert.doesNotMatch(source, /NANOCODEX_AUTH_MODE \?\?/);
+  assert.doesNotMatch(roomSource, /NANOCODEX_AUTH_MODE \?\?/);
+
+  const config = JSON.parse(configText);
+  const brokerConfig = JSON.parse(brokerConfigText);
+  const webConfig = JSON.parse(webConfigText);
+  assert.equal(config.workers_dev, false);
+  assert.equal(brokerConfig.workers_dev, false);
+  assert.deepEqual(
+    config.services?.filter((service) => service.binding === "EGRESS"),
+    [{ binding: "EGRESS", service: "nanocodex-egress-broker-example" }],
+  );
+  assert.equal(config.vars?.OPENAI_API_KEY, undefined);
+  assert.equal(config.vars?.CODEX_OAUTH_BOOTSTRAP, undefined);
+  assert.equal(config.vars?.NANOCODEX_AUTH_MODE, "chatgpt");
+  assert.equal(brokerConfig.vars?.ALLOWED_POLICIES, "codex");
+  assert.deepEqual(
+    webConfig.services?.filter((service) => service.binding === "MULTIPLAYER_BACKEND"),
+    [{ binding: "MULTIPLAYER_BACKEND", service: config.name }],
+  );
+  assert.equal(webConfig.vars?.OPENAI_API_KEY, undefined);
+  assert.equal(webConfig.vars?.CODEX_OAUTH_BOOTSTRAP, undefined);
+
+  const packageJson = JSON.parse(packageText);
+  assert.equal(packageJson.scripts.dev, "node scripts/dev-brokered.mjs");
+  assert.match(launcher, /envLine\("ALLOWED_POLICIES", brokerPolicyForAuthMode\(authMode\)\)/);
+  assert.match(launcher, /const auth = await readCodexSubscription\(authPath\)/);
+  assert.match(launcher, /envLine\("CODEX_OAUTH_BOOTSTRAP", \{/);
+  assert.match(launcher, /envLine\("NANOCODEX_BROKER_PROBE_TOKEN", brokerProbeToken\)/);
+  assert.match(launcher, /env: agentProcessEnvironment\(\)/);
+  const brokerSpawn = launcher.indexOf("const brokerHandle = spawnProcessGroup");
+  const brokerProof = launcher.indexOf('description: "private broker deep readiness"');
+  const managedSpawn = launcher.indexOf("const managedHandle = spawnProcessGroup");
+  const managedHealth = launcher.indexOf('description: "managed Worker health"');
+  const attestation = launcher.indexOf("await sendReadinessAttestation()");
+  const readinessError = launcher.indexOf("class WranglerExitedError");
+  const entrypoint = launcher.lastIndexOf("if (isMainModule()) await main()");
+  assert(brokerSpawn >= 0 && brokerSpawn < brokerProof);
+  assert(brokerProof < managedSpawn);
+  assert(managedSpawn < managedHealth);
+  assert(managedHealth < attestation);
+  assert(readinessError >= 0 && readinessError < entrypoint);
+});
 
 test("brokered dev writes structured credentials as one JSON layer", () => {
   const bootstrap = {
@@ -34,15 +118,154 @@ test("brokered dev writes structured credentials as one JSON layer", () => {
   assert.equal(JSON.parse(encodedString), "fixture-key");
 });
 
-test("brokered dev keeps its disposable state root under launcher control", async () => {
-  const script = fileURLToPath(new URL("../scripts/dev-brokered.mjs", import.meta.url));
-  await assert.rejects(
-    runBoundedProcess(process.execPath, [script, "--persist-to", "/tmp/untrusted-state"], {
-      label: "brokered dev state override",
-      timeoutMs: 2_000,
+test("managed Worker environment receives neither provider nor probe authority", () => {
+  assert.deepEqual(agentProcessEnvironment({
+    ALLOW_INSECURE_LOOPBACK_RELAY: "true",
+    CHATGPT_ACCESS_TOKEN: "access-token",
+    CHATGPT_ACCOUNT_ID: "account-id",
+    CHATGPT_REFRESH_TOKEN: "refresh-token",
+    CODEX_HOME: "/private/codex-home",
+    CODEX_OAUTH_BOOTSTRAP: "oauth-bootstrap",
+    CODEX_RELAY_URL: "https://relay.example/private",
+    NANOCODEX_BROKER_PROBE_TOKEN: "probe-token",
+    NANOCODEX_CODEX_AUTH_FILE: "/private/codex-auth.json",
+    NANOCODEX_CODEX_RELAY_URL: "https://relay.example/private",
+    OPENAI_API_KEY: "api-key",
+    SAFE_PARENT_VALUE: "preserved",
+  }), {
+    SAFE_PARENT_VALUE: "preserved",
+  });
+});
+
+test("brokered readiness ignores shallow 403 health and accepts only a later 2xx proof", async () => {
+  const responses = [
+    new Response("not authorized", { status: 403 }),
+    Response.json({ ready: false }, {
+      status: 200,
+      headers: { "cache-control": "no-store" },
     }),
-    /--persist-to is controlled by the brokered development launcher/,
+    Response.json({ ready: true }, {
+      status: 200,
+      headers: { "cache-control": "no-store" },
+    }),
+  ];
+  const requests = [];
+  await waitForReadiness({
+    acceptResponse: isBrokerReadinessResponse,
+    attempts: 3,
+    delay: async () => {},
+    description: "private broker deep readiness",
+    fetchImpl: async (url, init) => {
+      requests.push({ url, init });
+      return responses.shift();
+    },
+    processes: [{ exitCode: null, signalCode: null }],
+    request: {
+      method: "POST",
+      headers: { authorization: "Bearer private-probe-token" },
+    },
+    retryDelayMs: 0,
+    url: "http://127.0.0.1:8788/.well-known/nanocodex/broker-readiness",
+  });
+  assert.equal(requests.length, 3);
+  assert(requests.every(({ init }) => init.method === "POST"));
+  assert(requests.every(({ init }) => init.headers.authorization === "Bearer private-probe-token"));
+});
+
+test("brokered readiness rejects exact proof when its Wrangler exits during the request", async () => {
+  const child = { exitCode: null, signalCode: null };
+  await assert.rejects(
+    waitForReadiness({
+      acceptResponse: isBrokerReadinessResponse,
+      attempts: 1,
+      delay: async () => {},
+      description: "private broker deep readiness",
+      fetchImpl: async () => {
+        child.exitCode = 1;
+        return Response.json({ ready: true }, {
+          status: 200,
+          headers: { "cache-control": "no-store" },
+        });
+      },
+      processes: [child],
+      retryDelayMs: 0,
+      url: "http://127.0.0.1:8788/.well-known/nanocodex/broker-readiness",
+    }),
+    /a Wrangler process exited before brokered development became ready/,
   );
+});
+
+test("brokered readiness and IPC failures expose no private input", async () => {
+  const secret = "private-readiness-secret";
+  const privateUrl = `https://relay.example/${secret}`;
+  await assert.rejects(
+    waitForReadiness({
+      attempts: 1,
+      delay: async () => {},
+      description: "private broker deep readiness",
+      fetchImpl: async () => {
+        const error = new Error(`${secret} at ${privateUrl}`);
+        error.name = "InjectedFailure";
+        throw error;
+      },
+      processes: [{ exitCode: null, signalCode: null }],
+      request: { headers: { authorization: `Bearer ${secret}` } },
+      retryDelayMs: 0,
+      url: privateUrl,
+    }),
+    (error) => {
+      assert.match(error.message, /request failed \(InjectedFailure\)/);
+      assert.doesNotMatch(error.message, new RegExp(secret));
+      assert.doesNotMatch(error.message, /relay\.example/);
+      return true;
+    },
+  );
+
+  await assert.rejects(
+    sendReadinessAttestation((_message, callback) => callback(new Error(secret))),
+    (error) => {
+      assert.equal(error.message, "failed to send brokered development readiness attestation");
+      assert.doesNotMatch(error.message, new RegExp(secret));
+      return true;
+    },
+  );
+});
+
+test("brokered development emits the exact private readiness attestation", async () => {
+  const messages = [];
+  assert.equal(await sendReadinessAttestation((message, callback) => {
+    messages.push(message);
+    callback();
+  }), true);
+  assert.deepEqual(messages, [{ type: "nanocodex.dev.ready" }]);
+  assert.equal(await sendReadinessAttestation(undefined), false);
+});
+
+test("brokered dev rejects every Wrangler/configuration override", async () => {
+  const script = fileURLToPath(new URL("../scripts/dev-brokered.mjs", import.meta.url));
+  for (const arguments_ of [
+    ["--persist-to=/tmp/untrusted-state"],
+    ["--env-file=/tmp/untrusted.env"],
+    ["--config=/tmp/untrusted.jsonc"],
+    ["--var=OPENAI_API_KEY:leak"],
+    ["--env=production"],
+    ["--remote"],
+    ["untrusted-worker.ts"],
+  ]) {
+    await assert.rejects(
+      runBoundedProcess(process.execPath, ["--", script, ...arguments_], {
+        label: "brokered dev configuration override",
+        timeoutMs: 2_000,
+      }),
+      (error) => {
+        assert.match(error.message, /unexpected argument; only --auth-mode and --broker-only are supported/);
+        for (const argument of arguments_) {
+          assert.doesNotMatch(error.message, new RegExp(escapeRegExp(argument)));
+        }
+        return true;
+      },
+    );
+  }
 });
 
 test("credential-bearing URLs require TLS away from loopback", () => {
@@ -385,4 +608,8 @@ function processIsAlive(pid) {
     if (error?.code === "ESRCH") return false;
     throw error;
   }
+}
+
+function escapeRegExp(value) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

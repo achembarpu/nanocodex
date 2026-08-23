@@ -13,8 +13,10 @@
     "check": "npm run typecheck && npm test && npm run build",
     "deploy:agent": "wrangler deploy -c wrangler.agent.jsonc",
     "deploy:broker": "wrangler deploy -c wrangler.broker.jsonc",
+    "deploy:production:broker": "node scripts/production-broker.mjs",
     "smoke:codex": "node scripts/live-codex-smoke.mjs",
-    "test": "vitest run",
+    "test": "npm run test:node && vitest run",
+    "test:node": "node --test test/*.node.mjs",
     "typecheck": "tsc --noEmit"
   },
   "devDependencies": {

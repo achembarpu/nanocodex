@@ -66,6 +66,50 @@ test("subscription egress proxy rejects a configurable credential destination", 
   );
 });
 
+test("subscription egress proxy exposes only exact capability-gated HTTP tool routes", async () => {
+  const upstream = [];
+  const proxy = await startSubscriptionEgressProxy({
+    capability: "test-capability-0000000000000000000000000000",
+    async fetchImpl(url, init) {
+      upstream.push({ url, init });
+      return Response.json({ output: "ok" });
+    },
+  });
+  const base = proxy.url.replace(/^ws:/, "http:");
+  try {
+    const response = await fetch(`${base}/http/codex-web-search`, {
+      method: "POST",
+      headers: {
+        authorization: "Bearer broker-injected-token",
+        "chatgpt-account-id": "account-1",
+        "content-type": "application/json",
+        originator: "codex_cli_rs",
+        "x-not-forwarded": "private",
+      },
+      body: JSON.stringify({ commands: { search_query: [{ q: "nanocodex" }] } }),
+    });
+    assert.equal(response.status, 200);
+    assert.deepEqual(await response.json(), { output: "ok" });
+    assert.equal(upstream.length, 1);
+    assert.equal(upstream[0].url, "https://chatgpt.com/backend-api/codex/alpha/search");
+    assert.equal(upstream[0].init.headers.authorization, "Bearer broker-injected-token");
+    assert.equal(upstream[0].init.headers["chatgpt-account-id"], "account-1");
+    assert.equal(upstream[0].init.headers["x-not-forwarded"], undefined);
+    assert.deepEqual(JSON.parse(upstream[0].init.body.toString()), {
+      commands: { search_query: [{ q: "nanocodex" }] },
+    });
+
+    const wrong = await fetch(`${base}/http/codex-responses-websocket`, {
+      method: "POST",
+      headers: { authorization: "Bearer broker-injected-token" },
+    });
+    assert.equal(wrong.status, 404);
+    assert.equal(upstream.length, 1);
+  } finally {
+    await proxy.close();
+  }
+});
+
 test("an upstream rejection settles once and leaves the proxy alive", async () => {
   const upstream = createServer((_request, response) => {
     response.writeHead(403, { "content-type": "text/plain" });

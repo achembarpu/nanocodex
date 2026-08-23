@@ -53,25 +53,13 @@ try {
     const ready = client.readyMessage;
     assert(ready.room_id === roomId, `${client.name} joined a different room`);
     assert(ready.members.length === 3, `${client.name} did not receive the complete durable roster`);
+    assert(ready.can_target_agent === true, `${client.name} cannot target the shared agent`);
     assert(
-      ready.can_target_agent === (client === ownerClient),
-      `${client.name} received the wrong agent-targeting authority`,
+      ready.can_end_room === (client === ownerClient),
+      `${client.name} received the wrong destructive room authority`,
     );
     assert(!Object.hasOwn(ready, "agent_id"), `${client.name} received a private agent id`);
   }
-
-  const deniedAgentRequestId = `guest-agent-${randomUUID()}`;
-  graceClient.say(deniedAgentRequestId, "This guest request must be denied.", "agent");
-  await graceClient.waitFor(
-    (message) => message.type === "error" && message.code === "agent_owner_required",
-    timeoutMs,
-  );
-  assert(
-    clients.every((client) => !client.messages.some(
-      (message) => roomEvent(message, "member_message")?.id === deniedAgentRequestId,
-    )),
-    "guest agent request entered the durable room log",
-  );
 
   const roomMessageId = `room-${randomUUID()}`;
   ownerClient.say(roomMessageId, "MULTIPLAYER_HUMANS_OK", "room");
@@ -95,7 +83,7 @@ try {
   );
 
   const agentRequestId = `agent-${randomUUID()}`;
-  ownerClient.say(
+  graceClient.say(
     agentRequestId,
     "Reply in one short sentence containing the exact token MULTIPLAYER_AGENT_OK.",
     "agent",

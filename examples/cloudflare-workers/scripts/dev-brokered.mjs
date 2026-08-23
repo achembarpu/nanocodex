@@ -1,44 +1,53 @@
-import { spawn } from "node:child_process";
+import { randomBytes } from "node:crypto";
+import { realpathSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { readCodexSubscription } from "./codex-auth-file.mjs";
+import { spawnProcessGroup } from "./child-process.mjs";
 import { envLine } from "./env-file.mjs";
+import { brokerPolicyForAuthMode } from "./model-auth-mode.mjs";
 import { startSubscriptionEgressProxy } from "./subscription-egress-proxy.mjs";
 
 const workersRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const brokerRoot = resolve(workersRoot, "../cloudflare-egress");
-const modeArgument = process.argv.slice(2).find((argument) => argument.startsWith("--auth-mode="));
-const authMode = modeArgument?.slice("--auth-mode=".length)
-  ?? process.env.NANOCODEX_AUTH_MODE
-  ?? "chatgpt";
-if (authMode !== "api_key" && authMode !== "chatgpt") {
-  throw new Error("--auth-mode must be api_key or chatgpt");
-}
-const forwardedArguments = process.argv.slice(2).filter((argument) => !argument.startsWith("--auth-mode="));
-if (forwardedArguments.some((argument) => argument === "--persist-to" || argument.startsWith("--persist-to="))) {
-  throw new Error("--persist-to is controlled by the brokered development launcher");
-}
-const workerPort = port("NANOCODEX_WORKER_PORT", 8787);
-const brokerPort = port("NANOCODEX_BROKER_PORT", 8788);
-if (workerPort === brokerPort) throw new Error("managed Worker and broker ports must differ");
-const adminToken = process.env.NANOCODEX_ADMIN_TOKEN ?? "local-admin-token";
-const roomAllocatorToken = process.env.NANOCODEX_ROOM_ALLOCATOR_TOKEN
-  ?? "local-room-allocator-token";
-if (roomAllocatorToken === adminToken) {
-  throw new Error("NANOCODEX_ROOM_ALLOCATOR_TOKEN must differ from NANOCODEX_ADMIN_TOKEN");
-}
-
-await main();
 
 async function main() {
+  const arguments_ = process.argv.slice(2);
+  const brokerOnly = arguments_.includes("--broker-only");
+  const modeArguments = arguments_.filter((argument) => argument.startsWith("--auth-mode="));
+  if (modeArguments.length > 1) throw new Error("--auth-mode may be provided only once");
+  const modeArgument = modeArguments[0];
+  const authMode = modeArgument?.slice("--auth-mode=".length)
+    ?? process.env.NANOCODEX_AUTH_MODE
+    ?? "chatgpt";
+  if (authMode !== "api_key" && authMode !== "chatgpt") {
+    throw new Error("--auth-mode must be api_key or chatgpt");
+  }
+  const unexpectedArguments = arguments_.filter((argument) =>
+    argument !== "--broker-only" && !argument.startsWith("--auth-mode=")
+  );
+  if (unexpectedArguments.length > 0) {
+    throw new Error("unexpected argument; only --auth-mode and --broker-only are supported");
+  }
+  const workerPort = port("NANOCODEX_WORKER_PORT", 8787);
+  const brokerPort = port("NANOCODEX_BROKER_PORT", 8788);
+  if (workerPort === brokerPort) throw new Error("managed Worker and broker ports must differ");
+  const adminToken = process.env.NANOCODEX_ADMIN_TOKEN ?? "local-admin-token";
+  const roomAllocatorToken = process.env.NANOCODEX_ROOM_ALLOCATOR_TOKEN
+    ?? "local-room-allocator-token";
+  if (roomAllocatorToken === adminToken) {
+    throw new Error("NANOCODEX_ROOM_ALLOCATOR_TOKEN must differ from NANOCODEX_ADMIN_TOKEN");
+  }
+  const brokerProbeToken = randomBytes(32).toString("base64url");
   const temporaryDirectory = await mkdtemp(join(tmpdir(), "nanocodex-brokered-dev-"));
   const brokerEnvPath = join(temporaryDirectory, "broker.env");
   const agentEnvPath = join(temporaryDirectory, "agent.env");
   const brokerStatePath = join(temporaryDirectory, "broker-state");
   const agentStatePath = join(temporaryDirectory, "agent-state");
+  const processHandles = [];
   const children = [];
   const exits = [];
   const signalHandlers = new Map();
@@ -46,7 +55,10 @@ async function main() {
   let parentSignal;
 
   try {
-    const brokerEnvironment = [];
+    const brokerEnvironment = [
+      envLine("ALLOWED_POLICIES", brokerPolicyForAuthMode(authMode)),
+      envLine("NANOCODEX_BROKER_PROBE_TOKEN", brokerProbeToken),
+    ];
     let credentialDescription;
     if (authMode === "chatgpt") {
       const codexHome = process.env.CODEX_HOME ?? join(homedir(), ".codex");
@@ -80,38 +92,64 @@ async function main() {
       credentialDescription = "OPENAI_API_KEY from the broker process environment";
     }
 
-    await Promise.all([
+    const environmentWrites = [
       writeFile(brokerEnvPath, `${brokerEnvironment.join("\n")}\n`, { mode: 0o600 }),
-      writeFile(agentEnvPath, [
+    ];
+    if (!brokerOnly) {
+      environmentWrites.push(writeFile(agentEnvPath, [
         envLine("NANOCODEX_ADMIN_TOKEN", adminToken),
         envLine("NANOCODEX_ROOM_ALLOCATOR_TOKEN", roomAllocatorToken),
         envLine("NANOCODEX_AUTH_MODE", authMode),
         envLine("AGENT_IDLE_TIMEOUT_MS", process.env.AGENT_IDLE_TIMEOUT_MS ?? "1000"),
         "",
-      ].join("\n"), { mode: 0o600 }),
-    ]);
+      ].join("\n"), { mode: 0o600 }));
+    }
+    await Promise.all(environmentWrites);
 
     const brokerWrangler = join(brokerRoot, "node_modules", "wrangler", "bin", "wrangler.js");
     const agentWrangler = join(workersRoot, "node_modules", "wrangler", "bin", "wrangler.js");
-    children.push(
-      spawn(process.execPath, [
-        brokerWrangler,
-        "dev",
-        "-c",
-        "wrangler.broker.jsonc",
-        "--env-file",
-        brokerEnvPath,
-        "--persist-to",
-        brokerStatePath,
-        "--port",
-        String(brokerPort),
-        "--inspector-port",
-        "9231",
-      ], {
-        cwd: brokerRoot,
-        stdio: "inherit",
-      }),
-      spawn(process.execPath, [
+    const brokerHandle = spawnProcessGroup(process.execPath, [
+      brokerWrangler,
+      "dev",
+      "-c",
+      "wrangler.broker.jsonc",
+      "--env-file",
+      brokerEnvPath,
+      "--persist-to",
+      brokerStatePath,
+      "--port",
+      String(brokerPort),
+      "--inspector-port",
+      "0",
+    ], {
+      cwd: brokerRoot,
+      stdio: "inherit",
+    });
+    processHandles.push(brokerHandle);
+    children.push(brokerHandle.child);
+    exits.push(childExit(brokerHandle.exit, "broker"));
+    for (const signal of ["SIGINT", "SIGTERM"]) {
+      const handler = () => {
+        parentSignal = signal;
+        for (const handle of processHandles) void handle.terminate().catch(() => {});
+      };
+      signalHandlers.set(signal, handler);
+      process.once(signal, handler);
+    }
+
+    await waitForReadiness({
+      acceptResponse: isBrokerReadinessResponse,
+      description: "private broker deep readiness",
+      processes: children,
+      request: {
+        method: "POST",
+        headers: { authorization: `Bearer ${brokerProbeToken}` },
+      },
+      url: `http://127.0.0.1:${brokerPort}/.well-known/nanocodex/broker-readiness`,
+    });
+
+    if (!brokerOnly) {
+      const managedHandle = spawnProcessGroup(process.execPath, [
         agentWrangler,
         "dev",
         "--env-file",
@@ -121,43 +159,38 @@ async function main() {
         "--port",
         String(workerPort),
         "--inspector-port",
-        "9232",
-        ...forwardedArguments,
+        "0",
       ], {
         cwd: workersRoot,
         env: agentProcessEnvironment(),
         stdio: "inherit",
-      }),
-    );
-    exits.push(
-      childExit(children[0], "broker"),
-      childExit(children[1], "managed Worker"),
-    );
-    for (const signal of ["SIGINT", "SIGTERM"]) {
-      const handler = () => {
-        parentSignal = signal;
-        for (const child of children) terminate(child, signal);
-      };
-      signalHandlers.set(signal, handler);
-      process.once(signal, handler);
+      });
+      processHandles.push(managedHandle);
+      children.push(managedHandle.child);
+      exits.push(childExit(managedHandle.exit, "managed Worker"));
+      await waitForReadiness({
+        description: "managed Worker health",
+        processes: children,
+        url: `http://127.0.0.1:${workerPort}/health`,
+      });
     }
-
-    await Promise.all([
-      waitForHttp(`http://127.0.0.1:${brokerPort}/health`, children, false),
-      waitForHttp(`http://127.0.0.1:${workerPort}/health`, children, true),
-    ]);
+    await sendReadinessAttestation();
     process.stderr.write(
-      `Managed Nanocodex is ready at http://127.0.0.1:${workerPort} in ${authMode} mode.\n` +
-      `The private broker received ${credentialDescription}; the managed Worker received no provider credential.\n`,
+      brokerOnly
+        ? `The private Nanocodex broker is ready in ${authMode} mode and received ${credentialDescription}.\n`
+        : `Managed Nanocodex is ready at http://127.0.0.1:${workerPort} in ${authMode} mode.\n`
+          + `The private broker received ${credentialDescription}; the managed Worker received no provider credential.\n`,
     );
     const exited = await Promise.race(exits);
     if (!parentSignal && exited.code !== 0) {
       throw new Error(`${exited.name} exited with ${exited.code ?? exited.signal}`);
     }
-    process.exitCode = exited.code ?? signalExitCode(exited.signal ?? parentSignal);
+    process.exitCode = parentSignal
+      ? signalExitCode(parentSignal)
+      : (exited.code ?? signalExitCode(exited.signal));
   } finally {
     for (const [signal, handler] of signalHandlers) process.removeListener(signal, handler);
-    for (const child of children) terminate(child, "SIGTERM");
+    await Promise.allSettled(processHandles.map((handle) => handle.terminate()));
     await Promise.allSettled(exits);
     try {
       await localRelay?.close();
@@ -167,10 +200,11 @@ async function main() {
   }
 }
 
-function agentProcessEnvironment() {
-  const environment = { ...process.env };
+export function agentProcessEnvironment(source = process.env) {
+  const environment = { ...source };
   for (const name of [
     "OPENAI_API_KEY",
+    "CODEX_HOME",
     "CODEX_OAUTH_BOOTSTRAP",
     "CODEX_RELAY_URL",
     "ALLOW_INSECURE_LOOPBACK_RELAY",
@@ -178,40 +212,105 @@ function agentProcessEnvironment() {
     "CHATGPT_ACCESS_TOKEN",
     "CHATGPT_ACCOUNT_ID",
     "CHATGPT_REFRESH_TOKEN",
+    "NANOCODEX_BROKER_PROBE_TOKEN",
+    "NANOCODEX_CODEX_AUTH_FILE",
   ]) {
     delete environment[name];
   }
   return environment;
 }
 
-function childExit(child, name) {
-  return new Promise((resolveExit, rejectExit) => {
-    child.once("error", rejectExit);
-    child.once("exit", (code, signal) => resolveExit({ name, code, signal }));
-  });
+function childExit(exit, name) {
+  return exit.then(({ code, signal }) => ({ name, code, signal }));
 }
 
-async function waitForHttp(url, processes, requireOk) {
-  let lastError;
-  for (let attempt = 0; attempt < 300; attempt += 1) {
+export async function waitForReadiness({
+  acceptResponse = (response) => response.ok,
+  attempts = 300,
+  delay = defaultDelay,
+  description,
+  fetchImpl = fetch,
+  processes,
+  request = {},
+  requestTimeoutMs = 1_000,
+  retryDelayMs = 100,
+  url,
+}) {
+  let lastFailure = "no successful response";
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     if (processes.some((child) => child.exitCode !== null || child.signalCode !== null)) {
       throw new Error("a Wrangler process exited before brokered development became ready");
     }
     try {
-      const response = await fetch(url, { signal: AbortSignal.timeout(1_000) });
-      await response.body?.cancel();
-      if (!requireOk || response.ok) return;
-      lastError = new Error(`${url} returned HTTP ${response.status}`);
+      const response = await fetchImpl(url, {
+        ...request,
+        signal: AbortSignal.timeout(requestTimeoutMs),
+      });
+      let accepted;
+      try {
+        accepted = await acceptResponse(response);
+      } finally {
+        await cancelResponseBody(response);
+      }
+      if (accepted) {
+        if (processes.some((child) => child.exitCode !== null || child.signalCode !== null)) {
+          throw new WranglerExitedError();
+        }
+        return;
+      }
+      lastFailure = response.ok ? "invalid readiness response" : `HTTP ${response.status}`;
     } catch (error) {
-      lastError = error;
+      if (error instanceof WranglerExitedError) {
+        throw new Error("a Wrangler process exited before brokered development became ready");
+      }
+      lastFailure = `request failed (${errorName(error)})`;
     }
-    await new Promise((resolveDelay) => setTimeout(resolveDelay, 100));
+    await delay(retryDelayMs);
   }
-  throw new Error(`${url} did not become ready: ${errorMessage(lastError)}`);
+  throw new Error(`${description} did not become ready: ${lastFailure}`);
 }
 
-function terminate(child, signal) {
-  if (child.exitCode === null && child.signalCode === null) child.kill(signal);
+export async function isBrokerReadinessResponse(response) {
+  if (response.status !== 200
+    || response.headers.get("cache-control") !== "no-store"
+    || !response.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
+    return false;
+  }
+  const encoded = await readBoundedResponseText(response, 256);
+  if (encoded === undefined) return false;
+  try {
+    const value = JSON.parse(encoded);
+    return typeof value === "object"
+      && value !== null
+      && !Array.isArray(value)
+      && Object.keys(value).length === 1
+      && value.ready === true;
+  } catch {
+    return false;
+  }
+}
+
+export async function sendReadinessAttestation(send = defaultProcessSend()) {
+  if (!send) return false;
+  try {
+    await new Promise((resolveSend, rejectSend) => {
+      send({ type: "nanocodex.dev.ready" }, (error) => {
+        if (error) rejectSend(error);
+        else resolveSend(undefined);
+      });
+    });
+  } catch {
+    throw new Error("failed to send brokered development readiness attestation");
+  }
+  return true;
+}
+
+async function cancelResponseBody(response) {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // Readiness never reflects a response body or cancellation failure.
+  }
 }
 
 function relayEvent({ type, status, code }) {
@@ -235,6 +334,49 @@ function signalExitCode(signal) {
   return signal ? 1 : 0;
 }
 
-function errorMessage(error) {
-  return error instanceof Error ? error.message : String(error);
+function errorName(error) {
+  return error instanceof Error && error.name ? error.name : typeof error;
 }
+
+async function readBoundedResponseText(response, limit) {
+  if (!response.body) return undefined;
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let total = 0;
+  let output = "";
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) return output + decoder.decode();
+      total += value.byteLength;
+      if (total > limit) {
+        await reader.cancel();
+        return undefined;
+      }
+      output += decoder.decode(value, { stream: true });
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+class WranglerExitedError extends Error {}
+
+function defaultDelay(milliseconds) {
+  return new Promise((resolveDelay) => setTimeout(resolveDelay, milliseconds));
+}
+
+function defaultProcessSend() {
+  return typeof process.send === "function" ? process.send.bind(process) : undefined;
+}
+
+function isMainModule() {
+  if (!process.argv[1]) return false;
+  try {
+    return realpathSync(resolve(process.argv[1])) === realpathSync(fileURLToPath(import.meta.url));
+  } catch {
+    return false;
+  }
+}
+
+if (isMainModule()) await main();

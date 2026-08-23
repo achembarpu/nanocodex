@@ -45,6 +45,7 @@ export type RoomServerMessage =
       latest_cursor: string;
       auth_mode: "api_key" | "chatgpt";
       can_target_agent: boolean;
+      can_end_room: boolean;
     }
   | {
       type: "room_event";
@@ -56,9 +57,10 @@ export type RoomServerMessage =
   | { type: "replay_paused"; cursor: string; latest_cursor: string }
   | { type: "presence"; online_member_ids: string[] }
   | { type: "pong"; nonce?: string }
-  | { type: "error"; code: string; message: string };
+  | { type: "error"; code: string; message: string; id?: string };
 
 const MESSAGE_ID = /^[A-Za-z0-9._:-]{1,128}$/;
+const RECEIPT_ID = /^[A-Za-z0-9_-]{43}$/;
 const CURSOR = /^(0|[1-9][0-9]{0,18})$/;
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
@@ -138,6 +140,26 @@ export function validateDisplayName(value: unknown): string {
     throw new RoomProtocolError("invalid_display_name", "display name contains control characters");
   }
   return name;
+}
+
+export function validateJoinId(value: unknown): string {
+  if (typeof value !== "string" || !RECEIPT_ID.test(value)) {
+    throw new RoomProtocolError(
+      "invalid_join_id",
+      "join id must be a 32-byte base64url value",
+    );
+  }
+  return value;
+}
+
+export function validateCreateId(value: unknown): string {
+  if (typeof value !== "string" || !RECEIPT_ID.test(value)) {
+    throw new RoomProtocolError(
+      "invalid_create_id",
+      "create id must be a 32-byte base64url value",
+    );
+  }
+  return value;
 }
 
 function exactKeys(value: Record<string, unknown>, allowed: readonly string[]): void {

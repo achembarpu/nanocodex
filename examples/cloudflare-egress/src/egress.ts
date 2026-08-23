@@ -6,7 +6,12 @@ import {
 export { CodexOAuthBroker } from "./broker";
 
 const AGENT_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const BROKER_READINESS_PATH = "/.well-known/nanocodex/broker-readiness";
+const MODEL_STATUS_PATH = "/.well-known/nanocodex/model-status";
+const BROKER_READINESS_SESSION_ID = "nanocodex-broker-readiness";
+const BROKER_READINESS_CLOSE_TIMEOUT_MS = 2_000;
 const MAX_BROKER_ERROR_BYTES = 4 * 1024;
+const MAX_MODEL_HTTP_BODY_BYTES = 32 * 1024 * 1024;
 const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
 
 export interface EgressEnv {
@@ -15,6 +20,7 @@ export interface EgressEnv {
   ALLOW_INSECURE_LOOPBACK_RELAY?: string;
   GITHUB_READ_TOKEN?: string;
   OPENAI_API_KEY?: string;
+  NANOCODEX_BROKER_PROBE_TOKEN?: string;
   AGENT_ID: string;
   ALLOWED_POLICIES: string;
 }
@@ -66,6 +72,7 @@ type Rule = Readonly<{
   forwardedHeaders: readonly string[];
   replacements: readonly Replacement[];
   credential: CredentialSource;
+  maxBodyBytes?: number;
 }>;
 
 type CredentialValues = Readonly<{
@@ -157,6 +164,96 @@ const OPENAI_RULE: Rule = {
   credential: { kind: "static", binding: "OPENAI_API_KEY" },
 };
 
+function modelHttpRule(
+  id: string,
+  policy: "codex" | "openai",
+  hostname: "chatgpt.com" | "api.openai.com",
+  path: `/${string}`,
+  replacements: readonly Replacement[],
+  credential: CredentialSource,
+): Rule {
+  return {
+    id,
+    policy,
+    route: {
+      protocol: "https:",
+      hostname,
+      port: "",
+      methods: ["POST"],
+      path: { kind: "exact", value: path },
+      query: "none",
+    },
+    requiredHeaders: [{ name: "content-type", value: "application/json" }],
+    forwardedHeaders: policy === "codex"
+      ? [
+          "authorization",
+          "chatgpt-account-id",
+          "content-type",
+          "originator",
+          "user-agent",
+          "x-openai-fedramp",
+        ]
+      : ["authorization", "content-type", "user-agent"],
+    replacements,
+    credential,
+    maxBodyBytes: MAX_MODEL_HTTP_BODY_BYTES,
+  };
+}
+
+const CODEX_HTTP_RULES: readonly Rule[] = [
+  modelHttpRule(
+    "codex-web-search",
+    "codex",
+    "chatgpt.com",
+    "/backend-api/codex/alpha/search",
+    CODEX_RULE.replacements,
+    CODEX_RULE.credential,
+  ),
+  modelHttpRule(
+    "codex-image-generation",
+    "codex",
+    "chatgpt.com",
+    "/backend-api/codex/images/generations",
+    CODEX_RULE.replacements,
+    CODEX_RULE.credential,
+  ),
+  modelHttpRule(
+    "codex-image-edit",
+    "codex",
+    "chatgpt.com",
+    "/backend-api/codex/images/edits",
+    CODEX_RULE.replacements,
+    CODEX_RULE.credential,
+  ),
+];
+
+const OPENAI_HTTP_RULES: readonly Rule[] = [
+  modelHttpRule(
+    "openai-web-search",
+    "openai",
+    "api.openai.com",
+    "/v1/alpha/search",
+    OPENAI_RULE.replacements,
+    OPENAI_RULE.credential,
+  ),
+  modelHttpRule(
+    "openai-image-generation",
+    "openai",
+    "api.openai.com",
+    "/v1/images/generations",
+    OPENAI_RULE.replacements,
+    OPENAI_RULE.credential,
+  ),
+  modelHttpRule(
+    "openai-image-edit",
+    "openai",
+    "api.openai.com",
+    "/v1/images/edits",
+    OPENAI_RULE.replacements,
+    OPENAI_RULE.credential,
+  ),
+];
+
 const GITHUB_RULE: Rule = {
   id: "github-read-user",
   policy: "github-readonly",
@@ -186,7 +283,13 @@ const GITHUB_RULE: Rule = {
   credential: { kind: "static", binding: "GITHUB_READ_TOKEN" },
 };
 
-const RULES: readonly Rule[] = [CODEX_RULE, OPENAI_RULE, GITHUB_RULE];
+const RULES: readonly Rule[] = [
+  CODEX_RULE,
+  OPENAI_RULE,
+  ...CODEX_HTTP_RULES,
+  ...OPENAI_HTTP_RULES,
+  GITHUB_RULE,
+];
 
 export default {
   fetch(request: Request, env: EgressEnv, ctx: ExecutionContext): Promise<Response> {
@@ -205,14 +308,22 @@ export async function handleEgress(
 ): Promise<Response> {
   const started = Date.now();
   const context = agentContext(env);
-  if (!context) return failed("invalid_broker_configuration", undefined, request, started);
 
   let url: URL;
   try {
     url = new URL(request.url);
   } catch {
-    return denied("invalid_url", context, request, started);
+    return context
+      ? denied("invalid_url", context, request, started)
+      : failed("invalid_broker_configuration", undefined, request, started);
   }
+  if (url.pathname === BROKER_READINESS_PATH) {
+    return handleBrokerReadiness(request, url, env, context, upstreamFetch, diagnostics);
+  }
+  if (url.pathname === MODEL_STATUS_PATH) {
+    return handleModelStatus(request, url, env, context);
+  }
+  if (!context) return failed("invalid_broker_configuration", undefined, request, started);
   if (url.username || url.password || url.hash) {
     return denied("url_credentials_forbidden", context, request, started);
   }
@@ -229,16 +340,17 @@ export async function handleEgress(
   }
 
   try {
+    const body = await replayableRequestBody(request, rule);
     const target = upstreamTarget(rule, url, env);
     let credential = await resolveCredential(rule.credential, env, false);
-    let upstream = await upstreamFetch(buildRequest(request, target, rule, credential));
+    let upstream = await upstreamFetch(buildRequest(request, target, rule, credential, body));
     let recovered = false;
     if (upstream.status === 401 && rule.credential.kind === "codex_oauth") {
       const revision = credential.revision;
       if (revision === undefined) throw new EgressFailure(503, "broker_revision_missing");
       await upstream.body?.cancel();
       credential = await resolveCredential(rule.credential, env, true, revision);
-      upstream = await upstreamFetch(buildRequest(request, target, rule, credential));
+      upstream = await upstreamFetch(buildRequest(request, target, rule, credential, body));
       recovered = true;
     }
     if (REDIRECT_STATUS.has(upstream.status)) {
@@ -283,11 +395,195 @@ export async function handleEgress(
   }
 }
 
+async function handleBrokerReadiness(
+  request: Request,
+  url: URL,
+  env: EgressEnv,
+  context: AgentContext | undefined,
+  upstreamFetch: typeof fetch,
+  diagnostics?: Readonly<{
+    upstreamException(error: Readonly<{ name: string }>): void;
+  }>,
+): Promise<Response> {
+  if (!await exactReadinessRequest(request, url, env.NANOCODEX_BROKER_PROBE_TOKEN)) {
+    return response(404, "not_found");
+  }
+  if (!context) return readinessUnavailable();
+
+  const rule = readinessRule(context);
+  if (!rule) return readinessUnavailable();
+
+  const upgraded = await handleEgress(
+    readinessUpgradeRequest(rule),
+    env,
+    undefined,
+    upstreamFetch,
+    diagnostics,
+  );
+  if (upgraded.status !== 101 || !upgraded.webSocket) {
+    await cancelBody(upgraded);
+    return readinessUnavailable();
+  }
+
+  if (!await closeReadinessSocket(upgraded.webSocket)) return readinessUnavailable();
+
+  return Response.json({ ready: true }, {
+    status: 200,
+    headers: { "cache-control": "no-store" },
+  });
+}
+
+async function handleModelStatus(
+  request: Request,
+  url: URL,
+  env: EgressEnv,
+  context: AgentContext | undefined,
+): Promise<Response> {
+  if (request.method !== "GET"
+    || request.body !== null
+    || url.username
+    || url.password
+    || url.search
+    || url.hash) {
+    return response(404, "not_found");
+  }
+  if (!context) return readinessUnavailable();
+  const rule = readinessRule(context);
+  if (!rule) return readinessUnavailable();
+  try {
+    await resolveCredential(rule.credential, env, false);
+  } catch {
+    return readinessUnavailable();
+  }
+  return Response.json({
+    ready: true,
+    auth_mode: rule.policy === "codex" ? "chatgpt" : "api_key",
+  }, {
+    status: 200,
+    headers: { "cache-control": "no-store" },
+  });
+}
+
+async function closeReadinessSocket(socket: WebSocket): Promise<boolean> {
+  let timeout: ReturnType<typeof setTimeout> | undefined;
+  let closeListener: (() => void) | undefined;
+  const closed = new Promise<boolean>((resolveClosed) => {
+    closeListener = () => resolveClosed(true);
+    socket.addEventListener("close", closeListener, { once: true });
+    timeout = setTimeout(() => resolveClosed(false), BROKER_READINESS_CLOSE_TIMEOUT_MS);
+  });
+  try {
+    socket.accept();
+    socket.close(1000, "readiness_complete");
+    return await closed;
+  } catch {
+    try {
+      socket.close(1011, "readiness_failed");
+    } catch {
+      // The proof still fails closed if an upgraded socket cannot be closed.
+    }
+    return false;
+  } finally {
+    if (timeout !== undefined) clearTimeout(timeout);
+    if (closeListener) socket.removeEventListener("close", closeListener);
+  }
+}
+
+async function exactReadinessRequest(
+  request: Request,
+  url: URL,
+  token: string | undefined,
+): Promise<boolean> {
+  if (request.method !== "POST"
+    || url.username
+    || url.password
+    || url.search
+    || url.hash) {
+    return false;
+  }
+  if (!token
+    || token.length < 32
+    || token.length > 512
+    || token.trim() !== token
+    || /[\u0000-\u0020\u007f]/.test(token)) {
+    return false;
+  }
+  if (request.headers.get("authorization") !== `Bearer ${token}`) return false;
+  return requestBodyIsEmpty(request);
+}
+
+async function requestBodyIsEmpty(request: Request): Promise<boolean> {
+  if (!request.body) return true;
+  const reader = request.body.getReader();
+  try {
+    for (let readCount = 0; readCount < 4; readCount += 1) {
+      const { done, value } = await reader.read();
+      if (done) return true;
+      if (value.byteLength > 0) {
+        await reader.cancel();
+        return false;
+      }
+    }
+    await reader.cancel();
+    return false;
+  } catch {
+    return false;
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function readinessRule(context: AgentContext): Rule | undefined {
+  if (context.policies.has(CODEX_RULE.policy)) return CODEX_RULE;
+  if (context.policies.has(OPENAI_RULE.policy)) return OPENAI_RULE;
+  return undefined;
+}
+
+function readinessUpgradeRequest(rule: Rule): Request {
+  const route = rule.route;
+  if (route.path.kind !== "exact" || route.query !== "none") {
+    throw new EgressFailure(503, "invalid_readiness_rule");
+  }
+  const url = new URL(
+    `${route.protocol}//${route.hostname}${route.port ? `:${route.port}` : ""}${route.path.value}`,
+  );
+  const headers = new Headers({
+    "session-id": BROKER_READINESS_SESSION_ID,
+    "thread-id": BROKER_READINESS_SESSION_ID,
+    "user-agent": BROKER_READINESS_SESSION_ID,
+    "x-client-request-id": BROKER_READINESS_SESSION_ID,
+  });
+  for (const requirement of rule.requiredHeaders) {
+    headers.set(requirement.name, requirement.value);
+  }
+  for (const replacement of rule.replacements) {
+    if (replacement.location === "header") {
+      headers.set(replacement.name, replacement.placeholder);
+    } else {
+      url.searchParams.set(replacement.name, replacement.placeholder);
+    }
+  }
+  return new Request(url, { method: "GET", headers });
+}
+
+async function cancelBody(response: Response): Promise<void> {
+  try {
+    await response.body?.cancel();
+  } catch {
+    // Readiness responses never expose an upstream body or cancellation failure.
+  }
+}
+
+function readinessUnavailable(): Response {
+  return response(503, "broker_not_ready");
+}
+
 function buildRequest(
   request: Request,
   targetUrl: URL,
   rule: Rule,
   credential: CredentialValues,
+  body: Uint8Array | null,
 ): Request {
   const url = new URL(targetUrl);
   const headers = new Headers();
@@ -307,10 +603,54 @@ function buildRequest(
   return new Request(url, {
     method: request.method,
     headers,
-    body: request.method === "GET" || request.method === "HEAD" ? null : request.body,
+    body,
     cache: "no-store",
     redirect: "manual",
   });
+}
+
+async function replayableRequestBody(request: Request, rule: Rule): Promise<Uint8Array | null> {
+  if (request.method === "GET" || request.method === "HEAD") return null;
+  const limit = rule.maxBodyBytes;
+  if (limit === undefined) {
+    throw new EgressFailure(403, "request_body_forbidden");
+  }
+  const declared = request.headers.get("content-length");
+  if (declared !== null) {
+    const bytes = Number(declared);
+    if (!/^(?:0|[1-9][0-9]*)$/.test(declared) || !Number.isSafeInteger(bytes)) {
+      throw new EgressFailure(400, "invalid_content_length");
+    }
+    if (bytes > limit) throw new EgressFailure(413, "request_body_too_large");
+  }
+  if (!request.body) return new Uint8Array();
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > limit) {
+        await reader.cancel();
+        throw new EgressFailure(413, "request_body_too_large");
+      }
+      chunks.push(value);
+    }
+  } catch (error) {
+    if (error instanceof EgressFailure) throw error;
+    throw new EgressFailure(400, "request_body_unavailable");
+  } finally {
+    reader.releaseLock();
+  }
+  const body = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    body.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return body;
 }
 
 function upstreamTarget(rule: Rule, original: URL, env: EgressEnv): URL {
@@ -335,6 +675,9 @@ function upstreamTarget(rule: Rule, original: URL, env: EgressEnv): URL {
     || relay.search
     || relay.hash) {
     throw new EgressFailure(503, "invalid_codex_relay_url");
+  }
+  if (rule.id !== CODEX_RULE.id) {
+    relay.pathname = `${relay.pathname.replace(/\/$/, "")}/http/${rule.id}`;
   }
   return relay;
 }
@@ -429,7 +772,7 @@ function render(template: string, values: CredentialValues): string {
 function agentContext(env: Pick<EgressEnv, "AGENT_ID" | "ALLOWED_POLICIES">): AgentContext | undefined {
   if (!AGENT_ID.test(env.AGENT_ID)) return undefined;
   const configured = env.ALLOWED_POLICIES.split(",").map((policy) => policy.trim());
-  if (configured.length === 0 || configured.some((policy) => !policy)) return undefined;
+  if (configured.length !== 1 || !configured[0]) return undefined;
   const known = new Set(RULES.map((rule) => rule.policy));
   if (configured.some((policy) => !known.has(policy))) return undefined;
   return { agent_id: env.AGENT_ID, policies: new Set(configured) };

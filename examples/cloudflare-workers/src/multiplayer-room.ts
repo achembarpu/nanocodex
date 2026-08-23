@@ -12,6 +12,7 @@ import {
   parseRoomCommand,
   truncateRoomMessage,
   validateDisplayName,
+  validateJoinId,
   type RoomEventMessage,
   type RoomMember,
   type RoomServerMessage,
@@ -44,12 +45,13 @@ const ROOM_CHAT_EVENTS_PER_MINUTE = 240;
 const ROOM_CHAT_BYTES_PER_MINUTE = 512 * 1024;
 const INVITE_TTL_MS = 60 * 60_000;
 export const MULTIPLAYER_ROOM_TTL_MS = 2 * 60 * 60_000;
+const ROOM_QUOTA_CLEANUP_KEY = "nanocodex:room-quota-cleanup";
 const roomEncoder = new TextEncoder();
 
 export interface MultiplayerRoomEnv {
   NANOCODEX_SESSIONS: DurableObjectNamespace;
   NANOCODEX_MULTIPLAYER_QUOTA: DurableObjectNamespace;
-  NANOCODEX_AUTH_MODE?: string;
+  NANOCODEX_AUTH_MODE: string;
 }
 
 type AuthMode = "api_key" | "chatgpt";
@@ -107,6 +109,10 @@ type ChatRateLimitRow = {
   byte_count: number;
 };
 
+type QuotaCleanupRow = {
+  room_id: string;
+};
+
 type SocketAttachment = {
   memberId: string;
   after: string;
@@ -123,12 +129,19 @@ type InitializeRequest = {
 type JoinRequest = {
   invite?: unknown;
   display_name?: unknown;
+  join_id?: unknown;
+};
+
+type JoinReceiptRow = {
+  request_hash: string;
+  member_id: string;
 };
 
 export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
   readonly #events: DurableEventLog<RoomEventMessage>;
   #agentTask?: Promise<void>;
   #initializationTask?: Promise<"ready" | "retry" | "lost">;
+  #lifecycleTail = Promise.resolve();
   #alarmTail = Promise.resolve();
   #sayTail = Promise.resolve();
   readonly #catchUpTasks = new WeakMap<WebSocket, Promise<void>>();
@@ -189,6 +202,11 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
         singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
         redemptions INTEGER NOT NULL CHECK (redemptions >= 0)
       );
+      CREATE TABLE IF NOT EXISTS room_join_receipts (
+        join_id_hash TEXT PRIMARY KEY,
+        request_hash TEXT NOT NULL,
+        member_id TEXT NOT NULL UNIQUE
+      );
     `);
     const roomColumns = new Set(this.ctx.storage.sql.exec<{ name: string }>(
       "PRAGMA table_info(room_state)",
@@ -235,7 +253,7 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === "PUT" && url.pathname === "/initialize") {
-      return this.#initialize(request);
+      return this.#queueLifecycle(() => this.#initialize(request));
     }
     if (request.method === "POST" && url.pathname === "/join") {
       return this.#join(request);
@@ -247,10 +265,10 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
       return this.#state(request);
     }
     if (request.method === "DELETE" && url.pathname === "/room") {
-      return this.#deleteRoom(request, false);
+      return this.#queueLifecycle(() => this.#deleteRoom(request, false));
     }
     if (request.method === "DELETE" && url.pathname === "/admin") {
-      return this.#deleteRoom(request, true);
+      return this.#queueLifecycle(() => this.#deleteRoom(request, true));
     }
     return roomJson({ error: "not_found" }, { status: 404 });
   }
@@ -310,9 +328,17 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
     this.#broadcastPresence();
   }
 
-  async alarm(): Promise<void> {
+  alarm(): Promise<void> {
+    return this.#queueLifecycle(() => this.#runAlarm());
+  }
+
+  async #runAlarm(): Promise<void> {
     const room = this.#room();
-    if (!room) return;
+    if (!room) {
+      const cleanup = await this.#quotaCleanup();
+      if (cleanup) await this.#releaseUnownedRoomQuota(cleanup.room_id);
+      return;
+    }
     if (room.status === "deleting") {
       await this.#deleteOwnedAgent(room);
       return;
@@ -437,6 +463,7 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
       member_id: memberId,
       member_token: memberToken,
       auth_mode: authMode,
+      public_origin: ready.public_origin,
     }, { status: 201 });
   }
 
@@ -545,27 +572,91 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
     const initialRoom = this.#readyRoom();
     if (!initialRoom) return roomJson({ error: "room_unavailable" }, { status: 404 });
     const body = await readJson<JoinRequest>(request, MAX_REQUEST_BYTES);
+    if (!body || typeof body !== "object" || Array.isArray(body)
+      || Object.keys(body).some((key) => !["invite", "display_name", "join_id"].includes(key))) {
+      return roomJson({ error: "invalid_request" }, { status: 400 });
+    }
     if (!body || typeof body.invite !== "string" || !TOKEN.test(body.invite)) {
       return roomJson({ error: "invalid_invite" }, { status: 401 });
     }
     let displayName: string;
+    let joinId: string;
     try {
       displayName = validateDisplayName(body.display_name);
+      joinId = validateJoinId(body.join_id);
     } catch (error) {
       return protocolResponse(error);
     }
-    const memberId = crypto.randomUUID();
-    const memberToken = randomToken();
-    const [inviteHash, memberTokenHash] = await Promise.all([
+    const derivedMemberToken = await joinMemberToken(body.invite, initialRoom.room_id, joinId);
+    const presentedMemberToken = cookieValue(
+      request.headers.get("cookie"),
+      roomCookieName(initialRoom.room_id),
+    );
+    const [inviteHash, joinIdHash, requestHash, derivedMemberTokenHash, presentedMemberTokenHash] = await Promise.all([
       tokenHash(body.invite),
-      tokenHash(memberToken),
+      hashText(`nanocodex-multiplayer-join-id-v1\n${joinId}`),
+      hashText(`nanocodex-multiplayer-join-request-v1\n${body.invite}\n${displayName}`),
+      tokenHash(derivedMemberToken),
+      presentedMemberToken && TOKEN.test(presentedMemberToken)
+        ? tokenHash(presentedMemberToken)
+        : Promise.resolve(undefined),
     ]);
     const now = Date.now();
-    let joined: DurableEvent<RoomEventMessage>;
-    let room: RoomRow;
+    let result: {
+      event?: DurableEvent<RoomEventMessage>;
+      member: MemberRow;
+      memberToken: string;
+      replayed: boolean;
+      room: RoomRow;
+    };
     try {
-      ({ joined, room } = this.ctx.storage.transactionSync(() => {
+      result = this.ctx.storage.transactionSync(() => {
         const current = this.#requireReadyRoom(now);
+        if (current.room_id !== initialRoom.room_id) {
+          throw new RoomMutationError("room_unavailable", "room is unavailable", 404);
+        }
+        if (presentedMemberToken && presentedMemberTokenHash) {
+          const existingMember = this.#memberByTokenHash(presentedMemberTokenHash);
+          if (existingMember) {
+            return {
+              member: existingMember,
+              memberToken: presentedMemberToken,
+              replayed: true,
+              room: current,
+            };
+          }
+        }
+        const receipt = this.#joinReceipt(joinIdHash);
+        if (receipt) {
+          if (receipt.request_hash !== requestHash) {
+            throw new RoomMutationError(
+              "join_id_conflict",
+              "join id is already bound to different inputs",
+              409,
+            );
+          }
+          const member = this.#member(receipt.member_id);
+          if (!member) {
+            throw new RoomMutationError(
+              "join_receipt_invalid",
+              "join receipt no longer identifies a member",
+              409,
+            );
+          }
+          if (derivedMemberTokenHash === member.token_hash) {
+            return {
+              member,
+              memberToken: derivedMemberToken,
+              replayed: true,
+              room: current,
+            };
+          }
+          throw new RoomMutationError(
+            "join_receipt_invalid",
+            "join receipt token binding is invalid",
+            409,
+          );
+        }
         if (now >= current.invite_expires_at) {
           throw new RoomMutationError("invite_expired", "room invite has expired", 410);
         }
@@ -587,12 +678,13 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
         this.ctx.storage.sql.exec(
           "UPDATE room_invite_state SET redemptions = redemptions + 1 WHERE singleton = 1",
         );
+        const memberId = crypto.randomUUID();
         this.ctx.storage.sql.exec(
           `INSERT INTO room_members (id, display_name, token_hash, is_owner, joined_at, last_seen)
            VALUES (?, ?, ?, 0, ?, ?)`,
           memberId,
           displayName,
-          memberTokenHash,
+          derivedMemberTokenHash,
           now,
           now,
         );
@@ -601,11 +693,27 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
           member: { id: memberId, name: displayName },
         });
         this.ctx.storage.sql.exec(
+          `INSERT INTO room_join_receipts (
+             join_id_hash, request_hash, member_id
+           ) VALUES (?, ?, ?)`,
+          joinIdHash,
+          requestHash,
+          memberId,
+        );
+        this.ctx.storage.sql.exec(
           "UPDATE room_state SET last_active = ? WHERE singleton = 1 AND status = 'ready'",
           now,
         );
-        return { joined: event, room: current };
-      }));
+        const member = this.#member(memberId);
+        if (!member) throw new Error("joined room member was not persisted");
+        return {
+          event,
+          member,
+          memberToken: derivedMemberToken,
+          replayed: false,
+          room: current,
+        };
+      });
     } catch (error) {
       if (error instanceof RoomMutationError) {
         this.#scheduleExpiryCleanup();
@@ -616,13 +724,14 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
       }
       throw error;
     }
-    this.#publish(joined);
+    if (result.event) this.#publish(result.event);
     return roomJson({
-      room_id: room.room_id,
-      member_id: memberId,
-      member_token: memberToken,
-      auth_mode: room.auth_mode,
-    }, { status: 201 });
+      room_id: result.room.room_id,
+      member_id: result.member.id,
+      member_token: result.memberToken,
+      auth_mode: result.room.auth_mode,
+      public_origin: result.room.public_origin,
+    }, { status: result.replayed ? 200 : 201 });
   }
 
   async #upgrade(request: Request, url: URL): Promise<Response> {
@@ -632,6 +741,11 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
     const initialRoom = this.#readyRoom();
     if (!initialRoom) return new Response("Unknown or expired room", { status: 404 });
     if (request.headers.get("origin") !== initialRoom.public_origin) {
+      console.error(JSON.stringify({
+        type: "multiplayer.origin_rejected",
+        expected: initialRoom.public_origin,
+        received: request.headers.get("origin"),
+      }));
       return new Response("Room origin rejected", { status: 403 });
     }
     const after = parseCursor(url.searchParams.get("cursor"));
@@ -726,7 +840,8 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
       online_member_ids: this.#onlineMemberIds(),
       latest_cursor: this.#events.latestCursor(),
       auth_mode: room.auth_mode,
-      can_target_agent: member.is_owner === 1,
+      can_target_agent: true,
+      can_end_room: member.is_owner === 1,
     });
     this.#scheduleCatchUp(server);
     this.#broadcastPresence();
@@ -782,9 +897,6 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
         const now = Date.now();
         const room = this.#requireReadyRoom(now);
         const member = this.#requireMember(memberId);
-        if (target === "agent") {
-          this.#requireAgentOwner(member);
-        }
         const existing = this.#messageKey(memberId, clientId);
         if (existing) {
           if (existing.content_hash !== contentHash) {
@@ -804,7 +916,7 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
         return { room, member };
       });
     } catch (error) {
-      if (this.#sendSayError(socket, error)) return;
+      if (this.#sendSayError(socket, clientId, error)) return;
       throw error;
     }
 
@@ -830,7 +942,6 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
         const now = Date.now();
         this.#requireReadyRoom(now);
         const member = this.#requireMember(memberId);
-        if (target === "agent") this.#requireAgentOwner(member);
         const existing = this.#messageKey(memberId, clientId);
         if (existing) {
           if (existing.content_hash !== contentHash) {
@@ -880,7 +991,7 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
         return { cursor: event.cursor, event, replayed: false };
       });
     } catch (error) {
-      if (this.#sendSayError(socket, error)) return;
+      if (this.#sendSayError(socket, clientId, error)) return;
       throw error;
     }
     this.#send(socket, {
@@ -1313,7 +1424,24 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
 
   async #deleteRoom(request: Request, administrator: boolean): Promise<Response> {
     const room = this.#room();
-    if (!room) return new Response(null, { status: 204 });
+    if (!room) {
+      const cleanupRoomId = administrator
+        ? new URL(request.url).searchParams.get("room_id")
+        : null;
+      if (cleanupRoomId !== null) {
+        if (!ROOM_ID.test(cleanupRoomId)) {
+          return roomJson({ error: "invalid_request" }, { status: 400 });
+        }
+        return this.#releaseUnownedRoomQuota(cleanupRoomId);
+      }
+      return new Response(null, { status: 204 });
+    }
+    const cleanupRoomId = administrator
+      ? new URL(request.url).searchParams.get("room_id")
+      : null;
+    if (cleanupRoomId !== null && cleanupRoomId !== room.room_id) {
+      return roomJson({ error: "room_changed" }, { status: 409 });
+    }
     if (administrator) return this.#beginDeleting(room);
     const token = cookieValue(request.headers.get("cookie"), roomCookieName(room.room_id));
     if (!token || !TOKEN.test(token)) {
@@ -1323,6 +1451,9 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
   }
 
   async #beginDeleting(room: RoomRow, ownerTokenHash?: string): Promise<Response> {
+    // Arm first: a stale alarm is self-clearing, while a committed deleting row
+    // must never exist without a durable cleanup wakeup.
+    await this.#armAlarm(Date.now() + 1_000);
     let deleting: RoomRow | undefined;
     try {
       deleting = this.ctx.storage.transactionSync(() => {
@@ -1380,13 +1511,21 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
       await this.#rescheduleAlarm();
       return roomJson({ error: "agent_cleanup_pending" }, { status: 503 });
     }
-    if (!deleted.ok && deleted.status !== 404) {
+    const childDeleted = deleted.ok || deleted.status === 404;
+    try {
       await deleted.body?.cancel();
+    } catch {
       await this.#rescheduleAlarm();
       return roomJson({ error: "agent_cleanup_pending" }, { status: 503 });
     }
-    await deleted.body?.cancel();
-    await this.#releaseRoomQuota(room.room_id);
+    if (!childDeleted) {
+      await this.#rescheduleAlarm();
+      return roomJson({ error: "agent_cleanup_pending" }, { status: 503 });
+    }
+    if (!await this.#releaseRoomQuota(room.room_id)) {
+      await this.#rescheduleAlarm();
+      return roomJson({ error: "agent_cleanup_pending" }, { status: 503 });
+    }
     const cleared = this.ctx.storage.transactionSync(() => {
       const owned = this.#room();
       if (!owned || owned.agent_id !== room.agent_id || owned.status !== "deleting") {
@@ -1398,6 +1537,7 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
       this.ctx.storage.sql.exec("DELETE FROM room_invite_state");
       this.ctx.storage.sql.exec("DELETE FROM room_agent_jobs");
       this.ctx.storage.sql.exec("DELETE FROM room_message_keys");
+      this.ctx.storage.sql.exec("DELETE FROM room_join_receipts");
       this.ctx.storage.sql.exec("DELETE FROM room_members");
       this.ctx.storage.sql.exec(
         "DELETE FROM room_state WHERE singleton = 1 AND agent_id = ? AND status = 'deleting'",
@@ -1407,9 +1547,48 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
     });
     await this.#rescheduleAlarm();
     if (!cleared) {
-      if (!this.#room()) return new Response(null, { status: 204 });
+      if (!this.#room()) {
+        return new Response(null, { status: 204 });
+      }
       return roomJson({ error: "agent_cleanup_pending" }, { status: 503 });
     }
+    return new Response(null, { status: 204 });
+  }
+
+  async #releaseUnownedRoomQuota(roomId: string): Promise<Response> {
+    try {
+      if (this.#room()) {
+        return roomJson({ error: "agent_cleanup_pending" }, { status: 503 });
+      }
+      await this.ctx.storage.transaction(async (transaction) => {
+        const cleanup = await transaction.get<QuotaCleanupRow>(ROOM_QUOTA_CLEANUP_KEY);
+        if (cleanup && cleanup.room_id !== roomId) {
+          throw new RoomMutationError("room_changed", "quota cleanup ownership changed", 409);
+        }
+        await transaction.put(ROOM_QUOTA_CLEANUP_KEY, { room_id: roomId });
+        const current = await transaction.getAlarm();
+        const next = Date.now() + 1_000;
+        if (current === null || next < current) await transaction.setAlarm(next);
+      });
+    } catch (error) {
+      if (error instanceof RoomMutationError) {
+        return roomJson({ error: error.code }, { status: error.status });
+      }
+      throw error;
+    }
+    if (!await this.#releaseRoomQuota(roomId)) {
+      await this.#rescheduleAlarm();
+      return roomJson({ error: "agent_cleanup_pending" }, { status: 503 });
+    }
+    const cleared = await this.ctx.storage.transaction(async (transaction) => {
+      if (this.#room()) return false;
+      const cleanup = await transaction.get<QuotaCleanupRow>(ROOM_QUOTA_CLEANUP_KEY);
+      if (cleanup?.room_id !== roomId) return false;
+      await transaction.delete(ROOM_QUOTA_CLEANUP_KEY);
+      return true;
+    });
+    await this.#rescheduleAlarm();
+    if (!cleared) return roomJson({ error: "agent_cleanup_pending" }, { status: 503 });
     return new Response(null, { status: 204 });
   }
 
@@ -1527,13 +1706,19 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
     return this.#queueAlarm(async () => {
       const room = this.#room();
       if (!room) {
-        await this.ctx.storage.deleteAlarm();
+        if (!await this.#quotaCleanup()) {
+          await this.ctx.storage.deleteAlarm();
+          return;
+        }
+        const next = Date.now() + 1_000;
+        const current = await this.ctx.storage.getAlarm();
+        if (current === null || next < current) await this.ctx.storage.setAlarm(next);
         return;
       }
       const now = Date.now();
       let next = room.expires_at;
       if (room.status === "deleting") {
-        next = Math.min(next, now + 1_000);
+        next = now + 1_000;
       } else if (now >= room.expires_at) {
         next = now + 1;
       } else if (room.status === "initializing") {
@@ -1558,10 +1743,18 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
     return task;
   }
 
+  #queueLifecycle<T>(operation: () => Promise<T>): Promise<T> {
+    const task = this.#lifecycleTail.then(operation);
+    this.#lifecycleTail = task.then(() => undefined, () => undefined);
+    return task;
+  }
+
   #scheduleExpiryCleanup(): void {
     const room = this.#room();
     if (room && Date.now() >= room.expires_at) {
-      this.ctx.waitUntil(this.#beginDeleting(room).then(() => undefined));
+      this.ctx.waitUntil(
+        this.#queueLifecycle(() => this.#beginDeleting(room)).then(() => undefined),
+      );
     }
   }
 
@@ -1579,16 +1772,6 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
       throw new RoomMutationError("room_unavailable", "room membership is unavailable", 403);
     }
     return member;
-  }
-
-  #requireAgentOwner(member: MemberRow): void {
-    if (member.is_owner !== 1) {
-      throw new RoomMutationError(
-        "agent_owner_required",
-        "only the room owner may address the managed agent",
-        403,
-      );
-    }
   }
 
   #enforceSocketCaps(memberId: string): void {
@@ -1644,15 +1827,17 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
     return status === 429 ? "limited" : "unavailable";
   }
 
-  async #releaseRoomQuota(roomId: string): Promise<void> {
+  async #releaseRoomQuota(roomId: string): Promise<boolean> {
     try {
       const response = await this.env.NANOCODEX_MULTIPLAYER_QUOTA.getByName("global").fetch(
         `https://quota.internal/rooms/${encodeURIComponent(roomId)}`,
         { method: "DELETE" },
       );
+      const released = response.ok;
       await response.body?.cancel();
+      return released;
     } catch {
-      // Quota leases also expire at the room's hard two-hour lifetime.
+      return false;
     }
   }
 
@@ -1669,11 +1854,17 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
     ).toArray()[0];
   }
 
+  #quotaCleanup(): Promise<QuotaCleanupRow | undefined> {
+    return this.ctx.storage.get<QuotaCleanupRow>(ROOM_QUOTA_CLEANUP_KEY);
+  }
+
   #readyRoom(): RoomRow | undefined {
     const room = this.#room();
     if (!room || room.status !== "ready") return undefined;
     if (Date.now() < room.expires_at) return room;
-    this.ctx.waitUntil(this.#beginDeleting(room).then(() => undefined));
+    this.ctx.waitUntil(
+      this.#queueLifecycle(() => this.#beginDeleting(room)).then(() => undefined),
+    );
     return undefined;
   }
 
@@ -1697,6 +1888,14 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
       `SELECT id, display_name, token_hash, is_owner, joined_at, last_seen
        FROM room_members WHERE token_hash = ?`,
       hash,
+    ).toArray()[0];
+  }
+
+  #joinReceipt(joinIdHash: string): JoinReceiptRow | undefined {
+    return this.ctx.storage.sql.exec<JoinReceiptRow>(
+      `SELECT request_hash, member_id
+       FROM room_join_receipts WHERE join_id_hash = ?`,
+      joinIdHash,
     ).toArray()[0];
   }
 
@@ -1901,18 +2100,24 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
     );
   }
 
-  #sendSayError(socket: WebSocket, error: unknown): boolean {
+  #sendSayError(socket: WebSocket, clientId: string, error: unknown): boolean {
     if (error instanceof RoomMutationError) {
       if (error.code === "room_unavailable") this.#scheduleExpiryCleanup();
       this.#send(socket, {
         type: "error",
+        id: clientId,
         code: error.code,
         message: error.message,
       });
       return true;
     }
     if (error instanceof EventLogCapacityError) {
-      this.#send(socket, { type: "error", code: error.code, message: error.message });
+      this.#send(socket, {
+        type: "error",
+        id: clientId,
+        code: error.code,
+        message: error.message,
+      });
       return true;
     }
     return false;
@@ -1993,13 +2198,33 @@ export function roomCookieName(roomId: string): string {
 }
 
 function modelAuthMode(env: MultiplayerRoomEnv): AuthMode {
-  const configured = env.NANOCODEX_AUTH_MODE ?? "api_key";
+  const configured = env.NANOCODEX_AUTH_MODE;
   if (configured === "api_key" || configured === "chatgpt") return configured;
   throw new Error("NANOCODEX_AUTH_MODE must be api_key or chatgpt");
 }
 
 function randomToken(): string {
   const bytes = crypto.getRandomValues(new Uint8Array(32));
+  return base64Url(bytes);
+}
+
+async function joinMemberToken(invite: string, roomId: string, joinId: string): Promise<string> {
+  const key = await crypto.subtle.importKey(
+    "raw",
+    roomEncoder.encode(invite),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    ["sign"],
+  );
+  const signature = await crypto.subtle.sign(
+    "HMAC",
+    key,
+    roomEncoder.encode(`nanocodex-multiplayer-join-token-v1\n${roomId}\n${joinId}`),
+  );
+  return base64Url(new Uint8Array(signature));
+}
+
+function base64Url(bytes: Uint8Array): string {
   let binary = "";
   for (const byte of bytes) binary += String.fromCharCode(byte);
   return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");

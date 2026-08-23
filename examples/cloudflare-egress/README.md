@@ -39,6 +39,14 @@ header allowlist is forwarded. Redirects are manual and rejected rather than
 followed with an injected credential. The optional Codex relay is a complete,
 fixed secret URL in the broker; callers cannot select it.
 
+The approved provider and any configured terminating relay are trusted
+credential recipients: they necessarily receive the injected credential and
+must not reflect it in response headers or WebSocket frames. The enforceable
+boundary is that managed code receives only placeholders and can initiate model
+traffic only through fixed broker rules; this example does not claim to defend
+against a malicious approved provider transforming or reflecting a credential
+it legitimately received.
+
 The checked-in deployment enables only `codex`. For API-key mode, change
 `ALLOWED_POLICIES` to only `openai` before deploying. Use a separate broker
 deployment/binding for a consumer that needs `github-readonly`; do not give one
@@ -135,6 +143,31 @@ curl -i -X POST \
 The first request returns `403 destination_denied` from the private broker. The
 second opens the credentialed Responses WebSocket, then immediately closes it
 and returns `authenticated: true`.
+
+For the repository's production rollout, do not edit the checked-in policy or
+run the two manual secret commands above. Set the repository variable
+`NANOCODEX_MANAGED_AUTH_MODE` to exactly `api_key` or `chatgpt`. The master CI
+rollout generates a private broker config with exactly the corresponding
+`openai` or `codex` policy and provisions only the selected explicit secrets.
+After the broker deploy succeeds, the same broker-scoped step atomically
+deletes the known inactive OpenAI, Codex, relay, and GitHub credential bindings,
+so a prior mode cannot leave usable provider material behind:
+
+- `api_key`: `NANOCODEX_MANAGED_OPENAI_API_KEY`;
+- `chatgpt`: `NANOCODEX_MANAGED_CODEX_OAUTH_BOOTSTRAP` and
+  `NANOCODEX_MANAGED_CODEX_RELAY_URL`.
+
+The ChatGPT bootstrap must contain the dedicated deployment's access token,
+refresh token, account ID, and expiry. The relay secret must be a complete
+default-port HTTPS capability path without userinfo, query, or fragment. These
+repository secrets enter only the broker deployment step and its mode-`0600`
+Wrangler secrets file; they are never passed to the managed or website steps.
+Also configure a separate random `NANOCODEX_BROKER_PROBE_TOKEN` repository
+secret. It authorizes only the broker's fixed private readiness request and is
+copied to the disposable service-bound probe, never the managed or website
+Worker. Generate 32 random bytes and store their 43-character base64url
+encoding. The generated broker config and secrets files are mode `0600` and
+deleted in `finally`.
 
 ## Real Codex smoke
 
