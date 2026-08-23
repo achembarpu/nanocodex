@@ -98,6 +98,7 @@ const CONTEXT_APPEND_MAX_BYTES: usize = 500;
 const INITIAL_ITEMS_MAX_COUNT: usize = 128;
 const INITIAL_ITEMS_MAX_TOKENS: usize = 8_192;
 const APPROX_BYTES_PER_TOKEN: usize = 4;
+const REALTIME_ASSISTANT_OUTPUT_TOKEN_BUDGET: usize = 1_000;
 const AGENT_FINAL_MESSAGE_PREFIX: &str = "\"Agent Final Message\":\n\n";
 const STANDALONE_HANDOFF_ID: &str = "codex";
 const MAX_ACTIVE_TRANSCRIPT_BYTES: usize = 8 * 1024;
@@ -504,6 +505,31 @@ impl RealtimeEvents {
     }
 }
 
+/// Caller-owned WebRTC negotiation result and its independent control handles.
+///
+/// The caller applies [`Self::sdp`] to its own peer connection. Nanocodex owns
+/// only the authenticated realtime sideband and never creates or closes the
+/// caller's media peer.
+pub struct RealtimeSdpConnection {
+    sdp: String,
+    session: RealtimeSession,
+    events: RealtimeEvents,
+}
+
+impl RealtimeSdpConnection {
+    /// Returns the provider's SDP answer verbatim.
+    #[must_use]
+    pub fn sdp(&self) -> &str {
+        &self.sdp
+    }
+
+    /// Separates the SDP answer, cheap command handle, and optional event stream.
+    #[must_use]
+    pub fn into_parts(self) -> (String, RealtimeSession, RealtimeEvents) {
+        (self.sdp, self.session, self.events)
+    }
+}
+
 /// Cloneable command handle for one active GPT Realtime session.
 #[derive(Clone)]
 pub struct RealtimeSession {
@@ -558,29 +584,30 @@ impl RealtimeSession {
     ///
     /// # Errors
     ///
-    /// Returns an error when the text cannot be delivered.
+    /// Returns an error when the bounded text queue is closed or unavailable.
     pub async fn send_text(
         &self,
         role: RealtimeInputTextRole,
         text: impl Into<String>,
     ) -> Result<(), RealtimeError> {
-        self.send(CommandKind::Text {
+        self.enqueue(CommandKind::Text {
             role,
             text: text.into(),
         })
         .await
-        .map(|_| ())
     }
 
     /// Appends text that the realtime model should treat as directly speakable.
     ///
     /// # Errors
     ///
-    /// Returns an error when the speech context cannot be delivered.
+    /// Returns an error when the bounded output queue is closed or unavailable.
     pub async fn append_speech(&self, text: impl Into<String>) -> Result<(), RealtimeError> {
-        self.send(CommandKind::Speech { text: text.into() })
-            .await
-            .map(|_| ())
+        let text = text.into();
+        if text.trim().is_empty() {
+            return Ok(());
+        }
+        self.enqueue(CommandKind::Speech { text }).await
     }
 
     /// Completes a background-agent request and asks Realtime to speak the result.
@@ -775,6 +802,14 @@ impl RealtimeSession {
             .map_err(|_| RealtimeError::SendTimeout)?
             .map_err(|_| RealtimeError::Closed)?
     }
+
+    async fn enqueue(&self, kind: CommandKind) -> Result<(), RealtimeError> {
+        let (result, _completed) = oneshot::channel();
+        timeout(SEND_TIMEOUT, self.commands.send(Command { kind, result }))
+            .await
+            .map_err(|_| RealtimeError::SendTimeout)?
+            .map_err(|_| RealtimeError::Closed)
+    }
 }
 
 /// Builder for one independent GPT Realtime conversation.
@@ -793,6 +828,7 @@ pub struct RealtimeSessionBuilder {
     session_mode: RealtimeSessionMode,
     output_modality: RealtimeOutputModality,
     client_managed_handoffs: bool,
+    delegation_ack_filler: Option<bool>,
     codex_responses_as_items: bool,
     codex_response_item_prefix: Option<String>,
     codex_response_handoff_mode: RealtimeResponseHandoffMode,
@@ -820,6 +856,7 @@ impl RealtimeSessionBuilder {
             session_mode: RealtimeSessionMode::Conversational,
             output_modality: RealtimeOutputModality::Audio,
             client_managed_handoffs: false,
+            delegation_ack_filler: None,
             codex_responses_as_items: false,
             codex_response_item_prefix: None,
             codex_response_handoff_mode: RealtimeResponseHandoffMode::Thinking,
@@ -866,6 +903,16 @@ impl RealtimeSessionBuilder {
     #[must_use]
     pub const fn client_managed_handoffs(mut self, managed: bool) -> Self {
         self.client_managed_handoffs = managed;
+        self
+    }
+
+    /// Controls the provider's Frameless delegation acknowledgement filler.
+    ///
+    /// Omitting this policy preserves the Realtime API default. Realtime V1 and
+    /// V2 ignore it.
+    #[must_use]
+    pub const fn delegation_ack_filler(mut self, enabled: bool) -> Self {
+        self.delegation_ack_filler = Some(enabled);
         self
     }
 
@@ -961,16 +1008,7 @@ impl RealtimeSessionBuilder {
     /// Returns an error for invalid configuration, authentication, timeout, or
     /// a failed WebSocket/WebRTC handshake.
     pub async fn connect(self) -> Result<(RealtimeSession, RealtimeEvents), RealtimeError> {
-        if self.instructions.trim().is_empty() {
-            return Err(RealtimeError::InvalidInstructions);
-        }
-        if self
-            .model
-            .as_ref()
-            .is_some_and(|model| model.trim().is_empty())
-        {
-            return Err(RealtimeError::InvalidModel);
-        }
+        validate_session_builder(&self)?;
         let version = self.version.unwrap_or(match self.auth.mode() {
             OpenAiAuthMode::ApiKey => RealtimeVersion::V2,
             OpenAiAuthMode::ChatGpt => RealtimeVersion::V3,
@@ -985,7 +1023,7 @@ impl RealtimeSessionBuilder {
         } else {
             RealtimeTransport::WebSocket
         });
-        let model = self.model.unwrap_or_else(|| match version {
+        let model = self.model.clone().unwrap_or_else(|| match version {
             RealtimeVersion::V1 | RealtimeVersion::V2 => REALTIME_MODEL.to_owned(),
             RealtimeVersion::V3 => CHATGPT_REALTIME_MODEL.to_owned(),
         });
@@ -1009,12 +1047,12 @@ impl RealtimeSessionBuilder {
             handoff_mode: self.codex_response_handoff_mode,
             channel_prefixes: self.codex_response_handoff_channel_prefixes,
         };
-        let (socket, media, sideband) = match transport {
+        let (socket, media, sideband, initial_event) = match transport {
             RealtimeTransport::WebSocket => {
                 let auth = self.auth.snapshot().await?;
                 let endpoint = match self.websocket_url {
                     Some(endpoint) => endpoint,
-                    None => realtime_endpoint(&self.api_base_url, &model)?,
+                    None => realtime_endpoint(&self.api_base_url, &model, version)?,
                 };
                 let mut request = endpoint
                     .as_str()
@@ -1068,9 +1106,15 @@ impl RealtimeSessionBuilder {
                     self.session_mode,
                     self.output_modality,
                     &self.initial_items,
+                    self.delegation_ack_filler,
                 );
                 send_json(&mut socket, &update).await?;
-                (socket, None, None)
+                let initial_event = if version == RealtimeVersion::V3 {
+                    Some(wait_for_frameless_session_started(&mut socket).await?)
+                } else {
+                    None
+                };
+                (socket, None, None, initial_event)
             }
             RealtimeTransport::WebRtc => {
                 let connection = webrtc::connect(webrtc::ConnectConfig {
@@ -1083,6 +1127,7 @@ impl RealtimeSessionBuilder {
                     voice,
                     session_id: self.session_id.as_deref(),
                     initial_items: &self.initial_items,
+                    delegation_ack_filler: self.delegation_ack_filler,
                     version,
                 })
                 .await?;
@@ -1090,35 +1135,348 @@ impl RealtimeSessionBuilder {
                     connection.socket,
                     Some(connection.media),
                     Some(connection.sideband),
+                    None,
                 )
             }
         };
-
-        let (command_tx, command_rx) = mpsc::channel(COMMAND_CAPACITY);
-        let (event_tx, event_rx) = mpsc::channel(EVENT_CAPACITY);
-        let (closed_tx, closed) = watch::channel(false);
-        tokio::spawn(async move {
-            run_socket(
-                socket,
-                command_rx,
-                event_tx,
-                protocol,
-                media,
-                sideband,
-                output_policy,
-            )
-            .await;
-            closed_tx.send_replace(true);
-        });
-        Ok((
-            RealtimeSession {
-                commands: command_tx,
-                protocol,
-                client_managed_handoffs: self.client_managed_handoffs,
-                closed,
-            },
-            RealtimeEvents { receiver: event_rx },
+        Ok(spawn_connected_session(
+            socket,
+            protocol,
+            media,
+            sideband,
+            output_policy,
+            self.client_managed_handoffs,
+            SessionOwnership::Owned,
+            initial_event,
         ))
+    }
+
+    /// Creates a realtime call from an SDP offer owned by the embedding.
+    ///
+    /// The answer is returned directly before Nanocodex waits for the control
+    /// sideband to join. The caller owns its peer connection and all media.
+    /// Commands accepted while the sideband joins remain queued on the session.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid configuration, authentication, or a failed
+    /// realtime call-creation request. Sideband failures are reported through
+    /// the returned event stream after the answer is available.
+    pub async fn connect_with_sdp(
+        self,
+        offer_sdp: impl Into<String>,
+    ) -> Result<RealtimeSdpConnection, RealtimeError> {
+        validate_session_builder(&self)?;
+        if self.transport.is_some() {
+            return Err(RealtimeError::InvalidConfiguration(
+                "connect_with_sdp owns transport selection".to_owned(),
+            ));
+        }
+        let version = self.version.unwrap_or(RealtimeVersion::V1);
+        validate_external_call_version(version)?;
+        validate_realtime_configuration(
+            version,
+            RealtimeTransport::WebRtc,
+            self.session_mode,
+            self.output_modality,
+            &self.initial_items,
+        )?;
+        validate_initial_items(version, &self.initial_items)?;
+        let protocol = realtime_protocol(version);
+        let model = self.model.clone().unwrap_or_else(|| match version {
+            RealtimeVersion::V1 | RealtimeVersion::V2 => REALTIME_MODEL.to_owned(),
+            RealtimeVersion::V3 => CHATGPT_REALTIME_MODEL.to_owned(),
+        });
+        let voice = self.voice.unwrap_or(match version {
+            RealtimeVersion::V1 | RealtimeVersion::V3 => CHATGPT_REALTIME_VOICE,
+            RealtimeVersion::V2 => PLATFORM_REALTIME_VOICE,
+        });
+        validate_voice(version, voice)?;
+        let offer_sdp = offer_sdp.into();
+        let prepared = webrtc::prepare_with_sdp(
+            webrtc::ConnectConfig {
+                auth: &self.auth,
+                api_base_url: &self.api_base_url,
+                attestation_header: self.attestation_header.as_deref(),
+                websocket_url: self.websocket_url.as_deref(),
+                instructions: &self.instructions,
+                model: &model,
+                voice,
+                session_id: self.session_id.as_deref(),
+                initial_items: &self.initial_items,
+                delegation_ack_filler: self.delegation_ack_filler,
+                version,
+            },
+            &offer_sdp,
+        )
+        .await?;
+        let output_policy = OutputPolicy {
+            codex_responses_as_items: self.codex_responses_as_items,
+            codex_response_item_prefix: self.codex_response_item_prefix,
+            handoff_mode: self.codex_response_handoff_mode,
+            channel_prefixes: self.codex_response_handoff_channel_prefixes,
+        };
+        let (session, events) = spawn_pending_sideband_session(
+            prepared.sideband,
+            prepared.initial_update,
+            protocol,
+            output_policy,
+            self.client_managed_handoffs,
+        );
+        Ok(RealtimeSdpConnection {
+            sdp: prepared.sdp,
+            session,
+            events,
+        })
+    }
+}
+
+/// Builder for attaching Nanocodex's authenticated control sideband to a call
+/// already created and negotiated by the embedding.
+///
+/// Existing calls are never reconfigured: attachment performs no call-create
+/// request and sends no `session.update`.
+pub struct RealtimeCallAttachmentBuilder {
+    auth: OpenAiAuth,
+    call_id: String,
+    attestation_header: Option<Arc<str>>,
+    websocket_url: Option<String>,
+    session_id: Option<String>,
+    version: Option<RealtimeVersion>,
+    client_managed_handoffs: bool,
+    codex_responses_as_items: bool,
+    codex_response_item_prefix: Option<String>,
+    codex_response_handoff_mode: RealtimeResponseHandoffMode,
+    codex_response_handoff_channel_prefixes: BTreeMap<String, Vec<String>>,
+}
+
+impl RealtimeCallAttachmentBuilder {
+    pub(crate) const fn new(auth: OpenAiAuth, call_id: String) -> Self {
+        Self {
+            auth,
+            call_id,
+            attestation_header: None,
+            websocket_url: None,
+            session_id: None,
+            version: None,
+            client_managed_handoffs: false,
+            codex_responses_as_items: false,
+            codex_response_item_prefix: None,
+            codex_response_handoff_mode: RealtimeResponseHandoffMode::Thinking,
+            codex_response_handoff_channel_prefixes: BTreeMap::new(),
+        }
+    }
+
+    /// Selects the realtime wire protocol. Existing calls default to V1.
+    #[must_use]
+    pub const fn version(mut self, version: RealtimeVersion) -> Self {
+        self.version = Some(version);
+        self
+    }
+
+    /// Replaces the derived Realtime sideband URL.
+    #[must_use]
+    pub fn websocket_url(mut self, websocket_url: impl Into<String>) -> Self {
+        self.websocket_url = Some(websocket_url.into());
+        self
+    }
+
+    /// Supplies a stable caller-owned session identity header.
+    #[must_use]
+    pub fn session_id(mut self, session_id: impl Into<String>) -> Self {
+        self.session_id = Some(session_id.into());
+        self
+    }
+
+    /// Supplies a host-generated `x-oai-attestation` value for the sideband.
+    #[must_use]
+    pub fn attestation_header(mut self, value: impl Into<Arc<str>>) -> Self {
+        self.attestation_header = Some(value.into());
+        self
+    }
+
+    /// Lets the embedding own all coding-agent handoff responses.
+    #[must_use]
+    pub const fn client_managed_handoffs(mut self, managed: bool) -> Self {
+        self.client_managed_handoffs = managed;
+        self
+    }
+
+    /// Sends automatic coding-agent responses as conversation items.
+    #[must_use]
+    pub const fn codex_responses_as_items(mut self, as_items: bool) -> Self {
+        self.codex_responses_as_items = as_items;
+        self
+    }
+
+    /// Prefixes automatic coding-agent response items.
+    #[must_use]
+    pub fn codex_response_item_prefix(mut self, prefix: impl Into<String>) -> Self {
+        self.codex_response_item_prefix = Some(prefix.into());
+        self
+    }
+
+    /// Selects Frameless coding-agent handoff channel routing.
+    #[must_use]
+    pub const fn codex_response_handoff_mode(mut self, mode: RealtimeResponseHandoffMode) -> Self {
+        self.codex_response_handoff_mode = mode;
+        self
+    }
+
+    /// Replaces BEM prefixes keyed by `analysis`, `commentary`, and `final`.
+    #[must_use]
+    pub fn codex_response_handoff_channel_prefixes(
+        mut self,
+        prefixes: BTreeMap<String, Vec<String>>,
+    ) -> Self {
+        self.codex_response_handoff_channel_prefixes = prefixes;
+        self
+    }
+
+    /// Attaches the authenticated sideband and returns independent controls.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for unsupported V2 attachment, authentication, or a
+    /// failed initial sideband handshake.
+    pub async fn connect(self) -> Result<(RealtimeSession, RealtimeEvents), RealtimeError> {
+        let version = self.version.unwrap_or(RealtimeVersion::V1);
+        validate_external_call_version(version)?;
+        let protocol = realtime_protocol(version);
+        let connection = webrtc::connect_existing_call(webrtc::ExistingCallConfig {
+            auth: &self.auth,
+            attestation_header: self.attestation_header.as_deref(),
+            websocket_url: self.websocket_url.as_deref(),
+            session_id: self.session_id.as_deref(),
+            version,
+            call_id: &self.call_id,
+        })
+        .await?;
+        let output_policy = OutputPolicy {
+            codex_responses_as_items: self.codex_responses_as_items,
+            codex_response_item_prefix: self.codex_response_item_prefix,
+            handoff_mode: self.codex_response_handoff_mode,
+            channel_prefixes: self.codex_response_handoff_channel_prefixes,
+        };
+        Ok(spawn_connected_session(
+            connection.socket,
+            protocol,
+            None,
+            Some(connection.sideband),
+            output_policy,
+            self.client_managed_handoffs,
+            SessionOwnership::External,
+            None,
+        ))
+    }
+}
+
+fn spawn_connected_session(
+    socket: Socket,
+    protocol: RealtimeProtocol,
+    media: Option<webrtc::WebRtcMedia>,
+    sideband: Option<webrtc::WebRtcSideband>,
+    output_policy: OutputPolicy,
+    client_managed_handoffs: bool,
+    ownership: SessionOwnership,
+    initial_event: Option<RealtimeEvent>,
+) -> (RealtimeSession, RealtimeEvents) {
+    let (command_tx, command_rx) = mpsc::channel(COMMAND_CAPACITY);
+    let (event_tx, event_rx) = mpsc::channel(EVENT_CAPACITY);
+    let (closed_tx, closed) = watch::channel(false);
+    if let Some(event) = initial_event {
+        event_tx
+            .try_send(event)
+            .expect("a new realtime event queue has capacity");
+    }
+    tokio::spawn(async move {
+        run_socket_with_pending(
+            socket,
+            command_rx,
+            event_tx,
+            protocol,
+            media,
+            sideband,
+            output_policy,
+            ownership,
+            VecDeque::new(),
+        )
+        .await;
+        closed_tx.send_replace(true);
+    });
+    (
+        RealtimeSession {
+            commands: command_tx,
+            protocol,
+            client_managed_handoffs,
+            closed,
+        },
+        RealtimeEvents { receiver: event_rx },
+    )
+}
+
+fn spawn_pending_sideband_session(
+    sideband: webrtc::WebRtcSideband,
+    initial_update: Option<Value>,
+    protocol: RealtimeProtocol,
+    output_policy: OutputPolicy,
+    client_managed_handoffs: bool,
+) -> (RealtimeSession, RealtimeEvents) {
+    let (command_tx, command_rx) = mpsc::channel(COMMAND_CAPACITY);
+    let (event_tx, event_rx) = mpsc::channel(EVENT_CAPACITY);
+    let (closed_tx, closed) = watch::channel(false);
+    tokio::spawn(async move {
+        run_pending_sideband(
+            sideband,
+            initial_update,
+            command_rx,
+            event_tx,
+            protocol,
+            output_policy,
+        )
+        .await;
+        closed_tx.send_replace(true);
+    });
+    (
+        RealtimeSession {
+            commands: command_tx,
+            protocol,
+            client_managed_handoffs,
+            closed,
+        },
+        RealtimeEvents { receiver: event_rx },
+    )
+}
+
+fn validate_session_builder(builder: &RealtimeSessionBuilder) -> Result<(), RealtimeError> {
+    if builder.instructions.trim().is_empty() {
+        return Err(RealtimeError::InvalidInstructions);
+    }
+    if builder
+        .model
+        .as_ref()
+        .is_some_and(|model| model.trim().is_empty())
+    {
+        return Err(RealtimeError::InvalidModel);
+    }
+    Ok(())
+}
+
+const fn realtime_protocol(version: RealtimeVersion) -> RealtimeProtocol {
+    match version {
+        RealtimeVersion::V1 => RealtimeProtocol::V1,
+        RealtimeVersion::V2 => RealtimeProtocol::Direct,
+        RealtimeVersion::V3 => RealtimeProtocol::Frameless,
+    }
+}
+
+fn validate_external_call_version(version: RealtimeVersion) -> Result<(), RealtimeError> {
+    if version == RealtimeVersion::V2 {
+        Err(RealtimeError::InvalidConfiguration(
+            "AVAS realtime calls require realtime v1 or v3".to_owned(),
+        ))
+    } else {
+        Ok(())
     }
 }
 
@@ -1311,6 +1669,12 @@ enum RealtimeProtocol {
     V1,
     Direct,
     Frameless,
+}
+
+#[derive(Clone, Copy, Eq, PartialEq)]
+enum SessionOwnership {
+    Owned,
+    External,
 }
 
 struct OutputPolicy {
@@ -1576,6 +1940,7 @@ fn configured_session_update(
     mode: RealtimeSessionMode,
     output: RealtimeOutputModality,
     initial_items: &[RealtimeInitialItem],
+    delegation_ack_filler: Option<bool>,
 ) -> Value {
     match version {
         RealtimeVersion::V1 => json!({
@@ -1632,6 +1997,9 @@ fn configured_session_update(
                 "audio": { "output": { "voice": voice.as_str() } },
                 "delegation": { "type": "client" },
             });
+            if let Some(delegation_ack_filler) = delegation_ack_filler {
+                session["delegation"]["ack_filler"] = Value::Bool(delegation_ack_filler);
+            }
             if !items.is_empty() {
                 session["initial_items"] = Value::Array(items);
             }
@@ -1640,7 +2008,88 @@ fn configured_session_update(
     }
 }
 
+async fn run_pending_sideband(
+    sideband: webrtc::WebRtcSideband,
+    initial_update: Option<Value>,
+    mut commands: mpsc::Receiver<Command>,
+    events: mpsc::Sender<RealtimeEvent>,
+    protocol: RealtimeProtocol,
+    output_policy: OutputPolicy,
+) {
+    let mut pending_commands = VecDeque::new();
+    let mut socket = {
+        let connect = sideband.reconnect();
+        tokio::pin!(connect);
+        loop {
+            tokio::select! {
+                result = &mut connect => {
+                    match result {
+                        Ok(socket) => break socket,
+                        Err(error) => {
+                            let _ = events.send(RealtimeEvent::Error(error.to_string())).await;
+                            return;
+                        }
+                    }
+                }
+                command = commands.recv(), if pending_commands.len() < COMMAND_CAPACITY => {
+                    match command {
+                        Some(Command { kind: CommandKind::Close, result }) => {
+                            let _ = result.send(Ok(CommandOutcome::Closed(Vec::new())));
+                            return;
+                        }
+                        Some(command) => pending_commands.push_back(command),
+                        None => return,
+                    }
+                }
+            }
+        }
+    };
+    if let Some(update) = initial_update
+        && let Err(error) = send_json(&mut socket, &update).await
+    {
+        let _ = events.send(RealtimeEvent::Error(error.to_string())).await;
+        return;
+    }
+    run_socket_with_pending(
+        socket,
+        commands,
+        events,
+        protocol,
+        None,
+        Some(sideband),
+        output_policy,
+        SessionOwnership::External,
+        pending_commands,
+    )
+    .await;
+}
+
+#[cfg(test)]
 async fn run_socket(
+    socket: Socket,
+    commands: mpsc::Receiver<Command>,
+    events: mpsc::Sender<RealtimeEvent>,
+    protocol: RealtimeProtocol,
+    media: Option<webrtc::WebRtcMedia>,
+    sideband: Option<webrtc::WebRtcSideband>,
+    output_policy: OutputPolicy,
+) {
+    run_socket_with_pending(
+        socket,
+        commands,
+        events,
+        protocol,
+        media,
+        sideband,
+        output_policy,
+        SessionOwnership::Owned,
+        VecDeque::new(),
+    )
+    .await;
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn run_socket_with_pending(
     mut socket: Socket,
     mut commands: mpsc::Receiver<Command>,
     events: mpsc::Sender<RealtimeEvent>,
@@ -1648,12 +2097,13 @@ async fn run_socket(
     mut media: Option<webrtc::WebRtcMedia>,
     sideband: Option<webrtc::WebRtcSideband>,
     output_policy: OutputPolicy,
+    ownership: SessionOwnership,
+    mut pending_commands: VecDeque<Command>,
 ) {
     let media_input = media.as_ref().map(webrtc::WebRtcMedia::input);
     let reconnectable_sideband = sideband.is_some() && protocol == RealtimeProtocol::Frameless;
     let mut state = SocketState::default();
     let mut tail_returned = false;
-    let mut pending_commands = VecDeque::new();
     let mut rapid_disconnects = 0_u32;
     'session: loop {
         let connected_at = Instant::now();
@@ -1668,6 +2118,7 @@ async fn run_socket(
                     &output_policy,
                     &events,
                     reconnectable_sideband,
+                    ownership,
                 )
                 .await
                 {
@@ -1687,7 +2138,7 @@ async fn run_socket(
             tokio::select! {
                 command = commands.recv() => {
                     let Some(command) = command else {
-                        if let Err(error) = close_socket(&mut socket, protocol).await {
+                        if let Err(error) = close_socket(&mut socket, protocol, ownership).await {
                             debug!(%error, "failed to close dropped GPT Realtime session");
                         }
                         break 'session;
@@ -1701,6 +2152,7 @@ async fn run_socket(
                         &output_policy,
                         &events,
                         reconnectable_sideband,
+                        ownership,
                     ).await {
                         SocketCommandExit::Continue => {}
                         SocketCommandExit::Terminal { returned_tail } => {
@@ -1920,6 +2372,7 @@ async fn handle_socket_command(
     output_policy: &OutputPolicy,
     events: &mpsc::Sender<RealtimeEvent>,
     reconnectable: bool,
+    ownership: SessionOwnership,
 ) -> SocketCommandExit {
     let replayable = reconnectable && command.kind.replayable_after_sideband_loss();
     let output_routing_before = replayable.then(|| state.output_routing.clone());
@@ -1930,6 +2383,7 @@ async fn handle_socket_command(
         media_input,
         state,
         output_policy,
+        ownership,
     )
     .await;
     let result = match result {
@@ -1999,6 +2453,7 @@ async fn handle_command(
     media_input: Option<&mpsc::Sender<RealtimeAudio>>,
     state: &mut SocketState,
     output_policy: &OutputPolicy,
+    ownership: SessionOwnership,
 ) -> Result<CommandOutcome, RealtimeError> {
     match command {
         CommandKind::Audio(audio) => {
@@ -2172,7 +2627,7 @@ async fn handle_command(
         }
         CommandKind::Close => {
             let tail = state.active_transcript.take_tail();
-            close_socket(socket, protocol).await?;
+            close_socket(socket, protocol, ownership).await?;
             Ok(CommandOutcome::Closed(tail))
         }
     }
@@ -2265,7 +2720,11 @@ async fn send_session_context(
 async fn close_socket(
     socket: &mut Socket,
     protocol: RealtimeProtocol,
+    ownership: SessionOwnership,
 ) -> Result<(), RealtimeError> {
+    if ownership == SessionOwnership::External {
+        return Ok(());
+    }
     if matches!(protocol, RealtimeProtocol::Frameless) {
         send_json(socket, &ClientEvent::SessionClose).await?;
     }
@@ -2346,6 +2805,8 @@ async fn send_response_item(
             || output.to_owned(),
             |prefix| format!("{prefix}\n\n{output}"),
         );
+    let output =
+        truncate_realtime_text_to_token_budget(&output, REALTIME_ASSISTANT_OUTPUT_TOKEN_BUDGET);
     if protocol == RealtimeProtocol::Frameless {
         send_session_context(socket, &output, channel).await
     } else {
@@ -2464,14 +2925,76 @@ async fn send_backend_output(socket: &mut Socket, output: &str) -> Result<(), Re
 }
 
 fn realtime_backend_output(protocol: RealtimeProtocol, output: String) -> String {
-    if protocol == RealtimeProtocol::V1
+    let output = if protocol != RealtimeProtocol::Direct
         || output.is_empty()
         || output.starts_with(BACKEND_TEXT_PREFIX)
     {
         output
     } else {
         format!("{BACKEND_TEXT_PREFIX}{output}")
+    };
+    truncate_realtime_text_to_token_budget(&output, REALTIME_ASSISTANT_OUTPUT_TOKEN_BUDGET)
+}
+
+fn truncate_realtime_text_to_token_budget(text: &str, budget_tokens: usize) -> String {
+    let mut truncation_budget = budget_tokens;
+    loop {
+        let candidate =
+            crate::session::compaction::truncate_middle_with_token_budget(text, truncation_budget);
+        let candidate_tokens = approx_token_count(&candidate);
+        if candidate_tokens <= budget_tokens {
+            break candidate;
+        }
+        let excess_tokens = candidate_tokens.saturating_sub(budget_tokens);
+        let next_budget = truncation_budget.saturating_sub(excess_tokens.max(1));
+        if next_budget == 0 {
+            break crate::session::compaction::truncate_middle_with_token_budget(text, 0);
+        }
+        truncation_budget = next_budget;
     }
+}
+
+async fn wait_for_frameless_session_started(
+    socket: &mut Socket,
+) -> Result<RealtimeEvent, RealtimeError> {
+    timeout(CONNECT_TIMEOUT, async {
+        loop {
+            match socket.next().await {
+                Some(Ok(Message::Text(payload))) => {
+                    trace!(target: "nanocodex_oai_api::realtime::wire", payload = %payload, "GPT Realtime event");
+                    let value: Value = serde_json::from_str(&payload)
+                        .map_err(|error| RealtimeError::Message(error.to_string()))?;
+                    match parse_event_value(&value, RealtimeProtocol::Frameless)? {
+                        Some(event @ RealtimeEvent::SessionReady { .. }) => return Ok(event),
+                        Some(RealtimeEvent::Error(message)) => {
+                            return Err(RealtimeError::WebSocket(message));
+                        }
+                        _ => {
+                            return Err(RealtimeError::WebSocket(
+                                "frameless realtime session received an event before session.started"
+                                    .to_owned(),
+                            ));
+                        }
+                    }
+                }
+                Some(Ok(Message::Close(_))) | None => {
+                    return Err(RealtimeError::WebSocket(
+                        "frameless realtime session ended before session.started".to_owned(),
+                    ));
+                }
+                Some(Ok(Message::Binary(_))) => {
+                    return Err(RealtimeError::WebSocket(
+                        "unexpected binary realtime websocket event".to_owned(),
+                    ));
+                }
+                Some(Ok(Message::Ping(_))) | Some(Ok(Message::Pong(_))) => {}
+                Some(Ok(Message::Frame(_))) => {}
+                Some(Err(error)) => return Err(map_websocket_error(error)),
+            }
+        }
+    })
+    .await
+    .map_err(|_| RealtimeError::ConnectTimeout)?
 }
 
 async fn send_json<T: Serialize>(socket: &mut Socket, value: &T) -> Result<(), RealtimeError> {
@@ -3089,7 +3612,11 @@ fn string_field(value: &Value, field: &str) -> Option<String> {
     value.get(field).and_then(Value::as_str).map(str::to_owned)
 }
 
-fn realtime_endpoint(api_base_url: &str, model: &str) -> Result<String, RealtimeError> {
+fn realtime_endpoint(
+    api_base_url: &str,
+    model: &str,
+    version: RealtimeVersion,
+) -> Result<String, RealtimeError> {
     let mut url =
         Url::parse(api_base_url).map_err(|error| RealtimeError::InvalidUrl(error.to_string()))?;
     match url.scheme() {
@@ -3106,11 +3633,32 @@ fn realtime_endpoint(api_base_url: &str, model: &str) -> Result<String, Realtime
             )));
         }
     }
-    let path = url.path().trim_end_matches('/');
-    if !path.ends_with("/realtime") {
-        url.set_path(&format!("{path}/realtime"));
+    let path = url.path().to_owned();
+    if version == RealtimeVersion::V3 {
+        if path.is_empty() || path == "/" || path == "/v1" || path == "/v1/" {
+            url.set_path("/v1/live");
+        } else if let Some(prefix) = path.trim_end_matches('/').strip_suffix("/realtime") {
+            url.set_path(&format!("{prefix}/live"));
+        } else if path.ends_with("/live/") {
+            url.set_path(path.trim_end_matches('/'));
+        }
+    } else {
+        if path.is_empty() || path == "/" {
+            url.set_path("/v1/realtime");
+        } else if path.ends_with("/realtime/") {
+            url.set_path(path.trim_end_matches('/'));
+        } else if path.ends_with("/v1") {
+            url.set_path(&format!("{path}/realtime"));
+        } else if path.ends_with("/v1/") {
+            url.set_path(&format!("{path}realtime"));
+        }
     }
-    url.query_pairs_mut().append_pair("model", model);
+    let mut query = url.query_pairs_mut();
+    if version == RealtimeVersion::V1 {
+        query.append_pair("intent", "quicksilver");
+    }
+    query.append_pair("model", model);
+    drop(query);
     Ok(url.into())
 }
 
@@ -3124,13 +3672,15 @@ mod tests {
 
     use futures_util::{SinkExt, StreamExt};
     use tokio::{
+        io::{AsyncReadExt, AsyncWriteExt},
         net::TcpListener,
         sync::{mpsc, oneshot},
     };
     use tokio_tungstenite::{
-        accept_async,
+        accept_async, accept_hdr_async,
         tungstenite::{
             Message,
+            handshake::server::{Request, Response},
             protocol::{CloseFrame, frame::coding::CloseCode},
         },
     };
@@ -3143,18 +3693,42 @@ mod tests {
         RealtimeEvent, RealtimeInitialItem, RealtimeInputTextRole, RealtimeOutputModality,
         RealtimeProtocol, RealtimeResponseHandoffMode, RealtimeSessionMode, RealtimeTextRole,
         RealtimeTranscriptEntry, RealtimeTransport, RealtimeVersion, RealtimeVoice,
-        SIDEBAND_RECONNECT_MAX_DELAY, SocketCommandExit, SocketState, configured_session_update,
-        context_append_chunks, delegated_prompt, handle_socket_command, parse_event,
-        realtime_endpoint, run_socket, session_update, sideband_reconnect_delay,
-        transcript_entries_bytes, validate_initial_items, validate_realtime_configuration,
+        SIDEBAND_RECONNECT_MAX_DELAY, SessionOwnership, SocketCommandExit, SocketState,
+        configured_session_update, context_append_chunks, delegated_prompt, handle_socket_command,
+        parse_event, realtime_endpoint, run_socket, session_update, sideband_reconnect_delay,
+        transcript_entries_bytes, validate_external_call_version, validate_initial_items,
+        validate_realtime_configuration,
     };
     use crate::OpenAi;
 
     #[test]
     fn derives_realtime_endpoint_from_api_base() {
         assert_eq!(
-            realtime_endpoint("https://api.openai.com/v1", "gpt-realtime-1.5").unwrap(),
+            realtime_endpoint(
+                "https://api.openai.com/v1",
+                "gpt-realtime-1.5",
+                RealtimeVersion::V2,
+            )
+            .unwrap(),
             "wss://api.openai.com/v1/realtime?model=gpt-realtime-1.5"
+        );
+        assert_eq!(
+            realtime_endpoint(
+                "https://api.openai.com/v1/realtime",
+                "gpt-live-1-boulder-alpha",
+                RealtimeVersion::V3,
+            )
+            .unwrap(),
+            "wss://api.openai.com/v1/live?model=gpt-live-1-boulder-alpha"
+        );
+        assert_eq!(
+            realtime_endpoint(
+                "https://api.openai.com/v1",
+                "gpt-realtime-1.5",
+                RealtimeVersion::V1,
+            )
+            .unwrap(),
+            "wss://api.openai.com/v1/realtime?intent=quicksilver&model=gpt-realtime-1.5"
         );
     }
 
@@ -3218,6 +3792,7 @@ mod tests {
             RealtimeSessionMode::Conversational,
             RealtimeOutputModality::Audio,
             &[],
+            None,
         );
         assert_eq!(v1["session"]["type"], "quicksilver");
         assert_eq!(v1["session"]["audio"]["output"]["voice"], "cove");
@@ -3230,6 +3805,7 @@ mod tests {
             RealtimeSessionMode::Transcription,
             RealtimeOutputModality::Audio,
             &[],
+            None,
         );
         assert_eq!(transcription["session"]["type"], "transcription");
         assert!(transcription["session"].get("tools").is_none());
@@ -3242,8 +3818,10 @@ mod tests {
             RealtimeSessionMode::Conversational,
             RealtimeOutputModality::Audio,
             &[RealtimeInitialItem::new(RealtimeTextRole::User, "hello")],
+            Some(false),
         );
         assert_eq!(v3["session"]["delegation"]["type"], "client");
+        assert_eq!(v3["session"]["delegation"]["ack_filler"], false);
         assert_eq!(v3["session"]["initial_items"][0]["role"], "user");
     }
 
@@ -3279,6 +3857,13 @@ mod tests {
             )
             .is_err()
         );
+    }
+
+    #[test]
+    fn existing_calls_accept_v1_and_v3_only() {
+        assert!(validate_external_call_version(RealtimeVersion::V1).is_ok());
+        assert!(validate_external_call_version(RealtimeVersion::V3).is_ok());
+        assert!(validate_external_call_version(RealtimeVersion::V2).is_err());
     }
 
     #[test]
@@ -3626,6 +4211,7 @@ mod tests {
             &policy,
             &events,
             true,
+            SessionOwnership::Owned,
         )
         .await
         {
@@ -3644,6 +4230,7 @@ mod tests {
                 &policy,
                 &events,
                 true,
+                SessionOwnership::Owned,
             )
             .await,
             SocketCommandExit::Continue
@@ -3693,6 +4280,12 @@ mod tests {
             let update = socket.next().await.unwrap().unwrap().into_text().unwrap();
             let update: serde_json::Value = serde_json::from_str(&update).unwrap();
             assert_eq!(update["type"], "session.update");
+            socket
+                .send(Message::Text(
+                    r#"{"type":"session.started","session":{"id":"live_bem"}}"#.into(),
+                ))
+                .await
+                .unwrap();
 
             let commentary = socket.next().await.unwrap().unwrap().into_text().unwrap();
             let commentary: serde_json::Value = serde_json::from_str(&commentary).unwrap();
@@ -3700,7 +4293,7 @@ mod tests {
             assert_eq!(commentary["channel"], "commentary");
             assert_eq!(
                 commentary["content"][0]["text"],
-                "item prefix\n\n[BACKEND] <|start|>assistant<|channel|>commentary<|message|>still working<|end|>"
+                "item prefix\n\n<|start|>assistant<|channel|>commentary<|message|>still working<|end|>"
             );
 
             let final_answer = socket.next().await.unwrap().unwrap().into_text().unwrap();
@@ -3709,7 +4302,7 @@ mod tests {
             assert_eq!(final_answer["channel"], "speakable");
             assert_eq!(
                 final_answer["content"][0]["text"],
-                "item prefix\n\n[BACKEND] no BEM envelope"
+                "item prefix\n\nno BEM envelope"
             );
 
             let close = socket.next().await.unwrap().unwrap().into_text().unwrap();
@@ -3750,6 +4343,55 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn frameless_websocket_waits_for_session_started_and_preserves_it() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let (update_seen, update_received) = oneshot::channel();
+        let (start_session, start_requested) = oneshot::channel();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            let update = socket.next().await.unwrap().unwrap().into_text().unwrap();
+            let update: serde_json::Value = serde_json::from_str(&update).unwrap();
+            assert_eq!(update["type"], "session.update");
+            update_seen.send(()).unwrap();
+            start_requested.await.unwrap();
+            socket
+                .send(Message::Text(
+                    r#"{"type":"session.started","session":{"id":"live_ready"}}"#.into(),
+                ))
+                .await
+                .unwrap();
+            let close = socket.next().await.unwrap().unwrap().into_text().unwrap();
+            let close: serde_json::Value = serde_json::from_str(&close).unwrap();
+            assert_eq!(close["type"], "session.close");
+        });
+
+        let openai = OpenAi::new("test-key").unwrap();
+        let connect = tokio::spawn(async move {
+            openai
+                .realtime("delegate coding work")
+                .version(RealtimeVersion::V3)
+                .transport(RealtimeTransport::WebSocket)
+                .websocket_url(format!("ws://{address}"))
+                .connect()
+                .await
+        });
+        update_received.await.unwrap();
+        assert!(!connect.is_finished());
+        start_session.send(()).unwrap();
+        let (session, mut events) = connect.await.unwrap().unwrap();
+        assert_eq!(
+            events.recv().await,
+            Some(RealtimeEvent::SessionReady {
+                session_id: "live_ready".to_owned()
+            })
+        );
+        session.close().await.unwrap();
         server.await.unwrap();
     }
 
@@ -3960,5 +4602,245 @@ mod tests {
             }]
         );
         server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn caller_owned_sdp_returns_before_sideband_join() {
+        let call_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let call_address = call_listener.local_addr().unwrap();
+        let call_server = tokio::spawn(async move {
+            let (mut stream, _) = call_listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            loop {
+                let read = stream.read(&mut chunk).await.unwrap();
+                request.extend_from_slice(&chunk[..read]);
+                let Some(headers_end) = request.windows(4).position(|part| part == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..headers_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length: ")
+                            .and_then(|value| value.parse::<usize>().ok())
+                    })
+                    .unwrap();
+                if request.len() >= headers_end + 4 + content_length {
+                    break;
+                }
+            }
+            stream
+                .write_all(
+                    b"HTTP/1.1 201 Created\r\nContent-Length: 8\r\nLocation: /v1/live/rtc_external\r\n\r\nv=answer",
+                )
+                .await
+                .unwrap();
+        });
+        let sideband_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let sideband_address = sideband_listener.local_addr().unwrap();
+        let openai = OpenAi::builder("test-key")
+            .api_base_url(format!("http://{call_address}/v1"))
+            .build()
+            .unwrap();
+
+        let connection = tokio::time::timeout(
+            Duration::from_secs(1),
+            openai
+                .realtime("delegate coding work")
+                .version(RealtimeVersion::V3)
+                .websocket_url(format!("ws://{sideband_address}/v1"))
+                .connect_with_sdp("v=offer"),
+        )
+        .await
+        .expect("SDP answer must not wait for the sideband")
+        .unwrap();
+        assert_eq!(connection.sdp(), "v=answer");
+        let (_sdp, session, _events) = connection.into_parts();
+        tokio::time::timeout(
+            Duration::from_secs(1),
+            session.send_text(RealtimeInputTextRole::User, "queued before join"),
+        )
+        .await
+        .expect("text append must resolve after bounded-queue acceptance")
+        .unwrap();
+        tokio::time::timeout(Duration::from_secs(1), session.close())
+            .await
+            .expect("close must cancel a pending sideband join")
+            .unwrap();
+        drop(sideband_listener);
+        call_server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn existing_call_attachment_sends_no_session_configuration_or_close() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut socket = accept_async(stream).await.unwrap();
+            match tokio::time::timeout(Duration::from_secs(1), socket.next()).await {
+                Ok(Some(Ok(Message::Text(payload)))) => {
+                    panic!("existing-call attachment sent configuration: {payload}")
+                }
+                Ok(Some(Ok(Message::Close(_)))) | Ok(None) | Ok(Some(Err(_))) => {}
+                Ok(Some(Ok(message))) => panic!("unexpected existing-call frame: {message:?}"),
+                Err(_) => panic!("external close did not detach the sideband"),
+            }
+        });
+        let openai = OpenAi::new("test-key").unwrap();
+        let (session, _events) = openai
+            .attach_realtime_call("rtc_existing")
+            .version(RealtimeVersion::V3)
+            .websocket_url(format!("ws://{address}/v1"))
+            .connect()
+            .await
+            .unwrap();
+        session.close().await.unwrap();
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn existing_call_reconnects_with_the_same_call_and_transcript() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut first = accept_hdr_async(stream, |request: &Request, response: Response| {
+                assert_eq!(request.uri().path(), "/v1/live/rtc_existing");
+                Ok(response)
+            })
+            .await
+            .unwrap();
+            first
+                .send(Message::Text(
+                    r#"{"type":"input_transcript.added","item":{"text":"hello"}}"#.into(),
+                ))
+                .await
+                .unwrap();
+            first
+                .send(Message::Close(Some(CloseFrame {
+                    code: CloseCode::Away,
+                    reason: "replace sideband".into(),
+                })))
+                .await
+                .unwrap();
+
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut second = accept_hdr_async(stream, |request: &Request, response: Response| {
+                assert_eq!(request.uri().path(), "/v1/live/rtc_existing");
+                Ok(response)
+            })
+            .await
+            .unwrap();
+            second
+                .send(Message::Text(
+                    r#"{"type":"turn.done","turn":{"role":"user","transcript":"hello"}}"#.into(),
+                ))
+                .await
+                .unwrap();
+            match tokio::time::timeout(Duration::from_secs(2), second.next()).await {
+                Ok(Some(Ok(Message::Text(payload)))) => {
+                    panic!("existing-call reconnect sent configuration: {payload}")
+                }
+                Ok(Some(Ok(Message::Close(_)))) | Ok(None) | Ok(Some(Err(_))) => {}
+                Ok(Some(Ok(message))) => panic!("unexpected reconnect frame: {message:?}"),
+                Err(_) => panic!("external close did not detach the reconnected sideband"),
+            }
+        });
+
+        let openai = OpenAi::new("test-key").unwrap();
+        let (session, mut events) = openai
+            .attach_realtime_call("rtc_existing")
+            .version(RealtimeVersion::V3)
+            .websocket_url(format!("ws://{address}/v1"))
+            .connect()
+            .await
+            .unwrap();
+        assert_eq!(
+            events.recv().await,
+            Some(RealtimeEvent::InputTranscriptDelta("hello".to_owned()))
+        );
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(3), events.recv())
+                .await
+                .unwrap(),
+            Some(RealtimeEvent::InputTranscriptDone("hello".to_owned()))
+        );
+        assert_eq!(
+            session.close_with_transcript_tail().await.unwrap(),
+            vec![RealtimeTranscriptEntry {
+                role: "user".to_owned(),
+                text: "hello".to_owned(),
+            }]
+        );
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn existing_call_reconnect_410_closes_quietly() {
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let mut first = accept_hdr_async(stream, |request: &Request, response: Response| {
+                assert_eq!(request.uri().path(), "/v1/live/rtc_ended");
+                Ok(response)
+            })
+            .await
+            .unwrap();
+            first
+                .send(Message::Close(Some(CloseFrame {
+                    code: CloseCode::Away,
+                    reason: "replace sideband".into(),
+                })))
+                .await
+                .unwrap();
+
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 1024];
+            while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                let read = stream.read(&mut chunk).await.unwrap();
+                assert_ne!(read, 0);
+                request.extend_from_slice(&chunk[..read]);
+            }
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.starts_with("GET /v1/live/rtc_ended HTTP/1.1\r\n"));
+            stream
+                .write_all(b"HTTP/1.1 410 Gone\r\nContent-Length: 0\r\n\r\n")
+                .await
+                .unwrap();
+        });
+
+        let openai = OpenAi::new("test-key").unwrap();
+        let (_session, mut events) = openai
+            .attach_realtime_call("rtc_ended")
+            .version(RealtimeVersion::V3)
+            .websocket_url(format!("ws://{address}/v1"))
+            .connect()
+            .await
+            .unwrap();
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(3), events.recv())
+                .await
+                .expect("terminal 410 must stop reconnecting without an error event"),
+            None
+        );
+        server.await.unwrap();
+    }
+
+    #[test]
+    fn realtime_backend_output_obeys_the_codex_token_budget() {
+        let output = super::realtime_backend_output(RealtimeProtocol::Direct, "é".repeat(4_000));
+        assert!(super::approx_token_count(&output) <= 1_000);
+        assert!(output.starts_with("[BACKEND] "));
+        assert!(output.contains("tokens truncated"));
+        assert_eq!(
+            super::realtime_backend_output(RealtimeProtocol::Frameless, "spoken".to_owned()),
+            "spoken"
+        );
     }
 }

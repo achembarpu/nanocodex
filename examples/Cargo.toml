@@ -98,6 +98,10 @@ name = "realtime-pipe"
 path = "realtime_pipe.rs"
 
 [[bin]]
+name = "realtime-external"
+path = "realtime_external.rs"
+
+[[bin]]
 name = "voice"
 path = "voice.rs"
 

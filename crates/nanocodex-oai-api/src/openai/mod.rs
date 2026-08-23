@@ -87,6 +87,26 @@ where
         )
     }
 
+    /// Attaches an authenticated control sideband to an existing realtime call.
+    ///
+    /// The embedding retains ownership of call creation, WebRTC negotiation,
+    /// and media. Nanocodex does not reconfigure or close the remote call.
+    #[cfg(all(feature = "realtime", not(target_family = "wasm")))]
+    #[cfg_attr(
+        docsrs,
+        doc(cfg(all(feature = "realtime", not(target_family = "wasm"))))
+    )]
+    #[must_use]
+    pub fn attach_realtime_call(
+        &self,
+        call_id: impl Into<String>,
+    ) -> crate::realtime::RealtimeCallAttachmentBuilder {
+        crate::realtime::RealtimeCallAttachmentBuilder::new(
+            self.config.auth.clone(),
+            call_id.into(),
+        )
+    }
+
     /// Starts a client-side managed session with stable developer
     /// instructions.
     ///

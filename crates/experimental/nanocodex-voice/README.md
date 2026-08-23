@@ -19,6 +19,12 @@ exists and otherwise reaches Realtime as a standalone update, so the voice
 model stays synchronized with typed work. The Nanocodex TUI wires this path
 automatically.
 
+`VoiceSession::append_text` and `VoiceSession::append_speech` expose Codex's
+bounded live control queues to other inputs. They return after queue acceptance
+instead of waiting for a provider round trip; transport failures remain typed
+Realtime events. Empty speech is ignored and speakable output uses Codex's
+1,000-token bound.
+
 Voice-started coding work remains independently controllable when the audio
 session stops or reconnects. Retain a `VoiceAgentControl`, pass it to each
 replacement session with `VoiceSessionBuilder::agent_control`, and route the
@@ -35,8 +41,8 @@ and read-only session-context capabilities.
 The builder exposes V1/V2/V3, WebSocket/WebRTC, conversation/transcription,
 audio/text output, initial items, client-managed handoffs, responses-as-items,
 item prefixes, thinking/commentary/BEM routing, configurable BEM prefixes,
-startup-context policy, and tail-flush policy. Defaults follow Codex for the
-selected authentication mode.
+delegation acknowledgement filler, startup-context policy, and tail-flush
+policy. Defaults follow Codex for the selected authentication mode.
 
 ```rust,no_run
 use nanocodex::{Nanocodex, OpenAi};

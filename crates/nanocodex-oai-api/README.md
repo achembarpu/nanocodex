@@ -173,6 +173,18 @@ The experimental `nanocodex-voice` crate packages default desktop devices and
 background-agent delegation without moving those policies into this transport
 boundary.
 
+Embeddings that already own WebRTC use
+[`realtime::RealtimeSessionBuilder::connect_with_sdp`]. It creates the remote
+call and returns a [`realtime::RealtimeSdpConnection`] immediately after the
+answer SDP is available, while the authenticated sideband joins in the
+background. The caller applies the answer and owns its peer and media for the
+entire call. [`OpenAi::attach_realtime_call`] instead joins a call created and
+negotiated elsewhere. Attachment defaults to Realtime V1, supports V3 when
+selected explicitly, performs no call-create request, and sends no
+`session.update`. Closing either external mode detaches Nanocodex's sideband; it
+does not send `session.close` or terminate the caller-owned media call. See the
+`realtime-external` example for both modes.
+
 Both transports expose background-agent delegation as
 [`realtime::RealtimeEvent::AgentRequest`]. An embedding handles that event with
 its existing agent or tool loop, then calls

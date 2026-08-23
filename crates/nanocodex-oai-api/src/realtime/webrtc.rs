@@ -57,10 +57,22 @@ const WEBRTC_EXPECTED_PACKET_LOSS_PERCENT: u8 = 5;
 const OPUS_PACKET_CAPACITY: usize = 4_000;
 const OPENAI_REALTIME_BASE: &str = "https://api.openai.com/v1";
 const ATTESTATION_UNAVAILABLE: &str = r#"{"v":1,"s":1}"#;
+const MULTIPART_BOUNDARY: &str = "----nanocodex-realtime-boundary";
 
 pub(super) struct WebRtcConnection {
     pub(super) socket: Socket,
     pub(super) media: WebRtcMedia,
+    pub(super) sideband: WebRtcSideband,
+}
+
+pub(super) struct PreparedCallerSdpCall {
+    pub(super) sdp: String,
+    pub(super) sideband: WebRtcSideband,
+    pub(super) initial_update: Option<Value>,
+}
+
+pub(super) struct ExistingCallConnection {
+    pub(super) socket: Socket,
     pub(super) sideband: WebRtcSideband,
 }
 
@@ -81,7 +93,7 @@ impl WebRtcSideband {
     ) -> Result<Self, RealtimeError> {
         Ok(Self {
             auth,
-            endpoint: sideband_endpoint(config.websocket_url, call_id)?,
+            endpoint: sideband_endpoint(config.websocket_url, call_id, config.version)?,
             attestation_header: config
                 .attestation_header
                 .unwrap_or(ATTESTATION_UNAVAILABLE)
@@ -147,7 +159,17 @@ pub(super) struct ConnectConfig<'a> {
     pub(super) voice: RealtimeVoice,
     pub(super) session_id: Option<&'a str>,
     pub(super) initial_items: &'a [RealtimeInitialItem],
+    pub(super) delegation_ack_filler: Option<bool>,
     pub(super) version: RealtimeVersion,
+}
+
+pub(super) struct ExistingCallConfig<'a> {
+    pub(super) auth: &'a OpenAiAuth,
+    pub(super) attestation_header: Option<&'a str>,
+    pub(super) websocket_url: Option<&'a str>,
+    pub(super) session_id: Option<&'a str>,
+    pub(super) version: RealtimeVersion,
+    pub(super) call_id: &'a str,
 }
 
 pub(super) async fn connect(config: ConnectConfig<'_>) -> Result<WebRtcConnection, RealtimeError> {
@@ -174,20 +196,7 @@ pub(super) async fn connect(config: ConnectConfig<'_>) -> Result<WebRtcConnectio
         "connected GPT Realtime WebRTC sideband"
     );
     if config.version == RealtimeVersion::V1 {
-        let update = json!({
-            "type": "session.update",
-            "session": {
-                "type": "quicksilver",
-                "instructions": config.instructions,
-                "audio": {
-                    "input": {
-                        "format": { "type": "audio/pcm", "rate": super::REALTIME_SAMPLE_RATE }
-                    },
-                    "output": { "voice": config.voice.as_str() }
-                }
-            }
-        });
-        super::send_json(&mut socket, &update).await?;
+        send_v1_session_update(&mut socket, &config).await?;
     }
     Ok(WebRtcConnection {
         socket,
@@ -198,6 +207,67 @@ pub(super) async fn connect(config: ConnectConfig<'_>) -> Result<WebRtcConnectio
             audio: offer.audio,
         },
     })
+}
+
+async fn send_v1_session_update(
+    socket: &mut Socket,
+    config: &ConnectConfig<'_>,
+) -> Result<(), RealtimeError> {
+    super::send_json(socket, &v1_session_update(config)).await
+}
+
+fn v1_session_update(config: &ConnectConfig<'_>) -> Value {
+    json!({
+        "type": "session.update",
+        "session": {
+            "type": "quicksilver",
+            "instructions": config.instructions,
+            "audio": {
+                "input": {
+                    "format": { "type": "audio/pcm", "rate": super::REALTIME_SAMPLE_RATE }
+                },
+                "output": { "voice": config.voice.as_str() }
+            }
+        }
+    })
+}
+
+pub(super) async fn prepare_with_sdp(
+    config: ConnectConfig<'_>,
+    sdp: &str,
+) -> Result<PreparedCallerSdpCall, RealtimeError> {
+    let (call, auth) = create_call_with_auth_recovery(&config, sdp).await?;
+    trace!(target: "nanocodex_oai_api::realtime::wire", sdp = %call.sdp, call_id = %call.id, "GPT Realtime WebRTC answer");
+    let sideband = WebRtcSideband::from_config(&config, auth, &call.id)?;
+    let initial_update =
+        (config.version == RealtimeVersion::V1).then(|| v1_session_update(&config));
+    Ok(PreparedCallerSdpCall {
+        sdp: call.sdp,
+        sideband,
+        initial_update,
+    })
+}
+
+pub(super) async fn connect_existing_call(
+    config: ExistingCallConfig<'_>,
+) -> Result<ExistingCallConnection, RealtimeError> {
+    let auth = config.auth.snapshot().await?;
+    let sideband = WebRtcSideband {
+        auth,
+        endpoint: sideband_endpoint(config.websocket_url, config.call_id, config.version)?,
+        attestation_header: config
+            .attestation_header
+            .unwrap_or(ATTESTATION_UNAVAILABLE)
+            .to_owned(),
+        session_id: config.session_id.map(str::to_owned),
+        version: config.version,
+    };
+    let (socket, response) = connect_sideband(&sideband).await?;
+    debug!(
+        status = response.status().as_u16(),
+        "attached GPT Realtime existing-call sideband"
+    );
+    Ok(ExistingCallConnection { socket, sideband })
 }
 
 async fn connect_sideband(
@@ -637,6 +707,9 @@ fn call_session(config: &ConnectConfig<'_>) -> Value {
                 "audio": { "output": { "voice": config.voice.as_str() } },
                 "delegation": { "type": "client" },
             });
+            if let Some(delegation_ack_filler) = config.delegation_ack_filler {
+                session["delegation"]["ack_filler"] = Value::Bool(delegation_ack_filler);
+            }
             if !initial_items.is_empty() {
                 session["initial_items"] = Value::Array(initial_items);
             }
@@ -693,7 +766,9 @@ async fn create_call(
     offer: &str,
     auth: &OpenAiAuthSnapshot,
 ) -> Result<CallResponse, CallAttemptError> {
-    let endpoint = call_endpoint(config.api_base_url).map_err(CallAttemptError::Other)?;
+    let backend_request = uses_backend_request_shape(config.api_base_url);
+    let endpoint =
+        call_endpoint(config.api_base_url, config.version).map_err(CallAttemptError::Other)?;
     let request = CallRequest {
         sdp: offer,
         session: call_session(config),
@@ -706,8 +781,17 @@ async fn create_call(
         .header(
             "x-oai-attestation",
             config.attestation_header.unwrap_or(ATTESTATION_UNAVAILABLE),
-        )
-        .json(&request);
+        );
+    if backend_request {
+        builder = builder.json(&request);
+    } else {
+        builder = builder
+            .header(
+                reqwest::header::CONTENT_TYPE,
+                format!("multipart/form-data; boundary={MULTIPART_BOUNDARY}"),
+            )
+            .body(multipart_call_body(offer, &request.session)?);
+    }
     if let Some(account_id) = auth.account_id() {
         builder = builder.header("ChatGPT-Account-ID", account_id);
     }
@@ -758,6 +842,24 @@ async fn create_call(
     Ok(CallResponse { sdp, id })
 }
 
+fn multipart_call_body(offer: &str, session: &Value) -> Result<Vec<u8>, CallAttemptError> {
+    let session = serde_json::to_string(session)
+        .map_err(|error| CallAttemptError::Other(RealtimeError::Message(error.to_string())))?;
+    let mut body = Vec::new();
+    body.extend_from_slice(format!("--{MULTIPART_BOUNDARY}\r\n").as_bytes());
+    body.extend_from_slice(b"Content-Disposition: form-data; name=\"sdp\"\r\n");
+    body.extend_from_slice(b"Content-Type: application/sdp\r\n\r\n");
+    body.extend_from_slice(offer.as_bytes());
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(format!("--{MULTIPART_BOUNDARY}\r\n").as_bytes());
+    body.extend_from_slice(b"Content-Disposition: form-data; name=\"session\"\r\n");
+    body.extend_from_slice(b"Content-Type: application/json\r\n\r\n");
+    body.extend_from_slice(session.as_bytes());
+    body.extend_from_slice(b"\r\n");
+    body.extend_from_slice(format!("--{MULTIPART_BOUNDARY}--\r\n").as_bytes());
+    Ok(body)
+}
+
 fn realtime_http_client() -> Client {
     static CLIENT: OnceLock<Client> = OnceLock::new();
     CLIENT.get_or_init(Client::new).clone()
@@ -802,19 +904,34 @@ fn add_auth_headers(
     Ok(())
 }
 
-fn call_endpoint(api_base_url: &str) -> Result<Url, RealtimeError> {
+fn uses_backend_request_shape(api_base_url: &str) -> bool {
+    api_base_url.contains("/backend-api")
+}
+
+fn call_endpoint(api_base_url: &str, version: RealtimeVersion) -> Result<Url, RealtimeError> {
     let mut endpoint =
         Url::parse(api_base_url).map_err(|error| RealtimeError::InvalidUrl(error.to_string()))?;
     let path = endpoint.path().trim_end_matches('/');
-    endpoint.set_path(&format!("{path}/realtime/calls"));
-    endpoint
-        .query_pairs_mut()
-        .append_pair("intent", "quicksilver")
-        .append_pair("architecture", "avas");
+    let backend_request = uses_backend_request_shape(api_base_url);
+    if version == RealtimeVersion::V3 && !backend_request {
+        endpoint.set_path(&format!("{path}/live"));
+    } else {
+        endpoint.set_path(&format!("{path}/realtime/calls"));
+    }
+    if version == RealtimeVersion::V1 || (backend_request && version == RealtimeVersion::V3) {
+        endpoint
+            .query_pairs_mut()
+            .append_pair("intent", "quicksilver")
+            .append_pair("architecture", "avas");
+    }
     Ok(endpoint)
 }
 
-fn sideband_endpoint(explicit: Option<&str>, call_id: &str) -> Result<Url, RealtimeError> {
+fn sideband_endpoint(
+    explicit: Option<&str>,
+    call_id: &str,
+    version: RealtimeVersion,
+) -> Result<Url, RealtimeError> {
     let base = explicit.unwrap_or(OPENAI_REALTIME_BASE);
     let mut endpoint =
         Url::parse(base).map_err(|error| RealtimeError::InvalidUrl(error.to_string()))?;
@@ -832,17 +949,44 @@ fn sideband_endpoint(explicit: Option<&str>, call_id: &str) -> Result<Url, Realt
             )));
         }
     }
-    let path = endpoint.path().to_owned();
-    if path.is_empty() || path == "/" || path == "/v1" || path == "/v1/" {
-        endpoint.set_path("/v1/live");
-    } else if let Some(prefix) = path.trim_end_matches('/').strip_suffix("/realtime") {
-        endpoint.set_path(&format!("{prefix}/live"));
-    } else if path.ends_with("/live/") {
-        endpoint.set_path(path.trim_end_matches('/'));
+    if version == RealtimeVersion::V3 {
+        if matches!(call_id, "." | "..") {
+            return Err(RealtimeError::InvalidConfiguration(format!(
+                "invalid realtime call id: {call_id}"
+            )));
+        }
+        let path = endpoint.path().to_owned();
+        if path.is_empty() || path == "/" || path == "/v1" || path == "/v1/" {
+            endpoint.set_path("/v1/live");
+        } else if let Some(prefix) = path.trim_end_matches('/').strip_suffix("/realtime") {
+            endpoint.set_path(&format!("{prefix}/live"));
+        } else if path.ends_with("/live/") {
+            endpoint.set_path(path.trim_end_matches('/'));
+        }
+        endpoint
+            .path_segments_mut()
+            .map_err(|()| {
+                RealtimeError::InvalidUrl(
+                    "realtime sideband URL cannot contain path segments".to_owned(),
+                )
+            })?
+            .pop_if_empty()
+            .push(call_id);
+    } else {
+        let path = endpoint.path().to_owned();
+        if path.is_empty() || path == "/" {
+            endpoint.set_path("/v1/realtime");
+        } else if path.ends_with("/v1") {
+            endpoint.set_path(&format!("{path}/realtime"));
+        } else if path.ends_with("/v1/") {
+            endpoint.set_path(&format!("{path}realtime"));
+        }
+        let mut query = endpoint.query_pairs_mut();
+        if version == RealtimeVersion::V1 {
+            query.append_pair("intent", "quicksilver");
+        }
+        query.append_pair("call_id", call_id);
     }
-    endpoint.set_query(None);
-    let path = endpoint.path().trim_end_matches('/');
-    endpoint.set_path(&format!("{path}/{call_id}"));
     Ok(endpoint)
 }
 
@@ -889,21 +1033,62 @@ mod tests {
     #[test]
     fn derives_chatgpt_call_and_direct_sideband_endpoints() {
         assert_eq!(
-            call_endpoint("https://chatgpt.com/backend-api/codex")
+            call_endpoint("https://chatgpt.com/backend-api/codex", RealtimeVersion::V3,)
                 .unwrap()
                 .as_str(),
             "https://chatgpt.com/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas"
         );
         assert_eq!(
-            sideband_endpoint(None, "rtc_test").unwrap().as_str(),
+            call_endpoint("https://api.openai.com/v1", RealtimeVersion::V3)
+                .unwrap()
+                .as_str(),
+            "https://api.openai.com/v1/live"
+        );
+        assert_eq!(
+            call_endpoint("https://api.openai.com/v1", RealtimeVersion::V1)
+                .unwrap()
+                .as_str(),
+            "https://api.openai.com/v1/realtime/calls?intent=quicksilver&architecture=avas"
+        );
+        assert_eq!(
+            sideband_endpoint(None, "rtc_test", RealtimeVersion::V3)
+                .unwrap()
+                .as_str(),
             "wss://api.openai.com/v1/live/rtc_test"
         );
         assert_eq!(
-            sideband_endpoint(Some("wss://example.test/v1/realtime"), "rtc_test")
-                .unwrap()
-                .as_str(),
+            sideband_endpoint(
+                Some("wss://example.test/v1/realtime"),
+                "rtc_test",
+                RealtimeVersion::V3,
+            )
+            .unwrap()
+            .as_str(),
             "wss://example.test/v1/live/rtc_test"
         );
+        assert_eq!(
+            sideband_endpoint(None, "rtc_test", RealtimeVersion::V1)
+                .unwrap()
+                .as_str(),
+            "wss://api.openai.com/v1/realtime?intent=quicksilver&call_id=rtc_test"
+        );
+        assert_eq!(
+            sideband_endpoint(None, "rtc/a", RealtimeVersion::V3)
+                .unwrap()
+                .as_str(),
+            "wss://api.openai.com/v1/live/rtc%2Fa"
+        );
+        assert_eq!(
+            sideband_endpoint(
+                Some("wss://example.test/v1?tenant=one"),
+                "rtc_test",
+                RealtimeVersion::V3,
+            )
+            .unwrap()
+            .as_str(),
+            "wss://example.test/v1/live/rtc_test?tenant=one"
+        );
+        assert!(sideband_endpoint(None, ".", RealtimeVersion::V3).is_err());
     }
 
     #[test]
@@ -986,6 +1171,7 @@ mod tests {
 
     #[tokio::test]
     async fn chatgpt_call_uses_account_auth_and_frameless_shape() {
+        crate::transport::install_default_rustls_crypto_provider();
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let address = listener.local_addr().unwrap();
         let server = tokio::spawn(async move {
@@ -1027,6 +1213,7 @@ mod tests {
             assert_eq!(body["session"]["model"], "gpt-live-1-boulder-alpha");
             assert_eq!(body["session"]["audio"]["output"]["voice"], "cove");
             assert_eq!(body["session"]["delegation"]["type"], "client");
+            assert_eq!(body["session"]["delegation"]["ack_filler"], false);
             assert_eq!(
                 body["session"]["initial_items"],
                 serde_json::json!([
@@ -1068,6 +1255,7 @@ mod tests {
             voice: RealtimeVoice::Cove,
             session_id: Some("session-1"),
             initial_items: &initial_items,
+            delegation_ack_filler: Some(false),
             version: RealtimeVersion::V3,
         };
         let snapshot = OpenAiAuthSnapshot::new(
@@ -1083,6 +1271,88 @@ mod tests {
             .unwrap();
         assert_eq!(response.sdp, "v=answer\r\n");
         assert_eq!(response.id, "rtc_test");
+        server.await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn direct_v3_call_uses_live_multipart_shape() {
+        crate::transport::install_default_rustls_crypto_provider();
+        let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            let mut chunk = [0_u8; 4096];
+            loop {
+                let read = stream.read(&mut chunk).await.unwrap();
+                assert_ne!(read, 0, "request ended before its multipart body");
+                request.extend_from_slice(&chunk[..read]);
+                let Some(headers_end) = request.windows(4).position(|part| part == b"\r\n\r\n")
+                else {
+                    continue;
+                };
+                let headers = String::from_utf8_lossy(&request[..headers_end]);
+                let content_length = headers
+                    .lines()
+                    .find_map(|line| {
+                        line.to_ascii_lowercase()
+                            .strip_prefix("content-length: ")
+                            .and_then(|value| value.parse::<usize>().ok())
+                    })
+                    .unwrap();
+                if request.len() >= headers_end + 4 + content_length {
+                    break;
+                }
+            }
+            let request = String::from_utf8(request).unwrap();
+            assert!(request.starts_with("POST /v1/live HTTP/1.1\r\n"));
+            assert!(!request.contains("intent=quicksilver"));
+            assert!(request.contains("authorization: Bearer api-token\r\n"));
+            assert!(request.contains(
+                "content-type: multipart/form-data; boundary=----nanocodex-realtime-boundary\r\n"
+            ));
+            let body = request.split_once("\r\n\r\n").unwrap().1;
+            assert!(body.contains("Content-Disposition: form-data; name=\"sdp\""));
+            assert!(body.contains("Content-Type: application/sdp\r\n\r\nv=offer\r\n"));
+            assert!(body.contains("Content-Disposition: form-data; name=\"session\""));
+            assert!(body.contains("\"model\":\"gpt-live-1-boulder-alpha\""));
+            assert!(body.contains("\"ack_filler\":true"));
+            stream
+                .write_all(
+                    b"HTTP/1.1 201 Created\r\nContent-Length: 10\r\nLocation: /v1/live/rtc_direct\r\n\r\nv=answer\r\n",
+                )
+                .await
+                .unwrap();
+        });
+
+        let auth_source = OpenAiAuth::api_key("api-token");
+        let api_base_url = format!("http://{address}/v1");
+        let config = ConnectConfig {
+            auth: &auth_source,
+            api_base_url: &api_base_url,
+            attestation_header: None,
+            websocket_url: None,
+            instructions: "delegate coding work",
+            model: "gpt-live-1-boulder-alpha",
+            voice: RealtimeVoice::Cove,
+            session_id: None,
+            initial_items: &[],
+            delegation_ack_filler: Some(true),
+            version: RealtimeVersion::V3,
+        };
+        let snapshot = OpenAiAuthSnapshot::new(
+            OpenAiAuthMode::ApiKey,
+            "api-token",
+            Option::<String>::None,
+            false,
+            0,
+        );
+        let response = create_call(&config, "v=offer\r\n", &snapshot)
+            .await
+            .map_err(|error| error.into_realtime())
+            .unwrap();
+        assert_eq!(response.sdp, "v=answer\r\n");
+        assert_eq!(response.id, "rtc_direct");
         server.await.unwrap();
     }
 }

@@ -406,6 +406,36 @@ input and the end of the transcript. The focused regressions
 adopts Codex `ecb8013dfa82120d11b02e3b68b7d3a3afd79d39` without importing its
 app-server lifecycle.
 
+### P42 — caller-owned Realtime calls and complete live control surface
+
+[`RealtimeSessionBuilder::connect_with_sdp`](../crates/nanocodex-oai-api/src/realtime.rs)
+creates a caller-owned V1 or V3 WebRTC call and returns the answer SDP directly
+before its authenticated sideband finishes joining. The embedding owns the peer
+and all media. [`OpenAi::attach_realtime_call`](../crates/nanocodex-oai-api/src/openai/mod.rs)
+attaches to an already-negotiated V1 or V3 call through a configuration-free
+builder: it performs no call-create request and sends no `session.update`.
+Closing either external mode detaches the control socket without sending
+Frameless `session.close`; owned WebSocket/WebRTC sessions retain their existing
+close behavior.
+
+The same transport port uses Codex's direct V3 `/v1/live` HTTP and WebSocket
+routes, V1 Quicksilver/AVAS query contract, backend JSON versus direct multipart
+call bodies, direct-V3 `session.started` readiness gate, V3 delegation
+`ack_filler`, and versioned sideband call-ID routing.
+The low-level session exposes Codex's role-bearing text and speakable-context
+append operations, ignores empty speech, and applies the same 1,000-token bound
+after backend/item prefixing. The high-level voice session forwards those two
+bounded controls without introducing app-server request types.
+
+Focused regressions cover direct V1/V3 endpoint and multipart shapes,
+direct V3 readiness, SDP-before-sideband ordering, pending-join cancellation,
+configuration-free existing-call attachment, reconnect/transcript continuity,
+terminal 410 handling, external detach semantics, and output truncation.
+[`realtime_external.rs`](../examples/realtime_external.rs) is the concrete
+caller-owned SDP/existing-call consumer. This adopts Codex
+`536f86e5cc9ec1ff38457d099bf320b9d08eeeba`; its JSON-RPC and app-server
+notification plumbing remains out-of-scope.
+
 ## Reviewed baseline behavior
 
 ### Realtime voice delegation
@@ -430,17 +460,17 @@ only protocol-neutral live-input, developer-message, and read-only session
 context hooks. ChatGPT WebRTC uses native Rust WebRTC/Opus with a sideband
 WebSocket, while the host owns device-attestation generation.
 
-The later voice-adjacent commits not imported by this owned-session boundary
-are:
+The focused later-commit dispositions are:
 
 - `13dfaab4469eff5c5b929bb7e1cbc6bba5e0c1be` is `out-of-scope`: it narrates
   Codex approval, permission, patch-approval, elicitation, and app-owned input
   requests. Nanocodex deliberately has no approval subsystem or app-server
   request surface.
-- `536f86e5cc9ec1ff38457d099bf320b9d08eeeba` is `out-of-scope`: it lets a
-  Codex app-server client attach to a call the client created. Nanocodex owns
-  its agent and WebRTC call lifecycle and has no consumer for client-owned call
-  attachment.
+- `ecb8013dfa82120d11b02e3b68b7d3a3afd79d39` is `port`: `P41` owns recoverable
+  V3 sidebands and the related transcript/delegation bounds.
+- `536f86e5cc9ec1ff38457d099bf320b9d08eeeba` is `port`: `P42` owns caller-SDP
+  call creation and configuration-free existing-call attachment without
+  importing Codex's app-server protocol.
 - `d44696065723a56b9de6538cd6348fcbe6c1542e` is `out-of-scope`: it adds a
   Codex TUI keymap schema entry and Linux version-skew build plumbing, not a
   Realtime transport behavior. The current local Codex Rust TUI contains no

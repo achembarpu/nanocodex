@@ -2,8 +2,9 @@
 
 All language consumers live at this repository boundary:
 
-- Rust: `minimal.rs`, `durable.rs`, `voice.rs`, `realtime_pipe.rs`, `follow_on.rs`,
-  `lifecycle.rs`, `custom_tool.rs`, `subagents.rs`, `resume.rs`, `fork_conversations.rs`,
+- Rust: `minimal.rs`, `durable.rs`, `voice.rs`, `realtime_pipe.rs`,
+  `realtime_external.rs`, `follow_on.rs`, `lifecycle.rs`, `custom_tool.rs`,
+  `subagents.rs`, `resume.rs`, `fork_conversations.rs`,
   `fork_checkpoint_bench.rs`, `secret_egress.rs`, and `mcp.rs` are binaries in the
   `nanocodex-examples` package.
 - Python: `python/` uses the native PyO3 binding (`follow_on.py`, `events.py`,
@@ -44,6 +45,10 @@ cargo run -p nanocodex-examples --bin durable
 cargo run -p nanocodex-examples --bin voice
 # Or keep devices outside the process and compose raw PCM with Unix pipes:
 cargo run -p nanocodex-examples --bin realtime-pipe < microphone.pcm > speaker.pcm
+# Apply the printed answer SDP to a caller-owned peer:
+cargo run -p nanocodex-examples --bin realtime-external -- offer offer.sdp > answer.sdp
+# Or attach only the authenticated sideband to a call negotiated elsewhere:
+cargo run -p nanocodex-examples --bin realtime-external -- attach rtc_...
 cargo run -p nanocodex-examples --bin lifecycle
 cargo run -p nanocodex-examples --bin fork-conversations
 cargo run -p nanocodex-examples --bin subagents
@@ -76,6 +81,12 @@ stdout are raw 24 kHz mono signed-16-bit little-endian PCM, so capture,
 playback, files, sockets, `ffmpeg`, or another media stack can be composed
 without Nanocodex owning a device. The desktop and pipe examples are two thin
 adapters over the same typed Realtime events and retained agent lifecycle.
+`realtime-external` demonstrates Codex's caller-owned WebRTC modes. `offer`
+returns answer SDP before the authenticated sideband finishes joining;
+`attach` joins an existing V1 call without creating or reconfiguring it. Set
+`NANOCODEX_REALTIME_V3=1` for Frameless V3. In both modes the caller owns media
+and closing Nanocodex detaches only the sideband. Lines on stdin append user
+text; prefix a line with `/say ` to append speakable context.
 Both use the shared Codex/ChatGPT subscription credentials at
 `$CODEX_HOME/auth.json` or `~/.codex/auth.json`; `NANOCODEX_AUTH_FILE` overrides
 that path. Run `nanocodex auth login` once if the shared credential does not
