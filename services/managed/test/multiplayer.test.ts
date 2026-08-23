@@ -472,6 +472,77 @@ describe("durable Multiplayer rooms", () => {
     rooms.delete(roomId);
   });
 
+  it("keeps the initialization watchdog out of the live request", async () => {
+    const { roomId, agentId } = testRoomIdentity();
+    rooms.add(roomId);
+    const room = testEnv.NANOCODEX_ROOMS.getByName(roomId);
+    const observation = await runInDurableObject(room, async (instance, state) => {
+      const mutable = instance as unknown as {
+        env: Env;
+        fetch(request: Request): Promise<Response>;
+      };
+      const originalEnv = mutable.env;
+      let childStarted!: () => void;
+      const started = new Promise<void>((resolve) => {
+        childStarted = resolve;
+      });
+      let releaseChild!: () => void;
+      const blocked = new Promise<void>((resolve) => {
+        releaseChild = resolve;
+      });
+      mutable.env = {
+        ...originalEnv,
+        NANOCODEX_SESSIONS: {
+          idFromName(name: string) {
+            return originalEnv.NANOCODEX_SESSIONS.idFromName(name);
+          },
+          getByName(name: string) {
+            const session = originalEnv.NANOCODEX_SESSIONS.getByName(name);
+            return {
+              async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+                const request = new Request(input, init);
+                if (request.method === "PUT" && new URL(request.url).pathname === "/initialize") {
+                  childStarted();
+                  await blocked;
+                }
+                return session.fetch(input, init);
+              },
+            } as DurableObjectStub;
+          },
+        } as Env["NANOCODEX_SESSIONS"],
+      };
+      const initializing = mutable.fetch(new Request("https://room.internal/initialize", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          room_id: roomId,
+          agent_id: agentId,
+          owner_id: USER_ID,
+          public_origin: ORIGIN,
+          owner_name: "Ada",
+          create_id_hash: randomHash(),
+          request_hash: randomHash(),
+          invite: "i".repeat(43),
+          member_id: crypto.randomUUID(),
+          member_token: "m".repeat(43),
+        }),
+      }));
+      await started;
+      const now = Date.now();
+      const alarm = await state.storage.getAlarm();
+      releaseChild();
+      try {
+        const response = await initializing;
+        return { alarmDelay: alarm === null ? null : alarm - now, status: response.status };
+      } finally {
+        mutable.env = originalEnv;
+      }
+    });
+    expect(observation.status).toBe(201);
+    expect(observation.alarmDelay).not.toBeNull();
+    expect(observation.alarmDelay!).toBeGreaterThan(500);
+  });
+
   it("keeps an ambiguously initialized room leased for exact create replay", async () => {
     const originalFetch = MultiplayerRoom.prototype.fetch;
     let roomId: string | undefined;

@@ -512,10 +512,10 @@ export class MultiplayerRoom extends DurableObject<MultiplayerRoomEnv> {
     if (!initializing) {
       return roomJson({ error: "agent_initialization_failed" }, { status: 503 });
     }
-    // This alarm is durable before the first cross-object side effect. A reset
-    // after child initialization therefore retries the idempotent initialize
-    // call and reconciles the checked room transition.
-    await this.#armAlarm(Date.now() + 1);
+    // This watchdog is durable before the first cross-object side effect. A
+    // reset after child initialization therefore retries the idempotent call,
+    // without making an alarm immediately contend with the live request.
+    await this.#armAlarm(Date.now() + INITIALIZATION_RETRY_MS);
     const outcome = await this.#reconcileInitialization(initializing);
     const ready = this.#room();
     if (outcome !== "ready"
