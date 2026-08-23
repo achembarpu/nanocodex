@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { cloudflareEgress } from "../cloudflare/egress.mjs";
+import { scopeCloudflareEgress } from "../cloudflare/egress-subject.mjs";
 
 class FakeWebSocket {
   accepted = 0;
@@ -22,6 +23,10 @@ test("Cloudflare EGRESS owns one broker endpoint and never accepts provider conf
   assert.throws(
     () => cloudflareEgress({ binding, apiKey: "managed-secret" }),
     /provider credentials belong in the private broker/,
+  );
+  assert.throws(
+    () => cloudflareEgress({ binding, subject: "caller-selected" }),
+    /does not accept subject/,
   );
   assert.throws(
     () => cloudflareEgress({ binding: {} }),
@@ -47,7 +52,9 @@ test("Cloudflare EGRESS sends one fixed placeholder through the private binding"
         };
       },
     };
-    const options = cloudflareEgress({ binding });
+    const options = cloudflareEgress({
+      binding: scopeCloudflareEgress(binding, "c".repeat(64)),
+    });
     assert.equal(Object.isFrozen(options), true);
     assert.equal(options.apiBaseUrl, "https://nanocodex.internal/v1");
     assert.equal(options.websocketUrl, "https://nanocodex.internal/v1/responses");
@@ -68,6 +75,7 @@ test("Cloudflare EGRESS sends one fixed placeholder through the private binding"
     assert.equal(headers.get("thread-id"), "runtime-session-1");
     assert.equal(headers.get("x-client-request-id"), "runtime-session-1");
     assert.equal(headers.get("x-codex-turn-state"), "current-state");
+    assert.equal(headers.get("x-nanocodex-subject"), "c".repeat(64));
     assert.equal(headers.get("upgrade"), "websocket");
     assert.equal(socket.accepted, 1);
     assert.equal(socket.binaryType, "arraybuffer");

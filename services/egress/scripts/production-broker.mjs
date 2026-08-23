@@ -1,0 +1,159 @@
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join, resolve } from "node:path";
+import { spawn } from "node:child_process";
+import { fileURLToPath } from "node:url";
+
+const directory = resolve(fileURLToPath(new URL("..", import.meta.url)));
+
+export function productionBrokerSecrets(environment) {
+  const encryptionKey = required(environment.NANOCODEX_CREDENTIAL_ENCRYPTION_KEY,
+    "NANOCODEX_CREDENTIAL_ENCRYPTION_KEY");
+  const probeToken = required(environment.NANOCODEX_BROKER_PROBE_TOKEN,
+    "NANOCODEX_BROKER_PROBE_TOKEN");
+  if (!/^[A-Za-z0-9_-]{43}$/.test(encryptionKey)) {
+    throw new Error("NANOCODEX_CREDENTIAL_ENCRYPTION_KEY must be a 32-byte base64url value");
+  }
+  if (probeToken.length < 32 || probeToken.length > 512) {
+    throw new Error("NANOCODEX_BROKER_PROBE_TOKEN must be 32-512 characters");
+  }
+  const secrets = {
+    CREDENTIAL_ENCRYPTION_KEY: encryptionKey,
+    NANOCODEX_BROKER_PROBE_TOKEN: probeToken,
+  };
+  const previousEncryptionKey = environment.NANOCODEX_CREDENTIAL_ENCRYPTION_KEY_PREVIOUS;
+  if (previousEncryptionKey !== undefined) {
+    const previous = required(previousEncryptionKey,
+      "NANOCODEX_CREDENTIAL_ENCRYPTION_KEY_PREVIOUS");
+    if (!/^[A-Za-z0-9_-]{43}$/.test(previous)) {
+      throw new Error(
+        "NANOCODEX_CREDENTIAL_ENCRYPTION_KEY_PREVIOUS must be a 32-byte base64url value",
+      );
+    }
+    secrets.CREDENTIAL_ENCRYPTION_KEY_PREVIOUS = previous;
+  }
+  return secrets;
+}
+
+export function productionRevision(environment) {
+  const revision = required(environment.TARGET_SHA, "TARGET_SHA");
+  if (!/^[0-9a-f]{40}$/.test(revision)) {
+    throw new Error("TARGET_SHA must be a full lowercase Git commit SHA");
+  }
+  return revision;
+}
+
+export function brokerWranglerEnvironment(environment, accountId, apiToken) {
+  const clean = { ...environment };
+  for (const name of [
+    "OPENAI_API_KEY",
+    "CODEX_OAUTH_BOOTSTRAP",
+    "LOCAL_CHATGPT_BOOTSTRAP",
+    "NANOCODEX_MANAGED_AUTH_MODE",
+    "NANOCODEX_MANAGED_OPENAI_API_KEY",
+    "NANOCODEX_MANAGED_CODEX_OAUTH_BOOTSTRAP",
+    "NANOCODEX_CREDENTIAL_ENCRYPTION_KEY",
+    "NANOCODEX_CREDENTIAL_ENCRYPTION_KEY_PREVIOUS",
+    "NANOCODEX_BROKER_PROBE_TOKEN",
+  ]) delete clean[name];
+  return { ...clean, CLOUDFLARE_ACCOUNT_ID: accountId, CLOUDFLARE_API_TOKEN: apiToken };
+}
+
+export function buildProductionBrokerConfig(base, { mainPath }) {
+  const bindings = base.durable_objects?.bindings ?? [];
+  if (!bindings.some((binding) => binding.name === "USER_CREDENTIALS"
+      && binding.class_name === "UserCredentialBroker")
+    || !bindings.some((binding) => binding.name === "AGENT_SUBJECTS"
+      && binding.class_name === "AgentSubjectDirectory")) {
+    throw new Error("production broker requires user credential and subject DO bindings");
+  }
+  const creates = base.migrations?.find((migration) => migration.tag === "v2");
+  const deletes = base.migrations?.find((migration) => migration.tag === "v3");
+  if (!creates?.new_sqlite_classes?.includes("UserCredentialBroker")
+    || !creates.new_sqlite_classes.includes("AgentSubjectDirectory")
+    || !deletes?.deleted_classes?.includes("CodexOAuthBroker")) {
+    throw new Error("production broker requires the current v2/v3 DO migration chain");
+  }
+  return {
+    ...base,
+    main: mainPath,
+    workers_dev: false,
+    routes: undefined,
+    durable_objects: {
+      ...base.durable_objects,
+      bindings: [
+        ...bindings,
+        {
+          name: "CHATGPT_EGRESS",
+          class_name: "ChatGptEgress",
+          script_name: "nanocodex",
+        },
+      ],
+    },
+    vars: { ENVIRONMENT: "production" },
+  };
+}
+
+export async function withPrivateBrokerFiles(files, callback) {
+  const temporary = await mkdtemp(join(tmpdir(), "nanocodex-egress-"));
+  try {
+    const paths = {};
+    for (const [name, value] of Object.entries(files)) {
+      const path = join(temporary, name);
+      await writeFile(path, `${JSON.stringify(value)}\n`, { mode: 0o600 });
+      paths[name] = path;
+    }
+    return await callback({ ...paths, directory: temporary });
+  } finally {
+    await rm(temporary, { recursive: true, force: true });
+  }
+}
+
+async function deploy() {
+  const accountId = required(process.env.CLOUDFLARE_ACCOUNT_ID, "CLOUDFLARE_ACCOUNT_ID");
+  const apiToken = required(process.env.CLOUDFLARE_API_TOKEN, "CLOUDFLARE_API_TOKEN");
+  const revision = productionRevision(process.env);
+  const secrets = productionBrokerSecrets(process.env);
+  const base = JSON.parse(await readFile(join(directory, "wrangler.broker.jsonc"), "utf8"));
+  const config = buildProductionBrokerConfig(base, { mainPath: join(directory, "src/egress.ts") });
+  await withPrivateBrokerFiles({ "wrangler.json": config, "secrets.json": secrets }, async (paths) => {
+    const childEnv = brokerWranglerEnvironment(process.env, accountId, apiToken);
+    await run([
+      "wrangler",
+      "deploy",
+      "--config",
+      paths["wrangler.json"],
+      "--strict",
+      "--tag",
+      revision,
+      "--message",
+      `gakonst/nanocodex@${revision}`,
+      "--secrets-file",
+      paths["secrets.json"],
+    ], childEnv);
+  });
+}
+
+function required(value, name) {
+  if (!value || value.trim() !== value || /[\u0000-\u001f\u007f]/.test(value)) {
+    throw new Error(`${name} is required and must be one line`);
+  }
+  return value;
+}
+
+function run(args, env) {
+  return new Promise((resolvePromise, reject) => {
+    const child = spawn("npx", args, { cwd: directory, env, stdio: "inherit" });
+    child.once("error", reject);
+    child.once("exit", (code) => code === 0
+      ? resolvePromise()
+      : reject(new Error(`${args.join(" ")} exited ${code}`)));
+  });
+}
+
+if (process.argv[1] === fileURLToPath(import.meta.url)) {
+  deploy().catch((error) => {
+    console.error(error instanceof Error ? error.message : String(error));
+    process.exitCode = 1;
+  });
+}

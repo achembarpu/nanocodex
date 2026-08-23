@@ -15,6 +15,8 @@ export type CloudflareEgressOptions = Readonly<{
   apiKey?: never;
   accessToken?: never;
   token?: never;
+  /** Broker subjects are derived privately from the owning Durable Object. */
+  subject?: never;
 }>;
 
 /** Exact function-backed options for `Transport.hostManaged(...)`. */

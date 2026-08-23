@@ -296,6 +296,349 @@ svg {
   justify-self: end;
 }
 
+.account-menu {
+  position: relative;
+  display: flex;
+  align-items: center;
+  min-height: 44px;
+}
+
+.account-menu-trigger {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+  justify-content: center;
+  min-height: 34px;
+  padding: 0 8px;
+  color: var(--text-muted);
+  font: 600 10px/1 var(--font-mono);
+  background: transparent;
+  border-radius: var(--radius-small);
+  cursor: pointer;
+}
+
+.account-menu-trigger:hover,
+.account-menu-trigger:focus-visible,
+.account-menu-trigger[aria-expanded="true"] {
+  color: var(--text);
+  background: var(--surface-hover);
+}
+
+.account-menu-trigger svg {
+  width: 13px;
+  height: 13px;
+}
+
+.account-panel {
+  position: absolute;
+  z-index: 70;
+  top: calc(100% - 2px);
+  right: 0;
+  width: min(380px, calc(100vw - 24px));
+  max-height: min(680px, calc(100dvh - var(--shell-header-height) - 12px));
+  overflow-y: auto;
+  color: var(--text);
+  background: var(--surface-raised);
+  border: 1px solid var(--border-soft);
+  box-shadow: var(--shadow-overlay);
+}
+
+.account-panel button {
+  min-height: 30px;
+  padding: 0 9px;
+  color: var(--text);
+  background: var(--surface-hover);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-small);
+  cursor: pointer;
+}
+
+.account-panel button:hover,
+.account-panel button:focus-visible {
+  border-color: var(--border);
+}
+
+.account-panel button:disabled {
+  cursor: default;
+  opacity: 0.48;
+}
+
+.account-panel-header {
+  display: flex;
+  gap: 12px;
+  align-items: start;
+  justify-content: space-between;
+  padding: 13px 14px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.account-panel-header > div {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+}
+
+.account-panel-header span {
+  color: var(--text-muted);
+  font-size: 9px;
+  text-transform: uppercase;
+}
+
+.account-panel-header strong {
+  overflow: hidden;
+  font-size: 10px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.account-panel-header > button {
+  display: grid;
+  width: 30px;
+  padding: 0;
+  place-items: center;
+  background: transparent;
+  border-color: transparent;
+}
+
+.account-panel-header svg {
+  width: 13px;
+  height: 13px;
+}
+
+.account-failure {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 14px;
+  color: var(--negative);
+  background: color-mix(in srgb, var(--negative) 8%, transparent);
+  border-bottom: 1px solid color-mix(in srgb, var(--negative) 30%, var(--border-soft));
+}
+
+.account-failure p {
+  font-size: 10px;
+  line-height: 1.4;
+}
+
+.account-failure button {
+  flex: 0 0 auto;
+}
+
+.account-auth-actions {
+  display: grid;
+  gap: 9px;
+  padding: 14px;
+}
+
+.account-auth-actions p {
+  margin-bottom: 3px;
+  color: var(--text-muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.account-auth-actions .account-primary-action {
+  color: var(--text-inverse);
+  background: var(--text);
+  border-color: var(--text);
+}
+
+.account-summary {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  gap: 9px;
+  align-items: center;
+  padding: 10px 14px;
+  color: var(--text-muted);
+  font-size: 9px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.api-key-panel {
+  display: grid;
+  gap: 12px;
+  padding: 14px;
+}
+
+.account-connections {
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.account-provider-row {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+}
+
+.account-provider-row > div {
+  display: grid;
+  gap: 3px;
+}
+
+.account-provider-row strong {
+  font-size: 10px;
+}
+
+.account-provider-row span {
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.new-api-key > a {
+  width: fit-content;
+  color: var(--text);
+  font-size: 9px;
+  text-decoration: underline;
+}
+
+.api-key-heading {
+  display: flex;
+  gap: 10px;
+  align-items: start;
+  justify-content: space-between;
+}
+
+.api-key-heading h2 {
+  font-size: 13px;
+}
+
+.api-key-heading p {
+  margin-top: 4px;
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.new-api-key {
+  display: grid;
+  gap: 7px;
+  padding: 11px;
+  background: color-mix(in srgb, var(--positive) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--positive) 35%, var(--border-soft));
+}
+
+.new-api-key > strong {
+  color: var(--positive);
+  font-size: 10px;
+}
+
+.new-api-key > p {
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.new-api-key > code {
+  padding: 8px;
+  overflow-wrap: anywhere;
+  user-select: all;
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  font-size: 9px;
+  line-height: 1.45;
+}
+
+.new-api-key > div {
+  display: flex;
+  gap: 7px;
+}
+
+.new-api-key button {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
+}
+
+.new-api-key button svg {
+  width: 11px;
+  height: 11px;
+}
+
+.api-key-create {
+  display: grid;
+  gap: 6px;
+}
+
+.api-key-create > label {
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
+.api-key-create > div {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 7px;
+}
+
+.api-key-create input {
+  min-width: 0;
+  height: 32px;
+  padding: 0 9px;
+  color: var(--text);
+  background: var(--surface);
+  border: 1px solid var(--border-soft);
+  border-radius: var(--radius-small);
+  outline: none;
+}
+
+.api-key-create input:focus {
+  border-color: var(--border);
+}
+
+.api-key-list {
+  display: grid;
+  padding: 0;
+  margin: 0;
+  list-style: none;
+  border-top: 1px solid var(--border-soft);
+}
+
+.api-key-list li {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: space-between;
+  padding-block: 9px;
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.api-key-list li > div {
+  display: grid;
+  min-width: 0;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 3px 9px;
+}
+
+.api-key-list strong {
+  overflow: hidden;
+  font-size: 10px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.api-key-list code,
+.api-key-list time {
+  color: var(--text-muted);
+  font-size: 8px;
+}
+
+.api-key-list code {
+  grid-column: 1;
+}
+
+.api-key-list time {
+  grid-row: 1 / span 2;
+  grid-column: 2;
+  align-self: center;
+}
+
+.api-key-empty {
+  color: var(--text-muted);
+  font-size: 9px;
+}
+
 .header-install {
   position: relative;
   display: flex;
@@ -2453,6 +2796,17 @@ html[data-theme="dark"] .tui-syntax .shiki span {
     gap: 2px;
   }
 
+  .account-menu-trigger {
+    min-height: 44px;
+  }
+
+  .account-panel {
+    position: fixed;
+    top: calc(var(--mobile-header-height) - 2px);
+    right: max(12px, env(safe-area-inset-right));
+    max-height: calc(100dvh - var(--mobile-header-height) - 12px);
+  }
+
   .header-install-trigger {
     min-height: 44px;
     padding-inline: 8px;
@@ -3430,6 +3784,7 @@ html[data-theme="dark"] .tui-syntax .shiki span {
   }
 
   .surface-switch a,
+  .account-menu-trigger,
   .header-install-trigger,
   .header-install-menu button {
     min-height: 44px;
@@ -3526,6 +3881,15 @@ html[data-theme="dark"] .tui-syntax .shiki span {
   .header-install-trigger {
     width: 44px;
     padding-inline: 0;
+  }
+
+  .account-menu-trigger {
+    width: 44px;
+    padding-inline: 0;
+  }
+
+  .account-menu-trigger span {
+    display: none;
   }
 
   .header-install-trigger span {

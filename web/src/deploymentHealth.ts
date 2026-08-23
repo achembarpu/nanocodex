@@ -1,4 +1,4 @@
-export type DeploymentCredentialSource = "brokered" | "subscription" | "user" | null;
+export type DeploymentCredentialSource = "brokered" | null;
 
 export type DeploymentHealth = Readonly<{
   agentConfigured: boolean;
@@ -31,11 +31,8 @@ export function createDeploymentHealthResource(
         throw new Error(`Could not check the agent session (HTTP ${response.status})`);
       }
       const payload = await response.json() as HealthPayload;
-      const credentialSource = payload.agent_configured === true && (
-        payload.credential_source === "subscription"
-        || payload.credential_source === "user"
-        || payload.credential_source === "brokered"
-      ) ? payload.credential_source : null;
+      const credentialSource = payload.agent_configured === true
+        && payload.credential_source === "brokered" ? "brokered" : null;
       return Object.freeze({
         agentConfigured: credentialSource !== null,
         credentialSource,

@@ -11,7 +11,7 @@ import {
   createMemoryChatGptSubscriptionStore,
 } from "../node/index.mjs";
 import { artifact as artifactTool } from "../tools/index.mjs";
-import { readCodexSubscription } from "../../../examples/cloudflare-workers/scripts/codex-auth-file.mjs";
+import { readCodexSubscription } from "../../../services/managed/scripts/codex-auth-file.mjs";
 
 const executeFile = promisify(execFile);
 const LOGICAL_WORKSPACE = "/workspace";

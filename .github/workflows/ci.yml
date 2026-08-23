@@ -152,8 +152,8 @@ jobs:
             js/react/package-lock.json
             examples/node/package-lock.json
             examples/rivet-actors/package-lock.json
-            examples/cloudflare-egress/package-lock.json
-            examples/cloudflare-workers/package-lock.json
+            services/egress/package-lock.json
+            services/managed/package-lock.json
             examples/vercel-workflows/package-lock.json
             examples/react-vite/package-lock.json
       - uses: taiki-e/install-action@3522286d40783523f9c7880e33f785905b4c20d0 # v2
@@ -175,8 +175,8 @@ jobs:
           ./scripts/build-js-package.sh
           npm ci --prefix examples/node
           npm ci --prefix examples/rivet-actors
-          npm ci --prefix examples/cloudflare-egress
-          npm ci --prefix examples/cloudflare-workers
+          npm ci --prefix services/egress
+          npm ci --prefix services/managed
           npm ci --prefix examples/vercel-workflows
           npm ci --prefix examples/react-vite
       - name: Test JS runtime
@@ -193,8 +193,8 @@ jobs:
           node --test examples/browser-cdn/*.test.mjs
           npm test --prefix examples/node
           npm run check --prefix examples/rivet-actors
-          npm run check --prefix examples/cloudflare-egress
-          npm run check --prefix examples/cloudflare-workers
+          npm run check --prefix services/egress
+          npm run check --prefix services/managed
           npm run check --prefix examples/vercel-workflows
           npm test --prefix examples/react-vite
           npm run build --prefix examples/react-vite
@@ -328,8 +328,8 @@ jobs:
           node-version: 22.15.0
           cache: npm
           cache-dependency-path: |
-            examples/cloudflare-egress/package-lock.json
-            examples/cloudflare-workers/package-lock.json
+            services/egress/package-lock.json
+            services/managed/package-lock.json
             web/package-lock.json
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -341,8 +341,8 @@ jobs:
           path: js/bindings/pkg-web
       - name: Install deployment tooling
         run: |
-          npm ci --prefix examples/cloudflare-egress --ignore-scripts
-          npm ci --prefix examples/cloudflare-workers --ignore-scripts
+          npm ci --prefix services/egress --ignore-scripts
+          npm ci --prefix services/managed --ignore-scripts
           npm ci --prefix web --ignore-scripts
       - name: Select the current production revision
         id: production
@@ -363,23 +363,19 @@ jobs:
           CLOUDFLARE_API_TOKEN_CONFIGURED: ${{ secrets.CLOUDFLARE_API_TOKEN != '' }}
           NANOCODEX_ADMIN_TOKEN: ${{ secrets.NANOCODEX_ADMIN_TOKEN }}
           NANOCODEX_BROKER_PROBE_TOKEN_CONFIGURED: ${{ secrets.NANOCODEX_BROKER_PROBE_TOKEN != '' }}
+          NANOCODEX_CREDENTIAL_ENCRYPTION_KEY_CONFIGURED: ${{ secrets.NANOCODEX_CREDENTIAL_ENCRYPTION_KEY != '' }}
           NANOCODEX_GIT_TOKEN_CONFIGURED: ${{ secrets.NANOCODEX_GIT_TOKEN != '' }}
-          NANOCODEX_MANAGED_CODEX_OAUTH_BOOTSTRAP_CONFIGURED: ${{ secrets.NANOCODEX_MANAGED_CODEX_OAUTH_BOOTSTRAP != '' }}
-          NANOCODEX_MANAGED_CODEX_RELAY_URL_CONFIGURED: ${{ secrets.NANOCODEX_MANAGED_CODEX_RELAY_URL != '' }}
-          NANOCODEX_ROOM_ALLOCATOR_TOKEN: ${{ secrets.NANOCODEX_ROOM_ALLOCATOR_TOKEN }}
-          SESSION_CREDENTIAL_KEY_CONFIGURED: ${{ secrets.SESSION_CREDENTIAL_KEY != '' }}
           TARGET_SHA: ${{ github.sha }}
-        run: npm run deploy:production:preflight --prefix examples/cloudflare-workers
+        run: npm run deploy:production:preflight --prefix services/managed
       - name: Deploy the private credential broker
         if: steps.production.outputs.current == 'true'
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           NANOCODEX_BROKER_PROBE_TOKEN: ${{ secrets.NANOCODEX_BROKER_PROBE_TOKEN }}
-          NANOCODEX_MANAGED_CODEX_OAUTH_BOOTSTRAP: ${{ secrets.NANOCODEX_MANAGED_CODEX_OAUTH_BOOTSTRAP }}
-          NANOCODEX_MANAGED_CODEX_RELAY_URL: ${{ secrets.NANOCODEX_MANAGED_CODEX_RELAY_URL }}
+          NANOCODEX_CREDENTIAL_ENCRYPTION_KEY: ${{ secrets.NANOCODEX_CREDENTIAL_ENCRYPTION_KEY }}
           TARGET_SHA: ${{ github.sha }}
-        run: npm run deploy:production:broker --prefix examples/cloudflare-egress
+        run: npm run deploy:production:broker --prefix services/egress
       - name: Require master before managed rollout
         if: steps.production.outputs.current == 'true'
         env:
@@ -396,18 +392,16 @@ jobs:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           NANOCODEX_ADMIN_TOKEN: ${{ secrets.NANOCODEX_ADMIN_TOKEN }}
-          NANOCODEX_ROOM_ALLOCATOR_TOKEN: ${{ secrets.NANOCODEX_ROOM_ALLOCATOR_TOKEN }}
           TARGET_SHA: ${{ github.sha }}
-        run: npm run deploy:production:managed --prefix examples/cloudflare-workers
-      - name: Verify private room creation and owner deletion
+        run: npm run deploy:production:managed --prefix services/managed
+      - name: Verify private broker readiness
         if: steps.production.outputs.current == 'true'
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           NANOCODEX_BROKER_PROBE_TOKEN: ${{ secrets.NANOCODEX_BROKER_PROBE_TOKEN }}
-          NANOCODEX_ROOM_ALLOCATOR_TOKEN: ${{ secrets.NANOCODEX_ROOM_ALLOCATOR_TOKEN }}
           TARGET_SHA: ${{ github.sha }}
-        run: npm run verify:production:boundary --prefix examples/cloudflare-workers
+        run: npm run verify:production:boundary --prefix services/managed
       - name: Require master before website rollout
         if: steps.production.outputs.current == 'true'
         env:
@@ -423,11 +417,8 @@ jobs:
         env:
           CLOUDFLARE_ACCOUNT_ID: ${{ vars.CLOUDFLARE_ACCOUNT_ID }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
-          NANOCODEX_ROOM_ALLOCATOR_TOKEN: ${{ secrets.NANOCODEX_ROOM_ALLOCATOR_TOKEN }}
-          SESSION_CREDENTIAL_KEY: ${{ secrets.SESSION_CREDENTIAL_KEY }}
-          SESSION_CREDENTIAL_KEY_PREVIOUS: ${{ secrets.SESSION_CREDENTIAL_KEY_PREVIOUS }}
           TARGET_SHA: ${{ github.sha }}
-        run: npm run deploy:production:web --prefix examples/cloudflare-workers
+        run: npm run deploy:production:web --prefix services/managed
       - name: Verify the active Worker revision
         if: steps.production.outputs.current == 'true'
         env:

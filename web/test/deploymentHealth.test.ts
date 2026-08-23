@@ -11,7 +11,7 @@ test("deployment health is single-flight and cached across shell consumers", asy
     await blocked;
     return Response.json({
       agent_configured: true,
-      credential_source: "subscription",
+      credential_source: "brokered",
       deployment_sha: "a".repeat(40),
     });
   });
@@ -21,7 +21,7 @@ test("deployment health is single-flight and cached across shell consumers", asy
   assert.equal(calls, 1);
   release();
   assert.deepEqual(await first, await second);
-  assert.equal((await resource.read()).credentialSource, "subscription");
+  assert.equal((await resource.read()).credentialSource, "brokered");
   assert.equal(calls, 1);
 });
 
@@ -35,7 +35,7 @@ test("deployment health refreshes after invalidation and rejects malformed crede
       deployment_sha: null,
     } : {
       agent_configured: true,
-      credential_source: "user",
+      credential_source: "brokered",
       deployment_sha: "b".repeat(40),
     });
   });
@@ -46,7 +46,7 @@ test("deployment health refreshes after invalidation and rejects malformed crede
     deploymentSha: undefined,
   });
   resource.invalidate();
-  assert.equal((await resource.refresh()).credentialSource, "user");
+  assert.equal((await resource.refresh()).credentialSource, "brokered");
   assert.equal(calls, 2);
 });
 
@@ -59,7 +59,7 @@ test("invalidation detaches an obsolete in-flight health request", async () => {
     await new Promise<void>((resolve) => releases.push(resolve));
     return Response.json({
       agent_configured: true,
-      credential_source: call === 1 ? "subscription" : "user",
+      credential_source: "brokered",
     });
   });
 
@@ -68,13 +68,13 @@ test("invalidation detaches an obsolete in-flight health request", async () => {
   const current = resource.refresh();
   assert.equal(calls, 2);
   releases[0]?.();
-  assert.equal((await obsolete).credentialSource, "subscription");
+  assert.equal((await obsolete).credentialSource, "brokered");
   releases[1]?.();
-  assert.equal((await current).credentialSource, "user");
-  assert.equal((await resource.read()).credentialSource, "user");
+  assert.equal((await current).credentialSource, "brokered");
+  assert.equal((await resource.read()).credentialSource, "brokered");
 });
 
-test("broker health reports only credential availability", async () => {
+test("brokered health naturally reports whether the account has a connection", async () => {
   let ready = false;
   const resource = createDeploymentHealthResource(async () => Response.json({
     agent_configured: ready,

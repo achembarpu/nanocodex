@@ -14,7 +14,7 @@ const artifactRuntime = source("../src/artifactRuntime.tsx");
 const terminal = source("../src/AgentTerminal.tsx");
 const terminalSurface = source("../src/agentTerminalSurface.tsx");
 const artifactDock = source("../src/ArtifactDock.tsx");
-const chatGptSession = source("../src/chatGptSession.tsx");
+const modelSession = source("../src/modelSession.tsx");
 const docs = source("../src/Docs.tsx");
 const modalBoundary = source("../src/modalBoundary.ts");
 const modalFrameBoundary = source("../src/useModalFrameBoundary.ts");
@@ -152,8 +152,8 @@ test("the app shell owns deployment rollover and agent failures expose only manu
   assert.match(deploymentRollover, /sha !== deploymentSha/);
   assert.match(deploymentRollover, /window\.location\.reload\(\)/);
   assert.match(terminal, /refetch\(\)/);
-  assert.match(chatGptSession, /agentStatus === "error" && hasCredential[\s\S]*?>retry agent<\/button>/);
-  assert.doesNotMatch(`${terminal}\n${chatGptSession}`, /automaticRetry|workerRecoveryAttempts/);
+  assert.match(modelSession, /agentStatus === "error" && hasCredential[\s\S]*?>retry agent<\/button>/);
+  assert.doesNotMatch(`${terminal}\n${modelSession}`, /automaticRetry|workerRecoveryAttempts/);
   assert.doesNotMatch(terminal, /setTimeout\(/);
   assert.doesNotMatch(terminal, /deployment_sha|pageshow/);
   assert.doesNotMatch(terminal, /createDemoAgent|setRetryGeneration|sessions\.current\.replace/);
@@ -327,14 +327,13 @@ test("portrait coarse-pointer tablets retain 44px controls without changing layo
   }
 });
 
-test("the terminal chrome retains ChatGPT subscription controls without payment paths", () => {
-  assert.doesNotMatch(chatGptSession, /Connected to your ChatGPT subscription/);
-  assert.doesNotMatch(chatGptSession, /The agent runs in your browser/);
-  assert.match(chatGptSession, /aria-live="polite"/);
-  assert.match(chatGptSession, /aria-label="Sign in with ChatGPT"/);
-  assert.match(chatGptSession, /aria-label="Connection options">session/);
-  assert.match(chatGptSession, />Sign out<\/button>/);
-  assert.doesNotMatch(`${terminal}\n${chatGptSession}`, /Tempo|MPP|payment details|onSelectTransport/);
+test("the terminal chrome delegates account and model connection controls to the account menu", () => {
+  assert.doesNotMatch(modelSession, /Connected to your ChatGPT subscription/);
+  assert.doesNotMatch(modelSession, /The agent runs in your browser/);
+  assert.match(modelSession, /aria-live="polite"/);
+  assert.match(modelSession, /Connect ChatGPT or an OpenAI API key from the account menu/);
+  assert.match(modelSession, /Sign in with a passkey from the account menu/);
+  assert.doesNotMatch(`${terminal}\n${modelSession}`, /Tempo|MPP|payment details|onSelectTransport/);
 });
 
 function source(path: string): string {

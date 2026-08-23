@@ -1,3 +1,5 @@
+import { cloudflareEgressSubject } from "./egress-subject.mjs";
+
 const OPENAI_WEBSOCKET_BETA = "responses_websockets=2026-02-06";
 const BROKER_API_BASE_URL = "https://nanocodex.internal/v1";
 const BROKER_WEBSOCKET_URL = `${BROKER_API_BASE_URL}/responses`;
@@ -58,6 +60,8 @@ async function openBrokeredWebSocket(
     "x-responsesapi-include-timing-metrics": "true",
     "User-Agent": "nanocodex-js/cloudflare",
   });
+  const subject = cloudflareEgressSubject(binding);
+  if (subject !== undefined) headers.set("x-nanocodex-subject", subject);
   if (typeof request.turnState === "string" && request.turnState) {
     headers.set("x-codex-turn-state", request.turnState);
   }

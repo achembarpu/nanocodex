@@ -108,12 +108,12 @@ function createChatGptEgress(response: () => Response) {
   return { requests, namespace: namespace as unknown as DurableObjectNamespace };
 }
 
-test("brokered website access stays credentialless without disabling user sessions", async () => {
+test("brokered website access stays credentialless and disables legacy browser sessions", async () => {
   const egressRequests: Request[] = [];
   let credentialSessionCalls = 0;
   const env = {
     ENVIRONMENT: "development",
-    EGRESS: {
+    NANOCODEX_BACKEND: {
       async fetch(input: RequestInfo | URL, init?: RequestInit) {
         const request = new Request(input, init);
         egressRequests.push(request);
@@ -138,6 +138,7 @@ test("brokered website access stays credentialless without disabling user sessio
     agent_configured: true,
     credential_source: "brokered",
     deployment_sha: null,
+    interactive_auth: false,
     service: "nanocodex",
     runtime: "cloudflare-workers",
     status: "ok",
@@ -148,7 +149,10 @@ test("brokered website access stays credentialless without disabling user sessio
       method,
       headers: { origin: "https://demo.test" },
     }), env);
-    assert.equal(response.status, 200);
+    assert.equal(response.status, 409);
+    assert.deepEqual(await response.json(), {
+      error: "interactive authentication is disabled for managed model access",
+    });
   }
 
   const search = await worker.fetch(new Request("https://demo.test/api/tools/web-search", {

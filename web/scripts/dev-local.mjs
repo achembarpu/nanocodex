@@ -1,18 +1,18 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { readdir, stat } from "node:fs/promises";
+import { readFile, readdir, stat } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 
-import { readCodexSubscription } from "../../examples/cloudflare-workers/scripts/codex-auth-file.mjs";
+import { readCodexSubscription } from "../../services/managed/scripts/codex-auth-file.mjs";
 
 const scriptPath = fileURLToPath(import.meta.url);
 const webRoot = resolve(dirname(scriptPath), "..");
 const repositoryRoot = resolve(webRoot, "..");
-const managedRoot = resolve(repositoryRoot, "examples/cloudflare-workers");
+const managedRoot = resolve(repositoryRoot, "services/managed");
 const runtimeEnvironmentNames = [
   "CI",
   "COLORTERM",
@@ -65,6 +65,7 @@ const websiteEnvironmentNames = [
   "GIT_MIRROR_TOKEN",
   "NANOCODEX_DEV_CONTAINERS",
   "NANOCODEX_LOCAL_DEPLOYMENT_SHA",
+  "NANOCODEX_LOCAL_CODEX_RELAY_URL",
 ];
 const managedEnvironmentNames = [
   "AGENT_IDLE_TIMEOUT_MS",
@@ -155,9 +156,10 @@ export function localDevelopmentOrigin(raw = "http://localhost:5173") {
 async function main() {
   loadRootEnvironment();
   const environment = process.env;
-  const options = parseLocalDevOptions(process.argv.slice(2), environment);
+  if (process.argv.slice(2).length > 0) {
+    throw new Error("local development has one production-shaped account and managed-agent topology");
+  }
   const origin = localDevelopmentOrigin(environment.NANOCODEX_DEV_ORIGIN);
-  const authMode = await resolveLocalAuthMode(options, environment);
   const toolEnvironment = buildChildEnvironment(environment);
   await run(process.execPath, [resolve(webRoot, "scripts/check-dev-wasm.mjs")], {
     cwd: webRoot,
@@ -167,11 +169,10 @@ async function main() {
   const head = await gitHead(environment.NANOCODEX_REPO ?? repositoryRoot, toolEnvironment);
   const mirrorToken = randomBytes(32).toString("base64url");
   const adminToken = randomBytes(32).toString("base64url");
-  const roomAllocatorToken = randomBytes(32).toString("base64url");
+  const localChatGptBootstrap = await readLocalChatGptBootstrap(environment);
   const children = [];
   const exits = [];
   const signalHandlers = new Map();
-  let brokerReady;
   let parentSignal;
   let shutdown;
 
@@ -185,44 +186,31 @@ async function main() {
       "--local",
       "--env",
       "development",
-    ], { cwd: webRoot, env: toolEnvironment });
+    ], { cwd: webRoot, env: { ...toolEnvironment, CI: "true" } });
 
-    if (authMode) {
-      await ensureManagedDependencies(toolEnvironment);
-      await run(process.execPath, [resolve(managedRoot, "scripts/prepare-wasm.mjs")], {
-        cwd: managedRoot,
-        env: toolEnvironment,
-      });
-      const broker = spawn(process.execPath, [
-        resolve(managedRoot, "scripts/dev-brokered.mjs"),
-        "--broker-only",
-        `--auth-mode=${authMode}`,
-      ], localStackChildOptions({
-        cwd: managedRoot,
-        env: managedChildEnvironment(environment),
-        stdio: ["inherit", "inherit", "inherit", "ipc"],
-      }));
-      brokerReady = waitForManagedStack(broker);
-      // The website starts in parallel; mark an early child failure handled
-      // now, then rethrow it at the readiness boundary below.
-      void brokerReady.catch(() => {});
-      children.push(broker);
-    }
+    await ensureManagedDependencies(toolEnvironment);
+
+    const relayLaunch = localChatGptRelayChildLaunch(toolEnvironment);
+    const relayChild = spawn(
+      relayLaunch.command,
+      relayLaunch.arguments,
+      relayLaunch.options,
+    );
+    children.push(relayChild);
+    exits.push(childExit(relayChild, "local ChatGPT transport relay"));
+    const relayUrl = await waitForLocalChatGptRelay(relayChild);
 
     const websiteLaunch = websiteChildLaunch(environment, origin, {
       CLOUDFLARE_ENV: "development",
       CLOUDFLARE_INCLUDE_PROCESS_ENV: "false",
       CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV: "false",
       GIT_MIRROR_TOKEN: mirrorToken,
-      NANOCODEX_LOCAL_ADMIN_TOKEN: authMode ? adminToken : undefined,
-      NANOCODEX_LOCAL_AGENT_IDLE_TIMEOUT_MS: authMode
-        ? environment.AGENT_IDLE_TIMEOUT_MS ?? "1000"
-        : undefined,
+      NANOCODEX_LOCAL_ADMIN_TOKEN: adminToken,
+      NANOCODEX_LOCAL_AGENT_IDLE_TIMEOUT_MS: environment.AGENT_IDLE_TIMEOUT_MS ?? "1000",
       NANOCODEX_LOCAL_DEPLOYMENT_SHA: head,
-      NANOCODEX_LOCAL_MODEL_ACCESS: authMode ? "managed" : undefined,
-      NANOCODEX_LOCAL_MODEL_AUTH_MODE: authMode,
+      NANOCODEX_LOCAL_CHATGPT_BOOTSTRAP: localChatGptBootstrap,
+      NANOCODEX_LOCAL_CODEX_RELAY_URL: relayUrl,
       NANOCODEX_LOCAL_PUBLIC_ORIGIN: origin.origin,
-      NANOCODEX_LOCAL_ROOM_ALLOCATOR_TOKEN: authMode ? roomAllocatorToken : undefined,
     });
     const webEnvironment = websiteLaunch.options.env;
     children.push(spawn(
@@ -230,10 +218,7 @@ async function main() {
       websiteLaunch.arguments,
       websiteLaunch.options,
     ));
-    exits.push(...children.map((child, index) => childExit(
-      child,
-      authMode && index === 0 ? "private credential broker" : "web multi-Worker stack",
-    )));
+    exits.push(childExit(children.at(-1), "web multi-Worker stack"));
     for (const signal of ["SIGINT", "SIGTERM"]) {
       const handler = () => {
         if (!parentSignal) parentSignal = signal;
@@ -254,16 +239,11 @@ async function main() {
       process.once(signal, handler);
     }
 
-    if (authMode) await brokerReady;
     await waitForHttp(
       new URL("/api/health", origin),
       children,
-      (response) => verifyLocalHealthResponse(response, authMode),
+      (response) => verifyLocalHealthResponse(response),
     );
-    if (authMode) {
-      await verifyLocalModelPreconnect(origin);
-      await verifyLocalMultiplayer(origin);
-    }
 
     await run(process.execPath, [resolve(webRoot, "scripts/publish-repository.mjs")], {
       cwd: webRoot,
@@ -280,7 +260,7 @@ async function main() {
     });
     process.stderr.write(
       `Nanocodex local Workers are ready at ${origin.origin} (${head.slice(0, 7)}; `
-      + `repository published; evals migrated; multiplayer ${authMode ?? "disabled"}).\n`,
+      + "repository published; evals migrated; managed agents ready).\n",
     );
 
     const exited = await Promise.race(exits);
@@ -372,6 +352,55 @@ export function websiteChildLaunch(
   };
 }
 
+export function localChatGptRelayChildLaunch(environment) {
+  return {
+    command: process.execPath,
+    arguments: [scriptPath, "--chatgpt-relay-child"],
+    options: localStackChildOptions({
+      cwd: webRoot,
+      env: buildChildEnvironment(environment),
+      stdio: ["ignore", "inherit", "inherit", "ipc"],
+    }),
+  };
+}
+
+export function waitForLocalChatGptRelay(child, timeoutMs = 10_000) {
+  return new Promise((resolveReady, rejectReady) => {
+    const timeout = setTimeout(() => {
+      cleanup();
+      rejectReady(new Error("local ChatGPT transport relay did not become ready"));
+    }, timeoutMs);
+    const cleanup = () => {
+      clearTimeout(timeout);
+      child.off("message", onMessage);
+      child.off("error", onError);
+      child.off("exit", onExit);
+    };
+    const onMessage = (message) => {
+      if (message?.type !== "nanocodex.chatgpt-relay.ready") return;
+      let url;
+      try { url = new URL(message.url); } catch { return; }
+      if (url.protocol !== "http:" || url.hostname !== "127.0.0.1" || !url.port
+        || url.pathname !== "/" || url.search || url.hash) return;
+      cleanup();
+      resolveReady(url.href);
+    };
+    const onError = (error) => {
+      cleanup();
+      rejectReady(error);
+    };
+    const onExit = (code, signal) => {
+      cleanup();
+      rejectReady(new Error(
+        `local ChatGPT transport relay exited before readiness with ${code ?? signal}`,
+      ));
+    };
+    child.on("message", onMessage);
+    child.once("error", onError);
+    child.once("exit", onExit);
+  });
+}
+
 export function localStackChildOptions(options, platform = process.platform) {
   return {
     ...options,
@@ -406,6 +435,31 @@ async function sendManagedReadySentinel() {
     });
   });
   process.disconnect();
+}
+
+async function runLocalChatGptRelayChild() {
+  if (!process.send) throw new Error("local ChatGPT transport relay requires IPC");
+  const { startRelay } = await import("../container/relay.mjs");
+  const server = startRelay({ host: "127.0.0.1", port: 0 });
+  await new Promise((resolveListening, rejectListening) => {
+    if (server.listening) {
+      resolveListening();
+      return;
+    }
+    server.once("listening", resolveListening);
+    server.once("error", rejectListening);
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    server.close();
+    throw new Error("local ChatGPT transport relay has no TCP address");
+  }
+  await new Promise((resolveSend, rejectSend) => {
+    process.send({
+      type: "nanocodex.chatgpt-relay.ready",
+      url: `http://127.0.0.1:${address.port}/`,
+    }, (error) => error ? rejectSend(error) : resolveSend());
+  });
 }
 
 export async function verifyLocalHealthResponse(response, authMode) {
@@ -498,7 +552,7 @@ export async function verifyLocalModelPreconnect(
 }
 
 async function ensureManagedDependencies(environment) {
-  const packages = [resolve(managedRoot, "../cloudflare-egress"), managedRoot];
+  const packages = [resolve(managedRoot, "../egress"), managedRoot];
   const missing = [];
   for (const root of packages) {
     try {
@@ -554,6 +608,25 @@ async function hasCodexLogin(environment) {
     return true;
   } catch {
     return false;
+  }
+}
+
+async function readLocalChatGptBootstrap(environment) {
+  const codexHome = environment.CODEX_HOME ?? join(homedir(), ".codex");
+  const path = resolve(environment.NANOCODEX_CODEX_AUTH_FILE ?? join(codexHome, "auth.json"));
+  try {
+    const credential = await readCodexSubscription(path);
+    const document = JSON.parse(await readFile(path, "utf8"));
+    const refreshToken = document?.tokens?.refresh_token;
+    return JSON.stringify({
+      access_token: credential.accessToken,
+      account_id: credential.accountId,
+      expires_at: credential.expiresAt,
+      fedramp: credential.fedramp,
+      ...(typeof refreshToken === "string" && refreshToken ? { refresh_token: refreshToken } : {}),
+    });
+  } catch {
+    return undefined;
   }
 }
 
@@ -1282,6 +1355,8 @@ if (resolve(process.argv[1] ?? "") === scriptPath) {
     printEnvironmentSentinel(process.argv.slice(3));
   } else if (process.argv[2] === "--managed-ready-sentinel") {
     await sendManagedReadySentinel();
+  } else if (process.argv[2] === "--chatgpt-relay-child") {
+    await runLocalChatGptRelayChild();
   } else {
     await main();
   }

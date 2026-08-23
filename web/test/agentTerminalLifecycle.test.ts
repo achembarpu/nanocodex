@@ -5,44 +5,34 @@ import test from "node:test";
 const terminal = source("../src/AgentTerminal.tsx");
 const demoTerminal = source("../src/demoTerminal.ts");
 const experience = source("../src/AgentExperience.tsx");
-const session = source("../src/chatGptSession.tsx");
+const session = source("../src/modelSession.tsx");
 const health = source("../src/deploymentHealth.ts");
 const surface = source("../src/agentTerminalSurface.tsx");
 const terminalCss = source("../src/AgentTerminal.css");
 
-test("browser authentication automatically selects the supported agent credential", () => {
-  assert.match(session, /next\.state === "authenticated"[\s\S]*?onSourceChange\("subscription"\)/);
-  assert.match(health, /payload\.credential_source === "subscription"/);
-  assert.match(session, /deploymentHealth\.read\(\)/);
-  assert.match(session, /window\.addEventListener\("focus", refreshWhenVisible\)/);
-  assert.match(session, /document\.addEventListener\("visibilitychange", refreshWhenVisible\)/);
-  assert.match(session, /This terminal will start automatically/);
-});
-
-test("sign-out invalidates refreshes from before and during the credential mutation", () => {
-  const signOut = session.slice(
-    session.indexOf("const signOut = async"),
-    session.indexOf("return { busy", session.indexOf("const signOut = async")),
-  );
-  assert.equal(matches(signOut, /\+\+authGeneration\.current|authGeneration\.current \+= 1/g), 2);
-  assert.match(signOut, /method: "DELETE"[\s\S]*?publishStatus\(\{ state: "signed_out" \}\)[\s\S]*?await refreshStatus\(\)/);
+test("account authentication naturally selects the private broker", () => {
+  assert.match(session, /useAccountSession\(\)\.account/);
+  assert.match(health, /payload\.credential_source === "brokered"/);
+  assert.match(session, /deploymentHealth\.refresh\(\)/);
+  assert.match(session, /window\.addEventListener\("focus", refresh\)/);
+  assert.match(session, /nanocodex:model-credential-changed/);
 });
 
 test("credential presence is distinct from agent readiness and failures are manually actionable", () => {
   assert.match(session, /const ready = agentStatus === "ready"/);
   assert.match(session, /agentStatus === "error" && hasCredential/);
   assert.match(session, />retry agent<\/button>/);
-  assert.match(session, />retry session<\/button>/);
-  assert.match(session, /agentStartFailure\(agentError, source\)/);
+  assert.match(session, />retry connection<\/button>/);
+  assert.match(session, /agentStartFailure\(agentError\)/);
   assert.match(terminal, /const retryAgent = useCallback\(\(\) => \{[\s\S]*?refetch\(\)/);
   assert.doesNotMatch(`${terminal}\n${session}`, /automaticRetry|workerRecoveryAttempts/);
   assert.doesNotMatch(`${terminal}\n${session}`, /Connect to start\./);
 });
 
-test("signed-out browsers wait for explicit ChatGPT authentication", () => {
-  assert.match(experience, /source === "subscription" \|\| source === "user"/);
+test("signed-out browsers wait for the account-owned model connection", () => {
+  assert.match(experience, /source === "brokered"/);
   assert.match(experience, /hasCredential && !capabilityError \? \(/);
-  assert.match(session, /Sign in with ChatGPT to start the browser agent/);
+  assert.match(session, /Sign in with a passkey to start the browser agent/);
   assert.doesNotMatch(`${experience}\n${terminal}\n${session}`, /guest|sponsor|"deployment"|backend-anon|anonymous (?:OpenAI|ChatGPT|Codex)/i);
 });
 
@@ -88,18 +78,14 @@ test("touch terminals keep xterm output readable without hiding a focusable text
   assert.doesNotMatch(surface, /textarea\.setAttribute\("aria-hidden"/);
 });
 
-test("app-local modules own ChatGPT policy and xterm presentation", () => {
-  assert.match(experience, /from "\.\/chatGptSession"/);
+test("app-local modules own account model policy and xterm presentation", () => {
+  assert.match(experience, /from "\.\/modelSession"/);
   assert.match(terminal, /from "\.\/agentTerminalSurface"/);
   assert.doesNotMatch(`${experience}\n${terminal}`, /new Xterm|\/api\/auth\/chatgpt|deployment_sha|pageshow/);
-  assert.match(session, /function useChatGptSession/);
+  assert.match(session, /function useModelSession/);
   assert.match(surface, /export function XtermSurface/);
 });
 
 function source(path: string): string {
   return readFileSync(new URL(path, import.meta.url), "utf8");
-}
-
-function matches(value: string, pattern: RegExp) {
-  return [...value.matchAll(pattern)].length;
 }

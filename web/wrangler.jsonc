@@ -42,7 +42,7 @@
   },
   "services": [
     {
-      "binding": "MULTIPLAYER_BACKEND",
+      "binding": "NANOCODEX_BACKEND",
       "service": "nanocodex-durable-agent"
     }
   ],
@@ -171,12 +171,7 @@
       },
       "services": [
         {
-          "binding": "EGRESS",
-          "service": "nanocodex-egress-broker-example",
-          "remote": false
-        },
-        {
-          "binding": "MULTIPLAYER_BACKEND",
+          "binding": "NANOCODEX_BACKEND",
           "service": "nanocodex-durable-agent",
           "remote": false
         }
@@ -223,8 +218,7 @@
         }
       ],
       "vars": {
-        "ENVIRONMENT": "development",
-        "MULTIPLAYER_ALLOCATOR_TOKEN": "local-room-allocator-token"
+        "ENVIRONMENT": "development"
       }
     }
   }

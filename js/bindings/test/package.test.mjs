@@ -84,6 +84,7 @@ test("the packed package ships and resolves every public entry point", async () 
       } from "nanocodex/durability/postgres";
       import { Agent as HostAgent, Transport as HostTransport } from "nanocodex/host";
       import * as hostExports from "nanocodex/host";
+      import { Agent as ManagedAgent } from "nanocodex/managed";
       import { dataset as aggregateDataset, web } from "nanocodex/tools";
       import { dataset } from "nanocodex/tools/dataset";
       import { nanocodexTools } from "nanocodex/tools/vite";
@@ -93,6 +94,8 @@ test("the packed package ships and resolves every public entry point", async () 
       import * as browserExports from "nanocodex/browser";
 
       assert.equal(typeof Actions.turn.prompt, "function");
+      assert.equal(typeof ManagedAgent.create, "function");
+      assert.equal(typeof ManagedAgent.list, "function");
       const durabilityValueNames = [
         "createMemoryDurabilityStore",
         "createSqliteDurabilityStore",

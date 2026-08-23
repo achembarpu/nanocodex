@@ -702,7 +702,7 @@ Revisions are unsigned decimal strings so JavaScript preserves Rust's full
 `nanocodex/durability` leaf. Durable step hosts can carry the memory store's
 `snapshot()` into the next step. SQLite hosts provide one transaction query
 adapter and execute the canonical schema; the platform never interprets the
-opaque Rust journal. See `examples/cloudflare-workers`,
+opaque Rust journal. See `services/managed`,
 `examples/vercel-workflows`, and `examples/rivet-actors` for all three host
 shapes.
 

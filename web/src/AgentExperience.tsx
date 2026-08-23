@@ -15,9 +15,9 @@ import { browserAgentCapabilityError } from "./browserAgentCapabilities";
 import {
   AgentSessionBar,
   inactiveTerminalMessage,
-  type ChatGptStatus,
+  type ModelSessionStatus,
   type CredentialSource,
-} from "./chatGptSession";
+} from "./modelSession";
 import "./AgentTerminal.css";
 import "./Home.css";
 
@@ -30,7 +30,7 @@ export const AgentExperience = memo(function AgentExperience({
   theme: "light" | "dark";
 }) {
   const capabilityError = useMemo(() => browserAgentCapabilityError(), []);
-  const [authStatus, setAuthStatus] = useState<ChatGptStatus>();
+  const [authStatus, setAuthStatus] = useState<ModelSessionStatus>();
   const [credentialSource, setCredentialSource] = useState<CredentialSource>();
   const credentialSourceRef = useRef<CredentialSource | undefined>(undefined);
   const [runtimeState, setRuntimeState] = useState<AgentTerminalState>();
@@ -105,5 +105,5 @@ function ReservedTerminal({
 function isAuthenticatedCredential(
   source: CredentialSource | undefined,
 ): source is Exclude<CredentialSource, null> {
-  return source === "brokered" || source === "subscription" || source === "user";
+  return source === "brokered";
 }

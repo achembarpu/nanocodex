@@ -9,20 +9,22 @@ import {
 } from "./managedModel.ts";
 
 test("brokered model access is inferred from one private binding", () => {
-  assert.equal(managedModelAccess({}), undefined);
-  const access = managedModelAccess({ EGRESS: binding(async () => new Response()) });
+  assert.equal(managedModelAccess(browserRequest(), {}), undefined);
+  const access = managedModelAccess(browserRequest(), {
+    NANOCODEX_BACKEND: binding(async () => new Response()),
+  });
   assert.ok(access);
   assert.deepEqual(Object.keys(access), ["binding"]);
   assert.throws(
-    () => managedModelAccess({ EGRESS: {} as Fetcher }),
-    /private EGRESS Service Binding/,
+    () => managedModelAccess(browserRequest(), { NANOCODEX_BACKEND: {} as Fetcher }),
+    /private managed Service Binding/,
   );
 });
 
 test("broker health is structural and provider-neutral", async () => {
   const requests: Request[] = [];
-  const access = managedModelAccess({
-    EGRESS: binding(async (request) => {
+  const access = managedModelAccess(browserRequest(), {
+    NANOCODEX_BACKEND: binding(async (request) => {
       requests.push(request);
       return Response.json({ ready: true }, {
         headers: { "cache-control": "no-store" },
@@ -33,8 +35,8 @@ test("broker health is structural and provider-neutral", async () => {
   assert.equal(requests[0]?.url, "https://broker.internal/.well-known/nanocodex/model-status");
   assert.equal(requests[0]?.method, "GET");
 
-  const providerLeaking = managedModelAccess({
-    EGRESS: binding(async () => Response.json({ ready: true, auth_mode: "chatgpt" }, {
+  const providerLeaking = managedModelAccess(browserRequest(), {
+    NANOCODEX_BACKEND: binding(async () => Response.json({ ready: true, auth_mode: "chatgpt" }, {
       headers: { "cache-control": "no-store" },
     })),
   })!;
@@ -43,8 +45,8 @@ test("broker health is structural and provider-neutral", async () => {
 
 test("brokered tools send one fixed operation and placeholder", async () => {
   let forwarded: Request | undefined;
-  const access = managedModelAccess({
-    EGRESS: binding(async (request) => {
+  const access = managedModelAccess(browserRequest(), {
+    NANOCODEX_BACKEND: binding(async (request) => {
       forwarded = request;
       return Response.json({ output: "ok" });
     }),
@@ -66,8 +68,8 @@ test("brokered sockets use the credentialless Cloudflare egress leaf", async () 
     accept() { this.accepted = true; },
     close() {},
   };
-  const access = managedModelAccess({
-    EGRESS: binding(async (request) => {
+  const access = managedModelAccess(browserRequest(), {
+    NANOCODEX_BACKEND: binding(async (request) => {
       forwarded = request;
       return {
         status: 101,
@@ -92,4 +94,10 @@ function binding(fetchRequest: (request: Request) => Promise<Response>): Fetcher
       return fetchRequest(new Request(input, init));
     },
   } as Fetcher;
+}
+
+function browserRequest(): Request {
+  return new Request("https://demo.test/agent", {
+    headers: { cookie: "nanocodex_account=opaque-session" },
+  });
 }

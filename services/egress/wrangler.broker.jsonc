@@ -1,0 +1,46 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "nanocodex-egress",
+  "main": "src/egress.ts",
+  "compatibility_date": "2026-07-29",
+  "compatibility_flags": ["global_fetch_strictly_public"],
+  "workers_dev": false,
+  "minify": true,
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true,
+      "persist": true
+    }
+  },
+  "vars": {
+    "ENVIRONMENT": "production"
+  },
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "USER_CREDENTIALS",
+        "class_name": "UserCredentialBroker"
+      },
+      {
+        "name": "AGENT_SUBJECTS",
+        "class_name": "AgentSubjectDirectory"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["CodexOAuthBroker"]
+    },
+    {
+      "tag": "v2",
+      "new_sqlite_classes": ["UserCredentialBroker", "AgentSubjectDirectory"]
+    },
+    {
+      "tag": "v3",
+      "deleted_classes": ["CodexOAuthBroker"]
+    }
+  ]
+}

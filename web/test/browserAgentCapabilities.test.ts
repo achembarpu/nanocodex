@@ -51,7 +51,7 @@ test("only capabilities used by the Worker, transport, thread, and workspace are
 test("the terminal fails before thread or Worker creation and exposes the capability error", () => {
   const experience = source("../src/AgentExperience.tsx");
   const terminal = source("../src/AgentTerminal.tsx");
-  const session = source("../src/chatGptSession.tsx");
+  const session = source("../src/modelSession.tsx");
   assert.match(experience, /const capabilityError = useMemo\(\(\) => browserAgentCapabilityError\(\), \[\]\)/);
   assert.match(experience, /hasCredential && !capabilityError \? \([\s\S]*?<AgentTerminal/);
   assert.match(terminal, /const thread = useMemo\(\(\) => getBrowserThread\(\), \[\]\)/);

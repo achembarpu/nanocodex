@@ -30,7 +30,7 @@ import {
 } from "./publicSecurity.ts";
 import { CHATGPT_REALTIME_INSTRUCTIONS } from "nanocodex/browser/realtime";
 import { routeLinkPreview } from "./linkPreview.ts";
-import { routeMultiplayer } from "./multiplayerProxy.ts";
+import { routeManaged } from "./managedProxy.ts";
 import {
   fetchManagedModel,
   managedModelAccess,
@@ -93,8 +93,8 @@ type WorkerEnv = GitStorageEnv & ThreadGitStorageEnv & EvalStorageEnv & ChatGptE
   BYOK_SESSIONS?: DurableObjectNamespace;
   CHATGPT_SESSIONS?: DurableObjectNamespace;
   EGRESS?: Fetcher;
-  MULTIPLAYER_BACKEND?: Fetcher;
-  MULTIPLAYER_ALLOCATOR_TOKEN?: string;
+  NANOCODEX_BACKEND?: Fetcher;
+  NANOCODEX_PUBLIC_ORIGIN?: string;
 };
 
 type ApiKeyCredential = {
@@ -121,8 +121,8 @@ export default {
     const url = new URL(request.url);
     const insecure = enforceHttps(request, env, url);
     if (insecure) return insecure;
-    const multiplayer = await routeMultiplayer(request, env, url);
-    if (multiplayer != null) return multiplayer;
+    const managed = await routeManaged(request, env, url);
+    if (managed != null) return managed;
     const evalMutation = await routeEvalMutation(request, env, url);
     if (evalMutation != null) return evalMutation;
     const evalRead = await routeEvalRead(request, env, url, context);
@@ -135,7 +135,7 @@ export default {
     if (mcpResponse != null) return mcpResponse;
 
     if (url.pathname === "/api/health" && request.method === "GET") {
-      const managed = managedAccess(env);
+      const managed = managedAccess(request, env);
       if (managed instanceof Response) return managed;
       if (managed) {
         const ready = await managedModelReady(managed);
@@ -145,6 +145,7 @@ export default {
           deployment_sha: GIT_SHA_PATTERN.test(env.DEPLOYMENT_SHA ?? "")
             ? env.DEPLOYMENT_SHA
             : null,
+          interactive_auth: false,
           service: "nanocodex",
           runtime: "cloudflare-workers",
           status: "ok",
@@ -169,22 +170,37 @@ export default {
     }
 
     if (url.pathname === "/api/auth/chatgpt" && request.method === "POST") {
+      const managed = managedAccess(request, env);
+      if (managed instanceof Response) return managed;
+      if (managed) return interactiveAuthDisabled();
       return startChatGptSession(request, env, url);
     }
 
     if (url.pathname === "/api/auth/chatgpt" && request.method === "GET") {
+      const managed = managedAccess(request, env);
+      if (managed instanceof Response) return managed;
+      if (managed) return interactiveAuthDisabled();
       return chatGptSessionStatus(request, env, context);
     }
 
     if (url.pathname === "/api/auth/chatgpt" && request.method === "DELETE") {
+      const managed = managedAccess(request, env);
+      if (managed instanceof Response) return managed;
+      if (managed) return interactiveAuthDisabled();
       return clearChatGptSession(request, env, url);
     }
 
     if (url.pathname === "/api/auth/openai" && request.method === "PUT") {
+      const managed = managedAccess(request, env);
+      if (managed instanceof Response) return managed;
+      if (managed) return interactiveAuthDisabled();
       return createByokSession(request, env, url);
     }
 
     if (url.pathname === "/api/auth/openai" && request.method === "DELETE") {
+      const managed = managedAccess(request, env);
+      if (managed instanceof Response) return managed;
+      if (managed) return interactiveAuthDisabled();
       return clearByokSession(request, env, url);
     }
 
@@ -235,12 +251,21 @@ function enforceHttps(request: Request, env: WorkerEnv, url: URL): Response | nu
   return new Response("HTTPS required", { headers, status: 426 });
 }
 
-function managedAccess(env: WorkerEnv): ManagedModelAccess | Response | undefined {
+function managedAccess(
+  request: Request,
+  env: WorkerEnv,
+): ManagedModelAccess | Response | undefined {
   try {
-    return managedModelAccess(env);
+    return managedModelAccess(request, env);
   } catch {
     return json({ error: "managed model access is misconfigured" }, { status: 503 });
   }
+}
+
+function interactiveAuthDisabled(): Response {
+  return json({ error: "interactive authentication is disabled for managed model access" }, {
+    status: 409,
+  });
 }
 
 function isManagedAccess(value: Credential | ManagedModelAccess): value is ManagedModelAccess {
@@ -602,7 +627,7 @@ async function validateToolRequest(
   if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
     return json({ error: "expected JSON" }, { status: 415 });
   }
-  const managed = managedAccess(env);
+  const managed = managedAccess(request, env);
   if (managed instanceof Response) return managed;
   if (managed) return managed;
   const resolved = await resolveCredential(request, env, operation);
@@ -725,7 +750,7 @@ async function setupResponsesWebSocket(
   downstream.addEventListener("close", onDownstreamClose);
   downstream.addEventListener("error", onDownstreamClose);
   try {
-    const managed = managedAccess(env);
+    const managed = managedAccess(request, env);
     if (managed instanceof Response) {
       await rejectResponsesWebSocket(downstream, managed);
       return;

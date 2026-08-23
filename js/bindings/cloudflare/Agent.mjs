@@ -2,6 +2,7 @@ import * as HostAgent from "../host/Agent.mjs";
 import * as Transport from "../browser/Transport.mjs";
 import { createCloudflareDurabilityStore } from "../runtime/cloudflare-durability-store.mjs";
 import { cloudflareEgress } from "./egress.mjs";
+import { scopeCloudflareEgress } from "./egress-subject.mjs";
 import {
   clearCloudflareEventSocket,
   createCloudflareEventSocket,
@@ -43,12 +44,14 @@ export function destroy(owner) {
 
 /** @internal Creates one Agent with an explicitly supplied package module. */
 export async function create(module, owner, options = {}) {
-  const { context, egress } = resolveOwner(owner);
+  const { context, egress, subject } = resolveOwner(owner);
   const agentOptions = applicationOptions(options);
   const eventSocket = createCloudflareEventSocket(context);
   const durability = createCloudflareDurabilityStore(context.storage);
   const sessionId = durableSessionId(context.storage);
-  const endpoint = cloudflareEgress({ binding: egress });
+  const endpoint = cloudflareEgress({
+    binding: scopeCloudflareEgress(egress, subject),
+  });
   const startup = deferred();
   const transport = Transport.hostManaged({
     ...endpoint,
@@ -112,7 +115,11 @@ function resolveOwner(owner) {
       "Cloudflare Agent.create requires the private owner.env.NANOCODEX Service Binding",
     );
   }
-  return { context, egress };
+  const subject = context.id?.toString?.();
+  if (typeof subject !== "string" || !subject) {
+    throw new TypeError("Cloudflare Agent.create requires owner.ctx.id");
+  }
+  return { context, egress, subject };
 }
 
 function resolveContext(owner) {

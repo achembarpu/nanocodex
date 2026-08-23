@@ -799,7 +799,7 @@ export function Multiplayer() {
           <section className="multiplayer-credential-boundary" aria-labelledby="credential-boundary-title">
             <header>
               <p>credential boundary</p>
-              <strong>Brokered</strong>
+              <strong>Per-user broker</strong>
             </header>
             <h2 id="credential-boundary-title">Secretless agent</h2>
             <p>
@@ -810,7 +810,7 @@ export function Multiplayer() {
             <dl>
               <div><dt>Browser</dt><dd>room cookie</dd></div>
               <div><dt>Agent</dt><dd>placeholder</dd></div>
-              <div><dt>Broker</dt><dd>credential owner</dd></div>
+              <div><dt>Broker</dt><dd>room owner credential</dd></div>
             </dl>
           </section>
         </aside>

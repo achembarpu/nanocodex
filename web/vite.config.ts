@@ -5,17 +5,13 @@ import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import { defineConfig, type Plugin } from "vite";
 import { rewriteDocsDevModuleUrl } from "./vite/docsDevModules.ts";
-import {
-  localManagedAuxiliaryWorkers,
-  localRoomAllocatorToken,
-} from "./vite/localWorkerTopology.ts";
+import { localManagedAuxiliaryWorkers } from "./vite/localWorkerTopology.ts";
 import {
   documentStatusForPath,
   renderLinkPreviewDocument,
 } from "./worker/linkPreview.ts";
 
 const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
-const localAllocatorToken = localRoomAllocatorToken();
 function applicationRouteFallback(): Plugin {
   return {
     name: "nanocodex-application-route-fallback",
@@ -101,9 +97,6 @@ export default defineConfig({
             : {}),
           ...(process.env.NANOCODEX_LOCAL_DEPLOYMENT_SHA
             ? { DEPLOYMENT_SHA: process.env.NANOCODEX_LOCAL_DEPLOYMENT_SHA }
-            : {}),
-          ...(localAllocatorToken
-            ? { MULTIPLAYER_ALLOCATOR_TOKEN: localAllocatorToken }
             : {}),
         },
         dev: {

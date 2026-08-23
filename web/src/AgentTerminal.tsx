@@ -25,9 +25,9 @@ import type {
 } from "./agentTerminalTypes";
 import {
   inactiveTerminalMessage,
-  type ChatGptStatus,
+  type ModelSessionStatus,
   type CredentialSource,
-} from "./chatGptSession";
+} from "./modelSession";
 import {
   createAgentTerminal,
   type AgentTerminal as DemoTerminal,
@@ -52,7 +52,7 @@ export const AgentTerminal = memo(function AgentTerminal({
   source,
   theme,
 }: {
-  authStatus: ChatGptStatus | undefined;
+  authStatus: ModelSessionStatus | undefined;
   mode: AgentTerminalMode;
   onStateChange(state: AgentTerminalState): void;
   source: Exclude<CredentialSource, null>;

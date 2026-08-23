@@ -24,6 +24,7 @@ import {
 import { flushSync } from "react-dom";
 import { useLocation, useNavigate } from "react-router";
 import { AgentExperience } from "./AgentExperience";
+import { AccountMenu } from "./AccountMenu";
 import { Changelog, preloadChangelog } from "./Changelog";
 import { CodeBrowser } from "./CodeBrowser";
 import { CommitCodeStream } from "./CommitCodeStream";
@@ -1065,6 +1066,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
             </nav>
           </div>
           <nav className="header-actions" aria-label="Site actions">
+            <AccountMenu />
             <div className="header-install">
               <button
                 className="header-install-trigger"

@@ -157,6 +157,11 @@ async function check() {
   HostTransport.hostManaged(cloudflareEgress({
     binding: cloudflareBinding,
   }));
+  cloudflareEgress({
+    binding: cloudflareBinding,
+    // @ts-expect-error broker subjects are derived privately from the Durable Object identity.
+    subject: "caller-selected",
+  });
   const cloudflareAgent: CloudflareAgent.Agent = await CloudflareAgent.create(cloudflareOwner);
   cloudflareAgent.turn.prompt({ input: "hello" });
   cloudflareAgent.events.connect(new Request("https://agent.internal/events"));
@@ -165,6 +170,10 @@ async function check() {
   const cloudflareApplication: true = extendedCloudflareAgent.application;
   void cloudflareApplication;
   CloudflareAgent.destroy(cloudflareOwner);
+  await CloudflareAgent.create(cloudflareOwner, {
+    // @ts-expect-error broker subjects are not caller-selected.
+    subject: "caller-selected",
+  });
   await CloudflareAgent.create(cloudflareOwner, {
     // @ts-expect-error provider credentials belong to the private EGRESS broker.
     apiKey,

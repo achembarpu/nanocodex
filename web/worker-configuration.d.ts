@@ -22,7 +22,7 @@ interface __BaseEnv_Env {
 	THREAD_GIT_REPOSITORY: DurableObjectNamespace<import("./worker/entry").ThreadGitRepository>;
 	EVAL_COORDINATOR: DurableObjectNamespace<import("./worker/entry").EvalCoordinator>;
 	CHATGPT_EGRESS: DurableObjectNamespace<import("./worker/entry").ChatGptEgress>;
-	MULTIPLAYER_BACKEND: Fetcher /* nanocodex-durable-agent */;
+	NANOCODEX_BACKEND: Fetcher /* nanocodex-durable-agent */;
 }
 declare namespace Cloudflare {
 	interface GlobalProps {
@@ -50,7 +50,7 @@ declare namespace Cloudflare {
 		THREAD_GIT_REPOSITORY: DurableObjectNamespace<import("./worker/entry").ThreadGitRepository>;
 		EVAL_COORDINATOR: DurableObjectNamespace<import("./worker/entry").EvalCoordinator>;
 		CHATGPT_EGRESS: DurableObjectNamespace<import("./worker/entry").ChatGptEgress>;
-		MULTIPLAYER_BACKEND: Fetcher /* nanocodex-durable-agent */;
+		NANOCODEX_BACKEND: Fetcher /* nanocodex-durable-agent */;
 	}
 	interface Env extends __BaseEnv_Env {}
 }

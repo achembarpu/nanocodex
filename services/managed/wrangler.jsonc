@@ -1,0 +1,64 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "nanocodex-durable-agent",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-07-29",
+  "compatibility_flags": ["nodejs_compat"],
+  "workers_dev": false,
+  "minify": true,
+  "observability": {
+    "enabled": true,
+    "logs": {
+      "enabled": true,
+      "invocation_logs": true,
+      "persist": true
+    }
+  },
+  "services": [
+    {
+      "binding": "NANOCODEX",
+      "service": "nanocodex-egress"
+    }
+  ],
+  "durable_objects": {
+    "bindings": [
+      {
+        "name": "NANOCODEX_SESSIONS",
+        "class_name": "NanocodexSession"
+      },
+      {
+        "name": "NANOCODEX_ROOMS",
+        "class_name": "MultiplayerRoom"
+      },
+      {
+        "name": "NANOCODEX_MULTIPLAYER_QUOTA",
+        "class_name": "MultiplayerQuota"
+      },
+      {
+        "name": "NANOCODEX_AUTH",
+        "class_name": "NonceStorage"
+      },
+      {
+        "name": "NANOCODEX_USERS",
+        "class_name": "UserAccount"
+      },
+      {
+        "name": "NANOCODEX_API_KEYS",
+        "class_name": "ApiKeyRecord"
+      }
+    ]
+  },
+  "migrations": [
+    {
+      "tag": "v1",
+      "new_sqlite_classes": ["NanocodexSession", "MultiplayerRoom", "MultiplayerQuota"]
+    },
+    {
+      "tag": "v2",
+      "new_classes": ["NonceStorage", "UserAccount", "ApiKeyRecord"]
+    }
+  ],
+  "vars": {
+    "AGENT_IDLE_TIMEOUT_MS": "30000"
+  }
+}

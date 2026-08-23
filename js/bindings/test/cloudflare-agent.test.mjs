@@ -4,6 +4,9 @@ import { test } from "node:test";
 
 import { create, destroy } from "../cloudflare/Agent.mjs";
 
+const FIRST_OBJECT_ID = "a".repeat(64);
+const SECOND_OBJECT_ID = "b".repeat(64);
+
 class MemoryStorage {
   constructor() {
     this.batches = [];
@@ -75,17 +78,19 @@ class UpstreamSocket {
   close() { this.closed = true; }
 }
 
-function durableContext(storage) {
+function durableContext(storage, id = FIRST_OBJECT_ID) {
   return {
+    id: { toString: () => id },
     storage,
     acceptWebSocket() {},
     getWebSockets() { return []; },
   };
 }
 
-function egressBinding() {
+function egressBinding(subjects) {
   return {
-    async fetch() {
+    async fetch(_input, init) {
+      subjects?.push(init.headers.get("x-nanocodex-subject"));
       return {
         status: 101,
         headers: new Headers(),
@@ -95,9 +100,9 @@ function egressBinding() {
   };
 }
 
-function durableOwner(storage, binding = egressBinding()) {
+function durableOwner(storage, binding = egressBinding(), id = FIRST_OBJECT_ID) {
   return {
-    ctx: durableContext(storage),
+    ctx: durableContext(storage, id),
     env: { NANOCODEX: binding },
   };
 }
@@ -124,6 +129,10 @@ test("Cloudflare Agent owns credentials, transport, and durability options", asy
     );
   }
   await assert.rejects(
+    create(module, durableOwner(new MemoryStorage()), { subject: "caller-selected" }),
+    /does not accept subject/,
+  );
+  await assert.rejects(
     create(module, { ctx: durableContext(new MemoryStorage()), env: {} }),
     /owner\.env\.NANOCODEX Service Binding/,
   );
@@ -132,7 +141,14 @@ test("Cloudflare Agent owns credentials, transport, and durability options", asy
     /requires owner\.ctx/,
   );
   await assert.rejects(
-    create(module, { ctx: {}, env: { NANOCODEX: egressBinding() } }),
+    create(module, { ctx: durableContext(new MemoryStorage(), ""), env: { NANOCODEX: egressBinding() } }),
+    /requires owner\.ctx\.id/,
+  );
+  await assert.rejects(
+    create(module, {
+      ctx: { id: { toString: () => FIRST_OBJECT_ID } },
+      env: { NANOCODEX: egressBinding() },
+    }),
     /requires Durable Object SQLite storage/,
   );
 });
@@ -141,16 +157,19 @@ test("Cloudflare Agent isolates journals per Durable Object and can recreate aft
   const module = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
   const firstStorage = new MemoryStorage();
   const secondStorage = new MemoryStorage();
-  const owner = (storage) => durableOwner(storage);
+  const subjects = [];
+  const binding = egressBinding(subjects);
+  const owner = (storage, id) => durableOwner(storage, binding, id);
 
   const [first, second] = await Promise.all([
-    create(module, owner(firstStorage)),
-    create(module, owner(secondStorage)),
+    create(module, owner(firstStorage, FIRST_OBJECT_ID)),
+    create(module, owner(secondStorage, SECOND_OBJECT_ID)),
   ]);
   assert.notEqual(first.sessionId, second.sessionId);
+  assert.deepEqual(new Set(subjects), new Set([FIRST_OBJECT_ID, SECOND_OBJECT_ID]));
   await Promise.all([first.session.shutdown(), second.session.shutdown()]);
 
-  const recreated = await create(module, owner(firstStorage));
+  const recreated = await create(module, owner(firstStorage, FIRST_OBJECT_ID));
   assert.equal(recreated.sessionId, first.sessionId);
   await recreated.session.shutdown();
 });

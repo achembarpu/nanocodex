@@ -71,8 +71,8 @@ build-rivet-example: build-wasm
 
 # Type-check, test, and bundle the Cloudflare Durable Object WASM consumer.
 build-cloudflare-example: build-wasm
-    npm ci --prefix examples/cloudflare-workers
-    npm run check --prefix examples/cloudflare-workers
+    npm ci --prefix services/managed
+    npm run check --prefix services/managed
 
 # Type-check, test, and bundle the Vercel Workflow actor consumer.
 build-vercel-example: build-wasm

@@ -1,6 +1,7 @@
 import { Suspense, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router";
+import { AccountSessionProvider } from "./AccountSession";
 import { NanocodexApp } from "./NanocodexApp";
 import { ArtifactRuntime } from "./artifactRuntime";
 import {
@@ -43,7 +44,9 @@ function BrowserApplication({ url }: { url: URL }) {
   return (
     <BrowserRouter useTransitions={false}>
       <Suspense fallback={null}>
-        <NanocodexApp preparedRoute={preparedRoute} />
+        <AccountSessionProvider>
+          <NanocodexApp preparedRoute={preparedRoute} />
+        </AccountSessionProvider>
       </Suspense>
     </BrowserRouter>
   );

@@ -10,9 +10,9 @@ import {
 import type { AgentStatus } from "./agentTerminalTypes";
 import {
   AgentSessionBar,
-  type ChatGptStatus,
+  type ModelSessionStatus,
   type CredentialSource,
-} from "./chatGptSession";
+} from "./modelSession";
 import {
   AUTONOMOUS_AGENT_IDS,
   RESIDENT_IDS,
@@ -133,7 +133,7 @@ export function MonsterWorld() {
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus>("offline");
   const [agentError, setAgentError] = useState<string>();
   const [agentNotice, setAgentNotice] = useState<string>();
-  const [, setAuthStatus] = useState<ChatGptStatus>();
+  const [, setAuthStatus] = useState<ModelSessionStatus>();
   const [credentialSource, setCredentialSource] = useState<CredentialSource>();
   const [usage, setUsage] = useState<UsageTotals>(emptyUsage);
   const [assetError, setAssetError] = useState<Error>();
@@ -419,9 +419,7 @@ export function MonsterWorld() {
   const startAgents = useCallback(() => {
     if (
       capabilityError
-      || (credentialSource !== "brokered"
-        && credentialSource !== "subscription"
-        && credentialSource !== "user")
+      || credentialSource !== "brokered"
       || runtimeStatusRef.current === "starting"
       || runtimeStatusRef.current === "ready"
     ) return;
@@ -715,9 +713,7 @@ export function MonsterWorld() {
     invalidateWorld();
   };
 
-  const hasCredential = credentialSource === "brokered"
-    || credentialSource === "subscription"
-    || credentialSource === "user";
+  const hasCredential = credentialSource === "brokered";
   const agentStatus: AgentStatus = capabilityError || !hasCredential
     ? "idle"
     : runtimeStatus === "ready"

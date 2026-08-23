@@ -17,7 +17,7 @@ The public demo family is explicit in the shared navigation:
 
 Multiplayer is the managed-agent deployment proof rather than another browser
 agent. The website Worker forwards only `/v1/rooms` through its
-`MULTIPLAYER_BACKEND` Service Binding. Invite capabilities stay in URL
+`NANOCODEX_BACKEND` Service Binding. Invite capabilities stay in URL
 fragments until exchanged for room-scoped HttpOnly cookies; the browser sees
 room cursors and final agent replies, never managed agent/turn capabilities or
 provider credentials. The managed runtime, in turn, has only a private
@@ -43,7 +43,7 @@ npx wrangler secret put MULTIPLAYER_ALLOCATOR_TOKEN
 ```
 
 The managed Worker remains `workers_dev = false`; its
-`MULTIPLAYER_BACKEND` Service Binding is the production entry point. Production
+`NANOCODEX_BACKEND` Service Binding is the production entry point. Production
 also fails closed unless the checked-in per-client and global room-allocation
 rate-limit bindings are available; cross-origin allocation requests are
 rejected before the server capability is used. A singleton backend quota object
@@ -129,7 +129,7 @@ The local Worker and Vite client run together at `http://localhost:5173` using
 the Cloudflare Vite-plugin layout. No Cloudflare account or remote binding is
 used by the normal development command. Browsers treat `localhost` as a secure
 context, while provider credentials remain behind private Worker bindings; see the
-[Cloudflare Worker example](../examples/cloudflare-workers/README.md#multiplayer-managed-agent-rooms)
+[Cloudflare Worker example](../services/managed/README.md#multiplayer-managed-agent-rooms)
 for the deployment and live-smoke workflow.
 
 ### Documentation

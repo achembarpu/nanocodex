@@ -367,7 +367,7 @@ test("a direct visit waits for its complete route preload before mounting the sh
   assert.doesNotMatch(entry, /import\(|lazy\(/);
   assert.match(
     entry,
-    /<Suspense fallback=\{null\}>\s*<NanocodexApp preparedRoute=\{preparedRoute\} \/>/,
+    /<Suspense fallback=\{null\}>\s*<AccountSessionProvider>\s*<NanocodexApp preparedRoute=\{preparedRoute\} \/>\s*<\/AccountSessionProvider>/,
   );
   assert.match(application, /preparedRoute\.repositorySnapshot/);
   assert.match(application, /preparedRoute\.sourceFile/);

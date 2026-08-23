@@ -642,7 +642,10 @@ test("development WASM preflight always delegates freshness to the canonical bui
   assert.equal(executions.length, 1);
   assert.equal(executions[0][0], "just");
   assert.deepEqual(executions[0][1], ["build-wasm"]);
-  assert.match(executions[0][2], /nanocodex-release\.[^/]+$/);
+  assert.equal(
+    executions[0][2],
+    fileURLToPath(new URL("../..", import.meta.url)).replace(/\/$/, ""),
+  );
 });
 
 test("development WASM preflight invalidates partial output before repair", async () => {

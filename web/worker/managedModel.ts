@@ -1,7 +1,7 @@
 import { cloudflareEgress } from "nanocodex/cloudflare/egress";
 
 export type ManagedModelEnv = {
-  EGRESS?: Fetcher;
+  NANOCODEX_BACKEND?: Fetcher;
 };
 
 export type ManagedModelAccess = Readonly<{
@@ -19,12 +19,25 @@ const HTTP_OPERATIONS = Object.freeze({
 const MODEL_STATUS_URL = "https://broker.internal/.well-known/nanocodex/model-status";
 
 /** Resolves the deployment-owned model boundary without reading a provider credential. */
-export function managedModelAccess(env: ManagedModelEnv): ManagedModelAccess | undefined {
-  if (env.EGRESS === undefined) return undefined;
-  if (typeof env.EGRESS.fetch !== "function") {
-    throw new Error("model access requires the private EGRESS Service Binding");
+export function managedModelAccess(
+  request: Request,
+  env: ManagedModelEnv,
+): ManagedModelAccess | undefined {
+  if (env.NANOCODEX_BACKEND === undefined) return undefined;
+  if (typeof env.NANOCODEX_BACKEND.fetch !== "function") {
+    throw new Error("model access requires the private managed Service Binding");
   }
-  return Object.freeze({ binding: env.EGRESS });
+  const cookie = request.headers.get("cookie");
+  const backend = env.NANOCODEX_BACKEND;
+  const binding = {
+    fetch(input: RequestInfo | URL, init?: RequestInit) {
+      const scoped = new Request(input, init);
+      const headers = new Headers(scoped.headers);
+      if (cookie) headers.set("cookie", cookie);
+      return backend.fetch(new Request(scoped, { headers }));
+    },
+  } as Fetcher;
+  return Object.freeze({ binding });
 }
 
 /** Checks broker policy/credential availability without opening a provider connection. */

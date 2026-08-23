@@ -1,12 +1,7 @@
-import { routeMultiplayer } from "./multiplayerProxy.ts";
+import { routeManaged } from "./managedProxy.ts";
 
 type Env = {
-  ENVIRONMENT: string;
-  MULTIPLAYER_BACKEND: Fetcher;
-  MULTIPLAYER_ALLOCATOR_TOKEN: string;
-  MULTIPLAYER_CREATE_LIMIT: RateLimit;
-  MULTIPLAYER_GLOBAL_LIMIT: RateLimit;
-  MULTIPLAYER_ROUTE_LIMIT: RateLimit;
+  NANOCODEX_BACKEND: Fetcher;
 };
 
 export default {
@@ -16,7 +11,7 @@ export default {
       let backend: Response;
       try {
         const backendUrl = new URL("/health", url);
-        backend = await env.MULTIPLAYER_BACKEND.fetch(new Request(backendUrl, {
+        backend = await env.NANOCODEX_BACKEND.fetch(new Request(backendUrl, {
           headers: { accept: "application/json" },
         }));
       } catch {
@@ -35,11 +30,11 @@ export default {
         || (body as { service?: unknown }).service !== "nanocodex") {
         return unavailable();
       }
-      return Response.json({ status: "ok", service: "multiplayer-proxy" }, {
+      return Response.json({ status: "ok", service: "nanocodex-managed-proxy" }, {
         headers: { "cache-control": "no-store" },
       });
     }
-    return await routeMultiplayer(request, env, url)
+    return await routeManaged(request, env, url)
       ?? Response.json({ error: "not_found" }, {
         status: 404,
         headers: { "cache-control": "no-store" },
@@ -48,7 +43,7 @@ export default {
 } satisfies ExportedHandler<Env>;
 
 function unavailable(): Response {
-  return Response.json({ status: "unavailable", service: "multiplayer-proxy" }, {
+  return Response.json({ status: "unavailable", service: "nanocodex-managed-proxy" }, {
     status: 503,
     headers: { "cache-control": "no-store" },
   });

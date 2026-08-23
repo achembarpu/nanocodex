@@ -10,58 +10,61 @@ type AuxiliaryWorker = {
 };
 
 const LOCAL_MANAGED_WORKER = "nanocodex-durable-agent";
+const LOCAL_EGRESS_WORKER = "nanocodex-egress";
+const DEVELOPMENT_SIGNING_KEY = "nanocodex-local-room-signing-key";
 
 /**
  * Cloudflare requires Workers that share external Durable Objects or upgraded
  * Service Binding responses to run in one local multi-Worker session. Keep the
- * provider credential broker outside this session: only the managed Worker is
- * an auxiliary Worker, and its environment contains placeholders/policy but no
- * OpenAI or ChatGPT credential.
+ * provider credential broker and managed Worker in the same local session so
+ * account, credential, agent, and room routes use the production topology.
  */
 export function localManagedAuxiliaryWorkers(
   environment: NodeJS.ProcessEnv = process.env,
 ): AuxiliaryWorker[] {
-  if (environment.NANOCODEX_LOCAL_MODEL_ACCESS !== "managed") return [];
-
-  const adminToken = exact(environment, "NANOCODEX_LOCAL_ADMIN_TOKEN");
-  const roomAllocatorToken = exact(environment, "NANOCODEX_LOCAL_ROOM_ALLOCATOR_TOKEN");
-  if (adminToken === roomAllocatorToken) {
-    throw new Error("local managed Worker credentials must be distinct");
-  }
+  const signingKey = environment.NANOCODEX_LOCAL_ADMIN_TOKEN?.trim()
+    || DEVELOPMENT_SIGNING_KEY;
   const idleTimeout = environment.NANOCODEX_LOCAL_AGENT_IDLE_TIMEOUT_MS?.trim() || "1000";
+  const relayUrl = environment.NANOCODEX_LOCAL_CODEX_RELAY_URL?.trim();
   if (!/^[1-9][0-9]*$/.test(idleTimeout)) {
     throw new Error("local managed Worker idle timeout must be a positive integer");
   }
 
-  return [{
-    configPath: "../examples/cloudflare-workers/wrangler.jsonc",
-    devOnly: true,
-    config: (configuration) => ({
-      // CLOUDFLARE_ENV applies to every Worker in the Vite session. Pin the
-      // auxiliary name so the website and broker Service Bindings resolve the
-      // same local service names as production.
-      name: LOCAL_MANAGED_WORKER,
-      vars: {
-        ...configuration.vars,
-        AGENT_IDLE_TIMEOUT_MS: idleTimeout,
-        NANOCODEX_ADMIN_TOKEN: adminToken,
-        NANOCODEX_ROOM_ALLOCATOR_TOKEN: roomAllocatorToken,
-      },
-    }),
-  }];
-}
-
-export function localRoomAllocatorToken(
-  environment: NodeJS.ProcessEnv = process.env,
-): string | undefined {
-  if (environment.NANOCODEX_LOCAL_MODEL_ACCESS !== "managed") return undefined;
-  return exact(environment, "NANOCODEX_LOCAL_ROOM_ALLOCATOR_TOKEN");
-}
-
-function exact(environment: NodeJS.ProcessEnv, name: string): string {
-  const value = environment[name]?.trim();
-  if (!value || value !== environment[name]) {
-    throw new Error(`${name} is required and must not contain surrounding whitespace`);
-  }
-  return value;
+  return [
+    {
+      configPath: "../services/egress/wrangler.broker.jsonc",
+      devOnly: true,
+      config: (configuration) => ({
+        name: LOCAL_EGRESS_WORKER,
+        vars: {
+          ...configuration.vars,
+          ENVIRONMENT: "development",
+          ALLOW_LOCAL_CREDENTIAL_CLAIM: "true",
+          ...(relayUrl
+            ? {
+                ALLOW_INSECURE_LOOPBACK_RELAY: "true",
+                CODEX_RELAY_URL: relayUrl,
+              }
+            : {}),
+          ...(environment.NANOCODEX_LOCAL_CHATGPT_BOOTSTRAP
+            ? { LOCAL_CHATGPT_BOOTSTRAP: environment.NANOCODEX_LOCAL_CHATGPT_BOOTSTRAP }
+            : {}),
+        },
+      }),
+    },
+    {
+      configPath: "../services/managed/wrangler.jsonc",
+      devOnly: true,
+      config: (configuration) => ({
+        // CLOUDFLARE_ENV applies to every Worker in the Vite session. Pin the
+        // auxiliary name so Service Bindings resolve the production names.
+        name: LOCAL_MANAGED_WORKER,
+        vars: {
+          ...configuration.vars,
+          AGENT_IDLE_TIMEOUT_MS: idleTimeout,
+          NANOCODEX_ADMIN_TOKEN: signingKey,
+        },
+      }),
+    },
+  ];
 }
