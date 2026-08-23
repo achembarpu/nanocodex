@@ -48,8 +48,20 @@ impl AgentHandle {
     ///
     /// Returns an error after the containing driver has stopped.
     pub async fn spawn(&self) -> Result<(Nanocodex, AgentEvents)> {
+        self.spawn_with(SpawnOptions::new()).await
+    }
+
+    /// Starts a clean agent with optional model and reasoning overrides.
+    ///
+    /// Unspecified values inherit this agent's settings when the driver handles
+    /// the spawn command. Overrides affect only the new child.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error after the containing driver has stopped.
+    pub async fn spawn_with(&self, options: SpawnOptions) -> Result<(Nanocodex, AgentEvents)> {
         let commands = self.commands()?;
-        request_spawn(&commands).await
+        request_spawn(&commands, options).await
     }
 
     /// Forks the containing agent's latest safe model boundary.
@@ -391,7 +403,19 @@ impl Nanocodex {
     ///
     /// Returns an error after this agent's driver has stopped.
     pub async fn spawn(&self) -> Result<(Self, AgentEvents)> {
-        request_spawn(&self.commands).await
+        self.spawn_with(SpawnOptions::new()).await
+    }
+
+    /// Starts a clean sibling with optional model and reasoning overrides.
+    ///
+    /// Unspecified values inherit this agent's settings when its driver handles
+    /// the spawn command. Overrides affect only the new sibling.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error after this agent's driver has stopped.
+    pub async fn spawn_with(&self, options: SpawnOptions) -> Result<(Self, AgentEvents)> {
+        request_spawn(&self.commands, options).await
     }
 
     /// Forks from the latest safe model boundary into an independently driven
@@ -441,8 +465,11 @@ async fn request_fork(
     request_command(commands, |result| Command::Fork { checkpoint, result }).await
 }
 
-async fn request_spawn(commands: &mpsc::Sender<Command>) -> Result<(Nanocodex, AgentEvents)> {
-    request_command(commands, |result| Command::Spawn { result }).await
+async fn request_spawn(
+    commands: &mpsc::Sender<Command>,
+    options: SpawnOptions,
+) -> Result<(Nanocodex, AgentEvents)> {
+    request_command(commands, |result| Command::Spawn { options, result }).await
 }
 
 pub(super) async fn request_command<T>(

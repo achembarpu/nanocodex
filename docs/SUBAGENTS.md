@@ -33,7 +33,7 @@ An enabled runtime installs seven tools for root and child agents:
 
 | Tool | Contract |
 | --- | --- |
-| `spawn_agent` | Create a clean child session with a role, focused task, and required output schema. |
+| `spawn_agent` | Create a clean child session with a role, focused task, required output schema, and optional model/thinking overrides. |
 | `submit_result` | Submit the active child turn’s final JSON value against its schema and turn token. |
 | `send_agent_message` | Send a bounded directed message within the current task tree. |
 | `list_agents` | List visible agents, status, topology, and caller authority. |
@@ -47,6 +47,10 @@ a monotonically changing turn token. A successful model turn must call
 `submit_result` exactly once with a schema-valid value and the current token.
 Steering rotates the token, preventing a superseded turn from submitting the
 new turn’s result.
+
+Model and thinking overrides apply only to the new child. When either is
+omitted, the child inherits the invoking agent’s current value at the spawn
+boundary.
 
 ## Tree authority and messaging
 

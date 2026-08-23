@@ -170,6 +170,74 @@ async fn clean_spawn_reuses_the_root_cache_key_without_history() -> Result<()> {
 }
 
 #[tokio::test]
+async fn clean_spawn_can_override_model_and_thinking_without_mutating_parent() -> Result<()> {
+    let listener = TcpListener::bind("127.0.0.1:0").await?;
+    let endpoint = format!("ws://{}", listener.local_addr()?);
+    let server = tokio::spawn(async move {
+        let (stream, _) = listener.accept().await?;
+        let mut child = accept_async(stream).await?;
+        let child_warmup = next_json(&mut child).await?;
+        assert_eq!(child_warmup["model"], Model::Luna.as_str());
+        assert_eq!(child_warmup["reasoning"]["effort"], "medium");
+        send_warmup(&mut child, "resp-child-warmup").await?;
+        let child_turn = next_json(&mut child).await?;
+        send_final(&mut child, "resp-child").await?;
+
+        let (stream, _) = listener.accept().await?;
+        let mut root = accept_async(stream).await?;
+        let root_warmup = next_json(&mut root).await?;
+        assert_eq!(root_warmup["model"], Model::Sol.as_str());
+        assert_eq!(root_warmup["reasoning"]["effort"], "low");
+        send_warmup(&mut root, "resp-root-warmup").await?;
+        let root_turn = next_json(&mut root).await?;
+        send_final(&mut root, "resp-root").await?;
+
+        Ok::<_, eyre::Report>((child_turn, root_turn))
+    });
+
+    let (handles, mut received_handles) = tokio::sync::mpsc::unbounded_channel::<AgentHandle>();
+    let workspace = temporary_workspace("configured-clean-spawn")?;
+    let openai = OpenAi::builder("test-key")
+        .websocket_url(endpoint)
+        .build()?;
+    let (root, root_events) = Nanocodex::builder(openai)
+        .model(Model::Sol)
+        .thinking(Thinking::Low)
+        .session_id(test_session_id())
+        .workspace(&workspace)
+        .tools_factory(move |handle| {
+            drop(handles.send(handle));
+            Tools::builder().without_defaults().build()
+        })
+        .build()?;
+    let root_handle = received_handles
+        .recv()
+        .await
+        .ok_or_else(|| eyre!("root tool factory did not receive an agent handle"))?;
+
+    let (child, child_events) = root_handle
+        .spawn_with(
+            SpawnOptions::new()
+                .model(Model::Luna)
+                .thinking(Thinking::Medium),
+        )
+        .await?;
+    received_handles
+        .recv()
+        .await
+        .ok_or_else(|| eyre!("clean child tool factory did not receive an agent handle"))?;
+    child.prompt("child turn").await?.result().await?;
+    root.prompt("root turn").await?.result().await?;
+
+    drop((root, child, root_events, child_events));
+    timeout(std::time::Duration::from_secs(5), server)
+        .await
+        .map_err(|_| eyre!("mock Responses server did not finish"))???;
+    std::fs::remove_dir_all(workspace)?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn cloned_builders_singleflight_one_shared_prefix_warmup() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let endpoint = format!("ws://{}", listener.local_addr()?);

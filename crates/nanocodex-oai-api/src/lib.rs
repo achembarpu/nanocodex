@@ -587,7 +587,8 @@ impl FromStr for ReasoningMode {
 }
 
 /// Requested model reasoning effort.
-#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Thinking {
     /// Disable reasoning when supported.
     None,
@@ -674,6 +675,11 @@ mod tests {
             ("max", Thinking::Max),
         ] {
             assert_eq!(value.parse(), Ok(expected));
+            assert_eq!(serde_json::to_value(expected).unwrap(), json!(value));
+            assert_eq!(
+                serde_json::from_value::<Thinking>(json!(value)).unwrap(),
+                expected
+            );
         }
     }
 

@@ -29,7 +29,7 @@ pub mod usage;
 
 pub use agent::{
     AgentHandle, AgentSessionContext, ExecutionEnvironment, Nanocodex, NanocodexBuilder,
-    PromptRequest, PromptRoute, Turn, TurnControl, TurnResult,
+    PromptRequest, PromptRoute, SpawnOptions, Turn, TurnControl, TurnResult,
 };
 pub use error::{NanocodexError, Result};
 pub use nanocodex_oai_api::{

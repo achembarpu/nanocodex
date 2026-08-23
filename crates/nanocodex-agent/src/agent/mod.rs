@@ -96,7 +96,7 @@ pub use context_source::ExecutionEnvironment;
 pub use handle::{AgentHandle, Nanocodex};
 pub use session_context::AgentSessionContext;
 use turn::TurnCheckpoint;
-pub use turn::{PromptRequest, PromptRoute, Turn, TurnControl, TurnResult};
+pub use turn::{PromptRequest, PromptRoute, SpawnOptions, Turn, TurnControl, TurnResult};
 
 use builder::{CodexCompatibility, PromptCacheConfig};
 pub(crate) use context_source::ContextSource;

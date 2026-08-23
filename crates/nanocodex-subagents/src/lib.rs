@@ -15,7 +15,9 @@ pub use model::{
     MessagePurpose, MessageSender, ScopedAgentUpdate, SubagentRuntimeId, ThreadId,
 };
 pub use runtime::{AgentSummary, Registry, SubagentControl, channel};
-pub use tools::{AgentStartReport, AgentTask, AgentToolResult, install_tools, start_agent};
+pub use tools::{
+    AgentStartReport, AgentTask, AgentToolResult, install_tools, start_agent, start_agent_with,
+};
 
 /// Default maximum number of active turns in one task tree.
 pub const DEFAULT_MAX_SUBAGENTS: usize = 32;

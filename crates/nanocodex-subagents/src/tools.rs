@@ -10,7 +10,7 @@ use super::{
     runtime::{AgentDirectoryEntry, AgentSummary, OutputContract, Registry, forward_events},
 };
 use async_trait::async_trait;
-use nanocodex_agent::AgentHandle;
+use nanocodex_agent::{AgentHandle, Model, SpawnOptions, Thinking};
 use nanocodex_tools::{
     Tool, ToolContext, ToolDefinition, ToolInput, ToolOutput, ToolResult, Tools,
     runtime::ToolsBuildError,
@@ -37,6 +37,38 @@ pub struct AgentTask {
     pub role: String,
     pub task: String,
     pub output_schema: Value,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SpawnAgentTask {
+    role: String,
+    task: String,
+    #[serde(default)]
+    model: Option<Model>,
+    #[serde(default)]
+    thinking: Option<Thinking>,
+    output_schema: Value,
+}
+
+impl SpawnAgentTask {
+    fn into_parts(self) -> (AgentTask, SpawnOptions) {
+        let mut options = SpawnOptions::new();
+        if let Some(model) = self.model {
+            options = options.model(model);
+        }
+        if let Some(thinking) = self.thinking {
+            options = options.thinking(thinking);
+        }
+        (
+            AgentTask {
+                role: self.role,
+                task: self.task,
+                output_schema: self.output_schema,
+            },
+            options,
+        )
+    }
 }
 
 #[derive(Serialize)]
@@ -110,6 +142,16 @@ pub async fn start_agent(
     session_id: &str,
     task: AgentTask,
 ) -> AgentToolResult<AgentStartReport> {
+    start_agent_with(parent, registry, session_id, task, SpawnOptions::new()).await
+}
+
+pub async fn start_agent_with(
+    parent: &AgentHandle,
+    registry: &Arc<Registry>,
+    session_id: &str,
+    task: AgentTask,
+    options: SpawnOptions,
+) -> AgentToolResult<AgentStartReport> {
     let AgentTask {
         role,
         task,
@@ -119,7 +161,7 @@ pub async fn start_agent(
     let capacity = registry.reserve_turn()?;
     let reservation = registry.reserve(session_id).await?;
     let id = reservation.id;
-    let (child, events) = parent.spawn().await?;
+    let (child, events) = parent.spawn_with(options).await?;
     let session_id = child.session_id().to_string();
     let descriptor = AgentDescriptor {
         id,
@@ -175,37 +217,52 @@ impl Tool for SpawnAgent {
         ToolDefinition::function(
             SPAWN_AGENT_TOOL,
             "Starts a reusable clean-room subagent without inherited conversation history and immediately returns its ID.",
-            json!({
-                "type": "object",
-                "properties": {
-                    "role": {
-                        "type": "string",
-                        "description": "A short role describing the subagent's specialty."
-                    },
-                    "task": {
-                        "type": "string",
-                        "description": "A complete, focused task for the subagent."
-                    },
-                    "output_schema": {
-                        "description": "The JSON Schema that every successful result from this agent must satisfy. Use an object with one string field for a free-form report."
-                    }
-                },
-                "required": ["role", "task", "output_schema"],
-                "additionalProperties": false
-            }),
+            spawn_agent_parameters(),
         )
         .with_output_schema(spawn_agent_output_schema())
     }
 
     async fn execute(&self, input: ToolInput, context: ToolContext<'_>) -> ToolResult {
-        let task = input.decode_json()?;
+        let (task, options) = input.decode_json::<SpawnAgentTask>()?.into_parts();
         let registry = self
             .registry
             .upgrade()
             .ok_or_else(|| std::io::Error::other("subagent runtime is closed"))?;
-        let report = start_agent(&self.parent, &registry, context.session_id(), task).await?;
+        let report =
+            start_agent_with(&self.parent, &registry, context.session_id(), task, options).await?;
         json_output(&report)
     }
+}
+
+fn spawn_agent_parameters() -> Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "role": {
+                "type": "string",
+                "description": "A short role describing the subagent's specialty."
+            },
+            "task": {
+                "type": "string",
+                "description": "A complete, focused task for the subagent."
+            },
+            "model": {
+                "type": "string",
+                "enum": ["sol", "terra", "luna"],
+                "description": "Model override for the new agent. Omit to inherit the parent's current model."
+            },
+            "thinking": {
+                "type": "string",
+                "enum": ["none", "low", "medium", "high", "xhigh", "max"],
+                "description": "Reasoning effort override for the new agent. Omit to inherit the parent's current thinking level."
+            },
+            "output_schema": {
+                "description": "The JSON Schema that every successful result from this agent must satisfy. Use an object with one string field for a free-form report."
+            }
+        },
+        "required": ["role", "task", "output_schema"],
+        "additionalProperties": false
+    })
 }
 
 #[derive(Deserialize)]
@@ -648,11 +705,61 @@ fn agent_status_schema() -> Value {
 
 #[cfg(test)]
 mod tests {
-    use super::{SendAgentMessage, SubmitResult, WaitAgent};
+    use super::{
+        SendAgentMessage, SpawnAgentTask, SubmitResult, WaitAgent, spawn_agent_parameters,
+    };
     use crate::runtime::Registry;
+    use nanocodex_agent::{Model, SpawnOptions, Thinking};
     use nanocodex_tools::Tool;
     use serde_json::json;
     use std::sync::Weak;
+
+    #[test]
+    fn spawn_agent_exposes_optional_model_and_thinking_overrides() {
+        let parameters = spawn_agent_parameters();
+
+        assert_eq!(
+            parameters["properties"]["model"]["enum"],
+            json!(["sol", "terra", "luna"])
+        );
+        assert_eq!(
+            parameters["properties"]["thinking"]["enum"],
+            json!(["none", "low", "medium", "high", "xhigh", "max"])
+        );
+        assert_eq!(
+            parameters["required"],
+            json!(["role", "task", "output_schema"])
+        );
+
+        let overridden: SpawnAgentTask = serde_json::from_value(json!({
+            "role": "researcher",
+            "task": "inspect the implementation",
+            "model": "luna",
+            "thinking": "medium",
+            "output_schema": { "type": "object" }
+        }))
+        .unwrap();
+        assert_eq!(overridden.model, Some(Model::Luna));
+        assert_eq!(overridden.thinking, Some(Thinking::Medium));
+        let (_, options) = overridden.into_parts();
+        assert_eq!(
+            options,
+            SpawnOptions::new()
+                .model(Model::Luna)
+                .thinking(Thinking::Medium)
+        );
+
+        let inherited: SpawnAgentTask = serde_json::from_value(json!({
+            "role": "researcher",
+            "task": "inspect the implementation",
+            "output_schema": { "type": "object" }
+        }))
+        .unwrap();
+        assert_eq!(inherited.model, None);
+        assert_eq!(inherited.thinking, None);
+        let (_, options) = inherited.into_parts();
+        assert_eq!(options, SpawnOptions::new());
+    }
 
     #[test]
     fn send_message_definition_names_deferred_delivery_and_queued_waiting() {

@@ -12,6 +12,10 @@ depend on orchestration policy:
 - `interrupt_agent`
 - `close_agent`
 
+`spawn_agent` accepts optional `model` (`sol`, `terra`, or `luna`) and
+`thinking` (`none` through `max`) overrides. Omitted values inherit the
+invoking agent's current settings; an override configures only the new child.
+
 Create one channel for an application-owned agent family, then install fresh
 tools for every driver with `NanocodexBuilder::tools_factory`:
 

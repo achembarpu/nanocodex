@@ -180,7 +180,10 @@ pub(super) async fn begin_shutdown(
                 drop(route_result.send(Err(NanocodexError::AgentStopped)));
                 drop(turn_result);
             }
-            Command::Fork { result, .. } | Command::Spawn { result } => {
+            Command::Fork { result, .. } => {
+                drop(result.send(Err(NanocodexError::AgentStopped)));
+            }
+            Command::Spawn { result, .. } => {
                 drop(result.send(Err(NanocodexError::AgentStopped)));
             }
             Command::AppendDeveloperMessage { result, .. } => {
@@ -234,14 +237,12 @@ pub(super) fn handle_idle_command<S>(
                 });
             drop(result.send(outcome));
         }
-        Command::Spawn { result } => {
-            drop(result.send(spawner.spawn_clean(
-                workspace,
-                session_id,
-                defaults.model,
-                defaults.thinking,
-                defaults.fast_mode,
-            )));
+        Command::Spawn { options, result } => {
+            let model = options.model.unwrap_or(defaults.model);
+            let thinking = options.thinking.unwrap_or(defaults.thinking);
+            let outcome =
+                spawner.spawn_clean(workspace, session_id, model, thinking, defaults.fast_mode);
+            drop(result.send(outcome));
         }
         Command::Steer { result, .. } => {
             drop(result.send(Err(NanocodexError::TurnNotSteerable)));

@@ -276,6 +276,41 @@ impl From<&str> for PromptRequest {
     }
 }
 
+/// Optional model policy for a newly spawned clean agent.
+///
+/// Omitted values inherit the invoking agent's settings at the model boundary
+/// where the spawn command is handled.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct SpawnOptions {
+    pub(super) model: Option<Model>,
+    pub(super) thinking: Option<Thinking>,
+}
+
+impl SpawnOptions {
+    /// Starts an inherited spawn configuration.
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            model: None,
+            thinking: None,
+        }
+    }
+
+    /// Overrides the model for the new agent without changing its parent.
+    #[must_use]
+    pub const fn model(mut self, model: Model) -> Self {
+        self.model = Some(model);
+        self
+    }
+
+    /// Overrides the reasoning effort for the new agent without changing its parent.
+    #[must_use]
+    pub const fn thinking(mut self, thinking: Thinking) -> Self {
+        self.thinking = Some(thinking);
+        self
+    }
+}
+
 pub(super) enum Command {
     Prompt {
         key: TurnKey,
@@ -310,6 +345,7 @@ pub(super) enum Command {
         result: oneshot::Sender<Result<(Nanocodex, AgentEvents)>>,
     },
     Spawn {
+        options: SpawnOptions,
         result: oneshot::Sender<Result<(Nanocodex, AgentEvents)>>,
     },
     SetThinking {
