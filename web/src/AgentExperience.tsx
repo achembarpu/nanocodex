@@ -10,7 +10,7 @@ import type {
   AgentTerminalMode,
   AgentTerminalState,
 } from "./agentTerminalTypes";
-import { AgentTerminal } from "./AgentTerminal";
+import { AgentTerminal, ManagedAgentTerminal } from "./AgentTerminal";
 import { browserAgentCapabilityError } from "./browserAgentCapabilities";
 import {
   AgentSessionBar,
@@ -30,6 +30,9 @@ export const AgentExperience = memo(function AgentExperience({
   theme: "light" | "dark";
 }) {
   const capabilityError = useMemo(() => browserAgentCapabilityError(), []);
+  const [runtime, setRuntime] = useState<"local" | "managed">(() =>
+    localStorage.getItem("nanocodex.agent-runtime.v1") === "managed" ? "managed" : "local"
+  );
   const [authStatus, setAuthStatus] = useState<ModelSessionStatus>();
   const [credentialSource, setCredentialSource] = useState<CredentialSource>();
   const credentialSourceRef = useRef<CredentialSource | undefined>(undefined);
@@ -44,7 +47,8 @@ export const AgentExperience = memo(function AgentExperience({
     setCredentialSource(source);
   }, []);
 
-  const agentStatus: AgentStatus = !hasCredential || capabilityError
+  const activeCapabilityError = runtime === "local" ? capabilityError : undefined;
+  const agentStatus: AgentStatus = !hasCredential || activeCapabilityError
     ? "idle"
     : runtimeState?.status ?? "starting";
   const agentError = runtimeState?.error;
@@ -55,23 +59,45 @@ export const AgentExperience = memo(function AgentExperience({
     agentError,
     agentStatus,
     authStatus,
-    capabilityError,
+    capabilityError: activeCapabilityError,
     source: credentialSource,
   });
 
   return (
     <div className={`nanocodex-demo is-${mode}`}>
+      <div className="agent-runtime-switch" role="group" aria-label="Agent runtime">
+        {(["local", "managed"] as const).map((value) => (
+          <button
+            key={value}
+            type="button"
+            aria-pressed={runtime === value}
+            onClick={() => {
+              localStorage.setItem("nanocodex.agent-runtime.v1", value);
+              setRuntimeState(undefined);
+              setRuntime(value);
+            }}
+          >
+            {value === "local" ? "Local browser" : "Managed durable"}
+          </button>
+        ))}
+      </div>
       <AgentSessionBar
         agentStatus={agentStatus}
         agentError={agentError}
         source={credentialSource}
-        capabilityError={capabilityError}
+        capabilityError={activeCapabilityError}
         onAuthStatusChange={setAuthStatus}
         onRetryAgent={retryAgent}
         onSourceChange={changeCredentialSource}
       />
-      {hasCredential && !capabilityError ? (
-        <AgentTerminal
+      {hasCredential && !activeCapabilityError ? (
+        runtime === "local" ? <AgentTerminal
+          authStatus={authStatus}
+          mode={mode}
+          onStateChange={setRuntimeState}
+          source={credentialSource}
+          theme={theme}
+        /> : <ManagedAgentTerminal
           authStatus={authStatus}
           mode={mode}
           onStateChange={setRuntimeState}

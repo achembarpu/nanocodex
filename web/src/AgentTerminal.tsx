@@ -31,10 +31,12 @@ import {
 import {
   createAgentTerminal,
   type AgentTerminal as DemoTerminal,
+  type TerminalAgent,
   type TerminalHost,
 } from "./demoTerminal";
 import { ArtifactDock } from "./ArtifactDock";
 import { browserMcpConfiguration } from "./browserMcp";
+import { loadManagedTerminalAgent } from "./managedAgentRuntime";
 
 export type { AgentTerminalMode, AgentTerminalState } from "./agentTerminalTypes";
 
@@ -59,6 +61,92 @@ export const AgentTerminal = memo(function AgentTerminal({
   theme: "light" | "dark";
 }) {
   const thread = useMemo(() => getBrowserThread(), []);
+  const {
+    data: agent,
+    error,
+    isError,
+    refetch,
+  } = useNanocodex({ config: agentConfig, threadId: thread?.id });
+  const retryAgent = useCallback(() => {
+    refetch();
+  }, [refetch]);
+  return (
+    <AgentTerminalView
+      agent={agent}
+      agentError={isError ? errorMessage(error) : undefined}
+      authStatus={authStatus}
+      mode={mode}
+      onStateChange={onStateChange}
+      retryAgent={retryAgent}
+      source={source}
+      theme={theme}
+    />
+  );
+});
+
+export const ManagedAgentTerminal = memo(function ManagedAgentTerminal({
+  authStatus,
+  mode,
+  onStateChange,
+  source,
+  theme,
+}: {
+  authStatus: ModelSessionStatus | undefined;
+  mode: AgentTerminalMode;
+  onStateChange(state: AgentTerminalState): void;
+  source: Exclude<CredentialSource, null>;
+  theme: "light" | "dark";
+}) {
+  const [attempt, setAttempt] = useState(0);
+  const [agent, setAgent] = useState<TerminalAgent>();
+  const [agentError, setAgentError] = useState<string>();
+  useEffect(() => {
+    let cancelled = false;
+    setAgentError(undefined);
+    void loadManagedTerminalAgent().then((loaded) => {
+      if (!cancelled) setAgent(loaded);
+    }, (error) => {
+      if (!cancelled) setAgentError(errorMessage(error));
+    });
+    return () => { cancelled = true; };
+  }, [attempt]);
+  const retryAgent = useCallback(() => {
+    setAgent(undefined);
+    setAttempt((value) => value + 1);
+  }, []);
+  return (
+    <AgentTerminalView
+      agent={agent}
+      agentError={agentError}
+      authStatus={authStatus}
+      mode={mode}
+      onStateChange={onStateChange}
+      retryAgent={retryAgent}
+      source={source}
+      theme={theme}
+    />
+  );
+});
+
+function AgentTerminalView({
+  agent,
+  agentError,
+  authStatus,
+  mode,
+  onStateChange,
+  retryAgent,
+  source,
+  theme,
+}: {
+  agent: TerminalAgent | undefined;
+  agentError: string | undefined;
+  authStatus: ModelSessionStatus | undefined;
+  mode: AgentTerminalMode;
+  onStateChange(state: AgentTerminalState): void;
+  retryAgent(): void;
+  source: Exclude<CredentialSource, null>;
+  theme: "light" | "dark";
+}) {
   const [touchDraft, setTouchDraft] = useState("");
   const [pendingTouchSubmission, setPendingTouchSubmission] = useState<{
     input: string;
@@ -70,23 +158,12 @@ export const AgentTerminal = memo(function AgentTerminal({
   const [terminalReady, setTerminalReady] = useState(false);
   const touchInput = useTouchInput();
   const active = useRef<DemoTerminal | undefined>(undefined);
-  const {
-    data: agent,
-    error,
-    isError,
-    isSuccess,
-    refetch,
-  } = useNanocodex({ config: agentConfig, threadId: thread?.id });
   const activePromptIds = useRef(new Set<number>());
-  const agentStatus: AgentStatus = isError
+  const agentStatus: AgentStatus = agentError
     ? "error"
-    : isSuccess && terminalReady
+    : agent && terminalReady
       ? "ready"
       : "starting";
-  const agentError = error === undefined ? undefined : errorMessage(error);
-  const retryAgent = useCallback(() => {
-    refetch();
-  }, [refetch]);
 
   useEffect(() => {
     onStateChange({ error: agentError, retry: retryAgent, status: agentStatus });
@@ -240,7 +317,7 @@ export const AgentTerminal = memo(function AgentTerminal({
       />
     </div>
   ) : terminal;
-});
+}
 
 function artifactFollowOnPrompt(
   artifact: ArtifactDocument,

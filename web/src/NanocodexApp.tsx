@@ -1163,7 +1163,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
 
                 <section className="home-demo" id="agent-demo" aria-labelledby="agent-demo-title">
                   <header className="home-demo-head">
-                    <h2 id="agent-demo-title">live agent · browser WASM</h2>
+                    <h2 id="agent-demo-title">live agent · local or durable</h2>
                     <button
                       className="home-demo-expand"
                       type="button"

@@ -226,6 +226,15 @@ export function applyAgentEvents(
     flushDeltas();
 
     switch (event.type) {
+      case "managed.prompt": {
+        const turnId = payloadString(event.payload, "turn_id");
+        const text = payloadString(event.payload, "text");
+        const id = turnId ? `managed-user-${turnId}` : `managed-user-${event.seq}`;
+        if (text && !next.entries.some((entry) => entry.id === id)) {
+          mutableEntries().push({ id, kind: "user", text });
+        }
+        break;
+      }
       case "run.started": {
         const [prompt, ...queuedPrompts] = next.queuedPrompts;
         if (prompt && next.displayedQueuedPrompt !== prompt.id) {

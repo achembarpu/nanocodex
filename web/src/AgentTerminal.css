@@ -9,6 +9,34 @@
   --terminal-hover: var(--surface-hover);
 }
 
+.agent-runtime-switch {
+  display: flex;
+  width: 100%;
+  padding: 4px;
+  gap: 4px;
+  background: var(--terminal-background);
+  border: 1px solid var(--terminal-border);
+  border-bottom: 0;
+}
+
+.agent-runtime-switch button {
+  min-height: 26px;
+  padding: 0 9px;
+  color: var(--terminal-muted);
+  font: 11px var(--font-mono);
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.agent-runtime-switch button:hover,
+.agent-runtime-switch button:focus-visible,
+.agent-runtime-switch button[aria-pressed="true"] {
+  color: var(--terminal-foreground);
+  background: var(--terminal-hover);
+  outline: 1px solid var(--terminal-border);
+}
+
 .agent-session-shell,
 .agent-session-panel {
   position: relative;

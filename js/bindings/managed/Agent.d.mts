@@ -123,6 +123,7 @@ export type Turn = Readonly<{
   idempotencyKey: string;
   accepted(): Promise<string>;
   state(): Promise<TurnView>;
+  steer(options: Readonly<{ input: PromptInput }>): Promise<Readonly<{ turn_id: string; state: "steering" }>>;
   cancel(): Promise<TurnView | Readonly<{ turn_id: string; state: "cancelling" }>>;
   result(): Promise<TurnResult>;
 }>;

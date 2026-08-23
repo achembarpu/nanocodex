@@ -91,6 +91,14 @@ function managedTurn(client, agentId, options) {
       const accepted = await submission;
       return client.json(turnPath(agentId, requiredString(accepted, "turn_id")), { signal });
     },
+    steer: async ({ input }) => {
+      const accepted = await submission;
+      return client.json(`${turnPath(agentId, requiredString(accepted, "turn_id"))}/steer`, {
+        method: "POST",
+        body: JSON.stringify({ input }),
+        signal,
+      });
+    },
     cancel: async () => {
       const accepted = await submission;
       return client.json(`${turnPath(agentId, requiredString(accepted, "turn_id"))}/cancel`, {

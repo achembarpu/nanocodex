@@ -1,4 +1,4 @@
-import type { DefaultAgent, Turn, TurnResult } from "nanocodex";
+import type { AgentEvent } from "nanocodex";
 import {
   applyAgentEvents,
   initialTerminalState,
@@ -44,7 +44,7 @@ export type AgentTerminal = Readonly<{
   submit(input: string, options?: {
     intent?: "queue" | "steer";
     submittedAt?: number;
-  }): Promise<Turn | undefined>;
+  }): Promise<TerminalTurn | undefined>;
   cancel(): Promise<void>;
   render(): void;
   resize(): void;
@@ -52,9 +52,27 @@ export type AgentTerminal = Readonly<{
   dispose(): void;
 }>;
 
+export type TerminalTurn = Readonly<{
+  steer(options: { input: string }): Promise<unknown>;
+  cancel(): Promise<unknown>;
+  result(): Promise<Readonly<{ finalMessage: string; dispose(): void }>>;
+  dispose(): void;
+}>;
+
+export type TerminalAgent = Readonly<{
+  sessionId: string;
+  turn: Readonly<{ prompt(options: { input: string }): TerminalTurn }>;
+  events: Readonly<{
+    watch(): Readonly<{
+      onEvent(listener: (event: AgentEvent) => void): () => void;
+      off(): void;
+    }>;
+  }>;
+}>;
+
 type ActiveTurn = {
   timing: PromptTiming;
-  turn: Turn;
+  turn: TerminalTurn;
 };
 
 type PromptTiming = {
@@ -66,7 +84,7 @@ type PromptTiming = {
 
 /** App-local terminal presentation used only by the website demo. */
 export function createAgentTerminal(options: {
-  agent: DefaultAgent;
+  agent: TerminalAgent;
   terminal: TerminalHost;
   inputMode?: AgentTerminalInputMode;
   maxEntries?: number;
@@ -163,7 +181,7 @@ export function createAgentTerminal(options: {
   async function submit(
     value: string,
     submitOptions: { intent?: "queue" | "steer"; submittedAt?: number } = {},
-  ): Promise<Turn | undefined> {
+  ): Promise<TerminalTurn | undefined> {
     const submittedAt = finiteTimestamp(submitOptions.submittedAt) ?? performanceNow();
     const submitted = String(value);
     const prompt = submitted.trim();
@@ -207,7 +225,7 @@ export function createAgentTerminal(options: {
       return current.turn;
     }
 
-    let turn: Turn;
+    let turn: TerminalTurn;
     try {
       turn = agent.turn.prompt({ input: prompt });
     } catch (error) {
@@ -231,7 +249,7 @@ export function createAgentTerminal(options: {
   }
 
   async function finishTurn(record: ActiveTurn) {
-    let result: TurnResult | undefined;
+    let result: Awaited<ReturnType<TerminalTurn["result"]>> | undefined;
     try {
       result = await record.turn.result();
       const completed = { finalMessage: result.finalMessage };
