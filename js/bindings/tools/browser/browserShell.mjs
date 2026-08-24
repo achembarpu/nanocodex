@@ -54,7 +54,7 @@ export function validateBrowserArtifactSource(source) {
         throw new Error(`artifact source is not executable JavaScript: ${errorMessage(error)}`);
     }
 }
-export async function prepareBrowserShell(threadId, origin, fetch) {
+export async function prepareBrowserShell(threadId, origin, fetch, headers) {
     const thread = browserThread(threadId, origin);
     const [{ rawFs, workspaceRoot }, workspace] = await Promise.all([
         prepareThreadGit(thread),
@@ -70,7 +70,12 @@ export async function prepareBrowserShell(threadId, origin, fetch) {
         // The shell's first path scan observes every mutation completed before
         // creation. Only mutations racing that scan require a second refresh.
         shellDirty = false;
-        const loading = createBrowserBash(rawFs, thread, { workspaceRoot, origin, fetch }).then(async (shell) => {
+        const loading = createBrowserBash(rawFs, thread, {
+            workspaceRoot,
+            origin,
+            fetch,
+            headers,
+        }).then(async (shell) => {
             shellFs = shell.filesystem;
             if (shellDirty) {
                 shellDirty = false;
@@ -200,6 +205,9 @@ export async function createBrowserBash(rawFs, thread, options = {}) {
     const workerEgress = {
         origin,
         threadId: thread.id,
+        ...(options.headers === undefined
+            ? {}
+            : { headers: Object.fromEntries(new Headers(options.headers).entries()) }),
     };
     let pythonRuntime = options.pythonRuntime;
     const shellFetch = options.fetch ?? (origin

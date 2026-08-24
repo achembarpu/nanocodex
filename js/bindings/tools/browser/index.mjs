@@ -76,7 +76,12 @@ async function prepareBrowserRuntime(threadId, origin, options) {
     threadId,
   });
   const secureFetch = createBrowserEgressFetch({ fetch, origin, threadId });
-  const shell = await shellModule.prepareBrowserShell(threadId, origin, secureFetch);
+  const shell = await shellModule.prepareBrowserShell(
+    threadId,
+    origin,
+    secureFetch,
+    options.headers,
+  );
   return Object.freeze({
     origin,
     threadId,
