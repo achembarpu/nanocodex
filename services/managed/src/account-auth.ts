@@ -292,7 +292,11 @@ function authStore(env: AccountAuthEnv, name: string): Kv.Kv {
   return Kv.durableObject(namespace, { name });
 }
 
-async function ensureAccount(env: AccountAuthEnv, userId: string, persistent: boolean): Promise<void> {
+export async function ensureAccount(
+  env: AccountAuthEnv,
+  userId: string,
+  persistent: boolean,
+): Promise<void> {
   if (!isUserId(userId)) {
     throw new Error("invalid account identity");
   }
@@ -304,8 +308,17 @@ async function ensureAccount(env: AccountAuthEnv, userId: string, persistent: bo
       body: JSON.stringify({ id: userId, persistent }),
     },
   );
-  if (!response.ok) throw new Error("account provisioning failed");
+  if (response.ok) {
+    await response.body?.cancel();
+    return;
+  }
+  const status = response.status;
   await response.body?.cancel();
+  if (status === 409) {
+    const current = await readAccount(env, userId);
+    if (current?.id === userId && (current.persistent || !persistent)) return;
+  }
+  throw new Error("account provisioning failed");
 }
 
 async function readAccount(env: AccountAuthEnv, userId: string): Promise<UserRecord | undefined> {
