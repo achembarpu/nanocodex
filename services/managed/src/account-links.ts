@@ -289,7 +289,11 @@ function accountLinkPage(page: AccountLinkPage, status = 200): Response {
       ...noStoreHeaders(),
       "content-security-policy": `default-src 'none'; base-uri 'none'; form-action 'self'; frame-ancestors 'none'; script-src 'nonce-${nonce}'; style-src 'nonce-${nonce}'`,
       "content-type": "text/html; charset=utf-8",
-      "referrer-policy": "no-referrer",
+      // Chromium serializes the Origin of a same-origin form POST as `null`
+      // under `no-referrer`, which makes the explicit mutation check fail.
+      // This page has no cross-origin resources or links, so `same-origin`
+      // keeps the approval query private while preserving the public origin.
+      "referrer-policy": "same-origin",
       "x-frame-options": "DENY",
     },
   });

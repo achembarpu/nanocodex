@@ -287,6 +287,7 @@ describe("managed agents REST and resumable SSE", () => {
     const confirmation = await RAW_SELF.fetch(authorize, { headers: { cookie } });
     expect(confirmation.status).toBe(200);
     expect(confirmation.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
+    expect(confirmation.headers.get("referrer-policy")).toBe("same-origin");
     const confirmationHtml = await confirmation.text();
     expect(confirmationHtml).toContain("Use Nanocodex profile");
     expect(confirmationHtml).not.toContain(userId);
