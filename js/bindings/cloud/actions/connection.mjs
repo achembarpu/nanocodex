@@ -98,8 +98,9 @@ export async function connect(client, options) {
   if (typeof grantToken !== "string" || grantToken.length === 0) {
     throw new Error("Nanocodex Connect returned no grant-scoped session");
   }
-  client._setSessionToken(grantToken);
-  return connectionFromWire(wire);
+  const connection = connectionFromWire(wire);
+  client._setSession({ grantId: connection.grant.id, token: grantToken });
+  return connection;
 }
 
 // The Nanocodex wallet host owns the complete SIWE ceremony so it can keep
@@ -251,4 +252,29 @@ export async function disconnect(client, options = {}) {
     path: "/v1/connections/disconnect",
     signal: options.signal,
   });
+  client._clearSession();
+}
+
+export async function reconnect(client, options = {}) {
+  const session = client._getSession();
+  if (!session) return undefined;
+  client._setSessionToken(session.token);
+  try {
+    const connection = connectionFromWire(await client.request({
+      method: "GET",
+      path: `/v1/grants/${session.grantId}`,
+      signal: options.signal,
+    }));
+    if (connection.grant.status !== "active"
+      || connection.grant.expiresAt <= Math.floor(Date.now() / 1_000)) {
+      client._clearSession();
+      return undefined;
+    }
+    client._setSession(session);
+    return connection;
+  } catch (error) {
+    client._setSessionToken(undefined);
+    if (error?.status === 401 || error?.status === 403) client._clearSession();
+    throw error;
+  }
 }

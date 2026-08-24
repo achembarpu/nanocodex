@@ -82,3 +82,12 @@ export declare namespace disconnect {
 }
 
 export function disconnect(client: Client, options?: disconnect.Options | undefined): disconnect.ReturnType;
+
+export declare namespace reconnect {
+  type Options = Readonly<{ signal?: AbortSignal | undefined }>;
+  type ReturnType = Promise<Connection | undefined>;
+  type ErrorType = Error;
+}
+
+/** Restores and validates this app's persisted grant session, if one exists. */
+export function reconnect(client: Client, options?: reconnect.Options | undefined): reconnect.ReturnType;

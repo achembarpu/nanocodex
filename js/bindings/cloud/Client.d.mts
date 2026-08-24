@@ -34,6 +34,8 @@ export type Parameters = Readonly<{
   name?: string | undefined;
   /** Advanced override for the Accounts provider that owns the access key. */
   provider?: Provider.Provider | undefined;
+  /** App-scoped grant session persistence. Defaults to browser localStorage. */
+  session?: Pick<Storage, "getItem" | "setItem" | "removeItem"> | false | undefined;
   transport?: Transport | undefined;
 }>;
 

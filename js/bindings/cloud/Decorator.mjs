@@ -12,6 +12,7 @@ export function connectActions() {
     connection: {
       connect: (options) => connection.connect(client, options),
       disconnect: (options) => connection.disconnect(client, options),
+      reconnect: (options) => connection.reconnect(client, options),
     },
     grant: {
       revoke: (options) => grant.revoke(client, options),

@@ -263,6 +263,84 @@ test("Connect reselects a reusable access key when the passkey account changes",
   });
 });
 
+test("Connect persists, validates, and clears an app-scoped grant session", async () => {
+  const expiry = Math.floor(Date.now() / 1_000) + 3_600;
+  const keyId = "0x1111111111111111111111111111111111111111";
+  const storage = memoryStorage();
+  const requests = [];
+  const wire = testConnectionWire({
+    expiry,
+    keyId,
+    capabilities: ["nanocodex.agent", "agent.output.final", "chatgpt"],
+  });
+  const transport = Transport.from({
+    key: "session",
+    name: "session",
+    type: "session",
+    setup() {
+      return {
+        baseUrl: "https://connect.example",
+        async request(request) {
+          requests.push(request);
+          if (request.method === "POST" && request.path === "/v1/connections") return wire;
+          if (request.method === "GET" && request.path === `/v1/grants/${wire.grant.id}`) return wire;
+          if (request.method === "POST" && request.path === "/v1/connections/disconnect") return undefined;
+          throw new Error(`unexpected request ${request.method} ${request.path}`);
+        },
+      };
+    },
+  });
+  const provider = {
+    async request() {
+      return {
+        accounts: [{
+          address: wire.account_address,
+          capabilities: {
+            auth: { approval_id: "approval-session" },
+            keyAuthorization: {
+              address: keyId,
+              keyId,
+              keyType: "p256",
+              chainId: 4217n,
+              expiry,
+              witness: wire.access_key.witness,
+            },
+            personalSign: { keyAuthorization: "0x1234" },
+          },
+        }],
+      };
+    },
+  };
+  const first = Client.create({
+    appId: "session-workspace",
+    dialog: Dialog.memory(),
+    provider,
+    session: storage,
+    transport,
+  });
+  const connected = await first.connection.connect();
+  assert.equal(connected.grant.id, wire.grant.id);
+  assert.deepEqual(JSON.parse(storage.getItem("nanocodex:connect:session-workspace:session")), {
+    grantId: wire.grant.id,
+    token: wire.grant_token,
+  });
+
+  const restoredClient = Client.create({
+    appId: "session-workspace",
+    dialog: Dialog.memory(),
+    provider: { request() { throw new Error("wallet must not reopen"); } },
+    session: storage,
+    transport,
+  });
+  const restored = await restoredClient.connection.reconnect();
+  assert.equal(restored.grant.id, connected.grant.id);
+  assert.equal(requests.at(-1).headers.authorization, `Bearer ${wire.grant_token}`);
+
+  await restoredClient.connection.disconnect();
+  assert.equal(storage.getItem("nanocodex:connect:session-workspace:session"), null);
+  assert.equal(restoredClient._hasSession(), false);
+});
+
 test("Nanocodex Connect signs one witness-bound access key and enforces its MPP permission", async () => {
   const expiry = Math.floor(Date.now() / 1_000) + 30 * 86_400;
   const keyId = "0x1111111111111111111111111111111111111111";
@@ -430,5 +508,14 @@ function testConnectionWire({ expiry, keyId, capabilities, agentId = "agent_conn
       balance_atomics: "0",
       spent_atomics: "0",
     },
+  };
+}
+
+function memoryStorage() {
+  const values = new Map();
+  return {
+    getItem(key) { return values.get(key) ?? null; },
+    setItem(key, value) { values.set(key, String(value)); },
+    removeItem(key) { values.delete(key); },
   };
 }

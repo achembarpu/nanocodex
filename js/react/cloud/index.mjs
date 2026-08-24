@@ -5,6 +5,7 @@ import {
   createElement,
   useCallback,
   useContext,
+  useEffect,
   useSyncExternalStore,
 } from "react";
 import { useMutation } from "@tanstack/react-query";
@@ -23,7 +24,10 @@ export function createConfig(parameters) {
   }
 
   const listeners = new Set();
-  let state = DISCONNECTED;
+  let state = client._hasSession?.()
+    ? connectionSnapshot("connecting")
+    : DISCONNECTED;
+  let reconnecting;
 
   function setState(nextState) {
     if (Object.is(state, nextState)) return;
@@ -42,6 +46,35 @@ export function createConfig(parameters) {
       }
       listeners.add(listener);
       return () => listeners.delete(listener);
+    },
+    async _reconnectAgent(agentOptions) {
+      if (state.status === "connected") {
+        return Object.freeze({ connection: state.connection, agent: state.agent });
+      }
+      if (reconnecting) return reconnecting;
+      if (!client._hasSession?.()) {
+        setState(DISCONNECTED);
+        return undefined;
+      }
+      setState(connectionSnapshot("connecting"));
+      reconnecting = (async () => {
+        let agent;
+        try {
+          const connection = await client.connection.reconnect();
+          if (!connection) {
+            setState(DISCONNECTED);
+            return undefined;
+          }
+          agent = await client.agent.create({ ...agentOptions, connection });
+          setState(connectionSnapshot("connected", connection, agent));
+          return Object.freeze({ connection, agent });
+        } catch (error) {
+          await agent?.session.shutdown().catch(() => {});
+          setState(DISCONNECTED);
+          throw error;
+        }
+      })().finally(() => { reconnecting = undefined; });
+      return reconnecting;
     },
     _setConnection(status, connection, agent) {
       setState(connectionSnapshot(status, connection, agent));
@@ -105,6 +138,12 @@ export function useConnect(parameters = {}) {
 export function useConnectAgent(parameters = {}) {
   const config = useConfig(parameters);
   const snapshot = useConnection({ config });
+  useEffect(() => {
+    if (parameters.reconnectOnMount === false) return;
+    void config._reconnectAgent(parameters.agent).catch((error) => {
+      console.error("Nanocodex Connect session restore failed", error);
+    });
+  }, [config, parameters.agent, parameters.reconnectOnMount]);
   const mutation = useMutation({
     ...parameters.mutation,
     mutationKey: ["nanocodex", "connectAgent"],

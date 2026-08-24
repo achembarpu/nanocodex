@@ -25,6 +25,10 @@ export function create(parameters) {
     mpp: false,
   });
   const uid = `${transport.key}:${parameters.appId}:${++sequence}`;
+  const sessionStorage = parameters.session === false
+    ? undefined
+    : parameters.session ?? browserSessionStorage();
+  const sessionStorageKey = `nanocodex:connect:${parameters.appId}:session`;
   let sessionToken;
 
   function fetchControlPlane(input, init, token = sessionToken) {
@@ -77,6 +81,32 @@ export function create(parameters) {
       sessionToken = token;
     },
   });
+  Object.defineProperty(base, "_setSession", {
+    enumerable: false,
+    value(session) {
+      sessionToken = session.token;
+      writeSession(sessionStorage, sessionStorageKey, session);
+    },
+  });
+  Object.defineProperty(base, "_getSession", {
+    enumerable: false,
+    value() {
+      return readSession(sessionStorage, sessionStorageKey);
+    },
+  });
+  Object.defineProperty(base, "_hasSession", {
+    enumerable: false,
+    value() {
+      return readSession(sessionStorage, sessionStorageKey) !== undefined;
+    },
+  });
+  Object.defineProperty(base, "_clearSession", {
+    enumerable: false,
+    value() {
+      sessionToken = undefined;
+      removeSession(sessionStorage, sessionStorageKey);
+    },
+  });
   Object.defineProperty(base, "_captureSession", {
     enumerable: false,
     value() {
@@ -103,4 +133,50 @@ export function create(parameters) {
   let client = Object.assign(base, { extend });
   client = client.extend(connectActions());
   return Object.freeze(client);
+}
+
+function browserSessionStorage() {
+  try {
+    return globalThis.localStorage;
+  } catch {
+    return undefined;
+  }
+}
+
+function readSession(storage, key) {
+  if (!storage) return undefined;
+  try {
+    const value = JSON.parse(storage.getItem(key));
+    if (!value
+      || typeof value !== "object"
+      || !/^0x[0-9a-fA-F]{64}$/.test(value.grantId)
+      || typeof value.token !== "string"
+      || value.token.length === 0) {
+      removeSession(storage, key);
+      return undefined;
+    }
+    return Object.freeze({ grantId: value.grantId, token: value.token });
+  } catch {
+    removeSession(storage, key);
+    return undefined;
+  }
+}
+
+function writeSession(storage, key, session) {
+  if (!storage) return;
+  try {
+    storage.setItem(key, JSON.stringify(session));
+  } catch {
+    // Storage is an optional browser convenience. The in-memory grant session
+    // remains valid for the current page when persistence is unavailable.
+  }
+}
+
+function removeSession(storage, key) {
+  if (!storage) return;
+  try {
+    storage.removeItem(key);
+  } catch {
+    // A blocked storage implementation is equivalent to an ephemeral session.
+  }
 }

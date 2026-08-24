@@ -119,6 +119,8 @@ export type UseConnectAgentParameters<
   context = unknown,
 > = ConfigParameter & Readonly<{
   agent?: Omit<Actions.agent.create.Options, "connection"> | undefined;
+  /** Validate and reopen the app-scoped durable grant session on mount. @default true */
+  reconnectOnMount?: boolean | undefined;
   mutation?: Omit<
     UseMutationOptions<ConnectAgentResult, error, Actions.connection.connect.Options, context>,
     "mutationFn" | "mutationKey"
