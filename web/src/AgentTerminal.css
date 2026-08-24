@@ -391,9 +391,10 @@
     align-items: end;
     min-height: 44px;
     overflow: hidden;
-    background: var(--surface-raised);
-    border: 1px solid var(--border);
-    border-radius: 9px;
+    background: var(--terminal-background);
+    border: 0;
+    border-left: 1px solid var(--terminal-muted);
+    border-radius: 0;
   }
 
   .agent-touch-composer textarea {
@@ -426,8 +427,9 @@
   .agent-touch-actions {
     display: flex;
     grid-column: 2;
-    padding: 4px;
+    padding: 4px 0;
     align-self: end;
+    border-left: 1px solid var(--terminal-border);
   }
 
   .agent-touch-actions button {
@@ -436,10 +438,10 @@
     min-width: 44px;
     min-height: 44px;
     padding: 0;
-    color: var(--terminal-background);
-    background: var(--terminal-foreground);
+    color: var(--terminal-foreground);
+    background: transparent;
     border: 0;
-    border-radius: 6px;
+    border-radius: 0;
     cursor: pointer;
     place-items: center;
     touch-action: manipulation;
@@ -452,14 +454,19 @@
   }
 
   .agent-touch-actions button:focus-visible {
-    outline: 1px solid var(--terminal-foreground);
+    background: var(--terminal-hover);
+    outline: 1px solid var(--terminal-border);
     outline-offset: -2px;
   }
 
   .agent-touch-actions button:disabled {
     color: var(--terminal-muted);
-    background: var(--terminal-hover);
+    background: transparent;
     cursor: default;
+  }
+
+  .agent-touch-composer.is-running .agent-touch-actions button {
+    color: var(--terminal-muted);
   }
 
   .agent-oauth-code a,

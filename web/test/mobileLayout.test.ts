@@ -225,7 +225,14 @@ test("touch terminals use one native IME-safe composer and one contextual action
   assert.match(terminalCss, /--terminal-composer-min-height:\s*calc\(62px \+ env\(safe-area-inset-bottom\)\)/);
   assert.match(composer, /env\(safe-area-inset-left\)/);
   assert.match(composer, /env\(safe-area-inset-right\)/);
-  assert.match(ruleBlock(terminalCss, ".agent-touch-field {", touchCss), /border-radius:\s*9px/);
+  const field = ruleBlock(terminalCss, ".agent-touch-field {", touchCss);
+  assert.match(field, /background:\s*var\(--terminal-background\)/);
+  assert.match(field, /border-left:\s*1px solid var\(--terminal-muted\)/);
+  assert.match(field, /border-radius:\s*0/);
+  const action = ruleBlock(terminalCss, ".agent-touch-actions button {", touchCss);
+  assert.match(action, /background:\s*transparent/);
+  assert.match(action, /border-radius:\s*0/);
+  assert.match(terminalCss, /\.agent-touch-composer\.is-running \.agent-touch-actions button \{[\s\S]*?color:\s*var\(--terminal-muted\)/);
   assert.match(terminal, /active\.current\.submit\(input, \{ submittedAt \}\)/);
   assert.match(terminal, /active\.current\?\.cancel\(\)/);
 });
