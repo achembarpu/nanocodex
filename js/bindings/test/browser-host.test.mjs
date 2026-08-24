@@ -111,29 +111,40 @@ test("browser host never flattens remote MCP tools into direct mode", () => {
 
 test("browser host readiness installs deferred MCP without waiting for discovery", async () => {
   let releaseDiscovery;
+  let reportDiscoveryStarted;
   const discovery = new Promise((resolve) => { releaseDiscovery = resolve; });
+  const discoveryStarted = new Promise((resolve) => { reportDiscoveryStarted = resolve; });
   const host = createBrowserHost({
     mcp: {
       fixture: {
         client: {
           close: async () => {},
-          listTools: () => discovery,
+          listTools: () => {
+            reportDiscoveryStarted();
+            return discovery;
+          },
         },
       },
     },
   });
-  const readiness = await Promise.race([
-    host.ready().then(() => "ready"),
-    new Promise((resolve) => setTimeout(() => resolve("timed out"), 250)),
-  ]);
-  assert.equal(readiness, "ready");
-  assert.match(host.toolDefinitions(), /tool_search/);
-  assert.doesNotMatch(host.toolDefinitions(), /mcp__fixture__lookup/);
+  let ready = false;
+  const readiness = host.ready().then(() => { ready = true; });
+  const tools = { tools: [{ name: "lookup", inputSchema: { type: "object" } }] };
+  try {
+    await Promise.race([discoveryStarted, readiness]);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(ready, true);
+    assert.match(host.toolDefinitions(), /tool_search/);
+    assert.doesNotMatch(host.toolDefinitions(), /mcp__fixture__lookup/);
 
-  releaseDiscovery({ tools: [{ name: "lookup", inputSchema: { type: "object" } }] });
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.match(host.toolDefinitions(), /mcp__fixture__lookup/);
-  await host.dispose();
+    releaseDiscovery(tools);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.match(host.toolDefinitions(), /mcp__fixture__lookup/);
+  } finally {
+    releaseDiscovery(tools);
+    await readiness.catch(() => {});
+    await host.dispose();
+  }
 });
 
 test("browser host reports non-JSON tool results as failures", async () => {
