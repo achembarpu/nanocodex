@@ -99,7 +99,7 @@ test("the shared shell presents Source without changing the stable Code route", 
 test("navigation does not capture global letter keys and browser Find remains native", () => {
   assert.deepEqual(
     [...demoNavigation, ...primaryNavigation, ...gitNavigation].map(({ label, description }) => [label, description]),
-    [["Multiplayer", "Shared room"], ["World", "Agent world"], ["Docs", "Reference"], ["Evals", "Benchmarks"], ["Changelog", "Releases"], ["Commits", "History"], ["Source", "Repository"]],
+    [["Durable Agent", "Persistent browser agent"], ["Multiplayer", "Shared room"], ["World", "Agent world"], ["Docs", "Reference"], ["Evals", "Benchmarks"], ["Changelog", "Releases"], ["Commits", "History"], ["Source", "Repository"]],
   );
   assert.doesNotMatch(application, /item\.shortcut|shortcut<\/small>|const nextSurface =\s*key/);
   assert.match(
@@ -113,7 +113,7 @@ test("navigation does not capture global letter keys and browser Find remains na
 });
 
 test("the product navigation exposes the deliberate Demos and Git hierarchy", () => {
-  assert.deepEqual(demoNavigation.map(({ label }) => label), ["Multiplayer", "World"]);
+  assert.deepEqual(demoNavigation.map(({ label }) => label), ["Durable Agent", "Multiplayer", "World"]);
   assert.deepEqual(primaryNavigation.map(({ label }) => label), ["Docs", "Evals"]);
   assert.deepEqual(gitNavigation.map(({ label }) => label), ["Changelog", "Commits", "Source"]);
   assert.equal(connectDemoUrl, "https://nanocodex-connect-playground.gakonst.workers.dev");

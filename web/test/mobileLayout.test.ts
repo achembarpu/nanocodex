@@ -72,7 +72,7 @@ test("phone headers expose readable product navigation in an owned modal", () =>
   assert.match(application, /onClick=\{toggleMobileNavigation\}/);
   assert.match(application, /className="mobile-navigation-backdrop"[\s\S]*?onClick=\{closeMobileNavigation\}/);
   assert.doesNotMatch(application, /onPointerDown=\{closeMobileNavigation\}/);
-  assert.doesNotMatch(application, /<AccountMenu/);
+  assert.match(application, /<AccountMenu/);
   assert.match(application, /<span>\{item\.label\}<\/span><small>\{item\.description\}<\/small>/);
   assert.match(application, /className="mobile-navigation-group" aria-labelledby="mobile-demos-title"/);
   assert.match(application, /className="mobile-navigation-group" aria-labelledby="mobile-git-title"/);
@@ -362,6 +362,9 @@ test("portrait coarse-pointer tablets retain 44px controls without changing layo
 });
 
 test("the terminal chrome delegates account and model connection controls to the account menu", () => {
+  assert.match(experience, /useModelSession\(\{/);
+  assert.doesNotMatch(experience, /<AgentSessionBar/);
+  assert.doesNotMatch(modelSession, /Account agent/);
   assert.doesNotMatch(modelSession, /Connected to your ChatGPT subscription/);
   assert.doesNotMatch(modelSession, /The agent runs in your browser/);
   assert.match(modelSession, /aria-live="polite"/);

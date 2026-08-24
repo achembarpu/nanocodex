@@ -19,6 +19,7 @@ export type ProductNavigationItem = Readonly<{
 export const connectDemoUrl = "https://nanocodex-connect-playground.gakonst.workers.dev";
 
 export const demoNavigation = [
+  { surface: "agent", label: "Durable Agent", description: "Persistent browser agent" },
   { surface: "multiplayer", label: "Multiplayer", description: "Shared room" },
   { surface: "world", label: "World", description: "Agent world" },
 ] as const satisfies ReadonlyArray<ProductNavigationItem>;
