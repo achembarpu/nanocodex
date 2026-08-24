@@ -1,3 +1,4 @@
+import { execFileSync } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -11,6 +12,9 @@ import {
   isMissingWorkerDeleteError,
   runBoundedProcess,
 } from "./child-process.mjs";
+import {
+  verifyManagedWasmArtifact,
+} from "../../../js/bindings/scripts/check-managed-wasm.mjs";
 
 const workersRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const repositoryRoot = resolve(workersRoot, "../..");
@@ -27,8 +31,23 @@ const probeMainPath = resolve(workersRoot, "scripts/production-boundary-probe-wo
 const lifecycleAbort = new AbortController();
 
 const BROKER_NAME = "nanocodex-egress";
+const MANAGED_TEMPLATE_NAME = "nanocodex-managed-development";
 const MANAGED_NAME = "nanocodex-durable-agent";
 const WEB_NAME = "nanocodex";
+const MANAGED_DURABLE_OBJECT_MIGRATIONS = [
+  ["v1", [
+    ["NANOCODEX_SESSIONS", "NanocodexSession"],
+    ["NANOCODEX_ROOMS", "MultiplayerRoom"],
+    ["NANOCODEX_MULTIPLAYER_QUOTA", "MultiplayerQuota"],
+  ]],
+  ["v2", [
+    ["NANOCODEX_AUTH", "NonceStorage"],
+    ["NANOCODEX_USERS", "UserAccount"],
+    ["NANOCODEX_API_KEYS", "ApiKeyRecord"],
+  ]],
+  ["v3", [["NANOCODEX_MEMORY", "MemoryScope"]]],
+  ["v4", [["NANOCODEX_ORGANIZATIONS", "Organization"]]],
+];
 const PROVIDER_NAMES = [
   "NANOCODEX_MANAGED_AUTH_MODE",
   "OPENAI_API_KEY",
@@ -67,12 +86,29 @@ export function assertProductionPreflight(environment) {
   return { adminToken, revision };
 }
 
+export function assertProductionCheckout(revision, {
+  dirty,
+  head,
+  originMaster,
+}) {
+  const expected = productionRevision(revision);
+  if (head !== expected) {
+    throw new Error("production rollout checkout must match TARGET_SHA");
+  }
+  if (originMaster !== expected) {
+    throw new Error("production rollout checkout must be the fetched origin/master");
+  }
+  if (dirty) {
+    throw new Error("production rollout checkout must not contain tracked changes");
+  }
+}
+
 export function buildManagedProductionConfig(baseConfig, {
   mainPath = managedMainPath,
 } = {}) {
   assertRecord(baseConfig, "managed config");
-  if (baseConfig.name !== MANAGED_NAME) {
-    throw new Error("production managed config has an unexpected Worker name");
+  if (baseConfig.name !== MANAGED_TEMPLATE_NAME) {
+    throw new Error("production managed config must use the non-production template name");
   }
   if (baseConfig.workers_dev !== false || baseConfig.routes !== undefined) {
     throw new Error("production managed Worker must remain private");
@@ -89,42 +125,33 @@ export function buildManagedProductionConfig(baseConfig, {
       binding?.class_name,
     ]),
   );
-  if ((baseConfig.durable_objects?.bindings ?? []).length !== 6
-    || durableObjects.size !== 6) {
+  const expectedBindings = MANAGED_DURABLE_OBJECT_MIGRATIONS.flatMap(([, bindings]) => bindings);
+  if ((baseConfig.durable_objects?.bindings ?? []).length !== expectedBindings.length
+    || durableObjects.size !== expectedBindings.length) {
     throw new Error("production managed Worker has an unexpected Durable Object binding");
   }
-  for (const [name, className] of [
-    ["NANOCODEX_SESSIONS", "NanocodexSession"],
-    ["NANOCODEX_ROOMS", "MultiplayerRoom"],
-    ["NANOCODEX_MULTIPLAYER_QUOTA", "MultiplayerQuota"],
-    ["NANOCODEX_AUTH", "NonceStorage"],
-    ["NANOCODEX_USERS", "UserAccount"],
-    ["NANOCODEX_API_KEYS", "ApiKeyRecord"],
-  ]) {
+  for (const [name, className] of expectedBindings) {
     if (durableObjects.get(name) !== className) {
       throw new Error(`production managed Worker requires ${name}`);
     }
   }
   const migrationTags = baseConfig.migrations?.map((migration) => migration?.tag);
-  if (JSON.stringify(migrationTags) !== JSON.stringify(["v1", "v2"])) {
-    throw new Error("production managed Worker requires the current v1 and v2 migrations");
+  const expectedTags = MANAGED_DURABLE_OBJECT_MIGRATIONS.map(([tag]) => tag);
+  if (JSON.stringify(migrationTags) !== JSON.stringify(expectedTags)) {
+    throw new Error("production managed Worker requires the complete ordered migration history");
   }
-  const v1 = baseConfig.migrations[0];
-  if (!["NanocodexSession", "MultiplayerRoom", "MultiplayerQuota"].every(
-    (className) => v1.new_sqlite_classes?.includes(className),
-  )) {
-    throw new Error("production managed Worker requires the current SQLite classes in migration v1");
-  }
-  const v2 = baseConfig.migrations[1];
-  for (const className of ["NonceStorage", "UserAccount", "ApiKeyRecord"]) {
-    if (!v2?.new_sqlite_classes?.includes(className)) {
-      throw new Error(`production managed Worker requires ${className} in migration v2`);
+  for (const [index, [tag, bindings]] of MANAGED_DURABLE_OBJECT_MIGRATIONS.entries()) {
+    const actual = baseConfig.migrations[index]?.new_sqlite_classes;
+    const expected = bindings.map(([, className]) => className);
+    if (JSON.stringify(actual) !== JSON.stringify(expected)) {
+      throw new Error(`production managed Worker requires the exact ${tag} SQLite migration`);
     }
   }
   assertNoProviderConfiguration(baseConfig, "managed config");
 
   return {
     ...baseConfig,
+    name: MANAGED_NAME,
     main: resolve(mainPath),
   };
 }
@@ -243,11 +270,13 @@ export async function withPrivateRolloutFiles(values, callback, {
 
 export async function preflightProductionRollout(environment = process.env) {
   const selection = assertProductionPreflight(environment);
+  verifyProductionCheckout(selection.revision);
   const [brokerBase, managedBase, webBase] = await Promise.all([
     readJson(brokerConfigPath),
     readJson(managedConfigPath),
     readJson(webArtifactConfigPath),
   ]);
+  await verifyManagedWasmArtifact(selection.revision);
   const broker = buildProductionBrokerConfig(brokerBase, { mainPath: brokerMainPath });
   if (broker.name !== BROKER_NAME || broker.workers_dev !== false || broker.routes !== undefined) {
     throw new Error("production broker must remain the private nanocodex-egress Worker");
@@ -268,6 +297,8 @@ export async function preflightProductionRollout(environment = process.env) {
 export async function deployProductionManaged(environment = process.env) {
   const cloudflare = cloudflareCredentials(environment);
   const revision = productionRevision(environment.TARGET_SHA);
+  verifyProductionCheckout(revision);
+  await verifyManagedWasmArtifact(revision);
   const adminToken = requiredSecret(environment, "NANOCODEX_ADMIN_TOKEN");
   const baseConfig = await readJson(managedConfigPath);
   const config = buildManagedProductionConfig(baseConfig);
@@ -297,7 +328,7 @@ export async function deployProductionManaged(environment = process.env) {
 
   const result = {
     component: "private-managed",
-    migrations: ["v1", "v2"],
+    migrations: MANAGED_DURABLE_OBJECT_MIGRATIONS.map(([tag]) => tag),
     revision,
     status: "deployed",
   };
@@ -310,6 +341,7 @@ export async function verifyProductionBoundary(environment = process.env, {
 } = {}) {
   const cloudflare = cloudflareCredentials(environment);
   const revision = productionRevision(environment.TARGET_SHA);
+  verifyProductionCheckout(revision);
   const brokerProbeToken = requiredBrokerProbeToken(environment);
   const probeToken = randomBytes(32).toString("base64url");
   const name = `nanocodex-boundary-${revision.slice(0, 12)}-${randomBytes(5).toString("hex")}`;
@@ -395,6 +427,7 @@ export async function verifyProductionBoundary(environment = process.env, {
 export async function deployProductionWeb(environment = process.env) {
   const cloudflare = cloudflareCredentials(environment);
   const revision = productionRevision(environment.TARGET_SHA);
+  verifyProductionCheckout(revision);
   const baseConfig = await readJson(webArtifactConfigPath);
   const config = buildWebProductionConfig(baseConfig, {
     artifactDirectory: dirname(webArtifactConfigPath),
@@ -513,6 +546,21 @@ function productionRevision(value) {
     throw new Error("TARGET_SHA must be the full lowercase production commit SHA");
   }
   return revision;
+}
+
+function verifyProductionCheckout(revision) {
+  assertProductionCheckout(revision, {
+    dirty: git("status", "--porcelain", "--untracked-files=no").length > 0,
+    head: git("rev-parse", "HEAD"),
+    originMaster: git("rev-parse", "origin/master"),
+  });
+}
+
+function git(...arguments_) {
+  return execFileSync("git", arguments_, {
+    cwd: repositoryRoot,
+    encoding: "utf8",
+  }).trim();
 }
 
 function requiredEnvironment(environment, name) {

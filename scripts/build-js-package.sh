@@ -24,7 +24,9 @@ if [[ -f "$stamp_path" ]] \
   && [[ -f js/bindings/pkg-web/nanocodex_bg.js ]] \
   && [[ -f js/bindings/pkg-web/nanocodex_worker.js ]] \
   && [[ -f js/bindings/pkg-node/nanocodex.js ]] \
-  && [[ "$(<"$stamp_path")" == "$fingerprint" ]]; then
+  && [[ "$(<"$stamp_path")" == "$fingerprint" ]] \
+  && node js/bindings/scripts/write-wasm-attestation.mjs --check-cache "$wasm_artifact" 2>/dev/null; then
+  node js/bindings/scripts/write-wasm-attestation.mjs "$wasm_artifact"
   echo "wasm-bindgen outputs are current"
   exit 0
 fi
@@ -64,3 +66,4 @@ mv "$optimized_wasm" "$generated_wasm"
 node js/bindings/scripts/deduplicate-wasm.mjs
 node js/bindings/scripts/write-package-types.mjs
 printf '%s\n' "$fingerprint" > "$stamp_path"
+node js/bindings/scripts/write-wasm-attestation.mjs "$wasm_artifact"

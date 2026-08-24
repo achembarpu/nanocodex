@@ -97,6 +97,7 @@ const requiredFiles = [
   "pkg-web/nanocodex_bg.js",
   "pkg-web/nanocodex_bg.wasm",
   "pkg-web/nanocodex_worker.js",
+  "pkg-web/nanocodex-build.json",
   "pkg-node/nanocodex.js",
   "pkg-node/nanocodex.d.ts",
 ];
