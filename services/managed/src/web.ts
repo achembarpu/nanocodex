@@ -35,24 +35,24 @@ const HTML = `<!doctype html>
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>Nanocodex · Cloudflare Durable Agent</title>
+  <title>Nanocodex · Managed Agent Operator</title>
   <link rel="stylesheet" href="/app.css">
 </head>
 <body>
   <main>
     <header>
-      <div><p class="eyebrow">NANOCODEX / CLOUDFLARE</p><h1>Durable agent, disposable client.</h1></div>
-      <span id="status" class="pill">no session</span>
+      <div><p class="eyebrow">NANOCODEX / CLOUDFLARE</p><h1>Durable agent, disposable operator.</h1></div>
+      <span id="status" class="pill">no agent</span>
     </header>
     <section class="setup">
-      <label>Session creation token <input id="admin" type="password" autocomplete="off" placeholder="Paste the deployment admin token"></label>
-      <button id="new-session" type="button">New session</button>
+      <label>Account API key <input id="api-key" type="password" autocomplete="off" spellcheck="false" placeholder="Paste an account-issued NANOCODEX_API_KEY"></label>
+      <button id="new-agent" type="button">New agent</button>
       <button id="reconnect" type="button" class="secondary">Reconnect</button>
       <button id="detach" type="button" class="secondary">Detach</button>
     </section>
-    <p class="meta">Session <code id="session">none</code>. The browser stores only this session capability, transcript, and any unfinished turn. Subscription credentials stay in the Worker host.</p>
+    <p class="meta">Agent <code id="agent">none</code>. The account key stays only in this tab's memory; local storage contains routing metadata, a bounded transcript, and any unfinished turn.</p>
     <section id="transcript" class="transcript" aria-live="polite">
-      <article class="system">Create a session, send a prompt, then detach or close this tab. Reopen it to resume the same durable turn.</article>
+      <article class="system">Paste an account-issued API key, create an agent, and send a prompt. Re-enter the key after reload to resume the same durable turn.</article>
     </section>
     <form id="prompt-form">
       <textarea id="prompt" rows="3" maxlength="1048576" placeholder="Ask the durable agent…" required></textarea>
@@ -64,45 +64,56 @@ const HTML = `<!doctype html>
 </body>
 </html>`;
 
-const APP = `const STORAGE_KEY = "nanocodex.cloudflare.web.v1";
+const APP = `const STORAGE_KEY = "nanocodex.cloudflare.web.v2";
 const byId = (id) => document.getElementById(id);
 const ui = {
-  activity: byId("activity"), admin: byId("admin"), detach: byId("detach"),
-  form: byId("prompt-form"), input: byId("prompt"), newSession: byId("new-session"),
-  reconnect: byId("reconnect"), send: byId("send"), session: byId("session"),
+  activity: byId("activity"), apiKey: byId("api-key"), detach: byId("detach"),
+  form: byId("prompt-form"), input: byId("prompt"), newAgent: byId("new-agent"),
+  reconnect: byId("reconnect"), send: byId("send"), agent: byId("agent"),
   status: byId("status"), transcript: byId("transcript"),
 };
 let state = loadState();
-let socket;
+let accountKey = "";
+let streamAbort;
+let reconnectTimer;
+let streamGeneration = 0;
+let submittingTurnId;
 let ready = false;
 let eventCount = 0;
 let streamedText = "";
 
-if (["127.0.0.1", "localhost"].includes(location.hostname)) ui.admin.placeholder = "local-admin-token";
 window.addEventListener("storage", (event) => {
   if (event.key === STORAGE_KEY) syncStoredState(event.newValue);
 });
 renderState();
-if (state) connect();
+if (state) setActivity("enter the account API key to reconnect");
 
-ui.newSession.addEventListener("click", async () => {
-  const token = ui.admin.value.trim();
-  if (!token) return setActivity("session creation token required", true);
+ui.newAgent.addEventListener("click", async () => {
+  if (!captureAccountKey()) return;
   setBusy(true);
   try {
-    const response = await fetch("/sessions", {
+    const response = await fetch("/v1/agents", {
       method: "POST",
-      headers: { authorization: "Bearer " + token },
+      headers: authHeaders(),
     });
-    if (response.status === 401) throw new Error("session creation token rejected; enter this deployment's NANOCODEX_ADMIN_TOKEN");
-    if (!response.ok) throw new Error("session creation failed with HTTP " + response.status);
+    if (response.status === 401) return rejectAccountKey();
+    if (!response.ok) throw new Error("agent creation failed with HTTP " + response.status);
     const created = await response.json();
-    if (socket) socket.close(1000, "new session");
-    state = { session_id: created.session_id, websocket_url: created.websocket_url, messages: [] };
+    if (!validAgentReceipt(created)) {
+      throw new Error("agent creation returned an invalid receipt");
+    }
+    stopStream();
+    state = {
+      agent_id: created.agent_id,
+      session_id: created.session_id,
+      events_url: created.events_url,
+      websocket_url: created.websocket_url,
+      cursor: "0",
+      messages: [],
+    };
     saveState();
     renderState();
-    connect();
-    ui.admin.value = "";
+    void connect();
   } catch (error) {
     setActivity(errorMessage(error), true);
   } finally {
@@ -110,18 +121,22 @@ ui.newSession.addEventListener("click", async () => {
   }
 });
 
-ui.reconnect.addEventListener("click", connect);
+ui.reconnect.addEventListener("click", () => {
+  if (!captureAccountKey()) return;
+  void connect();
+});
 ui.detach.addEventListener("click", () => {
-  if (socket) socket.close(1000, "client detached");
+  stopStream();
+  accountKey = "";
   ready = false;
   setStatus(state && state.pending ? "detached · turn running" : "detached", "warn");
-  setActivity("safe to close; durable state remains in the object");
+  setActivity("detached and account key forgotten; durable state remains in the object");
 });
 
 ui.form.addEventListener("submit", (event) => {
   event.preventDefault();
   const input = ui.input.value.trim();
-  if (!input || !state) return setActivity(state ? "prompt is empty" : "create a session first", true);
+  if (!input || !state) return setActivity(state ? "prompt is empty" : "create an agent first", true);
   if (state.pending) return setActivity("one durable turn is already pending", true);
   state.pending = { id: crypto.randomUUID(), input };
   state.messages.push({ role: "you", text: input, turn_id: state.pending.id });
@@ -131,31 +146,80 @@ ui.form.addEventListener("submit", (event) => {
   sendPending();
 });
 
-function connect() {
-  if (!state) return setActivity("create a session first", true);
-  if (socket && (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING)) return;
+async function connect() {
+  if (!state) return setActivity("create an agent first", true);
+  if (!accountKey) return setActivity("account API key required", true);
+  stopStream();
+  const generation = ++streamGeneration;
+  const abort = new AbortController();
+  streamAbort = abort;
   ready = false;
   eventCount = 0;
   setStatus("connecting", "warn");
-  socket = new WebSocket(state.websocket_url);
-  socket.addEventListener("open", () => setActivity("connected; waiting for durable object"));
-  socket.addEventListener("message", (event) => onMessage(event.data));
-  socket.addEventListener("close", () => {
+  try {
+    const separator = state.events_url.includes("?") ? "&" : "?";
+    const response = await fetch(state.events_url + separator + "cursor=" + encodeURIComponent(state.cursor || "0"), {
+      headers: authHeaders({ accept: "text/event-stream" }),
+      signal: abort.signal,
+    });
+    if (response.status === 401) return rejectAccountKey();
+    if (response.status === 404) return forgetUnavailableAgent();
+    if (!response.ok || !response.body) throw new Error("event stream failed with HTTP " + response.status);
+    ready = true;
+    setStatus("ready", "ok");
+    setActivity("authenticated event stream connected");
+    void sendPending();
+    await consumeEvents(response.body, generation);
+    if (!abort.signal.aborted && generation === streamGeneration) throw new Error("event stream ended");
+  } catch (error) {
+    if (abort.signal.aborted || generation !== streamGeneration) return;
     ready = false;
     setStatus(state && state.pending ? "detached · resumable" : "detached", "warn");
-  });
-  socket.addEventListener("error", () => setActivity("WebSocket connection failed", true));
+    setActivity(errorMessage(error), true);
+    scheduleReconnect(generation);
+  }
 }
 
-function onMessage(encoded) {
+async function consumeEvents(body, generation) {
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  while (generation === streamGeneration) {
+    const chunk = await reader.read();
+    if (chunk.done) break;
+    buffer += decoder.decode(chunk.value, { stream: true });
+    let boundary;
+    while ((boundary = buffer.indexOf("\\n\\n")) >= 0) {
+      const frame = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      onEventFrame(frame);
+    }
+  }
+}
+
+function onEventFrame(frame) {
+  const data = [];
+  for (const line of frame.split("\\n")) {
+    if (line.startsWith(": cursor ")) {
+      updateCursor(line.slice(9));
+      continue;
+    }
+    if (line.startsWith("data:")) data.push(line.slice(5).replace(/^ /, ""));
+  }
+  if (!data.length) return;
   let message;
-  try { message = JSON.parse(encoded); } catch { return setActivity("invalid server message", true); }
-  if (message.type === "ready") {
-    ready = true;
-    setStatus(message.restored ? "restored" : "ready", "ok");
-    for (const turn of message.active_turn_details || []) observeTurn(turn.id, turn.input);
-    socket.send(JSON.stringify({ type: "status" }));
-    sendPending();
+  try { message = JSON.parse(data.join("\\n")); }
+  catch { return setActivity("invalid event stream message", true); }
+  const cursor = typeof message.cursor === "string" ? message.cursor : undefined;
+  onMessage(message);
+  // Apply and persist the event before advancing its durable cursor. A crash
+  // may replay an applied event, but must never skip an unapplied event.
+  if (cursor) updateCursor(cursor);
+}
+
+function onMessage(message) {
+  if (message.type === "agent_created") {
+    setStatus("ready", "ok");
   } else if (message.type === "turn_accepted") {
     observeTurn(message.id, message.input);
     setStatus(message.replayed ? "resuming" : "running", "ok");
@@ -191,26 +255,66 @@ function onMessage(encoded) {
     renderMessages();
     setStatus("failed", "bad");
     setActivity(message.error, true);
-  } else if (message.type === "status") {
-    for (const turn of message.active_turn_details || []) observeTurn(turn.id, turn.input);
+  } else if (message.type === "turn_cancelled") {
+    if (!state) return;
+    finishTurn(message.id);
+    state.messages.push({ role: "error", text: "turn cancelled", turn_id: message.id });
+    saveState();
+    renderMessages();
+    setStatus("ready", "ok");
+  } else if (message.type === "turn_retryable") {
+    setStatus("retrying", "warn");
+    setActivity(message.error, true);
+  } else if (message.type === "turn_blocked") {
+    if (!state) return;
+    finishTurn(message.id);
+    state.messages.push({ role: "error", text: message.error, turn_id: message.id });
+    saveState();
+    renderMessages();
+    setStatus("blocked · replace agent", "bad");
+    setActivity(message.error, true);
   } else if (message.type === "error") {
     setActivity(message.code + ": " + message.message, true);
   }
 }
 
-function sendPending() {
-  if (!ready || !state || !state.pending) return;
-  socket.send(JSON.stringify({ type: "prompt", id: state.pending.id, input: state.pending.input }));
+async function sendPending() {
+  if (!ready || !state || !state.pending || !accountKey) return;
+  if (submittingTurnId === state.pending.id) return;
+  const pending = state.pending;
+  submittingTurnId = pending.id;
   setStatus("running", "ok");
   setActivity("turn " + shortId(state.pending.id) + " is durable; detach any time");
+  try {
+    const turnsUrl = state.events_url.replace(/\\/events(?:\\?.*)?$/, "/turns");
+    const response = await fetch(turnsUrl, {
+      method: "POST",
+      headers: authHeaders({
+        "content-type": "application/json",
+        "idempotency-key": pending.id,
+      }),
+      body: JSON.stringify({ id: pending.id, input: pending.input }),
+    });
+    if (response.status === 401) return rejectAccountKey();
+    if (response.status !== 200 && response.status !== 202) {
+      throw new Error("turn submission failed with HTTP " + response.status);
+    }
+  } catch (error) {
+    setStatus("detached · resumable", "warn");
+    setActivity(errorMessage(error), true);
+  } finally {
+    if (submittingTurnId === pending.id) submittingTurnId = undefined;
+  }
 }
 
 function renderState() {
-  ui.session.textContent = state ? state.session_id : "none";
+  ui.agent.textContent = state ? state.agent_id : "none";
   renderMessages();
   if (state && state.pending) {
     setStatus("pending · reconnecting", "warn");
-    setActivity("resuming unfinished turn " + shortId(state.pending.id));
+    setActivity(accountKey
+      ? "resuming unfinished turn " + shortId(state.pending.id)
+      : "enter the account API key to resume unfinished turn " + shortId(state.pending.id));
   }
 }
 
@@ -253,29 +357,46 @@ function loadState() {
 function parseStoredState(encoded) {
   try {
     const value = JSON.parse(encoded);
-    if (!value || typeof value.session_id !== "string" || typeof value.websocket_url !== "string") return undefined;
+    if (!validAgentReceipt(value)) return undefined;
     value.messages = Array.isArray(value.messages) ? value.messages.slice(-50) : [];
     value.active_turns = Array.isArray(value.active_turns) ? value.active_turns.slice(-16) : [];
     return value;
   } catch { return undefined; }
 }
 
+function validAgentReceipt(value) {
+  if (!value
+    || typeof value.agent_id !== "string"
+    || !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value.agent_id)
+    || value.session_id !== value.agent_id
+    || typeof value.events_url !== "string"
+    || typeof value.websocket_url !== "string") return false;
+  try {
+    const events = new URL(value.events_url);
+    const socket = new URL(value.websocket_url);
+    const route = "/v1/agents/" + value.agent_id;
+    return events.origin === location.origin
+      && events.pathname === route + "/events"
+      && !events.search && !events.hash && !events.username && !events.password
+      && socket.protocol === (location.protocol === "https:" ? "wss:" : "ws:")
+      && socket.host === location.host
+      && socket.pathname === route + "/ws"
+      && !socket.search && !socket.hash && !socket.username && !socket.password;
+  } catch { return false; }
+}
+
 function syncStoredState(encoded) {
   const incoming = parseStoredState(encoded);
   const previousPendingId = state && state.pending && state.pending.id;
-  const changedSession = Boolean((!state && incoming)
+  const changedAgent = Boolean((!state && incoming)
     || (state && !incoming)
-    || (state && incoming && (state.session_id !== incoming.session_id || state.websocket_url !== incoming.websocket_url)));
-  if (changedSession && socket) {
-    socket.close(1000, "session changed in another tab");
-    socket = undefined;
-    ready = false;
-  }
+    || (state && incoming && state.agent_id !== incoming.agent_id));
+  if (changedAgent) stopStream();
   state = incoming;
   renderState();
   if (!state) return;
-  if (changedSession || !socket || socket.readyState === WebSocket.CLOSED) connect();
-  else if (previousPendingId !== (state.pending && state.pending.id)) sendPending();
+  if (accountKey && changedAgent) void connect();
+  else if (accountKey && previousPendingId !== (state.pending && state.pending.id)) void sendPending();
 }
 
 function observeTurn(id, input) {
@@ -332,7 +453,59 @@ function saveState() {
   }
 }
 
-function setBusy(busy) { ui.newSession.disabled = busy; }
+function captureAccountKey() {
+  const entered = ui.apiKey.value.trim();
+  ui.apiKey.value = "";
+  if (entered) accountKey = entered;
+  if (accountKey) return true;
+  setActivity("account API key required", true);
+  return false;
+}
+
+function authHeaders(extra) {
+  return { authorization: "Bearer " + accountKey, ...(extra || {}) };
+}
+
+function rejectAccountKey() {
+  accountKey = "";
+  ready = false;
+  stopStream();
+  setStatus("authentication required", "bad");
+  setActivity("account API key rejected", true);
+}
+
+function forgetUnavailableAgent() {
+  stopStream();
+  state = undefined;
+  streamedText = "";
+  saveState();
+  renderState();
+  setStatus("agent unavailable", "bad");
+  setActivity("agent was deleted or is no longer owned by this account; create a new agent", true);
+}
+
+function updateCursor(cursor) {
+  if (!state || !/^[0-9]+$/.test(cursor)) return;
+  state.cursor = cursor;
+  saveState();
+}
+
+function scheduleReconnect(generation) {
+  if (!state || !accountKey || generation !== streamGeneration) return;
+  clearTimeout(reconnectTimer);
+  reconnectTimer = setTimeout(() => void connect(), 1000);
+}
+
+function stopStream() {
+  clearTimeout(reconnectTimer);
+  reconnectTimer = undefined;
+  streamGeneration += 1;
+  streamAbort?.abort();
+  streamAbort = undefined;
+  ready = false;
+}
+
+function setBusy(busy) { ui.newAgent.disabled = busy; }
 function setStatus(text, tone) { ui.status.textContent = text; ui.status.dataset.tone = tone || ""; }
 function setActivity(text, bad) { ui.activity.textContent = text; ui.activity.dataset.bad = bad ? "true" : "false"; }
 function shortId(id) { return id.slice(0, 8); }

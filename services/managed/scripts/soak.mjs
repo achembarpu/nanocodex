@@ -1,10 +1,15 @@
 import { randomUUID } from "node:crypto";
 import WebSocket from "ws";
 
-import { managedAgentFetch, managedAgentWebSocketOptions } from "./managed-agent-auth.mjs";
+import {
+  managedAccountFetch,
+  managedAccountWebSocketOptions,
+  parseManagedAgentReceipt,
+  requireManagedApiKey,
+} from "./managed-account-auth.mjs";
 
 const baseUrl = process.env.NANOCODEX_WORKER_URL ?? "http://127.0.0.1:8787";
-const adminToken = process.env.NANOCODEX_ADMIN_TOKEN ?? "local-admin-token";
+const apiKey = requireManagedApiKey();
 const sessionCount = Number(process.env.NANOCODEX_SOAK_SESSIONS ?? 16);
 const timeoutMs = Number(process.env.NANOCODEX_SOAK_TIMEOUT_MS ?? 60_000);
 
@@ -17,17 +22,17 @@ const sockets = [];
 const started = performance.now();
 try {
   await Promise.all(Array.from({ length: sessionCount }, async () => {
-    sessions.push(await createSession());
+    sessions.push(await createAgent());
   }));
-  const clients = await Promise.all(sessions.map(async (session, index) => {
+  const clients = await Promise.all(sessions.map(async (agent, index) => {
     const socket = new WebSocket(
-      session.websocket_url,
-      managedAgentWebSocketOptions(session),
+      agent.websocket_url,
+      managedAccountWebSocketOptions(apiKey),
     );
     sockets.push(socket);
     const inbox = createInbox(socket);
     await inbox.next((message) => message.type === "ready", 10_000);
-    return { inbox, index, session, socket };
+    return { agent, inbox, index, socket };
   }));
 
   await Promise.all(clients.map(async ({ inbox, index, socket }) => {
@@ -49,10 +54,10 @@ try {
     }
   }));
 
-  const states = await Promise.all(sessions.map(async (session) => {
-    const response = await managedAgentFetch(
-      session,
-      `${baseUrl}/sessions/${session.session_id}`,
+  const states = await Promise.all(sessions.map(async (agent) => {
+    const response = await managedAccountFetch(
+      apiKey,
+      `${baseUrl}/v1/agents/${agent.agent_id}`,
     );
     if (!response.ok) throw new Error(`state failed with HTTP ${response.status}`);
     return response.json();
@@ -71,20 +76,19 @@ try {
   }));
 } finally {
   for (const socket of sockets) socket.terminate();
-  await Promise.all(sessions.map((session) => managedAgentFetch(
-    session,
-    `${baseUrl}/sessions/${session.session_id}`,
+  await Promise.all(sessions.map((agent) => managedAccountFetch(
+    apiKey,
+    `${baseUrl}/v1/agents/${agent.agent_id}`,
     { method: "DELETE" },
   ).catch(() => {})));
 }
 
-async function createSession() {
-  const response = await fetch(`${baseUrl}/sessions`, {
+async function createAgent() {
+  const response = await managedAccountFetch(apiKey, `${baseUrl}/v1/agents`, {
     method: "POST",
-    headers: { authorization: `Bearer ${adminToken}` },
   });
-  if (!response.ok) throw new Error(`session creation failed with HTTP ${response.status}: ${await response.text()}`);
-  return response.json();
+  if (!response.ok) throw new Error(`agent creation failed with HTTP ${response.status}: ${await response.text()}`);
+  return parseManagedAgentReceipt(await response.json());
 }
 
 function createInbox(socket) {

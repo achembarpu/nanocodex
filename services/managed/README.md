@@ -19,7 +19,7 @@ N humans -> website proxy -> MultiplayerRoom -> private NanocodexSession
                 |                  `- global MultiplayerQuota -----------------------|
                 `- create-only allocator capability                                 |
                                                                                     v
-REST/SSE or direct WebSocket -> NanocodexSession -> private EGRESS Service Binding
+account-authenticated REST/SSE or WebSocket -> NanocodexSession -> private EGRESS Service Binding
                                                         |
                                                         v
                                             ordinary credential-broker Worker
@@ -115,17 +115,18 @@ other fixed deployment mode:
 OPENAI_API_KEY='<key>' npm run dev:api-key --prefix services/managed
 ```
 
-Open <http://127.0.0.1:8787> for the deliberately thin browser client, or use
-the REPL below. The page stores only routing metadata, a bounded transcript, and
-an unfinished turn in browser local storage; the scoped agent capability stays
-in an HttpOnly cookie. Reloading resubmits the same idempotent turn ID and
-rejoins or replays the Durable Object result. Enter `local-admin-token` once to
-create a local session; this is the example's
-router token, not a model credential. That direct page is a local operator
-surface: do not publish it and hand a deployment-wide administrator token to
-end users. The production Multiplayer site keeps the managed Worker private and
-injects a distinct create-room-only allocator capability in its server-side
-Service Binding proxy.
+Open <http://127.0.0.1:8787> for the deliberately thin browser operator, or use
+the REPL below. First issue an API key from the same Nanocodex account (the
+account UI calls `POST /v1/api-keys`) and paste that `NANOCODEX_API_KEY` into
+the page. The page keeps the key only in this tab's memory. Browser local
+storage contains only the token-free agent receipt, a bounded transcript, and
+an unfinished turn; reload or detach requires the key again. Reconnecting
+resubmits the same idempotent turn ID and rejoins or replays the Durable Object
+result. The embedded operator uses authenticated REST and a `fetch()`-streamed
+SSE response because the browser WebSocket constructor cannot attach the
+required bearer header. It never opens OAuth or device-code UI. The production
+Multiplayer site keeps the managed Worker private and injects a distinct
+create-room-only allocator capability in its server-side Service Binding proxy.
 
 The launcher securely reads `$CODEX_HOME/auth.json` (normally
 `~/.codex/auth.json`), requires mode `0600`, and selects only its current access
@@ -220,30 +221,29 @@ npm run smoke:multiplayer --prefix services/managed
 
 ## Managed REST and resumable SSE
 
-Create an agent with the router credential. The UUIDv7 is only a routing ID. The
-receipt separately returns a 256-bit `agent_token` scoped to that one ID and
-also sets it as an HttpOnly cookie for the same-origin browser client. Every
-state, turn, event, WebSocket, cancellation, and deletion route requires that
-scoped token; knowing an ID is not authorization. Applications should still
-replace this example's creation policy with their own authorization boundary.
+Create an agent with an account-issued Nanocodex API key. The UUIDv7 is only a
+routing ID. Creation and every state, turn, event, WebSocket, cancellation, and
+deletion route authenticate the account again; knowing an agent ID is not
+authorization. A valid key owned by another account receives the same hidden
+not-found result as an unknown ID.
 
 ```sh
 curl -fsS -X POST \
-  -H 'Authorization: Bearer local-admin-token' \
+  -H "Authorization: Bearer $NANOCODEX_API_KEY" \
   http://127.0.0.1:8787/v1/agents
 ```
 
-The receipt contains `agent_id`, `agent_token`, `events_url`, and
-`websocket_url`. In the commands below, set `agent_token` from that receipt.
-Start the event stream at cursor zero, or resume after the last event your
-consumer fully processed:
+The token-free receipt contains exactly `agent_id`, `session_id`, `events_url`,
+and `websocket_url`. The API key remains caller-owned and is never copied into
+the receipt, a cookie, an event, or browser storage. Start the event stream at
+cursor zero, or resume after the last event your consumer fully processed:
 
 ```sh
-curl -N -H "Authorization: Bearer $agent_token" \
+curl -N -H "Authorization: Bearer $NANOCODEX_API_KEY" \
   -H 'Accept: text/event-stream' \
   'http://127.0.0.1:8787/v1/agents/<agent-id>/events?cursor=0'
 
-curl -N -H "Authorization: Bearer $agent_token" \
+curl -N -H "Authorization: Bearer $NANOCODEX_API_KEY" \
   -H 'Last-Event-ID: <last-processed-cursor>' \
   'http://127.0.0.1:8787/v1/agents/<agent-id>/events'
 ```
@@ -259,22 +259,22 @@ turn and cursors; reusing either identifier with different input returns 409.
 
 ```sh
 curl -fsS -X POST \
-  -H "Authorization: Bearer $agent_token" \
+  -H "Authorization: Bearer $NANOCODEX_API_KEY" \
   -H 'Content-Type: application/json' \
   -H 'Idempotency-Key: incoming-request-42' \
   --data '{"id":"turn-42","input":"Use exec_command to inspect /workspace"}' \
   http://127.0.0.1:8787/v1/agents/<agent-id>/turns
 
 curl -fsS \
-  -H "Authorization: Bearer $agent_token" \
+  -H "Authorization: Bearer $NANOCODEX_API_KEY" \
   http://127.0.0.1:8787/v1/agents/<agent-id>/turns/turn-42
 
 curl -fsS -X POST \
-  -H "Authorization: Bearer $agent_token" \
+  -H "Authorization: Bearer $NANOCODEX_API_KEY" \
   http://127.0.0.1:8787/v1/agents/<agent-id>/turns/turn-42/cancel
 
 curl -fsS -X DELETE \
-  -H "Authorization: Bearer $agent_token" \
+  -H "Authorization: Bearer $NANOCODEX_API_KEY" \
   http://127.0.0.1:8787/v1/agents/<agent-id>
 ```
 
@@ -298,16 +298,15 @@ npm run soak --prefix services/managed
 npm run fanout --prefix services/managed
 ```
 
-The REPL is intentionally disposable. It stores only the session capability
-token, routing URL, and an unfinished turn ID/input in
-`.nanocodex/cloudflare-repl.json`; the
-WASM agent, model socket, history, and execution remain in the Durable Object.
-The file is mode `0600` because the scoped token is a bearer capability. Press
-Ctrl-C during inference to drop only the local WebSocket. Re-running the same
-command reconnects and resubmits the idempotent turn ID, which either joins the
-active turn or replays its committed terminal result. Use `/status` or `/exit`
-at the prompt. Set `NANOCODEX_REPL_STATE` to isolate another local REPL state
-file.
+The REPL is intentionally disposable. Supply `NANOCODEX_API_KEY` in its process
+environment. Its state file, `.nanocodex/cloudflare-repl.json`, retains only
+non-secret agent routing metadata and an unfinished turn ID/input; it never
+copies the account key into the receipt or state file. The WASM agent, model
+socket, history, and execution remain in the Durable Object. Press Ctrl-C during
+inference to drop only the local connection. Re-running with the account key
+reconnects and resubmits the idempotent turn ID, which either joins the active
+turn or replays its committed terminal result. Use `/status` or `/exit` at the
+prompt. Set `NANOCODEX_REPL_STATE` to isolate another local REPL state file.
 
 This demonstrates durable client detachment plus step recovery, not a claim
 that arbitrary external effects are magically exactly once. A completed model
@@ -377,10 +376,11 @@ npx wrangler deploy
 ```
 
 Generate both backend values from at least 32 random bytes. They must be
-different: `NANOCODEX_ADMIN_TOKEN` owns raw managed-agent creation/deletion and
-derives scoped agent capabilities, while `NANOCODEX_ROOM_ALLOCATOR_TOKEN` can
-only create a bounded room. Only the allocator value is copied to the website
-Worker.
+different: `NANOCODEX_ADMIN_TOKEN` is retained for internal room/operator
+administration, while `NANOCODEX_ROOM_ALLOCATOR_TOKEN` can only create a bounded
+room. Raw managed-agent ownership is account-authenticated and does not derive
+credentials from either value. Only the allocator value is copied to the
+website Worker.
 
 ### Master production rollout
 
@@ -524,12 +524,13 @@ the managed runtime can present only the exact fixed placeholder.
 (including forced eviction with a live hibernatable client socket), and asks
 Wrangler to build the complete WASM deployment without uploading it.
 
-`POST /sessions` requires `Authorization: Bearer $NANOCODEX_ADMIN_TOKEN` and
-returns a random routing ID, WebSocket URL, and separate per-session
-`agent_token` while setting the same capability as an HttpOnly cookie. Every
-session subroute requires that scoped token; the ID alone grants nothing.
-Production applications can replace this small router policy with their own
-authentication while leaving the object and Nanocodex lifecycle unchanged.
+`POST /v1/agents` and every `/v1/agents/<agent-id>` owner route require the same
+account session or account-issued API key. The receipt contains only
+`agent_id`, `session_id`, `events_url`, and `websocket_url`; it does not mint a
+second agent credential or set a credential cookie. Non-browser WebSocket
+clients authenticate the upgrade with `Authorization: Bearer
+$NANOCODEX_API_KEY`. Browser operators use authenticated REST/SSE unless they
+already have the same-origin account session cookie.
 
 Client WebSocket commands are JSON objects:
 

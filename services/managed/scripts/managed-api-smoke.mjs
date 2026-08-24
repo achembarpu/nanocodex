@@ -2,13 +2,18 @@ import { randomUUID } from "node:crypto";
 
 import { deleteWith503Retry } from "./cleanup-resource.mjs";
 import { credentialSafeHttpOrigin, credentialSafeUrl } from "./credential-origin.mjs";
-import { managedAgentFetch, managedAgentHeaders, managedAgentToken } from "./managed-agent-auth.mjs";
+import {
+  managedAccountFetch,
+  managedAccountHeaders,
+  parseManagedAgentReceipt,
+  requireManagedApiKey,
+} from "./managed-account-auth.mjs";
 
 const baseUrl = credentialSafeHttpOrigin(
   process.env.NANOCODEX_WORKER_URL ?? "http://127.0.0.1:8787",
   "NANOCODEX_WORKER_URL",
 );
-const adminToken = process.env.NANOCODEX_ADMIN_TOKEN ?? "local-admin-token";
+const apiKey = requireManagedApiKey();
 const terminalTimeoutMs = numberFromEnv("NANOCODEX_SMOKE_TIMEOUT_MS", 180_000);
 const idleTimeoutMs = numberFromEnv("NANOCODEX_SMOKE_IDLE_TIMEOUT_MS", 45_000);
 const cleanupTimeoutMs = numberFromEnv("NANOCODEX_SMOKE_CLEANUP_TIMEOUT_MS", 30_000);
@@ -27,15 +32,11 @@ try {
   stage = "create-agent";
   const created = await timedRequest(new URL("/v1/agents", baseUrl), {
     method: "POST",
-    headers: { authorization: `Bearer ${adminToken}` },
+    headers: managedAccountHeaders(apiKey),
   });
   await requireStatus(created.response, 201, "create agent");
-  agent = await created.response.json();
-  assert(typeof agent.agent_id === "string", "create agent omitted agent_id");
-  assert(typeof agent.events_url === "string", "create agent omitted events_url");
-  managedAgentToken(agent);
+  agent = parseManagedAgentReceipt(await created.response.json());
   credentialSafeUrl(agent.events_url, "managed agent events URL");
-  assert(agent.agent_token !== agent.agent_id, "agent capability aliases its routing id");
   const agentUrl = agent.events_url.replace(/\/events$/, "");
   const turnsUrl = `${agentUrl}/turns`;
 
@@ -83,9 +84,9 @@ try {
   requireCompletedTool(tool.messages, toolId, "exec_command");
   const runtimeInfoPayload = JSON.stringify(runtimeInfo.event.payload);
   assert(!runtimeInfoPayload.includes(agent.agent_id), "runtimeInfo exposed the agent routing id");
-  assert(!runtimeInfoPayload.includes(agent.agent_token), "runtimeInfo exposed the scoped agent capability");
+  assert(!runtimeInfoPayload.includes(apiKey), "runtimeInfo exposed the account API key");
 
-  const toolStateResponse = await managedAgentFetch(agent, `${turnsUrl}/${toolId}`);
+  const toolStateResponse = await managedAccountFetch(apiKey, `${turnsUrl}/${toolId}`);
   await requireStatus(toolStateResponse, 200, "tool state");
   const toolState = await toolStateResponse.json();
   assert(toolState.state === "completed", `tool state was ${toolState.state}`);
@@ -96,7 +97,7 @@ try {
     stage = "idle-shutdown";
     const idleStarted = performance.now();
     await poll(async () => {
-      const response = await managedAgentFetch(agent, agentUrl);
+      const response = await managedAccountFetch(apiKey, agentUrl);
       if (!response.ok) return false;
       return (await response.json()).agent_loaded === false;
     }, idleTimeoutMs, "agent idle shutdown");
@@ -143,7 +144,7 @@ try {
     `request-${cancelId}`,
   );
   await requireStatus(cancelAcceptance.response, 202, "cancel acceptance");
-  const cancelResponse = await managedAgentFetch(agent, `${turnsUrl}/${cancelId}/cancel`, {
+  const cancelResponse = await managedAccountFetch(apiKey, `${turnsUrl}/${cancelId}/cancel`, {
     method: "POST",
   });
   await requireStatus(cancelResponse, 202, "cancel intent");
@@ -152,7 +153,7 @@ try {
   assert(cancelled.terminal.type === "turn_cancelled", terminalFailure("cancelled turn", cancelled.terminal));
 
   stage = "final-state";
-  const finalStateResponse = await managedAgentFetch(agent, agentUrl);
+  const finalStateResponse = await managedAccountFetch(apiKey, agentUrl);
   await requireStatus(finalStateResponse, 200, "final state");
   const finalState = await finalStateResponse.json();
   assert(finalState.completed_turns === 3, `expected 3 completed turns, got ${finalState.completed_turns}`);
@@ -184,7 +185,7 @@ try {
   if (agent?.agent_id) {
     try {
       const cleanup = await deleteWith503Retry(
-        (signal) => managedAgentFetch(agent, new URL(`/v1/agents/${agent.agent_id}`, baseUrl), {
+        (signal) => managedAccountFetch(apiKey, new URL(`/v1/agents/${agent.agent_id}`, baseUrl), {
           method: "DELETE",
           signal,
         }),
@@ -216,7 +217,7 @@ async function submitTurn(turnsUrl, id, input, idempotencyKey) {
 async function openEventStream(url, { cursor, lastEventId } = {}) {
   const target = new URL(url);
   if (cursor !== undefined) target.searchParams.set("cursor", cursor);
-  const response = await managedAgentFetch(agent, target, {
+  const response = await managedAccountFetch(apiKey, target, {
     headers: lastEventId === undefined ? undefined : { "last-event-id": lastEventId },
   });
   await requireStatus(response, 200, "event stream");
@@ -321,7 +322,7 @@ async function timedAgentRequest(url, init) {
   const startedAt = performance.now();
   const response = await fetch(url, {
     ...init,
-    headers: managedAgentHeaders(agent, init?.headers),
+    headers: managedAccountHeaders(apiKey, init?.headers),
   });
   return { response, elapsedMs: performance.now() - startedAt };
 }

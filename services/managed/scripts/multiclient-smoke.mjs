@@ -1,10 +1,15 @@
 import { randomUUID } from "node:crypto";
 import WebSocket from "ws";
 
-import { managedAgentFetch, managedAgentWebSocketOptions } from "./managed-agent-auth.mjs";
+import {
+  managedAccountFetch,
+  managedAccountWebSocketOptions,
+  parseManagedAgentReceipt,
+  requireManagedApiKey,
+} from "./managed-account-auth.mjs";
 
 const baseUrl = process.env.NANOCODEX_WORKER_URL ?? "http://127.0.0.1:8787";
-const adminToken = process.env.NANOCODEX_ADMIN_TOKEN ?? "local-admin-token";
+const apiKey = requireManagedApiKey();
 const clientCount = Number(process.env.NANOCODEX_MULTICLIENT_CLIENTS ?? 2);
 const timeoutMs = Number(process.env.NANOCODEX_MULTICLIENT_TIMEOUT_MS ?? 120_000);
 
@@ -12,19 +17,18 @@ if (!Number.isSafeInteger(clientCount) || clientCount < 2 || clientCount > 64) {
   throw new Error("NANOCODEX_MULTICLIENT_CLIENTS must be 2-64");
 }
 
-const created = await fetch(`${baseUrl}/sessions`, {
+const created = await managedAccountFetch(apiKey, `${baseUrl}/v1/agents`, {
   method: "POST",
-  headers: { authorization: `Bearer ${adminToken}` },
 });
-if (!created.ok) throw new Error(`session creation failed with HTTP ${created.status}: ${await created.text()}`);
-const session = await created.json();
+if (!created.ok) throw new Error(`agent creation failed with HTTP ${created.status}: ${await created.text()}`);
+const agent = parseManagedAgentReceipt(await created.json());
 const sockets = [];
 
 try {
   const receivers = await Promise.all(Array.from({ length: clientCount }, async () => {
     const socket = new WebSocket(
-      session.websocket_url,
-      managedAgentWebSocketOptions(session),
+      agent.websocket_url,
+      managedAccountWebSocketOptions(apiKey),
     );
     sockets.push(socket);
     const ready = deferred();
@@ -72,7 +76,7 @@ try {
   if (new Set(eventCounts).size !== 1) throw new Error(`event counts diverged: ${eventCounts.join(",")}`);
   if (!streamed[0] || new Set(streamed).size !== 1) throw new Error("assistant streams diverged");
   console.log(JSON.stringify({
-    session_id: session.session_id,
+    agent_id: agent.agent_id,
     clients: clientCount,
     events_per_client: eventCounts[0],
     streamed_bytes_per_client: Buffer.byteLength(streamed[0]),
@@ -81,7 +85,7 @@ try {
   }));
 } finally {
   for (const socket of sockets) socket.terminate();
-  await managedAgentFetch(session, `${baseUrl}/sessions/${session.session_id}`, {
+  await managedAccountFetch(apiKey, `${baseUrl}/v1/agents/${agent.agent_id}`, {
     method: "DELETE",
   }).catch(() => {});
 }

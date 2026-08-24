@@ -7,16 +7,18 @@ import WebSocket from "ws";
 
 import { credentialSafeHttpOrigin, credentialSafeUrl } from "./credential-origin.mjs";
 import {
-  managedAgentFetch,
-  managedAgentToken,
-  managedAgentWebSocketOptions,
-} from "./managed-agent-auth.mjs";
+  managedAccountFetch,
+  managedAccountWebSocketOptions,
+  parseManagedAgentReceipt,
+  parseManagedReplState,
+  requireManagedApiKey,
+} from "./managed-account-auth.mjs";
 
 const baseUrl = credentialSafeHttpOrigin(
   process.env.NANOCODEX_WORKER_URL ?? "http://127.0.0.1:8787",
   "NANOCODEX_WORKER_URL",
 ).origin;
-const adminToken = process.env.NANOCODEX_ADMIN_TOKEN ?? "local-admin-token";
+const apiKey = requireManagedApiKey();
 const statePath = resolve(process.env.NANOCODEX_REPL_STATE ?? ".nanocodex/cloudflare-repl.json");
 let state = await loadState();
 let client;
@@ -29,14 +31,13 @@ if (state && state.base_url !== baseUrl) {
   );
 }
 if (!state) {
-  const session = await createSession();
-  managedAgentToken(session);
-  credentialSafeUrl(session.websocket_url, "managed agent WebSocket URL");
+  const agent = await createAgent();
+  credentialSafeUrl(agent.websocket_url, "managed agent WebSocket URL");
   state = {
     base_url: baseUrl,
-    agent_token: session.agent_token,
-    session_id: session.session_id,
-    websocket_url: session.websocket_url,
+    agent_id: agent.agent_id,
+    session_id: agent.session_id,
+    websocket_url: agent.websocket_url,
   };
   await saveState();
 }
@@ -54,10 +55,10 @@ const detach = () => {
 process.once("SIGINT", detach);
 
 try {
-  client = connect(state.websocket_url, state);
+  client = connect(state.websocket_url, apiKey);
   const ready = await client.ready;
   process.stdout.write(
-    `Nanocodex Cloudflare REPL (${state.session_id}${ready.restored ? ", restored" : ""})\n`,
+    `Nanocodex Cloudflare REPL (${state.agent_id}${ready.restored ? ", restored" : ""})\n`,
   );
   if (state.pending) await completePending(state.pending, true);
 
@@ -112,9 +113,9 @@ async function completePending(pending, resumed) {
   process.stdout.write(`${terminal.final_message}\n`);
 }
 
-function connect(url, agent) {
+function connect(url, accountApiKey) {
   credentialSafeUrl(url, "managed agent WebSocket URL");
-  const socket = new WebSocket(url, managedAgentWebSocketOptions(agent));
+  const socket = new WebSocket(url, managedAccountWebSocketOptions(accountApiKey));
   let readySettled = false;
   let resolveReady;
   let rejectReady;
@@ -171,40 +172,27 @@ function connect(url, agent) {
   };
 }
 
-async function createSession() {
-  const response = await fetch(`${baseUrl}/sessions`, {
+async function createAgent() {
+  const response = await managedAccountFetch(apiKey, `${baseUrl}/v1/agents`, {
     method: "POST",
-    headers: { authorization: `Bearer ${adminToken}` },
   });
   if (!response.ok) {
-    throw new Error(`session creation failed with HTTP ${response.status}: ${await response.text()}`);
+    throw new Error(`agent creation failed with HTTP ${response.status}: ${await response.text()}`);
   }
-  return response.json();
+  return parseManagedAgentReceipt(await response.json());
 }
 
 async function sessionStatus() {
-  const response = await managedAgentFetch(state, `${baseUrl}/sessions/${state.session_id}`);
-  if (!response.ok) throw new Error(`session status failed with HTTP ${response.status}: ${await response.text()}`);
+  const response = await managedAccountFetch(apiKey, `${baseUrl}/v1/agents/${state.agent_id}`);
+  if (!response.ok) throw new Error(`agent status failed with HTTP ${response.status}: ${await response.text()}`);
   return response.json();
 }
 
 async function loadState() {
   try {
-    const parsed = JSON.parse(await readFile(statePath, "utf8"));
-    if (typeof parsed.base_url !== "string"
-      || typeof parsed.agent_token !== "string"
-      || typeof parsed.session_id !== "string"
-      || typeof parsed.websocket_url !== "string") {
-      throw new Error("missing Worker URL or session capability");
-    }
-    managedAgentToken(parsed);
+    const parsed = parseManagedReplState(JSON.parse(await readFile(statePath, "utf8")));
     credentialSafeHttpOrigin(parsed.base_url, "saved Worker origin");
     credentialSafeUrl(parsed.websocket_url, "saved managed agent WebSocket URL");
-    if (parsed.pending && (
-      typeof parsed.pending.id !== "string" || typeof parsed.pending.input !== "string"
-    )) {
-      throw new Error("invalid pending turn");
-    }
     return parsed;
   } catch (error) {
     if (error?.code === "ENOENT") return undefined;

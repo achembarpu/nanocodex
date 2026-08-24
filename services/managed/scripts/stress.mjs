@@ -1,9 +1,14 @@
 import WebSocket from "ws";
 
-import { managedAgentFetch, managedAgentWebSocketOptions } from "./managed-agent-auth.mjs";
+import {
+  managedAccountFetch,
+  managedAccountWebSocketOptions,
+  parseManagedAgentReceipt,
+  requireManagedApiKey,
+} from "./managed-account-auth.mjs";
 
 const baseUrl = process.env.NANOCODEX_WORKER_URL ?? "http://127.0.0.1:8787";
-const adminToken = process.env.NANOCODEX_ADMIN_TOKEN ?? "local-admin-token";
+const apiKey = requireManagedApiKey();
 const clients = Number(process.env.NANOCODEX_STRESS_CLIENTS ?? 32);
 const pingsPerClient = Number(process.env.NANOCODEX_STRESS_PINGS ?? 128);
 const expected = clients * pingsPerClient;
@@ -13,19 +18,18 @@ if (!Number.isSafeInteger(pingsPerClient) || pingsPerClient < 1 || pingsPerClien
   throw new Error("pings per client must be 1-10000");
 }
 
-const created = await fetch(`${baseUrl}/sessions`, {
+const created = await managedAccountFetch(apiKey, `${baseUrl}/v1/agents`, {
   method: "POST",
-  headers: { authorization: `Bearer ${adminToken}` },
 });
-if (!created.ok) throw new Error(`session creation failed with HTTP ${created.status}: ${await created.text()}`);
-const session = await created.json();
+if (!created.ok) throw new Error(`agent creation failed with HTTP ${created.status}: ${await created.text()}`);
+const agent = parseManagedAgentReceipt(await created.json());
 const sockets = [];
 
 try {
   await Promise.all(Array.from({ length: clients }, async () => {
     const socket = new WebSocket(
-      session.websocket_url,
-      managedAgentWebSocketOptions(session),
+      agent.websocket_url,
+      managedAccountWebSocketOptions(apiKey),
     );
     await onceMessage(socket, (message) => message.type === "ready", 10_000);
     sockets.push(socket);
@@ -60,7 +64,7 @@ try {
   }));
 } finally {
   for (const socket of sockets) socket.close(1000, "stress complete");
-  await managedAgentFetch(session, `${baseUrl}/sessions/${session.session_id}`, {
+  await managedAccountFetch(apiKey, `${baseUrl}/v1/agents/${agent.agent_id}`, {
     method: "DELETE",
   }).catch(() => {});
 }

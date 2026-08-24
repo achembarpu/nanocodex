@@ -4,33 +4,33 @@ import WebSocket from "ws";
 import { deleteWith503Retry } from "./cleanup-resource.mjs";
 import { credentialSafeHttpOrigin, credentialSafeUrl } from "./credential-origin.mjs";
 import {
-  managedAgentFetch,
-  managedAgentToken,
-  managedAgentWebSocketOptions,
-} from "./managed-agent-auth.mjs";
+  managedAccountFetch,
+  managedAccountWebSocketOptions,
+  parseManagedAgentReceipt,
+  requireManagedApiKey,
+} from "./managed-account-auth.mjs";
 
 const baseUrl = credentialSafeHttpOrigin(
   process.env.NANOCODEX_WORKER_URL ?? "http://127.0.0.1:8787",
   "NANOCODEX_WORKER_URL",
 ).origin;
-const adminToken = process.env.NANOCODEX_ADMIN_TOKEN ?? "local-admin-token";
+const apiKey = requireManagedApiKey();
 const terminalTimeoutMs = Number(process.env.NANOCODEX_SMOKE_TIMEOUT_MS ?? 180_000);
 const idleTimeoutMs = Number(process.env.NANOCODEX_SMOKE_IDLE_TIMEOUT_MS ?? 45_000);
 const cleanupTimeoutMs = positiveInteger("NANOCODEX_SMOKE_CLEANUP_TIMEOUT_MS", 30_000);
-let currentStage = "create-session";
+let currentStage = "create-agent";
 
 const agentEvents = [];
-let session;
+let agent;
 let socket;
 let inbox;
 let failure;
 let result;
 
 try {
-  session = await createSession();
-  managedAgentToken(session);
-  credentialSafeUrl(session.websocket_url, "managed agent WebSocket URL");
-  progress("session-created");
+  agent = await createAgent();
+  credentialSafeUrl(agent.websocket_url, "managed agent WebSocket URL");
+  progress("agent-created");
   ({ socket, inbox } = connectClient());
 
   currentStage = "websocket-ready";
@@ -129,8 +129,8 @@ try {
     return event.type === "tool.result" && event.payload?.call_id === runtimeCall?.payload?.call_id;
   });
   const runtimePayload = JSON.stringify(runtimeResult?.payload);
-  if (runtimePayload.includes(session.session_id) || runtimePayload.includes(session.agent_token)) {
-    throw new Error("runtimeInfo exposed a managed-agent routing capability");
+  if (runtimePayload.includes(agent.agent_id) || runtimePayload.includes(apiKey)) {
+    throw new Error("runtimeInfo exposed managed-agent routing or account authorization data");
   }
 
   const finalState = await state();
@@ -139,7 +139,7 @@ try {
   }
 
   result = {
-    session_id: session.session_id,
+    agent_id: agent.agent_id,
     first_turn_ms: Math.round(firstMs),
     idle_shutdown_ms: Math.round(idleShutdownMs),
     restored_turn_ms: Math.round(restoreMs),
@@ -151,7 +151,7 @@ try {
     status: "ok",
   };
 } catch (error) {
-  const diagnosticState = session
+  const diagnosticState = agent
     ? await state().catch((stateError) => ({ error: errorMessage(stateError) }))
     : undefined;
   const eventTypes = Object.entries(Object.groupBy(agentEvents, (event) => event.type))
@@ -167,10 +167,10 @@ try {
 } finally {
   inbox?.close();
   if (socket) await disconnect(socket);
-  if (session?.session_id) {
+  if (agent?.agent_id) {
     try {
       const cleanup = await deleteWith503Retry(
-        (signal) => managedAgentFetch(session, `${baseUrl}/sessions/${session.session_id}`, {
+        (signal) => managedAccountFetch(apiKey, `${baseUrl}/v1/agents/${agent.agent_id}`, {
           method: "DELETE",
           signal,
         }),
@@ -205,17 +205,16 @@ function positiveInteger(name, fallback) {
   return value;
 }
 
-async function createSession() {
-  const response = await fetch(`${baseUrl}/sessions`, {
+async function createAgent() {
+  const response = await managedAccountFetch(apiKey, `${baseUrl}/v1/agents`, {
     method: "POST",
-    headers: { authorization: `Bearer ${adminToken}` },
   });
-  if (!response.ok) throw new Error(`session creation failed with HTTP ${response.status}: ${await response.text()}`);
-  return response.json();
+  if (!response.ok) throw new Error(`agent creation failed with HTTP ${response.status}: ${await response.text()}`);
+  return parseManagedAgentReceipt(await response.json());
 }
 
 async function state() {
-  const response = await managedAgentFetch(session, `${baseUrl}/sessions/${session.session_id}`);
+  const response = await managedAccountFetch(apiKey, `${baseUrl}/v1/agents/${agent.agent_id}`);
   if (!response.ok) {
     throw Object.assign(
       new Error(`state failed with HTTP ${response.status}: ${await response.text()}`),
@@ -247,8 +246,8 @@ async function pollState(predicate, timeoutMs) {
 
 function connectClient() {
   const socket = new WebSocket(
-    session.websocket_url,
-    managedAgentWebSocketOptions(session),
+    agent.websocket_url,
+    managedAccountWebSocketOptions(apiKey),
   );
   const inbox = createInbox(socket, (message) => {
     if (message.type === "event") agentEvents.push(message.event);
