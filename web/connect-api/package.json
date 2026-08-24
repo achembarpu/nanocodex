@@ -10,7 +10,8 @@
   },
   "dependencies": {
     "accounts": "0.16.2",
-    "ox": "0.14.36"
+    "ox": "0.14.36",
+    "viem": "2.55.19"
   },
   "devDependencies": {
     "typescript": "5.9.3",

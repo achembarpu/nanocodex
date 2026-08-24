@@ -1,4 +1,5 @@
 import { Handler, Kv } from "accounts/server";
+import { custom } from "viem";
 import { KeyAuthorization } from "ox/tempo";
 
 type WorkerWebSocket = WebSocket & { accept(): void };
@@ -2357,6 +2358,14 @@ function createAuth(env: Env, store: Kv.Kv, context?: AuthRequestContext) {
     path: "/v1/connect/auth",
     statement: "Authorize this app to use your Nanocodex agent and bounded MPP access key.",
     store,
+    // Connect accepts root passkey accounts, so Tempo's contract-account probe is
+    // both unnecessary and an external RPC dependency on the login hot path.
+    transport: custom({
+      async request({ method }) {
+        if (method === "eth_getCode") return "0x";
+        throw new Error(`Connect passkey verification does not permit RPC method ${method}.`);
+      },
+    }),
     async onAuthenticate({ address: authenticated, message }) {
       const startedAt = performance.now();
       const timings: Array<readonly [string, number]> = [];

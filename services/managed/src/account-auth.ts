@@ -288,7 +288,6 @@ function webAuthnHandler(env: AccountAuthEnv, url: URL) {
     onAuthenticate: async ({ userId }) => {
       const decoded = userId ? decodeUserId(userId) : undefined;
       if (!isUserId(decoded)) throw new Error("unknown passkey identity");
-      await ensureAccount(env, decoded, true);
     },
   });
 }
