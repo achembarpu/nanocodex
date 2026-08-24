@@ -189,7 +189,7 @@ describe("Vercel PostgreSQL durability store", () => {
     }
   });
 
-  it("rejects missing numeric CHECKs before mutation even when PGlite accepts u64 + 1", async () => {
+  it("rejects missing numeric CHECK constraints before mutation even when PGlite accepts u64 + 1", async () => {
     const pool = new PGlitePool();
     try {
       await pool.query(
