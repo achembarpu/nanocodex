@@ -16,6 +16,11 @@ type AccessKeyRecord = {
 
 type AccountsStore = {
   accessKeys: {
+    get(options: {
+      account: `0x${string}`;
+      accessKey: `0x${string}`;
+      chainId: number;
+    }): Promise<unknown>;
     list(query: { account: `0x${string}`; chainId: number }): readonly AccessKeyRecord[];
   };
   persist: {
