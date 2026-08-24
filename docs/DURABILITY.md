@@ -133,6 +133,14 @@ request prefix (including instructions and tool definitions), and typed prompt
 history. A changed configuration therefore rejects replay instead of applying
 an old result under new semantics.
 
+That strict identity belongs to an unfinished effect, not to the lifetime of a
+completed thread. A cold reopen from a committed `SessionSnapshot` keeps its
+typed conversation, model, workspace, lineage, and prompt-cache key, then
+rebuilds the request prefix from the current runtime. This lets deployments
+change instructions or tool schemas without stranding the thread. Historical
+tool calls and outputs remain inert typed history; only current handlers may
+execute on subsequent turns.
+
 The durable model-effect append is the authorization linearization point. A
 newer owner can fence the old owner before that append or fence its result
 afterward, but cannot retract a provider call that was already authorized and
@@ -471,9 +479,11 @@ invariants, not pi's incomplete lifecycle or weaker JSONL authority model.
   `previous_response_id` continuation.
 - Provider cache-hit rate and first-request cost after cold durable reopen still
   require the paired live benchmark described in `PROMPT_CACHE_REVIEW.md`.
-- A deliberately incompatible retained browser snapshot fails closed; a more
-  explicit new-session/reset UX remains product work rather than a durability
-  authority gap.
+- A malformed retained browser snapshot still fails closed. Instruction and
+  tool-definition drift at a completed boundary is deploy-compatible: the new
+  runtime rebinds its current request prefix while retaining authoritative
+  history. Drift during an unfinished recorded model step remains a semantic
+  conflict and must not replay an old result under the new profile.
 - Native SQLite/Postgres and JavaScript Postgres validate existing owner-table
   schemas eagerly and exactly. The generic JavaScript SQLite/Cloudflare adapter
   relies on its first acquire/append statement to reject incompatible

@@ -438,35 +438,28 @@ pub(crate) fn prepare_resumed_checkpoint(
     checkpoint.global_instructions = context_source
         .global_instructions()
         .or(checkpoint.global_instructions);
-    let prepared = prepare_checkpoint(checkpoint, config, tools, context_source);
-    let (tool_specs, code_mode_tool_names) = model_tool_contract(&prepared.runtime, session_id);
-    let expected = request_profile(
-        "resume-validation",
-        "resume-validation",
-        tool_specs,
-        code_mode_tool_names,
-        config.system_prompt(),
+    let runtime = tool_runtime(checkpoint.workspace(), config, tools);
+    let (tool_specs, code_mode_tool_names) = model_tool_contract(&runtime, session_id);
+    checkpoint.request_prefix = Arc::from(
+        request_profile(
+            session_id,
+            checkpoint.prompt_cache_key(),
+            tool_specs,
+            code_mode_tool_names,
+            config.system_prompt(),
+        )
+        .prefix()
+        .to_vec(),
     );
-    let expected =
-        serde_json::to_vec(&without_response_item_ids(expected.prefix())).map_err(|error| {
-            NanocodexError::InvalidSessionSnapshot(format!(
-                "failed to validate the request prefix: {error}"
-            ))
-        })?;
-    let stored = serde_json::to_vec(&without_response_item_ids(
-        prepared.checkpoint.request_prefix(),
-    ))
-    .map_err(|error| {
-        NanocodexError::InvalidSessionSnapshot(format!(
-            "failed to validate the stored request prefix: {error}"
-        ))
-    })?;
-    if expected != stored {
-        return Err(NanocodexError::InvalidSessionSnapshot(
-            "instructions or tool definitions do not match the resumed session".to_owned(),
-        ));
-    }
-    Ok(prepared)
+    let selected_agents_md = context_source
+        .project_instructions(checkpoint.workspace())
+        .map(Arc::from);
+    Ok(PreparedCheckpoint {
+        checkpoint,
+        runtime,
+        context_source,
+        selected_agents_md,
+    })
 }
 
 pub(crate) fn prepare_history_checkpoint(
@@ -512,15 +505,4 @@ pub(crate) fn prepare_history_checkpoint(
         context_source,
         selected_agents_md,
     })
-}
-
-fn without_response_item_ids(items: &[ResponseItem]) -> Vec<ResponseItem> {
-    items
-        .iter()
-        .cloned()
-        .map(|mut item| {
-            item.strip_id();
-            item
-        })
-        .collect()
 }

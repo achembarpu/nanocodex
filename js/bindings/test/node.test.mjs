@@ -410,15 +410,22 @@ test("Node-hosted WASM runs the canonical Rust subagent task tree", async () => 
   }
 });
 
-test("WASM snapshots resume authoritative history in a fresh agent", async () => {
+test("WASM snapshots rebind deployed policy while retaining authoritative history", async () => {
   const originalServer = await startServer();
   const original = await createWarmAgent({
     apiKey: "test-key",
     websocketUrl: originalServer.url,
     thinking: "none",
-    instructions: "durable wasm instructions",
+    instructions: "instructions from the old WASM deployment",
     sessionId: SESSION_IDS.original,
     workspace: "/virtual/original-workspace",
+    tools: {
+      oldDeploymentTool: {
+        description: "Only the old deployment exposes this tool.",
+        parameters: { type: "object", additionalProperties: false },
+        handler: async () => "old",
+      },
+    },
   });
   const originalScenario = (async () => {
     const socket = await originalServer.connection;
@@ -443,9 +450,16 @@ test("WASM snapshots resume authoritative history in a fresh agent", async () =>
     apiKey: "test-key",
     websocketUrl: resumedServer.url,
     thinking: "none",
-    instructions: "durable wasm instructions",
+    instructions: "instructions from the new WASM deployment",
     sessionId: SESSION_IDS.resumed,
     resume: snapshot,
+    tools: {
+      newDeploymentTool: {
+        description: "Only the new deployment exposes this tool.",
+        parameters: { type: "object", additionalProperties: false },
+        handler: async () => "new",
+      },
+    },
   });
   const resumedScenario = (async () => {
     const socket = await resumedServer.connection;
@@ -453,8 +467,13 @@ test("WASM snapshots resume authoritative history in a fresh agent", async () =>
     const request = await messageReader(socket).next();
     assert.equal(request.previous_response_id, undefined);
     assert.equal(request.prompt_cache_key, snapshot.prompt_cache_key);
-    assert.match(JSON.stringify(request.input), /remember cobalt/);
-    assert.match(JSON.stringify(request.input), /what did I ask/);
+    const input = JSON.stringify(request.input);
+    assert.match(input, /instructions from the new WASM deployment/);
+    assert.match(input, /newDeploymentTool/);
+    assert.doesNotMatch(input, /instructions from the old WASM deployment/);
+    assert.doesNotMatch(input, /oldDeploymentTool/);
+    assert.match(input, /remember cobalt/);
+    assert.match(input, /what did I ask/);
     sendFinal(socket, "resp-resumed", "cobalt");
   })();
   assert.equal(
