@@ -5,6 +5,7 @@ import type { Dialog } from "nanocodex/connect";
 
 import { classifyMachineUsdOrder } from "./machineUsdOrder.mjs";
 import {
+  appVisibilityPermissions,
   connectApiOrigin,
   registeredApp,
   sanitizeWalletResult,
@@ -612,6 +613,7 @@ function ConnectionApproval({
   profileLinking: boolean;
   request: ConnectionView;
 }>) {
+  const appVisibility = appVisibilityPermissions(request.auth.resources);
   return (
     <>
       <section className="consent-hero" aria-labelledby="approval-heading">
@@ -707,6 +709,23 @@ function ConnectionApproval({
             <SpendLogo />
           </div>
         </div>
+        {appVisibility.length > 0 ? (
+          <div className="app-sees" aria-label="App sees" role="list">
+            <span className="app-sees-label" aria-hidden="true">App sees</span>
+            {appVisibility.map((permission) => (
+              <span
+                aria-label={`${permission.label}: ${permission.detail}`}
+                className="app-sees-permission"
+                data-tooltip={permission.detail}
+                key={permission.resource}
+                role="listitem"
+                tabIndex={0}
+              >
+                {permission.label}
+              </span>
+            ))}
+          </div>
+        ) : null}
       </section>
 
       {deviceCode ? (

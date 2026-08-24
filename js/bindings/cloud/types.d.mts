@@ -22,23 +22,47 @@ export type AccessKey = Readonly<{
 }>;
 
 export type AgentTurnResult = Readonly<{
-  turnId: string | undefined;
+  turnId: string;
   finalMessage: string;
   provider: string;
   capabilitiesUsed: readonly string[];
-  usage: import("../types.mjs").TurnUsage;
+  usage: import("../types.mjs").TurnUsage | null;
+  usageError?: string | undefined;
+  cursor?: string | undefined;
+}>;
+
+export type AgentVisibility = Readonly<{
+  finalMessages: boolean;
+  actionSummaries: boolean;
+  conversationHistory: boolean;
+  rawTraces: boolean;
 }>;
 
 export type AgentTurn = Readonly<{
-  accepted: Promise<string | undefined>;
-  result(): Promise<AgentTurnResult>;
-  cancel(): Promise<void>;
+  idempotencyKey: string;
+  accepted(): Promise<string>;
+  state(): Promise<import("../managed/Agent.mjs").TurnView>;
+  steer(options: Readonly<{ input: import("../types.mjs").PromptInput }>): Promise<Readonly<{
+    turn_id: string;
+    state: "steering";
+  }>>;
+  result(options?: import("../managed/Agent.mjs").TurnResultOptions): Promise<AgentTurnResult>;
+  cancel(): Promise<import("../managed/Agent.mjs").TurnView | Readonly<{
+    turn_id: string;
+    state: "cancelling";
+  }>>;
 }>;
 
 export type ConnectAgent = Readonly<{
   id: string;
+  /** Alias matching the canonical Nanocodex Agent surface. */
+  sessionId: string;
   type: "connect";
   provider: string;
+  events: Readonly<{
+    page(options?: import("../managed/Agent.mjs").EventHistoryOptions): Promise<import("../managed/Agent.mjs").EventHistoryPage>;
+    watch(options?: import("../managed/Agent.mjs").WatchEventsOptions): AsyncIterableIterator<import("../managed/Agent.mjs").Event>;
+  }>;
   mercator: Readonly<{
     enabled: true;
     readonly channelId: Hex | undefined;
@@ -46,8 +70,9 @@ export type ConnectAgent = Readonly<{
     readonly opened: boolean;
   }>;
   turn: Readonly<{
-    prompt(options: Readonly<{ input: string; signal?: AbortSignal | undefined }>): AgentTurn;
+    prompt(options: import("../managed/Agent.mjs").PromptOptions): AgentTurn;
   }>;
+  state(): Promise<import("../managed/Agent.mjs").State>;
   session: Readonly<{ shutdown(): Promise<void> }>;
 }>;
 
@@ -57,6 +82,7 @@ export type Grant = Readonly<{
   status: "active" | "revoked" | "expired";
   expiresAt: number;
   capabilities: readonly string[];
+  visibility: AgentVisibility;
   /** Secret-free cloud account providers bound to this grant. */
   connectors: readonly CloudAccount[];
 }>;

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  appVisibilityPermissions,
   connectApiOrigin,
   productionConnectApiOrigin,
   registeredApp,
@@ -9,6 +10,47 @@ import {
 } from "../src/connectPolicy.mjs";
 
 const playground = "https://nanocodex-connect-playground.gakonst.workers.dev";
+
+test("signed agent visibility resources map to compact consent labels", () => {
+  assert.deepEqual(appVisibilityPermissions([
+    "urn:nanocodex:agent:trace:read",
+    "urn:nanocodex:connector:github",
+    "urn:nanocodex:agent:output:actions",
+    "urn:nanocodex:agent:history:read",
+    "urn:nanocodex:agent:output:final",
+    "urn:nanocodex:agent:trace:read",
+  ]), [
+    {
+      resource: "urn:nanocodex:agent:output:final",
+      label: "Reply",
+      detail: "Final agent reply",
+    },
+    {
+      resource: "urn:nanocodex:agent:output:actions",
+      label: "Actions",
+      detail: "Agent actions and tool calls",
+    },
+    {
+      resource: "urn:nanocodex:agent:history:read",
+      label: "History",
+      detail: "Conversation history",
+    },
+    {
+      resource: "urn:nanocodex:agent:trace:read",
+      label: "Traces",
+      detail: "Full run trace",
+    },
+  ]);
+});
+
+test("unsigned and malformed resources do not produce visibility claims", () => {
+  assert.deepEqual(appVisibilityPermissions([
+    "urn:nanocodex:agent:output",
+    "urn:nanocodex:agent:trace:write",
+    null,
+  ]), []);
+  assert.deepEqual(appVisibilityPermissions(undefined), []);
+});
 
 test("production Connect policy pins the API and registered embedding app", () => {
   assert.equal(connectApiOrigin({

@@ -45,9 +45,22 @@ export type Capabilities = Readonly<{
   authorizeAccessKey?: AuthorizeAccessKey | undefined;
   /** Cloud accounts authorized by the same SIWE/passkey message. */
   cloudAccounts?: CloudAccounts | undefined;
+  /** App-visible agent output. Omitted fields use the documented defaults. */
+  agent?: AgentVisibility | undefined;
 }>;
 
 export type CloudAccounts = Readonly<Partial<Record<CloudAccount, true>>>;
+
+export type AgentVisibility = Readonly<{
+  /** Expose completed assistant messages to the app. @default true */
+  finalMessages?: boolean | undefined;
+  /** Expose summaries of capabilities used during a turn. @default true */
+  actionSummaries?: boolean | undefined;
+  /** Allow the app to read retained conversation history. @default false */
+  conversationHistory?: boolean | undefined;
+  /** Expose the raw ordered agent event stream. Implies every other visibility. @default false */
+  rawTraces?: boolean | undefined;
+}>;
 
 export declare namespace connect {
   type Options = Readonly<{

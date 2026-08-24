@@ -10,6 +10,7 @@ export type {
   AccessKey,
   AgentTurn,
   AgentTurnResult,
+  AgentVisibility,
   CloudAccount,
   Connection,
   ConnectAgent,

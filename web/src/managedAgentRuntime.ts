@@ -22,6 +22,8 @@ export type ManagedConversation = Readonly<{
   turnCount?: number;
 }>;
 
+export type ManagedTerminalSource = Pick<ManagedAgent, "events" | "id" | "turn">;
+
 export function listManagedConversations(accountId = "default"): Promise<readonly ManagedConversation[]> {
   const retained = managedLists.get(accountId);
   if (retained) return retained;
@@ -71,7 +73,7 @@ export function openManagedTerminalAgent(agentId: string): TerminalAgent {
   return managedTerminalAgent(managed);
 }
 
-export function managedTerminalAgent(managed: ManagedAgent): TerminalAgent {
+export function managedTerminalAgent(managed: ManagedTerminalSource): TerminalAgent {
   const submitted = new Set<string>();
   return Object.freeze({
     sessionId: managed.id,
@@ -87,7 +89,7 @@ export function managedTerminalAgent(managed: ManagedAgent): TerminalAgent {
   });
 }
 
-function managedTerminalTurn(managed: ManagedAgent, turnId: string, input: string): TerminalTurn {
+function managedTerminalTurn(managed: ManagedTerminalSource, turnId: string, input: string): TerminalTurn {
   const controller = new AbortController();
   const turn: ManagedTurn = managed.turn.prompt({ id: turnId, input });
   return Object.freeze({
@@ -103,7 +105,7 @@ function managedTerminalTurn(managed: ManagedAgent, turnId: string, input: strin
 }
 
 function managedEventWatcher(
-  managed: ManagedAgent,
+  managed: ManagedTerminalSource,
   submitted: Set<string>,
 ): ReturnType<TerminalAgent["events"]["watch"]> {
   const controller = new AbortController();

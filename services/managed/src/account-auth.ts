@@ -8,6 +8,8 @@ const USER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f
 const API_KEY = /^ncx_live_([A-Za-z0-9_-]{12})_([A-Za-z0-9_-]{43})$/;
 const ANONYMOUS_SESSION_TOKEN = /^a_[A-Za-z0-9_-]{43}$/;
 const DEFAULT_OWNERSHIP_IO_TIMEOUT_MS = 10_000;
+const CONNECT_SERVICE_ORIGIN = "https://nanocodex.internal";
+const CONNECT_USER_HEADER = "x-nanocodex-connect-user";
 const accountSessionKey = (token: string) => `session:${token}`;
 
 export function isUserId(value: unknown): value is string {
@@ -23,7 +25,7 @@ export interface AccountAuthEnv {
 }
 
 export type Principal = Readonly<{
-  kind: "account_session" | "api_key";
+  kind: "account_session" | "api_key" | "connect_grant";
   userId: string;
 }>;
 
@@ -136,6 +138,10 @@ export async function authenticate(
   env: AccountAuthEnv,
   url = new URL(request.url),
 ): Promise<Principal | undefined> {
+  const connectUser = request.headers.get(CONNECT_USER_HEADER);
+  if (url.origin === CONNECT_SERVICE_ORIGIN && isUserId(connectUser)) {
+    return { kind: "connect_grant", userId: connectUser };
+  }
   const cookie = cookieValue(request, ACCOUNT_COOKIE);
   if (cookie && ANONYMOUS_SESSION_TOKEN.test(cookie)) {
     const session = await readBrowserSession(request, env);

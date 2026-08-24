@@ -16,4 +16,9 @@ export function sanitizeWalletResult(result: unknown): Readonly<{
     }>;
   }>[];
 }> & Record<string, unknown>;
+export function appVisibilityPermissions(resources: unknown): readonly Readonly<{
+  resource: string;
+  label: "Reply" | "Actions" | "History" | "Traces";
+  detail: string;
+}>[];
 export function isLoopbackOrigin(value: string): boolean;

@@ -1,5 +1,28 @@
 export const productionConnectApiOrigin = "https://nanocodex-connect-api.gakonst.workers.dev";
 
+const signedAppVisibility = Object.freeze([
+  Object.freeze({
+    resource: "urn:nanocodex:agent:output:final",
+    label: "Reply",
+    detail: "Final agent reply",
+  }),
+  Object.freeze({
+    resource: "urn:nanocodex:agent:output:actions",
+    label: "Actions",
+    detail: "Agent actions and tool calls",
+  }),
+  Object.freeze({
+    resource: "urn:nanocodex:agent:history:read",
+    label: "History",
+    detail: "Conversation history",
+  }),
+  Object.freeze({
+    resource: "urn:nanocodex:agent:trace:read",
+    label: "Traces",
+    detail: "Full run trace",
+  }),
+]);
+
 const productionApps = new Map([
   ["https://nanocodex-connect-playground.gakonst.workers.dev", Object.freeze({
     id: "atlas-workspace",
@@ -58,6 +81,12 @@ export function sanitizeWalletResult(result) {
       };
     }),
   };
+}
+
+export function appVisibilityPermissions(resources) {
+  if (!Array.isArray(resources)) return [];
+  const requested = new Set(resources.filter((resource) => typeof resource === "string"));
+  return signedAppVisibility.filter(({ resource }) => requested.has(resource));
 }
 
 export function isLoopbackOrigin(value) {

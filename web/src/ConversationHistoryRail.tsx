@@ -18,7 +18,7 @@ export const ConversationHistoryRail = memo(function ConversationHistoryRail({
   error?: string;
   mobileOpen: boolean;
   onClose(): void;
-  onCreate(): void;
+  onCreate?(): void;
   onOpen(): void;
   onRetry(): void;
   onSelect(id: string): void;
@@ -52,10 +52,10 @@ export const ConversationHistoryRail = memo(function ConversationHistoryRail({
           <span><MessageSquare aria-hidden="true" /> {runtime === "local" ? "this browser" : "managed account"}</span>
         </div>
         <nav className="conversation-sidebar-actions" aria-label="Conversation actions">
-          <button className="conversation-icon-button" type="button" disabled={pending}
+          {onCreate ? <button className="conversation-icon-button" type="button" disabled={pending}
             aria-label="New conversation" title="New conversation" onClick={onCreate}>
             <Plus aria-hidden="true" />
-          </button>
+          </button> : null}
           <button ref={closeRef} className="conversation-drawer-close" type="button"
             aria-label="Close conversations" onClick={onClose}><X aria-hidden="true" /></button>
         </nav>
@@ -95,10 +95,10 @@ export const ConversationHistoryRail = memo(function ConversationHistoryRail({
           <i aria-hidden="true" />{statusLabel(agentStatus)}
         </span>
       </div>
-      <button className="conversation-mobile-new" type="button" disabled={pending}
+      {onCreate ? <button className="conversation-mobile-new" type="button" disabled={pending}
         aria-label="New conversation" onClick={onCreate}>
         <Plus aria-hidden="true" /><span>New</span>
-      </button>
+      </button> : null}
     </header>
   </>;
 });

@@ -1,424 +1,151 @@
-import {
-  Agent as NanocodexAgent,
-  createTempoProviderFromAccounts,
-  Transport as NanocodexTransport,
-} from "../../host/index.mjs";
-import { createSessionId } from "../../internal.mjs";
-import { createBrowserHarness } from "../../browser/harness.mjs";
-import { mercatorRestTool } from "../mercator.mjs";
+import { Agent as ManagedAgent } from "../../managed/index.mjs";
 
 const PROVIDER_NAME = "ChatGPT · Nanocodex Connect";
-const tempoMcp = Symbol.for("nanocodex.tempo.mcp");
 
-/** Creates one real Nanocodex agent from an active Connect grant. */
+/** Opens the durable Nanocodex agent provisioned by a signed Connect approval. */
 export async function create(client, options) {
   const connection = options?.connection;
   if (!connection || typeof connection !== "object") {
     throw new TypeError("agent.create requires an active connection");
   }
   if (connection.grant?.status !== "active") {
-    throw new Error("The Connect grant is not active.");
+    throw new Error("The Connect authorization is not active.");
   }
   if (!connection.grant.connectors?.includes("chatgpt")) {
-    throw new Error("Connect ChatGPT before creating a Nanocodex agent.");
+    throw new Error("Connect ChatGPT before opening the durable Nanocodex agent.");
+  }
+  const unsupported = Object.keys(options ?? {}).find((key) => key !== "connection");
+  if (unsupported) {
+    throw new TypeError(`Connect durable agents do not accept app-local ${unsupported}`);
   }
 
-  const toolCalls = createToolCallLedger();
-  const sessionId = options?.sessionId ?? createSessionId();
-  const harnessThreadId = uuid(sessionId) ? sessionId : crypto.randomUUID();
   const grantSession = client._captureSession?.();
-  if (!grantSession) throw new Error("The Connect grant session is unavailable.");
-  const grantClient = { request: grantSession.request, transport: client.transport };
-  const configuredSession = options?.session ?? {};
-  const channelStore = configuredSession.channelStore
-    ?? await connectChannelStore(connection);
-  const boostProvider = await createTempoProviderFromAccounts({
-    wallet: client.provider,
-    account: connection.accountAddress,
-    accessKey: connection.accessKey.keyId,
-    chainId: Number(connection.accessKey.chainId),
-    policy: {
-      // BOOST payments are cumulative across a Mercator workflow. Let its
-      // channel grow only as far as the signed daily grant while keeping each
-      // incremental top-up small.
-      autoSwap: true,
-      maxDeposit: decimalAtomics(connection.mpp.limit, 6),
-      topUpAmount: "0.01",
-      ...options?.payment,
-    },
-    session: {
-      bootstrap: true,
-      ...(typeof globalThis.WebSocket === "function"
-        ? { webSocket: boundedCloseWebSocket(globalThis.WebSocket) }
-        : {}),
-      ...(channelStore ? { channelStore } : {}),
-      ...configuredSession,
-    },
-    mercator: options?.mercator,
-    payment: { maxAmount: connection.mpp.maxPerRequest },
-  });
-  const harness = await createBrowserHarness({
-    accountInfo: {
-      endpoint: "/v1/agent/account-info",
-      requireAuthorization: true,
-    },
-    fetch: grantSession.fetch,
-    headers: { authorization: `Bearer ${grantSession.token}` },
-    installFetch: false,
-    origin: client.transport.baseUrl,
-    threadId: harnessThreadId,
-  });
-  const tools = connectTools(
-    harness.tools,
-    connection,
-    options?.tools,
-    toolCalls,
-    boostProvider.fetch,
-    new URL("/v1/mercator/jobs", client.transport.baseUrl).href,
-  );
+  if (!grantSession) throw new Error("The Connect authorization session is unavailable.");
+  const managedOptions = {
+    baseUrl: client.transport.baseUrl,
+    fetch: managedGrantFetch(
+      grantSession,
+      client.transport.baseUrl,
+      connection.grant.id,
+      connection.agentId,
+    ),
+  };
+  const managed = ManagedAgent.open(connection.agentId, managedOptions);
+  await managed.state();
+  return connectAgent(managed, connection);
+}
 
-  let raw;
-  try {
-    raw = await NanocodexAgent.create({
-      transport: NanocodexTransport.hostManaged({
-        websocketUrl: grantModelWebSocketUrl(client, connection).href,
-        createWebSocket: (_endpoint, sessionId, request) => createGrantModelWebSocket(
-          grantClient,
-          connection,
-          sessionId,
-          request,
-        ),
-      }),
-      codeEvaluator: harness.codeEvaluator,
-      executionEnvironment: options?.executionEnvironment ?? harness.executionEnvironment,
-      fastMode: options?.fastMode,
-      filesystem: harness.filesystem,
-      filesystemTools: false,
-      instructions: options?.instructions ?? harness.instructions,
-      model: options?.model,
-      reasoningMode: options?.reasoningMode,
-      sessionId,
-      thinking: options?.thinking,
-      tools,
-      mcp: options?.mcp === false
-        ? false
-        : { ...boostProvider[tempoMcp], ...options?.mcp },
-      toolMode: options?.toolMode,
-    });
-  } catch (error) {
-    // No channel is opened during construction, so do not call the manager's
-    // on-chain close path when initialization itself fails.
-    harness.release();
-    throw error;
-  }
-
-  let shutdown;
-  const agent = {
-    id: raw.sessionId,
+function connectAgent(managed, connection) {
+  const visibility = connection.grant.visibility;
+  return Object.freeze({
+    id: managed.id,
+    sessionId: managed.id,
     type: "connect",
     provider: PROVIDER_NAME,
+    state: () => managed.state(),
+    events: Object.freeze({
+      async page(options) {
+        const page = await managed.events.page(options);
+        if (!visibility.conversationHistory && !visibility.rawTraces) {
+          return Object.freeze({
+            data: Object.freeze([]),
+            hasMore: false,
+            latestCursor: page.latestCursor,
+          });
+        }
+        return Object.freeze({
+          ...page,
+          data: Object.freeze(page.data
+            .map((event) => projectManagedEvent(event, visibility))
+            .filter(Boolean)),
+        });
+      },
+      watch(options) {
+        return projectManagedEvents(managed.events.watch(options), visibility);
+      },
+    }),
     mercator: Object.freeze({
       enabled: true,
-      get channelId() {
-        return boostProvider.session.channelId;
-      },
-      get cumulative() {
-        return boostProvider.session.cumulative;
-      },
-      get opened() {
-        return boostProvider.session.opened;
-      },
+      channelId: undefined,
+      cumulative: 0n,
+      opened: false,
     }),
     turn: Object.freeze({
       prompt(parameters) {
-        const input = parameters?.input;
-        if (typeof input !== "string" || input.trim().length === 0) {
-          throw new TypeError("agent prompt requires input");
-        }
-        const callRecord = toolCalls.open();
-        const turn = raw.turn.prompt({ input });
-        const accepted = turn.accepted();
-        const completion = Promise.all([accepted, turn.result()]);
-        void completion.then(
-          () => toolCalls.close(callRecord),
-          () => toolCalls.close(callRecord),
-        );
-        const signal = parameters.signal;
-        const cancel = () => { void turn.cancel(); };
-        signal?.addEventListener("abort", cancel, { once: true });
+        const turn = managed.turn.prompt(parameters);
         return Object.freeze({
-          accepted,
-          async result() {
-            let completed;
-            try {
-              const [turnId, value] = await completion;
-              completed = value;
-              const usage = await completed.usage();
-              return Object.freeze({
-                turnId,
-                finalMessage: completed.finalMessage,
-                provider: PROVIDER_NAME,
-                capabilitiesUsed: Object.freeze([
-                  "nanocodex.agent",
-                  "chatgpt",
-                  ...[...callRecord.calls].map((name) => `tool.${name}`),
-                ]),
-                usage,
-              });
-            } finally {
-              signal?.removeEventListener("abort", cancel);
-              completed?.dispose();
-              turn.dispose();
-            }
-          },
+          idempotencyKey: turn.idempotencyKey,
+          accepted: () => turn.accepted(),
+          state: () => turn.state(),
+          steer: (options) => turn.steer(options),
           cancel: () => turn.cancel(),
+          async result(options) {
+            const result = await turn.result(options);
+            return Object.freeze({
+              ...result,
+              finalMessage: visibility.finalMessages ? result.finalMessage : "",
+              provider: PROVIDER_NAME,
+              capabilitiesUsed: Object.freeze([]),
+            });
+          },
         });
       },
     }),
     session: Object.freeze({
-      shutdown() {
-        return shutdown ??= (async () => {
-          const errors = [];
-          try {
-            await raw.session.shutdown();
-          } catch (error) {
-            errors.push(error);
-          }
-          try {
-            await boostProvider.close?.();
-          } catch (error) {
-            errors.push(error);
-          }
-          harness.release();
-          raw.dispose();
-          if (errors.length === 1) throw errors[0];
-          if (errors.length > 1) {
-            throw new AggregateError(errors, "Nanocodex agent shutdown and BOOST settlement both failed");
-          }
-        })();
-      },
+      async shutdown() {},
     }),
-  };
-  return Object.freeze(agent);
-}
-
-/** @internal Opens one Responses WebSocket through the grant's connected ChatGPT account. */
-export async function createGrantModelWebSocket(
-  client,
-  connection,
-  sessionId,
-  request = {},
-  WebSocketImpl = globalThis.WebSocket,
-) {
-  if (typeof WebSocketImpl !== "function") {
-    throw new Error("WebSocket is unavailable in this runtime");
-  }
-  const issued = await client.request({
-    method: "POST",
-    path: `/v1/grants/${connection.grant.id}/model/ticket`,
-    body: {
-      session_id: sessionId,
-      ...(typeof request.turnState === "string" && request.turnState
-        ? { turn_state: request.turnState }
-        : {}),
-    },
   });
-  if (!issued || typeof issued.ticket !== "string" || !issued.ticket) {
-    throw new Error("Nanocodex Connect returned no model ticket");
-  }
-  const endpoint = grantModelWebSocketUrl(client, connection);
-  endpoint.searchParams.set("session_id", sessionId);
-  endpoint.searchParams.set("ticket", issued.ticket);
-  return new WebSocketImpl(endpoint);
 }
 
-function grantModelWebSocketUrl(client, connection) {
-  const endpoint = new URL(`/v1/grants/${connection.grant.id}/model`, client.transport.baseUrl);
-  endpoint.protocol = endpoint.protocol === "https:" ? "wss:" : "ws:";
-  return endpoint;
-}
-
-/** @internal */
-export function decimalAtomics(value, decimals) {
-  const atomics = BigInt(value);
-  const scale = 10n ** BigInt(decimals);
-  const whole = atomics / scale;
-  const fraction = (atomics % scale).toString().padStart(decimals, "0").replace(/0+$/, "");
-  return fraction ? `${whole}.${fraction}` : whole.toString();
-}
-
-// Browsers reject WebSocket close reasons above 123 UTF-8 bytes. MPP keeps
-// the complete failure on its receipt promise; this only bounds the protocol
-// close frame so a useful payment error is not replaced by a DOMException.
-function boundedCloseWebSocket(WebSocketImpl) {
-  return class NanocodexWebSocket extends WebSocketImpl {
-    close(code, reason) {
-      super.close(code, closeReason(reason));
+function managedGrantFetch(session, baseUrl, grantId, agentId) {
+  const origin = new URL(baseUrl).origin;
+  const prefix = `/v1/agents/${encodeURIComponent(agentId)}`;
+  return async (input, init) => {
+    const request = input instanceof Request ? new Request(input, init) : new Request(input, init);
+    const url = new URL(request.url);
+    if (url.origin !== origin || (url.pathname !== prefix && !url.pathname.startsWith(`${prefix}/`))) {
+      throw new TypeError("Connect managed fetch is restricted to its authorized durable agent");
     }
+    url.pathname = `/v1/grants/${grantId}/agents/${encodeURIComponent(agentId)}${url.pathname.slice(prefix.length)}`;
+    return session.fetch(new Request(url, request));
   };
 }
 
-function closeReason(reason) {
-  if (typeof reason !== "string") return reason;
-  let bounded = "";
-  let bytes = 0;
-  for (const character of reason) {
-    const size = new TextEncoder().encode(character).length;
-    if (bytes + size > 123) break;
-    bounded += character;
-    bytes += size;
-  }
-  return bounded;
-}
-
-const channelStores = new Map();
-
-async function connectChannelStore(connection) {
-  if (typeof localStorage === "undefined") return undefined;
-  const account = connection.accountAddress.toLowerCase();
-  const accessKey = connection.accessKey.keyId.toLowerCase();
-  const key = `${account}:${accessKey}`;
-  if (channelStores.has(key)) return channelStores.get(key);
-
+async function* projectManagedEvents(events, visibility) {
   try {
-    const { Session } = await import("mppx/tempo");
-    const legacyPrefix = `nanocodex:connect:mpp:${account}:`;
-    const prefix = `${legacyPrefix}${accessKey}:`;
-    // Relocate prototype snapshots by the authority encoded in the signed
-    // channel descriptor. This repairs both the original account-only key and
-    // any prior incorrectly guessed namespace without adopting another key's
-    // channel.
-    for (const name of Object.keys(localStorage)) {
-      if (!name.startsWith(legacyPrefix) || !name.includes(":chan:")) continue;
-      const value = localStorage.getItem(name);
-      if (value === null) continue;
-      let snapshot;
-      try {
-        snapshot = JSON.parse(value);
-      } catch {
-        continue;
-      }
-      if (snapshot?.descriptor?.authorizedSigner?.toLowerCase() !== accessKey) continue;
-      const channelName = name.slice(name.indexOf("chan:", legacyPrefix.length));
-      const migrated = prefix + channelName;
-      if (localStorage.getItem(migrated) === null) {
-        localStorage.setItem(migrated, value);
-      }
-      if (name !== migrated) localStorage.removeItem(name);
+    for await (const event of events) {
+      const projected = projectManagedEvent(event, visibility);
+      if (projected) yield projected;
     }
-    const store = Session.Client.createJsonChannelStore({
-      get(name) {
-        return localStorage.getItem(prefix + name) ?? undefined;
-      },
-      set(name, value) {
-        localStorage.setItem(prefix + name, value);
-      },
-      delete(name) {
-        localStorage.removeItem(prefix + name);
-      },
+  } finally {
+    await events.return?.();
+  }
+}
+
+function projectManagedEvent(event, visibility) {
+  if (visibility.rawTraces) return event;
+  const data = event?.data;
+  if (!data || typeof data !== "object") return undefined;
+  if (data.type === "event") {
+    const eventType = data.event?.type;
+    return visibility.actionSummaries
+      && (eventType === "tool.call" || eventType === "tool.result")
+      ? event
+      : undefined;
+  }
+  if (data.type === "turn_completed" && !visibility.finalMessages) {
+    return Object.freeze({
+      ...event,
+      data: Object.freeze({ ...data, final_message: "" }),
     });
-    channelStores.set(key, store);
-    return store;
-  } catch {
-    // Storage can be disabled by an embedding browser. The session remains
-    // usable for the current page and shutdown still closes it cooperatively.
-    return undefined;
   }
+  return event;
 }
 
-function connectTools(canonical, connection, configured, calls, paymentFetch, mercatorRelay) {
-  const tools = namedTools(canonical, calls);
-  const application = normalizeTools(configured);
-  for (const name of Object.keys(application)) {
-    if (Object.hasOwn(tools, name)) throw new TypeError(`${name} is already a canonical Nanocodex tool`);
-    tools[name] = trackTool(name, application[name], calls);
-  }
-  if (Object.hasOwn(tools, "run_rest_request")) {
-    throw new TypeError("run_rest_request is reserved by Nanocodex Connect");
-  }
-  return {
-    ...tools,
-    run_rest_request: mercatorRestTool({
-      connection,
-      fetch: paymentFetch,
-      calls,
-      relay: mercatorRelay,
-    }),
-  };
-}
-
-function namedTools(entries, calls) {
-  const tools = {};
-  for (const entry of entries) {
-    if (!entry || typeof entry.name !== "string" || !entry.name || typeof entry.handler !== "function") {
-      throw new TypeError("canonical Nanocodex tools must be named tools");
-    }
-    if (Object.hasOwn(tools, entry.name)) throw new TypeError(`duplicate canonical tool: ${entry.name}`);
-    const { name, ...tool } = entry;
-    tools[name] = trackTool(name, tool, calls);
-  }
-  return tools;
-}
-
-function trackTool(name, tool, calls) {
-  return {
-    ...tool,
-    async handler(input, context) {
-      calls.add(name, context);
-      return tool.handler(input, context);
-    },
-  };
-}
-
-function uuid(value) {
-  return typeof value === "string"
-    && /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(value);
-}
-
-function createToolCallLedger() {
-  const pending = [];
-  const bySignal = new WeakMap();
-  return {
-    open() {
-      const record = { bound: false, calls: new Set(), closed: false };
-      pending.push(record);
-      return record;
-    },
-    close(record) {
-      record.closed = true;
-      const index = pending.indexOf(record);
-      if (index !== -1) pending.splice(index, 1);
-    },
-    add(name, context) {
-      const signal = context?.signal;
-      let record = signal && typeof signal === "object" ? bySignal.get(signal) : undefined;
-      if (!record) {
-        record = pending.find((candidate) => !candidate.closed && !candidate.bound);
-        if (!record) return;
-        record.bound = true;
-        if (signal && typeof signal === "object") bySignal.set(signal, record);
-      }
-      record.calls.add(name);
-    },
-  };
-}
-
-function normalizeTools(tools) {
-  if (tools === undefined) return {};
-  if (!tools || typeof tools !== "object" || Array.isArray(tools)) {
-    throw new TypeError("Connect agent tools must be an object map");
-  }
-  const wrapped = {};
-  for (const [name, tool] of Object.entries(tools)) {
-    if (!tool || typeof tool.handler !== "function") {
-      throw new TypeError(`Connect agent tool ${name} requires a handler`);
-    }
-    wrapped[name] = {
-      ...tool,
-      async handler(input, context) {
-        return tool.handler(input, context);
-      },
-    };
-  }
-  return wrapped;
+/** @internal Projects app-visible result fields from the signed SIWE resources. */
+export function projectAgentObservations(visibility, finalMessage, capabilitiesUsed) {
+  return Object.freeze({
+    finalMessage: visibility.finalMessages ? finalMessage : "",
+    capabilitiesUsed: Object.freeze(visibility.actionSummaries ? [...capabilitiesUsed] : []),
+  });
 }

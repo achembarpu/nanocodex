@@ -1,6 +1,6 @@
-import { useState } from "react";
+import { useCallback, useState } from "react";
 import type {
-  AgentTurnResult,
+  CloudAccount,
   ConnectAgent,
   Connection,
   Grant,
@@ -14,6 +14,7 @@ import {
 } from "nanocodex-react/connect";
 
 import { config } from "./config";
+import { ConnectAgentExperience, type AppObservation } from "./ConnectAgentExperience";
 
 type AuditEvent = Readonly<{
   id: number;
@@ -34,10 +35,37 @@ const INITIAL_AUDIT: readonly AuditEvent[] = [
 ];
 
 const MACHINE_USD_ATOMICS = 1_000_000n;
+
+type VisibilityRequest = Readonly<{
+  finalMessages: boolean;
+  actionSummaries: boolean;
+  conversationHistory: boolean;
+  rawTraces: boolean;
+}>;
+
+type ConnectRequest = Readonly<{
+  connectors: Readonly<Partial<Record<CloudAccount, true>>>;
+  visibility: VisibilityRequest;
+}>;
+
+const DEFAULT_REQUEST: ConnectRequest = {
+  connectors: { github: true, gmail: true, gdrive: true, chatgpt: true },
+  visibility: {
+    finalMessages: true,
+    actionSummaries: true,
+    conversationHistory: true,
+    rawTraces: false,
+  },
+};
+
+const EMPTY_OBSERVATION: AppObservation = { actions: [], historyTurns: 0, traceEvents: 0 };
+
 export function App() {
   const { connection, isConnected } = useConnection({ config });
   const [audit, setAudit] = useState<readonly AuditEvent[]>(INITIAL_AUDIT);
   const [error, setError] = useState<string>();
+  const [request, setRequest] = useState<ConnectRequest>(DEFAULT_REQUEST);
+  const [observation, setObservation] = useState<AppObservation>(EMPTY_OBSERVATION);
   const connect = useConnectAgent({ config });
   const fund = useFund({ config });
   const revoke = useRevokeGrant({ config });
@@ -47,6 +75,7 @@ export function App() {
     && connection
     && connection.mpp.balance > 0n,
   );
+  const observe = useCallback((value: AppObservation) => setObservation(value), []);
 
   function record(title: string, detail: string, tone: AuditEvent["tone"] = "success") {
     setAudit((current) => [{
@@ -69,17 +98,14 @@ export function App() {
     connect.mutate(
       {
         capabilities: {
-          cloudAccounts: {
-            github: true,
-            gmail: true,
-            gdrive: true,
-            chatgpt: true,
-          },
+          agent: request.visibility,
+          cloudAccounts: request.connectors,
         },
         permission: "agent.run",
       },
       {
         onSuccess({ connection: nextConnection }) {
+          setObservation(EMPTY_OBSERVATION);
           record(
             "Agent instantiated",
             `${nextConnection.grant.capabilities.join(" + ")} approved; ChatGPT is the model and MPP is reserved for BOOST.`,
@@ -179,9 +205,14 @@ export function App() {
                 <div>
                   <h3>One approval. Explicit boundaries.</h3>
                   <p>
-                    Connect ChatGPT and approve an expiring machineUSD budget for BOOST.
+                    Choose exactly what Atlas may connect and observe.
                   </p>
                 </div>
+                <PermissionBuilder
+                  disabled={isMutating}
+                  request={request}
+                  onChange={setRequest}
+                />
                 <button
                   className="primary-button connect-button"
                   data-testid="connect-button"
@@ -205,32 +236,40 @@ export function App() {
                 />
                 <AgentPanel
                   agent={connect.agent}
-                  mercatorConnected={mercatorReady}
+                  connection={connection}
+                  onObservation={observe}
                 />
               </>
             )}
           </section>
 
-          <section className="panel">
+          <section className="panel app-view-panel">
             <header className="panel-heading">
               <div>
-                <h2>Audit events</h2>
-                <p className="panel-kicker">Newest first · retained in this view</p>
+                <h2>Atlas can see</h2>
+                <p className="panel-kicker">Grant-enforced app projection</p>
               </div>
-              <span className="status-pill">{audit.length} events</span>
+              <span className="status-pill">{isConnected ? "Live" : "Preview"}</span>
             </header>
-            <ol className="audit-list" data-testid="audit-events">
-              {audit.map((event) => (
-                <li className="audit-event" key={event.id}>
-                  <span className={`audit-dot ${event.tone}`} aria-hidden="true" />
-                  <div>
-                    <strong>{event.title}</strong>
-                    <p>{event.detail}</p>
-                  </div>
-                  <time>{event.time}</time>
-                </li>
-              ))}
-            </ol>
+            <VisibilityInspector
+              observation={observation}
+              visibility={connection?.grant.visibility ?? request.visibility}
+            />
+            <details className="audit-details">
+              <summary>Audit · {audit.length}</summary>
+              <ol className="audit-list" data-testid="audit-events">
+                {audit.map((event) => (
+                  <li className="audit-event" key={event.id}>
+                    <span className={`audit-dot ${event.tone}`} aria-hidden="true" />
+                    <div>
+                      <strong>{event.title}</strong>
+                      <p>{event.detail}</p>
+                    </div>
+                    <time>{event.time}</time>
+                  </li>
+                ))}
+              </ol>
+            </details>
           </section>
         </div>
 
@@ -242,117 +281,134 @@ export function App() {
   );
 }
 
-function AgentPanel({ agent, mercatorConnected }: Readonly<{
+function AgentPanel({ agent, connection, onObservation }: Readonly<{
   agent: ConnectAgent | undefined;
-  mercatorConnected: boolean;
+  connection: Connection;
+  onObservation(value: AppObservation): void;
 }>) {
-  const [prompt, setPrompt] = useState("Use accountInfo to explain what I have connected, what this app may do, and what it may spend");
-  const [result, setResult] = useState<AgentTurnResult>();
-  const [runError, setRunError] = useState<string>();
-  const [isRunning, setIsRunning] = useState(false);
+  return agent ? (
+    <ConnectAgentExperience
+      agent={agent}
+      connection={connection}
+      onObservation={onObservation}
+    />
+  ) : null;
+}
 
-  if (!agent) return null;
-  const activeAgent = agent;
+function PermissionBuilder({ disabled, onChange, request }: Readonly<{
+  disabled: boolean;
+  onChange(value: ConnectRequest): void;
+  request: ConnectRequest;
+}>) {
+  const connectors: readonly Readonly<{ id: CloudAccount; label: string; required?: boolean }>[] = [
+    { id: "github", label: "GitHub" },
+    { id: "gmail", label: "Gmail" },
+    { id: "gdrive", label: "Drive" },
+    { id: "chatgpt", label: "ChatGPT", required: true },
+  ];
+  const visibility: readonly Readonly<{ id: keyof VisibilityRequest; label: string; detail: string }>[] = [
+    { id: "finalMessages", label: "Replies", detail: "Final assistant messages" },
+    { id: "actionSummaries", label: "Actions", detail: "Tools used, without arguments" },
+    { id: "conversationHistory", label: "History", detail: "Conversation titles and prior messages" },
+    { id: "rawTraces", label: "Traces", detail: "Full reasoning and tool traffic" },
+  ];
 
-  async function runAgent(event: React.FormEvent<HTMLFormElement>) {
-    event.preventDefault();
-    const input = prompt.trim();
-    if (!input || isRunning) return;
-
-    setRunError(undefined);
-    setIsRunning(true);
-    try {
-      setResult(await activeAgent.turn.prompt({ input }).result());
-    } catch (reason) {
-      setResult(undefined);
-      setRunError(errorMessage(reason));
-    } finally {
-      setIsRunning(false);
+  function setVisibility(id: keyof VisibilityRequest, checked: boolean) {
+    const next = { ...request.visibility, [id]: checked };
+    if (id === "rawTraces" && checked) {
+      next.finalMessages = true;
+      next.actionSummaries = true;
+      next.conversationHistory = true;
+    } else if (!checked) {
+      next.rawTraces = false;
     }
+    onChange({ ...request, visibility: next });
   }
 
   return (
-    <section className="agent-panel" aria-labelledby="agent-panel-title">
-      <header className="agent-heading">
-        <div>
-          <h3 id="agent-panel-title">Nanocodex agent</h3>
-          <p>ChatGPT by default. Mercator only when BOOST is used.</p>
+    <div className="permission-builder" data-testid="permission-builder">
+      <fieldset>
+        <legend>Connectors</legend>
+        <div className="permission-options">
+          {connectors.map((item) => (
+            <label key={item.id} title={item.required ? "Required to run this embedded agent" : item.label}>
+              <input
+                checked={request.connectors[item.id]}
+                disabled={disabled || item.required}
+                onChange={(event) => {
+                  const connectors = { ...request.connectors };
+                  if (event.target.checked) connectors[item.id] = true;
+                  else delete connectors[item.id];
+                  onChange({ ...request, connectors });
+                }}
+                type="checkbox"
+              />
+              <span>{item.label}</span>
+            </label>
+          ))}
         </div>
-        <span
-          className={mercatorConnected ? "agent-ready" : "agent-locked"}
-          data-testid="mercator-status"
-        >
-          Mercator {mercatorConnected ? "connected" : "locked · buy MACHUSD"}
-        </span>
-      </header>
-
-      <dl className="agent-status-grid">
-        <div>
-          <dt>Agent id</dt>
-          <dd data-testid="agent-id" title={agent.id}>{agent.id}</dd>
+      </fieldset>
+      <fieldset>
+        <legend>Atlas sees</legend>
+        <div className="permission-options">
+          {visibility.map((item) => (
+            <label key={item.id} title={item.detail}>
+              <input
+                checked={request.visibility[item.id]}
+                disabled={disabled}
+                onChange={(event) => setVisibility(item.id, event.target.checked)}
+                type="checkbox"
+              />
+              <span>{item.label}</span>
+            </label>
+          ))}
         </div>
-        <div>
-          <dt>Provider</dt>
-          <dd>{agent.provider}</dd>
-        </div>
-        <div>
-          <dt>Capability</dt>
-          <dd className="boost-cell"><MercatorBoost connected={mercatorConnected} /></dd>
-        </div>
-      </dl>
-
-      <form className="agent-form" onSubmit={runAgent}>
-        <label htmlFor="agent-prompt">Prompt</label>
-        <div className="agent-prompt-row">
-          <input
-            data-testid="agent-prompt-input"
-            disabled={isRunning}
-            id="agent-prompt"
-            onChange={(event) => setPrompt(event.target.value)}
-            type="text"
-            value={prompt}
-          />
-          <button
-            className="primary-button"
-            data-testid="agent-run-button"
-            disabled={isRunning || prompt.trim().length === 0}
-            type="submit"
-          >
-            Run agent
-          </button>
-        </div>
-      </form>
-
-      {runError ? <p className="agent-error" role="alert">{runError}</p> : null}
-      {result ? (
-        <div className="agent-result" data-testid="agent-result">
-          <p>{result.finalMessage}</p>
-          <div>
-            <span>{result.provider}</span>
-            <span>{result.capabilitiesUsed.join(" · ")}</span>
-          </div>
-        </div>
-      ) : null}
-    </section>
+      </fieldset>
+    </div>
   );
 }
 
-function MercatorBoost({ connected }: Readonly<{ connected: boolean }>) {
+function VisibilityInspector({ observation, visibility }: Readonly<{
+  observation: AppObservation;
+  visibility: VisibilityRequest;
+}>) {
+  const actions = observation.actions.filter((item) => item.startsWith("tool."));
   return (
-    <span className={`mercator-boost ${connected ? "connected" : "locked"}`}>
-      <span>BOOST with Mercator</span>
-      <span className="boost-help">
-        <button
-          aria-describedby="mercator-boost-tooltip"
-          aria-label="How BOOST with Mercator improves this agent"
-          type="button"
-        >i</button>
-        <span className="boost-tooltip" id="mercator-boost-tooltip" role="tooltip">
-          Mercator finds the right tools, composes the best route, and settles each step through
-          MPP—so the agent pays only for the calls it makes.
-        </span>
-      </span>
-    </span>
+    <dl className="visibility-inspector" data-testid="visibility-inspector">
+      <Projection
+        allowed={visibility.finalMessages}
+        label="Final reply"
+        value={observation.finalMessage || "Waiting for a turn"}
+      />
+      <Projection
+        allowed={visibility.actionSummaries}
+        label="Actions"
+        value={actions.length ? actions.map((item) => item.slice(5)).join(" · ") : "No actions yet"}
+      />
+      <Projection
+        allowed={visibility.conversationHistory}
+        label="History"
+        value={`${observation.historyTurns} visible turn${observation.historyTurns === 1 ? "" : "s"}`}
+      />
+      <Projection
+        allowed={visibility.rawTraces}
+        label="Raw traces"
+        value={`${observation.traceEvents} streamed events`}
+      />
+    </dl>
+  );
+}
+
+function Projection({ allowed, label, value }: Readonly<{
+  allowed: boolean;
+  label: string;
+  value: string;
+}>) {
+  return (
+    <div className={allowed ? "projection-row is-allowed" : "projection-row is-private"}>
+      <dt>{label}</dt>
+      <dd>{allowed ? value : "Private"}</dd>
+    </div>
   );
 }
 

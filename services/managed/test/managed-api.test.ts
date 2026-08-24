@@ -545,6 +545,34 @@ describe("managed agents REST and resumable SSE", () => {
     }
   });
 
+  it("accepts Connect ownership only on the trusted service-binding origin", async () => {
+    const publicAttempt = await RAW_SELF.fetch("https://example.test/v1/agents", {
+      method: "POST",
+      headers: { "x-nanocodex-connect-user": USER_ID },
+    });
+    expect(publicAttempt.status).toBe(401);
+
+    const created = await RAW_SELF.fetch("https://nanocodex.internal/v1/agents", {
+      method: "POST",
+      headers: { "x-nanocodex-connect-user": USER_ID },
+    });
+    expect(created.status).toBe(201);
+    const receipt = await created.json<AgentReceipt>();
+    createdAgents.add(receipt.agent_id);
+
+    const state = await RAW_SELF.fetch(
+      `https://nanocodex.internal/v1/agents/${receipt.agent_id}`,
+      { headers: { "x-nanocodex-connect-user": USER_ID } },
+    );
+    expect(state.status).toBe(200);
+
+    const otherAccount = await RAW_SELF.fetch(
+      `https://nanocodex.internal/v1/agents/${receipt.agent_id}`,
+      { headers: { "x-nanocodex-connect-user": OTHER_USER_ID } },
+    );
+    expect(otherAccount.status).toBe(404);
+  });
+
   it("runs the default network tools inside a managed durable agent", async () => {
     const agent = await createAgent();
     const accepted = await submit(agent, "turn-managed-web", "E2E_MANAGED_WEB");

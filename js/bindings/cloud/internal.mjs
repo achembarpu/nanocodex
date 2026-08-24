@@ -5,6 +5,7 @@ export function connectionFromWire(value) {
   const grant = object(wire.grant, "connection.grant");
   const accessKey = object(wire.access_key, "connection.access_key");
   const mpp = object(wire.mpp, "connection.mpp");
+  const capabilities = strings(grant.capabilities, "connection.grant.capabilities");
   return Object.freeze({
     accountAddress: hex(wire.account_address, "connection.account_address"),
     agentId: string(wire.agent_id, "connection.agent_id"),
@@ -13,8 +14,9 @@ export function connectionFromWire(value) {
       permission: string(grant.permission, "connection.grant.permission"),
       status: status(grant.status),
       expiresAt: integer(grant.expires_at, "connection.grant.expires_at"),
-      capabilities: strings(grant.capabilities, "connection.grant.capabilities"),
-      connectors: connectors(grant.capabilities, "connection.grant.capabilities"),
+      capabilities,
+      connectors: connectors(capabilities, "connection.grant.capabilities"),
+      visibility: agentVisibility(capabilities),
     }),
     accessKey: accessKeyFromWire(accessKey),
     mpp: Object.freeze({
@@ -106,13 +108,34 @@ export function accessKeyFromWire(wire) {
 
 export function grantFromWire(value) {
   const grant = object(value, "grant");
+  const capabilities = strings(grant.capabilities, "grant.capabilities");
   return Object.freeze({
     id: hex(grant.id, "grant.id"),
     permission: string(grant.permission, "grant.permission"),
     status: status(grant.status),
     expiresAt: integer(grant.expires_at, "grant.expires_at"),
-    capabilities: strings(grant.capabilities, "grant.capabilities"),
-    connectors: connectors(grant.capabilities, "grant.capabilities"),
+    capabilities,
+    connectors: connectors(capabilities, "grant.capabilities"),
+    visibility: agentVisibility(capabilities),
+  });
+}
+
+const AGENT_VISIBILITY_CAPABILITIES = Object.freeze({
+  finalMessages: "agent.output.final",
+  actionSummaries: "agent.output.actions",
+  conversationHistory: "agent.history.read",
+  rawTraces: "agent.trace.read",
+});
+
+function agentVisibility(capabilities) {
+  const recognized = Object.values(AGENT_VISIBILITY_CAPABILITIES)
+    .some((capability) => capabilities.includes(capability));
+  const rawTraces = capabilities.includes(AGENT_VISIBILITY_CAPABILITIES.rawTraces);
+  return Object.freeze({
+    finalMessages: rawTraces || !recognized || capabilities.includes(AGENT_VISIBILITY_CAPABILITIES.finalMessages),
+    actionSummaries: rawTraces || !recognized || capabilities.includes(AGENT_VISIBILITY_CAPABILITIES.actionSummaries),
+    conversationHistory: rawTraces || capabilities.includes(AGENT_VISIBILITY_CAPABILITIES.conversationHistory),
+    rawTraces,
   });
 }
 

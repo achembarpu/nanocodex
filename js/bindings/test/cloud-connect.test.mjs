@@ -2,43 +2,56 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { Actions, Client, Dialog, Errors, Transport } from "../cloud/index.mjs";
-import {
-  createGrantModelWebSocket,
-  decimalAtomics,
-} from "../cloud/actions/agent.mjs";
+import { projectAgentObservations } from "../cloud/actions/agent.mjs";
+import { connectionFromWire } from "../cloud/internal.mjs";
 
-test("MPP channel ceilings preserve the signed six-decimal daily limit", () => {
-  assert.equal(decimalAtomics(10_000_000n, 6), "10");
-  assert.equal(decimalAtomics(250_000n, 6), "0.25");
-  assert.equal(decimalAtomics(1n, 6), "0.000001");
-});
-
-test("the default model uses a one-time grant ticket for the connected ChatGPT account", async () => {
+test("Connect opens only its grant-provisioned managed durable agent", async () => {
   const requests = [];
-  const sockets = [];
-  class TestWebSocket {
-    constructor(url) {
-      sockets.push(String(url));
-    }
-  }
-  const connection = { grant: { id: `0x${"ab".repeat(32)}` } };
-  const socket = await createGrantModelWebSocket({
-    transport: { baseUrl: "https://connect.example/" },
-    async request(request) {
-      requests.push(request);
-      return { ticket: "model-ticket-once" };
-    },
-  }, connection, "session-123", { turnState: "turn-state-1" }, TestWebSocket);
+  const agentId = "019fc927-b280-79a7-8445-1b9996ad2fb0";
+  const grantId = `0x${"33".repeat(32)}`;
+  const expiry = Math.floor(Date.now() / 1_000) + 3_600;
+  const client = Client.create({
+    appId: "durable-workspace",
+    dialog: Dialog.memory(),
+    provider: { request() { throw new Error("wallet should not be used"); } },
+    transport: Transport.from({
+      key: "durable",
+      name: "durable",
+      type: "durable",
+      setup() {
+        return {
+          baseUrl: "https://connect.example",
+          async fetch(input, init) {
+            const request = new Request(input, init);
+            requests.push(request);
+            return Response.json({ agent_id: agentId, session_id: agentId });
+          },
+          async request() { throw new Error("control-plane request was unexpected"); },
+        };
+      },
+    }),
+  });
+  client._setSessionToken("grant-session-test");
+  const connection = connectionFromWire(testConnectionWire({
+    agentId,
+    expiry,
+    keyId: "0x1111111111111111111111111111111111111111",
+    capabilities: ["nanocodex.agent", "agent.output.final", "chatgpt"],
+  }));
+  const agent = await client.agent.create({ connection });
 
-  assert.ok(socket instanceof TestWebSocket);
-  assert.deepEqual(requests, [{
-    method: "POST",
-    path: `/v1/grants/${connection.grant.id}/model/ticket`,
-    body: { session_id: "session-123", turn_state: "turn-state-1" },
-  }]);
-  assert.deepEqual(sockets, [
-    `wss://connect.example/v1/grants/${connection.grant.id}/model?session_id=session-123&ticket=model-ticket-once`,
-  ]);
+  assert.equal(agent.id, agentId);
+  assert.equal(agent.type, "connect");
+  assert.equal(requests.length, 1);
+  assert.equal(
+    requests[0].url,
+    `https://connect.example/v1/grants/${grantId}/agents/${agentId}`,
+  );
+  assert.equal(requests[0].headers.get("authorization"), "Bearer grant-session-test");
+  await assert.rejects(
+    client.agent.create({ connection, sessionId: "browser-local" }),
+    /do not accept app-local sessionId/,
+  );
 });
 
 test("Connect binds normalized cloud accounts into auth resources and the connection request", async () => {
@@ -88,6 +101,10 @@ test("Connect binds normalized cloud accounts into auth resources and the connec
             requests.push(request);
             return testConnectionWire({ expiry, keyId, capabilities: [
               "nanocodex.agent",
+              "agent.output.final",
+              "agent.output.actions",
+              "agent.history.read",
+              "agent.trace.read",
               "github",
               "gdrive",
             ] });
@@ -116,6 +133,12 @@ test("Connect binds normalized cloud accounts into auth resources and the connec
         chatgpt: "true",
         unknown: true,
       },
+      agent: {
+        finalMessages: false,
+        actionSummaries: false,
+        conversationHistory: false,
+        rawTraces: true,
+      },
     },
   });
 
@@ -132,15 +155,27 @@ test("Connect binds normalized cloud accounts into auth resources and the connec
             "urn:nanocodex:app:connector-workspace",
             "urn:nanocodex:connector:github",
             "urn:nanocodex:connector:gdrive",
+            "urn:nanocodex:agent:output:final",
+            "urn:nanocodex:agent:output:actions",
+            "urn:nanocodex:agent:history:read",
+            "urn:nanocodex:agent:trace:read",
           ],
         },
       },
     }],
   }]);
   assert.deepEqual(requests[0].body.requested_connectors, ["github", "gdrive"]);
+  assert.equal("agent" in requests[0].body, false);
+  assert.equal("visibility" in requests[0].body, false);
   assert.equal(requests[0].body.approval_id, "approval-test");
   assert.equal(requests[0].headers, undefined);
   assert.deepEqual(connection.grant.connectors, ["github", "gdrive"]);
+  assert.deepEqual(connection.grant.visibility, {
+    finalMessages: true,
+    actionSummaries: true,
+    conversationHistory: true,
+    rawTraces: true,
+  });
   assert.equal("credentials" in connection.grant, false);
   assert.equal("account" in connection.grant, false);
 
@@ -242,6 +277,13 @@ test("Nanocodex Connect signs one witness-bound access key and enforces its MPP 
     provider: {
       async request(request) {
         assert.equal(request.method, "wallet_connect");
+        assert.deepEqual(request.params[0].capabilities.auth.resources, [
+          "repositories",
+          "model-entitlement",
+          "urn:nanocodex:app:test-workspace",
+          "urn:nanocodex:agent:output:final",
+          "urn:nanocodex:agent:output:actions",
+        ]);
         return {
           accounts: [{
             address: "0x8ba1f109551bd432803012645ac136ddd64dba72",
@@ -266,10 +308,20 @@ test("Nanocodex Connect signs one witness-bound access key and enforces its MPP 
 
   let connection = await Actions.connection.connect(client, {
     capabilities: {
-      auth: { resources: ["repositories", "model-entitlement"] },
+      auth: { resources: [
+        "repositories",
+        "model-entitlement",
+        "urn:nanocodex:agent:trace:read",
+      ] },
     },
   });
   assert.equal(connection.grant.status, "active");
+  assert.deepEqual(connection.grant.visibility, {
+    finalMessages: true,
+    actionSummaries: true,
+    conversationHistory: false,
+    rawTraces: false,
+  });
   assert.equal(connection.accessKey.keyId, keyId);
   assert.equal(connection.accessKey.witness, witness);
   assert.equal(connection.accessKey.authorization, "0x1234");
@@ -311,6 +363,34 @@ test("Nanocodex Connect signs one witness-bound access key and enforces its MPP 
   assert.equal(revoked.status, "revoked");
 });
 
+test("recognized visibility capabilities do not receive the legacy output fallback", () => {
+  const expiry = Math.floor(Date.now() / 1_000) + 3_600;
+  const keyId = "0x1111111111111111111111111111111111111111";
+  const connection = connectionFromWire(testConnectionWire({
+    expiry,
+    keyId,
+    capabilities: ["nanocodex.agent", "agent.history.read"],
+  }));
+
+  assert.deepEqual(connection.grant.visibility, {
+    finalMessages: false,
+    actionSummaries: false,
+    conversationHistory: true,
+    rawTraces: false,
+  });
+});
+
+test("ConnectAgent projections hide terminal output outside the signed resources", async () => {
+  assert.deepEqual(projectAgentObservations({
+    finalMessages: false,
+    actionSummaries: false,
+  }, "secret final", ["tool.search"]), {
+    finalMessage: "",
+    capabilitiesUsed: [],
+  });
+
+});
+
 async function nextDialogRequest(dialog) {
   for (let attempt = 0; attempt < 8; attempt += 1) {
     const request = dialog.getRequest();
@@ -320,11 +400,11 @@ async function nextDialogRequest(dialog) {
   throw new Error("Nanocodex Connect did not open its dialog");
 }
 
-function testConnectionWire({ expiry, keyId, capabilities }) {
+function testConnectionWire({ expiry, keyId, capabilities, agentId = "agent_connectors" }) {
   return {
     grant_token: "grant-session-test",
     account_address: "0x8ba1f109551bd432803012645ac136ddd64dba72",
-    agent_id: "agent_connectors",
+    agent_id: agentId,
     grant: {
       id: `0x${"33".repeat(32)}`,
       permission: "agent.run",

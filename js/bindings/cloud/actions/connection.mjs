@@ -3,16 +3,24 @@ import { connectionFromWire } from "../internal.mjs";
 const CLOUD_ACCOUNT_PROVIDERS = Object.freeze(["github", "gmail", "gdrive", "chatgpt"]);
 const CONNECTOR_RESOURCE_PREFIX = "urn:nanocodex:connector:";
 const APP_RESOURCE_PREFIX = "urn:nanocodex:app:";
+const AGENT_VISIBILITY_RESOURCES = Object.freeze({
+  finalMessages: "urn:nanocodex:agent:output:final",
+  actionSummaries: "urn:nanocodex:agent:output:actions",
+  conversationHistory: "urn:nanocodex:agent:history:read",
+  rawTraces: "urn:nanocodex:agent:trace:read",
+});
 
 export async function connect(client, options) {
   options ??= {};
   const permission = options.permission ?? "agent.run";
   if (typeof permission !== "string" || permission.length === 0) throw new TypeError("connect permission must be a non-empty string");
   const requestedConnectors = normalizeCloudAccounts(options.capabilities?.cloudAccounts);
+  const agentVisibility = normalizeAgentVisibility(options.capabilities?.agent);
   const auth = withConnectionResources(
     options.capabilities?.auth ?? client.auth,
     client.appId,
     requestedConnectors,
+    agentVisibility,
   );
   const walletAuth = delegateAuthVerification(auth);
   const activeAccount = activeAccountAddress(client.provider);
@@ -101,14 +109,27 @@ function normalizeCloudAccounts(cloudAccounts) {
   return CLOUD_ACCOUNT_PROVIDERS.filter((provider) => cloudAccounts[provider] === true);
 }
 
-function withConnectionResources(auth, appId, requestedConnectors) {
+function normalizeAgentVisibility(agent) {
+  const rawTraces = agent?.rawTraces === true;
+  return Object.freeze({
+    finalMessages: rawTraces || agent?.finalMessages !== false,
+    actionSummaries: rawTraces || agent?.actionSummaries !== false,
+    conversationHistory: rawTraces || agent?.conversationHistory === true,
+    rawTraces,
+  });
+}
+
+function withConnectionResources(auth, appId, requestedConnectors, agentVisibility) {
   const configured = typeof auth === "object" && auth !== null
-    ? auth.resources ?? []
+    ? (auth.resources ?? []).filter((resource) => !Object.values(AGENT_VISIBILITY_RESOURCES).includes(resource))
     : [];
   const resources = [...new Set([
     ...configured,
     `${APP_RESOURCE_PREFIX}${encodeURIComponent(appId)}`,
     ...requestedConnectors.map((provider) => `${CONNECTOR_RESOURCE_PREFIX}${provider}`),
+    ...Object.entries(AGENT_VISIBILITY_RESOURCES)
+      .filter(([name]) => agentVisibility[name])
+      .map(([, resource]) => resource),
   ])];
   if (typeof auth === "string") return { url: auth, resources };
   return { ...auth, resources };

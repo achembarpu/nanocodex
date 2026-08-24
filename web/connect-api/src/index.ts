@@ -35,6 +35,12 @@ const BASE_APPROVAL_RESOURCES = [
   "urn:nanocodex:capability:mercator:boost",
   "urn:nanocodex:mpp:machusd:spend",
 ] as const;
+const AGENT_VISIBILITY_RESOURCES = {
+  "urn:nanocodex:agent:output:final": "agent.output.final",
+  "urn:nanocodex:agent:output:actions": "agent.output.actions",
+  "urn:nanocodex:agent:history:read": "agent.history.read",
+  "urn:nanocodex:agent:trace:read": "agent.trace.read",
+} as const;
 const PROVIDER_CREDENTIAL_PLACEHOLDER = "Bearer NANOCODEX_PROVIDER_CREDENTIAL";
 const CONNECTOR_STATE_TTL = 10 * 60;
 const CONNECT_APPROVAL_TTL = 10 * 60;
@@ -472,6 +478,7 @@ async function createConnection(request: Request, env: Env, store: Kv.Kv): Promi
   const requested = requestedConnectors(body.requested_connectors);
   const approval = await takeConnectApproval(store, approvalId, accountAddress);
   requireApprovedCapabilities(approval.resources, appId, requested);
+  const agentCapabilities = approvedAgentCapabilities(approval.resources);
 
   const { accessKey, persist } = await connectionAccessKey(store, body, approval, appId, accountAddress);
   const expiresAt = safeInteger(accessKey.expiry, "access_key.expiry");
@@ -481,7 +488,11 @@ async function createConnection(request: Request, env: Env, store: Kv.Kv): Promi
     throw new ApiFailure(403, "access_key_expired", "The delegated access key has expired.");
   }
   const identity = await brokerIdentity(env, accountAddress);
+  if (!identity.linked) {
+    throw new ApiFailure(403, "account_link_required", "Link this Tempo account to your Nanocodex profile before authorizing a durable agent.");
+  }
   const connectors = await connectedRequestedConnectors(env, identity.userId, requested);
+  const durableAgentId = await createManagedAgent(env, identity.userId);
   const grantId = await digestHex(`grant:${randomSubject()}`);
   const grantToken = randomSubject();
   const grant: GrantRecord = {
@@ -489,21 +500,22 @@ async function createConnection(request: Request, env: Env, store: Kv.Kv): Promi
     appId,
     accountAddress,
     brokerUserId: identity.userId,
-    agentId: await agentId(accountAddress),
+    agentId: durableAgentId,
     permission,
     status: "active",
     expiresAt,
-    capabilities: [...BASE_CAPABILITIES, ...connectors],
+    capabilities: [...BASE_CAPABILITIES, ...agentCapabilities, ...connectors],
     accessKey,
     spentAtomics: "0",
     egressSubject: randomSubject(),
   };
 
-  // Resolve all fallible read-only data before publishing either the broker
-  // subject or the bearer token.
-  const wire = await connectionWire(grant, grantToken);
-  await bindSubject(env, grant.egressSubject, grant.brokerUserId);
   try {
+    // Resolve the public projection before publishing either the broker subject
+    // or bearer token. The newly provisioned durable agent is compensated on
+    // every later failure.
+    const wire = await connectionWire(grant, grantToken);
+    await bindSubject(env, grant.egressSubject, grant.brokerUserId);
     await store.set(`grant:${grant.id}`, grant, { ttl: grantTtl });
     if (persist) {
       await store.set(accessKeyStorageKey(accountAddress, accessKey.key_id), {
@@ -520,17 +532,18 @@ async function createConnection(request: Request, env: Env, store: Kv.Kv): Promi
       throw new ApiFailure(500, "grant_token_unavailable", "The grant session could not be created.");
     }
     await appendGrantIndex(store, grant.accountAddress, grant.id);
+    return Response.json(wire, { status: 201 });
   } catch (cause) {
     const cleanup = [
       store.delete(`grant:${grant.id}`),
       store.delete(`grant-token:${grantToken}`),
       unbindSubject(env, grant.egressSubject, grant.brokerUserId),
+      deleteManagedAgent(env, grant.brokerUserId, grant.agentId),
     ];
     if (persist) cleanup.push(store.delete(accessKeyStorageKey(accountAddress, accessKey.key_id)));
     await Promise.allSettled(cleanup);
     throw cause;
   }
-  return Response.json(wire, { status: 201 });
 }
 
 async function connectionAccessKey(
@@ -691,7 +704,207 @@ async function handleGrantRoute(
       return chargeGrant(store, current.grant, current.token, body);
     }));
   }
+  if (action?.startsWith("agents/")) {
+    requirePlaygroundOrigin(request);
+    return proxyManagedAgent(request, env, grant, action.slice("agents/".length));
+  }
   throw new ApiFailure(405, "method_not_allowed", "Unsupported grant operation.");
+}
+
+async function createManagedAgent(env: Env, userId: string): Promise<string> {
+  const response = await env.ACCOUNTS.fetch(new Request("https://nanocodex.internal/v1/agents", {
+    method: "POST",
+    headers: { "x-nanocodex-connect-user": userId },
+  }));
+  const body = await response.json().catch(() => undefined) as unknown;
+  if (!response.ok || !isRecord(body) || typeof body.agent_id !== "string") {
+    throw new ApiFailure(503, "durable_agent_unavailable", "The durable Nanocodex agent could not be provisioned.");
+  }
+  return body.agent_id;
+}
+
+async function deleteManagedAgent(env: Env, userId: string, agentId: string): Promise<void> {
+  const response = await env.ACCOUNTS.fetch(new Request(
+    `https://nanocodex.internal/v1/agents/${encodeURIComponent(agentId)}`,
+    {
+      method: "DELETE",
+      headers: { "x-nanocodex-connect-user": userId },
+    },
+  ));
+  await response.body?.cancel();
+}
+
+async function proxyManagedAgent(
+  request: Request,
+  env: Env,
+  grant: GrantRecord,
+  resource: string,
+): Promise<Response> {
+  const slash = resource.indexOf("/");
+  const requestedAgentId = slash === -1 ? resource : resource.slice(0, slash);
+  const suffix = slash === -1 ? "" : resource.slice(slash);
+  if (requestedAgentId !== grant.agentId || request.method === "DELETE") {
+    throw new ApiFailure(403, "agent_not_granted", "This durable agent is outside the signed Connect authorization.");
+  }
+  const target = new URL(
+    `/v1/agents/${encodeURIComponent(grant.agentId)}${suffix}${new URL(request.url).search}`,
+    "https://nanocodex.internal",
+  );
+  const headers = new Headers({
+    "x-nanocodex-connect-user": grant.brokerUserId,
+  });
+  for (const name of ["accept", "content-type", "idempotency-key"]) {
+    const value = request.headers.get(name);
+    if (value) headers.set(name, value);
+  }
+  const upstream = await env.ACCOUNTS.fetch(new Request(target, {
+    method: request.method,
+    headers,
+    body: request.method === "GET" || request.method === "HEAD" ? undefined : request.body,
+    signal: request.signal,
+  }));
+  return projectManagedResponse(upstream, grant, suffix);
+}
+
+async function projectManagedResponse(
+  upstream: Response,
+  grant: GrantRecord,
+  resource: string,
+): Promise<Response> {
+  const responseHeaders = new Headers();
+  for (const name of ["content-type", "retry-after"]) {
+    const value = upstream.headers.get(name);
+    if (value) responseHeaders.set(name, value);
+  }
+  if (!upstream.ok || !upstream.body) {
+    return new Response(upstream.body, {
+      status: upstream.status,
+      statusText: upstream.statusText,
+      headers: responseHeaders,
+    });
+  }
+  const contentType = upstream.headers.get("content-type") ?? "";
+  if (contentType.startsWith("text/event-stream")) {
+    return new Response(upstream.body.pipeThrough(managedEventProjection(grant)), {
+      status: upstream.status,
+      statusText: upstream.statusText,
+      headers: responseHeaders,
+    });
+  }
+  if (contentType.includes("application/json")) {
+    const value = await upstream.json() as unknown;
+    return new Response(JSON.stringify(projectManagedJson(value, grant, resource)), {
+      status: upstream.status,
+      statusText: upstream.statusText,
+      headers: responseHeaders,
+    });
+  }
+  return new Response(upstream.body, {
+    status: upstream.status,
+    statusText: upstream.statusText,
+    headers: responseHeaders,
+  });
+}
+
+function projectManagedJson(value: unknown, grant: GrantRecord, resource: string): unknown {
+  if (!isRecord(value)) return value;
+  const history = grant.capabilities.includes("agent.history.read")
+    || grant.capabilities.includes("agent.trace.read");
+  if (resource === "/events/history" || resource.startsWith("/events/history?")) {
+    const data = Array.isArray(value.data)
+      ? history
+        ? value.data.map((event) => projectManagedEvent(event, grant)).filter(Boolean)
+        : []
+      : [];
+    return { ...value, data, has_more: history ? value.has_more : false };
+  }
+  const projected = projectManagedEvent(value, grant) ?? {};
+  if (!history) {
+    if ("active_turn_details" in projected) projected.active_turn_details = [];
+    if ("input" in projected) projected.input = "";
+  }
+  if (isRecord(projected.terminal)) {
+    projected.terminal = projectManagedEvent(projected.terminal, grant) ?? {};
+  }
+  return projected;
+}
+
+function projectManagedEvent(value: unknown, grant: GrantRecord): Record<string, unknown> | undefined {
+  if (!isRecord(value) || typeof value.type !== "string") return isRecord(value) ? { ...value } : undefined;
+  const traces = grant.capabilities.includes("agent.trace.read");
+  const actions = traces || grant.capabilities.includes("agent.output.actions");
+  const history = traces || grant.capabilities.includes("agent.history.read");
+  const finalMessages = traces || grant.capabilities.includes("agent.output.final");
+  if (value.type === "event") {
+    if (traces) return { ...value };
+    if (!actions || !isRecord(value.event) || typeof value.event.type !== "string") return undefined;
+    if (value.event.type !== "tool.call" && value.event.type !== "tool.result") return undefined;
+    const payload = isRecord(value.event.payload) ? value.event.payload : {};
+    const safePayload = value.event.type === "tool.call"
+      ? {
+          ...(typeof payload.call_id === "string" ? { call_id: payload.call_id } : {}),
+          ...(typeof payload.name === "string" ? { name: payload.name } : {}),
+        }
+      : {
+          ...(typeof payload.call_id === "string" ? { call_id: payload.call_id } : {}),
+          ...(typeof payload.status === "string" ? { status: payload.status } : {}),
+        };
+    return {
+      ...value,
+      event: { ...value.event, payload: safePayload },
+    };
+  }
+  const projected = { ...value };
+  if (value.type === "turn_completed" && !finalMessages) projected.final_message = "";
+  if (value.type === "turn_accepted" && !history) projected.input = "";
+  return projected;
+}
+
+function managedEventProjection(grant: GrantRecord): TransformStream<Uint8Array, Uint8Array> {
+  const decoder = new TextDecoder();
+  const encoder = new TextEncoder();
+  let buffered = "";
+  const flushFrames = (controller: TransformStreamDefaultController<Uint8Array>, final: boolean) => {
+    let boundary: number;
+    while ((boundary = buffered.indexOf("\n\n")) !== -1) {
+      const frame = buffered.slice(0, boundary);
+      buffered = buffered.slice(boundary + 2);
+      const projected = projectManagedSseFrame(frame, grant);
+      if (projected) controller.enqueue(encoder.encode(`${projected}\n\n`));
+    }
+    if (final && buffered) {
+      const projected = projectManagedSseFrame(buffered, grant);
+      if (projected) controller.enqueue(encoder.encode(`${projected}\n\n`));
+      buffered = "";
+    }
+    if (buffered.length > 2_500_000) throw new Error("managed event projection frame exceeded its bound");
+  };
+  return new TransformStream({
+    transform(chunk, controller) {
+      buffered += decoder.decode(chunk, { stream: true });
+      flushFrames(controller, false);
+    },
+    flush(controller) {
+      buffered += decoder.decode();
+      flushFrames(controller, true);
+    },
+  });
+}
+
+function projectManagedSseFrame(frame: string, grant: GrantRecord): string | undefined {
+  const lines = frame.split("\n");
+  const dataIndex = lines.findIndex((line) => line.startsWith("data: "));
+  if (dataIndex === -1) return frame;
+  let value: unknown;
+  try {
+    value = JSON.parse(lines[dataIndex]!.slice("data: ".length));
+  } catch {
+    throw new Error("managed event projection received invalid JSON");
+  }
+  const projected = projectManagedEvent(value, grant);
+  if (!projected) return undefined;
+  lines[dataIndex] = `data: ${JSON.stringify(projected)}`;
+  return lines.join("\n");
 }
 
 async function handleAgentToolRoute(
@@ -1972,6 +2185,16 @@ function requireApprovedCapabilities(
   }
 }
 
+function approvedAgentCapabilities(resources: readonly string[]): string[] {
+  const approved = new Set(resources);
+  if (approved.has("urn:nanocodex:agent:trace:read")) {
+    return [...new Set(Object.values(AGENT_VISIBILITY_RESOURCES))];
+  }
+  return Object.entries(AGENT_VISIBILITY_RESOURCES)
+    .filter(([resource]) => approved.has(resource))
+    .map(([, capability]) => capability);
+}
+
 function siweResources(message: string): string[] {
   const lines = message.split("\n");
   const marker = lines.indexOf("Resources:");
@@ -2131,6 +2354,8 @@ async function digestHex(value: string): Promise<`0x${string}`> {
   return `0x${[...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
 }
 
+// The SIWE verifier returns a stable pre-connection identifier. The actual
+// Connection projection replaces it with the provisioned durable agent id.
 async function agentId(account: `0x${string}`) {
   return `agent_${(await digestHex(`agent:${account.toLowerCase()}`)).slice(2, 18)}`;
 }

@@ -419,6 +419,68 @@ dd {
   cursor: default;
 }
 
+.app-sees {
+  display: flex;
+  min-width: 0;
+  align-items: center;
+  gap: 5px;
+  padding: 7px 0 0;
+  overflow: visible;
+  color: var(--faint);
+  font-size: 8px;
+  line-height: 1;
+  white-space: nowrap;
+}
+
+.app-sees-label {
+  margin-right: 2px;
+  color: var(--muted);
+}
+
+.app-sees-permission {
+  position: relative;
+  padding: 3px 5px;
+  border: 1px solid var(--border);
+  background: var(--surface-subtle);
+  cursor: help;
+}
+
+.app-sees-permission::after {
+  position: absolute;
+  z-index: 20;
+  left: 0;
+  bottom: calc(100% + 6px);
+  width: max-content;
+  max-width: 180px;
+  padding: 7px 8px;
+  border: 1px solid var(--border-strong);
+  background: var(--surface-raised);
+  color: var(--muted);
+  content: attr(data-tooltip);
+  font-size: 8px;
+  line-height: 1.4;
+  opacity: 0;
+  pointer-events: none;
+  transform: translateY(3px);
+  transition: opacity 120ms ease, transform 120ms ease;
+}
+
+.app-sees-permission:last-child::after {
+  right: 0;
+  left: auto;
+}
+
+.app-sees-permission:hover::after,
+.app-sees-permission:focus::after {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.app-sees-permission:focus-visible {
+  outline: 1px solid var(--text);
+  outline-offset: 2px;
+}
+
 .capability-action:disabled .connector-logo {
   opacity: 0.42;
 }
