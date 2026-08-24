@@ -106,6 +106,7 @@ function createIframeInstance(host) {
   let walletHost;
   let walletModal;
   let walletReady;
+  let walletStale = false;
   let walletVisible = false;
 
   function mount() {
@@ -202,7 +203,19 @@ function createIframeInstance(host) {
     walletModal.append(style, walletFrame);
     document.body.append(walletModal);
     walletHost = source;
+    walletStale = false;
     if (walletVisible) walletModal.showModal();
+  }
+
+  async function refreshStaleWallet() {
+    if (!walletStale) return;
+    walletModal?.remove();
+    walletFrame = undefined;
+    walletHost = undefined;
+    walletModal = undefined;
+    walletReady = undefined;
+    mountWallet(host);
+    await walletReady;
   }
 
   function showWallet() {
@@ -216,6 +229,16 @@ function createIframeInstance(host) {
     walletVisible = false;
     if (walletModal?.open) walletModal.close();
     setWalletInteractive(false);
+  }
+
+  async function resetWallet() {
+    walletVisible = false;
+    if (walletModal?.open) walletModal.close();
+    setWalletInteractive(false);
+    // The hosted account is still finishing its own logout when the Wata
+    // response reaches the parent. Keep that document alive until the next
+    // connect, then replace it before creating the next Provider session.
+    walletStale = true;
   }
 
   function setWalletInteractive(visible) {
@@ -234,6 +257,7 @@ function createIframeInstance(host) {
   return {
     host,
     hideWallet,
+    resetWallet,
     async open(request) {
       if (active) throw new DialogBusyError();
       mount();
@@ -253,6 +277,7 @@ function createIframeInstance(host) {
     },
     showWallet,
     async waitForWallet() {
+      await refreshStaleWallet();
       await walletReady;
     },
     walletTarget(options = {}) {

@@ -107,6 +107,94 @@ test("history-disabled Connect sources tail latest and expose only source-submit
   assert.equal(watchSignal.aborted, true);
 });
 
+test("Connect sources resume transient tail failures without publishing a fatal run", async () => {
+  let promptOptions;
+  let watches = 0;
+  const cursors = [];
+  const connectAgent = {
+    id: "retrying-connect-agent",
+    sessionId: "retrying-connect-agent",
+    events: {
+      async page() { throw new Error("history is disabled"); },
+      async *watch(options) {
+        watches += 1;
+        cursors.push(options.cursor);
+        if (watches === 1) {
+          throw Object.assign(new Error("connection changed"), { code: "network_error" });
+        }
+        yield outerEnvelope("1", promptOptions.id, {
+          type: "turn_accepted", id: promptOptions.id, input: "resume", replayed: false,
+        });
+        yield outerEnvelope("2", promptOptions.id, {
+          type: "turn_completed", id: promptOptions.id, final_message: "resumed", usage: null,
+        });
+        await aborted(options.signal);
+      },
+    },
+    turn: {
+      prompt(options) {
+        promptOptions = options;
+        return {
+          async steer() {},
+          async cancel() {},
+          result() { return new Promise(() => {}); },
+        };
+      },
+    },
+  };
+  const source = createConnectAgentSource(connectAgent, { history: false });
+  const watcher = source.events.watch();
+  const events = [];
+  watcher.onEvent((event) => events.push(event));
+  source.turn.prompt({ input: "resume" });
+
+  await waitFor(() => events.some(({ type }) => type === "run.completed"), 1_000, 1);
+  assert.deepEqual(cursors, ["latest", "latest"]);
+  assert.equal(events.some(({ type }) => type === "run.error" || type === "run.failed"), false);
+  assert.equal(events.find(({ type }) => type === "assistant.message")?.payload.text, "resumed");
+  watcher.off();
+});
+
+test("Connect turns replay the same durable operation after a transient submission failure", async () => {
+  const prompts = [];
+  let attempts = 0;
+  const connectAgent = {
+    id: "durable-retry-agent",
+    sessionId: "durable-retry-agent",
+    events: {
+      async page() { throw new Error("history is disabled"); },
+      async *watch({ signal }) { await aborted(signal); },
+    },
+    turn: {
+      prompt(options) {
+        prompts.push(options);
+        attempts += 1;
+        return {
+          async steer() {},
+          async cancel() {},
+          async result() {
+            if (attempts === 1) {
+              throw Object.assign(new Error("connection changed"), { code: "network_error" });
+            }
+            return { finalMessage: "durably resumed" };
+          },
+        };
+      },
+    },
+  };
+  const source = createConnectAgentSource(connectAgent, { history: false });
+  const turn = source.turn.prompt({ input: "keep going" });
+
+  const result = await turn.result();
+
+  assert.equal(result.finalMessage, "durably resumed");
+  assert.equal(prompts.length, 2);
+  assert.equal(prompts[0].id, prompts[1].id);
+  assert.equal(prompts[0].idempotencyKey, prompts[0].id);
+  assert.deepEqual(prompts[1], prompts[0]);
+  turn.dispose();
+});
+
 test("history-enabled Connect sources page, order, dedupe, and serialize older loads", async () => {
   const pageCalls = [];
   let resolveInitial;
@@ -277,10 +365,12 @@ function aborted(signal) {
   return new Promise((resolve) => signal.addEventListener("abort", resolve, { once: true }));
 }
 
-async function waitFor(predicate) {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+async function waitFor(predicate, attempts = 100, delayMilliseconds = 0) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     if (predicate()) return;
-    await new Promise((resolve) => setImmediate(resolve));
+    await new Promise((resolve) => delayMilliseconds > 0
+      ? setTimeout(resolve, delayMilliseconds)
+      : setImmediate(resolve));
   }
   throw new Error("condition was not met");
 }

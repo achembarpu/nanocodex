@@ -9,6 +9,8 @@ export type Provider = Readonly<{
     params?: readonly unknown[] | undefined;
     context?: Readonly<Record<string, unknown>> | undefined;
   }>): Promise<unknown>;
+  /** Internal lifecycle reset used after account logout. */
+  reset?(): Promise<void>;
   store?: Readonly<{
     getState?(): Readonly<{
       accounts?: readonly Readonly<{ address: string }>[] | undefined;

@@ -4,6 +4,10 @@ const HISTORY_ATTEMPTS = 3;
 const HISTORY_ATTEMPT_TIMEOUT_MS = 10_000;
 const HISTORY_RETRY_INITIAL_MS = 1_000;
 const HISTORY_RETRY_MAX_MS = 30_000;
+const TAIL_RETRY_INITIAL_MS = 250;
+const TAIL_RETRY_MAX_MS = 5_000;
+const TURN_RETRY_INITIAL_MS = 250;
+const TURN_RETRY_MAX_MS = 5_000;
 
 /** Normalizes one capability-bound Connect agent for nanocodex-react/agent. */
 export function createConnectAgentSource(connectAgent, options) {
@@ -30,19 +34,38 @@ export function createConnectAgentSource(connectAgent, options) {
 
 function connectTurn(connectAgent, turnId, input) {
   const controller = new AbortController();
-  const turn = connectAgent.turn.prompt({ id: turnId, input });
+  let turn = startConnectTurn(connectAgent, turnId, input);
   return Object.freeze({
     historyEntryId: `managed-user-${turnId}`,
     steer: ({ input: steerInput }) => turn.steer({ input: steerInput }),
     cancel: () => turn.cancel(),
     async result() {
-      const result = await turn.result({ signal: controller.signal });
-      return Object.freeze({ finalMessage: result.finalMessage, dispose() {} });
+      let retryDelay = TURN_RETRY_INITIAL_MS;
+      while (!controller.signal.aborted) {
+        try {
+          const result = await turn.result({ signal: controller.signal });
+          return Object.freeze({ finalMessage: result.finalMessage, dispose() {} });
+        } catch (error) {
+          if (controller.signal.aborted || !isRetryableTurnError(error)) throw error;
+          await retryDelayUnlessAborted(retryDelay, controller.signal);
+          retryDelay = Math.min(retryDelay * 2, TURN_RETRY_MAX_MS);
+          turn = startConnectTurn(connectAgent, turnId, input);
+        }
+      }
+      throw controller.signal.reason ?? new DOMException("Connect turn detached", "AbortError");
     },
     dispose() {
       if (!controller.signal.aborted) controller.abort();
     },
   });
+}
+
+function startConnectTurn(connectAgent, turnId, input) {
+  return connectAgent.turn.prompt({ id: turnId, idempotencyKey: turnId, input });
+}
+
+function isRetryableTurnError(error) {
+  return error && typeof error === "object" && error.code === "network_error";
 }
 
 function connectEventWatcher(connectAgent, submitted, historyEnabled) {
@@ -110,40 +133,49 @@ function connectEventWatcher(connectAgent, submitted, historyEnabled) {
     if (tailStarted || controller.signal.aborted) return;
     tailStarted = true;
     void (async () => {
-      try {
-        for await (const envelope of connectAgent.events.watch({
-          cursor,
-          signal: controller.signal,
-        })) {
-          if (controller.signal.aborted) return;
-          if (latestLiveCursor !== undefined
-            && compareCursor(envelope.cursor, latestLiveCursor) <= 0) continue;
-          latestLiveCursor = envelope.cursor;
-          const turnId = envelopeTurnId(envelope);
-          if (!historyEnabled && !submitted?.has(turnId ?? "")) continue;
-          if (!retain(envelope)) continue;
-          const projected = envelopeEvents(
-            envelope,
-            rawAssistantMessageTurns(envelopes),
-            connectAgent.sessionId,
-            sequence + 1,
-          );
-          sequence += projected.length;
-          for (const event of projected) {
-            for (const listener of listeners) listener(event);
+      let retryDelay = TAIL_RETRY_INITIAL_MS;
+      while (!controller.signal.aborted) {
+        try {
+          for await (const envelope of connectAgent.events.watch({
+            cursor: latestLiveCursor ?? cursor,
+            signal: controller.signal,
+          })) {
+            if (controller.signal.aborted) return;
+            if (latestLiveCursor !== undefined
+              && compareCursor(envelope.cursor, latestLiveCursor) <= 0) continue;
+            latestLiveCursor = envelope.cursor;
+            retryDelay = TAIL_RETRY_INITIAL_MS;
+            const turnId = envelopeTurnId(envelope);
+            if (!historyEnabled && !submitted?.has(turnId ?? "")) continue;
+            if (!retain(envelope)) continue;
+            const projected = envelopeEvents(
+              envelope,
+              rawAssistantMessageTurns(envelopes),
+              connectAgent.sessionId,
+              sequence + 1,
+            );
+            sequence += projected.length;
+            for (const event of projected) {
+              for (const listener of listeners) listener(event);
+            }
+            if (turnId && isOuterTerminal(envelope)) submitted?.delete(turnId);
           }
-          if (turnId && isOuterTerminal(envelope)) submitted?.delete(turnId);
+        } catch (error) {
+          if (controller.signal.aborted) return;
+          if (!isRetryableTailError(error)) {
+            for (const event of [
+              historyEvent(connectAgent.sessionId, ++sequence, "run.error", {
+                message: error instanceof Error ? error.message : String(error),
+              }),
+              historyEvent(connectAgent.sessionId, ++sequence, "run.failed", { status: "failed" }),
+            ]) {
+              for (const listener of listeners) listener(event);
+            }
+            return;
+          }
         }
-      } catch (error) {
-        if (controller.signal.aborted) return;
-        for (const event of [
-          historyEvent(connectAgent.sessionId, ++sequence, "run.error", {
-            message: error instanceof Error ? error.message : String(error),
-          }),
-          historyEvent(connectAgent.sessionId, ++sequence, "run.failed", { status: "failed" }),
-        ]) {
-          for (const listener of listeners) listener(event);
-        }
+        await retryDelayUnlessAborted(retryDelay, controller.signal);
+        retryDelay = Math.min(retryDelay * 2, TAIL_RETRY_MAX_MS);
       }
     })();
   };
@@ -507,4 +539,25 @@ function validateConnectAgent(connectAgent) {
     || typeof connectAgent.events?.watch !== "function") {
     throw new TypeError("connectAgent must provide sessionId, turn.prompt, events.page, and events.watch");
   }
+}
+
+function isRetryableTailError(error) {
+  return error && typeof error === "object" && (
+    error.code === "network_error"
+    || error.code === "event_stream_ended"
+    || error.code === "event_stream_inactive"
+  );
+}
+
+function retryDelayUnlessAborted(milliseconds, signal) {
+  if (signal.aborted) return Promise.resolve();
+  return new Promise((resolve) => {
+    const timeout = setTimeout(done, milliseconds);
+    signal.addEventListener("abort", done, { once: true });
+    function done() {
+      clearTimeout(timeout);
+      signal.removeEventListener("abort", done);
+      resolve();
+    }
+  });
 }

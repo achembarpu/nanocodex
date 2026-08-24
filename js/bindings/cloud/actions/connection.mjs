@@ -42,6 +42,7 @@ export async function connect(client, options) {
     ?? (reusable
       ? undefined
       : freshAccessKeyAuthorization(client.accessKey?.authorize));
+  await client.dialog.waitForWallet?.();
   client.dialog.showWallet?.();
   let connected = false;
   try {

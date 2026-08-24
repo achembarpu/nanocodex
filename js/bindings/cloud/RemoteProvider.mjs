@@ -68,6 +68,12 @@ export function create(parameters) {
     prepare() {
       return ensureSession().ready;
     },
+    async reset() {
+      const current = session;
+      session = undefined;
+      state = Object.freeze({ accounts: Object.freeze([]), activeAccount: 0, accessKeys: Object.freeze([]) });
+      await current?.close();
+    },
     request,
     store: Object.freeze({ getState: () => state }),
   });

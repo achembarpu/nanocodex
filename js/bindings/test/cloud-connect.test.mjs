@@ -417,12 +417,16 @@ test("Connect persists, validates, and clears an app-scoped grant session", asyn
 test("Connect account logout clears the local session without revoking the app grant", async () => {
   const storage = memoryStorage();
   const walletRequests = [];
+  let providerResets = 0;
   const client = Client.create({
     appId: "logout-workspace",
     dialog: Dialog.memory(),
     provider: {
       async request(request) {
         walletRequests.push(request);
+      },
+      async reset() {
+        providerResets += 1;
       },
     },
     session: storage,
@@ -447,10 +451,12 @@ test("Connect account logout clears the local session without revoking the app g
   await client.account.logout();
   assert.equal(client._hasSession(), false);
   assert.deepEqual(walletRequests, [{ method: "wallet_disconnect" }]);
+  assert.equal(providerResets, 1);
 });
 
 test("Connect account logout clears the local session when wallet logout fails", async () => {
   const storage = memoryStorage();
+  let providerResets = 0;
   const client = Client.create({
     appId: "failed-logout-workspace",
     dialog: Dialog.memory(),
@@ -458,6 +464,9 @@ test("Connect account logout clears the local session when wallet logout fails",
       async request(request) {
         assert.equal(request.method, "wallet_disconnect");
         throw new Error("account service unavailable");
+      },
+      async reset() {
+        providerResets += 1;
       },
     },
     session: storage,
@@ -470,6 +479,7 @@ test("Connect account logout clears the local session when wallet logout fails",
 
   await assert.rejects(client.account.logout(), /account service unavailable/);
   assert.equal(client._hasSession(), false);
+  assert.equal(providerResets, 1);
 });
 
 test("Connect account logout clears the local session before remote wallet cleanup", async () => {

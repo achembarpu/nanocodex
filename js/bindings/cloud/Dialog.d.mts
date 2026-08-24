@@ -68,6 +68,8 @@ export type Instance = Readonly<{
   waitForWallet?(): Promise<void>;
   showWallet?(): void;
   hideWallet?(): void;
+  /** Replaces the cached hosted wallet after account logout. */
+  resetWallet?(): Promise<void>;
   getRequest?(): Request | undefined;
   subscribe?(listener: () => void): () => void;
   respond?(result: unknown): void;
