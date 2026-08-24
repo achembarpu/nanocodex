@@ -1,15 +1,17 @@
-import { Provider, WebAuthnCeremony, webAuthn } from "accounts";
+import { Provider, Storage, webAuthn } from "accounts";
 import { loadStripe, type Stripe, type StripeElements } from "@stripe/stripe-js";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { Dialog } from "nanocodex/connect";
 
 import { classifyMachineUsdOrder } from "./machineUsdOrder.mjs";
-import { connectApiOrigin, registeredApp, sanitizeWalletResult } from "./connectPolicy.mjs";
+import {
+  connectApiOrigin,
+  registeredApp,
+  sanitizeWalletResult,
+} from "./connectPolicy.mjs";
 import { parentDialog, type WalletRequest } from "./protocol";
 
-const provider = Provider.create({
-  adapter: webAuthn({ ceremony: WebAuthnCeremony.local() }),
-});
+const provider = createProvider();
 
 const connectorIds = ["github", "gmail", "gdrive", "chatgpt"] as const;
 const connectorResourcePrefix = "urn:nanocodex:connector:";
@@ -250,6 +252,9 @@ export function App() {
 
     setCeremonyRequestId(activeRequest.id);
     try {
+      if (activeRequest.type === "walletConnect" && accountMode === "register") {
+        await ensureBrowserSession();
+      }
       const result = await provider.request(
         (activeRequest.type === "walletConnect"
           ? walletRequest(activeRequest, accountMode)
@@ -1106,6 +1111,39 @@ function walletRequest(request: WalletRequest, accountMode: "login" | "register"
       },
     }],
   };
+}
+
+function createProvider() {
+  return Provider.create({
+    adapter: webAuthn({
+      auth: "/webauthn",
+      name: "Nanocodex",
+      rdns: "xyz.paradigm.nanocodex",
+    }),
+    maxAccounts: 1,
+    mpp: false,
+    storage: Storage.idb({ key: "nanocodex" }),
+  });
+}
+
+async function ensureBrowserSession() {
+  const response = await fetch("/v1/me", {
+    cache: "no-store",
+    credentials: "same-origin",
+    headers: { accept: "application/json" },
+  });
+  const body: unknown = await response.json().catch(() => undefined);
+  if (!response.ok) {
+    throw new Error(apiError(record(body), "Unable to start a Nanocodex browser session."));
+  }
+  if (
+    !isRecord(body)
+    || !isRecord(body.user)
+    || typeof body.user.id !== "string"
+    || typeof body.user.persistent !== "boolean"
+  ) {
+    throw new Error("The Nanocodex account service returned an invalid browser session.");
+  }
 }
 
 function walletView(request: WalletRequest): ConnectionView {

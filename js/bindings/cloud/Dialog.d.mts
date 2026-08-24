@@ -1,4 +1,4 @@
-export const DEFAULT_HOST: "https://connect.nanocodex.xyz/embed";
+export const DEFAULT_HOST: "https://nanocodex.gakonst.workers.dev/connect-dialog/";
 
 export type Request = ConnectionRequest | FundingRequest;
 

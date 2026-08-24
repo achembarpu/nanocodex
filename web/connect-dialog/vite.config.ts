@@ -2,6 +2,7 @@ import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
 export default defineConfig({
+  base: "/connect-dialog/",
   plugins: [react()],
   resolve: {
     dedupe: ["@tanstack/react-query", "react", "react-dom"],

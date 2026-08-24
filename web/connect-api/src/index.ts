@@ -9,7 +9,7 @@ declare const WebSocketPair: {
 export class NonceStorage extends Kv.NonceStorage {}
 
 const PLAYGROUND_ORIGIN = "https://nanocodex-connect-playground.gakonst.workers.dev";
-const DIALOG_ORIGIN = "https://nanocodex-connect-dialog.gakonst.workers.dev";
+const DIALOG_ORIGIN = "https://nanocodex.gakonst.workers.dev";
 const API_ORIGIN = "https://nanocodex-connect-api.gakonst.workers.dev";
 const NANOCODEX_ORIGIN = "https://nanocodex.gakonst.workers.dev";
 const MACHINE_USD_ORIGIN = "https://machine-usd.porto.workers.dev";

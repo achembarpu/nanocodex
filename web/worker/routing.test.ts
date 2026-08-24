@@ -16,6 +16,8 @@ test("Cloudflare routes preview documents, images, and protocol endpoints throug
     "/code",
     "/commits",
     "/requests",
+    "/connect-dialog",
+    "/connect-dialog/*",
     "/docs",
     "/docs/*",
     "/evals",
@@ -28,6 +30,28 @@ test("Cloudflare routes preview documents, images, and protocol endpoints throug
   ]);
   assert.equal(config.assets.binding, "ASSETS");
   assert.equal(config.assets.not_found_handling, "none");
+  assert.deepEqual(config.services, [
+    {
+      binding: "NANOCODEX_BACKEND",
+      service: "nanocodex-durable-agent",
+    },
+    {
+      binding: "NANOCODEX_CONNECT_DIALOG",
+      service: "nanocodex-connect-dialog",
+    },
+  ]);
+  assert.deepEqual(config.env.development.services, [
+    {
+      binding: "NANOCODEX_BACKEND",
+      service: "nanocodex-durable-agent",
+      remote: false,
+    },
+    {
+      binding: "NANOCODEX_CONNECT_DIALOG",
+      service: "nanocodex-connect-dialog",
+      remote: false,
+    },
+  ]);
 });
 
 test("SPA fallback serves only documents and missing immutable assets stay real 404s", async () => {

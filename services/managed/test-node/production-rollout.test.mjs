@@ -181,6 +181,7 @@ test("boundary probe and website configs preserve the private service chain", ()
     services: [
       { binding: "EGRESS", service: "nanocodex-egress" },
       { binding: "NANOCODEX_BACKEND", service: "nanocodex-durable-agent" },
+      { binding: "NANOCODEX_CONNECT_DIALOG", service: "nanocodex-connect-dialog" },
     ],
     containers: [{ class_name: "ChatGptEgress", image: "/stale/Dockerfile" }],
     d1_databases: [{ binding: "EVALS_DB", migrations_dir: "../../migrations" }],
@@ -193,6 +194,7 @@ test("boundary probe and website configs preserve the private service chain", ()
   assert.deepEqual(website.vars, { ENVIRONMENT: "production" });
   assert.deepEqual(website.services, [
     { binding: "NANOCODEX_BACKEND", service: "nanocodex-durable-agent" },
+    { binding: "NANOCODEX_CONNECT_DIALOG", service: "nanocodex-connect-dialog" },
   ]);
   assert.throws(() => buildWebProductionConfig({
     ...website,

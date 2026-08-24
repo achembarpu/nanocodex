@@ -6,7 +6,7 @@ import {
   type AccountAuthEnv,
 } from "./account-auth";
 
-const CONNECT_DIALOG_ORIGIN = "https://nanocodex-connect-dialog.gakonst.workers.dev";
+const CONNECT_DIALOG_ORIGIN = "https://nanocodex.gakonst.workers.dev";
 const CONNECT_APP_ID = "atlas-workspace";
 const INTERNAL_ORIGIN = "https://nanocodex.internal";
 const NANOCODEX_ORIGIN = "https://nanocodex.gakonst.workers.dev";

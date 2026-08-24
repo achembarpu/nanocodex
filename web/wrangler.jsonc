@@ -29,6 +29,8 @@
       "/code",
       "/commits",
       "/requests",
+      "/connect-dialog",
+      "/connect-dialog/*",
       "/docs",
       "/docs/*",
       "/evals",
@@ -44,6 +46,10 @@
     {
       "binding": "NANOCODEX_BACKEND",
       "service": "nanocodex-durable-agent"
+    },
+    {
+      "binding": "NANOCODEX_CONNECT_DIALOG",
+      "service": "nanocodex-connect-dialog"
     }
   ],
   "durable_objects": {
@@ -173,6 +179,11 @@
         {
           "binding": "NANOCODEX_BACKEND",
           "service": "nanocodex-durable-agent",
+          "remote": false
+        },
+        {
+          "binding": "NANOCODEX_CONNECT_DIALOG",
+          "service": "nanocodex-connect-dialog",
           "remote": false
         }
       ],

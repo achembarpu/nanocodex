@@ -201,6 +201,12 @@ export function buildWebProductionConfig(baseConfig, {
   if (backend?.length !== 1 || backend[0].service !== MANAGED_NAME) {
     throw new Error("production website requires NANOCODEX_BACKEND bound to nanocodex-durable-agent");
   }
+  const connectDialog = baseConfig.services?.filter(
+    (candidate) => candidate?.binding === "NANOCODEX_CONNECT_DIALOG",
+  );
+  if (connectDialog?.length !== 1 || connectDialog[0].service !== "nanocodex-connect-dialog") {
+    throw new Error("production website requires NANOCODEX_CONNECT_DIALOG bound to nanocodex-connect-dialog");
+  }
   if (baseConfig.keep_vars !== true) {
     throw new Error("production website must retain its unrelated server-side bindings");
   }
@@ -221,7 +227,10 @@ export function buildWebProductionConfig(baseConfig, {
   const { configPath: _configPath, userConfigPath: _userConfigPath, ...portable } = baseConfig;
   return {
     ...portable,
-    services: [{ binding: "NANOCODEX_BACKEND", service: MANAGED_NAME }],
+    services: [
+      { binding: "NANOCODEX_BACKEND", service: MANAGED_NAME },
+      { binding: "NANOCODEX_CONNECT_DIALOG", service: "nanocodex-connect-dialog" },
+    ],
     main: resolve(configDirectory, baseConfig.main),
     assets: {
       ...baseConfig.assets,

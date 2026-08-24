@@ -1,7 +1,7 @@
 import { Client, Dialog, Transport } from "nanocodex/connect";
 import { createConfig } from "nanocodex-react/connect";
 
-const DEFAULT_DIALOG_HOST = "https://nanocodex-connect-dialog.gakonst.workers.dev";
+const DEFAULT_DIALOG_HOST = "https://nanocodex.gakonst.workers.dev/connect-dialog/";
 const DEFAULT_API_HOST = "https://nanocodex-connect-api.gakonst.workers.dev";
 const MACHINE_USD = "0x20c0000000000000000000006637932dE5413804" as const;
 const USDC_E = "0x20C000000000000000000000b9537d11c60E8b50" as const;

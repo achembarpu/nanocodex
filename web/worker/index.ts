@@ -32,6 +32,10 @@ import { CHATGPT_REALTIME_INSTRUCTIONS } from "nanocodex/browser/realtime";
 import { routeLinkPreview } from "./linkPreview.ts";
 import { routeManaged } from "./managedProxy.ts";
 import {
+  routeConnectDialog,
+  type ConnectDialogProxyEnv,
+} from "./connectDialogProxy.ts";
+import {
   fetchManagedModel,
   managedModelAccess,
   managedModelActorId,
@@ -85,6 +89,7 @@ const SECURE_CHATGPT_COOKIE = "__Secure-nanocodex_chatgpt_v2";
 const GIT_SHA_PATTERN = /^[0-9a-f]{40}$/;
 
 type WorkerEnv = GitStorageEnv & ThreadGitStorageEnv & EvalStorageEnv & ChatGptEgressEnv
+  & ConnectDialogProxyEnv
   & PublicSecurityEnv & CredentialVaultEnv & {
   ASSETS?: Fetcher;
   ENVIRONMENT: string;
@@ -121,6 +126,8 @@ export default {
     const url = new URL(request.url);
     const insecure = enforceHttps(request, env, url);
     if (insecure) return insecure;
+    const connectDialog = await routeConnectDialog(request, env, url);
+    if (connectDialog != null) return connectDialog;
     const managed = await routeManaged(request, env, url);
     if (managed != null) return managed;
     const evalMutation = await routeEvalMutation(request, env, url);

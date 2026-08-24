@@ -277,7 +277,7 @@ describe("managed agents REST and resumable SSE", () => {
     const authorize = new URL("https://example.test/v1/connect/account-link");
     authorize.searchParams.set("account_address", accountAddress);
     authorize.searchParams.set("app_id", "atlas-workspace");
-    authorize.searchParams.set("return_origin", "https://nanocodex-connect-dialog.gakonst.workers.dev");
+    authorize.searchParams.set("return_origin", "https://nanocodex.gakonst.workers.dev");
     authorize.searchParams.set("state", state);
 
     const unauthenticated = await RAW_SELF.fetch(authorize);

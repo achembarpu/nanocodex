@@ -1,6 +1,6 @@
 import { DialogBusyError, UserRejectedRequestError } from "./Errors.mjs";
 
-export const DEFAULT_HOST = "https://connect.nanocodex.xyz/embed";
+export const DEFAULT_HOST = "https://nanocodex.gakonst.workers.dev/connect-dialog/";
 
 const iframeInstances = new Map();
 
