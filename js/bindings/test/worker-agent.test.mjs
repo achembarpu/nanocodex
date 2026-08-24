@@ -1098,6 +1098,16 @@ test("stable browser harness identity opts into Worker-owned durability", async 
   assert.equal(Object.hasOwn(explicitConfig, "workerDurabilityId"), false);
   assert.equal(explicitConfig.durabilityId, "caller-owned");
   explicitAgent.dispose();
+
+  const ephemeralWorker = new HarnessWorker();
+  const ephemeralAgent = await createWorkerAgent({
+    durability: false,
+    threadId: "ephemeral-browser-thread",
+  }, { worker: ephemeralWorker });
+  const ephemeralConfig = ephemeralWorker.incoming.find(({ type }) => type === "boot").config;
+  assert.equal(Object.hasOwn(ephemeralConfig, "workerDurabilityId"), false);
+  assert.equal(Object.hasOwn(ephemeralConfig, "durability"), false);
+  ephemeralAgent.dispose();
 });
 
 test("Worker hydration constructs default durability inside its own isolate", async () => {

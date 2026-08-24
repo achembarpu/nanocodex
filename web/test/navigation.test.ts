@@ -99,7 +99,7 @@ test("the shared shell presents Source without changing the stable Code route", 
 test("navigation does not capture global letter keys and browser Find remains native", () => {
   assert.deepEqual(
     [...demoNavigation, ...primaryNavigation, ...gitNavigation].map(({ label, description }) => [label, description]),
-    [["Agent", "Browser agent"], ["Multiplayer", "Shared room"], ["World", "Agent world"], ["Docs", "Reference"], ["Evals", "Benchmarks"], ["Changelog", "Releases"], ["Commits", "History"], ["Source", "Repository"]],
+    [["Durable Agent", "Persistent browser agent"], ["Multiplayer", "Shared room"], ["World", "Agent world"], ["Docs", "Reference"], ["Evals", "Benchmarks"], ["Changelog", "Releases"], ["Commits", "History"], ["Source", "Repository"]],
   );
   assert.doesNotMatch(application, /item\.shortcut|shortcut<\/small>|const nextSurface =\s*key/);
   assert.match(
@@ -113,7 +113,7 @@ test("navigation does not capture global letter keys and browser Find remains na
 });
 
 test("the product navigation exposes the deliberate Demos and Git hierarchy", () => {
-  assert.deepEqual(demoNavigation.map(({ label }) => label), ["Agent", "Multiplayer", "World"]);
+  assert.deepEqual(demoNavigation.map(({ label }) => label), ["Durable Agent", "Multiplayer", "World"]);
   assert.deepEqual(primaryNavigation.map(({ label }) => label), ["Docs", "Evals"]);
   assert.deepEqual(gitNavigation.map(({ label }) => label), ["Changelog", "Commits", "Source"]);
   assert.equal(connectDemoUrl, "https://nanocodex-connect-playground.gakonst.workers.dev");
@@ -122,6 +122,19 @@ test("the product navigation exposes the deliberate Demos and Git hierarchy", ()
   assert.match(application, /href=\{connectDemoUrl\}[\s\S]*?target="_blank"[\s\S]*?rel="noreferrer"[\s\S]*?Connect demo \(opens in a new tab\)/);
   assert.match(application, /id="mobile-demos-title">Demos/);
   assert.match(application, /id="mobile-git-title">Git/);
+});
+
+test("Home removes durable thread identity while the Durable Agent route owns it", () => {
+  assert.match(application, /surface === "home" \|\| surface === "docs" \? undefined : getBrowserThread\(\)\.id/);
+  assert.equal(application.match(/getBrowserThread\(\)\.id/g)?.length, 1);
+  assert.match(application, /const nextThreadId = threadId \?\? crypto\.randomUUID\(\)/);
+  assert.match(application, /if \(surface !== "home" \|\| location\.pathname !== "\/"\) return;[\s\S]*?search\.delete\("thread"\)[\s\S]*?replace: true/);
+  assert.match(application, /nextSurface === "home"[\s\S]*?pathForSurface\("home"\)/);
+  assert.match(application, /if \(nextSurface === "home"\) \{[\s\S]*?navigate\(destination\)/);
+  assert.match(application, /threadId=\{threadId\}/);
+  assert.doesNotMatch(application, /threadId=\{threadId \?\? getBrowserThread\(\)\.id\}/);
+  assert.match(application, /const agentExperienceSurface = surface === "home" \|\| surface === "agent"[\s\S]*?: retainedAgentSurface/);
+  assert.match(application, /landing=\{agentExperienceSurface === "home"\}/);
 });
 
 test("the active navigation item is bold without a selection underline", () => {

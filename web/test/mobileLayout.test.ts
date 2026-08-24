@@ -126,7 +126,7 @@ test("compact Artifact, Source, and Docs overlays share complete modal ownership
 test("the homepage is one local, terminal-first agent on desktop and mobile", () => {
   assert.match(application, /<AgentExperience[\s\S]*?mode=\{[\s\S]*?"full"[\s\S]*?"preview"[\s\S]*?"hidden"[\s\S]*?theme=\{theme\}/);
   assert.equal(matches(application, /<AgentExperience\b/g), 1);
-  assert.match(application, /landing=\{surface === "home"\}/);
+  assert.match(application, /landing=\{agentExperienceSurface === "home"\}/);
   assert.match(application, /hidden=\{surface !== "home" && surface !== "agent"\}/);
   assert.match(application, /inert=\{surface !== "home" && surface !== "agent" \? true : undefined\}/);
   assert.doesNotMatch(application, /home-intro|home-install|home-demo-head|live agent · local or durable/);

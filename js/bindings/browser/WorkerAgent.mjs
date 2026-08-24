@@ -1280,6 +1280,8 @@ function listenForAbort(signal, listener) {
 
 function serializeConfig(options) {
   const config = { ...options };
+  const workerDurability = config.durability !== false;
+  if (!workerDurability) delete config.durability;
   const stableThreadId = nonEmptyString(options.threadId) ?? nonEmptyString(options.sessionId);
   const transport = options.transport;
   if (transport !== undefined) {
@@ -1311,7 +1313,8 @@ function serializeConfig(options) {
   if (config.harness !== false) {
     config.harness = harnessDescriptor(config);
     if (
-      stableThreadId !== undefined
+      workerDurability
+      && stableThreadId !== undefined
       && config.durability === undefined
       && config.durabilityId === undefined
     ) config.workerDurabilityId = stableThreadId;

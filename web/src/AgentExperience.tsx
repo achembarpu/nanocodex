@@ -37,8 +37,11 @@ export const AgentExperience = memo(function AgentExperience({
   landing?: boolean;
   mode: AgentTerminalMode;
   onThreadChange(threadId: string): void;
-  threadId: string;
+  threadId?: string;
 }) {
+  const [ephemeralThreadId] = useState(() => crypto.randomUUID());
+  const durable = !landing && threadId !== undefined;
+  const activeThreadId = landing || threadId === undefined ? ephemeralThreadId : threadId;
   const account = useAccountSession();
   const capabilityError = useMemo(() => browserAgentCapabilityError(), []);
   const [runtime, setRuntime] = useState<"local" | "managed">(() =>
@@ -51,7 +54,7 @@ export const AgentExperience = memo(function AgentExperience({
   const [runtimeState, setRuntimeState] = useState<AgentTerminalState>();
   const [railOpen, setRailOpen] = useState(false);
   const [localConversations, setLocalConversations] = useState<readonly LocalConversation[]>(() =>
-    loadLocalConversations(threadId)
+    durable ? loadLocalConversations(activeThreadId) : []
   );
   const [managedConversations, setManagedConversations] = useState<readonly ManagedConversation[]>([]);
   const [managedConversationId, setManagedConversationId] = useState<string>();
@@ -60,7 +63,9 @@ export const AgentExperience = memo(function AgentExperience({
   const [conversationPending, setConversationPending] = useState(false);
   const hasCredential = credentialSource === "brokered";
 
-  useEffect(() => setLocalConversations(loadLocalConversations(threadId)), [threadId]);
+  useEffect(() => {
+    setLocalConversations(durable ? loadLocalConversations(activeThreadId) : []);
+  }, [activeThreadId, durable]);
   useEffect(() => {
     if (deploymentCurrent || authStatus?.state !== "ready") return;
     void beforeLocalTurn().catch(() => {});
@@ -149,7 +154,11 @@ export const AgentExperience = memo(function AgentExperience({
   }, []);
   const recordActivity = useCallback((input: string) => {
     if (activeRuntime === "local") {
-      setLocalConversations((current) => recordLocalConversationPrompt(current, threadId, input));
+      if (durable) {
+        setLocalConversations((current) =>
+          recordLocalConversationPrompt(current, activeThreadId, input)
+        );
+      }
       return;
     }
     if (!managedConversationId) return;
@@ -159,11 +168,11 @@ export const AgentExperience = memo(function AgentExperience({
       turnCount: (item.turnCount ?? 0) + 1,
       updatedAt: Date.now(),
     } : item).sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0)));
-  }, [activeRuntime, managedConversationId, threadId]);
+  }, [activeRuntime, activeThreadId, durable, managedConversationId]);
 
   const conversations: readonly ConversationSummary[] = activeRuntime === "local"
     ? localConversations : managedConversations;
-  const selectedId = activeRuntime === "local" ? threadId : managedConversationId;
+  const selectedId = activeRuntime === "local" ? activeThreadId : managedConversationId;
   return <div className={`nanocodex-demo is-${mode}${landing ? " is-landing" : ""}`}>
     {landing ? null : <div className="agent-runtime-switch" role="group" aria-label="Agent runtime">
       {(["local", "managed"] as const).map((value) => <button
@@ -195,9 +204,11 @@ export const AgentExperience = memo(function AgentExperience({
           && (activeRuntime === "managed" || deploymentCurrent)
           && (activeRuntime === "local" || managedConversationId)
           ? activeRuntime === "local" ? <AgentTerminal
-              key={threadId} authStatus={authStatus} beforeLocalTurn={beforeLocalTurn}
+              key={`${durable ? "durable" : "ephemeral"}:${activeThreadId}`}
+              authStatus={authStatus} beforeLocalTurn={beforeLocalTurn}
+              durable={durable}
               mode={mode} onConversationActivity={recordActivity}
-              onStateChange={setRuntimeState} source={credentialSource} threadId={threadId}
+              onStateChange={setRuntimeState} source={credentialSource} threadId={activeThreadId}
               welcome={landing ? HOME_TERMINAL_WELCOME : undefined}
             /> : <ManagedAgentTerminal
               key={managedConversationId} agentId={managedConversationId!} authStatus={authStatus}

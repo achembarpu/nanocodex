@@ -31,6 +31,7 @@ export { AgentTerminalView } from "./AgentTerminalView";
 export const AgentTerminal = memo(function AgentTerminal({
   authStatus,
   beforeLocalTurn,
+  durable,
   mode,
   onConversationActivity,
   onStateChange,
@@ -40,6 +41,7 @@ export const AgentTerminal = memo(function AgentTerminal({
 }: {
   authStatus: ModelSessionStatus | undefined;
   beforeLocalTurn(): Promise<void>;
+  durable: boolean;
   mode: AgentTerminalMode;
   onConversationActivity(input: string): void;
   onStateChange(state: AgentTerminalState): void;
@@ -50,8 +52,9 @@ export const AgentTerminal = memo(function AgentTerminal({
   const agentConfig = useMemo(() => createConfig({
     agent: {
       mcp: browserMcpConfiguration(location.origin, threadId),
+      ...(durable ? {} : { durability: false }),
     },
-  }), [threadId]);
+  }), [durable, threadId]);
   const {
     data: agent,
     error,
@@ -68,12 +71,16 @@ export const AgentTerminal = memo(function AgentTerminal({
     enabled: mode !== "hidden",
   });
   const terminalAgent = useMemo(
-    () => agent ? localTerminalAgent(agent, threadId, undefined, (failure) => {
-      setLocalFailure({ agent, message: errorMessage(failure), threadId });
-    }, undefined, undefined, beforeLocalTurn) : undefined,
-    [agent, beforeLocalTurn, threadId],
+    () => agent
+      ? durable
+        ? localTerminalAgent(agent, threadId, undefined, (failure) => {
+            setLocalFailure({ agent, message: errorMessage(failure), threadId });
+          }, undefined, undefined, beforeLocalTurn)
+        : agent
+      : undefined,
+    [agent, beforeLocalTurn, durable, threadId],
   );
-  const localAgentError = localFailure
+  const localAgentError = durable && localFailure
     && localFailure.agent === agent
     && localFailure.threadId === threadId
     ? localFailure.message

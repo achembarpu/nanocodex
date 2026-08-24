@@ -14,7 +14,7 @@ const viteConfig = source("../vite.config.ts");
 test("one thread-scoped Config supplies clone-safe MCP servers to the retained Agent", () => {
   const declaration = section(terminal, "export const AgentTerminal", "export const ManagedAgentTerminal");
   assert.equal(matches(terminal, /createConfig\(/g), 1);
-  assert.match(declaration, /useMemo\(\(\) => createConfig\(\{[\s\S]*?mcp: browserMcpConfiguration\(location\.origin, threadId\)[\s\S]*?\[threadId\]/);
+  assert.match(declaration, /useMemo\(\(\) => createConfig\(\{[\s\S]*?mcp: browserMcpConfiguration\(location\.origin, threadId\)[\s\S]*?\[durable, threadId\]/);
   assert.match(
     terminal,
     /useNanocodex\(\{ config: agentConfig, threadId \}\)/,
@@ -30,6 +30,17 @@ test("one thread-scoped Config supplies clone-safe MCP servers to the retained A
     typeof server.url === "string"
     && Array.isArray(server.enabledTools)
     && Object.values(server.headers).every((value) => typeof value === "string")));
+});
+
+test("the landing terminal is ephemeral while the Agent demo retains durability", () => {
+  const declaration = section(terminal, "export const AgentTerminal", "export const ManagedAgentTerminal");
+  assert.match(declaration, /\.\.\.\(durable \? \{\} : \{ durability: false \}\)/);
+  assert.match(declaration, /\? durable[\s\S]*?\? localTerminalAgent\([\s\S]*?: agent/);
+  assert.match(experience, /const durable = !landing && threadId !== undefined/);
+  assert.match(experience, /durable \? loadLocalConversations\(activeThreadId\) : \[\]/);
+  assert.match(experience, /if \(durable\) \{[\s\S]*?recordLocalConversationPrompt/);
+  assert.match(experience, /key=\{`\$\{durable \? "durable" : "ephemeral"\}:\$\{activeThreadId\}`\}/);
+  assert.match(experience, /durable=\{durable\}/);
 });
 
 test("the full Agent experience alone mounts a collapsed, counted artifact dock", () => {

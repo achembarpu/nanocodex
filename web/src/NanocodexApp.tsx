@@ -256,7 +256,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
     ? commitHashFromSearch(location.search)
     : undefined;
   const [threadId, setThreadId] = useState<string | undefined>(() =>
-    surface === "docs" ? undefined : getBrowserThread().id
+    surface === "home" || surface === "docs" ? undefined : getBrowserThread().id
   );
   const [snapshot, setSnapshot] = useState<PublishedRepositorySnapshot | undefined>(
     preparedRoute.repositorySnapshot,
@@ -289,6 +289,12 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
   const [agentExperienceMounted, setAgentExperienceMounted] = useState(
     surface === "home" || surface === "agent",
   );
+  const [retainedAgentSurface, setRetainedAgentSurface] = useState<"home" | "agent" | undefined>(
+    surface === "home" || surface === "agent" ? surface : undefined,
+  );
+  const agentExperienceSurface = surface === "home" || surface === "agent"
+    ? surface
+    : retainedAgentSurface;
   const needsRepository = surface === "code" || surface === "commits";
   const searchInputRef = useRef<HTMLInputElement>(null);
   const searchDialogRef = useRef<HTMLElement>(null);
@@ -491,6 +497,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
 
   useLayoutEffect(() => {
     retainAgentExperience(surface);
+    if (surface === "home" || surface === "agent") setRetainedAgentSurface(surface);
   }, [retainAgentExperience, surface]);
 
   useEffect(() => {
@@ -664,9 +671,20 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
       : `${surface === "code" ? "Source" : `${surface[0].toUpperCase()}${surface.slice(1)}`} · Nanocodex`;
   }, [surface]);
 
+  useLayoutEffect(() => {
+    if (surface !== "home" || location.pathname !== "/") return;
+    const search = new URLSearchParams(location.search);
+    if (!search.has("thread")) return;
+    search.delete("thread");
+    const query = search.toString();
+    navigate(query ? `/?${query}` : "/", { replace: true });
+  }, [location.pathname, location.search, navigate, surface]);
+
   const threadSurfacePath = useCallback(
     (nextSurface: Surface) =>
-      threadId
+      nextSurface === "home"
+        ? pathForSurface("home")
+        : threadId
         ? `${pathForSurface(nextSurface)}?thread=${threadId}`
         : pathForSurface(nextSurface),
     [threadId],
@@ -768,7 +786,14 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
         );
       return;
     }
-    const nextThreadId = threadId ?? getBrowserThread().id;
+    if (nextSurface === "home") {
+      const destination = pathForSurface("home");
+      if (`${location.pathname}${location.search}` === destination) return;
+      repositoryRequestId.current++;
+      startTransition(() => navigate(destination));
+      return;
+    }
+    const nextThreadId = threadId ?? crypto.randomUUID();
     const destination = `${pathForSurface(nextSurface)}?thread=${nextThreadId}`;
     if (`${location.pathname}${location.search}` === destination) return;
     repositoryRequestId.current++;
@@ -824,7 +849,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
     if (`${location.pathname}${location.search}` === destination) return;
     retainAgentExperience("commits");
     const navigationId = ++surfaceNavigationId.current;
-    const nextThreadId = threadId ?? getBrowserThread().id;
+    const nextThreadId = threadId ?? crypto.randomUUID();
     repositoryRequestId.current++;
     navigateToPreparedRepository("commits", destination, navigationId, nextThreadId);
   }, [
@@ -1294,13 +1319,13 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
                   className="sr-only"
                   id={surface === "agent" ? "agent-page-title" : "home-title"}
                 >
-                  {surface === "agent" ? "Nanocodex browser agent" : "High-performance Codex SDK. Runs anywhere."}
+                  {surface === "agent" ? "Nanocodex durable browser agent" : "High-performance Codex SDK. Runs anywhere."}
                 </h1>
                 <section className="home-demo" id="agent-demo">
                   <AgentExperience
                     beforeLocalTurn={deploymentRollover.beforeLocalTurn}
                     deploymentCurrent={deploymentRollover.deploymentCurrent}
-                    landing={surface === "home"}
+                    landing={agentExperienceSurface === "home"}
                     mode={
                       surface === "agent"
                         ? "full"
@@ -1309,7 +1334,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
                           : "hidden"
                     }
                     onThreadChange={setThreadId}
-                    threadId={threadId ?? getBrowserThread().id}
+                    threadId={threadId}
                   />
                 </section>
               </article>

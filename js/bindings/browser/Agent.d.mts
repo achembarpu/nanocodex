@@ -35,6 +35,8 @@ export declare namespace create {
     transport?: WorkerTransport | undefined;
     /** Stable OPFS/Git workspace identity for the default browser harness. */
     threadId?: string | undefined;
+    /** Set false to keep this browser session out of the IndexedDB durability store. */
+    durability?: false | undefined;
     /** Set false to omit the default OPFS, shell, web, image, plan, and artifact tools. */
     harness?: false | undefined;
   };
