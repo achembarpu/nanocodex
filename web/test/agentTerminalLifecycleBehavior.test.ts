@@ -15,6 +15,7 @@ import {
   sourceTreeItemHeight,
   terminalComposerAction,
   terminalComposerMinimumHeight,
+  visualViewportShowsKeyboard,
 } from "../src/mobileInteraction.ts";
 
 test("auth refreshes deduplicate only within the current mutation generation", async () => {
@@ -190,6 +191,21 @@ test("visual viewport floors include the measured composer and bottom safe area"
     measuredComposerHeight: 112.1,
     safeAreaInsetBottom: 34,
   }), 113, "a taller measured composer remains authoritative");
+});
+
+test("only keyboard-sized visual viewport occlusion collapses the bottom safe area", () => {
+  assert.equal(visualViewportShowsKeyboard({
+    baselineHeight: 852,
+    viewportHeight: 852,
+  }), false);
+  assert.equal(visualViewportShowsKeyboard({
+    baselineHeight: 852,
+    viewportHeight: 760,
+  }), false, "browser chrome movement is not a software keyboard");
+  assert.equal(visualViewportShowsKeyboard({
+    baselineHeight: 852,
+    viewportHeight: 520,
+  }), true);
 });
 
 test("a running touch agent keeps a visible send action for a follow-up", () => {

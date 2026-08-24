@@ -1,12 +1,17 @@
 .nanocodex-demo {
   position: relative;
   width: 100%;
-  --terminal-composer-min-height: calc(62px + env(safe-area-inset-bottom));
+  --terminal-safe-area-bottom: env(safe-area-inset-bottom);
+  --terminal-composer-min-height: calc(62px + var(--terminal-safe-area-bottom));
   --terminal-background: var(--surface);
   --terminal-foreground: var(--text);
   --terminal-muted: color-mix(in srgb, var(--text) 56%, transparent);
   --terminal-border: var(--border-soft);
   --terminal-hover: var(--surface-hover);
+}
+
+[data-agent-keyboard] .nanocodex-demo {
+  --terminal-safe-area-bottom: 0px;
 }
 
 .agent-runtime-switch {
@@ -584,7 +589,7 @@
     padding:
       8px
       max(8px, env(safe-area-inset-right))
-      max(8px, env(safe-area-inset-bottom))
+      max(8px, var(--terminal-safe-area-bottom))
       max(8px, env(safe-area-inset-left));
     color: var(--terminal-foreground);
     background: var(--terminal-background);
@@ -707,7 +712,7 @@
 @media (max-width: 740px), (pointer: coarse) and (orientation: landscape) and (max-width: 950px) {
   .nanocodex-demo {
     min-width: 0;
-    --terminal-composer-min-height: calc(62px + env(safe-area-inset-bottom));
+    --terminal-composer-min-height: calc(62px + var(--terminal-safe-area-bottom));
   }
 
   .agent-runtime-switch {

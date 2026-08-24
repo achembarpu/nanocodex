@@ -141,7 +141,7 @@ test("the homepage is one local, terminal-first agent on desktop and mobile", ()
   assert.match(terminal, /aria-label="Copy terminal transcript"/);
   assert.match(terminal, /<Streamdown[\s\S]*?mode=\{entry\.streaming \? "streaming" : "static"\}/);
   assert.match(terminalCss, /--terminal-background:\s*var\(--surface\)/);
-  assert.match(homeCss, /height:\s*calc\(100dvh - var\(--shell-header-height\)\)/);
+  assert.match(homeCss, /\.home-page \{[\s\S]*?height:\s*100%/);
   assert.match(homeCss, /overflow:\s*hidden/);
   assert.match(homeCss, /\.home-page \.agent-terminal-shell \{[\s\S]*?height:\s*100%/);
   assert.doesNotMatch(terminal, /<NanocodexTui|<WorkspacePanel/);
@@ -193,7 +193,9 @@ test("touch terminals use one native IME-safe composer and one contextual action
   const composer = ruleBlock(terminalCss, ".agent-touch-composer {", touchCss);
   assert.match(composer, /position:\s*relative/);
   assert.match(composer, /min-height:\s*var\(--terminal-composer-min-height\)/);
-  assert.match(terminalCss, /--terminal-composer-min-height:\s*calc\(62px \+ env\(safe-area-inset-bottom\)\)/);
+  assert.match(terminalCss, /--terminal-safe-area-bottom:\s*env\(safe-area-inset-bottom\)/);
+  assert.match(terminalCss, /--terminal-composer-min-height:\s*calc\(62px \+ var\(--terminal-safe-area-bottom\)\)/);
+  assert.match(terminalCss, /\[data-agent-keyboard\] \.nanocodex-demo \{[\s\S]*?--terminal-safe-area-bottom:\s*0px/);
   assert.match(composer, /env\(safe-area-inset-left\)/);
   assert.match(composer, /env\(safe-area-inset-right\)/);
   const field = ruleBlock(terminalCss, ".agent-touch-field {", touchCss);
@@ -226,10 +228,13 @@ test("the phone transcript owns the remaining workspace and native vertical gest
   assert.match(transcript, /-webkit-overflow-scrolling:\s*touch/);
   assert.match(terminalCss, /\.nanocodex-demo\.is-landing \.conversation-workspace \{[\s\S]*?grid-template-rows:\s*minmax\(0, 1fr\)/);
   assert.match(homeCss, /\.home-page \{[\s\S]*?overflow:\s*hidden/);
-  assert.match(application, /if \(surface !== "agent"\) return;[\s\S]*?classList\.add\("agent-viewport-locked"\)[\s\S]*?lockDocumentScroll\(root, body\)/);
+  assert.match(application, /const terminalSurfaceActive = surface === "home" \|\| surface === "agent"/);
+  assert.match(application, /if \(!terminalSurfaceActive\) return;[\s\S]*?classList\.add\("agent-viewport-locked"\)[\s\S]*?lockDocumentScroll\(root, body\)/);
+  assert.match(application, /className=\{`site-shell surface-\$\{surface\}`\} ref=\{shellRef\}/);
+  assert.match(application, /\}, \[terminalSurfaceActive\]\)/);
   assert.match(indexCss, /html\.agent-viewport-locked,[\s\S]*?body\.agent-viewport-locked \{[\s\S]*?height:\s*100%;[\s\S]*?min-height:\s*0/);
   const fixedBody = ruleBlock(indexCss, "body.agent-viewport-locked {", indexCss.indexOf("body.agent-viewport-locked {") + 1);
-  const fixedSurface = ruleBlock(indexCss, ".surface-agent {", indexCss.lastIndexOf(".surface-agent {"));
+  const fixedSurface = ruleBlock(indexCss, ".surface-home,", indexCss.lastIndexOf(".surface-home,"));
   assert.match(fixedBody, /position:\s*fixed/);
   assert.match(fixedBody, /inset:\s*0/);
   assert.match(fixedSurface, /position:\s*fixed/);
@@ -239,6 +244,8 @@ test("the phone transcript owns the remaining workspace and native vertical gest
   assert.match(application, /agentSurface\.style\.height = `\$\{viewport\.height\}px`/);
   assert.match(application, /viewport\?\.addEventListener\("resize", anchorViewport\)/);
   assert.match(application, /viewport\?\.addEventListener\("scroll", anchorViewport\)/);
+  assert.match(application, /visualViewportShowsKeyboard\(\{[\s\S]*?baselineHeight,[\s\S]*?viewportHeight:\s*viewport\.height/);
+  assert.match(application, /agentSurface\.toggleAttribute\("data-agent-keyboard"/);
 });
 
 test("compact agent chrome prioritizes the conversation and transcript", () => {

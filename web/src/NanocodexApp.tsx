@@ -61,6 +61,7 @@ import {
   type Surface,
 } from "./navigation";
 import { COMPACT_WORKSPACE_QUERY } from "./pierreCodeView";
+import { visualViewportShowsKeyboard } from "./mobileInteraction";
 import { RouteErrorBoundary } from "./RouteErrorBoundary";
 import type {
   PublishedCommitHistory,
@@ -295,7 +296,9 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
   const agentExperienceSurface = surface === "home" || surface === "agent"
     ? surface
     : retainedAgentSurface;
+  const terminalSurfaceActive = surface === "home" || surface === "agent";
   const needsRepository = surface === "code" || surface === "commits";
+  const shellRef = useRef<HTMLDivElement>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
   const searchDialogRef = useRef<HTMLElement>(null);
   const searchOpenerRef = useRef<HTMLElement | null>(null);
@@ -623,10 +626,10 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
   }, [theme]);
 
   useLayoutEffect(() => {
-    if (surface !== "agent") return;
+    if (!terminalSurfaceActive) return;
     const root = document.documentElement;
     const body = document.body;
-    const agentSurface = document.querySelector<HTMLElement>(".surface-agent");
+    const agentSurface = shellRef.current;
     const viewport = window.visualViewport;
     const roots = [root, body] as const;
     const alreadyLocked = roots.map((element) =>
@@ -636,33 +639,52 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
     window.scrollTo(0, 0);
     const restoreScroll = lockDocumentScroll(root, body);
     let viewportFrame = 0;
+    let viewportWidth = viewport?.width;
+    let baselineHeight = Math.max(root.clientHeight, viewport?.height ?? 0);
     const anchorViewport = () => {
       window.cancelAnimationFrame(viewportFrame);
       viewportFrame = window.requestAnimationFrame(() => {
         if (!agentSurface?.isConnected || !viewport) return;
+        if (viewportWidth !== viewport.width) {
+          viewportWidth = viewport.width;
+          baselineHeight = Math.max(root.clientHeight, viewport.height);
+        } else {
+          baselineHeight = Math.max(baselineHeight, root.clientHeight, viewport.height);
+        }
         agentSurface.style.top = `${viewport.offsetTop}px`;
         agentSurface.style.left = `${viewport.offsetLeft}px`;
         agentSurface.style.width = `${viewport.width}px`;
         agentSurface.style.height = `${viewport.height}px`;
+        agentSurface.toggleAttribute("data-agent-keyboard", visualViewportShowsKeyboard({
+          baselineHeight,
+          viewportHeight: viewport.height,
+        }));
       });
     };
     anchorViewport();
     viewport?.addEventListener("resize", anchorViewport);
     viewport?.addEventListener("scroll", anchorViewport);
+    window.addEventListener("resize", anchorViewport);
+    document.addEventListener("focusin", anchorViewport);
+    document.addEventListener("focusout", anchorViewport);
     return () => {
       window.cancelAnimationFrame(viewportFrame);
       viewport?.removeEventListener("resize", anchorViewport);
       viewport?.removeEventListener("scroll", anchorViewport);
+      window.removeEventListener("resize", anchorViewport);
+      document.removeEventListener("focusin", anchorViewport);
+      document.removeEventListener("focusout", anchorViewport);
       agentSurface?.style.removeProperty("top");
       agentSurface?.style.removeProperty("left");
       agentSurface?.style.removeProperty("width");
       agentSurface?.style.removeProperty("height");
+      agentSurface?.removeAttribute("data-agent-keyboard");
       restoreScroll();
       roots.forEach((element, index) => {
         if (!alreadyLocked[index]) element.classList.remove("agent-viewport-locked");
       });
     };
-  }, [surface]);
+  }, [terminalSurfaceActive]);
 
   useEffect(() => {
     if (surface === "docs") return;
@@ -1093,7 +1115,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
   );
 
   return (
-    <div className={`site-shell surface-${surface}`}>
+    <div className={`site-shell surface-${surface}`} ref={shellRef}>
         <header
           className="site-header"
           inert={commitModalOpen ? true : undefined}
