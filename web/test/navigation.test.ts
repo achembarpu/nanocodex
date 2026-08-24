@@ -173,8 +173,9 @@ test("the mounted shell prefetches route data without module-loader orchestratio
   assert.match(css, /\.surface-switch a\s*\{[^}]*touch-action:\s*manipulation/);
   assert.match(
     css,
-    /@media \(max-width: 420px\)[\s\S]*?--mobile-header-height: calc\(96px \+ env\(safe-area-inset-top\)\)[\s\S]*?\.header-center \{[\s\S]*?grid-row: 2;[\s\S]*?grid-column: 1 \/ -1;[\s\S]*?\.surface-switch \{[\s\S]*?min-width: 352px/,
+    /@media \(max-width: 740px\)[\s\S]*?\.header-center \{[\s\S]*?display: none;[\s\S]*?\.mobile-navigation-trigger \{[\s\S]*?display: grid;[\s\S]*?\.mobile-product-navigation > nav \{[\s\S]*?repeat\(2, minmax\(0, 1fr\)\)/,
   );
+  assert.match(application, /useModalBoundary\(\{[\s\S]*?open: mobileNavigationOpen/);
 });
 
 test("Source and Commits navigation prepares exact route state before navigating", () => {
