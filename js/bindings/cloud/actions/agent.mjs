@@ -25,7 +25,7 @@ export async function create(client, options) {
 
   const toolCalls = createToolCallLedger();
   const sessionId = options?.sessionId ?? createSessionId();
-  const harnessThreadId = uuid(sessionId) ? sessionId : createSessionId();
+  const harnessThreadId = uuid(sessionId) ? sessionId : crypto.randomUUID();
   const grantSession = client._captureSession?.();
   if (!grantSession) throw new Error("The Connect grant session is unavailable.");
   const grantClient = { request: grantSession.request, transport: client.transport };
