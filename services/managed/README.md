@@ -81,7 +81,7 @@ commands such as `gh` directly in the interpreter. Output, execution
 time, files, and entry counts remain bounded. A host-owned secure Fetcher sends
 public HTTP through the gateway. Private managed agents may also use exact
 connector destinations; Multiplayer agents receive no connector subject, so
-GitHub, Gmail, and Drive fail closed. Provider credentials never enter the shell.
+GitHub, Gmail, Drive, and X fail closed. Provider credentials never enter the shell.
 
 Browser-local agents continue to use OPFS. Managed and Multiplayer agents
 cannot use OPFS, while a plain in-memory filesystem would disappear on Durable
@@ -172,7 +172,7 @@ cookie (or the server-side administrator during cleanup) may delete a room.
 Every authenticated room member may target the shared agent; per-member and
 per-room quotas bound shared spend. Only the owner may delete the room. The
 agent profile has the standard shell, workspace, web, image, and planning tools,
-but no account connector capability. GitHub, Gmail, and Drive return
+but no account connector capability. GitHub, Gmail, Drive, and X return
 `requires_login` for the owner and every invitee. Local durable limits allow six turns per member/minute and 60 room
 turns/hour. A deployment-wide singleton
 adds hard ceilings of 16 active two-hour rooms, 32 allocations/hour, and 240

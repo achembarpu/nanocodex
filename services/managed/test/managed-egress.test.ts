@@ -25,6 +25,7 @@ describe("Computer egress gateway", () => {
       "https://api.github.com/repos/nanocodex/nanocodex/pulls?state=open",
       "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=10",
       "https://www.googleapis.com/drive/v3/files?pageSize=10",
+      "https://api.x.com/2/dm_events?max_results=10",
     ]) {
       expect((await gateway.fetch(url)).status).toBe(200);
     }
@@ -34,19 +35,34 @@ describe("Computer egress gateway", () => {
       headers: { "content-type": "application/octet-stream" },
       body: writeBody,
     })).status).toBe(200);
+    const xWriteBody = JSON.stringify({ text: "hello from Nanocodex" });
+    expect((await gateway.fetch("https://api.x.com/2/tweets", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: xWriteBody,
+    })).status).toBe(200);
+    expect((await gateway.fetch(
+      "https://api.x.com/2/users/2244994945/bookmarks/1890000000000000000",
+      { method: "DELETE" },
+    )).status).toBe(200);
 
     expect(seen.map((request) => request.url)).toEqual([
       "https://api.github.com/repos/nanocodex/nanocodex/pulls?state=open",
       "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=10",
       "https://www.googleapis.com/drive/v3/files?pageSize=10",
+      "https://api.x.com/2/dm_events?max_results=10",
       "https://www.googleapis.com/upload/drive/v3/files?uploadType=media",
+      "https://api.x.com/2/tweets",
+      "https://api.x.com/2/users/2244994945/bookmarks/1890000000000000000",
     ]);
     expect(seen.every((request) => (
       request.headers.get("authorization") === "Bearer NANOCODEX_PROVIDER_CREDENTIAL"
         && request.headers.get("x-nanocodex-subject") === SUBJECT
     ))).toBe(true);
     expect(publicFetch).not.toHaveBeenCalled();
-    expect(await seen[3]!.text()).toBe(writeBody);
+    expect(await seen[4]!.text()).toBe(writeBody);
+    expect(await seen[5]!.text()).toBe(xWriteBody);
+    expect(seen[5]!.headers.get("content-type")).toBe("application/json");
   });
 
   it("rejects credentials, lookalikes, userinfo, and private destinations", async () => {

@@ -33,6 +33,8 @@ function preflightEnvironment() {
     NANOCODEX_GITHUB_OAUTH_CLIENT_SECRET_CONFIGURED: "true",
     NANOCODEX_GOOGLE_OAUTH_CLIENT_ID_CONFIGURED: "true",
     NANOCODEX_GOOGLE_OAUTH_CLIENT_SECRET_CONFIGURED: "true",
+    NANOCODEX_X_OAUTH_CLIENT_ID_CONFIGURED: "true",
+    NANOCODEX_X_OAUTH_CLIENT_SECRET_CONFIGURED: "true",
     TARGET_SHA: revision,
   };
 }
@@ -51,6 +53,8 @@ test("production preflight requires only deployment and application boundary inp
     "NANOCODEX_GITHUB_OAUTH_CLIENT_SECRET_CONFIGURED",
     "NANOCODEX_GOOGLE_OAUTH_CLIENT_ID_CONFIGURED",
     "NANOCODEX_GOOGLE_OAUTH_CLIENT_SECRET_CONFIGURED",
+    "NANOCODEX_X_OAUTH_CLIENT_ID_CONFIGURED",
+    "NANOCODEX_X_OAUTH_CLIENT_SECRET_CONFIGURED",
   ]) {
     const missing = preflightEnvironment();
     delete missing[name];
@@ -151,6 +155,8 @@ test("production Wrangler environment excludes every secret and stale provider i
     NANOCODEX_GITHUB_OAUTH_CLIENT_SECRET: "github-client-secret",
     NANOCODEX_GOOGLE_OAUTH_CLIENT_ID: "google-client-id",
     NANOCODEX_GOOGLE_OAUTH_CLIENT_SECRET: "google-client-secret",
+    NANOCODEX_X_OAUTH_CLIENT_ID: "x-client-id",
+    NANOCODEX_X_OAUTH_CLIENT_SECRET: "x-client-secret",
     NANOCODEX_MANAGED_AUTH_MODE: "chatgpt",
     NANOCODEX_MANAGED_CODEX_RELAY_URL: "relay-secret",
     OPENAI_API_KEY: "provider-secret",

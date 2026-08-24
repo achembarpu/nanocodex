@@ -20,7 +20,7 @@ const BLOCKED_RESPONSE_HEADERS = new Set([
   "x-nanocodex-subject",
 ]);
 
-type ConnectorId = "github" | "gmail" | "gdrive";
+type ConnectorId = "github" | "gmail" | "gdrive" | "x";
 
 type ProviderPolicy = Readonly<{
   connector: ConnectorId;
@@ -39,6 +39,10 @@ const PROVIDERS = new Map<string, ProviderPolicy>([
   ["www.googleapis.com", {
     connector: "gdrive",
     path: (path) => path.startsWith("/drive/v3/") || path.startsWith("/upload/drive/v3/"),
+  }],
+  ["api.x.com", {
+    connector: "x",
+    path: (path) => /^\/2\/(?:tweets|users|lists|dm_(?:conversations|events)|media)(?:\/|$)/.test(path),
   }],
 ]);
 

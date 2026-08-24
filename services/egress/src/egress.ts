@@ -29,7 +29,7 @@ const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
 const CONNECTOR_METHODS = new Set(["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]);
 
 type ConnectorOperation = Readonly<{
-  id: "github" | "gmail" | "gdrive";
+  id: "github" | "gmail" | "gdrive" | "x";
   origin: `https://${string}`;
   paths: readonly RegExp[];
 }>;
@@ -49,6 +49,17 @@ const CONNECTOR_OPERATIONS: readonly ConnectorOperation[] = [
     id: "gdrive",
     origin: "https://www.googleapis.com",
     paths: [/^\/drive\/v3(?:\/|$)/, /^\/upload\/drive\/v3(?:\/|$)/],
+  },
+  {
+    id: "x",
+    origin: "https://api.x.com",
+    paths: [
+      /^\/2\/tweets(?:\/|$)/,
+      /^\/2\/users(?:\/|$)/,
+      /^\/2\/lists(?:\/|$)/,
+      /^\/2\/dm_(?:conversations|events)(?:\/|$)/,
+      /^\/2\/media(?:\/|$)/,
+    ],
   },
 ];
 
@@ -313,7 +324,7 @@ async function handleControl(request: Request, url: URL, env: EgressEnv): Promis
   }
 
   const connectorMatch = url.pathname.match(
-    /^\/users\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/connectors(?:\/(github|gmail|gdrive)(\/callback)?)?$/,
+    /^\/users\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/connectors(?:\/(github|gmail|gdrive|x)(\/callback)?)?$/,
   );
   if (connectorMatch) {
     const userId = connectorMatch[1]!;

@@ -5,9 +5,9 @@ import {
 } from "./account-auth";
 
 type ConnectorEnv = AccountAuthEnv & { NANOCODEX: Fetcher };
-type ConnectorId = "github" | "gmail" | "gdrive";
+type ConnectorId = "github" | "gmail" | "gdrive" | "x";
 
-const CONNECTOR = /^(github|gmail|gdrive)$/;
+const CONNECTOR = /^(github|gmail|gdrive|x)$/;
 const CALLBACK_SUFFIX = "/callback";
 const CONNECTOR_ERROR_CODES = new Set([
   "authorization_code_missing",

@@ -19,6 +19,10 @@ export function productionBrokerSecrets(environment) {
     "NANOCODEX_GOOGLE_OAUTH_CLIENT_ID");
   const googleClientSecret = required(environment.NANOCODEX_GOOGLE_OAUTH_CLIENT_SECRET,
     "NANOCODEX_GOOGLE_OAUTH_CLIENT_SECRET");
+  const xClientId = required(environment.NANOCODEX_X_OAUTH_CLIENT_ID,
+    "NANOCODEX_X_OAUTH_CLIENT_ID");
+  const xClientSecret = required(environment.NANOCODEX_X_OAUTH_CLIENT_SECRET,
+    "NANOCODEX_X_OAUTH_CLIENT_SECRET");
   if (!/^[A-Za-z0-9_-]{43}$/.test(encryptionKey)) {
     throw new Error("NANOCODEX_CREDENTIAL_ENCRYPTION_KEY must be a 32-byte base64url value");
   }
@@ -32,6 +36,8 @@ export function productionBrokerSecrets(environment) {
     GITHUB_OAUTH_CLIENT_SECRET: githubClientSecret,
     GOOGLE_OAUTH_CLIENT_ID: googleClientId,
     GOOGLE_OAUTH_CLIENT_SECRET: googleClientSecret,
+    X_OAUTH_CLIENT_ID: xClientId,
+    X_OAUTH_CLIENT_SECRET: xClientSecret,
   };
   const previousEncryptionKey = environment.NANOCODEX_CREDENTIAL_ENCRYPTION_KEY_PREVIOUS;
   if (previousEncryptionKey !== undefined) {
@@ -71,6 +77,8 @@ export function brokerWranglerEnvironment(environment, accountId, apiToken) {
     "NANOCODEX_GITHUB_OAUTH_CLIENT_SECRET",
     "NANOCODEX_GOOGLE_OAUTH_CLIENT_ID",
     "NANOCODEX_GOOGLE_OAUTH_CLIENT_SECRET",
+    "NANOCODEX_X_OAUTH_CLIENT_ID",
+    "NANOCODEX_X_OAUTH_CLIENT_SECRET",
   ]) delete clean[name];
   clean.CLOUDFLARE_ACCOUNT_ID = accountId;
   if (apiToken) clean.CLOUDFLARE_API_TOKEN = apiToken;

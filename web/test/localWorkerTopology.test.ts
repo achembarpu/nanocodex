@@ -13,6 +13,8 @@ test("local development always mirrors the two private production Workers", () =
     NANOCODEX_LOCAL_GITHUB_OAUTH_CLIENT_SECRET: "github-secret",
     NANOCODEX_LOCAL_GOOGLE_OAUTH_CLIENT_ID: "google-client",
     NANOCODEX_LOCAL_GOOGLE_OAUTH_CLIENT_SECRET: "google-secret",
+    NANOCODEX_LOCAL_X_OAUTH_CLIENT_ID: "x-client",
+    NANOCODEX_LOCAL_X_OAUTH_CLIENT_SECRET: "x-secret",
     OPENAI_API_KEY: "must-not-enter-managed-worker",
   });
   assert.equal(egress?.configPath, "../services/egress/wrangler.broker.jsonc");
@@ -29,6 +31,8 @@ test("local development always mirrors the two private production Workers", () =
       GITHUB_OAUTH_CLIENT_SECRET: "github-secret",
       GOOGLE_OAUTH_CLIENT_ID: "google-client",
       GOOGLE_OAUTH_CLIENT_SECRET: "google-secret",
+      X_OAUTH_CLIENT_ID: "x-client",
+      X_OAUTH_CLIENT_SECRET: "x-secret",
     },
   });
   assert.equal(managed?.configPath, "../services/managed/wrangler.jsonc");
@@ -51,5 +55,9 @@ test("local managed defaults are immediately runnable and validate only policy",
   assert.throws(
     () => localManagedAuxiliaryWorkers({ NANOCODEX_LOCAL_GOOGLE_OAUTH_CLIENT_ID: "incomplete" }),
     /Google OAuth client ID and secret must be configured together/,
+  );
+  assert.throws(
+    () => localManagedAuxiliaryWorkers({ NANOCODEX_LOCAL_X_OAUTH_CLIENT_ID: "incomplete" }),
+    /X OAuth client ID and secret must be configured together/,
   );
 });

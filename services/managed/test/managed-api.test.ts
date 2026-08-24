@@ -91,6 +91,7 @@ describe("managed agents REST and resumable SSE", () => {
         github: { connected: false },
         gmail: { connected: false },
         gdrive: { connected: false },
+        x: { connected: false },
       },
     });
 

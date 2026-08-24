@@ -28,6 +28,15 @@ import {
   decodeGDriveTokenResponse,
 } from "./connectors/gdrive";
 import { canonicalConnectorPath } from "./connector-path";
+import {
+  buildXAuthorizationUrl,
+  buildXIdentityRequest,
+  buildXRefreshRequest,
+  buildXRevocationRequest,
+  buildXTokenRequest,
+  decodeXIdentity,
+  decodeXTokenResponse,
+} from "./connectors/x";
 
 const STATE_KEY = "connector-state";
 const PENDING_TTL_MS = 10 * 60_000;
@@ -38,7 +47,7 @@ const MAX_CONNECTOR_RESPONSE_BYTES = 8 * 1024 * 1024;
 const CONNECTOR_TIMEOUT_MS = 20_000;
 const EXPIRY_SKEW_MS = 30_000;
 const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
-const CONNECTOR = /^(github|gmail|gdrive)$/;
+const CONNECTOR = /^(github|gmail|gdrive|x)$/;
 const CONNECTOR_METHODS = new Set(["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]);
 
 type ProviderRule = Readonly<{
@@ -63,15 +72,28 @@ const PROVIDER_RULES: readonly ProviderRule[] = [
     origin: "https://www.googleapis.com",
     paths: [/^\/drive\/v3(?:\/|$)/, /^\/upload\/drive\/v3(?:\/|$)/],
   },
+  {
+    id: "x",
+    origin: "https://api.x.com",
+    paths: [
+      /^\/2\/tweets(?:\/|$)/,
+      /^\/2\/users(?:\/|$)/,
+      /^\/2\/lists(?:\/|$)/,
+      /^\/2\/dm_(?:conversations|events)(?:\/|$)/,
+      /^\/2\/media(?:\/|$)/,
+    ],
+  },
 ];
 
-export type ConnectorId = "github" | "gmail" | "gdrive";
+export type ConnectorId = "github" | "gmail" | "gdrive" | "x";
 
 export interface ConnectorBrokerEnv extends CredentialVaultEnv {
   GITHUB_OAUTH_CLIENT_ID?: string;
   GITHUB_OAUTH_CLIENT_SECRET?: string;
   GOOGLE_OAUTH_CLIENT_ID?: string;
   GOOGLE_OAUTH_CLIENT_SECRET?: string;
+  X_OAUTH_CLIENT_ID?: string;
+  X_OAUTH_CLIENT_SECRET?: string;
 }
 
 type StoredConnector = {
@@ -161,7 +183,7 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
       if (request.method === "GET" && url.pathname === "/v1/status") {
         return json({ connectors: this.#publicStatus() }, 200);
       }
-      const match = url.pathname.match(/^\/v1\/(github|gmail|gdrive)(?:\/(start|callback))?$/);
+      const match = url.pathname.match(/^\/v1\/(github|gmail|gdrive|x)(?:\/(start|callback))?$/);
       const id = connectorId(match?.[1]);
       if (!id) return jsonError(404, "not_found");
       const operation = match?.[2];
@@ -282,6 +304,7 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
       throw new ConnectorFailure(409, "connector_reauthentication_required");
     }
     if (id === "github") return this.#refreshGitHubConnector(connector);
+    if (id === "x") return this.#refreshXConnector(connector);
     return this.#refreshGoogleConnector(id, connector);
   }
 
@@ -339,6 +362,43 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
     throw new ConnectorFailure(409, "connector_reauthentication_required");
   }
 
+  async #refreshXConnector(connector: StoredConnector): Promise<StoredConnector> {
+    const credentials = providerCredentials("x", this.#env);
+    const response = await providerFetch(buildXRefreshRequest(
+      credentials.clientId,
+      credentials.clientSecret,
+      connector.refreshToken!,
+    ));
+    if (REDIRECT_STATUS.has(response.status) || !response.ok) {
+      await response.body?.cancel();
+      if (response.status === 400 || response.status === 401) {
+        return this.#rejectRefresh("x", connector);
+      }
+      connectorAudit("refresh", "error", "x", {
+        status: 503,
+        code: "connector_provider_unavailable",
+      });
+      throw new ConnectorFailure(503, "connector_provider_unavailable");
+    }
+    let refreshed;
+    try {
+      refreshed = decodeXTokenResponse(await providerJson(response));
+    } catch {
+      return this.#rejectRefresh("x", connector);
+    }
+    const next: StoredConnector = {
+      ...connector,
+      accessToken: refreshed.accessToken,
+      refreshToken: refreshed.refreshToken ?? connector.refreshToken!,
+      expiresAt: Date.now() + refreshed.expiresIn * 1_000,
+      scopes: [...refreshed.scopes],
+    };
+    this.#connectors.connectors.x = next;
+    await this.#persist();
+    connectorAudit("refresh", "allow", "x", { status: 200 });
+    return next;
+  }
+
   async #refreshGoogleConnector(
     id: "gmail" | "gdrive",
     connector: StoredConnector,
@@ -382,6 +442,25 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
   }
 
   async #revoke(id: ConnectorId, connector: StoredConnector): Promise<void> {
+    if (id === "x") {
+      const credentials = providerCredentials(id, this.#env);
+      const tokens = [...new Set([
+        connector.refreshToken,
+        connector.accessToken,
+      ].filter((token): token is string => Boolean(token)))];
+      for (const token of tokens) {
+        const response = await providerFetch(buildXRevocationRequest(
+          credentials.clientId,
+          credentials.clientSecret,
+          token,
+        ));
+        await response.body?.cancel();
+        if (response.status !== 200) {
+          throw new ConnectorFailure(503, "connector_revocation_failed");
+        }
+      }
+      return;
+    }
     const response = await providerFetch(revocationRequest(id, connector, this.#env));
     await response.body?.cancel();
     const revoked = id === "github" ? response.status === 204 : response.status === 200;
@@ -389,7 +468,7 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
   }
 
   #disconnectIds(id: ConnectorId, connector: StoredConnector): ConnectorId[] {
-    if (id === "github") return [id];
+    if (id === "github" || id === "x") return [id];
     return (["gmail", "gdrive"] as const).filter((candidate) => (
       candidate === id
       || this.#connectors.connectors[candidate]?.accountId === connector.accountId
@@ -424,6 +503,7 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
       github: status("github"),
       gmail: status("gmail"),
       gdrive: status("gdrive"),
+      x: status("x"),
     };
   }
 
@@ -553,6 +633,7 @@ function authorizationUrl(
   const clientId = providerCredentials(id, env).clientId;
   if (id === "github") return buildGitHubAuthorizationUrl({ clientId, ...fields });
   if (id === "gmail") return buildGmailAuthorizationUrl({ clientId, ...fields });
+  if (id === "x") return buildXAuthorizationUrl({ clientId, ...fields });
   return buildGDriveAuthorizationUrl({ clientId, ...fields });
 }
 
@@ -568,6 +649,11 @@ function tokenExchangeRequest(
     ...fields,
   });
   if (id === "gmail") return buildGmailTokenRequest({
+    clientId: credentials.clientId,
+    clientSecret: credentials.clientSecret,
+    ...fields,
+  });
+  if (id === "x") return buildXTokenRequest({
     clientId: credentials.clientId,
     clientSecret: credentials.clientSecret,
     ...fields,
@@ -603,6 +689,18 @@ function decodeToken(id: ConnectorId, value: unknown): DecodedToken {
       scopes: token.scopes,
     };
   }
+  if (id === "x") {
+    const token = decodeXTokenResponse(value);
+    if (!token.refreshToken) {
+      throw new ConnectorFailure(502, "connector_token_response_invalid");
+    }
+    return {
+      accessToken: token.accessToken,
+      ...(token.refreshToken ? { refreshToken: token.refreshToken } : {}),
+      expiresIn: token.expiresIn,
+      scopes: token.scopes,
+    };
+  }
   const token = decodeGDriveTokenResponse(value);
   return {
     accessToken: token.accessToken,
@@ -615,6 +713,7 @@ function decodeToken(id: ConnectorId, value: unknown): DecodedToken {
 function identityRequest(id: ConnectorId, accessToken: string): Request {
   if (id === "github") return buildGitHubIdentityRequest(accessToken);
   if (id === "gmail") return buildGmailIdentityRequest(accessToken);
+  if (id === "x") return buildXIdentityRequest(accessToken);
   return buildGDriveIdentityRequest(accessToken);
 }
 
@@ -650,6 +749,7 @@ function revocationRequest(
 function decodeIdentity(id: ConnectorId, value: unknown): { accountId: string; displayLabel: string } {
   if (id === "github") return decodeGitHubIdentity(value);
   if (id === "gmail") return decodeGmailIdentity(value);
+  if (id === "x") return decodeXIdentity(value);
   return decodeGDriveIdentity(value);
 }
 
@@ -657,9 +757,12 @@ function providerCredentials(
   id: ConnectorId,
   env: ConnectorBrokerEnv,
 ): { clientId: string; clientSecret: string } {
-  const clientId = (id === "github" ? env.GITHUB_OAUTH_CLIENT_ID : env.GOOGLE_OAUTH_CLIENT_ID)?.trim();
+  const clientId = (id === "github" ? env.GITHUB_OAUTH_CLIENT_ID
+    : id === "x" ? env.X_OAUTH_CLIENT_ID
+    : env.GOOGLE_OAUTH_CLIENT_ID)?.trim();
   const clientSecret = (id === "github"
     ? env.GITHUB_OAUTH_CLIENT_SECRET
+    : id === "x" ? env.X_OAUTH_CLIENT_SECRET
     : env.GOOGLE_OAUTH_CLIENT_SECRET)?.trim();
   if (!clientId || !clientSecret) throw new ConnectorFailure(503, "connector_not_configured");
   return { clientId, clientSecret };

@@ -1314,7 +1314,7 @@ describe("per-user credential broker", () => {
 });
 
 describe("per-user OAuth connectors", () => {
-  for (const connector of ["github", "gmail", "gdrive"] as const) {
+  for (const connector of ["github", "gmail", "gdrive", "x"] as const) {
     it(`completes ${connector} authorization without returning provider credentials`, async () => {
       const user = `connector-${connector}`;
       const started = await control(`/users/${user}/connectors/${connector}`, "POST", {
@@ -1350,6 +1350,54 @@ describe("per-user OAuth connectors", () => {
       }
     });
   }
+
+  for (const [code, label] of [
+    ["x-no-refresh-code", "refresh token"],
+    ["x-reduced-scope-code", "complete scope grant"],
+  ] as const) {
+    it(`rejects an X authorization without its ${label}`, async () => {
+      const user = `connector-${code}`;
+      const started = await control(`/users/${user}/connectors/x`, "POST", {
+        redirect_uri: "https://nanocodex.test/v1/connectors/x/callback",
+        return_to: "/",
+      });
+      const authorization = new URL(
+        (await started.json<{ authorization_url: string }>()).authorization_url,
+      );
+      const completed = await control(`/users/${user}/connectors/x/callback`, "POST", {
+        code,
+        state: authorization.searchParams.get("state"),
+      });
+      expect(completed.status).toBe(502);
+      const status = await SELF.fetch(`https://broker.test/users/${user}/connectors`);
+      expect(await status.json()).toMatchObject({
+        connectors: { x: { connected: false } },
+      });
+    });
+  }
+
+  it("revokes X credentials before disconnecting and preserves them if revocation fails", async () => {
+    await connect("connector-x-disconnect", "x", "x-code");
+    const disconnected = await SELF.fetch(
+      "https://broker.test/users/connector-x-disconnect/connectors/x",
+      { method: "DELETE" },
+    );
+    expect(disconnected.status).toBe(204);
+    expect(await (await SELF.fetch(
+      "https://broker.test/users/connector-x-disconnect/connectors",
+    )).json()).toMatchObject({ connectors: { x: { connected: false } } });
+
+    await connect("connector-x-revocation-failure", "x", "x-revocation-failure-code");
+    const failed = await SELF.fetch(
+      "https://broker.test/users/connector-x-revocation-failure/connectors/x",
+      { method: "DELETE" },
+    );
+    expect(failed.status).toBe(503);
+    expect(await failed.json()).toEqual({ error: "connector_revocation_failed" });
+    expect(await (await SELF.fetch(
+      "https://broker.test/users/connector-x-revocation-failure/connectors",
+    )).json()).toMatchObject({ connectors: { x: { connected: true } } });
+  });
 
   it("encrypts tokens, refresh tokens, PKCE verifiers, and OAuth state at rest", async () => {
     const stub = workerEnv.USER_CONNECTORS.getByName("connector-gdrive");
@@ -1395,7 +1443,7 @@ describe("private connector data plane", () => {
     const subject = connectorSubject("data-plane");
     const user = "connector-data-plane";
     await control(`/subjects/${subject}`, "PUT", { user_id: user });
-    for (const connector of ["github", "gmail", "gdrive"] as const) {
+    for (const connector of ["github", "gmail", "gdrive", "x"] as const) {
       await connect(user, connector, connector === "gdrive" ? "gdrive-code" : `${connector}-code`);
     }
 
@@ -1406,6 +1454,7 @@ describe("private connector data plane", () => {
         "https://api.github.com/repos/nanocodex/sdk?per_page=1",
         "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=1",
         "https://www.googleapis.com/drive/v3/files?pageSize=1",
+        "https://api.x.com/2/dm_events?max_results=5",
       ]) {
         const response = await SELF.fetch(connectorRequest(url, subject));
         expect(response.status).toBe(200);
@@ -1429,6 +1478,24 @@ describe("private connector data plane", () => {
         method: "POST",
         body: "unbounded-provider-write",
       });
+      const xWrite = await SELF.fetch(connectorRequest(
+        "https://api.x.com/2/tweets",
+        subject,
+        { method: "POST", body: JSON.stringify({ text: "hello from Nanocodex" }), contentType: "application/json" },
+      ));
+      expect(xWrite.status).toBe(200);
+      expect(await xWrite.json()).toMatchObject({
+        method: "POST",
+        body: JSON.stringify({ text: "hello from Nanocodex" }),
+        content_type: "application/json",
+      });
+      const xDelete = await SELF.fetch(connectorRequest(
+        "https://api.x.com/2/users/2244994945/bookmarks/1890000000000000000",
+        subject,
+        { method: "DELETE" },
+      ));
+      expect(xDelete.status).toBe(200);
+      expect(await xDelete.json()).toMatchObject({ method: "DELETE" });
       expect(log.mock.calls.flat().join(" ")).not.toMatch(
         /connector-access|connector-refresh|NANOCODEX_PROVIDER_CREDENTIAL/,
       );
@@ -1457,6 +1524,8 @@ describe("private connector data plane", () => {
       ),
       connectorRequest("https://www.googleapis.com/drive/v3/%252e%252e%252fother", subject),
       connectorRequest("https://www.googleapis.com/oauth2/v3/userinfo", subject),
+      connectorRequest("https://api.x.com/1.1/statuses/home_timeline.json", subject),
+      connectorRequest("https://api.x.com/2/oauth2/revoke", subject),
       connectorRequest("https://api.github.com/repos/nanocodex/sdk?access_token=caller", subject),
       connectorRequest("https://api.github.com/repos/nanocodex/sdk", ""),
       connectorRequest("https://api.github.com/repos/nanocodex/sdk", subject, {
@@ -1777,6 +1846,19 @@ describe("private connector data plane", () => {
       log.mockRestore();
     }
   });
+
+  it("refreshes an expiring X connector before polling direct messages", async () => {
+    const subject = "X".repeat(43);
+    const user = "connector-x-refresh";
+    await control(`/subjects/${subject}`, "PUT", { user_id: user });
+    await connect(user, "x", "x-expiring-code");
+    const response = await SELF.fetch(connectorRequest(
+      "https://api.x.com/2/dm_events?max_results=5",
+      subject,
+    ));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ account: "x-refreshed" });
+  });
 });
 
 function control(path: string, method: string, body: Record<string, unknown>): Promise<Response> {
@@ -1793,7 +1875,7 @@ function connectorSubject(label: string): string {
 
 async function connect(
   user: string,
-  connector: "github" | "gmail" | "gdrive",
+  connector: "github" | "gmail" | "gdrive" | "x",
   code: string,
 ): Promise<void> {
   const started = await control(`/users/${user}/connectors/${connector}`, "POST", {
@@ -1812,7 +1894,12 @@ async function connect(
 function connectorRequest(
   url: string,
   subject: string,
-  override: Readonly<{ method?: string; authorization?: string; body?: string }> = {},
+  override: Readonly<{
+    method?: string;
+    authorization?: string;
+    body?: string;
+    contentType?: string;
+  }> = {},
 ): Request {
   return new Request(url, {
     method: override.method ?? "GET",
@@ -1821,7 +1908,9 @@ function connectorRequest(
       cookie: "caller-secret=cookie",
       "proxy-authorization": "Basic caller-proxy-secret",
       ...(subject ? { "x-nanocodex-subject": subject } : {}),
-      ...(override.body === undefined ? {} : { "content-type": "application/octet-stream" }),
+      ...(override.body === undefined
+        ? {}
+        : { "content-type": override.contentType ?? "application/octet-stream" }),
     },
     ...(override.body === undefined ? {} : { body: override.body }),
   });

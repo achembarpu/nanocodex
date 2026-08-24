@@ -17,6 +17,8 @@ const connectorSecrets = {
   NANOCODEX_GITHUB_OAUTH_CLIENT_SECRET: "github-client-secret",
   NANOCODEX_GOOGLE_OAUTH_CLIENT_ID: "google-client-id",
   NANOCODEX_GOOGLE_OAUTH_CLIENT_SECRET: "google-client-secret",
+  NANOCODEX_X_OAUTH_CLIENT_ID: "x-client-id",
+  NANOCODEX_X_OAUTH_CLIENT_SECRET: "x-client-secret",
 };
 
 test("production deployment selects only owned broker and connector secrets", () => {
@@ -33,6 +35,8 @@ test("production deployment selects only owned broker and connector secrets", ()
     GITHUB_OAUTH_CLIENT_SECRET: "github-client-secret",
     GOOGLE_OAUTH_CLIENT_ID: "google-client-id",
     GOOGLE_OAUTH_CLIENT_SECRET: "google-client-secret",
+    X_OAUTH_CLIENT_ID: "x-client-id",
+    X_OAUTH_CLIENT_SECRET: "x-client-secret",
   });
   assert.throws(() => productionBrokerSecrets({}), /CREDENTIAL_ENCRYPTION_KEY/);
 });
@@ -51,6 +55,8 @@ test("production deployment accepts an optional previous encryption key for rota
     GITHUB_OAUTH_CLIENT_SECRET: "github-client-secret",
     GOOGLE_OAUTH_CLIENT_ID: "google-client-id",
     GOOGLE_OAUTH_CLIENT_SECRET: "google-client-secret",
+    X_OAUTH_CLIENT_ID: "x-client-id",
+    X_OAUTH_CLIENT_SECRET: "x-client-secret",
   });
   assert.throws(() => productionBrokerSecrets({
     NANOCODEX_CREDENTIAL_ENCRYPTION_KEY: encryptionKey,

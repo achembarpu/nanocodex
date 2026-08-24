@@ -333,12 +333,16 @@ test("local connector app credentials use private auxiliary names", () => {
     GH_CLIENT_SECRETS: "github-secret",
     GOOGLE_CLIENT_ID: "google-client",
     GOOGLE_CLIENT_SECRET: "google-secret",
+    X_CLIENT_ID: "x-client",
+    X_CLIENT_SECRET: "x-secret",
     OPENAI_API_KEY: "must-not-project",
   }), {
     NANOCODEX_LOCAL_GITHUB_OAUTH_CLIENT_ID: "github-client",
     NANOCODEX_LOCAL_GITHUB_OAUTH_CLIENT_SECRET: "github-secret",
     NANOCODEX_LOCAL_GOOGLE_OAUTH_CLIENT_ID: "google-client",
     NANOCODEX_LOCAL_GOOGLE_OAUTH_CLIENT_SECRET: "google-secret",
+    NANOCODEX_LOCAL_X_OAUTH_CLIENT_ID: "x-client",
+    NANOCODEX_LOCAL_X_OAUTH_CLIENT_SECRET: "x-secret",
   });
 });
 

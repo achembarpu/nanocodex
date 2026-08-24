@@ -1,4 +1,4 @@
-export type ConnectorPathId = "github" | "gmail" | "gdrive";
+export type ConnectorPathId = "github" | "gmail" | "gdrive" | "x";
 
 const ENCODED_GOOGLE_PATH_SEPARATOR = /%(?:2e|2f|5c|25)/i;
 

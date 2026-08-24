@@ -116,6 +116,10 @@ export function localConnectorEnvironment(environment) {
       environment.NANOCODEX_GOOGLE_OAUTH_CLIENT_ID ?? environment.GOOGLE_CLIENT_ID,
     NANOCODEX_LOCAL_GOOGLE_OAUTH_CLIENT_SECRET:
       environment.NANOCODEX_GOOGLE_OAUTH_CLIENT_SECRET ?? environment.GOOGLE_CLIENT_SECRET,
+    NANOCODEX_LOCAL_X_OAUTH_CLIENT_ID:
+      environment.NANOCODEX_X_OAUTH_CLIENT_ID ?? environment.X_CLIENT_ID,
+    NANOCODEX_LOCAL_X_OAUTH_CLIENT_SECRET:
+      environment.NANOCODEX_X_OAUTH_CLIENT_SECRET ?? environment.X_CLIENT_SECRET,
   });
 }
 

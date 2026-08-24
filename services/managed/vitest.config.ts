@@ -7,13 +7,13 @@ const connectors = new Map();
 export default {
   async fetch(request) {
     const url = new URL(request.url);
-    const connectorRoute = url.pathname.match(/^\\/users\\/([^/]+)\\/connectors(?:\\/(github|gmail|gdrive)(\\/callback)?)?$/);
+    const connectorRoute = url.pathname.match(/^\\/users\\/([^/]+)\\/connectors(?:\\/(github|gmail|gdrive|x)(\\/callback)?)?$/);
     if (connectorRoute) {
       const [, userId, connector, callback] = connectorRoute;
       if (!connector && request.method === "GET") {
         const connected = connectors.get(userId) || new Map();
         return Response.json({ connectors: Object.fromEntries(
-          ["github", "gmail", "gdrive"].map((id) => [id, connected.has(id)
+          ["github", "gmail", "gdrive", "x"].map((id) => [id, connected.has(id)
             ? { connected: true, account_id: id + "-account", label: connected.get(id) }
             : { connected: false }]),
         ) });

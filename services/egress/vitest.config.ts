@@ -40,6 +40,8 @@ export default defineConfig({
           GITHUB_OAUTH_CLIENT_SECRET: "github-client-secret",
           GOOGLE_OAUTH_CLIENT_ID: "google-client-id",
           GOOGLE_OAUTH_CLIENT_SECRET: "google-client-secret",
+          X_OAUTH_CLIENT_ID: "x-client-id",
+          X_OAUTH_CLIENT_SECRET: "x-client-secret",
         },
         workers: [{
           name: "nanocodex",
@@ -102,6 +104,43 @@ export default defineConfig({
           if (request.method === "GET" && url.hostname === "api.github.com"
             && url.pathname === "/user") {
             return Response.json({ id: 42, login: "nanocat", name: "Nano Cat" });
+          }
+          if (request.method === "POST" && url.hostname === "api.x.com"
+            && url.pathname === "/2/oauth2/token") {
+            const body = await request.clone().formData();
+            const refresh = body.get("grant_type") === "refresh_token";
+            const code = String(body.get("code") ?? "");
+            const revocationFailure = code === "x-revocation-failure-code";
+            return Response.json({
+              access_token: refresh ? "x-refreshed-access"
+                : revocationFailure ? "x-revocation-failure-access"
+                : "x-connector-access",
+              ...(code === "x-no-refresh-code" ? {} : {
+                refresh_token: revocationFailure
+                  ? "x-revocation-failure-refresh"
+                  : "x-connector-refresh",
+              }),
+              expires_in: !refresh && code === "x-expiring-code" ? 1 : 7_200,
+              token_type: "bearer",
+              scope: code === "x-reduced-scope-code"
+                ? "tweet.read users.read offline.access"
+                : "tweet.read tweet.write users.read follows.read follows.write like.read like.write bookmark.read bookmark.write list.read list.write dm.read dm.write media.write offline.access",
+            });
+          }
+          if (request.method === "POST" && url.hostname === "api.x.com"
+            && url.pathname === "/2/oauth2/revoke") {
+            const body = await request.clone().formData();
+            const token = String(body.get("token") ?? "");
+            if (token === "x-revocation-failure-refresh") {
+              return Response.json({ error: "provider unavailable" }, { status: 503 });
+            }
+            return Response.json({ revoked: token });
+          }
+          if (request.method === "GET" && url.hostname === "api.x.com"
+            && url.pathname === "/2/users/me") {
+            return Response.json({
+              data: { id: "2244994945", username: "nanocodex", name: "Nanocodex" },
+            });
           }
           if (request.method === "POST" && url.hostname === "oauth2.googleapis.com"
             && url.pathname === "/token") {
@@ -172,7 +211,8 @@ export default defineConfig({
           }
           if ((url.hostname === "api.github.com"
               || url.hostname === "gmail.googleapis.com"
-              || url.hostname === "www.googleapis.com")) {
+              || url.hostname === "www.googleapis.com"
+              || url.hostname === "api.x.com")) {
             const authorization = request.headers.get("authorization") ?? "";
             if (url.searchParams.has("redirect")) {
               return new Response(null, {
@@ -193,6 +233,7 @@ export default defineConfig({
               : authorization === "Bearer github-beta-access" ? "beta"
               : authorization === "Bearer github-refreshed-access" ? "github-refreshed"
               : authorization === "Bearer gmail-refreshed-access" ? "gmail-refreshed"
+              : authorization === "Bearer x-refreshed-access" ? "x-refreshed"
               : authorization.startsWith("Bearer ") ? "connected" : "missing";
             return Response.json({
               account,
@@ -200,6 +241,7 @@ export default defineConfig({
               path: url.pathname,
               method: request.method,
               body: request.body ? await request.text() : null,
+              content_type: request.headers.get("content-type"),
               caller_cookie: request.headers.has("cookie"),
               caller_proxy_credential: request.headers.has("proxy-authorization"),
               subject: request.headers.get("x-nanocodex-subject"),

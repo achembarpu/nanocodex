@@ -85,7 +85,7 @@ key, access token, refresh token, device auth ID, verifier, or challenge.
 
 ## Account connectors
 
-The account profile supports GitHub, Gmail, and Google Drive authorization.
+The account profile supports GitHub, Gmail, Google Drive, and X authorization.
 The browser starts an account-authenticated flow and receives only the fixed
 provider authorization URL. The private per-user connector Durable Object owns
 PKCE/state validation, code exchange, identity lookup, encrypted token storage,
@@ -99,6 +99,7 @@ origin with the deployed website origin:
 https://<origin>/v1/connectors/github/callback
 https://<origin>/v1/connectors/gmail/callback
 https://<origin>/v1/connectors/gdrive/callback
+https://<origin>/v1/connectors/x/callback
 ```
 
 For the canonical local stack, register the corresponding OrbStack HTTPS
@@ -108,6 +109,7 @@ callbacks; neither Portless nor a public tunnel is required:
 https://nanocodex.local/v1/connectors/github/callback
 https://nanocodex.local/v1/connectors/gmail/callback
 https://nanocodex.local/v1/connectors/gdrive/callback
+https://nanocodex.local/v1/connectors/x/callback
 ```
 
 Google Web clients require every development URI to match exactly, including the
@@ -120,7 +122,10 @@ repository deletion. Gmail requests
 `https://mail.google.com/`, and Drive requests full `drive` access. These grants
 permit destructive writes but never exceed the authorizing user's own provider
 permissions. The Google scopes are restricted and require the corresponding
-verification and data-handling review for a public production application.
+verification and data-handling review for a public production application. X
+requests read/write scopes for posts, follows, likes, bookmarks, lists, direct
+messages, media, and offline refresh. Agents poll or act through the allowlisted
+X API paths when invoked.
 
 ## Validation and deployment
 
@@ -130,10 +135,11 @@ npm run check
 ```
 
 Production deployment accepts the encryption key, private readiness probe
-token, and the GitHub/Google OAuth application client IDs and secrets. The
+token, and the GitHub/Google/X OAuth application client IDs and secrets. The
 deployment input names are `NANOCODEX_GITHUB_OAUTH_CLIENT_ID`,
-`NANOCODEX_GITHUB_OAUTH_CLIENT_SECRET`, `NANOCODEX_GOOGLE_OAUTH_CLIENT_ID`, and
-`NANOCODEX_GOOGLE_OAUTH_CLIENT_SECRET`; the deployment script maps them to the
+`NANOCODEX_GITHUB_OAUTH_CLIENT_SECRET`, `NANOCODEX_GOOGLE_OAUTH_CLIENT_ID`,
+`NANOCODEX_GOOGLE_OAUTH_CLIENT_SECRET`, `NANOCODEX_X_OAUTH_CLIENT_ID`, and
+`NANOCODEX_X_OAUTH_CLIENT_SECRET`; the deployment script maps them to the
 private Worker bindings and strips them from child-process environments. User
 provider credentials are still provisioned per account only after interactive
 authorization; no user token or deployment-global provider credential reaches

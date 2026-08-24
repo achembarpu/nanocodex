@@ -87,6 +87,13 @@ function localConnectorVars(environment: NodeJS.ProcessEnv): Record<string, stri
       targetSecret: "GOOGLE_OAUTH_CLIENT_SECRET",
       label: "Google",
     }),
+    ...credentialPair(environment, {
+      id: "NANOCODEX_LOCAL_X_OAUTH_CLIENT_ID",
+      secret: "NANOCODEX_LOCAL_X_OAUTH_CLIENT_SECRET",
+      targetId: "X_OAUTH_CLIENT_ID",
+      targetSecret: "X_OAUTH_CLIENT_SECRET",
+      label: "X",
+    }),
   };
 }
 
