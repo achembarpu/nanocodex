@@ -186,6 +186,10 @@ export default {
           headers: { "content-type": upstream.headers.get("content-type") ?? "application/json" },
         }), request);
       }
+      if (/^\/git\/thread-[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}\/(?:info\/refs|git-upload-pack|git-receive-pack)$/.test(url.pathname)) {
+        requirePlaygroundOrigin(request);
+        return cors(await proxyThreadGit(request, url), request);
+      }
       if (request.method === "POST" && url.pathname === "/v1/mercator/jobs") {
         requirePlaygroundOrigin(request);
         const body = await request.text();
@@ -2115,7 +2119,7 @@ function cors(response: Response, request: Request) {
     response.headers.set("access-control-allow-credentials", "true");
     response.headers.set(
       "access-control-allow-headers",
-      "accept-payment, authorization, content-type, idempotency-key, payment-session, payment-session-snapshot, payment-signature",
+      "accept-payment, authorization, content-type, git-protocol, idempotency-key, payment-session, payment-session-snapshot, payment-signature",
     );
     response.headers.set("access-control-allow-methods", "GET, POST, PUT, DELETE, OPTIONS");
     response.headers.set(
@@ -2126,6 +2130,35 @@ function cors(response: Response, request: Request) {
   }
   response.headers.set("cache-control", "no-store");
   return response;
+}
+
+async function proxyThreadGit(request: Request, url: URL): Promise<Response> {
+  if (request.method !== "GET" && request.method !== "POST") {
+    throw new ApiFailure(405, "method_not_allowed", "Git workspace requests require GET or POST.");
+  }
+  const headers = new Headers();
+  for (const name of ["accept", "content-type", "git-protocol"]) {
+    const value = request.headers.get(name);
+    if (value) headers.set(name, value);
+  }
+  const target = new URL(`${url.pathname}${url.search}`, NANOCODEX_ORIGIN);
+  const upstream = await fetch(target, {
+    method: request.method,
+    headers,
+    ...(request.method === "POST" ? { body: request.body } : {}),
+    redirect: "manual",
+    signal: request.signal,
+  });
+  const responseHeaders = new Headers();
+  for (const name of ["cache-control", "content-type", "x-content-type-options"]) {
+    const value = upstream.headers.get(name);
+    if (value) responseHeaders.set(name, value);
+  }
+  return new Response(upstream.body, {
+    status: upstream.status,
+    statusText: upstream.statusText,
+    headers: responseHeaders,
+  });
 }
 
 function proxy(response: Response) {
