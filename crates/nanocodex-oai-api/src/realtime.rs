@@ -47,7 +47,7 @@ pub const REALTIME_CHANNELS: u16 = 1;
 /// Default model used by native Realtime sessions.
 pub const REALTIME_MODEL: &str = "gpt-realtime-1.5";
 /// Default model used by ChatGPT-authenticated Codex voice sessions.
-pub const CHATGPT_REALTIME_MODEL: &str = "gpt-live-1-boulder-alpha";
+pub const CHATGPT_REALTIME_MODEL: &str = "gpt-live-1-codex";
 
 /// Voices supported by Codex's Frameless/V3 ChatGPT voice sessions.
 pub const CHATGPT_REALTIME_VOICES: &[RealtimeVoice] = &[
@@ -3717,11 +3717,11 @@ mod tests {
         assert_eq!(
             realtime_endpoint(
                 "https://api.openai.com/v1/realtime",
-                "gpt-live-1-boulder-alpha",
+                "gpt-live-1-codex",
                 RealtimeVersion::V3,
             )
             .unwrap(),
-            "wss://api.openai.com/v1/live?model=gpt-live-1-boulder-alpha"
+            "wss://api.openai.com/v1/live?model=gpt-live-1-codex"
         );
         assert_eq!(
             realtime_endpoint(
@@ -3736,7 +3736,7 @@ mod tests {
 
     #[test]
     fn matches_codex_voice_catalog_and_defaults() {
-        assert_eq!(CHATGPT_REALTIME_MODEL, "gpt-live-1-boulder-alpha");
+        assert_eq!(CHATGPT_REALTIME_MODEL, "gpt-live-1-codex");
         assert_eq!(CHATGPT_REALTIME_VOICE, RealtimeVoice::Cove);
         assert_eq!(PLATFORM_REALTIME_VOICE, RealtimeVoice::Marin);
         assert_eq!(
@@ -3814,7 +3814,7 @@ mod tests {
 
         let v3 = configured_session_update(
             "delegate",
-            "gpt-live-1-boulder-alpha",
+            "gpt-live-1-codex",
             RealtimeVoice::Cove,
             RealtimeVersion::V3,
             RealtimeSessionMode::Conversational,

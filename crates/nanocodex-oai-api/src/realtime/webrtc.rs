@@ -1210,7 +1210,7 @@ mod tests {
             let body = request.split_once("\r\n\r\n").unwrap().1;
             let body: serde_json::Value = serde_json::from_str(body).unwrap();
             assert_eq!(body["sdp"], "v=offer\r\n");
-            assert_eq!(body["session"]["model"], "gpt-live-1-boulder-alpha");
+            assert_eq!(body["session"]["model"], "gpt-live-1-codex");
             assert_eq!(body["session"]["audio"]["output"]["voice"], "cove");
             assert_eq!(body["session"]["delegation"]["type"], "client");
             assert_eq!(body["session"]["delegation"]["ack_filler"], false);
@@ -1251,7 +1251,7 @@ mod tests {
             attestation_header: None,
             websocket_url: None,
             instructions: "delegate coding work",
-            model: "gpt-live-1-boulder-alpha",
+            model: "gpt-live-1-codex",
             voice: RealtimeVoice::Cove,
             session_id: Some("session-1"),
             initial_items: &initial_items,
@@ -1315,7 +1315,7 @@ mod tests {
             assert!(body.contains("Content-Disposition: form-data; name=\"sdp\""));
             assert!(body.contains("Content-Type: application/sdp\r\n\r\nv=offer\r\n"));
             assert!(body.contains("Content-Disposition: form-data; name=\"session\""));
-            assert!(body.contains("\"model\":\"gpt-live-1-boulder-alpha\""));
+            assert!(body.contains("\"model\":\"gpt-live-1-codex\""));
             assert!(body.contains("\"ack_filler\":true"));
             stream
                 .write_all(
@@ -1333,7 +1333,7 @@ mod tests {
             attestation_header: None,
             websocket_url: None,
             instructions: "delegate coding work",
-            model: "gpt-live-1-boulder-alpha",
+            model: "gpt-live-1-codex",
             voice: RealtimeVoice::Cove,
             session_id: None,
             initial_items: &[],

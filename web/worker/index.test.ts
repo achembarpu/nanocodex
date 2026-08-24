@@ -19,7 +19,7 @@ function browserRealtimeCall(
     call_body: JSON.stringify({
       sdp: "v=0\r\na=offer\r\n",
       session: {
-        model: "gpt-live-1-boulder-alpha",
+        model: "gpt-live-1-codex",
         instructions,
         audio: { output: { voice: "cove" } },
         delegation: { type: "client" },
@@ -846,7 +846,7 @@ test("Realtime calls keep subscription credentials server-side and bind the agen
     assert.equal(upstreamHeaders.get("thread-id"), "thread-1");
     const session = upstreamBody?.session as Record<string, unknown>;
     assert.deepEqual(session.delegation, { type: "client" });
-    assert.equal(session.model, "gpt-live-1-boulder-alpha");
+    assert.equal(session.model, "gpt-live-1-codex");
     assert.equal(
       session.instructions,
       "rust-owned instructions\n\n<startup_context>current thread</startup_context>",

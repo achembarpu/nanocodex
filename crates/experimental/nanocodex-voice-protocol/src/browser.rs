@@ -3,7 +3,7 @@ use serde_json::{Value, json};
 use std::collections::VecDeque;
 
 pub const CHATGPT_REALTIME_VOICE: &str = "cove";
-pub const CHATGPT_REALTIME_MODEL: &str = "gpt-live-1-boulder-alpha";
+pub const CHATGPT_REALTIME_MODEL: &str = "gpt-live-1-codex";
 pub const CHATGPT_REALTIME_VOICES: &[&str] = &[
     "juniper", "maple", "spruce", "ember", "vale", "breeze", "arbor", "sol", "cove",
 ];
