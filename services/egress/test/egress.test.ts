@@ -1136,7 +1136,7 @@ describe("per-user credential broker", () => {
       "http://127.0.0.1:49152/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas",
     );
     expect(realtimeCall?.headers.get("openai-alpha")).toBe("quicksilver=v2");
-    expect(realtimeCall?.headers.get("x-oai-attestation")).toBeNull();
+    expect(realtimeCall?.headers.get("x-oai-attestation")).toBe('{"v":1,"s":1}');
     expect(realtimeCall?.headers.get("originator")).toBeNull();
     expect(realtimeCall?.headers.get("x-session-id")).toBe("realtime-session");
     expect(realtimeCall?.headers.get("session-id")).toBe("lifecycle-session");
@@ -1166,6 +1166,7 @@ describe("per-user credential broker", () => {
     expect(sideband.status).toBe(200);
     expect(realtimeSideband?.url).toBe("https://api.openai.com/v1/live/rtc_test");
     expect(realtimeSideband?.headers.get("upgrade")).toBe("websocket");
+    expect(realtimeSideband?.headers.get("x-oai-attestation")).toBe('{"v":1,"s":1}');
     expect(realtimeSideband?.headers.get("originator")).toBeNull();
     expect(realtimeSideband?.headers.get("x-session-id")).toBe("realtime-session");
     expect(realtimeSideband?.headers.get("session-id")).toBe("lifecycle-session");

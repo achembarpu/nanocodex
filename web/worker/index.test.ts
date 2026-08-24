@@ -840,7 +840,7 @@ test("Realtime calls keep subscription credentials server-side and bind the agen
     assert.equal(upstreamHeaders.get("openai-alpha"), "quicksilver=v2");
     assert.equal(upstreamHeaders.get("originator"), null);
     assert.equal(upstreamHeaders.get("user-agent"), "codex_cli_rs/0.0.0");
-    assert.equal(upstreamHeaders.get("x-oai-attestation"), null);
+    assert.equal(upstreamHeaders.get("x-oai-attestation"), '{"v":1,"s":1}');
     assert.equal(upstreamHeaders.get("x-session-id"), "realtime-1");
     assert.equal(upstreamHeaders.get("session-id"), "lifecycle-1");
     assert.equal(upstreamHeaders.get("thread-id"), "thread-1");

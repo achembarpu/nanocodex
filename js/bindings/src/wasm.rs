@@ -8,7 +8,7 @@ use std::{
 use js_sys::Promise;
 use nanocodex::{
     AgentEvents, AgentSessionContext, DurableAgentExt, Model, Nanocodex as RustNanocodex,
-    NanocodexError, OpenAi, ReasoningMode, Thinking, TurnControl, TurnResult,
+    NanocodexError, OpenAi, PromptRoute, ReasoningMode, Thinking, TurnControl, TurnResult,
     agent::{
         ExecutionEnvironment, PromptRequest,
         durability::{
@@ -1385,7 +1385,7 @@ impl WasmBrowserVoice {
         encode_voice_effects(&self.protocol.borrow_mut().flush(final_chunk))
     }
 
-    /// Ends Codex's Realtime lifecycle without flushing transcript-tail work by default.
+    /// Flushes any final transcript tail and ends Codex's Realtime lifecycle.
     ///
     /// # Errors
     ///
@@ -1394,6 +1394,12 @@ impl WasmBrowserVoice {
         if !self.started.get() {
             return encode_voice_effects(&self.protocol.borrow().close_effects());
         }
+        let tail = self.protocol.borrow_mut().take_transcript_tail();
+        let routed = if let Some(input) = realtime_tail_delegation(&tail) {
+            self.route_agent_input(input).await
+        } else {
+            Ok(())
+        };
         let ended = self
             .agent
             .append_developer_message(REALTIME_END_INSTRUCTIONS)
@@ -1401,7 +1407,10 @@ impl WasmBrowserVoice {
             .map(|_| ())
             .map_err(|error| error.to_string());
         self.started.set(false);
-        ended.map_err(js_error)?;
+        match (routed, ended) {
+            (Err(error), _) | (Ok(()), Err(error)) => return Err(js_error(error)),
+            (Ok(()), Ok(())) => {}
+        }
         encode_voice_effects(&self.protocol.borrow().close_effects())
     }
 
@@ -1454,41 +1463,31 @@ impl WasmBrowserVoice {
     }
 
     async fn route_agent_input(&self, input: String) -> Result<(), String> {
-        let control = self
-            .active_turn
-            .borrow()
-            .as_ref()
-            .map(|(_, control)| control.clone());
-        if let Some(control) = control {
-            return control
-                .steer(Prompt::new(input))
-                .await
-                .map_err(|error| error.to_string());
-        }
-        self.start_agent_turn(input).await
-    }
-
-    async fn start_agent_turn(&self, input: String) -> Result<(), String> {
-        let turn = self
+        match self
             .agent
-            .prompt(Prompt::new(input))
+            .route_prompt(Prompt::new(input))
             .await
-            .map_err(|error| error.to_string())?;
-        let ticket = self.next_turn.get().saturating_add(1);
-        self.next_turn.set(ticket);
-        self.active_turn.replace(Some((ticket, turn.control())));
-        let active_turn = Rc::clone(&self.active_turn);
-        spawn_local(async move {
-            let _ = turn.await;
-            let mut active = active_turn.borrow_mut();
-            if active
-                .as_ref()
-                .is_some_and(|(active_ticket, _)| *active_ticket == ticket)
-            {
-                active.take();
+            .map_err(|error| error.to_string())?
+        {
+            PromptRoute::Steered => Ok(()),
+            PromptRoute::Started(turn) => {
+                let ticket = self.next_turn.get().saturating_add(1);
+                self.next_turn.set(ticket);
+                self.active_turn.replace(Some((ticket, turn.control())));
+                let active_turn = Rc::clone(&self.active_turn);
+                spawn_local(async move {
+                    let _ = turn.await;
+                    let mut active = active_turn.borrow_mut();
+                    if active
+                        .as_ref()
+                        .is_some_and(|(active_ticket, _)| *active_ticket == ticket)
+                    {
+                        active.take();
+                    }
+                });
+                Ok(())
             }
-        });
-        Ok(())
+        }
     }
 }
 

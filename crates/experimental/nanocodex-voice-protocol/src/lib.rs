@@ -7,7 +7,7 @@ pub const CHATGPT_REALTIME_BACKEND_PROMPT_TEMPLATE: &str = include_str!("backend
 
 pub use browser::{
     BrowserRealtimeCallResult, BrowserVoiceEffects, BrowserVoiceProtocol, BrowserVoiceUpdate,
-    CHATGPT_REALTIME_VOICE, CHATGPT_REALTIME_VOICES, VoiceHistoryEntry,
+    CHATGPT_REALTIME_MODEL, CHATGPT_REALTIME_VOICE, CHATGPT_REALTIME_VOICES, VoiceHistoryEntry,
     build_browser_startup_context, build_chatgpt_realtime_call, decode_chatgpt_realtime_call,
     preferred_physical_input, realtime_message_requires_agent_admission, valid_realtime_call_id,
 };

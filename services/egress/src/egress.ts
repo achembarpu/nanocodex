@@ -24,6 +24,7 @@ const BROKER_READINESS_PATH = "/.well-known/nanocodex/broker-readiness";
 const MAX_CONTROL_BODY_BYTES = 16 * 1024;
 const MAX_BROKER_RESPONSE_BYTES = 4 * 1024;
 const MAX_MODEL_BODY_BYTES = 32 * 1024 * 1024;
+const CODEX_ATTESTATION_UNAVAILABLE = '{"v":1,"s":1}';
 const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
 const CONNECTOR_METHODS = new Set(["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]);
 
@@ -470,6 +471,7 @@ function buildUpstreamRequest(
       throw new EgressFailure(400, "invalid_realtime_session");
     }
     headers.set("openai-alpha", "quicksilver=v2");
+    headers.set("x-oai-attestation", CODEX_ATTESTATION_UNAVAILABLE);
     headers.set("x-session-id", realtimeSessionId);
     headers.set("session-id", sessionId);
     headers.set("thread-id", threadId);

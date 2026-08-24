@@ -67,6 +67,7 @@ const MODEL = "gpt-5.6-sol";
 const IMAGE_MODEL = "gpt-image-2";
 const CODEX_ORIGINATOR = "codex_cli_rs";
 const CODEX_USER_AGENT = "codex_cli_rs/0.0.0";
+const CODEX_ATTESTATION_UNAVAILABLE = '{"v":1,"s":1}';
 const MAX_JSON_BODY_CHARS = 32 * 1024 * 1024;
 const MAX_SEARCH_OUTPUT_CHARS = 1024 * 1024;
 const MAX_WEB_OPERATION_ITEMS = 16;
@@ -655,6 +656,7 @@ function realtimeHeaders(
     Authorization: `Bearer ${credential.accessToken}`,
     "ChatGPT-Account-ID": credential.accountId,
     "User-Agent": CODEX_USER_AGENT,
+    "x-oai-attestation": CODEX_ATTESTATION_UNAVAILABLE,
     "openai-alpha": identity.openAiAlpha,
     "x-session-id": identity.realtimeSessionId,
     "session-id": identity.sessionId,

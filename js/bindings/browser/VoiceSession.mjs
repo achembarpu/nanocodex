@@ -199,7 +199,10 @@ export class BrowserVoiceSession {
     try {
       await this.#starting?.catch(() => {});
       await this.#inbound;
-      if (this.#core) await this.#apply(await this.#core.stop());
+      if (this.#core) {
+        await this.#options.beforeAgentTurn?.();
+        await this.#apply(await this.#core.stop());
+      }
     } finally {
       this.#stopBrowserIo();
       this.#core?.free();

@@ -3,6 +3,7 @@ use serde_json::{Value, json};
 use std::collections::VecDeque;
 
 pub const CHATGPT_REALTIME_VOICE: &str = "cove";
+pub const CHATGPT_REALTIME_MODEL: &str = "gpt-live-1-boulder-alpha";
 pub const CHATGPT_REALTIME_VOICES: &[&str] = &[
     "juniper", "maple", "spruce", "ember", "vale", "breeze", "arbor", "sol", "cove",
 ];
@@ -95,6 +96,7 @@ pub fn build_chatgpt_realtime_call(
     Ok(json!({
         "sdp": sdp,
         "session": {
+            "model": CHATGPT_REALTIME_MODEL,
             "instructions": instructions,
             "audio": {
                 "output": { "voice": voice },
@@ -943,7 +945,7 @@ mod tests {
         let call: Value = serde_json::from_str(&call).unwrap();
         assert_eq!(call["sdp"], "v=offer");
         assert!(call["session"].get("type").is_none());
-        assert!(call["session"].get("model").is_none());
+        assert_eq!(call["session"]["model"], CHATGPT_REALTIME_MODEL);
         assert!(call["session"]["audio"].get("input").is_none());
         assert_eq!(call["session"]["audio"]["output"]["voice"], "cove");
         assert!(

@@ -68,6 +68,7 @@ test("the public resource is a thin binding over the Rust voice controller", asy
 
     await Actions.voice.stop(voice);
     assert.equal(Actions.voice.getSnapshot(voice).status, "idle");
+    assert.equal(calls.filter(([kind]) => kind === "fence").length, 3);
     assert.equal(calls.some(([kind]) => kind === "stop"), true);
     assert.equal(calls.some(([kind]) => kind === "free"), true);
     assert.equal(fixture.sideband.sent.includes('{"type":"session.close"}'), true);
