@@ -353,12 +353,6 @@ body.agent-viewport-locked {
   padding: 2px 0 3px;
 }
 
-.surface-key {
-  text-decoration: underline;
-  text-decoration-color: color-mix(in srgb, currentColor 55%, transparent);
-  text-underline-offset: 2px;
-}
-
 .surface-switch a.is-active .surface-label,
 .surface-navigation-group.is-active button .surface-label {
   font-weight: 600;

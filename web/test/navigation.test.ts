@@ -12,7 +12,6 @@ import {
   pathForCommit,
   pathForSurface,
   primaryNavigation,
-  productNavigation,
   surfaceFromUrl,
 } from "../src/navigation.ts";
 
@@ -88,32 +87,25 @@ test("the shared shell presents Source without changing the stable Code route", 
   assert.deepEqual(gitNavigation.at(-1), {
     surface: "code",
     label: "Source",
-    shortcut: "S",
+    description: "Repository",
   });
-  assert.match(application, /aria-keyshortcuts=\{item\.shortcut\}/);
-  assert.match(application, /data-mobile-label=\{item\.shortcut\}/);
-  assert.doesNotMatch(application, /data-mobile-label=\{item\.label\.slice/);
-  assert.match(application, /<ProductNavigationLabel/);
-  assert.match(application, /key === "s"[\s\S]*?\? "code"/);
-  assert.doesNotMatch(application, /key === "t"[\s\S]*?\? "code"/);
+  assert.doesNotMatch(application, /aria-keyshortcuts=\{item\./);
+  assert.doesNotMatch(application, /data-mobile-label/);
+  assert.doesNotMatch(application, /ProductNavigationLabel/);
   assert.doesNotMatch(application, /className=\{surface === "requests" \? "nav-optional/);
   assert.doesNotMatch(application, /className="header-source"/);
 });
 
-test("global product shortcuts are visible and browser Find remains native", () => {
+test("navigation does not capture global letter keys and browser Find remains native", () => {
   assert.deepEqual(
-    productNavigation.map(({ label, shortcut }) => [label, shortcut]),
-    [["Agent", "A"], ["Multiplayer", "P"], ["World", "W"], ["Docs", "D"], ["Evals", "E"], ["Changelog", "H"], ["Commits", "C"], ["Source", "S"]],
+    [...demoNavigation, ...primaryNavigation, ...gitNavigation].map(({ label, description }) => [label, description]),
+    [["Agent", "Browser agent"], ["Multiplayer", "Shared room"], ["World", "Agent world"], ["Docs", "Reference"], ["Evals", "Benchmarks"], ["Changelog", "Releases"], ["Commits", "History"], ["Source", "Repository"]],
   );
-  assert.match(application, /title=\{`\$\{item\.label\} \(\$\{item\.shortcut\}\)`\}/);
-  assert.match(application, /key === "h"[\s\S]*?\? "changelog"/);
-  assert.match(application, /key === "p"[\s\S]*?\? "multiplayer"/);
-  assert.match(application, /key === "w"[\s\S]*?\? "world"/);
+  assert.doesNotMatch(application, /item\.shortcut|shortcut<\/small>|const nextSurface =\s*key/);
   assert.match(
     application,
     /surface === "world"[\s\S]{0,180}target === document\.activeElement[\s\S]{0,180}target\?\.matches\("\.monster-world-stage canvas"\)/,
   );
-  assert.doesNotMatch(application, /aria-keyshortcuts="H"[\s\S]*Nanocodex home/);
   assert.doesNotMatch(
     application,
     /surface === "code"[\s\S]{0,180}key === "f"/,
@@ -135,6 +127,7 @@ test("the product navigation exposes the deliberate Demos and Git hierarchy", ()
 test("the active navigation item is bold without a selection underline", () => {
   assert.match(css, /\.surface-switch a\.is-active \.surface-label,[\s\S]*?\.surface-navigation-group\.is-active button \.surface-label\s*\{[^}]*font-weight:\s*600/);
   assert.doesNotMatch(css, /\.surface-switch a\.is-active \.surface-label::after/);
+  assert.doesNotMatch(css, /\.surface-key/);
 });
 
 test("every primary route begins preloading on touch or pointer intent", () => {

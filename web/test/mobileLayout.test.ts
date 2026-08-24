@@ -66,7 +66,7 @@ test("phone headers expose readable product navigation in an owned modal", () =>
   assert.match(application, /className="mobile-product-navigation"/);
   assert.match(application, /role="dialog"[\s\S]*?aria-modal="true"[\s\S]*?Mobile product navigation/);
   assert.match(application, /useModalBoundary\(\{[\s\S]*?onDismiss: closeMobileNavigation/);
-  assert.match(application, /<span>\{item\.label\}<\/span><small>\{item\.shortcut\} shortcut<\/small>/);
+  assert.match(application, /<span>\{item\.label\}<\/span><small>\{item\.description\}<\/small>/);
   assert.match(application, /className="mobile-navigation-group" aria-labelledby="mobile-demos-title"/);
   assert.match(application, /className="mobile-navigation-group" aria-labelledby="mobile-git-title"/);
   assert.match(application, /href=\{connectDemoUrl\}[\s\S]*?External demo/);

@@ -1020,30 +1020,6 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
         setTheme((current) => (current === "light" ? "dark" : "light"));
         return;
       }
-      const nextSurface =
-        key === "h"
-          ? "changelog"
-          : key === "a"
-          ? "agent"
-          : key === "p"
-          ? "multiplayer"
-          : key === "w"
-          ? "world"
-          : key === "d"
-          ? "docs"
-          : key === "s"
-          ? "code"
-          : key === "c"
-          ? "commits"
-          : key === "e"
-          ? "evals"
-          : null;
-      if (nextSurface) {
-        event.preventDefault();
-        event.stopPropagation();
-        target?.blur();
-        navigateToSurface(nextSurface);
-      }
     };
     window.addEventListener("keydown", onKeyDown, { capture: true });
     return () =>
@@ -1054,7 +1030,6 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
     commitModalOpen,
     commitRailModalOpen,
     commitSearchModalOpen,
-    navigateToSurface,
     openCommitSearch,
     surface,
   ]);
@@ -1085,10 +1060,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
         ? pathForSurface(item.surface)
         : threadSurfacePath(item.surface)}
       aria-current={surface === item.surface ? "page" : undefined}
-      aria-keyshortcuts={item.shortcut}
-      data-mobile-label={item.shortcut}
       key={item.surface}
-      title={`${item.label} (${item.shortcut})`}
       onFocus={() => preloadSurface(item.surface)}
       onPointerEnter={() => preloadSurface(item.surface)}
       onPointerDown={() => preloadSurface(item.surface)}
@@ -1099,8 +1071,8 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
       }}
     >
       {context === "mobile" ? <>
-        <span>{item.label}</span><small>{item.shortcut} shortcut</small>
-      </> : <ProductNavigationLabel label={item.label} shortcut={item.shortcut} />}
+        <span>{item.label}</span><small>{item.description}</small>
+      </> : <span className="surface-label">{item.label}</span>}
     </a>
   );
 
@@ -1657,23 +1629,5 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
         ) : null}
 
     </div>
-  );
-}
-
-function ProductNavigationLabel({
-  label,
-  shortcut,
-}: {
-  label: string;
-  shortcut: string;
-}) {
-  const index = label.toLowerCase().indexOf(shortcut.toLowerCase());
-  if (index < 0) return <span className="surface-label">{label}</span>;
-  return (
-    <span className="surface-label">
-      {label.slice(0, index)}
-      <span className="surface-key">{label[index]}</span>
-      {label.slice(index + 1)}
-    </span>
   );
 }
