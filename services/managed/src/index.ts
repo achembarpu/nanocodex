@@ -85,6 +85,7 @@ import {
 } from "./account-auth";
 import { routeBrowserModel } from "./browser-model";
 export { ApiKeyRecord, NonceStorage, UserAccount } from "./account-auth";
+export { MemoryScope, Organization } from "./reserved-durable-objects";
 
 const MAX_CLIENT_MESSAGE_BYTES = 1024 * 1024;
 const MAX_ACTIVE_TURNS = 16;
