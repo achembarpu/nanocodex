@@ -3,13 +3,13 @@ import { Kv } from "accounts/server";
 import {
   authenticatePersistentAccount,
   isUserId,
-  requireSameOriginMutation,
   type AccountAuthEnv,
 } from "./account-auth";
 
 const CONNECT_DIALOG_ORIGIN = "https://nanocodex-connect-dialog.gakonst.workers.dev";
 const CONNECT_APP_ID = "atlas-workspace";
 const INTERNAL_ORIGIN = "https://nanocodex.internal";
+const NANOCODEX_ORIGIN = "https://nanocodex.gakonst.workers.dev";
 const AUTHORIZATION_TTL_SECONDS = 5 * 60;
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 const OPAQUE_TOKEN = /^[A-Za-z0-9_-]{43}$/;
@@ -61,7 +61,7 @@ export async function routeAccountLinkRequest(
   if (request.method !== "DELETE") return json({ error: "method_not_allowed" }, { status: 405 });
   const principal = await authenticatePersistentAccount(request, env, url);
   if (!principal) return json({ error: "unauthorized" }, { status: 401 });
-  const originFailure = requireSameOriginMutation(request, url, principal);
+  const originFailure = requireNanocodexOrigin(request, url);
   if (originFailure) return originFailure;
   const accountAddress = normalizeAddress(unlink[1]!);
   const store = accountLinkStore(env);
@@ -106,7 +106,7 @@ async function authorizeAccountLink(
 ): Promise<Response> {
   const principal = await authenticatePersistentAccount(request, env, url);
   if (!principal) return accountLinkPage({ kind: "error", message: "Your Nanocodex session expired." }, 401);
-  const originFailure = requireSameOriginMutation(request, url, principal);
+  const originFailure = requireNanocodexOrigin(request, url);
   if (originFailure) return originFailure;
   const contentLength = Number(request.headers.get("content-length") ?? 0);
   if (!Number.isFinite(contentLength) || contentLength > 4_096) {
@@ -328,6 +328,13 @@ function noStoreHeaders(): Record<string, string> {
     "cache-control": "no-store",
     "x-content-type-options": "nosniff",
   };
+}
+
+function requireNanocodexOrigin(request: Request, url: URL): Response | undefined {
+  const expected = url.hostname.endsWith(".test") ? url.origin : NANOCODEX_ORIGIN;
+  return request.headers.get("origin") === expected
+    ? undefined
+    : json({ error: "forbidden_origin" }, { status: 403 });
 }
 
 function json(body: unknown, init: ResponseInit = {}): Response {
