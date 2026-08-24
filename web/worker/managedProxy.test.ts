@@ -27,6 +27,7 @@ test("projects only the managed product surface through one private binding", as
     "/auth/challenge",
     "/webauthn/register/options",
     "/v1/me",
+    "/v1/connect/account-link",
     "/v1/api-keys/key-id",
     "/v1/credentials/chatgpt/login",
     "/v1/connectors/github/callback?code=code&state=state",

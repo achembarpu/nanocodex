@@ -266,6 +266,117 @@ describe("managed agents REST and resumable SSE", () => {
     expect(decodedUserId).toBe(account.user.id);
   });
 
+  it("links a Tempo account to one persistent Nanocodex profile through a one-time code", async () => {
+    const userId = "66666666-6666-4666-8666-666666666666";
+    const sessionToken = "l".repeat(43);
+    const cookie = `nanocodex_account=${sessionToken}`;
+    const accountAddress = "0x1111111111111111111111111111111111111111";
+    const state = "s".repeat(43);
+    await seedPasskeySession(userId, sessionToken);
+
+    const authorize = new URL("https://example.test/v1/connect/account-link");
+    authorize.searchParams.set("account_address", accountAddress);
+    authorize.searchParams.set("app_id", "atlas-workspace");
+    authorize.searchParams.set("return_origin", "https://nanocodex-connect-dialog.gakonst.workers.dev");
+    authorize.searchParams.set("state", state);
+
+    const unauthenticated = await RAW_SELF.fetch(authorize);
+    expect(unauthenticated.status).toBe(401);
+    expect(await unauthenticated.text()).not.toContain(userId);
+
+    const confirmation = await RAW_SELF.fetch(authorize, { headers: { cookie } });
+    expect(confirmation.status).toBe(200);
+    expect(confirmation.headers.get("content-security-policy")).toContain("frame-ancestors 'none'");
+    const confirmationHtml = await confirmation.text();
+    expect(confirmationHtml).toContain("Use Nanocodex profile");
+    expect(confirmationHtml).not.toContain(userId);
+    const intent = confirmationHtml.match(/name="intent" value="([A-Za-z0-9_-]{43})"/)?.[1];
+    expect(intent).toBeTruthy();
+
+    const crossOrigin = await RAW_SELF.fetch(authorize, {
+      method: "POST",
+      headers: { cookie, origin: "https://attacker.test" },
+      body: new URLSearchParams({ intent: intent! }),
+    });
+    expect(crossOrigin.status).toBe(403);
+
+    const authorized = await RAW_SELF.fetch(authorize, {
+      method: "POST",
+      headers: {
+        cookie,
+        origin: "https://example.test",
+        "content-type": "application/x-www-form-urlencoded",
+      },
+      body: new URLSearchParams({ intent: intent! }),
+    });
+    expect(authorized.status).toBe(200);
+    const authorizedHtml = await authorized.text();
+    expect(authorizedHtml).not.toContain(userId);
+    const code = authorizedHtml.match(/"code":"([A-Za-z0-9_-]{43})"/)?.[1];
+    expect(code).toBeTruthy();
+
+    const wrongContext = await RAW_SELF.fetch(
+      "https://nanocodex.internal/connect/account-links/exchange",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          account_address: accountAddress,
+          app_id: "atlas-workspace",
+          code,
+          state: "w".repeat(43),
+        }),
+      },
+    );
+    expect(wrongContext.status).toBe(403);
+
+    const exchange = await RAW_SELF.fetch(
+      "https://nanocodex.internal/connect/account-links/exchange",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          account_address: accountAddress,
+          app_id: "atlas-workspace",
+          code,
+          state,
+        }),
+      },
+    );
+    expect(exchange.status).toBe(200);
+    expect(await exchange.json()).toEqual({ linked: true, user_id: userId });
+
+    const resolve = await RAW_SELF.fetch(
+      `https://nanocodex.internal/connect/account-links/resolve?account_address=${accountAddress}`,
+    );
+    expect(await resolve.json()).toEqual({ linked: true, user_id: userId });
+
+    const replay = await RAW_SELF.fetch(
+      "https://nanocodex.internal/connect/account-links/exchange",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          account_address: accountAddress,
+          app_id: "atlas-workspace",
+          code,
+          state,
+        }),
+      },
+    );
+    expect(replay.status).toBe(403);
+
+    const unlinked = await RAW_SELF.fetch(
+      `https://example.test/v1/connect/account-links/${accountAddress}`,
+      { method: "DELETE", headers: { cookie, origin: "https://example.test" } },
+    );
+    expect(unlinked.status).toBe(204);
+    const missing = await RAW_SELF.fetch(
+      `https://nanocodex.internal/connect/account-links/resolve?account_address=${accountAddress}`,
+    );
+    expect(missing.status).toBe(404);
+  });
+
   it("rejects malformed bearer authentication instead of minting a browser identity", async () => {
     const response = await RAW_SELF.fetch("https://example.test/v1/me", {
       headers: { authorization: "Bearer malformed" },

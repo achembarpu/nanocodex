@@ -11,6 +11,7 @@ export class NonceStorage extends Kv.NonceStorage {}
 const PLAYGROUND_ORIGIN = "https://nanocodex-connect-playground.gakonst.workers.dev";
 const DIALOG_ORIGIN = "https://nanocodex-connect-dialog.gakonst.workers.dev";
 const API_ORIGIN = "https://nanocodex-connect-api.gakonst.workers.dev";
+const NANOCODEX_ORIGIN = "https://nanocodex.gakonst.workers.dev";
 const MACHINE_USD_ORIGIN = "https://machine-usd.porto.workers.dev";
 const MERCATOR_ORIGIN = "https://mercator.tempoxyz.dev";
 const TEMPO_RPC = "https://api.tempo.xyz/rpc/4217";
@@ -38,6 +39,7 @@ const PROVIDER_CREDENTIAL_PLACEHOLDER = "Bearer NANOCODEX_PROVIDER_CREDENTIAL";
 const CONNECTOR_STATE_TTL = 10 * 60;
 const CONNECT_APPROVAL_TTL = 10 * 60;
 const MODEL_TICKET_TTL = 60;
+const ACCOUNT_LINK_TTL = 5 * 60;
 const REGISTERED_APP_ID = "atlas-workspace";
 const MAX_BROKER_BODY_BYTES = 16 * 1024;
 const MAX_CONNECTOR_REQUEST_BODY_BYTES = 256 * 1024;
@@ -76,8 +78,12 @@ type ConnectorStatus = Readonly<{
 }>;
 type ConnectorState = Readonly<{
   accountAddress: `0x${string}`;
+  brokerUserId: string;
   dialogOrigin: string;
   provider: OAuthConnectorId;
+}>;
+type AccountLinkState = Readonly<{
+  accountAddress: `0x${string}`;
 }>;
 type AuthRequestContext = Readonly<{
   keyAuthorization?: `0x${string}`;
@@ -93,6 +99,7 @@ type Fetcher = Readonly<{
 }>;
 
 type Env = Readonly<{
+  ACCOUNTS: Fetcher;
   CONNECT_STATE: Kv.durableObject.Namespace;
   EGRESS: Fetcher;
 }>;
@@ -101,6 +108,7 @@ type GrantRecord = Readonly<{
   id: `0x${string}`;
   appId: string;
   accountAddress: `0x${string}`;
+  brokerUserId: string;
   agentId: string;
   permission: string;
   status: "active" | "revoked";
@@ -247,22 +255,41 @@ export default {
       if (!session) return error(request, 401, "not_authenticated", "Connect with a passkey first.");
       const accountAddress = address(session.address);
 
+      if (url.pathname === "/v1/account-link") {
+        if (request.method === "GET") {
+          const identity = await brokerIdentity(env, accountAddress);
+          return cors(Response.json({ linked: identity.linked }), request);
+        }
+        if (request.method === "POST") {
+          return cors(await startAccountLink(store, accountAddress), request);
+        }
+        if (request.method === "PUT") {
+          return cors(await completeAccountLink(request, env, store, accountAddress), request);
+        }
+        return error(request, 405, "method_not_allowed", "Unsupported account-link operation.");
+      }
+
       if (request.method === "GET" && url.pathname === "/v1/connectors") {
-        return cors(Response.json(await connectorStatuses(env, accountAddress)), request);
+        const identity = await brokerIdentity(env, accountAddress);
+        return cors(Response.json({
+          ...(await connectorStatuses(env, identity.userId)),
+          profile: { linked: identity.linked },
+        }), request);
       }
 
       const connectorRoute = url.pathname.match(/^\/v1\/connectors\/(github|gmail|gdrive|chatgpt)$/);
       if (connectorRoute) {
         const connector = connectorRoute[1] as ConnectorId;
+        const identity = await brokerIdentity(env, accountAddress);
         if (request.method === "POST") {
-          return cors(await startConnector(env, store, request, accountAddress, connector), request);
+          return cors(await startConnector(env, store, request, accountAddress, identity.userId, connector), request);
         }
         if (request.method === "DELETE") {
-          await disconnectConnector(env, accountAddress, connector);
+          await disconnectConnector(env, identity.userId, connector);
           return cors(new Response(null, { status: 204 }), request);
         }
         if (request.method === "GET" && connector === "chatgpt") {
-          return cors(await pollChatGpt(env, accountAddress), request);
+          return cors(await pollChatGpt(env, identity.userId), request);
         }
         return error(request, 405, "method_not_allowed", "Unsupported connector operation.");
       }
@@ -285,6 +312,121 @@ class ApiFailure extends Error {
   ) {
     super(message);
   }
+}
+
+async function startAccountLink(
+  store: Kv.Kv,
+  accountAddress: `0x${string}`,
+): Promise<Response> {
+  if (!store.create) {
+    throw new ApiFailure(500, "account_link_unavailable", "Atomic account linking is unavailable.");
+  }
+  const state = randomSubject();
+  if (!await store.create(`account-link-state:${state}`, {
+    accountAddress,
+  } satisfies AccountLinkState, { ttl: ACCOUNT_LINK_TTL })) {
+    throw new ApiFailure(503, "account_link_conflict", "The account-link request could not be reserved.");
+  }
+  const authorize = new URL("/v1/connect/account-link", NANOCODEX_ORIGIN);
+  authorize.searchParams.set("account_address", accountAddress);
+  authorize.searchParams.set("app_id", REGISTERED_APP_ID);
+  authorize.searchParams.set("return_origin", DIALOG_ORIGIN);
+  authorize.searchParams.set("state", state);
+  return Response.json({ authorization_url: authorize.href, state });
+}
+
+async function completeAccountLink(
+  request: Request,
+  env: Env,
+  store: Kv.Kv,
+  accountAddress: `0x${string}`,
+): Promise<Response> {
+  const body = await json(request);
+  const code = opaqueToken(body.code, "code");
+  const state = opaqueToken(body.state, "state");
+  if (!store.take) {
+    throw new ApiFailure(500, "account_link_unavailable", "Atomic account linking is unavailable.");
+  }
+  const correlation = await store.take<AccountLinkState>(`account-link-state:${state}`);
+  if (!isAccountLinkState(correlation)
+    || correlation.accountAddress.toLowerCase() !== accountAddress.toLowerCase()) {
+    throw new ApiFailure(403, "invalid_account_link_state", "The account-link request expired or was already used.");
+  }
+  let response: Response;
+  try {
+    response = await env.ACCOUNTS.fetch(new Request(
+      "https://nanocodex.internal/connect/account-links/exchange",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          account_address: accountAddress,
+          app_id: REGISTERED_APP_ID,
+          code,
+          state,
+        }),
+      },
+    ));
+  } catch {
+    throw new ApiFailure(502, "account_link_unavailable", "The Nanocodex account service is unavailable.");
+  }
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new ApiFailure(403, "account_link_rejected", "The Nanocodex account authorization was rejected.");
+  }
+  const linked = await response.json() as unknown;
+  if (!isBrokerIdentityResponse(linked)) {
+    throw new ApiFailure(502, "account_link_invalid", "The Nanocodex account service returned an invalid identity.");
+  }
+  return Response.json({
+    linked: true,
+    ...(await connectorStatuses(env, linked.user_id)),
+  });
+}
+
+async function brokerIdentity(
+  env: Env,
+  accountAddress: `0x${string}`,
+): Promise<{ linked: boolean; userId: string }> {
+  let response: Response;
+  try {
+    const url = new URL("https://nanocodex.internal/connect/account-links/resolve");
+    url.searchParams.set("account_address", accountAddress);
+    response = await env.ACCOUNTS.fetch(new Request(url));
+  } catch {
+    throw new ApiFailure(502, "account_link_unavailable", "The Nanocodex account service is unavailable.");
+  }
+  if (response.status === 404) {
+    await response.body?.cancel();
+    return { linked: false, userId: accountAddress };
+  }
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new ApiFailure(502, "account_link_unavailable", "The Nanocodex account service rejected identity resolution.");
+  }
+  const body = await response.json() as unknown;
+  if (!isBrokerIdentityResponse(body)) {
+    throw new ApiFailure(502, "account_link_invalid", "The Nanocodex account service returned an invalid identity.");
+  }
+  return { linked: true, userId: body.user_id };
+}
+
+function isBrokerIdentityResponse(value: unknown): value is { linked: true; user_id: string } {
+  return isRecord(value)
+    && value.linked === true
+    && typeof value.user_id === "string"
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value.user_id);
+}
+
+function isAccountLinkState(value: unknown): value is AccountLinkState {
+  return isRecord(value) && /^0x[0-9a-fA-F]{40}$/.test(String(value.accountAddress));
+}
+
+function opaqueToken(value: unknown, label: string): string {
+  if (typeof value !== "string" || !/^[A-Za-z0-9_-]{43}$/.test(value)) {
+    throw new ApiFailure(400, "invalid_account_link", `${label} must be a 32-byte opaque token.`);
+  }
+  return value;
 }
 
 async function createConnection(request: Request, env: Env, store: Kv.Kv): Promise<Response> {
@@ -311,13 +453,15 @@ async function createConnection(request: Request, env: Env, store: Kv.Kv): Promi
   if (grantTtl <= 0) {
     throw new ApiFailure(403, "access_key_expired", "The delegated access key has expired.");
   }
-  const connectors = await connectedRequestedConnectors(env, accountAddress, requested);
+  const identity = await brokerIdentity(env, accountAddress);
+  const connectors = await connectedRequestedConnectors(env, identity.userId, requested);
   const grantId = await digestHex(`grant:${randomSubject()}`);
   const grantToken = randomSubject();
   const grant: GrantRecord = {
     id: grantId,
     appId,
     accountAddress,
+    brokerUserId: identity.userId,
     agentId: await agentId(accountAddress),
     permission,
     status: "active",
@@ -331,7 +475,7 @@ async function createConnection(request: Request, env: Env, store: Kv.Kv): Promi
   // Resolve all fallible read-only data before publishing either the broker
   // subject or the bearer token.
   const wire = await connectionWire(grant, grantToken);
-  await bindSubject(env, grant.egressSubject, accountAddress);
+  await bindSubject(env, grant.egressSubject, grant.brokerUserId);
   try {
     await store.set(`grant:${grant.id}`, grant, { ttl: grantTtl });
     if (persist) {
@@ -352,7 +496,7 @@ async function createConnection(request: Request, env: Env, store: Kv.Kv): Promi
     const cleanup = [
       store.delete(`grant:${grant.id}`),
       store.delete(`grant-token:${grantToken}`),
-      unbindSubject(env, grant.egressSubject, accountAddress),
+      unbindSubject(env, grant.egressSubject, grant.brokerUserId),
     ];
     if (persist) cleanup.push(store.delete(accessKeyStorageKey(accountAddress, accessKey.key_id)));
     await Promise.allSettled(cleanup);
@@ -692,7 +836,7 @@ async function revokeGrant(
     throw new ApiFailure(403, "invalid_grant_binding", "The grant's broker binding is invalid.");
   }
   const ttl = remainingGrantTtl(grant);
-  await unbindSubject(env, grant.egressSubject, grant.accountAddress);
+  await unbindSubject(env, grant.egressSubject, grant.brokerUserId);
   const revoked = { ...grant, status: "revoked" as const };
   await store.set(`grant:${grant.id}`, revoked, { ttl });
   await store.delete(`grant-token:${token}`);
@@ -770,6 +914,7 @@ function isGrantRecord(value: unknown): value is GrantRecord {
     && value.appId.length > 0
     && /^0x[0-9a-fA-F]{64}$/.test(String(value.id))
     && /^0x[0-9a-fA-F]{40}$/.test(String(value.accountAddress))
+    && isBrokerUserId(value.brokerUserId)
     && typeof value.agentId === "string"
     && typeof value.permission === "string"
     && (value.status === "active" || value.status === "revoked")
@@ -779,6 +924,13 @@ function isGrantRecord(value: unknown): value is GrantRecord {
     && isRecord(value.accessKey)
     && typeof value.spentAtomics === "string"
     && typeof value.egressSubject === "string";
+}
+
+function isBrokerUserId(value: unknown): value is string {
+  return typeof value === "string" && (
+    /^0x[0-9a-fA-F]{40}$/.test(value)
+    || /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value)
+  );
 }
 
 function isAccessKeyRecord(value: unknown): value is AccessKeyRecord {
@@ -837,11 +989,11 @@ async function chargeGrant(
 
 async function connectorStatuses(
   env: Env,
-  accountAddress: `0x${string}`,
+  brokerUserId: string,
 ): Promise<{ connectors: Record<ConnectorId, ConnectorStatus> }> {
   const [connectorValue, credentialValue] = await Promise.all([
-    brokerJson(env, `/users/${accountAddress}/connectors`),
-    brokerJson(env, `/users/${accountAddress}/credentials`),
+    brokerJson(env, `/users/${encodeURIComponent(brokerUserId)}/connectors`),
+    brokerJson(env, `/users/${encodeURIComponent(brokerUserId)}/credentials`),
   ]);
   const statuses = isRecord(connectorValue.connectors) ? connectorValue.connectors : {};
   const chatGpt = isRecord(credentialValue.chatgpt) ? credentialValue.chatgpt : {};
@@ -871,17 +1023,18 @@ async function startConnector(
   store: Kv.Kv,
   request: Request,
   accountAddress: `0x${string}`,
+  brokerUserId: string,
   connector: ConnectorId,
 ): Promise<Response> {
   if (connector === "chatgpt") {
     return Response.json(publicChatGptLogin(await brokerJson(
       env,
-      `/users/${accountAddress}/credentials/chatgpt/login`,
+      `/users/${encodeURIComponent(brokerUserId)}/credentials/chatgpt/login`,
       { method: "POST" },
     )));
   }
 
-  const started = await brokerJson(env, `/users/${accountAddress}/connectors/${connector}`, {
+  const started = await brokerJson(env, `/users/${encodeURIComponent(brokerUserId)}/connectors/${connector}`, {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({
@@ -899,6 +1052,7 @@ async function startConnector(
   }
   const created = await store.create(`connector-state:${state}`, {
     accountAddress,
+    brokerUserId,
     dialogOrigin: requiredDialogOrigin(request),
     provider: connector,
   } satisfies ConnectorState, { ttl: CONNECTOR_STATE_TTL });
@@ -927,12 +1081,12 @@ function connectorAuthorizationUrl(value: unknown, connector: OAuthConnectorId):
 
 async function disconnectConnector(
   env: Env,
-  accountAddress: `0x${string}`,
+  brokerUserId: string,
   connector: ConnectorId,
 ): Promise<void> {
   const path = connector === "chatgpt"
-    ? `/users/${accountAddress}/credentials/chatgpt`
-    : `/users/${accountAddress}/connectors/${connector}`;
+    ? `/users/${encodeURIComponent(brokerUserId)}/credentials/chatgpt`
+    : `/users/${encodeURIComponent(brokerUserId)}/connectors/${connector}`;
   const response = await brokerFetch(env, path, { method: "DELETE" });
   if (!response.ok) {
     await response.body?.cancel();
@@ -941,10 +1095,10 @@ async function disconnectConnector(
   await response.body?.cancel();
 }
 
-async function pollChatGpt(env: Env, accountAddress: `0x${string}`): Promise<Response> {
+async function pollChatGpt(env: Env, brokerUserId: string): Promise<Response> {
   const status = publicChatGptLogin(await brokerJson(
     env,
-    `/users/${accountAddress}/credentials/chatgpt/login/status`,
+    `/users/${encodeURIComponent(brokerUserId)}/credentials/chatgpt/login/status`,
     { method: "POST" },
   ));
   if (status.state === "authenticated") return Response.json({ ...status, connected: true });
@@ -1002,7 +1156,7 @@ async function completeConnectorCallback(
   try {
     response = await brokerFetch(
       env,
-      `/users/${correlation.accountAddress}/connectors/${provider}/callback`,
+      `/users/${encodeURIComponent(correlation.brokerUserId)}/connectors/${provider}/callback`,
       {
         method: "POST",
         headers: { "content-type": "application/json" },
@@ -1049,6 +1203,7 @@ function connectorCompletionPage(
 function isConnectorState(value: unknown): value is ConnectorState {
   return isRecord(value)
     && /^0x[0-9a-fA-F]{40}$/.test(String(value.accountAddress))
+    && isBrokerUserId(value.brokerUserId)
     && typeof value.dialogOrigin === "string"
     && isAllowedDialogOrigin(value.dialogOrigin)
     && typeof value.provider === "string"
@@ -1072,11 +1227,11 @@ function requestedConnectors(value: unknown): ConnectorId[] {
 
 async function connectedRequestedConnectors(
   env: Env,
-  accountAddress: `0x${string}`,
+  brokerUserId: string,
   requested: readonly ConnectorId[],
 ): Promise<ConnectorId[]> {
   if (requested.length === 0) return [];
-  const current = (await connectorStatuses(env, accountAddress)).connectors;
+  const current = (await connectorStatuses(env, brokerUserId)).connectors;
   return requested.filter((connector) => current[connector].connected);
 }
 
@@ -1090,12 +1245,12 @@ function randomSubject(): string {
 async function bindSubject(
   env: Env,
   subject: string,
-  accountAddress: `0x${string}`,
+  brokerUserId: string,
 ): Promise<void> {
   const response = await brokerFetch(env, `/subjects/${subject}`, {
     method: "PUT",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ user_id: accountAddress }),
+    body: JSON.stringify({ user_id: brokerUserId }),
   });
   if (!response.ok) {
     await response.body?.cancel();
@@ -1107,12 +1262,12 @@ async function bindSubject(
 async function unbindSubject(
   env: Env,
   subject: string,
-  accountAddress: `0x${string}`,
+  brokerUserId: string,
 ): Promise<void> {
   const response = await brokerFetch(env, `/subjects/${subject}`, {
     method: "DELETE",
     headers: { "content-type": "application/json" },
-    body: JSON.stringify({ user_id: accountAddress }),
+    body: JSON.stringify({ user_id: brokerUserId }),
   });
   if (!response.ok) {
     await response.body?.cancel();
@@ -1538,7 +1693,7 @@ function cors(response: Response, request: Request) {
       "access-control-allow-headers",
       "accept-payment, authorization, content-type, idempotency-key, payment-session, payment-session-snapshot, payment-signature",
     );
-    response.headers.set("access-control-allow-methods", "GET, POST, DELETE, OPTIONS");
+    response.headers.set("access-control-allow-methods", "GET, POST, PUT, DELETE, OPTIONS");
     response.headers.set(
       "access-control-expose-headers",
       "payment-receipt, payment-response, payment-session, payment-session-snapshot, www-authenticate",

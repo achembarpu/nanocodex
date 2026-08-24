@@ -84,6 +84,7 @@ import {
   type AccountAuthEnv,
 } from "./account-auth";
 import { routeBrowserModel } from "./browser-model";
+import { routeAccountLinkRequest } from "./account-links";
 export { ApiKeyRecord, NonceStorage, UserAccount } from "./account-auth";
 export { MemoryScope, Organization } from "./reserved-durable-objects";
 
@@ -239,6 +240,8 @@ export default {
     const url = new URL(request.url);
     const browserModel = await routeBrowserModel(request, env, url);
     if (browserModel) return browserModel;
+    const accountLink = await routeAccountLinkRequest(request, env, url);
+    if (accountLink) return accountLink;
     const account = await routeAccountRequest(request, env, url);
     if (account) return account;
     const credential = await routeCredentialRequest(request, env, url);

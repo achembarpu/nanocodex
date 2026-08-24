@@ -6,6 +6,7 @@
   "compatibility_flags": ["nodejs_compat"],
   "workers_dev": true,
   "services": [
+    { "binding": "ACCOUNTS", "service": "nanocodex-durable-agent" },
     { "binding": "EGRESS", "service": "nanocodex-egress" }
   ],
   "durable_objects": {
