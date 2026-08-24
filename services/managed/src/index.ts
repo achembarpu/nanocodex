@@ -70,7 +70,7 @@ import {
   unbindAgentCredential,
 } from "./credentials";
 import { routeBrowserEgress } from "./browser-egress";
-import { accountInfo } from "./account-info";
+import { accountInfo, type AccountInfo, withInitialAccountInfo } from "./account-info";
 import { routeConnectorRequest } from "./connectors";
 import {
   attachAgent,
@@ -103,6 +103,7 @@ const encoder = new TextEncoder();
 const ENCODED_PONG = JSON.stringify({ type: "pong" });
 const SESSION_DELETING_KEY = "nanocodex:session-deleting";
 const SESSION_DELETION_GENERATION_KEY = "nanocodex:session-deletion-generation";
+const INITIAL_ACCOUNT_CONTEXT_KEY = "nanocodex:initial-account-context";
 const CREDENTIAL_BINDING_KEY = "nanocodex:credential-binding";
 const CLEANUP_RETRY_ATTEMPT_KEY = "nanocodex:cleanup-retry-attempt";
 const CREDENTIAL_BINDING_PREPARE_TIMEOUT_MS = 60_000;
@@ -146,6 +147,11 @@ type SessionStatusRow = {
   last_active: number;
   stream_error: string | null;
 };
+
+type InitialAccountContext = Readonly<{
+  turn_id: string;
+  account: AccountInfo;
+}>;
 
 type ManagedTurnState =
   | "accepted"
@@ -571,6 +577,7 @@ export class NanocodexSession extends DurableComputerSession {
   readonly #pendingTurnIds = new Set<string>();
   readonly #turnInputs = new Map<string, PromptInput>();
   readonly #admissionTasks = new Map<string, Promise<ManagedTurnRow>>();
+  #initialAccountContextTask?: Promise<InitialAccountContext | undefined>;
   readonly #cancellationTasks = new Map<string, Promise<void>>();
   readonly #inFlight = new Set<Promise<unknown>>();
   #recoveryTask?: Promise<void>;
@@ -1409,8 +1416,12 @@ export class NanocodexSession extends DurableComputerSession {
     try {
       const agent = await this.#ensureAgent();
       if (this.#deleting || this.#agent !== agent) throw retryableError("agent became unavailable during admission");
+      const initialAccountContext = await this.#initialAccountContext();
+      const modelInput = initialAccountContext?.turn_id === row.id
+        ? withInitialAccountInfo(input, initialAccountContext.account)
+        : input;
       this.#eventTurnQueue.push(row.id);
-      turn = agent.turn.prompt({ id: row.id, input });
+      turn = agent.turn.prompt({ id: row.id, input: modelInput });
       this.#turns.set(row.id, turn);
       const durableId = await turn.accepted();
       if (durableId !== undefined && durableId !== row.id) {
@@ -1563,11 +1574,13 @@ export class NanocodexSession extends DurableComputerSession {
       }
       await transaction.delete(CREDENTIAL_BINDING_KEY);
       await transaction.delete(CLEANUP_RETRY_ATTEMPT_KEY);
+      await transaction.delete(INITIAL_ACCOUNT_CONTEXT_KEY);
       await transaction.delete(SESSION_DELETING_KEY);
       await transaction.deleteAlarm();
     });
     this.#assertDeletionGeneration(generation);
     this.#credentialBinding = undefined;
+    this.#initialAccountContextTask = undefined;
     this.#deleting = false;
   }
 
@@ -1777,6 +1790,29 @@ export class NanocodexSession extends DurableComputerSession {
       console.error("superseded Nanocodex agent shutdown failed", errorMessage(error));
     }));
     return shutdown;
+  }
+
+  #initialAccountContext(): Promise<InitialAccountContext | undefined> {
+    return this.#initialAccountContextTask ??= this.#loadInitialAccountContext();
+  }
+
+  async #loadInitialAccountContext(): Promise<InitialAccountContext | undefined> {
+    const retained = await this.ctx.storage.get<InitialAccountContext>(
+      INITIAL_ACCOUNT_CONTEXT_KEY,
+    );
+    if (retained) return retained;
+    const session = this.#session();
+    if (!session || session.runtime_profile === "multiplayer") return undefined;
+    const first = this.ctx.storage.sql.exec<{ id: string }>(
+      "SELECT id FROM managed_turns ORDER BY created_at, id LIMIT 1",
+    ).toArray()[0];
+    if (!first) return undefined;
+    const prepared = {
+      turn_id: first.id,
+      account: await accountInfo(this.env.NANOCODEX, session.owner_id, true),
+    } satisfies InitialAccountContext;
+    await this.ctx.storage.put(INITIAL_ACCOUNT_CONTEXT_KEY, prepared);
+    return prepared;
   }
 
   async #createAgent(): Promise<CloudflareAgent.Agent> {

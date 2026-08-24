@@ -1,3 +1,5 @@
+import type { PromptInput } from "nanocodex";
+
 const CONNECTOR_IDS = ["github", "gmail", "gdrive"] as const;
 
 type ConnectorId = typeof CONNECTOR_IDS[number];
@@ -53,6 +55,21 @@ export async function accountInfo(
   } catch {
     return emptyInfo("unavailable");
   }
+}
+
+export function withInitialAccountInfo(input: PromptInput, info: AccountInfo): PromptInput {
+  const explanation = [
+    "The managed runtime already resolved the following non-secret accountInfo snapshot for",
+    "this agent. Use it as the current connected-account context. Do not call accountInfo",
+    "again unless the task requires state refreshed after this first prompt.",
+  ].join(" ");
+  const context = {
+    type: "text" as const,
+    text: `${explanation}\n\n<account_info>\n${JSON.stringify(info)}\n</account_info>`,
+  };
+  return typeof input === "string"
+    ? [context, { type: "text", text: input }]
+    : [context, ...input];
 }
 
 function emptyInfo(status: "disabled" | "unavailable"): AccountInfo {

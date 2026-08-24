@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { accountInfo } from "../src/account-info";
+import { accountInfo, withInitialAccountInfo } from "../src/account-info";
 
 describe("account info", () => {
   it("reports authenticated connector names and display labels only", async () => {
@@ -52,5 +52,27 @@ describe("account info", () => {
       authorizations: [],
     });
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("prepends a resolved snapshot to the first model prompt", () => {
+    const info = {
+      status: "ready" as const,
+      authenticated: ["github" as const],
+      accounts: { github: "Nano Cat (nanocat)" },
+      identity: {},
+      stablecoins: [] as const,
+      authorizations: [] as const,
+    };
+
+    expect(withInitialAccountInfo("inspect my repositories", info)).toEqual([
+      {
+        type: "text",
+        text: [
+          "The managed runtime already resolved the following non-secret accountInfo snapshot for this agent. Use it as the current connected-account context. Do not call accountInfo again unless the task requires state refreshed after this first prompt.",
+          `<account_info>\n${JSON.stringify(info)}\n</account_info>`,
+        ].join("\n\n"),
+      },
+      { type: "text", text: "inspect my repositories" },
+    ]);
   });
 });
