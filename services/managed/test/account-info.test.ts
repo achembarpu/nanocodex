@@ -9,6 +9,7 @@ describe("account info", () => {
         github: { connected: true, account_id: "secret-account", label: "Nano Cat (nanocat)" },
         gmail: { connected: false },
         gdrive: { connected: true, access_token: "secret-token" },
+        x: { connected: true, account_id: "secret-x-account", label: "Nano Cat (@nanocat)" },
       },
     }));
 
@@ -16,8 +17,8 @@ describe("account info", () => {
 
     expect(info).toEqual({
       status: "ready",
-      authenticated: ["github", "gdrive"],
-      accounts: { github: "Nano Cat (nanocat)" },
+      authenticated: ["github", "gdrive", "x"],
+      accounts: { github: "Nano Cat (nanocat)", x: "Nano Cat (@nanocat)" },
       identity: {},
       stablecoins: [],
       authorizations: [],
@@ -25,7 +26,7 @@ describe("account info", () => {
     expect(fetch).toHaveBeenCalledWith(
       "https://broker.internal/users/user%2Fwith%20spaces/connectors",
     );
-    expect(JSON.stringify(info)).not.toMatch(/secret-account|secret-token/);
+    expect(JSON.stringify(info)).not.toMatch(/secret-account|secret-token|secret-x-account/);
   });
 
   it("fails closed when status is unavailable or malformed", async () => {

@@ -1,6 +1,6 @@
 import type { PromptInput } from "nanocodex";
 
-const CONNECTOR_IDS = ["github", "gmail", "gdrive"] as const;
+const CONNECTOR_IDS = ["github", "gmail", "gdrive", "x"] as const;
 
 type ConnectorId = typeof CONNECTOR_IDS[number];
 type BrokerBinding = Readonly<{
