@@ -32,7 +32,21 @@ This branch now:
   only `managed_events`; and
 - fixes `Agent.extend()` so nested adapter actions such as `events.connect` and
   `turn.route` are actually merged at runtime instead of existing only in the
-  type declarations.
+  type declarations;
+- compacts 64 or more terminal Rust journal batches into one fenced checkpoint
+  batch without rewinding the revision, while retaining exact completed-ID
+  replay receipts and every unresolved operation; and
+- prevents a cold alarm from taking the idle-shutdown path while SQLite still
+  owns accepted, cancelling, or retryable work. A real browser detach/reconnect
+  run exposed this race: the outer turn remained accepted while repeated idle
+  shutdowns fenced admission before the first journal revision. The corrected
+  run recovered that same accepted turn and committed its terminal after the
+  browser re-authorized the reconnect.
+
+The compaction bounds journal row count and repeated checkpoint copies, not the
+total lifetime receipt bytes inside the checkpoint. Exact completed-ID replay
+still grows linearly until the product chooses a retention contract and the R2
+archive/read path exists.
 
 ## Scale target
 
@@ -77,10 +91,10 @@ The governing rule is simple:
                  |  session_state                                         |
                  |  managed_turns              input + terminal forever   |
                  |  managed_events             managed API projection     |
-                 |  nanocodex_cloudflare_events raw AgentEvent projection |
+                 |  nanocodex_cloudflare_events disabled for managed mode |
                  |  nanocodex_journal_owners   current fence              |
                  |  nanocodex_journals         current revision           |
-                 |  nanocodex_journal_batches  every retained append      |
+                 |  nanocodex_journal_batches  checkpoint + recent tail   |
                  |  workspace / Computer state                            |
                  +--------------------------------------------------------+
                                                                           |
@@ -323,13 +337,14 @@ terminal boundary or from its own alarm.
 
 R2 should not preserve accidental duplication forever. The order of work is:
 
-1. Measure bytes and rows independently for journal batches, managed events,
-   raw AgentEvents, turn receipts, checkpoints, and workspace data.
-2. Remove the second full event projection or make the managed stream a typed
-   view over one canonical retained event log.
-3. Teach the durability journal to checkpoint and discard a closed prefix while
-   retaining the latest checkpoint, unresolved work, and required replay
-   receipts.
+1. **Implemented:** measure bytes and rows independently for journal batches,
+   managed events, raw AgentEvents, turn receipts, checkpoints, and workspace
+   data.
+2. **Implemented:** remove the second full event projection or make the managed
+   stream a typed view over one canonical retained event log.
+3. **Implemented for capable stores:** teach the durability journal to
+   checkpoint and discard a closed prefix while retaining the latest
+   checkpoint, unresolved work, and required replay receipts.
 4. Keep recent reconnect and idempotency data locally.
 5. Add R2 segments only for product-required long history, old replay, audit,
    or export.

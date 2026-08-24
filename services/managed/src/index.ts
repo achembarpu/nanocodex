@@ -1196,9 +1196,19 @@ export class NanocodexSession extends DurableComputerSession {
       }
       return;
     }
+    // An alarm may be the first event delivered to a freshly reconstructed
+    // object. In-memory admission ownership is empty in that case even though
+    // SQLite still contains accepted work. Never let the idle path fence the
+    // recovery task that constructor startup (or this alarm) is about to run.
     if (this.#turns.size > 0 || this.#pendingTurnIds.size > 0 || this.#agentPromise) {
       this.#scheduleRecovery();
       await this.#scheduleNextAlarm();
+      return;
+    }
+    if (this.#recoverableTurnCount() > 0) {
+      // Recovery remains the sole owner of a retained retry_at and installs
+      // the next alarm from the same ordered pass that evaluates that row.
+      this.#scheduleRecovery();
       return;
     }
     this.#logCapacity("idle_shutdown");
@@ -3112,6 +3122,12 @@ export class NanocodexSession extends DurableComputerSession {
   #unfinishedTurnCount(): number {
     return this.ctx.storage.sql.exec<{ count: number }>(
       "SELECT COUNT(*) AS count FROM managed_turns WHERE state IN ('accepted', 'cancelling', 'retryable', 'blocked')",
+    ).toArray()[0]?.count ?? 0;
+  }
+
+  #recoverableTurnCount(): number {
+    return this.ctx.storage.sql.exec<{ count: number }>(
+      "SELECT COUNT(*) AS count FROM managed_turns WHERE state IN ('accepted', 'cancelling', 'retryable')",
     ).toArray()[0]?.count ?? 0;
   }
 

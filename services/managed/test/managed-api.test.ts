@@ -2441,6 +2441,42 @@ describe("managed agents REST and resumable SSE", () => {
     }
   });
 
+  it("does not idle-shutdown durable accepted work after in-memory ownership is lost", async () => {
+    const agent = await createAgent();
+    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    const id = "turn-cold-alarm-recovery";
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      await runInDurableObject(session, async (instance, state) => {
+        const now = Date.now();
+        state.storage.sql.exec(
+          `INSERT INTO managed_turns (
+             id, request_key, request_hash, input_json, state,
+             accepted_cursor, may_have_inner_operation, created_at, accepted_at, updated_at
+           ) VALUES (?, ?, ?, ?, 'accepted', 1, 0, ?, ?, ?)`,
+          id,
+          `request-${id}`,
+          `hash-${id}`,
+          JSON.stringify("recover accepted work before considering idle shutdown"),
+          now,
+          now,
+          now,
+        );
+
+        await instance.alarm();
+      });
+
+      expect(info.mock.calls.some(([entry]) => (
+        entry && typeof entry === "object"
+          && (entry as { type?: unknown }).type === "managed.capacity"
+          && (entry as { reason?: unknown }).reason === "idle_shutdown"
+      ))).toBe(false);
+      await waitForTurnState(agent, id, "completed");
+    } finally {
+      info.mockRestore();
+    }
+  });
+
   it("does not construct a replacement after deletion supersedes cold construction", async () => {
     const agent = await createAgent();
     const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
