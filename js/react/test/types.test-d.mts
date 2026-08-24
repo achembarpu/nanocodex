@@ -11,6 +11,18 @@ import {
   type UseNanocodexReturnType,
   type UseVoiceReturnType,
 } from "../index.mjs";
+import {
+  AgentController,
+  useAgentController,
+  type Agent,
+  type AgentControllerSnapshot,
+  type AgentEntry,
+} from "../agent/index.mjs";
+import {
+  createConnectAgentSource,
+  type ConnectAgentSourceOptions,
+} from "../cloud/index.mjs";
+import type { ConnectAgent } from "nanocodex/connect";
 
 const config = createConfig({
   agent: { transport: Transport.hostManaged(), thinking: "high" },
@@ -118,3 +130,47 @@ void narrowResource;
 
 // @ts-expect-error function-backed transports require nanocodex/host and cannot configure the Worker store.
 createConfig({ agent: { transport: Transport.hostManaged({ createWebSocket() { return {} as WebSocket; } }) } });
+
+declare const structuralAgent: Agent | undefined;
+declare const defaultAgent: DefaultAgent;
+const normalizedDefaultAgent: Agent = defaultAgent;
+void normalizedDefaultAgent;
+
+declare const connectAgent: ConnectAgent;
+const connectSourceOptions: ConnectAgentSourceOptions = { history: false };
+const normalizedConnectAgent: Agent = createConnectAgentSource(connectAgent, connectSourceOptions);
+void normalizedConnectAgent;
+// @ts-expect-error history visibility is an explicit, required privacy decision.
+createConnectAgentSource(connectAgent);
+// @ts-expect-error a Connect source cannot infer conversation-history authorization.
+createConnectAgentSource(connectAgent, {});
+
+function HeadlessConversation() {
+  const controller: AgentControllerSnapshot = useAgentController(structuralAgent, {
+    maxEntries: 100,
+    visible: true,
+    onEvent(event) { event.type satisfies string; },
+  });
+  const entries: readonly AgentEntry[] = controller.entries;
+  void controller.submit("root", { intent: "queue" });
+  void controller.steer("adjust");
+  void controller.cancel();
+  void controller.loadOlder();
+  controller.clear();
+  controller.setVisible(false);
+  return entries;
+}
+void HeadlessConversation;
+
+const agentControllerProps: ComponentProps<typeof AgentController> = {
+  agent: structuralAgent,
+  children(controller) {
+    return controller.entries.length;
+  },
+};
+void agentControllerProps;
+
+// @ts-expect-error presentation entries are immutable controller output.
+useAgentController(structuralAgent).entries.push({ id: "x", kind: "error", text: "no" });
+// @ts-expect-error only queue and steer are supported submission intents.
+void useAgentController(structuralAgent).submit("x", { intent: "replace" });

@@ -23,6 +23,7 @@ export function appVisibilityPermissions(resources: unknown): readonly Readonly<
 }>[];
 export function accountLoginCapabilities(accounts: unknown): Readonly<
   | { method: "login"; credentialId: readonly string[] }
-  | { method: "login"; selectAccount: true }
+  | { method: "login" }
 >;
-export function isLoopbackOrigin(value: string): boolean;
+export function isLocalDevelopmentOrigin(value: string): boolean;
+export function usesBrowserLocalWebAuthn(value: string): boolean;

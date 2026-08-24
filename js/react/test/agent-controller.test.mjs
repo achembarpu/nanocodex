@@ -1,0 +1,351 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+
+import { createElement } from "react";
+import { act, create } from "react-test-renderer";
+
+import { AgentController, useAgentController } from "../agent/index.mjs";
+
+globalThis.IS_REACT_ACT_ENVIRONMENT = true;
+
+test("useAgentController projects the complete ordered semantic transcript", async () => {
+  const frames = fakeAnimationFrames();
+  const source = fakeAgent();
+  const lifecycle = [];
+  let controller;
+
+  function Consumer() {
+    controller = useAgentController(source.agent, {
+      onEvent: (event) => lifecycle.push(event),
+    });
+    return null;
+  }
+
+  let root;
+  try {
+    await act(async () => { root = create(createElement(Consumer)); });
+    await flushFrames(frames);
+
+    let turn;
+    await act(async () => { turn = await controller.submit("Build it"); });
+    await flushFrames(frames);
+    assert.equal(turn, source.turns[0]);
+    assert.equal(controller.pendingTurns, 1);
+
+    await act(async () => {
+      source.emit(event(1, "run.started", { turn_id: "turn-1" }));
+      source.emit(event(2, "reasoning.summary.delta", { text: "Inspect", turn_id: "turn-1" }));
+      source.emit(event(3, "tool.call", {
+        call_id: "parent", tool: "exec_command", arguments: { cmd: "pwd" }, turn_id: "turn-1",
+      }));
+      source.emit(event(4, "tool.call", {
+        call_id: "parent/code-1", tool: "read_file", arguments: { path: "README.md" }, turn_id: "turn-1",
+      }));
+      source.emit(event(5, "tool.result", {
+        call_id: "parent/code-1", status: "completed", result: "ok", turn_id: "turn-1",
+      }));
+      source.emit(event(6, "tool.call", {
+        call_id: "plan", tool: "update_plan", turn_id: "turn-1",
+        arguments: { plan: [{ step: "Ship", status: "in_progress" }] },
+      }));
+      source.emit(event(7, "assistant.delta", { text: "Draft", turn_id: "turn-1" }));
+      source.emit(event(8, "assistant.message", { text: "Draft answer", turn_id: "turn-1" }));
+      source.emit(event(9, "run.error", { message: "retained warning", turn_id: "turn-1" }));
+      source.emit(event(10, "run.completed", { turn_id: "turn-1" }));
+    });
+    await flushFrames(frames);
+
+    assert.deepEqual(controller.entries.map((entry) => entry.kind), [
+      "user", "reasoning", "tool", "plan", "assistant", "error",
+    ]);
+    const tool = controller.entries.find((entry) => entry.kind === "tool").tool;
+    assert.equal(tool.name, "exec_command");
+    assert.equal(tool.children[0].name, "read_file");
+    assert.equal(tool.children[0].status, "completed");
+    assert.equal(controller.running, false);
+
+    await act(async () => source.turns[0].complete("Final **Markdown**"));
+    await flushFrames(frames);
+    assert.equal(
+      controller.entries.find((entry) => entry.kind === "assistant").text,
+      "Final **Markdown**",
+    );
+    assert.equal(controller.pendingTurns, 0);
+    assert.equal(source.turns[0].resultDisposals, 1);
+    assert.equal(source.turns[0].disposals, 1);
+    assert.ok(lifecycle.some((entry) => entry.type === "prompt.completed"));
+
+    await act(async () => root.unmount());
+    assert.equal(source.offs, 1);
+    assert.equal(source.releases, 2);
+  } finally {
+    frames.restore();
+  }
+});
+
+test("prompt controls steer active work, queue roots, cancel the latest turn, and dispose exactly", async () => {
+  const frames = fakeAnimationFrames();
+  const source = fakeAgent();
+  let controller;
+
+  function Consumer() {
+    controller = useAgentController(source.agent);
+    return null;
+  }
+
+  let root;
+  try {
+    await act(async () => { root = create(createElement(Consumer)); });
+    await flushFrames(frames);
+    await act(async () => { await controller.submit("first"); });
+    source.emit(event(1, "run.started", { turn_id: "turn-1" }));
+    await flushFrames(frames);
+
+    await act(async () => { await controller.steer("adjust it"); });
+    assert.deepEqual(source.turns[0].steers, ["adjust it"]);
+    await act(async () => { await controller.submit("second", { intent: "queue" }); });
+    await flushFrames(frames);
+    assert.equal(source.turns.length, 2);
+    assert.equal(controller.pendingTurns, 2);
+
+    await act(async () => { assert.equal(await controller.cancel(), true); });
+    assert.equal(source.turns[1].cancelled, true);
+    assert.equal(source.turns[0].cancelled, false);
+
+    await act(async () => root.unmount());
+    assert.deepEqual(source.turns.map((turn) => turn.disposals), [1, 1]);
+    controller.dispose();
+    assert.deepEqual(source.turns.map((turn) => turn.disposals), [1, 1]);
+  } finally {
+    frames.restore();
+  }
+});
+
+test("retained history merges older pages by durable turn and exposes load state", async () => {
+  const frames = fakeAnimationFrames();
+  const source = fakeAgent();
+  source.history = [
+    event(1, "managed.prompt", { text: "recent", turn_id: "recent" }),
+    event(2, "assistant.message", { text: "recent answer", turn_id: "recent" }),
+  ];
+  source.olderPages.push([
+    event(1, "managed.prompt", { text: "older", turn_id: "older" }),
+    event(2, "assistant.message", { text: "older answer", turn_id: "older" }),
+    event(3, "managed.prompt", { text: "recent", turn_id: "recent" }),
+    event(4, "assistant.message", { text: "recent answer", turn_id: "recent" }),
+  ]);
+  let controller;
+
+  function Consumer() {
+    controller = useAgentController(source.agent);
+    return null;
+  }
+
+  let root;
+  try {
+    await act(async () => { root = create(createElement(Consumer)); });
+    await flushFrames(frames);
+    assert.deepEqual(controller.entries.filter(textEntry).map(({ text }) => text), [
+      "recent", "recent answer",
+    ]);
+    assert.equal(controller.canLoadOlder, true);
+
+    await act(async () => { assert.equal(await controller.loadOlder(), true); });
+    await flushFrames(frames);
+    assert.deepEqual(controller.entries.filter(textEntry).map(({ text }) => text), [
+      "older", "older answer", "recent", "recent answer",
+    ]);
+    assert.equal(source.loadCalls, 1);
+
+    await act(async () => { assert.equal(await controller.loadOlder(), false); });
+    await flushFrames(frames);
+    assert.equal(controller.canLoadOlder, false);
+    await act(async () => root.unmount());
+  } finally {
+    frames.restore();
+  }
+});
+
+test("hidden controllers reduce bursts and publish one visible catch-up snapshot", async () => {
+  const frames = fakeAnimationFrames();
+  const source = fakeAgent();
+  let controller;
+  let renders = 0;
+
+  function Consumer({ visible }) {
+    renders += 1;
+    controller = useAgentController(source.agent, { visible });
+    return null;
+  }
+
+  let root;
+  try {
+    await act(async () => { root = create(createElement(Consumer, { visible: false })); });
+    assert.equal(frames.pending, 0);
+    const hiddenRenders = renders;
+    await act(async () => {
+      source.emit(event(1, "run.started", { turn_id: "turn-1" }));
+      for (let seq = 2; seq < 50; seq += 1) {
+        source.emit(event(seq, "assistant.delta", { text: "x", turn_id: "turn-1" }));
+      }
+    });
+    assert.equal(renders, hiddenRenders);
+    assert.equal(controller.entries.length, 0);
+
+    await act(async () => root.update(createElement(Consumer, { visible: true })));
+    assert.equal(frames.pending, 1);
+    const beforeCatchUp = renders;
+    await flushFrames(frames);
+    assert.equal(renders, beforeCatchUp + 1);
+    assert.equal(controller.entries[0].text.length, 48);
+    await act(async () => root.unmount());
+  } finally {
+    frames.restore();
+  }
+});
+
+test("AgentController exposes the same stable controls through a render prop", async () => {
+  const frames = fakeAnimationFrames();
+  const source = fakeAgent();
+  let first;
+  let latest;
+  let root;
+  try {
+    await act(async () => {
+      root = create(createElement(AgentController, {
+        agent: source.agent,
+        children(snapshot) {
+          first ??= snapshot;
+          latest = snapshot;
+          return null;
+        },
+      }));
+    });
+    await flushFrames(frames);
+    assert.equal(first.submit, latest.submit);
+    assert.equal(first.cancel, latest.cancel);
+    await act(async () => root.unmount());
+  } finally {
+    frames.restore();
+  }
+});
+
+function fakeAgent() {
+  let eventListener = () => {};
+  let historyListener = () => {};
+  let offs = 0;
+  let releases = 0;
+  let loadCalls = 0;
+  const turns = [];
+  const olderPages = [];
+  const source = {
+    history: [],
+    olderPages,
+    turns,
+    agent: {
+      sessionId: "session",
+      events: {
+        watch() {
+          return {
+            onEvent(listener) {
+              eventListener = listener;
+              return () => { releases += 1; eventListener = () => {}; };
+            },
+            onHistory(listener) {
+              historyListener = listener;
+              listener(source.history);
+              return () => { releases += 1; historyListener = () => {}; };
+            },
+            async loadOlder() {
+              loadCalls += 1;
+              const page = olderPages.shift();
+              if (!page) return false;
+              source.history = page;
+              historyListener(page);
+              return true;
+            },
+            off() { offs += 1; },
+          };
+        },
+      },
+      turn: {
+        prompt({ input }) {
+          let resolve;
+          let reject;
+          const pending = new Promise((yes, no) => { resolve = yes; reject = no; });
+          const turn = {
+            input,
+            historyEntryId: `managed-user-turn-${turns.length + 1}`,
+            steers: [],
+            cancelled: false,
+            disposals: 0,
+            resultDisposals: 0,
+            async steer({ input: steer }) { turn.steers.push(steer); },
+            async cancel() { turn.cancelled = true; },
+            result() { return pending; },
+            dispose() { turn.disposals += 1; },
+            complete(finalMessage) {
+              resolve({
+                finalMessage,
+                dispose() { turn.resultDisposals += 1; },
+              });
+            },
+            fail(error) { reject(error); },
+          };
+          turns.push(turn);
+          return turn;
+        },
+      },
+    },
+    emit(next) { eventListener(next); },
+    get loadCalls() { return loadCalls; },
+    get offs() { return offs; },
+    get releases() { return releases; },
+  };
+  return source;
+}
+
+function event(seq, type, payload = {}) {
+  return { request_id: "session", seq, type, payload };
+}
+
+function textEntry(entry) {
+  return "text" in entry;
+}
+
+function fakeAnimationFrames() {
+  const requestDescriptor = Object.getOwnPropertyDescriptor(globalThis, "requestAnimationFrame");
+  const cancelDescriptor = Object.getOwnPropertyDescriptor(globalThis, "cancelAnimationFrame");
+  const callbacks = new Map();
+  let nextFrame = 1;
+  Object.defineProperty(globalThis, "requestAnimationFrame", {
+    configurable: true,
+    value(callback) {
+      const frame = nextFrame++;
+      callbacks.set(frame, callback);
+      return frame;
+    },
+  });
+  Object.defineProperty(globalThis, "cancelAnimationFrame", {
+    configurable: true,
+    value(frame) { callbacks.delete(frame); },
+  });
+  return {
+    get pending() { return callbacks.size; },
+    flush() {
+      const pending = [...callbacks.values()];
+      callbacks.clear();
+      for (const callback of pending) callback(performance.now());
+    },
+    restore() {
+      if (requestDescriptor) Object.defineProperty(globalThis, "requestAnimationFrame", requestDescriptor);
+      else Reflect.deleteProperty(globalThis, "requestAnimationFrame");
+      if (cancelDescriptor) Object.defineProperty(globalThis, "cancelAnimationFrame", cancelDescriptor);
+      else Reflect.deleteProperty(globalThis, "cancelAnimationFrame");
+    },
+  };
+}
+
+async function flushFrames(frames) {
+  await act(async () => { frames.flush(); });
+}

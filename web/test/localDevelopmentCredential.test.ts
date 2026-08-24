@@ -37,6 +37,28 @@ test("a changed browser identity receives its own localhost credential claim", a
   assert.deepEqual(users, ["claim", "claim"]);
 });
 
+test("the canonical OrbStack hostname receives the local credential claim", async () => {
+  let calls = 0;
+  const resource = createLocalDevelopmentCredentialResource(async () => {
+    calls += 1;
+    return new Response(null, { status: 204 });
+  }, "nanocodex.local");
+
+  assert.equal(await resource.ensure("user-a"), true);
+  assert.equal(calls, 1);
+});
+
+test("the portable browser hostname receives the local credential claim", async () => {
+  let calls = 0;
+  const resource = createLocalDevelopmentCredentialResource(async () => {
+    calls += 1;
+    return new Response(null, { status: 204 });
+  }, "nanocodex.localhost");
+
+  assert.equal(await resource.ensure("user-a"), true);
+  assert.equal(calls, 1);
+});
+
 test("a rejected localhost claim blocks startup and remains retryable", async () => {
   let calls = 0;
   const resource = createLocalDevelopmentCredentialResource(async () => {

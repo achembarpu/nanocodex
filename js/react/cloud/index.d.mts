@@ -10,6 +10,7 @@ import type {
   Dialog,
 } from "nanocodex/connect";
 import type { ReactNode } from "react";
+import type { Agent as StructuralAgent } from "../agent/index.mjs";
 
 export type ConnectionStatus = "disconnected" | "connecting" | "connected";
 
@@ -147,6 +148,17 @@ export function useConnectAgent<
   error = Error,
   context = unknown,
 >(parameters?: UseConnectAgentParameters<error, context>): UseConnectAgentReturnType<error, context>;
+
+export type ConnectAgentSourceOptions = Readonly<{
+  /** Whether the signed Connect grant permits retained conversation history. */
+  history: boolean;
+}>;
+
+/** Normalizes a capability-bound Connect agent for nanocodex-react/agent. */
+export function createConnectAgentSource(
+  connectAgent: ConnectAgent,
+  options: ConnectAgentSourceOptions,
+): StructuralAgent;
 
 export function useFund<
   error = Error,

@@ -72,7 +72,9 @@ function linkPreviewMetadata(): Plugin {
     transformIndexHtml: {
       order: "post",
       handler(html, context) {
-        const origin = context.server?.resolvedUrls?.local[0] ?? "http://localhost:5173";
+        const origin = process.env.NANOCODEX_LOCAL_PUBLIC_ORIGIN
+          ?? context.server?.resolvedUrls?.local[0]
+          ?? "http://localhost:5173";
         const url = new URL(context.path, origin);
         return renderLinkPreviewDocument(html, url);
       },
@@ -113,6 +115,9 @@ export default defineConfig({
     react(),
     cloudflare({
       auxiliaryWorkers: localManagedAuxiliaryWorkers(),
+      persistState: process.env.NANOCODEX_LOCAL_STATE_PATH
+        ? { path: process.env.NANOCODEX_LOCAL_STATE_PATH }
+        : undefined,
       config: (config) => ({
         // `npm run dev` mints this one-use bootstrap credential after rejecting
         // local env files. Wrangler's required-secret loader cannot consume
@@ -176,6 +181,7 @@ export default defineConfig({
   },
   server: {
     strictPort: true,
+    allowedHosts: ["nanocodex.local", "nanocodex.localhost"],
     // The live artifact frame intentionally has an opaque sandbox origin. Its
     // module graph therefore needs CORS even though it is served by this host.
     headers: { "Access-Control-Allow-Origin": "*" },

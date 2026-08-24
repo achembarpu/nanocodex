@@ -1,24 +1,31 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { basename, join, resolve } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
 import {
   LocalStackLifecycle,
+  acquireLocalDevelopmentLease,
   assertLocalDevelopmentPortAvailable,
+  assertOrbStack,
+  localDevelopmentBrowserOrigin,
   localDevelopmentOrigin,
+  localDevelopmentPublicOrigin,
+  localDevelopmentStatePath,
   localConnectorEnvironment,
   localDependencyRequirements,
   localStackChildIsAlive,
   localStackChildOptions,
   loadRootEnvironment,
   managedChildEnvironment,
+  orbStackGatewayChildLaunch,
+  orbStackGatewayStop,
   parseLocalDevOptions,
   providerFreeWebEnvironment,
   requireLocalProcessGroups,
@@ -33,6 +40,7 @@ import {
   verifyLocalMultiplayer,
   viteChildConfiguration,
   waitForManagedStack,
+  waitForOrbStackGateway,
   websiteChildLaunch,
 } from "./dev-local.mjs";
 import { prepareDevWasm } from "./check-dev-wasm.mjs";
@@ -834,6 +842,99 @@ test("local development origin is the canonical loopback HTTP authority", () => 
     "http://127.0.0.1:5173/path",
   ]) {
     assert.throws(() => localDevelopmentOrigin(invalid), /explicit loopback HTTP origin/);
+  }
+});
+
+test("local development exposes one stable HTTPS identity and shared state path", () => {
+  assert.equal(localDevelopmentPublicOrigin().origin, "https://nanocodex.local");
+  assert.equal(
+    localDevelopmentBrowserOrigin(localDevelopmentOrigin("http://127.0.0.1:5273")).origin,
+    "http://nanocodex.localhost:5273",
+  );
+  assert.equal(
+    localDevelopmentStatePath("/Users/example"),
+    "/Users/example/.nanocodex/web-development",
+  );
+  for (const invalid of [
+    "http://nanocodex.local",
+    "https://nanocodex.local:8443",
+    "https://other.nanocodex.local",
+  ]) {
+    assert.throws(
+      () => localDevelopmentPublicOrigin(invalid),
+      /must be https:\/\/nanocodex\.local/,
+    );
+  }
+});
+
+test("OrbStack owns the canonical HTTPS gateway without receiving provider credentials", async () => {
+  const calls = [];
+  await assertOrbStack({ PATH: "/bin" }, async (command, arguments_, options) => {
+    calls.push([command, arguments_, options]);
+    return command === "orb" ? "Running\n" : "orbstack\n";
+  });
+  assert.deepEqual(calls.map(([command, arguments_]) => [command, arguments_]), [
+    ["orb", ["status"]],
+    ["docker", ["context", "show"]],
+  ]);
+
+  const launch = orbStackGatewayChildLaunch(
+    { PATH: "/bin", OPENAI_API_KEY: "must-not-cross" },
+    localDevelopmentOrigin("http://127.0.0.1:5273"),
+  );
+  assert.equal(launch.command, "docker");
+  assert.deepEqual(launch.options.env, {
+    NANOCODEX_DEV_PORT: "5273",
+    PATH: "/bin",
+  });
+  assert.equal(launch.arguments.includes("--force-recreate"), true);
+  assert.deepEqual(orbStackGatewayStop(launch), {
+    command: "docker",
+    arguments: [
+      "compose",
+      "--file",
+      fileURLToPath(new URL("../docker-compose.dev.yml", import.meta.url)),
+      "down",
+      "--remove-orphans",
+    ],
+    options: {
+      cwd: resolve(fileURLToPath(new URL("..", import.meta.url))),
+      env: { NANOCODEX_DEV_PORT: "5273", PATH: "/bin" },
+    },
+  });
+
+  await waitForOrbStackGateway(
+    new URL("https://nanocodex.local/api/health"),
+    [{ exitCode: null, signalCode: null }],
+    { PATH: "/bin" },
+    async () => JSON.stringify({ status: "ok" }),
+  );
+});
+
+test("the shared local state admits only one canonical HTTPS owner", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "nanocodex-development-lease-"));
+  try {
+    await chmod(directory, 0o755);
+    const first = await acquireLocalDevelopmentLease(directory, {
+      currentPid: 101,
+      isProcessAlive: () => false,
+    });
+    assert.equal((await stat(directory)).mode & 0o777, 0o700);
+    await assert.rejects(
+      acquireLocalDevelopmentLease(directory, {
+        currentPid: 202,
+        isProcessAlive: (pid) => pid === 101,
+      }),
+      /already running as process 101/,
+    );
+    await first.release();
+    const second = await acquireLocalDevelopmentLease(directory, {
+      currentPid: 202,
+      isProcessAlive: () => false,
+    });
+    await second.release();
+  } finally {
+    await rm(directory, { recursive: true, force: true });
   }
 });
 

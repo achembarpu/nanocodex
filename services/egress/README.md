@@ -101,16 +101,16 @@ https://<origin>/v1/connectors/gmail/callback
 https://<origin>/v1/connectors/gdrive/callback
 ```
 
-For the canonical local stack, register the corresponding loopback callbacks;
-neither Portless nor a public tunnel is required:
+For the canonical local stack, register the corresponding OrbStack HTTPS
+callbacks; neither Portless nor a public tunnel is required:
 
 ```text
-http://localhost:5173/v1/connectors/github/callback
-http://localhost:5173/v1/connectors/gmail/callback
-http://localhost:5173/v1/connectors/gdrive/callback
+https://nanocodex.local/v1/connectors/github/callback
+https://nanocodex.local/v1/connectors/gmail/callback
+https://nanocodex.local/v1/connectors/gdrive/callback
 ```
 
-Google Web clients require every loopback URI to match exactly, including the
+Google Web clients require every development URI to match exactly, including the
 scheme, host, port, and path. Keep GitHub wildcard callback matching disabled.
 
 GitHub requests only the classic `repo` and `workflow` OAuth scopes for cloning,

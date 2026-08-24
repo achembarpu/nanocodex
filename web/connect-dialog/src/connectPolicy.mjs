@@ -38,7 +38,7 @@ const productionApps = new Map([
 export function registeredApp(embeddingOrigin, dialogOrigin) {
   const registered = productionApps.get(embeddingOrigin);
   if (registered) return registered;
-  if (isLoopbackOrigin(dialogOrigin) && isLoopbackOrigin(embeddingOrigin)) {
+  if (isLocalDevelopmentOrigin(dialogOrigin) && isLocalDevelopmentOrigin(embeddingOrigin)) {
     return Object.freeze({ id: "atlas-workspace", name: "Atlas Workspace", origin: embeddingOrigin });
   }
   throw new Error("This application is not registered with Nanocodex Connect.");
@@ -53,10 +53,10 @@ export function connectApiOrigin(auth, dialogOrigin) {
   if (origins.every((origin) => origin === productionConnectApiOrigin)) {
     return productionConnectApiOrigin;
   }
-  if (isLoopbackOrigin(dialogOrigin)) {
+  if (isLocalDevelopmentOrigin(dialogOrigin)) {
     const expected = origins[0];
-    if (!isLoopbackOrigin(expected) || origins.some((origin) => origin !== expected)) {
-      throw new Error("Local Nanocodex Connect auth endpoints must share one loopback origin.");
+    if (!isLocalDevelopmentOrigin(expected) || origins.some((origin) => origin !== expected)) {
+      throw new Error("Local Nanocodex Connect auth endpoints must share one development origin.");
     }
     return expected;
   }
@@ -109,15 +109,39 @@ export function accountLoginCapabilities(accounts) {
     : [];
   return credentialIds.length > 0
     ? Object.freeze({ method: "login", credentialId: Object.freeze(credentialIds) })
-    : Object.freeze({ method: "login", selectAccount: true });
+    : Object.freeze({ method: "login" });
 }
 
-export function isLoopbackOrigin(value) {
+export function isLocalDevelopmentOrigin(value) {
   try {
     const url = new URL(value);
     return url.origin === value
       && (url.protocol === "http:" || url.protocol === "https:")
-      && (url.hostname === "localhost" || url.hostname === "127.0.0.1" || url.hostname === "[::1]");
+      && (
+        url.hostname === "localhost"
+        || url.hostname === "127.0.0.1"
+        || url.hostname === "[::1]"
+        || url.hostname === "nanocodex.localhost"
+        || (url.protocol === "https:" && (
+          url.hostname === "nanocodex.local"
+          || url.hostname.endsWith(".nanocodex.local")
+        ))
+      );
+  } catch {
+    return false;
+  }
+}
+
+export function usesBrowserLocalWebAuthn(value) {
+  try {
+    const url = new URL(value);
+    return url.origin === value
+      && (url.protocol === "http:" || url.protocol === "https:")
+      && (
+        url.hostname === "localhost"
+        || url.hostname === "127.0.0.1"
+        || url.hostname === "[::1]"
+      );
   } catch {
     return false;
   }

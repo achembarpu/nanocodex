@@ -1,9 +1,9 @@
 import { useCallback, useEffect, useMemo, useRef } from "react";
 import type { ConnectAgent, Connection } from "nanocodex/connect";
+import type { AgentControllerEvent } from "nanocodex-react/agent";
+import { createConnectAgentSource } from "nanocodex-react/connect";
 
 import { AgentTerminalView } from "../../src/AgentTerminalView";
-import type { AgentTerminalEvent } from "../../src/demoTerminal";
-import { managedTerminalAgent } from "../../src/managedAgentRuntime";
 
 export type AppObservation = Readonly<{
   actions: readonly string[];
@@ -29,7 +29,7 @@ export function ConnectAgentExperience({
 }>) {
   const visibility = connection.grant.visibility;
   const terminalAgent = useMemo(
-    () => managedTerminalAgent(agent, { history: visibility.conversationHistory }),
+    () => createConnectAgentSource(agent, { history: visibility.conversationHistory }),
     [agent, visibility.conversationHistory],
   );
   const retryAgent = useCallback(() => {}, []);
@@ -42,7 +42,7 @@ export function ConnectAgentExperience({
     onObservation(observation.current);
   }, [agent, onObservation]);
 
-  const observeTerminalEvent = useCallback((terminalEvent: AgentTerminalEvent) => {
+  const observeTerminalEvent = useCallback((terminalEvent: AgentControllerEvent) => {
     let next = observation.current;
     if (terminalEvent.type === "prompt.completed" && visibility.finalMessages) {
       const finalMessage = typeof terminalEvent.finalMessage === "string"
@@ -112,13 +112,11 @@ export function ConnectAgentExperience({
             <AgentTerminalView
               agent={terminalAgent}
               agentError={undefined}
-              composer="always"
               mode="preview"
               onConversationActivity={recordActivity}
               onTerminalEvent={observeTerminalEvent}
               onStateChange={recordState}
               retryAgent={retryAgent}
-              theme="dark"
             />
           </div>
         </div>

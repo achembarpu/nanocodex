@@ -11,10 +11,12 @@ import {
   connectApiOrigin,
   registeredApp,
   sanitizeWalletResult,
+  usesBrowserLocalWebAuthn,
 } from "./connectPolicy.mjs";
 import { parentDialog, type WalletRequest } from "./protocol";
 
-const provider = createProvider();
+const browserLocalWebAuthn = usesBrowserLocalWebAuthn(window.location.origin);
+const provider = createProvider(browserLocalWebAuthn);
 
 export async function logoutAccount() {
   await provider.request({ method: "wallet_disconnect" });
@@ -260,7 +262,11 @@ export function App() {
 
     setCeremonyRequestId(activeRequest.id);
     try {
-      if (activeRequest.type === "walletConnect" && accountMode === "register") {
+      if (
+        activeRequest.type === "walletConnect"
+        && accountMode === "register"
+        && !browserLocalWebAuthn
+      ) {
         await ensureBrowserSession();
       }
       const result = await provider.request(
@@ -1165,13 +1171,18 @@ function storedProviderAccounts(): unknown {
   }).store.getState().accounts;
 }
 
-function createProvider() {
+function createProvider(browserLocal: boolean) {
   return Provider.create({
-    adapter: webAuthn({
-      auth: "/webauthn",
-      name: "Nanocodex",
-      rdns: "xyz.paradigm.nanocodex",
-    }),
+    adapter: webAuthn(browserLocal
+      ? {
+          name: "Nanocodex",
+          rdns: "xyz.paradigm.nanocodex",
+        }
+      : {
+          auth: "/webauthn",
+          name: "Nanocodex",
+          rdns: "xyz.paradigm.nanocodex",
+        }),
     maxAccounts: 1,
     mpp: false,
     storage: Storage.idb({ key: "nanocodex" }),

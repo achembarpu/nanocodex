@@ -67,6 +67,18 @@ while the existing surfaces are recomposed incrementally.
 
 ## Development
 
+Local development requires a running [OrbStack](https://orbstack.dev/) Docker
+context. OrbStack terminates trusted HTTPS for the canonical
+`https://nanocodex.local` origin; the application and credential broker still
+run as host processes.
+
+Browser runtimes outside macOS mDNS, including the managed verification
+browser, use the same running stack through
+`http://nanocodex.localhost:<development-port>`. The reserved `.localhost`
+domain remains a browser secure context and gives WebAuthn one stable
+`nanocodex.localhost` RP ID; normal interactive development uses the canonical
+OrbStack HTTPS origin.
+
 ```bash
 cd web
 npm install
@@ -81,8 +93,10 @@ starts the website Worker, and publishes the current committed Git `HEAD`
 through the real repository publisher into local R2 and the repository Durable
 Object. It reports ready only after a generation-pinned Source blob, commit
 metadata and page, patch, Evals, and the read-only `/git` advertisement all
-resolve that `HEAD`. Local Cloudflare state is retained under `.wrangler`, so
-later starts reuse immutable repository objects and are substantially faster.
+resolve that `HEAD`. Local Cloudflare state is retained under
+`~/.nanocodex/web-development`, shared by repository worktrees, so passkey
+registrations, browser accounts, and immutable repository objects survive a
+worktree switch.
 
 The orchestrator loads the repository-root `.env` once before it selects auth
 or starts a child. It reconstructs every child environment explicitly: only the
@@ -107,7 +121,7 @@ NANOCODEX_GOOGLE_OAUTH_CLIENT_ID=...
 NANOCODEX_GOOGLE_OAUTH_CLIENT_SECRET=...
 ```
 
-Register the three `http://localhost:5173/v1/connectors/{github,gmail,gdrive}/callback`
+Register the three `https://nanocodex.local/v1/connectors/{github,gmail,gdrive}/callback`
 URIs described in `services/egress/README.md`. Connector controls remain visible
 but disabled for browser-only guest sessions; a persistent passkey account is
 required even when that guest session already has a ChatGPT connection.
@@ -141,10 +155,12 @@ React integration creates the browser agent with
 event stream with `useAgentEvents`. React owns no Worker lifecycle, agent
 history, credential policy, or model-loop state.
 
-The local Worker and Vite client run together at `http://localhost:5173` using
-the Cloudflare Vite-plugin layout. No Cloudflare account or remote binding is
-used by the normal development command. Browsers treat `localhost` as a secure
-context, while provider credentials remain behind private Worker bindings; see the
+The local Worker and Vite client run together behind
+`https://nanocodex.local` using the Cloudflare Vite-plugin layout and a tiny
+OrbStack TCP gateway. The gateway receives only the internal Vite port; it
+never receives provider credentials. No Cloudflare account or remote binding
+is used by the normal development command. Provider credentials remain behind
+private Worker bindings; see the
 [Cloudflare Worker example](../services/managed/README.md#multiplayer-managed-agent-rooms)
 for the deployment and live-smoke workflow.
 
@@ -321,9 +337,9 @@ Run `npm run bench:dataset` in `js/bindings` for the deterministic 100,000-row
 Snappy Parquet/JSONL browser-path benchmark. It reports cold and repeated query
 latency, pulled bytes, range requests, scanned rows, and cache hits.
 
-Development runs on ordinary `http://localhost`, which browsers treat as a
-secure context. Provider credentials remain behind Worker Service Bindings and
-never enter that browser origin.
+Development runs on the stable `https://nanocodex.local` origin. Provider
+credentials remain behind Worker Service Bindings and never enter that browser
+origin.
 
 Local development reads the optional ignored root `.env` through the repository
 workflow. BYOK uses the `BYOK_SESSIONS` Durable Object binding; ChatGPT login

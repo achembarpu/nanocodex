@@ -11,6 +11,8 @@ import {
 } from "react";
 import { useMutation } from "@tanstack/react-query";
 
+export { createConnectAgentSource } from "./connectAgentSource.mjs";
+
 const NanocodexConnectContext = createContext(null);
 const DISCONNECTED = connectionSnapshot("disconnected");
 

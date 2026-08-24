@@ -4,6 +4,82 @@ React hooks over the headless browser SDK. The vanilla config owns the package
 Worker, Rust/WASM Agent, persistent workspace, and cleanup. React only reads
 that external state and binds event subscriptions.
 
+## Headless conversation controller
+
+`nanocodex-react/agent` accepts a structural Agent contract and owns the full
+conversation lifecycle without owning markup, Markdown rendering, scrolling,
+or CSS. It projects ordered user, reasoning, assistant, nested tool, plan, and
+error entries, and exposes stable controls for prompts, steering, cancellation,
+history, and cleanup.
+
+```tsx
+import { useAgentController } from "nanocodex-react/agent";
+
+function Conversation({ agent, visible }) {
+  const conversation = useAgentController(agent, { visible });
+  return (
+    <section>
+      {conversation.entries.map((entry) => (
+        <TranscriptEntry key={entry.id} entry={entry} />
+      ))}
+      <Composer
+        running={conversation.running}
+        onCancel={conversation.cancel}
+        onSubmit={conversation.submit}
+      />
+    </section>
+  );
+}
+```
+
+The default submit intent steers the latest active turn. Pass
+`{ intent: "queue" }` to queue a separate root turn. `loadOlder()` delegates to
+the Agent watcher and merges retained pages by durable turn identity. Streaming
+bursts publish at most once per animation frame; while `visible` is false the
+controller continues reducing events and publishes one catch-up snapshot after
+becoming visible. `AgentController` provides the same API as a render-prop
+component.
+
+Reasoning summaries and assistant text arrive as separate Markdown-bearing
+entries. Consumers can apply the same streaming renderer to both while keeping
+their own visual policy:
+
+```tsx
+import { Streamdown } from "streamdown";
+
+function TranscriptEntry({ entry }) {
+  if (entry.kind !== "reasoning" && entry.kind !== "assistant") return null;
+  return (
+    <article data-kind={entry.kind}>
+      {entry.kind === "reasoning" ? <span>thinking{entry.streaming ? "…" : ""}</span> : null}
+      <Streamdown
+        caret={entry.streaming ? "block" : undefined}
+        isAnimating={entry.streaming}
+        mode={entry.streaming ? "streaming" : "static"}
+        skipHtml
+      >
+        {entry.text}
+      </Streamdown>
+    </article>
+  );
+}
+```
+
+Connect applications normalize their capability-bound agent through the
+Connect entrypoint. The `history` choice is required and should come directly
+from the signed grant; when false, the source never requests retained history
+and exposes live events only for turns submitted through that source.
+
+```tsx
+import { createConnectAgentSource } from "nanocodex-react/connect";
+import { useAgentController } from "nanocodex-react/agent";
+
+const source = createConnectAgentSource(connectAgent, {
+  history: connection.grant.visibility.conversationHistory,
+});
+const conversation = useAgentController(source);
+```
+
 ```tsx
 import { createConfig, useNanocodex } from "nanocodex-react";
 

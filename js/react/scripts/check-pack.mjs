@@ -12,6 +12,12 @@ const files = manifest.files.map(({ path }) => path);
 
 assert(files.includes("index.mjs"));
 assert(files.includes("index.d.mts"));
+assert(files.includes("agent/index.mjs"));
+assert(files.includes("agent/index.d.mts"));
+assert(files.includes("agent/transcript.mjs"));
+assert(files.includes("cloud/index.mjs"));
+assert(files.includes("cloud/index.d.mts"));
+assert(files.includes("cloud/connectAgentSource.mjs"));
 assert(!files.some((path) => path.startsWith("scripts/")));
 assert(!files.some(isRawTypeScript));
 

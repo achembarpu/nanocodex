@@ -6,7 +6,6 @@ import {
   localTranscriptEvents,
   localTerminalAgent,
 } from "../src/localAgentRuntime.ts";
-import { applyAgentEvents, initialTerminalState } from "../src/agentTranscript.ts";
 import type {
   LocalTranscriptJournal,
   LocalTranscriptTransition,
@@ -1156,9 +1155,10 @@ test("accepted steering is persisted and projected after completion and reload",
   assert.equal(history.some(({ type, payload }) =>
     type === "managed.steer" && payload.text === "accepted correction"
   ), true);
-  const projected = applyAgentEvents(initialTerminalState(), history);
   assert.deepEqual(
-    projected.entries.filter(({ kind }) => kind === "user").map(({ text }) => text),
+    history
+      .filter(({ type }) => type === "managed.prompt" || type === "managed.steer")
+      .map(({ payload }) => payload.text),
     ["initial", "accepted correction"],
   );
 });
@@ -1420,9 +1420,9 @@ test("a cancelled durable turn reloads as cancellation without a failure diagnos
   assert.equal(history.some(({ type, payload }) =>
     type === "run.failed" && payload.status === "cancelled" && payload.disposition === "cancelled"
   ), true);
-  const projected = applyAgentEvents(initialTerminalState(), history);
-  assert.equal(projected.entries.some(({ kind }) => kind === "error"), false);
-  assert.equal(projected.status, "Cancelled");
+  assert.equal(history.some(({ type }) => type === "run.error"), false);
+  assert.equal(history.at(-1)?.type, "run.failed");
+  assert.equal(history.at(-1)?.payload.status, "cancelled");
 });
 
 test("disposal before admission waits for the durable result before disposing the underlying turn", async () => {

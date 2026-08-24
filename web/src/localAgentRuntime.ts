@@ -1,5 +1,5 @@
 import type { AgentEvent, AgentSessionContext } from "nanocodex";
-import type { TerminalAgent, TerminalTurn } from "./demoTerminal";
+import type { Agent, AgentTurn } from "nanocodex-react/agent";
 import {
   createLocalTranscriptJournal,
   MAX_LOCAL_TRANSCRIPT_TURNS,
@@ -37,9 +37,9 @@ const browserTranscriptActivity: LocalTranscriptActivity = Object.freeze({
   },
 });
 
-type LocalSessionAgent = TerminalAgent & Readonly<{
+type LocalSessionAgent = Agent & Readonly<{
   session: Readonly<{ context(): Promise<AgentSessionContext> }>;
-  turn: Readonly<{ prompt(options: { input: string; id?: string }): TerminalTurn }>;
+  turn: Readonly<{ prompt(options: { input: string; id?: string }): AgentTurn }>;
 }>;
 
 /** Adds an app-owned durable transcript to the local browser agent. */
@@ -51,7 +51,7 @@ export function localTerminalAgent(
   recoveryTimeoutMs = DEFAULT_RECOVERY_TIMEOUT_MS,
   transcriptActivity: LocalTranscriptActivity = browserTranscriptActivity,
   beforeTurn: () => Promise<void> = async () => {},
-): TerminalAgent {
+): Agent {
   let latestHistory: readonly AgentEvent[] | undefined;
   const reopenBarriers = new Set<string>();
   let processorTail: Promise<void> = Promise.resolve();
@@ -253,11 +253,14 @@ export function localTerminalAgent(
         let disposed = false;
         const offLive = live.onEvent((event) => {
           if (disposed) return;
+          // The browser Agent emits the complete protocol event. The public
+          // controller contract intentionally requires only its projection fields.
+          const sourceEvent = event as AgentEvent;
           const ownedEvent = activeDurableTurnId === undefined
-            ? event
+            ? sourceEvent
             : {
-                ...event,
-                payload: { ...event.payload, turn_id: activeDurableTurnId },
+                ...sourceEvent,
+                payload: { ...sourceEvent.payload, turn_id: activeDurableTurnId },
               };
           // The independently awaited Turn result owns the typed durability
           // disposition and authoritative transcript transition. Raw Rust
@@ -316,7 +319,7 @@ export function localTerminalAgent(
 }
 
 function deferredTurn(
-  start: (admitted: (turn: TerminalTurn) => void) => Promise<Awaited<ReturnType<TerminalTurn["result"]>>>,
+  start: (admitted: (turn: AgentTurn) => void) => Promise<Awaited<ReturnType<AgentTurn["result"]>>>,
   historyEntryId?: string,
   reserveSteer: (input: string) => Promise<LocalTranscriptSteer> = async (input) => ({
     id: crypto.randomUUID(), text: input, status: "pending",
@@ -327,15 +330,15 @@ function deferredTurn(
     error?: unknown,
   ) => Promise<void> = async () => {},
   persistCancel: () => Promise<LocalTranscriptTransition | undefined> = async () => undefined,
-): TerminalTurn {
-  let turn: TerminalTurn | undefined;
+): AgentTurn {
+  let turn: AgentTurn | undefined;
   let disposed = false;
   let settled = false;
   let underlyingDisposed = false;
   let cancellation: Promise<unknown> | undefined;
-  let resolveAdmission!: (turn: TerminalTurn) => void;
+  let resolveAdmission!: (turn: AgentTurn) => void;
   let rejectAdmission!: (error: unknown) => void;
-  const admission = new Promise<TerminalTurn>((resolve, reject) => {
+  const admission = new Promise<AgentTurn>((resolve, reject) => {
     resolveAdmission = resolve;
     rejectAdmission = reject;
   });
@@ -371,7 +374,7 @@ function deferredTurn(
     historyEntryId,
     async steer(options: { input: string }) {
       const steer = await reserveSteer(options.input);
-      let admitted: TerminalTurn;
+      let admitted: AgentTurn;
       try {
         admitted = await admission;
       } catch (error) {
@@ -412,11 +415,11 @@ function deferredTurn(
 }
 
 async function finishDurableTurn(
-  turn: TerminalTurn,
+  turn: AgentTurn,
   transcript: LocalTranscriptTurn,
   journal: LocalTranscriptJournal,
   refreshed: () => Promise<unknown>,
-): Promise<Awaited<ReturnType<TerminalTurn["result"]>>> {
+): Promise<Awaited<ReturnType<AgentTurn["result"]>>> {
   try {
     const completed = await turn.result();
     let transition: LocalTranscriptTransition;
@@ -486,11 +489,11 @@ async function processPendingTurns(
   reopenBarriers: Set<string>,
   recoveryTimeoutMs: number,
   target?: LocalTranscriptTurn,
-  admitted?: (turn: TerminalTurn) => void,
+  admitted?: (turn: AgentTurn) => void,
   refreshed: () => Promise<unknown> = async () => {},
   setActiveTurn: (turnId?: string) => void = () => {},
   beforeTurn: () => Promise<void> = async () => {},
-): Promise<Awaited<ReturnType<TerminalTurn["result"]>> | Error | undefined> {
+): Promise<Awaited<ReturnType<AgentTurn["result"]>> | Error | undefined> {
   const retained = await journal.load(threadId);
   for (const transcript of retained.turns) {
     const status = transcriptStatus(transcript);
@@ -595,8 +598,8 @@ async function processPendingTurns(
         setActiveTurn();
       }
     }
-    let turn: TerminalTurn | undefined;
-    let completed: Awaited<ReturnType<TerminalTurn["result"]>> | undefined;
+    let turn: AgentTurn | undefined;
+    let completed: Awaited<ReturnType<AgentTurn["result"]>> | undefined;
     try {
       await beforeTurn();
       setActiveTurn(transcript.turnId);
@@ -635,10 +638,10 @@ async function processPendingTurns(
 }
 
 function boundedRecoveryResult(
-  turn: TerminalTurn,
+  turn: AgentTurn,
   transcript: LocalTranscriptTurn,
   timeoutMs: number,
-): Promise<Awaited<ReturnType<TerminalTurn["result"]>>> {
+): Promise<Awaited<ReturnType<AgentTurn["result"]>>> {
   return new Promise((resolve, reject) => {
     let settled = false;
     const timeout = setTimeout(() => {
@@ -649,7 +652,7 @@ function boundedRecoveryResult(
         `Saved turn ${transcript.turnId} did not settle during recovery. Reload to retry this exact saved prompt; newer prompts remain blocked.`,
       ));
     }, Math.max(0, timeoutMs));
-    let result: ReturnType<TerminalTurn["result"]>;
+    let result: ReturnType<AgentTurn["result"]>;
     try {
       result = turn.result();
     } catch (error) {
@@ -678,7 +681,7 @@ function boundedRecoveryResult(
   });
 }
 
-function disposeTerminalTurn(turn: TerminalTurn): void {
+function disposeTerminalTurn(turn: AgentTurn): void {
   try {
     turn.dispose();
   } catch (error) {
@@ -686,7 +689,7 @@ function disposeTerminalTurn(turn: TerminalTurn): void {
   }
 }
 
-function disposeCompletedResult(completed: Awaited<ReturnType<TerminalTurn["result"]>>): void {
+function disposeCompletedResult(completed: Awaited<ReturnType<AgentTurn["result"]>>): void {
   try {
     completed.dispose();
   } catch (error) {

@@ -27,7 +27,7 @@ import { localTerminalAgent } from "./localAgentRuntime";
 export type { AgentTerminalMode, AgentTerminalState } from "./agentTerminalTypes";
 export { AgentTerminalView } from "./AgentTerminalView";
 
-/** Authenticated website policy around the headless Agent SDK and app-local xterm. */
+/** Authenticated website policy around the headless Agent SDK and shared transcript view. */
 export const AgentTerminal = memo(function AgentTerminal({
   authStatus,
   beforeLocalTurn,
@@ -35,8 +35,8 @@ export const AgentTerminal = memo(function AgentTerminal({
   onConversationActivity,
   onStateChange,
   source,
-  theme,
   threadId,
+  welcome,
 }: {
   authStatus: ModelSessionStatus | undefined;
   beforeLocalTurn(): Promise<void>;
@@ -44,8 +44,8 @@ export const AgentTerminal = memo(function AgentTerminal({
   onConversationActivity(input: string): void;
   onStateChange(state: AgentTerminalState): void;
   source: Exclude<CredentialSource, null>;
-  theme: "light" | "dark";
   threadId: string;
+  welcome?: string;
 }) {
   const agentConfig = useMemo(() => createConfig({
     agent: {
@@ -93,7 +93,7 @@ export const AgentTerminal = memo(function AgentTerminal({
       onConversationActivity={onConversationActivity}
       onStateChange={onStateChange}
       retryAgent={retryAgent}
-      theme={theme}
+      welcome={welcome}
       controls={({ agentReady }) => <VoiceControl agentReady={agentReady} voice={voice} />}
       accessory={({ agentReady, submit }) => (
         <ArtifactDock
@@ -112,7 +112,6 @@ export const ManagedAgentTerminal = memo(function ManagedAgentTerminal({
   onConversationActivity,
   onStateChange,
   source,
-  theme,
 }: {
   agentId: string;
   authStatus: ModelSessionStatus | undefined;
@@ -120,7 +119,6 @@ export const ManagedAgentTerminal = memo(function ManagedAgentTerminal({
   onConversationActivity(input: string): void;
   onStateChange(state: AgentTerminalState): void;
   source: Exclude<CredentialSource, null>;
-  theme: "light" | "dark";
 }) {
   const agent = useMemo(() => openManagedTerminalAgent(agentId), [agentId]);
   const retryAgent = useCallback(() => {}, []);
@@ -139,7 +137,6 @@ export const ManagedAgentTerminal = memo(function ManagedAgentTerminal({
       onConversationActivity={onConversationActivity}
       onStateChange={onStateChange}
       retryAgent={retryAgent}
-      theme={theme}
       accessory={({ agentReady, submit }) => (
         <ArtifactDock
           agentReady={agentReady}

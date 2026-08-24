@@ -170,14 +170,6 @@
   grid-template-rows: minmax(0, 1fr) auto;
 }
 
-.connect-chat .agent-terminal-shell.has-composer .agent-xterm {
-  min-height: 0;
-}
-
-.connect-chat .agent-terminal-shell.has-composer .xterm-helper-textarea {
-  display: none;
-}
-
 .connect-chat .agent-terminal-shell.has-composer .agent-touch-composer {
   position: relative;
   z-index: 6;

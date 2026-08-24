@@ -214,6 +214,60 @@
   grid-template-rows: auto minmax(0, 1fr);
 }
 
+.agent-terminal-shell.is-dom {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr) auto;
+}
+
+.agent-terminal-toolbar {
+  display: flex;
+  min-width: 0;
+  min-height: 34px;
+  align-items: stretch;
+  justify-content: flex-end;
+  color: var(--terminal-muted);
+  border-bottom: 1px solid var(--terminal-border);
+}
+
+.agent-terminal-toolbar > div {
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.agent-terminal-toolbar > button {
+  display: inline-flex;
+  min-width: 64px;
+  min-height: 34px;
+  padding: 0 10px;
+  gap: 6px;
+  align-items: center;
+  justify-content: center;
+  color: inherit;
+  font: 11px var(--font-mono);
+  background: transparent;
+  border: 0;
+  border-left: 1px solid var(--terminal-border);
+  cursor: pointer;
+}
+
+.agent-terminal-toolbar > button:hover,
+.agent-terminal-toolbar > button:focus-visible {
+  color: var(--terminal-foreground);
+  background: var(--terminal-hover);
+  outline: 1px solid var(--terminal-border);
+  outline-offset: -1px;
+}
+
+.agent-terminal-toolbar > button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.agent-terminal-toolbar > button svg {
+  width: 12px;
+  height: 12px;
+}
+
 .agent-voice-control {
   z-index: 7;
   display: flex;
@@ -226,7 +280,7 @@
   color: var(--terminal-muted);
   font: 11px var(--font-mono);
   background: var(--terminal-background);
-  border-bottom: 1px solid var(--terminal-border);
+  border-bottom: 0;
 }
 
 .agent-voice-control button {
@@ -274,42 +328,193 @@
   white-space: pre-wrap;
 }
 
-.agent-xterm,
-.agent-xterm > .xterm {
-  width: 100%;
-  height: 100%;
-}
-
-.agent-xterm > .xterm {
-  padding: 12px;
-}
-
-.agent-xterm .xterm-viewport {
-  background: var(--terminal-background) !important;
-  overscroll-behavior-y: contain;
+.agent-dom-transcript {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
   scrollbar-color: var(--terminal-muted) var(--terminal-background);
   scrollbar-width: thin;
-  touch-action: pan-y;
   -webkit-overflow-scrolling: touch;
 }
 
-.agent-xterm .xterm-scrollable-element {
-  overscroll-behavior-y: contain;
-  touch-action: none;
+.agent-dom-transcript-inner {
+  width: min(100%, 900px);
+  min-height: 100%;
+  padding: 18px clamp(14px, 3vw, 32px) 28px;
+  color: var(--terminal-foreground);
+  font: 14px/1.55 var(--font-mono);
+  overflow-wrap: anywhere;
 }
 
-.agent-xterm .xterm-dim {
-  color: var(--terminal-muted) !important;
+.agent-terminal-brand {
+  display: block;
+  margin-bottom: 22px;
+  font-weight: 700;
+}
+
+.agent-terminal-user {
+  margin: 0 0 20px;
+  padding-left: 12px;
+  color: var(--terminal-foreground);
+  font: 600 14px/1.5 var(--font-mono);
+  white-space: pre-wrap;
+  border-left: 1px solid var(--terminal-muted);
+}
+
+.agent-terminal-markdown {
+  margin: 0 0 22px;
+  color: var(--terminal-foreground);
+}
+
+.agent-terminal-markdown.is-reasoning {
+  color: var(--terminal-muted);
+}
+
+.agent-terminal-entry-label {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--terminal-muted);
+}
+
+.agent-terminal-markdown :where(h1, h2, h3, p, ul, ol, pre, blockquote, table) {
+  margin: 0;
+}
+
+.agent-terminal-markdown :where(h1, h2, h3, p, ul, ol, pre, blockquote, table)
+  + :where(h1, h2, h3, p, ul, ol, pre, blockquote, table) {
+  margin-top: 12px;
+}
+
+.agent-terminal-markdown :where(h1, h2, h3) {
+  font: 700 1em/1.45 var(--font-mono);
+}
+
+.agent-terminal-markdown :where(ul, ol) {
+  padding-left: 20px;
+}
+
+.agent-terminal-markdown :where(code, pre) {
+  font-family: var(--font-mono);
+}
+
+.agent-terminal-markdown :not(pre) > code {
+  padding: 1px 4px;
+  color: var(--terminal-foreground);
+  background: var(--terminal-hover);
+}
+
+.agent-terminal-markdown pre,
+.agent-terminal-tool pre {
+  max-width: 100%;
+  padding: 10px 12px;
+  overflow: auto;
+  color: var(--terminal-foreground);
+  background: var(--terminal-hover);
+  border: 1px solid var(--terminal-border);
+  border-radius: 0;
+  white-space: pre;
+}
+
+.agent-terminal-markdown a {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.agent-terminal-error,
+.agent-terminal-status,
+.agent-terminal-plan,
+.agent-terminal-tool {
+  margin: 0 0 20px;
+  color: var(--terminal-muted);
+  font: 14px/1.5 var(--font-mono);
+}
+
+.agent-terminal-error { color: var(--negative); }
+.agent-terminal-status { margin-top: 20px; }
+.agent-terminal-plan { padding: 0; list-style: none; }
+.agent-terminal-plan li { display: flex; gap: 9px; }
+.agent-terminal-tool > header { display: flex; gap: 9px; }
+.agent-terminal-tool > pre { margin: 7px 0 0 22px; font: 12px/1.45 var(--font-mono); }
+.agent-terminal-tool .agent-terminal-tool { margin: 7px 0 0 22px; }
+
+.agent-touch-composer {
+  position: relative;
+  z-index: 6;
+  display: block;
+  min-height: var(--terminal-composer-min-height);
+  padding: 8px;
+  color: var(--terminal-foreground);
+  background: var(--terminal-background);
+  border-top: 1px solid var(--terminal-border);
+  font-family: var(--font-mono);
+}
+
+.agent-touch-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-height: 44px;
+  align-items: end;
+  overflow: hidden;
+  background: var(--terminal-background);
+  border: 0;
+  border-left: 1px solid var(--terminal-muted);
+  border-radius: 0;
+}
+
+.agent-touch-composer textarea {
+  grid-column: 1;
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  max-height: 132px;
+  margin: 0;
+  padding: 10px 12px;
+  overflow-y: auto;
+  color: var(--terminal-foreground);
+  caret-color: var(--terminal-foreground);
+  font: 400 14px/22px var(--font-mono);
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  outline: 0;
+  resize: none;
+  white-space: pre-wrap;
+}
+
+.agent-touch-composer textarea::placeholder,
+.agent-touch-composer textarea:disabled {
+  color: var(--terminal-muted);
   opacity: 1;
 }
 
-.agent-xterm .xterm-screen canvas {
-  image-rendering: auto;
+.agent-touch-actions {
+  display: flex;
+  grid-column: 2;
+  padding: 4px 0;
+  align-self: end;
+  border-left: 1px solid var(--terminal-border);
 }
 
-.agent-touch-composer {
-  display: none;
+.agent-touch-actions button {
+  display: grid;
+  width: 44px;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0;
+  color: var(--terminal-foreground);
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  cursor: pointer;
+  place-items: center;
 }
+
+.agent-touch-actions button svg { width: 17px; height: 17px; stroke-width: 2; }
+.agent-touch-actions button:focus-visible { background: var(--terminal-hover); outline: 1px solid var(--terminal-border); outline-offset: -2px; }
+.agent-touch-actions button:disabled { color: var(--terminal-muted); background: transparent; cursor: default; }
+.agent-touch-composer.is-running .agent-touch-actions button { color: var(--terminal-muted); }
 
 @media (pointer: coarse), (any-pointer: coarse) {
   .agent-runtime-switch button {
@@ -327,6 +532,11 @@
     grid-template-rows: auto minmax(0, 1fr) auto;
   }
 
+  .agent-terminal-toolbar,
+  .agent-terminal-toolbar > button {
+    min-height: 44px;
+  }
+
   .agent-voice-control {
     min-height: 44px;
   }
@@ -334,14 +544,6 @@
   .agent-voice-control button {
     min-width: 52px;
     min-height: 44px;
-  }
-
-  .agent-xterm {
-    min-height: 0;
-  }
-
-  .agent-xterm .xterm-helper-textarea {
-    display: none;
   }
 
   .agent-session-bar,
@@ -559,9 +761,6 @@
     margin-bottom: 0;
   }
 
-  .agent-xterm > .xterm {
-    padding: 12px;
-  }
 }
 
 .nanocodex-demo.is-full .agent-terminal-workspace {
@@ -671,6 +870,15 @@
 }
 
 .nanocodex-demo.is-full .conversation-workspace { flex: 1 1 auto; }
+.nanocodex-demo.is-landing .conversation-workspace {
+  grid-template-columns: minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+  flex: 1 1 auto;
+}
+.nanocodex-demo.is-landing .conversation-main {
+  grid-column: 1;
+  grid-row: 1;
+}
 .conversation-main { display: flex; min-width: 0; min-height: 0; flex-direction: column; }
 .conversation-main > .agent-terminal-shell,
 .conversation-main > .agent-terminal-workspace { flex: 1 1 auto; }
@@ -854,6 +1062,10 @@
 
 @media (prefers-reduced-motion: reduce) {
   .conversation-sidebar { transition-duration: 0.01ms !important; }
+}
+
+.nanocodex-demo.is-landing .agent-terminal-shell {
+  margin-bottom: 0;
 }
 
 @media (max-width: 740px), (pointer: coarse) and (orientation: landscape) and (max-width: 950px) {

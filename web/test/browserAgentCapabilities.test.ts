@@ -53,7 +53,7 @@ test("the terminal fails before thread or Worker creation and exposes the capabi
   const terminal = source("../src/AgentTerminal.tsx");
   const session = source("../src/modelSession.tsx");
   assert.match(experience, /const capabilityError = useMemo\(\(\) => browserAgentCapabilityError\(\), \[\]\)/);
-  assert.match(experience, /activeCapabilityError = runtime === "local" \? capabilityError : undefined/);
+  assert.match(experience, /activeCapabilityError = activeRuntime === "local" \? capabilityError : undefined/);
   assert.match(experience, /hasCredential && !activeCapabilityError[\s\S]*?<AgentTerminal/);
   assert.match(terminal, /threadId: string/);
   assert.match(terminal, /useNanocodex\(\{ config: agentConfig, threadId \}\)/);
@@ -63,12 +63,14 @@ test("the terminal fails before thread or Worker creation and exposes the capabi
 
 test("coarse-pointer Safari keeps native IME composition separate from send", () => {
   const terminal = source("../src/AgentTerminalView.tsx");
-  const surface = source("../src/agentTerminalSurface.tsx");
-  assert.match(surface, /<textarea[\s\S]*?enterKeyHint="send"/);
-  assert.match(surface, /onCompositionStart=\{\(\) => \{ composing\.current = true; \}\}/);
-  assert.match(surface, /onCompositionEnd=\{\(\) => \{ composing\.current = false; \}\}/);
-  assert.match(surface, /isTerminalSubmitKeyEvent\(event\.nativeEvent, composing\.current\)/);
-  assert.match(terminal, /active\.current\.submit\(input, \{ submittedAt \}\)/);
+  const composer = source("../src/TerminalComposer.tsx");
+  assert.match(composer, /<textarea[\s\S]*?enterKeyHint="send"/);
+  assert.match(composer, /onCompositionStart=\{\(\) => \{ composing\.current = true; \}\}/);
+  assert.match(composer, /onCompositionEnd=\{\(\) => \{ composing\.current = false; \}\}/);
+  assert.match(composer, /isSubmitKeyEvent\(event\.nativeEvent, composing\.current\)/);
+  assert.match(composer, /!event\.isComposing/);
+  assert.match(composer, /event\.keyCode !== 229/);
+  assert.match(terminal, /submitPrompt\(controller, submittedPrompts\.current, input, submittedAt\)/);
 });
 
 function source(path: string): string {

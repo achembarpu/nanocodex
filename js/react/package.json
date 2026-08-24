@@ -12,9 +12,14 @@
     "./connect": {
       "types": "./cloud/index.d.mts",
       "import": "./cloud/index.mjs"
+    },
+    "./agent": {
+      "types": "./agent/index.d.mts",
+      "import": "./agent/index.mjs"
     }
   },
   "files": [
+    "agent",
     "cloud",
     "index.d.mts",
     "index.mjs",

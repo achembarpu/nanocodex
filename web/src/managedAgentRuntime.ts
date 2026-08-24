@@ -5,7 +5,7 @@ import {
   type ManagedEvent,
   type ManagedTurn,
 } from "nanocodex/managed";
-import type { TerminalAgent, TerminalTurn } from "./demoTerminal";
+import type { Agent as ControllerAgent, AgentTurn } from "nanocodex-react/agent";
 
 const MANAGED_HISTORY_PAGE_SIZE = 128;
 const MANAGED_HISTORY_INITIAL_ATTEMPTS = 3;
@@ -69,7 +69,7 @@ export function createManagedConversation(accountId = "default"): Promise<Manage
   return creating;
 }
 
-export function openManagedTerminalAgent(agentId: string): TerminalAgent {
+export function openManagedTerminalAgent(agentId: string): ControllerAgent {
   const managed = managedAgents.get(agentId) ?? Agent.open(agentId);
   managedAgents.set(agentId, managed);
   return managedTerminalAgent(managed);
@@ -78,24 +78,25 @@ export function openManagedTerminalAgent(agentId: string): TerminalAgent {
 export function managedTerminalAgent(
   managed: ManagedTerminalSource,
   options: Readonly<{ history?: boolean }> = {},
-): TerminalAgent {
-  const submitted = new Set<string>();
+): ControllerAgent {
+  const historyEnabled = options.history !== false;
+  const submitted = historyEnabled ? undefined : new Set<string>();
   return Object.freeze({
     sessionId: managed.id,
     events: Object.freeze({
-      watch: () => managedEventWatcher(managed, submitted, options.history !== false),
+      watch: () => managedEventWatcher(managed, submitted, historyEnabled),
     }),
     turn: Object.freeze({
       prompt: ({ input }: { input: string }) => {
         const id = crypto.randomUUID();
-        submitted.add(id);
+        submitted?.add(id);
         return managedTerminalTurn(managed, id, input);
       },
     }),
   });
 }
 
-function managedTerminalTurn(managed: ManagedTerminalSource, turnId: string, input: string): TerminalTurn {
+function managedTerminalTurn(managed: ManagedTerminalSource, turnId: string, input: string): AgentTurn {
   const controller = new AbortController();
   const turn: ManagedTurn = managed.turn.prompt({ id: turnId, input });
   return Object.freeze({
@@ -112,9 +113,9 @@ function managedTerminalTurn(managed: ManagedTerminalSource, turnId: string, inp
 
 function managedEventWatcher(
   managed: ManagedTerminalSource,
-  submitted: Set<string>,
+  submitted: Set<string> | undefined,
   historyEnabled: boolean,
-): ReturnType<TerminalAgent["events"]["watch"]> {
+): ReturnType<ControllerAgent["events"]["watch"]> {
   const controller = new AbortController();
   const listeners = new Set<(event: AgentEvent) => void>();
   const historyListeners = new Set<(events: readonly AgentEvent[]) => void>();
@@ -197,7 +198,8 @@ function managedEventWatcher(
           if (latestLiveCursor !== undefined
             && compareManagedCursor(envelope.cursor, latestLiveCursor) <= 0) continue;
           latestLiveCursor = envelope.cursor;
-          if (!historyEnabled && !submitted.has(managedEnvelopeTurnId(envelope) ?? "")) continue;
+          const turnId = managedEnvelopeTurnId(envelope);
+          if (!historyEnabled && !submitted?.has(turnId ?? "")) continue;
           if (!retain(envelope, "live")) continue;
           const projected = managedEnvelopeEvents(
             envelope,
@@ -208,6 +210,7 @@ function managedEventWatcher(
           );
           sequence += projected.length;
           for (const event of projected) emit(event);
+          if (turnId && managedOuterTerminal(envelope)) submitted?.delete(turnId);
         }
       } catch (error) {
         if (controller.signal.aborted) return;
@@ -459,7 +462,7 @@ function compareManagedCursor(left: string, right: string): number {
 export function terminalEvent(
   envelope: ManagedEvent,
   sessionId: string,
-  submitted: Set<string>,
+  submitted: Set<string> | undefined,
   sequence: number,
 ): AgentEvent | undefined {
   if (envelope.data.type === "event") {
@@ -497,7 +500,7 @@ export function terminalEvent(
 export function managedHistoryEvents(
   envelopes: readonly ManagedEvent[],
   sessionId: string,
-  submitted: Set<string>,
+  submitted: Set<string> | undefined,
 ): readonly AgentEvent[] {
   const events: AgentEvent[] = [];
   const assistantTurns = rawAssistantMessageTurns(envelopes);
@@ -517,7 +520,7 @@ function managedEnvelopeEvents(
   envelope: ManagedEvent,
   rawAssistantTurns: ReadonlySet<string>,
   sessionId: string,
-  submitted: Set<string>,
+  submitted: Set<string> | undefined,
   firstSequence: number,
 ): AgentEvent[] {
   if (envelope.data.type === "event") {

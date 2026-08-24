@@ -5,10 +5,28 @@ import {
   accountLoginCapabilities,
   appVisibilityPermissions,
   connectApiOrigin,
+  isLocalDevelopmentOrigin,
   productionConnectApiOrigin,
   registeredApp,
   sanitizeWalletResult,
+  usesBrowserLocalWebAuthn,
 } from "../src/connectPolicy.mjs";
+
+test("local development origins include the canonical OrbStack HTTPS domain", () => {
+  assert.equal(isLocalDevelopmentOrigin("https://nanocodex.local"), true);
+  assert.equal(isLocalDevelopmentOrigin("https://connect.nanocodex.local"), true);
+  assert.equal(isLocalDevelopmentOrigin("http://nanocodex.localhost:5173"), true);
+  assert.equal(isLocalDevelopmentOrigin("http://nanocodex.local"), false);
+  assert.equal(isLocalDevelopmentOrigin("https://notnanocodex.local"), false);
+});
+
+test("only standalone loopback dialogs use the browser-local WebAuthn ceremony", () => {
+  assert.equal(usesBrowserLocalWebAuthn("http://127.0.0.1:4177"), true);
+  assert.equal(usesBrowserLocalWebAuthn("https://localhost:4177"), true);
+  assert.equal(usesBrowserLocalWebAuthn("http://nanocodex.localhost:4177"), false);
+  assert.equal(usesBrowserLocalWebAuthn("https://nanocodex.local"), false);
+  assert.equal(usesBrowserLocalWebAuthn("https://nanocodex.gakonst.workers.dev"), false);
+});
 
 const playground = "https://nanocodex-connect-playground.gakonst.workers.dev";
 
@@ -23,7 +41,6 @@ test("existing-account login targets only credentials retained by this dialog", 
   });
   assert.deepEqual(accountLoginCapabilities([]), {
     method: "login",
-    selectAccount: true,
   });
 });
 
@@ -105,7 +122,7 @@ test("loopback auth and apps are accepted only by a loopback dialog", () => {
   assert.throws(() => connectApiOrigin({
     challenge: "http://127.0.0.1:8787/v1/connect/auth/challenge",
     verify: "http://localhost:8787/v1/connect/auth",
-  }, "http://127.0.0.1:4177"), /share one loopback origin/);
+  }, "http://127.0.0.1:4177"), /share one development origin/);
 });
 
 test("wallet result sanitization retains signatures without exposing the account bearer", () => {

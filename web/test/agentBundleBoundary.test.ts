@@ -11,6 +11,7 @@ const managedRuntime = source("../src/managedAgentRuntime.ts");
 const evals = source("../src/Evals.tsx");
 const terminal = source("../src/AgentTerminal.tsx");
 const terminalCss = source("../src/AgentTerminal.css");
+const homeCss = source("../src/Home.css");
 const applicationGraph = readdirSync(new URL("../src/", import.meta.url), { recursive: true })
   .filter((path) => /\.(?:js|jsx|ts|tsx)$/.test(String(path)))
   .map((path) => source(`../src/${String(path)}`))
@@ -24,7 +25,7 @@ test("Vite owns one static application graph without manual module loaders", () 
   );
   assert.match(
     experience,
-    /hasCredential && !activeCapabilityError[\s\S]*?\(runtime === "local" \|\| managedConversationId\)[\s\S]*?<AgentTerminal[\s\S]*?<ManagedAgentTerminal/,
+    /hasCredential && !activeCapabilityError[\s\S]*?\(activeRuntime === "local" \|\| managedConversationId\)[\s\S]*?<AgentTerminal[\s\S]*?<ManagedAgentTerminal/,
   );
   assert.doesNotMatch(
     applicationGraph,
@@ -47,9 +48,12 @@ test("the authenticated terminal consumes the public React hooks directly", () =
 
 test("signed-out state retains terminal geometry without loading copy", () => {
   const reserve = section(experience, "function ReservedTerminal", "function managedSelectionKey");
-  assert.match(reserve, /className="agent-terminal-shell"/);
-  assert.match(terminalCss, /\.agent-terminal-shell \{[\s\S]*?height:\s*clamp\(300px, 36svh, 380px\)/);
-  assert.doesNotMatch(experience, /loading|spinner|skeleton/i);
+  assert.match(reserve, /<TerminalTranscriptSurface/);
+  assert.match(reserve, /composer=\{null\}/);
+  assert.match(reserve, /mode=\{mode\}/);
+  assert.match(terminalCss, /\.agent-terminal-shell\.is-dom \{[\s\S]*?minmax\(0, 1fr\)/);
+  assert.match(homeCss, /\.home-page \.agent-terminal-shell \{[\s\S]*?height:\s*100%/);
+  assert.doesNotMatch(experience, />\s*(?:loading|spinner|skeleton)/i);
 });
 
 test("evaluation query state stays behind the Evals route", () => {

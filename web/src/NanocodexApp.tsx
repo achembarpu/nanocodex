@@ -9,8 +9,6 @@ import {
   GitBranch,
   GitPullRequest,
   Menu,
-  Maximize2,
-  Minimize2,
   Search,
   X,
 } from "lucide-react";
@@ -202,8 +200,6 @@ function commitSearchScore(commit: HarnessCommit, tokens: readonly string[]) {
 }
 
 const installCommand = "curl -fsSL https://nanocodex.paradigm.xyz | bash";
-const terminalBenchWorksetPath =
-  "/evals/worksets/e1c16fd7df8f171e69052a66cb59b8bd52bc43017297d748eb19866e7593570d";
 const installOptions = [
   { id: "rust", label: "Rust", command: "cargo add nanocodex" },
   { id: "javascript", label: "JavaScript", command: "npm install nanocodex" },
@@ -286,7 +282,6 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
     commitHashFromSearch(location.search)
   );
   const [commitRailOpen, setCommitRailOpen] = useState(false);
-  const [installCopied, setInstallCopied] = useState(false);
   const [headerInstallCopied, setHeaderInstallCopied] = useState<InstallTarget | null>(null);
   const [mobileNavigationOpen, setMobileNavigationOpen] = useState(false);
   const [demoNavigationOpen, setDemoNavigationOpen] = useState(false);
@@ -840,33 +835,6 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
     threadId,
   ]);
 
-  const handleEvalPathClick = useCallback((
-    event: ReactMouseEvent<HTMLAnchorElement>,
-    destination: string,
-  ) => {
-    if (!isPlainProductNavigation(event)) return;
-    event.preventDefault();
-    if (`${location.pathname}${location.search}` === destination) return;
-    retainAgentExperience("evals");
-    preloadSurface("evals");
-    surfaceNavigationId.current++;
-    repositoryRequestId.current++;
-    startTransition(() => navigate(destination));
-  }, [
-    location.pathname,
-    location.search,
-    navigate,
-    preloadSurface,
-    retainAgentExperience,
-  ]);
-
-  const collapseAgent = useCallback(() => {
-    navigateToSurface("home");
-    window.requestAnimationFrame(() => {
-      window.document.getElementById("agent-demo")?.scrollIntoView({ block: "start" });
-    });
-  }, [navigateToSurface]);
-
   useLayoutEffect(() => {
     const headerCenter = headerCenterRef.current;
     const activeButton =
@@ -1324,63 +1292,15 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
               <article className="home-article">
                 <h1
                   className="sr-only"
-                  id="agent-page-title"
-                  hidden={surface !== "agent"}
+                  id={surface === "agent" ? "agent-page-title" : "home-title"}
                 >
-                  Nanocodex browser agent
+                  {surface === "agent" ? "Nanocodex browser agent" : "High-performance Codex SDK. Runs anywhere."}
                 </h1>
-                <header className="home-intro" hidden={surface === "agent"}>
-                  <h1 id="home-title">High-performance Codex SDK. Runs anywhere.</h1>
-                  <button
-                    className="home-install"
-                    type="button"
-                    aria-label="Copy Nanocodex CLI install command"
-                    onClick={() => {
-                      void navigator.clipboard.writeText(installCommand).then(() => {
-                        setInstallCopied(true);
-                        window.setTimeout(() => setInstallCopied(false), 1_500);
-                      });
-                    }}
-                  >
-                    <span aria-hidden="true">$</span>
-                    <code>{installCommand}</code>
-                    <span className="home-install-state">
-                      {installCopied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
-                      {installCopied ? "copied" : "copy"}
-                    </span>
-                  </button>
-                  <p className="home-meta">
-                    <span>optimized WASM · 1.3 MB gzip</span>
-                    <span aria-hidden="true"> · </span>
-                    <a
-                      href={terminalBenchWorksetPath}
-                      onClick={(event) => handleEvalPathClick(event, terminalBenchWorksetPath)}
-                      onFocus={() => preloadSurface("evals")}
-                      onPointerEnter={() => preloadSurface("evals")}
-                      onPointerDown={() => preloadSurface("evals")}
-                    >
-                      Terminal-Bench 2.1 high: Nanocodex 82.2% vs Codex 79.6% · 890/890 runs
-                    </a>
-                  </p>
-                </header>
-
-                <section className="home-demo" id="agent-demo" aria-labelledby="agent-demo-title">
-                  <header className="home-demo-head">
-                    <h2 id="agent-demo-title">live agent · local or durable</h2>
-                    <button
-                      className="home-demo-expand"
-                      type="button"
-                      aria-label={surface === "agent" ? "Return to homepage terminal" : "Open full-screen agent"}
-                      title={surface === "agent" ? "Return to homepage terminal" : "Open full-screen agent"}
-                      onClick={surface === "agent" ? collapseAgent : () => navigateToSurface("agent")}
-                    >
-                      {surface === "agent" ? <Minimize2 aria-hidden="true" /> : <Maximize2 aria-hidden="true" />}
-                      <span>{surface === "agent" ? "collapse" : "expand"}</span>
-                    </button>
-                  </header>
+                <section className="home-demo" id="agent-demo">
                   <AgentExperience
                     beforeLocalTurn={deploymentRollover.beforeLocalTurn}
                     deploymentCurrent={deploymentRollover.deploymentCurrent}
+                    landing={surface === "home"}
                     mode={
                       surface === "agent"
                         ? "full"
@@ -1389,7 +1309,6 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
                           : "hidden"
                     }
                     onThreadChange={setThreadId}
-                    theme={theme}
                     threadId={threadId ?? getBrowserThread().id}
                   />
                 </section>

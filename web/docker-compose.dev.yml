@@ -1,0 +1,22 @@
+name: nanocodex-dev
+
+services:
+  gateway:
+    image: alpine/socat:1.8.0.3
+    init: true
+    command:
+      - TCP-LISTEN:80,fork,reuseaddr
+      - TCP:host.docker.internal:${NANOCODEX_DEV_PORT:?set NANOCODEX_DEV_PORT}
+    labels:
+      dev.orbstack.domains: nanocodex.local
+      dev.orbstack.http-port: "80"
+    healthcheck:
+      test:
+        - CMD
+        - socat
+        - -T1
+        - /dev/null
+        - TCP:host.docker.internal:${NANOCODEX_DEV_PORT}
+      interval: 1s
+      timeout: 2s
+      retries: 30

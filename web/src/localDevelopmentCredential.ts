@@ -1,4 +1,9 @@
-const LOOPBACK_HOSTS = new Set(["localhost", "127.0.0.1"]);
+const LOCAL_DEVELOPMENT_HOSTS = new Set([
+  "localhost",
+  "127.0.0.1",
+  "nanocodex.local",
+  "nanocodex.localhost",
+]);
 
 type CredentialClaim = Readonly<{
   userId: string;
@@ -6,14 +11,14 @@ type CredentialClaim = Readonly<{
 }>;
 
 /**
- * Serializes the localhost-only host credential import for one browser
+ * Serializes the local-development-only host credential import for one browser
  * identity. Production never calls the claim route.
  */
 export function createLocalDevelopmentCredentialResource(
   request: typeof fetch = globalThis.fetch.bind(globalThis),
   hostname: string = globalThis.location?.hostname ?? "",
 ) {
-  const enabled = LOOPBACK_HOSTS.has(hostname);
+  const enabled = LOCAL_DEVELOPMENT_HOSTS.has(hostname);
   let current: CredentialClaim | undefined;
 
   return Object.freeze({
