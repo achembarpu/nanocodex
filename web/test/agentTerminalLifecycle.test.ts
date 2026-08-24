@@ -2,7 +2,10 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 
-const terminal = source("../src/AgentTerminal.tsx");
+const terminal = [
+  source("../src/AgentTerminal.tsx"),
+  source("../src/AgentTerminalView.tsx"),
+].join("\n");
 const demoTerminal = source("../src/demoTerminal.ts");
 const experience = source("../src/AgentExperience.tsx");
 const session = source("../src/modelSession.tsx");
@@ -60,7 +63,7 @@ test("starting and failure states repaint the terminal while the native mobile c
   assert.match(surface, /onCompositionStart/);
   assert.match(surface, /isTerminalSubmitKeyEvent\(event\.nativeEvent, composing\.current\)/);
   assert.doesNotMatch(surface, /aria-label="Message Nanocodex"[\s\S]{0,120}disabled=\{!ready\}/);
-  assert.match(terminal, /setPendingTouchSubmission\(\{ input, intent, submittedAt \}\)/);
+  assert.match(terminal, /setPendingTouchSubmission\(\{ input, submittedAt \}\)/);
   assert.match(terminal, /agentStatus !== "ready" \|\| !pendingTouchSubmission \|\| !active\.current/);
   assert.match(terminalCss, /\.agent-touch-composer textarea \{[\s\S]*?font:\s*400 16px\/22px/);
 });

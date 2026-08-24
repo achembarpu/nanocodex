@@ -173,6 +173,11 @@ body.agent-viewport-locked {
   min-height: 0;
 }
 
+body.agent-viewport-locked {
+  position: fixed;
+  inset: 0;
+}
+
 .page-grid {
   width: 100%;
   padding-inline: var(--page-margin);
@@ -3212,6 +3217,12 @@ html[data-theme="dark"] .tui-syntax .shiki span {
   min-height: 0;
   overflow: hidden;
   overscroll-behavior: none;
+}
+
+.surface-agent {
+  position: fixed;
+  inset: 0;
+  width: 100%;
 }
 
 .surface-code > main,

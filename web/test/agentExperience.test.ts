@@ -5,6 +5,7 @@ import test from "node:test";
 import { browserMcpConfiguration } from "../src/browserMcp.ts";
 
 const terminal = source("../src/AgentTerminal.tsx");
+const terminalView = source("../src/AgentTerminalView.tsx");
 const dock = source("../src/ArtifactDock.tsx");
 const terminalCss = source("../src/AgentTerminal.css");
 const experience = source("../src/AgentExperience.tsx");
@@ -32,8 +33,13 @@ test("one thread-scoped Config supplies clone-safe MCP servers to the retained A
 });
 
 test("the full Agent experience alone mounts a collapsed, counted artifact dock", () => {
-  assert.match(terminal, /mode === "full" \? \([\s\S]*?className="agent-terminal-workspace"[\s\S]*?<ArtifactDock[\s\S]*?\) : terminal/);
-  assert.equal(matches(terminal, /<ArtifactDock\b/g), 1);
+  assert.match(terminalView, /return mode === "full" \? \([\s\S]*?className="agent-terminal-workspace"[\s\S]*?accessory\?\.\([\s\S]*?\) : terminal/);
+  const local = section(terminal, "export const AgentTerminal", "export const ManagedAgentTerminal");
+  const managed = section(terminal, "export const ManagedAgentTerminal", "function artifactFollowOnPrompt");
+  assert.equal(matches(local, /accessory=\{/g), 1);
+  assert.equal(matches(local, /<ArtifactDock\b/g), 1);
+  assert.equal(matches(managed, /accessory=\{/g), 1);
+  assert.equal(matches(managed, /<ArtifactDock\b/g), 1);
   assert.match(dock, /const \[collapsed, setCollapsed\] = useState\(true\)/);
   assert.match(dock, /aria-expanded=\{false\}/);
   assert.match(dock, /aria-label=\{`Open artifacts, \$\{artifactCount\}`\}/);
@@ -55,16 +61,15 @@ test("an artifact action queues exactly one contextual follow-on on the retained
   assert.equal(matches(ask, /onPrompt\(/g), 1);
   assert.match(ask, /onPrompt\(selected, prompt, store\.path\(selected\.id\)\)/);
 
-  const submit = section(terminal, "const submitArtifactPrompt =", "const terminal =");
-  assert.match(submit, /const retainedTerminal = active\.current/);
-  assert.equal(matches(submit, /retainedTerminal\.submit\(/g), 1);
-  assert.match(submit, /artifactFollowOnPrompt\(artifact, path, prompt\)/);
+  const submit = section(terminalView, "const submitAccessoryPrompt =", "const terminal =");
+  assert.equal(matches(submit, /active\.current\?\.submit\(/g), 1);
   assert.match(submit, /\{ intent: "queue", submittedAt: performance\.now\(\) \}/);
-  const contextualPrompt = section(terminal, "function artifactFollowOnPrompt", "function markAgentTiming");
+  assert.equal(matches(terminal, /artifactFollowOnPrompt\(artifact, path, prompt\)/g), 2);
+  const contextualPrompt = section(terminal, "function artifactFollowOnPrompt", "function errorMessage");
   assert.match(contextualPrompt, /JSON\.stringify\(artifact\.id\)/);
   assert.match(contextualPrompt, /JSON\.stringify\(path\)/);
   assert.match(contextualPrompt, /prompt\.trim\(\)/);
-  assert.doesNotMatch(`${terminal}\n${dock}`, /NanocodexTui|Artifact action queued|loading|spinner|skeleton/i);
+  assert.doesNotMatch(`${terminal}\n${terminalView}\n${dock}`, /NanocodexTui|Artifact action queued|loading|spinner|skeleton/i);
 });
 
 test("credential-gated terminal uses the normal static Vite graph", () => {

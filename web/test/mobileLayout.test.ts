@@ -12,7 +12,10 @@ const evalsCss = source("../src/evals.css");
 const application = source("../src/NanocodexApp.tsx");
 const artifactRuntime = source("../src/artifactRuntime.tsx");
 const experience = source("../src/AgentExperience.tsx");
-const terminal = source("../src/AgentTerminal.tsx");
+const terminal = [
+  source("../src/AgentTerminal.tsx"),
+  source("../src/AgentTerminalView.tsx"),
+].join("\n");
 const terminalSurface = source("../src/agentTerminalSurface.tsx");
 const artifactDock = source("../src/ArtifactDock.tsx");
 const modelSession = source("../src/modelSession.tsx");
@@ -152,7 +155,8 @@ test("the phone home surface leads directly from thesis to install, metadata, an
   assert.match(homeCss, /\.home-install code[\s\S]*?overflow-wrap:\s*anywhere/);
   assert.doesNotMatch(homeCss, /\.home-proof|\.home-summary|\.home-evidence|\.home-facts|\.home-surfaces|\.home-divider/);
   assert.doesNotMatch(terminal, /<NanocodexTui|<WorkspacePanel/);
-  assert.match(terminal, /mode === "full" \? \([\s\S]*?<ArtifactDock[\s\S]*?\) : terminal/);
+  assert.match(terminal, /accessory=\{\([\s\S]*?<ArtifactDock/);
+  assert.match(terminal, /return mode === "full" \? \([\s\S]*?accessory\?\.\([\s\S]*?\) : terminal/);
 });
 
 test("the app shell owns deployment rollover and agent failures expose only manual retry", () => {
@@ -196,7 +200,8 @@ test("touch terminals use one native IME-safe composer and one contextual action
   assert.match(touchComposer, /value=\{draft\}[\s\S]*?onChange=\{\(event\) => onChange\(event\.currentTarget\.value\)\}/);
   assert.match(touchComposer, /onCompositionStart=\{\(\) => \{ composing\.current = true; \}\}/);
   assert.match(touchComposer, /isTerminalSubmitKeyEvent\(event\.nativeEvent, composing\.current\)/);
-  assert.match(touchComposer, /onSubmit\(draft, running \? "steer" : "queue"\)/);
+  assert.match(touchComposer, /onSubmit\(draft\)/);
+  assert.match(demoTerminal, /submitOptions\.intent !== "queue" && current/);
   assert.match(touchComposer, /\{running \? \([\s\S]*?aria-label="Stop response"[\s\S]*?<Square[\s\S]*?\) : \([\s\S]*?aria-label="Send message"[\s\S]*?<ArrowUp/);
   assert.equal(matches(touchComposer, /className="agent-touch-actions"/g), 1);
   assert.equal(matches(touchComposer, /className="agent-touch-field"/g), 1);
@@ -221,7 +226,7 @@ test("touch terminals use one native IME-safe composer and one contextual action
   assert.match(composer, /env\(safe-area-inset-left\)/);
   assert.match(composer, /env\(safe-area-inset-right\)/);
   assert.match(ruleBlock(terminalCss, ".agent-touch-field {", touchCss), /border-radius:\s*9px/);
-  assert.match(terminal, /active\.current\.submit\(input, \{ intent, submittedAt \}\)/);
+  assert.match(terminal, /active\.current\.submit\(input, \{ submittedAt \}\)/);
   assert.match(terminal, /active\.current\?\.cancel\(\)/);
 });
 
@@ -249,6 +254,17 @@ test("the phone transcript owns the remaining workspace and native vertical gest
   assert.match(ruleBlock(compactHome, ".home-page.is-agent .home-demo-head {"), /display:\s*none/);
   assert.match(application, /if \(surface !== "agent"\) return;[\s\S]*?classList\.add\("agent-viewport-locked"\)[\s\S]*?lockDocumentScroll\(root, body\)/);
   assert.match(indexCss, /html\.agent-viewport-locked,[\s\S]*?body\.agent-viewport-locked \{[\s\S]*?height:\s*100%;[\s\S]*?min-height:\s*0/);
+  const fixedBody = ruleBlock(indexCss, "body.agent-viewport-locked {", indexCss.indexOf("body.agent-viewport-locked {") + 1);
+  const fixedSurface = ruleBlock(indexCss, ".surface-agent {", indexCss.lastIndexOf(".surface-agent {"));
+  assert.match(fixedBody, /position:\s*fixed/);
+  assert.match(fixedBody, /inset:\s*0/);
+  assert.match(fixedSurface, /position:\s*fixed/);
+  assert.match(fixedSurface, /inset:\s*0/);
+  assert.match(application, /const viewport = window\.visualViewport/);
+  assert.match(application, /agentSurface\.style\.top = `\$\{viewport\.offsetTop\}px`/);
+  assert.match(application, /agentSurface\.style\.height = `\$\{viewport\.height\}px`/);
+  assert.match(application, /viewport\?\.addEventListener\("resize", anchorViewport\)/);
+  assert.match(application, /viewport\?\.addEventListener\("scroll", anchorViewport\)/);
 });
 
 test("compact agent chrome prioritizes the conversation and transcript", () => {

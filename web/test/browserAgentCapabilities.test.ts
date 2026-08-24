@@ -62,13 +62,13 @@ test("the terminal fails before thread or Worker creation and exposes the capabi
 });
 
 test("coarse-pointer Safari keeps native IME composition separate from send", () => {
-  const terminal = source("../src/AgentTerminal.tsx");
+  const terminal = source("../src/AgentTerminalView.tsx");
   const surface = source("../src/agentTerminalSurface.tsx");
   assert.match(surface, /<textarea[\s\S]*?enterKeyHint="send"/);
   assert.match(surface, /onCompositionStart=\{\(\) => \{ composing\.current = true; \}\}/);
   assert.match(surface, /onCompositionEnd=\{\(\) => \{ composing\.current = false; \}\}/);
   assert.match(surface, /isTerminalSubmitKeyEvent\(event\.nativeEvent, composing\.current\)/);
-  assert.match(terminal, /active\.current\.submit\(input, \{ intent, submittedAt \}\)/);
+  assert.match(terminal, /active\.current\.submit\(input, \{ submittedAt \}\)/);
 });
 
 function source(path: string): string {

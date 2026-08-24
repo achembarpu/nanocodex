@@ -215,8 +215,8 @@ test("settled records are removed without losing cancellation of older live turn
   const terminal = createAgentTerminal({ agent: agent as never, terminal: host });
 
   await terminal.submit("first");
-  await terminal.submit("second");
-  await terminal.submit("third");
+  await terminal.submit("second", { intent: "queue" });
+  await terminal.submit("third", { intent: "queue" });
   agent.turns[2]?.complete("third done");
   await settle();
 
@@ -270,7 +270,7 @@ test("first-token timing follows root run FIFO and ignores child or empty deltas
     onEvent: (next) => events.push(next),
   });
   await terminal.submit("first", { submittedAt: 11 });
-  await terminal.submit("second", { submittedAt: 22 });
+  await terminal.submit("second", { intent: "queue", submittedAt: 22 });
 
   agent.event(event(1, "run.started", {}, "child-session"));
   agent.event(event(2, "assistant.delta", { text: "child" }, "child-session"));
@@ -398,7 +398,7 @@ test("public and keyboard submissions share history, steering, and cancellation"
   const terminal = createAgentTerminal({ agent: agent as never, terminal: host });
 
   const turn = await terminal.submit("from touch");
-  await terminal.submit("follow up", { intent: "steer" });
+  await terminal.submit("follow up");
   assert.deepEqual(agent.turns[0]?.steers, ["follow up"]);
   host.data("\x03");
   await settle();
@@ -425,6 +425,8 @@ test("native composer mode is the only input path and can return to desktop xter
 
   await terminal.submit("native composer prompt");
   assert.equal(agent.turns[0]?.input, "native composer prompt");
+  agent.turns[0]?.complete("first turn complete");
+  await settle();
 
   terminal.setInputMode("xterm");
   host.data("desktop prompt\r");
@@ -644,6 +646,26 @@ test("managed history rebases one same-tab optimistic turn by durable turn ident
     ["user", "mine"],
     ["assistant", "answer"],
   ]);
+});
+
+test("durable steer history replaces its optimistic transcript row exactly once", () => {
+  let live = queuePrompt(initialTerminalState(), 1, "initial", "managed-user-steered-turn");
+  live = applyAgentEvents(live, [event(10, "run.started", { turn_id: "steered-turn" })]);
+  live = queueSteer(live, 2, "shorter please");
+  const retained = applyAgentEvents(initialTerminalState(), [
+    event(1, "managed.prompt", { text: "initial", turn_id: "steered-turn" }),
+    event(2, "managed.steer", {
+      text: "shorter please",
+      steer_id: "steer-2",
+      turn_id: "steered-turn",
+    }),
+  ]);
+
+  const entries = mergeAgentHistoryEntries(live.entries, retained.entries, new Set());
+  assert.deepEqual(
+    entries.filter((entry) => entry.kind === "user").map(({ text }) => text),
+    ["initial", "shorter please"],
+  );
 });
 
 test("queued durable history cannot move or duplicate the running turn answer", () => {
@@ -960,12 +982,16 @@ test("disposal cancels an outstanding animation-frame projection", async () => {
 
 test("streaming reduction preserves queue/steer ordering and tool completion", () => {
   let state = queuePrompt(initialTerminalState(), 1, "first");
-  state = applyAgentEvents(state, [event(1, "run.started")]);
-  state = queueSteer(state, 2, "correction");
-  state = steerAdmitted(state, 2);
   state = applyAgentEvents(state, [
+    event(1, "run.started"),
     event(2, "assistant.delta", { text: "hello " }),
     event(3, "assistant.delta", { text: "world" }),
+  ]);
+  state = queueSteer(state, 2, "correction");
+  assert.equal(state.entries.at(-1)?.kind, "user");
+  assert.equal(state.entries.at(-1)?.kind === "user" && state.entries.at(-1)?.text, "correction");
+  state = steerAdmitted(state, 2);
+  state = applyAgentEvents(state, [
     event(4, "run.steered"),
     event(5, "tool.call", { call_id: "call-1", tool: "exec_command", arguments: { cmd: "pwd" } }),
     event(6, "tool.result", {

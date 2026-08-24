@@ -268,7 +268,7 @@ export function createAgentTerminal(options: {
 
     const id = nextPromptId++;
     const current = latestActiveTurn();
-    if (submitOptions.intent === "steer" && current) {
+    if (submitOptions.intent !== "queue" && current) {
       state = boundedTerminalState(queueSteer(state, id, prompt), maxEntries);
       render();
       try {

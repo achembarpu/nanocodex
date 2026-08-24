@@ -624,6 +624,8 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
     if (surface !== "agent") return;
     const root = document.documentElement;
     const body = document.body;
+    const agentSurface = document.querySelector<HTMLElement>(".surface-agent");
+    const viewport = window.visualViewport;
     const roots = [root, body] as const;
     const alreadyLocked = roots.map((element) =>
       element.classList.contains("agent-viewport-locked")
@@ -631,7 +633,28 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
     roots.forEach((element) => element.classList.add("agent-viewport-locked"));
     window.scrollTo(0, 0);
     const restoreScroll = lockDocumentScroll(root, body);
+    let viewportFrame = 0;
+    const anchorViewport = () => {
+      window.cancelAnimationFrame(viewportFrame);
+      viewportFrame = window.requestAnimationFrame(() => {
+        if (!agentSurface?.isConnected || !viewport) return;
+        agentSurface.style.top = `${viewport.offsetTop}px`;
+        agentSurface.style.left = `${viewport.offsetLeft}px`;
+        agentSurface.style.width = `${viewport.width}px`;
+        agentSurface.style.height = `${viewport.height}px`;
+      });
+    };
+    anchorViewport();
+    viewport?.addEventListener("resize", anchorViewport);
+    viewport?.addEventListener("scroll", anchorViewport);
     return () => {
+      window.cancelAnimationFrame(viewportFrame);
+      viewport?.removeEventListener("resize", anchorViewport);
+      viewport?.removeEventListener("scroll", anchorViewport);
+      agentSurface?.style.removeProperty("top");
+      agentSurface?.style.removeProperty("left");
+      agentSurface?.style.removeProperty("width");
+      agentSurface?.style.removeProperty("height");
       restoreScroll();
       roots.forEach((element, index) => {
         if (!alreadyLocked[index]) element.classList.remove("agent-viewport-locked");

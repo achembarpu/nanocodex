@@ -230,7 +230,7 @@ export function TouchTerminalComposer({
   status: AgentStatus;
   onCancel(): void;
   onChange(value: string): void;
-  onSubmit(value: string, intent: "queue" | "steer"): void;
+  onSubmit(value: string): void;
 }) {
   const composing = useRef(false);
   const textarea = useRef<HTMLTextAreaElement>(null);
@@ -242,7 +242,7 @@ export function TouchTerminalComposer({
   }, [draft]);
   const submit = () => {
     if (pending || !draft.trim()) return;
-    onSubmit(draft, running ? "steer" : "queue");
+    onSubmit(draft);
   };
   return (
     <form

@@ -99,6 +99,12 @@ export function queuePrompt(
 export function queueSteer(state: TerminalState, id: number, text: string): TerminalState {
   return {
     ...state,
+    entries: [...state.entries, {
+      id: `steer-${id}`,
+      kind: "user",
+      text,
+      ...(state.activeTurnId === undefined ? {} : { turnId: state.activeTurnId }),
+    }],
     pendingSteers: [
       ...state.pendingSteers,
       { id, text, state: "submitting", runGeneration: state.runGeneration },
@@ -599,12 +605,14 @@ function reconcileSteers(state: TerminalState): TerminalState {
     if (index < 0) break;
     const [steer] = pendingSteers.splice(index, 1);
     if (!steer) break;
-    entries.push({
-      id: `steer-${steer.id}`,
-      kind: "user",
-      text: steer.text,
-      ...(state.activeTurnId === undefined ? {} : { turnId: state.activeTurnId }),
-    });
+    if (!entries.some((entry) => entry.id === `steer-${steer.id}`)) {
+      entries.push({
+        id: `steer-${steer.id}`,
+        kind: "user",
+        text: steer.text,
+        ...(state.activeTurnId === undefined ? {} : { turnId: state.activeTurnId }),
+      });
+    }
     appliedSteerRuns.shift();
     applied += 1;
   }

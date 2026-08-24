@@ -57,7 +57,6 @@ export function AgentTerminalView({
   const [touchDraft, setTouchDraft] = useState("");
   const [pendingTouchSubmission, setPendingTouchSubmission] = useState<{
     input: string;
-    intent: "queue" | "steer";
     submittedAt: number;
   }>();
   const [terminalRunning, setTerminalRunning] = useState(false);
@@ -151,20 +150,19 @@ export function AgentTerminalView({
   }, [touchInput]);
 
   const unavailableMessage = inactiveMessage?.({ agentError, agentStatus });
-  const submitTouchPrompt = useCallback((input: string, intent: "queue" | "steer") => {
+  const submitTouchPrompt = useCallback((input: string) => {
     if (!input.trim()) return;
     const submittedAt = performance.now();
     if (agentStatus !== "ready" || !active.current) {
-      setPendingTouchSubmission({ input, intent, submittedAt });
+      setPendingTouchSubmission({ input, submittedAt });
       return;
     }
-    void active.current.submit(input, { intent, submittedAt });
+    void active.current.submit(input, { submittedAt });
     setTouchDraft("");
   }, [agentStatus]);
   useEffect(() => {
     if (agentStatus !== "ready" || !pendingTouchSubmission || !active.current) return;
     void active.current.submit(pendingTouchSubmission.input, {
-      intent: pendingTouchSubmission.intent,
       submittedAt: pendingTouchSubmission.submittedAt,
     });
     setPendingTouchSubmission(undefined);
