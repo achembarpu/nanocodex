@@ -63,8 +63,9 @@ import {
   routeCredentialRequest,
   unbindAgentCredential,
 } from "./credentials";
-import { routeConnectorRequest } from "./connectors";
 import { routeBrowserEgress } from "./browser-egress";
+import { connectorEgressInfo } from "./connector-capabilities";
+import { routeConnectorRequest } from "./connectors";
 import {
   attachAgent,
   authenticate,
@@ -1343,6 +1344,7 @@ export class NanocodexSession extends DurableComputerSession {
           : [
             "You are Nanocodex running as a durable managed agent on Cloudflare Workers.",
             "Your /workspace filesystem is durable Cloudflare Computer storage backed by this agent's Durable Object.",
+            "Connected account APIs use authenticated shell egress: call runtimeInfo for the current GitHub, Gmail, and Google Drive availability; use gh or curl normally.",
           ].join("\n\n"),
         tools: [
           execCommand,
@@ -1361,13 +1363,18 @@ export class NanocodexSession extends DurableComputerSession {
             name: "runtimeInfo",
             description: "Return information about the current durable agent runtime.",
             parameters: { type: "object", additionalProperties: false },
-            handler: () => ({
+            handler: async () => ({
               runtime: "cloudflare-durable-object",
               shell: "nanocodex-just-bash",
               shell_network: multiplayer ? "public-http-only" : "connector-http-gateway",
               sandbox: "disabled",
               workspace: "/workspace",
               custom_commands: ["gh"],
+              connector_egress: await connectorEgressInfo(
+                this.env.NANOCODEX,
+                session.owner_id,
+                !multiplayer,
+              ),
             }),
           },
         ],
