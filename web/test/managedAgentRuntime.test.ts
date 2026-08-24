@@ -364,6 +364,35 @@ test("managed history retries the initial page and tails only from its concrete 
   watcher.off();
 });
 
+test("managed terminal tails from latest without requesting history when history is disabled", async () => {
+  const cursors: string[] = [];
+  let pageCalls = 0;
+  const managed = {
+    id: "private-history-agent",
+    events: {
+      async page() {
+        pageCalls += 1;
+        throw new Error("history must not be requested");
+      },
+      async *watch(options: { cursor: string; signal: AbortSignal }) {
+        cursors.push(options.cursor);
+        await new Promise<void>((resolve) => options.signal.addEventListener("abort", () => resolve()));
+      },
+    },
+    turn: { prompt() { throw new Error("unused"); } },
+  };
+  const watcher = managedTerminalAgent(managed as never, { history: false }).events.watch();
+  const histories: string[][] = [];
+  watcher.onHistory?.((events) => histories.push(events.map((event) => String(event.payload.text))));
+  await waitForCondition(() => cursors.length === 1);
+
+  assert.equal(pageCalls, 0);
+  assert.deepEqual(cursors, ["latest"]);
+  assert.deepEqual(histories, [[]]);
+  assert.equal(await watcher.loadOlder?.(), false);
+  watcher.off();
+});
+
 test("managed history fails actionably without attaching at latest after retries exhaust", async () => {
   const cursors: string[] = [];
   let pages = 0;

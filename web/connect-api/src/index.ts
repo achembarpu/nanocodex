@@ -830,6 +830,7 @@ function projectManagedJson(value: unknown, grant: GrantRecord, resource: string
   if (!history) {
     if ("active_turn_details" in projected) projected.active_turn_details = [];
     if ("input" in projected) projected.input = "";
+    if ("completed_turns" in projected) projected.completed_turns = 0;
   }
   if (isRecord(projected.terminal)) {
     projected.terminal = projectManagedEvent(projected.terminal, grant) ?? {};

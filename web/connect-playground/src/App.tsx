@@ -53,7 +53,7 @@ const DEFAULT_REQUEST: ConnectRequest = {
   visibility: {
     finalMessages: true,
     actionSummaries: true,
-    conversationHistory: true,
+    conversationHistory: false,
     rawTraces: false,
   },
 };
@@ -69,7 +69,10 @@ export function App() {
   const connect = useConnectAgent({ config });
   const fund = useFund({ config });
   const revoke = useRevokeGrant({ config });
-  const isMutating = connect.isPending || fund.isPending || revoke.isPending;
+  const isMutating = connect.connectionStatus === "connecting"
+    || connect.isPending
+    || fund.isPending
+    || revoke.isPending;
   const mercatorReady = Boolean(
     connect.agent
     && connection

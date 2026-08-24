@@ -138,26 +138,6 @@
   width: auto;
 }
 
-.private-history {
-  display: flex;
-  min-height: 0;
-  flex-direction: column;
-  justify-content: space-between;
-  padding: 12px;
-  color: var(--text-faint);
-  border-right: 1px solid var(--border-soft);
-  font-size: 10px;
-}
-
-.private-history strong {
-  color: var(--text-secondary);
-  font-weight: 500;
-}
-
-.private-history span {
-  color: var(--negative);
-}
-
 .visibility-inspector {
   display: grid;
   gap: 1px;

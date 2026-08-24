@@ -73,12 +73,15 @@ export function openManagedTerminalAgent(agentId: string): TerminalAgent {
   return managedTerminalAgent(managed);
 }
 
-export function managedTerminalAgent(managed: ManagedTerminalSource): TerminalAgent {
+export function managedTerminalAgent(
+  managed: ManagedTerminalSource,
+  options: Readonly<{ history?: boolean }> = {},
+): TerminalAgent {
   const submitted = new Set<string>();
   return Object.freeze({
     sessionId: managed.id,
     events: Object.freeze({
-      watch: () => managedEventWatcher(managed, submitted),
+      watch: () => managedEventWatcher(managed, submitted, options.history !== false),
     }),
     turn: Object.freeze({
       prompt: ({ input }: { input: string }) => {
@@ -107,6 +110,7 @@ function managedTerminalTurn(managed: ManagedTerminalSource, turnId: string, inp
 function managedEventWatcher(
   managed: ManagedTerminalSource,
   submitted: Set<string>,
+  historyEnabled: boolean,
 ): ReturnType<TerminalAgent["events"]["watch"]> {
   const controller = new AbortController();
   const listeners = new Set<(event: AgentEvent) => void>();
@@ -264,11 +268,16 @@ function managedEventWatcher(
       if (!loaded) globalThis.addEventListener?.("online", retryWhenOnline, { once: true });
     });
   };
-  void loadInitial().then((loaded) => {
-    if (!loaded && !controller.signal.aborted) {
-      globalThis.addEventListener?.("online", retryWhenOnline, { once: true });
-    }
-  });
+  if (historyEnabled) {
+    void loadInitial().then((loaded) => {
+      if (!loaded && !controller.signal.aborted) {
+        globalThis.addEventListener?.("online", retryWhenOnline, { once: true });
+      }
+    });
+  } else {
+    historyLoaded = true;
+    startTail("latest");
+  }
   return Object.freeze({
     onEvent(listener: (event: AgentEvent) => void) {
       listeners.add(listener);
@@ -280,6 +289,7 @@ function managedEventWatcher(
       return () => historyListeners.delete(listener);
     },
     loadOlder() {
+      if (!historyEnabled) return Promise.resolve(false);
       if (!historyLoaded) return loadInitial();
       if (!hasOlder || controller.signal.aborted) return Promise.resolve(false);
       if (loadingOlder) return loadingOlder;
