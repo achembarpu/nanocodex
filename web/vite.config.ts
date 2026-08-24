@@ -15,6 +15,10 @@ import {
 import { isManagedRoutePath } from "./worker/managedProxy.ts";
 
 const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
+const repositoryRevision = execFileSync("git", ["rev-parse", "HEAD"], {
+  cwd: repositoryRoot,
+  encoding: "utf8",
+}).trim();
 function applicationRouteFallback(): Plugin {
   return {
     name: "nanocodex-application-route-fallback",
@@ -82,14 +86,10 @@ function deploymentBuildAttestation(): Plugin {
     apply: "build" as const,
     async closeBundle() {
       const config = await readFile(new URL("./wrangler.jsonc", import.meta.url));
-      const revision = execFileSync("git", ["rev-parse", "HEAD"], {
-        cwd: repositoryRoot,
-        encoding: "utf8",
-      }).trim();
       await writeFile(
         new URL("./dist/nanocodex/build-attestation.json", import.meta.url),
         `${JSON.stringify({
-          revision,
+          revision: repositoryRevision,
           wranglerConfigSha256: createHash("sha256").update(config).digest("hex"),
         })}\n`,
       );
@@ -101,7 +101,10 @@ export default defineConfig({
   // Some browser dependencies feature-detect `process` but assume that a
   // detected shim also contains `env`. The browser has no environment access;
   // make that empty boundary explicit instead of letting a partial shim crash.
-  define: { "process.env": "{}" },
+  define: {
+    "process.env": "{}",
+    __NANOCODEX_DEPLOYMENT_SHA__: JSON.stringify(repositoryRevision),
+  },
   plugins: [
     applicationRouteFallback(),
     linkPreviewMetadata(),

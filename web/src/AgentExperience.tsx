@@ -29,8 +29,10 @@ import "./Home.css";
 
 /** Account-aware shell around the local and managed Agent consumers. */
 export const AgentExperience = memo(function AgentExperience({
-  mode, onThreadChange, theme, threadId,
+  beforeLocalTurn, deploymentCurrent, mode, onThreadChange, theme, threadId,
 }: {
+  beforeLocalTurn(): Promise<void>;
+  deploymentCurrent: boolean;
   mode: AgentTerminalMode;
   onThreadChange(threadId: string): void;
   theme: "light" | "dark";
@@ -57,6 +59,10 @@ export const AgentExperience = memo(function AgentExperience({
   const hasCredential = credentialSource === "brokered";
 
   useEffect(() => setLocalConversations(loadLocalConversations(threadId)), [threadId]);
+  useEffect(() => {
+    if (deploymentCurrent || authStatus?.state !== "ready") return;
+    void beforeLocalTurn().catch(() => {});
+  }, [authStatus, beforeLocalTurn, deploymentCurrent]);
   useEffect(() => {
     setManagedConversations([]);
     setManagedConversationId(undefined);
@@ -183,9 +189,12 @@ export const AgentExperience = memo(function AgentExperience({
         onSelect={runtime === "local" ? selectLocal : selectManaged}
       />
       <div className="conversation-main">
-        {hasCredential && !activeCapabilityError && (runtime === "local" || managedConversationId)
+        {hasCredential && !activeCapabilityError
+          && (runtime === "managed" || deploymentCurrent)
+          && (runtime === "local" || managedConversationId)
           ? runtime === "local" ? <AgentTerminal
-              key={threadId} authStatus={authStatus} mode={mode} onConversationActivity={recordActivity}
+              key={threadId} authStatus={authStatus} beforeLocalTurn={beforeLocalTurn}
+              mode={mode} onConversationActivity={recordActivity}
               onStateChange={setRuntimeState} source={credentialSource} theme={theme} threadId={threadId}
             /> : <ManagedAgentTerminal
               key={managedConversationId} agentId={managedConversationId!} authStatus={authStatus}

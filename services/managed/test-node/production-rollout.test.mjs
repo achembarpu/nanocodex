@@ -5,6 +5,7 @@ import test from "node:test";
 import {
   assertProductionCheckout,
   assertProductionPreflight,
+  assertWebBuildAttestation,
   buildBoundaryProbeConfig,
   buildManagedProductionConfig,
   buildWebProductionConfig,
@@ -116,6 +117,27 @@ test("managed production rejects stale, dirty, or modified WASM artifacts", () =
       "nanocodex_bg.wasm": "7".repeat(64),
     }),
     /artifact bytes/,
+  );
+});
+
+test("website production rejects stale or mismatched build artifacts", () => {
+  const config = Buffer.from('{"name":"nanocodex"}\n');
+  const attestation = {
+    revision,
+    wranglerConfigSha256: "9600b209414abcc5d304884f6ff5f1e1bcee00a1c3487dc6253b9f7a4b1f0de2",
+  };
+  assert.doesNotThrow(() => assertWebBuildAttestation(attestation, revision, config));
+  assert.throws(
+    () => assertWebBuildAttestation(attestation, "b".repeat(40), config),
+    /exact production revision/,
+  );
+  assert.throws(
+    () => assertWebBuildAttestation(attestation, revision, Buffer.from("modified")),
+    /production Wrangler config/,
+  );
+  assert.throws(
+    () => assertWebBuildAttestation(undefined, revision, config),
+    /website build attestation/,
   );
 });
 

@@ -246,6 +246,93 @@ test("a prompt waits for context bootstrap and remains after bootstrapped histor
   ]);
 });
 
+test("a deployment fence runs after prompt durability and before browser agent access", async () => {
+  const journal = memoryJournal();
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  let checks = 0;
+  const runtime = fakeAgent([], "answer");
+  const local = localTerminalAgent(
+    runtime.agent,
+    "thread-1",
+    journal,
+    undefined,
+    undefined,
+    undefined,
+    async () => {
+      checks += 1;
+      await blocked;
+    },
+  );
+
+  const result = local.turn.prompt({ input: "survive a deployment" }).result();
+  await waitForAsync(async () => (await journal.load("thread-1")).turns.length === 1);
+  assert.equal(checks, 1);
+  assert.equal(runtime.contextCalls(), 0, "stale runtime context is not opened before the fence");
+  assert.deepEqual(runtime.promptIds(), [], "stale runtime cannot admit the saved prompt");
+
+  release();
+  assert.equal((await result).finalMessage, "answer");
+  assert.equal(runtime.contextCalls(), 1);
+  assert.equal(checks, 2, "initialization and model admission are independently fenced");
+  assert.equal((await journal.load("thread-1")).turns[0]?.status, "completed");
+});
+
+test("recovery fences an already-saved prompt before browser agent admission", async () => {
+  const journal = memoryJournal();
+  await journal.bootstrap("thread-1", []);
+  await journal.recordPrompt({
+    threadId: "thread-1",
+    turnId: "retained-after-deploy",
+    createdAt: 1,
+    prompt: "recover after deployment",
+  });
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  const runtime = fakeAgent([], "recovered");
+  const local = localTerminalAgent(
+    runtime.agent,
+    "thread-1",
+    journal,
+    undefined,
+    undefined,
+    undefined,
+    () => blocked,
+  );
+
+  const history = watchedHistory(local);
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(runtime.promptIds(), [], "recovery cannot enter a stale browser runtime");
+  release();
+  await waitFor(() => runtime.promptIds().length === 1);
+  await waitForAsync(async () => (await journal.load("thread-1")).turns[0]?.status === "completed");
+  assert.equal((await history).some(({ payload }) => payload.text === "recover after deployment"), true);
+});
+
+test("an unavailable deployment attestation leaves the saved prompt pending", async () => {
+  const journal = memoryJournal();
+  await journal.bootstrap("thread-1", []);
+  const runtime = fakeAgent([], "unused");
+  const local = localTerminalAgent(
+    runtime.agent,
+    "thread-1",
+    journal,
+    undefined,
+    undefined,
+    undefined,
+    async () => { throw new Error("deployment health unavailable"); },
+  );
+
+  await assert.rejects(
+    local.turn.prompt({ input: "retain me" }).result(),
+    /deployment health unavailable/,
+  );
+  assert.deepEqual(runtime.promptIds(), []);
+  const retained = (await journal.load("thread-1")).turns[0];
+  assert.equal(retained?.prompt, "retain me");
+  assert.equal(retained?.status, "pending");
+});
+
 test("delivers the initial history snapshot before live events while a prompt waits behind recovery", async () => {
   const journal = memoryJournal();
   await journal.bootstrap("thread-1", []);
@@ -341,7 +428,7 @@ test("history starts only after a committed consumer and reports initialization 
     assert.equal(loadCalls, 0, "wrapper construction performs no recovery work during render");
     await assert.rejects(
       local.turn.prompt({ input: "must fail" }).result(),
-      /Local transcript storage is unavailable.*history failed/i,
+      /prompt was saved.*initialization failed.*history failed/i,
     );
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.deepEqual(initializationErrors, [failure]);
@@ -991,6 +1078,7 @@ test("persists queued prompts immediately and processes them one at a time", asy
   const first = local.turn.prompt({ input: "first" }).result();
   const second = local.turn.prompt({ input: "second" }).result();
   await waitForAsync(async () => (await journal.load("thread-1")).turns.length === 2);
+  await waitFor(() => runtime.promptIds().length === 1);
 
   assert.equal((await journal.load("thread-1")).turns.length, 2, "both accepted prompts are crash-retained");
   assert.equal(runtime.promptIds().length, 1, "the second model call waits behind the authoritative processor");

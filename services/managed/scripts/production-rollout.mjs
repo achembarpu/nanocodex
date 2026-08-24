@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
@@ -23,6 +23,8 @@ const brokerRoot = resolve(workersRoot, "../egress");
 const managedConfigPath = resolve(workersRoot, "wrangler.jsonc");
 const brokerConfigPath = resolve(brokerRoot, "wrangler.broker.jsonc");
 const webArtifactConfigPath = resolve(webRoot, "dist/nanocodex/wrangler.json");
+const webBuildAttestationPath = resolve(webRoot, "dist/nanocodex/build-attestation.json");
+const webSourceConfigPath = resolve(webRoot, "wrangler.jsonc");
 const wranglerPath = resolve(workersRoot, "node_modules/wrangler/bin/wrangler.js");
 const webWranglerPath = resolve(webRoot, "node_modules/wrangler/bin/wrangler.js");
 const managedMainPath = resolve(workersRoot, "src/index.ts");
@@ -100,6 +102,18 @@ export function assertProductionCheckout(revision, {
   }
   if (dirty) {
     throw new Error("production rollout checkout must not contain tracked changes");
+  }
+}
+
+export function assertWebBuildAttestation(attestation, revision, sourceConfig) {
+  assertRecord(attestation, "website build attestation");
+  const expectedRevision = productionRevision(revision);
+  if (attestation.revision !== expectedRevision) {
+    throw new Error("website build artifact must match the exact production revision");
+  }
+  const expectedConfig = createHash("sha256").update(sourceConfig).digest("hex");
+  if (attestation.wranglerConfigSha256 !== expectedConfig) {
+    throw new Error("website build artifact must match the production Wrangler config");
   }
 }
 
@@ -280,12 +294,15 @@ export async function withPrivateRolloutFiles(values, callback, {
 export async function preflightProductionRollout(environment = process.env) {
   const selection = assertProductionPreflight(environment);
   verifyProductionCheckout(selection.revision);
-  const [brokerBase, managedBase, webBase] = await Promise.all([
+  const [brokerBase, managedBase, webBase, webAttestation, webSourceConfig] = await Promise.all([
     readJson(brokerConfigPath),
     readJson(managedConfigPath),
     readJson(webArtifactConfigPath),
+    readJson(webBuildAttestationPath),
+    readFile(webSourceConfigPath),
   ]);
   await verifyManagedWasmArtifact(selection.revision);
+  assertWebBuildAttestation(webAttestation, selection.revision, webSourceConfig);
   const broker = buildProductionBrokerConfig(brokerBase, { mainPath: brokerMainPath });
   if (broker.name !== BROKER_NAME || broker.workers_dev !== false || broker.routes !== undefined) {
     throw new Error("production broker must remain the private nanocodex-egress Worker");
@@ -437,7 +454,12 @@ export async function deployProductionWeb(environment = process.env) {
   const cloudflare = cloudflareCredentials(environment);
   const revision = productionRevision(environment.TARGET_SHA);
   verifyProductionCheckout(revision);
-  const baseConfig = await readJson(webArtifactConfigPath);
+  const [baseConfig, attestation, sourceConfig] = await Promise.all([
+    readJson(webArtifactConfigPath),
+    readJson(webBuildAttestationPath),
+    readFile(webSourceConfigPath),
+  ]);
+  assertWebBuildAttestation(attestation, revision, sourceConfig);
   const config = buildWebProductionConfig(baseConfig, {
     artifactDirectory: dirname(webArtifactConfigPath),
   });

@@ -1,6 +1,78 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { createDeploymentHealthResource } from "../src/deploymentHealth.ts";
+import { createDeploymentRolloverGuard } from "../src/useDeploymentRollover.ts";
+
+const deployment = (deploymentSha?: string) => Object.freeze({
+  agentConfigured: true,
+  credentialSource: "brokered" as const,
+  deploymentSha,
+});
+
+test("deployment rollover coalesces matching live-generation checks", async () => {
+  let calls = 0;
+  let release!: () => void;
+  const blocked = new Promise<void>((resolve) => { release = resolve; });
+  const guard = createDeploymentRolloverGuard({
+    currentDeploymentSha: "a".repeat(40),
+    async refresh() {
+      calls += 1;
+      await blocked;
+      return deployment("a".repeat(40));
+    },
+    reload() { assert.fail("a matching deployment must not reload"); },
+  });
+
+  const first = guard();
+  const second = guard();
+  assert.equal(first, second);
+  assert.equal(calls, 1);
+  release();
+  await Promise.all([first, second]);
+  await guard();
+  assert.equal(calls, 2, "each model boundary checks current deployment health");
+});
+
+test("deployment rollover reloads once and permanently fences stale JavaScript", async () => {
+  let calls = 0;
+  let reloads = 0;
+  const guard = createDeploymentRolloverGuard({
+    currentDeploymentSha: "a".repeat(40),
+    async refresh() {
+      calls += 1;
+      return deployment("b".repeat(40));
+    },
+    reload() { reloads += 1; },
+  });
+
+  const first = guard();
+  await Promise.resolve();
+  await Promise.resolve();
+  const second = guard();
+  let settled = false;
+  void first.then(() => { settled = true; }, () => { settled = true; });
+  await Promise.resolve();
+  void second.then(() => { settled = true; }, () => { settled = true; });
+  assert.equal(calls, 1);
+  assert.equal(reloads, 1);
+  assert.equal(settled, false, "stale code cannot continue while navigation is pending");
+});
+
+test("deployment rollover fails closed when health cannot attest a generation", async () => {
+  let reloads = 0;
+  for (const refresh of [
+    async () => deployment(undefined),
+    async () => { throw new Error("offline"); },
+  ]) {
+    const guard = createDeploymentRolloverGuard({
+      currentDeploymentSha: "a".repeat(40),
+      refresh,
+      reload() { reloads += 1; },
+    });
+    await assert.rejects(guard());
+  }
+  assert.equal(reloads, 0);
+});
 
 test("deployment health is single-flight and cached across shell consumers", async () => {
   let calls = 0;

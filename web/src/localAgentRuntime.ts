@@ -50,6 +50,7 @@ export function localTerminalAgent(
   onInitializationError?: (error: unknown) => void,
   recoveryTimeoutMs = DEFAULT_RECOVERY_TIMEOUT_MS,
   transcriptActivity: LocalTranscriptActivity = browserTranscriptActivity,
+  beforeTurn: () => Promise<void> = async () => {},
 ): TerminalAgent {
   let latestHistory: readonly AgentEvent[] | undefined;
   const reopenBarriers = new Set<string>();
@@ -104,7 +105,7 @@ export function localTerminalAgent(
   let initialization: Promise<void> | undefined;
   const initialize = () => {
     if (!initialization) {
-      initialization = initializeTranscript(agent, threadId, journal);
+      initialization = initializeTranscript(agent, threadId, journal, beforeTurn);
       void initialization.catch((error) => onInitializationError?.(error));
     }
     return initialization;
@@ -134,6 +135,7 @@ export function localTerminalAgent(
           undefined,
           () => refreshHistory(true),
           setActiveDurableTurn,
+          beforeTurn,
         );
       }).catch((error) => onInitializationError?.(error));
       return initial;
@@ -155,14 +157,17 @@ export function localTerminalAgent(
         });
         const persisted = (async () => {
           try {
-            await initialize();
-          } catch (error) {
-            throw localStorageError("Local transcript storage is unavailable; the prompt was not submitted", error);
-          }
-          try {
             await journal.recordPrompt(transcript);
           } catch (error) {
             throw localStorageError("Could not save this prompt; it was not submitted to the agent", error);
+          }
+          try {
+            await initialize();
+          } catch (error) {
+            throw localStorageError(
+              "The prompt was saved, but local transcript initialization failed; reload to recover it",
+              error,
+            );
           }
         })();
         return deferredTurn(async (admitted) => {
@@ -178,6 +183,7 @@ export function localTerminalAgent(
               admitted,
               () => refreshHistory(true),
               setActiveDurableTurn,
+              beforeTurn,
             );
             if (processed instanceof Error) throw processed;
             if (processed) return processed;
@@ -463,9 +469,11 @@ async function initializeTranscript(
   agent: LocalSessionAgent,
   threadId: string,
   journal: LocalTranscriptJournal,
+  beforeTurn: () => Promise<void>,
 ): Promise<void> {
   const retained = await journal.load(threadId);
   if (retained.initialized) return;
+  await beforeTurn();
   const context = await agent.session.context();
   const bootstrap = localContextTurns(context.history, threadId);
   await journal.bootstrap(threadId, bootstrap);
@@ -481,6 +489,7 @@ async function processPendingTurns(
   admitted?: (turn: TerminalTurn) => void,
   refreshed: () => Promise<unknown> = async () => {},
   setActiveTurn: (turnId?: string) => void = () => {},
+  beforeTurn: () => Promise<void> = async () => {},
 ): Promise<Awaited<ReturnType<TerminalTurn["result"]>> | Error | undefined> {
   const retained = await journal.load(threadId);
   for (const transcript of retained.turns) {
@@ -576,6 +585,7 @@ async function processPendingTurns(
       return retainedBarrier(transition.turn, currentStatus);
     }
     if (transcript.turnId === target?.turnId) {
+      await beforeTurn();
       setActiveTurn(transcript.turnId);
       try {
         const turn = agent.turn.prompt({ input: transcript.prompt, id: transcript.turnId });
@@ -588,6 +598,7 @@ async function processPendingTurns(
     let turn: TerminalTurn | undefined;
     let completed: Awaited<ReturnType<TerminalTurn["result"]>> | undefined;
     try {
+      await beforeTurn();
       setActiveTurn(transcript.turnId);
       turn = agent.turn.prompt({ input: transcript.prompt, id: transcript.turnId });
       completed = await boundedRecoveryResult(turn, transcript, recoveryTimeoutMs);

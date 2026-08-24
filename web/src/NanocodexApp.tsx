@@ -240,7 +240,7 @@ export function NanocodexApp({ preparedRoute = {} }: NanocodexAppProps) {
 }
 
 function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
-  useDeploymentRollover();
+  const deploymentRollover = useDeploymentRollover();
   const location = useLocation();
   const navigate = useNavigate();
   const [theme, setTheme] = useState<Theme>(() => {
@@ -1356,6 +1356,8 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
                     </button>
                   </header>
                   <AgentExperience
+                    beforeLocalTurn={deploymentRollover.beforeLocalTurn}
+                    deploymentCurrent={deploymentRollover.deploymentCurrent}
                     mode={
                       surface === "agent"
                         ? "full"

@@ -3,6 +3,7 @@ import test from "node:test";
 
 import {
   assertBuildAttestation,
+  assertCleanCheckout,
   assertDeploymentDocument,
   assertDeploymentEntry,
   assertDeploymentHealth,
@@ -27,6 +28,11 @@ test("deployment rejects a stale build revision or Wrangler config", () => {
   assert.doesNotThrow(() => assertBuildAttestation(attestation, revision, config));
   assert.throws(() => assertBuildAttestation(attestation, "b".repeat(40), config));
   assert.throws(() => assertBuildAttestation(attestation, revision, Buffer.from("stale")));
+});
+
+test("deployment rejects artifacts built from tracked dirty source", () => {
+  assert.doesNotThrow(() => assertCleanCheckout(""));
+  assert.throws(() => assertCleanCheckout(" M web/src/main.tsx"), /tracked dirty source/);
 });
 
 test("deployment arguments bind the exact tagged commit to Worker health", () => {

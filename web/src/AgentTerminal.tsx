@@ -44,6 +44,7 @@ export type { AgentTerminalMode, AgentTerminalState } from "./agentTerminalTypes
 /** Authenticated website policy around the headless Agent SDK and app-local xterm. */
 export const AgentTerminal = memo(function AgentTerminal({
   authStatus,
+  beforeLocalTurn,
   mode,
   onConversationActivity,
   onStateChange,
@@ -52,6 +53,7 @@ export const AgentTerminal = memo(function AgentTerminal({
   threadId,
 }: {
   authStatus: ModelSessionStatus | undefined;
+  beforeLocalTurn(): Promise<void>;
   mode: AgentTerminalMode;
   onConversationActivity(input: string): void;
   onStateChange(state: AgentTerminalState): void;
@@ -78,8 +80,8 @@ export const AgentTerminal = memo(function AgentTerminal({
   const terminalAgent = useMemo(
     () => agent ? localTerminalAgent(agent, threadId, undefined, (failure) => {
       setLocalFailure({ agent, message: errorMessage(failure), threadId });
-    }) : undefined,
-    [agent, threadId],
+    }, undefined, undefined, beforeLocalTurn) : undefined,
+    [agent, beforeLocalTurn, threadId],
   );
   const localAgentError = localFailure
     && localFailure.agent === agent

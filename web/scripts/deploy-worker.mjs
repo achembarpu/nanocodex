@@ -66,6 +66,10 @@ export function assertBuildAttestation(attestation, revision, wranglerConfig) {
   }, "deployment build must match the current revision and Wrangler config");
 }
 
+export function assertCleanCheckout(status) {
+  assert.equal(status, "", "refusing to deploy a build from tracked dirty source");
+}
+
 export function assertDeploymentDocument(response, document) {
   assert.equal(response.status, 200, `deployed homepage returned HTTP ${response.status}`);
   assert.match(
@@ -105,6 +109,7 @@ export async function deployWorker({
   run = runWrangler,
 } = {}) {
   const revision = git("rev-parse", "HEAD");
+  assertCleanCheckout(git("status", "--porcelain", "--untracked-files=no"));
   assert.equal(
     git("rev-parse", "origin/master"),
     revision,

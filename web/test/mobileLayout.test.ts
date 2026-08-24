@@ -11,6 +11,7 @@ const docsCss = source("../src/Docs.css");
 const evalsCss = source("../src/evals.css");
 const application = source("../src/NanocodexApp.tsx");
 const artifactRuntime = source("../src/artifactRuntime.tsx");
+const experience = source("../src/AgentExperience.tsx");
 const terminal = source("../src/AgentTerminal.tsx");
 const terminalSurface = source("../src/agentTerminalSurface.tsx");
 const artifactDock = source("../src/ArtifactDock.tsx");
@@ -157,8 +158,10 @@ test("the phone home surface leads directly from thesis to install, metadata, an
 test("the app shell owns deployment rollover and agent failures expose only manual retry", () => {
   assert.match(application, /useDeploymentRollover\(\)/);
   assert.match(deploymentRollover, /event\.persisted/);
-  assert.match(deploymentRollover, /sha !== deploymentSha/);
+  assert.match(deploymentRollover, /liveDeploymentSha === currentDeploymentSha/);
   assert.match(deploymentRollover, /window\.location\.reload\(\)/);
+  assert.match(application, /beforeLocalTurn=\{deploymentRollover\.beforeLocalTurn\}/);
+  assert.match(experience, /deploymentCurrent[\s\S]*?<AgentTerminal/);
   assert.match(terminal, /refetch\(\)/);
   assert.match(modelSession, /agentStatus === "error" && hasCredential[\s\S]*?>retry agent<\/button>/);
   assert.doesNotMatch(`${terminal}\n${modelSession}`, /automaticRetry|workerRecoveryAttempts/);
