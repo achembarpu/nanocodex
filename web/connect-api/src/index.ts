@@ -744,9 +744,16 @@ async function accountAuthorizations(store: Kv.Kv, current: GrantRecord) {
   ];
   const grants = records.filter((grant): grant is GrantRecord => isGrantRecord(grant)
     && grant.accountAddress.toLowerCase() === current.accountAddress.toLowerCase());
+  const seen = new Set<string>();
   return grants
     .sort((left, right) => right.expiresAt - left.expiresAt)
-    .map(grantAuthorization);
+    .map(grantAuthorization)
+    .filter((authorization) => {
+      const fingerprint = JSON.stringify(authorization);
+      if (seen.has(fingerprint)) return false;
+      seen.add(fingerprint);
+      return true;
+    });
 }
 
 function grantAuthorization(grant: GrantRecord) {
