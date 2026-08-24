@@ -246,6 +246,7 @@ export function TerminalTranscriptSurface({
       else if (followTail.current) element.scrollTop = element.scrollHeight;
     });
     const content = element.firstElementChild;
+    observer.observe(element);
     if (content) observer.observe(content);
     return () => observer.disconnect();
   }, [welcome]);
@@ -295,6 +296,7 @@ export function TerminalTranscriptSurface({
               {inactiveMessage}
             </p>
           ) : null}
+          <div className="agent-transcript-keyboard-spacer" aria-hidden="true" />
         </div>
       </div>
       {composer}

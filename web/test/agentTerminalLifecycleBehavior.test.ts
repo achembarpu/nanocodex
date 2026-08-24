@@ -193,7 +193,7 @@ test("visual viewport floors include the measured composer and bottom safe area"
   }), 113, "a taller measured composer remains authoritative");
 });
 
-test("keyboard occlusion becomes a continuous inset after browser chrome movement", () => {
+test("keyboard occlusion continuously follows the visual viewport", () => {
   assert.equal(visualViewportKeyboardInset({
     baselineHeight: 852,
     viewportHeight: 852,
@@ -201,15 +201,15 @@ test("keyboard occlusion becomes a continuous inset after browser chrome movemen
   assert.equal(visualViewportKeyboardInset({
     baselineHeight: 852,
     viewportHeight: 760,
-  }), 0, "browser chrome movement is not a software keyboard");
+  }), 92);
   assert.equal(visualViewportKeyboardInset({
     baselineHeight: 852,
     viewportHeight: 700,
-  }), 32, "the safe area contracts continuously as the keyboard enters");
+  }), 152, "the composer follows every keyboard animation frame");
   assert.equal(visualViewportKeyboardInset({
     baselineHeight: 852,
     viewportHeight: 520,
-  }), 212);
+  }), 332);
 });
 
 test("a running touch agent keeps a visible send action for a follow-up", () => {
