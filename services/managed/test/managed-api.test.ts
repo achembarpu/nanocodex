@@ -30,6 +30,87 @@ afterEach(async () => {
 });
 
 describe("managed agents REST and resumable SSE", () => {
+  it("accounts for each independently growing per-agent durable payload", async () => {
+    const agent = await createAgent();
+    await submit(agent, "turn-capacity", "CAPACITY_ACCOUNTING");
+    await waitForTurnState(agent, "turn-capacity", "completed");
+
+    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    const response = await session.fetch("https://session.internal/capacity");
+    expect(response.status).toBe(200);
+    const capacity = await response.json<{
+      completed_operations_rows: number;
+      database_size_bytes: number;
+      journal: { bytes: number; max_batch_bytes: number; revision: string; rows: number };
+      known_payload_bytes: number;
+      managed_events: { bytes: number; rows: number };
+      raw_events: { bytes: number; rows: number };
+      turns: {
+        blocked_rows: number;
+        input_bytes: number;
+        terminal_bytes: number;
+        terminal_rows: number;
+        total_rows: number;
+        unfinished_rows: number;
+      };
+      unattributed_database_bytes: number;
+    }>();
+
+    expect(capacity.database_size_bytes).toBeGreaterThan(0);
+    expect(capacity.journal).toMatchObject({ rows: expect.any(Number) });
+    expect(capacity.journal.rows).toBeGreaterThan(0);
+    expect(capacity.journal.bytes).toBeGreaterThan(0);
+    expect(capacity.journal.max_batch_bytes).toBeGreaterThan(0);
+    expect(BigInt(capacity.journal.revision)).toBeGreaterThan(0n);
+    expect(capacity.managed_events.rows).toBeGreaterThan(0);
+    expect(capacity.managed_events.bytes).toBeGreaterThan(0);
+    expect(capacity.raw_events).toEqual({ rows: 0, bytes: 0 });
+    expect(capacity.turns).toMatchObject({
+      blocked_rows: 0,
+      terminal_rows: 1,
+      total_rows: 1,
+      unfinished_rows: 0,
+    });
+    expect(capacity.turns.input_bytes).toBeGreaterThan(0);
+    expect(capacity.turns.terminal_bytes).toBeGreaterThan(0);
+    expect(capacity.completed_operations_rows).toBe(1);
+    expect(capacity.known_payload_bytes).toBeGreaterThan(0);
+    expect(capacity.database_size_bytes).toBeGreaterThanOrEqual(capacity.known_payload_bytes);
+    expect(capacity.unattributed_database_bytes).toBe(
+      capacity.database_size_bytes - capacity.known_payload_bytes,
+    );
+  });
+
+  it("compacts a terminal journal prefix and cold-reopens from the retained checkpoint", async () => {
+    const agent = await createAgent();
+    for (let index = 0; index < 22; index += 1) {
+      const id = `turn-compaction-${index}`;
+      await submit(agent, id, `COMPACTION_${index}`);
+      await waitForTurnState(agent, id, "completed");
+    }
+
+    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    const before = await (await session.fetch("https://session.internal/capacity")).json<{
+      journal: { revision: string; rows: number };
+    }>();
+    expect(BigInt(before.journal.revision)).toBeGreaterThanOrEqual(66n);
+    expect(BigInt(before.journal.rows)).toBeLessThan(BigInt(before.journal.revision));
+
+    await waitForScheduledAlarm(session);
+    await runDurableObjectAlarm(session);
+    await evictDurableObject(session);
+
+    await submit(agent, "turn-after-compaction-reopen", "AFTER_COMPACTION_REOPEN");
+    await waitForTurnState(agent, "turn-after-compaction-reopen", "completed");
+    const after = await (await session.fetch("https://session.internal/capacity")).json<{
+      journal: { revision: string; rows: number };
+      turns: { terminal_rows: number };
+    }>();
+    expect(BigInt(after.journal.revision)).toBeGreaterThan(BigInt(before.journal.revision));
+    expect(BigInt(after.journal.rows)).toBeLessThan(BigInt(after.journal.revision));
+    expect(after.turns.terminal_rows).toBe(23);
+  }, 30_000);
+
   it("keeps connector OAuth state and credentials behind a persistent account", async () => {
     const publicEgressEnvelope = JSON.stringify({
       thread_id: "77777777-7777-4777-8777-777777777777",

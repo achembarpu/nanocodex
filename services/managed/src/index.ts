@@ -16,6 +16,10 @@ import { Agent as CloudflareAgent } from "nanocodex/cloudflare";
 import { imageGeneration, updatePlan, viewImage, web } from "nanocodex/tools";
 import { justBash } from "nanocodex/tools/bash";
 import { createComputerFilesystem } from "./computer-workspace";
+import {
+  managedCapacitySnapshot,
+  type ManagedCapacitySnapshot,
+} from "./capacity";
 import { fetchResponseWithDeadline, withHardDeadline } from "./deadline";
 import { drainRuntimeForDeletion } from "./deletion-runtime";
 import {
@@ -1066,6 +1070,16 @@ export class NanocodexSession extends DurableComputerSession {
         latest_cursor: page.latest_cursor,
       }, { headers: { "cache-control": "no-store" } });
     }
+    if (request.method === "GET" && url.pathname === "/capacity") {
+      if (this.#deleting)
+        return json({ error: "agent_deleting" }, { status: 409 });
+      const sessionId = this.#sessionId();
+      if (!sessionId)
+        return json({ error: "not_found" }, { status: 404 });
+      return json(managedCapacitySnapshot(this.ctx.storage, sessionId), {
+        headers: { "cache-control": "no-store" },
+      });
+    }
     if (request.method === "POST" && url.pathname === "/turns") {
       return this.#submitHttpTurn(request);
     }
@@ -1187,6 +1201,7 @@ export class NanocodexSession extends DurableComputerSession {
       await this.#scheduleNextAlarm();
       return;
     }
+    this.#logCapacity("idle_shutdown");
     await this.#shutdownAgent();
     this.#scheduleRecovery();
   }
@@ -2536,6 +2551,7 @@ export class NanocodexSession extends DurableComputerSession {
   }
 
   async #createAgent(): Promise<CloudflareAgent.Agent> {
+    const constructionStartedAt = performance.now();
     const session = this.#session();
     if (!session) throw new Error("session is not initialized");
     const multiplayer = session.runtime_profile === "multiplayer";
@@ -2571,6 +2587,7 @@ export class NanocodexSession extends DurableComputerSession {
     let agent: CloudflareAgent.Agent;
     try {
       agent = await CloudflareAgent.create(this, {
+        eventPersistence: "caller",
         instructions: multiplayer
           ? [
             "You are the shared Nanocodex participant in a short-lived Multiplayer chat room.",
@@ -2622,6 +2639,9 @@ export class NanocodexSession extends DurableComputerSession {
       disposeWorkspace();
       throw error;
     }
+    this.#logCapacity("agent_constructed", {
+      construction_ms: Math.round((performance.now() - constructionStartedAt) * 100) / 100,
+    });
     return agent;
   }
 
@@ -2813,8 +2833,44 @@ export class NanocodexSession extends DurableComputerSession {
       );
       committed = this.#managedTurn(id) ?? row;
     });
-    if (event) this.#publish(event);
+    if (event) {
+      this.#publish(event);
+      if (isTerminalState(committed.state)) this.#maybeLogTerminalCapacity();
+    }
     return committed;
+  }
+
+  #maybeLogTerminalCapacity(): void {
+    const terminalRows = this.ctx.storage.sql.exec<{ rows: number }>(
+      `SELECT COUNT(*) AS rows FROM managed_turns
+       WHERE state IN ('completed', 'cancelled', 'failed')`,
+    ).toArray()[0]?.rows ?? 0;
+    if (terminalRows > 0 && Number.isInteger(Math.log2(terminalRows))) {
+      this.#logCapacity("terminal_milestone", { terminal_milestone: terminalRows });
+    }
+  }
+
+  #logCapacity(
+    reason: "agent_constructed" | "idle_shutdown" | "terminal_milestone",
+    dimensions: Record<string, number> = {},
+  ): void {
+    const sessionId = this.#sessionId();
+    if (!sessionId) return;
+    try {
+      const capacity: ManagedCapacitySnapshot = managedCapacitySnapshot(
+        this.ctx.storage,
+        sessionId,
+      );
+      console.info({
+        type: "managed.capacity",
+        reason,
+        agent_id: sessionId,
+        ...dimensions,
+        ...capacity,
+      });
+    } catch (error) {
+      console.warn("managed capacity snapshot failed", errorMessage(error));
+    }
   }
 
   #recordAgentEvent(event: AgentEvent): void {

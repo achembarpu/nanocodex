@@ -3,6 +3,8 @@ export type {
   DurabilityAcquireRequest,
   DurabilityAppendRequest,
   DurabilityAppendResult,
+  DurabilityCompactRequest,
+  DurabilityCompactResult,
   DurabilityFence,
   DurabilityRevision,
   DurabilitySqliteQuery,

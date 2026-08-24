@@ -36,6 +36,11 @@ test("Cloudflare durability owns schema setup and atomic SQLite adaptation", () 
         } else if (sql.startsWith("INSERT INTO nanocodex_journal_batches")) {
           batches.push({ journalId, revision, payload });
           rows = [];
+        } else if (sql.startsWith("DELETE FROM nanocodex_journal_batches")) {
+          for (let index = batches.length - 1; index >= 0; index -= 1) {
+            if (batches[index].journalId === journalId) batches.splice(index, 1);
+          }
+          rows = [];
         } else {
           throw new Error(`unexpected SQL: ${sql}`);
         }
@@ -68,6 +73,16 @@ test("Cloudflare durability owns schema setup and atomic SQLite adaptation", () 
     revision: "1",
     batches: [{ revision: "1", payload: "opaque-rust-batch" }],
   });
+  assert.deepEqual(store.compact("agent-1", {
+    ownerId: firstOwner.ownerId,
+    fence: firstOwner.fence,
+    expectedRevision: "1",
+    payload: "compacted-rust-state",
+  }), { status: "compacted", revision: "1" });
+  assert.deepEqual(store.load("agent-1"), {
+    revision: "1",
+    batches: [{ revision: "1", payload: "compacted-rust-state" }],
+  });
   revisions.delete("agent-1");
   batches.splice(0, batches.length);
   const secondOwner = store.acquire("agent-1", { ownerId: "worker-2" });
@@ -83,7 +98,7 @@ test("Cloudflare durability owns schema setup and atomic SQLite adaptation", () 
     expectedRevision: "9",
     payload: "stale-owner",
   }), { status: "fenced" });
-  assert.equal(transactions, 6);
+  assert.equal(transactions, 8);
   assert.throws(
     () => createCloudflareDurabilityStore({}),
     /Durable Object storage with SQLite/,

@@ -147,7 +147,8 @@ pub enum Entry {
 }
 
 /// Reduced status of one operation.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum OperationStatus {
     /// Accepted work may be attempted or resumed.
     Pending,
@@ -185,7 +186,8 @@ impl OperationStatus {
 }
 
 /// Reduced status of one step.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StepStatus {
     /// A start exists without a corresponding completion.
     Started,
@@ -194,7 +196,7 @@ pub enum StepStatus {
 }
 
 /// Reduced durable step state.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct StepState {
     /// Semantic kind recorded by the caller.
     pub kind: String,
@@ -209,7 +211,7 @@ pub struct StepState {
 }
 
 /// Reduced durable operation state.
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct OperationState {
     /// Original opaque operation input.
     pub input: EncodedPayload,
@@ -232,6 +234,18 @@ pub struct JournalState {
     revision: u64,
     operations: BTreeMap<String, OperationState>,
     latest_checkpoint: Option<(u64, EncodedPayload)>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+pub(crate) struct JournalCheckpoint {
+    version: u8,
+    operations: BTreeMap<String, OperationState>,
+    latest_checkpoint: Option<EncodedPayload>,
+}
+
+#[derive(serde::Deserialize, serde::Serialize)]
+pub(crate) struct RetainedCheckpoint {
+    pub(crate) nanocodex_journal_state: JournalCheckpoint,
 }
 
 impl JournalState {
@@ -280,6 +294,64 @@ impl JournalState {
         self.latest_checkpoint
             .as_ref()
             .map(|(_, checkpoint)| checkpoint)
+    }
+
+    pub(crate) fn checkpoint_payload(&self) -> Result<String> {
+        serde_json::to_string(&RetainedCheckpoint {
+            nanocodex_journal_state: JournalCheckpoint {
+                version: 1,
+                operations: self.operations.clone(),
+                latest_checkpoint: self.latest_checkpoint().cloned(),
+            },
+        })
+        .map_err(Error::InvalidPayload)
+    }
+
+    pub(crate) fn from_checkpoint(revision: u64, checkpoint: JournalCheckpoint) -> Result<Self> {
+        if revision == 0 {
+            return Err(Error::InvalidJournal(
+                "a compacted journal checkpoint must have a positive revision".to_owned(),
+            ));
+        }
+        if checkpoint.version != 1 {
+            return Err(Error::InvalidJournal(format!(
+                "unsupported compacted journal checkpoint version {}",
+                checkpoint.version
+            )));
+        }
+        let mut accepted_orders = std::collections::BTreeSet::new();
+        for (operation_id, operation) in &checkpoint.operations {
+            ensure_nonempty(operation_id, "operation ID")?;
+            if operation.accepted_order == 0
+                || operation.accepted_order > revision
+                || !accepted_orders.insert(operation.accepted_order)
+            {
+                return Err(Error::InvalidJournal(format!(
+                    "operation `{operation_id}` has an invalid compacted acceptance order"
+                )));
+            }
+            if operation.status.is_terminal() && operation.active_attempt {
+                return Err(Error::InvalidJournal(format!(
+                    "terminal operation `{operation_id}` retained an active attempt"
+                )));
+            }
+            for (step_id, step) in &operation.steps {
+                ensure_nonempty(step_id, "step ID")?;
+                ensure_nonempty(&step.kind, "step kind")?;
+                if step.attempts == 0 {
+                    return Err(Error::InvalidJournal(format!(
+                        "step `{step_id}` in operation `{operation_id}` has no committed start"
+                    )));
+                }
+            }
+        }
+        Ok(Self {
+            revision,
+            operations: checkpoint.operations,
+            latest_checkpoint: checkpoint
+                .latest_checkpoint
+                .map(|checkpoint| (revision, checkpoint)),
+        })
     }
 
     pub(crate) fn validate_batch(&self, revision: u64, entry: &Entry) -> Result<()> {

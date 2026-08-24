@@ -98,6 +98,29 @@ export function createMemoryDurabilityStore(journalId, initial) {
       });
       return { status: "appended", revision };
     },
+    compact(selected, request) {
+      select(selected);
+      const ownerId = durabilityOwnerId(request?.ownerId);
+      const fence = durabilityFence(request?.fence);
+      if (ownerId !== owner?.ownerId || fence !== owner.fence) {
+        return { status: "fenced" };
+      }
+      const expectedRevision = durabilityRevision(request.expectedRevision);
+      if (expectedRevision !== journal.revision) {
+        return { status: "conflict", actualRevision: journal.revision };
+      }
+      if (expectedRevision === "0") {
+        return { status: "not_committed", message: "cannot compact an empty journal" };
+      }
+      journal = Object.freeze({
+        revision: expectedRevision,
+        batches: Object.freeze([Object.freeze({
+          revision: expectedRevision,
+          payload: request.payload,
+        })]),
+      });
+      return { status: "compacted", revision: expectedRevision };
+    },
     snapshot() {
       return journal;
     },
@@ -185,6 +208,57 @@ export function createSqliteDurabilityStore(options) {
                     [journalId, revision, request.payload],
                   ),
                   () => ({ status: "appended", revision }),
+                ),
+              );
+            },
+          );
+        },
+      ));
+    },
+    compact(journalId, request) {
+      const ownerId = durabilityOwnerId(request?.ownerId);
+      const fence = durabilityFence(request?.fence);
+      const expectedRevision = durabilityRevision(request.expectedRevision);
+      return options.transaction((query) => mapMaybePromise(
+        query(
+          "SELECT owner_id, fence FROM nanocodex_journal_owners WHERE journal_id = ?",
+          [journalId],
+        ),
+        (owners) => {
+          const storedOwner = owners[0];
+          if (
+            storedOwner?.owner_id !== ownerId
+            || durabilityFence(storedOwner?.fence ?? "0") !== fence
+          ) {
+            return { status: "fenced" };
+          }
+          return mapMaybePromise(
+            query(
+              "SELECT revision FROM nanocodex_journals WHERE journal_id = ?",
+              [journalId],
+            ),
+            (journals) => {
+              const actualRevision = durabilityRevision(journals[0]?.revision ?? "0");
+              if (actualRevision !== expectedRevision) {
+                return { status: "conflict", actualRevision };
+              }
+              if (expectedRevision === "0") {
+                return {
+                  status: "not_committed",
+                  message: "cannot compact an empty SQLite durability journal",
+                };
+              }
+              return mapMaybePromise(
+                query(
+                  "DELETE FROM nanocodex_journal_batches WHERE journal_id = ?",
+                  [journalId],
+                ),
+                () => mapMaybePromise(
+                  query(
+                    "INSERT INTO nanocodex_journal_batches (journal_id, revision, payload) VALUES (?, ?, ?)",
+                    [journalId, expectedRevision, request.payload],
+                  ),
+                  () => ({ status: "compacted", revision: expectedRevision }),
                 ),
               );
             },

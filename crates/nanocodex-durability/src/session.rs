@@ -11,11 +11,12 @@ use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     EncodedPayload, Entry, Error, JournalState, JournalStore, OperationStatus, OwnerId, OwnerToken,
-    Result, RetryPolicy, StepStatus, StoreError, StoredJournal,
+    Result, RetryPolicy, StepStatus, StoreError, StoredJournal, journal::RetainedCheckpoint,
 };
 
 const COMMAND_CAPACITY: usize = 64;
 const RELEASE_BURST_LIMIT: usize = 32;
+const COMPACTION_BATCH_THRESHOLD: usize = 64;
 
 /// Result of submitting one idempotent operation.
 #[derive(Clone, Debug)]
@@ -228,6 +229,7 @@ struct Driver {
     store: Box<dyn JournalStore>,
     journal_id: Arc<str>,
     state: JournalState,
+    retained_batches: usize,
     owner: OwnerToken,
     next_agent_generation: u64,
     active_agent_generation: Option<u64>,
@@ -510,7 +512,7 @@ impl Driver {
                                     };
                                     match self.terminal_retry_entry(&operation_id, proposed) {
                                         Ok(entry) => {
-                                            let outcome = self.append(entry.clone()).await;
+                                            let outcome = self.append_terminal(entry.clone()).await;
                                             self.track_terminal_attempt(
                                                 &operation_id,
                                                 entry,
@@ -543,7 +545,10 @@ impl Driver {
                                 operation_id: "standalone-checkpoint".to_owned(),
                                 pending_id: pending_id.to_owned(),
                             }),
-                            None => self.append(Entry::CheckpointCommitted { checkpoint }).await,
+                            None => {
+                                self.append_terminal(Entry::CheckpointCommitted { checkpoint })
+                                    .await
+                            }
                         },
                         Err(error) => Err(error),
                     };
@@ -874,7 +879,7 @@ impl Driver {
             output,
         };
         let entry = self.terminal_retry_entry(&operation_id, proposed)?;
-        let outcome = self.append(entry.clone()).await;
+        let outcome = self.append_terminal(entry.clone()).await;
         self.track_terminal_attempt(&operation_id, entry, &outcome);
         if finishing_attempt_releases_claim(&outcome) {
             self.release_claim_if_owned(caller, &operation_id);
@@ -897,7 +902,7 @@ impl Driver {
             error,
         };
         let entry = self.terminal_retry_entry(&operation_id, proposed)?;
-        let outcome = self.append(entry.clone()).await;
+        let outcome = self.append_terminal(entry.clone()).await;
         self.track_terminal_attempt(&operation_id, entry, &outcome);
         if finishing_attempt_releases_claim(&outcome) {
             self.release_claim_if_owned(caller, &operation_id);
@@ -1033,7 +1038,38 @@ impl Driver {
             self.poisoned = true;
             return Err(error);
         }
+        self.retained_batches = self.retained_batches.saturating_add(1);
         Ok(())
+    }
+
+    async fn append_terminal(&mut self, entry: Entry) -> Result<()> {
+        self.append(entry).await?;
+        if self.retained_batches < COMPACTION_BATCH_THRESHOLD {
+            return Ok(());
+        }
+        let revision = self.state.revision();
+        let payload = self.state.checkpoint_payload()?;
+        match self
+            .store
+            .compact(&self.journal_id, &self.owner, revision, &payload)
+            .await
+        {
+            Ok(compacted_revision) if compacted_revision == revision => {
+                self.retained_batches = 1;
+                Ok(())
+            }
+            Ok(compacted_revision) => {
+                self.poisoned = true;
+                Err(Error::InvalidJournal(format!(
+                    "store compacted revision {compacted_revision} while retaining revision {revision}"
+                )))
+            }
+            Err(StoreError::NotCommitted(_)) => Ok(()),
+            Err(error) => {
+                self.poisoned = true;
+                Err(error.into())
+            }
+        }
     }
 }
 
@@ -1047,12 +1083,27 @@ const fn finishing_attempt_releases_claim(outcome: &Result<()>) -> bool {
 fn reduce(stored: StoredJournal) -> Result<JournalState> {
     let mut state = JournalState::default();
     for batch in stored.batches {
-        let entry =
-            serde_json::from_str::<Entry>(&batch.payload).map_err(|source| Error::Decode {
-                revision: batch.revision,
-                source,
-            })?;
-        state.apply_replayed_batch(batch.revision, &entry)?;
+        match serde_json::from_str::<RetainedCheckpoint>(&batch.payload) {
+            Ok(RetainedCheckpoint {
+                nanocodex_journal_state,
+            }) if state.revision() == 0 => {
+                state = JournalState::from_checkpoint(batch.revision, nanocodex_journal_state)?;
+            }
+            Ok(_) => {
+                return Err(Error::InvalidJournal(
+                    "a compacted journal checkpoint must be the first retained batch".to_owned(),
+                ));
+            }
+            Err(_) => {
+                let entry = serde_json::from_str::<Entry>(&batch.payload).map_err(|source| {
+                    Error::Decode {
+                        revision: batch.revision,
+                        source,
+                    }
+                })?;
+                state.apply_replayed_batch(batch.revision, &entry)?;
+            }
+        }
     }
     if state.revision() != stored.revision {
         return Err(Error::InvalidJournal(format!(
@@ -1111,6 +1162,7 @@ impl DurableSession {
             ));
         }
         let acquired = store.acquire_owner(&journal_id, OwnerId::new()).await?;
+        let retained_batches = acquired.journal.batches.len();
         let state = reduce(acquired.journal)?;
         let journal_id = Arc::<str>::from(journal_id);
         let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
@@ -1119,6 +1171,7 @@ impl DurableSession {
             store: Box::new(store),
             journal_id: Arc::clone(&journal_id),
             state,
+            retained_batches,
             owner: acquired.owner,
             next_agent_generation: 0,
             active_agent_generation: None,
@@ -2158,6 +2211,52 @@ mod tests {
             41
         );
         owner.shutdown().await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn terminal_boundary_compacts_the_prefix_without_rewinding_revision() {
+        let store = MemoryStore::new().unwrap();
+        let session = DurableSession::open(store.clone(), "bounded-prefix")
+            .await
+            .unwrap();
+        let (owner, _) = session.acquire_agent().await.unwrap();
+        for index in 0..22_u32 {
+            let operation_id = format!("turn-{index}");
+            let prompt = format!("prompt-{index}");
+            assert!(matches!(
+                owner
+                    .admit_typed::<_, u32, String>(operation_id.clone(), &prompt)
+                    .await,
+                Ok(Admission::Accepted)
+            ));
+            owner.begin_attempt(operation_id.clone()).await.unwrap();
+            owner
+                .complete(operation_id, &index, &format!("output-{index}"))
+                .await
+                .unwrap();
+        }
+        owner.shutdown().await.unwrap();
+
+        let mut inspector = store.clone();
+        let compacted = inspector
+            .acquire_owner("bounded-prefix", OwnerId::new())
+            .await
+            .unwrap();
+        assert_eq!(compacted.journal.revision, 66);
+        assert_eq!(compacted.journal.batches.len(), 1);
+        assert_eq!(compacted.journal.batches[0].revision, 66);
+
+        let reopened = DurableSession::open(store, "bounded-prefix").await.unwrap();
+        assert!(matches!(
+            reopened
+                .admit_typed::<_, u32, String>("turn-0", &"prompt-0")
+                .await,
+            Ok(Admission::Completed {
+                checkpoint: 0,
+                output
+            }) if output == "output-0"
+        ));
+        assert_eq!(reopened.state().await.unwrap().revision(), 66);
     }
 
     #[tokio::test]

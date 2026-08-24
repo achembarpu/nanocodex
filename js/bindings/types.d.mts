@@ -79,6 +79,14 @@ export type DurabilityAppendResult =
   | Readonly<{ status: "conflict"; actualRevision: DurabilityRevision }>
   | Readonly<{ status: "not_committed"; message: string }>;
 
+export type DurabilityCompactRequest = DurabilityAppendRequest;
+
+export type DurabilityCompactResult =
+  | Readonly<{ status: "compacted"; revision: DurabilityRevision }>
+  | Readonly<{ status: "fenced" }>
+  | Readonly<{ status: "conflict"; actualRevision: DurabilityRevision }>
+  | Readonly<{ status: "not_committed"; message: string }>;
+
 /** Host capability consumed by the Rust/WASM durability driver. */
 export type DurabilityStore = Readonly<{
   load(journalId: string): DurabilityStoredJournal | Promise<DurabilityStoredJournal>;
@@ -90,6 +98,10 @@ export type DurabilityStore = Readonly<{
     journalId: string,
     request: DurabilityAppendRequest,
   ): DurabilityAppendResult | Promise<DurabilityAppendResult>;
+  compact?(
+    journalId: string,
+    request: DurabilityCompactRequest,
+  ): DurabilityCompactResult | Promise<DurabilityCompactResult>;
 }>;
 
 /** In-process store for hosts that carry its snapshot across durable steps. */

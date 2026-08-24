@@ -55,9 +55,15 @@ test("the memory durability store carries opaque Rust batches across host steps"
     expectedRevision: "0",
     payload: "conflicting",
   }), { status: "conflict", actualRevision: "1" });
+  assert.deepEqual(store.compact("journal-1", {
+    ownerId: "owner-2",
+    fence: "2",
+    expectedRevision: "1",
+    payload: "{\"nanocodex_journal_state\":{}}",
+  }), { status: "compacted", revision: "1" });
   assert.deepEqual(store.snapshot(), {
     revision: "1",
-    batches: [{ revision: "1", payload: "{\"entry\":1}" }],
+    batches: [{ revision: "1", payload: "{\"nanocodex_journal_state\":{}}" }],
   });
   assert.throws(() => store.load("other"), /unknown durability journal/);
   assert.equal(durabilityRevision("18446744073709551615"), "18446744073709551615");
@@ -121,6 +127,12 @@ test("the SQLite durability store owns revision validation and compare-and-appen
       batches.push({ journalId, revision, payload });
       return [];
     }
+    if (sql.startsWith("DELETE FROM nanocodex_journal_batches")) {
+      for (let index = batches.length - 1; index >= 0; index -= 1) {
+        if (batches[index].journalId === journalId) batches.splice(index, 1);
+      }
+      return [];
+    }
     throw new Error(`unexpected SQL: ${sql}`);
   };
   const store = createSqliteDurabilityStore({
@@ -148,6 +160,16 @@ test("the SQLite durability store owns revision validation and compare-and-appen
     expectedRevision: "0",
     payload: "stale",
   }), { status: "conflict", actualRevision: "1" });
+  assert.deepEqual(store.compact("journal-1", {
+    ownerId: firstOwner.ownerId,
+    fence: firstOwner.fence,
+    expectedRevision: "1",
+    payload: "checkpoint",
+  }), { status: "compacted", revision: "1" });
+  assert.deepEqual(store.load("journal-1"), {
+    revision: "1",
+    batches: [{ revision: "1", payload: "checkpoint" }],
+  });
   revisions.set("exhausted", "18446744073709551615");
   const exhaustedOwner = store.acquire("exhausted", { ownerId: "owner-exhausted" });
   assert.deepEqual(store.append("exhausted", {
@@ -162,7 +184,7 @@ test("the SQLite durability store owns revision validation and compare-and-appen
   assert.equal(batches.some((batch) => batch.journalId === "exhausted"), false);
   assert.deepEqual(store.load("journal-1"), {
     revision: "1",
-    batches: [{ revision: "1", payload: "opaque" }],
+    batches: [{ revision: "1", payload: "checkpoint" }],
   });
   revisions.delete("journal-1");
   batches.splice(0, batches.length);

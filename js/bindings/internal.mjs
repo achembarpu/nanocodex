@@ -506,6 +506,23 @@ const hostBridge = Object.freeze({
       payload,
     );
   },
+  async durabilityCompact(
+    routeId,
+    journalId,
+    ownerId,
+    fence,
+    expectedRevision,
+    payload,
+  ) {
+    return (await loadDurabilityRuntime()).compact(
+      routeId,
+      journalId,
+      ownerId,
+      fence,
+      expectedRevision,
+      payload,
+    );
+  },
   emitEvent(sessionId, eventJson, encodedBytes) {
     requiredSessionHost(sessionId).emitEvent(eventJson, encodedBytes);
   },
@@ -569,6 +586,7 @@ function createAgent(
 
 function agentView(state, extensions) {
   let agent;
+  let reservedKeys;
   const base = {
     uid: state.uid,
     key: state.runtime.key,
@@ -582,7 +600,7 @@ function agentView(state, extensions) {
         throw new TypeError("an agent decorator must return an object");
       }
       const extension = { ...value };
-      for (const key of Object.keys(base)) delete extension[key];
+      for (const key of reservedKeys) delete extension[key];
       return agentView(state, deepMerge(extensions, extension));
     },
     dispose() {
@@ -590,6 +608,7 @@ function agentView(state, extensions) {
       releaseAgentState(state);
     },
   };
+  reservedKeys = Object.keys(base);
   agent = Object.assign(base, extensions);
   agentStates.set(agent, state);
   return agent;

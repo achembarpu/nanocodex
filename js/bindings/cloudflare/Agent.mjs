@@ -11,7 +11,7 @@ import {
 } from "./event-socket.mjs";
 
 const STARTUP_TIMEOUT_MS = 10_000;
-const APPLICATION_OPTIONS = new Set(["instructions", "tools"]);
+const APPLICATION_OPTIONS = new Set(["eventPersistence", "instructions", "tools"]);
 const lifecycles = new WeakMap();
 
 /** @internal Binds the package-owned module to the public Cloudflare namespace. */
@@ -92,8 +92,13 @@ export async function create(module, owner, options = {}, hostAgent = HostAgent)
 
 async function createOwned(module, resolved, options, hostAgent, lifecycle) {
   const { context, egress, subject } = resolved;
-  const agentOptions = applicationOptions(options);
-  const eventSocket = createCloudflareEventSocket(context);
+  const configured = applicationOptions(options);
+  const eventPersistence = configured.eventPersistence ?? "durable";
+  const { eventPersistence: _eventPersistence, ...agentOptions } = configured;
+  const eventSocket = eventPersistence === "durable"
+    ? createCloudflareEventSocket(context)
+    : undefined;
+  if (eventPersistence === "caller") clearCloudflareEventSocket(context);
   const durability = createCloudflareDurabilityStore(context.storage);
   const sessionId = durableSessionId(context.storage);
   const endpoint = cloudflareEgress({
@@ -134,19 +139,24 @@ async function createOwned(module, resolved, options, hostAgent, lifecycle) {
       "Cloudflare Agent EGRESS startup validation timed out",
     );
 
-    watcher = agent.events.watch();
-    unwatch = watcher.onEvent((event) => {
-      try {
-        eventSocket.publish(event);
-      } catch (error) {
-        unwatch?.();
-        eventSocket.fail(error);
-        console.error("Nanocodex Cloudflare event projection failed", error);
-      }
-    });
+    if (eventSocket !== undefined) {
+      watcher = agent.events.watch();
+      unwatch = watcher.onEvent((event) => {
+        try {
+          eventSocket.publish(event);
+        } catch (error) {
+          unwatch?.();
+          eventSocket.fail(error);
+          console.error("Nanocodex Cloudflare event projection failed", error);
+        }
+      });
+    }
     const exposed = agent.extend((owned) => ({
       events: {
-        connect: (request) => eventSocket.connect(request),
+        connect: (request) => eventSocket?.connect(request) ?? Response.json(
+          { error: "event_persistence_caller_owned" },
+          { status: 409 },
+        ),
       },
       turn: {
         ...owned.turn,
@@ -229,9 +239,16 @@ function applicationOptions(options) {
   for (const name of Object.keys(options)) {
     if (!APPLICATION_OPTIONS.has(name)) {
       throw new TypeError(
-        `Cloudflare Agent.create does not accept ${name}; only instructions and tools are configurable`,
+        `Cloudflare Agent.create does not accept ${name}; only eventPersistence, instructions, and tools are configurable`,
       );
     }
+  }
+  if (options.eventPersistence !== undefined
+    && options.eventPersistence !== "durable"
+    && options.eventPersistence !== "caller") {
+    throw new TypeError(
+      "Cloudflare Agent.create eventPersistence must be durable or caller",
+    );
   }
   return options;
 }

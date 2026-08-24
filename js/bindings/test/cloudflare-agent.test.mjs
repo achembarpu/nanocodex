@@ -36,7 +36,9 @@ class MemoryStorage {
       const cursor = String(this.events.length + 1);
       this.events.push({ cursor, event_json, created_at });
       rows = [{ cursor }];
-    } else if (statement.startsWith("UPDATE nanocodex_cloudflare_event_meta SET total_bytes")) {
+    } else if (statement.startsWith(
+      "UPDATE nanocodex_cloudflare_event_meta SET total_bytes = total_bytes",
+    )) {
       this.meta.total_bytes += args[0];
     } else if (statement.startsWith("UPDATE nanocodex_cloudflare_event_meta SET stream_error")) {
       this.meta.stream_error = args[0];
@@ -123,7 +125,7 @@ test("Cloudflare Agent owns credentials, transport, and durability options", asy
   await assert.rejects(create(module), /requires a Durable Object instance/);
   await assert.rejects(
     create(module, durableOwner(new MemoryStorage()), { apiKey: "managed-secret" }),
-    /does not accept apiKey; only instructions and tools are configurable/,
+    /does not accept apiKey; only eventPersistence, instructions, and tools are configurable/,
   );
   await assert.rejects(
     create(module, durableOwner(new MemoryStorage()), { CODEX_OAUTH_BOOTSTRAP: "managed-secret" }),
@@ -142,6 +144,10 @@ test("Cloudflare Agent owns credentials, transport, and durability options", asy
   await assert.rejects(
     create(module, durableOwner(new MemoryStorage()), { subject: "caller-selected" }),
     /does not accept subject/,
+  );
+  await assert.rejects(
+    create(module, durableOwner(new MemoryStorage()), { eventPersistence: "somewhere" }),
+    /eventPersistence must be durable or caller/,
   );
   await assert.rejects(
     create(module, { ctx: durableContext(new MemoryStorage()), env: {} }),
@@ -225,6 +231,22 @@ test("Cloudflare Agent releases its journal when event projection setup fails", 
 
   const recreated = await create(module, owner);
   await recreated.session.shutdown();
+});
+
+test("Cloudflare Agent lets an embedding Durable Object own the only retained event log", async () => {
+  const module = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
+  const storage = new MemoryStorage();
+  storage.events.push({ cursor: "1", event_json: "{}", created_at: Date.now() });
+  storage.meta.total_bytes = 2;
+  const owner = durableOwner(storage);
+  const agent = await create(module, owner, { eventPersistence: "caller" });
+  assert.equal(storage.events.length, 0);
+  assert.equal(storage.meta.total_bytes, 0);
+  assert.equal(typeof agent.events.connect, "function");
+  const unavailable = agent.events.connect(new Request("https://agent.invalid/events"));
+  assert.equal(unavailable.status, 409);
+  assert.deepEqual(await unavailable.json(), { error: "event_persistence_caller_owned" });
+  await agent.session.shutdown();
 });
 
 test("Cloudflare Agent destroy and duplicate create refuse an in-flight creation", async () => {
