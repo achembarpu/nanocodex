@@ -25,6 +25,31 @@ afterEach(async () => {
 
 describe("managed agents REST and resumable SSE", () => {
   it("keeps connector OAuth state and credentials behind a persistent account", async () => {
+    const publicEgressEnvelope = JSON.stringify({
+      thread_id: "77777777-7777-4777-8777-777777777777",
+      url: "https://example.com/public",
+      method: "GET",
+      headers: { accept: "application/json" },
+    });
+    const unauthenticated = await RAW_SELF.fetch("https://example.test/v1/egress", {
+      method: "POST",
+      headers: { origin: "https://example.test", "content-type": "application/json" },
+      body: publicEgressEnvelope,
+    });
+    expect(unauthenticated.status).toBe(401);
+    expect(await unauthenticated.json()).toEqual({ error: "unauthorized" });
+
+    const apiKeyPrincipal = await RAW_SELF.fetch("https://example.test/v1/egress", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${API_KEY}`,
+        origin: "https://example.test",
+        "content-type": "application/json",
+      },
+      body: publicEgressEnvelope,
+    });
+    expect(apiKeyPrincipal.status).toBe(401);
+
     const session = await RAW_SELF.fetch("https://example.test/v1/me");
     const anonymousCookie = session.headers.get("set-cookie")?.split(";", 1)[0];
     expect(anonymousCookie).toMatch(/^nanocodex_account=a_[A-Za-z0-9_-]{43}$/);
@@ -34,6 +59,17 @@ describe("managed agents REST and resumable SSE", () => {
     });
     expect(anonymous.status).toBe(401);
     expect(await anonymous.json()).toEqual({ error: "unauthorized" });
+
+    const anonymousEgress = await RAW_SELF.fetch("https://example.test/v1/egress", {
+      method: "POST",
+      headers: {
+        cookie: anonymousCookie!,
+        origin: "https://example.test",
+        "content-type": "application/json",
+      },
+      body: publicEgressEnvelope,
+    });
+    expect(anonymousEgress.status).toBe(401);
 
     const connectorUserId = "55555555-5555-4555-8555-555555555555";
     const connectorToken = "c".repeat(43);
@@ -114,11 +150,56 @@ describe("managed agents REST and resumable SSE", () => {
     });
     expect(githubRead.status).toBe(200);
     expect(githubRead.headers.get("cache-control")).toBe("no-store");
-    expect(await githubRead.json()).toMatchObject({
+    const githubValue = await githubRead.json<{ subject: string }>();
+    expect(githubValue).toMatchObject({
       cookie: null,
       full_name: "gakonst/nanocodex",
       subject: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
     });
+
+    const forgedOuterPrincipal = await RAW_SELF.fetch("https://example.test/v1/egress", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${OTHER_API_KEY}`,
+        cookie,
+        origin: "https://example.test",
+        "content-type": "application/json",
+        "x-nanocodex-subject": "b".repeat(43),
+      },
+      body: egressEnvelope,
+    });
+    expect(forgedOuterPrincipal.status).toBe(200);
+    expect((await forgedOuterPrincipal.json<{ subject: string }>()).subject).toBe(githubValue.subject);
+
+    for (const forged of [
+      { authorization: "Bearer attacker" },
+      { cookie: "nanocodex_account=attacker" },
+      { "proxy-authorization": "Basic attacker" },
+      { "x-nanocodex-subject": "a".repeat(43) },
+    ]) {
+      const response = await RAW_SELF.fetch("https://example.test/v1/egress", {
+        method: "POST",
+        headers: { cookie, origin: "https://example.test", "content-type": "application/json" },
+        body: JSON.stringify({
+          ...JSON.parse(egressEnvelope),
+          headers: forged,
+        }),
+      });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: "invalid_headers" });
+    }
+    for (const field of ["principal", "subject", "user_id"]) {
+      const response = await RAW_SELF.fetch("https://example.test/v1/egress", {
+        method: "POST",
+        headers: { cookie, origin: "https://example.test", "content-type": "application/json" },
+        body: JSON.stringify({
+          ...JSON.parse(egressEnvelope),
+          [field]: connectorUserId,
+        }),
+      });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: "invalid_request" });
+    }
 
     const deniedDestination = await RAW_SELF.fetch("https://example.test/v1/egress", {
       method: "POST",

@@ -7,6 +7,12 @@ type BrowserEgressEnv = AccountAuthEnv & { NANOCODEX: Fetcher };
 const THREAD_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 const METHODS = new Set(["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]);
 const ENVELOPE_FIELDS = new Set(["thread_id", "url", "method", "headers", "body"]);
+const PRINCIPAL_HEADERS = new Set([
+  "authorization",
+  "cookie",
+  "proxy-authorization",
+  "x-nanocodex-subject",
+]);
 
 type EgressEnvelope = Readonly<{
   thread_id: string;
@@ -28,6 +34,16 @@ export async function routeBrowserEgress(
   if (!request.headers.get("content-type")?.toLowerCase().startsWith("application/json")) {
     return json({ error: "invalid_content_type" }, 415);
   }
+  const authenticationHeaders = new Headers(request.headers);
+  authenticationHeaders.delete("authorization");
+  authenticationHeaders.delete("proxy-authorization");
+  authenticationHeaders.delete("x-nanocodex-subject");
+  const principal = await authenticatePersistentAccount(new Request(request.url, {
+    method: request.method,
+    headers: authenticationHeaders,
+    signal: request.signal,
+  }), env, url);
+  if (!principal) return json({ error: "unauthorized" }, 401);
 
   const envelope = await readEnvelope(request);
   if (!envelope) return json({ error: "invalid_request" }, 400);
@@ -56,15 +72,11 @@ export async function routeBrowserEgress(
     return json({ error: "invalid_request" }, 400);
   }
 
-  const principal = await authenticatePersistentAccount(request, env, url);
-  let subject: string | undefined;
-  if (principal) {
-    subject = await browserEgressSubject(principal.userId, envelope.thread_id);
-    try {
-      await bindAgentCredential(env.NANOCODEX, subject, principal.userId);
-    } catch {
-      return json({ error: "credential_broker_unavailable" }, 503);
-    }
+  const subject = await browserEgressSubject(principal.userId, envelope.thread_id);
+  try {
+    await bindAgentCredential(env.NANOCODEX, subject, principal.userId);
+  } catch {
+    return json({ error: "credential_broker_unavailable" }, 503);
   }
   const response = await handleManagedEgress(target, env.NANOCODEX, subject);
   const responseHeaders = new Headers(response.headers);
@@ -110,6 +122,7 @@ function decodeHeaders(value: Record<string, string> | undefined): Headers | und
       if (typeof headerValue !== "string") return undefined;
       const lower = name.toLowerCase();
       if (names.has(lower)) return undefined;
+      if (PRINCIPAL_HEADERS.has(lower)) return undefined;
       names.add(lower);
       headers.append(name, headerValue);
     }
