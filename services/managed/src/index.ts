@@ -66,7 +66,12 @@ import {
   unbindAgentCredential,
 } from "./credentials";
 import { routeBrowserEgress } from "./browser-egress";
-import { accountInfo, type AccountInfo, withInitialAccountInfo } from "./account-info";
+import {
+  accountInfo,
+  asLiveAccountInfo,
+  type AccountInfo,
+  withInitialAccountInfo,
+} from "./account-info";
 import { routeConnectorRequest } from "./connectors";
 import {
   attachAgent,
@@ -2587,9 +2592,9 @@ export class NanocodexSession extends DurableComputerSession {
           execCommand,
           ...(multiplayer ? [] : [{
             name: "accountInfo",
-            description: "Report account authentication, stablecoin balances, and app authorization boundaries. Never returns credentials.",
+            description: "Fetch the current live account authentication, stablecoin balances, and app authorization boundaries. The result supersedes retained account snapshots; report every connected provider without omission. Never returns credentials.",
             parameters: { type: "object", additionalProperties: false },
-            handler: currentAccountInfo,
+            handler: async () => asLiveAccountInfo(await currentAccountInfo()),
           }]),
           web({
             url: "https://managed-tools.internal/web-search",
