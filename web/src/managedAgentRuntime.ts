@@ -8,6 +8,9 @@ import {
 import type { TerminalAgent, TerminalTurn } from "./demoTerminal";
 
 const MANAGED_HISTORY_PAGE_SIZE = 128;
+const MANAGED_HISTORY_INITIAL_ATTEMPTS = 3;
+const MANAGED_HISTORY_ATTEMPT_TIMEOUT_MS = 10_000;
+export const MAX_MANAGED_RETAINED_ENVELOPES = MANAGED_HISTORY_PAGE_SIZE * 2;
 const managedAgents = new Map<string, ManagedAgent>();
 const managedLists = new Map<string, Promise<readonly ManagedConversation[]>>();
 const managedCreates = new Map<string, Promise<ManagedConversation>>();
@@ -78,22 +81,24 @@ export function managedTerminalAgent(managed: ManagedAgent): TerminalAgent {
     turn: Object.freeze({
       prompt: ({ input }: { input: string }) => {
         const id = crypto.randomUUID();
-        submitted.add(id);
-        return managedTerminalTurn(managed.turn.prompt({ id, input }));
+        return managedTerminalTurn(managed, id, input);
       },
     }),
   });
 }
 
-function managedTerminalTurn(turn: ManagedTurn): TerminalTurn {
+function managedTerminalTurn(managed: ManagedAgent, turnId: string, input: string): TerminalTurn {
+  const controller = new AbortController();
+  const turn: ManagedTurn = managed.turn.prompt({ id: turnId, input });
   return Object.freeze({
+    historyEntryId: `managed-user-${turnId}`,
     steer: ({ input }) => turn.steer({ input }),
     cancel: () => turn.cancel(),
     async result() {
-      const result = await turn.result();
+      const result = await turn.result({ signal: controller.signal });
       return Object.freeze({ finalMessage: result.finalMessage, dispose() {} });
     },
-    dispose() {},
+    dispose() { controller.abort(); },
   });
 }
 
@@ -106,77 +111,160 @@ function managedEventWatcher(
   const historyListeners = new Set<(events: readonly AgentEvent[]) => void>();
   const envelopes: ManagedEvent[] = [];
   const seen = new Set<string>();
-  const sequences = new Map<string, number>();
   let sequence = 0;
   let hasOlder = false;
+  let historyLoaded = false;
   let loadingOlder: Promise<boolean> | undefined;
+  let loadingInitial: Promise<boolean> | undefined;
+  let historyPageInFlight: Promise<Awaited<ReturnType<typeof managed.events.page>>> | undefined;
+  let tailStarted = false;
+  let outageReported = false;
+  let latestLiveCursor: string | undefined;
   const emit = (event: AgentEvent) => {
     for (const listener of listeners) listener(event);
   };
-  const project = (envelope: ManagedEvent) => terminalEvent(
-    envelope,
+  const projectedHistory = () => managedHistoryEvents(
+    envelopes,
     managed.id,
     submitted,
-    sequences.get(envelope.cursor) ?? sequence,
   );
   const emitHistory = () => {
-    sequences.clear();
-    envelopes.forEach((envelope, index) => sequences.set(envelope.cursor, index + 1));
-    sequence = Math.max(sequence, envelopes.length);
-    const events = envelopes.flatMap((envelope) => {
-      const event = project(envelope);
-      return event ? [event] : [];
-    });
+    const events = projectedHistory();
+    sequence = Math.max(sequence, events.length);
     for (const listener of historyListeners) listener(events);
   };
-  const retain = (envelope: ManagedEvent) => {
+  const retain = (envelope: ManagedEvent, source: "initial" | "live" | "older") => {
     if (seen.has(envelope.cursor)) return false;
     seen.add(envelope.cursor);
-    sequences.set(envelope.cursor, ++sequence);
     envelopes.push(envelope);
-    envelopes.sort((left, right) => compareManagedCursor(left.cursor, right.cursor));
-    return true;
+    compactManagedEnvelopeRetention(envelopes, seen);
+    return seen.has(envelope.cursor);
   };
-  void (async () => {
-    try {
-      for await (const envelope of managed.events.watch({
-        cursor: "latest",
-        signal: controller.signal,
-      })) {
-        if (controller.signal.aborted) return;
-        if (!retain(envelope)) continue;
-        const event = project(envelope);
-        if (event) emit(event);
-      }
-    } catch (error) {
-      if (controller.signal.aborted) return;
-      emit({
-        protocol_version: 1,
-        request_id: managed.id,
-        seq: ++sequence,
-        type: "run.error",
-        payload: { message: error instanceof Error ? error.message : String(error) },
-      });
-      emit({
-        protocol_version: 1,
-        request_id: managed.id,
-        seq: ++sequence,
-        type: "run.failed",
-        payload: { status: "failed" },
-      });
+  const requestHistoryPage = (
+    options: Omit<Parameters<typeof managed.events.page>[0], "signal">,
+  ) => managedHistoryPageAttempt((signal) => {
+    if (historyPageInFlight) {
+      throw new Error("the previous managed history request is still settling");
     }
-  })();
-  void managed.events.page({ limit: MANAGED_HISTORY_PAGE_SIZE }).then((initial) => {
-    if (controller.signal.aborted) return;
-    for (const envelope of initial.data) retain(envelope);
-    hasOlder = initial.hasMore;
-    emitHistory();
-  }).catch((error) => {
-    if (!controller.signal.aborted) {
-      console.error("nanocodex:managed.history_failed", {
-        agentId: managed.id,
-        error: error instanceof Error ? error.message : String(error),
-      });
+    const request = managed.events.page({ ...options, signal });
+    historyPageInFlight = request;
+    const clear = () => {
+      if (historyPageInFlight === request) historyPageInFlight = undefined;
+    };
+    void request.then(clear, clear);
+    return request;
+  }, controller.signal);
+  const reportHistoryOutage = (historyError: unknown) => {
+    if (outageReported) return;
+    outageReported = true;
+    const detail = historyError instanceof Error ? historyError.message : String(historyError);
+    emit({
+      protocol_version: 1,
+      request_id: managed.id,
+      seq: ++sequence,
+      type: "run.error",
+      payload: {
+        message: `Managed conversation history could not be loaded: ${detail}. Reconnect or retry loading history.`,
+      },
+    });
+    emit({
+      protocol_version: 1,
+      request_id: managed.id,
+      seq: ++sequence,
+      type: "run.failed",
+      payload: { status: "failed", disposition: "history_unavailable" },
+    });
+  };
+  const startTail = (cursor: string) => {
+    if (tailStarted || controller.signal.aborted) return;
+    tailStarted = true;
+    void (async () => {
+      try {
+        for await (const envelope of managed.events.watch({
+          cursor,
+          signal: controller.signal,
+        })) {
+          if (controller.signal.aborted) return;
+          if (latestLiveCursor !== undefined
+            && compareManagedCursor(envelope.cursor, latestLiveCursor) <= 0) continue;
+          latestLiveCursor = envelope.cursor;
+          if (!retain(envelope, "live")) continue;
+          const projected = managedEnvelopeEvents(
+            envelope,
+            rawAssistantMessageTurns(envelopes),
+            managed.id,
+            submitted,
+            sequence + 1,
+          );
+          sequence += projected.length;
+          for (const event of projected) emit(event);
+        }
+      } catch (error) {
+        if (controller.signal.aborted) return;
+        emit({
+          protocol_version: 1,
+          request_id: managed.id,
+          seq: ++sequence,
+          type: "run.error",
+          payload: { message: error instanceof Error ? error.message : String(error) },
+        });
+        emit({
+          protocol_version: 1,
+          request_id: managed.id,
+          seq: ++sequence,
+          type: "run.failed",
+          payload: { status: "failed" },
+        });
+      }
+    })();
+  };
+  const loadInitial = (): Promise<boolean> => {
+    if (historyLoaded) return Promise.resolve(true);
+    if (controller.signal.aborted) return Promise.resolve(false);
+    if (loadingInitial) return loadingInitial;
+    loadingInitial = (async () => {
+      let initial: Awaited<ReturnType<typeof managed.events.page>> | undefined;
+      let historyError: unknown;
+      for (let attempt = 1; attempt <= MANAGED_HISTORY_INITIAL_ATTEMPTS; attempt += 1) {
+        try {
+          initial = await requestHistoryPage({ limit: MANAGED_HISTORY_PAGE_SIZE });
+          break;
+        } catch (error) {
+          historyError = error;
+          if (controller.signal.aborted) return false;
+          console.error("nanocodex:managed.history_failed", {
+            agentId: managed.id,
+            attempt,
+            error: error instanceof Error ? error.message : String(error),
+          });
+          if (historyPageInFlight) break;
+        }
+      }
+      if (!initial || controller.signal.aborted) {
+        reportHistoryOutage(historyError);
+        return false;
+      }
+      for (const envelope of initial.data) retain(envelope, "initial");
+      envelopes.sort((left, right) => compareManagedCursor(left.cursor, right.cursor));
+      hasOlder = initial.hasMore && envelopes.length < MAX_MANAGED_RETAINED_ENVELOPES;
+      historyLoaded = true;
+      latestLiveCursor = initial.latestCursor;
+      outageReported = false;
+      emitHistory();
+      startTail(initial.latestCursor);
+      return true;
+    })().finally(() => { loadingInitial = undefined; });
+    return loadingInitial;
+  };
+  const retryWhenOnline = () => {
+    if (controller.signal.aborted || historyLoaded) return;
+    void loadInitial().then((loaded) => {
+      if (!loaded) globalThis.addEventListener?.("online", retryWhenOnline, { once: true });
+    });
+  };
+  void loadInitial().then((loaded) => {
+    if (!loaded && !controller.signal.aborted) {
+      globalThis.addEventListener?.("online", retryWhenOnline, { once: true });
     }
   });
   return Object.freeze({
@@ -186,21 +274,20 @@ function managedEventWatcher(
     },
     onHistory(listener: (events: readonly AgentEvent[]) => void) {
       historyListeners.add(listener);
-      if (envelopes.length > 0) listener(envelopes.flatMap((envelope) => {
-        const event = project(envelope);
-        return event ? [event] : [];
-      }));
+      if (historyLoaded) listener(projectedHistory());
       return () => historyListeners.delete(listener);
     },
     loadOlder() {
+      if (!historyLoaded) return loadInitial();
       if (!hasOlder || controller.signal.aborted) return Promise.resolve(false);
       if (loadingOlder) return loadingOlder;
       const before = envelopes[0]?.cursor;
       if (!before) return Promise.resolve(false);
-      loadingOlder = managed.events.page({ before, limit: MANAGED_HISTORY_PAGE_SIZE }).then((page) => {
+      loadingOlder = requestHistoryPage({ before, limit: MANAGED_HISTORY_PAGE_SIZE }).then((page) => {
         let added = false;
-        for (const envelope of page.data) added = retain(envelope) || added;
-        hasOlder = page.hasMore;
+        for (const envelope of page.data) added = retain(envelope, "older") || added;
+        if (added) envelopes.sort((left, right) => compareManagedCursor(left.cursor, right.cursor));
+        hasOlder = page.hasMore && envelopes.length < MAX_MANAGED_RETAINED_ENVELOPES;
         if (added) emitHistory();
         return added;
       }).finally(() => { loadingOlder = undefined; });
@@ -208,10 +295,135 @@ function managedEventWatcher(
     },
     off() {
       controller.abort();
+      globalThis.removeEventListener?.("online", retryWhenOnline);
       listeners.clear();
       historyListeners.clear();
     },
   });
+}
+
+export async function managedHistoryPageAttempt<T>(
+  load: (signal: AbortSignal) => Promise<T>,
+  lifetimeSignal: AbortSignal,
+  timeoutMs = MANAGED_HISTORY_ATTEMPT_TIMEOUT_MS,
+): Promise<T> {
+  if (lifetimeSignal.aborted) {
+    throw lifetimeSignal.reason ?? new Error("managed history detached");
+  }
+  const attempt = new AbortController();
+  let rejectBoundary!: (reason: unknown) => void;
+  const boundary = new Promise<never>((_, reject) => { rejectBoundary = reject; });
+  const abort = (reason: unknown) => {
+    if (attempt.signal.aborted) return;
+    attempt.abort(reason);
+    rejectBoundary(reason);
+  };
+  const lifetimeAborted = () => abort(lifetimeSignal.reason ?? new Error("managed history detached"));
+  const timeout = setTimeout(
+    () => abort(new Error(`managed history request exceeded ${timeoutMs}ms`)),
+    Math.max(0, timeoutMs),
+  );
+  lifetimeSignal.addEventListener("abort", lifetimeAborted, { once: true });
+  try {
+    const result = await Promise.race([load(attempt.signal), boundary]);
+    if (attempt.signal.aborted) throw attempt.signal.reason;
+    return result;
+  } catch (error) {
+    if (attempt.signal.aborted) throw attempt.signal.reason;
+    throw error;
+  } finally {
+    clearTimeout(timeout);
+    lifetimeSignal.removeEventListener("abort", lifetimeAborted);
+  }
+}
+
+function compactManagedEnvelopeRetention(envelopes: ManagedEvent[], seen: Set<string>): void {
+  while (envelopes.length > MAX_MANAGED_RETAINED_ENVELOPES) {
+    const groups = managedEnvelopeGroups(envelopes);
+    const oversizedComplete = [...groups.values()].find((group) =>
+      group.complete && group.envelopes.length > MAX_MANAGED_RETAINED_ENVELOPES
+    );
+    if (oversizedComplete) {
+      removeManagedEnvelopes(
+        envelopes,
+        seen,
+        new Set(oversizedComplete.envelopes.filter((envelope) =>
+          !oversizedComplete.mandatory.has(envelope)
+        )),
+      );
+      continue;
+    }
+    const complete = [...groups.values()]
+      .filter((group) => group.complete && groups.size > 1)
+      .sort((left, right) => compareManagedCursor(left.oldestCursor, right.oldestCursor))[0];
+    if (complete) {
+      removeManagedEnvelopes(envelopes, seen, new Set(complete.envelopes));
+      continue;
+    }
+
+    const removable = [...groups.values()]
+      .flatMap((group) => group.envelopes.filter((envelope) => !group.mandatory.has(envelope)))
+      .sort((left, right) => compareManagedCursor(left.cursor, right.cursor))[0];
+    if (!removable) return;
+    removeManagedEnvelopes(envelopes, seen, new Set([removable]));
+  }
+}
+
+type ManagedEnvelopeGroup = Readonly<{
+  envelopes: readonly ManagedEvent[];
+  mandatory: ReadonlySet<ManagedEvent>;
+  complete: boolean;
+  oldestCursor: string;
+}>;
+
+function managedEnvelopeGroups(envelopes: readonly ManagedEvent[]): Map<string, ManagedEnvelopeGroup> {
+  const grouped = new Map<string, ManagedEvent[]>();
+  for (const envelope of envelopes) {
+    const group = managedEnvelopeGroup(envelope);
+    const retained = grouped.get(group) ?? [];
+    retained.push(envelope);
+    grouped.set(group, retained);
+  }
+  return new Map([...grouped].map(([group, retained]) => {
+    retained.sort((left, right) => compareManagedCursor(left.cursor, right.cursor));
+    const prompt = retained.find((envelope) => envelope.data.type === "turn_accepted");
+    const terminal = [...retained].reverse().find(managedOuterTerminal);
+    const mandatory = new Set<ManagedEvent>();
+    if (prompt) mandatory.add(prompt);
+    if (terminal) mandatory.add(terminal);
+    return [group, Object.freeze({
+      envelopes: retained,
+      mandatory,
+      complete: terminal !== undefined,
+      oldestCursor: retained[0]!.cursor,
+    })];
+  }));
+}
+
+function managedOuterTerminal(envelope: ManagedEvent): boolean {
+  return envelope.data.type === "turn_completed"
+    || envelope.data.type === "turn_cancelled"
+    || envelope.data.type === "turn_blocked"
+    || envelope.data.type === "turn_failed"
+    || envelope.data.type === "stream_failed";
+}
+
+function removeManagedEnvelopes(
+  envelopes: ManagedEvent[],
+  seen: Set<string>,
+  removed: ReadonlySet<ManagedEvent>,
+): void {
+  for (let index = envelopes.length - 1; index >= 0; index -= 1) {
+    const envelope = envelopes[index]!;
+    if (!removed.has(envelope)) continue;
+    envelopes.splice(index, 1);
+    seen.delete(envelope.cursor);
+  }
+}
+
+function managedEnvelopeGroup(envelope: ManagedEvent): string {
+  const id = "id" in envelope.data ? envelope.data.id : undefined;
+  return envelope.turnId ?? (typeof id === "string" ? id : `cursor:${envelope.cursor}`);
 }
 
 function compareManagedCursor(left: string, right: string): number {
@@ -230,10 +442,19 @@ export function terminalEvent(
     if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
     const event = value as AgentEvent;
     return typeof event.type === "string" && event.payload && typeof event.payload === "object"
-      ? { ...event, request_id: sessionId, seq: sequence }
+      ? {
+          ...event,
+          request_id: sessionId,
+          seq: sequence,
+          payload: {
+            ...event.payload,
+            ...(typeof envelope.cursor === "string" ? { managed_event_cursor: envelope.cursor } : {}),
+            ...(envelope.turnId ? { turn_id: envelope.turnId } : {}),
+          },
+        }
       : undefined;
   }
-  if (envelope.data.type !== "turn_accepted" || submitted.has(envelope.data.id)) {
+  if (envelope.data.type !== "turn_accepted") {
     return undefined;
   }
   return {
@@ -246,6 +467,138 @@ export function terminalEvent(
       turn_id: envelope.data.id,
     },
   };
+}
+
+export function managedHistoryEvents(
+  envelopes: readonly ManagedEvent[],
+  sessionId: string,
+  submitted: Set<string>,
+): readonly AgentEvent[] {
+  const events: AgentEvent[] = [];
+  const assistantTurns = rawAssistantMessageTurns(envelopes);
+  for (const envelope of envelopes) {
+    events.push(...managedEnvelopeEvents(
+      envelope,
+      assistantTurns,
+      sessionId,
+      submitted,
+      events.length + 1,
+    ));
+  }
+  return Object.freeze(events);
+}
+
+function managedEnvelopeEvents(
+  envelope: ManagedEvent,
+  rawAssistantTurns: ReadonlySet<string>,
+  sessionId: string,
+  submitted: Set<string>,
+  firstSequence: number,
+): AgentEvent[] {
+  if (envelope.data.type === "event") {
+    const projected = terminalEvent(envelope, sessionId, submitted, firstSequence);
+    if (!projected || RAW_RUN_TERMINALS.has(projected.type)) return [];
+    return [projected];
+  }
+  if (envelope.data.type === "turn_accepted") {
+    const projected = terminalEvent(envelope, sessionId, submitted, firstSequence);
+    return projected ? [projected] : [];
+  }
+
+  const turnId = terminalTurnId(envelope);
+  if (envelope.data.type === "turn_completed") {
+    const projected: AgentEvent[] = [];
+    if (!rawAssistantTurns.has(turnId)) {
+      projected.push(historyEvent(sessionId, firstSequence, "assistant.message", {
+        text: envelope.data.final_message,
+        turn_id: turnId,
+      }));
+    }
+    projected.push(historyEvent(sessionId, firstSequence + projected.length, "run.completed", {
+      status: "completed",
+      disposition: "completed",
+      turn_id: turnId,
+    }));
+    return projected;
+  }
+  if (envelope.data.type === "turn_cancelled") {
+    return [historyEvent(sessionId, firstSequence, "run.failed", {
+      status: "cancelled",
+      disposition: "cancelled",
+      turn_id: turnId,
+    })];
+  }
+  if (
+    envelope.data.type === "turn_blocked"
+    || envelope.data.type === "turn_failed"
+  ) {
+    const disposition = envelope.data.type.slice("turn_".length);
+    return [
+      historyEvent(sessionId, firstSequence, "run.error", {
+        message: envelope.data.error,
+        turn_id: turnId,
+      }),
+      historyEvent(sessionId, firstSequence + 1, "run.failed", {
+        status: "failed",
+        disposition,
+        turn_id: turnId,
+      }),
+    ];
+  }
+  if (envelope.data.type === "turn_retryable") {
+    return [historyEvent(sessionId, firstSequence, "run.error", {
+      message: envelope.data.error,
+      disposition: "retryable",
+      turn_id: turnId,
+    })];
+  }
+  if (envelope.data.type === "stream_failed") {
+    return [
+      historyEvent(sessionId, firstSequence, "run.error", {
+        message: envelope.data.error,
+      }),
+      historyEvent(sessionId, firstSequence + 1, "run.failed", {
+        status: "failed",
+        disposition: "stream_failed",
+      }),
+    ];
+  }
+  return [];
+}
+
+const RAW_RUN_TERMINALS = new Set(["run.error", "run.completed", "run.failed"]);
+
+function terminalTurnId(envelope: ManagedEvent): string {
+  const id = "id" in envelope.data ? envelope.data.id : undefined;
+  return typeof id === "string" ? id : envelope.turnId ?? "unknown";
+}
+
+function rawAssistantMessageTurns(
+  history: readonly ManagedEvent[],
+): ReadonlySet<string> {
+  const turns = new Set<string>();
+  for (const candidate of history) {
+    if (!candidate.turnId || candidate.data.type !== "event") continue;
+    const event = candidate.data.event;
+    if (
+      event
+      && typeof event === "object"
+      && !Array.isArray(event)
+      && (event as { type?: unknown }).type === "assistant.message"
+    ) {
+      turns.add(candidate.turnId);
+    }
+  }
+  return turns;
+}
+
+function historyEvent(
+  sessionId: string,
+  seq: number,
+  type: string,
+  payload: Record<string, unknown>,
+): AgentEvent {
+  return { protocol_version: 1, request_id: sessionId, seq, type, payload };
 }
 
 function promptText(input: unknown): string {

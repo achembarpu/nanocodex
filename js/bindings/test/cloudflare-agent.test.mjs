@@ -2,7 +2,9 @@ import assert from "node:assert/strict";
 import { readFile } from "node:fs/promises";
 import { test } from "node:test";
 
-import { create, destroy } from "../cloudflare/Agent.mjs";
+import * as HostAgent from "../host/Agent.mjs";
+import { bindAgent, create, destroy } from "../cloudflare/Agent.mjs";
+import { createCloudflareDurabilityStore } from "../runtime/cloudflare-durability-store.mjs";
 
 const FIRST_OBJECT_ID = "a".repeat(64);
 const SECOND_OBJECT_ID = "b".repeat(64);
@@ -12,6 +14,7 @@ class MemoryStorage {
     this.batches = [];
     this.events = [];
     this.journals = new Map();
+    this.owners = new Map();
     this.meta = { total_bytes: 0, stream_error: null };
     this.sessionId = undefined;
     this.sql = { exec: (sql, ...args) => this.#exec(sql, args) };
@@ -46,6 +49,14 @@ class MemoryStorage {
       rows = this.sessionId === undefined ? [] : [{ session_id: this.sessionId }];
     } else if (statement.startsWith("INSERT OR IGNORE INTO nanocodex_cloudflare_agent")) {
       this.sessionId ??= args[0];
+    } else if (statement.startsWith("SELECT owner_id, fence FROM nanocodex_journal_owners")) {
+      const owner = this.owners.get(args[0]);
+      rows = owner === undefined ? [] : [{ owner_id: owner.ownerId, fence: owner.fence }];
+    } else if (statement.startsWith("SELECT fence FROM nanocodex_journal_owners")) {
+      const owner = this.owners.get(args[0]);
+      rows = owner === undefined ? [] : [{ fence: owner.fence }];
+    } else if (statement.startsWith("INSERT INTO nanocodex_journal_owners")) {
+      this.owners.set(args[0], { ownerId: args[1], fence: args[2] });
     } else if (statement.startsWith("SELECT revision FROM nanocodex_journals")) {
       const revision = this.journals.get(args[0]);
       rows = revision === undefined ? [] : [{ revision }];
@@ -174,6 +185,117 @@ test("Cloudflare Agent isolates journals per Durable Object and can recreate aft
   await recreated.session.shutdown();
 });
 
+test("Cloudflare Agent disposal releases lifecycle authority without bypassing joined shutdown", async () => {
+  const module = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
+  const storage = new MemoryStorage();
+  const owner = durableOwner(storage);
+  const disposed = await create(module, owner);
+
+  disposed.dispose();
+  assert.doesNotThrow(() => destroy(owner));
+
+  const replacement = await create(module, owner);
+  const shutdown = replacement.session.shutdown();
+  await assert.rejects(create(module, owner), /shutdown must complete before create/);
+  await shutdown;
+
+  const reopened = await create(module, owner);
+  await reopened.session.shutdown();
+});
+
+test("Cloudflare Agent releases its journal when event projection setup fails", async () => {
+  const module = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
+  const storage = new MemoryStorage();
+  const owner = durableOwner(storage);
+  const failing = bindAgent(module, {
+    async create(options) {
+      const agent = await HostAgent.create(options);
+      return new Proxy(agent, {
+        get(target, property, receiver) {
+          if (property === "events") {
+            return { watch: () => { throw new Error("event projection setup failed"); } };
+          }
+          return Reflect.get(target, property, receiver);
+        },
+      });
+    },
+  });
+
+  await assert.rejects(failing.create(owner), /event projection setup failed/);
+
+  const recreated = await create(module, owner);
+  await recreated.session.shutdown();
+});
+
+test("Cloudflare Agent destroy and duplicate create refuse an in-flight creation", async () => {
+  const module = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
+  const storage = new MemoryStorage();
+  const owner = durableOwner(storage);
+  const entered = deferred();
+  const release = deferred();
+  const held = bindAgent(module, {
+    async create(options) {
+      entered.resolve();
+      await release.promise;
+      return HostAgent.create(options);
+    },
+  });
+
+  const pending = held.create(owner);
+  await entered.promise;
+  assert.throws(() => destroy(owner), /creation must settle before destroy/);
+  await assert.rejects(held.create(owner), /creation is already in progress/);
+
+  release.resolve();
+  const agent = await pending;
+  assert.throws(() => destroy(owner), /shutdown must complete before destroy/);
+  await agent.session.shutdown();
+  destroy(owner);
+});
+
+test("Cloudflare Agent classifies failed creation rollback as reopen required", async () => {
+  const module = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
+  const storage = new MemoryStorage();
+  const owner = durableOwner(storage);
+  const failing = bindAgent(module, {
+    async create(options) {
+      const agent = await HostAgent.create(options);
+      return new Proxy(agent, {
+        get(target, property, receiver) {
+          if (property === "events") {
+            return { watch: () => { throw new Error("event projection setup failed"); } };
+          }
+          if (property === "session") {
+            return new Proxy(target.session, {
+              get(session, sessionProperty, sessionReceiver) {
+                if (sessionProperty === "shutdown") {
+                  return async () => {
+                    await session.shutdown();
+                    throw new Error("injected rollback acknowledgement failure");
+                  };
+                }
+                return Reflect.get(session, sessionProperty, sessionReceiver);
+              },
+            });
+          }
+          return Reflect.get(target, property, receiver);
+        },
+      });
+    },
+  });
+
+  await assert.rejects(failing.create(owner), (error) => {
+    assert.equal(error.code, "reopen_required");
+    assert.match(error.message, /rollback requires reopen/);
+    assert.ok(error.cause instanceof AggregateError);
+    assert.equal(error.cause.errors.length, 2);
+    return true;
+  });
+
+  const recreated = await create(module, owner);
+  await recreated.session.shutdown();
+});
+
 test("Cloudflare Agent destroy owns idempotent adapter cleanup", async () => {
   const module = await readFile(new URL("../pkg-web/nanocodex_bg.wasm", import.meta.url));
   const storage = new MemoryStorage();
@@ -182,10 +304,34 @@ test("Cloudflare Agent destroy owns idempotent adapter cleanup", async () => {
   destroy(owner);
   const agent = await create(module, owner);
   await agent.session.shutdown();
+  const journalId = `cloudflare:${agent.sessionId}`;
+  const staleOwner = { ...storage.owners.get(journalId) };
+  assert.equal(staleOwner.fence, "2");
   destroy(owner);
+  const destroyedOwner = storage.owners.get(journalId);
+  assert.equal(destroyedOwner.fence, "3");
+  assert.match(destroyedOwner.ownerId, /^destroy:/);
+  assert.deepEqual(
+    createCloudflareDurabilityStore(storage).append(journalId, {
+      ...staleOwner,
+      expectedRevision: "0",
+      payload: "stale resurrection",
+    }),
+    { status: "fenced" },
+  );
   destroy(owner);
 
   assert.equal(storage.batches.length, 0);
   assert.equal(storage.journals.size, 0);
   assert.equal(storage.events.length, 0);
 });
+
+function deferred() {
+  let resolve;
+  let reject;
+  const promise = new Promise((onResolve, onReject) => {
+    resolve = onResolve;
+    reject = onReject;
+  });
+  return { promise, reject, resolve };
+}

@@ -57,6 +57,25 @@ credential/cookie fields, but a WebSocket peer necessarily controls its frames;
 bind the broker only to the owned managed Worker and use only an audited relay
 that cannot reflect injected credentials.
 
+### Subject-directory rollout
+
+Deploy the broker before deploying managed-agent changes. During the sharding
+rollout, `agent-subjects-v1` remains the authoritative coordinator and rollback
+copy, with mutation ordering scoped per subject so shard I/O cannot block other
+tenants. New binds write both it and the per-subject shard. Every resolution
+dual-reads through the coordinator, cold-copies a legacy-only binding, replaces
+a stale shard owner, or deletes a shard whose legacy binding was removed.
+Replacement and deletion use one revision-fenced shard reconciliation mutation;
+they never compose ordinary unbind and bind across a tombstone. Both
+the current control path and direct legacy `/v1/unbind` reconcile the shard
+before deleting authoritative metadata; reconciliation failure retains the
+legacy owner. Keep this broker-first, legacy-authoritative version deployed
+until rollback is retired and every pre-sharding session has been rebound or
+deleted; only then may a later focused cutover remove the legacy read. If a
+legacy-only broker binary handled mutations during rollback, do not cut over
+until this version is redeployed and every affected subject is explicitly
+reconciled or rebound: that old binary cannot update the shard copy.
+
 All API keys, ChatGPT access/refresh state, device-login state, connector
 access/refresh tokens, PKCE verifiers, OAuth state, and refresh markers are
 AES-256-GCM encrypted before Durable Object storage. Production

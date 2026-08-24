@@ -21,12 +21,23 @@ test("IndexedDB durability validates revisions and loads numerically ordered bat
       { revision: "10", payload: "ten" },
     ],
   });
+  const owner = await store.acquire("thread", { ownerId: "owner-1" });
   await assert.rejects(
-    store.append("thread", { expectedRevision: "01", payload: "invalid" }),
+    store.append("thread", {
+      ownerId: owner.ownerId,
+      fence: owner.fence,
+      expectedRevision: "01",
+      payload: "invalid",
+    }),
     /unsigned 64-bit decimal string/,
   );
   await assert.rejects(
-    store.append("thread", { expectedRevision: "10", payload: new Uint8Array() }),
+    store.append("thread", {
+      ownerId: owner.ownerId,
+      fence: owner.fence,
+      expectedRevision: "10",
+      payload: new Uint8Array(),
+    }),
     /payload must be a string/,
   );
 });
@@ -34,9 +45,10 @@ test("IndexedDB durability validates revisions and loads numerically ordered bat
 test("IndexedDB durability serializes atomic compare-and-append transactions", async () => {
   const indexedDB = createFakeIndexedDb();
   const store = createIndexedDbDurabilityStore({ indexedDB, databaseName: "atomic" });
+  const owner = await store.acquire("thread", { ownerId: "owner-1" });
   const results = await Promise.all([
-    store.append("thread", { expectedRevision: "0", payload: "left" }),
-    store.append("thread", { expectedRevision: "0", payload: "right" }),
+    store.append("thread", { ...owner, expectedRevision: "0", payload: "left" }),
+    store.append("thread", { ...owner, expectedRevision: "0", payload: "right" }),
   ]);
 
   assert.equal(results.filter(({ status }) => status === "appended").length, 1);
@@ -50,10 +62,43 @@ test("IndexedDB durability serializes atomic compare-and-append transactions", a
 
   indexedDB.failNextBatchAdd("atomic");
   await assert.rejects(
-    store.append("thread", { expectedRevision: "1", payload: "rolled back" }),
+    store.append("thread", { ...owner, expectedRevision: "1", payload: "rolled back" }),
     /injected batch failure/,
   );
   assert.deepEqual(await store.load("thread"), journal);
+
+  indexedDB.resetContent("atomic", "thread");
+  const replacement = await store.acquire("thread", { ownerId: "owner-2" });
+  assert.deepEqual(replacement, {
+    ownerId: "owner-2",
+    fence: "2",
+    revision: "0",
+    batches: [],
+  });
+  assert.deepEqual(
+    await store.append("thread", { ...owner, expectedRevision: "0", payload: "stale" }),
+    { status: "fenced" },
+  );
+});
+
+test("IndexedDB durability atomically increments concurrent owner acquisitions", async () => {
+  const indexedDB = createFakeIndexedDb();
+  const store = createIndexedDbDurabilityStore({ indexedDB, databaseName: "owners" });
+  const [first, second] = await Promise.all([
+    store.acquire("thread", { ownerId: "owner-1" }),
+    store.acquire("thread", { ownerId: "owner-2" }),
+  ]);
+
+  assert.equal(first.fence, "1");
+  assert.equal(second.fence, "2");
+  assert.deepEqual(
+    await store.append("thread", { ...first, expectedRevision: "99", payload: "stale" }),
+    { status: "fenced" },
+  );
+  assert.deepEqual(
+    await store.append("thread", { ...second, expectedRevision: "0", payload: "current" }),
+    { status: "appended", revision: "1" },
+  );
 });
 
 test("IndexedDB durability reports u64 overflow without committing", async () => {
@@ -62,9 +107,10 @@ test("IndexedDB durability reports u64 overflow without committing", async () =>
   const maximum = "18446744073709551615";
   await store.load("thread");
   indexedDB.seed("overflow", "thread", maximum, [{ revision: maximum, payload: "last" }]);
+  const owner = await store.acquire("thread", { ownerId: "owner" });
 
   assert.deepEqual(
-    await store.append("thread", { expectedRevision: maximum, payload: "never" }),
+    await store.append("thread", { ...owner, expectedRevision: maximum, payload: "never" }),
     {
       status: "not_committed",
       message: "IndexedDB durability revision overflow",
@@ -76,22 +122,52 @@ test("IndexedDB durability reports u64 overflow without committing", async () =>
   });
 });
 
+test("IndexedDB durability upgrades v1 databases with a separate v2 owner store", async () => {
+  const indexedDB = createFakeIndexedDb();
+  indexedDB.seedVersionOne("upgrade", "thread", "1", [
+    { revision: "1", payload: "retained" },
+  ]);
+  const store = createIndexedDbDurabilityStore({ indexedDB, databaseName: "upgrade" });
+
+  assert.deepEqual(await store.acquire("thread", { ownerId: "owner" }), {
+    ownerId: "owner",
+    fence: "1",
+    revision: "1",
+    batches: [{ revision: "1", payload: "retained" }],
+  });
+  assert.equal(indexedDB.version("upgrade"), 2);
+});
+
 test("IndexedDB durability has no browser-global import-time dependency", () => {
   assert.throws(() => createIndexedDbDurabilityStore(), /requires IndexedDB/);
 });
 
-test("IndexedDB durability retries failed opens and reopens after version changes", async () => {
+test("IndexedDB durability retries failed opens and reopens retained journals after close", async () => {
   const indexedDB = createFakeIndexedDb();
   const store = createIndexedDbDurabilityStore({ indexedDB, databaseName: "reopen" });
   indexedDB.failNextOpen("reopen");
 
   await assert.rejects(store.load("thread"), /injected open failure/);
-  assert.deepEqual(await store.load("thread"), { revision: "0", batches: [] });
+  const owner = await store.acquire("thread", { ownerId: "owner" });
+  assert.deepEqual(
+    await store.append("thread", { ...owner, expectedRevision: "0", payload: "retained" }),
+    { status: "appended", revision: "1" },
+  );
   assert.equal(indexedDB.openCount("reopen"), 2, "a rejected open is not cached");
 
   indexedDB.triggerVersionChange("reopen");
-  assert.deepEqual(await store.load("thread"), { revision: "0", batches: [] });
+  assert.deepEqual(await store.load("thread"), {
+    revision: "1",
+    batches: [{ revision: "1", payload: "retained" }],
+  });
   assert.equal(indexedDB.openCount("reopen"), 3, "a closed connection is not cached");
+
+  indexedDB.triggerAbnormalClose("reopen");
+  assert.deepEqual(await store.load("thread"), {
+    revision: "1",
+    batches: [{ revision: "1", payload: "retained" }],
+  });
+  assert.equal(indexedDB.openCount("reopen"), 4, "an abnormal close is not cached");
 });
 
 function createFakeIndexedDb() {
@@ -99,7 +175,7 @@ function createFakeIndexedDb() {
   const failedOpens = new Set();
   const openCounts = new Map();
   return {
-    open(name) {
+    open(name, version) {
       const request = fakeRequest();
       openCounts.set(name, (openCounts.get(name) ?? 0) + 1);
       queueMicrotask(() => {
@@ -109,14 +185,19 @@ function createFakeIndexedDb() {
           return;
         }
         let database = databases.get(name);
+        let upgrade = false;
         if (!database) {
-          database = new FakeDatabase();
+          database = new FakeDatabase(version);
           databases.set(name, database);
-          request.result = database;
+          upgrade = true;
+        } else if (version > database.version) {
+          database.version = version;
+          upgrade = true;
+        }
+        database.closed = false;
+        request.result = database;
+        if (upgrade) {
           request.onupgradeneeded?.();
-        } else {
-          database.closed = false;
-          request.result = database;
         }
         queueMicrotask(() => request.onsuccess?.());
       });
@@ -131,6 +212,24 @@ function createFakeIndexedDb() {
     triggerVersionChange(name) {
       databases.get(name).onversionchange?.();
     },
+    triggerAbnormalClose(name) {
+      const database = databases.get(name);
+      database.closed = true;
+      database.onclose?.();
+    },
+    version(name) {
+      return databases.get(name)?.version;
+    },
+    seedVersionOne(name, journalId, revision, batches) {
+      const database = new FakeDatabase(1);
+      database.createObjectStore("journals", { keyPath: "journalId" });
+      const batchStore = database.createObjectStore("batches", {
+        keyPath: ["journalId", "revision"],
+      });
+      batchStore.createIndex("journalId", "journalId");
+      databases.set(name, database);
+      this.seed(name, journalId, revision, batches);
+    },
     seed(name, journalId, revision, batches) {
       const database = databases.get(name);
       if (!database) throw new Error(`database ${name} has not been opened`);
@@ -143,11 +242,20 @@ function createFakeIndexedDb() {
     failNextBatchAdd(name) {
       databases.get(name).failNextBatchAdd = true;
     },
+    resetContent(name, journalId) {
+      const database = databases.get(name);
+      database.stores.get("journals").records.delete(journalId);
+      const records = database.stores.get("batches").records;
+      for (const [key, batch] of records) {
+        if (batch.journalId === journalId) records.delete(key);
+      }
+    },
   };
 }
 
 class FakeDatabase {
-  constructor() {
+  constructor(version) {
+    this.version = version;
     this.stores = new Map();
     this.closed = false;
     this.failNextBatchAdd = false;

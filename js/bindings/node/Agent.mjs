@@ -7,6 +7,7 @@ import {
   bindHostSession,
   createAgentClient,
   createEventChannel,
+  createSessionId,
   defineRuntime,
   loadDurabilityRuntime,
   loadSubscriptionRuntime,
@@ -43,6 +44,7 @@ export function create(options = {}) {
     mcp,
     codeEvaluator,
   } = options;
+  const stableSessionId = sessionId ?? createSessionId();
   const {
     apiKey,
     subscription,
@@ -75,6 +77,7 @@ export function create(options = {}) {
     onDispose: () => releaseDefinitionHost(hostDefinitionId),
   });
   let durabilityOwner;
+  let creationStarted = false;
   hostDefinitionId = registerDefinitionHost(host);
   activateHost(host);
   const runtime = defineRuntime({
@@ -82,6 +85,7 @@ export function create(options = {}) {
     name: "Nanocodex Node WASM",
     type: "node",
     async create(config) {
+      creationStarted = true;
       try {
         if (durability !== undefined || durabilityId !== undefined) {
           durabilityOwner = (await loadDurabilityRuntime()).own(
@@ -108,6 +112,7 @@ export function create(options = {}) {
           subagents: subagentConfig,
           hostDefinitionId,
           ...config,
+          durabilityHostId: durabilityOwner?.id,
         }));
         return subscription === undefined
           ? Nanocodex.create(configJson)
@@ -150,10 +155,13 @@ export function create(options = {}) {
     reasoningMode,
     fastMode,
     instructions,
-    sessionId,
+    sessionId: stableSessionId,
     workspace: workspace ?? filesystem?.root,
     resume,
     durabilityId,
+  }).catch(async (error) => {
+    if (!creationStarted) await host.dispose();
+    throw error;
   });
 }
 

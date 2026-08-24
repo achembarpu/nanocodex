@@ -6,7 +6,7 @@ import {
   loadPublishedCommitHistory,
   loadPublishedRepositorySnapshot,
   preloadPreferredPublishedFile,
-  preloadPublishedRepositoryPatchBody,
+  preloadPublishedRepositoryPatch,
   type PublishedCommitHistory,
   type PreparedPublishedFile,
   type PublishedRepositorySnapshot,
@@ -153,26 +153,21 @@ async function prepareCommitSurface(
   requestedCommit?: string,
   adopted: Promise<void> = Promise.resolve(),
 ): Promise<PreparedCommitSurface> {
-  const historyRequest = loadPublishedCommitHistory(requestedCommit);
+  const historyRequest = loadPublishedCommitHistory(
+    requestedCommit,
+    undefined,
+    undefined,
+    undefined,
+    adopted,
+  );
   preloadPierreWorker();
-  const patchRequest = historyRequest
-    .then((history) =>
-      preloadPublishedRepositoryPatchBody(
-        history.initialPage.patchUrl,
-        adopted,
-      )
-    );
-  const syntaxRequest = historyRequest
-    .then((history) => {
-      const initialPaths = history.initialPage.commits[0]?.files
-        .map(({ path }) => path) ?? [];
-      return preloadPierrePaths(initialPaths);
-    });
-  const [history] = await Promise.all([
-    historyRequest,
-    patchRequest,
-    syntaxRequest,
-  ]);
+  void historyRequest.then((history) => {
+    preloadPublishedRepositoryPatch(history.initialPage.patchUrl);
+    const initialPaths = history.initialPage.commits[0]?.files
+      .map(({ path }) => path) ?? [];
+    return preloadPierrePaths(initialPaths);
+  }).catch(() => undefined);
+  const history = await historyRequest;
   return {
     surface: "commits",
     history,
@@ -223,7 +218,9 @@ export async function preloadDirectSurface(url: URL): Promise<PreparedDirectRout
     await preloadDocsRoute(url.pathname);
     return {};
   }
-  if (surface === "evals") await preloadEvalOverview();
+  if (surface === "evals" && url.pathname.replace(/\/+$/, "") === "/evals") {
+    await preloadEvalOverview();
+  }
   return {};
 }
 

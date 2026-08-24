@@ -12,7 +12,13 @@ const TERMINAL_TYPES = new Set([
   "turn_failed",
 ]);
 const TERMINAL_CACHE_CAPACITY = 256;
+const TERMINAL_CACHE_BYTES = 8 * 1024 * 1024;
+const SUBSCRIBER_QUEUE_CAPACITY = 4_096;
+const SUBSCRIBER_QUEUE_BYTES = 32 * 1024 * 1024;
+const EVENT_STREAM_FRAME_BYTES = 2 * 1024 * 1024;
+const EVENT_STREAM_INACTIVITY_TIMEOUT_MS = 45_000;
 const ALLOWED_OPTIONS = new Set(["apiKey", "baseUrl", "fetch"]);
+const eventEncoder = new TextEncoder();
 
 /** Create a new managed agent owned by the authenticated account. */
 export async function create(options = {}) {
@@ -120,7 +126,9 @@ async function eventHistoryPage(client, agentId, options) {
   }
   const query = new URLSearchParams({ limit: String(limit) });
   if (before !== undefined) query.set("before", before);
-  const body = await client.json(`${agentPath(agentId)}/events/history?${query}`);
+  const body = await client.json(`${agentPath(agentId)}/events/history?${query}`, {
+    signal: options.signal,
+  });
   if (!body || !Array.isArray(body.data) || typeof body.has_more !== "boolean") {
     throw new ManagedError("invalid_response", "managed event history is malformed");
   }
@@ -170,13 +178,23 @@ function managedTurn(client, agentId, eventStream, options) {
       });
     },
     cancel: async () => {
-      const accepted = await submission;
-      return client.json(`${turnPath(agentId, requiredString(accepted, "turn_id"))}/cancel`, {
+      const turnId = id ?? requiredString(await submission, "turn_id");
+      return client.json(`${turnPath(agentId, turnId)}/cancel`, {
         method: "POST",
-        signal,
       });
     },
-    result: () => result ??= waitForResult(eventStream, submission, signal),
+    result: (options = {}) => {
+      if (!options || typeof options !== "object" || Array.isArray(options)) {
+        throw new TypeError("managed turn result options must be an object");
+      }
+      const observerSignal = options.signal;
+      if (observerSignal !== undefined && !(observerSignal instanceof AbortSignal)) {
+        throw new TypeError("managed turn result signal must be an AbortSignal");
+      }
+      return observerSignal === undefined
+        ? result ??= waitForResult(eventStream, submission, signal)
+        : waitForResult(eventStream, submission, observerSignal);
+    },
   };
   return Object.freeze(turn);
 }
@@ -205,7 +223,7 @@ async function retrySubmission(client, agentId, options) {
 }
 
 async function waitForResult(eventStream, submission, signal) {
-  const accepted = await submission;
+  const accepted = await observePromise(submission, signal);
   const turnId = requiredString(accepted, "turn_id");
   if (accepted.terminal) return terminalResult(turnId, accepted.terminal, accepted.terminal_cursor);
   const cursor = requiredCursor(accepted, "accepted_cursor");
@@ -226,6 +244,28 @@ async function waitForResult(eventStream, submission, signal) {
   }
   if (signal?.aborted) throw abortError(signal.reason);
   throw new ManagedError("event_stream_ended", "managed event stream ended before the turn completed");
+}
+
+function observePromise(promise, signal) {
+  if (!signal) return promise;
+  if (signal.aborted) return Promise.reject(abortError(signal.reason));
+  return new Promise((resolve, reject) => {
+    const aborted = () => {
+      signal.removeEventListener("abort", aborted);
+      reject(abortError(signal.reason));
+    };
+    signal.addEventListener("abort", aborted, { once: true });
+    Promise.resolve(promise).then(
+      (value) => {
+        signal.removeEventListener("abort", aborted);
+        resolve(value);
+      },
+      (error) => {
+        signal.removeEventListener("abort", aborted);
+        reject(error);
+      },
+    );
+  });
 }
 
 function terminalResult(turnId, terminal, cursor) {
@@ -251,15 +291,41 @@ function terminalResult(turnId, terminal, cursor) {
 
 function replayableEventStream(client, agentId) {
   const subscribers = new Set();
+  const joiningSubscribers = new Set();
   const terminals = new Map();
+  let terminalBytes = 0;
   let connection;
-  let connectionCursor;
+  let nextGeneration = 0;
   let closed = false;
+  let stopOnlineReconnect;
+
+  const retireConnection = (restart = true) => {
+    const retired = connection;
+    if (!retired) return;
+    connection = undefined;
+    retired.controller.abort();
+    if (restart) start();
+  };
+
+  const watchOnlineReconnect = () => {
+    if (stopOnlineReconnect || typeof globalThis.addEventListener !== "function") return;
+    const reconnect = () => retireConnection();
+    globalThis.addEventListener("online", reconnect);
+    stopOnlineReconnect = () => {
+      globalThis.removeEventListener?.("online", reconnect);
+      stopOnlineReconnect = undefined;
+    };
+  };
 
   const remove = (subscriber) => {
-    if (!subscribers.delete(subscriber)) return;
+    const removed = subscribers.delete(subscriber) || joiningSubscribers.delete(subscriber);
+    if (!removed) return;
+    subscriber.boundaryController?.abort();
     subscriber.signal?.removeEventListener("abort", subscriber.onAbort);
-    if (subscribers.size === 0) connection?.controller.abort();
+    if (subscribers.size === 0 && joiningSubscribers.size === 0) {
+      stopOnlineReconnect?.();
+      retireConnection(false);
+    }
   };
 
   const finish = (subscriber, error) => {
@@ -277,7 +343,25 @@ function replayableEventStream(client, agentId) {
   const unsubscribe = (subscriber) => {
     finish(subscriber);
     remove(subscriber);
+    subscriber.queue.length = 0;
+    subscriber.bufferedBytes = 0;
     return Promise.resolve({ value: undefined, done: true });
+  };
+
+  const attach = (subscriber) => {
+    if (subscriber.done || closed) return;
+    joiningSubscribers.delete(subscriber);
+    subscriber.boundaryController = undefined;
+    subscribers.add(subscriber);
+    watchOnlineReconnect();
+    if (
+      connection?.cursor !== undefined
+      && cursorBefore(subscriber.cursor, connection.cursor)
+    ) {
+      retireConnection();
+    } else {
+      start();
+    }
   };
 
   const start = () => {
@@ -287,19 +371,54 @@ function replayableEventStream(client, agentId) {
       [...subscribers][0].cursor,
     );
     const controller = new AbortController();
-    connectionCursor = cursor;
+    const current = {
+      controller,
+      cursor,
+      generation: nextGeneration += 1,
+      running: undefined,
+    };
+    connection = current;
     const running = (async () => {
       try {
-        for await (const event of readEvents(client, agentId, cursor, controller.signal)) {
-          connectionCursor = event.cursor;
+        for await (const event of readEvents(
+          client,
+          agentId,
+          cursor,
+          controller.signal,
+          (controlCursor) => {
+            if (connection !== current) return;
+            current.cursor = controlCursor;
+            for (const subscriber of subscribers) {
+              if (subscriber.cursor !== LATEST_CURSOR) continue;
+              subscriber.cursor = controlCursor;
+              subscriber.deliveredCursor = controlCursor;
+            }
+          },
+        )) {
+          if (connection !== current) return;
+          current.cursor = event.cursor;
           const turnId = event.data.turn_id ?? event.data.id;
           if (typeof turnId === "string" && TERMINAL_TYPES.has(event.data.type)) {
             const retained = terminals.get(turnId);
-            if (!retained || cursorBefore(retained.cursor, event.cursor)) {
-              terminals.delete(turnId);
-              terminals.set(turnId, event);
-              if (terminals.size > TERMINAL_CACHE_CAPACITY) {
-                terminals.delete(terminals.keys().next().value);
+            if (retained) {
+              if (sameTerminal(retained.event.data, event.data)) continue;
+              throw new ManagedError(
+                "conflicting_terminal",
+                `managed turn ${turnId} published conflicting terminal events`,
+              );
+            }
+            const bytes = encodedBytes(event);
+            if (bytes <= TERMINAL_CACHE_BYTES) {
+              terminals.set(turnId, { bytes, event });
+              terminalBytes += bytes;
+              while (
+                terminals.size > TERMINAL_CACHE_CAPACITY
+                || terminalBytes > TERMINAL_CACHE_BYTES
+              ) {
+                const oldestTurnId = terminals.keys().next().value;
+                const oldest = terminals.get(oldestTurnId);
+                terminals.delete(oldestTurnId);
+                terminalBytes -= oldest.bytes;
               }
             }
           }
@@ -309,9 +428,21 @@ function replayableEventStream(client, agentId) {
             if (subscriber.pending) {
               const pending = subscriber.pending;
               subscriber.pending = undefined;
+              subscriber.deliveredCursor = event.cursor;
               pending.resolve({ value: event, done: false });
             } else {
-              subscriber.queue.push(event);
+              const bytes = encodedBytes(event.data);
+              if (
+                subscriber.queue.length >= SUBSCRIBER_QUEUE_CAPACITY
+                || subscriber.bufferedBytes + bytes > SUBSCRIBER_QUEUE_BYTES
+              ) {
+                subscriber.overflowed = true;
+                subscriber.done = true;
+                remove(subscriber);
+                continue;
+              }
+              subscriber.queue.push({ bytes, event });
+              subscriber.bufferedBytes += bytes;
             }
           }
         }
@@ -322,11 +453,10 @@ function replayableEventStream(client, agentId) {
         }
       }
     })();
-    connection = { controller, running };
-    running.finally(() => {
-      if (connection?.running !== running) return;
+    current.running = running;
+    void running.finally(() => {
+      if (connection !== current) return;
       connection = undefined;
-      connectionCursor = undefined;
       start();
     });
   };
@@ -343,19 +473,36 @@ function replayableEventStream(client, agentId) {
 
     const subscriber = {
       cursor,
+      deliveredCursor: cursor,
       queue: [],
+      bufferedBytes: 0,
       pending: undefined,
       done: false,
       error: undefined,
+      overflowed: false,
+      overflowReported: false,
+      boundaryController: undefined,
       signal: options.signal,
       onAbort: undefined,
     };
     const iterator = {
       next() {
         if (subscriber.queue.length > 0) {
-          return Promise.resolve({ value: subscriber.queue.shift(), done: false });
+          const entry = subscriber.queue.shift();
+          subscriber.bufferedBytes -= entry.bytes;
+          subscriber.deliveredCursor = entry.event.cursor;
+          return Promise.resolve({ value: entry.event, done: false });
         }
         if (subscriber.error) return Promise.reject(subscriber.error);
+        if (subscriber.overflowed && !subscriber.overflowReported) {
+          subscriber.overflowReported = true;
+          return Promise.reject(new ManagedError(
+            "event_backlog_exceeded",
+            `managed event iterator exceeded its private buffer of ${SUBSCRIBER_QUEUE_CAPACITY} events or `
+              + `${SUBSCRIBER_QUEUE_BYTES} encoded bytes; reconnect with events.watch({ cursor: `
+              + `"${subscriber.deliveredCursor}" })`,
+          ));
+        }
         if (subscriber.done) return Promise.resolve({ value: undefined, done: true });
         if (subscriber.pending) {
           return Promise.reject(new TypeError("managed event iterator already has a pending read"));
@@ -375,11 +522,24 @@ function replayableEventStream(client, agentId) {
     }
     subscriber.onAbort = () => unsubscribe(subscriber);
     subscriber.signal?.addEventListener("abort", subscriber.onAbort, { once: true });
-    subscribers.add(subscriber);
-    if (connectionCursor !== undefined && cursorBefore(cursor, connectionCursor)) {
-      connection?.controller.abort();
+    if (cursor === LATEST_CURSOR && (connection !== undefined || subscribers.size > 0)) {
+      subscriber.boundaryController = new AbortController();
+      joiningSubscribers.add(subscriber);
+      watchOnlineReconnect();
+      void resolveLatestCursor(client, agentId, subscriber.boundaryController.signal).then(
+        (boundary) => {
+          subscriber.cursor = boundary;
+          subscriber.deliveredCursor = boundary;
+          attach(subscriber);
+        },
+        (error) => {
+          if (subscriber.done) return;
+          finish(subscriber, error);
+          remove(subscriber);
+        },
+      );
     } else {
-      start();
+      attach(subscriber);
     }
     return Object.freeze(iterator);
   };
@@ -387,21 +547,54 @@ function replayableEventStream(client, agentId) {
   return Object.freeze({
     subscribe,
     terminal(turnId, afterCursor) {
-      const event = terminals.get(turnId);
+      const event = terminals.get(turnId)?.event;
       return event && cursorBefore(afterCursor, event.cursor) ? event : undefined;
     },
     close() {
       if (closed) return;
       closed = true;
-      connection?.controller.abort();
+      stopOnlineReconnect?.();
+      retireConnection(false);
       for (const subscriber of subscribers) finish(subscriber);
       for (const subscriber of [...subscribers]) remove(subscriber);
+      for (const subscriber of joiningSubscribers) finish(subscriber);
+      for (const subscriber of [...joiningSubscribers]) remove(subscriber);
       terminals.clear();
+      terminalBytes = 0;
     },
   });
 }
 
-async function* readEvents(client, agentId, initialCursor, signal) {
+async function resolveLatestCursor(client, agentId, signal) {
+  const controller = new AbortController();
+  const aborted = () => controller.abort(signal?.reason);
+  signal?.addEventListener("abort", aborted, { once: true });
+  let boundary;
+  try {
+    for await (const _event of readEvents(
+      client,
+      agentId,
+      LATEST_CURSOR,
+      controller.signal,
+      (cursor) => {
+        boundary = cursor;
+        controller.abort();
+      },
+    )) {
+      if (boundary !== undefined) break;
+    }
+  } finally {
+    signal?.removeEventListener("abort", aborted);
+  }
+  if (boundary !== undefined) return boundary;
+  if (signal?.aborted) throw abortError(signal.reason);
+  throw new ManagedError(
+    "event_stream_ended",
+    "managed event stream ended before establishing the latest cursor boundary",
+  );
+}
+
+async function* readEvents(client, agentId, initialCursor, signal, onControlCursor) {
   let cursor = initialCursor;
   let reconnectDelay = 1_000;
 
@@ -417,6 +610,10 @@ async function* readEvents(client, agentId, initialCursor, signal) {
       await delay(reconnectDelay, signal);
       continue;
     }
+    if (signal?.aborted) {
+      void response.body?.cancel().catch(() => {});
+      return;
+    }
     if (!response.ok) {
       const error = await responseError(response);
       if (response.status !== 429 && response.status < 500) throw error;
@@ -429,17 +626,29 @@ async function* readEvents(client, agentId, initialCursor, signal) {
     let buffer = "";
     try {
       while (!signal?.aborted) {
-        const chunk = await reader.read();
+        let chunk;
+        try {
+          chunk = await readEventChunk(reader, signal);
+        } catch {
+          if (signal?.aborted) return;
+          break;
+        }
         if (chunk.done) break;
         buffer += chunk.value.replaceAll("\r\n", "\n").replaceAll("\r", "\n");
+        assertEventFrameSize(buffer);
         while (true) {
           const boundary = buffer.indexOf("\n\n");
           if (boundary < 0) break;
-          const parsed = parseEventFrame(buffer.slice(0, boundary));
+          const frame = buffer.slice(0, boundary);
+          assertEventFrameSize(frame);
+          const parsed = parseEventFrame(frame);
           buffer = buffer.slice(boundary + 2);
           if (!parsed) continue;
           if (parsed.retry !== undefined) reconnectDelay = parsed.retry;
-          if (parsed.controlCursor !== undefined) cursor = parsed.controlCursor;
+          if (parsed.controlCursor !== undefined) {
+            cursor = parsed.controlCursor;
+            onControlCursor?.(cursor);
+          }
           if (!parsed.data) continue;
           if (parsed.id !== undefined) cursor = parsed.id;
           const data = parseEventData(parsed.data);
@@ -449,9 +658,49 @@ async function* readEvents(client, agentId, initialCursor, signal) {
         }
       }
     } finally {
-      await reader.cancel().catch(() => {});
+      void reader.cancel().catch(() => {});
     }
     if (!signal?.aborted) await delay(reconnectDelay, signal);
+  }
+}
+
+function assertEventFrameSize(frame) {
+  if (encodedBytes(frame) <= EVENT_STREAM_FRAME_BYTES) return;
+  throw new ManagedError(
+    "event_frame_too_large",
+    `managed event frame exceeds ${EVENT_STREAM_FRAME_BYTES} decoded bytes`,
+  );
+}
+
+function encodedBytes(value) {
+  const encoded = typeof value === "string" ? value : JSON.stringify(value);
+  return eventEncoder.encode(encoded).byteLength;
+}
+
+function sameTerminal(left, right) {
+  return JSON.stringify(left) === JSON.stringify(right);
+}
+
+async function readEventChunk(reader, signal) {
+  let timeout;
+  let onAbort;
+  const pending = reader.read();
+  void pending.catch(() => {});
+  const interrupted = new Promise((_, reject) => {
+    timeout = setTimeout(() => {
+      reject(new ManagedError(
+        "event_stream_inactive",
+        `managed event stream was inactive for ${EVENT_STREAM_INACTIVITY_TIMEOUT_MS}ms`,
+      ));
+    }, EVENT_STREAM_INACTIVITY_TIMEOUT_MS);
+    onAbort = () => reject(abortError(signal?.reason));
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+  try {
+    return await Promise.race([pending, interrupted]);
+  } finally {
+    clearTimeout(timeout);
+    signal?.removeEventListener("abort", onAbort);
   }
 }
 

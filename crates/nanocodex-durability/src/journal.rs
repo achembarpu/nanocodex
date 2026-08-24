@@ -53,9 +53,18 @@ pub enum RetryPolicy {
 }
 
 /// One Rust-owned durable journal entry.
-#[derive(Clone, Debug, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Entry {
+    /// The authoritative owner durably authorized a model-only external effect.
+    ///
+    /// This append is the effect-start linearization point. A later owner may
+    /// fence the stale result, but cannot retract a request that was already
+    /// authorized and entered the transport.
+    ModelEffectStarted {
+        /// Stable semantic effect kind used for recovery diagnostics.
+        kind: String,
+    },
     /// A host-visible operation was durably accepted.
     OperationAccepted {
         /// Caller-provided idempotency identity.
@@ -65,6 +74,11 @@ pub enum Entry {
     },
     /// A new execution attempt began for an accepted operation.
     AttemptStarted {
+        /// Accepted operation identity.
+        operation_id: String,
+    },
+    /// A live attempt lost its claim before reaching a terminal mutation.
+    AttemptReleased {
         /// Accepted operation identity.
         operation_id: String,
     },
@@ -119,6 +133,16 @@ pub enum Entry {
     OperationCancelled {
         /// Accepted operation identity.
         operation_id: String,
+        /// Safe interrupted checkpoint for an active operation. A queued
+        /// cancellation has no new model boundary.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        checkpoint: Option<EncodedPayload>,
+    },
+    /// A model-only boundary, such as explicit standalone compaction, advanced
+    /// the resumable session without terminalizing an operation.
+    CheckpointCommitted {
+        /// Opaque resumable agent checkpoint.
+        checkpoint: EncodedPayload,
     },
 }
 
@@ -141,8 +165,12 @@ pub enum OperationStatus {
         /// Failure returned to duplicate submissions.
         error: String,
     },
-    /// Work was explicitly cancelled.
-    Cancelled,
+    /// Work was explicitly cancelled, optionally after advancing the safe
+    /// interrupted checkpoint.
+    Cancelled {
+        /// Safe checkpoint committed by active cancellation.
+        checkpoint: Option<EncodedPayload>,
+    },
 }
 
 impl OperationStatus {
@@ -151,7 +179,7 @@ impl OperationStatus {
     pub const fn is_terminal(&self) -> bool {
         matches!(
             self,
-            Self::Completed { .. } | Self::Failed { .. } | Self::Cancelled
+            Self::Completed { .. } | Self::Failed { .. } | Self::Cancelled { .. }
         )
     }
 }
@@ -191,6 +219,8 @@ pub struct OperationState {
     pub steps: BTreeMap<String, StepState>,
     /// Number of execution attempts.
     pub attempts: u32,
+    /// Whether the latest begun attempt may still mutate this operation.
+    pub active_attempt: bool,
     /// Most recent non-terminal failure, when any.
     pub last_error: Option<String>,
     pub(crate) accepted_order: u64,
@@ -201,6 +231,7 @@ pub struct OperationState {
 pub struct JournalState {
     revision: u64,
     operations: BTreeMap<String, OperationState>,
+    latest_checkpoint: Option<(u64, EncodedPayload)>,
 }
 
 impl JournalState {
@@ -246,18 +277,8 @@ impl JournalState {
     /// Returns the latest terminal checkpoint in operation order.
     #[must_use]
     pub fn latest_checkpoint(&self) -> Option<&EncodedPayload> {
-        self.operations
-            .values()
-            .filter_map(|operation| match &operation.status {
-                OperationStatus::Completed { checkpoint, .. } => {
-                    Some((operation.accepted_order, checkpoint))
-                }
-                OperationStatus::Failed { checkpoint, .. } => {
-                    Some((operation.accepted_order, checkpoint))
-                }
-                OperationStatus::Pending | OperationStatus::Cancelled => None,
-            })
-            .max_by_key(|(order, _)| *order)
+        self.latest_checkpoint
+            .as_ref()
             .map(|(_, checkpoint)| checkpoint)
     }
 
@@ -281,16 +302,27 @@ impl JournalState {
         Ok(())
     }
 
-    fn validate(&self, entry: &Entry) -> Result<()> {
-        ensure_nonempty(entry.operation_id(), "operation ID")?;
+    pub(crate) fn apply_replayed_batch(&mut self, revision: u64, entry: &Entry) -> Result<()> {
+        let expected_revision = self.revision.checked_add(1).ok_or_else(|| {
+            Error::InvalidJournal("journal revision exceeded the u64 range".to_owned())
+        })?;
+        if revision != expected_revision {
+            return Err(Error::InvalidJournal(format!(
+                "expected revision {}, found {revision}",
+                expected_revision
+            )));
+        }
+        self.validate_replayed(entry)?;
+        self.apply(revision, entry)?;
+        self.revision = revision;
+        Ok(())
+    }
+
+    fn validate_replayed(&self, entry: &Entry) -> Result<()> {
+        if let Some(operation_id) = entry.operation_id() {
+            ensure_nonempty(operation_id, "operation ID")?;
+        }
         match entry {
-            Entry::OperationAccepted { operation_id, .. } => {
-                if self.operations.contains_key(operation_id) {
-                    return Err(Error::InvalidJournal(format!(
-                        "operation `{operation_id}` was accepted more than once"
-                    )));
-                }
-            }
             Entry::AttemptStarted { operation_id } | Entry::AttemptFailed { operation_id, .. } => {
                 self.pending_operation(operation_id)?;
             }
@@ -336,11 +368,95 @@ impl JournalState {
                 }
             }
             Entry::OperationCompleted { operation_id, .. }
-            | Entry::OperationFailed { operation_id, .. }
-            | Entry::OperationCancelled { operation_id } => {
+            | Entry::OperationFailed { operation_id, .. } => {
                 self.ensure_prior_operations_terminal(operation_id)?;
                 self.pending_operation(operation_id)?;
             }
+            _ => return self.validate(entry),
+        }
+        Ok(())
+    }
+
+    fn validate(&self, entry: &Entry) -> Result<()> {
+        if let Some(operation_id) = entry.operation_id() {
+            ensure_nonempty(operation_id, "operation ID")?;
+        }
+        match entry {
+            Entry::OperationAccepted { operation_id, .. } => {
+                if self.operations.contains_key(operation_id) {
+                    return Err(Error::InvalidJournal(format!(
+                        "operation `{operation_id}` was accepted more than once"
+                    )));
+                }
+            }
+            Entry::AttemptStarted { operation_id } => {
+                self.ensure_prior_operations_terminal(operation_id)?;
+                let operation = self.pending_operation(operation_id)?;
+                if operation.active_attempt {
+                    return Err(Error::AttemptActive {
+                        operation_id: operation_id.clone(),
+                    });
+                }
+            }
+            Entry::AttemptReleased { operation_id } => {
+                self.active_attempt(operation_id)?;
+            }
+            Entry::AttemptFailed { operation_id, .. } => {
+                self.attempted_operation(operation_id)?;
+            }
+            Entry::StepStarted {
+                operation_id,
+                step_id,
+                kind,
+                input,
+                retry,
+            } => {
+                ensure_nonempty(step_id, "step ID")?;
+                ensure_nonempty(kind, "step kind")?;
+                let operation = self.attempted_operation(operation_id)?;
+                if let Some(step) = operation.steps.get(step_id) {
+                    if step.kind != *kind || step.input != *input || step.retry != *retry {
+                        return Err(Error::InvalidJournal(format!(
+                            "step `{step_id}` in operation `{operation_id}` changed definition"
+                        )));
+                    }
+                    if matches!(step.status, StepStatus::Completed(_)) {
+                        return Err(Error::InvalidJournal(format!(
+                            "completed step `{step_id}` in operation `{operation_id}` restarted"
+                        )));
+                    }
+                }
+            }
+            Entry::StepCompleted {
+                operation_id,
+                step_id,
+                ..
+            } => {
+                ensure_nonempty(step_id, "step ID")?;
+                let operation = self.attempted_operation(operation_id)?;
+                let step = operation.steps.get(step_id).ok_or_else(|| {
+                    Error::InvalidJournal(format!(
+                        "step `{step_id}` in operation `{operation_id}` completed before start"
+                    ))
+                })?;
+                if matches!(step.status, StepStatus::Completed(_)) {
+                    return Err(Error::InvalidJournal(format!(
+                        "step `{step_id}` in operation `{operation_id}` completed more than once"
+                    )));
+                }
+            }
+            Entry::OperationCompleted { operation_id, .. }
+            | Entry::OperationFailed { operation_id, .. } => {
+                self.attempted_operation(operation_id)?;
+            }
+            Entry::OperationCancelled { operation_id, .. } => {
+                let operation = self.pending_operation(operation_id)?;
+                if operation.attempts > 0 {
+                    self.ensure_prior_operations_terminal(operation_id)?;
+                }
+            }
+            Entry::ModelEffectStarted { kind } => ensure_nonempty(kind, "model effect kind")?,
+            Entry::CheckpointCommitted { .. } => {}
         }
         Ok(())
     }
@@ -363,6 +479,7 @@ impl JournalState {
                         status: OperationStatus::Pending,
                         steps: BTreeMap::new(),
                         attempts: 0,
+                        active_attempt: false,
                         last_error: None,
                         accepted_order: revision,
                     },
@@ -371,7 +488,11 @@ impl JournalState {
             Entry::AttemptStarted { operation_id } => {
                 let operation = self.pending_operation_mut(operation_id)?;
                 operation.attempts = operation.attempts.saturating_add(1);
+                operation.active_attempt = true;
                 operation.last_error = None;
+            }
+            Entry::AttemptReleased { operation_id } => {
+                self.pending_operation_mut(operation_id)?.active_attempt = false;
             }
             Entry::StepStarted {
                 operation_id,
@@ -428,7 +549,9 @@ impl JournalState {
                 operation_id,
                 error,
             } => {
-                self.pending_operation_mut(operation_id)?.last_error = Some(error.clone());
+                let operation = self.pending_operation_mut(operation_id)?;
+                operation.active_attempt = false;
+                operation.last_error = Some(error.clone());
             }
             Entry::OperationCompleted {
                 operation_id,
@@ -436,10 +559,13 @@ impl JournalState {
                 output,
             } => {
                 self.ensure_prior_operations_terminal(operation_id)?;
-                self.pending_operation_mut(operation_id)?.status = OperationStatus::Completed {
+                let operation = self.pending_operation_mut(operation_id)?;
+                operation.active_attempt = false;
+                operation.status = OperationStatus::Completed {
                     checkpoint: checkpoint.clone(),
                     output: output.clone(),
                 };
+                self.latest_checkpoint = Some((revision, checkpoint.clone()));
             }
             Entry::OperationFailed {
                 operation_id,
@@ -447,14 +573,33 @@ impl JournalState {
                 error,
             } => {
                 self.ensure_prior_operations_terminal(operation_id)?;
-                self.pending_operation_mut(operation_id)?.status = OperationStatus::Failed {
+                let operation = self.pending_operation_mut(operation_id)?;
+                operation.active_attempt = false;
+                operation.status = OperationStatus::Failed {
                     checkpoint: checkpoint.clone(),
                     error: error.clone(),
                 };
+                self.latest_checkpoint = Some((revision, checkpoint.clone()));
             }
-            Entry::OperationCancelled { operation_id } => {
-                self.ensure_prior_operations_terminal(operation_id)?;
-                self.pending_operation_mut(operation_id)?.status = OperationStatus::Cancelled;
+            Entry::OperationCancelled {
+                operation_id,
+                checkpoint,
+            } => {
+                if self.pending_operation(operation_id)?.attempts > 0 {
+                    self.ensure_prior_operations_terminal(operation_id)?;
+                }
+                let operation = self.pending_operation_mut(operation_id)?;
+                operation.active_attempt = false;
+                operation.status = OperationStatus::Cancelled {
+                    checkpoint: checkpoint.clone(),
+                };
+                if let Some(checkpoint) = checkpoint {
+                    self.latest_checkpoint = Some((revision, checkpoint.clone()));
+                }
+            }
+            Entry::ModelEffectStarted { .. } => {}
+            Entry::CheckpointCommitted { checkpoint } => {
+                self.latest_checkpoint = Some((revision, checkpoint.clone()));
             }
         }
         Ok(())
@@ -484,6 +629,21 @@ impl JournalState {
         Ok(operation)
     }
 
+    fn attempted_operation(&self, operation_id: &str) -> Result<&OperationState> {
+        self.ensure_prior_operations_terminal(operation_id)?;
+        self.active_attempt(operation_id)
+    }
+
+    fn active_attempt(&self, operation_id: &str) -> Result<&OperationState> {
+        let operation = self.pending_operation(operation_id)?;
+        if !operation.active_attempt {
+            return Err(Error::InvalidJournal(format!(
+                "operation `{operation_id}` does not have an active attempt"
+            )));
+        }
+        Ok(operation)
+    }
+
     fn ensure_prior_operations_terminal(&self, operation_id: &str) -> Result<()> {
         let operation = self.operations.get(operation_id).ok_or_else(|| {
             Error::InvalidJournal(format!("operation `{operation_id}` was not accepted"))
@@ -502,16 +662,18 @@ impl JournalState {
 }
 
 impl Entry {
-    fn operation_id(&self) -> &str {
+    fn operation_id(&self) -> Option<&str> {
         match self {
             Self::OperationAccepted { operation_id, .. }
             | Self::AttemptStarted { operation_id }
+            | Self::AttemptReleased { operation_id }
             | Self::StepStarted { operation_id, .. }
             | Self::StepCompleted { operation_id, .. }
             | Self::AttemptFailed { operation_id, .. }
             | Self::OperationCompleted { operation_id, .. }
             | Self::OperationFailed { operation_id, .. }
-            | Self::OperationCancelled { operation_id } => operation_id,
+            | Self::OperationCancelled { operation_id, .. } => Some(operation_id),
+            Self::ModelEffectStarted { .. } | Self::CheckpointCommitted { .. } => None,
         }
     }
 }

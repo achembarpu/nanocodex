@@ -4,8 +4,9 @@ import { installBrowserEgressFetch } from "./browserEgress.mjs";
 let apiPromise;
 let workerFetch;
 let diagnostics = "";
-const knownDirectories = new Set();
-self.addEventListener("message", (event) => {
+const knownDirectories = new WeakMap();
+const workerScope = globalThis.self;
+workerScope?.addEventListener("message", (event) => {
     const message = event.data;
     if (message.type === "initialize") {
         workerFetch = installBrowserEgressFetch({
@@ -23,7 +24,29 @@ async function compile(id, input) {
     try {
         const api = await runtime();
         await api.ready;
-        const prefix = `.nanocodex-runs/run-${id}`;
+        const bytes = await compileInput(api, id, input);
+        const result = {
+            stdout: "",
+            stderr: diagnostics,
+            exitCode: 0,
+            output: bytes,
+        };
+        workerScope.postMessage({ id, result }, [bytes.buffer]);
+    }
+    catch (error) {
+        workerScope.postMessage({
+            id,
+            result: {
+                stdout: "",
+                stderr: `${diagnostics}${error instanceof Error ? error.message : String(error)}\n`,
+                exitCode: 1,
+            },
+        });
+    }
+}
+export async function compileInput(api, id, input) {
+    const prefix = `.nanocodex-runs/run-${id}`;
+    try {
         addDirectories(api, [`${prefix}/.keep`, ...input.files.map((file) => `${prefix}/${file.path}`)]);
         for (const file of input.files)
             api.memfs.addFile(`${prefix}/${file.path}`, file.contents);
@@ -48,24 +71,10 @@ async function compile(id, input) {
         const generated = input.compileOnly
             ? objects[0]
             : await link(api, objects, prefix);
-        const bytes = api.memfs.getFileContents(generated).slice();
-        const result = {
-            stdout: "",
-            stderr: diagnostics,
-            exitCode: 0,
-            output: bytes,
-        };
-        self.postMessage({ id, result }, [bytes.buffer]);
+        return api.memfs.getFileContents(generated).slice();
     }
-    catch (error) {
-        self.postMessage({
-            id,
-            result: {
-                stdout: "",
-                stderr: `${diagnostics}${error instanceof Error ? error.message : String(error)}\n`,
-                exitCode: 1,
-            },
-        });
+    finally {
+        removeRun(api.memfs, prefix);
     }
 }
 async function runtime() {
@@ -98,6 +107,7 @@ async function link(api, objects, prefix) {
     return output;
 }
 function addDirectories(api, paths) {
+    const known = directoriesFor(api.memfs);
     const directories = new Set();
     for (const path of paths) {
         const parts = path.split("/").slice(0, -1);
@@ -106,11 +116,44 @@ function addDirectories(api, paths) {
         }
     }
     for (const directory of [...directories].sort()) {
-        if (knownDirectories.has(directory))
+        if (known.has(directory))
             continue;
         api.memfs.addDirectory(directory);
-        knownDirectories.add(directory);
+        known.add(directory);
     }
+}
+function removeRun(memfs, prefix) {
+    try {
+        memfs.mem.check();
+        const pathBuffer = memfs.exports.GetPathBuf();
+        memfs.mem.write(pathBuffer, prefix);
+        const previousHostMemory = memfs.hostMem_;
+        memfs.hostMem = memfs.mem;
+        let errno;
+        try {
+            errno = memfs.exports.path_unlink_file(3, pathBuffer, prefix.length);
+        }
+        finally {
+            memfs.hostMem = previousHostMemory;
+        }
+        if (errno !== 0 && errno !== 44)
+            throw new Error(`compiler memfs cleanup failed with WASI errno ${errno}`);
+    }
+    finally {
+        const known = directoriesFor(memfs);
+        for (const directory of known) {
+            if (directory === prefix || directory.startsWith(`${prefix}/`))
+                known.delete(directory);
+        }
+    }
+}
+function directoriesFor(memfs) {
+    let directories = knownDirectories.get(memfs);
+    if (!directories) {
+        directories = new Set();
+        knownDirectories.set(memfs, directories);
+    }
+    return directories;
 }
 function workspaceRelative(path) {
     return path.replace(/^\/workspace\//, "").replace(/^\/+/, "");

@@ -1,7 +1,10 @@
 import { PGlite } from "@electric-sql/pglite";
 import { describe, expect, it } from "vitest";
 
-import { durabilityRevision } from "nanocodex/durability";
+import {
+  type DurabilityFence,
+  durabilityRevision,
+} from "nanocodex/durability";
 import {
   createPostgresDurabilityStore,
   type PostgresDurabilityClient,
@@ -47,6 +50,428 @@ describe("Vercel PostgreSQL durability store", () => {
     }
   });
 
+  it("reopens the canonical native schema with structurally compatible numeric counters", async () => {
+    const pool = new PGlitePool();
+    try {
+      await pool.query(
+        `CREATE TABLE nanocodex_journals (
+           journal_id TEXT PRIMARY KEY,
+           revision NUMERIC(20, 0) NOT NULL
+             CHECK (revision >= 0 AND revision <= 18446744073709551615)
+         )`,
+      );
+      await pool.query(
+        `CREATE TABLE nanocodex_journal_batches (
+           journal_id TEXT NOT NULL REFERENCES nanocodex_journals(journal_id),
+           revision NUMERIC(20, 0) NOT NULL
+             CHECK (revision > 0 AND revision <= 18446744073709551615),
+           payload TEXT NOT NULL,
+           PRIMARY KEY (journal_id, revision)
+         )`,
+      );
+      await pool.query(
+        `CREATE TABLE nanocodex_journal_owners (
+           journal_id TEXT PRIMARY KEY,
+           owner_id TEXT NOT NULL,
+           fence NUMERIC(20, 0) NOT NULL
+             CHECK (fence >= 1 AND fence <= 18446744073709551615)
+         )`,
+      );
+
+      const columns = await pool.query<{
+        table_name: string;
+        column_name: string;
+        data_type: string;
+        is_nullable: "YES" | "NO";
+        numeric_precision: number | null;
+        numeric_scale: number | null;
+      }>(
+        `SELECT table_name, column_name, data_type, is_nullable,
+                numeric_precision, numeric_scale
+           FROM information_schema.columns
+          WHERE table_schema = current_schema()
+            AND table_name IN (
+              'nanocodex_journals',
+              'nanocodex_journal_batches',
+              'nanocodex_journal_owners'
+            )
+          ORDER BY table_name, ordinal_position`,
+      );
+      expect(columns.rows).toEqual([
+        {
+          table_name: "nanocodex_journal_batches",
+          column_name: "journal_id",
+          data_type: "text",
+          is_nullable: "NO",
+          numeric_precision: null,
+          numeric_scale: null,
+        },
+        {
+          table_name: "nanocodex_journal_batches",
+          column_name: "revision",
+          data_type: "numeric",
+          is_nullable: "NO",
+          numeric_precision: 20,
+          numeric_scale: 0,
+        },
+        {
+          table_name: "nanocodex_journal_batches",
+          column_name: "payload",
+          data_type: "text",
+          is_nullable: "NO",
+          numeric_precision: null,
+          numeric_scale: null,
+        },
+        {
+          table_name: "nanocodex_journal_owners",
+          column_name: "journal_id",
+          data_type: "text",
+          is_nullable: "NO",
+          numeric_precision: null,
+          numeric_scale: null,
+        },
+        {
+          table_name: "nanocodex_journal_owners",
+          column_name: "owner_id",
+          data_type: "text",
+          is_nullable: "NO",
+          numeric_precision: null,
+          numeric_scale: null,
+        },
+        {
+          table_name: "nanocodex_journal_owners",
+          column_name: "fence",
+          data_type: "numeric",
+          is_nullable: "NO",
+          numeric_precision: 20,
+          numeric_scale: 0,
+        },
+        {
+          table_name: "nanocodex_journals",
+          column_name: "journal_id",
+          data_type: "text",
+          is_nullable: "NO",
+          numeric_precision: null,
+          numeric_scale: null,
+        },
+        {
+          table_name: "nanocodex_journals",
+          column_name: "revision",
+          data_type: "numeric",
+          is_nullable: "NO",
+          numeric_precision: 20,
+          numeric_scale: 0,
+        },
+      ]);
+
+      const first = createPostgresDurabilityStore(pool.asPostgresPool());
+      const owner = await first.acquire("shared", { ownerId: "native-reopener" });
+      await expect(first.append("shared", {
+        ownerId: owner.ownerId,
+        fence: owner.fence,
+        expectedRevision: owner.revision,
+        payload: "written-by-js",
+      })).resolves.toEqual({ status: "appended", revision: durabilityRevision("1") });
+
+      const reopened = createPostgresDurabilityStore(pool.asPostgresPool());
+      await expect(reopened.acquire("shared", { ownerId: "second-reopener" })).resolves.toEqual({
+        ownerId: "second-reopener",
+        fence: durabilityRevision("2"),
+        revision: durabilityRevision("1"),
+        batches: [{ revision: durabilityRevision("1"), payload: "written-by-js" }],
+      });
+      await expect(pool.query(
+        `INSERT INTO nanocodex_journal_owners (journal_id, owner_id, fence)
+         VALUES ('invalid-zero-fence', 'invalid', 0)`,
+      )).rejects.toThrow();
+    } finally {
+      await pool.close();
+    }
+  });
+
+  it("rejects missing numeric CHECKs before mutation even when PGlite accepts u64 + 1", async () => {
+    const pool = new PGlitePool();
+    try {
+      await pool.query(
+        `CREATE TABLE nanocodex_journals (
+           journal_id TEXT PRIMARY KEY,
+           revision NUMERIC(20, 0) NOT NULL
+         )`,
+      );
+      await pool.query(
+        `CREATE TABLE nanocodex_journal_batches (
+           journal_id TEXT NOT NULL REFERENCES nanocodex_journals(journal_id),
+           revision NUMERIC(20, 0) NOT NULL,
+           payload TEXT NOT NULL,
+           PRIMARY KEY (journal_id, revision)
+         )`,
+      );
+      await pool.query(
+        `CREATE TABLE nanocodex_journal_owners (
+           journal_id TEXT PRIMARY KEY,
+           owner_id TEXT NOT NULL,
+           fence NUMERIC(20, 0) NOT NULL
+         )`,
+      );
+      await expect(pool.query(
+        `INSERT INTO nanocodex_journals (journal_id, revision)
+         VALUES ('accepted-overflow', 18446744073709551616)`,
+      )).resolves.toEqual({ rows: [] });
+
+      const store = createPostgresDurabilityStore(pool.asPostgresPool());
+      await expect(store.acquire("must-not-mutate", { ownerId: "rejected-owner" })).rejects.toThrow(
+        "`nanocodex_journal_batches.revision` must have a single-column CHECK constraint",
+      );
+      await expect(pool.query(
+        "SELECT journal_id FROM nanocodex_journal_owners WHERE journal_id = 'must-not-mutate'",
+      )).resolves.toEqual({ rows: [] });
+    } finally {
+      await pool.close();
+    }
+  });
+
+  it("rejects a batches foreign key into a same-named table in another schema", async () => {
+    const pool = new PGlitePool();
+    try {
+      await pool.query("CREATE SCHEMA alternate");
+      await pool.query(
+        `CREATE TABLE alternate.nanocodex_journals (
+           journal_id TEXT PRIMARY KEY,
+           revision NUMERIC(20, 0) NOT NULL
+         )`,
+      );
+      await createDurabilitySchema(pool, {
+        reference: "alternate.nanocodex_journals(journal_id)",
+      });
+
+      const store = createPostgresDurabilityStore(pool.asPostgresPool());
+      await expect(store.acquire("must-not-mutate", { ownerId: "rejected-owner" })).rejects.toThrow(
+        "`nanocodex_journal_batches` has an incompatible foreign key",
+      );
+      await expect(pool.query(
+        "SELECT journal_id FROM nanocodex_journal_owners WHERE journal_id = 'must-not-mutate'",
+      )).resolves.toEqual({ rows: [] });
+    } finally {
+      await pool.close();
+    }
+  });
+
+  it("rejects a deferred batches foreign key", async () => {
+    const pool = new PGlitePool();
+    try {
+      await createDurabilitySchema(pool, {
+        foreignKeyMode: "DEFERRABLE INITIALLY DEFERRED",
+      });
+
+      const store = createPostgresDurabilityStore(pool.asPostgresPool());
+      await expect(store.acquire("must-not-mutate", { ownerId: "rejected-owner" })).rejects.toThrow(
+        "`nanocodex_journal_batches` has an incompatible foreign key",
+      );
+      await expect(pool.query(
+        "SELECT journal_id FROM nanocodex_journal_owners WHERE journal_id = 'must-not-mutate'",
+      )).resolves.toEqual({ rows: [] });
+    } finally {
+      await pool.close();
+    }
+  });
+
+  it("rejects an extra owner CHECK constraint", async () => {
+    const pool = new PGlitePool();
+    try {
+      await createDurabilitySchema(pool, {
+        ownerExtraCheck: "CHECK (owner_id <> '')",
+      });
+
+      const store = createPostgresDurabilityStore(pool.asPostgresPool());
+      await expect(store.acquire("must-not-mutate", { ownerId: "rejected-owner" })).rejects.toThrow(
+        "the journal tables have incompatible CHECK constraints",
+      );
+      await expect(pool.query(
+        "SELECT journal_id FROM nanocodex_journal_owners WHERE journal_id = 'must-not-mutate'",
+      )).resolves.toEqual({ rows: [] });
+    } finally {
+      await pool.close();
+    }
+  });
+
+  it.each([
+    {
+      name: "owner fence",
+      schema: { ownerCheck: "fence IN (1, 18446744073709551615)" },
+      error: "owner bounds rejected",
+    },
+    {
+      name: "journal revision",
+      schema: { journalCheck: "revision IN (0, 18446744073709551615)" },
+      error: "journal bounds rejected",
+    },
+    {
+      name: "batch revision",
+      schema: { batchCheck: "revision IN (1, 18446744073709551615)" },
+      error: "batch bounds rejected",
+    },
+  ])("rejects endpoint-only $name CHECK semantics", async ({ schema, error }) => {
+    const pool = new PGlitePool();
+    try {
+      await createDurabilitySchema(pool, schema);
+
+      const store = createPostgresDurabilityStore(pool.asPostgresPool());
+      await expect(store.acquire("must-not-mutate", { ownerId: "rejected-owner" })).rejects.toThrow(error);
+      await expect(pool.query(
+        "SELECT journal_id FROM nanocodex_journal_owners WHERE journal_id = 'must-not-mutate'",
+      )).resolves.toEqual({ rows: [] });
+    } finally {
+      await pool.close();
+    }
+  });
+
+  it.each([
+    {
+      name: "negative owner fence",
+      schema: { ownerCheck: "fence <> 0 AND fence <= 18446744073709551615" },
+      error: "negative owner fence was accepted by its CHECK constraint",
+    },
+    {
+      name: "negative batch revision",
+      schema: { batchCheck: "revision <> 0 AND revision <= 18446744073709551615" },
+      error: "negative batch revision was accepted by its CHECK constraint",
+    },
+    {
+      name: "journal revision above the adjacent overflow sample",
+      schema: { journalCheck: "revision >= 0 AND revision <> 18446744073709551616" },
+      error: "journal revision farther above u64 was accepted by its CHECK constraint",
+    },
+  ])("rejects CHECK semantics admitting $name", async ({ schema, error }) => {
+    const pool = new PGlitePool();
+    try {
+      await createDurabilitySchema(pool, schema);
+
+      const store = createPostgresDurabilityStore(pool.asPostgresPool());
+      await expect(store.acquire("must-not-mutate", { ownerId: "rejected-owner" })).rejects.toThrow(error);
+      await expect(pool.query(
+        "SELECT journal_id FROM nanocodex_journal_owners WHERE journal_id = 'must-not-mutate'",
+      )).resolves.toEqual({ rows: [] });
+    } finally {
+      await pool.close();
+    }
+  });
+
+  it.each([
+    {
+      name: "reversed batch primary key",
+      reference: "nanocodex_journals(journal_id)",
+      primaryKey: "revision, journal_id",
+      error: "journal tables have incompatible PRIMARY KEY constraints",
+    },
+    {
+      name: "batch foreign key targeting owners",
+      reference: "nanocodex_journal_owners(journal_id)",
+      primaryKey: "journal_id, revision",
+      error: "`nanocodex_journal_batches` has an incompatible foreign key",
+    },
+  ])("rejects $name before owner mutation", async ({ reference, primaryKey, error }) => {
+    const pool = new PGlitePool();
+    try {
+      await pool.query(
+        `CREATE TABLE nanocodex_journals (
+           journal_id TEXT PRIMARY KEY,
+           revision NUMERIC(20, 0) NOT NULL
+             CHECK (revision >= 0 AND revision <= 18446744073709551615)
+         )`,
+      );
+      await pool.query(
+        `CREATE TABLE nanocodex_journal_owners (
+           journal_id TEXT PRIMARY KEY,
+           owner_id TEXT NOT NULL,
+           fence NUMERIC(20, 0) NOT NULL
+             CHECK (fence >= 1 AND fence <= 18446744073709551615)
+         )`,
+      );
+      await pool.query(
+        `CREATE TABLE nanocodex_journal_batches (
+           journal_id TEXT NOT NULL REFERENCES ${reference},
+           revision NUMERIC(20, 0) NOT NULL
+             CHECK (revision > 0 AND revision <= 18446744073709551615),
+           payload TEXT NOT NULL,
+           PRIMARY KEY (${primaryKey})
+         )`,
+      );
+
+      const store = createPostgresDurabilityStore(pool.asPostgresPool());
+      await expect(store.acquire("must-not-mutate", { ownerId: "rejected-owner" })).rejects.toThrow(error);
+      await expect(pool.query(
+        "SELECT journal_id FROM nanocodex_journal_owners WHERE journal_id = 'must-not-mutate'",
+      )).resolves.toEqual({ rows: [] });
+    } finally {
+      await pool.close();
+    }
+  });
+
+  it("rejects mixed legacy BIGINT journals before acquiring or appending", async () => {
+    const pool = new PGlitePool();
+    try {
+      await pool.query(
+        `CREATE TABLE nanocodex_journals (
+           journal_id TEXT PRIMARY KEY,
+           revision BIGINT NOT NULL CHECK (revision >= 0)
+         )`,
+      );
+      await pool.query(
+        `CREATE TABLE nanocodex_journal_batches (
+           journal_id TEXT NOT NULL REFERENCES nanocodex_journals(journal_id),
+           revision BIGINT NOT NULL CHECK (revision > 0),
+           payload TEXT NOT NULL,
+           PRIMARY KEY (journal_id, revision)
+         )`,
+      );
+      await pool.query(
+        `CREATE TABLE nanocodex_journal_owners (
+           journal_id TEXT PRIMARY KEY,
+           owner_id TEXT NOT NULL,
+           fence NUMERIC(20, 0) NOT NULL
+             CHECK (fence >= 1 AND fence <= 18446744073709551615)
+         )`,
+      );
+      await pool.query(
+        `INSERT INTO nanocodex_journals (journal_id, revision)
+         VALUES ('retained', 1)`,
+      );
+      await pool.query(
+        `INSERT INTO nanocodex_journal_batches (journal_id, revision, payload)
+         VALUES ('retained', 1, 'legacy')`,
+      );
+
+      const store = createPostgresDurabilityStore(pool.asPostgresPool());
+      await expect(store.acquire("retained", { ownerId: "must-not-acquire" })).rejects.toThrow(
+        "incompatible Postgres durability schema: `nanocodex_journal_batches.revision` has an incompatible column shape",
+      );
+      await expect(store.append("retained", {
+        ownerId: "must-not-append",
+        fence: "1" as DurabilityFence,
+        expectedRevision: durabilityRevision("1"),
+        payload: "must-not-write",
+      })).rejects.toThrow(
+        "incompatible Postgres durability schema: `nanocodex_journal_batches.revision` has an incompatible column shape",
+      );
+
+      await expect(pool.query(
+        "SELECT journal_id, owner_id, fence::text AS fence FROM nanocodex_journal_owners",
+      )).resolves.toEqual({ rows: [] });
+      await expect(pool.query(
+        `SELECT journal.revision::text AS revision,
+                batch.revision::text AS batch_revision,
+                batch.payload
+           FROM nanocodex_journals AS journal
+           JOIN nanocodex_journal_batches AS batch USING (journal_id)
+          WHERE journal.journal_id = 'retained'`,
+      )).resolves.toEqual({
+        rows: [{ revision: "1", batch_revision: "1", payload: "legacy" }],
+      });
+    } finally {
+      await pool.close();
+    }
+  });
+
   it("chooses one of many independent CAS contenders and reloads numeric batch order", async () => {
     const pool = new PGlitePool();
     try {
@@ -55,7 +480,10 @@ describe("Vercel PostgreSQL durability store", () => {
         () => createPostgresDurabilityStore(pool.asPostgresPool()),
       );
       await Promise.all(stores.map((store, index) => store.load(`schema-${index}`)));
+      const owner = await stores[0]!.acquire("race", { ownerId: "race-owner" });
       const contenders = await Promise.all(stores.map((store, index) => store.append("race", {
+          ownerId: owner.ownerId,
+          fence: owner.fence,
           expectedRevision: durabilityRevision("0"),
           payload: `batch-1-${index}`,
         })));
@@ -80,6 +508,8 @@ describe("Vercel PostgreSQL durability store", () => {
       const store = stores[0]!;
       for (let revision = 1n; revision < 10n; revision += 1n) {
         await expect(store.append("race", {
+          ownerId: owner.ownerId,
+          fence: owner.fence,
           expectedRevision: durabilityRevision(revision),
           payload: `batch-${revision + 1n}`,
         })).resolves.toEqual({
@@ -105,7 +535,7 @@ describe("Vercel PostgreSQL durability store", () => {
     const pool = new PGlitePool();
     try {
       const store = createPostgresDurabilityStore(pool.asPostgresPool());
-      await store.load("u64");
+      const owner = await store.acquire("u64", { ownerId: "u64-owner" });
       await pool.query(
         `INSERT INTO nanocodex_journals (journal_id, revision)
          VALUES ($1, $2::numeric)`,
@@ -113,6 +543,8 @@ describe("Vercel PostgreSQL durability store", () => {
       );
 
       await expect(store.append("u64", {
+        ownerId: owner.ownerId,
+        fence: owner.fence,
         expectedRevision: BEFORE_MAX_REVISION,
         payload: "max-batch",
       })).resolves.toEqual({ status: "appended", revision: MAX_REVISION });
@@ -121,6 +553,8 @@ describe("Vercel PostgreSQL durability store", () => {
         batches: [{ revision: MAX_REVISION, payload: "max-batch" }],
       });
       await expect(store.append("u64", {
+        ownerId: owner.ownerId,
+        fence: owner.fence,
         expectedRevision: MAX_REVISION,
         payload: "overflow",
       })).resolves.toEqual({
@@ -137,16 +571,22 @@ describe("Vercel PostgreSQL durability store", () => {
   });
 
   it("throws on an unknown COMMIT outcome and reloads the retained commit", async () => {
-    const pool = new PGlitePool({ failCommitAfter: 2 });
+    const pool = new PGlitePool({ failCommitAfter: 3 });
     try {
       const first = createPostgresDurabilityStore(pool.asPostgresPool());
+      const owner = await first.acquire("unknown", { ownerId: "first-owner" });
       await expect(first.append("unknown", {
+        ownerId: owner.ownerId,
+        fence: owner.fence,
         expectedRevision: durabilityRevision("0"),
         payload: "committed-before-disconnect",
       })).rejects.toBeInstanceOf(UnknownPostgresCommitOutcomeError);
 
       const recreated = createPostgresDurabilityStore(pool.asPostgresPool());
-      await expect(recreated.load("unknown")).resolves.toEqual({
+      const recreatedOwner = await recreated.acquire("unknown", { ownerId: "recreated-owner" });
+      expect(recreatedOwner).toEqual({
+        ownerId: "recreated-owner",
+        fence: durabilityRevision("2"),
         revision: durabilityRevision("1"),
         batches: [{
           revision: durabilityRevision("1"),
@@ -154,6 +594,8 @@ describe("Vercel PostgreSQL durability store", () => {
         }],
       });
       await expect(recreated.append("unknown", {
+        ownerId: recreatedOwner.ownerId,
+        fence: recreatedOwner.fence,
         expectedRevision: durabilityRevision("0"),
         payload: "must-not-repeat",
       })).resolves.toEqual({
@@ -170,10 +612,12 @@ describe("Vercel PostgreSQL durability store", () => {
     const pool = new PGlitePool();
     try {
       const store = createPostgresDurabilityStore(pool.asPostgresPool());
-      await store.load("begin-failure");
+      const owner = await store.acquire("begin-failure", { ownerId: "begin-owner" });
       pool.failNextBefore(/^BEGIN$/);
 
       await expect(store.append("begin-failure", {
+        ownerId: owner.ownerId,
+        fence: owner.fence,
         expectedRevision: durabilityRevision("0"),
         payload: "never-started",
       })).resolves.toEqual({
@@ -194,10 +638,12 @@ describe("Vercel PostgreSQL durability store", () => {
     const pool = new PGlitePool();
     try {
       const store = createPostgresDurabilityStore(pool.asPostgresPool());
-      await store.load("rolled-back");
+      const owner = await store.acquire("rolled-back", { ownerId: "rollback-owner" });
       pool.failNextAfter(/^INSERT INTO nanocodex_journals/);
 
       await expect(store.append("rolled-back", {
+        ownerId: owner.ownerId,
+        fence: owner.fence,
         expectedRevision: durabilityRevision("0"),
         payload: "rolled-back-batch",
       })).resolves.toEqual({
@@ -214,6 +660,51 @@ describe("Vercel PostgreSQL durability store", () => {
     }
   });
 });
+
+type DurabilitySchemaOptions = {
+  reference?: string;
+  foreignKeyMode?: string;
+  journalCheck?: string;
+  batchCheck?: string;
+  ownerCheck?: string;
+  ownerExtraCheck?: string;
+};
+
+async function createDurabilitySchema(
+  pool: PGlitePool,
+  options: DurabilitySchemaOptions = {},
+): Promise<void> {
+  const {
+    reference = "nanocodex_journals(journal_id)",
+    foreignKeyMode = "",
+    journalCheck = "revision >= 0 AND revision <= 18446744073709551615",
+    batchCheck = "revision > 0 AND revision <= 18446744073709551615",
+    ownerCheck = "fence >= 1 AND fence <= 18446744073709551615",
+    ownerExtraCheck,
+  } = options;
+  await pool.query(
+    `CREATE TABLE nanocodex_journals (
+       journal_id TEXT PRIMARY KEY,
+       revision NUMERIC(20, 0) NOT NULL CHECK (${journalCheck})
+     )`,
+  );
+  await pool.query(
+    `CREATE TABLE nanocodex_journal_owners (
+       journal_id TEXT PRIMARY KEY,
+       owner_id TEXT NOT NULL,
+       fence NUMERIC(20, 0) NOT NULL CHECK (${ownerCheck})
+       ${ownerExtraCheck === undefined ? "" : `, ${ownerExtraCheck}`}
+     )`,
+  );
+  await pool.query(
+    `CREATE TABLE nanocodex_journal_batches (
+       journal_id TEXT NOT NULL REFERENCES ${reference} ${foreignKeyMode},
+       revision NUMERIC(20, 0) NOT NULL CHECK (${batchCheck}),
+       payload TEXT NOT NULL,
+       PRIMARY KEY (journal_id, revision)
+     )`,
+  );
+}
 
 type InjectedFailure = {
   pattern: RegExp;

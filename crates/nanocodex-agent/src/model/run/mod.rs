@@ -323,25 +323,39 @@ impl<S> ModelRun<S> {
         }
     }
 
-    pub(crate) fn append_developer_message(&mut self, text: String) -> Option<ModelCheckpoint> {
+    pub(crate) fn append_developer_message(
+        &mut self,
+        text: String,
+        requested_workspace: Option<&str>,
+    ) -> Result<ModelCheckpoint> {
         let item = ResponseItem::message(
             MessageRole::Developer,
             [ContentItem::InputText {
                 text: text.into_boxed_str(),
             }],
         );
-        let Some(session) = &mut self.session else {
-            self.pending_developer_messages.push(item);
-            return None;
-        };
+        if self.session.is_none() {
+            self.session = Some(self.empty_session(requested_workspace)?);
+        }
+        let session = self.session.as_mut().ok_or_else(|| {
+            NanocodexError::InvalidSessionSnapshot(
+                "developer context did not establish a model session".to_owned(),
+            )
+        })?;
+        if !self.pending_developer_messages.is_empty() {
+            session
+                .conversation
+                .append(self.pending_developer_messages.drain(..));
+        }
         session.conversation.append([item]);
         session.conversation.commit_tail();
-        Some(ModelCheckpoint {
+        session.preserve_inherited_delta = true;
+        Ok(ModelCheckpoint {
             workspace: session.workspace.clone(),
             conversation: session.conversation.clone(),
             request_prefix: session.factory.profile().shared_prefix(),
             prompt_cache_key: Arc::from(session.factory.profile().prompt_cache_key()),
-            preserve_inherited_delta: false,
+            preserve_inherited_delta: true,
             global_instructions: self.global_instructions.clone(),
             context_baseline: session.context.baseline(),
         })

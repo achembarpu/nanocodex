@@ -4,9 +4,16 @@ use super::*;
 struct RecordedModelCall<'a> {
     call_index: u32,
     model: &'a str,
+    model_id_prefix: Option<&'a str>,
     reasoning_mode: &'a str,
     effort: &'a str,
     fast_mode: bool,
+    store_responses: bool,
+    transport: &'a str,
+    websocket_url: &'a str,
+    api_base_url: &'a str,
+    prompt_cache_key: &'a str,
+    request_prefix: &'a [ResponseItem],
     prompt_history: &'a [ResponseItem],
 }
 
@@ -17,6 +24,11 @@ struct RecordedModelResult {
     connection_generation: u32,
     server_reasoning_included: bool,
     duration_ns: u64,
+}
+
+pub(super) struct ModelCallOutcome {
+    pub(super) response: TurnResult,
+    pub(super) transport_continuation_valid: bool,
 }
 
 impl<S> ModelRun<S>
@@ -30,7 +42,7 @@ where
         call_index: u32,
         conversation: &mut ConversationState,
         factory: &ResponsesAttemptFactory,
-    ) -> Result<TurnResult> {
+    ) -> Result<ModelCallOutcome> {
         let (prompt_history, prompt_repaired) = conversation.prompt_history_with_repair();
         let previous_response_id = if prompt_repaired {
             None
@@ -78,12 +90,23 @@ where
         for item in &mut recorded_prompt_history {
             item.strip_id();
         }
+        let mut recorded_request_prefix = factory.profile().prefix().to_vec();
+        for item in &mut recorded_request_prefix {
+            item.strip_id();
+        }
         let step_input = RecordedModelCall {
             call_index,
             model: self.model.as_str(),
+            model_id_prefix: self.config.model_id_prefix.as_deref(),
             reasoning_mode: self.config.reasoning_mode.as_str(),
             effort: self.thinking.as_str(),
             fast_mode: self.fast_mode,
+            store_responses: self.config.store_responses,
+            transport: self.config.responses_transport.as_str(),
+            websocket_url: &self.config.websocket_url,
+            api_base_url: &self.config.api_base_url,
+            prompt_cache_key: factory.profile().prompt_cache_key(),
+            request_prefix: &recorded_request_prefix,
             prompt_history: &recorded_prompt_history,
         };
         let recovered = if let Some(steps) = &execution_steps {
@@ -102,8 +125,8 @@ where
         } else {
             None
         };
-        let recorded_result = if let Some(output) = recovered {
-            output
+        let (recorded_result, transport_continuation_valid) = if let Some(output) = recovered {
+            (output, false)
         } else {
             let success = match self.client.execute(request).instrument(span.clone()).await {
                 Ok(success) => success,
@@ -135,10 +158,11 @@ where
                 server_reasoning_included,
                 duration_ns: elapsed_ns(started_at),
             };
+            validate_provider_response_id(&output.response.id)?;
             if let Some(steps) = &execution_steps {
                 steps.complete(&step_id, &output).await?;
             }
-            output
+            (output, true)
         };
         let RecordedModelResult {
             response,
@@ -147,6 +171,7 @@ where
             server_reasoning_included,
             duration_ns,
         } = recorded_result;
+        validate_provider_response_id(&response.id)?;
         conversation.observe_server_reasoning(server_reasoning_included);
         if prompt_repaired {
             conversation.adopt_prompt_history(prompt_history);
@@ -162,7 +187,7 @@ where
         if let Some(usage) = &response.usage {
             self.stats.usage.add(usage);
         }
-        self.stats.last_response_id = Some(response.id.clone());
+        self.stats.last_response_id = transport_continuation_valid.then(|| response.id.clone());
         self.events.emit(
             AgentEventKind::ModelCallCompleted,
             ModelCallCompleted {
@@ -179,7 +204,10 @@ where
                 usage: response.usage.as_ref(),
             },
         )?;
-        Ok(response)
+        Ok(ModelCallOutcome {
+            response,
+            transport_continuation_valid,
+        })
     }
 
     pub(super) fn model_call_failed<T>(
@@ -202,6 +230,15 @@ where
         )?;
         Err(error)
     }
+}
+
+pub(super) fn validate_provider_response_id(response_id: &str) -> Result<()> {
+    if response_id.trim().is_empty() {
+        return Err(NanocodexError::MalformedResponse {
+            detail: "completed turn did not have a response ID",
+        });
+    }
+    Ok(())
 }
 
 pub(super) fn unsupported_tool_message(tools: &ToolRuntime, call: &CodeCall) -> Option<String> {
@@ -635,4 +672,16 @@ pub(super) const fn status(success: bool) -> &'static str {
 
 pub(super) const fn otel_status(success: bool) -> &'static str {
     if success { "OK" } else { "ERROR" }
+}
+
+#[cfg(test)]
+mod response_id_tests {
+    use super::validate_provider_response_id;
+
+    #[test]
+    fn provider_response_ids_must_contain_non_whitespace_text() {
+        assert!(validate_provider_response_id("response-1").is_ok());
+        assert!(validate_provider_response_id("").is_err());
+        assert!(validate_provider_response_id(" \n\t").is_err());
+    }
 }

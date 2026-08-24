@@ -178,6 +178,9 @@ test("Worker completion keeps a large retained snapshot out of the eager crossov
     free() { stats.resultReleases += 1; },
   };
   const runtime = defineRuntime({
+    // This is the simulated Worker isolate; the page-side Worker client owns
+    // the same-session reservation in this process.
+    reserveSessions: false,
     create: ({ sessionId = "large-worker-result" } = {}) => ({
       sessionId,
       prompt() {

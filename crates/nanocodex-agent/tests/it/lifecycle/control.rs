@@ -118,7 +118,17 @@ async fn adapter_developer_context_is_visible_at_safe_model_boundaries() {
         .append_developer_message("adapter session started")
         .await
         .unwrap();
-    assert!(initial.history().is_empty());
+    assert!(initial.history().iter().any(|item| matches!(
+        item,
+        ResponseItem::Message {
+            role: MessageRole::Developer,
+            content,
+            ..
+        } if content.iter().any(|part| matches!(
+            part,
+            ContentItem::InputText { text } if text.as_ref() == "adapter session started"
+        ))
+    )));
     assert!(!initial.workspace().is_empty());
 
     agent
@@ -130,19 +140,23 @@ async fn adapter_developer_context_is_visible_at_safe_model_boundaries() {
         .unwrap();
     let first = retained_attempts.recv().await.unwrap();
     let first_items = first.input_items().collect::<Vec<_>>();
+    assert!(first_items.iter().any(|item| matches!(
+        item,
+        ResponseItem::Message {
+            role: MessageRole::Developer,
+            content,
+            ..
+        } if content.iter().any(|part| matches!(
+            part,
+            ContentItem::InputText { text } if text.as_ref() == "adapter session started"
+        ))
+    )));
     assert!(matches!(
-        first_items.as_slice(),
-        [
-            ..,
-            ResponseItem::Message {
-                role: MessageRole::Developer,
-                ..
-            },
-            ResponseItem::Message {
-                role: MessageRole::User,
-                ..
-            }
-        ]
+        first_items.last(),
+        Some(ResponseItem::Message {
+            role: MessageRole::User,
+            ..
+        })
     ));
 
     let completed = agent

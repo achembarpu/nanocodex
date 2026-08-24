@@ -24,6 +24,7 @@ async function checkManaged() {
   });
   const accepted: string = await turn.accepted();
   const result: ManagedTurnResult = await turn.result();
+  await turn.result({ signal: new AbortController().signal });
   result.finalMessage;
   result.usage?.input_tokens;
   for await (const event of serverAgent.events.watch({ cursor: result.cursor ?? "0" })) {

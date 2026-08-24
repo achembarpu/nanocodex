@@ -306,6 +306,150 @@ describe("durable Multiplayer rooms", () => {
     expect(await sessionStateCount(agentId)).toBe(1);
   });
 
+  it("bounds quota reservation headers and retries the same deterministic create", async () => {
+    const originalQuota = testEnv.NANOCODEX_MULTIPLAYER_QUOTA;
+    const originalTimeout = testEnv.MANAGED_MULTIPLAYER_IO_TIMEOUT_MS;
+    const createId = randomCreateId();
+    testEnv.MANAGED_MULTIPLAYER_IO_TIMEOUT_MS = "20";
+    testEnv.NANOCODEX_MULTIPLAYER_QUOTA = {
+      getByName() {
+        return { fetch: () => new Promise<Response>(() => {}) } as unknown as DurableObjectStub;
+      },
+    } as unknown as Env["NANOCODEX_MULTIPLAYER_QUOTA"];
+
+    try {
+      const failed = await within(createRoomResponse("Ada", createId), "quota reservation headers");
+      expect(failed.status).toBe(503);
+      expect(await failed.json()).toEqual({ error: "multiplayer_capacity_unavailable" });
+    } finally {
+      testEnv.NANOCODEX_MULTIPLAYER_QUOTA = originalQuota;
+      testEnv.MANAGED_MULTIPLAYER_IO_TIMEOUT_MS = originalTimeout;
+    }
+
+    const recovered = await createRoomResponse("Ada", createId);
+    expect(recovered.status).toBe(201);
+    const receipt = await recovered.json<Omit<RoomReceipt, "cookie">>();
+    rooms.add(receipt.room_id);
+    await deleteTestRoom(receipt.room_id);
+  });
+
+  it("bounds quota receipt settlement after an ambiguous committed reservation", async () => {
+    const originalQuota = testEnv.NANOCODEX_MULTIPLAYER_QUOTA;
+    const originalTimeout = testEnv.MANAGED_MULTIPLAYER_IO_TIMEOUT_MS;
+    const createId = randomCreateId();
+    let reservedRoomId: string | undefined;
+    testEnv.MANAGED_MULTIPLAYER_IO_TIMEOUT_MS = "20";
+    testEnv.NANOCODEX_MULTIPLAYER_QUOTA = {
+      getByName(name: string) {
+        const quota = originalQuota.getByName(name);
+        return {
+          async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+            const request = new Request(input, init);
+            if (request.method === "POST" && new URL(request.url).pathname === "/rooms") {
+              reservedRoomId = (await request.clone().json<{ room_id: string }>()).room_id;
+              const committed = await quota.fetch(input, init);
+              expect(committed.ok).toBe(true);
+              await committed.body?.cancel();
+              return new Response(noncooperativeBody(), {
+                status: 201,
+                headers: { "content-type": "application/json" },
+              });
+            }
+            return quota.fetch(input, init);
+          },
+        } as DurableObjectStub;
+      },
+    } as Env["NANOCODEX_MULTIPLAYER_QUOTA"];
+
+    let failed: Response | undefined;
+    try {
+      failed = await within(createRoomResponse("Ada", createId), "quota receipt body");
+      expect(failed.status).toBe(503);
+      expect(await failed.json()).toEqual({ error: "multiplayer_capacity_unavailable" });
+    } finally {
+      testEnv.NANOCODEX_MULTIPLAYER_QUOTA = originalQuota;
+      testEnv.MANAGED_MULTIPLAYER_IO_TIMEOUT_MS = originalTimeout;
+    }
+    expect(await quotaLeaseCount(reservedRoomId!)).toBe(1);
+
+    const recovered = await createRoomResponse("Ada", createId);
+    expect(recovered.status).toBe(201);
+    const receipt = await recovered.json<Omit<RoomReceipt, "cookie">>();
+    expect(receipt.room_id).toBe(reservedRoomId);
+    rooms.add(receipt.room_id);
+    await deleteTestRoom(receipt.room_id);
+  });
+
+  it("bounds room initialization receipt parsing and reconciles the committed room", async () => {
+    const originalFetch = MultiplayerRoom.prototype.fetch;
+    const originalTimeout = testEnv.MANAGED_MULTIPLAYER_IO_TIMEOUT_MS;
+    const createId = randomCreateId();
+    let initializedRoomId: string | undefined;
+    testEnv.MANAGED_MULTIPLAYER_IO_TIMEOUT_MS = "20";
+    const fetchSpy = vi.spyOn(MultiplayerRoom.prototype, "fetch").mockImplementation(
+      async function (this: MultiplayerRoom, request: Request): Promise<Response> {
+        if (request.method === "PUT" && new URL(request.url).pathname === "/initialize") {
+          initializedRoomId = (await request.clone().json<{ room_id: string }>()).room_id;
+          const committed = await originalFetch.call(this, request);
+          expect(committed.ok).toBe(true);
+          await committed.body?.cancel();
+          rooms.add(initializedRoomId);
+          return new Response(noncooperativeBody(), {
+            status: 201,
+            headers: { "content-type": "application/json" },
+          });
+        }
+        return originalFetch.call(this, request);
+      },
+    );
+
+    try {
+      const failed = await within(createRoomResponse("Ada", createId), "room receipt body");
+      expect(failed.status).toBe(503);
+      expect(await failed.json()).toEqual({ error: "room_initialization_failed" });
+    } finally {
+      fetchSpy.mockRestore();
+      testEnv.MANAGED_MULTIPLAYER_IO_TIMEOUT_MS = originalTimeout;
+    }
+
+    const recovered = await createRoomResponse("Ada", createId);
+    expect(recovered.status).toBe(201);
+    const receipt = await recovered.json<Omit<RoomReceipt, "cookie">>();
+    expect(receipt.room_id).toBe(initializedRoomId);
+    await deleteTestRoom(receipt.room_id);
+  });
+
+  it("bounds nonsettling room initialization headers and reuses its reservation", async () => {
+    const originalRooms = testEnv.NANOCODEX_ROOMS;
+    const originalTimeout = testEnv.MANAGED_MULTIPLAYER_IO_TIMEOUT_MS;
+    const createId = randomCreateId();
+    let roomId: string | undefined;
+    testEnv.MANAGED_MULTIPLAYER_IO_TIMEOUT_MS = "20";
+    testEnv.NANOCODEX_ROOMS = {
+      getByName(name: string) {
+        roomId = name;
+        return { fetch: () => new Promise<Response>(() => {}) } as unknown as DurableObjectStub;
+      },
+    } as unknown as Env["NANOCODEX_ROOMS"];
+
+    try {
+      const failed = await within(createRoomResponse("Ada", createId), "room initialization headers");
+      expect(failed.status).toBe(503);
+      expect(await failed.json()).toEqual({ error: "room_initialization_failed" });
+      expect(await quotaLeaseCount(roomId!)).toBe(1);
+    } finally {
+      testEnv.NANOCODEX_ROOMS = originalRooms;
+      testEnv.MANAGED_MULTIPLAYER_IO_TIMEOUT_MS = originalTimeout;
+    }
+
+    const recovered = await createRoomResponse("Ada", createId);
+    expect(recovered.status).toBe(201);
+    const receipt = await recovered.json<Omit<RoomReceipt, "cookie">>();
+    expect(receipt.room_id).toBe(roomId);
+    rooms.add(receipt.room_id);
+    await deleteTestRoom(receipt.room_id);
+  });
+
   it("serializes quota release behind an in-flight room reservation", async () => {
     const { roomId } = testRoomIdentity();
     const quota = testEnv.NANOCODEX_MULTIPLAYER_QUOTA.getByName("global");
@@ -541,6 +685,106 @@ describe("durable Multiplayer rooms", () => {
     expect(observation.status).toBe(201);
     expect(observation.alarmDelay).not.toBeNull();
     expect(observation.alarmDelay!).toBeGreaterThan(500);
+  });
+
+  it("retains a child tombstone across eviction so held late initialization cannot recreate it", async () => {
+    const { roomId, agentId } = testRoomIdentity();
+    rooms.add(roomId);
+    const room = testEnv.NANOCODEX_ROOMS.getByName(roomId);
+    const first = await runInDurableObject(room, async (instance) => {
+      const mutable = instance as unknown as {
+        env: Env;
+        fetch(request: Request): Promise<Response>;
+      };
+      const originalEnv = mutable.env;
+      let childStarted!: () => void;
+      const started = new Promise<void>((resolve) => { childStarted = resolve; });
+      let releaseChild!: () => void;
+      const held = new Promise<void>((resolve) => { releaseChild = resolve; });
+      const child = originalEnv.NANOCODEX_SESSIONS.getByName(agentId);
+      mutable.env = {
+        ...originalEnv,
+        NANOCODEX_SESSIONS: {
+          idFromName(name: string) {
+            return originalEnv.NANOCODEX_SESSIONS.idFromName(name);
+          },
+          getByName(name: string) {
+            const session = originalEnv.NANOCODEX_SESSIONS.getByName(name);
+            return {
+              async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+                const request = new Request(input, init);
+                if (request.method === "PUT"
+                  && new URL(request.url).pathname === "/initialize") {
+                  childStarted();
+                  await held;
+                }
+                return session.fetch(input, init);
+              },
+            } as DurableObjectStub;
+          },
+        } as Env["NANOCODEX_SESSIONS"],
+      };
+      const initializing = mutable.fetch(new Request("https://room.internal/initialize", {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          room_id: roomId,
+          agent_id: agentId,
+          owner_id: USER_ID,
+          public_origin: ORIGIN,
+          owner_name: "Ada",
+          create_id_hash: randomHash(),
+          request_hash: randomHash(),
+          invite: "i".repeat(43),
+          member_id: crypto.randomUUID(),
+          member_token: "m".repeat(43),
+        }),
+      }));
+      await started;
+      const deleted = await child.fetch("https://session.internal/session", {
+        method: "DELETE",
+      });
+      releaseChild();
+      try {
+        const initialized = await initializing;
+        return { deleted: deleted.status, initialized: initialized.status };
+      } finally {
+        mutable.env = originalEnv;
+      }
+    });
+
+    expect(first).toEqual({ deleted: 204, initialized: 503 });
+    const child = testEnv.NANOCODEX_SESSIONS.getByName(agentId);
+    expect(await sessionStateCount(agentId)).toBe(0);
+    expect(await sessionInitializationState(agentId)).toBe("deleted");
+
+    await Promise.all([evictDurableObject(child), evictDurableObject(room)]);
+    const coldRetry = await child.fetch("https://session.internal/initialize", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        session_id: agentId,
+        owner_id: USER_ID,
+        public_origin: ORIGIN,
+        runtime_profile: "multiplayer",
+      }),
+    });
+    expect(coldRetry.status).toBe(409);
+    expect(await runDurableObjectAlarm(room)).toBe(true);
+    expect(await sessionStateCount(agentId)).toBe(0);
+    expect(await sessionInitializationState(agentId)).toBe("deleted");
+    expect(await roomCleanupState(room)).toMatchObject({ rooms: 1, status: "initializing" });
+
+    const cleaned = await room.fetch(
+      `https://room.internal/admin?room_id=${encodeURIComponent(roomId)}`,
+      {
+        method: "DELETE",
+      },
+    );
+    expect(cleaned.status).toBe(204);
+    rooms.delete(roomId);
+    expect(await sessionStateCount(agentId)).toBe(0);
+    expect(await sessionInitializationState(agentId)).toBe("deleted");
   });
 
   it("keeps an ambiguously initialized room leased for exact create replay", async () => {
@@ -1620,6 +1864,15 @@ async function sessionStateCount(agentId: string): Promise<number> {
   );
 }
 
+async function sessionInitializationState(agentId: string): Promise<string | undefined> {
+  return runInDurableObject(
+    testEnv.NANOCODEX_SESSIONS.getByName(agentId),
+    (_instance, state) => state.storage.sql.exec<{ state: string }>(
+      "SELECT state FROM session_initialization_ownership WHERE singleton = 1",
+    ).toArray()[0]?.state,
+  );
+}
+
 function testRoomIdentity(): { roomId: string; agentId: string } {
   const suffix = crypto.randomUUID().replaceAll("-", "").slice(0, 12);
   const agentId = `0198d214-0d9d-7a45-8a89-${suffix}`;
@@ -1747,6 +2000,49 @@ function randomHash(): string {
   return [...crypto.getRandomValues(new Uint8Array(32))]
     .map((byte) => byte.toString(16).padStart(2, "0"))
     .join("");
+}
+
+async function deleteTestRoom(roomId: string): Promise<void> {
+  const deleted = await SELF.fetch(`${ORIGIN}/v1/rooms/${roomId}`, {
+    method: "DELETE",
+    headers: admin,
+  });
+  expect(deleted.status).toBe(204);
+  rooms.delete(roomId);
+  await runInDurableObject(
+    testEnv.NANOCODEX_MULTIPLAYER_QUOTA.getByName("global"),
+    (_instance, state) => {
+      state.storage.sql.exec(
+        "DELETE FROM multiplayer_room_reservations WHERE room_id = ?",
+        roomId,
+      );
+      state.storage.sql.exec(
+        `UPDATE multiplayer_quota_counters
+         SET count = MAX(0, count - 1)
+         WHERE scope = 'room-creations'`,
+      );
+    },
+  );
+}
+
+function noncooperativeBody(): ReadableStream<Uint8Array> {
+  return new ReadableStream({
+    cancel() { return new Promise<void>(() => {}); },
+  });
+}
+
+async function within<Result>(promise: Promise<Result>, operation: string): Promise<Result> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(() => reject(new Error(`${operation} test timed out`)), 1_000);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 async function connect(websocketUrl: string, cookie: string): Promise<WebSocket> {

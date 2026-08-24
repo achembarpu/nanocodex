@@ -357,6 +357,206 @@ test("disposing a host owns a taken preconnect through handshake completion", as
   );
 });
 
+test("disposing a host rejects never-resolving socket factories and preconnects", async () => {
+  const directHandshake = deferred();
+  const direct = createBrowserHost({ createWebSocket: () => directHandshake.promise });
+  const directConnect = direct.connect("wss://direct.test", "secret", "session-1");
+  await direct.dispose();
+  await assert.rejects(directConnect, /disposed during WebSocket connection/);
+
+  const preconnectHandshake = deferred();
+  const preconnected = createBrowserHost({
+    createWebSocket: () => preconnectHandshake.promise,
+  });
+  const preconnect = preconnected.preconnect("wss://preconnect.test", "session-2");
+  await preconnected.dispose();
+  await assert.rejects(preconnect, /disposed during WebSocket connection/);
+});
+
+test("disposing a host rejects a never-resolving MPP socket factory", async () => {
+  const handshake = deferred();
+  const host = createBrowserHost({ mpp: { ws: () => handshake.promise } });
+  const connecting = host.connect("wss://paid.test", "mpp-managed", "session-1");
+
+  await host.dispose();
+  await assert.rejects(connecting, /disposed during WebSocket connection/);
+});
+
+test("disposing a host closes a CONNECTING socket before a late open", async () => {
+  const socket = new FakeWebSocket("wss://api.openai.test/v1/responses");
+  const host = createBrowserHost({ createWebSocket: () => socket });
+
+  const connecting = host.connect(socket.url, "host-managed", "session-1");
+  await Promise.resolve();
+  const rejected = assert.rejects(connecting, /disposed during WebSocket connection/);
+  await host.dispose();
+
+  await rejected;
+  assert.equal(socket.readyState, 3);
+  socket.open();
+  assert.deepEqual(JSON.parse(await host.send(1, "must-not-send")), {
+    ok: false,
+    reconnectable: true,
+    error: "WebSocket is no longer open",
+  });
+  assert.deepEqual(socket.sent, []);
+});
+
+test("host disposal isolates all close failures and completes every cleanup", async () => {
+  const failures = [
+    new Error("connecting close failed"),
+    new Error("first established close failed"),
+    new Error("second established close failed"),
+    new Error("preconnect close failed"),
+    new Error("code cleanup failed"),
+    new Error("onDispose failed"),
+  ];
+  const sockets = new Map([
+    ["wss://connecting.test", failingSocket("wss://connecting.test", failures[0])],
+    ["wss://first.test", failingSocket("wss://first.test", failures[1])],
+    ["wss://second.test", failingSocket("wss://second.test", failures[2], true)],
+    ["wss://preconnect.test", failingSocket("wss://preconnect.test", failures[3], true)],
+  ]);
+  sockets.get("wss://connecting.test").readyState = 0;
+  let mcpAborted = false;
+  const host = createBrowserHost({
+    createWebSocket: (endpoint) => sockets.get(endpoint),
+    mcp: {
+      cleanup: {
+        client: {
+          listTools(_params, { signal }) {
+            signal.addEventListener("abort", () => { mcpAborted = true; }, { once: true });
+            return new Promise(() => {});
+          },
+        },
+      },
+    },
+    onDispose: async () => { throw failures[5]; },
+    tools: {
+      cleanup: {
+        handler() {},
+        dispose() { throw failures[4]; },
+      },
+    },
+  });
+
+  await host.ready();
+  await host.connect("wss://first.test", "secret", "session-1");
+  await host.connect("wss://second.test", "secret", "session-2");
+  const connecting = host.connect("wss://connecting.test", "secret", "session-3");
+  void connecting.catch(() => {});
+  await Promise.resolve();
+  await host.preconnect("wss://preconnect.test", "session-4");
+
+  const disposal = host.dispose();
+  assert.strictEqual(host.dispose(), disposal);
+  await assert.rejects(disposal, (error) => {
+    assert.equal(error instanceof AggregateError, true);
+    assert.deepEqual(error.errors, failures);
+    return true;
+  });
+  await assert.rejects(connecting, /disposed during WebSocket connection/);
+  assert.equal(mcpAborted, true);
+  assert.strictEqual(host.dispose(), disposal);
+});
+
+test("host disposal owns post-open sockets until direct and MPP registration", async () => {
+  const unhandled = [];
+  const onUnhandled = (error) => { unhandled.push(error); };
+  process.on("unhandledRejection", onUnhandled);
+  try {
+    for (const [kind, asynchronous] of [["direct", false], ["mpp", true]]) {
+      const closeError = new Error(`${kind} close failed`);
+      const socket = new FakeWebSocket(`wss://${kind}.test`);
+      socket.readyState = FakeWebSocket.OPEN;
+      let closeCalls = 0;
+      socket.close = () => {
+        closeCalls += 1;
+        socket.readyState = 3;
+        if (asynchronous) return Promise.reject(closeError);
+        throw closeError;
+      };
+
+      let host;
+      let disposal;
+      const triggerDisposal = () => {
+        if (disposal) return;
+        disposal = host.dispose();
+        void disposal.catch(() => {});
+      };
+      let opened;
+      if (kind === "direct") {
+        opened = {
+          get socket() {
+            triggerDisposal();
+            return socket;
+          },
+        };
+        host = createBrowserHost({ createWebSocket: () => opened });
+      } else {
+        Object.defineProperty(socket, "addEventListener", {
+          configurable: true,
+          get() {
+            triggerDisposal();
+            return FakeWebSocket.prototype.addEventListener.bind(socket);
+          },
+        });
+        host = createBrowserHost({ mpp: { ws: () => socket } });
+      }
+
+      const connecting = host.connect(socket.url, "secret", `session-${kind}`);
+      await assert.rejects(connecting, /disposed during WebSocket connection/);
+      assert.ok(disposal);
+      assert.strictEqual(host.dispose(), disposal);
+      await assert.rejects(disposal, (error) => error === closeError);
+      assert.equal(closeCalls, 1);
+      await new Promise((resolve) => setImmediate(resolve));
+    }
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.off("unhandledRejection", onUnhandled);
+  }
+});
+
+test("reentrant host disposal returns one promise and performs each cleanup once", async () => {
+  const socket = new FakeWebSocket("wss://reentrant.test");
+  socket.readyState = FakeWebSocket.OPEN;
+  const calls = { close: 0, tool: 0, onDispose: 0 };
+  const reentrant = [];
+  let host;
+  socket.close = () => {
+    calls.close += 1;
+    reentrant.push(host.dispose());
+    socket.readyState = 3;
+  };
+  host = createBrowserHost({
+    createWebSocket: () => socket,
+    onDispose() {
+      calls.onDispose += 1;
+      reentrant.push(host.dispose());
+    },
+    tools: {
+      cleanup: {
+        handler() {},
+        dispose() {
+          calls.tool += 1;
+          reentrant.push(host.dispose());
+        },
+      },
+    },
+  });
+  await host.connect(socket.url, "secret", "session-reentrant");
+
+  const disposal = host.dispose();
+  assert.strictEqual(host.dispose(), disposal);
+  await disposal;
+
+  assert.deepEqual(calls, { close: 1, tool: 1, onDispose: 1 });
+  assert.equal(reentrant.length, 3);
+  assert.equal(reentrant.every((nested) => nested === disposal), true);
+  assert.strictEqual(host.dispose(), disposal);
+});
+
 test("browser host never exposes its host-managed credential marker", async () => {
   const socket = new FakeWebSocket("wss://chatgpt.test/backend-api/codex/responses");
   socket.readyState = FakeWebSocket.OPEN;
@@ -629,4 +829,15 @@ function deferred() {
     reject = fail;
   });
   return { promise, reject, resolve };
+}
+
+function failingSocket(url, error, asynchronous = false) {
+  const socket = new FakeWebSocket(url);
+  socket.readyState = FakeWebSocket.OPEN;
+  socket.close = () => {
+    socket.readyState = 3;
+    if (asynchronous) return Promise.reject(error);
+    throw error;
+  };
+  return socket;
 }

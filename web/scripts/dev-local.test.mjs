@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, join } from "node:path";
 import test from "node:test";
@@ -9,14 +10,18 @@ import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
 import {
+  LocalStackLifecycle,
+  assertLocalDevelopmentPortAvailable,
   localDevelopmentOrigin,
   localConnectorEnvironment,
   localDependencyRequirements,
+  localStackChildIsAlive,
   localStackChildOptions,
   loadRootEnvironment,
   managedChildEnvironment,
   parseLocalDevOptions,
   providerFreeWebEnvironment,
+  requireLocalProcessGroups,
   rejectWorkerEnvironmentFiles,
   resolveLocalAuthMode,
   stopLocalStackChildren,
@@ -34,6 +39,130 @@ import { prepareDevWasm } from "./check-dev-wasm.mjs";
 
 const execFileAsync = promisify(execFile);
 const devLocalScript = fileURLToPath(new URL("./dev-local.mjs", import.meta.url));
+const devLocalModuleUrl = new URL("./dev-local.mjs", import.meta.url).href;
+
+function fixtureProcessSource(role, { watchParent = false } = {}) {
+  return `
+    import { spawn } from "node:child_process";
+    ${watchParent
+      ? `import { watchLocalStackParent } from ${JSON.stringify(devLocalModuleUrl)};
+         watchLocalStackParent();`
+      : ""}
+    const descendant = spawn(
+      process.execPath,
+      ["--input-type=commonjs", "-e", "setInterval(() => {}, 1000)"],
+      { stdio: "ignore" },
+    );
+    const record = { role: ${JSON.stringify(role)}, leader: process.pid, descendant: descendant.pid };
+    if (process.send) process.send(record);
+    else process.stdout.write(JSON.stringify(record) + "\\n");
+    setInterval(() => {}, 1000);
+  `;
+}
+
+function lifecycleHarnessSource(roles) {
+  return `
+    import { LocalStackLifecycle } from ${JSON.stringify(devLocalModuleUrl)};
+    const lifecycle = new LocalStackLifecycle({ graceMs: 200 });
+    lifecycle.installSignalHandlers();
+    try {
+      ${roles.slice(0, -1).map((role) => `
+        lifecycle.spawn(
+          process.execPath,
+          ["--input-type=module", "-e", ${JSON.stringify(fixtureProcessSource(role))}],
+          { stdio: ["ignore", "inherit", "inherit"] },
+          ${JSON.stringify(role)},
+        );
+      `).join("\n")}
+      await lifecycle.run(
+        process.execPath,
+        ["--input-type=module", "-e", ${JSON.stringify(fixtureProcessSource(roles.at(-1)))}],
+        { stdio: ["ignore", "inherit", "inherit"] },
+        ${JSON.stringify(roles.at(-1))},
+      );
+    } catch (error) {
+      if (!lifecycle.signal) throw error;
+    } finally {
+      try { await lifecycle.stop(); } finally { lifecycle.removeSignalHandlers(); }
+    }
+  `;
+}
+
+function spawnJsonLineHarness(source) {
+  const child = spawn(process.execPath, ["--input-type=module", "-e", source], {
+    stdio: ["ignore", "pipe", "inherit"],
+  });
+  child.stdout.setEncoding("utf8");
+  let buffered = "";
+  const records = [];
+  const waiters = [];
+  child.stdout.on("data", (chunk) => {
+    buffered += chunk;
+    while (buffered.includes("\n")) {
+      const newline = buffered.indexOf("\n");
+      const line = buffered.slice(0, newline);
+      buffered = buffered.slice(newline + 1);
+      if (line) records.push(JSON.parse(line));
+    }
+    for (const waiter of waiters.splice(0)) waiter();
+  });
+  return { child, records, waiters };
+}
+
+async function waitForFixtureRecords(harness, count, timeoutMs = 2_000) {
+  const deadline = Date.now() + timeoutMs;
+  while (harness.records.length < count) {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) throw new Error(`received only ${harness.records.length} fixture records`);
+    await new Promise((resolveWait, rejectWait) => {
+      const timeout = setTimeout(
+        () => rejectWait(new Error(`received only ${harness.records.length} fixture records`)),
+        remaining,
+      );
+      harness.waiters.push(() => {
+        clearTimeout(timeout);
+        resolveWait();
+      });
+    });
+  }
+  return harness.records;
+}
+
+function processExit(child) {
+  return new Promise((resolveExit, rejectExit) => {
+    child.once("error", rejectExit);
+    child.once("exit", (code, signal) => resolveExit({ code, signal }));
+  });
+}
+
+async function assertProcessesExit(records, timeoutMs = 3_000) {
+  const pids = records.flatMap(({ leader, descendant }) => [leader, descendant]);
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const alive = pids.filter((pid) => {
+      try { process.kill(pid, 0); return true; } catch (error) {
+        if (error?.code === "ESRCH") return false;
+        throw error;
+      }
+    });
+    if (alive.length === 0) return;
+    await new Promise((resolveDelay) => setTimeout(resolveDelay, 20));
+  }
+  assert.fail(`fixture processes remained alive: ${pids.join(", ")}`);
+}
+
+function forceStopFixture(harness) {
+  if (harness.child.exitCode === null && harness.child.signalCode === null) {
+    harness.child.kill("SIGKILL");
+  }
+  for (const { leader, descendant } of harness.records) {
+    for (const pid of [-leader, descendant]) {
+      try { process.kill(pid, "SIGKILL"); } catch (error) {
+        if (error?.code !== "ESRCH" && error?.code !== "EPERM") throw error;
+      }
+    }
+  }
+}
 
 test("local development installs every package required to start the web stack", () => {
   const requirements = localDependencyRequirements();
@@ -44,6 +173,133 @@ test("local development installs every package required to start the web stack",
     "node_modules/wrangler/bin/wrangler.js",
   ]);
   assert.equal(requirements.length, 3);
+});
+
+test("completed one-shot commands surrender their process-group capabilities", async () => {
+  const lifecycle = new LocalStackLifecycle({ graceMs: 100 });
+  await lifecycle.run(
+    process.execPath,
+    ["-e", ""],
+    { stdio: "ignore" },
+    "one-shot fixture",
+  );
+  assert.equal(lifecycle.children.length, 0);
+  await lifecycle.stop();
+});
+
+test("an inaccessible reused process group is never treated as an owned live child", () => {
+  const inaccessible = () => {
+    const error = new Error("operation not permitted");
+    error.code = "EPERM";
+    throw error;
+  };
+  const child = { exitCode: 0, pid: 42_424, signalCode: null };
+
+  assert.equal(localStackChildIsAlive(child, inaccessible, "darwin"), false);
+  assert.equal(terminateLocalStackChild(child, "SIGKILL", inaccessible, "darwin"), false);
+});
+
+test("local development fails closed where descendant shutdown cannot be proved", () => {
+  assert.throws(
+    () => requireLocalProcessGroups("win32"),
+    /requires Unix process-group semantics/,
+  );
+  assert.doesNotThrow(() => requireLocalProcessGroups("darwin"));
+  assert.doesNotThrow(() => requireLocalProcessGroups("linux"));
+});
+
+test("the ChatGPT relay exits and releases its port when parent IPC disconnects before readiness", async () => {
+  const probe = createNetServer();
+  await new Promise((resolve, reject) => {
+    probe.once("error", reject);
+    probe.listen(0, "127.0.0.1", resolve);
+  });
+  const address = probe.address();
+  assert.ok(address && typeof address !== "string");
+  const port = address.port;
+  await new Promise((resolve, reject) => probe.close((error) => error ? reject(error) : resolve()));
+
+  const child = spawn(process.execPath, [devLocalScript, "--chatgpt-relay-child", String(port)], {
+    cwd: fileURLToPath(new URL("..", import.meta.url)),
+    env: process.env,
+    stdio: ["ignore", "ignore", "pipe", "ipc"],
+  });
+  let stderr = "";
+  let ready = false;
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  child.on("message", (message) => {
+    if (message?.type === "nanocodex.chatgpt-relay.ready") ready = true;
+  });
+  const exited = new Promise((resolve) => {
+    child.once("exit", (code, signal) => resolve({ code, signal }));
+  });
+  try {
+    child.disconnect();
+    const exit = await Promise.race([
+      exited,
+      new Promise((_, rejectExit) => {
+        setTimeout(
+          () => rejectExit(new Error(`pre-ready relay did not exit: ${stderr}`)),
+          5_000,
+        ).unref();
+      }),
+    ]);
+    assert.deepEqual(exit, { code: 0, signal: null });
+    assert.equal(ready, false);
+
+    const rebound = createNetServer();
+    try {
+      await new Promise((resolve, reject) => {
+        rebound.once("error", reject);
+        rebound.listen(port, "127.0.0.1", resolve);
+      });
+    } finally {
+      await new Promise((resolve, reject) => {
+        rebound.close((error) => error ? reject(error) : resolve());
+      });
+    }
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  }
+});
+
+test("the detached ChatGPT relay exits when its parent IPC channel disappears", async () => {
+  const child = spawn(process.execPath, [devLocalScript, "--chatgpt-relay-child"], {
+    cwd: fileURLToPath(new URL("..", import.meta.url)),
+    env: process.env,
+    stdio: ["ignore", "ignore", "pipe", "ipc"],
+  });
+  let stderr = "";
+  child.stderr.setEncoding("utf8");
+  child.stderr.on("data", (chunk) => { stderr += chunk; });
+  try {
+    await new Promise((resolveReady, rejectReady) => {
+      const timeout = setTimeout(
+        () => rejectReady(new Error(`relay readiness timed out: ${stderr}`)),
+        5_000,
+      );
+      child.once("error", rejectReady);
+      child.on("message", (message) => {
+        if (message?.type !== "nanocodex.chatgpt-relay.ready") return;
+        clearTimeout(timeout);
+        resolveReady();
+      });
+    });
+    child.disconnect();
+    const exit = await Promise.race([
+      new Promise((resolveExit) => child.once("exit", (code, signal) => resolveExit({ code, signal }))),
+      new Promise((_, rejectExit) => {
+        setTimeout(
+          () => rejectExit(new Error(`relay did not exit after IPC disconnect: ${stderr}`)),
+          5_000,
+        ).unref();
+      }),
+    ]);
+    assert.deepEqual(exit, { code: 0, signal: null });
+  } finally {
+    if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+  }
 });
 
 test("local web environment cannot inherit provider or Cloudflare deployment credentials", () => {
@@ -138,6 +394,15 @@ test("the actual Vite child launch cannot inherit or reload a provider sentinel"
       NANOCODEX_LOCAL_MODEL_ACCESS: "managed",
       NANOCODEX_LOCAL_MODEL_AUTH_MODE: "api_key",
     }, names);
+    const liveWebsiteLaunch = websiteChildLaunch(
+      inherited,
+      localDevelopmentOrigin(),
+      { CLOUDFLARE_LOAD_DEV_VARS_FROM_DOT_ENV: "false" },
+    );
+    assert.deepEqual(
+      liveWebsiteLaunch.options.stdio,
+      ["ignore", "inherit", "inherit", "ipc"],
+    );
     const websiteResult = await execFileAsync(
       websiteLaunch.command,
       websiteLaunch.arguments,
@@ -183,6 +448,10 @@ test("the Vite child disables env loading and rejects Wrangler dev-var files", a
       watch: { ignored: ["**/.env*", "**/.dev.vars*"] },
     },
   });
+  assert.deepEqual(
+    viteChildConfiguration("localhost", "5173"),
+    viteChildConfiguration("127.0.0.1", "5173"),
+  );
 
   const temporaryDirectory = await mkdtemp(join(tmpdir(), "nanocodex-dev-vars-"));
   try {
@@ -194,6 +463,29 @@ test("the Vite child disables env loading and rejects Wrangler dev-var files", a
   } finally {
     await rm(temporaryDirectory, { recursive: true, force: true });
   }
+});
+
+test("local development rejects a port already owned on either loopback family", async () => {
+  const listener = createNetServer();
+  await new Promise((resolveListen, rejectListen) => {
+    listener.once("error", rejectListen);
+    listener.listen(0, "127.0.0.1", resolveListen);
+  });
+  const address = listener.address();
+  assert.ok(address && typeof address === "object");
+  try {
+    await assert.rejects(
+      assertLocalDevelopmentPortAvailable("127.0.0.1", String(address.port)),
+      /local development port .* is already in use/,
+    );
+  } finally {
+    await new Promise((resolveClose, rejectClose) => {
+      listener.close((error) => error ? rejectClose(error) : resolveClose());
+    });
+  }
+  await assert.doesNotReject(
+    assertLocalDevelopmentPortAvailable("127.0.0.1", String(address.port)),
+  );
 });
 
 test("local stack children are isolated and shutdown still targets an exited group leader", async () => {
@@ -292,6 +584,81 @@ test("local stack shutdown kills a descendant after its process-group leader exi
         if (error?.code !== "ESRCH") throw error;
       }
     }
+  }
+});
+
+test("a repeated signal terminates an in-flight detached setup process group", {
+  skip: process.platform === "win32",
+}, async () => {
+  const harness = spawnJsonLineHarness(lifecycleHarnessSource(["setup"]));
+  try {
+    const exited = processExit(harness.child);
+    const records = await waitForFixtureRecords(harness, 1);
+    assert.equal(records[0].role, "setup");
+
+    assert.equal(harness.child.kill("SIGTERM"), true);
+    harness.child.kill("SIGTERM");
+    await Promise.race([
+      exited,
+      new Promise((_, rejectTimeout) => setTimeout(
+        () => rejectTimeout(new Error("setup orchestrator hung after repeated signal")),
+        2_000,
+      )),
+    ]);
+    await assertProcessesExit(records);
+  } finally {
+    forceStopFixture(harness);
+  }
+});
+
+test("shutdown terminates publisher and already-running website process groups", {
+  skip: process.platform === "win32",
+}, async () => {
+  const harness = spawnJsonLineHarness(lifecycleHarnessSource(["website", "publisher"]));
+  try {
+    const exited = processExit(harness.child);
+    const records = await waitForFixtureRecords(harness, 2);
+    assert.deepEqual(new Set(records.map(({ role }) => role)), new Set(["website", "publisher"]));
+
+    assert.equal(harness.child.kill("SIGINT"), true);
+    await Promise.race([
+      exited,
+      new Promise((_, rejectTimeout) => setTimeout(
+        () => rejectTimeout(new Error("publisher orchestrator did not exit after shutdown")),
+        2_000,
+      )),
+    ]);
+    await assertProcessesExit(records);
+  } finally {
+    forceStopFixture(harness);
+  }
+});
+
+test("abrupt orchestrator loss terminates the detached website child and descendants", {
+  skip: process.platform === "win32",
+}, async () => {
+  const childSource = fixtureProcessSource("website", { watchParent: true });
+  const parentSource = `
+    import { spawn } from "node:child_process";
+    const website = spawn(
+      process.execPath,
+      ["--input-type=module", "-e", ${JSON.stringify(childSource)}],
+      { detached: true, stdio: ["ignore", "ignore", "inherit", "ipc"] },
+    );
+    website.once("message", (record) => process.stdout.write(JSON.stringify(record) + "\\n"));
+    setInterval(() => {}, 1000);
+  `;
+  const harness = spawnJsonLineHarness(parentSource);
+  try {
+    const exited = processExit(harness.child);
+    const records = await waitForFixtureRecords(harness, 1);
+    assert.equal(records[0].role, "website");
+
+    assert.equal(harness.child.kill("SIGKILL"), true);
+    assert.deepEqual(await exited, { code: null, signal: "SIGKILL" });
+    await assertProcessesExit(records);
+  } finally {
+    forceStopFixture(harness);
   }
 });
 
@@ -458,7 +825,7 @@ test("missing localhost credentials fail without launching a login flow", async 
 });
 
 test("local development origin is the canonical loopback HTTP authority", () => {
-  assert.equal(localDevelopmentOrigin().origin, "http://localhost:5173");
+  assert.equal(localDevelopmentOrigin().origin, "http://127.0.0.1:5173");
   assert.equal(localDevelopmentOrigin("http://127.0.0.1:6123").port, "6123");
   for (const invalid of [
     "https://localhost:5173",

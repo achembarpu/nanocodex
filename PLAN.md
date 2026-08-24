@@ -64,6 +64,132 @@ instructions with the classifications already recorded in
 and classify every intervening commit as port/evaluate/defer/out-of-scope. Do
 not let an unreviewed upstream change silently redefine Nanocodex behavior.
 
+## Completed correctness gate: durability and recovery
+
+Durability correctness is the release blocker ahead of further managed-agent
+performance tuning. The model is documented in
+[`docs/DURABILITY.md`](docs/DURABILITY.md); prompt-cache interactions are in
+[`docs/PROMPT_CACHE_REVIEW.md`](docs/PROMPT_CACHE_REVIEW.md). Fixes proceed from the Rust
+journal and authoritative model owner outward to WASM, JavaScript, and the web
+projections.
+
+- [x] Make Cloudflare Agent construction atomic through startup validation,
+  event watching, and decoration. A late setup failure shuts down the real host
+  and releases the same persisted journal before returning the error.
+- [x] Remove fixed one-second passive managed prewarm polling. Subscriber
+  warmup failure is logged once; stale alarms do not retry it, while a real
+  accepted turn retains the normal typed recovery path.
+- [x] Replace process-local journal ownership with persisted monotonic owner
+  fences in every host store. Acquisition returns the newly installed token and
+  same-snapshot journal atomically; every append checks authority before
+  revision. Process-local Agent generations and caller-bound claims close clone
+  ABA, and two live Agents cannot regress history or prompt-cache lineage.
+- [x] Bind every replayable model step to the complete immutable request
+  profile: instructions, tool definitions, model, cache key, reasoning controls,
+  and every continuation-relevant request field.
+- [x] Commit active-cancellation and standalone-compaction checkpoints to the
+  portable journal, and emit contractual terminal events only after the owning
+  journal transition commits.
+- [x] Preserve typed reopen/blocked/ambiguous dispositions through WASM and the
+  managed/local controllers; do not map structural ownership failures to
+  ordinary retryable work.
+- [x] Close the remaining admission, claim, native snapshot-load, and local
+  ingress ordering races enumerated as D-04 through D-14.
+- [x] Close the adversarial follow-on findings D-15 through D-78: routed-prompt
+  admission, stale transcript terminal downgrade, unsafe JavaScript counters,
+  cold replay response-chain invalidation, replay acceptance ordering, managed
+  transient/alarm recovery, native backend races/schema validation, and local
+  transcript retention/corruption. The final review also applied the acceptance
+  rule to idle routed terminal replay and made corrupt per-thread transcript
+  sequences fail closed. The last hostile pass closed exact-ID reclaim after a
+  definitely-uncommitted terminal, developer/checkpoint ordering, compaction
+  rollback, warmup authorization, cancellation-safe release, fail-closed public
+  policy defaults, release-lane liveness, lossless bounded transcript migration,
+  managed create/delete cleanup races, pre-sharding session repair, and durable
+  provider-throttle backoff.
+  The release gate additionally closed committed-cancel acknowledgement,
+  operation-owned automatic compaction, pre-construction stable-session
+  reservation, managed terminal/cursor and retained-lifecycle repair, bounded
+  local recovery, browser socket/compiler cleanup, complete localhost child
+  ownership, egress body disposal, Worker-crash reservation release, and
+  durable developer-message visibility in the next model request.
+  The final browser-shaped review also made durable builders single-use across
+  clones, validated JavaScript Postgres authority schemas exactly, closed
+  reentrant browser-host socket ownership, preserved reopen disposition after a
+  fenced driver's shutdown, and made every reattached local terminal reload
+  commits missed while it had no journal observer. The final release review
+  aligned optimistic local prompt identity with the durable transcript,
+  released Cloudflare and Worker lifecycle capabilities on every disposal
+  path, strengthened JavaScript PostgreSQL counter-domain validation,
+  quarantined ambiguous credential refresh restoration, and removed
+  cross-tenant shard head-of-line blocking. The final browser/service
+  brutalism pass removed cross-tab Web Locks around model I/O, stopped display
+  deadlines from cancelling ambiguously live Turns, made managed history
+  startup retryable and abort-owned, scoped every transcript projection to its
+  durable turn, enforced cancellation `retry_at` across alarms and duplicate
+  requests, and restored failed Evals queries on remount.
+  The final hostile browser/reviewer pass made localhost port ownership
+  unambiguous across both loopback families, enforced managed admission retry
+  deadlines at the authoritative boundary, carried exact durable turn identity
+  across raw local events, bounded even non-cooperative history requests,
+  released managed observers on terminal detach, and stabilized history
+  projection identity and tool ordering across older-page prepends.
+  The final release gate globally coalesced non-contiguous same-turn transcript
+  groups, deduplicated retained/live terminal failures, separated managed
+  mutation lifetime from result observation, bounded half-open SSE readers,
+  retained browser Agents across route detachment while accepted work settles,
+  bounded every managed ownership RPC, permanently retired one-shot
+  account/subject identities before cleanup, compensated ambiguous create
+  commits, and preserved Worker failure delivery through presentation wrappers.
+  The final brutalism pass closed D-79 through D-98: recovery snapshot/buffer
+  duplication; raw policy diagnostics on both live and legacy retained reads;
+  the World collision-scan hot path; repeated legacy `AttemptStarted` replay and
+  definitely-uncommitted cancellation; latest-SSE cursor and independent cancel
+  lifetimes; browser Config, Turn, and recursive `Turn.agent` lease escape;
+  non-cooperative stream cancellation, frame/terminal byte bounds, and
+  first-terminal authority; local steering/cancel intent and unresolved-steer
+  crash recovery; grouped managed retention and bounded history; revision-CAS
+  subject shards, tombstone repair, and post-I/O authority checks; bounded room
+  initialization; deletion/runtime generations that reject late resurrection;
+  in-place PostgreSQL `BIGINT` to `NUMERIC` authority upgrades with exact empty
+  owner-residue acceptance; and replay compatibility for old attemptless journal
+  shapes without weakening live validation.
+- [ ] Give an intentionally incompatible retained browser snapshot an explicit
+  new-session/reset action. Semantic model-step identity now rejects changed
+  instructions or tools and stale authority has actionable reopen recovery, but
+  deliberate snapshot incompatibility still needs dedicated reset UX.
+- [x] Run the focused crash-boundary, two-owner, store-fence, disposition,
+  transcript-ingress, and independent-tab browser gates. The 2026-08-24
+  two-tab pass at the final WASM boundary proved stale-owner no-model-call
+  behavior and exact `FINAL_STALE_RECOVERY_OK` recovery with zero page errors;
+  the integrated build also passed a real GitHub API GET, native-touch mobile
+  turn, managed durable completion, local/managed reload, and every public web
+  route. The final remount/foreground pass proved cross-tab projection after a
+  missed observer interval, actionable offline recovery, native iPhone-SE touch
+  submission, nonzero mobile transcript geometry, and zero accessibility
+  violations. The final cold-stack pass additionally proved full-document local
+  and managed detach, exact-once reload, two-tab handoff and convergence,
+  cancellation, persisted steering, legacy diagnostic normalization, native
+  touch/IME, two-client Multiplayer chat and room-agent completion, reconnect,
+  and teardown. All eight canonical direct routes had zero page errors and zero
+  horizontal overflow; the four-device mobile matrix had zero layout findings.
+- [ ] Deploy the completed slice and verify production logs stay free of
+  ownership polling and false durability-policy errors.
+
+Correctness exit gate met: one fenced owner can execute against a journal at a
+time; every accepted operation has one recoverable disposition; cold reopen
+restores the latest safe model/cache checkpoint; projections never precede
+authority; and the Rust journal, restored snapshot, public result, and
+application terminal agree after every tested crash boundary.
+
+Known limits are deliberate and documented: ownership is non-expiring
+last-opener-wins authority rather than a lease/heartbeat; owner-fence exhaustion
+fails closed at `u64`, native Rust SQL revision exhaustion fails closed at
+`i64::MAX`, application transcripts remain ingress projections, and browser
+IndexedDB durability is origin-local rather than remote durability. Finished
+transcript rows are bounded; unfinished rows are retained until recovery or
+explicit resolution, and local admission fails closed at 32 rows per thread.
+
 ## Immediate working slice: embedded web and authenticated managed agents
 
 The managed-agent product is the active vertical slice. The evaluation

@@ -140,6 +140,19 @@ impl<F> NanocodexBuilder<F> {
         self
     }
 
+    /// Installs a cache identity only when the caller did not configure one.
+    ///
+    /// This is an internal composition seam for durable session owners that
+    /// need a stable pre-checkpoint lineage across process replacement.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn default_prompt_cache_key(mut self, prompt_cache_key: impl Into<String>) -> Self {
+        if self.prompt_cache.key.is_none() {
+            self.prompt_cache.key = Some(prompt_cache_key.into());
+        }
+        self
+    }
+
     /// Shares completed immutable-prefix warmups among builders cloned from
     /// this recipe.
     ///
@@ -207,6 +220,21 @@ impl<F> NanocodexBuilder<F> {
     #[must_use]
     pub fn execution_policy(mut self, policy: Arc<dyn execution::ExecutionPolicy>) -> Self {
         self.codex.execution.set_policy(policy);
+        self
+    }
+
+    /// Builds a fresh higher-layer execution policy for every root agent.
+    ///
+    /// This internal composition seam is for stateful policy recipes whose
+    /// builder remains cloneable while each built driver requires independent
+    /// lifecycle ownership.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn execution_policy_factory<P>(mut self, factory: P) -> Self
+    where
+        P: Fn() -> Result<Arc<dyn execution::ExecutionPolicy>> + Send + Sync + 'static,
+    {
+        self.codex.execution.set_policy_factory(Arc::new(factory));
         self
     }
 }

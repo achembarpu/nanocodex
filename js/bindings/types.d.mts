@@ -41,6 +41,12 @@ export type DurabilityRevision = string & {
   readonly [durabilityRevisionBrand]: "NanocodexDurabilityRevision";
 };
 
+/** Unsigned decimal owner generation. Strings preserve the complete Rust `u64` range. */
+declare const durabilityFenceBrand: unique symbol;
+export type DurabilityFence = string & {
+  readonly [durabilityFenceBrand]: "NanocodexDurabilityFence";
+};
+
 export type DurabilityStoredBatch = Readonly<{
   revision: DurabilityRevision;
   payload: string;
@@ -51,19 +57,35 @@ export type DurabilityStoredJournal = Readonly<{
   batches: readonly DurabilityStoredBatch[];
 }>;
 
+export type DurabilityAcquireRequest = Readonly<{
+  ownerId: string;
+}>;
+
+export type DurabilityAcquiredJournal = DurabilityStoredJournal & Readonly<{
+  ownerId: string;
+  fence: DurabilityFence;
+}>;
+
 export type DurabilityAppendRequest = Readonly<{
+  ownerId: string;
+  fence: DurabilityFence;
   expectedRevision: DurabilityRevision;
   payload: string;
 }>;
 
 export type DurabilityAppendResult =
   | Readonly<{ status: "appended"; revision: DurabilityRevision }>
+  | Readonly<{ status: "fenced" }>
   | Readonly<{ status: "conflict"; actualRevision: DurabilityRevision }>
   | Readonly<{ status: "not_committed"; message: string }>;
 
 /** Host capability consumed by the Rust/WASM durability driver. */
 export type DurabilityStore = Readonly<{
   load(journalId: string): DurabilityStoredJournal | Promise<DurabilityStoredJournal>;
+  acquire(
+    journalId: string,
+    request: DurabilityAcquireRequest,
+  ): DurabilityAcquiredJournal | Promise<DurabilityAcquiredJournal>;
   append(
     journalId: string,
     request: DurabilityAppendRequest,
@@ -76,6 +98,10 @@ export type MemoryDurabilityStore = DurabilityStore & Readonly<{
   snapshot(): DurabilityStoredJournal;
 }>;
 
+/**
+ * SQLite scalar accepted by the generic adapter. Revision and fence numbers
+ * must be nonnegative safe integers; return exact decimal TEXT for larger values.
+ */
 export type DurabilitySqliteValue = string | number | null;
 export type DurabilitySqliteRow = Record<string, DurabilitySqliteValue>;
 
@@ -290,9 +316,13 @@ export type Turn<agent extends Agent<object> = Agent<object>> = Readonly<{
   /**
    * Waits for execution-policy admission and returns its durable request ID.
    * Rejections are Errors whose `code` is `cancelled`, `blocked`, `conflict`,
-   * `retryable`, `invalid_request`, or `failed`.
+   * `retryable`, `reopen_required`, `invalid_request`, or `failed`.
    */
   accepted(): Promise<string | undefined>;
+  /**
+   * Waits for the terminal result. A `reopen_required` rejection means this
+   * Agent is stale and the same durable turn may be resumed only on a new Agent.
+   */
   result(): Promise<TurnResult>;
   steer(options: { input: PromptInput }): Promise<void>;
   cancel(): Promise<void>;

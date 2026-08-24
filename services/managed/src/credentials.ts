@@ -3,8 +3,11 @@ import {
   requireSameOriginMutation,
   type AccountAuthEnv,
 } from "./account-auth";
+import { fetchResponseWithDeadline } from "./deadline";
 
 type CredentialEnv = AccountAuthEnv & { NANOCODEX: Fetcher };
+
+const DEFAULT_OWNERSHIP_IO_TIMEOUT_MS = 10_000;
 
 const ROUTES = new Map<string, ReadonlySet<string>>([
   ["/v1/credentials", new Set(["GET"])],
@@ -52,30 +55,50 @@ export async function bindAgentCredential(
   binding: Fetcher,
   subject: string,
   userId: string,
+  timeoutMs = DEFAULT_OWNERSHIP_IO_TIMEOUT_MS,
 ): Promise<void> {
-  const response = await binding.fetch(`https://broker.internal/subjects/${subject}`, {
-    method: "PUT",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ user_id: userId }),
-  });
-  if (!response.ok) throw new Error(`credential subject binding failed with HTTP ${response.status}`);
-  await response.body?.cancel();
+  await fetchResponseWithDeadline(
+    binding,
+    `https://broker.internal/subjects/${subject}`,
+    {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ user_id: userId }),
+    },
+    timeoutMs,
+    "credential subject binding",
+    (response) => {
+      if (!response.ok) {
+        throw new Error(`credential subject binding failed with HTTP ${response.status}`);
+      }
+    },
+    { retryable: true },
+  );
 }
 
 export async function unbindAgentCredential(
   binding: Fetcher,
   subject: string,
   userId: string,
+  timeoutMs = DEFAULT_OWNERSHIP_IO_TIMEOUT_MS,
 ): Promise<void> {
-  const response = await binding.fetch(`https://broker.internal/subjects/${subject}`, {
-    method: "DELETE",
-    headers: { "content-type": "application/json" },
-    body: JSON.stringify({ user_id: userId }),
-  });
-  if (!response.ok && response.status !== 404) {
-    throw new Error(`credential subject unbinding failed with HTTP ${response.status}`);
-  }
-  await response.body?.cancel();
+  await fetchResponseWithDeadline(
+    binding,
+    `https://broker.internal/subjects/${subject}`,
+    {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ user_id: userId }),
+    },
+    timeoutMs,
+    "credential subject unbinding",
+    (response) => {
+      if (!response.ok && response.status !== 404) {
+        throw new Error(`credential subject unbinding failed with HTTP ${response.status}`);
+      }
+    },
+    { retryable: true },
+  );
 }
 
 function json(body: unknown, status: number): Response {

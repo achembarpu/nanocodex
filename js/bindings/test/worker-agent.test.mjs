@@ -486,6 +486,130 @@ test("Worker failures reject every pending operation and stale messages stay iso
   agent.dispose();
 });
 
+test("a duplicate Worker session neither boots nor fences and leaves the first usable", async () => {
+  const fixture = createFixture();
+  const firstWorker = new LoopbackWorker(fixture.createAgent);
+  const first = await createWorkerAgent(
+    { sessionId: "reserved-worker-session", harness: false },
+    { worker: firstWorker },
+  );
+  let duplicateWorkers = 0;
+
+  await assert.rejects(
+    createWorkerAgent(
+      { sessionId: "reserved-worker-session", harness: false },
+      { worker: () => { duplicateWorkers += 1; return new SilentWorker(); } },
+    ),
+    /session ID is already active/,
+  );
+  assert.equal(duplicateWorkers, 0, "duplicate detection precedes Worker construction and boot");
+  assert.equal(await first.session.compact(), undefined);
+
+  first.dispose();
+  const replacementFixture = createFixture();
+  const replacementWorker = new LoopbackWorker(replacementFixture.createAgent);
+  const replacement = await createWorkerAgent(
+    { sessionId: "reserved-worker-session", harness: false },
+    { worker: replacementWorker },
+  );
+  replacement.dispose();
+});
+
+test("post-boot Worker client construction awaits Agent rollback acknowledgement", async () => {
+  const worker = new MismatchedSessionWorker();
+  let settled = false;
+  const creation = createWorkerAgent(
+    { sessionId: "reserved-session", harness: false },
+    { worker },
+  ).finally(() => { settled = true; });
+
+  await waitFor(() => worker.rollback !== undefined);
+  assert.equal(settled, false);
+  assert.equal(worker.terminated, 0);
+  worker.acknowledgeRollback();
+  await assert.rejects(creation, /changed reserved session ID/);
+  assert.equal(worker.terminated, 1);
+
+  const fixture = createFixture();
+  const replacementWorker = new LoopbackWorker(fixture.createAgent);
+  const replacement = await createWorkerAgent(
+    { sessionId: "reserved-session", harness: false },
+    { worker: replacementWorker },
+  );
+  replacement.dispose();
+});
+
+test("a Worker crash queued after ready fails creation and releases its raw lease", async () => {
+  const worker = new ReadyThenCrashWorker();
+
+  await assert.rejects(
+    createWorkerAgent(
+      { sessionId: "ready-then-crashed", harness: false },
+      { worker },
+    ),
+    /crashed after ready/,
+  );
+  assert.equal(worker.terminated, 1);
+  assert.equal(worker.onerror, null);
+
+  const fixture = createFixture();
+  const replacementWorker = new LoopbackWorker(fixture.createAgent);
+  const replacement = await createWorkerAgent(
+    { sessionId: "ready-then-crashed", harness: false },
+    { worker: replacementWorker },
+  );
+  replacement.dispose();
+});
+
+test("Worker connection construction releases its reservation after every cleanup failure", async () => {
+  const failures = [
+    new Error("onerror installation failed"),
+    new Error("onmessage cleanup failed"),
+    new Error("onerror cleanup failed"),
+    new Error("onmessageerror cleanup failed"),
+    new Error("termination failed"),
+  ];
+  await assert.rejects(
+    createWorkerAgent(
+      { sessionId: "throwing-worker-construction", harness: false },
+      { worker: new ThrowingConstructionWorker(failures) },
+    ),
+    (error) => {
+      assert.equal(error instanceof AggregateError, true);
+      assert.deepEqual(error.errors, failures);
+      return true;
+    },
+  );
+
+  const fixture = createFixture();
+  const replacement = await createWorkerAgent(
+    { sessionId: "throwing-worker-construction", harness: false },
+    { worker: new LoopbackWorker(fixture.createAgent) },
+  );
+  replacement.dispose();
+});
+
+test("a throwing prewarmed Worker terminator cannot strand creation or its reservation", { timeout: 2_000 }, async (t) => {
+  const reported = [];
+  t.mock.method(globalThis.console, "error", (error) => reported.push(error));
+  const terminationFailure = new Error("prewarm termination failed");
+  const worker = new ThrowingPrewarmTerminatorWorker(terminationFailure);
+  const options = { sessionId: "throwing-prewarm-session", harness: false };
+  const preparation = prepareWorkerAgent(options, { worker });
+  void preparation.catch(() => {});
+  const creation = createWorkerAgent(options);
+
+  worker.fail("prewarm startup failed");
+  await assert.rejects(creation, /prewarm startup failed/);
+  assert.deepEqual(reported, [terminationFailure]);
+
+  const fixture = createFixture();
+  const replacement = await createWorkerAgent(options, {
+    worker: new LoopbackWorker(fixture.createAgent),
+  });
+  replacement.dispose();
+});
+
 test("Worker failure cleanup survives a throwing terminator", async (t) => {
   const reported = [];
   t.mock.method(globalThis.console, "error", (error) => reported.push(error));
@@ -726,6 +850,15 @@ test("pending RPCs and structured-clone configuration fail closed at explicit bo
   worker.crash("bounded cleanup");
   await assert.rejects(first, /bounded cleanup/);
   await assert.rejects(second, /bounded cleanup/);
+
+  const replacementFixture = createFixture();
+  const replacementWorker = new LoopbackWorker(replacementFixture.createAgent);
+  const replacement = await createWorkerAgent(
+    { sessionId: "root", harness: false },
+    { worker: replacementWorker },
+  );
+  replacement.dispose();
+  assert.equal(replacementWorker.terminated, 1);
 });
 
 test("host-managed transport is a clone-safe Worker descriptor without app callbacks", async () => {
@@ -1185,6 +1318,30 @@ class SilentWorker {
   terminate() { this.terminated += 1; }
 }
 
+class ThrowingPrewarmTerminatorWorker extends SilentWorker {
+  constructor(terminationFailure) {
+    super();
+    this.terminationFailure = terminationFailure;
+  }
+
+  fail(message) {
+    const prewarm = this.incoming.find(({ type }) => type === "prewarm");
+    this.onmessage?.({
+      data: {
+        channel: prewarm.channel,
+        error: { name: "Error", message },
+        protocol: prewarm.protocol,
+        type: "fatal",
+      },
+    });
+  }
+
+  terminate() {
+    this.terminated += 1;
+    throw this.terminationFailure;
+  }
+}
+
 class HarnessWorker {
   constructor() {
     this.onmessage = null;
@@ -1210,7 +1367,10 @@ class HarnessWorker {
         data: {
           channel: message.channel,
           protocol: message.protocol,
-          root: { agentId: "agent-1", sessionId: message.config.sessionId },
+          root: {
+            agentId: "agent-1",
+            sessionId: message.config.sessionId ?? "generated-session",
+          },
           type: "ready",
         },
       }));
@@ -1218,6 +1378,99 @@ class HarnessWorker {
   }
 
   terminate() { this.terminated += 1; }
+}
+
+class MismatchedSessionWorker {
+  constructor() {
+    this.onmessage = null;
+    this.onerror = null;
+    this.onmessageerror = null;
+    this.incoming = [];
+    this.rollback = undefined;
+    this.terminated = 0;
+  }
+
+  postMessage(data) {
+    const message = structuredClone(data);
+    this.incoming.push(message);
+    if (message.type === "boot") {
+      queueMicrotask(() => this.onmessage?.({
+        data: {
+          channel: message.channel,
+          protocol: message.protocol,
+          root: { agentId: "booted-agent", sessionId: "wrong-session" },
+          type: "ready",
+        },
+      }));
+    } else if (message.type === "rpc" && message.method === "agent.dispose") {
+      this.rollback = message;
+    }
+  }
+
+  acknowledgeRollback() {
+    const message = this.rollback;
+    this.rollback = undefined;
+    queueMicrotask(() => this.onmessage?.({
+      data: {
+        channel: message.channel,
+        id: message.id,
+        protocol: message.protocol,
+        type: "resolve",
+      },
+    }));
+  }
+
+  terminate() { this.terminated += 1; }
+}
+
+class ReadyThenCrashWorker {
+  constructor() {
+    this.onmessage = null;
+    this.onerror = null;
+    this.onmessageerror = null;
+    this.terminated = 0;
+  }
+
+  postMessage(message) {
+    if (message.type !== "boot") return;
+    this.onmessage?.({
+      data: {
+        channel: message.channel,
+        protocol: message.protocol,
+        root: { agentId: "raw-agent", sessionId: message.config.sessionId },
+        type: "ready",
+      },
+    });
+    queueMicrotask(() => this.onerror?.({ message: "crashed after ready" }));
+  }
+
+  terminate() { this.terminated += 1; }
+}
+
+class ThrowingConstructionWorker {
+  constructor(failures) {
+    this.failures = failures;
+    this.installing = true;
+  }
+
+  set onmessage(value) {
+    if (value === null) throw this.failures[1];
+  }
+
+  set onerror(value) {
+    if (this.installing && typeof value === "function") {
+      this.installing = false;
+      throw this.failures[0];
+    }
+    if (value === null) throw this.failures[2];
+  }
+
+  set onmessageerror(value) {
+    if (value === null) throw this.failures[3];
+  }
+
+  postMessage() {}
+  terminate() { throw this.failures[4]; }
 }
 
 class SynchronousHeartbeatWorker {
@@ -1301,6 +1554,9 @@ function createFixture(options = {}) {
     key: "worker-test",
     name: "Worker test Agent",
     type: "test",
+    // This runtime is the simulated Worker isolate. Its page-side client owns
+    // the reservation in the test process; a real Worker has a separate global.
+    reserveSessions: false,
     create: ({ sessionId = "root" } = {}) => rawAgent(sessionId),
     dispose: (agent) => agent.free(),
     subscribe(listener) {

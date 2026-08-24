@@ -13,7 +13,8 @@ import { canonicalConnectorPath } from "./connector-path";
 export { AgentSubjectDirectory, UserCredentialBroker } from "./broker";
 export { UserConnectorBroker } from "./connector-broker";
 
-const SUBJECT_DIRECTORY_NAME = "agent-subjects-v1";
+const LEGACY_SUBJECT_DIRECTORY_NAME = "agent-subjects-v1";
+const READINESS_SUBJECT_DIRECTORY_NAME = "agent-subject-readiness-v1";
 const SUBJECT = /^[A-Za-z0-9_-]{43,128}$/;
 const USER_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SUBJECT_HEADER = "x-nanocodex-subject";
@@ -171,7 +172,7 @@ export async function handleEgress(
     );
     let recovered = false;
     if (upstream.status === 401 && credential.kind === "chatgpt") {
-      await upstream.body?.cancel();
+      await cancelResponseBody(upstream);
       credential = await resolveCredential(env, userId, true, credential.revision);
       upstream = await fetchUpstream(
         env,
@@ -183,12 +184,12 @@ export async function handleEgress(
       recovered = true;
     }
     if (REDIRECT_STATUS.has(upstream.status)) {
-      await upstream.body?.cancel();
+      await cancelResponseBody(upstream);
       return auditedError(502, "upstream_redirect_blocked", request, url, operation.id, started);
     }
     if (upstream.status >= 400) {
       const status = upstream.status;
-      await upstream.body?.cancel();
+      await cancelResponseBody(upstream);
       return auditedError(status === 429 ? 503 : 502, "upstream_rejected", request, url, operation.id, started);
     }
     audit("allow", request, url, operation.id, started, { status: upstream.status, recovered });
@@ -269,7 +270,7 @@ async function handleControl(request: Request, url: URL, env: EgressEnv): Promis
     const body = await readJson(request, MAX_CONTROL_BODY_BYTES);
     const userId = stringField(body, "user_id");
     if (!USER_ID.test(userId ?? "")) return jsonError(400, "invalid_request");
-    return directory(env).fetch(`https://subjects.internal/v1/${request.method === "PUT" ? "bind" : "unbind"}`, {
+    return legacyDirectory(env).fetch(`https://subjects.internal/v1/${request.method === "PUT" ? "sharded-bind" : "sharded-unbind"}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ subject: subjectMatch[1], user_id: userId }),
@@ -357,15 +358,25 @@ async function handleReadiness(request: Request, env: EgressEnv): Promise<Respon
     return jsonError(404, "not_found");
   }
   try {
-    const [subjects, credentials] = await Promise.all([
-      directory(env).fetch("https://subjects.internal/v1/health"),
+    const [legacySubjects, shardedSubjects, credentials] = await Promise.all([
+      legacyDirectory(env).fetch("https://subjects.internal/v1/health"),
+      env.AGENT_SUBJECTS.getByName(READINESS_SUBJECT_DIRECTORY_NAME)
+        .fetch("https://subjects.internal/v1/health"),
       userBroker(env, "broker-readiness-v1").fetch("https://credentials.internal/v1/health"),
     ]);
-    if (!subjects.ok || !credentials.ok) {
-      await Promise.all([subjects.body?.cancel(), credentials.body?.cancel()]);
+    if (!legacySubjects.ok || !shardedSubjects.ok || !credentials.ok) {
+      await Promise.all([
+        cancelResponseBody(legacySubjects),
+        cancelResponseBody(shardedSubjects),
+        cancelResponseBody(credentials),
+      ]);
       return jsonError(503, "broker_not_ready");
     }
-    await Promise.all([subjects.body?.cancel(), credentials.body?.cancel()]);
+    await Promise.all([
+      cancelResponseBody(legacySubjects),
+      cancelResponseBody(shardedSubjects),
+      cancelResponseBody(credentials),
+    ]);
     return json({ ready: true }, 200);
   } catch { return jsonError(503, "broker_not_ready"); }
 }
@@ -464,7 +475,7 @@ async function fetchUpstream(
 }
 
 async function resolveSubject(env: EgressEnv, subject: string): Promise<string> {
-  const response = await directory(env).fetch("https://subjects.internal/v1/resolve", {
+  const response = await legacyDirectory(env).fetch("https://subjects.internal/v1/authoritative-resolve", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ subject }),
@@ -473,6 +484,10 @@ async function resolveSubject(env: EgressEnv, subject: string): Promise<string> 
     await readBoundedText(response, MAX_BROKER_RESPONSE_BYTES);
     throw new EgressFailure(response.status === 404 ? 403 : 503, "agent_subject_unavailable");
   }
+  return subjectUser(response);
+}
+
+async function subjectUser(response: Response): Promise<string> {
   const value = await response.json<Record<string, unknown>>();
   const userId = stringField(value, "user_id");
   if (!USER_ID.test(userId ?? "")) throw new EgressFailure(503, "invalid_subject_response");
@@ -534,14 +549,17 @@ async function replayableBody(request: Request, operation: ModelOperation): Prom
   return body;
 }
 
-function directory(env: EgressEnv): DurableObjectStub<AgentSubjectDirectory> {
-  return env.AGENT_SUBJECTS.getByName(SUBJECT_DIRECTORY_NAME);
+function legacyDirectory(env: EgressEnv): DurableObjectStub<AgentSubjectDirectory> {
+  return env.AGENT_SUBJECTS.getByName(LEGACY_SUBJECT_DIRECTORY_NAME);
 }
 function userBroker(env: EgressEnv, userId: string): DurableObjectStub<UserCredentialBroker> {
   return env.USER_CREDENTIALS.getByName(userId);
 }
 function connectorBroker(env: EgressEnv, userId: string): DurableObjectStub<UserConnectorBroker> {
   return env.USER_CONNECTORS.getByName(userId);
+}
+async function cancelResponseBody(response: Response): Promise<void> {
+  try { await response.body?.cancel(); } catch { /* Response disposal is best-effort. */ }
 }
 function localClaimEnabled(env: EgressEnv): boolean {
   const environment = env.ENVIRONMENT?.trim().toLowerCase();

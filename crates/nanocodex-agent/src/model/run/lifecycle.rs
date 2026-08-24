@@ -13,6 +13,37 @@ pub(super) struct WarmupOutcome {
     pub(super) server_reasoning_included: bool,
 }
 
+#[derive(Serialize)]
+struct RecordedCompactionCall<'a> {
+    after_model_call_index: u32,
+    model: &'a str,
+    model_id_prefix: Option<&'a str>,
+    reasoning_mode: &'a str,
+    effort: &'a str,
+    fast_mode: bool,
+    store_responses: bool,
+    transport: &'a str,
+    websocket_url: &'a str,
+    api_base_url: &'a str,
+    prompt_cache_key: &'a str,
+    request_prefix: &'a [ResponseItem],
+    prompt_history: &'a [ResponseItem],
+}
+
+#[derive(Deserialize, Serialize)]
+struct RecordedCompactionResult {
+    response_id: String,
+    status: String,
+    item: ResponseItem,
+    usage: Option<Usage>,
+    attempt: u32,
+    connection_generation: u32,
+    server_reasoning_included: bool,
+    duration_ns: u64,
+    time_to_first_event_ns: u64,
+    time_to_first_output_ns: Option<u64>,
+}
+
 pub(super) enum ModelTaskOutcome {
     Completed(String),
     Cancelled,
@@ -186,6 +217,9 @@ where
         factory: &ResponsesAttemptFactory,
         span: &tracing::Span,
     ) -> Result<WarmupExecution> {
+        if let Some(steps) = &self.execution_steps {
+            steps.authorize_model_effect("warmup").await?;
+        }
         let success = self
             .client
             .execute(factory.warmup(self.model, self.thinking, self.fast_mode))
@@ -260,7 +294,7 @@ where
         let request = factory.compaction(
             after_model_call_index,
             history.clone(),
-            history,
+            history.clone(),
             incremental_start,
             previous_response_id,
             trigger,
@@ -273,34 +307,108 @@ where
         if let Some(input_content) = &input_content {
             record_span_content(&span, "model.input", input_content);
         }
-        let success = match self.client.execute(request).instrument(span.clone()).await {
-            Ok(success) => success,
-            Err(error) => {
+        let execution_steps = self.execution_steps.clone();
+        let step_id = format!("compaction-{after_model_call_index}");
+        let mut recorded_prompt_history = history.iter().cloned().collect::<Vec<_>>();
+        for item in &mut recorded_prompt_history {
+            item.strip_id();
+        }
+        let mut recorded_request_prefix = factory.profile().prefix().to_vec();
+        for item in &mut recorded_request_prefix {
+            item.strip_id();
+        }
+        let step_input = RecordedCompactionCall {
+            after_model_call_index,
+            model: self.model.as_str(),
+            model_id_prefix: self.config.model_id_prefix.as_deref(),
+            reasoning_mode: self.config.reasoning_mode.as_str(),
+            effort: self.thinking.as_str(),
+            fast_mode: self.fast_mode,
+            store_responses: self.config.store_responses,
+            transport: self.config.responses_transport.as_str(),
+            websocket_url: &self.config.websocket_url,
+            api_base_url: &self.config.api_base_url,
+            prompt_cache_key: factory.profile().prompt_cache_key(),
+            request_prefix: &recorded_request_prefix,
+            prompt_history: &recorded_prompt_history,
+        };
+        let recovered = if let Some(steps) = &execution_steps {
+            match steps
+                .begin::<_, RecordedCompactionResult>(
+                    &step_id,
+                    "compaction",
+                    &step_input,
+                    crate::agent::execution::ExecutionRetry::Idempotent,
+                )
+                .await?
+            {
+                crate::agent::ExecutionStep::Execute => None,
+                crate::agent::ExecutionStep::Replay(output) => Some(output),
+            }
+        } else {
+            None
+        };
+        let recorded_result = if let Some(output) = recovered {
+            output
+        } else {
+            let success = match self.client.execute(request).instrument(span.clone()).await {
+                Ok(success) => success,
+                Err(error) => {
+                    span.record("status", "failed");
+                    span.record("otel.status_code", "ERROR");
+                    span.record("duration_ns", elapsed_ns(started_at));
+                    return self.compaction_failed(
+                        after_model_call_index,
+                        started_at,
+                        NanocodexError::Response(error.into()),
+                    );
+                }
+            };
+            let attempt = success.attempt();
+            let connection_generation = success.connection_generation();
+            let server_reasoning_included = success.server_reasoning_included();
+            let ResponsesOutput::Compaction(response) = success.into_output() else {
+                let error = NanocodexError::InvalidAttemptState {
+                    detail: "compaction returned a non-compaction response",
+                };
                 span.record("status", "failed");
                 span.record("otel.status_code", "ERROR");
                 span.record("duration_ns", elapsed_ns(started_at));
-                return self.compaction_failed(
-                    after_model_call_index,
-                    started_at,
-                    NanocodexError::Response(error.into()),
-                );
-            }
-        };
-        let attempt = success.attempt();
-        let connection_generation = success.connection_generation();
-        let server_reasoning_included = success.server_reasoning_included();
-        let ResponsesOutput::Compaction(response) = success.into_output() else {
-            let error = NanocodexError::InvalidAttemptState {
-                detail: "compaction returned a non-compaction response",
+                return self.compaction_failed(after_model_call_index, started_at, error);
             };
-            span.record("status", "failed");
-            span.record("otel.status_code", "ERROR");
-            span.record("duration_ns", elapsed_ns(started_at));
-            return self.compaction_failed(after_model_call_index, started_at, error);
+            let output = RecordedCompactionResult {
+                response_id: response.id,
+                status: response.status,
+                item: response.item,
+                usage: response.usage,
+                attempt,
+                connection_generation,
+                server_reasoning_included,
+                duration_ns: elapsed_ns(started_at),
+                time_to_first_event_ns: response.time_to_first_event_ns,
+                time_to_first_output_ns: response.time_to_first_output_ns,
+            };
+            validate_provider_response_id(&output.response_id)?;
+            if let Some(steps) = &execution_steps {
+                steps.complete(&step_id, &output).await?;
+            }
+            output
         };
-        let duration_ns = elapsed_ns(started_at);
-        span.record("model.response.id", response.id.as_str());
-        if let Some(content) = serialize_trace_content(&response.item) {
+        let RecordedCompactionResult {
+            response_id,
+            status,
+            item,
+            usage,
+            attempt,
+            connection_generation,
+            server_reasoning_included,
+            duration_ns,
+            time_to_first_event_ns,
+            time_to_first_output_ns,
+        } = recorded_result;
+        validate_provider_response_id(&response_id)?;
+        span.record("model.response.id", response_id.as_str());
+        if let Some(content) = serialize_trace_content(&item) {
             record_span_content(&span, "model.output_item", &content);
         }
         span.record("status", "completed");
@@ -308,26 +416,26 @@ where
         span.record("duration_ns", duration_ns);
         self.stats.model_duration_ns += duration_ns;
         self.stats.compaction_duration_ns += duration_ns;
-        if let Some(usage) = &response.usage {
+        if let Some(usage) = &usage {
             record_usage(&span, usage, self.model, self.fast_mode);
             self.stats.usage.add(usage);
         }
-        self.stats.last_response_id = Some(response.id.clone());
+        self.stats.last_response_id = Some(response_id.clone());
         self.events.emit(
             AgentEventKind::ModelCompactionCompleted,
             CompactionCompleted {
                 after_model_call_index,
-                response_id: &response.id,
+                response_id: &response_id,
                 attempt,
                 connection_generation,
-                status: &response.status,
+                status: &status,
                 duration_ns,
-                time_to_first_event_ns: response.time_to_first_event_ns,
-                time_to_first_output_ns: response.time_to_first_output_ns,
-                usage: response.usage.as_ref(),
+                time_to_first_event_ns,
+                time_to_first_output_ns,
+                usage: usage.as_ref(),
             },
         )?;
-        Ok((response.item, response.usage, server_reasoning_included))
+        Ok((item, usage, server_reasoning_included))
     }
 
     pub(super) fn compaction_failed<T>(

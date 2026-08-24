@@ -34,9 +34,9 @@ export const ConversationHistoryRail = memo(function ConversationHistoryRail({
   }, [mobileOpen, onClose]);
   const selected = conversations.find(({ id }) => id === selectedId);
   return <>
-    <button
+    <div
       className={mobileOpen ? "conversation-backdrop is-visible" : "conversation-backdrop"}
-      type="button" aria-hidden="true" tabIndex={-1} onPointerDown={onClose}
+      aria-hidden="true" onPointerDown={onClose}
     />
     <aside
       className={mobileOpen ? "conversation-sidebar is-mobile-open" : "conversation-sidebar"}

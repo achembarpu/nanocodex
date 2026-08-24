@@ -145,10 +145,12 @@ where
 {
     let session_id_text = session_id.to_string();
     let (commands, receiver) = mpsc::channel(COMMAND_CAPACITY);
+    let shutdown = DriverShutdown::default();
     let tools = spawner
         .tools
         .materialize(AgentHandle {
             commands: commands.downgrade(),
+            shutdown: shutdown.clone(),
         })?
         .for_session(&session_id_text);
     let execution = spawner.execution.start(
@@ -159,6 +161,7 @@ where
         origin.parent_session_id.as_deref(),
         initial_resume.as_ref().map(InitialResume::history_len),
     )?;
+    shutdown.set_execution_policy_owned(execution.identifies_prompts());
     let (events, event_stream) = EventSink::channel(session_id_text.clone());
     let initial_model = initial_resume
         .map(|initial| match initial {
@@ -179,7 +182,6 @@ where
         })
         .transpose()?;
     let transport_stats = Arc::new(TransportStats::default());
-    let shutdown = DriverShutdown::default();
     let agent = Nanocodex {
         commands,
         events: events.clone(),
@@ -206,16 +208,15 @@ where
     };
     let driver_task = async move {
         let outcome = driver.run().await;
-        if shutdown.requested() {
-            let outcome = outcome.and(execution.shutdown().await);
-            shutdown.complete(outcome);
-        } else if let Err(error) = outcome {
+        let outcome = outcome.and(execution.shutdown().await);
+        if let Err(error) = &outcome {
             tracing::error!(
                 target: "nanocodex",
                 error = %error,
                 "agent driver stopped with an error"
             );
         }
+        shutdown.complete(outcome);
     };
     spawn_driver(driver_task)?;
     Ok((agent, event_stream))

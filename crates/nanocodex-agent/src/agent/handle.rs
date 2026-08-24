@@ -35,6 +35,7 @@ impl Clone for Nanocodex {
 #[derive(Clone)]
 pub struct AgentHandle {
     pub(super) commands: mpsc::WeakSender<Command>,
+    pub(super) shutdown: DriverShutdown,
 }
 
 impl AgentHandle {
@@ -61,7 +62,7 @@ impl AgentHandle {
     /// Returns an error after the containing driver has stopped.
     pub async fn spawn_with(&self, options: SpawnOptions) -> Result<(Nanocodex, AgentEvents)> {
         let commands = self.commands()?;
-        request_spawn(&commands, options).await
+        request_spawn(&commands, &self.shutdown, options).await
     }
 
     /// Forks the containing agent's latest safe model boundary.
@@ -72,7 +73,7 @@ impl AgentHandle {
     /// after the containing agent driver has stopped.
     pub async fn fork(&self) -> Result<(Nanocodex, AgentEvents)> {
         let commands = self.commands()?;
-        request_fork(&commands, None).await
+        request_fork(&commands, &self.shutdown, None).await
     }
 
     fn commands(&self) -> Result<mpsc::Sender<Command>> {
@@ -218,14 +219,16 @@ impl Nanocodex {
             .await
             .is_err()
         {
-            return Err(NanocodexError::AgentStopped);
+            return Err(self.shutdown.stopped_error().await);
         }
         let request_id = if let Some(acceptance) = acceptance {
-            Some(
-                acceptance
-                    .await
-                    .map_err(|_| NanocodexError::AgentStopped)??,
-            )
+            Some(match acceptance.await {
+                Ok(Ok(request_id)) => request_id,
+                Ok(Err(NanocodexError::AgentStopped)) | Err(_) => {
+                    return Err(self.shutdown.stopped_error().await);
+                }
+                Ok(Err(error)) => return Err(error),
+            })
         } else {
             None
         };
@@ -233,6 +236,7 @@ impl Nanocodex {
             control: TurnControl {
                 key,
                 commands: self.commands.clone(),
+                shutdown: self.shutdown.clone(),
             },
             request_id,
             events: event_stream,
@@ -278,16 +282,21 @@ impl Nanocodex {
             .await
             .is_err()
         {
-            return Err(NanocodexError::AgentStopped);
+            return Err(self.shutdown.stopped_error().await);
         }
-        match route_receiver
-            .await
-            .map_err(|_| NanocodexError::AgentStopped)??
-        {
+        let route = match route_receiver.await {
+            Ok(Ok(route)) => route,
+            Ok(Err(NanocodexError::AgentStopped)) | Err(_) => {
+                return Err(self.shutdown.stopped_error().await);
+            }
+            Ok(Err(error)) => return Err(error),
+        };
+        match route {
             PromptRouteKind::Started => Ok(PromptRoute::Started(Turn {
                 control: TurnControl {
                     key,
                     commands: self.commands.clone(),
+                    shutdown: self.shutdown.clone(),
                 },
                 request_id: None,
                 events: event_stream,
@@ -306,9 +315,8 @@ impl Nanocodex {
     ///
     /// Returns an error if the agent driver has stopped.
     pub async fn set_thinking(&self, thinking: Thinking) -> Result<()> {
-        request_command(&self.commands, |result| Command::SetThinking {
-            thinking,
-            result,
+        request_command(&self.commands, &self.shutdown, |result| {
+            Command::SetThinking { thinking, result }
         })
         .await
     }
@@ -322,9 +330,8 @@ impl Nanocodex {
     ///
     /// Returns an error if the agent driver has stopped.
     pub async fn set_fast_mode(&self, enabled: bool) -> Result<()> {
-        request_command(&self.commands, |result| Command::SetFastMode {
-            enabled,
-            result,
+        request_command(&self.commands, &self.shutdown, |result| {
+            Command::SetFastMode { enabled, result }
         })
         .await
     }
@@ -363,7 +370,11 @@ impl Nanocodex {
     pub async fn compact(&self) -> Result<()> {
         let parent = tracing::Span::current();
         let parent = (!parent.is_disabled()).then_some(parent);
-        request_command(&self.commands, |result| Command::Compact { parent, result }).await
+        request_command(&self.commands, &self.shutdown, |result| Command::Compact {
+            parent,
+            result,
+        })
+        .await
     }
 
     /// Appends adapter-owned developer context at the next safe model boundary.
@@ -386,9 +397,8 @@ impl Nanocodex {
                 "developer message must not be empty".to_owned(),
             ));
         }
-        request_command(&self.commands, |result| Command::AppendDeveloperMessage {
-            text,
-            result,
+        request_command(&self.commands, &self.shutdown, |result| {
+            Command::AppendDeveloperMessage { text, result }
         })
         .await
     }
@@ -403,7 +413,10 @@ impl Nanocodex {
     ///
     /// Returns an error after the agent driver has stopped.
     pub async fn context(&self) -> Result<AgentSessionContext> {
-        request_command(&self.commands, |result| Command::Context { result }).await
+        request_command(&self.commands, &self.shutdown, |result| Command::Context {
+            result,
+        })
+        .await
     }
 
     /// Starts a clean sibling agent with the same private configuration,
@@ -428,7 +441,7 @@ impl Nanocodex {
     ///
     /// Returns an error after this agent's driver has stopped.
     pub async fn spawn_with(&self, options: SpawnOptions) -> Result<(Self, AgentEvents)> {
-        request_spawn(&self.commands, options).await
+        request_spawn(&self.commands, &self.shutdown, options).await
     }
 
     /// Forks from the latest safe model boundary into an independently driven
@@ -467,32 +480,45 @@ impl Nanocodex {
         &self,
         checkpoint: Option<Arc<CommittedSession>>,
     ) -> Result<(Self, AgentEvents)> {
-        request_fork(&self.commands, checkpoint).await
+        request_fork(&self.commands, &self.shutdown, checkpoint).await
     }
 }
 
 async fn request_fork(
     commands: &mpsc::Sender<Command>,
+    shutdown: &DriverShutdown,
     checkpoint: Option<Arc<CommittedSession>>,
 ) -> Result<(Nanocodex, AgentEvents)> {
-    request_command(commands, |result| Command::Fork { checkpoint, result }).await
+    request_command(commands, shutdown, |result| Command::Fork {
+        checkpoint,
+        result,
+    })
+    .await
 }
 
 async fn request_spawn(
     commands: &mpsc::Sender<Command>,
+    shutdown: &DriverShutdown,
     options: SpawnOptions,
 ) -> Result<(Nanocodex, AgentEvents)> {
-    request_command(commands, |result| Command::Spawn { options, result }).await
+    request_command(commands, shutdown, |result| Command::Spawn {
+        options,
+        result,
+    })
+    .await
 }
 
 pub(super) async fn request_command<T>(
     commands: &mpsc::Sender<Command>,
+    shutdown: &DriverShutdown,
     command: impl FnOnce(oneshot::Sender<Result<T>>) -> Command,
 ) -> Result<T> {
     let (result, receiver) = oneshot::channel();
-    commands
-        .send(command(result))
-        .await
-        .map_err(|_| NanocodexError::AgentStopped)?;
-    receiver.await.map_err(|_| NanocodexError::AgentStopped)?
+    if commands.send(command(result)).await.is_err() {
+        return Err(shutdown.stopped_error().await);
+    }
+    match receiver.await {
+        Ok(Err(NanocodexError::AgentStopped)) | Err(_) => Err(shutdown.stopped_error().await),
+        Ok(outcome) => outcome,
+    }
 }

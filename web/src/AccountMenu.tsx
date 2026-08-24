@@ -340,6 +340,7 @@ export function AccountMenu() {
       <button
         className="account-menu-trigger"
         type="button"
+        aria-label={accountLabel}
         aria-expanded={open}
         aria-haspopup="dialog"
         onClick={() => open ? close() : setOpen(true)}

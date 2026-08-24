@@ -3,9 +3,9 @@
 #![cfg_attr(docsrs, feature(doc_cfg))]
 
 pub use nanocodex_agent::{
-    AgentEvents, AgentSessionContext, CostStatus, EstimatedUsdCost, Nanocodex, NanocodexBuilder,
-    NanocodexError, PromptRequest, PromptRoute, ServiceTier, Turn, TurnControl, TurnResult,
-    TurnUsage, UsdAmount,
+    AgentEvents, AgentSessionContext, CostStatus, EstimatedUsdCost, ExecutionPolicyDisposition,
+    Nanocodex, NanocodexBuilder, NanocodexError, PromptRequest, PromptRoute, ServiceTier, Turn,
+    TurnControl, TurnResult, TurnUsage, UsdAmount,
 };
 pub use nanocodex_durability::DurableAgentExt;
 pub use nanocodex_oai_api::{Model, OpenAi, ReasoningMode, Thinking};
@@ -25,9 +25,9 @@ pub mod agent {
     pub use nanocodex_agent::rollout;
     pub use nanocodex_agent::{
         AgentEvents, AgentHandle, AgentSessionContext, CostStatus, EstimatedUsdCost,
-        ExecutionEnvironment, Nanocodex, NanocodexBuilder, NanocodexError, PromptRequest,
-        PromptRoute, Result, ServiceTier, SpawnOptions, Turn, TurnControl, TurnResult, TurnUsage,
-        UsdAmount, events, execution, input, session, usage,
+        ExecutionEnvironment, ExecutionPolicyDisposition, Nanocodex, NanocodexBuilder,
+        NanocodexError, PromptRequest, PromptRoute, Result, ServiceTier, SpawnOptions, Turn,
+        TurnControl, TurnResult, TurnUsage, UsdAmount, events, execution, input, session, usage,
     };
 }
 

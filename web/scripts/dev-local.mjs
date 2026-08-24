@@ -2,6 +2,7 @@ import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { readFile, readdir, stat } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
+import { connect as connectNet } from "node:net";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { Readable } from "node:stream";
@@ -149,7 +150,7 @@ export function parseLocalDevOptions(arguments_, environment = process.env) {
   return { requestedMode: requestedMode || undefined, withoutMultiplayer };
 }
 
-export function localDevelopmentOrigin(raw = "http://localhost:5173") {
+export function localDevelopmentOrigin(raw = "http://127.0.0.1:5173") {
   const origin = new URL(raw);
   if (
     origin.protocol !== "http:" ||
@@ -166,33 +167,79 @@ export function localDevelopmentOrigin(raw = "http://localhost:5173") {
   return origin;
 }
 
-async function main() {
-  loadRootEnvironment();
-  const environment = process.env;
-  if (process.argv.slice(2).length > 0) {
-    throw new Error("local development has one production-shaped account and managed-agent topology");
+export async function assertLocalDevelopmentPortAvailable(hostname, rawPort) {
+  const { server: { port } } = viteChildConfiguration(hostname, rawPort);
+  const occupied = await Promise.all([
+    loopbackPortIsListening("127.0.0.1", port),
+    loopbackPortIsListening("::1", port),
+  ]);
+  if (occupied.some(Boolean)) {
+    throw new Error(
+      `local development port ${port} is already in use; set NANOCODEX_DEV_ORIGIN to a free explicit loopback origin`,
+    );
   }
-  const origin = localDevelopmentOrigin(environment.NANOCODEX_DEV_ORIGIN);
-  const toolEnvironment = buildChildEnvironment(environment);
-  await run(process.execPath, [resolve(webRoot, "scripts/check-dev-wasm.mjs")], {
-    cwd: webRoot,
-    env: toolEnvironment,
+}
+
+function loopbackPortIsListening(host, port) {
+  return new Promise((resolveProbe, rejectProbe) => {
+    const socket = connectNet({ host, port });
+    let settled = false;
+    const finish = (result, error) => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      if (error) rejectProbe(error);
+      else resolveProbe(result);
+    };
+    socket.setTimeout(250, () => finish(true));
+    socket.once("connect", () => finish(true));
+    socket.once("error", (error) => {
+      if (["ECONNREFUSED", "EADDRNOTAVAIL", "EAFNOSUPPORT", "ENETUNREACH"]
+        .includes(error?.code)) {
+        finish(false);
+      } else {
+        finish(false, error);
+      }
+    });
   });
-  await rejectWorkerEnvironmentFiles();
-  const head = await gitHead(environment.NANOCODEX_REPO ?? repositoryRoot, toolEnvironment);
-  const mirrorToken = randomBytes(32).toString("base64url");
-  const adminToken = randomBytes(32).toString("base64url");
-  const localChatGptBootstrap = await readLocalChatGptBootstrap(environment);
-  const children = [];
-  const exits = [];
-  const signalHandlers = new Map();
-  let parentSignal;
-  let shutdown;
+}
+
+async function main() {
+  requireLocalProcessGroups();
+  const lifecycle = new LocalStackLifecycle();
+  lifecycle.installSignalHandlers();
 
   try {
-    await ensureLocalDependencies(toolEnvironment);
+    loadRootEnvironment();
+    const environment = process.env;
+    if (process.argv.slice(2).length > 0) {
+      throw new Error("local development has one production-shaped account and managed-agent topology");
+    }
+    const origin = localDevelopmentOrigin(environment.NANOCODEX_DEV_ORIGIN);
+    await assertLocalDevelopmentPortAvailable(origin.hostname, origin.port);
+    const toolEnvironment = buildChildEnvironment(environment);
+    await lifecycle.run(
+      process.execPath,
+      [resolve(webRoot, "scripts/check-dev-wasm.mjs")],
+      { cwd: webRoot, env: toolEnvironment },
+      "development WASM preflight",
+    );
+    await rejectWorkerEnvironmentFiles();
+    const head = await gitHead(
+      environment.NANOCODEX_REPO ?? repositoryRoot,
+      toolEnvironment,
+      (...arguments_) => lifecycle.run(...arguments_, "local Git HEAD inspection"),
+    );
+    const mirrorToken = randomBytes(32).toString("base64url");
+    const adminToken = randomBytes(32).toString("base64url");
+    const localChatGptBootstrap = await readLocalChatGptBootstrap(environment);
 
-    await run(process.execPath, [
+    await ensureLocalDependencies(
+      toolEnvironment,
+      (...arguments_) => lifecycle.run(...arguments_, "local dependency installation"),
+    );
+
+    await lifecycle.run(process.execPath, [
       resolve(webRoot, "node_modules/wrangler/bin/wrangler.js"),
       "d1",
       "migrations",
@@ -201,16 +248,16 @@ async function main() {
       "--local",
       "--env",
       "development",
-    ], { cwd: webRoot, env: { ...toolEnvironment, CI: "true" } });
+    ], { cwd: webRoot, env: { ...toolEnvironment, CI: "true" } }, "local D1 migration");
 
     const relayLaunch = localChatGptRelayChildLaunch(toolEnvironment);
-    const relayChild = spawn(
+    const relay = lifecycle.spawn(
       relayLaunch.command,
       relayLaunch.arguments,
       relayLaunch.options,
+      "local ChatGPT transport relay",
     );
-    children.push(relayChild);
-    exits.push(childExit(relayChild, "local ChatGPT transport relay"));
+    const relayChild = relay.child;
     const relayUrl = await waitForLocalChatGptRelay(relayChild);
 
     const websiteLaunch = websiteChildLaunch(environment, origin, {
@@ -227,39 +274,20 @@ async function main() {
       ...localConnectorEnvironment(environment),
     });
     const webEnvironment = websiteLaunch.options.env;
-    children.push(spawn(
+    const website = lifecycle.spawn(
       websiteLaunch.command,
       websiteLaunch.arguments,
       websiteLaunch.options,
-    ));
-    exits.push(childExit(children.at(-1), "web multi-Worker stack"));
-    for (const signal of ["SIGINT", "SIGTERM"]) {
-      const handler = () => {
-        if (!parentSignal) parentSignal = signal;
-        if (!shutdown) {
-          shutdown = stopLocalStackChildren(children, exits, { signal });
-          void shutdown.catch(() => {});
-          return;
-        }
-        for (const child of children) {
-          try {
-            terminateLocalStackChild(child, "SIGKILL");
-          } catch (error) {
-            process.stderr.write(`Failed to force local process-group shutdown: ${errorMessage(error)}\n`);
-          }
-        }
-      };
-      signalHandlers.set(signal, handler);
-      process.once(signal, handler);
-    }
+      "web multi-Worker stack",
+    );
 
     await waitForHttp(
       new URL("/api/health", origin),
-      children,
+      [relayChild, website.child],
       (response) => verifyLocalHealthResponse(response),
     );
 
-    await run(process.execPath, [resolve(webRoot, "scripts/publish-repository.mjs")], {
+    await lifecycle.run(process.execPath, [resolve(webRoot, "scripts/publish-repository.mjs")], {
       cwd: webRoot,
       env: {
         ...webEnvironment,
@@ -268,24 +296,36 @@ async function main() {
         NANOCODEX_GIT_TOKEN: mirrorToken,
         NANOCODEX_REPO: environment.NANOCODEX_REPO ?? repositoryRoot,
       },
-    });
+    }, "local repository publisher");
     await verifyLocalState(origin, head, {
       environment: toolEnvironment,
+      verifyGit: (verifyOrigin, verifyHead, verifyEnvironment) =>
+        verifyLocalGitAdvertisement(
+          verifyOrigin,
+          verifyHead,
+          verifyEnvironment,
+          (...arguments_) => lifecycle.run(...arguments_, "local Git readiness inspection"),
+        ),
     });
     process.stderr.write(
       `Nanocodex local Workers are ready at ${origin.origin} (${head.slice(0, 7)}; `
       + "repository published; evals migrated; managed agents ready).\n",
     );
 
-    const exited = await Promise.race(exits);
-    if (!parentSignal && exited.code !== 0) {
+    const exited = await Promise.race([relay.exit, website.exit]);
+    if (!lifecycle.signal && exited.code !== 0) {
       throw new Error(`${exited.name} exited with ${exited.code ?? exited.signal}`);
     }
-    process.exitCode = exited.code ?? signalExitCode(exited.signal ?? parentSignal);
+    process.exitCode = exited.code ?? signalExitCode(exited.signal ?? lifecycle.signal);
+  } catch (error) {
+    if (!lifecycle.signal) throw error;
+    process.exitCode = signalExitCode(lifecycle.signal);
   } finally {
-    for (const [signal, handler] of signalHandlers) process.removeListener(signal, handler);
-    shutdown ??= stopLocalStackChildren(children, exits);
-    await shutdown;
+    try {
+      await lifecycle.stop();
+    } finally {
+      lifecycle.removeSignalHandlers();
+    }
   }
 }
 
@@ -335,7 +375,11 @@ export function viteChildConfiguration(hostname, rawPort) {
   return {
     envDir: false,
     server: {
-      host: hostname,
+      // Node may resolve `localhost` to only ::1 while the browser/HMR client
+      // independently selects 127.0.0.1. Binding the Vite child explicitly to
+      // IPv4 makes one authority own both document and WebSocket traffic and
+      // lets strictPort reject an existing wildcard listener.
+      host: hostname === "localhost" ? "127.0.0.1" : hostname,
       port,
       strictPort: true,
       watch: { ignored: ["**/.env*", "**/.dev.vars*"] },
@@ -361,7 +405,9 @@ export function websiteChildLaunch(
     options: localStackChildOptions({
       cwd: webRoot,
       env: providerFreeWebEnvironment(environment, overrides),
-      stdio: sentinelNames.length > 0 ? ["ignore", "pipe", "inherit"] : "inherit",
+      stdio: sentinelNames.length > 0
+        ? ["ignore", "pipe", "inherit"]
+        : ["ignore", "inherit", "inherit", "ipc"],
     }),
   };
 }
@@ -423,10 +469,16 @@ export function localStackChildOptions(options, platform = process.platform) {
 }
 
 async function runViteChild(hostname, port) {
+  const stopWatchingParent = watchLocalStackParent();
   const { createServer } = await import("vite");
   const server = await createServer(viteChildConfiguration(hostname, port));
-  await server.listen();
-  server.printUrls();
+  try {
+    await server.listen();
+    server.printUrls();
+  } catch (error) {
+    stopWatchingParent();
+    throw error;
+  }
 }
 
 function printEnvironmentSentinel(names) {
@@ -451,10 +503,43 @@ async function sendManagedReadySentinel() {
   process.disconnect();
 }
 
-async function runLocalChatGptRelayChild() {
-  if (!process.send) throw new Error("local ChatGPT transport relay requires IPC");
+async function runLocalChatGptRelayChild(port = 0) {
+  let server;
+  let serverClosing = false;
+  const sockets = new Set();
+  let parentDisconnected = !process.connected;
+  if (!process.send && !parentDisconnected) {
+    throw new Error("local ChatGPT transport relay requires IPC");
+  }
+  const closeAfterParentDisconnect = () => {
+    parentDisconnected = true;
+    if (!server) return;
+    if (!serverClosing) {
+      serverClosing = true;
+      server.close();
+    }
+    for (const socket of sockets) socket.destroy();
+  };
+  process.once("disconnect", closeAfterParentDisconnect);
+  if (parentDisconnected) {
+    process.removeListener("disconnect", closeAfterParentDisconnect);
+    return;
+  }
+
   const { startRelay } = await import("../container/relay.mjs");
-  const server = startRelay({ host: "127.0.0.1", port: 0 });
+  if (parentDisconnected || !process.connected) {
+    process.removeListener("disconnect", closeAfterParentDisconnect);
+    return;
+  }
+  server = startRelay({ host: "127.0.0.1", port });
+  server.on("connection", (socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+  });
+  server.once("close", () => {
+    process.removeListener("disconnect", closeAfterParentDisconnect);
+  });
+  if (parentDisconnected || !process.connected) closeAfterParentDisconnect();
   await new Promise((resolveListening, rejectListening) => {
     if (server.listening) {
       resolveListening();
@@ -463,16 +548,41 @@ async function runLocalChatGptRelayChild() {
     server.once("listening", resolveListening);
     server.once("error", rejectListening);
   });
+  if (parentDisconnected || !process.connected) {
+    closeAfterParentDisconnect();
+    return;
+  }
   const address = server.address();
   if (!address || typeof address === "string") {
     server.close();
     throw new Error("local ChatGPT transport relay has no TCP address");
   }
   await new Promise((resolveSend, rejectSend) => {
-    process.send({
-      type: "nanocodex.chatgpt-relay.ready",
-      url: `http://127.0.0.1:${address.port}/`,
-    }, (error) => error ? rejectSend(error) : resolveSend());
+    const onSend = (error) => {
+      if (!error) {
+        resolveSend();
+        return;
+      }
+      if (
+        parentDisconnected
+        || !process.connected
+        || error.code === "EPIPE"
+        || error.code === "ERR_IPC_CHANNEL_CLOSED"
+      ) {
+        closeAfterParentDisconnect();
+        resolveSend();
+        return;
+      }
+      rejectSend(error);
+    };
+    try {
+      process.send({
+        type: "nanocodex.chatgpt-relay.ready",
+        url: `http://127.0.0.1:${address.port}/`,
+      }, onSend);
+    } catch (error) {
+      onSend(error);
+    }
   });
 }
 
@@ -565,7 +675,7 @@ export async function verifyLocalModelPreconnect(
   }
 }
 
-async function ensureLocalDependencies(environment) {
+async function ensureLocalDependencies(environment, execute = run) {
   const packages = localDependencyRequirements();
   const missing = [];
   for (const { root, requiredFiles } of packages) {
@@ -585,7 +695,7 @@ async function ensureLocalDependencies(environment) {
   }
   if (missing.length === 0) return;
   process.stderr.write("Preparing missing local Cloudflare Worker dependencies.\n");
-  await Promise.all(missing.map((root) => run("npm", ["ci", "--prefix", root], {
+  await Promise.all(missing.map((root) => execute("npm", ["ci", "--prefix", root], {
     cwd: repositoryRoot,
     env: environment,
   })));
@@ -1200,8 +1310,8 @@ function localFetch(url, signal, init = {}) {
   });
 }
 
-async function gitHead(repository, environment) {
-  const result = await run("git", ["rev-parse", "HEAD"], {
+async function gitHead(repository, environment, execute = run) {
+  const result = await execute("git", ["rev-parse", "HEAD"], {
     cwd: repository,
     capture: true,
     env: environment,
@@ -1209,6 +1319,116 @@ async function gitHead(repository, environment) {
   const head = result.trim();
   if (!/^[a-f0-9]{40}$/.test(head)) throw new Error("local Git HEAD is invalid");
   return head;
+}
+
+export class LocalStackLifecycle {
+  #children = [];
+  #exits = [];
+  #graceMs;
+  #handlers = new Map();
+  #shutdown;
+  #signal;
+
+  constructor({ graceMs = 2_000 } = {}) {
+    if (!Number.isSafeInteger(graceMs) || graceMs < 1) {
+      throw new Error("local process-group shutdown grace must be a positive integer");
+    }
+    this.#graceMs = graceMs;
+  }
+
+  get children() {
+    return this.#children;
+  }
+
+  get signal() {
+    return this.#signal;
+  }
+
+  installSignalHandlers() {
+    if (this.#handlers.size > 0) throw new Error("local signal ownership was already installed");
+    for (const signal of ["SIGINT", "SIGTERM"]) {
+      const handler = () => {
+        this.#signal ??= signal;
+        if (!this.#shutdown) {
+          const shutdown = this.stop(signal);
+          void shutdown.catch(() => {});
+          return;
+        }
+        this.#forceStop();
+      };
+      this.#handlers.set(signal, handler);
+      process.on(signal, handler);
+    }
+  }
+
+  removeSignalHandlers() {
+    for (const [signal, handler] of this.#handlers) process.removeListener(signal, handler);
+    this.#handlers.clear();
+  }
+
+  spawn(command, arguments_, options, name = command) {
+    if (this.#shutdown || this.#signal) {
+      throw new Error(`cannot start ${name} while local shutdown is in progress`);
+    }
+    const child = spawn(command, arguments_, localStackChildOptions(options));
+    const exit = childExit(child, name);
+    void exit.catch(() => {});
+    this.#children.push(child);
+    this.#exits.push(exit);
+    return { child, exit };
+  }
+
+  async run(command, arguments_, { capture = false, ...options } = {}, name = command) {
+    const stdio = capture ? ["ignore", "pipe", "inherit"] : "inherit";
+    const { child } = this.spawn(command, arguments_, { ...options, stdio }, name);
+    let stdout = "";
+    if (capture) {
+      child.stdout.setEncoding("utf8").on("data", (chunk) => { stdout += chunk; });
+    }
+    await new Promise((resolveRun, rejectRun) => {
+      child.once("error", rejectRun);
+      child.once("close", (code, signal) => {
+        if (code === 0) resolveRun();
+        else rejectRun(new Error(`${command} exited with ${code ?? signal}`));
+      });
+    });
+    if (!await waitForLocalStackGroups([child], this.#graceMs)) {
+      throw new Error(`${name} left a live process group after its command exited`);
+    }
+    const retained = this.#children.indexOf(child);
+    if (retained >= 0) {
+      this.#children.splice(retained, 1);
+      this.#exits.splice(retained, 1);
+    }
+    return stdout;
+  }
+
+  stop(signal = this.#signal ?? "SIGTERM") {
+    if (!this.#shutdown) {
+      const stopping = stopLocalStackChildren(this.#children, this.#exits, {
+        graceMs: this.#graceMs,
+        signal,
+      });
+      this.#shutdown = stopping.then(() => {
+        this.#children.length = 0;
+        this.#exits.length = 0;
+      });
+      void this.#shutdown.catch(() => {});
+    }
+    return this.#shutdown;
+  }
+
+  #forceStop() {
+    for (const child of this.#children) {
+      try {
+        terminateLocalStackChild(child, "SIGKILL");
+      } catch (error) {
+        process.stderr.write(
+          `Failed to force local process-group shutdown: ${errorMessage(error)}\n`,
+        );
+      }
+    }
+  }
 }
 
 function run(command, arguments_, { capture = false, ...options } = {}) {
@@ -1225,6 +1445,41 @@ function run(command, arguments_, { capture = false, ...options } = {}) {
       else rejectRun(new Error(`${command} exited with ${code ?? signal}`));
     });
   });
+}
+
+export function watchLocalStackParent({
+  kill = process.kill,
+  platform = process.platform,
+  processObject = process,
+} = {}) {
+  if (typeof processObject.send !== "function") {
+    throw new Error("local detached child requires an IPC parent watchdog");
+  }
+  let watching = true;
+  const onDisconnect = () => {
+    if (!watching) return;
+    watching = false;
+    if (platform === "win32") {
+      processObject.exit(1);
+      return;
+    }
+    try {
+      kill(-processObject.pid, "SIGTERM");
+    } catch (error) {
+      if (error?.code !== "ESRCH") {
+        processObject.stderr.write(
+          `Failed to terminate orphaned local process group: ${errorMessage(error)}\n`,
+        );
+      }
+      processObject.exit(1);
+    }
+  };
+  processObject.once("disconnect", onDisconnect);
+  if (processObject.connected === false) queueMicrotask(onDisconnect);
+  return () => {
+    watching = false;
+    processObject.removeListener("disconnect", onDisconnect);
+  };
 }
 
 function childExit(child, name) {
@@ -1285,7 +1540,10 @@ export function terminateLocalStackChild(
     kill(-child.pid, signal);
     return true;
   } catch (error) {
-    if (error?.code === "ESRCH") return false;
+    // Every group created by this lifecycle has the current process's uid. An
+    // inaccessible group therefore cannot still be the group we created; its
+    // numeric pgid was either released or reused outside our authority.
+    if (error?.code === "ESRCH" || error?.code === "EPERM") return false;
     throw error;
   }
 }
@@ -1334,7 +1592,7 @@ export function localStackChildIsAlive(
     return true;
   } catch (error) {
     if (error?.code === "ESRCH") return false;
-    if (error?.code === "EPERM") return true;
+    if (error?.code === "EPERM") return false;
     throw error;
   }
 }
@@ -1351,7 +1609,11 @@ function signalLocalStackChildren(children, signal, terminate) {
   return errors;
 }
 
-async function waitForLocalStackGroups(children, timeoutMs, isAlive) {
+async function waitForLocalStackGroups(
+  children,
+  timeoutMs,
+  isAlive = localStackChildIsAlive,
+) {
   const deadline = Date.now() + timeoutMs;
   while (children.some((child) => isAlive(child))) {
     const remaining = deadline - Date.now();
@@ -1359,6 +1621,14 @@ async function waitForLocalStackGroups(children, timeoutMs, isAlive) {
     await new Promise((resolveDelay) => setTimeout(resolveDelay, Math.min(25, remaining)));
   }
   return true;
+}
+
+export function requireLocalProcessGroups(platform = process.platform) {
+  if (platform === "win32") {
+    throw new Error(
+      "Nanocodex local development requires Unix process-group semantics so descendant shutdown can be proved",
+    );
+  }
 }
 
 async function settleWithin(settled, timeoutMs) {
@@ -1396,7 +1666,11 @@ if (resolve(process.argv[1] ?? "") === scriptPath) {
   } else if (process.argv[2] === "--managed-ready-sentinel") {
     await sendManagedReadySentinel();
   } else if (process.argv[2] === "--chatgpt-relay-child") {
-    await runLocalChatGptRelayChild();
+    const relayPort = process.argv[3] === undefined ? 0 : Number(process.argv[3]);
+    if (!Number.isSafeInteger(relayPort) || relayPort < 0 || relayPort > 65_535) {
+      throw new Error("--chatgpt-relay-child port must be an integer from 0 through 65535");
+    }
+    await runLocalChatGptRelayChild(relayPort);
   } else {
     await main();
   }

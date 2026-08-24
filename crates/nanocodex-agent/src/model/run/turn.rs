@@ -141,6 +141,39 @@ where
     }
 
     #[allow(clippy::too_many_arguments)]
+    pub(crate) fn emit_failed_before_start(
+        &mut self,
+        task: &Prompt,
+        workspace: Option<&str>,
+        thinking: Thinking,
+        fast_mode: bool,
+        error: &NanocodexError,
+    ) -> Result<()> {
+        self.thinking = thinking;
+        self.fast_mode = fast_mode;
+        self.started_at = Instant::now();
+        self.stats = RunStats::default();
+        self.events.emit(
+            AgentEventKind::RunStarted,
+            RunStarted {
+                mode: "openai_model",
+                model: self.model.as_str(),
+                reasoning_mode: self.config.reasoning_mode.as_str(),
+                effort: self.thinking.as_str(),
+                transport: self.config.responses_transport.as_str(),
+                orchestration: ModelConfig::orchestration(),
+                websocket_url: display_endpoint(self.responses_endpoint()),
+                workspace,
+                instruction_bytes: task.text_bytes(),
+            },
+        )?;
+        let message = error.to_string();
+        self.events
+            .emit(AgentEventKind::RunError, RunError { message: &message })?;
+        self.emit_terminal("failed")
+    }
+
+    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn execute(
         &mut self,
         task: Prompt,
@@ -187,25 +220,12 @@ where
                 &fork_snapshots,
             )
             .await;
-        let elapsed = self.started_at.elapsed();
         match outcome {
             Ok(ModelTaskOutcome::Completed(message)) => {
                 self.stats
                     .apply_transport(self.transport_stats.since(transport_before));
                 let usage = self.stats.turn_usage(self.model, self.fast_mode);
                 record_turn_usage(&tracing::Span::current(), &usage);
-                self.events.emit(
-                    AgentEventKind::RunCompleted,
-                    terminal_payload(
-                        "completed",
-                        elapsed,
-                        &self.config,
-                        self.model,
-                        self.thinking,
-                        &self.stats,
-                        &usage,
-                    ),
-                )?;
                 let checkpoint = self.commit_checkpoint()?;
                 Ok(ModelTurnOutcome::Completed(CompletedModelTurn {
                     final_message: message,
@@ -218,7 +238,6 @@ where
                     tools.cancel_turn().await;
                 }
                 let checkpoint = self.commit_interrupted_checkpoint()?;
-                let elapsed = self.started_at.elapsed();
                 let error = NanocodexError::TurnCancelled;
                 let message = error.to_string();
                 self.events
@@ -227,18 +246,6 @@ where
                     .apply_transport(self.transport_stats.since(transport_before));
                 let usage = self.stats.turn_usage(self.model, self.fast_mode);
                 record_turn_usage(&tracing::Span::current(), &usage);
-                self.events.emit(
-                    AgentEventKind::RunFailed,
-                    terminal_payload(
-                        "cancelled",
-                        elapsed,
-                        &self.config,
-                        self.model,
-                        self.thinking,
-                        &self.stats,
-                        &usage,
-                    ),
-                )?;
                 Ok(ModelTurnOutcome::Cancelled(checkpoint))
             }
             Err(error) => {
@@ -290,24 +297,34 @@ where
                     .apply_transport(self.transport_stats.since(transport_before));
                 let usage = self.stats.turn_usage(self.model, self.fast_mode);
                 record_turn_usage(&tracing::Span::current(), &usage);
-                self.events.emit(
-                    AgentEventKind::RunFailed,
-                    terminal_payload(
-                        "failed",
-                        elapsed,
-                        &self.config,
-                        self.model,
-                        self.thinking,
-                        &self.stats,
-                        &usage,
-                    ),
-                )?;
                 match checkpoint {
                     Some(checkpoint) => Ok(ModelTurnOutcome::Failed { error, checkpoint }),
                     None => Err(error),
                 }
             }
         }
+    }
+
+    pub(crate) fn emit_terminal(&self, status: &'static str) -> Result<()> {
+        let usage = self.stats.turn_usage(self.model, self.fast_mode);
+        let kind = if status == "completed" {
+            AgentEventKind::RunCompleted
+        } else {
+            AgentEventKind::RunFailed
+        };
+        self.events.emit(
+            kind,
+            terminal_payload(
+                status,
+                self.started_at.elapsed(),
+                &self.config,
+                self.model,
+                self.thinking,
+                &self.stats,
+                &usage,
+            ),
+        )?;
+        Ok(())
     }
 
     pub(super) async fn prepare_follow_on_turn(
@@ -524,7 +541,16 @@ where
             .ok_or(NanocodexError::InvalidAttemptState {
                 detail: "completed turn did not have a model session",
             })?;
-        session.conversation.commit()?;
+        if self.stats.last_response_id.is_some() {
+            session.conversation.commit()?;
+        } else {
+            // A journal-replayed model result is authoritative conversation
+            // history, but its provider response ID belongs to the replaced
+            // transport. Its output was already installed with a forced full
+            // replay baseline, so commit that typed tail without restoring the
+            // invalid response chain.
+            session.conversation.commit_tail();
+        }
         Ok(Self::checkpoint_from_session(
             session,
             false,
@@ -640,19 +666,27 @@ where
             }
             Self::publish_fork_snapshot(session, fork_snapshots, self.global_instructions.as_ref());
             let call_index = self.stats.model_calls + 1;
-            let response = self
+            let model_call = self
                 .perform_model_call(call_index, &mut session.conversation, &session.factory)
                 .await?;
+            let ModelCallOutcome {
+                response,
+                transport_continuation_valid,
+            } = model_call;
             session
                 .conversation
                 .update_token_info(response.usage.as_ref());
-            session
-                .conversation
-                .set_previous_response_id(response.id.clone());
-            if session.conversation.previous_response_id().is_none() {
-                return Err(NanocodexError::MalformedResponse {
-                    detail: "completed turn did not have a response ID",
-                });
+            if transport_continuation_valid {
+                session
+                    .conversation
+                    .set_previous_response_id(response.id.clone());
+                if session.conversation.previous_response_id().is_none() {
+                    return Err(NanocodexError::MalformedResponse {
+                        detail: "completed turn did not have a response ID",
+                    });
+                }
+            } else {
+                session.conversation.reset_for_full_request();
             }
             let end_turn = response.end_turn;
             let final_message = response.final_message;

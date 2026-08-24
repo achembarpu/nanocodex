@@ -192,7 +192,7 @@ test("Source and Commits navigation prepares exact route state before navigating
   );
   assert.match(
     preparation,
-    /loadPublishedCommitHistory\(requestedCommit\)[\s\S]*?preloadPierreWorker\(\)[\s\S]*?const patchRequest = historyRequest[\s\S]*?preloadPublishedRepositoryPatchBody[\s\S]*?const syntaxRequest = historyRequest[\s\S]*?preloadPierrePaths[\s\S]*?Promise\.all\(\[[\s\S]*?historyRequest,[\s\S]*?patchRequest,[\s\S]*?syntaxRequest/,
+    /loadPublishedCommitHistory\([\s\S]*?requestedCommit[\s\S]*?adopted[\s\S]*?preloadPierreWorker\(\)[\s\S]*?void historyRequest\.then[\s\S]*?preloadPublishedRepositoryPatch[\s\S]*?preloadPierrePaths[\s\S]*?const history = await historyRequest/,
   );
   assert.doesNotMatch(
     preparation,
@@ -204,14 +204,10 @@ test("Source and Commits navigation prepares exact route state before navigating
   );
   assert.match(
     preparation,
-    /prepareCommitSurface\(requestedCommit, adopted\)[\s\S]*?preloadPublishedRepositoryPatchBody\([\s\S]*?adopted/,
-  );
-  assert.match(
-    preparation,
     /if \(repositorySnapshotRequest\) return repositorySnapshotRequest;[\s\S]*?loadPublishedRepositorySnapshot\(\)[\s\S]*?repositorySnapshotRequest = undefined/,
   );
   assert.doesNotMatch(preparation, /window\.location\.search/);
-  assert.match(preparation, /preloadPublishedRepositoryPatchBody/);
+  assert.doesNotMatch(preparation, /preloadPublishedRepositoryPatchBody|arrayBuffer\(\)/);
 
   const prefetch = application.slice(
     application.indexOf("const preloadSurface"),
@@ -398,7 +394,7 @@ test("direct preloading selects only the work owned by the resolved route", () =
   );
   assert.match(
     preload,
-    /surface === "evals"\) await preloadEvalOverview\(\);\s*return \{\};/,
+    /surface === "evals" && url\.pathname\.replace[\s\S]*?=== "\/evals"\)[\s\S]*?await preloadEvalOverview\(\);[\s\S]*?return \{\};/,
   );
 });
 

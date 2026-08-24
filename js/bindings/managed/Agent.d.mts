@@ -114,6 +114,7 @@ export type EventHistoryOptions = Readonly<{
   before?: string | undefined;
   /** Page size from 1 through 256. Defaults to 128. */
   limit?: number | undefined;
+  signal?: AbortSignal | undefined;
 }>;
 
 export type EventHistoryPage = Readonly<{
@@ -140,13 +141,19 @@ export type TurnResult = Readonly<{
   cursor?: string | undefined;
 }>;
 
+export type TurnResultOptions = Readonly<{
+  /** Cancels only this result observer; it never cancels the durable server turn. */
+  signal?: AbortSignal | undefined;
+}>;
+
 export type Turn = Readonly<{
   idempotencyKey: string;
   accepted(): Promise<string>;
   state(): Promise<TurnView>;
   steer(options: Readonly<{ input: PromptInput }>): Promise<Readonly<{ turn_id: string; state: "steering" }>>;
+  /** With a caller-supplied prompt ID, cancellation does not wait for the prompt response. */
   cancel(): Promise<TurnView | Readonly<{ turn_id: string; state: "cancelling" }>>;
-  result(): Promise<TurnResult>;
+  result(options?: TurnResultOptions): Promise<TurnResult>;
 }>;
 
 export type Agent = Readonly<{
@@ -157,6 +164,10 @@ export type Agent = Readonly<{
   turn: Readonly<{ prompt(options: PromptOptions): Turn }>;
   events: Readonly<{
     page(options?: EventHistoryOptions): Promise<EventHistoryPage>;
+    /**
+     * Each iterator has a private 4,096-event/32-MiB buffer. A lagging iterator
+     * fails with an actionable resume cursor instead of dropping durable events.
+     */
     watch(options?: WatchEventsOptions): AsyncIterableIterator<Event>;
   }>;
   state(): Promise<State>;

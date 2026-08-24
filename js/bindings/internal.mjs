@@ -7,6 +7,7 @@ const resultFinalizer = typeof FinalizationRegistry === "function"
     })
   : undefined;
 const hostSessions = new Map();
+const activeAgentSessions = new Map();
 const hostConnections = new Map();
 const definitionHosts = new Map();
 let nextHostConnection = 1;
@@ -27,14 +28,57 @@ export function defineRuntime(definition) {
     adopt: definition.adopt,
     release: definition.release,
     decorate: definition.decorate,
+    reserveSessions: definition.reserveSessions !== false,
   });
 }
 
-export async function createAgentClient(runtime, options = {}) {
+export async function createAgentClient(runtime, options = {}, requestedReservation) {
   if (!runtime || typeof runtime.create !== "function") {
     throw new TypeError("createAgent requires a Nanocodex runtime");
   }
-  return createAgent(await runtime.create(options), runtime);
+  const reserveSession = runtime.reserveSessions !== false;
+  const reservation = requestedReservation ?? (
+    !reserveSession || options.sessionId === undefined
+      ? undefined
+      : reserveAgentSession(options.sessionId)
+  );
+  let raw;
+  try {
+    raw = await runtime.create(options);
+  } catch (error) {
+    releaseAgentSession(reservation);
+    throw error;
+  }
+  return createAgent(raw, runtime, reservation, reserveSession);
+}
+
+/** Internal adapter seam: observes completion of the owned Agent release path. */
+export function observeAgentRelease(agent, listener) {
+  if (typeof listener !== "function") throw new TypeError("Agent release observer must be a function");
+  const state = knownAgentState(agent);
+  if (state.released) {
+    listener({ graceful: state.shutdownPromise !== undefined });
+    return () => {};
+  }
+  state.releaseObservers.add(listener);
+  return () => state.releaseObservers.delete(listener);
+}
+
+/** Creates the stable UUIDv7 identity reserved before a WASM Agent is constructed. */
+export function createSessionId() {
+  if (typeof globalThis.crypto?.getRandomValues !== "function") {
+    throw new Error("Nanocodex Agent creation requires crypto.getRandomValues()");
+  }
+  const bytes = globalThis.crypto.getRandomValues(new Uint8Array(16));
+  let timestamp = Date.now();
+  for (let index = 5; index >= 0; index -= 1) {
+    bytes[index] = timestamp % 256;
+    timestamp = Math.floor(timestamp / 256);
+  }
+  bytes[6] = (bytes[6] & 0x0f) | 0x70;
+  bytes[8] = (bytes[8] & 0x3f) | 0x80;
+  const encoded = [...bytes].map((byte) => byte.toString(16).padStart(2, "0"));
+  return `${encoded.slice(0, 4).join("")}-${encoded.slice(4, 6).join("")}-${encoded.slice(6, 8).join("")}-${encoded.slice(8, 10).join("")}-${encoded.slice(10).join("")}`;
 }
 
 export function prompt(agent, options) {
@@ -234,6 +278,7 @@ export function toWasmConfig(options = {}) {
   }
   copy(config, "resume", options.resume);
   copy(config, "durability_id", options.durabilityId);
+  copy(config, "durability_host_id", options.durabilityHostId);
   copy(config, "subagents", options.subagents);
   copy(config, "host_definition_id", options.hostDefinitionId);
   return config;
@@ -422,12 +467,22 @@ const hostBridge = Object.freeze({
     // keeps that lookup instance-scoped for roots and Rust-spawned children.
     return requiredDefinitionHost(definitionHostId).toolDefinitions(sessionId);
   },
-  async durabilityLoad(journalId) {
-    return (await loadDurabilityRuntime()).load(journalId);
+  async durabilityAcquire(routeId, journalId, ownerId) {
+    return (await loadDurabilityRuntime()).acquire(routeId, journalId, ownerId);
   },
-  async durabilityAppend(journalId, expectedRevision, payload) {
+  async durabilityAppend(
+    routeId,
+    journalId,
+    ownerId,
+    fence,
+    expectedRevision,
+    payload,
+  ) {
     return (await loadDurabilityRuntime()).append(
+      routeId,
       journalId,
+      ownerId,
+      fence,
       expectedRevision,
       payload,
     );
@@ -441,13 +496,33 @@ export function loadSubscriptionRuntime() {
   return import("./runtime/chatgpt-subscription.mjs");
 }
 
-function createAgent(raw, runtime) {
+function createAgent(
+  raw,
+  runtime,
+  requestedReservation,
+  reserveSession = runtime.reserveSessions !== false,
+) {
+  let reservation = requestedReservation;
   if (!raw || typeof raw.prompt !== "function") {
+    releaseAgentSession(reservation);
     throw new TypeError("the runtime returned an invalid Nanocodex agent handle");
+  }
+  try {
+    if (reserveSession) {
+      reservation ??= reserveAgentSession(raw.sessionId);
+      adoptAgentSession(reservation, raw.sessionId);
+    }
+  } catch (error) {
+    const errors = [error];
+    runCleanup(errors, () => runtime.dispose(raw));
+    runCleanup(errors, () => releaseAgentSession(reservation));
+    throwCleanupErrors(errors);
   }
   const state = {
     raw,
     runtime,
+    reservation,
+    releaseObservers: new Set(),
     disposed: false,
     released: false,
     shutdownPromise: undefined,
@@ -458,12 +533,19 @@ function createAgent(raw, runtime) {
   try {
     runtime.adopt?.(raw);
   } catch (error) {
-    runtime.dispose(raw);
-    throw error;
+    const errors = [error];
+    runCleanup(errors, () => runtime.dispose(raw));
+    runCleanup(errors, () => releaseAgentSession(reservation));
+    throwCleanupErrors(errors);
   }
   const agent = agentView(state, {});
-  const decorated = runtime.decorate ? runtime.decorate(agent) : agent;
-  return decorated;
+  try {
+    return runtime.decorate ? runtime.decorate(agent, raw) : agent;
+  } catch (error) {
+    const errors = [error];
+    runCleanup(errors, () => releaseAgentState(state));
+    throwCleanupErrors(errors);
+  }
 }
 
 function agentView(state, extensions) {
@@ -516,7 +598,49 @@ function releaseAgentState(state) {
   }
   runCleanup(errors, () => state.runtime.release?.(state.raw));
   runCleanup(errors, () => state.runtime.dispose(state.raw));
+  runCleanup(errors, () => releaseAgentSession(state.reservation));
+  for (const observer of [...state.releaseObservers]) {
+    runCleanup(errors, () => observer({ graceful: state.shutdownPromise !== undefined }));
+  }
+  state.releaseObservers.clear();
   throwCleanupErrors(errors);
+}
+
+/** Internal adapter seam: reserves a stable identity before starting its runtime. */
+export function reserveAgentSession(sessionId) {
+  if (typeof sessionId !== "string" || !sessionId) {
+    throw new TypeError("sessionId must be a non-empty string");
+  }
+  if (activeAgentSessions.has(sessionId)) {
+    throw new Error(`Nanocodex session ID is already active: ${sessionId}`);
+  }
+  const reservation = { sessionId, adopted: false, released: false };
+  activeAgentSessions.set(sessionId, reservation);
+  return reservation;
+}
+
+function adoptAgentSession(reservation, sessionId) {
+  if (reservation.released || activeAgentSessions.get(reservation.sessionId) !== reservation) {
+    throw new Error(`Nanocodex session reservation is no longer active: ${sessionId}`);
+  }
+  if (reservation.sessionId !== sessionId) {
+    throw new Error(
+      `Nanocodex runtime changed reserved session ID ${reservation.sessionId} to ${sessionId}`,
+    );
+  }
+  if (reservation.adopted) {
+    throw new Error(`Nanocodex session reservation was already adopted: ${sessionId}`);
+  }
+  reservation.adopted = true;
+}
+
+/** Internal adapter seam: rolls back a runtime reservation that was not adopted. */
+export function releaseAgentSession(reservation) {
+  if (!reservation || reservation.released) return;
+  reservation.released = true;
+  if (activeAgentSessions.get(reservation.sessionId) === reservation) {
+    activeAgentSessions.delete(reservation.sessionId);
+  }
 }
 
 async function joinAgentShutdown(state) {

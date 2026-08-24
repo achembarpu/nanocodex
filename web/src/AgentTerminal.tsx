@@ -70,17 +70,29 @@ export const AgentTerminal = memo(function AgentTerminal({
     isError,
     refetch,
   } = useNanocodex({ config: agentConfig, threadId });
+  const [localFailure, setLocalFailure] = useState<{
+    agent: typeof agent;
+    message: string;
+    threadId: string;
+  }>();
   const terminalAgent = useMemo(
-    () => agent ? localTerminalAgent(agent, threadId) : undefined,
+    () => agent ? localTerminalAgent(agent, threadId, undefined, (failure) => {
+      setLocalFailure({ agent, message: errorMessage(failure), threadId });
+    }) : undefined,
     [agent, threadId],
   );
+  const localAgentError = localFailure
+    && localFailure.agent === agent
+    && localFailure.threadId === threadId
+    ? localFailure.message
+    : undefined;
   const retryAgent = useCallback(() => {
     refetch();
   }, [refetch]);
   return (
     <AgentTerminalView
       agent={terminalAgent}
-      agentError={isError ? errorMessage(error) : undefined}
+      agentError={isError ? errorMessage(error) : localAgentError}
       authStatus={authStatus}
       mode={mode}
       onConversationActivity={onConversationActivity}

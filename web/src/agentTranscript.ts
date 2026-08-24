@@ -18,13 +18,14 @@ export type PlanUpdate = {
   plan: { step: string; status: "pending" | "in_progress" | "completed" }[];
 };
 
-export type TerminalEntry =
+export type TerminalEntry = (
   | { id: string; kind: "user"; text: string; promptId?: number }
   | { id: string; kind: "reasoning"; text: string; streaming: boolean }
   | { id: string; kind: "assistant"; text: string; streaming: boolean }
   | { id: string; kind: "tool"; tool: ToolActivity }
   | { id: string; kind: "plan"; update: PlanUpdate }
-  | { id: string; kind: "error"; text: string };
+  | { id: string; kind: "error"; text: string }
+) & { turnId?: string };
 
 type PendingSteer = {
   id: number;
@@ -33,7 +34,7 @@ type PendingSteer = {
   runGeneration: number;
 };
 
-type PendingPrompt = { id: number; text: string };
+type PendingPrompt = { id: number; text: string; historyEntryId?: string; turnId?: string };
 
 export type TerminalState = {
   entries: TerminalEntry[];
@@ -45,6 +46,7 @@ export type TerminalState = {
   pendingSteers: PendingSteer[];
   appliedSteerRuns: number[];
   runGeneration: number;
+  activeTurnId?: string;
   streamedThisTurn: boolean;
   pendingRunError?: string;
   modelCalls: number;
@@ -68,14 +70,26 @@ export function initialTerminalState(status = "Ready"): TerminalState {
   };
 }
 
-export function queuePrompt(state: TerminalState, id: number, text: string): TerminalState {
+export function queuePrompt(
+  state: TerminalState,
+  id: number,
+  text: string,
+  historyEntryId?: string,
+): TerminalState {
   const displayImmediately = !state.running && state.queuedPrompts.length === 0;
+  const turnId = historyTurnId(historyEntryId);
   return {
     ...state,
     entries: displayImmediately
-      ? [...state.entries, { id: `user-${id}`, kind: "user", text, promptId: id }]
+      ? [...state.entries, {
+          id: historyEntryId ?? `user-${id}`,
+          kind: "user",
+          text,
+          promptId: id,
+          ...(turnId === undefined ? {} : { turnId }),
+        }]
       : state.entries,
-    queuedPrompts: [...state.queuedPrompts, { id, text }],
+    queuedPrompts: [...state.queuedPrompts, { id, text, historyEntryId, turnId }],
     displayedQueuedPrompt: displayImmediately ? id : state.displayedQueuedPrompt,
     pendingTurns: state.pendingTurns + 1,
     status: state.running ? "Prompt queued" : "Starting",
@@ -112,22 +126,36 @@ export function turnFinished(
   state: TerminalState,
   error?: string,
   finalMessage?: string,
+  promptId?: number,
+  historyEntryId?: string,
 ): TerminalState {
+  const turnId = historyTurnId(historyEntryId);
   let next = {
     ...state,
     pendingTurns: Math.max(0, state.pendingTurns - 1),
+    queuedPrompts: promptId === undefined
+      ? state.queuedPrompts
+      : state.queuedPrompts.filter((prompt) => prompt.id !== promptId),
+    displayedQueuedPrompt: state.displayedQueuedPrompt === promptId
+      ? undefined
+      : state.displayedQueuedPrompt,
   };
   if (finalMessage?.trim()) {
     let userIndex = -1;
     let assistantIndex = -1;
     for (let index = next.entries.length - 1; index >= 0; index -= 1) {
-      if (next.entries[index]?.kind === "user") {
+      const entry = next.entries[index];
+      if (entry?.kind === "user" && (
+        (turnId !== undefined && entry.turnId === turnId)
+        || (turnId === undefined && (promptId === undefined || entry.promptId === promptId))
+      )) {
         userIndex = index;
         break;
       }
     }
     for (let index = next.entries.length - 1; index > userIndex; index -= 1) {
-      if (next.entries[index]?.kind === "assistant") {
+      const entry = next.entries[index];
+      if (entry?.kind === "assistant" && (turnId === undefined || entry.turnId === turnId)) {
         assistantIndex = index;
         break;
       }
@@ -151,6 +179,7 @@ export function turnFinished(
             kind: "assistant",
             text: finalMessage,
             streaming: false,
+            ...(turnId === undefined ? {} : { turnId }),
           },
         ],
       };
@@ -158,15 +187,20 @@ export function turnFinished(
   }
   if (!error || error === "the turn was cancelled") return next;
   const tail = next.entries.at(-1);
-  return tail?.kind === "error" && tail.text === error ? next : appendError(next, error);
+  return tail?.kind === "error" && tail.text === error ? next : appendError(next, error, turnId);
 }
 
-function appendError(state: TerminalState, text: string): TerminalState {
+function appendError(state: TerminalState, text: string, turnId = state.activeTurnId): TerminalState {
   const syntheticId = state.syntheticId + 1;
   return {
     ...state,
     syntheticId,
-    entries: [...state.entries, { id: `error-${syntheticId}`, kind: "error", text }],
+    entries: [...state.entries, {
+      id: `error-${syntheticId}`,
+      kind: "error",
+      text,
+      ...(turnId === undefined ? {} : { turnId }),
+    }],
   };
 }
 
@@ -180,6 +214,7 @@ export function applyAgentEvents(
   let ownsEntries = false;
   let bufferedKind: "assistant" | "reasoning" | undefined;
   let bufferedId = "";
+  let bufferedTurnId: string | undefined;
   let bufferedText: string[] = [];
 
   const mutableEntries = () => {
@@ -206,11 +241,18 @@ export function applyAgentEvents(
       entries[entries.length - 1] = { ...tail, text: tail.text + text };
     } else {
       sealStreamingTail(entries);
-      entries.push({ id: bufferedId, kind: bufferedKind, text, streaming: true });
+      entries.push({
+        id: bufferedId,
+        kind: bufferedKind,
+        text,
+        streaming: true,
+        ...(bufferedTurnId === undefined ? {} : { turnId: bufferedTurnId }),
+      });
     }
     next.streamedThisTurn ||= bufferedKind === "assistant";
     bufferedKind = undefined;
     bufferedId = "";
+    bufferedTurnId = undefined;
     bufferedText = [];
   };
 
@@ -219,7 +261,8 @@ export function applyAgentEvents(
       const kind = event.type === "assistant.delta" ? "assistant" : "reasoning";
       if (bufferedKind && bufferedKind !== kind) flushDeltas();
       bufferedKind = kind;
-      bufferedId ||= `${kind}-${event.seq}`;
+      bufferedId ||= `${kind}-${eventIdentity(event)}`;
+      bufferedTurnId ??= payloadString(event.payload, "turn_id") ?? next.activeTurnId;
       bufferedText.push(payloadString(event.payload, "text") ?? "");
       continue;
     }
@@ -231,25 +274,63 @@ export function applyAgentEvents(
         const text = payloadString(event.payload, "text");
         const id = turnId ? `managed-user-${turnId}` : `managed-user-${event.seq}`;
         if (text && !next.entries.some((entry) => entry.id === id)) {
-          mutableEntries().push({ id, kind: "user", text });
+          mutableEntries().push({
+            id,
+            kind: "user",
+            text,
+            ...(turnId === undefined ? {} : { turnId }),
+          });
+        }
+        break;
+      }
+      case "managed.steer": {
+        const turnId = payloadString(event.payload, "turn_id");
+        const steerId = payloadString(event.payload, "steer_id") ?? eventIdentity(event);
+        const text = payloadString(event.payload, "text");
+        const id = `managed-steer-${turnId ?? "unknown"}-${steerId}`;
+        if (text && !next.entries.some((entry) => entry.id === id)) {
+          mutableEntries().push({
+            id,
+            kind: "user",
+            text,
+            ...(turnId === undefined ? {} : { turnId }),
+          });
         }
         break;
       }
       case "run.started": {
-        const [prompt, ...queuedPrompts] = next.queuedPrompts;
-        if (prompt && next.displayedQueuedPrompt !== prompt.id) {
+        const eventTurnId = payloadString(event.payload, "turn_id");
+        const promptIndex = eventTurnId === undefined
+          ? (next.queuedPrompts.length > 0 ? 0 : -1)
+          : next.queuedPrompts.findIndex((queued) => queued.turnId === eventTurnId);
+        const prompt = promptIndex < 0 ? undefined : next.queuedPrompts[promptIndex];
+        const queuedPrompts = promptIndex < 0
+          ? next.queuedPrompts
+          : next.queuedPrompts.filter((_, index) => index !== promptIndex);
+        const promptEntryId = prompt?.historyEntryId ?? (prompt ? `user-${prompt.id}` : undefined);
+        if (prompt
+          && next.displayedQueuedPrompt !== prompt.id
+          && !next.entries.some((entry) => entry.kind === "user" && (
+            prompt.turnId === undefined
+              ? entry.id === promptEntryId
+              : entry.turnId === prompt.turnId
+          ))) {
           mutableEntries().push({
-            id: `user-${prompt.id}`,
+            id: prompt.historyEntryId ?? `user-${prompt.id}`,
             kind: "user",
             text: prompt.text,
             promptId: prompt.id,
+            ...(prompt.turnId === undefined ? {} : { turnId: prompt.turnId }),
           });
         }
         next = {
           ...next,
           queuedPrompts,
-          displayedQueuedPrompt: undefined,
+          displayedQueuedPrompt: prompt && next.displayedQueuedPrompt === prompt.id
+            ? undefined
+            : next.displayedQueuedPrompt,
           running: true,
+          activeTurnId: eventTurnId ?? prompt?.turnId,
           runGeneration: next.runGeneration + 1,
           streamedThisTurn: false,
           pendingRunError: undefined,
@@ -284,16 +365,18 @@ export function applyAgentEvents(
         break;
       case "assistant.message": {
         const text = payloadString(event.payload, "text") ?? "";
+        const turnId = payloadString(event.payload, "turn_id") ?? next.activeTurnId;
         const tail = next.entries.at(-1);
-        if (tail?.kind === "assistant") {
+        if (tail?.kind === "assistant" && tail.turnId === turnId) {
           const entries = mutableEntries();
           entries[entries.length - 1] = { ...tail, text, streaming: false };
         } else if (text) {
           mutableEntries().push({
-            id: `assistant-${event.seq}`,
+            id: `assistant-${eventIdentity(event)}`,
             kind: "assistant",
             text,
             streaming: false,
+            ...(turnId === undefined ? {} : { turnId }),
           });
         }
         break;
@@ -304,17 +387,31 @@ export function applyAgentEvents(
         if (tool === "update_plan") {
           const update = decodePlanUpdate(event.payload.arguments);
           if (update) {
-            mutableEntries().push({ id: `plan-${event.seq}`, kind: "plan", update });
+            const turnId = payloadString(event.payload, "turn_id") ?? next.activeTurnId;
+            mutableEntries().push({
+              id: `plan-${eventIdentity(event)}`,
+              kind: "plan",
+              update,
+              ...(turnId === undefined ? {} : { turnId }),
+            });
             next.status = "Working";
             break;
           }
         }
-        applyToolCall(mutableEntries(), event);
+        applyToolCall(
+          mutableEntries(),
+          event,
+          payloadString(event.payload, "turn_id") ?? next.activeTurnId,
+        );
         next.status = `Running ${tool}`;
         break;
       }
       case "tool.result":
-        applyToolResult(mutableEntries(), event);
+        applyToolResult(
+          mutableEntries(),
+          event,
+          payloadString(event.payload, "turn_id") ?? next.activeTurnId,
+        );
         next.status = "Working";
         break;
       case "model.call.completed":
@@ -325,28 +422,42 @@ export function applyAgentEvents(
         break;
       case "run.completed":
         sealTail();
-        if (next.pendingRunError) {
-          next = appendError(next, next.pendingRunError);
+        {
+          const terminalTurnId = payloadString(event.payload, "turn_id") ?? next.activeTurnId;
+        if (next.pendingRunError && !hasProjectedError(
+          next.entries,
+          next.pendingRunError,
+          terminalTurnId,
+        )) {
+          next = appendError(next, next.pendingRunError, terminalTurnId);
           ownsEntries = true;
         }
         next = reconcileSteers({
           ...next,
           running: false,
+          activeTurnId: undefined,
           pendingRunError: undefined,
           status: "Ready",
         });
         ownsEntries = true;
+        }
         break;
       case "run.failed": {
         sealTail();
         const cancelled = payloadString(event.payload, "status") === "cancelled";
-        if (!cancelled && next.pendingRunError) {
-          next = appendError(next, next.pendingRunError);
+        const terminalTurnId = payloadString(event.payload, "turn_id") ?? next.activeTurnId;
+        if (!cancelled && next.pendingRunError && !hasProjectedError(
+          next.entries,
+          next.pendingRunError,
+          terminalTurnId,
+        )) {
+          next = appendError(next, next.pendingRunError, terminalTurnId);
           ownsEntries = true;
         }
         next = reconcileSteers({
           ...next,
           running: false,
+          activeTurnId: undefined,
           pendingRunError: undefined,
           status: cancelled ? "Cancelled" : "Turn failed",
         });
@@ -357,6 +468,122 @@ export function applyAgentEvents(
   }
   flushDeltas();
   return next;
+}
+
+export function mergeAgentHistoryEntries(
+  current: readonly TerminalEntry[],
+  historical: readonly TerminalEntry[],
+  previouslyProjectedKeys: ReadonlySet<string>,
+): TerminalEntry[] {
+  const historicalGroups = transcriptTurnGroups(historical);
+  const historicalKeys = historyGroupEntryKeys(historicalGroups);
+  const currentGroups = transcriptTurnGroups(current).flatMap((group) => {
+    const entries = group.entries.filter((entry) => {
+      const key = historyEntryKey(group.turnId, entry);
+      return !previouslyProjectedKeys.has(key) && !historicalKeys.has(key);
+    });
+    return entries.length === 0 ? [] : [{ ...group, entries }];
+  });
+  const historicalKinds = new Map<string, Set<TerminalEntry["kind"]>>();
+  for (const group of historicalGroups) {
+    if (!group.turnId) continue;
+    historicalKinds.set(group.turnId, new Set(group.entries.map((entry) => entry.kind)));
+  }
+
+  const merged: TerminalEntry[] = [];
+  const emittedCurrentTurns = new Set<string>();
+  for (const group of historicalGroups) {
+    if (!group.turnId) {
+      merged.push(...group.entries);
+      continue;
+    }
+    const live = currentGroups.find((candidate) => candidate.turnId === group.turnId);
+    if (!live) {
+      merged.push(...group.entries);
+      continue;
+    }
+    const replacedKinds = historicalKinds.get(group.turnId) ?? new Set();
+    const liveEntries = live.entries.filter((entry) => (
+      entry.kind !== "user"
+      && !(entry.kind === "assistant" && replacedKinds.has("assistant"))
+    ));
+    const finalAssistant = group.entries.findIndex((entry) => entry.kind === "assistant");
+    if (finalAssistant < 0) {
+      merged.push(...group.entries, ...liveEntries);
+    } else {
+      merged.push(
+        ...group.entries.slice(0, finalAssistant),
+        ...liveEntries,
+        ...group.entries.slice(finalAssistant),
+      );
+    }
+    emittedCurrentTurns.add(group.turnId);
+  }
+  for (const group of currentGroups) {
+    if (group.turnId && emittedCurrentTurns.has(group.turnId)) continue;
+    merged.push(...group.entries);
+  }
+  return merged;
+}
+
+export function agentHistoryEntryKeys(entries: readonly TerminalEntry[]): ReadonlySet<string> {
+  return historyGroupEntryKeys(transcriptTurnGroups(entries));
+}
+
+function historyGroupEntryKeys(
+  groups: readonly { turnId?: string; entries: readonly TerminalEntry[] }[],
+): Set<string> {
+  const keys = new Set<string>();
+  for (const group of groups) {
+    for (const entry of group.entries) keys.add(historyEntryKey(group.turnId, entry));
+  }
+  return keys;
+}
+
+function historyEntryKey(turnId: string | undefined, entry: TerminalEntry): string {
+  return turnId === undefined ? `unowned\0${entry.id}` : `turn\0${turnId}\0${entry.id}`;
+}
+
+function transcriptTurnGroups(entries: readonly TerminalEntry[]): Array<{
+  turnId?: string;
+  entries: TerminalEntry[];
+}> {
+  const groups: Array<{ turnId?: string; entries: TerminalEntry[] }> = [];
+  const ownedGroups = new Map<string, { turnId?: string; entries: TerminalEntry[] }>();
+  let inferredTurnId: string | undefined;
+  for (const entry of entries) {
+    if (entry.kind === "user") inferredTurnId = entry.turnId ?? historyTurnId(entry.id);
+    const turnId = entry.turnId ?? inferredTurnId;
+    if (turnId !== undefined) {
+      const retained = ownedGroups.get(turnId);
+      if (retained) retained.entries.push(entry);
+      else {
+        const group = { turnId, entries: [entry] };
+        ownedGroups.set(turnId, group);
+        groups.push(group);
+      }
+      continue;
+    }
+    const tail = groups.at(-1);
+    if (!tail || tail.turnId !== undefined) groups.push({ entries: [entry] });
+    else tail.entries.push(entry);
+  }
+  return groups;
+}
+
+function hasProjectedError(
+  entries: readonly TerminalEntry[],
+  text: string,
+  turnId: string | undefined,
+): boolean {
+  return entries.some((entry) => entry.kind === "error"
+    && entry.text === text
+    && entry.turnId === turnId);
+}
+
+function historyTurnId(historyEntryId?: string): string | undefined {
+  const prefix = "managed-user-";
+  return historyEntryId?.startsWith(prefix) ? historyEntryId.slice(prefix.length) : undefined;
 }
 
 function reconcileSteers(state: TerminalState): TerminalState {
@@ -372,7 +599,12 @@ function reconcileSteers(state: TerminalState): TerminalState {
     if (index < 0) break;
     const [steer] = pendingSteers.splice(index, 1);
     if (!steer) break;
-    entries.push({ id: `steer-${steer.id}`, kind: "user", text: steer.text });
+    entries.push({
+      id: `steer-${steer.id}`,
+      kind: "user",
+      text: steer.text,
+      ...(state.activeTurnId === undefined ? {} : { turnId: state.activeTurnId }),
+    });
     appliedSteerRuns.shift();
     applied += 1;
   }
@@ -393,8 +625,16 @@ function removeSteer(state: TerminalState, id: number): TerminalState {
   return { ...state, pendingSteers: state.pendingSteers.filter((steer) => steer.id !== id) };
 }
 
-function applyToolCall(entries: TerminalEntry[], event: AgentEvent): void {
-  const callId = payloadString(event.payload, "call_id") ?? `tool-${event.seq}`;
+function eventIdentity(event: AgentEvent): string {
+  return payloadString(event.payload, "managed_event_cursor") ?? String(event.seq);
+}
+
+function applyToolCall(
+  entries: TerminalEntry[],
+  event: AgentEvent,
+  turnId: string | undefined,
+): void {
+  const callId = payloadString(event.payload, "call_id") ?? `tool-${eventIdentity(event)}`;
   const name = payloadString(event.payload, "tool") ?? "tool";
   const tool: ToolActivity = {
     callId,
@@ -408,7 +648,9 @@ function applyToolCall(entries: TerminalEntry[], event: AgentEvent): void {
     let parentIndex = -1;
     for (let index = entries.length - 1; index >= 0; index -= 1) {
       const entry = entries[index];
-      if (entry?.kind === "tool" && entry.tool.callId === parentId) {
+      if (entry?.kind === "tool"
+        && entry.tool.callId === parentId
+        && (turnId === undefined || entry.turnId === turnId)) {
         parentIndex = index;
         break;
       }
@@ -422,7 +664,12 @@ function applyToolCall(entries: TerminalEntry[], event: AgentEvent): void {
       return;
     }
   }
-  entries.push({ id: `tool-${callId}`, kind: "tool", tool });
+  entries.push({
+    id: `tool-${callId}`,
+    kind: "tool",
+    tool,
+    ...(turnId === undefined ? {} : { turnId }),
+  });
 }
 
 function isEmptyTerminalPoll(tool: string, value: unknown): boolean {
@@ -446,7 +693,11 @@ function decodePlanUpdate(value: unknown): PlanUpdate | undefined {
   };
 }
 
-function applyToolResult(entries: TerminalEntry[], event: AgentEvent): void {
+function applyToolResult(
+  entries: TerminalEntry[],
+  event: AgentEvent,
+  turnId: string | undefined,
+): void {
   const callId = payloadString(event.payload, "call_id");
   if (!callId) return;
   const statusValue = payloadString(event.payload, "status");
@@ -457,7 +708,7 @@ function applyToolResult(entries: TerminalEntry[], event: AgentEvent): void {
       : "failed";
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const entry = entries[index];
-    if (entry?.kind !== "tool") continue;
+    if (entry?.kind !== "tool" || (turnId !== undefined && entry.turnId !== turnId)) continue;
     if (entry.tool.callId === callId) {
       entries[index] = { ...entry, tool: completedTool(entry.tool, event, status) };
       return;

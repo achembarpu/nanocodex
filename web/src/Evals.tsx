@@ -10,7 +10,12 @@ import {
 import { Component, useDeferredValue, type ErrorInfo, type ReactNode } from "react";
 import { Link, useLocation } from "react-router";
 import { evalRouteFromPath, type EvalRoute } from "./evalRoute";
-import { evalApi, type EvalSummary, type EvalWorksetDetail } from "./evalApi";
+import {
+  evalApi,
+  type EvalSummary,
+  type EvalWorksetDetail,
+} from "./evalApi";
+import { createEvalQueryClient } from "./evalQueryClient";
 import {
   LiveEvals,
   type EvalSurfaceStatus,
@@ -23,15 +28,7 @@ const resultStaleMs = 30_000;
 const resultCacheMs = 30 * 60_000;
 const hoverFreshMs = 2_000;
 
-const queryClient = new QueryClient({
-  defaultOptions: {
-    queries: {
-      gcTime: 30 * 60 * 1_000,
-      refetchOnWindowFocus: false,
-      retry: 2,
-    },
-  },
-});
+const queryClient = createEvalQueryClient();
 
 export async function preloadEvalOverview(): Promise<void> {
   const [overview, cluster] = overviewQueryOptions();

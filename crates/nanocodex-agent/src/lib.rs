@@ -31,7 +31,7 @@ pub use agent::{
     AgentHandle, AgentSessionContext, ExecutionEnvironment, Nanocodex, NanocodexBuilder,
     PromptRequest, PromptRoute, SpawnOptions, Turn, TurnControl, TurnResult,
 };
-pub use error::{NanocodexError, Result};
+pub use error::{ExecutionPolicyDisposition, NanocodexError, Result};
 pub use nanocodex_oai_api::{
     Model, OpenAi, ReasoningMode, ResponseError, ResponseErrorKind, Thinking, events::AgentEvents,
 };

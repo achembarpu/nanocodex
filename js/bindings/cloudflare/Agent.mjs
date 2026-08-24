@@ -1,6 +1,8 @@
 import * as HostAgent from "../host/Agent.mjs";
+import { observeAgentRelease } from "../internal.mjs";
 import * as Transport from "../browser/Transport.mjs";
 import { createCloudflareDurabilityStore } from "../runtime/cloudflare-durability-store.mjs";
+import { durabilityRevision } from "../runtime/durability-store.mjs";
 import { cloudflareEgress } from "./egress.mjs";
 import { scopeCloudflareEgress } from "./egress-subject.mjs";
 import {
@@ -10,11 +12,12 @@ import {
 
 const STARTUP_TIMEOUT_MS = 10_000;
 const APPLICATION_OPTIONS = new Set(["instructions", "tools"]);
+const lifecycles = new WeakMap();
 
 /** @internal Binds the package-owned module to the public Cloudflare namespace. */
-export function bindAgent(module) {
+export function bindAgent(module, hostAgent = HostAgent) {
   return Object.freeze({
-    create: (owner, options) => create(module, owner, options),
+    create: (owner, options) => create(module, owner, options, hostAgent),
     destroy,
   });
 }
@@ -22,6 +25,13 @@ export function bindAgent(module) {
 /** Removes the package-owned durable history for one Cloudflare Agent. */
 export function destroy(owner) {
   const context = resolveContext(owner);
+  const lifecycle = lifecycles.get(context);
+  if (lifecycle?.creating) {
+    throw new Error("Cloudflare Agent creation must settle before destroy");
+  }
+  if (lifecycle?.active !== undefined) {
+    throw new Error("Cloudflare Agent shutdown must complete before destroy");
+  }
   const storage = context.storage;
   createCloudflareDurabilityStore(storage);
   initializeAgentStorage(storage);
@@ -29,6 +39,20 @@ export function destroy(owner) {
   storage.transactionSync(() => {
     if (sessionId !== undefined) {
       const journalId = `cloudflare:${sessionId}`;
+      const retained = storage.sql.exec(
+        "SELECT fence FROM nanocodex_journal_owners WHERE journal_id = ?",
+        journalId,
+      ).toArray();
+      const fence = durabilityRevision(
+        BigInt(durabilityRevision(retained[0]?.fence ?? "0")) + 1n,
+      );
+      storage.sql.exec(
+        `INSERT INTO nanocodex_journal_owners (journal_id, owner_id, fence) VALUES (?, ?, ?)
+         ON CONFLICT (journal_id) DO UPDATE SET owner_id = excluded.owner_id, fence = excluded.fence`,
+        journalId,
+        `destroy:${globalThis.crypto.randomUUID()}`,
+        fence,
+      );
       storage.sql.exec(
         "DELETE FROM nanocodex_journal_batches WHERE journal_id = ?",
         journalId,
@@ -43,8 +67,25 @@ export function destroy(owner) {
 }
 
 /** @internal Creates one Agent with an explicitly supplied package module. */
-export async function create(module, owner, options = {}) {
-  const { context, egress, subject } = resolveOwner(owner);
+export async function create(module, owner, options = {}, hostAgent = HostAgent) {
+  const resolved = resolveOwner(owner);
+  const lifecycle = lifecycleFor(resolved.context);
+  if (lifecycle.creating) {
+    throw new Error("Cloudflare Agent creation is already in progress for this Durable Object");
+  }
+  if (lifecycle.active !== undefined) {
+    throw new Error("Cloudflare Agent shutdown must complete before create");
+  }
+  lifecycle.creating = true;
+  try {
+    return await createOwned(module, resolved, options, hostAgent, lifecycle);
+  } finally {
+    lifecycle.creating = false;
+  }
+}
+
+async function createOwned(module, resolved, options, hostAgent, lifecycle) {
+  const { context, egress, subject } = resolved;
   const agentOptions = applicationOptions(options);
   const eventSocket = createCloudflareEventSocket(context);
   const durability = createCloudflareDurabilityStore(context.storage);
@@ -69,8 +110,10 @@ export async function create(module, owner, options = {}) {
   });
 
   let agent;
+  let watcher;
+  let unwatch;
   try {
-    agent = await HostAgent.create({
+    agent = await hostAgent.create({
       ...agentOptions,
       module,
       toolMode: agentOptions.toolMode ?? "direct",
@@ -84,27 +127,63 @@ export async function create(module, owner, options = {}) {
       STARTUP_TIMEOUT_MS,
       "Cloudflare Agent EGRESS startup validation timed out",
     );
+
+    watcher = agent.events.watch();
+    unwatch = watcher.onEvent((event) => {
+      try {
+        eventSocket.publish(event);
+      } catch (error) {
+        unwatch?.();
+        eventSocket.fail(error);
+        console.error("Nanocodex Cloudflare event projection failed", error);
+      }
+    });
+    const exposed = agent.extend(() => ({
+      events: {
+        connect: (request) => eventSocket.connect(request),
+      },
+    }));
+    const active = {};
+    lifecycle.active = active;
+    observeAgentRelease(exposed, () => {
+      if (lifecycle.active === active) lifecycle.active = undefined;
+    });
+    return exposed;
   } catch (error) {
-    if (agent) await agent.session.shutdown().catch(() => {});
+    const cleanupErrors = [];
+    try { unwatch?.(); } catch (cleanupError) { cleanupErrors.push(cleanupError); }
+    try { watcher?.off(); } catch (cleanupError) { cleanupErrors.push(cleanupError); }
+    if (agent) {
+      try { await agent.session.shutdown(); } catch (cleanupError) { cleanupErrors.push(cleanupError); }
+    }
+    if (cleanupErrors.length > 0) {
+      const cause = new AggregateError(
+        [error, ...cleanupErrors],
+        "Cloudflare Agent creation and resource rollback both failed",
+      );
+      throw Object.assign(
+        new Error(
+          `Cloudflare Agent creation failed and rollback requires reopen: ${errorMessage(error)}`,
+          { cause },
+        ),
+        { code: "reopen_required" },
+      );
+    }
     throw error;
   }
+}
 
-  const watcher = agent.events.watch();
-  let unwatch;
-  unwatch = watcher.onEvent((event) => {
-    try {
-      eventSocket.publish(event);
-    } catch (error) {
-      unwatch?.();
-      eventSocket.fail(error);
-      console.error("Nanocodex Cloudflare event projection failed", error);
-    }
-  });
-  return agent.extend(() => ({
-    events: {
-      connect: (request) => eventSocket.connect(request),
-    },
-  }));
+function lifecycleFor(context) {
+  let lifecycle = lifecycles.get(context);
+  if (lifecycle === undefined) {
+    lifecycle = { active: undefined, creating: false };
+    lifecycles.set(context, lifecycle);
+  }
+  return lifecycle;
+}
+
+function errorMessage(error) {
+  return error instanceof Error ? error.message : String(error);
 }
 
 function resolveOwner(owner) {
@@ -201,6 +280,10 @@ function deferred() {
     resolve = onResolve;
     reject = onReject;
   });
+  // Preconnect may fail before HostAgent.create returns and installs the
+  // startup waiter. Mark the original promise handled without changing what
+  // the later await observes.
+  void promise.catch(() => {});
   return { promise, resolve, reject };
 }
 

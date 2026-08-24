@@ -1,14 +1,31 @@
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    future::Future,
+    path::PathBuf,
+    pin::Pin,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::Duration,
+};
 
 use eyre::{Result, eyre};
 use nanocodex_agent::{
-    Nanocodex, NanocodexError, OpenAi, PromptRequest, ResponseError, Tools, session::SessionId,
+    ExecutionPolicyDisposition, Nanocodex, NanocodexError, OpenAi, PromptRequest, PromptRoute,
+    ResponseError, Tools,
+    events::{AgentEventKind, AgentEvents, RunStatus, RunTerminal},
+    execution::{
+        ExecutionAdmission, ExecutionFuture, ExecutionOutput, ExecutionPolicy, ExecutionRetry,
+        ExecutionStepAdmission,
+    },
+    input::Prompt,
+    session::{SessionId, SessionSnapshot},
 };
 use serde_json::json;
 
 use nanocodex_durability::{
-    DurableAgentExt, DurableSession, JournalStore, MemoryStore, StoreError, StoreFuture,
-    StoredJournal,
+    DurableAgentExt, DurableSession, JournalStore, MemoryStore, OwnedJournal, OwnerId, OwnerToken,
+    StoreError, StoreFuture,
 };
 
 fn temporary_workspace(label: &str) -> Result<PathBuf> {
@@ -28,17 +45,96 @@ struct FailAppendOnce {
     failed: Arc<std::sync::atomic::AtomicBool>,
 }
 
-impl crate::JournalStore for FailAppendOnce {
-    fn load<'a>(
+#[derive(Clone)]
+struct FailEntryOnce {
+    inner: crate::MemoryStore,
+    entry_tag: &'static str,
+    operation_id: &'static str,
+    failed: Arc<AtomicBool>,
+}
+
+impl crate::JournalStore for FailEntryOnce {
+    fn acquire_owner<'a>(
         &'a mut self,
         journal_id: &'a str,
-    ) -> crate::StoreFuture<'a, std::result::Result<crate::StoredJournal, crate::StoreError>> {
-        self.inner.load(journal_id)
+        owner_id: crate::OwnerId,
+    ) -> crate::StoreFuture<'a, std::result::Result<crate::OwnedJournal, crate::StoreError>> {
+        self.inner.acquire_owner(journal_id, owner_id)
     }
 
     fn append<'a>(
         &'a mut self,
         journal_id: &'a str,
+        owner: &'a crate::OwnerToken,
+        expected_revision: u64,
+        payload: &'a str,
+    ) -> crate::StoreFuture<'a, std::result::Result<u64, crate::StoreError>> {
+        let matches_entry = payload.contains(self.entry_tag)
+            && payload.contains(&format!("\"operation_id\":\"{}\"", self.operation_id));
+        if matches_entry && !self.failed.swap(true, Ordering::SeqCst) {
+            return Box::pin(async {
+                Err(crate::StoreError::NotCommitted(
+                    "injected entry append failure".to_owned(),
+                ))
+            });
+        }
+        self.inner
+            .append(journal_id, owner, expected_revision, payload)
+    }
+}
+
+#[derive(Clone)]
+struct GateCompactionAuthorization {
+    inner: crate::MemoryStore,
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+impl crate::JournalStore for GateCompactionAuthorization {
+    fn acquire_owner<'a>(
+        &'a mut self,
+        journal_id: &'a str,
+        owner_id: crate::OwnerId,
+    ) -> crate::StoreFuture<'a, std::result::Result<crate::OwnedJournal, crate::StoreError>> {
+        self.inner.acquire_owner(journal_id, owner_id)
+    }
+
+    fn append<'a>(
+        &'a mut self,
+        journal_id: &'a str,
+        owner: &'a crate::OwnerToken,
+        expected_revision: u64,
+        payload: &'a str,
+    ) -> crate::StoreFuture<'a, std::result::Result<u64, crate::StoreError>> {
+        if payload.contains("\"step_started\"") && payload.contains("\"kind\":\"compaction\"") {
+            let started = Arc::clone(&self.started);
+            let release = Arc::clone(&self.release);
+            return Box::pin(async move {
+                started.notify_one();
+                release.notified().await;
+                self.inner
+                    .append(journal_id, owner, expected_revision, payload)
+                    .await
+            });
+        }
+        self.inner
+            .append(journal_id, owner, expected_revision, payload)
+    }
+}
+
+impl crate::JournalStore for FailAppendOnce {
+    fn acquire_owner<'a>(
+        &'a mut self,
+        journal_id: &'a str,
+        owner_id: crate::OwnerId,
+    ) -> crate::StoreFuture<'a, std::result::Result<crate::OwnedJournal, crate::StoreError>> {
+        self.inner.acquire_owner(journal_id, owner_id)
+    }
+
+    fn append<'a>(
+        &'a mut self,
+        journal_id: &'a str,
+        owner: &'a crate::OwnerToken,
         expected_revision: u64,
         payload: &'a str,
     ) -> crate::StoreFuture<'a, std::result::Result<u64, crate::StoreError>> {
@@ -51,13 +147,29 @@ impl crate::JournalStore for FailAppendOnce {
                 ))
             });
         }
-        self.inner.append(journal_id, expected_revision, payload)
+        self.inner
+            .append(journal_id, owner, expected_revision, payload)
     }
 }
 
 #[derive(Clone)]
 struct DurableReplayService {
     generations: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[derive(Clone)]
+struct ReplayContinuationService {
+    generations: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+struct GatedCompletedPolicy {
+    snapshot: SessionSnapshot,
+    entered: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+struct FailClosedDefaultsPolicy {
+    releases: Arc<std::sync::atomic::AtomicUsize>,
 }
 
 struct CountingDurableTool {
@@ -131,6 +243,575 @@ struct DurableToolService {
 #[derive(Clone)]
 struct RemovedSpawnRecoveryService {
     generations: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[derive(Clone)]
+struct PendingGenerationService {
+    started: Arc<AtomicBool>,
+}
+
+#[derive(Clone)]
+struct GatedGenerationService {
+    generations: Arc<std::sync::atomic::AtomicUsize>,
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[derive(Clone)]
+struct GatedWarmupService {
+    warmups: Arc<std::sync::atomic::AtomicUsize>,
+    generations: Arc<std::sync::atomic::AtomicUsize>,
+    started: Arc<tokio::sync::Notify>,
+    release: Arc<tokio::sync::Notify>,
+}
+
+#[derive(Clone)]
+struct DurableCompactionService;
+
+#[derive(Clone)]
+struct AutomaticCompactionService {
+    generations: Arc<std::sync::atomic::AtomicUsize>,
+    compactions: Arc<std::sync::atomic::AtomicUsize>,
+}
+
+#[derive(Clone)]
+struct SteeredDurableService {
+    generations: Arc<std::sync::atomic::AtomicUsize>,
+    started: Arc<AtomicBool>,
+    release_first: Arc<tokio::sync::Notify>,
+    observed_steer: Arc<AtomicBool>,
+}
+
+fn unexpected_policy<T>() -> ExecutionFuture<'static, nanocodex_agent::Result<T>>
+where
+    T: 'static,
+{
+    Box::pin(async {
+        Err(NanocodexError::InvalidExecutionPolicy(
+            "unexpected test policy operation".to_owned(),
+        ))
+    })
+}
+
+impl ExecutionPolicy for GatedCompletedPolicy {
+    fn admit<'a>(
+        &'a self,
+        _operation_id: String,
+        _input_json: String,
+    ) -> ExecutionFuture<'a, nanocodex_agent::Result<ExecutionAdmission>> {
+        let snapshot = self.snapshot.clone();
+        let entered = Arc::clone(&self.entered);
+        let release = Arc::clone(&self.release);
+        Box::pin(async move {
+            entered.notify_one();
+            release.notified().await;
+            Ok(ExecutionAdmission::Completed {
+                snapshot,
+                output: ExecutionOutput {
+                    final_message: "retained terminal".to_owned(),
+                    usage: nanocodex_agent::usage::TurnUsage::default(),
+                },
+            })
+        })
+    }
+
+    fn admit_automatic<'a>(
+        &'a self,
+        candidate_operation_id: String,
+        _input_json: String,
+    ) -> ExecutionFuture<'a, nanocodex_agent::Result<(String, ExecutionAdmission)>> {
+        let snapshot = self.snapshot.clone();
+        let entered = Arc::clone(&self.entered);
+        let release = Arc::clone(&self.release);
+        Box::pin(async move {
+            entered.notify_one();
+            release.notified().await;
+            Ok((
+                candidate_operation_id,
+                ExecutionAdmission::Completed {
+                    snapshot,
+                    output: ExecutionOutput {
+                        final_message: "retained terminal".to_owned(),
+                        usage: nanocodex_agent::usage::TurnUsage::default(),
+                    },
+                },
+            ))
+        })
+    }
+
+    fn release<'a>(&'a self, _operation_id: String) -> ExecutionFuture<'a, ()> {
+        Box::pin(async {})
+    }
+
+    fn cancel<'a>(
+        &'a self,
+        _operation_id: String,
+        _snapshot: Option<SessionSnapshot>,
+    ) -> ExecutionFuture<'a, nanocodex_agent::Result<()>> {
+        unexpected_policy()
+    }
+
+    fn begin_attempt<'a>(
+        &'a self,
+        _operation_id: String,
+    ) -> ExecutionFuture<'a, nanocodex_agent::Result<()>> {
+        unexpected_policy()
+    }
+
+    fn begin_step<'a>(
+        &'a self,
+        _operation_id: String,
+        _step_id: String,
+        _kind: String,
+        _input_json: String,
+        _retry: ExecutionRetry,
+    ) -> ExecutionFuture<'a, nanocodex_agent::Result<ExecutionStepAdmission>> {
+        unexpected_policy()
+    }
+
+    fn complete_step<'a>(
+        &'a self,
+        _operation_id: String,
+        _step_id: String,
+        _output_json: String,
+    ) -> ExecutionFuture<'a, nanocodex_agent::Result<()>> {
+        unexpected_policy()
+    }
+
+    fn complete<'a>(
+        &'a self,
+        _operation_id: String,
+        _snapshot: SessionSnapshot,
+        _output: ExecutionOutput,
+    ) -> ExecutionFuture<'a, nanocodex_agent::Result<()>> {
+        unexpected_policy()
+    }
+
+    fn fail_attempt<'a>(
+        &'a self,
+        _operation_id: String,
+        _error: String,
+    ) -> ExecutionFuture<'a, nanocodex_agent::Result<()>> {
+        unexpected_policy()
+    }
+
+    fn fail<'a>(
+        &'a self,
+        _operation_id: String,
+        _snapshot: SessionSnapshot,
+        _error: String,
+    ) -> ExecutionFuture<'a, nanocodex_agent::Result<()>> {
+        unexpected_policy()
+    }
+}
+
+impl ExecutionPolicy for FailClosedDefaultsPolicy {
+    fn admit<'a>(
+        &'a self,
+        _operation_id: String,
+        _input_json: String,
+    ) -> ExecutionFuture<'a, nanocodex_agent::Result<ExecutionAdmission>> {
+        unexpected_policy()
+    }
+
+    fn admit_automatic<'a>(
+        &'a self,
+        _candidate_operation_id: String,
+        _input_json: String,
+    ) -> ExecutionFuture<'a, nanocodex_agent::Result<(String, ExecutionAdmission)>> {
+        unexpected_policy()
+    }
+
+    fn release<'a>(&'a self, _operation_id: String) -> ExecutionFuture<'a, ()> {
+        self.releases.fetch_add(1, Ordering::SeqCst);
+        Box::pin(async {})
+    }
+
+    fn begin_attempt<'a>(
+        &'a self,
+        _operation_id: String,
+    ) -> ExecutionFuture<'a, nanocodex_agent::Result<()>> {
+        unexpected_policy()
+    }
+
+    fn begin_step<'a>(
+        &'a self,
+        _operation_id: String,
+        _step_id: String,
+        _kind: String,
+        _input_json: String,
+        _retry: ExecutionRetry,
+    ) -> ExecutionFuture<'a, nanocodex_agent::Result<ExecutionStepAdmission>> {
+        unexpected_policy()
+    }
+
+    fn complete_step<'a>(
+        &'a self,
+        _operation_id: String,
+        _step_id: String,
+        _output_json: String,
+    ) -> ExecutionFuture<'a, nanocodex_agent::Result<()>> {
+        unexpected_policy()
+    }
+
+    fn complete<'a>(
+        &'a self,
+        _operation_id: String,
+        _snapshot: SessionSnapshot,
+        _output: ExecutionOutput,
+    ) -> ExecutionFuture<'a, nanocodex_agent::Result<()>> {
+        unexpected_policy()
+    }
+
+    fn fail_attempt<'a>(
+        &'a self,
+        _operation_id: String,
+        _error: String,
+    ) -> ExecutionFuture<'a, nanocodex_agent::Result<()>> {
+        unexpected_policy()
+    }
+
+    fn fail<'a>(
+        &'a self,
+        _operation_id: String,
+        _snapshot: SessionSnapshot,
+        _error: String,
+    ) -> ExecutionFuture<'a, nanocodex_agent::Result<()>> {
+        unexpected_policy()
+    }
+}
+
+impl tower::Service<nanocodex_oai_api::tower::ResponsesAttempt> for PendingGenerationService {
+    type Response = nanocodex_oai_api::tower::ResponsesServiceResponse;
+    type Error = ResponseError;
+    type Future =
+        Pin<Box<dyn Future<Output = std::result::Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(
+        &mut self,
+        _context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, request: nanocodex_oai_api::tower::ResponsesAttempt) -> Self::Future {
+        use nanocodex_oai_api::{
+            responses::WarmupResponse,
+            tower::{ResponsesAttemptKind, ResponsesOutput, ResponsesServiceResponse},
+        };
+        match request.kind() {
+            ResponsesAttemptKind::Warmup => Box::pin(async {
+                Ok(ResponsesServiceResponse::new(ResponsesOutput::Warmup(
+                    WarmupResponse {
+                        id: "warmup".to_owned(),
+                        usage: None,
+                    },
+                )))
+            }),
+            ResponsesAttemptKind::Generation => {
+                self.started.store(true, Ordering::Release);
+                Box::pin(std::future::pending())
+            }
+            ResponsesAttemptKind::Compaction => panic!("unexpected compaction request"),
+            _ => panic!("unexpected Responses attempt kind"),
+        }
+    }
+}
+
+fn successful_attempt(
+    kind: nanocodex_oai_api::tower::ResponsesAttemptKind,
+) -> nanocodex_oai_api::tower::ResponsesServiceResponse {
+    use nanocodex_oai_api::{
+        responses::{ContentItem, MessageRole, ResponseItem, ResponseItemId, WarmupResponse},
+        tower::{
+            CompactionOutput, GenerationOutput, ResponsePipelineStats, ResponsesAttemptKind,
+            ResponsesOutput, ResponsesServiceResponse,
+        },
+    };
+    let output = match kind {
+        ResponsesAttemptKind::Warmup => ResponsesOutput::Warmup(WarmupResponse {
+            id: "warmup".to_owned(),
+            usage: None,
+        }),
+        ResponsesAttemptKind::Generation => ResponsesOutput::Generation(GenerationOutput {
+            id: "durable-response".to_owned(),
+            status: "completed".to_owned(),
+            end_turn: Some(true),
+            final_message: Some("durably replayed".to_owned()),
+            output_items: vec![ResponseItem::message(
+                MessageRole::Assistant,
+                [ContentItem::output_text("durably replayed")],
+            )],
+            code_calls: Vec::new(),
+            usage: None,
+            time_to_first_event_ns: 0,
+            time_to_first_output_ns: None,
+            pipeline_stats: ResponsePipelineStats::default(),
+        }),
+        ResponsesAttemptKind::Compaction => ResponsesOutput::Compaction(CompactionOutput {
+            id: "durable-compaction".to_owned(),
+            status: "completed".to_owned(),
+            item: ResponseItem::Compaction {
+                id: Some(ResponseItemId::from("cmp-durable")),
+                encrypted_content: "retained-compaction".into(),
+                created_by: None,
+                internal_chat_message_metadata_passthrough: None,
+            },
+            usage: None,
+            time_to_first_event_ns: 0,
+            time_to_first_output_ns: None,
+            pipeline_stats: ResponsePipelineStats::default(),
+        }),
+        kind => panic!("unexpected test attempt: {kind:?}"),
+    };
+    ResponsesServiceResponse::new(output)
+}
+
+impl tower::Service<nanocodex_oai_api::tower::ResponsesAttempt> for GatedGenerationService {
+    type Response = nanocodex_oai_api::tower::ResponsesServiceResponse;
+    type Error = ResponseError;
+    type Future =
+        Pin<Box<dyn Future<Output = std::result::Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(
+        &mut self,
+        _context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, request: nanocodex_oai_api::tower::ResponsesAttempt) -> Self::Future {
+        use nanocodex_oai_api::tower::ResponsesAttemptKind;
+        let kind = request.kind();
+        match kind {
+            ResponsesAttemptKind::Generation => {
+                let generation = self.generations.fetch_add(1, Ordering::SeqCst);
+                let started = Arc::clone(&self.started);
+                let release = Arc::clone(&self.release);
+                Box::pin(async move {
+                    if generation == 0 {
+                        started.notify_one();
+                        release.notified().await;
+                    }
+                    Ok(successful_attempt(ResponsesAttemptKind::Generation))
+                })
+            }
+            kind => Box::pin(async move { Ok(successful_attempt(kind)) }),
+        }
+    }
+}
+
+impl tower::Service<nanocodex_oai_api::tower::ResponsesAttempt> for GatedWarmupService {
+    type Response = nanocodex_oai_api::tower::ResponsesServiceResponse;
+    type Error = ResponseError;
+    type Future =
+        Pin<Box<dyn Future<Output = std::result::Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(
+        &mut self,
+        _context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, request: nanocodex_oai_api::tower::ResponsesAttempt) -> Self::Future {
+        use nanocodex_oai_api::tower::ResponsesAttemptKind;
+        let kind = request.kind();
+        match kind {
+            ResponsesAttemptKind::Warmup => {
+                self.warmups.fetch_add(1, Ordering::SeqCst);
+                let started = Arc::clone(&self.started);
+                let release = Arc::clone(&self.release);
+                Box::pin(async move {
+                    started.notify_one();
+                    release.notified().await;
+                    Ok(successful_attempt(kind))
+                })
+            }
+            ResponsesAttemptKind::Generation => {
+                self.generations.fetch_add(1, Ordering::SeqCst);
+                Box::pin(async move { Ok(successful_attempt(kind)) })
+            }
+            _ => Box::pin(async move { Ok(successful_attempt(kind)) }),
+        }
+    }
+}
+
+impl tower::Service<nanocodex_oai_api::tower::ResponsesAttempt> for DurableCompactionService {
+    type Response = nanocodex_oai_api::tower::ResponsesServiceResponse;
+    type Error = ResponseError;
+    type Future = std::future::Ready<std::result::Result<Self::Response, Self::Error>>;
+
+    fn poll_ready(
+        &mut self,
+        _context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, request: nanocodex_oai_api::tower::ResponsesAttempt) -> Self::Future {
+        std::future::ready(Ok(successful_attempt(request.kind())))
+    }
+}
+
+impl tower::Service<nanocodex_oai_api::tower::ResponsesAttempt> for AutomaticCompactionService {
+    type Response = nanocodex_oai_api::tower::ResponsesServiceResponse;
+    type Error = ResponseError;
+    type Future = std::future::Ready<std::result::Result<Self::Response, Self::Error>>;
+
+    fn poll_ready(
+        &mut self,
+        _context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, request: nanocodex_oai_api::tower::ResponsesAttempt) -> Self::Future {
+        use nanocodex_oai_api::{
+            responses::{
+                ContentItem, MessageRole, ResponseItem, ResponseItemId, Usage, WarmupResponse,
+            },
+            tower::{
+                CompactionOutput, GenerationOutput, ResponsePipelineStats, ResponsesAttemptKind,
+                ResponsesOutput, ResponsesServiceResponse,
+            },
+        };
+        let output = match request.kind() {
+            ResponsesAttemptKind::Warmup => ResponsesOutput::Warmup(WarmupResponse {
+                id: "automatic-compaction-warmup".to_owned(),
+                usage: None,
+            }),
+            ResponsesAttemptKind::Generation => {
+                let call = self.generations.fetch_add(1, Ordering::SeqCst) + 1;
+                let message = format!("automatic-generation-{call}");
+                ResponsesOutput::Generation(GenerationOutput {
+                    id: format!("automatic-generation-{call}"),
+                    status: "completed".to_owned(),
+                    end_turn: Some(true),
+                    final_message: Some(message.clone()),
+                    output_items: vec![ResponseItem::message(
+                        MessageRole::Assistant,
+                        [ContentItem::output_text(message)],
+                    )],
+                    code_calls: Vec::new(),
+                    usage: Some(Usage {
+                        total_tokens: if call == 1 { 244_800 } else { 120 },
+                        ..Usage::default()
+                    }),
+                    time_to_first_event_ns: 0,
+                    time_to_first_output_ns: None,
+                    pipeline_stats: ResponsePipelineStats::default(),
+                })
+            }
+            ResponsesAttemptKind::Compaction => {
+                let call = self.compactions.fetch_add(1, Ordering::SeqCst);
+                let label = if call == 0 { "A" } else { "B" };
+                ResponsesOutput::Compaction(CompactionOutput {
+                    id: format!("automatic-compaction-{label}"),
+                    status: "completed".to_owned(),
+                    item: ResponseItem::Compaction {
+                        id: Some(ResponseItemId::from(format!("cmp-{label}"))),
+                        encrypted_content: format!("compaction-{label}").into(),
+                        created_by: None,
+                        internal_chat_message_metadata_passthrough: None,
+                    },
+                    usage: Some(Usage {
+                        total_tokens: 120,
+                        ..Usage::default()
+                    }),
+                    time_to_first_event_ns: 0,
+                    time_to_first_output_ns: None,
+                    pipeline_stats: ResponsePipelineStats::default(),
+                })
+            }
+            kind => panic!("unexpected automatic compaction attempt: {kind:?}"),
+        };
+        std::future::ready(Ok(ResponsesServiceResponse::new(output)))
+    }
+}
+
+impl tower::Service<nanocodex_oai_api::tower::ResponsesAttempt> for SteeredDurableService {
+    type Response = nanocodex_oai_api::tower::ResponsesServiceResponse;
+    type Error = ResponseError;
+    type Future =
+        Pin<Box<dyn Future<Output = std::result::Result<Self::Response, Self::Error>> + Send>>;
+
+    fn poll_ready(
+        &mut self,
+        _context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, request: nanocodex_oai_api::tower::ResponsesAttempt) -> Self::Future {
+        use nanocodex_oai_api::{
+            responses::{ContentItem, MessageRole, ResponseItem, WarmupResponse},
+            tower::{
+                GenerationOutput, ResponsePipelineStats, ResponsesAttemptKind, ResponsesOutput,
+                ResponsesServiceResponse,
+            },
+        };
+        match request.kind() {
+            ResponsesAttemptKind::Warmup => Box::pin(async {
+                Ok(ResponsesServiceResponse::new(ResponsesOutput::Warmup(
+                    WarmupResponse {
+                        id: "warmup".to_owned(),
+                        usage: None,
+                    },
+                )))
+            }),
+            ResponsesAttemptKind::Generation => {
+                let generation = self.generations.fetch_add(1, Ordering::SeqCst);
+                if generation == 0 {
+                    self.started.store(true, Ordering::Release);
+                    let release_first = Arc::clone(&self.release_first);
+                    Box::pin(async move {
+                        release_first.notified().await;
+                        Ok(ResponsesServiceResponse::new(ResponsesOutput::Generation(
+                            GenerationOutput {
+                                id: "steer-boundary".to_owned(),
+                                status: "completed".to_owned(),
+                                end_turn: Some(false),
+                                final_message: None,
+                                output_items: Vec::new(),
+                                code_calls: Vec::new(),
+                                usage: None,
+                                time_to_first_event_ns: 0,
+                                time_to_first_output_ns: None,
+                                pipeline_stats: ResponsePipelineStats::default(),
+                            },
+                        )))
+                    })
+                } else {
+                    let observed = request.input_items().any(|item| {
+                        serde_json::to_string(item)
+                            .is_ok_and(|encoded| encoded.contains("retain this routed steer"))
+                    });
+                    self.observed_steer.store(observed, Ordering::Release);
+                    Box::pin(async move {
+                        Ok(ResponsesServiceResponse::new(ResponsesOutput::Generation(
+                            GenerationOutput {
+                                id: "steered-response".to_owned(),
+                                status: "completed".to_owned(),
+                                end_turn: Some(true),
+                                final_message: Some("steer retained".to_owned()),
+                                output_items: vec![ResponseItem::message(
+                                    MessageRole::Assistant,
+                                    [ContentItem::output_text("steer retained")],
+                                )],
+                                code_calls: Vec::new(),
+                                usage: None,
+                                time_to_first_event_ns: 0,
+                                time_to_first_output_ns: None,
+                                pipeline_stats: ResponsePipelineStats::default(),
+                            },
+                        )))
+                    })
+                }
+            }
+            kind => panic!("unexpected steered durable attempt: {kind:?}"),
+        }
+    }
 }
 
 impl tower::Service<nanocodex_oai_api::tower::ResponsesAttempt> for RemovedSpawnRecoveryService {
@@ -292,6 +973,116 @@ impl tower::Service<nanocodex_oai_api::tower::ResponsesAttempt> for DurableToolS
     }
 }
 
+impl tower::Service<nanocodex_oai_api::tower::ResponsesAttempt> for ReplayContinuationService {
+    type Response = nanocodex_oai_api::tower::ResponsesServiceResponse;
+    type Error = ResponseError;
+    type Future = std::future::Ready<std::result::Result<Self::Response, Self::Error>>;
+
+    fn poll_ready(
+        &mut self,
+        _context: &mut std::task::Context<'_>,
+    ) -> std::task::Poll<std::result::Result<(), Self::Error>> {
+        std::task::Poll::Ready(Ok(()))
+    }
+
+    fn call(&mut self, request: nanocodex_oai_api::tower::ResponsesAttempt) -> Self::Future {
+        use nanocodex_oai_api::{
+            responses::{ContentItem, MessageRole, ResponseItem, WarmupResponse},
+            tower::{
+                CodeCall, CodeCallKind, GenerationOutput, ResponsePipelineStats,
+                ResponsesAttemptKind, ResponsesOutput, ResponsesServiceResponse,
+            },
+        };
+
+        let output = match request.kind() {
+            ResponsesAttemptKind::Warmup => ResponsesOutput::Warmup(WarmupResponse {
+                id: "warmup".to_owned(),
+                usage: None,
+            }),
+            ResponsesAttemptKind::Generation => {
+                let generation = self.generations.fetch_add(1, Ordering::SeqCst);
+                if generation == 0 {
+                    let item = serde_json::from_value(json!({
+                        "type": "function_call",
+                        "call_id": "call-replay-fence",
+                        "name": "count_once",
+                        "arguments": "{}"
+                    }))
+                    .expect("replay-fence tool call item decodes");
+                    ResponsesOutput::Generation(GenerationOutput {
+                        id: "old-socket-response".to_owned(),
+                        status: "completed".to_owned(),
+                        end_turn: Some(false),
+                        final_message: None,
+                        output_items: vec![item],
+                        code_calls: vec![CodeCall {
+                            call_id: "call-replay-fence".to_owned(),
+                            name: "count_once".to_owned(),
+                            namespace: None,
+                            input: "{}".to_owned(),
+                            kind: CodeCallKind::Function,
+                        }],
+                        usage: None,
+                        time_to_first_event_ns: 0,
+                        time_to_first_output_ns: None,
+                        pipeline_stats: ResponsePipelineStats::default(),
+                    })
+                } else {
+                    assert_eq!(generation, 1, "recovery must make exactly one continuation");
+                    assert_eq!(request.previous_response_id(), None);
+                    assert!(
+                        request.is_full_replay(),
+                        "a replacement transport must replay authoritative typed history"
+                    );
+                    let input = request
+                        .input_items()
+                        .map(|item| serde_json::to_value(item).expect("request item encodes"))
+                        .collect::<Vec<_>>();
+                    let prompt_index = input
+                        .iter()
+                        .position(|item| item.to_string().contains("replay the response chain"))
+                        .expect("full replay retains the original prompt");
+                    let model_index = input
+                        .iter()
+                        .position(|item| {
+                            item["type"] == "function_call"
+                                && item["call_id"] == "call-replay-fence"
+                        })
+                        .expect("full replay retains the journaled model output");
+                    let tool_index = input
+                        .iter()
+                        .position(|item| {
+                            item["type"] == "function_call_output"
+                                && item["call_id"] == "call-replay-fence"
+                                && item.to_string().contains("counted")
+                        })
+                        .expect("full replay retains the recovered tool result");
+                    assert!(prompt_index < model_index && model_index < tool_index);
+                    ResponsesOutput::Generation(GenerationOutput {
+                        id: "replacement-socket-response".to_owned(),
+                        status: "completed".to_owned(),
+                        end_turn: Some(true),
+                        final_message: Some("continued from full typed history".to_owned()),
+                        output_items: vec![ResponseItem::message(
+                            MessageRole::Assistant,
+                            [ContentItem::output_text(
+                                "continued from full typed history",
+                            )],
+                        )],
+                        code_calls: Vec::new(),
+                        usage: None,
+                        time_to_first_event_ns: 0,
+                        time_to_first_output_ns: None,
+                        pipeline_stats: ResponsePipelineStats::default(),
+                    })
+                }
+            }
+            kind => panic!("unexpected replay-continuation attempt: {kind:?}"),
+        };
+        std::future::ready(Ok(ResponsesServiceResponse::new(output)))
+    }
+}
+
 impl tower::Service<nanocodex_oai_api::tower::ResponsesAttempt> for DurableReplayService {
     type Response = nanocodex_oai_api::tower::ResponsesServiceResponse;
     type Error = ResponseError;
@@ -343,6 +1134,39 @@ impl tower::Service<nanocodex_oai_api::tower::ResponsesAttempt> for DurableRepla
 }
 
 #[tokio::test]
+async fn durability_attached_builder_is_safe_single_use_across_clones() -> Result<()> {
+    let store = MemoryStore::new()?;
+    let journal = DurableSession::open(store, "single-use-builder").await?;
+    let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let openai = OpenAi::builder("test-key")
+        .service({
+            let generations = Arc::clone(&generations);
+            move || DurableReplayService {
+                generations: Arc::clone(&generations),
+            }
+        })
+        .build()?;
+    let workspace = temporary_workspace("durability-single-use-builder")?;
+    let builder = Nanocodex::builder(openai)
+        .workspace(&workspace)
+        .durability(journal)
+        .await?;
+    let duplicate = builder.clone();
+
+    let (agent, events) = builder.build()?;
+    let error = match duplicate.build() {
+        Ok(_) => return Err(eyre!("a cloned attached builder built a second agent")),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("can build only one agent"));
+
+    agent.shutdown().await?;
+    drop((agent, events));
+    std::fs::remove_dir_all(workspace)?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn configured_durability_automatically_journals_plain_prompts() -> Result<()> {
     let store = crate::MemoryStore::new()?;
     let journal = crate::DurableSession::open(store, "automatic-prompt").await?;
@@ -390,12 +1214,1338 @@ async fn configured_durability_automatically_journals_plain_prompts() -> Result<
 }
 
 #[tokio::test]
+async fn acknowledged_developer_context_survives_a_cold_reopen() -> Result<()> {
+    let store = crate::MemoryStore::new()?;
+    let journal = crate::DurableSession::open(store.clone(), "durable-developer-context").await?;
+    let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let openai = || {
+        let generations = Arc::clone(&generations);
+        OpenAi::builder("test-key")
+            .service(move || DurableReplayService {
+                generations: Arc::clone(&generations),
+            })
+            .build()
+    };
+    let workspace = temporary_workspace("durable-developer-context")?;
+    let (agent, events) = Nanocodex::builder(openai()?)
+        .workspace(&workspace)
+        .durability(journal.clone())
+        .await?
+        .build()?;
+
+    agent
+        .append_developer_message("durable adapter marker")
+        .await?;
+    agent.shutdown().await?;
+    drop((agent, events));
+
+    let retained = journal
+        .latest_checkpoint()
+        .await?
+        .ok_or_else(|| eyre!("developer context was acknowledged without a checkpoint"))?;
+    assert!(retained.json().contains("durable adapter marker"));
+
+    let reopened = crate::DurableSession::open(store, "durable-developer-context").await?;
+    let (resumed, resumed_events) = Nanocodex::builder(openai()?)
+        .workspace(&workspace)
+        .durability(reopened)
+        .await?
+        .build()?;
+    assert!(resumed.context().await?.history().iter().any(|item| {
+        serde_json::to_string(item).is_ok_and(|encoded| encoded.contains("durable adapter marker"))
+    }));
+    resumed.shutdown().await?;
+    drop((resumed, resumed_events));
+    std::fs::remove_dir_all(workspace)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn execution_policy_authority_defaults_fail_closed() -> Result<()> {
+    let releases = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let policy = Arc::new(FailClosedDefaultsPolicy {
+        releases: Arc::clone(&releases),
+    });
+    let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let openai = OpenAi::builder("test-key")
+        .service({
+            let generations = Arc::clone(&generations);
+            move || DurableReplayService {
+                generations: Arc::clone(&generations),
+            }
+        })
+        .build()?;
+    let workspace = temporary_workspace("fail-closed-policy-defaults")?;
+    let (agent, events) = Nanocodex::builder(openai)
+        .workspace(&workspace)
+        .execution_policy(policy.clone())
+        .build()?;
+
+    assert!(matches!(
+        agent.append_developer_message("must not acknowledge").await,
+        Err(NanocodexError::ExecutionPolicyCapabilityUnsupported {
+            capability: "commit_checkpoint"
+        })
+    ));
+    assert!(matches!(
+        agent.compact().await,
+        Err(NanocodexError::ExecutionPolicyCapabilityUnsupported {
+            capability: "authorize_model_effect"
+        })
+    ));
+    assert!(matches!(
+        ExecutionPolicy::cancel(policy.as_ref(), "turn".to_owned(), None).await,
+        Err(NanocodexError::ExecutionPolicyCapabilityUnsupported {
+            capability: "cancel"
+        })
+    ));
+    assert_eq!(releases.load(Ordering::SeqCst), 0);
+    assert_eq!(generations.load(Ordering::SeqCst), 0);
+
+    agent.shutdown().await?;
+    drop((agent, events));
+    std::fs::remove_dir_all(workspace)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn developer_context_during_an_active_turn_acks_only_after_durable_commit() -> Result<()> {
+    let store = crate::MemoryStore::new()?;
+    let journal = crate::DurableSession::open(store, "active-developer-context").await?;
+    let started = Arc::new(AtomicBool::new(false));
+    let openai = OpenAi::builder("test-key")
+        .service({
+            let started = Arc::clone(&started);
+            move || PendingGenerationService {
+                started: Arc::clone(&started),
+            }
+        })
+        .build()?;
+    let workspace = temporary_workspace("active-developer-context")?;
+    let (agent, events) = Nanocodex::builder(openai)
+        .workspace(&workspace)
+        .durability(journal.clone())
+        .await?
+        .build()?;
+    let turn = agent.prompt("hold this turn open").await?;
+    while !started.load(Ordering::Acquire) {
+        tokio::task::yield_now().await;
+    }
+
+    let append_agent = agent.clone();
+    let append = tokio::spawn(async move {
+        append_agent
+            .append_developer_message("active durable marker")
+            .await
+    });
+    tokio::task::yield_now().await;
+    assert!(
+        !append.is_finished(),
+        "active developer context must not acknowledge early"
+    );
+
+    turn.cancel().await?;
+    assert!(matches!(
+        turn.result().await,
+        Err(NanocodexError::TurnCancelled)
+    ));
+    append.await??;
+    assert!(
+        journal
+            .latest_checkpoint()
+            .await?
+            .is_some_and(|checkpoint| checkpoint.json().contains("active durable marker"))
+    );
+
+    agent.shutdown().await?;
+    drop((agent, events));
+    std::fs::remove_dir_all(workspace)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn queued_developer_context_waits_for_an_exact_id_retry_to_terminalize() -> Result<()> {
+    let store = crate::MemoryStore::new()?;
+    let failing = FailAppendOnce {
+        inner: store.clone(),
+        expected_revision: 4,
+        failed: Arc::new(AtomicBool::new(false)),
+    };
+    let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let openai = || {
+        let generations = Arc::clone(&generations);
+        let started = Arc::clone(&started);
+        let release = Arc::clone(&release);
+        OpenAi::builder("test-key")
+            .service(move || GatedGenerationService {
+                generations: Arc::clone(&generations),
+                started: Arc::clone(&started),
+                release: Arc::clone(&release),
+            })
+            .build()
+    };
+    let workspace = temporary_workspace("developer-context-retry-barrier")?;
+    let journal = DurableSession::open(failing, "developer-context-retry-barrier").await?;
+    let (agent, events) = Nanocodex::builder(openai()?)
+        .workspace(&workspace)
+        .durability(journal.clone())
+        .await?
+        .build()?;
+
+    let turn = agent
+        .prompt(PromptRequest::new("retry before developer context").request_id("retry-turn"))
+        .await?;
+    started.notified().await;
+    let append = {
+        let agent = agent.clone();
+        tokio::spawn(async move {
+            agent
+                .append_developer_message("ordered developer marker")
+                .await
+        })
+    };
+    tokio::task::yield_now().await;
+    assert!(!append.is_finished());
+    release.notify_one();
+    let first = turn
+        .result()
+        .await
+        .expect_err("the first model-step completion must be retryable");
+    assert!(first.to_string().contains("injected append failure"));
+    assert!(
+        !append.is_finished(),
+        "developer context must remain unacknowledged while the operation is pending"
+    );
+
+    let recovered = agent
+        .prompt(PromptRequest::new("retry before developer context").request_id("retry-turn"))
+        .await?
+        .result()
+        .await?;
+    assert_eq!(recovered.final_message(), "durably replayed");
+    append.await??;
+    assert_eq!(generations.load(Ordering::SeqCst), 2);
+    let checkpoint = journal
+        .latest_checkpoint()
+        .await?
+        .ok_or_else(|| eyre!("developer acknowledgment omitted its checkpoint"))?;
+    assert!(checkpoint.json().contains("ordered developer marker"));
+
+    agent.shutdown().await?;
+    drop((agent, events));
+    let reopened = DurableSession::open(store, "developer-context-retry-barrier").await?;
+    let (resumed, resumed_events) = Nanocodex::builder(openai()?)
+        .workspace(&workspace)
+        .durability(reopened)
+        .await?
+        .build()?;
+    assert!(resumed.context().await?.history().iter().any(|item| {
+        serde_json::to_string(item).is_ok_and(|json| json.contains("ordered developer marker"))
+    }));
+    resumed.shutdown().await?;
+    drop((resumed, resumed_events));
+    std::fs::remove_dir_all(workspace)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn idle_routed_prompt_is_durably_admitted_and_checkpointed() -> Result<()> {
+    let store = crate::MemoryStore::new()?;
+    let journal = crate::DurableSession::open(store, "automatic-routed-prompt").await?;
+    let journal_state = journal.clone();
+    let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let openai = OpenAi::builder("test-key")
+        .service({
+            let generations = Arc::clone(&generations);
+            move || DurableReplayService {
+                generations: Arc::clone(&generations),
+            }
+        })
+        .build()?;
+    let workspace = temporary_workspace("automatic-routed-durability")?;
+    let (agent, events) = Nanocodex::builder(openai)
+        .workspace(&workspace)
+        .session_id(test_session_id())
+        .durability(journal)
+        .await?
+        .build()?;
+
+    let turn = match agent.route_prompt("journal this routed prompt").await? {
+        PromptRoute::Started(turn) => turn,
+        PromptRoute::Steered => return Err(eyre!("idle durable input unexpectedly steered")),
+    };
+    let result = turn.result().await?;
+    assert_eq!(result.final_message(), "durably replayed");
+    let request_id = result
+        .request_id()
+        .ok_or_else(|| eyre!("routed durable result is missing its request ID"))?;
+    let state = journal_state.state().await?;
+    assert!(
+        state
+            .operation(request_id)
+            .is_some_and(|operation| operation.status.is_terminal())
+    );
+    assert!(journal_state.latest_checkpoint().await?.is_some());
+    assert_eq!(generations.load(Ordering::SeqCst), 1);
+
+    agent.shutdown().await?;
+    drop((agent, events));
+    std::fs::remove_dir_all(workspace)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn cold_reopen_recovers_idle_routed_prompt_without_a_second_model_call() -> Result<()> {
+    let store = crate::MemoryStore::new()?;
+    let failing_store = FailAppendOnce {
+        inner: store.clone(),
+        expected_revision: 5,
+        failed: Arc::new(AtomicBool::new(false)),
+    };
+    let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let openai = || {
+        let generations = Arc::clone(&generations);
+        OpenAi::builder("test-key")
+            .service(move || DurableReplayService {
+                generations: Arc::clone(&generations),
+            })
+            .build()
+    };
+    let workspace = temporary_workspace("routed-durability-cold-reopen")?;
+
+    let journal = crate::DurableSession::open(failing_store, "routed-cold-reopen").await?;
+    let (first, first_events) = Nanocodex::builder(openai()?)
+        .workspace(&workspace)
+        .session_id(test_session_id())
+        .durability(journal)
+        .await?
+        .build()?;
+    let first_turn = match first.route_prompt("recover routed input").await? {
+        PromptRoute::Started(turn) => turn,
+        PromptRoute::Steered => return Err(eyre!("idle durable input unexpectedly steered")),
+    };
+    let first_error = first_turn
+        .result()
+        .await
+        .expect_err("the injected terminal append must fail the routed attempt");
+    assert!(first_error.to_string().contains("injected append failure"));
+    first.shutdown().await?;
+    drop((first, first_events));
+
+    let journal = crate::DurableSession::open(store, "routed-cold-reopen").await?;
+    let (reopened, reopened_events) = Nanocodex::builder(openai()?)
+        .workspace(&workspace)
+        .session_id(test_session_id())
+        .durability(journal.clone())
+        .await?
+        .build()?;
+    let recovered_turn = match reopened.route_prompt("recover routed input").await? {
+        PromptRoute::Started(turn) => turn,
+        PromptRoute::Steered => return Err(eyre!("cold idle durable input unexpectedly steered")),
+    };
+    let recovered = recovered_turn.result().await?;
+    assert_eq!(recovered.final_message(), "durably replayed");
+    assert_eq!(
+        generations.load(Ordering::SeqCst),
+        1,
+        "cold recovery must replay the journaled model output",
+    );
+    assert!(journal.latest_checkpoint().await?.is_some());
+
+    reopened.shutdown().await?;
+    drop((reopened, reopened_events));
+    std::fs::remove_dir_all(workspace)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn active_routed_input_is_retained_in_the_durable_checkpoint() -> Result<()> {
+    let store = crate::MemoryStore::new()?;
+    let journal = crate::DurableSession::open(store, "active-routed-input").await?;
+    let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let started = Arc::new(AtomicBool::new(false));
+    let release_first = Arc::new(tokio::sync::Notify::new());
+    let observed_steer = Arc::new(AtomicBool::new(false));
+    let openai = OpenAi::builder("test-key")
+        .service({
+            let generations = Arc::clone(&generations);
+            let started = Arc::clone(&started);
+            let release_first = Arc::clone(&release_first);
+            let observed_steer = Arc::clone(&observed_steer);
+            move || SteeredDurableService {
+                generations: Arc::clone(&generations),
+                started: Arc::clone(&started),
+                release_first: Arc::clone(&release_first),
+                observed_steer: Arc::clone(&observed_steer),
+            }
+        })
+        .build()?;
+    let workspace = temporary_workspace("active-routed-durability")?;
+    let (agent, events) = Nanocodex::builder(openai)
+        .workspace(&workspace)
+        .session_id(test_session_id())
+        .durability(journal.clone())
+        .await?
+        .build()?;
+
+    let turn = match agent.route_prompt("start durable routed turn").await? {
+        PromptRoute::Started(turn) => turn,
+        PromptRoute::Steered => return Err(eyre!("idle durable input unexpectedly steered")),
+    };
+    while !started.load(Ordering::Acquire) {
+        tokio::task::yield_now().await;
+    }
+    assert!(matches!(
+        agent.route_prompt("retain this routed steer").await?,
+        PromptRoute::Steered
+    ));
+    release_first.notify_one();
+    assert_eq!(turn.result().await?.final_message(), "steer retained");
+    assert!(observed_steer.load(Ordering::Acquire));
+    assert_eq!(generations.load(Ordering::SeqCst), 2);
+    let checkpoint = journal
+        .latest_checkpoint()
+        .await?
+        .ok_or_else(|| eyre!("active routed turn did not commit a checkpoint"))?
+        .decode::<nanocodex_agent::session::SessionSnapshot>()?;
+    assert!(serde_json::to_string(&checkpoint)?.contains("retain this routed steer"));
+
+    agent.shutdown().await?;
+    drop((agent, events));
+    std::fs::remove_dir_all(workspace)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn shutdown_reclaims_a_definitely_uncommitted_queued_terminalization() -> Result<()> {
+    let store = crate::MemoryStore::new()?;
+    let failing = FailAppendOnce {
+        inner: store.clone(),
+        expected_revision: 6,
+        failed: Arc::new(AtomicBool::new(false)),
+    };
+    let started = Arc::new(AtomicBool::new(false));
+    let openai = OpenAi::builder("test-key")
+        .service({
+            let started = Arc::clone(&started);
+            move || PendingGenerationService {
+                started: Arc::clone(&started),
+            }
+        })
+        .build()?;
+    let workspace = temporary_workspace("durable-shutdown-failure")?;
+    let journal = DurableSession::open(failing, "shutdown-failure").await?;
+    let (agent, events) = Nanocodex::builder(openai)
+        .workspace(&workspace)
+        .durability(journal)
+        .await?
+        .build()?;
+    let active = agent
+        .prompt(PromptRequest::new("active").request_id("turn-1"))
+        .await?;
+    while !started.load(Ordering::Acquire) {
+        tokio::task::yield_now().await;
+    }
+    let queued = agent
+        .prompt(PromptRequest::new("queued").request_id("turn-2"))
+        .await?;
+
+    agent.shutdown().await?;
+    assert!(matches!(
+        active.result().await,
+        Err(NanocodexError::TurnCancelled)
+    ));
+    assert!(queued.result().await.is_err());
+    drop((agent, events));
+
+    let reopened = DurableSession::open(store, "shutdown-failure").await?;
+    let state = reopened.state().await?;
+    assert!(
+        state
+            .operation("turn-1")
+            .is_some_and(|operation| operation.status.is_terminal())
+    );
+    assert!(
+        state
+            .operation("turn-2")
+            .is_some_and(|operation| operation.status.is_terminal())
+    );
+    std::fs::remove_dir_all(workspace)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn durable_terminal_replays_emit_one_terminal_without_model_execution() -> Result<()> {
+    let store = crate::MemoryStore::new()?;
+    let journal = crate::DurableSession::open(store, "terminal-replay-events").await?;
+    let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let openai = || {
+        let generations = Arc::clone(&generations);
+        OpenAi::builder("test-key")
+            .service(move || DurableReplayService {
+                generations: Arc::clone(&generations),
+            })
+            .build()
+    };
+    let workspace = temporary_workspace("durable-terminal-replay-events")?;
+
+    let (seed, seed_events) = Nanocodex::builder(openai()?)
+        .workspace(&workspace)
+        .durability(journal.clone())
+        .await?
+        .build()?;
+    let completed = seed
+        .prompt(PromptRequest::new("completed replay").request_id("completed-replay"))
+        .await?
+        .result()
+        .await?;
+    let snapshot = completed.snapshot();
+    assert_eq!(generations.load(std::sync::atomic::Ordering::SeqCst), 1);
+    seed.shutdown().await?;
+    drop((seed, seed_events));
+
+    let failed_prompt = Prompt::from("failed replay");
+    journal.admit("failed-replay", &failed_prompt).await?;
+    journal.begin_attempt("failed-replay").await?;
+    journal
+        .fail("failed-replay", &snapshot, "retained failure")
+        .await?;
+    let cancelled_prompt = Prompt::from("cancelled replay");
+    journal.admit("cancelled-replay", &cancelled_prompt).await?;
+    journal.cancel("cancelled-replay").await?;
+
+    let (resumed, mut events) = Nanocodex::builder(openai()?)
+        .workspace(&workspace)
+        .durability(journal)
+        .await?
+        .build()?;
+
+    let result = resumed
+        .prompt(PromptRequest::new("completed replay").request_id("completed-replay"))
+        .await?
+        .result()
+        .await?;
+    assert_eq!(result.final_message(), "durably replayed");
+    assert_replay_terminal(
+        &mut events,
+        AgentEventKind::RunCompleted,
+        RunStatus::Completed,
+    )?;
+
+    let error = resumed
+        .prompt(PromptRequest::new("failed replay").request_id("failed-replay"))
+        .await?
+        .result()
+        .await
+        .expect_err("failed terminal must replay its retained error");
+    assert!(matches!(error, NanocodexError::ReplayedExecutionFailed(_)));
+    assert_replay_terminal(&mut events, AgentEventKind::RunFailed, RunStatus::Failed)?;
+
+    let error = resumed
+        .prompt(PromptRequest::new("cancelled replay").request_id("cancelled-replay"))
+        .await?
+        .result()
+        .await
+        .expect_err("cancelled terminal must replay cancellation");
+    assert!(matches!(error, NanocodexError::TurnCancelled));
+    assert_replay_terminal(&mut events, AgentEventKind::RunFailed, RunStatus::Cancelled)?;
+
+    assert_eq!(
+        generations.load(std::sync::atomic::Ordering::SeqCst),
+        1,
+        "terminal admission replay must not execute the model",
+    );
+    resumed.shutdown().await?;
+    drop((resumed, events));
+    std::fs::remove_dir_all(workspace)?;
+    Ok(())
+}
+
+fn assert_replay_terminal(
+    events: &mut AgentEvents,
+    expected_kind: AgentEventKind,
+    expected_status: RunStatus,
+) -> Result<()> {
+    let replay_events = std::iter::from_fn(|| events.try_recv_timed()).collect::<Vec<_>>();
+    assert_eq!(
+        replay_events.len(),
+        1,
+        "a terminal admission replay must publish exactly one lifecycle event",
+    );
+    let event = &replay_events[0].event;
+    assert_eq!(event.kind, expected_kind);
+    assert_eq!(
+        event.decode_payload::<RunTerminal>()?.status,
+        expected_status
+    );
+    Ok(())
+}
+
+#[tokio::test]
+async fn newer_agent_acquisition_fences_an_older_live_model_before_execution() -> Result<()> {
+    let store = crate::MemoryStore::new()?;
+    let journal = crate::DurableSession::open(store, "fenced-live-agents").await?;
+    let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let openai = || {
+        let generations = Arc::clone(&generations);
+        OpenAi::builder("test-key")
+            .service(move || DurableReplayService {
+                generations: Arc::clone(&generations),
+            })
+            .build()
+    };
+    let workspace = temporary_workspace("fenced-live-agents")?;
+
+    let (older, older_events) = Nanocodex::builder(openai()?)
+        .workspace(&workspace)
+        .durability(journal.clone())
+        .await?
+        .build()?;
+    let (newer, newer_events) = Nanocodex::builder(openai()?)
+        .workspace(&workspace)
+        .durability(journal.clone())
+        .await?
+        .build()?;
+
+    let error = match older.prompt("stale owner must not execute").await {
+        Ok(_) => panic!("the newer acquisition must fence the older Agent"),
+        Err(error) => error,
+    };
+    assert!(error.to_string().contains("model owner was fenced"));
+    assert_eq!(
+        generations.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "a fenced owner must fail before starting a model effect",
+    );
+    let developer_error = older
+        .append_developer_message("stale developer context")
+        .await
+        .expect_err("a stale owner must not acknowledge developer context");
+    assert_eq!(
+        developer_error.execution_policy_disposition(),
+        Some(ExecutionPolicyDisposition::Reopen)
+    );
+    let compact_error = older
+        .compact()
+        .await
+        .expect_err("a fenced owner must not start model-only compaction");
+    assert_eq!(
+        compact_error.execution_policy_disposition(),
+        Some(ExecutionPolicyDisposition::Reopen)
+    );
+    assert_eq!(
+        generations.load(std::sync::atomic::Ordering::SeqCst),
+        0,
+        "fenced compaction must fail before calling the model service",
+    );
+
+    let result = newer
+        .prompt("authoritative owner executes")
+        .await?
+        .result()
+        .await?;
+    assert_eq!(result.final_message(), "durably replayed");
+    assert_eq!(generations.load(std::sync::atomic::Ordering::SeqCst), 1);
+    assert_eq!(journal.state().await?.operations().len(), 1);
+
+    older.shutdown().await?;
+    newer.shutdown().await?;
+    drop((older, older_events, newer, newer_events));
+    std::fs::remove_dir_all(workspace)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn takeover_after_warmup_authorization_fences_the_result_not_the_in_flight_call() -> Result<()>
+{
+    let store = crate::MemoryStore::new()?;
+    let journal = DurableSession::open(store, "warmup-authorization-takeover").await?;
+    let warmups = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let openai = || {
+        let warmups = Arc::clone(&warmups);
+        let generations = Arc::clone(&generations);
+        let started = Arc::clone(&started);
+        let release = Arc::clone(&release);
+        OpenAi::builder("test-key")
+            .service(move || GatedWarmupService {
+                warmups: Arc::clone(&warmups),
+                generations: Arc::clone(&generations),
+                started: Arc::clone(&started),
+                release: Arc::clone(&release),
+            })
+            .build()
+    };
+    let workspace = temporary_workspace("warmup-authorization-takeover")?;
+    let (older, older_events) = Nanocodex::builder(openai()?)
+        .workspace(&workspace)
+        .durability(journal.clone())
+        .await?
+        .build()?;
+    let turn = older.prompt("authorize warmup then take over").await?;
+    started.notified().await;
+    assert_eq!(warmups.load(Ordering::SeqCst), 1);
+
+    let (newer, newer_events) = Nanocodex::builder(openai()?)
+        .workspace(&workspace)
+        .durability(journal)
+        .await?
+        .build()?;
+    release.notify_one();
+    let error = turn
+        .result()
+        .await
+        .expect_err("takeover must fence work after the authorized warmup returns");
+    assert!(error.to_string().contains("model owner was fenced"));
+    assert_eq!(
+        generations.load(Ordering::SeqCst),
+        0,
+        "takeover must fence the next generation before transport entry"
+    );
+
+    older.shutdown().await?;
+    newer.shutdown().await?;
+    drop((older, older_events, newer, newer_events));
+    std::fs::remove_dir_all(workspace)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn sequential_model_owners_preserve_history_and_cache_lineage() -> Result<()> {
+    let store = crate::MemoryStore::new()?;
+    let journal = crate::DurableSession::open(store, "sequential-model-owners").await?;
+    let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let openai = || {
+        let generations = Arc::clone(&generations);
+        OpenAi::builder("test-key")
+            .service(move || DurableReplayService {
+                generations: Arc::clone(&generations),
+            })
+            .build()
+    };
+    let workspace = temporary_workspace("sequential-model-owners")?;
+
+    let (first, first_events) = Nanocodex::builder(openai()?)
+        .workspace(&workspace)
+        .durability(journal.clone())
+        .await?
+        .build()?;
+    first.prompt("first retained turn").await?.result().await?;
+    let first_checkpoint = journal
+        .latest_checkpoint()
+        .await?
+        .ok_or_else(|| eyre!("first owner did not commit a checkpoint"))?
+        .decode::<nanocodex_agent::session::SessionSnapshot>()?;
+    let first_json = serde_json::to_value(&first_checkpoint)?;
+    let cache_key = first_json["prompt_cache_key"]
+        .as_str()
+        .ok_or_else(|| eyre!("first checkpoint has no cache key"))?
+        .to_owned();
+    first.shutdown().await?;
+    drop((first, first_events));
+
+    let (second, second_events) = Nanocodex::builder(openai()?)
+        .workspace(&workspace)
+        .durability(journal.clone())
+        .await?
+        .build()?;
+    second
+        .prompt("second retained turn")
+        .await?
+        .result()
+        .await?;
+    let second_checkpoint = journal
+        .latest_checkpoint()
+        .await?
+        .ok_or_else(|| eyre!("second owner did not commit a checkpoint"))?
+        .decode::<nanocodex_agent::session::SessionSnapshot>()?;
+    let second_json = serde_json::to_value(&second_checkpoint)?;
+    assert_eq!(second_json["prompt_cache_key"], cache_key);
+    let encoded = serde_json::to_string(&second_checkpoint)?;
+    assert!(encoded.contains("first retained turn"));
+    assert!(encoded.contains("second retained turn"));
+    assert_eq!(generations.load(std::sync::atomic::Ordering::SeqCst), 2);
+
+    second.shutdown().await?;
+    drop((second, second_events));
+    std::fs::remove_dir_all(workspace)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn failed_completed_compaction_persistence_restores_the_committed_live_boundary() -> Result<()>
+{
+    let store = MemoryStore::new()?;
+    let failing = FailAppendOnce {
+        inner: store.clone(),
+        expected_revision: 7,
+        failed: Arc::new(AtomicBool::new(false)),
+    };
+    let openai = || {
+        OpenAi::builder("test-key")
+            .service(|| DurableCompactionService)
+            .build()
+    };
+    let workspace = temporary_workspace("completed-compaction-rollback")?;
+    let journal = DurableSession::open(failing, "completed-compaction-rollback").await?;
+    let (agent, events) = Nanocodex::builder(openai()?)
+        .workspace(&workspace)
+        .durability(journal)
+        .await?
+        .build()?;
+    agent
+        .prompt("seed committed boundary")
+        .await?
+        .result()
+        .await?;
+    let committed_history = serde_json::to_value(agent.context().await?.history())?;
+
+    let error = agent
+        .compact()
+        .await
+        .expect_err("the completed compaction checkpoint append must fail once");
+    assert!(error.to_string().contains("injected append failure"));
+    assert_eq!(
+        serde_json::to_value(agent.context().await?.history())?,
+        committed_history,
+        "the live model must roll back to the last committed boundary"
+    );
+    agent.shutdown().await?;
+    drop((agent, events));
+
+    let reopened = DurableSession::open(store, "completed-compaction-rollback").await?;
+    let (resumed, resumed_events) = Nanocodex::builder(openai()?)
+        .workspace(&workspace)
+        .durability(reopened)
+        .await?
+        .build()?;
+    assert_eq!(
+        serde_json::to_value(resumed.context().await?.history())?,
+        committed_history,
+        "cold reopen and the repaired live model must expose the same checkpoint"
+    );
+    resumed.shutdown().await?;
+    drop((resumed, resumed_events));
+    std::fs::remove_dir_all(workspace)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn active_cancel_reclaims_a_definitely_uncommitted_terminal_before_follow_on() -> Result<()> {
+    let store = MemoryStore::new()?;
+    let failing = FailEntryOnce {
+        inner: store.clone(),
+        entry_tag: "\"operation_cancelled\"",
+        operation_id: "cancel-not-committed",
+        failed: Arc::new(AtomicBool::new(false)),
+    };
+    let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let openai = OpenAi::builder("test-key")
+        .service({
+            let generations = Arc::clone(&generations);
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            move || GatedGenerationService {
+                generations: Arc::clone(&generations),
+                started: Arc::clone(&started),
+                release: Arc::clone(&release),
+            }
+        })
+        .build()?;
+    let workspace = temporary_workspace("active-cancel-not-committed")?;
+    let journal = DurableSession::open(failing, "active-cancel-not-committed").await?;
+    let (agent, events) = Nanocodex::builder(openai)
+        .workspace(&workspace)
+        .durability(journal)
+        .await?
+        .build()?;
+    let turn = agent
+        .prompt(PromptRequest::new("cancel after admission").request_id("cancel-not-committed"))
+        .await?;
+    started.notified().await;
+    let follow_on = agent
+        .prompt(PromptRequest::new("continue after cancellation").request_id("active-follow-on"))
+        .await?;
+
+    turn.cancel().await?;
+    assert!(matches!(
+        turn.result().await,
+        Err(NanocodexError::TurnCancelled)
+    ));
+    let followed = tokio::time::timeout(Duration::from_secs(2), follow_on.result())
+        .await
+        .expect("the follow-on must not strand behind the released cancellation claim")?;
+    assert_eq!(followed.final_message(), "durably replayed");
+
+    agent.shutdown().await?;
+    drop((agent, events));
+    let reopened = DurableSession::open(store, "active-cancel-not-committed").await?;
+    assert!(
+        reopened
+            .state()
+            .await?
+            .operation("cancel-not-committed")
+            .is_some_and(|operation| operation.status.is_terminal()),
+        "the exact cancellation retry must commit before the follow-on runs"
+    );
+    std::fs::remove_dir_all(workspace)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn queued_cancel_reclaims_a_definitely_uncommitted_terminal_before_follow_on() -> Result<()> {
+    let store = MemoryStore::new()?;
+    let failing = FailEntryOnce {
+        inner: store,
+        entry_tag: "\"operation_cancelled\"",
+        operation_id: "queued-cancel-not-committed",
+        failed: Arc::new(AtomicBool::new(false)),
+    };
+    let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let started = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let openai = OpenAi::builder("test-key")
+        .service({
+            let generations = Arc::clone(&generations);
+            let started = Arc::clone(&started);
+            let release = Arc::clone(&release);
+            move || GatedGenerationService {
+                generations: Arc::clone(&generations),
+                started: Arc::clone(&started),
+                release: Arc::clone(&release),
+            }
+        })
+        .build()?;
+    let workspace = temporary_workspace("queued-cancel-not-committed")?;
+    let journal = DurableSession::open(failing, "queued-cancel-not-committed").await?;
+    let (agent, events) = Nanocodex::builder(openai)
+        .workspace(&workspace)
+        .durability(journal)
+        .await?
+        .build()?;
+    let active = agent
+        .prompt(PromptRequest::new("active predecessor").request_id("queued-predecessor"))
+        .await?;
+    started.notified().await;
+    let cancelled = agent
+        .prompt(PromptRequest::new("cancel while queued").request_id("queued-cancel-not-committed"))
+        .await?;
+    let follow_on = agent
+        .prompt(PromptRequest::new("run after queued cancellation").request_id("queued-follow-on"))
+        .await?;
+
+    cancelled.cancel().await?;
+    release.notify_one();
+    active.result().await?;
+    assert!(matches!(
+        cancelled.result().await,
+        Err(NanocodexError::TurnCancelled)
+    ));
+    let followed = tokio::time::timeout(Duration::from_secs(2), follow_on.result())
+        .await
+        .expect("the follow-on must not strand behind a claimless queued command")?;
+    assert_eq!(followed.final_message(), "durably replayed");
+
+    agent.shutdown().await?;
+    drop((agent, events));
+    std::fs::remove_dir_all(workspace)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn automatic_compaction_replays_a_after_terminal_not_committed_instead_of_running_b()
+-> Result<()> {
+    let store = MemoryStore::new()?;
+    let failing = FailEntryOnce {
+        inner: store,
+        entry_tag: "\"operation_completed\"",
+        operation_id: "compaction-terminal-retry",
+        failed: Arc::new(AtomicBool::new(false)),
+    };
+    let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let compactions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let openai = OpenAi::builder("test-key")
+        .service({
+            let generations = Arc::clone(&generations);
+            let compactions = Arc::clone(&compactions);
+            move || AutomaticCompactionService {
+                generations: Arc::clone(&generations),
+                compactions: Arc::clone(&compactions),
+            }
+        })
+        .build()?;
+    let workspace = temporary_workspace("automatic-compaction-terminal-retry")?;
+    let journal = DurableSession::open(failing, "automatic-compaction-terminal-retry").await?;
+    let (agent, events) = Nanocodex::builder(openai)
+        .workspace(&workspace)
+        .durability(journal)
+        .await?
+        .build()?;
+    agent
+        .prompt(PromptRequest::new("seed high usage").request_id("compaction-seed"))
+        .await?
+        .result()
+        .await?;
+
+    let first = agent
+        .prompt(
+            PromptRequest::new("reuse the exact compaction")
+                .request_id("compaction-terminal-retry"),
+        )
+        .await?
+        .result()
+        .await
+        .expect_err("the first terminal append must be definitely uncommitted");
+    assert!(first.to_string().contains("injected entry append failure"));
+    assert_eq!(compactions.load(Ordering::SeqCst), 1);
+    assert_eq!(generations.load(Ordering::SeqCst), 2);
+
+    let recovered = agent
+        .prompt(
+            PromptRequest::new("reuse the exact compaction")
+                .request_id("compaction-terminal-retry"),
+        )
+        .await?
+        .result()
+        .await?;
+    assert_eq!(recovered.final_message(), "automatic-generation-2");
+    assert_eq!(
+        compactions.load(Ordering::SeqCst),
+        1,
+        "the exact-ID retry must replay compaction A instead of calling the provider for B"
+    );
+    assert_eq!(
+        generations.load(Ordering::SeqCst),
+        2,
+        "the generation after compaction must also replay after terminal NotCommitted"
+    );
+    let history = serde_json::to_string(agent.context().await?.history())?;
+    assert!(history.contains("compaction-A"));
+    assert!(!history.contains("compaction-B"));
+
+    agent.shutdown().await?;
+    drop((agent, events));
+    std::fs::remove_dir_all(workspace)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn takeover_during_automatic_compaction_authorization_fences_before_provider_entry()
+-> Result<()> {
+    let store = MemoryStore::new()?;
+    let authorization_started = Arc::new(tokio::sync::Notify::new());
+    let authorization_release = Arc::new(tokio::sync::Notify::new());
+    let gated = GateCompactionAuthorization {
+        inner: store.clone(),
+        started: Arc::clone(&authorization_started),
+        release: Arc::clone(&authorization_release),
+    };
+    let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let compactions = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let openai = || {
+        let generations = Arc::clone(&generations);
+        let compactions = Arc::clone(&compactions);
+        OpenAi::builder("test-key")
+            .service(move || AutomaticCompactionService {
+                generations: Arc::clone(&generations),
+                compactions: Arc::clone(&compactions),
+            })
+            .build()
+    };
+    let workspace = temporary_workspace("automatic-compaction-takeover")?;
+    let older_journal = DurableSession::open(gated, "automatic-compaction-takeover").await?;
+    let (older, older_events) = Nanocodex::builder(openai()?)
+        .workspace(&workspace)
+        .durability(older_journal)
+        .await?
+        .build()?;
+    older
+        .prompt(PromptRequest::new("seed high usage").request_id("takeover-seed"))
+        .await?
+        .result()
+        .await?;
+    let interrupted = older
+        .prompt(
+            PromptRequest::new("compact only with fresh authority")
+                .request_id("takeover-compaction"),
+        )
+        .await?;
+    authorization_started.notified().await;
+
+    let newer_journal = DurableSession::open(store, "automatic-compaction-takeover").await?;
+    let (newer, newer_events) = Nanocodex::builder(openai()?)
+        .workspace(&workspace)
+        .durability(newer_journal)
+        .await?
+        .build()?;
+    authorization_release.notify_one();
+    let fenced = interrupted
+        .result()
+        .await
+        .expect_err("takeover must reject the stale compaction authorization");
+    assert!(fenced.to_string().contains("owner was fenced"));
+    assert_eq!(
+        compactions.load(Ordering::SeqCst),
+        0,
+        "the stale owner must fail before entering the compaction provider call"
+    );
+
+    newer
+        .prompt(
+            PromptRequest::new("compact only with fresh authority")
+                .request_id("takeover-compaction"),
+        )
+        .await?
+        .result()
+        .await?;
+    assert_eq!(
+        compactions.load(Ordering::SeqCst),
+        0,
+        "a cold recovery may recompute below the proactive threshold, but must never inherit the stale owner's provider admission"
+    );
+    assert_eq!(generations.load(Ordering::SeqCst), 2);
+
+    let _ = older.shutdown().await;
+    newer.shutdown().await?;
+    drop((older, older_events, newer, newer_events));
+    std::fs::remove_dir_all(workspace)?;
+    Ok(())
+}
+
+async fn assert_cold_model_replay_forces_full_history(store_responses: bool) -> Result<()> {
+    let store = crate::MemoryStore::new()?;
+    let failing_store = FailAppendOnce {
+        inner: store.clone(),
+        expected_revision: 5,
+        failed: Arc::new(AtomicBool::new(false)),
+    };
+    let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let tool_calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let openai = || {
+        let generations = Arc::clone(&generations);
+        OpenAi::builder("test-key")
+            .store(store_responses)
+            .service(move || ReplayContinuationService {
+                generations: Arc::clone(&generations),
+            })
+            .build()
+    };
+    let tools = || {
+        Tools::builder()
+            .without_defaults()
+            .tool(CountingDurableTool {
+                calls: Arc::clone(&tool_calls),
+            })
+            .build()
+    };
+    let suffix = if store_responses {
+        "stored"
+    } else {
+        "ephemeral"
+    };
+    let journal_id = format!("cold-model-replay-{suffix}");
+    let workspace = temporary_workspace(&journal_id)?;
+
+    let journal = crate::DurableSession::open(failing_store, journal_id.clone()).await?;
+    let (first, first_events) = Nanocodex::builder(openai()?)
+        .workspace(&workspace)
+        .session_id(test_session_id())
+        .tools(tools()?)
+        .durability(journal)
+        .await?
+        .build()?;
+    let error = first
+        .prompt(
+            PromptRequest::new("replay the response chain safely")
+                .request_id("response-chain-turn"),
+        )
+        .await?
+        .result()
+        .await
+        .expect_err("the injected tool-step append must fail the first owner");
+    assert!(error.to_string().contains("injected append failure"));
+    assert_eq!(generations.load(Ordering::SeqCst), 1);
+    assert_eq!(tool_calls.load(Ordering::SeqCst), 0);
+    first.shutdown().await?;
+    drop((first, first_events));
+
+    let journal = crate::DurableSession::open(store, journal_id).await?;
+    let (reopened, reopened_events) = Nanocodex::builder(openai()?)
+        .workspace(&workspace)
+        .session_id(test_session_id())
+        .tools(tools()?)
+        .durability(journal)
+        .await?
+        .build()?;
+    let result = reopened
+        .prompt(
+            PromptRequest::new("replay the response chain safely")
+                .request_id("response-chain-turn"),
+        )
+        .await?
+        .result()
+        .await?;
+    assert_eq!(result.final_message(), "continued from full typed history");
+    assert_eq!(generations.load(Ordering::SeqCst), 2);
+    assert_eq!(tool_calls.load(Ordering::SeqCst), 1);
+
+    reopened.shutdown().await?;
+    drop((reopened, reopened_events));
+    std::fs::remove_dir_all(workspace)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn cold_model_step_replay_never_reuses_the_replaced_transport_chain() -> Result<()> {
+    assert_cold_model_replay_forces_full_history(false).await?;
+    assert_cold_model_replay_forces_full_history(true).await
+}
+
+#[tokio::test]
+async fn abandoned_terminal_replay_acceptance_emits_no_terminal_event() -> Result<()> {
+    let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let openai = || {
+        let generations = Arc::clone(&generations);
+        OpenAi::builder("test-key")
+            .service(move || DurableReplayService {
+                generations: Arc::clone(&generations),
+            })
+            .build()
+    };
+    let workspace = temporary_workspace("abandoned-terminal-replay")?;
+    let (seed, seed_events) = Nanocodex::builder(openai()?)
+        .workspace(&workspace)
+        .build()?;
+    let snapshot = seed
+        .prompt("seed replay snapshot")
+        .await?
+        .result()
+        .await?
+        .snapshot();
+    seed.shutdown().await?;
+    drop((seed, seed_events));
+
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let policy = Arc::new(GatedCompletedPolicy {
+        snapshot,
+        entered: Arc::clone(&entered),
+        release: Arc::clone(&release),
+    });
+    let (agent, mut events) = Nanocodex::builder(openai()?)
+        .workspace(&workspace)
+        .execution_policy(policy)
+        .build()?;
+    let abandoned = {
+        let agent = agent.clone();
+        tokio::spawn(async move {
+            agent
+                .prompt(PromptRequest::new("retained terminal").request_id("retained-turn"))
+                .await
+        })
+    };
+    entered.notified().await;
+    abandoned.abort();
+    let _ = abandoned.await;
+    release.notify_one();
+
+    // This command is ordered behind the abandoned prompt and proves the
+    // driver has finished processing its terminal admission.
+    agent.set_fast_mode(false).await?;
+    while let Some(event) = events.try_recv_timed() {
+        assert!(
+            !event.event.kind.is_terminal(),
+            "a prompt whose caller never accepted it must not publish a terminal event"
+        );
+    }
+    assert_eq!(
+        generations.load(Ordering::SeqCst),
+        1,
+        "terminal replay must not execute the model"
+    );
+
+    agent.shutdown().await?;
+    drop((agent, events));
+    std::fs::remove_dir_all(workspace)?;
+    Ok(())
+}
+
+#[tokio::test]
+async fn abandoned_routed_terminal_replay_emits_no_terminal_event() -> Result<()> {
+    let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let openai = || {
+        let generations = Arc::clone(&generations);
+        OpenAi::builder("test-key")
+            .service(move || DurableReplayService {
+                generations: Arc::clone(&generations),
+            })
+            .build()
+    };
+    let workspace = temporary_workspace("abandoned-routed-terminal-replay")?;
+    let (seed, seed_events) = Nanocodex::builder(openai()?)
+        .workspace(&workspace)
+        .build()?;
+    let snapshot = seed
+        .prompt("seed routed replay snapshot")
+        .await?
+        .result()
+        .await?
+        .snapshot();
+    seed.shutdown().await?;
+    drop((seed, seed_events));
+
+    let entered = Arc::new(tokio::sync::Notify::new());
+    let release = Arc::new(tokio::sync::Notify::new());
+    let policy = Arc::new(GatedCompletedPolicy {
+        snapshot,
+        entered: Arc::clone(&entered),
+        release: Arc::clone(&release),
+    });
+    let (agent, mut events) = Nanocodex::builder(openai()?)
+        .workspace(&workspace)
+        .execution_policy(policy)
+        .build()?;
+    let abandoned = {
+        let agent = agent.clone();
+        tokio::spawn(async move { agent.route_prompt("retained routed terminal").await })
+    };
+    entered.notified().await;
+    abandoned.abort();
+    let _ = abandoned.await;
+    release.notify_one();
+
+    agent.set_fast_mode(false).await?;
+    while let Some(event) = events.try_recv_timed() {
+        assert!(
+            !event.event.kind.is_terminal(),
+            "a routed prompt whose caller never accepted it must not publish a terminal event"
+        );
+    }
+    assert_eq!(
+        generations.load(Ordering::SeqCst),
+        1,
+        "routed terminal replay must not execute the model"
+    );
+
+    agent.shutdown().await?;
+    drop((agent, events));
+    std::fs::remove_dir_all(workspace)?;
+    Ok(())
+}
+
+#[tokio::test]
 async fn portable_journal_replays_a_completed_model_step_after_terminal_commit_failure()
 -> Result<()> {
     let store = crate::MemoryStore::new()?;
     let failing_store = FailAppendOnce {
         inner: store.clone(),
-        expected_revision: 4,
+        expected_revision: 5,
         failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -414,7 +2564,7 @@ async fn portable_journal_replays_a_completed_model_step_after_terminal_commit_f
         .session_id(test_session_id())
         .durability(journal)
         .await?;
-    let (agent, events) = builder.build()?;
+    let (agent, mut events) = builder.build()?;
     let first_turn = agent.prompt("replay this exact turn").await?;
     let first_request_id = first_turn
         .request_id()
@@ -425,6 +2575,15 @@ async fn portable_journal_replays_a_completed_model_step_after_terminal_commit_f
         .await
         .expect_err("the injected terminal append must fail the first attempt");
     assert!(error.to_string().contains("injected append failure"));
+    let terminals = std::iter::from_fn(|| events.try_recv_timed())
+        .filter(|event| event.event.kind.is_terminal())
+        .collect::<Vec<_>>();
+    assert_eq!(
+        terminals.len(),
+        1,
+        "an accepted turn must publish exactly one terminal event even when settlement fails"
+    );
+    assert_eq!(terminals[0].event.kind, AgentEventKind::RunFailed);
     agent.shutdown().await?;
     drop((agent, events));
 
@@ -452,11 +2611,11 @@ async fn portable_journal_replays_a_completed_model_step_after_terminal_commit_f
 }
 
 #[tokio::test]
-async fn portable_journal_restores_the_live_owner_before_retrying_a_failed_commit() -> Result<()> {
+async fn exact_id_retry_reclaims_a_definitely_uncommitted_terminal_append() -> Result<()> {
     let store = crate::MemoryStore::new()?;
     let failing_store = FailAppendOnce {
         inner: store,
-        expected_revision: 4,
+        expected_revision: 5,
         failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -478,7 +2637,7 @@ async fn portable_journal_restores_the_live_owner_before_retrying_a_failed_commi
     let (agent, events) = builder.build()?;
 
     let first = agent
-        .prompt("replay this exact turn")
+        .prompt(PromptRequest::new("replay this exact turn").request_id("exact-live-retry"))
         .await?
         .result()
         .await
@@ -486,7 +2645,7 @@ async fn portable_journal_restores_the_live_owner_before_retrying_a_failed_commi
     assert!(first.to_string().contains("injected append failure"));
 
     let recovered = agent
-        .prompt("replay this exact turn")
+        .prompt(PromptRequest::new("replay this exact turn").request_id("exact-live-retry"))
         .await?
         .result()
         .await?;
@@ -508,7 +2667,7 @@ async fn portable_journal_refuses_to_repeat_a_tool_with_an_ambiguous_completion(
     let store = crate::MemoryStore::new()?;
     let failing_store = FailAppendOnce {
         inner: store.clone(),
-        expected_revision: 5,
+        expected_revision: 6,
         failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -576,11 +2735,11 @@ async fn portable_journal_refuses_to_repeat_a_tool_with_an_ambiguous_completion(
 }
 
 #[tokio::test]
-async fn crash_after_spawn_before_wait_recovers_without_a_ghost_or_duplicate_child() -> Result<()> {
+async fn changed_tool_profile_blocks_replay_after_spawn_without_creating_a_ghost() -> Result<()> {
     let store = crate::MemoryStore::new()?;
     let failing_store = FailAppendOnce {
         inner: store.clone(),
-        expected_revision: 6,
+        expected_revision: 7,
         failed: Arc::new(std::sync::atomic::AtomicBool::new(false)),
     };
     let generations = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -638,12 +2797,13 @@ async fn crash_after_spawn_before_wait_recovers_without_a_ghost_or_duplicate_chi
         .durability(journal)
         .await?;
     let (recovered, recovered_events) = builder.build()?;
-    let result = recovered
+    let error = recovered
         .prompt(PromptRequest::new("delegate once").request_id("turn-1"))
         .await?
         .result()
-        .await?;
-    assert_eq!(result.final_message(), "recovered without a ghost child");
+        .await
+        .expect_err("a changed model-visible tool profile must block recorded model replay");
+    assert!(error.to_string().contains("changed definition"));
     assert_eq!(
         spawn_calls.load(std::sync::atomic::Ordering::SeqCst),
         1,
@@ -651,8 +2811,8 @@ async fn crash_after_spawn_before_wait_recovers_without_a_ghost_or_duplicate_chi
     );
     assert_eq!(
         generations.load(std::sync::atomic::Ordering::SeqCst),
-        2,
-        "recovery must replay the first model step and continue only after the failed tool output"
+        1,
+        "a changed request profile must fail before another model call"
     );
 
     recovered.shutdown().await?;

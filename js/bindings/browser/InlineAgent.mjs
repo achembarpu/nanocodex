@@ -6,6 +6,7 @@ import {
   bindHostSession,
   createAgentClient,
   createEventChannel,
+  createSessionId,
   defineRuntime,
   loadDurabilityRuntime,
   loadSubscriptionRuntime,
@@ -46,6 +47,7 @@ export async function create(options = {}) {
     executionEnvironment,
     codeEvaluator,
   } = options;
+  const stableSessionId = sessionId ?? createSessionId();
   const {
     apiKey,
     hostAuth,
@@ -91,6 +93,7 @@ export async function create(options = {}) {
     onDispose: () => releaseDefinitionHost(hostDefinitionId),
   });
   let durabilityOwner;
+  let creationStarted = false;
   hostDefinitionId = registerDefinitionHost(host);
   activateHost(host);
   const runtime = defineRuntime({
@@ -98,6 +101,7 @@ export async function create(options = {}) {
     name: "Nanocodex Browser WASM",
     type: "browser",
     async create(config) {
+      creationStarted = true;
       try {
         if (durability !== undefined || durabilityId !== undefined) {
           durabilityOwner = (await loadDurabilityRuntime()).own(
@@ -122,6 +126,7 @@ export async function create(options = {}) {
           subagents: subagentConfig,
           hostDefinitionId,
           ...config,
+          durabilityHostId: durabilityOwner?.id,
         }));
         return subscription === undefined
           ? Nanocodex.create(configJson)
@@ -158,20 +163,29 @@ export async function create(options = {}) {
     },
     decorate: (agent) => agent.extend(agentActions()),
   });
-  const agent = await createAgentClient(runtime, {
-    model,
-    thinking,
-    reasoningMode,
-    fastMode,
-    instructions,
-    sessionId,
-    workspace: workspace ?? filesystem?.root,
-    executionEnvironment,
-    resume,
-    durabilityId,
-  });
+  let agent;
+  try {
+    agent = await createAgentClient(runtime, {
+      model,
+      thinking,
+      reasoningMode,
+      fastMode,
+      instructions,
+      sessionId: stableSessionId,
+      workspace: workspace ?? filesystem?.root,
+      executionEnvironment,
+      resume,
+      durabilityId,
+    });
+  } catch (error) {
+    if (!creationStarted) await host.dispose();
+    throw error;
+  }
   if (websocketPreconnect && websocketUrl) {
-    void host.preconnect(websocketUrl, agent.sessionId).catch(reportError);
+    // Preconnect is speculative. A normal turn reconnects through the owned
+    // transport path, while adapters that require startup validation (such as
+    // Cloudflare) observe the same attempt at their createWebSocket boundary.
+    void host.preconnect(websocketUrl, agent.sessionId).catch(() => {});
   }
   return agent;
 }
