@@ -28,6 +28,12 @@ export interface GitHubTokenExchangeInput {
   codeVerifier: string;
 }
 
+export interface GitHubTokenRefreshInput {
+  clientId: string;
+  clientSecret: string;
+  refreshToken: string;
+}
+
 export interface GitHubTokenResponse {
   accessToken: string;
   tokenType: "bearer";
@@ -77,6 +83,24 @@ export function buildGitHubTokenRequest(input: GitHubTokenExchangeInput): Reques
     code: required(input.code, "authorization code"),
     redirect_uri: required(input.redirectUri, "redirect URI"),
     code_verifier: codeVerifier,
+  });
+
+  return new Request(GITHUB_PROVIDER.tokenUrl, {
+    method: "POST",
+    headers: {
+      accept: "application/json",
+      "content-type": "application/x-www-form-urlencoded",
+    },
+    body,
+  });
+}
+
+export function buildGitHubTokenRefreshRequest(input: GitHubTokenRefreshInput): Request {
+  const body = new URLSearchParams({
+    client_id: required(input.clientId, "client ID"),
+    client_secret: required(input.clientSecret, "client secret"),
+    grant_type: "refresh_token",
+    refresh_token: required(input.refreshToken, "refresh token"),
   });
 
   return new Request(GITHUB_PROVIDER.tokenUrl, {

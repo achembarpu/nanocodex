@@ -1429,21 +1429,62 @@ describe("private connector data plane", () => {
     expect(await oversized.json()).toEqual({ error: "connector_response_too_large" });
   });
 
-  it("rejects expired and unrefreshable connector credentials", async () => {
+  it("projects expired and unrefreshable connector credentials as disconnected", async () => {
     const githubSubject = connectorSubject("expired");
     const gmailSubject = connectorSubject("unrefreshable");
     await control(`/subjects/${githubSubject}`, "PUT", { user_id: "connector-expired" });
     await control(`/subjects/${gmailSubject}`, "PUT", { user_id: "connector-unrefreshable" });
-    await connect("connector-expired", "github", "expired-code");
+    await connect("connector-expired", "github", "no-refresh-code");
     await connect("connector-unrefreshable", "gmail", "gmail-no-refresh-code");
-    expect((await SELF.fetch(connectorRequest(
+    const githubExpired = await SELF.fetch(connectorRequest(
       "https://api.github.com/repos/nanocodex/sdk",
       githubSubject,
-    ))).status).toBe(409);
+    ));
+    expect(githubExpired.status).toBe(409);
+    expect(await githubExpired.json()).toEqual({ error: "connector_reauthentication_required" });
+    expect(await (await SELF.fetch(
+      "https://broker.test/users/connector-expired/connectors",
+    )).json()).toMatchObject({ connectors: { github: { connected: false } } });
+    expect(await (await SELF.fetch(connectorRequest(
+      "https://api.github.com/repos/nanocodex/sdk",
+      githubSubject,
+    ))).json()).toEqual({ error: "connector_not_connected" });
     expect((await SELF.fetch(connectorRequest(
       "https://gmail.googleapis.com/gmail/v1/users/me/messages",
       gmailSubject,
     ))).status).toBe(409);
+  });
+
+  it("rotates an expired GitHub connector entirely inside the user broker", async () => {
+    const subject = connectorSubject("github-refresh");
+    const user = "connector-github-refresh";
+    await control(`/subjects/${subject}`, "PUT", { user_id: user });
+    await connect(user, "github", "expired-code");
+    const response = await SELF.fetch(connectorRequest(
+      "https://api.github.com/repos/nanocodex/sdk",
+      subject,
+    ));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ account: "github-refreshed" });
+    expect(await (await SELF.fetch(
+      `https://broker.test/users/${user}/connectors`,
+    )).json()).toMatchObject({ connectors: { github: { connected: true } } });
+  });
+
+  it("clears a provider-rejected GitHub refresh token and requires reauthorization", async () => {
+    const subject = connectorSubject("github-revoked-refresh");
+    const user = "connector-github-revoked-refresh";
+    await control(`/subjects/${subject}`, "PUT", { user_id: user });
+    await connect(user, "github", "revoked-refresh-code");
+    const response = await SELF.fetch(connectorRequest(
+      "https://api.github.com/repos/nanocodex/sdk",
+      subject,
+    ));
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: "connector_reauthentication_required" });
+    expect(await (await SELF.fetch(
+      `https://broker.test/users/${user}/connectors`,
+    )).json()).toMatchObject({ connectors: { github: { connected: false } } });
   });
 
   it("refreshes an expired Google connector entirely inside the user broker", async () => {

@@ -8,6 +8,7 @@ import {
 import {
   buildGitHubAuthorizationUrl,
   buildGitHubIdentityRequest,
+  buildGitHubTokenRefreshRequest,
   buildGitHubTokenRequest,
   decodeGitHubIdentity,
   decodeGitHubTokenResponse,
@@ -77,6 +78,7 @@ type StoredConnector = {
   accessToken: string;
   refreshToken?: string;
   expiresAt?: number;
+  refreshExpiresAt?: number;
   scopes: string[];
   accountId: string;
   label: string;
@@ -270,11 +272,71 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
     if (connector.expiresAt === undefined || connector.expiresAt > Date.now() + EXPIRY_SKEW_MS) {
       return connector;
     }
-    if (id === "github") throw new ConnectorFailure(409, "connector_expired");
     if (!connector.refreshToken) {
+      return this.#rejectRefresh(id, connector);
+    }
+    if (connector.refreshExpiresAt !== undefined
+      && connector.refreshExpiresAt <= Date.now() + EXPIRY_SKEW_MS) {
+      this.#deleteConnectorGrant(id, connector);
+      await this.#persist();
       throw new ConnectorFailure(409, "connector_reauthentication_required");
     }
+    if (id === "github") return this.#refreshGitHubConnector(connector);
     return this.#refreshGoogleConnector(id, connector);
+  }
+
+  async #refreshGitHubConnector(connector: StoredConnector): Promise<StoredConnector> {
+    const credentials = providerCredentials("github", this.#env);
+    const response = await providerFetch(buildGitHubTokenRefreshRequest({
+      clientId: credentials.clientId,
+      clientSecret: credentials.clientSecret,
+      refreshToken: connector.refreshToken!,
+    }));
+    if (REDIRECT_STATUS.has(response.status) || !response.ok) {
+      await response.body?.cancel();
+      if (response.status === 400 || response.status === 401) {
+        return this.#rejectRefresh("github", connector);
+      }
+      connectorAudit("refresh", "error", "github", {
+        status: 503,
+        code: "connector_provider_unavailable",
+      });
+      throw new ConnectorFailure(503, "connector_provider_unavailable");
+    }
+    let refreshed;
+    try {
+      refreshed = decodeGitHubTokenResponse(await providerJson(response));
+    } catch {
+      return this.#rejectRefresh("github", connector);
+    }
+    if (refreshed.expiresIn === undefined || refreshed.refreshToken === undefined) {
+      return this.#rejectRefresh("github", connector);
+    }
+    const { refreshExpiresAt: _previousRefreshExpiry, ...retained } = connector;
+    const next: StoredConnector = {
+      ...retained,
+      accessToken: refreshed.accessToken,
+      refreshToken: refreshed.refreshToken,
+      expiresAt: Date.now() + refreshed.expiresIn * 1_000,
+      ...(refreshed.refreshTokenExpiresIn === undefined ? {} : {
+        refreshExpiresAt: Date.now() + refreshed.refreshTokenExpiresIn * 1_000,
+      }),
+      scopes: [...refreshed.scopes],
+    };
+    this.#connectors.connectors.github = next;
+    await this.#persist();
+    connectorAudit("refresh", "allow", "github", { status: 200 });
+    return next;
+  }
+
+  async #rejectRefresh(id: ConnectorId, connector: StoredConnector): Promise<never> {
+    this.#deleteConnectorGrant(id, connector);
+    await this.#persist();
+    connectorAudit("refresh", "deny", id, {
+      status: 409,
+      code: "connector_reauthentication_required",
+    });
+    throw new ConnectorFailure(409, "connector_reauthentication_required");
   }
 
   async #refreshGoogleConnector(
@@ -298,13 +360,7 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
     if (REDIRECT_STATUS.has(response.status) || !response.ok) {
       await response.body?.cancel();
       if (response.status === 400 || response.status === 401) {
-        this.#deleteConnectorGrant(id, connector);
-        await this.#persist();
-        connectorAudit("refresh", "deny", id, {
-          status: 409,
-          code: "connector_reauthentication_required",
-        });
-        throw new ConnectorFailure(409, "connector_reauthentication_required");
+        return this.#rejectRefresh(id, connector);
       }
       connectorAudit("refresh", "error", id, {
         status: 503,
@@ -351,7 +407,14 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
   #publicStatus(): Record<ConnectorId, Record<string, unknown>> {
     const status = (id: ConnectorId): Record<string, unknown> => {
       const connector = this.#connectors.connectors[id];
-      return connector ? {
+      const refreshable = connector?.refreshToken
+        && (connector.refreshExpiresAt === undefined
+          || connector.refreshExpiresAt > Date.now() + EXPIRY_SKEW_MS);
+      const usable = connector
+        && (connector.expiresAt === undefined
+          || connector.expiresAt > Date.now() + EXPIRY_SKEW_MS
+          || refreshable);
+      return usable ? {
         connected: true,
         account_id: connector.accountId,
         label: connector.label,
@@ -438,6 +501,9 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
         accessToken: token.accessToken,
         ...(token.refreshToken ? { refreshToken: token.refreshToken } : {}),
         ...(token.expiresIn ? { expiresAt: Date.now() + token.expiresIn * 1_000 } : {}),
+        ...(token.refreshExpiresIn
+          ? { refreshExpiresAt: Date.now() + token.refreshExpiresIn * 1_000 }
+          : {}),
         scopes: [...token.scopes],
         accountId: identity.accountId,
         label: identity.displayLabel,
@@ -475,6 +541,7 @@ type DecodedToken = {
   accessToken: string;
   refreshToken?: string;
   expiresIn?: number;
+  refreshExpiresIn?: number;
   scopes: readonly string[];
 };
 
@@ -521,6 +588,9 @@ function decodeToken(id: ConnectorId, value: unknown): DecodedToken {
       accessToken: token.accessToken,
       ...(token.refreshToken ? { refreshToken: token.refreshToken } : {}),
       ...(token.expiresIn ? { expiresIn: token.expiresIn } : {}),
+      ...(token.refreshTokenExpiresIn
+        ? { refreshExpiresIn: token.refreshTokenExpiresIn }
+        : {}),
       scopes: token.scopes,
     };
   }

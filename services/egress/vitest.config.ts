@@ -52,6 +52,19 @@ export default defineConfig({
           if (request.method === "POST" && url.hostname === "github.com"
             && url.pathname === "/login/oauth/access_token") {
             const body = await request.clone().formData();
+            if (body.get("grant_type") === "refresh_token") {
+              if (body.get("refresh_token") === "github-revoked-refresh") {
+                return Response.json({ error: "bad_refresh_token" }, { status: 400 });
+              }
+              return Response.json({
+                access_token: "github-refreshed-access",
+                expires_in: 28_800,
+                refresh_token: "github-rotated-refresh",
+                refresh_token_expires_in: 15_897_600,
+                token_type: "bearer",
+                scope: "repo,workflow",
+              });
+            }
             const code = String(body.get("code") ?? "");
             return Response.json({
               access_token: code === "github-code"
@@ -59,7 +72,17 @@ export default defineConfig({
                 : `github-${code.replace(/-code$/, "")}-access`,
               token_type: "bearer",
               scope: "repo,workflow",
-              ...(code === "expired-code" ? { expires_in: 1 } : {}),
+              ...(code === "expired-code" ? {
+                expires_in: 1,
+                refresh_token: "github-expired-refresh",
+                refresh_token_expires_in: 15_897_600,
+              } : {}),
+              ...(code === "revoked-refresh-code" ? {
+                expires_in: 1,
+                refresh_token: "github-revoked-refresh",
+                refresh_token_expires_in: 15_897_600,
+              } : {}),
+              ...(code === "no-refresh-code" ? { expires_in: 1 } : {}),
             });
           }
           if (request.method === "DELETE" && url.hostname === "api.github.com"
@@ -168,6 +191,7 @@ export default defineConfig({
             }
             const account = authorization === "Bearer github-alpha-access" ? "alpha"
               : authorization === "Bearer github-beta-access" ? "beta"
+              : authorization === "Bearer github-refreshed-access" ? "github-refreshed"
               : authorization === "Bearer gmail-refreshed-access" ? "gmail-refreshed"
               : authorization.startsWith("Bearer ") ? "connected" : "missing";
             return Response.json({

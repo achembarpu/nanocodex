@@ -4,6 +4,7 @@ import {
   buildGitHubAuthorizationParams,
   buildGitHubAuthorizationUrl,
   buildGitHubIdentityRequest,
+  buildGitHubTokenRefreshRequest,
   buildGitHubTokenRequest,
   decodeGitHubIdentity,
   decodeGitHubTokenResponse,
@@ -79,6 +80,24 @@ describe("GitHub OAuth connector", () => {
       redirectUri: "https://connector.example/callback",
       codeVerifier: "short",
     })).toThrow("valid PKCE verifier");
+  });
+
+  it("builds a rotating refresh-token request", async () => {
+    const request = buildGitHubTokenRefreshRequest({
+      clientId: "client-id",
+      clientSecret: "client-secret",
+      refreshToken: "github-refresh-secret",
+    });
+
+    expect(request.url).toBe(GITHUB_PROVIDER.tokenUrl);
+    expect(request.method).toBe("POST");
+    expect(request.headers.get("accept")).toBe("application/json");
+    expect(Object.fromEntries(await request.formData())).toEqual({
+      client_id: "client-id",
+      client_secret: "client-secret",
+      grant_type: "refresh_token",
+      refresh_token: "github-refresh-secret",
+    });
   });
 
   it("strictly decodes non-expiring and expiring token responses", () => {
