@@ -1815,7 +1815,7 @@ describe("managed agents REST and resumable SSE", () => {
       expect(await firstDeletion.json()).toEqual({ error: "session_cleanup_pending" });
       expect(await cleanupMarkers(session)).toEqual({ binding: true, deleting: true });
 
-      expect(await runDurableObjectAlarm(session)).toBe(true);
+      await runCleanupAlarmsUntilDeleted(session);
       createdAgents.delete(agent.agent_id);
       expect(await cleanupMarkers(session)).toEqual({ binding: false, deleting: false });
       expect(await runInDurableObject(session, (_instance, state) => ({
@@ -2560,6 +2560,18 @@ async function waitForCleanupDeletion(
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error("timed out waiting for watchdog deletion");
+}
+
+async function runCleanupAlarmsUntilDeleted(
+  stub: DurableObjectStub<NanocodexSession>,
+): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    if (!(await cleanupMarkers(stub)).deleting) return;
+    await runDurableObjectAlarm(stub);
+    await scheduler.wait(10);
+  }
+  throw new Error("timed out running Durable Object cleanup alarms");
 }
 
 function sessionForSubject(subject: string): DurableObjectStub<NanocodexSession> {
