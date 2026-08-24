@@ -169,6 +169,7 @@ type ManagedTurnRow = {
   error: string | null;
   id: string;
   input_json: string;
+  may_have_inner_operation: number;
   request_hash: string;
   request_key: string | null;
   attempt_count: number;
@@ -581,6 +582,7 @@ export class NanocodexSession extends DurableComputerSession {
   readonly #cancellationTasks = new Map<string, Promise<void>>();
   readonly #inFlight = new Set<Promise<unknown>>();
   #recoveryTask?: Promise<void>;
+  #recoveryRequested = false;
   #streamError?: string;
   #deleting = false;
   #deleted = false;
@@ -627,6 +629,7 @@ export class NanocodexSession extends DurableComputerSession {
         terminal_json TEXT,
         terminal_cursor INTEGER,
         error TEXT,
+        may_have_inner_operation INTEGER NOT NULL DEFAULT 1 CHECK (may_have_inner_operation IN (0, 1)),
         attempt_count INTEGER NOT NULL DEFAULT 0,
         retry_at INTEGER,
         created_at INTEGER NOT NULL,
@@ -656,6 +659,16 @@ export class NanocodexSession extends DurableComputerSession {
     if (!sessionColumns.has("runtime_profile")) {
       this.ctx.storage.sql.exec(
         "ALTER TABLE session_state ADD COLUMN runtime_profile TEXT NOT NULL DEFAULT 'managed'",
+      );
+    }
+    const managedTurnColumns = new Set(this.ctx.storage.sql.exec<{ name: string }>(
+      "PRAGMA table_info(managed_turns)",
+    ).toArray().map((column) => column.name));
+    if (!managedTurnColumns.has("may_have_inner_operation")) {
+      // Pre-upgrade unfinished rows may already own an inner Rust journal
+      // operation. Conservatively replay them instead of orphaning that work.
+      this.ctx.storage.sql.exec(
+        "ALTER TABLE managed_turns ADD COLUMN may_have_inner_operation INTEGER NOT NULL DEFAULT 1 CHECK (may_have_inner_operation IN (0, 1))",
       );
     }
     this.#deleted = this.#initializationOwnership()?.state === "deleted";
@@ -1261,7 +1274,7 @@ export class NanocodexSession extends DurableComputerSession {
       if (existing.state === "cancelling") {
         this.#scheduleCancellation(existing.id);
       } else if (!isTerminalState(existing.state) && existing.state !== "blocked") {
-        this.#scheduleAdmission(existing, true);
+        this.#scheduleRecovery();
       }
       return { created: false, row: existing };
     }
@@ -1294,8 +1307,8 @@ export class NanocodexSession extends DurableComputerSession {
       this.ctx.storage.sql.exec(
         `INSERT INTO managed_turns (
            id, request_key, request_hash, input_json, state,
-           accepted_cursor, created_at, accepted_at, updated_at
-         ) VALUES (?, ?, ?, ?, 'accepted', CAST(? AS INTEGER), ?, ?, ?)`,
+           accepted_cursor, may_have_inner_operation, created_at, accepted_at, updated_at
+         ) VALUES (?, ?, ?, ?, 'accepted', CAST(? AS INTEGER), 0, ?, ?, ?)`,
         id,
         requestKey,
         requestHash,
@@ -1309,16 +1322,8 @@ export class NanocodexSession extends DurableComputerSession {
     this.#publish(event!);
     const row = this.#managedTurn(id);
     if (!row) throw new Error("managed turn disappeared after acceptance");
-    this.#scheduleAdmission(row, false);
+    this.#scheduleRecovery();
     return { created: true, row };
-  }
-
-  #scheduleAdmission(row: ManagedTurnRow, replayed: boolean): void {
-    if (this.#deleting || this.#turns.has(row.id) || this.#pendingTurnIds.has(row.id)) return;
-    const task = Promise.resolve().then(() => this.#admitManagedTurn(row, replayed));
-    this.ctx.waitUntil(task.then(() => undefined, (error) => {
-      console.error("managed turn admission failed", row.id, errorMessage(error));
-    }));
   }
 
   #markCancelling(id: string): ManagedTurnRow {
@@ -1366,7 +1371,16 @@ export class NanocodexSession extends DurableComputerSession {
       await this.#scheduleNextAlarm();
       return;
     }
+    const admission = this.#admissionTasks.get(id);
+    if (admission) await admission;
+    row = this.#managedTurn(id);
+    if (!row || isTerminalState(row.state) || row.state === "blocked") return;
     let turn = this.#turns.get(id);
+    if (!turn && row.may_have_inner_operation === 0) {
+      this.#commitManagedMessage(id, { type: "turn_cancelled", id });
+      this.#scheduleRecovery();
+      return;
+    }
     if (!turn) {
       row = await this.#admitManagedTurn(row, true);
       if (isTerminalState(row.state) || row.state === "blocked") return;
@@ -1420,7 +1434,28 @@ export class NanocodexSession extends DurableComputerSession {
       const modelInput = initialAccountContext?.turn_id === row.id
         ? withInitialAccountInfo(input, initialAccountContext.account)
         : input;
+      const dispatchable = this.#managedTurn(row.id);
+      if (!dispatchable || isTerminalState(dispatchable.state) || dispatchable.state === "blocked") {
+        this.#pendingTurnIds.delete(row.id);
+        this.#turnInputs.delete(row.id);
+        return dispatchable ?? row;
+      }
+      if (dispatchable.state === "cancelling" && dispatchable.may_have_inner_operation === 0) {
+        this.#pendingTurnIds.delete(row.id);
+        this.#turnInputs.delete(row.id);
+        return dispatchable;
+      }
       this.#eventTurnQueue.push(row.id);
+      // This write must stay immediately before prompt dispatch with no await
+      // between them. A false positive is safely replayable; a false negative
+      // could orphan an accepted Rust journal operation.
+      this.ctx.storage.sql.exec(
+        `UPDATE managed_turns
+         SET may_have_inner_operation = 1, updated_at = ?
+         WHERE id = ? AND state IN ('accepted', 'retryable', 'cancelling')`,
+        Date.now(),
+        row.id,
+      );
       turn = agent.turn.prompt({ id: row.id, input: modelInput });
       this.#turns.set(row.id, turn);
       const durableId = await turn.accepted();
@@ -1651,11 +1686,18 @@ export class NanocodexSession extends DurableComputerSession {
   }
 
   #scheduleRecovery(): void {
-    if (this.#deleting || this.#deleted || this.#recoveryTask) return;
+    if (this.#deleting || this.#deleted) return;
+    if (this.#recoveryTask) {
+      this.#recoveryRequested = true;
+      return;
+    }
+    this.#recoveryRequested = false;
     const task = Promise.resolve().then(() => this.#runRecovery());
     this.#recoveryTask = task;
     void task.finally(() => {
-      if (this.#recoveryTask === task) this.#recoveryTask = undefined;
+      if (this.#recoveryTask !== task) return;
+      this.#recoveryTask = undefined;
+      if (this.#recoveryRequested) this.#scheduleRecovery();
     }).catch(() => {});
     this.ctx.waitUntil(task.catch((error) => {
       console.error("managed turn recovery failed", errorMessage(error));
@@ -1665,31 +1707,46 @@ export class NanocodexSession extends DurableComputerSession {
   async #runRecovery(): Promise<void> {
     if (this.#deleting || !this.#sessionId() || this.#streamError) return;
     const rows = this.#managedTurns(
-      `WHERE state = 'accepted'
-          OR (state IN ('retryable', 'cancelling') AND COALESCE(retry_at, 0) <= ?)
+      `WHERE state IN ('accepted', 'cancelling', 'retryable', 'blocked')
        ORDER BY created_at, rowid`,
-      Date.now(),
     );
     for (const row of rows) {
       if (this.#deleting) return;
       const current = this.#managedTurn(row.id);
-      if (!current || isTerminalState(current.state) || current.state === "blocked") continue;
+      if (!current || isTerminalState(current.state)) continue;
+      if (current.state === "blocked") break;
+      if ((current.state === "retryable" || current.state === "cancelling")
+        && current.retry_at !== null && current.retry_at > Date.now()) break;
       if (current.state === "cancelling") {
-        if (this.#pendingTurnIds.has(row.id)
-          || this.#admissionTasks.has(row.id)
-          || this.#cancellationTasks.has(row.id)) continue;
-        this.#scheduleCancellation(current.id);
+        const cancellation = this.#cancellationTasks.get(row.id);
+        try {
+          if (cancellation) await cancellation;
+          else await this.#cancelManagedTurn(current.id);
+        } catch (error) {
+          // Cancellation failure is already projected into the durable row.
+          // Keep the ordered recovery pump alive so it can retain that retry.
+          console.error("managed turn cancellation recovery failed", row.id, errorMessage(error));
+        }
+        const cancelled = this.#managedTurn(current.id);
+        if (cancelled && !isTerminalState(cancelled.state)) break;
         continue;
       }
       if (this.#turns.has(row.id)
         || this.#pendingTurnIds.has(row.id)
-        || this.#admissionTasks.has(row.id)) continue;
+        || this.#admissionTasks.has(row.id)) {
+        if (current.may_have_inner_operation === 1) continue;
+        break;
+      }
       try {
         validatePromptInput(JSON.parse(current.input_json));
         await this.#admitManagedTurn(current, true);
       } catch (error) {
         this.#commitManagedFailure(current.id, error, true);
       }
+      const admitted = this.#managedTurn(current.id);
+      if (admitted && (admitted.state === "retryable"
+        || admitted.state === "cancelling"
+        || admitted.state === "blocked")) break;
     }
     await this.#scheduleNextAlarm();
   }
@@ -2269,7 +2326,7 @@ export class NanocodexSession extends DurableComputerSession {
       `SELECT id, request_key, request_hash, input_json, state,
               CAST(accepted_cursor AS TEXT) AS accepted_cursor,
               terminal_json, CAST(terminal_cursor AS TEXT) AS terminal_cursor,
-              error, attempt_count, CAST(retry_at AS INTEGER) AS retry_at,
+              error, may_have_inner_operation, attempt_count, CAST(retry_at AS INTEGER) AS retry_at,
               created_at, accepted_at, updated_at
        FROM managed_turns ${clause}`,
       ...args,
@@ -2311,14 +2368,19 @@ export class NanocodexSession extends DurableComputerSession {
           if (!this.#cancellationTasks.has(row.id)) {
             targets.push(row.retry_at ?? now + 1);
           }
-          continue;
+          break;
         }
-        if (this.#turns.has(row.id)
+        const admissionOwned = this.#turns.has(row.id)
           || this.#pendingTurnIds.has(row.id)
-          || this.#admissionTasks.has(row.id)
-          || this.#cancellationTasks.has(row.id)) continue;
+          || this.#admissionTasks.has(row.id);
+        if (admissionOwned) {
+          if (row.may_have_inner_operation === 1) continue;
+          break;
+        }
+        if (this.#cancellationTasks.has(row.id)) break;
         if (row.state === "retryable" && row.retry_at !== null) targets.push(row.retry_at);
         else targets.push(now + 1);
+        break;
       }
     }
     if (targets.length === 0) {

@@ -2023,10 +2023,9 @@ describe("managed agents REST and resumable SSE", () => {
     ))).toBe(false);
   });
 
-  it("honors the durable cancellation retry deadline across duplicate requests and alarms", async () => {
-    vi.useFakeTimers({ toFake: ["Date"] });
+  it("cancels a pre-runtime retry without reconstructing the unavailable agent", async () => {
     const agent = await createAgent();
-    const id = "turn-cancel-retry-deadline";
+    const id = "turn-cancel-before-runtime";
     const turnsUrl = agent.events_url.replace(/\/events$/, "/turns");
     const turnRequest = {
       method: "POST",
@@ -2037,7 +2036,6 @@ describe("managed agents REST and resumable SSE", () => {
       body: JSON.stringify({ id, input: "cancel through a reconstruction outage" }),
     } satisfies RequestInit;
     const cancelUrl = `${turnsUrl}/${id}/cancel`;
-    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
     const originalBroker = testEnv.NANOCODEX;
     let upgradeCount = 0;
     testEnv.NANOCODEX = {
@@ -2053,48 +2051,345 @@ describe("managed agents REST and resumable SSE", () => {
 
     try {
       expect((await SELF.fetch(turnsUrl, turnRequest)).status).toBe(202);
-      await waitForTurnAttempt(agent, id, 1);
-      expect((await SELF.fetch(cancelUrl, { method: "POST" })).status).toBe(202);
-      const cancelling = await waitForTurnAttempt(agent, id, 2);
-      expect(cancelling.state).toBe("cancelling");
-      expect(cancelling.error).toMatch(/HTTP 503/i);
-      expect(cancelling.retry_at).not.toBeNull();
-      const retryAt = cancelling.retry_at!;
-      const attemptsBeforeDeadline = cancelling.attempt_count;
-      const upgradesBeforeDeadline = upgradeCount;
+      const retryable = await waitForTurnAttempt(agent, id, 1);
+      expect(retryable.state).toBe("retryable");
+      expect(retryable.error).toMatch(/HTTP 503/i);
+      const upgradesBeforeCancel = upgradeCount;
 
-      vi.setSystemTime(retryAt - 1);
-      expect((await SELF.fetch(turnsUrl, turnRequest)).status).toBe(200);
       expect((await SELF.fetch(cancelUrl, { method: "POST" })).status).toBe(202);
-      expect(await runDurableObjectAlarm(session)).toBe(true);
+      expect((await SELF.fetch(turnsUrl, turnRequest)).status).toBe(200);
+      expect((await SELF.fetch(cancelUrl, { method: "POST" })).status).toBe(200);
+      const cancelled = await waitForTurnState(agent, id, "cancelled");
+      expect(cancelled).toMatchObject({
+        attempt_count: 1,
+        retry_at: null,
+        state: "cancelled",
+      });
       await scheduler.wait(25);
-      const beforeDeadline = await (
+      expect(upgradeCount).toBe(upgradesBeforeCancel);
+
+      const replay = await (
         await SELF.fetch(`${turnsUrl}/${id}`)
       ).json<ManagedTurnView>();
-      expect(beforeDeadline).toMatchObject({
-        attempt_count: attemptsBeforeDeadline,
-        retry_at: retryAt,
-        state: "cancelling",
+      expect(replay).toMatchObject({
+        attempt_count: 1,
+        retry_at: null,
+        state: "cancelled",
       });
-      expect(upgradeCount).toBe(upgradesBeforeDeadline);
-      expect(await runInDurableObject(session, (_instance, state) => state.storage.getAlarm()))
-        .toBe(retryAt);
-
-      vi.setSystemTime(retryAt);
-      expect(await runDurableObjectAlarm(session)).toBe(true);
-      const retried = await waitForTurnAttempt(agent, id, attemptsBeforeDeadline + 1);
-      expect(retried.state).toBe("cancelling");
-      expect(retried.retry_at).not.toBeNull();
-      expect(retried.retry_at!).toBeGreaterThan(retryAt);
-      expect(upgradeCount).toBe(upgradesBeforeDeadline + 1);
       const history = await managedHistory(agent);
+      expect(history.data.filter(({ type, turn_id }) => (
+        type === "turn_accepted" && turn_id === id
+      ))).toHaveLength(1);
+      expect(history.data.filter(({ type, turn_id }) => (
+        type === "turn_retryable" && turn_id === id
+      ))).toHaveLength(1);
       expect(history.data.filter(({ type, turn_id }) => (
         type === "turn_cancelling" && turn_id === id
       ))).toHaveLength(1);
+      expect(history.data.filter(({ type, turn_id }) => (
+        type === "turn_cancelled" && turn_id === id
+      ))).toHaveLength(1);
+      expect(history.data.some(({ type, turn_id }) => (
+        turn_id === id && (type === "turn_failed" || type === "turn_blocked")
+      ))).toBe(false);
+      expect(await runInDurableObject(
+        testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id),
+        (_instance, state) => state.storage.sql.exec<{
+          may_have_inner_operation: number;
+          state: string;
+        }>(
+          "SELECT may_have_inner_operation, state FROM managed_turns WHERE id = ?",
+          id,
+        ).one(),
+      )).toEqual({
+        may_have_inner_operation: 0,
+        state: "cancelled",
+      });
     } finally {
       testEnv.NANOCODEX = originalBroker;
+    }
+  });
+
+  it("joins an in-flight construction before cancelling it as outer-only", async () => {
+    const agent = await createAgent();
+    const id = "turn-cancel-during-construction";
+    const turnsUrl = agent.events_url.replace(/\/events$/, "/turns");
+    const originalBroker = testEnv.NANOCODEX;
+    let releaseConstruction!: () => void;
+    const heldConstruction = new Promise<Response>((resolve) => {
+      releaseConstruction = () => resolve(Response.json(
+        { error: "injected_held_startup_failure" },
+        { status: 503 },
+      ));
+    });
+    let constructionStarted!: () => void;
+    const started = new Promise<void>((resolve) => { constructionStarted = resolve; });
+    let upgradeCount = 0;
+    testEnv.NANOCODEX = {
+      async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+        const request = new Request(input, init);
+        if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
+          upgradeCount += 1;
+          constructionStarted();
+          return heldConstruction;
+        }
+        return originalBroker.fetch(input, init);
+      },
+    } as Fetcher;
+
+    try {
+      expect((await SELF.fetch(turnsUrl, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": `request-${id}`,
+        },
+        body: JSON.stringify({ id, input: "cancel while construction is held" }),
+      })).status).toBe(202);
+      await within(started, "held cancellation construction");
+
+      expect((await SELF.fetch(`${turnsUrl}/${id}/cancel`, {
+        method: "POST",
+      })).status).toBe(202);
+      expect(await (
+        await SELF.fetch(`${turnsUrl}/${id}`)
+      ).json<ManagedTurnView>()).toMatchObject({ state: "cancelling" });
+
+      releaseConstruction();
+      const cancelled = await waitForTurnState(agent, id, "cancelled");
+      expect(cancelled).toMatchObject({
+        retry_at: null,
+        state: "cancelled",
+      });
+      expect(upgradeCount).toBe(1);
+      expect(await runInDurableObject(
+        testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id),
+        (_instance, state) => state.storage.sql.exec<{ may_have_inner_operation: number }>(
+          "SELECT may_have_inner_operation FROM managed_turns WHERE id = ?",
+          id,
+        ).one().may_have_inner_operation,
+      )).toBe(0);
+    } finally {
+      releaseConstruction();
+      testEnv.NANOCODEX = originalBroker;
+    }
+  });
+
+  it("retains the cancellation retry deadline for a dispatched turn", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    vi.setSystemTime(Date.now() + 60_000);
+    const agent = await createAgent();
+    const id = "turn-cancel-after-dispatch";
+    const turnsUrl = agent.events_url.replace(/\/events$/, "/turns");
+    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    const errorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    let restoreJournal = () => {};
+
+    try {
+      expect((await SELF.fetch(turnsUrl, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": `request-${id}`,
+        },
+        body: JSON.stringify({ id, input: "wait for cancellation" }),
+      })).status).toBe(202);
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const dispatched = await runInDurableObject(session, (_instance, state) => (
+          state.storage.sql.exec<{ may_have_inner_operation: number }>(
+            "SELECT may_have_inner_operation FROM managed_turns WHERE id = ?",
+            id,
+          ).one().may_have_inner_operation
+        ));
+        if (dispatched === 1) break;
+        await scheduler.wait(5);
+      }
+      expect(await runInDurableObject(session, (_instance, state) => (
+        state.storage.sql.exec<{ may_have_inner_operation: number }>(
+          "SELECT may_have_inner_operation FROM managed_turns WHERE id = ?",
+          id,
+        ).one().may_have_inner_operation
+      ))).toBe(1);
+
+      await runInDurableObject(session, (_instance, state) => {
+        const sql = state.storage.sql as unknown as {
+          exec(query: string, ...bindings: unknown[]): unknown;
+        };
+        const originalExec = sql.exec;
+        let failed = false;
+        sql.exec = function injectedJournalFailure(query, ...bindings) {
+          if (!failed
+            && query.includes("INSERT INTO nanocodex_journal_batches")
+            && bindings.some((binding) => (
+              typeof binding === "string" && binding.includes("\"operation_cancelled\"")
+            ))) {
+            failed = true;
+            throw new Error("injected cancellation journal failure");
+          }
+          return originalExec.call(sql, query, ...bindings);
+        };
+        restoreJournal = () => { sql.exec = originalExec; };
+      });
+
+      expect((await SELF.fetch(`${turnsUrl}/${id}/cancel`, {
+        method: "POST",
+      })).status).toBe(202);
+      const cancelling = await waitForTurnAttempt(agent, id, 1);
+      expect(cancelling).toMatchObject({ state: "cancelling" });
+      expect(cancelling.retry_at).not.toBeNull();
+      const retryAt = cancelling.retry_at!;
+      restoreJournal();
+
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const alarm = await runInDurableObject(
+          session,
+          (_instance, state) => state.storage.getAlarm(),
+        );
+        if (alarm === retryAt) break;
+        await scheduler.wait(5);
+      }
+      expect(await runInDurableObject(session, (_instance, state) => state.storage.getAlarm()))
+        .toBe(retryAt);
+      expect((await SELF.fetch(turnsUrl, {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "idempotency-key": "request-turn-after-cancel-retry",
+        },
+        body: JSON.stringify({
+          id: "turn-after-cancel-retry",
+          input: "run only after cancellation",
+        }),
+      })).status).toBe(202);
+      await scheduler.wait(25);
+      expect(await runInDurableObject(session, (_instance, state) => state.storage.getAlarm()))
+        .toBe(retryAt);
+      expect(await (
+        await SELF.fetch(`${turnsUrl}/turn-after-cancel-retry`)
+      ).json<ManagedTurnView>()).toMatchObject({ attempt_count: 0, state: "accepted" });
+
+      vi.setSystemTime(retryAt);
+      expect(await runDurableObjectAlarm(session)).toBe(true);
+      await scheduler.wait(250);
+      expect(await (
+        await SELF.fetch(`${turnsUrl}/${id}`)
+      ).json<ManagedTurnView>()).toMatchObject({ state: "cancelled" });
+      await waitForTurnState(agent, "turn-after-cancel-retry", "completed");
+    } finally {
+      restoreJournal();
+      errorSpy.mockRestore();
       vi.useRealTimers();
     }
+  });
+
+  it("does not dispatch a newer turn past a pre-runtime retry", async () => {
+    const agent = await createAgent();
+    const turnsUrl = agent.events_url.replace(/\/events$/, "/turns");
+    const originalBroker = testEnv.NANOCODEX;
+    let upgradeCount = 0;
+    testEnv.NANOCODEX = {
+      async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+        const request = new Request(input, init);
+        if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
+          upgradeCount += 1;
+          return Response.json({ error: "injected_fifo_startup_failure" }, { status: 503 });
+        }
+        return originalBroker.fetch(input, init);
+      },
+    } as Fetcher;
+
+    const submit = (id: string) => SELF.fetch(turnsUrl, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": `request-${id}`,
+      },
+      body: JSON.stringify({ id, input: `input for ${id}` }),
+    });
+
+    try {
+      expect((await submit("turn-fifo-first")).status).toBe(202);
+      await waitForTurnState(agent, "turn-fifo-first", "retryable");
+      expect(upgradeCount).toBe(1);
+
+      expect((await submit("turn-fifo-second")).status).toBe(202);
+      await scheduler.wait(50);
+      expect(upgradeCount).toBe(1);
+      expect(await (
+        await SELF.fetch(`${turnsUrl}/turn-fifo-second`)
+      ).json<ManagedTurnView>()).toMatchObject({
+        attempt_count: 0,
+        state: "accepted",
+      });
+
+      testEnv.NANOCODEX = originalBroker;
+      expect((await SELF.fetch(`${turnsUrl}/turn-fifo-first/cancel`, {
+        method: "POST",
+      })).status).toBe(202);
+      await waitForTurnState(agent, "turn-fifo-first", "cancelled");
+      await waitForTurnState(agent, "turn-fifo-second", "completed");
+
+      const history = await managedHistory(agent);
+      expect(history.data.some(({ type, turn_id }) => (
+        type === "turn_blocked"
+        && (turn_id === "turn-fifo-first" || turn_id === "turn-fifo-second")
+      ))).toBe(false);
+    } finally {
+      testEnv.NANOCODEX = originalBroker;
+    }
+  });
+
+  it("conservatively marks legacy unfinished turns as possibly dispatched", async () => {
+    const agent = await createAgent();
+    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    const turnsUrl = agent.events_url.replace(/\/events$/, "/turns");
+    await runInDurableObject(session, (_instance, state) => {
+      state.storage.sql.exec("DROP TABLE managed_turns");
+      state.storage.sql.exec(`
+        CREATE TABLE managed_turns (
+          id TEXT PRIMARY KEY,
+          request_key TEXT,
+          request_hash TEXT NOT NULL,
+          input_json TEXT NOT NULL,
+          state TEXT NOT NULL CHECK (
+            state IN ('accepted', 'cancelling', 'retryable', 'blocked', 'completed', 'cancelled', 'failed')
+          ),
+          accepted_cursor INTEGER NOT NULL,
+          terminal_json TEXT,
+          terminal_cursor INTEGER,
+          error TEXT,
+          attempt_count INTEGER NOT NULL DEFAULT 0,
+          retry_at INTEGER,
+          created_at INTEGER NOT NULL,
+          accepted_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL
+        )
+      `);
+      state.storage.sql.exec(
+        `INSERT INTO managed_turns (
+           id, request_key, request_hash, input_json, state, accepted_cursor,
+           error, created_at, accepted_at, updated_at
+         ) VALUES (?, NULL, ?, ?, 'blocked', 0, ?, ?, ?, ?)`,
+        "legacy-unfinished-turn",
+        "legacy-request-hash",
+        JSON.stringify("legacy input"),
+        "legacy row requires conservative reconciliation",
+        Date.now(),
+        Date.now(),
+        Date.now(),
+      );
+    });
+
+    await evictDurableObject(session);
+    expect((await SELF.fetch(`${turnsUrl}/legacy-unfinished-turn`)).status).toBe(200);
+    expect(await runInDurableObject(session, (_instance, state) => ({
+      column: state.storage.sql.exec<{ name: string }>(
+        "PRAGMA table_info(managed_turns)",
+      ).toArray().some(({ name }) => name === "may_have_inner_operation"),
+      marker: state.storage.sql.exec<{ may_have_inner_operation: number }>(
+        "SELECT may_have_inner_operation FROM managed_turns WHERE id = 'legacy-unfinished-turn'",
+      ).one().may_have_inner_operation,
+    }))).toEqual({ column: true, marker: 1 });
   });
 
   it("does not let an idempotent submission bypass a durable admission retry deadline", async () => {
