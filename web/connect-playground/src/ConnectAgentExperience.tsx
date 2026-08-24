@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ConnectAgent, Connection } from "nanocodex/connect";
 
 import { AgentTerminalView } from "../../src/AgentTerminalView";
@@ -26,6 +26,7 @@ export function ConnectAgentExperience({
   const [terminalState, setTerminalState] = useState<AgentTerminalState>();
   const [summary, setSummary] = useState<ConversationSummary>(() => conversation(agent.id));
   const terminalAgent = useMemo(() => managedTerminalAgent(agent), [agent]);
+  const retryAgent = useCallback(() => {}, []);
   const visibility = connection.grant.visibility;
 
   useEffect(() => {
@@ -73,13 +74,13 @@ export function ConnectAgentExperience({
     };
   }, [agent, onObservation, visibility.conversationHistory, visibility.finalMessages, visibility.rawTraces]);
 
-  function recordActivity(input: string) {
+  const recordActivity = useCallback((input: string) => {
     setSummary((current) => ({
       ...current,
       title: current.turnCount ? current.title : conversationTitle(input),
       updatedAt: Date.now(),
     }));
-  }
+  }, []);
 
   const agentStatus = terminalState?.status ?? "starting";
   return (
@@ -119,7 +120,7 @@ export function ConnectAgentExperience({
               mode="preview"
               onConversationActivity={recordActivity}
               onStateChange={setTerminalState}
-              retryAgent={() => {}}
+              retryAgent={retryAgent}
               theme="dark"
             />
           </div>
