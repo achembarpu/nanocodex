@@ -248,7 +248,7 @@ export default {
           }));
           return;
         }
-        if (text === "E2E_MANAGED_WEB") {
+        if (text.includes("E2E_MANAGED_WEB")) {
           server.send(JSON.stringify({
             type: "response.completed",
             response: {
