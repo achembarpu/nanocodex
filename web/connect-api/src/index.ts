@@ -120,6 +120,7 @@ type Env = Readonly<{
   ACCOUNTS: Fetcher;
   CONNECT_STATE: Kv.durableObject.Namespace;
   EGRESS: Fetcher;
+  NANOCODEX: Fetcher;
 }>;
 
 type GrantRecord = Readonly<{
@@ -188,7 +189,7 @@ export default {
       }
       if (/^\/git\/thread-[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}\/(?:info\/refs|git-upload-pack|git-receive-pack)$/.test(url.pathname)) {
         requirePlaygroundOrigin(request);
-        return cors(await proxyThreadGit(request, url), request);
+        return cors(await proxyThreadGit(request, env, url), request);
       }
       if (request.method === "POST" && url.pathname === "/v1/mercator/jobs") {
         requirePlaygroundOrigin(request);
@@ -2132,7 +2133,7 @@ function cors(response: Response, request: Request) {
   return response;
 }
 
-async function proxyThreadGit(request: Request, url: URL): Promise<Response> {
+async function proxyThreadGit(request: Request, env: Env, url: URL): Promise<Response> {
   if (request.method !== "GET" && request.method !== "POST") {
     throw new ApiFailure(405, "method_not_allowed", "Git workspace requests require GET or POST.");
   }
@@ -2142,13 +2143,13 @@ async function proxyThreadGit(request: Request, url: URL): Promise<Response> {
     if (value) headers.set(name, value);
   }
   const target = new URL(`${url.pathname}${url.search}`, NANOCODEX_ORIGIN);
-  const upstream = await fetch(target, {
+  const upstream = await env.NANOCODEX.fetch(new Request(target, {
     method: request.method,
     headers,
     ...(request.method === "POST" ? { body: request.body } : {}),
     redirect: "manual",
     signal: request.signal,
-  });
+  }));
   const responseHeaders = new Headers();
   for (const name of ["cache-control", "content-type", "x-content-type-options"]) {
     const value = upstream.headers.get(name);
