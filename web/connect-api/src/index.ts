@@ -1,0 +1,1555 @@
+import { Handler, Kv } from "accounts/server";
+import { KeyAuthorization } from "ox/tempo";
+
+export class NonceStorage extends Kv.NonceStorage {}
+
+const PLAYGROUND_ORIGIN = "https://nanocodex-connect-playground.gakonst.workers.dev";
+const DIALOG_ORIGIN = "https://nanocodex-connect-dialog.gakonst.workers.dev";
+const API_ORIGIN = "https://nanocodex-connect-api.gakonst.workers.dev";
+const MACHINE_USD_ORIGIN = "https://machine-usd.porto.workers.dev";
+const MERCATOR_ORIGIN = "https://mercator.tempoxyz.dev";
+const TEMPO_RPC = "https://api.tempo.xyz/rpc/4217";
+const MACHINE_USD = "0x20c0000000000000000000006637932dE5413804";
+const USDC_E = "0x20C000000000000000000000b9537d11c60E8b50";
+const MACHINE_USD_SWAPPER = "0xd588ED9Ae08643A450157Adaf61c3C0C1BBd0dbb";
+const TIP20_CHANNEL_ESCROW = "0x4d50500000000000000000000000000000000000";
+const MERCATOR_SETTLEMENT = "0xa295C42FBCC026a62304A7701f25B4c91799B0dA";
+const MPP_LIMIT = 10_000_000n;
+const MPP_PERIOD = 86_400;
+const MPP_MAX_PER_REQUEST = 250_000n;
+const CONNECTOR_IDS = ["github", "gmail", "gdrive", "chatgpt"] as const;
+const OAUTH_CONNECTOR_IDS = ["github", "gmail", "gdrive"] as const;
+const BASE_CAPABILITIES = [
+  "nanocodex.agent",
+  "mercator.boost",
+  "mpp.machusd",
+] as const;
+const BASE_APPROVAL_RESOURCES = [
+  "urn:nanocodex:agent:run",
+  "urn:nanocodex:capability:mercator:boost",
+  "urn:nanocodex:mpp:machusd:spend",
+] as const;
+const PROVIDER_CREDENTIAL_PLACEHOLDER = "Bearer NANOCODEX_PROVIDER_CREDENTIAL";
+const CONNECTOR_STATE_TTL = 10 * 60;
+const CONNECT_APPROVAL_TTL = 10 * 60;
+const MODEL_TICKET_TTL = 60;
+const REGISTERED_APP_ID = "atlas-workspace";
+const MAX_BROKER_BODY_BYTES = 16 * 1024;
+const MAX_CONNECTOR_REQUEST_BODY_BYTES = 256 * 1024;
+const MAX_CONNECTOR_RESPONSE_BODY_BYTES = 1024 * 1024;
+const EGRESS_SUBJECT = /^[A-Za-z0-9_-]{43,128}$/;
+const CONNECTOR_METHODS = new Set(["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]);
+const CONNECTOR_REQUEST_HEADERS = new Set([
+  "accept",
+  "content-range",
+  "content-type",
+  "if-match",
+  "if-modified-since",
+  "if-none-match",
+  "if-unmodified-since",
+]);
+const CONNECTOR_RESPONSE_HEADERS = new Set([
+  "accept-ranges",
+  "content-range",
+  "content-type",
+  "etag",
+  "last-modified",
+  "retry-after",
+  "x-ratelimit-limit",
+  "x-ratelimit-remaining",
+  "x-ratelimit-reset",
+  "x-ratelimit-resource",
+]);
+const FORBIDDEN_CONNECTOR_HEADERS = /^(?:authorization|cookie|forwarded|host|origin|proxy-|referer|set-cookie|x-forwarded-|x-nanocodex-subject$|x-real-ip$|cf-)/i;
+
+type ConnectorId = typeof CONNECTOR_IDS[number];
+type OAuthConnectorId = typeof OAUTH_CONNECTOR_IDS[number];
+type ConnectorStatus = Readonly<{
+  connected: boolean;
+  label?: string;
+  account_id?: string;
+}>;
+type ConnectorState = Readonly<{
+  accountAddress: `0x${string}`;
+  dialogOrigin: string;
+  provider: OAuthConnectorId;
+}>;
+type AuthRequestContext = Readonly<{
+  keyAuthorization?: `0x${string}`;
+  message: string;
+}>;
+type ConnectApproval = Readonly<{
+  accountAddress: `0x${string}`;
+  keyAuthorization?: `0x${string}`;
+  resources: readonly string[];
+}>;
+type Fetcher = Readonly<{
+  fetch(request: Request): Promise<Response>;
+}>;
+
+type Env = Readonly<{
+  CONNECT_STATE: Kv.durableObject.Namespace;
+  EGRESS: Fetcher;
+}>;
+
+type GrantRecord = Readonly<{
+  id: `0x${string}`;
+  appId: string;
+  accountAddress: `0x${string}`;
+  agentId: string;
+  permission: string;
+  status: "active" | "revoked";
+  expiresAt: number;
+  capabilities: readonly string[];
+  accessKey: Record<string, unknown>;
+  spentAtomics: string;
+  egressSubject: string;
+}>;
+type GrantPrincipal = Readonly<{
+  accountAddress: `0x${string}`;
+  appId: string;
+  grantId: `0x${string}`;
+}>;
+type AccessKeyRecord = Readonly<{
+  accountAddress: `0x${string}`;
+  appId: string;
+  accessKey: Record<string, unknown>;
+}>;
+type ModelTicket = Readonly<{
+  grantId: `0x${string}`;
+  sessionId: string;
+  turnState?: string;
+}>;
+
+export default {
+  async fetch(request: Request, env: Env): Promise<Response> {
+    if (request.method === "OPTIONS") return cors(new Response(null, { status: 204 }), request);
+    try {
+      const url = new URL(request.url);
+      const store = Kv.durableObject(env.CONNECT_STATE);
+      const auth = createAuth(store, await authRequestContext(request, url));
+
+      if (url.pathname.startsWith("/v1/connect/auth")) {
+        requireDialogOrigin(request);
+        return cors(await auth.fetch(request), request);
+      }
+      if (request.method === "GET" && url.pathname === "/healthz") {
+        return cors(Response.json({ status: "ok", mode: "live" }), request);
+      }
+      const modelSocket = url.pathname.match(/^\/v1\/grants\/(0x[0-9a-fA-F]{64})\/model$/);
+      if (modelSocket) {
+        return openGrantModelWebSocket(
+          request,
+          env,
+          store,
+          url,
+          modelSocket[1] as `0x${string}`,
+        );
+      }
+      if (request.method === "GET" && url.pathname === "/v1/machine-usd/config") {
+        const upstream = await fetch(`${MACHINE_USD_ORIGIN}/v1/config`, {
+          headers: { accept: "application/json" },
+        });
+        return cors(new Response(upstream.body, {
+          status: upstream.status,
+          headers: { "content-type": upstream.headers.get("content-type") ?? "application/json" },
+        }), request);
+      }
+      if (request.method === "POST" && url.pathname === "/v1/mercator/jobs") {
+        requirePlaygroundOrigin(request);
+        const body = await request.text();
+        if (new TextEncoder().encode(body).byteLength > 64 * 1024) {
+          return error(request, 413, "mercator_request_too_large", "Mercator job requests are limited to 64 KiB.");
+        }
+        const headers = new Headers({
+          accept: request.headers.get("accept") ?? "application/json",
+          "content-type": "application/json",
+        });
+        for (const name of [
+          "accept-payment",
+          "authorization",
+          "payment-signature",
+          "payment-session",
+          "payment-session-snapshot",
+        ]) {
+          const value = request.headers.get(name);
+          if (value) headers.set(name, value);
+        }
+        const upstream = await fetch(`${MERCATOR_ORIGIN}/v1/jobs`, {
+          method: "POST",
+          headers,
+          body,
+        });
+        return cors(proxyPayment(upstream), request);
+      }
+      if (request.method === "POST" && url.pathname === "/v1/machine-usd/orders") {
+        requireOnrampOrigin(request);
+        const upstream = await fetch(`${MACHINE_USD_ORIGIN}/v1/orders`, {
+          method: "POST",
+          headers: {
+            "content-type": "application/json",
+            "idempotency-key": requiredHeader(request, "idempotency-key"),
+          },
+          body: await request.text(),
+        });
+        return cors(proxy(upstream), request);
+      }
+      const machineUsdOrder = url.pathname.match(/^\/v1\/machine-usd\/orders\/([^/]+)$/);
+      if (request.method === "GET" && machineUsdOrder) {
+        requireOnrampOrigin(request);
+        const upstream = await fetch(
+          `${MACHINE_USD_ORIGIN}/v1/orders/${encodeURIComponent(machineUsdOrder[1]!)}`,
+          { headers: { authorization: requiredHeader(request, "authorization") } },
+        );
+        return cors(proxy(upstream), request);
+      }
+
+      const connectorCallback = url.pathname.match(/^\/v1\/connectors\/(github|gmail|gdrive)\/callback$/);
+      if (connectorCallback) {
+        if (request.method !== "GET") {
+          return error(request, 405, "method_not_allowed", "Connector callbacks require GET.");
+        }
+        return cors(await completeConnectorCallback(
+          env,
+          store,
+          url,
+          connectorCallback[1] as OAuthConnectorId,
+        ), request);
+      }
+
+      const accessKeyStatus = url.pathname.match(/^\/v1\/access-keys\/(0x[0-9a-fA-F]{40})\/(0x[0-9a-fA-F]{40})$/);
+      if (request.method === "GET" && accessKeyStatus) {
+        requireRegisteredAppOrigin(request);
+        const accountAddress = address(accessKeyStatus[1]);
+        const keyId = address(accessKeyStatus[2]);
+        const stored = await store.get<AccessKeyRecord>(accessKeyStorageKey(accountAddress, keyId));
+        return cors(Response.json({
+          registered: isAccessKeyRecord(stored)
+            && stored.appId === REGISTERED_APP_ID
+            && stored.accountAddress.toLowerCase() === accountAddress.toLowerCase(),
+        }), request);
+      }
+
+      if (request.method === "POST" && url.pathname === "/v1/connections") {
+        return cors(await createConnection(request, env, store), request);
+      }
+
+      const grantResponse = await handleGrantRoute(request, env, store, url);
+      if (grantResponse) return cors(grantResponse, request);
+
+      requireDialogOrigin(request);
+      const session = await auth.getSession(request);
+      if (!session) return error(request, 401, "not_authenticated", "Connect with a passkey first.");
+      const accountAddress = address(session.address);
+
+      if (request.method === "GET" && url.pathname === "/v1/connectors") {
+        return cors(Response.json(await connectorStatuses(env, accountAddress)), request);
+      }
+
+      const connectorRoute = url.pathname.match(/^\/v1\/connectors\/(github|gmail|gdrive|chatgpt)$/);
+      if (connectorRoute) {
+        const connector = connectorRoute[1] as ConnectorId;
+        if (request.method === "POST") {
+          return cors(await startConnector(env, store, request, accountAddress, connector), request);
+        }
+        if (request.method === "DELETE") {
+          await disconnectConnector(env, accountAddress, connector);
+          return cors(new Response(null, { status: 204 }), request);
+        }
+        if (request.method === "GET" && connector === "chatgpt") {
+          return cors(await pollChatGpt(env, accountAddress), request);
+        }
+        return error(request, 405, "method_not_allowed", "Unsupported connector operation.");
+      }
+
+      return error(request, 404, "not_found", "Route not found.");
+    } catch (cause) {
+      const failure = cause instanceof ApiFailure
+        ? cause
+        : new ApiFailure(500, "internal_error", "Unexpected Connect API failure.");
+      return error(request, failure.status, failure.code, failure.message);
+    }
+  },
+};
+
+class ApiFailure extends Error {
+  constructor(
+    readonly status: number,
+    readonly code: string,
+    message: string,
+  ) {
+    super(message);
+  }
+}
+
+async function createConnection(request: Request, env: Env, store: Kv.Kv): Promise<Response> {
+  requireRegisteredAppOrigin(request);
+  const body = await json(request);
+  const appId = requiredString(body.app_id, "app_id");
+  if (appId !== REGISTERED_APP_ID) {
+    throw new ApiFailure(403, "app_not_registered", "The requesting app is not registered with Nanocodex Connect.");
+  }
+  const accountAddress = address(body.account_address);
+  const approvalId = requiredString(body.approval_id, "approval_id");
+  const permission = requiredString(body.permission, "permission");
+  if (permission !== "agent.run") {
+    throw new ApiFailure(403, "permission_not_supported", "This app may request only the agent.run permission.");
+  }
+  const requested = requestedConnectors(body.requested_connectors);
+  const approval = await takeConnectApproval(store, approvalId, accountAddress);
+  requireApprovedCapabilities(approval.resources, appId, requested);
+
+  const { accessKey, persist } = await connectionAccessKey(store, body, approval, appId, accountAddress);
+  const expiresAt = safeInteger(accessKey.expiry, "access_key.expiry");
+  const now = Math.floor(Date.now() / 1000);
+  const grantTtl = expiresAt - now;
+  if (grantTtl <= 0) {
+    throw new ApiFailure(403, "access_key_expired", "The delegated access key has expired.");
+  }
+  const connectors = await connectedRequestedConnectors(env, accountAddress, requested);
+  const grantId = await digestHex(`grant:${randomSubject()}`);
+  const grantToken = randomSubject();
+  const grant: GrantRecord = {
+    id: grantId,
+    appId,
+    accountAddress,
+    agentId: await agentId(accountAddress),
+    permission,
+    status: "active",
+    expiresAt,
+    capabilities: [...BASE_CAPABILITIES, ...connectors],
+    accessKey,
+    spentAtomics: "0",
+    egressSubject: randomSubject(),
+  };
+
+  // Resolve all fallible read-only data before publishing either the broker
+  // subject or the bearer token.
+  const wire = await connectionWire(grant, grantToken);
+  await bindSubject(env, grant.egressSubject, accountAddress);
+  try {
+    await store.set(`grant:${grant.id}`, grant, { ttl: grantTtl });
+    if (persist) {
+      await store.set(accessKeyStorageKey(accountAddress, accessKey.key_id), {
+        accountAddress,
+        appId,
+        accessKey,
+      } satisfies AccessKeyRecord, { ttl: grantTtl });
+    }
+    if (!store.create || !await store.create(`grant-token:${grantToken}`, {
+      accountAddress,
+      appId,
+      grantId: grant.id,
+    } satisfies GrantPrincipal, { ttl: grantTtl })) {
+      throw new ApiFailure(500, "grant_token_unavailable", "The grant session could not be created.");
+    }
+  } catch (cause) {
+    const cleanup = [
+      store.delete(`grant:${grant.id}`),
+      store.delete(`grant-token:${grantToken}`),
+      unbindSubject(env, grant.egressSubject, accountAddress),
+    ];
+    if (persist) cleanup.push(store.delete(accessKeyStorageKey(accountAddress, accessKey.key_id)));
+    await Promise.allSettled(cleanup);
+    throw cause;
+  }
+  return Response.json(wire, { status: 201 });
+}
+
+async function connectionAccessKey(
+  store: Kv.Kv,
+  body: Record<string, unknown>,
+  approval: ConnectApproval,
+  appId: string,
+  accountAddress: `0x${string}`,
+): Promise<{ accessKey: Record<string, unknown>; persist: boolean }> {
+  const hasNew = body.key_authorization !== undefined || body.signed_key_authorization !== undefined;
+  const hasReuse = body.reuse_access_key !== undefined;
+  if (hasNew === hasReuse) {
+    throw new ApiFailure(400, "invalid_access_key", "Provide exactly one new or reusable access key.");
+  }
+
+  if (hasNew) {
+    if (!isRecord(body.key_authorization)) {
+      throw new ApiFailure(400, "invalid_access_key", "key_authorization must be an object.");
+    }
+    const serialized = hex(body.signed_key_authorization, "signed_key_authorization");
+    if (!approval.keyAuthorization
+      || approval.keyAuthorization.toLowerCase() !== serialized.toLowerCase()) {
+      throw new ApiFailure(403, "access_key_not_approved", "The access key does not match the signed Connect approval.");
+    }
+    const accessKey = accessKeyWire(body.key_authorization, serialized);
+    validateGrantAccessKey(accessKey);
+    return { accessKey, persist: true };
+  }
+
+  if (approval.keyAuthorization) {
+    throw new ApiFailure(403, "access_key_not_approved", "A newly approved access key cannot be replaced with a reused key.");
+  }
+  if (!isRecord(body.reuse_access_key)) {
+    throw new ApiFailure(400, "invalid_access_key", "reuse_access_key must be an object.");
+  }
+  const keyId = address(body.reuse_access_key.key_id);
+  const claimedExpiry = safeInteger(body.reuse_access_key.expiry, "reuse_access_key.expiry");
+  const stored = await store.get<AccessKeyRecord>(accessKeyStorageKey(accountAddress, keyId));
+  if (!isAccessKeyRecord(stored)
+    || stored.appId !== appId
+    || stored.accountAddress.toLowerCase() !== accountAddress.toLowerCase()) {
+    throw new ApiFailure(403, "access_key_unavailable", "The reusable access key is unavailable for this app and account.");
+  }
+  const storedKeyId = address(stored.accessKey.key_id);
+  const storedExpiry = safeInteger(stored.accessKey.expiry, "stored access_key.expiry");
+  if (storedKeyId.toLowerCase() !== keyId.toLowerCase() || storedExpiry !== claimedExpiry) {
+    throw new ApiFailure(403, "access_key_unavailable", "The reusable access key does not match the requested key.");
+  }
+  const normalized = accessKeyWire(
+    stored.accessKey,
+    hex(stored.accessKey.authorization, "stored access_key.authorization"),
+  );
+  validateGrantAccessKey(normalized);
+  return { accessKey: normalized, persist: false };
+}
+
+function validateGrantAccessKey(accessKey: Record<string, unknown>): void {
+  if (accessKey.chain_id !== "4217") {
+    throw new ApiFailure(403, "invalid_access_key_chain", "The access key must be authorized for Tempo chain 4217.");
+  }
+  const expiry = safeInteger(accessKey.expiry, "access_key.expiry");
+  if (expiry <= Math.floor(Date.now() / 1000)) {
+    throw new ApiFailure(403, "access_key_expired", "The delegated access key has expired.");
+  }
+  hex(accessKey.authorization, "access_key.authorization");
+  if (!Array.isArray(accessKey.limits) || !Array.isArray(accessKey.scopes)) {
+    throw new ApiFailure(403, "invalid_access_key_policy", "The access key policy is incomplete.");
+  }
+  const limits = new Map<string, { limit: string; period?: number }>();
+  for (const value of accessKey.limits) {
+    if (!isRecord(value) || typeof value.limit !== "string") {
+      throw new ApiFailure(403, "invalid_access_key_policy", "The access key spending limits are invalid.");
+    }
+    const token = address(value.token).toLowerCase();
+    if (limits.has(token)) {
+      throw new ApiFailure(403, "invalid_access_key_policy", "The access key spending limits contain duplicates.");
+    }
+    limits.set(token, {
+      limit: value.limit,
+      ...(Number.isSafeInteger(value.period) ? { period: value.period as number } : {}),
+    });
+  }
+  if (limits.size !== 2
+    || !matchesLimit(limits.get(MACHINE_USD.toLowerCase()))
+    || !matchesLimit(limits.get(USDC_E.toLowerCase()))) {
+    throw new ApiFailure(403, "invalid_access_key_policy", "The access key must contain the bounded Nanocodex MPP limits.");
+  }
+
+  const actualScopes = new Set(accessKey.scopes.map(scopeKey));
+  const expectedScopes = new Set([
+    scopeKey({ address: USDC_E, selector: "0xa9059cbb", recipients: [MERCATOR_SETTLEMENT] }),
+    scopeKey({ address: USDC_E, selector: "0x95777d59", recipients: [MERCATOR_SETTLEMENT] }),
+    scopeKey({ address: MACHINE_USD, selector: "0x095ea7b3", recipients: [MACHINE_USD_SWAPPER] }),
+    scopeKey({ address: MACHINE_USD_SWAPPER, selector: "0x34189fed" }),
+    scopeKey({ address: TIP20_CHANNEL_ESCROW, selector: "0xedc53b00" }),
+    scopeKey({ address: TIP20_CHANNEL_ESCROW, selector: "0xdc48471e" }),
+  ]);
+  if (actualScopes.size !== expectedScopes.size
+    || [...actualScopes].some((scope) => !expectedScopes.has(scope))) {
+    throw new ApiFailure(403, "invalid_access_key_policy", "The access key must contain the bounded Nanocodex call scopes.");
+  }
+}
+
+function matchesLimit(value: { limit: string; period?: number } | undefined): boolean {
+  return value?.limit === MPP_LIMIT.toString() && value.period === MPP_PERIOD;
+}
+
+function scopeKey(value: unknown): string {
+  if (!isRecord(value) || typeof value.selector !== "string" || !/^0x[0-9a-fA-F]{8}$/.test(value.selector)) {
+    throw new ApiFailure(403, "invalid_access_key_policy", "An access key call scope is invalid.");
+  }
+  const recipients = value.recipients === undefined
+    ? []
+    : Array.isArray(value.recipients)
+      ? value.recipients.map(address).map((recipient) => recipient.toLowerCase()).sort()
+      : (() => { throw new ApiFailure(403, "invalid_access_key_policy", "An access key recipient scope is invalid."); })();
+  return `${address(value.address).toLowerCase()}:${value.selector.toLowerCase()}:${recipients.join(",")}`;
+}
+
+async function handleGrantRoute(
+  request: Request,
+  env: Env,
+  store: Kv.Kv,
+  url: URL,
+): Promise<Response | undefined> {
+  if (request.method === "POST" && url.pathname === "/v1/connections/disconnect") {
+    const authenticated = await authenticatedGrant(request, store);
+    await withGrantMutationLock(store, authenticated.grant.id, async () => {
+      const current = await authenticatedGrant(request, store, authenticated.grant.id);
+      await revokeGrant(env, store, current.grant, current.token);
+    });
+    return new Response(null, { status: 204 });
+  }
+
+  const grantRoute = url.pathname.match(/^\/v1\/grants\/(0x[0-9a-fA-F]{64})(?:\/(.*))?$/);
+  if (!grantRoute) return undefined;
+  const grantId = grantRoute[1] as `0x${string}`;
+  const action = grantRoute[2];
+  const { grant, token } = await authenticatedGrant(request, store, grantId);
+
+  if (action === undefined && request.method === "GET") {
+    return Response.json(await connectionWire(grant, token));
+  }
+  if (action === "revoke" && request.method === "POST") {
+    const revoked = await withGrantMutationLock(store, grant.id, async () => {
+      const current = await authenticatedGrant(request, store, grantId);
+      return revokeGrant(env, store, current.grant, current.token);
+    });
+    return Response.json(grantWire(revoked));
+  }
+  if (action === "model/ticket" && request.method === "POST") {
+    return Response.json(await issueModelTicket(store, grant, await json(request)));
+  }
+  const connectorRequest = action?.match(/^connectors\/(github|gmail|gdrive)\/request$/);
+  if (connectorRequest && request.method === "POST") {
+    return Response.json(await grantConnectorRequest(
+      env,
+      grant,
+      connectorRequest[1] as OAuthConnectorId,
+      await json(request),
+    ));
+  }
+  if (action === "mpp/charge" && request.method === "POST") {
+    const body = await json(request);
+    return Response.json(await withGrantMutationLock(store, grant.id, async () => {
+      const current = await authenticatedGrant(request, store, grantId);
+      return chargeGrant(store, current.grant, current.token, body);
+    }));
+  }
+  throw new ApiFailure(405, "method_not_allowed", "Unsupported grant operation.");
+}
+
+async function issueModelTicket(
+  store: Kv.Kv,
+  grant: GrantRecord,
+  body: Record<string, unknown>,
+): Promise<{ ticket: string; expires_in: number }> {
+  if (grant.status !== "active") throw new ApiFailure(409, "grant_inactive", "The grant is not active.");
+  remainingGrantTtl(grant);
+  if (!grant.capabilities.includes("chatgpt")) {
+    throw new ApiFailure(403, "chatgpt_not_granted", "Connect ChatGPT before starting the agent.");
+  }
+  const sessionId = boundedIdentifier(body.session_id, "session_id", 128);
+  const turnState = body.turn_state === undefined
+    ? undefined
+    : boundedIdentifier(body.turn_state, "turn_state", 512);
+  const ticket = randomSubject();
+  if (!store.create || !await store.create(`model-ticket:${ticket}`, {
+    grantId: grant.id,
+    sessionId,
+    ...(turnState ? { turnState } : {}),
+  } satisfies ModelTicket, { ttl: MODEL_TICKET_TTL })) {
+    throw new ApiFailure(500, "model_ticket_unavailable", "The model connection could not be reserved.");
+  }
+  return { ticket, expires_in: MODEL_TICKET_TTL };
+}
+
+async function openGrantModelWebSocket(
+  request: Request,
+  env: Env,
+  store: Kv.Kv,
+  url: URL,
+  grantId: `0x${string}`,
+): Promise<Response> {
+  requirePlaygroundOrigin(request);
+  if (request.method !== "GET" || request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+    throw new ApiFailure(426, "websocket_required", "The model endpoint requires a WebSocket upgrade.");
+  }
+  const keys = [...url.searchParams.keys()];
+  if (keys.some((key) => key !== "session_id" && key !== "ticket")
+    || url.searchParams.getAll("session_id").length !== 1
+    || url.searchParams.getAll("ticket").length !== 1) {
+    throw new ApiFailure(400, "invalid_model_request", "The model connection query is invalid.");
+  }
+  const ticketValue = boundedIdentifier(url.searchParams.get("ticket"), "ticket", 64);
+  const sessionId = boundedIdentifier(url.searchParams.get("session_id"), "session_id", 128);
+  if (!store.take) throw new ApiFailure(500, "model_ticket_unavailable", "One-time model tickets are unavailable.");
+  const ticket = await store.take<ModelTicket>(`model-ticket:${ticketValue}`);
+  if (!isModelTicket(ticket)
+    || ticket.grantId.toLowerCase() !== grantId.toLowerCase()
+    || ticket.sessionId !== sessionId) {
+    throw new ApiFailure(403, "invalid_model_ticket", "The one-time model ticket is invalid or expired.");
+  }
+  const grant = await store.get<GrantRecord>(`grant:${grantId}`);
+  if (!isGrantRecord(grant) || grant.status !== "active" || !grant.capabilities.includes("chatgpt")) {
+    throw new ApiFailure(403, "chatgpt_not_granted", "The active grant does not include ChatGPT.");
+  }
+  remainingGrantTtl(grant);
+  const headers = new Headers({
+    authorization: PROVIDER_CREDENTIAL_PLACEHOLDER,
+    upgrade: "websocket",
+    "openai-beta": "responses_websockets=2026-02-06",
+    "session-id": sessionId,
+    "thread-id": sessionId,
+    "x-client-request-id": sessionId,
+    "x-nanocodex-subject": grant.egressSubject,
+    "x-openai-internal-codex-responses-lite": "true",
+    "x-responsesapi-include-timing-metrics": "true",
+    "user-agent": "nanocodex-connect/0.1",
+  });
+  if (ticket.turnState) headers.set("x-codex-turn-state", ticket.turnState);
+  return env.EGRESS.fetch(new Request("https://nanocodex.internal/v1/responses", {
+    method: "GET",
+    headers,
+  }));
+}
+
+function isModelTicket(value: unknown): value is ModelTicket {
+  return isRecord(value)
+    && /^0x[0-9a-fA-F]{64}$/.test(String(value.grantId))
+    && typeof value.sessionId === "string"
+    && value.sessionId.length > 0
+    && (value.turnState === undefined || typeof value.turnState === "string");
+}
+
+async function revokeGrant(
+  env: Env,
+  store: Kv.Kv,
+  grant: GrantRecord,
+  token: string,
+): Promise<GrantRecord> {
+  if (grant.status !== "active") {
+    throw new ApiFailure(409, "grant_inactive", "The grant is not active.");
+  }
+  if (!EGRESS_SUBJECT.test(grant.egressSubject)) {
+    throw new ApiFailure(403, "invalid_grant_binding", "The grant's broker binding is invalid.");
+  }
+  const ttl = remainingGrantTtl(grant);
+  await unbindSubject(env, grant.egressSubject, grant.accountAddress);
+  const revoked = { ...grant, status: "revoked" as const };
+  await store.set(`grant:${grant.id}`, revoked, { ttl });
+  await store.delete(`grant-token:${token}`);
+  return revoked;
+}
+
+async function withGrantMutationLock<value>(
+  store: Kv.Kv,
+  grantId: `0x${string}`,
+  operation: () => Promise<value>,
+): Promise<value> {
+  if (!store.create) {
+    throw new ApiFailure(500, "grant_lock_unavailable", "Atomic grant mutation is unavailable.");
+  }
+  const lockKey = `grant-lock:${grantId}`;
+  const lockValue = randomSubject();
+  let acquired = false;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    acquired = await store.create(lockKey, lockValue, { ttl: 60 });
+    if (acquired) break;
+    await new Promise((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
+  }
+  if (!acquired) {
+    throw new ApiFailure(409, "grant_busy", "Another grant operation is still in progress.");
+  }
+  try {
+    return await operation();
+  } finally {
+    // The bounded operation completes well inside the lock TTL. Deleting here
+    // cannot remove a successor's lock because no successor can acquire before
+    // this token's entry expires or is deleted.
+    await store.delete(lockKey);
+  }
+}
+
+async function authenticatedGrant(
+  request: Request,
+  store: Kv.Kv,
+  requestedGrantId?: `0x${string}`,
+): Promise<{ grant: GrantRecord; principal: GrantPrincipal; token: string }> {
+  const token = grantBearerToken(request);
+  const principal = await store.get<GrantPrincipal>(`grant-token:${token}`);
+  if (!isGrantPrincipal(principal)
+    || principal.appId !== REGISTERED_APP_ID
+    || (requestedGrantId && principal.grantId.toLowerCase() !== requestedGrantId.toLowerCase())) {
+    throw new ApiFailure(401, "invalid_grant_token", "The grant session is invalid.");
+  }
+  const grant = await store.get<GrantRecord>(`grant:${principal.grantId}`);
+  if (!isGrantRecord(grant)
+    || grant.id.toLowerCase() !== principal.grantId.toLowerCase()
+    || grant.appId !== principal.appId
+    || grant.accountAddress.toLowerCase() !== principal.accountAddress.toLowerCase()) {
+    throw new ApiFailure(401, "invalid_grant_token", "The grant session is not bound to this grant, app, and account.");
+  }
+  return { grant, principal, token };
+}
+
+function grantBearerToken(request: Request): string {
+  const authorization = request.headers.get("authorization");
+  const match = authorization?.match(/^Bearer ([A-Za-z0-9_-]{43})$/i);
+  if (!match) throw new ApiFailure(401, "grant_token_required", "A grant-scoped bearer token is required.");
+  return match[1]!;
+}
+
+function isGrantPrincipal(value: unknown): value is GrantPrincipal {
+  return isRecord(value)
+    && typeof value.appId === "string"
+    && /^0x[0-9a-fA-F]{40}$/.test(String(value.accountAddress))
+    && /^0x[0-9a-fA-F]{64}$/.test(String(value.grantId));
+}
+
+function isGrantRecord(value: unknown): value is GrantRecord {
+  return isRecord(value)
+    && typeof value.appId === "string"
+    && value.appId.length > 0
+    && /^0x[0-9a-fA-F]{64}$/.test(String(value.id))
+    && /^0x[0-9a-fA-F]{40}$/.test(String(value.accountAddress))
+    && typeof value.agentId === "string"
+    && typeof value.permission === "string"
+    && (value.status === "active" || value.status === "revoked")
+    && Number.isSafeInteger(value.expiresAt)
+    && Array.isArray(value.capabilities)
+    && value.capabilities.every((capability) => typeof capability === "string")
+    && isRecord(value.accessKey)
+    && typeof value.spentAtomics === "string"
+    && typeof value.egressSubject === "string";
+}
+
+function isAccessKeyRecord(value: unknown): value is AccessKeyRecord {
+  return isRecord(value)
+    && typeof value.appId === "string"
+    && /^0x[0-9a-fA-F]{40}$/.test(String(value.accountAddress))
+    && isRecord(value.accessKey);
+}
+
+function accessKeyStorageKey(accountAddress: `0x${string}`, keyId: unknown): string {
+  return `access-key:${accountAddress.toLowerCase()}:${address(keyId).toLowerCase()}`;
+}
+
+function remainingGrantTtl(grant: GrantRecord): number {
+  const ttl = grant.expiresAt - Math.floor(Date.now() / 1000);
+  if (ttl <= 0) throw new ApiFailure(409, "grant_expired", "The grant has expired.");
+  return ttl;
+}
+
+async function chargeGrant(
+  store: Kv.Kv,
+  grant: GrantRecord,
+  grantToken: string,
+  body: Record<string, unknown>,
+) {
+  if (grant.status !== "active") throw new ApiFailure(409, "grant_inactive", "The grant is not active.");
+  const ttl = remainingGrantTtl(grant);
+  if (typeof body.amount_atomics !== "string" || !/^[1-9][0-9]*$/.test(body.amount_atomics)) {
+    throw new ApiFailure(400, "invalid_mpp_amount", "MPP amount_atomics must be a positive integer string.");
+  }
+  const amount = BigInt(body.amount_atomics);
+  if (amount > MPP_MAX_PER_REQUEST) {
+    throw new ApiFailure(403, "mpp_request_limit_exceeded", "This payment exceeds the per-request permission.");
+  }
+  const spent = BigInt(grant.spentAtomics);
+  if (spent + amount > MPP_LIMIT) {
+    throw new ApiFailure(403, "mpp_period_limit_exceeded", "This payment exceeds the daily MPP permission.");
+  }
+  if (amount > await tokenBalance(MACHINE_USD, grant.accountAddress)) {
+    throw new ApiFailure(402, "machine_usd_required", "Add machineUSD before paying for this capability.");
+  }
+  const origin = requiredOrigin(body.origin, "origin");
+  const updated = { ...grant, spentAtomics: (spent + amount).toString() };
+  await store.set(`grant:${grant.id}`, updated, { ttl });
+  const receiptSeed = `${grant.id}:${updated.spentAtomics}:${origin}:${randomSubject()}`;
+  return {
+    receipt: {
+      id: `mpp_${(await digestHex(receiptSeed)).slice(2, 18)}`,
+      amount_atomics: amount.toString(),
+      origin,
+      transaction_hash: await digestHex(`transaction:${receiptSeed}`),
+    },
+    connection: await connectionWire(updated, grantToken),
+  };
+}
+
+async function connectorStatuses(
+  env: Env,
+  accountAddress: `0x${string}`,
+): Promise<{ connectors: Record<ConnectorId, ConnectorStatus> }> {
+  const [connectorValue, credentialValue] = await Promise.all([
+    brokerJson(env, `/users/${accountAddress}/connectors`),
+    brokerJson(env, `/users/${accountAddress}/credentials`),
+  ]);
+  const statuses = isRecord(connectorValue.connectors) ? connectorValue.connectors : {};
+  const chatGpt = isRecord(credentialValue.chatgpt) ? credentialValue.chatgpt : {};
+  return {
+    connectors: {
+      github: connectorStatus(statuses.github),
+      gmail: connectorStatus(statuses.gmail),
+      gdrive: connectorStatus(statuses.gdrive),
+      chatgpt: connectorStatus(chatGpt),
+    },
+  };
+}
+
+function connectorStatus(value: unknown): ConnectorStatus {
+  if (!isRecord(value) || value.connected !== true) return { connected: false };
+  const label = boundedOptionalString(value.label, 256);
+  const accountId = boundedOptionalString(value.account_id, 256);
+  return {
+    connected: true,
+    ...(label ? { label } : {}),
+    ...(accountId ? { account_id: accountId } : {}),
+  };
+}
+
+async function startConnector(
+  env: Env,
+  store: Kv.Kv,
+  request: Request,
+  accountAddress: `0x${string}`,
+  connector: ConnectorId,
+): Promise<Response> {
+  if (connector === "chatgpt") {
+    return Response.json(publicChatGptLogin(await brokerJson(
+      env,
+      `/users/${accountAddress}/credentials/chatgpt/login`,
+      { method: "POST" },
+    )));
+  }
+
+  const started = await brokerJson(env, `/users/${accountAddress}/connectors/${connector}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      redirect_uri: `${API_ORIGIN}/v1/connectors/${connector}/callback`,
+      return_to: "/",
+    }),
+  });
+  const authorizationUrl = connectorAuthorizationUrl(started.authorization_url, connector);
+  const state = authorizationUrl.searchParams.get("state");
+  if (!state || state.length > 512) {
+    throw new ApiFailure(502, "connector_broker_invalid", "The connector broker returned an invalid authorization state.");
+  }
+  if (!store.create) {
+    throw new ApiFailure(500, "connector_state_unavailable", "Atomic connector state storage is unavailable.");
+  }
+  const created = await store.create(`connector-state:${state}`, {
+    accountAddress,
+    dialogOrigin: requiredDialogOrigin(request),
+    provider: connector,
+  } satisfies ConnectorState, { ttl: CONNECTOR_STATE_TTL });
+  if (!created) {
+    throw new ApiFailure(502, "connector_state_conflict", "The connector authorization state could not be reserved.");
+  }
+  return Response.json({ authorization_url: authorizationUrl.href });
+}
+
+function connectorAuthorizationUrl(value: unknown, connector: OAuthConnectorId): URL {
+  if (typeof value !== "string" || value.length > 8_192) {
+    throw new ApiFailure(502, "connector_broker_invalid", "The connector broker returned an invalid authorization URL.");
+  }
+  let url: URL;
+  try { url = new URL(value); } catch {
+    throw new ApiFailure(502, "connector_broker_invalid", "The connector broker returned an invalid authorization URL.");
+  }
+  const expected = connector === "github"
+    ? ["https://github.com", "/login/oauth/authorize"]
+    : ["https://accounts.google.com", "/o/oauth2/v2/auth"];
+  if (url.origin !== expected[0] || url.pathname !== expected[1] || url.username || url.password || url.hash) {
+    throw new ApiFailure(502, "connector_broker_invalid", "The connector broker returned an invalid authorization URL.");
+  }
+  return url;
+}
+
+async function disconnectConnector(
+  env: Env,
+  accountAddress: `0x${string}`,
+  connector: ConnectorId,
+): Promise<void> {
+  const path = connector === "chatgpt"
+    ? `/users/${accountAddress}/credentials/chatgpt`
+    : `/users/${accountAddress}/connectors/${connector}`;
+  const response = await brokerFetch(env, path, { method: "DELETE" });
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new ApiFailure(502, "connector_broker_failed", "The connector broker could not disconnect the account.");
+  }
+  await response.body?.cancel();
+}
+
+async function pollChatGpt(env: Env, accountAddress: `0x${string}`): Promise<Response> {
+  const status = publicChatGptLogin(await brokerJson(
+    env,
+    `/users/${accountAddress}/credentials/chatgpt/login/status`,
+    { method: "POST" },
+  ));
+  if (status.state === "authenticated") return Response.json({ ...status, connected: true });
+  if (status.state === "pending") return Response.json({ ...status, connected: false }, { status: 202 });
+  return Response.json({ ...status, connected: false }, { status: 409 });
+}
+
+function publicChatGptLogin(value: Record<string, unknown>): Record<string, unknown> {
+  const state = typeof value.state === "string"
+    && ["pending", "authenticated", "not_started", "expired"].includes(value.state)
+    ? value.state
+    : undefined;
+  if (!state) {
+    throw new ApiFailure(502, "connector_broker_invalid", "The credential broker returned an invalid login status.");
+  }
+  return {
+    state,
+    ...(boundedOptionalString(value.verification_url, 2_048)
+      ? { verification_url: boundedOptionalString(value.verification_url, 2_048) }
+      : {}),
+    ...(boundedOptionalString(value.user_code, 256)
+      ? { user_code: boundedOptionalString(value.user_code, 256) }
+      : {}),
+    ...(Number.isSafeInteger(value.expires_at) ? { expires_at: value.expires_at } : {}),
+    ...(Number.isSafeInteger(value.poll_after_ms) ? { poll_after_ms: value.poll_after_ms } : {}),
+    ...(boundedOptionalString(value.account_id, 256)
+      ? { account_id: boundedOptionalString(value.account_id, 256) }
+      : {}),
+  };
+}
+
+async function completeConnectorCallback(
+  env: Env,
+  store: Kv.Kv,
+  url: URL,
+  provider: OAuthConnectorId,
+): Promise<Response> {
+  const state = url.searchParams.get("state");
+  if (!state || state.length > 512) return connectorCompletionPage(provider, 400, DIALOG_ORIGIN, "invalid_state");
+  if (!store.take) return connectorCompletionPage(provider, 500, DIALOG_ORIGIN, "state_unavailable");
+  const correlation = await store.take<ConnectorState>(`connector-state:${state}`);
+  if (!isConnectorState(correlation) || correlation.provider !== provider) {
+    return connectorCompletionPage(provider, 400, DIALOG_ORIGIN, "invalid_state");
+  }
+
+  const callback: Record<string, string | null> = {};
+  for (const name of ["code", "state", "error", "error_description"] as const) {
+    const value = url.searchParams.get(name);
+    if (value !== null && value.length > 4_096) {
+      return connectorCompletionPage(provider, 400, correlation.dialogOrigin, "invalid_callback");
+    }
+    callback[name] = value;
+  }
+  let response: Response;
+  try {
+    response = await brokerFetch(
+      env,
+      `/users/${correlation.accountAddress}/connectors/${provider}/callback`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(callback),
+      },
+    );
+  } catch {
+    return connectorCompletionPage(provider, 502, correlation.dialogOrigin, "connector_broker_unavailable");
+  }
+  const status = response.ok ? 200 : 502;
+  await response.body?.cancel();
+  return connectorCompletionPage(
+    provider,
+    status,
+    correlation.dialogOrigin,
+    response.ok ? undefined : "connector_broker_failed",
+  );
+}
+
+function connectorCompletionPage(
+  provider: OAuthConnectorId,
+  status: number,
+  targetOrigin: string,
+  failure?: string,
+): Response {
+  const completion = JSON.stringify({
+    type: "nanocodex:connector-complete",
+    connector: provider,
+    result: failure ? "error" : "success",
+    ...(failure ? { error: failure, message: "The connector authorization did not complete." } : {}),
+  });
+  const html = `<!doctype html><html><head><meta charset="utf-8"><meta name="viewport" content="width=device-width"><title>Nanocodex connector</title></head><body><p>Connection flow complete. You can close this window.</p><script>window.opener?.postMessage(${completion},${JSON.stringify(targetOrigin)});window.close();</script></body></html>`;
+  return new Response(html, {
+    status,
+    headers: {
+      "content-security-policy": "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      "content-type": "text/html; charset=utf-8",
+      "referrer-policy": "no-referrer",
+      "x-content-type-options": "nosniff",
+    },
+  });
+}
+
+function isConnectorState(value: unknown): value is ConnectorState {
+  return isRecord(value)
+    && /^0x[0-9a-fA-F]{40}$/.test(String(value.accountAddress))
+    && typeof value.dialogOrigin === "string"
+    && isAllowedDialogOrigin(value.dialogOrigin)
+    && typeof value.provider === "string"
+    && OAUTH_CONNECTOR_IDS.includes(value.provider as OAuthConnectorId);
+}
+
+function requestedConnectors(value: unknown): ConnectorId[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || value.length > CONNECTOR_IDS.length) {
+    throw new ApiFailure(400, "invalid_requested_connectors", "requested_connectors must be a connector ID array.");
+  }
+  const requested = new Set<ConnectorId>();
+  for (const item of value) {
+    if (typeof item !== "string" || !CONNECTOR_IDS.includes(item as ConnectorId)) {
+      throw new ApiFailure(400, "invalid_requested_connectors", "requested_connectors contains an unknown connector.");
+    }
+    requested.add(item as ConnectorId);
+  }
+  return [...requested];
+}
+
+async function connectedRequestedConnectors(
+  env: Env,
+  accountAddress: `0x${string}`,
+  requested: readonly ConnectorId[],
+): Promise<ConnectorId[]> {
+  if (requested.length === 0) return [];
+  const current = (await connectorStatuses(env, accountAddress)).connectors;
+  return requested.filter((connector) => current[connector].connected);
+}
+
+function randomSubject(): string {
+  const bytes = crypto.getRandomValues(new Uint8Array(32));
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+}
+
+async function bindSubject(
+  env: Env,
+  subject: string,
+  accountAddress: `0x${string}`,
+): Promise<void> {
+  const response = await brokerFetch(env, `/subjects/${subject}`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ user_id: accountAddress }),
+  });
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new ApiFailure(502, "egress_subject_bind_failed", "The private egress subject could not be bound.");
+  }
+  await response.body?.cancel();
+}
+
+async function unbindSubject(
+  env: Env,
+  subject: string,
+  accountAddress: `0x${string}`,
+): Promise<void> {
+  const response = await brokerFetch(env, `/subjects/${subject}`, {
+    method: "DELETE",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ user_id: accountAddress }),
+  });
+  if (!response.ok) {
+    await response.body?.cancel();
+    throw new ApiFailure(502, "egress_subject_unbind_failed", "The private egress subject could not be revoked.");
+  }
+  await response.body?.cancel();
+}
+
+async function grantConnectorRequest(
+  env: Env,
+  grant: GrantRecord,
+  connector: OAuthConnectorId,
+  value: Record<string, unknown>,
+): Promise<{ status: number; headers: Record<string, string>; body: string }> {
+  if (grant.status !== "active") {
+    throw new ApiFailure(409, "grant_inactive", "The grant is not active.");
+  }
+  if (grant.expiresAt <= Math.floor(Date.now() / 1000)) {
+    throw new ApiFailure(409, "grant_expired", "The grant has expired.");
+  }
+  if (!grant.capabilities.includes(connector)) {
+    throw new ApiFailure(403, "connector_not_granted", "The connector is not granted to this connection.");
+  }
+  if (!EGRESS_SUBJECT.test(grant.egressSubject)) {
+    throw new ApiFailure(409, "connector_subject_unavailable", "Reconnect to authorize connector execution.");
+  }
+
+  const method = typeof value.method === "string" ? value.method.toUpperCase() : "GET";
+  if (!CONNECTOR_METHODS.has(method)) {
+    throw new ApiFailure(400, "invalid_connector_method", "The connector request method is not allowed.");
+  }
+  const target = connectorTarget(connector, value.path);
+  const headers = connectorHeaders(value.headers);
+  headers.set("authorization", PROVIDER_CREDENTIAL_PLACEHOLDER);
+  headers.set("x-nanocodex-subject", grant.egressSubject);
+  const body = value.body;
+  if (body !== undefined && typeof body !== "string") {
+    throw new ApiFailure(400, "invalid_connector_body", "The connector request body must be a string.");
+  }
+  if (typeof body === "string" && new TextEncoder().encode(body).byteLength > MAX_CONNECTOR_REQUEST_BODY_BYTES) {
+    throw new ApiFailure(413, "connector_body_too_large", "Connector request bodies are limited to 256 KiB.");
+  }
+  if (body !== undefined && (method === "GET" || method === "HEAD")) {
+    throw new ApiFailure(400, "invalid_connector_body", "GET and HEAD connector requests cannot have a body.");
+  }
+
+  const response = await env.EGRESS.fetch(new Request(target, {
+    method,
+    headers,
+    ...(body === undefined ? {} : { body }),
+  }));
+  const responseBody = await boundedResponseText(response, MAX_CONNECTOR_RESPONSE_BODY_BYTES);
+  const responseHeaders: Record<string, string> = {};
+  for (const [name, headerValue] of response.headers) {
+    if (CONNECTOR_RESPONSE_HEADERS.has(name.toLowerCase()) && headerValue.length <= 4_096) {
+      responseHeaders[name.toLowerCase()] = headerValue;
+    }
+  }
+  return { status: response.status, headers: responseHeaders, body: responseBody };
+}
+
+function connectorTarget(connector: OAuthConnectorId, value: unknown): URL {
+  if (typeof value !== "string" || value.length === 0 || value.length > 8_192
+    || !value.startsWith("/") || value.startsWith("//")) {
+    throw new ApiFailure(400, "invalid_connector_path", "The connector request path is invalid.");
+  }
+  const origin = connector === "github"
+    ? "https://api.github.com"
+    : connector === "gmail"
+      ? "https://gmail.googleapis.com"
+      : "https://www.googleapis.com";
+  const target = new URL(value, origin);
+  const pathAllowed = connector === "github"
+    || (connector === "gmail" && /^\/gmail\/v1\/users\/me(?:\/|$)/.test(target.pathname))
+    || (connector === "gdrive" && /^(?:\/drive\/v3|\/upload\/drive\/v3)(?:\/|$)/.test(target.pathname));
+  if (target.origin !== origin || target.username || target.password || target.hash || !pathAllowed) {
+    throw new ApiFailure(403, "connector_destination_denied", "The connector destination is not allowed.");
+  }
+  let count = 0;
+  for (const [name, queryValue] of target.searchParams) {
+    count += 1;
+    if (count > 64 || name.length > 128 || queryValue.length > 4_096
+      || /^(?:access_token|api_key|authorization|key|oauth_token)$/i.test(name)) {
+      throw new ApiFailure(403, "connector_destination_denied", "The connector query is not allowed.");
+    }
+  }
+  return target;
+}
+
+function connectorHeaders(value: unknown): Headers {
+  if (value === undefined) return new Headers();
+  if (!isRecord(value) || Object.keys(value).length > 16) {
+    throw new ApiFailure(400, "invalid_connector_headers", "Connector request headers must be a bounded string map.");
+  }
+  const headers = new Headers();
+  for (const [rawName, headerValue] of Object.entries(value)) {
+    const name = rawName.toLowerCase();
+    if (typeof headerValue !== "string" || rawName.length > 128 || headerValue.length > 4_096
+      || FORBIDDEN_CONNECTOR_HEADERS.test(name)) {
+      throw new ApiFailure(403, "connector_header_forbidden", "Credential and authority headers are forbidden.");
+    }
+    if (!CONNECTOR_REQUEST_HEADERS.has(name)) {
+      throw new ApiFailure(400, "connector_header_unsupported", `Connector header ${rawName} is not supported.`);
+    }
+    try { headers.set(name, headerValue); } catch {
+      throw new ApiFailure(400, "invalid_connector_headers", "A connector request header is invalid.");
+    }
+  }
+  return headers;
+}
+
+async function brokerJson(
+  env: Env,
+  path: string,
+  init?: RequestInit,
+): Promise<Record<string, unknown>> {
+  const response = await brokerFetch(env, path, init);
+  const text = await boundedResponseText(response, MAX_BROKER_BODY_BYTES);
+  if (!response.ok) {
+    throw new ApiFailure(502, "connector_broker_failed", "The connector broker rejected the operation.");
+  }
+  try { return object(JSON.parse(text), "connector broker response"); } catch {
+    throw new ApiFailure(502, "connector_broker_invalid", "The connector broker returned an invalid response.");
+  }
+}
+
+function brokerFetch(env: Env, path: string, init?: RequestInit): Promise<Response> {
+  return env.EGRESS.fetch(new Request(`https://broker.internal${path}`, init));
+}
+
+async function boundedResponseText(response: Response, limit: number): Promise<string> {
+  const declared = response.headers.get("content-length");
+  if (declared && Number(declared) > limit) {
+    await response.body?.cancel();
+    throw new ApiFailure(502, "upstream_response_too_large", "The upstream response exceeded its size limit.");
+  }
+  if (!response.body) return "";
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    total += value.byteLength;
+    if (total > limit) {
+      await reader.cancel();
+      throw new ApiFailure(502, "upstream_response_too_large", "The upstream response exceeded its size limit.");
+    }
+    chunks.push(value);
+  }
+  const joined = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    joined.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(joined);
+}
+
+function boundedOptionalString(value: unknown, limit: number): string | undefined {
+  return typeof value === "string" && value.length > 0 && value.length <= limit ? value : undefined;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function createAuth(store: Kv.Kv, context?: AuthRequestContext) {
+  return Handler.auth({
+    cookie: false,
+    cors: false,
+    origin: API_ORIGIN,
+    path: "/v1/connect/auth",
+    statement: "Authorize this app to use your Nanocodex agent and bounded MPP access key.",
+    store,
+    async onAuthenticate({ address: authenticated, message }) {
+      if (!context || context.message !== message) {
+        throw new Error("The authenticated Connect request is unavailable.");
+      }
+      const accountAddress = address(authenticated);
+      const approvalId = randomSubject();
+      await store.set(`connect-approval:${approvalId}`, {
+        accountAddress,
+        resources: siweResources(message),
+        ...(context.keyAuthorization ? { keyAuthorization: context.keyAuthorization } : {}),
+      } satisfies ConnectApproval, { ttl: CONNECT_APPROVAL_TTL });
+      return Response.json({
+        agent_id: await agentId(accountAddress),
+        approval_id: approvalId,
+      });
+    },
+  });
+}
+
+async function authRequestContext(request: Request, url: URL): Promise<AuthRequestContext | undefined> {
+  if (request.method !== "POST" || url.pathname !== "/v1/connect/auth") return undefined;
+  const body = await request.clone().json().catch(() => undefined);
+  if (!isRecord(body) || typeof body.message !== "string") return undefined;
+  const keyAuthorization = body.keyAuthorization;
+  return {
+    message: body.message,
+    ...(typeof keyAuthorization === "string" && /^0x[0-9a-fA-F]+$/.test(keyAuthorization)
+      ? { keyAuthorization: keyAuthorization as `0x${string}` }
+      : {}),
+  };
+}
+
+async function takeConnectApproval(
+  store: Kv.Kv,
+  approvalId: string,
+  accountAddress: `0x${string}`,
+): Promise<ConnectApproval> {
+  if (!/^[A-Za-z0-9_-]{43}$/.test(approvalId) || !store.take) {
+    throw new ApiFailure(403, "approval_unavailable", "The signed Connect approval is unavailable.");
+  }
+  const approval = await store.take<ConnectApproval>(`connect-approval:${approvalId}`);
+  if (!isConnectApproval(approval)
+    || approval.accountAddress.toLowerCase() !== accountAddress.toLowerCase()) {
+    throw new ApiFailure(403, "approval_unavailable", "The signed Connect approval is unavailable.");
+  }
+  return approval;
+}
+
+function isConnectApproval(value: unknown): value is ConnectApproval {
+  return isRecord(value)
+    && /^0x[0-9a-fA-F]{40}$/.test(String(value.accountAddress))
+    && Array.isArray(value.resources)
+    && value.resources.every((resource) => typeof resource === "string")
+    && (value.keyAuthorization === undefined
+      || (typeof value.keyAuthorization === "string" && /^0x[0-9a-fA-F]+$/.test(value.keyAuthorization)));
+}
+
+function requireApprovedCapabilities(
+  resources: readonly string[],
+  appId: string,
+  requested: readonly ConnectorId[],
+) {
+  const approvedResources = new Set(resources);
+  const required = [
+    ...BASE_APPROVAL_RESOURCES,
+    `urn:nanocodex:app:${encodeURIComponent(appId)}`,
+  ];
+  if (required.some((resource) => !approvedResources.has(resource))) {
+    throw new ApiFailure(403, "capability_not_approved", "The app grant was not present in the signed SIWE approval.");
+  }
+  const approved = new Set(resources
+    .filter((resource) => resource.startsWith("urn:nanocodex:connector:"))
+    .map((resource) => resource.slice("urn:nanocodex:connector:".length)));
+  if (requested.some((connector) => !approved.has(connector))) {
+    throw new ApiFailure(403, "connector_not_approved", "A requested connector was not present in the signed SIWE approval.");
+  }
+}
+
+function siweResources(message: string): string[] {
+  const lines = message.split("\n");
+  const marker = lines.indexOf("Resources:");
+  if (marker === -1) return [];
+  const resources: string[] = [];
+  for (const line of lines.slice(marker + 1)) {
+    if (!line.startsWith("- ")) break;
+    const resource = line.slice(2);
+    if (resource.length > 0 && resource.length <= 2_048) resources.push(resource);
+  }
+  return resources;
+}
+
+async function connectionWire(grant: GrantRecord, grantToken: string) {
+  const [balance, settlementBalance] = await Promise.all([
+    tokenBalance(MACHINE_USD, grant.accountAddress),
+    tokenBalance(USDC_E, grant.accountAddress),
+  ]);
+  return {
+    grant_token: grantToken,
+    account_address: grant.accountAddress,
+    agent_id: grant.agentId,
+    grant: grantWire(grant),
+    access_key: grant.accessKey,
+    mpp: {
+      token: MACHINE_USD,
+      symbol: "MACHUSD",
+      balance_atomics: balance.toString(),
+      settlement_token: USDC_E,
+      settlement_symbol: "USDC.e",
+      settlement_balance_atomics: settlementBalance.toString(),
+      spent_atomics: grant.spentAtomics,
+      limit_atomics: MPP_LIMIT.toString(),
+      period: MPP_PERIOD,
+      max_per_request_atomics: MPP_MAX_PER_REQUEST.toString(),
+    },
+  };
+}
+
+function grantWire(grant: GrantRecord) {
+  return {
+    id: grant.id,
+    permission: grant.permission,
+    status: grant.status,
+    expires_at: grant.expiresAt,
+    capabilities: grant.capabilities,
+  };
+}
+
+function accessKeyWire(value: Record<string, unknown>, serialized: `0x${string}`) {
+  const authorization = KeyAuthorization.deserialize(serialized);
+  if (("isAdmin" in authorization && authorization.isAdmin === true)) {
+    throw new ApiFailure(403, "invalid_access_key_policy", "Administrative access keys cannot back a Nanocodex grant.");
+  }
+  const claimedKeyId = address(value.keyId ?? value.address);
+  const keyAddress = address(authorization.address);
+  if (claimedKeyId.toLowerCase() !== keyAddress.toLowerCase()) {
+    throw new Error("The access-key identifier does not match the signed authorization.");
+  }
+  if (!authorization.signature) throw new Error("The access-key authorization is not signed.");
+  const witness = hex(authorization.witness, "key_authorization.witness");
+  if (witness.length !== 66) throw new Error("key_authorization.witness must be 32 bytes.");
+  const expiry = authorization.expiry;
+  if (typeof expiry !== "number" || !Number.isSafeInteger(expiry)) {
+    throw new Error("The access-key authorization must have an expiry.");
+  }
+  const limits = authorization.limits?.map(({ limit, period, token }) => ({
+    token: address(token),
+    limit: limit.toString(),
+    ...(Number.isSafeInteger(period) ? { period } : {}),
+  })) ?? [];
+  const scopes = authorization.scopes?.map(({ address: target, recipients, selector }) => ({
+    address: address(target),
+    ...(selector ? { selector: hex(selector, "key_authorization.scope.selector") } : {}),
+    ...(recipients ? { recipients: recipients.map(address) } : {}),
+  })) ?? [];
+  return {
+    address: keyAddress,
+    chain_id: authorization.chainId.toString(),
+    key_id: keyAddress,
+    key_type: authorization.type,
+    limits,
+    scopes,
+    witness,
+    expiry,
+    authorization: serialized,
+  };
+}
+
+async function tokenBalance(token: string, account: `0x${string}`): Promise<bigint> {
+  const data = `0x70a08231000000000000000000000000${account.slice(2)}`;
+  const response = await fetch(TEMPO_RPC, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "eth_call", params: [{ to: token, data }, "latest"] }),
+  });
+  const body = await response.json() as { result?: string; error?: { message?: string } };
+  if (!response.ok || typeof body.result !== "string") throw new Error(body.error?.message ?? "Tempo balance lookup failed.");
+  return BigInt(body.result);
+}
+
+async function json(request: Request): Promise<Record<string, unknown>> {
+  return object(await request.json(), "request body");
+}
+
+function object(value: unknown, label: string): Record<string, unknown> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error(`${label} must be an object.`);
+  return value as Record<string, unknown>;
+}
+
+function requiredString(value: unknown, label: string): string {
+  if (typeof value !== "string" || value.length === 0) throw new Error(`${label} must be a non-empty string.`);
+  return value;
+}
+
+function boundedIdentifier(value: unknown, label: string, limit: number): string {
+  if (typeof value !== "string"
+    || value.length === 0
+    || value.length > limit
+    || !/^[A-Za-z0-9._:-]+$/.test(value)) {
+    throw new ApiFailure(400, "invalid_identifier", `${label} is invalid.`);
+  }
+  return value;
+}
+
+function requiredOrigin(value: unknown, label: string): string {
+  if (typeof value !== "string" || value.length > 2_048) {
+    throw new ApiFailure(400, "invalid_origin", `${label} must be an HTTPS origin.`);
+  }
+  let url: URL;
+  try { url = new URL(value); } catch {
+    throw new ApiFailure(400, "invalid_origin", `${label} must be an HTTPS origin.`);
+  }
+  if (url.origin !== value || (url.protocol !== "https:" && !isLoopbackOrigin(url.origin))) {
+    throw new ApiFailure(400, "invalid_origin", `${label} must be an HTTPS origin.`);
+  }
+  return url.origin;
+}
+
+function safeInteger(value: unknown, label: string): number {
+  if (typeof value !== "number" || !Number.isSafeInteger(value)) throw new Error(`${label} must be an integer.`);
+  return value;
+}
+
+function address(value: unknown): `0x${string}` {
+  if (typeof value !== "string" || !/^0x[0-9a-fA-F]{40}$/.test(value)) throw new Error("Invalid Tempo address.");
+  return value as `0x${string}`;
+}
+
+function hex(value: unknown, label: string): `0x${string}` {
+  if (typeof value !== "string" || !/^0x[0-9a-fA-F]+$/.test(value)) throw new Error(`${label} must be hex.`);
+  return value as `0x${string}`;
+}
+
+async function digestHex(value: string): Promise<`0x${string}`> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return `0x${[...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("")}`;
+}
+
+async function agentId(account: `0x${string}`) {
+  return `agent_${(await digestHex(`agent:${account.toLowerCase()}`)).slice(2, 18)}`;
+}
+
+function cors(response: Response, request: Request) {
+  const origin = request.headers.get("origin");
+  if (origin && allowedOrigin(origin)) {
+    response.headers.set("access-control-allow-origin", origin);
+    response.headers.set("access-control-allow-credentials", "true");
+    response.headers.set(
+      "access-control-allow-headers",
+      "accept-payment, authorization, content-type, idempotency-key, payment-session, payment-session-snapshot, payment-signature",
+    );
+    response.headers.set("access-control-allow-methods", "GET, POST, DELETE, OPTIONS");
+    response.headers.set(
+      "access-control-expose-headers",
+      "payment-receipt, payment-response, payment-session, payment-session-snapshot, www-authenticate",
+    );
+    response.headers.set("vary", "Origin");
+  }
+  response.headers.set("cache-control", "no-store");
+  return response;
+}
+
+function proxy(response: Response) {
+  return new Response(response.body, {
+    status: response.status,
+    headers: { "content-type": response.headers.get("content-type") ?? "application/json" },
+  });
+}
+
+function proxyPayment(response: Response) {
+  const headers = new Headers({
+    "content-type": response.headers.get("content-type") ?? "application/json",
+  });
+  for (const name of [
+    "payment-receipt",
+    "payment-response",
+    "payment-session",
+    "payment-session-snapshot",
+    "www-authenticate",
+  ]) {
+    const value = response.headers.get(name);
+    if (value) headers.set(name, value);
+  }
+  return new Response(response.body, { status: response.status, headers });
+}
+
+function requiredHeader(request: Request, name: string) {
+  const value = request.headers.get(name);
+  if (!value) throw new Error(`${name} header is required.`);
+  return value;
+}
+
+function requireOnrampOrigin(request: Request): void {
+  requireDialogOrigin(request);
+}
+
+function requirePlaygroundOrigin(request: Request): void {
+  const origin = request.headers.get("origin");
+  if (origin !== PLAYGROUND_ORIGIN && !isLoopbackOrigin(origin)) {
+    throw new ApiFailure(403, "origin_denied", "This operation is available only to the registered Nanocodex app.");
+  }
+}
+
+function requireRegisteredAppOrigin(request: Request): void {
+  if (request.headers.get("origin") !== PLAYGROUND_ORIGIN) {
+    throw new ApiFailure(403, "origin_denied", "This operation is available only to the registered Nanocodex app origin.");
+  }
+}
+
+function requireDialogOrigin(request: Request): void {
+  requiredDialogOrigin(request);
+}
+
+function requiredDialogOrigin(request: Request): string {
+  const origin = request.headers.get("origin");
+  if (!origin || !isAllowedDialogOrigin(origin)) {
+    throw new ApiFailure(403, "origin_denied", "This account operation is available only inside Nanocodex Connect.");
+  }
+  return origin;
+}
+
+function isAllowedDialogOrigin(origin: string): boolean {
+  return origin === DIALOG_ORIGIN || isLoopbackOrigin(origin);
+}
+
+function isLoopbackOrigin(origin: string | null): boolean {
+  return /^http:\/\/(?:localhost|127\.0\.0\.1):\d+$/.test(origin ?? "");
+}
+
+function allowedOrigin(origin: string): boolean {
+  return origin === PLAYGROUND_ORIGIN || isAllowedDialogOrigin(origin);
+}
+
+function error(request: Request, status: number, code: string, message: string) {
+  return cors(Response.json({ error: { code, message } }, { status }), request);
+}
