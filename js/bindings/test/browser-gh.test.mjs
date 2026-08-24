@@ -4,7 +4,10 @@ import test from "node:test";
 import {
   createGhCompatibilityCommand,
 } from "../tools/browser/browserShell.mjs";
-import { createBrowserEgressFetch } from "../tools/browser/browserEgress.mjs";
+import {
+  createBrowserEgressFetch,
+  createBrowserRuntimeFetch,
+} from "../tools/browser/browserEgress.mjs";
 
 const THREAD_ID = "11111111-1111-4111-8111-111111111111";
 
@@ -32,6 +35,36 @@ test("browser egress sends one credential-free thread-scoped envelope", async ()
     method: "GET",
     headers: { accept: "application/json" },
   });
+});
+
+test("Connect authorization stays on the egress gateway and never reaches its target", async () => {
+  const requests = [];
+  const fetch = createBrowserRuntimeFetch({
+    origin: "https://connect.example",
+    threadId: THREAD_ID,
+    headers: { authorization: "Bearer grant-session" },
+    async fetch(input, init) {
+      const request = new Request(input, init);
+      requests.push(request);
+      if (request.url === "https://connect.example/v1/agent/account-info") {
+        return Response.json({ status: "ready" });
+      }
+      return new Response("github", { status: 200 });
+    },
+  });
+
+  await fetch("/v1/agent/account-info");
+  await fetch("https://api.github.com/user", {
+    headers: { accept: "application/vnd.github+json" },
+  });
+
+  assert.equal(requests[0].url, "https://connect.example/v1/agent/account-info");
+  assert.equal(requests[0].headers.get("authorization"), null);
+  assert.equal(requests[1].url, "https://connect.example/v1/egress");
+  assert.equal(requests[1].headers.get("authorization"), "Bearer grant-session");
+  const envelope = await requests[1].json();
+  assert.deepEqual(envelope.headers, { accept: "application/vnd.github+json" });
+  assert.equal(JSON.stringify(envelope).includes("grant-session"), false);
 });
 
 test("browser gh makes useful GitHub calls through the same-origin connector", async () => {

@@ -125,6 +125,13 @@ export type BrowserShellFileSystem = {
 export type BrowserOptions = Readonly<{
   threadId: string;
   origin?: string | undefined;
+  fetch?: typeof globalThis.fetch | undefined;
+  headers?: HeadersInit | undefined;
+  installFetch?: boolean | undefined;
+  accountInfo?: Readonly<{
+    endpoint?: string | undefined;
+    requireAuthorization?: boolean | undefined;
+  }> | undefined;
   web?: JsonToolOptions | undefined;
   images?: JsonToolOptions | undefined;
   dataset?: DatasetOptions | undefined;

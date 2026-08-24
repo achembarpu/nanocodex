@@ -27,6 +27,30 @@ export function create(parameters) {
   const uid = `${transport.key}:${parameters.appId}:${++sequence}`;
   let sessionToken;
 
+  function fetchControlPlane(input, init, token = sessionToken) {
+    if (typeof transportInstance.fetch !== "function") {
+      throw new TypeError("Connect transport does not expose an HTTP fetch boundary");
+    }
+    const request = input instanceof Request
+      ? new Request(input, init)
+      : new Request(new URL(String(input), transportInstance.baseUrl), init);
+    if (new URL(request.url).origin !== new URL(transportInstance.baseUrl).origin) {
+      throw new TypeError("Connect client fetch is restricted to its configured API origin");
+    }
+    const headers = new Headers(request.headers);
+    if (token) headers.set("authorization", `Bearer ${token}`);
+    return transportInstance.fetch(new Request(request, { headers }));
+  }
+
+  function requestControlPlane(request, token = sessionToken) {
+    return transportInstance.request({
+      ...request,
+      headers: token
+        ? { ...request.headers, authorization: `Bearer ${token}` }
+        : request.headers,
+    });
+  }
+
   const base = {
     accessKey: parameters.accessKey,
     appId: parameters.appId,
@@ -35,12 +59,8 @@ export function create(parameters) {
     key: parameters.key ?? "connect",
     name: parameters.name ?? "Nanocodex Connect",
     provider,
-    request: (request) => transportInstance.request({
-      ...request,
-      headers: sessionToken
-        ? { ...request.headers, authorization: `Bearer ${sessionToken}` }
-        : request.headers,
-    }),
+    fetch: fetchControlPlane,
+    request: requestControlPlane,
     transport: Object.freeze({
       key: transport.key,
       name: transport.name,
@@ -55,6 +75,20 @@ export function create(parameters) {
     enumerable: false,
     value(token) {
       sessionToken = token;
+    },
+  });
+  Object.defineProperty(base, "_captureSession", {
+    enumerable: false,
+    value() {
+      const token = sessionToken;
+      if (typeof token !== "string" || !token) {
+        throw new Error("The Connect grant session is unavailable.");
+      }
+      return Object.freeze({
+        token,
+        fetch: (input, init) => fetchControlPlane(input, init, token),
+        request: (request) => requestControlPlane(request, token),
+      });
     },
   });
 

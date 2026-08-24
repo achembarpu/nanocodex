@@ -15,13 +15,23 @@ export function installBrowserEgressFetch(options) {
     }
     return installed.fetch;
   }
+  const routedFetch = createBrowserRuntimeFetch(options);
+  globalThis.fetch = routedFetch;
+  installed = Object.freeze({ fetch: routedFetch, origin, threadId: options.threadId });
+  return routedFetch;
+}
+
+/** Creates the browser harness fetch boundary without mutating the caller's global fetch. */
+export function createBrowserRuntimeFetch(options) {
+  const origin = new URL(options?.origin).origin;
   const nativeFetch = (options.fetch ?? globalThis.fetch).bind(globalThis);
   const externalFetch = standardFetchFromEgress(createBrowserEgressFetch({
     fetch: nativeFetch,
+    headers: options.headers,
     origin,
     threadId: options.threadId,
   }));
-  const routedFetch = async (input, init) => {
+  return async (input, init) => {
     const request = input instanceof Request
       ? new Request(input, init)
       : new Request(new URL(String(input), origin), init);
@@ -29,9 +39,6 @@ export function installBrowserEgressFetch(options) {
       ? nativeFetch(request)
       : externalFetch(request);
   };
-  globalThis.fetch = routedFetch;
-  installed = Object.freeze({ fetch: routedFetch, origin, threadId: options.threadId });
-  return routedFetch;
 }
 
 /** Creates the only workload-network capability installed in browser-side runtimes. */
@@ -61,9 +68,11 @@ export function createBrowserEgressFetch(options) {
       }
     }
     try {
+      const gatewayHeaders = new Headers(options.headers);
+      gatewayHeaders.set("content-type", "application/json");
       const response = await options.fetch(endpoint, {
         method: "POST",
-        headers: { "content-type": "application/json" },
+        headers: gatewayHeaders,
         body: JSON.stringify({
           thread_id: options.threadId,
           url: url.href,

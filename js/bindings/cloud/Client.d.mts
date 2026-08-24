@@ -15,6 +15,7 @@ export type Base = Readonly<{
   type: "connect";
   uid: string;
   transport: Readonly<{ key: string; name: string; type: string; baseUrl: string }>;
+  fetch(input: RequestInfo | URL, init?: RequestInit | undefined): Promise<Response>;
   request(request: Request): Promise<unknown>;
 }>;
 

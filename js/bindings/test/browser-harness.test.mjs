@@ -93,6 +93,9 @@ test("the default browser harness exposes one exact model-visible tool set", asy
     status: "ready",
     authenticated: ["github", "gdrive"],
     accounts: { github: "Nano Cat (nanocat)", gdrive: "Drive User" },
+    identity: {},
+    stablecoins: [],
+    authorizations: [],
   });
   assert.deepEqual((await byName.runtimeInfo.handler({}, context)).account, accountInfo);
   assert.equal(await byName.web__run.handler({ time: [{ utc_offset: "+03:00" }] }, context), "searched");
@@ -147,6 +150,79 @@ test("the browser harness preserves explicit tool URLs", async () => {
   await byName.web__run.handler({ search_query: [{ q: "override" }] }, context);
   await byName.image_gen__imagegen.handler({ prompt: "override" }, context);
   assert.deepEqual(urls, ["https://tools.test/search", "https://tools.test/images"]);
+});
+
+test("accountInfo adds app authorization without forwarding unknown control-plane fields", async () => {
+  const runtime = bindBrowser({
+    ...preparedBrowser(),
+    fetch: async () => Response.json({
+      connectors: { chatgpt: { connected: true, label: "Subscription" } },
+      identity: { tempoAddress: "0xabc", brokerUserId: "secret" },
+      stablecoins: [{
+        token: "0x01",
+        symbol: "MACHUSD",
+        balance: "5000000",
+        decimals: 6,
+        providerCredential: "secret",
+      }],
+      authorizations: [{
+        appId: "atlas-workspace",
+        permission: "agent.run",
+        status: "active",
+        expiresAt: 2_000_000_000,
+        capabilities: ["nanocodex.agent", "chatgpt"],
+        connectors: ["chatgpt"],
+        accessKey: {
+          id: "0x02",
+          expiry: 2_000_000_000,
+          limits: [{ token: "0x01", symbol: "MACHUSD", limit: "10000000", period: 86_400 }],
+          scopes: [{ address: "0x03", selector: "0x12345678", recipients: ["0x04"] }],
+          witness: "secret",
+        },
+        spend: {
+          token: "0x01",
+          symbol: "MACHUSD",
+          spent: "250000",
+          limit: "10000000",
+          period: 86_400,
+          maxPerRequest: "250000",
+          credential: "secret",
+        },
+        grantToken: "secret",
+      }],
+    }),
+  }, { accountInfo: { requireAuthorization: true } });
+  const accountInfo = runtime.tools.find(({ name }) => name === "accountInfo");
+
+  assert.deepEqual(await accountInfo.handler({}, context), {
+    status: "ready",
+    authenticated: ["chatgpt"],
+    accounts: { chatgpt: "Subscription" },
+    identity: { tempoAddress: "0xabc" },
+    stablecoins: [{ token: "0x01", symbol: "MACHUSD", balance: "5000000", decimals: 6 }],
+    authorizations: [{
+      appId: "atlas-workspace",
+      permission: "agent.run",
+      status: "active",
+      expiresAt: 2_000_000_000,
+      capabilities: ["nanocodex.agent", "chatgpt"],
+      connectors: ["chatgpt"],
+      accessKey: {
+        id: "0x02",
+        expiry: 2_000_000_000,
+        limits: [{ token: "0x01", symbol: "MACHUSD", limit: "10000000", period: 86_400 }],
+        scopes: [{ address: "0x03", selector: "0x12345678", recipients: ["0x04"] }],
+      },
+      spend: {
+        token: "0x01",
+        symbol: "MACHUSD",
+        spent: "250000",
+        limit: "10000000",
+        period: 86_400,
+        maxPerRequest: "250000",
+      },
+    }],
+  });
 });
 
 function preparedBrowser() {

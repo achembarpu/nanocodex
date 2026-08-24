@@ -1224,11 +1224,11 @@ function serializeConfig(options) {
 
 async function hydrateConfig(config, createDurabilityStore) {
   const { harness, workerDurabilityId, ...options } = config;
-  const [Transport, runtime] = await Promise.all([
+  const [Transport, harnessRuntime] = await Promise.all([
     import("./Transport.mjs"),
     harness === false || harness === undefined
       ? undefined
-      : import("../tools/browser/index.mjs").then(({ browser }) => browser({
+      : import("./harness.mjs").then(({ createBrowserHarness }) => createBrowserHarness({
           ...harness,
           web: { headers: { "x-nanocodex-request": "1" } },
           images: { headers: { "x-nanocodex-request": "1" } },
@@ -1258,25 +1258,14 @@ async function hydrateConfig(config, createDurabilityStore) {
     options.durability = await createDurabilityStore();
     options.durabilityId = workerDurabilityId;
   }
-  if (runtime) {
-    const { createWorkerEvaluator } = await import("../runtime/worker-evaluator.mjs");
-    options.codeEvaluator = createWorkerEvaluator({
-      egress: { origin: harness.origin, threadId: harness.threadId },
-    });
-    const now = new Date();
-    const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
+  if (harnessRuntime) {
     Object.assign(options, {
-      filesystem: runtime.filesystem,
+      codeEvaluator: harnessRuntime.codeEvaluator,
+      filesystem: harnessRuntime.filesystem,
       filesystemTools: false,
-      instructions: options.instructions ?? runtime.instructions,
-      tools: runtime.tools,
-      executionEnvironment: options.executionEnvironment ?? {
-        currentDate: localDate(now),
-        timezone,
-        ...(runtime.projectInstructions === undefined
-          ? {}
-          : { projectInstructions: runtime.projectInstructions }),
-      },
+      instructions: options.instructions ?? harnessRuntime.instructions,
+      tools: harnessRuntime.tools,
+      executionEnvironment: options.executionEnvironment ?? harnessRuntime.executionEnvironment,
     });
   }
   return options;
@@ -1345,8 +1334,5 @@ function harnessDescriptor(options = {}, requireIdentity = false) {
   };
 }
 function harnessKey(harness) { return `${harness?.origin ?? ""}\n${harness?.threadId ?? ""}`; }
-function localDate(date) {
-  return `${date.getFullYear()}-${String(date.getMonth() + 1).padStart(2, "0")}-${String(date.getDate()).padStart(2, "0")}`;
-}
 function encodeError(error) { return { name: error?.name || "Error", message: error?.message || String(error), stack: error?.stack, ...(typeof error?.code === "string" ? { code: error.code } : {}) }; }
 function decodeError(encoded = {}) { const error = encoded.name === "RangeError" ? new RangeError(encoded.message) : encoded.name === "TypeError" ? new TypeError(encoded.message) : new Error(encoded.message || "Worker Agent failed"); if (encoded.stack) error.stack = encoded.stack; if (typeof encoded.code === "string") error.code = encoded.code; return error; }

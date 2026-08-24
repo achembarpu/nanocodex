@@ -12,6 +12,7 @@ export type Request = Readonly<{
 
 export type Instance = Readonly<{
   baseUrl: string;
+  fetch?(input: RequestInfo | URL, init?: RequestInit | undefined): Promise<Response>;
   request(request: Request): Promise<unknown>;
 }>;
 

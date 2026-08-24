@@ -246,7 +246,7 @@ function AgentPanel({ agent, mercatorConnected }: Readonly<{
   agent: ConnectAgent | undefined;
   mercatorConnected: boolean;
 }>) {
-  const [prompt, setPrompt] = useState("Use connectGrant to inspect this grant, then explain its exact boundaries");
+  const [prompt, setPrompt] = useState("Use accountInfo to explain what I have connected, what this app may do, and what it may spend");
   const [result, setResult] = useState<AgentTurnResult>();
   const [runError, setRunError] = useState<string>();
   const [isRunning, setIsRunning] = useState(false);
@@ -275,7 +275,7 @@ function AgentPanel({ agent, mercatorConnected }: Readonly<{
     <section className="agent-panel" aria-labelledby="agent-panel-title">
       <header className="agent-heading">
         <div>
-          <h3 id="agent-panel-title">App-owned Nanocodex agent</h3>
+          <h3 id="agent-panel-title">Nanocodex agent</h3>
           <p>ChatGPT by default. Mercator only when BOOST is used.</p>
         </div>
         <span

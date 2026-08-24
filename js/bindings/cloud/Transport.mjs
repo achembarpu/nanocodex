@@ -31,6 +31,9 @@ export function http(url = DEFAULT_API_URL, options = {}) {
     setup() {
       return {
         baseUrl,
+        fetch(input, init) {
+          return fetchFn(input, { credentials: "include", ...init });
+        },
         async request(request) {
           const headers = new Headers(request.headers);
           headers.set("accept", "application/json");

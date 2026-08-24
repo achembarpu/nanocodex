@@ -9,6 +9,9 @@ export type AccountInfo = Readonly<{
   status: "disabled" | "ready" | "unavailable";
   authenticated: readonly ConnectorId[];
   accounts: Readonly<Partial<Record<ConnectorId, string>>>;
+  identity: Readonly<Record<string, never>>;
+  stablecoins: readonly [];
+  authorizations: readonly [];
 }>;
 
 export async function accountInfo(
@@ -39,14 +42,28 @@ export async function accountInfo(
       }
       return true;
     });
-    return { status: "ready", authenticated, accounts };
+    return {
+      status: "ready",
+      authenticated,
+      accounts,
+      identity: {},
+      stablecoins: [],
+      authorizations: [],
+    };
   } catch {
     return emptyInfo("unavailable");
   }
 }
 
 function emptyInfo(status: "disabled" | "unavailable"): AccountInfo {
-  return { status, authenticated: [], accounts: {} };
+  return {
+    status,
+    authenticated: [],
+    accounts: {},
+    identity: {},
+    stablecoins: [],
+    authorizations: [],
+  };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

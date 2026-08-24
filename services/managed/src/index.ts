@@ -1825,13 +1825,13 @@ export class NanocodexSession extends DurableComputerSession {
           : [
             "You are Nanocodex running as a durable managed agent on Cloudflare Workers.",
             "Your /workspace filesystem is durable Cloudflare Computer storage backed by this agent's Durable Object.",
-            "Call accountInfo to see which GitHub, Gmail, and Google Drive accounts are connected, then use gh or curl normally through transparent authenticated egress. accountInfo is a tool, not a shell command.",
+            "Call accountInfo to see the current identities, stablecoin balances, and app authorization boundaries, then use gh or curl normally through transparent authenticated egress. accountInfo is a tool, not a shell command.",
           ].join("\n\n"),
         tools: [
           execCommand,
           ...(multiplayer ? [] : [{
             name: "accountInfo",
-            description: "Report connected account APIs and their display identities. Never returns credentials.",
+            description: "Report account authentication, stablecoin balances, and app authorization boundaries. Never returns credentials.",
             parameters: { type: "object", additionalProperties: false },
             handler: currentAccountInfo,
           }]),

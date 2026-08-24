@@ -44,6 +44,10 @@ const REGISTERED_APP_ID = "atlas-workspace";
 const MAX_BROKER_BODY_BYTES = 16 * 1024;
 const MAX_CONNECTOR_REQUEST_BODY_BYTES = 256 * 1024;
 const MAX_CONNECTOR_RESPONSE_BODY_BYTES = 1024 * 1024;
+const MAX_AGENT_TOOL_BODY_BYTES = 20 * 1024 * 1024;
+const MAX_PUBLIC_EGRESS_BODY_BYTES = 256 * 1024;
+const MAX_PUBLIC_EGRESS_RESPONSE_BYTES = 1024 * 1024;
+const MAX_ACCOUNT_AUTHORIZATIONS = 64;
 const EGRESS_SUBJECT = /^[A-Za-z0-9_-]{43,128}$/;
 const CONNECTOR_METHODS = new Set(["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]);
 const CONNECTOR_REQUEST_HEADERS = new Set([
@@ -68,6 +72,20 @@ const CONNECTOR_RESPONSE_HEADERS = new Set([
   "x-ratelimit-resource",
 ]);
 const FORBIDDEN_CONNECTOR_HEADERS = /^(?:authorization|cookie|forwarded|host|origin|proxy-|referer|set-cookie|x-forwarded-|x-nanocodex-subject$|x-real-ip$|cf-)/i;
+const PRIVATE_EGRESS_HEADER = /(?:^|[-_])(?:auth(?:orization)?|cookie|credential|password|proxy|secret|token|api[-_]?key)(?:$|[-_]|\d)/i;
+const FORBIDDEN_EGRESS_HEADERS = new Set([
+  "connection", "host", "origin", "proxy-connection", "referer", "te", "trailer",
+  "transfer-encoding", "upgrade", "x-nanocodex-subject",
+]);
+const BLOCKED_EGRESS_RESPONSE_HEADERS = new Set([
+  "clear-site-data", "connection", "keep-alive", "nel", "proxy-authenticate",
+  "proxy-authorization", "refresh", "report-to", "set-cookie", "set-cookie2",
+  "trailer", "transfer-encoding", "upgrade", "x-nanocodex-subject",
+]);
+const PRIVATE_HOST_SUFFIXES = [
+  ".internal", ".invalid", ".local", ".localhost", ".test", ".home.arpa",
+];
+const PUBLIC_REDIRECTS = new Set([301, 302, 303, 307, 308]);
 
 type ConnectorId = typeof CONNECTOR_IDS[number];
 type OAuthConnectorId = typeof OAUTH_CONNECTOR_IDS[number];
@@ -249,6 +267,9 @@ export default {
 
       const grantResponse = await handleGrantRoute(request, env, store, url);
       if (grantResponse) return cors(grantResponse, request);
+
+      const agentToolResponse = await handleAgentToolRoute(request, env, store, url);
+      if (agentToolResponse) return cors(agentToolResponse, request);
 
       requireDialogOrigin(request);
       const session = await auth.getSession(request);
@@ -492,6 +513,7 @@ async function createConnection(request: Request, env: Env, store: Kv.Kv): Promi
     } satisfies GrantPrincipal, { ttl: grantTtl })) {
       throw new ApiFailure(500, "grant_token_unavailable", "The grant session could not be created.");
     }
+    await appendGrantIndex(store, grant.accountAddress, grant.id);
   } catch (cause) {
     const cleanup = [
       store.delete(`grant:${grant.id}`),
@@ -656,15 +678,6 @@ async function handleGrantRoute(
   if (action === "model/ticket" && request.method === "POST") {
     return Response.json(await issueModelTicket(store, grant, await json(request)));
   }
-  const connectorRequest = action?.match(/^connectors\/(github|gmail|gdrive)\/request$/);
-  if (connectorRequest && request.method === "POST") {
-    return Response.json(await grantConnectorRequest(
-      env,
-      grant,
-      connectorRequest[1] as OAuthConnectorId,
-      await json(request),
-    ));
-  }
   if (action === "mpp/charge" && request.method === "POST") {
     const body = await json(request);
     return Response.json(await withGrantMutationLock(store, grant.id, async () => {
@@ -673,6 +686,390 @@ async function handleGrantRoute(
     }));
   }
   throw new ApiFailure(405, "method_not_allowed", "Unsupported grant operation.");
+}
+
+async function handleAgentToolRoute(
+  request: Request,
+  env: Env,
+  store: Kv.Kv,
+  url: URL,
+): Promise<Response | undefined> {
+  const isAccountInfo = request.method === "GET" && url.pathname === "/v1/agent/account-info";
+  const isEgress = request.method === "POST" && url.pathname === "/v1/egress";
+  const isWeb = request.method === "POST" && url.pathname === "/api/tools/web-search";
+  const isImage = request.method === "POST" && url.pathname === "/api/tools/image-generation";
+  if (!isAccountInfo && !isEgress && !isWeb && !isImage) return undefined;
+  requirePlaygroundOrigin(request);
+  const { grant } = await authenticatedGrant(request, store);
+  if (isAccountInfo) return Response.json(await connectAccountInfo(env, store, grant));
+  if (isEgress) return grantBrowserEgress(request, env, grant);
+  if (isWeb) return grantWebSearch(request, env, grant);
+  return grantImageGeneration(request, env, grant);
+}
+
+async function connectAccountInfo(env: Env, store: Kv.Kv, current: GrantRecord) {
+  const [connectorInfo, machineUsd, settlement, authorizations] = await Promise.all([
+    connectorStatuses(env, current.brokerUserId),
+    tokenBalance(MACHINE_USD, current.accountAddress),
+    tokenBalance(USDC_E, current.accountAddress),
+    accountAuthorizations(store, current),
+  ]);
+  return {
+    ...connectorInfo,
+    identity: { tempoAddress: current.accountAddress },
+    stablecoins: [
+      { token: MACHINE_USD, symbol: "MACHUSD", balance: machineUsd.toString(), decimals: 6 },
+      { token: USDC_E, symbol: "USDC.e", balance: settlement.toString(), decimals: 6 },
+    ],
+    authorizations,
+  };
+}
+
+async function accountAuthorizations(store: Kv.Kv, current: GrantRecord) {
+  const key = grantIndexKey(current.accountAddress);
+  const retained = await store.get<unknown>(key);
+  const ids = new Set<string>([
+    current.id,
+    ...retainedGrantIds(retained),
+  ]);
+  ids.delete(current.id);
+  const records = [
+    current,
+    ...await Promise.all([...ids].map((id) => store.get<GrantRecord>(`grant:${id}`))),
+  ];
+  const grants = records.filter((grant): grant is GrantRecord => isGrantRecord(grant)
+    && grant.accountAddress.toLowerCase() === current.accountAddress.toLowerCase());
+  return grants
+    .sort((left, right) => right.expiresAt - left.expiresAt)
+    .map(grantAuthorization);
+}
+
+function grantAuthorization(grant: GrantRecord) {
+  const now = Math.floor(Date.now() / 1000);
+  const accessKey = grant.accessKey;
+  const limits = Array.isArray(accessKey.limits) ? accessKey.limits : [];
+  const scopes = Array.isArray(accessKey.scopes) ? accessKey.scopes : [];
+  return {
+    appId: grant.appId,
+    permission: grant.permission,
+    status: grant.expiresAt <= now ? "expired" : grant.status,
+    expiresAt: grant.expiresAt,
+    capabilities: [...grant.capabilities],
+    connectors: CONNECTOR_IDS.filter((connector) => grant.capabilities.includes(connector)),
+    accessKey: {
+      id: address(accessKey.key_id),
+      expiry: safeInteger(accessKey.expiry, "access_key.expiry"),
+      limits: limits.map((limit) => {
+        if (!isRecord(limit) || typeof limit.limit !== "string") {
+          throw new ApiFailure(500, "invalid_grant_policy", "A retained grant has an invalid spending limit.");
+        }
+        const token = address(limit.token);
+        return {
+          token,
+          symbol: tokenSymbol(token),
+          limit: limit.limit,
+          ...(Number.isSafeInteger(limit.period) ? { period: limit.period as number } : {}),
+        };
+      }),
+      scopes: scopes.map((scope) => {
+        if (!isRecord(scope)) {
+          throw new ApiFailure(500, "invalid_grant_policy", "A retained grant has an invalid call scope.");
+        }
+        return {
+          address: address(scope.address),
+          ...(typeof scope.selector === "string" ? { selector: scope.selector } : {}),
+          ...(Array.isArray(scope.recipients)
+            ? { recipients: scope.recipients.map(address) }
+            : {}),
+        };
+      }),
+    },
+    spend: {
+      token: MACHINE_USD,
+      symbol: "MACHUSD",
+      spent: grant.spentAtomics,
+      limit: MPP_LIMIT.toString(),
+      period: MPP_PERIOD,
+      maxPerRequest: MPP_MAX_PER_REQUEST.toString(),
+    },
+  };
+}
+
+async function appendGrantIndex(
+  store: Kv.Kv,
+  accountAddress: `0x${string}`,
+  grantId: `0x${string}`,
+): Promise<void> {
+  await withGrantIndexLock(store, accountAddress, async () => {
+    const key = grantIndexKey(accountAddress);
+    const retained = await store.get<unknown>(key);
+    const ids = retainedGrantIds(retained).filter((id) => id !== grantId);
+    await store.set(key, [...ids, grantId].slice(-MAX_ACCOUNT_AUTHORIZATIONS));
+  });
+}
+
+function retainedGrantIds(value: unknown): string[] {
+  return Array.isArray(value)
+    ? value.filter((id): id is string => typeof id === "string" && /^0x[0-9a-fA-F]{64}$/.test(id))
+    : [];
+}
+
+function grantIndexKey(accountAddress: `0x${string}`): string {
+  return `grant-index:${accountAddress.toLowerCase()}`;
+}
+
+async function grantBrowserEgress(request: Request, env: Env, grant: GrantRecord): Promise<Response> {
+  if (grant.status !== "active") {
+    throw new ApiFailure(409, "grant_inactive", "The grant is not active.");
+  }
+  if (grant.expiresAt <= Math.floor(Date.now() / 1000)) {
+    throw new ApiFailure(409, "grant_expired", "The grant has expired.");
+  }
+  const value = await boundedJson(request, MAX_PUBLIC_EGRESS_BODY_BYTES, "browser egress");
+  const targetValue = value.url;
+  const threadId = value.thread_id;
+  if (typeof targetValue !== "string" || typeof threadId !== "string"
+    || !/^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(threadId)) {
+    throw new ApiFailure(400, "invalid_egress_request", "The browser egress request is invalid.");
+  }
+  let target: URL;
+  try { target = new URL(targetValue); } catch {
+    throw new ApiFailure(400, "invalid_egress_url", "The browser egress URL is invalid.");
+  }
+  const connector = connectorForUrl(target);
+  if (connector) {
+    const result = await grantConnectorRequest(env, grant, connector, {
+      path: `${target.pathname}${target.search}`,
+      method: value.method,
+      headers: value.headers,
+      body: value.body,
+    });
+    return new Response(result.body, { status: result.status, headers: result.headers });
+  }
+  return publicBrowserEgress(target, value, request.signal);
+}
+
+function connectorForUrl(url: URL): OAuthConnectorId | undefined {
+  if (url.origin === "https://api.github.com") return "github";
+  if (url.origin === "https://gmail.googleapis.com") return "gmail";
+  if (url.origin === "https://www.googleapis.com") return "gdrive";
+  return undefined;
+}
+
+async function publicBrowserEgress(
+  target: URL,
+  value: Record<string, unknown>,
+  signal: AbortSignal,
+): Promise<Response> {
+  let url = publicEgressUrl(target);
+  let method = typeof value.method === "string" ? value.method.toUpperCase() : "GET";
+  if (!CONNECTOR_METHODS.has(method)) {
+    throw new ApiFailure(403, "egress_method_denied", "The browser egress method is denied.");
+  }
+  const headers = publicEgressHeaders(value.headers);
+  const bodyValue = value.body;
+  if (bodyValue !== undefined && typeof bodyValue !== "string") {
+    throw new ApiFailure(400, "invalid_egress_body", "The browser egress body must be a string.");
+  }
+  let body: string | undefined = bodyValue;
+  if (body !== undefined && (method === "GET" || method === "HEAD")) {
+    throw new ApiFailure(400, "invalid_egress_body", "GET and HEAD egress requests cannot have a body.");
+  }
+  for (let redirects = 0; ; redirects += 1) {
+    if (redirects > 5) {
+      throw new ApiFailure(502, "too_many_redirects", "The public request redirected too many times.");
+    }
+    const outgoingHeaders = new Headers(headers);
+    if (method === "GET" || method === "HEAD") {
+      outgoingHeaders.delete("content-length");
+      outgoingHeaders.delete("content-type");
+      body = undefined;
+    }
+    const upstream = await fetch(url, {
+      method,
+      headers: outgoingHeaders,
+      ...(body === undefined ? {} : { body }),
+      redirect: "manual",
+      signal,
+    });
+    if (PUBLIC_REDIRECTS.has(upstream.status)) {
+      const location = upstream.headers.get("location");
+      await upstream.body?.cancel();
+      if (!location) throw new ApiFailure(502, "invalid_redirect", "The public request returned an invalid redirect.");
+      url = publicEgressUrl(new URL(location, url));
+      if (connectorForUrl(url)) {
+        throw new ApiFailure(502, "redirect_to_connector_denied", "Public requests cannot redirect into a connected account.");
+      }
+      if (upstream.status === 303
+        || ((upstream.status === 301 || upstream.status === 302) && method === "POST")) {
+        method = "GET";
+        body = undefined;
+      }
+      continue;
+    }
+    const responseBody = await boundedResponseText(upstream, MAX_PUBLIC_EGRESS_RESPONSE_BYTES);
+    return new Response(responseBody, {
+      status: upstream.status,
+      statusText: upstream.statusText,
+      headers: projectedPublicHeaders(upstream.headers),
+    });
+  }
+}
+
+function publicEgressUrl(url: URL): URL {
+  if ((url.protocol !== "http:" && url.protocol !== "https:")
+    || url.username || url.password || url.hash) {
+    throw new ApiFailure(403, "egress_destination_denied", "The browser egress destination is denied.");
+  }
+  const hostname = url.hostname.toLowerCase().replace(/\.$/, "");
+  if (!hostname || hostname === "localhost" || PRIVATE_HOST_SUFFIXES.some((suffix) => (
+    hostname === suffix.slice(1) || hostname.endsWith(suffix)
+  )) || deniedIpLiteral(hostname)) {
+    throw new ApiFailure(403, "egress_destination_denied", "The browser egress destination is denied.");
+  }
+  return url;
+}
+
+function deniedIpLiteral(hostname: string): boolean {
+  const ipv4 = hostname.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (!ipv4) {
+    if (!hostname.includes(":")) return false;
+    const normalized = hostname.replace(/^\[/, "").replace(/\]$/, "").toLowerCase();
+    return normalized === "::" || normalized === "::1" || normalized.startsWith("fc")
+      || normalized.startsWith("fd") || normalized.startsWith("fe8")
+      || normalized.startsWith("fe9") || normalized.startsWith("fea")
+      || normalized.startsWith("feb") || normalized.startsWith("ff")
+      || normalized.startsWith("::ffff:");
+  }
+  const octets = ipv4.slice(1).map(Number);
+  if (octets.some((octet) => octet > 255)) return true;
+  const [a, b] = octets;
+  return a === 0 || a === 10 || a === 127 || a! >= 224
+    || (a === 100 && b! >= 64 && b! <= 127)
+    || (a === 169 && b === 254) || (a === 172 && b! >= 16 && b! <= 31)
+    || (a === 192 && (b === 0 || b === 168)) || (a === 198 && (b === 18 || b === 19));
+}
+
+function publicEgressHeaders(value: unknown): Headers {
+  if (value === undefined) return new Headers();
+  if (!isRecord(value) || Object.keys(value).length > 64) {
+    throw new ApiFailure(400, "invalid_egress_headers", "Public request headers must be a bounded string map.");
+  }
+  const headers = new Headers();
+  for (const [name, headerValue] of Object.entries(value)) {
+    const lower = name.toLowerCase();
+    if (typeof headerValue !== "string" || name.length > 128 || headerValue.length > 4_096
+      || PRIVATE_EGRESS_HEADER.test(name) || FORBIDDEN_EGRESS_HEADERS.has(lower)
+      || lower.startsWith("cf-") || lower.startsWith("forwarded")
+      || lower.startsWith("sec-") || lower.startsWith("x-forwarded-")) {
+      throw new ApiFailure(403, "egress_header_forbidden", "Credential and routing headers are forbidden.");
+    }
+    headers.set(name, headerValue);
+  }
+  return headers;
+}
+
+function projectedPublicHeaders(source: Headers): Headers {
+  const headers = new Headers();
+  for (const [name, value] of source) {
+    const lower = name.toLowerCase();
+    if (!PRIVATE_EGRESS_HEADER.test(name) && !BLOCKED_EGRESS_RESPONSE_HEADERS.has(lower)
+      && value.length <= 16_384) {
+      headers.append(name, value);
+    }
+  }
+  return headers;
+}
+
+async function grantWebSearch(request: Request, env: Env, grant: GrantRecord): Promise<Response> {
+  const value = await boundedJson(request, 64 * 1024, "web search");
+  if (!isRecord(value.commands) || typeof value.session_id !== "string" || !value.session_id) {
+    throw new ApiFailure(400, "invalid_web_request", "The web search request is invalid.");
+  }
+  return fetchGrantModelTool(env, grant, "/v1/search", {
+    id: value.session_id,
+    model: "gpt-5.6-sol",
+    commands: value.commands,
+    settings: { allowed_callers: ["direct"], external_web_access: true },
+    max_output_tokens: 10_000,
+  });
+}
+
+async function grantImageGeneration(request: Request, env: Env, grant: GrantRecord): Promise<Response> {
+  const value = await boundedJson(request, MAX_AGENT_TOOL_BODY_BYTES, "image generation");
+  const prompt = typeof value.prompt === "string" ? value.prompt.trim() : "";
+  const images = Array.isArray(value.images)
+    ? value.images.filter((image): image is string => typeof image === "string")
+    : [];
+  if (!prompt || images.length > 5 || images.some((image) => !image.startsWith("data:image/"))) {
+    throw new ApiFailure(400, "invalid_image_request", "The image generation request is invalid.");
+  }
+  const upstream = await fetchGrantModelTool(
+    env,
+    grant,
+    images.length ? "/v1/images/edits" : "/v1/images/generations",
+    {
+      ...(images.length ? { images: images.map((image_url) => ({ image_url })) } : {}),
+      prompt,
+      background: "auto",
+      model: "gpt-image-2",
+      quality: "auto",
+      size: "auto",
+    },
+  );
+  const payload = await upstream.json() as { data?: Array<{ b64_json?: unknown }>; error?: unknown };
+  if (!upstream.ok) {
+    throw new ApiFailure(502, "image_generation_failed", `Image generation failed with HTTP ${upstream.status}.`);
+  }
+  const encoded = payload.data?.[0]?.b64_json;
+  if (typeof encoded !== "string" || !encoded) {
+    throw new ApiFailure(502, "image_generation_failed", "Image generation returned no image.");
+  }
+  return Response.json({ image_url: `data:image/png;base64,${encoded}` });
+}
+
+function fetchGrantModelTool(
+  env: Env,
+  grant: GrantRecord,
+  path: "/v1/search" | "/v1/images/generations" | "/v1/images/edits",
+  body: unknown,
+): Promise<Response> {
+  if (grant.status !== "active" || grant.expiresAt <= Math.floor(Date.now() / 1000)
+    || !grant.capabilities.includes("chatgpt") || !EGRESS_SUBJECT.test(grant.egressSubject)) {
+    throw new ApiFailure(403, "chatgpt_not_granted", "The active grant does not authorize ChatGPT tools.");
+  }
+  return env.EGRESS.fetch(new Request(`https://nanocodex.internal${path}`, {
+    method: "POST",
+    headers: {
+      authorization: PROVIDER_CREDENTIAL_PLACEHOLDER,
+      "content-type": "application/json",
+      "user-agent": "nanocodex-connect/0.1",
+      "x-nanocodex-subject": grant.egressSubject,
+    },
+    body: JSON.stringify(body),
+  }));
+}
+
+async function boundedJson(
+  request: Request,
+  limit: number,
+  label: string,
+): Promise<Record<string, unknown>> {
+  const encoded = await request.text();
+  if (new TextEncoder().encode(encoded).byteLength > limit) {
+    throw new ApiFailure(413, "request_too_large", `${label} request is too large.`);
+  }
+  try { return object(JSON.parse(encoded), `${label} request`); } catch (error) {
+    if (error instanceof ApiFailure) throw error;
+    throw new ApiFailure(400, "invalid_json", `${label} request must be JSON.`);
+  }
+}
+
+function tokenSymbol(token: `0x${string}`): string {
+  const normalized = token.toLowerCase();
+  if (normalized === MACHINE_USD.toLowerCase()) return "MACHUSD";
+  if (normalized === USDC_E.toLowerCase()) return "USDC.e";
+  return "TIP20";
 }
 
 async function issueModelTicket(
@@ -830,7 +1227,8 @@ async function revokeGrant(
   token: string,
 ): Promise<GrantRecord> {
   if (grant.status !== "active") {
-    throw new ApiFailure(409, "grant_inactive", "The grant is not active.");
+    await store.delete(`grant-token:${token}`);
+    return grant;
   }
   if (!EGRESS_SUBJECT.test(grant.egressSubject)) {
     throw new ApiFailure(403, "invalid_grant_binding", "The grant's broker binding is invalid.");
@@ -868,6 +1266,32 @@ async function withGrantMutationLock<value>(
     // The bounded operation completes well inside the lock TTL. Deleting here
     // cannot remove a successor's lock because no successor can acquire before
     // this token's entry expires or is deleted.
+    await store.delete(lockKey);
+  }
+}
+
+async function withGrantIndexLock<value>(
+  store: Kv.Kv,
+  accountAddress: `0x${string}`,
+  operation: () => Promise<value>,
+): Promise<value> {
+  if (!store.create) {
+    throw new ApiFailure(500, "grant_index_lock_unavailable", "Atomic authorization indexing is unavailable.");
+  }
+  const lockKey = `grant-index-lock:${accountAddress.toLowerCase()}`;
+  const lockValue = randomSubject();
+  let acquired = false;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    acquired = await store.create(lockKey, lockValue, { ttl: 60 });
+    if (acquired) break;
+    await new Promise((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
+  }
+  if (!acquired) {
+    throw new ApiFailure(409, "grant_index_busy", "Another authorization is being indexed.");
+  }
+  try {
+    return await operation();
+  } finally {
     await store.delete(lockKey);
   }
 }
@@ -1686,7 +2110,7 @@ async function agentId(account: `0x${string}`) {
 
 function cors(response: Response, request: Request) {
   const origin = request.headers.get("origin");
-  if (origin && allowedOrigin(origin)) {
+  if (origin && allowedOrigin(request, origin)) {
     response.headers.set("access-control-allow-origin", origin);
     response.headers.set("access-control-allow-credentials", "true");
     response.headers.set(
@@ -1740,7 +2164,7 @@ function requireOnrampOrigin(request: Request): void {
 
 function requirePlaygroundOrigin(request: Request): void {
   const origin = request.headers.get("origin");
-  if (origin !== PLAYGROUND_ORIGIN && !isLoopbackOrigin(origin)) {
+  if (origin !== PLAYGROUND_ORIGIN && !developmentLoopbackOrigin(request, origin)) {
     throw new ApiFailure(403, "origin_denied", "This operation is available only to the registered Nanocodex app.");
   }
 }
@@ -1757,7 +2181,7 @@ function requireDialogOrigin(request: Request): void {
 
 function requiredDialogOrigin(request: Request): string {
   const origin = request.headers.get("origin");
-  if (!origin || !isAllowedDialogOrigin(origin)) {
+  if (!origin || (origin !== DIALOG_ORIGIN && !developmentLoopbackOrigin(request, origin))) {
     throw new ApiFailure(403, "origin_denied", "This account operation is available only inside Nanocodex Connect.");
   }
   return origin;
@@ -1771,8 +2195,14 @@ function isLoopbackOrigin(origin: string | null): boolean {
   return /^http:\/\/(?:localhost|127\.0\.0\.1):\d+$/.test(origin ?? "");
 }
 
-function allowedOrigin(origin: string): boolean {
-  return origin === PLAYGROUND_ORIGIN || isAllowedDialogOrigin(origin);
+function developmentLoopbackOrigin(request: Request, origin: string | null): boolean {
+  return new URL(request.url).origin !== API_ORIGIN && isLoopbackOrigin(origin);
+}
+
+function allowedOrigin(request: Request, origin: string): boolean {
+  return origin === PLAYGROUND_ORIGIN
+    || origin === DIALOG_ORIGIN
+    || developmentLoopbackOrigin(request, origin);
 }
 
 function error(request: Request, status: number, code: string, message: string) {

@@ -3,8 +3,8 @@ import {
   createTempoProviderFromAccounts,
   Transport as NanocodexTransport,
 } from "../../host/index.mjs";
+import { createBrowserHarness } from "../../browser/harness.mjs";
 import { mercatorRestTool } from "../mercator.mjs";
-import { connectorRequestTools } from "../connectors.mjs";
 
 const PROVIDER_NAME = "ChatGPT · Nanocodex Connect";
 const tempoMcp = Symbol.for("nanocodex.tempo.mcp");
@@ -23,6 +23,11 @@ export async function create(client, options) {
   }
 
   const toolCalls = createToolCallLedger();
+  const sessionId = options?.sessionId ?? crypto.randomUUID();
+  const harnessThreadId = uuid(sessionId) ? sessionId : crypto.randomUUID();
+  const grantSession = client._captureSession?.();
+  if (!grantSession) throw new Error("The Connect grant session is unavailable.");
+  const grantClient = { request: grantSession.request, transport: client.transport };
   const configuredSession = options?.session ?? {};
   const channelStore = configuredSession.channelStore
     ?? await connectChannelStore(connection);
@@ -51,8 +56,19 @@ export async function create(client, options) {
     mercator: options?.mercator,
     payment: { maxAmount: connection.mpp.maxPerRequest },
   });
+  const harness = await createBrowserHarness({
+    accountInfo: {
+      endpoint: "/v1/agent/account-info",
+      requireAuthorization: true,
+    },
+    fetch: grantSession.fetch,
+    headers: { authorization: `Bearer ${grantSession.token}` },
+    installFetch: false,
+    origin: client.transport.baseUrl,
+    threadId: harnessThreadId,
+  });
   const tools = connectTools(
-    client,
+    harness.tools,
     connection,
     options?.tools,
     toolCalls,
@@ -66,19 +82,22 @@ export async function create(client, options) {
       transport: NanocodexTransport.hostManaged({
         websocketUrl: grantModelWebSocketUrl(client, connection).href,
         createWebSocket: (_endpoint, sessionId, request) => createGrantModelWebSocket(
-          client,
+          grantClient,
           connection,
           sessionId,
           request,
         ),
       }),
-      fastMode: options?.fastMode ?? true,
-      thinking: options?.thinking ?? "none",
-      instructions: options?.instructions
-        ?? "You are the Nanocodex Connect agent. Use connectGrant before making claims about the active authorization. When connector_request is available, use it for authenticated GitHub, Gmail, or Google Drive API requests; it never exposes connector credentials and never supports ChatGPT. Mercator create_job may return a run_rest_request handoff; execute that exact handoff with run_rest_request, then poll it with Mercator get_job. Answer directly and never invent capabilities that are absent from tool results.",
+      codeEvaluator: harness.codeEvaluator,
+      executionEnvironment: options?.executionEnvironment ?? harness.executionEnvironment,
+      fastMode: options?.fastMode,
+      filesystem: harness.filesystem,
+      filesystemTools: false,
+      instructions: options?.instructions ?? harness.instructions,
       model: options?.model,
       reasoningMode: options?.reasoningMode,
-      ...(options?.sessionId === undefined ? {} : { sessionId: options.sessionId }),
+      sessionId,
+      thinking: options?.thinking,
       tools,
       mcp: options?.mcp === false
         ? false
@@ -88,6 +107,7 @@ export async function create(client, options) {
   } catch (error) {
     // No channel is opened during construction, so do not call the manager's
     // on-chain close path when initialization itself fails.
+    harness.release();
     throw error;
   }
 
@@ -168,6 +188,7 @@ export async function create(client, options) {
           } catch (error) {
             errors.push(error);
           }
+          harness.release();
           raw.dispose();
           if (errors.length === 1) throw errors[0];
           if (errors.length > 1) {
@@ -304,63 +325,53 @@ async function connectChannelStore(connection) {
   }
 }
 
-function connectTools(client, connection, configured, calls, paymentFetch, mercatorRelay) {
-  const tools = normalizeTools(configured);
-  for (const name of ["connectGrant", "connector_request", "run_rest_request"]) {
-    if (Object.hasOwn(tools, name)) {
-      throw new TypeError(`${name} is reserved by Nanocodex Connect`);
-    }
+function connectTools(canonical, connection, configured, calls, paymentFetch, mercatorRelay) {
+  const tools = namedTools(canonical, calls);
+  const application = normalizeTools(configured);
+  for (const name of Object.keys(application)) {
+    if (Object.hasOwn(tools, name)) throw new TypeError(`${name} is already a canonical Nanocodex tool`);
+    tools[name] = trackTool(name, application[name], calls);
+  }
+  if (Object.hasOwn(tools, "run_rest_request")) {
+    throw new TypeError("run_rest_request is reserved by Nanocodex Connect");
   }
   return {
     ...tools,
-    ...connectorRequestTools(client, connection, calls),
     run_rest_request: mercatorRestTool({
       connection,
       fetch: paymentFetch,
       calls,
       relay: mercatorRelay,
     }),
-    connectGrant: {
-      description: "Read the exact active Nanocodex Connect grant, delegated access key, and bounded MPP policy. Call this before describing the grant.",
-      parameters: { type: "object", additionalProperties: false },
-      async handler(_input, context) {
-        calls.add("connectGrant", context);
-        return {
-          account: connection.accountAddress,
-          grant: {
-            id: connection.grant.id,
-            permission: connection.grant.permission,
-            status: connection.grant.status,
-            expiresAt: connection.grant.expiresAt,
-            capabilities: connection.grant.capabilities,
-            connectors: connection.grant.connectors,
-          },
-          accessKey: {
-            id: connection.accessKey.keyId,
-            type: connection.accessKey.keyType,
-            expiry: connection.accessKey.expiry,
-            witness: connection.accessKey.witness,
-            limits: connection.accessKey.limits.map((limit) => ({
-              token: limit.token,
-              limit: limit.limit.toString(),
-              period: limit.period,
-            })),
-            scopes: connection.accessKey.scopes,
-          },
-          mpp: {
-            token: connection.mpp.token,
-            symbol: connection.mpp.symbol,
-            balance: connection.mpp.balance.toString(),
-            settlementToken: connection.mpp.settlementToken,
-            settlementSymbol: connection.mpp.settlementSymbol,
-            settlementBalance: connection.mpp.settlementBalance.toString(),
-            dailyLimit: connection.mpp.limit.toString(),
-            maxPerRequest: connection.mpp.maxPerRequest.toString(),
-          },
-        };
-      },
+  };
+}
+
+function namedTools(entries, calls) {
+  const tools = {};
+  for (const entry of entries) {
+    if (!entry || typeof entry.name !== "string" || !entry.name || typeof entry.handler !== "function") {
+      throw new TypeError("canonical Nanocodex tools must be named tools");
+    }
+    if (Object.hasOwn(tools, entry.name)) throw new TypeError(`duplicate canonical tool: ${entry.name}`);
+    const { name, ...tool } = entry;
+    tools[name] = trackTool(name, tool, calls);
+  }
+  return tools;
+}
+
+function trackTool(name, tool, calls) {
+  return {
+    ...tool,
+    async handler(input, context) {
+      calls.add(name, context);
+      return tool.handler(input, context);
     },
   };
+}
+
+function uuid(value) {
+  return typeof value === "string"
+    && /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(value);
 }
 
 function createToolCallLedger() {

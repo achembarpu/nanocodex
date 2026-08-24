@@ -18,6 +18,9 @@ describe("account info", () => {
       status: "ready",
       authenticated: ["github", "gdrive"],
       accounts: { github: "Nano Cat (nanocat)" },
+      identity: {},
+      stablecoins: [],
+      authorizations: [],
     });
     expect(fetch).toHaveBeenCalledWith(
       "https://broker.internal/users/user%2Fwith%20spaces/connectors",
@@ -28,10 +31,14 @@ describe("account info", () => {
   it("fails closed when status is unavailable or malformed", async () => {
     expect(await accountInfo({
       fetch: async () => Response.json({ error: "down" }, { status: 503 }),
-    }, "user", true)).toEqual({ status: "unavailable", authenticated: [], accounts: {} });
+    }, "user", true)).toEqual({
+      status: "unavailable", authenticated: [], accounts: {}, identity: {}, stablecoins: [], authorizations: [],
+    });
     expect(await accountInfo({
       fetch: async () => Response.json({ connectors: null }),
-    }, "user", true)).toEqual({ status: "unavailable", authenticated: [], accounts: {} });
+    }, "user", true)).toEqual({
+      status: "unavailable", authenticated: [], accounts: {}, identity: {}, stablecoins: [], authorizations: [],
+    });
   });
 
   it("does not query account connectors for shared rooms", async () => {
@@ -40,6 +47,9 @@ describe("account info", () => {
       status: "disabled",
       authenticated: [],
       accounts: {},
+      identity: {},
+      stablecoins: [],
+      authorizations: [],
     });
     expect(fetch).not.toHaveBeenCalled();
   });
