@@ -1,0 +1,71 @@
+import type { Client } from "../Client.mjs";
+import type { CloudAccount, Connection } from "../types.mjs";
+
+export type Auth = string | Readonly<{
+  url?: string | undefined;
+  challenge?: string | undefined;
+  verify?: string | undefined;
+  logout?: string | undefined;
+  /** URI resources echoed into the exact EIP-4361 message before signing. */
+  resources?: readonly string[] | undefined;
+  returnToken?: boolean | undefined;
+}>;
+
+export type AuthorizeAccessKey = Readonly<{
+  address?: `0x${string}` | undefined;
+  chainId?: bigint | undefined;
+  expiry: number;
+  keyType?: "secp256k1" | "p256" | "webAuthn" | undefined;
+  limits?: readonly Readonly<{
+    token: `0x${string}`;
+    limit: bigint;
+    period?: number | undefined;
+  }>[] | undefined;
+  /** Accounts policy for reusing a locally persisted matching signer. */
+  reuse?: Readonly<{
+    minExpiry?: number | undefined;
+    minLimits?: readonly Readonly<{
+      token: `0x${string}`;
+      limit: bigint;
+      period?: number | undefined;
+    }>[] | undefined;
+  }> | undefined;
+  publicKey?: `0x${string}` | undefined;
+  scopes?: readonly Readonly<{
+    address: `0x${string}`;
+    selector?: `0x${string}` | string | undefined;
+    recipients?: readonly `0x${string}`[] | undefined;
+  }>[] | undefined;
+}>;
+
+export type Capabilities = Readonly<{
+  /** SIWE authentication folded into the same passkey ceremony. */
+  auth?: Auth | undefined;
+  /** Access key authorized by the same passkey ceremony. */
+  authorizeAccessKey?: AuthorizeAccessKey | undefined;
+  /** Cloud accounts authorized by the same SIWE/passkey message. */
+  cloudAccounts?: CloudAccounts | undefined;
+}>;
+
+export type CloudAccounts = Readonly<Partial<Record<CloudAccount, true>>>;
+
+export declare namespace connect {
+  type Options = Readonly<{
+    capabilities?: Capabilities | undefined;
+    /** Nanocodex permission preset selected by the app. @default "agent.run" */
+    permission?: string | undefined;
+    signal?: AbortSignal | undefined;
+  }>;
+  type ReturnType = Promise<Connection>;
+  type ErrorType = Error;
+}
+
+export function connect(client: Client, options: connect.Options): connect.ReturnType;
+
+export declare namespace disconnect {
+  type Options = Readonly<{ signal?: AbortSignal | undefined }>;
+  type ReturnType = Promise<void>;
+  type ErrorType = Error;
+}
+
+export function disconnect(client: Client, options?: disconnect.Options | undefined): disconnect.ReturnType;

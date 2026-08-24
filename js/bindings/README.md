@@ -588,7 +588,13 @@ adapter-neutral `getMppxParameters()` contract. The lower-level
 `createTempoProvider({ session, payment })` remains available when the
 application constructs MPPx itself. Both explicitly select Tempo provider mode.
 In that mode Nanocodex automatically adds its built-in Mercator MCP and wraps it
-with the same wallet and payment policy.
+with the same wallet and payment policy. The provider also exposes an MPP-aware
+`fetch`; Mercator's paid REST handoffs use that same method rather than a second
+wallet or payment configuration. Its MCP transport remains wrapped at the MCP
+protocol layer, so browser requests do not need an `Accept-Payment` CORS header.
+Browser Connect consumers send paid REST handoffs through the Connect API's
+fixed Mercator relay because Mercator's job endpoint is not itself CORS-enabled;
+the relay preserves MPP challenges, credentials, and receipts but never signs.
 Passing a generic `MppSession`, an OpenAI key, or ChatGPT host auth does not
 initialize Mercator. Pass `mcp: false` to opt out explicitly.
 
@@ -602,9 +608,10 @@ returned canonical name. Search results return loadable namespaces for the next
 model request; remote tools never become a flat set of top-level model-visible
 calls.
 
-MPP-enabled MCP uses MPPx's in-place `McpClient.wrap`. The public `tempo()`
-method supports both Tempo charge and session challenges, so paid services
-composed behind Mercator use the same signer and spending policy as the model:
+MPP-enabled MCP uses MPPx's in-place `McpClient.wrap`. Ordinary paid HTTP uses
+`Mppx.create(...).fetch`. The public `tempo()` method is installed in both and
+supports Tempo charge and session challenges, so paid services composed behind
+Mercator use the same signer and spending policy as the model:
 
 ```js
 const mcpMethod = tempo({

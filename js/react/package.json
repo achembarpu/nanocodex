@@ -8,9 +8,14 @@
     ".": {
       "types": "./index.d.mts",
       "import": "./index.mjs"
+    },
+    "./connect": {
+      "types": "./cloud/index.d.mts",
+      "import": "./cloud/index.mjs"
     }
   },
   "files": [
+    "cloud",
     "index.d.mts",
     "index.mjs",
     "README.md"
@@ -23,10 +28,12 @@
     "test:typecheck": "tsc -p test/tsconfig.json"
   },
   "peerDependencies": {
+    "@tanstack/react-query": ">=5",
     "nanocodex": "^0.5.0",
     "react": ">=18"
   },
   "devDependencies": {
+    "@tanstack/react-query": "^5.101.4",
     "@types/react": "^19.2.14",
     "nanocodex": "file:../bindings",
     "react": "19.2.6",

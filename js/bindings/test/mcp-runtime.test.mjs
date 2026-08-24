@@ -10,6 +10,7 @@ import {
   createTempoProvider,
   createTempoProviderFromAccounts,
   DEFAULT_MERCATOR_MCP_URL,
+  pinnedScopedAccountParameters,
   resolveMcpServers,
 } from "../runtime/tempo-provider.mjs";
 
@@ -54,15 +55,23 @@ test("any Accounts SDK provider can own both Tempo payment paths", async () => {
     accessKey,
     policy: { maxDeposit: "0.05" },
     session: { bootstrap: true },
+    payment: { maxAmount: 250_000n },
   });
 
   assert.deepEqual(calls, [{ accessKey }]);
   assert.equal(provider.kind, "tempo");
   assert.equal(typeof provider.ws, "function");
+  assert.equal(typeof provider.fetch, "function");
   const mercator = resolveMcpServers(provider, undefined).mercator;
   assert.equal(mercator.url, DEFAULT_MERCATOR_MCP_URL);
   assert.equal(mercator.payment.methods.length, 1);
   assert.equal(mercator.payment.methods[0].length, 2);
+  assert.equal(mercator.fetch, undefined);
+  assert.equal(await mercator.payment.onPaymentRequired({ request: { amount: "250000" } }), true);
+  await assert.rejects(
+    mercator.payment.onPaymentRequired({ request: { amount: "250001" } }),
+    /exceeds the per-request limit 250000/,
+  );
 
   await assert.rejects(
     createTempoProviderFromAccounts({ wallet: {} }),
@@ -74,6 +83,54 @@ test("any Accounts SDK provider can own both Tempo payment paths", async () => {
     }),
     /invalid MPPx parameters/,
   );
+});
+
+test("pinned MPP clients read as the root and sign mutations with the access key", async () => {
+  const root = "0x0000000000000000000000000000000000000002";
+  const accessKey = "0x0000000000000000000000000000000000000003";
+  const pinnedAccount = { address: root, accessKeyAddress: accessKey, type: "local" };
+  let created;
+  const sourceClient = {
+    chain: {
+      id: 4217,
+      rpcUrls: { default: { http: ["https://rpc.tempo.example"] } },
+    },
+  };
+  const parameters = {
+    getClient() { return sourceClient; },
+    async resolveAccount() { throw new Error("generic resolver must not be used"); },
+  };
+  const wallet = {
+    store: {
+      accessKeys: {
+        async get(query) {
+          assert.deepEqual(query, { account: root, accessKey, chainId: 4217 });
+          return pinnedAccount;
+        },
+      },
+      getState() {
+        return { accounts: [{ address: root }], activeAccount: 0, chainId: 4217 };
+      },
+    },
+  };
+
+  const scoped = await pinnedScopedAccountParameters(wallet, parameters, accessKey, {
+    account: root,
+    chainId: 4217,
+    createClient(options) {
+      created = options;
+      return options;
+    },
+    http(url) { return { url }; },
+  });
+
+  assert.deepEqual(scoped.getClient().account, { address: root, type: "json-rpc" });
+  assert.equal(created.transport.url, "https://rpc.tempo.example");
+  assert.equal(await scoped.resolveAccount({
+    account: { address: root },
+    chainId: 4217,
+    operation: { kind: "authorizePaymentChannel", authority: accessKey },
+  }), pinnedAccount);
 });
 
 test("remote MCP stays deferred behind tool_search and executes through Code Mode", async () => {

@@ -1,0 +1,210 @@
+import { connectionFromWire } from "../internal.mjs";
+
+const CLOUD_ACCOUNT_PROVIDERS = Object.freeze(["github", "gmail", "gdrive", "chatgpt"]);
+const CONNECTOR_RESOURCE_PREFIX = "urn:nanocodex:connector:";
+const APP_RESOURCE_PREFIX = "urn:nanocodex:app:";
+
+export async function connect(client, options) {
+  options ??= {};
+  const permission = options.permission ?? "agent.run";
+  if (typeof permission !== "string" || permission.length === 0) throw new TypeError("connect permission must be a non-empty string");
+  const requestedConnectors = normalizeCloudAccounts(options.capabilities?.cloudAccounts);
+  const auth = withConnectionResources(
+    options.capabilities?.auth ?? client.auth,
+    client.appId,
+    requestedConnectors,
+  );
+  const walletAuth = delegateAuthVerification(auth);
+  const activeAccount = activeAccountAddress(client.provider);
+  const reusable = activeAccount
+    ? await registeredAccessKey(client, activeAccount, options.signal)
+    : undefined;
+  // Reuse only keys already registered with the Connect control plane. Older
+  // browser-only keys are replaced in this same passkey ceremony, after which
+  // both the private signer and public grant record remain durable.
+  const authorizeAccessKey = options.capabilities?.authorizeAccessKey
+    ?? (reusable
+      ? undefined
+      : freshAccessKeyAuthorization(client.accessKey?.authorize));
+  client.dialog.showWallet?.();
+  let result;
+  try {
+    result = await client.provider.request({
+      method: "wallet_connect",
+      params: [{
+        chainId: "0x1079",
+        capabilities: {
+          ...(walletAuth ? { auth: walletAuth } : {}),
+          ...(authorizeAccessKey ? { authorizeAccessKey: serializeAuthorizeAccessKey(authorizeAccessKey) } : {}),
+        },
+      }],
+    });
+  } finally {
+    client.dialog.hideWallet?.();
+  }
+  const account = result.accounts?.[0];
+  if (!account) throw new Error("Nanocodex Connect returned no account");
+  const approvalId = account.capabilities?.auth?.approval_id;
+  if (typeof approvalId !== "string" || approvalId.length === 0) {
+    throw new Error("Nanocodex Connect returned no signed approval identifier");
+  }
+  const keyAuthorization = account.capabilities?.keyAuthorization;
+  const reusedAccessKey = keyAuthorization
+    ? undefined
+    : reusable ?? await registeredAccessKey(client, account.address, options.signal);
+  if (!keyAuthorization && !reusedAccessKey) {
+    throw new Error("Nanocodex Connect returned no new or reusable access key");
+  }
+  const wire = await client.request({
+    method: "POST",
+    path: "/v1/connections",
+    body: {
+      app_id: client.appId,
+      account_address: account.address,
+      approval_id: approvalId,
+      ...(keyAuthorization ? {
+        key_authorization: keyAuthorization,
+        signed_key_authorization: account.capabilities?.personalSign?.keyAuthorization,
+      } : {
+        reuse_access_key: reusedAccessKey,
+      }),
+      permission,
+      ...(requestedConnectors.length === 0 ? {} : { requested_connectors: requestedConnectors }),
+    },
+    signal: options.signal,
+  });
+  const grantToken = wire?.grant_token;
+  if (typeof grantToken !== "string" || grantToken.length === 0) {
+    throw new Error("Nanocodex Connect returned no grant-scoped session");
+  }
+  client._setSessionToken(grantToken);
+  return connectionFromWire(wire);
+}
+
+// The Nanocodex wallet host owns the complete SIWE ceremony so it can keep
+// the authenticated session in the iframe while the user resolves requested
+// connectors. Omitting `verify` here also prevents the forwarding Provider
+// from replaying the wallet host's one-time challenge after approval.
+function delegateAuthVerification(auth) {
+  if (!auth || typeof auth === "string") return auth;
+  const { verify: _verify, ...forwarded } = auth;
+  return forwarded;
+}
+
+function normalizeCloudAccounts(cloudAccounts) {
+  if (!cloudAccounts || typeof cloudAccounts !== "object" || Array.isArray(cloudAccounts)) return [];
+  return CLOUD_ACCOUNT_PROVIDERS.filter((provider) => cloudAccounts[provider] === true);
+}
+
+function withConnectionResources(auth, appId, requestedConnectors) {
+  const configured = typeof auth === "object" && auth !== null
+    ? auth.resources ?? []
+    : [];
+  const resources = [...new Set([
+    ...configured,
+    `${APP_RESOURCE_PREFIX}${encodeURIComponent(appId)}`,
+    ...requestedConnectors.map((provider) => `${CONNECTOR_RESOURCE_PREFIX}${provider}`),
+  ])];
+  if (typeof auth === "string") return { url: auth, resources };
+  return { ...auth, resources };
+}
+
+function reusableAccessKeys(provider, accountAddress) {
+  const records = provider?.store?.getState?.().accessKeys;
+  if (!Array.isArray(records)) return undefined;
+  const now = Math.floor(Date.now() / 1000);
+  const matching = records.filter((record) =>
+    record
+    && typeof record === "object"
+    && typeof record.address === "string"
+    && typeof record.expiry === "number"
+    && record.expiry > now
+    && typeof record.access === "string"
+    && record.access.toLowerCase() === accountAddress.toLowerCase()
+    && Number(record.chainId) === 4217
+  );
+  const channelAuthorities = persistedChannelAuthorities(accountAddress);
+  matching.sort((left, right) => {
+    const leftOwnsChannel = channelAuthorities.has(left.address.toLowerCase()) ? 1 : 0;
+    const rightOwnsChannel = channelAuthorities.has(right.address.toLowerCase()) ? 1 : 0;
+    return rightOwnsChannel - leftOwnsChannel || right.expiry - left.expiry;
+  });
+  return matching.map((selected) => ({ key_id: selected.address, expiry: selected.expiry }));
+}
+
+function activeAccountAddress(provider) {
+  const state = provider?.store?.getState?.();
+  const account = state?.accounts?.[state.activeAccount ?? 0];
+  return typeof account?.address === "string" ? account.address : undefined;
+}
+
+async function isRegisteredAccessKey(client, accountAddress, keyId, signal) {
+  try {
+    const value = await client.request({
+      method: "GET",
+      path: `/v1/access-keys/${accountAddress}/${keyId}`,
+      signal,
+    });
+    return value?.registered === true;
+  } catch {
+    // Registration discovery is only an optimization. If it is unavailable,
+    // create a fresh authorization in the one passkey ceremony and fail closed.
+    return false;
+  }
+}
+
+async function registeredAccessKey(client, accountAddress, signal) {
+  for (const candidate of reusableAccessKeys(client.provider, accountAddress)) {
+    if (await isRegisteredAccessKey(client, accountAddress, candidate.key_id, signal)) {
+      return candidate;
+    }
+  }
+  return undefined;
+}
+
+function freshAccessKeyAuthorization(authorization) {
+  if (!authorization || typeof authorization !== "object") return authorization;
+  const { reuse: _reuse, ...fresh } = authorization;
+  return fresh;
+}
+
+function persistedChannelAuthorities(accountAddress) {
+  const authorities = new Set();
+  if (typeof localStorage === "undefined") return authorities;
+  const prefix = `nanocodex:connect:mpp:${accountAddress.toLowerCase()}:`;
+  for (const name of Object.keys(localStorage)) {
+    if (!name.startsWith(prefix) || !name.includes(":chan:")) continue;
+    try {
+      const snapshot = JSON.parse(localStorage.getItem(name));
+      const authority = snapshot?.descriptor?.authorizedSigner;
+      if (typeof authority === "string") authorities.add(authority.toLowerCase());
+    } catch {
+      // Ignore unrelated or corrupt browser storage; the MPP store owns its
+      // eventual validation and will fail closed if selected directly.
+    }
+  }
+  return authorities;
+}
+
+function serializeAuthorizeAccessKey(value) {
+  return {
+    ...value,
+    chainId: value.chainId === undefined ? undefined : toHex(value.chainId),
+    limits: value.limits?.map((limit) => ({
+      ...limit,
+      limit: toHex(limit.limit),
+    })),
+  };
+}
+
+function toHex(value) {
+  return `0x${BigInt(value).toString(16)}`;
+}
+
+export async function disconnect(client, options = {}) {
+  await client.request({
+    method: "POST",
+    path: "/v1/connections/disconnect",
+    signal: options.signal,
+  });
+}

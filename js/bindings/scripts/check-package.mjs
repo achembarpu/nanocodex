@@ -20,6 +20,14 @@ export function checkDocumentedBrowserVersion(readme, packageVersion) {
 }
 
 const requiredFiles = [
+  "cloud/index.mjs",
+  "cloud/index.d.mts",
+  "cloud/Client.mjs",
+  "cloud/Client.d.mts",
+  "cloud/Dialog.mjs",
+  "cloud/Dialog.d.mts",
+  "cloud/actions/index.mjs",
+  "cloud/actions/index.d.mts",
   "browser/index.mjs",
   "browser/index.d.mts",
   "browser/InlineAgent.mjs",
@@ -109,6 +117,9 @@ export async function checkPackage(packageRoot = root) {
   assert.equal(packageJson.exports?.["./host"]?.import, "./host/index.mjs");
   assert.equal(packageJson.exports?.["./cloudflare"]?.import, "./cloudflare/index.mjs");
   assert.equal(packageJson.exports?.["./managed"]?.import, "./managed/index.mjs");
+  assert.equal(packageJson.exports?.["./connect"]?.import, "./cloud/index.mjs");
+  assert.equal(packageJson.exports?.["./connect"]?.types, "./cloud/index.d.mts");
+  assert.equal(packageJson.exports?.["./connect/actions"]?.import, "./cloud/actions/index.mjs");
   assert.equal(packageJson.exports?.["./durability"]?.import, "./runtime/durability-store.mjs");
   assert.equal(
     packageJson.exports?.["./durability/cloudflare"]?.import,
