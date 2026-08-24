@@ -195,8 +195,8 @@ export function App() {
       stopPopupMonitor(attempt);
       void (async () => {
         try {
-          const statuses = await refreshConnectors(pendingApproval);
-          if (!statuses[attempt.connector]?.connected) {
+          const state = await refreshConnectors(pendingApproval);
+          if (!state.connectors[attempt.connector]?.connected) {
             throw new Error("The account provider completed without connecting the requested account.");
           }
         } catch (error) {
@@ -228,6 +228,20 @@ export function App() {
     void parentDialog.reject(new Error(requestPolicyError));
   }, [request?.id, requestPolicyError]);
 
+  useEffect(() => {
+    if (
+      !pendingApproval
+      || !profileLinked
+      || !connectorStatuses?.chatgpt?.connected
+      || ceremonyRequestId === pendingApproval.requestId
+      || connectorAction
+      || profileLinking
+    ) return;
+    const completed = pendingApproval;
+    setPendingApproval(undefined);
+    void parentDialog.respond(completed.result);
+  }, [connectorAction, connectorStatuses?.chatgpt?.connected, pendingApproval, profileLinked, profileLinking, ceremonyRequestId]);
+
   if (!request || requestPolicyError) return null;
 
   const ceremonyActive = ceremonyRequestId === request.id;
@@ -237,20 +251,6 @@ export function App() {
     if (!activeRequest) return;
     setFailure(undefined);
     if (activeRequest.type === "machineUsdFund") return;
-
-    if (activeRequest.type === "walletConnect" && pendingApproval) {
-      const connectorAttempt = activeConnector.current;
-      if (connectorAttempt) finishConnectorAttempt(connectorAttempt);
-      const profileAttempt = activeProfileLink.current;
-      activeProfileLink.current = undefined;
-      if (profileAttempt) {
-        window.clearInterval(profileAttempt.popupCheck);
-        if (profileAttempt.popupClosed !== undefined) window.clearTimeout(profileAttempt.popupClosed);
-        if (!profileAttempt.popup.closed) profileAttempt.popup.close();
-      }
-      await parentDialog.respond(pendingApproval.result);
-      return;
-    }
 
     setCeremonyRequestId(activeRequest.id);
     try {
@@ -279,8 +279,12 @@ export function App() {
           requestId: activeRequest.id,
           token,
         };
+        const state = await refreshConnectors(next);
+        if (state.profileLinked && state.connectors.chatgpt?.connected) {
+          await parentDialog.respond(next.result);
+          return;
+        }
         setPendingApproval(next);
-        await refreshConnectors(next);
         return;
       }
       await parentDialog.respond(result);
@@ -306,9 +310,10 @@ export function App() {
       throw new DOMException("The Connect request changed.", "AbortError");
     }
     setConnectorStatuses(body.connectors);
-    setProfileLinked(body.profile?.linked === true);
+    const linked = body.profile?.linked === true;
+    setProfileLinked(linked);
     if (body.connectors.chatgpt?.connected) setDeviceCode(undefined);
-    return body.connectors;
+    return { connectors: body.connectors, profileLinked: linked };
   }
 
   async function linkProfile() {
@@ -497,10 +502,7 @@ export function App() {
     void parentDialog.reject(new Error("The request was not approved."));
   }
 
-  const chatGptRequired = request.type === "walletConnect"
-    && walletView(request).permission.connectors.some((connector) => connector.id === "chatgpt");
-  const approvalDisabled = ceremonyActive || profileLinking
-    || Boolean(pendingApproval && chatGptRequired && !connectorStatuses?.chatgpt?.connected);
+  const approvalDisabled = ceremonyActive || profileLinking;
 
   return (
     <main className="dialog-shell" data-request={request.type} data-testid="remote-connect-dialog">
@@ -533,14 +535,15 @@ export function App() {
           </div>
           <div className="dialog-actions">
             <button type="button" disabled={ceremonyActive} onClick={reject}>Cancel</button>
-            <button
-              type="button"
-              disabled={approvalDisabled}
-              onClick={() => void approve()}
-              title={approvalDisabled && pendingApproval ? "Connect ChatGPT to continue" : undefined}
-            >
-              {pendingApproval ? "Continue" : accountMode === "login" ? "Approve" : "Create & approve"}
-            </button>
+            {!pendingApproval ? (
+              <button
+                type="button"
+                disabled={approvalDisabled}
+                onClick={() => void approve()}
+              >
+                {accountMode === "login" ? "Approve" : "Create & approve"}
+              </button>
+            ) : null}
           </div>
         </>
       ) : request.type === "walletRevokeAccessKey" ? (
