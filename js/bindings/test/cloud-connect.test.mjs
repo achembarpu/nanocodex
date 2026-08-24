@@ -472,6 +472,37 @@ test("Connect account logout clears the local session when wallet logout fails",
   assert.equal(client._hasSession(), false);
 });
 
+test("Connect account logout clears the local session before remote wallet cleanup", async () => {
+  const storage = memoryStorage();
+  let release;
+  let started;
+  const remoteStarted = new Promise((resolve) => { started = resolve; });
+  const remoteCleanup = new Promise((resolve) => { release = resolve; });
+  const client = Client.create({
+    appId: "local-first-logout-workspace",
+    dialog: Dialog.memory(),
+    provider: {
+      async request(request) {
+        assert.equal(request.method, "wallet_disconnect");
+        started();
+        await remoteCleanup;
+      },
+    },
+    session: storage,
+    transport: Transport.mock(),
+  });
+  client._setSession({
+    grantId: `0x${"56".repeat(32)}`,
+    token: "grant-session",
+  });
+
+  const logout = client.account.logout();
+  await remoteStarted;
+  assert.equal(client._hasSession(), false);
+  release();
+  await logout;
+});
+
 test("Nanocodex Connect signs one witness-bound access key and enforces its MPP permission", async () => {
   const expiry = Math.floor(Date.now() / 1_000) + 30 * 86_400;
   const keyId = "0x1111111111111111111111111111111111111111";

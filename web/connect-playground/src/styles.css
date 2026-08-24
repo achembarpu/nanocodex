@@ -1245,7 +1245,7 @@ body > dialog[aria-label="Nanocodex Connect permissions"] > iframe {
     grid-template-columns: 1fr;
     grid-template-rows: minmax(0, 1fr);
     gap: 0;
-    overflow: hidden;
+    overflow: clip;
   }
 
   .app-shell.is-connected .chat-primary {

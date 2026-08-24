@@ -359,7 +359,10 @@ function replayableEventStream(client, agentId) {
     watchOnlineReconnect();
     if (
       connection?.cursor !== undefined
-      && cursorBefore(subscriber.cursor, connection.cursor)
+      && (
+        (connection.startCursor === LATEST_CURSOR && subscriber.cursor !== LATEST_CURSOR)
+        || cursorBefore(subscriber.cursor, connection.cursor)
+      )
     ) {
       retireConnection();
     } else {
@@ -377,6 +380,7 @@ function replayableEventStream(client, agentId) {
     const current = {
       controller,
       cursor,
+      startCursor: cursor,
       generation: nextGeneration += 1,
       running: undefined,
     };

@@ -501,6 +501,83 @@ test("prompts and a watcher multiplex one active managed event request without s
   await waitFor(() => activeConnections === 0);
 });
 
+test("a result joining a latest tail replays durably from its accepted cursor", async () => {
+  const connections = [];
+  const requestedCursors = [];
+  const requestSignals = [];
+  let activeConnections = 0;
+  let maximumActiveConnections = 0;
+  const fetch = async (input, init) => {
+    const request = new Request(input, init);
+    const url = new URL(request.url);
+    if (request.method === "POST" && url.pathname.endsWith("/turns")) {
+      return Response.json({
+        turn_id: "turn-latest-result",
+        state: "accepted",
+        accepted_cursor: "186",
+        terminal_cursor: null,
+      }, { status: 202 });
+    }
+    if (request.method === "GET" && url.pathname.endsWith("/events")) {
+      requestedCursors.push(url.searchParams.get("cursor"));
+      requestSignals.push(request.signal);
+      activeConnections += 1;
+      maximumActiveConnections = Math.max(maximumActiveConnections, activeConnections);
+      const connection = controlledEventStream(request.signal, () => { activeConnections -= 1; });
+      connections.push(connection);
+      return connection.response;
+    }
+    return Response.json({ error: "not_found" }, { status: 404 });
+  };
+
+  const agent = Agent.open(agentId, { baseUrl: origin, fetch });
+  const events = agent.events.watch({ cursor: "latest" });
+  const watchedAcceptance = events.next();
+  await waitFor(() => connections.length === 1);
+  connections[0].send(": cursor 185\n\n");
+
+  const turn = agent.turn.prompt({
+    id: "turn-latest-result",
+    input: "replay my result",
+    idempotencyKey: "latest-result-request",
+  });
+  connections[0].send(sse("186", "turn_accepted", {
+    cursor: "186",
+    created_at: 1,
+    turn_id: "turn-latest-result",
+    type: "turn_accepted",
+    id: "turn-latest-result",
+    input: "replay my result",
+  }));
+  assert.equal((await within(watchedAcceptance, "latest watcher acceptance")).value.cursor, "186");
+  const watchedTerminal = events.next();
+  const result = turn.result();
+
+  await waitFor(() => connections.length === 2);
+  assert.equal(requestSignals[0].aborted, true);
+  connections[1].send(sse("211", "turn_completed", {
+    cursor: "211",
+    created_at: 2,
+    turn_id: "turn-latest-result",
+    type: "turn_completed",
+    id: "turn-latest-result",
+    final_message: "replayed",
+    usage: null,
+  }));
+
+  assert.deepEqual(await within(result, "latest-tail result replay"), {
+    turnId: "turn-latest-result",
+    finalMessage: "replayed",
+    usage: null,
+    cursor: "211",
+  });
+  assert.equal((await within(watchedTerminal, "latest watcher terminal")).value.cursor, "211");
+  await events.return();
+  assert.deepEqual(requestedCursors, ["latest", "186"]);
+  assert.equal(maximumActiveConnections, 1);
+  await waitFor(() => activeConnections === 0);
+});
+
 test("shared event replay reconnect resolves one turn and delivers each cursor exactly once", async () => {
   const connections = [];
   const requestedCursors = [];

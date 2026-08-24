@@ -214,6 +214,49 @@ test("useLogoutAccount shuts down the durable agent and clears the connected sna
   queryClient.clear();
 });
 
+test("useLogoutAccount publishes disconnected before remote cleanup settles", async () => {
+  let release;
+  let started;
+  const remoteStarted = new Promise((resolve) => { started = resolve; });
+  const remoteCleanup = new Promise((resolve) => { release = resolve; });
+  const config = createConfig({
+    client: {
+      _hasSession() { return false; },
+      account: {
+        async logout() {
+          started();
+          await remoteCleanup;
+        },
+      },
+    },
+  });
+  config._setConnection("connected", Object.freeze({ grant: Object.freeze({ id: "0x01" }) }));
+  const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+  let disconnect;
+
+  function Consumer() {
+    disconnect = useLogoutAccount({ config });
+    return null;
+  }
+
+  let root;
+  await act(async () => {
+    root = create(createElement(
+      QueryClientProvider,
+      { client: queryClient },
+      createElement(Consumer),
+    ));
+  });
+  let logout;
+  await act(async () => { logout = disconnect.mutateAsync(); });
+  await remoteStarted;
+  assert.equal(config.getState().status, "disconnected");
+  release();
+  await act(async () => logout);
+  await act(async () => root.unmount());
+  queryClient.clear();
+});
+
 async function waitFor(predicate) {
   for (let attempt = 0; attempt < 50; attempt += 1) {
     if (predicate()) return;

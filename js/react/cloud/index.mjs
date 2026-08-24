@@ -235,16 +235,13 @@ export function useLogoutAccount(parameters = {}) {
     mutationKey: ["nanocodex", "logoutAccount"],
     mutationFn: async () => {
       const agent = config.getState().agent;
-      try {
-        const settled = await Promise.allSettled([
-          agent?.session.shutdown(),
-          config.client.account.logout(),
-        ]);
-        const failure = settled.find((result) => result.status === "rejected");
-        if (failure?.status === "rejected") throw failure.reason;
-      } finally {
-        config._setConnection("disconnected");
-      }
+      config._setConnection("disconnected");
+      const settled = await Promise.allSettled([
+        agent?.session.shutdown(),
+        config.client.account.logout(),
+      ]);
+      const failure = settled.find((result) => result.status === "rejected");
+      if (failure?.status === "rejected") throw failure.reason;
     },
   });
 }
