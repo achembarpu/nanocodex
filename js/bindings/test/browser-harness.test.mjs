@@ -23,6 +23,16 @@ test("the default browser harness exposes one exact model-visible tool set", asy
   };
   const runtime = bindBrowser({
     datasets,
+    fetch: async (input) => {
+      requests.push(String(input));
+      return Response.json({
+        connectors: {
+          github: { connected: true, label: "Nano Cat (nanocat)", account_id: "hidden" },
+          gmail: { connected: false },
+          gdrive: { connected: true, label: "Drive User", access_token: "hidden" },
+        },
+      });
+    },
     origin: "https://demo.test",
     standard,
     threadId: "browser-harness-thread",
@@ -62,6 +72,8 @@ test("the default browser harness exposes one exact model-visible tool set", asy
   assert.equal(runtime.projectInstructions, "project instructions");
   assert.deepEqual(runtime.tools.map(({ name }) => name), [
     "exec_command",
+    "runtimeInfo",
+    "connectorEgress",
     "web__run",
     "image_gen__imagegen",
     "view_image",
@@ -76,11 +88,20 @@ test("the default browser harness exposes one exact model-visible tool set", asy
     exit_code: 0,
     output: "pwd\n",
   });
+  const connectorEgress = await byName.connectorEgress.handler({}, context);
+  assert.deepEqual(connectorEgress, {
+    status: "ready",
+    authenticated: ["github", "gdrive"],
+    accounts: { github: "Nano Cat (nanocat)", gdrive: "Drive User" },
+  });
+  assert.deepEqual((await byName.runtimeInfo.handler({}, context)).connector_egress, connectorEgress);
   assert.equal(await byName.web__run.handler({ time: [{ utc_offset: "+03:00" }] }, context), "searched");
   assert.deepEqual(await byName.image_gen__imagegen.handler({ prompt: "draw" }, context), {
     image_url: "data:image/png;base64,Z2VuZXJhdGVk",
   });
   assert.deepEqual(requests, [
+    "https://demo.test/v1/connectors",
+    "https://demo.test/v1/connectors",
     "https://demo.test/api/tools/web-search",
     "https://demo.test/api/tools/image-generation",
   ]);
@@ -132,6 +153,7 @@ function preparedBrowser() {
   const workspace = { async readFile() { return new Uint8Array(); } };
   return {
     datasets,
+    fetch: async () => Response.json({ connectors: {} }),
     origin: "https://demo.test",
     standard,
     threadId: "browser-harness-overrides",

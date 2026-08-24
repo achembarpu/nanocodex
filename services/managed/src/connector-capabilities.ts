@@ -8,6 +8,7 @@ type BrokerBinding = Readonly<{
 export type ConnectorEgressInfo = Readonly<{
   status: "disabled" | "ready" | "unavailable";
   authenticated: readonly ConnectorId[];
+  accounts: Readonly<Partial<Record<ConnectorId, string>>>;
 }>;
 
 export async function connectorEgressInfo(
@@ -15,28 +16,37 @@ export async function connectorEgressInfo(
   userId: string,
   enabled: boolean,
 ): Promise<ConnectorEgressInfo> {
-  if (!enabled) return { status: "disabled", authenticated: [] };
+  if (!enabled) return emptyInfo("disabled");
   try {
     const response = await binding.fetch(
       `https://broker.internal/users/${encodeURIComponent(userId)}/connectors`,
     );
     if (!response.ok) {
       await response.body?.cancel();
-      return { status: "unavailable", authenticated: [] };
+      return emptyInfo("unavailable");
     }
     const value: unknown = await response.json();
     if (!isRecord(value) || !isRecord(value.connectors)) {
-      return { status: "unavailable", authenticated: [] };
+      return emptyInfo("unavailable");
     }
     const connectors = value.connectors;
+    const accounts: Partial<Record<ConnectorId, string>> = {};
     const authenticated = CONNECTOR_IDS.filter((id) => {
       const connector = connectors[id];
-      return isRecord(connector) && connector.connected === true;
+      if (!isRecord(connector) || connector.connected !== true) return false;
+      if (typeof connector.label === "string" && connector.label.trim()) {
+        accounts[id] = connector.label.trim();
+      }
+      return true;
     });
-    return { status: "ready", authenticated };
+    return { status: "ready", authenticated, accounts };
   } catch {
-    return { status: "unavailable", authenticated: [] };
+    return emptyInfo("unavailable");
   }
+}
+
+function emptyInfo(status: "disabled" | "unavailable"): ConnectorEgressInfo {
+  return { status, authenticated: [], accounts: {} };
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

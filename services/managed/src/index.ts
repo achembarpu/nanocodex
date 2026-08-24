@@ -1331,6 +1331,11 @@ export class NanocodexSession extends DurableComputerSession {
       customCommands: [createManagedGhCommand(shellFetch)],
     });
     const execCommand = Object.freeze({ ...shell.tool, dispose: disposeWorkspace });
+    const connectorInfo = () => connectorEgressInfo(
+      this.env.NANOCODEX,
+      session.owner_id,
+      !multiplayer,
+    );
     let agent: CloudflareAgent.Agent;
     try {
       agent = await CloudflareAgent.create(this, {
@@ -1344,10 +1349,16 @@ export class NanocodexSession extends DurableComputerSession {
           : [
             "You are Nanocodex running as a durable managed agent on Cloudflare Workers.",
             "Your /workspace filesystem is durable Cloudflare Computer storage backed by this agent's Durable Object.",
-            "Connected account APIs use authenticated shell egress: call runtimeInfo for the current GitHub, Gmail, and Google Drive availability; use gh or curl normally.",
+            "Connected account APIs use transparent shell egress: call connectorEgress for the current GitHub, Gmail, and Google Drive identities, then use gh or curl normally; there is no connectorEgress shell command.",
           ].join("\n\n"),
         tools: [
           execCommand,
+          ...(multiplayer ? [] : [{
+            name: "connectorEgress",
+            description: "Report which connected account APIs and display identities are available through transparent gh/curl egress. Never returns credentials.",
+            parameters: { type: "object", additionalProperties: false },
+            handler: connectorInfo,
+          }]),
           web({
             url: "https://managed-tools.internal/web-search",
             fetch: managedWebFetch(this.env, this.ctx.id.toString()),
@@ -1370,11 +1381,7 @@ export class NanocodexSession extends DurableComputerSession {
               sandbox: "disabled",
               workspace: "/workspace",
               custom_commands: ["gh"],
-              connector_egress: await connectorEgressInfo(
-                this.env.NANOCODEX,
-                session.owner_id,
-                !multiplayer,
-              ),
+              connector_egress: await connectorInfo(),
             }),
           },
         ],
