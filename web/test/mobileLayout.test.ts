@@ -207,8 +207,8 @@ test("touch terminals use one native IME-safe composer and one contextual action
   assert.equal(matches(touchComposer, /className="agent-touch-actions"/g), 1);
   assert.equal(matches(touchComposer, /className="agent-touch-field"/g), 1);
   assert.doesNotMatch(touchComposer, />Steer<|>Queued</);
-  assert.match(touchComposer, /const textarea = useRef<HTMLTextAreaElement>/);
-  assert.match(touchComposer, /Math\.min\(Math\.max\(element\.scrollHeight, 44\), 132\)/);
+  assert.doesNotMatch(touchComposer, /scrollHeight/);
+  assert.match(ruleBlock(terminalCss, ".agent-touch-composer textarea {", terminalCss.indexOf(`@media ${coarseQuery}`)), /field-sizing:\s*content/);
   assert.doesNotMatch(touchComposer, /agent-touch-rail|>│<\/span>/);
   assert.doesNotMatch(touchComposer, /\x1b\[200~|bracketed-paste/i);
   assert.match(terminal, /inputMode: touchInput \? "composer" : "xterm"/);

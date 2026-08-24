@@ -1,3 +1,4 @@
+import * as account from "./actions/account.mjs";
 import * as agent from "./actions/agent.mjs";
 import * as connection from "./actions/connection.mjs";
 import * as grant from "./actions/grant.mjs";
@@ -6,6 +7,9 @@ import * as mpp from "./actions/mpp.mjs";
 
 export function connectActions() {
   return (client) => ({
+    account: {
+      logout: () => account.logout(client),
+    },
     agent: {
       create: (options) => agent.create(client, options),
     },

@@ -15,6 +15,10 @@ import { parentDialog, type WalletRequest } from "./protocol";
 
 const provider = createProvider();
 
+export async function logoutAccount() {
+  await provider.request({ method: "wallet_disconnect" });
+}
+
 const connectorIds = ["github", "gmail", "gdrive", "chatgpt"] as const;
 const connectorResourcePrefix = "urn:nanocodex:connector:";
 const connectorsResourcePrefix = "urn:nanocodex:connectors:";

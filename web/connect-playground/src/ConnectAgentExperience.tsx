@@ -93,6 +93,7 @@ export function ConnectAgentExperience({
             <AgentTerminalView
               agent={terminalAgent}
               agentError={undefined}
+              composer="always"
               mode="preview"
               onConversationActivity={recordActivity}
               onTerminalEvent={observeTerminalEvent}

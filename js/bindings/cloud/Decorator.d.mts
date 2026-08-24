@@ -1,3 +1,4 @@
+import type { logout } from "./actions/account.mjs";
 import type { create as createAgent } from "./actions/agent.mjs";
 import type { connect, disconnect, reconnect } from "./actions/connection.mjs";
 import type { revoke } from "./actions/grant.mjs";
@@ -6,6 +7,7 @@ import type { charge } from "./actions/mpp.mjs";
 import type { Client } from "./Client.mjs";
 
 export type ConnectActions = {
+  account: { logout(): logout.ReturnType };
   agent: { create(options: createAgent.Options): Promise<createAgent.ReturnType> };
   connection: {
     connect(options: connect.Options): connect.ReturnType;

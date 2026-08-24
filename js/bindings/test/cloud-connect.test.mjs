@@ -324,7 +324,9 @@ test("Connect persists, validates, and clears an app-scoped grant session", asyn
   const restoredClient = Client.create({
     appId: "session-workspace",
     dialog: Dialog.memory(),
-    provider: { request() { throw new Error("wallet must not reopen"); } },
+    provider: {
+      request() { throw new Error("wallet must not reopen"); },
+    },
     session: storage,
     transport,
   });
@@ -336,6 +338,64 @@ test("Connect persists, validates, and clears an app-scoped grant session", asyn
   await restoredClient.connection.disconnect();
   assert.equal(storage.getItem("nanocodex:connect:session-workspace:session"), null);
   assert.equal(restoredClient._hasSession(), false);
+});
+
+test("Connect account logout clears the local session without revoking the app grant", async () => {
+  const storage = memoryStorage();
+  const walletRequests = [];
+  const client = Client.create({
+    appId: "logout-workspace",
+    dialog: Dialog.memory(),
+    provider: {
+      async request(request) {
+        walletRequests.push(request);
+      },
+    },
+    session: storage,
+    transport: Transport.from({
+      key: "logout",
+      name: "logout",
+      type: "logout",
+      setup() {
+        return {
+          baseUrl: "https://connect.example",
+          async fetch() { throw new Error("unused"); },
+          async request() { throw new Error("grant transport must not be called"); },
+        };
+      },
+    }),
+  });
+  client._setSession({
+    grantId: `0x${"12".repeat(32)}`,
+    token: "grant-session",
+  });
+
+  await client.account.logout();
+  assert.equal(client._hasSession(), false);
+  assert.deepEqual(walletRequests, [{ method: "wallet_disconnect" }]);
+});
+
+test("Connect account logout clears the local session when wallet logout fails", async () => {
+  const storage = memoryStorage();
+  const client = Client.create({
+    appId: "failed-logout-workspace",
+    dialog: Dialog.memory(),
+    provider: {
+      async request(request) {
+        assert.equal(request.method, "wallet_disconnect");
+        throw new Error("account service unavailable");
+      },
+    },
+    session: storage,
+    transport: Transport.mock(),
+  });
+  client._setSession({
+    grantId: `0x${"34".repeat(32)}`,
+    token: "grant-session",
+  });
+
+  await assert.rejects(client.account.logout(), /account service unavailable/);
+  assert.equal(client._hasSession(), false);
 });
 
 test("Nanocodex Connect signs one witness-bound access key and enforces its MPP permission", async () => {

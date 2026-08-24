@@ -9,6 +9,7 @@ import type {
 import {
   useConnectAgent,
   useFund,
+  useLogoutAccount,
   useRevokeGrant,
 } from "nanocodex-react/connect";
 
@@ -67,10 +68,12 @@ export function App() {
   const connect = useConnectAgent({ config });
   const connection = connect.connection;
   const fund = useFund({ config });
+  const logoutAccount = useLogoutAccount({ config });
   const revoke = useRevokeGrant({ config });
   const isMutating = connect.connectionStatus === "connecting"
     || connect.isPending
     || fund.isPending
+    || logoutAccount.isPending
     || revoke.isPending;
   const mercatorReady = Boolean(
     connect.agent
@@ -158,6 +161,19 @@ export function App() {
         },
       },
     );
+  }
+
+  function logout() {
+    setError(undefined);
+    logoutAccount.mutate(undefined, {
+      onSuccess() {
+        setObservation(EMPTY_OBSERVATION);
+        record("Signed out", "This browser forgot the Nanocodex account session. The app grant was not revoked.", "neutral");
+      },
+      onError(reason: Error) {
+        fail("Sign out failed", reason);
+      },
+    });
   }
 
   if (connect.connectionStatus === "connecting" && !connect.isPending) return null;
@@ -254,6 +270,7 @@ export function App() {
                     mercatorReady={mercatorReady}
                     onDismissError={() => setError(undefined)}
                     onFund={addMachineUsd}
+                    onLogout={logout}
                     onRevoke={revokeAccess}
                   />
                 </section>
@@ -447,6 +464,7 @@ function ConnectionWorkspace({
   mercatorReady,
   onDismissError,
   onFund,
+  onLogout,
   onRevoke,
 }: Readonly<{
   connection: Connection;
@@ -455,6 +473,7 @@ function ConnectionWorkspace({
   mercatorReady: boolean;
   onDismissError(): void;
   onFund(): void;
+  onLogout(): void;
   onRevoke(): void;
 }>) {
   return (
@@ -530,7 +549,16 @@ function ConnectionWorkspace({
         </dl>
       </details>
 
-      <div className="panel-body">
+      <div className="panel-body account-actions">
+        <button
+          className="secondary-button"
+          data-testid="logout-button"
+          disabled={isMutating}
+          onClick={onLogout}
+          type="button"
+        >
+          Sign out
+        </button>
         <button
           className="danger-button"
           data-testid="revoke-button"

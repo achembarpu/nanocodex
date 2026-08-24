@@ -5,7 +5,7 @@ import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { createElement } from "react";
 import { act, create } from "react-test-renderer";
 
-import { createConfig, useConnectAgent } from "../cloud/index.mjs";
+import { createConfig, useConnectAgent, useLogoutAccount } from "../cloud/index.mjs";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -107,6 +107,45 @@ test("useConnectAgent validates a retained agent while refreshing its grant proj
   assert.equal(snapshot.agent, agent);
   assert.equal(creates, 1);
 
+  await act(async () => root.unmount());
+  queryClient.clear();
+});
+
+test("useLogoutAccount shuts down the durable agent and clears the connected snapshot", async () => {
+  const connection = Object.freeze({ grant: Object.freeze({ id: "0x01" }) });
+  const calls = [];
+  const agent = Object.freeze({
+    session: Object.freeze({ async shutdown() { calls.push("shutdown"); } }),
+  });
+  const config = createConfig({
+    client: {
+      _hasSession() { return false; },
+      account: {
+        async logout() { calls.push("logout"); },
+      },
+    },
+  });
+  config._setConnection("connected", connection, agent);
+  const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+  let disconnect;
+
+  function Consumer() {
+    disconnect = useLogoutAccount({ config });
+    return null;
+  }
+
+  let root;
+  await act(async () => {
+    root = create(createElement(
+      QueryClientProvider,
+      { client: queryClient },
+      createElement(Consumer),
+    ));
+  });
+  await act(async () => disconnect.mutateAsync());
+
+  assert.deepEqual(calls, ["shutdown", "logout"]);
+  assert.equal(config.getState().status, "disconnected");
   await act(async () => root.unmount());
   queryClient.clear();
 });

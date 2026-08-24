@@ -182,6 +182,7 @@ type GrantPrincipal = Readonly<{
   appId: string;
   grantId: `0x${string}`;
 }>;
+type ConnectAgentRecord = Readonly<{ agentId: string }>;
 type AccessKeyRecord = Readonly<{
   accountAddress: `0x${string}`;
   appId: string;
@@ -524,8 +525,10 @@ async function createConnection(request: Request, env: Env, store: Kv.Kv): Promi
   if (!identity.linked) {
     throw new ApiFailure(403, "account_link_required", "Link this Tempo account to your Nanocodex profile before authorizing a durable agent.");
   }
-  const connectors = await connectedRequestedConnectors(env, identity.userId, requested);
-  const durableAgentId = await createManagedAgent(env, identity.userId);
+  const [connectors, durableAgentId] = await Promise.all([
+    connectedRequestedConnectors(env, identity.userId, requested),
+    connectManagedAgent(env, store, identity.userId, appId),
+  ]);
   const grantId = await digestHex(`grant:${randomSubject()}`);
   const grantToken = randomSubject();
   const grant: GrantRecord = {
@@ -545,33 +548,42 @@ async function createConnection(request: Request, env: Env, store: Kv.Kv): Promi
 
   try {
     // Resolve the public projection before publishing either the broker subject
-    // or bearer token. The newly provisioned durable agent is compensated on
-    // every later failure.
-    const wire = await connectionWire(grant, grantToken);
-    await bindSubject(env, grant.egressSubject, grant.brokerUserId);
-    await store.set(`grant:${grant.id}`, grant, { ttl: grantTtl });
-    if (persist) {
-      await store.set(accessKeyStorageKey(accountAddress, accessKey.key_id), {
+    // or bearer token. Independent network boundaries settle together.
+    const [wireResult, subjectResult] = await Promise.allSettled([
+      connectionWire(grant, grantToken),
+      bindSubject(env, grant.egressSubject, grant.brokerUserId),
+    ]);
+    if (wireResult.status === "rejected") throw wireResult.reason;
+    if (subjectResult.status === "rejected") throw subjectResult.reason;
+
+    if (!store.create) {
+      throw new ApiFailure(500, "grant_token_unavailable", "The grant session could not be created.");
+    }
+    const writes = await Promise.allSettled([
+      store.set(`grant:${grant.id}`, grant, { ttl: grantTtl }),
+      store.create(`grant-token:${grantToken}`, {
+        accountAddress,
+        appId,
+        grantId: grant.id,
+      } satisfies GrantPrincipal, { ttl: grantTtl }),
+      ...(persist ? [store.set(accessKeyStorageKey(accountAddress, accessKey.key_id), {
         accountAddress,
         appId,
         accessKey,
-      } satisfies AccessKeyRecord, { ttl: grantTtl });
-    }
-    if (!store.create || !await store.create(`grant-token:${grantToken}`, {
-      accountAddress,
-      appId,
-      grantId: grant.id,
-    } satisfies GrantPrincipal, { ttl: grantTtl })) {
+      } satisfies AccessKeyRecord, { ttl: grantTtl })] : []),
+    ]);
+    const writeFailure = writes.find((result) => result.status === "rejected");
+    if (writeFailure?.status === "rejected") throw writeFailure.reason;
+    if (writes[1]?.status !== "fulfilled" || writes[1].value !== true) {
       throw new ApiFailure(500, "grant_token_unavailable", "The grant session could not be created.");
     }
     await appendGrantIndex(store, grant.accountAddress, grant.id);
-    return Response.json(wire, { status: 201 });
+    return Response.json(wireResult.value, { status: 201 });
   } catch (cause) {
     const cleanup = [
       store.delete(`grant:${grant.id}`),
       store.delete(`grant-token:${grantToken}`),
       unbindSubject(env, grant.egressSubject, grant.brokerUserId),
-      deleteManagedAgent(env, grant.brokerUserId, grant.agentId),
     ];
     if (persist) cleanup.push(store.delete(accessKeyStorageKey(accountAddress, accessKey.key_id)));
     await Promise.allSettled(cleanup);
@@ -742,6 +754,50 @@ async function handleGrantRoute(
     return proxyManagedAgent(request, env, grant, action.slice("agents/".length));
   }
   throw new ApiFailure(405, "method_not_allowed", "Unsupported grant operation.");
+}
+
+async function connectManagedAgent(
+  env: Env,
+  store: Kv.Kv,
+  userId: string,
+  appId: string,
+): Promise<string> {
+  if (!store.create) {
+    throw new ApiFailure(500, "durable_agent_unavailable", "Atomic durable-agent provisioning is unavailable.");
+  }
+  const recordKey = `connect-agent:${appId}:${userId}`;
+  const lockKey = `${recordKey}:lock`;
+  const lockValue = randomSubject();
+  let acquired = false;
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    acquired = await store.create(lockKey, lockValue, { ttl: 60 });
+    if (acquired) break;
+    await new Promise((resolve) => setTimeout(resolve, 25 * (attempt + 1)));
+  }
+  if (!acquired) {
+    throw new ApiFailure(409, "durable_agent_busy", "The account's durable agent is already being provisioned.");
+  }
+  try {
+    const retained = await store.get<unknown>(recordKey);
+    if (isConnectAgentRecord(retained)) return retained.agentId;
+
+    const agentId = await createManagedAgent(env, userId);
+    try {
+      await store.set(recordKey, { agentId } satisfies ConnectAgentRecord);
+      return agentId;
+    } catch (cause) {
+      await deleteManagedAgent(env, userId, agentId).catch(() => {});
+      throw cause;
+    }
+  } finally {
+    await store.delete(lockKey);
+  }
+}
+
+function isConnectAgentRecord(value: unknown): value is ConnectAgentRecord {
+  return isRecord(value)
+    && typeof value.agentId === "string"
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value.agentId);
 }
 
 async function createManagedAgent(env: Env, userId: string): Promise<string> {

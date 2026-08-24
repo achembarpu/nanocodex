@@ -36,6 +36,7 @@ export function AgentTerminalView({
   agent,
   agentError,
   controls,
+  composer = "auto",
   inactiveMessage,
   mode,
   onConversationActivity,
@@ -48,6 +49,7 @@ export function AgentTerminalView({
   agent: TerminalAgent | undefined;
   agentError: string | undefined;
   controls?(controls: Pick<AgentTerminalAccessory, "agentReady">): ReactNode;
+  composer?: "auto" | "always";
   inactiveMessage?(state: Readonly<{
     agentError: string | undefined;
     agentStatus: AgentStatus;
@@ -67,7 +69,8 @@ export function AgentTerminalView({
   const [terminalRunning, setTerminalRunning] = useState(false);
   const [terminalHost, setTerminalHost] = useState<TerminalHost>();
   const [terminalReady, setTerminalReady] = useState(false);
-  const touchInput = useTouchInput();
+  const detectedTouchInput = useTouchInput();
+  const touchInput = composer === "always" || detectedTouchInput;
   const active = useRef<DemoTerminal | undefined>(undefined);
   const activePromptIds = useRef(new Set<number>());
   const agentStatus: AgentStatus = agentError

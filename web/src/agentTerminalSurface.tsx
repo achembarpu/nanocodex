@@ -212,7 +212,7 @@ export function XtermSurface({
 
   return (
     <section
-      className={`agent-terminal-shell${controls ? " has-controls" : ""}`}
+      className={`agent-terminal-shell${controls ? " has-controls" : ""}${composer ? " has-composer" : ""}`}
       aria-label="Live Nanocodex terminal"
     >
       {controls}
@@ -240,13 +240,6 @@ export function TouchTerminalComposer({
   onSubmit(value: string): void;
 }) {
   const composing = useRef(false);
-  const textarea = useRef<HTMLTextAreaElement>(null);
-  useLayoutEffect(() => {
-    const element = textarea.current;
-    if (!element) return;
-    element.style.height = "0";
-    element.style.height = `${Math.min(Math.max(element.scrollHeight, 44), 132)}px`;
-  }, [draft]);
   const submit = () => {
     if (pending || !draft.trim()) return;
     onSubmit(draft);
@@ -263,7 +256,6 @@ export function TouchTerminalComposer({
     >
       <div className="agent-touch-field">
         <textarea
-          ref={textarea}
           aria-label="Message Nanocodex"
           enterKeyHint="send"
           placeholder="Message Nanocodex"

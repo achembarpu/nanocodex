@@ -10,6 +10,8 @@ import type { TerminalAgent, TerminalTurn } from "./demoTerminal";
 const MANAGED_HISTORY_PAGE_SIZE = 128;
 const MANAGED_HISTORY_INITIAL_ATTEMPTS = 3;
 const MANAGED_HISTORY_ATTEMPT_TIMEOUT_MS = 10_000;
+const MANAGED_HISTORY_RETRY_INITIAL_MS = 1_000;
+const MANAGED_HISTORY_RETRY_MAX_MS = 30_000;
 export const MAX_MANAGED_RETAINED_ENVELOPES = MANAGED_HISTORY_PAGE_SIZE * 2;
 const managedAgents = new Map<string, ManagedAgent>();
 const managedLists = new Map<string, Promise<readonly ManagedConversation[]>>();
@@ -86,6 +88,7 @@ export function managedTerminalAgent(
     turn: Object.freeze({
       prompt: ({ input }: { input: string }) => {
         const id = crypto.randomUUID();
+        submitted.add(id);
         return managedTerminalTurn(managed, id, input);
       },
     }),
@@ -125,6 +128,8 @@ function managedEventWatcher(
   let historyPageInFlight: Promise<Awaited<ReturnType<typeof managed.events.page>>> | undefined;
   let tailStarted = false;
   let outageReported = false;
+  let historyRetryDelay = MANAGED_HISTORY_RETRY_INITIAL_MS;
+  let historyRetryTimer: ReturnType<typeof setTimeout> | undefined;
   let latestLiveCursor: string | undefined;
   const emit = (event: AgentEvent) => {
     for (const listener of listeners) listener(event);
@@ -164,22 +169,20 @@ function managedEventWatcher(
     if (outageReported) return;
     outageReported = true;
     const detail = historyError instanceof Error ? historyError.message : String(historyError);
-    emit({
-      protocol_version: 1,
-      request_id: managed.id,
-      seq: ++sequence,
-      type: "run.error",
-      payload: {
-        message: `Managed conversation history could not be loaded: ${detail}. Reconnect or retry loading history.`,
-      },
+    console.warn("nanocodex:managed.history_unavailable", {
+      agentId: managed.id,
+      error: detail,
+      retrying: true,
     });
-    emit({
-      protocol_version: 1,
-      request_id: managed.id,
-      seq: ++sequence,
-      type: "run.failed",
-      payload: { status: "failed", disposition: "history_unavailable" },
-    });
+  };
+  const scheduleHistoryRetry = () => {
+    if (controller.signal.aborted || historyLoaded || historyRetryTimer !== undefined) return;
+    const delay = historyRetryDelay;
+    historyRetryDelay = Math.min(historyRetryDelay * 2, MANAGED_HISTORY_RETRY_MAX_MS);
+    historyRetryTimer = setTimeout(() => {
+      historyRetryTimer = undefined;
+      void loadInitial();
+    }, delay);
   };
   const startTail = (cursor: string) => {
     if (tailStarted || controller.signal.aborted) return;
@@ -194,6 +197,7 @@ function managedEventWatcher(
           if (latestLiveCursor !== undefined
             && compareManagedCursor(envelope.cursor, latestLiveCursor) <= 0) continue;
           latestLiveCursor = envelope.cursor;
+          if (!historyEnabled && !submitted.has(managedEnvelopeTurnId(envelope) ?? "")) continue;
           if (!retain(envelope, "live")) continue;
           const projected = managedEnvelopeEvents(
             envelope,
@@ -231,14 +235,15 @@ function managedEventWatcher(
     loadingInitial = (async () => {
       let initial: Awaited<ReturnType<typeof managed.events.page>> | undefined;
       let historyError: unknown;
-      for (let attempt = 1; attempt <= MANAGED_HISTORY_INITIAL_ATTEMPTS; attempt += 1) {
+      const attempts = outageReported ? 1 : MANAGED_HISTORY_INITIAL_ATTEMPTS;
+      for (let attempt = 1; attempt <= attempts; attempt += 1) {
         try {
           initial = await requestHistoryPage({ limit: MANAGED_HISTORY_PAGE_SIZE });
           break;
         } catch (error) {
           historyError = error;
           if (controller.signal.aborted) return false;
-          console.error("nanocodex:managed.history_failed", {
+          console.warn("nanocodex:managed.history_failed", {
             agentId: managed.id,
             attempt,
             error: error instanceof Error ? error.message : String(error),
@@ -248,6 +253,8 @@ function managedEventWatcher(
       }
       if (!initial || controller.signal.aborted) {
         reportHistoryOutage(historyError);
+        startTail("latest");
+        scheduleHistoryRetry();
         return false;
       }
       for (const envelope of initial.data) retain(envelope, "initial");
@@ -256,6 +263,9 @@ function managedEventWatcher(
       historyLoaded = true;
       latestLiveCursor = initial.latestCursor;
       outageReported = false;
+      historyRetryDelay = MANAGED_HISTORY_RETRY_INITIAL_MS;
+      if (historyRetryTimer !== undefined) clearTimeout(historyRetryTimer);
+      historyRetryTimer = undefined;
       emitHistory();
       startTail(initial.latestCursor);
       return true;
@@ -264,16 +274,13 @@ function managedEventWatcher(
   };
   const retryWhenOnline = () => {
     if (controller.signal.aborted || historyLoaded) return;
-    void loadInitial().then((loaded) => {
-      if (!loaded) globalThis.addEventListener?.("online", retryWhenOnline, { once: true });
-    });
+    if (historyRetryTimer !== undefined) clearTimeout(historyRetryTimer);
+    historyRetryTimer = undefined;
+    void loadInitial();
   };
   if (historyEnabled) {
-    void loadInitial().then((loaded) => {
-      if (!loaded && !controller.signal.aborted) {
-        globalThis.addEventListener?.("online", retryWhenOnline, { once: true });
-      }
-    });
+    globalThis.addEventListener?.("online", retryWhenOnline);
+    void loadInitial();
   } else {
     historyLoaded = true;
     startTail("latest");
@@ -307,6 +314,7 @@ function managedEventWatcher(
     },
     off() {
       controller.abort();
+      if (historyRetryTimer !== undefined) clearTimeout(historyRetryTimer);
       globalThis.removeEventListener?.("online", retryWhenOnline);
       listeners.clear();
       historyListeners.clear();
@@ -436,6 +444,11 @@ function removeManagedEnvelopes(
 function managedEnvelopeGroup(envelope: ManagedEvent): string {
   const id = "id" in envelope.data ? envelope.data.id : undefined;
   return envelope.turnId ?? (typeof id === "string" ? id : `cursor:${envelope.cursor}`);
+}
+
+function managedEnvelopeTurnId(envelope: ManagedEvent): string | undefined {
+  const id = "id" in envelope.data ? envelope.data.id : undefined;
+  return envelope.turnId ?? (typeof id === "string" ? id : undefined);
 }
 
 function compareManagedCursor(left: string, right: string): number {

@@ -45,6 +45,9 @@ export function create(parameters) {
           params: request.params ?? [],
           ...(request.context ? { context: request.context } : {}),
         });
+        if (request.method === "wallet_disconnect") {
+          state = Object.freeze({ accounts: Object.freeze([]), activeAccount: 0, accessKeys: Object.freeze([]) });
+        }
         return sent.result;
       } catch (error) {
         if (error?.code === 4001) {

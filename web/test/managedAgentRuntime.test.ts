@@ -393,7 +393,68 @@ test("managed terminal tails from latest without requesting history when history
   watcher.off();
 });
 
-test("managed history fails actionably without attaching at latest after retries exhaust", async () => {
+test("managed terminal without history projects only turns submitted by this app session", async () => {
+  let releaseLive!: () => void;
+  const liveReady = new Promise<void>((resolve) => { releaseLive = resolve; });
+  let submittedTurnId: string | undefined;
+  const managed = {
+    id: "private-live-agent",
+    events: {
+      async page() {
+        throw new Error("history must not be requested");
+      },
+      async *watch(options: { cursor: string; signal: AbortSignal }) {
+        assert.equal(options.cursor, "latest");
+        await liveReady;
+        yield managedOuterEnvelope("1", "peer-turn", {
+          type: "turn_accepted", id: "peer-turn", input: "private peer prompt", replayed: false,
+        });
+        yield managedOuterEnvelope("2", submittedTurnId!, {
+          type: "turn_accepted", id: submittedTurnId!, input: "my prompt", replayed: false,
+        });
+        yield managedRawEnvelope("3", "peer-turn", "assistant.message", { text: "private peer reply" });
+        yield managedRawEnvelope("4", submittedTurnId!, "assistant.message", { text: "my reply" });
+        yield managedOuterEnvelope("5", "peer-turn", {
+          type: "turn_completed", id: "peer-turn", final_message: "private peer reply", usage: null,
+        });
+        yield managedOuterEnvelope("6", submittedTurnId!, {
+          type: "turn_completed", id: submittedTurnId!, final_message: "my reply", usage: null,
+        });
+        await new Promise<void>((resolve) => options.signal.addEventListener("abort", () => resolve()));
+      },
+    },
+    turn: {
+      prompt(options: { id: string }) {
+        submittedTurnId = options.id;
+        return {
+          steer: async () => {},
+          cancel: async () => {},
+          result: async () => ({ finalMessage: "my reply" }),
+        };
+      },
+    },
+  };
+  const agent = managedTerminalAgent(managed as never, { history: false });
+  const watcher = agent.events.watch();
+  const events: Array<{ type: string; payload: Record<string, unknown> }> = [];
+  const histories: Array<readonly { type: string }[]> = [];
+  watcher.onEvent((event) => events.push(event));
+  watcher.onHistory?.((history) => histories.push(history));
+  agent.turn.prompt({ input: "my prompt" });
+  releaseLive();
+  await waitForCondition(() => events.some(({ type }) => type === "run.completed"));
+
+  assert.deepEqual(histories, [[]]);
+  assert.deepEqual(events.map(({ type, payload }) => [type, payload.text]), [
+    ["managed.prompt", "my prompt"],
+    ["assistant.message", "my reply"],
+    ["run.completed", undefined],
+  ]);
+  assert.equal(events.some(({ payload }) => String(payload.text).includes("peer")), false);
+  watcher.off();
+});
+
+test("managed history failure stays non-fatal, tails live events, and retries in the background", async () => {
   const cursors: string[] = [];
   let pages = 0;
   const managed = {
@@ -415,10 +476,8 @@ test("managed history fails actionably without attaching at latest after retries
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(pages, 3);
-  assert.deepEqual(cursors, []);
-  assert.deepEqual(events.map(({ type }) => type), ["run.error", "run.failed"]);
-  assert.match(String(events[0]?.payload.message), /Reconnect or retry loading history/);
-  assert.equal(events[1]?.payload.disposition, "history_unavailable");
+  assert.deepEqual(cursors, ["latest"]);
+  assert.deepEqual(events, []);
   watcher.off();
 });
 
@@ -458,8 +517,8 @@ test("managed history resumes after an online transition and detachment aborts i
     await waitForCondition(() => pages === 3);
 
     online.dispatchEvent(new Event("online"));
-    await waitForCondition(() => watched.length === 1);
-    assert.deepEqual(watched, ["11"]);
+    await waitForCondition(() => histories.length === 1);
+    assert.deepEqual(watched, ["latest"]);
     assert.deepEqual(histories, [["online history"]]);
 
     watcher.off();

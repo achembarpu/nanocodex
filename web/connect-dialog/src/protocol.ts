@@ -19,6 +19,10 @@ type WalletEvent = Readonly<{
   reject(error: Readonly<{ code: number; message: string }>): Promise<unknown>;
 }>;
 
+type WalletHostActions = Readonly<{
+  logout(): Promise<void> | void;
+}>;
+
 const listeners = new Set<() => void>();
 let snapshot: Request | undefined;
 let walletEvent: WalletEvent | undefined;
@@ -64,7 +68,7 @@ export const parentDialog = Object.freeze({
   },
 });
 
-export function startWalletHost() {
+export function startWalletHost(actions: WalletHostActions) {
   if (started) return;
   started = true;
   const origin = parseOrigin(new URL(window.location.href).searchParams.get("origin"));
@@ -72,13 +76,24 @@ export function startWalletHost() {
   const wata = Wata.create({ transports: [postMessage({ targetOrigin: origin })] });
   const session = wata.start();
   session.onRequest((event) => {
+    if (event.request.method === "wallet_disconnect") {
+      if (snapshot) {
+        void event.reject({ code: -32002, message: "Nanocodex Connect already has a pending request." });
+        return;
+      }
+      void Promise.resolve()
+        .then(() => actions.logout())
+        .then(() => event.respond(undefined))
+        .catch((error) => event.reject({ code: -32603, message: errorMessage(error) }));
+      return;
+    }
     const type = event.request.method === "wallet_connect"
       ? "walletConnect"
       : event.request.method === "wallet_revokeAccessKey"
         ? "walletRevokeAccessKey"
         : undefined;
     if (snapshot || !type) {
-      void event.reject({ code: -32601, message: "Nanocodex Connect only accepts connection and access-key revocation requests here." });
+      void event.reject({ code: -32601, message: "Nanocodex Connect only accepts connection, logout, and access-key revocation requests here." });
       return;
     }
     walletEvent = event as unknown as WalletEvent;

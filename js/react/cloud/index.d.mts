@@ -178,6 +178,21 @@ export function useCharge<
   context
 >;
 
+export function useLogoutAccount<
+  error = Error,
+  context = unknown,
+>(parameters?: UseConnectMutationParameters<
+  void,
+  void,
+  error,
+  context
+>): UseConnectMutationReturnType<
+  void,
+  void,
+  error,
+  context
+>;
+
 export function useRevokeGrant<
   error = Error,
   context = unknown,

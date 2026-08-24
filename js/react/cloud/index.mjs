@@ -213,6 +213,28 @@ export function useCharge(parameters = {}) {
   );
 }
 
+/** Signs the Nanocodex account out without revoking its app grant or access key. */
+export function useLogoutAccount(parameters = {}) {
+  const config = useConfig(parameters);
+  return useMutation({
+    ...parameters.mutation,
+    mutationKey: ["nanocodex", "logoutAccount"],
+    mutationFn: async () => {
+      const agent = config.getState().agent;
+      try {
+        const settled = await Promise.allSettled([
+          agent?.session.shutdown(),
+          config.client.account.logout(),
+        ]);
+        const failure = settled.find((result) => result.status === "rejected");
+        if (failure?.status === "rejected") throw failure.reason;
+      } finally {
+        config._setConnection("disconnected");
+      }
+    },
+  });
+}
+
 /** Revokes the current connection's grant. */
 export function useRevokeGrant(parameters = {}) {
   const config = useConfig(parameters);
