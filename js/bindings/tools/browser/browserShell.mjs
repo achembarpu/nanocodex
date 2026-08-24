@@ -196,16 +196,19 @@ export async function createBrowserBash(rawFs, thread, options = {}) {
     const filesystem = new OpfsShellFileSystem(rawFs);
     await filesystem.refreshPaths();
     const executionTimeoutMs = options.executionTimeoutMs ?? MAX_EXECUTION_MS;
+    const origin = options.origin ?? globalThis.location?.origin;
     const workerEgress = {
-        origin: options.origin ?? globalThis.location?.origin,
+        origin,
         threadId: thread.id,
     };
     let pythonRuntime = options.pythonRuntime;
-    const shellFetch = options.fetch ?? createBrowserEgressFetch({
-        fetch: options.connectorFetch ?? globalThis.fetch,
-        origin: options.origin ?? globalThis.location?.origin,
-        threadId: thread.id,
-    });
+    const shellFetch = options.fetch ?? (origin
+        ? createBrowserEgressFetch({
+            fetch: options.connectorFetch ?? globalThis.fetch,
+            origin,
+            threadId: thread.id,
+        })
+        : unavailableBrowserEgress);
     const loadPython = async (name) => {
         const module = await import("./browserPython.mjs");
         pythonRuntime ??= options.workspaceRoot
@@ -268,6 +271,9 @@ export async function createBrowserBash(rawFs, thread, options = {}) {
         exec: (input, context) => execute(bash, filesystem, thread, input, options.onChanged ?? (() => notifyThreadGitChanged(thread)), context?.signal, executionTimeoutMs),
     };
 }
+const unavailableBrowserEgress = async () => {
+    throw new Error("browser egress is unavailable outside the Nanocodex browser host");
+};
 function unameCommand(defineCommand) {
     return defineCommand("uname", async (args) => {
         const fields = {
