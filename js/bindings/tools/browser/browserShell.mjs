@@ -33,8 +33,8 @@ const AGENT_INSTRUCTIONS = `You are working in a persistent browser filesystem r
 Use exec_command for bash commands such as ls, cat, find, grep, git, curl, wget, and python3. The
 shell and Python runtime execute entirely in browser sandboxes, so they have no host process or PTY.
 curl, wget, and the gh compatibility command use one thread-scoped, same-origin egress gateway.
-Call connectorEgress for the current GitHub, Gmail, and Google Drive identities, then use gh or curl
-normally; there is no connectorEgress shell command. Destination policy and connected-account
+Call accountInfo for the current GitHub, Gmail, and Google Drive identities, then use gh or curl
+normally; accountInfo is a tool, not a shell command. Destination policy and connected-account
 credentials stay outside the browser runtime. The
 clang, clang++, gcc, g++, cc, and c++ compile C/C++ sources to WASI WebAssembly in a lazy worker.
 Browser SSH is noninteractive and requires a wss:// endpoint that carries raw SSH because browsers

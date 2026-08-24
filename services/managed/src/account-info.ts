@@ -5,17 +5,17 @@ type BrokerBinding = Readonly<{
   fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response>;
 }>;
 
-export type ConnectorEgressInfo = Readonly<{
+export type AccountInfo = Readonly<{
   status: "disabled" | "ready" | "unavailable";
   authenticated: readonly ConnectorId[];
   accounts: Readonly<Partial<Record<ConnectorId, string>>>;
 }>;
 
-export async function connectorEgressInfo(
+export async function accountInfo(
   binding: BrokerBinding,
   userId: string,
   enabled: boolean,
-): Promise<ConnectorEgressInfo> {
+): Promise<AccountInfo> {
   if (!enabled) return emptyInfo("disabled");
   try {
     const response = await binding.fetch(
@@ -45,7 +45,7 @@ export async function connectorEgressInfo(
   }
 }
 
-function emptyInfo(status: "disabled" | "unavailable"): ConnectorEgressInfo {
+function emptyInfo(status: "disabled" | "unavailable"): AccountInfo {
   return { status, authenticated: [], accounts: {} };
 }
 

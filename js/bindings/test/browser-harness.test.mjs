@@ -73,7 +73,7 @@ test("the default browser harness exposes one exact model-visible tool set", asy
   assert.deepEqual(runtime.tools.map(({ name }) => name), [
     "exec_command",
     "runtimeInfo",
-    "connectorEgress",
+    "accountInfo",
     "web__run",
     "image_gen__imagegen",
     "view_image",
@@ -88,13 +88,13 @@ test("the default browser harness exposes one exact model-visible tool set", asy
     exit_code: 0,
     output: "pwd\n",
   });
-  const connectorEgress = await byName.connectorEgress.handler({}, context);
-  assert.deepEqual(connectorEgress, {
+  const accountInfo = await byName.accountInfo.handler({}, context);
+  assert.deepEqual(accountInfo, {
     status: "ready",
     authenticated: ["github", "gdrive"],
     accounts: { github: "Nano Cat (nanocat)", gdrive: "Drive User" },
   });
-  assert.deepEqual((await byName.runtimeInfo.handler({}, context)).connector_egress, connectorEgress);
+  assert.deepEqual((await byName.runtimeInfo.handler({}, context)).account, accountInfo);
   assert.equal(await byName.web__run.handler({ time: [{ utc_offset: "+03:00" }] }, context), "searched");
   assert.deepEqual(await byName.image_gen__imagegen.handler({ prompt: "draw" }, context), {
     image_url: "data:image/png;base64,Z2VuZXJhdGVk",

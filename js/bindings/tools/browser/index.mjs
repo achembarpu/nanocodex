@@ -1,6 +1,6 @@
 import "./browserBuffer.mjs";
 import { createBrowserEgressFetch, installBrowserEgressFetch } from "./browserEgress.mjs";
-import { browserConnectorEgressTool, browserRuntimeInfoTool } from "./connectorEgress.mjs";
+import { browserAccountInfoTool, browserRuntimeInfoTool } from "./accountInfo.mjs";
 
 const preparedBrowsers = new Map();
 
@@ -99,7 +99,7 @@ export function bindBrowser(prepared, options = {}) {
     tools: Object.freeze([
       standard.namedTool("exec_command", shell.execTool),
       browserRuntimeInfoTool({ fetch, origin: prepared.origin }),
-      browserConnectorEgressTool({ fetch, origin: prepared.origin }),
+      browserAccountInfoTool({ fetch, origin: prepared.origin }),
       standard.web(web),
       standard.imageGeneration({
         ...images,

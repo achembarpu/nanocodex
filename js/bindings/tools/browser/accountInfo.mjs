@@ -1,7 +1,7 @@
 import { namedTool } from "../namedTool.mjs";
 
 const CONNECTOR_IDS = ["github", "gmail", "gdrive"];
-const CONNECTOR_INFO_SCHEMA = Object.freeze({
+const ACCOUNT_INFO_SCHEMA = Object.freeze({
   type: "object",
   properties: {
     status: {
@@ -22,18 +22,18 @@ const CONNECTOR_INFO_SCHEMA = Object.freeze({
   additionalProperties: false,
 });
 
-export function browserConnectorEgressTool(options) {
-  return namedTool("connectorEgress", {
-    description: "Report which connected account APIs and display identities are available through transparent gh/curl egress. Never returns credentials.",
+export function browserAccountInfoTool(options) {
+  return namedTool("accountInfo", {
+    description: "Report connected account APIs and their display identities. Never returns credentials.",
     parameters: { type: "object", additionalProperties: false },
-    outputSchema: CONNECTOR_INFO_SCHEMA,
-    handler: (_input, context) => browserConnectorEgress(options, context?.signal),
+    outputSchema: ACCOUNT_INFO_SCHEMA,
+    handler: (_input, context) => browserAccountInfo(options, context?.signal),
   });
 }
 
 export function browserRuntimeInfoTool(options) {
   return namedTool("runtimeInfo", {
-    description: "Return information about the browser agent runtime and connected-account egress.",
+    description: "Return information about the browser agent runtime and connected accounts.",
     parameters: { type: "object", additionalProperties: false },
     async handler(_input, context) {
       return {
@@ -43,14 +43,14 @@ export function browserRuntimeInfoTool(options) {
         sandbox: "browser",
         workspace: "/workspace",
         custom_commands: ["gh"],
-        connector_egress: await browserConnectorEgress(options, context?.signal),
+        account: await browserAccountInfo(options, context?.signal),
       };
     },
   });
 }
 
-export async function browserConnectorEgress(options, signal) {
-  if (typeof options?.fetch !== "function") throw new TypeError("browser connector status requires fetch");
+export async function browserAccountInfo(options, signal) {
+  if (typeof options?.fetch !== "function") throw new TypeError("browser account info requires fetch");
   const endpoint = new URL("/v1/connectors", options.origin);
   try {
     const response = await options.fetch(endpoint, {

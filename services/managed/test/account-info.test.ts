@@ -1,8 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { connectorEgressInfo } from "../src/connector-capabilities";
+import { accountInfo } from "../src/account-info";
 
-describe("connector egress capabilities", () => {
+describe("account info", () => {
   it("reports authenticated connector names and display labels only", async () => {
     const fetch = vi.fn(async () => Response.json({
       connectors: {
@@ -12,7 +12,7 @@ describe("connector egress capabilities", () => {
       },
     }));
 
-    const info = await connectorEgressInfo({ fetch }, "user/with spaces", true);
+    const info = await accountInfo({ fetch }, "user/with spaces", true);
 
     expect(info).toEqual({
       status: "ready",
@@ -26,17 +26,17 @@ describe("connector egress capabilities", () => {
   });
 
   it("fails closed when status is unavailable or malformed", async () => {
-    expect(await connectorEgressInfo({
+    expect(await accountInfo({
       fetch: async () => Response.json({ error: "down" }, { status: 503 }),
     }, "user", true)).toEqual({ status: "unavailable", authenticated: [], accounts: {} });
-    expect(await connectorEgressInfo({
+    expect(await accountInfo({
       fetch: async () => Response.json({ connectors: null }),
     }, "user", true)).toEqual({ status: "unavailable", authenticated: [], accounts: {} });
   });
 
   it("does not query account connectors for shared rooms", async () => {
     const fetch = vi.fn(async () => Response.json({}));
-    expect(await connectorEgressInfo({ fetch }, "owner", false)).toEqual({
+    expect(await accountInfo({ fetch }, "owner", false)).toEqual({
       status: "disabled",
       authenticated: [],
       accounts: {},

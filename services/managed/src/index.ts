@@ -70,7 +70,7 @@ import {
   unbindAgentCredential,
 } from "./credentials";
 import { routeBrowserEgress } from "./browser-egress";
-import { connectorEgressInfo } from "./connector-capabilities";
+import { accountInfo } from "./account-info";
 import { routeConnectorRequest } from "./connectors";
 import {
   attachAgent,
@@ -1803,7 +1803,7 @@ export class NanocodexSession extends DurableComputerSession {
       customCommands: [createManagedGhCommand(shellFetch)],
     });
     const execCommand = Object.freeze({ ...shell.tool, dispose: disposeWorkspace });
-    const connectorInfo = () => connectorEgressInfo(
+    const currentAccountInfo = () => accountInfo(
       this.env.NANOCODEX,
       session.owner_id,
       !multiplayer,
@@ -1821,15 +1821,15 @@ export class NanocodexSession extends DurableComputerSession {
           : [
             "You are Nanocodex running as a durable managed agent on Cloudflare Workers.",
             "Your /workspace filesystem is durable Cloudflare Computer storage backed by this agent's Durable Object.",
-            "Connected account APIs use transparent shell egress: call connectorEgress for the current GitHub, Gmail, and Google Drive identities, then use gh or curl normally; there is no connectorEgress shell command.",
+            "Call accountInfo to see which GitHub, Gmail, and Google Drive accounts are connected, then use gh or curl normally through transparent authenticated egress. accountInfo is a tool, not a shell command.",
           ].join("\n\n"),
         tools: [
           execCommand,
           ...(multiplayer ? [] : [{
-            name: "connectorEgress",
-            description: "Report which connected account APIs and display identities are available through transparent gh/curl egress. Never returns credentials.",
+            name: "accountInfo",
+            description: "Report connected account APIs and their display identities. Never returns credentials.",
             parameters: { type: "object", additionalProperties: false },
-            handler: connectorInfo,
+            handler: currentAccountInfo,
           }]),
           web({
             url: "https://managed-tools.internal/web-search",
@@ -1853,7 +1853,7 @@ export class NanocodexSession extends DurableComputerSession {
               sandbox: "disabled",
               workspace: "/workspace",
               custom_commands: ["gh"],
-              connector_egress: await connectorInfo(),
+              account: await currentAccountInfo(),
             }),
           },
         ],
