@@ -3,6 +3,7 @@ import { access, readFile, stat } from "node:fs/promises";
 import test from "node:test";
 
 import {
+  assertProductionCheckout,
   assertProductionPreflight,
   buildBoundaryProbeConfig,
   buildManagedProductionConfig,
@@ -11,6 +12,10 @@ import {
   productionWranglerEnvironment,
   withPrivateRolloutFiles,
 } from "../scripts/production-rollout.mjs";
+import {
+  assertCachedManagedWasmAttestation,
+  assertManagedWasmAttestation,
+} from "../../../js/bindings/scripts/check-managed-wasm.mjs";
 
 const revision = "a".repeat(40);
 const adminToken = "admin-" + "a".repeat(32);
@@ -55,6 +60,65 @@ test("production preflight requires only deployment and application boundary inp
   assert.throws(() => assertProductionPreflight(weak), /at least 32 bytes/);
 });
 
+test("production rollout accepts only a clean checkout of the selected master revision", () => {
+  const checkout = { dirty: false, head: revision, originMaster: revision };
+  assert.doesNotThrow(() => assertProductionCheckout(revision, checkout));
+  assert.throws(
+    () => assertProductionCheckout(revision, { ...checkout, head: "b".repeat(40) }),
+    /match TARGET_SHA/,
+  );
+  assert.throws(
+    () => assertProductionCheckout(revision, { ...checkout, originMaster: "b".repeat(40) }),
+    /fetched origin\/master/,
+  );
+  assert.throws(
+    () => assertProductionCheckout(revision, { ...checkout, dirty: true }),
+    /tracked changes/,
+  );
+});
+
+test("managed production rejects stale, dirty, or modified WASM artifacts", () => {
+  const artifacts = {
+    "nanocodex.js": "1".repeat(64),
+    "nanocodex.d.ts": "2".repeat(64),
+    "nanocodex_bg.js": "3".repeat(64),
+    "nanocodex_bg.wasm": "4".repeat(64),
+    "nanocodex_worker.js": "5".repeat(64),
+    "package.json": "6".repeat(64),
+  };
+  const attestation = {
+    schema: 1,
+    revision,
+    dirty: false,
+    sourceWasmSha256: "0".repeat(64),
+    artifacts,
+  };
+  assert.doesNotThrow(() => assertManagedWasmAttestation(attestation, revision, artifacts));
+  assert.doesNotThrow(() => assertCachedManagedWasmAttestation(attestation, {
+    artifacts,
+    sourceWasmSha256: attestation.sourceWasmSha256,
+  }));
+  assert.throws(() => assertCachedManagedWasmAttestation(attestation, {
+    artifacts,
+    sourceWasmSha256: "8".repeat(64),
+  }), /source bytes/);
+  assert.throws(
+    () => assertManagedWasmAttestation(attestation, "b".repeat(40), artifacts),
+    /exact production revision/,
+  );
+  assert.throws(
+    () => assertManagedWasmAttestation({ ...attestation, dirty: true }, revision, artifacts),
+    /clean source/,
+  );
+  assert.throws(
+    () => assertManagedWasmAttestation(attestation, revision, {
+      ...artifacts,
+      "nanocodex_bg.wasm": "7".repeat(64),
+    }),
+    /artifact bytes/,
+  );
+});
+
 test("production Wrangler environment excludes every secret and stale provider input", () => {
   const child = productionWranglerEnvironment({
     CLOUDFLARE_ENV: "staging",
@@ -77,9 +141,11 @@ test("production Wrangler environment excludes every secret and stale provider i
   });
 });
 
-test("managed production config retains the exact private six-DO topology", async () => {
+test("managed production config retains the exact private eight-DO topology", async () => {
   const base = JSON.parse(await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8"));
+  assert.equal(base.name, "nanocodex-managed-development");
   const config = buildManagedProductionConfig(base, { mainPath: "/fixed/managed.ts" });
+  assert.equal(config.name, "nanocodex-durable-agent");
   assert.equal(config.workers_dev, false);
   assert.equal(config.main, "/fixed/managed.ts");
   assert.deepEqual(config.compatibility_flags, ["nodejs_compat", "global_fetch_strictly_public"]);
@@ -87,10 +153,14 @@ test("managed production config retains the exact private six-DO topology", asyn
   assert.deepEqual(config.services, [
     { binding: "NANOCODEX", service: "nanocodex-egress" },
   ]);
-  assert.equal(config.durable_objects.bindings.length, 6);
-  assert.deepEqual(config.migrations.map(({ tag }) => tag), ["v1", "v2"]);
+  assert.equal(config.durable_objects.bindings.length, 8);
+  assert.deepEqual(config.migrations.map(({ tag }) => tag), ["v1", "v2", "v3", "v4"]);
   assert.doesNotMatch(JSON.stringify(config), /NANOCODEX_AUTH_MODE|OPENAI_API_KEY|CODEX_OAUTH_BOOTSTRAP|CODEX_RELAY_URL/);
   assert.deepEqual(managedSecretPayload(adminToken), { NANOCODEX_ADMIN_TOKEN: adminToken });
+  assert.throws(
+    () => buildManagedProductionConfig({ ...base, name: "nanocodex-durable-agent" }),
+    /non-production template name/,
+  );
 });
 
 test("boundary probe and website configs preserve the private service chain", () => {
