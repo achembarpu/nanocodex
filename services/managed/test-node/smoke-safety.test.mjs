@@ -61,6 +61,7 @@ test("managed agents have no provider-credential or direct transport path", asyn
   const brokerConfig = JSON.parse(brokerConfigText);
   const webConfig = JSON.parse(webConfigText);
   assert.equal(config.workers_dev, false);
+  assert.equal(config.name, "nanocodex-managed-development");
   assert.equal(brokerConfig.workers_dev, false);
   assert.deepEqual(
     config.services?.filter((service) => service.binding === "NANOCODEX"),
@@ -72,7 +73,7 @@ test("managed agents have no provider-credential or direct transport path", asyn
   assert.deepEqual(brokerConfig.vars, { ENVIRONMENT: "production" });
   assert.deepEqual(
     webConfig.services?.filter((service) => service.binding === "NANOCODEX_BACKEND"),
-    [{ binding: "NANOCODEX_BACKEND", service: config.name }],
+    [{ binding: "NANOCODEX_BACKEND", service: "nanocodex-durable-agent" }],
   );
   assert.equal(webConfig.vars?.OPENAI_API_KEY, undefined);
   assert.equal(webConfig.vars?.CODEX_OAUTH_BOOTSTRAP, undefined);
