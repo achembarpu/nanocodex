@@ -960,9 +960,18 @@ dd {
 }
 
 @media (max-width: 440px) {
+  #root {
+    display: grid;
+    place-items: end center;
+  }
+
   .dialog-shell {
-    width: calc(100vw - 12px);
-    max-height: calc(100vh - 12px);
+    width: 100vw;
+    max-height: 90dvh;
+    margin: 0;
+    border-inline: 0;
+    border-bottom: 0;
+    box-shadow: 0 -24px 72px rgba(0, 0, 0, 0.55);
   }
 
   .dialog-header {
@@ -974,7 +983,7 @@ dd {
   }
 
   .dialog-actions {
-    padding-inline: 14px;
+    padding: 12px 14px max(16px, env(safe-area-inset-bottom));
   }
 
   .permission-row {
@@ -983,8 +992,16 @@ dd {
 }
 
 @media (pointer: coarse) {
-  .dialog-actions button {
+  .account-mode button,
+  .capability-action,
+  .dialog-actions button,
+  .profile-link {
     min-height: 44px;
+  }
+
+  .capability-token {
+    width: 44px;
+    height: 44px;
   }
 }
 

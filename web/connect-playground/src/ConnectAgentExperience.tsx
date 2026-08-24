@@ -88,11 +88,11 @@ export function ConnectAgentExperience({
     <section className="connect-chat" aria-labelledby="connect-chat-title">
       <header className="connect-chat-header">
         <div>
-          <h3 id="connect-chat-title">Embedded Nanocodex</h3>
-          <p>Account-owned durable agent. Atlas sees only the signed projection.</p>
+          <h3 id="connect-chat-title">Nanocodex</h3>
+          <p>Durable agent · scoped by Atlas</p>
         </div>
         <div className="connect-chat-actions">
-          <span>Durable</span>
+          <span className="connect-agent-status">Live</span>
           <button
             className="connect-sign-out"
             disabled={isMutating}

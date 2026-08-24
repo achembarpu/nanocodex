@@ -24,15 +24,7 @@ type AuditEvent = Readonly<{
   time: string;
 }>;
 
-const INITIAL_AUDIT: readonly AuditEvent[] = [
-  {
-    id: 0,
-    tone: "neutral",
-    title: "Playground ready",
-    detail: "Live Accounts, durable Nanocodex agents, Tempo MPP, Mercator, and the machineUSD onramp are ready.",
-    time: "local",
-  },
-];
+const INITIAL_AUDIT: readonly AuditEvent[] = [];
 
 const MACHINE_USD_ATOMICS = 1_000_000n;
 
@@ -195,70 +187,68 @@ export function App() {
 
   return (
     <main className={`app-shell${connection ? " is-connected" : ""}`} data-testid="connect-playground">
-        <header className="topbar">
-          <div className="brand">
-            <span className="brand-mark" aria-hidden="true" />
-            <span className="brand-product">Nanocodex</span>
-            <span className="brand-divider" aria-hidden="true">/</span>
-            <span>Connect</span>
-          </div>
-          <div className="environment">
-            <span className="environment-dot" aria-hidden="true" />
-            <span>Playground · live APIs</span>
-          </div>
-        </header>
+      <header className="topbar">
+        <div className="brand">
+          <span className="brand-mark" aria-hidden="true" />
+          <span className="brand-product">Nanocodex Connect</span>
+        </div>
+        <div className="environment">
+          <span className="environment-dot" aria-hidden="true" />
+          <span>{connection ? "Atlas connected" : "Playground · mainnet"}</span>
+        </div>
+      </header>
 
-        <section className="hero" aria-labelledby="page-title">
-          <div>
-            <p className="eyebrow">Connect playground</p>
-            <h1 id="page-title">Nanocodex Connect</h1>
-          </div>
-          <p className="hero-copy">
-            Authorize an agent, add BOOST with Mercator, and grant a bounded machineUSD
-            payment permission from one surface.
-          </p>
-        </section>
-
-        <div className={`workspace-grid ${connection ? "is-connected" : ""}`}>
+      <div className={`workspace-grid ${connection ? "is-connected" : ""}`}>
           {!connection ? (
             <>
-              <section className="panel panel-dark">
+              <section className="panel panel-dark connect-method">
                 <header className="panel-heading">
                   <div>
-                    <h2>Account connection</h2>
-                    <p className="panel-kicker">Atlas Workspace · deployed Connect flow</p>
+                    <h1>Connect Atlas</h1>
+                    <p className="panel-kicker">wallet_connect</p>
                   </div>
                   <span className="status-pill" data-testid="connection-status">Not connected</span>
                 </header>
-              <div className="panel-body empty-state">
-                <div className="empty-orbit" aria-hidden="true" />
-                <div>
-                  <h3>One approval. Explicit boundaries.</h3>
-                  <p>
-                    Choose exactly what Atlas may connect and observe.
-                  </p>
+                <div className="panel-body empty-state">
+                  <div className="empty-orbit" aria-hidden="true" />
+                  <div className="connect-copy">
+                    <h2>One approval.</h2>
+                    <p>Sign in and grant this app the capabilities configured at right.</p>
+                  </div>
+                  {error ? (
+                    <div className="error-banner connect-error" data-testid="error-message" role="alert">
+                      <span>{error}</span>
+                      <button aria-label="Dismiss error" onClick={() => setError(undefined)} type="button">×</button>
+                    </div>
+                  ) : null}
+                  <button
+                    className="primary-button connect-button"
+                    data-testid="connect-button"
+                    disabled={isMutating}
+                    onClick={startConnect}
+                    type="button"
+                  >
+                    Connect
+                  </button>
                 </div>
-                <PermissionBuilder
-                  disabled={isMutating}
-                  request={request}
-                  onChange={setRequest}
-                />
-                <button
-                  className="primary-button connect-button"
-                  data-testid="connect-button"
-                  disabled={isMutating}
-                  onClick={startConnect}
-                  type="button"
-                >
-                  Connect &amp; sign access key
-                </button>
-              </div>
               </section>
-              <AppProjectionPanel
-                audit={audit}
-                observation={observation}
-                visibility={request.visibility}
-              />
+              <aside className="playground-config">
+                <section className="panel configuration-panel">
+                  <header className="panel-heading">
+                    <div>
+                      <h2>Configuration</h2>
+                      <p className="panel-kicker">Requested capabilities</p>
+                    </div>
+                  </header>
+                  <div className="panel-body">
+                    <PermissionBuilder
+                      disabled={isMutating}
+                      request={request}
+                      onChange={setRequest}
+                    />
+                  </div>
+                </section>
+              </aside>
             </>
           ) : (
             <>
@@ -319,12 +309,7 @@ export function App() {
               </aside>
             </>
           )}
-        </div>
-
-        <footer className="footer-note">
-          <span>Nanocodex Connect / SDK consumer</span>
-          <span>Accounts passkey · Mercator · machineUSD · hosted dialog</span>
-        </footer>
+      </div>
     </main>
   );
 }
