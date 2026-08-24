@@ -17,6 +17,7 @@ import { parentDialog, type WalletRequest } from "./protocol";
 
 const browserLocalWebAuthn = usesBrowserLocalWebAuthn(window.location.origin);
 const provider = createProvider(browserLocalWebAuthn);
+let browserSession: Promise<void> | undefined;
 
 export async function logoutAccount() {
   await provider.request({ method: "wallet_disconnect" });
@@ -57,6 +58,7 @@ type ProfileLinkAttempt = {
   requestId: string;
   state: string;
 };
+type CeremonyAttempt = Readonly<{ requestId: string }>;
 
 export function App() {
   const subscribe = useCallback(
@@ -81,6 +83,7 @@ export function App() {
   }>>();
   const activeConnector = useRef<ConnectorAttempt | undefined>(undefined);
   const activeProfileLink = useRef<ProfileLinkAttempt | undefined>(undefined);
+  const activeCeremony = useRef<CeremonyAttempt | undefined>(undefined);
   const currentRequestId = useRef<string | undefined>(undefined);
   currentRequestId.current = request?.id;
 
@@ -238,6 +241,20 @@ export function App() {
 
   useEffect(() => {
     if (
+      !request
+      || request.type !== "walletConnect"
+      || accountMode !== "register"
+      || browserLocalWebAuthn
+    ) return;
+    void ensureBrowserSession().catch((error) => {
+      if (currentRequestId.current === request.id) {
+        setFailure({ id: request.id, message: errorMessage(error) });
+      }
+    });
+  }, [request?.id, accountMode]);
+
+  useEffect(() => {
+    if (
       !pendingApproval
       || !profileLinked
       || !connectorStatuses?.chatgpt?.connected
@@ -256,10 +273,12 @@ export function App() {
 
   async function approve() {
     const activeRequest = request;
-    if (!activeRequest) return;
+    if (!activeRequest || activeCeremony.current) return;
     setFailure(undefined);
     if (activeRequest.type === "machineUsdFund") return;
 
+    const attempt: CeremonyAttempt = { requestId: activeRequest.id };
+    activeCeremony.current = attempt;
     setCeremonyRequestId(activeRequest.id);
     try {
       if (
@@ -274,6 +293,9 @@ export function App() {
           ? walletRequest(activeRequest, accountMode)
           : activeRequest.rpc) as never,
       ) as undefined | { accounts: readonly Readonly<{ address: `0x${string}` }>[] };
+      if (currentRequestId.current !== attempt.requestId) {
+        throw new DOMException("The Connect request changed.", "AbortError");
+      }
       if (activeRequest.type === "walletConnect" && !result?.accounts[0]) {
         throw new Error("Accounts did not return a connected account.");
       }
@@ -318,9 +340,14 @@ export function App() {
       }
       await parentDialog.respond(result);
     } catch (error) {
-      setFailure({ id: activeRequest.id, message: errorMessage(error) });
+      if (currentRequestId.current === attempt.requestId) {
+        setFailure({ id: activeRequest.id, message: errorMessage(error) });
+      }
     } finally {
-      setCeremonyRequestId(undefined);
+      if (activeCeremony.current === attempt) {
+        activeCeremony.current = undefined;
+        setCeremonyRequestId(undefined);
+      }
     }
   }
 
@@ -1190,22 +1217,32 @@ function createProvider(browserLocal: boolean) {
 }
 
 async function ensureBrowserSession() {
-  const response = await fetch("/v1/me", {
-    cache: "no-store",
-    credentials: "same-origin",
-    headers: { accept: "application/json" },
-  });
-  const body: unknown = await response.json().catch(() => undefined);
-  if (!response.ok) {
-    throw new Error(apiError(record(body), "Unable to start a Nanocodex browser session."));
-  }
-  if (
-    !isRecord(body)
-    || !isRecord(body.user)
-    || typeof body.user.id !== "string"
-    || typeof body.user.persistent !== "boolean"
-  ) {
-    throw new Error("The Nanocodex account service returned an invalid browser session.");
+  if (browserSession) return browserSession;
+  const attempt = (async () => {
+    const response = await fetch("/v1/me", {
+      cache: "no-store",
+      credentials: "same-origin",
+      headers: { accept: "application/json" },
+    });
+    const body: unknown = await response.json().catch(() => undefined);
+    if (!response.ok) {
+      throw new Error(apiError(record(body), "Unable to start a Nanocodex browser session."));
+    }
+    if (
+      !isRecord(body)
+      || !isRecord(body.user)
+      || typeof body.user.id !== "string"
+      || typeof body.user.persistent !== "boolean"
+    ) {
+      throw new Error("The Nanocodex account service returned an invalid browser session.");
+    }
+  })();
+  browserSession = attempt;
+  try {
+    await attempt;
+  } catch (error) {
+    if (browserSession === attempt) browserSession = undefined;
+    throw error;
   }
 }
 
