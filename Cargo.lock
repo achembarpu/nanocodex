@@ -5668,6 +5668,10 @@ dependencies = [
 [[package]]
 name = "nanocodex-voice-protocol"
 version = "0.5.0"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "nanocodex-wasm"

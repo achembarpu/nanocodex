@@ -1,5 +1,10 @@
 import type { AgentEvent, DefaultAgent } from "nanocodex";
 import type { Config } from "nanocodex/browser";
+import type {
+  Options as VoiceOptions,
+  Snapshot as VoiceSnapshot,
+  VoiceName,
+} from "nanocodex/browser/voice";
 import type { ReactNode } from "react";
 
 export {
@@ -85,3 +90,22 @@ export function useAgentEvents(
   listener: (event: AgentEvent) => void,
   options?: { includeAllSessions?: boolean | undefined },
 ): void;
+
+export type UseVoiceParameters = VoiceOptions & Readonly<{
+  /** Defaults to true. Disabled hooks do not create a voice resource. */
+  enabled?: boolean | undefined;
+}>;
+export type UseVoiceReturnType = VoiceSnapshot & Readonly<{
+  isActive: boolean;
+  isConnecting: boolean;
+  isError: boolean;
+  isIdle: boolean;
+  cancel(): Promise<boolean>;
+  start(options?: { voice?: VoiceName | undefined }): Promise<void>;
+  stop(): Promise<void>;
+  toggle(options?: { voice?: VoiceName | undefined }): Promise<void>;
+}>;
+export function useVoice(
+  agent: DefaultAgent | undefined,
+  options?: UseVoiceParameters,
+): UseVoiceReturnType;

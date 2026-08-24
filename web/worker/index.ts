@@ -28,7 +28,6 @@ import {
   limitSessionPoll,
   type PublicSecurityEnv,
 } from "./publicSecurity.ts";
-import { CHATGPT_REALTIME_INSTRUCTIONS } from "nanocodex/browser/realtime";
 import { routeLinkPreview } from "./linkPreview.ts";
 import { routeManaged } from "./managedProxy.ts";
 import {
@@ -37,10 +36,12 @@ import {
 } from "./connectDialogProxy.ts";
 import {
   fetchManagedModel,
+  fetchManagedRealtimeCall,
   managedModelAccess,
   managedModelActorId,
   managedModelReady,
   openManagedResponsesWebSocket,
+  openManagedRealtimeSideband,
   type ManagedModelAccess,
 } from "./managedModel.ts";
 
@@ -64,10 +65,6 @@ const IMAGE_GENERATION_URL = "https://api.openai.com/v1/images/generations";
 const IMAGE_EDIT_URL = "https://api.openai.com/v1/images/edits";
 const MODEL = "gpt-5.6-sol";
 const IMAGE_MODEL = "gpt-image-2";
-const CHATGPT_REALTIME_MODEL = "gpt-live-1-boulder-alpha";
-const CHATGPT_REALTIME_VOICES = new Set([
-  "juniper", "maple", "spruce", "ember", "vale", "breeze", "arbor", "sol", "cove",
-]);
 const CODEX_ORIGINATOR = "codex_cli_rs";
 const CODEX_USER_AGENT = "codex_cli_rs/0.0.0";
 const MAX_JSON_BODY_CHARS = 32 * 1024 * 1024;
@@ -78,8 +75,8 @@ const MAX_IMAGE_INPUT_TOTAL_CHARS = 20 * 1024 * 1024;
 const MAX_IMAGE_PROMPT_CHARS = 16 * 1024;
 const MAX_API_KEY_CHARS = 1_024;
 const MAX_REALTIME_SDP_CHARS = 1024 * 1024;
-const MAX_REALTIME_STARTUP_CONTEXT_BYTES = 24 * 1024;
-const REALTIME_SIDEBAND_URL = "https://api.openai.com/v1/live";
+const MAX_REALTIME_CALL_BODY_CHARS = MAX_REALTIME_SDP_CHARS + 128 * 1024;
+const REALTIME_SIDEBAND_URL = "https://api.openai.com/v1/live/";
 const MAX_WEBSOCKET_MESSAGE_CHARS = 8 * 1024 * 1024;
 const BYOK_SESSION_TTL_MS = 60 * 60 * 1_000;
 const BYOK_COOKIE = "nanocodex_byok_v2";
@@ -416,78 +413,70 @@ async function createRealtimeCall(request: Request, env: WorkerEnv, url: URL): P
   }
   const decoded = await readJsonBody(request);
   if (decoded instanceof Response) return decoded;
-  const sdp = typeof decoded.sdp === "string" ? decoded.sdp : "";
-  const sessionId = typeof decoded.session_id === "string" ? decoded.session_id : "";
-  const startupContext = typeof decoded.startup_context === "string" ? decoded.startup_context : "";
-  const voice = typeof decoded.voice === "string" ? decoded.voice : "";
-  if (!sdp || sdp.length > MAX_REALTIME_SDP_CHARS) {
-    return json({ error: "invalid WebRTC offer" }, { status: 400 });
+  const identity = realtimeIdentity(decoded);
+  const callBody = typeof decoded.call_body === "string" ? decoded.call_body : "";
+  if (!callBody || callBody.length > MAX_REALTIME_CALL_BODY_CHARS) {
+    return json({ error: "Realtime call body exceeded its bound" }, { status: 400 });
   }
-  if (!/^[A-Za-z0-9._:-]{1,200}$/.test(sessionId)) {
+  if (!identity) {
     return json({ error: "invalid session" }, { status: 400 });
   }
-  if (!CHATGPT_REALTIME_VOICES.has(voice)) {
-    return json({ error: "unsupported ChatGPT voice" }, { status: 400 });
-  }
-  if (new TextEncoder().encode(startupContext).byteLength > MAX_REALTIME_STARTUP_CONTEXT_BYTES) {
-    return json({ error: "Realtime startup context exceeded 24 KiB" }, { status: 400 });
-  }
-  const resolved = await resolveSubscriptionCredential(request, env, "health");
-  if (resolved instanceof Response) return resolved;
-  let credential = resolved;
-  if (!credential) {
-    return json({ error: "voice requires an authenticated ChatGPT subscription" }, { status: 503 });
-  }
-  const limited = await limitAgentOperation(env, credential.actorId, "socket");
-  if (limited) return limited;
-  let upstream = await openRealtimeCall(
-    credential,
-    env,
-    sdp,
-    sessionId,
-    voice,
-    startupContext,
-  );
-  if (upstream.status === 401) {
-    await upstream.body?.cancel();
-    const recovered = await recoverSubscriptionCredential(request, env, credential);
-    if (recovered) {
-      credential = recovered;
-      upstream = await openRealtimeCall(
-        credential,
-        env,
-        sdp,
-        sessionId,
-        voice,
-        startupContext,
-      );
+  const body = callBody;
+  const managed = managedAccess(request, env);
+  if (managed instanceof Response) return managed;
+  let upstream: Response;
+  if (managed) {
+    const limited = await limitAgentOperation(
+      env,
+      managedModelActorId(request, managed),
+      "socket",
+    );
+    if (limited) return limited;
+    upstream = await fetchManagedRealtimeCall(managed, identity, body);
+  } else {
+    const resolved = await resolveSubscriptionCredential(request, env, "health");
+    if (resolved instanceof Response) return resolved;
+    let credential = resolved;
+    if (!credential) {
+      return json({ error: "voice requires an authenticated ChatGPT subscription" }, { status: 503 });
+    }
+    const limited = await limitAgentOperation(env, credential.actorId, "socket");
+    if (limited) return limited;
+    upstream = await openRealtimeCall(credential, env, identity, body);
+    if (upstream.status === 401) {
+      await upstream.body?.cancel();
+      const recovered = await recoverSubscriptionCredential(request, env, credential);
+      if (recovered) {
+        credential = recovered;
+        upstream = await openRealtimeCall(credential, env, identity, body);
+      }
     }
   }
-  const callId = realtimeCallId(upstream.headers.get("location"));
-  const answer = await upstream.text();
-  if (answer.length > MAX_REALTIME_SDP_CHARS) {
-    return json({ error: "Realtime answer exceeded 1 MiB" }, { status: 502 });
+  if (!upstream.ok) {
+    return upstreamError(
+      "Realtime call",
+      upstream.status,
+      await readBoundedResponse(upstream, 4_096),
+    );
   }
-  if (!upstream.ok) return upstreamError("Realtime call", upstream.status, answer);
-  if (!callId) {
-    return json({ error: "Realtime call response omitted a call ID" }, { status: 502 });
+  const location = upstream.headers.get("location");
+  if (!location || location.length > 2_048) {
+    await upstream.body?.cancel();
+    return json({ error: "Realtime call response omitted its Location" }, { status: 502 });
   }
+  const answer = await readRealtimeAnswer(upstream);
+  if (answer instanceof Response) return answer;
   return new Response(answer, {
     headers: {
       "cache-control": "no-store",
       "content-type": "application/sdp",
-      "x-nanocodex-realtime-call-id": callId,
+      "x-nanocodex-realtime-location": location,
     },
   });
 }
 
-function realtimeCallId(location: string | null): string | undefined {
-  if (!location) return undefined;
-  return location
-    .split("?", 1)[0]
-    .split("/")
-    .reverse()
-    .find((segment) => (segment.startsWith("rtc_") && segment.length > 4) || isUuid(segment));
+function validRealtimeCallId(value: string): boolean {
+  return /^rtc_[A-Za-z0-9._:-]{1,196}$/.test(value) || isUuid(value);
 }
 
 function isUuid(value: string): boolean {
@@ -497,35 +486,17 @@ function isUuid(value: string): boolean {
 function openRealtimeCall(
   credential: SubscriptionCredential,
   env: WorkerEnv,
-  sdp: string,
-  sessionId: string,
-  voice: string,
-  startupContext: string,
+  identity: RealtimeIdentity,
+  body: string,
 ): Promise<Response> {
   const endpoint = `${chatGptApiBaseUrl(env)}/realtime/calls?intent=quicksilver&architecture=avas`;
   return fetchChatGpt(env, endpoint, {
     method: "POST",
     headers: {
-      ...openAiHeaders(credential),
-      "openai-alpha": "quicksilver=v2",
-      "x-oai-attestation": '{"v":1,"s":1}',
-      "x-session-id": sessionId,
-      "session-id": sessionId,
-      "thread-id": sessionId,
-      originator: "nanocodex",
-      "User-Agent": "nanocodex/0.1.0",
+      ...realtimeHeaders(credential, identity),
+      "content-type": "application/json",
     },
-    body: JSON.stringify({
-      sdp,
-      session: {
-        model: CHATGPT_REALTIME_MODEL,
-        instructions: startupContext
-          ? `${CHATGPT_REALTIME_INSTRUCTIONS}\n\n${startupContext}`
-          : CHATGPT_REALTIME_INSTRUCTIONS,
-        audio: { output: { voice } },
-        delegation: { type: "client" },
-      },
-    }),
+    body,
   }, credential.sessionId);
 }
 
@@ -539,43 +510,60 @@ async function upgradeRealtimeSideband(
   }
   if (!sameOrigin(request, url, env)) return new Response("Forbidden", { status: 403 });
   const callId = url.searchParams.get("call_id") ?? "";
-  const sessionId = url.searchParams.get("session_id") ?? "";
-  if (!realtimeCallId(callId) || !/^[A-Za-z0-9._:-]{1,200}$/.test(sessionId)) {
+  const identity = realtimeIdentity({
+    openai_alpha: url.searchParams.get("openai_alpha"),
+    realtime_session_id: url.searchParams.get("realtime_session_id"),
+    session_id: url.searchParams.get("session_id"),
+    thread_id: url.searchParams.get("thread_id"),
+  });
+  if (!validRealtimeCallId(callId) || !identity) {
     return new Response("Invalid Realtime session", { status: 400 });
   }
-  const leaseId = randomSessionId();
-  const resolved = await resolveSubscriptionCredential(request, env, "socket", leaseId);
-  if (resolved instanceof Response) return webSocketError(resolved);
-  let credential = resolved;
-  if (!credential) {
-    return new Response("Voice requires an authenticated ChatGPT subscription", { status: 503 });
-  }
-  const limited = await limitAgentOperation(env, credential.actorId, "socket");
-  if (limited) {
-    await releaseSubscriptionLease(env, credential);
-    return webSocketError(limited);
-  }
-
+  const managed = managedAccess(request, env);
+  if (managed instanceof Response) return webSocketError(managed);
+  let credential: SubscriptionCredential | undefined;
   let upstreamResponse: Response;
   try {
-    upstreamResponse = await openRealtimeSidebandWithRetry(credential, callId, sessionId);
+    if (managed) {
+      const limited = await limitAgentOperation(
+        env,
+        managedModelActorId(request, managed),
+        "socket",
+      );
+      if (limited) return webSocketError(limited);
+      upstreamResponse = await openManagedRealtimeSidebandWithRetry(managed, callId, identity);
+    } else {
+      const leaseId = randomSessionId();
+      const resolved = await resolveSubscriptionCredential(request, env, "socket", leaseId);
+      if (resolved instanceof Response) return webSocketError(resolved);
+      credential = resolved;
+      if (!credential) {
+        return new Response("Voice requires an authenticated ChatGPT subscription", { status: 503 });
+      }
+      const limited = await limitAgentOperation(env, credential.actorId, "socket");
+      if (limited) {
+        await releaseSubscriptionLease(env, credential);
+        return webSocketError(limited);
+      }
+      upstreamResponse = await openRealtimeSidebandWithRetry(credential, callId, identity);
+    }
   } catch (error) {
-    await releaseSubscriptionLease(env, credential);
+    if (credential) await releaseSubscriptionLease(env, credential);
     const detail = error instanceof Error ? error.message : String(error);
     return new Response(`Realtime sideband upgrade request failed: ${detail}`, { status: 502 });
   }
-  if (upstreamResponse.status === 401) {
+  if (credential && upstreamResponse.status === 401) {
     await upstreamResponse.body?.cancel();
     const recovered = await recoverSubscriptionCredential(request, env, credential);
     if (recovered) {
       credential = recovered;
-      upstreamResponse = await openRealtimeSidebandWithRetry(credential, callId, sessionId);
+      upstreamResponse = await openRealtimeSidebandWithRetry(credential, callId, identity);
     }
   }
   const upstream = upstreamResponse.webSocket;
   if (!upstream) {
     const detail = await upstreamResponseDetail(upstreamResponse);
-    await releaseSubscriptionLease(env, credential);
+    if (credential) await releaseSubscriptionLease(env, credential);
     return new Response(
       `Realtime sideband upgrade failed with HTTP ${upstreamResponse.status}: ${detail}`,
       { status: 502 },
@@ -587,19 +575,36 @@ async function upgradeRealtimeSideband(
   upstream.accept();
   server.accept();
   bridge(server, upstream, () => {
-    void releaseSubscriptionLease(env, credential);
+    if (credential) void releaseSubscriptionLease(env, credential);
   });
   return new Response(null, { status: 101, webSocket: client });
+}
+
+async function openManagedRealtimeSidebandWithRetry(
+  access: ManagedModelAccess,
+  callId: string,
+  identity: RealtimeIdentity,
+): Promise<Response> {
+  let response: Response | undefined;
+  for (let attempt = 0; attempt < 4; attempt += 1) {
+    response = await openManagedRealtimeSideband(access, callId, identity);
+    if (response.webSocket) return response;
+    if (attempt < 3) {
+      await response.body?.cancel();
+      await new Promise((resolve) => setTimeout(resolve, 100 * 2 ** attempt));
+    }
+  }
+  return response!;
 }
 
 async function openRealtimeSidebandWithRetry(
   credential: SubscriptionCredential,
   callId: string,
-  sessionId: string,
+  identity: RealtimeIdentity,
 ): Promise<Response> {
   let response: Response | undefined;
   for (let attempt = 0; attempt < 4; attempt += 1) {
-    response = await openRealtimeSideband(credential, callId, sessionId);
+    response = await openRealtimeSideband(credential, callId, identity);
     if (response.webSocket || response.status === 401) return response;
     if (attempt < 3) {
       await response.body?.cancel();
@@ -612,21 +617,51 @@ async function openRealtimeSidebandWithRetry(
 function openRealtimeSideband(
   credential: SubscriptionCredential,
   callId: string,
-  sessionId: string,
+  identity: RealtimeIdentity,
 ): Promise<Response> {
-  return fetch(`${REALTIME_SIDEBAND_URL}/${encodeURIComponent(callId)}`, {
+  const endpoint = new URL(callId, REALTIME_SIDEBAND_URL);
+  return fetch(endpoint, {
     headers: {
       Upgrade: "websocket",
-      ...openAiHeaders(credential),
-      "openai-alpha": "quicksilver=v2",
-      "x-oai-attestation": '{"v":1,"s":1}',
-      "x-session-id": sessionId,
-      "session-id": sessionId,
-      "thread-id": sessionId,
-      originator: "nanocodex",
-      "User-Agent": "nanocodex/0.1.0",
+      ...realtimeHeaders(credential, identity),
     },
   });
+}
+
+type RealtimeIdentity = Readonly<{
+  openAiAlpha: "quicksilver=v2";
+  realtimeSessionId: string;
+  sessionId: string;
+  threadId: string;
+}>;
+
+function realtimeIdentity(value: Record<string, unknown>): RealtimeIdentity | undefined {
+  const openAiAlpha = value.openai_alpha;
+  const realtimeSessionId = value.realtime_session_id;
+  const sessionId = value.session_id;
+  const threadId = value.thread_id;
+  const valid = (id: unknown): id is string =>
+    typeof id === "string" && /^[A-Za-z0-9._:-]{1,200}$/.test(id);
+  if (openAiAlpha !== "quicksilver=v2"
+    || !valid(realtimeSessionId) || !valid(sessionId) || !valid(threadId)) return undefined;
+  return { openAiAlpha, realtimeSessionId, sessionId, threadId };
+}
+
+function realtimeHeaders(
+  credential: SubscriptionCredential,
+  identity: RealtimeIdentity,
+): Record<string, string> {
+  const headers: Record<string, string> = {
+    Authorization: `Bearer ${credential.accessToken}`,
+    "ChatGPT-Account-ID": credential.accountId,
+    "User-Agent": CODEX_USER_AGENT,
+    "openai-alpha": identity.openAiAlpha,
+    "x-session-id": identity.realtimeSessionId,
+    "session-id": identity.sessionId,
+    "thread-id": identity.threadId,
+  };
+  if (credential.fedramp) headers["X-OpenAI-Fedramp"] = "true";
+  return headers;
 }
 
 async function validateToolRequest(
@@ -936,6 +971,36 @@ async function readBoundedResponse(response: Response, limit: number): Promise<s
     }
     body += decoder.decode(value, { stream: true });
   }
+}
+
+async function readRealtimeAnswer(response: Response): Promise<string | Response> {
+  if (!response.body) return json({ error: "Realtime call returned an empty SDP answer" }, { status: 502 });
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder("utf-8", { fatal: true });
+  const chunks: string[] = [];
+  let total = 0;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        chunks.push(decoder.decode());
+        break;
+      }
+      total += value.byteLength;
+      if (total > MAX_REALTIME_SDP_CHARS) {
+        await reader.cancel();
+        return json({ error: "Realtime answer exceeded 1 MiB" }, { status: 502 });
+      }
+      chunks.push(decoder.decode(value, { stream: true }));
+    }
+  } catch {
+    await reader.cancel().catch(() => {});
+    return json({ error: "Realtime call returned invalid UTF-8 SDP" }, { status: 502 });
+  }
+  const answer = chunks.join("");
+  return answer.trim().length > 0
+    ? answer
+    : json({ error: "Realtime call returned an empty SDP answer" }, { status: 502 });
 }
 
 function openResponsesWebSocket(

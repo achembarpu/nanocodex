@@ -1,6 +1,6 @@
 use std::{
     cell::{Cell, RefCell},
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     path::PathBuf,
     rc::Rc,
 };
@@ -23,6 +23,7 @@ use nanocodex::{
         SubscriptionCommit, SubscriptionFuture, SubscriptionHostError, SubscriptionHttpRequest,
         SubscriptionHttpResponse, SubscriptionStoreValue,
     },
+    oai::responses::{ContentItem, MessageRole, ResponseItem},
     tools::{
         ToolContext, ToolDefinition, ToolInput, ToolOutput,
         contract::ToolOutputWire,
@@ -43,8 +44,11 @@ use nanocodex_subagents::{
     ScopedAgentUpdate, SubagentControl,
 };
 use nanocodex_voice_protocol::{
-    REALTIME_END_INSTRUCTIONS, REALTIME_START_INSTRUCTIONS, TranscriptEntry, realtime_delegation,
-    realtime_tail_delegation,
+    BrowserVoiceEffects, BrowserVoiceProtocol, REALTIME_END_INSTRUCTIONS,
+    REALTIME_START_INSTRUCTIONS, TranscriptEntry, VoiceHistoryEntry, build_browser_startup_context,
+    build_chatgpt_realtime_call, decode_chatgpt_realtime_call, preferred_physical_input,
+    realtime_delegation, realtime_message_requires_agent_admission, realtime_tail_delegation,
+    valid_realtime_call_id,
 };
 
 mod transport;
@@ -99,6 +103,9 @@ extern "C" {
 
     #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = readWorkspaceFile)]
     fn host_read_workspace_file(path: &str, session_id: &str) -> Result<Promise, JsValue>;
+
+    #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = listWorkspace)]
+    fn host_list_workspace(path: &str, session_id: &str) -> Result<Promise, JsValue>;
 
     #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = writeWorkspaceFile)]
     fn host_write_workspace_file(
@@ -1137,6 +1144,16 @@ impl WasmNanocodex {
         Ok(realtime_tail_delegation(&transcript))
     }
 
+    /// Creates the Rust-owned Codex browser voice controller for this agent.
+    ///
+    /// # Errors
+    ///
+    /// Rejects voices outside Codex's ChatGPT V3 catalog.
+    #[wasm_bindgen(js_name = browserVoice)]
+    pub fn browser_voice(&self, voice: &str) -> Result<WasmBrowserVoice, JsValue> {
+        WasmBrowserVoice::new(self.inner.clone(), voice).map_err(js_error)
+    }
+
     /// Gracefully stops the driver and joins every resource owned by this agent.
     ///
     /// # Errors
@@ -1177,6 +1194,430 @@ impl Drop for WasmNanocodex {
             subagents.set_event_forwarding(false);
         }
     }
+}
+
+/// Rust-owned Codex browser voice protocol and Agent bridge.
+#[wasm_bindgen(js_name = BrowserVoice)]
+pub struct WasmBrowserVoice {
+    agent: RustNanocodex,
+    protocol: RefCell<BrowserVoiceProtocol>,
+    active_turn: Rc<RefCell<Option<(u64, TurnControl)>>>,
+    next_turn: Rc<Cell<u64>>,
+    startup_context: RefCell<Option<String>>,
+    started: Cell<bool>,
+}
+
+#[wasm_bindgen(js_class = BrowserVoice)]
+impl WasmBrowserVoice {
+    /// Begins Codex's Realtime lifecycle and builds bounded browser startup context in Rust.
+    ///
+    /// # Errors
+    ///
+    /// Rejects when the Agent driver has stopped.
+    pub async fn start(&self) -> Result<(), JsValue> {
+        if self.started.get() {
+            return Ok(());
+        }
+        let context = self
+            .agent
+            .append_developer_message(REALTIME_START_INSTRUCTIONS)
+            .await
+            .map_err(js_error)?;
+        let tree =
+            browser_workspace_tree(context.workspace(), &self.agent.session_id().to_string()).await;
+        let history = browser_voice_history(context.history());
+        self.startup_context.replace(build_browser_startup_context(
+            &history,
+            context.workspace(),
+            &tree,
+        ));
+        self.started.set(true);
+        Ok(())
+    }
+
+    /// Encodes the complete same-origin call request after the browser creates its SDP offer.
+    ///
+    /// # Errors
+    ///
+    /// Rejects calls made before [`Self::start`] or an empty SDP offer.
+    #[wasm_bindgen(js_name = callBody)]
+    pub fn call_body(&self, sdp: &str) -> Result<String, JsValue> {
+        if !self.started.get() {
+            return Err(js_error("browser voice has not started"));
+        }
+        if sdp.trim().is_empty() {
+            return Err(js_error("browser voice requires an SDP offer"));
+        }
+        let protocol = self.protocol.borrow();
+        let thread_id = self.agent.session_id().to_string();
+        let call_body = build_chatgpt_realtime_call(
+            sdp,
+            protocol.voice(),
+            self.startup_context.borrow().as_deref(),
+        )
+        .map_err(js_error)?;
+        serde_json::to_string(&serde_json::json!({
+            "openai_alpha": "quicksilver=v2",
+            "realtime_session_id": thread_id,
+            "session_id": thread_id,
+            "thread_id": thread_id,
+            "call_body": call_body,
+        }))
+        .map_err(js_error)
+    }
+
+    /// Decodes Codex's provider response body and Location header in Rust.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an empty SDP answer or a Location without a Codex call identity.
+    #[wasm_bindgen(js_name = completeCall)]
+    pub fn complete_call(&self, response_body: &str, location: &str) -> Result<String, JsValue> {
+        let result = decode_chatgpt_realtime_call(response_body, location).map_err(js_error)?;
+        serde_json::to_string(&serde_json::json!({
+            "call_id": result.call_id,
+            "sdp": result.sdp,
+        }))
+        .map_err(js_error)
+    }
+
+    /// Builds the same-origin sideband URL with Codex's Rust-owned request identity.
+    ///
+    /// # Errors
+    ///
+    /// Rejects a malformed provider call identity.
+    #[wasm_bindgen(js_name = sidebandUrl)]
+    pub fn sideband_url(&self, call_id: &str) -> Result<String, JsValue> {
+        if !valid_realtime_call_id(call_id) {
+            return Err(js_error("invalid Realtime call ID"));
+        }
+        let thread_id = self.agent.session_id();
+        Ok(format!(
+            "/api/realtime/sideband?call_id={call_id}&realtime_session_id={thread_id}&session_id={thread_id}&thread_id={thread_id}&openai_alpha=quicksilver%3Dv2",
+        ))
+    }
+
+    /// Replays Rust-retained outbound frames after a sideband connects.
+    ///
+    /// # Errors
+    ///
+    /// Rejects only when effects cannot be serialized.
+    #[wasm_bindgen(js_name = sidebandOpened)]
+    pub fn sideband_opened(&self) -> Result<String, JsValue> {
+        encode_voice_effects(&self.protocol.borrow().sideband_opened())
+    }
+
+    /// Applies Codex's Rust-owned Frameless reconnect policy after transport loss.
+    ///
+    /// # Errors
+    ///
+    /// Rejects only when effects cannot be serialized.
+    #[wasm_bindgen(js_name = sidebandClosed)]
+    pub fn sideband_closed(&self, connected_ms: u32) -> Result<String, JsValue> {
+        encode_voice_effects(
+            &self
+                .protocol
+                .borrow_mut()
+                .sideband_closed(u64::from(connected_ms)),
+        )
+    }
+
+    /// Acknowledges frames written by the browser WebSocket effect executor.
+    #[wasm_bindgen(js_name = framesSent)]
+    pub fn frames_sent(&self, count: u32) {
+        self.protocol.borrow_mut().frames_sent(count as usize);
+    }
+
+    /// Reports whether one Rust-decoded sideband event can admit Agent work.
+    #[wasm_bindgen(js_name = requiresAgentAdmission)]
+    pub fn requires_agent_admission(&self, payload: &str) -> bool {
+        realtime_message_requires_agent_admission(payload)
+    }
+
+    /// Applies one Frameless sideband event and routes any delegation through the Rust Agent.
+    ///
+    /// # Errors
+    ///
+    /// Rejects when delegated Agent work cannot be accepted or steered.
+    #[wasm_bindgen(js_name = realtimeMessage)]
+    pub async fn realtime_message(&self, payload: &str) -> Result<String, JsValue> {
+        let update = self.protocol.borrow_mut().realtime_message(payload);
+        if let Some(delegation) = update.delegation {
+            let input = realtime_delegation(&delegation.input, &delegation.transcript);
+            self.route_agent_input(input).await.map_err(js_error)?;
+        }
+        encode_voice_effects(&update.effects)
+    }
+
+    /// Applies one typed Agent event to the Rust-owned handoff stream.
+    ///
+    /// # Errors
+    ///
+    /// Rejects only when effects cannot be serialized.
+    #[wasm_bindgen(js_name = agentEvent)]
+    pub fn agent_event(&self, envelope: &str) -> Result<String, JsValue> {
+        let Ok(value) = serde_json::from_str::<serde_json::Value>(envelope) else {
+            return encode_voice_effects(&BrowserVoiceEffects::default());
+        };
+        let target = value.get("target").unwrap_or(&serde_json::Value::Null);
+        let session_id = self.agent.session_id().to_string();
+        if value.get("type").and_then(serde_json::Value::as_str) != Some("event")
+            || target.get("pane").and_then(serde_json::Value::as_str) != Some("main")
+            || target.get("branchId").and_then(serde_json::Value::as_str)
+                != Some(session_id.as_str())
+        {
+            return encode_voice_effects(&BrowserVoiceEffects::default());
+        }
+        let event = value
+            .get("event")
+            .cloned()
+            .unwrap_or(serde_json::Value::Null);
+        let encoded = serde_json::to_string(&event).map_err(js_error)?;
+        encode_voice_effects(&self.protocol.borrow_mut().agent_event(&encoded))
+    }
+
+    /// Drains one Codex-paced streamed or final Agent handoff chunk.
+    ///
+    /// # Errors
+    ///
+    /// Rejects only when effects cannot be serialized.
+    pub fn flush(&self, final_chunk: bool) -> Result<String, JsValue> {
+        encode_voice_effects(&self.protocol.borrow_mut().flush(final_chunk))
+    }
+
+    /// Ends Codex's Realtime lifecycle without flushing transcript-tail work by default.
+    ///
+    /// # Errors
+    ///
+    /// Rejects when the Agent driver stops.
+    pub async fn stop(&self) -> Result<String, JsValue> {
+        if !self.started.get() {
+            return encode_voice_effects(&self.protocol.borrow().close_effects());
+        }
+        let ended = self
+            .agent
+            .append_developer_message(REALTIME_END_INSTRUCTIONS)
+            .await
+            .map(|_| ())
+            .map_err(|error| error.to_string());
+        self.started.set(false);
+        ended.map_err(js_error)?;
+        encode_voice_effects(&self.protocol.borrow().close_effects())
+    }
+
+    /// Cancels only the active coding turn, never merely the voice transport.
+    ///
+    /// # Errors
+    ///
+    /// Rejects when the active turn cannot be cancelled.
+    pub async fn cancel(&self) -> Result<bool, JsValue> {
+        let control = self
+            .active_turn
+            .borrow()
+            .as_ref()
+            .map(|(_, control)| control.clone());
+        let Some(control) = control else {
+            return Ok(false);
+        };
+        control.cancel().await.map_err(js_error)?;
+        Ok(true)
+    }
+
+    /// Selects Codex's preferred physical input from browser device labels.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed label JSON.
+    #[wasm_bindgen(js_name = preferredPhysicalInput)]
+    pub fn preferred_physical_input(
+        &self,
+        current_label: &str,
+        labels_json: &str,
+    ) -> Result<Option<u32>, JsValue> {
+        let labels = serde_json::from_str::<Vec<String>>(labels_json).map_err(js_error)?;
+        preferred_physical_input(current_label, &labels)
+            .map(|index| u32::try_from(index).map_err(js_error))
+            .transpose()
+    }
+}
+
+impl WasmBrowserVoice {
+    fn new(agent: RustNanocodex, voice: &str) -> Result<Self, String> {
+        Ok(Self {
+            agent,
+            protocol: RefCell::new(BrowserVoiceProtocol::new(voice)?),
+            active_turn: Rc::new(RefCell::new(None)),
+            next_turn: Rc::new(Cell::new(0)),
+            startup_context: RefCell::new(None),
+            started: Cell::new(false),
+        })
+    }
+
+    async fn route_agent_input(&self, input: String) -> Result<(), String> {
+        let control = self
+            .active_turn
+            .borrow()
+            .as_ref()
+            .map(|(_, control)| control.clone());
+        if let Some(control) = control {
+            return control
+                .steer(Prompt::new(input))
+                .await
+                .map_err(|error| error.to_string());
+        }
+        self.start_agent_turn(input).await
+    }
+
+    async fn start_agent_turn(&self, input: String) -> Result<(), String> {
+        let turn = self
+            .agent
+            .prompt(Prompt::new(input))
+            .await
+            .map_err(|error| error.to_string())?;
+        let ticket = self.next_turn.get().saturating_add(1);
+        self.next_turn.set(ticket);
+        self.active_turn.replace(Some((ticket, turn.control())));
+        let active_turn = Rc::clone(&self.active_turn);
+        spawn_local(async move {
+            let _ = turn.await;
+            let mut active = active_turn.borrow_mut();
+            if active
+                .as_ref()
+                .is_some_and(|(active_ticket, _)| *active_ticket == ticket)
+            {
+                active.take();
+            }
+        });
+        Ok(())
+    }
+}
+
+#[derive(Deserialize)]
+struct WasmWorkspaceEntry {
+    kind: String,
+    path: String,
+}
+
+async fn browser_workspace_tree(_workspace: &str, session_id: &str) -> Vec<String> {
+    const TREE_DEPTH: usize = 2;
+    const TREE_ENTRIES: usize = 20;
+    enum Task {
+        List(String, usize),
+        Render(WasmWorkspaceEntry, usize),
+        Omitted(usize, usize),
+    }
+    let mut output = Vec::new();
+    let mut pending = VecDeque::from([Task::List(String::from("."), 0_usize)]);
+    while let Some(task) = pending.pop_back() {
+        match task {
+            Task::List(path, depth) => {
+                if depth >= TREE_DEPTH {
+                    continue;
+                }
+                let Ok(promise) = host_list_workspace(&path, session_id) else {
+                    continue;
+                };
+                let Ok(value) = JsFuture::from(promise).await else {
+                    continue;
+                };
+                let Some(encoded) = value.as_string() else {
+                    continue;
+                };
+                let Ok(mut entries) = serde_json::from_str::<Vec<WasmWorkspaceEntry>>(&encoded)
+                else {
+                    continue;
+                };
+                entries.retain(|entry| !noisy_workspace_entry(&entry.path));
+                entries.sort_by(|left, right| {
+                    (left.kind == "file")
+                        .cmp(&(right.kind == "file"))
+                        .then_with(|| left.path.cmp(&right.path))
+                });
+                let omitted = entries.len().saturating_sub(TREE_ENTRIES);
+                if omitted > 0 {
+                    pending.push_back(Task::Omitted(omitted, depth));
+                }
+                for entry in entries.into_iter().take(TREE_ENTRIES).rev() {
+                    if entry.kind == "directory" {
+                        pending.push_back(Task::List(entry.path.clone(), depth + 1));
+                    }
+                    pending.push_back(Task::Render(entry, depth));
+                }
+            }
+            Task::Render(entry, depth) => {
+                let name = entry
+                    .path
+                    .rsplit('/')
+                    .find(|part| !part.is_empty())
+                    .unwrap_or(&entry.path);
+                output.push(format!(
+                    "{}- {}{}",
+                    "  ".repeat(depth),
+                    name,
+                    if entry.kind == "directory" { "/" } else { "" }
+                ));
+            }
+            Task::Omitted(omitted, depth) => {
+                output.push(format!(
+                    "{}- ... {omitted} more entries",
+                    "  ".repeat(depth)
+                ));
+            }
+        }
+    }
+    output
+}
+
+fn noisy_workspace_entry(path: &str) -> bool {
+    let name = path
+        .rsplit('/')
+        .find(|part| !part.is_empty())
+        .unwrap_or(path);
+    name.starts_with('.')
+        || [
+            ".git",
+            ".next",
+            ".pytest_cache",
+            ".ruff_cache",
+            "__pycache__",
+            "build",
+            "dist",
+            "node_modules",
+            "out",
+            "target",
+        ]
+        .contains(&name)
+}
+
+fn browser_voice_history(history: &[ResponseItem]) -> Vec<VoiceHistoryEntry> {
+    history
+        .iter()
+        .filter_map(|item| {
+            let ResponseItem::Message { role, content, .. } = item else {
+                return None;
+            };
+            let role = match role {
+                MessageRole::User => "user",
+                MessageRole::Assistant => "assistant",
+                MessageRole::Developer => "developer",
+            };
+            let text = content
+                .iter()
+                .filter_map(|part| match part {
+                    ContentItem::InputText { text } | ContentItem::OutputText { text, .. } => {
+                        Some(text.as_ref())
+                    }
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+                .join("\n");
+            Some(VoiceHistoryEntry::new(role, text))
+        })
+        .collect()
+}
+
+fn encode_voice_effects(effects: &BrowserVoiceEffects) -> Result<String, JsValue> {
+    serde_json::to_string(effects).map_err(js_error)
 }
 
 struct TurnState {

@@ -99,6 +99,40 @@ export default {
         subject,
       });
     }
+    const realtimeCall = url.href === "https://nanocodex.internal/v1/realtime/calls"
+      && request.method === "POST"
+      && authorization === "Bearer NANOCODEX_PROVIDER_CREDENTIAL"
+      && typeof subject === "string"
+      && subjects.has(subject)
+      && request.headers.get("chatgpt-account-id") === null;
+    if (realtimeCall) {
+      return Response.json({
+        body: await request.text(),
+        cookie: request.headers.get("cookie"),
+        origin: request.headers.get("origin"),
+        session: request.headers.get("x-session-id"),
+        subject,
+      });
+    }
+    const realtimeSideband = url.href === "https://nanocodex.internal/v1/realtime/sideband"
+      && request.method === "GET"
+      && authorization === "Bearer NANOCODEX_PROVIDER_CREDENTIAL"
+      && typeof subject === "string"
+      && subjects.has(subject)
+      && request.headers.get("chatgpt-account-id") === null
+      && request.headers.get("upgrade")?.toLowerCase() === "websocket";
+    if (realtimeSideband) {
+      const pair = new WebSocketPair();
+      const [client, server] = Object.values(pair);
+      server.accept();
+      queueMicrotask(() => server.send(JSON.stringify({
+        callId: request.headers.get("x-nanocodex-realtime-call-id"),
+        cookie: request.headers.get("cookie"),
+        session: request.headers.get("x-session-id"),
+        subject,
+      })));
+      return new Response(null, { status: 101, webSocket: client });
+    }
     const image = url.href === "https://nanocodex.internal/v1/images/generations"
       && request.method === "POST"
       && authorization === "Bearer NANOCODEX_PROVIDER_CREDENTIAL"

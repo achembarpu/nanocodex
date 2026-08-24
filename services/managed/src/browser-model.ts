@@ -9,6 +9,8 @@ const MODEL_PATHS = new Set([
   "/v1/search",
   "/v1/images/generations",
   "/v1/images/edits",
+  "/v1/realtime/calls",
+  "/v1/realtime/sideband",
 ]);
 
 type BrowserModelEnv = AccountAuthEnv & { NANOCODEX: Fetcher };

@@ -200,6 +200,11 @@ export async function realtimeTailDelegation(agent, transcript) {
   return agentState(agent).raw.realtimeTailDelegation(JSON.stringify(transcript));
 }
 
+/** Internal browser seam over the Rust-owned voice controller. */
+export function createBrowserVoice(agent, voice) {
+  return agentState(agent).raw.browserVoice(voice);
+}
+
 export async function shutdown(agent) {
   const state = knownAgentState(agent);
   if (state.shutdownPromise) return state.shutdownPromise;
@@ -438,6 +443,9 @@ const hostBridge = Object.freeze({
   },
   readWorkspaceFile(path, sessionId) {
     return requiredSessionHost(sessionId).readWorkspaceFile(path);
+  },
+  async listWorkspace(path, sessionId) {
+    return JSON.stringify(await requiredSessionHost(sessionId).listWorkspace(path));
   },
   writeWorkspaceFile(path, contents, sessionId) {
     return requiredSessionHost(sessionId).writeWorkspaceFile(path, contents);

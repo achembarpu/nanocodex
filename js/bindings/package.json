@@ -35,9 +35,9 @@
       "types": "./browser/Transport.d.mts",
       "import": "./browser/Transport.mjs"
     },
-    "./browser/realtime": {
-      "types": "./browser/realtimePrompt.d.mts",
-      "import": "./browser/realtimePrompt.mjs"
+    "./browser/voice": {
+      "types": "./browser/Voice.d.mts",
+      "import": "./browser/Voice.mjs"
     },
     "./vite": {
       "types": "./vite/index.d.mts",

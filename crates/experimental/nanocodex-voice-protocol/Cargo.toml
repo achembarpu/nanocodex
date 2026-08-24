@@ -10,5 +10,9 @@ homepage.workspace = true
 repository.workspace = true
 description = "Shared Codex Realtime adapter policy for native and browser consumers"
 
+[dependencies]
+serde.workspace = true
+serde_json.workspace = true
+
 [lints]
 workspace = true

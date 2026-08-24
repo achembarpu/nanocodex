@@ -34,6 +34,7 @@ export function AgentTerminalView({
   accessory,
   agent,
   agentError,
+  controls,
   inactiveMessage,
   mode,
   onConversationActivity,
@@ -44,6 +45,7 @@ export function AgentTerminalView({
   accessory?(controls: AgentTerminalAccessory): ReactNode;
   agent: TerminalAgent | undefined;
   agentError: string | undefined;
+  controls?(controls: Pick<AgentTerminalAccessory, "agentReady">): ReactNode;
   inactiveMessage?(state: Readonly<{
     agentError: string | undefined;
     agentStatus: AgentStatus;
@@ -178,6 +180,7 @@ export function AgentTerminalView({
 
   const terminal = (
     <XtermSurface
+      controls={controls?.({ agentReady: agentStatus === "ready" })}
       composer={touchInput ? (
         <TouchTerminalComposer
           draft={touchDraft}

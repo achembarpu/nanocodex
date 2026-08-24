@@ -2,7 +2,31 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import worker from "./index.ts";
-import { CHATGPT_REALTIME_INSTRUCTIONS } from "nanocodex/browser/realtime";
+
+function browserRealtimeCall(
+  sessionId: string,
+  startupContext?: string,
+  identity: { realtimeSessionId?: string; sessionId?: string; threadId?: string } = {},
+): string {
+  const instructions = startupContext
+    ? `rust-owned instructions\n\n${startupContext}`
+    : "rust-owned instructions";
+  return JSON.stringify({
+    openai_alpha: "quicksilver=v2",
+    realtime_session_id: identity.realtimeSessionId ?? sessionId,
+    session_id: identity.sessionId ?? sessionId,
+    thread_id: identity.threadId ?? sessionId,
+    call_body: JSON.stringify({
+      sdp: "v=0\r\na=offer\r\n",
+      session: {
+        model: "gpt-live-1-boulder-alpha",
+        instructions,
+        audio: { output: { voice: "cove" } },
+        delegation: { type: "client" },
+      },
+    }),
+  });
+}
 import { imageGeneration, web } from "nanocodex/tools";
 
 const TEST_BYOK_SESSION_ID = "a".repeat(43);
@@ -122,6 +146,12 @@ test("brokered website access stays credentialless and disables legacy browser s
             headers: { "cache-control": "no-store" },
           });
         }
+        if (new URL(request.url).pathname === "/v1/realtime/calls") {
+          return new Response("v=0\r\na=managed-answer\r\n", {
+            status: 201,
+            headers: { location: "/backend-api/codex/realtime/calls/rtc_managed" },
+          });
+        }
         return Response.json({ output: "brokered search" });
       },
     } as Fetcher,
@@ -168,6 +198,25 @@ test("brokered website access stays credentialless and disables legacy browser s
   assert.equal(upstream?.url, "https://nanocodex.internal/v1/search");
   assert.equal(upstream?.headers.get("authorization"), "Bearer NANOCODEX_PROVIDER_CREDENTIAL");
   assert.equal(upstream?.headers.get("chatgpt-account-id"), null);
+
+  const realtime = await worker.fetch(new Request("https://demo.test/api/realtime/calls", {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: "https://demo.test" },
+    body: browserRealtimeCall("session-voice", "<startup_context>current thread</startup_context>"),
+  }), env);
+  assert.equal(realtime.status, 200);
+  assert.equal(await realtime.text(), "v=0\r\na=managed-answer\r\n");
+  assert.equal(
+    realtime.headers.get("x-nanocodex-realtime-location"),
+    "/backend-api/codex/realtime/calls/rtc_managed",
+  );
+  const realtimeUpstream = egressRequests.find((request) => request.url.endsWith("/v1/realtime/calls"));
+  assert.equal(realtimeUpstream?.headers.get("authorization"), "Bearer NANOCODEX_PROVIDER_CREDENTIAL");
+  assert.equal(realtimeUpstream?.headers.get("x-session-id"), "session-voice");
+  assert.equal(realtimeUpstream?.headers.get("chatgpt-account-id"), null);
+  const realtimeBody = await realtimeUpstream?.json() as Record<string, unknown>;
+  assert.equal(realtimeBody.sdp, "v=0\r\na=offer\r\n");
+  assert.deepEqual((realtimeBody.session as Record<string, unknown>).delegation, { type: "client" });
   assert.equal(credentialSessionCalls, 0);
 });
 
@@ -769,29 +818,38 @@ test("Realtime calls keep subscription credentials server-side and bind the agen
         origin: "https://demo.test",
         cookie,
       },
-      body: JSON.stringify({
-        sdp: "v=0\r\na=offer\r\n",
-        session_id: "session-1",
-        startup_context: "<startup_context>current thread</startup_context>",
-        voice: "cove",
-      }),
+      body: browserRealtimeCall(
+        "session-1",
+        "<startup_context>current thread</startup_context>",
+        {
+          realtimeSessionId: "realtime-1",
+          sessionId: "lifecycle-1",
+          threadId: "thread-1",
+        },
+      ),
     }), { ENVIRONMENT: "test", CHATGPT_SESSIONS: namespace });
     assert.equal(response.status, 200);
     assert.equal(await response.text(), "v=0\r\na=answer\r\n");
-    assert.equal(response.headers.get("x-nanocodex-realtime-call-id"), "rtc_test");
+    assert.equal(
+      response.headers.get("x-nanocodex-realtime-location"),
+      "/backend-api/codex/realtime/calls/rtc_test",
+    );
     assert.equal(upstreamUrl, "https://chatgpt.com/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas");
     assert.equal(upstreamHeaders.get("authorization"), "Bearer subscription-secret");
     assert.equal(upstreamHeaders.get("chatgpt-account-id"), "account-1");
     assert.equal(upstreamHeaders.get("openai-alpha"), "quicksilver=v2");
-    assert.equal(upstreamHeaders.get("originator"), "nanocodex");
-    assert.equal(upstreamHeaders.get("user-agent"), "nanocodex/0.1.0");
-    assert.equal(upstreamHeaders.get("thread-id"), "session-1");
+    assert.equal(upstreamHeaders.get("originator"), null);
+    assert.equal(upstreamHeaders.get("user-agent"), "codex_cli_rs/0.0.0");
+    assert.equal(upstreamHeaders.get("x-oai-attestation"), null);
+    assert.equal(upstreamHeaders.get("x-session-id"), "realtime-1");
+    assert.equal(upstreamHeaders.get("session-id"), "lifecycle-1");
+    assert.equal(upstreamHeaders.get("thread-id"), "thread-1");
     const session = upstreamBody?.session as Record<string, unknown>;
     assert.deepEqual(session.delegation, { type: "client" });
     assert.equal(session.model, "gpt-live-1-boulder-alpha");
     assert.equal(
       session.instructions,
-      `${CHATGPT_REALTIME_INSTRUCTIONS}\n\n<startup_context>current thread</startup_context>`,
+      "rust-owned instructions\n\n<startup_context>current thread</startup_context>",
     );
   } finally {
     globalThis.fetch = originalFetch;
@@ -815,11 +873,7 @@ test("production Realtime call creation uses the per-session ChatGPT egress", as
       origin: "https://demo.test",
       cookie,
     },
-    body: JSON.stringify({
-      sdp: "v=0\r\na=offer\r\n",
-      session_id: "session-1",
-      voice: "cove",
-    }),
+    body: browserRealtimeCall("session-1"),
   }), {
     ENVIRONMENT: "production",
     CHATGPT_SESSIONS: sessions,
@@ -836,6 +890,64 @@ test("production Realtime call creation uses the per-session ChatGPT egress", as
   assert.equal(requests[0]?.headers.get("authorization"), "Bearer subscription-secret");
   assert.equal(requests[0]?.headers.get("chatgpt-account-id"), "account-1");
   assert.equal((await requests[0]?.json() as { sdp?: string }).sdp, "v=0\r\na=offer\r\n");
+});
+
+test("Realtime call answers fail closed on invalid UTF-8, overflow, and missing Location", async () => {
+  const { namespace } = createChatGptSessions();
+  const cookie = `__Secure-nanocodex_chatgpt_v2=${"a".repeat(43)}`;
+  const originalFetch = globalThis.fetch;
+  const responses = [
+    new Response(new Uint8Array([0xff]), {
+      status: 201,
+      headers: { location: "/v1/live/rtc_invalid_utf8" },
+    }),
+    new Response(new Uint8Array(1024 * 1024 + 1), {
+      status: 201,
+      headers: { location: "/v1/live/rtc_oversized" },
+    }),
+    new Response("v=answer", { status: 201 }),
+  ];
+  globalThis.fetch = (async () => responses.shift()!) as typeof fetch;
+  const call = () => worker.fetch(new Request("https://demo.test/api/realtime/calls", {
+    method: "POST",
+    headers: {
+      "content-type": "application/json",
+      origin: "https://demo.test",
+      cookie,
+    },
+    body: browserRealtimeCall("session-1"),
+  }), { ENVIRONMENT: "test", CHATGPT_SESSIONS: namespace });
+  try {
+    const invalid = await call();
+    assert.equal(invalid.status, 502);
+    assert.deepEqual(await invalid.json(), { error: "Realtime call returned invalid UTF-8 SDP" });
+
+    const oversized = await call();
+    assert.equal(oversized.status, 502);
+    assert.deepEqual(await oversized.json(), { error: "Realtime answer exceeded 1 MiB" });
+
+    const missingLocation = await call();
+    assert.equal(missingLocation.status, 502);
+    assert.deepEqual(await missingLocation.json(), {
+      error: "Realtime call response omitted its Location",
+    });
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("Realtime sidebands reject call-ID path syntax before credential lookup", async () => {
+  const response = await worker.fetch(new Request(
+    "https://demo.test/api/realtime/sideband?call_id=rtc_..%2Fadmin&openai_alpha=quicksilver%3Dv2&realtime_session_id=realtime&session_id=lifecycle&thread_id=thread",
+    {
+      headers: {
+        origin: "https://demo.test",
+        upgrade: "websocket",
+      },
+    },
+  ), { ENVIRONMENT: "test" });
+  assert.equal(response.status, 400);
+  assert.equal(await response.text(), "Invalid Realtime session");
 });
 
 test("eval routes require a configured coordinator origin", async () => {

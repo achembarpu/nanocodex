@@ -1,6 +1,7 @@
 import { agentActions } from "../actions/index.mjs";
 import {
   createAgentClient,
+  createBrowserVoice,
   defineRuntime,
   freezeJson,
   getEncodedTurnSnapshot,
@@ -200,10 +201,12 @@ export function installWorkerAgentRuntime(scope = globalThis, options = {}) {
   let eventDeliveryGeneration = 0;
   let nextAgent = 1;
   let nextResult = 1;
+  let nextVoice = 1;
   let nextChunkedEvent = 1;
   const agents = new Map();
   const turns = new Map();
   const results = new Map();
+  const voices = new Map();
 
   const post = (message, expectedGeneration = generation, transfer) => {
     if (expectedGeneration !== generation) return;
@@ -221,11 +224,15 @@ export function installWorkerAgentRuntime(scope = globalThis, options = {}) {
     for (const agent of agents.values()) {
       try { agent.dispose(); } catch (error) { reportError(error); }
     }
+    for (const voice of voices.values()) {
+      try { voice.free(); } catch (error) { reportError(error); }
+    }
     turns.clear();
     for (const resultId of [...results.keys()]) {
       try { releaseWorkerResult(results, resultId); } catch (error) { reportError(error); }
     }
     agents.clear();
+    voices.clear();
   };
 
   const boot = async (message) => {
@@ -235,6 +242,7 @@ export function installWorkerAgentRuntime(scope = globalThis, options = {}) {
     channel = message.channel;
     nextAgent = 1;
     nextResult = 1;
+    nextVoice = 1;
     try {
       const hydration = hydrateConfig(message.config, createDurabilityStore);
       const preparation = prewarmBoot?.(message.config.harness, {
@@ -262,8 +270,14 @@ export function installWorkerAgentRuntime(scope = globalThis, options = {}) {
         agents,
         turns,
         results,
+        voices,
         allocateAgent: (agent) => allocateAgent(agent, currentGeneration),
         allocateResult,
+        allocateVoice: (voice) => {
+          const id = `voice-${nextVoice++}`;
+          voices.set(id, voice);
+          return id;
+        },
         isCurrent: () => currentGeneration === generation,
         moveWatcherFrom,
         setEventsEnabled,
@@ -471,7 +485,7 @@ export function installWorkerAgentRuntime(scope = globalThis, options = {}) {
 }
 
 async function dispatch(message, state) {
-  const { agents, turns, results } = state;
+  const { agents, turns, results, voices } = state;
   switch (message.type) {
     case "prompt": {
       const agent = required(agents, message.agentId, "agent");
@@ -528,7 +542,46 @@ async function dispatch(message, state) {
     releaseWorkerResult(results, args[0]);
     return;
   }
+  if (method === "voice.start") return required(voices, args[0], "voice").start();
+  if (method === "voice.callBody") return required(voices, args[0], "voice").callBody(args[1]);
+  if (method === "voice.completeCall") {
+    return required(voices, args[0], "voice").completeCall(args[1], args[2]);
+  }
+  if (method === "voice.sidebandUrl") {
+    return required(voices, args[0], "voice").sidebandUrl(args[1]);
+  }
+  if (method === "voice.sidebandOpened") {
+    return required(voices, args[0], "voice").sidebandOpened();
+  }
+  if (method === "voice.sidebandClosed") {
+    return required(voices, args[0], "voice").sidebandClosed(args[1]);
+  }
+  if (method === "voice.framesSent") {
+    return required(voices, args[0], "voice").framesSent(args[1]);
+  }
+  if (method === "voice.requiresAgentAdmission") {
+    return required(voices, args[0], "voice").requiresAgentAdmission(args[1]);
+  }
+  if (method === "voice.realtimeMessage") {
+    return required(voices, args[0], "voice").realtimeMessage(args[1]);
+  }
+  if (method === "voice.agentEvent") return required(voices, args[0], "voice").agentEvent(args[1]);
+  if (method === "voice.flush") return required(voices, args[0], "voice").flush(args[1]);
+  if (method === "voice.stop") return required(voices, args[0], "voice").stop();
+  if (method === "voice.cancel") return required(voices, args[0], "voice").cancel();
+  if (method === "voice.preferredPhysicalInput") {
+    return required(voices, args[0], "voice").preferredPhysicalInput(args[1], args[2]);
+  }
+  if (method === "voice.dispose") {
+    const voice = voices.get(args[0]);
+    voices.delete(args[0]);
+    voice?.free();
+    return;
+  }
   const agent = required(agents, args[0], "agent");
+  if (method === "agent.voice.create") {
+    return state.allocateVoice(await createBrowserVoice(agent, args[1]));
+  }
   if (method === "agent.fork") {
     if (args[1] === undefined) return state.allocateAgent(await agent.session.fork());
     return withWorkerResult(results, args[1], async (at) => (
@@ -613,6 +666,7 @@ class WorkerConnection {
     this.rawAgents = new Set();
     this.chunkedEvent = undefined;
     this.agents = 0;
+    this.voices = 0;
     this.turns = 0;
     this.results = 0;
     this.operations = 0;
@@ -717,11 +771,56 @@ class WorkerConnection {
       endRealtimeConversation: async () => JSON.stringify(await connection.rpc("agent.realtime.end", [agentId])),
       realtimeDelegation: (input, transcript) => connection.rpc("agent.realtime.delegation", [agentId, input, transcript]),
       realtimeTailDelegation: (transcript) => connection.rpc("agent.realtime.tailDelegation", [agentId, transcript]),
+      browserVoice: async (voice) => connection.rawVoice(
+        await connection.rpc("agent.voice.create", [agentId, voice]),
+      ),
       shutdown: () => connection.rpc("agent.shutdown", [agentId]),
       free() {},
     };
     this.rawAgents.add(raw);
     return raw;
+  }
+
+  rawVoice(voiceId) {
+    this.assertOpen();
+    this.voices += 1;
+    const connection = this;
+    let released = false;
+    return {
+      start: () => connection.rpc("voice.start", [voiceId]),
+      callBody: (sdp) => connection.rpc("voice.callBody", [voiceId, sdp]),
+      completeCall: (body, location) => connection.rpc(
+        "voice.completeCall",
+        [voiceId, body, location],
+      ),
+      sidebandUrl: (callId) => connection.rpc("voice.sidebandUrl", [voiceId, callId]),
+      sidebandOpened: () => connection.rpc("voice.sidebandOpened", [voiceId]),
+      sidebandClosed: (connectedMs) => connection.rpc(
+        "voice.sidebandClosed",
+        [voiceId, connectedMs],
+      ),
+      framesSent: (count) => connection.rpc("voice.framesSent", [voiceId, count]),
+      requiresAgentAdmission: (payload) => connection.rpc(
+        "voice.requiresAgentAdmission",
+        [voiceId, payload],
+      ),
+      realtimeMessage: (payload) => connection.rpc("voice.realtimeMessage", [voiceId, payload]),
+      agentEvent: (event) => connection.rpc("voice.agentEvent", [voiceId, event]),
+      flush: (finalChunk) => connection.rpc("voice.flush", [voiceId, finalChunk]),
+      stop: () => connection.rpc("voice.stop", [voiceId]),
+      cancel: () => connection.rpc("voice.cancel", [voiceId]),
+      preferredPhysicalInput: (current, labels) => connection.rpc(
+        "voice.preferredPhysicalInput",
+        [voiceId, current, labels],
+      ),
+      free() {
+        if (released) return;
+        released = true;
+        connection.sendBestEffort("voice.dispose", [voiceId]);
+        connection.voices -= 1;
+        connection.closeIfIdle();
+      },
+    };
   }
 
   prompt(agentId, options) {
@@ -805,6 +904,7 @@ class WorkerConnection {
     if (
       this.constructingAgents.size === 0
       && this.agents === 0
+      && this.voices === 0
       && this.turns === 0
       && this.results === 0
       && this.operations === 0

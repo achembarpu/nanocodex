@@ -995,6 +995,42 @@ test("destroy from a pending notification prevents preparation and creation", as
   unsubscribe();
 });
 
+test("durable turn tracking preserves the Agent extension lifecycle", async () => {
+  let extended = 0;
+  const config = createAgentConfig({}, {
+    async create() {
+      const agent = {
+        session: { async shutdown() {} },
+        turn: {
+          prompt() {
+            return {
+              result: async () => ({ finalMessage: "done" }),
+              dispose() {},
+            };
+          },
+        },
+        extend(decorator) {
+          extended += 1;
+          return { ...agent, ...decorator(agent), retainedAgentState: true };
+        },
+      };
+      return agent;
+    },
+    async prepare() {},
+  });
+  const parameters = { threadId: "extended-durable-agent" };
+  const unsubscribe = config.subscribeAgent(parameters, () => {});
+  await waitFor(() => config.getAgent(parameters).status === "success");
+
+  const presented = config.getAgent(parameters).data;
+  assert.equal(extended, 1);
+  assert.equal(presented.retainedAgentState, true);
+  assert.equal(Object.isFrozen(presented), true);
+
+  unsubscribe();
+  await config.destroy();
+});
+
 test("detached durable turns release after completion without requiring result observation", async (context) => {
   for (const disposition of ["abandoned", "disposed-before-result"]) {
     for (const outcome of ["resolved", "rejected"]) {

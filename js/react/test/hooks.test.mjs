@@ -10,6 +10,7 @@ import {
   useNanocodex,
   useAgentEvents,
   useConfig,
+  useVoice,
 } from "../index.mjs";
 
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
@@ -19,6 +20,30 @@ test("NanocodexProvider requires one explicit caller-owned config", () => {
     () => NanocodexProvider({ children: null }),
     /requires a config/,
   );
+});
+
+test("useVoice is a thin idle resource until its Agent is ready", async () => {
+  let voice;
+
+  function Consumer({ agent, enabled = true }) {
+    voice = useVoice(agent, { enabled });
+    return null;
+  }
+
+  let root;
+  await act(async () => {
+    root = create(createElement(Consumer, { agent: undefined }));
+  });
+  assert.equal(voice.status, "idle");
+  assert.equal(voice.isIdle, true);
+  assert.equal(voice.isActive, false);
+  await assert.rejects(voice.start(), /ready Agent/);
+
+  await act(async () => {
+    root.update(createElement(Consumer, { agent: createVoiceAgent(), enabled: false }));
+  });
+  assert.equal(voice.status, "idle");
+  await act(async () => root.unmount());
 });
 
 test("useNanocodex follows the vanilla external store without duplicating Agent ownership", async () => {
@@ -346,6 +371,22 @@ function createEventAgent() {
     },
     get offs() { return offs; },
     get releases() { return releases; },
+  };
+}
+
+function createVoiceAgent() {
+  return {
+    sessionId: "voice-agent",
+    events: { watch() { throw new Error("disabled voice must not watch events"); } },
+    session: {
+      realtime: {
+        start: async () => ({ workspace: "/workspace", history: [] }),
+        end: async () => ({ workspace: "/workspace", history: [] }),
+        delegation: async (input) => input,
+        tailDelegation: async () => undefined,
+      },
+    },
+    turn: { prompt() { throw new Error("disabled voice must not prompt"); } },
   };
 }
 

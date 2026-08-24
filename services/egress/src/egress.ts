@@ -62,12 +62,15 @@ export interface EgressEnv extends BrokerEnv, ConnectorBrokerEnv {
 }
 
 type ModelOperation = Readonly<{
-  id: "responses" | "search" | "image-generation" | "image-edit";
+  id: "responses" | "search" | "image-generation" | "image-edit"
+    | "realtime-call" | "realtime-sideband";
   method: "GET" | "POST";
   path: `/v1/${string}`;
   websocket: boolean;
   openai: `https://${string}`;
   chatgpt: `https://${string}`;
+  chatGptOnly?: true;
+  directChatGpt?: true;
 }>;
 
 const OPERATIONS: readonly ModelOperation[] = [
@@ -102,6 +105,25 @@ const OPERATIONS: readonly ModelOperation[] = [
     websocket: false,
     openai: "https://api.openai.com/v1/images/edits",
     chatgpt: "https://chatgpt.com/backend-api/codex/images/edits",
+  },
+  {
+    id: "realtime-call",
+    method: "POST",
+    path: "/v1/realtime/calls",
+    websocket: false,
+    openai: "https://api.openai.com/v1/realtime/calls?intent=quicksilver&architecture=avas",
+    chatgpt: "https://chatgpt.com/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas",
+    chatGptOnly: true,
+  },
+  {
+    id: "realtime-sideband",
+    method: "GET",
+    path: "/v1/realtime/sideband",
+    websocket: true,
+    openai: "https://api.openai.com/v1/live/",
+    chatgpt: "https://api.openai.com/v1/live/",
+    chatGptOnly: true,
+    directChatGpt: true,
   },
 ];
 
@@ -150,9 +172,13 @@ export async function handleEgress(
     return auditedError(403, "provider_header_forbidden", request, url, operation.id, started);
   }
   if (operation.websocket) {
-    if (request.headers.get("upgrade")?.toLowerCase() !== "websocket"
+    const responseHeadersValid = operation.id !== "responses"
       || request.headers.get("openai-beta")?.toLowerCase()
-        !== "responses_websockets=2026-02-06") {
+        === "responses_websockets=2026-02-06";
+    const realtimeHeadersValid = operation.id !== "realtime-sideband"
+      || validRealtimeCallId(request.headers.get("x-nanocodex-realtime-call-id"));
+    if (request.headers.get("upgrade")?.toLowerCase() !== "websocket"
+      || !responseHeadersValid || !realtimeHeadersValid) {
       return auditedError(403, "required_header_mismatch", request, url, operation.id, started);
     }
   } else if (request.headers.get("content-type")?.toLowerCase() !== "application/json") {
@@ -162,11 +188,15 @@ export async function handleEgress(
   try {
     const userId = await resolveSubject(env, subject);
     let credential = await resolveCredential(env, userId, false);
+    if (operation.chatGptOnly && credential.kind !== "chatgpt") {
+      return auditedError(409, "chatgpt_credential_required", request, url, operation.id, started);
+    }
     const body = await replayableBody(request, operation);
     let upstream = await fetchUpstream(
       env,
       userId,
       credential,
+      operation,
       buildUpstreamRequest(request, env, operation, credential, body),
       upstreamFetch,
     );
@@ -174,10 +204,14 @@ export async function handleEgress(
     if (upstream.status === 401 && credential.kind === "chatgpt") {
       await cancelResponseBody(upstream);
       credential = await resolveCredential(env, userId, true, credential.revision);
+      if (operation.chatGptOnly && credential.kind !== "chatgpt") {
+        return auditedError(409, "chatgpt_credential_required", request, url, operation.id, started);
+      }
       upstream = await fetchUpstream(
         env,
         userId,
         credential,
+        operation,
         buildUpstreamRequest(request, env, operation, credential, body),
         upstreamFetch,
       );
@@ -400,23 +434,48 @@ function buildUpstreamRequest(
   body: Uint8Array | null,
 ): Request {
   const headers = new Headers();
-  const allowed = operation.websocket
+  const realtime = operation.id === "realtime-call" || operation.id === "realtime-sideband";
+  const allowed = operation.id === "responses"
     ? ["openai-beta", "session-id", "thread-id", "upgrade", "user-agent",
         "x-client-request-id", "x-codex-turn-state",
         "x-openai-internal-codex-responses-lite", "x-responsesapi-include-timing-metrics"]
-    : ["content-type", "user-agent"];
+    : operation.id === "realtime-sideband"
+      ? ["openai-alpha", "session-id", "thread-id", "upgrade", "x-session-id"]
+      : ["content-type", "user-agent"];
   for (const name of allowed) {
     const value = original.headers.get(name);
     if (value !== null) headers.set(name, value);
+  }
+  if (realtime) {
+    const realtimeSessionId = original.headers.get("x-session-id");
+    const sessionId = original.headers.get("session-id");
+    const threadId = original.headers.get("thread-id");
+    const validId = (value: string | null): value is string =>
+      value !== null && /^[A-Za-z0-9._:-]{1,200}$/.test(value);
+    if (original.headers.get("openai-alpha") !== "quicksilver=v2"
+      || !validId(realtimeSessionId) || !validId(sessionId) || !validId(threadId)) {
+      throw new EgressFailure(400, "invalid_realtime_session");
+    }
+    headers.set("openai-alpha", "quicksilver=v2");
+    headers.set("x-session-id", realtimeSessionId);
+    headers.set("session-id", sessionId);
+    headers.set("thread-id", threadId);
+    headers.set("user-agent", "codex_cli_rs/0.0.0");
   }
   headers.set("authorization", `Bearer ${credential.secret}`);
   if (credential.kind === "chatgpt") {
     if (!credential.accountId) throw new EgressFailure(503, "credential_field_unavailable");
     headers.set("chatgpt-account-id", credential.accountId);
     if (credential.fedramp) headers.set("x-openai-fedramp", "true");
-    if (!operation.websocket) headers.set("originator", "codex_cli_rs");
+    if (!operation.websocket && !realtime) headers.set("originator", "codex_cli_rs");
   }
-  return new Request(upstreamUrl(env, operation, credential.kind), {
+  const target = upstreamUrl(env, operation, credential.kind);
+  if (operation.id === "realtime-sideband") {
+    const callId = original.headers.get("x-nanocodex-realtime-call-id");
+    if (!validRealtimeCallId(callId)) throw new EgressFailure(400, "invalid_realtime_call");
+    target.pathname += callId;
+  }
+  return new Request(target, {
     method: original.method,
     headers,
     body,
@@ -432,7 +491,7 @@ function upstreamUrl(
 ): URL {
   if (kind === "openai") return new URL(operation.openai);
   const configured = env.CODEX_RELAY_URL?.trim();
-  if (!configured) return new URL(operation.chatgpt);
+  if (!configured || operation.directChatGpt) return new URL(operation.chatgpt);
   let relay: URL;
   try { relay = new URL(configured); } catch { throw new EgressFailure(503, "invalid_codex_relay_url"); }
   const publicRelay = relay.protocol === "https:" && !relay.port;
@@ -442,7 +501,9 @@ function upstreamUrl(
     || relay.search || relay.hash) {
     throw new EgressFailure(503, "invalid_codex_relay_url");
   }
-  relay.pathname = new URL(operation.chatgpt).pathname;
+  const target = new URL(operation.chatgpt);
+  relay.pathname = target.pathname;
+  relay.search = target.search;
   return relay;
 }
 
@@ -450,10 +511,11 @@ async function fetchUpstream(
   env: EgressEnv,
   userId: string,
   credential: UserCredentialSnapshot,
+  operation: ModelOperation,
   request: Request,
   upstreamFetch: typeof fetch,
 ): Promise<Response> {
-  if (credential.kind !== "chatgpt" || env.CODEX_RELAY_URL) {
+  if (credential.kind !== "chatgpt" || env.CODEX_RELAY_URL || operation.directChatGpt) {
     return upstreamFetch(request);
   }
   if (env.CHATGPT_EGRESS) {
@@ -472,6 +534,13 @@ async function fetchUpstream(
     throw new EgressFailure(503, "chatgpt_relay_unavailable");
   }
   return upstreamFetch(request);
+}
+
+function validRealtimeCallId(value: string | null): value is string {
+  return value !== null && (
+    /^rtc_[A-Za-z0-9._:-]{1,196}$/.test(value)
+    || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value)
+  );
 }
 
 async function resolveSubject(env: EgressEnv, subject: string): Promise<string> {

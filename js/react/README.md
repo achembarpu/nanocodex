@@ -38,6 +38,24 @@ const sessionId = useNanocodex({
 Without a selector, `useNanocodex` returns the full query-like resource shown above.
 `useAgentEvents` is the narrow hook for ordered typed events.
 
+`useVoice` is the thin React adapter over the Rust/WASM-owned Codex voice
+resource:
+
+```tsx
+const { data: agent } = useNanocodex({ config, threadId });
+const voice = useVoice(agent);
+
+return (
+  <button disabled={!agent} onClick={() => void voice.toggle()}>
+    {voice.isActive ? `Voice (${voice.voice})` : "Voice"}
+  </button>
+);
+```
+
+Unmounting or replacing the Agent closes voice media and the Realtime session.
+Call `voice.cancel()` separately when the user intends to cancel the active
+coding turn.
+
 Create the config once, outside React. Applications with many consumers can put
 it in `NanocodexProvider` and omit `config` from each hook. Agent defaults belong
 in `createConfig({ agent: { ... } })`; React does not need a separate preload or

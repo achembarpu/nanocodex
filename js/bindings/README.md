@@ -70,6 +70,27 @@ Worker, Durable Object, or application proxy that owns rotating credentials.
 Authentication modes are constructors rather than a union of mutually
 exclusive fields on `Agent.create`.
 
+Browser consumers can attach Codex's ChatGPT Realtime voice lifecycle to the
+same retained Agent. The resource owns microphone, speaker, WebRTC, sideband,
+and delegation cleanup; stopping voice does not cancel an active coding turn.
+
+The one-operation-at-a-time action surface is the canonical imperative API:
+
+```js
+import { Actions } from "nanocodex/browser";
+
+const voice = Actions.voice.create(agent);
+
+await Actions.voice.start(voice); // defaults to Codex's `cove` voice
+await Actions.voice.stop(voice);
+await Actions.voice.destroy(voice);
+```
+
+`Voice.create(...)` remains the equivalent namespaced resource constructor, and
+`Voice.voices` is the exact ChatGPT V3 voice catalog. Authentication stays in
+the same-origin `/api/realtime/calls` and `/api/realtime/sideband` host routes;
+the browser binding never receives ChatGPT credentials.
+
 ### Durable Cloudflare Agent
 
 `nanocodex/cloudflare` is the standard Durable Object consumer. It keeps the

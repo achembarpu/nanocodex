@@ -24,6 +24,7 @@ export type { AgentStatus, AgentTerminalMode } from "./agentTerminalTypes";
 
 export function XtermSurface({
   composer,
+  controls,
   inactiveMessage,
   mode,
   status,
@@ -32,6 +33,7 @@ export function XtermSurface({
   onReady,
 }: {
   composer?: ReactNode;
+  controls?: ReactNode;
   inactiveMessage: string;
   mode: AgentTerminalMode;
   status: AgentStatus;
@@ -208,7 +210,11 @@ export function XtermSurface({
   }, [inactiveMessage, status]);
 
   return (
-    <section className="agent-terminal-shell" aria-label="Live Nanocodex terminal">
+    <section
+      className={`agent-terminal-shell${controls ? " has-controls" : ""}`}
+      aria-label="Live Nanocodex terminal"
+    >
+      {controls}
       <div ref={element} className="agent-xterm" />
       {composer}
     </section>

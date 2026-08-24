@@ -7,6 +7,8 @@ import {
 import {
   createConfig,
   useNanocodex,
+  useVoice,
+  type UseVoiceReturnType,
 } from "nanocodex-react";
 import type { ArtifactDocument } from "nanocodex/tools/artifact";
 import type { AgentTerminalMode, AgentTerminalState } from "./agentTerminalTypes";
@@ -61,6 +63,7 @@ export const AgentTerminal = memo(function AgentTerminal({
     message: string;
     threadId: string;
   }>();
+  const voice = useVoice(agent, { beforeAgentTurn: beforeLocalTurn });
   const terminalAgent = useMemo(
     () => agent ? localTerminalAgent(agent, threadId, undefined, (failure) => {
       setLocalFailure({ agent, message: errorMessage(failure), threadId });
@@ -91,6 +94,7 @@ export const AgentTerminal = memo(function AgentTerminal({
       onStateChange={onStateChange}
       retryAgent={retryAgent}
       theme={theme}
+      controls={({ agentReady }) => <VoiceControl agentReady={agentReady} voice={voice} />}
       accessory={({ agentReady, submit }) => (
         <ArtifactDock
           agentReady={agentReady}
@@ -145,6 +149,30 @@ export const ManagedAgentTerminal = memo(function ManagedAgentTerminal({
     />
   );
 });
+
+function VoiceControl({
+  agentReady,
+  voice,
+}: {
+  agentReady: boolean;
+  voice: UseVoiceReturnType;
+}) {
+  const engaged = voice.isActive || voice.isConnecting;
+  return (
+    <div className="agent-voice-control">
+      <button
+        type="button"
+        aria-pressed={engaged}
+        disabled={!agentReady}
+        onClick={() => { void voice.toggle().catch(() => {}); }}
+      >Voice</button>
+      {voice.isActive ? <span role="status">{voice.voice}</span> : null}
+      {voice.isError ? (
+        <span role="alert">{voice.error?.message ?? "Voice failed. Check microphone access and retry."}</span>
+      ) : null}
+    </div>
+  );
+}
 
 function artifactFollowOnPrompt(
   artifact: ArtifactDocument,

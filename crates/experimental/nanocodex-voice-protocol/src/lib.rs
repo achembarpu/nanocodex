@@ -1,5 +1,23 @@
 //! Shared, transport-neutral Codex Realtime adapter policy.
 
+mod browser;
+
+/// Exact Codex Realtime side-agent instructions before user-name substitution.
+pub const CHATGPT_REALTIME_BACKEND_PROMPT_TEMPLATE: &str = include_str!("backend_prompt.md");
+
+pub use browser::{
+    BrowserRealtimeCallResult, BrowserVoiceEffects, BrowserVoiceProtocol, BrowserVoiceUpdate,
+    CHATGPT_REALTIME_VOICE, CHATGPT_REALTIME_VOICES, VoiceHistoryEntry,
+    build_browser_startup_context, build_chatgpt_realtime_call, decode_chatgpt_realtime_call,
+    preferred_physical_input, realtime_message_requires_agent_admission, valid_realtime_call_id,
+};
+
+/// Builds the exact Codex Realtime side-agent instructions.
+#[must_use]
+pub fn chatgpt_realtime_instructions(user_first_name: &str) -> String {
+    CHATGPT_REALTIME_BACKEND_PROMPT_TEMPLATE.replace("{{ user_first_name }}", user_first_name)
+}
+
 /// Canonical developer marker appended when a Realtime conversation begins.
 pub const REALTIME_START_INSTRUCTIONS: &str = concat!(
     "<realtime_conversation>\n\n",

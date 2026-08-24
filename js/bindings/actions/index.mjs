@@ -1,8 +1,9 @@
 import * as events from "./events.mjs";
 import * as session from "./session.mjs";
 import * as turn from "./turn.mjs";
+import * as voice from "./voice.mjs";
 
-export { events, session, turn };
+export { events, session, turn, voice };
 
 export function agentActions() {
   return (agent) => ({

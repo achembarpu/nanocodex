@@ -8,6 +8,13 @@ export type ManagedModelAccess = Readonly<{
   binding: Fetcher;
 }>;
 
+export type ManagedRealtimeIdentity = Readonly<{
+  openAiAlpha: "quicksilver=v2";
+  realtimeSessionId: string;
+  sessionId: string;
+  threadId: string;
+}>;
+
 type ManagedHttpOperation = "image_edit" | "image_generation" | "search";
 
 const HTTP_OPERATIONS = Object.freeze({
@@ -90,6 +97,47 @@ export function fetchManagedModel(
     method: "POST",
     headers,
     body,
+  }));
+}
+
+/** Sends Codex's exact ChatGPT Realtime call through the existing private broker. */
+export function fetchManagedRealtimeCall(
+  access: ManagedModelAccess,
+  identity: ManagedRealtimeIdentity,
+  body: string,
+): Promise<Response> {
+  return access.binding.fetch(new Request("https://nanocodex.internal/v1/realtime/calls", {
+    method: "POST",
+    headers: {
+      authorization: "Bearer NANOCODEX_PROVIDER_CREDENTIAL",
+      "content-type": "application/json",
+      "user-agent": "nanocodex/0.1.0",
+      "openai-alpha": identity.openAiAlpha,
+      "x-session-id": identity.realtimeSessionId,
+      "session-id": identity.sessionId,
+      "thread-id": identity.threadId,
+    },
+    body,
+  }));
+}
+
+/** Opens Codex's exact Realtime sideband through the existing private broker. */
+export function openManagedRealtimeSideband(
+  access: ManagedModelAccess,
+  callId: string,
+  identity: ManagedRealtimeIdentity,
+): Promise<Response> {
+  return access.binding.fetch(new Request("https://nanocodex.internal/v1/realtime/sideband", {
+    headers: {
+      authorization: "Bearer NANOCODEX_PROVIDER_CREDENTIAL",
+      upgrade: "websocket",
+      "user-agent": "nanocodex/0.1.0",
+      "x-nanocodex-realtime-call-id": callId,
+      "openai-alpha": identity.openAiAlpha,
+      "x-session-id": identity.realtimeSessionId,
+      "session-id": identity.sessionId,
+      "thread-id": identity.threadId,
+    },
   }));
 }
 

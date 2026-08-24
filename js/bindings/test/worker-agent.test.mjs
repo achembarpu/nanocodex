@@ -13,7 +13,7 @@ import {
 } from "../browser/WorkerAgent.mjs";
 import { createAgentConfig } from "../browser/config.mjs";
 import { agentActions } from "../actions/index.mjs";
-import { createAgentClient, defineRuntime } from "../internal.mjs";
+import { createAgentClient, createBrowserVoice, defineRuntime } from "../internal.mjs";
 import * as Transport from "../browser/Transport.mjs";
 
 test("Worker Agent preserves synchronous prompt handles, independent results, and ordered events", async () => {
@@ -100,6 +100,52 @@ test("Worker prompt acknowledgement waits for durable turn admission", async () 
   result.dispose();
   turn.dispose();
   agent.dispose();
+  assert.equal(worker.terminated, 1);
+});
+
+test("Worker Agent retains and proxies the Rust browser voice handle", async () => {
+  const fixture = createFixture();
+  const worker = new LoopbackWorker(fixture.createAgent);
+  const agent = await createWorkerAgent({ sessionId: "root", harness: false }, { worker });
+  const voice = await createBrowserVoice(agent, "cove");
+
+  await voice.start();
+  const call = JSON.parse(await voice.callBody("v=offer"));
+  assert.equal(JSON.parse(call.call_body).session.audio.output.voice, "cove");
+  assert.deepEqual(
+    JSON.parse(await voice.completeCall("v=answer", "/v1/live/rtc_test")),
+    { call_id: "rtc_test", sdp: "v=answer" },
+  );
+  assert.equal(await voice.sidebandUrl("rtc_test"), "/sideband/rtc_test");
+  assert.equal(JSON.parse(await voice.sidebandOpened()).frames.length, 0);
+  assert.equal(JSON.parse(await voice.sidebandClosed(1_000)).reconnect_after_ms, 200);
+  await voice.framesSent(1);
+  assert.equal(await voice.requiresAgentAdmission('{"type":"delegation.created"}'), true);
+  assert.equal(JSON.parse(await voice.realtimeMessage('{"type":"turn.done"}')).frames.length, 0);
+  assert.equal(await voice.cancel(), true);
+  assert.equal(await voice.preferredPhysicalInput("BlackHole", '["Built-in Microphone"]'), 0);
+  assert.equal(JSON.parse(await voice.stop()).frames[0], '{"type":"session.close"}');
+  agent.dispose();
+  assert.equal(worker.terminated, 0);
+  voice.free();
+  await tick();
+
+  assert.deepEqual(fixture.log.filter(([kind]) => kind.startsWith("voice-")), [
+    ["voice-create", "root", "cove"],
+    ["voice-start", "root"],
+    ["voice-call", "root", "v=offer"],
+    ["voice-complete", "root", "v=answer", "/v1/live/rtc_test"],
+    ["voice-sideband", "root", "rtc_test"],
+    ["voice-sideband-opened", "root"],
+    ["voice-sideband-closed", "root", 1000],
+    ["voice-frames-sent", "root", 1],
+    ["voice-admission", "root", '{"type":"delegation.created"}'],
+    ["voice-message", "root", '{"type":"turn.done"}'],
+    ["voice-cancel", "root"],
+    ["voice-input", "root", "BlackHole", '["Built-in Microphone"]'],
+    ["voice-stop", "root"],
+    ["voice-free", "root"],
+  ]);
   assert.equal(worker.terminated, 1);
 });
 
@@ -1714,6 +1760,70 @@ function createFixture(options = {}) {
         const entries = JSON.parse(transcript);
         log.push(["realtime-tail", sessionId, entries]);
         return entries.length ? "canonical-tail" : undefined;
+      },
+      browserVoice(voice) {
+        log.push(["voice-create", sessionId, voice]);
+        return {
+          async start() { log.push(["voice-start", sessionId]); },
+          callBody(sdp) {
+            log.push(["voice-call", sessionId, sdp]);
+            return JSON.stringify({
+              session_id: sessionId,
+              call_body: JSON.stringify({
+                sdp,
+                session: { audio: { output: { voice } } },
+              }),
+            });
+          },
+          completeCall(body, location) {
+            log.push(["voice-complete", sessionId, body, location]);
+            return JSON.stringify({ call_id: "rtc_test", sdp: body });
+          },
+          sidebandUrl(callId) {
+            log.push(["voice-sideband", sessionId, callId]);
+            return `/sideband/${callId}`;
+          },
+          sidebandOpened() {
+            log.push(["voice-sideband-opened", sessionId]);
+            return JSON.stringify({ frames: [], transcripts: [], schedule_flush: false });
+          },
+          sidebandClosed(connectedMs) {
+            log.push(["voice-sideband-closed", sessionId, connectedMs]);
+            return JSON.stringify({
+              frames: [],
+              transcripts: [],
+              reconnect_after_ms: 200,
+              schedule_flush: false,
+            });
+          },
+          framesSent(count) { log.push(["voice-frames-sent", sessionId, count]); },
+          requiresAgentAdmission(payload) {
+            log.push(["voice-admission", sessionId, payload]);
+            return JSON.parse(payload).type === "delegation.created";
+          },
+          realtimeMessage(payload) {
+            log.push(["voice-message", sessionId, payload]);
+            return JSON.stringify({ frames: [], transcripts: [], schedule_flush: false });
+          },
+          agentEvent(payload) {
+            log.push(["voice-event", sessionId, payload]);
+            return JSON.stringify({ frames: [], transcripts: [], schedule_flush: false });
+          },
+          flush(finalChunk) {
+            log.push(["voice-flush", sessionId, finalChunk]);
+            return JSON.stringify({ frames: [], transcripts: [], schedule_flush: false });
+          },
+          async stop() {
+            log.push(["voice-stop", sessionId]);
+            return JSON.stringify({ frames: ['{"type":"session.close"}'], transcripts: [], schedule_flush: false });
+          },
+          async cancel() { log.push(["voice-cancel", sessionId]); return true; },
+          preferredPhysicalInput(current, labels) {
+            log.push(["voice-input", sessionId, current, labels]);
+            return 0;
+          },
+          free() { log.push(["voice-free", sessionId]); },
+        };
       },
       async shutdown() { log.push(["shutdown", sessionId]); },
       free() {

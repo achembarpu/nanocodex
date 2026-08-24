@@ -46,7 +46,8 @@ pub use nanocodex::oai::realtime::{
 
 use audio::VoiceAudio;
 
-const CODEX_BACKEND_PROMPT: &str = include_str!("backend_prompt.md");
+const CODEX_BACKEND_PROMPT: &str =
+    nanocodex_voice_protocol::CHATGPT_REALTIME_BACKEND_PROMPT_TEMPLATE;
 const USER_FIRST_NAME_PLACEHOLDER: &str = "{{ user_first_name }}";
 const DEFAULT_USER_FIRST_NAME: &str = "there";
 const HANDOFF_STREAM_FLUSH_INTERVAL: Duration = Duration::from_millis(200);

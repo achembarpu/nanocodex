@@ -148,7 +148,11 @@ export function createAgentConfig(options = {}, runtime) {
         });
       },
     });
-    presentedAgent = Object.freeze({ ...agent, turn });
+    presentedAgent = Object.freeze(
+      typeof agent.extend === "function"
+        ? agent.extend(() => ({ turn }))
+        : { ...agent, turn },
+    );
     presentedAgents.set(agent, presentedAgent);
     underlyingAgents.set(presentedAgent, agent);
     return presentedAgent;

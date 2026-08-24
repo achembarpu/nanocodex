@@ -486,6 +486,83 @@ describe("managed agents REST and resumable SSE", () => {
     expect(JSON.stringify(forwarded)).not.toContain(account.user.id);
   });
 
+  it("forwards browser Realtime calls through the same opaque account subject", async () => {
+    const session = await RAW_SELF.fetch("https://example.test/v1/me");
+    const cookie = session.headers.get("set-cookie")?.split(";", 1)[0];
+    const account = await session.json<{ user: { id: string } }>();
+    const body = JSON.stringify({ sdp: "v=0", session: { delegation: { type: "client" } } });
+    const response = await RAW_SELF.fetch("https://nanocodex.internal/v1/realtime/calls", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer NANOCODEX_PROVIDER_CREDENTIAL",
+        cookie: cookie!,
+        "content-type": "application/json",
+        origin: "https://example.test",
+        "x-nanocodex-subject": "browser-controlled-subject",
+        "x-session-id": "voice-session",
+      },
+      body,
+    });
+
+    expect(response.status).toBe(200);
+    const forwarded = await response.json<{
+      body: string;
+      cookie: string | null;
+      origin: string | null;
+      session: string;
+      subject: string;
+    }>();
+    expect(forwarded).toMatchObject({
+      body,
+      cookie: null,
+      origin: "https://example.test",
+      session: "voice-session",
+    });
+    expect(forwarded.subject).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(forwarded.subject).not.toBe("browser-controlled-subject");
+    expect(JSON.stringify(forwarded)).not.toContain(cookie!);
+    expect(JSON.stringify(forwarded)).not.toContain(account.user.id);
+  });
+
+  it("upgrades browser Realtime sidebands through the same opaque account subject", async () => {
+    const session = await RAW_SELF.fetch("https://example.test/v1/me");
+    const cookie = session.headers.get("set-cookie")?.split(";", 1)[0];
+    const account = await session.json<{ user: { id: string } }>();
+    const response = await RAW_SELF.fetch("https://nanocodex.internal/v1/realtime/sideband", {
+      headers: {
+        authorization: "Bearer NANOCODEX_PROVIDER_CREDENTIAL",
+        cookie: cookie!,
+        upgrade: "websocket",
+        "x-nanocodex-realtime-call-id": "rtc_test",
+        "x-nanocodex-subject": "browser-controlled-subject",
+        "x-session-id": "voice-session",
+      },
+    });
+
+    expect(response.status).toBe(101);
+    const socket = response.webSocket;
+    expect(socket).toBeDefined();
+    socket!.accept();
+    const forwarded = await new Promise<{
+      callId: string;
+      cookie: string | null;
+      session: string;
+      subject: string;
+    }>((resolve) => {
+      socket!.addEventListener("message", (event) => resolve(JSON.parse(String(event.data))));
+    });
+    socket!.close();
+    expect(forwarded).toMatchObject({
+      callId: "rtc_test",
+      cookie: null,
+      session: "voice-session",
+    });
+    expect(forwarded.subject).toMatch(/^[A-Za-z0-9_-]{43}$/);
+    expect(forwarded.subject).not.toBe("browser-controlled-subject");
+    expect(JSON.stringify(forwarded)).not.toContain(cookie!);
+    expect(JSON.stringify(forwarded)).not.toContain(account.user.id);
+  });
+
   it("lets anonymous and passkey cookies use browser-local and managed-durable runtimes", async () => {
     const anonymous = await RAW_SELF.fetch("https://example.test/v1/me");
     const anonymousCookie = anonymous.headers.get("set-cookie")?.split(";", 1)[0];

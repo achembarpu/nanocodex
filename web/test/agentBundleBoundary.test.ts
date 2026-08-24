@@ -34,13 +34,14 @@ test("Vite owns one static application graph without manual module loaders", () 
   assert.match(managedRuntime, /Agent,[\s\S]*?from "nanocodex\/managed"/);
 });
 
-test("the authenticated terminal consumes the public React hook directly", () => {
-  assert.match(terminal, /import \{[\s\S]*?createConfig,[\s\S]*?useNanocodex,[\s\S]*?\} from "nanocodex-react"/);
+test("the authenticated terminal consumes the public React hooks directly", () => {
+  assert.match(terminal, /import \{[\s\S]*?createConfig,[\s\S]*?useNanocodex,[\s\S]*?useVoice,[\s\S]*?\} from "nanocodex-react"/);
   assert.match(terminal, /const agentConfig = useMemo\(\(\) => createConfig\(\{/);
   assert.match(
     terminal,
     /useNanocodex\(\{ config: agentConfig, threadId \}\)/,
   );
+  assert.match(terminal, /useVoice\(agent, \{ beforeAgentTurn: beforeLocalTurn \}\)/);
   assert.doesNotMatch(terminal, /NanocodexProvider|prepareAgent|preload/);
 });
 

@@ -7,7 +7,9 @@ import {
   useNanocodex,
   useAgentEvents,
   useConfig,
+  useVoice,
   type UseNanocodexReturnType,
+  type UseVoiceReturnType,
 } from "../index.mjs";
 
 const config = createConfig({
@@ -45,6 +47,20 @@ function Consumer() {
   return result.data;
 }
 void Consumer;
+
+function VoiceConsumer(agent: DefaultAgent | undefined) {
+  const voice: UseVoiceReturnType = useVoice(agent, {
+    beforeAgentTurn: async () => {},
+    voice: "cove",
+  });
+  void voice.start({ voice: "juniper" });
+  void voice.stop();
+  void voice.cancel();
+  // @ts-expect-error platform-only voices are not accepted by ChatGPT V3.
+  void voice.start({ voice: "marin" });
+  return voice.isActive ? voice.voice : voice.status;
+}
+void VoiceConsumer;
 
 function SelectedConsumer() {
   const selectedStatus: AgentStatus = useNanocodex({

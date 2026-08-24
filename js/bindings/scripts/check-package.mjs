@@ -31,6 +31,9 @@ const requiredFiles = [
   "browser/index.mjs",
   "browser/index.d.mts",
   "browser/InlineAgent.mjs",
+  "browser/Voice.mjs",
+  "browser/Voice.d.mts",
+  "browser/VoiceSession.mjs",
   "browser/config.mjs",
   "browser/config.d.mts",
   "browser/engine.mjs",
@@ -115,6 +118,7 @@ export async function checkPackage(packageRoot = root) {
   assert.equal(packageJson.exports?.["./browser"]?.import, "./browser/index.mjs");
   assert.equal(packageJson.exports?.["./browser/client"], undefined);
   assert.equal(packageJson.exports?.["./browser/workspace"]?.import, "./browser/workspace.mjs");
+  assert.equal(packageJson.exports?.["./browser/voice"]?.import, "./browser/Voice.mjs");
   assert.equal(packageJson.exports?.["./host"]?.import, "./host/index.mjs");
   assert.equal(packageJson.exports?.["./cloudflare"]?.import, "./cloudflare/index.mjs");
   assert.equal(packageJson.exports?.["./managed"]?.import, "./managed/index.mjs");

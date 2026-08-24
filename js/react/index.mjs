@@ -11,6 +11,7 @@ import {
   useRef,
   useSyncExternalStore,
 } from "react";
+import { Actions } from "nanocodex/browser";
 
 export { createConfig } from "nanocodex/browser";
 
@@ -19,6 +20,13 @@ const IDLE_AGENT_SNAPSHOT = Object.freeze({
   data: undefined,
   error: undefined,
   status: "idle",
+});
+const IDLE_VOICE_SNAPSHOT = Object.freeze({
+  error: undefined,
+  status: "idle",
+  statusText: undefined,
+  transcripts: Object.freeze([]),
+  voice: undefined,
 });
 const identity = (value) => value;
 
@@ -89,6 +97,59 @@ export function useAgentEvents(agent, listener, options = {}) {
       watcher.off();
     };
   }, [agent, includeAllSessions]);
+}
+
+/** Adapts the Rust/WASM-owned Codex voice resource without reimplementing its lifecycle. */
+export function useVoice(agent, parameters = {}) {
+  const enabled = parameters.enabled ?? true;
+  const resource = useMemo(
+    () => agent && enabled
+      ? Actions.voice.create(agent, {
+          ...(parameters.voice === undefined ? {} : { voice: parameters.voice }),
+          ...(parameters.callUrl === undefined ? {} : { callUrl: parameters.callUrl }),
+          ...(parameters.sidebandUrl === undefined ? {} : { sidebandUrl: parameters.sidebandUrl }),
+          ...(parameters.captureMicrophone === undefined
+            ? {}
+            : { captureMicrophone: parameters.captureMicrophone }),
+          ...(parameters.beforeAgentTurn === undefined
+            ? {}
+            : { beforeAgentTurn: parameters.beforeAgentTurn }),
+        })
+      : undefined,
+    [
+      agent,
+      enabled,
+      parameters.beforeAgentTurn,
+      parameters.callUrl,
+      parameters.captureMicrophone,
+      parameters.sidebandUrl,
+      parameters.voice,
+    ],
+  );
+  useEffect(() => () => {
+    void resource?.destroy();
+  }, [resource]);
+  const subscribe = useCallback(
+    (listener) => resource?.subscribe(listener) ?? (() => {}),
+    [resource],
+  );
+  const getSnapshot = useCallback(
+    () => resource?.getSnapshot() ?? IDLE_VOICE_SNAPSHOT,
+    [resource],
+  );
+  const snapshot = useSyncExternalStore(subscribe, getSnapshot, () => IDLE_VOICE_SNAPSHOT);
+  const unavailable = useCallback(() => Promise.reject(new Error("voice requires a ready Agent")), []);
+  return useMemo(() => Object.freeze({
+    ...snapshot,
+    isActive: snapshot.status === "active",
+    isConnecting: snapshot.status === "connecting",
+    isError: snapshot.status === "error",
+    isIdle: snapshot.status === "idle",
+    cancel: resource?.cancel ?? (async () => false),
+    start: resource?.start ?? unavailable,
+    stop: resource?.stop ?? (async () => {}),
+    toggle: resource?.toggle ?? unavailable,
+  }), [resource, snapshot, unavailable]);
 }
 
 export function useConfig(parameters = {}) {

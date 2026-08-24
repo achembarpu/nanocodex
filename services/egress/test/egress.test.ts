@@ -1110,6 +1110,80 @@ describe("per-user credential broker", () => {
       localRelayRequest?.headers.get("authorization"),
     );
     expect(containerRequest?.headers.get("x-nanocodex-subject")).toBeNull();
+
+    let realtimeCall: Request | undefined;
+    const call = await handleEgress(
+      realtimeRequest(subject, "/v1/realtime/calls", {
+        method: "POST",
+        body: JSON.stringify({ sdp: "v=0", session: { delegation: { type: "client" } } }),
+      }),
+      {
+        ...workerEnv,
+        CODEX_RELAY_URL: "http://127.0.0.1:49152/",
+        ALLOW_INSECURE_LOOPBACK_RELAY: "true",
+      },
+      undefined,
+      async (input, init) => {
+        realtimeCall = input instanceof Request ? input : new Request(input, init);
+        return new Response("v=0", {
+          status: 201,
+          headers: { location: "/backend-api/codex/realtime/calls/rtc_test" },
+        });
+      },
+    );
+    expect(call.status).toBe(201);
+    expect(realtimeCall?.url).toBe(
+      "http://127.0.0.1:49152/backend-api/codex/realtime/calls?intent=quicksilver&architecture=avas",
+    );
+    expect(realtimeCall?.headers.get("openai-alpha")).toBe("quicksilver=v2");
+    expect(realtimeCall?.headers.get("x-oai-attestation")).toBeNull();
+    expect(realtimeCall?.headers.get("originator")).toBeNull();
+    expect(realtimeCall?.headers.get("x-session-id")).toBe("realtime-session");
+    expect(realtimeCall?.headers.get("session-id")).toBe("lifecycle-session");
+    expect(realtimeCall?.headers.get("thread-id")).toBe("thread-session");
+    expect(realtimeCall?.headers.get("chatgpt-account-id")).toBe("chatgpt-account");
+    expect(realtimeCall?.headers.get("x-nanocodex-subject")).toBeNull();
+
+    let realtimeSideband: Request | undefined;
+    const sideband = await handleEgress(
+      realtimeRequest(subject, "/v1/realtime/sideband", {
+        callId: "rtc_test",
+        method: "GET",
+      }),
+      {
+        ...workerEnv,
+        ENVIRONMENT: "production",
+        CHATGPT_EGRESS: {
+          idFromName() { throw new Error("Realtime sideband must use its fixed direct host"); },
+        } as unknown as DurableObjectNamespace,
+      },
+      undefined,
+      async (input, init) => {
+        realtimeSideband = input instanceof Request ? input : new Request(input, init);
+        return Response.json({ ok: true });
+      },
+    );
+    expect(sideband.status).toBe(200);
+    expect(realtimeSideband?.url).toBe("https://api.openai.com/v1/live/rtc_test");
+    expect(realtimeSideband?.headers.get("upgrade")).toBe("websocket");
+    expect(realtimeSideband?.headers.get("originator")).toBeNull();
+    expect(realtimeSideband?.headers.get("x-session-id")).toBe("realtime-session");
+    expect(realtimeSideband?.headers.get("session-id")).toBe("lifecycle-session");
+    expect(realtimeSideband?.headers.get("thread-id")).toBe("thread-session");
+  });
+
+  it("rejects Realtime before an OpenAI key can reach the ChatGPT-only endpoint", async () => {
+    const response = await handleEgress(
+      realtimeRequest(subjectA, "/v1/realtime/calls", {
+        method: "POST",
+        body: JSON.stringify({ sdp: "v=0" }),
+      }),
+      workerEnv,
+      undefined,
+      async () => { throw new Error("OpenAI credentials must not reach ChatGPT Realtime"); },
+    );
+    expect(response.status).toBe(409);
+    expect(await response.json()).toEqual({ error: "chatgpt_credential_required" });
   });
 
   it("encrypts all provider and pending-login material in Durable Object storage", async () => {
@@ -1738,6 +1812,27 @@ function modelRequest(subject: string): Request {
       "x-should-not-forward": "secret",
     },
     body: JSON.stringify({ query: "safe" }),
+  });
+}
+
+function realtimeRequest(
+  subject: string,
+  path: "/v1/realtime/calls" | "/v1/realtime/sideband",
+  options: Readonly<{ body?: string; callId?: string; method: "GET" | "POST" }>,
+): Request {
+  return new Request(`https://nanocodex.internal${path}`, {
+    method: options.method,
+    headers: {
+      authorization: "Bearer NANOCODEX_PROVIDER_CREDENTIAL",
+      ...(options.method === "POST" ? { "content-type": "application/json" } : { upgrade: "websocket" }),
+      "x-nanocodex-subject": subject,
+      "openai-alpha": "quicksilver=v2",
+      "x-session-id": "realtime-session",
+      "session-id": "lifecycle-session",
+      "thread-id": "thread-session",
+      ...(options.callId ? { "x-nanocodex-realtime-call-id": options.callId } : {}),
+    },
+    ...(options.body === undefined ? {} : { body: options.body }),
   });
 }
 

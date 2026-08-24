@@ -16,7 +16,7 @@
     "paths": {
       "nanocodex": ["../js/bindings/index.d.mts"],
       "nanocodex/browser": ["../js/bindings/browser/index.d.mts"],
-      "nanocodex/browser/realtime": ["../js/bindings/browser/realtimePrompt.d.mts"],
+      "nanocodex/browser/voice": ["../js/bindings/browser/Voice.d.mts"],
       "nanocodex/browser/workspace": ["../js/bindings/browser/workspace.d.mts"],
       "nanocodex/tools": ["../js/bindings/tools/index.d.mts"],
       "nanocodex/tools/artifact": ["../js/bindings/tools/artifact.d.mts"],

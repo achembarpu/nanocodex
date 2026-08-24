@@ -209,6 +209,61 @@
   border: 1px solid var(--terminal-border);
 }
 
+.agent-terminal-shell.has-controls {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.agent-voice-control {
+  z-index: 7;
+  display: flex;
+  min-width: 0;
+  min-height: 34px;
+  padding: 3px 8px;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+  color: var(--terminal-muted);
+  font: 11px var(--font-mono);
+  background: var(--terminal-background);
+  border-bottom: 1px solid var(--terminal-border);
+}
+
+.agent-voice-control button {
+  min-height: 26px;
+  padding: 0 8px;
+  color: inherit;
+  font: inherit;
+  background: transparent;
+  border: 0;
+  cursor: pointer;
+}
+
+.agent-voice-control button:hover,
+.agent-voice-control button:focus-visible,
+.agent-voice-control button[aria-pressed="true"] {
+  color: var(--terminal-foreground);
+  background: var(--terminal-hover);
+  outline: 1px solid var(--terminal-border);
+  outline-offset: -1px;
+}
+
+.agent-voice-control button:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.agent-voice-control span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.agent-voice-control span[role="alert"] {
+  color: var(--negative);
+}
+
 .agent-terminal-standby {
   margin: 0;
   padding: 12px;
@@ -266,6 +321,19 @@
   .agent-terminal-shell {
     display: grid;
     grid-template-rows: minmax(0, 1fr) auto;
+  }
+
+  .agent-terminal-shell.has-controls {
+    grid-template-rows: auto minmax(0, 1fr) auto;
+  }
+
+  .agent-voice-control {
+    min-height: 44px;
+  }
+
+  .agent-voice-control button {
+    min-width: 52px;
+    min-height: 44px;
   }
 
   .agent-xterm {
@@ -497,6 +565,10 @@
   height: 100%;
   min-height: 0;
   margin: 0;
+}
+
+.nanocodex-demo.is-full .agent-voice-control {
+  padding-right: 52px;
 }
 
 @media (pointer: coarse), (any-pointer: coarse) {

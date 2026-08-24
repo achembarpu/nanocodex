@@ -446,6 +446,13 @@ export function createBrowserHost(options = {}) {
       }
       return contents;
     },
+    listWorkspace: async (path) => {
+      if (!options.filesystem) throw new Error("browser workspace is unavailable");
+      if (typeof options.filesystem.list !== "function") {
+        throw new Error("browser workspace does not expose list()");
+      }
+      return options.filesystem.list(path, { maxEntries: 2_000 });
+    },
     writeWorkspaceFile: async (path, contents) => {
       if (!options.filesystem) throw new Error("browser workspace is unavailable");
       await options.filesystem.writeFile(path, contents);
