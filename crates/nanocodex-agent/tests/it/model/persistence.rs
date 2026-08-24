@@ -171,7 +171,7 @@ async fn serialized_session_and_codex_rollout_share_committed_history() -> Resul
         assert_eq!(replay["input"][1]["role"], "developer");
         assert_eq!(
             replay["input"][1]["content"][0]["text"],
-            "durable instructions"
+            "instructions from the resumed rollout"
         );
         let replay_text = replay.to_string();
         assert!(replay_text.contains("first prompt"));
@@ -252,16 +252,6 @@ async fn serialized_session_and_codex_rollout_share_committed_history() -> Resul
         Some(&rollout_history),
         "rollout resume must materialize the recorded committed history"
     );
-    let incompatible_rollout = Nanocodex::builder(openai()?)
-        .instructions("changed instructions")
-        .thinking(Thinking::Low)
-        .resume(durable.snapshot().clone())
-        .build();
-    assert!(matches!(
-        incompatible_rollout,
-        Err(NanocodexError::InvalidSessionSnapshot(message))
-            if message.contains("instructions do not match")
-    ));
     let snapshot: SessionSnapshot = serde_json::from_slice(&encoded)?;
     agent.shutdown().await?;
     drop((agent, events, first));
@@ -276,16 +266,6 @@ async fn serialized_session_and_codex_rollout_share_committed_history() -> Resul
             if message.contains("unsupported format version")
     ));
 
-    let incompatible = Nanocodex::builder(openai()?)
-        .instructions("changed instructions")
-        .thinking(Thinking::Low)
-        .resume(snapshot.clone())
-        .build();
-    assert!(matches!(
-        incompatible,
-        Err(NanocodexError::InvalidSessionSnapshot(message))
-            if message.contains("instructions or tool definitions")
-    ));
     let other_workspace = temporary_workspace("serialized-resume-other")?;
     let incompatible = Nanocodex::builder(openai()?)
         .instructions("durable instructions")
@@ -312,7 +292,7 @@ async fn serialized_session_and_codex_rollout_share_committed_history() -> Resul
 
     let (thread_id, snapshot, rollout) = durable.into_parts();
     let (resumed, resumed_events) = Nanocodex::builder(openai()?)
-        .instructions("durable instructions")
+        .instructions("instructions from the resumed rollout")
         .thinking(Thinking::Low)
         .session_id(thread_id.parse()?)
         .resume(snapshot)
@@ -366,7 +346,7 @@ async fn serialized_session_and_codex_rollout_share_committed_history() -> Resul
 }
 
 #[tokio::test]
-async fn serialized_session_resumes_over_ephemeral_https() -> Result<()> {
+async fn serialized_session_rebinds_deployed_instructions_and_tools() -> Result<()> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
     let endpoint = format!("http://{}", listener.local_addr()?);
     let server = tokio::spawn(async move {
@@ -382,6 +362,20 @@ async fn serialized_session_resumes_over_ephemeral_https() -> Result<()> {
         assert_eq!(resumed.body["store"], false);
         assert!(resumed.body.get("previous_response_id").is_none());
         let replay = resumed.body.to_string();
+        assert_eq!(
+            resumed.body["input"][1]["content"][0]["text"],
+            "instructions from the new deployment"
+        );
+        assert_eq!(
+            resumed.body["input"][0]["tools"]
+                .as_array()
+                .into_iter()
+                .flatten()
+                .filter_map(|tool| tool["name"].as_str())
+                .collect::<Vec<_>>(),
+            ["exec", "wait"]
+        );
+        assert!(!replay.contains("instructions from the old deployment"));
         assert!(replay.contains("first prompt"));
         assert!(replay.contains("done"));
         assert!(replay.contains("resume prompt"));
@@ -395,7 +389,7 @@ async fn serialized_session_resumes_over_ephemeral_https() -> Result<()> {
         .api_base_url(endpoint.clone())
         .build()?;
     let (agent, events) = Nanocodex::builder(openai)
-        .instructions("durable instructions")
+        .instructions("instructions from the old deployment")
         .model(Model::Luna)
         .thinking(Thinking::Low)
         .workspace(&workspace)
@@ -413,7 +407,8 @@ async fn serialized_session_resumes_over_ephemeral_https() -> Result<()> {
         .api_base_url(endpoint)
         .build()?;
     let (resumed, resumed_events) = Nanocodex::builder(openai)
-        .instructions("durable instructions")
+        .instructions("instructions from the new deployment")
+        .tools(Tools::builder().without_defaults().build()?)
         .thinking(Thinking::Low)
         .resume(snapshot)
         .build()?;

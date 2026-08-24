@@ -29,21 +29,12 @@ where
             lineage_id,
             prompt_cache_key: restored_cache_key,
             workspace,
-            base_instructions,
             canonical_context,
             history,
             context_baseline,
             checkpoint,
         } = snapshot.into_resume()?;
         Arc::make_mut(&mut config).model = model;
-        if base_instructions
-            .as_deref()
-            .is_some_and(|stored| stored != config.system_prompt())
-        {
-            return Err(NanocodexError::InvalidSessionSnapshot(
-                "instructions do not match the resumed rollout".to_owned(),
-            ));
-        }
         if key
             .as_deref()
             .is_some_and(|key| key != restored_cache_key.as_ref())

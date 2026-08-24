@@ -23,7 +23,7 @@ warmup suppression remain follow-up performance work.
 | --- | --- |
 | Live agent | Stable cache key, persistent WebSocket, typed history, and healthy `previous_response_id` continuation |
 | `store(true)` | Provider checkpoint may cross socket replacement and enables delta-sized in-memory forks |
-| Portable `SessionSnapshot` | Model, lineage, cache key, exact request prefix, context, and complete typed history |
+| Portable `SessionSnapshot` | Model, lineage, cache key, completed request prefix, context, and complete typed history; a new runtime rebinds its current prefix |
 | Cold process recovery | Full-history replay with the retained cache key; no `previous_response_id` |
 | Codex rollout reconstruction | History survives, but an explicit cache key is currently replaced by the thread ID |
 
@@ -43,6 +43,15 @@ restart is a full replay. It can receive cached-input pricing while the provider
 prompt cache remains warm, but it does not get the smaller stored-checkpoint
 request. Today `store(true)` improves live socket replacement and in-memory
 forks, not process restart.
+
+A completed snapshot does not freeze application policy forever. On cold
+resume, the retained typed history and prompt-cache lineage remain
+authoritative, while the newly deployed runtime rebuilds the request prefix
+from its current instructions, tool definitions, and handlers. If that prefix
+changed, the provider may miss the old cached prefix even though the stable key
+is retained. An unfinished recorded model step is stricter: its exact old
+request profile remains part of the durable step definition and cannot replay
+under changed semantics.
 
 ## Findings
 

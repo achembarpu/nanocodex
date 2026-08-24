@@ -143,10 +143,13 @@ let (resumed, events) = Nanocodex::builder(openai)
     .build()?;
 ```
 
-Configure the same instructions, tool definitions, handlers, and workspace
-policy as the original session. The first request after restore replays the
-authoritative client-owned typed history; callers never supply response IDs or
-prior messages.
+Configure the instructions, tool definitions, and handlers that the resumed
+runtime should use. They may differ from the completed snapshot's original
+runtime contract; the current prefix is rebound while authoritative typed
+history and cache lineage are retained. Workspace and explicit cache-key
+changes remain incompatible. The first request after restore replays complete
+client-owned typed history; callers never supply response IDs or prior
+messages.
 
 ## Removed package boundaries
 

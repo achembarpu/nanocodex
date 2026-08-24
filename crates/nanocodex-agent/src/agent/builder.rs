@@ -195,9 +195,10 @@ impl<F> NanocodexBuilder<F> {
     /// and tool runtime while retaining its typed history and cache lineage.
     ///
     /// An explicitly configured session ID names the new runtime/event stream;
-    /// it does not replace the snapshot's prompt-cache lineage. Configure the
-    /// same instructions, tool definitions, and custom handlers used by the
-    /// original session; incompatible policy is rejected during [`Self::build`].
+    /// it does not replace the snapshot's prompt-cache lineage. The new runtime
+    /// supplies the instructions, tool definitions, and handlers used for
+    /// subsequent turns. Previously committed typed history remains
+    /// authoritative and is replayed on the first resumed request.
     #[must_use]
     pub fn resume(mut self, snapshot: SessionSnapshot) -> Self {
         self.resume = Some(snapshot);
