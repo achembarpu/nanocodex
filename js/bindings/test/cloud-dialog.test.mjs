@@ -20,7 +20,9 @@ test("the default Connect dialog stays embedded and accepts responses only from 
 
     const request = { id: "request-1", type: "connect" };
     const result = dialog.open(request);
-    const modal = browser.document.body.children[0];
+    const modal = browser.document.body.children.find(
+      (element) => element.attributes.get("aria-label") === "Nanocodex Connect permissions",
+    );
     const frame = modal.children[0];
 
     assert.equal(modal.tagName, "DIALOG");
@@ -86,6 +88,7 @@ function createBrowserHarness() {
     },
   };
   const window = {
+    location: { origin: "https://consumer.example" },
     addEventListener(type, listener) {
       windowListeners.set(type, listener);
     },
