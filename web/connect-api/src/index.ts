@@ -1,6 +1,11 @@
 import { Handler, Kv } from "accounts/server";
 import { KeyAuthorization } from "ox/tempo";
 
+type WorkerWebSocket = WebSocket & { accept(): void };
+declare const WebSocketPair: {
+  new(): { 0: WorkerWebSocket; 1: WorkerWebSocket };
+};
+
 export class NonceStorage extends Kv.NonceStorage {}
 
 const PLAYGROUND_ORIGIN = "https://nanocodex-connect-playground.gakonst.workers.dev";
@@ -595,10 +600,75 @@ async function openGrantModelWebSocket(
     "user-agent": "nanocodex-connect/0.1",
   });
   if (ticket.turnState) headers.set("x-codex-turn-state", ticket.turnState);
-  return env.EGRESS.fetch(new Request("https://nanocodex.internal/v1/responses", {
+  const response = await env.EGRESS.fetch(new Request("https://nanocodex.internal/v1/responses", {
     method: "GET",
     headers,
   }));
+  const upstream = (response as Response & { webSocket?: WorkerWebSocket }).webSocket;
+  if (response.status !== 101 || !upstream) return response;
+
+  const pair = new WebSocketPair();
+  const [downstream, server] = Object.values(pair);
+  upstream.accept();
+  server.accept();
+  superviseGrantSocket(store, grant, server, upstream);
+  return new Response(null, { status: 101, webSocket: downstream } as ResponseInit);
+}
+
+function superviseGrantSocket(
+  store: Kv.Kv,
+  grant: GrantRecord,
+  downstream: WebSocket,
+  upstream: WebSocket,
+): void {
+  let closed = false;
+  let authorizationTimer: ReturnType<typeof setTimeout> | undefined;
+  const close = (code: number, reason: string) => {
+    if (closed) return;
+    closed = true;
+    if (authorizationTimer !== undefined) clearTimeout(authorizationTimer);
+    closeSocket(downstream, code, reason);
+    closeSocket(upstream, code, reason);
+  };
+  const forward = (target: WebSocket) => (event: MessageEvent) => {
+    if (closed || target.readyState !== WebSocket.OPEN) return;
+    try { target.send(event.data); } catch { close(1011, "Connect socket forwarding failed"); }
+  };
+  downstream.addEventListener("message", forward(upstream));
+  upstream.addEventListener("message", forward(downstream));
+  downstream.addEventListener("close", () => close(1000, "Connect client closed"));
+  upstream.addEventListener("close", () => close(1000, "ChatGPT upstream closed"));
+  downstream.addEventListener("error", () => close(1011, "Connect client socket failed"));
+  upstream.addEventListener("error", () => close(1011, "ChatGPT upstream failed"));
+
+  const reauthorize = async () => {
+    if (closed) return;
+    try {
+      const current = await store.get<GrantRecord>(`grant:${grant.id}`);
+      const active = isGrantRecord(current)
+        && current.status === "active"
+        && current.expiresAt > Math.floor(Date.now() / 1000)
+        && current.egressSubject === grant.egressSubject
+        && current.capabilities.includes("chatgpt");
+      if (!active) {
+        close(1008, "Nanocodex Connect grant inactive");
+        return;
+      }
+      const untilExpiry = current.expiresAt * 1000 - Date.now();
+      authorizationTimer = setTimeout(
+        () => { void reauthorize(); },
+        Math.max(0, Math.min(5_000, untilExpiry)),
+      );
+    } catch {
+      close(1011, "Nanocodex Connect grant check failed");
+    }
+  };
+  void reauthorize();
+}
+
+function closeSocket(socket: WebSocket, code: number, reason: string): void {
+  if (socket.readyState !== WebSocket.CONNECTING && socket.readyState !== WebSocket.OPEN) return;
+  try { socket.close(code, reason.slice(0, 120)); } catch { /* Socket already failed. */ }
 }
 
 function isModelTicket(value: unknown): value is ModelTicket {
