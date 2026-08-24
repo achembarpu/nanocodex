@@ -83,6 +83,41 @@ pub struct ExecutionOutput {
 /// without becoming a dependency of `nanocodex-agent`.
 #[cfg(not(target_family = "wasm"))]
 pub trait ExecutionPolicy: Send + Sync {
+    /// Releases policy-owned lifecycle state after all Agent work has stopped.
+    ///
+    /// The default is a no-op so existing stateless policies remain source
+    /// compatible. Stateful policies should make this operation idempotent.
+    fn shutdown<'a>(&'a self) -> ExecutionFuture<'a, Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    /// Commits a model-only resumable boundary such as standalone compaction.
+    /// The default fails closed so omission cannot acknowledge an uncommitted
+    /// boundary.
+    fn commit_checkpoint<'a>(
+        &'a self,
+        _snapshot: SessionSnapshot,
+    ) -> ExecutionFuture<'a, Result<()>> {
+        Box::pin(async {
+            Err(NanocodexError::ExecutionPolicyCapabilityUnsupported {
+                capability: "commit_checkpoint",
+            })
+        })
+    }
+
+    /// Fences a model-only external effect immediately before it begins. The
+    /// default fails closed so omission cannot authorize an effect.
+    fn authorize_model_effect<'a>(
+        &'a self,
+        _kind: &'static str,
+    ) -> ExecutionFuture<'a, Result<()>> {
+        Box::pin(async {
+            Err(NanocodexError::ExecutionPolicyCapabilityUnsupported {
+                capability: "authorize_model_effect",
+            })
+        })
+    }
+
     /// Admits a caller-identified operation.
     fn admit<'a>(
         &'a self,
@@ -101,8 +136,19 @@ pub trait ExecutionPolicy: Send + Sync {
     /// Releases a live claim when command acceptance is abandoned.
     fn release<'a>(&'a self, operation_id: String) -> ExecutionFuture<'a, ()>;
 
-    /// Marks an admitted operation as cancelled.
-    fn cancel<'a>(&'a self, operation_id: String) -> ExecutionFuture<'a, Result<()>>;
+    /// Marks an admitted operation as cancelled. The default fails closed so
+    /// omission cannot terminalize an operation by merely returning success.
+    fn cancel<'a>(
+        &'a self,
+        _operation_id: String,
+        _snapshot: Option<SessionSnapshot>,
+    ) -> ExecutionFuture<'a, Result<()>> {
+        Box::pin(async {
+            Err(NanocodexError::ExecutionPolicyCapabilityUnsupported {
+                capability: "cancel",
+            })
+        })
+    }
 
     /// Starts another attempt for an admitted operation.
     fn begin_attempt<'a>(&'a self, operation_id: String) -> ExecutionFuture<'a, Result<()>>;
@@ -156,6 +202,40 @@ pub trait ExecutionPolicy: Send + Sync {
 /// guarantees on every target.
 #[cfg(target_family = "wasm")]
 pub trait ExecutionPolicy: Send + Sync {
+    /// Releases policy-owned lifecycle state after all Agent work has stopped.
+    ///
+    /// The default is a no-op so existing stateless policies remain source
+    /// compatible. Stateful policies should make this operation idempotent.
+    fn shutdown<'a>(&'a self) -> ExecutionFuture<'a, Result<()>> {
+        Box::pin(async { Ok(()) })
+    }
+
+    /// Commits a model-only resumable boundary such as standalone compaction.
+    /// The default fails closed.
+    fn commit_checkpoint<'a>(
+        &'a self,
+        _snapshot: SessionSnapshot,
+    ) -> ExecutionFuture<'a, Result<()>> {
+        Box::pin(async {
+            Err(NanocodexError::ExecutionPolicyCapabilityUnsupported {
+                capability: "commit_checkpoint",
+            })
+        })
+    }
+
+    /// Fences a model-only external effect immediately before it begins. The
+    /// default fails closed.
+    fn authorize_model_effect<'a>(
+        &'a self,
+        _kind: &'static str,
+    ) -> ExecutionFuture<'a, Result<()>> {
+        Box::pin(async {
+            Err(NanocodexError::ExecutionPolicyCapabilityUnsupported {
+                capability: "authorize_model_effect",
+            })
+        })
+    }
+
     /// Admits a caller-identified operation.
     fn admit<'a>(
         &'a self,
@@ -170,8 +250,18 @@ pub trait ExecutionPolicy: Send + Sync {
     ) -> ExecutionFuture<'a, Result<(String, ExecutionAdmission)>>;
     /// Releases an abandoned live claim.
     fn release<'a>(&'a self, operation_id: String) -> ExecutionFuture<'a, ()>;
-    /// Marks an operation as cancelled.
-    fn cancel<'a>(&'a self, operation_id: String) -> ExecutionFuture<'a, Result<()>>;
+    /// Marks an operation as cancelled. The default fails closed.
+    fn cancel<'a>(
+        &'a self,
+        _operation_id: String,
+        _snapshot: Option<SessionSnapshot>,
+    ) -> ExecutionFuture<'a, Result<()>> {
+        Box::pin(async {
+            Err(NanocodexError::ExecutionPolicyCapabilityUnsupported {
+                capability: "cancel",
+            })
+        })
+    }
     /// Starts another operation attempt.
     fn begin_attempt<'a>(&'a self, operation_id: String) -> ExecutionFuture<'a, Result<()>>;
     /// Begins or replays one external effect.
@@ -215,7 +305,22 @@ pub trait ExecutionPolicy: Send + Sync {
 #[derive(Clone, Default)]
 pub(crate) struct ExecutionConfig {
     platform: platform::Config,
-    policy: Option<Arc<dyn ExecutionPolicy>>,
+    policy: Option<ExecutionPolicyRecipe>,
+}
+
+#[derive(Clone)]
+enum ExecutionPolicyRecipe {
+    Shared(Arc<dyn ExecutionPolicy>),
+    PerAgent(Arc<dyn Fn() -> Result<Arc<dyn ExecutionPolicy>> + Send + Sync>),
+}
+
+impl ExecutionPolicyRecipe {
+    fn instantiate(&self) -> Result<Arc<dyn ExecutionPolicy>> {
+        match self {
+            Self::Shared(policy) => Ok(Arc::clone(policy)),
+            Self::PerAgent(factory) => factory(),
+        }
+    }
 }
 
 impl ExecutionConfig {
@@ -225,9 +330,18 @@ impl ExecutionConfig {
     }
 
     pub(crate) fn set_policy(&mut self, policy: Arc<dyn ExecutionPolicy>) {
-        self.policy = Some(policy);
+        self.policy = Some(ExecutionPolicyRecipe::Shared(policy));
     }
 
+    pub(crate) fn set_policy_factory(
+        &mut self,
+        factory: Arc<dyn Fn() -> Result<Arc<dyn ExecutionPolicy>> + Send + Sync>,
+    ) {
+        self.policy = Some(ExecutionPolicyRecipe::PerAgent(factory));
+    }
+
+    // The WASM platform configuration is const, while native rollout cloning is not.
+    #[cfg_attr(target_family = "wasm", allow(clippy::missing_const_for_fn))]
     pub(crate) fn for_new_thread(&self, operation: &'static str) -> Result<Self> {
         if self.policy.is_some() {
             return Err(NanocodexError::ExecutionPolicyBranchUnsupported { operation });
@@ -257,7 +371,11 @@ impl ExecutionConfig {
                 parent_session_id,
                 resume_history_len,
             )?,
-            policy: self.policy.clone(),
+            policy: self
+                .policy
+                .as_ref()
+                .map(ExecutionPolicyRecipe::instantiate)
+                .transpose()?,
         })
     }
 }
@@ -326,12 +444,16 @@ impl Execution {
         }
     }
 
-    pub(crate) async fn cancel_operation(&self, operation_id: &str) -> Result<()> {
+    pub(crate) async fn cancel_operation<T: Serialize + ?Sized>(
+        &self,
+        operation_id: &str,
+        input: &T,
+    ) -> Result<()> {
         let policy = self
             .policy
             .as_ref()
             .ok_or(NanocodexError::ExecutionPolicyNotConfigured)?;
-        policy.cancel(operation_id.to_owned()).await
+        cancel_with_reclaim(policy, operation_id.to_owned(), Some(encode(input)?), None).await
     }
 
     pub(crate) fn start_turn(
@@ -344,6 +466,7 @@ impl Execution {
             platform: self.platform.start_turn(prompt, effort),
             policy: self.policy.clone(),
             operation_id,
+            operation_input: Some(prompt.clone()),
             outcome: ExecutionOutcome::Started,
         }
     }
@@ -352,10 +475,18 @@ impl Execution {
     pub(crate) fn start_compaction(&self, effort: nanocodex_oai_api::Thinking) -> ExecutionTurn {
         ExecutionTurn {
             platform: self.platform.start_compaction(effort),
-            policy: None,
+            policy: self.policy.clone(),
             operation_id: None,
+            operation_input: None,
             outcome: ExecutionOutcome::Started,
         }
+    }
+
+    pub(crate) async fn authorize_compaction(&self) -> Result<()> {
+        if let Some(policy) = &self.policy {
+            policy.authorize_model_effect("compaction").await?;
+        }
+        Ok(())
     }
 
     pub(crate) async fn persist(
@@ -367,10 +498,12 @@ impl Execution {
             platform,
             policy,
             operation_id,
+            operation_input,
             outcome,
         } = turn;
+        persist_operation(policy, operation_id, operation_input, outcome, checkpoint).await?;
         self.platform.persist(checkpoint, platform).await;
-        persist_operation(policy, operation_id, outcome, checkpoint).await
+        Ok(())
     }
 
     pub(crate) async fn persist_compaction(
@@ -378,9 +511,19 @@ impl Execution {
         checkpoint: &CommittedSession,
         turn: ExecutionTurn,
     ) -> Result<()> {
+        if let Some(policy) = &self.policy {
+            policy.commit_checkpoint(checkpoint.snapshot()).await?;
+        }
         self.platform
             .persist_compaction(checkpoint, turn.platform)
             .await;
+        Ok(())
+    }
+
+    pub(crate) async fn commit_checkpoint(&self, checkpoint: &CommittedSession) -> Result<()> {
+        if let Some(policy) = &self.policy {
+            policy.commit_checkpoint(checkpoint.snapshot()).await?;
+        }
         Ok(())
     }
 
@@ -401,13 +544,32 @@ impl Execution {
             .await
     }
 
+    pub(crate) async fn release_turn(&self, turn: ExecutionTurn) {
+        let ExecutionTurn {
+            policy,
+            operation_id,
+            ..
+        } = turn;
+        if let (Some(policy), Some(operation_id)) = (policy, operation_id) {
+            policy.release(operation_id).await;
+        }
+    }
+
     #[cfg(not(target_family = "wasm"))]
     pub(crate) async fn flush(&self) -> Result<()> {
         self.platform.flush().await
     }
 
     pub(crate) async fn shutdown(&self) -> Result<()> {
-        self.platform.shutdown().await
+        let platform = self.platform.shutdown().await;
+        let policy = match &self.policy {
+            Some(policy) => policy.shutdown().await,
+            None => Ok(()),
+        };
+        match (platform, policy) {
+            (Err(error), _) => Err(error),
+            (Ok(()), policy) => policy,
+        }
     }
 }
 
@@ -434,6 +596,15 @@ pub(crate) enum ExecutionStep<O> {
 }
 
 impl ExecutionSteps {
+    /// Durably authorizes an operation-owned model effect immediately before
+    /// entering the transport.
+    ///
+    /// Authorization fences owners that were already stale. Once it returns,
+    /// takeover can still fence the result but cannot retract an in-flight call.
+    pub(crate) async fn authorize_model_effect(&self, kind: &'static str) -> Result<()> {
+        self.policy.authorize_model_effect(kind).await
+    }
+
     pub(crate) async fn begin<I, O>(
         &self,
         step_id: impl Into<String>,
@@ -483,6 +654,7 @@ pub(crate) struct ExecutionTurn {
     platform: platform::Turn,
     policy: Option<Arc<dyn ExecutionPolicy>>,
     operation_id: Option<String>,
+    operation_input: Option<nanocodex_oai_api::Prompt>,
     outcome: ExecutionOutcome,
 }
 
@@ -541,11 +713,15 @@ impl ExecutionTurn {
 async fn persist_operation(
     policy: Option<Arc<dyn ExecutionPolicy>>,
     operation_id: Option<String>,
+    operation_input: Option<nanocodex_oai_api::Prompt>,
     outcome: ExecutionOutcome,
     checkpoint: &CommittedSession,
 ) -> Result<()> {
-    let (Some(policy), Some(operation_id)) = (policy, operation_id) else {
+    let Some(policy) = policy else {
         return Ok(());
+    };
+    let Some(operation_id) = operation_id else {
+        return policy.commit_checkpoint(checkpoint.snapshot()).await;
     };
     match outcome {
         ExecutionOutcome::Completed(output) => {
@@ -553,7 +729,10 @@ async fn persist_operation(
                 .complete(operation_id, checkpoint.snapshot(), output)
                 .await
         }
-        ExecutionOutcome::Interrupted => policy.cancel(operation_id).await,
+        ExecutionOutcome::Interrupted => {
+            let input = operation_input.as_ref().map(encode).transpose()?;
+            cancel_with_reclaim(&policy, operation_id, input, Some(checkpoint.snapshot())).await
+        }
         ExecutionOutcome::Failed { error, retryable } => {
             if retryable {
                 policy.fail_attempt(operation_id, error).await
@@ -566,6 +745,60 @@ async fn persist_operation(
         ExecutionOutcome::Started => Err(NanocodexError::InvalidExecutionPolicy(
             "an operation reached persistence without a terminal attempt outcome".to_owned(),
         )),
+    }
+}
+
+async fn cancel_with_reclaim(
+    policy: &Arc<dyn ExecutionPolicy>,
+    operation_id: String,
+    input_json: Option<String>,
+    snapshot: Option<SessionSnapshot>,
+) -> Result<()> {
+    let outcome = policy.cancel(operation_id.clone(), snapshot.clone()).await;
+    if !outcome.as_ref().is_err_and(|error| {
+        matches!(
+            error.execution_policy_disposition(),
+            Some(crate::ExecutionPolicyDisposition::Retry)
+        )
+    }) {
+        return outcome;
+    }
+
+    let input_json = input_json.ok_or_else(|| {
+        NanocodexError::InvalidExecutionPolicy(format!(
+            "cancel retry for operation `{operation_id}` did not retain its admission input"
+        ))
+    })?;
+    let admission = policy
+        .admit(operation_id.clone(), input_json)
+        .await
+        .map_err(reopen_after_cancel_retry)?;
+    match admission {
+        ExecutionAdmission::Execute => policy
+            .cancel(operation_id, snapshot)
+            .await
+            .map_err(reopen_after_cancel_retry),
+        ExecutionAdmission::Cancelled => Ok(()),
+        ExecutionAdmission::Completed { .. } | ExecutionAdmission::Failed { .. } => {
+            Err(NanocodexError::InvalidExecutionPolicy(format!(
+                "cancel retry for operation `{operation_id}` replayed an incompatible terminal outcome"
+            )))
+        }
+    }
+}
+
+fn reopen_after_cancel_retry(error: NanocodexError) -> NanocodexError {
+    if matches!(
+        error.execution_policy_disposition(),
+        Some(crate::ExecutionPolicyDisposition::Retry)
+    ) {
+        NanocodexError::execution_policy_with_disposition(
+            "cancellation recovery",
+            crate::ExecutionPolicyDisposition::Reopen,
+            error,
+        )
+    } else {
+        error
     }
 }
 

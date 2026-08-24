@@ -19,6 +19,8 @@ export function createBrowserHost(options = {}) {
     throw new Error("WebSocket is unavailable in this runtime");
   }
   const connections = new Map();
+  const openingAttempts = new Set();
+  const connectingConnections = new Set();
   const codeEvaluator = options.codeEvaluator
     ?? (typeof globalThis.Worker === "function"
       ? createWorkerEvaluator()
@@ -56,8 +58,10 @@ export function createBrowserHost(options = {}) {
     ? import("../runtime/mcp-runtime.mjs").then(({ createMcpRuntime }) =>
         createMcpRuntime(options.mcp, { clientName: "nanocodex-browser" }))
     : undefined;
-  if (mcp) mcp.then((provider) => code.addProvider(provider), () => {});
-  const mcpReady = mcp?.then((provider) => provider.settled());
+  const mcpInstalled = mcp?.then((provider) => {
+    code.addProvider(provider);
+    return provider;
+  });
   const onEvent = options.onEvent || (() => {});
   const maxQueuedMessages = options.maxQueuedMessages ?? DEFAULT_MAX_QUEUED_MESSAGES;
   const maxQueuedBytes = options.maxQueuedBytes ?? DEFAULT_MAX_QUEUED_BYTES;
@@ -65,38 +69,40 @@ export function createBrowserHost(options = {}) {
   let nextHandle = 1;
   let references = 0;
   let disposal;
+  let disposalError;
   let preconnected;
 
   function preconnect(endpoint, sessionId) {
     if (disposal) return Promise.reject(new Error("Nanocodex host is already disposed"));
     if (preconnected?.endpoint === endpoint && preconnected.sessionId === sessionId) {
-      return preconnected.promise.then(() => undefined);
+      return preconnected.ownership.promise.then(() => undefined);
     }
-    closePreconnected();
-    const promise = Promise.resolve().then(() => createWebSocket(endpoint, sessionId, {
+    void closePreconnected().catch(() => {});
+    const ownership = openOwned(() => createWebSocket(endpoint, sessionId, {
       authorization: "preconnect",
     }));
-    const entry = { endpoint, sessionId, promise };
+    const entry = { endpoint, sessionId, ownership };
     preconnected = entry;
-    void promise.catch(() => {
+    void ownership.promise.catch(() => {
       if (preconnected === entry) preconnected = undefined;
     });
-    return promise.then(() => undefined);
+    return ownership.promise.then(() => undefined);
   }
 
   function takePreconnected(endpoint, sessionId) {
     if (preconnected?.endpoint !== endpoint || preconnected.sessionId !== sessionId) {
       return undefined;
     }
-    const promise = preconnected.promise;
+    const ownership = preconnected.ownership;
     preconnected = undefined;
-    return promise;
+    return ownership;
   }
 
-  function closePreconnected() {
+  function closePreconnected(error = new Error("WebSocket preconnection was closed")) {
     const entry = preconnected;
     preconnected = undefined;
-    void entry?.promise.then((opened) => normalizeWebSocketConnection(opened).socket.close()).catch(() => {});
+    if (!entry) return Promise.resolve();
+    return entry.ownership.dispose(error);
   }
 
   async function connect(endpoint, apiKey, sessionId, metadata = {}) {
@@ -109,13 +115,10 @@ export function createBrowserHost(options = {}) {
     delete request.authorization;
     delete request.bearerToken;
     Object.assign(request, authorization);
-    const opened = await (takePreconnected(endpoint, sessionId)
-      ?? createWebSocket(endpoint, sessionId, request));
+    const ownership = takePreconnected(endpoint, sessionId)
+      ?? openOwned(() => createWebSocket(endpoint, sessionId, request));
+    const opened = await ownership.promise;
     const { socket, ...handshake } = normalizeWebSocketConnection(opened);
-    if (disposal) {
-      socket.close();
-      throw new Error("Nanocodex host was disposed during WebSocket connection");
-    }
     return new Promise((resolve, reject) => {
       let settled = false;
       const connection = {
@@ -126,9 +129,26 @@ export function createBrowserHost(options = {}) {
         intentionallyClosed: false,
         overflowed: false,
       };
-      const resolveOpen = () => {
+      const rejectConnection = (error) => {
         if (settled) return;
         settled = true;
+        connectingConnections.delete(connection);
+        reject(error);
+      };
+      connection.reject = rejectConnection;
+      ownership.transfer();
+      connectingConnections.add(connection);
+      const resolveOpen = () => {
+        if (settled) return;
+        if (disposal) {
+          connection.intentionallyClosed = true;
+          settled = true;
+          reject(disposalError);
+          return;
+        }
+        settled = true;
+        connectingConnections.delete(connection);
+        delete connection.reject;
         const handle = nextHandle++;
         connections.set(handle, connection);
         resolve(JSON.stringify({
@@ -148,24 +168,21 @@ export function createBrowserHost(options = {}) {
       });
       socket.addEventListener("close", (event) => {
         if (!settled) {
-          settled = true;
-          reject(new Error(`WebSocket closed during connection with code ${event.code}`));
+          rejectConnection(new Error(`WebSocket closed during connection with code ${event.code}`));
         } else if (!connection.intentionallyClosed && !connection.overflowed) {
           enqueue(connection, { kind: "closed", detail: `with code ${event.code}` });
         }
       });
       socket.addEventListener("error", () => {
         if (!settled) {
-          settled = true;
-          reject(new Error("WebSocket connection failed"));
+          rejectConnection(new Error("WebSocket connection failed"));
         } else {
           enqueue(connection, { kind: "error", detail: "WebSocket connection failed" });
         }
       });
       if (socket.readyState === WEBSOCKET_OPEN) resolveOpen();
       else if (socket.readyState > WEBSOCKET_OPEN) {
-        settled = true;
-        reject(new Error("WebSocket closed during connection"));
+        rejectConnection(new Error("WebSocket closed during connection"));
       }
     });
   }
@@ -175,13 +192,10 @@ export function createBrowserHost(options = {}) {
     if (typeof options.mpp.ws !== "function") {
       throw new TypeError("mpp must provide ws(endpoint)");
     }
-    const socket = await options.mpp.ws(endpoint);
+    const ownership = openOwned(() => options.mpp.ws(endpoint));
+    const socket = await ownership.promise;
     if (!socket || typeof socket.addEventListener !== "function") {
       throw new TypeError("mpp.ws(endpoint) must return a WebSocket");
-    }
-    if (disposal) {
-      socket.close();
-      throw new Error("Nanocodex host was disposed during WebSocket connection");
     }
     const handle = nextHandle++;
     const connection = {
@@ -193,6 +207,7 @@ export function createBrowserHost(options = {}) {
       overflowed: false,
       managed: true,
     };
+    ownership.transfer();
     connections.set(handle, connection);
     socket.addEventListener("message", (event) => {
       enqueue(connection, typeof event.data === "string"
@@ -282,7 +297,7 @@ export function createBrowserHost(options = {}) {
     connections.delete(handle);
     connection.intentionallyClosed = true;
     connection.waiter?.({ kind: "closed", detail: "by the WASM runtime" });
-    connection.socket.close();
+    return connection.socket.close();
   }
 
   function enqueue(connection, message) {
@@ -310,20 +325,101 @@ export function createBrowserHost(options = {}) {
     connection.queuedBytes += bytes;
   }
 
-  async function dispose() {
+  function dispose() {
     if (disposal) return disposal;
-    disposal = (async () => {
-      for (const handle of [...connections.keys()]) close(handle);
-      closePreconnected();
-      code.reset();
-      await mcp?.then((provider) => provider.close(), () => {});
-      options.onDispose?.();
-    })();
+    disposalError = new Error("Nanocodex host was disposed during WebSocket connection");
+    disposal = Promise.resolve().then(async () => {
+      const cleanups = [];
+      const cleanup = (action) => {
+        try { cleanups.push(Promise.resolve(action())); }
+        catch (failure) { cleanups.push(Promise.reject(failure)); }
+      };
+      const preconnectedOwnership = preconnected?.ownership;
+      for (const attempt of [...openingAttempts]) {
+        if (attempt !== preconnectedOwnership) cleanup(() => attempt.dispose(disposalError));
+      }
+      for (const connection of [...connectingConnections]) {
+        connection.intentionallyClosed = true;
+        cleanup(() => connection.reject(disposalError));
+        cleanup(() => connection.socket.close());
+      }
+      for (const handle of [...connections.keys()]) cleanup(() => close(handle));
+      cleanup(() => closePreconnected(disposalError));
+      cleanup(() => code.reset());
+      cleanup(() => mcpInstalled?.then((provider) => provider.close(), () => {}));
+      cleanup(() => options.onDispose?.());
+      const settled = await Promise.allSettled(cleanups);
+      const errors = settled
+        .filter((result) => result.status === "rejected")
+        .map((result) => result.reason);
+      if (errors.length === 1) throw errors[0];
+      if (errors.length > 1) {
+        throw new AggregateError(errors, "Nanocodex host disposal failed");
+      }
+    });
     return disposal;
   }
 
+  function openOwned(factory) {
+    if (disposal) throw new Error("Nanocodex host is already disposed");
+    let rejectDisposed;
+    const disposed = new Promise((_, reject) => { rejectDisposed = reject; });
+    const ownership = {
+      disposed: false,
+      opened: undefined,
+      closePromise: undefined,
+      error: undefined,
+      dispose(error) {
+        if (ownership.disposed) return ownership.closePromise ?? Promise.resolve();
+        ownership.disposed = true;
+        ownership.error = error;
+        openingAttempts.delete(ownership);
+        rejectDisposed(error);
+        return closeOpened();
+      },
+      transfer() {
+        if (disposal || ownership.disposed) {
+          throw disposalError ?? ownership.error
+            ?? new Error("Nanocodex host was disposed during WebSocket connection");
+        }
+        openingAttempts.delete(ownership);
+      },
+    };
+    openingAttempts.add(ownership);
+    let opening;
+    try {
+      opening = Promise.resolve(factory());
+    } catch (error) {
+      opening = Promise.reject(error);
+    }
+    opening = opening.then((opened) => {
+      ownership.opened = opened;
+      if (!ownership.disposed) return opened;
+      void closeOpened().catch(() => {});
+      throw ownership.error;
+    });
+    ownership.promise = Promise.race([opening, disposed]);
+    void ownership.promise.catch(() => {
+      openingAttempts.delete(ownership);
+    });
+    return ownership;
+
+    function closeOpened() {
+      if (ownership.closePromise) return ownership.closePromise;
+      if (ownership.opened === undefined) return Promise.resolve();
+      try {
+        ownership.closePromise = Promise.resolve(
+          normalizeWebSocketConnection(ownership.opened).socket.close(),
+        );
+      } catch (error) {
+        ownership.closePromise = Promise.reject(error);
+      }
+      return ownership.closePromise;
+    }
+  }
+
   return Object.freeze({
-    ready: async () => { await Promise.all([filesystemReady, mcpReady]); },
+    ready: async () => { await Promise.all([filesystemReady, mcpInstalled]); },
     retain() {
       if (disposal) throw new Error("Nanocodex host is already disposed");
       references += 1;

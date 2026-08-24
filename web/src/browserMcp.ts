@@ -21,7 +21,7 @@ export const DEFAULT_BROWSER_MCP_SERVERS = Object.freeze({
   },
 });
 
-export function browserMcpConfiguration(origin: string) {
+export function browserMcpConfiguration(origin: string, threadId: string) {
   return Object.fromEntries(
     Object.entries(DEFAULT_BROWSER_MCP_SERVERS).map(([name, server]) => [
       name,
@@ -31,8 +31,14 @@ export function browserMcpConfiguration(origin: string) {
         headers: { "x-nanocodex-request": "1" },
         startupTimeoutMs: 30_000,
         timeoutMs: 300_000,
-        url: new URL(server.path, origin).href,
+        url: mcpUrl(server.path, origin, threadId),
       },
     ]),
   );
+}
+
+function mcpUrl(path: string, origin: string, threadId: string): string {
+  const url = new URL(path, origin);
+  url.searchParams.set("thread_id", threadId);
+  return url.href;
 }

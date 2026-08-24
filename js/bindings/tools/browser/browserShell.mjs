@@ -2,6 +2,7 @@ import "./browserBuffer.mjs";
 import git from "isomorphic-git";
 import http from "isomorphic-git/http/web";
 import { artifact } from "../artifact.mjs";
+import { createBrowserEgressFetch } from "./browserEgress.mjs";
 import { browserThread, notifyThreadGitChanged, prepareThreadGit, THREAD_GIT_AUTHOR, THREAD_GIT_DIRECTORY, withThreadGitLock, } from "./threadGit.mjs";
 import { openThreadWorkspace } from "./workspace.mjs";
 const utf8 = new TextEncoder();
@@ -31,7 +32,10 @@ const UNIFIED_EXEC_OUTPUT_SCHEMA = {
 const AGENT_INSTRUCTIONS = `You are working in a persistent browser filesystem rooted at /workspace.
 Use exec_command for bash commands such as ls, cat, find, grep, git, curl, wget, and python3. The
 shell and Python runtime execute entirely in browser sandboxes, so they have no host process or PTY.
-curl and wget use browser Fetch directly, so remote servers must permit this origin with CORS. The
+curl, wget, and the gh compatibility command use one thread-scoped, same-origin egress gateway.
+Call accountInfo for the current GitHub, Gmail, and Google Drive identities, then use gh or curl
+normally; accountInfo is a tool, not a shell command. Destination policy and connected-account
+credentials stay outside the browser runtime. The
 clang, clang++, gcc, g++, cc, and c++ compile C/C++ sources to WASI WebAssembly in a lazy worker.
 Browser SSH is noninteractive and requires a wss:// endpoint that carries raw SSH because browsers
 cannot open TCP sockets. The repository's only publish branch is nanocodex;
@@ -50,7 +54,7 @@ export function validateBrowserArtifactSource(source) {
         throw new Error(`artifact source is not executable JavaScript: ${errorMessage(error)}`);
     }
 }
-export async function prepareBrowserShell(threadId, origin) {
+export async function prepareBrowserShell(threadId, origin, fetch) {
     const thread = browserThread(threadId, origin);
     const [{ rawFs, workspaceRoot }, workspace] = await Promise.all([
         prepareThreadGit(thread),
@@ -66,7 +70,7 @@ export async function prepareBrowserShell(threadId, origin) {
         // The shell's first path scan observes every mutation completed before
         // creation. Only mutations racing that scan require a second refresh.
         shellDirty = false;
-        const loading = createBrowserBash(rawFs, thread, { workspaceRoot }).then(async (shell) => {
+        const loading = createBrowserBash(rawFs, thread, { workspaceRoot, origin, fetch }).then(async (shell) => {
             shellFs = shell.filesystem;
             if (shellDirty) {
                 shellDirty = false;
@@ -192,11 +196,23 @@ export async function createBrowserBash(rawFs, thread, options = {}) {
     const filesystem = new OpfsShellFileSystem(rawFs);
     await filesystem.refreshPaths();
     const executionTimeoutMs = options.executionTimeoutMs ?? MAX_EXECUTION_MS;
+    const origin = options.origin ?? globalThis.location?.origin;
+    const workerEgress = {
+        origin,
+        threadId: thread.id,
+    };
     let pythonRuntime = options.pythonRuntime;
+    const shellFetch = options.fetch ?? (origin
+        ? createBrowserEgressFetch({
+            fetch: options.connectorFetch ?? globalThis.fetch,
+            origin,
+            threadId: thread.id,
+        })
+        : unavailableBrowserEgress);
     const loadPython = async (name) => {
         const module = await import("./browserPython.mjs");
         pythonRuntime ??= options.workspaceRoot
-            ? new module.BrowserPythonRuntime(options.workspaceRoot)
+            ? new module.BrowserPythonRuntime(options.workspaceRoot, workerEgress)
             : undefined;
         return module.createPythonCommand(name, pythonRuntime, filesystem);
     };
@@ -212,10 +228,12 @@ export async function createBrowserBash(rawFs, thread, options = {}) {
             PATH: THREAD_GIT_DIRECTORY,
         },
         fs: filesystem,
-        fetch: options.fetch ?? browserSecureFetch,
+        fetch: shellFetch,
         customCommands: [
             gitCommand(rawFs, thread, filesystem, defineCommand, createTwoFilesPatch),
-            ghCommand(rawFs, thread, defineCommand),
+            createGhCompatibilityCommand(rawFs, thread, defineCommand, {
+                fetch: shellFetch,
+            }),
             unameCommand(defineCommand),
             ...["python3", "python"].map((name) => ({
                 name,
@@ -227,7 +245,11 @@ export async function createBrowserBash(rawFs, thread, options = {}) {
             },
             ...["clang", "clang++", "gcc", "g++", "cc", "c++"].map((name) => ({
                 name,
-                load: async () => (await import("./browserCompiler.mjs")).createCompilerCommand(name, filesystem),
+                load: async () => (await import("./browserCompiler.mjs")).createCompilerCommand(
+                    name,
+                    filesystem,
+                    workerEgress,
+                ),
             })),
         ],
         executionLimitProfile: "hardened",
@@ -249,45 +271,8 @@ export async function createBrowserBash(rawFs, thread, options = {}) {
         exec: (input, context) => execute(bash, filesystem, thread, input, options.onChanged ?? (() => notifyThreadGitChanged(thread)), context?.signal, executionTimeoutMs),
     };
 }
-const browserSecureFetch = async (target, options = {}) => {
-    const url = new URL(target, globalThis.location?.href);
-    if (!["http:", "https:"].includes(url.protocol) || url.username || url.password) {
-        throw new Error("browser curl supports only credential-free http:// and https:// URLs");
-    }
-    const timeout = new AbortController();
-    const timeoutMs = Math.min(options.timeoutMs ?? MAX_EXECUTION_MS, MAX_EXECUTION_MS);
-    const timeoutId = setTimeout(() => timeout.abort(new Error("network request timed out")), timeoutMs);
-    const abort = () => timeout.abort(options.signal?.reason);
-    options.signal?.addEventListener("abort", abort, { once: true });
-    if (options.signal?.aborted)
-        abort();
-    try {
-        const response = await fetch(url, {
-            method: options.method,
-            headers: options.headers,
-            body: options.body,
-            credentials: "omit",
-            redirect: options.followRedirects === false ? "manual" : "follow",
-            signal: timeout.signal,
-        });
-        return {
-            status: response.status,
-            statusText: response.statusText,
-            headers: Object.fromEntries(response.headers.entries()),
-            body: new Uint8Array(await response.arrayBuffer()),
-            url: response.url || url.href,
-        };
-    }
-    catch (error) {
-        if (timeout.signal.aborted)
-            throw timeout.signal.reason;
-        const detail = error instanceof Error ? error.message : String(error);
-        throw new Error(`browser fetch failed (${detail}); the target must allow this origin with CORS`);
-    }
-    finally {
-        clearTimeout(timeoutId);
-        options.signal?.removeEventListener("abort", abort);
-    }
+const unavailableBrowserEgress = async () => {
+    throw new Error("browser egress is unavailable outside the Nanocodex browser host");
 };
 function unameCommand(defineCommand) {
     return defineCommand("uname", async (args) => {
@@ -422,10 +407,15 @@ function gitCommand(fs, thread, shellFs, defineCommand, createTwoFilesPatch) {
         }
     });
 }
-function ghCommand(fs, thread, defineCommand) {
+export function createGhCompatibilityCommand(fs, thread, defineCommand, options = {}) {
     return defineCommand("gh", async (args) => {
         try {
             if (args[0] === "repo" && args[1] === "view") {
+                const repository = repositoryArgument(args.slice(2));
+                if (repository) {
+                    const value = await githubConnectorJson(options, `/repos/${repository}`);
+                    return ok(formatRepository(value));
+                }
                 const head = await resolveHead(fs);
                 return ok([
                     `name:\t${thread.repositoryName}`,
@@ -437,19 +427,40 @@ function ghCommand(fs, thread, defineCommand) {
                 ].join("\n"));
             }
             if (args[0] === "auth" && args[1] === "status") {
-                return ok("Cloudflare thread Git uses the current web session; no GitHub token is required.\n");
+                const user = await githubConnectorJson(options, "/user");
+                return ok(`Logged in to github.com as ${textField(user, "login")} through the connected account.\n`);
             }
-            if (args[0] === "pr") {
-                return fail("gh: pull requests are not available for Cloudflare thread repositories\n", 1);
+            if (args[0] === "api") {
+                return ok(`${JSON.stringify(await githubApi(options, args.slice(1)), null, 2)}\n`);
+            }
+            if (args[0] === "pr" && args[1] === "list") {
+                const repository = optionValue(args.slice(2), "--repo", "-R");
+                if (!repository || !validRepository(repository)) {
+                    return fail("gh: pr list requires --repo OWNER/REPO in the browser runtime\n", 1);
+                }
+                const limit = boundedLimit(optionValue(args.slice(2), "--limit", "-L"));
+                const pulls = await githubConnectorJson(
+                    options,
+                    `/repos/${repository}/pulls?${new URLSearchParams({ state: "open", per_page: String(limit) })}`,
+                );
+                if (!Array.isArray(pulls))
+                    throw new Error("GitHub returned an invalid pull request list");
+                return ok(pulls.map((pull) => [
+                    numberField(pull, "number"),
+                    textField(pull, "title"),
+                    textField(pull, "head", "ref"),
+                ].join("\t")).join("\n") + (pulls.length ? "\n" : ""));
             }
             return ok([
                 "gh (Nanocodex browser compatibility command)",
                 "",
                 "Supported commands:",
-                "  gh repo view",
                 "  gh auth status",
+                "  gh api [--method METHOD] [-f key=value] ENDPOINT",
+                "  gh repo view [OWNER/REPO]",
+                "  gh pr list --repo OWNER/REPO [--limit N]",
                 "",
-                "This workspace is backed by Cloudflare Git, not github.com.",
+                "Connected GitHub calls use the permissions granted in Profile.",
                 "",
             ].join("\n"));
         }
@@ -457,6 +468,132 @@ function ghCommand(fs, thread, defineCommand) {
             return fail(`gh: ${errorMessage(error)}\n`, 1);
         }
     });
+}
+async function githubApi(options, args) {
+    const method = (optionValue(args, "--method", "-X") ?? "GET").toUpperCase();
+    const endpoint = args.find((arg, index) => !arg.startsWith("-")
+        && args[index - 1] !== "--method" && args[index - 1] !== "-X"
+        && !["-f", "-F", "--field", "--raw-field"].includes(args[index - 1]));
+    if (!endpoint)
+        throw new Error("gh api requires an endpoint");
+    let url;
+    try {
+        url = new URL(endpoint.startsWith("/") ? endpoint : `/${endpoint}`, "https://api.github.com");
+    }
+    catch {
+        throw new Error("gh api endpoint is invalid");
+    }
+    if (url.origin !== "https://api.github.com")
+        throw new Error("browser gh api permits only api.github.com endpoints");
+    const fields = githubApiFields(args);
+    return githubConnectorJson(options, `${url.pathname}${url.search}`, {
+        method,
+        ...(Object.keys(fields).length ? { body: JSON.stringify(fields) } : {}),
+    });
+}
+async function githubConnectorJson(options, path, request = {}) {
+    if (typeof options.fetch !== "function")
+        throw new Error("the managed GitHub connector is unavailable outside the Nanocodex browser host");
+    const providerUrl = new URL(path, "https://api.github.com");
+    if (providerUrl.origin !== "https://api.github.com")
+        throw new Error("GitHub endpoint is outside api.github.com");
+    const response = await options.fetch(providerUrl.href, {
+        method: request.method ?? "GET",
+        headers: {
+            accept: "application/json",
+            ...(request.body === undefined ? {} : { "content-type": "application/json" }),
+        },
+        ...(request.body === undefined ? {} : { body: request.body }),
+    });
+    const text = utf8Decoder.decode(response.body);
+    let value;
+    try {
+        value = text ? JSON.parse(text) : null;
+    }
+    catch {
+        throw new Error(`GitHub connector returned invalid JSON (HTTP ${response.status})`);
+    }
+    if (response.status < 200 || response.status >= 300) {
+        const detail = value && typeof value === "object"
+            ? value.message ?? value.error
+            : undefined;
+        throw new Error(`GitHub connector request failed (HTTP ${response.status}${detail ? `: ${detail}` : ""})`);
+    }
+    return value;
+}
+function githubApiFields(args) {
+    const fields = {};
+    for (let index = 0; index < args.length; index += 1) {
+        if (!["-f", "-F", "--field", "--raw-field"].includes(args[index]))
+            continue;
+        const field = args[index + 1];
+        const separator = field?.indexOf("=") ?? -1;
+        if (!field || separator <= 0)
+            throw new Error(`${args[index]} requires key=value`);
+        fields[field.slice(0, separator)] = field.slice(separator + 1);
+        index += 1;
+    }
+    return fields;
+}
+function repositoryArgument(args) {
+    const flagged = optionValue(args, "--repo", "-R");
+    const positional = args.find((arg, index) => !arg.startsWith("-")
+        && args[index - 1] !== "--repo" && args[index - 1] !== "-R");
+    const repository = flagged ?? positional;
+    if (repository && !validRepository(repository))
+        throw new Error("repository must be OWNER/REPO");
+    return repository;
+}
+function validRepository(value) {
+    return /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(value);
+}
+function optionValue(args, long, short) {
+    for (let index = 0; index < args.length; index += 1) {
+        const arg = args[index];
+        if (arg === long || arg === short)
+            return args[index + 1];
+        if (arg.startsWith(`${long}=`))
+            return arg.slice(long.length + 1);
+    }
+    return undefined;
+}
+function boundedLimit(value) {
+    if (value === undefined)
+        return 30;
+    const parsed = Number(value);
+    if (!Number.isSafeInteger(parsed) || parsed < 1 || parsed > 100)
+        throw new Error("--limit must be an integer from 1 to 100");
+    return parsed;
+}
+function formatRepository(value) {
+    return [
+        `name:\t${textField(value, "full_name")}`,
+        `description:\t${optionalTextField(value, "description") ?? ""}`,
+        `visibility:\t${value?.private === true ? "private" : "public"}`,
+        `default branch:\t${textField(value, "default_branch")}`,
+        `url:\t${textField(value, "html_url")}`,
+        "",
+    ].join("\n");
+}
+function textField(value, ...path) {
+    let current = value;
+    for (const part of path)
+        current = current?.[part];
+    if (typeof current !== "string")
+        throw new Error(`GitHub response is missing ${path.join(".")}`);
+    return current;
+}
+function optionalTextField(value, ...path) {
+    let current = value;
+    for (const part of path)
+        current = current?.[part];
+    return typeof current === "string" ? current : undefined;
+}
+function numberField(value, field) {
+    const current = value?.[field];
+    if (typeof current !== "number")
+        throw new Error(`GitHub response is missing ${field}`);
+    return current;
 }
 async function gitStatus(fs, thread, args) {
     const matrix = await git.statusMatrix({ fs, dir: THREAD_GIT_DIRECTORY });

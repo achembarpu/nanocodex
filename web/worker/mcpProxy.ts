@@ -21,12 +21,13 @@ const RESPONSE_HEADERS = [
   "www-authenticate",
 ];
 const METHODS = new Set(["GET", "POST", "DELETE"]);
-const MAX_REQUEST_BYTES = 16 * 1024 * 1024;
+const THREAD_ID = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/;
 
 export async function proxyDefaultMcp(
   request: Request,
   url: URL,
   authorized: boolean,
+  egress?: Fetcher,
 ): Promise<Response | undefined> {
   const match = /^\/api\/mcp\/([a-z-]+)$/.exec(url.pathname);
   if (!match) return undefined;
@@ -37,24 +38,39 @@ export async function proxyDefaultMcp(
     return error("method not allowed", 405, { allow: "GET, POST, DELETE" });
   }
 
-  const bodyResult = request.method === "GET"
-    ? { ok: true as const, body: undefined }
-    : await readBoundedBody(request);
-  if (!bodyResult.ok) return bodyResult.response;
+  const threadId = url.searchParams.get("thread_id");
+  if (!threadId || !THREAD_ID.test(threadId)) return error("invalid thread", 400);
+  if (!egress) return error("egress unavailable", 503);
 
   const upstream = new URL(upstreamBase);
-  upstream.search = url.search;
+  const upstreamQuery = new URLSearchParams(url.searchParams);
+  upstreamQuery.delete("thread_id");
+  upstream.search = upstreamQuery.toString();
   const headers = new Headers();
   for (const name of REQUEST_HEADERS) {
     const value = request.headers.get(name);
     if (value !== null) headers.set(name, value);
   }
-  const response = await fetch(upstream, {
-    method: request.method,
-    headers,
-    body: bodyResult.body,
-    redirect: "follow",
+  const gatewayHeaders = new Headers({
+    "content-type": "application/json",
+    origin: url.origin,
   });
+  const cookie = request.headers.get("cookie");
+  if (cookie !== null) gatewayHeaders.set("cookie", cookie);
+  const response = await egress.fetch(new Request(new URL("/v1/egress", url.origin), {
+    method: "POST",
+    headers: gatewayHeaders,
+    body: JSON.stringify({
+      thread_id: threadId,
+      url: upstream.href,
+      method: request.method,
+      headers: Object.fromEntries(headers.entries()),
+      ...(request.method === "GET" || request.body === null
+        ? {}
+        : { body: await request.text() }),
+    }),
+    signal: request.signal,
+  }));
   const responseHeaders = new Headers({
     "cache-control": "no-store",
     "x-content-type-options": "nosniff",
@@ -68,57 +84,6 @@ export async function proxyDefaultMcp(
     statusText: response.statusText,
     headers: responseHeaders,
   });
-}
-
-async function readBoundedBody(request: Request): Promise<
-  | { ok: true; body: ArrayBuffer | undefined }
-  | { ok: false; response: Response }
-> {
-  const declaredLength = request.headers.get("content-length");
-  if (declaredLength !== null) {
-    const normalized = declaredLength.trim();
-    if (!/^(0|[1-9][0-9]*)$/.test(normalized)) {
-      await cancelBody(request, "invalid Content-Length");
-      return { ok: false, response: error("invalid Content-Length", 400) };
-    }
-    const length = Number(normalized);
-    if (!Number.isSafeInteger(length) || length > MAX_REQUEST_BYTES) {
-      await cancelBody(request, "MCP request body is too large");
-      return { ok: false, response: error("MCP request body is too large", 413) };
-    }
-  }
-
-  if (request.body === null) return { ok: true, body: undefined };
-  const reader = request.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let bytes = 0;
-  try {
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (value.byteLength > MAX_REQUEST_BYTES - bytes) {
-        await reader.cancel("MCP request body is too large").catch(() => undefined);
-        return { ok: false, response: error("MCP request body is too large", 413) };
-      }
-      chunks.push(value);
-      bytes += value.byteLength;
-    }
-  } finally {
-    reader.releaseLock();
-  }
-
-  const body = new ArrayBuffer(bytes);
-  const target = new Uint8Array(body);
-  let offset = 0;
-  for (const chunk of chunks) {
-    target.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-  return { ok: true, body };
-}
-
-async function cancelBody(request: Request, reason: string): Promise<void> {
-  await request.body?.cancel(reason).catch(() => undefined);
 }
 
 function error(message: string, status: number, headers?: HeadersInit): Response {

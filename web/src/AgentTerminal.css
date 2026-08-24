@@ -231,8 +231,16 @@
 
 .agent-xterm .xterm-viewport {
   background: var(--terminal-background) !important;
+  overscroll-behavior-y: contain;
   scrollbar-color: var(--terminal-muted) var(--terminal-background);
   scrollbar-width: thin;
+  touch-action: pan-y;
+  -webkit-overflow-scrolling: touch;
+}
+
+.agent-xterm .xterm-scrollable-element {
+  overscroll-behavior-y: contain;
+  touch-action: none;
 }
 
 .agent-xterm .xterm-dim {
@@ -249,6 +257,12 @@
 }
 
 @media (pointer: coarse), (any-pointer: coarse) {
+  .agent-runtime-switch button {
+    min-width: 44px;
+    min-height: 44px;
+    flex: 1 1 0;
+  }
+
   .agent-terminal-shell {
     display: grid;
     grid-template-rows: minmax(0, 1fr) auto;
@@ -256,6 +270,10 @@
 
   .agent-xterm {
     min-height: 0;
+  }
+
+  .agent-xterm .xterm-helper-textarea {
+    display: none;
   }
 
   .agent-session-bar,
@@ -284,9 +302,9 @@
     z-index: 6;
     display: grid;
     grid-template-columns: auto minmax(0, 1fr) auto;
-    grid-template-rows: 44px 16px;
+    grid-template-rows: minmax(44px, auto);
     gap: 0 8px;
-    align-items: center;
+    align-items: end;
     min-height: var(--terminal-composer-min-height);
     padding:
       0
@@ -299,11 +317,17 @@
     font-family: var(--font-mono);
   }
 
+  .nanocodex-demo.is-full .agent-touch-composer {
+    padding-right: max(8px, env(safe-area-inset-right));
+  }
+
   .agent-touch-rail {
     grid-column: 1;
     grid-row: 1;
     color: var(--terminal-muted);
     font-size: 16px;
+    align-self: end;
+    padding-bottom: 12px;
   }
 
   .agent-touch-composer textarea {
@@ -311,9 +335,9 @@
     grid-row: 1;
     width: 100%;
     min-width: 0;
-    height: 44px;
+    height: auto;
     min-height: 44px;
-    max-height: 44px;
+    max-height: 88px;
     margin: 0;
     padding: 11px 0 9px;
     overflow-y: auto;
@@ -339,6 +363,7 @@
     grid-column: 3;
     grid-row: 1;
     gap: 4px;
+    align-self: end;
   }
 
   .agent-touch-actions button {
@@ -385,21 +410,34 @@
   }
 
   .agent-touch-composer small {
-    grid-column: 2 / 4;
-    grid-row: 2;
-    align-self: start;
-    overflow: hidden;
-    color: var(--terminal-muted);
-    font-size: 9px;
-    line-height: 12px;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    display: none;
   }
 }
 
 @media (max-width: 740px), (pointer: coarse) and (orientation: landscape) and (max-width: 950px) {
   .nanocodex-demo {
     min-width: 0;
+    --terminal-composer-min-height: calc(52px + env(safe-area-inset-bottom));
+  }
+
+  .agent-runtime-switch {
+    gap: 0;
+    padding: 0;
+    border-inline: 0;
+  }
+
+  .agent-runtime-switch button {
+    min-height: 44px;
+  }
+
+  .agent-runtime-switch button[aria-pressed="true"] {
+    background: color-mix(in srgb, var(--text) 5%, transparent);
+    box-shadow: inset 0 -2px 0 var(--terminal-foreground);
+    outline: 0;
+  }
+
+  .agent-session-shell.is-compact-ready {
+    display: none;
   }
 
   .agent-session-bar,
@@ -430,8 +468,8 @@
   }
 
   .agent-terminal-shell {
-    height: min(320px, calc(100dvh - var(--mobile-header-height, 64px) - 132px));
-    min-height: 280px;
+    height: min(360px, calc(100dvh - var(--mobile-header-height, 64px) - 96px));
+    min-height: 220px;
   }
 
   .nanocodex-demo.is-preview .agent-terminal-shell {
@@ -607,7 +645,14 @@
 .conversation-mobile-header,
 .conversation-backdrop { display: none; }
 
-.conversation-list { min-height: 0; overflow: auto; scrollbar-color: var(--text-faint) transparent; scrollbar-width: thin; }
+.conversation-list {
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: var(--text-faint) transparent;
+  scrollbar-width: thin;
+  -webkit-overflow-scrolling: touch;
+}
 .conversation-row {
   position: relative;
   display: flex;
@@ -631,30 +676,71 @@
   color: var(--text); background: color-mix(in srgb, var(--text) 4%, transparent); box-shadow: inset 1px 0 0 var(--text-muted);
 }
 .conversation-row strong {
-  overflow: hidden; font-size: 11px; font-weight: 500; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap;
+  overflow: hidden; font-size: 13px; font-weight: 600; line-height: 1.35; text-overflow: ellipsis; white-space: nowrap;
 }
 .conversation-row-meta {
-  display: flex; gap: 8px; justify-content: space-between; color: var(--text-faint); font: 10px/1.2 var(--font-mono);
+  display: flex; min-width: 0; gap: 6px; align-items: center; color: var(--text-faint); font: 10px/1.2 var(--font-mono);
 }
-.conversation-row-byline {
-  overflow: hidden; color: var(--text-faint); font-size: 10px; line-height: 1.2; text-overflow: ellipsis; white-space: nowrap;
+.conversation-row-meta span:last-child {
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
 }
 .conversation-row > svg {
   position: absolute; top: 50%; right: 10px; width: 11px; height: 11px; color: var(--text-faint); transform: translateY(-50%);
 }
 .conversation-list-error {
-  margin: 10px; padding: 8px 9px; color: var(--negative); font: 10px/1.4 var(--font-mono); border: 1px solid var(--border-soft);
+  margin: 10px;
+  padding: 8px 9px;
+  color: var(--negative);
+  font: 10px/1.4 var(--font-mono);
+  border: 1px solid var(--border-soft);
+}
+.conversation-list-error p { margin: 0; }
+.conversation-list-error button {
+  min-height: 44px;
+  margin-top: 6px;
+  color: currentColor;
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 @media (max-width: 740px), (pointer: coarse) and (orientation: landscape) and (max-width: 950px) {
-  .conversation-workspace { display: block; }
-  .conversation-main { display: grid; height: 100%; grid-template-rows: 44px minmax(0, 1fr); }
+  .conversation-workspace {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: 44px minmax(0, 1fr);
+  }
+  .conversation-main {
+    display: flex;
+    min-height: 0;
+    grid-row: 2;
+  }
   .conversation-mobile-header {
-    display: flex; min-width: 0; align-items: center; gap: 6px; padding-right: 10px;
-    color: var(--text-muted); font: 10px var(--font-mono); border-bottom: 1px solid var(--border-soft);
+    display: flex; min-width: 0; grid-row: 1; align-items: center; gap: 4px;
+    color: var(--text-muted); border-bottom: 1px solid var(--border-soft);
   }
   .conversation-mobile-header button { width: 44px; height: 44px; flex: 0 0 44px; }
-  .conversation-mobile-header span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .conversation-mobile-title {
+    display: flex; min-width: 0; flex: 1 1 auto; flex-direction: column; gap: 2px; justify-content: center;
+  }
+  .conversation-mobile-title strong {
+    overflow: hidden; color: var(--text); font: 600 12px/1.15 var(--font-sans); text-overflow: ellipsis; white-space: nowrap;
+  }
+  .conversation-mobile-status {
+    display: flex; min-width: 0; gap: 5px; align-items: center; overflow: hidden;
+    color: var(--text-faint); font: 9px/1 var(--font-mono); text-overflow: ellipsis; white-space: nowrap;
+  }
+  .conversation-mobile-status i {
+    width: 5px; height: 5px; flex: 0 0 auto; background: currentColor; border-radius: 50%;
+  }
+  .conversation-mobile-status.is-ready i { background: var(--terminal-foreground); }
+  .conversation-mobile-status.is-error { color: var(--negative); }
+  .conversation-mobile-new {
+    width: auto !important; min-width: 58px; padding-inline: 7px !important; gap: 4px;
+    display: flex !important; flex: 0 0 auto !important; font: 600 10px/1 var(--font-mono);
+  }
+  .conversation-mobile-new span { display: inline; }
+  .conversation-mobile-new:disabled { opacity: 0.4; }
   .conversation-sidebar {
     position: absolute; z-index: 22; inset: 0 auto 0 0; width: min(320px, 88vw);
     background: var(--surface); visibility: hidden; pointer-events: none; transform: translateX(-105%);
@@ -672,7 +758,11 @@
   .conversation-drawer-close,
   .conversation-icon-button { width: 44px; height: 44px; }
   .conversation-sidebar-header { min-height: 52px; flex-basis: 52px; }
-  .conversation-row { min-height: 72px; padding-inline: 12px 38px; }
+  .conversation-row { min-height: 62px; padding-inline: 12px 38px; }
+
+  .nanocodex-demo.is-full .artifact-dock.is-collapsed.is-empty {
+    display: none;
+  }
 }
 
 @media (prefers-reduced-motion: reduce) {

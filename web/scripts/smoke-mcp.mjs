@@ -42,7 +42,10 @@ if (expectedDeploymentSha) {
 }
 
 const report = [];
-for (const [serverName, server] of Object.entries(browserMcpConfiguration(origin))) {
+for (const [serverName, server] of Object.entries(browserMcpConfiguration(
+  origin,
+  crypto.randomUUID(),
+))) {
   const expectedTools = Object.keys(toolArguments[serverName] ?? {});
   assert.deepEqual(
     [...server.enabledTools].sort(),

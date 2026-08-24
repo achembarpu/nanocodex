@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useAccountSession } from "./AccountSession";
 import { GenerationRequestOwner } from "./agentTerminalLifecycle";
 import type { AgentStatus } from "./agentTerminalTypes";
+import { clientFailureMessage } from "./clientFailure";
 import { deploymentHealth } from "./deploymentHealth";
 
 export type CredentialSource = "brokered" | null;
@@ -71,9 +72,15 @@ export function AgentSessionBar({
   const ready = agentStatus === "ready";
   const hasCredential = source === "brokered";
   const label = sessionLabel({ agentStatus, authStatus: status, capabilityError, source });
+  const compactReady = ready
+    && hasCredential
+    && status?.state === "ready"
+    && status.ready
+    && !agentError
+    && !capabilityError;
 
   return (
-    <div className="agent-session-shell">
+    <div className={`agent-session-shell${compactReady ? " is-compact-ready" : ""}`}>
       <div className="agent-session-bar">
         <span className="agent-session-status" aria-live="polite">
           <i className={ready ? "is-ready" : ""} aria-hidden="true" />
@@ -114,7 +121,8 @@ function useModelSession({
   onStatusChange(status: ModelSessionStatus): void;
   onSourceChange(source: CredentialSource): void;
 }) {
-  const account = useAccountSession().account;
+  const accountSession = useAccountSession();
+  const account = accountSession.account;
   const [status, setStatus] = useState<ModelSessionStatus>();
   const [busy, setBusy] = useState(false);
   const generation = useRef(0);
@@ -128,6 +136,7 @@ function useModelSession({
   const readStatus = useCallback((fresh: boolean) => {
     const current = ++generation.current;
     return requests.current.run(current, async () => {
+      if (accountSession.status !== "ready") return;
       if (!account) {
         publish({ state: "signed_out" }, null);
         return;
@@ -143,13 +152,17 @@ function useModelSession({
         if (generation.current !== current) return;
         publish({
           state: "error",
-          error: cause instanceof Error ? cause.message : "Could not check the model connection.",
+          error: clientFailureMessage(cause, "Could not check the model connection. Try again."),
         }, null);
       }
     });
-  }, [account, publish]);
+  }, [account, accountSession.status, publish]);
 
   useEffect(() => {
+    if (accountSession.status !== "ready") {
+      generation.current++;
+      return;
+    }
     if (!account) {
       generation.current++;
       publish({ state: "signed_out" }, null);
@@ -160,7 +173,7 @@ function useModelSession({
     void readStatus(
       previousAccountId !== undefined && previousAccountId !== account.id,
     );
-  }, [account, publish, readStatus]);
+  }, [account, accountSession.status, publish, readStatus]);
   useEffect(() => {
     let inactive = false;
     const becameInactive = () => { inactive = true; };

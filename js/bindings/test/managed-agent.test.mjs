@@ -45,6 +45,7 @@ test("managed Agent covers account-scoped create, list, get, and delete", async 
   assert.deepEqual(listed[0].summary, {
     title: "First task", createdAt: 10, updatedAt: 20, turnCount: 3,
   });
+  assert.equal(Agent.open(agentId, options).id, agentId);
   assert.equal((await Agent.get(agentId, options)).id, agentId);
   assert.equal((await created.state()).latest_event_cursor, "4");
   await created.delete();
@@ -54,6 +55,9 @@ test("managed Agent covers account-scoped create, list, get, and delete", async 
     assert.equal(request.credentials, "include");
     assert.equal(request.headers.has("authorization"), false);
   }
+  assert.equal(calls.filter((request) =>
+    request.method === "GET" && new URL(request.url).pathname === `/v1/agents/${agentId}`
+  ).length, 2, "open constructs a handle without adding a state probe");
 });
 
 test("managed server authentication sends only an ncx_live bearer and omits cookies", async () => {
@@ -110,6 +114,322 @@ test("managed event history requests one bounded chronological page before a cur
   assert.equal(requests.length, 2, "one create plus one history request");
   await assert.rejects(() => agent.events.page({ before: "0" }), /positive decimal/);
   await assert.rejects(() => agent.events.page({ limit: 257 }), /1 through 256/);
+});
+
+test("managed event history forwards caller cancellation to the fetch boundary", async () => {
+  let historySignal;
+  const agent = await Agent.create({
+    baseUrl: origin,
+    fetch: async (input, init) => {
+      const request = new Request(input, init);
+      if (request.method === "POST") return Response.json({ agent_id: agentId }, { status: 201 });
+      historySignal = request.signal;
+      await new Promise((_, reject) => request.signal.addEventListener("abort", () => {
+        reject(new DOMException("aborted", "AbortError"));
+      }, { once: true }));
+    },
+  });
+  const controller = new AbortController();
+  const page = agent.events.page({ signal: controller.signal });
+  await waitFor(() => historySignal !== undefined);
+  controller.abort();
+
+  await assert.rejects(page, { name: "AbortError" });
+  assert.equal(historySignal.aborted, true);
+});
+
+test("latest event tails adopt the server cursor before reconnecting", async () => {
+  const connections = [];
+  const requestedCursors = [];
+  const agent = await Agent.create({
+    baseUrl: origin,
+    fetch: async (input, init) => {
+      const request = new Request(input, init);
+      const url = new URL(request.url);
+      if (request.method === "POST") return Response.json({ agent_id: agentId }, { status: 201 });
+      requestedCursors.push(url.searchParams.get("cursor"));
+      const connection = controlledEventStream(request.signal, () => {});
+      connections.push(connection);
+      return connection.response;
+    },
+  });
+
+  const observed = [];
+  const watching = (async () => {
+    for await (const event of agent.events.watch({ cursor: "latest" })) {
+      observed.push(event.cursor);
+      break;
+    }
+  })();
+  await waitFor(() => connections.length === 1);
+  connections[0].send("retry: 0\n: cursor 12\n\n");
+  connections[0].close();
+  await waitFor(() => connections.length === 2);
+  connections[1].send(sse("13", "event", eventData("13")));
+
+  await watching;
+  assert.deepEqual(requestedCursors, ["latest", "12"]);
+  assert.deepEqual(observed, ["13"]);
+});
+
+test("latest subscriber joining numeric shared replay starts after an atomic latest boundary", async () => {
+  const connections = [];
+  const requestedCursors = [];
+  const requestSignals = [];
+  const agent = await Agent.create({
+    baseUrl: origin,
+    fetch: async (input, init) => {
+      const request = new Request(input, init);
+      const url = new URL(request.url);
+      if (request.method === "POST") return Response.json({ agent_id: agentId }, { status: 201 });
+      requestedCursors.push(url.searchParams.get("cursor"));
+      requestSignals.push(request.signal);
+      const connection = controlledEventStream(request.signal, () => {});
+      connections.push(connection);
+      return connection.response;
+    },
+  });
+
+  const replayed = [];
+  const replaying = (async () => {
+    for await (const event of agent.events.watch({ cursor: "0" })) {
+      replayed.push(event.cursor);
+      if (event.cursor === "101") return;
+    }
+  })();
+  await waitFor(() => connections.length === 1);
+  connections[0].send(`${sse("1", "event", eventData("1"))}${sse("2", "event", eventData("2"))}`);
+  await waitFor(() => replayed.length === 2);
+
+  const latest = agent.events.watch({ cursor: "latest" });
+  const firstLatest = latest.next();
+  await waitFor(() => connections.length === 2);
+  connections[1].send(": cursor 100\n\n");
+  await waitFor(() => requestSignals[1].aborted);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  connections[0].send(Array.from(
+    { length: 99 },
+    (_, index) => sse(String(index + 3), "event", eventData(String(index + 3))),
+  ).join(""));
+
+  assert.equal((await firstLatest).value.cursor, "101");
+  await latest.return();
+  await replaying;
+  assert.deepEqual(requestedCursors, ["0", "latest"]);
+  assert.deepEqual(replayed, Array.from({ length: 101 }, (_, index) => String(index + 1)));
+});
+
+test("browser online recovery replaces a half-open managed event stream from its exact cursor", async () => {
+  const online = new EventTarget();
+  const addDescriptor = Object.getOwnPropertyDescriptor(globalThis, "addEventListener");
+  const removeDescriptor = Object.getOwnPropertyDescriptor(globalThis, "removeEventListener");
+  Object.defineProperty(globalThis, "addEventListener", {
+    configurable: true,
+    value: online.addEventListener.bind(online),
+  });
+  Object.defineProperty(globalThis, "removeEventListener", {
+    configurable: true,
+    value: online.removeEventListener.bind(online),
+  });
+  try {
+    const connections = [];
+    const requestedCursors = [];
+    const agent = await Agent.create({
+      baseUrl: origin,
+      fetch: async (input, init) => {
+        const request = new Request(input, init);
+        const url = new URL(request.url);
+        if (request.method === "POST") return Response.json({ agent_id: agentId }, { status: 201 });
+        requestedCursors.push(url.searchParams.get("cursor"));
+        const connection = controlledEventStream(request.signal, () => {});
+        connections.push(connection);
+        return connection.response;
+      },
+    });
+    const observed = [];
+    const watching = (async () => {
+      for await (const event of agent.events.watch({ cursor: "5" })) {
+        observed.push(event.cursor);
+        if (event.type === "turn_completed") return event;
+      }
+      throw new Error("managed event stream ended before terminal recovery");
+    })();
+
+    await waitFor(() => connections.length === 1);
+    connections[0].send(sse("6", "event", eventData("6")));
+    await waitFor(() => observed.includes("6"));
+    online.dispatchEvent(new Event("online"));
+    await waitFor(() => connections.length === 2);
+    connections[1].send(sse("7", "turn_completed", {
+      cursor: "7",
+      created_at: 7,
+      turn_id: "turn-online",
+      type: "turn_completed",
+      id: "turn-online",
+      final_message: "recovered online",
+      usage: null,
+    }));
+
+    assert.equal((await watching).data.final_message, "recovered online");
+    assert.deepEqual(requestedCursors, ["5", "6"]);
+  } finally {
+    if (addDescriptor) Object.defineProperty(globalThis, "addEventListener", addDescriptor);
+    else Reflect.deleteProperty(globalThis, "addEventListener");
+    if (removeDescriptor) Object.defineProperty(globalThis, "removeEventListener", removeDescriptor);
+    else Reflect.deleteProperty(globalThis, "removeEventListener");
+  }
+});
+
+test("a latest main stream persists its control cursor across browser online recovery", async () => {
+  const online = new EventTarget();
+  const restoreOnline = installOnlineTarget(online);
+  try {
+    const connections = [];
+    const requestedCursors = [];
+    const agent = Agent.open(agentId, {
+      baseUrl: origin,
+      fetch: async (input, init) => {
+        const request = new Request(input, init);
+        requestedCursors.push(new URL(request.url).searchParams.get("cursor"));
+        const connection = controlledEventStream(request.signal, () => {});
+        connections.push(connection);
+        return connection.response;
+      },
+    });
+    const events = agent.events.watch({ cursor: "latest" });
+    const next = events.next();
+    await waitFor(() => connections.length === 1);
+    connections[0].send(": cursor 44\n\n");
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    online.dispatchEvent(new Event("online"));
+    await waitFor(() => connections.length === 2);
+    connections[1].send(sse("45", "event", eventData("45")));
+    assert.equal((await next).value.cursor, "45");
+    await events.return();
+    assert.deepEqual(requestedCursors, ["latest", "44"]);
+  } finally {
+    restoreOnline();
+  }
+});
+
+test("logical online retirement replaces a fetch that ignores abort and fences its stale response", async () => {
+  const online = new EventTarget();
+  const restoreOnline = installOnlineTarget(online);
+  try {
+    const heldFetch = deferredPromise();
+    const connections = [];
+    const requestedCursors = [];
+    const agent = Agent.open(agentId, {
+      baseUrl: origin,
+      fetch: async (input, init) => {
+        const request = new Request(input, init);
+        requestedCursors.push(new URL(request.url).searchParams.get("cursor"));
+        if (requestedCursors.length === 1) return heldFetch.promise;
+        const connection = controlledEventStream(request.signal, () => {});
+        connections.push(connection);
+        return connection.response;
+      },
+    });
+    const events = agent.events.watch({ cursor: "0" });
+    const first = events.next();
+    await waitFor(() => requestedCursors.length === 1);
+    online.dispatchEvent(new Event("online"));
+    await waitFor(() => connections.length === 1);
+    connections[0].send(sse("1", "event", eventData("1")));
+    assert.equal((await first).value.cursor, "1");
+
+    let stalePublished = false;
+    const second = events.next().then((value) => {
+      stalePublished = true;
+      return value;
+    });
+    heldFetch.resolve(eventStream([sse("99", "event", eventData("99"))]));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(stalePublished, false);
+    connections[0].send(sse("2", "event", eventData("2")));
+    assert.equal((await second).value.cursor, "2");
+    await events.return();
+    assert.deepEqual(requestedCursors, ["0", "0"]);
+  } finally {
+    restoreOnline();
+  }
+});
+
+test("logical online retirement does not await a nonsettling response reader cancellation", async () => {
+  const online = new EventTarget();
+  const restoreOnline = installOnlineTarget(online);
+  try {
+    const cancelStarted = deferredPromise();
+    const cancelHeld = deferredPromise();
+    const connections = [];
+    let requests = 0;
+    const agent = Agent.open(agentId, {
+      baseUrl: origin,
+      fetch: async (input, init) => {
+        const request = new Request(input, init);
+        requests += 1;
+        if (requests === 1) {
+          return new Response(new ReadableStream({
+            cancel() {
+              cancelStarted.resolve();
+              return cancelHeld.promise;
+            },
+          }), { headers: { "content-type": "text/event-stream" } });
+        }
+        const connection = controlledEventStream(request.signal, () => {});
+        connections.push(connection);
+        return connection.response;
+      },
+    });
+    const events = agent.events.watch({ cursor: "0" });
+    const next = events.next();
+    await waitFor(() => requests === 1);
+    online.dispatchEvent(new Event("online"));
+    await cancelStarted.promise;
+    await waitFor(() => connections.length === 1);
+    connections[0].send(sse("1", "event", eventData("1")));
+    assert.equal((await next).value.cursor, "1");
+    await events.return();
+    assert.equal(requests, 2);
+  } finally {
+    restoreOnline();
+  }
+});
+
+test("managed event streams reconnect after a response reader fails", async () => {
+  const connections = [];
+  const requestedCursors = [];
+  const agent = await Agent.create({
+    baseUrl: origin,
+    fetch: async (input, init) => {
+      const request = new Request(input, init);
+      const url = new URL(request.url);
+      if (request.method === "POST") return Response.json({ agent_id: agentId }, { status: 201 });
+      requestedCursors.push(url.searchParams.get("cursor"));
+      const connection = controlledEventStream(request.signal, () => {});
+      connections.push(connection);
+      return connection.response;
+    },
+  });
+  const observed = [];
+  const watching = (async () => {
+    for await (const event of agent.events.watch({ cursor: "8" })) {
+      observed.push(event.cursor);
+      if (observed.length === 2) break;
+    }
+  })();
+  await waitFor(() => connections.length === 1);
+  connections[0].send(`retry: 0\n\n${sse("9", "event", eventData("9"))}`);
+  await waitFor(() => observed.length === 1);
+  connections[0].fail(new Error("injected reader failure"));
+  await waitFor(() => connections.length === 2);
+  connections[1].send(sse("10", "event", eventData("10")));
+
+  await watching;
+  assert.deepEqual(observed, ["9", "10"]);
+  assert.deepEqual(requestedCursors, ["8", "9"]);
 });
 
 test("prompts and a watcher multiplex one active managed event request without stealing events", async () => {
@@ -353,6 +673,457 @@ test("terminal managed failures are typed and HTTP failures hide response header
   );
 });
 
+test("a result observer can detach without aborting durable prompt or cancel mutations", async () => {
+  const connections = [];
+  let promptSignal;
+  let cancelSignal;
+  const fetch = async (input, init) => {
+    const request = new Request(input, init);
+    const url = new URL(request.url);
+    if (request.method === "POST" && url.pathname.endsWith("/turns")) {
+      promptSignal = request.signal;
+      return Response.json({
+        turn_id: "turn-observer",
+        state: "accepted",
+        accepted_cursor: "5",
+        terminal_cursor: null,
+      }, { status: 202 });
+    }
+    if (request.method === "GET" && url.pathname.endsWith("/events")) {
+      const connection = controlledEventStream(request.signal, () => {});
+      connections.push(connection);
+      return connection.response;
+    }
+    if (request.method === "POST" && url.pathname.endsWith("/turn-observer/cancel")) {
+      cancelSignal = request.signal;
+      return Response.json({ turn_id: "turn-observer", state: "cancelling" }, { status: 202 });
+    }
+    return Response.json({ error: "not_found" }, { status: 404 });
+  };
+  const turn = Agent.open(agentId, { baseUrl: origin, fetch }).turn.prompt({
+    id: "turn-observer",
+    input: "stay durable",
+    idempotencyKey: "observer-request",
+  });
+  const observer = new AbortController();
+  const result = turn.result({ signal: observer.signal });
+  await waitFor(() => connections.length === 1);
+  observer.abort();
+  await assert.rejects(result, { name: "AbortError" });
+  assert.equal(promptSignal.aborted, false);
+  await turn.cancel();
+  assert.equal(cancelSignal.aborted, false);
+});
+
+test("stable-ID cancellation dispatches after the prompt AbortSignal has fired", async () => {
+  const promptStarted = deferredPromise();
+  let cancelSignal;
+  const promptController = new AbortController();
+  const turn = Agent.open(agentId, {
+    baseUrl: origin,
+    fetch: async (input, init) => {
+      const request = new Request(input, init);
+      const url = new URL(request.url);
+      if (request.method === "POST" && url.pathname.endsWith("/turns")) {
+        promptStarted.resolve();
+        await new Promise((_, reject) => request.signal.addEventListener("abort", () => {
+          reject(new DOMException("prompt aborted", "AbortError"));
+        }, { once: true }));
+      }
+      if (request.method === "POST" && url.pathname.endsWith("/turn-aborted/cancel")) {
+        cancelSignal = request.signal;
+        return Response.json({ turn_id: "turn-aborted", state: "cancelling" }, { status: 202 });
+      }
+      return Response.json({ error: "not_found" }, { status: 404 });
+    },
+  }).turn.prompt({
+    id: "turn-aborted",
+    input: "cancel by stable identity",
+    idempotencyKey: "turn-aborted-request",
+    signal: promptController.signal,
+  });
+  await promptStarted.promise;
+  promptController.abort();
+  await assert.rejects(turn.accepted(), { name: "AbortError" });
+
+  assert.deepEqual(await turn.cancel(), { turn_id: "turn-aborted", state: "cancelling" });
+  assert.equal(cancelSignal.aborted, false);
+});
+
+test("stable-ID cancellation does not wait for a nonsettling prompt response", async () => {
+  const promptStarted = deferredPromise();
+  const neverSettles = deferredPromise();
+  const requests = [];
+  const turn = Agent.open(agentId, {
+    baseUrl: origin,
+    fetch: async (input, init) => {
+      const request = new Request(input, init);
+      const url = new URL(request.url);
+      requests.push(`${request.method} ${url.pathname}`);
+      if (request.method === "POST" && url.pathname.endsWith("/turns")) {
+        promptStarted.resolve();
+        await neverSettles.promise;
+      }
+      if (request.method === "POST" && url.pathname.endsWith("/turn-held/cancel")) {
+        return Response.json({ turn_id: "turn-held", state: "cancelling" }, { status: 202 });
+      }
+      return Response.json({ error: "not_found" }, { status: 404 });
+    },
+  }).turn.prompt({
+    id: "turn-held",
+    input: "the response can be lost after durable acceptance",
+    idempotencyKey: "turn-held-request",
+  });
+  await promptStarted.promise;
+
+  const cancelled = await within(turn.cancel(), 100, "stable-ID cancellation");
+  assert.deepEqual(cancelled, { turn_id: "turn-held", state: "cancelling" });
+  assert.deepEqual(requests, [
+    `POST /v1/agents/${agentId}/turns`,
+    `POST /v1/agents/${agentId}/turns/turn-held/cancel`,
+  ]);
+});
+
+test("paused managed event subscribers fail with a terminal-safe reconnect cursor", async () => {
+  const connections = [];
+  const requestSignals = [];
+  const requestedCursors = [];
+  const agent = Agent.open(agentId, {
+    baseUrl: origin,
+    fetch: async (input, init) => {
+      const request = new Request(input, init);
+      requestedCursors.push(new URL(request.url).searchParams.get("cursor"));
+      requestSignals.push(request.signal);
+      const connection = controlledEventStream(request.signal, () => {});
+      connections.push(connection);
+      return connection.response;
+    },
+  });
+  const paused = agent.events.watch({ cursor: "0" });
+  await waitFor(() => connections.length === 1);
+  connections[0].send(Array.from(
+    { length: 4_097 },
+    (_, index) => sse(String(index + 1), "event", eventData(String(index + 1))),
+  ).join(""));
+  await waitFor(() => requestSignals[0].aborted);
+
+  for (let cursor = 1; cursor <= 4_096; cursor += 1) {
+    assert.equal((await paused.next()).value.cursor, String(cursor));
+  }
+  await assert.rejects(
+    paused.next(),
+    (error) => {
+      assert(error instanceof ManagedError);
+      assert.equal(error.code, "event_backlog_exceeded");
+      assert.match(error.message, /reconnect with events\.watch\(\{ cursor: "4096" \}\)/);
+      return true;
+    },
+  );
+
+  const resumed = agent.events.watch({ cursor: "4096" });
+  const terminal = resumed.next();
+  await waitFor(() => connections.length === 2);
+  connections[1].send(sse("4097", "turn_completed", {
+    cursor: "4097",
+    created_at: 4_097,
+    turn_id: "turn-terminal",
+    type: "turn_completed",
+    id: "turn-terminal",
+    final_message: "terminal retained",
+    usage: null,
+  }));
+  assert.equal((await terminal).value.data.final_message, "terminal retained");
+  await resumed.return();
+  assert.deepEqual(requestedCursors, ["0", "4096"]);
+});
+
+test("observer detachment stops waiting for a held submission without aborting it", async () => {
+  const submitted = deferredPromise();
+  let mutationSignal;
+  const fetch = async (input, init) => {
+    const request = new Request(input, init);
+    if (request.method === "POST") {
+      mutationSignal = request.signal;
+      await submitted.promise;
+      return Response.json({
+        turn_id: "turn-held-submit",
+        state: "accepted",
+        accepted_cursor: "5",
+        terminal_cursor: null,
+      }, { status: 202 });
+    }
+    return Response.json({ error: "not_found" }, { status: 404 });
+  };
+  const turn = Agent.open(agentId, { baseUrl: origin, fetch }).turn.prompt({
+    id: "turn-held-submit",
+    input: "commit independently",
+    idempotencyKey: "held-submit-request",
+  });
+  const observer = new AbortController();
+  const result = turn.result({ signal: observer.signal });
+  await waitFor(() => mutationSignal !== undefined);
+  observer.abort();
+  await assert.rejects(result, { name: "AbortError" });
+  assert.equal(mutationSignal.aborted, false);
+  submitted.resolve();
+  assert.equal(await turn.accepted(), "turn-held-submit");
+});
+
+test("an inactive managed SSE reconnects from the exact cursor", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  const requestedCursors = [];
+  let connections = 0;
+  globalThis.setTimeout = (callback, delay, ...args) => originalSetTimeout(
+    callback,
+    delay === 45_000 ? 0 : delay,
+    ...args,
+  );
+  try {
+    const fetch = async (input, init) => {
+      const request = new Request(input, init);
+      const url = new URL(request.url);
+      if (request.method === "POST" && url.pathname.endsWith("/turns")) {
+        return Response.json({
+          turn_id: "turn-inactive",
+          state: "accepted",
+          accepted_cursor: "5",
+          terminal_cursor: null,
+        }, { status: 202 });
+      }
+      if (request.method === "GET" && url.pathname.endsWith("/events")) {
+        requestedCursors.push(url.searchParams.get("cursor"));
+        connections += 1;
+        const connection = controlledEventStream(request.signal, () => {});
+        if (connections === 1) {
+          queueMicrotask(() => connection.send("retry: 0\n\n"));
+        } else {
+          queueMicrotask(() => connection.send(sse("6", "turn_completed", {
+            cursor: "6",
+            created_at: 1,
+            turn_id: "turn-inactive",
+            type: "turn_completed",
+            id: "turn-inactive",
+            final_message: "reconnected",
+            usage: null,
+          })));
+        }
+        return connection.response;
+      }
+      return Response.json({ error: "not_found" }, { status: 404 });
+    };
+    const result = await Agent.open(agentId, { baseUrl: origin, fetch }).turn.prompt({
+      id: "turn-inactive",
+      input: "recover half-open stream",
+      idempotencyKey: "inactive-request",
+    }).result();
+    assert.equal(result.finalMessage, "reconnected");
+    assert.deepEqual(requestedCursors, ["5", "5"]);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
+test("managed SSE rejects an unterminated decoded frame beyond its byte budget", async () => {
+  const connections = [];
+  const agent = Agent.open(agentId, {
+    baseUrl: origin,
+    fetch: async (input, init) => {
+      const request = new Request(input, init);
+      const connection = controlledEventStream(request.signal, () => {});
+      connections.push(connection);
+      return connection.response;
+    },
+  });
+  const events = agent.events.watch({ cursor: "0" });
+  const next = events.next();
+  await waitFor(() => connections.length === 1);
+  connections[0].send(`data: ${"x".repeat(2 * 1024 * 1024)}`);
+  await assert.rejects(next, (error) => {
+    assert(error instanceof ManagedError);
+    assert.equal(error.code, "event_frame_too_large");
+    return true;
+  });
+});
+
+test("managed terminal retention is bounded by encoded bytes as well as turn count", async () => {
+  const connections = [];
+  const agent = Agent.open(agentId, {
+    baseUrl: origin,
+    fetch: async (input, init) => {
+      const request = new Request(input, init);
+      const url = new URL(request.url);
+      if (request.method === "POST") {
+        return Response.json({
+          turn_id: "turn-cache-0",
+          state: "accepted",
+          accepted_cursor: "0",
+          terminal_cursor: null,
+        }, { status: 202 });
+      }
+      const connection = controlledEventStream(request.signal, () => {});
+      connections.push(connection);
+      return connection.response;
+    },
+  });
+  let observed = 0;
+  const watching = (async () => {
+    for await (const _event of agent.events.watch({ cursor: "0" })) {
+      observed += 1;
+      if (observed === 9) return;
+    }
+  })();
+  await waitFor(() => connections.length === 1);
+  for (let index = 0; index < 9; index += 1) {
+    const cursor = String(index + 1);
+    connections[0].send(sse(cursor, "turn_completed", {
+      cursor,
+      created_at: index + 1,
+      turn_id: `turn-cache-${index}`,
+      type: "turn_completed",
+      id: `turn-cache-${index}`,
+      final_message: `${index}:${"x".repeat(1024 * 1024)}`,
+      usage: null,
+    }));
+    await waitFor(() => observed === index + 1);
+  }
+  await watching;
+
+  const observer = new AbortController();
+  let settled = false;
+  const result = agent.turn.prompt({
+    id: "turn-cache-0",
+    input: "inspect byte-bounded cache",
+    idempotencyKey: "turn-cache-request",
+  }).result({ signal: observer.signal }).finally(() => { settled = true; });
+  await waitFor(() => connections.length === 2);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(settled, false, "the oldest large terminal was evicted before the 256-turn count cap");
+  observer.abort();
+  await assert.rejects(result, { name: "AbortError" });
+});
+
+test("the first managed terminal is canonical, identical replay is ignored, and conflict fails", async () => {
+  const connections = [];
+  const agent = Agent.open(agentId, {
+    baseUrl: origin,
+    fetch: async (input, init) => {
+      const request = new Request(input, init);
+      const url = new URL(request.url);
+      if (request.method === "POST") {
+        return Response.json({
+          turn_id: "turn-canonical",
+          state: "accepted",
+          accepted_cursor: "0",
+          terminal_cursor: null,
+        }, { status: 202 });
+      }
+      const connection = controlledEventStream(request.signal, () => {});
+      connections.push(connection);
+      return connection.response;
+    },
+  });
+  const events = agent.events.watch({ cursor: "0" });
+  const canonical = {
+    cursor: "1",
+    created_at: 1,
+    turn_id: "turn-canonical",
+    type: "turn_completed",
+    id: "turn-canonical",
+    final_message: "first answer",
+    usage: null,
+  };
+  const first = events.next();
+  await waitFor(() => connections.length === 1);
+  connections[0].send(sse("1", "turn_completed", canonical));
+  assert.equal((await first).value.data.final_message, "first answer");
+
+  let replayPublished = false;
+  const afterReplay = events.next().then((value) => {
+    replayPublished = true;
+    return value;
+  });
+  connections[0].send(sse("1", "turn_completed", canonical));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(replayPublished, false);
+  connections[0].send(sse("2", "event", eventData("2")));
+  assert.equal((await afterReplay).value.cursor, "2");
+
+  const conflict = events.next();
+  connections[0].send(sse("3", "turn_completed", {
+    ...canonical,
+    cursor: "3",
+    created_at: 3,
+    final_message: "conflicting answer",
+  }));
+  await assert.rejects(conflict, (error) => {
+    assert(error instanceof ManagedError);
+    assert.equal(error.code, "conflicting_terminal");
+    return true;
+  });
+
+  const result = await agent.turn.prompt({
+    id: "turn-canonical",
+    input: "read canonical result",
+    idempotencyKey: "turn-canonical-request",
+  }).result();
+  assert.equal(result.finalMessage, "first answer");
+  assert.equal(result.cursor, "1");
+});
+
+test("browser transport failures become retryable managed errors", async () => {
+  await assert.rejects(
+    Agent.list({
+      baseUrl: origin,
+      fetch: async () => { throw new TypeError("Load failed"); },
+    }),
+    (error) => {
+      assert(error instanceof ManagedError);
+      assert.equal(error.code, "network_error");
+      assert.equal(
+        error.message,
+        "Managed agent connection was interrupted. Check your network and retry.",
+      );
+      assert.equal(error.cause.message, "Load failed");
+      return true;
+    },
+  );
+});
+
+test("managed prompts retry browser transport failures with one idempotency key", async () => {
+  const requests = [];
+  const agent = Agent.open(agentId, {
+    baseUrl: origin,
+    fetch: async (input, init) => {
+      const request = new Request(input, init);
+      requests.push(request);
+      if (requests.length < 3) throw new TypeError("Load failed");
+      return Response.json({
+        turn_id: "turn-1",
+        state: "completed",
+        accepted_cursor: "1",
+        terminal_cursor: "2",
+        terminal: {
+          type: "turn_completed",
+          final_message: "done",
+          usage: null,
+        },
+      });
+    },
+  });
+
+  const turn = agent.turn.prompt({
+    id: "turn-1",
+    input: "hello",
+    idempotencyKey: "retry-key",
+  });
+  assert.equal(await turn.accepted(), "turn-1");
+  assert.equal(requests.length, 3);
+  assert.deepEqual(
+    requests.map((request) => request.headers.get("idempotency-key")),
+    ["retry-key", "retry-key", "retry-key"],
+  );
+});
+
 function agentState() {
   return {
     agent_id: agentId,
@@ -414,6 +1185,39 @@ function controlledEventStream(signal, onClose) {
       if (!closed) controller.enqueue(new TextEncoder().encode(value));
     },
     close: finish,
+    fail(error) {
+      if (closed) return;
+      closed = true;
+      signal.removeEventListener("abort", finish);
+      onClose();
+      controller.error(error);
+    },
+  };
+}
+
+function deferredPromise() {
+  let resolve;
+  let reject;
+  const promise = new Promise((next, fail) => { resolve = next; reject = fail; });
+  return { promise, reject, resolve };
+}
+
+function installOnlineTarget(target) {
+  const addDescriptor = Object.getOwnPropertyDescriptor(globalThis, "addEventListener");
+  const removeDescriptor = Object.getOwnPropertyDescriptor(globalThis, "removeEventListener");
+  Object.defineProperty(globalThis, "addEventListener", {
+    configurable: true,
+    value: target.addEventListener.bind(target),
+  });
+  Object.defineProperty(globalThis, "removeEventListener", {
+    configurable: true,
+    value: target.removeEventListener.bind(target),
+  });
+  return () => {
+    if (addDescriptor) Object.defineProperty(globalThis, "addEventListener", addDescriptor);
+    else Reflect.deleteProperty(globalThis, "addEventListener");
+    if (removeDescriptor) Object.defineProperty(globalThis, "removeEventListener", removeDescriptor);
+    else Reflect.deleteProperty(globalThis, "removeEventListener");
   };
 }
 
@@ -423,6 +1227,20 @@ async function waitFor(predicate) {
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
   assert.fail("timed out waiting for managed event state");
+}
+
+async function within(promise, milliseconds, label) {
+  let timeout;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise((_, reject) => {
+        timeout = setTimeout(() => reject(new Error(`${label} exceeded ${milliseconds}ms`)), milliseconds);
+      }),
+    ]);
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 function sse(id, event, data) {

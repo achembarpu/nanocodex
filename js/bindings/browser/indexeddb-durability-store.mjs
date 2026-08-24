@@ -1,7 +1,8 @@
 import { durabilityRevision } from "../runtime/durability-store.mjs";
 
 const DATABASE_NAME = "nanocodex-browser-durability-v1";
-const DATABASE_VERSION = 1;
+const DATABASE_VERSION = 2;
+const OWNERS_STORE = "owners";
 const JOURNALS_STORE = "journals";
 const BATCHES_STORE = "batches";
 const JOURNAL_INDEX = "journalId";
@@ -57,21 +58,56 @@ export function createIndexedDbDurabilityStore(options = {}) {
       });
     },
 
+    async acquire(journalId, request) {
+      validateJournalId(journalId);
+      const ownerId = validateOwnerId(request?.ownerId);
+      const db = await open();
+      const transaction = db.transaction(
+        [OWNERS_STORE, JOURNALS_STORE, BATCHES_STORE],
+        "readwrite",
+      );
+      const completed = transactionCompletion(transaction);
+      try {
+        const outcome = acquireOwner(
+          transaction,
+          transaction.objectStore(OWNERS_STORE),
+          transaction.objectStore(JOURNALS_STORE),
+          transaction.objectStore(BATCHES_STORE),
+          journalId,
+          ownerId,
+        );
+        const [result] = await Promise.all([outcome, completed]);
+        return result;
+      } catch (error) {
+        await completed.catch(() => {});
+        throw error;
+      }
+    },
+
     async append(journalId, request) {
       validateJournalId(journalId);
+      const ownerId = validateOwnerId(request?.ownerId);
+      const fence = durabilityRevision(request?.fence);
       const expectedRevision = durabilityRevision(request?.expectedRevision);
       const payload = validatePayload(request?.payload);
       const db = await open();
-      const transaction = db.transaction([JOURNALS_STORE, BATCHES_STORE], "readwrite");
+      const transaction = db.transaction(
+        [OWNERS_STORE, JOURNALS_STORE, BATCHES_STORE],
+        "readwrite",
+      );
       const completed = transactionCompletion(transaction);
+      const owners = transaction.objectStore(OWNERS_STORE);
       const journals = transaction.objectStore(JOURNALS_STORE);
       const batches = transaction.objectStore(BATCHES_STORE);
       try {
         const outcome = compareAndAppend(
           transaction,
+          owners,
           journals,
           batches,
           journalId,
+          ownerId,
+          fence,
           expectedRevision,
           payload,
         );
@@ -85,35 +121,109 @@ export function createIndexedDbDurabilityStore(options = {}) {
   });
 }
 
+function acquireOwner(transaction, owners, journals, batches, journalId, ownerId) {
+  return new Promise((resolve, reject) => {
+    const ownerRequest = owners.get(journalId);
+    ownerRequest.onerror = () => reject(
+      ownerRequest.error ?? new Error("reading durability owner failed"),
+    );
+    ownerRequest.onsuccess = () => {
+      try {
+        const previousFence = durabilityRevision(ownerRequest.result?.fence ?? "0");
+        if (previousFence === MAX_REVISION) {
+          try { transaction.abort(); } catch {}
+          reject(new RangeError("IndexedDB durability fence overflow"));
+          return;
+        }
+        const fence = durabilityRevision(BigInt(previousFence) + 1n);
+        const ownerWrite = requestResult(owners.put({ journalId, ownerId, fence }));
+        const journalRead = requestResult(journals.get(journalId));
+        const batchesRead = requestResult(batches.index(JOURNAL_INDEX).getAll(journalId));
+        Promise.all([ownerWrite, journalRead, batchesRead]).then(
+          ([, journal, storedBatches]) => {
+            try {
+              const revision = durabilityRevision(journal?.revision ?? "0");
+              const loadedBatches = storedBatches.map((batch) => ({
+                revision: durabilityRevision(batch.revision),
+                payload: validatePayload(batch.payload),
+              }));
+              loadedBatches.sort((left, right) => (
+                compareRevisions(left.revision, right.revision)
+              ));
+              resolve(Object.freeze({
+                ownerId,
+                fence,
+                revision,
+                batches: Object.freeze(loadedBatches.map((batch) => Object.freeze(batch))),
+              }));
+            } catch (error) {
+              try { transaction.abort(); } catch {}
+              reject(error);
+            }
+          },
+          reject,
+        );
+      } catch (error) {
+        try { transaction.abort(); } catch {}
+        reject(error);
+      }
+    };
+  });
+}
+
 function compareAndAppend(
   transaction,
+  owners,
   journals,
   batches,
   journalId,
+  ownerId,
+  fence,
   expectedRevision,
   payload,
 ) {
   return new Promise((resolve, reject) => {
-    const request = journals.get(journalId);
-    request.onerror = () => reject(request.error ?? new Error("reading durability revision failed"));
-    request.onsuccess = () => {
+    const ownerRequest = owners.get(journalId);
+    ownerRequest.onerror = () => reject(
+      ownerRequest.error ?? new Error("reading durability owner failed"),
+    );
+    ownerRequest.onsuccess = () => {
       try {
-        const actualRevision = durabilityRevision(request.result?.revision ?? "0");
-        if (actualRevision !== expectedRevision) {
-          resolve({ status: "conflict", actualRevision });
+        const storedOwner = ownerRequest.result;
+        if (
+          storedOwner?.ownerId !== ownerId
+          || durabilityRevision(storedOwner?.fence ?? "0") !== fence
+        ) {
+          resolve({ status: "fenced" });
           return;
         }
-        if (actualRevision === MAX_REVISION) {
-          resolve({
-            status: "not_committed",
-            message: "IndexedDB durability revision overflow",
-          });
-          return;
-        }
-        const revision = durabilityRevision(BigInt(actualRevision) + 1n);
-        journals.put({ journalId, revision });
-        batches.add({ journalId, revision, payload });
-        resolve({ status: "appended", revision });
+        const journalRequest = journals.get(journalId);
+        journalRequest.onerror = () => reject(
+          journalRequest.error ?? new Error("reading durability revision failed"),
+        );
+        journalRequest.onsuccess = () => {
+          try {
+            const actualRevision = durabilityRevision(journalRequest.result?.revision ?? "0");
+            if (actualRevision !== expectedRevision) {
+              resolve({ status: "conflict", actualRevision });
+              return;
+            }
+            if (actualRevision === MAX_REVISION) {
+              resolve({
+                status: "not_committed",
+                message: "IndexedDB durability revision overflow",
+              });
+              return;
+            }
+            const revision = durabilityRevision(BigInt(actualRevision) + 1n);
+            journals.put({ journalId, revision });
+            batches.add({ journalId, revision, payload });
+            resolve({ status: "appended", revision });
+          } catch (error) {
+            try { transaction.abort(); } catch {}
+            reject(error);
+          }
+        };
       } catch (error) {
         try { transaction.abort(); } catch {}
         reject(error);
@@ -128,6 +238,9 @@ function openDatabase(indexedDb, databaseName, invalidate) {
     const request = indexedDb.open(databaseName, DATABASE_VERSION);
     request.onupgradeneeded = () => {
       const database = request.result;
+      if (!database.objectStoreNames.contains(OWNERS_STORE)) {
+        database.createObjectStore(OWNERS_STORE, { keyPath: "journalId" });
+      }
       if (!database.objectStoreNames.contains(JOURNALS_STORE)) {
         database.createObjectStore(JOURNALS_STORE, { keyPath: "journalId" });
       }
@@ -159,6 +272,7 @@ function openDatabase(indexedDb, databaseName, invalidate) {
         invalidate();
         database.close();
       };
+      database.onclose = () => invalidate();
       resolve(database);
     };
   });
@@ -194,6 +308,13 @@ function validatePayload(payload) {
     throw new TypeError("durability batch payload must be a string");
   }
   return payload;
+}
+
+function validateOwnerId(ownerId) {
+  if (typeof ownerId !== "string" || !ownerId.trim()) {
+    throw new TypeError("durability owner ID must be a non-empty string");
+  }
+  return ownerId;
 }
 
 function compareRevisions(left, right) {

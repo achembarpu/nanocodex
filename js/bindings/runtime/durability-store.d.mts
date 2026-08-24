@@ -1,6 +1,9 @@
 export type {
+  DurabilityAcquiredJournal,
+  DurabilityAcquireRequest,
   DurabilityAppendRequest,
   DurabilityAppendResult,
+  DurabilityFence,
   DurabilityRevision,
   DurabilitySqliteQuery,
   DurabilitySqliteRow,
@@ -16,7 +19,8 @@ export type {
 export declare const sqliteDurabilitySchema: readonly string[];
 
 export declare function durabilityRevision(
-  value: string | bigint,
+  /** Numbers must be nonnegative safe integers; use exact decimal text for larger values. */
+  value: string | bigint | number,
 ): import("../types.mjs").DurabilityRevision;
 
 export declare function createMemoryDurabilityStore(

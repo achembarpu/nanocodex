@@ -19,9 +19,15 @@ struct ShutdownState {
 #[derive(Clone, Default)]
 pub(in crate::agent) struct DriverShutdown {
     state: Arc<std::sync::Mutex<ShutdownState>>,
+    execution_policy_owned: Arc<std::sync::atomic::AtomicBool>,
 }
 
 impl DriverShutdown {
+    pub(in crate::agent) fn set_execution_policy_owned(&self, owned: bool) {
+        self.execution_policy_owned
+            .store(owned, std::sync::atomic::Ordering::Release);
+    }
+
     pub(in crate::agent) fn request(&self) -> (bool, oneshot::Receiver<SharedShutdownResult>) {
         let (result, receiver) = oneshot::channel();
         let mut state = match self.state.lock() {
@@ -45,14 +51,6 @@ impl DriverShutdown {
         }
     }
 
-    pub(in crate::agent) fn requested(&self) -> bool {
-        let state = match self.state.lock() {
-            Ok(state) => state,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        !matches!(state.phase, ShutdownPhase::Running)
-    }
-
     pub(in crate::agent) fn complete(&self, outcome: Result<()>) {
         let outcome = outcome.map_err(Arc::new);
         let waiters = {
@@ -67,9 +65,67 @@ impl DriverShutdown {
             drop(waiter.send(outcome.clone()));
         }
     }
+
+    pub(in crate::agent) async fn stopped_error(&self) -> NanocodexError {
+        let receiver = {
+            let (result, receiver) = oneshot::channel();
+            let mut state = match self.state.lock() {
+                Ok(state) => state,
+                Err(poisoned) => poisoned.into_inner(),
+            };
+            match &state.phase {
+                ShutdownPhase::Complete(outcome) => {
+                    drop(result.send(outcome.clone()));
+                }
+                ShutdownPhase::Running | ShutdownPhase::Requested => {
+                    state.waiters.push(result);
+                }
+            }
+            receiver
+        };
+        let error = match receiver.await {
+            Ok(Err(error))
+                if matches!(
+                    error.execution_policy_disposition(),
+                    Some(crate::ExecutionPolicyDisposition::Reopen)
+                ) =>
+            {
+                NanocodexError::Shutdown(error)
+            }
+            Ok(Ok(()) | Err(_)) | Err(_) => NanocodexError::AgentStopped,
+        };
+        if matches!(error, NanocodexError::AgentStopped)
+            && self
+                .execution_policy_owned
+                .load(std::sync::atomic::Ordering::Acquire)
+        {
+            NanocodexError::ExecutionPolicyOwnerStopped
+        } else {
+            error
+        }
+    }
 }
 
-pub(super) fn cancel_queued_turn(queued_turns: &mut VecDeque<QueuedTurn>, target: TurnKey) -> bool {
+pub(super) fn queued_execution_operation(
+    queued_turns: &VecDeque<QueuedTurn>,
+    target: TurnKey,
+) -> Option<(Option<String>, Prompt)> {
+    queued_turns.iter().find_map(|queued| match queued {
+        QueuedTurn::Pending {
+            key,
+            execution_operation,
+            prompt,
+            ..
+        } if *key == target => Some((execution_operation.clone(), prompt.clone())),
+        _ => None,
+    })
+}
+
+pub(super) fn cancel_queued_turn(
+    queued_turns: &mut VecDeque<QueuedTurn>,
+    target: TurnKey,
+    cancellation_committed: bool,
+) -> bool {
     let Some(position) = queued_turns
         .iter()
         .position(|queued| matches!(queued, QueuedTurn::Pending { key, .. } if *key == target))
@@ -97,6 +153,7 @@ pub(super) fn cancel_queued_turn(queued_turns: &mut VecDeque<QueuedTurn>, target
         QueuedTurn::Cancelled {
             prompt,
             execution_operation,
+            cancellation_committed,
             thinking,
             fast_mode,
             parent,
@@ -122,6 +179,7 @@ pub(super) fn mark_all_queued_turns_cancelled(queued_turns: &mut VecDeque<Queued
         } => QueuedTurn::Cancelled {
             prompt,
             execution_operation,
+            cancellation_committed: false,
             thinking,
             fast_mode,
             parent,
@@ -279,5 +337,28 @@ pub(super) fn handle_idle_command<S>(
             )));
         }
         Command::Prompt { .. } => {}
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn stopped_error_distinguishes_ordinary_and_policy_owned_agents() {
+        let ordinary = DriverShutdown::default();
+        ordinary.complete(Ok(()));
+        assert!(matches!(
+            ordinary.stopped_error().await,
+            NanocodexError::AgentStopped
+        ));
+
+        let policy_owned = DriverShutdown::default();
+        policy_owned.set_execution_policy_owned(true);
+        policy_owned.complete(Ok(()));
+        assert!(matches!(
+            policy_owned.stopped_error().await,
+            NanocodexError::ExecutionPolicyOwnerStopped
+        ));
     }
 }

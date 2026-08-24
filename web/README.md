@@ -11,7 +11,7 @@ The public demo family is explicit in the shared navigation:
 - **Home** explains the library and links the independent proofs.
 - **Agent** is one player using the browser-owned Rust/WASM agent in the TUI.
 - **Multiplayer** is many humans in one ordered, replayable Durable Object room
-  with one private, member-invoked, tool-free managed agent.
+  with one private, member-invoked, connector-free managed agent.
 - **World** is one human in a game world populated by many browser-owned AI
   residents.
 
@@ -95,6 +95,22 @@ non-secret runtime settings. The legacy credential-bearing development proxy
 is not part of managed localhost.
 Vite env loading is disabled, and website `.dev.vars*` files are rejected; keep
 local development settings in the one root `.env` instead.
+
+Local account connectors read their OAuth application credentials from the
+same root `.env` using the production deployment names. The launcher projects
+them only into the private auxiliary egress Worker:
+
+```text
+NANOCODEX_GITHUB_OAUTH_CLIENT_ID=...
+NANOCODEX_GITHUB_OAUTH_CLIENT_SECRET=...
+NANOCODEX_GOOGLE_OAUTH_CLIENT_ID=...
+NANOCODEX_GOOGLE_OAUTH_CLIENT_SECRET=...
+```
+
+Register the three `http://localhost:5173/v1/connectors/{github,gmail,gdrive}/callback`
+URIs described in `services/egress/README.md`. Connector controls remain visible
+but disabled for browser-only guest sessions; a persistent passkey account is
+required even when that guest session already has a ChatGPT connection.
 
 When `OPENAI_API_KEY` is configured, `npm run dev` uses it without inspecting
 another credential. Otherwise it automatically discovers an existing, valid `0600`

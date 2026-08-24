@@ -4,10 +4,17 @@ import {
   UserCredentialBroker,
   type UserCredentialSnapshot,
 } from "./broker";
+import {
+  UserConnectorBroker,
+  type ConnectorBrokerEnv,
+} from "./connector-broker";
+import { canonicalConnectorPath } from "./connector-path";
 
 export { AgentSubjectDirectory, UserCredentialBroker } from "./broker";
+export { UserConnectorBroker } from "./connector-broker";
 
-const SUBJECT_DIRECTORY_NAME = "agent-subjects-v1";
+const LEGACY_SUBJECT_DIRECTORY_NAME = "agent-subjects-v1";
+const READINESS_SUBJECT_DIRECTORY_NAME = "agent-subject-readiness-v1";
 const SUBJECT = /^[A-Za-z0-9_-]{43,128}$/;
 const USER_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
 const SUBJECT_HEADER = "x-nanocodex-subject";
@@ -18,9 +25,35 @@ const MAX_CONTROL_BODY_BYTES = 16 * 1024;
 const MAX_BROKER_RESPONSE_BYTES = 4 * 1024;
 const MAX_MODEL_BODY_BYTES = 32 * 1024 * 1024;
 const REDIRECT_STATUS = new Set([301, 302, 303, 307, 308]);
+const CONNECTOR_METHODS = new Set(["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]);
 
-export interface EgressEnv extends BrokerEnv {
+type ConnectorOperation = Readonly<{
+  id: "github" | "gmail" | "gdrive";
+  origin: `https://${string}`;
+  paths: readonly RegExp[];
+}>;
+
+const CONNECTOR_OPERATIONS: readonly ConnectorOperation[] = [
+  {
+    id: "github",
+    origin: "https://api.github.com",
+    paths: [/^\//],
+  },
+  {
+    id: "gmail",
+    origin: "https://gmail.googleapis.com",
+    paths: [/^\/gmail\/v1\/users\/me(?:\/|$)/],
+  },
+  {
+    id: "gdrive",
+    origin: "https://www.googleapis.com",
+    paths: [/^\/drive\/v3(?:\/|$)/, /^\/upload\/drive\/v3(?:\/|$)/],
+  },
+];
+
+export interface EgressEnv extends BrokerEnv, ConnectorBrokerEnv {
   USER_CREDENTIALS: DurableObjectNamespace<UserCredentialBroker>;
+  USER_CONNECTORS: DurableObjectNamespace<UserConnectorBroker>;
   AGENT_SUBJECTS: DurableObjectNamespace<AgentSubjectDirectory>;
   CHATGPT_EGRESS?: DurableObjectNamespace;
   CODEX_RELAY_URL?: string;
@@ -88,7 +121,11 @@ export async function handleEgress(
   const started = Date.now();
   let url: URL;
   try { url = new URL(request.url); } catch { return jsonError(400, "invalid_url"); }
-  if (url.username || url.password || url.search || url.hash) return jsonError(403, "destination_denied");
+  if (url.username || url.password || url.hash) return jsonError(403, "destination_denied");
+
+  const connector = connectorOperation(url);
+  if (connector) return handleConnectorEgress(request, url, connector, env, started);
+  if (url.search) return jsonError(403, "destination_denied");
 
   if (url.pathname.startsWith("/subjects/") || url.pathname.startsWith("/users/")) {
     return handleControl(request, url, env);
@@ -135,7 +172,7 @@ export async function handleEgress(
     );
     let recovered = false;
     if (upstream.status === 401 && credential.kind === "chatgpt") {
-      await upstream.body?.cancel();
+      await cancelResponseBody(upstream);
       credential = await resolveCredential(env, userId, true, credential.revision);
       upstream = await fetchUpstream(
         env,
@@ -147,12 +184,12 @@ export async function handleEgress(
       recovered = true;
     }
     if (REDIRECT_STATUS.has(upstream.status)) {
-      await upstream.body?.cancel();
+      await cancelResponseBody(upstream);
       return auditedError(502, "upstream_redirect_blocked", request, url, operation.id, started);
     }
     if (upstream.status >= 400) {
       const status = upstream.status;
-      await upstream.body?.cancel();
+      await cancelResponseBody(upstream);
       return auditedError(status === 429 ? 503 : 502, "upstream_rejected", request, url, operation.id, started);
     }
     audit("allow", request, url, operation.id, started, { status: upstream.status, recovered });
@@ -166,6 +203,42 @@ export async function handleEgress(
     }
     return auditedError(problem.status, problem.code, request, url, operation.id, started);
   }
+}
+
+async function handleConnectorEgress(
+  request: Request,
+  url: URL,
+  connector: ConnectorOperation,
+  env: EgressEnv,
+  started: number,
+): Promise<Response> {
+  if (!CONNECTOR_METHODS.has(request.method)) {
+    return auditedError(403, "method_denied", request, url, connector.id, started);
+  }
+  const subject = request.headers.get(SUBJECT_HEADER);
+  if (!subject || !SUBJECT.test(subject)) {
+    return auditedError(403, "agent_subject_required", request, url, connector.id, started);
+  }
+  if (request.headers.get("authorization") !== PROVIDER_PLACEHOLDER) {
+    return auditedError(403, "credential_placeholder_mismatch", request, url, connector.id, started);
+  }
+  try {
+    const userId = await resolveSubject(env, subject);
+    const response = await connectorBroker(env, userId).fetch(request);
+    audit(response.status >= 500 ? "error" : response.status >= 400 ? "deny" : "allow",
+      request, url, connector.id, started, { status: response.status });
+    return sanitizeUpstreamResponse(response);
+  } catch (error) {
+    const problem = egressFailure(error);
+    return auditedError(problem.status, problem.code, request, url, connector.id, started);
+  }
+}
+
+function connectorOperation(url: URL): ConnectorOperation | undefined {
+  if (url.href.length > 8_192) return undefined;
+  return CONNECTOR_OPERATIONS.find((candidate) => candidate.origin === url.origin
+    && canonicalConnectorPath(candidate.id, url.pathname)
+    && candidate.paths.some((path) => path.test(url.pathname)));
 }
 
 function sanitizeUpstreamResponse(upstream: Response): Response {
@@ -197,10 +270,34 @@ async function handleControl(request: Request, url: URL, env: EgressEnv): Promis
     const body = await readJson(request, MAX_CONTROL_BODY_BYTES);
     const userId = stringField(body, "user_id");
     if (!USER_ID.test(userId ?? "")) return jsonError(400, "invalid_request");
-    return directory(env).fetch(`https://subjects.internal/v1/${request.method === "PUT" ? "bind" : "unbind"}`, {
+    return legacyDirectory(env).fetch(`https://subjects.internal/v1/${request.method === "PUT" ? "sharded-bind" : "sharded-unbind"}`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ subject: subjectMatch[1], user_id: userId }),
+    });
+  }
+
+  const connectorMatch = url.pathname.match(
+    /^\/users\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/connectors(?:\/(github|gmail|gdrive)(\/callback)?)?$/,
+  );
+  if (connectorMatch) {
+    const userId = connectorMatch[1]!;
+    const connector = connectorMatch[2];
+    const callback = connectorMatch[3] === "/callback";
+    const target = connector
+      ? `https://connectors.internal/v1/${connector}${callback ? "/callback" : request.method === "POST" ? "/start" : ""}`
+      : "https://connectors.internal/v1/status";
+    if ((!connector && request.method !== "GET")
+      || (connector && callback && request.method !== "POST")
+      || (connector && !callback && request.method !== "POST" && request.method !== "DELETE")) {
+      return jsonError(405, "method_not_allowed");
+    }
+    return connectorBroker(env, userId).fetch(target, {
+      method: request.method,
+      ...(request.body === null ? {} : {
+        headers: { "content-type": request.headers.get("content-type") ?? "" },
+        body: request.body,
+      }),
     });
   }
 
@@ -261,15 +358,25 @@ async function handleReadiness(request: Request, env: EgressEnv): Promise<Respon
     return jsonError(404, "not_found");
   }
   try {
-    const [subjects, credentials] = await Promise.all([
-      directory(env).fetch("https://subjects.internal/v1/health"),
+    const [legacySubjects, shardedSubjects, credentials] = await Promise.all([
+      legacyDirectory(env).fetch("https://subjects.internal/v1/health"),
+      env.AGENT_SUBJECTS.getByName(READINESS_SUBJECT_DIRECTORY_NAME)
+        .fetch("https://subjects.internal/v1/health"),
       userBroker(env, "broker-readiness-v1").fetch("https://credentials.internal/v1/health"),
     ]);
-    if (!subjects.ok || !credentials.ok) {
-      await Promise.all([subjects.body?.cancel(), credentials.body?.cancel()]);
+    if (!legacySubjects.ok || !shardedSubjects.ok || !credentials.ok) {
+      await Promise.all([
+        cancelResponseBody(legacySubjects),
+        cancelResponseBody(shardedSubjects),
+        cancelResponseBody(credentials),
+      ]);
       return jsonError(503, "broker_not_ready");
     }
-    await Promise.all([subjects.body?.cancel(), credentials.body?.cancel()]);
+    await Promise.all([
+      cancelResponseBody(legacySubjects),
+      cancelResponseBody(shardedSubjects),
+      cancelResponseBody(credentials),
+    ]);
     return json({ ready: true }, 200);
   } catch { return jsonError(503, "broker_not_ready"); }
 }
@@ -368,7 +475,7 @@ async function fetchUpstream(
 }
 
 async function resolveSubject(env: EgressEnv, subject: string): Promise<string> {
-  const response = await directory(env).fetch("https://subjects.internal/v1/resolve", {
+  const response = await legacyDirectory(env).fetch("https://subjects.internal/v1/authoritative-resolve", {
     method: "POST",
     headers: { "content-type": "application/json" },
     body: JSON.stringify({ subject }),
@@ -377,6 +484,10 @@ async function resolveSubject(env: EgressEnv, subject: string): Promise<string> 
     await readBoundedText(response, MAX_BROKER_RESPONSE_BYTES);
     throw new EgressFailure(response.status === 404 ? 403 : 503, "agent_subject_unavailable");
   }
+  return subjectUser(response);
+}
+
+async function subjectUser(response: Response): Promise<string> {
   const value = await response.json<Record<string, unknown>>();
   const userId = stringField(value, "user_id");
   if (!USER_ID.test(userId ?? "")) throw new EgressFailure(503, "invalid_subject_response");
@@ -438,11 +549,17 @@ async function replayableBody(request: Request, operation: ModelOperation): Prom
   return body;
 }
 
-function directory(env: EgressEnv): DurableObjectStub<AgentSubjectDirectory> {
-  return env.AGENT_SUBJECTS.getByName(SUBJECT_DIRECTORY_NAME);
+function legacyDirectory(env: EgressEnv): DurableObjectStub<AgentSubjectDirectory> {
+  return env.AGENT_SUBJECTS.getByName(LEGACY_SUBJECT_DIRECTORY_NAME);
 }
 function userBroker(env: EgressEnv, userId: string): DurableObjectStub<UserCredentialBroker> {
   return env.USER_CREDENTIALS.getByName(userId);
+}
+function connectorBroker(env: EgressEnv, userId: string): DurableObjectStub<UserConnectorBroker> {
+  return env.USER_CONNECTORS.getByName(userId);
+}
+async function cancelResponseBody(response: Response): Promise<void> {
+  try { await response.body?.cancel(); } catch { /* Response disposal is best-effort. */ }
 }
 function localClaimEnabled(env: EgressEnv): boolean {
   const environment = env.ENVIRONMENT?.trim().toLowerCase();
@@ -508,13 +625,14 @@ function audit(
   started: number,
   detail: Record<string, unknown>,
 ): void {
+  const connector = rule === "github" || rule === "gmail" || rule === "gdrive";
   console.log(JSON.stringify({
     type: "egress.request",
     action,
     rule,
     method: request.method,
     host: url.host,
-    path: url.pathname,
+    path: connector ? "/provider-api" : url.pathname,
     duration_ms: Date.now() - started,
     ...detail,
   }));

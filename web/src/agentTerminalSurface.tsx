@@ -69,6 +69,9 @@ export function XtermSurface({
     instance.current = terminal;
     const terminalHost = bufferedXtermAdapter(terminal);
     configureXtermTextarea(terminal, touchInput);
+    const releaseTouchScroll = touchInput
+      ? bindTouchTerminalScroll(element.current, terminal)
+      : () => {};
     let resizeFrame = 0;
     const observer = new ResizeObserver(() => {
       window.cancelAnimationFrame(resizeFrame);
@@ -88,6 +91,7 @@ export function XtermSurface({
       window.cancelAnimationFrame(resizeFrame);
       observer.disconnect();
       latest.current.onReady(undefined);
+      releaseTouchScroll();
       terminalHost.dispose();
       terminal.dispose();
       fitAddon.current = undefined;
@@ -228,6 +232,13 @@ export function TouchTerminalComposer({
   onSubmit(value: string, intent: "queue" | "steer"): void;
 }) {
   const composing = useRef(false);
+  const textarea = useRef<HTMLTextAreaElement>(null);
+  useLayoutEffect(() => {
+    const element = textarea.current;
+    if (!element) return;
+    element.style.height = "0";
+    element.style.height = `${Math.min(Math.max(element.scrollHeight, 44), 88)}px`;
+  }, [draft]);
   const submit = () => {
     if (pending || !draft.trim()) return;
     onSubmit(draft, running ? "steer" : "queue");
@@ -243,6 +254,7 @@ export function TouchTerminalComposer({
     >
       <span className="agent-touch-rail" aria-hidden="true">│</span>
       <textarea
+        ref={textarea}
         aria-label="Message Nanocodex"
         enterKeyHint="send"
         placeholder="Message Nanocodex"
@@ -264,7 +276,7 @@ export function TouchTerminalComposer({
           <button type="submit" disabled={pending || !draft.trim()}>Send</button>
         )}
       </div>
-      <small>enter send · shift+enter newline</small>
+      <small>Enter sends · Shift+Enter adds a line</small>
     </form>
   );
 }
@@ -289,6 +301,61 @@ function configureXtermTextarea(terminal: XtermInstance, touchInput: boolean) {
   textarea.tabIndex = touchInput ? -1 : 0;
   textarea.removeAttribute("aria-hidden");
   if (touchInput && textarea === window.document.activeElement) textarea.blur();
+}
+
+function bindTouchTerminalScroll(host: HTMLElement, terminal: XtermInstance): () => void {
+  let gesture: { identifier: number; lastY: number; remainder: number } | undefined;
+
+  const rowHeight = () => Math.max(
+    1,
+    host.querySelector<HTMLElement>(".xterm-rows > div")?.getBoundingClientRect().height
+      ?? (terminal.options.fontSize ?? 14) * (terminal.options.lineHeight ?? 1),
+  );
+  const touchForGesture = (touches: TouchList) => {
+    if (!gesture) return undefined;
+    return Array.from(touches).find(({ identifier }) => identifier === gesture?.identifier);
+  };
+  const start = (event: TouchEvent) => {
+    if (event.touches.length !== 1) {
+      gesture = undefined;
+      return;
+    }
+    const touch = event.touches.item(0);
+    if (!touch) return;
+    gesture = { identifier: touch.identifier, lastY: touch.clientY, remainder: 0 };
+  };
+  const move = (event: TouchEvent) => {
+    const touch = touchForGesture(event.touches);
+    if (!touch || !gesture) return;
+    gesture.remainder += gesture.lastY - touch.clientY;
+    gesture.lastY = touch.clientY;
+    const lineHeight = rowHeight();
+    const lines = Math.trunc(gesture.remainder / lineHeight);
+    if (lines !== 0) {
+      terminal.scrollLines(lines);
+      gesture.remainder -= lines * lineHeight;
+    }
+    event.preventDefault();
+  };
+  const end = (event: TouchEvent) => {
+    if (!gesture) return;
+    if (!Array.from(event.changedTouches).some(({ identifier }) => identifier === gesture?.identifier)) {
+      return;
+    }
+    gesture = undefined;
+  };
+
+  host.addEventListener("touchstart", start, { passive: true });
+  host.addEventListener("touchmove", move, { passive: false });
+  host.addEventListener("touchend", end, { passive: true });
+  host.addEventListener("touchcancel", end, { passive: true });
+  return () => {
+    gesture = undefined;
+    host.removeEventListener("touchstart", start);
+    host.removeEventListener("touchmove", move);
+    host.removeEventListener("touchend", end);
+    host.removeEventListener("touchcancel", end);
+  };
 }
 
 function writeInactiveFrame(terminal: XtermInstance, message: string) {

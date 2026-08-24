@@ -5,7 +5,9 @@ import {
   freezeJson,
   getEncodedTurnSnapshot,
   getEncodedTurnUsage,
+  releaseAgentSession,
   reportError,
+  reserveAgentSession,
 } from "../internal.mjs";
 import { resolveResponsesTransport } from "../runtime/responses-transport.mjs";
 import { utf8ByteLength } from "../runtime/utf8.mjs";
@@ -30,24 +32,41 @@ let prewarmedWorker;
 export async function createWorkerAgent(options = {}, workerOptions = {}) {
   workerOptions.signal?.throwIfAborted();
   const config = serializeConfig(options);
-  const claimed = claimWorker(config.harness, config.module, workerOptions);
-  const worker = claimed instanceof Promise ? await claimed : claimed;
+  const reservation = config.sessionId === undefined
+    ? undefined
+    : reserveAgentSession(config.sessionId);
+  let worker;
+  try {
+    const claimed = claimWorker(config.harness, config.module, workerOptions);
+    worker = claimed instanceof Promise ? await claimed : claimed;
+  } catch (error) {
+    releaseAgentSession(reservation);
+    throw error;
+  }
   let connection;
   try {
     connection = new WorkerConnection(worker, workerOptions);
   } catch (error) {
-    disposeWorker(worker);
-    throw error;
+    const errors = [error];
+    try {
+      disposeWorker(worker);
+    } catch (cleanupError) {
+      appendErrors(errors, cleanupError);
+    } finally {
+      releaseAgentSession(reservation);
+    }
+    throwErrors(errors, "Worker Agent connection construction and cleanup both failed");
   }
   const stopAbort = listenForAbort(workerOptions.signal, (error) => connection.fail(error));
   try {
     const root = await connection.boot(config);
     workerOptions.signal?.throwIfAborted();
     stopAbort();
-    return createAgentClient(connection.runtime(), root);
+    return await connection.createClient(root, reservation);
   } catch (error) {
     stopAbort();
     connection.fail(error);
+    releaseAgentSession(reservation);
     throw error;
   }
 }
@@ -80,18 +99,21 @@ export function prepareWorkerAgent(options = {}, workerOptions = {}) {
     cancel = (error) => {
       if (disposed) return;
       disposed = true;
-      clearPreparationAborts();
-      clearTimeout(expiryTimer);
-      clearTimeout(startupTimer);
-      if (prewarmedWorker?.worker === worker) prewarmedWorker = undefined;
-      worker.onmessage = null;
-      worker.onerror = null;
-      worker.onmessageerror = null;
-      worker.terminate?.();
       if (!settled) {
         settled = true;
         reject(error);
       }
+      const cleanupErrors = [];
+      try { clearPreparationAborts(); } catch (cleanupError) { appendErrors(cleanupErrors, cleanupError); }
+      try { clearTimeout(expiryTimer); } catch (cleanupError) { appendErrors(cleanupErrors, cleanupError); }
+      try { clearTimeout(startupTimer); } catch (cleanupError) { appendErrors(cleanupErrors, cleanupError); }
+      try {
+        if (prewarmedWorker?.worker === worker) prewarmedWorker = undefined;
+      } catch (cleanupError) {
+        appendErrors(cleanupErrors, cleanupError);
+      }
+      try { disposeWorker(worker); } catch (cleanupError) { appendErrors(cleanupErrors, cleanupError); }
+      for (const cleanupError of cleanupErrors) reportError(cleanupError);
     };
     worker.onmessage = ({ data }) => {
       if (data?.protocol !== PROTOCOL || data.channel !== channel) return;
@@ -585,6 +607,10 @@ class WorkerConnection {
     this.nextHeartbeat = 1;
     this.pending = new Map();
     this.listeners = new Set();
+    this.clients = new Set();
+    this.clientByRaw = new Map();
+    this.constructingAgents = new Set();
+    this.rawAgents = new Set();
     this.chunkedEvent = undefined;
     this.agents = 0;
     this.turns = 0;
@@ -594,6 +620,7 @@ class WorkerConnection {
     this.heartbeatSequence = undefined;
     this.heartbeatTimer = undefined;
     this.closed = false;
+    this.closeError = undefined;
     worker.onmessage = ({ data }) => this.receive(data);
     worker.onerror = (event) => this.fail(new Error(event?.message || "Nanocodex Agent Worker failed"));
     worker.onmessageerror = () => this.fail(new Error("Nanocodex Agent Worker returned an unreadable message"));
@@ -613,17 +640,53 @@ class WorkerConnection {
       name: "Nanocodex Browser Worker WASM",
       type: "browser",
       create: (descriptor) => this.rawAgent(descriptor),
+      adopt: () => this.assertOpen(),
       subscribe: (listener) => this.subscribe(listener),
+      release: (raw) => {
+        const client = this.clientByRaw.get(raw);
+        if (client !== undefined) this.clients.delete(client);
+        this.clientByRaw.delete(raw);
+      },
       dispose: (raw) => {
         if (!raw.released) {
           raw.released = true;
-          this.sendBestEffort("agent.dispose", [raw.agentId]);
+          this.rawAgents.delete(raw);
+          if (!this.constructingAgents.has(raw.agentId)) {
+            this.sendBestEffort("agent.dispose", [raw.agentId]);
+          }
           this.agents -= 1;
         }
         this.closeIfIdle();
       },
-      decorate: (agent) => agent.extend(agentActions()),
+      decorate: (agent, raw) => {
+        const decorated = agent.extend(agentActions());
+        this.clients.add(decorated);
+        this.clientByRaw.set(raw, decorated);
+        return decorated;
+      },
     });
+  }
+
+  async createClient(root, reservation) {
+    const agentId = root?.agentId;
+    this.constructingAgents.add(agentId);
+    try {
+      return await createAgentClient(this.runtime(), root, reservation);
+    } catch (error) {
+      if (this.closed) throw error;
+      try {
+        await this.rpc("agent.dispose", [agentId]);
+      } catch (rollbackError) {
+        throw new AggregateError(
+          [error, rollbackError],
+          "Worker Agent client construction and boot rollback both failed",
+        );
+      }
+      throw error;
+    } finally {
+      this.constructingAgents.delete(agentId);
+      this.closeIfIdle();
+    }
   }
 
   rawAgent(descriptor) {
@@ -631,7 +694,7 @@ class WorkerConnection {
     this.agents += 1;
     const connection = this;
     const { agentId } = descriptor;
-    return {
+    const raw = {
       agentId,
       sessionId: descriptor.sessionId,
       released: false,
@@ -657,6 +720,8 @@ class WorkerConnection {
       shutdown: () => connection.rpc("agent.shutdown", [agentId]),
       free() {},
     };
+    this.rawAgents.add(raw);
+    return raw;
   }
 
   prompt(agentId, options) {
@@ -737,7 +802,13 @@ class WorkerConnection {
   }
 
   closeIfIdle() {
-    if (this.agents === 0 && this.turns === 0 && this.results === 0 && this.operations === 0) {
+    if (
+      this.constructingAgents.size === 0
+      && this.agents === 0
+      && this.turns === 0
+      && this.results === 0
+      && this.operations === 0
+    ) {
       this.close(new Error("the Nanocodex Agent Worker has been disposed"));
     }
   }
@@ -944,7 +1015,9 @@ class WorkerConnection {
   }
 
   assertOpen() {
-    if (this.closed) throw new Error("the Nanocodex Agent Worker has been disposed");
+    if (this.closed) {
+      throw this.closeError ?? new Error("the Nanocodex Agent Worker has been disposed");
+    }
   }
 
   fail(error) {
@@ -960,16 +1033,22 @@ class WorkerConnection {
   close(error) {
     if (this.closed) return;
     this.closed = true;
+    this.closeError = error;
     clearTimeout(this.heartbeatTimer);
     this.heartbeatTimer = undefined;
     this.heartbeatSequence = undefined;
     const worker = this.worker;
+    for (const raw of this.rawAgents) raw.released = true;
+    this.rawAgents.clear();
+    this.agents = 0;
     try {
-      worker.onmessage = null;
-      worker.onerror = null;
-      worker.onmessageerror = null;
-      worker.terminate?.();
+      disposeWorker(worker);
     } finally {
+      for (const client of [...this.clients]) {
+        try { client.dispose(); } catch (failure) { reportError(failure); }
+      }
+      this.clients.clear();
+      this.clientByRaw.clear();
       for (const pending of this.pending.values()) pending.reject(error);
       this.pending.clear();
       this.listeners.clear();
@@ -1036,10 +1115,22 @@ function claimWorker(harness, module, options) {
 }
 
 function disposeWorker(worker) {
-  worker.onmessage = null;
-  worker.onerror = null;
-  worker.onmessageerror = null;
-  worker.terminate?.();
+  const errors = [];
+  for (const property of ["onmessage", "onerror", "onmessageerror"]) {
+    try { worker[property] = null; } catch (error) { errors.push(error); }
+  }
+  try { worker.terminate?.(); } catch (error) { errors.push(error); }
+  throwErrors(errors, "Nanocodex Agent Worker cleanup failed");
+}
+
+function appendErrors(errors, error) {
+  if (error instanceof AggregateError) errors.push(...error.errors);
+  else errors.push(error);
+}
+
+function throwErrors(errors, message) {
+  if (errors.length === 1) throw errors[0];
+  if (errors.length > 1) throw new AggregateError(errors, message);
 }
 
 function abortable(promise, signal, abort) {
@@ -1168,6 +1259,10 @@ async function hydrateConfig(config, createDurabilityStore) {
     options.durabilityId = workerDurabilityId;
   }
   if (runtime) {
+    const { createWorkerEvaluator } = await import("../runtime/worker-evaluator.mjs");
+    options.codeEvaluator = createWorkerEvaluator({
+      egress: { origin: harness.origin, threadId: harness.threadId },
+    });
     const now = new Date();
     const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
     Object.assign(options, {

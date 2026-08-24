@@ -5,6 +5,10 @@ Nanocodex agents. Rust owns the journal format, optimistic revision protocol,
 state reduction, deduplication, checkpoint selection, and recovery decisions.
 Hosts provide only atomic journal loading and compare-and-append.
 
+See [the end-to-end durability model and correctness review](../../docs/DURABILITY.md)
+for the Rust state machine, Agent/WASM/application consumption, crash matrix,
+and current implementation gaps.
+
 This crate is an optional layer over `nanocodex-agent`: durability depends on
 the agent, never the reverse. It implements the agent's neutral execution
 policy seam at prompt admission, model calls, tool calls, and committed
@@ -103,9 +107,14 @@ Enable `postgres` and pass a driven `tokio_postgres::Client` to
 
 The host contract has only two operations:
 
-- `load(journal_id)` returns ordered opaque batches plus the current revision.
-- `append(journal_id, expected_revision, payload)` atomically compares the
-  revision and appends the opaque payload.
+- `acquire_owner(journal_id, owner_id)` atomically advances the persisted owner
+  fence and returns that token with one coherent journal snapshot.
+- `append(journal_id, owner_token, expected_revision, payload)` checks owner
+  authority before revision and atomically appends the opaque payload.
 
 Hosts do not deserialize entries, snapshots, model outputs, or tool results.
 Rust owns those types and all recovery decisions.
+
+Only a definite `NotCommitted` append may be retried on the same owner.
+`Fenced`, revision `Conflict`, and unknown `Backend` outcomes require a fresh
+owner acquisition and complete journal reduction before deciding what ran.

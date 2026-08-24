@@ -5,6 +5,7 @@ import { AgentTerminal, ManagedAgentTerminal } from "./AgentTerminal";
 import { useAccountSession } from "./AccountSession";
 import { ConversationHistoryRail, type ConversationSummary } from "./ConversationHistoryRail";
 import { browserAgentCapabilityError } from "./browserAgentCapabilities";
+import { clientFailureMessage } from "./clientFailure";
 import {
   AgentSessionBar,
   inactiveTerminalMessage,
@@ -51,6 +52,7 @@ export const AgentExperience = memo(function AgentExperience({
   const [managedConversations, setManagedConversations] = useState<readonly ManagedConversation[]>([]);
   const [managedConversationId, setManagedConversationId] = useState<string>();
   const [managedError, setManagedError] = useState<string>();
+  const [managedAttempt, setManagedAttempt] = useState(0);
   const [conversationPending, setConversationPending] = useState(false);
   const hasCredential = credentialSource === "brokered";
 
@@ -64,13 +66,14 @@ export const AgentExperience = memo(function AgentExperience({
     if (runtime !== "managed" || account.status !== "ready" || !account.account) return;
     let cancelled = false;
     const accountId = account.account.id;
+    const retainedId = safeGet(managedSelectionKey(accountId)) ?? undefined;
+    setManagedConversationId(retainedId);
     setConversationPending(true);
     setManagedError(undefined);
     void listManagedConversations(accountId).then(async (listed) => {
       if (cancelled) return;
       const next = listed.length || !hasCredential ? listed : [await createManagedConversation(accountId)];
       if (cancelled) return;
-      const retainedId = safeGet(managedSelectionKey(accountId));
       const selected = next.find(({ id }) => id === retainedId)?.id ?? next[0]?.id;
       setManagedConversations(next);
       setManagedConversationId(selected);
@@ -81,7 +84,7 @@ export const AgentExperience = memo(function AgentExperience({
       if (!cancelled) setConversationPending(false);
     });
     return () => { cancelled = true; };
-  }, [account.account?.id, account.status, hasCredential, runtime]);
+  }, [account.account?.id, account.status, hasCredential, managedAttempt, runtime]);
 
   const changeCredentialSource = useCallback((source: CredentialSource) => {
     if (credentialSourceRef.current === "brokered" && source !== "brokered") setRuntimeState(undefined);
@@ -132,6 +135,10 @@ export const AgentExperience = memo(function AgentExperience({
     }).catch((error) => setManagedError(errorMessage(error)))
       .finally(() => setConversationPending(false));
   }, [account.account, conversationPending, localConversations, onThreadChange, runtime]);
+  const retryManagedConversations = useCallback(() => {
+    setManagedError(undefined);
+    setManagedAttempt((value) => value + 1);
+  }, []);
   const recordActivity = useCallback((input: string) => {
     if (runtime === "local") {
       setLocalConversations((current) => recordLocalConversationPrompt(current, threadId, input));
@@ -168,9 +175,11 @@ export const AgentExperience = memo(function AgentExperience({
     />
     <div className="conversation-workspace">
       <ConversationHistoryRail
+        agentStatus={agentStatus}
         conversations={conversations} error={runtime === "managed" ? managedError : undefined}
         mobileOpen={railOpen} pending={conversationPending} runtime={runtime} selectedId={selectedId}
         onClose={() => setRailOpen(false)} onCreate={createConversation} onOpen={() => setRailOpen(true)}
+        onRetry={retryManagedConversations}
         onSelect={runtime === "local" ? selectLocal : selectManaged}
       />
       <div className="conversation-main">
@@ -205,5 +214,8 @@ function safeSet(key: string, value: string) {
   try { localStorage.setItem(key, value); } catch {}
 }
 function errorMessage(error: unknown) {
-  return error instanceof Error ? error.message : String(error);
+  return clientFailureMessage(
+    error,
+    "Managed agents could not be reached. Check your network and retry.",
+  );
 }

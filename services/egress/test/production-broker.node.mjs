@@ -12,16 +12,27 @@ import {
 
 const encryptionKey = "MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY";
 const probeToken = "probe-" + "p".repeat(32);
+const connectorSecrets = {
+  NANOCODEX_GITHUB_OAUTH_CLIENT_ID: "github-client-id",
+  NANOCODEX_GITHUB_OAUTH_CLIENT_SECRET: "github-client-secret",
+  NANOCODEX_GOOGLE_OAUTH_CLIENT_ID: "google-client-id",
+  NANOCODEX_GOOGLE_OAUTH_CLIENT_SECRET: "google-client-secret",
+};
 
-test("production deployment accepts only encryption and readiness secrets", () => {
+test("production deployment selects only owned broker and connector secrets", () => {
   assert.deepEqual(productionBrokerSecrets({
     NANOCODEX_CREDENTIAL_ENCRYPTION_KEY: encryptionKey,
     NANOCODEX_BROKER_PROBE_TOKEN: probeToken,
     OPENAI_API_KEY: "must-not-be-selected",
     CODEX_OAUTH_BOOTSTRAP: "must-not-be-selected",
+    ...connectorSecrets,
   }), {
     CREDENTIAL_ENCRYPTION_KEY: encryptionKey,
     NANOCODEX_BROKER_PROBE_TOKEN: probeToken,
+    GITHUB_OAUTH_CLIENT_ID: "github-client-id",
+    GITHUB_OAUTH_CLIENT_SECRET: "github-client-secret",
+    GOOGLE_OAUTH_CLIENT_ID: "google-client-id",
+    GOOGLE_OAUTH_CLIENT_SECRET: "google-client-secret",
   });
   assert.throws(() => productionBrokerSecrets({}), /CREDENTIAL_ENCRYPTION_KEY/);
 });
@@ -31,15 +42,21 @@ test("production deployment accepts an optional previous encryption key for rota
     NANOCODEX_CREDENTIAL_ENCRYPTION_KEY: encryptionKey,
     NANOCODEX_CREDENTIAL_ENCRYPTION_KEY_PREVIOUS: encryptionKey,
     NANOCODEX_BROKER_PROBE_TOKEN: probeToken,
+    ...connectorSecrets,
   }), {
     CREDENTIAL_ENCRYPTION_KEY: encryptionKey,
     CREDENTIAL_ENCRYPTION_KEY_PREVIOUS: encryptionKey,
     NANOCODEX_BROKER_PROBE_TOKEN: probeToken,
+    GITHUB_OAUTH_CLIENT_ID: "github-client-id",
+    GITHUB_OAUTH_CLIENT_SECRET: "github-client-secret",
+    GOOGLE_OAUTH_CLIENT_ID: "google-client-id",
+    GOOGLE_OAUTH_CLIENT_SECRET: "google-client-secret",
   });
   assert.throws(() => productionBrokerSecrets({
     NANOCODEX_CREDENTIAL_ENCRYPTION_KEY: encryptionKey,
     NANOCODEX_CREDENTIAL_ENCRYPTION_KEY_PREVIOUS: "invalid",
     NANOCODEX_BROKER_PROBE_TOKEN: probeToken,
+    ...connectorSecrets,
   }), /PREVIOUS must be a 32-byte base64url value/);
 });
 
@@ -57,6 +74,7 @@ test("Wrangler child environment strips all provider and source deployment secre
     NANOCODEX_MANAGED_AUTH_MODE: "chatgpt",
     NANOCODEX_CREDENTIAL_ENCRYPTION_KEY: encryptionKey,
     NANOCODEX_CREDENTIAL_ENCRYPTION_KEY_PREVIOUS: encryptionKey,
+    ...connectorSecrets,
     PATH: "/usr/bin",
   }, "account", "token");
   assert.deepEqual(environment, {
@@ -90,6 +108,9 @@ test("the base and generated production configs keep every required DO binding",
     binding.name === "CHATGPT_EGRESS"
   )).length, 1);
   assert.deepEqual(config.durable_objects.bindings.at(-1), relay);
+  assert.ok(config.durable_objects.bindings.some((binding) => (
+    binding.name === "USER_CONNECTORS" && binding.class_name === "UserConnectorBroker"
+  )));
   assert.throws(
     () => buildProductionBrokerConfig({
       ...base,
@@ -104,7 +125,7 @@ test("the base and generated production configs keep every required DO binding",
   );
   assert.throws(
     () => buildProductionBrokerConfig({ ...base, migrations: [] }, { mainPath: "/fixed/egress.ts" }),
-    /v2\/v3 DO migration chain/,
+    /v2\/v3\/v4 DO migration chain/,
   );
 });
 

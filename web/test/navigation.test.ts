@@ -173,8 +173,9 @@ test("the mounted shell prefetches route data without module-loader orchestratio
   assert.match(css, /\.surface-switch a\s*\{[^}]*touch-action:\s*manipulation/);
   assert.match(
     css,
-    /@media \(max-width: 420px\)[\s\S]*?--mobile-header-height: calc\(96px \+ env\(safe-area-inset-top\)\)[\s\S]*?\.header-center \{[\s\S]*?grid-row: 2;[\s\S]*?grid-column: 1 \/ -1;[\s\S]*?\.surface-switch \{[\s\S]*?min-width: 352px/,
+    /@media \(max-width: 740px\)[\s\S]*?\.header-center \{[\s\S]*?display: none;[\s\S]*?\.mobile-navigation-trigger \{[\s\S]*?display: grid;[\s\S]*?\.mobile-product-navigation > nav \{[\s\S]*?repeat\(2, minmax\(0, 1fr\)\)/,
   );
+  assert.match(application, /useModalBoundary\(\{[\s\S]*?open: mobileNavigationOpen/);
 });
 
 test("Source and Commits navigation prepares exact route state before navigating", () => {
@@ -192,7 +193,7 @@ test("Source and Commits navigation prepares exact route state before navigating
   );
   assert.match(
     preparation,
-    /loadPublishedCommitHistory\(requestedCommit\)[\s\S]*?preloadPierreWorker\(\)[\s\S]*?const patchRequest = historyRequest[\s\S]*?preloadPublishedRepositoryPatchBody[\s\S]*?const syntaxRequest = historyRequest[\s\S]*?preloadPierrePaths[\s\S]*?Promise\.all\(\[[\s\S]*?historyRequest,[\s\S]*?patchRequest,[\s\S]*?syntaxRequest/,
+    /loadPublishedCommitHistory\([\s\S]*?requestedCommit[\s\S]*?adopted[\s\S]*?preloadPierreWorker\(\)[\s\S]*?void historyRequest\.then[\s\S]*?preloadPublishedRepositoryPatch[\s\S]*?preloadPierrePaths[\s\S]*?const history = await historyRequest/,
   );
   assert.doesNotMatch(
     preparation,
@@ -204,14 +205,10 @@ test("Source and Commits navigation prepares exact route state before navigating
   );
   assert.match(
     preparation,
-    /prepareCommitSurface\(requestedCommit, adopted\)[\s\S]*?preloadPublishedRepositoryPatchBody\([\s\S]*?adopted/,
-  );
-  assert.match(
-    preparation,
     /if \(repositorySnapshotRequest\) return repositorySnapshotRequest;[\s\S]*?loadPublishedRepositorySnapshot\(\)[\s\S]*?repositorySnapshotRequest = undefined/,
   );
   assert.doesNotMatch(preparation, /window\.location\.search/);
-  assert.match(preparation, /preloadPublishedRepositoryPatchBody/);
+  assert.doesNotMatch(preparation, /preloadPublishedRepositoryPatchBody|arrayBuffer\(\)/);
 
   const prefetch = application.slice(
     application.indexOf("const preloadSurface"),
@@ -398,7 +395,7 @@ test("direct preloading selects only the work owned by the resolved route", () =
   );
   assert.match(
     preload,
-    /surface === "evals"\) await preloadEvalOverview\(\);\s*return \{\};/,
+    /surface === "evals" && url\.pathname\.replace[\s\S]*?=== "\/evals"\)[\s\S]*?await preloadEvalOverview\(\);[\s\S]*?return \{\};/,
   );
 });
 

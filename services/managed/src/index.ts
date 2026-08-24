@@ -20,6 +20,12 @@ import {
 } from "nanocodex/tools";
 import { justBash } from "nanocodex/tools/bash";
 import { createComputerFilesystem } from "./computer-workspace";
+import { fetchResponseWithDeadline, withHardDeadline } from "./deadline";
+import { drainRuntimeForDeletion } from "./deletion-runtime";
+import {
+  createManagedGhCommand,
+  createManagedShellFetch,
+} from "./computer-shell";
 import {
   DurableEventLog,
   EventLogCapacityError,
@@ -53,12 +59,19 @@ import {
   parseCommand,
   validatePromptInput,
 } from "./protocol";
-import { materializeTurnTerminal, type TurnTerminal } from "./turn-completion";
+import {
+  classifyTurnFailure,
+  materializeTurnTerminal,
+  type TurnTerminal,
+} from "./turn-completion";
 import {
   bindAgentCredential,
   routeCredentialRequest,
   unbindAgentCredential,
 } from "./credentials";
+import { routeBrowserEgress } from "./browser-egress";
+import { accountInfo } from "./account-info";
+import { routeConnectorRequest } from "./connectors";
 import {
   attachAgent,
   authenticate,
@@ -72,12 +85,12 @@ import {
 } from "./account-auth";
 import { routeBrowserModel } from "./browser-model";
 export { ApiKeyRecord, NonceStorage, UserAccount } from "./account-auth";
+export { MemoryScope, Organization } from "./reserved-durable-objects";
 
 const MAX_CLIENT_MESSAGE_BYTES = 1024 * 1024;
 const MAX_ACTIVE_TURNS = 16;
 const MAX_CLIENT_CONNECTIONS = 64;
 const MAX_REQUEST_BODY_BYTES = 1024 * 1024;
-const MAX_RETRY_ATTEMPTS = 8;
 const MAX_RETRY_DELAY_MS = 60_000;
 const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const ROOM_ROUTE_ID = /^([0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})~([A-Za-z0-9_-]{43})$/;
@@ -88,6 +101,13 @@ const IDEMPOTENCY_KEY = /^[\x21-\x7e]{1,256}$/;
 const encoder = new TextEncoder();
 const ENCODED_PONG = JSON.stringify({ type: "pong" });
 const SESSION_DELETING_KEY = "nanocodex:session-deleting";
+const SESSION_DELETION_GENERATION_KEY = "nanocodex:session-deletion-generation";
+const CREDENTIAL_BINDING_KEY = "nanocodex:credential-binding";
+const CLEANUP_RETRY_ATTEMPT_KEY = "nanocodex:cleanup-retry-attempt";
+const CREDENTIAL_BINDING_PREPARE_TIMEOUT_MS = 60_000;
+const DEFAULT_OWNERSHIP_IO_TIMEOUT_MS = 10_000;
+const DEFAULT_MULTIPLAYER_IO_TIMEOUT_MS = 10_000;
+const MAX_CLEANUP_RETRY_MS = 60_000;
 const SESSION_OWNER_ASSERTION = "x-nanocodex-owner-id";
 
 export interface Env extends AccountAuthEnv {
@@ -97,6 +117,8 @@ export interface Env extends AccountAuthEnv {
   NANOCODEX: Fetcher;
   NANOCODEX_ADMIN_TOKEN: string;
   AGENT_IDLE_TIMEOUT_MS?: string;
+  MANAGED_MULTIPLAYER_IO_TIMEOUT_MS?: string;
+  MANAGED_OWNERSHIP_IO_TIMEOUT_MS?: string;
 }
 
 type SessionRow = {
@@ -107,6 +129,13 @@ type SessionRow = {
   completed_turns: number;
   last_active: number;
   stream_error: string | null;
+};
+
+type SessionInitializationOwnership = {
+  session_id: string | null;
+  owner_id: string | null;
+  runtime_profile: AgentRuntimeProfile | null;
+  state: "active" | "deleted";
 };
 
 type SessionStatusRow = {
@@ -165,6 +194,22 @@ type ManagedTransition = TurnTerminal | Extract<StreamMessage, { type: "turn_can
 
 type AgentRuntimeProfile = "managed" | "multiplayer";
 
+type AgentConstructionOwnership = {
+  readonly deletionGeneration: number;
+  readonly runtimeGeneration: number;
+  promise: Promise<CloudflareAgent.Agent>;
+  publication: Promise<CloudflareAgent.Agent>;
+  shutdown?: Promise<void>;
+};
+
+type CredentialBindingOwnership = Readonly<{
+  cleanup_at: number;
+  owner_id: string;
+  session_id: string;
+  state: "preparing" | "active";
+  subject: string;
+}>;
+
 type RoomInitializationReceipt = {
   room_id: string;
   invite: string;
@@ -179,6 +224,8 @@ const AGENT_CAPABILITIES = Object.freeze({
   live_steer: true,
   live_cancel: true,
   workspace: "cloudflare-computer",
+  shell_runtime: "just-bash",
+  shell_egress: "connector-http-gateway",
   sandbox_escalation: false,
 }) satisfies AgentCapabilities;
 
@@ -196,6 +243,10 @@ export default {
     if (account) return account;
     const credential = await routeCredentialRequest(request, env, url);
     if (credential) return credential;
+    const connector = await routeConnectorRequest(request, env, url);
+    if (connector) return connector;
+    const browserEgress = await routeBrowserEgress(request, env, url);
+    if (browserEgress) return browserEgress;
     if (request.method === "GET") {
       const asset = webAsset(url.pathname);
       if (asset) return asset;
@@ -297,9 +348,34 @@ export default {
       const agentId = uuidV7();
       const subject = env.NANOCODEX_SESSIONS.idFromName(agentId).toString();
       const stub = env.NANOCODEX_SESSIONS.getByName(agentId);
+      const ownershipTimeoutMs = managedOwnershipTimeoutMs(env);
+      let prepared: Response;
+      try {
+        prepared = await fetchWithDeadline(stub, "https://session.internal/credential-binding", {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({
+            owner_id: principal.userId,
+            session_id: agentId,
+            subject,
+          }),
+        }, ownershipTimeoutMs, "agent cleanup preparation");
+      } catch {
+        return json({ error: "agent cleanup initialization failed" }, { status: 503 });
+      }
+      await prepared.body?.cancel();
+      if (!prepared.ok) {
+        return json({ error: "agent cleanup initialization failed" }, { status: 503 });
+      }
       const [credentialBinding, initialization] = await Promise.allSettled([
-        bindAgentCredential(env.NANOCODEX, subject, principal.userId),
-        stub.fetch("https://session.internal/initialize", {
+        fetchWithDeadline(
+          stub,
+          "https://session.internal/credential-binding/bind",
+          { method: "POST" },
+          ownershipTimeoutMs,
+          "agent credential binding",
+        ),
+        fetchWithDeadline(stub, "https://session.internal/initialize", {
           method: "PUT",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
@@ -307,30 +383,38 @@ export default {
             owner_id: principal.userId,
             public_origin: url.origin,
           }),
-        }),
+        }, ownershipTimeoutMs, "agent initialization"),
       ]);
       if (initialization.status === "fulfilled") {
         await initialization.value.body?.cancel();
       }
-      if (credentialBinding.status === "rejected"
+      if (credentialBinding.status === "fulfilled") {
+        await credentialBinding.value.body?.cancel();
+      }
+      const credentialUnavailable = credentialBinding.status === "rejected"
+        || !credentialBinding.value.ok;
+      if (credentialUnavailable
         || initialization.status === "rejected"
         || !initialization.value.ok) {
-        await Promise.all([
-          stub.fetch("https://session.internal/session", { method: "DELETE" })
-            .then((response) => response.body?.cancel())
-            .catch(() => {}),
-          unbindAgentCredential(env.NANOCODEX, subject, principal.userId).catch(() => {}),
-        ]);
-        return credentialBinding.status === "rejected"
+        await requestSessionCleanup(stub, ownershipTimeoutMs);
+        return credentialUnavailable
           ? json({ error: "credential_broker_unavailable" }, { status: 503 })
           : json({ error: "agent initialization failed" }, { status: 503 });
       }
+      let committed: Response | undefined;
       try {
-        await attachAgent(env, principal.userId, agentId);
-      } catch (error) {
-        await stub.fetch("https://session.internal/session", { method: "DELETE" }).catch(() => {});
-        await unbindAgentCredential(env.NANOCODEX, subject, principal.userId).catch(() => {});
-        throw error;
+        committed = await fetchWithDeadline(
+          stub,
+          "https://session.internal/credential-binding/commit",
+          { method: "POST" },
+          ownershipTimeoutMs,
+          "agent cleanup commit",
+        );
+        await committed.body?.cancel();
+      } catch { /* The commit may have applied; cleanup is authoritative. */ }
+      if (!committed?.ok) {
+        await requestSessionCleanup(stub, ownershipTimeoutMs);
+        return json({ error: "agent cleanup commit failed" }, { status: 503 });
       }
       const routeBase = "/v1/agents";
       const websocketUrl = new URL(`${routeBase}/${agentId}/ws`, url);
@@ -438,21 +522,20 @@ export default {
     if (!resource && request.method === "DELETE") {
       const originFailure = requireSameOriginMutation(request, url, principal);
       if (originFailure) return originFailure;
-      const deleted = await stub.fetch("https://session.internal/session", {
-        method: "DELETE",
-        headers: sessionHeaders,
-      });
-      if (deleted.ok) {
-        await Promise.all([
-          detachAgent(env, principal.userId, agentId),
-          unbindAgentCredential(
-            env.NANOCODEX,
-            env.NANOCODEX_SESSIONS.idFromName(agentId).toString(),
-            principal.userId,
-          ),
-        ]);
+      try {
+        return await fetchWithDeadline(
+          stub,
+          "https://session.internal/session",
+          { method: "DELETE", headers: sessionHeaders },
+          managedOwnershipTimeoutMs(env),
+          "agent session deletion",
+        );
+      } catch {
+        return json({ error: "session_cleanup_pending" }, {
+          status: 503,
+          headers: { "retry-after": "1" },
+        });
       }
-      return deleted;
     }
     return json({ error: "method_not_allowed" }, { status: 405 });
   },
@@ -473,9 +556,13 @@ const DurableComputerSession = withWorkspace(
 export class NanocodexSession extends DurableComputerSession {
   #agent?: CloudflareAgent.Agent;
   #agentPromise?: Promise<CloudflareAgent.Agent>;
+  #agentConstruction?: AgentConstructionOwnership;
+  readonly #agentConstructions = new Set<AgentConstructionOwnership>();
+  #agentShutdownPromise?: Promise<void>;
   #events?: EventWatcher;
   readonly #eventLog: DurableEventLog<StreamMessage>;
   readonly #turns = new Map<string, Turn>();
+  readonly #reopenInterruptedTurnIds = new Set<string>();
   readonly #eventTurnQueue: string[] = [];
   #eventTurnId?: string;
   readonly #pendingTurnIds = new Set<string>();
@@ -486,8 +573,12 @@ export class NanocodexSession extends DurableComputerSession {
   #recoveryTask?: Promise<void>;
   #streamError?: string;
   #deleting = false;
+  #deleted = false;
+  #credentialBinding?: CredentialBindingOwnership;
   #deletionMarkerTask?: Promise<void>;
   #deletionTask?: Promise<void>;
+  #deletionGeneration = 0;
+  #runtimeOwnershipGeneration = 0;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -502,6 +593,13 @@ export class NanocodexSession extends DurableComputerSession {
         completed_turns INTEGER NOT NULL DEFAULT 0,
         stream_error TEXT,
         last_active INTEGER NOT NULL
+      );
+      CREATE TABLE IF NOT EXISTS session_initialization_ownership (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        session_id TEXT,
+        owner_id TEXT,
+        runtime_profile TEXT CHECK (runtime_profile IN ('managed', 'multiplayer')),
+        state TEXT NOT NULL CHECK (state IN ('active', 'deleted'))
       );
       CREATE TABLE IF NOT EXISTS completed_operations (
         id TEXT PRIMARY KEY,
@@ -550,9 +648,17 @@ export class NanocodexSession extends DurableComputerSession {
         "ALTER TABLE session_state ADD COLUMN runtime_profile TEXT NOT NULL DEFAULT 'managed'",
       );
     }
+    this.#deleted = this.#initializationOwnership()?.state === "deleted";
     this.#streamError = this.#session()?.stream_error ?? undefined;
     this.ctx.blockConcurrencyWhile(async () => {
-      this.#deleting = await this.ctx.storage.get<boolean>(SESSION_DELETING_KEY) === true;
+      const [deleting, credentialBinding, deletionGeneration] = await Promise.all([
+        this.ctx.storage.get<boolean>(SESSION_DELETING_KEY),
+        this.ctx.storage.get<CredentialBindingOwnership>(CREDENTIAL_BINDING_KEY),
+        this.ctx.storage.get<number>(SESSION_DELETION_GENERATION_KEY),
+      ]);
+      this.#deleting = deleting === true;
+      this.#credentialBinding = credentialBinding;
+      this.#deletionGeneration = deletionGeneration ?? 0;
       // Durable state and SSE replay are immediately usable after eviction.
       // Re-admission or deletion may load external resources, so neither sits
       // on the object's request-readiness boundary.
@@ -567,6 +673,85 @@ export class NanocodexSession extends DurableComputerSession {
     if (ownerAssertion !== null && ownerAssertion !== this.#session()?.owner_id) {
       return json({ error: "not_found" }, { status: 404 });
     }
+    if (request.method === "PUT" && url.pathname === "/credential-binding") {
+      if (this.#deleting || this.#deleted) return new Response(null, { status: 409 });
+      let ownership: Partial<CredentialBindingOwnership>;
+      try { ownership = await request.json<Partial<CredentialBindingOwnership>>(); }
+      catch { return new Response(null, { status: 400 }); }
+      if (!isUserId(ownership.owner_id)
+        || typeof ownership.session_id !== "string"
+        || !SESSION_ID.test(ownership.session_id)
+        || typeof ownership.subject !== "string"
+        || ownership.subject !== this.ctx.id.toString()) {
+        return new Response(null, { status: 400 });
+      }
+      const current = this.#credentialBinding;
+      if (current && (current.owner_id !== ownership.owner_id
+        || current.session_id !== ownership.session_id
+        || current.subject !== ownership.subject)) {
+        return new Response(null, { status: 409 });
+      }
+      if (!current) {
+        const prepared: CredentialBindingOwnership = {
+          cleanup_at: Date.now() + CREDENTIAL_BINDING_PREPARE_TIMEOUT_MS,
+          owner_id: ownership.owner_id,
+          session_id: ownership.session_id,
+          state: "preparing",
+          subject: ownership.subject,
+        };
+        await this.ctx.storage.transaction(async (transaction) => {
+          await transaction.put(CREDENTIAL_BINDING_KEY, prepared);
+          await transaction.setAlarm(prepared.cleanup_at);
+        });
+        this.#credentialBinding = prepared;
+      }
+      return new Response(null, { status: 204 });
+    }
+    if (request.method === "POST" && url.pathname === "/credential-binding/bind") {
+      const ownership = this.#credentialBinding;
+      if (!ownership || this.#deleting || this.#deleted) {
+        return new Response(null, { status: 409 });
+      }
+      try {
+        await this.#track(bindAgentCredential(
+          this.env.NANOCODEX,
+          ownership.subject,
+          ownership.owner_id,
+          this.#ownershipIoTimeoutMs(),
+        ));
+      } catch {
+        return new Response(null, { status: 503 });
+      }
+      return new Response(null, { status: this.#deleting || this.#deleted ? 409 : 204 });
+    }
+    if (request.method === "POST" && url.pathname === "/credential-binding/commit") {
+      if (this.#deleting || this.#deleted) return new Response(null, { status: 409 });
+      const ownership = this.#credentialBinding;
+      const session = this.#session();
+      if (!ownership || !session
+        || ownership.owner_id !== session.owner_id
+        || ownership.session_id !== session.session_id) {
+        return new Response(null, { status: 409 });
+      }
+      try {
+        await this.#track(attachAgent(
+          this.env,
+          ownership.owner_id,
+          ownership.session_id,
+          this.#ownershipIoTimeoutMs(),
+        ));
+      } catch {
+        return new Response(null, { status: 503 });
+      }
+      if (this.#deleting || this.#deleted) return new Response(null, { status: 409 });
+      if (ownership.state !== "active") {
+        const active = { ...ownership, state: "active" as const };
+        await this.ctx.storage.put(CREDENTIAL_BINDING_KEY, active);
+        this.#credentialBinding = active;
+      }
+      await this.#scheduleNextAlarm();
+      return new Response(null, { status: 204 });
+    }
     const forwardedOrigin = url.searchParams.get("public_origin");
     if (!this.#deleting
       && forwardedOrigin !== null
@@ -578,9 +763,9 @@ export class NanocodexSession extends DurableComputerSession {
       );
     }
     if (request.method === "PUT" && url.pathname === "/initialize") {
-      if (this.#deleting) return new Response(null, { status: 409 });
+      if (this.#deleting || this.#deleted) return new Response(null, { status: 409 });
       const body = await request.text();
-      if (this.#deleting) return new Response(null, { status: 409 });
+      if (this.#deleting || this.#deleted) return new Response(null, { status: 409 });
       if (body.length > 2048) return new Response(null, { status: 400 });
       let initialization: {
         session_id?: unknown;
@@ -605,16 +790,64 @@ export class NanocodexSession extends DurableComputerSession {
         || (runtimeProfile !== "managed" && runtimeProfile !== "multiplayer")) {
         return new Response(null, { status: 400 });
       }
+      const credentialBinding = this.#credentialBinding;
+      if (runtimeProfile === "managed" && (!credentialBinding
+        || credentialBinding.owner_id !== ownerId
+        || credentialBinding.session_id !== sessionId
+        || credentialBinding.subject !== this.ctx.id.toString())) {
+        return new Response(null, { status: 409 });
+      }
       const current = this.#session();
       const currentId = current?.session_id;
       if (currentId && currentId !== sessionId) return new Response(null, { status: 409 });
       if (current && current.owner_id !== ownerId) return new Response(null, { status: 409 });
       if (current && current.runtime_profile !== runtimeProfile) return new Response(null, { status: 409 });
-      if (!currentId) {
-        let event: DurableEvent<StreamMessage> | undefined;
+      let event: DurableEvent<StreamMessage> | undefined;
+      try {
         this.ctx.storage.transactionSync(() => {
-          if (this.#deleting || this.#sessionId()) {
-            throw new ManagedRequestError(409, "agent_deleting", "the agent is being deleted or initialized");
+          const ownership = this.#initializationOwnership();
+          if (this.#deleting || this.#deleted || ownership?.state === "deleted") {
+            throw new ManagedRequestError(
+              409,
+              "agent_deleting",
+              "the agent is being deleted or was already deleted",
+            );
+          }
+          if (ownership && (ownership.session_id !== sessionId
+            || ownership.owner_id !== ownerId
+            || ownership.runtime_profile !== runtimeProfile)) {
+            throw new ManagedRequestError(
+              409,
+              "agent_initialized",
+              "the one-shot initialization ownership belongs to another session",
+            );
+          }
+          if (!ownership) {
+            this.ctx.storage.sql.exec(
+              `INSERT INTO session_initialization_ownership (
+                 singleton, session_id, owner_id, runtime_profile, state
+               ) VALUES (1, ?, ?, ?, 'active')`,
+              sessionId,
+              ownerId,
+              runtimeProfile,
+            );
+          }
+          const retained = this.#session();
+          if (retained && (retained.session_id !== sessionId
+            || retained.owner_id !== ownerId
+            || retained.runtime_profile !== runtimeProfile)) {
+            throw new ManagedRequestError(
+              409,
+              "agent_initialized",
+              "the agent is already initialized with different ownership",
+            );
+          }
+          if (retained) {
+            this.ctx.storage.sql.exec(
+              "UPDATE session_state SET public_origin = ? WHERE singleton = 1",
+              publicOrigin,
+            );
+            return;
           }
           this.ctx.storage.sql.exec(
             `INSERT INTO session_state
@@ -632,14 +865,13 @@ export class NanocodexSession extends DurableComputerSession {
             capabilities: this.#capabilities(),
           }, null, true);
         });
-        this.#publish(event!);
-      } else {
-        if (this.#deleting) return new Response(null, { status: 409 });
-        this.ctx.storage.sql.exec(
-          "UPDATE session_state SET public_origin = ? WHERE singleton = 1",
-          publicOrigin,
-        );
+      } catch (error) {
+        if (error instanceof ManagedRequestError) {
+          return new Response(null, { status: error.status });
+        }
+        throw error;
       }
+      if (event) this.#publish(event);
       return new Response(null, { status: 204 });
     }
     if (request.method === "GET" && url.pathname === "/socket") return this.#upgrade();
@@ -649,7 +881,7 @@ export class NanocodexSession extends DurableComputerSession {
       const requested = request.headers.get("last-event-id")
         ?? url.searchParams.get("cursor")
         ?? url.searchParams.get("after");
-      const cursor = parseCursor(requested);
+      const cursor = requested === "latest" ? this.#eventLog.latestCursor() : parseCursor(requested);
       if (cursor === undefined) return json({ error: "invalid_cursor" }, { status: 400 });
       return this.#eventLog.stream(cursor, request.signal);
     }
@@ -720,15 +952,20 @@ export class NanocodexSession extends DurableComputerSession {
     }
     if (request.method === "DELETE" && url.pathname === "/session") {
       try {
-        if (!this.#sessionId() && !this.#deleting) return new Response(null, { status: 204 });
+        if (this.#deleted && !this.#deleting && !this.#sessionId() && !this.#credentialBinding) {
+          return new Response(null, { status: 204 });
+        }
         await this.#beginDeletion();
         await this.#deleteOwnedSession();
       } catch (error) {
         console.error("managed session cleanup remains pending", errorMessage(error));
-        try { await this.ctx.storage.setAlarm(Date.now() + 1_000); } catch { /* Durable marker retains ownership. */ }
+        let retryAfter = 1;
+        try {
+          retryAfter = Math.ceil(await this.#scheduleCleanupRetry() / 1_000);
+        } catch { /* Durable marker retains ownership. */ }
         return json({ error: "session_cleanup_pending" }, {
           status: 503,
-          headers: { "retry-after": "1" },
+          headers: { "retry-after": String(retryAfter) },
         });
       }
       return new Response(null, { status: 204 });
@@ -771,12 +1008,28 @@ export class NanocodexSession extends DurableComputerSession {
         await this.#deleteOwnedSession();
       } catch (error) {
         console.error("managed session alarm cleanup remains pending", errorMessage(error));
-        await this.ctx.storage.setAlarm(Date.now() + 1_000);
+        await this.#scheduleCleanupRetry();
+      }
+      return;
+    }
+    const credentialBinding = this.#credentialBinding;
+    if (credentialBinding?.state === "preparing") {
+      if (credentialBinding.cleanup_at > Date.now()) {
+        await this.ctx.storage.setAlarm(credentialBinding.cleanup_at);
+        return;
+      }
+      await this.#beginDeletion();
+      try {
+        await this.#deleteOwnedSession();
+      } catch (error) {
+        console.error("abandoned managed create cleanup remains pending", errorMessage(error));
+        await this.#scheduleCleanupRetry();
       }
       return;
     }
     if (this.#turns.size > 0 || this.#pendingTurnIds.size > 0 || this.#agentPromise) {
-      await this.ctx.storage.setAlarm(Date.now() + this.#idleTimeoutMs());
+      this.#scheduleRecovery();
+      await this.#scheduleNextAlarm();
       return;
     }
     await this.#shutdownAgent();
@@ -976,7 +1229,7 @@ export class NanocodexSession extends DurableComputerSession {
     requestKey: string | null,
     explicitId = true,
   ): ManagedTurnSubmission {
-    if (this.#deleting) {
+    if (this.#deleting || this.#deleted) {
       throw new ManagedRequestError(409, "agent_deleting", "the agent is being deleted");
     }
     const keyed = requestKey === null ? undefined : this.#managedTurnByRequestKey(requestKey);
@@ -1087,27 +1340,40 @@ export class NanocodexSession extends DurableComputerSession {
     if (this.#deleting || this.#cancellationTasks.has(id)) return;
     const task = Promise.resolve().then(() => this.#cancelManagedTurn(id));
     this.#cancellationTasks.set(id, task);
-    void task.finally(() => {
-      if (this.#cancellationTasks.get(id) === task) this.#cancellationTasks.delete(id);
-    }).catch(() => {});
-    this.ctx.waitUntil(task.catch(async (error) => {
+    const observed = task.catch((error) => {
       console.error("managed turn cancellation failed", id, errorMessage(error));
-      await this.#scheduleNextAlarm();
-    }));
+    }).finally(async () => {
+      if (this.#cancellationTasks.get(id) === task) this.#cancellationTasks.delete(id);
+      if (!this.#deleting) await this.#scheduleNextAlarm();
+    });
+    this.ctx.waitUntil(observed);
   }
 
   async #cancelManagedTurn(id: string): Promise<void> {
     let row = this.#managedTurn(id);
     if (!row || isTerminalState(row.state) || row.state === "blocked") return;
+    if (row.state === "cancelling" && row.retry_at !== null && row.retry_at > Date.now()) {
+      await this.#scheduleNextAlarm();
+      return;
+    }
     let turn = this.#turns.get(id);
     if (!turn) {
       row = await this.#admitManagedTurn(row, true);
       if (isTerminalState(row.state) || row.state === "blocked") return;
       turn = this.#turns.get(id);
     }
-    if (!turn) throw retryableError(`turn ${id} is not active yet`);
-    await turn.cancel();
-    await this.#scheduleNextAlarm();
+    if (!turn) {
+      await this.#scheduleNextAlarm();
+      return;
+    }
+    try {
+      await turn.cancel();
+    } catch (error) {
+      if (this.#managedTurn(id)?.state === "cancelling") {
+        this.#commitManagedFailure(id, error, true);
+      }
+      throw error;
+    }
   }
 
   async #admitManagedTurn(row: ManagedTurnRow, replayed: boolean): Promise<ManagedTurnRow> {
@@ -1118,13 +1384,20 @@ export class NanocodexSession extends DurableComputerSession {
     try {
       return await task;
     } finally {
-      if (this.#admissionTasks.get(row.id) === task) this.#admissionTasks.delete(row.id);
+      if (this.#admissionTasks.get(row.id) === task) {
+        this.#admissionTasks.delete(row.id);
+        if (!this.#deleting) await this.#scheduleNextAlarm();
+      }
     }
   }
 
   async #startManagedTurn(row: ManagedTurnRow, replayed: boolean): Promise<ManagedTurnRow> {
     const latest = this.#managedTurn(row.id);
     if (!latest || isTerminalState(latest.state) || latest.state === "blocked") return latest ?? row;
+    if (latest.state === "retryable" && latest.retry_at !== null && latest.retry_at > Date.now()) {
+      await this.#scheduleNextAlarm();
+      return latest;
+    }
     row = latest;
     let turn: Turn | undefined;
     const input = JSON.parse(row.input_json) as PromptInput;
@@ -1135,6 +1408,7 @@ export class NanocodexSession extends DurableComputerSession {
       if (this.#deleting || this.#agent !== agent) throw retryableError("agent became unavailable during admission");
       this.#eventTurnQueue.push(row.id);
       turn = agent.turn.prompt({ id: row.id, input });
+      this.#turns.set(row.id, turn);
       const durableId = await turn.accepted();
       if (durableId !== undefined && durableId !== row.id) {
         throw new Error(`durable admission returned unexpected turn id ${durableId}`);
@@ -1143,12 +1417,17 @@ export class NanocodexSession extends DurableComputerSession {
         try { await turn.cancel(); } catch { /* Deletion owns shutdown. */ }
         throw retryableError("agent was deleted during admission");
       }
-      this.#turns.set(row.id, turn);
       this.#pendingTurnIds.delete(row.id);
       this.ctx.storage.sql.exec(
         `UPDATE managed_turns
-         SET state = CASE WHEN state = 'cancelling' THEN 'cancelling' ELSE 'accepted' END,
-             error = NULL, retry_at = NULL, updated_at = ?
+         SET state = CASE
+               WHEN state = 'cancelling' THEN 'cancelling'
+               WHEN state = 'retryable' THEN 'retryable'
+               ELSE 'accepted'
+             END,
+             error = CASE WHEN state = 'retryable' THEN error ELSE NULL END,
+             retry_at = CASE WHEN state = 'retryable' THEN retry_at ELSE NULL END,
+             updated_at = ?
          WHERE id = ? AND state IN ('accepted', 'retryable', 'cancelling')`,
         Date.now(),
         row.id,
@@ -1158,12 +1437,14 @@ export class NanocodexSession extends DurableComputerSession {
       return this.#managedTurn(row.id) ?? row;
     } catch (error) {
       this.#releaseEventTurn(row.id);
-      if (turn && this.#turns.get(row.id) !== turn) turn.dispose();
+      if (turn && this.#turns.get(row.id) === turn) this.#turns.delete(row.id);
+      turn?.dispose();
       this.#pendingTurnIds.delete(row.id);
       this.#turnInputs.delete(row.id);
       if (this.#deleting) return this.#managedTurn(row.id) ?? row;
-      const failed = this.#commitManagedFailure(row.id, error, replayed);
-      await this.#scheduleNextAlarm();
+      const failure = classifyTurnFailure(row.id, error);
+      const failed = this.#commitManagedFailure(row.id, error, replayed, failure.terminal);
+      if (failure.reopenAgent) await this.#reopenAgent(row.id);
       return failed;
     }
   }
@@ -1171,6 +1452,22 @@ export class NanocodexSession extends DurableComputerSession {
   async #beginDeletion(): Promise<void> {
     if (this.#deletionMarkerTask) return this.#deletionMarkerTask;
     if (this.#deleting) return;
+    this.ctx.storage.transactionSync(() => {
+      const ownership = this.#initializationOwnership();
+      if (ownership) {
+        this.ctx.storage.sql.exec(
+          `UPDATE session_initialization_ownership
+           SET state = 'deleted' WHERE singleton = 1`,
+        );
+      } else {
+        this.ctx.storage.sql.exec(
+          `INSERT INTO session_initialization_ownership (
+             singleton, session_id, owner_id, runtime_profile, state
+           ) VALUES (1, NULL, NULL, NULL, 'deleted')`,
+        );
+      }
+    });
+    this.#deleted = true;
     this.#deleting = true;
     const task = this.ctx.storage.transaction(async (transaction) => {
       await transaction.put(SESSION_DELETING_KEY, true);
@@ -1191,13 +1488,14 @@ export class NanocodexSession extends DurableComputerSession {
     const task = this.#deleteOwnedSession();
     this.ctx.waitUntil(task.catch(async (error) => {
       console.error("managed session deletion recovery failed", errorMessage(error));
-      try { await this.ctx.storage.setAlarm(Date.now() + 1_000); } catch { /* Marker retains ownership. */ }
+      try { await this.#scheduleCleanupRetry(); } catch { /* Marker retains ownership. */ }
     }));
   }
 
   #deleteOwnedSession(): Promise<void> {
     if (this.#deletionTask) return this.#deletionTask;
-    const task = this.#performOwnedSessionDeletion();
+    const generation = ++this.#deletionGeneration;
+    const task = this.#performOwnedSessionDeletion(generation);
     this.#deletionTask = task;
     void task.finally(() => {
       if (this.#deletionTask === task) this.#deletionTask = undefined;
@@ -1205,24 +1503,48 @@ export class NanocodexSession extends DurableComputerSession {
     return task;
   }
 
-  async #performOwnedSessionDeletion(): Promise<void> {
+  async #performOwnedSessionDeletion(generation: number): Promise<void> {
     this.#deleting = true;
-    const runtimeProfile = this.#session()?.runtime_profile;
-    await this.#stop(true);
-    await Promise.allSettled([...this.#inFlight]);
+    await this.ctx.storage.put(SESSION_DELETION_GENERATION_KEY, generation);
+    const session = this.#session();
+    const runtimeProfile = session?.runtime_profile;
+    const timeoutMs = this.#ownershipIoTimeoutMs();
+    await this.#releaseRuntimeOwnershipForDeletion(timeoutMs);
     for (const socket of this.ctx.getWebSockets()) closeSocket(socket, 1000, "session deleted");
-    if (runtimeProfile !== "multiplayer") {
+    const credentialBinding = this.#credentialBinding ?? (
+      session && runtimeProfile !== "multiplayer"
+        ? this.#bindingOwnershipForSession(session)
+        : undefined
+    );
+    if (credentialBinding) {
+      await Promise.all([
+        unbindAgentCredential(
+          this.env.NANOCODEX,
+          credentialBinding.subject,
+          credentialBinding.owner_id,
+          this.#ownershipIoTimeoutMs(),
+        ),
+        detachAgent(
+          this.env,
+          credentialBinding.owner_id,
+          credentialBinding.session_id,
+          this.#ownershipIoTimeoutMs(),
+        ),
+      ]);
+    }
+    await withHardDeadline("managed workspace deletion", timeoutMs, async () => {
       const workspace = await getWorkspace(this);
       try {
         await workspace.fs.rm("/workspace", { recursive: true, force: true });
       } finally {
         workspace[Symbol.dispose]();
       }
-    }
+    });
     // A socket or admission event may have resumed while external cleanup was
     // awaited. The durable deletion marker makes those paths fail closed; close
     // once more before dropping the owned journal and event history.
     for (const socket of this.ctx.getWebSockets()) closeSocket(socket, 1000, "session deleted");
+    this.#assertDeletionGeneration(generation);
     CloudflareAgent.destroy(this);
     this.ctx.storage.transactionSync(() => {
       this.ctx.storage.sql.exec("DELETE FROM managed_turns");
@@ -1230,19 +1552,90 @@ export class NanocodexSession extends DurableComputerSession {
       this.ctx.storage.sql.exec("DELETE FROM completed_operations");
       this.ctx.storage.sql.exec("DELETE FROM session_state");
     });
-    await this.ctx.storage.delete(SESSION_DELETING_KEY);
+    await this.ctx.storage.transaction(async (transaction) => {
+      const retainedGeneration = await transaction.get<number>(SESSION_DELETION_GENERATION_KEY);
+      const deleting = await transaction.get<boolean>(SESSION_DELETING_KEY);
+      if (retainedGeneration !== generation || deleting !== true) {
+        throw new Error("managed deletion attempt lost its durable ownership fence");
+      }
+      await transaction.delete(CREDENTIAL_BINDING_KEY);
+      await transaction.delete(CLEANUP_RETRY_ATTEMPT_KEY);
+      await transaction.delete(SESSION_DELETING_KEY);
+      await transaction.deleteAlarm();
+    });
+    this.#assertDeletionGeneration(generation);
+    this.#credentialBinding = undefined;
     this.#deleting = false;
-    try {
-      await this.ctx.storage.deleteAlarm();
-    } catch (error) {
-      // Cleanup is already complete and the durable deletion marker is gone;
-      // a stale alarm is harmless and will observe an empty session.
-      console.error("failed to clear stale managed-session alarm", errorMessage(error));
+  }
+
+  async #releaseRuntimeOwnershipForDeletion(timeoutMs: number): Promise<void> {
+    const agent = this.#agent;
+    const construction = this.#agentConstruction;
+    const shutdown = this.#agentShutdownPromise;
+    const turns = [...this.#turns.values()];
+    const inFlight = [...this.#inFlight];
+
+    this.#runtimeOwnershipGeneration += 1;
+    this.#agent = undefined;
+    this.#agentPromise = undefined;
+    this.#agentConstruction = undefined;
+    this.#agentShutdownPromise = undefined;
+    this.#events?.off();
+    this.#events = undefined;
+    this.#turns.clear();
+    this.#inFlight.clear();
+    this.#admissionTasks.clear();
+    this.#cancellationTasks.clear();
+    this.#recoveryTask = undefined;
+    this.#reopenInterruptedTurnIds.clear();
+    this.#eventTurnQueue.length = 0;
+    this.#eventTurnId = undefined;
+    this.#pendingTurnIds.clear();
+    this.#turnInputs.clear();
+
+    // The deletion attempt waits for the construction it superseded once. If
+    // that drain times out, the retained ownership record keeps the late
+    // result visible to its own cleanup continuation without making every
+    // later deletion generation wait on the same noncooperative promise.
+    const constructionShutdown = construction
+      ? this.#retireAgentConstruction(construction)
+      : undefined;
+
+    await drainRuntimeForDeletion(
+      timeoutMs,
+      turns,
+      async () => {
+        if (shutdown) return shutdown;
+        await Promise.all([
+          agent?.session.shutdown(),
+          constructionShutdown,
+        ]);
+      },
+      inFlight,
+    );
+  }
+
+  #assertDeletionGeneration(generation: number): void {
+    if (!this.#deleting || this.#deletionGeneration !== generation) {
+      throw new Error("managed deletion attempt lost its ownership fence");
     }
   }
 
+  async #scheduleCleanupRetry(): Promise<number> {
+    const previous = await this.ctx.storage.get<number>(CLEANUP_RETRY_ATTEMPT_KEY) ?? 0;
+    const attempt = Math.min(30, previous + 1);
+    const cap = Math.min(MAX_CLEANUP_RETRY_MS, 1_000 * (2 ** attempt));
+    const random = crypto.getRandomValues(new Uint32Array(1))[0]! / 0x1_0000_0000;
+    const delay = Math.ceil(cap / 2 + random * cap / 2);
+    await this.ctx.storage.transaction(async (transaction) => {
+      await transaction.put(CLEANUP_RETRY_ATTEMPT_KEY, attempt);
+      await transaction.setAlarm(Date.now() + delay);
+    });
+    return delay;
+  }
+
   #scheduleRecovery(): void {
-    if (this.#deleting || this.#recoveryTask) return;
+    if (this.#deleting || this.#deleted || this.#recoveryTask) return;
     const task = Promise.resolve().then(() => this.#runRecovery());
     this.#recoveryTask = task;
     void task.finally(() => {
@@ -1256,22 +1649,25 @@ export class NanocodexSession extends DurableComputerSession {
   async #runRecovery(): Promise<void> {
     if (this.#deleting || !this.#sessionId() || this.#streamError) return;
     const rows = this.#managedTurns(
-      `WHERE state IN ('accepted', 'cancelling')
-          OR (state = 'retryable' AND COALESCE(retry_at, 0) <= ?)
+      `WHERE state = 'accepted'
+          OR (state IN ('retryable', 'cancelling') AND COALESCE(retry_at, 0) <= ?)
        ORDER BY created_at, rowid`,
       Date.now(),
     );
     for (const row of rows) {
       if (this.#deleting) return;
-      if (this.#turns.has(row.id)
-        || this.#pendingTurnIds.has(row.id)
-        || this.#admissionTasks.has(row.id)) continue;
       const current = this.#managedTurn(row.id);
       if (!current || isTerminalState(current.state) || current.state === "blocked") continue;
       if (current.state === "cancelling") {
+        if (this.#pendingTurnIds.has(row.id)
+          || this.#admissionTasks.has(row.id)
+          || this.#cancellationTasks.has(row.id)) continue;
         this.#scheduleCancellation(current.id);
         continue;
       }
+      if (this.#turns.has(row.id)
+        || this.#pendingTurnIds.has(row.id)
+        || this.#admissionTasks.has(row.id)) continue;
       try {
         validatePromptInput(JSON.parse(current.input_json));
         await this.#admitManagedTurn(current, true);
@@ -1283,46 +1679,159 @@ export class NanocodexSession extends DurableComputerSession {
   }
 
   async #ensureAgent(): Promise<CloudflareAgent.Agent> {
+    if (this.#deleting) throw retryableError("agent is being deleted");
+    if (this.#agentShutdownPromise) {
+      try {
+        await this.#agentShutdownPromise;
+      } catch (error) {
+        throw retryableError(`previous agent shutdown failed: ${errorMessage(error)}`);
+      }
+      if (this.#deleting) throw retryableError("agent is being deleted");
+      return this.#ensureAgent();
+    }
     if (this.#agent) return this.#agent;
     if (this.#agentPromise) return this.#agentPromise;
-    this.#agentPromise = this.#createAgent();
+    const construction: AgentConstructionOwnership = {
+      deletionGeneration: this.#deletionGeneration,
+      runtimeGeneration: this.#runtimeOwnershipGeneration,
+      promise: undefined as unknown as Promise<CloudflareAgent.Agent>,
+      publication: undefined as unknown as Promise<CloudflareAgent.Agent>,
+    };
+    construction.promise = this.#createAgent();
+    this.#agentConstruction = construction;
+    this.#agentConstructions.add(construction);
+    const publication = this.#publishAgentConstruction(construction);
+    construction.publication = publication;
+    this.#agentPromise = publication;
     try {
-      this.#agent = await this.#agentPromise;
-      return this.#agent;
+      return await publication;
     } finally {
-      this.#agentPromise = undefined;
+      if (this.#agentPromise === publication) this.#agentPromise = undefined;
+      if (this.#agentConstruction === construction) this.#agentConstruction = undefined;
     }
+  }
+
+  async #publishAgentConstruction(
+    construction: AgentConstructionOwnership,
+  ): Promise<CloudflareAgent.Agent> {
+    try {
+      const agent = await construction.promise;
+      if (!this.#ownsAgentConstruction(construction)) {
+        try { await this.#retireAgentConstruction(construction, agent); }
+        catch (error) {
+          throw retryableError(`superseded agent shutdown failed: ${errorMessage(error)}`);
+        }
+        throw retryableError("agent construction was superseded");
+      }
+      const events = agent.events.watch();
+      events.onEvent((event) => this.#recordAgentEvent(event));
+      if (!this.#ownsAgentConstruction(construction)) {
+        events.off();
+        try { await this.#retireAgentConstruction(construction, agent); }
+        catch (error) {
+          throw retryableError(`superseded agent shutdown failed: ${errorMessage(error)}`);
+        }
+        throw retryableError("agent construction was superseded");
+      }
+      this.#events = events;
+      this.#agent = agent;
+      this.#agentConstructions.delete(construction);
+      return this.#agent;
+    } catch (error) {
+      if (!construction.shutdown) this.#agentConstructions.delete(construction);
+      throw error;
+    }
+  }
+
+  #ownsAgentConstruction(construction: AgentConstructionOwnership): boolean {
+    return !this.#deleting
+      && !this.#deleted
+      && this.#agentConstruction === construction
+      && this.#agentPromise === construction.publication
+      && this.#runtimeOwnershipGeneration === construction.runtimeGeneration
+      && this.#deletionGeneration === construction.deletionGeneration;
+  }
+
+  #retireAgentConstruction(
+    construction: AgentConstructionOwnership,
+    resolved?: CloudflareAgent.Agent,
+  ): Promise<void> {
+    if (construction.shutdown) return construction.shutdown;
+    this.#agentConstructions.add(construction);
+    const shutdown = (async () => {
+      let agent = resolved;
+      if (!agent) {
+        try { agent = await construction.promise; }
+        catch { return; }
+      }
+      await agent.session.shutdown();
+    })();
+    construction.shutdown = shutdown;
+    void shutdown.finally(() => {
+      this.#agentConstructions.delete(construction);
+    }).catch(() => {});
+    this.ctx.waitUntil(shutdown.catch((error) => {
+      console.error("superseded Nanocodex agent shutdown failed", errorMessage(error));
+    }));
+    return shutdown;
   }
 
   async #createAgent(): Promise<CloudflareAgent.Agent> {
     const session = this.#session();
     if (!session) throw new Error("session is not initialized");
     const multiplayer = session.runtime_profile === "multiplayer";
-    const workspace = multiplayer ? undefined : await getWorkspace(this);
-    const filesystem = workspace ? await createComputerFilesystem(workspace) : undefined;
-    const shell = filesystem ? await justBash({
-      filesystem,
+    if (!multiplayer) await this.#ensureCredentialBinding(session);
+    const workspace = await getWorkspace(this);
+    const sourceFilesystem = await createComputerFilesystem(workspace);
+    let workspaceDisposed = false;
+    const disposeWorkspace = () => {
+      if (workspaceDisposed) return;
+      workspaceDisposed = true;
+      workspace[Symbol.dispose]();
+    };
+    // Shared-room members can all admit turns. Never attach the room owner's
+    // connector capability to that shared tool runtime: provider destinations
+    // fail closed without a subject, while ordinary public HTTP remains usable.
+    const shellFetch = createManagedShellFetch(
+      this.env.NANOCODEX,
+      multiplayer ? undefined : this.ctx.id.toString(),
+    );
+    const shell = await justBash({
+      filesystem: sourceFilesystem,
       maxEntries: 2_000,
       maxOutputTokens: 10_000,
-      network: false,
-    }) : undefined;
+      fetch: shellFetch,
+      customCommands: [createManagedGhCommand(shellFetch)],
+    });
+    const execCommand = Object.freeze({ ...shell.tool, dispose: disposeWorkspace });
+    const currentAccountInfo = () => accountInfo(
+      this.env.NANOCODEX,
+      session.owner_id,
+      !multiplayer,
+    );
     let agent: CloudflareAgent.Agent;
     try {
       agent = await CloudflareAgent.create(this, {
         instructions: multiplayer
           ? [
             "You are the shared Nanocodex participant in a short-lived Multiplayer chat room.",
-            "Reply conversationally and concisely to the room message. You have no tools, shell, web access, or workspace authority.",
-            "Never claim to have performed an external action and never expose internal runtime, routing, credential, or correlation identifiers.",
+            "Reply conversationally and concisely to the room message. Use the normal Nanocodex tools when they materially help answer the room.",
+            "GitHub, Gmail, Google Drive, and other account connectors are unavailable in shared rooms.",
+            "Never claim to have performed an external action unless its tool completed successfully, and never expose internal runtime, routing, credential, or correlation identifiers.",
           ].join("\n\n")
           : [
             "You are Nanocodex running as a durable managed agent on Cloudflare Workers.",
             "Your /workspace filesystem is durable Cloudflare Computer storage backed by this agent's Durable Object.",
-            shell!.instructions,
-            "No process sandbox is attached. Bounded Just Bash is the complete local execution boundary.",
+            "Call accountInfo to see which GitHub, Gmail, and Google Drive accounts are connected, then use gh or curl normally through transparent authenticated egress. accountInfo is a tool, not a shell command.",
           ].join("\n\n"),
-        tools: multiplayer ? [] : [
-          shell!.tool,
+        tools: [
+          execCommand,
+          ...(multiplayer ? [] : [{
+            name: "accountInfo",
+            description: "Report connected account APIs and their display identities. Never returns credentials.",
+            parameters: { type: "object", additionalProperties: false },
+            handler: currentAccountInfo,
+          }]),
           web({
             url: "https://managed-tools.internal/web-search",
             fetch: managedWebFetch(this.env, this.ctx.id.toString()),
@@ -1330,39 +1839,86 @@ export class NanocodexSession extends DurableComputerSession {
           imageGeneration({
             url: "https://managed-tools.internal/image-generation",
             fetch: managedImageFetch(this.env, this.ctx.id.toString()),
-            workspace: shell!.filesystem,
+            workspace: shell.filesystem,
           }),
-          viewImage({ workspace: shell!.filesystem }),
+          viewImage({ workspace: shell.filesystem }),
           updatePlan(),
           {
             name: "runtimeInfo",
             description: "Return information about the current durable agent runtime.",
             parameters: { type: "object", additionalProperties: false },
-            handler: () => ({
+            handler: async () => ({
               runtime: "cloudflare-durable-object",
               shell: "nanocodex-just-bash",
-              shell_network: "disabled",
+              shell_network: multiplayer ? "public-http-only" : "connector-http-gateway",
               sandbox: "disabled",
               workspace: "/workspace",
+              custom_commands: ["gh"],
+              account: await currentAccountInfo(),
             }),
           },
         ],
       });
     } catch (error) {
-      workspace?.[Symbol.dispose]();
+      disposeWorkspace();
       throw error;
     }
-    this.#events = agent.events.watch();
-    this.#events.onEvent((event) => this.#recordAgentEvent(event));
     return agent;
   }
 
+  async #ensureCredentialBinding(session: SessionRow): Promise<void> {
+    if (this.#deleting) throw retryableError("agent is being deleted");
+    let ownership = this.#credentialBinding;
+    if (!ownership) {
+      ownership = this.#bindingOwnershipForSession(session);
+      await this.ctx.storage.put(CREDENTIAL_BINDING_KEY, ownership);
+      this.#credentialBinding = ownership;
+    }
+    if (ownership.owner_id !== session.owner_id
+      || ownership.session_id !== session.session_id
+      || ownership.subject !== this.ctx.id.toString()) {
+      throw new Error("credential binding ownership does not match the retained session");
+    }
+    await bindAgentCredential(
+      this.env.NANOCODEX,
+      ownership.subject,
+      ownership.owner_id,
+      this.#ownershipIoTimeoutMs(),
+    );
+    if (this.#deleting) throw retryableError("agent is being deleted");
+  }
+
+  #bindingOwnershipForSession(session: SessionRow): CredentialBindingOwnership {
+    return {
+      cleanup_at: Date.now(),
+      owner_id: session.owner_id,
+      session_id: session.session_id,
+      state: "active",
+      subject: this.ctx.id.toString(),
+    };
+  }
+
   async #complete(id: string, turn: Turn): Promise<void> {
+    let reopenAgent = false;
     try {
-      const materialized = await materializeTurnTerminal(id, turn);
+      let materialized = await materializeTurnTerminal(id, turn);
+      if (this.#deleting) return;
+      if (this.#reopenInterruptedTurnIds.has(id)
+        && materialized.terminal.type === "turn_cancelled") {
+        materialized = {
+          terminal: {
+            type: "turn_retryable",
+            id,
+            error: "turn was interrupted while reopening the durable Agent",
+          },
+          reopenAgent: false,
+        };
+      }
+      reopenAgent = materialized.reopenAgent;
       try {
-        this.#commitManagedMessage(id, materialized);
+        this.#commitManagedMessage(id, materialized.terminal);
       } catch (error) {
+        if (this.#deleting) return;
         try {
           this.#commitManagedMessage(id, {
             type: "turn_retryable",
@@ -1375,18 +1931,24 @@ export class NanocodexSession extends DurableComputerSession {
       }
     } finally {
       this.#turns.delete(id);
+      this.#reopenInterruptedTurnIds.delete(id);
       this.#turnInputs.delete(id);
-      this.#releaseEventTurn(id);
       turn.dispose();
       if (!this.#deleting) {
+        if (reopenAgent) await this.#reopenAgent(id);
         this.#scheduleRecovery();
         await this.#scheduleNextAlarm();
       }
     }
   }
 
-  #commitManagedFailure(id: string, error: unknown, _replayed: boolean): ManagedTurnRow {
-    const failure = classifyManagedFailure(id, error);
+  #commitManagedFailure(
+    id: string,
+    error: unknown,
+    _replayed: boolean,
+    classified?: TurnTerminal,
+  ): ManagedTurnRow {
+    const failure = classified ?? classifyTurnFailure(id, error).terminal;
     const row = this.#managedTurn(id);
     if (row?.state === "cancelling"
       && failure.type !== "turn_cancelled"
@@ -1434,17 +1996,27 @@ export class NanocodexSession extends DurableComputerSession {
           committed = row;
           return;
         }
-        attemptCount += 1;
-        if (attemptCount >= MAX_RETRY_ATTEMPTS) {
-          message = {
-            type: "turn_blocked",
+        attemptCount = Math.min(Number.MAX_SAFE_INTEGER, attemptCount + 1);
+        retryAt = now + retryDelayMs(attemptCount);
+        if (message.type === "turn_cancelling") message = { ...message, retry_at: retryAt };
+        if (row.state === state) {
+          this.ctx.storage.sql.exec(
+            `UPDATE managed_turns
+             SET error = ?, attempt_count = ?, retry_at = ?, updated_at = ?
+             WHERE id = ? AND state = ?`,
+            detail,
+            attemptCount,
+            retryAt,
+            now,
             id,
-            error: `${detail ?? "operation failed"} (retry limit reached)`,
-          };
-          state = "blocked";
-        } else {
-          retryAt = now + retryDelayMs(attemptCount);
-          if (message.type === "turn_cancelling") message = { ...message, retry_at: retryAt };
+            state,
+          );
+          this.ctx.storage.sql.exec(
+            "UPDATE session_state SET last_active = ? WHERE singleton = 1",
+            now,
+          );
+          committed = this.#managedTurn(id) ?? row;
+          return;
         }
       }
 
@@ -1492,6 +2064,12 @@ export class NanocodexSession extends DurableComputerSession {
     if (event.type === "run.started") {
       turnId = this.#eventTurnQueue.shift();
       this.#eventTurnId = turnId;
+    } else if ((event.type === "run.completed" || event.type === "run.failed")
+      && turnId === undefined) {
+      // A retained operation replays only its raw terminal event. Preserve the
+      // outer admission queue until that event arrives so a following run
+      // cannot inherit the replayed operation's attribution.
+      turnId = this.#eventTurnQueue.shift();
     }
     this.#recordAndBroadcast({ type: "event", event }, turnId ?? null);
     if (event.type === "run.completed" || event.type === "run.failed") {
@@ -1547,13 +2125,15 @@ export class NanocodexSession extends DurableComputerSession {
   }
 
   async #stop(strictShutdown = false): Promise<void> {
+    const shutdown = this.#shutdownAgent(strictShutdown);
     const cancellations = [...this.#turns.values()].map(async (turn) => {
       try { await turn.cancel(); } catch { /* A terminal turn needs no cancellation. */ }
     });
     await Promise.all(cancellations);
+    await shutdown;
     await Promise.allSettled([...this.#inFlight]);
-    await this.#shutdownAgent(strictShutdown);
     this.#turns.clear();
+    this.#reopenInterruptedTurnIds.clear();
     this.#eventTurnQueue.length = 0;
     this.#eventTurnId = undefined;
     this.#pendingTurnIds.clear();
@@ -1561,27 +2141,56 @@ export class NanocodexSession extends DurableComputerSession {
   }
 
   async #shutdownAgent(strict = false): Promise<void> {
-    let agent = this.#agent;
-    if (!agent && this.#agentPromise) {
-      try { agent = await this.#agentPromise; } catch { /* Construction cleanup runs below. */ }
+    let shutdown = this.#agentShutdownPromise;
+    if (!shutdown) {
+      const agent = this.#agent;
+      const construction = this.#agentConstruction;
+      this.#runtimeOwnershipGeneration += 1;
+      this.#agent = undefined;
+      this.#agentPromise = undefined;
+      this.#agentConstruction = undefined;
+      this.#events?.off();
+      this.#events = undefined;
+      if (!agent && !construction) return;
+      shutdown = (async () => {
+        if (agent) await agent.session.shutdown();
+        else if (construction) await this.#retireAgentConstruction(construction);
+      })();
+      this.#agentShutdownPromise = shutdown;
+      void shutdown.finally(() => {
+        if (this.#agentShutdownPromise === shutdown) this.#agentShutdownPromise = undefined;
+      }).catch(() => {});
     }
-    if (agent) {
-      try {
-        await agent.session.shutdown();
-      } catch (error) {
-        if (strict) throw error;
-        console.error("Nanocodex idle shutdown failed", errorMessage(error));
-      }
+    try {
+      await shutdown;
+    } catch (error) {
+      if (strict) throw error;
+      console.error("Nanocodex agent shutdown failed", errorMessage(error));
     }
-    this.#agent = undefined;
     this.#events?.off();
     this.#events = undefined;
+  }
+
+  async #reopenAgent(failedId: string): Promise<void> {
+    for (const siblingId of this.#turns.keys()) {
+      if (siblingId !== failedId) this.#reopenInterruptedTurnIds.add(siblingId);
+    }
+    await this.#shutdownAgent();
+    this.#eventTurnQueue.length = 0;
+    this.#eventTurnId = undefined;
   }
 
   #session(): SessionRow | undefined {
     return this.ctx.storage.sql.exec<SessionRow>(
       `SELECT session_id, owner_id, public_origin, runtime_profile, completed_turns, last_active, stream_error
        FROM session_state WHERE singleton = 1`,
+    ).toArray()[0];
+  }
+
+  #initializationOwnership(): SessionInitializationOwnership | undefined {
+    return this.ctx.storage.sql.exec<SessionInitializationOwnership>(
+      `SELECT session_id, owner_id, runtime_profile, state
+       FROM session_initialization_ownership WHERE singleton = 1`,
     ).toArray()[0];
   }
 
@@ -1659,6 +2268,12 @@ export class NanocodexSession extends DurableComputerSession {
       for (const row of this.#managedTurns(
         "WHERE state IN ('accepted', 'cancelling', 'retryable') ORDER BY created_at",
       )) {
+        if (row.state === "cancelling") {
+          if (!this.#cancellationTasks.has(row.id)) {
+            targets.push(row.retry_at ?? now + 1);
+          }
+          continue;
+        }
         if (this.#turns.has(row.id)
           || this.#pendingTurnIds.has(row.id)
           || this.#admissionTasks.has(row.id)
@@ -1698,6 +2313,10 @@ export class NanocodexSession extends DurableComputerSession {
   #idleTimeoutMs(): number {
     const configured = Number(this.env.AGENT_IDLE_TIMEOUT_MS ?? 30_000);
     return Number.isFinite(configured) ? Math.min(15 * 60_000, Math.max(1_000, configured)) : 30_000;
+  }
+
+  #ownershipIoTimeoutMs(): number {
+    return managedOwnershipTimeoutMs(this.env);
   }
 
   #broadcast(message: ServerMessage): void {
@@ -1817,28 +2436,70 @@ function managedStateForMessage(message: ManagedTransition): ManagedTurnState {
   }
 }
 
-function classifyManagedFailure(id: string, error: unknown): TurnTerminal {
-  const message = errorMessage(error);
-  const code = (error as { code?: unknown } | null)?.code;
-  if (code === "cancelled" || /\bturn was cancelled\b/i.test(message)) {
-    return { type: "turn_cancelled", id };
-  }
-  if (code === "blocked" || /ambiguous outcome/i.test(message)) {
-    return { type: "turn_blocked", id, error: message };
-  }
-  if (code === "retryable"
-    || /blocked by unfinished operation|already active|agent stopped|turn completed|durability (?:store|driver)|transport|websocket/i.test(message)) {
-    return { type: "turn_retryable", id, error: message };
-  }
-  return { type: "turn_failed", id, error: message };
-}
-
 function retryableError(message: string): Error {
   return Object.assign(new Error(message), { code: "retryable" });
 }
 
 function retryDelayMs(attempt: number): number {
   return Math.min(MAX_RETRY_DELAY_MS, 1_000 * (2 ** Math.max(0, attempt - 1)));
+}
+
+function managedOwnershipTimeoutMs(env: Env): number {
+  const configured = Number(env.MANAGED_OWNERSHIP_IO_TIMEOUT_MS ?? DEFAULT_OWNERSHIP_IO_TIMEOUT_MS);
+  return Number.isFinite(configured)
+    ? Math.min(CREDENTIAL_BINDING_PREPARE_TIMEOUT_MS, Math.max(1, configured))
+    : DEFAULT_OWNERSHIP_IO_TIMEOUT_MS;
+}
+
+function managedMultiplayerTimeoutMs(env: Env): number {
+  const configured = Number(env.MANAGED_MULTIPLAYER_IO_TIMEOUT_MS ?? DEFAULT_MULTIPLAYER_IO_TIMEOUT_MS);
+  return Number.isFinite(configured)
+    ? Math.min(60_000, Math.max(1, configured))
+    : DEFAULT_MULTIPLAYER_IO_TIMEOUT_MS;
+}
+
+async function requestSessionCleanup(
+  stub: DurableObjectStub<NanocodexSession>,
+  timeoutMs: number,
+): Promise<void> {
+  try {
+    const response = await fetchWithDeadline(
+      stub,
+      "https://session.internal/session",
+      { method: "DELETE" },
+      timeoutMs,
+      "agent session cleanup",
+    );
+    await response.body?.cancel();
+  } catch { /* A retained preparation/deletion marker owns later cleanup. */ }
+}
+
+async function fetchWithDeadline(
+  binding: Pick<Fetcher, "fetch">,
+  input: RequestInfo | URL,
+  init: RequestInit,
+  timeoutMs: number,
+  operation: string,
+): Promise<Response> {
+  const controller = new AbortController();
+  let timedOut = false;
+  const pending = binding.fetch(input, { ...init, signal: controller.signal }).then((response) => {
+    if (timedOut) void response.body?.cancel();
+    return response;
+  });
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      timedOut = true;
+      reject(new Error(`${operation} timed out after ${timeoutMs}ms`));
+      controller.abort();
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([pending, deadline]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
 }
 
 function managedHttpError(error: unknown, fallbackCode = "managed_request_failed") {
@@ -2065,101 +2726,120 @@ async function createMultiplayerRoom(
   const roomId = await signedRoomRouteId(env.NANOCODEX_ADMIN_TOKEN, roomUuid);
   const quota = env.NANOCODEX_MULTIPLAYER_QUOTA.getByName("global");
   const room = env.NANOCODEX_ROOMS.getByName(roomId);
-  let reserved: Response;
+  const timeoutMs = managedMultiplayerTimeoutMs(env);
+  let reservation: Readonly<{
+    kind: "reserved";
+  }> | Readonly<{
+    kind: "rejected";
+    retryAfter: string | null;
+    status: number;
+  }>;
   try {
-    reserved = await quota.fetch("https://quota.internal/rooms", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        room_id: roomId,
-        expires_at: Date.now() + MULTIPLAYER_ROOM_LEASE_MS,
-        create_id_hash: createIdHash,
-        request_hash: requestHash,
-      }),
-    });
+    reservation = await fetchResponseWithDeadline(
+      quota,
+      "https://quota.internal/rooms",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          room_id: roomId,
+          expires_at: Date.now() + MULTIPLAYER_ROOM_LEASE_MS,
+          create_id_hash: createIdHash,
+          request_hash: requestHash,
+        }),
+      },
+      timeoutMs,
+      "multiplayer quota reservation",
+      async (response) => {
+        if (!response.ok) {
+          return {
+            kind: "rejected" as const,
+            retryAfter: response.headers.get("retry-after"),
+            status: response.status,
+          };
+        }
+        const value = await response.json<unknown>();
+        if (!value || typeof value !== "object" || Array.isArray(value)
+          || (value as Record<string, unknown>).room_id !== roomId
+          || !Number.isSafeInteger((value as Record<string, unknown>).expires_at)) {
+          throw new Error("invalid quota response");
+        }
+        return { kind: "reserved" as const };
+      },
+    );
   } catch {
     return json({ error: "multiplayer_capacity_unavailable" }, { status: 503 });
   }
-  if (!reserved.ok) {
-    if (reserved.status === 409) {
-      await reserved.body?.cancel();
+  if (reservation.kind === "rejected") {
+    if (reservation.status === 409) {
       return json({ error: "create_id_conflict" }, { status: 409 });
     }
-    const status = reserved.status === 429 ? 429 : 503;
-    const retryAfter = reserved.headers.get("retry-after");
-    await reserved.body?.cancel();
+    const status = reservation.status === 429 ? 429 : 503;
     return json({
       error: status === 429
         ? "multiplayer_capacity_reached"
         : "multiplayer_capacity_unavailable",
     }, {
       status,
-      ...(retryAfter ? { headers: { "retry-after": retryAfter } } : {}),
+      ...(reservation.retryAfter ? { headers: { "retry-after": reservation.retryAfter } } : {}),
     });
   }
 
+  let initialization: Readonly<{
+    kind: "initialized";
+    receipt: RoomInitializationReceipt;
+  }> | Readonly<{
+    kind: "rejected";
+    status: number;
+  }>;
   try {
-    const reservation = await reserved.json<unknown>();
-    if (!reservation || typeof reservation !== "object" || Array.isArray(reservation)
-      || (reservation as Record<string, unknown>).room_id !== roomId
-      || !Number.isSafeInteger((reservation as Record<string, unknown>).expires_at)) {
-      throw new Error("invalid quota response");
-    }
-  } catch {
-    return json({ error: "multiplayer_capacity_unavailable" }, { status: 503 });
-  }
-
-  let initialized: Response;
-  try {
-    initialized = await room.fetch("https://room.internal/initialize", {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        room_id: roomId,
-        agent_id: agentId,
-        owner_id: ownerId,
-        public_origin: publicOrigin,
-        owner_name: ownerName,
-        create_id_hash: createIdHash,
-        request_hash: requestHash,
-        invite,
-        member_id: creatorMemberId,
-        member_token: memberToken,
-      }),
-    });
+    initialization = await fetchResponseWithDeadline(
+      room,
+      "https://room.internal/initialize",
+      {
+        method: "PUT",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          room_id: roomId,
+          agent_id: agentId,
+          owner_id: ownerId,
+          public_origin: publicOrigin,
+          owner_name: ownerName,
+          create_id_hash: createIdHash,
+          request_hash: requestHash,
+          invite,
+          member_id: creatorMemberId,
+          member_token: memberToken,
+        }),
+      },
+      timeoutMs,
+      "multiplayer room initialization",
+      async (response) => {
+        if (!response.ok) return { kind: "rejected" as const, status: response.status };
+        const receipt = validateRoomInitializationReceipt(
+          await response.json<unknown>(),
+          roomId,
+          publicOrigin,
+        );
+        if (receipt.invite !== invite
+          || receipt.member_id !== creatorMemberId
+          || receipt.member_token !== memberToken) {
+          throw new Error("room receipt does not match deterministic credentials");
+        }
+        return { kind: "initialized" as const, receipt };
+      },
+    );
   } catch {
     return json({ error: "room_initialization_failed" }, { status: 503 });
   }
-  if (!initialized.ok) {
-    const status = initialized.status;
-    try {
-      await initialized.body?.cancel();
-    } catch {
-      // The Room's durable state and alarm own any ambiguous initialization.
-    }
-    return status === 409
+  if (initialization.kind === "rejected") {
+    return initialization.status === 409
       ? json({ error: "create_id_conflict" }, { status: 409 })
       : json({ error: "room_initialization_failed" }, {
-        status: status >= 500 ? 503 : 400,
+        status: initialization.status >= 500 ? 503 : 400,
       });
   }
-
-  let receipt: RoomInitializationReceipt;
-  try {
-    receipt = validateRoomInitializationReceipt(
-      await initialized.json<unknown>(),
-      roomId,
-      publicOrigin,
-    );
-    if (receipt.invite !== invite
-      || receipt.member_id !== creatorMemberId
-      || receipt.member_token !== memberToken) {
-      throw new Error("room receipt does not match deterministic credentials");
-    }
-  } catch {
-    return json({ error: "room_initialization_failed" }, { status: 503 });
-  }
-  return roomCreationResponse(receipt, 201);
+  return roomCreationResponse(initialization.receipt, 201);
 }
 
 function validateRoomInitializationReceipt(

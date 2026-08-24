@@ -1,4 +1,5 @@
 import { DurableObject } from "cloudflare:workers";
+import { fetchResponseWithDeadline } from "./deadline";
 import { Handler, Kv } from "accounts/server";
 
 const ACCOUNT_COOKIE = "nanocodex_account";
@@ -6,6 +7,7 @@ const SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
 const USER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const API_KEY = /^ncx_live_([A-Za-z0-9_-]{12})_([A-Za-z0-9_-]{43})$/;
 const ANONYMOUS_SESSION_TOKEN = /^a_[A-Za-z0-9_-]{43}$/;
+const DEFAULT_OWNERSHIP_IO_TIMEOUT_MS = 10_000;
 const accountSessionKey = (token: string) => `session:${token}`;
 
 export function isUserId(value: unknown): value is string {
@@ -161,6 +163,17 @@ export async function authenticate(
   return { kind: "api_key", userId: record.userId };
 }
 
+export async function authenticatePersistentAccount(
+  request: Request,
+  env: AccountAuthEnv,
+  url = new URL(request.url),
+): Promise<Principal | undefined> {
+  const principal = await authenticate(request, env, url);
+  if (!principal || principal.kind !== "account_session") return undefined;
+  const account = await readAccount(env, principal.userId);
+  return account?.persistent === true ? principal : undefined;
+}
+
 export function requireSameOriginMutation(
   request: Request,
   url: URL,
@@ -182,17 +195,22 @@ export async function attachAgent(
   env: AccountAuthEnv,
   userId: string,
   agentId: string,
+  timeoutMs = DEFAULT_OWNERSHIP_IO_TIMEOUT_MS,
 ): Promise<void> {
-  const response = await env.NANOCODEX_USERS.getByName(userId).fetch(
+  await fetchResponseWithDeadline(
+    env.NANOCODEX_USERS.getByName(userId),
     "https://user.internal/agents",
     {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ agentId }),
     },
+    timeoutMs,
+    "agent attachment",
+    (response) => {
+      if (!response.ok) throw new Error("agent attachment failed");
+    },
   );
-  if (!response.ok) throw new Error("agent attachment failed");
-  await response.body?.cancel();
 }
 
 export async function recordAgentActivity(
@@ -227,13 +245,18 @@ export async function detachAgent(
   env: AccountAuthEnv,
   userId: string,
   agentId: string,
+  timeoutMs = DEFAULT_OWNERSHIP_IO_TIMEOUT_MS,
 ): Promise<void> {
-  const response = await env.NANOCODEX_USERS.getByName(userId).fetch(
+  await fetchResponseWithDeadline(
+    env.NANOCODEX_USERS.getByName(userId),
     `https://user.internal/agents/${agentId}`,
     { method: "DELETE" },
+    timeoutMs,
+    "agent detachment",
+    (response) => {
+      if (!response.ok && response.status !== 404) throw new Error("agent detachment failed");
+    },
   );
-  if (!response.ok && response.status !== 404) throw new Error("agent detachment failed");
-  await response.body?.cancel();
 }
 
 function webAuthnHandler(env: AccountAuthEnv, url: URL) {
@@ -269,7 +292,11 @@ function authStore(env: AccountAuthEnv, name: string): Kv.Kv {
   return Kv.durableObject(namespace, { name });
 }
 
-async function ensureAccount(env: AccountAuthEnv, userId: string, persistent: boolean): Promise<void> {
+export async function ensureAccount(
+  env: AccountAuthEnv,
+  userId: string,
+  persistent: boolean,
+): Promise<void> {
   if (!isUserId(userId)) {
     throw new Error("invalid account identity");
   }
@@ -281,8 +308,17 @@ async function ensureAccount(env: AccountAuthEnv, userId: string, persistent: bo
       body: JSON.stringify({ id: userId, persistent }),
     },
   );
-  if (!response.ok) throw new Error("account provisioning failed");
+  if (response.ok) {
+    await response.body?.cancel();
+    return;
+  }
+  const status = response.status;
   await response.body?.cancel();
+  if (status === 409) {
+    const current = await readAccount(env, userId);
+    if (current?.id === userId && (current.persistent || !persistent)) return;
+  }
+  throw new Error("account provisioning failed");
 }
 
 async function readAccount(env: AccountAuthEnv, userId: string): Promise<UserRecord | undefined> {
@@ -311,9 +347,15 @@ async function resolveOrCreateBrowserAccount(
   }
 
   // An explicit but invalid credential must not silently become a fresh
-  // browser account. Cookie-free browser bootstrap is only for unauthenticated
-  // requests that did not attempt bearer authentication.
+  // browser account. Cookie-free browser bootstrap is only for requests that
+  // did not present either account or bearer authentication.
   if (request.headers.has("authorization")) return unauthorized();
+  if (hasCookie(request, ACCOUNT_COOKIE)) {
+    return json({ error: "invalid_session" }, {
+      status: 401,
+      headers: { "set-cookie": clearAccountCookie(new URL(request.url).protocol) },
+    });
+  }
 
   const userId = crypto.randomUUID();
   const issuedAt = Math.floor(Date.now() / 1_000);
@@ -357,20 +399,39 @@ function decodeUserId(value: string): string | undefined {
 }
 
 function cookieValue(request: Request, name: string): string | undefined {
+  const cookie = rawCookie(request, name);
+  return cookie.present && /^(?:a_)?[A-Za-z0-9_-]{43}$/.test(cookie.value)
+    ? cookie.value
+    : undefined;
+}
+
+function hasCookie(request: Request, name: string): boolean {
+  return rawCookie(request, name).present;
+}
+
+function rawCookie(request: Request, name: string): { present: boolean; value: string } {
   for (const part of request.headers.get("cookie")?.split(";") ?? []) {
     const separator = part.indexOf("=");
-    if (separator < 0 || part.slice(0, separator).trim() !== name) continue;
-    const value = part.slice(separator + 1).trim();
-    if (/^(?:a_)?[A-Za-z0-9_-]{43}$/.test(value)) return value;
+    if (separator >= 0 && part.slice(0, separator).trim() === name) {
+      return { present: true, value: part.slice(separator + 1).trim() };
+    }
   }
-  return undefined;
+  return { present: false, value: "" };
 }
 
 function serializeAccountCookie(token: string, protocol: string): string {
+  return accountCookie(token, SESSION_TTL_SECONDS, protocol);
+}
+
+function clearAccountCookie(protocol: string): string {
+  return accountCookie("", 0, protocol);
+}
+
+function accountCookie(value: string, maxAge: number, protocol: string): string {
   return [
-    `${ACCOUNT_COOKIE}=${token}`,
+    `${ACCOUNT_COOKIE}=${value}`,
     "Path=/",
-    `Max-Age=${SESSION_TTL_SECONDS}`,
+    `Max-Age=${maxAge}`,
     "HttpOnly",
     "SameSite=Lax",
     ...(protocol === "https:" ? ["Secure"] : []),
@@ -497,9 +558,9 @@ export class UserAccount extends DurableObject<AccountAuthEnv> {
       }
     }
     if (url.pathname === "/agents") {
-      const agents = await this.ctx.storage.get<string[]>("agents") ?? [];
-      const summaries = await this.ctx.storage.get<Record<string, AgentSummary>>("agentSummaries") ?? {};
       if (request.method === "GET") {
+        const agents = await this.ctx.storage.get<string[]>("agents") ?? [];
+        const summaries = await this.ctx.storage.get<Record<string, AgentSummary>>("agentSummaries") ?? {};
         return json(agents.map((id) => summaries[id] ?? {
           id,
           title: "",
@@ -514,12 +575,18 @@ export class UserAccount extends DurableObject<AccountAuthEnv> {
         if (!/^[0-9a-f-]{36}$/.test(agentId)) {
           return json({ error: "invalid_agent" }, { status: 400 });
         }
-        if (!agents.includes(agentId)) {
+        const attached = await this.ctx.storage.transaction(async (transaction) => {
+          if (await transaction.get(`agent-tombstone:${agentId}`)) return false;
+          const agents = await transaction.get<string[]>("agents") ?? [];
+          if (agents.includes(agentId)) return true;
+          const summaries = await transaction.get<Record<string, AgentSummary>>("agentSummaries") ?? {};
           agents.push(agentId);
           const now = Date.now();
           summaries[agentId] = { id: agentId, title: "", createdAt: now, updatedAt: now, turnCount: 0 };
-          await this.ctx.storage.put({ agents, agentSummaries: summaries });
-        }
+          await transaction.put({ agents, agentSummaries: summaries });
+          return true;
+        });
+        if (!attached) return json({ error: "agent_deleted" }, { status: 410 });
         return new Response(null, { status: 204 });
       }
     }
@@ -548,12 +615,17 @@ export class UserAccount extends DurableObject<AccountAuthEnv> {
     }
     const agentMatch = url.pathname.match(/^\/agents\/([0-9a-f-]{36})$/);
     if (agentMatch && request.method === "DELETE") {
-      const agents = await this.ctx.storage.get<string[]>("agents") ?? [];
-      const next = agents.filter((agent) => agent !== agentMatch[1]);
-      if (next.length === agents.length) return json({ error: "not_found" }, { status: 404 });
-      const summaries = await this.ctx.storage.get<Record<string, AgentSummary>>("agentSummaries") ?? {};
-      delete summaries[agentMatch[1]!];
-      await this.ctx.storage.put({ agents: next, agentSummaries: summaries });
+      const agentId = agentMatch[1]!;
+      await this.ctx.storage.transaction(async (transaction) => {
+        const agents = await transaction.get<string[]>("agents") ?? [];
+        const summaries = await transaction.get<Record<string, AgentSummary>>("agentSummaries") ?? {};
+        delete summaries[agentId];
+        await transaction.put({
+          agents: agents.filter((agent) => agent !== agentId),
+          agentSummaries: summaries,
+          [`agent-tombstone:${agentId}`]: true,
+        });
+      });
       return new Response(null, { status: 204 });
     }
     return json({ error: "not_found" }, { status: 404 });

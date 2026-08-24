@@ -1,4 +1,6 @@
 import "./browserBuffer.mjs";
+import { createBrowserEgressFetch, installBrowserEgressFetch } from "./browserEgress.mjs";
+import { browserAccountInfoTool, browserRuntimeInfoTool } from "./accountInfo.mjs";
 
 const preparedBrowsers = new Map();
 
@@ -58,10 +60,16 @@ async function prepareBrowserRuntime(threadId, origin) {
     import("../standard.mjs"),
     import("../dataset.mjs"),
   ]);
-  const shell = await shellModule.prepareBrowserShell(threadId, origin);
+  const fetch = installBrowserEgressFetch({
+    origin,
+    threadId,
+  });
+  const secureFetch = createBrowserEgressFetch({ fetch, origin, threadId });
+  const shell = await shellModule.prepareBrowserShell(threadId, origin, secureFetch);
   return Object.freeze({
     origin,
     threadId,
+    fetch,
     shell,
     standard,
     datasets,
@@ -75,7 +83,7 @@ export function bindBrowser(prepared, options = {}) {
   if (options.threadId !== undefined && options.threadId !== prepared.threadId) {
     throw new Error("prepared browser runtime belongs to a different thread");
   }
-  const { datasets, shell, standard } = prepared;
+  const { datasets, fetch, shell, standard } = prepared;
   const web = {
     url: new URL("/api/tools/web-search", prepared.origin),
     ...options.web,
@@ -90,6 +98,8 @@ export function bindBrowser(prepared, options = {}) {
     projectInstructions: shell.projectInstructions,
     tools: Object.freeze([
       standard.namedTool("exec_command", shell.execTool),
+      browserRuntimeInfoTool({ fetch, origin: prepared.origin }),
+      browserAccountInfoTool({ fetch, origin: prepared.origin }),
       standard.web(web),
       standard.imageGeneration({
         ...images,

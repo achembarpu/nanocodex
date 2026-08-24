@@ -8,12 +8,12 @@ const multiplayerCss = source("../src/Multiplayer.css");
 const monsterWorldCss = source("../src/MonsterWorld.css");
 const coarseQuery = "(pointer: coarse), (any-pointer: coarse)";
 
-test("Multiplayer and World subtract the complete two-row phone header", () => {
-  const narrow = indexCss.indexOf("@media (max-width: 420px)");
-  assert.notEqual(narrow, -1);
+test("Multiplayer and World subtract the complete compact phone header", () => {
+  const phone = indexCss.indexOf("@media (max-width: 740px)", indexCss.indexOf("@media (max-width: 1023px)"));
+  assert.notEqual(phone, -1);
   assert.match(
-    ruleBlock(indexCss, ":root {", narrow),
-    /--mobile-header-height:\s*calc\(96px \+ env\(safe-area-inset-top\)\)/,
+    ruleBlock(indexCss, ":root {", phone),
+    /--mobile-header-height:\s*calc\(48px \+ env\(safe-area-inset-top\)\)/,
   );
   assert.doesNotMatch(multiplayerCss, /var\(--header-height\)/);
   assert.doesNotMatch(monsterWorldCss, /var\(--header-height\)/);

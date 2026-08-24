@@ -55,8 +55,11 @@ import { nanocodex } from "../vite/index.mjs";
 import {
   createMemoryDurabilityStore,
   durabilityRevision,
+  type DurabilityAcquiredJournal,
+  type DurabilityAcquireRequest,
   type DurabilityAppendRequest,
   type DurabilityAppendResult,
+  type DurabilityFence,
   type DurabilityRevision,
   type DurabilitySqliteQuery,
   type DurabilitySqliteRow,
@@ -147,12 +150,27 @@ async function check() {
   void sqliteOptions;
   const durabilityStore: DurabilityStore = {
     load: () => storedJournal,
+    acquire: (
+      _journalId: string,
+      request: DurabilityAcquireRequest,
+    ): DurabilityAcquiredJournal => ({
+      ...storedJournal,
+      ownerId: request.ownerId,
+      fence: "1" as DurabilityFence,
+    }),
     append: (_journalId: string, request: DurabilityAppendRequest): DurabilityAppendResult => ({
       status: "not_committed",
       message: `revision ${request.expectedRevision} was not committed`,
     }),
   };
-  await durabilityStore.load("typed-leaf");
+  const acquired = await durabilityStore.acquire("typed-leaf", { ownerId: "typed-owner" });
+  const fence: DurabilityFence = acquired.fence;
+  await durabilityStore.append("typed-leaf", {
+    ownerId: acquired.ownerId,
+    fence,
+    expectedRevision: acquired.revision,
+    payload: "opaque",
+  });
   const postgresStore: DurabilityStore = createPostgresDurabilityStore(postgresPool);
   const cloudflareStore: DurabilityStore = createCloudflareDurabilityStore(cloudflareStorage);
   HostTransport.hostManaged(cloudflareEgress({

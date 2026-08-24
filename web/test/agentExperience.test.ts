@@ -10,17 +10,20 @@ const terminalCss = source("../src/AgentTerminal.css");
 const experience = source("../src/AgentExperience.tsx");
 const viteConfig = source("../vite.config.ts");
 
-test("one app-lifetime Config supplies clone-safe MCP servers to the retained Agent", () => {
-  const declaration = section(terminal, "const agentConfig = createConfig", "/** Authenticated website policy");
+test("one thread-scoped Config supplies clone-safe MCP servers to the retained Agent", () => {
+  const declaration = section(terminal, "export const AgentTerminal", "export const ManagedAgentTerminal");
   assert.equal(matches(terminal, /createConfig\(/g), 1);
-  assert.match(declaration, /createConfig\(\{[\s\S]*?agent: \{[\s\S]*?mcp: browserMcpConfiguration\(location\.origin\)/);
+  assert.match(declaration, /useMemo\(\(\) => createConfig\(\{[\s\S]*?mcp: browserMcpConfiguration\(location\.origin, threadId\)[\s\S]*?\[threadId\]/);
   assert.match(
     terminal,
     /useNanocodex\(\{ config: agentConfig, threadId \}\)/,
   );
   assert.doesNotMatch(terminal, /prepareAgentRuntime|NanocodexProvider/);
 
-  const configuration = browserMcpConfiguration("https://agent.test/path");
+  const configuration = browserMcpConfiguration(
+    "https://agent.test/path",
+    "11111111-1111-4111-8111-111111111111",
+  );
   assert.deepEqual(structuredClone(configuration), configuration);
   assert.ok(Object.values(configuration).every((server) =>
     typeof server.url === "string"
@@ -82,11 +85,17 @@ test("managed conversation selection is invalidated when account ownership chang
   assert.match(experience, /managedSelectionKey\(accountId\)/);
 });
 
-test("managed startup checks effect ownership before auto-creating a conversation", () => {
+test("managed startup mounts a retained selection before refreshing the rail", () => {
   assert.match(
     experience,
-    /listManagedConversations\(accountId\)\.then\(async \(listed\) => \{\s*if \(cancelled\) return;\s*const next = listed\.length \|\| !hasCredential \? listed : \[await createManagedConversation\(accountId\)\]/,
+    /const retainedId = safeGet\(managedSelectionKey\(accountId\)\) \?\? undefined;\s*setManagedConversationId\(retainedId\);\s*setConversationPending\(true\);[\s\S]*?listManagedConversations\(accountId\)\.then\(async \(listed\) => \{\s*if \(cancelled\) return;\s*const next = listed\.length \|\| !hasCredential \? listed : \[await createManagedConversation\(accountId\)\]/,
   );
+});
+
+test("managed list failures expose a real retry action", () => {
+  assert.match(experience, /const \[managedAttempt, setManagedAttempt\] = useState\(0\)/);
+  assert.match(experience, /setManagedAttempt\(\(value\) => value \+ 1\)/);
+  assert.match(experience, /onRetry=\{retryManagedConversations\}/);
 });
 
 function source(path: string): string {

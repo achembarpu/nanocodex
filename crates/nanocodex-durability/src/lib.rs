@@ -27,7 +27,10 @@ pub use session::{Admission, AutomaticAdmission, BeginStep, DurableSession};
 #[cfg(all(feature = "sqlite", not(target_family = "wasm")))]
 #[cfg_attr(docsrs, doc(cfg(all(feature = "sqlite", not(target_family = "wasm")))))]
 pub use sqlite::SqliteStore;
-pub use store::{JournalStore, StoreError, StoreFuture, StoredBatch, StoredJournal};
+pub use store::{
+    JournalStore, OwnedJournal, OwnerId, OwnerToken, StoreError, StoreFuture, StoredBatch,
+    StoredJournal,
+};
 
 /// Result returned by durability operations.
 pub type Result<T> = std::result::Result<T, Error>;
@@ -90,6 +93,30 @@ pub enum Error {
     #[error("durable operation `{operation_id}` is already active")]
     OperationActive {
         /// Active operation identity.
+        operation_id: String,
+    },
+    /// A direct journal caller attempted to mutate state while an Agent owns it.
+    #[error("durability journal has a live authoritative model owner")]
+    ModelOwnerActive,
+    /// A superseded Agent attempted to use its stale model-owner capability.
+    #[error("durability model owner was fenced by a newer owner")]
+    ModelOwnerFenced,
+    /// A lifecycle mutation did not hold the operation's live claim.
+    #[error("durable operation `{operation_id}` is not claimed by this owner")]
+    OperationNotClaimed {
+        /// Unclaimed operation identity.
+        operation_id: String,
+    },
+    /// A step was requested before the owning operation began an attempt.
+    #[error("durable operation `{operation_id}` has not begun an attempt")]
+    AttemptNotStarted {
+        /// Operation without a begun attempt.
+        operation_id: String,
+    },
+    /// An operation already has a live attempt and cannot begin another one.
+    #[error("durable operation `{operation_id}` already has an active attempt")]
+    AttemptActive {
+        /// Operation with a live attempt.
         operation_id: String,
     },
     /// A native owner task was created without an active Tokio runtime.

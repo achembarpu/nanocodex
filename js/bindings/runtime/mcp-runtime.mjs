@@ -146,6 +146,13 @@ async function initializeServer(server, options, outerSignal) {
       reject(new Error("MCP startup deadline exceeded"));
     }, server.startupTimeoutMs);
   });
+  let rejectCancellation;
+  const cancellation = new Promise((_resolve, reject) => {
+    rejectCancellation = () => reject(
+      controller.signal.reason ?? new Error("MCP startup was cancelled"),
+    );
+    controller.signal.addEventListener("abort", rejectCancellation, { once: true });
+  });
   let connection;
   try {
     return await Promise.race([
@@ -159,6 +166,7 @@ async function initializeServer(server, options, outerSignal) {
         return { connection, tools };
       })(),
       deadline,
+      cancellation,
     ]);
   } catch (error) {
     if (connection?.owned) await connection.client.close().catch(() => {});
@@ -171,6 +179,7 @@ async function initializeServer(server, options, outerSignal) {
     throw error;
   } finally {
     clearTimeout(timeout);
+    controller.signal.removeEventListener("abort", rejectCancellation);
     outerSignal?.removeEventListener("abort", abort);
   }
 }

@@ -325,22 +325,24 @@ test("tool proxies reject cross-origin calls before using the credential", async
 });
 
 test("same-origin Fetch Metadata admits MCP GET streams without a referrer", async () => {
-  const originalFetch = globalThis.fetch;
-  globalThis.fetch = (async () => new Response("event: message\ndata: {}\n\n", {
-    headers: { "content-type": "text/event-stream" },
-  })) as typeof fetch;
-  try {
-    const response = await worker.fetch(new Request("https://demo.test/api/mcp/cloudflare", {
+  const backend = {
+    async fetch() {
+      return new Response("event: message\ndata: {}\n\n", {
+        headers: { "content-type": "text/event-stream" },
+      });
+    },
+  } as unknown as Fetcher;
+    const response = await worker.fetch(new Request(
+      "https://demo.test/api/mcp/cloudflare?thread_id=11111111-1111-4111-8111-111111111111",
+      {
       headers: {
         "sec-fetch-site": "same-origin",
         "x-nanocodex-request": "1",
       },
-    }), { ENVIRONMENT: "test" });
+      },
+    ), { ENVIRONMENT: "test", NANOCODEX_BACKEND: backend });
     assert.equal(response.status, 200);
     assert.equal(response.headers.get("content-type"), "text/event-stream");
-  } finally {
-    globalThis.fetch = originalFetch;
-  }
 });
 
 test("BYOK sessions keep the key behind an opaque HttpOnly cookie", async () => {

@@ -8,12 +8,16 @@ import {
   type TerminalHost,
 } from "../src/demoTerminal.ts";
 import {
+  agentHistoryEntryKeys,
   applyAgentEvents,
   initialTerminalState,
+  mergeAgentHistoryEntries,
   queuePrompt,
   queueSteer,
   steerAdmitted,
+  turnFinished,
 } from "../src/agentTranscript.ts";
+import { localTranscriptEvents } from "../src/localAgentRuntime.ts";
 import {
   encodeXtermKeyEvent,
   bufferedXtermAdapter,
@@ -447,6 +451,288 @@ test("connection failures stay concise and return to the composer", async () => 
   terminal.dispose();
 });
 
+test("managed offline fetch failures are actionable and return to the composer", async () => {
+  const host = fakeTerminal();
+  const agent = fakeAgent();
+  const terminal = createAgentTerminal({ agent: agent as never, terminal: host });
+  await terminal.submit("hello");
+  agent.turns[0]?.fail(new TypeError("Failed to fetch"));
+  await settle();
+
+  const frame = host.writes.at(-1)!;
+  assert.match(
+    frame,
+    /The agent connection was interrupted\. Check your network and try again\./,
+  );
+  assert.doesNotMatch(frame, /Failed to fetch/);
+  assert.equal(agent.turns[0]?.disposals, 1);
+  terminal.dispose();
+});
+
+test("authoritative local history IDs replace optimistic prompt rows exactly", async () => {
+  let state = queuePrompt(
+    initialTerminalState(),
+    1,
+    "one durable prompt",
+    "managed-user-durable-turn",
+  );
+  state = applyAgentEvents(state, [
+    event(1, "managed.prompt", {
+      text: "one durable prompt",
+      turn_id: "durable-turn",
+    }),
+  ]);
+  assert.deepEqual(
+    state.entries.filter((entry) => entry.kind === "user"),
+    [{
+      id: "managed-user-durable-turn",
+      kind: "user",
+      text: "one durable prompt",
+      promptId: 1,
+      turnId: "durable-turn",
+    }],
+  );
+});
+
+test("queued local prompts keep their authoritative history IDs when admitted", () => {
+  let state = applyAgentEvents(initialTerminalState(), [event(1, "run.started")]);
+  state = queuePrompt(state, 2, "queued durable prompt", "managed-user-queued-turn");
+  state = applyAgentEvents(state, [event(2, "run.completed")]);
+  state = applyAgentEvents(state, [event(3, "run.started")]);
+  assert.ok(state.entries.some((entry) =>
+    entry.kind === "user"
+    && entry.id === "managed-user-queued-turn"
+    && entry.text === "queued durable prompt"
+  ));
+});
+
+test("an older durable run start cannot consume a newer queued prompt", () => {
+  let state = queuePrompt(initialTerminalState(), 2, "newer B", "managed-user-turn-b");
+  state = applyAgentEvents(state, [event(10, "run.started", { turn_id: "turn-a" })]);
+  assert.deepEqual(state.queuedPrompts.map(({ turnId }) => turnId), ["turn-b"]);
+  assert.equal(state.activeTurnId, "turn-a");
+
+  state = applyAgentEvents(state, [
+    event(11, "run.completed", { turn_id: "turn-a" }),
+    event(12, "run.started", { turn_id: "turn-b" }),
+  ]);
+  assert.deepEqual(state.queuedPrompts, []);
+  assert.equal(state.entries.filter((entry) => entry.kind === "user" && entry.turnId === "turn-b").length, 1);
+});
+
+test("managed cursor identity prevents reasoning duplication when older pages renumber projections", () => {
+  const live = applyAgentEvents(initialTerminalState(), [
+    event(20, "managed.prompt", { text: "A", turn_id: "turn-a" }),
+    event(21, "run.started", { turn_id: "turn-a", managed_event_cursor: "8" }),
+    event(22, "reasoning.summary.delta", {
+      text: "inspect", turn_id: "turn-a", managed_event_cursor: "9",
+    }),
+  ]);
+  const reprojected = applyAgentEvents(initialTerminalState(), [
+    event(1, "managed.prompt", { text: "older", turn_id: "older" }),
+    event(2, "assistant.message", { text: "old answer", turn_id: "older" }),
+    event(3, "managed.prompt", { text: "A", turn_id: "turn-a" }),
+    event(4, "run.started", { turn_id: "turn-a", managed_event_cursor: "8" }),
+    event(5, "reasoning.summary.delta", {
+      text: "inspect", turn_id: "turn-a", managed_event_cursor: "9",
+    }),
+  ]);
+  const merged = mergeAgentHistoryEntries(
+    live.entries,
+    reprojected.entries,
+    agentHistoryEntryKeys(live.entries),
+  );
+  assert.equal(merged.filter((entry) => entry.kind === "reasoning" && entry.turnId === "turn-a").length, 1);
+});
+
+test("history merge retains late activity from a non-contiguous durable turn", () => {
+  const current = applyAgentEvents(initialTerminalState(), [
+    event(1, "managed.prompt", { text: "A", turn_id: "turn-a" }),
+    event(2, "run.started", { turn_id: "turn-a" }),
+    event(3, "tool.call", {
+      call_id: "call-a", tool: "exec_command", arguments: { cmd: "sleep 1" }, turn_id: "turn-a",
+    }),
+    event(4, "managed.prompt", { text: "B", turn_id: "turn-b" }),
+    event(5, "reasoning.summary.delta", { text: "late A", turn_id: "turn-a" }),
+  ]);
+  const historical = applyAgentEvents(initialTerminalState(), [
+    event(1, "managed.prompt", { text: "A", turn_id: "turn-a" }),
+    event(2, "managed.prompt", { text: "B", turn_id: "turn-b" }),
+  ]);
+  const merged = mergeAgentHistoryEntries(current.entries, historical.entries, new Set());
+  assert.deepEqual(merged.map((entry) => [entry.kind, entry.turnId]), [
+    ["user", "turn-a"],
+    ["tool", "turn-a"],
+    ["reasoning", "turn-a"],
+    ["user", "turn-b"],
+  ]);
+});
+
+test("buffered replay cannot duplicate an authoritative terminal error", () => {
+  const retainedEvents = [
+    event(1, "managed.prompt", { text: "A", turn_id: "turn-a" }),
+    event(2, "run.started", { turn_id: "turn-a" }),
+    event(3, "run.error", { message: "boom", turn_id: "turn-a" }),
+    event(4, "run.failed", { status: "failed", turn_id: "turn-a" }),
+  ];
+  const retained = applyAgentEvents(initialTerminalState(), retainedEvents);
+  let state = { ...initialTerminalState(), entries: retained.entries };
+  state = applyAgentEvents(state, retainedEvents.slice(2));
+  assert.equal(state.entries.filter((entry) => entry.kind === "error" && entry.text === "boom").length, 1);
+});
+
+test("terminal detachment releases every active turn observer", async () => {
+  const host = fakeTerminal();
+  const agent = fakeAgent();
+  const terminal = createAgentTerminal({ agent: agent as never, terminal: host });
+  await terminal.submit("still durable");
+  assert.equal(agent.turns[0]?.disposals, 0);
+  terminal.dispose();
+  assert.equal(agent.turns[0]?.disposals, 1);
+});
+
+test("authoritative local history replaces the matching live assistant projection", () => {
+  let live = queuePrompt(
+    initialTerminalState(),
+    1,
+    "durable prompt",
+    "managed-user-durable-turn",
+  );
+  live = applyAgentEvents(live, [
+    event(10, "run.started", { turn_id: "durable-turn" }),
+    event(11, "assistant.delta", { text: "durable answer" }),
+    event(12, "assistant.message", { text: "durable answer" }),
+    event(13, "run.completed"),
+  ]);
+  const retained = applyAgentEvents(initialTerminalState(), localTranscriptEvents([{
+    threadId: "thread",
+    turnId: "durable-turn",
+    createdAt: 1,
+    prompt: "durable prompt",
+    assistant: "durable answer",
+    status: "completed",
+  }], "session"));
+  const entries = mergeAgentHistoryEntries(live.entries, retained.entries, new Set());
+  const finished = turnFinished(
+    { ...live, entries },
+    undefined,
+    "durable answer",
+    1,
+    "managed-user-durable-turn",
+  );
+
+  assert.equal(finished.entries.filter((entry) => entry.kind === "user").length, 1);
+  assert.deepEqual(
+    finished.entries.filter((entry) => entry.kind === "assistant").map((entry) => entry.text),
+    ["durable answer"],
+  );
+});
+
+test("managed history rebases one same-tab optimistic turn by durable turn identity", () => {
+  let live = queuePrompt(initialTerminalState(), 1, "mine", "managed-user-same-tab");
+  live = applyAgentEvents(live, [
+    event(10, "run.started", { turn_id: "same-tab" }),
+    event(11, "assistant.message", { text: "answer", turn_id: "same-tab" }),
+  ]);
+  const retained = applyAgentEvents(initialTerminalState(), [
+    event(1, "managed.prompt", { text: "mine", turn_id: "same-tab" }),
+    event(2, "assistant.message", { text: "answer", turn_id: "same-tab" }),
+  ]);
+
+  const entries = mergeAgentHistoryEntries(live.entries, retained.entries, new Set());
+  assert.deepEqual(entries.map((entry) => [entry.kind, "text" in entry ? entry.text : undefined]), [
+    ["user", "mine"],
+    ["assistant", "answer"],
+  ]);
+});
+
+test("queued durable history cannot move or duplicate the running turn answer", () => {
+  let live = queuePrompt(initialTerminalState(), 1, "A", "managed-user-turn-a");
+  live = applyAgentEvents(live, [
+    event(10, "run.started", { turn_id: "turn-a" }),
+    event(11, "assistant.message", { text: "answer A", turn_id: "turn-a" }),
+  ]);
+  live = queuePrompt(live, 2, "B", "managed-user-turn-b");
+  const retained = applyAgentEvents(initialTerminalState(), [
+    event(1, "managed.prompt", { text: "A", turn_id: "turn-a" }),
+    event(2, "managed.prompt", { text: "B", turn_id: "turn-b" }),
+  ]);
+
+  const entries = mergeAgentHistoryEntries(live.entries, retained.entries, new Set());
+  const finished = turnFinished(
+    { ...live, entries },
+    undefined,
+    "answer A",
+    1,
+    "managed-user-turn-a",
+  );
+  const admitted = applyAgentEvents(finished, [
+    event(12, "run.completed", { turn_id: "turn-a" }),
+    event(13, "run.started", { turn_id: "turn-b" }),
+  ]);
+  assert.deepEqual(admitted.entries.map((entry) => [entry.kind, "text" in entry ? entry.text : undefined]), [
+    ["user", "A"],
+    ["assistant", "answer A"],
+    ["user", "B"],
+  ]);
+});
+
+test("history presentation IDs are scoped by durable turn identity", () => {
+  let live = queuePrompt(initialTerminalState(), 2, "new", "managed-user-new");
+  live = applyAgentEvents(live, [
+    event(1, "run.started", { turn_id: "new" }),
+    event(2, "assistant.message", { text: "new answer", turn_id: "new" }),
+  ]);
+  const retained = applyAgentEvents(initialTerminalState(), [
+    event(1, "managed.prompt", { text: "old", turn_id: "old" }),
+    event(2, "assistant.message", { text: "old answer", turn_id: "old" }),
+  ]);
+
+  const entries = mergeAgentHistoryEntries(live.entries, retained.entries, new Set());
+  assert.deepEqual(entries.filter((entry) => entry.kind === "assistant").map((entry) => (
+    [entry.turnId, entry.text]
+  )), [
+    ["old", "old answer"],
+    ["new", "new answer"],
+  ]);
+});
+
+test("live tool activity stays before its retained final answer and the next turn", () => {
+  let live = queuePrompt(initialTerminalState(), 1, "A", "managed-user-turn-a");
+  live = applyAgentEvents(live, [
+    event(10, "run.started", { turn_id: "turn-a" }),
+    event(11, "tool.call", {
+      call_id: "call-a",
+      tool: "exec_command",
+      arguments: { cmd: "sleep 3" },
+      turn_id: "turn-a",
+    }),
+  ]);
+  const retained = applyAgentEvents(initialTerminalState(), [
+    event(1, "managed.prompt", { text: "A", turn_id: "turn-a" }),
+    event(2, "assistant.message", { text: "answer A", turn_id: "turn-a" }),
+    event(3, "managed.prompt", { text: "B", turn_id: "turn-b" }),
+  ]);
+
+  const entries = mergeAgentHistoryEntries(live.entries, retained.entries, new Set());
+  assert.deepEqual(entries.map((entry) => entry.kind), ["user", "tool", "assistant", "user"]);
+  assert.equal(entries[1]?.turnId, "turn-a");
+});
+
+test("a prompt rejected before run admission cannot consume the next run", () => {
+  let state = queuePrompt(initialTerminalState(), 1, "offline prompt");
+  state = turnFinished(state, "Could not connect", undefined, 1);
+
+  assert.deepEqual(state.queuedPrompts, []);
+  assert.equal(state.displayedQueuedPrompt, undefined);
+
+  state = queuePrompt(state, 2, "reconnected prompt");
+  state = applyAgentEvents(state, [event(1, "run.started")]);
+
+  assert.deepEqual(state.queuedPrompts, []);
+  assert.equal(state.entries.filter((entry) => entry.kind === "user").at(-1)?.text, "reconnected prompt");
+});
+
 test("streaming bursts coalesce into one animation-frame projection", async () => {
   const frames = fakeAnimationFrames();
   const host = fakeTerminal();
@@ -573,6 +859,26 @@ test("xterm history redraw restores the previous distance from the buffer bottom
   });
   await adapter.write("older frame", { preserveScroll: true });
   assert.equal(restored, 100);
+});
+
+test("xterm streaming redraw leaves a user-scrolled viewport anchored", async () => {
+  let restored: number | undefined;
+  const active = { baseY: 100, viewportY: 32 };
+  const adapter = xtermAdapter({
+    cols: 80,
+    rows: 24,
+    buffer: { active },
+    write(_data: string, callback?: () => void) {
+      active.baseY = 140;
+      active.viewportY = 140;
+      callback?.();
+    },
+    scrollToLine(line: number) { restored = line; },
+    onData() { return { dispose() {} }; },
+    onResize() { return { dispose() {} }; },
+  });
+  await adapter.write("streamed frame");
+  assert.equal(restored, 32);
 });
 
 test("hidden streaming reduces state without TerminalHost writes", async () => {

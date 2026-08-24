@@ -1,7 +1,10 @@
 import type { AgentEvent } from "nanocodex";
+import { isClientNetworkFailure } from "./clientFailure.ts";
 import {
+  agentHistoryEntryKeys,
   applyAgentEvents,
   initialTerminalState,
+  mergeAgentHistoryEntries,
   queuePrompt,
   queueSteer,
   steerAdmitted,
@@ -54,6 +57,7 @@ export type AgentTerminal = Readonly<{
 }>;
 
 export type TerminalTurn = Readonly<{
+  historyEntryId?: string;
   steer(options: { input: string }): Promise<unknown>;
   cancel(): Promise<unknown>;
   result(): Promise<Readonly<{ finalMessage: string; dispose(): void }>>;
@@ -74,6 +78,7 @@ export type TerminalAgent = Readonly<{
 }>;
 
 type ActiveTurn = {
+  disposed: boolean;
   timing: PromptTiming;
   turn: TerminalTurn;
 };
@@ -106,7 +111,7 @@ export function createAgentTerminal(options: {
   let renderScheduled = false;
   let projectionDirty = true;
   let preserveScroll = false;
-  let projectedHistoryEntryIds = new Set<string>();
+  let projectedHistoryEntryKeys: ReadonlySet<string> = new Set();
   let cancelScheduledRender: (() => void) | undefined;
   let nextPromptId = 1;
   const history: string[] = [];
@@ -130,6 +135,16 @@ export function createAgentTerminal(options: {
       options.onEvent?.({ type, timestamp: performanceNow(), ...detail });
     } catch {
       // Host diagnostics must never break the terminal lifecycle.
+    }
+  };
+
+  const disposeActiveTurn = (record: ActiveTurn) => {
+    if (record.disposed) return;
+    record.disposed = true;
+    try {
+      record.turn.dispose();
+    } catch (error) {
+      emit("terminal.cleanup_error", { error });
     }
   };
 
@@ -191,12 +206,14 @@ export function createAgentTerminal(options: {
     listeners.push(watcher.onHistory((events) => {
       if (disposed) return;
       const historical = applyAgentEvents(initialTerminalState(), events);
-      const historicalIds = new Set(historical.entries.map((entry) => entry.id));
-      const localEntries = state.entries.filter((entry) =>
-        !projectedHistoryEntryIds.has(entry.id) && !historicalIds.has(entry.id)
+      const historicalKeys = agentHistoryEntryKeys(historical.entries);
+      const entries = mergeAgentHistoryEntries(
+        state.entries,
+        historical.entries,
+        projectedHistoryEntryKeys,
       );
-      projectedHistoryEntryIds = historicalIds;
-      state = { ...state, entries: [...historical.entries, ...localEntries] };
+      projectedHistoryEntryKeys = historicalKeys;
+      state = boundedTerminalState({ ...state, entries }, maxEntries);
       preserveScroll = true;
       render();
     }));
@@ -216,7 +233,9 @@ export function createAgentTerminal(options: {
       if (!loadArmed || loadingOlder) return;
       loadArmed = false;
       loadingOlder = true;
-      void watcher.loadOlder?.().finally(() => { loadingOlder = false; });
+      void watcher.loadOlder?.().catch((error) => {
+        emit("terminal.history_error", { error });
+      }).finally(() => { loadingOlder = false; });
     }));
   }
 
@@ -275,13 +294,16 @@ export function createAgentTerminal(options: {
       emit("prompt.rejected", { error, id });
       return undefined;
     }
-    state = boundedTerminalState(queuePrompt(state, id, prompt), maxEntries);
+    state = boundedTerminalState(
+      queuePrompt(state, id, prompt, turn.historyEntryId),
+      maxEntries,
+    );
     const timing: PromptTiming = {
       id,
       firstOutputReported: false,
       submittedAt,
     };
-    const record: ActiveTurn = { timing, turn };
+    const record: ActiveTurn = { disposed: false, timing, turn };
     activeTurns.add(record);
     pendingRootPrompts.push(timing);
     emit("prompt.accepted", { id, input: prompt, sessionId: agent.sessionId, submittedAt });
@@ -294,15 +316,29 @@ export function createAgentTerminal(options: {
     let result: Awaited<ReturnType<TerminalTurn["result"]>> | undefined;
     try {
       result = await record.turn.result();
+      if (disposed) return;
       const completed = { finalMessage: result.finalMessage };
       state = boundedTerminalState(
-        turnFinished(state, undefined, completed.finalMessage),
+        turnFinished(
+          state,
+          undefined,
+          completed.finalMessage,
+          record.timing.id,
+          record.turn.historyEntryId,
+        ),
         maxEntries,
       );
       emit("prompt.completed", { id: record.timing.id, ...completed });
     } catch (error) {
+      if (disposed) return;
       state = boundedTerminalState(
-        turnFinished(state, terminalErrorMessage(error)),
+        turnFinished(
+          state,
+          terminalErrorMessage(error),
+          undefined,
+          record.timing.id,
+          record.turn.historyEntryId,
+        ),
         maxEntries,
       );
       emit("prompt.failed", { error, id: record.timing.id });
@@ -317,11 +353,7 @@ export function createAgentTerminal(options: {
       activeTurns.delete(record);
       const pendingIndex = pendingRootPrompts.indexOf(record.timing);
       if (pendingIndex >= 0) pendingRootPrompts.splice(pendingIndex, 1);
-      try {
-        record.turn.dispose();
-      } catch (error) {
-        emit("terminal.cleanup_error", { error });
-      }
+      disposeActiveTurn(record);
       render();
     }
   }
@@ -512,6 +544,7 @@ export function createAgentTerminal(options: {
     pendingRootPrompts.length = 0;
     currentRootPrompt = undefined;
     watcher.off();
+    for (const record of activeTurns) disposeActiveTurn(record);
     for (const release of listeners.splice(0)) {
       try {
         release();
@@ -828,7 +861,11 @@ function errorMessage(error: unknown): string {
 
 function terminalErrorMessage(error: unknown): string {
   const message = errorMessage(error);
+  if (isClientNetworkFailure(error)) {
+    return "The agent connection was interrupted. Check your network and try again.";
+  }
   return /Responses WebSocket handshake failed|WebSocket connection failed/.test(message)
+    || /^(Failed to fetch|Load failed|NetworkError when attempting to fetch resource\.?)$/.test(message)
     ? "Could not connect to the agent. Try again."
     : message;
 }

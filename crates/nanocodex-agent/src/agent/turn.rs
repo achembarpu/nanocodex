@@ -111,6 +111,7 @@ impl Future for Turn {
 pub struct TurnControl {
     pub(super) key: TurnKey,
     pub(super) commands: mpsc::Sender<Command>,
+    pub(super) shutdown: DriverShutdown,
 }
 
 impl TurnControl {
@@ -123,7 +124,7 @@ impl TurnControl {
     pub async fn steer(&self, prompt: impl Into<Prompt>) -> Result<()> {
         let prompt = prompt.into();
         prompt.validate().map_err(steer_validation_error)?;
-        request_command(&self.commands, |result| Command::Steer {
+        request_command(&self.commands, &self.shutdown, |result| Command::Steer {
             key: self.key,
             prompt,
             result,
@@ -138,7 +139,7 @@ impl TurnControl {
     /// Returns an error when the turn has already finished or if the driver
     /// stops.
     pub async fn cancel(&self) -> Result<()> {
-        request_command(&self.commands, |result| Command::Cancel {
+        request_command(&self.commands, &self.shutdown, |result| Command::Cancel {
             key: self.key,
             result,
         })
@@ -406,6 +407,7 @@ pub(super) enum QueuedTurn {
     Cancelled {
         prompt: Prompt,
         execution_operation: Option<String>,
+        cancellation_committed: bool,
         thinking: Thinking,
         fast_mode: bool,
         parent: Option<tracing::Span>,

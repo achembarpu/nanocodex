@@ -69,4 +69,13 @@ test("direct route data and mounted World assets reject into the route boundary"
     entry,
     /<Suspense fallback=\{null\}>/,
   );
+  assert.match(
+    entry,
+    /prepareRepositorySurface\(directRepositorySurface, requestedCommit\)\.catch/,
+  );
+  assert.match(
+    entry,
+    /useState<PreparedDirectRoute \| null>\(\s*directRepositorySurface \? \{\} : null/,
+  );
+  assert.match(entry, /if \(directRepositorySurface\) return;/);
 });

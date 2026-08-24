@@ -1,6 +1,34 @@
 import type { NamedTool } from "../types.mjs";
 import type { Workspace } from "../runtime/workspace.mjs";
 
+export type JustBashFetch = (
+  url: string,
+  options?: Readonly<{
+    method?: string | undefined;
+    headers?: Headers | Record<string, string> | undefined;
+    body?: string | undefined;
+    followRedirects?: boolean | undefined;
+    timeoutMs?: number | undefined;
+    maxRedirects?: number | undefined;
+    signal?: AbortSignal | undefined;
+  }>,
+) => Promise<Readonly<{
+  status: number;
+  statusText: string;
+  headers: Record<string, string>;
+  body: Uint8Array;
+  url: string;
+}>>;
+
+export type JustBashCustomCommand = Readonly<{
+  name: string;
+  trusted?: boolean | undefined;
+  execute(
+    args: string[],
+    context: unknown,
+  ): Promise<Readonly<{ stdout: string; stderr: string; exitCode: number }>>;
+}>;
+
 export type JustBashNetworkOptions = Readonly<{
   /** Explicitly permit credential-free HTTP(S) requests to arbitrary origins. */
   dangerouslyAllowFullInternetAccess?: boolean | undefined;
@@ -35,4 +63,8 @@ export function justBash(options: {
   maxEntries?: number | undefined;
   maxOutputTokens?: number | undefined;
   network?: false | JustBashNetworkOptions | undefined;
+  /** Host-owned fetch boundary used by curl and app-owned commands. */
+  fetch?: JustBashFetch | undefined;
+  /** Application commands registered directly in the embedded interpreter. */
+  customCommands?: readonly JustBashCustomCommand[] | undefined;
 }): Promise<JustBashRuntime>;

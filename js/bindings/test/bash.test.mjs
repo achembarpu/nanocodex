@@ -82,6 +82,35 @@ test("network access is absent by default and an empty allow-list denies egress"
   }
 });
 
+test("the host can inject one secure fetch boundary and app-owned commands", async () => {
+  const secureFetch = async (url) => ({
+    status: 200,
+    statusText: "OK",
+    headers: { "content-type": "text/plain" },
+    body: new TextEncoder().encode(`fetched ${url}`),
+    url,
+  });
+  const runtime = await justBash({
+    filesystem: memoryWorkspace(),
+    fetch: secureFetch,
+    customCommands: [{
+      name: "mock-tool",
+      trusted: true,
+      async execute(args) {
+        return { stdout: `${args.join("|")}\n`, stderr: "", exitCode: 0 };
+      },
+    }],
+  });
+
+  const custom = await runtime.tool.handler({ cmd: "mock-tool one two" }, context());
+  assert.equal(custom.exit_code, 0);
+  assert.equal(custom.output, "one|two\n");
+  assert.equal(typeof custom.wall_time_seconds, "number");
+  const fetched = await runtime.tool.handler({ cmd: "curl -s https://example.com/data" }, context());
+  assert.equal(fetched.exit_code, 0);
+  assert.equal(fetched.output, "fetched https://example.com/data");
+});
+
 test("caller cancellation and the runtime deadline stop execution", async () => {
   const cancellable = await justBash({
     filesystem: memoryWorkspace(),

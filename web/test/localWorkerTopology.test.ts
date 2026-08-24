@@ -9,6 +9,10 @@ test("local development always mirrors the two private production Workers", () =
     NANOCODEX_LOCAL_AGENT_IDLE_TIMEOUT_MS: "750",
     NANOCODEX_LOCAL_CHATGPT_BOOTSTRAP: "local-secret-document",
     NANOCODEX_LOCAL_CODEX_RELAY_URL: "http://127.0.0.1:49152/",
+    NANOCODEX_LOCAL_GITHUB_OAUTH_CLIENT_ID: "github-client",
+    NANOCODEX_LOCAL_GITHUB_OAUTH_CLIENT_SECRET: "github-secret",
+    NANOCODEX_LOCAL_GOOGLE_OAUTH_CLIENT_ID: "google-client",
+    NANOCODEX_LOCAL_GOOGLE_OAUTH_CLIENT_SECRET: "google-secret",
     OPENAI_API_KEY: "must-not-enter-managed-worker",
   });
   assert.equal(egress?.configPath, "../services/egress/wrangler.broker.jsonc");
@@ -21,6 +25,10 @@ test("local development always mirrors the two private production Workers", () =
       ALLOW_INSECURE_LOOPBACK_RELAY: "true",
       CODEX_RELAY_URL: "http://127.0.0.1:49152/",
       LOCAL_CHATGPT_BOOTSTRAP: "local-secret-document",
+      GITHUB_OAUTH_CLIENT_ID: "github-client",
+      GITHUB_OAUTH_CLIENT_SECRET: "github-secret",
+      GOOGLE_OAUTH_CLIENT_ID: "google-client",
+      GOOGLE_OAUTH_CLIENT_SECRET: "google-secret",
     },
   });
   assert.equal(managed?.configPath, "../services/managed/wrangler.jsonc");
@@ -39,5 +47,9 @@ test("local managed defaults are immediately runnable and validate only policy",
   assert.throws(
     () => localManagedAuxiliaryWorkers({ NANOCODEX_LOCAL_AGENT_IDLE_TIMEOUT_MS: "0" }),
     /positive integer/,
+  );
+  assert.throws(
+    () => localManagedAuxiliaryWorkers({ NANOCODEX_LOCAL_GOOGLE_OAUTH_CLIENT_ID: "incomplete" }),
+    /Google OAuth client ID and secret must be configured together/,
   );
 });

@@ -11,11 +11,21 @@ const TOKEN_ENDPOINT_PATH = "/oauth/token";
 const CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const LOGIN_TTL_MS = 15 * 60_000;
 const REFRESH_EARLY_MS = 5 * 60_000;
+const DEFAULT_REFRESH_BACKOFF_MS = 60_000;
+const MAX_REFRESH_BACKOFF_MS = 15 * 60_000;
+const MAX_REFRESH_BACKOFF_ATTEMPT = 5;
 const MAX_PROVIDER_RESPONSE_BYTES = 16 * 1024;
 const SUBJECT = /^[A-Za-z0-9_-]{43,128}$/;
 const USER_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const SUBJECT_DIRECTORY_PREFIX = "agent-subject-v1:";
+const SUBJECT_TOMBSTONE_PREFIX = "!deleted:";
+const SUBJECT_REVISION_PREFIX = "subject-revision:";
+const DEFAULT_SUBJECT_DIRECTORY_IO_TIMEOUT_MS = 10_000;
+const MAX_SUBJECT_RECONCILIATION_ATTEMPTS = 4;
 
 export interface BrokerEnv extends CredentialVaultEnv {
+  AGENT_SUBJECTS: DurableObjectNamespace<AgentSubjectDirectory>;
+  SUBJECT_DIRECTORY_IO_TIMEOUT_MS?: string;
   CHATGPT_ISSUER?: string;
   ALLOW_LOCAL_CREDENTIAL_CLAIM?: string;
   LOCAL_CHATGPT_BOOTSTRAP?: string;
@@ -39,6 +49,8 @@ type ChatGptCredential = {
   expiresAt: number;
   revision: number;
   refreshState: "ready" | "in_flight";
+  refreshAfter?: number;
+  refreshAttempts?: number;
   deadReason: string | null;
 };
 type PendingLogin = {
@@ -60,22 +72,59 @@ type StoredRow = { envelope: EncryptedEnvelope };
 
 export class AgentSubjectDirectory extends DurableObject<BrokerEnv> {
   readonly #state: DurableObjectState;
+  readonly #env: BrokerEnv;
+  readonly #isSubjectShard: boolean;
+  readonly #subjectTails = new Map<string, Promise<void>>();
 
   constructor(state: DurableObjectState, env: BrokerEnv) {
     super(state, env);
     this.#state = state;
+    this.#env = env;
+    this.#isSubjectShard = state.id.name?.startsWith(SUBJECT_DIRECTORY_PREFIX) === true;
   }
 
   async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (request.method === "GET" && url.pathname === "/v1/health") {
-      return json({ ready: true }, 200);
+      return this.#dispatch(request);
     }
     const body = await readJson(request, 2_048);
     if (!body) return jsonError(400, "invalid_json");
     const subject = stringField(body, "subject");
+    return this.#exclusive(subject ?? "", () => this.#dispatch(request, body));
+  }
+
+  async #exclusive<T>(subject: string, operation: () => Promise<T>): Promise<T> {
+    const previous = this.#subjectTails.get(subject) ?? Promise.resolve();
+    let release!: () => void;
+    const current = new Promise<void>((resolve) => { release = resolve; });
+    this.#subjectTails.set(subject, current);
+    await previous;
+    try { return await operation(); }
+    finally {
+      release();
+      if (this.#subjectTails.get(subject) === current) this.#subjectTails.delete(subject);
+    }
+  }
+
+  async #dispatch(
+    request: Request,
+    parsedBody?: Record<string, unknown>,
+  ): Promise<Response> {
+    const url = new URL(request.url);
+    if (request.method === "GET" && url.pathname === "/v1/health") {
+      return json({ ready: true }, 200);
+    }
+    const body = parsedBody ?? await readJson(request, 2_048);
+    if (!body) return jsonError(400, "invalid_json");
+    const subject = stringField(body, "subject");
     if ((url.pathname === "/v1/bind" || url.pathname === "/v1/unbind"
-        || url.pathname === "/v1/resolve") && !SUBJECT.test(subject ?? "")) {
+        || url.pathname === "/v1/shard-unbind" || url.pathname === "/v1/resolve"
+        || url.pathname === "/v1/shard-reconcile"
+        || url.pathname === "/v1/sharded-bind"
+        || url.pathname === "/v1/sharded-unbind"
+        || url.pathname === "/v1/authoritative-resolve")
+      && !SUBJECT.test(subject ?? "")) {
       return jsonError(400, "invalid_subject");
     }
     if (request.method === "POST" && url.pathname === "/v1/bind") {
@@ -84,32 +133,318 @@ export class AgentSubjectDirectory extends DurableObject<BrokerEnv> {
       const result = await this.#state.storage.transaction(async (transaction) => {
         const key = `subject:${subject}`;
         const current = await transaction.get<string>(key);
+        if (subjectTombstoneOwner(current) !== undefined) return "deleted" as const;
         if (current && current !== userId) return "conflict" as const;
         if (!current) await transaction.put(key, userId!);
+        if (this.#isSubjectShard) await incrementSubjectRevision(transaction, subject!);
         return current ? "unchanged" as const : "bound" as const;
       });
+      if (result === "deleted") return jsonError(410, "subject_deleted");
       if (result === "conflict") return jsonError(409, "subject_already_bound");
       return json({ status: result }, 200);
     }
-    if (request.method === "POST" && url.pathname === "/v1/unbind") {
+    if (request.method === "POST" && url.pathname === "/v1/unbind"
+      && !this.#isSubjectShard) {
+      const userId = stringField(body, "user_id");
+      if (!USER_ID.test(userId ?? "")) return jsonError(400, "invalid_user_id");
+      const removed = await this.#tombstoneSubject(subject!, userId!);
+      if (removed === "mismatch") return jsonError(409, "subject_owner_mismatch");
+      try { await this.#reconcileShard(subject!); }
+      catch { return jsonError(503, "subject_reconciliation_failed"); }
+      return new Response(null, { status: 204, headers: noStoreHeaders() });
+    }
+    if (request.method === "POST" && (url.pathname === "/v1/shard-unbind"
+      || (url.pathname === "/v1/unbind" && this.#isSubjectShard))) {
       const userId = stringField(body, "user_id");
       if (!USER_ID.test(userId ?? "")) return jsonError(400, "invalid_user_id");
       const removed = await this.#state.storage.transaction(async (transaction) => {
         const key = `subject:${subject}`;
         const current = await transaction.get<string>(key);
-        if (!current) return false;
-        if (current !== userId) return "mismatch" as const;
-        await transaction.delete(key);
+        const retainedOwner = subjectTombstoneOwner(current);
+        if ((retainedOwner ?? current) && (retainedOwner ?? current) !== userId) {
+          return "mismatch" as const;
+        }
+        await transaction.put(key, subjectTombstone(userId!));
+        await incrementSubjectRevision(transaction, subject!);
         return true;
       });
       if (removed === "mismatch") return jsonError(409, "subject_owner_mismatch");
       return new Response(null, { status: 204, headers: noStoreHeaders() });
     }
     if (request.method === "POST" && url.pathname === "/v1/resolve") {
-      const userId = await this.#state.storage.get<string>(`subject:${subject}`);
+      const retained = await this.#state.storage.get<string>(`subject:${subject}`);
+      const revision = this.#isSubjectShard
+        ? await this.#state.storage.get<number>(subjectRevisionKey(subject!)) ?? 0
+        : 0;
+      const deletedUserId = subjectTombstoneOwner(retained);
+      return retained && deletedUserId === undefined
+        ? json({ user_id: retained, revision }, 200)
+        : json({
+          error: "subject_not_bound",
+          revision,
+          ...(deletedUserId === undefined ? {} : { deleted_user_id: deletedUserId }),
+        }, 404);
+    }
+    if (request.method === "POST" && url.pathname === "/v1/shard-reconcile"
+      && this.#isSubjectShard) {
+      const expectedRevision = numberField(body, "expected_revision");
+      const authoritativeState = stringField(body, "authoritative_state");
+      const userId = stringField(body, "user_id");
+      if (expectedRevision === undefined || expectedRevision < 0) {
+        return jsonError(400, "invalid_expected_revision");
+      }
+      if (authoritativeState !== "bound" && authoritativeState !== "deleted"
+        && authoritativeState !== "absent") {
+        return jsonError(400, "invalid_authoritative_state");
+      }
+      if ((authoritativeState === "bound" || authoritativeState === "deleted")
+        && !USER_ID.test(userId ?? "")) {
+        return jsonError(400, "invalid_user_id");
+      }
+      if (authoritativeState === "absent" && userId !== undefined) {
+        return jsonError(400, "unexpected_user_id");
+      }
+      const reconciled = await this.#state.storage.transaction(async (transaction) => {
+        const revisionKey = subjectRevisionKey(subject!);
+        const currentRevision = await transaction.get<number>(revisionKey) ?? 0;
+        if (currentRevision !== expectedRevision) return "stale" as const;
+        const key = `subject:${subject}`;
+        if (authoritativeState === "bound") await transaction.put(key, userId!);
+        else if (authoritativeState === "deleted") {
+          await transaction.put(key, subjectTombstone(userId!));
+        } else await transaction.delete(key);
+        await transaction.put(revisionKey, currentRevision + 1);
+        return currentRevision + 1;
+      });
+      return reconciled === "stale"
+        ? jsonError(409, "stale_shard_revision")
+        : json({ status: "reconciled", revision: reconciled }, 200);
+    }
+    // During the rollback-compatible rollout, the legacy shared directory is
+    // authoritative. Same-subject operations stay ordered through shard
+    // reconciliation, while unrelated subjects never share a network-waiting
+    // tail. A later cutover may remove this hop only after rollback to a
+    // legacy-only broker has been retired.
+    if (request.method === "POST" && url.pathname === "/v1/sharded-bind") {
+      const userId = stringField(body, "user_id");
+      if (!USER_ID.test(userId ?? "")) return jsonError(400, "invalid_user_id");
+      const legacy = await this.#state.storage.get<string>(`subject:${subject}`);
+      if (subjectTombstoneOwner(legacy) !== undefined) return jsonError(410, "subject_deleted");
+      if (legacy && legacy !== userId) return jsonError(409, "subject_already_bound");
+      let authorityUnchanged: boolean;
+      try { authorityUnchanged = await this.#reconcileShardSnapshot(subject!, userId!, legacy); }
+      catch { return jsonError(503, "subject_reconciliation_failed"); }
+      if (!authorityUnchanged) {
+        try { await this.#reconcileShard(subject!); }
+        catch { return jsonError(503, "subject_reconciliation_failed"); }
+      }
+      const committed = await this.#state.storage.transaction(async (transaction) => {
+        const current = await transaction.get<string>(`subject:${subject}`);
+        if (subjectTombstoneOwner(current) !== undefined) return "deleted" as const;
+        if (current && current !== userId) return "conflict" as const;
+        if (!current) await transaction.put(`subject:${subject}`, userId!);
+        return current ? "unchanged" as const : "bound" as const;
+      });
+      if (committed === "deleted") return jsonError(410, "subject_deleted");
+      if (committed === "conflict") return jsonError(409, "subject_already_bound");
+      return json({ status: committed }, 200);
+    }
+    if (request.method === "POST" && url.pathname === "/v1/sharded-unbind") {
+      const userId = stringField(body, "user_id");
+      if (!USER_ID.test(userId ?? "")) return jsonError(400, "invalid_user_id");
+      const key = `subject:${subject}`;
+      const legacy = await this.#state.storage.get<string>(key);
+      const retainedOwner = subjectTombstoneOwner(legacy);
+      if ((retainedOwner ?? legacy) && (retainedOwner ?? legacy) !== userId) {
+        return jsonError(409, "subject_owner_mismatch");
+      }
+      const removed = await this.#tombstoneSubject(subject!, userId!);
+      if (removed === "mismatch") return jsonError(409, "subject_owner_mismatch");
+      try { await this.#reconcileShard(subject!); }
+      catch { return jsonError(503, "subject_reconciliation_failed"); }
+      return new Response(null, { status: 204, headers: noStoreHeaders() });
+    }
+    if (request.method === "POST" && url.pathname === "/v1/authoritative-resolve") {
+      let retained: string | undefined;
+      try { retained = await this.#reconcileShard(subject!); }
+      catch { return jsonError(503, "subject_reconciliation_failed"); }
+      const userId = subjectTombstoneOwner(retained) === undefined ? retained : undefined;
       return userId ? json({ user_id: userId }, 200) : jsonError(404, "subject_not_bound");
     }
     return jsonError(404, "not_found");
+  }
+
+  async #shardState(subject: string): Promise<{
+    owner?: string;
+    deletedOwner?: string;
+    revision: number;
+  }> {
+    return withDeadline(
+      async (signal) => {
+        const response = await this.#shard(subject).fetch(
+          "https://subjects.internal/v1/resolve",
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ subject }),
+            signal,
+          },
+        );
+        if (!response.ok && response.status !== 404) {
+          await cancelResponseBody(response);
+          throw new Error("subject shard resolution failed");
+        }
+        const value = await response.json<Record<string, unknown>>();
+        const revision = numberField(value, "revision") ?? 0;
+        if (revision < 0) throw new Error("subject shard returned an invalid revision");
+        if (response.status === 404) {
+          const deletedOwner = stringField(value, "deleted_user_id");
+          if (deletedOwner !== undefined && !USER_ID.test(deletedOwner)) {
+            throw new Error("subject shard returned an invalid deletion owner");
+          }
+          return { revision, ...(deletedOwner === undefined ? {} : { deletedOwner }) };
+        }
+        const userId = stringField(value, "user_id");
+        if (!USER_ID.test(userId ?? "")) {
+          throw new Error("subject shard returned an invalid owner");
+        }
+        return { owner: userId!, revision };
+      },
+      this.#directoryIoTimeoutMs(),
+      "subject shard resolution",
+    );
+  }
+
+  async #tombstoneSubject(subject: string, userId: string): Promise<true | "mismatch"> {
+    return this.#state.storage.transaction(async (transaction) => {
+      const key = `subject:${subject}`;
+      const current = await transaction.get<string>(key);
+      const retainedOwner = subjectTombstoneOwner(current);
+      if ((retainedOwner ?? current) && (retainedOwner ?? current) !== userId) {
+        return "mismatch" as const;
+      }
+      await transaction.put(key, subjectTombstone(userId));
+      return true;
+    });
+  }
+
+  async #reconcileShard(subject: string): Promise<string | undefined> {
+    const key = `subject:${subject}`;
+    for (let attempt = 0; attempt < MAX_SUBJECT_RECONCILIATION_ATTEMPTS; attempt += 1) {
+      const authoritative = await this.#state.storage.get<string>(key);
+      if (await this.#reconcileShardSnapshot(subject, authoritative, authoritative)) {
+        return authoritative;
+      }
+    }
+    throw new Error("subject shard reconciliation did not converge");
+  }
+
+  async #reconcileShardSnapshot(
+    subject: string,
+    authoritative: string | undefined,
+    expectedAuthority: string | undefined,
+  ): Promise<boolean> {
+    const key = `subject:${subject}`;
+    for (let attempt = 0; attempt < MAX_SUBJECT_RECONCILIATION_ATTEMPTS; attempt += 1) {
+      const observed = await this.#shardState(subject);
+      if (await this.#state.storage.get<string>(key) !== expectedAuthority) return false;
+      const deletedOwner = subjectTombstoneOwner(authoritative)
+        ?? (authoritative === undefined ? observed.deletedOwner ?? observed.owner : undefined);
+      const authoritativeState = authoritative !== undefined && deletedOwner === undefined
+        ? "bound"
+        : deletedOwner === undefined ? "absent" : "deleted";
+      const userId = authoritativeState === "bound" ? authoritative : deletedOwner;
+      const reconciled = await withDeadline(
+        async (signal) => {
+          const response = await this.#shard(subject).fetch(
+            "https://subjects.internal/v1/shard-reconcile",
+            {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({
+                subject,
+                expected_revision: observed.revision,
+                authoritative_state: authoritativeState,
+                ...(userId === undefined ? {} : { user_id: userId }),
+              }),
+              signal,
+            },
+          );
+          if (response.status === 409) {
+            await cancelResponseBody(response);
+            return "stale" as const;
+          }
+          if (!response.ok) {
+            await cancelResponseBody(response);
+            throw new Error("subject shard reconciliation failed");
+          }
+          await cancelResponseBody(response);
+          return "reconciled" as const;
+        },
+        this.#directoryIoTimeoutMs(),
+        "subject shard reconciliation",
+      );
+      const revalidated = await this.#state.storage.get<string>(key);
+      if (revalidated !== expectedAuthority) return false;
+      if (reconciled === "reconciled") return true;
+    }
+    throw new Error("subject shard reconciliation did not converge");
+  }
+
+  #shard(subject: string): DurableObjectStub<AgentSubjectDirectory> {
+    return this.#env.AGENT_SUBJECTS.getByName(`${SUBJECT_DIRECTORY_PREFIX}${subject}`);
+  }
+
+  #directoryIoTimeoutMs(): number {
+    const configured = Number(
+      this.#env.SUBJECT_DIRECTORY_IO_TIMEOUT_MS ?? DEFAULT_SUBJECT_DIRECTORY_IO_TIMEOUT_MS,
+    );
+    return Number.isFinite(configured) ? Math.min(60_000, Math.max(1, configured))
+      : DEFAULT_SUBJECT_DIRECTORY_IO_TIMEOUT_MS;
+  }
+}
+
+function subjectTombstone(userId: string): string {
+  return `${SUBJECT_TOMBSTONE_PREFIX}${userId}`;
+}
+
+function subjectTombstoneOwner(value: string | undefined): string | undefined {
+  return value?.startsWith(SUBJECT_TOMBSTONE_PREFIX)
+    ? value.slice(SUBJECT_TOMBSTONE_PREFIX.length)
+    : undefined;
+}
+
+function subjectRevisionKey(subject: string): string {
+  return `${SUBJECT_REVISION_PREFIX}${subject}`;
+}
+
+async function incrementSubjectRevision(
+  transaction: DurableObjectTransaction,
+  subject: string,
+): Promise<void> {
+  const key = subjectRevisionKey(subject);
+  const current = await transaction.get<number>(key) ?? 0;
+  await transaction.put(key, current + 1);
+}
+
+async function withDeadline<T>(
+  operation: (signal: AbortSignal) => Promise<T>,
+  timeoutMs: number,
+  description: string,
+): Promise<T> {
+  const controller = new AbortController();
+  const pending = Promise.resolve().then(() => operation(controller.signal));
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(() => {
+      reject(new Error(`${description} timed out after ${timeoutMs}ms`));
+      controller.abort();
+    }, timeoutMs);
+  });
+  try {
+    return await Promise.race([pending, deadline]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 
@@ -145,7 +480,8 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
       }
       const credential = this.#credentials.chatgpt;
       if (credential && !credential.deadReason && credential.refreshToken
-        && credential.expiresAt <= Date.now() + REFRESH_EARLY_MS) {
+        && credential.expiresAt <= Date.now() + REFRESH_EARLY_MS
+        && (credential.refreshAfter ?? 0) <= Date.now()) {
         try {
           await this.#refreshChatGpt(credential);
         } catch (error) {
@@ -175,13 +511,8 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
     const row = await this.#state.storage.get<StoredRow>(STATE_KEY);
     if (!row) return;
     const opened = await this.#vault.open<CredentialState>(row.envelope);
-    this.#credentials = opened.value;
-    const chatgpt = this.#credentials.chatgpt;
-    if (chatgpt?.refreshState === "in_flight") {
-      chatgpt.refreshState = "ready";
-      chatgpt.deadReason = "refresh_outcome_unknown";
-      await this.#persist();
-    } else if (opened.reseal) {
+    const quarantined = this.#installRestoredState(opened.value);
+    if (quarantined || opened.reseal) {
       await this.#persist();
     }
     await this.#schedule();
@@ -289,11 +620,38 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
       throw new BrokerFailure(404, "credential_not_configured");
     }
     if (current.deadReason) throw new BrokerFailure(422, "chatgpt_credential_dead");
-    const refresh = recover
+    const now = Date.now();
+    const refreshNeeded = recover
       ? revision === current.revision
-      : current.expiresAt <= Date.now() + REFRESH_EARLY_MS;
-    const credential = refresh ? await this.#refreshChatGpt(current) : current;
-    if (credential.expiresAt <= Date.now()) throw new BrokerFailure(503, "chatgpt_credential_expired");
+      : current.expiresAt <= now + REFRESH_EARLY_MS;
+    if (refreshNeeded && (current.refreshAfter ?? 0) > now) {
+      if (recover || current.expiresAt <= now) {
+        throw new BrokerFailure(503, "chatgpt_refresh_rate_limited");
+      }
+      return {
+        kind: "chatgpt",
+        secret: current.accessToken,
+        accountId: current.accountId,
+        fedramp: current.fedramp,
+        expiresAt: current.expiresAt,
+        revision: current.revision,
+      };
+    }
+    let credential = current;
+    if (refreshNeeded) {
+      try {
+        credential = await this.#refreshChatGpt(current);
+      } catch (error) {
+        if (recover || !(error instanceof BrokerFailure)
+          || error.code !== "chatgpt_refresh_rate_limited"
+          || current.expiresAt <= Date.now()) {
+          throw error;
+        }
+      }
+    }
+    if (credential.expiresAt <= Date.now()) {
+      throw new BrokerFailure(503, "chatgpt_credential_expired");
+    }
     return {
       kind: "chatgpt",
       secret: credential.accessToken,
@@ -316,7 +674,10 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
       headers: { "content-type": "application/json" },
       body: JSON.stringify({ client_id: CODEX_CLIENT_ID }),
     });
-    if (!response.ok) throw new BrokerFailure(503, "chatgpt_login_start_failed");
+    if (!response.ok) {
+      await cancelResponseBody(response);
+      throw new BrokerFailure(503, "chatgpt_login_start_failed");
+    }
     const value = await providerJson(response);
     const deviceAuthId = stringField(value, "device_auth_id");
     const userCode = stringField(value, "user_code") ?? stringField(value, "usercode");
@@ -354,11 +715,15 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
       body: JSON.stringify({ device_auth_id: login.deviceAuthId, user_code: login.userCode }),
     });
     if (response.status === 403 || response.status === 404) {
+      await cancelResponseBody(response);
       login.nextPollAt = Date.now() + login.pollAfterMs;
       await this.#persist();
       return publicLogin(login);
     }
-    if (!response.ok) throw new BrokerFailure(503, "chatgpt_login_poll_failed");
+    if (!response.ok) {
+      await cancelResponseBody(response);
+      throw new BrokerFailure(503, "chatgpt_login_poll_failed");
+    }
     const code = await providerJson(response);
     const authorizationCode = stringField(code, "authorization_code");
     const codeVerifier = stringField(code, "code_verifier");
@@ -430,11 +795,27 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
     }
     if (!response.ok) {
       if (response.status === 429) {
-        this.#credentials.chatgpt = current;
-        await this.#persist();
+        const now = Date.now();
+        const refreshAttempts = nextRefreshAttempt(current.refreshAttempts);
+        const refreshAfter = now + retryAfterDelayMs(
+          response.headers.get("retry-after"),
+          now,
+          refreshAttempts,
+        );
+        this.#credentials.chatgpt = {
+          ...current,
+          refreshState: "ready",
+          refreshAfter,
+          refreshAttempts,
+        };
+        await finishRateLimitedRefresh(
+          response,
+          () => this.#persist(),
+          () => this.#schedule(),
+        );
         throw new BrokerFailure(503, "chatgpt_refresh_rate_limited");
       }
-      await response.body?.cancel();
+      await cancelResponseBody(response);
       await this.#markDead(claimed, `token_endpoint_http_${response.status}`);
       throw new BrokerFailure(422, "chatgpt_credential_dead");
     }
@@ -477,10 +858,20 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
         this.#credentials = { version: 1, active: null };
         return;
       }
-      this.#credentials = (await this.#vault.open<CredentialState>(row.envelope)).value;
+      const opened = await this.#vault.open<CredentialState>(row.envelope);
+      this.#installRestoredState(opened.value);
     } catch {
       this.#credentials = { version: 1, active: null };
     }
+  }
+
+  #installRestoredState(restored: CredentialState): boolean {
+    this.#credentials = restored;
+    const chatgpt = restored.chatgpt;
+    if (chatgpt?.refreshState !== "in_flight") return false;
+    chatgpt.refreshState = "ready";
+    chatgpt.deadReason = "refresh_outcome_unknown";
+    return true;
   }
 
   async #schedule(): Promise<void> {
@@ -488,11 +879,65 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
     if (this.#credentials.login) times.push(this.#credentials.login.expiresAt);
     const chatgpt = this.#credentials.chatgpt;
     if (chatgpt?.refreshToken && !chatgpt.deadReason) {
-      times.push(Math.max(Date.now() + 1_000, chatgpt.expiresAt - REFRESH_EARLY_MS));
+      times.push(Math.max(
+        Date.now() + 1_000,
+        chatgpt.expiresAt - REFRESH_EARLY_MS,
+        chatgpt.refreshAfter ?? 0,
+      ));
     }
     if (times.length) await this.#state.storage.setAlarm(Math.min(...times));
     else await this.#state.storage.deleteAlarm();
   }
+}
+
+export async function finishRateLimitedRefresh(
+  response: Response,
+  persist: () => Promise<void>,
+  schedule: () => Promise<void>,
+): Promise<void> {
+  try {
+    await persist();
+    await schedule();
+  } finally {
+    await cancelResponseBody(response);
+  }
+}
+
+export function retryAfterDelayMs(
+  value: string | null,
+  now = Date.now(),
+  fallbackAttempt = 1,
+  jitter = Math.random(),
+): number {
+  const candidate = value?.trim() ?? "";
+  const numeric = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(candidate);
+  const seconds = numeric ? Number(candidate) : Number.NaN;
+  const parsed = numeric
+    ? Number.isFinite(seconds) && seconds >= 0 ? seconds * 1_000 : Number.NaN
+    : candidate ? Date.parse(candidate) - now : Number.NaN;
+  if (!Number.isFinite(parsed)) {
+    const attempt = Number.isSafeInteger(fallbackAttempt) && fallbackAttempt > 0
+      ? Math.min(MAX_REFRESH_BACKOFF_ATTEMPT, fallbackAttempt)
+      : 1;
+    const ceiling = Math.min(
+      MAX_REFRESH_BACKOFF_MS,
+      DEFAULT_REFRESH_BACKOFF_MS * 2 ** (attempt - 1),
+    );
+    const boundedJitter = Number.isFinite(jitter) ? Math.max(0, Math.min(1, jitter)) : 0.5;
+    return Math.round(ceiling / 2 + ceiling / 2 * boundedJitter);
+  }
+  return Math.max(1_000, Math.min(MAX_REFRESH_BACKOFF_MS, parsed));
+}
+
+function nextRefreshAttempt(previous: number | undefined): number {
+  const attempt = typeof previous === "number" && Number.isSafeInteger(previous) && previous >= 0
+    ? previous + 1
+    : 1;
+  return Math.min(MAX_REFRESH_BACKOFF_ATTEMPT, attempt);
+}
+
+async function cancelResponseBody(response: Response): Promise<void> {
+  try { await response.body?.cancel(); } catch { /* Response disposal is best-effort. */ }
 }
 
 class BrokerFailure extends Error {
@@ -544,7 +989,10 @@ async function exchangeAuthorizationCode(
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body,
   });
-  if (!response.ok) throw new BrokerFailure(503, "chatgpt_token_exchange_failed");
+  if (!response.ok) {
+    await cancelResponseBody(response);
+    throw new BrokerFailure(503, "chatgpt_token_exchange_failed");
+  }
   return providerJson(response);
 }
 

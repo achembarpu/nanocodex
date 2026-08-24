@@ -188,12 +188,12 @@ export type EvalCase = {
 };
 
 export class EvalApiError extends Error {
-  constructor(
-    message: string,
-    readonly status: number,
-  ) {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
     super(message);
     this.name = "EvalApiError";
+    this.status = status;
   }
 }
 

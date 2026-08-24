@@ -1,7 +1,7 @@
 import { defineCommand, } from "just-bash/browser";
 const runtimes = new WeakMap();
-export function createCompilerCommand(name, filesystem) {
-    const runtime = runtimes.get(filesystem) ?? new BrowserCompilerRuntime();
+export function createCompilerCommand(name, filesystem, egress) {
+    const runtime = runtimes.get(filesystem) ?? new BrowserCompilerRuntime(egress);
     runtimes.set(filesystem, runtime);
     return defineCommand(name, async (args, context) => {
         const parsed = parseArguments(name, args, context);
@@ -21,9 +21,13 @@ export function createCompilerCommand(name, filesystem) {
     });
 }
 class BrowserCompilerRuntime {
+    #egress;
     #worker;
     #nextId = 1;
     #queue = Promise.resolve();
+    constructor(egress) {
+        this.#egress = egress;
+    }
     execute(input, signal) {
         const run = this.#queue.then(() => this.#run(input, signal));
         this.#queue = run.then(() => undefined, () => undefined);
@@ -67,6 +71,7 @@ class BrowserCompilerRuntime {
     }
     #createWorker() {
         const worker = new Worker(new URL("./compiler.worker.mjs", import.meta.url), { type: "module" });
+        worker.postMessage({ type: "initialize", egress: this.#egress });
         this.#worker = worker;
         return worker;
     }

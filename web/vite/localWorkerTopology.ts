@@ -26,6 +26,7 @@ export function localManagedAuxiliaryWorkers(
     || DEVELOPMENT_SIGNING_KEY;
   const idleTimeout = environment.NANOCODEX_LOCAL_AGENT_IDLE_TIMEOUT_MS?.trim() || "1000";
   const relayUrl = environment.NANOCODEX_LOCAL_CODEX_RELAY_URL?.trim();
+  const connectorVars = localConnectorVars(environment);
   if (!/^[1-9][0-9]*$/.test(idleTimeout)) {
     throw new Error("local managed Worker idle timeout must be a positive integer");
   }
@@ -49,6 +50,7 @@ export function localManagedAuxiliaryWorkers(
           ...(environment.NANOCODEX_LOCAL_CHATGPT_BOOTSTRAP
             ? { LOCAL_CHATGPT_BOOTSTRAP: environment.NANOCODEX_LOCAL_CHATGPT_BOOTSTRAP }
             : {}),
+          ...connectorVars,
         },
       }),
     },
@@ -67,4 +69,35 @@ export function localManagedAuxiliaryWorkers(
       }),
     },
   ];
+}
+
+function localConnectorVars(environment: NodeJS.ProcessEnv): Record<string, string> {
+  return {
+    ...credentialPair(environment, {
+      id: "NANOCODEX_LOCAL_GITHUB_OAUTH_CLIENT_ID",
+      secret: "NANOCODEX_LOCAL_GITHUB_OAUTH_CLIENT_SECRET",
+      targetId: "GITHUB_OAUTH_CLIENT_ID",
+      targetSecret: "GITHUB_OAUTH_CLIENT_SECRET",
+      label: "GitHub",
+    }),
+    ...credentialPair(environment, {
+      id: "NANOCODEX_LOCAL_GOOGLE_OAUTH_CLIENT_ID",
+      secret: "NANOCODEX_LOCAL_GOOGLE_OAUTH_CLIENT_SECRET",
+      targetId: "GOOGLE_OAUTH_CLIENT_ID",
+      targetSecret: "GOOGLE_OAUTH_CLIENT_SECRET",
+      label: "Google",
+    }),
+  };
+}
+
+function credentialPair(
+  environment: NodeJS.ProcessEnv,
+  names: { id: string; secret: string; targetId: string; targetSecret: string; label: string },
+): Record<string, string> {
+  const id = environment[names.id]?.trim();
+  const secret = environment[names.secret]?.trim();
+  if (Boolean(id) !== Boolean(secret)) {
+    throw new Error(`local ${names.label} OAuth client ID and secret must be configured together`);
+  }
+  return id && secret ? { [names.targetId]: id, [names.targetSecret]: secret } : {};
 }

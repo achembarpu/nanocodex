@@ -48,14 +48,23 @@ export function xtermAdapter(term: XtermLike, now: () => number = performanceNow
   });
   return {
     write(data: string | Uint8Array, options: { preserveScroll?: boolean } = {}) {
+      const viewportY = term.buffer?.active.viewportY;
       const bottomOffset = options.preserveScroll && term.buffer
         ? term.buffer.active.baseY - term.buffer.active.viewportY
         : undefined;
+      const restoreViewportY = bottomOffset === undefined
+        && term.buffer
+        && viewportY !== undefined
+        && viewportY < term.buffer.active.baseY
+          ? viewportY
+          : undefined;
       return new Promise<void>((resolve) => term.write(
         typeof data === "string" ? data : new TextDecoder().decode(data),
         () => {
           if (bottomOffset !== undefined && term.buffer && term.scrollToLine) {
             term.scrollToLine(Math.max(0, term.buffer.active.baseY - bottomOffset));
+          } else if (restoreViewportY !== undefined && term.scrollToLine) {
+            term.scrollToLine(restoreViewportY);
           }
           resolve();
         },

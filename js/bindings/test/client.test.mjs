@@ -14,6 +14,7 @@ import {
   createAgentClient,
   defineRuntime,
   releaseHostSession,
+  toWasmConfig,
 } from "../internal.mjs";
 import {
   own as ownDurabilityHost,
@@ -24,13 +25,35 @@ import {
 test("the memory durability store carries opaque Rust batches across host steps", () => {
   const store = createMemoryDurabilityStore("journal-1");
   assert.deepEqual(store.load("journal-1"), { revision: "0", batches: [] });
+  assert.deepEqual(store.acquire("journal-1", { ownerId: "owner-1" }), {
+    ownerId: "owner-1",
+    fence: "1",
+    revision: "0",
+    batches: [],
+  });
   assert.deepEqual(store.append("journal-1", {
+    ownerId: "owner-1",
+    fence: "1",
     expectedRevision: "0",
     payload: "{\"entry\":1}",
   }), { status: "appended", revision: "1" });
+  assert.deepEqual(store.acquire("journal-1", { ownerId: "owner-2" }), {
+    ownerId: "owner-2",
+    fence: "2",
+    revision: "1",
+    batches: [{ revision: "1", payload: "{\"entry\":1}" }],
+  });
   assert.deepEqual(store.append("journal-1", {
+    ownerId: "owner-1",
+    fence: "1",
     expectedRevision: "0",
     payload: "stale",
+  }), { status: "fenced" });
+  assert.deepEqual(store.append("journal-1", {
+    ownerId: "owner-2",
+    fence: "2",
+    expectedRevision: "0",
+    payload: "conflicting",
   }), { status: "conflict", actualRevision: "1" });
   assert.deepEqual(store.snapshot(), {
     revision: "1",
@@ -42,11 +65,23 @@ test("the memory durability store carries opaque Rust batches across host steps"
     () => durabilityRevision("18446744073709551616"),
     /unsigned 64-bit decimal string/,
   );
+  assert.equal(durabilityRevision(Number.MAX_SAFE_INTEGER), "9007199254740991");
+  assert.throws(
+    () => durabilityRevision(-1),
+    /revision numbers must be nonnegative safe integers/,
+  );
+  assert.throws(
+    () => durabilityRevision(1.5),
+    /revision numbers must be nonnegative safe integers/,
+  );
   const exhausted = createMemoryDurabilityStore("exhausted", {
     revision: "18446744073709551615",
     batches: [],
   });
+  const exhaustedOwner = exhausted.acquire("exhausted", { ownerId: "owner" });
   assert.deepEqual(exhausted.append("exhausted", {
+    ownerId: exhaustedOwner.ownerId,
+    fence: exhaustedOwner.fence,
     expectedRevision: "18446744073709551615",
     payload: "never-written",
   }), {
@@ -57,10 +92,20 @@ test("the memory durability store carries opaque Rust batches across host steps"
 });
 
 test("the SQLite durability store owns revision validation and compare-and-append", () => {
+  const owners = new Map();
   const revisions = new Map();
   const batches = [];
   const query = (sql, args) => {
     const [journalId, revision, payload] = args;
+    if (sql.startsWith("SELECT owner_id, fence FROM nanocodex_journal_owners")) {
+      const stored = owners.get(journalId);
+      return stored === undefined ? [] : [stored];
+    }
+    if (sql.startsWith("INSERT INTO nanocodex_journal_owners")) {
+      const [, ownerId, fence] = args;
+      owners.set(journalId, { owner_id: ownerId, fence });
+      return [];
+    }
     if (sql.startsWith("SELECT revision FROM nanocodex_journals")) {
       const stored = revisions.get(journalId);
       return stored === undefined ? [] : [{ revision: stored }];
@@ -81,19 +126,33 @@ test("the SQLite durability store owns revision validation and compare-and-appen
   const store = createSqliteDurabilityStore({
     transaction: (callback) => callback(query),
   });
-  assert.equal(sqliteDurabilitySchema.length, 2);
+  assert.equal(sqliteDurabilitySchema.length, 3);
 
   assert.deepEqual(store.load("journal-1"), { revision: "0", batches: [] });
+  const firstOwner = store.acquire("journal-1", { ownerId: "owner-1" });
+  assert.deepEqual(firstOwner, {
+    ownerId: "owner-1",
+    fence: "1",
+    revision: "0",
+    batches: [],
+  });
   assert.deepEqual(store.append("journal-1", {
+    ownerId: firstOwner.ownerId,
+    fence: firstOwner.fence,
     expectedRevision: "0",
     payload: "opaque",
   }), { status: "appended", revision: "1" });
   assert.deepEqual(store.append("journal-1", {
+    ownerId: firstOwner.ownerId,
+    fence: firstOwner.fence,
     expectedRevision: "0",
     payload: "stale",
   }), { status: "conflict", actualRevision: "1" });
   revisions.set("exhausted", "18446744073709551615");
+  const exhaustedOwner = store.acquire("exhausted", { ownerId: "owner-exhausted" });
   assert.deepEqual(store.append("exhausted", {
+    ownerId: exhaustedOwner.ownerId,
+    fence: exhaustedOwner.fence,
     expectedRevision: "18446744073709551615",
     payload: "never-written",
   }), {
@@ -105,6 +164,38 @@ test("the SQLite durability store owns revision validation and compare-and-appen
     revision: "1",
     batches: [{ revision: "1", payload: "opaque" }],
   });
+  revisions.delete("journal-1");
+  batches.splice(0, batches.length);
+  const secondOwner = store.acquire("journal-1", { ownerId: "owner-2" });
+  assert.deepEqual(secondOwner, {
+    ownerId: "owner-2",
+    fence: "2",
+    revision: "0",
+    batches: [],
+  });
+  assert.deepEqual(store.append("journal-1", {
+    ownerId: firstOwner.ownerId,
+    fence: firstOwner.fence,
+    expectedRevision: "0",
+    payload: "stale-after-reset",
+  }), { status: "fenced" });
+
+  const roundedRevision = Number("9007199254740993");
+  assert.equal(roundedRevision, 9007199254740992);
+  revisions.set("unsafe-revision", roundedRevision);
+  assert.throws(
+    () => store.load("unsafe-revision"),
+    /revision numbers must be nonnegative safe integers; use exact unsigned decimal text/,
+  );
+
+  revisions.set("exact-revision", "9007199254740993");
+  assert.equal(store.load("exact-revision").revision, "9007199254740993");
+
+  owners.set("unsafe-fence", { owner_id: "old-owner", fence: roundedRevision });
+  assert.throws(
+    () => store.acquire("unsafe-fence", { ownerId: "new-owner" }),
+    /fence numbers must be nonnegative safe integers; use exact unsigned decimal text/,
+  );
 });
 
 test("the headless client exposes matching direct and standalone actions", async () => {
@@ -217,6 +308,84 @@ test("the headless client exposes matching direct and standalone actions", async
   agent.dispose();
 });
 
+test("a duplicate stable session rejects before touching durability authority", async () => {
+  const sessionId = "session-duplicate-reservation";
+  let authorityAcquisitions = 0;
+  let releases = 0;
+  const runtime = defineRuntime({
+    create(options) {
+      authorityAcquisitions += 1;
+      return rawAgent(options.sessionId);
+    },
+    release() {
+      releases += 1;
+    },
+    decorate: (agent) => agent.extend(Actions.agentActions()),
+  });
+  const first = await createAgentClient(runtime, { sessionId, durabilityId: "journal-1" });
+
+  await assert.rejects(
+    createAgentClient(runtime, { sessionId, durabilityId: "journal-1" }),
+    /session ID is already active/,
+  );
+  assert.equal(authorityAcquisitions, 1);
+  assert.equal(
+    (await first.turn.prompt({ input: "first owner remains live" }).result()).finalMessage,
+    `${sessionId}:first owner remains live`,
+  );
+
+  first.dispose();
+  assert.equal(releases, 1);
+  const replacement = await createAgentClient(runtime, { sessionId, durabilityId: "journal-1" });
+  assert.equal(authorityAcquisitions, 2);
+  replacement.dispose();
+  assert.equal(releases, 2);
+});
+
+test("concurrent creation admits exactly one stable session owner", async () => {
+  const sessionId = "session-concurrent-reservation";
+  let creations = 0;
+  let releaseFirst;
+  const firstGate = new Promise((resolve) => { releaseFirst = resolve; });
+  const runtime = defineRuntime({
+    async create(options) {
+      creations += 1;
+      await firstGate;
+      return rawAgent(options.sessionId);
+    },
+    decorate: (agent) => agent.extend(Actions.agentActions()),
+  });
+
+  const firstCreation = createAgentClient(runtime, { sessionId });
+  const secondCreation = createAgentClient(runtime, { sessionId });
+  await assert.rejects(secondCreation, /session ID is already active/);
+  assert.equal(creations, 1);
+  releaseFirst();
+  const first = await firstCreation;
+  first.dispose();
+});
+
+test("failed construction releases its stable session reservation", async () => {
+  const sessionId = "session-construction-failure";
+  let creations = 0;
+  const runtime = defineRuntime({
+    create(options) {
+      creations += 1;
+      if (creations === 1) throw new Error("WASM construction failed");
+      return rawAgent(options.sessionId);
+    },
+    decorate: (agent) => agent.extend(Actions.agentActions()),
+  });
+
+  await assert.rejects(
+    createAgentClient(runtime, { sessionId }),
+    /WASM construction failed/,
+  );
+  const recovered = await createAgentClient(runtime, { sessionId });
+  assert.equal(creations, 2);
+  recovered.dispose();
+});
+
 test("turn acceptance forwards durable IDs and remains optional for custom runtimes", async () => {
   const legacyRuntime = defineRuntime({
     create: () => rawAgent("legacy-session"),
@@ -256,37 +425,68 @@ test("turn acceptance forwards durable IDs and remains optional for custom runti
   agent.dispose();
 });
 
-test("the WASM host bridge preserves typed decimal durability revisions", async () => {
+test("the WASM config pairs a durability route with its journal", () => {
+  assert.deepEqual(toWasmConfig({
+    apiKey: "test-key",
+    hostDefinitionId: 1,
+    durabilityId: "journal-1",
+    durabilityHostId: "durability-route-1",
+  }), {
+    api_key: "test-key",
+    durability_id: "journal-1",
+    durability_host_id: "durability-route-1",
+    host_definition_id: 1,
+  });
+});
+
+test("the WASM host bridge routes owner-fenced durability per Agent binding", async () => {
   const batches = [];
-  const host = {
-    connect() {},
-    durability: {
-      load: () => ({ revision: String(batches.length), batches }),
-      append(_journalId, { expectedRevision, payload }) {
-        if (payload === "definite-failure") {
-          return { status: "not_committed", message: "transaction rolled back" };
-        }
-        if (expectedRevision !== String(batches.length)) {
-          return { status: "conflict", actualRevision: String(batches.length) };
-        }
-        const revision = String(batches.length + 1);
-        batches.push({ revision, payload });
-        return { status: "appended", revision };
-      },
+  let owner;
+  const durability = {
+    acquire(_journalId, { ownerId }) {
+      const fence = String(BigInt(owner?.fence ?? "0") + 1n);
+      owner = { ownerId, fence };
+      return { ...owner, revision: String(batches.length), batches };
+    },
+    append(_journalId, { ownerId, fence, expectedRevision, payload }) {
+      if (ownerId !== owner?.ownerId || fence !== owner?.fence) {
+        return { status: "fenced" };
+      }
+      if (payload === "definite-failure") {
+        return { status: "not_committed", message: "transaction rolled back" };
+      }
+      if (expectedRevision !== String(batches.length)) {
+        return { status: "conflict", actualRevision: String(batches.length) };
+      }
+      const revision = String(batches.length + 1);
+      batches.push({ revision, payload });
+      return { status: "appended", revision };
     },
   };
-  activateHost(host);
-  ownDurabilityHost(host, host.durability, "journal-1");
-  retainDurabilityHost(host, "journal-1");
-  retainDurabilityHost(host, "journal-1");
+  const firstHost = { connect() {} };
+  const secondHost = { connect() {} };
+  activateHost(firstHost);
+  const firstRoute = ownDurabilityHost(firstHost, durability, "journal-1");
+  const secondRoute = ownDurabilityHost(secondHost, durability, "journal-1");
+  assert.notEqual(firstRoute.id, secondRoute.id);
+  retainDurabilityHost(firstHost, firstRoute.id);
+  retainDurabilityHost(firstHost, firstRoute.id);
+  retainDurabilityHost(secondHost, secondRoute.id);
   try {
     assert.deepEqual(
-      JSON.parse(await globalThis.nanocodexHost.durabilityLoad("journal-1")),
-      { revision: "0", batches: [] },
+      JSON.parse(await globalThis.nanocodexHost.durabilityAcquire(
+        firstRoute.id,
+        "journal-1",
+        "owner-1",
+      )),
+      { owner_id: "owner-1", fence: "1", revision: "0", batches: [] },
     );
     assert.deepEqual(
       JSON.parse(await globalThis.nanocodexHost.durabilityAppend(
+        firstRoute.id,
         "journal-1",
+        "owner-1",
+        "1",
         "0",
         "opaque-rust-batch",
       )),
@@ -294,7 +494,10 @@ test("the WASM host bridge preserves typed decimal durability revisions", async 
     );
     assert.deepEqual(
       JSON.parse(await globalThis.nanocodexHost.durabilityAppend(
+        firstRoute.id,
         "journal-1",
+        "owner-1",
+        "1",
         "0",
         "stale",
       )),
@@ -302,24 +505,82 @@ test("the WASM host bridge preserves typed decimal durability revisions", async 
     );
     assert.deepEqual(
       JSON.parse(await globalThis.nanocodexHost.durabilityAppend(
+        firstRoute.id,
         "journal-1",
+        "owner-1",
+        "1",
         "1",
         "definite-failure",
       )),
       { status: "not_committed", message: "transaction rolled back" },
     );
-    releaseDurabilityHost(host, "journal-1");
+    assert.deepEqual(
+      JSON.parse(await globalThis.nanocodexHost.durabilityAcquire(
+        secondRoute.id,
+        "journal-1",
+        "owner-2",
+      )),
+      {
+        owner_id: "owner-2",
+        fence: "2",
+        revision: "1",
+        batches: [{ revision: "1", payload: "opaque-rust-batch" }],
+      },
+    );
+    assert.deepEqual(
+      JSON.parse(await globalThis.nanocodexHost.durabilityAppend(
+        firstRoute.id,
+        "journal-1",
+        "owner-1",
+        "1",
+        "1",
+        "stale-owner",
+      )),
+      { status: "fenced" },
+    );
+    await assert.rejects(
+      globalThis.nanocodexHost.durabilityAcquire(
+        firstRoute.id,
+        "another-journal",
+        "owner-3",
+      ),
+      /route does not own journal/,
+    );
+    releaseDurabilityHost(firstHost, firstRoute.id);
     assert.equal(
-      JSON.parse(await globalThis.nanocodexHost.durabilityLoad("journal-1")).revision,
-      "1",
+      JSON.parse(await globalThis.nanocodexHost.durabilityAcquire(
+        firstRoute.id,
+        "journal-1",
+        "owner-3",
+      )).fence,
+      "3",
       "releasing a child host reference must preserve its parent's journal binding",
     );
+    releaseDurabilityHost(firstHost, firstRoute.id);
+    await assert.rejects(
+      globalThis.nanocodexHost.durabilityAcquire(
+        firstRoute.id,
+        "journal-1",
+        "owner-4",
+      ),
+      /no Nanocodex host owns durability route/,
+    );
+    assert.equal(
+      JSON.parse(await globalThis.nanocodexHost.durabilityAcquire(
+        secondRoute.id,
+        "journal-1",
+        "owner-5",
+      )).fence,
+      "4",
+      "releasing one route must not release another route for the same journal",
+    );
   } finally {
-    releaseDurabilityHost(host, "journal-1");
+    releaseDurabilityHost(firstHost, firstRoute.id);
+    releaseDurabilityHost(secondHost, secondRoute.id);
   }
   await assert.rejects(
-    globalThis.nanocodexHost.durabilityLoad("journal-1"),
-    /no Nanocodex host owns durability journal/,
+    globalThis.nanocodexHost.durabilityAcquire(firstRoute.id, "journal-1", "owner-4"),
+    /no Nanocodex host owns durability route/,
   );
 });
 

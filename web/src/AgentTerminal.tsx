@@ -35,16 +35,11 @@ import {
 } from "./demoTerminal";
 import { ArtifactDock } from "./ArtifactDock";
 import { browserMcpConfiguration } from "./browserMcp";
-import { loadManagedTerminalAgent } from "./managedAgentRuntime";
+import { clientFailureMessage } from "./clientFailure";
+import { openManagedTerminalAgent } from "./managedAgentRuntime";
 import { localTerminalAgent } from "./localAgentRuntime";
 
 export type { AgentTerminalMode, AgentTerminalState } from "./agentTerminalTypes";
-
-const agentConfig = createConfig({
-  agent: {
-    mcp: browserMcpConfiguration(location.origin),
-  },
-});
 
 /** Authenticated website policy around the headless Agent SDK and app-local xterm. */
 export const AgentTerminal = memo(function AgentTerminal({
@@ -64,23 +59,40 @@ export const AgentTerminal = memo(function AgentTerminal({
   theme: "light" | "dark";
   threadId: string;
 }) {
+  const agentConfig = useMemo(() => createConfig({
+    agent: {
+      mcp: browserMcpConfiguration(location.origin, threadId),
+    },
+  }), [threadId]);
   const {
     data: agent,
     error,
     isError,
     refetch,
   } = useNanocodex({ config: agentConfig, threadId });
+  const [localFailure, setLocalFailure] = useState<{
+    agent: typeof agent;
+    message: string;
+    threadId: string;
+  }>();
   const terminalAgent = useMemo(
-    () => agent ? localTerminalAgent(agent, threadId) : undefined,
+    () => agent ? localTerminalAgent(agent, threadId, undefined, (failure) => {
+      setLocalFailure({ agent, message: errorMessage(failure), threadId });
+    }) : undefined,
     [agent, threadId],
   );
+  const localAgentError = localFailure
+    && localFailure.agent === agent
+    && localFailure.threadId === threadId
+    ? localFailure.message
+    : undefined;
   const retryAgent = useCallback(() => {
     refetch();
   }, [refetch]);
   return (
     <AgentTerminalView
       agent={terminalAgent}
-      agentError={isError ? errorMessage(error) : undefined}
+      agentError={isError ? errorMessage(error) : localAgentError}
       authStatus={authStatus}
       mode={mode}
       onConversationActivity={onConversationActivity}
@@ -109,28 +121,12 @@ export const ManagedAgentTerminal = memo(function ManagedAgentTerminal({
   source: Exclude<CredentialSource, null>;
   theme: "light" | "dark";
 }) {
-  const [attempt, setAttempt] = useState(0);
-  const [agent, setAgent] = useState<TerminalAgent>();
-  const [agentError, setAgentError] = useState<string>();
-  useEffect(() => {
-    let cancelled = false;
-    setAgent(undefined);
-    setAgentError(undefined);
-    void loadManagedTerminalAgent(agentId).then((loaded) => {
-      if (!cancelled) setAgent(loaded);
-    }, (error) => {
-      if (!cancelled) setAgentError(errorMessage(error));
-    });
-    return () => { cancelled = true; };
-  }, [agentId, attempt]);
-  const retryAgent = useCallback(() => {
-    setAgent(undefined);
-    setAttempt((value) => value + 1);
-  }, []);
+  const agent = useMemo(() => openManagedTerminalAgent(agentId), [agentId]);
+  const retryAgent = useCallback(() => {}, []);
   return (
     <AgentTerminalView
       agent={agent}
-      agentError={agentError}
+      agentError={undefined}
       authStatus={authStatus}
       mode={mode}
       onConversationActivity={onConversationActivity}
@@ -362,5 +358,8 @@ function markAgentTiming(
 }
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return clientFailureMessage(
+    error,
+    "The agent connection was interrupted. Check your network and retry.",
+  );
 }

@@ -7,7 +7,9 @@ import {
   type FormEvent,
 } from "react";
 import { isRecord, responseFailure, useAccountSession } from "./AccountSession";
+import { clientFailureMessage } from "./clientFailure";
 import { deploymentHealth } from "./deploymentHealth";
+import { ProfileConnectors } from "./ProfileConnectors";
 
 type ApiKeyMetadata = Readonly<{
   id: string;
@@ -48,7 +50,7 @@ export function AccountMenu() {
   const session = useAccountSession();
   const refreshSession = session.refresh;
   const accountId = session.account?.id;
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(() => new URL(window.location.href).searchParams.has("connector_result"));
   const [keys, setKeys] = useState<ApiKeyMetadata[] | null>(null);
   const [keyError, setKeyError] = useState<string | null>(null);
   const [keyOperation, setKeyOperation] = useState<string | null>(null);
@@ -338,6 +340,7 @@ export function AccountMenu() {
       <button
         className="account-menu-trigger"
         type="button"
+        aria-label={accountLabel}
         aria-expanded={open}
         aria-haspopup="dialog"
         onClick={() => open ? close() : setOpen(true)}
@@ -346,10 +349,10 @@ export function AccountMenu() {
         <span>{accountLabel}</span>
       </button>
       {open && session.status !== "checking" ? (
-        <section className="account-panel" aria-label="Nanocodex account">
+        <section className="account-panel" aria-label="Nanocodex profile">
           <header className="account-panel-header">
             <div>
-              <span>Nanocodex account</span>
+              <span>Profile</span>
               {session.account ? <strong>{session.account.persistent
                 ? shortIdentity(session.account.id)
                 : "This browser"}</strong> : null}
@@ -402,6 +405,13 @@ export function AccountMenu() {
                   </button>
                 </div>
               ) : null}
+
+              <ProfileConnectors
+                accountId={session.account.id}
+                key={session.account.id}
+                requiresLogin={!session.account.persistent}
+                refreshSession={refreshSession}
+              />
 
               {credentials ? (
                 <section className="api-key-panel account-connections" aria-labelledby="connections-heading">
@@ -549,21 +559,21 @@ export function AccountMenu() {
             </>
           ) : (
             <div className="account-auth-actions">
-              <p>Create or open your Nanocodex account with a passkey.</p>
+              <p>Sign in with your passkey, or explicitly start a separate account.</p>
               <button
                 className="account-primary-action"
-                type="button"
-                disabled={session.operation !== null}
-                onClick={() => void session.register()}
-              >
-                Register passkey
-              </button>
-              <button
                 type="button"
                 disabled={session.operation !== null}
                 onClick={() => void session.signIn()}
               >
                 Sign in with passkey
+              </button>
+              <button
+                type="button"
+                disabled={session.operation !== null}
+                onClick={() => void session.startNewAccount()}
+              >
+                Start new account
               </button>
             </div>
           )}
@@ -646,7 +656,7 @@ function shortIdentity(id: string): string {
 }
 
 function failureMessage(cause: unknown, fallback: string): string {
-  return cause instanceof Error && cause.message ? cause.message : fallback;
+  return clientFailureMessage(cause, fallback);
 }
 
 function notifyModelCredentialChanged(): void {

@@ -138,6 +138,20 @@ const shopFurniture = Object.freeze([
   position("trail_shop", 26, 17),
 ]);
 
+// Routing probes the same static collision map thousands of times during a
+// cold simulation tick. Keep those probes numeric and allocation-free instead
+// of rescanning position objects for every BFS neighbor.
+const townStaticBlocks = new Set([
+  ...orchardTrees,
+  ...townScenery,
+].map((point) => tileIndex(point.x, point.y, WORLD_SCENES.town.columns)));
+const hallStaticBlocks = new Set(hallFurniture.map((point) => (
+  tileIndex(point.x, point.y, WORLD_SCENES.guild_hall.columns)
+)));
+const shopStaticBlocks = new Set(shopFurniture.map((point) => (
+  tileIndex(point.x, point.y, WORLD_SCENES.trail_shop.columns)
+)));
+
 const portalByPosition = new Map(WORLD_PORTALS.map((worldPortal) => [
   positionKey(worldPortal.from),
   worldPortal,
@@ -158,8 +172,8 @@ export function isWorldPositionBlocked(value: WorldPosition): boolean {
   if (!isWorldPositionInBounds(value)) return true;
   if (value.scene === "town") return townBlocked(value.x, value.y);
   if (value.x < 1 || value.y < 1 || value.x >= 31 || value.y >= 23) return true;
-  const furniture = value.scene === "guild_hall" ? hallFurniture : shopFurniture;
-  return furniture.some((point) => samePosition(point, value));
+  const furniture = value.scene === "guild_hall" ? hallStaticBlocks : shopStaticBlocks;
+  return furniture.has(tileIndex(value.x, value.y, WORLD_SCENES[value.scene].columns));
 }
 
 export function isBlocked(x: number, y: number, scene: WorldSceneId = "town"): boolean {
@@ -273,8 +287,11 @@ function townBlocked(x: number, y: number): boolean {
   if (inside(x, y, 2, 2, 9, 6)) return true;
   if (inside(x, y, 23, 2, 29, 6)) return true;
   if (inside(x, y, 46, 31, 62, 46) && y !== 34) return true;
-  if (orchardTrees.some((point) => point.x === x && point.y === y)) return true;
-  return townScenery.some((point) => point.x === x && point.y === y);
+  return townStaticBlocks.has(tileIndex(x, y, WORLD_SCENES.town.columns));
+}
+
+function tileIndex(x: number, y: number, columns: number): number {
+  return y * columns + x;
 }
 
 function poi(scene: WorldSceneId, x: number, y: number, label: string): WorldPoi {

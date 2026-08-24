@@ -12,6 +12,7 @@ import {
   documentStatusForPath,
   renderLinkPreviewDocument,
 } from "./worker/linkPreview.ts";
+import { isManagedRoutePath } from "./worker/managedProxy.ts";
 
 const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
 function applicationRouteFallback(): Plugin {
@@ -30,6 +31,10 @@ function applicationRouteFallback(): Plugin {
         const url = new URL(request.url ?? "/", "https://localhost");
         const acceptsHtml = request.headers.accept?.includes("text/html") ?? false;
         if ((request.method !== "GET" && request.method !== "HEAD") || !acceptsHtml) {
+          next();
+          return;
+        }
+        if (isManagedRoutePath(url.pathname)) {
           next();
           return;
         }
@@ -129,9 +134,8 @@ export default defineConfig({
           // The website, broker, and managed Worker can then start together
           // even when another checkout already has an inspector open.
           inspector_port: 0,
-          // The website, Worker APIs, Durable Objects, D1, and R2 do not need
-          // Docker. Opt into the ChatGPT egress container only while working
-          // on that boundary so the normal visual loop starts immediately.
+          // The website, Worker APIs, Durable Objects, D1, and Just Bash do
+          // not need Docker. Container-backed experiments remain explicit.
           enable_containers: process.env.NANOCODEX_DEV_CONTAINERS === "1",
         },
       }),

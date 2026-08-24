@@ -265,8 +265,8 @@ test("the public protocol rejects private managed-agent fields", () => {
 
   const source = readFileSync(new URL("../src/Multiplayer.tsx", import.meta.url), "utf8");
   assert.doesNotMatch(source, /agent_id|access_token|refresh_token|OPENAI_API_KEY|CODEX_OAUTH/);
-  assert.match(source, /private Service Binding/);
-  assert.match(source, /fixed placeholder/);
+  assert.match(source, /Connectors disabled/);
+  assert.match(source, /no connector grant/);
   assert.match(source, /lifecycleAbort\.current\.abort\(\)/);
   assert.match(source, /signal\.aborted \|\| !mounted\.current/);
   assert.match(source, /const connect = useCallback[\s\S]*?if \(!mounted\.current\) return/);

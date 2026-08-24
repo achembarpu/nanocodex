@@ -1,5 +1,6 @@
 import { ChevronRight, Menu, MessageSquare, Plus, X } from "lucide-react";
 import { memo, useEffect, useRef } from "react";
+import type { AgentStatus } from "./agentTerminalTypes";
 
 export type ConversationSummary = Readonly<{
   id: string;
@@ -9,15 +10,17 @@ export type ConversationSummary = Readonly<{
 }>;
 
 export const ConversationHistoryRail = memo(function ConversationHistoryRail({
-  conversations, error, mobileOpen, onClose, onCreate, onOpen, onSelect,
+  agentStatus, conversations, error, mobileOpen, onClose, onCreate, onOpen, onRetry, onSelect,
   pending, runtime, selectedId,
 }: {
+  agentStatus: AgentStatus;
   conversations: readonly ConversationSummary[];
   error?: string;
   mobileOpen: boolean;
   onClose(): void;
   onCreate(): void;
   onOpen(): void;
+  onRetry(): void;
   onSelect(id: string): void;
   pending: boolean;
   runtime: "local" | "managed";
@@ -33,9 +36,9 @@ export const ConversationHistoryRail = memo(function ConversationHistoryRail({
   }, [mobileOpen, onClose]);
   const selected = conversations.find(({ id }) => id === selectedId);
   return <>
-    <button
+    <div
       className={mobileOpen ? "conversation-backdrop is-visible" : "conversation-backdrop"}
-      type="button" aria-hidden="true" tabIndex={-1} onPointerDown={onClose}
+      aria-hidden="true" onPointerDown={onClose}
     />
     <aside
       className={mobileOpen ? "conversation-sidebar is-mobile-open" : "conversation-sidebar"}
@@ -60,26 +63,42 @@ export const ConversationHistoryRail = memo(function ConversationHistoryRail({
       <div className="conversation-list">
         {conversations.map((conversation) => {
           const active = conversation.id === selectedId;
+          const title = conversationDisplayTitle(conversation.title);
           return <button
             className={active ? "conversation-row is-selected" : "conversation-row"}
             type="button" key={conversation.id}
             aria-current={active ? "location" : undefined}
             onClick={() => onSelect(conversation.id)}
           >
-            <span className="conversation-row-meta"><span>{conversation.id.slice(0, 8)}</span><span>{relativeTime(conversation.updatedAt)}</span></span>
-            <strong>{conversation.title}</strong>
-            <span className="conversation-row-byline">{conversation.turnCount === undefined
-              ? runtime === "local" ? "Browser thread" : "Durable agent"
-              : `${conversation.turnCount} turn${conversation.turnCount === 1 ? "" : "s"}`}</span>
+            <strong>{title}</strong>
+            <span className="conversation-row-meta">
+              <span>{relativeTime(conversation.updatedAt)}</span>
+              <span aria-hidden="true">·</span>
+              <span>{conversation.turnCount === undefined
+                ? runtime === "local" ? "Browser thread" : "Durable agent"
+                : `${conversation.turnCount} turn${conversation.turnCount === 1 ? "" : "s"}`}</span>
+            </span>
             <ChevronRight aria-hidden="true" />
           </button>;
         })}
-        {error ? <p className="conversation-list-error" role="alert">{error}</p> : null}
+        {error ? <div className="conversation-list-error">
+          <p role="alert">{error}</p>
+          <button type="button" disabled={pending} onClick={onRetry}>Retry conversations</button>
+        </div> : null}
       </div>
     </aside>
     <header className="conversation-mobile-header">
       <button type="button" aria-label="Open conversations" onClick={onOpen}><Menu aria-hidden="true" /></button>
-      <span>{selected?.title ?? "Conversations"}</span>
+      <div className="conversation-mobile-title">
+        <strong>{selected ? conversationDisplayTitle(selected.title) : "Conversations"}</strong>
+        <span className={`conversation-mobile-status is-${agentStatus}`}>
+          <i aria-hidden="true" />{statusLabel(agentStatus)}
+        </span>
+      </div>
+      <button className="conversation-mobile-new" type="button" disabled={pending}
+        aria-label="New conversation" onClick={onCreate}>
+        <Plus aria-hidden="true" /><span>New</span>
+      </button>
     </header>
   </>;
 });
@@ -91,4 +110,15 @@ function relativeTime(value?: number): string {
   if (elapsed < 3_600_000) return `${Math.floor(elapsed / 60_000)}m`;
   if (elapsed < 86_400_000) return `${Math.floor(elapsed / 3_600_000)}h`;
   return `${Math.floor(elapsed / 86_400_000)}d`;
+}
+
+function statusLabel(status: AgentStatus): string {
+  if (status === "ready") return "ready";
+  if (status === "error") return "needs attention";
+  if (status === "starting") return "connecting";
+  return "waiting";
+}
+
+function conversationDisplayTitle(title: string): string {
+  return /^Conversation [a-f\d]{8}$/i.test(title) ? "New conversation" : title;
 }

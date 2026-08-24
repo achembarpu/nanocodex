@@ -235,6 +235,20 @@ impl HostedToolRuntime {
             crate::code_mode_order::sort_definitions(&mut definitions);
             return (definitions, Vec::new());
         }
+        let has_deferred_tools = definitions.iter().any(|definition| {
+            matches!(
+                definition,
+                ToolDefinition::ToolSearch { .. }
+                    | ToolDefinition::Function {
+                        defer_loading: Some(true),
+                        ..
+                    }
+                    | ToolDefinition::Custom {
+                        defer_loading: Some(true),
+                        ..
+                    }
+            )
+        });
         let (mut direct_definitions, code_mode_definitions): (Vec<_>, Vec<_>) =
             definitions.into_iter().partition(|definition| {
                 matches!(definition, ToolDefinition::ToolSearch { .. })
@@ -257,7 +271,6 @@ impl HostedToolRuntime {
             })
             .collect();
         let mut description = EXEC_DESCRIPTION.to_owned();
-        let mut has_deferred_tools = false;
         for definition in code_mode_definitions {
             if matches!(
                 definition,
@@ -269,7 +282,6 @@ impl HostedToolRuntime {
                     ..
                 }
             ) {
-                has_deferred_tools = true;
                 continue;
             }
             let definition =
@@ -492,6 +504,8 @@ mod tests {
 
     struct DeferredHost;
 
+    struct PendingDeferredHost;
+
     struct ExecHost;
 
     struct LocalAlpha;
@@ -579,6 +593,27 @@ mod tests {
             _context: ToolContext<'a>,
         ) -> HostFuture<'a, Result<crate::ToolOutput, CodeModeHostError>> {
             Box::pin(async move { Ok(crate::ToolOutput::from_json(json!({"name": name}), true)) })
+        }
+    }
+
+    impl CodeModeHost for PendingDeferredHost {
+        fn tool_definitions(
+            &self,
+            _session_id: &str,
+        ) -> Result<Vec<ToolDefinition>, CodeModeHostError> {
+            Ok(vec![ToolDefinition::tool_search(
+                "client",
+                "Search deferred MCP tools.",
+                json!({"type": "object"}),
+            )])
+        }
+
+        fn execute<'a>(
+            &'a self,
+            _source: &'a str,
+            _context: ToolContext<'a>,
+        ) -> HostFuture<'a, Result<CodeModeExecution, CodeModeHostError>> {
+            Box::pin(async { unreachable!("pending discovery does not execute code") })
         }
     }
 
@@ -718,8 +753,12 @@ mod tests {
         let tools = HostedTools::new(DeferredHost);
         let runtime = HostedToolRuntime::new_with_tools(".", None, None, &tools);
         let specs = runtime.model_specs("session-1");
+        let pending_tools = HostedTools::new(PendingDeferredHost);
+        let pending_runtime = HostedToolRuntime::new_with_tools(".", None, None, &pending_tools);
+        let pending_specs = pending_runtime.model_specs("session-1");
         let names = specs.iter().map(ToolDefinition::name).collect::<Vec<_>>();
         assert_eq!(names, ["exec", "tool_search"]);
+        assert_eq!(pending_specs[0].description(), specs[0].description());
         assert!(
             !specs[0]
                 .description()

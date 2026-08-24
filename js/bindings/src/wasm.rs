@@ -11,7 +11,10 @@ use nanocodex::{
     NanocodexError, OpenAi, ReasoningMode, Thinking, TurnControl, TurnResult,
     agent::{
         ExecutionEnvironment, PromptRequest,
-        durability::{JournalStore, StoreError, StoreFuture, StoredBatch, StoredJournal},
+        durability::{
+            JournalStore, OwnedJournal, OwnerId, OwnerToken, StoreError, StoreFuture, StoredBatch,
+            StoredJournal,
+        },
         input::{Prompt, UserInput},
         session::{SessionId, SessionSnapshot},
     },
@@ -77,12 +80,19 @@ extern "C" {
     #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = toolDefinitions)]
     fn host_tool_definitions(definition_host_id: u32, session_id: &str) -> Result<String, JsValue>;
 
-    #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = durabilityLoad)]
-    fn host_durability_load(journal_id: &str) -> Result<Promise, JsValue>;
+    #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = durabilityAcquire)]
+    fn host_durability_acquire(
+        route_id: &str,
+        journal_id: &str,
+        owner_id: &str,
+    ) -> Result<Promise, JsValue>;
 
     #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = durabilityAppend)]
     fn host_durability_append(
+        route_id: &str,
         journal_id: &str,
+        owner_id: &str,
+        fence: &str,
         expected_revision: &str,
         payload: &str,
     ) -> Result<Promise, JsValue>;
@@ -244,10 +254,14 @@ fn subscription_host_error(error: JsValue) -> SubscriptionHostError {
     SubscriptionHostError::new(host_error_message(&error))
 }
 
-struct JavaScriptDurabilityStore;
+struct JavaScriptDurabilityStore {
+    route_id: String,
+}
 
 #[derive(Deserialize)]
-struct JavaScriptStoredJournal {
+struct JavaScriptOwnedJournal {
+    owner_id: String,
+    fence: String,
     revision: String,
     batches: Vec<JavaScriptStoredBatch>,
 }
@@ -263,39 +277,51 @@ struct JavaScriptStoredBatch {
 enum JavaScriptAppendResult {
     Appended { revision: String },
     Conflict { actual_revision: String },
+    Fenced,
     NotCommitted { message: String },
 }
 
 impl JournalStore for JavaScriptDurabilityStore {
-    fn load<'a>(
+    fn acquire_owner<'a>(
         &'a mut self,
         journal_id: &'a str,
-    ) -> StoreFuture<'a, Result<StoredJournal, StoreError>> {
+        owner_id: OwnerId,
+    ) -> StoreFuture<'a, Result<OwnedJournal, StoreError>> {
         Box::pin(async move {
-            let promise = host_durability_load(journal_id)
+            let promise = host_durability_acquire(&self.route_id, journal_id, owner_id.as_str())
                 .map_err(|error| StoreError::Backend(host_error_message(&error)))?;
             let value = JsFuture::from(promise)
                 .await
                 .map_err(|error| StoreError::Backend(host_error_message(&error)))?;
             let encoded = value.as_string().ok_or_else(|| {
-                StoreError::Backend("JavaScript durability load returned a non-string".to_owned())
+                StoreError::Backend(
+                    "JavaScript durability acquire returned a non-string".to_owned(),
+                )
             })?;
             let stored =
-                serde_json::from_str::<JavaScriptStoredJournal>(&encoded).map_err(|error| {
-                    StoreError::Backend(format!("invalid durability load: {error}"))
+                serde_json::from_str::<JavaScriptOwnedJournal>(&encoded).map_err(|error| {
+                    StoreError::Backend(format!("invalid durability acquire: {error}"))
                 })?;
-            Ok(StoredJournal {
-                revision: parse_revision(&stored.revision)?,
-                batches: stored
-                    .batches
-                    .into_iter()
-                    .map(|batch| {
-                        Ok(StoredBatch {
-                            revision: parse_revision(&batch.revision)?,
-                            payload: batch.payload,
+            if stored.owner_id != owner_id.as_str() {
+                return Err(StoreError::Backend(
+                    "JavaScript durability acquire returned a different owner ID".to_owned(),
+                ));
+            }
+            Ok(OwnedJournal {
+                owner: OwnerToken::new(owner_id, parse_revision(&stored.fence)?),
+                journal: StoredJournal {
+                    revision: parse_revision(&stored.revision)?,
+                    batches: stored
+                        .batches
+                        .into_iter()
+                        .map(|batch| {
+                            Ok(StoredBatch {
+                                revision: parse_revision(&batch.revision)?,
+                                payload: batch.payload,
+                            })
                         })
-                    })
-                    .collect::<Result<_, StoreError>>()?,
+                        .collect::<Result<_, StoreError>>()?,
+                },
             })
         })
     }
@@ -303,13 +329,22 @@ impl JournalStore for JavaScriptDurabilityStore {
     fn append<'a>(
         &'a mut self,
         journal_id: &'a str,
+        owner: &'a OwnerToken,
         expected_revision: u64,
         payload: &'a str,
     ) -> StoreFuture<'a, Result<u64, StoreError>> {
         Box::pin(async move {
+            let fence = owner.fence().to_string();
             let expected = expected_revision.to_string();
-            let promise = host_durability_append(journal_id, &expected, payload)
-                .map_err(|error| StoreError::Backend(host_error_message(&error)))?;
+            let promise = host_durability_append(
+                &self.route_id,
+                journal_id,
+                owner.owner_id().as_str(),
+                &fence,
+                &expected,
+                payload,
+            )
+            .map_err(|error| StoreError::Backend(host_error_message(&error)))?;
             let value = JsFuture::from(promise)
                 .await
                 .map_err(|error| StoreError::Backend(host_error_message(&error)))?;
@@ -324,6 +359,7 @@ impl JournalStore for JavaScriptDurabilityStore {
                     expected: expected_revision,
                     actual: parse_revision(&actual_revision)?,
                 }),
+                JavaScriptAppendResult::Fenced => Err(StoreError::Fenced),
                 JavaScriptAppendResult::NotCommitted { message } => {
                     Err(StoreError::NotCommitted(message))
                 }
@@ -627,6 +663,8 @@ struct WasmConfig {
     #[serde(default)]
     durability_id: Option<String>,
     #[serde(default)]
+    durability_host_id: Option<String>,
+    #[serde(default)]
     subagents: Option<WasmSubagentsConfig>,
 }
 
@@ -887,9 +925,11 @@ impl WasmNanocodex {
         if let Some(resume) = config.resume {
             builder = builder.resume(resume);
         }
-        if let Some(journal_id) = config.durability_id {
+        if let (Some(route_id), Some(journal_id)) =
+            (config.durability_host_id, config.durability_id)
+        {
             let journal = nanocodex::agent::durability::DurableSession::open(
-                JavaScriptDurabilityStore,
+                JavaScriptDurabilityStore { route_id },
                 journal_id,
             )
             .await
@@ -1350,10 +1390,21 @@ fn turn_failure(error: &NanocodexError) -> TurnFailure {
             "invalid_request"
         }
         NanocodexError::AgentStopped | NanocodexError::TurnStopped => "retryable",
-        NanocodexError::ExecutionPolicy { source, .. } => source
+        NanocodexError::ExecutionPolicyOwnerStopped => "reopen_required",
+        NanocodexError::ExecutionPolicy {
+            disposition,
+            source,
+            ..
+        } => source
             .as_ref()
             .downcast_ref::<nanocodex::durability::Error>()
-            .map_or("failed", durability_acceptance_failure_code),
+            .filter(|error| {
+                matches!(
+                    error,
+                    nanocodex::durability::Error::OperationConflict { .. }
+                )
+            })
+            .map_or(execution_policy_failure_code(*disposition), |_| "conflict"),
         NanocodexError::Response(_)
             if error
                 .responses_error()
@@ -1370,17 +1421,16 @@ fn turn_failure(error: &NanocodexError) -> TurnFailure {
     }
 }
 
-const fn durability_acceptance_failure_code(error: &nanocodex::durability::Error) -> &'static str {
-    use nanocodex::durability::Error;
+const fn execution_policy_failure_code(
+    disposition: nanocodex::ExecutionPolicyDisposition,
+) -> &'static str {
+    use nanocodex::ExecutionPolicyDisposition;
 
-    match error {
-        Error::AmbiguousStep { .. } => "blocked",
-        Error::OperationConflict { .. } => "conflict",
-        Error::Store(_)
-        | Error::OperationBlocked { .. }
-        | Error::OperationActive { .. }
-        | Error::DriverStopped => "retryable",
-        _ => "failed",
+    match disposition {
+        ExecutionPolicyDisposition::Retry => "retryable",
+        ExecutionPolicyDisposition::Blocked => "blocked",
+        ExecutionPolicyDisposition::Reopen => "reopen_required",
+        ExecutionPolicyDisposition::Fatal => "failed",
     }
 }
 
@@ -1574,6 +1624,18 @@ fn validate(config: &WasmConfig) -> Result<(), JsValue> {
         .is_some_and(|journal_id| journal_id.trim().is_empty())
     {
         return Err(js_error("durability_id must not be empty"));
+    }
+    if config
+        .durability_host_id
+        .as_deref()
+        .is_some_and(|route_id| route_id.trim().is_empty())
+    {
+        return Err(js_error("durability_host_id must not be empty"));
+    }
+    if config.durability_id.is_some() != config.durability_host_id.is_some() {
+        return Err(js_error(
+            "durability_id and durability_host_id must be supplied together",
+        ));
     }
     if config
         .subagents

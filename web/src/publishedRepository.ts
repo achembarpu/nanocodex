@@ -68,18 +68,9 @@ export type PublishedCommitHistory = PublishedRepositoryMetadata & {
 type Fetch = typeof fetch;
 
 type PrefetchedPatch = {
-  body?: Promise<BufferedPublishedPatch | undefined>;
-  claimed?: boolean;
   controller: AbortController;
   expiry?: ReturnType<typeof setTimeout>;
   response: Promise<Response>;
-};
-
-type BufferedPublishedPatch = {
-  body: ArrayBuffer;
-  headers: Headers;
-  status: number;
-  statusText: string;
 };
 
 const SHA1_PATTERN = /^[a-f0-9]{40}$/;
@@ -89,6 +80,7 @@ const MAX_COMMIT_PAGE_BYTES = 2 * 1024 * 1024;
 const MAX_COMMIT_PAGE_COUNT = 256;
 const MAX_COMMIT_PAGE_SIZE = 32;
 const PREFETCHED_PATCH_RETENTION_MS = 30_000;
+const ADOPTED_PATCH_RETENTION_MS = 5 * 60_000;
 const DEPLOYMENT_META_NAME = "nanocodex-deployment-sha";
 
 let snapshotPreload: Promise<PublishedRepositorySnapshot> | undefined;
@@ -148,6 +140,7 @@ export async function loadPublishedCommitHistory(
   request: Fetch = fetch,
   development = import.meta.env?.DEV ?? false,
   generation = publishedRepositoryGeneration(),
+  adopted?: Promise<void>,
 ): Promise<PublishedCommitHistory> {
   const index = request === fetch && !development
     ? await preloadPublishedCommitIndex()
@@ -169,7 +162,12 @@ export async function loadPublishedCommitHistory(
 
   const initialPatchUrl = `${base}/commits/${index.repository.head}/${String(initialPageIndex).padStart(4, "0")}.diff`;
   if (request === fetch && initialPatchUrl != null) {
-    void preloadPublishedRepositoryPatchBody(initialPatchUrl).catch(() => undefined);
+    void preloadPublishedRepositoryPatch(initialPatchUrl)?.catch(() => undefined);
+    if (adopted) {
+      void adopted.then(() => {
+        adoptPublishedRepositoryPatch(initialPatchUrl);
+      });
+    }
   }
 
   const localPages = new Map<number, Promise<PublishedCommitPage>>();
@@ -253,6 +251,7 @@ export function preloadPublishedRepositoryPatch(
   }
   const controller = new AbortController();
   markCommitPerformance("patch-prefetch-start");
+  let prefetched!: PrefetchedPatch;
   const response = fetch(patchUrl, {
     cache: "default",
     signal: controller.signal,
@@ -260,68 +259,34 @@ export function preloadPublishedRepositoryPatch(
     markCommitPerformance("patch-prefetch-headers");
     return result;
   }).catch((error) => {
-    prefetchedPatches.delete(patchUrl);
+    if (prefetchedPatches.get(patchUrl) === prefetched) {
+      prefetchedPatches.delete(patchUrl);
+    }
     throw error;
   });
-  const prefetched = { controller, response } satisfies PrefetchedPatch;
+  prefetched = { controller, response } satisfies PrefetchedPatch;
   prefetchedPatches.set(patchUrl, prefetched);
   retainPrefetchedPatch(patchUrl, prefetched);
   return response;
 }
 
-function retainPrefetchedPatch(patchUrl: string, prefetched: PrefetchedPatch): void {
+export function adoptPublishedRepositoryPatch(patchUrl: string): void {
+  const prefetched = prefetchedPatches.get(patchUrl);
+  if (prefetched) retainPrefetchedPatch(patchUrl, prefetched, ADOPTED_PATCH_RETENTION_MS);
+}
+
+function retainPrefetchedPatch(
+  patchUrl: string,
+  prefetched: PrefetchedPatch,
+  retentionMs = PREFETCHED_PATCH_RETENTION_MS,
+): void {
   clearTimeout(prefetched.expiry);
   prefetched.expiry = undefined;
-  if (prefetched.claimed) return;
   prefetched.expiry = setTimeout(() => {
     if (prefetchedPatches.get(patchUrl) !== prefetched) return;
     prefetched.controller.abort("unused patch preload expired");
     prefetchedPatches.delete(patchUrl);
-  }, PREFETCHED_PATCH_RETENTION_MS);
-}
-
-function claimPrefetchedPatch(patchUrl: string, prefetched: PrefetchedPatch): void {
-  if (prefetchedPatches.get(patchUrl) !== prefetched) return;
-  prefetched.claimed = true;
-  clearTimeout(prefetched.expiry);
-  prefetched.expiry = undefined;
-}
-
-export async function preloadPublishedRepositoryPatchBody(
-  patchUrl: PublishedCommitPatchUrl,
-  adopted?: Promise<void>,
-): Promise<void> {
-  if (typeof patchUrl !== "string") return;
-  preloadPublishedRepositoryPatch(patchUrl);
-  const prefetched = prefetchedPatches.get(patchUrl);
-  if (prefetched == null) return;
-  retainPrefetchedPatch(patchUrl, prefetched);
-  if (adopted != null) {
-    void adopted.then(() => claimPrefetchedPatch(patchUrl, prefetched));
-  }
-  prefetched.body ??= prefetched.response.then(async (response) => {
-    const buffered = response.ok
-      ? {
-          body: await response.arrayBuffer(),
-          headers: new Headers(response.headers),
-          status: response.status,
-          statusText: response.statusText,
-        } satisfies BufferedPublishedPatch
-      : undefined;
-    if (buffered != null) markCommitPerformance("patch-prefetch-body");
-    if (prefetchedPatches.get(patchUrl) === prefetched) {
-      prefetched.claimed = false;
-      retainPrefetchedPatch(patchUrl, prefetched);
-    }
-    return buffered;
-  }).catch((error) => {
-    if (prefetchedPatches.get(patchUrl) === prefetched) {
-      prefetchedPatches.delete(patchUrl);
-    }
-    clearTimeout(prefetched.expiry);
-    throw error;
-  });
-  await prefetched.body;
+  }, retentionMs);
 }
 
 export function fetchPublishedRepositoryPatch(
@@ -343,16 +308,7 @@ export function fetchPublishedRepositoryPatch(
       { once: true },
     );
   }
-  if (prefetched.body == null) return prefetched.response;
-  return prefetched.body.then((buffered) =>
-    buffered == null
-      ? prefetched.response
-      : new Response(buffered.body, {
-          headers: buffered.headers,
-          status: buffered.status,
-          statusText: buffered.statusText,
-        })
-  );
+  return prefetched.response;
 }
 
 async function loadPublishedRepositorySnapshotUncached(

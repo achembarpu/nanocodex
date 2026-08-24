@@ -248,6 +248,16 @@
   }
 }
 
+@media (max-width: 740px), (pointer: coarse) and (orientation: landscape) and (max-width: 950px) {
+  .home-page.is-agent .home-demo {
+    grid-template-rows: minmax(0, 1fr);
+  }
+
+  .home-page.is-agent .home-demo-head {
+    display: none;
+  }
+}
+
 @media (prefers-reduced-motion: reduce) {
   .home-page *,
   .home-page *::before,

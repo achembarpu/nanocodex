@@ -25,6 +25,8 @@ export function createAgentConfig(options = {}, runtime) {
   const retryDelay = options.retryDelay ?? ((attempt) => 400 * attempt);
   if (typeof retryDelay !== "function") throw new TypeError("retryDelay must be a function");
   const failedAgents = new WeakSet();
+  const underlyingAgents = new WeakMap();
+  const presentedAgents = new WeakMap();
   let destroyed = false;
   let destruction;
 
@@ -40,11 +42,13 @@ export function createAgentConfig(options = {}, runtime) {
     });
     const entry = {
       activeSubscribers: 0,
+      activeTurns: 0,
       agent: undefined,
       closing: Promise.resolve(),
       createOptions,
       generation: 0,
       key: threadId,
+      refetchRequested: false,
       subscriptions: new Set(),
       operation: undefined,
       snapshot: IDLE_SNAPSHOT,
@@ -73,14 +77,15 @@ export function createAgentConfig(options = {}, runtime) {
 
   async function close(agent) {
     if (agent === undefined) return;
-    if (failedAgents.has(agent)) {
-      disposeFailedAgent(agent);
+    const underlyingAgent = underlyingAgents.get(agent) ?? agent;
+    if (failedAgents.has(underlyingAgent)) {
+      disposeFailedAgent(underlyingAgent);
       return;
     }
     try {
-      await agent.session.shutdown();
+      await underlyingAgent.session.shutdown();
     } catch (error) {
-      if (!failedAgents.has(agent)) throw error;
+      if (!failedAgents.has(underlyingAgent)) throw error;
     }
   }
 
@@ -91,11 +96,12 @@ export function createAgentConfig(options = {}, runtime) {
 
   function failAgent(entry, operation, agent, error) {
     disposeFailedAgent(agent);
+    const presentedAgent = presentedAgents.get(agent) ?? agent;
     if (
       destroyed
       || entry.operation !== operation
       || entry.generation !== operation.generation
-      || entry.agent !== agent
+      || entry.agent !== presentedAgent
     ) return;
     entry.agent = undefined;
     finishGeneration(entry, operation);
@@ -109,6 +115,43 @@ export function createAgentConfig(options = {}, runtime) {
     const closing = entry.closing.then(() => close(agent));
     entry.closing = closing.catch(() => {});
     return closing;
+  }
+
+  function trackDurableTurns(entry, agent) {
+    if (typeof agent?.turn?.prompt !== "function") return agent;
+    let presentedAgent;
+    const turn = Object.freeze({
+      ...agent.turn,
+      prompt(options) {
+        const owned = agent.turn.prompt(options);
+        entry.activeTurns += 1;
+        let settled = false;
+        const settle = () => {
+          if (settled) return;
+          settled = true;
+          entry.activeTurns = Math.max(0, entry.activeTurns - 1);
+          if (destroyed || entry.activeTurns > 0) return;
+          if (entry.refetchRequested && entry.activeSubscribers > 0) {
+            start(entry, true);
+          } else if (entry.activeSubscribers === 0) {
+            release(entry);
+          }
+        };
+        let completion;
+        try { completion = Promise.resolve(owned.result()); }
+        catch (error) { completion = Promise.reject(error); }
+        void completion.then(settle, settle);
+        return Object.freeze({
+          ...owned,
+          agent: presentedAgent,
+          result() { return completion; },
+        });
+      },
+    });
+    presentedAgent = Object.freeze({ ...agent, turn });
+    presentedAgents.set(agent, presentedAgent);
+    underlyingAgents.set(presentedAgent, agent);
+    return presentedAgent;
   }
 
   function cancelGeneration(entry) {
@@ -133,7 +176,16 @@ export function createAgentConfig(options = {}, runtime) {
 
   function start(entry, force = false) {
     if (destroyed || entry.activeSubscribers === 0) return;
-    if (!force && (entry.operation !== undefined || entry.agent !== undefined)) return;
+    const replace = force || entry.refetchRequested;
+    if (entry.activeTurns > 0) {
+      // A refetch (or a new observer after a live Worker failure) requests a
+      // replacement; it is not authority to abandon accepted work. Coalesce
+      // the request until every eagerly observed result lease has settled.
+      if (replace || entry.agent === undefined) entry.refetchRequested = true;
+      return;
+    }
+    if (!replace && (entry.operation !== undefined || entry.agent !== undefined)) return;
+    entry.refetchRequested = false;
     cancelGeneration(entry);
     const operation = {
       controller: new AbortController(),
@@ -224,8 +276,9 @@ export function createAgentConfig(options = {}, runtime) {
         await close(candidate).catch(reportError);
         return;
       }
-      entry.agent = candidate;
-      publish(entry, "success", candidate, undefined);
+      const ownedCandidate = trackDurableTurns(entry, candidate);
+      entry.agent = ownedCandidate;
+      publish(entry, "success", ownedCandidate, undefined);
     } catch (error) {
       if (isCurrent(entry, operation)) {
         publish(entry, "error", undefined, error);
@@ -237,6 +290,10 @@ export function createAgentConfig(options = {}, runtime) {
   function release(entry) {
     queueMicrotask(() => {
       if (entry.activeSubscribers > 0 || destroyed) return;
+      // A route subscription is only a presentation observer. Accepted turns
+      // retain the Agent until their result settles; an actually idle Agent is
+      // still reclaimed immediately.
+      if (entry.activeTurns > 0) return;
       const closing = retireAgent(entry);
       publish(entry, "idle", undefined, undefined);
       void closing.catch(reportError).finally(() => {
@@ -309,6 +366,8 @@ export function createAgentConfig(options = {}, runtime) {
             subscription.subscribed = false;
           }
           notifications.push(subscriptions);
+          // Destruction is the explicit application boundary allowed to force
+          // shutdown even when an accepted result lease does not settle.
           closures.push(retireAgent(entry));
         }
         entries.clear();

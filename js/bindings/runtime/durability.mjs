@@ -1,52 +1,59 @@
 const hosts = new Map();
+let nextRouteId = 1n;
 
 export function own(host, store, journalId) {
   if ((store === undefined) !== (journalId === undefined)) {
     throw new TypeError("durability and durabilityId must be supplied together");
   }
-  bind(host, store, journalId);
+  const routeId = `durability-route-${nextRouteId++}`;
+  bind(routeId, host, store, journalId);
   return Object.freeze({
-    id: journalId,
-    abandon: () => abandon(host, journalId),
-    retain: () => retain(host, journalId),
-    release: () => release(host, journalId),
+    id: routeId,
+    abandon: () => abandon(host, routeId),
+    retain: () => retain(host, routeId),
+    release: () => release(host, routeId),
   });
 }
 
-function bind(host, store, journalId) {
-  const existing = hosts.get(journalId);
-  if (existing && existing.host !== host) {
-    throw new Error(`Nanocodex durability journal is already active: ${journalId}`);
-  }
-  hosts.set(journalId, existing ?? { host, store, references: 0 });
+function bind(routeId, host, store, journalId) {
+  hosts.set(routeId, { host, store, journalId, references: 0 });
 }
 
-export function retain(host, journalId) {
-  const ownership = hosts.get(journalId);
+export function retain(host, routeId) {
+  const ownership = hosts.get(routeId);
   if (!ownership || ownership.host !== host) {
-    throw new Error(`Nanocodex durability journal is not bound to this host: ${journalId}`);
+    throw new Error(`Nanocodex durability route is not bound to this host: ${routeId}`);
   }
   ownership.references += 1;
 }
 
-export function release(host, journalId) {
-  const ownership = hosts.get(journalId);
+export function release(host, routeId) {
+  const ownership = hosts.get(routeId);
   if (!ownership || ownership.host !== host) return;
   if (ownership.references > 0) ownership.references -= 1;
-  if (ownership.references === 0) hosts.delete(journalId);
+  if (ownership.references === 0) hosts.delete(routeId);
 }
 
-export function abandon(host, journalId) {
-  const ownership = hosts.get(journalId);
-  if (ownership?.host === host && ownership.references === 0) hosts.delete(journalId);
+export function abandon(host, routeId) {
+  const ownership = hosts.get(routeId);
+  if (ownership?.host === host && ownership.references === 0) hosts.delete(routeId);
 }
 
-export async function load(journalId) {
-  const stored = await requiredStore(journalId).load(journalId);
+export async function acquire(routeId, journalId, ownerId) {
+  const stored = await requiredRoute(routeId, journalId).store.acquire(
+    journalId,
+    { ownerId },
+  );
   if (!stored || typeof stored !== "object" || !Array.isArray(stored.batches)) {
-    throw new TypeError("durability.load() must return { revision, batches }");
+    throw new TypeError("durability.acquire() must return { ownerId, fence, revision, batches }");
+  }
+  const acquiredOwnerId = requiredString(stored.ownerId, "durability owner ID");
+  if (acquiredOwnerId !== ownerId) {
+    throw new TypeError("durability.acquire() must return the requested owner ID");
   }
   return JSON.stringify({
+    owner_id: acquiredOwnerId,
+    fence: revision(stored.fence, "durability owner fence"),
     revision: revision(stored.revision, "durability load revision"),
     batches: stored.batches.map((batch) => ({
       revision: revision(batch?.revision, "durability batch revision"),
@@ -55,8 +62,17 @@ export async function load(journalId) {
   });
 }
 
-export async function append(journalId, expectedRevision, payload) {
-  const result = await requiredStore(journalId).append(journalId, {
+export async function append(
+  routeId,
+  journalId,
+  ownerId,
+  fence,
+  expectedRevision,
+  payload,
+) {
+  const result = await requiredRoute(routeId, journalId).store.append(journalId, {
+    ownerId,
+    fence,
     expectedRevision,
     payload,
   });
@@ -78,17 +94,25 @@ export async function append(journalId, expectedRevision, payload) {
       message: requiredString(result.message, "durability not-committed message"),
     });
   }
-  throw new TypeError("durability.append() must return an appended, conflict, or not_committed result");
+  if (result?.status === "fenced") {
+    return JSON.stringify({ status: "fenced" });
+  }
+  throw new TypeError(
+    "durability.append() must return an appended, conflict, fenced, or not_committed result",
+  );
 }
 
-function requiredStore(journalId) {
-  const host = hosts.get(journalId)?.host;
-  if (!host) throw new Error(`no Nanocodex host owns durability journal: ${journalId}`);
-  const store = hosts.get(journalId)?.store;
-  if (!store || typeof store.load !== "function" || typeof store.append !== "function") {
+function requiredRoute(routeId, journalId) {
+  const route = hosts.get(routeId);
+  if (!route) throw new Error(`no Nanocodex host owns durability route: ${routeId}`);
+  if (route.journalId !== journalId) {
+    throw new Error(`Nanocodex durability route does not own journal: ${journalId}`);
+  }
+  const store = route.store;
+  if (!store || typeof store.acquire !== "function" || typeof store.append !== "function") {
     throw new TypeError("the selected Nanocodex host must define a durability store");
   }
-  return store;
+  return route;
 }
 
 function revision(value, name) {

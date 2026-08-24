@@ -5,9 +5,11 @@ import { AccountSessionProvider } from "./AccountSession";
 import { NanocodexApp } from "./NanocodexApp";
 import { ArtifactRuntime } from "./artifactRuntime";
 import {
+  prepareRepositorySurface,
   preloadDirectSurface,
   type PreparedDirectRoute,
 } from "./routeLoaders";
+import { surfaceFromUrl } from "./navigation";
 
 const directUrl = new URL(window.location.href);
 const directPath = directUrl.pathname === "/"
@@ -15,6 +17,19 @@ const directPath = directUrl.pathname === "/"
   : directUrl.pathname.replace(/\/+$/, "");
 const container = document.getElementById("root");
 if (!container) throw new Error("Nanocodex root container is missing");
+const directSurface = surfaceFromUrl(directUrl);
+const directRepositorySurface = directSurface === "code" || directSurface === "commits"
+  ? directSurface
+  : undefined;
+if (directRepositorySurface) {
+  const commit = directUrl.searchParams.get("commit")?.toLowerCase();
+  const requestedCommit = directRepositorySurface === "commits"
+    && commit
+    && /^[0-9a-f]{40}$/.test(commit)
+    ? commit
+    : undefined;
+  void prepareRepositorySurface(directRepositorySurface, requestedCommit).catch(() => undefined);
+}
 
 createRoot(container).render(
   directPath === "/artifact-runtime"
@@ -23,9 +38,12 @@ createRoot(container).render(
 );
 
 function BrowserApplication({ url }: { url: URL }) {
-  const [preparedRoute, setPreparedRoute] = useState<PreparedDirectRoute | null>(null);
+  const [preparedRoute, setPreparedRoute] = useState<PreparedDirectRoute | null>(
+    directRepositorySurface ? {} : null,
+  );
 
   useEffect(() => {
+    if (directRepositorySurface) return;
     let active = true;
     void preloadDirectSurface(url).then(
       (prepared) => {

@@ -132,7 +132,7 @@ test("the packed package ships and resolves every public entry point", async () 
         transactionSync(callback) { return callback(); },
       });
       assert.equal(Object.isFrozen(cloudflareStore), true);
-      assert.equal(cloudflareSchemaStatements, 2);
+      assert.equal(cloudflareSchemaStatements, 3);
       let postgresCalls = 0;
       const postgresStore = createPostgresDurabilityStore({
         connect() {

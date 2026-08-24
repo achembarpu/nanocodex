@@ -333,6 +333,264 @@ test("refetch serializes shutdown before replacement", async () => {
   await config.destroy();
 });
 
+test("refetch waits for the accepted turn result before replacing its Agent generation", async () => {
+  const completion = deferred();
+  const transitions = [];
+  let creations = 0;
+  const config = createAgentConfig({}, {
+    async create() {
+      const id = creations++;
+      transitions.push(`create:${id}`);
+      return {
+        session: {
+          async shutdown() { transitions.push(`close:${id}`); },
+        },
+        turn: {
+          prompt() {
+            assert.equal(id, 0);
+            return {
+              result() { return completion.promise; },
+            };
+          },
+        },
+      };
+    },
+    async prepare() {},
+  });
+  const unsubscribe = config.subscribeAgent({}, () => {});
+  await waitFor(() => config.getAgent().status === "success");
+  const original = config.getAgent().data;
+  original.turn.prompt({ input: "durable work" });
+
+  config.refetchAgent();
+  await tick();
+
+  assert.equal(config.getAgent().status, "success");
+  assert.equal(config.getAgent().data, original);
+  assert.deepEqual(transitions, ["create:0"]);
+
+  unsubscribe();
+  completion.resolve({ finalMessage: "done" });
+  // Remount after the lease settlement queued detached release, but before
+  // that release microtask runs. The pending refetch still owns replacement.
+  await Promise.resolve();
+  const remounted = config.subscribeAgent({}, () => {});
+  await waitFor(() => creations === 2 && config.getAgent().status === "success");
+  assert.deepEqual(transitions, ["create:0", "close:0", "create:1"]);
+
+  remounted();
+  await waitFor(() => transitions.includes("close:1"));
+  await config.destroy();
+});
+
+test("multiple refetches during accepted turns coalesce into one safe replacement", async () => {
+  const first = deferred();
+  const second = deferred();
+  const shutdowns = [];
+  let creations = 0;
+  let prompts = 0;
+  const config = createAgentConfig({}, {
+    async create() {
+      const id = creations++;
+      return {
+        session: {
+          async shutdown() { shutdowns.push(id); },
+        },
+        turn: {
+          prompt() {
+            assert.equal(id, 0);
+            return {
+              result() { return prompts++ === 0 ? first.promise : second.promise; },
+            };
+          },
+        },
+      };
+    },
+    async prepare() {},
+  });
+  const unsubscribe = config.subscribeAgent({}, () => {});
+  await waitFor(() => config.getAgent().status === "success");
+  const original = config.getAgent().data;
+  original.turn.prompt({ input: "first" });
+  original.turn.prompt({ input: "second" });
+
+  config.refetchAgent();
+  config.refetchAgent();
+  config.refetchAgent();
+  first.resolve({ finalMessage: "first done" });
+  await tick();
+
+  assert.equal(creations, 1);
+  assert.deepEqual(shutdowns, []);
+  assert.equal(config.getAgent().data, original);
+
+  second.reject(new Error("second failed"));
+  await waitFor(() => creations === 2 && config.getAgent().status === "success");
+  await tick();
+  assert.equal(creations, 2);
+  assert.deepEqual(shutdowns, [0]);
+
+  unsubscribe();
+  await waitFor(() => shutdowns.length === 2);
+  await config.destroy();
+});
+
+test("recursive Turn.agent prompts retain the Agent through refetch and unsubscribe", async (context) => {
+  for (const lifecycle of ["refetch", "unsubscribe"]) {
+    await context.test(lifecycle, async () => {
+      const first = deferred();
+      const second = deferred();
+      const shutdowns = [];
+      let creations = 0;
+      let prompts = 0;
+      const config = createAgentConfig({}, {
+        async create() {
+          const id = creations++;
+          const agent = {
+            session: {
+              async shutdown() { shutdowns.push(id); },
+            },
+            turn: {
+              prompt() {
+                assert.equal(id, 0);
+                return {
+                  agent,
+                  result() { return prompts++ === 0 ? first.promise : second.promise; },
+                };
+              },
+            },
+          };
+          return agent;
+        },
+        async prepare() {},
+      });
+      const unsubscribe = config.subscribeAgent({}, () => {});
+      await waitFor(() => config.getAgent().status === "success");
+      const original = config.getAgent().data;
+      const firstTurn = original.turn.prompt({ input: "first" });
+
+      assert.equal(firstTurn.agent, original);
+      const secondTurn = firstTurn.agent.turn.prompt({ input: "second never settles first" });
+      assert.equal(secondTurn.agent, original);
+
+      if (lifecycle === "refetch") config.refetchAgent();
+      else unsubscribe();
+      first.resolve({ finalMessage: "first done" });
+      await tick();
+
+      assert.equal(creations, 1);
+      assert.deepEqual(shutdowns, []);
+      assert.equal(config.getAgent().data, original);
+
+      second.resolve({ finalMessage: "second done" });
+      if (lifecycle === "refetch") {
+        await waitFor(() => creations === 2 && config.getAgent().status === "success");
+        assert.deepEqual(shutdowns, [0]);
+        unsubscribe();
+        await waitFor(() => shutdowns.length === 2);
+      } else {
+        await waitFor(() => shutdowns.length === 1);
+        assert.equal(creations, 1);
+        assert.deepEqual(shutdowns, [0]);
+      }
+      await config.destroy();
+    });
+  }
+});
+
+test("a nonsettling result lease blocks refetch until explicit destroy forces shutdown", async () => {
+  const completion = deferred();
+  const shutdowns = [];
+  let creations = 0;
+  const config = createAgentConfig({}, {
+    async create() {
+      const id = creations++;
+      return {
+        session: {
+          async shutdown() { shutdowns.push(id); },
+        },
+        turn: {
+          prompt() {
+            return {
+              result() { return completion.promise; },
+            };
+          },
+        },
+      };
+    },
+    async prepare() {},
+  });
+  const unsubscribe = config.subscribeAgent({}, () => {});
+  await waitFor(() => config.getAgent().status === "success");
+  config.getAgent().data.turn.prompt({ input: "never settles" });
+
+  config.refetchAgent();
+  config.refetchAgent();
+  await tick();
+
+  assert.equal(creations, 1);
+  assert.deepEqual(shutdowns, []);
+  await config.destroy();
+  assert.equal(config.getAgent().status, "idle");
+  assert.equal(creations, 1);
+  assert.deepEqual(shutdowns, [0]);
+  unsubscribe();
+});
+
+test("refetch replaces a presented Agent when shutdown reports and rejects its Worker failure", async () => {
+  for (let iteration = 0; iteration < 20; iteration += 1) {
+    const disposals = [];
+    const failures = [];
+    const shutdowns = [];
+    const statuses = [];
+    let creations = 0;
+    const config = createAgentConfig({}, {
+      async create(_options, { onFailure }) {
+        const id = creations++;
+        failures.push(onFailure);
+        return {
+          dispose() { disposals.push(id); },
+          session: {
+            async shutdown() {
+              shutdowns.push(id);
+              if (id !== 0) return;
+              const failure = new Error(`retiring Worker ${iteration} failed`);
+              onFailure(failure);
+              throw failure;
+            },
+          },
+          turn: {
+            prompt() { throw new Error("not used"); },
+          },
+        };
+      },
+      async prepare() {},
+    });
+    const unsubscribe = config.subscribeAgent({}, () => statuses.push(config.getAgent().status));
+    await waitFor(() => config.getAgent().status === "success");
+
+    config.refetchAgent();
+    await waitFor(() => creations === 2 && config.getAgent().status === "success");
+
+    assert.deepEqual(statuses, ["pending", "success", "pending", "success"]);
+    assert.deepEqual(shutdowns, [0]);
+    assert.deepEqual(disposals, [0]);
+
+    failures[0](new Error("late failure from the retired Worker"));
+    await tick();
+    assert.equal(config.getAgent().status, "success");
+
+    const replacementFailure = new Error("replacement Worker failed later");
+    failures[1](replacementFailure);
+    await waitFor(() => config.getAgent().status === "error");
+    assert.equal(config.getAgent().error, replacementFailure);
+    assert.deepEqual(disposals, [0, 0, 1]);
+
+    unsubscribe();
+    await config.destroy();
+  }
+});
+
 test("refetch aborts a hung generation and starts its replacement immediately", { timeout: 2_000 }, async () => {
   const first = deferred();
   const closed = [];
@@ -735,6 +993,67 @@ test("destroy from a pending notification prevents preparation and creation", as
   assert.deepEqual(calls, []);
   unsubscribe();
   unsubscribe();
+});
+
+test("detached durable turns release after completion without requiring result observation", async (context) => {
+  for (const disposition of ["abandoned", "disposed-before-result"]) {
+    for (const outcome of ["resolved", "rejected"]) {
+      await context.test(`${disposition}, ${outcome}`, async () => {
+        for (let iteration = 0; iteration < 10; iteration += 1) {
+          const completion = deferred();
+          let resultCalls = 0;
+          let shutdowns = 0;
+          let turnDisposals = 0;
+          let workAborted = false;
+          const config = createAgentConfig({}, {
+            async create() {
+              return {
+                session: { async shutdown() { shutdowns += 1; } },
+                turn: { prompt() {
+                  let resultStarted = false;
+                  return {
+                    result() {
+                      resultCalls += 1;
+                      resultStarted = true;
+                      return completion.promise;
+                    },
+                    steer: async () => {},
+                    cancel: async () => {},
+                    dispose() {
+                      turnDisposals += 1;
+                      if (!resultStarted) workAborted = true;
+                    },
+                  };
+                } },
+              };
+            },
+            async prepare() {},
+          });
+          const parameters = { threadId: `durable-${disposition}-${outcome}-${iteration}` };
+          const unsubscribe = config.subscribeAgent(parameters, () => {});
+          await waitFor(() => config.getAgent(parameters).status === "success");
+          const turn = config.getAgent(parameters).data.turn.prompt({ input: "hold" });
+
+          assert.equal(resultCalls, 1);
+          if (disposition === "disposed-before-result") turn.dispose();
+          unsubscribe();
+          await tick();
+
+          assert.equal(config.getAgent(parameters).status, "success");
+          assert.equal(shutdowns, 0);
+          assert.equal(workAborted, false);
+          assert.equal(turnDisposals, disposition === "disposed-before-result" ? 1 : 0);
+
+          if (outcome === "resolved") completion.resolve({ finalMessage: "done", dispose() {} });
+          else completion.reject(new Error("durable turn failed"));
+          await waitFor(() => shutdowns === 1);
+          assert.equal(config.getAgent(parameters).status, "idle");
+          assert.equal(resultCalls, 1);
+          await config.destroy();
+        }
+      });
+    }
+  }
 });
 
 function fakeAgent(id, closed) {

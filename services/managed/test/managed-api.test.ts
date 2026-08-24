@@ -1,7 +1,13 @@
-import { env, SELF as RAW_SELF, evictDurableObject } from "cloudflare:test";
+import {
+  env,
+  SELF as RAW_SELF,
+  evictDurableObject,
+  runDurableObjectAlarm,
+  runInDurableObject,
+} from "cloudflare:test";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
-import { NanocodexSession, type Env } from "../src/index";
+import { NanocodexSession, UserAccount, type Env } from "../src/index";
 
 const testEnv = env as unknown as Env;
 const USER_ID = "11111111-1111-4111-8111-111111111111";
@@ -24,6 +30,200 @@ afterEach(async () => {
 });
 
 describe("managed agents REST and resumable SSE", () => {
+  it("keeps connector OAuth state and credentials behind a persistent account", async () => {
+    const publicEgressEnvelope = JSON.stringify({
+      thread_id: "77777777-7777-4777-8777-777777777777",
+      url: "https://example.com/public",
+      method: "GET",
+      headers: { accept: "application/json" },
+    });
+    const unauthenticated = await RAW_SELF.fetch("https://example.test/v1/egress", {
+      method: "POST",
+      headers: { origin: "https://example.test", "content-type": "application/json" },
+      body: publicEgressEnvelope,
+    });
+    expect(unauthenticated.status).toBe(401);
+    expect(await unauthenticated.json()).toEqual({ error: "unauthorized" });
+
+    const apiKeyPrincipal = await RAW_SELF.fetch("https://example.test/v1/egress", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${API_KEY}`,
+        origin: "https://example.test",
+        "content-type": "application/json",
+      },
+      body: publicEgressEnvelope,
+    });
+    expect(apiKeyPrincipal.status).toBe(401);
+
+    const session = await RAW_SELF.fetch("https://example.test/v1/me");
+    const anonymousCookie = session.headers.get("set-cookie")?.split(";", 1)[0];
+    expect(anonymousCookie).toMatch(/^nanocodex_account=a_[A-Za-z0-9_-]{43}$/);
+
+    const anonymous = await RAW_SELF.fetch("https://example.test/v1/connectors", {
+      headers: { cookie: anonymousCookie! },
+    });
+    expect(anonymous.status).toBe(401);
+    expect(await anonymous.json()).toEqual({ error: "unauthorized" });
+
+    const anonymousEgress = await RAW_SELF.fetch("https://example.test/v1/egress", {
+      method: "POST",
+      headers: {
+        cookie: anonymousCookie!,
+        origin: "https://example.test",
+        "content-type": "application/json",
+      },
+      body: publicEgressEnvelope,
+    });
+    expect(anonymousEgress.status).toBe(401);
+
+    const connectorUserId = "55555555-5555-4555-8555-555555555555";
+    const connectorToken = "c".repeat(43);
+    await seedPasskeySession(connectorUserId, connectorToken);
+    const cookie = `nanocodex_account=${connectorToken}`;
+
+    const initial = await RAW_SELF.fetch("https://example.test/v1/connectors", {
+      headers: { cookie },
+    });
+    expect(initial.status).toBe(200);
+    expect(await initial.json()).toMatchObject({
+      connectors: {
+        github: { connected: false },
+        gmail: { connected: false },
+        gdrive: { connected: false },
+      },
+    });
+
+    const missingOrigin = await RAW_SELF.fetch("https://example.test/v1/connectors/github", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/json" },
+      body: JSON.stringify({ return_to: "/agent" }),
+    });
+    expect(missingOrigin.status).toBe(403);
+
+    const started = await RAW_SELF.fetch("https://example.test/v1/connectors/github", {
+      method: "POST",
+      headers: {
+        cookie,
+        "content-type": "application/json",
+        origin: "https://example.test",
+      },
+      body: JSON.stringify({ return_to: "/agent?thread=connector" }),
+    });
+    expect(started.status).toBe(200);
+    const authorization = new URL((await started.json<{ authorization_url: string }>()).authorization_url);
+    expect(authorization.origin).toBe("https://provider.test");
+    expect(authorization.searchParams.get("redirect_uri")).toBe(
+      "https://example.test/v1/connectors/github/callback",
+    );
+
+    const callback = await RAW_SELF.fetch(
+      `https://example.test/v1/connectors/github/callback?${new URLSearchParams({
+        code: "authorization-code",
+        state: authorization.searchParams.get("state")!,
+      })}`,
+      { headers: { cookie }, redirect: "manual" },
+    );
+    expect(callback.status).toBe(303);
+    expect(callback.headers.get("location")).toBe(
+      "https://example.test/agent?thread=connector&connector=github&connector_result=connected",
+    );
+
+    const connected = await RAW_SELF.fetch("https://example.test/v1/connectors", {
+      headers: { cookie },
+    });
+    expect(await connected.json()).toMatchObject({
+      connectors: { github: { connected: true, label: "Nano Cat" } },
+    });
+
+    const egressEnvelope = JSON.stringify({
+      thread_id: "77777777-7777-4777-8777-777777777777",
+      url: "https://api.github.com/repos/gakonst/nanocodex",
+      method: "GET",
+      headers: { accept: "application/json" },
+    });
+    const crossOriginRead = await RAW_SELF.fetch("https://example.test/v1/egress", {
+      method: "POST",
+      headers: { cookie, origin: "https://attacker.test", "content-type": "application/json" },
+      body: egressEnvelope,
+    });
+    expect(crossOriginRead.status).toBe(403);
+
+    const githubRead = await RAW_SELF.fetch("https://example.test/v1/egress", {
+      method: "POST",
+      headers: { cookie, origin: "https://example.test", "content-type": "application/json" },
+      body: egressEnvelope,
+    });
+    expect(githubRead.status).toBe(200);
+    expect(githubRead.headers.get("cache-control")).toBe("no-store");
+    const githubValue = await githubRead.json<{ subject: string }>();
+    expect(githubValue).toMatchObject({
+      cookie: null,
+      full_name: "gakonst/nanocodex",
+      subject: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+    });
+
+    const forgedOuterPrincipal = await RAW_SELF.fetch("https://example.test/v1/egress", {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${OTHER_API_KEY}`,
+        cookie,
+        origin: "https://example.test",
+        "content-type": "application/json",
+        "x-nanocodex-subject": "b".repeat(43),
+      },
+      body: egressEnvelope,
+    });
+    expect(forgedOuterPrincipal.status).toBe(200);
+    expect((await forgedOuterPrincipal.json<{ subject: string }>()).subject).toBe(githubValue.subject);
+
+    for (const forged of [
+      { authorization: "Bearer attacker" },
+      { cookie: "nanocodex_account=attacker" },
+      { "proxy-authorization": "Basic attacker" },
+      { "x-nanocodex-subject": "a".repeat(43) },
+    ]) {
+      const response = await RAW_SELF.fetch("https://example.test/v1/egress", {
+        method: "POST",
+        headers: { cookie, origin: "https://example.test", "content-type": "application/json" },
+        body: JSON.stringify({
+          ...JSON.parse(egressEnvelope),
+          headers: forged,
+        }),
+      });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: "invalid_headers" });
+    }
+    for (const field of ["principal", "subject", "user_id"]) {
+      const response = await RAW_SELF.fetch("https://example.test/v1/egress", {
+        method: "POST",
+        headers: { cookie, origin: "https://example.test", "content-type": "application/json" },
+        body: JSON.stringify({
+          ...JSON.parse(egressEnvelope),
+          [field]: connectorUserId,
+        }),
+      });
+      expect(response.status).toBe(400);
+      expect(await response.json()).toEqual({ error: "invalid_request" });
+    }
+
+    const deniedDestination = await RAW_SELF.fetch("https://example.test/v1/egress", {
+      method: "POST",
+      headers: { cookie, origin: "https://example.test", "content-type": "application/json" },
+      body: JSON.stringify({
+        thread_id: "77777777-7777-4777-8777-777777777777",
+        url: "http://127.0.0.1/private",
+      }),
+    });
+    expect(deniedDestination.status).toBe(403);
+
+    const disconnected = await RAW_SELF.fetch("https://example.test/v1/connectors/github", {
+      method: "DELETE",
+      headers: { cookie, origin: "https://example.test" },
+    });
+    expect(disconnected.status).toBe(204);
+  });
+
   it("bootstraps one browser identity and binds passkey options to it", async () => {
     const first = await RAW_SELF.fetch("https://example.test/v1/me");
     expect(first.status).toBe(200);
@@ -73,6 +273,51 @@ describe("managed agents REST and resumable SSE", () => {
     expect(response.status).toBe(401);
     expect(await response.json()).toEqual({ error: "unauthorized" });
     expect(response.headers.get("set-cookie")).toBeNull();
+  });
+
+  it("rejects and clears stale account cookies instead of minting a replacement identity", async () => {
+    const expiredToken = `a_${"e".repeat(43)}`;
+    const auth = testEnv.NANOCODEX_AUTH.getByName("account");
+    const stored = await auth.fetch(
+      `https://do.invalid/set?key=${encodeURIComponent(`session:${expiredToken}`)}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          value: {
+            userId: "44444444-4444-4444-8444-444444444444",
+            issuedAt: 1,
+            expiresAt: 2,
+          },
+          ttl: 60,
+        }),
+      },
+    );
+    expect(stored.ok).toBe(true);
+
+    for (const token of [
+      "malformed",
+      `a_${"z".repeat(43)}`,
+      expiredToken,
+      "z".repeat(43),
+    ]) {
+      const response = await RAW_SELF.fetch("https://example.test/v1/me", {
+        headers: { cookie: `other=value; nanocodex_account=${token}` },
+      });
+      expect(response.status).toBe(401);
+      expect(await response.json()).toEqual({ error: "invalid_session" });
+      expect(response.headers.get("set-cookie")).toMatch(
+        /^nanocodex_account=; Path=\/; Max-Age=0; HttpOnly; SameSite=Lax; Secure$/,
+      );
+    }
+
+    const unrelatedCookie = await RAW_SELF.fetch("https://example.test/v1/me", {
+      headers: { cookie: "other=value" },
+    });
+    expect(unrelatedCookie.status).toBe(200);
+    expect(unrelatedCookie.headers.get("set-cookie")).toMatch(
+      /^nanocodex_account=a_[A-Za-z0-9_-]{43};/,
+    );
   });
 
   it("recognizes passkey sessions even when their random token begins with the anonymous prefix", async () => {
@@ -206,6 +451,27 @@ describe("managed agents REST and resumable SSE", () => {
     await events.cancel();
   });
 
+  it("runs the normal tool composition through durable in-process Just Bash", async () => {
+    const agent = await createAgent();
+    const accepted = await submit(agent, "turn-computer-runtime", "E2E_COMPUTER_RUNTIME");
+    const events = sseReader(await SELF.fetch(
+      `${agent.events_url}?cursor=${accepted.accepted_cursor}`,
+    ));
+    let event;
+    const observed: unknown[] = [];
+    do {
+      event = await nextWithin(events, "Computer runtime tool completion");
+      observed.push(event.data);
+    } while (event.data.type !== "turn_completed");
+    expect(JSON.stringify(observed)).toContain("COMPUTER_RUNTIME_OK");
+    expect(event.data).toMatchObject({
+      id: "turn-computer-runtime",
+      final_message: "COMPUTER_TOOLS_OK",
+      type: "turn_completed",
+    });
+    await events.cancel();
+  });
+
   it("does not let an unrelated bearer mint managed agents", async () => {
     const response = await RAW_SELF.fetch("https://example.test/v1/agents", {
       method: "POST",
@@ -313,6 +579,598 @@ describe("managed agents REST and resumable SSE", () => {
     } finally {
       testEnv.NANOCODEX = originalBroker;
       testEnv.NANOCODEX_SESSIONS = originalSessions;
+    }
+  });
+
+  it("fences a held bind and compensates it before watchdog cleanup completes", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const originalBroker = testEnv.NANOCODEX;
+    let subject: string | undefined;
+    let bindStarted!: () => void;
+    let releaseBind!: () => void;
+    const started = new Promise<void>((resolve) => { bindStarted = resolve; });
+    const release = new Promise<void>((resolve) => { releaseBind = resolve; });
+    let unbinds = 0;
+    testEnv.NANOCODEX = {
+      async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+        const request = new Request(input, init);
+        const match = new URL(request.url).pathname.match(/^\/subjects\/([A-Za-z0-9_-]+)$/);
+        if (match && request.method === "PUT") {
+          subject = match[1];
+          bindStarted();
+          await release;
+        }
+        if (match && request.method === "DELETE") unbinds += 1;
+        return originalBroker.fetch(request);
+      },
+    } as Fetcher;
+
+    try {
+      const creation = SELF.fetch("https://example.test/v1/agents", { method: "POST" });
+      await within(started, "held credential bind");
+      const session = sessionForSubject(subject!);
+      expireCredentialPreparation();
+      const alarm = runDurableObjectAlarm(session);
+      await waitForCleanupDeletion(session);
+      releaseBind();
+
+      expect(await alarm).toBe(true);
+      const response = await creation;
+      expect(response.status).toBe(503);
+      expect(unbinds).toBe(1);
+      expect(await cleanupMarkers(session)).toEqual({ binding: false, deleting: false });
+      expect(await (await SELF.fetch("https://example.test/v1/agents")).json()).toEqual({
+        data: [],
+        summaries: {},
+      });
+    } finally {
+      releaseBind?.();
+      testEnv.NANOCODEX = originalBroker;
+      vi.useRealTimers();
+    }
+  });
+
+  it("fences a held account attach and detaches it before watchdog cleanup completes", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const originalBroker = testEnv.NANOCODEX;
+    const originalUserFetch = UserAccount.prototype.fetch;
+    let subject: string | undefined;
+    let attachStarted!: () => void;
+    let releaseAttach!: () => void;
+    const started = new Promise<void>((resolve) => { attachStarted = resolve; });
+    const release = new Promise<void>((resolve) => { releaseAttach = resolve; });
+    testEnv.NANOCODEX = {
+      async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+        const request = new Request(input, init);
+        const match = new URL(request.url).pathname.match(/^\/subjects\/([A-Za-z0-9_-]+)$/);
+        if (match && request.method === "PUT") subject = match[1];
+        return originalBroker.fetch(request);
+      },
+    } as Fetcher;
+    const attachSpy = vi.spyOn(UserAccount.prototype, "fetch").mockImplementation(
+      async function (this: UserAccount, request: Request): Promise<Response> {
+        if (request.method === "POST" && new URL(request.url).pathname === "/agents") {
+          attachStarted();
+          await release;
+        }
+        return originalUserFetch.call(this, request);
+      },
+    );
+
+    try {
+      const creation = SELF.fetch("https://example.test/v1/agents", { method: "POST" });
+      await within(started, "held account attach");
+      const session = sessionForSubject(subject!);
+      expireCredentialPreparation();
+      const alarm = runDurableObjectAlarm(session);
+      await waitForCleanupDeletion(session);
+      releaseAttach();
+
+      expect(await alarm).toBe(true);
+      expect((await creation).status).toBe(503);
+      expect(await cleanupMarkers(session)).toEqual({ binding: false, deleting: false });
+      expect(await (await SELF.fetch("https://example.test/v1/agents")).json()).toEqual({
+        data: [],
+        summaries: {},
+      });
+    } finally {
+      releaseAttach?.();
+      attachSpy.mockRestore();
+      testEnv.NANOCODEX = originalBroker;
+      vi.useRealTimers();
+    }
+  });
+
+  it("bounds a nonsettling bind and completes watchdog-owned cleanup", async () => {
+    const originalBroker = testEnv.NANOCODEX;
+    const originalTimeout = testEnv.MANAGED_OWNERSHIP_IO_TIMEOUT_MS;
+    let subject: string | undefined;
+    let bindStarted!: () => void;
+    const started = new Promise<void>((resolve) => { bindStarted = resolve; });
+    testEnv.MANAGED_OWNERSHIP_IO_TIMEOUT_MS = "25";
+    testEnv.NANOCODEX = {
+      async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+        const request = new Request(input, init);
+        const match = new URL(request.url).pathname.match(/^\/subjects\/([A-Za-z0-9_-]+)$/);
+        if (match && request.method === "PUT") {
+          subject = match[1];
+          bindStarted();
+          return new Promise<Response>(() => {});
+        }
+        return originalBroker.fetch(input, init);
+      },
+    } as Fetcher;
+
+    try {
+      const creation = SELF.fetch("https://example.test/v1/agents", { method: "POST" });
+      await within(started, "nonsettling credential bind");
+      const response = await within(creation, "bounded credential bind");
+      expect(response.status).toBe(503);
+      const session = sessionForSubject(subject!);
+      expect(await cleanupMarkers(session)).toEqual({ binding: false, deleting: false });
+      expect(await (await SELF.fetch("https://example.test/v1/agents")).json()).toEqual({
+        data: [],
+        summaries: {},
+      });
+    } finally {
+      testEnv.NANOCODEX = originalBroker;
+      testEnv.MANAGED_OWNERSHIP_IO_TIMEOUT_MS = originalTimeout;
+    }
+  });
+
+  it("makes a nonsettling cold rebind retryable on its bounded deadline", async () => {
+    const agent = await createAgent();
+    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    await evictDurableObject(session);
+    const originalBroker = testEnv.NANOCODEX;
+    const originalTimeout = testEnv.MANAGED_OWNERSHIP_IO_TIMEOUT_MS;
+    let bindStarted!: () => void;
+    const started = new Promise<void>((resolve) => { bindStarted = resolve; });
+    testEnv.MANAGED_OWNERSHIP_IO_TIMEOUT_MS = "25";
+    testEnv.NANOCODEX = {
+      async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+        const request = new Request(input, init);
+        if (request.method === "PUT" && new URL(request.url).pathname.startsWith("/subjects/")) {
+          bindStarted();
+          return new Promise<Response>(() => {});
+        }
+        return originalBroker.fetch(input, init);
+      },
+    } as Fetcher;
+
+    try {
+      await submit(agent, "turn-bounded-cold-rebind", "retry after a nonsettling rebind");
+      await within(started, "nonsettling cold rebind");
+      const retryable = await waitForTurnState(agent, "turn-bounded-cold-rebind", "retryable");
+      expect(retryable.attempt_count).toBe(1);
+      expect(retryable.error).toMatch(/credential subject binding timed out/i);
+      expect(retryable.retry_at).not.toBeNull();
+    } finally {
+      testEnv.NANOCODEX = originalBroker;
+      testEnv.MANAGED_OWNERSHIP_IO_TIMEOUT_MS = originalTimeout;
+    }
+  });
+
+  it("tombstones an agent before a timed-out late account attach can commit", async () => {
+    const originalTimeout = testEnv.MANAGED_OWNERSHIP_IO_TIMEOUT_MS;
+    const originalUserFetch = UserAccount.prototype.fetch;
+    let attachedAgentId: string | undefined;
+    let attachStarted!: () => void;
+    const started = new Promise<void>((resolve) => { attachStarted = resolve; });
+    testEnv.MANAGED_OWNERSHIP_IO_TIMEOUT_MS = "25";
+    const attachSpy = vi.spyOn(UserAccount.prototype, "fetch").mockImplementation(
+      async function (this: UserAccount, request: Request): Promise<Response> {
+        if (request.method === "POST" && new URL(request.url).pathname === "/agents") {
+          attachedAgentId = (await request.clone().json<{ agentId: string }>()).agentId;
+          attachStarted();
+          return new Promise<Response>(() => {});
+        }
+        return originalUserFetch.call(this, request);
+      },
+    );
+
+    try {
+      const creation = SELF.fetch("https://example.test/v1/agents", { method: "POST" });
+      await within(started, "nonsettling account attach");
+      const response = await within(creation, "bounded account attach");
+      expect(response.status).toBe(503);
+      expect(await (await SELF.fetch("https://example.test/v1/agents")).json()).toEqual({
+        data: [],
+        summaries: {},
+      });
+    } finally {
+      attachSpy.mockRestore();
+      testEnv.MANAGED_OWNERSHIP_IO_TIMEOUT_MS = originalTimeout;
+    }
+
+    const lateAttach = await testEnv.NANOCODEX_USERS.getByName(USER_ID).fetch(
+      "https://user.internal/agents",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ agentId: attachedAgentId }),
+      },
+    );
+    expect(lateAttach.status).toBe(410);
+  });
+
+  it("cleans an applied commit when its response is lost", async () => {
+    const originalSessions = testEnv.NANOCODEX_SESSIONS;
+    let committedAgentId: string | undefined;
+    testEnv.NANOCODEX_SESSIONS = {
+      idFromName(name: string) { return originalSessions.idFromName(name); },
+      getByName(name: string) {
+        const session = originalSessions.getByName(name);
+        return {
+          async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+            const request = new Request(input, init);
+            if (request.method === "POST"
+              && new URL(request.url).pathname === "/credential-binding/commit") {
+              committedAgentId = name;
+              const response = await session.fetch(input, init);
+              await response.body?.cancel();
+              throw new Error("injected lost commit response");
+            }
+            return session.fetch(input, init);
+          },
+        } as DurableObjectStub;
+      },
+    } as Env["NANOCODEX_SESSIONS"];
+
+    try {
+      const response = await SELF.fetch("https://example.test/v1/agents", { method: "POST" });
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({ error: "agent cleanup commit failed" });
+    } finally {
+      testEnv.NANOCODEX_SESSIONS = originalSessions;
+    }
+
+    expect(committedAgentId).toMatch(/^[0-9a-f-]{36}$/);
+    expect(await (await SELF.fetch("https://example.test/v1/agents")).json()).toEqual({
+      data: [],
+      summaries: {},
+    });
+    expect(await cleanupMarkers(originalSessions.getByName(committedAgentId!)))
+      .toEqual({ binding: false, deleting: false });
+  });
+
+  it("retains durable cleanup ownership when binding and the first unbind both fail", async () => {
+    const originalBroker = testEnv.NANOCODEX;
+    let session: DurableObjectStub<NanocodexSession> | undefined;
+    let subject: string | undefined;
+    let unbindAttempts = 0;
+    let rejectUnbind = true;
+    testEnv.NANOCODEX = {
+      async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+        const request = new Request(input, init);
+        const subjectRoute = new URL(request.url).pathname.startsWith("/subjects/");
+        if (subjectRoute && request.method === "PUT") {
+          subject = new URL(request.url).pathname.split("/").at(-1);
+          return Response.json({ error: "injected_bind_failure" }, { status: 503 });
+        }
+        if (subjectRoute && request.method === "DELETE") {
+          unbindAttempts += 1;
+          if (rejectUnbind) {
+            return Response.json({ error: "injected_unbind_failure" }, { status: 503 });
+          }
+        }
+        return originalBroker.fetch(request);
+      },
+    } as Fetcher;
+
+    try {
+      const response = await SELF.fetch("https://example.test/v1/agents", { method: "POST" });
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({ error: "credential_broker_unavailable" });
+      session = sessionForSubject(subject!);
+      expect(unbindAttempts).toBe(1);
+      expect(await cleanupMarkers(session!)).toEqual({ binding: true, deleting: true });
+
+      rejectUnbind = false;
+      expect(await runDurableObjectAlarm(session!)).toBe(true);
+      expect(unbindAttempts).toBe(2);
+      expect(await cleanupMarkers(session!)).toEqual({ binding: false, deleting: false });
+      const unbound = await originalBroker.fetch("https://nanocodex.internal/v1/search", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer NANOCODEX_PROVIDER_CREDENTIAL",
+          "content-type": "application/json",
+          "x-nanocodex-subject": subject!,
+        },
+        body: "{}",
+      });
+      expect(unbound.status).toBe(403);
+
+      const replay = await session!.fetch("https://session.internal/session", { method: "DELETE" });
+      expect(replay.status).toBe(204);
+      expect(unbindAttempts).toBe(2);
+    } finally {
+      testEnv.NANOCODEX = originalBroker;
+    }
+  });
+
+  it("keeps a bound subject owned after initialization and first cleanup fail", async () => {
+    const originalBroker = testEnv.NANOCODEX;
+    let session: DurableObjectStub<NanocodexSession> | undefined;
+    let subject: string | undefined;
+    let unbindAttempts = 0;
+    let rejectUnbind = true;
+    testEnv.NANOCODEX = {
+      async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+        const request = new Request(input, init);
+        const match = new URL(request.url).pathname.match(/^\/subjects\/([A-Za-z0-9_-]+)$/);
+        if (match && request.method === "PUT") subject = match[1];
+        if (match && request.method === "DELETE") {
+          unbindAttempts += 1;
+          if (rejectUnbind) {
+            return Response.json({ error: "injected_unbind_failure" }, { status: 503 });
+          }
+        }
+        return originalBroker.fetch(request);
+      },
+    } as Fetcher;
+    const originalFetch = NanocodexSession.prototype.fetch;
+    const fetchSpy = vi.spyOn(NanocodexSession.prototype, "fetch").mockImplementation(
+      async function (this: NanocodexSession, request: Request): Promise<Response> {
+        if (request.method === "PUT" && new URL(request.url).pathname === "/initialize") {
+          return Response.json({ error: "injected_initialize_failure" }, { status: 503 });
+        }
+        return originalFetch.call(this, request);
+      },
+    );
+
+    try {
+      const response = await SELF.fetch("https://example.test/v1/agents", { method: "POST" });
+      expect(response.status).toBe(503);
+      expect(await response.json()).toEqual({ error: "agent initialization failed" });
+      expect(fetchSpy.mock.calls.map(([request]) => (
+        `${request.method} ${new URL(request.url).pathname}`
+      ))).toContain("DELETE /session");
+      expect(subject).toMatch(/^[A-Za-z0-9_-]{43,128}$/);
+      session = sessionForSubject(subject!);
+      expect(await cleanupMarkers(session!)).toEqual({ binding: true, deleting: true });
+      expect(unbindAttempts).toBe(1);
+
+      const stillBound = await originalBroker.fetch("https://nanocodex.internal/v1/search", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer NANOCODEX_PROVIDER_CREDENTIAL",
+          "content-type": "application/json",
+          "x-nanocodex-subject": subject!,
+        },
+        body: "{}",
+      });
+      expect(stillBound.status).toBe(200);
+
+      rejectUnbind = false;
+      expect(await runDurableObjectAlarm(session!)).toBe(true);
+      expect(unbindAttempts).toBe(2);
+      expect(await cleanupMarkers(session!)).toEqual({ binding: false, deleting: false });
+
+      const replay = await session!.fetch("https://session.internal/session", { method: "DELETE" });
+      expect(replay.status).toBe(204);
+      expect(unbindAttempts).toBe(2);
+    } finally {
+      fetchSpy.mockRestore();
+      testEnv.NANOCODEX = originalBroker;
+    }
+  });
+
+  it("retries failed public delete cleanup from the durable marker idempotently", async () => {
+    const agent = await createAgent();
+    const originalBroker = testEnv.NANOCODEX;
+    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    let unbindAttempts = 0;
+    let rejectUnbind = true;
+    testEnv.NANOCODEX = {
+      async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+        const request = new Request(input, init);
+        if (request.method === "DELETE"
+          && new URL(request.url).pathname.startsWith("/subjects/")) {
+          unbindAttempts += 1;
+          if (rejectUnbind) {
+            return Response.json({ error: "injected_unbind_failure" }, { status: 503 });
+          }
+        }
+        return originalBroker.fetch(request);
+      },
+    } as Fetcher;
+
+    try {
+      const deleted = await SELF.fetch(`https://example.test/v1/agents/${agent.agent_id}`, {
+        method: "DELETE",
+      });
+      expect(deleted.status).toBe(503);
+      expect(await deleted.json()).toEqual({ error: "session_cleanup_pending" });
+      expect(unbindAttempts).toBe(1);
+      expect(await cleanupMarkers(session)).toEqual({ binding: true, deleting: true });
+
+      rejectUnbind = false;
+      expect(await runDurableObjectAlarm(session)).toBe(true);
+      createdAgents.delete(agent.agent_id);
+      expect(unbindAttempts).toBe(2);
+      expect(await cleanupMarkers(session)).toEqual({ binding: false, deleting: false });
+      expect(await (await SELF.fetch("https://example.test/v1/agents")).json()).toEqual({
+        data: [],
+        summaries: {},
+      });
+
+      const replay = await session.fetch("https://session.internal/session", { method: "DELETE" });
+      expect(replay.status).toBe(204);
+      expect(unbindAttempts).toBe(2);
+    } finally {
+      testEnv.NANOCODEX = originalBroker;
+    }
+  });
+
+  it("rebinds a retained pre-marker session before every cold model transport", async () => {
+    const agent = await createAgent();
+    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    const subject = testEnv.NANOCODEX_SESSIONS.idFromName(agent.agent_id).toString();
+    const originalBroker = testEnv.NANOCODEX;
+
+    const unbound = await originalBroker.fetch(`https://broker.internal/subjects/${subject}`, {
+      method: "DELETE",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ user_id: USER_ID }),
+    });
+    expect(unbound.status).toBe(204);
+    await runInDurableObject(session, async (_instance, state) => {
+      await state.storage.delete("nanocodex:credential-binding");
+    });
+    expect(await cleanupMarkers(session)).toEqual({ binding: false, deleting: false });
+    const missing = await originalBroker.fetch("https://nanocodex.internal/v1/search", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer NANOCODEX_PROVIDER_CREDENTIAL",
+        "content-type": "application/json",
+        "x-nanocodex-subject": subject,
+      },
+      body: "{}",
+    });
+    expect(missing.status).toBe(403);
+
+    const order: Array<"bind" | "transport" | "unbind"> = [];
+    testEnv.NANOCODEX = {
+      async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+        const request = new Request(input, init);
+        const url = new URL(request.url);
+        if (request.method === "PUT" && url.pathname === `/subjects/${subject}`) {
+          order.push("bind");
+        }
+        if (request.method === "DELETE" && url.pathname === `/subjects/${subject}`) {
+          order.push("unbind");
+        }
+        if (request.method === "GET"
+          && url.pathname === "/v1/responses"
+          && request.headers.get("upgrade")?.toLowerCase() === "websocket") {
+          order.push("transport");
+        }
+        return originalBroker.fetch(request);
+      },
+    } as Fetcher;
+
+    try {
+      await evictDurableObject(session);
+      await submit(agent, "retained-rebind-first", "first retained startup");
+      await waitForTurnState(agent, "retained-rebind-first", "completed");
+      expect(order).toEqual(["bind", "transport"]);
+      expect(await cleanupMarkers(session)).toEqual({ binding: true, deleting: false });
+
+      await evictDurableObject(session);
+      await submit(agent, "retained-rebind-second", "second retained startup");
+      await waitForTurnState(agent, "retained-rebind-second", "completed");
+      expect(order).toEqual(["bind", "transport", "bind", "transport"]);
+
+      const deleted = await SELF.fetch(`https://example.test/v1/agents/${agent.agent_id}`, {
+        method: "DELETE",
+      });
+      expect(deleted.status).toBe(204);
+      createdAgents.delete(agent.agent_id);
+      expect(order).toEqual(["bind", "transport", "bind", "transport", "unbind"]);
+      const removed = await originalBroker.fetch("https://nanocodex.internal/v1/search", {
+        method: "POST",
+        headers: {
+          authorization: "Bearer NANOCODEX_PROVIDER_CREDENTIAL",
+          "content-type": "application/json",
+          "x-nanocodex-subject": subject,
+        },
+        body: "{}",
+      });
+      expect(removed.status).toBe(403);
+    } finally {
+      testEnv.NANOCODEX = originalBroker;
+    }
+  });
+
+  it("derives legacy cleanup ownership from session_state on direct delete", async () => {
+    const agent = await createAgent();
+    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    const subject = testEnv.NANOCODEX_SESSIONS.idFromName(agent.agent_id).toString();
+    const originalBroker = testEnv.NANOCODEX;
+    const originalUserFetch = UserAccount.prototype.fetch;
+    let unboundSubject: string | undefined;
+    let detachedAgent: string | undefined;
+    testEnv.NANOCODEX = {
+      async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+        const request = new Request(input, init);
+        if (request.method === "DELETE") {
+          unboundSubject = new URL(request.url).pathname.match(/^\/subjects\/(.+)$/)?.[1];
+        }
+        return originalBroker.fetch(request);
+      },
+    } as Fetcher;
+    const accountSpy = vi.spyOn(UserAccount.prototype, "fetch").mockImplementation(
+      async function (this: UserAccount, request: Request): Promise<Response> {
+        if (request.method === "DELETE") {
+          detachedAgent = new URL(request.url).pathname.match(/^\/agents\/(.+)$/)?.[1];
+        }
+        return originalUserFetch.call(this, request);
+      },
+    );
+
+    try {
+      await runInDurableObject(session, async (_instance, state) => {
+        await state.storage.delete("nanocodex:credential-binding");
+      });
+      await evictDurableObject(session);
+      expect(await cleanupMarkers(session)).toEqual({ binding: false, deleting: false });
+
+      const deleted = await SELF.fetch(`https://example.test/v1/agents/${agent.agent_id}`, {
+        method: "DELETE",
+      });
+      expect(deleted.status).toBe(204);
+      createdAgents.delete(agent.agent_id);
+      expect(unboundSubject).toBe(subject);
+      expect(detachedAgent).toBe(agent.agent_id);
+      expect(await (await SELF.fetch("https://example.test/v1/agents")).json()).toEqual({
+        data: [],
+        summaries: {},
+      });
+    } finally {
+      accountSpy.mockRestore();
+      testEnv.NANOCODEX = originalBroker;
+    }
+  });
+
+  it("retains fenced deletion ownership and retries after workspace cleanup times out", async () => {
+    const agent = await createAgent();
+    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    const originalTimeout = testEnv.MANAGED_OWNERSHIP_IO_TIMEOUT_MS;
+    testEnv.MANAGED_OWNERSHIP_IO_TIMEOUT_MS = "20";
+
+    try {
+      const failed = await runInDurableObject(session, async (instance) => {
+        const mutable = instance as unknown as { fetch(request: Request): Promise<Response> };
+        const workspaceSymbol = Object.getOwnPropertySymbols(instance)
+          .find((symbol) => symbol.description === "workspace");
+        expect(workspaceSymbol).toBeTruthy();
+        const workspace = (instance as unknown as Record<symbol, {
+          fs: { rm(...args: unknown[]): Promise<void> };
+        }>)[workspaceSymbol!];
+        const originalRm = workspace.fs.rm;
+        workspace.fs.rm = () => new Promise<void>(() => {});
+        try {
+          return await within(
+            mutable.fetch(new Request("https://session.internal/session", { method: "DELETE" })),
+            "workspace deletion attempt",
+          );
+        } finally {
+          workspace.fs.rm = originalRm;
+        }
+      });
+      expect(failed.status).toBe(503);
+      expect(await cleanupMarkers(session)).toEqual({ binding: true, deleting: true });
+      expect(await runDurableObjectAlarm(session)).toBe(true);
+      expect(await cleanupMarkers(session)).toEqual({ binding: false, deleting: false });
+      expect(await runInDurableObject(session, (_instance, state) => (
+        state.storage.sql.exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM session_state",
+        ).toArray()[0]!.count
+      ))).toBe(0);
+      createdAgents.delete(agent.agent_id);
+    } finally {
+      testEnv.MANAGED_OWNERSHIP_IO_TIMEOUT_MS = originalTimeout;
     }
   });
 
@@ -535,6 +1393,77 @@ describe("managed agents REST and resumable SSE", () => {
     expect(await replay.json()).toMatchObject({ turn_id: generatedTurn.turn_id });
   });
 
+  it("serializes truly concurrent duplicate, conflicting, and aliased submissions", async () => {
+    const agent = await createAgent();
+    const turnsUrl = agent.events_url.replace(/\/events$/, "/turns");
+    const request = (id: string | undefined, input: string, key: string) => ({
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": key,
+      },
+      body: JSON.stringify({ ...(id === undefined ? {} : { id }), input }),
+    } satisfies RequestInit);
+
+    const duplicates = await Promise.all(Array.from({ length: 8 }, () => (
+      SELF.fetch(turnsUrl, request("concurrent-same", "same input", "concurrent-same-key"))
+    )));
+    expect(duplicates.map(({ status }) => status).sort()).toEqual([
+      200, 200, 200, 200, 200, 200, 200, 202,
+    ]);
+    const duplicateViews = await Promise.all(
+      duplicates.map((response) => response.json<ManagedTurnView>()),
+    );
+    expect(new Set(duplicateViews.map(({ accepted_cursor }) => accepted_cursor))).toEqual(
+      new Set([duplicateViews[0]!.accepted_cursor]),
+    );
+
+    const conflictingInput = await Promise.all([
+      SELF.fetch(turnsUrl, request("concurrent-conflict", "left", "concurrent-conflict-key")),
+      SELF.fetch(turnsUrl, request("concurrent-conflict", "right", "concurrent-conflict-key")),
+    ]);
+    expect(conflictingInput.map(({ status }) => status).sort()).toEqual([202, 409]);
+    const conflictBody = await conflictingInput.find(({ status }) => status === 409)!.json();
+    expect(conflictBody).toMatchObject({ error: "idempotency_conflict" });
+    const persistedConflict = await (
+      await SELF.fetch(`${turnsUrl}/concurrent-conflict`)
+    ).json<ManagedTurnView>();
+    expect(["left", "right"]).toContain(persistedConflict.input);
+
+    const changedKeys = await Promise.all([
+      SELF.fetch(turnsUrl, request("concurrent-key-alias", "one turn", "first-key")),
+      SELF.fetch(turnsUrl, request("concurrent-key-alias", "one turn", "second-key")),
+    ]);
+    expect(changedKeys.map(({ status }) => status).sort()).toEqual([202, 409]);
+
+    const changedIds = await Promise.all([
+      SELF.fetch(turnsUrl, request("concurrent-id-left", "one request", "shared-key")),
+      SELF.fetch(turnsUrl, request("concurrent-id-right", "one request", "shared-key")),
+    ]);
+    expect(changedIds.map(({ status }) => status).sort()).toEqual([202, 409]);
+
+    const generated = await Promise.all(Array.from({ length: 4 }, () => (
+      SELF.fetch(turnsUrl, request(undefined, "generated once", "generated-concurrent-key"))
+    )));
+    expect(generated.map(({ status }) => status).sort()).toEqual([200, 200, 200, 202]);
+    const generatedViews = await Promise.all(generated.map((response) => response.json<ManagedTurnView>()));
+    expect(new Set(generatedViews.map(({ turn_id }) => turn_id))).toEqual(
+      new Set([generatedViews[0]!.turn_id]),
+    );
+
+    const history = await (
+      await SELF.fetch(`${agent.events_url}/history?limit=256`)
+    ).json<{ data: Array<{ type: string; turn_id?: string }> }>();
+    const acceptances = history.data.filter(({ type }) => type === "turn_accepted");
+    expect(acceptances.filter(({ turn_id }) => turn_id === "concurrent-same")).toHaveLength(1);
+    expect(acceptances.filter(({ turn_id }) => turn_id === "concurrent-conflict")).toHaveLength(1);
+    expect(acceptances.filter(({ turn_id }) => turn_id === "concurrent-key-alias")).toHaveLength(1);
+    expect(acceptances.filter(({ turn_id }) => (
+      turn_id === "concurrent-id-left" || turn_id === "concurrent-id-right"
+    ))).toHaveLength(1);
+    expect(acceptances.filter(({ turn_id }) => turn_id === generatedViews[0]!.turn_id)).toHaveLength(1);
+  });
+
   it("persists cancellation intent and its resumable event before acknowledging", async () => {
     const agent = await createAgent();
     const accepted = await submit(agent, "turn-cancel", "wait for cancellation");
@@ -596,6 +1525,534 @@ describe("managed agents REST and resumable SSE", () => {
     const ahead = await SELF.fetch(`${agent.events_url}?cursor=9223372036854775807`);
     expect(ahead.status).toBe(409);
     expect(await ahead.json()).toMatchObject({ error: "cursor_ahead" });
+  });
+
+  it("tails atomically from the latest durable cursor", async () => {
+    const agent = await createAgent();
+    const response = await SELF.fetch(`${agent.events_url}?cursor=latest`);
+    expect(response.status).toBe(200);
+    const stream = sseReader(response);
+    await submit(agent, "turn-latest", "after tail attachment");
+
+    let accepted;
+    do {
+      accepted = await nextWithin(stream, "latest turn acceptance");
+    } while (accepted.data.type !== "turn_accepted");
+    expect(accepted).toMatchObject({
+      id: accepted.data.cursor,
+      event: "turn_accepted",
+      data: { id: "turn-latest", type: "turn_accepted" },
+    });
+    await stream.cancel();
+  });
+
+  it("resumes exactly once from the concrete latest control cursor after disconnect", async () => {
+    const agent = await createAgent();
+    const disconnect = new AbortController();
+    const latest = sseFrameReader(await SELF.fetch(`${agent.events_url}?cursor=latest`, {
+      signal: disconnect.signal,
+    }));
+    const controlFrame = await within(latest.nextFrame(), "latest control cursor");
+    const cursor = controlFrame.match(/(?:^|\n): cursor ([0-9]+)(?:\n|$)/)?.[1];
+    expect(cursor).toMatch(/^[0-9]+$/);
+    disconnect.abort();
+    await latest.cancel();
+
+    const accepted = await submit(agent, "turn-latest-resume", "resume me exactly once");
+
+    const resumed = sseReader(await SELF.fetch(`${agent.events_url}?cursor=ignored`, {
+      headers: { "last-event-id": cursor! },
+    }));
+    const progress: Array<{ id: string; data: Record<string, unknown> }> = [];
+    while (true) {
+      const event = await nextWithin(resumed, "latest cursor resumed progress");
+      progress.push(event);
+      if (event.data.type === "turn_completed" && event.data.id === "turn-latest-resume") break;
+    }
+    await resumed.cancel();
+
+    const cursors = progress.map(({ id: eventCursor }) => BigInt(eventCursor));
+    expect(cursors.every((eventCursor) => eventCursor > BigInt(cursor!))).toBe(true);
+    expect(cursors).toEqual([...cursors].sort((left, right) => left < right ? -1 : 1));
+    expect(new Set(cursors.map(String)).size).toBe(cursors.length);
+    expect(progress.filter(({ data }) => (
+      data.type === "turn_accepted" && data.id === "turn-latest-resume"
+    ))).toHaveLength(1);
+    expect(progress.find(({ data }) => data.type === "turn_accepted")?.id).toBe(
+      accepted.accepted_cursor,
+    );
+    expect(progress.filter(({ data }) => (
+      data.type === "turn_completed" && data.id === "turn-latest-resume"
+    ))).toHaveLength(1);
+  });
+
+  it("does not reuse an idle Agent while alarm shutdown races the next admission", async () => {
+    const agent = await createAgent();
+    await submit(agent, "turn-before-alarm", "finish before alarm");
+    await waitForTurnState(agent, "turn-before-alarm", "completed");
+    const id = new URL(agent.events_url).pathname.split("/").at(-2)!;
+    const stub = testEnv.NANOCODEX_SESSIONS.getByName(id);
+    const originalAlarm = NanocodexSession.prototype.alarm;
+    let entered!: () => void;
+    const alarmEntered = new Promise<void>((resolve) => { entered = resolve; });
+    const alarmSpy = vi.spyOn(NanocodexSession.prototype, "alarm").mockImplementation(
+      async function (this: NanocodexSession): Promise<void> {
+        entered();
+        return originalAlarm.call(this);
+      },
+    );
+    try {
+      const alarm = runDurableObjectAlarm(stub);
+      await within(alarmEntered, "idle alarm entry");
+      const accepted = await submit(agent, "turn-during-alarm", "survive alarm replacement");
+      expect(await within(alarm, "concurrent idle alarm")).toBe(true);
+      const completed = await waitForTurnState(agent, "turn-during-alarm", "completed");
+      expect(completed.accepted_cursor).toBe(accepted.accepted_cursor);
+
+      const history = await (
+        await SELF.fetch(`${agent.events_url}/history?limit=256`)
+      ).json<{ data: Array<{ type: string; turn_id?: string }> }>();
+      expect(history.data.filter(({ type, turn_id }) => (
+        turn_id === "turn-during-alarm" && type === "turn_accepted"
+      ))).toHaveLength(1);
+      expect(history.data.some(({ type, turn_id }) => (
+        turn_id === "turn-during-alarm"
+          && (type === "turn_failed" || type === "turn_retryable" || type === "turn_blocked")
+      ))).toBe(false);
+    } finally {
+      alarmSpy.mockRestore();
+    }
+  });
+
+  it("does not construct a replacement after deletion supersedes cold construction", async () => {
+    const agent = await createAgent();
+    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    const originalBroker = testEnv.NANOCODEX;
+    let bindingCount = 0;
+    let transportCount = 0;
+    testEnv.NANOCODEX = {
+      async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+        const request = new Request(input, init);
+        if (request.method === "PUT" && new URL(request.url).pathname.startsWith("/subjects/")) {
+          bindingCount += 1;
+          await scheduler.wait(250);
+        }
+        if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
+          transportCount += 1;
+        }
+        return originalBroker.fetch(request);
+      },
+    } as Fetcher;
+
+    try {
+      await submit(agent, "turn-delete-during-create", "construction must stay fenced");
+      for (let attempt = 0; attempt < 100 && bindingCount === 0; attempt += 1) {
+        await scheduler.wait(5);
+      }
+      expect(bindingCount).toBe(1);
+      const deletion = SELF.fetch(`https://example.test/v1/agents/${agent.agent_id}`, {
+        method: "DELETE",
+      });
+      await waitForCleanupDeletion(session);
+      expect((await within(deletion, "delete superseded construction")).status).toBe(204);
+      createdAgents.delete(agent.agent_id);
+      expect(transportCount).toBe(0);
+    } finally {
+      testEnv.NANOCODEX = originalBroker;
+    }
+  });
+
+  it("does not publish a construction that resolves after a newer deletion generation", async () => {
+    const agent = await createAgent();
+    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    const originalTimeout = testEnv.MANAGED_OWNERSHIP_IO_TIMEOUT_MS;
+    let releaseConstruction!: () => void;
+    const heldConstruction = new Promise<void>((resolve) => { releaseConstruction = resolve; });
+    let constructionStarted!: () => void;
+    const started = new Promise<void>((resolve) => { constructionStarted = resolve; });
+    let restoreWorkspace = () => {};
+    await runInDurableObject(session, (instance) => {
+      const workspaceSymbol = Object.getOwnPropertySymbols(instance)
+        .find((symbol) => symbol.description === "workspace");
+      expect(workspaceSymbol).toBeTruthy();
+      const workspace = (instance as unknown as Record<symbol, {
+        fs: { lstat(path: string): Promise<unknown> };
+      }>)[workspaceSymbol!];
+      const originalLstat = workspace.fs.lstat;
+      let held = false;
+      workspace.fs.lstat = async (path: string) => {
+        if (!held && path === "/workspace") {
+          held = true;
+          constructionStarted();
+          await heldConstruction;
+        }
+        return originalLstat.call(workspace.fs, path);
+      };
+      restoreWorkspace = () => { workspace.fs.lstat = originalLstat; };
+    });
+    testEnv.MANAGED_OWNERSHIP_IO_TIMEOUT_MS = "20";
+
+    try {
+      await submit(agent, "turn-late-construction", "never publish this runtime");
+      await within(started, "held agent construction");
+
+      const firstDeletion = await SELF.fetch(
+        `https://example.test/v1/agents/${agent.agent_id}`,
+        { method: "DELETE" },
+      );
+      expect(firstDeletion.status).toBe(503);
+      expect(await firstDeletion.json()).toEqual({ error: "session_cleanup_pending" });
+      expect(await cleanupMarkers(session)).toEqual({ binding: true, deleting: true });
+
+      expect(await runDurableObjectAlarm(session)).toBe(true);
+      createdAgents.delete(agent.agent_id);
+      expect(await cleanupMarkers(session)).toEqual({ binding: false, deleting: false });
+      expect(await runInDurableObject(session, (_instance, state) => ({
+        events: state.storage.sql.exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM managed_events",
+        ).toArray()[0]!.count,
+        session: state.storage.sql.exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM session_state",
+        ).toArray()[0]!.count,
+        turns: state.storage.sql.exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM managed_turns",
+        ).toArray()[0]!.count,
+      }))).toEqual({ events: 0, session: 0, turns: 0 });
+
+      releaseConstruction();
+      restoreWorkspace();
+      await scheduler.wait(100);
+      expect(await runInDurableObject(session, (_instance, state) => ({
+        events: state.storage.sql.exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM managed_events",
+        ).toArray()[0]!.count,
+        session: state.storage.sql.exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM session_state",
+        ).toArray()[0]!.count,
+        turns: state.storage.sql.exec<{ count: number }>(
+          "SELECT COUNT(*) AS count FROM managed_turns",
+        ).toArray()[0]!.count,
+      }))).toEqual({ events: 0, session: 0, turns: 0 });
+
+      const rejected = await session.fetch("https://session.internal/turns", {
+        method: "POST",
+        headers: { "content-type": "application/json", "idempotency-key": "after-deletion" },
+        body: JSON.stringify({ id: "after-deletion", input: "must not be accepted" }),
+      });
+      expect(rejected.status).toBe(409);
+      expect(await rejected.json()).toMatchObject({ error: "agent_deleting" });
+    } finally {
+      releaseConstruction();
+      restoreWorkspace();
+      testEnv.MANAGED_OWNERSHIP_IO_TIMEOUT_MS = originalTimeout;
+    }
+  });
+
+  it("retries a pre-admission HTTP 503 through a concurrent alarm without false failure", async () => {
+    const agent = await createAgent();
+    const id = "turn-pre-admission-503";
+    const turnsUrl = agent.events_url.replace(/\/events$/, "/turns");
+    const request = {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": `request-${id}`,
+      },
+      body: JSON.stringify({ id, input: "retry after startup failure" }),
+    } satisfies RequestInit;
+    const originalBroker = testEnv.NANOCODEX;
+    testEnv.NANOCODEX = {
+      async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+        const request = new Request(input, init);
+        if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
+          return Response.json({ error: "injected_startup_failure" }, { status: 503 });
+        }
+        return originalBroker.fetch(input, init);
+      },
+    } as Fetcher;
+    try {
+      expect((await SELF.fetch(turnsUrl, request)).status).toBe(202);
+      const retryable = await waitForTurnState(agent, id, "retryable");
+      expect(retryable.error).toMatch(/HTTP 503/i);
+    } finally {
+      testEnv.NANOCODEX = originalBroker;
+    }
+
+    const sessionId = new URL(agent.events_url).pathname.split("/").at(-2)!;
+    const stub = testEnv.NANOCODEX_SESSIONS.getByName(sessionId);
+    await within(waitForScheduledAlarm(stub), "retry alarm scheduling");
+    const [alarm, replay] = await Promise.all([
+      runDurableObjectAlarm(stub),
+      SELF.fetch(turnsUrl, request),
+    ]);
+    expect(alarm).toBe(true);
+    expect(replay.status).toBe(200);
+    await waitForTurnState(agent, id, "completed");
+
+    const history = await (
+      await SELF.fetch(`${agent.events_url}/history?limit=256`)
+    ).json<{ data: Array<{ type: string; turn_id?: string }> }>();
+    expect(history.data.filter(({ type, turn_id }) => (
+      turn_id === id && type === "turn_accepted"
+    ))).toHaveLength(1);
+    expect(history.data.filter(({ type, turn_id }) => (
+      turn_id === id && type === "turn_retryable"
+    ))).toHaveLength(1);
+    expect(history.data.filter(({ type, turn_id }) => (
+      turn_id === id && type === "turn_completed"
+    ))).toHaveLength(1);
+    expect(history.data.some(({ type, turn_id }) => (
+      turn_id === id && (type === "turn_failed" || type === "turn_blocked")
+    ))).toBe(false);
+  });
+
+  it("honors the durable cancellation retry deadline across duplicate requests and alarms", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const agent = await createAgent();
+    const id = "turn-cancel-retry-deadline";
+    const turnsUrl = agent.events_url.replace(/\/events$/, "/turns");
+    const turnRequest = {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": `request-${id}`,
+      },
+      body: JSON.stringify({ id, input: "cancel through a reconstruction outage" }),
+    } satisfies RequestInit;
+    const cancelUrl = `${turnsUrl}/${id}/cancel`;
+    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    const originalBroker = testEnv.NANOCODEX;
+    let upgradeCount = 0;
+    testEnv.NANOCODEX = {
+      async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+        const request = new Request(input, init);
+        if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
+          upgradeCount += 1;
+          return Response.json({ error: "injected_cancellation_reconstruction_outage" }, { status: 503 });
+        }
+        return originalBroker.fetch(input, init);
+      },
+    } as Fetcher;
+
+    try {
+      expect((await SELF.fetch(turnsUrl, turnRequest)).status).toBe(202);
+      await waitForTurnAttempt(agent, id, 1);
+      expect((await SELF.fetch(cancelUrl, { method: "POST" })).status).toBe(202);
+      const cancelling = await waitForTurnAttempt(agent, id, 2);
+      expect(cancelling.state).toBe("cancelling");
+      expect(cancelling.error).toMatch(/HTTP 503/i);
+      expect(cancelling.retry_at).not.toBeNull();
+      const retryAt = cancelling.retry_at!;
+      const attemptsBeforeDeadline = cancelling.attempt_count;
+      const upgradesBeforeDeadline = upgradeCount;
+
+      vi.setSystemTime(retryAt - 1);
+      expect((await SELF.fetch(turnsUrl, turnRequest)).status).toBe(200);
+      expect((await SELF.fetch(cancelUrl, { method: "POST" })).status).toBe(202);
+      expect(await runDurableObjectAlarm(session)).toBe(true);
+      await scheduler.wait(25);
+      const beforeDeadline = await (
+        await SELF.fetch(`${turnsUrl}/${id}`)
+      ).json<ManagedTurnView>();
+      expect(beforeDeadline).toMatchObject({
+        attempt_count: attemptsBeforeDeadline,
+        retry_at: retryAt,
+        state: "cancelling",
+      });
+      expect(upgradeCount).toBe(upgradesBeforeDeadline);
+      expect(await runInDurableObject(session, (_instance, state) => state.storage.getAlarm()))
+        .toBe(retryAt);
+
+      vi.setSystemTime(retryAt);
+      expect(await runDurableObjectAlarm(session)).toBe(true);
+      const retried = await waitForTurnAttempt(agent, id, attemptsBeforeDeadline + 1);
+      expect(retried.state).toBe("cancelling");
+      expect(retried.retry_at).not.toBeNull();
+      expect(retried.retry_at!).toBeGreaterThan(retryAt);
+      expect(upgradeCount).toBe(upgradesBeforeDeadline + 1);
+      const history = await managedHistory(agent);
+      expect(history.data.filter(({ type, turn_id }) => (
+        type === "turn_cancelling" && turn_id === id
+      ))).toHaveLength(1);
+    } finally {
+      testEnv.NANOCODEX = originalBroker;
+      vi.useRealTimers();
+    }
+  });
+
+  it("does not let an idempotent submission bypass a durable admission retry deadline", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const agent = await createAgent();
+    const id = "turn-admission-retry-deadline";
+    const turnsUrl = agent.events_url.replace(/\/events$/, "/turns");
+    const request = {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": `request-${id}`,
+      },
+      body: JSON.stringify({ id, input: "respect the retained admission deadline" }),
+    } satisfies RequestInit;
+    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    const originalBroker = testEnv.NANOCODEX;
+    let upgradeCount = 0;
+    testEnv.NANOCODEX = {
+      async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+        const request = new Request(input, init);
+        if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
+          upgradeCount += 1;
+          return Response.json({ error: "injected_admission_outage" }, { status: 503 });
+        }
+        return originalBroker.fetch(input, init);
+      },
+    } as Fetcher;
+
+    try {
+      expect((await SELF.fetch(turnsUrl, request)).status).toBe(202);
+      const retryable = await waitForTurnAttempt(agent, id, 1);
+      expect(retryable.state).toBe("retryable");
+      expect(retryable.retry_at).not.toBeNull();
+      const retryAt = retryable.retry_at!;
+      const upgradesBeforeDeadline = upgradeCount;
+
+      vi.setSystemTime(retryAt - 1);
+      expect((await SELF.fetch(turnsUrl, request)).status).toBe(200);
+      expect(await runDurableObjectAlarm(session)).toBe(true);
+      await scheduler.wait(25);
+      const beforeDeadline = await (
+        await SELF.fetch(`${turnsUrl}/${id}`)
+      ).json<ManagedTurnView>();
+      expect(beforeDeadline).toMatchObject({
+        attempt_count: 1,
+        retry_at: retryAt,
+        state: "retryable",
+      });
+      expect(upgradeCount).toBe(upgradesBeforeDeadline);
+      expect(await runInDurableObject(session, (_instance, state) => state.storage.getAlarm()))
+        .toBe(retryAt);
+
+      vi.setSystemTime(retryAt);
+      expect(await runDurableObjectAlarm(session)).toBe(true);
+      const retried = await waitForTurnAttempt(agent, id, 2);
+      expect(retried.state).toBe("retryable");
+      expect(upgradeCount).toBe(upgradesBeforeDeadline + 1);
+    } finally {
+      testEnv.NANOCODEX = originalBroker;
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps infrastructure failures retryable after the former eight-attempt ceiling", async () => {
+    vi.useFakeTimers({ toFake: ["Date"] });
+    const agent = await createAgent();
+    const id = "turn-many-infra-retries";
+    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    const originalBroker = testEnv.NANOCODEX;
+    testEnv.NANOCODEX = {
+      async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+        const request = new Request(input, init);
+        if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
+          return Response.json({ error: "injected_persistent_outage" }, { status: 503 });
+        }
+        return originalBroker.fetch(input, init);
+      },
+    } as Fetcher;
+
+    try {
+      await submit(agent, id, "remain retryable under capped backoff");
+      let turn = await waitForTurnAttempt(agent, id, 1);
+      for (let expected = 2; expected <= 10; expected += 1) {
+        expect(turn.state).toBe("retryable");
+        expect(turn.retry_at).not.toBeNull();
+        expect(turn.retry_at! - turn.updated_at).toBeLessThanOrEqual(60_000);
+        vi.setSystemTime(turn.retry_at!);
+        expect(await runDurableObjectAlarm(session)).toBe(true);
+        turn = await waitForTurnAttempt(agent, id, expected);
+      }
+      expect(turn).toMatchObject({ attempt_count: 10, state: "retryable" });
+      expect(turn.error).not.toMatch(/retry limit reached/i);
+      const history = await managedHistory(agent);
+      expect(history.data.filter(({ type, turn_id }) => (
+        type === "turn_retryable" && turn_id === id
+      ))).toHaveLength(1);
+    } finally {
+      testEnv.NANOCODEX = originalBroker;
+      vi.useRealTimers();
+    }
+  });
+
+  it("keeps accepted siblings retryable when a fenced turn requires Agent reopen", async () => {
+    const agent = await createAgent();
+    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    await submit(agent, "turn-reopen-owner", "force owner fencing after provider admission");
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    await submit(agent, "turn-reopen-sibling", "remain retryable across sibling reopen");
+    await runInDurableObject(session, (_instance, state) => {
+      state.storage.sql.exec(
+        `UPDATE nanocodex_journal_owners
+         SET owner_id = 'injected-new-owner', fence = CAST(fence AS INTEGER) + 1`,
+      );
+    });
+
+    await waitForHistoryEvent(agent, ({ type, turn_id }) => (
+      type === "turn_retryable" && turn_id === "turn-reopen-sibling"
+    ));
+    const history = await managedHistory(agent);
+    expect(history.data.some(({ type, turn_id }) => (
+      type === "turn_cancelled" && turn_id === "turn-reopen-sibling"
+    ))).toBe(false);
+  });
+
+  it("attributes replay-only raw terminals before the following turn can start", async () => {
+    const agent = await createAgent();
+    const replayId = "turn-raw-replay";
+    await submit(agent, replayId, "retain this exact completed operation");
+    await waitForTurnState(agent, replayId, "completed");
+    await waitForHistoryEvent(agent, ({ event, turn_id }) => (
+      event?.type === "run.completed" && turn_id === replayId
+    ));
+    const beforeReplay = BigInt((await managedHistory(agent)).latest_cursor);
+    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    await runInDurableObject(session, (_instance, state) => {
+      state.storage.sql.exec(
+        `UPDATE managed_turns
+         SET state = 'retryable', terminal_json = NULL, terminal_cursor = NULL,
+             error = 'injected outer projection gap', retry_at = 0
+         WHERE id = ?`,
+        replayId,
+      );
+    });
+
+    const replay = await SELF.fetch(agent.events_url.replace(/\/events$/, "/turns"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": `request-${replayId}`,
+      },
+      body: JSON.stringify({ id: replayId, input: "retain this exact completed operation" }),
+    });
+    expect(replay.status).toBe(200);
+    await waitForTurnState(agent, replayId, "completed");
+    await submit(agent, "turn-after-raw-replay", "start only after replay attribution");
+    await waitForTurnState(agent, "turn-after-raw-replay", "completed");
+    await waitForHistoryEvent(agent, ({ cursor, event, turn_id }) => (
+      BigInt(cursor) > beforeReplay
+        && event?.type === "run.completed"
+        && turn_id === "turn-after-raw-replay"
+    ));
+
+    const replayWindow = (await managedHistory(agent)).data.filter(({ cursor }) => (
+      BigInt(cursor) > beforeReplay
+    ));
+    expect(replayWindow.find(({ event }) => event?.type === "run.completed")).toMatchObject({
+      turn_id: replayId,
+    });
+    expect(replayWindow.find(({ event, turn_id }) => (
+      event?.type === "run.started" && turn_id === "turn-after-raw-replay"
+    ))).toBeTruthy();
+    expect(replayWindow.find(({ event, turn_id }) => (
+      event?.type === "run.completed" && turn_id === "turn-after-raw-replay"
+    ))).toBeTruthy();
   });
 
   it("persists cursors across eviction and tails strictly after the acknowledged cursor", async () => {
@@ -739,10 +2196,26 @@ type AgentReceipt = {
 
 type ManagedTurnView = {
   accepted_cursor: string;
+  attempt_count: number;
+  error?: string;
   input: unknown;
+  retry_at: number | null;
   state: string;
   terminal_cursor: string | null;
   turn_id: string;
+  updated_at: number;
+};
+
+type ManagedHistoryEvent = {
+  cursor: string;
+  event?: { type?: string };
+  turn_id?: string;
+  type: string;
+};
+
+type ManagedHistory = {
+  data: ManagedHistoryEvent[];
+  latest_cursor: string;
 };
 
 async function createAgent(): Promise<AgentReceipt> {
@@ -861,6 +2334,127 @@ function sseReader(response: Response) {
     },
     cancel: () => reader.cancel(),
   };
+}
+
+function sseFrameReader(response: Response) {
+  if (!response.body) throw new Error("SSE response has no body");
+  const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
+  let buffer = "";
+  return {
+    async nextFrame(): Promise<string> {
+      while (true) {
+        const boundary = buffer.indexOf("\n\n");
+        if (boundary >= 0) {
+          const frame = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+          return frame;
+        }
+        const chunk = await reader.read();
+        if (chunk.done) throw new Error("SSE stream ended before the next frame");
+        buffer += chunk.value;
+      }
+    },
+    cancel: () => reader.cancel(),
+  };
+}
+
+async function waitForTurnState(
+  agent: AgentReceipt,
+  id: string,
+  expected: string,
+): Promise<ManagedTurnView> {
+  const deadline = Date.now() + 4_000;
+  while (Date.now() < deadline) {
+    const response = await SELF.fetch(agent.events_url.replace(/\/events$/, `/turns/${id}`));
+    if (response.ok) {
+      const turn = await response.json<ManagedTurnView>();
+      if (turn.state === expected) return turn;
+      if (turn.state === "failed" || turn.state === "blocked") {
+        throw new Error(`turn ${id} entered ${turn.state} while waiting for ${expected}`);
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`timed out waiting for turn ${id} to enter ${expected}`);
+}
+
+async function waitForTurnAttempt(
+  agent: AgentReceipt,
+  id: string,
+  expected: number,
+): Promise<ManagedTurnView> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const response = await SELF.fetch(agent.events_url.replace(/\/events$/, `/turns/${id}`));
+    if (response.ok) {
+      const turn = await response.json<ManagedTurnView>();
+      if (turn.attempt_count >= expected) return turn;
+      if (turn.state === "failed" || turn.state === "blocked" || turn.state === "cancelled") {
+        throw new Error(`turn ${id} entered ${turn.state} before retry attempt ${expected}`);
+      }
+    }
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`timed out waiting for turn ${id} retry attempt ${expected}`);
+}
+
+async function managedHistory(agent: AgentReceipt): Promise<ManagedHistory> {
+  const response = await SELF.fetch(`${agent.events_url}/history?limit=256`);
+  expect(response.status).toBe(200);
+  return response.json<ManagedHistory>();
+}
+
+async function waitForHistoryEvent(
+  agent: AgentReceipt,
+  predicate: (event: ManagedHistoryEvent) => boolean,
+): Promise<ManagedHistoryEvent> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    const event = (await managedHistory(agent)).data.find(predicate);
+    if (event) return event;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("timed out waiting for managed history event");
+}
+
+async function waitForScheduledAlarm(
+  stub: DurableObjectStub<NanocodexSession>,
+): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    const alarm = await runInDurableObject(stub, (_instance, state) => state.storage.getAlarm());
+    if (alarm !== null) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("timed out waiting for a scheduled Durable Object alarm");
+}
+
+async function cleanupMarkers(
+  stub: DurableObjectStub<NanocodexSession>,
+): Promise<{ binding: boolean; deleting: boolean }> {
+  return runInDurableObject(stub, async (_instance, state) => ({
+    binding: await state.storage.get("nanocodex:credential-binding") !== undefined,
+    deleting: await state.storage.get("nanocodex:session-deleting") === true,
+  }));
+}
+
+function expireCredentialPreparation(): void {
+  vi.setSystemTime(Date.now() + 61_000);
+}
+
+async function waitForCleanupDeletion(
+  stub: DurableObjectStub<NanocodexSession>,
+): Promise<void> {
+  const deadline = Date.now() + 2_000;
+  while (Date.now() < deadline) {
+    if ((await cleanupMarkers(stub)).deleting) return;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("timed out waiting for watchdog deletion");
+}
+
+function sessionForSubject(subject: string): DurableObjectStub<NanocodexSession> {
+  return testEnv.NANOCODEX_SESSIONS.get(
+    testEnv.NANOCODEX_SESSIONS.idFromString(subject),
+  );
 }
 
 async function nextWithin(

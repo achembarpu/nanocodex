@@ -28,6 +28,10 @@
         "class_name": "AgentSubjectDirectory"
       },
       {
+        "name": "USER_CONNECTORS",
+        "class_name": "UserConnectorBroker"
+      },
+      {
         "name": "CHATGPT_EGRESS",
         "class_name": "ChatGptEgress",
         "script_name": "nanocodex"
@@ -46,6 +50,10 @@
     {
       "tag": "v3",
       "deleted_classes": ["CodexOAuthBroker"]
+    },
+    {
+      "tag": "v4",
+      "new_sqlite_classes": ["UserConnectorBroker"]
     }
   ]
 }

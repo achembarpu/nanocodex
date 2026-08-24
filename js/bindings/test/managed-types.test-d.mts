@@ -9,6 +9,7 @@ declare const apiKey: string;
 
 async function checkManaged() {
   const created: ManagedAgent = await Agent.create();
+  const opened: ManagedAgent = Agent.open("0198d3f0-8844-7000-8000-000000000001");
   const serverAgent = await Agent.get("0198d3f0-8844-7000-8000-000000000001", {
     baseUrl: "https://managed.example",
     apiKey,
@@ -23,6 +24,7 @@ async function checkManaged() {
   });
   const accepted: string = await turn.accepted();
   const result: ManagedTurnResult = await turn.result();
+  await turn.result({ signal: new AbortController().signal });
   result.finalMessage;
   result.usage?.input_tokens;
   for await (const event of serverAgent.events.watch({ cursor: result.cursor ?? "0" })) {
@@ -32,6 +34,7 @@ async function checkManaged() {
   }
   await turn.cancel();
   await created.delete();
+  opened.id;
   await Agent.delete(accepted, { baseUrl: "https://managed.example", apiKey });
   new ManagedError("failed", "failed", { status: 500 });
 
