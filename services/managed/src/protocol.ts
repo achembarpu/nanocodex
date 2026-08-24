@@ -26,6 +26,8 @@ export type AgentCapabilities = Readonly<{
   live_steer: true;
   live_cancel: true;
   workspace: "cloudflare-computer";
+  shell_runtime: "just-bash";
+  shell_egress: "connector-http-gateway";
   sandbox_escalation: boolean;
 }>;
 

@@ -69,9 +69,14 @@ export async function justBash(options) {
       PATH: filesystem.root,
     },
     fs: shellFilesystem,
-    ...(options.network === false || options.network === undefined
+    ...(typeof options.fetch === "function"
+      ? { fetch: options.fetch }
+      : options.network === false || options.network === undefined
+        ? {}
+        : { network: options.network }),
+    ...(options.customCommands === undefined
       ? {}
-      : { network: options.network }),
+      : { customCommands: [...options.customCommands] }),
     executionLimitProfile: "hardened",
     executionLimits: {
       maxCommandCount: 10_000,

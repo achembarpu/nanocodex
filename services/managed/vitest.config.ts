@@ -3,9 +3,51 @@ import { defineConfig } from "vitest/config";
 
 const TEST_BROKER = `
 const subjects = new Set();
+const connectors = new Map();
 export default {
   async fetch(request) {
     const url = new URL(request.url);
+    const connectorRoute = url.pathname.match(/^\\/users\\/([^/]+)\\/connectors(?:\\/(github|gmail|gdrive)(\\/callback)?)?$/);
+    if (connectorRoute) {
+      const [, userId, connector, callback] = connectorRoute;
+      if (!connector && request.method === "GET") {
+        const connected = connectors.get(userId) || new Map();
+        return Response.json({ connectors: Object.fromEntries(
+          ["github", "gmail", "gdrive"].map((id) => [id, connected.has(id)
+            ? { connected: true, account_id: id + "-account", label: connected.get(id) }
+            : { connected: false }]),
+        ) });
+      }
+      if (connector && !callback && request.method === "POST") {
+        const body = await request.json();
+        const state = userId + "-" + connector + "-state";
+        connectors.set("pending:" + state, { userId, connector, returnTo: body.return_to });
+        return Response.json({
+          authorization_url: "https://provider.test/authorize?" + new URLSearchParams({
+            redirect_uri: body.redirect_uri,
+            state,
+          }),
+        });
+      }
+      if (connector && callback && request.method === "POST") {
+        const body = await request.json();
+        const pending = connectors.get("pending:" + body.state);
+        if (!pending || pending.userId !== userId || pending.connector !== connector) {
+          return Response.json({ error: "invalid_oauth_state" }, { status: 400 });
+        }
+        connectors.delete("pending:" + body.state);
+        if (body.error) return Response.json({ connected: false, return_to: pending.returnTo });
+        const connected = connectors.get(userId) || new Map();
+        connected.set(connector, connector === "github" ? "Nano Cat" : connector + "@example.test");
+        connectors.set(userId, connected);
+        return Response.json({ connected: true, return_to: pending.returnTo });
+      }
+      if (connector && !callback && request.method === "DELETE") {
+        connectors.get(userId)?.delete(connector);
+        return new Response(null, { status: 204 });
+      }
+      return Response.json({ error: "method_not_allowed" }, { status: 405 });
+    }
     const subjectRoute = url.pathname.match(/^\\/subjects\\/([A-Za-z0-9_-]{43,128})$/);
     if (subjectRoute && request.method === "PUT") {
       const body = await request.json();
@@ -21,6 +63,17 @@ export default {
     }
     const authorization = request.headers.get("authorization");
     const subject = request.headers.get("x-nanocodex-subject");
+    if (url.href === "https://api.github.com/repos/gakonst/nanocodex"
+      && request.method === "GET"
+      && authorization === "Bearer NANOCODEX_PROVIDER_CREDENTIAL"
+      && typeof subject === "string"
+      && subjects.has(subject)) {
+      return Response.json({
+        cookie: request.headers.get("cookie"),
+        full_name: "gakonst/nanocodex",
+        subject,
+      });
+    }
     const search = url.href === "https://nanocodex.internal/v1/search"
       && request.method === "POST"
       && authorization === "Bearer NANOCODEX_PROVIDER_CREDENTIAL"
@@ -92,8 +145,55 @@ export default {
       const imageOutput = input.find((item) => (
         item?.type === "function_call_output" && item.call_id === "managed-image"
       ));
+      const computerOutput = input.find((item) => (
+        item?.type === "function_call_output" && item.call_id === "computer-runtime"
+      ));
+      const multiplayerConnectorOutput = input.find((item) => (
+        item?.type === "function_call_output" && item.call_id === "multiplayer-no-connectors"
+      ));
       pendingResponse = setTimeout(() => {
         pendingResponse = undefined;
+        if (multiplayerConnectorOutput) {
+          const output = String(multiplayerConnectorOutput.output);
+          const valid = output.includes("MULTIPLAYER_RUNTIME_OK")
+            && output.includes("requires_login")
+            && !output.includes("gakonst/nanocodex");
+          server.send(JSON.stringify({
+            type: "response.completed",
+            response: {
+              id: crypto.randomUUID(),
+              status: "completed",
+              output: [{
+                type: "message",
+                role: "assistant",
+                content: [{
+                  type: "output_text",
+                  text: valid ? "MULTIPLAYER_CONNECTORS_BLOCKED" : "MULTIPLAYER_CONNECTORS_EXPOSED",
+                }],
+              }],
+              usage: null,
+            },
+          }));
+          return;
+        }
+        if (computerOutput) {
+          const valid = String(computerOutput.output).includes("COMPUTER_RUNTIME_OK")
+            && String(computerOutput.output).includes("gakonst/nanocodex");
+          server.send(JSON.stringify({
+            type: "response.completed",
+            response: {
+              id: crypto.randomUUID(),
+              status: "completed",
+              output: [{
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: valid ? "COMPUTER_TOOLS_OK" : "COMPUTER_TOOLS_BAD" }],
+              }],
+              usage: null,
+            },
+          }));
+          return;
+        }
         if (toolOutput && imageOutput) {
           const valid = String(toolOutput.output).includes("MANAGED_WEB_SEARCH_OK")
             && String(imageOutput.output).includes("TUFOQUdFRF9JTUFHRV9PSw==");
@@ -128,6 +228,44 @@ export default {
                 call_id: "managed-image",
                 name: "image_gen__imagegen",
                 arguments: JSON.stringify({ prompt: "draw managed" }),
+              }],
+              usage: null,
+            },
+          }));
+          return;
+        }
+        if (text.includes("E2E_COMPUTER_RUNTIME")) {
+          server.send(JSON.stringify({
+            type: "response.completed",
+            response: {
+              id: crypto.randomUUID(),
+              status: "completed",
+              output: [{
+                type: "function_call",
+                call_id: "computer-runtime",
+                name: "exec_command",
+                arguments: JSON.stringify({
+                  cmd: "printf 'COMPUTER_RUNTIME_OK\\n' > /workspace/computer.txt && cat /workspace/computer.txt && gh api repos/gakonst/nanocodex | jq -r .full_name",
+                }),
+              }],
+              usage: null,
+            },
+          }));
+          return;
+        }
+        if (text.includes("E2E_MULTIPLAYER_NO_CONNECTORS")) {
+          server.send(JSON.stringify({
+            type: "response.completed",
+            response: {
+              id: crypto.randomUUID(),
+              status: "completed",
+              output: [{
+                type: "function_call",
+                call_id: "multiplayer-no-connectors",
+                name: "exec_command",
+                arguments: JSON.stringify({
+                  cmd: "printf 'MULTIPLAYER_RUNTIME_OK\\n' > /workspace/multiplayer.txt; cat /workspace/multiplayer.txt; gh api repos/gakonst/nanocodex",
+                }),
               }],
               usage: null,
             },

@@ -248,7 +248,7 @@ function managedConfig() {
     name: managedName,
     main: resolve(workersRoot, "src/index.ts"),
     compatibility_date: "2026-07-29",
-    compatibility_flags: ["nodejs_compat"],
+    compatibility_flags: ["nodejs_compat", "global_fetch_strictly_public"],
     workers_dev: false,
     minify: true,
     rules: [{ type: "CompiledWasm", globs: ["**/*.wasm"], fallthrough: true }],

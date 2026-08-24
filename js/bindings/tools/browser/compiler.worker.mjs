@@ -1,10 +1,19 @@
 /// <reference lib="webworker" />
 import { API } from "@eduoj/wasm-clang";
+import { installBrowserEgressFetch } from "./browserEgress.mjs";
 let apiPromise;
+let workerFetch;
 let diagnostics = "";
 const knownDirectories = new Set();
 self.addEventListener("message", (event) => {
     const message = event.data;
+    if (message.type === "initialize") {
+        workerFetch = installBrowserEgressFetch({
+            ...message.egress,
+            fetch: globalThis.fetch,
+        });
+        return;
+    }
     if (message.type !== "compile" || typeof message.id !== "number")
         return;
     void compile(message.id, message.input);
@@ -61,16 +70,18 @@ async function compile(id, input) {
 }
 async function runtime() {
     if (!apiPromise) {
+        if (!workerFetch)
+            throw new Error("compiler worker egress was not initialized");
         apiPromise = Promise.resolve(new API({
             hostWrite: (message) => diagnostics += message,
             readBuffer: async (url) => {
-                const response = await fetch(url);
+                const response = await workerFetch(url);
                 if (!response.ok)
                     throw new Error(`compiler asset failed: HTTP ${response.status}`);
                 return response.arrayBuffer();
             },
             compileStreaming: async (url) => {
-                const response = await fetch(url);
+                const response = await workerFetch(url);
                 if (!response.ok)
                     throw new Error(`compiler asset failed: HTTP ${response.status}`);
                 return WebAssembly.compile(await response.arrayBuffer());

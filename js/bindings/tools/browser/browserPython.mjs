@@ -1,11 +1,13 @@
 import { defineCommand, } from "just-bash/browser";
 export class BrowserPythonRuntime {
     #workspaceRoot;
+    #egress;
     #worker;
     #nextId = 1;
     #queue = Promise.resolve();
-    constructor(workspaceRoot) {
+    constructor(workspaceRoot, egress) {
         this.#workspaceRoot = workspaceRoot;
+        this.#egress = egress;
     }
     execute(input, signal) {
         const run = this.#queue.then(() => this.#run(input, signal));
@@ -54,7 +56,11 @@ export class BrowserPythonRuntime {
     }
     #createWorker() {
         const worker = new Worker(new URL("./python.worker.mjs", import.meta.url), { type: "module" });
-        worker.postMessage({ type: "initialize", workspaceRoot: this.#workspaceRoot });
+        worker.postMessage({
+            type: "initialize",
+            workspaceRoot: this.#workspaceRoot,
+            egress: this.#egress,
+        });
         this.#worker = worker;
         return worker;
     }

@@ -57,11 +57,51 @@ credential/cookie fields, but a WebSocket peer necessarily controls its frames;
 bind the broker only to the owned managed Worker and use only an audited relay
 that cannot reflect injected credentials.
 
-All API keys, ChatGPT access/refresh state, device-login state, and refresh
-markers are AES-256-GCM encrypted before Durable Object storage. Production
+All API keys, ChatGPT access/refresh state, device-login state, connector
+access/refresh tokens, PKCE verifiers, OAuth state, and refresh markers are
+AES-256-GCM encrypted before Durable Object storage. Production
 requires `CREDENTIAL_ENCRYPTION_KEY`; `CREDENTIAL_ENCRYPTION_KEY_PREVIOUS`
 supports online key rotation. Status and control responses never return an API
 key, access token, refresh token, device auth ID, verifier, or challenge.
+
+## Account connectors
+
+The account profile supports GitHub, Gmail, and Google Drive authorization.
+The browser starts an account-authenticated flow and receives only the fixed
+provider authorization URL. The private per-user connector Durable Object owns
+PKCE/state validation, code exchange, identity lookup, encrypted token storage,
+and disconnect. OAuth callbacks return only a relative profile destination and
+connection result through the managed Worker.
+
+Register these exact callbacks on the provider applications, replacing the
+origin with the deployed website origin:
+
+```text
+https://<origin>/v1/connectors/github/callback
+https://<origin>/v1/connectors/gmail/callback
+https://<origin>/v1/connectors/gdrive/callback
+```
+
+For the canonical local stack, register the corresponding loopback callbacks;
+neither Portless nor a public tunnel is required:
+
+```text
+http://localhost:5173/v1/connectors/github/callback
+http://localhost:5173/v1/connectors/gmail/callback
+http://localhost:5173/v1/connectors/gdrive/callback
+```
+
+Google Web clients require every loopback URI to match exactly, including the
+scheme, host, port, and path. Keep GitHub wildcard callback matching disabled.
+
+GitHub requests only the classic `repo` and `workflow` OAuth scopes for cloning,
+pushing, repository API work, and workflow-file updates. It does not request
+organization administration, account administration, package management, or
+repository deletion. Gmail requests
+`https://mail.google.com/`, and Drive requests full `drive` access. These grants
+permit destructive writes but never exceed the authorizing user's own provider
+permissions. The Google scopes are restricted and require the corresponding
+verification and data-handling review for a public production application.
 
 ## Validation and deployment
 
@@ -70,7 +110,12 @@ npm ci
 npm run check
 ```
 
-Production deployment accepts only the encryption key and private readiness
-probe token. Provider credentials are provisioned per user through the private
-control API after authentication; there is no deployment-global provider mode
-or provider bootstrap.
+Production deployment accepts the encryption key, private readiness probe
+token, and the GitHub/Google OAuth application client IDs and secrets. The
+deployment input names are `NANOCODEX_GITHUB_OAUTH_CLIENT_ID`,
+`NANOCODEX_GITHUB_OAUTH_CLIENT_SECRET`, `NANOCODEX_GOOGLE_OAUTH_CLIENT_ID`, and
+`NANOCODEX_GOOGLE_OAUTH_CLIENT_SECRET`; the deployment script maps them to the
+private Worker bindings and strips them from child-process environments. User
+provider credentials are still provisioned per account only after interactive
+authorization; no user token or deployment-global provider credential reaches
+the browser or managed Worker.

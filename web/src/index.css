@@ -487,6 +487,39 @@ svg {
   font-size: 9px;
 }
 
+.profile-connectors {
+  border-bottom: 1px solid var(--border-soft);
+}
+
+.profile-connectors--locked .connector-row {
+  opacity: 0.55;
+}
+
+.connector-row > div {
+  min-width: 0;
+}
+
+.connector-row span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.connector-result {
+  padding: 9px 10px;
+  color: var(--positive);
+  font-size: 10px;
+  background: color-mix(in srgb, var(--positive) 8%, transparent);
+  border: 1px solid color-mix(in srgb, var(--positive) 30%, var(--border-soft));
+}
+
+.connector-result--cancelled,
+.connector-result--failed {
+  color: var(--negative);
+  background: color-mix(in srgb, var(--negative) 8%, transparent);
+  border-color: color-mix(in srgb, var(--negative) 30%, var(--border-soft));
+}
+
 .new-api-key > a {
   width: fit-content;
   color: var(--text);
@@ -3788,6 +3821,19 @@ html[data-theme="dark"] .tui-syntax .shiki span {
   .header-install-trigger,
   .header-install-menu button {
     min-height: 44px;
+  }
+
+  .account-panel button,
+  .account-panel input {
+    min-height: 44px;
+  }
+
+  .account-panel input {
+    font-size: 16px;
+  }
+
+  .account-panel-header > button {
+    width: 44px;
   }
 
   .surface-switch a {

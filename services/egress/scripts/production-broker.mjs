@@ -11,6 +11,14 @@ export function productionBrokerSecrets(environment) {
     "NANOCODEX_CREDENTIAL_ENCRYPTION_KEY");
   const probeToken = required(environment.NANOCODEX_BROKER_PROBE_TOKEN,
     "NANOCODEX_BROKER_PROBE_TOKEN");
+  const githubClientId = required(environment.NANOCODEX_GITHUB_OAUTH_CLIENT_ID,
+    "NANOCODEX_GITHUB_OAUTH_CLIENT_ID");
+  const githubClientSecret = required(environment.NANOCODEX_GITHUB_OAUTH_CLIENT_SECRET,
+    "NANOCODEX_GITHUB_OAUTH_CLIENT_SECRET");
+  const googleClientId = required(environment.NANOCODEX_GOOGLE_OAUTH_CLIENT_ID,
+    "NANOCODEX_GOOGLE_OAUTH_CLIENT_ID");
+  const googleClientSecret = required(environment.NANOCODEX_GOOGLE_OAUTH_CLIENT_SECRET,
+    "NANOCODEX_GOOGLE_OAUTH_CLIENT_SECRET");
   if (!/^[A-Za-z0-9_-]{43}$/.test(encryptionKey)) {
     throw new Error("NANOCODEX_CREDENTIAL_ENCRYPTION_KEY must be a 32-byte base64url value");
   }
@@ -20,6 +28,10 @@ export function productionBrokerSecrets(environment) {
   const secrets = {
     CREDENTIAL_ENCRYPTION_KEY: encryptionKey,
     NANOCODEX_BROKER_PROBE_TOKEN: probeToken,
+    GITHUB_OAUTH_CLIENT_ID: githubClientId,
+    GITHUB_OAUTH_CLIENT_SECRET: githubClientSecret,
+    GOOGLE_OAUTH_CLIENT_ID: googleClientId,
+    GOOGLE_OAUTH_CLIENT_SECRET: googleClientSecret,
   };
   const previousEncryptionKey = environment.NANOCODEX_CREDENTIAL_ENCRYPTION_KEY_PREVIOUS;
   if (previousEncryptionKey !== undefined) {
@@ -55,6 +67,10 @@ export function brokerWranglerEnvironment(environment, accountId, apiToken) {
     "NANOCODEX_CREDENTIAL_ENCRYPTION_KEY",
     "NANOCODEX_CREDENTIAL_ENCRYPTION_KEY_PREVIOUS",
     "NANOCODEX_BROKER_PROBE_TOKEN",
+    "NANOCODEX_GITHUB_OAUTH_CLIENT_ID",
+    "NANOCODEX_GITHUB_OAUTH_CLIENT_SECRET",
+    "NANOCODEX_GOOGLE_OAUTH_CLIENT_ID",
+    "NANOCODEX_GOOGLE_OAUTH_CLIENT_SECRET",
   ]) delete clean[name];
   clean.CLOUDFLARE_ACCOUNT_ID = accountId;
   if (apiToken) clean.CLOUDFLARE_API_TOKEN = apiToken;
@@ -68,6 +84,8 @@ export function buildProductionBrokerConfig(base, { mainPath }) {
       && binding.class_name === "UserCredentialBroker")
     || !bindings.some((binding) => binding.name === "AGENT_SUBJECTS"
       && binding.class_name === "AgentSubjectDirectory")
+    || !bindings.some((binding) => binding.name === "USER_CONNECTORS"
+      && binding.class_name === "UserConnectorBroker")
     || !bindings.some((binding) => binding.name === "CHATGPT_EGRESS"
       && binding.class_name === "ChatGptEgress"
       && binding.script_name === "nanocodex")) {
@@ -75,10 +93,12 @@ export function buildProductionBrokerConfig(base, { mainPath }) {
   }
   const creates = base.migrations?.find((migration) => migration.tag === "v2");
   const deletes = base.migrations?.find((migration) => migration.tag === "v3");
+  const connectorCreates = base.migrations?.find((migration) => migration.tag === "v4");
   if (!creates?.new_sqlite_classes?.includes("UserCredentialBroker")
     || !creates.new_sqlite_classes.includes("AgentSubjectDirectory")
-    || !deletes?.deleted_classes?.includes("CodexOAuthBroker")) {
-    throw new Error("production broker requires the current v2/v3 DO migration chain");
+    || !deletes?.deleted_classes?.includes("CodexOAuthBroker")
+    || !connectorCreates?.new_sqlite_classes?.includes("UserConnectorBroker")) {
+    throw new Error("production broker requires the current v2/v3/v4 DO migration chain");
   }
   return {
     ...base,

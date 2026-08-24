@@ -131,7 +131,12 @@ export default {
     if (gitResponse != null) return gitResponse;
     const threadGitResponse = await handleThreadGitRequest(request, env, url, context);
     if (threadGitResponse != null) return threadGitResponse;
-    const mcpResponse = await proxyDefaultMcp(request, url, sameOrigin(request, url, env));
+    const mcpResponse = await proxyDefaultMcp(
+      request,
+      url,
+      sameOrigin(request, url, env),
+      env.NANOCODEX_BACKEND,
+    );
     if (mcpResponse != null) return mcpResponse;
 
     if (url.pathname === "/api/health" && request.method === "GET") {

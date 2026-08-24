@@ -99,6 +99,7 @@ export function createWorkerEvaluator(options = {}) {
       worker.postMessage({
         protocol: WORKER_PROTOCOL,
         evaluationId,
+        egress: options.egress,
         type: "evaluate",
         source,
         storedEntries: environment.storedEntries,

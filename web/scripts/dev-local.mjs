@@ -103,6 +103,19 @@ export function managedChildEnvironment(environment) {
   };
 }
 
+export function localConnectorEnvironment(environment) {
+  return definedEnvironment({
+    NANOCODEX_LOCAL_GITHUB_OAUTH_CLIENT_ID:
+      environment.NANOCODEX_GITHUB_OAUTH_CLIENT_ID ?? environment.GH_CLIENT_ID,
+    NANOCODEX_LOCAL_GITHUB_OAUTH_CLIENT_SECRET:
+      environment.NANOCODEX_GITHUB_OAUTH_CLIENT_SECRET ?? environment.GH_CLIENT_SECRETS,
+    NANOCODEX_LOCAL_GOOGLE_OAUTH_CLIENT_ID:
+      environment.NANOCODEX_GOOGLE_OAUTH_CLIENT_ID ?? environment.GOOGLE_CLIENT_ID,
+    NANOCODEX_LOCAL_GOOGLE_OAUTH_CLIENT_SECRET:
+      environment.NANOCODEX_GOOGLE_OAUTH_CLIENT_SECRET ?? environment.GOOGLE_CLIENT_SECRET,
+  });
+}
+
 export function loadRootEnvironment(path = resolve(repositoryRoot, ".env")) {
   if (rootEnvironmentLoaded) throw new Error("the root environment was already loaded");
   rootEnvironmentLoaded = true;
@@ -211,6 +224,7 @@ async function main() {
       NANOCODEX_LOCAL_CHATGPT_BOOTSTRAP: localChatGptBootstrap,
       NANOCODEX_LOCAL_CODEX_RELAY_URL: relayUrl,
       NANOCODEX_LOCAL_PUBLIC_ORIGIN: origin.origin,
+      ...localConnectorEnvironment(environment),
     });
     const webEnvironment = websiteLaunch.options.env;
     children.push(spawn(

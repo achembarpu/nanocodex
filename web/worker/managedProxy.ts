@@ -2,7 +2,11 @@ export type ManagedProxyEnv = {
   NANOCODEX_BACKEND?: Fetcher;
 };
 
-const MANAGED_ROUTE = /^(?:\/auth(?:\/.*)?|\/webauthn\/.*|\/v1\/(?:me|api-keys(?:\/.*)?|credentials(?:\/.*)?|agents(?:\/.*)?|rooms(?:\/.*)?))$/;
+const MANAGED_ROUTE = /^(?:\/auth(?:\/.*)?|\/webauthn\/.*|\/v1\/(?:me|egress|api-keys(?:\/.*)?|credentials(?:\/.*)?|connectors(?:\/.*)?|agents(?:\/.*)?|rooms(?:\/.*)?))$/;
+
+export function isManagedRoutePath(pathname: string): boolean {
+  return MANAGED_ROUTE.test(pathname);
+}
 
 /**
  * Projects the private managed service onto the website origin.
@@ -17,7 +21,7 @@ export async function routeManaged(
   env: ManagedProxyEnv,
   url: URL,
 ): Promise<Response | undefined> {
-  if (!MANAGED_ROUTE.test(url.pathname)) return undefined;
+  if (!isManagedRoutePath(url.pathname)) return undefined;
   if (!env.NANOCODEX_BACKEND) {
     return json({ error: "managed_service_unavailable" }, { status: 503 });
   }

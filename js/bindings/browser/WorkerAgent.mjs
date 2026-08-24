@@ -1168,6 +1168,10 @@ async function hydrateConfig(config, createDurabilityStore) {
     options.durabilityId = workerDurabilityId;
   }
   if (runtime) {
+    const { createWorkerEvaluator } = await import("../runtime/worker-evaluator.mjs");
+    options.codeEvaluator = createWorkerEvaluator({
+      egress: { origin: harness.origin, threadId: harness.threadId },
+    });
     const now = new Date();
     const timezone = Intl.DateTimeFormat().resolvedOptions().timeZone;
     Object.assign(options, {

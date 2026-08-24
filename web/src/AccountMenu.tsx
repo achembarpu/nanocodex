@@ -8,6 +8,7 @@ import {
 } from "react";
 import { isRecord, responseFailure, useAccountSession } from "./AccountSession";
 import { deploymentHealth } from "./deploymentHealth";
+import { ProfileConnectors } from "./ProfileConnectors";
 
 type ApiKeyMetadata = Readonly<{
   id: string;
@@ -48,7 +49,7 @@ export function AccountMenu() {
   const session = useAccountSession();
   const refreshSession = session.refresh;
   const accountId = session.account?.id;
-  const [open, setOpen] = useState(false);
+  const [open, setOpen] = useState(() => new URL(window.location.href).searchParams.has("connector_result"));
   const [keys, setKeys] = useState<ApiKeyMetadata[] | null>(null);
   const [keyError, setKeyError] = useState<string | null>(null);
   const [keyOperation, setKeyOperation] = useState<string | null>(null);
@@ -346,10 +347,10 @@ export function AccountMenu() {
         <span>{accountLabel}</span>
       </button>
       {open && session.status !== "checking" ? (
-        <section className="account-panel" aria-label="Nanocodex account">
+        <section className="account-panel" aria-label="Nanocodex profile">
           <header className="account-panel-header">
             <div>
-              <span>Nanocodex account</span>
+              <span>Profile</span>
               {session.account ? <strong>{session.account.persistent
                 ? shortIdentity(session.account.id)
                 : "This browser"}</strong> : null}
@@ -402,6 +403,13 @@ export function AccountMenu() {
                   </button>
                 </div>
               ) : null}
+
+              <ProfileConnectors
+                accountId={session.account.id}
+                key={session.account.id}
+                requiresLogin={!session.account.persistent}
+                refreshSession={refreshSession}
+              />
 
               {credentials ? (
                 <section className="api-key-panel account-connections" aria-labelledby="connections-heading">

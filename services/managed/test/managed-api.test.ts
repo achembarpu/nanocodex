@@ -24,6 +24,119 @@ afterEach(async () => {
 });
 
 describe("managed agents REST and resumable SSE", () => {
+  it("keeps connector OAuth state and credentials behind a persistent account", async () => {
+    const session = await RAW_SELF.fetch("https://example.test/v1/me");
+    const anonymousCookie = session.headers.get("set-cookie")?.split(";", 1)[0];
+    expect(anonymousCookie).toMatch(/^nanocodex_account=a_[A-Za-z0-9_-]{43}$/);
+
+    const anonymous = await RAW_SELF.fetch("https://example.test/v1/connectors", {
+      headers: { cookie: anonymousCookie! },
+    });
+    expect(anonymous.status).toBe(401);
+    expect(await anonymous.json()).toEqual({ error: "unauthorized" });
+
+    const connectorUserId = "55555555-5555-4555-8555-555555555555";
+    const connectorToken = "c".repeat(43);
+    await seedPasskeySession(connectorUserId, connectorToken);
+    const cookie = `nanocodex_account=${connectorToken}`;
+
+    const initial = await RAW_SELF.fetch("https://example.test/v1/connectors", {
+      headers: { cookie },
+    });
+    expect(initial.status).toBe(200);
+    expect(await initial.json()).toMatchObject({
+      connectors: {
+        github: { connected: false },
+        gmail: { connected: false },
+        gdrive: { connected: false },
+      },
+    });
+
+    const missingOrigin = await RAW_SELF.fetch("https://example.test/v1/connectors/github", {
+      method: "POST",
+      headers: { cookie, "content-type": "application/json" },
+      body: JSON.stringify({ return_to: "/agent" }),
+    });
+    expect(missingOrigin.status).toBe(403);
+
+    const started = await RAW_SELF.fetch("https://example.test/v1/connectors/github", {
+      method: "POST",
+      headers: {
+        cookie,
+        "content-type": "application/json",
+        origin: "https://example.test",
+      },
+      body: JSON.stringify({ return_to: "/agent?thread=connector" }),
+    });
+    expect(started.status).toBe(200);
+    const authorization = new URL((await started.json<{ authorization_url: string }>()).authorization_url);
+    expect(authorization.origin).toBe("https://provider.test");
+    expect(authorization.searchParams.get("redirect_uri")).toBe(
+      "https://example.test/v1/connectors/github/callback",
+    );
+
+    const callback = await RAW_SELF.fetch(
+      `https://example.test/v1/connectors/github/callback?${new URLSearchParams({
+        code: "authorization-code",
+        state: authorization.searchParams.get("state")!,
+      })}`,
+      { headers: { cookie }, redirect: "manual" },
+    );
+    expect(callback.status).toBe(303);
+    expect(callback.headers.get("location")).toBe(
+      "https://example.test/agent?thread=connector&connector=github&connector_result=connected",
+    );
+
+    const connected = await RAW_SELF.fetch("https://example.test/v1/connectors", {
+      headers: { cookie },
+    });
+    expect(await connected.json()).toMatchObject({
+      connectors: { github: { connected: true, label: "Nano Cat" } },
+    });
+
+    const egressEnvelope = JSON.stringify({
+      thread_id: "77777777-7777-4777-8777-777777777777",
+      url: "https://api.github.com/repos/gakonst/nanocodex",
+      method: "GET",
+      headers: { accept: "application/json" },
+    });
+    const crossOriginRead = await RAW_SELF.fetch("https://example.test/v1/egress", {
+      method: "POST",
+      headers: { cookie, origin: "https://attacker.test", "content-type": "application/json" },
+      body: egressEnvelope,
+    });
+    expect(crossOriginRead.status).toBe(403);
+
+    const githubRead = await RAW_SELF.fetch("https://example.test/v1/egress", {
+      method: "POST",
+      headers: { cookie, origin: "https://example.test", "content-type": "application/json" },
+      body: egressEnvelope,
+    });
+    expect(githubRead.status).toBe(200);
+    expect(githubRead.headers.get("cache-control")).toBe("no-store");
+    expect(await githubRead.json()).toMatchObject({
+      cookie: null,
+      full_name: "gakonst/nanocodex",
+      subject: expect.stringMatching(/^[A-Za-z0-9_-]{43}$/),
+    });
+
+    const deniedDestination = await RAW_SELF.fetch("https://example.test/v1/egress", {
+      method: "POST",
+      headers: { cookie, origin: "https://example.test", "content-type": "application/json" },
+      body: JSON.stringify({
+        thread_id: "77777777-7777-4777-8777-777777777777",
+        url: "http://127.0.0.1/private",
+      }),
+    });
+    expect(deniedDestination.status).toBe(403);
+
+    const disconnected = await RAW_SELF.fetch("https://example.test/v1/connectors/github", {
+      method: "DELETE",
+      headers: { cookie, origin: "https://example.test" },
+    });
+    expect(disconnected.status).toBe(204);
+  });
+
   it("bootstraps one browser identity and binds passkey options to it", async () => {
     const first = await RAW_SELF.fetch("https://example.test/v1/me");
     expect(first.status).toBe(200);
@@ -201,6 +314,27 @@ describe("managed agents REST and resumable SSE", () => {
     expect(event.data).toMatchObject({
       id: "turn-managed-web",
       final_message: "MANAGED_WEB_OK",
+      type: "turn_completed",
+    });
+    await events.cancel();
+  });
+
+  it("runs the normal tool composition through durable in-process Just Bash", async () => {
+    const agent = await createAgent();
+    const accepted = await submit(agent, "turn-computer-runtime", "E2E_COMPUTER_RUNTIME");
+    const events = sseReader(await SELF.fetch(
+      `${agent.events_url}?cursor=${accepted.accepted_cursor}`,
+    ));
+    let event;
+    const observed: unknown[] = [];
+    do {
+      event = await nextWithin(events, "Computer runtime tool completion");
+      observed.push(event.data);
+    } while (event.data.type !== "turn_completed");
+    expect(JSON.stringify(observed)).toContain("COMPUTER_RUNTIME_OK");
+    expect(event.data).toMatchObject({
+      id: "turn-computer-runtime",
+      final_message: "COMPUTER_TOOLS_OK",
       type: "turn_completed",
     });
     await events.cancel();

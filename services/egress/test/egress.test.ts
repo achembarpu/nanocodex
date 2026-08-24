@@ -1,8 +1,9 @@
 import { env } from "cloudflare:workers";
 import { runInDurableObject, SELF } from "cloudflare:test";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import type { AgentSubjectDirectory, UserCredentialBroker } from "../src/broker";
+import type { UserConnectorBroker } from "../src/connector-broker";
 import { handleEgress, type EgressEnv } from "../src/egress";
 
 const workerEnv = env as unknown as EgressEnv;
@@ -307,11 +308,286 @@ describe("per-user credential broker", () => {
   });
 });
 
+describe("per-user OAuth connectors", () => {
+  for (const connector of ["github", "gmail", "gdrive"] as const) {
+    it(`completes ${connector} authorization without returning provider credentials`, async () => {
+      const user = `connector-${connector}`;
+      const started = await control(`/users/${user}/connectors/${connector}`, "POST", {
+        redirect_uri: `https://nanocodex.test/v1/connectors/${connector}/callback`,
+        return_to: "/agent?thread=connector-test",
+      });
+      expect(started.status).toBe(200);
+      const startBody = await started.json<{ authorization_url: string }>();
+      const authorization = new URL(startBody.authorization_url);
+      expect(authorization.protocol).toBe("https:");
+      expect(authorization.searchParams.get("state")).toMatch(/^[A-Za-z0-9_-]{43}$/);
+      expect(authorization.searchParams.get("code_challenge_method")).toBe("S256");
+      expect(JSON.stringify(startBody)).not.toContain("client-secret");
+
+      const completed = await control(`/users/${user}/connectors/${connector}/callback`, "POST", {
+        code: connector === "gdrive" ? "gdrive-code" : `${connector}-code`,
+        state: authorization.searchParams.get("state"),
+      });
+      expect(completed.status).toBe(200);
+      expect(await completed.json()).toEqual({
+        connected: true,
+        return_to: "/agent?thread=connector-test",
+      });
+
+      const status = await SELF.fetch(`https://broker.test/users/${user}/connectors`);
+      expect(status.status).toBe(200);
+      const publicStatus = await status.json<Record<string, unknown>>();
+      expect(publicStatus).toMatchObject({
+        connectors: { [connector]: { connected: true } },
+      });
+      for (const secret of ["connector-access", "connector-refresh", "client-secret"]) {
+        expect(JSON.stringify(publicStatus)).not.toContain(secret);
+      }
+    });
+  }
+
+  it("encrypts tokens, refresh tokens, PKCE verifiers, and OAuth state at rest", async () => {
+    const stub = workerEnv.USER_CONNECTORS.getByName("connector-gdrive");
+    await runInDurableObject(stub, async (_instance: UserConnectorBroker, state) => {
+      const row = await state.storage.get("connector-state");
+      const encoded = JSON.stringify(row);
+      for (const forbidden of [
+        "gdrive-connector-access",
+        "gdrive-connector-refresh",
+        "connector-test",
+      ]) expect(encoded).not.toContain(forbidden);
+      expect(encoded).toContain("ciphertext");
+    });
+  });
+
+  it("consumes state once and preserves the existing connection on replay", async () => {
+    const started = await control("/users/connector-replay/connectors/github", "POST", {
+      redirect_uri: "https://nanocodex.test/v1/connectors/github/callback",
+      return_to: "/",
+    });
+    const authorization = new URL((await started.json<{ authorization_url: string }>()).authorization_url);
+    const callback = {
+      code: "github-code",
+      state: authorization.searchParams.get("state"),
+    };
+    expect((await control(
+      "/users/connector-replay/connectors/github/callback",
+      "POST",
+      callback,
+    )).status).toBe(200);
+    const replay = await control(
+      "/users/connector-replay/connectors/github/callback",
+      "POST",
+      callback,
+    );
+    expect(replay.status).toBe(400);
+    expect(await replay.json()).toEqual({ error: "invalid_oauth_state" });
+  });
+});
+
+describe("private connector data plane", () => {
+  it("forwards provider reads and writes with server-side credentials", async () => {
+    const subject = "P".repeat(43);
+    const user = "connector-data-plane";
+    await control(`/subjects/${subject}`, "PUT", { user_id: user });
+    for (const connector of ["github", "gmail", "gdrive"] as const) {
+      await connect(user, connector, connector === "gdrive" ? "gdrive-code" : `${connector}-code`);
+    }
+
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    const errorLog = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      for (const url of [
+        "https://api.github.com/repos/nanocodex/sdk?per_page=1",
+        "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=1",
+        "https://www.googleapis.com/drive/v3/files?pageSize=1",
+      ]) {
+        const response = await SELF.fetch(connectorRequest(url, subject));
+        expect(response.status).toBe(200);
+        expect(response.headers.get("authorization")).toBeNull();
+        expect(response.headers.get("set-cookie")).toBeNull();
+        const body = await response.json<Record<string, unknown>>();
+        expect(body).toMatchObject({
+          caller_cookie: false,
+          caller_proxy_credential: false,
+          subject: null,
+        });
+        expect(JSON.stringify(body)).not.toContain("connector-access");
+      }
+      const write = await SELF.fetch(connectorRequest(
+        "https://www.googleapis.com/upload/drive/v3/files?uploadType=media",
+        subject,
+        { method: "POST", body: "unbounded-provider-write" },
+      ));
+      expect(write.status).toBe(200);
+      expect(await write.json()).toMatchObject({
+        method: "POST",
+        body: "unbounded-provider-write",
+      });
+      expect(log.mock.calls.flat().join(" ")).not.toMatch(
+        /connector-access|connector-refresh|NANOCODEX_PROVIDER_CREDENTIAL/,
+      );
+      expect(errorLog.mock.calls.flat().join(" ")).not.toMatch(
+        /connector-access|connector-refresh|NANOCODEX_PROVIDER_CREDENTIAL/,
+      );
+    } finally {
+      log.mockRestore();
+      errorLog.mockRestore();
+    }
+  });
+
+  it("denies lookalike origins, cross-account Google paths, missing subjects, and bad placeholders", async () => {
+    const subject = "Q".repeat(43);
+    await control(`/subjects/${subject}`, "PUT", { user_id: "connector-denials" });
+    await connect("connector-denials", "github", "github-code");
+    const denied = [
+      connectorRequest("http://api.github.com/repos/nanocodex/sdk", subject),
+      connectorRequest("https://api.github.com.evil.test/repos/nanocodex/sdk", subject),
+      connectorRequest("https://api.github.com:444/repos/nanocodex/sdk", subject),
+      connectorRequest("https://github.com/repos/nanocodex/sdk", subject),
+      connectorRequest("https://gmail.googleapis.com/gmail/v1/users/other/messages", subject),
+      connectorRequest("https://www.googleapis.com/oauth2/v3/userinfo", subject),
+      connectorRequest("https://api.github.com/repos/nanocodex/sdk?access_token=caller", subject),
+      connectorRequest("https://api.github.com/repos/nanocodex/sdk", ""),
+      connectorRequest("https://api.github.com/repos/nanocodex/sdk", subject, {
+        authorization: "Bearer caller-secret",
+      }),
+    ];
+    for (const request of denied) expect((await SELF.fetch(request)).status).toBe(403);
+  });
+
+  it("enforces the same origin and Google account path policy inside the user broker", async () => {
+    const user = "connector-direct-broker";
+    await connect(user, "github", "github-code");
+    const broker = workerEnv.USER_CONNECTORS.getByName(user);
+    for (const request of [
+      new Request("https://api.github.com.evil.test/repos/nanocodex/sdk"),
+      new Request("https://gmail.googleapis.com/gmail/v1/users/other/messages"),
+      new Request("https://evil.test/v1/status"),
+    ]) expect((await broker.fetch(request)).status).toBe(403);
+  });
+
+  it("keeps connector selection scoped to the subject's owning user", async () => {
+    const alphaSubject = "A".repeat(44);
+    const betaSubject = "B".repeat(44);
+    await control(`/subjects/${alphaSubject}`, "PUT", { user_id: "connector-alpha" });
+    await control(`/subjects/${betaSubject}`, "PUT", { user_id: "connector-beta" });
+    await connect("connector-alpha", "github", "alpha-code");
+    await connect("connector-beta", "github", "beta-code");
+
+    const url = "https://api.github.com/repos/nanocodex/sdk";
+    expect(await (await SELF.fetch(connectorRequest(url, alphaSubject))).json()).toMatchObject({
+      account: "alpha",
+    });
+    expect(await (await SELF.fetch(connectorRequest(url, betaSubject))).json()).toMatchObject({
+      account: "beta",
+    });
+    expect((await SELF.fetch(connectorRequest(url, "Z".repeat(43)))).status).toBe(403);
+  });
+
+  it("rejects disconnected connectors and upstream credential projection", async () => {
+    const subject = "C".repeat(43);
+    const user = "connector-unavailable";
+    await control(`/subjects/${subject}`, "PUT", { user_id: user });
+    expect((await SELF.fetch(connectorRequest(
+      "https://api.github.com/repos/nanocodex/sdk",
+      subject,
+    ))).status).toBe(409);
+    await connect(user, "github", "github-code");
+    const reflected = await SELF.fetch(connectorRequest(
+      "https://api.github.com/repos/nanocodex/sdk?reflect_credential=1",
+      subject,
+    ));
+    expect(reflected.status).toBe(502);
+    expect(await reflected.json()).toEqual({ error: "credential_projection_blocked" });
+
+    const redirected = await SELF.fetch(connectorRequest(
+      "https://api.github.com/repos/nanocodex/sdk?redirect=1",
+      subject,
+    ));
+    expect(redirected.status).toBe(502);
+    expect(await redirected.json()).toEqual({ error: "connector_redirect_blocked" });
+
+    const oversized = await SELF.fetch(connectorRequest(
+      "https://api.github.com/repos/nanocodex/sdk?oversize=1",
+      subject,
+    ));
+    expect(oversized.status).toBe(502);
+    expect(await oversized.json()).toEqual({ error: "connector_response_too_large" });
+  });
+
+  it("rejects expired and unrefreshable connector credentials", async () => {
+    const githubSubject = "E".repeat(43);
+    const gmailSubject = "U".repeat(43);
+    await control(`/subjects/${githubSubject}`, "PUT", { user_id: "connector-expired" });
+    await control(`/subjects/${gmailSubject}`, "PUT", { user_id: "connector-unrefreshable" });
+    await connect("connector-expired", "github", "expired-code");
+    await connect("connector-unrefreshable", "gmail", "gmail-no-refresh-code");
+    expect((await SELF.fetch(connectorRequest(
+      "https://api.github.com/repos/nanocodex/sdk",
+      githubSubject,
+    ))).status).toBe(409);
+    expect((await SELF.fetch(connectorRequest(
+      "https://gmail.googleapis.com/gmail/v1/users/me/messages",
+      gmailSubject,
+    ))).status).toBe(409);
+  });
+
+  it("refreshes an expired Google connector entirely inside the user broker", async () => {
+    const subject = "F".repeat(43);
+    const user = "connector-refresh";
+    await control(`/subjects/${subject}`, "PUT", { user_id: user });
+    await connect(user, "gmail", "gmail-expiring-code");
+    const response = await SELF.fetch(connectorRequest(
+      "https://gmail.googleapis.com/gmail/v1/users/me/messages?maxResults=1",
+      subject,
+    ));
+    expect(response.status).toBe(200);
+    expect(await response.json()).toMatchObject({ account: "gmail-refreshed" });
+  });
+});
+
 function control(path: string, method: string, body: Record<string, unknown>): Promise<Response> {
   return SELF.fetch(`https://broker.test${path}`, {
     method,
     headers: { "content-type": "application/json" },
     body: JSON.stringify(body),
+  });
+}
+
+async function connect(
+  user: string,
+  connector: "github" | "gmail" | "gdrive",
+  code: string,
+): Promise<void> {
+  const started = await control(`/users/${user}/connectors/${connector}`, "POST", {
+    redirect_uri: `https://nanocodex.test/v1/connectors/${connector}/callback`,
+    return_to: "/",
+  });
+  expect(started.status).toBe(200);
+  const authorization = new URL((await started.json<{ authorization_url: string }>()).authorization_url);
+  const completed = await control(`/users/${user}/connectors/${connector}/callback`, "POST", {
+    code,
+    state: authorization.searchParams.get("state"),
+  });
+  expect(completed.status).toBe(200);
+}
+
+function connectorRequest(
+  url: string,
+  subject: string,
+  override: Readonly<{ method?: string; authorization?: string; body?: string }> = {},
+): Request {
+  return new Request(url, {
+    method: override.method ?? "GET",
+    headers: {
+      authorization: override.authorization ?? "Bearer NANOCODEX_PROVIDER_CREDENTIAL",
+      cookie: "caller-secret=cookie",
+      "proxy-authorization": "Basic caller-proxy-secret",
+      ...(subject ? { "x-nanocodex-subject": subject } : {}),
+      ...(override.body === undefined ? {} : { "content-type": "application/octet-stream" }),
+    },
+    ...(override.body === undefined ? {} : { body: override.body }),
   });
 }
 

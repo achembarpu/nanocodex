@@ -69,7 +69,7 @@ sockets.on("connection", (socket) => {
       const shell = parseToolOutput(toolOutputs, "managed-shell");
       const valid = runtime?.runtime === "cloudflare-durable-object"
         && runtime?.shell === "nanocodex-just-bash"
-        && runtime?.shell_network === "disabled"
+        && runtime?.shell_network === "connector-http-gateway"
         && shell?.exit_code === 0
         && String(shell?.output).includes("MANAGED_WORKSPACE_OK")
         && String(shell?.output).includes("/workspace");

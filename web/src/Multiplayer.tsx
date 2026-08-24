@@ -649,7 +649,7 @@ export function Multiplayer() {
             <div>
               <span>02</span>
               <h2>Agent</h2>
-              <p>One private, tool-free managed agent retains WASM history. Every room member can admit a quota-bound turn.</p>
+              <p>One private, connector-free managed agent retains WASM history. Every room member can admit a quota-bound turn.</p>
             </div>
             <div>
               <span>03</span>
@@ -776,16 +776,15 @@ export function Multiplayer() {
               <p>credential boundary</p>
               <strong>Per-user broker</strong>
             </header>
-            <h2 id="credential-boundary-title">Secretless agent</h2>
+            <h2 id="credential-boundary-title">Connectors disabled</h2>
             <p>
-              The room and WASM agent send a fixed placeholder through a private Service Binding.
-              The tool-free room profile cannot act outside chat; the broker replaces the placeholder
-              only after exact destination and header checks.
+              Shared-room tools receive no account connector capability. GitHub, Gmail, and Google
+              Drive calls fail closed for every participant, including the room owner.
             </p>
             <dl>
               <div><dt>Browser</dt><dd>room cookie</dd></div>
-              <div><dt>Agent</dt><dd>placeholder</dd></div>
-              <div><dt>Broker</dt><dd>room owner credential</dd></div>
+              <div><dt>Agent</dt><dd>public tools only</dd></div>
+              <div><dt>Broker</dt><dd>no connector grant</dd></div>
             </dl>
           </section>
         </aside>

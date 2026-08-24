@@ -40,12 +40,6 @@ import { localTerminalAgent } from "./localAgentRuntime";
 
 export type { AgentTerminalMode, AgentTerminalState } from "./agentTerminalTypes";
 
-const agentConfig = createConfig({
-  agent: {
-    mcp: browserMcpConfiguration(location.origin),
-  },
-});
-
 /** Authenticated website policy around the headless Agent SDK and app-local xterm. */
 export const AgentTerminal = memo(function AgentTerminal({
   authStatus,
@@ -64,6 +58,11 @@ export const AgentTerminal = memo(function AgentTerminal({
   theme: "light" | "dark";
   threadId: string;
 }) {
+  const agentConfig = useMemo(() => createConfig({
+    agent: {
+      mcp: browserMcpConfiguration(location.origin, threadId),
+    },
+  }), [threadId]);
   const {
     data: agent,
     error,

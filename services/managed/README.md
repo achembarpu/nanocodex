@@ -3,7 +3,8 @@
 This example runs the real Rust/WASM Nanocodex harness inside one SQLite-backed
 Durable Object per managed agent. It also provides the Multiplayer demo: one
 SQLite-backed room object coordinates many humans and owns one private managed
-agent with a tool-free room profile. A singleton quota object caps the whole
+agent with room-specific conversational instructions. Both normal and room agents use the
+same bounded tool composition. A singleton quota object caps the whole
 public demo rather than relying on per-location edge limits. Provider
 credentials live in a separate ordinary Worker from the
 [credential-broker example](../egress/README.md), never in either
@@ -11,7 +12,7 @@ object, WASM, browser state, room events, or managed-agent events.
 
 ```text
 N humans -> website proxy -> MultiplayerRoom -> private NanocodexSession
-                |                  |                    |- tool-free room profile
+                |                  |                    |- room conversational profile
                 |                  |                    |- Rust/WASM typed history
                 |                  |                    `- placeholder transport --.
                 |                  |- ordered chat + bounded replay + durable outbox |
@@ -71,18 +72,20 @@ rebuilds complete client-owned typed history from the Rust journal in SQLite. Se
 and [WebSocket hibernation](https://developers.cloudflare.com/durable-objects/best-practices/websockets/)
 documentation for the underlying behavior.
 
-The default shell has no process, container, host filesystem, PTY, or network
-access. Cloudflare Computer supplies only durable SQLite-backed files; the SDK's
-host-generic Just Bash adapter mounts that one `/workspace` handle with bounded
-commands, file sizes, output, execution time, and entry count. Symbolic links
-and every lexical or persisted path escape are rejected. This keeps the common
-agent path cheap while preserving files across agent unload and reconstruction.
+The execution boundary is Nanocodex's in-process Just Bash interpreter over the
+durable SQLite-backed Cloudflare Computer `/workspace` VFS. Computer supplies
+storage only; there is no Computer execution backend, Dynamic Worker, Worker
+Loader, container, process, sandbox, or second filesystem. Just Bash provides its core
+file/text commands and `curl`, and Nanocodex registers application-owned
+commands such as `gh` directly in the interpreter. Output, execution
+time, files, and entry counts remain bounded. A host-owned secure Fetcher sends
+public HTTP through the gateway. Private managed agents may also use exact
+connector destinations; Multiplayer agents receive no connector subject, so
+GitHub, Gmail, and Drive fail closed. Provider credentials never enter the shell.
 
-Container escalation is intentionally absent from the primary Worker graph: a
-disabled container SDK still adds megabytes of JavaScript and forces image work
-on every deployment. Applications that truly need Linux can register their own
-remote tool or deploy the retained `sandbox-tools.ts` adapter as a separate
-service. Nanocodex remains the only model and tool-loop owner either way.
+Browser-local agents continue to use OPFS. Managed and Multiplayer agents
+cannot use OPFS, while a plain in-memory filesystem would disappear on Durable
+Object eviction, so the small Computer VFS is the only retained Computer layer.
 
 ## Run locally
 
@@ -95,9 +98,8 @@ npm ci --prefix services/managed
 npm ci --prefix services/egress
 ```
 
-The default deployment has no Docker, container, Worker Loader, or R2
-requirement. Wrangler emulates the Durable Object and its Computer filesystem
-directly.
+Canonical local development does not require Docker or experimental Worker
+Loader support.
 
 For OAuth, sign in once with Codex and start the two Workers:
 
@@ -168,8 +170,9 @@ cookie (or the server-side administrator during cleanup) may delete a room.
 
 Every authenticated room member may target the shared agent; per-member and
 per-room quotas bound shared spend. Only the owner may delete the room. The
-agent profile has no shell, workspace tool, web tool, runtime-info tool, or
-subagents. Local durable limits allow six turns per member/minute and 60 room
+agent profile has the standard shell, workspace, web, image, and planning tools,
+but no account connector capability. GitHub, Gmail, and Drive return
+`requires_login` for the owner and every invitee. Local durable limits allow six turns per member/minute and 60 room
 turns/hour. A deployment-wide singleton
 adds hard ceilings of 16 active two-hour rooms, 32 allocations/hour, and 240
 agent turns/hour across Cloudflare locations. Ordinary chat is separately
@@ -342,11 +345,13 @@ forbid `eval` and `new Function`. This retains Nanocodex's typed Rust tool
 lifecycle and caller-defined handlers without shipping a JavaScript evaluator.
 Node-based consumers may continue to use Code Mode when their host permits it.
 
-Normal Durable Object agents install the standard `exec_command`, `web__run`,
-`image_gen__imagegen`, `view_image`, and `update_plan` tools. Web and image
+Normal Durable Object and Multiplayer Ask agents install the same standard
+`exec_command`, `web__run`, `image_gen__imagegen`, `view_image`, and
+`update_plan` tools. Only normal private agents attach their account connector
+subject to shell egress; Multiplayer shell egress is public-HTTP-only. Web and image
 requests go directly through the private `NANOCODEX` Service Binding with the
 agent's opaque broker subject; no provider credential or account cookie enters
-the tool runtime. Multiplayer agents remain intentionally tool-free.
+the tool runtime. Their conversational instructions remain profile-specific.
 
 ## Validate and deploy
 

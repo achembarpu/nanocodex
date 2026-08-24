@@ -161,6 +161,17 @@ export async function authenticate(
   return { kind: "api_key", userId: record.userId };
 }
 
+export async function authenticatePersistentAccount(
+  request: Request,
+  env: AccountAuthEnv,
+  url = new URL(request.url),
+): Promise<Principal | undefined> {
+  const principal = await authenticate(request, env, url);
+  if (!principal || principal.kind !== "account_session") return undefined;
+  const account = await readAccount(env, principal.userId);
+  return account?.persistent === true ? principal : undefined;
+}
+
 export function requireSameOriginMutation(
   request: Request,
   url: URL,

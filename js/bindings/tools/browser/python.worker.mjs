@@ -1,12 +1,15 @@
 /// <reference lib="webworker" />
 import { loadPyodide } from "pyodide";
+import { installBrowserEgressFetch } from "./browserEgress.mjs";
 const PYODIDE_INDEX_URL = "https://cdn.jsdelivr.net/pyodide/v314.0.5/full/";
 let workspaceRoot;
+let egress;
 let runtimePromise;
 self.addEventListener("message", (event) => {
     const message = event.data;
     if (message.type === "initialize") {
         workspaceRoot = message.workspaceRoot;
+        egress = message.egress;
         return;
     }
     if (message.type !== "execute" || typeof message.id !== "number")
@@ -77,6 +80,12 @@ async function runtime() {
         runtimePromise = (async () => {
             if (!workspaceRoot)
                 throw new Error("Python worker was not initialized");
+            if (!egress)
+                throw new Error("Python worker egress was not initialized");
+            installBrowserEgressFetch({
+                ...egress,
+                fetch: globalThis.fetch,
+            });
             const pyodide = await loadPyodide({ indexURL: PYODIDE_INDEX_URL });
             const nativeFs = await pyodide.mountNativeFS("/workspace", workspaceRoot);
             return { pyodide, nativeFs };

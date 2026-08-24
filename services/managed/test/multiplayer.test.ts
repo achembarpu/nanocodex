@@ -1522,7 +1522,7 @@ describe("durable Multiplayer rooms", () => {
     }
   }, 15_000);
 
-  it("projects one brokered managed-agent reply without leaking credentials or capabilities", async () => {
+  it("keeps Just Bash available while connector calls fail closed for the whole room", async () => {
     const owner = await createRoom("Ada");
     const bob = await joinRoom(owner, "Bob");
     const adaSocket = await connect(owner.websocket_url, owner.cookie);
@@ -1533,7 +1533,7 @@ describe("durable Multiplayer rooms", () => {
       adaSocket.send(JSON.stringify({
         type: "say",
         id: "ask-agent",
-        text: "say multiplayer works",
+        text: "E2E_MULTIPLAYER_NO_CONNECTORS",
         target: "agent",
       }));
       const human = await humanMessage;
@@ -1546,7 +1546,8 @@ describe("durable Multiplayer rooms", () => {
         reply_to: human.cursor,
       });
       const encoded = JSON.stringify(replyAda);
-      expect(encoded).toContain("ROOM_AGENT_OK");
+      expect(encoded).toContain("MULTIPLAYER_CONNECTORS_BLOCKED");
+      expect(encoded).not.toContain("MULTIPLAYER_CONNECTORS_EXPOSED");
       expect(encoded).not.toContain("test-openai-key");
       expect(encoded).not.toContain("NANOCODEX_OPENAI_API_KEY");
       expect(encoded).not.toContain("agent_id");

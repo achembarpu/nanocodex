@@ -10,6 +10,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   localDevelopmentOrigin,
+  localConnectorEnvironment,
   localDependencyRequirements,
   localStackChildOptions,
   loadRootEnvironment,
@@ -59,6 +60,21 @@ test("local web environment cannot inherit provider or Cloudflare deployment cre
   assert.deepEqual(environment, {
     PATH: "/bin",
     GIT_MIRROR_TOKEN: "ephemeral-local-token",
+  });
+});
+
+test("local connector app credentials use private auxiliary names", () => {
+  assert.deepEqual(localConnectorEnvironment({
+    GH_CLIENT_ID: "github-client",
+    GH_CLIENT_SECRETS: "github-secret",
+    GOOGLE_CLIENT_ID: "google-client",
+    GOOGLE_CLIENT_SECRET: "google-secret",
+    OPENAI_API_KEY: "must-not-project",
+  }), {
+    NANOCODEX_LOCAL_GITHUB_OAUTH_CLIENT_ID: "github-client",
+    NANOCODEX_LOCAL_GITHUB_OAUTH_CLIENT_SECRET: "github-secret",
+    NANOCODEX_LOCAL_GOOGLE_OAUTH_CLIENT_ID: "google-client",
+    NANOCODEX_LOCAL_GOOGLE_OAUTH_CLIENT_SECRET: "google-secret",
   });
 });
 

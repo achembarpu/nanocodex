@@ -23,6 +23,10 @@ function preflightEnvironment() {
     NANOCODEX_BROKER_PROBE_TOKEN_CONFIGURED: "true",
     NANOCODEX_CREDENTIAL_ENCRYPTION_KEY_CONFIGURED: "true",
     NANOCODEX_GIT_TOKEN_CONFIGURED: "true",
+    NANOCODEX_GITHUB_OAUTH_CLIENT_ID_CONFIGURED: "true",
+    NANOCODEX_GITHUB_OAUTH_CLIENT_SECRET_CONFIGURED: "true",
+    NANOCODEX_GOOGLE_OAUTH_CLIENT_ID_CONFIGURED: "true",
+    NANOCODEX_GOOGLE_OAUTH_CLIENT_SECRET_CONFIGURED: "true",
     TARGET_SHA: revision,
   };
 }
@@ -37,6 +41,10 @@ test("production preflight requires only deployment and application boundary inp
     "NANOCODEX_BROKER_PROBE_TOKEN_CONFIGURED",
     "NANOCODEX_CREDENTIAL_ENCRYPTION_KEY_CONFIGURED",
     "NANOCODEX_GIT_TOKEN_CONFIGURED",
+    "NANOCODEX_GITHUB_OAUTH_CLIENT_ID_CONFIGURED",
+    "NANOCODEX_GITHUB_OAUTH_CLIENT_SECRET_CONFIGURED",
+    "NANOCODEX_GOOGLE_OAUTH_CLIENT_ID_CONFIGURED",
+    "NANOCODEX_GOOGLE_OAUTH_CLIENT_SECRET_CONFIGURED",
   ]) {
     const missing = preflightEnvironment();
     delete missing[name];
@@ -53,6 +61,10 @@ test("production Wrangler environment excludes every secret and stale provider i
     NANOCODEX_ADMIN_TOKEN: "admin-secret",
     NANOCODEX_BROKER_PROBE_TOKEN: "probe-secret",
     NANOCODEX_CREDENTIAL_ENCRYPTION_KEY: "encryption-secret",
+    NANOCODEX_GITHUB_OAUTH_CLIENT_ID: "github-client-id",
+    NANOCODEX_GITHUB_OAUTH_CLIENT_SECRET: "github-client-secret",
+    NANOCODEX_GOOGLE_OAUTH_CLIENT_ID: "google-client-id",
+    NANOCODEX_GOOGLE_OAUTH_CLIENT_SECRET: "google-client-secret",
     NANOCODEX_MANAGED_AUTH_MODE: "chatgpt",
     NANOCODEX_MANAGED_CODEX_RELAY_URL: "relay-secret",
     OPENAI_API_KEY: "provider-secret",
@@ -70,6 +82,8 @@ test("managed production config retains the exact private six-DO topology", asyn
   const config = buildManagedProductionConfig(base, { mainPath: "/fixed/managed.ts" });
   assert.equal(config.workers_dev, false);
   assert.equal(config.main, "/fixed/managed.ts");
+  assert.deepEqual(config.compatibility_flags, ["nodejs_compat", "global_fetch_strictly_public"]);
+  assert.equal(config.worker_loaders, undefined);
   assert.deepEqual(config.services, [
     { binding: "NANOCODEX", service: "nanocodex-egress" },
   ]);
@@ -176,9 +190,13 @@ test("CI orders the credential-neutral production rollout and keeps freshness ga
   const website = workflowSection(productionJob, "Deploy the attested Cloudflare Worker", "Verify the active Worker revision");
   assert.match(broker, /secrets\.NANOCODEX_CREDENTIAL_ENCRYPTION_KEY/);
   assert.match(broker, /secrets\.NANOCODEX_BROKER_PROBE_TOKEN/);
+  assert.match(broker, /secrets\.NANOCODEX_GITHUB_OAUTH_CLIENT_ID/);
+  assert.match(broker, /secrets\.NANOCODEX_GITHUB_OAUTH_CLIENT_SECRET/);
+  assert.match(broker, /secrets\.NANOCODEX_GOOGLE_OAUTH_CLIENT_ID/);
+  assert.match(broker, /secrets\.NANOCODEX_GOOGLE_OAUTH_CLIENT_SECRET/);
   assert.match(managed, /secrets\.NANOCODEX_ADMIN_TOKEN/);
-  assert.doesNotMatch(managed, /BROKER_PROBE_TOKEN|CREDENTIAL_ENCRYPTION_KEY/);
-  assert.doesNotMatch(website, /NANOCODEX_ADMIN_TOKEN|BROKER_PROBE_TOKEN|CREDENTIAL_ENCRYPTION_KEY/);
+  assert.doesNotMatch(managed, /BROKER_PROBE_TOKEN|CREDENTIAL_ENCRYPTION_KEY|OAUTH_CLIENT/);
+  assert.doesNotMatch(website, /NANOCODEX_ADMIN_TOKEN|BROKER_PROBE_TOKEN|CREDENTIAL_ENCRYPTION_KEY|OAUTH_CLIENT/);
   assert.doesNotMatch(productionJob, /MANAGED_AUTH_MODE|MANAGED_OPENAI|MANAGED_CODEX|ROOM_ALLOCATOR|MULTIPLAYER_BACKEND/);
 });
 

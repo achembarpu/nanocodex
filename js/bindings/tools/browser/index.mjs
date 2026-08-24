@@ -1,4 +1,5 @@
 import "./browserBuffer.mjs";
+import { createBrowserEgressFetch, installBrowserEgressFetch } from "./browserEgress.mjs";
 
 const preparedBrowsers = new Map();
 
@@ -58,7 +59,12 @@ async function prepareBrowserRuntime(threadId, origin) {
     import("../standard.mjs"),
     import("../dataset.mjs"),
   ]);
-  const shell = await shellModule.prepareBrowserShell(threadId, origin);
+  const fetch = installBrowserEgressFetch({
+    origin,
+    threadId,
+  });
+  const secureFetch = createBrowserEgressFetch({ fetch, origin, threadId });
+  const shell = await shellModule.prepareBrowserShell(threadId, origin, secureFetch);
   return Object.freeze({
     origin,
     threadId,

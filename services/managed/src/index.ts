@@ -21,6 +21,10 @@ import {
 import { justBash } from "nanocodex/tools/bash";
 import { createComputerFilesystem } from "./computer-workspace";
 import {
+  createManagedGhCommand,
+  createManagedShellFetch,
+} from "./computer-shell";
+import {
   DurableEventLog,
   EventLogCapacityError,
   MAX_HISTORY_PAGE_SIZE,
@@ -59,6 +63,8 @@ import {
   routeCredentialRequest,
   unbindAgentCredential,
 } from "./credentials";
+import { routeConnectorRequest } from "./connectors";
+import { routeBrowserEgress } from "./browser-egress";
 import {
   attachAgent,
   authenticate,
@@ -179,6 +185,8 @@ const AGENT_CAPABILITIES = Object.freeze({
   live_steer: true,
   live_cancel: true,
   workspace: "cloudflare-computer",
+  shell_runtime: "just-bash",
+  shell_egress: "connector-http-gateway",
   sandbox_escalation: false,
 }) satisfies AgentCapabilities;
 
@@ -196,6 +204,10 @@ export default {
     if (account) return account;
     const credential = await routeCredentialRequest(request, env, url);
     if (credential) return credential;
+    const connector = await routeConnectorRequest(request, env, url);
+    if (connector) return connector;
+    const browserEgress = await routeBrowserEgress(request, env, url);
+    if (browserEgress) return browserEgress;
     if (request.method === "GET") {
       const asset = webAsset(url.pathname);
       if (asset) return asset;
@@ -1207,17 +1219,14 @@ export class NanocodexSession extends DurableComputerSession {
 
   async #performOwnedSessionDeletion(): Promise<void> {
     this.#deleting = true;
-    const runtimeProfile = this.#session()?.runtime_profile;
     await this.#stop(true);
     await Promise.allSettled([...this.#inFlight]);
     for (const socket of this.ctx.getWebSockets()) closeSocket(socket, 1000, "session deleted");
-    if (runtimeProfile !== "multiplayer") {
-      const workspace = await getWorkspace(this);
-      try {
-        await workspace.fs.rm("/workspace", { recursive: true, force: true });
-      } finally {
-        workspace[Symbol.dispose]();
-      }
+    const workspace = await getWorkspace(this);
+    try {
+      await workspace.fs.rm("/workspace", { recursive: true, force: true });
+    } finally {
+      workspace[Symbol.dispose]();
     }
     // A socket or admission event may have resumed while external cleanup was
     // awaited. The durable deletion marker makes those paths fail closed; close
@@ -1298,31 +1307,45 @@ export class NanocodexSession extends DurableComputerSession {
     const session = this.#session();
     if (!session) throw new Error("session is not initialized");
     const multiplayer = session.runtime_profile === "multiplayer";
-    const workspace = multiplayer ? undefined : await getWorkspace(this);
-    const filesystem = workspace ? await createComputerFilesystem(workspace) : undefined;
-    const shell = filesystem ? await justBash({
-      filesystem,
+    const workspace = await getWorkspace(this);
+    const sourceFilesystem = await createComputerFilesystem(workspace);
+    let workspaceDisposed = false;
+    const disposeWorkspace = () => {
+      if (workspaceDisposed) return;
+      workspaceDisposed = true;
+      workspace[Symbol.dispose]();
+    };
+    // Shared-room members can all admit turns. Never attach the room owner's
+    // connector capability to that shared tool runtime: provider destinations
+    // fail closed without a subject, while ordinary public HTTP remains usable.
+    const shellFetch = createManagedShellFetch(
+      this.env.NANOCODEX,
+      multiplayer ? undefined : this.ctx.id.toString(),
+    );
+    const shell = await justBash({
+      filesystem: sourceFilesystem,
       maxEntries: 2_000,
       maxOutputTokens: 10_000,
-      network: false,
-    }) : undefined;
+      fetch: shellFetch,
+      customCommands: [createManagedGhCommand(shellFetch)],
+    });
+    const execCommand = Object.freeze({ ...shell.tool, dispose: disposeWorkspace });
     let agent: CloudflareAgent.Agent;
     try {
       agent = await CloudflareAgent.create(this, {
         instructions: multiplayer
           ? [
             "You are the shared Nanocodex participant in a short-lived Multiplayer chat room.",
-            "Reply conversationally and concisely to the room message. You have no tools, shell, web access, or workspace authority.",
-            "Never claim to have performed an external action and never expose internal runtime, routing, credential, or correlation identifiers.",
+            "Reply conversationally and concisely to the room message. Use the normal Nanocodex tools when they materially help answer the room.",
+            "GitHub, Gmail, Google Drive, and other account connectors are unavailable in shared rooms.",
+            "Never claim to have performed an external action unless its tool completed successfully, and never expose internal runtime, routing, credential, or correlation identifiers.",
           ].join("\n\n")
           : [
             "You are Nanocodex running as a durable managed agent on Cloudflare Workers.",
             "Your /workspace filesystem is durable Cloudflare Computer storage backed by this agent's Durable Object.",
-            shell!.instructions,
-            "No process sandbox is attached. Bounded Just Bash is the complete local execution boundary.",
           ].join("\n\n"),
-        tools: multiplayer ? [] : [
-          shell!.tool,
+        tools: [
+          execCommand,
           web({
             url: "https://managed-tools.internal/web-search",
             fetch: managedWebFetch(this.env, this.ctx.id.toString()),
@@ -1330,9 +1353,9 @@ export class NanocodexSession extends DurableComputerSession {
           imageGeneration({
             url: "https://managed-tools.internal/image-generation",
             fetch: managedImageFetch(this.env, this.ctx.id.toString()),
-            workspace: shell!.filesystem,
+            workspace: shell.filesystem,
           }),
-          viewImage({ workspace: shell!.filesystem }),
+          viewImage({ workspace: shell.filesystem }),
           updatePlan(),
           {
             name: "runtimeInfo",
@@ -1341,15 +1364,16 @@ export class NanocodexSession extends DurableComputerSession {
             handler: () => ({
               runtime: "cloudflare-durable-object",
               shell: "nanocodex-just-bash",
-              shell_network: "disabled",
+              shell_network: multiplayer ? "public-http-only" : "connector-http-gateway",
               sandbox: "disabled",
               workspace: "/workspace",
+              custom_commands: ["gh"],
             }),
           },
         ],
       });
     } catch (error) {
-      workspace?.[Symbol.dispose]();
+      disposeWorkspace();
       throw error;
     }
     this.#events = agent.events.watch();

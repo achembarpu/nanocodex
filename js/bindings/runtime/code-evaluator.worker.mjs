@@ -1,3 +1,5 @@
+import { installBrowserEgressFetch } from "../tools/browser/browserEgress.mjs";
+
 const WORKER_PROTOCOL = "nanocodex.code-evaluator.v1";
 const pendingTools = new Map();
 const toolInvocations = [];
@@ -16,6 +18,7 @@ globalThis.onmessage = ({ data }) => {
     return;
   }
   if (data.type !== "evaluate" || evaluating) return;
+  if (data.egress) installBrowserEgressFetch(data.egress);
   evaluating = true;
   evaluationId = data.evaluationId;
   void evaluate(data).then(
