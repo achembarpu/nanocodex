@@ -5,7 +5,7 @@ import type { ManagedEvent } from "nanocodex/managed";
 import {
   createManagedConversation,
   listManagedConversations,
-  loadManagedTerminalAgent,
+  openManagedTerminalAgent,
   managedTerminalAgent,
   terminalEvent,
 } from "../src/managedAgentRuntime.ts";
@@ -80,7 +80,7 @@ test("managed conversation listing carries summaries without per-agent state req
     assert.deepEqual(first, [{ id: agentId, title: "Persisted task", updatedAt: 20, turnCount: 3 }]);
     assert.equal(second, first);
     assert.equal(requests.length, 1, "StrictMode-style duplicate loads share one list request");
-    assert.equal((await loadManagedTerminalAgent(agentId)).sessionId, agentId);
+    assert.equal(openManagedTerminalAgent(agentId).sessionId, agentId);
     assert.equal(requests.length, 1, "the selected handle is reused without a state probe");
   } finally {
     restore("fetch", originals.fetch);
@@ -108,7 +108,7 @@ test("a retained managed agent handle opens without a state probe", async () => 
   });
 
   try {
-    const agent = await loadManagedTerminalAgent(agentId);
+    const agent = openManagedTerminalAgent(agentId);
     assert.equal(agent.sessionId, agentId);
     assert.deepEqual(requests, []);
   } finally {

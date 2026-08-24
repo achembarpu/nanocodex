@@ -2,6 +2,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useAccountSession } from "./AccountSession";
 import { GenerationRequestOwner } from "./agentTerminalLifecycle";
 import type { AgentStatus } from "./agentTerminalTypes";
+import { clientFailureMessage } from "./clientFailure";
 import { deploymentHealth } from "./deploymentHealth";
 
 export type CredentialSource = "brokered" | null;
@@ -145,7 +146,7 @@ function useModelSession({
         if (generation.current !== current) return;
         publish({
           state: "error",
-          error: cause instanceof Error ? cause.message : "Could not check the model connection.",
+          error: clientFailureMessage(cause, "Could not check the model connection. Try again."),
         }, null);
       }
     });

@@ -35,7 +35,8 @@ import {
 } from "./demoTerminal";
 import { ArtifactDock } from "./ArtifactDock";
 import { browserMcpConfiguration } from "./browserMcp";
-import { loadManagedTerminalAgent } from "./managedAgentRuntime";
+import { clientFailureMessage } from "./clientFailure";
+import { openManagedTerminalAgent } from "./managedAgentRuntime";
 import { localTerminalAgent } from "./localAgentRuntime";
 
 export type { AgentTerminalMode, AgentTerminalState } from "./agentTerminalTypes";
@@ -108,28 +109,12 @@ export const ManagedAgentTerminal = memo(function ManagedAgentTerminal({
   source: Exclude<CredentialSource, null>;
   theme: "light" | "dark";
 }) {
-  const [attempt, setAttempt] = useState(0);
-  const [agent, setAgent] = useState<TerminalAgent>();
-  const [agentError, setAgentError] = useState<string>();
-  useEffect(() => {
-    let cancelled = false;
-    setAgent(undefined);
-    setAgentError(undefined);
-    void loadManagedTerminalAgent(agentId).then((loaded) => {
-      if (!cancelled) setAgent(loaded);
-    }, (error) => {
-      if (!cancelled) setAgentError(errorMessage(error));
-    });
-    return () => { cancelled = true; };
-  }, [agentId, attempt]);
-  const retryAgent = useCallback(() => {
-    setAgent(undefined);
-    setAttempt((value) => value + 1);
-  }, []);
+  const agent = useMemo(() => openManagedTerminalAgent(agentId), [agentId]);
+  const retryAgent = useCallback(() => {}, []);
   return (
     <AgentTerminalView
       agent={agent}
-      agentError={agentError}
+      agentError={undefined}
       authStatus={authStatus}
       mode={mode}
       onConversationActivity={onConversationActivity}
@@ -361,5 +346,8 @@ function markAgentTiming(
 }
 
 function errorMessage(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
+  return clientFailureMessage(
+    error,
+    "The agent connection was interrupted. Check your network and retry.",
+  );
 }

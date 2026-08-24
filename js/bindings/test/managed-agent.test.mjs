@@ -391,6 +391,60 @@ test("terminal managed failures are typed and HTTP failures hide response header
   );
 });
 
+test("browser transport failures become retryable managed errors", async () => {
+  await assert.rejects(
+    Agent.list({
+      baseUrl: origin,
+      fetch: async () => { throw new TypeError("Load failed"); },
+    }),
+    (error) => {
+      assert(error instanceof ManagedError);
+      assert.equal(error.code, "network_error");
+      assert.equal(
+        error.message,
+        "Managed agent connection was interrupted. Check your network and retry.",
+      );
+      assert.equal(error.cause.message, "Load failed");
+      return true;
+    },
+  );
+});
+
+test("managed prompts retry browser transport failures with one idempotency key", async () => {
+  const requests = [];
+  const agent = Agent.open(agentId, {
+    baseUrl: origin,
+    fetch: async (input, init) => {
+      const request = new Request(input, init);
+      requests.push(request);
+      if (requests.length < 3) throw new TypeError("Load failed");
+      return Response.json({
+        turn_id: "turn-1",
+        state: "completed",
+        accepted_cursor: "1",
+        terminal_cursor: "2",
+        terminal: {
+          type: "turn_completed",
+          final_message: "done",
+          usage: null,
+        },
+      });
+    },
+  });
+
+  const turn = agent.turn.prompt({
+    id: "turn-1",
+    input: "hello",
+    idempotencyKey: "retry-key",
+  });
+  assert.equal(await turn.accepted(), "turn-1");
+  assert.equal(requests.length, 3);
+  assert.deepEqual(
+    requests.map((request) => request.headers.get("idempotency-key")),
+    ["retry-key", "retry-key", "retry-key"],
+  );
+});
+
 function agentState() {
   return {
     agent_id: agentId,

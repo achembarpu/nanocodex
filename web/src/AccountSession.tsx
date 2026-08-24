@@ -8,6 +8,8 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { Provider, Storage, webAuthn } from "accounts";
+import { clientFailureMessage } from "./clientFailure";
 import { deploymentHealth } from "./deploymentHealth";
 import { localDevelopmentCredential } from "./localDevelopmentCredential";
 
@@ -34,8 +36,7 @@ type AccountSession = Readonly<{
 const AccountSessionContext = createContext<AccountSession | null>(null);
 const USER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 
-async function createAccountProvider() {
-  const { Provider, Storage, webAuthn } = await import("accounts");
+function createAccountProvider() {
   return Provider.create({
     adapter: webAuthn({
       auth: "/webauthn",
@@ -120,7 +121,7 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
     setError(null);
     try {
       if (method === "register" && !user) throw new Error("The browser identity is not ready.");
-      await (await accountProvider()).request(method === "register"
+      await accountProvider().request(method === "register"
         ? {
             method: "wallet_connect",
             params: [{ capabilities: {
@@ -170,7 +171,7 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
     setOperation("sign-out");
     setError(null);
     try {
-      await (await accountProvider()).request({ method: "wallet_disconnect" });
+      await accountProvider().request({ method: "wallet_disconnect" });
       const nextUser = await getCurrentUser();
       if (nextUser) await claimLocalCredential(nextUser.id);
       requestId.current++;
@@ -251,7 +252,7 @@ function accountFailure(cause: unknown, fallback: string): string {
   if (cause instanceof DOMException && cause.name === "NotAllowedError") {
     return "The passkey request was cancelled or timed out. Try again.";
   }
-  return cause instanceof Error && cause.message ? cause.message : fallback;
+  return clientFailureMessage(cause, fallback);
 }
 
 export function isRecord(value: unknown): value is Record<string, unknown> {

@@ -280,6 +280,7 @@ test("the artifact runtime remains independently scrollable", () => {
 
 test("phone auth controls and other application targets meet mobile baselines", () => {
   assert.match(ruleBlock(terminalCss, ".agent-session-actions button,", terminalCss.indexOf(`@media ${compactQuery}`)), /min-height:\s*44px/);
+  assert.match(ruleBlock(terminalCss, ".conversation-list-error button {"), /min-height:\s*44px/);
 
   for (const selector of [
     ".pierre-tree-heading button",

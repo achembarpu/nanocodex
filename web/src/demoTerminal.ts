@@ -1,4 +1,5 @@
 import type { AgentEvent } from "nanocodex";
+import { isClientNetworkFailure } from "./clientFailure.ts";
 import {
   applyAgentEvents,
   initialTerminalState,
@@ -828,6 +829,9 @@ function errorMessage(error: unknown): string {
 
 function terminalErrorMessage(error: unknown): string {
   const message = errorMessage(error);
+  if (isClientNetworkFailure(error)) {
+    return "The agent connection was interrupted. Check your network and try again.";
+  }
   return /Responses WebSocket handshake failed|WebSocket connection failed/.test(message)
     ? "Could not connect to the agent. Try again."
     : message;

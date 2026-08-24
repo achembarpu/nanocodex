@@ -9,7 +9,7 @@ export type ConversationSummary = Readonly<{
 }>;
 
 export const ConversationHistoryRail = memo(function ConversationHistoryRail({
-  conversations, error, mobileOpen, onClose, onCreate, onOpen, onSelect,
+  conversations, error, mobileOpen, onClose, onCreate, onOpen, onRetry, onSelect,
   pending, runtime, selectedId,
 }: {
   conversations: readonly ConversationSummary[];
@@ -18,6 +18,7 @@ export const ConversationHistoryRail = memo(function ConversationHistoryRail({
   onClose(): void;
   onCreate(): void;
   onOpen(): void;
+  onRetry(): void;
   onSelect(id: string): void;
   pending: boolean;
   runtime: "local" | "managed";
@@ -74,7 +75,10 @@ export const ConversationHistoryRail = memo(function ConversationHistoryRail({
             <ChevronRight aria-hidden="true" />
           </button>;
         })}
-        {error ? <p className="conversation-list-error" role="alert">{error}</p> : null}
+        {error ? <div className="conversation-list-error">
+          <p role="alert">{error}</p>
+          <button type="button" disabled={pending} onClick={onRetry}>Retry conversations</button>
+        </div> : null}
       </div>
     </aside>
     <header className="conversation-mobile-header">

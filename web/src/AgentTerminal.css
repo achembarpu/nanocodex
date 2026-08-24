@@ -672,7 +672,20 @@
   position: absolute; top: 50%; right: 10px; width: 11px; height: 11px; color: var(--text-faint); transform: translateY(-50%);
 }
 .conversation-list-error {
-  margin: 10px; padding: 8px 9px; color: var(--negative); font: 10px/1.4 var(--font-mono); border: 1px solid var(--border-soft);
+  margin: 10px;
+  padding: 8px 9px;
+  color: var(--negative);
+  font: 10px/1.4 var(--font-mono);
+  border: 1px solid var(--border-soft);
+}
+.conversation-list-error p { margin: 0; }
+.conversation-list-error button {
+  min-height: 44px;
+  margin-top: 6px;
+  color: currentColor;
+  font: inherit;
+  text-decoration: underline;
+  text-underline-offset: 2px;
 }
 
 @media (max-width: 740px), (pointer: coarse) and (orientation: landscape) and (max-width: 950px) {

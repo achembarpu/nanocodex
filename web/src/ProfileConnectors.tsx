@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { isRecord, responseFailure } from "./AccountSession";
+import { clientFailureMessage } from "./clientFailure";
 
 type ConnectorId = "github" | "gmail" | "gdrive";
 type ConnectorStatus = Readonly<{
@@ -238,5 +239,5 @@ function connectorLabel(id: ConnectorId): string {
 }
 
 function failureMessage(cause: unknown, fallback: string): string {
-  return cause instanceof Error && cause.message ? cause.message : fallback;
+  return clientFailureMessage(cause, fallback);
 }

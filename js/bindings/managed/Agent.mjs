@@ -196,7 +196,8 @@ async function retrySubmission(client, agentId, options) {
         signal: options.signal,
       });
     } catch (error) {
-      if (options.signal?.aborted || error instanceof ManagedError) throw error;
+      if (options.signal?.aborted
+        || (error instanceof ManagedError && error.code !== "network_error")) throw error;
       failure = error;
     }
   }
@@ -534,13 +535,22 @@ function managedClient(options) {
     if (init.accept) headers.set("accept", init.accept);
     if (init.idempotencyKey) headers.set("idempotency-key", init.idempotencyKey);
     if (apiKey) headers.set("authorization", `Bearer ${apiKey}`);
-    return fetchImpl(new URL(path, baseUrl), {
-      method: init.method ?? "GET",
-      headers,
-      credentials: apiKey ? "omit" : "include",
-      ...(init.body === undefined ? {} : { body: init.body }),
-      ...(init.signal === undefined ? {} : { signal: init.signal }),
-    });
+    try {
+      return await fetchImpl(new URL(path, baseUrl), {
+        method: init.method ?? "GET",
+        headers,
+        credentials: apiKey ? "omit" : "include",
+        ...(init.body === undefined ? {} : { body: init.body }),
+        ...(init.signal === undefined ? {} : { signal: init.signal }),
+      });
+    } catch (error) {
+      if (init.signal?.aborted) throw abortError(init.signal.reason);
+      throw new ManagedError(
+        "network_error",
+        "Managed agent connection was interrupted. Check your network and retry.",
+        { cause: error },
+      );
+    }
   };
   return Object.freeze({
     response,

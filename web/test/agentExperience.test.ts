@@ -92,6 +92,12 @@ test("managed startup mounts a retained selection before refreshing the rail", (
   );
 });
 
+test("managed list failures expose a real retry action", () => {
+  assert.match(experience, /const \[managedAttempt, setManagedAttempt\] = useState\(0\)/);
+  assert.match(experience, /setManagedAttempt\(\(value\) => value \+ 1\)/);
+  assert.match(experience, /onRetry=\{retryManagedConversations\}/);
+});
+
 function source(path: string): string {
   return readFileSync(new URL(path, import.meta.url), "utf8");
 }

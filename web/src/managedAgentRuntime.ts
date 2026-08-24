@@ -1,8 +1,9 @@
 import type { AgentEvent } from "nanocodex";
-import type {
-  ManagedAgent,
-  ManagedEvent,
-  ManagedTurn,
+import {
+  Agent,
+  type ManagedAgent,
+  type ManagedEvent,
+  type ManagedTurn,
 } from "nanocodex/managed";
 import type { TerminalAgent, TerminalTurn } from "./demoTerminal";
 
@@ -21,8 +22,7 @@ export type ManagedConversation = Readonly<{
 export function listManagedConversations(accountId = "default"): Promise<readonly ManagedConversation[]> {
   const retained = managedLists.get(accountId);
   if (retained) return retained;
-  const loading = import("nanocodex/managed").then(async ({ Agent }) => {
-    const agents = await Agent.list();
+  const loading = Agent.list().then((agents) => {
     const conversations = agents.map((agent) => {
       managedAgents.set(agent.id, agent);
       return Object.freeze({
@@ -46,8 +46,7 @@ export function listManagedConversations(accountId = "default"): Promise<readonl
 export function createManagedConversation(accountId = "default"): Promise<ManagedConversation> {
   const retained = managedCreates.get(accountId);
   if (retained) return retained;
-  const creating = import("nanocodex/managed").then(async ({ Agent }) => {
-    const agent = await Agent.create();
+  const creating = Agent.create().then((agent) => {
     managedAgents.set(agent.id, agent);
     managedLists.delete(accountId);
     return Object.freeze({
@@ -63,8 +62,7 @@ export function createManagedConversation(accountId = "default"): Promise<Manage
   return creating;
 }
 
-export async function loadManagedTerminalAgent(agentId: string): Promise<TerminalAgent> {
-  const { Agent } = await import("nanocodex/managed");
+export function openManagedTerminalAgent(agentId: string): TerminalAgent {
   const managed = managedAgents.get(agentId) ?? Agent.open(agentId);
   managedAgents.set(agentId, managed);
   return managedTerminalAgent(managed);

@@ -7,6 +7,7 @@ import {
   type FormEvent,
 } from "react";
 import { isRecord, responseFailure, useAccountSession } from "./AccountSession";
+import { clientFailureMessage } from "./clientFailure";
 import { deploymentHealth } from "./deploymentHealth";
 import { ProfileConnectors } from "./ProfileConnectors";
 
@@ -654,7 +655,7 @@ function shortIdentity(id: string): string {
 }
 
 function failureMessage(cause: unknown, fallback: string): string {
-  return cause instanceof Error && cause.message ? cause.message : fallback;
+  return clientFailureMessage(cause, fallback);
 }
 
 function notifyModelCredentialChanged(): void {
