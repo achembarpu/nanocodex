@@ -3890,6 +3890,8 @@ html[data-theme="dark"] .tui-syntax .shiki span {
   .header-center {
     grid-row: 2;
     grid-column: 1 / -1;
+    width: calc(100% + 16px);
+    margin-inline: -8px;
   }
 
   .wordmark {

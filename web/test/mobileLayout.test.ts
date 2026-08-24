@@ -54,6 +54,8 @@ test("the shared phone header stays in one compact row on every surface", () => 
 test("360px headers retain scrollable alphabetic navigation without clipping the actions", () => {
   const narrow = indexCss.indexOf("@media (max-width: 420px)");
   assert.notEqual(narrow, -1);
+  assert.match(ruleBlock(indexCss, ".header-center {", narrow), /width:\s*calc\(100% \+ 16px\)/);
+  assert.match(ruleBlock(indexCss, ".header-center {", narrow), /margin-inline:\s*-8px/);
   assert.match(ruleBlock(indexCss, ".wordmark {", narrow), /font-size:\s*10px/);
   assert.match(ruleBlock(indexCss, ".surface-switch {", narrow), /gap:\s*0/);
   assert.match(ruleBlock(indexCss, ".surface-switch a {", narrow), /min-width:\s*44px/);
