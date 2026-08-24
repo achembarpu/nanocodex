@@ -647,23 +647,14 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
       && agentSurface?.contains(target)
       && target.matches(".agent-touch-composer textarea");
     let keyboardTracking = isComposerTarget(document.activeElement);
-    let appliedTop: number | undefined;
     let appliedKeyboardInset: number | undefined;
-    const positionViewport = () => {
-      if (!agentSurface?.isConnected || !viewport) return;
-      const viewportTop = keyboardTracking && Math.abs(viewport.scale - 1) < 0.01
-        ? viewport.offsetTop
-        : 0;
-      if (appliedTop === viewportTop) return;
-      appliedTop = viewportTop;
-      agentSurface.style.transform = `translate3d(0, ${viewportTop}px, 0)`;
-    };
     const anchorViewport = () => {
       if (!agentSurface?.isConnected || !viewport) return;
       const keyboardInset = keyboardTracking && Math.abs(viewport.scale - 1) < 0.01
         ? visualViewportKeyboardInset({
           baselineHeight: agentSurface.clientHeight,
           viewportHeight: viewport.height,
+          viewportOffsetTop: viewport.offsetTop,
         })
         : 0;
       if (!isComposerTarget(document.activeElement) && keyboardInset === 0) {
@@ -673,7 +664,6 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
         appliedKeyboardInset = keyboardInset;
         agentSurface.style.setProperty("--terminal-keyboard-inset", `${keyboardInset}px`);
       }
-      positionViewport();
     };
     const trackComposerFocus = (event: FocusEvent) => {
       if (isComposerTarget(event.target)) keyboardTracking = true;
@@ -681,17 +671,16 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
     };
     anchorViewport();
     viewport?.addEventListener("resize", anchorViewport);
-    viewport?.addEventListener("scroll", positionViewport);
+    viewport?.addEventListener("scroll", anchorViewport);
     window.addEventListener("resize", anchorViewport);
     document.addEventListener("focusin", trackComposerFocus);
     document.addEventListener("focusout", trackComposerFocus);
     return () => {
       viewport?.removeEventListener("resize", anchorViewport);
-      viewport?.removeEventListener("scroll", positionViewport);
+      viewport?.removeEventListener("scroll", anchorViewport);
       window.removeEventListener("resize", anchorViewport);
       document.removeEventListener("focusin", trackComposerFocus);
       document.removeEventListener("focusout", trackComposerFocus);
-      agentSurface?.style.removeProperty("transform");
       agentSurface?.style.removeProperty("--terminal-keyboard-inset");
       restoreScroll();
       roots.forEach((element, index) => {

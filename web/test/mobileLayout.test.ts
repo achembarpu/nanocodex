@@ -247,13 +247,11 @@ test("the phone transcript owns the remaining workspace and native vertical gest
   assert.match(fixedSurface, /position:\s*fixed/);
   assert.match(fixedSurface, /inset:\s*0/);
   assert.match(application, /const viewport = window\.visualViewport/);
-  assert.match(application, /const viewportTop = keyboardTracking[\s\S]*?\? viewport\.offsetTop[\s\S]*?: 0/);
   assert.doesNotMatch(application, /agentSurface\.style\.(?:width|height)\s*=/);
-  assert.match(application, /agentSurface\.style\.transform = `translate3d\(0, \$\{viewportTop\}px, 0\)`/);
+  assert.doesNotMatch(application, /agentSurface\.style\.transform\s*=/);
   assert.match(application, /viewport\?\.addEventListener\("resize", anchorViewport\)/);
-  assert.match(application, /viewport\?\.addEventListener\("scroll", positionViewport\)/);
-  assert.match(application, /appliedTop === viewportTop/);
-  assert.match(application, /visualViewportKeyboardInset\(\{[\s\S]*?baselineHeight:\s*agentSurface\.clientHeight,[\s\S]*?viewportHeight:\s*viewport\.height/);
+  assert.match(application, /viewport\?\.addEventListener\("scroll", anchorViewport\)/);
+  assert.match(application, /visualViewportKeyboardInset\(\{[\s\S]*?baselineHeight:\s*agentSurface\.clientHeight,[\s\S]*?viewportHeight:\s*viewport\.height,[\s\S]*?viewportOffsetTop:\s*viewport\.offsetTop/);
   assert.match(application, /style\.setProperty\("--terminal-keyboard-inset", `\$\{keyboardInset\}px`\)/);
   assert.match(terminalCss, /\.agent-touch-composer \{[\s\S]*?transform:\s*translate3d\([\s\S]*?var\(--terminal-composer-lift\)/);
   assert.match(terminalCss, /\.agent-transcript-keyboard-spacer \{[\s\S]*?height:\s*var\(--terminal-composer-lift\)/);

@@ -197,19 +197,28 @@ test("keyboard occlusion continuously follows the visual viewport", () => {
   assert.equal(visualViewportKeyboardInset({
     baselineHeight: 852,
     viewportHeight: 852,
+    viewportOffsetTop: 0,
   }), 0);
   assert.equal(visualViewportKeyboardInset({
     baselineHeight: 852,
     viewportHeight: 760,
-  }), 92);
+    viewportOffsetTop: 8,
+  }), 84);
   assert.equal(visualViewportKeyboardInset({
     baselineHeight: 852,
     viewportHeight: 700,
-  }), 152, "the composer follows every keyboard animation frame");
+    viewportOffsetTop: 20,
+  }), 132, "the composer follows the visible viewport bottom");
   assert.equal(visualViewportKeyboardInset({
     baselineHeight: 852,
     viewportHeight: 520,
-  }), 332);
+    viewportOffsetTop: 44,
+  }), 288);
+  assert.equal(visualViewportKeyboardInset({
+    baselineHeight: 852,
+    viewportHeight: 852,
+    viewportOffsetTop: 44,
+  }), 0, "viewport panning alone does not move the composer");
 });
 
 test("a running touch agent keeps a visible send action for a follow-up", () => {

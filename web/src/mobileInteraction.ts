@@ -6,14 +6,17 @@ export const TERMINAL_COMPOSER_BASE_HEIGHT = 62;
 export function visualViewportKeyboardInset({
   baselineHeight,
   viewportHeight,
+  viewportOffsetTop,
 }: {
   baselineHeight: number;
   viewportHeight: number;
+  viewportOffsetTop: number;
 }): number {
   return Math.max(
     0,
     finiteNonNegative(baselineHeight)
-      - finiteNonNegative(viewportHeight),
+      - finiteNonNegative(viewportHeight)
+      - finiteNonNegative(viewportOffsetTop),
   );
 }
 
