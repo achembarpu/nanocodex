@@ -47,6 +47,7 @@ const MAX_CONNECTOR_RESPONSE_BODY_BYTES = 1024 * 1024;
 const MAX_AGENT_TOOL_BODY_BYTES = 20 * 1024 * 1024;
 const MAX_PUBLIC_EGRESS_BODY_BYTES = 256 * 1024;
 const MAX_PUBLIC_EGRESS_RESPONSE_BYTES = 1024 * 1024;
+const MAX_PINNED_RUNTIME_RESPONSE_BYTES = 32 * 1024 * 1024;
 const MAX_ACCOUNT_AUTHORIZATIONS = 64;
 const EGRESS_SUBJECT = /^[A-Za-z0-9_-]{43,128}$/;
 const CONNECTOR_METHODS = new Set(["DELETE", "GET", "HEAD", "OPTIONS", "PATCH", "POST", "PUT"]);
@@ -78,7 +79,7 @@ const FORBIDDEN_EGRESS_HEADERS = new Set([
   "transfer-encoding", "upgrade", "x-nanocodex-subject",
 ]);
 const BLOCKED_EGRESS_RESPONSE_HEADERS = new Set([
-  "clear-site-data", "connection", "keep-alive", "nel", "proxy-authenticate",
+  "clear-site-data", "connection", "content-encoding", "content-length", "keep-alive", "nel", "proxy-authenticate",
   "proxy-authorization", "refresh", "report-to", "set-cookie", "set-cookie2",
   "trailer", "transfer-encoding", "upgrade", "x-nanocodex-subject",
 ]);
@@ -919,13 +920,23 @@ async function publicBrowserEgress(
       }
       continue;
     }
-    const responseBody = await boundedResponseText(upstream, MAX_PUBLIC_EGRESS_RESPONSE_BYTES);
+    const responseBody = await boundedResponseBytes(upstream, publicEgressResponseLimit(url));
     return new Response(responseBody, {
       status: upstream.status,
       statusText: upstream.statusText,
       headers: projectedPublicHeaders(upstream.headers),
     });
   }
+}
+
+function publicEgressResponseLimit(url: URL): number {
+  if (url.origin === "https://cdn.jsdelivr.net" && (
+    url.pathname.startsWith("/pyodide/v314.0.5/full/")
+    || url.pathname.startsWith("/npm/wasm-clang@0.0.1/bin/")
+  )) {
+    return MAX_PINNED_RUNTIME_RESPONSE_BYTES;
+  }
+  return MAX_PUBLIC_EGRESS_RESPONSE_BYTES;
 }
 
 function publicEgressUrl(url: URL): URL {
@@ -1835,12 +1846,16 @@ function brokerFetch(env: Env, path: string, init?: RequestInit): Promise<Respon
 }
 
 async function boundedResponseText(response: Response, limit: number): Promise<string> {
+  return new TextDecoder().decode(await boundedResponseBytes(response, limit));
+}
+
+async function boundedResponseBytes(response: Response, limit: number): Promise<ArrayBuffer> {
   const declared = response.headers.get("content-length");
   if (declared && Number(declared) > limit) {
     await response.body?.cancel();
     throw new ApiFailure(502, "upstream_response_too_large", "The upstream response exceeded its size limit.");
   }
-  if (!response.body) return "";
+  if (!response.body) return new ArrayBuffer(0);
   const reader = response.body.getReader();
   const chunks: Uint8Array[] = [];
   let total = 0;
@@ -1860,7 +1875,7 @@ async function boundedResponseText(response: Response, limit: number): Promise<s
     joined.set(chunk, offset);
     offset += chunk.byteLength;
   }
-  return new TextDecoder().decode(joined);
+  return joined.buffer;
 }
 
 function boundedOptionalString(value: unknown, limit: number): string | undefined {
