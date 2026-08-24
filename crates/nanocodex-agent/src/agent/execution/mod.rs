@@ -340,7 +340,7 @@ impl ExecutionConfig {
         self.policy = Some(ExecutionPolicyRecipe::PerAgent(factory));
     }
 
-    pub(crate) fn for_new_thread(&self, operation: &'static str) -> Result<Self> {
+    pub(crate) const fn for_new_thread(&self, operation: &'static str) -> Result<Self> {
         if self.policy.is_some() {
             return Err(NanocodexError::ExecutionPolicyBranchUnsupported { operation });
         }
