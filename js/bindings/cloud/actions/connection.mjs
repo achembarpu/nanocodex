@@ -49,9 +49,14 @@ export async function connect(client, options) {
     throw new Error("Nanocodex Connect returned no signed approval identifier");
   }
   const keyAuthorization = account.capabilities?.keyAuthorization;
+  const preflightKeyMatchesAccount = reusable
+    && typeof activeAccount === "string"
+    && activeAccount.toLowerCase() === account.address.toLowerCase();
   const reusedAccessKey = keyAuthorization
     ? undefined
-    : reusable ?? await registeredAccessKey(client, account.address, options.signal);
+    : preflightKeyMatchesAccount
+      ? reusable
+      : await registeredAccessKey(client, account.address, options.signal);
   if (!keyAuthorization && !reusedAccessKey) {
     throw new Error("Nanocodex Connect returned no new or reusable access key");
   }

@@ -158,6 +158,80 @@ test("Connect binds normalized cloud accounts into auth resources and the connec
   );
 });
 
+test("Connect reselects a reusable access key when the passkey account changes", async () => {
+  const expiry = Math.floor(Date.now() / 1_000) + 3_600;
+  const initialAccount = "0x1111111111111111111111111111111111111111";
+  const selectedAccount = "0x2222222222222222222222222222222222222222";
+  const initialKey = "0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+  const selectedKey = "0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
+  const requests = [];
+  const walletRequests = [];
+  const provider = {
+    store: {
+      getState() {
+        return {
+          accounts: [{ address: initialAccount }],
+          activeAccount: 0,
+          accessKeys: [
+            { access: initialAccount, address: initialKey, chainId: 4217, expiry },
+            { access: selectedAccount, address: selectedKey, chainId: 4217, expiry },
+          ],
+        };
+      },
+    },
+    async request(request) {
+      walletRequests.push(request);
+      return {
+        accounts: [{
+          address: selectedAccount,
+          capabilities: { auth: { approval_id: "approval-selected" } },
+        }],
+      };
+    },
+  };
+  const client = Client.create({
+    appId: "account-switch-workspace",
+    dialog: Dialog.memory(),
+    provider,
+    transport: Transport.from({
+      key: "account-switch",
+      name: "account-switch",
+      type: "account-switch",
+      setup() {
+        return {
+          baseUrl: "https://connect.example",
+          async fetch() {
+            return Response.json({ ok: true });
+          },
+          async request(request) {
+            requests.push(request);
+            if (request.method === "GET") return { registered: true };
+            return {
+              ...testConnectionWire({ expiry, keyId: selectedKey, capabilities: ["nanocodex.agent"] }),
+              account_address: selectedAccount,
+            };
+          },
+        };
+      },
+    }),
+  });
+
+  await client.connection.connect();
+
+  assert.equal("authorizeAccessKey" in walletRequests[0].params[0].capabilities, false);
+  assert.deepEqual(
+    requests.filter((request) => request.method === "GET").map((request) => request.path),
+    [
+      `/v1/access-keys/${initialAccount}/${initialKey}`,
+      `/v1/access-keys/${selectedAccount}/${selectedKey}`,
+    ],
+  );
+  assert.deepEqual(requests.at(-1).body.reuse_access_key, {
+    key_id: selectedKey,
+    expiry,
+  });
+});
+
 test("Nanocodex Connect signs one witness-bound access key and enforces its MPP permission", async () => {
   const expiry = Math.floor(Date.now() / 1_000) + 30 * 86_400;
   const keyId = "0x1111111111111111111111111111111111111111";
