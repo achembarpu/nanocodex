@@ -651,8 +651,12 @@ function CodeBrowserComponent(
       const searchInput = root.querySelector<HTMLInputElement>(
         "[data-file-tree-search-input]",
       );
-      if (searchInput?.getAttribute("aria-controls") !== rowsId) {
-        searchInput?.setAttribute("aria-controls", rowsId);
+      if (!searchInput) return false;
+      if (searchInput.getAttribute("aria-label") !== "Search repository files") {
+        searchInput.setAttribute("aria-label", "Search repository files");
+      }
+      if (searchInput.getAttribute("aria-controls") !== rowsId) {
+        searchInput.setAttribute("aria-controls", rowsId);
       }
       return true;
     };

@@ -28,6 +28,8 @@ test("the Source tree exposes only Pierre's virtualized rows as the ARIA tree", 
   assert.match(codeBrowser, /root\.removeAttribute\("role"\)/);
   assert.match(codeBrowser, /rows\.setAttribute\("role", "tree"\)/);
   assert.match(codeBrowser, /rows\.setAttribute\("aria-label", "Repository files"\)/);
+  assert.match(codeBrowser, /searchInput\.setAttribute\("aria-label", "Search repository files"\)/);
+  assert.match(codeBrowser, /searchInput\.setAttribute\("aria-controls", rowsId\)/);
   assert.doesNotMatch(codeBrowser, /new MutationObserver\(exposeVirtualizedRows\)/);
   assert.match(codeBrowser, /<header className="pierre-tree-heading source-tree-toolbar">/);
   assert.match(codeBrowser, /<FileTree[\s\S]*?model=\{model\}[\s\S]*?style=\{treeTheme\}/);
