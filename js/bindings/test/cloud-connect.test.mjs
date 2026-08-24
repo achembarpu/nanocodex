@@ -153,12 +153,8 @@ test("Connect binds normalized cloud accounts into auth resources and the connec
           resources: [
             "urn:example:configured",
             "urn:nanocodex:app:connector-workspace",
-            "urn:nanocodex:connector:github",
-            "urn:nanocodex:connector:gdrive",
-            "urn:nanocodex:agent:output:final",
-            "urn:nanocodex:agent:output:actions",
-            "urn:nanocodex:agent:history:read",
-            "urn:nanocodex:agent:trace:read",
+            "urn:nanocodex:connectors:github,gdrive",
+            "urn:nanocodex:agent:visibility:reply,actions,history,traces",
           ],
         },
       },
@@ -281,8 +277,7 @@ test("Nanocodex Connect signs one witness-bound access key and enforces its MPP 
           "repositories",
           "model-entitlement",
           "urn:nanocodex:app:test-workspace",
-          "urn:nanocodex:agent:output:final",
-          "urn:nanocodex:agent:output:actions",
+          "urn:nanocodex:agent:visibility:reply,actions",
         ]);
         return {
           accounts: [{

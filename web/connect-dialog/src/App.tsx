@@ -16,6 +16,7 @@ const provider = createProvider();
 
 const connectorIds = ["github", "gmail", "gdrive", "chatgpt"] as const;
 const connectorResourcePrefix = "urn:nanocodex:connector:";
+const connectorsResourcePrefix = "urn:nanocodex:connectors:";
 const nanocodexOrigin = "https://nanocodex.gakonst.workers.dev";
 type ConnectorId = typeof connectorIds[number];
 type ConnectorStatus = Readonly<{
@@ -1172,10 +1173,15 @@ function walletView(request: WalletRequest): ConnectionView {
   const resources = Array.isArray(auth.resources)
     ? auth.resources.filter((value): value is string => typeof value === "string")
     : [];
-  const requestedConnectors = resources
-    .filter((resource) => resource.startsWith(connectorResourcePrefix))
-    .map((resource) => resource.slice(connectorResourcePrefix.length))
-    .filter(isConnectorId);
+  const requestedConnectors = [...new Set(resources.flatMap((resource) => {
+    if (resource.startsWith(connectorResourcePrefix)) {
+      return [resource.slice(connectorResourcePrefix.length)];
+    }
+    if (resource.startsWith(connectorsResourcePrefix)) {
+      return resource.slice(connectorsResourcePrefix.length).split(",");
+    }
+    return [];
+  }).filter(isConnectorId))];
   const access = record(capabilities.authorizeAccessKey);
   const limits = array(access.limits).map((value) => {
     const limit = record(value);

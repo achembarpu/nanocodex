@@ -41,6 +41,14 @@ const AGENT_VISIBILITY_RESOURCES = {
   "urn:nanocodex:agent:history:read": "agent.history.read",
   "urn:nanocodex:agent:trace:read": "agent.trace.read",
 } as const;
+const AGENT_VISIBILITY_RESOURCE_PREFIX = "urn:nanocodex:agent:visibility:";
+const AGENT_VISIBILITY_NAMES = {
+  reply: "agent.output.final",
+  actions: "agent.output.actions",
+  history: "agent.history.read",
+  traces: "agent.trace.read",
+} as const;
+const CONNECTORS_RESOURCE_PREFIX = "urn:nanocodex:connectors:";
 const PROVIDER_CREDENTIAL_PLACEHOLDER = "Bearer NANOCODEX_PROVIDER_CREDENTIAL";
 const CONNECTOR_STATE_TTL = 10 * 60;
 const CONNECT_APPROVAL_TTL = 10 * 60;
@@ -2177,9 +2185,7 @@ function requireApprovedCapabilities(
   if (required.some((resource) => !approvedResources.has(resource))) {
     throw new ApiFailure(403, "capability_not_approved", "The app grant was not present in the signed SIWE approval.");
   }
-  const approved = new Set(resources
-    .filter((resource) => resource.startsWith("urn:nanocodex:connector:"))
-    .map((resource) => resource.slice("urn:nanocodex:connector:".length)));
+  const approved = approvedConnectors(resources);
   if (requested.some((connector) => !approved.has(connector))) {
     throw new ApiFailure(403, "connector_not_approved", "A requested connector was not present in the signed SIWE approval.");
   }
@@ -2187,12 +2193,31 @@ function requireApprovedCapabilities(
 
 function approvedAgentCapabilities(resources: readonly string[]): string[] {
   const approved = new Set(resources);
-  if (approved.has("urn:nanocodex:agent:trace:read")) {
+  const compact = new Set(resources
+    .filter((resource) => resource.startsWith(AGENT_VISIBILITY_RESOURCE_PREFIX))
+    .flatMap((resource) => resource.slice(AGENT_VISIBILITY_RESOURCE_PREFIX.length).split(",")));
+  if (approved.has("urn:nanocodex:agent:trace:read") || compact.has("traces")) {
     return [...new Set(Object.values(AGENT_VISIBILITY_RESOURCES))];
   }
-  return Object.entries(AGENT_VISIBILITY_RESOURCES)
+  const legacy = Object.entries(AGENT_VISIBILITY_RESOURCES)
     .filter(([resource]) => approved.has(resource))
     .map(([, capability]) => capability);
+  const combined = Object.entries(AGENT_VISIBILITY_NAMES)
+    .filter(([name]) => compact.has(name))
+    .map(([, capability]) => capability);
+  return [...new Set([...legacy, ...combined])];
+}
+
+function approvedConnectors(resources: readonly string[]): Set<string> {
+  return new Set(resources.flatMap((resource) => {
+    if (resource.startsWith("urn:nanocodex:connector:")) {
+      return [resource.slice("urn:nanocodex:connector:".length)];
+    }
+    if (resource.startsWith(CONNECTORS_RESOURCE_PREFIX)) {
+      return resource.slice(CONNECTORS_RESOURCE_PREFIX.length).split(",");
+    }
+    return [];
+  }).filter((connector) => (CONNECTOR_IDS as readonly string[]).includes(connector)));
 }
 
 function siweResources(message: string): string[] {

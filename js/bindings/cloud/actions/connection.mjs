@@ -2,12 +2,20 @@ import { connectionFromWire } from "../internal.mjs";
 
 const CLOUD_ACCOUNT_PROVIDERS = Object.freeze(["github", "gmail", "gdrive", "chatgpt"]);
 const CONNECTOR_RESOURCE_PREFIX = "urn:nanocodex:connector:";
+const CONNECTORS_RESOURCE_PREFIX = "urn:nanocodex:connectors:";
 const APP_RESOURCE_PREFIX = "urn:nanocodex:app:";
 const AGENT_VISIBILITY_RESOURCES = Object.freeze({
   finalMessages: "urn:nanocodex:agent:output:final",
   actionSummaries: "urn:nanocodex:agent:output:actions",
   conversationHistory: "urn:nanocodex:agent:history:read",
   rawTraces: "urn:nanocodex:agent:trace:read",
+});
+const AGENT_VISIBILITY_RESOURCE_PREFIX = "urn:nanocodex:agent:visibility:";
+const AGENT_VISIBILITY_NAMES = Object.freeze({
+  finalMessages: "reply",
+  actionSummaries: "actions",
+  conversationHistory: "history",
+  rawTraces: "traces",
 });
 
 export async function connect(client, options) {
@@ -121,15 +129,25 @@ function normalizeAgentVisibility(agent) {
 
 function withConnectionResources(auth, appId, requestedConnectors, agentVisibility) {
   const configured = typeof auth === "object" && auth !== null
-    ? (auth.resources ?? []).filter((resource) => !Object.values(AGENT_VISIBILITY_RESOURCES).includes(resource))
+    ? (auth.resources ?? []).filter((resource) =>
+      !Object.values(AGENT_VISIBILITY_RESOURCES).includes(resource)
+      && !resource.startsWith(AGENT_VISIBILITY_RESOURCE_PREFIX)
+      && !resource.startsWith(CONNECTOR_RESOURCE_PREFIX)
+      && !resource.startsWith(CONNECTORS_RESOURCE_PREFIX)
+      && !resource.startsWith(APP_RESOURCE_PREFIX))
     : [];
+  const visibility = Object.entries(AGENT_VISIBILITY_NAMES)
+    .filter(([name]) => agentVisibility[name])
+    .map(([, value]) => value);
   const resources = [...new Set([
     ...configured,
     `${APP_RESOURCE_PREFIX}${encodeURIComponent(appId)}`,
-    ...requestedConnectors.map((provider) => `${CONNECTOR_RESOURCE_PREFIX}${provider}`),
-    ...Object.entries(AGENT_VISIBILITY_RESOURCES)
-      .filter(([name]) => agentVisibility[name])
-      .map(([, resource]) => resource),
+    ...(requestedConnectors.length === 0
+      ? []
+      : [`${CONNECTORS_RESOURCE_PREFIX}${requestedConnectors.join(",")}`]),
+    ...(visibility.length === 0
+      ? []
+      : [`${AGENT_VISIBILITY_RESOURCE_PREFIX}${visibility.join(",")}`]),
   ])];
   if (typeof auth === "string") return { url: auth, resources };
   return { ...auth, resources };

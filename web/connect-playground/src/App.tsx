@@ -29,7 +29,7 @@ const INITIAL_AUDIT: readonly AuditEvent[] = [
     id: 0,
     tone: "neutral",
     title: "Playground ready",
-    detail: "Live Accounts, Nanocodex WASM, Tempo MPP, Mercator, and the machineUSD onramp are ready.",
+    detail: "Live Accounts, durable Nanocodex agents, Tempo MPP, Mercator, and the machineUSD onramp are ready.",
     time: "local",
   },
 ];

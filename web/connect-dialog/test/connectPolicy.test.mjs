@@ -13,12 +13,7 @@ const playground = "https://nanocodex-connect-playground.gakonst.workers.dev";
 
 test("signed agent visibility resources map to compact consent labels", () => {
   assert.deepEqual(appVisibilityPermissions([
-    "urn:nanocodex:agent:trace:read",
-    "urn:nanocodex:connector:github",
-    "urn:nanocodex:agent:output:actions",
-    "urn:nanocodex:agent:history:read",
-    "urn:nanocodex:agent:output:final",
-    "urn:nanocodex:agent:trace:read",
+    "urn:nanocodex:agent:visibility:reply,actions,history,traces",
   ]), [
     {
       resource: "urn:nanocodex:agent:output:final",
@@ -50,6 +45,13 @@ test("unsigned and malformed resources do not produce visibility claims", () => 
     null,
   ]), []);
   assert.deepEqual(appVisibilityPermissions(undefined), []);
+});
+
+test("legacy visibility resources remain readable", () => {
+  assert.deepEqual(appVisibilityPermissions([
+    "urn:nanocodex:agent:output:final",
+    "urn:nanocodex:agent:trace:read",
+  ]).map(({ label }) => label), ["Reply", "Traces"]);
 });
 
 test("production Connect policy pins the API and registered embedding app", () => {

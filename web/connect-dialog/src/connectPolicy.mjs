@@ -3,21 +3,25 @@ export const productionConnectApiOrigin = "https://nanocodex-connect-api.gakonst
 const signedAppVisibility = Object.freeze([
   Object.freeze({
     resource: "urn:nanocodex:agent:output:final",
+    name: "reply",
     label: "Reply",
     detail: "Final agent reply",
   }),
   Object.freeze({
     resource: "urn:nanocodex:agent:output:actions",
+    name: "actions",
     label: "Actions",
     detail: "Agent actions and tool calls",
   }),
   Object.freeze({
     resource: "urn:nanocodex:agent:history:read",
+    name: "history",
     label: "History",
     detail: "Conversation history",
   }),
   Object.freeze({
     resource: "urn:nanocodex:agent:trace:read",
+    name: "traces",
     label: "Traces",
     detail: "Full run trace",
   }),
@@ -86,7 +90,12 @@ export function sanitizeWalletResult(result) {
 export function appVisibilityPermissions(resources) {
   if (!Array.isArray(resources)) return [];
   const requested = new Set(resources.filter((resource) => typeof resource === "string"));
-  return signedAppVisibility.filter(({ resource }) => requested.has(resource));
+  const compact = new Set(resources
+    .filter((resource) => typeof resource === "string" && resource.startsWith("urn:nanocodex:agent:visibility:"))
+    .flatMap((resource) => resource.slice("urn:nanocodex:agent:visibility:".length).split(",")));
+  return signedAppVisibility
+    .filter(({ resource, name }) => requested.has(resource) || compact.has(name))
+    .map(({ name: _name, ...permission }) => permission);
 }
 
 export function isLoopbackOrigin(value) {
