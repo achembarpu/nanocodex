@@ -162,7 +162,6 @@
     "@microsoft/dev-tunnels-ssh": "3.12.40",
     "@microsoft/dev-tunnels-ssh-keys": "3.12.40",
     "@modelcontextprotocol/sdk": "1.30.0",
-    "accounts": "0.16.2",
     "buffer": "6.0.3",
     "diff": "^9.0.0",
     "hyparquet": "1.28.2",
@@ -175,6 +174,7 @@
     "pako": "2.1.0",
     "pyodide": "314.0.5",
     "viem": "2.55.13",
+    "wata": "0.4.0",
     "ws": "^8.18.3"
   },
   "devDependencies": {

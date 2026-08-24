@@ -8,7 +8,6 @@ import type {
 } from "nanocodex/connect";
 import {
   useConnectAgent,
-  useConnection,
   useFund,
   useRevokeGrant,
 } from "nanocodex-react/connect";
@@ -61,12 +60,12 @@ const DEFAULT_REQUEST: ConnectRequest = {
 const EMPTY_OBSERVATION: AppObservation = { actions: [], historyTurns: 0, traceEvents: 0 };
 
 export function App() {
-  const { connection } = useConnection({ config });
   const [audit, setAudit] = useState<readonly AuditEvent[]>(INITIAL_AUDIT);
   const [error, setError] = useState<string>();
   const [request, setRequest] = useState<ConnectRequest>(DEFAULT_REQUEST);
   const [observation, setObservation] = useState<AppObservation>(EMPTY_OBSERVATION);
   const connect = useConnectAgent({ config });
+  const connection = connect.connection;
   const fund = useFund({ config });
   const revoke = useRevokeGrant({ config });
   const isMutating = connect.connectionStatus === "connecting"
@@ -160,6 +159,8 @@ export function App() {
       },
     );
   }
+
+  if (connect.connectionStatus === "connecting" && !connect.isPending) return null;
 
   return (
     <main className="app-shell" data-testid="connect-playground">

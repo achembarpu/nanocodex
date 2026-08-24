@@ -1,7 +1,8 @@
 import { connectActions } from "./Decorator.mjs";
 import { iframe } from "./Dialog.mjs";
+import { connectionFromWire } from "./internal.mjs";
+import { create as createRemoteProvider } from "./RemoteProvider.mjs";
 import { http } from "./Transport.mjs";
-import { Provider, postMessage } from "accounts";
 
 let sequence = 0;
 
@@ -13,16 +14,9 @@ export function create(parameters) {
   const dialog = parameters.dialog ?? iframe();
   const transportInstance = transport.setup({ appId: parameters.appId });
   const dialogInstance = dialog.setup({ appId: parameters.appId });
-  const provider = parameters.provider ?? Provider.create({
-    adapter: postMessage({
-      host: dialogInstance.host,
-      name: parameters.name ?? "Nanocodex Connect",
-      rdns: `xyz.nanocodex.${parameters.appId}`,
-      target: (options) => dialogInstance.walletTarget(options),
-    }),
-    auth: parameters.auth,
-    accessKey: parameters.accessKey,
-    mpp: false,
+  const provider = parameters.provider ?? createRemoteProvider({
+    host: dialogInstance.host,
+    target: (options) => dialogInstance.walletTarget(options),
   });
   const uid = `${transport.key}:${parameters.appId}:${++sequence}`;
   const sessionStorage = parameters.session === false
@@ -100,6 +94,25 @@ export function create(parameters) {
       return readSession(sessionStorage, sessionStorageKey) !== undefined;
     },
   });
+  Object.defineProperty(base, "_resumeConnection", {
+    enumerable: false,
+    value() {
+      const session = readSession(sessionStorage, sessionStorageKey);
+      if (!session?.connection) return undefined;
+      try {
+        const connection = connectionFromWire(session.connection);
+        if (connection.grant.id.toLowerCase() !== session.grantId.toLowerCase()
+          || connection.grant.status !== "active"
+          || connection.grant.expiresAt <= Math.floor(Date.now() / 1_000)) {
+          return undefined;
+        }
+        sessionToken = session.token;
+        return connection;
+      } catch {
+        return undefined;
+      }
+    },
+  });
   Object.defineProperty(base, "_clearSession", {
     enumerable: false,
     value() {
@@ -155,7 +168,13 @@ function readSession(storage, key) {
       removeSession(storage, key);
       return undefined;
     }
-    return Object.freeze({ grantId: value.grantId, token: value.token });
+    return Object.freeze({
+      grantId: value.grantId,
+      token: value.token,
+      ...(value.connection && typeof value.connection === "object"
+        ? { connection: value.connection }
+        : {}),
+    });
   } catch {
     removeSession(storage, key);
     return undefined;

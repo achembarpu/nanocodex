@@ -38,8 +38,6 @@ export function ConnectAgentExperience({
         historyTurns = state.completed_turns;
         onObservation({ actions: [], historyTurns, traceEvents: 0 });
       }).catch(() => {});
-    } else {
-      onObservation({ actions: [], historyTurns: 0, traceEvents: 0 });
     }
 
     const controller = new AbortController();

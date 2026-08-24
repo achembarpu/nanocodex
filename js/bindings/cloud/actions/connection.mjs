@@ -99,7 +99,11 @@ export async function connect(client, options) {
     throw new Error("Nanocodex Connect returned no grant-scoped session");
   }
   const connection = connectionFromWire(wire);
-  client._setSession({ grantId: connection.grant.id, token: grantToken });
+  client._setSession({
+    grantId: connection.grant.id,
+    token: grantToken,
+    connection: sessionConnectionWire(wire),
+  });
   return connection;
 }
 
@@ -260,21 +264,31 @@ export async function reconnect(client, options = {}) {
   if (!session) return undefined;
   client._setSessionToken(session.token);
   try {
-    const connection = connectionFromWire(await client.request({
+    const wire = await client.request({
       method: "GET",
       path: `/v1/grants/${session.grantId}`,
       signal: options.signal,
-    }));
+    });
+    const connection = connectionFromWire(wire);
     if (connection.grant.status !== "active"
       || connection.grant.expiresAt <= Math.floor(Date.now() / 1_000)) {
       client._clearSession();
       return undefined;
     }
-    client._setSession(session);
+    client._setSession({
+      grantId: session.grantId,
+      token: session.token,
+      connection: sessionConnectionWire(wire),
+    });
     return connection;
   } catch (error) {
     client._setSessionToken(undefined);
     if (error?.status === 401 || error?.status === 403) client._clearSession();
     throw error;
   }
+}
+
+function sessionConnectionWire(wire) {
+  const { grant_token: _grantToken, ...connection } = wire;
+  return connection;
 }

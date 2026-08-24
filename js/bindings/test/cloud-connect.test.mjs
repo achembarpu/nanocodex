@@ -320,9 +320,11 @@ test("Connect persists, validates, and clears an app-scoped grant session", asyn
   });
   const connected = await first.connection.connect();
   assert.equal(connected.grant.id, wire.grant.id);
+  const { grant_token: _grantToken, ...connectionWire } = wire;
   assert.deepEqual(JSON.parse(storage.getItem("nanocodex:connect:session-workspace:session")), {
     grantId: wire.grant.id,
     token: wire.grant_token,
+    connection: connectionWire,
   });
 
   const restoredClient = Client.create({
@@ -332,6 +334,7 @@ test("Connect persists, validates, and clears an app-scoped grant session", asyn
     session: storage,
     transport,
   });
+  assert.equal(restoredClient._resumeConnection().agentId, wire.agent_id);
   const restored = await restoredClient.connection.reconnect();
   assert.equal(restored.grant.id, connected.grant.id);
   assert.equal(requests.at(-1).headers.authorization, `Bearer ${wire.grant_token}`);

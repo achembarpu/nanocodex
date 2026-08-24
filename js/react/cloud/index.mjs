@@ -56,16 +56,33 @@ export function createConfig(parameters) {
         setState(DISCONNECTED);
         return undefined;
       }
-      setState(connectionSnapshot("connecting"));
+      if (state.status !== "connecting") setState(connectionSnapshot("connecting"));
       reconnecting = (async () => {
         let agent;
         try {
-          const connection = await client.connection.reconnect();
+          const resumed = client._resumeConnection?.();
+          const refreshing = client.connection.reconnect();
+          void refreshing.catch(() => {});
+          if (resumed) {
+            try {
+              agent = await client.agent.create({ ...agentOptions, connection: resumed });
+              setState(connectionSnapshot("connected", resumed, agent));
+            } catch {
+              agent = undefined;
+            }
+          }
+          const connection = await refreshing;
           if (!connection) {
+            await agent?.session.shutdown().catch(() => {});
             setState(DISCONNECTED);
             return undefined;
           }
-          agent = await client.agent.create({ ...agentOptions, connection });
+          if (!agent
+            || resumed.agentId !== connection.agentId
+            || resumed.grant.id.toLowerCase() !== connection.grant.id.toLowerCase()) {
+            await agent?.session.shutdown().catch(() => {});
+            agent = await client.agent.create({ ...agentOptions, connection });
+          }
           setState(connectionSnapshot("connected", connection, agent));
           return Object.freeze({ connection, agent });
         } catch (error) {

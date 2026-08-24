@@ -2,7 +2,26 @@ import type { ConnectActions } from "./Decorator.mjs";
 import type { Instance as DialogInstance, Dialog } from "./Dialog.mjs";
 import type { Request, Transport } from "./Transport.mjs";
 import type { Auth, AuthorizeAccessKey } from "./actions/connection.mjs";
-import type { Provider } from "accounts";
+
+export type Provider = Readonly<{
+  request(request: Readonly<{
+    method: string;
+    params?: readonly unknown[] | undefined;
+    context?: Readonly<Record<string, unknown>> | undefined;
+  }>): Promise<unknown>;
+  store?: Readonly<{
+    getState?(): Readonly<{
+      accounts?: readonly Readonly<{ address: string }>[] | undefined;
+      activeAccount?: number | undefined;
+      accessKeys?: readonly Readonly<{
+        access: string;
+        address: string;
+        chainId: number;
+        expiry: number;
+      }>[] | undefined;
+    }>;
+  }> | undefined;
+}>;
 
 export type Base = Readonly<{
   appId: string;
@@ -11,7 +30,7 @@ export type Base = Readonly<{
   dialog: DialogInstance;
   key: string;
   name: string;
-  provider: Provider.Provider;
+  provider: Provider;
   type: "connect";
   uid: string;
   transport: Readonly<{ key: string; name: string; type: string; baseUrl: string }>;
@@ -32,8 +51,8 @@ export type Parameters = Readonly<{
   dialog?: Dialog | undefined;
   key?: string | undefined;
   name?: string | undefined;
-  /** Advanced override for the Accounts provider that owns the access key. */
-  provider?: Provider.Provider | undefined;
+  /** Advanced override for the remote wallet provider that owns the access key. */
+  provider?: Provider | undefined;
   /** App-scoped grant session persistence. Defaults to browser localStorage. */
   session?: Pick<Storage, "getItem" | "setItem" | "removeItem"> | false | undefined;
   transport?: Transport | undefined;
