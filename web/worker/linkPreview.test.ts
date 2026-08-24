@@ -299,11 +299,12 @@ test("generated PNG images are cacheable, deterministic, bounded, and conditiona
   assert.ok((await bounded!.arrayBuffer()).byteLength < 100_000);
 });
 
-test("Cloudflare routes every preview-owning document and image through the Worker", async () => {
+test("Cloudflare routes every Worker-owned document and generated image through the Worker", async () => {
   const config = JSON.parse(await readFile(new URL("../wrangler.jsonc", import.meta.url), "utf8"));
-  assert.deepEqual(config.assets.run_worker_first.slice(0, 14), [
+  assert.deepEqual(config.assets.run_worker_first.slice(0, 16), [
     "/", "/agent", "/multiplayer", "/world", "/artifact-runtime", "/changelog",
-    "/code", "/commits", "/requests", "/docs", "/docs/*", "/evals", "/evals/*", "/og.png",
+    "/code", "/commits", "/requests", "/connect-dialog", "/connect-dialog/*",
+    "/docs", "/docs/*", "/evals", "/evals/*", "/og.png",
   ]);
 });
 
