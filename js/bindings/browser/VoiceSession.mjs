@@ -70,6 +70,7 @@ export class BrowserVoiceSession {
   #starting;
   #closePromise;
   #closed = false;
+  #closing = new AbortController();
 
   constructor(options) {
     this.#options = options;
@@ -137,7 +138,8 @@ export class BrowserVoiceSession {
 
     const offer = await peer.createOffer();
     await peer.setLocalDescription(offer);
-    await waitForIce(peer);
+    await waitForIce(peer, this.#closing.signal);
+    if (this.#closed || peer.signalingState === "closed") return;
     const sdp = peer.localDescription?.sdp;
     if (!sdp) throw new Error("the browser did not produce a Realtime WebRTC offer");
 
@@ -166,6 +168,7 @@ export class BrowserVoiceSession {
       : await core.sidebandUrl(completed.call_id);
     this.#sidebandUrl = String(sidebandUrl);
     await this.#openSideband();
+    if (this.#closed) return;
     this.#status(`Voice active (${this.#options.voice}) — /voice off to stop`);
   }
 
@@ -182,6 +185,10 @@ export class BrowserVoiceSession {
   close() {
     if (this.#closePromise) return this.#closePromise;
     this.#closed = true;
+    this.#closing.abort();
+    // Microphone and speaker ownership ends synchronously. Protocol tail/lifecycle
+    // cleanup may legitimately wait behind an independent coding turn.
+    this.#stopBrowserMedia();
     this.#closePromise = this.#finishClose();
     return this.#closePromise;
   }
@@ -189,6 +196,7 @@ export class BrowserVoiceSession {
   abort() {
     if (this.#closed && this.#closePromise) return;
     this.#closed = true;
+    this.#closing.abort();
     this.#stopBrowserIo();
     this.#core?.free();
     this.#core = undefined;
@@ -197,7 +205,6 @@ export class BrowserVoiceSession {
 
   async #finishClose() {
     try {
-      await this.#starting?.catch(() => {});
       await this.#inbound;
       if (this.#core) {
         await this.#options.beforeAgentTurn?.();
@@ -211,6 +218,7 @@ export class BrowserVoiceSession {
   }
 
   #enqueue(operation) {
+    if (this.#closed) return Promise.resolve();
     const next = this.#inbound.then(operation).then((effects) => this.#apply(effects));
     this.#inbound = next.catch((error) => {
       if (!this.#closed) this.#options.onTerminated(errorMessage(error));
@@ -261,7 +269,7 @@ export class BrowserVoiceSession {
     this.#sideband = sideband;
     let opened = false;
     sideband.addEventListener("message", (event) => {
-      if (generation === this.#sidebandGeneration) {
+      if (!this.#closed && generation === this.#sidebandGeneration) {
         this.#enqueue(async () => {
           if (await this.#core.requiresAgentAdmission(event.data)) {
             await this.#options.beforeAgentTurn?.();
@@ -275,7 +283,7 @@ export class BrowserVoiceSession {
       const connectedMs = Math.max(0, Date.now() - this.#sidebandOpenedAt);
       this.#enqueue(() => this.#core.sidebandClosed(Math.min(connectedMs, 0xffff_ffff)));
     });
-    await waitForWebSocket(sideband);
+    await waitForWebSocket(sideband, this.#closing.signal);
     if (this.#closed || generation !== this.#sidebandGeneration) {
       sideband.close();
       return;
@@ -290,18 +298,27 @@ export class BrowserVoiceSession {
   }
 
   #stopBrowserIo() {
+    this.#stopBrowserMedia();
+    this.#sidebandGeneration += 1;
+    this.#sideband?.close();
+    this.#sideband = undefined;
+  }
+
+  #stopBrowserMedia() {
     this.#call?.abort();
     this.#call = undefined;
     if (this.#flushTimer !== undefined) window.clearTimeout(this.#flushTimer);
     this.#flushTimer = undefined;
     if (this.#reconnectTimer !== undefined) window.clearTimeout(this.#reconnectTimer);
     this.#reconnectTimer = undefined;
-    this.#sidebandGeneration += 1;
-    this.#sideband?.close();
     this.#channel?.close();
+    this.#channel = undefined;
     this.#peer?.close();
+    this.#peer = undefined;
     stopStream(this.#microphone);
+    this.#microphone = undefined;
     this.#speaker?.close();
+    this.#speaker = undefined;
   }
 }
 
@@ -340,29 +357,46 @@ function realtimeSidebandUrl(callId, sessionId) {
   return url;
 }
 
-function waitForIce(peer) {
+function waitForIce(peer, signal) {
   if (peer.iceGatheringState === "complete") return Promise.resolve();
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     const changed = () => {
       if (peer.iceGatheringState !== "complete") return;
-      peer.removeEventListener("icegatheringstatechange", changed);
+      cleanup();
       resolve();
     };
+    const stopped = () => {
+      cleanup();
+      reject(new Error("voice connection stopped"));
+    };
+    const cleanup = () => {
+      peer.removeEventListener("icegatheringstatechange", changed);
+      signal?.removeEventListener("abort", stopped);
+    };
     peer.addEventListener("icegatheringstatechange", changed);
+    signal?.addEventListener("abort", stopped, { once: true });
+    if (signal?.aborted) stopped();
   });
 }
 
-function waitForWebSocket(socket) {
+function waitForWebSocket(socket, signal) {
   if (socket.readyState === WebSocket.OPEN) return Promise.resolve();
   return new Promise((resolve, reject) => {
     const opened = () => { cleanup(); resolve(); };
     const failed = () => { cleanup(); reject(new Error("voice sideband connection failed")); };
+    const closed = () => { cleanup(); reject(new Error("voice sideband closed before opening")); };
+    const stopped = () => { cleanup(); reject(new Error("voice connection stopped")); };
     const cleanup = () => {
       socket.removeEventListener("open", opened);
       socket.removeEventListener("error", failed);
+      socket.removeEventListener("close", closed);
+      signal?.removeEventListener("abort", stopped);
     };
     socket.addEventListener("open", opened);
     socket.addEventListener("error", failed);
+    socket.addEventListener("close", closed);
+    signal?.addEventListener("abort", stopped, { once: true });
+    if (signal?.aborted) stopped();
   });
 }
 

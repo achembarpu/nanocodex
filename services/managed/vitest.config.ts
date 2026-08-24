@@ -107,6 +107,7 @@ export default {
       && request.headers.get("chatgpt-account-id") === null;
     if (realtimeCall) {
       return Response.json({
+        agent: request.headers.get("x-nanocodex-agent-id"),
         body: await request.text(),
         cookie: request.headers.get("cookie"),
         origin: request.headers.get("origin"),
@@ -126,6 +127,7 @@ export default {
       const [client, server] = Object.values(pair);
       server.accept();
       queueMicrotask(() => server.send(JSON.stringify({
+        agent: request.headers.get("x-nanocodex-agent-id"),
         callId: request.headers.get("x-nanocodex-realtime-call-id"),
         cookie: request.headers.get("cookie"),
         session: request.headers.get("x-session-id"),

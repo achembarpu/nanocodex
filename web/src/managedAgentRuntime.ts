@@ -70,9 +70,13 @@ export function createManagedConversation(accountId = "default"): Promise<Manage
 }
 
 export function openManagedTerminalAgent(agentId: string): ControllerAgent {
+  return managedTerminalAgent(openManagedAgent(agentId));
+}
+
+export function openManagedAgent(agentId: string): ManagedAgent {
   const managed = managedAgents.get(agentId) ?? Agent.open(agentId);
   managedAgents.set(agentId, managed);
-  return managedTerminalAgent(managed);
+  return managed;
 }
 
 export function managedTerminalAgent(

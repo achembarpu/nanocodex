@@ -1,4 +1,5 @@
 import { ManagedError } from "./ManagedError.mjs";
+import { registerManagedAgent } from "./internal.mjs";
 
 const API_KEY = /^ncx_live_[A-Za-z0-9_-]{12}_[A-Za-z0-9_-]{43}$/;
 const CURSOR = /^(?:0|[1-9][0-9]*)$/;
@@ -75,7 +76,7 @@ function agentHandle(client, id, summary) {
     page: (options = {}) => eventHistoryPage(client, id, options),
     watch: (options = {}) => eventStream.subscribe(options),
   });
-  const agent = {
+  const agent = Object.freeze({
     type: "managed",
     id,
     ...(summary === undefined ? {} : { summary }),
@@ -88,8 +89,9 @@ function agentHandle(client, id, summary) {
       await client.empty(agentPath(id), { method: "DELETE" });
       eventStream.close();
     },
-  };
-  return Object.freeze(agent);
+  });
+  registerManagedAgent(agent, client, id);
+  return agent;
 }
 
 function managedSummary(value) {

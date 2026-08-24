@@ -105,6 +105,7 @@ export function fetchManagedRealtimeCall(
   access: ManagedModelAccess,
   identity: ManagedRealtimeIdentity,
   body: string,
+  agentId?: string,
 ): Promise<Response> {
   return access.binding.fetch(new Request("https://nanocodex.internal/v1/realtime/calls", {
     method: "POST",
@@ -116,6 +117,7 @@ export function fetchManagedRealtimeCall(
       "x-session-id": identity.realtimeSessionId,
       "session-id": identity.sessionId,
       "thread-id": identity.threadId,
+      ...(agentId === undefined ? {} : { "x-nanocodex-agent-id": agentId }),
     },
     body,
   }));
@@ -126,6 +128,7 @@ export function openManagedRealtimeSideband(
   access: ManagedModelAccess,
   callId: string,
   identity: ManagedRealtimeIdentity,
+  agentId?: string,
 ): Promise<Response> {
   return access.binding.fetch(new Request("https://nanocodex.internal/v1/realtime/sideband", {
     headers: {
@@ -137,6 +140,7 @@ export function openManagedRealtimeSideband(
       "x-session-id": identity.realtimeSessionId,
       "session-id": identity.sessionId,
       "thread-id": identity.threadId,
+      ...(agentId === undefined ? {} : { "x-nanocodex-agent-id": agentId }),
     },
   }));
 }

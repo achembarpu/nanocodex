@@ -1,4 +1,5 @@
 import type { DefaultAgent } from "../types.mjs";
+import type { Agent as ManagedAgent } from "../managed/Agent.mjs";
 
 export const voices: readonly ["juniper", "maple", "spruce", "ember", "vale", "breeze", "arbor", "sol", "cove"];
 export const defaultVoice: "cove";
@@ -34,4 +35,4 @@ export type Voice = Readonly<{
   subscribe(listener: () => void): () => void;
   toggle(options?: { voice?: VoiceName | undefined }): Promise<void>;
 }>;
-export function create(agent: DefaultAgent, options?: Options): Voice;
+export function create(agent: DefaultAgent | ManagedAgent, options?: Options): Voice;

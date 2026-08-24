@@ -282,7 +282,7 @@ impl VoiceSession {
 /// Realtime reconnect.
 #[derive(Clone, Default)]
 pub struct VoiceAgentControl {
-    active: Arc<Mutex<Option<ActiveVoiceAgentTurn>>>,
+    state: Arc<Mutex<VoiceAgentControlState>>,
 }
 
 impl VoiceAgentControl {
@@ -315,28 +315,33 @@ impl VoiceAgentControl {
     }
 
     fn active(&self) -> Option<ActiveVoiceAgentTurn> {
-        self.lock().clone()
+        self.lock().active.clone()
     }
 
-    fn set(&self, generation: u64, control: TurnControl) {
-        *self.lock() = Some(ActiveVoiceAgentTurn {
+    fn install(&self, control: TurnControl) -> u64 {
+        let mut state = self.lock();
+        state.next_generation = state.next_generation.saturating_add(1);
+        let generation = state.next_generation;
+        state.active = Some(ActiveVoiceAgentTurn {
             generation,
             control,
         });
+        generation
     }
 
     fn clear(&self, generation: u64) {
-        let mut active = self.lock();
-        if active
+        let mut state = self.lock();
+        if state
+            .active
             .as_ref()
             .is_some_and(|active| active.generation == generation)
         {
-            *active = None;
+            state.active = None;
         }
     }
 
-    fn lock(&self) -> MutexGuard<'_, Option<ActiveVoiceAgentTurn>> {
-        match self.active.lock() {
+    fn lock(&self) -> MutexGuard<'_, VoiceAgentControlState> {
+        match self.state.lock() {
             Ok(active) => active,
             Err(poisoned) => poisoned.into_inner(),
         }
@@ -347,6 +352,12 @@ impl VoiceAgentControl {
 struct ActiveVoiceAgentTurn {
     generation: u64,
     control: TurnControl,
+}
+
+#[derive(Default)]
+struct VoiceAgentControlState {
+    active: Option<ActiveVoiceAgentTurn>,
+    next_generation: u64,
 }
 
 impl Drop for VoiceSession {
@@ -1053,9 +1064,8 @@ async fn handle_realtime_event(
                 .await
             {
                 Ok(PromptRoute::Started(turn)) => {
-                    agent_bridge.next_generation = agent_bridge.next_generation.saturating_add(1);
-                    let generation = agent_bridge.next_generation;
-                    agent_bridge.control.set(generation, turn.control());
+                    let generation = agent_bridge.control.install(turn.control());
+                    agent_bridge.next_generation = agent_bridge.next_generation.max(generation);
                     agent_bridge.active = Some(ActiveAgentRequest {
                         generation,
                         call_id: call_id.clone(),

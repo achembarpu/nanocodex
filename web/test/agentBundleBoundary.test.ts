@@ -42,7 +42,8 @@ test("the authenticated terminal consumes the public React hooks directly", () =
     terminal,
     /useNanocodex\(\{ config: agentConfig, threadId \}\)/,
   );
-  assert.match(terminal, /useVoice\(agent, \{ beforeAgentTurn: beforeLocalTurn \}\)/);
+  assert.match(terminal, /useVoice\(agent, \{[\s\S]*?beforeAgentTurn: beforeLocalTurn,[\s\S]*?enabled: mode !== "hidden"/);
+  assert.match(terminal, /useVoice\(managed, \{ enabled: mode !== "hidden" \}\)/);
   assert.doesNotMatch(terminal, /NanocodexProvider|prepareAgent|preload/);
 });
 

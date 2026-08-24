@@ -13,7 +13,13 @@ const MODEL_PATHS = new Set([
   "/v1/realtime/sideband",
 ]);
 
-type BrowserModelEnv = AccountAuthEnv & { NANOCODEX: Fetcher };
+type BrowserModelEnv = AccountAuthEnv & {
+  NANOCODEX: Fetcher;
+  NANOCODEX_SESSIONS: {
+    idFromName(name: string): DurableObjectId;
+    get(id: DurableObjectId): Fetcher;
+  };
+};
 
 /**
  * Authenticates browser-owned model traffic inside the private managed Worker,
@@ -50,7 +56,11 @@ export async function routeBrowserModel(
       headers: { "cache-control": "no-store" },
     });
   }
-  const subject = await browserModelSubject(principal.userId);
+  const realtimeSubject = model && url.pathname.startsWith("/v1/realtime/")
+    ? await ownedRealtimeSubject(request, env, principal.userId)
+    : undefined;
+  if (realtimeSubject instanceof Response) return realtimeSubject;
+  const subject = realtimeSubject ?? await browserModelSubject(principal.userId);
   try {
     await bindAgentCredential(env.NANOCODEX, subject, principal.userId);
   } catch {
@@ -62,8 +72,33 @@ export async function routeBrowserModel(
 
   const headers = new Headers(request.headers);
   headers.delete("cookie");
+  headers.delete("x-nanocodex-agent-id");
   headers.set("x-nanocodex-subject", subject);
   return env.NANOCODEX.fetch(new Request(request, { headers }));
+}
+
+async function ownedRealtimeSubject(
+  request: Request,
+  env: BrowserModelEnv,
+  userId: string,
+): Promise<string | Response | undefined> {
+  const agentId = request.headers.get("x-nanocodex-agent-id");
+  if (agentId === null) return undefined;
+  const identities = [
+    request.headers.get("x-session-id"),
+    request.headers.get("session-id"),
+    request.headers.get("thread-id"),
+  ];
+  if (!UUID.test(agentId) || identities.some((identity) => identity !== agentId)) {
+    return Response.json({ error: "not_found" }, { status: 404 });
+  }
+  const durableId = env.NANOCODEX_SESSIONS.idFromName(agentId);
+  const owned = await env.NANOCODEX_SESSIONS.get(durableId).fetch("https://session.internal/state", {
+    headers: { "x-nanocodex-owner-id": userId },
+  });
+  await owned.body?.cancel();
+  if (!owned.ok) return Response.json({ error: "not_found" }, { status: 404 });
+  return durableId.toString();
 }
 
 async function browserModelSubject(userId: string): Promise<string> {
@@ -75,3 +110,5 @@ async function browserModelSubject(userId: string): Promise<string> {
   for (const byte of new Uint8Array(digest)) binary += String.fromCharCode(byte);
   return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
 }
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;

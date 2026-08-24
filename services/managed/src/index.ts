@@ -7,17 +7,13 @@ import {
 } from "@cloudflare/computer";
 import type {
   AgentEvent,
+  AgentSessionContext,
   EventWatcher,
   PromptInput,
   Turn,
 } from "nanocodex";
 import { Agent as CloudflareAgent } from "nanocodex/cloudflare";
-import {
-  imageGeneration,
-  updatePlan,
-  viewImage,
-  web,
-} from "nanocodex/tools";
+import { imageGeneration, updatePlan, viewImage, web } from "nanocodex/tools";
 import { justBash } from "nanocodex/tools/bash";
 import { createComputerFilesystem } from "./computer-workspace";
 import { fetchResponseWithDeadline, withHardDeadline } from "./deadline";
@@ -92,13 +88,19 @@ const MAX_CLIENT_MESSAGE_BYTES = 1024 * 1024;
 const MAX_ACTIVE_TURNS = 16;
 const MAX_CLIENT_CONNECTIONS = 64;
 const MAX_REQUEST_BODY_BYTES = 1024 * 1024;
+const MAX_REALTIME_REQUEST_BYTES = 64 * 1024;
+const MAX_REALTIME_CONTEXT_BYTES = 1024 * 1024;
 const MAX_RETRY_DELAY_MS = 60_000;
-const SESSION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
-const ROOM_ROUTE_ID = /^([0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})~([A-Za-z0-9_-]{43})$/;
+const SESSION_ID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const ROOM_ROUTE_ID =
+  /^([0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})~([A-Za-z0-9_-]{43})$/;
 const AGENT_TOKEN = /^[A-Za-z0-9_-]{43}$/;
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const UUID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const TURN_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const IDEMPOTENCY_KEY = /^[\x21-\x7e]{1,256}$/;
+const REALTIME_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const encoder = new TextEncoder();
 const ENCODED_PONG = JSON.stringify({ type: "pong" });
 const SESSION_DELETING_KEY = "nanocodex:session-deleting";
@@ -198,7 +200,36 @@ type ManagedTurnSubmission = {
   row: ManagedTurnRow;
 };
 
-type ManagedTransition = TurnTerminal | Extract<StreamMessage, { type: "turn_cancelling" }>;
+type ManagedRealtimeKind = "start" | "delegate" | "stop";
+
+type ManagedRealtimeOperationRow = {
+  kind: ManagedRealtimeKind;
+  operation_id: string;
+  request_hash: string;
+  response_json: string | null;
+  state: "pending" | "completed";
+  voice_session_id: string;
+};
+
+type ManagedRealtimeRequest = {
+  input?: string;
+  operationId: string;
+  voiceSessionId: string;
+};
+
+type ManagedRealtimeSessionRow = {
+  voice_session_id: string;
+};
+
+type ManagedRealtimeRouteResult = Readonly<{
+  operation_id: string;
+  route: "started" | "steered";
+  turn_id: string;
+  voice_session_id: string;
+}>;
+
+type ManagedTransition =
+  TurnTerminal | Extract<StreamMessage, { type: "turn_cancelling" }>;
 
 type AgentRuntimeProfile = "managed" | "multiplayer";
 
@@ -472,38 +503,81 @@ export default {
       });
     }
     if (resource === "turns") {
-      if (request.method !== "POST") return json({ error: "method_not_allowed" }, { status: 405 });
+      if (request.method !== "POST")
+        return json({ error: "method_not_allowed" }, { status: 405 });
       const originFailure = requireSameOriginMutation(request, url, principal);
       if (originFailure) return originFailure;
-      const response = await stub.fetch(`https://session.internal/turns?${publicOrigin}`, {
-        method: "POST",
-        headers: sessionHeaders,
-        body: request.body,
-      });
+      const response = await stub.fetch(
+        `https://session.internal/turns?${publicOrigin}`,
+        {
+          method: "POST",
+          headers: sessionHeaders,
+          body: request.body,
+        },
+      );
       const created = response.headers.get("x-nanocodex-turn-created") === "1";
       const encodedSummary = response.headers.get("x-nanocodex-turn-summary");
       if (created && encodedSummary !== null) {
         let title = "";
         let turnCount = 0;
         try {
-          const summary = JSON.parse(encodedSummary) as { title?: unknown; turnCount?: unknown };
+          const summary = JSON.parse(encodedSummary) as {
+            title?: unknown;
+            turnCount?: unknown;
+          };
           if (typeof summary.title === "string") title = summary.title;
-          if (Number.isSafeInteger(summary.turnCount) && Number(summary.turnCount) >= 0) {
+          if (
+            Number.isSafeInteger(summary.turnCount) &&
+            Number(summary.turnCount) >= 0
+          ) {
             turnCount = Number(summary.turnCount);
           }
-        } catch { /* Session-generated value is best effort. */ }
+        } catch {
+          /* Session-generated value is best effort. */
+        }
         if (turnCount > 0) {
-          ctx.waitUntil(recordAgentActivity(env, principal.userId, agentId, { title, turnCount }).catch((error) => {
-            console.error("managed agent summary update failed", errorMessage(error));
-          }));
+          ctx.waitUntil(
+            recordAgentActivity(env, principal.userId, agentId, {
+              title,
+              turnCount,
+            }).catch((error) => {
+              console.error(
+                "managed agent summary update failed",
+                errorMessage(error),
+              );
+            }),
+          );
         }
       }
       const headers = new Headers(response.headers);
       headers.delete("x-nanocodex-turn-created");
       headers.delete("x-nanocodex-turn-summary");
-      return new Response(response.body, { status: response.status, statusText: response.statusText, headers });
+      return new Response(response.body, {
+        status: response.status,
+        statusText: response.statusText,
+        headers,
+      });
     }
-    const turnMatch = resource.match(/^turns\/([A-Za-z0-9._:-]{1,128})(?:\/(steer|cancel))?$/);
+    const realtimeMatch = resource.match(/^realtime\/(start|delegate|stop)$/);
+    if (realtimeMatch) {
+      if (request.method !== "POST")
+        return json({ error: "method_not_allowed" }, { status: 405 });
+      if (url.search !== "")
+        return json({ error: "invalid_request" }, { status: 400 });
+      const originFailure = requireSameOriginMutation(request, url, principal);
+      if (originFailure) return originFailure;
+      return stub.fetch(
+        `https://session.internal/realtime/${realtimeMatch[1]}?${publicOrigin}`,
+        {
+          method: "POST",
+          headers: sessionHeaders,
+          body: request.body,
+        },
+      );
+    }
+    const turnMatch = resource.match(
+      /^turns\/([A-Za-z0-9._:-]{1,128})(?:\/(steer|cancel))?$/,
+    );
     if (turnMatch) {
       const action = turnMatch[2];
       const expectedMethod = action === undefined ? "GET" : "POST";
@@ -580,7 +654,11 @@ export class NanocodexSession extends DurableComputerSession {
   readonly #admissionTasks = new Map<string, Promise<ManagedTurnRow>>();
   #initialAccountContextTask?: Promise<InitialAccountContext | undefined>;
   readonly #cancellationTasks = new Map<string, Promise<void>>();
+  readonly #realtimeOperations = new Map<string, Promise<unknown>>();
+  #realtimeOperationTail: Promise<void> = Promise.resolve();
   readonly #inFlight = new Set<Promise<unknown>>();
+  #realtimeEventBuffer?: AgentEvent[];
+  #realtimeRouteTail: Promise<void> = Promise.resolve();
   #recoveryTask?: Promise<void>;
   #recoveryRequested = false;
   #streamError?: string;
@@ -638,11 +716,30 @@ export class NanocodexSession extends DurableComputerSession {
       );
       CREATE UNIQUE INDEX IF NOT EXISTS managed_turns_request_key
         ON managed_turns(request_key) WHERE request_key IS NOT NULL;
+      CREATE TABLE IF NOT EXISTS managed_realtime_operations (
+        voice_session_id TEXT NOT NULL,
+        operation_id TEXT NOT NULL,
+        kind TEXT NOT NULL CHECK (kind IN ('start', 'delegate', 'stop')),
+        request_hash TEXT NOT NULL,
+        state TEXT NOT NULL CHECK (state IN ('pending', 'completed')),
+        response_json TEXT,
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        PRIMARY KEY (voice_session_id, operation_id)
+      );
+      CREATE TABLE IF NOT EXISTS managed_realtime_session (
+        singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+        voice_session_id TEXT NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
     `);
     this.#eventLog = new DurableEventLog<StreamMessage>(this.ctx.storage);
-    const sessionColumns = new Set(this.ctx.storage.sql.exec<{ name: string }>(
-      "PRAGMA table_info(session_state)",
-    ).toArray().map((column) => column.name));
+    const sessionColumns = new Set(
+      this.ctx.storage.sql
+        .exec<{ name: string }>("PRAGMA table_info(session_state)")
+        .toArray()
+        .map((column) => column.name),
+    );
     if (!sessionColumns.has("public_origin")) {
       this.ctx.storage.sql.exec(
         "ALTER TABLE session_state ADD COLUMN public_origin TEXT NOT NULL DEFAULT ''",
@@ -897,25 +994,52 @@ export class NanocodexSession extends DurableComputerSession {
       if (event) this.#publish(event);
       return new Response(null, { status: 204 });
     }
-    if (request.method === "GET" && url.pathname === "/socket") return this.#upgrade();
+    if (request.method === "GET" && url.pathname === "/socket")
+      return this.#upgrade();
+    const realtimeRoute = url.pathname.match(
+      /^\/realtime\/(start|delegate|stop)$/,
+    );
+    if (realtimeRoute) {
+      if (ownerAssertion === null)
+        return json({ error: "not_found" }, { status: 404 });
+      if (request.method !== "POST")
+        return json({ error: "method_not_allowed" }, { status: 405 });
+      return this.#managedRealtime(
+        realtimeRoute[1] as ManagedRealtimeKind,
+        request,
+      );
+    }
     if (request.method === "GET" && url.pathname === "/events") {
-      if (this.#deleting) return json({ error: "agent_deleting" }, { status: 409 });
-      if (!this.#sessionId()) return json({ error: "not_found" }, { status: 404 });
-      const requested = request.headers.get("last-event-id")
-        ?? url.searchParams.get("cursor")
-        ?? url.searchParams.get("after");
-      const cursor = requested === "latest" ? this.#eventLog.latestCursor() : parseCursor(requested);
-      if (cursor === undefined) return json({ error: "invalid_cursor" }, { status: 400 });
+      if (this.#deleting)
+        return json({ error: "agent_deleting" }, { status: 409 });
+      if (!this.#sessionId())
+        return json({ error: "not_found" }, { status: 404 });
+      const requested =
+        request.headers.get("last-event-id") ??
+        url.searchParams.get("cursor") ??
+        url.searchParams.get("after");
+      const cursor =
+        requested === "latest"
+          ? this.#eventLog.latestCursor()
+          : parseCursor(requested);
+      if (cursor === undefined)
+        return json({ error: "invalid_cursor" }, { status: 400 });
       return this.#eventLog.stream(cursor, request.signal);
     }
     if (request.method === "GET" && url.pathname === "/events/history") {
-      if (this.#deleting) return json({ error: "agent_deleting" }, { status: 409 });
-      if (!this.#sessionId()) return json({ error: "not_found" }, { status: 404 });
+      if (this.#deleting)
+        return json({ error: "agent_deleting" }, { status: 409 });
+      if (!this.#sessionId())
+        return json({ error: "not_found" }, { status: 404 });
       const requestedBefore = url.searchParams.get("before");
-      const before = requestedBefore === null ? undefined : parseCursor(requestedBefore);
+      const before =
+        requestedBefore === null ? undefined : parseCursor(requestedBefore);
       const requestedLimit = url.searchParams.get("limit") ?? "128";
-      if ((requestedBefore !== null && (before === undefined || before === "0"))
-        || !/^[1-9][0-9]*$/.test(requestedLimit)) {
+      if (
+        (requestedBefore !== null &&
+          (before === undefined || before === "0")) ||
+        !/^[1-9][0-9]*$/.test(requestedLimit)
+      ) {
         return json({ error: "invalid_history_page" }, { status: 400 });
       }
       const limit = Number(requestedLimit);
@@ -1155,48 +1279,444 @@ export class NanocodexSession extends DurableComputerSession {
       return json({ error: "invalid_json" }, { status: 400 });
     }
     if (!value || typeof value !== "object" || Array.isArray(value)) {
-      return json({ error: "invalid_request", message: "turn request must be a JSON object" }, { status: 400 });
+      return json(
+        {
+          error: "invalid_request",
+          message: "turn request must be a JSON object",
+        },
+        { status: 400 },
+      );
     }
     const body = value as Record<string, unknown>;
     if (Object.keys(body).some((key) => key !== "id" && key !== "input")) {
-      return json({ error: "invalid_request", message: "supported fields are id and input" }, { status: 400 });
+      return json(
+        {
+          error: "invalid_request",
+          message: "supported fields are id and input",
+        },
+        { status: 400 },
+      );
     }
     try {
       validatePromptInput(body.input);
     } catch (error) {
-      const protocol = error instanceof ProtocolError ? error : new ProtocolError("invalid_prompt", errorMessage(error));
-      return json({ error: protocol.code, message: protocol.message }, { status: 400 });
+      const protocol =
+        error instanceof ProtocolError
+          ? error
+          : new ProtocolError("invalid_prompt", errorMessage(error));
+      return json(
+        { error: protocol.code, message: protocol.message },
+        { status: 400 },
+      );
     }
-    if (body.id !== undefined && (typeof body.id !== "string" || !TURN_ID.test(body.id))) {
-      return json({ error: "invalid_turn_id", message: "turn id must be 1-128 safe ASCII characters" }, { status: 400 });
+    if (
+      body.id !== undefined &&
+      (typeof body.id !== "string" || !TURN_ID.test(body.id))
+    ) {
+      return json(
+        {
+          error: "invalid_turn_id",
+          message: "turn id must be 1-128 safe ASCII characters",
+        },
+        { status: 400 },
+      );
     }
     const requestKey = request.headers.get("idempotency-key");
     if (requestKey !== null && !IDEMPOTENCY_KEY.test(requestKey)) {
       return json({ error: "invalid_idempotency_key" }, { status: 400 });
     }
     if (body.id === undefined && requestKey === null) {
-      return json({
-        error: "idempotency_required",
-        message: "provide a stable turn id or Idempotency-Key",
-      }, { status: 400 });
+      return json(
+        {
+          error: "idempotency_required",
+          message: "provide a stable turn id or Idempotency-Key",
+        },
+        { status: 400 },
+      );
     }
 
     try {
       const input = body.input;
       const id = typeof body.id === "string" ? body.id : uuidV7();
       const requestHash = await hashManagedInput(input);
-      const submission = this.#submitManagedTurn(id, input, requestHash, requestKey, body.id !== undefined);
+      const submission = this.#submitManagedTurn(
+        id,
+        input,
+        requestHash,
+        requestKey,
+        body.id !== undefined,
+      );
       const view = managedTurnView(submission.row);
-      const summary = submission.created ? this.#conversationSummary() : undefined;
+      const summary = submission.created
+        ? this.#conversationSummary()
+        : undefined;
       return json(view, {
         status: submission.created ? 202 : 200,
-        headers: submission.created ? {
-          "x-nanocodex-turn-created": "1",
-          "x-nanocodex-turn-summary": asciiJsonHeaderValue(summary),
-        } : undefined,
+        headers: submission.created
+          ? {
+              "x-nanocodex-turn-created": "1",
+              "x-nanocodex-turn-summary": asciiJsonHeaderValue(summary),
+            }
+          : undefined,
       });
     } catch (error) {
       return managedErrorResponse(error);
+    }
+  }
+
+  async #managedRealtime(
+    kind: ManagedRealtimeKind,
+    request: Request,
+  ): Promise<Response> {
+    if (this.#deleting || this.#deleted) {
+      return json({ error: "agent_deleting" }, { status: 409 });
+    }
+    let encoded: string;
+    try {
+      encoded = await readBoundedRequestText(
+        request,
+        MAX_REALTIME_REQUEST_BYTES,
+      );
+    } catch (error) {
+      return managedErrorResponse(error);
+    }
+    let value: unknown;
+    try {
+      value = JSON.parse(encoded);
+    } catch {
+      return json({ error: "invalid_json" }, { status: 400 });
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) {
+      return json(
+        {
+          error: "invalid_request",
+          message: "realtime request must be a JSON object",
+        },
+        { status: 400 },
+      );
+    }
+    const body = value as Record<string, unknown>;
+    const allowed =
+      kind === "delegate"
+        ? new Set(["voice_session_id", "operation_id", "input"])
+        : new Set(["voice_session_id", "operation_id"]);
+    if (Object.keys(body).some((key) => !allowed.has(key))) {
+      return json(
+        {
+          error: "invalid_request",
+          message: `unsupported ${kind} request field`,
+        },
+        { status: 400 },
+      );
+    }
+    if (
+      typeof body.voice_session_id !== "string" ||
+      !REALTIME_ID.test(body.voice_session_id) ||
+      typeof body.operation_id !== "string" ||
+      !REALTIME_ID.test(body.operation_id)
+    ) {
+      return json(
+        {
+          error: "invalid_request",
+          message:
+            "voice_session_id and operation_id must be 1-128 safe ASCII characters",
+        },
+        { status: 400 },
+      );
+    }
+    if (kind === "delegate") {
+      if (
+        typeof body.input !== "string" ||
+        body.input.trim() === "" ||
+        encoder.encode(body.input).byteLength > MAX_REALTIME_REQUEST_BYTES / 2
+      ) {
+        return json(
+          {
+            error: "invalid_prompt",
+            message: `delegation input must be a non-empty string of at most ${MAX_REALTIME_REQUEST_BYTES / 2} bytes`,
+          },
+          { status: 400 },
+        );
+      }
+    } else if (body.input !== undefined) {
+      return json({ error: "invalid_request" }, { status: 400 });
+    }
+
+    const parsed: ManagedRealtimeRequest = {
+      voiceSessionId: body.voice_session_id,
+      operationId: body.operation_id,
+      ...(kind === "delegate" ? { input: body.input as string } : {}),
+    };
+    const requestHash = await hashText(
+      canonicalJson({
+        kind,
+        operation_id: parsed.operationId,
+        voice_session_id: parsed.voiceSessionId,
+        ...(parsed.input === undefined ? {} : { input: parsed.input }),
+      }),
+    );
+    try {
+      const result = await this.#runRealtimeOperation(
+        parsed,
+        kind,
+        requestHash,
+        async () => {
+          const agent = await this.#ensureAgent();
+          if (this.#deleting || this.#agent !== agent) {
+            throw retryableError(
+              "agent became unavailable during realtime operation",
+            );
+          }
+          if (kind === "start") {
+            const active = this.#managedRealtimeSession();
+            if (active?.voice_session_id === parsed.voiceSessionId) {
+              throw new ManagedRequestError(
+                409,
+                "voice_session_active",
+                "voice session is already active with a different operation identity",
+              );
+            }
+            if (active) {
+              this.ctx.storage.sql.exec(
+                "DELETE FROM managed_realtime_session WHERE singleton = 1 AND voice_session_id = ?",
+                active.voice_session_id,
+              );
+              await agent.session.realtime.end();
+            }
+            const context = await agent.session.realtime.start();
+            assertBoundedRealtimeContext(context);
+            this.ctx.storage.sql.exec(
+              `INSERT INTO managed_realtime_session (singleton, voice_session_id, updated_at)
+               VALUES (1, ?, ?)
+               ON CONFLICT (singleton) DO UPDATE SET
+                 voice_session_id = excluded.voice_session_id,
+                 updated_at = excluded.updated_at`,
+              parsed.voiceSessionId,
+              Date.now(),
+            );
+            return {
+              context,
+              operation_id: parsed.operationId,
+              voice_session_id: parsed.voiceSessionId,
+            };
+          }
+          if (kind === "stop") {
+            const active = this.#managedRealtimeSession();
+            if (active?.voice_session_id !== parsed.voiceSessionId) {
+              return {
+                context: [],
+                operation_id: parsed.operationId,
+                stale: active !== undefined,
+                stopped: false,
+                voice_session_id: parsed.voiceSessionId,
+              };
+            }
+            this.ctx.storage.sql.exec(
+              "DELETE FROM managed_realtime_session WHERE singleton = 1 AND voice_session_id = ?",
+              parsed.voiceSessionId,
+            );
+            const context = await agent.session.realtime.end();
+            assertBoundedRealtimeContext(context);
+            return {
+              context,
+              operation_id: parsed.operationId,
+              stopped: true,
+              voice_session_id: parsed.voiceSessionId,
+            };
+          }
+          if (this.#managedRealtimeSession()?.voice_session_id !== parsed.voiceSessionId) {
+            throw new ManagedRequestError(
+              409,
+              "voice_session_inactive",
+              "realtime delegation does not own the active voice session",
+            );
+          }
+          return this.#routeRealtimeDelegation(agent, parsed, requestHash);
+        },
+      );
+      return json(result, { status: kind === "delegate" ? 202 : 200 });
+    } catch (error) {
+      return managedErrorResponse(error, `realtime_${kind}_failed`);
+    }
+  }
+
+  async #runRealtimeOperation<Result>(
+    request: ManagedRealtimeRequest,
+    kind: ManagedRealtimeKind,
+    requestHash: string,
+    operation: () => Promise<Result>,
+  ): Promise<Result> {
+    const key = `${request.voiceSessionId}\n${request.operationId}`;
+    const existing = this.#managedRealtimeOperation(
+      request.voiceSessionId,
+      request.operationId,
+    );
+    if (
+      existing &&
+      (existing.kind !== kind || existing.request_hash !== requestHash)
+    ) {
+      throw new ManagedRequestError(
+        409,
+        "idempotency_conflict",
+        "realtime operation identity is already bound to a different request",
+      );
+    }
+    if (existing?.state === "completed" && existing.response_json !== null) {
+      return JSON.parse(existing.response_json) as Result;
+    }
+    const inFlight = this.#realtimeOperations.get(key);
+    if (inFlight) return inFlight as Promise<Result>;
+    if (existing?.state === "pending") {
+      throw new ManagedRequestError(
+        409,
+        "operation_pending",
+        "realtime operation is pending and will not be replayed",
+      );
+    }
+
+    const now = Date.now();
+    this.ctx.storage.sql.exec(
+      `INSERT INTO managed_realtime_operations (
+         voice_session_id, operation_id, kind, request_hash, state, response_json, created_at, updated_at
+       ) VALUES (?, ?, ?, ?, 'pending', NULL, ?, ?)
+       ON CONFLICT (voice_session_id, operation_id) DO UPDATE SET updated_at = excluded.updated_at`,
+      request.voiceSessionId,
+      request.operationId,
+      kind,
+      requestHash,
+      now,
+      now,
+    );
+    const task = this.#track(
+      (async () => {
+        try {
+          const result = await this.#serializeRealtimeOperation(operation);
+          const response = JSON.stringify(result);
+          if (
+            encoder.encode(response).byteLength >
+            MAX_REALTIME_CONTEXT_BYTES + MAX_REALTIME_REQUEST_BYTES
+          ) {
+            throw new ManagedRequestError(
+              413,
+              "response_too_large",
+              "realtime response exceeds the managed limit",
+            );
+          }
+          this.ctx.storage.sql.exec(
+            `UPDATE managed_realtime_operations
+           SET state = 'completed', response_json = ?, updated_at = ?
+           WHERE voice_session_id = ? AND operation_id = ? AND request_hash = ?`,
+            response,
+            Date.now(),
+            request.voiceSessionId,
+            request.operationId,
+            requestHash,
+          );
+          return result;
+        } catch (error) {
+          this.ctx.storage.sql.exec(
+            `DELETE FROM managed_realtime_operations
+           WHERE voice_session_id = ? AND operation_id = ? AND state = 'pending'`,
+            request.voiceSessionId,
+            request.operationId,
+          );
+          throw error;
+        }
+      })(),
+    );
+    this.#realtimeOperations.set(key, task);
+    try {
+      return await task;
+    } finally {
+      if (this.#realtimeOperations.get(key) === task)
+        this.#realtimeOperations.delete(key);
+    }
+  }
+
+  async #serializeRealtimeOperation<Result>(operation: () => Promise<Result>): Promise<Result> {
+    let release!: () => void;
+    const previous = this.#realtimeOperationTail;
+    this.#realtimeOperationTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous.catch(() => {});
+    try {
+      return await operation();
+    } finally {
+      release();
+    }
+  }
+
+  async #routeRealtimeDelegation(
+    agent: CloudflareAgent.Agent,
+    request: ManagedRealtimeRequest,
+    requestHash: string,
+  ): Promise<ManagedRealtimeRouteResult> {
+    const input = request.input!;
+    this.#assertRealtimeRouteAvailable();
+    let release!: () => void;
+    const previous = this.#realtimeRouteTail;
+    this.#realtimeRouteTail = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    await previous.catch(() => {});
+    try {
+      const turnId = `realtime:${(await hashText(`${request.voiceSessionId}\n${request.operationId}`)).slice(0, 48)}`;
+      this.#realtimeEventBuffer = [];
+      let turn: Turn | undefined;
+      try {
+        turn = await CloudflareAgent.route(agent, { input });
+      } catch (error) {
+        const buffered = this.#takeRealtimeEventBuffer();
+        for (const event of buffered) this.#recordAgentEvent(event);
+        throw error;
+      }
+      if (turn === undefined) {
+        const buffered = this.#takeRealtimeEventBuffer();
+        const activeTurnId = this.#eventTurnId;
+        for (const event of buffered) this.#recordAgentEvent(event);
+        if (activeTurnId === undefined) {
+          throw new ManagedRequestError(
+            503,
+            "event_attribution_failed",
+            "steered realtime input has no active managed turn attribution",
+          );
+        }
+        return {
+          operation_id: request.operationId,
+          route: "steered",
+          turn_id: activeTurnId,
+          voice_session_id: request.voiceSessionId,
+        };
+      }
+
+      try {
+        this.#acceptRoutedTurn(turnId, input, requestHash, request);
+        this.#turns.set(turnId, turn);
+        this.#turnInputs.set(turnId, input);
+        this.#eventTurnQueue.push(turnId);
+        const buffered = this.#takeRealtimeEventBuffer();
+        for (const event of buffered) this.#recordAgentEvent(event);
+        this.ctx.waitUntil(this.#track(this.#ownRoutedTurn(turnId, turn)));
+      } catch (error) {
+        this.#takeRealtimeEventBuffer();
+        try {
+          await turn.cancel();
+        } catch {
+          /* The failed adoption still owns disposal. */
+        }
+        turn.dispose();
+        throw error;
+      }
+      return {
+        operation_id: request.operationId,
+        route: "started",
+        turn_id: turnId,
+        voice_session_id: request.voiceSessionId,
+      };
+    } finally {
+      this.#realtimeEventBuffer = undefined;
+      release();
     }
   }
 
@@ -1204,23 +1724,40 @@ export class NanocodexSession extends DurableComputerSession {
     const row = this.#managedTurn(id);
     if (!row) return json({ error: "turn_not_found" }, { status: 404 });
     if (row.state !== "accepted") {
-      return json({ error: "turn_not_steerable", state: row.state }, { status: 409 });
+      return json(
+        { error: "turn_not_steerable", state: row.state },
+        { status: 409 },
+      );
     }
     const turn = this.#turns.get(id);
-    if (!turn) return json({ error: "turn_not_active", state: row.state }, { status: 409 });
+    if (!turn)
+      return json(
+        { error: "turn_not_active", state: row.state },
+        { status: 409 },
+      );
     try {
-      const encoded = await readBoundedRequestText(request, MAX_REQUEST_BODY_BYTES);
+      const encoded = await readBoundedRequestText(
+        request,
+        MAX_REQUEST_BODY_BYTES,
+      );
       const value = JSON.parse(encoded) as { input?: unknown };
       if (!value || typeof value !== "object" || Array.isArray(value)) {
-        throw new ProtocolError("invalid_request", "steer request must be a JSON object");
+        throw new ProtocolError(
+          "invalid_request",
+          "steer request must be a JSON object",
+        );
       }
       validatePromptInput(value.input);
       await turn.steer({ input: value.input });
       return json({ turn_id: id, state: "steering" }, { status: 202 });
     } catch (error) {
-      if (error instanceof SyntaxError) return json({ error: "invalid_json" }, { status: 400 });
+      if (error instanceof SyntaxError)
+        return json({ error: "invalid_json" }, { status: 400 });
       if (error instanceof ProtocolError) {
-        return json({ error: error.code, message: error.message }, { status: 400 });
+        return json(
+          { error: error.code, message: error.message },
+          { status: 400 },
+        );
       }
       return managedErrorResponse(error, "steer_failed");
     }
@@ -1231,10 +1768,15 @@ export class NanocodexSession extends DurableComputerSession {
     if (!row) return json({ error: "turn_not_found" }, { status: 404 });
     if (isTerminalState(row.state)) return json(managedTurnView(row));
     if (row.state === "blocked") {
-      return json({
-        error: "turn_blocked",
-        message: row.error ?? "the durable operation requires explicit reconciliation",
-      }, { status: 409 });
+      return json(
+        {
+          error: "turn_blocked",
+          message:
+            row.error ??
+            "the durable operation requires explicit reconciliation",
+        },
+        { status: 409 },
+      );
     }
     try {
       const cancelling = this.#markCancelling(id);
@@ -1242,6 +1784,119 @@ export class NanocodexSession extends DurableComputerSession {
       return json({ turn_id: id, state: "cancelling" }, { status: 202 });
     } catch (error) {
       return managedErrorResponse(error, "cancel_failed");
+    }
+  }
+
+  #assertRealtimeRouteAvailable(): void {
+    if (this.#deleting || this.#deleted) {
+      throw new ManagedRequestError(
+        409,
+        "agent_deleting",
+        "the agent is being deleted",
+      );
+    }
+    if (this.#streamError) {
+      throw new ManagedRequestError(
+        503,
+        "event_stream_failed",
+        this.#streamError,
+      );
+    }
+    const blocked = this.#managedTurns(
+      "WHERE state = 'blocked' ORDER BY updated_at LIMIT 1",
+    )[0];
+    if (blocked) {
+      throw new ManagedRequestError(
+        409,
+        "agent_blocked",
+        `turn ${blocked.id} requires reconciliation before new work`,
+      );
+    }
+    if (this.#unfinishedTurnCount() >= MAX_ACTIVE_TURNS) {
+      throw new ManagedRequestError(
+        429,
+        "turn_queue_full",
+        `at most ${MAX_ACTIVE_TURNS} turns may be unfinished`,
+      );
+    }
+    if (!this.#eventLog.canAcceptTurn()) {
+      throw new ManagedRequestError(
+        507,
+        "event_log_full",
+        "delete or replace this agent before submitting more work",
+      );
+    }
+  }
+
+  #acceptRoutedTurn(
+    id: string,
+    input: PromptInput,
+    requestHash: string,
+    request: ManagedRealtimeRequest,
+  ): ManagedTurnRow {
+    this.#assertRealtimeRouteAvailable();
+    if (this.#managedTurn(id)) {
+      throw new ManagedRequestError(
+        409,
+        "idempotency_conflict",
+        "realtime turn identity already exists",
+      );
+    }
+    const now = Date.now();
+    const accepted: StreamMessage = {
+      type: "turn_accepted",
+      id,
+      input,
+      replayed: false,
+    };
+    let event: DurableEvent<StreamMessage> | undefined;
+    this.ctx.storage.transactionSync(() => {
+      event = this.#eventLog.append(accepted, id);
+      this.ctx.storage.sql.exec(
+        `INSERT INTO managed_turns (
+           id, request_key, request_hash, input_json, state,
+           accepted_cursor, created_at, accepted_at, updated_at
+         ) VALUES (?, ?, ?, ?, 'accepted', CAST(? AS INTEGER), ?, ?, ?)`,
+        id,
+        `realtime:${request.voiceSessionId}:${request.operationId}`,
+        requestHash,
+        JSON.stringify(input),
+        event.cursor,
+        now,
+        now,
+        now,
+      );
+    });
+    this.#publish(event!);
+    const row = this.#managedTurn(id);
+    if (!row)
+      throw new Error("routed managed turn disappeared after acceptance");
+    return row;
+  }
+
+  async #ownRoutedTurn(id: string, turn: Turn): Promise<void> {
+    try {
+      await turn.accepted();
+      if (this.#deleting) {
+        try {
+          await turn.cancel();
+        } catch {
+          /* Deletion owns shutdown. */
+        }
+        return;
+      }
+      await this.#complete(id, turn);
+    } catch (error) {
+      this.#releaseEventTurn(id);
+      if (this.#turns.get(id) === turn) this.#turns.delete(id);
+      this.#turnInputs.delete(id);
+      turn.dispose();
+      if (this.#deleting) return;
+      const failure = classifyTurnFailure(id, error);
+      this.#commitManagedFailure(id, error, false, failure.terminal);
+      if (failure.reopenAgent) await this.#reopenAgent(id);
+      this.#scheduleRecovery();
+      await this.#scheduleNextAlarm();
     }
   }
 
@@ -2156,12 +2811,18 @@ export class NanocodexSession extends DurableComputerSession {
 
   #recordAgentEvent(event: AgentEvent): void {
     if (this.#deleting) return;
+    if (this.#realtimeEventBuffer) {
+      this.#realtimeEventBuffer.push(event);
+      return;
+    }
     let turnId = this.#eventTurnId;
     if (event.type === "run.started") {
       turnId = this.#eventTurnQueue.shift();
       this.#eventTurnId = turnId;
-    } else if ((event.type === "run.completed" || event.type === "run.failed")
-      && turnId === undefined) {
+    } else if (
+      (event.type === "run.completed" || event.type === "run.failed") &&
+      turnId === undefined
+    ) {
       // A retained operation replays only its raw terminal event. Preserve the
       // outer admission queue until that event arrives so a following run
       // cannot inherit the replayed operation's attribution.
@@ -2179,10 +2840,21 @@ export class NanocodexSession extends DurableComputerSession {
     if (queued >= 0) this.#eventTurnQueue.splice(queued, 1);
   }
 
-  #recordAndBroadcast(message: StreamMessage, turnId: string | null = null): void {
+  #takeRealtimeEventBuffer(): AgentEvent[] {
+    const buffered = this.#realtimeEventBuffer ?? [];
+    this.#realtimeEventBuffer = undefined;
+    return buffered;
+  }
+
+  #recordAndBroadcast(
+    message: StreamMessage,
+    turnId: string | null = null,
+  ): void {
     if (this.#deleting || this.#streamError) return;
     try {
-      const event = this.ctx.storage.transactionSync(() => this.#eventLog.append(message, turnId));
+      const event = this.ctx.storage.transactionSync(() =>
+        this.#eventLog.append(message, turnId),
+      );
       this.#publish(event);
     } catch (error) {
       this.#failEventStream(error);
@@ -2277,53 +2949,93 @@ export class NanocodexSession extends DurableComputerSession {
   }
 
   #session(): SessionRow | undefined {
-    return this.ctx.storage.sql.exec<SessionRow>(
-      `SELECT session_id, owner_id, public_origin, runtime_profile, completed_turns, last_active, stream_error
+    return this.ctx.storage.sql
+      .exec<SessionRow>(
+        `SELECT session_id, owner_id, public_origin, runtime_profile, completed_turns, last_active, stream_error
        FROM session_state WHERE singleton = 1`,
-    ).toArray()[0];
+      )
+      .toArray()[0];
   }
 
   #initializationOwnership(): SessionInitializationOwnership | undefined {
-    return this.ctx.storage.sql.exec<SessionInitializationOwnership>(
-      `SELECT session_id, owner_id, runtime_profile, state
+    return this.ctx.storage.sql
+      .exec<SessionInitializationOwnership>(
+        `SELECT session_id, owner_id, runtime_profile, state
        FROM session_initialization_ownership WHERE singleton = 1`,
-    ).toArray()[0];
+      )
+      .toArray()[0];
   }
 
   #sessionId(): string | undefined {
-    return this.ctx.storage.sql.exec<{ session_id: string }>(
-      "SELECT session_id FROM session_state WHERE singleton = 1",
-    ).toArray()[0]?.session_id;
+    return this.ctx.storage.sql
+      .exec<{ session_id: string }>(
+        "SELECT session_id FROM session_state WHERE singleton = 1",
+      )
+      .toArray()[0]?.session_id;
   }
 
   #sessionStatus(): SessionStatusRow | undefined {
-    return this.ctx.storage.sql.exec<SessionStatusRow>(
-      `SELECT session_id, completed_turns > 0 AS has_snapshot, completed_turns,
+    return this.ctx.storage.sql
+      .exec<SessionStatusRow>(
+        `SELECT session_id, completed_turns > 0 AS has_snapshot, completed_turns,
               last_active, stream_error
        FROM session_state WHERE singleton = 1`,
-    ).toArray()[0];
+      )
+      .toArray()[0];
   }
 
   #managedTurn(id: string): ManagedTurnRow | undefined {
     return this.#managedTurns("WHERE id = ?", id)[0];
   }
 
+  #managedRealtimeOperation(
+    voiceSessionId: string,
+    operationId: string,
+  ): ManagedRealtimeOperationRow | undefined {
+    return this.ctx.storage.sql
+      .exec<ManagedRealtimeOperationRow>(
+        `SELECT voice_session_id, operation_id, kind, request_hash, state, response_json
+       FROM managed_realtime_operations
+       WHERE voice_session_id = ? AND operation_id = ?`,
+        voiceSessionId,
+        operationId,
+      )
+      .toArray()[0];
+  }
+
+  #managedRealtimeSession(): ManagedRealtimeSessionRow | undefined {
+    return this.ctx.storage.sql
+      .exec<ManagedRealtimeSessionRow>(
+        "SELECT voice_session_id FROM managed_realtime_session WHERE singleton = 1",
+      )
+      .toArray()[0];
+  }
+
   #firstPrompt(): string {
-    const row = this.ctx.storage.sql.exec<{ input_json: string }>(
-      "SELECT input_json FROM managed_turns ORDER BY created_at, id LIMIT 1",
-    ).toArray()[0];
+    const row = this.ctx.storage.sql
+      .exec<{ input_json: string }>(
+        "SELECT input_json FROM managed_turns ORDER BY created_at, id LIMIT 1",
+      )
+      .toArray()[0];
     if (!row) return "";
-    try { return promptInputText(JSON.parse(row.input_json) as PromptInput); }
-    catch { return ""; }
+    try {
+      return promptInputText(JSON.parse(row.input_json) as PromptInput);
+    } catch {
+      return "";
+    }
   }
 
   #managedTurnByRequestKey(requestKey: string): ManagedTurnRow | undefined {
     return this.#managedTurns("WHERE request_key = ?", requestKey)[0];
   }
 
-  #managedTurns(clause: string, ...args: (string | number | null)[]): ManagedTurnRow[] {
-    return this.ctx.storage.sql.exec<ManagedTurnRow>(
-      `SELECT id, request_key, request_hash, input_json, state,
+  #managedTurns(
+    clause: string,
+    ...args: (string | number | null)[]
+  ): ManagedTurnRow[] {
+    return this.ctx.storage.sql
+      .exec<ManagedTurnRow>(
+        `SELECT id, request_key, request_hash, input_json, state,
               CAST(accepted_cursor AS TEXT) AS accepted_cursor,
               terminal_json, CAST(terminal_cursor AS TEXT) AS terminal_cursor,
               error, may_have_inner_operation, attempt_count, CAST(retry_at AS INTEGER) AS retry_at,
@@ -2486,9 +3198,32 @@ function conversationTitle(input: string): string {
 }
 
 function asciiJsonHeaderValue(value: unknown): string {
-  return JSON.stringify(value).replace(/[^\x20-\x7e]/g, (character) => (
-    `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`
-  ));
+  return JSON.stringify(value).replace(
+    /[^\x20-\x7e]/g,
+    (character) =>
+      `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`,
+  );
+}
+
+function assertBoundedRealtimeContext(context: AgentSessionContext): void {
+  if (
+    typeof context.workspace !== "string" ||
+    !Array.isArray(context.history)
+  ) {
+    throw new ManagedRequestError(
+      502,
+      "invalid_agent_context",
+      "agent returned an invalid session context",
+    );
+  }
+  const encoded = JSON.stringify(context);
+  if (encoder.encode(encoded).byteLength > MAX_REALTIME_CONTEXT_BYTES) {
+    throw new ManagedRequestError(
+      413,
+      "context_too_large",
+      `agent session context exceeds ${MAX_REALTIME_CONTEXT_BYTES} bytes`,
+    );
+  }
 }
 
 function messageForManagedTurn(row: ManagedTurnRow): ServerMessage {

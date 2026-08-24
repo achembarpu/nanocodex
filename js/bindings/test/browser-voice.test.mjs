@@ -108,6 +108,74 @@ test("requests the microphone before waiting for the Rust controller", async () 
   }
 });
 
+test("stop tears browser media down while startup boundaries are stalled", async () => {
+  for (const boundary of ["ice", "fetch", "sideband"]) {
+    const fixture = installBrowserVoiceFixture({ boundary });
+    const calls = [];
+    try {
+      const session = new BrowserVoiceSession({
+        core: fakeVoiceCore(calls),
+        sessionId: `stalled-${boundary}`,
+        voice: "cove",
+        captureMicrophone: async () => fakeMicrophone(calls),
+        onStatus() {},
+        onTranscript() {},
+        onTerminated() {},
+      });
+      const starting = session.start();
+      await waitFor(() => (
+        boundary === "ice" ? fixture.peer !== undefined
+          : boundary === "fetch" ? fixture.requestSignal !== undefined
+            : fixture.sideband !== undefined
+      ));
+      await Promise.race([
+        session.close(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error(`${boundary} stop timed out`)), 100)),
+      ]);
+      if (boundary !== "fetch") await starting.catch(() => {});
+      assert.equal(calls.some(([kind]) => kind === "track.stop"), true, boundary);
+      if (boundary === "fetch") assert.equal(fixture.requestSignal.aborted, true);
+    } finally {
+      fixture.restore();
+    }
+  }
+});
+
+test("starts waiting on one stop coalesce into one replacement session", async () => {
+  const fixture = installBrowserVoiceFixture();
+  const calls = [];
+  let releaseStop;
+  let stopCount = 0;
+  const core = fakeVoiceCore(calls, {
+    async stop() {
+      stopCount += 1;
+      if (stopCount === 1) await new Promise((resolve) => { releaseStop = resolve; });
+      return JSON.stringify({ frames: [], transcripts: [], schedule_flush: false });
+    },
+  });
+  try {
+    const { agent } = await testAgent(core, calls);
+    const voice = Actions.voice.create(agent, {
+      captureMicrophone: async () => {
+        calls.push(["microphone"]);
+        return fakeMicrophone(calls);
+      },
+    });
+    await voice.start();
+    const stopping = voice.stop();
+    await waitFor(() => typeof releaseStop === "function");
+    const first = voice.start();
+    const second = voice.start();
+    releaseStop();
+    await Promise.all([stopping, first, second]);
+    assert.equal(calls.filter(([kind]) => kind === "microphone").length, 2);
+    await voice.stop();
+    agent.dispose();
+  } finally {
+    fixture.restore();
+  }
+});
+
 test("speaker playback resumes from the next user gesture when autoplay is blocked", async () => {
   let attempts = 0;
   let resume;
@@ -134,7 +202,7 @@ test("speaker playback resumes from the next user gesture when autoplay is block
   playback.close();
 });
 
-function fakeVoiceCore(calls) {
+function fakeVoiceCore(calls, overrides = {}) {
   return {
     async start() { calls.push(["start"]); },
     async callBody(sdp) {
@@ -199,6 +267,7 @@ function fakeVoiceCore(calls) {
     async cancel() { calls.push(["cancel"]); return true; },
     async preferredPhysicalInput() { return undefined; },
     free() { calls.push(["free"]); },
+    ...overrides,
   };
 }
 
@@ -228,7 +297,7 @@ function fakeMicrophone(calls) {
   };
 }
 
-function installBrowserVoiceFixture() {
+function installBrowserVoiceFixture({ boundary } = {}) {
   const previous = {
     RTCPeerConnection: globalThis.RTCPeerConnection,
     WebSocket: globalThis.WebSocket,
@@ -236,12 +305,13 @@ function installBrowserVoiceFixture() {
     location: globalThis.location,
     window: globalThis.window,
   };
-  const fixture = { request: undefined, sideband: undefined };
+  const fixture = { peer: undefined, request: undefined, requestSignal: undefined, sideband: undefined };
   class FakePeer {
     connectionState = "connected";
-    iceGatheringState = "complete";
+    iceGatheringState = boundary === "ice" ? "gathering" : "complete";
     localDescription;
     signalingState = "stable";
+    constructor() { fixture.peer = this; }
     addEventListener() {}
     removeEventListener() {}
     addTrack() {}
@@ -260,6 +330,7 @@ function installBrowserVoiceFixture() {
     sent = [];
     constructor() {
       fixture.sideband = this;
+      if (boundary === "sideband") return;
       queueMicrotask(() => {
         this.readyState = FakeWebSocket.OPEN;
         this.emit("open", {});
@@ -285,12 +356,16 @@ function installBrowserVoiceFixture() {
   globalThis.WebSocket = FakeWebSocket;
   globalThis.fetch = async (_url, init) => {
     fixture.request = JSON.parse(init.body);
+    fixture.requestSignal = init.signal;
+    if (boundary === "fetch") return new Promise(() => {});
     return new Response("v=answer", {
       headers: { "x-nanocodex-realtime-location": "/v1/live/rtc_test" },
     });
   };
   return {
     get request() { return fixture.request; },
+    get requestSignal() { return fixture.requestSignal; },
+    get peer() { return fixture.peer; },
     get sideband() { return fixture.sideband; },
     restore() { Object.assign(globalThis, previous); },
   };

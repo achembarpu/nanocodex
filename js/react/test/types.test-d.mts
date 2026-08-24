@@ -1,6 +1,7 @@
 import type { ComponentProps } from "react";
 import type { DefaultAgent } from "nanocodex";
 import { Transport, type AgentStatus } from "nanocodex/browser";
+import type { ManagedAgent } from "nanocodex/managed";
 import {
   NanocodexProvider,
   createConfig,
@@ -60,7 +61,7 @@ function Consumer() {
 }
 void Consumer;
 
-function VoiceConsumer(agent: DefaultAgent | undefined) {
+function VoiceConsumer(agent: DefaultAgent | ManagedAgent | undefined) {
   const voice: UseVoiceReturnType = useVoice(agent, {
     beforeAgentTurn: async () => {},
     voice: "cove",

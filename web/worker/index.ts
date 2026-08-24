@@ -415,12 +415,16 @@ async function createRealtimeCall(request: Request, env: WorkerEnv, url: URL): P
   const decoded = await readJsonBody(request);
   if (decoded instanceof Response) return decoded;
   const identity = realtimeIdentity(decoded);
+  const managedAgentId = managedRealtimeAgentId(decoded.managed_agent_id, identity);
   const callBody = typeof decoded.call_body === "string" ? decoded.call_body : "";
   if (!callBody || callBody.length > MAX_REALTIME_CALL_BODY_CHARS) {
     return json({ error: "Realtime call body exceeded its bound" }, { status: 400 });
   }
   if (!identity) {
     return json({ error: "invalid session" }, { status: 400 });
+  }
+  if (decoded.managed_agent_id !== undefined && !managedAgentId) {
+    return json({ error: "invalid managed agent" }, { status: 400 });
   }
   const body = callBody;
   const managed = managedAccess(request, env);
@@ -433,7 +437,7 @@ async function createRealtimeCall(request: Request, env: WorkerEnv, url: URL): P
       "socket",
     );
     if (limited) return limited;
-    upstream = await fetchManagedRealtimeCall(managed, identity, body);
+    upstream = await fetchManagedRealtimeCall(managed, identity, body, managedAgentId);
   } else {
     const resolved = await resolveSubscriptionCredential(request, env, "health");
     if (resolved instanceof Response) return resolved;
@@ -517,8 +521,12 @@ async function upgradeRealtimeSideband(
     session_id: url.searchParams.get("session_id"),
     thread_id: url.searchParams.get("thread_id"),
   });
+  const managedAgentId = managedRealtimeAgentId(url.searchParams.get("managed_agent_id"), identity);
   if (!validRealtimeCallId(callId) || !identity) {
     return new Response("Invalid Realtime session", { status: 400 });
+  }
+  if (url.searchParams.has("managed_agent_id") && !managedAgentId) {
+    return new Response("Invalid managed agent", { status: 400 });
   }
   const managed = managedAccess(request, env);
   if (managed instanceof Response) return webSocketError(managed);
@@ -532,7 +540,12 @@ async function upgradeRealtimeSideband(
         "socket",
       );
       if (limited) return webSocketError(limited);
-      upstreamResponse = await openManagedRealtimeSidebandWithRetry(managed, callId, identity);
+      upstreamResponse = await openManagedRealtimeSidebandWithRetry(
+        managed,
+        callId,
+        identity,
+        managedAgentId,
+      );
     } else {
       const leaseId = randomSessionId();
       const resolved = await resolveSubscriptionCredential(request, env, "socket", leaseId);
@@ -585,10 +598,11 @@ async function openManagedRealtimeSidebandWithRetry(
   access: ManagedModelAccess,
   callId: string,
   identity: RealtimeIdentity,
+  agentId?: string,
 ): Promise<Response> {
   let response: Response | undefined;
   for (let attempt = 0; attempt < 4; attempt += 1) {
-    response = await openManagedRealtimeSideband(access, callId, identity);
+    response = await openManagedRealtimeSideband(access, callId, identity, agentId);
     if (response.webSocket) return response;
     if (attempt < 3) {
       await response.body?.cancel();
@@ -646,6 +660,19 @@ function realtimeIdentity(value: Record<string, unknown>): RealtimeIdentity | un
   if (openAiAlpha !== "quicksilver=v2"
     || !valid(realtimeSessionId) || !valid(sessionId) || !valid(threadId)) return undefined;
   return { openAiAlpha, realtimeSessionId, sessionId, threadId };
+}
+
+function managedRealtimeAgentId(
+  value: unknown,
+  identity: RealtimeIdentity | undefined,
+): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string" || !isUuid(value) || !identity) return undefined;
+  return identity.realtimeSessionId === value
+    && identity.sessionId === value
+    && identity.threadId === value
+    ? value
+    : undefined;
 }
 
 function realtimeHeaders(

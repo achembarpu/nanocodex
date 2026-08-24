@@ -24,10 +24,14 @@ export type EventFrame = Readonly<{
   latest_cursor: string;
 }>;
 
-type CloudflareAgentActions = Omit<AgentActions, "events"> & Readonly<{
+type CloudflareAgentActions = Omit<AgentActions, "events" | "turn"> & Readonly<{
   events: AgentActions["events"] & Readonly<{
     /** Accepts a read-only hibernatable event socket; reconnect from the last event or replay pause cursor. */
     connect(request: Request): Response;
+  }>;
+  turn: AgentActions["turn"] & Readonly<{
+    /** Atomically steers the active turn or starts a new independently awaitable turn. */
+    route(options: { input: string }): Promise<import("../types.mjs").Turn | undefined>;
   }>;
 }>;
 
@@ -41,6 +45,12 @@ export type Agent<extended extends object = {}> =
 
 /** Removes the package-owned durable history for one Cloudflare Agent. */
 export function destroy(owner: DurableObjectOwner): void;
+
+/** Atomically steers an active Cloudflare Agent turn or starts a new turn. */
+export function route(
+  agent: Agent,
+  options: { input: string },
+): Promise<import("../types.mjs").Turn | undefined>;
 
 /** Creates one durable Agent from its owning Durable Object instance. */
 export function create(owner: create.Owner, options?: create.Options): Promise<create.ReturnType>;

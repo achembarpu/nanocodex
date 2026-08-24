@@ -7,6 +7,7 @@ function browserRealtimeCall(
   sessionId: string,
   startupContext?: string,
   identity: { realtimeSessionId?: string; sessionId?: string; threadId?: string } = {},
+  managedAgentId?: string,
 ): string {
   const instructions = startupContext
     ? `rust-owned instructions\n\n${startupContext}`
@@ -16,6 +17,7 @@ function browserRealtimeCall(
     realtime_session_id: identity.realtimeSessionId ?? sessionId,
     session_id: identity.sessionId ?? sessionId,
     thread_id: identity.threadId ?? sessionId,
+    ...(managedAgentId === undefined ? {} : { managed_agent_id: managedAgentId }),
     call_body: JSON.stringify({
       sdp: "v=0\r\na=offer\r\n",
       session: {
@@ -213,10 +215,30 @@ test("brokered website access stays credentialless and disables legacy browser s
   const realtimeUpstream = egressRequests.find((request) => request.url.endsWith("/v1/realtime/calls"));
   assert.equal(realtimeUpstream?.headers.get("authorization"), "Bearer NANOCODEX_PROVIDER_CREDENTIAL");
   assert.equal(realtimeUpstream?.headers.get("x-session-id"), "session-voice");
+  assert.equal(realtimeUpstream?.headers.get("x-nanocodex-agent-id"), null);
   assert.equal(realtimeUpstream?.headers.get("chatgpt-account-id"), null);
   const realtimeBody = await realtimeUpstream?.json() as Record<string, unknown>;
   assert.equal(realtimeBody.sdp, "v=0\r\na=offer\r\n");
   assert.deepEqual((realtimeBody.session as Record<string, unknown>).delegation, { type: "client" });
+
+  const managedAgentId = "019d2f5d-7491-7000-8000-000000000001";
+  const managedRealtime = await worker.fetch(new Request("https://demo.test/api/realtime/calls", {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: "https://demo.test" },
+    body: browserRealtimeCall(managedAgentId, undefined, {}, managedAgentId),
+  }), env);
+  assert.equal(managedRealtime.status, 200);
+  const managedUpstream = egressRequests.filter((request) => request.url.endsWith("/v1/realtime/calls")).at(-1);
+  assert.equal(managedUpstream?.headers.get("x-nanocodex-agent-id"), managedAgentId);
+  assert.equal(managedUpstream?.headers.get("x-session-id"), managedAgentId);
+
+  const mismatched = await worker.fetch(new Request("https://demo.test/api/realtime/calls", {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: "https://demo.test" },
+    body: browserRealtimeCall("different-session", undefined, {}, managedAgentId),
+  }), env);
+  assert.equal(mismatched.status, 400);
+  assert.deepEqual(await mismatched.json(), { error: "invalid managed agent" });
   assert.equal(credentialSessionCalls, 0);
 });
 

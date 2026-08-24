@@ -91,6 +91,17 @@ export function prompt(agent, options) {
   return createTurn(raw, agent);
 }
 
+/** Internal live-input seam: atomically steers the active turn or starts one. */
+export async function routePrompt(agent, options) {
+  const state = agentState(agent);
+  const input = actionInput(options);
+  if (typeof input !== "string") {
+    throw new TypeError("live routed input must be text");
+  }
+  const raw = await state.raw.routePrompt(input);
+  return raw === undefined ? undefined : createTurn(raw, agent);
+}
+
 export function getTurnResult(turn) {
   const state = turnState(turn);
   if (!state.result) {

@@ -284,6 +284,9 @@
 }
 
 .agent-voice-control button {
+  display: inline-flex;
+  gap: 6px;
+  align-items: center;
   min-height: 26px;
   padding: 0 8px;
   color: inherit;
@@ -291,6 +294,12 @@
   background: transparent;
   border: 0;
   cursor: pointer;
+}
+
+.agent-voice-control button svg {
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
 }
 
 .agent-voice-control button:hover,

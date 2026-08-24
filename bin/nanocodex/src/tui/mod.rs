@@ -329,6 +329,9 @@ enum WorkerEvent {
     VoiceFailed {
         error: String,
     },
+    VoiceCommandFailed {
+        error: String,
+    },
     VoiceStopped,
 }
 
@@ -1244,7 +1247,14 @@ fn handle_worker_update(
             app.push_active_error(format!("Voice: {error}"));
             app.set_active_status("Voice unavailable");
         }
-        WorkerEvent::VoiceStopped => app.set_active_status("Voice stopped"),
+        WorkerEvent::VoiceCommandFailed { error } => {
+            app.push_active_error(format!("Voice: {error}"));
+        }
+        WorkerEvent::VoiceStopped => {
+            app.main
+                .push_output(TranscriptItem::Assistant("**Voice:** Stopped.".to_owned()));
+            app.set_active_status("Voice stopped");
+        }
     }
     Ok(())
 }
@@ -1276,6 +1286,7 @@ fn spawn_agent_worker(
             mcp,
             realtime,
             voice: None,
+            voice_shutdown: None,
             voice_agent_control: VoiceAgentControl::default(),
         };
         loop {
@@ -1291,7 +1302,8 @@ fn spawn_agent_worker(
                 }
             }
         }
-        worker.stop_voice().await;
+        worker.stop_voice();
+        worker.await_voice_shutdown().await;
     })
 }
 
@@ -1334,6 +1346,7 @@ struct AgentWorker {
     mcp: Option<McpHandle>,
     realtime: Option<OpenAi>,
     voice: Option<VoiceSession>,
+    voice_shutdown: Option<tokio::task::JoinHandle<()>>,
     voice_agent_control: VoiceAgentControl,
 }
 
@@ -1403,15 +1416,15 @@ impl AgentWorker {
                 return;
             }
             VoiceControl::Stop => {
-                self.stop_voice().await;
+                self.stop_voice();
                 return;
             }
             VoiceControl::Toggle if running => {
-                self.stop_voice().await;
+                self.stop_voice();
                 return;
             }
             VoiceControl::Start(_) if running => {
-                drop(self.updates.send(WorkerEvent::VoiceFailed {
+                drop(self.updates.send(WorkerEvent::VoiceCommandFailed {
                     error: "voice is already active; use /voice off before changing it".to_owned(),
                 }));
                 return;
@@ -1423,6 +1436,7 @@ impl AgentWorker {
             VoiceControl::Toggle => None,
             VoiceControl::Stop | VoiceControl::List => return,
         };
+        self.await_voice_shutdown().await;
         if self.btw.is_some() {
             drop(self.updates.send(WorkerEvent::VoiceFailed {
                 error: "close /btw before starting voice".to_owned(),
@@ -1456,14 +1470,25 @@ impl AgentWorker {
         self.voice.as_ref().is_some_and(VoiceSession::is_running)
     }
 
-    async fn stop_voice(&mut self) {
+    fn stop_voice(&mut self) {
         let Some(mut voice) = self.voice.take() else {
             return;
         };
-        if let Err(error) = voice.shutdown().await {
-            drop(self.updates.send(WorkerEvent::VoiceFailed {
-                error: format!("failed to stop voice cleanly: {error}"),
-            }));
+        voice.stop();
+        drop(self.updates.send(WorkerEvent::VoiceStopped));
+        let updates = self.updates.clone();
+        self.voice_shutdown = Some(tokio::spawn(async move {
+            if let Err(error) = voice.shutdown().await {
+                drop(updates.send(WorkerEvent::VoiceFailed {
+                    error: format!("failed to stop voice cleanly: {error}"),
+                }));
+            }
+        }));
+    }
+
+    async fn await_voice_shutdown(&mut self) {
+        if let Some(shutdown) = self.voice_shutdown.take() {
+            let _ = shutdown.await;
         }
     }
 
@@ -3067,7 +3092,7 @@ fn classify_submission(input: impl Into<SubmittedPrompt>) -> Submission {
         let argument = argument.trim();
         return match argument {
             "on" => Submission::Voice(VoiceControl::Start(None)),
-            "off" => Submission::Voice(VoiceControl::Stop),
+            "off" | "stop" => Submission::Voice(VoiceControl::Stop),
             "list" => Submission::Voice(VoiceControl::List),
             _ if argument.split_whitespace().count() == 1 => match argument.parse() {
                 Ok(voice) => Submission::Voice(VoiceControl::Start(Some(voice))),
@@ -3075,7 +3100,7 @@ fn classify_submission(input: impl Into<SubmittedPrompt>) -> Submission {
                     "Unknown voice. Use /voice list to see Codex voices.".to_owned(),
                 ),
             },
-            _ => Submission::InvalidCommand("Usage: /voice [on|off|list|<voice>]".to_owned()),
+            _ => Submission::InvalidCommand("Usage: /voice [on|off|stop|list|<voice>]".to_owned()),
         };
     }
     if trimmed == "/fast" {
@@ -3430,6 +3455,10 @@ mod tests {
         assert_eq!(
             classify_submission("/voice list"),
             Submission::Voice(VoiceControl::List)
+        );
+        assert_eq!(
+            classify_submission("/voice stop"),
+            Submission::Voice(VoiceControl::Stop)
         );
         assert_eq!(
             classify_submission("/voice junk"),

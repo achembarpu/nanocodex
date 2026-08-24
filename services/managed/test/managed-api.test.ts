@@ -484,6 +484,7 @@ describe("managed agents REST and resumable SSE", () => {
     expect(forwarded.subject).not.toBe("browser-controlled-subject");
     expect(JSON.stringify(forwarded)).not.toContain(cookie!);
     expect(JSON.stringify(forwarded)).not.toContain(account.user.id);
+
   });
 
   it("forwards browser Realtime calls through the same opaque account subject", async () => {
@@ -522,6 +523,53 @@ describe("managed agents REST and resumable SSE", () => {
     expect(forwarded.subject).not.toBe("browser-controlled-subject");
     expect(JSON.stringify(forwarded)).not.toContain(cookie!);
     expect(JSON.stringify(forwarded)).not.toContain(account.user.id);
+
+    const created = await RAW_SELF.fetch("https://example.test/v1/agents", {
+      method: "POST",
+      headers: { cookie: cookie!, origin: "https://example.test" },
+    });
+    expect(created.status).toBe(201);
+    const agent = await created.json<AgentReceipt>();
+    const managed = await RAW_SELF.fetch("https://nanocodex.internal/v1/realtime/calls", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer NANOCODEX_PROVIDER_CREDENTIAL",
+        cookie: cookie!,
+        "content-type": "application/json",
+        origin: "https://example.test",
+        "x-nanocodex-agent-id": agent.agent_id,
+        "x-session-id": agent.agent_id,
+        "session-id": agent.agent_id,
+        "thread-id": agent.agent_id,
+      },
+      body,
+    });
+    expect(managed.status).toBe(200);
+    const managedForwarded = await managed.json<{
+      agent: string | null;
+      subject: string;
+    }>();
+    expect(managedForwarded.agent).toBeNull();
+    expect(managedForwarded.subject).toBe(
+      testEnv.NANOCODEX_SESSIONS.idFromName(agent.agent_id).toString(),
+    );
+
+    const mismatched = await RAW_SELF.fetch("https://nanocodex.internal/v1/realtime/calls", {
+      method: "POST",
+      headers: {
+        authorization: "Bearer NANOCODEX_PROVIDER_CREDENTIAL",
+        cookie: cookie!,
+        "content-type": "application/json",
+        origin: "https://example.test",
+        "x-nanocodex-agent-id": agent.agent_id,
+        "x-session-id": "wrong-session",
+        "session-id": agent.agent_id,
+        "thread-id": agent.agent_id,
+      },
+      body,
+    });
+    expect(mismatched.status).toBe(404);
+    expect(await mismatched.json()).toEqual({ error: "not_found" });
   });
 
   it("upgrades browser Realtime sidebands through the same opaque account subject", async () => {
@@ -711,6 +759,257 @@ describe("managed agents REST and resumable SSE", () => {
     } });
     expect(wrong.status).toBe(401);
     expect((await SELF.fetch(stateUrl)).status).toBe(200);
+  });
+
+  it("keeps managed realtime mutations same-origin, owner-asserted, and bounded", async () => {
+    const agent = await createAgent();
+    const realtimeUrl = agent.events_url.replace(/\/events$/, "/realtime/start");
+    const token = "r".repeat(43);
+    await seedPasskeySession(USER_ID, token);
+    const cookie = `nanocodex_account=${token}`;
+    const body = JSON.stringify({
+      operation_id: "voice-origin-operation",
+      voice_session_id: "voice-origin-session",
+    });
+
+    for (const origin of [undefined, "https://attacker.test"]) {
+      const response = await RAW_SELF.fetch(realtimeUrl, {
+        method: "POST",
+        headers: {
+          cookie,
+          "content-type": "application/json",
+          ...(origin === undefined ? {} : { origin }),
+        },
+        body,
+      });
+      expect(response.status).toBe(403);
+      expect(await response.json()).toEqual({ error: "forbidden_origin" });
+    }
+
+    const otherOwner = await RAW_SELF.fetch(realtimeUrl, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${OTHER_API_KEY}`,
+        "content-type": "application/json",
+        origin: "https://example.test",
+      },
+      body,
+    });
+    expect(otherOwner.status).toBe(404);
+    expect(await otherOwner.json()).toEqual({ error: "not_found" });
+
+    const internal = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    const missingAssertion = await internal.fetch("https://session.internal/realtime/start", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body,
+    });
+    expect(missingAssertion.status).toBe(404);
+
+    const oversized = await SELF.fetch(realtimeUrl, {
+      method: "POST",
+      headers: {
+        "content-length": String(64 * 1024 + 1),
+        "content-type": "application/json",
+        origin: "https://example.test",
+      },
+      body,
+    });
+    expect(oversized.status).toBe(413);
+    expect(await oversized.json()).toMatchObject({ error: "request_too_large" });
+
+    const forbiddenAudio = await SELF.fetch(realtimeUrl, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: "https://example.test" },
+      body: JSON.stringify({
+        audio: "provider-or-audio-data-must-not-cross-this-route",
+        operation_id: "voice-audio-operation",
+        voice_session_id: "voice-origin-session",
+      }),
+    });
+    expect(forbiddenAudio.status).toBe(400);
+    expect(await forbiddenAudio.json()).toMatchObject({ error: "invalid_request" });
+  });
+
+  it("starts and stops the canonical managed realtime lifecycle idempotently", async () => {
+    const agent = await createAgent();
+    const started = await managedRealtime(agent, "start", {
+      operation_id: "voice-start-operation",
+      voice_session_id: "voice-lifecycle-session",
+    });
+    expect(started.status).toBe(200);
+    const startValue = await started.json<ManagedRealtimeLifecycleResponse>();
+    expect(startValue).toMatchObject({
+      operation_id: "voice-start-operation",
+      voice_session_id: "voice-lifecycle-session",
+      context: { workspace: "." },
+    });
+    expect(JSON.stringify(startValue.context.history)).toContain("Realtime conversation started.");
+
+    const duplicateStart = await managedRealtime(agent, "start", {
+      operation_id: "voice-start-operation",
+      voice_session_id: "voice-lifecycle-session",
+    });
+    expect(await duplicateStart.json()).toEqual(startValue);
+
+    const stopped = await managedRealtime(agent, "stop", {
+      operation_id: "voice-stop-operation",
+      voice_session_id: "voice-lifecycle-session",
+    });
+    expect(stopped.status).toBe(200);
+    const stopValue = await stopped.json<ManagedRealtimeLifecycleResponse>();
+    expect(stopValue).toMatchObject({
+      operation_id: "voice-stop-operation",
+      stopped: true,
+      voice_session_id: "voice-lifecycle-session",
+      context: { workspace: "." },
+    });
+    expect(JSON.stringify(stopValue.context.history)).toContain("Realtime conversation ended.");
+
+    const duplicateStop = await managedRealtime(agent, "stop", {
+      operation_id: "voice-stop-operation",
+      voice_session_id: "voice-lifecycle-session",
+    });
+    expect(await duplicateStop.json()).toEqual(stopValue);
+
+    const operationCount = await runInDurableObject(
+      testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id),
+      (_instance, state) => state.storage.sql.exec<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM managed_realtime_operations",
+      ).one().count,
+    );
+    expect(operationCount).toBe(2);
+  });
+
+  it("atomically starts or steers realtime delegation under managed turn ownership", async () => {
+    const agent = await createAgent();
+    const lifecycle = await managedRealtime(agent, "start", {
+      operation_id: "voice-delegation-start",
+      voice_session_id: "voice-delegation-session",
+    });
+    expect(lifecycle.status).toBe(200);
+    const first = await managedRealtime(agent, "delegate", {
+      input: "First realtime delegation",
+      operation_id: "voice-delegate-started",
+      voice_session_id: "voice-delegation-session",
+    });
+    const started = await first.json<ManagedRealtimeRouteResponse>();
+    expect(first.status, JSON.stringify(started)).toBe(202);
+    expect(started).toMatchObject({
+      operation_id: "voice-delegate-started",
+      route: "started",
+      voice_session_id: "voice-delegation-session",
+    });
+    expect(started.turn_id).toMatch(/^realtime:[0-9a-f]{48}$/);
+
+    const second = await managedRealtime(agent, "delegate", {
+      input: "Second realtime delegation steers the active work",
+      operation_id: "voice-delegate-steered",
+      voice_session_id: "voice-delegation-session",
+    });
+    expect(second.status).toBe(202);
+    const steered = await second.json<ManagedRealtimeRouteResponse>();
+    expect(steered).toEqual({
+      operation_id: "voice-delegate-steered",
+      route: "steered",
+      turn_id: started.turn_id,
+      voice_session_id: "voice-delegation-session",
+    });
+
+    await waitForHistoryEvent(agent, ({ event, turn_id }) => (
+      event?.type === "run.steered" && turn_id === started.turn_id
+    ));
+    await waitForTurnState(agent, started.turn_id, "completed");
+    const history = await managedHistory(agent);
+    expect(history.data).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "turn_accepted", turn_id: started.turn_id }),
+      expect.objectContaining({ event: expect.objectContaining({ type: "run.started" }), turn_id: started.turn_id }),
+      expect.objectContaining({ event: expect.objectContaining({ type: "run.completed" }), turn_id: started.turn_id }),
+      expect.objectContaining({ type: "turn_completed", turn_id: started.turn_id }),
+    ]));
+
+    const duplicateSteer = await managedRealtime(agent, "delegate", {
+      input: "Second realtime delegation steers the active work",
+      operation_id: "voice-delegate-steered",
+      voice_session_id: "voice-delegation-session",
+    });
+    expect(await duplicateSteer.json()).toEqual(steered);
+    const conflict = await managedRealtime(agent, "delegate", {
+      input: "Different input cannot reuse the operation identity",
+      operation_id: "voice-delegate-steered",
+      voice_session_id: "voice-delegation-session",
+    });
+    expect(conflict.status).toBe(409);
+    expect(await conflict.json()).toMatchObject({ error: "idempotency_conflict" });
+  });
+
+  it("fences stale managed voice sessions and never replays a pending mutation", async () => {
+    const agent = await createAgent();
+    const first = await managedRealtime(agent, "start", {
+      operation_id: "voice-lease-first-start",
+      voice_session_id: "voice-lease-first",
+    });
+    expect(first.status).toBe(200);
+
+    const repeatedIdentity = await managedRealtime(agent, "start", {
+      operation_id: "voice-lease-first-start-again",
+      voice_session_id: "voice-lease-first",
+    });
+    expect(repeatedIdentity.status).toBe(409);
+    expect(await repeatedIdentity.json()).toMatchObject({ error: "voice_session_active" });
+
+    const replacement = await managedRealtime(agent, "start", {
+      operation_id: "voice-lease-second-start",
+      voice_session_id: "voice-lease-second",
+    });
+    expect(replacement.status).toBe(200);
+
+    const staleDelegate = await managedRealtime(agent, "delegate", {
+      input: "stale voice must not route",
+      operation_id: "voice-lease-stale-delegate",
+      voice_session_id: "voice-lease-first",
+    });
+    expect(staleDelegate.status).toBe(409);
+    expect(await staleDelegate.json()).toMatchObject({ error: "voice_session_inactive" });
+
+    const staleStop = await managedRealtime(agent, "stop", {
+      operation_id: "voice-lease-stale-stop",
+      voice_session_id: "voice-lease-first",
+    });
+    expect(staleStop.status).toBe(200);
+    expect(await staleStop.json()).toMatchObject({ stale: true, stopped: false });
+
+    const pendingRequestHash = await testHash(JSON.stringify({
+      kind: "stop",
+      operation_id: "voice-lease-pending-stop",
+      voice_session_id: "voice-lease-second",
+    }));
+    await runInDurableObject(
+      testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id),
+      (_instance, state) => state.storage.sql.exec(
+        `INSERT INTO managed_realtime_operations (
+           voice_session_id, operation_id, kind, request_hash, state, response_json, created_at, updated_at
+         ) VALUES (?, ?, 'stop', ?, 'pending', NULL, ?, ?)`,
+        "voice-lease-second",
+        "voice-lease-pending-stop",
+        pendingRequestHash,
+        Date.now(),
+        Date.now(),
+      ),
+    );
+    const pending = await managedRealtime(agent, "stop", {
+      operation_id: "voice-lease-pending-stop",
+      voice_session_id: "voice-lease-second",
+    });
+    expect(pending.status).toBe(409);
+    expect(await pending.json()).toMatchObject({ error: "operation_pending" });
+
+    const stopped = await managedRealtime(agent, "stop", {
+      operation_id: "voice-lease-second-stop",
+      voice_session_id: "voice-lease-second",
+    });
+    expect(stopped.status).toBe(200);
+    expect(await stopped.json()).toMatchObject({ stopped: true });
   });
 
   it("forwards one owner-asserted session request and overwrites caller assertions", async () => {
@@ -2730,6 +3029,20 @@ type ManagedHistory = {
   latest_cursor: string;
 };
 
+type ManagedRealtimeLifecycleResponse = {
+  context: { history: unknown[]; workspace: string };
+  operation_id: string;
+  stopped?: boolean;
+  voice_session_id: string;
+};
+
+type ManagedRealtimeRouteResponse = {
+  operation_id: string;
+  route: "started" | "steered";
+  turn_id: string;
+  voice_session_id: string;
+};
+
 async function createAgent(): Promise<AgentReceipt> {
   const response = await SELF.fetch("https://example.test/v1/agents", {
     method: "POST",
@@ -2824,6 +3137,22 @@ async function submit(agent: AgentReceipt, id: string, input: string): Promise<M
   return response.json<ManagedTurnView>();
 }
 
+async function managedRealtime(
+  agent: AgentReceipt,
+  action: "start" | "delegate" | "stop",
+  body: Readonly<{
+    input?: string;
+    operation_id: string;
+    voice_session_id: string;
+  }>,
+): Promise<Response> {
+  return SELF.fetch(agent.events_url.replace(/\/events$/, `/realtime/${action}`), {
+    method: "POST",
+    headers: { "content-type": "application/json", origin: "https://example.test" },
+    body: JSON.stringify(body),
+  });
+}
+
 function sseReader(response: Response) {
   if (!response.body) throw new Error("SSE response has no body");
   const reader = response.body.pipeThrough(new TextDecoderStream()).getReader();
@@ -2846,6 +3175,11 @@ function sseReader(response: Response) {
     },
     cancel: () => reader.cancel(),
   };
+}
+
+async function testHash(value: string): Promise<string> {
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+  return [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, "0")).join("");
 }
 
 function sseFrameReader(response: Response) {

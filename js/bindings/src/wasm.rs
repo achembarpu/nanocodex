@@ -8,7 +8,7 @@ use std::{
 use js_sys::Promise;
 use nanocodex::{
     AgentEvents, AgentSessionContext, DurableAgentExt, Model, Nanocodex as RustNanocodex,
-    NanocodexError, OpenAi, PromptRoute, ReasoningMode, Thinking, TurnControl, TurnResult,
+    NanocodexError, OpenAi, PromptRoute, ReasoningMode, Thinking, Turn, TurnControl, TurnResult,
     agent::{
         ExecutionEnvironment, PromptRequest,
         durability::{
@@ -165,6 +165,12 @@ struct JavaScriptSubscriptionResponse {
 struct WasmAgentSessionContext<'a> {
     workspace: &'a str,
     history: &'a [nanocodex::oai::responses::ResponseItem],
+}
+
+#[derive(Deserialize)]
+struct WasmOwnedAgentSessionContext {
+    workspace: String,
+    history: Vec<ResponseItem>,
 }
 
 #[derive(Deserialize)]
@@ -1004,6 +1010,29 @@ impl WasmNanocodex {
         ))
     }
 
+    /// Atomically steers the active turn or starts a new independently awaitable turn.
+    ///
+    /// Returns `undefined` when the input was steered into an active turn.
+    ///
+    /// # Errors
+    ///
+    /// Rejects empty input, a full steering queue, or a stopped driver.
+    #[wasm_bindgen(js_name = routePrompt)]
+    pub async fn route_prompt(&self, instruction: &str) -> Result<Option<WasmTurn>, JsValue> {
+        if instruction.trim().is_empty() {
+            return Err(js_error("prompt instruction must not be empty"));
+        }
+        match self
+            .inner
+            .route_prompt(Prompt::new(instruction))
+            .await
+            .map_err(js_error)?
+        {
+            PromptRoute::Steered => Ok(None),
+            PromptRoute::Started(turn) => Ok(Some(WasmTurn::started(turn))),
+        }
+    }
+
     /// Forks the latest safe committed model boundary.
     ///
     /// # Errors
@@ -1491,6 +1520,241 @@ impl WasmBrowserVoice {
     }
 }
 
+#[derive(Serialize)]
+struct WasmManagedBrowserVoiceUpdate {
+    effects: BrowserVoiceEffects,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    delegation: Option<String>,
+}
+
+/// Standalone Rust-owned browser voice protocol for a remote managed Agent.
+///
+/// This core owns only Realtime protocol state. The caller owns media,
+/// transports, the managed Agent lifecycle, and routing returned delegations.
+#[wasm_bindgen(js_name = ManagedBrowserVoice)]
+pub struct WasmManagedBrowserVoice {
+    protocol: RefCell<BrowserVoiceProtocol>,
+    startup_context: RefCell<Option<String>>,
+    started: Cell<bool>,
+}
+
+#[wasm_bindgen(js_class = ManagedBrowserVoice)]
+impl WasmManagedBrowserVoice {
+    /// Creates an idle managed browser voice protocol core.
+    ///
+    /// # Errors
+    ///
+    /// Rejects voices outside Codex's ChatGPT V3 catalog.
+    #[wasm_bindgen(constructor)]
+    pub fn new(voice: &str) -> Result<Self, JsValue> {
+        Ok(Self {
+            protocol: RefCell::new(BrowserVoiceProtocol::new(voice).map_err(js_error)?),
+            startup_context: RefCell::new(None),
+            started: Cell::new(false),
+        })
+    }
+
+    /// Starts the protocol from the managed Agent's authoritative serialized context.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed `AgentSessionContext` JSON.
+    pub fn start(&self, context_json: &str) -> Result<(), JsValue> {
+        if self.started.get() {
+            return Ok(());
+        }
+        let context = serde_json::from_str::<WasmOwnedAgentSessionContext>(context_json)
+            .map_err(|error| js_error(format!("invalid AgentSessionContext: {error}")))?;
+        let history = browser_voice_history(&context.history);
+        self.startup_context.replace(build_browser_startup_context(
+            &history,
+            &context.workspace,
+            &[],
+        ));
+        self.started.set(true);
+        Ok(())
+    }
+
+    /// Encodes the managed same-origin call request after the browser creates its SDP offer.
+    ///
+    /// # Errors
+    ///
+    /// Rejects calls before [`Self::start`], invalid session IDs, or empty SDP offers.
+    #[wasm_bindgen(js_name = callBody)]
+    pub fn call_body(&self, sdp: &str, managed_session_id: &str) -> Result<String, JsValue> {
+        if !self.started.get() {
+            return Err(js_error("managed browser voice has not started"));
+        }
+        let session_id = managed_voice_session_id(managed_session_id)?;
+        let protocol = self.protocol.borrow();
+        let call_body = build_chatgpt_realtime_call(
+            sdp,
+            protocol.voice(),
+            self.startup_context.borrow().as_deref(),
+        )
+        .map_err(js_error)?;
+        serde_json::to_string(&serde_json::json!({
+            "openai_alpha": "quicksilver=v2",
+            "realtime_session_id": session_id,
+            "session_id": session_id,
+            "thread_id": session_id,
+            "call_body": call_body,
+        }))
+        .map_err(js_error)
+    }
+
+    /// Decodes Codex's provider response body and Location header in Rust.
+    ///
+    /// # Errors
+    ///
+    /// Rejects an empty SDP answer or a Location without a Codex call identity.
+    #[wasm_bindgen(js_name = completeCall)]
+    pub fn complete_call(&self, response_body: &str, location: &str) -> Result<String, JsValue> {
+        let result = decode_chatgpt_realtime_call(response_body, location).map_err(js_error)?;
+        serde_json::to_string(&serde_json::json!({
+            "call_id": result.call_id,
+            "sdp": result.sdp,
+        }))
+        .map_err(js_error)
+    }
+
+    /// Builds the managed same-origin sideband URL for a provider call identity.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed provider call or managed session identities.
+    #[wasm_bindgen(js_name = sidebandUrl)]
+    pub fn sideband_url(&self, call_id: &str, managed_session_id: &str) -> Result<String, JsValue> {
+        if !valid_realtime_call_id(call_id) {
+            return Err(js_error("invalid Realtime call ID"));
+        }
+        let session_id = managed_voice_session_id(managed_session_id)?;
+        Ok(format!(
+            "/api/realtime/sideband?call_id={call_id}&realtime_session_id={session_id}&session_id={session_id}&thread_id={session_id}&openai_alpha=quicksilver%3Dv2",
+        ))
+    }
+
+    /// Replays Rust-retained outbound frames after a sideband connects.
+    ///
+    /// # Errors
+    ///
+    /// Rejects only when effects cannot be serialized.
+    #[wasm_bindgen(js_name = sidebandOpened)]
+    pub fn sideband_opened(&self) -> Result<String, JsValue> {
+        encode_voice_effects(&self.protocol.borrow().sideband_opened())
+    }
+
+    /// Applies Codex's bounded reconnect policy after sideband transport loss.
+    ///
+    /// # Errors
+    ///
+    /// Rejects only when effects cannot be serialized.
+    #[wasm_bindgen(js_name = sidebandClosed)]
+    pub fn sideband_closed(&self, connected_ms: u32) -> Result<String, JsValue> {
+        encode_voice_effects(
+            &self
+                .protocol
+                .borrow_mut()
+                .sideband_closed(u64::from(connected_ms)),
+        )
+    }
+
+    /// Acknowledges frames written by the caller's WebSocket effect executor.
+    #[wasm_bindgen(js_name = framesSent)]
+    pub fn frames_sent(&self, count: u32) {
+        self.protocol.borrow_mut().frames_sent(count as usize);
+    }
+
+    /// Reports whether one sideband event may produce a managed Agent delegation.
+    #[wasm_bindgen(js_name = requiresAgentAdmission)]
+    pub fn requires_agent_admission(&self, payload: &str) -> bool {
+        realtime_message_requires_agent_admission(payload)
+    }
+
+    /// Applies one sideband event and returns effects plus canonical delegation text.
+    ///
+    /// The caller must route returned delegation text through its remote managed Agent.
+    ///
+    /// # Errors
+    ///
+    /// Rejects only when the update cannot be serialized.
+    #[wasm_bindgen(js_name = realtimeMessage)]
+    pub fn realtime_message(&self, payload: &str) -> Result<String, JsValue> {
+        let update = self.protocol.borrow_mut().realtime_message(payload);
+        let delegation = update
+            .delegation
+            .map(|delegation| realtime_delegation(&delegation.input, &delegation.transcript));
+        encode_managed_voice_update(update.effects, delegation)
+    }
+
+    /// Applies one canonical raw `AgentEvent` JSON value to the handoff stream.
+    ///
+    /// # Errors
+    ///
+    /// Rejects only when effects cannot be serialized.
+    #[wasm_bindgen(js_name = agentEvent)]
+    pub fn agent_event(&self, event_json: &str) -> Result<String, JsValue> {
+        encode_voice_effects(&self.protocol.borrow_mut().agent_event(event_json))
+    }
+
+    /// Drains one Codex-paced streamed or final managed Agent handoff chunk.
+    ///
+    /// # Errors
+    ///
+    /// Rejects only when effects cannot be serialized.
+    pub fn flush(&self, final_chunk: bool) -> Result<String, JsValue> {
+        encode_voice_effects(&self.protocol.borrow_mut().flush(final_chunk))
+    }
+
+    /// Stops the protocol and returns final transcript delegation plus close effects.
+    ///
+    /// # Errors
+    ///
+    /// Rejects only when the update cannot be serialized.
+    pub fn stop(&self) -> Result<String, JsValue> {
+        let tail = self.protocol.borrow_mut().take_transcript_tail();
+        let delegation = realtime_tail_delegation(&tail);
+        self.started.set(false);
+        self.startup_context.replace(None);
+        encode_managed_voice_update(self.protocol.borrow().close_effects(), delegation)
+    }
+
+    /// Selects Codex's preferred physical input from browser device labels.
+    ///
+    /// # Errors
+    ///
+    /// Rejects malformed label JSON.
+    #[wasm_bindgen(js_name = preferredPhysicalInput)]
+    pub fn preferred_physical_input(
+        &self,
+        current_label: &str,
+        labels_json: &str,
+    ) -> Result<Option<u32>, JsValue> {
+        let labels = serde_json::from_str::<Vec<String>>(labels_json).map_err(js_error)?;
+        preferred_physical_input(current_label, &labels)
+            .map(|index| u32::try_from(index).map_err(js_error))
+            .transpose()
+    }
+}
+
+fn managed_voice_session_id(value: &str) -> Result<String, JsValue> {
+    value
+        .parse::<SessionId>()
+        .map(|session_id| session_id.to_string())
+        .map_err(|error| js_error(format!("invalid managed session ID: {error}")))
+}
+
+fn encode_managed_voice_update(
+    effects: BrowserVoiceEffects,
+    delegation: Option<String>,
+) -> Result<String, JsValue> {
+    serde_json::to_string(&WasmManagedBrowserVoiceUpdate {
+        effects,
+        delegation,
+    })
+    .map_err(js_error)
+}
+
 #[derive(Deserialize)]
 struct WasmWorkspaceEntry {
     kind: String,
@@ -1735,31 +1999,46 @@ impl WasmTurn {
                 request = request.request_id(operation_id);
             }
             let accepted = agent.prompt(request).await;
-            let completed = match accepted {
-                Ok(turn) => {
-                    {
-                        let mut state = task_state.borrow_mut();
-                        state.accepted = Some(Ok(turn.request_id().map(str::to_owned)));
-                        state.control = Some(turn.control());
-                        state.notify();
-                    }
-                    turn.await.map_err(|error| turn_failure(&error))
-                }
+            match accepted {
+                Ok(turn) => Self::complete_started(task_state, turn).await,
                 Err(error) => {
                     let failure = turn_failure(&error);
                     let mut state = task_state.borrow_mut();
                     state.accepted = Some(Err(failure.clone()));
                     state.completed = Some(Err(failure));
                     state.notify();
-                    return;
                 }
-            };
-            let mut state = task_state.borrow_mut();
-            state.control = None;
-            state.completed = Some(completed);
-            state.notify();
+            }
         });
         Self { state }
+    }
+
+    fn started(turn: Turn) -> Self {
+        let state = Rc::new(RefCell::new(TurnState {
+            accepted: None,
+            control: None,
+            completed: None,
+            waiters: Vec::new(),
+        }));
+        let task_state = Rc::clone(&state);
+        spawn_local(async move {
+            Self::complete_started(task_state, turn).await;
+        });
+        Self { state }
+    }
+
+    async fn complete_started(state: Rc<RefCell<TurnState>>, turn: Turn) {
+        {
+            let mut state = state.borrow_mut();
+            state.accepted = Some(Ok(turn.request_id().map(str::to_owned)));
+            state.control = Some(turn.control());
+            state.notify();
+        }
+        let completed = turn.await.map_err(|error| turn_failure(&error));
+        let mut state = state.borrow_mut();
+        state.control = None;
+        state.completed = Some(completed);
+        state.notify();
     }
 
     async fn acceptance(&self) -> Result<Option<String>, TurnFailure> {

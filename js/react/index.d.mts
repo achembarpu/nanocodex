@@ -1,4 +1,5 @@
 import type { AgentEvent, DefaultAgent } from "nanocodex";
+import type { ManagedAgent } from "nanocodex/managed";
 import type { Config } from "nanocodex/browser";
 import type {
   Options as VoiceOptions,
@@ -106,6 +107,6 @@ export type UseVoiceReturnType = VoiceSnapshot & Readonly<{
   toggle(options?: { voice?: VoiceName | undefined }): Promise<void>;
 }>;
 export function useVoice(
-  agent: DefaultAgent | undefined,
+  agent: DefaultAgent | ManagedAgent | undefined,
   options?: UseVoiceParameters,
 ): UseVoiceReturnType;

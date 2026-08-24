@@ -1,5 +1,5 @@
 import * as HostAgent from "../host/Agent.mjs";
-import { observeAgentRelease } from "../internal.mjs";
+import { observeAgentRelease, routePrompt } from "../internal.mjs";
 import * as Transport from "../browser/Transport.mjs";
 import { createCloudflareDurabilityStore } from "../runtime/cloudflare-durability-store.mjs";
 import { durabilityRevision } from "../runtime/durability-store.mjs";
@@ -19,7 +19,13 @@ export function bindAgent(module, hostAgent = HostAgent) {
   return Object.freeze({
     create: (owner, options) => create(module, owner, options, hostAgent),
     destroy,
+    route,
   });
+}
+
+/** Atomically steers an active Cloudflare Agent turn or starts a new turn. */
+export function route(agent, options) {
+  return routePrompt(agent, options);
 }
 
 /** Removes the package-owned durable history for one Cloudflare Agent. */
@@ -138,9 +144,13 @@ async function createOwned(module, resolved, options, hostAgent, lifecycle) {
         console.error("Nanocodex Cloudflare event projection failed", error);
       }
     });
-    const exposed = agent.extend(() => ({
+    const exposed = agent.extend((owned) => ({
       events: {
         connect: (request) => eventSocket.connect(request),
+      },
+      turn: {
+        ...owned.turn,
+        route: (options) => routePrompt(owned, options),
       },
     }));
     const active = {};
