@@ -58,7 +58,6 @@ export function TerminalComposer({
           ref={textarea}
           aria-label="Message Nanocodex"
           enterKeyHint="send"
-          placeholder="Message Nanocodex"
           rows={1}
           value={draft}
           onChange={(event) => onChange(event.currentTarget.value)}

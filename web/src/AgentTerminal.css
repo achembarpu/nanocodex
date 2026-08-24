@@ -394,7 +394,6 @@
   white-space: pre-wrap;
 }
 
-.agent-touch-composer textarea::placeholder,
 .agent-touch-composer textarea:disabled {
   color: var(--terminal-muted);
   opacity: 1;
@@ -530,7 +529,6 @@
     field-sizing: content;
   }
 
-  .agent-touch-composer textarea::placeholder,
   .agent-touch-composer textarea:disabled {
     color: var(--terminal-muted);
     opacity: 1;

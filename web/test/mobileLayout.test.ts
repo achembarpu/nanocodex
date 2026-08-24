@@ -174,6 +174,7 @@ test("touch terminals use one native IME-safe composer and one contextual action
   assert.match(touchComposer, /window\.matchMedia\(COARSE_POINTER_QUERY\)/);
   assert.equal(matches(terminal, /<TerminalComposer\b/g), 1);
   assert.match(touchComposer, /<textarea[\s\S]*?aria-label="Message Nanocodex"/);
+  assert.doesNotMatch(touchComposer, /placeholder="Message Nanocodex"/);
   assert.match(touchComposer, /value=\{draft\}[\s\S]*?onChange=\{\(event\) => onChange\(event\.currentTarget\.value\)\}/);
   assert.match(touchComposer, /onCompositionStart=\{\(\) => \{ composing\.current = true; \}\}/);
   assert.match(touchComposer, /isSubmitKeyEvent\(event\.nativeEvent, composing\.current\)/);
