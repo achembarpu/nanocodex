@@ -322,9 +322,15 @@ async function resolveOrCreateBrowserAccount(
   }
 
   // An explicit but invalid credential must not silently become a fresh
-  // browser account. Cookie-free browser bootstrap is only for unauthenticated
-  // requests that did not attempt bearer authentication.
+  // browser account. Cookie-free browser bootstrap is only for requests that
+  // did not present either account or bearer authentication.
   if (request.headers.has("authorization")) return unauthorized();
+  if (hasCookie(request, ACCOUNT_COOKIE)) {
+    return json({ error: "invalid_session" }, {
+      status: 401,
+      headers: { "set-cookie": clearAccountCookie(new URL(request.url).protocol) },
+    });
+  }
 
   const userId = crypto.randomUUID();
   const issuedAt = Math.floor(Date.now() / 1_000);
@@ -368,20 +374,39 @@ function decodeUserId(value: string): string | undefined {
 }
 
 function cookieValue(request: Request, name: string): string | undefined {
+  const cookie = rawCookie(request, name);
+  return cookie.present && /^(?:a_)?[A-Za-z0-9_-]{43}$/.test(cookie.value)
+    ? cookie.value
+    : undefined;
+}
+
+function hasCookie(request: Request, name: string): boolean {
+  return rawCookie(request, name).present;
+}
+
+function rawCookie(request: Request, name: string): { present: boolean; value: string } {
   for (const part of request.headers.get("cookie")?.split(";") ?? []) {
     const separator = part.indexOf("=");
-    if (separator < 0 || part.slice(0, separator).trim() !== name) continue;
-    const value = part.slice(separator + 1).trim();
-    if (/^(?:a_)?[A-Za-z0-9_-]{43}$/.test(value)) return value;
+    if (separator >= 0 && part.slice(0, separator).trim() === name) {
+      return { present: true, value: part.slice(separator + 1).trim() };
+    }
   }
-  return undefined;
+  return { present: false, value: "" };
 }
 
 function serializeAccountCookie(token: string, protocol: string): string {
+  return accountCookie(token, SESSION_TTL_SECONDS, protocol);
+}
+
+function clearAccountCookie(protocol: string): string {
+  return accountCookie("", 0, protocol);
+}
+
+function accountCookie(value: string, maxAge: number, protocol: string): string {
   return [
-    `${ACCOUNT_COOKIE}=${token}`,
+    `${ACCOUNT_COOKIE}=${value}`,
     "Path=/",
-    `Max-Age=${SESSION_TTL_SECONDS}`,
+    `Max-Age=${maxAge}`,
     "HttpOnly",
     "SameSite=Lax",
     ...(protocol === "https:" ? ["Secure"] : []),

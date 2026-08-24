@@ -17,7 +17,7 @@ export type AuthenticatedAccount = Readonly<{
 }>;
 
 type SessionStatus = "checking" | "ready" | "error";
-type AccountOperation = "register" | "sign-in" | "sign-out";
+type AccountOperation = "new-account" | "register" | "sign-in" | "sign-out";
 
 type AccountSession = Readonly<{
   status: SessionStatus;
@@ -25,6 +25,7 @@ type AccountSession = Readonly<{
   error: string | null;
   operation: AccountOperation | null;
   refresh: () => Promise<void>;
+  startNewAccount: () => Promise<void>;
   register: () => Promise<void>;
   signIn: () => Promise<void>;
   signOut: () => Promise<void>;
@@ -149,6 +150,22 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
 
   const register = useCallback(() => connect("register"), [connect]);
   const signIn = useCallback(() => connect("login"), [connect]);
+  const startNewAccount = useCallback(async () => {
+    setOperation("new-account");
+    setError(null);
+    try {
+      const nextUser = await getCurrentUser();
+      if (!nextUser) throw new Error("The browser session was not created.");
+      await claimLocalCredential(nextUser.id);
+      requestId.current++;
+      setUser(nextUser);
+      setStatus("ready");
+    } catch (cause) {
+      setError(accountFailure(cause, "Couldn’t start a new account. Try again."));
+    } finally {
+      setOperation(null);
+    }
+  }, [claimLocalCredential]);
   const signOut = useCallback(async () => {
     setOperation("sign-out");
     setError(null);
@@ -173,10 +190,11 @@ export function AccountSessionProvider({ children }: { children: ReactNode }) {
     error,
     operation,
     refresh,
+    startNewAccount,
     register,
     signIn,
     signOut,
-  }), [error, operation, refresh, register, signIn, signOut, status, user]);
+  }), [error, operation, refresh, register, signIn, signOut, startNewAccount, status, user]);
 
   return (
     <AccountSessionContext.Provider value={value}>
@@ -198,7 +216,10 @@ async function getCurrentUser(): Promise<AuthenticatedAccount | null> {
     headers: { accept: "application/json" },
   });
   if (response.status === 401) {
-    await response.body?.cancel();
+    const body: unknown = await response.json().catch(() => undefined);
+    if (isRecord(body) && body.error === "invalid_session") {
+      throw new Error("Your account session expired. Retry to start a new browser session, or sign in with your passkey.");
+    }
     return null;
   }
   if (!response.ok) throw await responseFailure(response, "Account service unavailable.");

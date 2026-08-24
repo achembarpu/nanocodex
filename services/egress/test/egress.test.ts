@@ -446,6 +446,11 @@ describe("private connector data plane", () => {
       connectorRequest("https://api.github.com:444/repos/nanocodex/sdk", subject),
       connectorRequest("https://github.com/repos/nanocodex/sdk", subject),
       connectorRequest("https://gmail.googleapis.com/gmail/v1/users/other/messages", subject),
+      connectorRequest(
+        "https://gmail.googleapis.com/gmail/v1/users/me/%2e%2e%2fother/messages",
+        subject,
+      ),
+      connectorRequest("https://www.googleapis.com/drive/v3/%252e%252e%252fother", subject),
       connectorRequest("https://www.googleapis.com/oauth2/v3/userinfo", subject),
       connectorRequest("https://api.github.com/repos/nanocodex/sdk?access_token=caller", subject),
       connectorRequest("https://api.github.com/repos/nanocodex/sdk", ""),
@@ -544,6 +549,184 @@ describe("private connector data plane", () => {
     ));
     expect(response.status).toBe(200);
     expect(await response.json()).toMatchObject({ account: "gmail-refreshed" });
+  });
+
+  it("clears provider-revoked access and refresh tokens and requires reauthorization", async () => {
+    const githubSubject = "V".repeat(43);
+    const gmailSubject = "Y".repeat(43);
+    await control(`/subjects/${githubSubject}`, "PUT", { user_id: "connector-revoked-access" });
+    await control(`/subjects/${gmailSubject}`, "PUT", { user_id: "connector-revoked-refresh" });
+    await connect("connector-revoked-access", "github", "github-code");
+    await connect("connector-revoked-refresh", "gmail", "gmail-revoked-code");
+
+    for (const [request, user, connector] of [
+      [connectorRequest("https://api.github.com/repos/nanocodex/sdk?revoked=1", githubSubject),
+        "connector-revoked-access", "github"],
+      [connectorRequest("https://gmail.googleapis.com/gmail/v1/users/me/messages", gmailSubject),
+        "connector-revoked-refresh", "gmail"],
+    ] as const) {
+      const revoked = await SELF.fetch(request);
+      expect(revoked.status).toBe(409);
+      expect(await revoked.json()).toEqual({ error: "connector_reauthentication_required" });
+      const status = await SELF.fetch(`https://broker.test/users/${user}/connectors`);
+      expect(await status.json()).toMatchObject({
+        connectors: { [connector]: { connected: false } },
+      });
+    }
+  });
+
+  it("revokes each upstream OAuth grant before deleting local connector state", async () => {
+    for (const connector of ["github", "gmail", "gdrive"] as const) {
+      const user = `connector-disconnect-${connector}`;
+      await connect(user, connector, connector === "gdrive" ? "gdrive-code" : `${connector}-code`);
+      const disconnected = await SELF.fetch(
+        `https://broker.test/users/${user}/connectors/${connector}`,
+        { method: "DELETE" },
+      );
+      expect(disconnected.status).toBe(204);
+      const status = await SELF.fetch(`https://broker.test/users/${user}/connectors`);
+      expect(await status.json()).toMatchObject({
+        connectors: { [connector]: { connected: false } },
+      });
+    }
+  });
+
+  it("disconnects sibling Google connectors for the same revoked account grant", async () => {
+    const user = "connector-google-shared-account";
+    await connect(user, "gmail", "gmail-shared-account-code");
+    await connect(user, "gdrive", "gdrive-shared-account-code");
+
+    const connected = await SELF.fetch(`https://broker.test/users/${user}/connectors`);
+    expect(await connected.json()).toMatchObject({
+      connectors: {
+        gmail: { connected: true, account_id: "google-shared-account" },
+        gdrive: { connected: true, account_id: "google-shared-account" },
+      },
+    });
+
+    const disconnected = await SELF.fetch(
+      `https://broker.test/users/${user}/connectors/gmail`,
+      { method: "DELETE" },
+    );
+    expect(disconnected.status).toBe(204);
+    const status = await SELF.fetch(`https://broker.test/users/${user}/connectors`);
+    expect(await status.json()).toMatchObject({
+      connectors: {
+        gmail: { connected: false },
+        gdrive: { connected: false },
+      },
+    });
+  });
+
+  it("clears sibling Google connectors when the shared account grant is rejected", async () => {
+    const user = "connector-google-rejected-account";
+    const subject = "S".repeat(43);
+    await control(`/subjects/${subject}`, "PUT", { user_id: user });
+    await connect(user, "gmail", "gmail-shared-account-code");
+    await connect(user, "gdrive", "gdrive-shared-account-code");
+
+    const rejected = await SELF.fetch(connectorRequest(
+      "https://gmail.googleapis.com/gmail/v1/users/me/messages?revoked=1",
+      subject,
+    ));
+    expect(rejected.status).toBe(409);
+    expect(await rejected.json()).toEqual({ error: "connector_reauthentication_required" });
+
+    const status = await SELF.fetch(`https://broker.test/users/${user}/connectors`);
+    expect(await status.json()).toMatchObject({
+      connectors: {
+        gmail: { connected: false },
+        gdrive: { connected: false },
+      },
+    });
+  });
+
+  it("retains encrypted connector state when upstream revocation is retryable", async () => {
+    for (const [connector, code] of [
+      ["github", "revoke-failure-code"],
+      ["gmail", "gmail-revoke-failure-code"],
+    ] as const) {
+      const user = `connector-disconnect-retry-${connector}`;
+      await connect(user, connector, code);
+      const disconnected = await SELF.fetch(
+        `https://broker.test/users/${user}/connectors/${connector}`,
+        { method: "DELETE" },
+      );
+      expect(disconnected.status).toBe(503);
+      expect(await disconnected.json()).toEqual({ error: "connector_revocation_failed" });
+      const status = await SELF.fetch(`https://broker.test/users/${user}/connectors`);
+      expect(await status.json()).toMatchObject({
+        connectors: { [connector]: { connected: true } },
+      });
+    }
+  });
+
+  it("emits secret-free lifecycle audits for authorization, use, failure, and disconnect", async () => {
+    const subject = "L".repeat(43);
+    const user = "connector-audit";
+    await control(`/subjects/${subject}`, "PUT", { user_id: user });
+    const log = vi.spyOn(console, "log").mockImplementation(() => {});
+    try {
+      await connect(user, "github", "github-code");
+      expect((await SELF.fetch(connectorRequest(
+        "https://api.github.com/repos/nanocodex/sdk",
+        subject,
+      ))).status).toBe(200);
+
+      const started = await control(`/users/${user}/connectors/gmail`, "POST", {
+        redirect_uri: "https://nanocodex.test/v1/connectors/gmail/callback",
+        return_to: "/",
+      });
+      expect(started.status).toBe(200);
+      const failed = await control(`/users/${user}/connectors/gmail/callback`, "POST", {
+        code: "authorization-code-must-not-be-logged",
+        state: "invalid-state-must-not-be-logged",
+      });
+      expect(failed.status).toBe(400);
+      expect((await SELF.fetch(`https://broker.test/users/${user}/connectors/github`, {
+        method: "DELETE",
+      })).status).toBe(204);
+
+      const entries = log.mock.calls.flatMap(([value]) => {
+        if (typeof value !== "string") return [];
+        try {
+          const entry = JSON.parse(value) as Record<string, unknown>;
+          return entry.type === "connector.audit" ? [entry] : [];
+        } catch { return []; }
+      });
+      expect(entries).toEqual(expect.arrayContaining([
+        expect.objectContaining({ action: "authorize_start", outcome: "allow", connector: "github" }),
+        expect.objectContaining({ action: "authorize_callback", outcome: "allow", connector: "github" }),
+        expect.objectContaining({ action: "use", outcome: "allow", connector: "github" }),
+        expect.objectContaining({
+          action: "authorize_callback",
+          outcome: "deny",
+          connector: "gmail",
+          code: "invalid_oauth_state",
+        }),
+        expect.objectContaining({
+          action: "disconnect",
+          outcome: "allow",
+          connector: "github",
+          provider_revoked: true,
+        }),
+      ]));
+      const encoded = JSON.stringify(entries);
+      expect(encoded).not.toMatch(
+        /connector-access|connector-refresh|authorization-code-must-not-be-logged|invalid-state-must-not-be-logged|NANOCODEX_PROVIDER_CREDENTIAL/,
+      );
+      const egressEntries = log.mock.calls.flatMap(([value]) => {
+        if (typeof value !== "string") return [];
+        try {
+          const entry = JSON.parse(value) as Record<string, unknown>;
+          return entry.type === "egress.request" && entry.rule === "github" ? [entry] : [];
+        } catch { return []; }
+      });
+      expect(egressEntries).toContainEqual(expect.objectContaining({ path: "/provider-api" }));
+      expect(JSON.stringify(egressEntries)).not.toContain("/repos/nanocodex/sdk");
+    } finally {
+      log.mockRestore();
+    }
   });
 });
 

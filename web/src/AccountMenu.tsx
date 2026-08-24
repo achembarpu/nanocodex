@@ -557,21 +557,21 @@ export function AccountMenu() {
             </>
           ) : (
             <div className="account-auth-actions">
-              <p>Create or open your Nanocodex account with a passkey.</p>
+              <p>Sign in with your passkey, or explicitly start a separate account.</p>
               <button
                 className="account-primary-action"
-                type="button"
-                disabled={session.operation !== null}
-                onClick={() => void session.register()}
-              >
-                Register passkey
-              </button>
-              <button
                 type="button"
                 disabled={session.operation !== null}
                 onClick={() => void session.signIn()}
               >
                 Sign in with passkey
+              </button>
+              <button
+                type="button"
+                disabled={session.operation !== null}
+                onClick={() => void session.startNewAccount()}
+              >
+                Start new account
               </button>
             </div>
           )}

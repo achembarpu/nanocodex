@@ -269,6 +269,51 @@ describe("managed agents REST and resumable SSE", () => {
     expect(response.headers.get("set-cookie")).toBeNull();
   });
 
+  it("rejects and clears stale account cookies instead of minting a replacement identity", async () => {
+    const expiredToken = `a_${"e".repeat(43)}`;
+    const auth = testEnv.NANOCODEX_AUTH.getByName("account");
+    const stored = await auth.fetch(
+      `https://do.invalid/set?key=${encodeURIComponent(`session:${expiredToken}`)}`,
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          value: {
+            userId: "44444444-4444-4444-8444-444444444444",
+            issuedAt: 1,
+            expiresAt: 2,
+          },
+          ttl: 60,
+        }),
+      },
+    );
+    expect(stored.ok).toBe(true);
+
+    for (const token of [
+      "malformed",
+      `a_${"z".repeat(43)}`,
+      expiredToken,
+      "z".repeat(43),
+    ]) {
+      const response = await RAW_SELF.fetch("https://example.test/v1/me", {
+        headers: { cookie: `other=value; nanocodex_account=${token}` },
+      });
+      expect(response.status).toBe(401);
+      expect(await response.json()).toEqual({ error: "invalid_session" });
+      expect(response.headers.get("set-cookie")).toMatch(
+        /^nanocodex_account=; Path=\/; Max-Age=0; HttpOnly; SameSite=Lax; Secure$/,
+      );
+    }
+
+    const unrelatedCookie = await RAW_SELF.fetch("https://example.test/v1/me", {
+      headers: { cookie: "other=value" },
+    });
+    expect(unrelatedCookie.status).toBe(200);
+    expect(unrelatedCookie.headers.get("set-cookie")).toMatch(
+      /^nanocodex_account=a_[A-Za-z0-9_-]{43};/,
+    );
+  });
+
   it("recognizes passkey sessions even when their random token begins with the anonymous prefix", async () => {
     const tokens = ["w".repeat(43), `a_${"w".repeat(41)}`];
     for (const [index, token] of tokens.entries()) {

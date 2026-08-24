@@ -26,6 +26,7 @@ import {
   decodeGDriveIdentity,
   decodeGDriveTokenResponse,
 } from "./connectors/gdrive";
+import { canonicalConnectorPath } from "./connector-path";
 
 const STATE_KEY = "connector-state";
 const PENDING_TTL_MS = 10 * 60_000;
@@ -139,9 +140,18 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
 
   async #dispatch(request: Request): Promise<Response> {
     const url = new URL(request.url);
+    let auditAction: ConnectorAuditAction | undefined;
+    let auditConnector: ConnectorId | undefined;
     try {
       const provider = providerRule(url);
-      if (provider) return await this.#proxy(provider, request, url);
+      if (provider) {
+        auditAction = "use";
+        auditConnector = provider.id;
+        const response = await this.#proxy(provider, request, url);
+        connectorAudit("use", response.status >= 500 ? "error" : response.status >= 400 ? "deny" : "allow",
+          provider.id, { status: response.status });
+        return response;
+      }
       if (PROVIDER_RULES.some((candidate) => candidate.origin === url.origin)
         || url.origin !== "https://connectors.internal") {
         return jsonError(403, "destination_denied");
@@ -154,20 +164,46 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
       if (!id) return jsonError(404, "not_found");
       const operation = match?.[2];
       if (request.method === "POST" && operation === "start") {
-        return json(await this.#start(id, request), 200);
+        auditAction = "authorize_start";
+        auditConnector = id;
+        const result = json(await this.#start(id, request), 200);
+        connectorAudit("authorize_start", "allow", id, { status: 200 });
+        return result;
       }
       if (request.method === "POST" && operation === "callback") {
-        return json(await this.#callback(id, request), 200);
+        auditAction = "authorize_callback";
+        auditConnector = id;
+        const callback = await this.#callback(id, request);
+        connectorAudit("authorize_callback", callback.connected === true ? "allow" : "deny", id, {
+          status: 200,
+          connected: callback.connected === true,
+        });
+        return json(callback, 200);
       }
       if (request.method === "DELETE" && operation === undefined) {
-        delete this.#connectors.connectors[id];
+        auditAction = "disconnect";
+        auditConnector = id;
+        const connector = this.#connectors.connectors[id];
+        if (connector) await this.#revoke(id, connector);
+        const disconnected = this.#deleteConnectorGrant(id, connector);
         delete this.#connectors.pending[id];
         await this.#persist();
+        connectorAudit("disconnect", "allow", id, {
+          status: 204,
+          provider_revoked: Boolean(connector),
+          disconnected_connectors: disconnected.length,
+        });
         return new Response(null, { status: 204, headers: noStoreHeaders() });
       }
       return jsonError(405, "method_not_allowed");
     } catch (error) {
       const problem = connectorFailure(error);
+      if (auditAction && auditConnector) {
+        connectorAudit(auditAction, problem.status >= 500 ? "error" : "deny", auditConnector, {
+          status: problem.status,
+          code: problem.code,
+        });
+      }
       await this.#restoreDurableState();
       return problem.returnTo
         ? json({ error: problem.code, return_to: problem.returnTo }, problem.status)
@@ -200,6 +236,12 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
       });
     } catch {
       throw new ConnectorFailure(503, "connector_provider_unavailable");
+    }
+    if (upstream.status === 401) {
+      await upstream.body?.cancel();
+      this.#deleteConnectorGrant(provider.id, connector);
+      await this.#persist();
+      throw new ConnectorFailure(409, "connector_reauthentication_required");
     }
     if (REDIRECT_STATUS.has(upstream.status)) {
       await upstream.body?.cancel();
@@ -255,7 +297,20 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
     }));
     if (REDIRECT_STATUS.has(response.status) || !response.ok) {
       await response.body?.cancel();
-      throw new ConnectorFailure(409, "connector_reauthentication_required");
+      if (response.status === 400 || response.status === 401) {
+        this.#deleteConnectorGrant(id, connector);
+        await this.#persist();
+        connectorAudit("refresh", "deny", id, {
+          status: 409,
+          code: "connector_reauthentication_required",
+        });
+        throw new ConnectorFailure(409, "connector_reauthentication_required");
+      }
+      connectorAudit("refresh", "error", id, {
+        status: 503,
+        code: "connector_provider_unavailable",
+      });
+      throw new ConnectorFailure(503, "connector_provider_unavailable");
     }
     const refreshed = decodeGoogleRefresh(await providerJson(response));
     const next: StoredConnector = {
@@ -266,7 +321,31 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
     };
     this.#connectors.connectors[id] = next;
     await this.#persist();
+    connectorAudit("refresh", "allow", id, { status: 200 });
     return next;
+  }
+
+  async #revoke(id: ConnectorId, connector: StoredConnector): Promise<void> {
+    const response = await providerFetch(revocationRequest(id, connector, this.#env));
+    await response.body?.cancel();
+    const revoked = id === "github" ? response.status === 204 : response.status === 200;
+    if (!revoked) throw new ConnectorFailure(503, "connector_revocation_failed");
+  }
+
+  #disconnectIds(id: ConnectorId, connector: StoredConnector): ConnectorId[] {
+    if (id === "github") return [id];
+    return (["gmail", "gdrive"] as const).filter((candidate) => (
+      candidate === id
+      || this.#connectors.connectors[candidate]?.accountId === connector.accountId
+    ));
+  }
+
+  #deleteConnectorGrant(id: ConnectorId, connector?: StoredConnector): ConnectorId[] {
+    const connectorIds = connector ? this.#disconnectIds(id, connector) : [id];
+    for (const connectorId of connectorIds) {
+      delete this.#connectors.connectors[connectorId];
+    }
+    return connectorIds;
   }
 
   #publicStatus(): Record<ConnectorId, Record<string, unknown>> {
@@ -469,6 +548,35 @@ function identityRequest(id: ConnectorId, accessToken: string): Request {
   return buildGDriveIdentityRequest(accessToken);
 }
 
+function revocationRequest(
+  id: ConnectorId,
+  connector: StoredConnector,
+  env: ConnectorBrokerEnv,
+): Request {
+  if (id === "github") {
+    const credentials = providerCredentials(id, env);
+    return new Request(
+      `https://api.github.com/applications/${encodeURIComponent(credentials.clientId)}/token`,
+      {
+        method: "DELETE",
+        headers: {
+          accept: "application/vnd.github+json",
+          authorization: `Basic ${btoa(`${credentials.clientId}:${credentials.clientSecret}`)}`,
+          "content-type": "application/json",
+          "user-agent": "nanocodex-connector-broker",
+          "x-github-api-version": "2026-03-10",
+        },
+        body: JSON.stringify({ access_token: connector.accessToken }),
+      },
+    );
+  }
+  return new Request("https://oauth2.googleapis.com/revoke", {
+    method: "POST",
+    headers: { "content-type": "application/x-www-form-urlencoded" },
+    body: new URLSearchParams({ token: connector.refreshToken ?? connector.accessToken }),
+  });
+}
+
 function decodeIdentity(id: ConnectorId, value: unknown): { accountId: string; displayLabel: string } {
   if (id === "github") return decodeGitHubIdentity(value);
   if (id === "gmail") return decodeGmailIdentity(value);
@@ -524,6 +632,7 @@ function decodeGoogleRefresh(value: unknown): {
 
 function providerRule(url: URL): ProviderRule | undefined {
   return PROVIDER_RULES.find((candidate) => candidate.origin === url.origin
+    && canonicalConnectorPath(candidate.id, url.pathname)
     && candidate.paths.some((path) => path.test(url.pathname)));
 }
 
@@ -694,6 +803,28 @@ function connectorId(value: string | undefined): ConnectorId | undefined {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+type ConnectorAuditAction =
+  | "authorize_start"
+  | "authorize_callback"
+  | "disconnect"
+  | "refresh"
+  | "use";
+
+function connectorAudit(
+  action: ConnectorAuditAction,
+  outcome: "allow" | "deny" | "error",
+  connector: ConnectorId,
+  detail: Readonly<Record<string, boolean | number | string>>,
+): void {
+  console.log(JSON.stringify({
+    type: "connector.audit",
+    action,
+    outcome,
+    connector,
+    ...detail,
+  }));
 }
 
 class ConnectorFailure extends Error {

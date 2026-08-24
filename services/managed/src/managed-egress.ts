@@ -42,7 +42,7 @@ const PROVIDERS = new Map<string, ProviderPolicy>([
   }],
 ]);
 
-const PRIVATE_HEADER = /(?:^|[-_])(?:auth(?:orization)?|cookie|credential|password|proxy|secret|token|api[-_]?key)(?:$|[-_])/i;
+const PRIVATE_HEADER = /(?:^|[-_])(?:auth(?:orization)?|cookie|credential|password|proxy|secret|token|api[-_]?key)(?:$|[-_]|\d)/i;
 const FORBIDDEN_HEADERS = new Set([
   "connection", "host", "origin", "proxy-connection", "referer", "te", "trailer",
   "transfer-encoding", "upgrade", "x-nanocodex-subject",
@@ -72,7 +72,9 @@ export async function handleManagedEgress(
   if (!provider && PROVIDERS.has(url.hostname)) return failure(403, "destination_denied");
   if (provider) {
     if (!subject || !SUBJECT.test(subject)) return failure(403, "requires_login");
-    if (!provider.path(url.pathname)) return failure(403, "connector_path_denied");
+    if (!canonicalProviderPath(provider, url.pathname) || !provider.path(url.pathname)) {
+      return failure(403, "connector_path_denied");
+    }
     const headers = new Headers(request.headers);
     headers.set("authorization", PROVIDER_PLACEHOLDER);
     headers.set("x-nanocodex-subject", subject);
@@ -94,6 +96,11 @@ export async function handleManagedEgress(
 function providerFor(url: URL): ProviderPolicy | undefined {
   if (url.protocol !== "https:" || url.port) return undefined;
   return PROVIDERS.get(url.hostname);
+}
+
+function canonicalProviderPath(provider: ProviderPolicy, pathname: string): boolean {
+  return provider.connector === "github"
+    || (!pathname.includes("\\") && !/%(?:2e|2f|5c|25)/i.test(pathname));
 }
 
 async function fetchPublic(

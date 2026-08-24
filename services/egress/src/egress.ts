@@ -8,6 +8,7 @@ import {
   UserConnectorBroker,
   type ConnectorBrokerEnv,
 } from "./connector-broker";
+import { canonicalConnectorPath } from "./connector-path";
 
 export { AgentSubjectDirectory, UserCredentialBroker } from "./broker";
 export { UserConnectorBroker } from "./connector-broker";
@@ -235,6 +236,7 @@ async function handleConnectorEgress(
 function connectorOperation(url: URL): ConnectorOperation | undefined {
   if (url.href.length > 8_192) return undefined;
   return CONNECTOR_OPERATIONS.find((candidate) => candidate.origin === url.origin
+    && canonicalConnectorPath(candidate.id, url.pathname)
     && candidate.paths.some((path) => path.test(url.pathname)));
 }
 
@@ -605,13 +607,14 @@ function audit(
   started: number,
   detail: Record<string, unknown>,
 ): void {
+  const connector = rule === "github" || rule === "gmail" || rule === "gdrive";
   console.log(JSON.stringify({
     type: "egress.request",
     action,
     rule,
     method: request.method,
     host: url.host,
-    path: url.pathname,
+    path: connector ? "/provider-api" : url.pathname,
     duration_ms: Date.now() - started,
     ...detail,
   }));

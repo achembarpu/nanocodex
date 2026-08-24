@@ -57,8 +57,12 @@ describe("Computer egress gateway", () => {
     const cases: Array<[RequestInfo, RequestInit | undefined, number]> = [
       ["https://example.com/", { headers: { authorization: "Bearer browser-token" } }, 403],
       ["https://example.com/", { headers: { cookie: "session=secret" } }, 403],
+      ["https://example.com/", { headers: { cookie2: "session=secret" } }, 403],
+      ["https://example.com/", { headers: { "x-authorization2": "browser-token" } }, 403],
       ["http://api.github.com/user", undefined, 403],
       ["https://api.github.com.evil.test/user", undefined, 403],
+      ["https://gmail.googleapis.com/gmail/v1/users/me/%2e%2e%2fother/messages", undefined, 403],
+      ["https://www.googleapis.com/drive/v3/%252e%252e%252fother", undefined, 403],
       ["https://name:password@example.com/", undefined, 403],
       ["http://127.0.0.1/", undefined, 403],
       ["http://169.254.169.254/latest/meta-data", undefined, 403],

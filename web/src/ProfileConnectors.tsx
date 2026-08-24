@@ -96,7 +96,7 @@ export function ProfileConnectors({
       const response = await connectorRequest(`/v1/connectors/${id}`, { method: "DELETE" });
       if (!response.ok) throw await responseFailure(response, `Couldn’t disconnect ${connectorLabel(id)}.`);
       await response.body?.cancel();
-      setConnectors((current) => current ? { ...current, [id]: { connected: false } } : current);
+      await load();
     } catch (cause) {
       setError(failureMessage(cause, `Couldn’t disconnect ${connectorLabel(id)}.`));
     } finally {

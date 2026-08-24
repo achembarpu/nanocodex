@@ -9,6 +9,18 @@ type ConnectorId = "github" | "gmail" | "gdrive";
 
 const CONNECTOR = /^(github|gmail|gdrive)$/;
 const CALLBACK_SUFFIX = "/callback";
+const CONNECTOR_ERROR_CODES = new Set([
+  "authorization_code_missing",
+  "connector_broker_failed",
+  "connector_identity_failed",
+  "connector_identity_response_invalid",
+  "connector_not_configured",
+  "connector_provider_unavailable",
+  "connector_token_exchange_failed",
+  "connector_token_response_invalid",
+  "invalid_oauth_state",
+  "invalid_request",
+]);
 
 export async function routeConnectorRequest(
   request: Request,
@@ -78,7 +90,7 @@ async function finishCallback(
     console.warn("connector callback failed", {
       connector,
       status: response.status,
-      error: isRecord(value) && typeof value.error === "string" ? value.error : "invalid_response",
+      error: connectorErrorCode(value),
     });
   }
   if (!isRecord(value) || typeof value.return_to !== "string") {
@@ -90,6 +102,11 @@ async function finishCallback(
     connector,
     response.ok ? value.connected === true ? "connected" : "cancelled" : "failed",
   );
+}
+
+function connectorErrorCode(value: unknown): string {
+  const code = isRecord(value) && typeof value.error === "string" ? value.error : undefined;
+  return code && CONNECTOR_ERROR_CODES.has(code) ? code : "invalid_response";
 }
 
 async function decodeReturnTo(request: Request, url: URL): Promise<string | undefined> {
