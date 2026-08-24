@@ -3,17 +3,17 @@ let nextEvaluation = 1;
 
 /** Creates the browser's per-cell, synchronously terminable Code Mode boundary. */
 export function createWorkerEvaluator(options = {}) {
-  const WorkerImpl = options.WorkerImpl ?? globalThis.Worker;
-  if (typeof WorkerImpl !== "function") {
+  const createWorker = options.createWorker ?? createCodeEvaluatorWorker;
+  if (options.createWorker === undefined && typeof globalThis.Worker !== "function") {
     throw new TypeError("browser Code Mode isolation requires Worker");
+  }
+  if (typeof createWorker !== "function") {
+    throw new TypeError("browser Code Mode isolation requires a Worker factory");
   }
 
   return (source, environment) => new Promise((resolve, reject) => {
     environment.signal?.throwIfAborted();
-    const worker = new WorkerImpl(
-      new URL("./code-evaluator.worker.mjs", import.meta.url),
-      { name: "nanocodex-code-evaluator", type: "module" },
-    );
+    const worker = createWorker();
     const evaluationId = nextEvaluation++;
     let closed = false;
 
@@ -110,6 +110,16 @@ export function createWorkerEvaluator(options = {}) {
       fail(error);
     }
   });
+}
+
+// Vite recognizes only this literal Worker + URL shape as a worker entry. Keep
+// the test factory above out of the production construction path so the
+// evaluator and its imports are emitted as one runnable browser asset.
+function createCodeEvaluatorWorker() {
+  return new Worker(
+    new URL("./code-evaluator.worker.mjs", import.meta.url),
+    { name: "nanocodex-code-evaluator", type: "module" },
+  );
 }
 
 function postToolResult(worker, evaluationId, id, ok, value, isClosed) {

@@ -6,6 +6,7 @@ import { createWorkerEvaluator } from "../runtime/worker-evaluator.mjs";
 import { NodeWebWorker } from "./support/node-web-worker.mjs";
 
 const PROTOCOL = "nanocodex.code-evaluator.v1";
+const WORKER_URL = new URL("../runtime/code-evaluator.worker.mjs", import.meta.url);
 
 test("real module evaluator preserves Code Mode globals and terminal store commits", async () => {
   const logs = [];
@@ -17,7 +18,12 @@ test("real module evaluator preserves Code Mode globals and terminal store commi
     },
   }, {
     console: { log: (...values) => logs.push(values) },
-    evaluate: createWorkerEvaluator({ WorkerImpl: NodeWebWorker }),
+    evaluate: createWorkerEvaluator({
+      createWorker: () => new NodeWebWorker(WORKER_URL, {
+        name: "nanocodex-code-evaluator",
+        type: "module",
+      }),
+    }),
   });
 
   const completed = JSON.parse(await runtime.executeCode(`
@@ -75,7 +81,7 @@ test("evaluator cancellation aborts nested work before termination and recreates
       },
     },
   }, {
-    evaluate: createWorkerEvaluator({ WorkerImpl: FakeWorker }),
+    evaluate: createWorkerEvaluator({ createWorker: () => new FakeWorker() }),
   });
 
   const pending = runtime.executeCode(
@@ -157,7 +163,7 @@ test("evaluator cancellation aborts nested work before termination and recreates
 test("session-scoped cancellation terminates only that cell's evaluator", async () => {
   FakeWorker.reset();
   const runtime = createCodeRuntime({}, {
-    evaluate: createWorkerEvaluator({ WorkerImpl: FakeWorker }),
+    evaluate: createWorkerEvaluator({ createWorker: () => new FakeWorker() }),
   });
   const firstPending = runtime.executeCode("await new Promise(() => {});", "session-a", "exec-a");
   const first = await FakeWorker.next();
