@@ -72,9 +72,15 @@ export function AgentSessionBar({
   const ready = agentStatus === "ready";
   const hasCredential = source === "brokered";
   const label = sessionLabel({ agentStatus, authStatus: status, capabilityError, source });
+  const compactReady = ready
+    && hasCredential
+    && status?.state === "ready"
+    && status.ready
+    && !agentError
+    && !capabilityError;
 
   return (
-    <div className="agent-session-shell">
+    <div className={`agent-session-shell${compactReady ? " is-compact-ready" : ""}`}>
       <div className="agent-session-bar">
         <span className="agent-session-status" aria-live="polite">
           <i className={ready ? "is-ready" : ""} aria-hidden="true" />

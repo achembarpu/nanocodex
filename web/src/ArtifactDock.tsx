@@ -185,7 +185,7 @@ export const ArtifactDock = memo(function ArtifactDock({
 
   if (collapsed) {
     return (
-      <aside className="artifact-dock is-collapsed" aria-label="Artifacts">
+      <aside className={`artifact-dock is-collapsed${artifacts.length === 0 ? " is-empty" : ""}`} aria-label="Artifacts">
         <button
           ref={toggleRef}
           type="button"

@@ -6,6 +6,7 @@ import {
   Copy,
   GitBranch,
   GitPullRequest,
+  Menu,
   Maximize2,
   Minimize2,
   Search,
@@ -31,6 +32,7 @@ import { CommitCodeStream } from "./CommitCodeStream";
 import { Docs, preloadDocsRoute } from "./Docs";
 import { Evals, preloadEvalOverview } from "./Evals";
 import { MonsterWorld } from "./MonsterWorld";
+import { useModalBoundary } from "./modalBoundary";
 import { Multiplayer } from "./Multiplayer";
 import { PierreWorkerProvider } from "./PierreWorkerProvider";
 import { VirtualCommitList } from "./VirtualCommitList";
@@ -274,6 +276,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
   const [commitRailOpen, setCommitRailOpen] = useState(false);
   const [installCopied, setInstallCopied] = useState(false);
   const [headerInstallCopied, setHeaderInstallCopied] = useState<InstallTarget | null>(null);
+  const [mobileNavigationOpen, setMobileNavigationOpen] = useState(false);
   const [agentExperienceMounted, setAgentExperienceMounted] = useState(
     surface === "home" || surface === "agent",
   );
@@ -282,6 +285,10 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
   const searchDialogRef = useRef<HTMLElement>(null);
   const searchOpenerRef = useRef<HTMLElement | null>(null);
   const headerCenterRef = useRef<HTMLDivElement>(null);
+  const mobileNavigationBackdropRef = useRef<HTMLButtonElement>(null);
+  const mobileNavigationCloseRef = useRef<HTMLButtonElement>(null);
+  const mobileNavigationPanelRef = useRef<HTMLElement>(null);
+  const mobileNavigationTriggerRef = useRef<HTMLButtonElement>(null);
   const codeBrowserRef = useRef<CodeBrowserHandle>(null);
   const commitWorkspaceRef = useRef<HTMLElement>(null);
   const commitRailRef = useRef<HTMLElement>(null);
@@ -302,6 +309,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
   const commitModalOpen = commitRailModalOpen || commitSearchModalOpen;
 
   const closeCommitRail = useCallback(() => setCommitRailOpen(false), []);
+  const closeMobileNavigation = useCallback(() => setMobileNavigationOpen(false), []);
   const openCommitRail = useCallback(() => {
     commitRailOpenerRef.current = activeFocusOwner();
     setCommitRailOpen(true);
@@ -824,6 +832,26 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
     setCommitRailOpen(false);
   }, [surface]);
 
+  useEffect(closeMobileNavigation, [closeMobileNavigation, surface]);
+
+  useEffect(() => {
+    const mobile = window.matchMedia("(max-width: 740px)");
+    const closeOnDesktop = () => {
+      if (!mobile.matches) closeMobileNavigation();
+    };
+    mobile.addEventListener("change", closeOnDesktop);
+    return () => mobile.removeEventListener("change", closeOnDesktop);
+  }, [closeMobileNavigation]);
+
+  useModalBoundary({
+    backdropRef: mobileNavigationBackdropRef,
+    initialFocusRef: mobileNavigationCloseRef,
+    onDismiss: closeMobileNavigation,
+    open: mobileNavigationOpen,
+    panelRef: mobileNavigationPanelRef,
+    returnFocusRef: mobileNavigationTriggerRef,
+  });
+
   useEffect(() => {
     const compact = window.matchMedia(COMPACT_WORKSPACE_QUERY);
     const closeRailOnDesktop = () => {
@@ -1066,6 +1094,17 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
             </nav>
           </div>
           <nav className="header-actions" aria-label="Site actions">
+            <button
+              ref={mobileNavigationTriggerRef}
+              className="mobile-navigation-trigger"
+              type="button"
+              aria-expanded={mobileNavigationOpen}
+              aria-controls="mobile-product-navigation"
+              aria-label="Open product navigation"
+              onClick={() => setMobileNavigationOpen(true)}
+            >
+              <Menu aria-hidden="true" />
+            </button>
             <AccountMenu />
             <div className="header-install">
               <button
@@ -1096,6 +1135,62 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
             </div>
           </nav>
         </header>
+
+        {mobileNavigationOpen ? <>
+          <button
+            ref={mobileNavigationBackdropRef}
+            className="mobile-navigation-backdrop"
+            type="button"
+            tabIndex={-1}
+            aria-hidden="true"
+            onPointerDown={closeMobileNavigation}
+          />
+          <section
+            ref={mobileNavigationPanelRef}
+            className="mobile-product-navigation"
+            id="mobile-product-navigation"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="mobile-product-navigation-title"
+            tabIndex={-1}
+          >
+            <header>
+              <div>
+                <strong id="mobile-product-navigation-title">Explore Nanocodex</strong>
+                <span>Choose a workspace</span>
+              </div>
+              <button ref={mobileNavigationCloseRef} type="button" aria-label="Close product navigation"
+                onClick={closeMobileNavigation}><X aria-hidden="true" /></button>
+            </header>
+            <nav aria-label="Mobile product navigation">
+              <a
+                className={surface === "home" ? "is-active" : ""}
+                href={threadSurfacePath("home")}
+                aria-current={surface === "home" ? "page" : undefined}
+                onClick={(event) => {
+                  closeMobileNavigation();
+                  handleSurfaceClick(event, "home");
+                }}
+              >
+                <span>Home</span><small>Overview</small>
+              </a>
+              {productNavigation.map((item) => <a
+                className={surface === item.surface ? "is-active" : ""}
+                href={item.surface === "docs" ? pathForSurface(item.surface) : threadSurfacePath(item.surface)}
+                aria-current={surface === item.surface ? "page" : undefined}
+                key={item.surface}
+                onFocus={() => preloadSurface(item.surface)}
+                onPointerDown={() => preloadSurface(item.surface)}
+                onClick={(event) => {
+                  closeMobileNavigation();
+                  handleSurfaceClick(event, item.surface);
+                }}
+              >
+                <span>{item.label}</span><small>{item.shortcut} shortcut</small>
+              </a>)}
+            </nav>
+          </section>
+        </> : null}
 
         <main
           id="top"

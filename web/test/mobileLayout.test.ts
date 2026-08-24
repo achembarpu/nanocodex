@@ -37,7 +37,7 @@ test("terminal and application controls share the compact phone policy", () => {
   );
   assert.match(auth, /min-height:\s*44px/);
   assert.match(shell, /100dvh/);
-  assert.match(shell, /min-height:\s*280px/);
+  assert.match(shell, /min-height:\s*220px/);
   assert.match(previewShell, /env\(safe-area-inset-bottom\)/);
 });
 
@@ -51,19 +51,22 @@ test("the shared phone header stays in one compact row on every surface", () => 
   assert.doesNotMatch(indexCss, /\.surface-commits \.header-actions/);
 });
 
-test("360px headers retain scrollable alphabetic navigation without clipping the actions", () => {
+test("phone headers expose readable product navigation in an owned modal", () => {
+  const phone = indexCss.indexOf("@media (max-width: 740px) {", indexCss.indexOf("@media (max-width: 1023px)"));
   const narrow = indexCss.indexOf("@media (max-width: 420px)");
   assert.notEqual(narrow, -1);
-  assert.match(ruleBlock(indexCss, ".header-center {", narrow), /width:\s*calc\(100% \+ 16px\)/);
-  assert.match(ruleBlock(indexCss, ".header-center {", narrow), /margin-inline:\s*-8px/);
+  assert.match(ruleBlock(indexCss, ".header-center {", phone), /display:\s*none/);
+  assert.match(ruleBlock(indexCss, ".mobile-navigation-trigger {", phone), /width:\s*44px/);
+  assert.match(ruleBlock(indexCss, ".mobile-navigation-trigger {", phone), /height:\s*44px/);
+  assert.match(ruleBlock(indexCss, ".mobile-product-navigation > nav {", phone), /repeat\(2, minmax\(0, 1fr\)\)/);
+  assert.match(ruleBlock(indexCss, ".mobile-product-navigation > nav a {", phone), /min-height:\s*56px/);
   assert.match(ruleBlock(indexCss, ".wordmark {", narrow), /font-size:\s*10px/);
-  assert.match(ruleBlock(indexCss, ".surface-switch {", narrow), /gap:\s*0/);
-  assert.match(ruleBlock(indexCss, ".surface-switch a {", narrow), /min-width:\s*44px/);
-  assert.match(ruleBlock(indexCss, ".surface-label {", narrow), /display:\s*none/);
-  assert.match(
-    ruleBlock(indexCss, ".surface-switch a::after {", narrow),
-    /content:\s*attr\(data-mobile-label\)[\s\S]*?font-size:\s*10px/,
-  );
+  assert.doesNotMatch(ruleBlock(indexCss, ".site-header {", narrow), /grid-template-rows:\s*48px 48px/);
+  assert.doesNotMatch(indexCss, /--mobile-header-height:\s*calc\(96px/);
+  assert.match(application, /className="mobile-product-navigation"/);
+  assert.match(application, /role="dialog"[\s\S]*?aria-modal="true"[\s\S]*?Mobile product navigation/);
+  assert.match(application, /useModalBoundary\(\{[\s\S]*?onDismiss: closeMobileNavigation/);
+  assert.match(application, /<span>\{item\.label\}<\/span><small>\{item\.shortcut\} shortcut<\/small>/);
   assert.match(ruleBlock(indexCss, ".header-install-trigger {", narrow), /width:\s*44px/);
   assert.match(ruleBlock(indexCss, ".header-install-trigger span {", narrow), /display:\s*none/);
 });
@@ -191,7 +194,9 @@ test("touch terminals use one native IME-safe composer and one contextual action
   assert.match(touchComposer, /\{running \? \([\s\S]*?>Stop<\/button>[\s\S]*?\) : \([\s\S]*?>Send<\/button>[\s\S]*?\)\}/);
   assert.equal(matches(touchComposer, /className="agent-touch-actions"/g), 1);
   assert.doesNotMatch(touchComposer, />Steer<|>Queued</);
-  assert.equal(matches(touchComposer, /enter send · shift\+enter newline/g), 1);
+  assert.equal(matches(touchComposer, /Enter sends · Shift\+Enter adds a line/g), 1);
+  assert.match(touchComposer, /const textarea = useRef<HTMLTextAreaElement>/);
+  assert.match(touchComposer, /Math\.min\(Math\.max\(element\.scrollHeight, 44\), 88\)/);
   assert.match(touchComposer, />│<\/span>/);
   assert.doesNotMatch(touchComposer, /\x1b\[200~|bracketed-paste/i);
   assert.match(terminal, /inputMode: touchInput \? "composer" : "xterm"/);
@@ -209,6 +214,7 @@ test("touch terminals use one native IME-safe composer and one contextual action
   assert.match(terminalCss, /--terminal-composer-min-height:\s*calc\(60px \+ env\(safe-area-inset-bottom\)\)/);
   assert.match(composer, /env\(safe-area-inset-left\)/);
   assert.match(composer, /env\(safe-area-inset-right\)/);
+  assert.match(ruleBlock(terminalCss, ".agent-touch-composer small {", touchCss), /display:\s*none/);
   assert.match(terminal, /active\.current\.submit\(input, \{ intent, submittedAt \}\)/);
   assert.match(terminal, /active\.current\?\.cancel\(\)/);
 });
@@ -235,6 +241,21 @@ test("the phone transcript owns the remaining workspace and native vertical gest
   assert.match(terminalSurface, /terminal\.scrollLines\(lines\)/);
   assert.match(ruleBlock(compactHome, ".home-page.is-agent .home-demo {"), /minmax\(0, 1fr\)/);
   assert.match(ruleBlock(compactHome, ".home-page.is-agent .home-demo-head {"), /display:\s*none/);
+});
+
+test("compact agent chrome prioritizes the conversation and transcript", () => {
+  const compact = terminalCss.indexOf(`@media ${compactQuery}`);
+  assert.match(modelSession, /agent-session-shell\$\{compactReady \? " is-compact-ready" : ""\}/);
+  assert.match(ruleBlock(terminalCss, ".agent-session-shell.is-compact-ready {", compact), /display:\s*none/);
+  assert.match(application, /className="mobile-product-navigation"/);
+  assert.match(artifactDock, /artifacts\.length === 0 \? " is-empty"/);
+  assert.match(ruleBlock(terminalCss, ".nanocodex-demo.is-full .artifact-dock.is-collapsed.is-empty {", compact), /display:\s*none/);
+  const conversationRail = source("../src/ConversationHistoryRail.tsx");
+  assert.match(conversationRail, /className="conversation-mobile-title"/);
+  assert.match(conversationRail, /className="conversation-mobile-new"/);
+  assert.match(conversationRail, /statusLabel\(agentStatus\)/);
+  assert.doesNotMatch(conversationRail, /conversation\.id\.slice/);
+  assert.match(ruleBlock(terminalCss, ".conversation-row {", terminalCss.indexOf(`@media ${compactQuery}`, compact + 1)), /min-height:\s*62px/);
 });
 
 test("touch terminal geometry follows the visual viewport without weakening hidden focus", () => {

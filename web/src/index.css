@@ -296,6 +296,12 @@ svg {
   justify-self: end;
 }
 
+.mobile-navigation-trigger,
+.mobile-navigation-backdrop,
+.mobile-product-navigation {
+  display: none;
+}
+
 .account-menu {
   position: relative;
   display: flex;
@@ -2794,17 +2800,6 @@ html[data-theme="dark"] .tui-syntax .shiki span {
   }
 
   .header-center {
-    grid-row: 1;
-    grid-column: 2;
-    width: 100%;
-    min-width: 0;
-    overflow-x: auto;
-    justify-self: start;
-    margin-left: 0;
-    scrollbar-width: none;
-  }
-
-  .header-center::-webkit-scrollbar {
     display: none;
   }
 
@@ -2827,6 +2822,158 @@ html[data-theme="dark"] .tui-syntax .shiki span {
     grid-row: 1;
     grid-column: 3;
     gap: 2px;
+  }
+
+  .mobile-navigation-trigger {
+    display: grid;
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    color: var(--text-muted);
+    background: transparent;
+    border: 0;
+    cursor: pointer;
+    place-items: center;
+    touch-action: manipulation;
+  }
+
+  .mobile-navigation-trigger:hover,
+  .mobile-navigation-trigger:focus-visible,
+  .mobile-navigation-trigger[aria-expanded="true"] {
+    color: var(--text);
+    background: var(--surface-hover);
+    outline: 1px solid var(--border-soft);
+    outline-offset: -1px;
+  }
+
+  .mobile-navigation-trigger svg {
+    width: 17px;
+    height: 17px;
+  }
+
+  .mobile-navigation-backdrop {
+    position: fixed;
+    z-index: 38;
+    inset: 0;
+    display: block;
+    width: 100%;
+    height: 100%;
+    padding: 0;
+    background: rgb(0 0 0 / 34%);
+    border: 0;
+    cursor: pointer;
+    touch-action: none;
+  }
+
+  .mobile-product-navigation {
+    position: fixed;
+    z-index: 39;
+    top: calc(var(--mobile-header-height) + 8px);
+    right: max(8px, env(safe-area-inset-right));
+    left: max(8px, env(safe-area-inset-left));
+    display: block;
+    overflow: hidden;
+    color: var(--text);
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    box-shadow: 0 20px 70px rgb(0 0 0 / 28%);
+  }
+
+  .mobile-product-navigation > header {
+    display: flex;
+    min-height: 56px;
+    align-items: center;
+    justify-content: space-between;
+    padding: 6px 6px 6px 14px;
+    border-bottom: 1px solid var(--border-soft);
+  }
+
+  .mobile-product-navigation > header > div {
+    display: flex;
+    min-width: 0;
+    flex-direction: column;
+    gap: 3px;
+  }
+
+  .mobile-product-navigation > header strong {
+    font: 600 13px/1.2 var(--font-sans);
+  }
+
+  .mobile-product-navigation > header span {
+    color: var(--text-faint);
+    font: 10px/1.2 var(--font-mono);
+  }
+
+  .mobile-product-navigation > header button {
+    display: grid;
+    width: 44px;
+    height: 44px;
+    padding: 0;
+    color: var(--text-muted);
+    background: transparent;
+    border: 0;
+    place-items: center;
+  }
+
+  .mobile-product-navigation > header button:hover,
+  .mobile-product-navigation > header button:focus-visible {
+    color: var(--text);
+    background: var(--surface-hover);
+    outline: 1px solid var(--border-soft);
+    outline-offset: -1px;
+  }
+
+  .mobile-product-navigation > header svg {
+    width: 16px;
+    height: 16px;
+  }
+
+  .mobile-product-navigation > nav {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    padding: 6px;
+  }
+
+  .mobile-product-navigation > nav a {
+    display: flex;
+    min-width: 0;
+    min-height: 56px;
+    flex-direction: column;
+    gap: 4px;
+    justify-content: center;
+    padding: 8px 10px;
+    color: var(--text-muted);
+    border: 1px solid transparent;
+    touch-action: manipulation;
+  }
+
+  .mobile-product-navigation > nav a:hover,
+  .mobile-product-navigation > nav a:focus-visible {
+    color: var(--text);
+    background: var(--surface-hover);
+    border-color: var(--border-soft);
+    outline: 0;
+  }
+
+  .mobile-product-navigation > nav a.is-active {
+    color: var(--text);
+    background: color-mix(in srgb, var(--text) 5%, transparent);
+    border-color: var(--border);
+  }
+
+  .mobile-product-navigation > nav a > span {
+    overflow: hidden;
+    font: 600 12px/1.2 var(--font-sans);
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .mobile-product-navigation > nav a > small {
+    overflow: hidden;
+    color: var(--text-faint);
+    font: 9px/1.2 var(--font-mono);
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .account-menu-trigger {
@@ -3876,54 +4023,14 @@ html[data-theme="dark"] .tui-syntax .shiki span {
 }
 
 @media (max-width: 420px) {
-  :root {
-    --mobile-header-height: calc(96px + env(safe-area-inset-top));
-  }
-
   .site-header {
-    grid-template-rows: 48px 48px;
     gap: 0 8px;
     padding-right: max(12px, env(safe-area-inset-right));
     padding-left: max(12px, env(safe-area-inset-left));
   }
 
-  .header-center {
-    grid-row: 2;
-    grid-column: 1 / -1;
-    width: calc(100% + 16px);
-    margin-inline: -8px;
-  }
-
   .wordmark {
     font-size: 10px;
-  }
-
-  .surface-switch {
-    justify-content: space-between;
-    width: 100%;
-    min-width: 352px;
-    gap: 0;
-  }
-
-  .surface-switch a {
-    min-width: 44px;
-    justify-content: center;
-  }
-
-  .surface-label {
-    display: none;
-  }
-
-  .surface-switch a::after {
-    content: attr(data-mobile-label);
-    font-size: 10px;
-    text-decoration: underline;
-    text-decoration-color: color-mix(in srgb, currentColor 55%, transparent);
-    text-underline-offset: 2px;
-  }
-
-  .surface-switch a.is-active::after {
-    font-weight: 600;
   }
 
   .header-install-trigger {

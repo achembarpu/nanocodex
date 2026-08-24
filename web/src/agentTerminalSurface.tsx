@@ -232,6 +232,13 @@ export function TouchTerminalComposer({
   onSubmit(value: string, intent: "queue" | "steer"): void;
 }) {
   const composing = useRef(false);
+  const textarea = useRef<HTMLTextAreaElement>(null);
+  useLayoutEffect(() => {
+    const element = textarea.current;
+    if (!element) return;
+    element.style.height = "0";
+    element.style.height = `${Math.min(Math.max(element.scrollHeight, 44), 88)}px`;
+  }, [draft]);
   const submit = () => {
     if (pending || !draft.trim()) return;
     onSubmit(draft, running ? "steer" : "queue");
@@ -247,6 +254,7 @@ export function TouchTerminalComposer({
     >
       <span className="agent-touch-rail" aria-hidden="true">│</span>
       <textarea
+        ref={textarea}
         aria-label="Message Nanocodex"
         enterKeyHint="send"
         placeholder="Message Nanocodex"
@@ -268,7 +276,7 @@ export function TouchTerminalComposer({
           <button type="submit" disabled={pending || !draft.trim()}>Send</button>
         )}
       </div>
-      <small>enter send · shift+enter newline</small>
+      <small>Enter sends · Shift+Enter adds a line</small>
     </form>
   );
 }

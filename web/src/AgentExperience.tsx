@@ -175,6 +175,7 @@ export const AgentExperience = memo(function AgentExperience({
     />
     <div className="conversation-workspace">
       <ConversationHistoryRail
+        agentStatus={agentStatus}
         conversations={conversations} error={runtime === "managed" ? managedError : undefined}
         mobileOpen={railOpen} pending={conversationPending} runtime={runtime} selectedId={selectedId}
         onClose={() => setRailOpen(false)} onCreate={createConversation} onOpen={() => setRailOpen(true)}
