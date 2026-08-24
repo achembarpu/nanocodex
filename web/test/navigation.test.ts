@@ -6,8 +6,12 @@ import {
   settleRepositoryNavigationIntent,
 } from "../src/commitRouteState.ts";
 import {
+  connectDemoUrl,
+  demoNavigation,
+  gitNavigation,
   pathForCommit,
   pathForSurface,
+  primaryNavigation,
   productNavigation,
   surfaceFromUrl,
 } from "../src/navigation.ts";
@@ -81,7 +85,7 @@ test("deep product links retain prepared client navigation", () => {
 });
 
 test("the shared shell presents Source without changing the stable Code route", () => {
-  assert.deepEqual(productNavigation.at(-1), {
+  assert.deepEqual(gitNavigation.at(-1), {
     surface: "code",
     label: "Source",
     shortcut: "S",
@@ -99,7 +103,7 @@ test("the shared shell presents Source without changing the stable Code route", 
 test("global product shortcuts are visible and browser Find remains native", () => {
   assert.deepEqual(
     productNavigation.map(({ label, shortcut }) => [label, shortcut]),
-    [["Agent", "A"], ["Multiplayer", "P"], ["World", "W"], ["Changelog", "H"], ["Commits", "C"], ["Docs", "D"], ["Evals", "E"], ["Source", "S"]],
+    [["Agent", "A"], ["Multiplayer", "P"], ["World", "W"], ["Docs", "D"], ["Evals", "E"], ["Changelog", "H"], ["Commits", "C"], ["Source", "S"]],
   );
   assert.match(application, /title=\{`\$\{item\.label\} \(\$\{item\.shortcut\}\)`\}/);
   assert.match(application, /key === "h"[\s\S]*?\? "changelog"/);
@@ -116,13 +120,27 @@ test("global product shortcuts are visible and browser Find remains native", () 
   );
 });
 
+test("the product navigation exposes the deliberate Demos and Git hierarchy", () => {
+  assert.deepEqual(demoNavigation.map(({ label }) => label), ["Agent", "Multiplayer", "World"]);
+  assert.deepEqual(primaryNavigation.map(({ label }) => label), ["Docs", "Evals"]);
+  assert.deepEqual(gitNavigation.map(({ label }) => label), ["Changelog", "Commits", "Source"]);
+  assert.equal(connectDemoUrl, "https://nanocodex-connect-playground.gakonst.workers.dev");
+  assert.match(application, /aria-label="Demos navigation"/);
+  assert.match(application, /aria-label="Git navigation"/);
+  assert.match(application, /href=\{connectDemoUrl\}[\s\S]*?target="_blank"[\s\S]*?rel="noreferrer"[\s\S]*?Connect demo \(opens in a new tab\)/);
+  assert.match(application, /id="mobile-demos-title">Demos/);
+  assert.match(application, /id="mobile-git-title">Git/);
+});
+
 test("the active navigation item is bold without a selection underline", () => {
-  assert.match(css, /\.surface-switch a\.is-active \.surface-label\s*\{[^}]*font-weight:\s*600/);
+  assert.match(css, /\.surface-switch a\.is-active \.surface-label,[\s\S]*?\.surface-navigation-group\.is-active button \.surface-label\s*\{[^}]*font-weight:\s*600/);
   assert.doesNotMatch(css, /\.surface-switch a\.is-active \.surface-label::after/);
 });
 
 test("every primary route begins preloading on touch or pointer intent", () => {
-  assert.match(application, /productNavigation\.map/);
+  assert.match(application, /demoNavigation\.map/);
+  assert.match(application, /primaryNavigation\.map/);
+  assert.match(application, /gitNavigation\.map/);
   assert.match(application, /onFocus=\{\(\) => preloadSurface\(item\.surface\)\}/);
   assert.match(application, /onPointerEnter=\{\(\) => preloadSurface\(item\.surface\)\}/);
   assert.match(application, /onPointerDown=\{\(\) => preloadSurface\(item\.surface\)\}/);
@@ -170,10 +188,11 @@ test("the mounted shell prefetches route data without module-loader orchestratio
     navigation,
     /const ready = nextSurface === "code"[\s\S]*?commitPreparationMatchesIntent\([\s\S]*?commitHistoryTargetRef\.current,[\s\S]*?undefined[\s\S]*?if \(ready\)[\s\S]*?navigate\(destination\)/,
   );
-  assert.match(css, /\.surface-switch a\s*\{[^}]*touch-action:\s*manipulation/);
+  assert.match(css, /\.surface-switch > a,[\s\S]*?\.surface-navigation-group button\s*\{[^}]*touch-action:\s*manipulation/);
+  assert.match(css, /\.surface-navigation-group button\s*\{[^}]*min-width:\s*44px/);
   assert.match(
     css,
-    /@media \(max-width: 740px\)[\s\S]*?\.header-center \{[\s\S]*?display: none;[\s\S]*?\.mobile-navigation-trigger \{[\s\S]*?display: grid;[\s\S]*?\.mobile-product-navigation > nav \{[\s\S]*?repeat\(2, minmax\(0, 1fr\)\)/,
+    /@media \(max-width: 740px\)[\s\S]*?\.header-center \{[\s\S]*?display: none;[\s\S]*?\.mobile-navigation-trigger \{[\s\S]*?display: grid;[\s\S]*?\.mobile-navigation-grid \{[\s\S]*?repeat\(2, minmax\(0, 1fr\)\)/,
   );
   assert.match(application, /useModalBoundary\(\{[\s\S]*?open: mobileNavigationOpen/);
 });

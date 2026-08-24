@@ -58,8 +58,8 @@ test("phone headers expose readable product navigation in an owned modal", () =>
   assert.match(ruleBlock(indexCss, ".header-center {", phone), /display:\s*none/);
   assert.match(ruleBlock(indexCss, ".mobile-navigation-trigger {", phone), /width:\s*44px/);
   assert.match(ruleBlock(indexCss, ".mobile-navigation-trigger {", phone), /height:\s*44px/);
-  assert.match(ruleBlock(indexCss, ".mobile-product-navigation > nav {", phone), /repeat\(2, minmax\(0, 1fr\)\)/);
-  assert.match(ruleBlock(indexCss, ".mobile-product-navigation > nav a {", phone), /min-height:\s*56px/);
+  assert.match(ruleBlock(indexCss, ".mobile-navigation-grid {", phone), /repeat\(2, minmax\(0, 1fr\)\)/);
+  assert.match(ruleBlock(indexCss, ".mobile-navigation-sections a {", phone), /min-height:\s*56px/);
   assert.match(ruleBlock(indexCss, ".wordmark {", narrow), /font-size:\s*10px/);
   assert.doesNotMatch(ruleBlock(indexCss, ".site-header {", narrow), /grid-template-rows:\s*48px 48px/);
   assert.doesNotMatch(indexCss, /--mobile-header-height:\s*calc\(96px/);
@@ -67,6 +67,9 @@ test("phone headers expose readable product navigation in an owned modal", () =>
   assert.match(application, /role="dialog"[\s\S]*?aria-modal="true"[\s\S]*?Mobile product navigation/);
   assert.match(application, /useModalBoundary\(\{[\s\S]*?onDismiss: closeMobileNavigation/);
   assert.match(application, /<span>\{item\.label\}<\/span><small>\{item\.shortcut\} shortcut<\/small>/);
+  assert.match(application, /className="mobile-navigation-group" aria-labelledby="mobile-demos-title"/);
+  assert.match(application, /className="mobile-navigation-group" aria-labelledby="mobile-git-title"/);
+  assert.match(application, /href=\{connectDemoUrl\}[\s\S]*?External demo/);
   assert.match(ruleBlock(indexCss, ".header-install-trigger {", narrow), /width:\s*44px/);
   assert.match(ruleBlock(indexCss, ".header-install-trigger span {", narrow), /display:\s*none/);
 });
@@ -321,7 +324,7 @@ test("phone auth controls and other application targets meet mobile baselines", 
 
   const phone = indexCss.indexOf("@media (max-width: 740px) {", indexCss.indexOf("@media (max-width: 1023px)"));
   const switcher = ruleBlock(indexCss, ".surface-switch {", phone);
-  const surfaces = ruleBlock(indexCss, ".surface-switch a {", phone);
+  const surfaces = ruleBlock(indexCss, ".surface-switch > a,", indexCss.indexOf(".surface-switch > a,"));
   const brand = ruleBlock(indexCss, ".site-brand {", phone);
   const install = ruleBlock(indexCss, ".header-install-trigger {", phone);
   assert.match(switcher, /padding:\s*0/);

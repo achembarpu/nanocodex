@@ -10,20 +10,36 @@ export type Surface =
   | "requests"
   | "evals";
 
-export const productNavigation = [
-  { surface: "agent", label: "Agent", shortcut: "A" },
-  { surface: "multiplayer", label: "Multiplayer", shortcut: "P" },
-  { surface: "world", label: "World", shortcut: "W" },
-  { surface: "changelog", label: "Changelog", shortcut: "H" },
-  { surface: "commits", label: "Commits", shortcut: "C" },
-  { surface: "docs", label: "Docs", shortcut: "D" },
-  { surface: "evals", label: "Evals", shortcut: "E" },
-  { surface: "code", label: "Source", shortcut: "S" },
-] as const satisfies ReadonlyArray<{
+export type ProductNavigationItem = Readonly<{
   surface: Surface;
   label: string;
   shortcut: string;
 }>;
+
+export const connectDemoUrl = "https://nanocodex-connect-playground.gakonst.workers.dev";
+
+export const demoNavigation = [
+  { surface: "agent", label: "Agent", shortcut: "A" },
+  { surface: "multiplayer", label: "Multiplayer", shortcut: "P" },
+  { surface: "world", label: "World", shortcut: "W" },
+] as const satisfies ReadonlyArray<ProductNavigationItem>;
+
+export const primaryNavigation = [
+  { surface: "docs", label: "Docs", shortcut: "D" },
+  { surface: "evals", label: "Evals", shortcut: "E" },
+] as const satisfies ReadonlyArray<ProductNavigationItem>;
+
+export const gitNavigation = [
+  { surface: "changelog", label: "Changelog", shortcut: "H" },
+  { surface: "commits", label: "Commits", shortcut: "C" },
+  { surface: "code", label: "Source", shortcut: "S" },
+] as const satisfies ReadonlyArray<ProductNavigationItem>;
+
+export const productNavigation = [
+  ...demoNavigation,
+  ...primaryNavigation,
+  ...gitNavigation,
+] as const satisfies ReadonlyArray<ProductNavigationItem>;
 
 const surfacePaths: Record<Surface, string> = {
   home: "/",

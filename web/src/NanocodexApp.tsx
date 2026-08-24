@@ -2,8 +2,10 @@
 
 import {
   Check,
+  ChevronDown,
   ChevronRight,
   Copy,
+  ExternalLink,
   GitBranch,
   GitPullRequest,
   Menu,
@@ -30,6 +32,12 @@ import { Changelog, preloadChangelog } from "./Changelog";
 import { CodeBrowser } from "./CodeBrowser";
 import { CommitCodeStream } from "./CommitCodeStream";
 import { Docs, preloadDocsRoute } from "./Docs";
+import {
+  DropdownMenu,
+  DropdownMenuContent,
+  DropdownMenuItem,
+  DropdownMenuTrigger,
+} from "./DropdownMenu";
 import { Evals, preloadEvalOverview } from "./Evals";
 import { MonsterWorld } from "./MonsterWorld";
 import { lockDocumentScroll, useModalBoundary } from "./modalBoundary";
@@ -44,10 +52,14 @@ import {
 } from "./commitRouteState";
 import { fuzzyScore } from "./fuzzy";
 import {
+  connectDemoUrl,
+  demoNavigation,
+  gitNavigation,
   pathForCommit,
   pathForSurface,
-  productNavigation,
+  primaryNavigation,
   surfaceFromUrl,
+  type ProductNavigationItem,
   type Surface,
 } from "./navigation";
 import { COMPACT_WORKSPACE_QUERY } from "./pierreCodeView";
@@ -277,6 +289,8 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
   const [installCopied, setInstallCopied] = useState(false);
   const [headerInstallCopied, setHeaderInstallCopied] = useState<InstallTarget | null>(null);
   const [mobileNavigationOpen, setMobileNavigationOpen] = useState(false);
+  const [demoNavigationOpen, setDemoNavigationOpen] = useState(false);
+  const [gitNavigationOpen, setGitNavigationOpen] = useState(false);
   const [agentExperienceMounted, setAgentExperienceMounted] = useState(
     surface === "home" || surface === "agent",
   );
@@ -285,7 +299,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
   const searchDialogRef = useRef<HTMLElement>(null);
   const searchOpenerRef = useRef<HTMLElement | null>(null);
   const headerCenterRef = useRef<HTMLDivElement>(null);
-  const mobileNavigationBackdropRef = useRef<HTMLButtonElement>(null);
+  const mobileNavigationBackdropRef = useRef<HTMLDivElement>(null);
   const mobileNavigationCloseRef = useRef<HTMLButtonElement>(null);
   const mobileNavigationPanelRef = useRef<HTMLElement>(null);
   const mobileNavigationTriggerRef = useRef<HTMLButtonElement>(null);
@@ -1056,6 +1070,40 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
     commitStreamRef.current?.scrollToCommit(commit.hash);
   };
 
+  const demoNavigationActive = demoNavigation.some((item) => item.surface === surface);
+  const gitNavigationActive = gitNavigation.some((item) => item.surface === surface);
+  const surfaceNavigationLink = (
+    item: ProductNavigationItem,
+    context: "desktop" | "group" | "mobile",
+    closeMenu?: () => void,
+  ) => (
+    <a
+      className={`${context === "group" ? "surface-navigation-menu-item" : ""}${
+        surface === item.surface ? " is-active" : ""
+      }`.trim()}
+      href={item.surface === "docs"
+        ? pathForSurface(item.surface)
+        : threadSurfacePath(item.surface)}
+      aria-current={surface === item.surface ? "page" : undefined}
+      aria-keyshortcuts={item.shortcut}
+      data-mobile-label={item.shortcut}
+      key={item.surface}
+      title={`${item.label} (${item.shortcut})`}
+      onFocus={() => preloadSurface(item.surface)}
+      onPointerEnter={() => preloadSurface(item.surface)}
+      onPointerDown={() => preloadSurface(item.surface)}
+      onClick={(event) => {
+        closeMenu?.();
+        if (context === "mobile") closeMobileNavigation();
+        handleSurfaceClick(event, item.surface);
+      }}
+    >
+      {context === "mobile" ? <>
+        <span>{item.label}</span><small>{item.shortcut} shortcut</small>
+      </> : <ProductNavigationLabel label={item.label} shortcut={item.shortcut} />}
+    </a>
+  );
+
   return (
     <div className={`site-shell surface-${surface}`}>
         <header
@@ -1088,28 +1136,66 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
           </div>
           <div className="header-center" ref={headerCenterRef}>
             <nav className="surface-switch" aria-label="Product navigation">
-              {productNavigation.map((item) => (
-                <a
-                  className={surface === item.surface ? "is-active" : ""}
-                  href={item.surface === "docs"
-                    ? pathForSurface(item.surface)
-                    : threadSurfacePath(item.surface)}
-                  aria-current={surface === item.surface ? "page" : undefined}
-                  aria-keyshortcuts={item.shortcut}
-                  data-mobile-label={item.shortcut}
-                  key={item.surface}
-                  title={`${item.label} (${item.shortcut})`}
-                  onFocus={() => preloadSurface(item.surface)}
-                  onPointerEnter={() => preloadSurface(item.surface)}
-                  onPointerDown={() => preloadSurface(item.surface)}
-                  onClick={(event) => handleSurfaceClick(event, item.surface)}
-                >
-                  <ProductNavigationLabel
-                    label={item.label}
-                    shortcut={item.shortcut}
-                  />
-                </a>
-              ))}
+              <a
+                className={surface === "home" ? "is-active" : ""}
+                href={threadSurfacePath("home")}
+                aria-current={surface === "home" ? "page" : undefined}
+                onFocus={() => preloadSurface("home")}
+                onPointerEnter={() => preloadSurface("home")}
+                onPointerDown={() => preloadSurface("home")}
+                onClick={(event) => handleSurfaceClick(event, "home")}
+              >
+                <span className="surface-label">Home</span>
+              </a>
+              <span
+                className={`surface-navigation-group${demoNavigationActive ? " is-active" : ""}`}
+              >
+                <DropdownMenu open={demoNavigationOpen} onOpenChange={setDemoNavigationOpen}>
+                  <DropdownMenuTrigger asChild>
+                    <button type="button" aria-label="Demos navigation">
+                      <span className="surface-label">Demos</span><ChevronDown aria-hidden="true" />
+                    </button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="start" className="surface-navigation-menu" aria-label="Demos">
+                    {demoNavigation.map((item) => (
+                      <DropdownMenuItem asChild key={item.surface}>
+                        {surfaceNavigationLink(item, "group", () => setDemoNavigationOpen(false))}
+                      </DropdownMenuItem>
+                    ))}
+                    <DropdownMenuItem asChild>
+                      <a
+                        className="surface-navigation-menu-item"
+                        href={connectDemoUrl}
+                        target="_blank"
+                        rel="noreferrer"
+                        aria-label="Connect demo (opens in a new tab)"
+                        onClick={() => setDemoNavigationOpen(false)}
+                      >
+                        <span className="surface-label">Connect</span><ExternalLink aria-hidden="true" />
+                      </a>
+                    </DropdownMenuItem>
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </span>
+              {primaryNavigation.map((item) => surfaceNavigationLink(item, "desktop"))}
+              <span
+                className={`surface-navigation-group${gitNavigationActive ? " is-active" : ""}`}
+              >
+                <DropdownMenu open={gitNavigationOpen} onOpenChange={setGitNavigationOpen}>
+                  <DropdownMenuTrigger asChild>
+                    <button type="button" aria-label="Git navigation">
+                      <span className="surface-label">Git</span><ChevronDown aria-hidden="true" />
+                    </button>
+                  </DropdownMenuTrigger>
+                  <DropdownMenuContent align="start" className="surface-navigation-menu" aria-label="Git">
+                    {gitNavigation.map((item) => (
+                      <DropdownMenuItem asChild key={item.surface}>
+                        {surfaceNavigationLink(item, "group", () => setGitNavigationOpen(false))}
+                      </DropdownMenuItem>
+                    ))}
+                  </DropdownMenuContent>
+                </DropdownMenu>
+              </span>
             </nav>
           </div>
           <nav className="header-actions" aria-label="Site actions">
@@ -1156,11 +1242,9 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
         </header>
 
         {mobileNavigationOpen ? <>
-          <button
+          <div
             ref={mobileNavigationBackdropRef}
             className="mobile-navigation-backdrop"
-            type="button"
-            tabIndex={-1}
             aria-hidden="true"
             onPointerDown={closeMobileNavigation}
           />
@@ -1181,9 +1265,9 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
               <button ref={mobileNavigationCloseRef} type="button" aria-label="Close product navigation"
                 onClick={closeMobileNavigation}><X aria-hidden="true" /></button>
             </header>
-            <nav aria-label="Mobile product navigation">
+            <nav className="mobile-navigation-sections" aria-label="Mobile product navigation">
               <a
-                className={surface === "home" ? "is-active" : ""}
+                className={`mobile-navigation-home${surface === "home" ? " is-active" : ""}`}
                 href={threadSurfacePath("home")}
                 aria-current={surface === "home" ? "page" : undefined}
                 onClick={(event) => {
@@ -1193,20 +1277,30 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
               >
                 <span>Home</span><small>Overview</small>
               </a>
-              {productNavigation.map((item) => <a
-                className={surface === item.surface ? "is-active" : ""}
-                href={item.surface === "docs" ? pathForSurface(item.surface) : threadSurfacePath(item.surface)}
-                aria-current={surface === item.surface ? "page" : undefined}
-                key={item.surface}
-                onFocus={() => preloadSurface(item.surface)}
-                onPointerDown={() => preloadSurface(item.surface)}
-                onClick={(event) => {
-                  closeMobileNavigation();
-                  handleSurfaceClick(event, item.surface);
-                }}
-              >
-                <span>{item.label}</span><small>{item.shortcut} shortcut</small>
-              </a>)}
+              <section className="mobile-navigation-group" aria-labelledby="mobile-demos-title">
+                <h2 id="mobile-demos-title">Demos</h2>
+                <div className="mobile-navigation-grid">
+                  {demoNavigation.map((item) => surfaceNavigationLink(item, "mobile"))}
+                  <a
+                    href={connectDemoUrl}
+                    target="_blank"
+                    rel="noreferrer"
+                    aria-label="Connect demo (opens in a new tab)"
+                    onClick={closeMobileNavigation}
+                  >
+                    <span>Connect <ExternalLink aria-hidden="true" /></span><small>External demo</small>
+                  </a>
+                </div>
+              </section>
+              <div className="mobile-navigation-grid mobile-navigation-direct">
+                {primaryNavigation.map((item) => surfaceNavigationLink(item, "mobile"))}
+              </div>
+              <section className="mobile-navigation-group" aria-labelledby="mobile-git-title">
+                <h2 id="mobile-git-title">Git</h2>
+                <div className="mobile-navigation-grid">
+                  {gitNavigation.map((item) => surfaceNavigationLink(item, "mobile"))}
+                </div>
+              </section>
             </nav>
           </section>
         </> : null}
