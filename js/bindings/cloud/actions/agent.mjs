@@ -3,6 +3,7 @@ import {
   createTempoProviderFromAccounts,
   Transport as NanocodexTransport,
 } from "../../host/index.mjs";
+import { createSessionId } from "../../internal.mjs";
 import { createBrowserHarness } from "../../browser/harness.mjs";
 import { mercatorRestTool } from "../mercator.mjs";
 
@@ -23,8 +24,8 @@ export async function create(client, options) {
   }
 
   const toolCalls = createToolCallLedger();
-  const sessionId = options?.sessionId ?? crypto.randomUUID();
-  const harnessThreadId = uuid(sessionId) ? sessionId : crypto.randomUUID();
+  const sessionId = options?.sessionId ?? createSessionId();
+  const harnessThreadId = uuid(sessionId) ? sessionId : createSessionId();
   const grantSession = client._captureSession?.();
   if (!grantSession) throw new Error("The Connect grant session is unavailable.");
   const grantClient = { request: grantSession.request, transport: client.transport };
