@@ -62,14 +62,17 @@ test("an artifact action queues exactly one contextual follow-on on the retained
   assert.match(ask, /onPrompt\(selected, prompt, store\.path\(selected\.id\)\)/);
 
   const submit = section(terminalView, "const submitAccessoryPrompt =", "const terminal =");
-  assert.equal(matches(submit, /active\.current\?\.submit\(/g), 1);
-  assert.match(submit, /\{ intent: "queue", submittedAt: performance\.now\(\) \}/);
+  assert.equal(matches(submit, /controller\.submit\(/g), 1);
+  assert.match(submit, /retainSubmittedPrompt\(submittedPrompts\.current, input, submittedAt\)/);
+  assert.match(submit, /controller\.submit\(input, \{ intent: "queue" \}\)/);
   assert.equal(matches(terminal, /artifactFollowOnPrompt\(artifact, path, prompt\)/g), 2);
   const contextualPrompt = section(terminal, "function artifactFollowOnPrompt", "function errorMessage");
   assert.match(contextualPrompt, /JSON\.stringify\(artifact\.id\)/);
   assert.match(contextualPrompt, /JSON\.stringify\(path\)/);
   assert.match(contextualPrompt, /prompt\.trim\(\)/);
-  assert.doesNotMatch(`${terminal}\n${terminalView}\n${dock}`, /NanocodexTui|Artifact action queued|loading|spinner|skeleton/i);
+  const surfaceSource = `${terminal}\n${terminalView}\n${dock}`;
+  assert.doesNotMatch(surfaceSource, /NanocodexTui|Artifact action queued|spinner|skeleton/i);
+  assert.doesNotMatch(surfaceSource, /[">]Loading(?:[ .<]|$)/i);
 });
 
 test("credential-gated terminal uses the normal static Vite graph", () => {

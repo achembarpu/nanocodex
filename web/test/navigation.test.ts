@@ -79,8 +79,8 @@ test("commit deep links stay inside the product", () => {
 test("deep product links retain prepared client navigation", () => {
   assert.match(application, /<Changelog onCommitClick=\{handleCommitClick\} \/>/);
   assert.match(application, /handleCommitClick[\s\S]*?navigateToPreparedRepository\("commits", destination/);
-  assert.match(application, /handleEvalPathClick[\s\S]*?preloadSurface\("evals"\)[\s\S]*?startTransition\(\(\) => navigate\(destination\)\)/);
-  assert.match(application, /href=\{terminalBenchWorksetPath\}[\s\S]*?onClick=\{\(event\) => handleEvalPathClick\(event, terminalBenchWorksetPath\)\}[\s\S]*?Terminal-Bench 2\.1 high:/);
+  assert.match(application, /if \(nextSurface === "evals"\) \{\s*void preloadEvalOverview\(\)/);
+  assert.match(application, /const navigateToSurface[\s\S]*?retainAgentExperience\(nextSurface\);\s*preloadSurface\(nextSurface\)[\s\S]*?startTransition\(\(\) => navigate\(destination\)\)/);
 });
 
 test("the shared shell presents Source without changing the stable Code route", () => {
