@@ -385,12 +385,13 @@ async function handleControl(request: Request, url: URL, env: EgressEnv): Promis
 }
 
 async function handleReadiness(request: Request, env: EgressEnv): Promise<Response> {
-  if (request.method !== "POST" || request.body !== null) return jsonError(404, "not_found");
+  if (request.method !== "POST") return jsonError(404, "not_found");
   const token = env.NANOCODEX_BROKER_PROBE_TOKEN;
   if (!token || token.length < 32 || token.length > 512
     || request.headers.get("authorization") !== `Bearer ${token}`) {
     return jsonError(404, "not_found");
   }
+  if (await hasRequestPayload(request)) return jsonError(404, "not_found");
   try {
     const [legacySubjects, shardedSubjects, credentials] = await Promise.all([
       legacyDirectory(env).fetch("https://subjects.internal/v1/health"),
@@ -413,6 +414,18 @@ async function handleReadiness(request: Request, env: EgressEnv): Promise<Respon
     ]);
     return json({ ready: true }, 200);
   } catch { return jsonError(503, "broker_not_ready"); }
+}
+
+async function hasRequestPayload(request: Request): Promise<boolean> {
+  if (request.body === null) return false;
+  const reader = request.body.getReader();
+  try {
+    const { done } = await reader.read();
+    return !done;
+  } finally {
+    await reader.cancel().catch(() => {});
+    reader.releaseLock();
+  }
 }
 
 async function handleModelStatus(request: Request, env: EgressEnv): Promise<Response> {

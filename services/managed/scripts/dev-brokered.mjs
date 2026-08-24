@@ -56,6 +56,7 @@ async function main() {
 
   try {
     const brokerEnvironment = [
+      envLine("ENVIRONMENT", "development"),
       envLine("ALLOWED_POLICIES", brokerPolicyForAuthMode(authMode)),
       envLine("NANOCODEX_BROKER_PROBE_TOKEN", brokerProbeToken),
     ];

@@ -80,6 +80,7 @@ test("managed agents have no provider-credential or direct transport path", asyn
 
   const packageJson = JSON.parse(packageText);
   assert.equal(packageJson.scripts.dev, "node scripts/dev-brokered.mjs");
+  assert.match(launcher, /envLine\("ENVIRONMENT", "development"\)/);
   assert.match(launcher, /envLine\("ALLOWED_POLICIES", brokerPolicyForAuthMode\(authMode\)\)/);
   assert.match(launcher, /const auth = await readCodexSubscription\(authPath\)/);
   assert.match(launcher, /envLine\("CODEX_OAUTH_BOOTSTRAP", \{/);

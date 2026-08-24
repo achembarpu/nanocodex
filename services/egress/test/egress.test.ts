@@ -1275,6 +1275,31 @@ describe("per-user credential broker", () => {
       },
     );
     expect(await ready.json()).toEqual({ ready: true });
+
+    const emptyPayload = await SELF.fetch(
+      "https://broker.test/.well-known/nanocodex/broker-readiness",
+      {
+        method: "POST",
+        headers: {
+          authorization: "Bearer probe-token-that-is-at-least-thirty-two-bytes",
+        },
+        body: "",
+      },
+    );
+    expect(await emptyPayload.json()).toEqual({ ready: true });
+
+    const payloadDenied = await SELF.fetch(
+      "https://broker.test/.well-known/nanocodex/broker-readiness",
+      {
+        method: "POST",
+        headers: {
+          authorization: "Bearer probe-token-that-is-at-least-thirty-two-bytes",
+        },
+        body: "unexpected",
+      },
+    );
+    expect(payloadDenied.status).toBe(404);
+    expect(await payloadDenied.json()).toEqual({ error: "not_found" });
   });
 
   it("stores only opaque subject mappings in the directory DO", async () => {
