@@ -43,6 +43,7 @@ export async function connect(client, options) {
       ? undefined
       : freshAccessKeyAuthorization(client.accessKey?.authorize));
   client.dialog.showWallet?.();
+  let connected = false;
   try {
     const result = await client.provider.request({
       method: "wallet_connect",
@@ -100,12 +101,15 @@ export async function connect(client, options) {
       token: grantToken,
       connection: sessionConnectionWire(wire),
     });
+    connected = true;
     return connection;
   } finally {
-    // The host stays covered until the grant session is committed. The async
-    // caller can publish its connected snapshot in the same microtask before
-    // the browser has an opportunity to paint the underlying application.
-    client.dialog.hideWallet?.();
+    // The host stays covered until the grant session is committed. React owns
+    // manual closure from a layout effect so its connected tree is committed
+    // before the modal disappears; imperative callers retain automatic close.
+    if (!connected || options.dialog?.close !== "manual") {
+      client.dialog.hideWallet?.();
+    }
   }
 }
 

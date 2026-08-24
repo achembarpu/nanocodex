@@ -10,7 +10,10 @@ import { createConfig, useConnectAgent, useLogoutAccount } from "../cloud/index.
 globalThis.IS_REACT_ACT_ENVIRONMENT = true;
 
 test("useConnectAgent reopens one persisted durable grant session on mount", async () => {
-  const connection = Object.freeze({ grant: Object.freeze({ id: "0x01" }) });
+  const connection = Object.freeze({
+    grant: Object.freeze({ id: "0x01" }),
+    mpp: Object.freeze({ balanceStatus: "ready" }),
+  });
   const agent = Object.freeze({ id: "agent-durable" });
   let reconnects = 0;
   let creates = 0;
@@ -63,8 +66,16 @@ test("useConnectAgent reopens one persisted durable grant session on mount", asy
 });
 
 test("useConnectAgent validates a retained agent while refreshing its grant projection", async () => {
-  const cached = Object.freeze({ agentId: "agent-durable", grant: Object.freeze({ id: "0x01" }) });
-  const fresh = Object.freeze({ agentId: "agent-durable", grant: Object.freeze({ id: "0x01" }) });
+  const cached = Object.freeze({
+    agentId: "agent-durable",
+    grant: Object.freeze({ id: "0x01" }),
+    mpp: Object.freeze({ balanceStatus: "ready" }),
+  });
+  const fresh = Object.freeze({
+    agentId: "agent-durable",
+    grant: Object.freeze({ id: "0x01" }),
+    mpp: Object.freeze({ balanceStatus: "ready" }),
+  });
   const agent = Object.freeze({ id: "agent-durable" });
   let resolveRefresh;
   const refresh = new Promise((resolve) => { resolveRefresh = resolve; });
@@ -107,6 +118,59 @@ test("useConnectAgent validates a retained agent while refreshing its grant proj
   assert.equal(snapshot.agent, agent);
   assert.equal(creates, 1);
 
+  await act(async () => root.unmount());
+  queryClient.clear();
+});
+
+test("useConnectAgent closes the manual dialog after the connected tree commits", async () => {
+  const events = [];
+  const connection = Object.freeze({
+    grant: Object.freeze({ id: "0x01" }),
+    mpp: Object.freeze({ balanceStatus: "ready" }),
+  });
+  const agent = Object.freeze({ id: "agent-durable" });
+  let snapshot;
+  const config = createConfig({
+    client: {
+      _hasSession() { return false; },
+      connection: {
+        async connect(options) {
+          assert.equal(options.dialog.close, "manual");
+          events.push("connect");
+          return connection;
+        },
+      },
+      agent: {
+        async create() {
+          events.push("agent");
+          return agent;
+        },
+      },
+      dialog: {
+        hideWallet() { events.push("hide"); },
+      },
+    },
+  });
+  const queryClient = new QueryClient({ defaultOptions: { mutations: { retry: false } } });
+
+  function Consumer() {
+    snapshot = useConnectAgent({ config, reconnectOnMount: false });
+    events.push(`render:${snapshot.connectionStatus}`);
+    return null;
+  }
+
+  let root;
+  await act(async () => {
+    root = create(createElement(
+      QueryClientProvider,
+      { client: queryClient },
+      createElement(Consumer),
+    ));
+  });
+  await act(async () => snapshot.connectAsync({}));
+
+  assert.equal(snapshot.connectionStatus, "connected");
+  assert.ok(events.indexOf("render:connected") < events.indexOf("hide"));
   await act(async () => root.unmount());
   queryClient.clear();
 });

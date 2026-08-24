@@ -6,6 +6,7 @@ import {
   useCallback,
   useContext,
   useEffect,
+  useLayoutEffect,
   useSyncExternalStore,
 } from "react";
 import { useMutation } from "@tanstack/react-query";
@@ -140,13 +141,15 @@ export function useAgent(parameters = {}) {
 /** Connects the configured Nanocodex Connect client. */
 export function useConnect(parameters = {}) {
   const config = useConfig(parameters);
+  const snapshot = useConnection({ config });
+  useCloseCommittedDialog(config, snapshot);
   return useMutation({
     ...parameters.mutation,
     mutationKey: ["nanocodex", "connect"],
     mutationFn: async (variables) => {
       config._setConnection("connecting");
       try {
-        const connection = await config.client.connection.connect(variables);
+        const connection = await config.client.connection.connect(manualDialogClose(variables));
         config._setConnection("connected", connection);
         refreshConfigMppBalance(config, connection);
         return connection;
@@ -162,6 +165,7 @@ export function useConnect(parameters = {}) {
 export function useConnectAgent(parameters = {}) {
   const config = useConfig(parameters);
   const snapshot = useConnection({ config });
+  useCloseCommittedDialog(config, snapshot);
   useEffect(() => {
     if (parameters.reconnectOnMount === false) return;
     void config._reconnectAgent(parameters.agent).catch((error) => {
@@ -175,7 +179,7 @@ export function useConnectAgent(parameters = {}) {
       config._setConnection("connecting");
       let agent;
       try {
-        const connection = await config.client.connection.connect(variables);
+        const connection = await config.client.connection.connect(manualDialogClose(variables));
         agent = await config.client.agent.create({
           ...parameters.agent,
           connection,
@@ -381,6 +385,19 @@ function refreshConfigMppBalance(config, connection) {
       config._setConnection("connected", refreshed, current.agent);
     }
   });
+}
+
+function useCloseCommittedDialog(config, snapshot) {
+  useLayoutEffect(() => {
+    if (snapshot.status === "connected") config.client.dialog?.hideWallet?.();
+  }, [config, snapshot.status, snapshot.connection?.grant.id]);
+}
+
+function manualDialogClose(options) {
+  return {
+    ...options,
+    dialog: { ...options?.dialog, close: "manual" },
+  };
 }
 
 function refreshMppBalance(client, connection, publish) {

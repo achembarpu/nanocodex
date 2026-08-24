@@ -65,6 +65,8 @@ export type AgentVisibility = Readonly<{
 export declare namespace connect {
   type Options = Readonly<{
     capabilities?: Capabilities | undefined;
+    /** Let an owning UI close the dialog after its connected state commits. @default "auto" */
+    dialog?: Readonly<{ close?: "auto" | "manual" | undefined }> | undefined;
     /** Nanocodex permission preset selected by the app. @default "agent.run" */
     permission?: string | undefined;
     signal?: AbortSignal | undefined;
