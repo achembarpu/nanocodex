@@ -29,6 +29,7 @@
 
 .permission-builder {
   display: grid;
+  grid-column: 1 / -1;
   width: 100%;
   gap: 10px;
   margin-top: 18px;
@@ -746,6 +747,33 @@ h3 {
   gap: 1px;
 }
 
+.grant-details {
+  border-top: 1px solid var(--border-soft);
+}
+
+.grant-details > summary {
+  min-height: 44px;
+  padding: 14px;
+  color: var(--text-muted);
+  cursor: pointer;
+  font-size: 9px;
+  list-style: none;
+  text-transform: uppercase;
+}
+
+.grant-details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.grant-details > summary::after {
+  float: right;
+  content: "+";
+}
+
+.grant-details[open] > summary::after {
+  content: "−";
+}
+
 .detail-row {
   display: grid;
   grid-template-columns: 128px minmax(0, 1fr);
@@ -1046,14 +1074,64 @@ body > dialog[aria-label="Nanocodex Connect permissions"] > iframe {
     padding: 24px 0 18px;
   }
 
+  .app-shell.is-connected {
+    padding-bottom: 0;
+  }
+
+  .app-shell.is-connected .hero,
+  .app-shell.is-connected .footer-note {
+    display: none;
+  }
+
+  .app-shell.is-connected .workspace-grid {
+    width: 100%;
+    gap: 0;
+  }
+
+  .app-shell.is-connected .chat-primary {
+    border-inline: 0;
+  }
+
+  .app-shell.is-connected .chat-primary .connect-chat .conversation-workspace {
+    grid-template-rows: minmax(0, 1fr);
+    min-height: 0;
+  }
+
+  .app-shell.is-connected .chat-primary .connect-chat .conversation-main {
+    grid-row: 1;
+  }
+
+  .app-shell.is-connected .chat-primary .connect-chat .agent-terminal-shell {
+    height: calc(100dvh - var(--header-height) - 68px);
+    min-height: 280px;
+    margin-bottom: 0;
+  }
+
   .empty-state {
-    grid-template-columns: 40px minmax(0, 1fr);
+    grid-template-columns: 1fr;
+    gap: 12px;
+  }
+
+  .empty-orbit {
+    display: none;
+  }
+
+  .permission-builder {
+    margin-top: 2px;
   }
 
   .connect-button {
     grid-column: 1 / -1;
     justify-self: stretch;
     width: 100%;
+  }
+
+  .visibility-inspector {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .projection-row {
+    min-height: 62px;
   }
 
   .action-grid {
@@ -1092,7 +1170,9 @@ body > dialog[aria-label="Nanocodex Connect permissions"] > iframe {
 @media (pointer: coarse) {
   .primary-button,
   .secondary-button,
-  .danger-button {
+  .danger-button,
+  .action-card button,
+  .permission-options label {
     min-height: 44px;
   }
 }

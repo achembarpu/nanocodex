@@ -128,6 +128,30 @@ export function steerFailed(state: TerminalState, id: number, error: string): Te
   return appendError(removeSteer(state, id), error);
 }
 
+export function requeueSteerAsPrompt(
+  state: TerminalState,
+  id: number,
+  text: string,
+  historyEntryId?: string,
+): TerminalState {
+  const turnId = historyTurnId(historyEntryId);
+  return {
+    ...state,
+    entries: state.entries.map((entry) => entry.id === `steer-${id}` ? {
+      id: historyEntryId ?? `user-${id}`,
+      kind: "user" as const,
+      text,
+      promptId: id,
+      ...(turnId === undefined ? {} : { turnId }),
+    } : entry),
+    pendingSteers: state.pendingSteers.filter((steer) => steer.id !== id),
+    queuedPrompts: [...state.queuedPrompts, { id, text, historyEntryId, turnId }],
+    displayedQueuedPrompt: id,
+    pendingTurns: state.pendingTurns + 1,
+    status: "Prompt queued",
+  };
+}
+
 export function turnFinished(
   state: TerminalState,
   error?: string,

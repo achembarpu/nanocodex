@@ -7,6 +7,7 @@ import {
   mergeAgentHistoryEntries,
   queuePrompt,
   queueSteer,
+  requeueSteerAsPrompt,
   steerAdmitted,
   steerFailed,
   turnFinished,
@@ -194,6 +195,7 @@ export function createAgentTerminal(options: {
 
   listeners.push(watcher.onEvent((event) => {
     if (disposed || event.request_id !== agent.sessionId) return;
+    emit("agent.event", { event });
     observeRootTurnEvent(event);
     const wasRunning = state.running;
     state = boundedTerminalState(applyAgentEvents(state, [event]), maxEntries);
@@ -205,6 +207,7 @@ export function createAgentTerminal(options: {
   if (watcher.onHistory) {
     listeners.push(watcher.onHistory((events) => {
       if (disposed) return;
+      emit("agent.history", { events });
       const historical = applyAgentEvents(initialTerminalState(), events);
       const historicalKeys = agentHistoryEntryKeys(historical.entries);
       const entries = mergeAgentHistoryEntries(
@@ -276,6 +279,9 @@ export function createAgentTerminal(options: {
         state = boundedTerminalState(steerAdmitted(state, id), maxEntries);
         emit("prompt.steered", { id });
       } catch (error) {
+        if (isCompletedSteerRace(error)) {
+          return startRootTurn(id, prompt, submittedAt, true);
+        }
         state = boundedTerminalState(
           steerFailed(state, id, terminalErrorMessage(error)),
           maxEntries,
@@ -286,16 +292,35 @@ export function createAgentTerminal(options: {
       return current.turn;
     }
 
+    return startRootTurn(id, prompt, submittedAt, false);
+  }
+
+  function startRootTurn(
+    id: number,
+    prompt: string,
+    submittedAt: number,
+    requeuedSteer: boolean,
+  ): TerminalTurn | undefined {
     let turn: TerminalTurn;
     try {
       turn = agent.turn.prompt({ input: prompt });
     } catch (error) {
-      appendTerminalError(terminalErrorMessage(error));
+      if (requeuedSteer) {
+        state = boundedTerminalState(
+          steerFailed(state, id, terminalErrorMessage(error)),
+          maxEntries,
+        );
+        render();
+      } else {
+        appendTerminalError(terminalErrorMessage(error));
+      }
       emit("prompt.rejected", { error, id });
       return undefined;
     }
     state = boundedTerminalState(
-      queuePrompt(state, id, prompt, turn.historyEntryId),
+      requeuedSteer
+        ? requeueSteerAsPrompt(state, id, prompt, turn.historyEntryId)
+        : queuePrompt(state, id, prompt, turn.historyEntryId),
       maxEntries,
     );
     const timing: PromptTiming = {
@@ -868,6 +893,13 @@ function terminalErrorMessage(error: unknown): string {
     || /^(Failed to fetch|Load failed|NetworkError when attempting to fetch resource\.?)$/.test(message)
     ? "Could not connect to the agent. Try again."
     : message;
+}
+
+function isCompletedSteerRace(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const failure = error as { code?: unknown; status?: unknown };
+  return failure.status === 409
+    && (failure.code === "turn_not_active" || failure.code === "turn_not_steerable");
 }
 
 function performanceNow(): number {

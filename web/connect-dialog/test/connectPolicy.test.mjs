@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  accountLoginCapabilities,
   appVisibilityPermissions,
   connectApiOrigin,
   productionConnectApiOrigin,
@@ -10,6 +11,21 @@ import {
 } from "../src/connectPolicy.mjs";
 
 const playground = "https://nanocodex-connect-playground.gakonst.workers.dev";
+
+test("existing-account login targets only credentials retained by this dialog", () => {
+  assert.deepEqual(accountLoginCapabilities([
+    { credential: { id: "known-passkey" } },
+    { credential: { id: "known-passkey" } },
+    { credential: { id: "second-passkey" } },
+  ]), {
+    method: "login",
+    credentialId: ["known-passkey", "second-passkey"],
+  });
+  assert.deepEqual(accountLoginCapabilities([]), {
+    method: "login",
+    selectAccount: true,
+  });
+});
 
 test("signed agent visibility resources map to compact consent labels", () => {
   assert.deepEqual(appVisibilityPermissions([

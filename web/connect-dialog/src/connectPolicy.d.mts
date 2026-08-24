@@ -21,4 +21,8 @@ export function appVisibilityPermissions(resources: unknown): readonly Readonly<
   label: "Reply" | "Actions" | "History" | "Traces";
   detail: string;
 }>[];
+export function accountLoginCapabilities(accounts: unknown): Readonly<
+  | { method: "login"; credentialId: readonly string[] }
+  | { method: "login"; selectAccount: true }
+>;
 export function isLoopbackOrigin(value: string): boolean;

@@ -1,7 +1,8 @@
-import { useCallback, useEffect, useMemo } from "react";
+import { useCallback, useEffect, useMemo, useRef } from "react";
 import type { ConnectAgent, Connection } from "nanocodex/connect";
 
 import { AgentTerminalView } from "../../src/AgentTerminalView";
+import type { AgentTerminalEvent } from "../../src/demoTerminal";
 import { managedTerminalAgent } from "../../src/managedAgentRuntime";
 
 export type AppObservation = Readonly<{
@@ -28,47 +29,54 @@ export function ConnectAgentExperience({
   const retryAgent = useCallback(() => {}, []);
   const recordActivity = useCallback(() => {}, []);
   const recordState = useCallback(() => {}, []);
+  const observation = useRef<AppObservation>({ actions: [], historyTurns: 0, traceEvents: 0 });
 
   useEffect(() => {
-    let cancelled = false;
-    let historyTurns = 0;
-    if (visibility.conversationHistory) {
-      void agent.state().then((state) => {
-        if (cancelled) return;
-        historyTurns = state.completed_turns;
-        onObservation({ actions: [], historyTurns, traceEvents: 0 });
-      }).catch(() => {});
-    }
+    observation.current = { actions: [], historyTurns: 0, traceEvents: 0 };
+    onObservation(observation.current);
+  }, [agent, onObservation]);
 
-    const controller = new AbortController();
-    const events = agent.events.watch({ cursor: "latest", signal: controller.signal });
-    void (async () => {
-      let traceEvents = 0;
-      try {
-        for await (const event of events) {
-          if (cancelled) break;
-          if (event.data.type === "event") traceEvents += 1;
-          if (event.data.type !== "turn_completed") continue;
-          if (visibility.conversationHistory) historyTurns += 1;
-          onObservation({
-            actions: [],
-            ...(visibility.finalMessages && event.data.final_message
-              ? { finalMessage: event.data.final_message }
-              : {}),
-            historyTurns,
-            traceEvents: visibility.rawTraces ? traceEvents : 0,
-          });
-        }
-      } catch (error) {
-        if (!controller.signal.aborted) console.error("Nanocodex Connect event projection failed", error);
-      }
-    })();
-    return () => {
-      cancelled = true;
-      controller.abort();
-      void events.return?.();
-    };
-  }, [agent, onObservation, visibility.conversationHistory, visibility.finalMessages, visibility.rawTraces]);
+  const observeTerminalEvent = useCallback((terminalEvent: AgentTerminalEvent) => {
+    let next = observation.current;
+    if (terminalEvent.type === "prompt.completed" && visibility.finalMessages) {
+      const finalMessage = typeof terminalEvent.finalMessage === "string"
+        ? terminalEvent.finalMessage
+        : undefined;
+      next = {
+        ...next,
+        ...(finalMessage ? { finalMessage } : {}),
+        historyTurns: visibility.conversationHistory ? next.historyTurns + 1 : 0,
+      };
+    } else if (terminalEvent.type === "agent.history") {
+      const events = Array.isArray(terminalEvent.events) ? terminalEvent.events : [];
+      next = {
+        ...next,
+        historyTurns: visibility.conversationHistory
+          ? events.filter((event) => event && typeof event === "object"
+            && !Array.isArray(event) && (event as { type?: unknown }).type === "run.completed").length
+          : 0,
+        traceEvents: visibility.rawTraces ? events.length : 0,
+      };
+    } else if (terminalEvent.type === "agent.event") {
+      const event = terminalEvent.event;
+      if (!event || typeof event !== "object" || Array.isArray(event)) return;
+      const type = (event as { type?: unknown }).type;
+      const actions = visibility.actionSummaries
+        && typeof type === "string"
+        && (type === "tool.call" || type === "tool.result")
+        ? [...next.actions, type]
+        : next.actions;
+      next = {
+        ...next,
+        actions,
+        traceEvents: visibility.rawTraces ? next.traceEvents + 1 : 0,
+      };
+    } else {
+      return;
+    }
+    observation.current = next;
+    onObservation(next);
+  }, [onObservation, visibility.actionSummaries, visibility.conversationHistory, visibility.finalMessages, visibility.rawTraces]);
 
   return (
     <section className="connect-chat" aria-labelledby="connect-chat-title">
@@ -87,6 +95,7 @@ export function ConnectAgentExperience({
               agentError={undefined}
               mode="preview"
               onConversationActivity={recordActivity}
+              onTerminalEvent={observeTerminalEvent}
               onStateChange={recordState}
               retryAgent={retryAgent}
               theme="dark"

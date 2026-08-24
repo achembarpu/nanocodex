@@ -5,6 +5,7 @@ import type { Dialog } from "nanocodex/connect";
 
 import { classifyMachineUsdOrder } from "./machineUsdOrder.mjs";
 import {
+  accountLoginCapabilities,
   appVisibilityPermissions,
   connectApiOrigin,
   registeredApp,
@@ -1128,12 +1129,18 @@ function walletRequest(request: WalletRequest, accountMode: "login" | "register"
       capabilities: {
         ...sharedCapabilities,
         ...(accountMode === "login"
-          ? { method: "login", selectAccount: true }
+          ? accountLoginCapabilities(storedProviderAccounts())
           : { method: "register", name: "Nanocodex Connect" }),
         ...(walletAuth ? { auth: walletAuth } : {}),
       },
     }],
   };
+}
+
+function storedProviderAccounts(): unknown {
+  return (provider as unknown as {
+    store: { getState(): { accounts: unknown } };
+  }).store.getState().accounts;
 }
 
 function createProvider() {

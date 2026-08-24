@@ -163,7 +163,7 @@ export function App() {
   if (connect.connectionStatus === "connecting" && !connect.isPending) return null;
 
   return (
-    <main className="app-shell" data-testid="connect-playground">
+    <main className={`app-shell${connection ? " is-connected" : ""}`} data-testid="connect-playground">
         <header className="topbar">
           <div className="brand">
             <span className="brand-mark" aria-hidden="true" />
@@ -507,25 +507,28 @@ function ConnectionWorkspace({
         </div>
       </div>
 
-      <dl className="details">
-        <Detail label="Account" testId="account-address" value={connection.accountAddress} />
-        <Detail label="Grant" testId="grant-id" value={connection.grant.id} />
-        <Detail label="Capabilities" value={connection.grant.capabilities.join(" · ")} />
-        <Detail
-          label="Model settlement"
-          value={`${formatMachineUsd(connection.mpp.settlementBalance)} ${connection.mpp.settlementSymbol}`}
-        />
-        <Detail label="Access key" testId="access-key" value={connection.accessKey.keyId} />
-        <Detail label="Witness" testId="witness" value={connection.accessKey.witness} />
-        <Detail
-          label="Key expiry"
-          value={new Date(connection.accessKey.expiry * 1_000).toLocaleDateString()}
-        />
-        <Detail
-          label="MPP permission"
-          value={`${formatMachineUsd(connection.mpp.maxPerRequest)} / request · ${formatMachineUsd(connection.mpp.limit)} / day`}
-        />
-      </dl>
+      <details className="grant-details">
+        <summary>Grant details</summary>
+        <dl className="details">
+          <Detail label="Account" testId="account-address" value={connection.accountAddress} />
+          <Detail label="Grant" testId="grant-id" value={connection.grant.id} />
+          <Detail label="Capabilities" value={connection.grant.capabilities.join(" · ")} />
+          <Detail
+            label="Model settlement"
+            value={`${formatMachineUsd(connection.mpp.settlementBalance)} ${connection.mpp.settlementSymbol}`}
+          />
+          <Detail label="Access key" testId="access-key" value={connection.accessKey.keyId} />
+          <Detail label="Witness" testId="witness" value={connection.accessKey.witness} />
+          <Detail
+            label="Key expiry"
+            value={new Date(connection.accessKey.expiry * 1_000).toLocaleDateString()}
+          />
+          <Detail
+            label="MPP permission"
+            value={`${formatMachineUsd(connection.mpp.maxPerRequest)} / request · ${formatMachineUsd(connection.mpp.limit)} / day`}
+          />
+        </dl>
+      </details>
 
       <div className="panel-body">
         <button

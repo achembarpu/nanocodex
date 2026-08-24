@@ -202,7 +202,8 @@ test("touch terminals use one native IME-safe composer and one contextual action
   assert.match(touchComposer, /isTerminalSubmitKeyEvent\(event\.nativeEvent, composing\.current\)/);
   assert.match(touchComposer, /onSubmit\(draft\)/);
   assert.match(demoTerminal, /submitOptions\.intent !== "queue" && current/);
-  assert.match(touchComposer, /\{running \? \([\s\S]*?aria-label="Stop response"[\s\S]*?<Square[\s\S]*?\) : \([\s\S]*?aria-label="Send message"[\s\S]*?<ArrowUp/);
+  assert.match(touchComposer, /terminalComposerAction\(running, draft\)/);
+  assert.match(touchComposer, /\{action === "stop" \? \([\s\S]*?aria-label="Stop response"[\s\S]*?<Square[\s\S]*?\) : \([\s\S]*?aria-label="Send message"[\s\S]*?<ArrowUp/);
   assert.equal(matches(touchComposer, /className="agent-touch-actions"/g), 1);
   assert.equal(matches(touchComposer, /className="agent-touch-field"/g), 1);
   assert.doesNotMatch(touchComposer, />Steer<|>Queued</);

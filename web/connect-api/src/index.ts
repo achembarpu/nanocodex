@@ -6,7 +6,32 @@ declare const WebSocketPair: {
   new(): { 0: WorkerWebSocket; 1: WorkerWebSocket };
 };
 
-export class NonceStorage extends Kv.NonceStorage {}
+export class NonceStorage extends Kv.NonceStorage {
+  override async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    if (url.pathname !== "/resolve-grant") return super.fetch(request);
+    const token = url.searchParams.get("token");
+    if (!token || !/^[A-Za-z0-9_-]{43}$/.test(token)) {
+      return Response.json({ error: "invalid grant token" }, { status: 400 });
+    }
+    const principal = await this.activeValue(`grant-token:${token}`);
+    const grantId = isRecord(principal) && typeof principal.grantId === "string"
+      ? principal.grantId
+      : undefined;
+    const grant = grantId ? await this.activeValue(`grant:${grantId}`) : undefined;
+    return Response.json({ principal, grant });
+  }
+
+  private async activeValue(key: string): Promise<unknown> {
+    const entry = await this.state.storage.get<Kv.NonceStorage.Entry>(key);
+    if (!entry) return undefined;
+    if (entry.expiresAt !== undefined && Date.now() >= entry.expiresAt) {
+      await this.state.storage.delete(key);
+      return undefined;
+    }
+    return entry.value;
+  }
+}
 
 const PLAYGROUND_ORIGIN = "https://nanocodex-connect-playground.gakonst.workers.dev";
 const DIALOG_ORIGIN = "https://nanocodex.gakonst.workers.dev";
@@ -678,9 +703,9 @@ async function handleGrantRoute(
   url: URL,
 ): Promise<Response | undefined> {
   if (request.method === "POST" && url.pathname === "/v1/connections/disconnect") {
-    const authenticated = await authenticatedGrant(request, store);
+    const authenticated = await authenticatedGrant(request, env.CONNECT_STATE);
     await withGrantMutationLock(store, authenticated.grant.id, async () => {
-      const current = await authenticatedGrant(request, store, authenticated.grant.id);
+      const current = await authenticatedGrant(request, env.CONNECT_STATE, authenticated.grant.id);
       await revokeGrant(env, store, current.grant, current.token);
     });
     return new Response(null, { status: 204 });
@@ -690,14 +715,14 @@ async function handleGrantRoute(
   if (!grantRoute) return undefined;
   const grantId = grantRoute[1] as `0x${string}`;
   const action = grantRoute[2];
-  const { grant, token } = await authenticatedGrant(request, store, grantId);
+  const { grant, token } = await authenticatedGrant(request, env.CONNECT_STATE, grantId);
 
   if (action === undefined && request.method === "GET") {
     return Response.json(await connectionWire(grant, token));
   }
   if (action === "revoke" && request.method === "POST") {
     const revoked = await withGrantMutationLock(store, grant.id, async () => {
-      const current = await authenticatedGrant(request, store, grantId);
+      const current = await authenticatedGrant(request, env.CONNECT_STATE, grantId);
       return revokeGrant(env, store, current.grant, current.token);
     });
     return Response.json(grantWire(revoked));
@@ -708,7 +733,7 @@ async function handleGrantRoute(
   if (action === "mpp/charge" && request.method === "POST") {
     const body = await json(request);
     return Response.json(await withGrantMutationLock(store, grant.id, async () => {
-      const current = await authenticatedGrant(request, store, grantId);
+      const current = await authenticatedGrant(request, env.CONNECT_STATE, grantId);
       return chargeGrant(store, current.grant, current.token, body);
     }));
   }
@@ -928,7 +953,7 @@ async function handleAgentToolRoute(
   const isImage = request.method === "POST" && url.pathname === "/api/tools/image-generation";
   if (!isAccountInfo && !isEgress && !isWeb && !isImage) return undefined;
   requirePlaygroundOrigin(request);
-  const { grant } = await authenticatedGrant(request, store);
+  const { grant } = await authenticatedGrant(request, env.CONNECT_STATE);
   if (isAccountInfo) return Response.json(await connectAccountInfo(env, store, grant));
   if (isEgress) return grantBrowserEgress(request, env, grant);
   if (isWeb) return grantWebSearch(request, env, grant);
@@ -1543,17 +1568,26 @@ async function withGrantIndexLock<value>(
 
 async function authenticatedGrant(
   request: Request,
-  store: Kv.Kv,
+  namespace: Kv.durableObject.Namespace,
   requestedGrantId?: `0x${string}`,
 ): Promise<{ grant: GrantRecord; principal: GrantPrincipal; token: string }> {
   const token = grantBearerToken(request);
-  const principal = await store.get<GrantPrincipal>(`grant-token:${token}`);
+  const stub = namespace.get(namespace.idFromName("default"));
+  const resolved = await stub.fetch(
+    `https://do.invalid/resolve-grant?token=${encodeURIComponent(token)}`,
+    { method: "POST" },
+  );
+  if (!resolved.ok) {
+    throw new ApiFailure(500, "grant_state_unavailable", "The grant session could not be resolved.");
+  }
+  const value = await resolved.json() as { principal?: unknown; grant?: unknown };
+  const principal = value.principal;
   if (!isGrantPrincipal(principal)
     || principal.appId !== REGISTERED_APP_ID
     || (requestedGrantId && principal.grantId.toLowerCase() !== requestedGrantId.toLowerCase())) {
     throw new ApiFailure(401, "invalid_grant_token", "The grant session is invalid.");
   }
-  const grant = await store.get<GrantRecord>(`grant:${principal.grantId}`);
+  const grant = value.grant;
   if (!isGrantRecord(grant)
     || grant.id.toLowerCase() !== principal.grantId.toLowerCase()
     || grant.appId !== principal.appId

@@ -16,6 +16,7 @@ import {
   COARSE_POINTER_QUERY,
   cssPixelValue,
   observeMediaQueryMatch,
+  terminalComposerAction,
   terminalComposerMinimumHeight,
 } from "./mobileInteraction";
 import "@xterm/xterm/css/xterm.css";
@@ -250,6 +251,7 @@ export function TouchTerminalComposer({
     if (pending || !draft.trim()) return;
     onSubmit(draft);
   };
+  const action = terminalComposerAction(running, draft);
   return (
     <form
       className={`agent-touch-composer${running ? " is-running" : ""}`}
@@ -277,7 +279,7 @@ export function TouchTerminalComposer({
           }}
         />
         <div className="agent-touch-actions">
-          {running ? (
+          {action === "stop" ? (
             <button
               type="button"
               aria-label="Stop response"

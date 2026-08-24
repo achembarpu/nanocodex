@@ -217,6 +217,7 @@ async function retrySubmission(client, agentId, options) {
       if (options.signal?.aborted
         || (error instanceof ManagedError && error.code !== "network_error")) throw error;
       failure = error;
+      if (attempt < 2) await delay(150 * (attempt + 1), options.signal);
     }
   }
   throw failure;

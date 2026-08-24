@@ -13,6 +13,7 @@ import {
   retainedSourceTreeState,
   scaledSourceTreeScrollTop,
   sourceTreeItemHeight,
+  terminalComposerAction,
   terminalComposerMinimumHeight,
 } from "../src/mobileInteraction.ts";
 
@@ -189,6 +190,12 @@ test("visual viewport floors include the measured composer and bottom safe area"
     measuredComposerHeight: 112.1,
     safeAreaInsetBottom: 34,
   }), 113, "a taller measured composer remains authoritative");
+});
+
+test("a running touch agent keeps a visible send action for a follow-up", () => {
+  assert.equal(terminalComposerAction(false, "hello"), "send");
+  assert.equal(terminalComposerAction(true, "follow up"), "send");
+  assert.equal(terminalComposerAction(true, "  "), "stop");
 });
 
 test("coarse Source rows resolve to a complete target without changing fine density", () => {

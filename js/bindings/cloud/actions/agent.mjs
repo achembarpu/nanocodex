@@ -31,7 +31,6 @@ export async function create(client, options) {
     ),
   };
   const managed = ManagedAgent.open(connection.agentId, managedOptions);
-  await managed.state();
   return connectAgent(managed, connection);
 }
 

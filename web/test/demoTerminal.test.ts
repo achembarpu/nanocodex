@@ -409,6 +409,26 @@ test("public and keyboard submissions share history, steering, and cancellation"
   assert.equal(host.writes.at(-1), "\x1b[?25h");
 });
 
+test("a follow-up racing a completed durable turn is re-admitted as one root prompt", async () => {
+  const host = fakeTerminal();
+  const agent = fakeAgent();
+  const terminal = createAgentTerminal({ agent: agent as never, terminal: host });
+
+  await terminal.submit("first");
+  agent.turns[0]!.steer = async () => {
+    throw Object.assign(new Error("managed request failed (409)"), {
+      code: "turn_not_active",
+      status: 409,
+    });
+  };
+  await terminal.submit("follow up");
+
+  assert.equal(agent.turns.length, 2);
+  assert.equal(agent.turns[1]?.input, "follow up");
+  assert.doesNotMatch(host.writes.at(-1)!, /managed request failed/);
+  terminal.dispose();
+});
+
 test("native composer mode is the only input path and can return to desktop xterm input", async () => {
   const host = fakeTerminal();
   const agent = fakeAgent();

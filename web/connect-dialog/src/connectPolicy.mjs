@@ -98,6 +98,20 @@ export function appVisibilityPermissions(resources) {
     .map(({ name: _name, ...permission }) => permission);
 }
 
+export function accountLoginCapabilities(accounts) {
+  const credentialIds = Array.isArray(accounts)
+    ? [...new Set(accounts.flatMap((account) => {
+      const id = isRecord(account) && isRecord(account.credential)
+        ? account.credential.id
+        : undefined;
+      return typeof id === "string" && id.length > 0 ? [id] : [];
+    }))]
+    : [];
+  return credentialIds.length > 0
+    ? Object.freeze({ method: "login", credentialId: Object.freeze(credentialIds) })
+    : Object.freeze({ method: "login", selectAccount: true });
+}
+
 export function isLoopbackOrigin(value) {
   try {
     const url = new URL(value);

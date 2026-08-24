@@ -554,6 +554,10 @@
     margin-bottom: max(24px, env(safe-area-inset-bottom));
   }
 
+  .connect-chat .nanocodex-demo.is-preview .agent-terminal-shell {
+    margin-bottom: 0;
+  }
+
   .agent-xterm > .xterm {
     padding: 12px;
   }

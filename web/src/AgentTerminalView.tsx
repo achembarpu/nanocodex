@@ -19,6 +19,7 @@ import type {
 } from "./agentTerminalTypes";
 import {
   createAgentTerminal,
+  type AgentTerminalEvent,
   type AgentTerminal as DemoTerminal,
   type TerminalAgent,
   type TerminalHost,
@@ -38,6 +39,7 @@ export function AgentTerminalView({
   inactiveMessage,
   mode,
   onConversationActivity,
+  onTerminalEvent,
   onStateChange,
   retryAgent,
   theme,
@@ -52,6 +54,7 @@ export function AgentTerminalView({
   }>): string | undefined;
   mode: AgentTerminalMode;
   onConversationActivity(input: string): void;
+  onTerminalEvent?(event: AgentTerminalEvent): void;
   onStateChange(state: AgentTerminalState): void;
   retryAgent(): void;
   theme: "light" | "dark";
@@ -90,6 +93,7 @@ export function AgentTerminalView({
       terminal: terminalHost,
       onEvent(event) {
         if (cancelled) return;
+        onTerminalEvent?.(event);
         if (event.type === "terminal.running_changed" && typeof event.running === "boolean") {
           setTerminalRunning(event.running || activePromptIds.current.size > 0);
         } else if (event.type === "prompt.accepted" && typeof event.id === "number") {
@@ -141,7 +145,7 @@ export function AgentTerminalView({
       if (active.current === attached) active.current = undefined;
       attached.dispose();
     };
-  }, [agent, onConversationActivity, terminalHost]);
+  }, [agent, onConversationActivity, onTerminalEvent, terminalHost]);
 
   useEffect(() => {
     setTerminalRunning((running) => terminalRunningForStatus(agentStatus, running));

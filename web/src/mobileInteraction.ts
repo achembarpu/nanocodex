@@ -3,6 +3,10 @@ export const MINIMUM_COARSE_TARGET_SIZE = 44;
 export const COMPACT_SOURCE_TREE_ITEM_HEIGHT = 24;
 export const TERMINAL_COMPOSER_BASE_HEIGHT = 62;
 
+export function terminalComposerAction(running: boolean, draft: string): "send" | "stop" {
+  return running && !draft.trim() ? "stop" : "send";
+}
+
 type MediaQueryMatchSource = Pick<
   MediaQueryList,
   "addEventListener" | "matches" | "removeEventListener"

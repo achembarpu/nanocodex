@@ -5,10 +5,9 @@ import { Actions, Client, Dialog, Errors, Transport } from "../cloud/index.mjs";
 import { projectAgentObservations } from "../cloud/actions/agent.mjs";
 import { connectionFromWire } from "../cloud/internal.mjs";
 
-test("Connect opens only its grant-provisioned managed durable agent", async () => {
+test("Connect opens its grant-provisioned durable agent without a redundant state probe", async () => {
   const requests = [];
   const agentId = "019fc927-b280-79a7-8445-1b9996ad2fb0";
-  const grantId = `0x${"33".repeat(32)}`;
   const expiry = Math.floor(Date.now() / 1_000) + 3_600;
   const client = Client.create({
     appId: "durable-workspace",
@@ -42,12 +41,7 @@ test("Connect opens only its grant-provisioned managed durable agent", async () 
 
   assert.equal(agent.id, agentId);
   assert.equal(agent.type, "connect");
-  assert.equal(requests.length, 1);
-  assert.equal(
-    requests[0].url,
-    `https://connect.example/v1/grants/${grantId}/agents/${agentId}`,
-  );
-  assert.equal(requests[0].headers.get("authorization"), "Bearer grant-session-test");
+  assert.equal(requests.length, 0);
   await assert.rejects(
     client.agent.create({ connection, sessionId: "browser-local" }),
     /do not accept app-local sessionId/,
