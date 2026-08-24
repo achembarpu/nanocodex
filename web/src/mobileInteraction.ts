@@ -4,15 +4,19 @@ export const COMPACT_SOURCE_TREE_ITEM_HEIGHT = 24;
 export const TERMINAL_COMPOSER_BASE_HEIGHT = 62;
 export const VIRTUAL_KEYBOARD_MINIMUM_OCCLUSION = 120;
 
-export function visualViewportShowsKeyboard({
+export function visualViewportKeyboardInset({
   baselineHeight,
   viewportHeight,
 }: {
   baselineHeight: number;
   viewportHeight: number;
-}): boolean {
-  return finiteNonNegative(baselineHeight) - finiteNonNegative(viewportHeight)
-    >= VIRTUAL_KEYBOARD_MINIMUM_OCCLUSION;
+}): number {
+  return Math.max(
+    0,
+    finiteNonNegative(baselineHeight)
+      - finiteNonNegative(viewportHeight)
+      - VIRTUAL_KEYBOARD_MINIMUM_OCCLUSION,
+  );
 }
 
 export function terminalComposerAction(running: boolean, draft: string): "send" | "stop" {

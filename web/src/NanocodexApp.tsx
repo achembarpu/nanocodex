@@ -25,7 +25,6 @@ import {
 import { flushSync } from "react-dom";
 import { useLocation, useNavigate } from "react-router";
 import { AgentExperience } from "./AgentExperience";
-import { AccountMenu } from "./AccountMenu";
 import { Changelog, preloadChangelog } from "./Changelog";
 import { CodeBrowser } from "./CodeBrowser";
 import { CommitCodeStream } from "./CommitCodeStream";
@@ -61,7 +60,7 @@ import {
   type Surface,
 } from "./navigation";
 import { COMPACT_WORKSPACE_QUERY } from "./pierreCodeView";
-import { visualViewportShowsKeyboard } from "./mobileInteraction";
+import { visualViewportKeyboardInset } from "./mobileInteraction";
 import { RouteErrorBoundary } from "./RouteErrorBoundary";
 import type {
   PublishedCommitHistory,
@@ -328,6 +327,10 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
 
   const closeCommitRail = useCallback(() => setCommitRailOpen(false), []);
   const closeMobileNavigation = useCallback(() => setMobileNavigationOpen(false), []);
+  const toggleMobileNavigation = useCallback(
+    () => setMobileNavigationOpen((current) => !current),
+    [],
+  );
   const openCommitRail = useCallback(() => {
     commitRailOpenerRef.current = activeFocusOwner();
     setCommitRailOpen(true);
@@ -638,47 +641,75 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
     roots.forEach((element) => element.classList.add("agent-viewport-locked"));
     window.scrollTo(0, 0);
     const restoreScroll = lockDocumentScroll(root, body);
-    let viewportFrame = 0;
     let viewportWidth = viewport?.width;
     let baselineHeight = Math.max(root.clientHeight, viewport?.height ?? 0);
+    let keyboardTracking = false;
+    let appliedWidth: number | undefined;
+    let appliedHeight: number | undefined;
+    let appliedLeft: number | undefined;
+    let appliedTop: number | undefined;
+    let appliedKeyboardInset: number | undefined;
+    const composerOwnsFocus = () =>
+      agentSurface?.contains(document.activeElement)
+      && document.activeElement?.matches(".agent-touch-composer textarea") === true;
+    const positionViewport = () => {
+      if (!agentSurface?.isConnected || !viewport) return;
+      const viewportLeft = viewport.offsetLeft;
+      const viewportTop = Math.max(
+        viewport.offsetTop,
+        viewport.pageTop - window.scrollY,
+      );
+      if (appliedLeft === viewportLeft && appliedTop === viewportTop) return;
+      appliedLeft = viewportLeft;
+      appliedTop = viewportTop;
+      agentSurface.style.transform = `translate3d(${viewportLeft}px, ${viewportTop}px, 0)`;
+    };
     const anchorViewport = () => {
-      window.cancelAnimationFrame(viewportFrame);
-      viewportFrame = window.requestAnimationFrame(() => {
-        if (!agentSurface?.isConnected || !viewport) return;
-        if (viewportWidth !== viewport.width) {
-          viewportWidth = viewport.width;
-          baselineHeight = Math.max(root.clientHeight, viewport.height);
-        } else {
-          baselineHeight = Math.max(baselineHeight, root.clientHeight, viewport.height);
-        }
-        agentSurface.style.top = `${viewport.offsetTop}px`;
-        agentSurface.style.left = `${viewport.offsetLeft}px`;
-        agentSurface.style.width = `${viewport.width}px`;
-        agentSurface.style.height = `${viewport.height}px`;
-        agentSurface.toggleAttribute("data-agent-keyboard", visualViewportShowsKeyboard({
+      if (!agentSurface?.isConnected || !viewport) return;
+      if (viewportWidth !== viewport.width) {
+        viewportWidth = viewport.width;
+        baselineHeight = Math.max(root.clientHeight, viewport.height);
+      } else {
+        baselineHeight = Math.max(baselineHeight, root.clientHeight, viewport.height);
+      }
+      if (composerOwnsFocus()) keyboardTracking = true;
+      const keyboardInset = keyboardTracking
+        ? visualViewportKeyboardInset({
           baselineHeight,
           viewportHeight: viewport.height,
-        }));
-      });
+        })
+        : 0;
+      if (!composerOwnsFocus() && keyboardInset === 0) keyboardTracking = false;
+      if (appliedWidth !== viewport.width) {
+        appliedWidth = viewport.width;
+        agentSurface.style.width = `${viewport.width}px`;
+      }
+      if (appliedHeight !== viewport.height) {
+        appliedHeight = viewport.height;
+        agentSurface.style.height = `${viewport.height}px`;
+      }
+      if (appliedKeyboardInset !== keyboardInset) {
+        appliedKeyboardInset = keyboardInset;
+        agentSurface.style.setProperty("--terminal-keyboard-inset", `${keyboardInset}px`);
+      }
+      positionViewport();
     };
     anchorViewport();
     viewport?.addEventListener("resize", anchorViewport);
-    viewport?.addEventListener("scroll", anchorViewport);
+    viewport?.addEventListener("scroll", positionViewport);
     window.addEventListener("resize", anchorViewport);
     document.addEventListener("focusin", anchorViewport);
     document.addEventListener("focusout", anchorViewport);
     return () => {
-      window.cancelAnimationFrame(viewportFrame);
       viewport?.removeEventListener("resize", anchorViewport);
-      viewport?.removeEventListener("scroll", anchorViewport);
+      viewport?.removeEventListener("scroll", positionViewport);
       window.removeEventListener("resize", anchorViewport);
       document.removeEventListener("focusin", anchorViewport);
       document.removeEventListener("focusout", anchorViewport);
-      agentSurface?.style.removeProperty("top");
-      agentSurface?.style.removeProperty("left");
       agentSurface?.style.removeProperty("width");
       agentSurface?.style.removeProperty("height");
-      agentSurface?.removeAttribute("data-agent-keyboard");
+      agentSurface?.style.removeProperty("transform");
+      agentSurface?.style.removeProperty("--terminal-keyboard-inset");
       restoreScroll();
       roots.forEach((element, index) => {
         if (!alreadyLocked[index]) element.classList.remove("agent-viewport-locked");
@@ -1215,12 +1246,11 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
               type="button"
               aria-expanded={mobileNavigationOpen}
               aria-controls="mobile-product-navigation"
-              aria-label="Open product navigation"
-              onClick={() => setMobileNavigationOpen(true)}
+              aria-label={mobileNavigationOpen ? "Close Explore navigation" : "Open Explore navigation"}
+              onClick={toggleMobileNavigation}
             >
               <Menu aria-hidden="true" />
             </button>
-            <AccountMenu />
             <div className="header-install">
               <button
                 className="header-install-trigger"
@@ -1256,7 +1286,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
             ref={mobileNavigationBackdropRef}
             className="mobile-navigation-backdrop"
             aria-hidden="true"
-            onPointerDown={closeMobileNavigation}
+            onClick={closeMobileNavigation}
           />
           <section
             ref={mobileNavigationPanelRef}

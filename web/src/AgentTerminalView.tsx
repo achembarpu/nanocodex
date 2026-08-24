@@ -8,7 +8,6 @@ import {
   useRef,
   useState,
 } from "react";
-import { Check, Copy } from "lucide-react";
 import {
   useAgentController,
   type Agent,
@@ -168,9 +167,9 @@ export function AgentTerminalView({
 
   const terminal = (
     <TerminalTranscriptSurface
-      controls={controls?.({ agentReady: agentStatus === "ready" })}
       composer={(
         <TerminalComposer
+          controls={controls?.({ agentReady: agentStatus === "ready" })}
           draft={touchDraft}
           pending={pendingTouchSubmission !== undefined}
           running={terminalRunning}
@@ -205,7 +204,6 @@ export function AgentTerminalView({
 export function TerminalTranscriptSurface({
   canLoadOlder,
   composer,
-  controls,
   entries,
   inactiveMessage,
   isLoadingOlder,
@@ -216,7 +214,6 @@ export function TerminalTranscriptSurface({
 }: {
   canLoadOlder: boolean;
   composer: ReactNode;
-  controls?: ReactNode;
   entries: readonly AgentEntry[];
   inactiveMessage: string;
   isLoadingOlder: boolean;
@@ -229,7 +226,6 @@ export function TerminalTranscriptSurface({
   const followTail = useRef(true);
   const loadOlderArmed = useRef(false);
   const preserveScroll = useRef<{ scrollHeight: number; scrollTop: number } | undefined>(undefined);
-  const [copied, setCopied] = useState(false);
 
   useLayoutEffect(() => {
     const element = transcript.current;
@@ -254,32 +250,11 @@ export function TerminalTranscriptSurface({
     return () => observer.disconnect();
   }, [welcome]);
 
-  const copyTranscript = useCallback(() => {
-    const text = [welcome, transcriptText(entries)].filter(Boolean).join("\n\n");
-    if (!text) return;
-    void navigator.clipboard.writeText(text).then(() => {
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1_500);
-    }).catch(() => {});
-  }, [entries, welcome]);
-
   return (
     <section
-      className={`agent-terminal-shell is-dom${controls ? " has-controls" : ""} is-${mode}`}
+      className={`agent-terminal-shell is-dom is-${mode}`}
       aria-label="Live Nanocodex terminal"
     >
-      <header className="agent-terminal-toolbar">
-        <div>{controls}</div>
-        <button
-          type="button"
-          disabled={entries.length === 0 && !welcome}
-          aria-label="Copy terminal transcript"
-          onClick={copyTranscript}
-        >
-          {copied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
-          <span>{copied ? "copied" : "copy"}</span>
-        </button>
-      </header>
       <div
         ref={transcript}
         className="agent-dom-transcript"
@@ -373,15 +348,6 @@ function TerminalToolView({ tool }: { tool: ToolActivity }) {
     {tool.result ? <pre>{tool.result}</pre> : null}
     {tool.children.map((child) => <TerminalToolView key={child.callId} tool={child} />)}
   </section>;
-}
-
-function transcriptText(entries: readonly AgentEntry[]): string {
-  return entries.map((entry) => {
-    if (entry.kind === "user") return `> ${entry.text}`;
-    if (entry.kind === "assistant" || entry.kind === "reasoning" || entry.kind === "error") return entry.text;
-    if (entry.kind === "plan") return entry.update.plan.map(({ status, step }) => `${status === "completed" ? "✓" : status === "in_progress" ? "→" : "·"} ${step}`).join("\n");
-    return [entry.tool.name, entry.tool.result].filter(Boolean).join("\n");
-  }).join("\n\n");
 }
 
 type PromptTiming = {

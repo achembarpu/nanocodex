@@ -69,6 +69,10 @@ test("phone headers expose readable product navigation in an owned modal", () =>
   assert.match(application, /className="mobile-product-navigation"/);
   assert.match(application, /role="dialog"[\s\S]*?aria-modal="true"[\s\S]*?Mobile product navigation/);
   assert.match(application, /useModalBoundary\(\{[\s\S]*?onDismiss: closeMobileNavigation/);
+  assert.match(application, /onClick=\{toggleMobileNavigation\}/);
+  assert.match(application, /className="mobile-navigation-backdrop"[\s\S]*?onClick=\{closeMobileNavigation\}/);
+  assert.doesNotMatch(application, /onPointerDown=\{closeMobileNavigation\}/);
+  assert.doesNotMatch(application, /<AccountMenu/);
   assert.match(application, /<span>\{item\.label\}<\/span><small>\{item\.description\}<\/small>/);
   assert.match(application, /className="mobile-navigation-group" aria-labelledby="mobile-demos-title"/);
   assert.match(application, /className="mobile-navigation-group" aria-labelledby="mobile-git-title"/);
@@ -138,7 +142,7 @@ test("the homepage is one local, terminal-first agent on desktop and mobile", ()
   assert.match(experience, /Terminal-Bench 2\.1 high · 82\.2% · 890\/890 runs/);
   assert.match(terminal, /import \{ Streamdown \} from "streamdown"/);
   assert.match(terminal, /className="agent-dom-transcript"/);
-  assert.match(terminal, /aria-label="Copy terminal transcript"/);
+  assert.doesNotMatch(terminal, /Copy terminal transcript|agent-terminal-toolbar/);
   assert.match(terminal, /<Streamdown[\s\S]*?mode=\{entry\.streaming \? "streaming" : "static"\}/);
   assert.match(terminalCss, /--terminal-background:\s*var\(--surface\)/);
   assert.match(homeCss, /\.home-page \{[\s\S]*?height:\s*100%/);
@@ -177,6 +181,8 @@ test("touch terminals use one native IME-safe composer and one contextual action
   assert.match(touchComposer, /terminalComposerAction\(running, draft\)/);
   assert.match(touchComposer, /\{action === "stop" \? \([\s\S]*?aria-label="Stop response"[\s\S]*?<Square[\s\S]*?\) : \([\s\S]*?aria-label="Send message"[\s\S]*?<ArrowUp/);
   assert.equal(matches(touchComposer, /className="agent-touch-actions"/g), 1);
+  assert.match(touchComposer, /className="agent-touch-actions">\s*\{controls\}[\s\S]*?aria-label="Send message"/);
+  assert.match(terminal, /className="agent-voice-button"[\s\S]*?aria-label=\{engaged \? "Stop voice" : "Start voice"\}/);
   assert.equal(matches(touchComposer, /className="agent-touch-field"/g), 1);
   assert.doesNotMatch(touchComposer, />Steer<|>Queued</);
   assert.doesNotMatch(touchComposer, /scrollHeight/);
@@ -193,9 +199,9 @@ test("touch terminals use one native IME-safe composer and one contextual action
   const composer = ruleBlock(terminalCss, ".agent-touch-composer {", touchCss);
   assert.match(composer, /position:\s*relative/);
   assert.match(composer, /min-height:\s*var\(--terminal-composer-min-height\)/);
-  assert.match(terminalCss, /--terminal-safe-area-bottom:\s*env\(safe-area-inset-bottom\)/);
+  assert.match(terminalCss, /--terminal-safe-area-bottom:\s*max\([\s\S]*?env\(safe-area-inset-bottom\) - var\(--terminal-keyboard-inset, 0px\)/);
   assert.match(terminalCss, /--terminal-composer-min-height:\s*calc\(62px \+ var\(--terminal-safe-area-bottom\)\)/);
-  assert.match(terminalCss, /\[data-agent-keyboard\] \.nanocodex-demo \{[\s\S]*?--terminal-safe-area-bottom:\s*0px/);
+  assert.doesNotMatch(terminalCss, /data-agent-keyboard/);
   assert.match(composer, /env\(safe-area-inset-left\)/);
   assert.match(composer, /env\(safe-area-inset-right\)/);
   const field = ruleBlock(terminalCss, ".agent-touch-field {", touchCss);
@@ -240,12 +246,15 @@ test("the phone transcript owns the remaining workspace and native vertical gest
   assert.match(fixedSurface, /position:\s*fixed/);
   assert.match(fixedSurface, /inset:\s*0/);
   assert.match(application, /const viewport = window\.visualViewport/);
-  assert.match(application, /agentSurface\.style\.top = `\$\{viewport\.offsetTop\}px`/);
+  assert.match(application, /const viewportTop = Math\.max\([\s\S]*?viewport\.offsetTop,[\s\S]*?viewport\.pageTop - window\.scrollY/);
   assert.match(application, /agentSurface\.style\.height = `\$\{viewport\.height\}px`/);
+  assert.match(application, /agentSurface\.style\.transform = `translate3d\(\$\{viewportLeft\}px, \$\{viewportTop\}px, 0\)`/);
   assert.match(application, /viewport\?\.addEventListener\("resize", anchorViewport\)/);
-  assert.match(application, /viewport\?\.addEventListener\("scroll", anchorViewport\)/);
-  assert.match(application, /visualViewportShowsKeyboard\(\{[\s\S]*?baselineHeight,[\s\S]*?viewportHeight:\s*viewport\.height/);
-  assert.match(application, /agentSurface\.toggleAttribute\("data-agent-keyboard"/);
+  assert.match(application, /viewport\?\.addEventListener\("scroll", positionViewport\)/);
+  assert.match(application, /appliedHeight !== viewport\.height/);
+  assert.match(application, /appliedLeft === viewportLeft && appliedTop === viewportTop/);
+  assert.match(application, /visualViewportKeyboardInset\(\{[\s\S]*?baselineHeight,[\s\S]*?viewportHeight:\s*viewport\.height/);
+  assert.match(application, /style\.setProperty\("--terminal-keyboard-inset", `\$\{keyboardInset\}px`\)/);
 });
 
 test("compact agent chrome prioritizes the conversation and transcript", () => {

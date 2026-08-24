@@ -3225,6 +3225,7 @@ html[data-theme="dark"] .tui-syntax .shiki span {
   position: fixed;
   inset: 0;
   width: 100%;
+  transform: translate3d(0, 0, 0);
 }
 
 .surface-code > main,
