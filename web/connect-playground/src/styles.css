@@ -408,6 +408,46 @@ h3 {
   align-items: start;
 }
 
+.workspace-grid.is-connected {
+  grid-template-columns: minmax(0, 1fr) 340px;
+}
+
+.connected-rail {
+  display: grid;
+  min-width: 0;
+  gap: 12px;
+}
+
+.chat-primary .connect-chat {
+  border-top: 0;
+}
+
+.chat-primary .connect-chat .conversation-workspace {
+  min-height: 680px;
+}
+
+.chat-primary .connect-chat .agent-terminal-shell {
+  height: 680px;
+}
+
+.connected-rail .action-grid {
+  grid-template-columns: 1fr;
+}
+
+.connected-rail .action-card {
+  min-height: 0;
+}
+
+.connected-rail .detail-row {
+  grid-template-columns: 84px minmax(0, 1fr);
+  gap: 10px;
+  padding-inline: 12px;
+}
+
+.connected-rail .balance-value {
+  font-size: 20px;
+}
+
 .panel {
   min-width: 0;
   overflow: hidden;
@@ -991,12 +1031,21 @@ body > dialog[aria-label="Nanocodex Connect permissions"] > iframe {
 
 @media (max-width: 900px) {
   .hero,
-  .workspace-grid {
+  .workspace-grid,
+  .workspace-grid.is-connected {
     grid-template-columns: 1fr;
   }
 
   .hero {
     gap: 10px;
+  }
+
+  .chat-primary .connect-chat .conversation-workspace {
+    min-height: 560px;
+  }
+
+  .chat-primary .connect-chat .agent-terminal-shell {
+    height: 560px;
   }
 }
 

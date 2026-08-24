@@ -61,7 +61,7 @@ const DEFAULT_REQUEST: ConnectRequest = {
 const EMPTY_OBSERVATION: AppObservation = { actions: [], historyTurns: 0, traceEvents: 0 };
 
 export function App() {
-  const { connection, isConnected } = useConnection({ config });
+  const { connection } = useConnection({ config });
   const [audit, setAudit] = useState<readonly AuditEvent[]>(INITIAL_AUDIT);
   const [error, setError] = useState<string>();
   const [request, setRequest] = useState<ConnectRequest>(DEFAULT_REQUEST);
@@ -184,22 +184,17 @@ export function App() {
           </p>
         </section>
 
-        <div className="workspace-grid">
-          <section className={`panel ${isConnected ? "" : "panel-dark"}`}>
-            <header className="panel-heading">
-              <div>
-                <h2>Account connection</h2>
-                <p className="panel-kicker">Atlas Workspace · deployed Connect flow</p>
-              </div>
-              <span
-                className={`status-pill ${isConnected ? "active" : ""}`}
-                data-testid="connection-status"
-              >
-                {isConnected ? "Active" : "Not connected"}
-              </span>
-            </header>
-
-            {!connection ? (
+        <div className={`workspace-grid ${connection ? "is-connected" : ""}`}>
+          {!connection ? (
+            <>
+              <section className="panel panel-dark">
+                <header className="panel-heading">
+                  <div>
+                    <h2>Account connection</h2>
+                    <p className="panel-kicker">Atlas Workspace · deployed Connect flow</p>
+                  </div>
+                  <span className="status-pill" data-testid="connection-status">Not connected</span>
+                </header>
               <div className="panel-body empty-state">
                 <div className="empty-orbit" aria-hidden="true" />
                 <div>
@@ -223,54 +218,49 @@ export function App() {
                   Connect &amp; sign access key
                 </button>
               </div>
-            ) : (
-              <>
-                <ConnectionWorkspace
-                  connection={connection}
-                  error={error}
-                  isMutating={isMutating}
-                  mercatorReady={mercatorReady}
-                  onDismissError={() => setError(undefined)}
-                  onFund={addMachineUsd}
-                  onRevoke={revokeAccess}
-                />
+              </section>
+              <AppProjectionPanel
+                audit={audit}
+                observation={observation}
+                visibility={request.visibility}
+              />
+            </>
+          ) : (
+            <>
+              <section className="panel chat-primary">
                 <AgentPanel
                   agent={connect.agent}
                   connection={connection}
                   onObservation={observe}
                 />
-              </>
-            )}
-          </section>
-
-          <section className="panel app-view-panel">
-            <header className="panel-heading">
-              <div>
-                <h2>Atlas can see</h2>
-                <p className="panel-kicker">Grant-enforced app projection</p>
-              </div>
-              <span className="status-pill">{isConnected ? "Live" : "Preview"}</span>
-            </header>
-            <VisibilityInspector
-              observation={observation}
-              visibility={connection?.grant.visibility ?? request.visibility}
-            />
-            <details className="audit-details">
-              <summary>Audit · {audit.length}</summary>
-              <ol className="audit-list" data-testid="audit-events">
-                {audit.map((event) => (
-                  <li className="audit-event" key={event.id}>
-                    <span className={`audit-dot ${event.tone}`} aria-hidden="true" />
+              </section>
+              <aside className="connected-rail" aria-label="Connection details">
+                <section className="panel connection-panel">
+                  <header className="panel-heading">
                     <div>
-                      <strong>{event.title}</strong>
-                      <p>{event.detail}</p>
+                      <h2>Atlas Workspace</h2>
+                      <p className="panel-kicker">Connect grant</p>
                     </div>
-                    <time>{event.time}</time>
-                  </li>
-                ))}
-              </ol>
-            </details>
-          </section>
+                    <span className="status-pill active" data-testid="connection-status">Active</span>
+                  </header>
+                  <ConnectionWorkspace
+                    connection={connection}
+                    error={error}
+                    isMutating={isMutating}
+                    mercatorReady={mercatorReady}
+                    onDismissError={() => setError(undefined)}
+                    onFund={addMachineUsd}
+                    onRevoke={revokeAccess}
+                  />
+                </section>
+                <AppProjectionPanel
+                  audit={audit}
+                  observation={observation}
+                  visibility={connection.grant.visibility}
+                />
+              </aside>
+            </>
+          )}
         </div>
 
         <footer className="footer-note">
@@ -293,6 +283,40 @@ function AgentPanel({ agent, connection, onObservation }: Readonly<{
       onObservation={onObservation}
     />
   ) : null;
+}
+
+function AppProjectionPanel({ audit, observation, visibility }: Readonly<{
+  audit: readonly AuditEvent[];
+  observation: AppObservation;
+  visibility: VisibilityRequest;
+}>) {
+  return (
+    <section className="panel app-view-panel">
+      <header className="panel-heading">
+        <div>
+          <h2>Atlas can see</h2>
+          <p className="panel-kicker">Grant-enforced projection</p>
+        </div>
+        <span className="status-pill">Scoped</span>
+      </header>
+      <VisibilityInspector observation={observation} visibility={visibility} />
+      <details className="audit-details">
+        <summary>Audit · {audit.length}</summary>
+        <ol className="audit-list" data-testid="audit-events">
+          {audit.map((event) => (
+            <li className="audit-event" key={event.id}>
+              <span className={`audit-dot ${event.tone}`} aria-hidden="true" />
+              <div>
+                <strong>{event.title}</strong>
+                <p>{event.detail}</p>
+              </div>
+              <time>{event.time}</time>
+            </li>
+          ))}
+        </ol>
+      </details>
+    </section>
+  );
 }
 
 function PermissionBuilder({ disabled, onChange, request }: Readonly<{
