@@ -106,14 +106,25 @@ export default {
       && subjects.has(subject)
       && request.headers.get("chatgpt-account-id") === null;
     if (realtimeCall) {
+      const agent = request.headers.get("x-nanocodex-agent-id");
       return Response.json({
-        agent: request.headers.get("x-nanocodex-agent-id"),
+        agent,
         body: await request.text(),
         cookie: request.headers.get("cookie"),
+        lifecycleSession: request.headers.get("session-id"),
+        openAiAlpha: request.headers.get("openai-alpha"),
         origin: request.headers.get("origin"),
         session: request.headers.get("x-session-id"),
         subject,
-      });
+        thread: request.headers.get("thread-id"),
+      }, { headers: {
+        location: "/backend-api/codex/realtime/calls/rtc_test",
+        ...(agent === null ? {} : {
+          authorization: "Bearer provider-secret",
+          "chatgpt-account-id": "provider-account",
+          "set-cookie": "provider=session",
+        }),
+      } });
     }
     const realtimeSideband = url.href === "https://nanocodex.internal/v1/realtime/sideband"
       && request.method === "GET"
@@ -130,8 +141,11 @@ export default {
         agent: request.headers.get("x-nanocodex-agent-id"),
         callId: request.headers.get("x-nanocodex-realtime-call-id"),
         cookie: request.headers.get("cookie"),
+        lifecycleSession: request.headers.get("session-id"),
+        openAiAlpha: request.headers.get("openai-alpha"),
         session: request.headers.get("x-session-id"),
         subject,
+        thread: request.headers.get("thread-id"),
       })));
       return new Response(null, { status: 101, webSocket: client });
     }

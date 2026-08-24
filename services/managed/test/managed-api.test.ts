@@ -612,6 +612,225 @@ describe("managed agents REST and resumable SSE", () => {
     expect(JSON.stringify(forwarded)).not.toContain(account.user.id);
   });
 
+  it("opens agent-scoped Realtime calls and sidebands with an account API key", async () => {
+    const agent = await createAgent();
+    const route = agent.events_url.replace(/\/events$/, "/realtime");
+    const callBody = publicRealtimeCallBody("v=0\r\no=mobile");
+    const subject = testEnv.NANOCODEX_SESSIONS.idFromName(agent.agent_id).toString();
+    const removedSubject = await testEnv.NANOCODEX.fetch(
+      `https://broker.internal/subjects/${subject}`,
+      { method: "DELETE" },
+    );
+    expect(removedSubject.status).toBe(204);
+    const call = await SELF.fetch(`${route}/calls`, {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "session-id": "caller-chosen-session",
+        "thread-id": "caller-chosen-thread",
+        "x-nanocodex-agent-id": "caller-chosen-agent",
+        "x-nanocodex-subject": "caller-chosen-subject",
+        "x-session-id": "caller-chosen-realtime-session",
+      },
+      body: callBody,
+    });
+    expect(call.status).toBe(200);
+    expect(call.headers.get("location")).toBeNull();
+    expect(call.headers.get("x-nanocodex-realtime-location")).toBe(
+      "/backend-api/codex/realtime/calls/rtc_test",
+    );
+    expect(call.headers.get("authorization")).toBeNull();
+    expect(call.headers.get("chatgpt-account-id")).toBeNull();
+    expect(call.headers.get("set-cookie")).toBeNull();
+    expect(await call.json()).toEqual({
+      agent: agent.agent_id,
+      body: callBody,
+      cookie: null,
+      lifecycleSession: agent.agent_id,
+      openAiAlpha: "quicksilver=v2",
+      origin: null,
+      session: agent.agent_id,
+      subject,
+      thread: agent.agent_id,
+    });
+
+    const sideband = await SELF.fetch(`${route}/sideband?call_id=rtc_mobile`, {
+      headers: {
+        upgrade: "websocket",
+        "session-id": "caller-chosen-session",
+        "x-nanocodex-subject": "caller-chosen-subject",
+      },
+    });
+    expect(sideband.status).toBe(101);
+    expect(sideband.webSocket).toBeDefined();
+    sideband.webSocket!.accept();
+    const forwarded = await new Promise<Record<string, unknown>>((resolve) => {
+      sideband.webSocket!.addEventListener("message", (event) => {
+        resolve(JSON.parse(String(event.data)));
+      });
+    });
+    sideband.webSocket!.close();
+    expect(forwarded).toEqual({
+      agent: agent.agent_id,
+      callId: "rtc_mobile",
+      cookie: null,
+      lifecycleSession: agent.agent_id,
+      openAiAlpha: "quicksilver=v2",
+      session: agent.agent_id,
+      subject,
+      thread: agent.agent_id,
+    });
+    expect(JSON.stringify(forwarded)).not.toContain(API_KEY);
+  });
+
+  it("hides agent-scoped Realtime routes from other owners and missing agents", async () => {
+    const agent = await createAgent();
+    const route = agent.events_url.replace(/\/events$/, "/realtime");
+    const body = publicRealtimeCallBody();
+    const otherOwnerCall = await RAW_SELF.fetch(`${route}/calls`, {
+      method: "POST",
+      headers: {
+        authorization: `Bearer ${OTHER_API_KEY}`,
+        "content-type": "application/json",
+      },
+      body,
+    });
+    expect(otherOwnerCall.status).toBe(404);
+    expect(await otherOwnerCall.json()).toEqual({ error: "not_found" });
+    const otherOwnerSideband = await RAW_SELF.fetch(
+      `${route}/sideband?call_id=rtc_other`,
+      { headers: { authorization: `Bearer ${OTHER_API_KEY}`, upgrade: "websocket" } },
+    );
+    expect(otherOwnerSideband.status).toBe(404);
+
+    const missing = "019d2f5d-7491-7000-8000-000000000099";
+    const missingCall = await SELF.fetch(
+      `https://example.test/v1/agents/${missing}/realtime/calls`,
+      { method: "POST", headers: { "content-type": "application/json" }, body },
+    );
+    expect(missingCall.status).toBe(404);
+    const missingSideband = await SELF.fetch(
+      `https://example.test/v1/agents/${missing}/realtime/sideband?call_id=rtc_missing`,
+      { headers: { upgrade: "websocket" } },
+    );
+    expect(missingSideband.status).toBe(404);
+  });
+
+  it("validates the public Realtime method, call body, upgrade, and browser origin", async () => {
+    const agent = await createAgent();
+    const route = agent.events_url.replace(/\/events$/, "/realtime");
+    expect((await SELF.fetch(`${route}/calls`)).status).toBe(405);
+    expect((await SELF.fetch(`${route}/sideband?call_id=rtc_test`, {
+      method: "POST",
+    })).status).toBe(405);
+    expect((await SELF.fetch(`${route}/calls`, {
+      method: "POST",
+      headers: { "content-type": "text/plain" },
+      body: "v=0",
+    })).status).toBe(415);
+    expect((await SELF.fetch(`${route}/calls`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: "{",
+    })).status).toBe(400);
+    expect((await SELF.fetch(`${route}/calls`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        call_body: JSON.stringify({ sdp: "v=0", session: {} }),
+        realtime_session_id: agent.agent_id,
+      }),
+    })).status).toBe(400);
+    expect((await SELF.fetch(`${route}/calls?subject=caller`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: publicRealtimeCallBody(),
+    })).status).toBe(400);
+    expect((await SELF.fetch(`${route}/calls`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ...JSON.parse(publicRealtimeCallBody()),
+        session: {
+          ...JSON.parse(publicRealtimeCallBody()).session,
+          model: "caller-selected-model",
+        },
+      }),
+    })).status).toBe(400);
+    expect((await SELF.fetch(`${route}/calls`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ...JSON.parse(publicRealtimeCallBody()),
+        session: {
+          ...JSON.parse(publicRealtimeCallBody()).session,
+          audio: { output: { voice: "caller-selected-voice" } },
+        },
+      }),
+    })).status).toBe(400);
+    expect((await SELF.fetch(`${route}/calls`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ...JSON.parse(publicRealtimeCallBody()),
+        session: {
+          ...JSON.parse(publicRealtimeCallBody()).session,
+          instructions: "i".repeat(32 * 1024 + 1),
+        },
+      }),
+    })).status).toBe(400);
+    expect((await SELF.fetch(`${route}/calls`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        ...JSON.parse(publicRealtimeCallBody()),
+        session: {
+          ...JSON.parse(publicRealtimeCallBody()).session,
+          destination: "https://attacker.test",
+        },
+      }),
+    })).status).toBe(400);
+    expect((await SELF.fetch(`${route}/sideband?call_id=rtc_test`)).status).toBe(426);
+    expect((await SELF.fetch(`${route}/sideband?call_id=..%2Fprovider`, {
+      headers: { upgrade: "websocket" },
+    })).status).toBe(400);
+    expect((await SELF.fetch(
+      `${route}/sideband?call_id=rtc_test&session_id=caller`,
+      { headers: { upgrade: "websocket" } },
+    )).status).toBe(400);
+
+    const token = "v".repeat(43);
+    await seedPasskeySession(USER_ID, token);
+    const cookie = `nanocodex_account=${token}`;
+    const crossOrigin = await RAW_SELF.fetch(`${route}/calls`, {
+      method: "POST",
+      headers: {
+        cookie,
+        "content-type": "application/json",
+        origin: "https://attacker.test",
+      },
+      body: publicRealtimeCallBody(),
+    });
+    expect(crossOrigin.status).toBe(403);
+
+    const browserCall = await RAW_SELF.fetch(`${route}/calls`, {
+      method: "POST",
+      headers: { cookie, "content-type": "application/json", origin: "https://example.test" },
+      body: publicRealtimeCallBody(),
+    });
+    expect(browserCall.status).toBe(200);
+    const browserSideband = await RAW_SELF.fetch(`${route}/sideband?call_id=rtc_browser`, {
+      headers: { cookie, origin: "https://example.test", upgrade: "websocket" },
+    });
+    expect(browserSideband.status).toBe(101);
+    browserSideband.webSocket!.accept();
+    browserSideband.webSocket!.close();
+    const crossOriginSideband = await RAW_SELF.fetch(`${route}/sideband?call_id=rtc_browser`, {
+      headers: { cookie, origin: "https://attacker.test", upgrade: "websocket" },
+    });
+    expect(crossOriginSideband.status).toBe(403);
+  });
+
   it("lets anonymous and passkey cookies use browser-local and managed-durable runtimes", async () => {
     const anonymous = await RAW_SELF.fetch("https://example.test/v1/me");
     const anonymousCookie = anonymous.headers.get("set-cookie")?.split(";", 1)[0];
@@ -3151,6 +3370,18 @@ async function managedRealtime(
     method: "POST",
     headers: { "content-type": "application/json", origin: "https://example.test" },
     body: JSON.stringify(body),
+  });
+}
+
+function publicRealtimeCallBody(sdp = "v=0"): string {
+  return JSON.stringify({
+    sdp,
+    session: {
+      model: "gpt-live-1-codex",
+      instructions: "Canonical Codex Realtime instructions for the managed transport test.",
+      audio: { output: { voice: "cove" } },
+      delegation: { type: "client" },
+    },
   });
 }
 

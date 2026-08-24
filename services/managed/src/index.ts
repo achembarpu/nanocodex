@@ -81,6 +81,7 @@ import {
 } from "./account-auth";
 import { routeBrowserModel } from "./browser-model";
 import { routeAccountLinkRequest } from "./account-links";
+import { routeManagedRealtimeTransport } from "./managed-realtime-transport";
 export { ApiKeyRecord, NonceStorage, UserAccount } from "./account-auth";
 export { MemoryScope, Organization } from "./reserved-durable-objects";
 
@@ -278,6 +279,13 @@ export default {
     const url = new URL(request.url);
     const browserModel = await routeBrowserModel(request, env, url);
     if (browserModel) return browserModel;
+    const realtimeTransport = await routeManagedRealtimeTransport(
+      request,
+      env,
+      url,
+      managedOwnershipTimeoutMs(env),
+    );
+    if (realtimeTransport) return realtimeTransport;
     const accountLink = await routeAccountLinkRequest(request, env, url);
     if (accountLink) return accountLink;
     const account = await routeAccountRequest(request, env, url);
