@@ -1,5 +1,6 @@
 import { Provider, Storage, webAuthn } from "accounts";
-import { loadStripe, type Stripe, type StripeElements } from "@stripe/stripe-js";
+import { loadStripe } from "@stripe/stripe-js/pure";
+import type { Stripe, StripeElements } from "@stripe/stripe-js";
 import { useCallback, useEffect, useRef, useState, useSyncExternalStore } from "react";
 import type { Dialog } from "nanocodex/connect";
 
@@ -273,9 +274,14 @@ export function App() {
       if (activeRequest.type === "walletConnect") {
         const account = result!.accounts[0] as Readonly<{
           address: `0x${string}`;
-          capabilities?: Readonly<{ auth?: Readonly<{ token?: string }> }>;
+          capabilities?: Readonly<{ auth?: Readonly<{
+            connectors?: ConnectorStatuses;
+            profile?: Readonly<{ linked?: boolean }>;
+            token?: string;
+          }> }>;
         }>;
-        const token = account.capabilities?.auth?.token;
+        const auth = account.capabilities?.auth;
+        const token = auth?.token;
         if (!token) throw new Error("Accounts did not return an authenticated Connect session.");
         const next: PendingApproval = {
           accountAddress: account.address,
@@ -284,6 +290,18 @@ export function App() {
           requestId: activeRequest.id,
           token,
         };
+        if (auth?.connectors && auth.profile?.linked !== undefined) {
+          const linked = auth.profile.linked === true;
+          setConnectorStatuses(auth.connectors);
+          setProfileLinked(linked);
+          if (auth.connectors.chatgpt?.connected) setDeviceCode(undefined);
+          if (linked && auth.connectors.chatgpt?.connected) {
+            await parentDialog.respond(next.result);
+            return;
+          }
+          setPendingApproval(next);
+          return;
+        }
         const state = await refreshConnectors(next);
         if (state.profileLinked && state.connectors.chatgpt?.connected) {
           await parentDialog.respond(next.result);

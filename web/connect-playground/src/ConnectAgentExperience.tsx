@@ -15,10 +15,16 @@ export type AppObservation = Readonly<{
 export function ConnectAgentExperience({
   agent,
   connection,
+  isMutating,
+  onLogout,
+  onOpenDetails,
   onObservation,
 }: Readonly<{
   agent: ConnectAgent;
   connection: Connection;
+  isMutating: boolean;
+  onLogout(): void;
+  onOpenDetails(): void;
   onObservation(value: AppObservation): void;
 }>) {
   const visibility = connection.grant.visibility;
@@ -85,7 +91,20 @@ export function ConnectAgentExperience({
           <h3 id="connect-chat-title">Embedded Nanocodex</h3>
           <p>Account-owned durable agent. Atlas sees only the signed projection.</p>
         </div>
-        <span>Durable</span>
+        <div className="connect-chat-actions">
+          <span>Durable</span>
+          <button
+            className="connect-sign-out"
+            disabled={isMutating}
+            onClick={onLogout}
+            type="button"
+          >
+            Sign out
+          </button>
+          <button className="connection-rail-open" onClick={onOpenDetails} type="button">
+            Details
+          </button>
+        </div>
       </header>
       <div className="nanocodex-demo is-preview">
         <div className="conversation-workspace">

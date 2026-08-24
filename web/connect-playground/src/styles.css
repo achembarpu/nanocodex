@@ -125,6 +125,35 @@
   font-size: 9px;
 }
 
+.connect-chat-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-faint);
+  font-size: 9px;
+}
+
+.connection-rail-open,
+.connection-rail-close,
+.connection-rail-backdrop {
+  display: none;
+}
+
+.connect-sign-out {
+  min-width: 44px;
+  min-height: 44px;
+  padding-inline: 10px;
+  color: var(--text-secondary);
+  background: transparent;
+  border: 1px solid var(--border-soft);
+  cursor: pointer;
+}
+
+.connect-sign-out:disabled {
+  color: var(--text-faint);
+  cursor: default;
+}
+
 .connect-chat .conversation-workspace {
   grid-template-columns: minmax(0, 1fr);
   min-height: 460px;
@@ -305,14 +334,23 @@
 
 html {
   min-width: 320px;
-  min-height: 100%;
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
   background: var(--surface);
   color: var(--text);
 }
 
-body {
+body,
+#root {
   min-width: 320px;
-  min-height: 100vh;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+  overscroll-behavior: none;
+}
+
+body {
   margin: 0;
   background: var(--surface);
   color: var(--text);
@@ -355,8 +393,12 @@ h3 {
 }
 
 .app-shell {
-  min-height: 100vh;
-  padding-bottom: 40px;
+  display: grid;
+  width: 100%;
+  height: 100dvh;
+  min-height: 0;
+  grid-template-rows: var(--header-height) auto minmax(0, 1fr) auto;
+  overflow: hidden;
 }
 
 .topbar {
@@ -474,9 +516,11 @@ h3 {
 
 .workspace-grid {
   display: grid;
+  height: 100%;
+  min-height: 0;
   grid-template-columns: minmax(0, 1.25fr) minmax(320px, 0.75fr);
   gap: 12px;
-  align-items: start;
+  align-items: stretch;
 }
 
 .workspace-grid.is-connected {
@@ -486,7 +530,36 @@ h3 {
 .connected-rail {
   display: grid;
   min-width: 0;
+  min-height: 0;
+  align-content: start;
   gap: 12px;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.workspace-grid:not(.is-connected) > .panel {
+  min-height: 0;
+  overflow-y: auto;
+}
+
+.chat-primary,
+.chat-primary .connect-chat,
+.chat-primary .nanocodex-demo,
+.chat-primary .conversation-workspace,
+.chat-primary .conversation-main {
+  min-height: 0;
+}
+
+.chat-primary .connect-chat {
+  display: grid;
+  height: 100%;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.chat-primary .nanocodex-demo,
+.chat-primary .conversation-workspace,
+.chat-primary .conversation-main {
+  height: 100%;
 }
 
 .chat-primary .connect-chat {
@@ -494,11 +567,12 @@ h3 {
 }
 
 .chat-primary .connect-chat .conversation-workspace {
-  min-height: 680px;
+  min-height: 0;
 }
 
 .chat-primary .connect-chat .agent-terminal-shell {
-  height: 680px;
+  height: 100%;
+  min-height: 0;
 }
 
 .connected-rail .action-grid {
@@ -1107,7 +1181,7 @@ h3 {
   display: flex;
   justify-content: space-between;
   gap: 16px;
-  padding-top: 14px;
+  padding-block: 10px 12px;
   color: var(--text-faint);
   font-size: 9px;
 }
@@ -1129,8 +1203,7 @@ body > dialog[aria-label="Nanocodex Connect permissions"] > iframe {
 
 @media (max-width: 900px) {
   .hero,
-  .workspace-grid,
-  .workspace-grid.is-connected {
+  .workspace-grid:not(.is-connected) {
     grid-template-columns: 1fr;
   }
 
@@ -1138,12 +1211,12 @@ body > dialog[aria-label="Nanocodex Connect permissions"] > iframe {
     gap: 10px;
   }
 
-  .chat-primary .connect-chat .conversation-workspace {
-    min-height: 560px;
+  .workspace-grid.is-connected {
+    grid-template-columns: minmax(0, 1fr) minmax(260px, 0.55fr);
   }
 
-  .chat-primary .connect-chat .agent-terminal-shell {
-    height: 560px;
+  .workspace-grid:not(.is-connected) {
+    grid-template-rows: repeat(2, minmax(0, 1fr));
   }
 }
 
@@ -1165,7 +1238,7 @@ body > dialog[aria-label="Nanocodex Connect permissions"] > iframe {
   }
 
   .app-shell.is-connected {
-    padding-bottom: 0;
+    grid-template-rows: var(--header-height) minmax(0, 1fr);
   }
 
   .app-shell.is-connected .hero,
@@ -1174,8 +1247,13 @@ body > dialog[aria-label="Nanocodex Connect permissions"] > iframe {
   }
 
   .app-shell.is-connected .workspace-grid {
+    position: relative;
     width: 100%;
+    min-height: 0;
+    grid-template-columns: 1fr;
+    grid-template-rows: minmax(0, 1fr);
     gap: 0;
+    overflow: hidden;
   }
 
   .app-shell.is-connected .chat-primary {
@@ -1192,9 +1270,78 @@ body > dialog[aria-label="Nanocodex Connect permissions"] > iframe {
   }
 
   .app-shell.is-connected .chat-primary .connect-chat .agent-terminal-shell {
-    height: calc(100dvh - var(--header-height) - 68px);
-    min-height: 280px;
+    height: 100%;
+    min-height: 0;
     margin-bottom: 0;
+  }
+
+  .app-shell.is-connected .connected-rail {
+    position: absolute;
+    z-index: 11;
+    inset: 0 0 0 auto;
+    width: min(360px, calc(100% - 28px));
+    gap: 0;
+    visibility: hidden;
+    background: var(--surface);
+    border-left: 1px solid var(--border-soft);
+    transform: translateX(100%);
+    transition: transform 140ms ease, visibility 0s linear 140ms;
+  }
+
+  .app-shell.is-connected .connected-rail.is-open {
+    visibility: visible;
+    transform: translateX(0);
+    transition-delay: 0s;
+  }
+
+  .connection-rail-open,
+  .connection-rail-close {
+    display: inline-flex;
+    min-height: 44px;
+    align-items: center;
+    justify-content: center;
+    padding-inline: 10px;
+    color: var(--text-secondary);
+    background: transparent;
+    border: 1px solid var(--border-soft);
+    cursor: pointer;
+  }
+
+  .connection-rail-close {
+    position: sticky;
+    z-index: 1;
+    top: 0;
+    width: 100%;
+    flex: 0 0 44px;
+    background: var(--surface);
+    border-inline: 0;
+    border-top: 0;
+  }
+
+  .connect-sign-out {
+    min-height: 44px;
+  }
+
+  .connection-rail-backdrop {
+    position: absolute;
+    z-index: 10;
+    inset: 0;
+    width: 100%;
+    height: 100%;
+    padding: 0;
+    background: rgba(0, 0, 0, 0.66);
+    opacity: 0;
+    pointer-events: none;
+  }
+
+  .connection-rail-backdrop.is-open {
+    display: block;
+    opacity: 1;
+    pointer-events: auto;
+  }
+
+  .app-shell.is-connected .connected-rail > .panel {
+    border-inline: 0;
   }
 
   .empty-state {

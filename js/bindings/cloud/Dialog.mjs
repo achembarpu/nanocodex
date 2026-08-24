@@ -170,6 +170,7 @@ function createIframeInstance(host) {
 
   function mountWallet(nextHost) {
     const url = new URL(nextHost ?? host);
+    if (!url.searchParams.has("origin")) url.searchParams.set("origin", window.location.origin);
     url.searchParams.set("mode", "iframe");
     const source = url.toString();
     if (walletFrame && walletModal && walletHost === source) return;
@@ -220,6 +221,11 @@ function createIframeInstance(host) {
     if (visible) walletFrame.removeAttribute("inert");
     else walletFrame.setAttribute("inert", "");
   }
+
+  // Keep the hosted wallet warm from client creation. The iframe remains
+  // hidden and inert until a request is made, but its Accounts/WebAuthn
+  // runtime can load while the embedding app is already useful.
+  mountWallet(host);
 
   return {
     host,

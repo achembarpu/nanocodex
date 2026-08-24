@@ -1,4 +1,4 @@
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type {
   CloudAccount,
   ConnectAgent,
@@ -65,6 +65,7 @@ export function App() {
   const [error, setError] = useState<string>();
   const [request, setRequest] = useState<ConnectRequest>(DEFAULT_REQUEST);
   const [observation, setObservation] = useState<AppObservation>(EMPTY_OBSERVATION);
+  const [detailsOpen, setDetailsOpen] = useState(false);
   const connect = useConnectAgent({ config });
   const connection = connect.connection;
   const fund = useFund({ config });
@@ -81,6 +82,19 @@ export function App() {
     && connection.mpp.balance > 0n,
   );
   const observe = useCallback((value: AppObservation) => setObservation(value), []);
+
+  useEffect(() => {
+    if (!connection && detailsOpen) setDetailsOpen(false);
+  }, [connection, detailsOpen]);
+
+  useEffect(() => {
+    if (!detailsOpen) return;
+    const close = (event: KeyboardEvent) => {
+      if (event.key === "Escape") setDetailsOpen(false);
+    };
+    window.addEventListener("keydown", close);
+    return () => window.removeEventListener("keydown", close);
+  }, [detailsOpen]);
 
   function record(title: string, detail: string, tone: AuditEvent["tone"] = "success") {
     setAudit((current) => [{
@@ -251,10 +265,31 @@ export function App() {
                 <AgentPanel
                   agent={connect.agent}
                   connection={connection}
+                  isMutating={isMutating}
+                  onLogout={logout}
+                  onOpenDetails={() => setDetailsOpen(true)}
                   onObservation={observe}
                 />
               </section>
-              <aside className="connected-rail" aria-label="Connection details">
+              <button
+                aria-label="Close connection details"
+                className={`connection-rail-backdrop${detailsOpen ? " is-open" : ""}`}
+                onClick={() => setDetailsOpen(false)}
+                type="button"
+              />
+              <aside
+                aria-label="Connection details"
+                aria-modal={detailsOpen ? true : undefined}
+                className={`connected-rail${detailsOpen ? " is-open" : ""}`}
+                role={detailsOpen ? "dialog" : undefined}
+              >
+                <button
+                  className="connection-rail-close"
+                  onClick={() => setDetailsOpen(false)}
+                  type="button"
+                >
+                  Close
+                </button>
                 <section className="panel connection-panel">
                   <header className="panel-heading">
                     <div>
@@ -292,15 +327,21 @@ export function App() {
   );
 }
 
-function AgentPanel({ agent, connection, onObservation }: Readonly<{
+function AgentPanel({ agent, connection, isMutating, onLogout, onOpenDetails, onObservation }: Readonly<{
   agent: ConnectAgent | undefined;
   connection: Connection;
+  isMutating: boolean;
+  onLogout(): void;
+  onOpenDetails(): void;
   onObservation(value: AppObservation): void;
 }>) {
   return agent ? (
     <ConnectAgentExperience
       agent={agent}
       connection={connection}
+      isMutating={isMutating}
+      onLogout={onLogout}
+      onOpenDetails={onOpenDetails}
       onObservation={onObservation}
     />
   ) : null;

@@ -149,11 +149,21 @@ type AuthRequestContext = Readonly<{
 }>;
 type ConnectApproval = Readonly<{
   accountAddress: `0x${string}`;
+  balanceAtomics?: string;
+  brokerUserId?: string;
+  connectedConnectors?: readonly ConnectorId[];
+  durableAgentId?: string;
   keyAuthorization?: `0x${string}`;
+  profileLinked?: boolean;
   resources: readonly string[];
+  settlementBalanceAtomics?: string;
 }>;
 type Fetcher = Readonly<{
   fetch(request: Request): Promise<Response>;
+}>;
+
+type WorkerContext = Readonly<{
+  waitUntil(promise: Promise<unknown>): void;
 }>;
 
 type Env = Readonly<{
@@ -176,6 +186,7 @@ type GrantRecord = Readonly<{
   accessKey: Record<string, unknown>;
   spentAtomics: string;
   egressSubject: string;
+  sharedEgressSubject?: boolean;
 }>;
 type GrantPrincipal = Readonly<{
   accountAddress: `0x${string}`;
@@ -183,6 +194,15 @@ type GrantPrincipal = Readonly<{
   grantId: `0x${string}`;
 }>;
 type ConnectAgentRecord = Readonly<{ agentId: string }>;
+type ConnectIdentityRecord = Readonly<{
+  accountAddress: `0x${string}`;
+  brokerUserId: string;
+}>;
+type ConnectSubjectRecord = Readonly<{
+  appId: string;
+  brokerUserId: string;
+  subject: string;
+}>;
 type AccessKeyRecord = Readonly<{
   accountAddress: `0x${string}`;
   appId: string;
@@ -195,12 +215,12 @@ type ModelTicket = Readonly<{
 }>;
 
 export default {
-  async fetch(request: Request, env: Env): Promise<Response> {
+  async fetch(request: Request, env: Env, context: WorkerContext): Promise<Response> {
     if (request.method === "OPTIONS") return cors(new Response(null, { status: 204 }), request);
     try {
       const url = new URL(request.url);
       const store = Kv.durableObject(env.CONNECT_STATE);
-      const auth = createAuth(store, await authRequestContext(request, url));
+      const auth = createAuth(env, store, await authRequestContext(request, url));
 
       if (url.pathname.startsWith("/v1/connect/auth")) {
         requireDialogOrigin(request);
@@ -308,7 +328,7 @@ export default {
       }
 
       if (request.method === "POST" && url.pathname === "/v1/connections") {
-        return cors(await createConnection(request, env, store), request);
+        return cors(await createConnection(request, env, store, context), request);
       }
 
       const grantResponse = await handleGrantRoute(request, env, store, url);
@@ -496,7 +516,15 @@ function opaqueToken(value: unknown, label: string): string {
   return value;
 }
 
-async function createConnection(request: Request, env: Env, store: Kv.Kv): Promise<Response> {
+async function createConnection(
+  request: Request,
+  env: Env,
+  store: Kv.Kv,
+  context: WorkerContext,
+): Promise<Response> {
+  const startedAt = performance.now();
+  const timings: Array<readonly [string, number]> = [];
+  const mark = (name: string) => timings.push([name, performance.now()]);
   requireRegisteredAppOrigin(request);
   const body = await json(request);
   const appId = requiredString(body.app_id, "app_id");
@@ -511,24 +539,46 @@ async function createConnection(request: Request, env: Env, store: Kv.Kv): Promi
   }
   const requested = requestedConnectors(body.requested_connectors);
   const approval = await takeConnectApproval(store, approvalId, accountAddress);
+  mark("approval");
   requireApprovedCapabilities(approval.resources, appId, requested);
   const agentCapabilities = approvedAgentCapabilities(approval.resources);
 
   const { accessKey, persist } = await connectionAccessKey(store, body, approval, appId, accountAddress);
+  mark("access-key");
   const expiresAt = safeInteger(accessKey.expiry, "access_key.expiry");
   const now = Math.floor(Date.now() / 1000);
   const grantTtl = expiresAt - now;
   if (grantTtl <= 0) {
     throw new ApiFailure(403, "access_key_expired", "The delegated access key has expired.");
   }
-  const identity = await brokerIdentity(env, accountAddress);
+  const balances = approval.balanceAtomics !== undefined
+    && approval.settlementBalanceAtomics !== undefined
+    ? Promise.resolve([
+        BigInt(approval.balanceAtomics),
+        BigInt(approval.settlementBalanceAtomics),
+      ] as const)
+    : connectionBalances(accountAddress);
+  void balances.catch(() => {});
+  const retainedIdentity = approval.profileLinked === true && isBrokerUserId(approval.brokerUserId)
+    ? { linked: true, userId: approval.brokerUserId }
+    : undefined;
+  const identity = retainedIdentity ?? await brokerIdentity(env, accountAddress);
+  mark("identity");
   if (!identity.linked) {
     throw new ApiFailure(403, "account_link_required", "Link this Tempo account to your Nanocodex profile before authorizing a durable agent.");
   }
-  const [connectors, durableAgentId] = await Promise.all([
-    connectedRequestedConnectors(env, identity.userId, requested),
-    connectManagedAgent(env, store, identity.userId, appId),
+  const retainedConnectors = new Set(approval.connectedConnectors ?? []);
+  const connectorsReady = requested.every((connector) => retainedConnectors.has(connector));
+  const [connectors, durableAgentId, egressSubject] = await Promise.all([
+    connectorsReady
+      ? Promise.resolve([...requested])
+      : connectedRequestedConnectors(env, identity.userId, requested),
+    isConnectAgentId(approval.durableAgentId)
+      ? Promise.resolve(approval.durableAgentId)
+      : connectManagedAgent(env, store, identity.userId, appId),
+    connectEgressSubject(env, store, identity.userId, appId),
   ]);
+  mark("capabilities");
   const grantId = await digestHex(`grant:${randomSubject()}`);
   const grantToken = randomSubject();
   const grant: GrantRecord = {
@@ -543,18 +593,13 @@ async function createConnection(request: Request, env: Env, store: Kv.Kv): Promi
     capabilities: [...BASE_CAPABILITIES, ...agentCapabilities, ...connectors],
     accessKey,
     spentAtomics: "0",
-    egressSubject: randomSubject(),
+    egressSubject,
+    sharedEgressSubject: true,
   };
 
   try {
-    // Resolve the public projection before publishing either the broker subject
-    // or bearer token. Independent network boundaries settle together.
-    const [wireResult, subjectResult] = await Promise.allSettled([
-      connectionWire(grant, grantToken),
-      bindSubject(env, grant.egressSubject, grant.brokerUserId),
-    ]);
-    if (wireResult.status === "rejected") throw wireResult.reason;
-    if (subjectResult.status === "rejected") throw subjectResult.reason;
+    const wireResult = await connectionWire(grant, grantToken, balances);
+    mark("subject");
 
     if (!store.create) {
       throw new ApiFailure(500, "grant_token_unavailable", "The grant session could not be created.");
@@ -577,18 +622,35 @@ async function createConnection(request: Request, env: Env, store: Kv.Kv): Promi
     if (writes[1]?.status !== "fulfilled" || writes[1].value !== true) {
       throw new ApiFailure(500, "grant_token_unavailable", "The grant session could not be created.");
     }
-    await appendGrantIndex(store, grant.accountAddress, grant.id);
-    return Response.json(wireResult.value, { status: 201 });
+    mark("grant");
+    context.waitUntil(appendGrantIndex(store, grant.accountAddress, grant.id).catch((cause) => {
+      console.error("Nanocodex Connect grant index update failed", cause);
+    }));
+    return Response.json(wireResult, {
+      status: 201,
+      headers: { "server-timing": serverTiming(startedAt, timings) },
+    });
   } catch (cause) {
-    const cleanup = [
+    const cleanup: Promise<unknown>[] = [
       store.delete(`grant:${grant.id}`),
       store.delete(`grant-token:${grantToken}`),
-      unbindSubject(env, grant.egressSubject, grant.brokerUserId),
     ];
+    if (grant.sharedEgressSubject !== true) {
+      cleanup.push(unbindSubject(env, grant.egressSubject, grant.brokerUserId));
+    }
     if (persist) cleanup.push(store.delete(accessKeyStorageKey(accountAddress, accessKey.key_id)));
     await Promise.allSettled(cleanup);
     throw cause;
   }
+}
+
+function serverTiming(startedAt: number, marks: readonly (readonly [string, number])[]): string {
+  let previous = startedAt;
+  return marks.map(([name, timestamp]) => {
+    const duration = timestamp - previous;
+    previous = timestamp;
+    return `${name};dur=${duration.toFixed(1)}`;
+  }).join(", ");
 }
 
 async function connectionAccessKey(
@@ -766,6 +828,8 @@ async function connectManagedAgent(
     throw new ApiFailure(500, "durable_agent_unavailable", "Atomic durable-agent provisioning is unavailable.");
   }
   const recordKey = `connect-agent:${appId}:${userId}`;
+  const retained = await store.get<unknown>(recordKey);
+  if (isConnectAgentRecord(retained)) return retained.agentId;
   const lockKey = `${recordKey}:lock`;
   const lockValue = randomSubject();
   let acquired = false;
@@ -778,8 +842,8 @@ async function connectManagedAgent(
     throw new ApiFailure(409, "durable_agent_busy", "The account's durable agent is already being provisioned.");
   }
   try {
-    const retained = await store.get<unknown>(recordKey);
-    if (isConnectAgentRecord(retained)) return retained.agentId;
+    const retainedAfterLock = await store.get<unknown>(recordKey);
+    if (isConnectAgentRecord(retainedAfterLock)) return retainedAfterLock.agentId;
 
     const agentId = await createManagedAgent(env, userId);
     try {
@@ -796,8 +860,79 @@ async function connectManagedAgent(
 
 function isConnectAgentRecord(value: unknown): value is ConnectAgentRecord {
   return isRecord(value)
-    && typeof value.agentId === "string"
-    && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value.agentId);
+    && isConnectAgentId(value.agentId);
+}
+
+function isConnectAgentId(value: unknown): value is string {
+  return typeof value === "string"
+    && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/.test(value);
+}
+
+async function connectBrokerIdentity(
+  env: Env,
+  store: Kv.Kv,
+  accountAddress: `0x${string}`,
+): Promise<{ linked: boolean; userId: string }> {
+  const key = `connect-identity:${accountAddress.toLowerCase()}`;
+  const retained = await store.get<unknown>(key);
+  if (isConnectIdentityRecord(retained, accountAddress)) {
+    return { linked: true, userId: retained.brokerUserId };
+  }
+  const identity = await brokerIdentity(env, accountAddress);
+  if (identity.linked) {
+    await store.set(key, {
+      accountAddress,
+      brokerUserId: identity.userId,
+    } satisfies ConnectIdentityRecord, { ttl: ACCOUNT_LINK_TTL });
+  }
+  return identity;
+}
+
+function isConnectIdentityRecord(
+  value: unknown,
+  accountAddress: `0x${string}`,
+): value is ConnectIdentityRecord {
+  return isRecord(value)
+    && typeof value.accountAddress === "string"
+    && value.accountAddress.toLowerCase() === accountAddress.toLowerCase()
+    && isBrokerUserId(value.brokerUserId);
+}
+
+async function connectEgressSubject(
+  env: Env,
+  store: Kv.Kv,
+  brokerUserId: string,
+  appId: string,
+): Promise<string> {
+  if (!store.create) {
+    throw new ApiFailure(500, "egress_subject_unavailable", "Atomic connector identity storage is unavailable.");
+  }
+  const key = `connect-subject:${appId}:${brokerUserId}`;
+  const retained = await store.get<unknown>(key);
+  if (isConnectSubjectRecord(retained, brokerUserId, appId)) return retained.subject;
+
+  const candidate: ConnectSubjectRecord = { appId, brokerUserId, subject: randomSubject() };
+  await bindSubject(env, candidate.subject, brokerUserId);
+  if (await store.create(key, candidate)) return candidate.subject;
+
+  const winner = await store.get<unknown>(key);
+  await unbindSubject(env, candidate.subject, brokerUserId).catch(() => {});
+  if (!isConnectSubjectRecord(winner, brokerUserId, appId)) {
+    throw new ApiFailure(500, "egress_subject_unavailable", "The connector identity could not be retained.");
+  }
+  return winner.subject;
+}
+
+function isConnectSubjectRecord(
+  value: unknown,
+  brokerUserId: string,
+  appId: string,
+): value is ConnectSubjectRecord {
+  return isRecord(value)
+    && value.appId === appId
+    && value.brokerUserId === brokerUserId
+    && typeof value.subject === "string"
+    && EGRESS_SUBJECT.test(value.subject);
 }
 
 async function createManagedAgent(env: Env, userId: string): Promise<string> {
@@ -1560,7 +1695,9 @@ async function revokeGrant(
     throw new ApiFailure(403, "invalid_grant_binding", "The grant's broker binding is invalid.");
   }
   const ttl = remainingGrantTtl(grant);
-  await unbindSubject(env, grant.egressSubject, grant.brokerUserId);
+  if (grant.sharedEgressSubject !== true) {
+    await unbindSubject(env, grant.egressSubject, grant.brokerUserId);
+  }
   const revoked = { ...grant, status: "revoked" as const };
   await store.set(`grant:${grant.id}`, revoked, { ttl });
   await store.delete(`grant-token:${token}`);
@@ -1682,7 +1819,8 @@ function isGrantRecord(value: unknown): value is GrantRecord {
     && value.capabilities.every((capability) => typeof capability === "string")
     && isRecord(value.accessKey)
     && typeof value.spentAtomics === "string"
-    && typeof value.egressSubject === "string";
+    && typeof value.egressSubject === "string"
+    && (value.sharedEgressSubject === undefined || typeof value.sharedEgressSubject === "boolean");
 }
 
 function isBrokerUserId(value: unknown): value is string {
@@ -2198,7 +2336,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function createAuth(store: Kv.Kv, context?: AuthRequestContext) {
+function createAuth(env: Env, store: Kv.Kv, context?: AuthRequestContext) {
   return Handler.auth({
     cookie: false,
     cors: false,
@@ -2207,22 +2345,76 @@ function createAuth(store: Kv.Kv, context?: AuthRequestContext) {
     statement: "Authorize this app to use your Nanocodex agent and bounded MPP access key.",
     store,
     async onAuthenticate({ address: authenticated, message }) {
+      const startedAt = performance.now();
+      const timings: Array<readonly [string, number]> = [];
+      const mark = (name: string) => timings.push([name, performance.now()]);
       if (!context || context.message !== message) {
         throw new Error("The authenticated Connect request is unavailable.");
       }
       const accountAddress = address(authenticated);
       const approvalId = randomSubject();
+      const resources = siweResources(message);
+      let connectorsDuration = 0;
+      let balancesDuration = 0;
+      let agentDuration = 0;
+      const balances = measured(
+        connectionBalances(accountAddress),
+        (duration) => { balancesDuration = duration; },
+      );
+      void balances.catch(() => {});
+      const identity = await connectBrokerIdentity(env, store, accountAddress);
+      mark("identity");
+      const resourcesStartedAt = performance.now();
+      const [status, [balance, settlementBalance], durableAgentId] = await Promise.all([
+        measured(connectorStatuses(env, identity.userId), (duration) => { connectorsDuration = duration; }),
+        balances,
+        identity.linked
+          ? measured(
+              connectManagedAgent(env, store, identity.userId, REGISTERED_APP_ID),
+              (duration) => { agentDuration = duration; },
+            )
+          : Promise.resolve(undefined),
+      ]);
+      mark("resources");
+      const connectedConnectors = CONNECTOR_IDS.filter((connector) => status.connectors[connector].connected);
       await store.set(`connect-approval:${approvalId}`, {
         accountAddress,
-        resources: siweResources(message),
+        balanceAtomics: balance.toString(),
+        brokerUserId: identity.userId,
+        connectedConnectors,
+        ...(durableAgentId ? { durableAgentId } : {}),
         ...(context.keyAuthorization ? { keyAuthorization: context.keyAuthorization } : {}),
+        profileLinked: identity.linked,
+        resources,
+        settlementBalanceAtomics: settlementBalance.toString(),
       } satisfies ConnectApproval, { ttl: CONNECT_APPROVAL_TTL });
+      mark("approval");
       return Response.json({
         agent_id: await agentId(accountAddress),
         approval_id: approvalId,
-      });
+        connectors: status.connectors,
+        profile: { linked: identity.linked },
+      }, { headers: { "server-timing": [
+        `identity;dur=${(resourcesStartedAt - startedAt).toFixed(1)}`,
+        `connectors;dur=${connectorsDuration.toFixed(1)}`,
+        `balances;dur=${balancesDuration.toFixed(1)}`,
+        `agent;dur=${agentDuration.toFixed(1)}`,
+        `approval;dur=${(performance.now() - (timings.at(-2)?.[1] ?? resourcesStartedAt)).toFixed(1)}`,
+      ].join(", ") } });
     },
   });
+}
+
+async function measured<value>(
+  promise: Promise<value>,
+  record: (duration: number) => void,
+): Promise<value> {
+  const startedAt = performance.now();
+  try {
+    return await promise;
+  } finally {
+    record(performance.now() - startedAt);
+  }
 }
 
 async function authRequestContext(request: Request, url: URL): Promise<AuthRequestContext | undefined> {
@@ -2257,8 +2449,16 @@ async function takeConnectApproval(
 function isConnectApproval(value: unknown): value is ConnectApproval {
   return isRecord(value)
     && /^0x[0-9a-fA-F]{40}$/.test(String(value.accountAddress))
+    && (value.brokerUserId === undefined || isBrokerUserId(value.brokerUserId))
+    && (value.balanceAtomics === undefined || /^\d+$/.test(String(value.balanceAtomics)))
+    && (value.connectedConnectors === undefined
+      || (Array.isArray(value.connectedConnectors)
+        && value.connectedConnectors.every((connector) => CONNECTOR_IDS.includes(connector as ConnectorId))))
+    && (value.durableAgentId === undefined || isConnectAgentId(value.durableAgentId))
     && Array.isArray(value.resources)
     && value.resources.every((resource) => typeof resource === "string")
+    && (value.profileLinked === undefined || typeof value.profileLinked === "boolean")
+    && (value.settlementBalanceAtomics === undefined || /^\d+$/.test(String(value.settlementBalanceAtomics)))
     && (value.keyAuthorization === undefined
       || (typeof value.keyAuthorization === "string" && /^0x[0-9a-fA-F]+$/.test(value.keyAuthorization)));
 }
@@ -2324,11 +2524,19 @@ function siweResources(message: string): string[] {
   return resources;
 }
 
-async function connectionWire(grant: GrantRecord, grantToken: string) {
-  const [balance, settlementBalance] = await Promise.all([
-    tokenBalance(MACHINE_USD, grant.accountAddress),
-    tokenBalance(USDC_E, grant.accountAddress),
+function connectionBalances(account: `0x${string}`): Promise<readonly [bigint, bigint]> {
+  return Promise.all([
+    tokenBalance(MACHINE_USD, account),
+    tokenBalance(USDC_E, account),
   ]);
+}
+
+async function connectionWire(
+  grant: GrantRecord,
+  grantToken: string,
+  balances = connectionBalances(grant.accountAddress),
+) {
+  const [balance, settlementBalance] = await balances;
   return {
     grant_token: grantToken,
     account_address: grant.accountAddress,
@@ -2486,6 +2694,7 @@ function cors(response: Response, request: Request) {
       "accept-payment, authorization, content-type, git-protocol, idempotency-key, payment-session, payment-session-snapshot, payment-signature",
     );
     response.headers.set("access-control-allow-methods", "GET, POST, PUT, DELETE, OPTIONS");
+    response.headers.set("access-control-max-age", "86400");
     response.headers.set(
       "access-control-expose-headers",
       "payment-receipt, payment-response, payment-session, payment-session-snapshot, www-authenticate",
