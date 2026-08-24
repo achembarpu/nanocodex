@@ -91,6 +91,7 @@ export type MppPermission = Readonly<{
   token: Hex;
   symbol: string;
   balance: bigint;
+  balanceStatus: "pending" | "ready";
   settlementToken: Hex;
   settlementSymbol: string;
   settlementBalance: bigint;

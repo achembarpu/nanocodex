@@ -1,4 +1,24 @@
-import { chargeResultFromWire } from "../internal.mjs";
+import { chargeResultFromWire, connectionFromWire } from "../internal.mjs";
+
+export async function getBalance(client, options) {
+  if (!options?.grantId) throw new TypeError("getBalance requires grantId");
+  const wire = await client.request({
+    method: "GET",
+    path: `/v1/grants/${options.grantId}/mpp/balance`,
+    signal: options.signal,
+  });
+  const connection = connectionFromWire(wire);
+  const session = client._getSession?.();
+  if (session && session.grantId.toLowerCase() === connection.grant.id.toLowerCase()) {
+    const { grant_token: _grantToken, ...sessionConnection } = wire;
+    client._setSession({
+      grantId: session.grantId,
+      token: session.token,
+      connection: sessionConnection,
+    });
+  }
+  return connection;
+}
 
 export async function charge(client, options) {
   if (!options?.grantId) throw new TypeError("charge requires grantId");

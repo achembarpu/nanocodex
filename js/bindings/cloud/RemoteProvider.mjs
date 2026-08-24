@@ -12,6 +12,7 @@ export function create(parameters) {
     if (session) return session;
     const next = Wata.create({
       transports: [postMessage({
+        connect: "eager",
         host,
         target: ({ host: targetHost }) => {
           const target = parameters.target({ host: targetHost });
@@ -21,6 +22,9 @@ export function create(parameters) {
       })],
     }).start();
     session = next;
+    void next.ready.catch(() => {
+      if (session === next) session = undefined;
+    });
     next.onClose(() => {
       if (session === next) session = undefined;
     });
@@ -61,6 +65,9 @@ export function create(parameters) {
   }
 
   return Object.freeze({
+    prepare() {
+      return ensureSession().ready;
+    },
     request,
     store: Object.freeze({ getState: () => state }),
   });

@@ -31,7 +31,7 @@ export async function fund(client, options) {
   }));
   return fundResultFromWire(await client.request({
     method: "GET",
-    path: `/v1/grants/${options.grantId}`,
+    path: `/v1/grants/${options.grantId}/mpp/balance`,
     signal: options.signal,
   }).then((connection) => ({ order: approval.order, connection })), client);
 }

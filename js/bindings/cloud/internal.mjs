@@ -23,6 +23,7 @@ export function connectionFromWire(value) {
       token: hex(mpp.token, "connection.mpp.token"),
       symbol: string(mpp.symbol, "connection.mpp.symbol"),
       balance: bigint(mpp.balance_atomics, "connection.mpp.balance_atomics"),
+      balanceStatus: mpp.balance_status === "ready" ? "ready" : "pending",
       settlementToken: hex(mpp.settlement_token, "connection.mpp.settlement_token"),
       settlementSymbol: string(mpp.settlement_symbol, "connection.mpp.settlement_symbol"),
       settlementBalance: bigint(mpp.settlement_balance_atomics, "connection.mpp.settlement_balance_atomics"),

@@ -84,6 +84,12 @@ export function createConfig(parameters) {
             agent = await client.agent.create({ ...agentOptions, connection });
           }
           setState(connectionSnapshot("connected", connection, agent));
+          refreshMppBalance(client, connection, (refreshed) => {
+            if (state.status === "connected"
+              && state.connection.grant.id.toLowerCase() === refreshed.grant.id.toLowerCase()) {
+              setState(connectionSnapshot("connected", refreshed, state.agent));
+            }
+          });
           return Object.freeze({ connection, agent });
         } catch (error) {
           await agent?.session.shutdown().catch(() => {});
@@ -142,6 +148,7 @@ export function useConnect(parameters = {}) {
       try {
         const connection = await config.client.connection.connect(variables);
         config._setConnection("connected", connection);
+        refreshConfigMppBalance(config, connection);
         return connection;
       } catch (error) {
         config._setConnection("disconnected");
@@ -174,6 +181,7 @@ export function useConnectAgent(parameters = {}) {
           connection,
         });
         config._setConnection("connected", connection, agent);
+        refreshConfigMppBalance(config, connection);
         return Object.freeze({ agent, connection });
       } catch (error) {
         await agent?.session.shutdown().catch(() => {});
@@ -358,9 +366,27 @@ function useConnectMutation(config, action, mutationFn, mutation) {
       const result = await mutationFn(variables);
       if (result?.connection) {
         config._setConnection("connected", result.connection, config.getState().agent);
+        refreshConfigMppBalance(config, result.connection);
       }
       return result;
     },
+  });
+}
+
+function refreshConfigMppBalance(config, connection) {
+  refreshMppBalance(config.client, connection, (refreshed) => {
+    const current = config.getState();
+    if (current.status === "connected"
+      && current.connection.grant.id.toLowerCase() === refreshed.grant.id.toLowerCase()) {
+      config._setConnection("connected", refreshed, current.agent);
+    }
+  });
+}
+
+function refreshMppBalance(client, connection, publish) {
+  if (connection.mpp.balanceStatus === "ready") return;
+  void client.mpp.getBalance({ grantId: connection.grant.id }).then(publish).catch((error) => {
+    console.error("Nanocodex Connect balance refresh failed", error);
   });
 }
 

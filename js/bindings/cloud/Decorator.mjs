@@ -27,6 +27,7 @@ export function connectActions() {
     },
     mpp: {
       charge: (options) => mpp.charge(client, options),
+      getBalance: (options) => mpp.getBalance(client, options),
     },
   });
 }

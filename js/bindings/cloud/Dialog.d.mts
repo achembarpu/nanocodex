@@ -64,6 +64,8 @@ export type Instance = Readonly<{
   open(request: Request): Promise<unknown>;
   /** Internal WATA iframe target used by the bundled Accounts provider. */
   walletTarget?(options: Readonly<{ host?: string | undefined }>): Window | null | undefined;
+  /** Resolves after the bundled Accounts iframe has completed navigation. */
+  waitForWallet?(): Promise<void>;
   showWallet?(): void;
   hideWallet?(): void;
   getRequest?(): Request | undefined;

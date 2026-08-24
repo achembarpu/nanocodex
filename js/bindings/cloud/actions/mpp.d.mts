@@ -1,5 +1,17 @@
 import type { Client } from "../Client.mjs";
-import type { Hex, MppCharge } from "../types.mjs";
+import type { Connection, Hex, MppCharge } from "../types.mjs";
+
+export declare namespace getBalance {
+  type Options = Readonly<{
+    grantId: Hex;
+    signal?: AbortSignal | undefined;
+  }>;
+  type ReturnType = Promise<Connection>;
+  type ErrorType = Error;
+}
+
+/** Refreshes the grant's Tempo balances independently from authentication. */
+export function getBalance(client: Client, options: getBalance.Options): getBalance.ReturnType;
 
 export declare namespace charge {
   type Options = Readonly<{

@@ -79,6 +79,7 @@ export function App() {
   const mercatorReady = Boolean(
     connect.agent
     && connection
+    && connection.mpp.balanceStatus === "ready"
     && connection.mpp.balance > 0n,
   );
   const observe = useCallback((value: AppObservation) => setObservation(value), []);
@@ -302,6 +303,7 @@ export function App() {
                     connection={connection}
                     error={error}
                     isMutating={isMutating}
+                    mppReady={connection.mpp.balanceStatus === "ready"}
                     mercatorReady={mercatorReady}
                     onDismissError={() => setError(undefined)}
                     onFund={addMachineUsd}
@@ -502,6 +504,7 @@ function ConnectionWorkspace({
   connection,
   error,
   isMutating,
+  mppReady,
   mercatorReady,
   onDismissError,
   onFund,
@@ -511,6 +514,7 @@ function ConnectionWorkspace({
   connection: Connection;
   error: string | undefined;
   isMutating: boolean;
+  mppReady: boolean;
   mercatorReady: boolean;
   onDismissError(): void;
   onFund(): void;
@@ -527,7 +531,7 @@ function ConnectionWorkspace({
           </div>
         ) : null}
 
-        <div className="balance-card">
+        {mppReady ? <div className="balance-card">
           <div className="mercator-balance-heading">
             <span className="balance-label">MPP available balance</span>
             <span className={mercatorReady ? "mercator-connected" : "mercator-locked"}>
@@ -540,10 +544,10 @@ function ConnectionWorkspace({
           <div className="balance-meta">
             {formatMachineUsd(connection.mpp.spent)} spent of {formatMachineUsd(connection.mpp.limit)} daily limit
           </div>
-        </div>
+        </div> : null}
 
         <div className="action-grid" aria-label="Connection actions">
-          <article className="action-card">
+          {mppReady ? <article className="action-card">
             <div>
               <strong>{mercatorReady ? "Add machineUSD" : "Unlock Mercator"}</strong>
               <p>Buy MACHUSD in this dialog with the embedded headless onramp.</p>
@@ -557,7 +561,7 @@ function ConnectionWorkspace({
             >
               {mercatorReady ? "Add $5.00" : "Buy MACHUSD"}
             </button>
-          </article>
+          </article> : null}
           <article className="action-card">
             <div>
               <strong>Explicit MPP boundary</strong>
@@ -573,10 +577,10 @@ function ConnectionWorkspace({
           <Detail label="Account" testId="account-address" value={connection.accountAddress} />
           <Detail label="Grant" testId="grant-id" value={connection.grant.id} />
           <Detail label="Capabilities" value={connection.grant.capabilities.join(" · ")} />
-          <Detail
+          {mppReady ? <Detail
             label="Model settlement"
             value={`${formatMachineUsd(connection.mpp.settlementBalance)} ${connection.mpp.settlementSymbol}`}
-          />
+          /> : null}
           <Detail label="Access key" testId="access-key" value={connection.accessKey.keyId} />
           <Detail label="Witness" testId="witness" value={connection.accessKey.witness} />
           <Detail

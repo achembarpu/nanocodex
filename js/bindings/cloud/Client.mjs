@@ -16,8 +16,12 @@ export function create(parameters) {
   const dialogInstance = dialog.setup({ appId: parameters.appId });
   const provider = parameters.provider ?? createRemoteProvider({
     host: dialogInstance.host,
-    target: (options) => dialogInstance.walletTarget(options),
+    async target(options) {
+      await dialogInstance.waitForWallet?.();
+      return dialogInstance.walletTarget(options);
+    },
   });
+  if (!parameters.provider) void provider.prepare().catch(() => undefined);
   const uid = `${transport.key}:${parameters.appId}:${++sequence}`;
   const sessionStorage = parameters.session === false
     ? undefined

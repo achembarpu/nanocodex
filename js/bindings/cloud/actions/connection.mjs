@@ -43,9 +43,8 @@ export async function connect(client, options) {
       ? undefined
       : freshAccessKeyAuthorization(client.accessKey?.authorize));
   client.dialog.showWallet?.();
-  let result;
   try {
-    result = await client.provider.request({
+    const result = await client.provider.request({
       method: "wallet_connect",
       params: [{
         chainId: "0x1079",
@@ -55,56 +54,59 @@ export async function connect(client, options) {
         },
       }],
     });
+    const account = result.accounts?.[0];
+    if (!account) throw new Error("Nanocodex Connect returned no account");
+    const approvalId = account.capabilities?.auth?.approval_id;
+    if (typeof approvalId !== "string" || approvalId.length === 0) {
+      throw new Error("Nanocodex Connect returned no signed approval identifier");
+    }
+    const keyAuthorization = account.capabilities?.keyAuthorization;
+    const preflightKeyMatchesAccount = reusable
+      && typeof activeAccount === "string"
+      && activeAccount.toLowerCase() === account.address.toLowerCase();
+    const reusedAccessKey = keyAuthorization
+      ? undefined
+      : preflightKeyMatchesAccount
+        ? reusable
+        : await registeredAccessKey(client, account.address, options.signal);
+    if (!keyAuthorization && !reusedAccessKey) {
+      throw new Error("Nanocodex Connect returned no new or reusable access key");
+    }
+    const wire = await client.request({
+      method: "POST",
+      path: "/v1/connections",
+      body: {
+        app_id: client.appId,
+        account_address: account.address,
+        approval_id: approvalId,
+        ...(keyAuthorization ? {
+          key_authorization: keyAuthorization,
+          signed_key_authorization: account.capabilities?.personalSign?.keyAuthorization,
+        } : {
+          reuse_access_key: reusedAccessKey,
+        }),
+        permission,
+        ...(requestedConnectors.length === 0 ? {} : { requested_connectors: requestedConnectors }),
+      },
+      signal: options.signal,
+    });
+    const grantToken = wire?.grant_token;
+    if (typeof grantToken !== "string" || grantToken.length === 0) {
+      throw new Error("Nanocodex Connect returned no grant-scoped session");
+    }
+    const connection = connectionFromWire(wire);
+    client._setSession({
+      grantId: connection.grant.id,
+      token: grantToken,
+      connection: sessionConnectionWire(wire),
+    });
+    return connection;
   } finally {
+    // The host stays covered until the grant session is committed. The async
+    // caller can publish its connected snapshot in the same microtask before
+    // the browser has an opportunity to paint the underlying application.
     client.dialog.hideWallet?.();
   }
-  const account = result.accounts?.[0];
-  if (!account) throw new Error("Nanocodex Connect returned no account");
-  const approvalId = account.capabilities?.auth?.approval_id;
-  if (typeof approvalId !== "string" || approvalId.length === 0) {
-    throw new Error("Nanocodex Connect returned no signed approval identifier");
-  }
-  const keyAuthorization = account.capabilities?.keyAuthorization;
-  const preflightKeyMatchesAccount = reusable
-    && typeof activeAccount === "string"
-    && activeAccount.toLowerCase() === account.address.toLowerCase();
-  const reusedAccessKey = keyAuthorization
-    ? undefined
-    : preflightKeyMatchesAccount
-      ? reusable
-      : await registeredAccessKey(client, account.address, options.signal);
-  if (!keyAuthorization && !reusedAccessKey) {
-    throw new Error("Nanocodex Connect returned no new or reusable access key");
-  }
-  const wire = await client.request({
-    method: "POST",
-    path: "/v1/connections",
-    body: {
-      app_id: client.appId,
-      account_address: account.address,
-      approval_id: approvalId,
-      ...(keyAuthorization ? {
-        key_authorization: keyAuthorization,
-        signed_key_authorization: account.capabilities?.personalSign?.keyAuthorization,
-      } : {
-        reuse_access_key: reusedAccessKey,
-      }),
-      permission,
-      ...(requestedConnectors.length === 0 ? {} : { requested_connectors: requestedConnectors }),
-    },
-    signal: options.signal,
-  });
-  const grantToken = wire?.grant_token;
-  if (typeof grantToken !== "string" || grantToken.length === 0) {
-    throw new Error("Nanocodex Connect returned no grant-scoped session");
-  }
-  const connection = connectionFromWire(wire);
-  client._setSession({
-    grantId: connection.grant.id,
-    token: grantToken,
-    connection: sessionConnectionWire(wire),
-  });
-  return connection;
 }
 
 // The Nanocodex wallet host owns the complete SIWE ceremony so it can keep

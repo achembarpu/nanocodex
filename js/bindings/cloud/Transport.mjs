@@ -107,6 +107,7 @@ export function mock(options = {}) {
               mpp: {
                 token: machineUsdAddress,
                 symbol: "MACHUSD",
+                balance_status: "ready",
                 settlement_token: "0x20C000000000000000000000b9537d11c60E8b50",
                 settlement_symbol: "USDC.e",
                 settlement_balance_atomics: "0",
@@ -238,6 +239,7 @@ export function mock(options = {}) {
               mpp: {
                 ...prepared.mpp,
                 balance_atomics: "0",
+                balance_status: "ready",
                 spent_atomics: "0",
               },
             };
@@ -247,6 +249,12 @@ export function mock(options = {}) {
 
           if (request.method === "POST" && request.path === "/v1/connections/disconnect") {
             return undefined;
+          }
+
+          if (request.method === "GET" && request.path.match(/^\/v1\/grants\/0x[0-9a-f]+\/mpp\/balance$/)) {
+            const wire = requiredGrant(grants, request.path.split("/")[3]);
+            wire.mpp = { ...wire.mpp, balance_status: "ready" };
+            return wire;
           }
 
           if (request.method === "POST" && request.path.match(/^\/v1\/grants\/0x[0-9a-f]+\/revoke$/)) {

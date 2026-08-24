@@ -168,6 +168,11 @@ test("Connect binds normalized cloud accounts into auth resources and the connec
   });
   assert.equal("credentials" in connection.grant, false);
   assert.equal("account" in connection.grant, false);
+  assert.equal(connection.mpp.balanceStatus, "ready");
+
+  const refreshed = await client.mpp.getBalance({ grantId: connection.grant.id });
+  assert.equal(requests[1].path, `/v1/grants/${connection.grant.id}/mpp/balance`);
+  assert.equal(refreshed.mpp.balanceStatus, "ready");
 
   await client.fetch("/v1/agent/account-info", { headers: { accept: "application/json" } });
   assert.equal(fetches[0].url, "https://connect.example/v1/agent/account-info");
@@ -181,6 +186,75 @@ test("Connect binds normalized cloud accounts into auth resources and the connec
     Promise.resolve().then(() => client.fetch("https://evil.example/steal")),
     /restricted to its configured API origin/,
   );
+});
+
+test("Connect keeps the hosted dialog open until the grant session is committed", async () => {
+  const events = [];
+  let releaseConnection;
+  const connectionGate = new Promise((resolve) => { releaseConnection = resolve; });
+  const expiry = Math.floor(Date.now() / 1_000) + 3_600;
+  const keyId = "0x1111111111111111111111111111111111111111";
+  const dialog = Dialog.from({
+    key: "lifecycle",
+    name: "Lifecycle",
+    type: "test",
+    setup() {
+      return {
+        host: "https://connect.example/dialog",
+        showWallet() { events.push("dialog:show"); },
+        hideWallet() { events.push("dialog:hide"); },
+      };
+    },
+  });
+  const client = Client.create({
+    appId: "lifecycle-workspace",
+    dialog,
+    provider: {
+      async request() {
+        events.push("wallet:approved");
+        return {
+          accounts: [{
+            address: "0x8ba1f109551bd432803012645ac136ddd64dba72",
+            capabilities: {
+              auth: { approval_id: "approval-lifecycle" },
+              keyAuthorization: { address: keyId, keyId, keyType: "p256", expiry },
+              personalSign: { keyAuthorization: "0x1234" },
+            },
+          }],
+        };
+      },
+    },
+    transport: Transport.from({
+      key: "lifecycle",
+      name: "Lifecycle",
+      type: "test",
+      setup() {
+        return {
+          baseUrl: "https://connect.example",
+          async fetch() { throw new Error("fetch was unexpected"); },
+          async request() {
+            events.push("grant:start");
+            await connectionGate;
+            events.push("grant:committed");
+            return testConnectionWire({ expiry, keyId, capabilities: ["nanocodex.agent"] });
+          },
+        };
+      },
+    }),
+  });
+
+  const connecting = client.connection.connect();
+  while (!events.includes("grant:start")) await Promise.resolve();
+  assert.deepEqual(events, ["dialog:show", "wallet:approved", "grant:start"]);
+  releaseConnection();
+  await connecting;
+  assert.deepEqual(events, [
+    "dialog:show",
+    "wallet:approved",
+    "grant:start",
+    "grant:committed",
+    "dialog:hide",
+  ]);
 });
 
 test("Connect reselects a reusable access key when the passkey account changes", async () => {
@@ -556,6 +630,7 @@ function testConnectionWire({ expiry, keyId, capabilities, agentId = "agent_conn
     mpp: {
       token: "0x20c0000000000000000000000000000000000001",
       symbol: "MACHUSD",
+      balance_status: "ready",
       settlement_token: "0x20C000000000000000000000b9537d11c60E8b50",
       settlement_symbol: "USDC.e",
       settlement_balance_atomics: "0",

@@ -149,14 +149,12 @@ type AuthRequestContext = Readonly<{
 }>;
 type ConnectApproval = Readonly<{
   accountAddress: `0x${string}`;
-  balanceAtomics?: string;
   brokerUserId?: string;
   connectedConnectors?: readonly ConnectorId[];
   durableAgentId?: string;
   keyAuthorization?: `0x${string}`;
   profileLinked?: boolean;
   resources: readonly string[];
-  settlementBalanceAtomics?: string;
 }>;
 type Fetcher = Readonly<{
   fetch(request: Request): Promise<Response>;
@@ -184,8 +182,10 @@ type GrantRecord = Readonly<{
   expiresAt: number;
   capabilities: readonly string[];
   accessKey: Record<string, unknown>;
+  balanceAtomics?: string;
   spentAtomics: string;
   egressSubject: string;
+  settlementBalanceAtomics?: string;
   sharedEgressSubject?: boolean;
 }>;
 type GrantPrincipal = Readonly<{
@@ -551,14 +551,6 @@ async function createConnection(
   if (grantTtl <= 0) {
     throw new ApiFailure(403, "access_key_expired", "The delegated access key has expired.");
   }
-  const balances = approval.balanceAtomics !== undefined
-    && approval.settlementBalanceAtomics !== undefined
-    ? Promise.resolve([
-        BigInt(approval.balanceAtomics),
-        BigInt(approval.settlementBalanceAtomics),
-      ] as const)
-    : connectionBalances(accountAddress);
-  void balances.catch(() => {});
   const retainedIdentity = approval.profileLinked === true && isBrokerUserId(approval.brokerUserId)
     ? { linked: true, userId: approval.brokerUserId }
     : undefined;
@@ -598,7 +590,7 @@ async function createConnection(
   };
 
   try {
-    const wireResult = await connectionWire(grant, grantToken, balances);
+    const wireResult = connectionWire(grant, grantToken);
     mark("subject");
 
     if (!store.create) {
@@ -792,7 +784,21 @@ async function handleGrantRoute(
   const { grant, token } = await authenticatedGrant(request, env.CONNECT_STATE, grantId);
 
   if (action === undefined && request.method === "GET") {
-    return Response.json(await connectionWire(grant, token));
+    return Response.json(connectionWire(grant, token));
+  }
+  if (action === "mpp/balance" && request.method === "GET") {
+    const refreshed = await withGrantMutationLock(store, grant.id, async () => {
+      const current = await authenticatedGrant(request, env.CONNECT_STATE, grantId);
+      const [balance, settlementBalance] = await connectionBalances(current.grant.accountAddress);
+      const updated = {
+        ...current.grant,
+        balanceAtomics: balance.toString(),
+        settlementBalanceAtomics: settlementBalance.toString(),
+      };
+      await store.set(`grant:${updated.id}`, updated, { ttl: remainingGrantTtl(updated) });
+      return connectionWire(updated, current.token);
+    });
+    return Response.json(refreshed);
   }
   if (action === "revoke" && request.method === "POST") {
     const revoked = await withGrantMutationLock(store, grant.id, async () => {
@@ -1818,8 +1824,10 @@ function isGrantRecord(value: unknown): value is GrantRecord {
     && Array.isArray(value.capabilities)
     && value.capabilities.every((capability) => typeof capability === "string")
     && isRecord(value.accessKey)
+    && (value.balanceAtomics === undefined || /^\d+$/.test(String(value.balanceAtomics)))
     && typeof value.spentAtomics === "string"
     && typeof value.egressSubject === "string"
+    && (value.settlementBalanceAtomics === undefined || /^\d+$/.test(String(value.settlementBalanceAtomics)))
     && (value.sharedEgressSubject === undefined || typeof value.sharedEgressSubject === "boolean");
 }
 
@@ -1866,11 +1874,16 @@ async function chargeGrant(
   if (spent + amount > MPP_LIMIT) {
     throw new ApiFailure(403, "mpp_period_limit_exceeded", "This payment exceeds the daily MPP permission.");
   }
-  if (amount > await tokenBalance(MACHINE_USD, grant.accountAddress)) {
+  const availableBalance = await tokenBalance(MACHINE_USD, grant.accountAddress);
+  if (amount > availableBalance) {
     throw new ApiFailure(402, "machine_usd_required", "Add machineUSD before paying for this capability.");
   }
   const origin = requiredOrigin(body.origin, "origin");
-  const updated = { ...grant, spentAtomics: (spent + amount).toString() };
+  const updated = {
+    ...grant,
+    balanceAtomics: (availableBalance - amount).toString(),
+    spentAtomics: (spent + amount).toString(),
+  };
   await store.set(`grant:${grant.id}`, updated, { ttl });
   const receiptSeed = `${grant.id}:${updated.spentAtomics}:${origin}:${randomSubject()}`;
   return {
@@ -1880,7 +1893,7 @@ async function chargeGrant(
       origin,
       transaction_hash: await digestHex(`transaction:${receiptSeed}`),
     },
-    connection: await connectionWire(updated, grantToken),
+    connection: connectionWire(updated, grantToken),
   };
 }
 
@@ -2355,19 +2368,12 @@ function createAuth(env: Env, store: Kv.Kv, context?: AuthRequestContext) {
       const approvalId = randomSubject();
       const resources = siweResources(message);
       let connectorsDuration = 0;
-      let balancesDuration = 0;
       let agentDuration = 0;
-      const balances = measured(
-        connectionBalances(accountAddress),
-        (duration) => { balancesDuration = duration; },
-      );
-      void balances.catch(() => {});
       const identity = await connectBrokerIdentity(env, store, accountAddress);
       mark("identity");
       const resourcesStartedAt = performance.now();
-      const [status, [balance, settlementBalance], durableAgentId] = await Promise.all([
+      const [status, durableAgentId] = await Promise.all([
         measured(connectorStatuses(env, identity.userId), (duration) => { connectorsDuration = duration; }),
-        balances,
         identity.linked
           ? measured(
               connectManagedAgent(env, store, identity.userId, REGISTERED_APP_ID),
@@ -2379,14 +2385,12 @@ function createAuth(env: Env, store: Kv.Kv, context?: AuthRequestContext) {
       const connectedConnectors = CONNECTOR_IDS.filter((connector) => status.connectors[connector].connected);
       await store.set(`connect-approval:${approvalId}`, {
         accountAddress,
-        balanceAtomics: balance.toString(),
         brokerUserId: identity.userId,
         connectedConnectors,
         ...(durableAgentId ? { durableAgentId } : {}),
         ...(context.keyAuthorization ? { keyAuthorization: context.keyAuthorization } : {}),
         profileLinked: identity.linked,
         resources,
-        settlementBalanceAtomics: settlementBalance.toString(),
       } satisfies ConnectApproval, { ttl: CONNECT_APPROVAL_TTL });
       mark("approval");
       return Response.json({
@@ -2397,7 +2401,6 @@ function createAuth(env: Env, store: Kv.Kv, context?: AuthRequestContext) {
       }, { headers: { "server-timing": [
         `identity;dur=${(resourcesStartedAt - startedAt).toFixed(1)}`,
         `connectors;dur=${connectorsDuration.toFixed(1)}`,
-        `balances;dur=${balancesDuration.toFixed(1)}`,
         `agent;dur=${agentDuration.toFixed(1)}`,
         `approval;dur=${(performance.now() - (timings.at(-2)?.[1] ?? resourcesStartedAt)).toFixed(1)}`,
       ].join(", ") } });
@@ -2450,7 +2453,6 @@ function isConnectApproval(value: unknown): value is ConnectApproval {
   return isRecord(value)
     && /^0x[0-9a-fA-F]{40}$/.test(String(value.accountAddress))
     && (value.brokerUserId === undefined || isBrokerUserId(value.brokerUserId))
-    && (value.balanceAtomics === undefined || /^\d+$/.test(String(value.balanceAtomics)))
     && (value.connectedConnectors === undefined
       || (Array.isArray(value.connectedConnectors)
         && value.connectedConnectors.every((connector) => CONNECTOR_IDS.includes(connector as ConnectorId))))
@@ -2458,7 +2460,6 @@ function isConnectApproval(value: unknown): value is ConnectApproval {
     && Array.isArray(value.resources)
     && value.resources.every((resource) => typeof resource === "string")
     && (value.profileLinked === undefined || typeof value.profileLinked === "boolean")
-    && (value.settlementBalanceAtomics === undefined || /^\d+$/.test(String(value.settlementBalanceAtomics)))
     && (value.keyAuthorization === undefined
       || (typeof value.keyAuthorization === "string" && /^0x[0-9a-fA-F]+$/.test(value.keyAuthorization)));
 }
@@ -2531,12 +2532,9 @@ function connectionBalances(account: `0x${string}`): Promise<readonly [bigint, b
   ]);
 }
 
-async function connectionWire(
-  grant: GrantRecord,
-  grantToken: string,
-  balances = connectionBalances(grant.accountAddress),
-) {
-  const [balance, settlementBalance] = await balances;
+function connectionWire(grant: GrantRecord, grantToken: string) {
+  const balancesReady = grant.balanceAtomics !== undefined
+    && grant.settlementBalanceAtomics !== undefined;
   return {
     grant_token: grantToken,
     account_address: grant.accountAddress,
@@ -2546,10 +2544,11 @@ async function connectionWire(
     mpp: {
       token: MACHINE_USD,
       symbol: "MACHUSD",
-      balance_atomics: balance.toString(),
+      balance_atomics: grant.balanceAtomics ?? "0",
+      balance_status: balancesReady ? "ready" : "pending",
       settlement_token: USDC_E,
       settlement_symbol: "USDC.e",
-      settlement_balance_atomics: settlementBalance.toString(),
+      settlement_balance_atomics: grant.settlementBalanceAtomics ?? "0",
       spent_atomics: grant.spentAtomics,
       limit_atomics: MPP_LIMIT.toString(),
       period: MPP_PERIOD,

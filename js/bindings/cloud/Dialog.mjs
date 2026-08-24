@@ -105,6 +105,7 @@ function createIframeInstance(host) {
   let walletFrame;
   let walletHost;
   let walletModal;
+  let walletReady;
   let walletVisible = false;
 
   function mount() {
@@ -185,6 +186,9 @@ function createIframeInstance(host) {
     walletFrame = document.createElement("iframe");
     walletFrame.dataset.testid = "nanocodex-connect-wallet";
     walletFrame.title = "Nanocodex Connect";
+    walletReady = new Promise((resolve) => {
+      walletFrame.addEventListener("load", resolve, { once: true });
+    });
     walletFrame.src = source;
     const dialogOrigin = url.origin;
     walletFrame.allow = [
@@ -248,6 +252,9 @@ function createIframeInstance(host) {
       });
     },
     showWallet,
+    async waitForWallet() {
+      await walletReady;
+    },
     walletTarget(options = {}) {
       mountWallet(options.host);
       if (walletVisible && walletModal && !walletModal.open) walletModal.showModal();
