@@ -32,7 +32,7 @@ import { CommitCodeStream } from "./CommitCodeStream";
 import { Docs, preloadDocsRoute } from "./Docs";
 import { Evals, preloadEvalOverview } from "./Evals";
 import { MonsterWorld } from "./MonsterWorld";
-import { useModalBoundary } from "./modalBoundary";
+import { lockDocumentScroll, useModalBoundary } from "./modalBoundary";
 import { Multiplayer } from "./Multiplayer";
 import { PierreWorkerProvider } from "./PierreWorkerProvider";
 import { VirtualCommitList } from "./VirtualCommitList";
@@ -605,6 +605,25 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
       ?.setAttribute("content", theme === "dark" ? "#161616" : "#ffffff");
     localStorage.setItem("nanocodex-theme", theme);
   }, [theme]);
+
+  useLayoutEffect(() => {
+    if (surface !== "agent") return;
+    const root = document.documentElement;
+    const body = document.body;
+    const roots = [root, body] as const;
+    const alreadyLocked = roots.map((element) =>
+      element.classList.contains("agent-viewport-locked")
+    );
+    roots.forEach((element) => element.classList.add("agent-viewport-locked"));
+    window.scrollTo(0, 0);
+    const restoreScroll = lockDocumentScroll(root, body);
+    return () => {
+      restoreScroll();
+      roots.forEach((element, index) => {
+        if (!alreadyLocked[index]) element.classList.remove("agent-viewport-locked");
+      });
+    };
+  }, [surface]);
 
   useEffect(() => {
     if (surface === "docs") return;

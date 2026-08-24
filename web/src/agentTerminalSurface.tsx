@@ -7,6 +7,7 @@ import {
 } from "react";
 import { FitAddon } from "@xterm/addon-fit";
 import { Terminal as Xterm, type Terminal as XtermInstance } from "@xterm/xterm";
+import { ArrowUp, Square } from "lucide-react";
 import { availableVisualHeight } from "./agentTerminalLifecycle";
 import { bufferedXtermAdapter, isTerminalSubmitKeyEvent } from "./agentTerminalXterm";
 import type { AgentStatus, AgentTerminalMode } from "./agentTerminalTypes";
@@ -237,7 +238,7 @@ export function TouchTerminalComposer({
     const element = textarea.current;
     if (!element) return;
     element.style.height = "0";
-    element.style.height = `${Math.min(Math.max(element.scrollHeight, 44), 88)}px`;
+    element.style.height = `${Math.min(Math.max(element.scrollHeight, 44), 132)}px`;
   }, [draft]);
   const submit = () => {
     if (pending || !draft.trim()) return;
@@ -252,31 +253,44 @@ export function TouchTerminalComposer({
         submit();
       }}
     >
-      <span className="agent-touch-rail" aria-hidden="true">│</span>
-      <textarea
-        ref={textarea}
-        aria-label="Message Nanocodex"
-        enterKeyHint="send"
-        placeholder="Message Nanocodex"
-        rows={1}
-        value={draft}
-        onChange={(event) => onChange(event.currentTarget.value)}
-        onCompositionStart={() => { composing.current = true; }}
-        onCompositionEnd={() => { composing.current = false; }}
-        onKeyDown={(event) => {
-          if (!isTerminalSubmitKeyEvent(event.nativeEvent, composing.current)) return;
-          event.preventDefault();
-          submit();
-        }}
-      />
-      <div className="agent-touch-actions">
-        {running ? (
-          <button type="button" disabled={status !== "ready"} onClick={onCancel}>Stop</button>
-        ) : (
-          <button type="submit" disabled={pending || !draft.trim()}>Send</button>
-        )}
+      <div className="agent-touch-field">
+        <textarea
+          ref={textarea}
+          aria-label="Message Nanocodex"
+          enterKeyHint="send"
+          placeholder="Message Nanocodex"
+          rows={1}
+          value={draft}
+          onChange={(event) => onChange(event.currentTarget.value)}
+          onCompositionStart={() => { composing.current = true; }}
+          onCompositionEnd={() => { composing.current = false; }}
+          onKeyDown={(event) => {
+            if (!isTerminalSubmitKeyEvent(event.nativeEvent, composing.current)) return;
+            event.preventDefault();
+            submit();
+          }}
+        />
+        <div className="agent-touch-actions">
+          {running ? (
+            <button
+              type="button"
+              aria-label="Stop response"
+              disabled={status !== "ready"}
+              onClick={onCancel}
+            >
+              <Square aria-hidden="true" />
+            </button>
+          ) : (
+            <button
+              type="submit"
+              aria-label="Send message"
+              disabled={pending || !draft.trim()}
+            >
+              <ArrowUp aria-hidden="true" />
+            </button>
+          )}
+        </div>
       </div>
-      <small>Enter sends · Shift+Enter adds a line</small>
     </form>
   );
 }

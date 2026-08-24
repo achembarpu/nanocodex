@@ -1,7 +1,7 @@
 export const COARSE_POINTER_QUERY = "(pointer: coarse), (any-pointer: coarse)";
 export const MINIMUM_COARSE_TARGET_SIZE = 44;
 export const COMPACT_SOURCE_TREE_ITEM_HEIGHT = 24;
-export const TERMINAL_COMPOSER_BASE_HEIGHT = 60;
+export const TERMINAL_COMPOSER_BASE_HEIGHT = 62;
 
 type MediaQueryMatchSource = Pick<
   MediaQueryList,

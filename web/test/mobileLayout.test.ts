@@ -191,13 +191,13 @@ test("touch terminals use one native IME-safe composer and one contextual action
   assert.match(touchComposer, /onCompositionStart=\{\(\) => \{ composing\.current = true; \}\}/);
   assert.match(touchComposer, /isTerminalSubmitKeyEvent\(event\.nativeEvent, composing\.current\)/);
   assert.match(touchComposer, /onSubmit\(draft, running \? "steer" : "queue"\)/);
-  assert.match(touchComposer, /\{running \? \([\s\S]*?>Stop<\/button>[\s\S]*?\) : \([\s\S]*?>Send<\/button>[\s\S]*?\)\}/);
+  assert.match(touchComposer, /\{running \? \([\s\S]*?aria-label="Stop response"[\s\S]*?<Square[\s\S]*?\) : \([\s\S]*?aria-label="Send message"[\s\S]*?<ArrowUp/);
   assert.equal(matches(touchComposer, /className="agent-touch-actions"/g), 1);
+  assert.equal(matches(touchComposer, /className="agent-touch-field"/g), 1);
   assert.doesNotMatch(touchComposer, />Steer<|>Queued</);
-  assert.equal(matches(touchComposer, /Enter sends · Shift\+Enter adds a line/g), 1);
   assert.match(touchComposer, /const textarea = useRef<HTMLTextAreaElement>/);
-  assert.match(touchComposer, /Math\.min\(Math\.max\(element\.scrollHeight, 44\), 88\)/);
-  assert.match(touchComposer, />│<\/span>/);
+  assert.match(touchComposer, /Math\.min\(Math\.max\(element\.scrollHeight, 44\), 132\)/);
+  assert.doesNotMatch(touchComposer, /agent-touch-rail|>│<\/span>/);
   assert.doesNotMatch(touchComposer, /\x1b\[200~|bracketed-paste/i);
   assert.match(terminal, /inputMode: touchInput \? "composer" : "xterm"/);
   assert.match(terminal, /active\.current\?\.setInputMode\(touchInput \? "composer" : "xterm"\)/);
@@ -211,10 +211,10 @@ test("touch terminals use one native IME-safe composer and one contextual action
   const composer = ruleBlock(terminalCss, ".agent-touch-composer {", touchCss);
   assert.match(composer, /position:\s*relative/);
   assert.match(composer, /min-height:\s*var\(--terminal-composer-min-height\)/);
-  assert.match(terminalCss, /--terminal-composer-min-height:\s*calc\(60px \+ env\(safe-area-inset-bottom\)\)/);
+  assert.match(terminalCss, /--terminal-composer-min-height:\s*calc\(62px \+ env\(safe-area-inset-bottom\)\)/);
   assert.match(composer, /env\(safe-area-inset-left\)/);
   assert.match(composer, /env\(safe-area-inset-right\)/);
-  assert.match(ruleBlock(terminalCss, ".agent-touch-composer small {", touchCss), /display:\s*none/);
+  assert.match(ruleBlock(terminalCss, ".agent-touch-field {", touchCss), /border-radius:\s*9px/);
   assert.match(terminal, /active\.current\.submit\(input, \{ intent, submittedAt \}\)/);
   assert.match(terminal, /active\.current\?\.cancel\(\)/);
 });
@@ -241,6 +241,8 @@ test("the phone transcript owns the remaining workspace and native vertical gest
   assert.match(terminalSurface, /terminal\.scrollLines\(lines\)/);
   assert.match(ruleBlock(compactHome, ".home-page.is-agent .home-demo {"), /minmax\(0, 1fr\)/);
   assert.match(ruleBlock(compactHome, ".home-page.is-agent .home-demo-head {"), /display:\s*none/);
+  assert.match(application, /if \(surface !== "agent"\) return;[\s\S]*?classList\.add\("agent-viewport-locked"\)[\s\S]*?lockDocumentScroll\(root, body\)/);
+  assert.match(indexCss, /html\.agent-viewport-locked,[\s\S]*?body\.agent-viewport-locked \{[\s\S]*?height:\s*100%;[\s\S]*?min-height:\s*0/);
 });
 
 test("compact agent chrome prioritizes the conversation and transcript", () => {

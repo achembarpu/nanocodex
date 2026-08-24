@@ -178,13 +178,13 @@ test("visual viewport floors include the measured composer and bottom safe area"
     measuredComposerHeight: 86.2,
     safeAreaInsetBottom: cssPixelValue("34px"),
   });
-  assert.equal(minimum, 94);
+  assert.equal(minimum, 96);
   assert.equal(availableVisualHeight({
     elementTop: 480,
     minimum,
     viewportHeight: 320,
     viewportOffsetTop: 40,
-  }), 94);
+  }), 96);
   assert.equal(terminalComposerMinimumHeight({
     measuredComposerHeight: 112.1,
     safeAreaInsetBottom: 34,

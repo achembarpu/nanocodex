@@ -1,7 +1,7 @@
 .nanocodex-demo {
   position: relative;
   width: 100%;
-  --terminal-composer-min-height: calc(60px + env(safe-area-inset-bottom));
+  --terminal-composer-min-height: calc(62px + env(safe-area-inset-bottom));
   --terminal-background: var(--surface);
   --terminal-foreground: var(--text);
   --terminal-muted: color-mix(in srgb, var(--text) 56%, transparent);
@@ -300,16 +300,12 @@
   .agent-touch-composer {
     position: relative;
     z-index: 6;
-    display: grid;
-    grid-template-columns: auto minmax(0, 1fr) auto;
-    grid-template-rows: minmax(44px, auto);
-    gap: 0 8px;
-    align-items: end;
+    display: block;
     min-height: var(--terminal-composer-min-height);
     padding:
-      0
+      8px
       max(8px, env(safe-area-inset-right))
-      env(safe-area-inset-bottom)
+      max(8px, env(safe-area-inset-bottom))
       max(8px, env(safe-area-inset-left));
     color: var(--terminal-foreground);
     background: var(--terminal-background);
@@ -321,25 +317,26 @@
     padding-right: max(8px, env(safe-area-inset-right));
   }
 
-  .agent-touch-rail {
-    grid-column: 1;
-    grid-row: 1;
-    color: var(--terminal-muted);
-    font-size: 16px;
-    align-self: end;
-    padding-bottom: 12px;
+  .agent-touch-field {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: end;
+    min-height: 44px;
+    overflow: hidden;
+    background: var(--surface-raised);
+    border: 1px solid var(--border);
+    border-radius: 9px;
   }
 
   .agent-touch-composer textarea {
-    grid-column: 2;
-    grid-row: 1;
+    grid-column: 1;
     width: 100%;
     min-width: 0;
     height: auto;
     min-height: 44px;
-    max-height: 88px;
+    max-height: 132px;
     margin: 0;
-    padding: 11px 0 9px;
+    padding: 10px 12px;
     overflow-y: auto;
     color: var(--terminal-foreground);
     caret-color: var(--terminal-foreground);
@@ -360,22 +357,30 @@
 
   .agent-touch-actions {
     display: flex;
-    grid-column: 3;
-    grid-row: 1;
-    gap: 4px;
+    grid-column: 2;
+    padding: 4px;
     align-self: end;
   }
 
   .agent-touch-actions button {
-    min-width: 52px;
+    display: grid;
+    width: 44px;
+    min-width: 44px;
     min-height: 44px;
-    padding: 0 8px;
-    color: var(--terminal-foreground);
-    font: 600 11px var(--font-mono);
-    background: transparent;
+    padding: 0;
+    color: var(--terminal-background);
+    background: var(--terminal-foreground);
     border: 0;
+    border-radius: 6px;
     cursor: pointer;
+    place-items: center;
     touch-action: manipulation;
+  }
+
+  .agent-touch-actions button svg {
+    width: 17px;
+    height: 17px;
+    stroke-width: 2;
   }
 
   .agent-touch-actions button:focus-visible {
@@ -385,6 +390,7 @@
 
   .agent-touch-actions button:disabled {
     color: var(--terminal-muted);
+    background: var(--terminal-hover);
     cursor: default;
   }
 
@@ -409,15 +415,12 @@
     height: var(--coarse-target-size);
   }
 
-  .agent-touch-composer small {
-    display: none;
-  }
 }
 
 @media (max-width: 740px), (pointer: coarse) and (orientation: landscape) and (max-width: 950px) {
   .nanocodex-demo {
     min-width: 0;
-    --terminal-composer-min-height: calc(52px + env(safe-area-inset-bottom));
+    --terminal-composer-min-height: calc(62px + env(safe-area-inset-bottom));
   }
 
   .agent-runtime-switch {
