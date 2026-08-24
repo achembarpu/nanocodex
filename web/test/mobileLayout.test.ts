@@ -211,6 +211,30 @@ test("touch terminals use one native IME-safe composer and one contextual action
   assert.match(terminal, /active\.current\?\.cancel\(\)/);
 });
 
+test("the phone transcript owns the remaining workspace and native vertical gestures", () => {
+  const compact = terminalCss.indexOf(
+    `@media ${compactQuery}`,
+    terminalCss.indexOf(".conversation-list"),
+  );
+  const compactCss = terminalCss.slice(compact);
+  const workspace = ruleBlock(compactCss, ".conversation-workspace {");
+  const main = ruleBlock(compactCss, ".conversation-main {");
+  const viewport = ruleBlock(terminalCss, ".agent-xterm .xterm-viewport {");
+  const scrollable = ruleBlock(terminalCss, ".agent-xterm .xterm-scrollable-element {");
+  const compactHome = homeCss.slice(homeCss.lastIndexOf(`@media ${compactQuery}`));
+
+  assert.match(workspace, /grid-template-rows:\s*44px minmax\(0, 1fr\)/);
+  assert.match(main, /grid-row:\s*2/);
+  assert.match(main, /min-height:\s*0/);
+  assert.match(viewport, /touch-action:\s*pan-y/);
+  assert.match(viewport, /overscroll-behavior-y:\s*contain/);
+  assert.match(scrollable, /touch-action:\s*none/);
+  assert.match(terminalSurface, /bindTouchTerminalScroll\(element\.current, terminal\)/);
+  assert.match(terminalSurface, /terminal\.scrollLines\(lines\)/);
+  assert.match(ruleBlock(compactHome, ".home-page.is-agent .home-demo {"), /minmax\(0, 1fr\)/);
+  assert.match(ruleBlock(compactHome, ".home-page.is-agent .home-demo-head {"), /display:\s*none/);
+});
+
 test("touch terminal geometry follows the visual viewport without weakening hidden focus", () => {
   assert.match(terminalSurface, /const viewport = window\.visualViewport/);
   assert.match(terminalSurface, /viewport\?\.addEventListener\("resize", measure\)/);

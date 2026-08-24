@@ -231,8 +231,16 @@
 
 .agent-xterm .xterm-viewport {
   background: var(--terminal-background) !important;
+  overscroll-behavior-y: contain;
   scrollbar-color: var(--terminal-muted) var(--terminal-background);
   scrollbar-width: thin;
+  touch-action: pan-y;
+  -webkit-overflow-scrolling: touch;
+}
+
+.agent-xterm .xterm-scrollable-element {
+  overscroll-behavior-y: contain;
+  touch-action: none;
 }
 
 .agent-xterm .xterm-dim {
@@ -621,7 +629,14 @@
 .conversation-mobile-header,
 .conversation-backdrop { display: none; }
 
-.conversation-list { min-height: 0; overflow: auto; scrollbar-color: var(--text-faint) transparent; scrollbar-width: thin; }
+.conversation-list {
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: var(--text-faint) transparent;
+  scrollbar-width: thin;
+  -webkit-overflow-scrolling: touch;
+}
 .conversation-row {
   position: relative;
   display: flex;
@@ -661,10 +676,18 @@
 }
 
 @media (max-width: 740px), (pointer: coarse) and (orientation: landscape) and (max-width: 950px) {
-  .conversation-workspace { display: block; }
-  .conversation-main { display: grid; height: 100%; grid-template-rows: 44px minmax(0, 1fr); }
+  .conversation-workspace {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: 44px minmax(0, 1fr);
+  }
+  .conversation-main {
+    display: flex;
+    min-height: 0;
+    grid-row: 2;
+  }
   .conversation-mobile-header {
-    display: flex; min-width: 0; align-items: center; gap: 6px; padding-right: 10px;
+    display: flex; min-width: 0; grid-row: 1; align-items: center; gap: 6px; padding-right: 10px;
     color: var(--text-muted); font: 10px var(--font-mono); border-bottom: 1px solid var(--border-soft);
   }
   .conversation-mobile-header button { width: 44px; height: 44px; flex: 0 0 44px; }

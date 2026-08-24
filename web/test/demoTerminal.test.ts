@@ -575,6 +575,26 @@ test("xterm history redraw restores the previous distance from the buffer bottom
   assert.equal(restored, 100);
 });
 
+test("xterm streaming redraw leaves a user-scrolled viewport anchored", async () => {
+  let restored: number | undefined;
+  const active = { baseY: 100, viewportY: 32 };
+  const adapter = xtermAdapter({
+    cols: 80,
+    rows: 24,
+    buffer: { active },
+    write(_data: string, callback?: () => void) {
+      active.baseY = 140;
+      active.viewportY = 140;
+      callback?.();
+    },
+    scrollToLine(line: number) { restored = line; },
+    onData() { return { dispose() {} }; },
+    onResize() { return { dispose() {} }; },
+  });
+  await adapter.write("streamed frame");
+  assert.equal(restored, 32);
+});
+
 test("hidden streaming reduces state without TerminalHost writes", async () => {
   const frames = fakeAnimationFrames();
   const host = fakeTerminal();
