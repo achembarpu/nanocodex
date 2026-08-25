@@ -11,6 +11,7 @@ export function create(parameters) {
     throw new TypeError("Client.create requires appId");
   }
   const transport = parameters.transport ?? http();
+  const appOrigin = parameters.appOrigin ?? browserOrigin();
   const dialog = parameters.dialog ?? iframe();
   const transportInstance = transport.setup({ appId: parameters.appId });
   const dialogInstance = dialog.setup({ appId: parameters.appId });
@@ -56,6 +57,7 @@ export function create(parameters) {
   const base = {
     accessKey: parameters.accessKey,
     appId: parameters.appId,
+    appOrigin,
     auth: parameters.auth,
     dialog: dialogInstance,
     key: parameters.key ?? "connect",
@@ -151,6 +153,15 @@ export function create(parameters) {
   let client = Object.assign(base, { extend });
   client = client.extend(connectActions());
   return Object.freeze(client);
+}
+
+function browserOrigin() {
+  try {
+    const origin = globalThis.location?.origin;
+    return typeof origin === "string" && origin !== "null" ? origin : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 function browserSessionStorage() {

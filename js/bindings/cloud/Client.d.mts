@@ -27,6 +27,7 @@ export type Provider = Readonly<{
 
 export type Base = Readonly<{
   appId: string;
+  appOrigin: string | undefined;
   accessKey: Readonly<{ authorize?: AuthorizeAccessKey | undefined }> | undefined;
   auth: Auth | undefined;
   dialog: DialogInstance;
@@ -46,6 +47,8 @@ export type Client<extension extends object = ConnectActions> = Base & extension
 
 export type Parameters = Readonly<{
   appId: string;
+  /** Exact browser origin bound into approvals and grants. Defaults to location.origin. */
+  appOrigin?: string | undefined;
   /** Accounts-compatible default SIWE round-trip configuration. */
   auth?: Auth | undefined;
   /** Accounts-compatible default access-key authorization policy. */

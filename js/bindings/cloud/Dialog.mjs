@@ -26,7 +26,7 @@ export function iframe(options = {}) {
     key: options.key ?? "nanocodex-iframe",
     name: options.name ?? "Nanocodex Connect",
     type: "iframe",
-    setup() {
+    setup({ appId }) {
       if (typeof document === "undefined" || typeof window === "undefined") {
         return {
           host,
@@ -35,10 +35,11 @@ export function iframe(options = {}) {
           },
         };
       }
-      let instance = iframeInstances.get(host);
+      const source = dialogUrl(host, "iframe", appId);
+      let instance = iframeInstances.get(source);
       if (!instance) {
-        instance = createIframeInstance(host);
-        iframeInstances.set(host, instance);
+        instance = createIframeInstance(source);
+        iframeInstances.set(source, instance);
       }
       return instance;
     },
@@ -51,7 +52,7 @@ export function popup(options = {}) {
     key: options.key ?? "nanocodex-popup",
     name: options.name ?? "Nanocodex Connect",
     type: "popup",
-    setup() {
+    setup({ appId }) {
       if (typeof window === "undefined") {
         return {
           host,
@@ -60,10 +61,11 @@ export function popup(options = {}) {
           },
         };
       }
-      let instance = popupInstances.get(host);
+      const source = dialogUrl(host, "popup", appId);
+      let instance = popupInstances.get(source);
       if (!instance) {
-        instance = createPopupInstance(host, options);
-        popupInstances.set(host, instance);
+        instance = createPopupInstance(source, options);
+        popupInstances.set(source, instance);
       }
       return instance;
     },
@@ -315,7 +317,7 @@ function createIframeInstance(host) {
 }
 
 function createPopupInstance(host, options) {
-  const source = walletUrl(host, "popup");
+  const source = host;
   const targetName = options.target ?? "nanocodex-connect";
   const features = options.features ?? "popup=yes,width=440,height=720,resizable=yes,scrollbars=yes";
   let walletWindow;
@@ -348,9 +350,10 @@ function createPopupInstance(host, options) {
   };
 }
 
-function walletUrl(host, mode) {
+function dialogUrl(host, mode, appId) {
   const url = new URL(host);
-  if (!url.searchParams.has("origin")) url.searchParams.set("origin", window.location.origin);
+  url.searchParams.set("app_id", appId);
+  url.searchParams.set("origin", window.location.origin);
   url.searchParams.set("mode", mode);
   return url.toString();
 }

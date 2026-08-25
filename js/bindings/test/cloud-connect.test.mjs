@@ -69,6 +69,7 @@ test("Connect opens a ticketed local WASM model socket without exposing its gran
   const socketUrl = new URL(sockets[0].url);
   assert.equal(socketUrl.origin, "wss://connect.example");
   assert.equal(socketUrl.pathname, `/v1/grants/${connection.grant.id}/model`);
+  assert.equal(socketUrl.searchParams.get("app_id"), "atlas-workspace");
   assert.equal(socketUrl.searchParams.get("session_id"), "019fc927-b280-79a7-8445-1b9996ad2fb0");
   assert.equal(socketUrl.searchParams.has("ticket"), false);
   assert.deepEqual(sockets[0].protocols, [
@@ -76,6 +77,25 @@ test("Connect opens a ticketed local WASM model socket without exposing its gran
     "nanocodex-ticket.one-time-ticket",
   ]);
   assert.equal(socketUrl.href.includes("grant-session-secret"), false);
+});
+
+test("Connect HTTP transport binds every API request to the configured app ID", async () => {
+  const fetches = [];
+  const transport = Transport.http("https://connect.example", {
+    credentials: "include",
+    async fetch(input, init) {
+      fetches.push({ request: new Request(input, init), init });
+      return Response.json({ ok: true });
+    },
+  }).setup({ appId: "consumer-app" });
+
+  await transport.fetch("https://connect.example/v1/direct", { credentials: "omit" });
+  await transport.request({ method: "GET", path: "/v1/control" });
+
+  assert.equal(fetches[0].request.headers.get("x-nanocodex-app-id"), "consumer-app");
+  assert.equal(fetches[0].init.credentials, "omit");
+  assert.equal(fetches[1].request.headers.get("x-nanocodex-app-id"), "consumer-app");
+  assert.equal(fetches[1].init.credentials, "include");
 });
 
 test("Connect opens its grant-provisioned durable agent without a redundant state probe", async () => {
@@ -152,6 +172,7 @@ test("Connect binds normalized cloud accounts into auth resources and the connec
   const keyId = "0x1111111111111111111111111111111111111111";
   const client = Client.create({
     appId: "connector-workspace",
+    appOrigin: "https://consumer.example",
     dialog: Dialog.memory(),
     provider: {
       async request(request) {
@@ -245,6 +266,7 @@ test("Connect binds normalized cloud accounts into auth resources and the connec
           resources: [
             "urn:example:configured",
             "urn:nanocodex:app:connector-workspace",
+            "urn:nanocodex:origin:https%3A%2F%2Fconsumer.example",
             "urn:nanocodex:connectors:github,gdrive,x",
             "urn:nanocodex:agent:visibility:reply,actions,history,traces",
           ],
@@ -419,8 +441,8 @@ test("Connect reselects a reusable access key when the passkey account changes",
   assert.deepEqual(
     requests.filter((request) => request.method === "GET").map((request) => request.path),
     [
-      `/v1/access-keys/${initialAccount}/${initialKey}`,
-      `/v1/access-keys/${selectedAccount}/${selectedKey}`,
+      `/v1/access-keys/${initialAccount}/${initialKey}?app_id=account-switch-workspace`,
+      `/v1/access-keys/${selectedAccount}/${selectedKey}?app_id=account-switch-workspace`,
     ],
   );
   assert.deepEqual(requests.at(-1).body.reuse_access_key, {

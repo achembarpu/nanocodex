@@ -3,6 +3,10 @@ export type ConnectDialogProxyEnv = {
 };
 
 const CONNECT_DIALOG_PREFIX = "/connect-dialog";
+const CONNECT_DIALOG_FRAME_ANCESTORS = [
+  "https://nanocodex-connect-playground.gakonst.workers.dev",
+  "chrome-extension://jpkimkgbgbpcaldbnhlhbkbadmpeffle",
+].join(" ");
 
 export function isConnectDialogPath(pathname: string): boolean {
   return pathname === CONNECT_DIALOG_PREFIX
@@ -70,6 +74,9 @@ function projectResponse(
   headers.delete("set-cookie");
   headers.delete("set-cookie2");
   headers.set("x-content-type-options", "nosniff");
+  if (headers.get("content-type")?.startsWith("text/html")) {
+    headers.set("content-security-policy", `frame-ancestors ${CONNECT_DIALOG_FRAME_ANCESTORS}`);
+  }
 
   const location = headers.get("location");
   if (location) {

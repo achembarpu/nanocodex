@@ -29,15 +29,22 @@ export function http(url = DEFAULT_API_URL, options = {}) {
     key: options.key ?? "http",
     name: options.name ?? "Nanocodex HTTP",
     type: "http",
-    setup() {
+    setup({ appId }) {
       return {
         baseUrl,
         fetch(input, init) {
-          return fetchFn(input, { credentials, ...init });
+          const request = new Request(input, init);
+          const headers = new Headers(request.headers);
+          headers.set("x-nanocodex-app-id", appId);
+          return fetchFn(
+            new Request(request, { headers }),
+            { credentials: init?.credentials ?? credentials },
+          );
         },
         async request(request) {
           const headers = new Headers(request.headers);
           headers.set("accept", "application/json");
+          headers.set("x-nanocodex-app-id", appId);
           if (request.body !== undefined) headers.set("content-type", "application/json");
           const response = await fetchFn(new URL(request.path, baseUrl), {
             method: request.method ?? "GET",

@@ -11,6 +11,7 @@ import {
   connectApiOrigin,
   registeredApp,
   sanitizeWalletResult,
+  signedAppResources,
   usesBrowserLocalWebAuthn,
 } from "./connectPolicy.mjs";
 import { parentDialog, type WalletRequest } from "./protocol";
@@ -658,15 +659,17 @@ function ConnectionApproval({
               </div>
             );
           })}
-          <div
-            className="capability-token"
-            data-tooltip={`${formatToken(request.mpp.maxPerRequest, request.mpp.symbol)} per request · ${formatToken(request.mpp.limit, request.mpp.symbol)} per day · ${request.accessKey ? expiryLabel(request.accessKey.expiry) : "active grant"}`}
-            role="listitem"
-            tabIndex={0}
-            aria-label={`machineUSD spend permission. ${formatToken(request.mpp.maxPerRequest, request.mpp.symbol)} per request, ${formatToken(request.mpp.limit, request.mpp.symbol)} per day.`}
-          >
-            <SpendLogo />
-          </div>
+          {request.mpp ? (
+            <div
+              className="capability-token"
+              data-tooltip={`${formatToken(request.mpp.maxPerRequest, request.mpp.symbol)} per request · ${formatToken(request.mpp.limit, request.mpp.symbol)} per day · ${request.accessKey ? expiryLabel(request.accessKey.expiry) : "active grant"}`}
+              role="listitem"
+              tabIndex={0}
+              aria-label={`machineUSD spend permission. ${formatToken(request.mpp.maxPerRequest, request.mpp.symbol)} per request, ${formatToken(request.mpp.limit, request.mpp.symbol)} per day.`}
+            >
+              <SpendLogo />
+            </div>
+          ) : null}
         </div>
         {appVisibility.length > 0 ? (
           <div className="app-sees" aria-label="App sees" role="list">
@@ -698,7 +701,7 @@ function ConnectionApproval({
         <summary>Details</summary>
         <dl className="key-details">
           <Detail label="App" value={request.app.origin} />
-          <Detail label="Spend" value={`${formatToken(request.mpp.maxPerRequest, request.mpp.symbol)} / request · ${formatToken(request.mpp.limit, request.mpp.symbol)} / day`} />
+          {request.mpp ? <Detail label="Spend" value={`${formatToken(request.mpp.maxPerRequest, request.mpp.symbol)} / request · ${formatToken(request.mpp.limit, request.mpp.symbol)} / day`} /> : null}
           {request.accessKey ? (
             <>
               <Detail label="Key" value={request.accessKey.keyId} />
@@ -1059,6 +1062,7 @@ function shortAddress(value: unknown) {
 function walletRequest(request: WalletRequest, accountMode: "login" | "register") {
   const params = record(firstParam(request.rpc.params));
   const capabilities = record(params.capabilities);
+  const { resources } = walletConnectContext(request);
   const {
     credentialId: _credentialId,
     method: _method,
@@ -1078,6 +1082,7 @@ function walletRequest(request: WalletRequest, accountMode: "login" | "register"
     return {
       ...forwarded,
       verify: `${apiUrl}/v1/connect/auth`,
+      resources,
     };
   })();
   return {
@@ -1152,19 +1157,8 @@ async function ensureBrowserSession() {
 function walletView(request: WalletRequest): ConnectionView {
   const params = record(firstParam(request.rpc.params));
   const capabilities = record(params.capabilities);
-  const auth = record(capabilities.auth);
-  const resources = Array.isArray(auth.resources)
-    ? auth.resources.filter((value): value is string => typeof value === "string")
-    : [];
-  const requestedConnectors = [...new Set(resources.flatMap((resource) => {
-    if (resource.startsWith(connectorResourcePrefix)) {
-      return [resource.slice(connectorResourcePrefix.length)];
-    }
-    if (resource.startsWith(connectorsResourcePrefix)) {
-      return resource.slice(connectorsResourcePrefix.length).split(",");
-    }
-    return [];
-  }).filter(isConnectorId))];
+  const { app, resources } = walletConnectContext(request);
+  const requestedConnectors = requestedConnectorIdsFromResources(resources);
   const access = record(capabilities.authorizeAccessKey);
   const limits = array(access.limits).map((value) => {
     const limit = record(value);
@@ -1202,7 +1196,7 @@ function walletView(request: WalletRequest): ConnectionView {
   return {
     id: request.id,
     type: "connect",
-    app: registeredApp(request.origin, window.location.origin),
+    app,
     accountAddress: "0x0000000000000000000000000000000000000000",
     auth: {
       resources,
@@ -1214,14 +1208,28 @@ function walletView(request: WalletRequest): ConnectionView {
       connectors: requestedConnectors.map(connectorDefinition),
     },
     ...(preparedAccessKey ? { accessKey: preparedAccessKey } : {}),
-    mpp: {
-      token: primary.token,
-      symbol: "MACHUSD",
-      limit: primary.limit,
-      period: primary.period ?? 86_400,
-      maxPerRequest: 250_000n,
-    },
+    ...(resources.includes("urn:nanocodex:mpp:machusd:spend") ? {
+      mpp: {
+        token: primary.token,
+        symbol: "MACHUSD",
+        limit: primary.limit,
+        period: primary.period ?? 86_400,
+        maxPerRequest: 250_000n,
+      },
+    } : {}),
   };
+}
+
+function requestedConnectorIdsFromResources(resources: readonly string[]): ConnectorId[] {
+  return [...new Set(resources.flatMap((resource) => {
+    if (resource.startsWith(connectorResourcePrefix)) {
+      return [resource.slice(connectorResourcePrefix.length)];
+    }
+    if (resource.startsWith(connectorsResourcePrefix)) {
+      return resource.slice(connectorsResourcePrefix.length).split(",");
+    }
+    return [];
+  }).filter(isConnectorId))];
 }
 
 function connectorDefinition(id: ConnectorId) {
@@ -1239,6 +1247,22 @@ function isConnectorId(value: string): value is ConnectorId {
 function connectApiUrl(request: WalletRequest) {
   const params = record(firstParam(request.rpc.params));
   return connectApiOrigin(record(params.capabilities).auth, window.location.origin);
+}
+
+function walletConnectContext(request: WalletRequest) {
+  const params = record(firstParam(request.rpc.params));
+  const auth = record(record(params.capabilities).auth);
+  const resources = Array.isArray(auth.resources)
+    ? auth.resources.filter((value): value is string => typeof value === "string")
+    : [];
+  const app = registeredApp(
+    request.origin,
+    request.appId,
+    window.location.href,
+    window.parent === window,
+  );
+  signedAppResources(resources, app);
+  return { app, resources };
 }
 
 function isConnectorCompletion(value: unknown): value is Readonly<{
@@ -1260,8 +1284,12 @@ function isConnectorCompletion(value: unknown): value is Readonly<{
 function walletRequestPolicyError(request: ReturnType<typeof parentDialog.getRequest>) {
   if (!request || request.type === "machineUsdFund") return undefined;
   try {
-    registeredApp(request.origin, window.location.origin);
-    if (request.type === "walletConnect") connectApiUrl(request);
+    if (request.type === "walletConnect") {
+      walletConnectContext(request);
+      connectApiUrl(request);
+    } else {
+      registeredApp(request.origin, request.appId, window.location.href, window.parent === window, false);
+    }
     return undefined;
   } catch (error) {
     return errorMessage(error);

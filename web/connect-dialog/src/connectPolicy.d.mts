@@ -1,12 +1,20 @@
 export const productionConnectApiOrigin: "https://nanocodex-connect-api.gakonst.workers.dev";
 
 export type RegisteredApp = Readonly<{
-  id: "atlas-workspace";
-  name: "Atlas Workspace";
+  id: string;
+  name: string;
   origin: string;
 }>;
 
-export function registeredApp(embeddingOrigin: string, dialogOrigin: string): RegisteredApp;
+export function registeredApp(
+  embeddingOrigin: string,
+  appId: string,
+  dialogUrl: string,
+  isTopLevel: boolean,
+  allowDynamicPopup?: boolean,
+): RegisteredApp;
+export function isPopupPresentation(dialogUrl: string, isTopLevel: boolean): boolean;
+export function signedAppResources(resources: unknown, app: RegisteredApp): readonly unknown[];
 export function connectApiOrigin(auth: unknown, dialogOrigin: string): string;
 export function sanitizeWalletResult(result: unknown): Readonly<{
   accounts: readonly Readonly<{

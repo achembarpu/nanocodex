@@ -6,9 +6,11 @@ import {
   appVisibilityPermissions,
   connectApiOrigin,
   isLocalDevelopmentOrigin,
+  isPopupPresentation,
   productionConnectApiOrigin,
   registeredApp,
   sanitizeWalletResult,
+  signedAppResources,
   usesBrowserLocalWebAuthn,
 } from "../src/connectPolicy.mjs";
 
@@ -29,6 +31,8 @@ test("only standalone loopback dialogs use the browser-local WebAuthn ceremony",
 });
 
 const playground = "https://nanocodex-connect-playground.gakonst.workers.dev";
+const chromeExtension = "chrome-extension://jpkimkgbgbpcaldbnhlhbkbadmpeffle";
+const productionDialog = "https://nanocodex.gakonst.workers.dev/connect-dialog/?mode=iframe";
 
 test("existing-account login targets only credentials retained by this dialog", () => {
   assert.deepEqual(accountLoginCapabilities([
@@ -92,20 +96,55 @@ test("production Connect policy pins the API and registered embedding app", () =
     challenge: `${productionConnectApiOrigin}/v1/connect/auth/challenge`,
     url: `${productionConnectApiOrigin}/v1/connect/auth`,
   }, "https://nanocodex-connect.gakonst.workers.dev"), productionConnectApiOrigin);
-  assert.deepEqual(registeredApp(playground, "https://nanocodex-connect.gakonst.workers.dev"), {
+  assert.deepEqual(registeredApp(playground, "atlas-workspace", productionDialog, false), {
     id: "atlas-workspace",
     name: "Atlas Workspace",
     origin: playground,
   });
+  assert.deepEqual(registeredApp(chromeExtension, "nanocodex-chrome", productionDialog, false), {
+    id: "nanocodex-chrome",
+    name: "Nanocodex for Chrome",
+    origin: chromeExtension,
+  });
 });
 
-test("production Connect policy rejects caller-controlled auth and app origins", () => {
+test("only top-level popup dialogs admit unknown secure app origins", () => {
   assert.throws(() => connectApiOrigin({
     challenge: `${productionConnectApiOrigin}/v1/connect/auth/challenge`,
     verify: `${productionConnectApiOrigin}/v1/connect/auth`,
     logout: "https://attacker.example/collect",
   }, "https://nanocodex-connect.gakonst.workers.dev"), /production Connect API/);
-  assert.throws(() => registeredApp("https://attacker.example", "https://nanocodex-connect.gakonst.workers.dev"), /not registered/);
+  assert.deepEqual(registeredApp(
+    "https://consumer.example",
+    "consumer-example",
+    "https://nanocodex.gakonst.workers.dev/connect-dialog/?mode=popup",
+    true,
+  ), {
+    id: "consumer-example",
+    name: "consumer.example",
+    origin: "https://consumer.example",
+  });
+  assert.deepEqual(registeredApp(
+    "chrome-extension://abcdefghijklmnopabcdefghijklmnop",
+    "consumer-extension",
+    "https://nanocodex.gakonst.workers.dev/connect-dialog/?mode=popup",
+    true,
+  ).origin, "chrome-extension://abcdefghijklmnopabcdefghijklmnop");
+  assert.throws(() => registeredApp(
+    "https://consumer.example",
+    "consumer-example",
+    "https://nanocodex.gakonst.workers.dev/connect-dialog/?mode=popup",
+    false,
+  ), /not registered/);
+  assert.throws(() => registeredApp(
+    "http://attacker.example",
+    "attacker",
+    "https://nanocodex.gakonst.workers.dev/connect-dialog/?mode=popup",
+    true,
+  ), /not registered/);
+  assert.equal(isPopupPresentation("https://dialog.example/?mode=popup", true), true);
+  assert.equal(isPopupPresentation("https://dialog.example/?mode=popup", false), false);
+  assert.equal(isPopupPresentation("https://dialog.example/?mode=iframe", true), false);
 });
 
 test("loopback auth and apps are accepted only by a loopback dialog", () => {
@@ -117,12 +156,40 @@ test("loopback auth and apps are accepted only by a loopback dialog", () => {
     challenge: "http://127.0.0.1:8787/v1/connect/auth/challenge",
     verify: "http://127.0.0.1:8787/v1/connect/auth",
   }, "http://127.0.0.1:4177"), "http://127.0.0.1:8787");
-  assert.equal(registeredApp("http://localhost:4173", "http://127.0.0.1:4177").id, "atlas-workspace");
+  assert.equal(registeredApp(
+    "http://localhost:4173",
+    "atlas-workspace",
+    "http://127.0.0.1:4177/connect-dialog/?mode=iframe",
+    false,
+  ).id, "atlas-workspace");
   assert.throws(() => connectApiOrigin({ url: "http://127.0.0.1:8787/v1/connect/auth" }, "https://dialog.example"), /production Connect API/);
   assert.throws(() => connectApiOrigin({
     challenge: "http://127.0.0.1:8787/v1/connect/auth/challenge",
     verify: "http://localhost:8787/v1/connect/auth",
   }, "http://127.0.0.1:4177"), /share one development origin/);
+});
+
+test("signed app and origin resources bind the dialog app exactly once", () => {
+  const app = registeredApp(
+    "https://consumer.example",
+    "consumer-example",
+    "https://nanocodex.gakonst.workers.dev/connect-dialog/?mode=popup",
+    true,
+  );
+  const resources = [
+    "urn:nanocodex:agent:run",
+    "urn:nanocodex:app:consumer-example",
+    "urn:nanocodex:origin:https%3A%2F%2Fconsumer.example",
+  ];
+  assert.strictEqual(signedAppResources(resources, app), resources);
+  assert.throws(() => signedAppResources([
+    "urn:nanocodex:app:other-app",
+    "urn:nanocodex:origin:https%3A%2F%2Fconsumer.example",
+  ], app), /do not match/);
+  assert.throws(() => signedAppResources([
+    "urn:nanocodex:app:consumer-example",
+    "urn:nanocodex:origin:https%3A%2F%2Fother.example",
+  ], app), /do not match/);
 });
 
 test("wallet result sanitization retains signatures without exposing the account bearer", () => {

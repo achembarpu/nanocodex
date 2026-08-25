@@ -37,6 +37,7 @@ export function transport(client, options) {
         throw new Error("Nanocodex Connect returned no model ticket.");
       }
       const url = new URL(`/v1/grants/${grantId}/model`, apiOrigin);
+      url.searchParams.set("app_id", client.appId);
       url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
       url.searchParams.set("session_id", sessionId);
       const WebSocketImpl = globalThis.WebSocket;

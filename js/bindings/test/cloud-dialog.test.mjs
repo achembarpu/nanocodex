@@ -16,7 +16,12 @@ test("the default Connect dialog stays embedded and accepts responses only from 
   try {
     assert.equal(Dialog.DEFAULT_HOST, DEFAULT_HOST);
     const dialog = Dialog.iframe().setup({ appId: "embedded-test" });
-    assert.equal(dialog.host, DEFAULT_HOST);
+    const source = new URL(dialog.host);
+    assert.equal(source.origin, DEFAULT_ORIGIN);
+    assert.equal(source.pathname, "/connect-dialog/");
+    assert.equal(source.searchParams.get("app_id"), "embedded-test");
+    assert.equal(source.searchParams.get("origin"), "https://consumer.example");
+    assert.equal(source.searchParams.get("mode"), "iframe");
 
     const request = { id: "request-1", type: "connect" };
     const result = dialog.open(request);
@@ -27,7 +32,7 @@ test("the default Connect dialog stays embedded and accepts responses only from 
 
     assert.equal(modal.tagName, "DIALOG");
     assert.equal(frame.tagName, "IFRAME");
-    assert.equal(frame.src, DEFAULT_HOST);
+    assert.equal(frame.src, dialog.host);
     assert.match(frame.allow, new RegExp(`publickey-credentials-get ${DEFAULT_ORIGIN}`));
 
     frame.dispatch("load");
@@ -95,6 +100,7 @@ test("the popup Connect dialog opens the canonical host as a top-level wallet ta
     const source = new URL(opened[0].source);
     assert.equal(source.origin, DEFAULT_ORIGIN);
     assert.equal(source.pathname, "/connect-dialog/");
+    assert.equal(source.searchParams.get("app_id"), "popup-test");
     assert.equal(source.searchParams.get("origin"), "chrome-extension://extension-id");
     assert.equal(source.searchParams.get("mode"), "popup");
     assert.equal(dialog.host, source.toString());
@@ -106,6 +112,31 @@ test("the popup Connect dialog opens the canonical host as a top-level wallet ta
     dialog.hideWallet();
     assert.equal(popupWindow.closed, true);
     assert.equal(dialog.walletTarget(), undefined);
+  } finally {
+    globalThis.window = previousWindow;
+  }
+});
+
+test("popup URLs overwrite caller-controlled routing parameters", () => {
+  const previousWindow = globalThis.window;
+  const opened = [];
+  globalThis.window = {
+    location: { origin: "https://consumer.example" },
+    open(source) {
+      opened.push(source);
+      return { closed: false, focus() {} };
+    },
+  };
+
+  try {
+    const dialog = Dialog.popup({
+      host: `${DEFAULT_HOST}?app_id=attacker&origin=https://attacker.example&mode=iframe`,
+    }).setup({ appId: "consumer-example" });
+    dialog.showWallet();
+    const source = new URL(opened[0]);
+    assert.equal(source.searchParams.get("app_id"), "consumer-example");
+    assert.equal(source.searchParams.get("origin"), "https://consumer.example");
+    assert.equal(source.searchParams.get("mode"), "popup");
   } finally {
     globalThis.window = previousWindow;
   }

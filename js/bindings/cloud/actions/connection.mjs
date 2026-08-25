@@ -4,6 +4,7 @@ const CLOUD_ACCOUNT_PROVIDERS = Object.freeze(["github", "gmail", "gdrive", "x",
 const CONNECTOR_RESOURCE_PREFIX = "urn:nanocodex:connector:";
 const CONNECTORS_RESOURCE_PREFIX = "urn:nanocodex:connectors:";
 const APP_RESOURCE_PREFIX = "urn:nanocodex:app:";
+const APP_ORIGIN_RESOURCE_PREFIX = "urn:nanocodex:origin:";
 const AGENT_VISIBILITY_RESOURCES = Object.freeze({
   finalMessages: "urn:nanocodex:agent:output:final",
   actionSummaries: "urn:nanocodex:agent:output:actions",
@@ -27,25 +28,15 @@ export async function connect(client, options) {
   const auth = withConnectionResources(
     options.capabilities?.auth ?? client.auth,
     client.appId,
+    client.appOrigin,
     requestedConnectors,
     agentVisibility,
   );
   const walletAuth = delegateAuthVerification(auth);
-  const activeAccount = activeAccountAddress(client.provider);
-  const reusable = activeAccount
-    ? await registeredAccessKey(client, activeAccount, options.signal)
-    : undefined;
-  // Reuse only keys already registered with the Connect control plane. Older
-  // browser-only keys are replaced in this same passkey ceremony, after which
-  // both the private signer and public grant record remain durable.
-  const authorizeAccessKey = options.capabilities?.authorizeAccessKey
-    ?? (reusable
-      ? undefined
-      : freshAccessKeyAuthorization(client.accessKey?.authorize));
-  await client.dialog.waitForWallet?.();
   client.dialog.showWallet?.();
   let connected = false;
   try {
+    await client.dialog.waitForWallet?.();
     const activeAccount = activeAccountAddress(client.provider);
     const reusable = activeAccount
       ? await registeredAccessKey(client, activeAccount, options.signal)
@@ -150,14 +141,15 @@ function normalizeAgentVisibility(agent) {
   });
 }
 
-function withConnectionResources(auth, appId, requestedConnectors, agentVisibility) {
+function withConnectionResources(auth, appId, appOrigin, requestedConnectors, agentVisibility) {
   const configured = typeof auth === "object" && auth !== null
     ? (auth.resources ?? []).filter((resource) =>
       !Object.values(AGENT_VISIBILITY_RESOURCES).includes(resource)
       && !resource.startsWith(AGENT_VISIBILITY_RESOURCE_PREFIX)
       && !resource.startsWith(CONNECTOR_RESOURCE_PREFIX)
       && !resource.startsWith(CONNECTORS_RESOURCE_PREFIX)
-      && !resource.startsWith(APP_RESOURCE_PREFIX))
+      && !resource.startsWith(APP_RESOURCE_PREFIX)
+      && !resource.startsWith(APP_ORIGIN_RESOURCE_PREFIX))
     : [];
   const visibility = Object.entries(AGENT_VISIBILITY_NAMES)
     .filter(([name]) => agentVisibility[name])
@@ -165,6 +157,7 @@ function withConnectionResources(auth, appId, requestedConnectors, agentVisibili
   const resources = [...new Set([
     ...configured,
     `${APP_RESOURCE_PREFIX}${encodeURIComponent(appId)}`,
+    ...(appOrigin ? [`${APP_ORIGIN_RESOURCE_PREFIX}${encodeURIComponent(appOrigin)}`] : []),
     ...(requestedConnectors.length === 0
       ? []
       : [`${CONNECTORS_RESOURCE_PREFIX}${requestedConnectors.join(",")}`]),
@@ -209,7 +202,7 @@ async function isRegisteredAccessKey(client, accountAddress, keyId, signal) {
   try {
     const value = await client.request({
       method: "GET",
-      path: `/v1/access-keys/${accountAddress}/${keyId}`,
+      path: `/v1/access-keys/${accountAddress}/${keyId}?app_id=${encodeURIComponent(client.appId)}`,
       signal,
     });
     return value?.registered === true;

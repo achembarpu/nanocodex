@@ -35,6 +35,7 @@ export class NonceStorage extends Kv.NonceStorage {
 }
 
 const PLAYGROUND_ORIGIN = "https://nanocodex-connect-playground.gakonst.workers.dev";
+const CHROME_EXTENSION_ORIGIN = "chrome-extension://jpkimkgbgbpcaldbnhlhbkbadmpeffle";
 const DIALOG_ORIGIN = "https://nanocodex.gakonst.workers.dev";
 const API_ORIGIN = "https://nanocodex-connect-api.gakonst.workers.dev";
 const NANOCODEX_ORIGIN = "https://nanocodex.gakonst.workers.dev";
@@ -68,6 +69,8 @@ const AGENT_VISIBILITY_RESOURCES = {
   "urn:nanocodex:agent:trace:read": "agent.trace.read",
 } as const;
 const AGENT_VISIBILITY_RESOURCE_PREFIX = "urn:nanocodex:agent:visibility:";
+const APP_RESOURCE_PREFIX = "urn:nanocodex:app:";
+const APP_ORIGIN_RESOURCE_PREFIX = "urn:nanocodex:origin:";
 const AGENT_VISIBILITY_NAMES = {
   reply: "agent.output.final",
   actions: "agent.output.actions",
@@ -80,8 +83,11 @@ const CONNECTOR_STATE_TTL = 10 * 60;
 const CONNECT_APPROVAL_TTL = 10 * 60;
 const MODEL_TICKET_TTL = 60;
 const REALTIME_TICKET_TTL = 60;
+const MODEL_PROTOCOL = "nanocodex-connect-v1";
+const MODEL_TICKET_PROTOCOL_PREFIX = "nanocodex-ticket.";
 const ACCOUNT_LINK_TTL = 5 * 60;
 const REGISTERED_APP_ID = "atlas-workspace";
+const CHROME_EXTENSION_APP_ID = "nanocodex-chrome";
 const MAX_BROKER_BODY_BYTES = 16 * 1024;
 const MAX_CONNECTOR_REQUEST_BODY_BYTES = 256 * 1024;
 const MAX_CONNECTOR_RESPONSE_BODY_BYTES = 1024 * 1024;
@@ -151,6 +157,8 @@ type AuthRequestContext = Readonly<{
 }>;
 type ConnectApproval = Readonly<{
   accountAddress: `0x${string}`;
+  appId: string;
+  appOrigin: string;
   brokerUserId?: string;
   connectedConnectors?: readonly ConnectorId[];
   durableAgentId?: string;
@@ -176,6 +184,7 @@ type Env = Readonly<{
 type GrantRecord = Readonly<{
   id: `0x${string}`;
   appId: string;
+  appOrigin: string;
   accountAddress: `0x${string}`;
   brokerUserId: string;
   agentId: string;
@@ -193,6 +202,7 @@ type GrantRecord = Readonly<{
 type GrantPrincipal = Readonly<{
   accountAddress: `0x${string}`;
   appId: string;
+  appOrigin: string;
   grantId: `0x${string}`;
 }>;
 type ConnectAgentRecord = Readonly<{ agentId: string }>;
@@ -208,8 +218,10 @@ type ConnectSubjectRecord = Readonly<{
 type AccessKeyRecord = Readonly<{
   accountAddress: `0x${string}`;
   appId: string;
+  appOrigin: string;
   accessKey: Record<string, unknown>;
 }>;
+type CallerApp = Readonly<{ appId: string; origin: string }>;
 type ModelTicket = Readonly<{
   grantId: `0x${string}`;
   sessionId: string;
@@ -336,13 +348,14 @@ export default {
 
       const accessKeyStatus = url.pathname.match(/^\/v1\/access-keys\/(0x[0-9a-fA-F]{40})\/(0x[0-9a-fA-F]{40})$/);
       if (request.method === "GET" && accessKeyStatus) {
-        requireRegisteredAppOrigin(request);
+        const app = requireCallerApp(request, url.searchParams.get("app_id"));
         const accountAddress = address(accessKeyStatus[1]);
         const keyId = address(accessKeyStatus[2]);
         const stored = await store.get<AccessKeyRecord>(accessKeyStorageKey(accountAddress, keyId));
         return cors(Response.json({
           registered: isAccessKeyRecord(stored)
-            && stored.appId === REGISTERED_APP_ID
+            && stored.appId === app.appId
+            && stored.appOrigin === app.origin
             && stored.accountAddress.toLowerCase() === accountAddress.toLowerCase(),
         }), request);
       }
@@ -545,12 +558,9 @@ async function createConnection(
   const startedAt = performance.now();
   const timings: Array<readonly [string, number]> = [];
   const mark = (name: string) => timings.push([name, performance.now()]);
-  requireRegisteredAppOrigin(request);
   const body = await json(request);
   const appId = requiredString(body.app_id, "app_id");
-  if (appId !== REGISTERED_APP_ID) {
-    throw new ApiFailure(403, "app_not_registered", "The requesting app is not registered with Nanocodex Connect.");
-  }
+  const app = requireCallerApp(request, appId);
   const accountAddress = address(body.account_address);
   const approvalId = requiredString(body.approval_id, "approval_id");
   const permission = requiredString(body.permission, "permission");
@@ -560,10 +570,19 @@ async function createConnection(
   const requested = requestedConnectors(body.requested_connectors);
   const approval = await takeConnectApproval(store, approvalId, accountAddress);
   mark("approval");
+  if (approval.appId !== app.appId || approval.appOrigin !== app.origin) {
+    throw new ApiFailure(403, "app_not_approved", "The signed approval is not bound to this app origin.");
+  }
   requireApprovedCapabilities(approval.resources, appId, requested);
   const agentCapabilities = approvedAgentCapabilities(approval.resources);
 
-  const { accessKey, persist } = await connectionAccessKey(store, body, approval, appId, accountAddress);
+  const { accessKey, persist } = await connectionAccessKey(
+    store,
+    body,
+    approval,
+    app,
+    accountAddress,
+  );
   mark("access-key");
   const expiresAt = safeInteger(accessKey.expiry, "access_key.expiry");
   const now = Math.floor(Date.now() / 1000);
@@ -581,14 +600,17 @@ async function createConnection(
   }
   const retainedConnectors = new Set(approval.connectedConnectors ?? []);
   const connectorsReady = requested.every((connector) => retainedConnectors.has(connector));
+  const appScope = await scopedAppId(app);
   const [connectors, durableAgentId, egressSubject] = await Promise.all([
     connectorsReady
       ? Promise.resolve([...requested])
       : connectedRequestedConnectors(env, identity.userId, requested),
-    isConnectAgentId(approval.durableAgentId)
-      ? Promise.resolve(approval.durableAgentId)
-      : connectManagedAgent(env, store, identity.userId, appId),
-    connectEgressSubject(env, store, identity.userId, appId),
+    appId === CHROME_EXTENSION_APP_ID
+      ? agentId(accountAddress)
+      : isConnectAgentId(approval.durableAgentId)
+        ? Promise.resolve(approval.durableAgentId)
+        : connectManagedAgent(env, store, identity.userId, appScope),
+    connectEgressSubject(env, store, identity.userId, appScope),
   ]);
   mark("capabilities");
   const grantId = await digestHex(`grant:${randomSubject()}`);
@@ -596,6 +618,7 @@ async function createConnection(
   const grant: GrantRecord = {
     id: grantId,
     appId,
+    appOrigin: app.origin,
     accountAddress,
     brokerUserId: identity.userId,
     agentId: durableAgentId,
@@ -621,11 +644,13 @@ async function createConnection(
       store.create(`grant-token:${grantToken}`, {
         accountAddress,
         appId,
+        appOrigin: app.origin,
         grantId: grant.id,
       } satisfies GrantPrincipal, { ttl: grantTtl }),
       ...(persist ? [store.set(accessKeyStorageKey(accountAddress, accessKey.key_id), {
         accountAddress,
         appId,
+        appOrigin: app.origin,
         accessKey,
       } satisfies AccessKeyRecord, { ttl: grantTtl })] : []),
     ]);
@@ -669,7 +694,7 @@ async function connectionAccessKey(
   store: Kv.Kv,
   body: Record<string, unknown>,
   approval: ConnectApproval,
-  appId: string,
+  app: CallerApp,
   accountAddress: `0x${string}`,
 ): Promise<{ accessKey: Record<string, unknown>; persist: boolean }> {
   const hasNew = body.key_authorization !== undefined || body.signed_key_authorization !== undefined;
@@ -688,7 +713,7 @@ async function connectionAccessKey(
       throw new ApiFailure(403, "access_key_not_approved", "The access key does not match the signed Connect approval.");
     }
     const accessKey = accessKeyWire(body.key_authorization, serialized);
-    validateGrantAccessKey(accessKey);
+    validateGrantAccessKey(accessKey, app.appId);
     return { accessKey, persist: true };
   }
 
@@ -702,7 +727,8 @@ async function connectionAccessKey(
   const claimedExpiry = safeInteger(body.reuse_access_key.expiry, "reuse_access_key.expiry");
   const stored = await store.get<AccessKeyRecord>(accessKeyStorageKey(accountAddress, keyId));
   if (!isAccessKeyRecord(stored)
-    || stored.appId !== appId
+    || stored.appId !== app.appId
+    || stored.appOrigin !== app.origin
     || stored.accountAddress.toLowerCase() !== accountAddress.toLowerCase()) {
     throw new ApiFailure(403, "access_key_unavailable", "The reusable access key is unavailable for this app and account.");
   }
@@ -715,11 +741,11 @@ async function connectionAccessKey(
     stored.accessKey,
     hex(stored.accessKey.authorization, "stored access_key.authorization"),
   );
-  validateGrantAccessKey(normalized);
+  validateGrantAccessKey(normalized, app.appId);
   return { accessKey: normalized, persist: false };
 }
 
-function validateGrantAccessKey(accessKey: Record<string, unknown>): void {
+function validateGrantAccessKey(accessKey: Record<string, unknown>, appId: string): void {
   if (accessKey.chain_id !== "4217") {
     throw new ApiFailure(403, "invalid_access_key_chain", "The access key must be authorized for Tempo chain 4217.");
   }
@@ -730,6 +756,12 @@ function validateGrantAccessKey(accessKey: Record<string, unknown>): void {
   hex(accessKey.authorization, "access_key.authorization");
   if (!Array.isArray(accessKey.limits) || !Array.isArray(accessKey.scopes)) {
     throw new ApiFailure(403, "invalid_access_key_policy", "The access key policy is incomplete.");
+  }
+  if (appId === CHROME_EXTENSION_APP_ID) {
+    if (accessKey.limits.length !== 0 || accessKey.scopes.length !== 0) {
+      throw new ApiFailure(403, "invalid_access_key_policy", "The Chrome extension access key cannot spend funds or call contracts.");
+    }
+    return;
   }
   const limits = new Map<string, { limit: string; period?: number }>();
   for (const value of accessKey.limits) {
@@ -1712,17 +1744,17 @@ async function openGrantModelWebSocket(
   url: URL,
   grantId: `0x${string}`,
 ): Promise<Response> {
-  requirePlaygroundOrigin(request);
+  const app = requireCallerApp(request, url.searchParams.get("app_id"));
   if (request.method !== "GET" || request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
     throw new ApiFailure(426, "websocket_required", "The model endpoint requires a WebSocket upgrade.");
   }
   const keys = [...url.searchParams.keys()];
-  if (keys.some((key) => key !== "session_id" && key !== "ticket")
-    || url.searchParams.getAll("session_id").length !== 1
-    || url.searchParams.getAll("ticket").length !== 1) {
+  if (keys.some((key) => key !== "app_id" && key !== "session_id")
+    || url.searchParams.getAll("app_id").length !== 1
+    || url.searchParams.getAll("session_id").length !== 1) {
     throw new ApiFailure(400, "invalid_model_request", "The model connection query is invalid.");
   }
-  const ticketValue = boundedIdentifier(url.searchParams.get("ticket"), "ticket", 64);
+  const ticketValue = modelTicketProtocol(request);
   const sessionId = boundedIdentifier(url.searchParams.get("session_id"), "session_id", 128);
   if (!store.take) throw new ApiFailure(500, "model_ticket_unavailable", "One-time model tickets are unavailable.");
   const ticket = await store.take<ModelTicket>(`model-ticket:${ticketValue}`);
@@ -1732,7 +1764,11 @@ async function openGrantModelWebSocket(
     throw new ApiFailure(403, "invalid_model_ticket", "The one-time model ticket is invalid or expired.");
   }
   const grant = await store.get<GrantRecord>(`grant:${grantId}`);
-  if (!isGrantRecord(grant) || grant.status !== "active" || !grant.capabilities.includes("chatgpt")) {
+  if (!isGrantRecord(grant)
+    || grant.appId !== app.appId
+    || grant.appOrigin !== app.origin
+    || grant.status !== "active"
+    || !grant.capabilities.includes("chatgpt")) {
     throw new ApiFailure(403, "chatgpt_not_granted", "The active grant does not include ChatGPT.");
   }
   remainingGrantTtl(grant);
@@ -1761,7 +1797,27 @@ async function openGrantModelWebSocket(
   upstream.accept();
   server.accept();
   superviseGrantSocket(store, grant, server, upstream);
-  return new Response(null, { status: 101, webSocket: downstream } as ResponseInit);
+  return new Response(null, {
+    headers: { "sec-websocket-protocol": MODEL_PROTOCOL },
+    status: 101,
+    webSocket: downstream,
+  } as ResponseInit);
+}
+
+function modelTicketProtocol(request: Request): string {
+  const protocols = (request.headers.get("sec-websocket-protocol") ?? "")
+    .split(",")
+    .map((value) => value.trim())
+    .filter(Boolean);
+  const ticketProtocols = protocols.filter((value) => value.startsWith(MODEL_TICKET_PROTOCOL_PREFIX));
+  if (protocols.length !== 2 || protocols[0] !== MODEL_PROTOCOL || ticketProtocols.length !== 1) {
+    throw new ApiFailure(400, "invalid_model_request", "The model connection protocols are invalid.");
+  }
+  return boundedIdentifier(
+    ticketProtocols[0].slice(MODEL_TICKET_PROTOCOL_PREFIX.length),
+    "ticket",
+    64,
+  );
 }
 
 function superviseGrantSocket(
@@ -1943,8 +1999,10 @@ async function authenticatedGrant(
   }
   const value = await resolved.json() as { principal?: unknown; grant?: unknown };
   const principal = value.principal;
+  const app = requireCallerApp(request);
   if (!isGrantPrincipal(principal)
-    || principal.appId !== REGISTERED_APP_ID
+    || principal.appId !== app.appId
+    || principal.appOrigin !== app.origin
     || (requestedGrantId && principal.grantId.toLowerCase() !== requestedGrantId.toLowerCase())) {
     throw new ApiFailure(401, "invalid_grant_token", "The grant session is invalid.");
   }
@@ -1952,6 +2010,7 @@ async function authenticatedGrant(
   if (!isGrantRecord(grant)
     || grant.id.toLowerCase() !== principal.grantId.toLowerCase()
     || grant.appId !== principal.appId
+    || grant.appOrigin !== principal.appOrigin
     || grant.accountAddress.toLowerCase() !== principal.accountAddress.toLowerCase()) {
     throw new ApiFailure(401, "invalid_grant_token", "The grant session is not bound to this grant, app, and account.");
   }
@@ -1967,15 +2026,16 @@ function grantBearerToken(request: Request): string {
 
 function isGrantPrincipal(value: unknown): value is GrantPrincipal {
   return isRecord(value)
-    && typeof value.appId === "string"
+    && validAppId(value.appId)
+    && isPublicAppOrigin(value.appOrigin)
     && /^0x[0-9a-fA-F]{40}$/.test(String(value.accountAddress))
     && /^0x[0-9a-fA-F]{64}$/.test(String(value.grantId));
 }
 
 function isGrantRecord(value: unknown): value is GrantRecord {
   return isRecord(value)
-    && typeof value.appId === "string"
-    && value.appId.length > 0
+    && validAppId(value.appId)
+    && isPublicAppOrigin(value.appOrigin)
     && /^0x[0-9a-fA-F]{64}$/.test(String(value.id))
     && /^0x[0-9a-fA-F]{40}$/.test(String(value.accountAddress))
     && isBrokerUserId(value.brokerUserId)
@@ -2002,7 +2062,8 @@ function isBrokerUserId(value: unknown): value is string {
 
 function isAccessKeyRecord(value: unknown): value is AccessKeyRecord {
   return isRecord(value)
-    && typeof value.appId === "string"
+    && validAppId(value.appId)
+    && isPublicAppOrigin(value.appOrigin)
     && /^0x[0-9a-fA-F]{40}$/.test(String(value.accountAddress))
     && isRecord(value.accessKey);
 }
@@ -2543,6 +2604,9 @@ function createAuth(env: Env, store: Kv.Kv, context?: AuthRequestContext) {
       const accountAddress = address(authenticated);
       const approvalId = randomSubject();
       const resources = siweResources(message);
+      const app = approvedAppContext(resources);
+      const chromeExtension = app.appId === CHROME_EXTENSION_APP_ID;
+      const appScope = await scopedAppId(app);
       let connectorsDuration = 0;
       let agentDuration = 0;
       const identity = await connectBrokerIdentity(env, store, accountAddress);
@@ -2550,9 +2614,9 @@ function createAuth(env: Env, store: Kv.Kv, context?: AuthRequestContext) {
       const resourcesStartedAt = performance.now();
       const [status, durableAgentId] = await Promise.all([
         measured(connectorStatuses(env, identity.userId), (duration) => { connectorsDuration = duration; }),
-        identity.linked
+        identity.linked && !chromeExtension
           ? measured(
-              connectManagedAgent(env, store, identity.userId, REGISTERED_APP_ID),
+              connectManagedAgent(env, store, identity.userId, appScope),
               (duration) => { agentDuration = duration; },
             )
           : Promise.resolve(undefined),
@@ -2561,6 +2625,8 @@ function createAuth(env: Env, store: Kv.Kv, context?: AuthRequestContext) {
       const connectedConnectors = CONNECTOR_IDS.filter((connector) => status.connectors[connector].connected);
       await store.set(`connect-approval:${approvalId}`, {
         accountAddress,
+        appId: app.appId,
+        appOrigin: app.origin,
         brokerUserId: identity.userId,
         connectedConnectors,
         ...(durableAgentId ? { durableAgentId } : {}),
@@ -2628,6 +2694,8 @@ async function takeConnectApproval(
 function isConnectApproval(value: unknown): value is ConnectApproval {
   return isRecord(value)
     && /^0x[0-9a-fA-F]{40}$/.test(String(value.accountAddress))
+    && validAppId(value.appId)
+    && isPublicAppOrigin(value.appOrigin)
     && (value.brokerUserId === undefined || isBrokerUserId(value.brokerUserId))
     && (value.connectedConnectors === undefined
       || (Array.isArray(value.connectedConnectors)
@@ -2657,6 +2725,26 @@ function requireApprovedCapabilities(
   if (requested.some((connector) => !approved.has(connector))) {
     throw new ApiFailure(403, "connector_not_approved", "A requested connector was not present in the signed SIWE approval.");
   }
+}
+
+function approvedAppContext(resources: readonly string[]): CallerApp {
+  const appIds = resourceValues(resources, APP_RESOURCE_PREFIX);
+  const origins = resourceValues(resources, APP_ORIGIN_RESOURCE_PREFIX);
+  if (appIds.length !== 1 || origins.length !== 1) {
+    throw new Error("The signed Connect approval must identify exactly one app and origin.");
+  }
+  return validateCallerApp(appIds[0]!, origins[0]!);
+}
+
+function resourceValues(resources: readonly string[], prefix: string): string[] {
+  return resources.flatMap((resource) => {
+    if (!resource.startsWith(prefix)) return [];
+    try {
+      return [decodeURIComponent(resource.slice(prefix.length))];
+    } catch {
+      throw new Error("The signed Connect app identity is malformed.");
+    }
+  });
 }
 
 function approvedAgentCapabilities(resources: readonly string[]): string[] {
@@ -2863,10 +2951,12 @@ function cors(response: Response, request: Request) {
   const origin = request.headers.get("origin");
   if (origin && allowedOrigin(request, origin)) {
     response.headers.set("access-control-allow-origin", origin);
-    response.headers.set("access-control-allow-credentials", "true");
+    if (!isChromeExtensionOrigin(origin)) {
+      response.headers.set("access-control-allow-credentials", "true");
+    }
     response.headers.set(
       "access-control-allow-headers",
-      "accept-payment, authorization, content-type, git-protocol, idempotency-key, payment-session, payment-session-snapshot, payment-signature",
+      "accept-payment, authorization, content-type, git-protocol, idempotency-key, payment-session, payment-session-snapshot, payment-signature, x-nanocodex-app-id",
     );
     response.headers.set("access-control-allow-methods", "GET, POST, PUT, DELETE, OPTIONS");
     response.headers.set("access-control-max-age", "86400");
@@ -2950,10 +3040,63 @@ function requirePlaygroundOrigin(request: Request): void {
   }
 }
 
-function requireRegisteredAppOrigin(request: Request): void {
-  if (request.headers.get("origin") !== PLAYGROUND_ORIGIN) {
-    throw new ApiFailure(403, "origin_denied", "This operation is available only to the registered Nanocodex app origin.");
+function requireCallerApp(request: Request, claimedAppId?: string | null): CallerApp {
+  const appId = claimedAppId ?? request.headers.get("x-nanocodex-app-id");
+  const origin = request.headers.get("origin");
+  if (!appId || !origin) {
+    throw new ApiFailure(403, "app_identity_required", "The Connect app id and origin are required.");
   }
+  try {
+    return validateCallerApp(appId, origin);
+  } catch (cause) {
+    throw cause instanceof ApiFailure
+      ? cause
+      : new ApiFailure(403, "origin_denied", "This origin cannot use Nanocodex Connect.");
+  }
+}
+
+function validateCallerApp(appId: unknown, origin: unknown): CallerApp {
+  if (!validAppId(appId) || !isPublicAppOrigin(origin)) {
+    throw new ApiFailure(403, "origin_denied", "This origin cannot use Nanocodex Connect.");
+  }
+  if (origin === PLAYGROUND_ORIGIN && appId !== REGISTERED_APP_ID) {
+    throw new ApiFailure(403, "app_identity_mismatch", "The registered app id does not match this origin.");
+  }
+  if (origin === CHROME_EXTENSION_ORIGIN && appId !== CHROME_EXTENSION_APP_ID) {
+    throw new ApiFailure(403, "app_identity_mismatch", "The registered app id does not match this origin.");
+  }
+  if (appId === REGISTERED_APP_ID
+    && origin !== PLAYGROUND_ORIGIN
+    && !isLoopbackOrigin(origin)) {
+    throw new ApiFailure(403, "app_identity_mismatch", "This app id is reserved for its registered origin.");
+  }
+  if (appId === CHROME_EXTENSION_APP_ID && !isChromeExtensionOrigin(origin)) {
+    throw new ApiFailure(403, "app_identity_mismatch", "This app id is reserved for Chrome extensions.");
+  }
+  return Object.freeze({ appId, origin });
+}
+
+function validAppId(value: unknown): value is string {
+  return typeof value === "string" && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value);
+}
+
+function isPublicAppOrigin(value: unknown): value is string {
+  if (typeof value !== "string") return false;
+  if (isChromeExtensionOrigin(value) || isLoopbackOrigin(value)) return true;
+  try {
+    const url = new URL(value);
+    return url.protocol === "https:" && url.origin === value && !url.username && !url.password;
+  } catch {
+    return false;
+  }
+}
+
+function isChromeExtensionOrigin(value: string | null): boolean {
+  return /^chrome-extension:\/\/[a-p]{32}$/.test(value ?? "");
+}
+
+async function scopedAppId(app: CallerApp): Promise<string> {
+  return `${app.appId}:${(await digestHex(app.origin)).slice(2, 18)}`;
 }
 
 function requireDialogOrigin(request: Request): void {
@@ -2981,8 +3124,8 @@ function developmentLoopbackOrigin(request: Request, origin: string | null): boo
 }
 
 function allowedOrigin(request: Request, origin: string): boolean {
-  return origin === PLAYGROUND_ORIGIN
-    || origin === DIALOG_ORIGIN
+  return origin === DIALOG_ORIGIN
+    || isPublicAppOrigin(origin)
     || developmentLoopbackOrigin(request, origin);
 }
 

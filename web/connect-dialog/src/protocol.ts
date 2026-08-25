@@ -1,7 +1,9 @@
 import type { Dialog } from "nanocodex/connect";
 import { Wata, postMessage } from "wata/host";
+import { registeredApp } from "./connectPolicy.mjs";
 
 type WalletRequestBase = Readonly<{
+  appId: string;
   id: string;
   origin: string;
   rpc: Readonly<{ method: string; params?: unknown }>;
@@ -71,12 +73,25 @@ export const parentDialog = Object.freeze({
 export function startWalletHost(actions: WalletHostActions) {
   if (started) return;
   started = true;
-  const origin = parseOrigin(new URL(window.location.href).searchParams.get("origin"));
-  if (!origin) return;
+  const url = new URL(window.location.href);
+  const origin = parseOrigin(singleParameter(url, "origin"));
+  const appId = parseAppId(singleParameter(url, "app_id"));
+  if (!origin || !appId) return;
+  const nonConnectApp = (() => {
+    try {
+      return registeredApp(origin, appId, url.href, window.parent === window, false);
+    } catch {
+      return undefined;
+    }
+  })();
   const wata = Wata.create({ transports: [postMessage({ targetOrigin: origin })] });
   const session = wata.start();
   session.onRequest((event) => {
     if (event.request.method === "wallet_disconnect") {
+      if (!nonConnectApp) {
+        void event.reject({ code: -32601, message: "Nanocodex Connect only accepts connection requests from this popup application." });
+        return;
+      }
       if (snapshot) {
         void event.reject({ code: -32002, message: "Nanocodex Connect already has a pending request." });
         return;
@@ -98,6 +113,7 @@ export function startWalletHost(actions: WalletHostActions) {
     }
     walletEvent = event as unknown as WalletEvent;
     publish(Object.freeze({
+      appId,
       id: crypto.randomUUID(),
       origin,
       rpc: event.request,
@@ -136,11 +152,23 @@ function settle() {
 function parseOrigin(value: string | null) {
   if (!value) return undefined;
   try {
-    const origin = new URL(value).origin;
-    return origin === value ? origin : undefined;
+    const url = new URL(value);
+    if (url.origin === value) return url.origin;
+    return url.protocol === "chrome-extension:" && url.href === value && /^[a-p]{32}$/.test(url.hostname)
+      ? value
+      : undefined;
   } catch {
     return undefined;
   }
+}
+
+function parseAppId(value: string | null) {
+  return value && /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(value) ? value : undefined;
+}
+
+function singleParameter(url: URL, name: string): string | null {
+  const values = url.searchParams.getAll(name);
+  return values.length === 1 ? values[0]! : null;
 }
 
 function isFundingMessage(value: unknown): value is Readonly<{
