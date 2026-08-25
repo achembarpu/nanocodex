@@ -119,7 +119,6 @@ export function ConnectAgentExperience({
               promptIntent="queue"
               retryAgent={retryAgent}
               showToolCalls={visibility.rawTraces}
-              voice={visibility.finalMessages}
             />
           </div>
         </div>
