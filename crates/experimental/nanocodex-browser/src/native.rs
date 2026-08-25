@@ -28,7 +28,7 @@ pub(crate) use artifacts::MAX_IMAGE_ARTIFACT_BYTES;
 
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use chromiumoxide::{
-    Browser as Chromium, Page,
+    Browser as Chromium, Command, Method, Page,
     browser::{BrowserConfig, BrowserConfigBuilder},
     cdp::{
         browser_protocol::{
@@ -65,7 +65,7 @@ use chromiumoxide::{
                 GetNavigationHistoryParams, HandleJavaScriptDialogParams,
                 NavigateToHistoryEntryParams, Viewport,
             },
-            target::{GetTargetsParams, SetAutoAttachParams, TargetId},
+            target::{FilterEntry, GetTargetsParams, SetAutoAttachParams, TargetFilter, TargetId},
             web_authn::{
                 AddCredentialParams, AddVirtualAuthenticatorParams, AuthenticatorId,
                 AuthenticatorProtocol, AuthenticatorTransport, Credential, EnableParams,
@@ -156,6 +156,7 @@ pub(crate) struct NativeBrowser {
     runtime_dir: TempDir,
     executable: Option<PathBuf>,
     cdp_endpoint: Option<Url>,
+    persistent_profile: Option<PathBuf>,
     brave_session: Option<BraveSession>,
     launch_brave_executable: bool,
     virtual_authenticator: Option<VirtualAuthenticator>,
@@ -176,6 +177,7 @@ pub(crate) struct NativeBrowser {
 struct BrowserState {
     next_sequence: u64,
     session: Option<Session>,
+    extension_paths: Vec<String>,
     closed: bool,
 }
 
@@ -468,6 +470,51 @@ struct HostPasskeyBroker {
 struct ActionLease {
     poisoned: Arc<AtomicBool>,
     completed: bool,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TriggerExtensionActionParams {
+    id: String,
+    target_id: String,
+}
+
+impl Method for TriggerExtensionActionParams {
+    fn identifier(&self) -> chromiumoxide::types::MethodId {
+        "Extensions.triggerAction".into()
+    }
+}
+
+#[derive(Debug, Deserialize)]
+struct TriggerExtensionActionReturns {}
+
+impl Command for TriggerExtensionActionParams {
+    type Response = TriggerExtensionActionReturns;
+}
+
+#[derive(Debug, Default, Serialize)]
+struct GetExtensionsParams {}
+
+impl Method for GetExtensionsParams {
+    fn identifier(&self) -> chromiumoxide::types::MethodId {
+        "Extensions.getExtensions".into()
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+struct ExtensionInfo {
+    id: String,
+    path: String,
+}
+
+#[derive(Debug, Deserialize)]
+struct GetExtensionsReturns {
+    extensions: Vec<ExtensionInfo>,
+}
+
+impl Command for GetExtensionsParams {
+    type Response = GetExtensionsReturns;
 }
 
 impl ActionLease {
@@ -929,6 +976,7 @@ fn trace_browser_configuration(owner: &NativeBrowser) {
     let value = serde_json::json!({
         "executable": owner.executable,
         "cdpEndpoint": owner.cdp_endpoint,
+        "persistentProfile": owner.persistent_profile,
         "braveSession": owner.brave_session.as_ref().map(BraveSession::trace_value),
         "launchBraveExecutable": owner.launch_brave_executable,
         "virtualAuthenticator": owner.virtual_authenticator.is_some(),
@@ -957,7 +1005,10 @@ impl Session {
         clippy::too_many_lines,
         reason = "launch ordering is security-sensitive: guards and observers precede any real navigation"
     )]
-    async fn launch(owner: &NativeBrowser) -> Result<Self, BrowserError> {
+    async fn launch(
+        owner: &NativeBrowser,
+        extension_paths: &[String],
+    ) -> Result<Self, BrowserError> {
         trace_browser_configuration(owner);
         let runtime_dir = owner.runtime_dir.path();
         let executable = owner.executable.as_deref();
@@ -974,7 +1025,10 @@ impl Session {
         let react_diagnostics = owner.react_diagnostics;
         let egress_policy = owner.egress_policy.clone();
         let file_root = owner.file_root.clone();
-        let profile = runtime_dir.join("profile");
+        let profile = owner
+            .persistent_profile
+            .clone()
+            .unwrap_or_else(|| runtime_dir.join("profile"));
         let output_dir = runtime_dir.join("screenshots");
         let download_dir = runtime_dir.join("downloads");
         tokio::fs::create_dir_all(&profile).await?;
@@ -1009,6 +1063,11 @@ impl Session {
                 config = profile_launch_config(config).arg("restore-last-session");
             } else {
                 config = isolated_launch_config(config);
+            }
+            if !extension_paths.is_empty() {
+                config = config
+                    .arg("enable-unsafe-extension-debugging")
+                    .extensions(extension_paths.iter().cloned());
             }
             if let Some(executable) = executable {
                 config = config.chrome_executable(executable);
@@ -1546,7 +1605,8 @@ impl Session {
     }
 
     fn validate_navigation(&self, url: &Url) -> Result<(), BrowserError> {
-        if self.allowed_origins.is_empty()
+        if url.scheme() == "chrome-extension"
+            || self.allowed_origins.is_empty()
             || self
                 .allowed_origins
                 .iter()
@@ -1591,6 +1651,73 @@ impl Session {
             resolved.push(candidate.to_string_lossy().into_owned());
         }
         Ok(resolved)
+    }
+
+    async fn extension_directory(&self, path: PathBuf) -> Result<String, BrowserError> {
+        let root = self
+            .file_root
+            .as_ref()
+            .ok_or(BrowserError::FileRootNotConfigured)?;
+        resolve_extension_directory(root, path).await
+    }
+
+    async fn loaded_extension_id(&self, path: &str) -> Result<String, BrowserError> {
+        self.browser
+            .execute(GetExtensionsParams::default())
+            .await?
+            .result
+            .extensions
+            .into_iter()
+            .find(|extension| extension.path == path)
+            .map(|extension| extension.id)
+            .ok_or_else(|| BrowserError::ExtensionNotLoaded {
+                path: PathBuf::from(path),
+            })
+    }
+
+    async fn extension_tab_target(&self, page_target_id: &str) -> Result<String, BrowserError> {
+        let page = self
+            .browser
+            .pages()
+            .await?
+            .into_iter()
+            .find(|page| page.target_id().as_ref() == page_target_id)
+            .ok_or_else(|| BrowserError::UnknownTab {
+                tab_id: page_target_id.to_owned(),
+            })?;
+        let url = page.url().await?.unwrap_or_default();
+        let title = page.get_title().await?.unwrap_or_default();
+        let tabs = self
+            .browser
+            .execute(
+                GetTargetsParams::builder()
+                    .filter(TargetFilter::new(vec![FilterEntry {
+                        exclude: Some(false),
+                        r#type: Some("tab".to_owned()),
+                    }]))
+                    .build(),
+            )
+            .await?;
+        let mut matches = tabs
+            .result
+            .target_infos
+            .into_iter()
+            .filter(|target| target.r#type == "tab" && target.url == url)
+            .collect::<Vec<_>>();
+        if matches.len() > 1 {
+            matches.retain(|target| target.title == title);
+        }
+        if matches.len() > 1 {
+            return Err(BrowserError::ExtensionTabTargetAmbiguous {
+                tab_id: page_target_id.to_owned(),
+            });
+        }
+        let target = matches
+            .pop()
+            .ok_or_else(|| BrowserError::ExtensionTabTargetUnavailable {
+                tab_id: page_target_id.to_owned(),
+            })?;
+        Ok(target.target_id.as_ref().to_owned())
     }
 
     #[allow(
@@ -3207,6 +3334,7 @@ impl NativeBrowser {
     pub(crate) fn new(
         executable: Option<PathBuf>,
         cdp_endpoint: Option<Url>,
+        persistent_profile: Option<PathBuf>,
         brave_session: Option<BraveSession>,
         launch_brave_executable: bool,
         virtual_authenticator: Option<VirtualAuthenticator>,
@@ -3228,6 +3356,7 @@ impl NativeBrowser {
                 .tempdir()?,
             executable,
             cdp_endpoint,
+            persistent_profile,
             brave_session,
             launch_brave_executable,
             virtual_authenticator,
@@ -3274,6 +3403,19 @@ impl NativeBrowser {
             trace_serialized("action.input", &action);
             if state.closed {
                 return Err(BrowserError::Closed);
+            }
+            if let BrowserAction::LoadExtension { path } = &action {
+                let root = self
+                    .file_root
+                    .as_ref()
+                    .ok_or(BrowserError::FileRootNotConfigured)?;
+                let path = resolve_extension_directory(root, path.clone()).await?;
+                if !state.extension_paths.contains(&path) {
+                    if let Some(session) = state.session.take() {
+                        session.close().await?;
+                    }
+                    state.extension_paths.push(path);
+                }
             }
             self.ensure_session(&mut state).await?;
             let session = state
@@ -3470,7 +3612,7 @@ impl NativeBrowser {
             );
         }
         if state.session.is_none() {
-            state.session = Some(Session::launch(self).await?);
+            state.session = Some(Session::launch(self, &state.extension_paths).await?);
         }
         Ok(())
     }
@@ -3555,6 +3697,7 @@ async fn execute_action(
             })
         }
         BrowserAction::Passkeys => {
+            session.sync_virtual_authenticators().await?;
             session.synchronize_virtual_credentials().await?;
             session.passkeys_result(sequence, BrowserActionName::Passkeys)
         }
@@ -3562,6 +3705,7 @@ async fn execute_action(
             credential_id,
             relying_party_id,
         } => {
+            session.sync_virtual_authenticators().await?;
             session.synchronize_virtual_credentials().await?;
             session.passkey_mode = session.resolve_passkey_mode(credential_id, relying_party_id)?;
             session.apply_passkey_mode().await?;
@@ -3569,6 +3713,7 @@ async fn execute_action(
         }
         BrowserAction::PasskeyNew => {
             session.persisted_virtual_credentials()?;
+            session.sync_virtual_authenticators().await?;
             session.synchronize_virtual_credentials().await?;
             session.passkey_mode = BrowserPasskeyMode::New;
             session.apply_passkey_mode().await?;
@@ -3576,6 +3721,7 @@ async fn execute_action(
         }
         BrowserAction::PasskeyAuto => {
             session.persisted_virtual_credentials()?;
+            session.sync_virtual_authenticators().await?;
             session.synchronize_virtual_credentials().await?;
             session.passkey_mode = BrowserPasskeyMode::Auto;
             session.apply_passkey_mode().await?;
@@ -5116,11 +5262,39 @@ return {
         }),
         BrowserAction::SelectTab { tab_id } => {
             session.select_tab(&tab_id).await?;
+            session.sync_virtual_authenticators().await?;
             Ok(action_result(sequence, BrowserActionName::SelectTab))
         }
         BrowserAction::CloseTab { tab_id } => {
             session.close_tab(&tab_id).await?;
             Ok(action_result(sequence, BrowserActionName::CloseTab))
+        }
+        BrowserAction::LoadExtension { path } => {
+            let path = session.extension_directory(path).await?;
+            Ok(BrowserActionResult::Extension {
+                sequence,
+                executed: true,
+                extension_id: session.loaded_extension_id(&path).await?,
+            })
+        }
+        BrowserAction::TriggerExtensionAction {
+            extension_id,
+            tab_id,
+        } => {
+            let page_target_id =
+                tab_id.unwrap_or_else(|| session.page.target_id().as_ref().to_owned());
+            let target_id = session.extension_tab_target(&page_target_id).await?;
+            session
+                .browser
+                .execute(TriggerExtensionActionParams {
+                    id: extension_id,
+                    target_id,
+                })
+                .await?;
+            Ok(action_result(
+                sequence,
+                BrowserActionName::TriggerExtensionAction,
+            ))
         }
         BrowserAction::Dialog => {
             let dialog = session
@@ -7004,6 +7178,7 @@ const fn requires_action_completion(action: BrowserActionName) -> bool {
             | BrowserActionName::SetChecked
             | BrowserActionName::Drag
             | BrowserActionName::UploadFiles
+            | BrowserActionName::TriggerExtensionAction
             | BrowserActionName::SetViewport
             | BrowserActionName::SetDevice
             | BrowserActionName::GoBack
@@ -7117,11 +7292,25 @@ fn diagnostic_limit(limit: Option<u16>) -> usize {
 fn validate_url(value: &str) -> Result<(), BrowserError> {
     let url = Url::parse(value)?;
     match url.scheme() {
-        "http" | "https" | "data" | "about" => Ok(()),
+        "http" | "https" | "data" | "about" | "chrome-extension" => Ok(()),
         scheme => Err(BrowserError::UnsupportedUrlScheme {
             scheme: scheme.to_owned(),
         }),
     }
+}
+
+async fn resolve_extension_directory(root: &Path, path: PathBuf) -> Result<String, BrowserError> {
+    if path.is_absolute() {
+        return Err(BrowserError::FileOutsideRoot { path });
+    }
+    let candidate = tokio::fs::canonicalize(root.join(&path)).await?;
+    if !candidate.starts_with(root) {
+        return Err(BrowserError::FileOutsideRoot { path: candidate });
+    }
+    if !tokio::fs::metadata(&candidate).await?.is_dir() {
+        return Err(BrowserError::ExtensionDirectoryInvalid { path: candidate });
+    }
+    Ok(candidate.to_string_lossy().into_owned())
 }
 
 fn build_config(builder: BrowserConfigBuilder) -> Result<BrowserConfig, BrowserError> {
@@ -7449,7 +7638,7 @@ pub enum BrowserError {
     UnknownTab { tab_id: String },
     #[error("the browser must retain at least one tab")]
     LastTab,
-    #[error("browser upload actions require a configured file root")]
+    #[error("browser filesystem actions require a configured file root")]
     FileRootNotConfigured,
     #[error("browser file path escapes the configured file root: {path:?}")]
     FileOutsideRoot { path: PathBuf },
@@ -7457,6 +7646,16 @@ pub enum BrowserError {
     UploadFileLimit { count: usize, maximum: usize },
     #[error("browser upload path is not a regular file: {path:?}")]
     UploadFileInvalid { path: PathBuf },
+    #[error("browser extension path is not a directory: {path:?}")]
+    ExtensionDirectoryInvalid { path: PathBuf },
+    #[error("Chrome did not load the unpacked extension at {path:?}")]
+    ExtensionNotLoaded { path: PathBuf },
+    #[error("Chrome did not expose an extension-action target for browser tab `{tab_id}`")]
+    ExtensionTabTargetUnavailable { tab_id: String },
+    #[error(
+        "Chrome exposed multiple extension-action targets for browser tab `{tab_id}`; select a tab with a unique URL and title"
+    )]
+    ExtensionTabTargetAmbiguous { tab_id: String },
     #[error("browser upload file {path:?} is {bytes} bytes, above the {maximum}-byte limit")]
     UploadFileTooLarge {
         path: PathBuf,
@@ -7980,6 +8179,7 @@ mod tests {
         Cookie, CookieParam, CookiePriority, CookieSourceScheme, TimeSinceEpoch,
     };
     use futures_util::StreamExt;
+    use tokio::{io::AsyncReadExt, net::TcpListener};
 
     #[cfg(target_os = "macos")]
     use super::isolated_launch_config;
@@ -7987,14 +8187,19 @@ mod tests {
         BrowserConfig, Chromium, Diagnostics, GateSignals, MAX_ACTION_INPUT_BYTES,
         MAX_CONSOLE_ENTRIES, MAX_DIAGNOSTIC_TEXT_BYTES, MAX_NETWORK_REQUESTS, NetworkSource,
         allowed_cookie_params, build_config, classify_gate, close_chromium, cookie_param,
-        diagnostic_limit, profile_launch_config, session_stopped, trace_browser_configuration,
-        validate_url,
+        diagnostic_limit, profile_launch_config, resolve_extension_directory, session_stopped,
+        trace_browser_configuration, validate_url,
     };
     use crate::{
         BraveSession, Browser, BrowserAction, BrowserActionResult, BrowserConsoleEntry,
         BrowserContext, BrowserCookie, BrowserCruxClient, BrowserError, BrowserGate,
-        BrowserNetworkRequest, BrowserOriginStorage, BrowserStorageState,
+        BrowserNetworkBodyKind, BrowserNetworkRequest, BrowserOriginStorage, BrowserStorageState,
+        BrowserTarget,
     };
+
+    type ExtensionSmokeResult = Result<(), Box<dyn std::error::Error>>;
+    type ExtensionSmokeFuture =
+        std::pin::Pin<Box<dyn std::future::Future<Output = ExtensionSmokeResult>>>;
 
     #[derive(Clone, Default)]
     struct TraceLog(Arc<StdMutex<Vec<u8>>>);
@@ -8082,8 +8287,807 @@ mod tests {
         assert!(validate_url("http://127.0.0.1:3000").is_ok());
         assert!(validate_url("data:text/html,<h1>test</h1>").is_ok());
         assert!(validate_url("about:blank").is_ok());
+        assert!(validate_url("chrome://extensions").is_err());
+        assert!(validate_url("chrome-extension://abcdefghijklmnop/index.html").is_ok());
         assert!(validate_url("file:///etc/passwd").is_err());
         assert!(validate_url("/etc/passwd").is_err());
+    }
+
+    #[tokio::test]
+    async fn extension_directory_stays_beneath_the_configured_file_root()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let extension = root.path().join("extension");
+        std::fs::create_dir(&extension)?;
+        std::fs::write(extension.join("manifest.json"), "{}")?;
+        let canonical_root = std::fs::canonicalize(root.path())?;
+        let canonical_extension = std::fs::canonicalize(&extension)?;
+
+        let resolved = resolve_extension_directory(&canonical_root, "extension".into()).await?;
+        assert_eq!(std::path::Path::new(&resolved), canonical_extension);
+        assert!(matches!(
+            resolve_extension_directory(&canonical_root, "extension/manifest.json".into()).await,
+            Err(BrowserError::ExtensionDirectoryInvalid { .. })
+        ));
+        assert!(matches!(
+            resolve_extension_directory(&canonical_root, extension.clone()).await,
+            Err(BrowserError::FileOutsideRoot { .. })
+        ));
+        Ok(())
+    }
+
+    #[tokio::test]
+    #[ignore = "requires a local Chrome or Chromium installation"]
+    async fn managed_browser_loads_and_triggers_an_unpackaged_extension()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let root = tempfile::tempdir()?;
+        let extension = root.path().join("extension");
+        std::fs::create_dir(&extension)?;
+        std::fs::write(
+            extension.join("manifest.json"),
+            r#"{
+                "manifest_version": 3,
+                "name": "Nanocodex managed-browser smoke",
+                "version": "0.0.1",
+                "action": {},
+                "background": { "service_worker": "background.js" }
+            }"#,
+        )?;
+        std::fs::write(
+            extension.join("background.js"),
+            "chrome.action.onClicked.addListener(() => {});",
+        )?;
+        std::fs::write(
+            extension.join("probe.html"),
+            "<!doctype html><title>Managed extension probe</title><h1>loaded</h1>",
+        )?;
+
+        let browser = Browser::builder().file_root(root.path()).build()?;
+        let result = browser
+            .execute(BrowserAction::LoadExtension {
+                path: "extension".into(),
+            })
+            .await?;
+        let BrowserActionResult::Extension { extension_id, .. } = result else {
+            return Err("load_extension returned the wrong result shape".into());
+        };
+        browser
+            .execute(BrowserAction::TriggerExtensionAction {
+                extension_id: extension_id.clone(),
+                tab_id: None,
+            })
+            .await?;
+        browser
+            .execute(BrowserAction::Open {
+                url: format!("chrome-extension://{extension_id}/probe.html"),
+            })
+            .await?;
+        let title = browser.execute(BrowserAction::GetTitle).await?;
+        assert!(matches!(
+            title,
+            BrowserActionResult::Title { title, .. } if title == "Managed extension probe"
+        ));
+        browser.close().await?;
+        Ok(())
+    }
+
+    #[test]
+    #[ignore = "requires a local Chrome and NANOCODEX_BROWSER_EXTENSION_SMOKE_PATH"]
+    fn managed_browser_runs_a_configured_product_extension() -> ExtensionSmokeResult {
+        let outcome = std::thread::Builder::new()
+            .name("nanocodex-extension-smoke".to_owned())
+            .stack_size(16 * 1024 * 1024)
+            .spawn(|| {
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|error| error.to_string())?;
+                runtime
+                    .block_on(run_configured_product_extension_smoke())
+                    .map_err(|error| error.to_string())
+            })?
+            .join()
+            .map_err(|_| "extension smoke thread panicked")?;
+        outcome.map_err(Into::into)
+    }
+
+    fn run_configured_product_extension_smoke() -> ExtensionSmokeFuture {
+        Box::pin(async {
+            let extension = std::env::var_os("NANOCODEX_BROWSER_EXTENSION_SMOKE_PATH")
+                .ok_or("NANOCODEX_BROWSER_EXTENSION_SMOKE_PATH is not configured")?;
+            let source_extension = std::fs::canonicalize(extension)?;
+            let fixture_extension_root = tempfile::tempdir()?;
+            let extension = fixture_extension_root.path().join("extension");
+            copy_directory(&source_extension, &extension)?;
+            let permission = "http://127.0.0.1/*";
+            authorize_fixture_origin(&extension, permission)?;
+            let root = fixture_extension_root.path();
+            let relative = std::path::PathBuf::from("extension");
+            let fixture = TcpListener::bind(("127.0.0.1", 0)).await?;
+            let fixture_port = fixture.local_addr()?.port();
+            let fixture_task = tokio::spawn(serve_extension_cleanup_fixture(fixture));
+            let origin = format!("http://127.0.0.1:{fixture_port}");
+            let first_url = format!("{origin}/one");
+            let second_url = format!("{origin}/two");
+            let profile_root = tempfile::tempdir()?;
+            let profile = profile_root.path().join("chrome-profile");
+            let passkey_store = profile_root.path().join("passkeys.json");
+            let connect_smoke =
+                std::env::var_os("NANOCODEX_BROWSER_EXTENSION_CONNECT_SMOKE").is_some();
+
+            let mut first_builder = Browser::builder()
+                .file_root(root)
+                .persistent_profile(&profile);
+            if connect_smoke {
+                first_builder = first_builder.virtual_authenticator(
+                    crate::VirtualAuthenticator::platform_passkey()
+                        .credential_store(&passkey_store),
+                );
+            }
+            let first = first_builder.build()?;
+            let extension_id = load_product_extension(&first, relative.clone()).await?;
+            first
+                .execute(BrowserAction::Open {
+                    url: first_url.clone(),
+                })
+                .await?;
+            let first_tab = tab_for_url(&first, &first_url).await?;
+            first
+                .execute(BrowserAction::TriggerExtensionAction {
+                    extension_id: extension_id.clone(),
+                    tab_id: Some(first_tab.clone()),
+                })
+                .await?;
+
+            let sidepanel_url = format!("chrome-extension://{extension_id}/sidepanel.html");
+            first
+                .execute(BrowserAction::NewTab {
+                    url: Some(sidepanel_url.clone()),
+                })
+                .await?;
+            let sidepanel_tab = tab_for_url(&first, &sidepanel_url).await?;
+            if connect_smoke {
+                run_connect_popup_smoke(&first, &sidepanel_tab, true).await?;
+            }
+
+            let recipe = serde_json::json!({
+                "schema_version": 1,
+                "name": "Distraction-free torture fixture",
+                "css": "article { max-width: 42rem !important; margin-inline: auto !important; font-size: 18px !important; }",
+                "hide_selectors": ["#cookie-banner", "#newsletter-modal", ".ad-rail", ".recommendations", ".ticker"]
+            });
+            let flow = evaluate_json(
+            &first,
+            format!(
+                r#"(async () => {{
+                  const send = async (message) => {{
+                    const response = await chrome.runtime.sendMessage(message);
+                    if (response?.error) throw new Error(response.error);
+                    return response;
+                  }};
+                  const own = await chrome.tabs.getCurrent();
+                  const tabs = await chrome.tabs.query({{ url: {permission:?} }});
+                  const fixture = tabs.find((tab) => tab.url === {first_url:?});
+                  if (!own?.id || !fixture?.id) throw new Error('fixture or harness tab missing');
+                  await chrome.tabs.update(fixture.id, {{ active: true }});
+                  const claim = await send({{ type: 'page.claim' }});
+                  await chrome.tabs.update(own.id, {{ active: true }});
+                  const inspect = await send({{
+                    type: 'page.cleanup', lease_id: claim.lease_id,
+                    request_id: crypto.randomUUID(), input: {{ action: 'inspect' }}
+                  }});
+                  const preview = await send({{
+                    type: 'page.cleanup', lease_id: claim.lease_id,
+                    request_id: crypto.randomUUID(),
+                    input: {{ action: 'preview', document_revision: inspect.document_revision, recipe: {recipe} }}
+                  }});
+                  return {{
+                    lease_id: claim.lease_id,
+                    revision: inspect.document_revision,
+                    candidates: inspect.candidates.length,
+                    truncated: inspect.truncated,
+                    preview_id: preview.preview_id
+                  }};
+                }})()"#,
+                permission = permission,
+                first_url = first_url,
+                recipe = recipe,
+            ),
+        )
+        .await?;
+            let lease_id = flow["lease_id"]
+                .as_str()
+                .ok_or("cleanup flow did not return a lease")?
+                .to_owned();
+            let revision = flow["revision"]
+                .as_str()
+                .ok_or("cleanup flow did not return a document revision")?
+                .to_owned();
+            assert_eq!(flow["candidates"].as_u64(), Some(500));
+            assert_eq!(flow["truncated"].as_bool(), Some(true));
+            assert!(flow["preview_id"].as_str().is_some());
+
+            first
+                .execute(BrowserAction::SelectTab {
+                    tab_id: first_tab.clone(),
+                })
+                .await?;
+            assert_cleanup_state(&first, true, false).await?;
+
+            first
+                .execute(BrowserAction::SelectTab {
+                    tab_id: sidepanel_tab.clone(),
+                })
+                .await?;
+            evaluate_json(
+                &first,
+                format!(
+                    "chrome.runtime.sendMessage({{type:'preview.revert',lease_id:{lease_id:?}}})"
+                ),
+            )
+            .await?;
+            first
+                .execute(BrowserAction::SelectTab {
+                    tab_id: first_tab.clone(),
+                })
+                .await?;
+            assert_cleanup_state(&first, false, false).await?;
+
+            first
+                .execute(BrowserAction::SelectTab {
+                    tab_id: sidepanel_tab.clone(),
+                })
+                .await?;
+            evaluate_json(
+                &first,
+                format!(
+                    r#"chrome.runtime.sendMessage({{
+                  type:'page.cleanup', lease_id:{lease_id:?}, request_id:crypto.randomUUID(),
+                  input:{{action:'preview',document_revision:{revision:?},recipe:{recipe}}}
+                }})"#,
+                    lease_id = lease_id,
+                    revision = revision,
+                    recipe = recipe,
+                ),
+            )
+            .await?;
+            first
+                .execute(BrowserAction::NewTab {
+                    url: Some(second_url.clone()),
+                })
+                .await?;
+            let second_tab = tab_for_url(&first, &second_url).await?;
+            assert_cleanup_state(&first, false, false).await?;
+            first
+                .execute(BrowserAction::SelectTab {
+                    tab_id: sidepanel_tab.clone(),
+                })
+                .await?;
+            let kept = evaluate_json(
+            &first,
+            format!(
+                "chrome.runtime.sendMessage({{type:'recipe.keep',lease_id:{lease_id:?},origin:{origin:?}}})"
+            ),
+        )
+        .await?;
+            assert_eq!(kept["name"], "Distraction-free torture fixture");
+
+            for tab in [&first_tab, &second_tab] {
+                first
+                    .execute(BrowserAction::SelectTab {
+                        tab_id: tab.clone(),
+                    })
+                    .await?;
+                assert_cleanup_state(&first, false, true).await?;
+            }
+            first
+                .execute(BrowserAction::SelectTab { tab_id: first_tab })
+                .await?;
+            first.execute(BrowserAction::Reload).await?;
+            wait_for_persisted_recipe(&first).await?;
+            assert_cleanup_state(&first, false, true).await?;
+            assert_browser_diagnostics(&first).await?;
+            first.close().await?;
+
+            let mut second_builder = Browser::builder()
+                .file_root(root)
+                .persistent_profile(&profile);
+            if connect_smoke {
+                second_builder = second_builder.virtual_authenticator(
+                    crate::VirtualAuthenticator::platform_passkey()
+                        .credential_store(&passkey_store),
+                );
+            }
+            let second = second_builder.build()?;
+            let second_extension_id = load_product_extension(&second, relative.clone()).await?;
+            assert_eq!(second_extension_id, extension_id);
+            second
+                .execute(BrowserAction::Open {
+                    url: first_url.clone(),
+                })
+                .await?;
+            wait_for_persisted_recipe(&second).await?;
+            assert_cleanup_state(&second, false, true).await?;
+            let reopened_first_tab = tab_for_url(&second, &first_url).await?;
+            second
+                .execute(BrowserAction::NewTab {
+                    url: Some(second_url.clone()),
+                })
+                .await?;
+            wait_for_persisted_recipe(&second).await?;
+            assert_cleanup_state(&second, false, true).await?;
+            let reopened_second_tab = tab_for_url(&second, &second_url).await?;
+            second
+                .execute(BrowserAction::NewTab {
+                    url: Some(sidepanel_url.clone()),
+                })
+                .await?;
+            let reopened_sidepanel_tab = tab_for_url(&second, &sidepanel_url).await?;
+            if connect_smoke {
+                run_connect_popup_smoke(&second, &reopened_sidepanel_tab, false).await?;
+            }
+            second
+            .execute(BrowserAction::WaitForFunction {
+                expression: format!(
+                    "document.body.innerText.includes({origin:?}) && document.body.innerText.includes('Forget')"
+                ),
+            })
+            .await?;
+            let snapshot = second
+                .execute(BrowserAction::Snapshot {
+                    interactive: false,
+                    compact: true,
+                    depth: Some(12),
+                    selector: None,
+                    include_urls: false,
+                })
+                .await?;
+            assert!(matches!(
+                snapshot,
+                BrowserActionResult::Snapshot { snapshot, .. }
+                    if snapshot.contains("Saved sites")
+                        && snapshot.contains(&origin)
+                        && snapshot.contains("Forget")
+            ));
+            second
+                .execute(BrowserAction::Click {
+                    target: BrowserTarget::role("button").named("Forget"),
+                    options: None,
+                })
+                .await?;
+
+            for tab in [&reopened_first_tab, &reopened_second_tab] {
+                second
+                    .execute(BrowserAction::SelectTab {
+                        tab_id: tab.clone(),
+                    })
+                    .await?;
+                assert_cleanup_state(&second, false, false).await?;
+                second.execute(BrowserAction::Reload).await?;
+                assert_cleanup_state(&second, false, false).await?;
+            }
+            assert_browser_diagnostics(&second).await?;
+            second.close().await?;
+
+            let third = Browser::builder()
+                .file_root(root)
+                .persistent_profile(&profile)
+                .build()?;
+            assert_eq!(
+                load_product_extension(&third, relative).await?,
+                extension_id
+            );
+            third
+                .execute(BrowserAction::Open { url: first_url })
+                .await?;
+            assert_cleanup_state(&third, false, false).await?;
+            assert_browser_diagnostics(&third).await?;
+            third.close().await?;
+            fixture_task.abort();
+            Ok(())
+        })
+    }
+
+    async fn load_product_extension(
+        browser: &Browser,
+        path: std::path::PathBuf,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let result = browser
+            .execute(BrowserAction::LoadExtension { path })
+            .await?;
+        let BrowserActionResult::Extension { extension_id, .. } = result else {
+            return Err("load_extension returned the wrong result shape".into());
+        };
+        Ok(extension_id)
+    }
+
+    async fn tab_for_url(
+        browser: &Browser,
+        url: &str,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let BrowserActionResult::Tabs { tabs, .. } =
+            browser.execute(BrowserAction::ListTabs).await?
+        else {
+            return Err("list_tabs returned the wrong result shape".into());
+        };
+        tabs.into_iter()
+            .find(|tab| tab.url == url)
+            .map(|tab| tab.tab_id)
+            .ok_or_else(|| format!("browser tab not found for {url}").into())
+    }
+
+    async fn tab_for_url_prefix(
+        browser: &Browser,
+        prefix: &str,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        for _ in 0..50 {
+            let BrowserActionResult::Tabs { tabs, .. } =
+                browser.execute(BrowserAction::ListTabs).await?
+            else {
+                return Err("list_tabs returned the wrong result shape".into());
+            };
+            if let Some(tab) = tabs.into_iter().find(|tab| tab.url.starts_with(prefix)) {
+                return Ok(tab.tab_id);
+            }
+            browser
+                .execute(BrowserAction::WaitForTimeout { milliseconds: 100 })
+                .await?;
+        }
+        Err(format!("browser tab not found for URL prefix {prefix}").into())
+    }
+
+    async fn run_connect_popup_smoke(
+        browser: &Browser,
+        sidepanel_tab: &str,
+        create_passkey: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        browser
+            .execute(BrowserAction::Click {
+                target: BrowserTarget::role("button").named("Connect Nanocodex"),
+                options: None,
+            })
+            .await?;
+        let popup = tab_for_url_prefix(
+            browser,
+            "https://nanocodex.gakonst.workers.dev/connect-dialog/",
+        )
+        .await?;
+        browser
+            .execute(BrowserAction::SelectTab {
+                tab_id: popup.clone(),
+            })
+            .await?;
+        browser
+            .execute(BrowserAction::WaitForText {
+                text: "Connect to Nanocodex for Chrome".to_owned(),
+                target: None,
+                hidden: false,
+            })
+            .await?;
+        let consent = browser
+            .execute(BrowserAction::Snapshot {
+                interactive: false,
+                compact: true,
+                depth: Some(20),
+                selector: None,
+                include_urls: false,
+            })
+            .await?;
+        assert!(matches!(
+            consent,
+            BrowserActionResult::Snapshot { snapshot, .. }
+                if snapshot.contains("Connect to Nanocodex for Chrome")
+                    && snapshot.contains("ChatGPT")
+                    && snapshot.contains("X")
+                    && !snapshot.contains("MACHUSD")
+                    && !snapshot.contains("machineUSD spend permission")
+                    && !snapshot.contains("Mercator")
+        ));
+
+        browser
+            .execute(if create_passkey {
+                BrowserAction::PasskeyNew
+            } else {
+                BrowserAction::PasskeyAuto
+            })
+            .await?;
+        if create_passkey {
+            browser
+                .execute(BrowserAction::Click {
+                    target: BrowserTarget::role("button").named("New"),
+                    options: None,
+                })
+                .await?;
+        }
+        browser
+            .execute(BrowserAction::Click {
+                target: BrowserTarget::role("button").named(if create_passkey {
+                    "Create & approve"
+                } else {
+                    "Approve"
+                }),
+                options: None,
+            })
+            .await?;
+        browser
+            .execute(BrowserAction::WaitForTimeout { milliseconds: 3000 })
+            .await?;
+        let post_passkey = browser
+            .execute(BrowserAction::Snapshot {
+                interactive: false,
+                compact: true,
+                depth: Some(20),
+                selector: None,
+                include_urls: false,
+            })
+            .await?;
+        let BrowserActionResult::Snapshot { snapshot, .. } = post_passkey else {
+            return Err("Connect post-passkey snapshot returned the wrong shape".into());
+        };
+        let passkeys = browser.execute(BrowserAction::Passkeys).await?;
+        let credential_retained = matches!(
+            &passkeys,
+            BrowserActionResult::Passkeys { credentials, .. } if !credentials.is_empty()
+        );
+        if create_passkey {
+            if !credential_retained {
+                return Err(format!(
+                    "unexpected Connect registration state:\n{snapshot}\nPasskeys: {passkeys:#?}"
+                )
+                .into());
+            }
+        } else if snapshot.contains("Failed to request credential")
+            || !snapshot.contains("Use Nanocodex profile")
+        {
+            let network = connect_auth_diagnostics(browser).await?;
+            let page = evaluate_json(
+                browser,
+                "({focus:document.hasFocus(),visibility:document.visibilityState,url:location.href})"
+                    .to_owned(),
+            )
+            .await?;
+            return Err(format!(
+                "unexpected Connect post-passkey state:\n{snapshot}\nPage: {page}\nPasskeys: {passkeys:#?}\nWebAuthn network:\n{network}"
+            )
+            .into());
+        }
+
+        browser
+            .execute(BrowserAction::CloseTab { tab_id: popup })
+            .await?;
+        browser
+            .execute(BrowserAction::SelectTab {
+                tab_id: sidepanel_tab.to_owned(),
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn connect_auth_diagnostics(
+        browser: &Browser,
+    ) -> Result<String, Box<dyn std::error::Error>> {
+        let BrowserActionResult::NetworkRequests { requests, .. } = browser
+            .execute(BrowserAction::NetworkRequests {
+                filter: None,
+                after: Some(0),
+                limit: Some(50),
+            })
+            .await?
+        else {
+            return Err("Connect network diagnostics returned the wrong shape".into());
+        };
+        let mut diagnostics = Vec::new();
+        for request in requests {
+            if !request.url.contains("/webauthn/") && !request.url.contains("/v1/connect/auth") {
+                continue;
+            }
+            let read_response = request.status.is_some_and(|status| status >= 400)
+                || request.url.ends_with("/webauthn/register/options")
+                || request.url.ends_with("/webauthn/login/options");
+            let mut entry = serde_json::json!({
+                "url": request.url,
+                "method": request.method,
+                "status": request.status,
+            });
+            if request.body_available && read_response {
+                match browser
+                    .execute(BrowserAction::NetworkBody {
+                        request_id: request.request_id,
+                        kind: BrowserNetworkBodyKind::Response,
+                    })
+                    .await
+                {
+                    Ok(BrowserActionResult::NetworkBody { body, .. }) => {
+                        entry["response"] = serde_json::from_str(&body)
+                            .unwrap_or_else(|_| serde_json::Value::String(body));
+                    }
+                    Ok(_) => entry["bodyError"] = "wrong result shape".into(),
+                    Err(error) => entry["bodyError"] = error.to_string().into(),
+                }
+            }
+            diagnostics.push(entry);
+        }
+        Ok(serde_json::to_string_pretty(&diagnostics)?)
+    }
+
+    async fn evaluate_json(
+        browser: &Browser,
+        expression: String,
+    ) -> Result<serde_json::Value, Box<dyn std::error::Error>> {
+        let result = browser
+            .execute(BrowserAction::Evaluate { expression })
+            .await?;
+        let BrowserActionResult::Evaluation { value, .. } = result else {
+            return Err("evaluate returned the wrong result shape".into());
+        };
+        Ok(value)
+    }
+
+    async fn wait_for_persisted_recipe(
+        browser: &Browser,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        browser
+            .execute(BrowserAction::WaitForFunction {
+                expression: r#"document.getElementById('nanocodex-persisted-v1') !== null
+                  && getComputedStyle(document.getElementById('cookie-banner')).display === 'none'"#
+                    .to_owned(),
+            })
+            .await?;
+        Ok(())
+    }
+
+    async fn assert_cleanup_state(
+        browser: &Browser,
+        preview: bool,
+        persisted: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let state = evaluate_json(
+            browser,
+            r#"({
+              preview: document.getElementById('nanocodex-preview-v1') !== null,
+              persisted: document.getElementById('nanocodex-persisted-v1') !== null,
+              cookie: getComputedStyle(document.getElementById('cookie-banner')).display,
+              newsletter: getComputedStyle(document.getElementById('newsletter-modal')).display,
+              adRail: getComputedStyle(document.querySelector('.ad-rail')).display,
+              recommendations: getComputedStyle(document.querySelector('.recommendations')).display,
+              ticker: getComputedStyle(document.querySelector('.ticker')).display,
+              articleWidth: getComputedStyle(document.querySelector('article')).maxWidth
+            })"#
+            .to_owned(),
+        )
+        .await?;
+        assert_eq!(state["preview"], preview);
+        assert_eq!(state["persisted"], persisted);
+        let expected_display = if preview || persisted {
+            "none"
+        } else {
+            "block"
+        };
+        for key in [
+            "cookie",
+            "newsletter",
+            "adRail",
+            "recommendations",
+            "ticker",
+        ] {
+            assert_eq!(
+                state[key], expected_display,
+                "unexpected state for {key}: {state}"
+            );
+        }
+        if preview || persisted {
+            assert_eq!(state["articleWidth"], "672px");
+        }
+        Ok(())
+    }
+
+    async fn assert_browser_diagnostics(
+        browser: &Browser,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let errors = browser
+            .execute(BrowserAction::Errors { limit: Some(100) })
+            .await?;
+        assert!(matches!(
+            errors,
+            BrowserActionResult::Errors { errors, .. } if errors.is_empty()
+        ));
+        let console = browser
+            .execute(BrowserAction::Console { limit: Some(100) })
+            .await?;
+        assert!(matches!(
+            console,
+            BrowserActionResult::Console { entries, .. }
+                if entries.iter().all(|entry| entry.level != "error")
+        ));
+        let network = browser
+            .execute(BrowserAction::NetworkRequests {
+                filter: None,
+                after: Some(0),
+                limit: Some(100),
+            })
+            .await?;
+        assert!(matches!(
+            network,
+            BrowserActionResult::NetworkRequests { requests, .. }
+                if requests.iter().all(|request| {
+                    request.failure.is_none()
+                        && request.status.is_none_or(|status| status < 400)
+                })
+        ));
+        Ok(())
+    }
+
+    async fn serve_extension_cleanup_fixture(listener: TcpListener) {
+        let sections = (0..550)
+            .map(|index| format!("<section><h2>Feed item {index}</h2><p>Repeated noisy content {index}</p></section>"))
+            .collect::<String>();
+        let body = Arc::new(format!(
+            r#"<!doctype html><html><head><title>Nanocodex cleanup torture fixture</title>
+            <style>body {{ margin: 0 }} #cookie-banner, #newsletter-modal, .ad-rail, .recommendations, .ticker {{ display: block }} article {{ max-width: none }}</style>
+            </head><body>
+            <header><div class="ticker">BREAKING: an extremely distracting ticker</div></header>
+            <div id="cookie-banner">Accept twelve kinds of cookies</div>
+            <div id="newsletter-modal">Subscribe before reading anything</div>
+            <aside class="ad-rail">BUY THINGS BUY THINGS BUY THINGS</aside>
+            <main><article id="article"><h1>The actual article</h1><p>Useful content worth keeping.</p></article>
+            <aside class="recommendations">Infinite recommendations</aside>{sections}</main>
+            </body></html>"#
+        ));
+        loop {
+            let Ok((mut socket, _)) = listener.accept().await else {
+                return;
+            };
+            let body = Arc::clone(&body);
+            tokio::spawn(async move {
+                let mut request = [0_u8; 8192];
+                let _ = socket.read(&mut request).await;
+                let response = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                    body.len(),
+                    body
+                );
+                let _ = tokio::io::AsyncWriteExt::write_all(&mut socket, response.as_bytes()).await;
+                let _ = tokio::io::AsyncWriteExt::shutdown(&mut socket).await;
+            });
+        }
+    }
+
+    fn copy_directory(
+        source: &std::path::Path,
+        destination: &std::path::Path,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        std::fs::create_dir(destination)?;
+        for entry in std::fs::read_dir(source)? {
+            let entry = entry?;
+            let target = destination.join(entry.file_name());
+            if entry.file_type()?.is_dir() {
+                copy_directory(&entry.path(), &target)?;
+            } else {
+                std::fs::copy(entry.path(), target)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn authorize_fixture_origin(
+        extension: &std::path::Path,
+        permission: &str,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let manifest_path = extension.join("manifest.json");
+        let mut manifest: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&manifest_path)?)?;
+        let required = manifest["host_permissions"]
+            .as_array_mut()
+            .ok_or("extension manifest has no host_permissions array")?;
+        assert!(
+            !required
+                .iter()
+                .any(|value| value.as_str() == Some(permission)),
+            "the production extension must not require broad page access"
+        );
+        required.push(permission.into());
+        std::fs::write(manifest_path, serde_json::to_vec(&manifest)?)?;
+        Ok(())
     }
 
     #[test]

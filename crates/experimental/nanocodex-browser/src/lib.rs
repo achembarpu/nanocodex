@@ -197,6 +197,10 @@ Diagnostic reads report retained and dropped counts and accept a limit up to
 Use `list_frames` and `evaluate_frame` for explicit frame work; snapshot
 references already retain their containing frame for normal DOM actions. Use
 `new_tab`, `list_tabs`, `select_tab`, and `close_tab` for multi-page workflows.
+Use `load_extension` before normal browsing with a path relative to the
+host-configured file root; installing a new unpacked Chrome extension restarts
+the private browser session. Then use `trigger_extension_action` to run its
+toolbar action on the active tab or an explicit tab returned by `list_tabs`.
 Pending JavaScript dialogs must be read with `dialog` and resolved with
 `handle_dialog`. `downloads` reports files retained in the session-private
 download directory.
@@ -706,6 +710,18 @@ pub enum BrowserAction {
         /// Chromium target identifier returned by `list_tabs`.
         tab_id: String,
     },
+    /// Install an unpacked Chrome extension, restarting the private session when necessary.
+    LoadExtension {
+        /// Extension directory relative to the browser's configured file root.
+        path: std::path::PathBuf,
+    },
+    /// Run an installed extension's default toolbar action on a browser tab.
+    TriggerExtensionAction {
+        /// Extension identifier returned by `load_extension`.
+        extension_id: String,
+        /// Chromium target identifier returned by `list_tabs`; defaults to the active tab.
+        tab_id: Option<String>,
+    },
     /// Read the currently pending JavaScript dialog, if any.
     Dialog,
     /// Accept or dismiss the currently pending JavaScript dialog.
@@ -881,6 +897,8 @@ impl BrowserAction {
             Self::ListTabs => BrowserActionName::ListTabs,
             Self::SelectTab { .. } => BrowserActionName::SelectTab,
             Self::CloseTab { .. } => BrowserActionName::CloseTab,
+            Self::LoadExtension { .. } => BrowserActionName::LoadExtension,
+            Self::TriggerExtensionAction { .. } => BrowserActionName::TriggerExtensionAction,
             Self::Dialog => BrowserActionName::Dialog,
             Self::HandleDialog { .. } => BrowserActionName::HandleDialog,
             Self::NetworkRoute { .. } => BrowserActionName::NetworkRoute,
@@ -999,6 +1017,8 @@ pub enum BrowserActionName {
     ListTabs,
     SelectTab,
     CloseTab,
+    LoadExtension,
+    TriggerExtensionAction,
     Dialog,
     HandleDialog,
     NetworkRoute,
@@ -2397,6 +2417,11 @@ pub enum BrowserActionResult {
         executed: bool,
         tabs: Vec<BrowserTab>,
     },
+    Extension {
+        sequence: u64,
+        executed: bool,
+        extension_id: String,
+    },
     Dialog {
         sequence: u64,
         executed: bool,
@@ -2504,6 +2529,7 @@ impl BrowserActionResult {
             Self::Video { .. } => BrowserActionName::VideoStop,
             Self::Frames { .. } => BrowserActionName::ListFrames,
             Self::Tabs { .. } => BrowserActionName::ListTabs,
+            Self::Extension { .. } => BrowserActionName::LoadExtension,
             Self::Dialog { .. } => BrowserActionName::Dialog,
             Self::Har { .. } => BrowserActionName::ExportHar,
             Self::Accessibility { .. } => BrowserActionName::AccessibilityAudit,
@@ -3137,6 +3163,11 @@ fn recording_result(
             executed,
             tabs: Vec::new(),
         },
+        BrowserAction::LoadExtension { .. } => BrowserActionResult::Extension {
+            sequence,
+            executed,
+            extension_id: String::new(),
+        },
         BrowserAction::Dialog => BrowserActionResult::Dialog {
             sequence,
             executed,
@@ -3328,6 +3359,7 @@ fn recording_result(
         | BrowserAction::NewTab { .. }
         | BrowserAction::SelectTab { .. }
         | BrowserAction::CloseTab { .. }
+        | BrowserAction::TriggerExtensionAction { .. }
         | BrowserAction::HandleDialog { .. }
         | BrowserAction::NetworkRoute { .. }
         | BrowserAction::RemoveNetworkRoute { .. }
@@ -3367,6 +3399,7 @@ pub struct Browser {
 pub struct BrowserBuilder {
     executable: Option<std::path::PathBuf>,
     cdp_endpoint: Option<url::Url>,
+    persistent_profile: Option<std::path::PathBuf>,
     brave_session: Option<BraveSession>,
     launch_brave_executable: bool,
     virtual_authenticator: Option<VirtualAuthenticator>,
@@ -3397,6 +3430,19 @@ impl BrowserBuilder {
     #[must_use]
     pub fn cdp_endpoint(mut self, endpoint: url::Url) -> Self {
         self.cdp_endpoint = Some(endpoint);
+        self
+    }
+
+    /// Stores the complete managed Chrome profile in a caller-owned directory.
+    ///
+    /// Unlike the default temporary profile, this directory is never deleted
+    /// by [`Browser`]. Cookies, granted extension permissions, and extension
+    /// storage therefore survive closing one browser and building another with
+    /// the same directory. The caller must prevent concurrent use and protect
+    /// the directory as sensitive browser state.
+    #[must_use]
+    pub fn persistent_profile(mut self, directory: impl Into<std::path::PathBuf>) -> Self {
+        self.persistent_profile = Some(directory.into());
         self
     }
 
@@ -3465,10 +3511,10 @@ impl BrowserBuilder {
         self
     }
 
-    /// Allows upload actions to read relative paths beneath one host directory.
+    /// Allows upload and unpacked-extension actions to read relative paths beneath one host directory.
     ///
     /// The root is canonicalized at build time and is never exposed as a
-    /// model-callable setting. Uploads are unsupported across remote CDP
+    /// model-callable setting. Filesystem actions are unsupported across remote CDP
     /// because those paths would refer to another machine.
     #[must_use]
     pub fn file_root(mut self, root: impl Into<std::path::PathBuf>) -> Self {
@@ -3540,6 +3586,18 @@ impl BrowserBuilder {
         if self.cdp_endpoint.is_some() && self.executable.is_some() {
             return Err(BrowserBuildError::Configuration {
                 message: "`cdp_endpoint` cannot be combined with `executable`".to_owned(),
+            });
+        }
+        if self.cdp_endpoint.is_some() && self.persistent_profile.is_some() {
+            return Err(BrowserBuildError::Configuration {
+                message: "`persistent_profile` is not supported across a remote CDP boundary"
+                    .to_owned(),
+            });
+        }
+        if self.brave_session.is_some() && self.persistent_profile.is_some() {
+            return Err(BrowserBuildError::Configuration {
+                message: "`persistent_profile` cannot be combined with a Brave profile snapshot"
+                    .to_owned(),
             });
         }
         if let Some(endpoint) = &self.cdp_endpoint
@@ -3623,6 +3681,14 @@ impl BrowserBuilder {
             .map(std::fs::canonicalize)
             .transpose()
             .map_err(BrowserBuildError::Io)?;
+        let persistent_profile = self
+            .persistent_profile
+            .map(|directory| {
+                std::fs::create_dir_all(&directory)?;
+                std::fs::canonicalize(directory)
+            })
+            .transpose()
+            .map_err(BrowserBuildError::Io)?;
         let egress_policy = self.egress_policy.or_else(|| {
             self.brave_session.as_ref().and_then(|session| {
                 if session.copies_all_cookies() {
@@ -3643,6 +3709,7 @@ impl BrowserBuilder {
             inner: native::NativeBrowser::new(
                 self.executable,
                 self.cdp_endpoint,
+                persistent_profile,
                 self.brave_session,
                 self.launch_brave_executable,
                 self.virtual_authenticator,

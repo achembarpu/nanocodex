@@ -71,6 +71,31 @@ fn remote_browser_accepts_cookie_only_brave_sessions() -> Result<()> {
 }
 
 #[test]
+fn caller_owned_browser_profile_is_created_and_not_deleted() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let profile = directory.path().join("durable-profile");
+    let browser = Browser::builder().persistent_profile(&profile).build()?;
+
+    assert!(profile.is_dir());
+    drop(browser);
+    assert!(profile.is_dir());
+    Ok(())
+}
+
+#[test]
+fn remote_browser_rejects_a_local_persistent_profile() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    assert!(matches!(
+        Browser::builder()
+            .cdp_endpoint(url::Url::parse("ws://127.0.0.1:9222")?)
+            .persistent_profile(directory.path())
+            .build(),
+        Err(BrowserBuildError::Configuration { .. })
+    ));
+    Ok(())
+}
+
+#[test]
 fn browser_accepts_an_explicit_all_cookie_brave_session() -> Result<()> {
     let directory = tempfile::tempdir()?;
     let executable = directory.path().join("brave");
@@ -357,6 +382,81 @@ async fn virtual_authenticator_is_reused_when_returning_to_a_tab() -> Result<()>
 }
 
 #[tokio::test]
+#[ignore = "requires a local Chrome or Chromium installation"]
+async fn virtual_authenticator_reaches_a_window_open_popup() -> Result<()> {
+    let directory = tempfile::tempdir()?;
+    let listener = TcpListener::bind(("127.0.0.1", 0)).await?;
+    let address = listener.local_addr()?;
+    let server = tokio::spawn(serve_passkey_fixture(listener));
+    let url = format!("http://localhost:{}/", address.port());
+    let browser = Browser::builder()
+        .virtual_authenticator(
+            VirtualAuthenticator::platform_passkey()
+                .credential_store(directory.path().join("passkeys.json")),
+        )
+        .build()?;
+
+    browser
+        .execute(BrowserAction::Open { url: url.clone() })
+        .await?;
+    let BrowserActionResult::Tabs { tabs, .. } = browser.execute(BrowserAction::ListTabs).await?
+    else {
+        return Err(eyre!("expected browser tabs"));
+    };
+    let opener = tabs
+        .into_iter()
+        .find(|tab| tab.active)
+        .ok_or_else(|| eyre!("missing active opener tab"))?
+        .tab_id;
+    browser
+        .execute(BrowserAction::Evaluate {
+            expression: "window.open(location.href, 'passkey-popup', 'popup=yes,width=440,height=720') !== null".to_owned(),
+        })
+        .await?;
+    let mut popup = None;
+    for _ in 0..100 {
+        let BrowserActionResult::Tabs { tabs, .. } =
+            browser.execute(BrowserAction::ListTabs).await?
+        else {
+            return Err(eyre!("expected browser tabs"));
+        };
+        if let Some(tab) = tabs
+            .into_iter()
+            .find(|tab| tab.tab_id != opener && tab.url == url)
+        {
+            popup = Some(tab.tab_id);
+            break;
+        }
+        browser
+            .execute(BrowserAction::WaitForTimeout { milliseconds: 50 })
+            .await?;
+    }
+    let popup = popup.ok_or_else(|| eyre!("window.open popup was not discovered"))?;
+    browser
+        .execute(BrowserAction::SelectTab { tab_id: popup })
+        .await?;
+    browser.execute(BrowserAction::PasskeyNew).await?;
+    browser
+        .execute(BrowserAction::Click {
+            target: BrowserTarget::role("button").named("Register passkey"),
+            options: None,
+        })
+        .await?;
+    browser
+        .execute(BrowserAction::WaitForText {
+            text: "registered".to_owned(),
+            target: Some(BrowserTarget::css("#status")),
+            hidden: false,
+        })
+        .await?;
+    assert_eq!(browser.virtual_credentials().await?.len(), 1);
+
+    browser.close().await?;
+    server.abort();
+    Ok(())
+}
+
+#[tokio::test]
 async fn code_mode_calls_record_browser_actions_in_order() -> Result<()> {
     let (browser, recording) = BrowserTool::recording();
     let tools = Tools::builder().without_defaults().tool(browser).build()?;
@@ -455,6 +555,38 @@ text({ opened, snapshot, clicked, html, elementContext });
             target: BrowserTarget::css("main"),
         }
     );
+    Ok(())
+}
+
+#[test]
+fn recording_browser_exposes_extension_lifecycle_actions() -> Result<()> {
+    let (_browser, recording) = BrowserTool::recording();
+
+    let loaded = recording.record(BrowserAction::LoadExtension {
+        path: "extensions/chrome/.output/chrome-mv3".into(),
+    })?;
+    let triggered = recording.record(BrowserAction::TriggerExtensionAction {
+        extension_id: "abcdefghijklmnop".to_owned(),
+        tab_id: Some("tab-1".to_owned()),
+    })?;
+
+    assert!(matches!(
+        loaded,
+        BrowserActionResult::Extension {
+            extension_id,
+            executed: false,
+            ..
+        } if extension_id.is_empty()
+    ));
+    assert!(matches!(
+        triggered,
+        BrowserActionResult::Action {
+            action: BrowserActionName::TriggerExtensionAction,
+            executed: false,
+            ..
+        }
+    ));
+    assert_eq!(recording.actions()?.len(), 2);
     Ok(())
 }
 
@@ -675,6 +807,8 @@ async fn code_mode_description_exposes_browser_action_schema() -> Result<()> {
     assert!(description.contains(r#"action: "export_har""#));
     assert!(description.contains(r#"action: "list_frames""#));
     assert!(description.contains(r#"action: "list_tabs""#));
+    assert!(description.contains(r#"action: "load_extension""#));
+    assert!(description.contains(r#"action: "trigger_extension_action""#));
     assert!(description.contains("after?: number"));
     assert!(description.contains("shadowTreeNodeCount: number"));
     assert!(description.contains("bodyAvailable: boolean"));
