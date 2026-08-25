@@ -384,16 +384,13 @@ describe("durable Multiplayer rooms", () => {
     const originalFetch = MultiplayerRoom.prototype.fetch;
     const originalTimeout = testEnv.MANAGED_MULTIPLAYER_IO_TIMEOUT_MS;
     const createId = randomCreateId();
-    let initializedRoomId: string | undefined;
     testEnv.MANAGED_MULTIPLAYER_IO_TIMEOUT_MS = "20";
     const fetchSpy = vi.spyOn(MultiplayerRoom.prototype, "fetch").mockImplementation(
       async function (this: MultiplayerRoom, request: Request): Promise<Response> {
         if (request.method === "PUT" && new URL(request.url).pathname === "/initialize") {
-          initializedRoomId = (await request.clone().json<{ room_id: string }>()).room_id;
           const committed = await originalFetch.call(this, request);
           expect(committed.ok).toBe(true);
           await committed.body?.cancel();
-          rooms.add(initializedRoomId);
           return new Response(noncooperativeBody(), {
             status: 201,
             headers: { "content-type": "application/json" },
@@ -415,7 +412,8 @@ describe("durable Multiplayer rooms", () => {
     const recovered = await createRoomResponse("Ada", createId);
     expect(recovered.status).toBe(201);
     const receipt = await recovered.json<Omit<RoomReceipt, "cookie">>();
-    expect(receipt.room_id).toBe(initializedRoomId);
+    rooms.add(receipt.room_id);
+    expect(await quotaLeaseCount(receipt.room_id)).toBe(1);
     await deleteTestRoom(receipt.room_id);
   });
 
