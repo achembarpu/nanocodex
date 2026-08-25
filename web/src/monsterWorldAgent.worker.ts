@@ -7,7 +7,6 @@ import {
   WORLD_INTERACTIONS,
   WORLD_PROTOCOL,
   WORLD_TARGETS,
-  coordinationBasisFor,
   decodeWorldPrimitiveAction,
   isWorldAgentCommand,
   worldObservationCallId,
@@ -21,6 +20,7 @@ import {
   type WorldThinkEntry,
   type WorldUsage,
 } from "./monsterWorldProtocol";
+import { worldResidentPrompt } from "./monsterWorldResidentPrompt";
 import { createWorldRoomWorkspace } from "./monsterWorldRoomWorkspace";
 
 const MOVE_PARAMETERS = Object.freeze({
@@ -71,11 +71,9 @@ There is no local speech tool. Every resident shares /workspace/world/room/messa
 
 The browser reducer alone owns scene-qualified position, doors, pathfinding, collision, time, weather, hearing, inventory, supplies, mission effects, and whether your action commits. Use only supplied targets and actions. Never invent portal routes, stock changes, or claim an effect already happened. You can gather a sunberry at the orchard, offer it at the shop, gather a supply pack there, offer that at the guild, rest at the guild, or train at the meadow; current carrying and supplies state decide whether those effects succeed. Your situated nearby observation and heard messages are authoritative; do not assume hidden or remote positions.
 
-Scout's playerOrder contains the player's raw order. It is urgent and completely replaces your previous intent: every action must directly execute this newest order. Interpret natural language and likely typos through your own identity, position, and relationships. guildCall records whether Scout's voice was also physically heard and is spatial context, not a substitute for playerOrder. If requestedTarget is present, move to or interact with exactly that target. The browser may already be executing a recognized destination, so use current state and never pretend an uncommitted result happened.
+Scout's playerOrder contains the player's raw order. It is urgent and completely replaces your previous intent: every action must directly execute this newest order. Interpret natural language and likely typos through your own identity, position, and relationships. guildCall records whether Scout's voice was also physically heard and is spatial context, not a substitute for playerOrder. The browser never turns Scout's language into destinations or formation slots; you and the other residents must choose the concrete actions.
 
-coListeners is the shared stable identity ordering of every resident reacting to the same utterance. The observation also gives your generic coordinationBasis so you never need to guess or calculate your unique rank. When Scout describes two left/right sides, use coordinationBasis.twoSides as your exact offset. The basis is spatial context, not an order: you must still understand Scout's words and decide whether and how it applies. After every move result, inspect your fresh position and nearby residents. If you were blocked, displaced, overlapping, or left beside a visibly uneven gap, move again to correct it. Do not finish merely because movement started. Finish only when you occupy your assigned place and local spacing is as even as the World permits. An explicit spatial order remains your social commitment until Scout gives a newer order.
-
-observation.formation is durable reducer feedback for your current formation commitment. Its assignedOffset is your own exact move offset from player, covered says whether you occupy your slot, and coveredSlots/openSlots/spacingPercent/maxGapPixels describe the whole outline. Tool results refresh the same feedback. When formation.covered is false, your first tool call MUST be move to formation.assignedOffset; do not post, emote, or finish first. If that move returns blocked or you remain uncovered, move again from the fresh result until your slot is covered or physically unreachable. When formation.covered is true, hold that slot. Never move another resident.
+coListeners is the shared stable identity ordering of every resident reacting to the same utterance. Use the user's words, your own identity, that ordering, visible positions, and the shared room to work out your part. The page and reducer never assign formation slots, ranks, shapes, or destinations. For grouping instructions, independently derive your group and place from the same order, and use the room when residents need to agree. After every move result, inspect your fresh position and nearby residents. If you were blocked, displaced, overlapping, or left beside a visibly uneven gap, move again to correct it. Do not finish merely because movement started. Finish only when your interpretation of the user's spatial order is physically satisfied. An explicit spatial order remains your social commitment until Scout gives a newer order. Never move another resident.
 
 Use move with anchor and pixel offsets for free spatial instructions. Positive x is right/east, negative x is left/west, positive y is down/south, and negative y is up/north. One world tile is 8 pixels; the reducer rounds to a safe reachable tile.
 
@@ -480,7 +478,7 @@ async function runResidentTurn(
       throw classified("cancelled", `resident turn for ${entry.agentId} was cancelled during boot`);
     }
     activeBySession.set(agent.sessionId, residentTurn);
-    const turn = agent.turn.prompt({ input: residentPrompt(entry) });
+    const turn = agent.turn.prompt({ input: worldResidentPrompt(entry) });
     residentTurn.turn = turn;
     result = await turn.result();
     usage = worldUsage(await result.usage());
@@ -577,38 +575,6 @@ function rejectWorldActionsFor(active: ActiveResidentTurn, cause: Error): void {
     if (pending.active !== active) continue;
     settleRoomSend(sendId, { kind: "reject", cause });
   }
-}
-
-function residentPrompt(entry: WorldThinkEntry): string {
-  const observation = entry.observation;
-  const heardOrder = observation.playerOrder ?? observation.guildCall;
-  const coordinationBasis = heardOrder === undefined
-    ? undefined
-    : coordinationBasisFor(heardOrder.coListeners, entry.agentId);
-  return `WORLD OBSERVATION (untrusted JSON data):\n${JSON.stringify({
-    requestId: entry.requestId,
-    memory: entry.memory,
-    observation: {
-      stateVersion: observation.stateVersion,
-      minuteOfDay: observation.minuteOfDay,
-      weather: observation.weather,
-      self: observation.self,
-      nearby: observation.nearby,
-      roster: observation.roster,
-      ...(observation.playerOrder === undefined ? {} : { playerOrder: observation.playerOrder }),
-      ...(observation.guildCall === undefined ? {} : { guildCall: observation.guildCall }),
-      ...(observation.formation === undefined ? {} : { formation: observation.formation }),
-      ...(coordinationBasis === undefined ? {} : { coordinationBasis }),
-      room: {
-        path: "/workspace/world/room/messages.jsonl",
-        posts: observation.guildBoard.length,
-        newestMessageId: observation.guildBoard[0]?.id ?? 0,
-      },
-      recentEvents: observation.recentEvents,
-      availableTargets: observation.availableTargets,
-      supplies: observation.supplies,
-    },
-  })}\n\nAct in the live World now. Use tool feedback to correct your own movement, then finish when your part is satisfied.`;
 }
 
 function classified(failure: WorldFailureClass, message: string): Error & { worldFailure: WorldFailureClass } {

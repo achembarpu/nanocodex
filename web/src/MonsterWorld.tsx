@@ -20,7 +20,6 @@ import {
   WORLD_PROTOCOL,
   isResidentId,
   isWorldAgentMessage,
-  worldObservationCallId,
   type Direction,
   type ResidentId,
   type VoiceLevel,
@@ -29,9 +28,8 @@ import {
   type WorldUsage,
 } from "./monsterWorldProtocol";
 import {
-  WORLD_FORMATION_LADDER,
-  type WorldFormationKind,
-  type WorldFormationPreset,
+  WORLD_FORMATION_PROMPTS,
+  type WorldFormationPrompt,
 } from "./monsterWorldFormations";
 import {
   drawMonsterWorld,
@@ -68,13 +66,10 @@ import {
   residentAtWorldPoint,
   serializeWorldState,
   setPopulationTarget,
-  settleWorldFormationTurn,
   setWorldAgentsOnline,
   updateWorld,
   worldToolResultAtDecisionBoundary,
   worldCameraForState,
-  worldFormationProgress,
-  worldFormationResidentNeedsTurn,
   type WorldActor,
   type WorldState,
   type WorldToolAction,
@@ -96,7 +91,6 @@ type UsageTotals = {
 type PendingResidentRequest = {
   requestId: string;
   agentId: ResidentId;
-  callId?: number;
   rejected: boolean;
   cancelled: boolean;
 };
@@ -128,7 +122,6 @@ export function MonsterWorld() {
   const [voiceLevel, setVoiceLevel] = useState<VoiceLevel>("call");
   const [selectedResident, setSelectedResident] = useState<ResidentId>("cinder");
   const [speechNotice, setSpeechNotice] = useState<string>();
-  const [latestOrderId, setLatestOrderId] = useState<number>();
   const [runtimeStatus, setRuntimeStatus] = useState<RuntimeStatus>("offline");
   const [agentError, setAgentError] = useState<string>();
   const [, setAuthStatus] = useState<ModelSessionStatus>();
@@ -409,9 +402,6 @@ export function MonsterWorld() {
     if (message.usage) commitModelUsage(message.usage, usageRef, setUsage);
 
     const activeWorld = worldRef.current;
-    if (activeWorld) {
-      settleWorldFormationTurn(activeWorld, request.callId, request.agentId, message.outcome);
-    }
     const unanswered = activeWorld
       ? hasUnansweredPlayerOrder(activeWorld, request.agentId)
         || hasUnansweredGuildCall(activeWorld, request.agentId)
@@ -481,7 +471,6 @@ export function MonsterWorld() {
         || paused
       ) return;
       const now = performance.now();
-      const formationProgress = worldFormationProgress(activeWorld);
       const activeAgentIds = new Set([...pendingRequests.current.values()].map(({ agentId }) => agentId));
       const orderedAgentIds = [...liveAgentIdsInWorld(activeWorld)].sort((left, right) => {
         const callPriority = Number(
@@ -494,7 +483,6 @@ export function MonsterWorld() {
       const agentIds = orderedAgentIds.filter((agentId) => {
         if (activeAgentIds.has(agentId)) return false;
         if (now < nextThinkAt.current[agentId]) return false;
-        if (!worldFormationResidentNeedsTurn(activeWorld, agentId, formationProgress)) return false;
         const actor = activeWorld.actors[agentId];
         if (
           actor.activeOrderId !== undefined
@@ -507,12 +495,10 @@ export function MonsterWorld() {
       if (agentIds.length === 0) return;
 
       for (const agentId of agentIds) {
-        const observation = observationFor(activeWorld, agentId, formationProgress);
-        const callId = worldObservationCallId(observation);
+        const observation = observationFor(activeWorld, agentId);
         const request: PendingResidentRequest = {
           requestId: `world-request-${crypto.randomUUID()}`,
           agentId,
-          ...(callId === undefined ? {} : { callId }),
           rejected: false,
           cancelled: false,
         };
@@ -637,15 +623,9 @@ export function MonsterWorld() {
     for (const agentId of mindsToWake) nextThinkAt.current[agentId] = 0;
     cancelResidentTurns(mindsToWake);
     setPaused(false);
-    if (speech.order) {
-      setSpeechNotice(undefined);
-      setLatestOrderId(speech.order.id);
-    } else {
-      setLatestOrderId(undefined);
-      setSpeechNotice(
-        `Raw order delivered to ${mindsToWake.length} resident mind${mindsToWake.length === 1 ? "" : "s"}. Each Luna resident will interpret it from their own identity and world state; no destination was assumed by the page.`,
-      );
-    }
+    setSpeechNotice(
+      `Raw order delivered to ${mindsToWake.length} resident mind${mindsToWake.length === 1 ? "" : "s"}. Each Luna resident will interpret it from their own identity and world state; no destination was assumed by the page.`,
+    );
     if (mindsToWake.length > 0) startAgents();
     setDraft("");
     invalidateWorld();
@@ -656,7 +636,7 @@ export function MonsterWorld() {
     issueDialogue(draft);
   };
 
-  const runFormation = (preset: WorldFormationPreset) => {
+  const sendFormationPrompt = (preset: WorldFormationPrompt) => {
     issueDialogue(preset.prompt);
   };
 
@@ -674,7 +654,6 @@ export function MonsterWorld() {
     const activeWorld = worldRef.current;
     if (!activeWorld || !requestResidentExit(activeWorld, residentId)) return false;
     cancelDepartingTurns([residentId]);
-    setLatestOrderId(undefined);
     setSpeechNotice(`${activeWorld.actors[residentId].name} decided to walk out through the nearest map edge.`);
     invalidateWorld();
     return true;
@@ -697,7 +676,6 @@ export function MonsterWorld() {
     if (!activeWorld) return;
     const change = setPopulationTarget(activeWorld, requested);
     cancelDepartingTurns(change.exiting);
-    setLatestOrderId(undefined);
     setSpeechNotice(
       change.entering.length > 0
         ? `${change.entering.length} resident${change.entering.length === 1 ? " is" : "s are"} joining from map edges or turning back into town.`
@@ -717,7 +695,6 @@ export function MonsterWorld() {
     setUsage(emptyUsage);
     setAgentError(undefined);
     setSpeechNotice(undefined);
-    setLatestOrderId(undefined);
     setSelectedResident("cinder");
     setPaused(false);
     invalidateWorld();
@@ -755,11 +732,7 @@ export function MonsterWorld() {
         ? "Luna error"
         : "Luna offline";
   const worldStatus = `${currentSceneLabel} · ${lunaStatus}`;
-  const latestOrderNotice = latestOrderId === undefined
-    ? undefined
-    : orderProgressNotice(world, latestOrderId);
-  const currentSpeechNotice = [speechNotice, latestOrderNotice].filter(Boolean).join(" ");
-  const formationProgress = worldFormationProgress(world);
+  const currentSpeechNotice = speechNotice;
   void revision;
 
   if (assetError) throw assetError;
@@ -856,40 +829,23 @@ export function MonsterWorld() {
                 <section className="monster-world-formation-lab" aria-labelledby="world-formation-title">
                   <header>
                     <span id="world-formation-title">Formation lab</span>
-                    <b>simple → complex</b>
+                    <b>prompt helpers</b>
                   </header>
                   <div className="monster-world-formation-ladder">
-                    {WORLD_FORMATION_LADDER.map((preset, index) => (
+                    {WORLD_FORMATION_PROMPTS.map((preset, index) => (
                       <button
-                        key={preset.kind}
+                        key={preset.id}
                         type="button"
-                        aria-label={`Run ${preset.label} formation`}
+                        aria-label={`Ask residents to form a ${preset.label}`}
                         title={preset.prompt}
-                        data-active={formationProgress?.kind === preset.kind ? "true" : "false"}
-                        onClick={() => runFormation(preset)}
+                        onClick={() => sendFormationPrompt(preset)}
                       >
                         <small>{index + 1}</small>
                         {preset.label}
                       </button>
                     ))}
                   </div>
-                  {formationProgress ? (
-                    <div
-                      className="monster-world-formation-score"
-                      data-verdict={formationProgress.verdict}
-                      role="status"
-                      aria-live="polite"
-                    >
-                      <strong>{formationProgress.verdict === "pass" ? "PASS" : formationProgress.verdict === "needs_correction" ? "CORRECT" : "RUNNING"}</strong>
-                      <span>{formationProgress.coveredSlots}/{formationProgress.participants} slots</span>
-                      <span>{formationProgress.openSlots} gaps</span>
-                      <span>{formationProgress.spacingPercent}% even</span>
-                      <span>{formationProgress.overlaps} overlaps</span>
-                      <span>{formationProgress.corrections} corrections</span>
-                    </div>
-                  ) : (
-                    <p className="monster-world-formation-empty">Each resident moves independently. The reducer only observes coverage and spacing.</p>
-                  )}
+                  <p className="monster-world-formation-empty">These buttons only send example prompts. Residents interpret the same words independently; the reducer supplies no slots, target points, or answer key.</p>
                 </section>
               </form>
             </div>
@@ -978,27 +934,6 @@ export function MonsterWorld() {
               <button type="button" onClick={resetTown}>reset</button>
             </div>
           </div>
-
-          {formationProgress && world.formationExperiment ? (
-            <section className="monster-world-formation-run" aria-labelledby="world-formation-run-title">
-              <header>
-                <div>
-                  <p>Reducer-scored · no central movement plan</p>
-                  <h2 id="world-formation-run-title">{formationLabel(formationProgress.kind)}</h2>
-                </div>
-                <span data-verdict={formationProgress.verdict}>{formationProgress.verdict.replace("_", " ")}</span>
-              </header>
-              <div className="monster-world-formation-metrics">
-                <span><strong>{formationProgress.acted}/{formationProgress.participants}</strong> acted</span>
-                <span><strong>{formationProgress.settled}/{formationProgress.participants}</strong> turns</span>
-                <span><strong>{formationProgress.coveredSlots}/{formationProgress.participants}</strong> coverage</span>
-                <span><strong>{formationProgress.spacingPercent}%</strong> even</span>
-                <span><strong>{formationProgress.maxGapPixels}px</strong> max gap</span>
-                <span><strong>{formationProgress.corrections}</strong> corrections</span>
-              </div>
-              <p>“{world.formationExperiment.prompt}”</p>
-            </section>
-          ) : null}
 
           <section className="monster-world-cast" aria-labelledby="world-cast-title">
             <header>
@@ -1147,7 +1082,7 @@ export function MonsterWorld() {
             </div>
             <p>{usage.totalTokens.toLocaleString()} observed tokens · {usage.estimatedUsd > 0 ? `$${usage.estimatedUsd.toFixed(4)} estimated` : "cost appears when reported"}</p>
             <p>GPT-5.6 Luna · thinking none · one persistent session per resident · independent concurrent execution.</p>
-            <p>Scout orders and room posts are reducer-owned. Every entry marked <b>nanocodex</b> came from that resident's live World tool loop.</p>
+            <p>Scout prompts are interpreted by resident minds; the reducer only applies their physical tool actions and records room posts. Every entry marked <b>nanocodex</b> came from that resident's live World tool loop.</p>
           </footer>
         </aside>
       </div>
@@ -1184,10 +1119,6 @@ function carriedItemLabel(item: WorldActor["carrying"]): string {
   return "Empty satchel";
 }
 
-function formationLabel(kind: WorldFormationKind): string {
-  return WORLD_FORMATION_LADDER.find((preset) => preset.kind === kind)?.label ?? kind;
-}
-
 function commitModelUsage(
   turn: WorldUsage | undefined,
   usageRef: { current: UsageTotals },
@@ -1203,21 +1134,6 @@ function commitModelUsage(
   usageRef.current = next;
   publish(next);
   return next;
-}
-
-function orderProgressNotice(state: WorldState, orderId: number): string | undefined {
-  const order = state.orders.find(({ id }) => id === orderId);
-  if (!order) return undefined;
-  const completed = order.assignments.filter(({ status }) => status === "completed").length;
-  const active = order.assignments.filter(({ status }) => status === "assigned" || status === "moving").length;
-  const rejected = order.assignments.filter(({ status }) => status === "rejected").length;
-  const preempted = order.assignments.filter(({ status }) => status === "preempted").length;
-  const stateLabel = !order.completionEmitted
-    ? "in progress"
-    : rejected === 0 && preempted === 0
-      ? "complete"
-      : "settled";
-  return `Order ${order.id} ${stateLabel}: ${completed} completed · ${active} active · ${rejected} rejected · ${preempted} preempted.`;
 }
 
 function readSavedWorld(): string | null {

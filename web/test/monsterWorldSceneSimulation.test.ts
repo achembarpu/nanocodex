@@ -3,17 +3,11 @@ import test from "node:test";
 
 import {
   RESIDENT_IDS,
-  coordinationBasisFor,
   decodeStagedPlan,
   type ResidentId,
   type WorldInteraction,
   type WorldTarget,
 } from "../src/monsterWorldProtocol.ts";
-import {
-  WORLD_FORMATION_KINDS,
-  WORLD_FORMATION_LADDER,
-  formationOffset,
-} from "../src/monsterWorldFormations.ts";
 import {
   WORLD_POIS,
   isWorldPositionBlocked,
@@ -36,11 +30,8 @@ import {
   requestResidentExit,
   serializeWorldState,
   setWorldAgentsOnline,
-  settleWorldFormationTurn,
   updateWorld,
   worldCameraForState,
-  worldFormationProgress,
-  worldFormationResidentNeedsTurn,
   type WorldState,
 } from "../src/monsterWorldSimulation.ts";
 
@@ -84,7 +75,7 @@ test("Scout traverses both room doors in both directions without bouncing", () =
 
 test("unequal-speed residents reserve a room-door handoff before crossing scenes", () => {
   const ids = ["cinder", "moss"] as const;
-  const state = formationWorld(ids);
+  const state = situatedWorld(ids);
   relocate(state, "cinder", "town", 6, 8);
   relocate(state, "moss", "town", 5, 7);
   state.actors.cinder.energy = 0;
@@ -92,7 +83,7 @@ test("unequal-speed residents reserve a room-door handoff before crossing scenes
   applyMovePlan(state, "cinder", "guild", "slow-guild-door");
   applyMovePlan(state, "moss", "guild", "fast-guild-door");
 
-  advanceFormation(state, ids);
+  advanceResidents(state, ids);
   assert.ok(ids.every((id) => state.actors[id].scene === "guild_hall"));
   assert.equal(new Set(ids.map((id) => positionKey(actorWorldPosition(state.actors[id])))).size, ids.length);
 });
@@ -129,6 +120,7 @@ test("nonlegacy plans and exact Scout orders retain fixed cross-scene goals", ()
     ordered,
     "Cinder go to the guild hall; Moss go to the shop.",
     "call",
+    "reducer",
   )?.order;
   assert.ok(receipt);
   assert.deepEqual(receipt.rejected, []);
@@ -273,7 +265,7 @@ test("outdoor fatigue is tile-based, low energy still progresses, and guild rest
 
   const ordered = quietWorld();
   ordered.actors.cinder.energy = 0;
-  const receipt = playerSpeak(ordered, "Cinder go to the guild hall.", "call")?.order;
+  const receipt = playerSpeak(ordered, "Cinder go to the guild hall.", "call", "reducer")?.order;
   assert.ok(receipt);
   advanceUntil(ordered, () => order(ordered, receipt.id).completionEmitted, 1_500);
   assert.equal(order(ordered, receipt.id).assignments[0]?.status, "completed");
@@ -335,84 +327,8 @@ test("observations and hearing are scene-aware while the public board and roster
   );
 });
 
-test("six situated residents execute every progressive formation without collisions or swaps", () => {
-  const listeners = ["cinder", "moss", "rill", "luma", "iris", "rook"] as const;
-  for (const formation of WORLD_FORMATION_KINDS) {
-    const state = formationWorld(listeners);
-    for (const [index, id] of listeners.entries()) {
-      const offset = formationOffset(formation, index, listeners.length);
-      applyRelativePlan(
-        state,
-        id,
-        offset.dxPixels,
-        offset.dyPixels,
-        `${formation}-${id}`,
-      );
-    }
-
-    advanceFormation(state, listeners);
-    const destinations = listeners.map((id) => actorWorldPosition(state.actors[id]));
-    assert.equal(new Set(destinations.map(positionKey)).size, listeners.length);
-    assert.deepEqual(destinations, listeners.map((_id, index) => {
-      const offset = formationOffset(formation, index, listeners.length);
-      return {
-        scene: "town",
-        x: state.actors.player.x + offset.dxPixels / 8,
-        y: state.actors.player.y + offset.dyPixels / 8,
-      };
-    }));
-  }
-});
-
-test("formation experiments score complete coverage, even spacing, and independent settlement", () => {
-  const listeners = ["cinder", "moss", "rill", "luma", "iris", "rook"] as const;
-  for (const preset of WORLD_FORMATION_LADDER) {
-    const state = formationWorld(listeners);
-    const speech = playerSpeak(state, preset.prompt, "call");
-    assert.ok(speech);
-    for (const [index, id] of listeners.entries()) {
-      const observation = observationFor(state, id);
-      assert.ok(observation.playerOrder);
-      const offset = formationOffset(preset.kind, index, listeners.length);
-      const application = applyWorldToolAction(state, {
-        actionId: `${preset.kind}-${id}`,
-        requestId: `${preset.kind}-${id}-turn`,
-        agentId: id,
-        heardCallId: speech.callId,
-        action: {
-          kind: "move_relative",
-          anchor: "player",
-          dx_pixels: offset.dxPixels,
-          dy_pixels: offset.dyPixels,
-        },
-      });
-      assert.equal(application.accepted, true, `${preset.kind}-${id}`);
-      settleWorldFormationTurn(state, speech.callId, id, "completed");
-    }
-    advanceFormation(state, listeners);
-    const progress = worldFormationProgress(state);
-    assert.ok(progress);
-    assert.equal(progress.kind, preset.kind);
-    assert.equal(progress.acted, listeners.length);
-    assert.equal(progress.settled, listeners.length);
-    assert.equal(progress.coveredSlots, listeners.length);
-    assert.equal(progress.openSlots, 0);
-    assert.equal(progress.overlaps, 0);
-    assert.equal(progress.spacingPercent, 100);
-    assert.equal(progress.maxGapPixels, 0);
-    assert.equal(progress.verdict, "pass");
-    for (const id of listeners) {
-      assert.equal(worldFormationResidentNeedsTurn(state, id), false, `${preset.kind}-${id}-held`);
-    }
-    state.actors.player.x += 2;
-    for (const id of listeners) {
-      assert.equal(worldFormationResidentNeedsTurn(state, id), true, `${preset.kind}-${id}-reanchor`);
-    }
-  }
-});
-
 test("a newly occupied route tile causes a resident to reroute and preserve its claimed goal", () => {
-  const state = formationWorld(["cinder"]);
+  const state = situatedWorld(["cinder"]);
   state.actors.guest01.presence = "active";
   relocate(state, "guest01", "town", 60, 20);
   applyRelativePlan(state, "cinder", 64, 0, "cinder-reroute");
@@ -441,7 +357,7 @@ test("a newly occupied route tile causes a resident to reroute and preserve its 
 
 test("residents proposing the same relative destination receive distinct physical claims", () => {
   const ids = ["cinder", "moss"] as const;
-  const state = formationWorld(ids);
+  const state = situatedWorld(ids);
   applyRelativePlan(state, "cinder", 64, 0, "shared-claim-cinder");
   applyRelativePlan(state, "moss", 64, 0, "shared-claim-moss");
   updateWorld(state, 100);
@@ -449,7 +365,7 @@ test("residents proposing the same relative destination receive distinct physica
   const goals = ids.map((id) => state.actors[id].tasks[0]?.goal);
   assert.ok(goals.every((goal) => goal !== undefined));
   assert.equal(new Set(goals.map((goal) => positionKey(goal!))).size, ids.length);
-  advanceFormation(state, ids);
+  advanceResidents(state, ids);
   assert.equal(
     new Set(ids.map((id) => positionKey(actorWorldPosition(state.actors[id])))).size,
     ids.length,
@@ -539,7 +455,7 @@ function quietWorld(): WorldState {
   return state;
 }
 
-function formationWorld(ids: readonly ResidentId[]): WorldState {
+function situatedWorld(ids: readonly ResidentId[]): WorldState {
   const state = quietWorld();
   for (const id of RESIDENT_IDS) {
     if (ids.includes(id)) continue;
@@ -567,7 +483,7 @@ function applyRelativePlan(
     request_id: requestId,
     agent_id: actorId,
     state_version: observation.stateVersion,
-    summary: "takes a distinct situated coordination slot",
+    summary: "takes a distinct situated position",
     steps: [{
       kind: "move_relative",
       anchor: "player",
@@ -603,13 +519,13 @@ function applyMovePlan(
   assert.deepEqual(applyWorldPlan(state, plan), { accepted: true });
 }
 
-function advanceFormation(state: WorldState, ids: readonly ResidentId[]): void {
+function advanceResidents(state: WorldState, ids: readonly ResidentId[]): void {
   for (let index = 0; index < 1_000; index += 1) {
     updateWorld(state, 100);
     assertPhysicalExclusion(state, ids);
     if (ids.every((id) => state.actors[id].tasks.length === 0 && !state.actors[id].movement)) return;
   }
-  assert.fail("formation did not settle within 1,000 ticks");
+  assert.fail("residents did not settle within 1,000 ticks");
 }
 
 function assertPhysicalExclusion(state: WorldState, ids: readonly ResidentId[]): void {

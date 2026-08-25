@@ -4,7 +4,6 @@ import {
   EMPTY_WORLD_RESIDENT_MEMORY,
   RESIDENT_IDS,
   WORLD_PROTOCOL,
-  coordinationBasisFor,
   isWorldAgentCommand,
   isWorldAgentMessage,
   type WorldObservation,
@@ -138,22 +137,6 @@ test("one resident action is correlated to its owning turn and fresh reducer res
     ...roomResult,
     result: { ...roomResult.result, message: { ...roomResult.result.message, fromId: "june" } },
   }), false);
-});
-
-test("stable co-listener ordering yields mirrored two-side slots", () => {
-  const listeners = ["cinder", "moss", "rill", "luma", "iris", "rook"] as const;
-  const bases = listeners.map((id) => coordinationBasisFor(listeners, id));
-
-  assert.deepEqual(bases.map((basis) => basis?.twoSides), [
-    { side: "left", dxPixels: -64, dyPixels: -32 },
-    { side: "left", dxPixels: -64, dyPixels: 0 },
-    { side: "left", dxPixels: -64, dyPixels: 32 },
-    { side: "right", dxPixels: 64, dyPixels: -32 },
-    { side: "right", dxPixels: 64, dyPixels: 0 },
-    { side: "right", dxPixels: 64, dyPixels: 32 },
-  ]);
-  assert.deepEqual(coordinationBasisFor(listeners, "cinder"), bases[0]);
-  assert.equal(coordinationBasisFor(listeners, "june"), undefined);
 });
 
 test("runtime action messages reject malformed physical actions", () => {

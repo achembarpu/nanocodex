@@ -218,7 +218,7 @@ test("voice is spatial off-center and guild-wide at the central relay", () => {
 test("a reducer-owned Scout order blocks model overwrite until physical completion", () => {
   const state = createWorldState();
   const staleObservation = observationFor(state, "cinder");
-  const speech = playerSpeak(state, "Cinder, inspect the gate.", "call");
+  const speech = playerSpeak(state, "Cinder, inspect the gate.", "call", "reducer");
   assert.ok(speech);
   assert.equal(observationFor(state, "cinder").guildCall?.id, speech.callId);
 
@@ -275,7 +275,7 @@ test("a reducer-owned Scout order blocks model overwrite until physical completi
 
 test("exact gather and split orders physically complete offline for every active resident", () => {
   const state = createWorldState();
-  const gather = playerSpeak(state, "Everyone come to me.", "whisper");
+  const gather = playerSpeak(state, "Everyone come to me.", "whisper", "reducer");
   assert.ok(gather);
   assert.ok(gather.order);
   assert.equal(state.agentsOnline, false);
@@ -302,6 +302,7 @@ test("exact gather and split orders physically complete offline for every active
     split,
     "Cinder, Moss, and Rill go to the bridge; everyone else go to the pond.",
     "talk",
+    "reducer",
   );
   assert.ok(command);
   assert.ok(command.order);
@@ -345,7 +346,7 @@ test("a recognized order preempts old tasks and an in-flight tile before moving"
   const affectedResidents = RESIDENT_IDS.slice(0, BASE_RESIDENT_COUNT);
   const versions = Object.fromEntries(affectedResidents.map((id) => [id, state.decisionVersions[id]]));
 
-  const speech = playerSpeak(state, "Everyone come to me", "call");
+  const speech = playerSpeak(state, "Everyone come to me", "call", "reducer");
   assert.ok(speech?.order);
   assert.equal(state.actors.cinder.movement, undefined);
   assert.equal(state.actors.cinder.tasks.length, 1);
@@ -362,7 +363,7 @@ test("a recognized order preempts old tasks and an in-flight tile before moving"
 
 test("a newer order preempts unfinished assignments and fences a late model result", () => {
   const state = createWorldState();
-  const gather = playerSpeak(state, "Everyone come to me", "call");
+  const gather = playerSpeak(state, "Everyone come to me", "call", "reducer");
   assert.ok(gather?.order);
   updateWorld(state, 100);
   const oldObservation = observationFor(state, "cinder");
@@ -384,6 +385,7 @@ test("a newer order preempts unfinished assignments and fences a late model resu
     state,
     "Cinder, Moss, and Rill go to the bridge; everyone else go to the pond",
     "call",
+    "reducer",
   );
   assert.ok(split?.order);
   const oldOrder = orderById(state, gather.order.id);
@@ -422,7 +424,7 @@ test("raw speech reaches every resident mind without inventing a reducer destina
 
   const withArrival = createWorldState();
   setPopulationTarget(withArrival, BASE_RESIDENT_COUNT + 1);
-  const rejected = playerSpeak(withArrival, "Mika go to the bridge", "call");
+  const rejected = playerSpeak(withArrival, "Mika go to the bridge", "call", "reducer");
   assert.ok(rejected?.order);
   assert.equal(rejected.order.assigned.length, 0);
   assert.deepEqual(rejected.order.rejected.map(({ actorId, reason }) => ({ actorId, reason })), [
@@ -477,7 +479,7 @@ test("a resident can interpret a coin flip into an independently sampled relativ
 
 test("imperative orders preserve interactions and can target another resident", () => {
   const interaction = createWorldState();
-  const inspect = playerSpeak(interaction, "Cinder, inspect the gate.", "call")?.order;
+  const inspect = playerSpeak(interaction, "Cinder, inspect the gate.", "call", "reducer")?.order;
   assert.ok(inspect);
   assert.equal(inspect.assigned[0]?.actorId, "cinder");
   assert.equal(inspect.assigned[0]?.interaction, "inspect");
@@ -491,7 +493,7 @@ test("imperative orders preserve interactions and can target another resident", 
   assert.ok(interaction.activities.some(({ text }) => /Cinder inspects Mystery Gate\./.test(text)));
 
   const actorTarget = createWorldState();
-  const meet = playerSpeak(actorTarget, "Cinder, go to Moss.", "call")?.order;
+  const meet = playerSpeak(actorTarget, "Cinder, go to Moss.", "call", "reducer")?.order;
   assert.ok(meet);
   assert.deepEqual(meet.assigned.map(({ actorId, target }) => ({ actorId, target })), [
     { actorId: "cinder", target: "moss" },
@@ -503,7 +505,7 @@ test("imperative orders preserve interactions and can target another resident", 
 test("mixed accepted and rejected assignments settle without claiming full completion", () => {
   const state = createWorldState();
   setPopulationTarget(state, BASE_RESIDENT_COUNT + 1);
-  const receipt = playerSpeak(state, "Cinder and Mika go to the bridge.", "call")?.order;
+  const receipt = playerSpeak(state, "Cinder and Mika go to the bridge.", "call", "reducer")?.order;
   assert.ok(receipt);
   assert.equal(receipt.assigned.length, 1);
   assert.equal(receipt.rejected.length, 1);
@@ -608,7 +610,7 @@ test("population changes enter from outside, remain physical, and cross an edge 
   for (let index = 0; index < 20; index += 1) updateWorld(state, 100);
   assert.equal(activeResidentCount(state), MAX_RESIDENT_COUNT);
 
-  const fullGuildOrder = playerSpeak(state, "Everyone go to the guild hall.", "call")?.order;
+  const fullGuildOrder = playerSpeak(state, "Everyone go to the guild hall.", "call", "reducer")?.order;
   assert.ok(fullGuildOrder);
   assert.equal(fullGuildOrder.assigned.length, MAX_RESIDENT_COUNT);
   assert.deepEqual(fullGuildOrder.rejected, []);
@@ -636,7 +638,7 @@ test("one map resident owns one isolated retained Luna session and turn", () => 
   assert.doesNotMatch(worker, /\n\s*observe:\s*\{/);
   assert.doesNotMatch(worker, /WAIT_PARAMETERS|kind: "wait"/);
   assert.match(worker, /result = await turn\.result\(\)/);
-  assert.match(worker, /agent\.turn\.prompt\(\{ input: residentPrompt\(entry\) \}\)/);
+  assert.match(worker, /agent\.turn\.prompt\(\{ input: worldResidentPrompt\(entry\) \}\)/);
   assert.doesNotMatch(worker, /agent\.turn\.prompt\(\{\s*id:/);
   assert.match(worker, /const activeTurns = new Map<ResidentId, ActiveResidentTurn>\(\)/);
   assert.doesNotMatch(worker, /batch|MAX_CONCURRENT_RESIDENT_TURNS/i);

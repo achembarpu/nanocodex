@@ -22,7 +22,6 @@ import {
   setPopulationTarget,
   setWorldAgentsOnline,
   updateWorld,
-  worldFormationProgress,
   worldToolResultAtDecisionBoundary,
 } from "../src/monsterWorldSimulation.ts";
 
@@ -75,7 +74,7 @@ test("speech, observations, calls, and plans include non-legacy residents", () =
   const state = createWorldState();
   const activeIds = liveAgentIdsInWorld(state);
   const versions = { ...state.decisionVersions };
-  const speech = playerSpeak(state, "Everyone go to the bridge.", "whisper");
+  const speech = playerSpeak(state, "Everyone go to the bridge.", "whisper", "reducer");
   assert.ok(speech?.order);
   assert.deepEqual(speech.liveHeardBy, activeIds);
   assert.deepEqual(speech.liveAddressed, activeIds);
@@ -140,7 +139,7 @@ test("online Luna control suppresses only new idle fallback routines", () => {
     assert.equal(state.actors[id].tasks.length, 0);
   }
 
-  const order = playerSpeak(state, "Everyone go to the pond.", "call")?.order;
+  const order = playerSpeak(state, "Everyone go to the pond.", "call", "reducer")?.order;
   assert.ok(order);
   updateWorld(state, 100);
   assert.ok(activeIds.every((id) => state.actors[id].tasks[0]?.orderId === order.id));
@@ -259,33 +258,4 @@ test("a newer player instruction supersedes stale in-turn World control", () => 
   const result = worldToolResultAtDecisionBoundary(state, action.pending);
   assert.equal(result?.outcome.status, "superseded");
   assert.match(result?.outcome.detail ?? "", /newer instruction/i);
-});
-
-test("a second move in one formation turn is measured as an independent correction", () => {
-  const state = createWorldState();
-  const speech = playerSpeak(
-    state,
-    "All residents form a circle with even spacing, no gaps, and correct blocked movement.",
-    "call",
-  );
-  assert.ok(speech);
-  for (const [attempt, dyPixels] of [[0, -72], [1, -80]] as const) {
-    const application = applyWorldToolAction(state, {
-      actionId: `cinder-correction-${attempt}`,
-      requestId: "cinder-correction-turn",
-      agentId: "cinder",
-      heardCallId: speech.callId,
-      action: {
-        kind: "move_relative",
-        anchor: "player",
-        dx_pixels: 0,
-        dy_pixels: dyPixels,
-      },
-    });
-    assert.equal(application.accepted, true);
-  }
-  const progress = worldFormationProgress(state);
-  assert.ok(progress);
-  assert.equal(progress.acted, 1);
-  assert.equal(progress.corrections, 1);
 });
