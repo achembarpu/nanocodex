@@ -444,20 +444,13 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
   async #revoke(id: ConnectorId, connector: StoredConnector): Promise<void> {
     if (id === "x") {
       const credentials = providerCredentials(id, this.#env);
-      const tokens = [...new Set([
-        connector.refreshToken,
-        connector.accessToken,
-      ].filter((token): token is string => Boolean(token)))];
-      for (const token of tokens) {
-        const response = await providerFetch(buildXRevocationRequest(
-          credentials.clientId,
-          credentials.clientSecret,
-          token,
-        ));
-        await response.body?.cancel();
-        if (response.status !== 200) {
-          throw new ConnectorFailure(503, "connector_revocation_failed");
-        }
+      const response = await providerFetch(buildXRevocationRequest(
+        credentials.clientId,
+        connector.refreshToken ?? connector.accessToken,
+      ));
+      await response.body?.cancel();
+      if (response.status !== 200) {
+        throw new ConnectorFailure(503, "connector_revocation_failed");
       }
       return;
     }

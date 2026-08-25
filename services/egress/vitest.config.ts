@@ -131,6 +131,9 @@ export default defineConfig({
             && url.pathname === "/2/oauth2/revoke") {
             const body = await request.clone().formData();
             const token = String(body.get("token") ?? "");
+            if (request.headers.has("authorization") || token === "x-connector-access") {
+              return Response.json({ error: "invalid revocation request" }, { status: 400 });
+            }
             if (token === "x-revocation-failure-refresh") {
               return Response.json({ error: "provider unavailable" }, { status: 503 });
             }
