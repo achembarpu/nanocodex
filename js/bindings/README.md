@@ -148,9 +148,11 @@ Cloudflare Agents default to direct tool mode because Workers prohibit dynamic
 `eval`/`new Function`. Caller-defined tools therefore work without a code
 evaluator. Select `toolMode: "code"` only when also supplying an evaluator that
 is explicitly compatible with the deployed Worker runtime. Runtime-owned
-`Subagents.create()` may be attached to a durable root. Clean children use the
-existing in-memory Rust task tree and are closed with the live root; their
-lifecycles are not reconstructed from the durable journal.
+Subagents are installed by default, including on a durable root. Clean children
+use the existing in-memory Rust task tree and are closed with the live root;
+their lifecycles are not reconstructed from the durable journal. Use
+`Subagents.create({ maxConcurrency })` in `tools` only to override the default
+maximum concurrency of 32.
 
 Each Durable Object persists a private runtime identity in its own SQLite
 storage and derives its journal identity from it, so multiple objects in one
@@ -196,7 +198,7 @@ Inside a caller-owned Worker or server isolate, host capabilities stay as
 ordinary functions without crossing another compatibility protocol:
 
 ```js
-import { Agent, Subagents, Transport } from "nanocodex/host";
+import { Agent, Transport } from "nanocodex/host";
 import nanocodexWasm from "./nanocodex.wasm";
 
 const myApplicationTool = {
@@ -217,10 +219,7 @@ const agent = await Agent.create({
     websocketUrl: "/api/responses",
     createWebSocket: (endpoint) => new WebSocket(endpoint),
   }),
-  tools: [
-    myApplicationTool,
-    ...Subagents.create({ maxConcurrency: 8 }),
-  ],
+  tools: [myApplicationTool],
 });
 ```
 
@@ -235,7 +234,7 @@ runtime. Each factory returns an entry that can sit beside application tools
 and Rust/WASM extensions in the same array:
 
 ```js
-import { Agent, Subagents, Transport } from "nanocodex/host";
+import { Agent, Transport } from "nanocodex/host";
 import {
   dataset,
   imageGeneration,
@@ -257,7 +256,6 @@ const agent = await Agent.create({
     }),
     updatePlan(),
     myApplicationTool,
-    ...Subagents.create({ maxConcurrency: 8 }),
   ],
 });
 ```
@@ -316,7 +314,7 @@ if (page.nextCursor) {
 This same adapter works inside a Cloudflare Worker or Durable Object:
 
 ```js
-import { Agent, Subagents, Transport } from "nanocodex/host";
+import { Agent, Transport } from "nanocodex/host";
 import { web } from "nanocodex/tools";
 
 const agent = await Agent.create({
@@ -331,7 +329,6 @@ const agent = await Agent.create({
       url: env.WEB_TOOL_URL,
       headers: { authorization: `Bearer ${env.WEB_TOOL_TOKEN}` },
     }),
-    ...Subagents.create(),
   ],
 });
 ```
@@ -341,7 +338,7 @@ one persistent OPFS workspace and a lazy WASM-backed shell (Python through
 Pyodide, C/C++ through wasm-clang, plus browser Git and bounded commands):
 
 ```js
-import { Agent, Subagents } from "nanocodex/host";
+import { Agent } from "nanocodex/host";
 import { browser } from "nanocodex/tools/browser";
 
 const runtime = await browser({
@@ -359,7 +356,7 @@ const agent = await Agent.create({
     timezone,
     projectInstructions: runtime.projectInstructions,
   },
-  tools: [...runtime.tools, ...Subagents.create()],
+  tools: runtime.tools,
 });
 ```
 
@@ -443,11 +440,11 @@ const execCommand = {
 ```
 
 This is what loading a Rust-written tool from JavaScript looks like here.
-`nanocodex-subagents` is statically linked into `nanocodex.wasm`; importing the
-module loads that Rust code, and spreading `Subagents.create()` into `tools`
-selects it for this agent. The spread contributes one opaque extension entry,
-not seven JavaScript handlers. Inside the binding, Rust creates one shared
-registry and installs fresh tools for every root, spawn, and fork:
+`nanocodex-subagents` is statically linked into `nanocodex.wasm`; every JS
+`Agent.create(...)` installs it by default. Spreading `Subagents.create()` into
+`tools` overrides its maximum concurrency and contributes one opaque extension
+entry, not seven JavaScript handlers. Inside the binding, Rust creates one
+shared registry and installs fresh tools for every root, spawn, and fork:
 
 ```rust,ignore
 let (registry, control, updates) = nanocodex_subagents::channel(max_concurrency);

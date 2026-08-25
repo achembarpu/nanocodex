@@ -4,7 +4,7 @@ import { createServer } from "node:http";
 import { test } from "node:test";
 import { WebSocketServer } from "ws";
 
-import { Actions, Agent, Subagents, Transport } from "../node/index.mjs";
+import { Actions, Agent, Transport } from "../node/index.mjs";
 import { createNodeHost } from "../node/host.mjs";
 import { createMemoryDurabilityStore } from "../runtime/durability-store.mjs";
 
@@ -285,7 +285,6 @@ test("a durable Node-hosted root runs the canonical in-memory Rust subagent task
         parameters: { type: "object" },
         handler: () => "root",
       },
-      ...Subagents.create({ maxConcurrency: 2 }),
     ],
   });
   // Make another host realm globally active before the Rust child is built.

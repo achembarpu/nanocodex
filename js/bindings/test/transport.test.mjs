@@ -24,8 +24,23 @@ test("Responses transports own authentication and connection setup", () => {
   assert.throws(() => NodeTransport.openAi({ apiKey: " " }), /non-empty/);
 });
 
-test("subagents are an explicit branded Rust extension", () => {
+test("subagents are installed by default and accept a branded concurrency override", () => {
   assert.deepEqual(Object.keys(Subagents), ["create"]);
+  assert.deepEqual(resolveTools(undefined), {
+    tools: undefined,
+    subagents: { max_concurrency: 32 },
+  });
+  const ping = {
+    name: "ping",
+    description: "Return pong.",
+    handler: () => "pong",
+  };
+  assert.deepEqual(resolveTools([ping]), {
+    tools: {
+      ping: { description: "Return pong.", handler: ping.handler },
+    },
+    subagents: { max_concurrency: 32 },
+  });
   const subagents = Subagents.create({ maxConcurrency: 7 });
   const handler = () => "pong";
   assert.deepEqual(resolveTools([{

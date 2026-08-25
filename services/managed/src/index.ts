@@ -13,7 +13,6 @@ import type {
   Turn,
 } from "nanocodex";
 import { Agent as CloudflareAgent } from "nanocodex/cloudflare";
-import * as Subagents from "nanocodex/subagents";
 import { imageGeneration, updatePlan, viewImage, web } from "nanocodex/tools";
 import { justBash } from "nanocodex/tools/bash";
 import { createComputerFilesystem } from "./computer-workspace";
@@ -3302,7 +3301,6 @@ export class NanocodexSession extends DurableComputerSession {
           ].join("\n\n"),
         tools: [
           execCommand,
-          ...Subagents.create(),
           ...(multiplayer ? [] : [{
             name: "phone",
             description: "Read current phone state or perform a phone operation on the currently attached Android device. This has no cloud fallback; inspect ok and status before claiming success.",

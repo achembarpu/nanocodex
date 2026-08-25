@@ -9,6 +9,16 @@ import { bindBrowser } from "../tools/browser/index.mjs";
 import * as datasets from "../tools/dataset.mjs";
 import * as standard from "../tools/standard.mjs";
 
+const SUBAGENT_TOOL_NAMES = Object.freeze([
+  "submit_result",
+  "spawn_agent",
+  "send_agent_message",
+  "list_agents",
+  "wait_agent",
+  "interrupt_agent",
+  "close_agent",
+]);
+
 const createWarmAgent = ({
   apiKey,
   createWebSocket,
@@ -187,7 +197,16 @@ test("web-target WASM directly dispatches a CSP-safe application tool", async ()
     const reader = messageReader(socket);
     const warmup = await reader.next();
     const toolPrefix = warmup.input.find((item) => item.type === "additional_tools");
-    assert.deepEqual(toolPrefix.tools.map((tool) => tool.name), ["runtimeInfo"]);
+    assert.deepEqual(toolPrefix.tools.map((tool) => tool.name), [
+      "close_agent",
+      "interrupt_agent",
+      "list_agents",
+      "runtimeInfo",
+      "send_agent_message",
+      "spawn_agent",
+      "submit_result",
+      "wait_agent",
+    ]);
     send(socket, { type: "response.completed", response: { id: "direct-warmup", usage: null } });
     const generation = await reader.next();
     assert.equal(generation.previous_response_id, "direct-warmup");
@@ -299,6 +318,7 @@ test("web-target WASM exposes browser bash and Rust apply_patch as standard tool
       "exec",
       "exec_command",
       "apply_patch",
+      ...SUBAGENT_TOOL_NAMES,
     ]);
     const execCommand = toolPrefix.tools.find((tool) => tool.name === "exec_command");
     assert.match(execCommand.description, /^Run browser bash\./);
@@ -402,7 +422,11 @@ test("web-target WASM keeps remote MCP deferred behind tool_search and Code Mode
     const reader = messageReader(socket);
     const warmup = await reader.next();
     const toolPrefix = warmup.input.find((item) => item.type === "additional_tools");
-    assert.deepEqual(toolPrefix.tools.map((tool) => tool.name ?? tool.type), ["exec", "tool_search"]);
+    assert.deepEqual(toolPrefix.tools.map((tool) => tool.name ?? tool.type), [
+      "exec",
+      "tool_search",
+      ...SUBAGENT_TOOL_NAMES,
+    ]);
     assert.doesNotMatch(toolPrefix.tools[0].description, /mcp__fixture__echo/);
     assert.equal(toolPrefix.tools.some((tool) => tool.name === "mcp__fixture__echo"), false);
     send(socket, { type: "response.completed", response: { id: "mcp-warmup", usage: null } });
@@ -690,9 +714,13 @@ test("web-target WASM executes the complete browser harness tool contract", asyn
       "apply_patch",
       "view_image",
       "tool_search",
+      ...SUBAGENT_TOOL_NAMES,
     ]);
     assert.equal(toolPrefix.tools[0].type, "custom");
-    assert.equal(toolPrefix.tools.at(-1).type, "tool_search");
+    assert.equal(
+      toolPrefix.tools.find((tool) => (tool.name ?? tool.type) === "tool_search")?.type,
+      "tool_search",
+    );
     send(socket, { type: "response.completed", response: { id: "combined-warmup", usage: null } });
 
     const generation = await reader.next();
