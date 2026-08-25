@@ -1644,11 +1644,10 @@ export class NanocodexSession extends DurableComputerSession {
               );
             }
             if (active) {
-              this.ctx.storage.sql.exec(
-                "DELETE FROM managed_realtime_session WHERE singleton = 1 AND voice_session_id = ?",
+              await this.#endManagedRealtimeSession(
+                agent,
                 active.voice_session_id,
               );
-              await agent.session.realtime.end();
             }
             const context = await agent.session.realtime.start();
             assertBoundedRealtimeContext(context);
@@ -1678,12 +1677,10 @@ export class NanocodexSession extends DurableComputerSession {
                 voice_session_id: parsed.voiceSessionId,
               };
             }
-            this.ctx.storage.sql.exec(
-              "DELETE FROM managed_realtime_session WHERE singleton = 1 AND voice_session_id = ?",
+            const context = await this.#endManagedRealtimeSession(
+              agent,
               parsed.voiceSessionId,
             );
-            const context = await agent.session.realtime.end();
-            assertBoundedRealtimeContext(context);
             return {
               context,
               operation_id: parsed.operationId,
@@ -3452,6 +3449,19 @@ export class NanocodexSession extends DurableComputerSession {
         "SELECT voice_session_id FROM managed_realtime_session WHERE singleton = 1",
       )
       .toArray()[0];
+  }
+
+  async #endManagedRealtimeSession(
+    agent: CloudflareAgent.Agent,
+    voiceSessionId: string,
+  ): Promise<AgentSessionContext> {
+    const context = await agent.session.realtime.end();
+    assertBoundedRealtimeContext(context);
+    this.ctx.storage.sql.exec(
+      "DELETE FROM managed_realtime_session WHERE singleton = 1 AND voice_session_id = ?",
+      voiceSessionId,
+    );
+    return context;
   }
 
   #firstPrompt(): string {

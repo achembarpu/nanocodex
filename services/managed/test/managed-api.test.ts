@@ -1507,6 +1507,77 @@ describe("managed agents REST and resumable SSE", () => {
     expect(capacity.archived_realtime).toMatchObject({ archived_receipts: 1, objects: 1 });
   });
 
+  it("ends realtime before releasing the managed lease", async () => {
+    const agent = await createAgent();
+    const first = await managedRealtime(agent, "start", {
+      operation_id: "voice-order-first-start",
+      voice_session_id: "voice-order-first",
+    });
+    expect(first.status).toBe(200);
+
+    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    const blockLeaseDeletion = () => runInDurableObject(
+      session,
+      (_instance, state) => state.storage.sql.exec(
+        `CREATE TRIGGER block_managed_realtime_lease_delete
+         BEFORE DELETE ON managed_realtime_session
+         BEGIN
+           SELECT RAISE(FAIL, 'managed realtime lease deletion blocked');
+         END`,
+      ),
+    );
+    const allowLeaseDeletion = () => runInDurableObject(
+      session,
+      (_instance, state) => state.storage.sql.exec(
+        "DROP TRIGGER block_managed_realtime_lease_delete",
+      ),
+    );
+    const activeVoiceSession = () => runInDurableObject(
+      session,
+      (_instance, state) => state.storage.sql.exec<{ voice_session_id: string }>(
+        "SELECT voice_session_id FROM managed_realtime_session WHERE singleton = 1",
+      ).one().voice_session_id,
+    );
+
+    await blockLeaseDeletion();
+    const blockedReplacement = await managedRealtime(agent, "start", {
+      operation_id: "voice-order-second-start",
+      voice_session_id: "voice-order-second",
+    });
+    expect(blockedReplacement.status).toBe(500);
+    expect(await activeVoiceSession()).toBe("voice-order-first");
+
+    await allowLeaseDeletion();
+    const replacement = await managedRealtime(agent, "start", {
+      operation_id: "voice-order-second-start",
+      voice_session_id: "voice-order-second",
+    });
+    expect(replacement.status).toBe(200);
+    const replacementValue = await replacement.json<ManagedRealtimeLifecycleResponse>();
+    expect(JSON.stringify(replacementValue.context.history).match(
+      /Realtime conversation ended\./g,
+    )).toHaveLength(2);
+
+    await blockLeaseDeletion();
+    const blockedStop = await managedRealtime(agent, "stop", {
+      operation_id: "voice-order-stop",
+      voice_session_id: "voice-order-second",
+    });
+    expect(blockedStop.status).toBe(500);
+    expect(await activeVoiceSession()).toBe("voice-order-second");
+
+    await allowLeaseDeletion();
+    const stopped = await managedRealtime(agent, "stop", {
+      operation_id: "voice-order-stop",
+      voice_session_id: "voice-order-second",
+    });
+    expect(stopped.status).toBe(200);
+    const stopValue = await stopped.json<ManagedRealtimeLifecycleResponse>();
+    expect(JSON.stringify(stopValue.context.history).match(
+      /Realtime conversation ended\./g,
+    )).toHaveLength(4);
+  });
+
   it("atomically starts or steers realtime delegation under managed turn ownership", async () => {
     const agent = await createAgent();
     const lifecycle = await managedRealtime(agent, "start", {
