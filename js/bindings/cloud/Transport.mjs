@@ -33,13 +33,15 @@ export function http(url = DEFAULT_API_URL, options = {}) {
       return {
         baseUrl,
         fetch(input, init) {
-          const request = new Request(input, init);
-          const headers = new Headers(request.headers);
-          headers.set("x-nanocodex-app-id", appId);
-          return fetchFn(
-            new Request(request, { headers }),
-            { credentials: init?.credentials ?? credentials },
+          const headers = new Headers(
+            init?.headers ?? (input instanceof Request ? input.headers : undefined),
           );
+          headers.set("x-nanocodex-app-id", appId);
+          return fetchFn(input, {
+            ...init,
+            headers,
+            credentials: init?.credentials ?? credentials,
+          });
         },
         async request(request) {
           const headers = new Headers(request.headers);
