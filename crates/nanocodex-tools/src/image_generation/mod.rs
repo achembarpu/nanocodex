@@ -92,7 +92,7 @@ impl ImageGenerationHandler {
         {
             Ok(path) => Some(path),
             Err(error) => {
-                eprintln!("failed to save generated image: {error}");
+                tracing::warn!(%error, "failed to save generated image");
                 None
             }
         };

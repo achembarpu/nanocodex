@@ -176,7 +176,7 @@ pub async fn prepare_output_images(output: &mut ToolOutputBody) {
             *output = prepared;
         }
         Err(error) => {
-            eprintln!("failed to join image preparation task: {error}");
+            tracing::warn!(%error, "failed to join image preparation task");
             *output = ToolOutputBody::Content(vec![ToolOutputContent::InputText {
                 text: IMAGE_PROCESSING_ERROR_PLACEHOLDER.to_owned(),
             }]);
@@ -196,7 +196,7 @@ pub async fn prepare_user_input(input: &PromptInput) -> Vec<ContentItem> {
     match tokio::task::spawn_blocking(move || prepare_user_content(input)).await {
         Ok(content) => content,
         Err(error) => {
-            eprintln!("failed to join user image preparation task: {error}");
+            tracing::warn!(%error, "failed to join user image preparation task");
             vec![input_text(IMAGE_PROCESSING_ERROR_PLACEHOLDER)]
         }
     }
@@ -257,7 +257,7 @@ fn prepare_user_image(mut image_url: String, detail: ImageDetail) -> ContentItem
             detail: Some(detail),
         },
         Err(error) => {
-            eprintln!("failed to prepare message image: {error}");
+            tracing::warn!(%error, "failed to prepare message image");
             input_text(error.placeholder())
         }
     }
@@ -275,7 +275,7 @@ fn prepare_content(mut content: Vec<ToolOutputContent>) -> Vec<ToolOutputContent
             continue;
         };
         if let Err(error) = prepare_image(image_url, *detail) {
-            eprintln!("failed to prepare tool output image: {error}");
+            tracing::warn!(%error, "failed to prepare tool output image");
             *item = ToolOutputContent::InputText {
                 text: error.placeholder().to_owned(),
             };
