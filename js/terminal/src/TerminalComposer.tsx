@@ -88,13 +88,11 @@ export function TerminalComposer({
   );
 }
 function isSubmitKeyEvent(
-  event: Pick<KeyboardEvent, "key" | "shiftKey" | "isComposing" | "keyCode">,
+  event: Pick<KeyboardEvent, "key" | "shiftKey" | "isComposing">,
   composing: boolean,
 ): boolean {
   return event.key === "Enter"
     && !event.shiftKey
     && !event.isComposing
-    && event.keyCode !== 229
     && !composing;
 }
-

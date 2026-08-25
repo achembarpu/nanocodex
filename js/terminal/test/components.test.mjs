@@ -79,6 +79,32 @@ test("composer keeps submit and stop policy controlled", async () => {
   const form = renderer.root.findByType("form");
   await act(async () => form.props.onSubmit({ preventDefault() {} }));
   assert.deepEqual(submissions, ["ship it"]);
+  const textarea = renderer.root.findByType("textarea");
+  let prevented = 0;
+  await act(async () => textarea.props.onKeyDown({
+    nativeEvent: {
+      isComposing: false,
+      key: "Enter",
+      keyCode: 229,
+      shiftKey: false,
+    },
+    preventDefault() { prevented += 1; },
+  }));
+  assert.deepEqual(submissions, ["ship it", "ship it"]);
+  assert.equal(prevented, 1);
+  await act(async () => textarea.props.onCompositionStart());
+  await act(async () => textarea.props.onKeyDown({
+    nativeEvent: {
+      isComposing: true,
+      key: "Enter",
+      keyCode: 229,
+      shiftKey: false,
+    },
+    preventDefault() { prevented += 1; },
+  }));
+  await act(async () => textarea.props.onCompositionEnd());
+  assert.deepEqual(submissions, ["ship it", "ship it"]);
+  assert.equal(prevented, 1);
   assert.equal(renderer.root.findByType("button").props["aria-label"], "Send message");
   assert.equal(cancelled, 0);
   await act(async () => renderer.unmount());

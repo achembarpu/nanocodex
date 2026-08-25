@@ -37,6 +37,5 @@ function isSubmitKeyEvent(event, composing) {
     return event.key === "Enter"
         && !event.shiftKey
         && !event.isComposing
-        && event.keyCode !== 229
         && !composing;
 }
