@@ -1,10 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import {
-  createHostManagedWebSocketMultiplexer,
-  openHostManagedWebSocket,
-} from "../browser/hostManagedWebSocket.mjs";
+import { openHostManagedWebSocket } from "../browser/hostManagedWebSocket.mjs";
 
 class FakeWebSocket {
   static nextMessage = { type: "nanocodex.proxy.ready" };
@@ -72,83 +69,4 @@ test("host-managed socket rejection preserves retry metadata", async () => {
       return true;
     },
   );
-});
-
-test("host-managed multiplexer preserves independent logical sockets", async () => {
-  class FakeMultiplexedWebSocket {
-    static instances = [];
-
-    constructor(url) {
-      this.url = String(url);
-      this.readyState = 0;
-      this.sent = [];
-      this.listeners = new Map();
-      FakeMultiplexedWebSocket.instances.push(this);
-      queueMicrotask(() => {
-        this.readyState = 1;
-        this.emit("open", {});
-      });
-    }
-
-    addEventListener(type, listener) {
-      const listeners = this.listeners.get(type) ?? new Set();
-      listeners.add(listener);
-      this.listeners.set(type, listeners);
-    }
-
-    emit(type, event) {
-      for (const listener of this.listeners.get(type) ?? []) listener(event);
-    }
-
-    send(message) { this.sent.push(JSON.parse(message)); }
-    close(code = 1000, reason = "") {
-      this.readyState = 3;
-      this.emit("close", { code, reason });
-    }
-  }
-
-  const createSocket = createHostManagedWebSocketMultiplexer({
-    WebSocketImpl: FakeMultiplexedWebSocket,
-  });
-  const firstOpening = createSocket("wss://nanocodex.example/api/responses", "resident-1");
-  const secondOpening = createSocket("wss://nanocodex.example/api/responses", "resident-2");
-  await new Promise((resolve) => setTimeout(resolve, 0));
-  const [physical] = FakeMultiplexedWebSocket.instances;
-  assert.equal(FakeMultiplexedWebSocket.instances.length, 1);
-  assert.equal(physical.url, "wss://nanocodex.example/api/responses/mux");
-  assert.deepEqual(physical.sent, [
-    { type: "nanocodex.mux.open", channel_id: "c1", session_id: "resident-1" },
-    { type: "nanocodex.mux.open", channel_id: "c2", session_id: "resident-2" },
-  ]);
-  physical.emit("message", {
-    data: JSON.stringify({ type: "nanocodex.mux.ready", channel_id: "c1" }),
-  });
-  physical.emit("message", {
-    data: JSON.stringify({ type: "nanocodex.mux.ready", channel_id: "c2" }),
-  });
-  const [first, second] = await Promise.all([firstOpening, secondOpening]);
-  assert.equal(first.readyState, 1);
-  assert.equal(second.readyState, 1);
-
-  let firstMessage;
-  first.addEventListener("message", (event) => { firstMessage = event.data; });
-  physical.emit("message", {
-    data: JSON.stringify({
-      type: "nanocodex.mux.data",
-      channel_id: "c1",
-      data: "resident one only",
-    }),
-  });
-  assert.equal(firstMessage, "resident one only");
-  first.close(1000, "done");
-  assert.equal(first.readyState, 3);
-  assert.equal(second.readyState, 1);
-  assert.deepEqual(physical.sent.at(-1), {
-    type: "nanocodex.mux.close",
-    channel_id: "c1",
-    code: 1000,
-    reason: "done",
-  });
-  second.close(1000, "done");
-  assert.equal(physical.readyState, 3);
 });

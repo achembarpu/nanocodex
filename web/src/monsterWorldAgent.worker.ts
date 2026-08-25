@@ -1,9 +1,5 @@
 import { Agent, Transport } from "nanocodex/host";
 import type { DefaultAgent, Tool, ToolContext, Turn, TurnResult, TurnUsage } from "nanocodex/host";
-import {
-  createHostManagedWebSocketMultiplexer,
-  defaultHostManagedWebSocketUrl,
-} from "nanocodex/browser";
 import { justBash } from "nanocodex/tools/bash";
 import {
   ACTOR_IDS,
@@ -74,8 +70,6 @@ const EMOTE_PARAMETERS = Object.freeze({
   required: ["icon"],
   properties: { icon: { type: "string", enum: [...WORLD_EMOTES] } },
 });
-
-const createWorldWebSocket = createHostManagedWebSocketMultiplexer();
 
 const WORLD_INSTRUCTIONS = `You are one persistent Luna resident inside Springleaf Rescue Guild, a busy mystery-dungeon world simulated in the user's browser tab.
 
@@ -201,11 +195,7 @@ async function createResidentAgent(entry: WorldThinkEntry): Promise<DefaultAgent
     model: "gpt-5.6-luna",
     thinking: "none",
     toolMode: "direct",
-    transport: Transport.hostManaged({
-      createWebSocket: createWorldWebSocket,
-      websocketPreconnect: false,
-      websocketUrl: defaultHostManagedWebSocketUrl(),
-    }),
+    transport: Transport.hostManaged(),
     tools: {
       move: {
         description: "Move your own resident toward a named target or an exact pixel offset from an anchor. Returns at a decision boundary with fresh World state.",
