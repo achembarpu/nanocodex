@@ -2725,7 +2725,9 @@ function requireApprovedCapabilities(
 ) {
   const approvedResources = new Set(resources);
   const required = [
-    ...BASE_APPROVAL_RESOURCES,
+    ...(appId === CHROME_EXTENSION_APP_ID
+      ? ["urn:nanocodex:agent:run"]
+      : BASE_APPROVAL_RESOURCES),
     `urn:nanocodex:app:${encodeURIComponent(appId)}`,
   ];
   if (required.some((resource) => !approvedResources.has(resource))) {
