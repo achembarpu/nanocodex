@@ -48,6 +48,37 @@ describe("ownership I/O deadlines", () => {
       "failed response disposal",
     )).rejects.toThrow(/timed out after 10ms/);
   });
+
+  it("retries transient subject-bind failures with the same identity", async () => {
+    let attempts = 0;
+    const requests: string[] = [];
+    const fetcher = {
+      async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+        attempts += 1;
+        const request = new Request(input, init);
+        requests.push(`${request.method} ${request.url} ${await request.text()}`);
+        return new Response(null, { status: attempts < 3 ? 503 : 200 });
+      },
+    } as unknown as Fetcher;
+
+    await bindAgentCredential(fetcher, "subject", USER_ID, 100);
+    expect(attempts).toBe(3);
+    expect(new Set(requests).size).toBe(1);
+  });
+
+  it("does not retry definitive subject ownership conflicts", async () => {
+    let attempts = 0;
+    const fetcher = {
+      async fetch(): Promise<Response> {
+        attempts += 1;
+        return new Response(null, { status: 409 });
+      },
+    } as unknown as Fetcher;
+
+    await expect(bindAgentCredential(fetcher, "subject", USER_ID, 100))
+      .rejects.toThrow(/HTTP 409/);
+    expect(attempts).toBe(1);
+  });
 });
 
 function accountEnv(fetcher: Fetcher): AccountAuthEnv {

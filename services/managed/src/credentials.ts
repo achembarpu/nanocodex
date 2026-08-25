@@ -8,6 +8,8 @@ import { fetchResponseWithDeadline } from "./deadline";
 type CredentialEnv = AccountAuthEnv & { NANOCODEX: Fetcher };
 
 const DEFAULT_OWNERSHIP_IO_TIMEOUT_MS = 10_000;
+const CREDENTIAL_BIND_ATTEMPTS = 3;
+const CREDENTIAL_BIND_RETRY_MS = 25;
 
 const ROUTES = new Map<string, ReadonlySet<string>>([
   ["/v1/credentials", new Set(["GET"])],
@@ -57,23 +59,44 @@ export async function bindAgentCredential(
   userId: string,
   timeoutMs = DEFAULT_OWNERSHIP_IO_TIMEOUT_MS,
 ): Promise<void> {
-  await fetchResponseWithDeadline(
-    binding,
-    `https://broker.internal/subjects/${subject}`,
-    {
-      method: "PUT",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ user_id: userId }),
-    },
-    timeoutMs,
-    "credential subject binding",
-    (response) => {
-      if (!response.ok) {
-        throw new Error(`credential subject binding failed with HTTP ${response.status}`);
+  let failure: unknown;
+  for (let attempt = 0; attempt < CREDENTIAL_BIND_ATTEMPTS; attempt += 1) {
+    try {
+      await fetchResponseWithDeadline(
+        binding,
+        `https://broker.internal/subjects/${subject}`,
+        {
+          method: "PUT",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ user_id: userId }),
+        },
+        timeoutMs,
+        "credential subject binding",
+        (response) => {
+          if (!response.ok) {
+            const error = new Error(
+              `credential subject binding failed with HTTP ${response.status}`,
+            );
+            throw Object.assign(error, {
+              code: response.status === 408 || response.status === 429 || response.status >= 500
+                ? "retryable"
+                : "definitive",
+            });
+          }
+        },
+        { retryable: true },
+      );
+      return;
+    } catch (error) {
+      failure = error;
+      if (errorCode(error) === "definitive" || attempt === CREDENTIAL_BIND_ATTEMPTS - 1) {
+        throw error;
       }
-    },
-    { retryable: true },
-  );
+      const baseDelay = CREDENTIAL_BIND_RETRY_MS * (2 ** attempt);
+      await scheduler.wait(baseDelay + Math.floor(Math.random() * baseDelay));
+    }
+  }
+  throw failure;
 }
 
 export async function unbindAgentCredential(
@@ -106,4 +129,11 @@ function json(body: unknown, status: number): Response {
     status,
     headers: { "cache-control": "no-store", "x-content-type-options": "nosniff" },
   });
+}
+
+function errorCode(error: unknown): string | undefined {
+  return typeof error === "object" && error !== null && "code" in error
+    && typeof error.code === "string"
+    ? error.code
+    : undefined;
 }

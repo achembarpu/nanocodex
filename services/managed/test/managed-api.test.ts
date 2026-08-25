@@ -2037,6 +2037,8 @@ describe("managed agents REST and resumable SSE", () => {
       const response = await within(creation, "bounded credential bind");
       expect(response.status).toBe(503);
       const session = sessionForSubject(subject!);
+      const markers = await cleanupMarkers(session);
+      if (markers.deleting) expect(await runDurableObjectAlarm(session)).toBe(true);
       expect(await cleanupMarkers(session)).toEqual({ binding: false, deleting: false });
       expect(await (await SELF.fetch("https://example.test/v1/agents")).json()).toEqual({
         data: [],
