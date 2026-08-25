@@ -563,12 +563,6 @@ body.agent-viewport-locked {
   font-size: 9px;
 }
 
-.account-provider-actions {
-  display: flex;
-  gap: 6px;
-  align-items: center;
-}
-
 .profile-connectors {
   display: grid;
   gap: 12px;

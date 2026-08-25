@@ -308,11 +308,9 @@ working tree and open in a fullscreen dock. Reusing an artifact ID replaces the
 interface in place, so voice or text turns can continuously retheme and extend
 it. Generated code has no imports, network access, or access to the parent page;
 explicit `sendPrompt` actions re-enter the normal queued prompt lifecycle.
-The browser agent requires a connected OpenAI subscription, OpenRouter account,
-or OpenAI key. Multiple providers can remain connected; the subscription is the
-default and the account menu switches the active provider. A presented session
-that cannot be read fails explicitly instead of silently selecting an
-unconnected credential.
+The browser agent requires an explicit user OpenAI key or ChatGPT session. A
+presented session that cannot be read fails explicitly instead of falling back
+to another credential.
 
 The reusable `browser(...)` tool bundle gives the browser agent a bounded
 `dataset` tool. It can inspect public

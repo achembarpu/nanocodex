@@ -13,11 +13,7 @@ const CREDENTIAL_BIND_RETRY_MS = 25;
 
 const ROUTES = new Map<string, ReadonlySet<string>>([
   ["/v1/credentials", new Set(["GET"])],
-  ["/v1/credentials/active", new Set(["PUT"])],
   ["/v1/credentials/openai", new Set(["PUT", "DELETE"])],
-  ["/v1/credentials/openrouter", new Set(["DELETE"])],
-  ["/v1/credentials/openrouter/login", new Set(["POST"])],
-  ["/v1/credentials/openrouter/callback", new Set(["GET"])],
   ["/v1/credentials/chatgpt", new Set(["DELETE"])],
   ["/v1/credentials/chatgpt/login", new Set(["GET", "POST"])],
   ["/v1/credentials/local-claim", new Set(["POST"])],
@@ -31,8 +27,7 @@ export async function routeCredentialRequest(
   const methods = ROUTES.get(url.pathname);
   if (!methods) return undefined;
   if (!methods.has(request.method)) return json({ error: "method_not_allowed" }, 405);
-  const openRouterCallback = url.pathname === "/v1/credentials/openrouter/callback";
-  if (url.search && !openRouterCallback) return json({ error: "invalid_request" }, 400);
+  if (url.search) return json({ error: "invalid_request" }, 400);
 
   const principal = await authenticate(request, env, url);
   if (!principal || principal.kind !== "account_session") {
@@ -41,34 +36,6 @@ export async function routeCredentialRequest(
   if (request.method !== "GET") {
     const originFailure = requireSameOriginMutation(request, url, principal);
     if (originFailure) return originFailure;
-  }
-
-  if (openRouterCallback) {
-    const state = url.searchParams.get("state");
-    const code = url.searchParams.get("code");
-    if (!state || !code) return openRouterResult(url, "failed");
-    const exchanged = await env.NANOCODEX.fetch(
-      `https://broker.internal/users/${encodeURIComponent(principal.userId)}/credentials/openrouter/callback`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ state, code }),
-      },
-    );
-    await exchanged.body?.cancel();
-    return openRouterResult(url, exchanged.ok ? "connected" : "failed");
-  }
-
-  if (url.pathname === "/v1/credentials/openrouter/login") {
-    const callbackUrl = new URL("/v1/credentials/openrouter/callback", url);
-    return env.NANOCODEX.fetch(
-      `https://broker.internal/users/${encodeURIComponent(principal.userId)}/credentials/openrouter/login`,
-      {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ callback_url: callbackUrl.href }),
-      },
-    );
   }
 
   const suffix = url.pathname.slice("/v1/credentials".length);
@@ -106,12 +73,6 @@ export async function browserModelSubject(userId: string): Promise<string> {
   let binary = "";
   for (const byte of new Uint8Array(digest)) binary += String.fromCharCode(byte);
   return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
-}
-
-function openRouterResult(url: URL, result: "connected" | "failed"): Response {
-  const target = new URL("/", url);
-  target.searchParams.set("openrouter_result", result);
-  return Response.redirect(target.href, 303);
 }
 
 export async function bindAgentCredential(

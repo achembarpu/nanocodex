@@ -1,7 +1,6 @@
 import {
   memo,
   useCallback,
-  useEffect,
   useMemo,
 } from "react";
 import {
@@ -59,13 +58,6 @@ export const AgentTerminal = memo(function AgentTerminal({
     isError,
     refetch,
   } = useNanocodex({ config: agentConfig, threadId });
-  useEffect(() => {
-    const credentialChanged = () => { refetch(); };
-    window.addEventListener("nanocodex:model-credential-changed", credentialChanged);
-    return () => {
-      window.removeEventListener("nanocodex:model-credential-changed", credentialChanged);
-    };
-  }, [refetch]);
   const retryAgent = useCallback(() => {
     refetch();
   }, [refetch]);

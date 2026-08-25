@@ -25,9 +25,8 @@ type NewApiKey = Readonly<{
 
 type CredentialStatus = Readonly<{
   ready: boolean;
-  active: ModelProvider | null;
+  active: "openai" | "chatgpt" | null;
   openai: { connected: boolean };
-  openrouter: { connected: boolean };
   chatgpt: {
     connected: boolean;
     accountId?: string;
@@ -40,9 +39,6 @@ type CredentialStatus = Readonly<{
   };
 }>;
 
-type ModelProvider = "openai" | "chatgpt" | "openrouter";
-type OpenRouterResult = "connected" | "failed" | null;
-
 type AccountDataRequest = Readonly<{
   accountId: string;
   promise: Promise<void>;
@@ -54,10 +50,7 @@ export function AccountMenu() {
   const session = useAccountSession();
   const refreshSession = session.refresh;
   const accountId = session.account?.id;
-  const [open, setOpen] = useState(() => {
-    const params = new URL(window.location.href).searchParams;
-    return params.has("connector_result") || params.has("openrouter_result");
-  });
+  const [open, setOpen] = useState(() => new URL(window.location.href).searchParams.has("connector_result"));
   const [keys, setKeys] = useState<ApiKeyMetadata[] | null>(null);
   const [keyError, setKeyError] = useState<string | null>(null);
   const [keyOperation, setKeyOperation] = useState<string | null>(null);
@@ -68,7 +61,6 @@ export function AccountMenu() {
   const [credentialError, setCredentialError] = useState<string | null>(null);
   const [providerOperation, setProviderOperation] = useState<string | null>(null);
   const [openAiKey, setOpenAiKey] = useState("");
-  const [openRouterResult, setOpenRouterResult] = useState<OpenRouterResult>(readOpenRouterResult);
   const menuRef = useRef<HTMLDivElement>(null);
   const cachedAccountId = useRef<string | undefined>(undefined);
   const keyRequest = useRef<AccountDataRequest | undefined>(undefined);
@@ -158,37 +150,6 @@ export function AccountMenu() {
       setCredentialError(failureMessage(cause, "Couldn’t check ChatGPT sign-in."));
     }
   }, [loadCredentials]);
-
-  useEffect(() => {
-    const channel = typeof BroadcastChannel === "function"
-      ? new BroadcastChannel("nanocodex-model-credentials")
-      : undefined;
-    if (channel) {
-      channel.onmessage = (event) => {
-        const result = event.data === "openrouter-connected"
-          ? "connected"
-          : event.data === "openrouter-failed" ? "failed" : null;
-        if (!result) return;
-        setOpenRouterResult(result);
-        if (result === "connected") {
-          void loadCredentials().then(notifyModelCredentialChanged);
-        }
-      };
-    }
-    if (openRouterResult) {
-      channel?.postMessage(`openrouter-${openRouterResult}`);
-      if (openRouterResult === "connected") {
-        void loadCredentials().then(notifyModelCredentialChanged);
-      }
-      const next = new URL(window.location.href);
-      next.searchParams.delete("openrouter_result");
-      window.history.replaceState(window.history.state, "", next);
-      if (window.name === "nanocodex-openrouter-login") {
-        window.setTimeout(() => window.close(), 250);
-      }
-    }
-    return () => channel?.close();
-  }, [loadCredentials, openRouterResult]);
 
   useEffect(() => {
     if (!accountId) {
@@ -355,56 +316,7 @@ export function AccountMenu() {
     }
   };
 
-  const startOpenRouter = async () => {
-    if (providerOperation) return;
-    const popup = window.open("about:blank", "nanocodex-openrouter-login");
-    if (popup) popup.opener = null;
-    setProviderOperation("openrouter");
-    setCredentialError(null);
-    setOpenRouterResult(null);
-    try {
-      const response = await apiRequest("/v1/credentials/openrouter/login", { method: "POST" });
-      if (!response.ok) throw await responseFailure(response, "Couldn’t start OpenRouter sign-in.");
-      const value: unknown = await response.json();
-      if (!isRecord(value) || typeof value.authorization_url !== "string") {
-        throw new Error("Invalid OpenRouter sign-in response.");
-      }
-      const authorization = new URL(value.authorization_url);
-      if (authorization.origin !== "https://openrouter.ai" || authorization.pathname !== "/auth") {
-        throw new Error("Invalid OpenRouter sign-in response.");
-      }
-      if (popup) popup.location.href = authorization.href;
-      else window.location.assign(authorization.href);
-    } catch (cause) {
-      popup?.close();
-      setCredentialError(failureMessage(cause, "Couldn’t start OpenRouter sign-in."));
-    } finally {
-      setProviderOperation(null);
-    }
-  };
-
-  const activateProvider = async (provider: ModelProvider) => {
-    if (providerOperation || credentials?.active === provider) return;
-    setProviderOperation(provider);
-    setCredentialError(null);
-    try {
-      const response = await apiRequest("/v1/credentials/active", {
-        method: "PUT",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ provider }),
-      });
-      if (!response.ok) throw await responseFailure(response, `Couldn’t use ${provider}.`);
-      await response.body?.cancel();
-      await loadCredentials();
-      notifyModelCredentialChanged();
-    } catch (cause) {
-      setCredentialError(failureMessage(cause, `Couldn’t use ${provider}.`));
-    } finally {
-      setProviderOperation(null);
-    }
-  };
-
-  const disconnectProvider = async (provider: ModelProvider) => {
+  const disconnectProvider = async (provider: "openai" | "chatgpt") => {
     if (providerOperation) return;
     setProviderOperation(provider);
     setCredentialError(null);
@@ -475,7 +387,7 @@ export function AccountMenu() {
 
               {!session.account.persistent ? (
                 <div className="account-auth-actions">
-                  <p>Connect an OpenAI subscription now, or add a passkey to keep this identity across devices.</p>
+                  <p>Connect ChatGPT now, or add a passkey to keep this identity across devices.</p>
                   <button
                     className="account-primary-action"
                     type="button"
@@ -519,18 +431,13 @@ export function AccountMenu() {
                     <>
                       <div className="account-provider-row">
                         <div>
-                          <strong>OpenAI subscription</strong>
+                          <strong>ChatGPT</strong>
                           <span>{credentials.chatgpt.connected
                             ? `Connected${credentials.active === "chatgpt" ? " · active" : ""}`
                             : "Not connected"}</span>
                         </div>
                         {credentials.chatgpt.connected ? (
-                          <div className="account-provider-actions">
-                            {credentials.active !== "chatgpt" ? (
-                              <button type="button" onClick={() => void activateProvider("chatgpt")}>Use</button>
-                            ) : null}
-                            <button type="button" onClick={() => void disconnectProvider("chatgpt")}>Disconnect</button>
-                          </div>
+                          <button type="button" onClick={() => void disconnectProvider("chatgpt")}>Disconnect</button>
                         ) : (
                           <button type="button" onClick={() => void startChatGpt()}>Connect ChatGPT</button>
                         )}
@@ -542,31 +449,6 @@ export function AccountMenu() {
                           <code>{credentials.chatgpt.login.userCode}</code>
                           <a href={credentials.chatgpt.login.verificationUrl} target="_blank" rel="noreferrer">Open sign-in page</a>
                         </div>
-                      ) : null}
-                      <div className="account-provider-row">
-                        <div>
-                          <strong>OpenRouter</strong>
-                          <span>{credentials.openrouter.connected
-                            ? `Connected${credentials.active === "openrouter" ? " · active" : ""}`
-                            : "Not connected"}</span>
-                        </div>
-                        {credentials.openrouter.connected ? (
-                          <div className="account-provider-actions">
-                            {credentials.active !== "openrouter" ? (
-                              <button type="button" onClick={() => void activateProvider("openrouter")}>Use</button>
-                            ) : null}
-                            <button type="button" onClick={() => void disconnectProvider("openrouter")}>Disconnect</button>
-                          </div>
-                        ) : (
-                          <button type="button" onClick={() => void startOpenRouter()}>Connect OpenRouter</button>
-                        )}
-                      </div>
-                      {openRouterResult ? (
-                        <p className={`connector-result${openRouterResult === "failed" ? " connector-result--failed" : ""}`} role="status">
-                          {openRouterResult === "connected"
-                            ? "OpenRouter connected. Your OpenAI subscription remains the default when available."
-                            : "OpenRouter sign-in failed. Try connecting again."}
-                        </p>
                       ) : null}
                     </>
                   ) : null}
@@ -590,12 +472,7 @@ export function AccountMenu() {
                             : "Not connected"}</span>
                         </div>
                         {credentials.openai.connected ? (
-                          <div className="account-provider-actions">
-                            {credentials.active !== "openai" ? (
-                              <button type="button" onClick={() => void activateProvider("openai")}>Use</button>
-                            ) : null}
-                            <button type="button" onClick={() => void disconnectProvider("openai")}>Disconnect</button>
-                          </div>
+                          <button type="button" onClick={() => void disconnectProvider("openai")}>Disconnect</button>
                         ) : null}
                       </div>
                       {!credentials.openai.connected ? (
@@ -735,15 +612,12 @@ function decodeApiKey(value: unknown): ApiKeyMetadata {
 }
 
 function decodeCredentialStatus(value: unknown): CredentialStatus {
-  if (!isRecord(value) || !isRecord(value.openai) || !isRecord(value.openrouter)
-    || !isRecord(value.chatgpt)) {
+  if (!isRecord(value) || !isRecord(value.openai) || !isRecord(value.chatgpt)) {
     throw new Error("Invalid model connection response.");
   }
-  const active = value.active === "openai" || value.active === "chatgpt"
-    || value.active === "openrouter" ? value.active : null;
+  const active = value.active === "openai" || value.active === "chatgpt" ? value.active : null;
   if (typeof value.ready !== "boolean"
     || typeof value.openai.connected !== "boolean"
-    || typeof value.openrouter.connected !== "boolean"
     || typeof value.chatgpt.connected !== "boolean") {
     throw new Error("Invalid model connection response.");
   }
@@ -754,18 +628,12 @@ function decodeCredentialStatus(value: unknown): CredentialStatus {
     ready: value.ready,
     active,
     openai: { connected: value.openai.connected },
-    openrouter: { connected: value.openrouter.connected },
     chatgpt: {
       connected: value.chatgpt.connected,
       ...(typeof value.chatgpt.account_id === "string" ? { accountId: value.chatgpt.account_id } : {}),
       ...(login ? { login } : {}),
     },
   };
-}
-
-function readOpenRouterResult(): OpenRouterResult {
-  const result = new URL(window.location.href).searchParams.get("openrouter_result");
-  return result === "connected" || result === "failed" ? result : null;
 }
 
 function decodeChatGptLogin(value: unknown): NonNullable<CredentialStatus["chatgpt"]["login"]> {

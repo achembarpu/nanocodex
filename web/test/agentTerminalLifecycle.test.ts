@@ -28,8 +28,6 @@ test("account authentication naturally selects the private broker", () => {
   assert.match(session, /window\.addEventListener\("focus", refreshAfterInactivity\)/);
   assert.match(session, /if \(!event\.persisted\) return/);
   assert.match(session, /nanocodex:model-credential-changed/);
-  assert.match(terminal, /nanocodex:model-credential-changed/);
-  assert.match(terminal, /const credentialChanged = \(\) => \{ refetch\(\); \}/);
 });
 
 test("AccountSession solely owns localhost credential import and invalidation", () => {

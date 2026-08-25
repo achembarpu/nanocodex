@@ -305,35 +305,6 @@ export default defineConfig({
               refresh_token: "chatgpt-refresh-rotated",
             });
           }
-          if (request.method === "POST" && url.href === "https://openrouter.ai/api/v1/auth/keys") {
-            const body = await request.json() as Record<string, unknown>;
-            if (body.code !== "openrouter-authorization-code"
-              || body.code_challenge_method !== "S256"
-              || typeof body.code_verifier !== "string"
-              || !/^[A-Za-z0-9_-]{43}$/.test(body.code_verifier)) {
-              return Response.json({ error: "invalid exchange" }, { status: 403 });
-            }
-            return Response.json({ key: "sk-or-v1-user-secret", user_id: "openrouter-user" });
-          }
-          if (request.method === "POST" && url.href === "https://openrouter.ai/api/v1/responses") {
-            const body = await request.json() as Record<string, unknown>;
-            return new Response(`data: ${JSON.stringify({
-              type: "response.completed",
-              response: {
-                id: "openrouter-response",
-                status: "completed",
-                output: [],
-                usage: null,
-                observed_model: body.model,
-                observed_session: body.session_id,
-                authorized: request.headers.get("authorization") === "Bearer sk-or-v1-user-secret",
-              },
-            })}\n\ndata: [DONE]\n\n`, {
-              headers: {
-                "content-type": "text/event-stream",
-              },
-            });
-          }
           if (url.hostname === "api.openai.com" || url.hostname === "chatgpt.com") {
             const authorization = request.headers.get("authorization");
             return Response.json({
