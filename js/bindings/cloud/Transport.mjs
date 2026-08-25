@@ -23,6 +23,7 @@ export function from(parameters) {
 export function http(url = DEFAULT_API_URL, options = {}) {
   const baseUrl = new URL(url).toString();
   const fetchFn = options.fetch ?? globalThis.fetch;
+  const credentials = options.credentials ?? "include";
   if (typeof fetchFn !== "function") throw new TypeError("http transport requires fetch");
   return from({
     key: options.key ?? "http",
@@ -32,7 +33,7 @@ export function http(url = DEFAULT_API_URL, options = {}) {
       return {
         baseUrl,
         fetch(input, init) {
-          return fetchFn(input, { credentials: "include", ...init });
+          return fetchFn(input, { credentials, ...init });
         },
         async request(request) {
           const headers = new Headers(request.headers);
@@ -41,7 +42,7 @@ export function http(url = DEFAULT_API_URL, options = {}) {
           const response = await fetchFn(new URL(request.path, baseUrl), {
             method: request.method ?? "GET",
             headers,
-            credentials: "include",
+            credentials,
             body: request.body === undefined ? undefined : JSON.stringify(request.body),
             signal: request.signal,
           });

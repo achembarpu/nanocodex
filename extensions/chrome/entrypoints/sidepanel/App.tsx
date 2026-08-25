@@ -171,6 +171,7 @@ export function App() {
   }
 
   async function disconnect(): Promise<void> {
+    setError("");
     cancelRequestedRef.current = true;
     await turnRef.current?.cancel().catch(() => {});
     const current = leaseRef.current;
@@ -181,9 +182,13 @@ export function App() {
     const session = sessionRef.current;
     sessionRef.current = undefined;
     if (session) await session.close();
-    await disconnectNanocodex();
     setConnection(undefined);
     setPending(false);
+    try {
+      await disconnectNanocodex();
+    } catch (cause) {
+      setError(`Disconnected locally. ${errorMessage(cause)}`);
+    }
   }
 
   async function revert(): Promise<void> {

@@ -31,6 +31,7 @@ export function from<const type extends string>(parameters: Readonly<{
 }>): Transport<type>;
 
 export function http(url?: string | undefined, options?: Readonly<{
+  credentials?: RequestCredentials | undefined;
   fetch?: typeof globalThis.fetch | undefined;
   key?: string | undefined;
   name?: string | undefined;

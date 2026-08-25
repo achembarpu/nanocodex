@@ -1,5 +1,8 @@
 import { createResponsesTransport } from "../../runtime/responses-transport.mjs";
 
+const MODEL_PROTOCOL = "nanocodex-connect-v1";
+const MODEL_TICKET_PROTOCOL_PREFIX = "nanocodex-ticket.";
+
 /** Creates a local browser/WASM Responses transport backed by this Connect grant. */
 export function transport(client, options) {
   const connection = options?.connection;
@@ -36,12 +39,11 @@ export function transport(client, options) {
       const url = new URL(`/v1/grants/${grantId}/model`, apiOrigin);
       url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
       url.searchParams.set("session_id", sessionId);
-      url.searchParams.set("ticket", ticket);
       const WebSocketImpl = globalThis.WebSocket;
       if (typeof WebSocketImpl !== "function") {
         throw new Error("WebSocket is unavailable in this runtime.");
       }
-      return new WebSocketImpl(url);
+      return new WebSocketImpl(url, [MODEL_PROTOCOL, `${MODEL_TICKET_PROTOCOL_PREFIX}${ticket}`]);
     },
   });
 }

@@ -273,12 +273,14 @@ function toHex(value) {
 }
 
 export async function disconnect(client, options = {}) {
-  await client.request({
+  const session = client._captureSession?.();
+  client._clearSession();
+  if (!session) return;
+  await session.request({
     method: "POST",
     path: "/v1/connections/disconnect",
     signal: options.signal,
   });
-  client._clearSession();
 }
 
 export async function reconnect(client, options = {}) {

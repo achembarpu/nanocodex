@@ -15,8 +15,9 @@ There is no native host or extension-to-process protocol.
    browser tools. The app-scoped grant is
    retained in extension-local storage and validated when the panel is reopened.
 3. For each model socket, the Connect SDK exchanges that grant for a one-time,
-   session-bound ticket. The ticketed WebSocket reaches the private broker; no
-   OpenAI or ChatGPT credential enters extension storage or browser traffic.
+   session-bound ticket carried as a WebSocket subprotocol, never in the URL.
+   The socket reaches the private broker; no OpenAI or ChatGPT credential enters
+   extension storage or browser traffic.
 4. Submit a cleanup prompt. `nanocodex/host` loads the browser WASM module in
    the panel and exposes one direct-only `cleanup` tool with `inspect`,
    `preview`, and `revert_preview` actions.
@@ -66,9 +67,10 @@ complete.
   `webRequest`, downloads, clipboard, broad required page access, externally
   connectable pages, and remote code.
 - The Connect dialog owns passkey approval. The extension retains only its
-  app-scoped grant session in origin-local storage; one-time model tickets are
-  never retained. No OpenAI API key, ChatGPT OAuth token, cookie, or provider
-  credential is stored by the extension.
+  app-scoped grant session in origin-local storage; content scripts cannot read
+  extension-local storage, and one-time model tickets are never retained. No
+  OpenAI API key, ChatGPT OAuth token, cookie, or provider credential is stored
+  by the extension.
 - Preview and persistence run in Chrome's isolated world. The model sees only
   the narrow cleanup schema, never tab IDs, lease tokens, browser inventory, or
   Chrome APIs.

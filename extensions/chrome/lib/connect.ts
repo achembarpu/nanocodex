@@ -26,6 +26,7 @@ const client = Client.create({
     name: "Nanocodex Connect",
   }),
   transport: Transport.http(CONNECT_API, {
+    credentials: "omit",
     key: "nanocodex-chrome",
     name: "Nanocodex Connect API",
   }),

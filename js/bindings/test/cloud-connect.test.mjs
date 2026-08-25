@@ -39,8 +39,9 @@ test("Connect opens a ticketed local WASM model socket without exposing its gran
   }));
   const OriginalWebSocket = globalThis.WebSocket;
   globalThis.WebSocket = class {
-    constructor(url) {
+    constructor(url, protocols) {
       this.url = String(url);
+      this.protocols = protocols;
       sockets.push(this);
     }
   };
@@ -69,7 +70,11 @@ test("Connect opens a ticketed local WASM model socket without exposing its gran
   assert.equal(socketUrl.origin, "wss://connect.example");
   assert.equal(socketUrl.pathname, `/v1/grants/${connection.grant.id}/model`);
   assert.equal(socketUrl.searchParams.get("session_id"), "019fc927-b280-79a7-8445-1b9996ad2fb0");
-  assert.equal(socketUrl.searchParams.get("ticket"), "one-time-ticket");
+  assert.equal(socketUrl.searchParams.has("ticket"), false);
+  assert.deepEqual(sockets[0].protocols, [
+    "nanocodex-connect-v1",
+    "nanocodex-ticket.one-time-ticket",
+  ]);
   assert.equal(socketUrl.href.includes("grant-session-secret"), false);
 });
 
@@ -585,6 +590,41 @@ test("Connect persists, validates, and clears an app-scoped grant session", asyn
   await restoredClient.connection.disconnect();
   assert.equal(storage.getItem("nanocodex:connect:session-workspace:session"), null);
   assert.equal(restoredClient._hasSession(), false);
+});
+
+test("Connect clears its local grant before remote revocation", async () => {
+  const storage = memoryStorage();
+  let client;
+  const transport = Transport.from({
+    key: "disconnect-failure",
+    name: "disconnect-failure",
+    type: "disconnect-failure",
+    setup() {
+      return {
+        baseUrl: "https://connect.example",
+        async request(request) {
+          assert.equal(request.path, "/v1/connections/disconnect");
+          assert.equal(client._hasSession(), false);
+          throw new Error("control plane unavailable");
+        },
+      };
+    },
+  });
+  client = Client.create({
+    appId: "disconnect-failure-workspace",
+    dialog: Dialog.memory(),
+    provider: { request() { throw new Error("wallet must not be used"); } },
+    session: storage,
+    transport,
+  });
+  client._setSession({
+    grantId: `0x${"78".repeat(32)}`,
+    token: "grant-session",
+  });
+
+  await assert.rejects(client.connection.disconnect(), /control plane unavailable/);
+  assert.equal(client._hasSession(), false);
+  assert.equal(storage.getItem("nanocodex:connect:disconnect-failure-workspace:session"), null);
 });
 
 test("Connect account logout clears the local session without revoking the app grant", async () => {

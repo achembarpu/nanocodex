@@ -42,6 +42,7 @@ const leaseQueues = new Map<string, Promise<unknown>>();
 let recipeQueue: Promise<unknown> = Promise.resolve();
 
 export default defineBackground(() => {
+  void chrome.storage.local.setAccessLevel({ accessLevel: "TRUSTED_CONTEXTS" });
   void chrome.sidePanel.setPanelBehavior({ openPanelOnActionClick: true });
   void serializeRecipes(repairRecipeRegistration);
   chrome.runtime.onStartup.addListener(() => void serializeRecipes(repairRecipeRegistration));
