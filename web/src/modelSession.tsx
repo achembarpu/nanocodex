@@ -36,7 +36,7 @@ export function inactiveTerminalMessage({
   if (authStatus.state === "signed_out") return `Sign in with a passkey to start the ${agent}.`;
   if (authStatus.state === "error") return "Could not check your model connection. Use Retry above.";
   if (!authStatus.ready) {
-    return `Connect ChatGPT or an OpenAI API key from the account menu to start the ${agent}.`;
+    return `Connect an OpenAI subscription, OpenRouter, or an OpenAI API key from the account menu to start the ${agent}.`;
   }
   return "";
 }
@@ -104,7 +104,7 @@ export function AgentSessionBar({
       ) : null}
       {status?.state === "ready" && !status.ready ? (
         <p className="agent-session-note" role="status">
-          Connect ChatGPT or an OpenAI API key from the account menu.
+          Connect an OpenAI subscription, OpenRouter, or an OpenAI API key from the account menu.
         </p>
       ) : null}
       {status?.state === "signed_out" ? (

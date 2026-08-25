@@ -74,7 +74,7 @@ export interface EgressEnv extends BrokerEnv, ConnectorBrokerEnv {
 }
 
 type ModelOperation = Readonly<{
-  id: "responses" | "search" | "image-generation" | "image-edit"
+  id: "responses" | "responses-http" | "search" | "image-generation" | "image-edit"
     | "realtime-call" | "realtime-sideband";
   method: "GET" | "POST";
   path: `/v1/${string}`;
@@ -91,6 +91,14 @@ const OPERATIONS: readonly ModelOperation[] = [
     method: "GET",
     path: "/v1/responses",
     websocket: true,
+    openai: "https://api.openai.com/v1/responses",
+    chatgpt: "https://chatgpt.com/backend-api/codex/responses",
+  },
+  {
+    id: "responses-http",
+    method: "POST",
+    path: "/v1/responses",
+    websocket: false,
     openai: "https://api.openai.com/v1/responses",
     chatgpt: "https://chatgpt.com/backend-api/codex/responses",
   },
@@ -202,6 +210,14 @@ export async function handleEgress(
     let credential = await resolveCredential(env, userId, false);
     if (operation.chatGptOnly && credential.kind !== "chatgpt") {
       return auditedError(409, "chatgpt_credential_required", request, url, operation.id, started);
+    }
+    if (credential.kind === "openrouter") {
+      if (operation.id === "responses") {
+        return auditedError(426, "responses_https_required", request, url, operation.id, started);
+      }
+      if (operation.id !== "responses-http") {
+        return auditedError(409, "openrouter_operation_unsupported", request, url, operation.id, started);
+      }
     }
     const body = await replayableBody(request, operation);
     let upstream = await fetchUpstream(
@@ -351,7 +367,7 @@ async function handleControl(request: Request, url: URL, env: EgressEnv): Promis
   }
 
   const userMatch = url.pathname.match(
-    /^\/users\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/credentials(?:\/(openai|chatgpt|chatgpt\/login|chatgpt\/login\/status|chatgpt\/local-claim))?$/,
+    /^\/users\/([A-Za-z0-9][A-Za-z0-9._:-]{0,127})\/credentials(?:\/(active|openai|openrouter|openrouter\/login|openrouter\/callback|chatgpt|chatgpt\/login|chatgpt\/login\/status|chatgpt\/local-claim))?$/,
   );
   if (!userMatch) return jsonError(404, "not_found");
   const userId = userMatch[1]!;
@@ -368,6 +384,14 @@ async function handleControl(request: Request, url: URL, env: EgressEnv): Promis
   if (!operation && request.method === "GET") {
     return userBroker(env, userId).fetch("https://credentials.internal/v1/status");
   }
+  if (operation === "active" && request.method === "PUT") {
+    const body = await readJson(request, MAX_CONTROL_BODY_BYTES);
+    return userBroker(env, userId).fetch("https://credentials.internal/v1/active", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ provider: stringField(body, "provider") }),
+    });
+  }
   if (operation === "openai" && request.method === "PUT") {
     const body = await readJson(request, MAX_CONTROL_BODY_BYTES);
     return userBroker(env, userId).fetch("https://credentials.internal/v1/openai-key", {
@@ -378,6 +402,27 @@ async function handleControl(request: Request, url: URL, env: EgressEnv): Promis
   }
   if (operation === "openai" && request.method === "DELETE") {
     return userBroker(env, userId).fetch("https://credentials.internal/v1/openai-key", {
+      method: "DELETE",
+    });
+  }
+  if (operation === "openrouter/login" && request.method === "POST") {
+    const body = await readJson(request, MAX_CONTROL_BODY_BYTES);
+    return userBroker(env, userId).fetch("https://credentials.internal/v1/openrouter/login/start", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ callback_url: stringField(body, "callback_url") }),
+    });
+  }
+  if (operation === "openrouter/callback" && request.method === "POST") {
+    const body = await readJson(request, MAX_CONTROL_BODY_BYTES);
+    return userBroker(env, userId).fetch("https://credentials.internal/v1/openrouter/login/callback", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: stringField(body, "code"), state: stringField(body, "state") }),
+    });
+  }
+  if (operation === "openrouter" && request.method === "DELETE") {
+    return userBroker(env, userId).fetch("https://credentials.internal/v1/openrouter", {
       method: "DELETE",
     });
   }
@@ -464,7 +509,10 @@ function buildUpstreamRequest(
     ? ["openai-beta", "session-id", "thread-id", "upgrade", "user-agent",
         "x-client-request-id", "x-codex-turn-state",
         "x-openai-internal-codex-responses-lite", "x-responsesapi-include-timing-metrics"]
-    : operation.id === "realtime-sideband"
+      : operation.id === "responses-http"
+        ? ["accept", "content-type", "session-id", "thread-id", "user-agent",
+            "x-client-request-id", "x-codex-turn-state"]
+        : operation.id === "realtime-sideband"
       ? ["openai-alpha", "session-id", "thread-id", "upgrade", "x-session-id"]
       : ["content-type", "user-agent"];
   for (const name of allowed) {
@@ -504,7 +552,9 @@ function buildUpstreamRequest(
   return new Request(target, {
     method: original.method,
     headers,
-    body,
+    body: credential.kind === "openrouter" && operation.id === "responses-http"
+      ? openRouterResponsesBody(body)
+      : body,
     cache: "no-store",
     redirect: "manual",
   });
@@ -516,6 +566,12 @@ function upstreamUrl(
   kind: UserCredentialSnapshot["kind"],
 ): URL {
   if (kind === "openai") return new URL(operation.openai);
+  if (kind === "openrouter") {
+    if (operation.id !== "responses-http") {
+      throw new EgressFailure(409, "openrouter_operation_unsupported");
+    }
+    return new URL("https://openrouter.ai/api/v1/responses");
+  }
   const configured = env.CODEX_RELAY_URL?.trim();
   if (!configured || operation.directChatGpt) return new URL(operation.chatgpt);
   let relay: URL;
@@ -531,6 +587,25 @@ function upstreamUrl(
   relay.pathname = target.pathname;
   relay.search = target.search;
   return relay;
+}
+
+function openRouterResponsesBody(body: Uint8Array | null): Uint8Array {
+  if (!body) throw new EgressFailure(400, "invalid_openrouter_request");
+  let value: unknown;
+  try { value = JSON.parse(new TextDecoder().decode(body)); } catch {
+    throw new EgressFailure(400, "invalid_openrouter_request");
+  }
+  if (!isRecord(value) || typeof value.model !== "string" || !value.model.trim()) {
+    throw new EgressFailure(400, "invalid_openrouter_request");
+  }
+  const model = value.model.trim();
+  value.model = model.includes("/") ? model : `openai/${model}`;
+  if (isRecord(value.client_metadata) && typeof value.client_metadata.session_id === "string"
+    && value.session_id === undefined) {
+    value.session_id = value.client_metadata.session_id;
+  }
+  delete value.client_metadata;
+  return new TextEncoder().encode(JSON.stringify(value));
 }
 
 async function fetchUpstream(
@@ -605,7 +680,8 @@ async function resolveCredential(
     throw new EgressFailure(response.status === 404 ? 409 : 503, "user_credential_unavailable");
   }
   const value = await response.json<UserCredentialSnapshot>();
-  if ((value.kind !== "openai" && value.kind !== "chatgpt") || !value.secret
+  if ((value.kind !== "openai" && value.kind !== "chatgpt" && value.kind !== "openrouter")
+    || !value.secret
     || !Number.isSafeInteger(value.revision)) {
     throw new EgressFailure(503, "invalid_credential_response");
   }

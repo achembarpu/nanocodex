@@ -23,24 +23,26 @@ account-authenticated REST/SSE or WebSocket -> NanocodexSession -> private EGRES
                                                         |
                                                         v
                                             ordinary credential-broker Worker
-                                              |- exact OpenAI/Codex rule
-                                              |- static API-key injection, or
-                                              `- rotating OAuth Durable Object
+                                              |- exact OpenAI/Codex/OpenRouter rules
+                                              |- per-account active provider
+                                              `- encrypted OAuth/API-key Durable Object
 ```
 
-`NANOCODEX_AUTH_MODE` is deployment-fixed to `api_key` or `chatgpt`. Both use
-`Transport.hostManaged`: the managed Worker supplies only
-`Bearer NANOCODEX_OPENAI_API_KEY`, or the two Codex OAuth placeholders, to its
+The local bootstrap selected by `NANOCODEX_AUTH_MODE` is deployment-fixed to
+`api_key` or `chatgpt`. Account users may additionally keep an OpenAI
+subscription, OpenRouter OAuth key, and OpenAI API key connected at once, with
+the subscription preferred by default and one explicit active selection. All use
+`Transport.hostManaged`: the managed Worker supplies only fixed placeholders to its
 private `EGRESS` Service Binding. The broker validates the complete destination,
 method, query, upgrade, beta header, header allowlist, and exact placeholders
 before injecting a credential. Rejected upstream bodies are consumed at that
 boundary and become a typed, non-secret managed transport failure.
 
-One managed deployment represents one credential and billing scope: every raw
-agent and every room shares the broker's one API key or Codex account. Room
-membership grants quota-bounded authority to spend from that scope; it is not a
-provider credential selector or per-member provider identity. Deploy separate
-managed/broker pairs when credentials, billing owners, or policy need isolation.
+Each authenticated account owns its provider credentials and active choice;
+agents and rooms bound to that account share the selected billing scope. Room
+membership grants quota-bounded authority to spend from that scope and is not a
+per-member provider selector. Deploy separate managed/broker pairs when policy
+or infrastructure isolation is required.
 
 This is the standard-Workers equivalent of the iron-proxy credential boundary,
 not transparent egress interception. Ordinary Workers cannot install an

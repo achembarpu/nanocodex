@@ -10,6 +10,9 @@ const STATE_KEY = "credential-state";
 const TOKEN_ENDPOINT_PATH = "/oauth/token";
 const CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const LOGIN_TTL_MS = 15 * 60_000;
+const OPENROUTER_LOGIN_TTL_MS = 10 * 60_000;
+const OPENROUTER_AUTH_URL = "https://openrouter.ai/auth";
+const OPENROUTER_KEY_URL = "https://openrouter.ai/api/v1/auth/keys";
 const REFRESH_EARLY_MS = 5 * 60_000;
 const DEFAULT_REFRESH_BACKOFF_MS = 60_000;
 const MAX_REFRESH_BACKOFF_MS = 15 * 60_000;
@@ -28,7 +31,7 @@ export interface BrokerEnv extends CredentialVaultEnv {
 }
 
 export type UserCredentialSnapshot = Readonly<{
-  kind: "openai" | "chatgpt";
+  kind: "openai" | "chatgpt" | "openrouter";
   secret: string;
   accountId?: string;
   fedramp?: boolean;
@@ -37,6 +40,11 @@ export type UserCredentialSnapshot = Readonly<{
 }>;
 
 type ApiKeyCredential = { secret: string; createdAt: number; revision: number };
+type PendingOpenRouterLogin = {
+  state: string;
+  codeVerifier: string;
+  expiresAt: number;
+};
 type ChatGptCredential = {
   accessToken: string;
   refreshToken: string;
@@ -59,8 +67,10 @@ type PendingLogin = {
 };
 type CredentialState = {
   version: 1;
-  active: "openai" | "chatgpt" | null;
+  active: "openai" | "chatgpt" | "openrouter" | null;
   openai?: ApiKeyCredential;
+  openrouter?: ApiKeyCredential;
+  openrouterLogin?: PendingOpenRouterLogin;
   chatgpt?: ChatGptCredential;
   login?: PendingLogin;
 };
@@ -191,6 +201,11 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
         delete this.#credentials.login;
         await this.#persist();
       }
+      if (this.#credentials.openrouterLogin
+        && this.#credentials.openrouterLogin.expiresAt <= Date.now()) {
+        delete this.#credentials.openrouterLogin;
+        await this.#persist();
+      }
       const credential = this.#credentials.chatgpt;
       if (credential && !credential.deadReason && credential.refreshToken
         && credential.expiresAt <= Date.now() + REFRESH_EARLY_MS
@@ -240,6 +255,62 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
       if (request.method === "GET" && url.pathname === "/v1/status") {
         return json(this.#publicStatus(), 200);
       }
+      if (request.method === "POST" && url.pathname === "/v1/openrouter/login/start") {
+        const body = await readJson(request, 4 * 1024);
+        const callbackUrl = openRouterCallbackUrl(stringField(body, "callback_url"), this.#env);
+        const login = await createOpenRouterLogin();
+        this.#credentials.openrouterLogin = login.pending;
+        await this.#persist();
+        callbackUrl.searchParams.set("state", login.pending.state);
+        const authorizationUrl = new URL(OPENROUTER_AUTH_URL);
+        authorizationUrl.searchParams.set("callback_url", callbackUrl.href);
+        authorizationUrl.searchParams.set("code_challenge", login.codeChallenge);
+        authorizationUrl.searchParams.set("code_challenge_method", "S256");
+        authorizationUrl.searchParams.set("key_label", "Nanocodex");
+        return json({ authorization_url: authorizationUrl.href }, 200);
+      }
+      if (request.method === "POST" && url.pathname === "/v1/openrouter/login/callback") {
+        const body = await readJson(request, 16 * 1024);
+        const code = stringField(body, "code")?.trim();
+        const state = stringField(body, "state");
+        const login = this.#credentials.openrouterLogin;
+        if (!code || !state || !login || !sameSecret(state, login.state)
+          || login.expiresAt <= Date.now()) {
+          return jsonError(400, "invalid_openrouter_oauth_callback");
+        }
+        delete this.#credentials.openrouterLogin;
+        await this.#persist();
+        const exchanged = await exchangeOpenRouterCode(code, login.codeVerifier);
+        this.#credentials.openrouter = {
+          secret: exchanged.key,
+          createdAt: Date.now(),
+          revision: (this.#credentials.openrouter?.revision ?? -1) + 1,
+        };
+        this.#credentials.active ??= "openrouter";
+        await this.#persist();
+        return new Response(null, { status: 204, headers: noStoreHeaders() });
+      }
+      if (request.method === "PUT" && url.pathname === "/v1/active") {
+        const body = await readJson(request, 1_024);
+        const provider = stringField(body, "provider");
+        if (!this.#connectedProvider(provider)) {
+          return jsonError(409, "credential_not_connected");
+        }
+        this.#credentials.active = provider;
+        await this.#persist();
+        return new Response(null, { status: 204, headers: noStoreHeaders() });
+      }
+      if (request.method === "DELETE" && url.pathname === "/v1/openrouter") {
+        delete this.#credentials.openrouter;
+        delete this.#credentials.openrouterLogin;
+        if (this.#credentials.active === "openrouter") {
+          this.#credentials.active = this.#credentials.chatgpt
+            ? "chatgpt"
+            : this.#credentials.openai ? "openai" : null;
+        }
+        await this.#persist();
+        return new Response(null, { status: 204, headers: noStoreHeaders() });
+      }
       if (request.method === "PUT" && url.pathname === "/v1/openai-key") {
         const body = await readJson(request, 16 * 1024);
         const secret = stringField(body, "api_key")?.trim();
@@ -251,14 +322,14 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
           createdAt: Date.now(),
           revision: (this.#credentials.openai?.revision ?? -1) + 1,
         };
-        this.#credentials.active = "openai";
+        this.#credentials.active ??= "openai";
         await this.#persist();
         return new Response(null, { status: 204, headers: noStoreHeaders() });
       }
       if (request.method === "DELETE" && url.pathname === "/v1/openai-key") {
         delete this.#credentials.openai;
         if (this.#credentials.active === "openai") {
-          this.#credentials.active = this.#credentials.chatgpt ? "chatgpt" : null;
+          this.#credentials.active = this.#preferredProvider();
         }
         await this.#persist();
         return new Response(null, { status: 204, headers: noStoreHeaders() });
@@ -277,7 +348,7 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
         delete this.#credentials.chatgpt;
         delete this.#credentials.login;
         if (this.#credentials.active === "chatgpt") {
-          this.#credentials.active = this.#credentials.openai ? "openai" : null;
+          this.#credentials.active = this.#preferredProvider();
         }
         await this.#persist();
         await this.#schedule();
@@ -310,6 +381,7 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
       ready: this.#credentials.active !== null,
       active: this.#credentials.active,
       openai: { connected: Boolean(this.#credentials.openai) },
+      openrouter: { connected: Boolean(this.#credentials.openrouter) },
       chatgpt: {
         connected: Boolean(this.#credentials.chatgpt && !this.#credentials.chatgpt.deadReason),
         ...(this.#credentials.chatgpt?.accountId
@@ -320,7 +392,31 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
     };
   }
 
+  #connectedProvider(
+    value: string | undefined,
+  ): value is "openai" | "chatgpt" | "openrouter" {
+    return value === "chatgpt"
+      ? Boolean(this.#credentials.chatgpt && !this.#credentials.chatgpt.deadReason)
+      : value === "openai"
+        ? Boolean(this.#credentials.openai)
+        : value === "openrouter" && Boolean(this.#credentials.openrouter);
+  }
+
+  #preferredProvider(): CredentialState["active"] {
+    if (this.#credentials.chatgpt && !this.#credentials.chatgpt.deadReason) return "chatgpt";
+    if (this.#credentials.openai) return "openai";
+    if (this.#credentials.openrouter) return "openrouter";
+    return null;
+  }
+
   async #credential(recover: boolean, revision: number | undefined): Promise<UserCredentialSnapshot> {
+    if (this.#credentials.active === "openrouter" && this.#credentials.openrouter) {
+      return {
+        kind: "openrouter",
+        secret: this.#credentials.openrouter.secret,
+        revision: this.#credentials.openrouter.revision,
+      };
+    }
     if (this.#credentials.active === "openai" && this.#credentials.openai) {
       return {
         kind: "openai",
@@ -553,7 +649,7 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
   async #markDead(current: ChatGptCredential, reason: string): Promise<void> {
     this.#credentials.chatgpt = { ...current, refreshState: "ready", deadReason: reason };
     if (this.#credentials.active === "chatgpt") {
-      this.#credentials.active = this.#credentials.openai ? "openai" : null;
+      this.#credentials.active = this.#preferredProvider();
     }
     await this.#persist();
   }
@@ -590,6 +686,9 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
   async #schedule(): Promise<void> {
     const times: number[] = [];
     if (this.#credentials.login) times.push(this.#credentials.login.expiresAt);
+    if (this.#credentials.openrouterLogin) {
+      times.push(this.#credentials.openrouterLogin.expiresAt);
+    }
     const chatgpt = this.#credentials.chatgpt;
     if (chatgpt?.refreshToken && !chatgpt.deadReason) {
       times.push(Math.max(
@@ -601,6 +700,101 @@ export class UserCredentialBroker extends DurableObject<BrokerEnv> {
     if (times.length) await this.#state.storage.setAlarm(Math.min(...times));
     else await this.#state.storage.deleteAlarm();
   }
+}
+
+async function createOpenRouterLogin(): Promise<Readonly<{
+  pending: PendingOpenRouterLogin;
+  codeChallenge: string;
+}>> {
+  const codeVerifier = randomBase64Url(32);
+  const state = randomBase64Url(32);
+  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(codeVerifier));
+  return {
+    pending: {
+      state,
+      codeVerifier,
+      expiresAt: Date.now() + OPENROUTER_LOGIN_TTL_MS,
+    },
+    codeChallenge: base64Url(new Uint8Array(digest)),
+  };
+}
+
+function openRouterCallbackUrl(value: string | undefined, env: BrokerEnv): URL {
+  if (!value) throw new BrokerFailure(400, "invalid_openrouter_callback_url");
+  let url: URL;
+  try { url = new URL(value); } catch {
+    throw new BrokerFailure(400, "invalid_openrouter_callback_url");
+  }
+  const environment = env.ENVIRONMENT?.trim().toLowerCase();
+  const loopback = (url.hostname === "localhost" || url.hostname.endsWith(".localhost")
+      || url.hostname === "127.0.0.1" || url.hostname === "[::1]")
+    && url.protocol === "http:";
+  if (url.username || url.password || url.hash || url.search
+    || (url.protocol !== "https:" && !loopback)
+    || ((environment === "production" || environment === "preview") && loopback)) {
+    throw new BrokerFailure(400, "invalid_openrouter_callback_url");
+  }
+  return url;
+}
+
+async function exchangeOpenRouterCode(
+  code: string,
+  codeVerifier: string,
+): Promise<Readonly<{ key: string }>> {
+  let response: Response;
+  try {
+    response = await fetch(OPENROUTER_KEY_URL, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        code,
+        code_verifier: codeVerifier,
+        code_challenge_method: "S256",
+      }),
+      redirect: "manual",
+      signal: AbortSignal.timeout(30_000),
+    });
+  } catch {
+    throw new BrokerFailure(503, "openrouter_provider_unavailable");
+  }
+  if (!response.ok) {
+    await cancelResponseBody(response);
+    throw new BrokerFailure(response.status === 400 || response.status === 403 ? 400 : 503,
+      "openrouter_token_exchange_failed");
+  }
+  const text = await readBoundedText(response, MAX_PROVIDER_RESPONSE_BYTES);
+  let value: unknown;
+  try { value = JSON.parse(text); } catch {
+    throw new BrokerFailure(503, "invalid_openrouter_token_response");
+  }
+  const key = isRecord(value) ? stringField(value, "key")?.trim() : undefined;
+  if (!key || key.length > 8_192 || /[\u0000-\u001f\u007f]/.test(key)) {
+    throw new BrokerFailure(503, "invalid_openrouter_token_response");
+  }
+  return { key };
+}
+
+function randomBase64Url(byteLength: number): string {
+  const bytes = new Uint8Array(byteLength);
+  crypto.getRandomValues(bytes);
+  return base64Url(bytes);
+}
+
+function base64Url(bytes: Uint8Array): string {
+  let binary = "";
+  for (const byte of bytes) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+}
+
+function sameSecret(left: string, right: string): boolean {
+  const leftBytes = new TextEncoder().encode(left);
+  const rightBytes = new TextEncoder().encode(right);
+  let difference = leftBytes.length ^ rightBytes.length;
+  const length = Math.max(leftBytes.length, rightBytes.length);
+  for (let index = 0; index < length; index += 1) {
+    difference |= (leftBytes[index] ?? 0) ^ (rightBytes[index] ?? 0);
+  }
+  return difference === 0;
 }
 
 export async function finishRateLimitedRefresh(

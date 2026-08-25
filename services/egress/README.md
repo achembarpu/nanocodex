@@ -20,8 +20,12 @@ managed. Neither value is accepted from a public browser request.
 | `PUT /subjects/:subject` | `{ "user_id": "..." }` | `200 {"status":"bound"}` or idempotent `unchanged`; `409` if owned by another user |
 | `DELETE /subjects/:subject` | `{ "user_id": "..." }` | `204`; `409` on owner mismatch |
 | `GET /users/:user/credentials` | none | secret-free status |
+| `PUT /users/:user/credentials/active` | `{ "provider": "chatgpt" | "openrouter" | "openai" }` | `204`; both credentials remain connected |
 | `PUT /users/:user/credentials/openai` | `{ "api_key": "..." }` | `204` |
 | `DELETE /users/:user/credentials/openai` | none | `204` |
+| `POST /users/:user/credentials/openrouter/login` | `{ "callback_url": "..." }` | OpenRouter authorization URL with an S256 challenge |
+| `POST /users/:user/credentials/openrouter/callback` | `{ "code": "...", "state": "..." }` | `204`; code exchange and generated-key storage stay server-side |
+| `DELETE /users/:user/credentials/openrouter` | none | `204` |
 | `POST /users/:user/credentials/chatgpt/login` | none | pending device-login status |
 | `POST /users/:user/credentials/chatgpt/login/status` | none | pending/authenticated/expired status; polling and token exchange stay server-side |
 | `DELETE /users/:user/credentials/chatgpt` | none | `204` |
@@ -40,18 +44,23 @@ device login fails with `409 local_credential_claim_required`.
 The managed runtime sends the exact hidden `x-nanocodex-subject` header and the
 literal `Authorization: Bearer NANOCODEX_PROVIDER_CREDENTIAL` placeholder.
 All model operations target `https://nanocodex.internal/v1/...`; callers cannot
-select OpenAI versus ChatGPT or an upstream URL. The broker resolves subject to
-user, selects that user's active credential, strips the subject, injects the
+select a provider or upstream URL per request. The account may keep OpenAI
+subscription, OpenRouter, and OpenAI API-key credentials connected together;
+the subscription is preferred by default and an explicit account control selects
+the active provider. The broker resolves subject to user, selects that active
+credential, strips the subject, injects the
 credential, and forwards only allowlisted headers to one exact provider URL.
 
 Exact supported paths are `GET /v1/responses` with the required Responses
-WebSocket beta/upgrade headers, plus JSON `POST /v1/search`,
+WebSocket beta/upgrade headers, streamed `POST /v1/responses`, plus JSON `POST /v1/search`,
 `/v1/images/generations`, and `/v1/images/edits`. Queries, redirects, provider
 headers, incorrect placeholders, other methods, paths, hosts, schemes, and
 ports fail closed. The fixed ChatGPT relay configuration remains supported for
-the environments where Cloudflare-to-ChatGPT WebSockets require it.
+the environments where Cloudflare-to-ChatGPT WebSockets require it. OpenRouter
+uses only the exact Responses HTTPS/SSE endpoint; the SDK owns the fallback from
+the unavailable WebSocket transport and retains the normal typed lifecycle.
 
-The approved OpenAI endpoint and configured terminating relay are trusted
+The approved OpenAI and OpenRouter endpoints and configured terminating relay are trusted
 credential recipients. Normal HTTP response headers are stripped of known
 credential/cookie fields, but a WebSocket peer necessarily controls its frames;
 bind the broker only to the owned managed Worker and use only an audited relay
@@ -82,7 +91,7 @@ Dormant pre-sharding agents remain recoverable because their AgentDO retains
 the authoritative owner and idempotently binds its direct shard before model
 use; deletion similarly creates the permanent shard tombstone.
 
-All API keys, ChatGPT access/refresh state, device-login state, connector
+All OpenAI and OpenRouter API keys, ChatGPT access/refresh state, device-login state, connector
 access/refresh tokens, PKCE verifiers, OAuth state, and refresh markers are
 AES-256-GCM encrypted before Durable Object storage. Production
 requires `CREDENTIAL_ENCRYPTION_KEY`; `CREDENTIAL_ENCRYPTION_KEY_PREVIOUS`

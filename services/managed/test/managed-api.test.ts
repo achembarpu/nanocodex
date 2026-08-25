@@ -604,6 +604,88 @@ describe("managed agents REST and resumable SSE", () => {
     expect(disconnected.status).toBe(204);
   });
 
+  it("keeps OpenRouter OAuth and provider selection behind the account session", async () => {
+    const userId = "66666666-6666-4666-8666-666666666666";
+    const token = "r".repeat(43);
+    await seedPasskeySession(userId, token);
+    const cookie = `nanocodex_account=${token}`;
+    const originalBroker = testEnv.NANOCODEX;
+    const calls: Request[] = [];
+    testEnv.NANOCODEX = {
+      async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+        const request = new Request(input, init);
+        calls.push(request.clone());
+        const url = new URL(request.url);
+        if (url.pathname.endsWith("/credentials/openrouter/login")) {
+          const body = await request.json<{ callback_url: string }>();
+          expect(body.callback_url).toBe(
+            "https://example.test/v1/credentials/openrouter/callback",
+          );
+          return Response.json({
+            authorization_url: "https://openrouter.ai/auth?code_challenge=challenge",
+          });
+        }
+        if (url.pathname.endsWith("/credentials/openrouter/callback")) {
+          expect(await request.json()).toEqual({ state: "oauth-state", code: "oauth-code" });
+          return new Response(null, { status: 204 });
+        }
+        if (url.pathname.endsWith("/credentials/active")) {
+          expect(await request.json()).toEqual({ provider: "openrouter" });
+          return new Response(null, { status: 204 });
+        }
+        return Response.json({ error: "unexpected_test_broker_request" }, { status: 500 });
+      },
+    } as Fetcher;
+
+    try {
+      const missingOrigin = await RAW_SELF.fetch(
+        "https://example.test/v1/credentials/openrouter/login",
+        { method: "POST", headers: { cookie } },
+      );
+      expect(missingOrigin.status).toBe(403);
+      expect(calls).toHaveLength(0);
+
+      const started = await RAW_SELF.fetch(
+        "https://example.test/v1/credentials/openrouter/login",
+        { method: "POST", headers: { cookie, origin: "https://example.test" } },
+      );
+      expect(started.status).toBe(200);
+      expect(await started.json()).toEqual({
+        authorization_url: "https://openrouter.ai/auth?code_challenge=challenge",
+      });
+
+      const callback = await RAW_SELF.fetch(
+        "https://example.test/v1/credentials/openrouter/callback?state=oauth-state&code=oauth-code",
+        { headers: { cookie }, redirect: "manual" },
+      );
+      expect(callback.status).toBe(303);
+      expect(callback.headers.get("location")).toBe(
+        "https://example.test/?openrouter_result=connected",
+      );
+
+      const selected = await RAW_SELF.fetch(
+        "https://example.test/v1/credentials/active",
+        {
+          method: "PUT",
+          headers: {
+            cookie,
+            origin: "https://example.test",
+            "content-type": "application/json",
+          },
+          body: JSON.stringify({ provider: "openrouter" }),
+        },
+      );
+      expect(selected.status).toBe(204);
+      expect(calls.map((request) => new URL(request.url).pathname)).toEqual([
+        `/users/${userId}/credentials/openrouter/login`,
+        `/users/${userId}/credentials/openrouter/callback`,
+        `/users/${userId}/credentials/active`,
+      ]);
+    } finally {
+      testEnv.NANOCODEX = originalBroker;
+    }
+  });
+
   it("bootstraps one browser identity and binds passkey options to it", async () => {
     const first = await RAW_SELF.fetch("https://example.test/v1/me");
     expect(first.status).toBe(200);
