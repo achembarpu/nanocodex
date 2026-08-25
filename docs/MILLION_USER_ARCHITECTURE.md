@@ -18,7 +18,7 @@ The initial instrumented Worker test proved four things:
   workspace state, and page overhead must stay visible as an unattributed
   remainder rather than being guessed away.
 
-This branch now:
+The current implementation:
 
 - emits structured per-agent capacity snapshots after construction, at
   power-of-two terminal milestones, and before idle shutdown;
@@ -81,6 +81,36 @@ events, and the small manifest head remain in SQLite. Closed cursor history and
 old exact receipts are immutable R2 data. The durable workspace remains a
 separate caller-visible storage budget; it is not journal history and is never
 silently moved or expired.
+
+## Production scale evidence
+
+Production currently runs the durability implementation from
+`536345ad97cecf6a9af52bd100c6d475f15f9b70` as managed deployment
+`718abf2c-7927-4e19-8d55-1d75434428e2`. The website deployment
+`15242374-9513-4dac-ac06-c9103cc5bdc2` attests the same source revision. A real
+authenticated browser created a fresh managed agent, completed
+`CREATE_REPLAY_FINAL_OK`, reloaded the document, and recovered the exact prompt
+and answer with zero page errors.
+
+The final public-API control wave concentrated 100,000 agent creates, state
+reads, and terminal deletions through one account at concurrency 128. It
+completed in 35 minutes 58 seconds. Create throughput was 87.15/s with 1.392 s
+p50 and 2.410 s p99; isolated state reads were 359.49/s; deletion was 136.64/s
+with 873 ms p50 and a 34.755 s maximum. All 38 initially pending deletions
+settled, exact run-ID verification took 194 ms, and the account returned from
+28 ordinary agents to the same 28.
+
+Provider-backed waves also completed at 10 agents/concurrency 10 and 100
+agents/concurrency 32. Turn acceptance remained 182 ms p50 and 217 ms p95 in
+the larger wave, but acceptance-to-terminal latency rose to 10.555 s p50 and
+71.856 s p95. The edge coordination path remained responsive; the shared
+provider/broker path was the observed active-generation bottleneck.
+
+This validates 100,000 independent AgentDO control-plane lifecycles and, more
+stringently, 100,000 membership mutations through one UserAccountDO. It does
+not measure one million simultaneous model generations. One million registered
+users remains a topology claim based on deterministic per-user and per-agent
+sharding, with provider capacity sized independently.
 
 ## Scale target
 
@@ -174,8 +204,19 @@ Current source anchors:
 
 ## What currently grows
 
-All of the following are per agent, which prevents a global storage hotspot,
-but their retained size and cold-read cost still grow with agent lifetime.
+There are two independent lifetime axes: a user's account index grows with
+agent-ID churn, while each agent's hot and archived state grows with its own
+conversation. Neither is deployment-global.
+
+### Account membership tombstones
+
+`UserAccount.user_agents` stores one active row or permanent deletion tombstone
+per agent ID. The tombstone prevents a delayed attach or replayed create from
+resurrecting deleted ownership. The 100,000-agent wave showed that one
+concentrated account remains functional at that size, but repeated lifetime
+churn is unbounded today. Deleting tombstones without another permanent
+anti-resurrection proof would reintroduce the race, so any compaction must first
+replace their semantic role rather than merely expire rows.
 
 ### Durability journal
 
@@ -224,7 +265,7 @@ The retained Computer filesystem shares the session's Durable Object storage.
 It is not loaded as part of journal recovery, but it contributes independently
 to the per-agent SQLite size and requires its own retention policy.
 
-## Proposed topology
+## Remaining target topology
 
 ```text
  Browser / SDK
@@ -341,7 +382,14 @@ exact-ID and idempotency semantics.
 
 ### Sealing protocol
 
-Only the owning AgentDO may seal one of its committed prefixes.
+Only the owning AgentDO may seal one of its committed prefixes. `needsSeal` is
+the local capacity predicate that decides whether archival work is due; it is
+not a lock, lease, consensus vote, or ownership signal. Events need sealing
+when local event bytes reach their configured threshold. Turn and realtime
+archives need sealing when completed terminal receipts exceed their retained
+hot counts. A true result schedules or performs an idempotent cut of older,
+already-immutable rows to R2 while preserving the bounded SQLite head. The
+AgentDO's existing fence remains the only authority for the cut.
 
 ```text
  1. Select a closed event prefix or terminal-receipt set. Unresolved turns are
@@ -396,7 +444,7 @@ R2 should not preserve accidental duplication forever. The order of work is:
 
 Deletion is preferable to moving redundant data.
 
-## Measurements required before choosing thresholds
+## Measurements required for threshold tuning
 
 Emit these dimensions per agent without requiring a global actor:
 
@@ -412,10 +460,10 @@ Emit these dimensions per agent without requiring a global actor:
 - sealed segment size, upload duration, and compaction duration; and
 - local head size after sealing.
 
-The first prototype should use retained production-shaped agents to determine
-whether checkpoints, tool output, assistant deltas, or workspaces dominate. A
-threshold selected before those measurements would only hide the current
-growth pattern.
+The next retained production-shaped sample should determine whether
+checkpoints, tool output, assistant deltas, or workspaces dominate. Current
+thresholds establish bounded behavior; this evidence is still required to tune
+them for cold-start and storage cost rather than guesswork.
 
 ## Decisions and open questions
 

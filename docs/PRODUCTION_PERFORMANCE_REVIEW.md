@@ -4,9 +4,9 @@ Date: 2026-08-25
 
 Production URL: `https://nanocodex.gakonst.workers.dev/`
 
-Web deployment: `286dc899-fa50-4e0d-8631-5720f0cd8e8b`
+Web deployment: `15242374-9513-4dac-ac06-c9103cc5bdc2`
 
-Managed deployment: `ad53c2ec-5e7e-4258-b1f1-e77c90ca1493`
+Managed deployment: `718abf2c-7927-4e19-8d55-1d75434428e2`
 
 ## Outcome
 
@@ -29,10 +29,13 @@ performance. The review baseline and remaining benchmark are in
 [`PROMPT_CACHE_REVIEW.md`](PROMPT_CACHE_REVIEW.md).
 
 The pathological failed-prewarm alarm loop and the durability ownership races
-found by that deployment are fixed. The current managed Worker is deployed from
-master `f0e13b2c`: startup rollback spans the real host lifecycle, persisted
-owner fences exclude stale writers, and structural authority failures require
-a fresh authoritative reopen.
+found by that deployment are fixed. The deployed durability implementation is
+revision `536345ad97cecf6a9af52bd100c6d475f15f9b70`: startup rollback spans the
+real host lifecycle, persisted owner fences exclude stale writers, structural
+authority failures require a fresh authoritative reopen, and managed creation
+replay is crash-safe through commit, deletion, and watchdog recovery. The load
+harness cleanup verifier was subsequently tightened on master at `01e52a51`;
+that harness-only change did not require a Worker deployment.
 
 The scale pass also removed both account-sized coordination structures. Subject
 ownership routes directly to one named Durable Object per subject, and each
@@ -40,10 +43,11 @@ account/agent membership is one SQLite row rather than an aggregate JSON array.
 Every idempotent public create stage now has bounded replay on an ambiguous
 transport result or transient HTTP status, and a caller `Idempotency-Key`
 derives one account-scoped agent identity for safe outer retry. The production
-browser created a new managed conversation, completed `CREATE_STAGE_REPLAY_OK`,
-and recovered the exact turn after reload with zero page errors. The hosted
-10,000-agent control run then completed every create, isolated state read,
-deletion, and leak check.
+browser created a new managed conversation, completed
+`CREATE_REPLAY_FINAL_OK`, and recovered the exact turn after reload with zero
+page errors. The final hosted control run then completed 100,000 creates,
+isolated state reads, terminal deletions, and run-scoped leak checks through one
+real account at concurrency 128.
 
 ## Measurement scope and caveats
 
@@ -62,6 +66,13 @@ provider response IDs, so its first post-restart request replays complete typed
 history rather than continuing from a stored provider checkpoint. A warm
 provider cache may still price much of that input as cached, but the current
 measurements cannot prove it.
+
+The final post-deployment replay check used a newly created managed conversation
+on the canonical production agent URL. Its full reload measured 33.4 ms TTFB,
+224 ms FCP, 616 ms LCP, 4 ms TBT, 0.00083 CLS, and 13,808 transferred bytes.
+The prompt and exact `CREATE_REPLAY_FINAL_OK` response remained visible after
+reload. There were zero page errors; the only aborted request was the prior SSE
+stream being replaced by the reload.
 
 ## Document and terminal readiness
 
@@ -429,25 +440,47 @@ The control harness reaches the public website Worker with a real account API
 key, crosses the private managed service binding, creates independent AgentDOs,
 reads every new agent's state, deletes every receipt, and finally proves none of
 the run's IDs remain in the account index. It stops new work on the first phase
-failure but still deletes all successful receipts. Exact
-`503 session_cleanup_pending` responses count as retained durable cleanup
-ownership and must also disappear from the final account listing.
+failure but still deletes all successful receipts. A
+`503 session_cleanup_pending` response is not treated as completion: the
+harness retries the same deletion until it receives terminal `204` or `404`,
+then verifies the exact receipt IDs. Account-wide before/after comparison is
+only a fallback for an interrupted create phase whose response receipts may be
+ambiguous, so unrelated agents created during a long wave are not mislabeled as
+leaks.
 
-The post-fix 10,000-agent run at concurrency 128 completed with no errors, no
-pending cleanup, and no leaked account rows:
+The final 100,000-agent control run at concurrency 128 completed in 35 minutes
+58 seconds with no errors and no leaked run IDs. Thirty-eight asynchronous
+deletions initially returned cleanup-pending and all reached a terminal result.
+The account had 28 ordinary agents before and after the wave:
 
 | Phase | Throughput | p50 | p95 | p99 | max |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Create | 87.69/s | 1.351 s | 2.219 s | 2.359 s | 17.701 s |
-| State | 436.32/s | 256 ms | 637 ms | 794 ms | 2.856 s |
-| Delete | 209.14/s | 524 ms | 1.223 s | 1.299 s | 9.637 s |
+| Create | 87.15/s | 1.392 s | 2.048 s | 2.410 s | 18.265 s |
+| State | 359.49/s | 361 ms | 747 ms | 849 ms | 10.898 s |
+| Delete | 136.64/s | 873 ms | 1.652 s | 2.025 s | 34.755 s |
 
-This is a control-plane and durability-coordination result, not a claim that
-10,000 simultaneous provider generations fit one upstream account. It exercises
-the horizontally sharded Worker/DO ownership path without paying for model
-turns. Registered-user capacity is therefore driven by independent per-user and
-per-agent objects rather than one coordinator, while active-turn capacity must
-also include provider quotas, model latency, and per-agent sequential execution.
+The load generator's maximum resident set was 346,882,048 bytes. The exact
+post-wave verification took 194 ms. This deliberately concentrated all
+membership writes in one UserAccountDO, making it harsher on the per-user index
+than the one-million-user target, where account ownership is distributed. It
+does not prove one account can churn indefinitely: permanent deletion
+tombstones remain one row per deleted ID and are the next per-account lifetime
+growth boundary to measure.
+
+Provider-backed tiers separated edge admission from model capacity:
+
+| Active tier | Create p50/p95 | Turn acceptance p50/p95 | Acceptance-to-terminal p50/p95 | Total elapsed |
+| --- | ---: | ---: | ---: | ---: |
+| 10 agents, concurrency 10 | 1.399/2.003 s | 159/184 ms | 3.345/4.512 s | 7.54 s |
+| 100 agents, concurrency 32 | 1.416/2.098 s | 182/217 ms | 10.555/71.856 s | 81.48 s |
+
+Both active tiers completed and returned the account to its exact baseline.
+At concurrency 32, edge acceptance remained fast while model completion p95
+rose to about 72 seconds. That is provider/broker saturation, not a global
+Durable Object coordinator. The production evidence therefore supports 100,000
+independent durability actors and the no-global-coordinator path; one million
+registered users is an architectural scaling projection, not a measurement of
+one million simultaneous generations.
 
 ## Instrumentation gaps
 
@@ -594,9 +627,10 @@ service bindings, while permanent account and subject tombstones prevent timed-
 out late requests from resurrecting ownership. An ambiguous keyed create keeps
 and refreshes the same preparation lease; keyless legacy creates compensate
 immediately, and the durable watchdog owns abandonment. Deletion commits its
-durable marker and alarm before the irreversible local tombstone. Finally, the route-lifetime Agent
-wrapper preserves later Worker failure identity, so heartbeat failure still
-publishes an actionable error and permits a fresh generation.
+durable marker and alarm before the irreversible local tombstone. Finally, the
+route-lifetime Agent wrapper preserves later Worker failure identity, so
+heartbeat failure still publishes an actionable error and permits a fresh
+generation.
 
 Shared warmup suppression still has no expiry or capacity. That is a low-risk
 performance/memory issue, not history corruption. Its policy should follow a
@@ -661,9 +695,9 @@ claiming a provider-side hit-rate or cold-reopen cost improvement.
 
 ## Ranked follow-ups
 
-1. Deploy the completed fencing/prewarm/recovery slice and prove production logs
-   remain quiet across Durable Object eviction, reconnect, retained-session
-   sharding repair, and explicit deletion.
+1. Measure and bound long-lived per-account deletion tombstones. The 100,000-ID
+   churn wave did not collapse, but permanent anti-resurrection rows are the
+   remaining account-lifetime growth term.
 2. Add a terminal-specific managed-history projection that omits raw
    `api.event` envelopes while preserving the authoritative full event log.
 3. Measure a conventional router-owned Changelog split of the 947.48 KB-gzip
@@ -672,8 +706,8 @@ claiming a provider-side hit-rate or cold-reopen cost improvement.
 4. Add runtime-labelled end-to-end timings and the paired cold-recovery cache
    benchmark described above.
 5. Preserve explicit prompt-cache keys through Codex-rollout reconstruction.
-6. Add correlated managed/egress cleanup timings now that subject sharding and
-   bounded retry are implemented.
+6. Add correlated managed/egress cleanup timings, especially for the 35-second
+   deletion tail, now that subject sharding and bounded retry are implemented.
 7. Remove MCP transport negotiation and teardown churn while preserving fully
    deferred discovery.
 8. Bound or expire shared warmup suppression using the cache benchmark's
