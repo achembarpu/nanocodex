@@ -17,6 +17,7 @@ const MAX_REFRESH_BACKOFF_ATTEMPT = 5;
 const MAX_PROVIDER_RESPONSE_BYTES = 16 * 1024;
 const SUBJECT = /^[A-Za-z0-9_-]{43,128}$/;
 const USER_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const SUBJECT_DIRECTORY_PREFIX = "agent-subject-v1:";
 const SUBJECT_TOMBSTONE_PREFIX = "!deleted:";
 
 export interface BrokerEnv extends CredentialVaultEnv {
@@ -67,11 +68,14 @@ type StoredRow = { envelope: EncryptedEnvelope };
 
 export class AgentSubjectDirectory extends DurableObject<BrokerEnv> {
   readonly #state: DurableObjectState;
-  readonly #subjectTails = new Map<string, Promise<void>>();
+  readonly #subject: string | undefined;
 
   constructor(state: DurableObjectState, env: BrokerEnv) {
     super(state, env);
     this.#state = state;
+    this.#subject = state.id.name?.startsWith(SUBJECT_DIRECTORY_PREFIX)
+      ? state.id.name.slice(SUBJECT_DIRECTORY_PREFIX.length)
+      : undefined;
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -81,21 +85,7 @@ export class AgentSubjectDirectory extends DurableObject<BrokerEnv> {
     }
     const body = await readJson(request, 2_048);
     if (!body) return jsonError(400, "invalid_json");
-    const subject = stringField(body, "subject");
-    return this.#exclusive(subject ?? "", () => this.#dispatch(request, body));
-  }
-
-  async #exclusive<T>(subject: string, operation: () => Promise<T>): Promise<T> {
-    const previous = this.#subjectTails.get(subject) ?? Promise.resolve();
-    let release!: () => void;
-    const current = new Promise<void>((resolve) => { release = resolve; });
-    this.#subjectTails.set(subject, current);
-    await previous;
-    try { return await operation(); }
-    finally {
-      release();
-      if (this.#subjectTails.get(subject) === current) this.#subjectTails.delete(subject);
-    }
+    return this.#dispatch(request, body);
   }
 
   async #dispatch(
@@ -111,7 +101,7 @@ export class AgentSubjectDirectory extends DurableObject<BrokerEnv> {
     const subject = stringField(body, "subject");
     if ((url.pathname === "/v1/bind" || url.pathname === "/v1/unbind"
         || url.pathname === "/v1/resolve")
-      && !SUBJECT.test(subject ?? "")) {
+      && (!SUBJECT.test(subject ?? "") || subject !== this.#subject)) {
       return jsonError(400, "invalid_subject");
     }
     if (request.method === "POST" && url.pathname === "/v1/bind") {

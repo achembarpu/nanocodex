@@ -408,6 +408,21 @@ describe("per-user credential broker", () => {
     expect((await control(`/subjects/${subjectD}`, "PUT", { user_id: "user-d" })).status)
       .toBe(410);
   });
+
+  it("rejects a body subject that does not match the named authority", async () => {
+    const subject = "M".repeat(43);
+    const other = "N".repeat(43);
+    const shard = workerEnv.AGENT_SUBJECTS.getByName(`agent-subject-v1:${subject}`);
+    const response = await shard.fetch("https://subjects.internal/v1/bind", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ subject: other, user_id: "user-mismatch" }),
+    });
+    expect(response.status).toBe(400);
+    expect(await subjectOwner(shard, subject)).toBeUndefined();
+    expect(await subjectOwner(shard, other)).toBeUndefined();
+  });
+
   it("stores per-user OpenAI keys, exposes only status, and injects after subject resolution", async () => {
     await control(`/subjects/${subjectA}`, "PUT", { user_id: "user-openai-a" });
     const stored = await control("/users/user-openai-a/credentials/openai", "PUT", {
