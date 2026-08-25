@@ -62,8 +62,8 @@ test("the terminal fails before thread or Worker creation and exposes the capabi
 });
 
 test("coarse-pointer Safari keeps native IME composition separate from send", () => {
-  const terminal = source("../src/AgentTerminalView.tsx");
-  const composer = source("../src/TerminalComposer.tsx");
+  const terminal = source("../../js/terminal/src/AgentTerminalView.tsx");
+  const composer = source("../../js/terminal/src/TerminalComposer.tsx");
   assert.match(composer, /<textarea[\s\S]*?enterKeyHint="send"/);
   assert.match(composer, /onCompositionStart=\{\(\) => \{ composing\.current = true; \}\}/);
   assert.match(composer, /onCompositionEnd=\{\(\) => \{ composing\.current = false; \}\}/);

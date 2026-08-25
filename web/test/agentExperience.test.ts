@@ -5,9 +5,13 @@ import test from "node:test";
 import { browserMcpConfiguration } from "../src/browserMcp.ts";
 
 const terminal = source("../src/AgentTerminal.tsx");
-const terminalView = source("../src/AgentTerminalView.tsx");
+const terminalView = source("../../js/terminal/src/AgentTerminalView.tsx");
+const terminalPresentation = source("../../js/terminal/src/TerminalTranscriptSurface.tsx");
 const dock = source("../src/ArtifactDock.tsx");
-const terminalCss = source("../src/AgentTerminal.css");
+const terminalCss = [
+  source("../src/AgentTerminal.css"),
+  source("../../js/terminal/styles.css"),
+].join("\n");
 const experience = source("../src/AgentExperience.tsx");
 const viteConfig = source("../vite.config.ts");
 
@@ -43,9 +47,9 @@ test("the landing terminal is ephemeral while the Agent demo is managed-durable 
 });
 
 test("the landing welcome is replaced atomically by the first transcript entry", () => {
-  assert.match(terminalView, /const visibleWelcome = entries\.length === 0 \? welcome : undefined/);
-  assert.match(terminalView, /\{visibleWelcome \? <article[\s\S]*?\{visibleWelcome\}/);
-  assert.doesNotMatch(terminalView, /welcomeDismissed|setWelcomeDismissed/);
+  assert.match(terminalPresentation, /const visibleWelcome = entries\.length === 0 \? welcome : undefined/);
+  assert.match(terminalPresentation, /\{visibleWelcome \? <article[\s\S]*?\{visibleWelcome\}/);
+  assert.doesNotMatch(terminalPresentation, /welcomeDismissed|setWelcomeDismissed/);
 });
 
 test("the full Agent experience alone mounts a collapsed, counted artifact dock", () => {

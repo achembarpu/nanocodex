@@ -2,8 +2,7 @@ import { useCallback, useEffect, useMemo, useRef } from "react";
 import type { ConnectAgent, Connection } from "nanocodex/connect";
 import type { AgentControllerEvent } from "nanocodex-react/agent";
 import { createConnectAgentSource } from "nanocodex-react/connect";
-
-import { AgentTerminalView } from "../../src/AgentTerminalView";
+import { AgentTerminalView } from "nanocodex-terminal";
 
 export type AppObservation = Readonly<{
   actions: readonly string[];

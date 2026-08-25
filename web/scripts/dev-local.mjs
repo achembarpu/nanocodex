@@ -13,6 +13,7 @@ import { readCodexSubscription } from "../../services/managed/scripts/codex-auth
 const scriptPath = fileURLToPath(import.meta.url);
 const webRoot = resolve(dirname(scriptPath), "..");
 const repositoryRoot = resolve(webRoot, "..");
+const terminalRoot = resolve(repositoryRoot, "js/terminal");
 const managedRoot = resolve(repositoryRoot, "services/managed");
 const localGatewayComposePath = resolve(webRoot, "docker-compose.dev.yml");
 const LOCAL_DEVELOPMENT_PUBLIC_ORIGIN = "https://nanocodex.local";
@@ -276,6 +277,12 @@ async function main() {
     await ensureLocalDependencies(
       toolEnvironment,
       (...arguments_) => lifecycle.run(...arguments_, "local dependency installation"),
+    );
+    await lifecycle.run(
+      "npm",
+      ["run", "build", "--prefix", terminalRoot],
+      { cwd: repositoryRoot, env: toolEnvironment },
+      "terminal package build",
     );
 
     await lifecycle.run(process.execPath, [
@@ -912,6 +919,10 @@ async function ensureLocalDependencies(environment, execute = run) {
 
 export function localDependencyRequirements() {
   return [
+    {
+      root: terminalRoot,
+      requiredFiles: ["node_modules/typescript/bin/tsc"],
+    },
     {
       root: webRoot,
       requiredFiles: [

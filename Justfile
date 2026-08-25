@@ -19,6 +19,8 @@ bootstrap-bindings:
     rustup target add "{{wasm_target}}"
     npm ci --prefix js/bindings
     npm ci --prefix js/artifacts
+    npm ci --prefix js/terminal
+    npm ci --prefix web/connect-playground
     npm ci --prefix examples/node
     npm ci --prefix examples/react-vite
     npm ci --prefix examples/vercel-workflows
@@ -54,6 +56,7 @@ test-wasm: build-wasm
     npm test --prefix js/bindings
     npm test --prefix js/artifacts
     npm test --prefix js/react
+    npm test --prefix js/terminal
 
 # Run custom JavaScript tooling and a follow-on through Node-hosted WASM.
 smoke-wasm-node: build-wasm
@@ -63,6 +66,12 @@ smoke-wasm-node: build-wasm
 # Type-check and bundle the React Worker example against the generated web WASM package.
 build-react-example: build-wasm
     npm run build --prefix examples/react-vite
+
+# Type-check and bundle the Connect consumer against the reusable terminal package.
+build-connect-playground: build-wasm
+    npm ci --prefix web/connect-playground
+    npm run build --prefix js/terminal
+    npm run build --prefix web/connect-playground
 
 # Type-check and test the Rivet Actors WASM consumer.
 build-rivet-example: build-wasm

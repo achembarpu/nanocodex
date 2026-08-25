@@ -1,0 +1,327 @@
+@import "streamdown/styles.css";
+
+.agent-terminal-shell {
+  position: relative;
+  width: 100%;
+  height: clamp(300px, 36svh, 380px);
+  overflow: hidden;
+  background: var(--terminal-background, #fff);
+  border: 1px solid var(--terminal-border, #ddd);
+}
+
+.agent-terminal-shell.is-dom {
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
+}
+
+.agent-terminal-standby {
+  margin: 0;
+  padding: 12px;
+  color: var(--terminal-muted, #6b6b6b);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+  font-size: 14px;
+  line-height: 1.25;
+  white-space: pre-wrap;
+}
+
+.agent-dom-transcript {
+  min-width: 0;
+  min-height: 0;
+  overflow: auto;
+  overscroll-behavior: contain;
+  scrollbar-color: var(--terminal-muted, #6b6b6b) var(--terminal-background, #fff);
+  scrollbar-width: thin;
+  -webkit-overflow-scrolling: touch;
+}
+
+.agent-dom-transcript-inner {
+  width: min(100%, 900px);
+  min-height: 100%;
+  padding: 18px clamp(14px, 3vw, 32px) 28px;
+  color: var(--terminal-foreground, #111);
+  font: 14px/1.55 var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+  overflow-wrap: anywhere;
+}
+
+.agent-terminal-user {
+  margin: 0 0 20px;
+  padding-left: 12px;
+  color: var(--terminal-foreground, #111);
+  font: 600 14px/1.5 var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+  white-space: pre-wrap;
+  border-left: 1px solid var(--terminal-muted, #6b6b6b);
+}
+
+.agent-terminal-markdown {
+  margin: 0 0 22px;
+  color: var(--terminal-foreground, #111);
+}
+
+.agent-terminal-markdown.is-reasoning {
+  color: var(--terminal-muted, #6b6b6b);
+}
+
+.agent-terminal-entry-label {
+  display: block;
+  margin-bottom: 4px;
+  color: var(--terminal-muted, #6b6b6b);
+}
+
+.agent-terminal-markdown :where(h1, h2, h3, p, ul, ol, pre, blockquote, table) {
+  margin: 0;
+}
+
+.agent-terminal-markdown :where(h1, h2, h3, p, ul, ol, pre, blockquote, table)
+  + :where(h1, h2, h3, p, ul, ol, pre, blockquote, table) {
+  margin-top: 12px;
+}
+
+.agent-terminal-markdown :where(h1, h2, h3) {
+  font: 700 1em/1.45 var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+}
+
+.agent-terminal-markdown :where(ul, ol) {
+  padding-left: 20px;
+}
+
+.agent-terminal-markdown :where(code, pre) {
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+}
+
+.agent-terminal-markdown :not(pre) > code {
+  padding: 1px 4px;
+  color: var(--terminal-foreground, #111);
+  background: var(--terminal-hover, #f4f4f4);
+}
+
+.agent-terminal-markdown pre,
+.agent-terminal-tool pre {
+  max-width: 100%;
+  padding: 10px 12px;
+  overflow: auto;
+  color: var(--terminal-foreground, #111);
+  background: var(--terminal-hover, #f4f4f4);
+  border: 1px solid var(--terminal-border, #ddd);
+  border-radius: 0;
+  white-space: pre;
+}
+
+.agent-terminal-markdown a {
+  color: inherit;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.agent-terminal-error,
+.agent-terminal-status,
+.agent-terminal-plan,
+.agent-terminal-tool {
+  margin: 0 0 20px;
+  color: var(--terminal-muted, #6b6b6b);
+  font: 14px/1.5 var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+}
+
+.agent-terminal-error { color: var(--negative, #d53b3b); }
+.agent-terminal-status { margin-top: 20px; }
+.agent-terminal-plan { padding: 0; list-style: none; }
+.agent-terminal-plan li { display: flex; gap: 9px; }
+.agent-terminal-tool > header { display: flex; gap: 9px; }
+.agent-terminal-tool > pre { margin: 7px 0 0 22px; font: 12px/1.45 var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace); }
+.agent-terminal-tool .agent-terminal-tool { margin: 7px 0 0 22px; }
+
+.agent-touch-composer {
+  position: relative;
+  z-index: 6;
+  display: block;
+  min-height: var(--terminal-composer-min-height, 62px);
+  padding: 8px;
+  color: var(--terminal-foreground, #111);
+  background: var(--terminal-background, #fff);
+  border-top: 1px solid var(--terminal-border, #ddd);
+  font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+  transform: translate3d(
+    0,
+    calc(0px - var(--terminal-composer-lift, 0px)),
+    0
+  );
+  will-change: transform;
+}
+
+.agent-transcript-keyboard-spacer {
+  height: var(--terminal-composer-lift, 0px);
+}
+
+.agent-touch-field {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  min-height: 44px;
+  align-items: end;
+  overflow: hidden;
+  background: var(--terminal-background, #fff);
+  border: 0;
+  border-left: 1px solid var(--terminal-muted, #6b6b6b);
+  border-radius: 0;
+}
+
+.agent-touch-composer textarea {
+  grid-column: 1;
+  width: 100%;
+  min-width: 0;
+  min-height: 44px;
+  max-height: 132px;
+  margin: 0;
+  padding: 10px 12px;
+  overflow-y: auto;
+  color: var(--terminal-foreground, #111);
+  caret-color: var(--terminal-foreground, #111);
+  font: 400 14px/22px var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  outline: 0;
+  resize: none;
+  white-space: pre-wrap;
+}
+
+.agent-touch-composer textarea:disabled {
+  color: var(--terminal-muted, #6b6b6b);
+  opacity: 1;
+}
+
+.agent-touch-actions {
+  position: relative;
+  display: flex;
+  grid-column: 2;
+  padding: 4px 0;
+  align-self: end;
+  border-left: 1px solid var(--terminal-border, #ddd);
+}
+
+.agent-touch-actions button {
+  display: grid;
+  width: 44px;
+  min-width: 44px;
+  min-height: 44px;
+  padding: 0;
+  color: var(--terminal-foreground, #111);
+  background: transparent;
+  border: 0;
+  border-radius: 0;
+  cursor: pointer;
+  place-items: center;
+}
+
+.agent-touch-actions button svg { width: 17px; height: 17px; stroke-width: 2; }
+.agent-touch-actions .agent-voice-button svg { fill: currentColor; }
+.agent-touch-actions .agent-voice-button[aria-pressed="true"] { color: var(--terminal-foreground, #111); background: var(--terminal-hover, #f4f4f4); }
+.agent-touch-actions button:focus-visible { background: var(--terminal-hover, #f4f4f4); outline: 1px solid var(--terminal-border, #ddd); outline-offset: -2px; }
+.agent-touch-actions button:disabled { color: var(--terminal-muted, #6b6b6b); background: transparent; cursor: default; }
+.agent-touch-composer.is-running .agent-touch-actions button { color: var(--terminal-muted, #6b6b6b); }
+
+@media (pointer: coarse), (any-pointer: coarse) {
+  .agent-terminal-shell {
+    display: grid;
+    grid-template-rows: minmax(0, 1fr) auto;
+  }
+
+  .agent-touch-composer {
+    position: relative;
+    z-index: 6;
+    display: block;
+    min-height: var(--terminal-composer-min-height, 62px);
+    padding:
+      8px
+      max(8px, env(safe-area-inset-right))
+      max(8px, var(--terminal-safe-area-bottom, env(safe-area-inset-bottom)))
+      max(8px, env(safe-area-inset-left));
+    color: var(--terminal-foreground, #111);
+    background: var(--terminal-background, #fff);
+    border-top: 1px solid var(--terminal-border, #ddd);
+    font-family: var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+  }
+
+  .agent-touch-field {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: end;
+    min-height: 44px;
+    overflow: hidden;
+    background: var(--terminal-background, #fff);
+    border: 0;
+    border-left: 1px solid var(--terminal-muted, #6b6b6b);
+    border-radius: 0;
+  }
+
+  .agent-touch-composer textarea {
+    grid-column: 1;
+    width: 100%;
+    min-width: 0;
+    height: auto;
+    min-height: 44px;
+    max-height: 132px;
+    margin: 0;
+    padding: 10px 12px;
+    overflow-y: auto;
+    color: var(--terminal-foreground, #111);
+    caret-color: var(--terminal-foreground, #111);
+    font: 400 16px/22px var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    outline: 0;
+    resize: none;
+    white-space: pre-wrap;
+    field-sizing: content;
+  }
+
+  .agent-touch-composer textarea:disabled {
+    color: var(--terminal-muted, #6b6b6b);
+    opacity: 1;
+  }
+
+  .agent-touch-actions {
+    display: flex;
+    grid-column: 2;
+    padding: 4px 0;
+    align-self: end;
+    border-left: 1px solid var(--terminal-border, #ddd);
+  }
+
+  .agent-touch-actions button {
+    display: grid;
+    width: 44px;
+    min-width: 44px;
+    min-height: 44px;
+    padding: 0;
+    color: var(--terminal-foreground, #111);
+    background: transparent;
+    border: 0;
+    border-radius: 0;
+    cursor: pointer;
+    place-items: center;
+    touch-action: manipulation;
+  }
+
+  .agent-touch-actions button svg {
+    width: 17px;
+    height: 17px;
+    stroke-width: 2;
+  }
+
+  .agent-touch-actions button:focus-visible {
+    background: var(--terminal-hover, #f4f4f4);
+    outline: 1px solid var(--terminal-border, #ddd);
+    outline-offset: -2px;
+  }
+
+  .agent-touch-actions button:disabled {
+    color: var(--terminal-muted, #6b6b6b);
+    background: transparent;
+    cursor: default;
+  }
+
+  .agent-touch-composer.is-running .agent-touch-actions button {
+    color: var(--terminal-muted, #6b6b6b);
+  }
+
+}

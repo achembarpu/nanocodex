@@ -1,7 +1,9 @@
+"use client";
+
 import { ArrowUp, Square } from "lucide-react";
 import { useEffect, useRef, type ReactNode } from "react";
-import type { AgentStatus } from "./agentTerminalTypes";
-import { COARSE_POINTER_QUERY, terminalComposerAction } from "./mobileInteraction";
+import type { AgentStatus } from "./types.js";
+import { COARSE_POINTER_QUERY, terminalComposerAction } from "./policy.js";
 
 /** One native, paste-capable composer shared by desktop and touch terminals. */
 export function TerminalComposer({
@@ -85,7 +87,6 @@ export function TerminalComposer({
     </form>
   );
 }
-
 function isSubmitKeyEvent(
   event: Pick<KeyboardEvent, "key" | "shiftKey" | "isComposing" | "keyCode">,
   composing: boolean,
@@ -96,3 +97,4 @@ function isSubmitKeyEvent(
     && event.keyCode !== 229
     && !composing;
 }
+

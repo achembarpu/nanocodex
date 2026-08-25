@@ -11,7 +11,7 @@
     "publish:repository": "node scripts/publish-repository.mjs",
     "wasm": "cd .. && just build-wasm",
     "dev:wasm": "npm run wasm",
-    "dev:bootstrap": "npm ci --prefix ../js/bindings && npm ci --prefix ../services/egress && npm ci --prefix ../services/managed && npm run dev:wasm",
+    "dev:bootstrap": "npm ci --prefix ../js/bindings && npm ci --prefix ../js/terminal && npm run build --prefix ../js/terminal && npm ci --prefix ../services/egress && npm ci --prefix ../services/managed && npm run dev:wasm",
     "dev:rebuild": "npm run dev",
     "dev:containers": "NANOCODEX_DEV_CONTAINERS=1 npm run dev",
     "dev": "node scripts/dev-local.mjs",
@@ -50,12 +50,12 @@
     "minisearch": "7.2.0",
     "nanocodex": "file:../js/bindings",
     "nanocodex-react": "file:../js/react",
+    "nanocodex-terminal": "file:../js/terminal",
     "react": "19.2.8",
     "react-dom": "19.2.8",
     "react-router": "^7.18.2",
     "recharts": "^3.10.1",
     "shiki": "^4.3.1",
-    "streamdown": "^2.5.0",
     "viem": "^2.54.0"
   },
   "devDependencies": {

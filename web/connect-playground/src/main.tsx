@@ -5,7 +5,7 @@ import { NanocodexProvider } from "nanocodex-react/connect";
 
 import { App } from "./App";
 import { config } from "./config";
-import "../../src/AgentTerminal.css";
+import "nanocodex-terminal/styles.css";
 import "./styles.css";
 
 const root = document.getElementById("root");

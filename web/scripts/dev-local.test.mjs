@@ -174,13 +174,16 @@ function forceStopFixture(harness) {
 
 test("local development installs every package required to start the web stack", () => {
   const requirements = localDependencyRequirements();
+  const terminal = requirements.find(({ root }) => basename(root) === "terminal");
   const web = requirements.find(({ root }) => basename(root) === "web");
+  assert.ok(terminal);
+  assert.deepEqual(terminal.requiredFiles, ["node_modules/typescript/bin/tsc"]);
   assert.ok(web);
   assert.deepEqual(web.requiredFiles, [
     "node_modules/accounts/package.json",
     "node_modules/wrangler/bin/wrangler.js",
   ]);
-  assert.equal(requirements.length, 3);
+  assert.equal(requirements.length, 4);
 });
 
 test("completed one-shot commands surrender their process-group capabilities", async () => {

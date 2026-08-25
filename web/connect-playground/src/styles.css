@@ -415,6 +415,14 @@ button:disabled {
   border-bottom: 1px solid var(--border-soft);
 }
 
+.connect-chat {
+  --terminal-background: var(--surface);
+  --terminal-foreground: var(--text);
+  --terminal-muted: var(--text-muted);
+  --terminal-border: var(--border-soft);
+  --terminal-hover: var(--surface-hover);
+}
+
 .connect-chat-header h3 {
   font-size: 12px;
 }
@@ -454,8 +462,14 @@ button:disabled {
 }
 
 .chat-primary .conversation-workspace {
+  display: grid;
   grid-template-columns: minmax(0, 1fr);
   border-top: 0;
+}
+
+.chat-primary .conversation-main {
+  min-width: 0;
+  overflow: hidden;
 }
 
 .chat-primary .agent-terminal-shell {
@@ -475,10 +489,6 @@ button:disabled {
   color: var(--text-secondary);
   font-size: 14px;
   line-height: 1.55;
-}
-
-.connect-chat .agent-terminal-brand {
-  color: var(--text);
 }
 
 .connect-chat .agent-terminal-shell.is-dom {

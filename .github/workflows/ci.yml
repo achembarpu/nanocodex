@@ -150,6 +150,7 @@ jobs:
             js/bindings/package-lock.json
             js/artifacts/package-lock.json
             js/react/package-lock.json
+            js/terminal/package-lock.json
             examples/node/package-lock.json
             examples/rivet-actors/package-lock.json
             services/egress/package-lock.json
@@ -172,6 +173,7 @@ jobs:
           npm ci --prefix js/artifacts
           npm run build --prefix js/artifacts
           npm ci --prefix js/react
+          npm ci --prefix js/terminal
           ./scripts/build-js-package.sh
           npm ci --prefix examples/node
           npm ci --prefix examples/rivet-actors
@@ -190,6 +192,7 @@ jobs:
           npm run check:package --prefix js/bindings
           npm test --prefix js/artifacts
           npm test --prefix js/react
+          npm test --prefix js/terminal
           node --test examples/browser-cdn/*.test.mjs
           npm test --prefix examples/node
           npm run check --prefix examples/rivet-actors
@@ -285,6 +288,8 @@ jobs:
             js/bindings/package-lock.json
             js/react/package-lock.json
             js/artifacts/package-lock.json
+            js/terminal/package-lock.json
+            web/connect-playground/package-lock.json
             web/package-lock.json
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -296,10 +301,15 @@ jobs:
           npm ci --prefix js/react
           npm ci --prefix js/artifacts
           npm run build --prefix js/artifacts
+          npm ci --prefix js/terminal
+          npm run build --prefix js/terminal
+          npm ci --prefix web/connect-playground
           npm ci --prefix web
       - name: Type-check and build the website
         working-directory: web
         run: npm test && npm run build:from-wasm
+      - name: Type-check and build the Connect playground
+        run: npm run build --prefix web/connect-playground
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: nanocodex-web-deployment

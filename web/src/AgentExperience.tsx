@@ -1,7 +1,7 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { AgentStatus, AgentTerminalMode, AgentTerminalState } from "./agentTerminalTypes";
 import { AgentTerminal, ManagedAgentTerminal } from "./AgentTerminal";
-import { TerminalTranscriptSurface } from "./AgentTerminalView";
+import { TerminalTranscriptSurface } from "nanocodex-terminal";
 import { useAccountSession } from "./AccountSession";
 import { ConversationHistoryRail } from "./ConversationHistoryRail";
 import { browserAgentCapabilityError } from "./browserAgentCapabilities";
@@ -19,6 +19,7 @@ import {
   type ManagedConversation,
 } from "./managedAgentRuntime";
 import "./AgentTerminal.css";
+import "nanocodex-terminal/styles.css";
 import "./Home.css";
 
 /** Ephemeral homepage consumer and managed-durable Agent demo. */

@@ -3,7 +3,11 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const indexCss = source("../src/index.css");
-const terminalCss = source("../src/AgentTerminal.css");
+const terminalPresentationCss = source("../../js/terminal/styles.css");
+const terminalCss = [
+  source("../src/AgentTerminal.css"),
+  terminalPresentationCss,
+].join("\n");
 const homeCss = source("../src/Home.css");
 const sourceBrowserCss = source("../src/SourceBrowser.css");
 const commitsCss = source("../src/Commits.css");
@@ -14,15 +18,19 @@ const artifactRuntime = source("../src/artifactRuntime.tsx");
 const experience = source("../src/AgentExperience.tsx");
 const terminal = [
   source("../src/AgentTerminal.tsx"),
-  source("../src/AgentTerminalView.tsx"),
+  source("../../js/terminal/src/AgentTerminalView.tsx"),
+  source("../../js/terminal/src/TerminalTranscriptSurface.tsx"),
 ].join("\n");
-const terminalComposer = source("../src/TerminalComposer.tsx");
+const terminalComposer = source("../../js/terminal/src/TerminalComposer.tsx");
 const artifactDock = source("../src/ArtifactDock.tsx");
 const modelSession = source("../src/modelSession.tsx");
 const docs = source("../src/Docs.tsx");
 const modalBoundary = source("../src/modalBoundary.ts");
 const modalFrameBoundary = source("../src/useModalFrameBoundary.ts");
-const mobileInteraction = source("../src/mobileInteraction.ts");
+const mobileInteraction = [
+  source("../src/mobileInteraction.ts"),
+  source("../../js/terminal/src/policy.ts"),
+].join("\n");
 const deploymentRollover = source("../src/useDeploymentRollover.ts");
 const compactQuery = "(max-width: 740px), (pointer: coarse) and (orientation: landscape) and (max-width: 950px)";
 const coarseQuery = "(pointer: coarse), (any-pointer: coarse)";
@@ -187,33 +195,33 @@ test("touch terminals use one native IME-safe composer and one contextual action
   assert.equal(matches(touchComposer, /className="agent-touch-field"/g), 1);
   assert.doesNotMatch(touchComposer, />Steer<|>Queued</);
   assert.doesNotMatch(touchComposer, /scrollHeight/);
-  assert.match(ruleBlock(terminalCss, ".agent-touch-composer textarea {", terminalCss.indexOf(`@media ${coarseQuery}`)), /field-sizing:\s*content/);
+  assert.match(ruleBlock(terminalPresentationCss, ".agent-touch-composer textarea {", terminalPresentationCss.indexOf(`@media ${coarseQuery}`)), /field-sizing:\s*content/);
   assert.doesNotMatch(touchComposer, /agent-touch-rail|>│<\/span>/);
   assert.doesNotMatch(touchComposer, /\x1b\[200~|bracketed-paste/i);
   assert.match(terminal, /useAgentController\(agent/);
   assert.doesNotMatch(terminal, /inputMode: "composer"|setInputMode\(/);
 
-  const touchCss = terminalCss.indexOf("@media (pointer: coarse), (any-pointer: coarse)");
+  const touchCss = terminalPresentationCss.indexOf("@media (pointer: coarse), (any-pointer: coarse)");
   assert.notEqual(touchCss, -1);
-  assert.match(ruleBlock(terminalCss, ".agent-touch-composer textarea {", touchCss), /font:\s*400 16px/);
-  assert.match(ruleBlock(terminalCss, ".agent-touch-actions button {", touchCss), /min-height:\s*44px/);
-  const composer = ruleBlock(terminalCss, ".agent-touch-composer {", touchCss);
+  assert.match(ruleBlock(terminalPresentationCss, ".agent-touch-composer textarea {", touchCss), /font:\s*400 16px/);
+  assert.match(ruleBlock(terminalPresentationCss, ".agent-touch-actions button {", touchCss), /min-height:\s*44px/);
+  const composer = ruleBlock(terminalPresentationCss, ".agent-touch-composer {", touchCss);
   assert.match(composer, /position:\s*relative/);
-  assert.match(composer, /min-height:\s*var\(--terminal-composer-min-height\)/);
+  assert.match(composer, /min-height:\s*var\(--terminal-composer-min-height/);
   assert.match(terminalCss, /--terminal-safe-area-bottom:\s*env\(safe-area-inset-bottom\)/);
   assert.match(terminalCss, /--terminal-composer-lift:\s*max\([\s\S]*?var\(--terminal-keyboard-inset, 0px\) - var\(--terminal-safe-area-bottom\)/);
   assert.match(terminalCss, /--terminal-composer-min-height:\s*calc\(62px \+ var\(--terminal-safe-area-bottom\)\)/);
   assert.doesNotMatch(terminalCss, /data-agent-keyboard/);
   assert.match(composer, /env\(safe-area-inset-left\)/);
   assert.match(composer, /env\(safe-area-inset-right\)/);
-  const field = ruleBlock(terminalCss, ".agent-touch-field {", touchCss);
-  assert.match(field, /background:\s*var\(--terminal-background\)/);
-  assert.match(field, /border-left:\s*1px solid var\(--terminal-muted\)/);
+  const field = ruleBlock(terminalPresentationCss, ".agent-touch-field {", touchCss);
+  assert.match(field, /background:\s*var\(--terminal-background/);
+  assert.match(field, /border-left:\s*1px solid var\(--terminal-muted/);
   assert.match(field, /border-radius:\s*0/);
-  const action = ruleBlock(terminalCss, ".agent-touch-actions button {", touchCss);
+  const action = ruleBlock(terminalPresentationCss, ".agent-touch-actions button {", touchCss);
   assert.match(action, /background:\s*transparent/);
   assert.match(action, /border-radius:\s*0/);
-  assert.match(terminalCss, /\.agent-touch-composer\.is-running \.agent-touch-actions button \{[\s\S]*?color:\s*var\(--terminal-muted\)/);
+  assert.match(terminalPresentationCss, /\.agent-touch-composer\.is-running \.agent-touch-actions button \{[\s\S]*?color:\s*var\(--terminal-muted/);
   assert.match(terminal, /submitPrompt\(controller, submittedPrompts\.current, input, submittedAt\)/);
   assert.match(terminal, /controller\.cancel\(\)/);
 });
@@ -226,7 +234,7 @@ test("the phone transcript owns the remaining workspace and native vertical gest
   const compactCss = terminalCss.slice(compact);
   const workspace = ruleBlock(compactCss, ".conversation-workspace {");
   const main = ruleBlock(compactCss, ".conversation-main {");
-  const transcript = ruleBlock(terminalCss, ".agent-dom-transcript {");
+  const transcript = ruleBlock(terminalPresentationCss, ".agent-dom-transcript {");
 
   assert.match(workspace, /grid-template-rows:\s*44px minmax\(0, 1fr\)/);
   assert.match(main, /grid-row:\s*2/);
@@ -254,8 +262,8 @@ test("the phone transcript owns the remaining workspace and native vertical gest
   assert.match(application, /viewport\?\.addEventListener\("scroll", anchorViewport\)/);
   assert.match(application, /visualViewportKeyboardInset\(\{[\s\S]*?baselineHeight:\s*agentSurface\.clientHeight,[\s\S]*?viewportHeight:\s*viewport\.height,[\s\S]*?viewportOffsetTop:\s*viewport\.offsetTop/);
   assert.match(application, /style\.setProperty\("--terminal-keyboard-inset", `\$\{keyboardInset\}px`\)/);
-  assert.match(terminalCss, /\.agent-touch-composer \{[\s\S]*?transform:\s*translate3d\([\s\S]*?var\(--terminal-composer-lift\)/);
-  assert.match(terminalCss, /\.agent-transcript-keyboard-spacer \{[\s\S]*?height:\s*var\(--terminal-composer-lift\)/);
+  assert.match(terminalPresentationCss, /\.agent-touch-composer \{[\s\S]*?transform:\s*translate3d\([\s\S]*?var\(--terminal-composer-lift/);
+  assert.match(terminalPresentationCss, /\.agent-transcript-keyboard-spacer \{[\s\S]*?height:\s*var\(--terminal-composer-lift/);
   assert.match(terminal, /className="agent-transcript-keyboard-spacer" aria-hidden="true"/);
   assert.match(terminal, /observer\.observe\(element\)/);
 });

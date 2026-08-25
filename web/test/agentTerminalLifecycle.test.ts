@@ -4,15 +4,19 @@ import test from "node:test";
 
 const terminal = [
   source("../src/AgentTerminal.tsx"),
-  source("../src/AgentTerminalView.tsx"),
+  source("../../js/terminal/src/AgentTerminalView.tsx"),
+  source("../../js/terminal/src/TerminalTranscriptSurface.tsx"),
 ].join("\n");
 const experience = source("../src/AgentExperience.tsx");
 const session = source("../src/modelSession.tsx");
 const accountSession = source("../src/AccountSession.tsx");
 const health = source("../src/deploymentHealth.ts");
 const localCredential = source("../src/localDevelopmentCredential.ts");
-const terminalCss = source("../src/AgentTerminal.css");
-const composer = source("../src/TerminalComposer.tsx");
+const terminalCss = [
+  source("../src/AgentTerminal.css"),
+  source("../../js/terminal/styles.css"),
+].join("\n");
+const composer = source("../../js/terminal/src/TerminalComposer.tsx");
 
 test("account authentication naturally selects the private broker", () => {
   assert.match(session, /const accountSession = useAccountSession\(\)/);
@@ -103,10 +107,10 @@ test("the DOM transcript and native composer remain the only terminal surfaces",
   assert.doesNotMatch(`${terminal}\n${composer}`, /Xterm|agent-xterm|xterm-helper-textarea/);
 });
 
-test("app-local modules own account model policy and selectable Markdown presentation", () => {
+test("app policy composes the package-owned Markdown presentation", () => {
   assert.match(experience, /from "\.\/modelSession"/);
   assert.match(terminal, /from "streamdown"/);
-  assert.match(terminal, /from "\.\/TerminalComposer"/);
+  assert.match(terminal, /from "nanocodex-terminal"/);
   assert.doesNotMatch(`${experience}\n${terminal}`, /new Xterm|\/api\/auth\/chatgpt|deployment_sha|pageshow/);
   assert.match(session, /function useModelSession/);
   assert.match(terminal, /className="agent-dom-transcript"/);

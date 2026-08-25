@@ -1,10 +1,9 @@
+"use client";
+
 import {
-  type ComponentProps,
   type ReactNode,
-  memo,
   useCallback,
   useEffect,
-  useLayoutEffect,
   useRef,
   useState,
 } from "react";
@@ -12,18 +11,14 @@ import {
   useAgentController,
   type Agent,
   type AgentControllerEvent,
-  type AgentEntry,
-  type ToolActivity,
 } from "nanocodex-react/agent";
-import { Streamdown } from "streamdown";
-import "streamdown/styles.css";
-
-import { TerminalComposer } from "./TerminalComposer";
+import { TerminalComposer } from "./TerminalComposer.js";
+import { TerminalTranscriptSurface } from "./TerminalTranscriptSurface.js";
 import type {
   AgentStatus,
   AgentTerminalMode,
   AgentTerminalState,
-} from "./agentTerminalTypes";
+} from "./types.js";
 
 export type AgentTerminalAccessory = Readonly<{
   agentReady: boolean;
@@ -203,174 +198,6 @@ export function AgentTerminalView({
       {accessory?.({ agentReady: agentStatus === "ready", submit: submitAccessoryPrompt })}
     </div>
   ) : terminal;
-}
-
-export function TerminalTranscriptSurface({
-  canLoadOlder,
-  composer,
-  entries,
-  followTailRequest = 0,
-  inactiveMessage,
-  isLoadingOlder,
-  mode,
-  showToolCalls = true,
-  status,
-  welcome,
-  onLoadOlder,
-}: {
-  canLoadOlder: boolean;
-  composer: ReactNode;
-  entries: readonly AgentEntry[];
-  followTailRequest?: number;
-  inactiveMessage: string;
-  isLoadingOlder: boolean;
-  mode: AgentTerminalMode;
-  showToolCalls?: boolean;
-  status: AgentStatus;
-  welcome?: string;
-  onLoadOlder(): Promise<boolean>;
-}) {
-  const transcript = useRef<HTMLDivElement>(null);
-  const followTail = useRef(true);
-  const handledFollowTailRequest = useRef(followTailRequest);
-  const loadOlderArmed = useRef(false);
-  const preserveScroll = useRef<{ scrollHeight: number; scrollTop: number } | undefined>(undefined);
-  const visibleWelcome = entries.length === 0 ? welcome : undefined;
-
-  useLayoutEffect(() => {
-    const element = transcript.current;
-    if (!element) return;
-    if (handledFollowTailRequest.current !== followTailRequest) {
-      handledFollowTailRequest.current = followTailRequest;
-      followTail.current = true;
-    }
-    const preserved = preserveScroll.current;
-    if (preserved) {
-      preserveScroll.current = undefined;
-      element.scrollTop = preserved.scrollTop + element.scrollHeight - preserved.scrollHeight;
-    } else if (visibleWelcome) element.scrollTop = 0;
-    else if (followTail.current) element.scrollTop = element.scrollHeight;
-  }, [entries, followTailRequest, visibleWelcome]);
-
-  useEffect(() => {
-    const element = transcript.current;
-    if (!element) return;
-    const observer = new ResizeObserver(() => {
-      if (visibleWelcome) element.scrollTop = 0;
-      else if (followTail.current) element.scrollTop = element.scrollHeight;
-    });
-    const content = element.firstElementChild;
-    observer.observe(element);
-    if (content) observer.observe(content);
-    return () => observer.disconnect();
-  }, [visibleWelcome]);
-
-  return (
-    <section
-      className={`agent-terminal-shell is-dom is-${mode}`}
-      aria-label="Live Nanocodex terminal"
-    >
-      <div
-        ref={transcript}
-        className="agent-dom-transcript"
-        role="log"
-        aria-live="off"
-        onScroll={(event) => {
-          const element = event.currentTarget;
-          followTail.current = element.scrollHeight - element.scrollTop - element.clientHeight < 48;
-          const lineHeight = Number.parseFloat(getComputedStyle(element).lineHeight) || 22;
-          const nearTop = element.scrollTop <= lineHeight * 12;
-          if (!nearTop) {
-            if (!isLoadingOlder) loadOlderArmed.current = true;
-            return;
-          }
-          if (!loadOlderArmed.current || isLoadingOlder || !canLoadOlder) return;
-          loadOlderArmed.current = false;
-          preserveScroll.current = {
-            scrollHeight: element.scrollHeight,
-            scrollTop: element.scrollTop,
-          };
-          void onLoadOlder().then((loaded) => {
-            if (!loaded) preserveScroll.current = undefined;
-          }).catch(() => {
-            preserveScroll.current = undefined;
-          });
-        }}
-      >
-        <div className="agent-dom-transcript-inner">
-          {visibleWelcome ? <article className="agent-terminal-markdown is-assistant is-welcome">
-            <Streamdown components={MARKDOWN_COMPONENTS} controls={false} linkSafety={LINK_SAFETY} mode="static" skipHtml>
-              {visibleWelcome}
-            </Streamdown>
-          </article> : null}
-          {entries.map((entry) => (
-            <TerminalEntryView entry={entry} key={entry.id} showToolCalls={showToolCalls} />
-          ))}
-          {status !== "ready" && inactiveMessage ? (
-            <p className="agent-terminal-status" role={status === "error" ? "alert" : "status"}>
-              {inactiveMessage}
-            </p>
-          ) : null}
-          <div className="agent-transcript-keyboard-spacer" aria-hidden="true" />
-        </div>
-      </div>
-      {composer}
-    </section>
-  );
-}
-
-const TerminalEntryView = memo(function TerminalEntryView({
-  entry,
-  showToolCalls,
-}: {
-  entry: AgentEntry;
-  showToolCalls: boolean;
-}) {
-  if (entry.kind === "user") return <pre className="agent-terminal-user">{entry.text}</pre>;
-  if (entry.kind === "assistant" || entry.kind === "reasoning") return (
-    <article className={`agent-terminal-markdown is-${entry.kind}`}>
-      {entry.kind === "reasoning" ? <span className="agent-terminal-entry-label">thinking{entry.streaming ? "…" : ""}</span> : null}
-      <Streamdown
-        caret={entry.streaming ? "block" : undefined}
-        components={MARKDOWN_COMPONENTS}
-        controls={false}
-        isAnimating={entry.streaming}
-        linkSafety={LINK_SAFETY}
-        mode={entry.streaming ? "streaming" : "static"}
-        skipHtml
-      >{entry.text}</Streamdown>
-    </article>
-  );
-  if (entry.kind === "error") return <p className="agent-terminal-error" role="alert">! {entry.text}</p>;
-  if (entry.kind === "plan") return <ol className="agent-terminal-plan">
-    {entry.update.plan.map((step, index) => <li key={`${index}-${step.step}`} data-status={step.status}>
-      <span aria-hidden="true">{step.status === "completed" ? "✓" : step.status === "in_progress" ? "→" : "·"}</span>
-      {step.step}
-    </li>)}
-  </ol>;
-  return showToolCalls ? <TerminalToolView tool={entry.tool} /> : null;
-});
-
-function MarkdownInput({
-  node: _node,
-  ref: _ref,
-  ...props
-}: ComponentProps<"input"> & { node?: unknown }) {
-  return <input
-    {...props}
-    aria-label={props["aria-label"] ?? (props.type === "checkbox" ? "Checklist item" : undefined)}
-  />;
-}
-
-const MARKDOWN_COMPONENTS = { input: MarkdownInput };
-const LINK_SAFETY = { enabled: true } as const;
-
-function TerminalToolView({ tool }: { tool: ToolActivity }) {
-  return <section className={`agent-terminal-tool is-${tool.status}`}>
-    <header><span aria-hidden="true">{tool.status === "completed" ? "✓" : tool.status === "running" ? "→" : "!"}</span>{tool.name}</header>
-    {tool.result ? <pre>{tool.result}</pre> : null}
-    {tool.children.map((child) => <TerminalToolView key={child.callId} tool={child} />)}
-  </section>;
 }
 
 type PromptTiming = {

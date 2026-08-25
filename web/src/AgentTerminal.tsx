@@ -10,20 +10,23 @@ import {
   type UseVoiceReturnType,
 } from "nanocodex-react";
 import type { ArtifactDocument } from "nanocodex/tools/artifact";
-import type { AgentTerminalMode, AgentTerminalState } from "./agentTerminalTypes";
+import {
+  AgentTerminalView,
+  type AgentTerminalMode,
+  type AgentTerminalState,
+} from "nanocodex-terminal";
 import {
   inactiveTerminalMessage,
   type ModelSessionStatus,
   type CredentialSource,
 } from "./modelSession";
-import { AgentTerminalView } from "./AgentTerminalView";
 import { ArtifactDock } from "./ArtifactDock";
 import { browserMcpConfiguration } from "./browserMcp";
 import { clientFailureMessage } from "./clientFailure";
 import { managedTerminalAgent, openManagedAgent } from "./managedAgentRuntime";
 
-export type { AgentTerminalMode, AgentTerminalState } from "./agentTerminalTypes";
-export { AgentTerminalView } from "./AgentTerminalView";
+export type { AgentTerminalMode, AgentTerminalState } from "nanocodex-terminal";
+export { AgentTerminalView } from "nanocodex-terminal";
 
 /** Authenticated website policy around the headless Agent SDK and shared transcript view. */
 export const AgentTerminal = memo(function AgentTerminal({

@@ -10,7 +10,10 @@ const accountSession = source("../src/AccountSession.tsx");
 const managedRuntime = source("../src/managedAgentRuntime.ts");
 const evals = source("../src/Evals.tsx");
 const terminal = source("../src/AgentTerminal.tsx");
-const terminalCss = source("../src/AgentTerminal.css");
+const terminalCss = [
+  source("../src/AgentTerminal.css"),
+  source("../../js/terminal/styles.css"),
+].join("\n");
 const homeCss = source("../src/Home.css");
 const applicationGraph = readdirSync(new URL("../src/", import.meta.url), { recursive: true })
   .filter((path) => /\.(?:js|jsx|ts|tsx)$/.test(String(path)))

@@ -4,6 +4,7 @@
   "private": true,
   "type": "module",
   "scripts": {
+    "predev": "npm run build --prefix ../../js/terminal",
     "dev": "vite --host 127.0.0.1",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview --host 127.0.0.1",
@@ -11,12 +12,11 @@
   },
   "dependencies": {
     "@tanstack/react-query": "^5.101.4",
-    "lucide-react": "^1.34.0",
     "nanocodex": "file:../../js/bindings",
     "nanocodex-react": "file:../../js/react",
+    "nanocodex-terminal": "file:../../js/terminal",
     "react": "^19.2.8",
-    "react-dom": "^19.2.8",
-    "streamdown": "^2.5.0"
+    "react-dom": "^19.2.8"
   },
   "devDependencies": {
     "@types/react": "19.2.14",

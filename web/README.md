@@ -150,8 +150,9 @@ npm run dev:api-key      # require OPENAI_API_KEY
 npm run dev:web          # omit the managed Multiplayer stack
 ```
 
-The homepage consumes the publishable `nanocodex` and `nanocodex-react`
-packages under `../js`; it does not reach into generated WASM artifacts. Its
+The homepage consumes the publishable `nanocodex`, `nanocodex-react`, and
+`nanocodex-terminal` packages under `../js`; it does not reach into generated
+WASM artifacts. Its
 React integration creates the browser agent with
 `useNanocodex({ config, threadId })` and observes its typed
 event stream with `useAgentEvents`. React owns no Worker lifecycle, agent
@@ -275,12 +276,13 @@ layers:
 - `../js/react` publishes `nanocodex-react`, the wagmi-like headless React owner. Its provider and
   hooks manage the module Worker lifecycle, readiness, commands, and event
   subscriptions without imposing presentation policy.
+- `../js/terminal` publishes `nanocodex-terminal`, the controlled transcript
+  and composer presentation used by the site.
 - `nanocodex/tools` owns the framework-independent live React document,
   bounded workspace store, and typed artifact tool used by the web consumer.
-- `AgentTerminal` is the optimized Ratatui-faithful consumer: native colors,
-  rendering hierarchy, queue/steer behavior, `/btw`, historical branch editing,
-  branch navigation, per-branch drafts, clipboard images, and key bindings over
-  virtualized transcripts.
+- `AgentTerminal` is the thin website policy wrapper around the package-owned
+  `AgentTerminalView`. It supplies voice, artifact, account, runtime, and
+  credential policy without introducing another conversation controller.
 
 The module Worker loads the generated `nanocodex-wasm` package, and the Rust
 engine owns the persistent Responses session, typed history, event stream, and
