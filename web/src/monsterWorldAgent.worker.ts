@@ -1,5 +1,6 @@
 import { Agent, Transport } from "nanocodex/host";
-import type { DefaultAgent, Turn, TurnResult, TurnUsage } from "nanocodex/host";
+import type { DefaultAgent, Tool, ToolContext, Turn, TurnResult, TurnUsage } from "nanocodex/host";
+import { justBash } from "nanocodex/tools/bash";
 import {
   ACTOR_IDS,
   WORLD_EMOTES,
@@ -11,6 +12,7 @@ import {
   isWorldAgentCommand,
   isWorldUsageLimitMessage,
   type ResidentId,
+  type WorldBoardMessage,
   type WorldAgentCommand,
   type WorldAgentMessage,
   type WorldPrimitiveAction,
@@ -19,6 +21,7 @@ import {
   type WorldThinkEntry,
   type WorldUsage,
 } from "./monsterWorldProtocol";
+import { createWorldRoomWorkspace } from "./monsterWorldRoomWorkspace";
 
 const MOVE_PARAMETERS = Object.freeze({
   oneOf: [
@@ -41,16 +44,6 @@ const MOVE_PARAMETERS = Object.freeze({
       },
     },
   ],
-});
-
-const SAY_PARAMETERS = Object.freeze({
-  type: "object",
-  additionalProperties: false,
-  required: ["text"],
-  properties: {
-    text: { type: "string", minLength: 1, maxLength: 140 },
-    to: { type: "string", enum: [...ACTOR_IDS] },
-  },
 });
 
 const INTERACT_PARAMETERS = Object.freeze({
@@ -79,7 +72,9 @@ const EMOTE_PARAMETERS = Object.freeze({
 
 const WORLD_INSTRUCTIONS = `You are one persistent Luna resident inside Springleaf Rescue Guild, a busy mystery-dungeon world simulated in the user's browser tab.
 
-For every WORLD OBSERVATION, control only your own body with move, say, interact, emote, and wait. Tool results are authoritative fresh observations from the live World. Continue reasoning and call another tool when reality differs from your expectation; finish only when your part of the instruction is satisfied or cannot progress. Never choose actions for another resident. Keep dialogue vivid, warm, and under 100 characters.
+For every WORLD OBSERVATION, control only your own body with move, interact, emote, and wait. Tool results are authoritative fresh observations from the live World. Continue reasoning and call another tool when reality differs from your expectation; finish only when your part of the instruction is satisfied or cannot progress. Never choose actions for another resident.
+
+There is no local speech tool. Every resident shares /workspace/world/room/messages.jsonl through exec_command. Use tail, grep, sed, or awk when room context would help. Post one short message by writing to /workspace/world/room/send. When Scout asks you to coordinate through the room, reading and writing these files is mandatory; merely finishing your turn does not satisfy the instruction. The reducer authenticates you as the author and serializes the post; never edit messages.jsonl. Room reads may be slightly stale, so re-read and correct when coordination matters. Do not post merely to narrate routine movement.
 
 The browser reducer alone owns scene-qualified position, doors, pathfinding, collision, time, weather, hearing, inventory, supplies, mission effects, and whether your action commits. Use only supplied targets and actions. Never invent portal routes, stock changes, or claim an effect already happened. You can gather a sunberry at the orchard, offer it at the shop, gather a supply pack there, offer that at the guild, rest at the guild, or train at the meadow; current carrying and supplies state decide whether those effects succeed. Your situated nearby observation and heard messages are authoritative; do not assume hidden or remote positions.
 
@@ -106,6 +101,14 @@ type PendingWorldAction = {
   onAbort(): void;
 };
 
+type PendingRoomSend = {
+  active: ActiveResidentTurn;
+  resolve(message: WorldBoardMessage): void;
+  reject(cause: Error): void;
+  signal: AbortSignal;
+  onAbort(): void;
+};
+
 const workerPort = globalThis as unknown as {
   postMessage(message: WorldAgentMessage): void;
   addEventListener(type: "message", listener: (event: MessageEvent<unknown>) => void): void;
@@ -116,6 +119,9 @@ const residentBoots = new Map<ResidentId, Promise<DefaultAgent>>();
 const activeTurns = new Map<ResidentId, ActiveResidentTurn>();
 const activeBySession = new Map<string, ActiveResidentTurn>();
 const pendingWorldActions = new Map<string, PendingWorldAction>();
+const pendingRoomSends = new Map<string, PendingRoomSend>();
+const roomMessages = new Map<number, WorldBoardMessage>();
+let roomShellBoot: Promise<Readonly<{ instructions: string; tool: Tool }>> | undefined;
 let boot: Promise<void> | undefined;
 let shuttingDown = false;
 let blocked = false;
@@ -131,6 +137,7 @@ function handleCommand(command: WorldAgentCommand): void {
     return;
   }
   if (command.type === "think") {
+    mergeRoomMessages(command.observation.guildBoard);
     void runResidentTurn({
       requestId: command.requestId,
       agentId: command.agentId,
@@ -141,6 +148,10 @@ function handleCommand(command: WorldAgentCommand): void {
   }
   if (command.type === "action_result") {
     resolveWorldAction(command);
+    return;
+  }
+  if (command.type === "room_send_result") {
+    resolveRoomSend(command);
     return;
   }
   if (command.type === "cancel") {
@@ -175,8 +186,9 @@ async function residentAgentFor(entry: WorldThinkEntry): Promise<DefaultAgent> {
 }
 
 async function createResidentAgent(entry: WorldThinkEntry): Promise<DefaultAgent> {
+  const roomShell = await worldRoomShell();
   return Agent.create({
-    instructions: residentInstructions(entry),
+    instructions: `${residentInstructions(entry)}\n\n${roomShell.instructions}`,
     model: "gpt-5.6-luna",
     thinking: "none",
     toolMode: "direct",
@@ -191,16 +203,6 @@ async function createResidentAgent(entry: WorldThinkEntry): Promise<DefaultAgent
             ? decodeWorldPrimitiveAction({ kind: "move", ...record })
             : decodeWorldPrimitiveAction({ kind: "move_relative", ...record });
           return requestWorldAction(context.sessionId, action, context.signal);
-        },
-      },
-      say: {
-        description: "Speak as your own resident. Returns the updated local World state.",
-        parameters: SAY_PARAMETERS,
-        handler(input, context) {
-          return requestWorldAction(
-            context.sessionId,
-            decodeWorldPrimitiveAction({ kind: "say", ...worldToolInput(input) }), context.signal,
-          );
         },
       },
       interact: {
@@ -233,8 +235,107 @@ async function createResidentAgent(entry: WorldThinkEntry): Promise<DefaultAgent
           );
         },
       },
+      exec_command: roomShell.tool,
     },
   });
+}
+
+async function worldRoomShell(): Promise<Readonly<{ instructions: string; tool: Tool }>> {
+  roomShellBoot ??= createWorldRoomShell();
+  return roomShellBoot;
+}
+
+async function createWorldRoomShell(): Promise<Readonly<{ instructions: string; tool: Tool }>> {
+  let activeContext: ToolContext | undefined;
+  const workspace = createWorldRoomWorkspace({
+    messages: () => [...roomMessages.values()].sort((left, right) => right.id - left.id),
+    async send(text) {
+      const caller = activeContext;
+      if (!caller) throw new Error("World room writes require an active resident shell call");
+      const active = activeBySession.get(caller.sessionId);
+      if (!active) throw new Error("World room writes must come from an active resident session");
+      const message = await requestWorldRoomSend(
+        caller.sessionId,
+        text,
+        caller.signal,
+      );
+      mergeRoomMessages([message]);
+    },
+  });
+  const runtime = await justBash({
+    filesystem: workspace,
+    executionTimeoutMs: 1_000,
+    maxEntries: 16,
+    maxOutputTokens: 2_000,
+    network: false,
+  });
+  const { name: _name, ...tool } = runtime.tool;
+  type ShellJob = {
+    input: unknown;
+    context: ToolContext;
+    resolve(value: unknown): void;
+    reject(cause: Error): void;
+    onAbort(): void;
+  };
+  const queue: ShellJob[] = [];
+  let running = false;
+  const runNext = () => {
+    if (running) return;
+    const job = queue.shift();
+    if (!job) return;
+    job.context.signal.removeEventListener("abort", job.onAbort);
+    if (job.context.signal.aborted) {
+      job.reject(classified("cancelled", "this resident shell call was cancelled"));
+      runNext();
+      return;
+    }
+    if (!activeBySession.has(job.context.sessionId)) {
+      job.reject(classified("cancelled", "this resident shell session is no longer active"));
+      runNext();
+      return;
+    }
+    running = true;
+    activeContext = job.context;
+    const execute = async () => tool.handler(job.input, job.context);
+    void execute().then(job.resolve, job.reject).finally(() => {
+      if (activeContext === job.context) activeContext = undefined;
+      running = false;
+      runNext();
+    });
+  };
+  const wrapped: Tool = Object.freeze({
+    ...tool,
+    description: "Run bounded Bash over the shared World room files. Use it to tail or grep room coordination and to post through /workspace/world/room/send.",
+    handler(input, context) {
+      if (context.signal.aborted) {
+        return Promise.reject(classified("cancelled", "this resident shell call was cancelled"));
+      }
+      return new Promise((resolve, reject) => {
+        const job: ShellJob = {
+          input,
+          context,
+          resolve,
+          reject,
+          onAbort() {
+            const index = queue.indexOf(job);
+            if (index < 0) return;
+            queue.splice(index, 1);
+            reject(classified("cancelled", "this queued resident shell call was cancelled"));
+          },
+        };
+        context.signal.addEventListener("abort", job.onAbort, { once: true });
+        queue.push(job);
+        runNext();
+      });
+    },
+  });
+  return Object.freeze({ instructions: runtime.instructions, tool: wrapped });
+}
+
+function mergeRoomMessages(messages: readonly WorldBoardMessage[]): void {
+  for (const message of messages) roomMessages.set(message.id, message);
+  const retained = [...roomMessages.keys()].sort((left, right) => right - left).slice(32);
+  for (const id of retained) roomMessages.delete(id);
 }
 
 function worldToolInput(input: unknown): Record<string, unknown> {
@@ -280,6 +381,38 @@ function requestWorldAction(
   });
 }
 
+function requestWorldRoomSend(
+  sessionId: string,
+  text: string,
+  signal: AbortSignal,
+): Promise<WorldBoardMessage> {
+  const active = activeBySession.get(sessionId);
+  if (!active) return Promise.reject(new Error("this Luna resident has no active world turn"));
+  if (active.cancelled || blocked || shuttingDown || signal.aborted) {
+    return Promise.reject(classified("cancelled", "this resident room send was cancelled"));
+  }
+  active.actionCount += 1;
+  const sendId = `world-room-${crypto.randomUUID()}`;
+  return new Promise<WorldBoardMessage>((resolve, reject) => {
+    const onAbort = () => settleRoomSend(sendId, {
+      kind: "reject",
+      cause: classified("cancelled", "this resident room send was cancelled"),
+    });
+    pendingRoomSends.set(sendId, { active, resolve, reject, signal, onAbort });
+    signal.addEventListener("abort", onAbort, { once: true });
+    const call = active.entry.observation.playerOrder ?? active.entry.observation.guildCall;
+    post({
+      protocol: WORLD_PROTOCOL,
+      type: "room_send",
+      sendId,
+      requestId: active.entry.requestId,
+      agentId: active.entry.agentId,
+      ...(call === undefined ? {} : { heardCallId: call.id }),
+      text,
+    });
+  });
+}
+
 function resolveWorldAction(command: Extract<WorldAgentCommand, { type: "action_result" }>): void {
   const pending = pendingWorldActions.get(command.actionId);
   if (
@@ -300,6 +433,36 @@ function settleWorldAction(
   pendingWorldActions.delete(actionId);
   pending.signal.removeEventListener("abort", pending.onAbort);
   if (settlement.kind === "resolve") pending.resolve(settlement.result);
+  else pending.reject(settlement.cause);
+}
+
+function resolveRoomSend(command: Extract<WorldAgentCommand, { type: "room_send_result" }>): void {
+  const pending = pendingRoomSends.get(command.sendId);
+  if (
+    !pending
+    || pending.active.entry.requestId !== command.requestId
+    || pending.active.entry.agentId !== command.agentId
+  ) return;
+  if (command.result.status === "committed") {
+    settleRoomSend(command.sendId, { kind: "resolve", message: command.result.message });
+  } else {
+    settleRoomSend(command.sendId, {
+      kind: "reject",
+      cause: classified("invalid", command.result.reason),
+    });
+  }
+}
+
+function settleRoomSend(
+  sendId: string,
+  settlement: Readonly<{ kind: "resolve"; message: WorldBoardMessage }>
+    | Readonly<{ kind: "reject"; cause: Error }>,
+): void {
+  const pending = pendingRoomSends.get(sendId);
+  if (!pending) return;
+  pendingRoomSends.delete(sendId);
+  pending.signal.removeEventListener("abort", pending.onAbort);
+  if (settlement.kind === "resolve") pending.resolve(settlement.message);
   else pending.reject(settlement.cause);
 }
 
@@ -424,6 +587,7 @@ async function releaseResidentAgents(): Promise<void> {
   const retained = [...new Set(residentAgents.values())];
   residentAgents.clear();
   residentBoots.clear();
+  roomShellBoot = undefined;
   await Promise.allSettled(retained.map((agent) => agent.session.shutdown()));
   for (const agent of retained) agent.dispose();
   activeBySession.clear();
@@ -432,12 +596,21 @@ async function releaseResidentAgents(): Promise<void> {
     pending.reject(classified("cancelled", "World agents shut down"));
   }
   pendingWorldActions.clear();
+  for (const pending of pendingRoomSends.values()) {
+    pending.signal.removeEventListener("abort", pending.onAbort);
+    pending.reject(classified("cancelled", "World agents shut down"));
+  }
+  pendingRoomSends.clear();
 }
 
 function rejectWorldActionsFor(active: ActiveResidentTurn, cause: Error): void {
   for (const [actionId, pending] of pendingWorldActions) {
     if (pending.active !== active) continue;
     settleWorldAction(actionId, { kind: "reject", cause });
+  }
+  for (const [sendId, pending] of pendingRoomSends) {
+    if (pending.active !== active) continue;
+    settleRoomSend(sendId, { kind: "reject", cause });
   }
 }
 
@@ -460,7 +633,11 @@ function residentPrompt(entry: WorldThinkEntry): string {
       ...(observation.playerOrder === undefined ? {} : { playerOrder: observation.playerOrder }),
       ...(observation.guildCall === undefined ? {} : { guildCall: observation.guildCall }),
       ...(coordinationBasis === undefined ? {} : { coordinationBasis }),
-      guildBoard: observation.guildBoard,
+      room: {
+        path: "/workspace/world/room/messages.jsonl",
+        posts: observation.guildBoard.length,
+        newestMessageId: observation.guildBoard[0]?.id ?? 0,
+      },
       recentEvents: observation.recentEvents,
       availableTargets: observation.availableTargets,
       supplies: observation.supplies,

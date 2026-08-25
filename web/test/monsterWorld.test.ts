@@ -14,6 +14,8 @@ import {
   activeResidentCount,
   actorWorldPosition,
   applyWorldPlan,
+  applyWorldRoomSend,
+  applyWorldToolAction,
   createWorldState,
   hasUnansweredGuildCall,
   hasUnansweredPlayerOrder,
@@ -514,8 +516,9 @@ test("mixed accepted and rejected assignments settle without claiming full compl
   ), false);
 });
 
-test("completed dialogue becomes a bounded shared board post other agents can answer", () => {
+test("local speech stays embodied while a room post enters the shared reducer log", () => {
   const state = createWorldState();
+  const initialPosts = state.guildMessages.length;
   const observation = observationFor(state, "cinder");
   const plan = decodeStagedPlan({
     request_id: "cinder-to-moss",
@@ -531,56 +534,26 @@ test("completed dialogue becomes a bounded shared board post other agents can an
 
   assert.deepEqual(applyWorldPlan(state, plan), { accepted: true });
   updateWorld(state, 100);
+  assert.equal(state.actors.cinder.bubble?.text, "Moss, compare this dust with the orchard sample.");
+  assert.equal(state.guildMessages.length, initialPosts);
+
+  const roomPost = applyWorldRoomSend(state, {
+    sendId: "cinder-room-post",
+    requestId: "cinder-room-turn",
+    agentId: "cinder",
+    text: "Moss, compare this dust with the orchard sample.",
+  });
+  assert.equal(roomPost.accepted, true);
   const message = state.guildMessages[0];
   assert.equal(message?.fromId, "cinder");
-  assert.equal(message?.toId, "moss");
+  assert.equal(message?.toId, undefined);
   assert.equal(message?.origin, "nanocodex");
   assert.equal(observationFor(state, "moss").guildBoard[0]?.id, message?.id);
-  assert.equal(observationFor(state, "moss").guildBoard[0]?.toName, "Moss");
+  assert.equal(observationFor(state, "moss").guildBoard[0]?.fromName, "Cinder");
 
   const restored = createWorldState(serializeWorldState(state));
   assert.equal(restored.guildMessages[0]?.text, message?.text);
   assert.ok(restored.nextGuildMessageId > (message?.id ?? 0));
-});
-
-test("an unfinished Nanocodex plan cannot be overwritten before its board post executes", () => {
-  const state = createWorldState();
-  const firstObservation = observationFor(state, "cinder");
-  const first = decodeStagedPlan({
-    request_id: "cinder-delayed-post",
-    agent_id: "cinder",
-    state_version: firstObservation.stateVersion,
-    summary: "crosses town before reporting",
-    steps: [
-      { kind: "move", target: "bridge" },
-      { kind: "say", text: "Bridge reached. The route is clear.", to: "moss" },
-    ],
-  }, {
-    requestId: "cinder-delayed-post",
-    agentId: "cinder",
-    stateVersion: firstObservation.stateVersion,
-  });
-  assert.deepEqual(applyWorldPlan(state, first), { accepted: true });
-
-  const secondObservation = observationFor(state, "cinder");
-  const second = decodeStagedPlan({
-    request_id: "cinder-overwrite",
-    agent_id: "cinder",
-    state_version: secondObservation.stateVersion,
-    summary: "starts another thought too early",
-    steps: [{ kind: "wait", duration_ms: 300 }],
-  }, {
-    requestId: "cinder-overwrite",
-    agentId: "cinder",
-    stateVersion: secondObservation.stateVersion,
-  });
-  assert.deepEqual(applyWorldPlan(state, second), { accepted: false, reason: "stale" });
-
-  for (let index = 0; index < 320; index += 1) updateWorld(state, 100);
-  assert.equal(
-    state.guildMessages.filter(({ text }) => text === "Bridge reached. The route is clear.").length,
-    1,
-  );
 });
 
 test("population changes enter from outside, remain physical, and cross an edge before removal", () => {
@@ -647,7 +620,14 @@ test("population changes enter from outside, remain physical, and cross an edge 
 test("one map resident owns one isolated retained Luna session and turn", () => {
   assert.match(worker, /from "nanocodex\/host"/);
   assert.match(worker, /toolMode: "direct"/);
-  assert.doesNotMatch(worker, /harness|exec_command|web__run|image_gen/);
+  assert.doesNotMatch(worker, /harness|web__run|image_gen/);
+  assert.match(worker, /justBash/);
+  assert.match(worker, /exec_command: roomShell\.tool/);
+  assert.match(worker, /let roomShellBoot:/);
+  assert.doesNotMatch(worker, /roomShellBoots = new Map/);
+  assert.match(worker, /\/workspace\/world\/room\/messages\.jsonl/);
+  assert.doesNotMatch(worker, /\n\s*say:\s*\{/);
+  assert.doesNotMatch(worker, /read_chat|send_chat/);
   assert.match(worker, /const residentAgents = new Map<ResidentId, DefaultAgent>\(\)/);
   assert.match(worker, /const residentBoots = new Map<ResidentId, Promise<DefaultAgent>>\(\)/);
   assert.match(worker, /async function residentAgentFor[\s\S]*?residentBoots\.get[\s\S]*?residentBoots\.set[\s\S]*?residentAgents\.set/);
@@ -695,7 +675,7 @@ test("the World surface stays statically available, stoppable, and semantically 
   assert.match(component, /type: "action_result"/);
   assert.doesNotMatch(component, /batch/i);
   assert.match(component, /Semantic event stream/);
-  assert.match(component, /Message board/);
+  assert.match(component, /Room chat/);
   assert.match(component, /if \(mindsToWake\.length > 0\) startAgents\(\)/);
   assert.match(component, /type: "cancel",\s*agentIds:[\s\S]*?requestIds:/);
   assert.match(component, /ask to leave/);
@@ -706,7 +686,7 @@ test("the World surface stays statically available, stoppable, and semantically 
     /loadWorldAssets\(\)\.then\([\s\S]*?setAssetError\([\s\S]*?World assets could not be loaded[\s\S]*?if \(assetError\) throw assetError/,
   );
   assert.match(component, /onPointerDown=\{handleCanvasPointerDown\}/);
-  assert.match(component, /Every entry marked <b>nanocodex<\/b> comes from that resident's own/);
+  assert.match(component, /Every entry marked <b>nanocodex<\/b> came from that resident's live World tool loop/);
   assert.match(application, /surface === "world"[\s\S]*?target === document\.activeElement[\s\S]*?target\?\.matches\("\.monster-world-stage canvas"\)/);
   assert.match(worldCss, /prefers-reduced-motion: reduce/);
   assert.match(worldCss, /monster-world-population input\[type="range"\]/);

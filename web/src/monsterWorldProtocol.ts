@@ -1,4 +1,4 @@
-export const WORLD_PROTOCOL = "nanocodex.monster-world.v4" as const;
+export const WORLD_PROTOCOL = "nanocodex.monster-world.v5" as const;
 
 export const WORLD_SCENE_IDS = ["town", "guild_hall", "trail_shop"] as const;
 export const WORLD_ITEM_KINDS = ["sunberry", "supply_pack"] as const;
@@ -283,6 +283,10 @@ export type WorldToolResult = Readonly<{
   relevantEvents: readonly string[];
 }>;
 
+export type WorldRoomSendResult =
+  | Readonly<{ status: "committed"; message: WorldBoardMessage }>
+  | Readonly<{ status: "rejected"; reason: string }>;
+
 export type WorldResidentDecision = Readonly<{
   plan: WorldPlan;
   memory: WorldResidentMemory;
@@ -318,6 +322,14 @@ export type WorldAgentCommand =
     }>
   | Readonly<{
       protocol: typeof WORLD_PROTOCOL;
+      type: "room_send_result";
+      sendId: string;
+      requestId: string;
+      agentId: ResidentId;
+      result: WorldRoomSendResult;
+    }>
+  | Readonly<{
+      protocol: typeof WORLD_PROTOCOL;
       type: "cancel";
       agentIds?: readonly ResidentId[];
       requestIds?: readonly string[];
@@ -342,6 +354,15 @@ export type WorldAgentMessage =
       agentId: ResidentId;
       heardCallId?: number;
       action: WorldPrimitiveAction;
+    }>
+  | Readonly<{
+      protocol: typeof WORLD_PROTOCOL;
+      type: "room_send";
+      sendId: string;
+      requestId: string;
+      agentId: ResidentId;
+      heardCallId?: number;
+      text: string;
     }>
   | Readonly<{
       protocol: typeof WORLD_PROTOCOL;
@@ -564,6 +585,16 @@ export function isWorldAgentMessage(value: unknown): value is WorldAgentMessage 
       && (message.heardCallId === undefined || Number.isSafeInteger(message.heardCallId))
       && isWorldPrimitiveAction(message.action);
   }
+  if (message.type === "room_send") {
+    return isWorldIdentifier(message.sendId)
+      && isWorldIdentifier(message.requestId)
+      && isResidentId(message.agentId)
+      && (message.heardCallId === undefined || Number.isSafeInteger(message.heardCallId))
+      && typeof message.text === "string"
+      && message.text.length > 0
+      && message.text.length <= 140
+      && sanitizeDialogue(message.text) === message.text;
+  }
   if (message.type === "settled") {
     return typeof message.requestId === "string"
       && isResidentId(message.agentId)
@@ -595,6 +626,12 @@ export function isWorldAgentCommand(value: unknown): value is WorldAgentCommand 
       && isWorldIdentifier(command.requestId)
       && isResidentId(command.agentId)
       && isWorldToolResult(command.result, command.agentId);
+  }
+  if (command.type === "room_send_result") {
+    return isWorldIdentifier(command.sendId)
+      && isWorldIdentifier(command.requestId)
+      && isResidentId(command.agentId)
+      && isWorldRoomSendResult(command.result, command.agentId);
   }
   if (command.type === "cancel") {
     return isOptionalUniqueList(command.agentIds, RESIDENT_IDS.length, isResidentId)
@@ -638,6 +675,17 @@ function isWorldToolResult(value: unknown, agentId: ResidentId): value is WorldT
   )
     && typeof outcome.detail === "string"
     && isWorldPrimitiveAction(outcome.action);
+}
+
+function isWorldRoomSendResult(
+  value: unknown,
+  agentId: ResidentId,
+): value is WorldRoomSendResult {
+  if (!isJsonObject(value)) return false;
+  if (value.status === "committed") {
+    return isWorldBoardMessage(value.message) && value.message.fromId === agentId;
+  }
+  return value.status === "rejected" && typeof value.reason === "string";
 }
 
 export function isResidentId(value: unknown): value is ResidentId {

@@ -8,9 +8,11 @@ import {
 import {
   BASE_RESIDENT_COUNT,
   applyResidentMemory,
+  applyWorldRoomSend,
   applyWorldToolAction,
   createWorldState,
   hasUnansweredGuildCall,
+  hasUnansweredPlayerOrder,
   liveAgentIdsInWorld,
   observationFor,
   playerSpeak,
@@ -187,6 +189,56 @@ test("independent resident tools mutate through one reducer and return fresh obs
   const juneResult = worldToolResultAtDecisionBoundary(state, june.pending);
   assert.equal(juneResult?.outcome.status, "completed");
   assert.equal(juneResult?.self.id, "june");
+});
+
+test("room posts are ordered reducer writes that do not interrupt embodied movement", () => {
+  const state = createWorldState();
+  setWorldAgentsOnline(state, true);
+  const movement = applyWorldToolAction(state, {
+    actionId: "cinder-move-before-chat",
+    requestId: "cinder-turn-before-chat",
+    agentId: "cinder",
+    action: { kind: "move", target: "bridge" },
+  });
+  assert.equal(movement.accepted, true);
+  const movementTask = state.actors.cinder.tasks[0];
+  assert.equal(movementTask?.requestId, "cinder-move-before-chat");
+
+  const decisionVersion = state.decisionVersions.cinder;
+  const roomPost = applyWorldRoomSend(state, {
+    sendId: "cinder-room-1",
+    requestId: "cinder-turn-before-chat",
+    agentId: "cinder",
+    text: "Moss, I will check Bell Bridge.",
+  });
+  assert.equal(roomPost.accepted, true);
+  assert.strictEqual(state.actors.cinder.tasks[0], movementTask);
+  assert.equal(state.decisionVersions.cinder, decisionVersion);
+  assert.equal(state.guildMessages[0]?.fromId, "cinder");
+  assert.equal(state.guildMessages[0]?.text, "Moss, I will check Bell Bridge.");
+  if (!roomPost.accepted) return;
+  assert.equal(roomPost.message.text, "Moss, I will check Bell Bridge.");
+  assert.equal(observationFor(state, "moss").guildBoard[0]?.fromName, "Cinder");
+
+  assert.deepEqual(applyWorldRoomSend(state, {
+    sendId: "cinder-room-1",
+    requestId: "cinder-turn-before-chat",
+    agentId: "cinder",
+    text: "This duplicate must not append.",
+  }), { accepted: false, reason: "duplicate" });
+
+  const roomOrder = playerSpeak(state, "Post your status in room chat.", "call");
+  const callId = observationFor(state, "cinder").playerOrder?.id;
+  assert.ok(roomOrder && callId !== undefined);
+  assert.equal(hasUnansweredPlayerOrder(state, "cinder"), true);
+  assert.equal(applyWorldRoomSend(state, {
+    sendId: "cinder-room-2",
+    requestId: "cinder-room-order-turn",
+    agentId: "cinder",
+    heardCallId: callId,
+    text: "Cinder ready.",
+  }).accepted, true);
+  assert.equal(hasUnansweredPlayerOrder(state, "cinder"), false);
 });
 
 test("a newer player instruction supersedes stale in-turn World control", () => {

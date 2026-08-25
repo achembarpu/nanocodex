@@ -262,6 +262,10 @@ export type WorldToolActionApplication =
   | Readonly<{ accepted: true; pending: WorldToolAction }>
   | Readonly<{ accepted: false; reason: "duplicate" | "invalid" | "superseded" }>;
 
+export type WorldRoomSendApplication =
+  | Readonly<{ accepted: true; message: WorldBoardMessage }>
+  | Readonly<{ accepted: false; reason: "duplicate" | "invalid" }>;
+
 type ActorDefinition = Readonly<{
   name: string;
   role: string;
@@ -1502,12 +1506,11 @@ export function applyWorldToolAction(
     return { accepted: false, reason: "superseded" };
   }
 
-  // The reducer is the single writer. A later tool call from this resident
-  // replaces its earlier control horizon, while every other resident keeps
-  // moving independently.
+  // The reducer is the single writer. A later embodied call from this resident
+  // replaces only its own earlier control horizon.
   actor.tasks = tasksFor([request.action], "nanocodex", request.actionId);
-  actor.activity = actionLabel(request.action);
   actor.intent = actionLabel(request.action);
+  actor.activity = actionLabel(request.action);
   actor.lastOrigin = "nanocodex";
   actor.routineDueMs = state.elapsedMs + 9_000;
   state.decisionVersions[request.agentId] += 1;
@@ -1529,6 +1532,41 @@ export function applyWorldToolAction(
       activityCursor: state.nextActivityId - 1,
     }),
   };
+}
+
+export function applyWorldRoomSend(
+  state: WorldState,
+  request: Readonly<{
+    sendId: string;
+    requestId: string;
+    agentId: ResidentId;
+    heardCallId?: number;
+    text: string;
+  }>,
+): WorldRoomSendApplication {
+  const actor = state.actors[request.agentId];
+  const text = sanitizeDialogue(request.text);
+  if (actor.presence !== "active" || !text || text.length > 140) {
+    return { accepted: false, reason: "invalid" };
+  }
+  if (state.seenRequestIds.includes(request.sendId)) {
+    return { accepted: false, reason: "duplicate" };
+  }
+  state.seenRequestIds.push(request.sendId);
+  if (state.seenRequestIds.length > 128) state.seenRequestIds.shift();
+  addGuildMessage(state, actor.id, text, "nanocodex");
+  if (request.heardCallId !== undefined && state.heardCalls[request.agentId]?.id === request.heardCallId) {
+    state.acknowledgedCallIds[request.agentId] = request.heardCallId;
+  }
+  if (request.heardCallId !== undefined && state.playerOrders[request.agentId]?.id === request.heardCallId) {
+    state.acknowledgedPlayerOrderIds[request.agentId] = request.heardCallId;
+  }
+  const message = state.guildMessages[0];
+  if (!message) return { accepted: false, reason: "invalid" };
+  return Object.freeze({
+    accepted: true,
+    message: boardMessageForObservation(state, message),
+  });
 }
 
 export function worldToolResultAtDecisionBoundary(
@@ -1712,7 +1750,7 @@ export function observationFor(state: WorldState, agentId: ResidentId): WorldObs
     guildBoard: Object.freeze(
       state.guildMessages
         .filter(({ audience }) => audience === undefined || audience.includes(agentId))
-        .slice(0, 8)
+        .slice(0, 32)
         .map((message) => boardMessageForObservation(state, message)),
     ),
     recentEvents: Object.freeze(
@@ -1996,8 +2034,13 @@ function updateActor(state: WorldState, actor: WorldActor, deltaMs: number): voi
     };
     actor.activity = `said “${task.action.text}”`;
     actor.social = clamp(actor.social + 2);
-    addGuildMessage(state, actor.id, task.action.text, task.origin, task.action.to);
-    addActivity(state, task.origin, `${actor.name}: “${task.action.text}”`, actor.id);
+    addActivity(
+      state,
+      task.origin,
+      `${actor.name}: “${task.action.text}”`,
+      actor.id,
+      [actor.id],
+    );
     return;
   }
   if (task.action.kind === "emote") {
@@ -3123,7 +3166,7 @@ function actionLabel(action: WorldAction): string {
     return `${action.action} at ${action.target.replaceAll("_", " ")}`;
   }
   if (action.kind === "say") {
-    return `tell ${action.to ?? "the guild"} “${action.text}”`;
+    return `say “${action.text}”${action.to === undefined ? "" : ` to ${action.to}`}`;
   }
   if (action.kind === "emote") return `emote ${action.icon}`;
   return `wait ${action.duration_ms}ms`;

@@ -114,6 +114,31 @@ test("one resident action is correlated to its owning turn and fresh reducer res
   assert.equal(isWorldAgentCommand(result), true);
   assert.equal(isWorldAgentCommand({ ...result, agentId: "june" }), false);
   assert.equal(isWorldAgentCommand({ ...result, result: { ...result.result, worldRevision: -1 } }), false);
+
+  const roomResult = {
+    protocol: WORLD_PROTOCOL,
+    type: "room_send_result",
+    sendId: "room-cinder-1",
+    requestId: action.requestId,
+    agentId: action.agentId,
+    result: {
+      status: "committed",
+      message: {
+        id: 8,
+        fromId: "cinder",
+        fromName: "Cinder",
+        text: "North path is clear.",
+        minuteOfDay: 481,
+        origin: "nanocodex",
+        scope: "public",
+      },
+    },
+  } as const;
+  assert.equal(isWorldAgentCommand(roomResult), true);
+  assert.equal(isWorldAgentCommand({
+    ...roomResult,
+    result: { ...roomResult.result, message: { ...roomResult.result.message, fromId: "june" } },
+  }), false);
 });
 
 test("stable co-listener ordering yields unique circle, star, and mirrored two-side slots", () => {
@@ -167,6 +192,16 @@ test("runtime action messages reject malformed physical actions", () => {
   assert.equal(isWorldAgentMessage(action), true);
   assert.equal(isWorldAgentMessage({ ...action, actionId: "" }), false);
   assert.equal(isWorldAgentMessage({ ...action, action: { kind: "say", text: "" } }), false);
+  const roomSend = {
+    protocol: WORLD_PROTOCOL,
+    type: "room_send",
+    sendId: "room-cinder-1",
+    requestId: "cinder-turn",
+    agentId: "cinder",
+    text: "I will cover the north path.",
+  } as const;
+  assert.equal(isWorldAgentMessage(roomSend), true);
+  assert.equal(isWorldAgentMessage({ ...roomSend, text: "" }), false);
   assert.equal(isWorldAgentMessage({ ...action, action: { kind: "wait", duration_ms: 9_000 } }), false);
 });
 

@@ -46,6 +46,7 @@ import {
   MAX_RESIDENT_COUNT,
   activeResidentCount,
   actorWorldPosition,
+  applyWorldRoomSend,
   applyWorldToolAction,
   createWorldState,
   formatWorldTime,
@@ -332,6 +333,32 @@ export function MonsterWorld() {
         runtimeStatusRef.current = "offline";
         if (worldRef.current) setWorldAgentsOnline(worldRef.current, false);
       }
+      invalidateWorld();
+      return;
+    }
+    if (message.type === "room_send") {
+      const request = pendingRequests.current.get(message.requestId);
+      if (!request || request.agentId !== message.agentId || request.cancelled) return;
+      request.resultReceived = true;
+      const activeWorld = worldRef.current;
+      if (!activeWorld) return;
+      const application = applyWorldRoomSend(activeWorld, {
+        sendId: message.sendId,
+        requestId: message.requestId,
+        agentId: message.agentId,
+        ...(message.heardCallId === undefined ? {} : { heardCallId: message.heardCallId }),
+        text: message.text,
+      });
+      worker.postMessage({
+        protocol: WORLD_PROTOCOL,
+        type: "room_send_result",
+        sendId: message.sendId,
+        requestId: message.requestId,
+        agentId: message.agentId,
+        result: application.accepted
+          ? { status: "committed", message: application.message }
+          : { status: "rejected", reason: `The reducer rejected this room post: ${application.reason}.` },
+      } satisfies WorldAgentCommand);
       invalidateWorld();
       return;
     }
@@ -1024,7 +1051,7 @@ export function MonsterWorld() {
 
           <section className="monster-world-board" aria-labelledby="world-board-title">
             <header>
-              <div><p>Every agent reads this before acting</p><h2 id="world-board-title">Message board</h2></div>
+              <div><p>/workspace/world/room/messages.jsonl</p><h2 id="world-board-title">Room chat</h2></div>
               <span aria-live="polite">{world.guildMessages.length} posts</span>
             </header>
             <ol>
@@ -1036,7 +1063,7 @@ export function MonsterWorld() {
                   ? to.name
                   : message.scope === "spatial"
                     ? `heard by ${audience || "nearby listeners"}`
-                    : "public room";
+                    : "room";
                 return (
                   <li key={message.id} data-origin={message.origin}>
                     <div>
@@ -1073,7 +1100,7 @@ export function MonsterWorld() {
             </div>
             <p>{usage.totalTokens.toLocaleString()} observed tokens · {usage.estimatedUsd > 0 ? `$${usage.estimatedUsd.toFixed(4)} estimated` : "cost appears when reported"}</p>
             <p>GPT-5.6 Luna · thinking none · one persistent session per resident · bounded concurrent execution.</p>
-            <p>Scout orders are reducer-owned and remain physical under model failure. Every entry marked <b>nanocodex</b> comes from that resident's own completed Luna turn.</p>
+            <p>Scout orders and room posts are reducer-owned. Every entry marked <b>nanocodex</b> came from that resident's live World tool loop.</p>
           </footer>
         </aside>
       </div>
