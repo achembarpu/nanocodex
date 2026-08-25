@@ -3,16 +3,13 @@ export const WORLD_PROTOCOL = "nanocodex.monster-world.v4" as const;
 export const WORLD_SCENE_IDS = ["town", "guild_hall", "trail_shop"] as const;
 export const WORLD_ITEM_KINDS = ["sunberry", "supply_pack"] as const;
 
-export const LIVE_AGENT_IDS = [
+export const NAMED_RESIDENT_IDS = [
   "cinder",
   "moss",
   "rill",
   "luma",
   "iris",
   "rook",
-] as const;
-
-export const NAMED_ROUTINE_AGENT_IDS = [
   "june",
   "pax",
   "ember",
@@ -60,13 +57,8 @@ export const GUEST_AGENT_IDS = [
   "guest24",
 ] as const;
 
-export const ROUTINE_AGENT_IDS = [...NAMED_ROUTINE_AGENT_IDS, ...GUEST_AGENT_IDS] as const;
-
-export const RESIDENT_IDS = [...LIVE_AGENT_IDS, ...ROUTINE_AGENT_IDS] as const;
-// Every resident may be scheduled through the bounded Luna batch runtime. The
-// older LIVE_AGENT_IDS name remains the six-resident compatibility surface
-// while the page migrates to the complete autonomous population.
-export const AUTONOMOUS_AGENT_IDS = RESIDENT_IDS;
+export const RESIDENT_IDS = [...NAMED_RESIDENT_IDS, ...GUEST_AGENT_IDS] as const;
+// Every resident owns one independent persistent Luna agent.
 export const ACTOR_IDS = ["player", ...RESIDENT_IDS] as const;
 export const WORLD_TARGETS = [
   "guild",
@@ -99,11 +91,8 @@ export const VOICE_RADIUS = Object.freeze({
   shout: 20,
 } satisfies Record<VoiceLevel, number>);
 
-export type LiveAgentId = (typeof LIVE_AGENT_IDS)[number];
 export type GuestAgentId = (typeof GUEST_AGENT_IDS)[number];
-export type RoutineAgentId = (typeof ROUTINE_AGENT_IDS)[number];
 export type ResidentId = (typeof RESIDENT_IDS)[number];
-export type AutonomousAgentId = ResidentId;
 export type ActorId = (typeof ACTOR_IDS)[number];
 export type WorldSceneId = (typeof WORLD_SCENE_IDS)[number];
 export type WorldItemKind = (typeof WORLD_ITEM_KINDS)[number];
@@ -273,14 +262,28 @@ export const EMPTY_WORLD_RESIDENT_MEMORY: WorldResidentMemory = Object.freeze({
   lastBoardMessageId: 0,
 });
 
-export type WorldBatchThinkEntry = Readonly<{
+export type WorldThinkEntry = Readonly<{
   requestId: string;
   agentId: ResidentId;
   observation: WorldObservation;
   memory: WorldResidentMemory;
 }>;
 
-export type WorldBatchDecision = Readonly<{
+export type WorldActionOutcome = Readonly<{
+  status: "completed" | "in_progress" | "blocked" | "rejected" | "superseded";
+  action: WorldPrimitiveAction;
+  detail: string;
+}>;
+
+export type WorldToolResult = Readonly<{
+  worldRevision: number;
+  outcome: WorldActionOutcome;
+  self: WorldObservation["self"];
+  nearby: WorldObservation["nearby"];
+  relevantEvents: readonly string[];
+}>;
+
+export type WorldResidentDecision = Readonly<{
   plan: WorldPlan;
   memory: WorldResidentMemory;
 }>;
@@ -301,20 +304,22 @@ export type WorldAgentCommand =
       protocol: typeof WORLD_PROTOCOL;
       type: "think";
       requestId: string;
-      agentId: LiveAgentId;
+      agentId: ResidentId;
       observation: WorldObservation;
+      memory: WorldResidentMemory;
     }>
   | Readonly<{
       protocol: typeof WORLD_PROTOCOL;
-      type: "think_batch";
-      batchId: string;
-      entries: readonly WorldBatchThinkEntry[];
+      type: "action_result";
+      actionId: string;
+      requestId: string;
+      agentId: ResidentId;
+      result: WorldToolResult;
     }>
   | Readonly<{
       protocol: typeof WORLD_PROTOCOL;
       type: "cancel";
       agentIds?: readonly ResidentId[];
-      batchIds?: readonly string[];
       requestIds?: readonly string[];
     }>
   | Readonly<{
@@ -331,32 +336,18 @@ export type WorldAgentMessage =
     }>
   | Readonly<{
       protocol: typeof WORLD_PROTOCOL;
-      type: "plan";
-      plan: WorldPlan;
-      usage: WorldUsage;
+      type: "action";
+      actionId: string;
+      requestId: string;
+      agentId: ResidentId;
+      heardCallId?: number;
+      action: WorldPrimitiveAction;
     }>
   | Readonly<{
       protocol: typeof WORLD_PROTOCOL;
       type: "settled";
       requestId: string;
-      agentId: LiveAgentId;
-      outcome: "completed" | "cancelled" | "failed";
-      message?: string;
-      usage?: WorldUsage;
-    }>
-  | Readonly<{
-      protocol: typeof WORLD_PROTOCOL;
-      type: "batch_result";
-      batchId: string;
-      decisions: readonly WorldBatchDecision[];
-      usage: WorldUsage;
-    }>
-  | Readonly<{
-      protocol: typeof WORLD_PROTOCOL;
-      type: "batch_settled";
-      batchId: string;
-      requestIds: readonly string[];
-      agentIds: readonly ResidentId[];
+      agentId: ResidentId;
       outcome: "completed" | "cancelled" | "failed";
       failure?: WorldFailureClass;
       message?: string;
@@ -424,59 +415,10 @@ export function decodeWorldResidentMemory(value: unknown): WorldResidentMemory {
   });
 }
 
-export function decodeStagedBatch(
-  value: unknown,
-  expected: Readonly<{
-    batchId: string;
-    entries: readonly ExpectedWorldDecision[];
-  }>,
-): readonly WorldBatchDecision[] {
-  if (expected.entries.length < 1 || expected.entries.length > 4) {
-    throw new Error("a world batch must expect between 1 and 4 residents");
-  }
-  const expectedByRequest = new Map(expected.entries.map((entry) => [entry.requestId, entry]));
-  if (expectedByRequest.size !== expected.entries.length) {
-    throw new Error("a world batch cannot contain duplicate request ids");
-  }
-  if (new Set(expected.entries.map(({ agentId }) => agentId)).size !== expected.entries.length) {
-    throw new Error("a world batch cannot contain duplicate residents");
-  }
-  const input = object(value, "world batch");
-  if (text(input.batch_id, "batch_id", 96) !== expected.batchId) {
-    throw new Error("batch_id does not match the active batch");
-  }
-  const rawDecisions = Array.isArray(input.decisions) ? input.decisions : undefined;
-  if (!rawDecisions || rawDecisions.length !== expected.entries.length) {
-    throw new Error("decisions must contain exactly one entry for every requested resident");
-  }
-  const seenRequests = new Set<string>();
-  const seenResidents = new Set<ResidentId>();
-  const decisions = rawDecisions.map((rawDecision) => {
-    const decision = object(rawDecision, "batch decision");
-    const planInput = object(decision.plan, "batch decision plan");
-    const requestId = text(planInput.request_id, "request_id", 96);
-    const entry = expectedByRequest.get(requestId);
-    if (!entry) throw new Error("batch decision does not match a requested turn");
-    if (seenRequests.has(requestId) || seenResidents.has(entry.agentId)) {
-      throw new Error("batch decisions must be unique by request and resident");
-    }
-    seenRequests.add(requestId);
-    seenResidents.add(entry.agentId);
-    return Object.freeze({
-      plan: decodeStagedPlan(planInput, entry),
-      memory: decodeWorldResidentMemory(decision.memory),
-    });
-  });
-  if (seenRequests.size !== expected.entries.length) {
-    throw new Error("the staged batch omitted a requested resident");
-  }
-  return Object.freeze(decisions);
-}
-
 export function decodeResidentDecision(
   value: unknown,
   expected: ExpectedWorldDecision,
-): WorldBatchDecision {
+): WorldResidentDecision {
   const input = object(value, "resident world plan");
   const plan = decodeStagedPlan({
     request_id: expected.requestId,
@@ -517,6 +459,7 @@ export type ResidentCoordinationBasis = Readonly<{
   index: number;
   count: number;
   radial: Readonly<{ dxPixels: number; dyPixels: number }>;
+  star: Readonly<{ dxPixels: number; dyPixels: number }>;
   twoSides: Readonly<{
     side: "left" | "right";
     dxPixels: number;
@@ -543,11 +486,36 @@ export function coordinationBasisFor(
       dxPixels: roundToEight(64 * Math.cos(angle)),
       dyPixels: roundToEight(64 * Math.sin(angle)),
     }),
+    star: starCoordinationOffset(index, count),
     twoSides: Object.freeze({
       side: left ? "left" : "right",
       dxPixels: left ? -64 : 64,
       dyPixels: roundToEight(32 * (rank - (groupSize - 1) / 2)),
     }),
+  });
+}
+
+function starCoordinationOffset(
+  index: number,
+  count: number,
+): Readonly<{ dxPixels: number; dyPixels: number }> {
+  const progress = index * 10 / count;
+  const segment = Math.floor(progress);
+  const fraction = progress - segment;
+  const start = starVertex(segment);
+  const end = starVertex((segment + 1) % 10);
+  return Object.freeze({
+    dxPixels: roundToEight(start.x + (end.x - start.x) * fraction),
+    dyPixels: roundToEight(start.y + (end.y - start.y) * fraction),
+  });
+}
+
+function starVertex(index: number): Readonly<{ x: number; y: number }> {
+  const angle = -Math.PI / 2 + index * Math.PI / 5;
+  const radius = index % 2 === 0 ? 96 : 40;
+  return Object.freeze({
+    x: radius * Math.cos(angle),
+    y: radius * Math.sin(angle),
   });
 }
 
@@ -589,34 +557,16 @@ export function isWorldAgentMessage(value: unknown): value is WorldAgentMessage 
       || message.status === "stopped"
       || message.status === "error";
   }
-  if (message.type === "plan") {
-    return isWorldPlan(message.plan)
-      && isLiveAgentId(message.plan.agentId)
-      && isWorldUsage(message.usage);
+  if (message.type === "action") {
+    return isWorldIdentifier(message.actionId)
+      && isWorldIdentifier(message.requestId)
+      && isResidentId(message.agentId)
+      && (message.heardCallId === undefined || Number.isSafeInteger(message.heardCallId))
+      && isWorldPrimitiveAction(message.action);
   }
   if (message.type === "settled") {
     return typeof message.requestId === "string"
-      && isLiveAgentId(message.agentId)
-      && (
-        message.outcome === "completed"
-        || message.outcome === "cancelled"
-        || message.outcome === "failed"
-      )
-      && (message.usage === undefined || isWorldUsage(message.usage));
-  }
-  if (message.type === "batch_result") {
-    return typeof message.batchId === "string"
-      && message.batchId.length > 0
-      && isWorldBatchDecisions(message.decisions)
-      && isWorldUsage(message.usage);
-  }
-  if (message.type === "batch_settled") {
-    return typeof message.batchId === "string"
-      && Array.isArray(message.requestIds)
-      && Array.isArray(message.agentIds)
-      && message.requestIds.length === message.agentIds.length
-      && message.requestIds.every((requestId) => typeof requestId === "string" && requestId.length > 0)
-      && message.agentIds.every(isResidentId)
+      && isResidentId(message.agentId)
       && (
         message.outcome === "completed"
         || message.outcome === "cancelled"
@@ -635,50 +585,59 @@ export function isWorldAgentCommand(value: unknown): value is WorldAgentCommand 
   if (command.type === "connect" || command.type === "shutdown") return true;
   if (command.type === "think") {
     return typeof command.requestId === "string"
-      && isLiveAgentId(command.agentId)
-      && isWorldObservation(command.observation, command.agentId);
+      && command.requestId.length > 0
+      && isResidentId(command.agentId)
+      && isWorldObservation(command.observation, command.agentId)
+      && isWorldResidentMemory(command.memory);
   }
-  if (command.type === "think_batch") {
-    if (
-      typeof command.batchId !== "string"
-      || !command.batchId
-      || !Array.isArray(command.entries)
-      || command.entries.length < 1
-      || command.entries.length > AUTONOMOUS_AGENT_IDS.length
-    ) return false;
-    const requestIds = new Set<string>();
-    const agentIds = new Set<ResidentId>();
-    for (const entry of command.entries) {
-      if (
-        !entry
-        || typeof entry !== "object"
-        || typeof entry.requestId !== "string"
-        || !entry.requestId
-        || !isResidentId(entry.agentId)
-        || !isWorldObservation(entry.observation, entry.agentId)
-        || !isWorldResidentMemory(entry.memory)
-        || requestIds.has(entry.requestId)
-        || agentIds.has(entry.agentId)
-      ) return false;
-      requestIds.add(entry.requestId);
-      agentIds.add(entry.agentId);
-    }
-    return true;
+  if (command.type === "action_result") {
+    return isWorldIdentifier(command.actionId)
+      && isWorldIdentifier(command.requestId)
+      && isResidentId(command.agentId)
+      && isWorldToolResult(command.result, command.agentId);
   }
   if (command.type === "cancel") {
     return isOptionalUniqueList(command.agentIds, RESIDENT_IDS.length, isResidentId)
-      && isOptionalUniqueList(command.batchIds, RESIDENT_IDS.length, isWorldIdentifier)
       && isOptionalUniqueList(command.requestIds, RESIDENT_IDS.length, isWorldIdentifier);
   }
   return false;
 }
 
-export function isLiveAgentId(value: unknown): value is LiveAgentId {
-  return typeof value === "string" && (LIVE_AGENT_IDS as readonly string[]).includes(value);
+export function decodeWorldPrimitiveAction(value: unknown): WorldPrimitiveAction {
+  const action = object(value, "action");
+  return decodePrimitiveAction(action, text(action.kind, "action.kind", 16));
 }
 
-export function isAutonomousAgentId(value: unknown): value is AutonomousAgentId {
-  return isResidentId(value);
+function isWorldPrimitiveAction(value: unknown): value is WorldPrimitiveAction {
+  try {
+    decodeWorldPrimitiveAction(value);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function isWorldToolResult(value: unknown, agentId: ResidentId): value is WorldToolResult {
+  if (!isJsonObject(value)) return false;
+  const result = value as Partial<WorldToolResult>;
+  if (
+    !Number.isSafeInteger(result.worldRevision)
+    || (result.worldRevision as number) < 0
+    || !isJsonObject(result.outcome)
+    || !isWorldObservationSelf(result.self, agentId)
+    || !isDenseArrayOf(result.nearby, isWorldNearbyActor)
+    || !isDenseArrayOf(result.relevantEvents, isString)
+  ) return false;
+  const outcome = result.outcome as Partial<WorldActionOutcome>;
+  return (
+    outcome.status === "completed"
+    || outcome.status === "in_progress"
+    || outcome.status === "blocked"
+    || outcome.status === "rejected"
+    || outcome.status === "superseded"
+  )
+    && typeof outcome.detail === "string"
+    && isWorldPrimitiveAction(outcome.action);
 }
 
 export function isResidentId(value: unknown): value is ResidentId {
@@ -721,26 +680,6 @@ function isWorldResidentMemory(value: unknown): value is WorldResidentMemory {
     && isBoundedTextList(memory.recentDecisions, 6, 160)
     && Number.isSafeInteger(memory.lastBoardMessageId)
     && (memory.lastBoardMessageId as number) >= 0;
-}
-
-function isWorldBatchDecisions(value: unknown): value is readonly WorldBatchDecision[] {
-  if (
-    !Array.isArray(value)
-    || value.length < 1
-    || value.length > AUTONOMOUS_AGENT_IDS.length
-    || !isDenseArray(value)
-  ) return false;
-  const requestIds = new Set<string>();
-  const agentIds = new Set<ResidentId>();
-  for (const valueDecision of value) {
-    if (!isJsonObject(valueDecision)) return false;
-    const decision = valueDecision as Partial<WorldBatchDecision>;
-    if (!isWorldPlan(decision.plan) || !isWorldResidentMemory(decision.memory)) return false;
-    if (requestIds.has(decision.plan.requestId) || agentIds.has(decision.plan.agentId)) return false;
-    requestIds.add(decision.plan.requestId);
-    agentIds.add(decision.plan.agentId);
-  }
-  return true;
 }
 
 function isWorldObservation(value: unknown, agentId: ResidentId): value is WorldObservation {

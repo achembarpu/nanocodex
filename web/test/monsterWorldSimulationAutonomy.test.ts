@@ -2,14 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  AUTONOMOUS_AGENT_IDS,
-  decodeStagedPlan,
+  RESIDENT_IDS,
   type WorldResidentMemory,
 } from "../src/monsterWorldProtocol.ts";
 import {
   BASE_RESIDENT_COUNT,
   applyResidentMemory,
-  applyWorldPlan,
+  applyWorldToolAction,
   createWorldState,
   hasUnansweredGuildCall,
   liveAgentIdsInWorld,
@@ -21,15 +20,16 @@ import {
   setPopulationTarget,
   setWorldAgentsOnline,
   updateWorld,
+  worldToolResultAtDecisionBoundary,
 } from "../src/monsterWorldSimulation.ts";
 
 test("every on-map resident has autonomous state and bounded retained memory", () => {
   const state = createWorldState();
   const activeIds = liveAgentIdsInWorld(state);
   assert.equal(activeIds.length, BASE_RESIDENT_COUNT);
-  assert.deepEqual(activeIds, AUTONOMOUS_AGENT_IDS.slice(0, BASE_RESIDENT_COUNT));
-  assert.deepEqual(Object.keys(state.decisionVersions), AUTONOMOUS_AGENT_IDS);
-  assert.deepEqual(Object.keys(state.residentMemories), AUTONOMOUS_AGENT_IDS);
+  assert.deepEqual(activeIds, RESIDENT_IDS.slice(0, BASE_RESIDENT_COUNT));
+  assert.deepEqual(Object.keys(state.decisionVersions), RESIDENT_IDS);
+  assert.deepEqual(Object.keys(state.residentMemories), RESIDENT_IDS);
   assert.notStrictEqual(residentMemoryFor(state, "cinder"), residentMemoryFor(state, "june"));
   assert.notStrictEqual(
     residentMemoryFor(state, "cinder").goals,
@@ -83,24 +83,18 @@ test("speech, observations, calls, and plans include non-legacy residents", () =
   }
 
   const planState = createWorldState();
-  const observation = observationFor(planState, "june");
-  const plan = decodeStagedPlan({
-    request_id: "june-autonomous-1",
-    agent_id: "june",
-    state_version: observation.stateVersion,
-    summary: "checks the public mission board",
-    steps: [{ kind: "move", target: "mission_board" }],
-  }, {
+  const application = applyWorldToolAction(planState, {
+    actionId: "june-action-1",
     requestId: "june-autonomous-1",
     agentId: "june",
-    stateVersion: observation.stateVersion,
+    action: { kind: "move", target: "mission_board" },
   });
-  assert.deepEqual(applyWorldPlan(planState, plan), { accepted: true });
+  assert.equal(application.accepted, true);
 });
 
 test("resident lifecycle and global weather changes fence every affected decision", () => {
   const lifecycle = createWorldState();
-  const nextResident = AUTONOMOUS_AGENT_IDS[BASE_RESIDENT_COUNT];
+  const nextResident = RESIDENT_IDS[BASE_RESIDENT_COUNT];
   assert.ok(nextResident);
   const guestVersion = lifecycle.decisionVersions[nextResident];
   assert.deepEqual(setPopulationTarget(lifecycle, BASE_RESIDENT_COUNT + 1).entering, [nextResident]);
@@ -114,7 +108,7 @@ test("resident lifecycle and global weather changes fence every affected decisio
   const versions = { ...weather.decisionVersions };
   weather.weatherDueMs = 0;
   updateWorld(weather, 100);
-  for (const id of AUTONOMOUS_AGENT_IDS) {
+  for (const id of RESIDENT_IDS) {
     assert.equal(weather.decisionVersions[id], versions[id] + 1, id);
   }
 });
@@ -159,4 +153,60 @@ test("online Luna control suppresses only new idle fallback routines", () => {
   setWorldAgentsOnline(fallback, false);
   for (let index = 0; index < 150; index += 1) updateWorld(fallback, 100);
   assert.ok(fallbackIds.every((id) => fallback.actors[id].routineIndex !== fallbackIndexes[id]));
+});
+
+test("independent resident tools mutate through one reducer and return fresh observations", () => {
+  const state = createWorldState();
+  setWorldAgentsOnline(state, true);
+  const cinder = applyWorldToolAction(state, {
+    actionId: "cinder-say-1",
+    requestId: "cinder-turn-1",
+    agentId: "cinder",
+    action: { kind: "say", text: "Taking my place." },
+  });
+  const june = applyWorldToolAction(state, {
+    actionId: "june-wait-1",
+    requestId: "june-turn-1",
+    agentId: "june",
+    action: { kind: "wait", duration_ms: 300 },
+  });
+  assert.equal(cinder.accepted, true);
+  assert.equal(june.accepted, true);
+  if (!cinder.accepted || !june.accepted) return;
+  assert.equal(state.actors.cinder.tasks[0]?.requestId, "cinder-say-1");
+  assert.equal(state.actors.june.tasks[0]?.requestId, "june-wait-1");
+
+  updateWorld(state, 100);
+  const cinderResult = worldToolResultAtDecisionBoundary(state, cinder.pending);
+  assert.equal(cinderResult?.outcome.status, "completed");
+  assert.equal(cinderResult?.self.id, "cinder");
+  assert.equal(cinderResult?.worldRevision, observationFor(state, "cinder").stateVersion);
+  assert.equal(worldToolResultAtDecisionBoundary(state, june.pending), undefined);
+  updateWorld(state, 100);
+  updateWorld(state, 100);
+  const juneResult = worldToolResultAtDecisionBoundary(state, june.pending);
+  assert.equal(juneResult?.outcome.status, "completed");
+  assert.equal(juneResult?.self.id, "june");
+});
+
+test("a newer player instruction supersedes stale in-turn World control", () => {
+  const state = createWorldState();
+  setWorldAgentsOnline(state, true);
+  const firstSpeech = playerSpeak(state, "Everyone form a circle around me.", "call");
+  assert.ok(firstSpeech);
+  const heardCallId = observationFor(state, "cinder").playerOrder?.id;
+  assert.ok(heardCallId !== undefined);
+  const action = applyWorldToolAction(state, {
+    actionId: "cinder-circle-1",
+    requestId: "cinder-turn-circle",
+    agentId: "cinder",
+    heardCallId,
+    action: { kind: "move_relative", anchor: "player", dx_pixels: 64, dy_pixels: 0 },
+  });
+  assert.equal(action.accepted, true);
+  if (!action.accepted) return;
+  playerSpeak(state, "Everyone form a star around me.", "call");
+  const result = worldToolResultAtDecisionBoundary(state, action.pending);
+  assert.equal(result?.outcome.status, "superseded");
+  assert.match(result?.outcome.detail ?? "", /newer instruction/i);
 });

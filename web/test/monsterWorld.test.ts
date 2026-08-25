@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
-  LIVE_AGENT_IDS,
   RESIDENT_IDS,
   VOICE_RADIUS,
   WORLD_PROTOCOL,
@@ -171,7 +170,6 @@ test("the reducer owns movement, mission effects, stale rejection, and idempoten
 test("voice is spatial off-center and guild-wide at the central relay", () => {
   const relay = createWorldState();
   assert.equal(Object.keys(relay.actors).length, RESIDENT_IDS.length + 1);
-  assert.equal(LIVE_AGENT_IDS.length, 6);
   assert.equal(RESIDENT_IDS.length, 48);
   assert.equal(BASE_RESIDENT_COUNT, 36);
   assert.equal(MAX_RESIDENT_COUNT, 48);
@@ -342,7 +340,8 @@ test("a recognized order preempts old tasks and an in-flight tile before moving"
   assert.deepEqual(applyWorldPlan(state, oldPlan), { accepted: true });
   updateWorld(state, 100);
   assert.ok(state.actors.cinder.movement);
-  const versions = Object.fromEntries(LIVE_AGENT_IDS.map((id) => [id, state.decisionVersions[id]]));
+  const affectedResidents = RESIDENT_IDS.slice(0, BASE_RESIDENT_COUNT);
+  const versions = Object.fromEntries(affectedResidents.map((id) => [id, state.decisionVersions[id]]));
 
   const speech = playerSpeak(state, "Everyone come to me", "call");
   assert.ok(speech?.order);
@@ -354,7 +353,7 @@ test("a recognized order preempts old tasks and an in-flight tile before moving"
     state.actors.cinder.tasks[0]?.action.kind === "move" && state.actors.cinder.tasks[0].action.target,
     "player",
   );
-  for (const id of LIVE_AGENT_IDS) {
+  for (const id of affectedResidents) {
     assert.equal(state.decisionVersions[id], (versions[id] ?? 0) + 1, id);
   }
 });
@@ -645,7 +644,7 @@ test("population changes enter from outside, remain physical, and cross an edge 
   assert.ok(RESIDENT_IDS.every((id) => state.actors[id].scene === "guild_hall"));
 });
 
-test("resident actions use isolated retained Luna sessions with bounded turn scheduling", () => {
+test("one map resident owns one isolated retained Luna session and turn", () => {
   assert.match(worker, /from "nanocodex\/host"/);
   assert.match(worker, /toolMode: "direct"/);
   assert.doesNotMatch(worker, /harness|exec_command|web__run|image_gen/);
@@ -653,22 +652,24 @@ test("resident actions use isolated retained Luna sessions with bounded turn sch
   assert.match(worker, /const residentBoots = new Map<ResidentId, Promise<DefaultAgent>>\(\)/);
   assert.match(worker, /async function residentAgentFor[\s\S]*?residentBoots\.get[\s\S]*?residentBoots\.set[\s\S]*?residentAgents\.set/);
   assert.match(worker, /async function createResidentAgent[\s\S]*?return Agent\.create/);
-  assert.match(worker, /decodeResidentDecision\(input, active\.expected\)/);
-  assert.match(worker, /result = await turn\.result\(\)[\s\S]*?const decision = stagedDecisions\.get\(entry\.requestId\)/);
-  assert.match(worker, /agent\.turn\.prompt\(\{ input: residentPrompt\(active\.batchId, entry\) \}\)/);
+  assert.match(worker, /decodeWorldPrimitiveAction/);
+  assert.match(worker, /result = await turn\.result\(\)/);
+  assert.match(worker, /agent\.turn\.prompt\(\{ input: residentPrompt\(entry\) \}\)/);
   assert.doesNotMatch(worker, /agent\.turn\.prompt\(\{\s*id:/);
-  assert.match(worker, /const MAX_CONCURRENT_RESIDENT_TURNS = 6/);
-  assert.match(worker, /slice\(offset, offset \+ MAX_CONCURRENT_RESIDENT_TURNS\)[\s\S]*?runResidentTurn/);
+  assert.match(worker, /const activeTurns = new Map<ResidentId, ActiveResidentTurn>\(\)/);
+  assert.doesNotMatch(worker, /batch|MAX_CONCURRENT_RESIDENT_TURNS/i);
+  assert.match(worker, /type: "action"[\s\S]*?actionId[\s\S]*?action/);
+  assert.match(worker, /function resolveWorldAction/);
+  assert.match(worker, /const pendingWorldActions = new Map<string, PendingWorldAction>\(\)/);
   assert.doesNotMatch(worker, /MAX_(?:COMPLETED|ATTEMPTED)_TURNS|MAX_TOTAL_TOKENS|budgetFailureMessage/);
   assert.match(worker, /model: "gpt-5\.6-luna"/);
   assert.match(worker, /thinking: "none"/);
   assert.doesNotMatch(worker, /session\.spawn|LANE_COUNT|worldAgent/);
-  assert.match(worker, /async function cancelBatches[\s\S]*?residentTurn\.cancelled = true[\s\S]*?turn\?\.cancel\(\)/);
+  assert.match(worker, /async function cancelResidentTurns[\s\S]*?active\.cancelled = true[\s\S]*?turn\?\.cancel\(\)/);
   assert.match(worker, /async function shutdownResidents[\s\S]*?await releaseResidentAgents\(\)/);
   assert.match(worker, /async function releaseResidentAgents[\s\S]*?agent\.session\.shutdown\(\)/);
   assert.equal(worker.match(/releaseResidentAgents\(\)/g)?.length, 2);
-  assert.match(worker, /observedUsages[\s\S]*?usageFromFailure\(outcome\.reason\)[\s\S]*?combineWorldUsage/);
-  assert.match(worker, /throw usage === undefined \? cause : failureWithUsage\(cause, usage\)/);
+  assert.match(worker, /usage === undefined \? cause : failureWithUsage\(cause, usage\)/);
   assert.match(worker, /usage_limit_reached/);
   assert.match(worker, /blocked = true/);
 });
@@ -685,11 +686,14 @@ test("the World surface stays statically available, stoppable, and semantically 
   assert.match(component, /wake"\} \$\{onMapMindIds\.length\} minds/);
   assert.match(component, /Orchestrate by voice/);
   assert.match(component, /Q cycles loudness/);
-  assert.match(component, /MAX_CONCURRENT_RESIDENT_TURNS = 6/);
-  assert.match(component, /slice\(0, MAX_CONCURRENT_RESIDENT_TURNS\)/);
+  assert.doesNotMatch(component, /MAX_CONCURRENT_RESIDENT_TURNS|slice\(0,\s*6\)/);
+  assert.match(component, /pendingRequests\.current\.set\(request\.requestId, request\)/);
   assert.doesNotMatch(component, /turn slots/);
   assert.doesNotMatch(component, /MAX_MODEL_TURNS|MAX_AGENT_TOKENS|modelBudgetExhausted/);
-  assert.match(component, /type: "think_batch"/);
+  assert.match(component, /type: "think"/);
+  assert.match(component, /worldToolResultAtDecisionBoundary/);
+  assert.match(component, /type: "action_result"/);
+  assert.doesNotMatch(component, /batch/i);
   assert.match(component, /Semantic event stream/);
   assert.match(component, /Message board/);
   assert.match(component, /if \(mindsToWake\.length > 0\) startAgents\(\)/);
@@ -702,7 +706,7 @@ test("the World surface stays statically available, stoppable, and semantically 
     /loadWorldAssets\(\)\.then\([\s\S]*?setAssetError\([\s\S]*?World assets could not be loaded[\s\S]*?if \(assetError\) throw assetError/,
   );
   assert.match(component, /onPointerDown=\{handleCanvasPointerDown\}/);
-  assert.match(component, /Autonomous entries marked <b>nanocodex<\/b> come only from completed Luna batches/);
+  assert.match(component, /Every entry marked <b>nanocodex<\/b> comes from that resident's own/);
   assert.match(application, /surface === "world"[\s\S]*?target === document\.activeElement[\s\S]*?target\?\.matches\("\.monster-world-stage canvas"\)/);
   assert.match(worldCss, /prefers-reduced-motion: reduce/);
   assert.match(worldCss, /monster-world-population input\[type="range"\]/);
@@ -718,7 +722,7 @@ test("the World canvas renders only for active animation or explicit invalidatio
   );
   assert.match(
     component,
-    /updateWorld\(activeWorld, delta\);\s*if \(now >= nextCanvasDraw\) dirty = true;[\s\S]*?if \(activeWorld && dirty\) \{[\s\S]*?drawMonsterWorld\([\s\S]*?dirty = false;\s*nextCanvasDraw = now \+ WORLD_RENDER_INTERVAL_MS/,
+    /updateWorld\(activeWorld, delta\);[\s\S]*?if \(now >= nextCanvasDraw\) dirty = true;[\s\S]*?if \(activeWorld && dirty\) \{[\s\S]*?drawMonsterWorld\([\s\S]*?dirty = false;\s*nextCanvasDraw = now \+ WORLD_RENDER_INTERVAL_MS/,
   );
   assert.match(component, /if \(activeWorld && !paused\) scheduleFrame\(\);/);
   assert.match(

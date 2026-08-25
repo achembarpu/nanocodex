@@ -1,16 +1,13 @@
 import {
   ACTOR_IDS,
-  AUTONOMOUS_AGENT_IDS,
   GUEST_AGENT_IDS,
-  LIVE_AGENT_IDS,
-  NAMED_ROUTINE_AGENT_IDS,
   RESIDENT_IDS,
   VOICE_RADIUS,
   WORLD_ITEM_KINDS,
   WORLD_SCENE_IDS,
   WORLD_TARGETS,
   decodeWorldResidentMemory,
-  isAutonomousAgentId,
+  isResidentId,
   isWorldPlan,
   sanitizeDialogue,
   type ActorId,
@@ -19,7 +16,6 @@ import {
   type HeardGuildCall,
   type PlanOrigin,
   type ResidentId,
-  type RoutineAgentId,
   type VoiceLevel,
   type WorldAction,
   type WorldBoardMessage,
@@ -34,6 +30,7 @@ import {
   type WorldSceneId,
   type WorldSupplyState,
   type WorldTarget,
+  type WorldToolResult,
 } from "./monsterWorldProtocol.ts";
 import {
   WORLD_ENTRY_PORTALS,
@@ -250,6 +247,20 @@ export type PopulationChange = Readonly<{
 export type PlanApplication =
   | Readonly<{ accepted: true }>
   | Readonly<{ accepted: false; reason: "duplicate" | "invalid" | "stale" }>;
+
+export type WorldToolAction = Readonly<{
+  actionId: string;
+  requestId: string;
+  agentId: ResidentId;
+  heardCallId?: number;
+  action: WorldPrimitiveAction;
+  startedAtMs: number;
+  activityCursor: number;
+}>;
+
+export type WorldToolActionApplication =
+  | Readonly<{ accepted: true; pending: WorldToolAction }>
+  | Readonly<{ accepted: false; reason: "duplicate" | "invalid" | "superseded" }>;
 
 type ActorDefinition = Readonly<{
   name: string;
@@ -530,7 +541,7 @@ export function activeResidentCount(state: WorldState): number {
 }
 
 export function liveAgentIdsInWorld(state: WorldState): readonly ResidentId[] {
-  return AUTONOMOUS_AGENT_IDS.filter((id) => state.actors[id].presence === "active");
+  return RESIDENT_IDS.filter((id) => state.actors[id].presence === "active");
 }
 
 export function residentMemoryFor(state: WorldState, id: ResidentId): WorldResidentMemory {
@@ -598,11 +609,7 @@ export function setPopulationTarget(state: WorldState, requested: number): Popul
       projected += 1;
     }
   } else if (target < projected) {
-    const departureOrder: readonly ResidentId[] = [
-      ...[...GUEST_AGENT_IDS].reverse(),
-      ...[...NAMED_ROUTINE_AGENT_IDS].reverse(),
-      ...[...LIVE_AGENT_IDS].reverse(),
-    ];
+    const departureOrder: readonly ResidentId[] = [...RESIDENT_IDS].reverse();
     for (const id of departureOrder) {
       if (projected <= target) break;
       if (!beginResidentExit(state, id)) continue;
@@ -788,7 +795,7 @@ export function updateWorld(state: WorldState, deltaMs: number): void {
         ? "A silver drizzle crossed the Mystery Gate."
         : "The drizzle passed over Springleaf Guild.",
     );
-    for (const id of AUTONOMOUS_AGENT_IDS) state.decisionVersions[id] += 1;
+    for (const id of RESIDENT_IDS) state.decisionVersions[id] += 1;
   }
   for (const id of ACTOR_IDS) updateActor(state, state.actors[id], boundedDelta);
 }
@@ -1407,7 +1414,7 @@ export function playerInteract(state: WorldState): void {
     player.bubble = { text, untilMs: state.elapsedMs + bubbleDuration(text) };
     player.activity = `checked in with ${nearby.actor.name}`;
     addActivity(state, "player", `Scout checked in with ${nearby.actor.name}.`, "player");
-    if (isAutonomousAgentId(nearby.actor.id)) state.decisionVersions[nearby.actor.id] += 1;
+    if (isResidentId(nearby.actor.id)) state.decisionVersions[nearby.actor.id] += 1;
     nearby.actor.emote = { icon: "!", untilMs: state.elapsedMs + 1_500 };
     return;
   }
@@ -1418,14 +1425,14 @@ export function playerInteract(state: WorldState): void {
       : `You inspect ${poi.label}.`;
     player.bubble = { text, untilMs: state.elapsedMs + bubbleDuration(text) };
     addActivity(state, "player", text, "player");
-    for (const id of AUTONOMOUS_AGENT_IDS) state.decisionVersions[id] += 1;
+    for (const id of RESIDENT_IDS) state.decisionVersions[id] += 1;
     return;
   }
   player.emote = { icon: "?", untilMs: state.elapsedMs + 1_200 };
 }
 
 export function applyWorldPlan(state: WorldState, plan: WorldPlan): PlanApplication {
-  if (!isWorldPlan(plan) || plan.origin !== "nanocodex" || !isAutonomousAgentId(plan.agentId)) {
+  if (!isWorldPlan(plan) || plan.origin !== "nanocodex" || !isResidentId(plan.agentId)) {
     return { accepted: false, reason: "invalid" };
   }
   const actor = state.actors[plan.agentId];
@@ -1476,6 +1483,127 @@ export function applyWorldPlan(state: WorldState, plan: WorldPlan): PlanApplicat
     actor.id,
   );
   return { accepted: true };
+}
+
+export function applyWorldToolAction(
+  state: WorldState,
+  request: Omit<WorldToolAction, "startedAtMs" | "activityCursor">,
+): WorldToolActionApplication {
+  const actor = state.actors[request.agentId];
+  if (
+    actor.presence !== "active"
+    || !actionTargetsPresent(state, request.action)
+  ) return { accepted: false, reason: "invalid" };
+  if (state.seenRequestIds.includes(request.actionId)) {
+    return { accepted: false, reason: "duplicate" };
+  }
+  const pendingCallId = pendingDecisionCallId(state, request.agentId);
+  if (pendingCallId !== undefined && pendingCallId !== request.heardCallId) {
+    return { accepted: false, reason: "superseded" };
+  }
+
+  // The reducer is the single writer. A later tool call from this resident
+  // replaces its earlier control horizon, while every other resident keeps
+  // moving independently.
+  actor.tasks = tasksFor([request.action], "nanocodex", request.actionId);
+  actor.activity = actionLabel(request.action);
+  actor.intent = actionLabel(request.action);
+  actor.lastOrigin = "nanocodex";
+  actor.routineDueMs = state.elapsedMs + 9_000;
+  state.decisionVersions[request.agentId] += 1;
+  if (request.heardCallId !== undefined && state.heardCalls[request.agentId]?.id === request.heardCallId) {
+    state.acknowledgedCallIds[request.agentId] = request.heardCallId;
+  }
+  if (request.heardCallId !== undefined && state.playerOrders[request.agentId]?.id === request.heardCallId) {
+    state.acknowledgedPlayerOrderIds[request.agentId] = request.heardCallId;
+  }
+  state.seenRequestIds.push(request.actionId);
+  if (state.seenRequestIds.length > 128) state.seenRequestIds.shift();
+  state.agentDecisions += 1;
+
+  return {
+    accepted: true,
+    pending: Object.freeze({
+      ...request,
+      startedAtMs: state.elapsedMs,
+      activityCursor: state.nextActivityId - 1,
+    }),
+  };
+}
+
+export function worldToolResultAtDecisionBoundary(
+  state: WorldState,
+  pending: WorldToolAction,
+  controlHorizonMs = 1_200,
+): WorldToolResult | undefined {
+  const actor = state.actors[pending.agentId];
+  const newerCallId = pendingDecisionCallId(state, pending.agentId);
+  if (newerCallId !== undefined && newerCallId !== pending.heardCallId) {
+    return worldToolResult(state, pending, "superseded", "A newer instruction arrived.");
+  }
+  const active = actor.tasks.some(({ requestId }) => requestId === pending.actionId);
+  const normalizedActivity = actor.activity.toLowerCase();
+  if (
+    active
+    && (
+      normalizedActivity.includes("waiting for a clear")
+      || normalizedActivity.includes("could not")
+      || normalizedActivity.includes("gave up")
+    )
+  ) {
+    return worldToolResult(state, pending, "blocked", actor.activity);
+  }
+  if (!active) {
+    const status = normalizedActivity.includes("could not") || normalizedActivity.includes("gave up")
+      ? "blocked"
+      : "completed";
+    return worldToolResult(state, pending, status, actor.activity);
+  }
+  if (state.elapsedMs - pending.startedAtMs >= controlHorizonMs) {
+    return worldToolResult(state, pending, "in_progress", actor.activity);
+  }
+  return undefined;
+}
+
+export function rejectedWorldToolResult(
+  state: WorldState,
+  agentId: ResidentId,
+  action: WorldPrimitiveAction,
+  status: "rejected" | "superseded",
+  detail: string,
+): WorldToolResult {
+  return worldToolResult(state, {
+    actionId: "rejected",
+    requestId: "rejected",
+    agentId,
+    action,
+    startedAtMs: state.elapsedMs,
+    activityCursor: state.nextActivityId - 1,
+  }, status, detail);
+}
+
+function worldToolResult(
+  state: WorldState,
+  pending: WorldToolAction,
+  status: WorldToolResult["outcome"]["status"],
+  detail: string,
+): WorldToolResult {
+  const observation = observationFor(state, pending.agentId);
+  const relevantEvents = state.activities
+    .filter(({ id, actorId, audience }) => (
+      id > pending.activityCursor
+      && (audience === undefined || audience.includes(pending.agentId))
+      && (actorId === undefined || actorId === pending.agentId || actorId === "player")
+    ))
+    .slice(-6)
+    .map(({ text }) => text);
+  return Object.freeze({
+    worldRevision: observation.stateVersion,
+    outcome: Object.freeze({ status, action: pending.action, detail }),
+    self: observation.self,
+    nearby: observation.nearby,
+    relevantEvents: Object.freeze(relevantEvents),
+  });
 }
 
 function planTargetsPresent(state: WorldState, steps: readonly WorldAction[]): boolean {
@@ -1703,13 +1831,13 @@ function createActors(): Record<ActorId, WorldActor> {
 
 function createDecisionVersions(): Record<ResidentId, number> {
   return Object.fromEntries(
-    AUTONOMOUS_AGENT_IDS.map((id) => [id, 1]),
+    RESIDENT_IDS.map((id) => [id, 1]),
   ) as Record<ResidentId, number>;
 }
 
 function createResidentMemories(): Record<ResidentId, WorldResidentMemory> {
   return Object.fromEntries(
-    AUTONOMOUS_AGENT_IDS.map((id) => [id, copyResidentMemory({})]),
+    RESIDENT_IDS.map((id) => [id, copyResidentMemory({})]),
   ) as Record<ResidentId, WorldResidentMemory>;
 }
 
@@ -2015,13 +2143,13 @@ function tileDuration(actor: WorldActor, baseMs: number): number {
 }
 
 function fenceActorDecision(state: WorldState, actor: WorldActor): void {
-  if (actor.id !== "player" && isAutonomousAgentId(actor.id)) {
+  if (actor.id !== "player" && isResidentId(actor.id)) {
     state.decisionVersions[actor.id] += 1;
   }
 }
 
 function fenceAllResidentDecisions(state: WorldState): void {
-  for (const id of AUTONOMOUS_AGENT_IDS) state.decisionVersions[id] += 1;
+  for (const id of RESIDENT_IDS) state.decisionVersions[id] += 1;
 }
 
 function scheduleRoutine(state: WorldState, actor: WorldActor & { id: ResidentId }): void {
@@ -2602,7 +2730,7 @@ function decodeSavedActivities(value: unknown): WorldActivity[] {
       .slice(0, 240);
     if (!text) return [];
     const audience = Array.isArray(activity.audience)
-      ? activity.audience.filter((id): id is ResidentId => isAutonomousAgentId(id))
+      ? activity.audience.filter((id): id is ResidentId => isResidentId(id))
       : undefined;
     seen.add(activity.id as number);
     return [Object.freeze({
@@ -2682,7 +2810,7 @@ function restoreSavedState(state: WorldState, saved: string): void {
           const text = sanitizeDialogue(message.text);
           if (!text) return [];
           const audience = Array.isArray(message.audience)
-            ? message.audience.filter((id): id is ResidentId => isAutonomousAgentId(id))
+            ? message.audience.filter((id): id is ResidentId => isResidentId(id))
             : undefined;
           return [Object.freeze({
             id: message.id as number,
@@ -2731,7 +2859,7 @@ function restoreSavedState(state: WorldState, saved: string): void {
     }
     if (value.residentMemories && typeof value.residentMemories === "object") {
       const memories = value.residentMemories as Record<string, unknown>;
-      for (const id of AUTONOMOUS_AGENT_IDS) {
+      for (const id of RESIDENT_IDS) {
         if (!Object.hasOwn(memories, id)) continue;
         state.residentMemories[id] = copyResidentMemory(memories[id]);
       }

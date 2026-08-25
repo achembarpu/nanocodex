@@ -1,15 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import {
-  AUTONOMOUS_AGENT_IDS,
   EMPTY_WORLD_RESIDENT_MEMORY,
+  RESIDENT_IDS,
   WORLD_PROTOCOL,
   coordinationBasisFor,
-  decodeResidentDecision,
-  decodeStagedBatch,
   isWorldAgentCommand,
   isWorldAgentMessage,
-  isWorldPlan,
   isWorldUsageLimitMessage,
   type WorldObservation,
 } from "../src/monsterWorldProtocol.ts";
@@ -45,167 +42,81 @@ const observation = (agentId: "cinder" | "june"): WorldObservation => ({
   },
 });
 
-test("every resident is eligible for bounded autonomous Luna batches", () => {
-  assert.equal(AUTONOMOUS_AGENT_IDS.length, 48);
-  assert.equal(AUTONOMOUS_AGENT_IDS.includes("june"), true);
-  assert.equal(AUTONOMOUS_AGENT_IDS.includes("guest24"), true);
+test("every resident is eligible for its own persistent Luna turn", () => {
+  assert.equal(RESIDENT_IDS.length, 48);
+  assert.equal(RESIDENT_IDS.includes("june"), true);
+  assert.equal(RESIDENT_IDS.includes("guest24"), true);
 
-  const command = {
+  const cinder = {
     protocol: WORLD_PROTOCOL,
-    type: "think_batch",
-    batchId: "batch-1",
-    entries: [
-      { requestId: "cinder-7", agentId: "cinder", observation: observation("cinder"), memory: EMPTY_WORLD_RESIDENT_MEMORY },
-      { requestId: "june-11", agentId: "june", observation: observation("june"), memory: EMPTY_WORLD_RESIDENT_MEMORY },
-    ],
+    type: "think",
+    requestId: "cinder-7",
+    agentId: "cinder",
+    observation: observation("cinder"),
+    memory: EMPTY_WORLD_RESIDENT_MEMORY,
   } as const;
-  assert.equal(isWorldAgentCommand(command), true);
-  assert.equal(isWorldAgentCommand({
-    ...command,
-    entries: [...command.entries, command.entries[0]],
-  }), false);
+  const june = { ...cinder, requestId: "june-11", agentId: "june", observation: observation("june") } as const;
+  assert.equal(isWorldAgentCommand(cinder), true);
+  assert.equal(isWorldAgentCommand(june), true);
+  assert.equal(isWorldAgentCommand({ ...cinder, memory: undefined }), false);
 });
 
-test("staged batches require exactly one versioned plan and bounded memory per resident", () => {
-  const decisions = decodeStagedBatch({
-    batch_id: "batch-1",
-    decisions: [
-      {
-        plan: {
-          request_id: "cinder-7",
-          agent_id: "cinder",
-          state_version: 7,
-          summary: "checks Bell Bridge",
-          steps: [{ kind: "move", target: "bridge" }],
-        },
-        memory: {
-          summary: "Scout asked me to inspect Bell Bridge.",
-          goals: ["Reach Bell Bridge"],
-          relationships: ["June is carrying the guild post"],
-          recent_decisions: ["Accepted Scout's bridge order"],
-          last_board_message_id: 12,
-        },
-      },
-      {
-        plan: {
-          request_id: "june-11",
-          agent_id: "june",
-          state_version: 11,
-          summary: "delivers the guild post",
-          steps: [{ kind: "move", target: "plaza" }],
-        },
-        memory: {
-          summary: "I have a fresh guild post for the plaza.",
-          goals: ["Deliver the post"],
-          relationships: [],
-          recent_decisions: ["Chose the plaza route"],
-          last_board_message_id: 12,
-        },
-      },
-    ],
-  }, {
-    batchId: "batch-1",
-    entries: [
-      { requestId: "cinder-7", agentId: "cinder", stateVersion: 7 },
-      { requestId: "june-11", agentId: "june", stateVersion: 11 },
-    ],
-  });
-
-  assert.deepEqual(decisions.map(({ plan }) => plan.agentId), ["cinder", "june"]);
-  assert.equal(decisions[0]?.memory.lastBoardMessageId, 12);
-  assert.ok(Object.isFrozen(decisions));
+test("resident settlements carry a typed breaker reason", () => {
   assert.equal(isWorldAgentMessage({
     protocol: WORLD_PROTOCOL,
-    type: "batch_result",
-    batchId: "batch-1",
-    decisions,
-    usage: { modelTurns: 2, inputTokens: 10, outputTokens: 5, totalTokens: 15 },
-  }), true);
-
-  assert.throws(() => decodeStagedBatch({
-    batch_id: "batch-1",
-    decisions: [{
-      plan: {
-        request_id: "cinder-7",
-        agent_id: "cinder",
-        state_version: 7,
-        summary: "duplicates one resident",
-        steps: [{ kind: "move", target: "bridge" }],
-      },
-      memory: {},
-    }],
-  }, {
-    batchId: "batch-1",
-    entries: [
-      { requestId: "cinder-7", agentId: "cinder", stateVersion: 7 },
-      { requestId: "june-11", agentId: "june", stateVersion: 11 },
-    ],
-  }), /exactly one entry/);
-});
-
-test("batch settlements carry a typed breaker reason", () => {
-  assert.equal(isWorldAgentMessage({
-    protocol: WORLD_PROTOCOL,
-    type: "batch_settled",
-    batchId: "batch-1",
-    requestIds: ["cinder-7", "june-11"],
-    agentIds: ["cinder", "june"],
+    type: "settled",
+    requestId: "cinder-7",
+    agentId: "cinder",
     outcome: "failed",
     failure: "usage_limit",
     message: "usage limit reached",
   }), true);
   assert.equal(isWorldAgentMessage({
     protocol: WORLD_PROTOCOL,
-    type: "batch_settled",
-    batchId: "batch-1",
-    requestIds: ["cinder-7"],
-    agentIds: ["cinder"],
+    type: "settled",
+    requestId: "cinder-7",
+    agentId: "cinder",
     outcome: "failed",
     failure: "made_up",
   }), false);
 });
 
-test("one resident decision is bound to its session identity and advances only its memory", () => {
-  const previous = Object.freeze({
-    summary: "Cinder keeps watch at Bell Bridge.",
-    goals: Object.freeze(["Protect the bridge"]),
-    relationships: Object.freeze(["June carries guild dispatches"]),
-    recentDecisions: Object.freeze(["Waited by the bridge"]),
-    lastBoardMessageId: 12,
-  });
-  const decision = decodeResidentDecision({
-    summary: "takes the eastern circle slot",
-    steps: [{ kind: "move_relative", anchor: "player", dx_pixels: 64, dy_pixels: 0 }],
-    memory_note: "Scout asked the group to hold a circle.",
-  }, {
+test("one resident action is correlated to its owning turn and fresh reducer result", () => {
+  const action = {
+    protocol: WORLD_PROTOCOL,
+    type: "action",
+    actionId: "cinder-action-1",
     requestId: "cinder-circle",
     agentId: "cinder",
-    stateVersion: 7,
-    memory: previous,
-  });
+    heardCallId: 12,
+    action: { kind: "move_relative", anchor: "player", dx_pixels: 64, dy_pixels: 0 },
+  } as const;
+  assert.equal(isWorldAgentMessage(action), true);
+  assert.equal(isWorldAgentMessage({ ...action, agentId: "june" }), true);
+  assert.equal(isWorldAgentMessage({ ...action, action: { ...action.action, dx_pixels: 0 } }), false);
+  assert.equal(isWorldAgentMessage({ ...action, action: { ...action.action, anchor: "nobody" } }), false);
 
-  assert.equal(decision.plan.requestId, "cinder-circle");
-  assert.equal(decision.plan.agentId, "cinder");
-  assert.deepEqual(decision.memory.goals, previous.goals);
-  assert.deepEqual(decision.memory.relationships, previous.relationships);
-  assert.deepEqual(decision.memory.recentDecisions, [
-    "Scout asked the group to hold a circle.",
-    "Waited by the bridge",
-  ]);
-  const spoofed = decodeResidentDecision({
-    summary: "impersonates June",
-    steps: [{ kind: "move", target: "plaza" }],
-    agent_id: "june",
-  }, {
-    requestId: "cinder-circle",
-    agentId: "cinder",
-    stateVersion: 7,
-  });
-  assert.equal(spoofed.plan.agentId, "cinder");
-  assert.equal(spoofed.plan.requestId, "cinder-circle");
+  const current = observation("cinder");
+  const result = {
+    protocol: WORLD_PROTOCOL,
+    type: "action_result",
+    actionId: action.actionId,
+    requestId: action.requestId,
+    agentId: action.agentId,
+    result: {
+      worldRevision: current.stateVersion,
+      outcome: { status: "in_progress", action: action.action, detail: "moving into position" },
+      self: current.self,
+      nearby: current.nearby,
+      relevantEvents: ["Cinder moved east."],
+    },
+  } as const;
+  assert.equal(isWorldAgentCommand(result), true);
+  assert.equal(isWorldAgentCommand({ ...result, agentId: "june" }), false);
+  assert.equal(isWorldAgentCommand({ ...result, result: { ...result.result, worldRevision: -1 } }), false);
 });
 
-test("stable co-listener ordering yields unique circle and mirrored two-side slots", () => {
+test("stable co-listener ordering yields unique circle, star, and mirrored two-side slots", () => {
   const listeners = ["cinder", "moss", "rill", "luma", "iris", "rook"] as const;
   const bases = listeners.map((id) => coordinationBasisFor(listeners, id));
 
@@ -225,38 +136,38 @@ test("stable co-listener ordering yields unique circle and mirrored two-side slo
     { side: "right", dxPixels: 64, dyPixels: 0 },
     { side: "right", dxPixels: 64, dyPixels: 32 },
   ]);
+  assert.deepEqual(bases.map((basis) => basis?.star), [
+    { dxPixels: 0, dyPixels: -96 },
+    { dxPixels: 72, dyPixels: -32 },
+    { dxPixels: 48, dyPixels: 32 },
+    { dxPixels: 0, dyPixels: 40 },
+    { dxPixels: -48, dyPixels: 32 },
+    { dxPixels: -72, dyPixels: -32 },
+  ]);
   assert.equal(new Set(bases.map((basis) => JSON.stringify(basis?.radial))).size, listeners.length);
+  assert.equal(new Set(bases.map((basis) => JSON.stringify(basis?.star))).size, listeners.length);
+  const fullPopulation = RESIDENT_IDS.slice(0, 36);
+  assert.equal(
+    new Set(fullPopulation.map((id) => JSON.stringify(coordinationBasisFor(fullPopulation, id)?.star))).size,
+    fullPopulation.length,
+  );
   assert.deepEqual(coordinationBasisFor(listeners, "cinder"), bases[0]);
   assert.equal(coordinationBasisFor(listeners, "june"), undefined);
 });
 
-test("runtime plan and batch guards reject sparse and duplicate decisions", () => {
-  const cinder = runtimeDecision("cinder", "cinder-7", 7);
-  const june = runtimeDecision("june", "june-11", 11);
-  const sparseSteps = new Array<unknown>(2);
-  sparseSteps[0] = { kind: "move", target: "bridge" };
-  assert.equal(isWorldPlan({ ...cinder.plan, steps: sparseSteps }), false);
-
-  const sparseDecisions = new Array<unknown>(2);
-  sparseDecisions[0] = cinder;
-  assert.equal(isWorldAgentMessage(batchResult(sparseDecisions)), false);
-  assert.equal(isWorldAgentMessage(batchResult([
-    cinder,
-    runtimeDecision("june", "cinder-7", 11),
-  ])), false, "duplicate request ids");
-  assert.equal(isWorldAgentMessage(batchResult([
-    cinder,
-    runtimeDecision("cinder", "cinder-8", 8),
-  ])), false, "duplicate residents");
-  assert.equal(isWorldAgentMessage(batchResult([cinder, june])), true);
-  assert.equal(isWorldAgentMessage({
-    ...batchResult([cinder]),
-    usage: { inputTokens: 10, outputTokens: 5, totalTokens: 15 },
-  }), false, "resident-turn accounting is required");
-  assert.equal(isWorldAgentMessage({
-    ...batchResult([cinder]),
-    usage: { modelTurns: 0, inputTokens: 10, outputTokens: 5, totalTokens: 15 },
-  }), false, "resident-turn accounting must be positive");
+test("runtime action messages reject malformed physical actions", () => {
+  const action = {
+    protocol: WORLD_PROTOCOL,
+    type: "action",
+    actionId: "cinder-action",
+    requestId: "cinder-turn",
+    agentId: "cinder",
+    action: { kind: "say", text: "On my way!" },
+  } as const;
+  assert.equal(isWorldAgentMessage(action), true);
+  assert.equal(isWorldAgentMessage({ ...action, actionId: "" }), false);
+  assert.equal(isWorldAgentMessage({ ...action, action: { kind: "say", text: "" } }), false);
+  assert.equal(isWorldAgentMessage({ ...action, action: { kind: "wait", duration_ms: 9_000 } }), false);
 });
 
 test("cancel selectors are real bounded arrays of nonempty unique ids", () => {
@@ -265,21 +176,17 @@ test("cancel selectors are real bounded arrays of nonempty unique ids", () => {
     protocol: WORLD_PROTOCOL,
     type: "cancel",
     agentIds: ["cinder"],
-    batchIds: ["batch-1"],
     requestIds: ["cinder-7"],
   }), true);
 
   const sparseIds = new Array<string>(1);
   const invalidSelectors: readonly Record<string, unknown>[] = [
     { agentIds: "cinder" },
-    { batchIds: { every: () => true } },
     { requestIds: null },
     { agentIds: [] },
-    { batchIds: ["   "] },
     { requestIds: ["same", "same"] },
-    { batchIds: ["x".repeat(97)] },
     { requestIds: sparseIds },
-    { requestIds: Array.from({ length: AUTONOMOUS_AGENT_IDS.length + 1 }, (_, index) => `request-${index}`) },
+    { requestIds: Array.from({ length: RESIDENT_IDS.length + 1 }, (_, index) => `request-${index}`) },
   ];
   for (const selectors of invalidSelectors) {
     assert.equal(isWorldAgentCommand({
@@ -290,18 +197,15 @@ test("cancel selectors are real bounded arrays of nonempty unique ids", () => {
   }
 });
 
-test("think batches deeply reject malformed observations", () => {
+test("resident turns deeply reject malformed observations", () => {
   const valid = detailedObservation();
   const accepts = (candidate: unknown) => isWorldAgentCommand({
     protocol: WORLD_PROTOCOL,
-    type: "think_batch",
-    batchId: "batch-observation",
-    entries: [{
-      requestId: "cinder-observation",
-      agentId: "cinder",
-      observation: candidate,
-      memory: EMPTY_WORLD_RESIDENT_MEMORY,
-    }],
+    type: "think",
+    requestId: "cinder-observation",
+    agentId: "cinder",
+    observation: candidate,
+    memory: EMPTY_WORLD_RESIDENT_MEMORY,
   });
   assert.equal(accepts(valid), true);
 
@@ -345,35 +249,6 @@ test("usage-limit classification recognizes shared API error spellings", () => {
     assert.equal(isWorldUsageLimitMessage(message), false, message);
   }
 });
-
-function runtimeDecision(
-  agentId: "cinder" | "june",
-  requestId: string,
-  stateVersion: number,
-) {
-  return {
-    plan: {
-      protocol: WORLD_PROTOCOL,
-      requestId,
-      agentId,
-      stateVersion,
-      summary: "checks the town",
-      steps: [{ kind: "move", target: "plaza" }],
-      origin: "nanocodex",
-    },
-    memory: EMPTY_WORLD_RESIDENT_MEMORY,
-  } as const;
-}
-
-function batchResult(decisions: unknown) {
-  return {
-    protocol: WORLD_PROTOCOL,
-    type: "batch_result",
-    batchId: "batch-malicious",
-    decisions,
-    usage: { modelTurns: 2, inputTokens: 10, outputTokens: 5, totalTokens: 15 },
-  } as const;
-}
 
 function detailedObservation(): WorldObservation {
   return {

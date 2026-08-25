@@ -14,7 +14,6 @@ import {
   type CredentialSource,
 } from "./modelSession";
 import {
-  AUTONOMOUS_AGENT_IDS,
   RESIDENT_IDS,
   VOICE_LEVELS,
   VOICE_RADIUS,
@@ -27,7 +26,6 @@ import {
   type VoiceLevel,
   type WorldAgentCommand,
   type WorldAgentMessage,
-  type WorldBatchThinkEntry,
   type WorldFailureClass,
   type WorldUsage,
 } from "./monsterWorldProtocol";
@@ -48,8 +46,7 @@ import {
   MAX_RESIDENT_COUNT,
   activeResidentCount,
   actorWorldPosition,
-  applyResidentMemory,
-  applyWorldPlan,
+  applyWorldToolAction,
   createWorldState,
   formatWorldTime,
   hasUnansweredGuildCall,
@@ -61,25 +58,26 @@ import {
   playerInteract,
   playerSpeak,
   requestResidentExit,
+  rejectedWorldToolResult,
   residentMemoryFor,
   residentAtWorldPoint,
   serializeWorldState,
   setPopulationTarget,
   setWorldAgentsOnline,
   updateWorld,
+  worldToolResultAtDecisionBoundary,
   worldCameraForState,
   type WorldActor,
   type WorldState,
+  type WorldToolAction,
 } from "./monsterWorldSimulation";
 import "./MonsterWorld.css";
 
-const MAX_CONCURRENT_RESIDENT_TURNS = 6;
 const WORLD_RENDER_INTERVAL_MS = 50;
 
 type RuntimeStatus = "offline" | "starting" | "ready" | "blocked" | "error";
 
 type UsageTotals = {
-  modelBatches: number;
   modelTurns: number;
   inputTokens: number;
   outputTokens: number;
@@ -87,23 +85,15 @@ type UsageTotals = {
   estimatedUsd: number;
 };
 
-type PendingResidentRequest = Readonly<{
+type PendingResidentRequest = {
   requestId: string;
-  batchId: string;
   agentId: ResidentId;
-}>;
-
-type PendingBatch = {
-  readonly batchId: string;
-  readonly requests: readonly PendingResidentRequest[];
-  usageCounted: boolean;
   resultReceived: boolean;
-  readonly cancelledResidentIds: Set<ResidentId>;
-  readonly rejectedResidentIds: Set<ResidentId>;
+  rejected: boolean;
+  cancelled: boolean;
 };
 
 const emptyUsage: UsageTotals = {
-  modelBatches: 0,
   modelTurns: 0,
   inputTokens: 0,
   outputTokens: 0,
@@ -118,8 +108,8 @@ export function MonsterWorld() {
   const workerRef = useRef<Worker | undefined>(undefined);
   const renderRequestRef = useRef<(() => void) | undefined>(undefined);
   const heldDirections = useRef(new Set<Direction>());
-  const pendingBatches = useRef(new Map<string, PendingBatch>());
   const pendingRequests = useRef(new Map<string, PendingResidentRequest>());
+  const pendingWorldActions = useRef(new Map<string, WorldToolAction>());
   const nextThinkAt = useRef(createThinkSchedule());
   const usageRef = useRef<UsageTotals>(emptyUsage);
   const runtimeStatusRef = useRef<RuntimeStatus>("offline");
@@ -232,6 +222,22 @@ export function MonsterWorld() {
         const direction = heldDirections.current.values().next().value;
         if (direction) movePlayer(activeWorld, direction);
         updateWorld(activeWorld, delta);
+        const worker = workerRef.current;
+        if (worker) {
+          for (const [actionId, pending] of pendingWorldActions.current) {
+            const result = worldToolResultAtDecisionBoundary(activeWorld, pending);
+            if (!result) continue;
+            pendingWorldActions.current.delete(actionId);
+            worker.postMessage({
+              protocol: WORLD_PROTOCOL,
+              type: "action_result",
+              actionId,
+              requestId: pending.requestId,
+              agentId: pending.agentId,
+              result,
+            } satisfies WorldAgentCommand);
+          }
+        }
         if (now >= nextCanvasDraw) dirty = true;
       }
       if (activeWorld && dirty) {
@@ -289,8 +295,8 @@ export function MonsterWorld() {
       worker.postMessage({ protocol: WORLD_PROTOCOL, type: "shutdown" });
       window.setTimeout(() => worker.terminate(), 900);
     }
-    pendingBatches.current.clear();
     pendingRequests.current.clear();
+    pendingWorldActions.current.clear();
     setRuntimeStatus("offline");
     runtimeStatusRef.current = "offline";
     setAgentError(undefined);
@@ -321,7 +327,6 @@ export function MonsterWorld() {
         setAgentError(failureMessage);
         if (worldRef.current) setWorldAgentsOnline(worldRef.current, false);
       } else if (message.status === "stopped") {
-        pendingBatches.current.clear();
         pendingRequests.current.clear();
         setRuntimeStatus("offline");
         runtimeStatusRef.current = "offline";
@@ -330,76 +335,75 @@ export function MonsterWorld() {
       invalidateWorld();
       return;
     }
-    if (message.type === "batch_result") {
-      const batch = pendingBatches.current.get(message.batchId);
-      if (!batch || batch.resultReceived) return;
-      batch.resultReceived = true;
-      if (!batch.usageCounted) {
-        commitModelBatchUsage(message.usage, usageRef, setUsage);
-        batch.usageCounted = true;
-      }
+    if (message.type === "action") {
+      const request = pendingRequests.current.get(message.requestId);
+      if (!request || request.agentId !== message.agentId || request.cancelled) return;
+      request.resultReceived = true;
       const activeWorld = worldRef.current;
       if (!activeWorld) return;
-      let accepted = 0;
-      const rejected: string[] = [];
-      for (const decision of message.decisions) {
-        const application = applyWorldPlan(activeWorld, decision.plan);
-        if (application.accepted) {
-          applyResidentMemory(activeWorld, decision.plan.agentId, decision.memory);
-          accepted += 1;
-          continue;
-        }
-        batch.rejectedResidentIds.add(decision.plan.agentId);
-        rejected.push(`${activeWorld.actors[decision.plan.agentId].name} (${application.reason})`);
+      const application = applyWorldToolAction(activeWorld, {
+        actionId: message.actionId,
+        requestId: message.requestId,
+        agentId: message.agentId,
+        ...(message.heardCallId === undefined ? {} : { heardCallId: message.heardCallId }),
+        action: message.action,
+      });
+      request.rejected = !application.accepted;
+      if (application.accepted) {
+        pendingWorldActions.current.set(message.actionId, application.pending);
+      } else {
+        worker.postMessage({
+          protocol: WORLD_PROTOCOL,
+          type: "action_result",
+          actionId: message.actionId,
+          requestId: message.requestId,
+          agentId: message.agentId,
+          result: rejectedWorldToolResult(
+            activeWorld,
+            message.agentId,
+            message.action,
+            application.reason === "superseded" ? "superseded" : "rejected",
+            `The reducer rejected this action: ${application.reason}.`,
+          ),
+        } satisfies WorldAgentCommand);
       }
-      setAgentNotice(rejected.length === 0
-        ? `Luna batch applied ${accepted} resident plan${accepted === 1 ? "" : "s"}.`
-        : `Luna batch applied ${accepted}/${message.decisions.length} resident plans; discarded ${rejected.join(", ")}.`);
       invalidateWorld();
       return;
     }
-    if (message.type !== "batch_settled") return;
-    const batch = pendingBatches.current.get(message.batchId);
-    if (!batch) return;
-    if (!batch.usageCounted && (message.usage || message.outcome !== "cancelled")) {
-      commitModelBatchUsage(message.usage, usageRef, setUsage);
-      batch.usageCounted = true;
+    if (message.type !== "settled") return;
+    const request = pendingRequests.current.get(message.requestId);
+    if (!request || request.agentId !== message.agentId) return;
+    pendingRequests.current.delete(request.requestId);
+    for (const [actionId, pending] of pendingWorldActions.current) {
+      if (pending.requestId === request.requestId) pendingWorldActions.current.delete(actionId);
     }
-    pendingBatches.current.delete(batch.batchId);
-    for (const request of batch.requests) {
-      if (pendingRequests.current.get(request.requestId)?.batchId === batch.batchId) {
-        pendingRequests.current.delete(request.requestId);
-      }
-    }
+    if (message.usage) commitModelUsage(message.usage, usageRef, setUsage);
 
     const failureMessage = message.message ?? failureDescription(message.failure);
     const terminallyBlocked = message.failure === "usage_limit"
       || message.failure === "budget"
       || isWorldUsageLimitMessage(failureMessage);
-    const now = performance.now();
     const activeWorld = worldRef.current;
-    for (const request of batch.requests) {
-      const unanswered = activeWorld
-        ? hasUnansweredPlayerOrder(activeWorld, request.agentId)
-          || hasUnansweredGuildCall(activeWorld, request.agentId)
-        : false;
-      const retryDelay = terminallyBlocked || runtimeStatusRef.current === "blocked"
-        ? Number.POSITIVE_INFINITY
-        : batch.cancelledResidentIds.has(request.agentId)
-          ? 0
+    const unanswered = activeWorld
+      ? hasUnansweredPlayerOrder(activeWorld, request.agentId)
+        || hasUnansweredGuildCall(activeWorld, request.agentId)
+      : false;
+    const retryDelay = terminallyBlocked || runtimeStatusRef.current === "blocked"
+      ? Number.POSITIVE_INFINITY
+      : request.cancelled
+        ? 0
         : unanswered
           ? message.outcome === "failed" ? 6_000 : 0
-          : batch.rejectedResidentIds.has(request.agentId)
+          : request.rejected
             ? 2_000
             : message.outcome === "completed"
               ? 7_500
               : message.outcome === "cancelled"
                 ? 2_500
                 : 8_000;
-      nextThinkAt.current[request.agentId] = retryDelay === Number.POSITIVE_INFINITY
-        ? retryDelay
-        : now + retryDelay + residentDelay(request.agentId);
-    }
+    nextThinkAt.current[request.agentId] = retryDelay === Number.POSITIVE_INFINITY
+      ? retryDelay
+      : performance.now() + retryDelay + residentDelay(request.agentId);
 
     if (terminallyBlocked) {
       const notice = message.failure === "usage_limit"
@@ -411,12 +415,11 @@ export function MonsterWorld() {
       setAgentNotice(notice);
       if (activeWorld) setWorldAgentsOnline(activeWorld, false);
     } else if (message.outcome === "failed") {
-      const names = batch.requests.map(({ agentId }) => activeWorld?.actors[agentId].name ?? agentId);
-      setAgentNotice(`Luna batch for ${names.join(", ")} failed: ${failureMessage}`);
-    } else if (message.outcome === "completed" && !batch.resultReceived) {
-      setAgentNotice("A Luna batch completed without a usable result; its residents were rescheduled.");
+      const name = activeWorld?.actors[request.agentId].name ?? request.agentId;
+      setAgentNotice(`${name}'s Luna turn failed independently: ${failureMessage}`);
+    } else if (message.outcome === "completed" && !request.resultReceived) {
+      setAgentNotice(`${request.agentId}'s Luna turn completed without acting in the World; retrying independently.`);
     }
-
     invalidateWorld();
   }, [invalidateWorld]);
 
@@ -433,8 +436,8 @@ export function MonsterWorld() {
       name: "nanocodex-monster-world",
     });
     workerRef.current = worker;
-    pendingBatches.current.clear();
     pendingRequests.current.clear();
+    pendingWorldActions.current.clear();
     setAgentError(undefined);
     setAgentNotice(undefined);
     setRuntimeStatus("starting");
@@ -449,8 +452,8 @@ export function MonsterWorld() {
       setRuntimeStatus("error");
       runtimeStatusRef.current = "error";
       setAgentError(event.message || "The browser Worker could not start the world agents.");
-      pendingBatches.current.clear();
       pendingRequests.current.clear();
+      pendingWorldActions.current.clear();
       if (worldRef.current) setWorldAgentsOnline(worldRef.current, false);
       invalidateWorld();
     });
@@ -467,7 +470,6 @@ export function MonsterWorld() {
         || !worker
         || document.visibilityState !== "visible"
         || paused
-        || pendingBatches.current.size > 0
       ) return;
       const now = performance.now();
       const activeAgentIds = new Set([...pendingRequests.current.values()].map(({ agentId }) => agentId));
@@ -477,7 +479,7 @@ export function MonsterWorld() {
         ) - Number(
           hasUnansweredPlayerOrder(activeWorld, left) || hasUnansweredGuildCall(activeWorld, left),
         );
-        return callPriority || AUTONOMOUS_AGENT_IDS.indexOf(left) - AUTONOMOUS_AGENT_IDS.indexOf(right);
+        return callPriority || RESIDENT_IDS.indexOf(left) - RESIDENT_IDS.indexOf(right);
       });
       const agentIds = orderedAgentIds.filter((agentId) => {
         if (activeAgentIds.has(agentId)) return false;
@@ -490,50 +492,35 @@ export function MonsterWorld() {
           || actor.departure
         ) return false;
         return true;
-      }).slice(0, MAX_CONCURRENT_RESIDENT_TURNS);
+      });
       if (agentIds.length === 0) return;
 
-      const batchId = `world-batch-${crypto.randomUUID()}`;
-      const requests = agentIds.map((agentId): PendingResidentRequest => Object.freeze({
-        requestId: `world-request-${crypto.randomUUID()}`,
-        batchId,
-        agentId,
-      }));
-      const entries: WorldBatchThinkEntry[] = requests.map(({ requestId, agentId }) => ({
-        requestId,
-        agentId,
-        observation: observationFor(activeWorld, agentId),
-        memory: residentMemoryFor(activeWorld, agentId),
-      }));
-      const batch: PendingBatch = {
-        batchId,
-        requests: Object.freeze(requests),
-        usageCounted: false,
-        resultReceived: false,
-        cancelledResidentIds: new Set(),
-        rejectedResidentIds: new Set(),
-      };
-      pendingBatches.current.set(batchId, batch);
-      for (const request of requests) {
+      for (const agentId of agentIds) {
+        const request: PendingResidentRequest = {
+          requestId: `world-request-${crypto.randomUUID()}`,
+          agentId,
+          resultReceived: false,
+          rejected: false,
+          cancelled: false,
+        };
         pendingRequests.current.set(request.requestId, request);
         nextThinkAt.current[request.agentId] = Number.POSITIVE_INFINITY;
-      }
-      try {
-        worker.postMessage({
-          protocol: WORLD_PROTOCOL,
-          type: "think_batch",
-          batchId,
-          entries,
-        } satisfies WorldAgentCommand);
-        invalidateWorld();
-      } catch (cause) {
-        pendingBatches.current.delete(batchId);
-        for (const request of requests) {
+        try {
+          worker.postMessage({
+            protocol: WORLD_PROTOCOL,
+            type: "think",
+            requestId: request.requestId,
+            agentId,
+            observation: observationFor(activeWorld, agentId),
+            memory: residentMemoryFor(activeWorld, agentId),
+          } satisfies WorldAgentCommand);
+        } catch (cause) {
           pendingRequests.current.delete(request.requestId);
           nextThinkAt.current[request.agentId] = now + 5_000 + residentDelay(request.agentId);
+          setAgentNotice(`Could not wake ${activeWorld.actors[agentId].name}: ${cause instanceof Error ? cause.message : String(cause)}`);
         }
-        setAgentNotice(`Could not send a Luna batch: ${cause instanceof Error ? cause.message : String(cause)}`);
       }
+      invalidateWorld();
     };
     schedule();
     const timer = window.setInterval(schedule, 500);
@@ -562,8 +549,8 @@ export function MonsterWorld() {
       worker.postMessage({ protocol: WORLD_PROTOCOL, type: "shutdown" });
       window.setTimeout(() => worker.terminate(), 700);
     }
-    pendingBatches.current.clear();
     pendingRequests.current.clear();
+    pendingWorldActions.current.clear();
   }, []);
 
   useEffect(() => {
@@ -611,14 +598,14 @@ export function MonsterWorld() {
     };
   }, [invalidateWorld, requestWorldRender]);
 
-  const cancelResidentBatches = (ids: readonly ResidentId[]): number => {
+  const cancelResidentTurns = (ids: readonly ResidentId[]): number => {
     const residents = new Set(ids);
-    const matchingRequests = [...pendingBatches.current.values()].flatMap((batch) =>
-      batch.requests.filter(({ agentId }) => residents.has(agentId)).map((request) => {
-        batch.cancelledResidentIds.add(request.agentId);
-        return request;
-      })
-    );
+    const matchingRequests = [...pendingRequests.current.values()]
+      .filter(({ agentId }) => residents.has(agentId));
+    for (const request of matchingRequests) request.cancelled = true;
+    for (const [actionId, pending] of pendingWorldActions.current) {
+      if (residents.has(pending.agentId)) pendingWorldActions.current.delete(actionId);
+    }
     if (matchingRequests.length > 0) {
       workerRef.current?.postMessage({
         protocol: WORLD_PROTOCOL,
@@ -637,7 +624,7 @@ export function MonsterWorld() {
     if (!speech) return;
     const mindsToWake = speech.liveAddressed;
     for (const agentId of mindsToWake) nextThinkAt.current[agentId] = 0;
-    cancelResidentBatches(mindsToWake);
+    cancelResidentTurns(mindsToWake);
     setPaused(false);
     if (speech.order) {
       setSpeechNotice(undefined);
@@ -660,7 +647,7 @@ export function MonsterWorld() {
   };
 
   const cancelDepartingTurns = (ids: readonly ResidentId[]) => {
-    cancelResidentBatches(ids);
+    cancelResidentTurns(ids);
   };
 
   const departResident = (residentId: ResidentId): boolean => {
@@ -728,7 +715,7 @@ export function MonsterWorld() {
   const pendingByAgent = new Set([...pendingRequests.current.values()].map(({ agentId }) => agentId));
   const relayActive = isGuildRelayActive(world);
   const residentsOnMap = activeResidentCount(world);
-  const onMapMindIds = AUTONOMOUS_AGENT_IDS.filter((id) => world.actors[id].presence !== "absent");
+  const onMapMindIds = RESIDENT_IDS.filter((id) => world.actors[id].presence !== "absent");
   const scout = world.actors.player;
   const scoutPosition = actorWorldPosition(scout);
   const currentSceneLabel = sceneLabel(scoutPosition.scene);
@@ -940,7 +927,7 @@ export function MonsterWorld() {
           <section className="monster-world-cast" aria-labelledby="world-cast-title">
             <header>
               <div><p>All on-map residents · retained private memory</p><h2 id="world-cast-title">Autonomous minds</h2></div>
-              <span>{pendingBatches.current.size} model batch{pendingBatches.current.size === 1 ? "" : "es"} active</span>
+              <span>{pendingRequests.current.size} resident mind{pendingRequests.current.size === 1 ? "" : "s"} thinking</span>
             </header>
             <div className="monster-world-scale" aria-label="World population architecture">
               <span><strong>{residentsOnMap}</strong> on map</span>
@@ -1082,11 +1069,11 @@ export function MonsterWorld() {
           <footer className="monster-world-budget">
             <div>
               <span>resident activity</span>
-              <strong>{usage.modelTurns} turns · {usage.modelBatches} envelopes</strong>
+              <strong>{usage.modelTurns} independent turns</strong>
             </div>
             <p>{usage.totalTokens.toLocaleString()} observed tokens · {usage.estimatedUsd > 0 ? `$${usage.estimatedUsd.toFixed(4)} estimated` : "cost appears when reported"}</p>
             <p>GPT-5.6 Luna · thinking none · one persistent session per resident · bounded concurrent execution.</p>
-            <p>Scout orders are reducer-owned and remain physical under model failure. Autonomous entries marked <b>nanocodex</b> come only from completed Luna batches.</p>
+            <p>Scout orders are reducer-owned and remain physical under model failure. Every entry marked <b>nanocodex</b> comes from that resident's own completed Luna turn.</p>
           </footer>
         </aside>
       </div>
@@ -1123,18 +1110,17 @@ function carriedItemLabel(item: WorldActor["carrying"]): string {
   return "Empty satchel";
 }
 
-function commitModelBatchUsage(
-  batch: WorldUsage | undefined,
+function commitModelUsage(
+  turn: WorldUsage | undefined,
   usageRef: { current: UsageTotals },
   publish: (usage: UsageTotals) => void,
 ): UsageTotals {
   const next = {
-    modelBatches: usageRef.current.modelBatches + 1,
-    modelTurns: usageRef.current.modelTurns + (batch?.modelTurns ?? 0),
-    inputTokens: usageRef.current.inputTokens + (batch?.inputTokens ?? 0),
-    outputTokens: usageRef.current.outputTokens + (batch?.outputTokens ?? 0),
-    totalTokens: usageRef.current.totalTokens + (batch?.totalTokens ?? 0),
-    estimatedUsd: usageRef.current.estimatedUsd + (Number(batch?.estimatedUsd) || 0),
+    modelTurns: usageRef.current.modelTurns + (turn?.modelTurns ?? 0),
+    inputTokens: usageRef.current.inputTokens + (turn?.inputTokens ?? 0),
+    outputTokens: usageRef.current.outputTokens + (turn?.outputTokens ?? 0),
+    totalTokens: usageRef.current.totalTokens + (turn?.totalTokens ?? 0),
+    estimatedUsd: usageRef.current.estimatedUsd + (Number(turn?.estimatedUsd) || 0),
   };
   usageRef.current = next;
   publish(next);
@@ -1144,9 +1130,9 @@ function commitModelBatchUsage(
 function failureDescription(failure: WorldFailureClass | undefined): string {
   if (failure === "usage_limit") return "The Luna usage limit was reached.";
   if (failure === "budget") return "The Luna resident-turn safety budget was reached.";
-  if (failure === "transient") return "A temporary Luna transport failure interrupted the batch.";
-  if (failure === "invalid") return "The Luna batch result did not satisfy the world contract.";
-  if (failure === "cancelled") return "The Luna batch was cancelled.";
+  if (failure === "transient") return "A temporary Luna transport failure interrupted this resident's turn.";
+  if (failure === "invalid") return "The resident's Luna result did not satisfy the world contract.";
+  if (failure === "cancelled") return "The resident's Luna turn was cancelled.";
   return "Unknown Luna resident-turn failure.";
 }
 
@@ -1205,12 +1191,12 @@ function isTypingTarget(target: EventTarget | null): boolean {
 
 function createThinkSchedule(): Record<ResidentId, number> {
   return Object.fromEntries(
-    AUTONOMOUS_AGENT_IDS.map((id) => [id, 0]),
+    RESIDENT_IDS.map((id) => [id, 0]),
   ) as Record<ResidentId, number>;
 }
 
 function residentDelay(id: ResidentId): number {
-  const index = AUTONOMOUS_AGENT_IDS.indexOf(id);
+  const index = RESIDENT_IDS.indexOf(id);
   return Math.max(index, 0) % 12 * 120;
 }
 

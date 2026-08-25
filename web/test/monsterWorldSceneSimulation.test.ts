@@ -14,6 +14,7 @@ import {
   isWorldPositionBlocked,
 } from "../src/monsterWorldMap.ts";
 import {
+  BASE_RESIDENT_COUNT,
   WORLD_COLUMNS,
   WORLD_PIXEL_HEIGHT,
   WORLD_PIXEL_WIDTH,
@@ -282,7 +283,7 @@ test("observations and hearing are scene-aware while the public board and roster
   assert.equal(cinder.self.scene, "guild_hall");
   assert.equal(cinder.self.carrying, "supply_pack");
   assert.equal(cinder.nearby.some(({ id }) => id === "player" || id === "moss"), false);
-  assert.equal(cinder.roster.length, 25);
+  assert.equal(cinder.roster.length, BASE_RESIDENT_COUNT + 1);
   assert.equal(cinder.roster.find(({ id }) => id === "cinder")?.scene, "guild_hall");
   assert.equal(cinder.roster.find(({ id }) => id === "moss")?.scene, "town");
   assert.deepEqual(cinder.supplies, state.supplies);
@@ -325,9 +326,9 @@ test("observations and hearing are scene-aware while the public board and roster
   );
 });
 
-test("six situated residents execute stable circle and two-side slots without collisions or swaps", () => {
+test("six situated residents execute stable circle, star, and two-side slots without collisions or swaps", () => {
   const listeners = ["cinder", "moss", "rill", "luma", "iris", "rook"] as const;
-  for (const formation of ["radial", "twoSides"] as const) {
+  for (const formation of ["radial", "star", "twoSides"] as const) {
     const state = formationWorld(listeners);
     for (const id of listeners) {
       const basis = coordinationBasisFor(listeners, id);
