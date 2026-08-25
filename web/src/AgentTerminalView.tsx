@@ -64,7 +64,6 @@ export function AgentTerminalView({
     input: string;
     submittedAt: number;
   }>();
-  const [welcomeDismissed, setWelcomeDismissed] = useState(false);
   const [readySessionId, setReadySessionId] = useState<string>();
   const submittedPrompts = useRef<Array<{ input: string; submittedAt: number }>>([]);
   const pendingRootPrompts = useRef<PromptTiming[]>([]);
@@ -128,14 +127,9 @@ export function AgentTerminalView({
     onStateChange({ error: agentError, retry: retryAgent, status: agentStatus });
   }, [agentError, agentStatus, onStateChange, retryAgent]);
 
-  useEffect(() => {
-    if (welcome) setWelcomeDismissed(false);
-  }, [welcome]);
-
   const unavailableMessage = inactiveMessage?.({ agentError, agentStatus });
   const submitTouchPrompt = useCallback((input: string) => {
     if (!input.trim()) return;
-    setWelcomeDismissed(true);
     const submittedAt = performance.now();
     if (agentStatus !== "ready") {
       setPendingTouchSubmission({ input, submittedAt });
@@ -188,7 +182,7 @@ export function AgentTerminalView({
       isLoadingOlder={controller.isLoadingOlder}
       mode={mode}
       status={agentStatus}
-      welcome={welcomeDismissed ? undefined : welcome}
+      welcome={welcome}
       onLoadOlder={controller.loadOlder}
     />
   );
@@ -226,6 +220,7 @@ export function TerminalTranscriptSurface({
   const followTail = useRef(true);
   const loadOlderArmed = useRef(false);
   const preserveScroll = useRef<{ scrollHeight: number; scrollTop: number } | undefined>(undefined);
+  const visibleWelcome = entries.length === 0 ? welcome : undefined;
 
   useLayoutEffect(() => {
     const element = transcript.current;
@@ -234,22 +229,22 @@ export function TerminalTranscriptSurface({
     if (preserved) {
       preserveScroll.current = undefined;
       element.scrollTop = preserved.scrollTop + element.scrollHeight - preserved.scrollHeight;
-    } else if (welcome) element.scrollTop = 0;
+    } else if (visibleWelcome) element.scrollTop = 0;
     else if (followTail.current) element.scrollTop = element.scrollHeight;
-  }, [entries, welcome]);
+  }, [entries, visibleWelcome]);
 
   useEffect(() => {
     const element = transcript.current;
     if (!element) return;
     const observer = new ResizeObserver(() => {
-      if (welcome) element.scrollTop = 0;
+      if (visibleWelcome) element.scrollTop = 0;
       else if (followTail.current) element.scrollTop = element.scrollHeight;
     });
     const content = element.firstElementChild;
     observer.observe(element);
     if (content) observer.observe(content);
     return () => observer.disconnect();
-  }, [welcome]);
+  }, [visibleWelcome]);
 
   return (
     <section
@@ -285,9 +280,9 @@ export function TerminalTranscriptSurface({
       >
         <div className="agent-dom-transcript-inner">
           <strong className="agent-terminal-brand">nanocodex</strong>
-          {welcome ? <article className="agent-terminal-markdown is-assistant is-welcome">
+          {visibleWelcome ? <article className="agent-terminal-markdown is-assistant is-welcome">
             <Streamdown components={MARKDOWN_COMPONENTS} controls={false} linkSafety={LINK_SAFETY} mode="static" skipHtml>
-              {welcome}
+              {visibleWelcome}
             </Streamdown>
           </article> : null}
           {entries.map((entry) => <TerminalEntryView entry={entry} key={entry.id} />)}
