@@ -1,4 +1,4 @@
-import { connectionFromWire } from "../internal.mjs";
+import { connectionFromWire, connectionMatchesRequest } from "../internal.mjs";
 
 const CLOUD_ACCOUNT_PROVIDERS = Object.freeze(["github", "gmail", "gdrive", "x", "chatgpt"]);
 const CONNECTOR_RESOURCE_PREFIX = "urn:nanocodex:connector:";
@@ -279,6 +279,10 @@ export async function reconnect(client, options = {}) {
     const connection = connectionFromWire(wire);
     if (connection.grant.status !== "active"
       || connection.grant.expiresAt <= Math.floor(Date.now() / 1_000)) {
+      client._clearSession();
+      return undefined;
+    }
+    if (!connectionMatchesRequest(connection, options)) {
       client._clearSession();
       return undefined;
     }

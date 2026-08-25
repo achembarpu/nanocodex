@@ -411,6 +411,35 @@ test("Connect persists, validates, and clears an app-scoped grant session", asyn
   assert.equal(restored.grant.id, connected.grant.id);
   assert.equal(requests.at(-1).headers.authorization, `Bearer ${wire.grant_token}`);
 
+  const mismatchedStorage = memoryStorage();
+  mismatchedStorage.setItem(
+    "nanocodex:connect:session-workspace:session",
+    storage.getItem("nanocodex:connect:session-workspace:session"),
+  );
+  const mismatchedClient = Client.create({
+    appId: "session-workspace",
+    dialog: Dialog.memory(),
+    provider: { request() { throw new Error("wallet must not reopen"); } },
+    session: mismatchedStorage,
+    transport,
+  });
+  assert.equal(mismatchedClient._resumeConnection({
+    capabilities: {
+      agent: { finalMessages: true, actionSummaries: true },
+      cloudAccounts: { github: true, chatgpt: true },
+    },
+    permission: "agent.run",
+  }), undefined);
+  const mismatched = await mismatchedClient.connection.reconnect({
+    capabilities: {
+      agent: { finalMessages: true, actionSummaries: true },
+      cloudAccounts: { github: true, chatgpt: true },
+    },
+    permission: "agent.run",
+  });
+  assert.equal(mismatched, undefined);
+  assert.equal(mismatchedClient._hasSession(), false);
+
   await restoredClient.connection.disconnect();
   assert.equal(storage.getItem("nanocodex:connect:session-workspace:session"), null);
   assert.equal(restoredClient._hasSession(), false);

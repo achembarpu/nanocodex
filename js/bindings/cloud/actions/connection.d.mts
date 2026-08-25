@@ -86,7 +86,13 @@ export declare namespace disconnect {
 export function disconnect(client: Client, options?: disconnect.Options | undefined): disconnect.ReturnType;
 
 export declare namespace reconnect {
-  type Options = Readonly<{ signal?: AbortSignal | undefined }>;
+  type Options = Readonly<{
+    /** Reject a retained grant that does not carry these exact app capabilities. */
+    capabilities?: Pick<Capabilities, "agent" | "cloudAccounts"> | undefined;
+    /** Reject a retained grant issued for another permission preset. */
+    permission?: string | undefined;
+    signal?: AbortSignal | undefined;
+  }>;
   type ReturnType = Promise<Connection | undefined>;
   type ErrorType = Error;
 }

@@ -50,7 +50,7 @@ export function createConfig(parameters) {
       listeners.add(listener);
       return () => listeners.delete(listener);
     },
-    async _reconnectAgent(agentOptions) {
+    async _reconnectAgent(agentOptions, reconnectOptions) {
       if (state.status === "connected") {
         return Object.freeze({ connection: state.connection, agent: state.agent });
       }
@@ -63,8 +63,8 @@ export function createConfig(parameters) {
       reconnecting = (async () => {
         let agent;
         try {
-          const resumed = client._resumeConnection?.();
-          const refreshing = client.connection.reconnect();
+          const resumed = client._resumeConnection?.(reconnectOptions);
+          const refreshing = client.connection.reconnect(reconnectOptions);
           void refreshing.catch(() => {});
           if (resumed) {
             try {
@@ -170,10 +170,10 @@ export function useConnectAgent(parameters = {}) {
   useCloseCommittedDialog(config, snapshot);
   useEffect(() => {
     if (parameters.reconnectOnMount === false) return;
-    void config._reconnectAgent(parameters.agent).catch((error) => {
+    void config._reconnectAgent(parameters.agent, parameters.reconnect).catch((error) => {
       console.error("Nanocodex Connect session restore failed", error);
     });
-  }, [config, parameters.agent, parameters.reconnectOnMount]);
+  }, [config, parameters.agent, parameters.reconnect, parameters.reconnectOnMount]);
   const mutation = useMutation({
     ...parameters.mutation,
     mutationKey: ["nanocodex", "connectAgent"],

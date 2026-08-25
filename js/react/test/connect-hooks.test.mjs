@@ -16,14 +16,16 @@ test("useConnectAgent reopens one persisted durable grant session on mount", asy
   });
   const agent = Object.freeze({ id: "agent-durable" });
   let reconnects = 0;
+  let reconnectOptions;
   let creates = 0;
   let notifications = 0;
   const config = createConfig({
     client: {
       _hasSession() { return true; },
       connection: {
-        async reconnect() {
+        async reconnect(options) {
           reconnects += 1;
+          reconnectOptions = options;
           return connection;
         },
       },
@@ -41,7 +43,13 @@ test("useConnectAgent reopens one persisted durable grant session on mount", asy
   let snapshot;
 
   function Consumer() {
-    snapshot = useConnectAgent({ config });
+    snapshot = useConnectAgent({
+      config,
+      reconnect: {
+        capabilities: { agent: { finalMessages: true } },
+        permission: "agent.run",
+      },
+    });
     return null;
   }
 
@@ -56,6 +64,10 @@ test("useConnectAgent reopens one persisted durable grant session on mount", asy
   await waitFor(() => snapshot.connectionStatus === "connected");
 
   assert.equal(reconnects, 1);
+  assert.deepEqual(reconnectOptions, {
+    capabilities: { agent: { finalMessages: true } },
+    permission: "agent.run",
+  });
   assert.equal(creates, 1);
   assert.equal(notifications, 1);
   assert.equal(snapshot.connection, connection);

@@ -120,6 +120,8 @@ export type UseConnectAgentParameters<
   context = unknown,
 > = ConfigParameter & Readonly<{
   agent?: Omit<Actions.agent.create.Options, "connection"> | undefined;
+  /** Exact permission projection a persisted grant must satisfy before reopening. */
+  reconnect?: Omit<Actions.connection.reconnect.Options, "signal"> | undefined;
   /** Validate and reopen the app-scoped durable grant session on mount. @default true */
   reconnectOnMount?: boolean | undefined;
   mutation?: Omit<

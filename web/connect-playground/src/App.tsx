@@ -50,6 +50,14 @@ const DEFAULT_REQUEST: ConnectRequest = {
   },
 };
 
+const RECONNECT_REQUEST = {
+  capabilities: {
+    agent: DEFAULT_REQUEST.visibility,
+    cloudAccounts: DEFAULT_REQUEST.connectors,
+  },
+  permission: "agent.run",
+} as const;
+
 const EMPTY_OBSERVATION: AppObservation = { actions: [], historyTurns: 0, traceEvents: 0 };
 
 export function App() {
@@ -58,7 +66,7 @@ export function App() {
   const [request, setRequest] = useState<ConnectRequest>(DEFAULT_REQUEST);
   const [observation, setObservation] = useState<AppObservation>(EMPTY_OBSERVATION);
   const [detailsOpen, setDetailsOpen] = useState(false);
-  const connect = useConnectAgent({ config });
+  const connect = useConnectAgent({ config, reconnect: RECONNECT_REQUEST });
   const connection = connect.connection;
   const fund = useFund({ config });
   const logoutAccount = useLogoutAccount({ config });

@@ -1,6 +1,6 @@
 import { connectActions } from "./Decorator.mjs";
 import { iframe } from "./Dialog.mjs";
-import { connectionFromWire } from "./internal.mjs";
+import { connectionFromWire, connectionMatchesRequest } from "./internal.mjs";
 import { create as createRemoteProvider } from "./RemoteProvider.mjs";
 import { http } from "./Transport.mjs";
 
@@ -100,14 +100,15 @@ export function create(parameters) {
   });
   Object.defineProperty(base, "_resumeConnection", {
     enumerable: false,
-    value() {
+    value(options) {
       const session = readSession(sessionStorage, sessionStorageKey);
       if (!session?.connection) return undefined;
       try {
         const connection = connectionFromWire(session.connection);
         if (connection.grant.id.toLowerCase() !== session.grantId.toLowerCase()
           || connection.grant.status !== "active"
-          || connection.grant.expiresAt <= Math.floor(Date.now() / 1_000)) {
+          || connection.grant.expiresAt <= Math.floor(Date.now() / 1_000)
+          || !connectionMatchesRequest(connection, options)) {
           return undefined;
         }
         sessionToken = session.token;

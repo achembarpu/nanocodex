@@ -1,5 +1,7 @@
 import { InvalidResponseError } from "./Errors.mjs";
 
+const CLOUD_ACCOUNT_PROVIDERS = Object.freeze(["github", "gmail", "gdrive", "x", "chatgpt"]);
+
 export function connectionFromWire(value) {
   const wire = object(value, "connection");
   const grant = object(wire.grant, "connection.grant");
@@ -33,6 +35,36 @@ export function connectionFromWire(value) {
       maxPerRequest: bigint(mpp.max_per_request_atomics, "connection.mpp.max_per_request_atomics"),
     }),
   });
+}
+
+export function connectionMatchesRequest(connection, options = {}) {
+  if (options.permission !== undefined && connection.grant.permission !== options.permission) {
+    return false;
+  }
+  const requestedCloudAccounts = options.capabilities?.cloudAccounts;
+  if (requestedCloudAccounts !== undefined) {
+    const expected = CLOUD_ACCOUNT_PROVIDERS.filter(
+      (provider) => requestedCloudAccounts?.[provider] === true,
+    );
+    if (connection.grant.connectors.length !== expected.length
+      || !connection.grant.connectors.every((value, index) => value === expected[index])) {
+      return false;
+    }
+  }
+  const requestedAgent = options.capabilities?.agent;
+  if (requestedAgent !== undefined) {
+    const rawTraces = requestedAgent?.rawTraces === true;
+    const expected = {
+      finalMessages: rawTraces || requestedAgent?.finalMessages !== false,
+      actionSummaries: rawTraces || requestedAgent?.actionSummaries !== false,
+      conversationHistory: rawTraces || requestedAgent?.conversationHistory === true,
+      rawTraces,
+    };
+    for (const name of Object.keys(expected)) {
+      if (connection.grant.visibility[name] !== expected[name]) return false;
+    }
+  }
+  return true;
 }
 
 export function preparedConnectionFromWire(value) {
