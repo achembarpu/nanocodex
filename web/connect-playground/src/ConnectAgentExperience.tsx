@@ -163,7 +163,6 @@ function isComposerTextarea(target: EventTarget | null): target is HTMLTextAreaE
 
 function reportClientStage(stage: string) {
   const body = JSON.stringify({ stage });
-  if (navigator.sendBeacon?.(`${apiHost}/v1/client-diagnostics`, body)) return;
   void fetch(`${apiHost}/v1/client-diagnostics`, {
     method: "POST",
     body,
