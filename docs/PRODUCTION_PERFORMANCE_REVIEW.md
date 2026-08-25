@@ -591,8 +591,10 @@ result observers; half-open SSE reads reconnect after a bounded idle interval.
 Browser route unmount is presentation-only while an accepted Turn is live.
 Managed credential ownership calls have hard deadlines even for non-cooperative
 service bindings, while permanent account and subject tombstones prevent timed-
-out late requests from resurrecting ownership. An ambiguous outer create commit
-always invokes the same durable cleanup. Finally, the route-lifetime Agent
+out late requests from resurrecting ownership. An ambiguous keyed create keeps
+and refreshes the same preparation lease; keyless legacy creates compensate
+immediately, and the durable watchdog owns abandonment. Deletion commits its
+durable marker and alarm before the irreversible local tombstone. Finally, the route-lifetime Agent
 wrapper preserves later Worker failure identity, so heartbeat failure still
 publishes an actionable error and permits a fresh generation.
 

@@ -73,7 +73,7 @@ test("managed Agent retries creation with one stable identity", async () => {
       if (attempt === 1) throw new Error("injected lost response");
       if (attempt === 2) {
         return Response.json(
-          { error: "agent cleanup initialization failed" },
+          { error: "agent cleanup commit failed" },
           { status: 503 },
         );
       }

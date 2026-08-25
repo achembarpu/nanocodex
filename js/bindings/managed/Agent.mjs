@@ -31,7 +31,7 @@ export async function create(options = {}) {
   const idempotencyKey = `managed-create:${globalThis.crypto.randomUUID()}`;
   let receipt;
   let failure;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
     try {
       receipt = await client.json("/v1/agents", {
         method: "POST",
@@ -41,15 +41,26 @@ export async function create(options = {}) {
     } catch (error) {
       failure = error;
       if (!(error instanceof ManagedError)
-        || !["network_error", "agent cleanup initialization failed"].includes(error.code)
-        || attempt === 2) {
+        || (error.code !== "network_error"
+          && error.status !== 408
+          && error.status !== 429
+          && !(error.status >= 500))
+        || attempt === 7) {
         throw error;
       }
-      await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
+      await new Promise((resolve) => setTimeout(
+        resolve,
+        createRetryDelayMs(attempt),
+      ));
     }
   }
   if (!receipt) throw failure;
   return agentHandle(client, requiredString(receipt, "agent_id"));
+}
+
+function createRetryDelayMs(attempt) {
+  const ceiling = Math.min(2_000, 250 * 2 ** attempt);
+  return Math.floor(Math.random() * (ceiling + 1));
 }
 
 /** List handles for every managed agent owned by the authenticated account. */

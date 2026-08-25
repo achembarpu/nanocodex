@@ -465,20 +465,26 @@ function authHeaders(extra) {
 
 async function createAgentRequest(idempotencyKey) {
   let failure;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
     try {
       const response = await fetch("/v1/agents", {
         method: "POST",
         headers: authHeaders({ "idempotency-key": idempotencyKey }),
       });
-      if (response.status !== 503) return response;
-      const body = await response.clone().json().catch(() => undefined);
-      if (body && body.error !== "agent cleanup initialization failed") return response;
-      failure = new Error("agent cleanup initialization failed");
+      if (response.status !== 408 && response.status !== 429 && response.status < 500) {
+        return response;
+      }
+      failure = new Error("agent creation returned HTTP " + response.status);
+      await response.body?.cancel();
     } catch (error) {
       failure = error;
     }
-    if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
+    if (attempt < 7) {
+      await new Promise((resolve) => setTimeout(
+        resolve,
+        Math.floor(Math.random() * (Math.min(2_000, 250 * 2 ** attempt) + 1)),
+      ));
+    }
   }
   throw failure;
 }

@@ -247,7 +247,11 @@ resurrecting ownership. Cleanup retries use persisted capped exponential
 backoff with jitter. Subject mappings are sharded one Durable Object per
 subject; a retained pre-sharding session installs an active ownership marker
 from authoritative `session_state` and idempotently rebinds the current shard
-before constructing any model transport.
+before constructing any model transport. Retryable keyed creation stages retain
+and refresh the same preparation lease; keyless legacy creates compensate
+immediately, while the durable watchdog owns abandoned keyed preparations.
+Deletion commits that durable marker and alarm before the irreversible local
+tombstone, so reconstruction always owns unfinished external cleanup.
 
 Managed turn cancellation is itself durable work. One `turn_cancelling` intent
 is committed before acknowledgement. Control or reconstruction failure updates

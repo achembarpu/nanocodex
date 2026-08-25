@@ -230,8 +230,10 @@ not-found result as an unknown ID.
 Supply a stable `Idempotency-Key` for every logical create. The account and key
 derive one opaque agent ID without a shared allocator, so retrying after a lost
 response resumes the same idempotent creation state machine instead of creating
-an unknown second agent. Reusing a key after that agent is permanently deleted
-cannot resurrect it.
+an unknown second agent. Retryable stages retain a refreshed preparation lease
+so keyed replay cannot race cleanup; its durable watchdog cleans an abandoned
+preparation. Reusing a key after watchdog cleanup or permanent agent deletion
+returns a conflict and cannot resurrect it.
 
 ```sh
 curl -fsS -X POST \

@@ -19,10 +19,13 @@ if (!new Set(["control", "turn"]).has(mode)) {
 }
 
 const receipts = new Array(agents);
+const acceptedAt = new Float64Array(agents);
+const terminalEndToEnd = new Float64Array(agents);
 const phases = {};
 let failure;
 let cleanupPending = 0;
 let baselineAgentIds = new Set();
+let baselineCaptured = false;
 let finalAgentCount;
 const runStarted = performance.now();
 try {
@@ -35,6 +38,7 @@ try {
     const response = await request(new URL("/v1/agents", baseUrl));
     if (!response.ok) throw new Error(`API boundary returned HTTP ${response.status}`);
     baselineAgentIds = new Set(agentIds(await response.json(), "boundary"));
+    baselineCaptured = true;
   });
   phases.create = await phase("create", agents, async (index) => {
     receipts[index] = await createAgent(index);
@@ -68,24 +72,49 @@ try {
         throw new Error(`turn acceptance returned HTTP ${response.status}: ${await boundedText(response)}`);
       }
       await response.body?.cancel();
+      acceptedAt[index] = Date.now();
     });
     phases.terminal = await phase("terminal", agents, async (index) => {
       const receipt = receipts[index];
-      const deadline = Date.now() + timeoutMs;
+      const deadline = acceptedAt[index] + timeoutMs;
+      let pollDelayMs = 100;
       while (true) {
-        const response = await request(
-          new URL(`/v1/agents/${receipt.agent_id}/turns/${receipt.turn_id}`, baseUrl),
-        );
-        if (!response.ok) throw new Error(`turn read returned HTTP ${response.status}`);
+        const remainingMs = deadline - Date.now();
+        if (remainingMs <= 0) throw new Error("turn terminal polling timed out");
+        let response;
+        try {
+          response = await request(
+            new URL(`/v1/agents/${receipt.agent_id}/turns/${receipt.turn_id}`, baseUrl),
+            {},
+            remainingMs,
+          );
+        } catch (error) {
+          if (Date.now() >= deadline) throw new Error("turn terminal polling timed out", { cause: error });
+          await waitWithFullJitter(pollDelayMs, deadline);
+          pollDelayMs = Math.min(2_000, pollDelayMs * 2);
+          continue;
+        }
+        if (!response.ok) {
+          const retryable = response.status === 408 || response.status === 429 || response.status >= 500;
+          if (!retryable) throw new Error(`turn read returned HTTP ${response.status}`);
+          await response.body?.cancel();
+          await waitWithFullJitter(pollDelayMs, deadline);
+          pollDelayMs = Math.min(2_000, pollDelayMs * 2);
+          continue;
+        }
         const turn = await response.json();
-        if (turn.state === "completed") return;
+        if (turn.state === "completed") {
+          terminalEndToEnd[index] = Date.now() - acceptedAt[index];
+          return;
+        }
         if (["blocked", "cancelled", "failed"].includes(turn.state)) {
           throw new Error(`turn entered ${turn.state}`);
         }
-        if (Date.now() >= deadline) throw new Error("turn terminal polling timed out");
-        await new Promise((resolve) => setTimeout(resolve, 25));
+        await waitWithFullJitter(pollDelayMs, deadline);
+        pollDelayMs = Math.min(2_000, pollDelayMs * 2);
       }
     });
+    phases.terminal.end_to_end_latency_ms = latencySummary(terminalEndToEnd);
   }
 } catch (error) {
   failure = error;
@@ -93,36 +122,61 @@ try {
   if (!preserve) {
     const retained = receipts.filter(Boolean);
     phases.cleanup = await phase("cleanup", retained.length, async (index) => {
-      const response = await request(
-        new URL(`/v1/agents/${retained[index].agent_id}`, baseUrl),
-        { method: "DELETE" },
-      );
-      if (response.status === 503) {
-        const body = await response.json().catch(() => undefined);
-        if (body?.error === "session_cleanup_pending") {
-          cleanupPending += 1;
-          return;
+      const deadline = Date.now() + timeoutMs;
+      let observedPending = false;
+      while (true) {
+        let response;
+        try {
+          response = await request(
+            new URL(`/v1/agents/${retained[index].agent_id}`, baseUrl),
+            { method: "DELETE" },
+            Math.max(1, deadline - Date.now()),
+          );
+        } catch (error) {
+          if (Date.now() >= deadline) throw error;
+          await waitWithFullJitter(1_000, deadline);
+          continue;
         }
-        throw new Error(`cleanup returned HTTP 503: ${JSON.stringify(body)?.slice(0, 1_024)}`);
+        if (response.status === 503) {
+          const body = await response.json().catch(() => undefined);
+          if (body?.error === "session_cleanup_pending") {
+            if (!observedPending) cleanupPending += 1;
+            observedPending = true;
+            if (Date.now() >= deadline) throw new Error("cleanup remained pending past its deadline");
+            const retryAfterMs = Number(response.headers.get("retry-after")) * 1_000;
+            await waitWithFullJitter(Number.isFinite(retryAfterMs) ? retryAfterMs : 1_000, deadline);
+            continue;
+          }
+          throw new Error(`cleanup returned HTTP 503: ${JSON.stringify(body)?.slice(0, 1_024)}`);
+        }
+        if (response.status !== 204 && response.status !== 404) {
+          throw new Error(`cleanup returned HTTP ${response.status}: ${await boundedText(response)}`);
+        }
+        await response.body?.cancel();
+        return;
       }
-      if (response.status !== 204 && response.status !== 404) {
-        throw new Error(`cleanup returned HTTP ${response.status}: ${await boundedText(response)}`);
-      }
-      await response.body?.cancel();
     }, { continueOnError: true }).catch((error) => {
       failure = failure
         ? new AggregateError([failure, error], "load and cleanup failed")
         : error;
       return { error: errorMessage(error) };
     });
-    phases.cleanup_verify = await phase("cleanup_verify", 1, async () => {
-      const response = await request(new URL("/v1/agents", baseUrl));
-      if (!response.ok) throw new Error(`cleanup verification returned HTTP ${response.status}`);
-      const listed = agentIds(await response.json(), "cleanup verification");
-      finalAgentCount = listed.length;
-      const leaked = listed.filter((id) => !baselineAgentIds.has(id));
-      if (leaked.length > 0) {
-        throw new Error(`cleanup verification retained ${leaked.length} post-baseline agents`);
+    if (baselineCaptured) phases.cleanup_verify = await phase("cleanup_verify", 1, async () => {
+      const deadline = Date.now() + Math.min(timeoutMs, 120_000);
+      let leaked = [];
+      while (true) {
+        const response = await request(new URL("/v1/agents", baseUrl));
+        if (!response.ok) throw new Error(`cleanup verification returned HTTP ${response.status}`);
+        const listed = agentIds(await response.json(), "cleanup verification");
+        finalAgentCount = listed.length;
+        leaked = listed.filter((id) => !baselineAgentIds.has(id));
+        if (leaked.length === 0) return;
+        if (Date.now() >= deadline) {
+          throw new Error(
+            `cleanup verification retained ${leaked.length} post-baseline agents: ${leaked.join(",")}`,
+          );
+        }
+        await new Promise((resolve) => setTimeout(resolve, 500));
       }
     }).catch((error) => {
       failure = failure
@@ -185,32 +239,25 @@ async function phase(name, count, operation, { continueOnError = false } = {}) {
   await Promise.all(workers);
   if (errors.length > 0) throw new AggregateError(errors, `${name} phase failed`);
   const elapsed = performance.now() - started;
-  const sorted = [...latencies].sort((left, right) => left - right);
   return {
     operations: count,
     elapsed_ms: rounded(elapsed),
     operations_per_second: rounded(count / (elapsed / 1_000)),
-    latency_ms: {
-      min: rounded(sorted[0] ?? 0),
-      p50: rounded(quantile(sorted, 0.5)),
-      p95: rounded(quantile(sorted, 0.95)),
-      p99: rounded(quantile(sorted, 0.99)),
-      max: rounded(sorted.at(-1) ?? 0),
-    },
+    latency_ms: latencySummary(latencies),
   };
 }
 
-async function request(url, init = {}) {
+async function request(url, init = {}, requestTimeoutMs = timeoutMs) {
   return managedAccountFetch(apiKey, url, {
     ...init,
-    signal: AbortSignal.timeout(timeoutMs),
+    signal: AbortSignal.timeout(Math.max(1, Math.min(timeoutMs, requestTimeoutMs))),
   });
 }
 
 async function createAgent(index) {
   const idempotencyKey = `load-create:${runId}:${index}`;
   let failure;
-  for (let attempt = 0; attempt < 3; attempt += 1) {
+  for (let attempt = 0; attempt < 8; attempt += 1) {
     try {
       const response = await request(new URL("/v1/agents", baseUrl), {
         method: "POST",
@@ -221,18 +268,41 @@ async function createAgent(index) {
       }
       const body = await boundedText(response);
       failure = new Error(`create returned HTTP ${response.status}: ${body}`);
-      let error;
-      try { error = JSON.parse(body)?.error; } catch { /* Non-JSON is definitive. */ }
-      if (response.status !== 503 || error !== "agent cleanup initialization failed") {
+      if (response.status !== 408 && response.status !== 429 && response.status < 500) {
         throw Object.assign(failure, { definitive: true });
       }
     } catch (error) {
       if (error?.definitive === true) throw error;
       failure = error;
     }
-    if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
+    if (attempt < 7) {
+      await new Promise((resolve) => setTimeout(resolve, retryDelayMs(attempt)));
+    }
   }
   throw failure;
+}
+
+function retryDelayMs(attempt) {
+  const ceiling = Math.min(2_000, 250 * 2 ** attempt);
+  return Math.floor(Math.random() * (ceiling + 1));
+}
+
+async function waitWithFullJitter(ceilingMs, deadline) {
+  const remainingMs = deadline - Date.now();
+  if (remainingMs <= 0) return;
+  const bounded = Math.max(1, Math.min(ceilingMs, remainingMs));
+  await new Promise((resolve) => setTimeout(resolve, Math.floor(Math.random() * bounded)));
+}
+
+function latencySummary(values) {
+  const sorted = [...values].sort((left, right) => left - right);
+  return {
+    min: rounded(sorted[0] ?? 0),
+    p50: rounded(quantile(sorted, 0.5)),
+    p95: rounded(quantile(sorted, 0.95)),
+    p99: rounded(quantile(sorted, 0.99)),
+    max: rounded(sorted.at(-1) ?? 0),
+  };
 }
 
 function integer(name, fallback, minimum, maximum) {

@@ -444,6 +444,9 @@ export default {
       }
       await prepared.body?.cancel();
       if (!prepared.ok) {
+        if (prepared.status === 409) {
+          return json({ error: "agent_creation_expired" }, { status: 409 });
+        }
         return json({ error: "agent cleanup initialization failed" }, { status: 503 });
       }
       const [credentialBinding, initialization] = await Promise.allSettled([
@@ -475,7 +478,11 @@ export default {
       if (credentialUnavailable
         || initialization.status === "rejected"
         || !initialization.value.ok) {
-        await requestSessionCleanup(stub, ownershipTimeoutMs);
+        // A keyed caller can safely replay this exact AgentDO. Keep the
+        // persisted preparation and its watchdog alive instead of racing the
+        // replay with deletion. Keyless legacy callers have no identity they
+        // can rediscover after a lost response, so compensate immediately.
+        if (requestKey === null) await requestSessionCleanup(stub, ownershipTimeoutMs);
         return credentialUnavailable
           ? json({ error: "credential_broker_unavailable" }, { status: 503 })
           : json({ error: "agent initialization failed" }, { status: 503 });
@@ -488,11 +495,12 @@ export default {
           { method: "POST" },
           ownershipTimeoutMs,
           "agent cleanup commit",
+          5,
         );
         await committed.body?.cancel();
-      } catch { /* The commit may have applied; cleanup is authoritative. */ }
+      } catch { /* The commit may have applied; keyed replay or the watchdog owns resolution. */ }
       if (!committed?.ok) {
-        await requestSessionCleanup(stub, ownershipTimeoutMs);
+        if (requestKey === null) await requestSessionCleanup(stub, ownershipTimeoutMs);
         return json({ error: "agent cleanup commit failed" }, { status: 503 });
       }
       const routeBase = "/v1/agents";
@@ -902,7 +910,7 @@ export class NanocodexSession extends DurableComputerSession {
       }
       if (!current) {
         const prepared: CredentialBindingOwnership = {
-          cleanup_at: Date.now() + CREDENTIAL_BINDING_PREPARE_TIMEOUT_MS,
+          cleanup_at: Date.now() + this.#credentialPreparationLeaseMs(),
           owner_id: ownership.owner_id,
           session_id: ownership.session_id,
           state: "preparing",
@@ -916,7 +924,7 @@ export class NanocodexSession extends DurableComputerSession {
       } else if (current.state === "preparing") {
         const refreshed = {
           ...current,
-          cleanup_at: Date.now() + CREDENTIAL_BINDING_PREPARE_TIMEOUT_MS,
+          cleanup_at: Date.now() + this.#credentialPreparationLeaseMs(),
         };
         await this.ctx.storage.transaction(async (transaction) => {
           await transaction.put(CREDENTIAL_BINDING_KEY, refreshed);
@@ -927,7 +935,7 @@ export class NanocodexSession extends DurableComputerSession {
       return new Response(null, { status: 204 });
     }
     if (request.method === "POST" && url.pathname === "/credential-binding/bind") {
-      const ownership = this.#credentialBinding;
+      const ownership = await this.#refreshCredentialPreparation();
       if (!ownership || this.#deleting || this.#deleted) {
         return new Response(null, { status: 409 });
       }
@@ -945,7 +953,7 @@ export class NanocodexSession extends DurableComputerSession {
     }
     if (request.method === "POST" && url.pathname === "/credential-binding/commit") {
       if (this.#deleting || this.#deleted) return new Response(null, { status: 409 });
-      const ownership = this.#credentialBinding;
+      const ownership = await this.#refreshCredentialPreparation();
       const session = this.#session();
       if (!ownership || !session
         || ownership.owner_id !== session.owner_id
@@ -2420,32 +2428,24 @@ export class NanocodexSession extends DurableComputerSession {
   async #beginDeletion(): Promise<void> {
     if (this.#deletionMarkerTask) return this.#deletionMarkerTask;
     if (this.#deleting) return;
-    this.ctx.storage.transactionSync(() => {
-      const ownership = this.#initializationOwnership();
-      if (ownership) {
-        this.ctx.storage.sql.exec(
-          `UPDATE session_initialization_ownership
-           SET state = 'deleted' WHERE singleton = 1`,
-        );
-      } else {
-        this.ctx.storage.sql.exec(
-          `INSERT INTO session_initialization_ownership (
-             singleton, session_id, owner_id, runtime_profile, state
-           ) VALUES (1, NULL, NULL, NULL, 'deleted')`,
-        );
-      }
-    });
-    this.#deleted = true;
+    // Fence reconstruction first. A crash after this transaction is recovered
+    // by the retained marker/alarm even if the local SQL tombstone has not yet
+    // been written. The reverse order can strand external ownership forever.
     this.#deleting = true;
-    const task = this.ctx.storage.transaction(async (transaction) => {
-      await transaction.put(SESSION_DELETING_KEY, true);
-      await transaction.setAlarm(Date.now() + 1);
-    });
+    let markerCommitted = false;
+    const task = (async () => {
+      await this.ctx.storage.transaction(async (transaction) => {
+        await transaction.put(SESSION_DELETING_KEY, true);
+        await transaction.setAlarm(Date.now() + 1);
+      });
+      markerCommitted = true;
+      this.#markInitializationDeleted();
+    })();
     this.#deletionMarkerTask = task;
     try {
       await task;
     } catch (error) {
-      this.#deleting = false;
+      if (!markerCommitted) this.#deleting = false;
       throw error;
     } finally {
       if (this.#deletionMarkerTask === task) this.#deletionMarkerTask = undefined;
@@ -2473,6 +2473,9 @@ export class NanocodexSession extends DurableComputerSession {
 
   async #performOwnedSessionDeletion(generation: number): Promise<void> {
     this.#deleting = true;
+    // Reconstruction can enter here from a marker committed just before a
+    // crash. Reassert the permanent local tombstone before any cleanup await.
+    this.#markInitializationDeleted();
     await this.ctx.storage.put(SESSION_DELETION_GENERATION_KEY, generation);
     const session = this.#session();
     const runtimeProfile = session?.runtime_profile;
@@ -3597,6 +3600,60 @@ export class NanocodexSession extends DurableComputerSession {
 
   #ownershipIoTimeoutMs(): number {
     return managedOwnershipTimeoutMs(this.env);
+  }
+
+  #credentialPreparationLeaseMs(): number {
+    // Credential binding owns three bounded downstream attempts. Keep the
+    // watchdog beyond that entire stage, including scheduler jitter.
+    return Math.max(
+      CREDENTIAL_BINDING_PREPARE_TIMEOUT_MS,
+      this.#ownershipIoTimeoutMs() * 4,
+    );
+  }
+
+  #markInitializationDeleted(): void {
+    this.ctx.storage.transactionSync(() => {
+      const ownership = this.#initializationOwnership();
+      if (ownership) {
+        this.ctx.storage.sql.exec(
+          `UPDATE session_initialization_ownership
+           SET state = 'deleted' WHERE singleton = 1`,
+        );
+      } else {
+        this.ctx.storage.sql.exec(
+          `INSERT INTO session_initialization_ownership (
+             singleton, session_id, owner_id, runtime_profile, state
+           ) VALUES (1, NULL, NULL, NULL, 'deleted')`,
+        );
+      }
+    });
+    this.#deleted = true;
+  }
+
+  async #refreshCredentialPreparation(): Promise<CredentialBindingOwnership | undefined> {
+    const current = this.#credentialBinding;
+    if (!current || current.state !== "preparing") return current;
+    let retained: CredentialBindingOwnership | undefined;
+    await this.ctx.storage.transaction(async (transaction) => {
+      const stored = await transaction.get<CredentialBindingOwnership>(CREDENTIAL_BINDING_KEY);
+      if (!stored || stored.state !== "preparing") {
+        retained = stored;
+        return;
+      }
+      retained = {
+        ...stored,
+        cleanup_at: Math.max(
+          stored.cleanup_at,
+          Date.now() + this.#credentialPreparationLeaseMs(),
+        ),
+      };
+      await transaction.put(CREDENTIAL_BINDING_KEY, retained);
+      await transaction.setAlarm(retained.cleanup_at);
+    });
+    const observed = this.#credentialBinding;
+    if (!observed || observed.state === "active") return observed;
+    this.#credentialBinding = retained;
+    return this.#credentialBinding;
   }
 
   #broadcast(message: ServerMessage): void {

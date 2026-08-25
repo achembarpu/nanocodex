@@ -2206,6 +2206,26 @@ describe("managed agents REST and resumable SSE", () => {
     expect(await invalid.json()).toEqual({ error: "invalid_idempotency_key" });
   });
 
+  it("returns a stable conflict when a deleted create identity is replayed", async () => {
+    const create = () => SELF.fetch("https://example.test/v1/agents", {
+      method: "POST",
+      headers: { "idempotency-key": "create-request-permanently-deleted" },
+    });
+    const created = await create();
+    expect(created.status, await created.clone().text()).toBe(201);
+    const receipt = await created.json<AgentReceipt>();
+    createdAgents.add(receipt.agent_id);
+
+    const deleted = await SELF.fetch(`https://example.test/v1/agents/${receipt.agent_id}`, {
+      method: "DELETE",
+    });
+    expect(deleted.status).toBe(204);
+
+    const replay = await create();
+    expect(replay.status).toBe(409);
+    expect(await replay.json()).toEqual({ error: "agent_creation_expired" });
+  });
+
   it("absorbs four transient cleanup-preparation responses", async () => {
     const originalSessions = testEnv.NANOCODEX_SESSIONS;
     let attempts = 0;
@@ -2242,6 +2262,52 @@ describe("managed agents REST and resumable SSE", () => {
       const receipt = await response.json<AgentReceipt>();
       createdAgents.add(receipt.agent_id);
       expect(attempts).toBe(5);
+    } finally {
+      testEnv.NANOCODEX_SESSIONS = originalSessions;
+    }
+  });
+
+  it("resumes a keyed create after an exhausted cleanup-commit stage", async () => {
+    const originalSessions = testEnv.NANOCODEX_SESSIONS;
+    const attemptedAgentIds: string[] = [];
+    let commitAttempts = 0;
+    testEnv.NANOCODEX_SESSIONS = {
+      idFromName(name: string) { return originalSessions.idFromName(name); },
+      getByName(name: string) {
+        const session = originalSessions.getByName(name);
+        return {
+          async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+            const request = new Request(input, init);
+            if (request.method === "POST"
+              && new URL(request.url).pathname === "/credential-binding/commit") {
+              commitAttempts += 1;
+              attemptedAgentIds.push(name);
+              if (commitAttempts <= 5) return new Response(null, { status: 503 });
+            }
+            return session.fetch(request);
+          },
+        } as DurableObjectStub;
+      },
+    } as Env["NANOCODEX_SESSIONS"];
+
+    try {
+      const create = () => SELF.fetch("https://example.test/v1/agents", {
+        method: "POST",
+        headers: { "idempotency-key": "create-request-resume-commit" },
+      });
+      const interrupted = await create();
+      expect(interrupted.status).toBe(503);
+      expect(await interrupted.json()).toEqual({ error: "agent cleanup commit failed" });
+
+      const resumed = await create();
+      expect(resumed.status, await resumed.clone().text()).toBe(201);
+      const receipt = await resumed.json<AgentReceipt>();
+      createdAgents.add(receipt.agent_id);
+      expect(commitAttempts).toBe(6);
+      expect(new Set(attemptedAgentIds)).toEqual(new Set([receipt.agent_id]));
+      expect(await (await SELF.fetch("https://example.test/v1/agents")).json()).toMatchObject({
+        data: [receipt.agent_id],
+      });
     } finally {
       testEnv.NANOCODEX_SESSIONS = originalSessions;
     }
