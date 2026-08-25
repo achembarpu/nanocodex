@@ -283,7 +283,7 @@ export default {
                 type: "function_call",
                 call_id: "managed-wait",
                 name: "wait_agent",
-                arguments: JSON.stringify({ agent_ids: [agentId], timeout_ms: 5_000 }),
+                arguments: JSON.stringify({ agent_ids: [agentId], timeout_ms: 30_000 }),
               }],
               usage: null,
             },

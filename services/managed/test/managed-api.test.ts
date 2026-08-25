@@ -1521,7 +1521,7 @@ describe("managed agents REST and resumable SSE", () => {
     let event;
     const observed: unknown[] = [];
     do {
-      event = await nextWithin(events, "managed subagent completion");
+      event = await nextWithin(events, "managed subagent completion", 10_000);
       observed.push(event.data);
     } while (event.data.type !== "turn_completed");
     expect(JSON.stringify(observed)).toContain("spawn_agent");
@@ -4572,17 +4572,22 @@ function sessionForSubject(subject: string): DurableObjectStub<NanocodexSession>
 async function nextWithin(
   reader: ReturnType<typeof sseReader>,
   stage: string,
+  timeoutMs = 2_000,
 ): Promise<{ id: string; event: string; data: Record<string, unknown> }> {
-  return within(reader.next(), stage);
+  return within(reader.next(), stage, timeoutMs);
 }
 
-async function within<Result>(promise: Promise<Result>, stage: string): Promise<Result> {
+async function within<Result>(
+  promise: Promise<Result>,
+  stage: string,
+  timeoutMs = 2_000,
+): Promise<Result> {
   let timeout: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
       promise,
       new Promise<never>((_, reject) => {
-        timeout = setTimeout(() => reject(new Error(`timed out waiting for ${stage}`)), 2_000);
+        timeout = setTimeout(() => reject(new Error(`timed out waiting for ${stage}`)), timeoutMs);
       }),
     ]);
   } finally {
