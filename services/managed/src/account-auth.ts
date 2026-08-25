@@ -62,6 +62,15 @@ export type AgentSummary = Readonly<{
   turnCount: number;
 }>;
 
+type AgentRegistryRow = Readonly<{
+  id: string;
+  title: string;
+  created_at: number;
+  updated_at: number;
+  turn_count: number;
+  deleted_at: number | null;
+}>;
+
 export async function routeAccountRequest(
   request: Request,
   env: AccountAuthEnv,
@@ -510,7 +519,27 @@ async function revokeApiKey(env: AccountAuthEnv, userId: string, id: string): Pr
 }
 
 export class UserAccount extends DurableObject<AccountAuthEnv> {
+  readonly #registryReady: Promise<void>;
+
+  constructor(ctx: DurableObjectState, env: AccountAuthEnv) {
+    super(ctx, env);
+    ctx.storage.sql.exec(`
+      CREATE TABLE IF NOT EXISTS user_agents (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL DEFAULT '',
+        created_at INTEGER NOT NULL,
+        updated_at INTEGER NOT NULL,
+        turn_count INTEGER NOT NULL DEFAULT 0 CHECK (turn_count >= 0),
+        deleted_at INTEGER
+      );
+      CREATE INDEX IF NOT EXISTS user_agents_active_created
+        ON user_agents (created_at, id) WHERE deleted_at IS NULL;
+    `);
+    this.#registryReady = ctx.blockConcurrencyWhile(() => this.#adoptLegacyAgentRegistry());
+  }
+
   async fetch(request: Request): Promise<Response> {
+    await this.#registryReady;
     const url = new URL(request.url);
     if (url.pathname === "/account") {
       if (request.method === "PUT") {
@@ -564,15 +593,12 @@ export class UserAccount extends DurableObject<AccountAuthEnv> {
     }
     if (url.pathname === "/agents") {
       if (request.method === "GET") {
-        const agents = await this.ctx.storage.get<string[]>("agents") ?? [];
-        const summaries = await this.ctx.storage.get<Record<string, AgentSummary>>("agentSummaries") ?? {};
-        return json(agents.map((id) => summaries[id] ?? {
-          id,
-          title: "",
-          createdAt: 0,
-          updatedAt: 0,
-          turnCount: 0,
-        }));
+        return json(this.ctx.storage.sql.exec<AgentRegistryRow>(
+          `SELECT id, title, created_at, updated_at, turn_count, deleted_at
+           FROM user_agents
+           WHERE deleted_at IS NULL
+           ORDER BY created_at, id`,
+        ).toArray().map(agentSummary));
       }
       if (request.method === "POST") {
         const body = await request.json<{ agentId?: unknown }>();
@@ -580,61 +606,128 @@ export class UserAccount extends DurableObject<AccountAuthEnv> {
         if (!/^[0-9a-f-]{36}$/.test(agentId)) {
           return json({ error: "invalid_agent" }, { status: 400 });
         }
-        const attached = await this.ctx.storage.transaction(async (transaction) => {
-          if (await transaction.get(`agent-tombstone:${agentId}`)) return false;
-          const agents = await transaction.get<string[]>("agents") ?? [];
-          if (agents.includes(agentId)) return true;
-          const summaries = await transaction.get<Record<string, AgentSummary>>("agentSummaries") ?? {};
-          agents.push(agentId);
+        const existing = this.ctx.storage.sql.exec<{ deleted_at: number | null }>(
+          "SELECT deleted_at FROM user_agents WHERE id = ?",
+          agentId,
+        ).toArray()[0];
+        if (existing?.deleted_at !== null && existing !== undefined) {
+          return json({ error: "agent_deleted" }, { status: 410 });
+        }
+        if (!existing) {
           const now = Date.now();
-          summaries[agentId] = { id: agentId, title: "", createdAt: now, updatedAt: now, turnCount: 0 };
-          await transaction.put({ agents, agentSummaries: summaries });
-          return true;
-        });
-        if (!attached) return json({ error: "agent_deleted" }, { status: 410 });
+          this.ctx.storage.sql.exec(
+            `INSERT INTO user_agents
+               (id, title, created_at, updated_at, turn_count, deleted_at)
+             VALUES (?, '', ?, ?, 0, NULL)`,
+            agentId,
+            now,
+            now,
+          );
+        }
         return new Response(null, { status: 204 });
       }
     }
     const activityMatch = url.pathname.match(/^\/agents\/([0-9a-f-]{36})\/activity$/);
     if (activityMatch && request.method === "POST") {
-      const agents = await this.ctx.storage.get<string[]>("agents") ?? [];
       const agentId = activityMatch[1]!;
-      if (!agents.includes(agentId)) return json({ error: "not_found" }, { status: 404 });
       const body = await request.json<{ title?: unknown; turnCount?: unknown }>();
       const title = typeof body.title === "string" ? body.title.trim().slice(0, 56) : "";
       const turnCount = Number.isSafeInteger(body.turnCount) && Number(body.turnCount) >= 0
         ? Number(body.turnCount) : undefined;
       if (turnCount === undefined) return json({ error: "invalid_activity" }, { status: 400 });
-      const summaries = await this.ctx.storage.get<Record<string, AgentSummary>>("agentSummaries") ?? {};
-      const current = summaries[agentId];
-      const now = Date.now();
-      summaries[agentId] = {
-        id: agentId,
-        title: current?.title || title,
-        createdAt: current?.createdAt || now,
-        updatedAt: now,
-        turnCount: Math.max(current?.turnCount ?? 0, turnCount),
-      };
-      await this.ctx.storage.put("agentSummaries", summaries);
+      const updated = this.ctx.storage.sql.exec(
+        `UPDATE user_agents
+         SET title = CASE WHEN title = '' THEN ? ELSE title END,
+             updated_at = ?,
+             turn_count = MAX(turn_count, ?)
+         WHERE id = ? AND deleted_at IS NULL`,
+        title,
+        Date.now(),
+        turnCount,
+        agentId,
+      );
+      if (updated.rowsWritten === 0) return json({ error: "not_found" }, { status: 404 });
       return new Response(null, { status: 204 });
     }
     const agentMatch = url.pathname.match(/^\/agents\/([0-9a-f-]{36})$/);
     if (agentMatch && request.method === "DELETE") {
       const agentId = agentMatch[1]!;
-      await this.ctx.storage.transaction(async (transaction) => {
-        const agents = await transaction.get<string[]>("agents") ?? [];
-        const summaries = await transaction.get<Record<string, AgentSummary>>("agentSummaries") ?? {};
-        delete summaries[agentId];
-        await transaction.put({
-          agents: agents.filter((agent) => agent !== agentId),
-          agentSummaries: summaries,
-          [`agent-tombstone:${agentId}`]: true,
-        });
-      });
+      const now = Date.now();
+      this.ctx.storage.sql.exec(
+        `INSERT INTO user_agents
+           (id, title, created_at, updated_at, turn_count, deleted_at)
+         VALUES (?, '', ?, ?, 0, ?)
+         ON CONFLICT(id) DO UPDATE SET deleted_at = COALESCE(user_agents.deleted_at, excluded.deleted_at)`,
+        agentId,
+        now,
+        now,
+        now,
+      );
       return new Response(null, { status: 204 });
     }
     return json({ error: "not_found" }, { status: 404 });
   }
+
+  async #adoptLegacyAgentRegistry(): Promise<void> {
+    const [agents, summaries] = await Promise.all([
+      this.ctx.storage.get<string[]>("agents"),
+      this.ctx.storage.get<Record<string, AgentSummary>>("agentSummaries"),
+    ]);
+    for (const id of agents ?? []) {
+      const summary = summaries?.[id];
+      const now = Date.now();
+      this.ctx.storage.sql.exec(
+        `INSERT OR IGNORE INTO user_agents
+           (id, title, created_at, updated_at, turn_count, deleted_at)
+         VALUES (?, ?, ?, ?, ?, NULL)`,
+        id,
+        summary?.title ?? "",
+        summary?.createdAt ?? now,
+        summary?.updatedAt ?? now,
+        summary?.turnCount ?? 0,
+      );
+    }
+    await this.ctx.storage.delete(["agents", "agentSummaries"]);
+
+    let startAfter: string | undefined;
+    while (true) {
+      const tombstones = await this.ctx.storage.list({
+        prefix: "agent-tombstone:",
+        limit: 1_000,
+        ...(startAfter === undefined ? {} : { startAfter }),
+      });
+      if (tombstones.size === 0) break;
+      const now = Date.now();
+      for (const key of tombstones.keys()) {
+        const id = key.slice("agent-tombstone:".length);
+        if (/^[0-9a-f-]{36}$/.test(id)) {
+          this.ctx.storage.sql.exec(
+            `INSERT INTO user_agents
+               (id, title, created_at, updated_at, turn_count, deleted_at)
+             VALUES (?, '', ?, ?, 0, ?)
+             ON CONFLICT(id) DO UPDATE SET deleted_at = COALESCE(user_agents.deleted_at, excluded.deleted_at)`,
+            id,
+            now,
+            now,
+            now,
+          );
+        }
+        startAfter = key;
+      }
+      await this.ctx.storage.delete([...tombstones.keys()]);
+      if (tombstones.size < 1_000) break;
+    }
+  }
+}
+
+function agentSummary(row: AgentRegistryRow): AgentSummary {
+  return {
+    id: row.id,
+    title: row.title,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    turnCount: row.turn_count,
+  };
 }
 
 export class ApiKeyRecord extends DurableObject<AccountAuthEnv> {

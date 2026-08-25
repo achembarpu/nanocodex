@@ -2527,6 +2527,81 @@ describe("managed agents REST and resumable SSE", () => {
     expect(await otherList.json()).toEqual({ data: [], summaries: {} });
   });
 
+  it("keeps a large per-account agent registry row-oriented", async () => {
+    const account = testEnv.NANOCODEX_USERS.getByName(`registry-${crypto.randomUUID()}`);
+    const ids = Array.from({ length: 4_096 }, (_, index) => (
+      `00000000-0000-4000-8000-${index.toString(16).padStart(12, "0")}`
+    ));
+    await runInDurableObject(account, (_instance, state) => {
+      const now = Date.now();
+      for (const agentId of ids) {
+        state.storage.sql.exec(
+          `INSERT INTO user_agents
+             (id, title, created_at, updated_at, turn_count, deleted_at)
+           VALUES (?, '', ?, ?, 0, NULL)`,
+          agentId,
+          now,
+          now,
+        );
+      }
+    });
+
+    const listed = await (await account.fetch("https://user.internal/agents"))
+      .json<Array<{ id: string }>>();
+    expect(listed).toHaveLength(ids.length);
+    expect(listed[0]?.id).toBe(ids[0]);
+    expect(listed.at(-1)?.id).toBe(ids.at(-1));
+
+    expect((await account.fetch(`https://user.internal/agents/${ids[2_048]}`, {
+      method: "DELETE",
+    })).status).toBe(204);
+    expect((await account.fetch("https://user.internal/agents", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ agentId: ids[2_048] }),
+    })).status).toBe(410);
+  });
+
+  it("adopts the aggregate account registry without losing deletion fences", async () => {
+    const account = testEnv.NANOCODEX_USERS.getByName(`registry-migration-${crypto.randomUUID()}`);
+    const activeId = "10000000-0000-4000-8000-000000000001";
+    const deletedId = "10000000-0000-4000-8000-000000000002";
+    await runInDurableObject(account, async (_instance, state) => {
+      await state.storage.put({
+        agents: [activeId],
+        agentSummaries: {
+          [activeId]: {
+            id: activeId,
+            title: "Retained title",
+            createdAt: 10,
+            updatedAt: 20,
+            turnCount: 3,
+          },
+        },
+        [`agent-tombstone:${deletedId}`]: true,
+      });
+    });
+    await evictDurableObject(account);
+
+    expect(await (await account.fetch("https://user.internal/agents")).json()).toEqual([{
+      id: activeId,
+      title: "Retained title",
+      createdAt: 10,
+      updatedAt: 20,
+      turnCount: 3,
+    }]);
+    expect((await account.fetch("https://user.internal/agents", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ agentId: deletedId }),
+    })).status).toBe(410);
+    expect(await runInDurableObject(account, async (_instance, state) => ({
+      agents: await state.storage.get("agents"),
+      summaries: await state.storage.get("agentSummaries"),
+      tombstone: await state.storage.get(`agent-tombstone:${deletedId}`),
+    }))).toEqual({ agents: undefined, summaries: undefined, tombstone: undefined });
+  });
+
   it("lists durable conversation summaries without probing every agent session", async () => {
     const agent = await createAgent();
     await submit(agent, "summary-turn", "Build the measured thing");
