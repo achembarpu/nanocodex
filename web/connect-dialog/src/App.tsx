@@ -51,13 +51,6 @@ type ConnectorAttempt = {
   requestId: string;
   token: string;
 };
-type ProfileLinkAttempt = {
-  popup: Window;
-  popupCheck: number;
-  popupClosed?: number | undefined;
-  requestId: string;
-  state: string;
-};
 type CeremonyAttempt = Readonly<{ requestId: string }>;
 
 export function App() {
@@ -74,15 +67,12 @@ export function App() {
   const [pendingApproval, setPendingApproval] = useState<PendingApproval>();
   const [connectorStatuses, setConnectorStatuses] = useState<ConnectorStatuses>();
   const [connectorAction, setConnectorAction] = useState<ConnectorId>();
-  const [profileLinked, setProfileLinked] = useState(false);
-  const [profileLinking, setProfileLinking] = useState(false);
   const [deviceCode, setDeviceCode] = useState<Readonly<{
     code: string;
     expiresAt?: number | undefined;
     url: string;
   }>>();
   const activeConnector = useRef<ConnectorAttempt | undefined>(undefined);
-  const activeProfileLink = useRef<ProfileLinkAttempt | undefined>(undefined);
   const activeCeremony = useRef<CeremonyAttempt | undefined>(undefined);
   const currentRequestId = useRef<string | undefined>(undefined);
   currentRequestId.current = request?.id;
@@ -106,16 +96,7 @@ export function App() {
     setPendingApproval(undefined);
     setConnectorStatuses(undefined);
     setConnectorAction(undefined);
-    setProfileLinked(false);
-    setProfileLinking(false);
     setDeviceCode(undefined);
-    const profileAttempt = activeProfileLink.current;
-    activeProfileLink.current = undefined;
-    if (profileAttempt) {
-      window.clearInterval(profileAttempt.popupCheck);
-      if (profileAttempt.popupClosed !== undefined) window.clearTimeout(profileAttempt.popupClosed);
-      if (!profileAttempt.popup.closed) profileAttempt.popup.close();
-    }
   }, [request?.id, finishConnectorAttempt]);
 
   useEffect(() => () => {
@@ -128,59 +109,7 @@ export function App() {
       if (attempt.popupClosed !== undefined) window.clearTimeout(attempt.popupClosed);
       if (attempt.popup && !attempt.popup.closed) attempt.popup.close();
     }
-    const profileAttempt = activeProfileLink.current;
-    activeProfileLink.current = undefined;
-    if (profileAttempt) {
-      window.clearInterval(profileAttempt.popupCheck);
-      if (profileAttempt.popupClosed !== undefined) window.clearTimeout(profileAttempt.popupClosed);
-      if (!profileAttempt.popup.closed) profileAttempt.popup.close();
-    }
   }, []);
-
-  useEffect(() => {
-    if (!pendingApproval) return;
-    const onMessage = (event: MessageEvent<unknown>) => {
-      const attempt = activeProfileLink.current;
-      if (!attempt
-        || event.origin !== nanocodexOrigin
-        || event.source !== attempt.popup
-        || attempt.requestId !== currentRequestId.current
-        || !isAccountLinkCompletion(event.data)
-        || event.data.state !== attempt.state) return;
-      const completion = event.data;
-      activeProfileLink.current = undefined;
-      window.clearInterval(attempt.popupCheck);
-      if (attempt.popupClosed !== undefined) window.clearTimeout(attempt.popupClosed);
-      setProfileLinking(false);
-      if (!attempt.popup.closed) attempt.popup.close();
-      void (async () => {
-        try {
-          const response = await fetch(`${pendingApproval.apiUrl}/v1/account-link`, {
-            method: "PUT",
-            headers: {
-              authorization: `Bearer ${pendingApproval.token}`,
-              "content-type": "application/json",
-            },
-            body: JSON.stringify({ code: completion.code, state: completion.state }),
-          });
-          const body = await response.json() as Readonly<{ connectors?: ConnectorStatuses; linked?: boolean }> & Record<string, any>;
-          if (!response.ok || body.linked !== true || !body.connectors) {
-            throw new Error(apiError(body, "Unable to link your Nanocodex profile."));
-          }
-          if (currentRequestId.current !== attempt.requestId) return;
-          setProfileLinked(true);
-          setConnectorStatuses(body.connectors);
-          if (body.connectors.chatgpt?.connected) setDeviceCode(undefined);
-        } catch (error) {
-          if (currentRequestId.current === attempt.requestId) {
-            setFailure({ id: attempt.requestId, message: errorMessage(error) });
-          }
-        }
-      })();
-    };
-    window.addEventListener("message", onMessage);
-    return () => window.removeEventListener("message", onMessage);
-  }, [pendingApproval]);
 
   useEffect(() => {
     if (!pendingApproval) return;
@@ -256,16 +185,14 @@ export function App() {
   useEffect(() => {
     if (
       !pendingApproval
-      || !profileLinked
       || !connectorStatuses?.chatgpt?.connected
       || ceremonyRequestId === pendingApproval.requestId
       || connectorAction
-      || profileLinking
     ) return;
     const completed = pendingApproval;
     setPendingApproval(undefined);
     void parentDialog.respond(completed.result);
-  }, [connectorAction, connectorStatuses?.chatgpt?.connected, pendingApproval, profileLinked, profileLinking, ceremonyRequestId]);
+  }, [connectorAction, connectorStatuses?.chatgpt?.connected, pendingApproval, ceremonyRequestId]);
 
   if (!request || requestPolicyError) return null;
 
@@ -318,20 +245,17 @@ export function App() {
           requestId: activeRequest.id,
           token,
         };
-        if (auth?.connectors && auth.profile?.linked !== undefined) {
-          const linked = auth.profile.linked === true;
+        if (auth?.connectors && auth.profile?.linked === true) {
           setConnectorStatuses(auth.connectors);
-          setProfileLinked(linked);
-          if (auth.connectors.chatgpt?.connected) setDeviceCode(undefined);
-          if (linked && auth.connectors.chatgpt?.connected) {
+          if (auth.connectors.chatgpt?.connected) {
             await parentDialog.respond(next.result);
             return;
           }
           setPendingApproval(next);
           return;
         }
-        const state = await refreshConnectors(next);
-        if (state.profileLinked && state.connectors.chatgpt?.connected) {
+        const connectors = await authorizeNanocodexAccount(next);
+        if (connectors.chatgpt?.connected) {
           await parentDialog.respond(next.result);
           return;
         }
@@ -366,55 +290,59 @@ export function App() {
       throw new DOMException("The Connect request changed.", "AbortError");
     }
     setConnectorStatuses(body.connectors);
-    const linked = body.profile?.linked === true;
-    setProfileLinked(linked);
     if (body.connectors.chatgpt?.connected) setDeviceCode(undefined);
-    return { connectors: body.connectors, profileLinked: linked };
+    return { connectors: body.connectors };
   }
 
-  async function linkProfile() {
-    if (!pendingApproval || ceremonyActive || connectorAction || profileLinking || profileLinked) return;
-    setFailure(undefined);
-    const popup = window.open("about:blank", `nanocodex-connect-profile-${crypto.randomUUID()}`, "popup,width=440,height=620");
-    if (!popup) {
-      setFailure({ id: pendingApproval.requestId, message: "The Nanocodex profile popup was blocked. Allow popups and try again." });
-      return;
+  async function authorizeNanocodexAccount(approval: PendingApproval): Promise<ConnectorStatuses> {
+    const start = await fetch(`${approval.apiUrl}/v1/account-link`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${approval.token}` },
+    });
+    const started = await start.json() as Record<string, unknown>;
+    if (!start.ok) throw new Error(apiError(started, "Unable to authorize your Nanocodex account."));
+    const authorizationUrl = new URL(requiredUrl(started.authorization_url));
+    const state = opaqueToken(started.state, "account-link state");
+    if (authorizationUrl.origin !== nanocodexOrigin
+      || authorizationUrl.pathname !== "/v1/connect/account-link"
+      || authorizationUrl.searchParams.get("state") !== state) {
+      throw new Error("The Nanocodex account authorization is invalid.");
     }
-    setProfileLinking(true);
-    try {
-      const response = await fetch(`${pendingApproval.apiUrl}/v1/account-link`, {
-        method: "POST",
-        headers: { authorization: `Bearer ${pendingApproval.token}` },
-      });
-      const body = await response.json() as Record<string, unknown>;
-      if (!response.ok) throw new Error(apiError(body, "Unable to start Nanocodex profile linking."));
-      const authorizationUrl = requiredUrl(body.authorization_url);
-      const state = opaqueToken(body.state, "account-link state");
-      const attempt: ProfileLinkAttempt = {
-        popup,
-        popupCheck: window.setInterval(() => {
-          if (activeProfileLink.current !== attempt || !popup.closed) return;
-          window.clearInterval(attempt.popupCheck);
-          attempt.popupClosed = window.setTimeout(() => {
-            if (activeProfileLink.current !== attempt) return;
-            activeProfileLink.current = undefined;
-            setProfileLinking(false);
-            setFailure({
-              id: attempt.requestId,
-              message: "The Nanocodex profile popup was closed before authorization completed.",
-            });
-          }, 750);
-        }, 300),
-        requestId: pendingApproval.requestId,
-        state,
-      };
-      activeProfileLink.current = attempt;
-      popup.location.href = authorizationUrl;
-    } catch (error) {
-      if (!popup.closed) popup.close();
-      setProfileLinking(false);
-      setFailure({ id: pendingApproval.requestId, message: errorMessage(error) });
+
+    authorizationUrl.pathname = "/v1/connect/account-link/authorize";
+    const authorize = await fetch(authorizationUrl, {
+      method: "POST",
+      credentials: "same-origin",
+      headers: { accept: "application/json" },
+    });
+    const authorized = await authorize.json() as Record<string, unknown>;
+    if (!authorize.ok) throw new Error(apiError(authorized, "Unable to authorize your Nanocodex account."));
+    const code = opaqueToken(authorized.code, "account-link code");
+    if (opaqueToken(authorized.state, "account-link state") !== state) {
+      throw new Error("The Nanocodex account authorization state changed.");
     }
+
+    const complete = await fetch(`${approval.apiUrl}/v1/account-link`, {
+      method: "PUT",
+      headers: {
+        authorization: `Bearer ${approval.token}`,
+        "content-type": "application/json",
+      },
+      body: JSON.stringify({ code, state }),
+    });
+    const completed = await complete.json() as Readonly<{
+      connectors?: ConnectorStatuses;
+      linked?: boolean;
+    }> & Record<string, any>;
+    if (!complete.ok || completed.linked !== true || !completed.connectors) {
+      throw new Error(apiError(completed, "Unable to authorize your Nanocodex account."));
+    }
+    if (currentRequestId.current !== approval.requestId) {
+      throw new DOMException("The Connect request changed.", "AbortError");
+    }
+    setConnectorStatuses(completed.connectors);
+    if (completed.connectors.chatgpt?.connected) setDeviceCode(undefined);
+    return completed.connectors;
   }
 
   async function connectConnector(id: ConnectorId) {
@@ -547,18 +475,11 @@ export function App() {
   function reject() {
     const attempt = activeConnector.current;
     if (attempt) finishConnectorAttempt(attempt);
-    const profileAttempt = activeProfileLink.current;
-    activeProfileLink.current = undefined;
-    if (profileAttempt) {
-      window.clearInterval(profileAttempt.popupCheck);
-      if (profileAttempt.popupClosed !== undefined) window.clearTimeout(profileAttempt.popupClosed);
-      if (!profileAttempt.popup.closed) profileAttempt.popup.close();
-    }
     setFailure(undefined);
     void parentDialog.reject(new Error("The request was not approved."));
   }
 
-  const approvalDisabled = ceremonyActive || profileLinking;
+  const approvalDisabled = ceremonyActive;
 
   return (
     <main className="dialog-shell" data-request={request.type} data-testid="remote-connect-dialog">
@@ -580,9 +501,6 @@ export function App() {
               deviceCode={deviceCode}
               onAccountModeChange={setAccountMode}
               onConnectConnector={connectConnector}
-              onLinkProfile={linkProfile}
-              profileLinked={profileLinked}
-              profileLinking={profileLinking}
               request={walletView(request)}
             />
             {failure?.id === request.id ? (
@@ -656,9 +574,6 @@ function ConnectionApproval({
   deviceCode,
   onAccountModeChange,
   onConnectConnector,
-  onLinkProfile,
-  profileLinked,
-  profileLinking,
   request,
 }: Readonly<{
   accountMode: "login" | "register";
@@ -668,9 +583,6 @@ function ConnectionApproval({
   deviceCode?: Readonly<{ code: string; expiresAt?: number | undefined; url: string }> | undefined;
   onAccountModeChange(mode: "login" | "register"): void;
   onConnectConnector(id: ConnectorId): void;
-  onLinkProfile(): void;
-  profileLinked: boolean;
-  profileLinking: boolean;
   request: ConnectionView;
 }>) {
   const appVisibility = appVisibilityPermissions(request.auth.resources);
@@ -702,19 +614,6 @@ function ConnectionApproval({
           New
         </button>
       </div> : null}
-
-      {connectorStatuses && !profileLinked ? (
-        <button
-          className="profile-link"
-          disabled={disabled || profileLinking}
-          onClick={onLinkProfile}
-          type="button"
-        >
-          <span className="profile-mark" aria-hidden="true" />
-          <strong>{profileLinking ? "Open Nanocodex…" : "Use Nanocodex profile"}</strong>
-          <span aria-hidden="true">→</span>
-        </button>
-      ) : null}
 
       <section className="oauth-permissions" aria-label="Requested capabilities">
         <div className="capability-logos" role="list">
@@ -1356,19 +1255,6 @@ function isConnectorCompletion(value: unknown): value is Readonly<{
     && (value.result === "success" || value.result === "error")
     && (value.error === undefined || typeof value.error === "string")
     && (value.message === undefined || typeof value.message === "string");
-}
-
-function isAccountLinkCompletion(value: unknown): value is Readonly<{
-  type: "nanocodex:account-link";
-  code: string;
-  state: string;
-}> {
-  return isRecord(value)
-    && value.type === "nanocodex:account-link"
-    && typeof value.code === "string"
-    && /^[A-Za-z0-9_-]{43}$/.test(value.code)
-    && typeof value.state === "string"
-    && /^[A-Za-z0-9_-]{43}$/.test(value.state);
 }
 
 function walletRequestPolicyError(request: ReturnType<typeof parentDialog.getRequest>) {

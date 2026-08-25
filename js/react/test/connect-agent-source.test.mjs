@@ -195,6 +195,75 @@ test("Connect turns replay the same durable operation after a transient submissi
   turn.dispose();
 });
 
+test("Connect turns replay the same durable operation after an interrupted event observation", async () => {
+  const prompts = [];
+  const connectAgent = {
+    id: "durable-event-retry-agent",
+    sessionId: "durable-event-retry-agent",
+    events: {
+      async page() { throw new Error("history is disabled"); },
+      async *watch({ signal }) { await aborted(signal); },
+    },
+    turn: {
+      prompt(options) {
+        prompts.push(options);
+        return {
+          async steer() {},
+          async cancel() {},
+          async result() {
+            if (prompts.length === 1) {
+              throw Object.assign(new Error("stream ended"), { code: "event_stream_ended" });
+            }
+            return { finalMessage: "event observation resumed" };
+          },
+        };
+      },
+    },
+  };
+  const source = createConnectAgentSource(connectAgent, { history: false });
+  const turn = source.turn.prompt({ input: "keep observing" });
+
+  assert.equal((await turn.result()).finalMessage, "event observation resumed");
+  assert.equal(prompts.length, 2);
+  assert.deepEqual(prompts[1], prompts[0]);
+  turn.dispose();
+});
+
+test("disposing a retrying Connect turn cannot submit another durable operation", async () => {
+  let resultStarted;
+  const started = new Promise((resolve) => { resultStarted = resolve; });
+  const prompts = [];
+  const connectAgent = {
+    id: "disposed-retry-agent",
+    sessionId: "disposed-retry-agent",
+    events: {
+      async page() { throw new Error("history is disabled"); },
+      async *watch({ signal }) { await aborted(signal); },
+    },
+    turn: {
+      prompt(options) {
+        prompts.push(options);
+        return {
+          async steer() {},
+          async cancel() {},
+          async result() {
+            resultStarted();
+            throw Object.assign(new Error("connection changed"), { code: "network_error" });
+          },
+        };
+      },
+    },
+  };
+  const turn = createConnectAgentSource(connectAgent, { history: false })
+    .turn.prompt({ input: "detach" });
+  const result = turn.result();
+  await started;
+  turn.dispose();
+
+  await assert.rejects(result, { name: "AbortError" });
+  assert.equal(prompts.length, 1);
+});
+
 test("history-enabled Connect sources hydrate every retained page in order", async () => {
   const pageCalls = [];
   let resolveInitial;

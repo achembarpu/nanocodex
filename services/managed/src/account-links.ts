@@ -55,6 +55,10 @@ export async function routeAccountLinkRequest(
     if (request.method === "POST") return authorizeAccountLink(request, env, url);
     return json({ error: "method_not_allowed" }, { status: 405 });
   }
+  if (url.pathname === "/v1/connect/account-link/authorize") {
+    if (request.method === "POST") return authorizeAccountLinkDirect(request, env, url);
+    return json({ error: "method_not_allowed" }, { status: 405 });
+  }
 
   const unlink = url.pathname.match(/^\/v1\/connect\/account-links\/(0x[0-9a-fA-F]{40})$/);
   if (!unlink) return undefined;
@@ -127,21 +131,46 @@ async function authorizeAccountLink(
   if (!validIntent(intent) || intent.userId !== principal.userId) {
     return accountLinkPage({ kind: "error", message: "This link request expired or was already used." }, 400);
   }
-  const code = randomToken();
-  if (!store.create || !await store.create(`code:${await sha256(code)}`, {
-    accountAddress: intent.accountAddress,
-    appId: intent.appId,
-    state: intent.state,
-    userId: intent.userId,
-  } satisfies AuthorizationCode, { ttl: AUTHORIZATION_TTL_SECONDS })) {
-    return accountLinkPage({ kind: "error", message: "This authorization could not be completed." }, 503);
-  }
+  const code = await issueAuthorizationCode(store, intent, intent.userId);
+  if (!code) return accountLinkPage({ kind: "error", message: "This authorization could not be completed." }, 503);
   return accountLinkPage({
     kind: "complete",
     code,
     returnOrigin: intent.returnOrigin,
     state: intent.state,
   });
+}
+
+async function authorizeAccountLinkDirect(
+  request: Request,
+  env: AccountAuthEnv,
+  url: URL,
+): Promise<Response> {
+  const principal = await authenticatePersistentAccount(request, env, url);
+  if (!principal) return json({ error: "unauthorized" }, { status: 401 });
+  const originFailure = requireNanocodexOrigin(request, url);
+  if (originFailure) return originFailure;
+  const parameters = authorizationParameters(url.searchParams);
+  if (!parameters) return json({ error: "invalid_account_link" }, { status: 400 });
+  const code = await issueAuthorizationCode(accountLinkStore(env), parameters, principal.userId);
+  return code
+    ? json({ code, state: parameters.state })
+    : json({ error: "authorization_unavailable" }, { status: 503 });
+}
+
+async function issueAuthorizationCode(
+  store: Kv.Kv,
+  parameters: Omit<AuthorizationIntent, "returnOrigin" | "userId">,
+  userId: string,
+): Promise<string | undefined> {
+  const code = randomToken();
+  if (!store.create || !await store.create(`code:${await sha256(code)}`, {
+    accountAddress: parameters.accountAddress,
+    appId: parameters.appId,
+    state: parameters.state,
+    userId,
+  } satisfies AuthorizationCode, { ttl: AUTHORIZATION_TTL_SECONDS })) return undefined;
+  return code;
 }
 
 async function resolveAccountLink(

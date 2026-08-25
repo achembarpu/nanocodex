@@ -18,6 +18,7 @@ const SUBSCRIBER_QUEUE_CAPACITY = 4_096;
 const SUBSCRIBER_QUEUE_BYTES = 32 * 1024 * 1024;
 const EVENT_STREAM_FRAME_BYTES = 2 * 1024 * 1024;
 const EVENT_STREAM_INACTIVITY_TIMEOUT_MS = 45_000;
+const TURN_SUBMISSION_TIMEOUT_MS = 10_000;
 const ALLOWED_OPTIONS = new Set(["apiKey", "baseUrl", "fetch"]);
 const eventEncoder = new TextEncoder();
 
@@ -163,6 +164,7 @@ function managedTurn(client, agentId, eventStream, options) {
     input,
     signal,
   });
+  void submission.catch(() => {});
   let result;
   const turn = {
     idempotencyKey,
@@ -209,12 +211,11 @@ async function retrySubmission(client, agentId, options) {
   let failure;
   for (let attempt = 0; attempt < 3; attempt += 1) {
     try {
-      return await client.json(`${agentPath(agentId)}/turns`, {
+      return await boundedSubmission(client, `${agentPath(agentId)}/turns`, {
         method: "POST",
         body,
         idempotencyKey: options.idempotencyKey,
-        signal: options.signal,
-      });
+      }, options.signal);
     } catch (error) {
       if (options.signal?.aborted
         || (error instanceof ManagedError && error.code !== "network_error")) throw error;
@@ -223,6 +224,33 @@ async function retrySubmission(client, agentId, options) {
     }
   }
   throw failure;
+}
+
+async function boundedSubmission(client, path, init, signal) {
+  const attempt = new AbortController();
+  let rejectBoundary;
+  const boundary = new Promise((_, reject) => { rejectBoundary = reject; });
+  const interrupt = (reason) => {
+    if (attempt.signal.aborted) return;
+    attempt.abort(reason);
+    rejectBoundary(reason);
+  };
+  const aborted = () => interrupt(abortError(signal.reason));
+  if (signal?.aborted) aborted();
+  else signal?.addEventListener("abort", aborted, { once: true });
+  const timeout = setTimeout(() => interrupt(new ManagedError(
+    "network_error",
+    "Managed agent submission was not acknowledged. Retrying the same durable turn.",
+  )), TURN_SUBMISSION_TIMEOUT_MS);
+  timeout.unref?.();
+  const request = client.json(path, { ...init, signal: attempt.signal });
+  void request.catch(() => {});
+  try {
+    return await Promise.race([request, boundary]);
+  } finally {
+    clearTimeout(timeout);
+    signal?.removeEventListener("abort", aborted);
+  }
 }
 
 async function waitForResult(eventStream, submission, signal) {

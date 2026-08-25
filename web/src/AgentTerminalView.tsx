@@ -68,6 +68,7 @@ export function AgentTerminalView({
     input: string;
     submittedAt: number;
   }>();
+  const [followTailRequest, setFollowTailRequest] = useState(0);
   const [readySessionId, setReadySessionId] = useState<string>();
   const submittedPrompts = useRef<Array<{ input: string; submittedAt: number }>>([]);
   const pendingRootPrompts = useRef<PromptTiming[]>([]);
@@ -136,6 +137,7 @@ export function AgentTerminalView({
   const submitTouchPrompt = useCallback((input: string) => {
     if (!input.trim()) return;
     const submittedAt = performance.now();
+    setFollowTailRequest((current) => current + 1);
     if (agentStatus !== "ready") {
       setPendingTouchSubmission({ input, submittedAt });
       return;
@@ -160,6 +162,7 @@ export function AgentTerminalView({
   const submitAccessoryPrompt = useCallback((input: string) => {
     if (agentStatus !== "ready") return;
     const submittedAt = performance.now();
+    setFollowTailRequest((current) => current + 1);
     retainSubmittedPrompt(submittedPrompts.current, input, submittedAt);
     void controller.submit(input, { intent: "queue" });
   }, [agentStatus, controller]);
@@ -183,6 +186,7 @@ export function AgentTerminalView({
       )}
       canLoadOlder={controller.canLoadOlder}
       entries={controller.entries}
+      followTailRequest={followTailRequest}
       inactiveMessage={unavailableMessage ?? ""}
       isLoadingOlder={controller.isLoadingOlder}
       mode={mode}
@@ -205,6 +209,7 @@ export function TerminalTranscriptSurface({
   canLoadOlder,
   composer,
   entries,
+  followTailRequest = 0,
   inactiveMessage,
   isLoadingOlder,
   mode,
@@ -216,6 +221,7 @@ export function TerminalTranscriptSurface({
   canLoadOlder: boolean;
   composer: ReactNode;
   entries: readonly AgentEntry[];
+  followTailRequest?: number;
   inactiveMessage: string;
   isLoadingOlder: boolean;
   mode: AgentTerminalMode;
@@ -226,6 +232,7 @@ export function TerminalTranscriptSurface({
 }) {
   const transcript = useRef<HTMLDivElement>(null);
   const followTail = useRef(true);
+  const handledFollowTailRequest = useRef(followTailRequest);
   const loadOlderArmed = useRef(false);
   const preserveScroll = useRef<{ scrollHeight: number; scrollTop: number } | undefined>(undefined);
   const visibleWelcome = entries.length === 0 ? welcome : undefined;
@@ -233,13 +240,17 @@ export function TerminalTranscriptSurface({
   useLayoutEffect(() => {
     const element = transcript.current;
     if (!element) return;
+    if (handledFollowTailRequest.current !== followTailRequest) {
+      handledFollowTailRequest.current = followTailRequest;
+      followTail.current = true;
+    }
     const preserved = preserveScroll.current;
     if (preserved) {
       preserveScroll.current = undefined;
       element.scrollTop = preserved.scrollTop + element.scrollHeight - preserved.scrollHeight;
     } else if (visibleWelcome) element.scrollTop = 0;
     else if (followTail.current) element.scrollTop = element.scrollHeight;
-  }, [entries, visibleWelcome]);
+  }, [entries, followTailRequest, visibleWelcome]);
 
   useEffect(() => {
     const element = transcript.current;

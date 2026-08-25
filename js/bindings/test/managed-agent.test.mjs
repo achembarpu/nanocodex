@@ -1201,6 +1201,59 @@ test("managed prompts retry browser transport failures with one idempotency key"
   );
 });
 
+test("managed prompts replay a committed turn when its acknowledgement never settles", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  const requests = [];
+  globalThis.setTimeout = (callback, delay, ...args) => originalSetTimeout(
+    callback,
+    delay === 10_000 ? 0 : delay,
+    ...args,
+  );
+  const keepAlive = originalSetTimeout(() => {}, 1_000);
+  try {
+    const result = await Agent.open(agentId, {
+      baseUrl: origin,
+      fetch: async (input, init) => {
+        const request = new Request(input, init);
+        requests.push(request);
+        if (requests.length === 1) {
+          await new Promise((_, reject) => request.signal.addEventListener(
+            "abort",
+            () => reject(request.signal.reason),
+            { once: true },
+          ));
+        }
+        return Response.json({
+          turn_id: "turn-committed",
+          state: "completed",
+          accepted_cursor: "1",
+          terminal_cursor: "2",
+          terminal: {
+            type: "turn_completed",
+            final_message: "recovered",
+            usage: null,
+          },
+        }, { status: 202 });
+      },
+    }).turn.prompt({
+      id: "turn-committed",
+      input: "survive a lost acknowledgement",
+      idempotencyKey: "committed-request",
+    }).result();
+
+    assert.equal(result.finalMessage, "recovered");
+    assert.equal(requests.length, 2);
+    assert.deepEqual(
+      requests.map((request) => request.headers.get("idempotency-key")),
+      ["committed-request", "committed-request"],
+    );
+    assert.equal(await requests[0].text(), await requests[1].text());
+  } finally {
+    clearTimeout(keepAlive);
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
 function agentState() {
   return {
     agent_id: agentId,

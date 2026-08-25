@@ -48,6 +48,7 @@ function connectTurn(connectAgent, turnId, input) {
         } catch (error) {
           if (controller.signal.aborted || !isRetryableTurnError(error)) throw error;
           await retryDelayUnlessAborted(retryDelay, controller.signal);
+          if (controller.signal.aborted) throw controller.signal.reason;
           retryDelay = Math.min(retryDelay * 2, TURN_RETRY_MAX_MS);
           turn = startConnectTurn(connectAgent, turnId, input);
         }
@@ -65,7 +66,11 @@ function startConnectTurn(connectAgent, turnId, input) {
 }
 
 function isRetryableTurnError(error) {
-  return error && typeof error === "object" && error.code === "network_error";
+  return error && typeof error === "object" && (
+    error.code === "network_error"
+    || error.code === "event_stream_ended"
+    || error.code === "event_stream_inactive"
+  );
 }
 
 function connectEventWatcher(connectAgent, submitted, historyEnabled) {

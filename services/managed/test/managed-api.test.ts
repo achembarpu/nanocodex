@@ -379,6 +379,52 @@ describe("managed agents REST and resumable SSE", () => {
     expect(missing.status).toBe(404);
   });
 
+  it("authorizes the signed Connect account from its existing first-party session", async () => {
+    const userId = "77777777-7777-4777-8777-777777777777";
+    const sessionToken = "m".repeat(43);
+    const cookie = `nanocodex_account=${sessionToken}`;
+    const accountAddress = "0x2222222222222222222222222222222222222222";
+    const state = "t".repeat(43);
+    await seedPasskeySession(userId, sessionToken);
+
+    const authorize = new URL("https://example.test/v1/connect/account-link/authorize");
+    authorize.searchParams.set("account_address", accountAddress);
+    authorize.searchParams.set("app_id", "atlas-workspace");
+    authorize.searchParams.set("return_origin", "https://nanocodex.gakonst.workers.dev");
+    authorize.searchParams.set("state", state);
+
+    expect((await RAW_SELF.fetch(authorize, { method: "POST" })).status).toBe(401);
+    expect((await RAW_SELF.fetch(authorize, {
+      method: "POST",
+      headers: { cookie, origin: "https://attacker.test" },
+    })).status).toBe(403);
+
+    const authorized = await RAW_SELF.fetch(authorize, {
+      method: "POST",
+      headers: { cookie, origin: "https://example.test" },
+    });
+    expect(authorized.status).toBe(200);
+    const body = await authorized.json<{ code: string; state: string }>();
+    expect(body.state).toBe(state);
+    expect(body.code).toMatch(/^[A-Za-z0-9_-]{43}$/);
+
+    const exchange = await RAW_SELF.fetch(
+      "https://nanocodex.internal/connect/account-links/exchange",
+      {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({
+          account_address: accountAddress,
+          app_id: "atlas-workspace",
+          code: body.code,
+          state,
+        }),
+      },
+    );
+    expect(exchange.status).toBe(200);
+    expect(await exchange.json()).toEqual({ linked: true, user_id: userId });
+  });
+
   it("rejects malformed bearer authentication instead of minting a browser identity", async () => {
     const response = await RAW_SELF.fetch("https://example.test/v1/me", {
       headers: { authorization: "Bearer malformed" },
