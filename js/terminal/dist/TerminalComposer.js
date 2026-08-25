@@ -18,20 +18,24 @@ export function TerminalComposer({ controls, draft, pending, running, status, on
         return () => window.cancelAnimationFrame(frame);
     }, [status]);
     const submit = () => {
-        if (pending || !draft.trim())
+        const value = textarea.current?.value ?? draft;
+        if (pending || !value.trim())
             return;
-        onSubmit(draft);
+        onSubmit(value);
     };
     const action = terminalComposerAction(running, draft);
     return (_jsx("form", { className: `agent-touch-composer${running ? " is-running" : ""}`, "aria-label": "Nanocodex message composer", onSubmit: (event) => {
             event.preventDefault();
             submit();
-        }, children: _jsxs("div", { className: "agent-touch-field", children: [_jsx("textarea", { ref: textarea, "aria-label": "Message Nanocodex", enterKeyHint: "send", rows: 1, value: draft, onChange: (event) => onChange(event.currentTarget.value), onCompositionStart: () => { composing.current = true; }, onCompositionEnd: () => { composing.current = false; }, onKeyDown: (event) => {
+        }, children: _jsxs("div", { className: "agent-touch-field", children: [_jsx("textarea", { ref: textarea, "aria-label": "Message Nanocodex", enterKeyHint: "send", rows: 1, value: draft, onChange: (event) => onChange(event.currentTarget.value), onCompositionStart: () => { composing.current = true; }, onCompositionEnd: (event) => {
+                        composing.current = false;
+                        onChange(event.currentTarget.value);
+                    }, onKeyDown: (event) => {
                         if (!isSubmitKeyEvent(event.nativeEvent, composing.current))
                             return;
                         event.preventDefault();
                         submit();
-                    } }), _jsxs("div", { className: "agent-touch-actions", children: [controls, action === "stop" ? (_jsx("button", { type: "button", "aria-label": "Stop response", disabled: status !== "ready", onClick: onCancel, children: _jsx(Square, { "aria-hidden": "true" }) })) : (_jsx("button", { type: "submit", "aria-label": "Send message", disabled: pending || !draft.trim(), children: _jsx(ArrowUp, { "aria-hidden": "true" }) }))] })] }) }));
+                    } }), _jsxs("div", { className: "agent-touch-actions", children: [controls, action === "stop" ? (_jsx("button", { type: "button", "aria-label": "Stop response", disabled: status !== "ready", onClick: onCancel, children: _jsx(Square, { "aria-hidden": "true" }) })) : null, _jsx("button", { type: "submit", "aria-label": "Send message", disabled: pending || status !== "ready", children: _jsx(ArrowUp, { "aria-hidden": "true" }) })] })] }) }));
 }
 function isSubmitKeyEvent(event, composing) {
     return event.key === "Enter"

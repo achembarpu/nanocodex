@@ -41,8 +41,9 @@ export function TerminalComposer({
   }, [status]);
 
   const submit = () => {
-    if (pending || !draft.trim()) return;
-    onSubmit(draft);
+    const value = textarea.current?.value ?? draft;
+    if (pending || !value.trim()) return;
+    onSubmit(value);
   };
   const action = terminalComposerAction(running, draft);
 
@@ -64,7 +65,10 @@ export function TerminalComposer({
           value={draft}
           onChange={(event) => onChange(event.currentTarget.value)}
           onCompositionStart={() => { composing.current = true; }}
-          onCompositionEnd={() => { composing.current = false; }}
+          onCompositionEnd={(event) => {
+            composing.current = false;
+            onChange(event.currentTarget.value);
+          }}
           onKeyDown={(event) => {
             if (!isSubmitKeyEvent(event.nativeEvent, composing.current)) return;
             event.preventDefault();
@@ -77,11 +81,10 @@ export function TerminalComposer({
             <button type="button" aria-label="Stop response" disabled={status !== "ready"} onClick={onCancel}>
               <Square aria-hidden="true" />
             </button>
-          ) : (
-            <button type="submit" aria-label="Send message" disabled={pending || !draft.trim()}>
-              <ArrowUp aria-hidden="true" />
-            </button>
-          )}
+          ) : null}
+          <button type="submit" aria-label="Send message" disabled={pending || status !== "ready"}>
+            <ArrowUp aria-hidden="true" />
+          </button>
         </div>
       </div>
     </form>

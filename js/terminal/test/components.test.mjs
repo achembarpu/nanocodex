@@ -59,7 +59,7 @@ test("controller-backed terminal remains caller-owned when no Agent is attached"
   await act(async () => renderer.unmount());
 });
 
-test("composer keeps submit and stop policy controlled", async () => {
+test("composer keeps send stable while exposing stop separately", async () => {
   assert.equal(terminalComposerAction(true, ""), "stop");
   assert.equal(terminalComposerAction(true, "steer"), "send");
   const submissions = [];
@@ -102,11 +102,29 @@ test("composer keeps submit and stop policy controlled", async () => {
     },
     preventDefault() { prevented += 1; },
   }));
-  await act(async () => textarea.props.onCompositionEnd());
+  await act(async () => textarea.props.onCompositionEnd({ currentTarget: { value: "ship it" } }));
   assert.deepEqual(submissions, ["ship it", "ship it"]);
   assert.equal(prevented, 1);
-  assert.equal(renderer.root.findByType("button").props["aria-label"], "Send message");
+  assert.deepEqual(
+    renderer.root.findAllByType("button").map((button) => button.props["aria-label"]),
+    ["Send message"],
+  );
   assert.equal(cancelled, 0);
+
+  await act(async () => renderer.update(React.createElement(TerminalComposer, {
+    draft: "",
+    pending: false,
+    running: true,
+    status: "ready",
+    onCancel() { cancelled += 1; },
+    onChange() {},
+    onSubmit(value) { submissions.push(value); },
+  })));
+  assert.deepEqual(
+    renderer.root.findAllByType("button").map((button) => button.props["aria-label"]),
+    ["Stop response", "Send message"],
+  );
+  assert.equal(renderer.root.findByProps({ "aria-label": "Send message" }).props.disabled, false);
   await act(async () => renderer.unmount());
 });
 
