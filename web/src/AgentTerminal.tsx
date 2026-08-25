@@ -168,26 +168,27 @@ function VoiceControl({
   voice: UseVoiceReturnType;
 }) {
   const engaged = voice.isActive || voice.isConnecting;
-  return (
-    <div className="agent-voice-control">
-      <button
-        type="button"
-        aria-label={engaged ? "Stop voice" : "Start voice"}
-        aria-pressed={engaged}
-        disabled={!agentReady}
-        onClick={() => { void voice.toggle().catch(() => {}); }}
-      >
-        <svg aria-hidden="true" viewBox="0 0 24 24">
-          <path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3Zm-7-3a1 1 0 1 1 2 0 5 5 0 0 0 10 0 1 1 0 1 1 2 0 7 7 0 0 1-6 6.92V21h3a1 1 0 1 1 0 2H8a1 1 0 1 1 0-2h3v-2.08A7 7 0 0 1 5 12Z" />
-        </svg>
-        <span>Voice</span>
-      </button>
-      {voice.isActive ? <span role="status">{voice.voice}</span> : null}
-      {voice.isError ? (
-        <span role="alert">{voice.error?.message ?? "Voice failed. Check microphone access and retry."}</span>
-      ) : null}
-    </div>
-  );
+  return <>
+    <button
+      className="agent-voice-button"
+      type="button"
+      aria-label={engaged ? "Stop voice" : "Start voice"}
+      aria-pressed={engaged}
+      disabled={!agentReady}
+      onClick={() => { void voice.toggle().catch(() => {}); }}
+    >
+      <svg aria-hidden="true" viewBox="0 0 24 24">
+        <path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3Zm-7-3a1 1 0 1 1 2 0 5 5 0 0 0 10 0 1 1 0 1 1 2 0 7 7 0 0 1-6 6.92V21h3a1 1 0 1 1 0 2H8a1 1 0 1 1 0-2h3v-2.08A7 7 0 0 1 5 12Z" />
+      </svg>
+      <span className="sr-only">Voice</span>
+    </button>
+    {voice.isActive ? <span className="sr-only" role="status">{voice.voice}</span> : null}
+    {voice.isError ? (
+      <span className="agent-voice-error" role="alert">
+        {voice.error?.message ?? "Voice failed. Check microphone access and retry."}
+      </span>
+    ) : null}
+  </>;
 }
 
 function artifactFollowOnPrompt(

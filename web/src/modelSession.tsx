@@ -114,7 +114,7 @@ export function AgentSessionBar({
   );
 }
 
-function useModelSession({
+export function useModelSession({
   onStatusChange,
   onSourceChange,
 }: {
@@ -220,8 +220,8 @@ function sessionLabel({
   source,
 }: SessionPresentation): string {
   if (capabilityError) return "browser unsupported";
-  if (agentStatus === "starting" && source === "brokered") return "Account agent";
-  if (agentStatus === "ready") return "Account agent ready";
+  if (agentStatus === "starting" && source === "brokered") return "agent starting";
+  if (agentStatus === "ready") return "agent ready";
   if (agentStatus === "error" && source) return "agent unavailable";
   if (authStatus?.state === "signed_out") return "account required";
   if (authStatus?.state === "error") return "connection check failed";

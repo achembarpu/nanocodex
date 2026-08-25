@@ -2,17 +2,22 @@ export const COARSE_POINTER_QUERY = "(pointer: coarse), (any-pointer: coarse)";
 export const MINIMUM_COARSE_TARGET_SIZE = 44;
 export const COMPACT_SOURCE_TREE_ITEM_HEIGHT = 24;
 export const TERMINAL_COMPOSER_BASE_HEIGHT = 62;
-export const VIRTUAL_KEYBOARD_MINIMUM_OCCLUSION = 120;
 
-export function visualViewportShowsKeyboard({
+export function visualViewportKeyboardInset({
   baselineHeight,
   viewportHeight,
+  viewportOffsetTop,
 }: {
   baselineHeight: number;
   viewportHeight: number;
-}): boolean {
-  return finiteNonNegative(baselineHeight) - finiteNonNegative(viewportHeight)
-    >= VIRTUAL_KEYBOARD_MINIMUM_OCCLUSION;
+  viewportOffsetTop: number;
+}): number {
+  return Math.max(
+    0,
+    finiteNonNegative(baselineHeight)
+      - finiteNonNegative(viewportHeight)
+      - finiteNonNegative(viewportOffsetTop),
+  );
 }
 
 export function terminalComposerAction(running: boolean, draft: string): "send" | "stop" {

@@ -8,8 +8,8 @@ import { ConversationHistoryRail, type ConversationSummary } from "./Conversatio
 import { browserAgentCapabilityError } from "./browserAgentCapabilities";
 import { clientFailureMessage } from "./clientFailure";
 import {
-  AgentSessionBar,
   inactiveTerminalMessage,
+  useModelSession,
   type ModelSessionStatus,
   type CredentialSource,
 } from "./modelSession";
@@ -104,11 +104,14 @@ export const AgentExperience = memo(function AgentExperience({
     credentialSourceRef.current = source;
     setCredentialSource(source);
   }, []);
+  useModelSession({
+    onStatusChange: setAuthStatus,
+    onSourceChange: changeCredentialSource,
+  });
   const activeCapabilityError = activeRuntime === "local" ? capabilityError : undefined;
   const agentStatus: AgentStatus = !hasCredential || activeCapabilityError
     ? "idle" : runtimeState?.status ?? "starting";
   const agentError = runtimeState?.error;
-  const retryAgent = useCallback(() => runtimeState?.retry(), [runtimeState]);
   const inactiveMessage = inactiveTerminalMessage({
     agentError, agentStatus, authStatus, capabilityError: activeCapabilityError, source: credentialSource,
   });
@@ -185,11 +188,6 @@ export const AgentExperience = memo(function AgentExperience({
         }}
       >{value === "local" ? "Local browser" : "Managed durable"}</button>)}
     </div>}
-    <AgentSessionBar
-      agentStatus={agentStatus} agentError={agentError} source={credentialSource}
-      capabilityError={activeCapabilityError} onAuthStatusChange={setAuthStatus}
-      onRetryAgent={retryAgent} onSourceChange={changeCredentialSource}
-    />
     <div className="conversation-workspace">
       {landing ? null : <ConversationHistoryRail
         agentStatus={agentStatus}

@@ -7,6 +7,7 @@ test("managed browser callbacks bypass the local document fallback", () => {
   assert.equal(isManagedRoutePath("/v1/connectors/github/callback"), true);
   assert.equal(isManagedRoutePath("/v1/connectors/gmail/callback"), true);
   assert.equal(isManagedRoutePath("/v1/connectors/gdrive/callback"), true);
+  assert.equal(isManagedRoutePath("/v1/connectors/x/callback"), true);
   assert.equal(isManagedRoutePath("/definitely-not-a-route"), false);
 });
 
@@ -31,6 +32,7 @@ test("projects only the managed product surface through one private binding", as
     "/v1/api-keys/key-id",
     "/v1/credentials/chatgpt/login",
     "/v1/connectors/github/callback?code=code&state=state",
+    "/v1/connectors/x/callback?code=code&state=state",
     "/v1/agents/agent-id/events?cursor=7",
     "/v1/rooms/room-id/ws?cursor=9",
   ]) {

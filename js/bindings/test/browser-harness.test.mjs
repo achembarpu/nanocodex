@@ -30,6 +30,7 @@ test("the default browser harness exposes one exact model-visible tool set", asy
           github: { connected: true, label: "Nano Cat (nanocat)", account_id: "hidden" },
           gmail: { connected: false },
           gdrive: { connected: true, label: "Drive User", access_token: "hidden" },
+          x: { connected: true, label: "Nano Cat (@nanocat)", account_id: "hidden" },
         },
       });
     },
@@ -91,8 +92,8 @@ test("the default browser harness exposes one exact model-visible tool set", asy
   const accountInfo = await byName.accountInfo.handler({}, context);
   assert.deepEqual(accountInfo, {
     status: "ready",
-    authenticated: ["github", "gdrive"],
-    accounts: { github: "Nano Cat (nanocat)", gdrive: "Drive User" },
+    authenticated: ["github", "gdrive", "x"],
+    accounts: { github: "Nano Cat (nanocat)", gdrive: "Drive User", x: "Nano Cat (@nanocat)" },
     identity: {},
     stablecoins: [],
     authorizations: [],
@@ -170,8 +171,8 @@ test("accountInfo adds app authorization without forwarding unknown control-plan
         permission: "agent.run",
         status: "active",
         expiresAt: 2_000_000_000,
-        capabilities: ["nanocodex.agent", "chatgpt"],
-        connectors: ["chatgpt"],
+        capabilities: ["nanocodex.agent", "x", "chatgpt"],
+        connectors: ["x", "chatgpt"],
         accessKey: {
           id: "0x02",
           expiry: 2_000_000_000,
@@ -205,8 +206,8 @@ test("accountInfo adds app authorization without forwarding unknown control-plan
       permission: "agent.run",
       status: "active",
       expiresAt: 2_000_000_000,
-      capabilities: ["nanocodex.agent", "chatgpt"],
-      connectors: ["chatgpt"],
+      capabilities: ["nanocodex.agent", "x", "chatgpt"],
+      connectors: ["x", "chatgpt"],
       accessKey: {
         id: "0x02",
         expiry: 2_000_000_000,

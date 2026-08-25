@@ -8,7 +8,6 @@ import {
   useRef,
   useState,
 } from "react";
-import { Check, Copy } from "lucide-react";
 import {
   useAgentController,
   type Agent,
@@ -65,7 +64,6 @@ export function AgentTerminalView({
     input: string;
     submittedAt: number;
   }>();
-  const [welcomeDismissed, setWelcomeDismissed] = useState(false);
   const [readySessionId, setReadySessionId] = useState<string>();
   const submittedPrompts = useRef<Array<{ input: string; submittedAt: number }>>([]);
   const pendingRootPrompts = useRef<PromptTiming[]>([]);
@@ -129,14 +127,9 @@ export function AgentTerminalView({
     onStateChange({ error: agentError, retry: retryAgent, status: agentStatus });
   }, [agentError, agentStatus, onStateChange, retryAgent]);
 
-  useEffect(() => {
-    if (welcome) setWelcomeDismissed(false);
-  }, [welcome]);
-
   const unavailableMessage = inactiveMessage?.({ agentError, agentStatus });
   const submitTouchPrompt = useCallback((input: string) => {
     if (!input.trim()) return;
-    setWelcomeDismissed(true);
     const submittedAt = performance.now();
     if (agentStatus !== "ready") {
       setPendingTouchSubmission({ input, submittedAt });
@@ -168,9 +161,9 @@ export function AgentTerminalView({
 
   const terminal = (
     <TerminalTranscriptSurface
-      controls={controls?.({ agentReady: agentStatus === "ready" })}
       composer={(
         <TerminalComposer
+          controls={controls?.({ agentReady: agentStatus === "ready" })}
           draft={touchDraft}
           pending={pendingTouchSubmission !== undefined}
           running={terminalRunning}
@@ -189,7 +182,7 @@ export function AgentTerminalView({
       isLoadingOlder={controller.isLoadingOlder}
       mode={mode}
       status={agentStatus}
-      welcome={welcomeDismissed ? undefined : welcome}
+      welcome={welcome}
       onLoadOlder={controller.loadOlder}
     />
   );
@@ -205,7 +198,6 @@ export function AgentTerminalView({
 export function TerminalTranscriptSurface({
   canLoadOlder,
   composer,
-  controls,
   entries,
   inactiveMessage,
   isLoadingOlder,
@@ -216,7 +208,6 @@ export function TerminalTranscriptSurface({
 }: {
   canLoadOlder: boolean;
   composer: ReactNode;
-  controls?: ReactNode;
   entries: readonly AgentEntry[];
   inactiveMessage: string;
   isLoadingOlder: boolean;
@@ -229,7 +220,7 @@ export function TerminalTranscriptSurface({
   const followTail = useRef(true);
   const loadOlderArmed = useRef(false);
   const preserveScroll = useRef<{ scrollHeight: number; scrollTop: number } | undefined>(undefined);
-  const [copied, setCopied] = useState(false);
+  const visibleWelcome = entries.length === 0 ? welcome : undefined;
 
   useLayoutEffect(() => {
     const element = transcript.current;
@@ -238,48 +229,28 @@ export function TerminalTranscriptSurface({
     if (preserved) {
       preserveScroll.current = undefined;
       element.scrollTop = preserved.scrollTop + element.scrollHeight - preserved.scrollHeight;
-    } else if (welcome) element.scrollTop = 0;
+    } else if (visibleWelcome) element.scrollTop = 0;
     else if (followTail.current) element.scrollTop = element.scrollHeight;
-  }, [entries, welcome]);
+  }, [entries, visibleWelcome]);
 
   useEffect(() => {
     const element = transcript.current;
     if (!element) return;
     const observer = new ResizeObserver(() => {
-      if (welcome) element.scrollTop = 0;
+      if (visibleWelcome) element.scrollTop = 0;
       else if (followTail.current) element.scrollTop = element.scrollHeight;
     });
     const content = element.firstElementChild;
+    observer.observe(element);
     if (content) observer.observe(content);
     return () => observer.disconnect();
-  }, [welcome]);
-
-  const copyTranscript = useCallback(() => {
-    const text = [welcome, transcriptText(entries)].filter(Boolean).join("\n\n");
-    if (!text) return;
-    void navigator.clipboard.writeText(text).then(() => {
-      setCopied(true);
-      window.setTimeout(() => setCopied(false), 1_500);
-    }).catch(() => {});
-  }, [entries, welcome]);
+  }, [visibleWelcome]);
 
   return (
     <section
-      className={`agent-terminal-shell is-dom${controls ? " has-controls" : ""} is-${mode}`}
+      className={`agent-terminal-shell is-dom is-${mode}`}
       aria-label="Live Nanocodex terminal"
     >
-      <header className="agent-terminal-toolbar">
-        <div>{controls}</div>
-        <button
-          type="button"
-          disabled={entries.length === 0 && !welcome}
-          aria-label="Copy terminal transcript"
-          onClick={copyTranscript}
-        >
-          {copied ? <Check aria-hidden="true" /> : <Copy aria-hidden="true" />}
-          <span>{copied ? "copied" : "copy"}</span>
-        </button>
-      </header>
       <div
         ref={transcript}
         className="agent-dom-transcript"
@@ -309,9 +280,9 @@ export function TerminalTranscriptSurface({
       >
         <div className="agent-dom-transcript-inner">
           <strong className="agent-terminal-brand">nanocodex</strong>
-          {welcome ? <article className="agent-terminal-markdown is-assistant is-welcome">
+          {visibleWelcome ? <article className="agent-terminal-markdown is-assistant is-welcome">
             <Streamdown components={MARKDOWN_COMPONENTS} controls={false} linkSafety={LINK_SAFETY} mode="static" skipHtml>
-              {welcome}
+              {visibleWelcome}
             </Streamdown>
           </article> : null}
           {entries.map((entry) => <TerminalEntryView entry={entry} key={entry.id} />)}
@@ -320,6 +291,7 @@ export function TerminalTranscriptSurface({
               {inactiveMessage}
             </p>
           ) : null}
+          <div className="agent-transcript-keyboard-spacer" aria-hidden="true" />
         </div>
       </div>
       {composer}
@@ -373,15 +345,6 @@ function TerminalToolView({ tool }: { tool: ToolActivity }) {
     {tool.result ? <pre>{tool.result}</pre> : null}
     {tool.children.map((child) => <TerminalToolView key={child.callId} tool={child} />)}
   </section>;
-}
-
-function transcriptText(entries: readonly AgentEntry[]): string {
-  return entries.map((entry) => {
-    if (entry.kind === "user") return `> ${entry.text}`;
-    if (entry.kind === "assistant" || entry.kind === "reasoning" || entry.kind === "error") return entry.text;
-    if (entry.kind === "plan") return entry.update.plan.map(({ status, step }) => `${status === "completed" ? "✓" : status === "in_progress" ? "→" : "·"} ${step}`).join("\n");
-    return [entry.tool.name, entry.tool.result].filter(Boolean).join("\n");
-  }).join("\n\n");
 }
 
 type PromptTiming = {

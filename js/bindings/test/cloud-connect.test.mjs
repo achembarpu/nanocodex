@@ -101,6 +101,7 @@ test("Connect binds normalized cloud accounts into auth resources and the connec
               "agent.trace.read",
               "github",
               "gdrive",
+              "x",
             ] });
           },
         };
@@ -124,6 +125,7 @@ test("Connect binds normalized cloud accounts into auth resources and the connec
         github: true,
         gmail: false,
         gdrive: true,
+        x: true,
         chatgpt: "true",
         unknown: true,
       },
@@ -147,19 +149,19 @@ test("Connect binds normalized cloud accounts into auth resources and the connec
           resources: [
             "urn:example:configured",
             "urn:nanocodex:app:connector-workspace",
-            "urn:nanocodex:connectors:github,gdrive",
+            "urn:nanocodex:connectors:github,gdrive,x",
             "urn:nanocodex:agent:visibility:reply,actions,history,traces",
           ],
         },
       },
     }],
   }]);
-  assert.deepEqual(requests[0].body.requested_connectors, ["github", "gdrive"]);
+  assert.deepEqual(requests[0].body.requested_connectors, ["github", "gdrive", "x"]);
   assert.equal("agent" in requests[0].body, false);
   assert.equal("visibility" in requests[0].body, false);
   assert.equal(requests[0].body.approval_id, "approval-test");
   assert.equal(requests[0].headers, undefined);
-  assert.deepEqual(connection.grant.connectors, ["github", "gdrive"]);
+  assert.deepEqual(connection.grant.connectors, ["github", "gdrive", "x"]);
   assert.deepEqual(connection.grant.visibility, {
     finalMessages: true,
     actionSummaries: true,
@@ -511,6 +513,24 @@ test("Connect account logout clears the local session before remote wallet clean
   assert.equal(client._hasSession(), false);
   release();
   await logout;
+});
+
+test("the mock Connect transport preserves X in requested connector permissions", async () => {
+  const transport = Transport.mock({ appName: "Test Workspace" }).setup({ appId: "x-workspace" });
+  const prepared = await transport.request({
+    method: "POST",
+    path: "/v1/connections/prepare",
+    body: {
+      permission: "agent.run",
+      resources: ["urn:nanocodex:connector:x"],
+    },
+  });
+
+  assert.deepEqual(prepared.permission.connectors.at(-1), {
+    id: "x",
+    name: "X",
+    detail: "Use the connected X account through the grant",
+  });
 });
 
 test("Nanocodex Connect signs one witness-bound access key and enforces its MPP permission", async () => {

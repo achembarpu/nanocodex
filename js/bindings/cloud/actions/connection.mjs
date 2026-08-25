@@ -1,6 +1,6 @@
 import { connectionFromWire } from "../internal.mjs";
 
-const CLOUD_ACCOUNT_PROVIDERS = Object.freeze(["github", "gmail", "gdrive", "chatgpt"]);
+const CLOUD_ACCOUNT_PROVIDERS = Object.freeze(["github", "gmail", "gdrive", "x", "chatgpt"]);
 const CONNECTOR_RESOURCE_PREFIX = "urn:nanocodex:connector:";
 const CONNECTORS_RESOURCE_PREFIX = "urn:nanocodex:connectors:";
 const APP_RESOURCE_PREFIX = "urn:nanocodex:app:";

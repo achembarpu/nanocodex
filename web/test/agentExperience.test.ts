@@ -43,6 +43,12 @@ test("the landing terminal is ephemeral while the Agent demo retains durability"
   assert.match(experience, /durable=\{durable\}/);
 });
 
+test("the landing welcome is replaced atomically by the first transcript entry", () => {
+  assert.match(terminalView, /const visibleWelcome = entries\.length === 0 \? welcome : undefined/);
+  assert.match(terminalView, /\{visibleWelcome \? <article[\s\S]*?\{visibleWelcome\}/);
+  assert.doesNotMatch(terminalView, /welcomeDismissed|setWelcomeDismissed/);
+});
+
 test("the full Agent experience alone mounts a collapsed, counted artifact dock", () => {
   assert.match(terminalView, /return mode === "full" \? \([\s\S]*?className="agent-terminal-workspace"[\s\S]*?accessory\?\.\([\s\S]*?\) : terminal/);
   const local = section(terminal, "export const AgentTerminal", "export const ManagedAgentTerminal");

@@ -2,16 +2,16 @@
   position: relative;
   width: 100%;
   --terminal-safe-area-bottom: env(safe-area-inset-bottom);
+  --terminal-composer-lift: max(
+    0px,
+    calc(var(--terminal-keyboard-inset, 0px) - var(--terminal-safe-area-bottom))
+  );
   --terminal-composer-min-height: calc(62px + var(--terminal-safe-area-bottom));
   --terminal-background: var(--surface);
   --terminal-foreground: var(--text);
   --terminal-muted: color-mix(in srgb, var(--text) 56%, transparent);
   --terminal-border: var(--border-soft);
   --terminal-hover: var(--surface-hover);
-}
-
-[data-agent-keyboard] .nanocodex-demo {
-  --terminal-safe-area-bottom: 0px;
 }
 
 .agent-runtime-switch {
@@ -214,122 +214,9 @@
   border: 1px solid var(--terminal-border);
 }
 
-.agent-terminal-shell.has-controls {
-  display: grid;
-  grid-template-rows: auto minmax(0, 1fr);
-}
-
 .agent-terminal-shell.is-dom {
   display: grid;
-  grid-template-rows: auto minmax(0, 1fr) auto;
-}
-
-.agent-terminal-toolbar {
-  display: flex;
-  min-width: 0;
-  min-height: 34px;
-  align-items: stretch;
-  justify-content: flex-end;
-  color: var(--terminal-muted);
-  border-bottom: 1px solid var(--terminal-border);
-}
-
-.agent-terminal-toolbar > div {
-  min-width: 0;
-  flex: 1 1 auto;
-}
-
-.agent-terminal-toolbar > button {
-  display: inline-flex;
-  min-width: 64px;
-  min-height: 34px;
-  padding: 0 10px;
-  gap: 6px;
-  align-items: center;
-  justify-content: center;
-  color: inherit;
-  font: 11px var(--font-mono);
-  background: transparent;
-  border: 0;
-  border-left: 1px solid var(--terminal-border);
-  cursor: pointer;
-}
-
-.agent-terminal-toolbar > button:hover,
-.agent-terminal-toolbar > button:focus-visible {
-  color: var(--terminal-foreground);
-  background: var(--terminal-hover);
-  outline: 1px solid var(--terminal-border);
-  outline-offset: -1px;
-}
-
-.agent-terminal-toolbar > button:disabled {
-  opacity: 0.45;
-  cursor: default;
-}
-
-.agent-terminal-toolbar > button svg {
-  width: 12px;
-  height: 12px;
-}
-
-.agent-voice-control {
-  z-index: 7;
-  display: flex;
-  min-width: 0;
-  min-height: 34px;
-  padding: 3px 8px;
-  gap: 8px;
-  align-items: center;
-  justify-content: flex-end;
-  color: var(--terminal-muted);
-  font: 11px var(--font-mono);
-  background: var(--terminal-background);
-  border-bottom: 0;
-}
-
-.agent-voice-control button {
-  display: inline-flex;
-  gap: 6px;
-  align-items: center;
-  min-height: 26px;
-  padding: 0 8px;
-  color: inherit;
-  font: inherit;
-  background: transparent;
-  border: 0;
-  cursor: pointer;
-}
-
-.agent-voice-control button svg {
-  width: 14px;
-  height: 14px;
-  fill: currentColor;
-}
-
-.agent-voice-control button:hover,
-.agent-voice-control button:focus-visible,
-.agent-voice-control button[aria-pressed="true"] {
-  color: var(--terminal-foreground);
-  background: var(--terminal-hover);
-  outline: 1px solid var(--terminal-border);
-  outline-offset: -1px;
-}
-
-.agent-voice-control button:disabled {
-  opacity: 0.45;
-  cursor: default;
-}
-
-.agent-voice-control span {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.agent-voice-control span[role="alert"] {
-  color: var(--negative);
+  grid-template-rows: minmax(0, 1fr) auto;
 }
 
 .agent-terminal-standby {
@@ -463,6 +350,16 @@
   background: var(--terminal-background);
   border-top: 1px solid var(--terminal-border);
   font-family: var(--font-mono);
+  transform: translate3d(
+    0,
+    calc(0px - var(--terminal-composer-lift)),
+    0
+  );
+  will-change: transform;
+}
+
+.agent-transcript-keyboard-spacer {
+  height: var(--terminal-composer-lift);
 }
 
 .agent-touch-field {
@@ -497,13 +394,13 @@
   white-space: pre-wrap;
 }
 
-.agent-touch-composer textarea::placeholder,
 .agent-touch-composer textarea:disabled {
   color: var(--terminal-muted);
   opacity: 1;
 }
 
 .agent-touch-actions {
+  position: relative;
   display: flex;
   grid-column: 2;
   padding: 4px 0;
@@ -526,9 +423,24 @@
 }
 
 .agent-touch-actions button svg { width: 17px; height: 17px; stroke-width: 2; }
+.agent-touch-actions .agent-voice-button svg { fill: currentColor; }
+.agent-touch-actions .agent-voice-button[aria-pressed="true"] { color: var(--terminal-foreground); background: var(--terminal-hover); }
 .agent-touch-actions button:focus-visible { background: var(--terminal-hover); outline: 1px solid var(--terminal-border); outline-offset: -2px; }
 .agent-touch-actions button:disabled { color: var(--terminal-muted); background: transparent; cursor: default; }
 .agent-touch-composer.is-running .agent-touch-actions button { color: var(--terminal-muted); }
+
+.agent-voice-error {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 9px);
+  width: max-content;
+  max-width: min(280px, calc(100vw - 24px));
+  padding: 7px 9px;
+  color: var(--negative);
+  font: 11px/1.35 var(--font-mono);
+  background: var(--terminal-background);
+  border: 1px solid var(--terminal-border);
+}
 
 @media (pointer: coarse), (any-pointer: coarse) {
   .agent-runtime-switch button {
@@ -540,24 +452,6 @@
   .agent-terminal-shell {
     display: grid;
     grid-template-rows: minmax(0, 1fr) auto;
-  }
-
-  .agent-terminal-shell.has-controls {
-    grid-template-rows: auto minmax(0, 1fr) auto;
-  }
-
-  .agent-terminal-toolbar,
-  .agent-terminal-toolbar > button {
-    min-height: 44px;
-  }
-
-  .agent-voice-control {
-    min-height: 44px;
-  }
-
-  .agent-voice-control button {
-    min-width: 52px;
-    min-height: 44px;
   }
 
   .agent-session-bar,
@@ -635,7 +529,6 @@
     field-sizing: content;
   }
 
-  .agent-touch-composer textarea::placeholder,
   .agent-touch-composer textarea:disabled {
     color: var(--terminal-muted);
     opacity: 1;
@@ -790,10 +683,6 @@
   height: 100%;
   min-height: 0;
   margin: 0;
-}
-
-.nanocodex-demo.is-full .agent-voice-control {
-  padding-right: 52px;
 }
 
 @media (pointer: coarse), (any-pointer: coarse) {

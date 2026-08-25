@@ -49,8 +49,8 @@ const MERCATOR_SETTLEMENT = "0xa295C42FBCC026a62304A7701f25B4c91799B0dA";
 const MPP_LIMIT = 10_000_000n;
 const MPP_PERIOD = 86_400;
 const MPP_MAX_PER_REQUEST = 250_000n;
-const CONNECTOR_IDS = ["github", "gmail", "gdrive", "chatgpt"] as const;
-const OAUTH_CONNECTOR_IDS = ["github", "gmail", "gdrive"] as const;
+const CONNECTOR_IDS = ["github", "gmail", "gdrive", "x", "chatgpt"] as const;
+const OAUTH_CONNECTOR_IDS = ["github", "gmail", "gdrive", "x"] as const;
 const BASE_CAPABILITIES = [
   "nanocodex.agent",
   "mercator.boost",
@@ -302,7 +302,7 @@ export default {
         return cors(proxy(upstream), request);
       }
 
-      const connectorCallback = url.pathname.match(/^\/v1\/connectors\/(github|gmail|gdrive)\/callback$/);
+      const connectorCallback = url.pathname.match(/^\/v1\/connectors\/(github|gmail|gdrive|x)\/callback$/);
       if (connectorCallback) {
         if (request.method !== "GET") {
           return error(request, 405, "method_not_allowed", "Connector callbacks require GET.");
@@ -365,7 +365,7 @@ export default {
         }), request);
       }
 
-      const connectorRoute = url.pathname.match(/^\/v1\/connectors\/(github|gmail|gdrive|chatgpt)$/);
+      const connectorRoute = url.pathname.match(/^\/v1\/connectors\/(github|gmail|gdrive|x|chatgpt)$/);
       if (connectorRoute) {
         const connector = connectorRoute[1] as ConnectorId;
         const identity = await brokerIdentity(env, accountAddress);
@@ -1331,6 +1331,7 @@ function connectorForUrl(url: URL): OAuthConnectorId | undefined {
   if (url.origin === "https://api.github.com") return "github";
   if (url.origin === "https://gmail.googleapis.com") return "gmail";
   if (url.origin === "https://www.googleapis.com") return "gdrive";
+  if (url.origin === "https://api.x.com") return "x";
   return undefined;
 }
 
@@ -1933,6 +1934,7 @@ async function connectorStatuses(
       github: connectorStatus(statuses.github),
       gmail: connectorStatus(statuses.gmail),
       gdrive: connectorStatus(statuses.gdrive),
+      x: connectorStatus(statuses.x),
       chatgpt: connectorStatus(chatGpt),
     },
   };
@@ -2003,7 +2005,9 @@ function connectorAuthorizationUrl(value: unknown, connector: OAuthConnectorId):
   }
   const expected = connector === "github"
     ? ["https://github.com", "/login/oauth/authorize"]
-    : ["https://accounts.google.com", "/o/oauth2/v2/auth"];
+    : connector === "x"
+      ? ["https://x.com", "/i/oauth2/authorize"]
+      : ["https://accounts.google.com", "/o/oauth2/v2/auth"];
   if (url.origin !== expected[0] || url.pathname !== expected[1] || url.username || url.password || url.hash) {
     throw new ApiFailure(502, "connector_broker_invalid", "The connector broker returned an invalid authorization URL.");
   }
@@ -2269,11 +2273,14 @@ function connectorTarget(connector: OAuthConnectorId, value: unknown): URL {
     ? "https://api.github.com"
     : connector === "gmail"
       ? "https://gmail.googleapis.com"
-      : "https://www.googleapis.com";
+      : connector === "gdrive"
+        ? "https://www.googleapis.com"
+        : "https://api.x.com";
   const target = new URL(value, origin);
   const pathAllowed = connector === "github"
     || (connector === "gmail" && /^\/gmail\/v1\/users\/me(?:\/|$)/.test(target.pathname))
-    || (connector === "gdrive" && /^(?:\/drive\/v3|\/upload\/drive\/v3)(?:\/|$)/.test(target.pathname));
+    || (connector === "gdrive" && /^(?:\/drive\/v3|\/upload\/drive\/v3)(?:\/|$)/.test(target.pathname))
+    || (connector === "x" && /^\/2\/(?:tweets|users|lists|dm_(?:conversations|events)|media)(?:\/|$)/.test(target.pathname));
   if (target.origin !== origin || target.username || target.password || target.hash || !pathAllowed) {
     throw new ApiFailure(403, "connector_destination_denied", "The connector destination is not allowed.");
   }

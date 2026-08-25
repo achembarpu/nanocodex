@@ -41,7 +41,7 @@ type ConnectRequest = Readonly<{
 }>;
 
 const DEFAULT_REQUEST: ConnectRequest = {
-  connectors: { github: true, gmail: true, gdrive: true, chatgpt: true },
+  connectors: { github: true, gmail: true, gdrive: true, x: true, chatgpt: true },
   visibility: {
     finalMessages: true,
     actionSummaries: true,
@@ -377,6 +377,7 @@ function PermissionBuilder({ disabled, onChange, request }: Readonly<{
     { id: "github", label: "GitHub" },
     { id: "gmail", label: "Gmail" },
     { id: "gdrive", label: "Drive" },
+    { id: "x", label: "X" },
     { id: "chatgpt", label: "ChatGPT", required: true },
   ];
   const visibility: readonly Readonly<{ id: keyof VisibilityRequest; label: string; detail: string }>[] = [

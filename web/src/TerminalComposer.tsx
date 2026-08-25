@@ -1,10 +1,11 @@
 import { ArrowUp, Square } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { useEffect, useRef, type ReactNode } from "react";
 import type { AgentStatus } from "./agentTerminalTypes";
 import { COARSE_POINTER_QUERY, terminalComposerAction } from "./mobileInteraction";
 
 /** One native, paste-capable composer shared by desktop and touch terminals. */
 export function TerminalComposer({
+  controls,
   draft,
   pending,
   running,
@@ -13,6 +14,7 @@ export function TerminalComposer({
   onChange,
   onSubmit,
 }: {
+  controls?: ReactNode;
   draft: string;
   pending: boolean;
   running: boolean;
@@ -56,7 +58,6 @@ export function TerminalComposer({
           ref={textarea}
           aria-label="Message Nanocodex"
           enterKeyHint="send"
-          placeholder="Message Nanocodex"
           rows={1}
           value={draft}
           onChange={(event) => onChange(event.currentTarget.value)}
@@ -69,6 +70,7 @@ export function TerminalComposer({
           }}
         />
         <div className="agent-touch-actions">
+          {controls}
           {action === "stop" ? (
             <button type="button" aria-label="Stop response" disabled={status !== "ready"} onClick={onCancel}>
               <Square aria-hidden="true" />
