@@ -10,6 +10,7 @@ import {
   applyResidentMemory,
   applyWorldRoomSend,
   applyWorldToolAction,
+  completeResidentInstruction,
   createWorldState,
   hasUnansweredGuildCall,
   hasUnansweredPlayerOrder,
@@ -235,6 +236,47 @@ test("room posts are ordered reducer writes that do not interrupt embodied movem
     heardCallId: callId,
     text: "Cinder ready.",
   }).accepted, true);
+  assert.equal(hasUnansweredPlayerOrder(state, "cinder"), true);
+  assert.equal(hasUnansweredGuildCall(state, "cinder"), true);
+  assert.equal(completeResidentInstruction(state, "cinder", callId), true);
+  assert.equal(hasUnansweredPlayerOrder(state, "cinder"), false);
+  assert.equal(hasUnansweredGuildCall(state, "cinder"), false);
+});
+
+test("World actions and room posts keep an instruction active until its resident turn completes", () => {
+  const state = createWorldState();
+  setWorldAgentsOnline(state, true);
+  playerSpeak(state, "Form six groups of eight, each group making a square.", "call");
+  const callId = observationFor(state, "cinder").playerOrder?.id;
+  assert.ok(callId !== undefined);
+
+  const movement = applyWorldToolAction(state, {
+    actionId: "cinder-provisional-position",
+    requestId: "cinder-formation-turn",
+    agentId: "cinder",
+    heardCallId: callId,
+    action: { kind: "move_relative", anchor: "player", dx_pixels: 24, dy_pixels: 0 },
+  });
+  assert.equal(movement.accepted, true);
+  assert.equal(hasUnansweredPlayerOrder(state, "cinder"), true);
+  assert.equal(hasUnansweredGuildCall(state, "cinder"), true);
+
+  assert.equal(applyWorldRoomSend(state, {
+    sendId: "cinder-provisional-board-post",
+    requestId: "cinder-formation-turn",
+    agentId: "cinder",
+    heardCallId: callId,
+    text: "I am taking a provisional northwest corner and will adjust.",
+  }).accepted, true);
+  assert.equal(hasUnansweredPlayerOrder(state, "cinder"), true);
+  assert.equal(hasUnansweredGuildCall(state, "cinder"), true);
+
+  playerSpeak(state, "Now make one wide ring.", "call");
+  assert.equal(completeResidentInstruction(state, "cinder", callId), false);
+  assert.equal(hasUnansweredPlayerOrder(state, "cinder"), true);
+  const newerCallId = observationFor(state, "cinder").playerOrder?.id;
+  assert.ok(newerCallId !== undefined && newerCallId !== callId);
+  assert.equal(completeResidentInstruction(state, "cinder", newerCallId), true);
   assert.equal(hasUnansweredPlayerOrder(state, "cinder"), false);
 });
 

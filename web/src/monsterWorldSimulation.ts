@@ -1393,6 +1393,20 @@ export function hasUnansweredPlayerOrder(state: WorldState, agentId: ResidentId)
   return order !== undefined && order !== state.acknowledgedPlayerOrderIds[agentId];
 }
 
+export function completeResidentInstruction(
+  state: WorldState,
+  agentId: ResidentId,
+  callId: number | undefined,
+): boolean {
+  if (callId === undefined) return false;
+  if (state.heardCalls[agentId]?.id === callId) {
+    state.acknowledgedCallIds[agentId] = callId;
+  }
+  if (state.playerOrders[agentId]?.id !== callId) return false;
+  state.acknowledgedPlayerOrderIds[agentId] = callId;
+  return true;
+}
+
 function pendingDecisionCallId(state: WorldState, agentId: ResidentId): number | undefined {
   if (hasUnansweredPlayerOrder(state, agentId)) return state.playerOrders[agentId]?.id;
   if (hasUnansweredGuildCall(state, agentId)) return state.heardCalls[agentId]?.id;
@@ -1517,12 +1531,6 @@ export function applyWorldToolAction(
   actor.lastOrigin = "nanocodex";
   actor.routineDueMs = state.elapsedMs + 9_000;
   state.decisionVersions[request.agentId] += 1;
-  if (request.heardCallId !== undefined && state.heardCalls[request.agentId]?.id === request.heardCallId) {
-    state.acknowledgedCallIds[request.agentId] = request.heardCallId;
-  }
-  if (request.heardCallId !== undefined && state.playerOrders[request.agentId]?.id === request.heardCallId) {
-    state.acknowledgedPlayerOrderIds[request.agentId] = request.heardCallId;
-  }
   state.seenRequestIds.push(request.actionId);
   if (state.seenRequestIds.length > 128) state.seenRequestIds.shift();
   state.agentDecisions += 1;
@@ -1557,12 +1565,6 @@ export function applyWorldRoomSend(
   state.seenRequestIds.push(request.sendId);
   if (state.seenRequestIds.length > 128) state.seenRequestIds.shift();
   addGuildMessage(state, actor.id, text, "nanocodex");
-  if (request.heardCallId !== undefined && state.heardCalls[request.agentId]?.id === request.heardCallId) {
-    state.acknowledgedCallIds[request.agentId] = request.heardCallId;
-  }
-  if (request.heardCallId !== undefined && state.playerOrders[request.agentId]?.id === request.heardCallId) {
-    state.acknowledgedPlayerOrderIds[request.agentId] = request.heardCallId;
-  }
   const message = state.guildMessages[0];
   if (!message) return { accepted: false, reason: "invalid" };
   return Object.freeze({

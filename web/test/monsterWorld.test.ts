@@ -625,8 +625,11 @@ test("one map resident owns one isolated retained Luna session and turn", () => 
   assert.doesNotMatch(worker, /harness|web__run|image_gen/);
   assert.match(worker, /justBash/);
   assert.match(worker, /exec_command: roomShell\.tool/);
-  assert.match(worker, /let roomShellBoot:/);
-  assert.doesNotMatch(worker, /roomShellBoots = new Map/);
+  assert.match(worker, /roomShellBoots = new Map<ResidentId/);
+  assert.match(worker, /worldRoomShell\(entry\.agentId\)/);
+  assert.match(worker, /createWorldRoomShell\(agentId\)/);
+  assert.match(worker, /active\.entry\.agentId !== agentId/);
+  assert.doesNotMatch(worker, /let roomShellBoot:/);
   assert.match(worker, /\/workspace\/world\/room\/messages\.jsonl/);
   assert.doesNotMatch(worker, /\n\s*say:\s*\{/);
   assert.doesNotMatch(worker, /read_chat|send_chat/);
@@ -671,6 +674,9 @@ test("the World surface stays statically available, stoppable, and semantically 
   assert.match(component, /Q cycles loudness/);
   assert.doesNotMatch(component, /MAX_CONCURRENT_RESIDENT_TURNS|slice\(0,\s*6\)/);
   assert.match(component, /pendingRequests\.current\.set\(request\.requestId, request\)/);
+  assert.match(component, /callId: worldObservationCallId\(observation\)/);
+  assert.match(component, /message\.outcome === "completed"[\s\S]*?completeResidentInstruction/);
+  assert.match(component, /if \(completedPlayerOrder\)[\s\S]*?Number\.POSITIVE_INFINITY/);
   assert.doesNotMatch(component, /turn slots/);
   assert.doesNotMatch(component, /MAX_MODEL_TURNS|MAX_AGENT_TOKENS|modelBudgetExhausted/);
   assert.match(component, /type: "think"/);

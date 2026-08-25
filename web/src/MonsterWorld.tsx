@@ -20,6 +20,7 @@ import {
   WORLD_PROTOCOL,
   isResidentId,
   isWorldAgentMessage,
+  worldObservationCallId,
   type Direction,
   type ResidentId,
   type VoiceLevel,
@@ -50,6 +51,7 @@ import {
   actorWorldPosition,
   applyWorldRoomSend,
   applyWorldToolAction,
+  completeResidentInstruction,
   createWorldState,
   formatWorldTime,
   hasUnansweredGuildCall,
@@ -91,6 +93,7 @@ type UsageTotals = {
 type PendingResidentRequest = {
   requestId: string;
   agentId: ResidentId;
+  callId?: number;
   rejected: boolean;
   cancelled: boolean;
 };
@@ -402,14 +405,20 @@ export function MonsterWorld() {
     if (message.usage) commitModelUsage(message.usage, usageRef, setUsage);
 
     const activeWorld = worldRef.current;
+    const completedPlayerOrder = activeWorld && message.outcome === "completed"
+      ? completeResidentInstruction(activeWorld, request.agentId, request.callId)
+      : false;
     const unanswered = activeWorld
       ? hasUnansweredPlayerOrder(activeWorld, request.agentId)
         || hasUnansweredGuildCall(activeWorld, request.agentId)
       : false;
-    const retryDelay = request.cancelled
-      ? 0
-      : unanswered
-        ? message.outcome === "failed" ? 6_000 : 0
+    if (completedPlayerOrder) {
+      nextThinkAt.current[request.agentId] = Number.POSITIVE_INFINITY;
+    } else if (request.cancelled || (unanswered && message.outcome !== "failed")) {
+      nextThinkAt.current[request.agentId] = performance.now();
+    } else {
+      const retryDelay = unanswered
+        ? 6_000
         : request.rejected
           ? 2_000
           : message.outcome === "completed"
@@ -417,9 +426,10 @@ export function MonsterWorld() {
             : message.outcome === "cancelled"
               ? 2_500
               : 8_000;
-    nextThinkAt.current[request.agentId] = performance.now()
-      + retryDelay
-      + residentDelay(request.agentId);
+      nextThinkAt.current[request.agentId] = performance.now()
+        + retryDelay
+        + residentDelay(request.agentId);
+    }
     invalidateWorld();
   }, [invalidateWorld]);
 
@@ -499,6 +509,7 @@ export function MonsterWorld() {
         const request: PendingResidentRequest = {
           requestId: `world-request-${crypto.randomUUID()}`,
           agentId,
+          callId: worldObservationCallId(observation),
           rejected: false,
           cancelled: false,
         };
