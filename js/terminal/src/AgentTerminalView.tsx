@@ -164,7 +164,10 @@ export function AgentTerminalView({
     if (start === transcripts.length) return;
 
     const afterEntryId = controller.entries.at(-1)?.id;
-    const appended = transcripts.slice(start).map((transcript): VoiceTerminalEntry => ({
+    const appended = transcripts.slice(start).map((transcript: Readonly<{
+      speaker: "user" | "assistant";
+      text: string;
+    }>): VoiceTerminalEntry => ({
       afterEntryId,
       id: `voice-${agent?.sessionId ?? "detached"}-${voiceEntrySequence.current++}`,
       kind: transcript.speaker,
