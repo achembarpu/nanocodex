@@ -17,6 +17,7 @@ export * as Voice from "./Voice.mjs";
 export * as Workspace from "./workspace.mjs";
 export { createConfig } from "./config.mjs";
 export {
+  createHostManagedWebSocketMultiplexer,
   defaultHostManagedWebSocketUrl,
   openHostManagedWebSocket,
 } from "./hostManagedWebSocket.mjs";

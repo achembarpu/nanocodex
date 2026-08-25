@@ -79,6 +79,7 @@ const MAX_REALTIME_SDP_CHARS = 1024 * 1024;
 const MAX_REALTIME_CALL_BODY_CHARS = MAX_REALTIME_SDP_CHARS + 128 * 1024;
 const REALTIME_SIDEBAND_URL = "https://api.openai.com/v1/live/";
 const MAX_WEBSOCKET_MESSAGE_CHARS = 8 * 1024 * 1024;
+const MAX_MULTIPLEXED_RESPONSES_CHANNELS = 64;
 const BYOK_SESSION_TTL_MS = 60 * 60 * 1_000;
 const BYOK_COOKIE = "nanocodex_byok_v2";
 const SECURE_BYOK_COOKIE = "__Secure-nanocodex_byok_v2";
@@ -216,6 +217,10 @@ export default {
 
     if (url.pathname === "/api/responses") {
       return upgradeResponsesWebSocket(request, env, url, context);
+    }
+
+    if (url.pathname === "/api/responses/mux") {
+      return upgradeMultiplexedResponsesWebSocket(request, env, url, context);
     }
 
     if (url.pathname === "/api/realtime/sideband") {
@@ -798,6 +803,215 @@ async function upgradeResponsesWebSocket(
   if (context) context.waitUntil(setup);
   else void setup;
   return new Response(null, { status: 101, webSocket: client });
+}
+
+async function upgradeMultiplexedResponsesWebSocket(
+  request: Request,
+  env: WorkerEnv,
+  url: URL,
+  context?: ExecutionContext,
+): Promise<Response> {
+  if (request.headers.get("Upgrade")?.toLowerCase() !== "websocket") {
+    return new Response("Expected WebSocket upgrade", { status: 426 });
+  }
+  if (!sameOrigin(request, url, env)) {
+    return new Response("Forbidden", { status: 403 });
+  }
+  const pair = new WebSocketPair();
+  const [client, server] = Object.values(pair);
+  server.accept();
+  setupResponsesMultiplexer(request, env, server, context);
+  return new Response(null, { status: 101, webSocket: client });
+}
+
+function setupResponsesMultiplexer(
+  request: Request,
+  env: WorkerEnv,
+  physical: WebSocket,
+  context?: ExecutionContext,
+): void {
+  const channels = new Map<string, ReturnType<typeof createMultiplexedChannel>>();
+  let closed = false;
+  const fail = (code: number, reason: string) => {
+    if (closed) return;
+    closed = true;
+    for (const channel of channels.values()) channel.physicalClose(code, reason);
+    channels.clear();
+    closeSocket(physical, code, reason);
+  };
+  const sendRejected = (channelId: string, status: number, error: string) => {
+    if (physical.readyState !== WebSocket.OPEN) return;
+    physical.send(JSON.stringify({
+      type: "nanocodex.mux.rejected",
+      channel_id: channelId,
+      status,
+      error,
+    }));
+  };
+  const sendClosed = (channelId: string, code: number, reason: string) => {
+    if (physical.readyState !== WebSocket.OPEN) return;
+    physical.send(JSON.stringify({
+      type: "nanocodex.mux.closed",
+      channel_id: channelId,
+      code,
+      reason,
+    }));
+  };
+  physical.addEventListener("message", (event) => {
+    if (typeof event.data !== "string") {
+      fail(1003, "text frames required");
+      return;
+    }
+    if (event.data.length > MAX_WEBSOCKET_MESSAGE_CHARS) {
+      fail(1009, "message too large");
+      return;
+    }
+    let message: Record<string, unknown> | undefined;
+    try { message = asObject(JSON.parse(event.data)); }
+    catch { /* Invalid protocol input is rejected below. */ }
+    const channelId = message?.channel_id;
+    if (typeof channelId !== "string" || !/^[A-Za-z0-9_-]{1,80}$/.test(channelId)) {
+      fail(1008, "invalid channel");
+      return;
+    }
+    if (message?.type === "nanocodex.mux.open") {
+      const sessionId = message.session_id;
+      if (typeof sessionId !== "string" || !/^[A-Za-z0-9._:-]{1,200}$/.test(sessionId)) {
+        fail(1008, "invalid session");
+        return;
+      }
+      if (channels.has(channelId)) {
+        sendRejected(channelId, 409, "channel already exists");
+        return;
+      }
+      if (channels.size >= MAX_MULTIPLEXED_RESPONSES_CHANNELS) {
+        sendRejected(channelId, 429, "multiplexer channel limit reached");
+        return;
+      }
+      const channel = createMultiplexedChannel(physical, channelId, () => {
+        channels.delete(channelId);
+      });
+      channels.set(channelId, channel);
+      const setup = setupResponsesWebSocket(
+        request,
+        env,
+        sessionId,
+        channel.socket,
+        context,
+      );
+      if (context) context.waitUntil(setup);
+      else void setup;
+      return;
+    }
+    const channel = channels.get(channelId);
+    if (!channel) {
+      sendClosed(channelId, 1008, "unknown channel");
+      return;
+    }
+    if (message?.type === "nanocodex.mux.data" && typeof message.data === "string") {
+      if (message.data.length > MAX_WEBSOCKET_MESSAGE_CHARS) {
+        fail(1009, "channel message too large");
+        return;
+      }
+      channel.receive(message.data);
+      return;
+    }
+    if (message?.type === "nanocodex.mux.close") {
+      const code = typeof message.code === "number" ? message.code : 1000;
+      const reason = typeof message.reason === "string" ? message.reason : "client closed";
+      channel.clientClose(code, reason);
+      return;
+    }
+    channel.serverClose(1008, "invalid channel message");
+  });
+  physical.addEventListener("close", (event) => {
+    if (closed) return;
+    closed = true;
+    for (const channel of channels.values()) {
+      channel.physicalClose(event.code, event.reason || "multiplexer closed");
+    }
+    channels.clear();
+  });
+  physical.addEventListener("error", () => fail(1011, "multiplexer failed"));
+}
+
+function createMultiplexedChannel(
+  physical: WebSocket,
+  channelId: string,
+  onClosed: () => void,
+) {
+  const listeners = new Map<string, Set<(event: MessageEvent | CloseEvent | Event) => void>>();
+  let readyState: number = WebSocket.OPEN;
+  let binaryType: BinaryType = "arraybuffer";
+  let setupComplete = false;
+  const dispatch = (type: string, event: MessageEvent | CloseEvent | Event) => {
+    for (const listener of [...(listeners.get(type) ?? [])]) listener(event);
+  };
+  const sendEnvelope = (message: Record<string, unknown>) => {
+    if (physical.readyState === WebSocket.OPEN) physical.send(JSON.stringify(message));
+  };
+  const close = (code: number, reason: string, notifyClient: boolean) => {
+    if (readyState !== WebSocket.OPEN) return;
+    readyState = WebSocket.CLOSED;
+    onClosed();
+    if (notifyClient) {
+      sendEnvelope({
+        type: "nanocodex.mux.closed",
+        channel_id: channelId,
+        code,
+        reason: reason.slice(0, 120),
+      });
+    }
+    dispatch("close", { code, reason } as CloseEvent);
+  };
+  const socket = {
+    accept() {},
+    get binaryType() { return binaryType; },
+    set binaryType(value: BinaryType) { binaryType = value; },
+    get readyState() { return readyState; },
+    addEventListener(type: string, listener: (event: MessageEvent | CloseEvent | Event) => void) {
+      const entries = listeners.get(type) ?? new Set();
+      entries.add(listener);
+      listeners.set(type, entries);
+    },
+    removeEventListener(type: string, listener: (event: MessageEvent | CloseEvent | Event) => void) {
+      listeners.get(type)?.delete(listener);
+    },
+    send(data: string) {
+      if (typeof data !== "string" || readyState !== WebSocket.OPEN) return;
+      if (!setupComplete) {
+        let handshake: Record<string, unknown> | undefined;
+        try { handshake = asObject(JSON.parse(data)); }
+        catch { /* The setup owner will close an invalid handshake. */ }
+        if (handshake?.type === "nanocodex.proxy.ready") {
+          setupComplete = true;
+          sendEnvelope({ type: "nanocodex.mux.ready", channel_id: channelId });
+          return;
+        }
+        if (handshake?.type === "nanocodex.proxy.rejected") {
+          sendEnvelope({
+            type: "nanocodex.mux.rejected",
+            channel_id: channelId,
+            status: handshake.status,
+            error: handshake.error,
+            ...(handshake.retryAfter === undefined ? {} : { retryAfter: handshake.retryAfter }),
+          });
+          return;
+        }
+      }
+      sendEnvelope({ type: "nanocodex.mux.data", channel_id: channelId, data });
+    },
+    close(code = 1000, reason = "") { close(code, reason, true); },
+  } as unknown as WebSocket;
+  return {
+    socket,
+    receive(data: string) {
+      if (readyState === WebSocket.OPEN) dispatch("message", { data } as MessageEvent);
+    },
+    clientClose(code: number, reason: string) { close(code, reason, false); },
+    serverClose(code: number, reason: string) { close(code, reason, true); },
+    physicalClose(code: number, reason: string) { close(code, reason, false); },
+  };
 }
 
 async function setupResponsesWebSocket(

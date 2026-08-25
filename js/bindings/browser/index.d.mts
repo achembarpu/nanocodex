@@ -66,8 +66,10 @@ export {
   type CreateConfigParameters,
 } from "./config.mjs";
 export {
+  createHostManagedWebSocketMultiplexer,
   defaultHostManagedWebSocketUrl,
   openHostManagedWebSocket,
+  type HostManagedWebSocketMultiplexerOptions,
   type HostManagedWebSocketOptions,
 } from "./hostManagedWebSocket.mjs";
 export type {

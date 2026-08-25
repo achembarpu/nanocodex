@@ -125,7 +125,7 @@
     {
       "name": "AGENT_SOCKET_LIMIT",
       "namespace_id": "987604",
-      "simple": { "limit": 12, "period": 60 }
+      "simple": { "limit": 120, "period": 60 }
     },
     {
       "name": "AGENT_TOOL_LIMIT",
@@ -214,7 +214,7 @@
         { "name": "AUTH_START_LIMIT", "namespace_id": "987601", "simple": { "limit": 5, "period": 60 } },
         { "name": "AUTH_GLOBAL_LIMIT", "namespace_id": "987602", "simple": { "limit": 100, "period": 60 } },
         { "name": "SESSION_POLL_LIMIT", "namespace_id": "987603", "simple": { "limit": 120, "period": 60 } },
-        { "name": "AGENT_SOCKET_LIMIT", "namespace_id": "987604", "simple": { "limit": 12, "period": 60 } },
+        { "name": "AGENT_SOCKET_LIMIT", "namespace_id": "987604", "simple": { "limit": 120, "period": 60 } },
         { "name": "AGENT_TOOL_LIMIT", "namespace_id": "987605", "simple": { "limit": 30, "period": 60 } },
         { "name": "AGENT_IMAGE_LIMIT", "namespace_id": "987606", "simple": { "limit": 4, "period": 60 } },
         { "name": "MULTIPLAYER_CREATE_LIMIT", "namespace_id": "987607", "simple": { "limit": 4, "period": 60 } },
