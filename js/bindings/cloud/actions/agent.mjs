@@ -138,13 +138,16 @@ function managedGrantFetch(session, baseUrl, grantId, agentId) {
   const origin = new URL(baseUrl).origin;
   const prefix = `/v1/agents/${encodeURIComponent(agentId)}`;
   return async (input, init) => {
-    const request = input instanceof Request ? new Request(input, init) : new Request(input, init);
-    const url = new URL(request.url);
+    const url = new URL(input instanceof Request ? input.url : input);
     if (url.origin !== origin || (url.pathname !== prefix && !url.pathname.startsWith(`${prefix}/`))) {
       throw new TypeError("Connect managed fetch is restricted to its authorized durable agent");
     }
     url.pathname = `/v1/grants/${grantId}/agents/${encodeURIComponent(agentId)}${url.pathname.slice(prefix.length)}`;
-    return session.fetch(new Request(url, request));
+    if (input instanceof Request) {
+      const request = init === undefined ? input : new Request(input, init);
+      return session.fetch(new Request(url, request));
+    }
+    return session.fetch(url, init);
   };
 }
 

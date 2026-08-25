@@ -34,15 +34,18 @@ export function create(parameters) {
     if (typeof transportInstance.fetch !== "function") {
       throw new TypeError("Connect transport does not expose an HTTP fetch boundary");
     }
-    const request = input instanceof Request
-      ? new Request(input, init)
-      : new Request(new URL(String(input), transportInstance.baseUrl), init);
-    if (new URL(request.url).origin !== new URL(transportInstance.baseUrl).origin) {
+    const target = input instanceof Request
+      ? input
+      : new URL(String(input), transportInstance.baseUrl);
+    const targetUrl = new URL(input instanceof Request ? input.url : target);
+    if (targetUrl.origin !== new URL(transportInstance.baseUrl).origin) {
       throw new TypeError("Connect client fetch is restricted to its configured API origin");
     }
-    const headers = new Headers(request.headers);
+    const headers = new Headers(
+      init?.headers ?? (input instanceof Request ? input.headers : undefined),
+    );
     if (token) headers.set("authorization", `Bearer ${token}`);
-    return transportInstance.fetch(new Request(request, { headers }));
+    return transportInstance.fetch(target, { ...init, headers });
   }
 
   function requestControlPlane(request, token = sessionToken) {

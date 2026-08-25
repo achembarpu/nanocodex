@@ -127,6 +127,63 @@ test("Connect HTTP transport sends POST bodies through the native fetch boundary
   assert.equal(fetches[0].init.headers.get("x-nanocodex-app-id"), "mobile-app");
 });
 
+test("Connect durable prompts reach native fetch without wrapping their POST body in Request", async () => {
+  const fetches = [];
+  const agentId = "019fc927-b280-79a7-8445-1b9996ad2fb0";
+  const expiry = Math.floor(Date.now() / 1_000) + 3_600;
+  const client = Client.create({
+    appId: "mobile-workspace",
+    dialog: Dialog.memory(),
+    provider: { request() { throw new Error("wallet should not be used"); } },
+    transport: Transport.http("https://connect.example", {
+      async fetch(input, init) {
+        fetches.push({ input, init });
+        return Response.json({
+          turn_id: "mobile-turn",
+          state: "completed",
+          accepted_cursor: "1",
+          terminal_cursor: "2",
+          terminal: {
+            type: "turn_completed",
+            final_message: "received",
+            usage: null,
+          },
+        });
+      },
+    }),
+  });
+  client._setSessionToken("grant-session-test");
+  const connection = connectionFromWire(testConnectionWire({
+    agentId,
+    expiry,
+    keyId: "0x1111111111111111111111111111111111111111",
+    capabilities: ["nanocodex.agent", "agent.output.final", "chatgpt"],
+  }));
+  const agent = await client.agent.create({ connection });
+  const turn = agent.turn.prompt({
+    id: "mobile-turn",
+    idempotencyKey: "mobile-turn",
+    input: "hello from Mobile Safari",
+  });
+
+  assert.equal((await turn.result()).finalMessage, "received");
+  assert.equal(fetches.length, 1);
+  assert.equal(fetches[0].input instanceof Request, false);
+  assert.equal(
+    new URL(fetches[0].input).pathname,
+    `/v1/grants/${connection.grant.id}/agents/${agentId}/turns`,
+  );
+  assert.equal(fetches[0].init.method, "POST");
+  assert.equal(fetches[0].init.body, JSON.stringify({
+    id: "mobile-turn",
+    input: "hello from Mobile Safari",
+  }));
+  assert.equal(fetches[0].init.headers.get("authorization"), "Bearer grant-session-test");
+  assert.equal(fetches[0].init.headers.get("content-type"), "application/json");
+  assert.equal(fetches[0].init.headers.get("idempotency-key"), "mobile-turn");
+  assert.equal(fetches[0].init.headers.get("x-nanocodex-app-id"), "mobile-workspace");
+});
+
 test("Connect opens its grant-provisioned durable agent without a redundant state probe", async () => {
   const requests = [];
   const agentId = "019fc927-b280-79a7-8445-1b9996ad2fb0";
