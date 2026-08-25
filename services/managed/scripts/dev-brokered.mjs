@@ -9,7 +9,7 @@ import { readCodexSubscription } from "./codex-auth-file.mjs";
 import { spawnProcessGroup } from "./child-process.mjs";
 import { envLine } from "./env-file.mjs";
 import { brokerPolicyForAuthMode } from "./model-auth-mode.mjs";
-import { startSubscriptionEgressProxy } from "./subscription-egress-proxy.mjs";
+import { startRelay } from "../../../web/container/relay.mjs";
 
 const workersRoot = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const brokerRoot = resolve(workersRoot, "../egress");
@@ -65,23 +65,22 @@ async function main() {
       const codexHome = process.env.CODEX_HOME ?? join(homedir(), ".codex");
       const authPath = resolve(process.env.NANOCODEX_CODEX_AUTH_FILE ?? join(codexHome, "auth.json"));
       const auth = await readCodexSubscription(authPath);
-      brokerEnvironment.push(envLine("CODEX_OAUTH_BOOTSTRAP", {
-        access_token: auth.accessToken,
-        account_id: auth.accountId,
-        fedramp: auth.fedramp,
-        expires_at: auth.expiresAt,
-      }));
+      brokerEnvironment.push(
+        envLine("ALLOW_LOCAL_CREDENTIAL_CLAIM", "true"),
+        envLine("LOCAL_CHATGPT_BOOTSTRAP", {
+          access_token: auth.accessToken,
+          account_id: auth.accountId,
+          fedramp: auth.fedramp,
+          expires_at: auth.expiresAt,
+        }),
+      );
       const configuredRelayUrl = process.env.NANOCODEX_CODEX_RELAY_URL?.trim();
       if (configuredRelayUrl) {
         brokerEnvironment.push(envLine("CODEX_RELAY_URL", configuredRelayUrl));
       } else {
-        localRelay = await startSubscriptionEgressProxy({
-          onEvent: relayEvent,
-        });
-        const relayUrl = new URL(localRelay.url);
-        relayUrl.protocol = "http:";
+        localRelay = await startLocalChatGptRelay();
         brokerEnvironment.push(
-          envLine("CODEX_RELAY_URL", relayUrl.href),
+          envLine("CODEX_RELAY_URL", localRelay.url),
           envLine("ALLOW_INSECURE_LOOPBACK_RELAY", "true"),
         );
       }
@@ -201,6 +200,41 @@ async function main() {
   }
 }
 
+async function startLocalChatGptRelay() {
+  const sockets = new Set();
+  const server = startRelay({ host: "127.0.0.1", port: 0 });
+  server.on("connection", (socket) => {
+    sockets.add(socket);
+    socket.once("close", () => sockets.delete(socket));
+  });
+  await new Promise((resolveListening, rejectListening) => {
+    const onListening = () => {
+      server.off("error", onError);
+      resolveListening();
+    };
+    const onError = (error) => {
+      server.off("listening", onListening);
+      rejectListening(error);
+    };
+    server.once("listening", onListening);
+    server.once("error", onError);
+  });
+  const address = server.address();
+  if (!address || typeof address === "string") {
+    server.close();
+    throw new Error("local ChatGPT transport relay has no TCP address");
+  }
+  return {
+    url: `http://127.0.0.1:${address.port}/`,
+    async close() {
+      sockets.forEach((socket) => socket.destroy());
+      await new Promise((resolveClose, rejectClose) => {
+        server.close((error) => error ? rejectClose(error) : resolveClose());
+      });
+    },
+  };
+}
+
 export function agentProcessEnvironment(source = process.env) {
   const environment = { ...source };
   for (const name of [
@@ -208,7 +242,9 @@ export function agentProcessEnvironment(source = process.env) {
     "CODEX_HOME",
     "CODEX_OAUTH_BOOTSTRAP",
     "CODEX_RELAY_URL",
+    "ALLOW_LOCAL_CREDENTIAL_CLAIM",
     "ALLOW_INSECURE_LOOPBACK_RELAY",
+    "LOCAL_CHATGPT_BOOTSTRAP",
     "NANOCODEX_CODEX_RELAY_URL",
     "CHATGPT_ACCESS_TOKEN",
     "CHATGPT_ACCOUNT_ID",
@@ -312,13 +348,6 @@ async function cancelResponseBody(response) {
   } catch {
     // Readiness never reflects a response body or cancellation failure.
   }
-}
-
-function relayEvent({ type, status, code }) {
-  const detail = status === undefined
-    ? (code === undefined ? "" : ` code=${code}`)
-    : ` status=${status}`;
-  process.stderr.write(`[subscription-egress] ${type}${detail}\n`);
 }
 
 function port(name, fallback) {

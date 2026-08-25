@@ -83,7 +83,8 @@ test("managed agents have no provider-credential or direct transport path", asyn
   assert.match(launcher, /envLine\("ENVIRONMENT", "development"\)/);
   assert.match(launcher, /envLine\("ALLOWED_POLICIES", brokerPolicyForAuthMode\(authMode\)\)/);
   assert.match(launcher, /const auth = await readCodexSubscription\(authPath\)/);
-  assert.match(launcher, /envLine\("CODEX_OAUTH_BOOTSTRAP", \{/);
+  assert.match(launcher, /envLine\("ALLOW_LOCAL_CREDENTIAL_CLAIM", "true"\)/);
+  assert.match(launcher, /envLine\("LOCAL_CHATGPT_BOOTSTRAP", \{/);
   assert.match(launcher, /envLine\("NANOCODEX_BROKER_PROBE_TOKEN", brokerProbeToken\)/);
   assert.match(launcher, /env: agentProcessEnvironment\(\)/);
   const brokerSpawn = launcher.indexOf("const brokerHandle = spawnProcessGroup");
@@ -107,7 +108,7 @@ test("brokered dev writes structured credentials as one JSON layer", () => {
     expires_at: 123,
     fedramp: false,
   };
-  const bootstrapLine = envLine("CODEX_OAUTH_BOOTSTRAP", bootstrap);
+  const bootstrapLine = envLine("LOCAL_CHATGPT_BOOTSTRAP", bootstrap);
   const encodedBootstrap = bootstrapLine.slice(bootstrapLine.indexOf("=") + 1);
   assert.equal(encodedBootstrap[0], "{");
   assert.deepEqual(JSON.parse(encodedBootstrap), bootstrap);
@@ -118,6 +119,7 @@ test("brokered dev writes structured credentials as one JSON layer", () => {
 
 test("managed Worker environment receives neither provider nor probe authority", () => {
   assert.deepEqual(agentProcessEnvironment({
+    ALLOW_LOCAL_CREDENTIAL_CLAIM: "true",
     ALLOW_INSECURE_LOOPBACK_RELAY: "true",
     CHATGPT_ACCESS_TOKEN: "access-token",
     CHATGPT_ACCOUNT_ID: "account-id",
@@ -125,6 +127,7 @@ test("managed Worker environment receives neither provider nor probe authority",
     CODEX_HOME: "/private/codex-home",
     CODEX_OAUTH_BOOTSTRAP: "oauth-bootstrap",
     CODEX_RELAY_URL: "https://relay.example/private",
+    LOCAL_CHATGPT_BOOTSTRAP: "local-oauth-bootstrap",
     NANOCODEX_BROKER_PROBE_TOKEN: "probe-token",
     NANOCODEX_CODEX_AUTH_FILE: "/private/codex-auth.json",
     NANOCODEX_CODEX_RELAY_URL: "https://relay.example/private",
