@@ -26,7 +26,9 @@ let failure;
 let cleanupPending = 0;
 let baselineAgentIds = new Set();
 let baselineCaptured = false;
+let createCompleted = false;
 let finalAgentCount;
+let postBaselineAgentCount;
 const runStarted = performance.now();
 try {
   phases.boundary = await phase("boundary", 1, async () => {
@@ -43,6 +45,7 @@ try {
   phases.create = await phase("create", agents, async (index) => {
     receipts[index] = await createAgent(index);
   });
+  createCompleted = true;
   phases.state = await phase("state", agents, async (index) => {
     const response = await request(new URL(`/v1/agents/${receipts[index].agent_id}`, baseUrl));
     if (!response.ok) throw new Error(`state returned HTTP ${response.status}`);
@@ -163,17 +166,21 @@ try {
     });
     if (baselineCaptured) phases.cleanup_verify = await phase("cleanup_verify", 1, async () => {
       const deadline = Date.now() + Math.min(timeoutMs, 120_000);
+      const knownRunAgents = new Set(receipts.filter(Boolean).map(({ agent_id }) => agent_id));
       let leaked = [];
       while (true) {
         const response = await request(new URL("/v1/agents", baseUrl));
         if (!response.ok) throw new Error(`cleanup verification returned HTTP ${response.status}`);
         const listed = agentIds(await response.json(), "cleanup verification");
         finalAgentCount = listed.length;
-        leaked = listed.filter((id) => !baselineAgentIds.has(id));
+        const retainedKnown = listed.filter((id) => knownRunAgents.has(id));
+        const postBaseline = listed.filter((id) => !baselineAgentIds.has(id));
+        postBaselineAgentCount = postBaseline.length;
+        leaked = createCompleted ? retainedKnown : postBaseline;
         if (leaked.length === 0) return;
         if (Date.now() >= deadline) {
           throw new Error(
-            `cleanup verification retained ${leaked.length} post-baseline agents: ${leaked.join(",")}`,
+            `cleanup verification retained ${leaked.length} run-owned agents: ${leaked.join(",")}`,
           );
         }
         await new Promise((resolve) => setTimeout(resolve, 500));
@@ -198,6 +205,9 @@ const result = {
   account: {
     baseline_agents: baselineAgentIds.size,
     ...(finalAgentCount === undefined ? {} : { final_agents: finalAgentCount }),
+    ...(postBaselineAgentCount === undefined
+      ? {}
+      : { concurrent_post_baseline_agents: postBaselineAgentCount }),
   },
   process: {
     max_rss_bytes: process.resourceUsage().maxRSS * 1_024,
