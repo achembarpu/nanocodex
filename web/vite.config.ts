@@ -15,10 +15,127 @@ import {
 import { isManagedRoutePath } from "./worker/managedProxy.ts";
 
 const repositoryRoot = fileURLToPath(new URL("..", import.meta.url));
+const connectDialogIndex = new URL("./connect-dialog/index.html", import.meta.url);
+const connectDialogRoot = fileURLToPath(new URL("./connect-dialog", import.meta.url));
+const connectPlaygroundIndex = new URL("./connect-playground/index.html", import.meta.url);
+const connectPlaygroundRoot = fileURLToPath(new URL("./connect-playground", import.meta.url));
 const repositoryRevision = execFileSync("git", ["rev-parse", "HEAD"], {
   cwd: repositoryRoot,
   encoding: "utf8",
 }).trim();
+
+function localConnectApplications(): Plugin {
+  return {
+    name: "nanocodex-local-connect-applications",
+    enforce: "pre",
+    apply: "serve" as const,
+    configureServer(vite) {
+      vite.middlewares.use(async (request, response, next) => {
+        const method = request.method ?? "GET";
+        const url = new URL(request.url ?? "/", "https://localhost");
+        let hostname: string | undefined;
+        try {
+          hostname = request.headers.host
+            ? new URL(`https://${request.headers.host}`).hostname
+            : undefined;
+        } catch {
+          next();
+          return;
+        }
+
+        const serveDocument = async (
+          index: URL,
+          transformPath: string,
+          rewrite?: (html: string) => string,
+        ) => {
+          const source = await readFile(index, "utf8");
+          const html = await vite.transformIndexHtml(transformPath, rewrite?.(source) ?? source);
+          response.statusCode = 200;
+          response.setHeader("cache-control", "no-store");
+          response.setHeader("content-type", "text/html; charset=utf-8");
+          response.end(method === "HEAD" ? undefined : html);
+        };
+
+        const playgroundHost = process.env.NANOCODEX_LOCAL_CONNECT_PLAYGROUND_HOST;
+        const browserPlaygroundHost = playgroundHost?.replace(
+          /\.nanocodex\.local$/,
+          ".nanocodex.localhost",
+        );
+        if (playgroundHost && (hostname === playgroundHost || hostname === browserPlaygroundHost)) {
+          if (method !== "GET" && method !== "HEAD") {
+            response.statusCode = 405;
+            response.setHeader("allow", "GET, HEAD");
+            response.setHeader("cache-control", "no-store");
+            response.end();
+            return;
+          }
+          if (url.pathname.startsWith("/src/")) {
+            request.url = `/@fs${connectPlaygroundRoot}${url.pathname}${url.search}`;
+            next();
+            return;
+          }
+          if (url.pathname.startsWith("/connect-playground/src/")) {
+            const sourcePath = url.pathname.slice("/connect-playground".length);
+            request.url = `/@fs${connectPlaygroundRoot}${sourcePath}${url.search}`;
+            next();
+            return;
+          }
+          if (
+            url.pathname.startsWith("/@")
+            || url.pathname.startsWith("/node_modules/")
+            || url.pathname.startsWith("/__vite")
+          ) {
+            next();
+            return;
+          }
+          if (request.headers.accept?.includes("text/html")) {
+            try {
+              await serveDocument(connectPlaygroundIndex, `${url.pathname}${url.search}`);
+            } catch (error) {
+              next(error as Error);
+            }
+            return;
+          }
+          response.statusCode = 404;
+          response.setHeader("cache-control", "no-store");
+          response.end(method === "HEAD" ? undefined : "Not found");
+          return;
+        }
+
+        if (url.pathname === "/connect-dialog" || url.pathname.startsWith("/connect-dialog/")) {
+          if (method !== "GET" && method !== "HEAD") {
+            next();
+            return;
+          }
+          if (url.pathname.startsWith("/connect-dialog/src/")) {
+            const sourcePath = url.pathname.slice("/connect-dialog".length);
+            request.url = `/@fs${connectDialogRoot}${sourcePath}${url.search}`;
+            next();
+            return;
+          }
+          if (request.headers.accept?.includes("text/html")) {
+            try {
+              response.setHeader(
+                "content-security-policy",
+                "frame-ancestors 'self' https://*.nanocodex.local http://*.nanocodex.localhost:*",
+              );
+              await serveDocument(
+                connectDialogIndex,
+                `${url.pathname}${url.search}`,
+                (html) => html.replace('src="/src/main.tsx"', 'src="/connect-dialog/src/main.tsx"'),
+              );
+            } catch (error) {
+              next(error as Error);
+            }
+            return;
+          }
+        }
+        next();
+      });
+    },
+  };
+}
+
 function applicationRouteFallback(): Plugin {
   return {
     name: "nanocodex-application-route-fallback",
@@ -108,6 +225,7 @@ export default defineConfig({
     __NANOCODEX_DEPLOYMENT_SHA__: JSON.stringify(repositoryRevision),
   },
   plugins: [
+    localConnectApplications(),
     applicationRouteFallback(),
     linkPreviewMetadata(),
     deploymentBuildAttestation(),
@@ -181,7 +299,7 @@ export default defineConfig({
   },
   server: {
     strictPort: true,
-    allowedHosts: ["nanocodex.local", "nanocodex.localhost"],
+    allowedHosts: [".nanocodex.local", ".nanocodex.localhost"],
     // The live artifact frame intentionally has an opaque sandbox origin. Its
     // module graph therefore needs CORS even though it is served by this host.
     headers: { "Access-Control-Allow-Origin": "*" },

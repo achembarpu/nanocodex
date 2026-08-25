@@ -79,7 +79,7 @@ async function accountLinkConfirmation(
   env: AccountAuthEnv,
   url: URL,
 ): Promise<Response> {
-  const parameters = authorizationParameters(url.searchParams);
+  const parameters = authorizationParameters(url.searchParams, expectedConnectDialogOrigin(url));
   if (!parameters) return accountLinkPage({ kind: "error", message: "This link request is invalid." }, 400);
   const principal = await authenticatePersistentAccount(request, env, url);
   if (!principal) {
@@ -150,7 +150,7 @@ async function authorizeAccountLinkDirect(
   if (!principal) return json({ error: "unauthorized" }, { status: 401 });
   const originFailure = requireNanocodexOrigin(request, url);
   if (originFailure) return originFailure;
-  const parameters = authorizationParameters(url.searchParams);
+  const parameters = authorizationParameters(url.searchParams, expectedConnectDialogOrigin(url));
   if (!parameters) return json({ error: "invalid_account_link" }, { status: 400 });
   const code = await issueAuthorizationCode(accountLinkStore(env), parameters, principal.userId);
   return code
@@ -248,13 +248,16 @@ async function exchangeAuthorizationCode(
   return json({ linked: true, user_id: link.userId });
 }
 
-function authorizationParameters(parameters: URLSearchParams): Omit<AuthorizationIntent, "userId"> | undefined {
+function authorizationParameters(
+  parameters: URLSearchParams,
+  expectedReturnOrigin: string,
+): Omit<AuthorizationIntent, "userId"> | undefined {
   const accountAddress = parseAddress(parameters.get("account_address"));
   const state = parameters.get("state");
   const appId = parameters.get("app_id");
   const returnOrigin = parameters.get("return_origin");
   if (!accountAddress || !state || !OPAQUE_TOKEN.test(state)
-    || appId !== CONNECT_APP_ID || returnOrigin !== CONNECT_DIALOG_ORIGIN) return undefined;
+    || appId !== CONNECT_APP_ID || returnOrigin !== expectedReturnOrigin) return undefined;
   return { accountAddress, appId, returnOrigin, state };
 }
 
@@ -278,7 +281,7 @@ function normalizeAddress(value: string): string {
 
 function validIntent(value: unknown): value is AuthorizationIntent {
   return validCode(value)
-    && (value as Partial<AuthorizationIntent>).returnOrigin === CONNECT_DIALOG_ORIGIN;
+    && isAllowedConnectDialogOrigin((value as Partial<AuthorizationIntent>).returnOrigin);
 }
 
 function validCode(value: unknown): value is AuthorizationCode {
@@ -364,10 +367,26 @@ function noStoreHeaders(): Record<string, string> {
 }
 
 function requireNanocodexOrigin(request: Request, url: URL): Response | undefined {
-  const expected = url.hostname.endsWith(".test") ? url.origin : NANOCODEX_ORIGIN;
+  const expected = isLocalDevelopmentOrigin(url.origin) || url.hostname.endsWith(".test")
+    ? url.origin
+    : NANOCODEX_ORIGIN;
   return request.headers.get("origin") === expected
     ? undefined
     : json({ error: "forbidden_origin" }, { status: 403 });
+}
+
+function expectedConnectDialogOrigin(url: URL): string {
+  return isLocalDevelopmentOrigin(url.origin) ? url.origin : CONNECT_DIALOG_ORIGIN;
+}
+
+function isAllowedConnectDialogOrigin(value: unknown): value is string {
+  return value === CONNECT_DIALOG_ORIGIN
+    || (typeof value === "string" && isLocalDevelopmentOrigin(value));
+}
+
+function isLocalDevelopmentOrigin(value: string): boolean {
+  return /^https:\/\/(?:[a-z0-9-]+\.)*nanocodex\.local$/.test(value)
+    || /^https?:\/\/(?:[a-z0-9-]+\.)*nanocodex\.localhost(?::\d+)?$/.test(value);
 }
 
 function json(body: unknown, init: ResponseInit = {}): Response {

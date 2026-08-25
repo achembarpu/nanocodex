@@ -3,10 +3,16 @@ import { fetchResponseWithDeadline } from "./deadline";
 import { Handler, Kv } from "accounts/server";
 
 const ACCOUNT_COOKIE = "nanocodex_account";
+const LOCAL_PORTABLE_CREDENTIAL_COOKIE = "nanocodex_local_passkey";
+const LOCAL_WEBAUTHN_RP_ID = "nanocodex.local";
+const LOCAL_BROWSER_WEBAUTHN_RP_ID = "nanocodex.localhost";
 const SESSION_TTL_SECONDS = 30 * 24 * 60 * 60;
 const USER_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const API_KEY = /^ncx_live_([A-Za-z0-9_-]{12})_([A-Za-z0-9_-]{43})$/;
 const ANONYMOUS_SESSION_TOKEN = /^a_[A-Za-z0-9_-]{43}$/;
+const PORTABLE_CREDENTIAL_ID = /^[A-Za-z0-9_-]{1,512}$/;
+const PORTABLE_PUBLIC_KEY = /^0x(?:[0-9a-fA-F]{2}){1,1024}$/;
+const BASE64_URL = /^[A-Za-z0-9_-]+$/;
 const DEFAULT_OWNERSHIP_IO_TIMEOUT_MS = 10_000;
 const CONNECT_SERVICE_ORIGIN = "https://nanocodex.internal";
 const CONNECT_USER_HEADER = "x-nanocodex-connect-user";
@@ -22,6 +28,7 @@ export interface AccountAuthEnv {
   NANOCODEX_AUTH: DurableObjectNamespace;
   NANOCODEX_USERS: DurableObjectNamespace<UserAccount>;
   NANOCODEX_API_KEYS: DurableObjectNamespace<ApiKeyRecord>;
+  NANOCODEX_LOCAL_WEBAUTHN_HMAC_KEY?: string;
 }
 
 export type Principal = Readonly<{
@@ -40,6 +47,12 @@ type AccountSessionPayload = Readonly<{
   userId: string;
   issuedAt: number;
   expiresAt: number;
+}>;
+
+type PortableCredential = Readonly<{
+  credentialId: string;
+  publicKey: string;
+  userId: string;
 }>;
 
 type ApiKeyMetadata = Readonly<{
@@ -96,19 +109,45 @@ export async function routeAccountRequest(
         headers: { ...Object.fromEntries(request.headers), "content-type": "application/json" },
       });
     }
+    if (url.pathname === "/webauthn/login/options" && request.method === "POST") {
+      const credential = await readPortableLocalCredential(request, env, url);
+      if (credential) {
+        const body = await readJson(request);
+        if (body instanceof Response) return body;
+        const {
+          allowCredentialIds: _allowCredentialIds,
+          credentialId: _credentialId,
+          ...options
+        } = body;
+        const headers = new Headers(request.headers);
+        headers.set("content-type", "application/json");
+        request = new Request(request, {
+          body: JSON.stringify({ ...options, credentialId: credential.credentialId }),
+          headers,
+        });
+      }
+    }
+    if (url.pathname === "/webauthn/login" && request.method === "POST") {
+      await seedPortableLocalCredential(request, env, url);
+    }
     return webAuthnHandler(env, url).fetch(request);
   }
   if (url.pathname === "/v1/me" && request.method === "GET") {
     const resolved = await resolveOrCreateBrowserAccount(request, env, url);
     if (resolved instanceof Response) return resolved;
     const principal = resolved.principal;
+    const portableCookie = resolved.persistent
+      ? await portableLocalCredentialCookieForSession(request, env, url, principal)
+      : undefined;
     return json({
       user: {
         id: principal.userId,
         persistent: resolved.persistent,
       },
       authentication: principal.kind,
-    }, resolved.cookie ? { headers: { "set-cookie": resolved.cookie } } : undefined);
+    }, resolved.cookie || portableCookie
+      ? { headers: { "set-cookie": resolved.cookie ?? portableCookie! } }
+      : undefined);
   }
   if (url.pathname === "/v1/api-keys") {
     const principal = await authenticate(request, env, url);
@@ -280,9 +319,9 @@ function webAuthnHandler(env: AccountAuthEnv, url: URL) {
     kv: authStore(env, "webauthn"),
     origin: url.origin,
     path: "/webauthn",
-    rpId: url.hostname,
+    rpId: portableLocalWebAuthnRpId(url) ?? url.hostname,
     ttl: { session: SESSION_TTL_SECONDS },
-    onRegister: async ({ request, userId }) => {
+    onRegister: async ({ credentialId, publicKey, request, userId }) => {
       const decoded = userId ? decodeUserId(userId) : undefined;
       const current = await readBrowserSession(request, env);
       if (!decoded || !current || decoded !== current.userId) {
@@ -293,12 +332,199 @@ function webAuthnHandler(env: AccountAuthEnv, url: URL) {
       if (anonymousToken) {
         await authStore(env, "account").delete(accountSessionKey(anonymousToken));
       }
+      return portableLocalCredentialResponse(env, url, {
+        credentialId,
+        publicKey,
+        userId: decoded,
+      });
     },
-    onAuthenticate: async ({ userId }) => {
+    onAuthenticate: async ({ credentialId, publicKey, userId }) => {
       const decoded = userId ? decodeUserId(userId) : undefined;
       if (!isUserId(decoded)) throw new Error("unknown passkey identity");
+      if (portableLocalWebAuthnKey(env, url)) {
+        await ensureAccount(env, decoded, true);
+      }
+      return portableLocalCredentialResponse(env, url, {
+        credentialId,
+        publicKey,
+        userId: decoded,
+      });
     },
   });
+}
+
+async function seedPortableLocalCredential(
+  request: Request,
+  env: AccountAuthEnv,
+  url: URL,
+): Promise<void> {
+  if (!portableLocalWebAuthnKey(env, url)) return;
+  let body: unknown;
+  try {
+    body = await request.clone().json();
+  } catch {
+    return;
+  }
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return;
+  const assertedCredentialId = (body as Record<string, unknown>).id;
+  if (typeof assertedCredentialId !== "string") return;
+  const credential = await readPortableLocalCredential(request, env, url);
+  if (!credential || credential.credentialId !== assertedCredentialId) return;
+  await authStore(env, "webauthn").set(`credential:${credential.credentialId}`, {
+    publicKey: credential.publicKey,
+    userId: encodeUserId(credential.userId),
+  });
+}
+
+async function portableLocalCredentialCookieForSession(
+  request: Request,
+  env: AccountAuthEnv,
+  url: URL,
+  principal: Principal,
+): Promise<string | undefined> {
+  if (principal.kind !== "account_session" || !portableLocalWebAuthnKey(env, url)) return undefined;
+  const session = await webAuthnHandler(env, url).getSession(request);
+  const userId = session?.userId ? decodeUserId(session.userId) : undefined;
+  if (!session || userId !== principal.userId) return undefined;
+  return serializePortableLocalCredentialCookie(env, url, {
+    credentialId: session.credentialId,
+    publicKey: session.publicKey,
+    userId,
+  });
+}
+
+async function portableLocalCredentialResponse(
+  env: AccountAuthEnv,
+  url: URL,
+  credential: PortableCredential,
+): Promise<Response> {
+  const cookie = await serializePortableLocalCredentialCookie(env, url, credential);
+  return new Response(null, cookie ? { headers: { "set-cookie": cookie } } : undefined);
+}
+
+async function serializePortableLocalCredentialCookie(
+  env: AccountAuthEnv,
+  url: URL,
+  credential: PortableCredential,
+): Promise<string | undefined> {
+  const secret = portableLocalWebAuthnKey(env, url);
+  if (!secret || !isPortableCredential(credential)) return undefined;
+  const payload = encodeBase64Url(new TextEncoder().encode(JSON.stringify(credential)));
+  const signature = await portableCredentialSignature(secret, payload);
+  return [
+    `${LOCAL_PORTABLE_CREDENTIAL_COOKIE}=${payload}.${encodeBase64Url(signature)}`,
+    "Path=/",
+    `Domain=${portableLocalWebAuthnRpId(url)}`,
+    `Max-Age=${SESSION_TTL_SECONDS}`,
+    "HttpOnly",
+    "SameSite=Lax",
+    "Secure",
+  ].join("; ");
+}
+
+async function readPortableLocalCredential(
+  request: Request,
+  env: AccountAuthEnv,
+  url: URL,
+): Promise<PortableCredential | undefined> {
+  const secret = portableLocalWebAuthnKey(env, url);
+  if (!secret) return undefined;
+  const encoded = rawCookie(request, LOCAL_PORTABLE_CREDENTIAL_COOKIE).value;
+  if (!encoded || encoded.length > 4_096) return undefined;
+  const parts = encoded.split(".");
+  if (parts.length !== 2) return undefined;
+  const [payload, encodedSignature] = parts as [string, string];
+  const signature = decodeBase64Url(encodedSignature);
+  if (!payload || !signature || signature.byteLength !== 32) return undefined;
+  const key = await portableCredentialHmacKey(secret, ["verify"]);
+  const valid = await crypto.subtle.verify("HMAC", key, signature, new TextEncoder().encode(payload));
+  if (!valid) return undefined;
+  const decoded = decodeBase64Url(payload);
+  if (!decoded) return undefined;
+  try {
+    const credential = JSON.parse(new TextDecoder().decode(decoded)) as unknown;
+    return isPortableCredential(credential) ? credential : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isPortableCredential(value: unknown): value is PortableCredential {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const record = value as Record<string, unknown>;
+  const keys = Object.keys(record).sort();
+  return keys.length === 3
+    && keys[0] === "credentialId"
+    && keys[1] === "publicKey"
+    && keys[2] === "userId"
+    && typeof record.credentialId === "string"
+    && PORTABLE_CREDENTIAL_ID.test(record.credentialId)
+    && typeof record.publicKey === "string"
+    && PORTABLE_PUBLIC_KEY.test(record.publicKey)
+    && isUserId(record.userId);
+}
+
+function portableLocalWebAuthnRpId(url: URL): string | undefined {
+  if (
+    url.protocol === "https:"
+    && (url.hostname === LOCAL_WEBAUTHN_RP_ID || url.hostname.endsWith(`.${LOCAL_WEBAUTHN_RP_ID}`))
+  ) {
+    return LOCAL_WEBAUTHN_RP_ID;
+  }
+  if (
+    (url.protocol === "http:" || url.protocol === "https:")
+    && (url.hostname === LOCAL_BROWSER_WEBAUTHN_RP_ID
+      || url.hostname.endsWith(`.${LOCAL_BROWSER_WEBAUTHN_RP_ID}`))
+  ) {
+    return LOCAL_BROWSER_WEBAUTHN_RP_ID;
+  }
+  return undefined;
+}
+
+function portableLocalWebAuthnKey(env: AccountAuthEnv, url: URL): string | undefined {
+  const secret = env.NANOCODEX_LOCAL_WEBAUTHN_HMAC_KEY;
+  return portableLocalWebAuthnRpId(url) && typeof secret === "string" && secret.length > 0
+    ? secret
+    : undefined;
+}
+
+async function portableCredentialSignature(secret: string, payload: string): Promise<Uint8Array> {
+  const key = await portableCredentialHmacKey(secret, ["sign"]);
+  return new Uint8Array(await crypto.subtle.sign("HMAC", key, new TextEncoder().encode(payload)));
+}
+
+function portableCredentialHmacKey(
+  secret: string,
+  usages: ("sign" | "verify")[],
+): Promise<CryptoKey> {
+  return crypto.subtle.importKey(
+    "raw",
+    new TextEncoder().encode(secret),
+    { name: "HMAC", hash: "SHA-256" },
+    false,
+    usages,
+  );
+}
+
+function encodeUserId(value: string): string {
+  return encodeBase64Url(new TextEncoder().encode(value));
+}
+
+function encodeBase64Url(value: Uint8Array): string {
+  let binary = "";
+  for (const byte of value) binary += String.fromCharCode(byte);
+  return btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+}
+
+function decodeBase64Url(value: string): Uint8Array | undefined {
+  if (!value || !BASE64_URL.test(value)) return undefined;
+  try {
+    const base64 = value.replaceAll("-", "+").replaceAll("_", "/");
+    const padded = base64.padEnd(Math.ceil(base64.length / 4) * 4, "=");
+    return Uint8Array.from(atob(padded), (character) => character.charCodeAt(0));
+  } catch {
+    return undefined;
+  }
 }
 
 function authStore(env: AccountAuthEnv, name: string): Kv.Kv {

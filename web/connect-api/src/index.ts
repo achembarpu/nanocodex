@@ -7,7 +7,7 @@ declare const WebSocketPair: {
   new(): { 0: WorkerWebSocket; 1: WorkerWebSocket };
 };
 
-export class NonceStorage extends Kv.NonceStorage {
+export class ConnectNonceStorage extends Kv.NonceStorage {
   override async fetch(request: Request): Promise<Response> {
     const url = new URL(request.url);
     if (url.pathname !== "/resolve-grant") return super.fetch(request);
@@ -239,7 +239,7 @@ export default {
     try {
       const url = new URL(request.url);
       const store = Kv.durableObject(env.CONNECT_STATE);
-      const auth = createAuth(env, store, await authRequestContext(request, url));
+      const auth = createAuth(env, store, request, await authRequestContext(request, url));
 
       if (url.pathname.startsWith("/v1/connect/auth")) {
         requireDialogOrigin(request);
@@ -391,7 +391,7 @@ export default {
           return cors(Response.json({ linked: identity.linked }), request);
         }
         if (request.method === "POST") {
-          return cors(await startAccountLink(store, accountAddress), request);
+          return cors(await startAccountLink(request, store, accountAddress), request);
         }
         if (request.method === "PUT") {
           return cors(await completeAccountLink(request, env, store, accountAddress), request);
@@ -445,6 +445,7 @@ class ApiFailure extends Error {
 }
 
 async function startAccountLink(
+  request: Request,
   store: Kv.Kv,
   accountAddress: `0x${string}`,
 ): Promise<Response> {
@@ -457,10 +458,11 @@ async function startAccountLink(
   } satisfies AccountLinkState, { ttl: ACCOUNT_LINK_TTL })) {
     throw new ApiFailure(503, "account_link_conflict", "The account-link request could not be reserved.");
   }
-  const authorize = new URL("/v1/connect/account-link", NANOCODEX_ORIGIN);
+  const localOrigin = localDevelopmentPublicOrigin(request);
+  const authorize = new URL("/v1/connect/account-link", localOrigin ?? NANOCODEX_ORIGIN);
   authorize.searchParams.set("account_address", accountAddress);
   authorize.searchParams.set("app_id", REGISTERED_APP_ID);
-  authorize.searchParams.set("return_origin", DIALOG_ORIGIN);
+  authorize.searchParams.set("return_origin", localOrigin ?? DIALOG_ORIGIN);
   authorize.searchParams.set("state", state);
   return Response.json({ authorization_url: authorize.href, state });
 }
@@ -2588,11 +2590,16 @@ function isRecord(value: unknown): value is Record<string, unknown> {
   return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
-function createAuth(env: Env, store: Kv.Kv, context?: AuthRequestContext) {
+function createAuth(
+  env: Env,
+  store: Kv.Kv,
+  request: Request,
+  context?: AuthRequestContext,
+) {
   return Handler.auth({
     cookie: false,
     cors: false,
-    origin: API_ORIGIN,
+    origin: authenticationOrigin(request),
     path: "/v1/connect/auth",
     statement: "Authorize this app to use your Nanocodex agent and bounded MPP access key.",
     store,
@@ -3152,7 +3159,25 @@ function isAllowedDialogOrigin(origin: string): boolean {
 }
 
 function isLoopbackOrigin(origin: string | null): boolean {
-  return /^http:\/\/(?:localhost|127\.0\.0\.1):\d+$/.test(origin ?? "");
+  return /^http:\/\/(?:localhost|127\.0\.0\.1|(?:[a-z0-9-]+\.)*nanocodex\.localhost):\d+$/.test(
+    origin ?? "",
+  );
+}
+
+function isLocalDevelopmentOrigin(origin: string | null): boolean {
+  return isLoopbackOrigin(origin)
+    || /^https:\/\/(?:[a-z0-9-]+\.)*nanocodex\.local$/.test(origin ?? "");
+}
+
+function authenticationOrigin(request: Request): string {
+  return localDevelopmentPublicOrigin(request) ?? API_ORIGIN;
+}
+
+function localDevelopmentPublicOrigin(request: Request): string | undefined {
+  const forwarded = request.headers.get("x-nanocodex-local-origin");
+  return new URL(request.url).origin !== API_ORIGIN && isLocalDevelopmentOrigin(forwarded)
+    ? forwarded!
+    : undefined;
 }
 
 function developmentLoopbackOrigin(request: Request, origin: string | null): boolean {

@@ -42,6 +42,19 @@
 
 ## Browser verification
 
+- Local web stacks must remain instance-isolated: each checkout or explicit
+  instance owns its Wrangler state, port, Compose project, and application and
+  playground hosts so multiple versions can run concurrently. Do not share a
+  live Miniflare state directory between processes.
+- Local WebAuthn keeps exact per-instance browser origins but uses the parent RP
+  ID: `nanocodex.localhost` for portable browser URLs and `nanocodex.local` for
+  OrbStack HTTPS URLs. Never scope a passkey to an instance subdomain. Preserve
+  the signed public credential handoff that lets an isolated local Worker
+  verify the same passkey without sharing private keys or mutable Worker state.
+- A local authentication change is incomplete until one real browser creates a
+  passkey through the Connect playground and dialog in one instance and reuses
+  that exact credential through the complete account-link leg in a second,
+  concurrently running instance.
 - Every change to a web interface, browser runtime, route, Worker-backed browser
   API, or local web development path must be exercised through the host-managed
   browser against the real running application. Unit tests, source assertions,

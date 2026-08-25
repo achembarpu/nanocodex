@@ -3,8 +3,8 @@ import test from "node:test";
 
 import { localManagedAuxiliaryWorkers } from "../vite/localWorkerTopology.ts";
 
-test("local development always mirrors the two private production Workers", () => {
-  const [egress, managed] = localManagedAuxiliaryWorkers({
+test("local development mirrors the private production Workers", () => {
+  const [egress, managed, connectApi] = localManagedAuxiliaryWorkers({
     NANOCODEX_LOCAL_ADMIN_TOKEN: "signing-key",
     NANOCODEX_LOCAL_AGENT_IDLE_TIMEOUT_MS: "750",
     NANOCODEX_LOCAL_CHATGPT_BOOTSTRAP: "local-secret-document",
@@ -42,12 +42,27 @@ test("local development always mirrors the two private production Workers", () =
       EXISTING: "kept",
       AGENT_IDLE_TIMEOUT_MS: "750",
       NANOCODEX_ADMIN_TOKEN: "signing-key",
+      NANOCODEX_LOCAL_WEBAUTHN_HMAC_KEY: "nanocodex-local-passkey-portability-v1",
     },
+  });
+  assert.equal(connectApi?.configPath, "./connect-api/wrangler.jsonc");
+  assert.deepEqual(connectApi?.config({
+    services: [
+      { binding: "ACCOUNTS", service: "nanocodex-durable-agent" },
+      { binding: "NANOCODEX", service: "nanocodex" },
+    ],
+  }), {
+    compatibility_date: "2026-08-18",
+    name: "nanocodex-connect-api",
+    services: [
+      { binding: "ACCOUNTS", service: "nanocodex-durable-agent" },
+      { binding: "NANOCODEX", service: "nanocodex-development" },
+    ],
   });
 });
 
 test("local managed defaults are immediately runnable and validate only policy", () => {
-  assert.equal(localManagedAuxiliaryWorkers({}).length, 2);
+  assert.equal(localManagedAuxiliaryWorkers({}).length, 3);
   assert.throws(
     () => localManagedAuxiliaryWorkers({ NANOCODEX_LOCAL_AGENT_IDLE_TIMEOUT_MS: "0" }),
     /positive integer/,

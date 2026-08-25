@@ -1,10 +1,10 @@
 import { spawn } from "node:child_process";
-import { randomBytes } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { chmod, mkdir, open, readFile, readdir, stat, unlink } from "node:fs/promises";
 import { request as httpRequest } from "node:http";
 import { connect as connectNet } from "node:net";
 import { homedir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 
@@ -15,6 +15,9 @@ const webRoot = resolve(dirname(scriptPath), "..");
 const repositoryRoot = resolve(webRoot, "..");
 const terminalRoot = resolve(repositoryRoot, "js/terminal");
 const managedRoot = resolve(repositoryRoot, "services/managed");
+const connectDialogRoot = resolve(webRoot, "connect-dialog");
+const connectPlaygroundRoot = resolve(webRoot, "connect-playground");
+const connectApiRoot = resolve(webRoot, "connect-api");
 const localGatewayComposePath = resolve(webRoot, "docker-compose.dev.yml");
 const LOCAL_DEVELOPMENT_PUBLIC_ORIGIN = "https://nanocodex.local";
 const runtimeEnvironmentNames = [
@@ -174,11 +177,61 @@ export function localDevelopmentOrigin(raw = "http://127.0.0.1:5173") {
   return origin;
 }
 
+export function localDevelopmentInstance(
+  repositoryPath,
+  { primary = false, requestedName } = {},
+) {
+  const requested = requestedName?.trim();
+  if (requested && !/^[A-Za-z0-9][A-Za-z0-9._-]{0,47}$/.test(requested)) {
+    throw new Error("NANOCODEX_DEV_INSTANCE must contain only letters, digits, dots, underscores, or hyphens");
+  }
+  const canonical = primary && !requested;
+  const base = sanitizeLocalDevelopmentSlug(requested || basename(repositoryPath));
+  const pathSuffix = createHash("sha256").update(resolve(repositoryPath)).digest("hex").slice(0, 6);
+  const id = canonical ? "main" : requested ? base : `${base.slice(0, 24)}-${pathSuffix}`;
+  const publicHost = canonical ? "nanocodex.local" : `${id}.nanocodex.local`;
+  const playgroundHost = canonical
+    ? "playground.nanocodex.local"
+    : `playground-${id}.nanocodex.local`;
+  const port = canonical
+    ? 5_173
+    : 20_000 + createHash("sha256").update(id).digest().readUInt16BE(0) % 30_000;
+  return Object.freeze({
+    composeProject: canonical ? "nanocodex-dev" : `nanocodex-dev-${id}`,
+    defaultOrigin: `http://127.0.0.1:${port}`,
+    id,
+    playgroundOrigin: `https://${playgroundHost}`,
+    primary: canonical,
+    publicOrigin: `https://${publicHost}`,
+  });
+}
+
+function sanitizeLocalDevelopmentSlug(value) {
+  const slug = value.toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 32);
+  return slug || "local";
+}
+
+async function resolveLocalDevelopmentInstance(environment) {
+  let primary = false;
+  try {
+    primary = (await stat(resolve(repositoryRoot, ".git"))).isDirectory();
+  } catch (error) {
+    if (error?.code !== "ENOENT") throw error;
+  }
+  return localDevelopmentInstance(repositoryRoot, {
+    primary,
+    requestedName: environment.NANOCODEX_DEV_INSTANCE,
+  });
+}
+
 export function localDevelopmentPublicOrigin(raw = LOCAL_DEVELOPMENT_PUBLIC_ORIGIN) {
   const origin = new URL(raw);
   if (
     origin.protocol !== "https:"
-    || origin.hostname !== "nanocodex.local"
+    || (origin.hostname !== "nanocodex.local" && !origin.hostname.endsWith(".nanocodex.local"))
     || origin.port
     || origin.username
     || origin.password
@@ -186,17 +239,33 @@ export function localDevelopmentPublicOrigin(raw = LOCAL_DEVELOPMENT_PUBLIC_ORIG
     || origin.search
     || origin.hash
   ) {
-    throw new Error("the public local development origin must be https://nanocodex.local");
+    throw new Error("the public local development origin must be HTTPS under nanocodex.local");
   }
   return origin;
 }
 
-export function localDevelopmentStatePath(userHome = homedir()) {
-  return resolve(userHome, ".nanocodex", "web-development");
+export function localDevelopmentStatePath(userHome = homedir(), instanceId = "main") {
+  const base = resolve(userHome, ".nanocodex", "web-development");
+  if (instanceId === "main") return base;
+  if (!/^[a-z0-9][a-z0-9-]{0,47}$/.test(instanceId)) {
+    throw new Error("invalid local development instance ID");
+  }
+  return resolve(base, "instances", instanceId);
 }
 
-export function localDevelopmentBrowserOrigin(origin = localDevelopmentOrigin()) {
-  return new URL(`http://nanocodex.localhost:${origin.port}`);
+export function localDevelopmentBrowserOrigin(origin = localDevelopmentOrigin(), instanceId = "main") {
+  const host = instanceId === "main" ? "nanocodex.localhost" : `${instanceId}.nanocodex.localhost`;
+  return new URL(`http://${host}:${origin.port}`);
+}
+
+export function localDevelopmentBrowserPlaygroundOrigin(
+  origin = localDevelopmentOrigin(),
+  instanceId = "main",
+) {
+  const host = instanceId === "main"
+    ? "playground.nanocodex.localhost"
+    : `playground-${instanceId}.nanocodex.localhost`;
+  return new URL(`http://${host}:${origin.port}`);
 }
 
 export async function assertLocalDevelopmentPortAvailable(hostname, rawPort) {
@@ -249,10 +318,12 @@ async function main() {
     if (process.argv.slice(2).length > 0) {
       throw new Error("local development has one production-shaped account and managed-agent topology");
     }
-    const origin = localDevelopmentOrigin(environment.NANOCODEX_DEV_ORIGIN);
-    const publicOrigin = localDevelopmentPublicOrigin();
-    const browserOrigin = localDevelopmentBrowserOrigin(origin);
-    const statePath = localDevelopmentStatePath();
+    const instance = await resolveLocalDevelopmentInstance(environment);
+    const origin = localDevelopmentOrigin(environment.NANOCODEX_DEV_ORIGIN ?? instance.defaultOrigin);
+    const publicOrigin = localDevelopmentPublicOrigin(instance.publicOrigin);
+    const browserOrigin = localDevelopmentBrowserOrigin(origin, instance.id);
+    const browserPlaygroundOrigin = localDevelopmentBrowserPlaygroundOrigin(origin, instance.id);
+    const statePath = localDevelopmentStatePath(homedir(), instance.id);
     developmentLease = await acquireLocalDevelopmentLease(statePath);
     await assertLocalDevelopmentPortAvailable(origin.hostname, origin.port);
     const toolEnvironment = buildChildEnvironment(environment);
@@ -284,6 +355,33 @@ async function main() {
       { cwd: repositoryRoot, env: toolEnvironment },
       "terminal package build",
     );
+    await Promise.all([
+      lifecycle.run(
+        "npm",
+        ["run", "build", "--prefix", connectDialogRoot],
+        { cwd: repositoryRoot, env: toolEnvironment },
+        "Connect dialog build",
+      ),
+      lifecycle.run(
+        "npm",
+        ["run", "build", "--prefix", connectPlaygroundRoot],
+        {
+          cwd: repositoryRoot,
+          env: {
+            ...toolEnvironment,
+            VITE_CONNECT_API_HOST: publicOrigin.origin,
+            VITE_CONNECT_DIALOG_HOST: new URL("/connect-dialog/", publicOrigin).href,
+          },
+        },
+        "Connect playground build",
+      ),
+      lifecycle.run(
+        "npm",
+        ["run", "build", "--prefix", connectApiRoot],
+        { cwd: repositoryRoot, env: toolEnvironment },
+        "Connect API build",
+      ),
+    ]);
 
     await lifecycle.run(process.execPath, [
       resolve(webRoot, "node_modules/wrangler/bin/wrangler.js"),
@@ -319,6 +417,7 @@ async function main() {
       NANOCODEX_LOCAL_CHATGPT_BOOTSTRAP: localChatGptBootstrap,
       NANOCODEX_LOCAL_CODEX_RELAY_URL: relayUrl,
       NANOCODEX_LOCAL_PUBLIC_ORIGIN: publicOrigin.origin,
+      NANOCODEX_LOCAL_CONNECT_PLAYGROUND_HOST: new URL(instance.playgroundOrigin).hostname,
       NANOCODEX_LOCAL_STATE_PATH: statePath,
       ...localConnectorEnvironment(environment),
     });
@@ -336,7 +435,13 @@ async function main() {
       (response) => verifyLocalHealthResponse(response),
     );
 
-    gatewayLaunch = orbStackGatewayChildLaunch(toolEnvironment, origin);
+    gatewayLaunch = orbStackGatewayChildLaunch(
+      toolEnvironment,
+      origin,
+      publicOrigin,
+      new URL(instance.playgroundOrigin),
+      instance.composeProject,
+    );
     const gateway = lifecycle.spawn(
       gatewayLaunch.command,
       gatewayLaunch.arguments,
@@ -370,9 +475,11 @@ async function main() {
         ),
     });
     process.stderr.write(
-      `Nanocodex local Workers are ready at ${publicOrigin.origin} (${head.slice(0, 7)}; `
+      `Nanocodex local Workers are ready at ${publicOrigin.origin} (${instance.id}; ${head.slice(0, 7)}; `
       + "repository published; evals migrated; managed agents ready).\n"
-      + `Portable browser verification: ${browserOrigin.origin}\n`,
+      + `Connect playground: ${instance.playgroundOrigin}\n`
+      + `Portable browser verification: ${browserOrigin.origin}\n`
+      + `Portable Connect playground: ${browserPlaygroundOrigin.origin}\n`,
     );
 
     const exited = await Promise.race([relay.exit, website.exit, gateway.exit]);
@@ -471,16 +578,27 @@ export async function assertOrbStack(environment, execute = run) {
   ]);
   if (status.trim() !== "Running" || context.trim() !== "orbstack") {
     throw new Error(
-      "Nanocodex local development requires a running OrbStack Docker context for https://nanocodex.local",
+      "Nanocodex local development requires a running OrbStack Docker context for trusted nanocodex.local HTTPS",
     );
   }
 }
 
-export function orbStackGatewayChildLaunch(environment, origin) {
+export function orbStackGatewayChildLaunch(
+  environment,
+  origin,
+  publicOrigin = localDevelopmentPublicOrigin(),
+  playgroundOrigin = localDevelopmentPublicOrigin("https://playground.nanocodex.local"),
+  composeProject = "nanocodex-dev",
+) {
+  if (!/^[a-z0-9][a-z0-9_-]{0,62}$/.test(composeProject)) {
+    throw new Error("invalid local development Compose project");
+  }
   return {
     command: "docker",
     arguments: [
       "compose",
+      "--project-name",
+      composeProject,
       "--file",
       localGatewayComposePath,
       "up",
@@ -492,6 +610,8 @@ export function orbStackGatewayChildLaunch(environment, origin) {
       cwd: webRoot,
       env: {
         ...selectedEnvironment(environment, runtimeEnvironmentNames),
+        NANOCODEX_DEV_HOST: publicOrigin.hostname,
+        NANOCODEX_PLAYGROUND_HOST: playgroundOrigin.hostname,
         NANOCODEX_DEV_PORT: origin.port,
       },
       stdio: ["ignore", "inherit", "inherit"],
@@ -504,6 +624,8 @@ export function orbStackGatewayStop(gatewayLaunch) {
     command: gatewayLaunch.command,
     arguments: [
       "compose",
+      "--project-name",
+      gatewayLaunch.arguments[gatewayLaunch.arguments.indexOf("--project-name") + 1],
       "--file",
       localGatewayComposePath,
       "down",
@@ -921,7 +1043,10 @@ export function localDependencyRequirements() {
   return [
     {
       root: terminalRoot,
-      requiredFiles: ["node_modules/typescript/bin/tsc"],
+      requiredFiles: [
+        "node_modules/streamdown/package.json",
+        "node_modules/typescript/bin/tsc",
+      ],
     },
     {
       root: webRoot,
@@ -929,6 +1054,18 @@ export function localDependencyRequirements() {
         "node_modules/accounts/package.json",
         "node_modules/wrangler/bin/wrangler.js",
       ],
+    },
+    {
+      root: connectDialogRoot,
+      requiredFiles: ["node_modules/wrangler/bin/wrangler.js"],
+    },
+    {
+      root: connectPlaygroundRoot,
+      requiredFiles: ["node_modules/wrangler/bin/wrangler.js"],
+    },
+    {
+      root: connectApiRoot,
+      requiredFiles: ["node_modules/wrangler/bin/wrangler.js"],
     },
     {
       root: resolve(managedRoot, "../egress"),

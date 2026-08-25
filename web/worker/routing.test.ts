@@ -47,8 +47,8 @@ test("Cloudflare routes preview documents, images, and protocol endpoints throug
       remote: false,
     },
     {
-      binding: "NANOCODEX_CONNECT_DIALOG",
-      service: "nanocodex-connect-dialog",
+      binding: "NANOCODEX_CONNECT_API",
+      service: "nanocodex-connect-api",
       remote: false,
     },
   ]);

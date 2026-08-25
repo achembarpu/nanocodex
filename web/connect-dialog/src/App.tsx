@@ -9,6 +9,7 @@ import {
   accountLoginCapabilities,
   appVisibilityPermissions,
   connectApiOrigin,
+  isLocalDevelopmentOrigin,
   registeredApp,
   sanitizeWalletResult,
   signedAppResources,
@@ -27,7 +28,9 @@ export async function logoutAccount() {
 const connectorIds = ["github", "gmail", "gdrive", "x", "chatgpt"] as const;
 const connectorResourcePrefix = "urn:nanocodex:connector:";
 const connectorsResourcePrefix = "urn:nanocodex:connectors:";
-const nanocodexOrigin = "https://nanocodex.gakonst.workers.dev";
+const nanocodexOrigin = isLocalDevelopmentOrigin(window.location.origin)
+  ? window.location.origin
+  : "https://nanocodex.gakonst.workers.dev";
 type ConnectorId = typeof connectorIds[number];
 type ConnectorStatus = Readonly<{
   connected: boolean;
@@ -1348,7 +1351,9 @@ function isAbortError(error: unknown) {
 function requiredUrl(value: unknown) {
   if (typeof value !== "string") throw new Error("The account broker returned no authorization URL.");
   const url = new URL(value);
-  if (url.protocol !== "https:") throw new Error("The account broker returned an unsafe authorization URL.");
+  if (url.protocol !== "https:" && !isLocalDevelopmentOrigin(url.origin)) {
+    throw new Error("The account broker returned an unsafe authorization URL.");
+  }
   return url.href;
 }
 

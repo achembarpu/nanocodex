@@ -68,16 +68,20 @@ while the existing surfaces are recomposed incrementally.
 ## Development
 
 Local development requires a running [OrbStack](https://orbstack.dev/) Docker
-context. OrbStack terminates trusted HTTPS for the canonical
-`https://nanocodex.local` origin; the application and credential broker still
+context. OrbStack terminates trusted HTTPS for `https://nanocodex.local` in the
+primary checkout and for a deterministic `https://<worktree>.nanocodex.local`
+origin in each linked worktree; the application and credential broker still
 run as host processes.
 
 Browser runtimes outside macOS mDNS, including the managed verification
 browser, use the same running stack through
 `http://nanocodex.localhost:<development-port>`. The reserved `.localhost`
-domain remains a browser secure context and gives WebAuthn one stable
-`nanocodex.localhost` RP ID; normal interactive development uses the canonical
-OrbStack HTTPS origin.
+domain remains a browser secure context. Normal interactive development uses
+OrbStack HTTPS: every checkout validates its exact browser origin while using
+the shared `nanocodex.local` RP ID; portable browser URLs use the corresponding
+shared `nanocodex.localhost` RP ID. A tamper-evident public credential record
+lets an isolated worktree Worker verify the same passkey without sharing or
+concurrently opening another Wrangler process's state files.
 
 ```bash
 cd web
@@ -93,10 +97,17 @@ starts the website Worker, and publishes the current committed Git `HEAD`
 through the real repository publisher into local R2 and the repository Durable
 Object. It reports ready only after a generation-pinned Source blob, commit
 metadata and page, patch, Evals, and the read-only `/git` advertisement all
-resolve that `HEAD`. Local Cloudflare state is retained under
-`~/.nanocodex/web-development`, shared by repository worktrees, so passkey
-registrations, browser accounts, and immutable repository objects survive a
-worktree switch.
+resolve that `HEAD`. The primary checkout retains Cloudflare state under
+`~/.nanocodex/web-development`; worktrees use instance-scoped children of that
+directory. Their Vite ports, Compose projects, OrbStack hosts, Durable Objects,
+R2, and D1 state are isolated, so multiple versions can run concurrently.
+Passkey eligibility and verified credential identity are deliberately shared;
+agent, account-session, connector, and repository state are not.
+
+Set `NANOCODEX_DEV_INSTANCE=<name>` to pin an explicit instance name, or
+`NANOCODEX_DEV_ORIGIN=http://127.0.0.1:<port>` to resolve a rare deterministic
+port collision. Startup prints both the app and Connect playground URLs for the
+instance. Ordinary shutdown retains that instance's state.
 
 The orchestrator loads the repository-root `.env` once before it selects auth
 or starts a child. It reconstructs every child environment explicitly: only the
@@ -123,8 +134,8 @@ NANOCODEX_X_OAUTH_CLIENT_ID=...
 NANOCODEX_X_OAUTH_CLIENT_SECRET=...
 ```
 
-Register the four `https://nanocodex.local/v1/connectors/{github,gmail,gdrive,x}/callback`
-URIs described in `services/egress/README.md`. Connector controls remain visible
+Register the four callback paths under the instance URL printed at startup, as
+described in `services/egress/README.md`. Connector controls remain visible
 but disabled for browser-only guest sessions; a persistent passkey account is
 required even when that guest session already has a ChatGPT connection.
 
@@ -158,9 +169,9 @@ React integration creates the browser agent with
 event stream with `useAgentEvents`. React owns no Worker lifecycle, agent
 history, credential policy, or model-loop state.
 
-The local Worker and Vite client run together behind
-`https://nanocodex.local` using the Cloudflare Vite-plugin layout and a tiny
-OrbStack TCP gateway. The gateway receives only the internal Vite port; it
+The local Worker and Vite client run together behind their printed
+`https://*.nanocodex.local` origin using the Cloudflare Vite-plugin layout and
+an instance-owned OrbStack TCP gateway. The gateway receives only the internal Vite port; it
 never receives provider credentials. No Cloudflare account or remote binding
 is used by the normal development command. Provider credentials remain behind
 private Worker bindings; see the
@@ -341,7 +352,7 @@ Run `npm run bench:dataset` in `js/bindings` for the deterministic 100,000-row
 Snappy Parquet/JSONL browser-path benchmark. It reports cold and repeated query
 latency, pulled bytes, range requests, scanned rows, and cache hits.
 
-Development runs on the stable `https://nanocodex.local` origin. Provider
+Development runs on the stable OrbStack HTTPS origin printed at startup. Provider
 credentials remain behind Worker Service Bindings and never enter that browser
 origin.
 

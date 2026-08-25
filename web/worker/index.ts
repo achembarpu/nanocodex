@@ -34,6 +34,7 @@ import {
   routeConnectDialog,
   type ConnectDialogProxyEnv,
 } from "./connectDialogProxy.ts";
+import { routeLocalConnectApi, type LocalConnectApiEnv } from "./localConnectApi.ts";
 import {
   fetchManagedModel,
   fetchManagedRealtimeCall,
@@ -88,6 +89,7 @@ const GIT_SHA_PATTERN = /^[0-9a-f]{40}$/;
 
 type WorkerEnv = GitStorageEnv & ThreadGitStorageEnv & EvalStorageEnv & ChatGptEgressEnv
   & ConnectDialogProxyEnv
+  & LocalConnectApiEnv
   & PublicSecurityEnv & CredentialVaultEnv & {
   ASSETS?: Fetcher;
   ENVIRONMENT: string;
@@ -126,6 +128,8 @@ export default {
     if (insecure) return insecure;
     const connectDialog = await routeConnectDialog(request, env, url);
     if (connectDialog != null) return connectDialog;
+    const connectApi = await routeLocalConnectApi(request, env, url);
+    if (connectApi != null) return connectApi;
     const managed = await routeManaged(request, env, url);
     if (managed != null) return managed;
     const evalMutation = await routeEvalMutation(request, env, url);

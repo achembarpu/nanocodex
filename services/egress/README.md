@@ -108,8 +108,9 @@ https://<origin>/v1/connectors/gdrive/callback
 https://<origin>/v1/connectors/x/callback
 ```
 
-For the canonical local stack, register the corresponding OrbStack HTTPS
-callbacks; neither Portless nor a public tunnel is required:
+For the primary local stack, register the corresponding OrbStack HTTPS
+callbacks below. Worktrees replace `nanocodex.local` with the instance host
+printed at startup; neither Portless nor a public tunnel is required:
 
 ```text
 https://nanocodex.local/v1/connectors/github/callback

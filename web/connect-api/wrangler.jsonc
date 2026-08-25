@@ -12,11 +12,11 @@
   ],
   "durable_objects": {
     "bindings": [
-      { "name": "CONNECT_STATE", "class_name": "NonceStorage" }
+      { "name": "CONNECT_STATE", "class_name": "ConnectNonceStorage" }
     ]
   },
   "migrations": [
-    { "tag": "v1", "new_sqlite_classes": ["NonceStorage"] }
+    { "tag": "v1", "new_sqlite_classes": ["ConnectNonceStorage"] }
   ],
   "observability": { "enabled": true }
 }

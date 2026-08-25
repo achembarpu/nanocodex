@@ -1,5 +1,7 @@
 type WorkerConfiguration = {
+  compatibility_date?: string;
   name?: string;
+  services?: Array<Record<string, unknown>>;
   vars?: Record<string, unknown>;
 };
 
@@ -11,7 +13,10 @@ type AuxiliaryWorker = {
 
 const LOCAL_MANAGED_WORKER = "nanocodex-durable-agent";
 const LOCAL_EGRESS_WORKER = "nanocodex-egress";
+const LOCAL_CONNECT_API_WORKER = "nanocodex-connect-api";
+const LOCAL_CONNECT_API_COMPATIBILITY_DATE = "2026-08-18";
 const DEVELOPMENT_SIGNING_KEY = "nanocodex-local-room-signing-key";
+const DEVELOPMENT_WEBAUTHN_HMAC_KEY = "nanocodex-local-passkey-portability-v1";
 
 /**
  * Cloudflare requires Workers that share external Durable Objects or upgraded
@@ -65,7 +70,23 @@ export function localManagedAuxiliaryWorkers(
           ...configuration.vars,
           AGENT_IDLE_TIMEOUT_MS: idleTimeout,
           NANOCODEX_ADMIN_TOKEN: signingKey,
+          // This development-only MAC key is intentionally stable across
+          // isolated worktrees. It authenticates public passkey metadata in a
+          // shared browser cookie; it is not a provider credential or a
+          // production trust root.
+          NANOCODEX_LOCAL_WEBAUTHN_HMAC_KEY: DEVELOPMENT_WEBAUTHN_HMAC_KEY,
         },
+      }),
+    },
+    {
+      configPath: "./connect-api/wrangler.jsonc",
+      devOnly: true,
+      config: (configuration) => ({
+        compatibility_date: LOCAL_CONNECT_API_COMPATIBILITY_DATE,
+        name: LOCAL_CONNECT_API_WORKER,
+        services: configuration.services?.map((service) => service.binding === "NANOCODEX"
+          ? { ...service, service: "nanocodex-development" }
+          : service),
       }),
     },
   ];

@@ -48,12 +48,34 @@ test("the canonical OrbStack hostname receives the local credential claim", asyn
   assert.equal(calls, 1);
 });
 
+test("a worktree OrbStack hostname receives the local credential claim", async () => {
+  let calls = 0;
+  const resource = createLocalDevelopmentCredentialResource(async () => {
+    calls += 1;
+    return new Response(null, { status: 204 });
+  }, "feature-a1b2c3.nanocodex.local");
+
+  assert.equal(await resource.ensure("user-a"), true);
+  assert.equal(calls, 1);
+});
+
 test("the portable browser hostname receives the local credential claim", async () => {
   let calls = 0;
   const resource = createLocalDevelopmentCredentialResource(async () => {
     calls += 1;
     return new Response(null, { status: 204 });
   }, "nanocodex.localhost");
+
+  assert.equal(await resource.ensure("user-a"), true);
+  assert.equal(calls, 1);
+});
+
+test("an instance-scoped portable browser hostname receives the local credential claim", async () => {
+  let calls = 0;
+  const resource = createLocalDevelopmentCredentialResource(async () => {
+    calls += 1;
+    return new Response(null, { status: 204 });
+  }, "passkey-a.nanocodex.localhost");
 
   assert.equal(await resource.ensure("user-a"), true);
   assert.equal(calls, 1);

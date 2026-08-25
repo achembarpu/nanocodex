@@ -5,6 +5,12 @@ const LOCAL_DEVELOPMENT_HOSTS = new Set([
   "nanocodex.localhost",
 ]);
 
+function isLocalDevelopmentHost(hostname: string): boolean {
+  return LOCAL_DEVELOPMENT_HOSTS.has(hostname)
+    || hostname.endsWith(".nanocodex.local")
+    || hostname.endsWith(".nanocodex.localhost");
+}
+
 type CredentialClaim = Readonly<{
   userId: string;
   promise: Promise<boolean>;
@@ -18,7 +24,7 @@ export function createLocalDevelopmentCredentialResource(
   request: typeof fetch = globalThis.fetch.bind(globalThis),
   hostname: string = globalThis.location?.hostname ?? "",
 ) {
-  const enabled = LOCAL_DEVELOPMENT_HOSTS.has(hostname);
+  const enabled = isLocalDevelopmentHost(hostname);
   let current: CredentialClaim | undefined;
 
   return Object.freeze({

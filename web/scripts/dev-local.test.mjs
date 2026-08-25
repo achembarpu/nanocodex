@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { EventEmitter } from "node:events";
-import { chmod, mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { basename, join, resolve } from "node:path";
@@ -15,6 +15,8 @@ import {
   assertLocalDevelopmentPortAvailable,
   assertOrbStack,
   localDevelopmentBrowserOrigin,
+  localDevelopmentBrowserPlaygroundOrigin,
+  localDevelopmentInstance,
   localDevelopmentOrigin,
   localDevelopmentPublicOrigin,
   localDevelopmentStatePath,
@@ -176,14 +178,23 @@ test("local development installs every package required to start the web stack",
   const requirements = localDependencyRequirements();
   const terminal = requirements.find(({ root }) => basename(root) === "terminal");
   const web = requirements.find(({ root }) => basename(root) === "web");
+  const connectDialog = requirements.find(({ root }) => basename(root) === "connect-dialog");
+  const connectPlayground = requirements.find(({ root }) => basename(root) === "connect-playground");
+  const connectApi = requirements.find(({ root }) => basename(root) === "connect-api");
   assert.ok(terminal);
-  assert.deepEqual(terminal.requiredFiles, ["node_modules/typescript/bin/tsc"]);
+  assert.deepEqual(terminal.requiredFiles, [
+    "node_modules/streamdown/package.json",
+    "node_modules/typescript/bin/tsc",
+  ]);
   assert.ok(web);
   assert.deepEqual(web.requiredFiles, [
     "node_modules/accounts/package.json",
     "node_modules/wrangler/bin/wrangler.js",
   ]);
-  assert.equal(requirements.length, 4);
+  assert.deepEqual(connectDialog?.requiredFiles, ["node_modules/wrangler/bin/wrangler.js"]);
+  assert.deepEqual(connectPlayground?.requiredFiles, ["node_modules/wrangler/bin/wrangler.js"]);
+  assert.deepEqual(connectApi?.requiredFiles, ["node_modules/wrangler/bin/wrangler.js"]);
+  assert.equal(requirements.length, 7);
 });
 
 test("completed one-shot commands surrender their process-group capabilities", async () => {
@@ -852,24 +863,64 @@ test("local development origin is the canonical loopback HTTP authority", () => 
   }
 });
 
-test("local development exposes one stable HTTPS identity and shared state path", () => {
-  assert.equal(localDevelopmentPublicOrigin().origin, "https://nanocodex.local");
+test("local development gives the primary checkout and worktrees stable isolated identities", () => {
+  const primary = localDevelopmentInstance("/Users/example/nanocodex", { primary: true });
+  const worktree = localDevelopmentInstance("/Users/example/nanocodex/.worktrees/passkey-fix");
+  assert.deepEqual(primary, {
+    composeProject: "nanocodex-dev",
+    defaultOrigin: "http://127.0.0.1:5173",
+    id: "main",
+    playgroundOrigin: "https://playground.nanocodex.local",
+    primary: true,
+    publicOrigin: "https://nanocodex.local",
+  });
+  assert.match(worktree.id, /^passkey-fix-[a-f0-9]{6}$/);
+  assert.equal(worktree.primary, false);
+  assert.equal(worktree.publicOrigin, `https://${worktree.id}.nanocodex.local`);
+  assert.equal(worktree.playgroundOrigin, `https://playground-${worktree.id}.nanocodex.local`);
+  assert.equal(worktree.composeProject, `nanocodex-dev-${worktree.id}`);
+  assert.match(worktree.defaultOrigin, /^http:\/\/127\.0\.0\.1:[2-4][0-9]{4}$/);
+  assert.equal(
+    localDevelopmentInstance("/tmp/other", { requestedName: "review-v2" }).id,
+    "review-v2",
+  );
+
+  assert.equal(localDevelopmentPublicOrigin(primary.publicOrigin).origin, "https://nanocodex.local");
+  assert.equal(
+    localDevelopmentPublicOrigin(worktree.publicOrigin).origin,
+    worktree.publicOrigin,
+  );
   assert.equal(
     localDevelopmentBrowserOrigin(localDevelopmentOrigin("http://127.0.0.1:5273")).origin,
     "http://nanocodex.localhost:5273",
   );
   assert.equal(
-    localDevelopmentStatePath("/Users/example"),
+    localDevelopmentBrowserOrigin(localDevelopmentOrigin("http://127.0.0.1:5273"), "review-v2").origin,
+    "http://review-v2.nanocodex.localhost:5273",
+  );
+  assert.equal(
+    localDevelopmentBrowserPlaygroundOrigin(
+      localDevelopmentOrigin("http://127.0.0.1:5273"),
+      "review-v2",
+    ).origin,
+    "http://playground-review-v2.nanocodex.localhost:5273",
+  );
+  assert.equal(
+    localDevelopmentStatePath("/Users/example", primary.id),
     "/Users/example/.nanocodex/web-development",
+  );
+  assert.equal(
+    localDevelopmentStatePath("/Users/example", worktree.id),
+    `/Users/example/.nanocodex/web-development/instances/${worktree.id}`,
   );
   for (const invalid of [
     "http://nanocodex.local",
     "https://nanocodex.local:8443",
-    "https://other.nanocodex.local",
+    "https://nanocodex.other.local",
   ]) {
     assert.throws(
       () => localDevelopmentPublicOrigin(invalid),
-      /must be https:\/\/nanocodex\.local/,
+      /must be HTTPS under nanocodex\.local/,
     );
   }
 });
@@ -888,10 +939,15 @@ test("OrbStack owns the canonical HTTPS gateway without receiving provider crede
   const launch = orbStackGatewayChildLaunch(
     { PATH: "/bin", OPENAI_API_KEY: "must-not-cross" },
     localDevelopmentOrigin("http://127.0.0.1:5273"),
+    localDevelopmentPublicOrigin("https://review.nanocodex.local"),
+    localDevelopmentPublicOrigin("https://playground-review.nanocodex.local"),
+    "nanocodex-dev-review",
   );
   assert.equal(launch.command, "docker");
   assert.deepEqual(launch.options.env, {
+    NANOCODEX_DEV_HOST: "review.nanocodex.local",
     NANOCODEX_DEV_PORT: "5273",
+    NANOCODEX_PLAYGROUND_HOST: "playground-review.nanocodex.local",
     PATH: "/bin",
   });
   assert.equal(launch.arguments.includes("--force-recreate"), true);
@@ -899,6 +955,8 @@ test("OrbStack owns the canonical HTTPS gateway without receiving provider crede
     command: "docker",
     arguments: [
       "compose",
+      "--project-name",
+      "nanocodex-dev-review",
       "--file",
       fileURLToPath(new URL("../docker-compose.dev.yml", import.meta.url)),
       "down",
@@ -906,7 +964,12 @@ test("OrbStack owns the canonical HTTPS gateway without receiving provider crede
     ],
     options: {
       cwd: resolve(fileURLToPath(new URL("..", import.meta.url))),
-      env: { NANOCODEX_DEV_PORT: "5273", PATH: "/bin" },
+      env: {
+        NANOCODEX_DEV_HOST: "review.nanocodex.local",
+        NANOCODEX_DEV_PORT: "5273",
+        NANOCODEX_PLAYGROUND_HOST: "playground-review.nanocodex.local",
+        PATH: "/bin",
+      },
     },
   });
 
@@ -918,25 +981,31 @@ test("OrbStack owns the canonical HTTPS gateway without receiving provider crede
   );
 });
 
-test("the shared local state admits only one canonical HTTPS owner", async () => {
+test("each instance state admits one owner without blocking another instance", async () => {
   const directory = await mkdtemp(join(tmpdir(), "nanocodex-development-lease-"));
   try {
-    await chmod(directory, 0o755);
-    const first = await acquireLocalDevelopmentLease(directory, {
+    const firstPath = join(directory, "first");
+    const secondPath = join(directory, "second");
+    const first = await acquireLocalDevelopmentLease(firstPath, {
       currentPid: 101,
       isProcessAlive: () => false,
     });
-    assert.equal((await stat(directory)).mode & 0o777, 0o700);
+    const independent = await acquireLocalDevelopmentLease(secondPath, {
+      currentPid: 202,
+      isProcessAlive: () => false,
+    });
+    assert.equal((await stat(firstPath)).mode & 0o777, 0o700);
     await assert.rejects(
-      acquireLocalDevelopmentLease(directory, {
-        currentPid: 202,
+      acquireLocalDevelopmentLease(firstPath, {
+        currentPid: 303,
         isProcessAlive: (pid) => pid === 101,
       }),
       /already running as process 101/,
     );
+    await independent.release();
     await first.release();
-    const second = await acquireLocalDevelopmentLease(directory, {
-      currentPid: 202,
+    const second = await acquireLocalDevelopmentLease(firstPath, {
+      currentPid: 303,
       isProcessAlive: () => false,
     });
     await second.release();

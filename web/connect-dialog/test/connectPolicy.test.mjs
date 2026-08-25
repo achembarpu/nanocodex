@@ -18,6 +18,8 @@ test("local development origins include the canonical OrbStack HTTPS domain", ()
   assert.equal(isLocalDevelopmentOrigin("https://nanocodex.local"), true);
   assert.equal(isLocalDevelopmentOrigin("https://connect.nanocodex.local"), true);
   assert.equal(isLocalDevelopmentOrigin("http://nanocodex.localhost:5173"), true);
+  assert.equal(isLocalDevelopmentOrigin("http://passkey-a.nanocodex.localhost:5173"), true);
+  assert.equal(isLocalDevelopmentOrigin("http://playground-passkey-a.nanocodex.localhost:5173"), true);
   assert.equal(isLocalDevelopmentOrigin("http://nanocodex.local"), false);
   assert.equal(isLocalDevelopmentOrigin("https://notnanocodex.local"), false);
 });
