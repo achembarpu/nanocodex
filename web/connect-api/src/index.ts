@@ -248,6 +248,16 @@ export default {
       if (request.method === "GET" && url.pathname === "/healthz") {
         return cors(Response.json({ status: "ok", mode: "live" }), request);
       }
+      if (request.method === "POST" && url.pathname === "/v1/client-diagnostics") {
+        requirePlaygroundOrigin(request);
+        const encoded = await request.text();
+        if (encoded.length > 256) {
+          return error(request, 413, "diagnostic_too_large", "Client diagnostics are limited to 256 bytes.");
+        }
+        const diagnostic = parseClientDiagnostic(encoded);
+        console.log("connect-client-diagnostic", diagnostic);
+        return cors(new Response(null, { status: 204 }), request);
+      }
       const modelSocket = url.pathname.match(/^\/v1\/grants\/(0x[0-9a-fA-F]{64})\/model$/);
       if (modelSocket) {
         return openGrantModelWebSocket(
@@ -3027,6 +3037,30 @@ function requiredHeader(request: Request, name: string) {
   const value = request.headers.get(name);
   if (!value) throw new Error(`${name} header is required.`);
   return value;
+}
+
+const CLIENT_DIAGNOSTIC_STAGES = new Set([
+  "experience_mounted",
+  "composer_input",
+  "send_pointer",
+  "send_touch",
+  "send_click",
+  "form_submit",
+  "prompt_accepted",
+]);
+
+function parseClientDiagnostic(encoded: string): { stage: string } {
+  let value: unknown;
+  try {
+    value = JSON.parse(encoded);
+  } catch {
+    throw new ApiFailure(400, "invalid_diagnostic", "Client diagnostic JSON is invalid.");
+  }
+  const stage = isRecord(value) && typeof value.stage === "string" ? value.stage : undefined;
+  if (!stage || !CLIENT_DIAGNOSTIC_STAGES.has(stage)) {
+    throw new ApiFailure(400, "invalid_diagnostic", "Client diagnostic stage is invalid.");
+  }
+  return { stage };
 }
 
 function requireOnrampOrigin(request: Request): void {

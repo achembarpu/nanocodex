@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useMemo, useRef } from "react";
+import { useCallback, useEffect, useMemo, useRef, type SyntheticEvent } from "react";
 import type { ConnectAgent, Connection } from "nanocodex/connect";
 import type { AgentControllerEvent } from "nanocodex-react/agent";
 import { createConnectAgentSource } from "nanocodex-react/connect";
 import { AgentTerminalView } from "nanocodex-terminal";
+import { apiHost } from "./config";
 
 export type AppObservation = Readonly<{
   actions: readonly string[];
@@ -31,8 +32,9 @@ export function ConnectAgentExperience({
     () => createConnectAgentSource(agent, { history: visibility.conversationHistory }),
     [agent, visibility.conversationHistory],
   );
+  const inputReported = useRef(false);
   const retryAgent = useCallback(() => {}, []);
-  const recordActivity = useCallback(() => {}, []);
+  const recordActivity = useCallback(() => reportClientStage("prompt_accepted"), []);
   const recordState = useCallback(() => {}, []);
   const observation = useRef<AppObservation>({ actions: [], historyTurns: 0, traceEvents: 0 });
 
@@ -40,6 +42,10 @@ export function ConnectAgentExperience({
     observation.current = { actions: [], historyTurns: 0, traceEvents: 0 };
     onObservation(observation.current);
   }, [agent, onObservation]);
+
+  useEffect(() => {
+    reportClientStage("experience_mounted");
+  }, []);
 
   const observeTerminalEvent = useCallback((terminalEvent: AgentControllerEvent) => {
     let next = observation.current;
@@ -84,7 +90,22 @@ export function ConnectAgentExperience({
   }, [onObservation, visibility.actionSummaries, visibility.conversationHistory, visibility.finalMessages, visibility.rawTraces]);
 
   return (
-    <section className="connect-chat" aria-labelledby="connect-chat-title">
+    <section
+      className="connect-chat"
+      aria-labelledby="connect-chat-title"
+      onClickCapture={(event) => reportSendControl(event, "send_click")}
+      onInputCapture={(event) => {
+        if (inputReported.current || !isComposerTextarea(event.target)) return;
+        inputReported.current = true;
+        reportClientStage("composer_input");
+      }}
+      onPointerDownCapture={(event) => reportSendControl(event, "send_pointer")}
+      onSubmitCapture={() => {
+        inputReported.current = false;
+        reportClientStage("form_submit");
+      }}
+      onTouchStartCapture={(event) => reportSendControl(event, "send_touch")}
+    >
       <header className="connect-chat-header">
         <div>
           <h3 id="connect-chat-title">Nanocodex</h3>
@@ -126,4 +147,26 @@ export function ConnectAgentExperience({
       </div>
     </section>
   );
+}
+
+function reportSendControl(event: SyntheticEvent, stage: "send_click" | "send_pointer" | "send_touch") {
+  const target = event.target;
+  if (!(target instanceof Element)) return;
+  const button = target.closest("button");
+  if (button?.getAttribute("aria-label") === "Send message") reportClientStage(stage);
+}
+
+function isComposerTextarea(target: EventTarget | null): target is HTMLTextAreaElement {
+  return target instanceof HTMLTextAreaElement
+    && target.getAttribute("aria-label") === "Message Nanocodex";
+}
+
+function reportClientStage(stage: string) {
+  const body = JSON.stringify({ stage });
+  if (navigator.sendBeacon?.(`${apiHost}/v1/client-diagnostics`, body)) return;
+  void fetch(`${apiHost}/v1/client-diagnostics`, {
+    method: "POST",
+    body,
+    keepalive: true,
+  }).catch(() => {});
 }
