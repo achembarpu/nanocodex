@@ -19,6 +19,7 @@ import {
 } from "nanocodex-react";
 import { TerminalComposer } from "./TerminalComposer.js";
 import { TerminalTranscriptSurface } from "./TerminalTranscriptSurface.js";
+import type { VoiceTerminalEntry } from "./TerminalTranscriptSurface.js";
 import type {
   AgentStatus,
   AgentTerminalMode,
@@ -77,9 +78,12 @@ export function AgentTerminalView({
   }>();
   const [followTailRequest, setFollowTailRequest] = useState(0);
   const [readySessionId, setReadySessionId] = useState<string>();
+  const [voiceEntries, setVoiceEntries] = useState<readonly VoiceTerminalEntry[]>([]);
   const submittedPrompts = useRef<Array<{ input: string; submittedAt: number }>>([]);
   const pendingRootPrompts = useRef<PromptTiming[]>([]);
   const currentRootPrompt = useRef<PromptTiming | undefined>(undefined);
+  const consumedVoiceTranscripts = useRef(0);
+  const voiceEntrySequence = useRef(0);
   const handleControllerEvent = useCallback((event: AgentControllerEvent) => {
     const observedEvent = observeControllerTiming({
       agentSessionId: agent?.sessionId,
@@ -132,6 +136,9 @@ export function AgentTerminalView({
     agent?.voiceSource ?? (agent as Parameters<typeof useVoice>[0]),
     { ...voiceOptions, enabled: voice && mode !== "hidden" },
   );
+  const maxVoiceEntries = Number.isSafeInteger(maxEntries) && (maxEntries ?? 0) > 0
+    ? maxEntries!
+    : 200;
   const agentStatus: AgentStatus = agentError
     ? "error"
     : agent && readySessionId === agent.sessionId
@@ -139,6 +146,35 @@ export function AgentTerminalView({
       : "starting";
   const terminalRunning = agentStatus === "ready"
     && (controller.running || controller.pendingTurns > 0);
+
+  useEffect(() => {
+    setVoiceEntries([]);
+    consumedVoiceTranscripts.current = 0;
+    voiceEntrySequence.current = 0;
+  }, [agent?.sessionId]);
+
+  useEffect(() => {
+    const transcripts = voiceState.transcripts;
+    if (transcripts.length === 0) {
+      consumedVoiceTranscripts.current = 0;
+      return;
+    }
+    const start = Math.min(consumedVoiceTranscripts.current, transcripts.length);
+    consumedVoiceTranscripts.current = transcripts.length;
+    if (start === transcripts.length) return;
+
+    const afterEntryId = controller.entries.at(-1)?.id;
+    const appended = transcripts.slice(start).map((transcript): VoiceTerminalEntry => ({
+      afterEntryId,
+      id: `voice-${agent?.sessionId ?? "detached"}-${voiceEntrySequence.current++}`,
+      kind: transcript.speaker,
+      source: "voice",
+      streaming: false,
+      text: transcript.text,
+    }));
+    setVoiceEntries((current) => [...current, ...appended].slice(-maxVoiceEntries));
+    setFollowTailRequest((current) => current + 1);
+  }, [agent?.sessionId, controller.entries, maxVoiceEntries, voiceState.transcripts]);
 
   useEffect(() => {
     onStateChange({ error: agentError, retry: retryAgent, status: agentStatus });
@@ -207,6 +243,7 @@ export function AgentTerminalView({
       mode={mode}
       showToolCalls={showToolCalls}
       status={agentStatus}
+      voiceEntries={voiceEntries}
       welcome={welcome}
       onLoadOlder={controller.loadOlder}
     />

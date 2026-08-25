@@ -11,9 +11,12 @@ export function AgentTerminalView({ accessory, agent, agentError, controls, inac
     const [pendingTouchSubmission, setPendingTouchSubmission] = useState();
     const [followTailRequest, setFollowTailRequest] = useState(0);
     const [readySessionId, setReadySessionId] = useState();
+    const [voiceEntries, setVoiceEntries] = useState([]);
     const submittedPrompts = useRef([]);
     const pendingRootPrompts = useRef([]);
     const currentRootPrompt = useRef(undefined);
+    const consumedVoiceTranscripts = useRef(0);
+    const voiceEntrySequence = useRef(0);
     const handleControllerEvent = useCallback((event) => {
         const observedEvent = observeControllerTiming({
             agentSessionId: agent?.sessionId,
@@ -57,6 +60,9 @@ export function AgentTerminalView({ accessory, agent, agentError, controls, inac
         onEvent: handleControllerEvent,
     });
     const voiceState = useVoice(agent?.voiceSource ?? agent, { ...voiceOptions, enabled: voice && mode !== "hidden" });
+    const maxVoiceEntries = Number.isSafeInteger(maxEntries) && (maxEntries ?? 0) > 0
+        ? maxEntries
+        : 200;
     const agentStatus = agentError
         ? "error"
         : agent && readySessionId === agent.sessionId
@@ -64,6 +70,33 @@ export function AgentTerminalView({ accessory, agent, agentError, controls, inac
             : "starting";
     const terminalRunning = agentStatus === "ready"
         && (controller.running || controller.pendingTurns > 0);
+    useEffect(() => {
+        setVoiceEntries([]);
+        consumedVoiceTranscripts.current = 0;
+        voiceEntrySequence.current = 0;
+    }, [agent?.sessionId]);
+    useEffect(() => {
+        const transcripts = voiceState.transcripts;
+        if (transcripts.length === 0) {
+            consumedVoiceTranscripts.current = 0;
+            return;
+        }
+        const start = Math.min(consumedVoiceTranscripts.current, transcripts.length);
+        consumedVoiceTranscripts.current = transcripts.length;
+        if (start === transcripts.length)
+            return;
+        const afterEntryId = controller.entries.at(-1)?.id;
+        const appended = transcripts.slice(start).map((transcript) => ({
+            afterEntryId,
+            id: `voice-${agent?.sessionId ?? "detached"}-${voiceEntrySequence.current++}`,
+            kind: transcript.speaker,
+            source: "voice",
+            streaming: false,
+            text: transcript.text,
+        }));
+        setVoiceEntries((current) => [...current, ...appended].slice(-maxVoiceEntries));
+        setFollowTailRequest((current) => current + 1);
+    }, [agent?.sessionId, controller.entries, maxVoiceEntries, voiceState.transcripts]);
     useEffect(() => {
         onStateChange({ error: agentError, retry: retryAgent, status: agentStatus });
     }, [agentError, agentStatus, onStateChange, retryAgent]);
@@ -102,7 +135,7 @@ export function AgentTerminalView({ accessory, agent, agentError, controls, inac
     const terminal = (_jsx(TerminalTranscriptSurface, { composer: (_jsx(TerminalComposer, { controls: (voice || controls) ? _jsxs(_Fragment, { children: [voice ? _jsx(VoiceControl, { agentReady: agentStatus === "ready", voice: voiceState }) : null, controls?.({ agentReady: agentStatus === "ready" })] }) : undefined, draft: touchDraft, pending: pendingTouchSubmission !== undefined, running: terminalRunning, status: agentStatus, onCancel: cancelTouchTurn, onChange: (value) => {
                 setPendingTouchSubmission(undefined);
                 setTouchDraft(value);
-            }, onSubmit: submitTouchPrompt })), canLoadOlder: controller.canLoadOlder, entries: controller.entries, followTailRequest: followTailRequest, inactiveMessage: unavailableMessage ?? "", isLoadingOlder: controller.isLoadingOlder, mode: mode, showToolCalls: showToolCalls, status: agentStatus, welcome: welcome, onLoadOlder: controller.loadOlder }));
+            }, onSubmit: submitTouchPrompt })), canLoadOlder: controller.canLoadOlder, entries: controller.entries, followTailRequest: followTailRequest, inactiveMessage: unavailableMessage ?? "", isLoadingOlder: controller.isLoadingOlder, mode: mode, showToolCalls: showToolCalls, status: agentStatus, voiceEntries: voiceEntries, welcome: welcome, onLoadOlder: controller.loadOlder }));
     return mode === "full" ? (_jsxs("div", { className: "agent-terminal-workspace", children: [terminal, accessory?.({ agentReady: agentStatus === "ready", submit: submitAccessoryPrompt })] })) : terminal;
 }
 function VoiceControl({ agentReady, voice, }) {

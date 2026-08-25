@@ -67,6 +67,13 @@
   color: var(--terminal-muted, #6b6b6b);
 }
 
+[data-source="voice"] > .agent-terminal-entry-label {
+  font-size: 10px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
 .agent-terminal-markdown :where(h1, h2, h3, p, ul, ol, pre, blockquote, table) {
   margin: 0;
 }

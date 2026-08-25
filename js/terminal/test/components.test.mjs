@@ -7,6 +7,7 @@ import {
   AgentTerminalView,
   TerminalComposer,
   TerminalTranscriptSurface,
+  interleaveTranscriptEntries,
   terminalComposerAction,
 } from "../dist/index.js";
 
@@ -185,4 +186,113 @@ test("transcript renders semantic reasoning, plans, and nested tools", async () 
   })));
   assert.equal(renderer.root.findAllByType("header").length, 0);
   await act(async () => renderer.unmount());
+});
+
+test("voice transcripts interleave with durable entries", async () => {
+  const entries = [
+    { id: "before", kind: "assistant", text: "Ready", streaming: false },
+    { id: "prompt", kind: "user", text: "ship the release" },
+    { id: "result", kind: "assistant", text: "Shipped", streaming: false },
+  ];
+  const voiceEntries = [
+    {
+      afterEntryId: "before",
+      id: "voice-user",
+      kind: "user",
+      source: "voice",
+      streaming: false,
+      text: "ship   the release",
+    },
+    {
+      afterEntryId: "result",
+      id: "voice-assistant",
+      kind: "assistant",
+      source: "voice",
+      streaming: false,
+      text: "All done",
+    },
+  ];
+  assert.deepEqual(
+    interleaveTranscriptEntries(entries, voiceEntries).map((entry) => entry.id),
+    ["before", "voice-user", "prompt", "result", "voice-assistant"],
+  );
+  assert.deepEqual(
+    interleaveTranscriptEntries(entries, [{ ...voiceEntries[0], afterEntryId: "prompt" }])
+      .map((entry) => entry.id),
+    ["before", "prompt", "voice-user", "result"],
+  );
+  assert.deepEqual(
+    interleaveTranscriptEntries([entries[2]], [{ ...voiceEntries[0], afterEntryId: "expired" }])
+      .map((entry) => entry.id),
+    ["result"],
+  );
+
+  let renderer;
+  await act(async () => {
+    renderer = TestRenderer.create(React.createElement(TerminalTranscriptSurface, {
+      canLoadOlder: false,
+      composer: null,
+      entries,
+      inactiveMessage: "",
+      isLoadingOlder: false,
+      mode: "full",
+      status: "ready",
+      voiceEntries,
+      onLoadOlder: async () => false,
+    }), {
+      createNodeMock(element) {
+        return element.type === "div"
+          ? { clientHeight: 300, firstElementChild: null, scrollHeight: 600, scrollTop: 0 }
+          : {};
+      },
+    });
+  });
+  assert.equal(renderer.root.findAllByProps({ "data-source": "voice" }).length, 2);
+  assert.deepEqual(
+    renderer.root.findAllByProps({ className: "agent-terminal-entry-label" })
+      .map((label) => label.children.join("")),
+    ["voice", "voice"],
+  );
+  await act(async () => renderer.unmount());
+});
+
+test("durable realtime handoffs project spoken history instead of internal markup", () => {
+  const delegation = {
+    id: "delegation",
+    kind: "user",
+    text: `<realtime_delegation>
+  <input>Continue the task</input>
+  <transcript_delta>user: ship &amp; verify
+assistant: on it</transcript_delta>
+</realtime_delegation>`,
+  };
+  const durable = interleaveTranscriptEntries([delegation], []);
+  assert.deepEqual(
+    durable.map(({ id, kind, text }) => ({ id, kind, text })),
+    [
+      { id: "delegation-voice-0", kind: "user", text: "ship & verify" },
+      { id: "delegation-voice-1", kind: "assistant", text: "on it" },
+    ],
+  );
+  assert.deepEqual(
+    interleaveTranscriptEntries([delegation], [{
+      afterEntryId: "delegation",
+      id: "live-user",
+      kind: "user",
+      source: "voice",
+      streaming: false,
+      text: "ship & verify",
+    }]).map((entry) => entry.id),
+    ["live-user", "delegation-voice-1"],
+  );
+  assert.deepEqual(
+    interleaveTranscriptEntries([{
+      ...delegation,
+      text: `<realtime_delegation>
+  <input>Continue the task</input>
+  <transcript_delta>…retained transcript tail</transcript_delta>
+</realtime_delegation>`,
+    }], []).map(({ kind, text }) => ({ kind, text })),
+    [{ kind: "assistant", text: "…retained transcript tail" }],
+  );
 });
