@@ -19,6 +19,7 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
   let nextSourceId = 1;
   let nextCallId = 1;
   const toolByName = new Map();
+  const subagentsBySession = new Map();
 
   function addTools(configuration = {}) {
     const added = {};
@@ -62,6 +63,7 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
         callId,
         model,
         signal: controller.signal,
+        subagent: subagentsBySession.get(sessionId),
       });
       return encodeToolOutput(
         outputBody(result),
@@ -154,11 +156,12 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
         try {
           controller.signal.throwIfAborted();
           result = await admission.invoke(name, input, {
-              sessionId,
-              parentCallId,
-              callId,
-              model,
-              signal: controller.signal,
+            sessionId,
+            parentCallId,
+            callId,
+            model,
+            signal: controller.signal,
+            subagent: subagentsBySession.get(sessionId),
           });
         } catch (error) {
           const message = errorMessage(error);
@@ -341,6 +344,7 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
 
   function releaseSession(sessionId) {
     stores.delete(sessionId);
+    subagentsBySession.delete(sessionId);
     router.releaseSession(sessionId);
     closeCodeObservations(sessionId);
   }
@@ -350,6 +354,7 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
       execution.controller.abort(new Error(CANCELLATION_MESSAGE));
     }
     stores.clear();
+    subagentsBySession.clear();
     closeCodeObservations();
     return ownsRouter ? router.reset() : undefined;
   }
@@ -383,6 +388,9 @@ export function createCodeRuntime(toolConfiguration = {}, extras = {}) {
     executeCode,
     executeCodeObserved,
     executeTool,
+    bindSubagentSession(sessionId, context) {
+      subagentsBySession.set(sessionId, Object.freeze({ ...context }));
+    },
     nextCodeUpdate,
     cancel,
     toolDefinitions: () => JSON.stringify(stableDefinitions()),

@@ -55,6 +55,7 @@ export type {
   Tool,
   ToolConfiguration,
   ToolContext,
+  SubagentToolContext,
   ToolMap,
   Turn,
   TurnResult,
