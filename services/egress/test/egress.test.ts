@@ -1376,7 +1376,7 @@ describe("per-user OAuth connectors", () => {
     });
   }
 
-  it("revokes X credentials before disconnecting and preserves them if revocation fails", async () => {
+  it("makes X revocation idempotent and preserves credentials only for retryable failures", async () => {
     await connect("connector-x-disconnect", "x", "x-code");
     const disconnected = await SELF.fetch(
       "https://broker.test/users/connector-x-disconnect/connectors/x",
@@ -1387,16 +1387,32 @@ describe("per-user OAuth connectors", () => {
       "https://broker.test/users/connector-x-disconnect/connectors",
     )).json()).toMatchObject({ connectors: { x: { connected: false } } });
 
-    await connect("connector-x-revocation-failure", "x", "x-revocation-failure-code");
-    const failed = await SELF.fetch(
-      "https://broker.test/users/connector-x-revocation-failure/connectors/x",
-      { method: "DELETE" },
-    );
-    expect(failed.status).toBe(503);
-    expect(await failed.json()).toEqual({ error: "connector_revocation_failed" });
-    expect(await (await SELF.fetch(
-      "https://broker.test/users/connector-x-revocation-failure/connectors",
-    )).json()).toMatchObject({ connectors: { x: { connected: true } } });
+    for (const code of ["x-partially-revoked-code", "x-already-revoked-code"]) {
+      const user = `connector-${code}`;
+      await connect(user, "x", code);
+      const stale = await SELF.fetch(
+        `https://broker.test/users/${user}/connectors/x`,
+        { method: "DELETE" },
+      );
+      expect(stale.status).toBe(204);
+      expect(await (await SELF.fetch(
+        `https://broker.test/users/${user}/connectors`,
+      )).json()).toMatchObject({ connectors: { x: { connected: false } } });
+    }
+
+    for (const code of ["x-revocation-failure-code", "x-revocation-throttled-code"]) {
+      const user = `connector-${code}`;
+      await connect(user, "x", code);
+      const failed = await SELF.fetch(
+        `https://broker.test/users/${user}/connectors/x`,
+        { method: "DELETE" },
+      );
+      expect(failed.status).toBe(503);
+      expect(await failed.json()).toEqual({ error: "connector_revocation_failed" });
+      expect(await (await SELF.fetch(
+        `https://broker.test/users/${user}/connectors`,
+      )).json()).toMatchObject({ connectors: { x: { connected: true } } });
+    }
   });
 
   it("encrypts tokens, refresh tokens, PKCE verifiers, and OAuth state at rest", async () => {
