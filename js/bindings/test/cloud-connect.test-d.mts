@@ -6,6 +6,7 @@ const client = Client.create({
   dialog: Dialog.memory(),
   transport: Transport.mock(),
 });
+Dialog.popup({ target: "nanocodex-connect", features: "popup=yes" });
 
 const standalone: Promise<Connection> = Actions.connection.connect(client, {
   capabilities: {
@@ -45,6 +46,8 @@ const agentTurn = (await agent).turn.prompt({ input: "Review my pull requests" }
 const agentResult = agentTurn.result();
 void agentResult;
 void voice;
+const localModelTransport = client.model.transport({ connection });
+localModelTransport satisfies import("../browser/Transport.mjs").Transport;
 client.machineUsd.fund({
   accountAddress: connection.accountAddress,
   grantId: connection.grant.id,

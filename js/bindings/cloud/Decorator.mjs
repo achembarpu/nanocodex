@@ -3,6 +3,7 @@ import * as agent from "./actions/agent.mjs";
 import * as connection from "./actions/connection.mjs";
 import * as grant from "./actions/grant.mjs";
 import * as machineUsd from "./actions/machineUsd.mjs";
+import * as model from "./actions/model.mjs";
 import * as mpp from "./actions/mpp.mjs";
 
 export function connectActions() {
@@ -24,6 +25,9 @@ export function connectActions() {
     machineUsd: {
       fund: (options) => machineUsd.fund(client, options),
       getConfig: (options) => machineUsd.getConfig(client, options),
+    },
+    model: {
+      transport: (options) => model.transport(client, options),
     },
     mpp: {
       charge: (options) => mpp.charge(client, options),

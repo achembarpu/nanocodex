@@ -6,6 +6,72 @@ import { Voice } from "../browser/index.mjs";
 import { projectAgentObservations } from "../cloud/actions/agent.mjs";
 import { connectionFromWire } from "../cloud/internal.mjs";
 import { managedBrowserVoiceTransport } from "../managed/internal.mjs";
+import { resolveResponsesTransport } from "../runtime/responses-transport.mjs";
+
+test("Connect opens a ticketed local WASM model socket without exposing its grant token", async () => {
+  const requests = [];
+  const sockets = [];
+  const expiry = Math.floor(Date.now() / 1_000) + 3_600;
+  const client = Client.create({
+    appId: "atlas-workspace",
+    dialog: Dialog.memory(),
+    provider: { request() { throw new Error("wallet should not be used"); } },
+    transport: Transport.from({
+      key: "ticketed-model",
+      name: "ticketed-model",
+      type: "ticketed-model",
+      setup() {
+        return {
+          baseUrl: "https://connect.example",
+          async request(request) {
+            requests.push(request);
+            return { ticket: "one-time-ticket", expires_in: 60 };
+          },
+        };
+      },
+    }),
+  });
+  client._setSessionToken("grant-session-secret");
+  const connection = connectionFromWire(testConnectionWire({
+    expiry,
+    keyId: "0x1111111111111111111111111111111111111111",
+    capabilities: ["nanocodex.agent", "chatgpt"],
+  }));
+  const OriginalWebSocket = globalThis.WebSocket;
+  globalThis.WebSocket = class {
+    constructor(url) {
+      this.url = String(url);
+      sockets.push(this);
+    }
+  };
+  try {
+    const model = resolveResponsesTransport(client.model.transport({ connection }));
+    const socket = await model.createWebSocket(
+      "wss://api.openai.com/v1/responses",
+      "019fc927-b280-79a7-8445-1b9996ad2fb0",
+      { authorization: "host_managed", turnState: "retained-turn-state" },
+    );
+    assert.strictEqual(socket, sockets[0]);
+  } finally {
+    globalThis.WebSocket = OriginalWebSocket;
+  }
+
+  assert.deepEqual(requests, [{
+    method: "POST",
+    path: `/v1/grants/${connection.grant.id}/model/ticket`,
+    body: {
+      session_id: "019fc927-b280-79a7-8445-1b9996ad2fb0",
+      turn_state: "retained-turn-state",
+    },
+    headers: { authorization: "Bearer grant-session-secret" },
+  }]);
+  const socketUrl = new URL(sockets[0].url);
+  assert.equal(socketUrl.origin, "wss://connect.example");
+  assert.equal(socketUrl.pathname, `/v1/grants/${connection.grant.id}/model`);
+  assert.equal(socketUrl.searchParams.get("session_id"), "019fc927-b280-79a7-8445-1b9996ad2fb0");
+  assert.equal(socketUrl.searchParams.get("ticket"), "one-time-ticket");
+  assert.equal(socketUrl.href.includes("grant-session-secret"), false);
+});
 
 test("Connect opens its grant-provisioned durable agent without a redundant state probe", async () => {
   const requests = [];
@@ -356,6 +422,43 @@ test("Connect reselects a reusable access key when the passkey account changes",
     key_id: selectedKey,
     expiry,
   });
+});
+
+test("Connect canonicalizes empty access-key policy before the wallet signs it", async () => {
+  const expiry = Math.floor(Date.now() / 1_000) + 3_600;
+  let walletRequest;
+  const client = Client.create({
+    appId: "empty-policy-workspace",
+    accessKey: { authorize: { expiry, limits: [], scopes: [] } },
+    dialog: Dialog.memory(),
+    provider: {
+      async request(request) {
+        walletRequest = request;
+        return {
+          accounts: [{
+            address: "0x8ba1f109551bd432803012645ac136ddd64dba72",
+            capabilities: {
+              auth: { approval_id: "approval-empty-policy" },
+              keyAuthorization: {
+                address: "0x1111111111111111111111111111111111111111",
+                keyId: "0x1111111111111111111111111111111111111111",
+                keyType: "p256",
+                chainId: 4217n,
+                expiry,
+                witness: `0x${"22".repeat(32)}`,
+              },
+              personalSign: { keyAuthorization: "0x1234" },
+            },
+          }],
+        };
+      },
+    },
+    transport: Transport.mock(),
+  });
+
+  await client.connection.connect();
+
+  assert.deepEqual(walletRequest.params[0].capabilities.authorizeAccessKey, { expiry });
 });
 
 test("Connect persists, validates, and clears an app-scoped grant session", async () => {

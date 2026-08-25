@@ -46,6 +46,17 @@ export async function connect(client, options) {
   client.dialog.showWallet?.();
   let connected = false;
   try {
+    const activeAccount = activeAccountAddress(client.provider);
+    const reusable = activeAccount
+      ? await registeredAccessKey(client, activeAccount, options.signal)
+      : undefined;
+    // Reuse only keys already registered with the Connect control plane. Older
+    // browser-only keys are replaced in this same passkey ceremony, after which
+    // both the private signer and public grant record remain durable.
+    const authorizeAccessKey = options.capabilities?.authorizeAccessKey
+      ?? (reusable
+        ? undefined
+        : freshAccessKeyAuthorization(client.accessKey?.authorize));
     const result = await client.provider.request({
       method: "wallet_connect",
       params: [{
@@ -243,13 +254,17 @@ function persistedChannelAuthorities(accountAddress) {
 }
 
 function serializeAuthorizeAccessKey(value) {
+  const { limits, scopes, ...authorization } = value;
   return {
-    ...value,
-    chainId: value.chainId === undefined ? undefined : toHex(value.chainId),
-    limits: value.limits?.map((limit) => ({
-      ...limit,
-      limit: toHex(limit.limit),
-    })),
+    ...authorization,
+    ...(value.chainId === undefined ? {} : { chainId: toHex(value.chainId) }),
+    ...(limits?.length ? {
+      limits: limits.map((limit) => ({
+        ...limit,
+        limit: toHex(limit.limit),
+      })),
+    } : {}),
+    ...(scopes?.length ? { scopes } : {}),
   };
 }
 

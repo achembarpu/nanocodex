@@ -38,13 +38,13 @@ export type ConnectionRequest = Readonly<{
       recipients?: readonly `0x${string}`[] | undefined;
     }>[];
   }>;
-  mpp: Readonly<{
+  mpp?: Readonly<{
     token: `0x${string}`;
     symbol: string;
     limit: bigint;
     period: number;
     maxPerRequest: bigint;
-  }>;
+  }> | undefined;
 }>;
 
 export type FundingRequest = Readonly<{
@@ -95,6 +95,14 @@ export function iframe(options?: Readonly<{
   key?: string | undefined;
   name?: string | undefined;
 }>): Dialog<"iframe">;
+
+export function popup(options?: Readonly<{
+  host?: string | undefined;
+  key?: string | undefined;
+  name?: string | undefined;
+  target?: string | undefined;
+  features?: string | undefined;
+}>): Dialog<"popup">;
 
 export function memory(options?: Readonly<{
   host?: string | undefined;

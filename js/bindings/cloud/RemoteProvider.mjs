@@ -16,7 +16,7 @@ export function create(parameters) {
         host,
         target: ({ host: targetHost }) => {
           const target = parameters.target({ host: targetHost });
-          if (!target) throw new Error("The Nanocodex Connect iframe is unavailable.");
+          if (!target) throw new Error("The Nanocodex Connect wallet host is unavailable.");
           return target;
         },
       })],
@@ -83,6 +83,6 @@ function walletHost(host) {
   if (typeof window === "undefined") return host;
   const url = new URL(host);
   url.searchParams.set("origin", window.location.origin);
-  url.searchParams.set("mode", "iframe");
+  if (!url.searchParams.has("mode")) url.searchParams.set("mode", "iframe");
   return url.toString();
 }

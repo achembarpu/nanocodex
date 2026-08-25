@@ -3,6 +3,7 @@ import { DialogBusyError, UserRejectedRequestError } from "./Errors.mjs";
 export const DEFAULT_HOST = "https://nanocodex.gakonst.workers.dev/connect-dialog/";
 
 const iframeInstances = new Map();
+const popupInstances = new Map();
 
 export function from(parameters) {
   if (!parameters || typeof parameters !== "object") {
@@ -38,6 +39,31 @@ export function iframe(options = {}) {
       if (!instance) {
         instance = createIframeInstance(host);
         iframeInstances.set(host, instance);
+      }
+      return instance;
+    },
+  });
+}
+
+export function popup(options = {}) {
+  const host = new URL(options.host ?? DEFAULT_HOST).toString();
+  return from({
+    key: options.key ?? "nanocodex-popup",
+    name: options.name ?? "Nanocodex Connect",
+    type: "popup",
+    setup() {
+      if (typeof window === "undefined") {
+        return {
+          host,
+          async open() {
+            throw new Error("The Nanocodex popup dialog requires a browser");
+          },
+        };
+      }
+      let instance = popupInstances.get(host);
+      if (!instance) {
+        instance = createPopupInstance(host, options);
+        popupInstances.set(host, instance);
       }
       return instance;
     },
@@ -286,6 +312,47 @@ function createIframeInstance(host) {
       return walletFrame?.contentWindow;
     },
   };
+}
+
+function createPopupInstance(host, options) {
+  const source = walletUrl(host, "popup");
+  const targetName = options.target ?? "nanocodex-connect";
+  const features = options.features ?? "popup=yes,width=440,height=720,resizable=yes,scrollbars=yes";
+  let walletWindow;
+
+  function showWallet() {
+    if (!walletWindow || walletWindow.closed) {
+      walletWindow = window.open(source, targetName, features);
+    }
+    if (!walletWindow) {
+      throw new Error("Nanocodex Connect was blocked. Allow the popup and try again.");
+    }
+    walletWindow.focus?.();
+  }
+
+  function hideWallet() {
+    if (walletWindow && !walletWindow.closed) walletWindow.close();
+    walletWindow = undefined;
+  }
+
+  return {
+    host: source,
+    async open() {
+      throw new Error("The Nanocodex popup supports account authorization only");
+    },
+    showWallet,
+    hideWallet,
+    walletTarget() {
+      return walletWindow && !walletWindow.closed ? walletWindow : undefined;
+    },
+  };
+}
+
+function walletUrl(host, mode) {
+  const url = new URL(host);
+  if (!url.searchParams.has("origin")) url.searchParams.set("origin", window.location.origin);
+  url.searchParams.set("mode", mode);
+  return url.toString();
 }
 
 function requiredString(value, label) {

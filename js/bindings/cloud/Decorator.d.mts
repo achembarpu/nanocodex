@@ -3,6 +3,7 @@ import type { create as createAgent } from "./actions/agent.mjs";
 import type { connect, disconnect, reconnect } from "./actions/connection.mjs";
 import type { revoke } from "./actions/grant.mjs";
 import type { fund, getConfig } from "./actions/machineUsd.mjs";
+import type { transport as modelTransport } from "./actions/model.mjs";
 import type { charge, getBalance } from "./actions/mpp.mjs";
 import type { Client } from "./Client.mjs";
 
@@ -19,6 +20,7 @@ export type ConnectActions = {
     fund(options: fund.Options): fund.ReturnType;
     getConfig(options?: getConfig.Options | undefined): getConfig.ReturnType;
   };
+  model: { transport(options: modelTransport.Options): modelTransport.ReturnType };
   mpp: {
     charge(options: charge.Options): charge.ReturnType;
     getBalance(options: getBalance.Options): getBalance.ReturnType;
