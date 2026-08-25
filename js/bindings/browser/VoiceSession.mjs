@@ -330,15 +330,20 @@ export class BrowserVoiceSession {
   }
 }
 
-async function capturePreferredMicrophone(selectPhysicalInput) {
-  let microphone = await navigator.mediaDevices.getUserMedia({
-    audio: {
-      autoGainControl: true,
-      channelCount: 1,
-      echoCancellation: true,
-      noiseSuppression: true,
-    },
-  });
+export async function capturePreferredMicrophone(selectPhysicalInput) {
+  let microphone;
+  try {
+    microphone = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        autoGainControl: true,
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true,
+      },
+    });
+  } catch (cause) {
+    throw microphoneCaptureError(cause);
+  }
   const current = microphone.getAudioTracks()[0];
   if (!current?.label || !navigator.mediaDevices.enumerateDevices) return microphone;
   const devices = await navigator.mediaDevices.enumerateDevices();
@@ -355,6 +360,25 @@ async function capturePreferredMicrophone(selectPhysicalInput) {
     }
   }
   return microphone;
+}
+
+function microphoneCaptureError(cause) {
+  const name = cause && typeof cause === "object" ? cause.name : undefined;
+  if (name === "NotAllowedError" || name === "SecurityError") {
+    const policy = document.permissionsPolicy ?? document.featurePolicy;
+    const embedded = window.top !== window;
+    if (embedded && policy?.allowsFeature?.("microphone") === false) {
+      return new Error('Microphone access is blocked by this embed. The host iframe must allow="microphone".', { cause });
+    }
+    return new Error("Microphone access is blocked for this site. Allow it in your browser settings, then retry.", { cause });
+  }
+  if (name === "NotFoundError" || name === "DevicesNotFoundError") {
+    return new Error("No microphone was found. Connect a microphone, then retry.", { cause });
+  }
+  if (name === "NotReadableError" || name === "TrackStartError" || name === "AbortError") {
+    return new Error("The microphone is unavailable. Close other apps using it, then retry.", { cause });
+  }
+  return cause;
 }
 
 function realtimeSidebandUrl(callId, sessionId) {

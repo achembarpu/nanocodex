@@ -22,7 +22,11 @@ test("build-only Vite metadata is excluded from deployed assets", async () => {
 });
 
 test("the host app may capture its microphone for browser voice", async () => {
-  const headers = await readFile(new URL("../public/_headers", import.meta.url), "utf8");
+  const [headers, connectHeaders] = await Promise.all([
+    readFile(new URL("../public/_headers", import.meta.url), "utf8"),
+    readFile(new URL("../connect-playground/public/_headers", import.meta.url), "utf8"),
+  ]);
 
   assert.match(headers, /Permissions-Policy: camera=\(\), microphone=\(self\), geolocation=\(\), usb=\(\)/);
+  assert.match(connectHeaders, /Permissions-Policy: camera=\(\), microphone=\(self\), geolocation=\(\), usb=\(\)/);
 });

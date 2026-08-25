@@ -1,0 +1,6 @@
+/*
+  Permissions-Policy: camera=(), microphone=(self), geolocation=(), usb=()
+  Referrer-Policy: no-referrer
+  Strict-Transport-Security: max-age=31536000
+  X-Content-Type-Options: nosniff
+

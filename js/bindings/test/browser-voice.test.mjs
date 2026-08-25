@@ -3,7 +3,11 @@ import { test } from "node:test";
 
 import { agentActions } from "../actions/index.mjs";
 import { Actions, Voice } from "../browser/index.mjs";
-import { BrowserVoiceSession, SpeakerPlayback } from "../browser/VoiceSession.mjs";
+import {
+  BrowserVoiceSession,
+  capturePreferredMicrophone,
+  SpeakerPlayback,
+} from "../browser/VoiceSession.mjs";
 import { createAgentClient, defineRuntime } from "../internal.mjs";
 
 test("browser voice exposes Codex's ChatGPT V3 catalog and default", () => {
@@ -105,6 +109,40 @@ test("requests the microphone before waiting for the Rust controller", async () 
     assert.equal(order.some((entry) => Array.isArray(entry) && entry[0] === "track.stop"), true);
   } finally {
     fixture.restore();
+  }
+});
+
+test("explains browser and embed microphone denials", async () => {
+  const previous = {
+    document: Object.getOwnPropertyDescriptor(globalThis, "document"),
+    navigator: Object.getOwnPropertyDescriptor(globalThis, "navigator"),
+    window: Object.getOwnPropertyDescriptor(globalThis, "window"),
+  };
+  const denial = Object.assign(new Error("Permission denied"), { name: "NotAllowedError" });
+  try {
+    Object.defineProperty(globalThis, "navigator", {
+      configurable: true,
+      value: { mediaDevices: { getUserMedia: async () => { throw denial; } } },
+    });
+    globalThis.window = { top: {} };
+    globalThis.document = { permissionsPolicy: { allowsFeature: () => false } };
+    await assert.rejects(
+      capturePreferredMicrophone(async () => undefined),
+      /host iframe must allow="microphone"/,
+    );
+
+    const topWindow = {};
+    topWindow.top = topWindow;
+    globalThis.window = topWindow;
+    globalThis.document = { permissionsPolicy: { allowsFeature: () => true } };
+    await assert.rejects(
+      capturePreferredMicrophone(async () => undefined),
+      /Allow it in your browser settings, then retry/,
+    );
+  } finally {
+    restoreGlobal("document", previous.document);
+    restoreGlobal("navigator", previous.navigator);
+    restoreGlobal("window", previous.window);
   }
 });
 
@@ -419,4 +457,9 @@ async function waitFor(predicate) {
     await new Promise((resolve) => setTimeout(resolve, 0));
   }
   throw new Error("condition was not reached");
+}
+
+function restoreGlobal(name, descriptor) {
+  if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+  else delete globalThis[name];
 }
