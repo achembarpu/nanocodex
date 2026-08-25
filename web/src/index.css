@@ -542,10 +542,6 @@ body.agent-viewport-locked {
   padding: 14px;
 }
 
-.account-connections {
-  border-bottom: 1px solid var(--border-soft);
-}
-
 .account-provider-row {
   display: flex;
   gap: 10px;
@@ -568,11 +564,19 @@ body.agent-viewport-locked {
 }
 
 .profile-connectors {
-  border-bottom: 1px solid var(--border-soft);
+  display: grid;
+  gap: 12px;
 }
 
 .profile-connectors--locked .connector-row {
   opacity: 0.55;
+}
+
+.account-api-keys {
+  display: grid;
+  gap: 12px;
+  padding-top: 14px;
+  border-top: 1px solid var(--border-soft);
 }
 
 .connector-row > div {

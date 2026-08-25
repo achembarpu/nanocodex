@@ -4,6 +4,7 @@ import test from "node:test";
 
 const accountMenu = source("../src/AccountMenu.tsx");
 const accountSession = source("../src/AccountSession.tsx");
+const profileConnectors = source("../src/ProfileConnectors.tsx");
 
 test("parallel unauthorized account requests share the current session refresh", () => {
   assert.match(accountSession, /const refreshRequest = useRef<Promise<void> \| undefined>\(undefined\)/);
@@ -36,6 +37,16 @@ test("the account trigger remains stable while session data is unavailable", () 
     /<button[\s\S]*?className="account-menu-trigger"[\s\S]*?<\/button>\s*\{open && session\.status !== "checking" \? \(/,
   );
   assert.doesNotMatch(accountMenu, /loading|spinner|skeleton/i);
+});
+
+test("connections and API keys share one account surface", () => {
+  assert.match(
+    accountMenu,
+    /<section className="api-key-panel account-profile-content"[\s\S]*?<h2 id="connections-heading">Connections<[\s\S]*?<ProfileConnectors[\s\S]*?<strong>ChatGPT<[\s\S]*?<div className="account-api-keys"/,
+  );
+  assert.match(accountMenu, /<h2 id="api-key-heading">API keys<[\s\S]*?<strong>OpenAI</);
+  assert.match(profileConnectors, /\{children\}[\s\S]*?connectorDefinitions\.map/);
+  assert.doesNotMatch(accountMenu, /Model connection|>Refresh<\/button>/);
 });
 
 function source(path: string): string {

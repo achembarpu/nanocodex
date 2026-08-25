@@ -406,88 +406,93 @@ export function AccountMenu() {
                 </div>
               ) : null}
 
-              <ProfileConnectors
-                accountId={session.account.id}
-                key={session.account.id}
-                requiresLogin={!session.account.persistent}
-                refreshSession={refreshSession}
-              />
-
-              {credentials ? (
-                <section className="api-key-panel account-connections" aria-labelledby="connections-heading">
-                  <div className="api-key-heading">
-                    <div>
-                      <h2 id="connections-heading">Model connection</h2>
-                      <p>Your agents use the active connection through the private broker.</p>
-                    </div>
-                    <button type="button" onClick={() => void loadCredentials()}>Refresh</button>
+              <section className="api-key-panel account-profile-content" aria-labelledby="connections-heading">
+                <div className="api-key-heading">
+                  <div>
+                    <h2 id="connections-heading">Connections</h2>
+                    <p>Services your agents can use through the private broker.</p>
                   </div>
-                  {credentialError ? <div className="account-failure" role="alert"><p>{credentialError}</p></div> : null}
-                  <div className="account-provider-row">
-                    <div>
-                      <strong>ChatGPT</strong>
-                      <span>{credentials.chatgpt.connected
-                        ? `Connected${credentials.active === "chatgpt" ? " · active" : ""}`
-                        : "Not connected"}</span>
-                    </div>
-                    {credentials.chatgpt.connected ? (
-                      <button type="button" onClick={() => void disconnectProvider("chatgpt")}>Disconnect</button>
-                    ) : (
-                      <button type="button" onClick={() => void startChatGpt()}>Connect ChatGPT</button>
-                    )}
-                  </div>
-                  {credentials.chatgpt.login ? (
-                    <div className="new-api-key" role="status">
-                      <strong>Finish ChatGPT sign-in</strong>
-                      <p>Enter this code on the OpenAI page, then leave this panel open.</p>
-                      <code>{credentials.chatgpt.login.userCode}</code>
-                      <a href={credentials.chatgpt.login.verificationUrl} target="_blank" rel="noreferrer">Open sign-in page</a>
-                    </div>
-                  ) : null}
-                  <div className="account-provider-row">
-                    <div>
-                      <strong>OpenAI API key</strong>
-                      <span>{credentials.openai.connected
-                        ? `Connected${credentials.active === "openai" ? " · active" : ""}`
-                        : "Not connected"}</span>
-                    </div>
-                    {credentials.openai.connected ? (
-                      <button type="button" onClick={() => void disconnectProvider("openai")}>Disconnect</button>
-                    ) : null}
-                  </div>
-                  {!credentials.openai.connected ? (
-                    <form className="api-key-create" onSubmit={(event) => void connectOpenAi(event)}>
-                      <label htmlFor="openai-key">Bring your OpenAI key</label>
-                      <div>
-                        <input
-                          id="openai-key"
-                          type="password"
-                          autoComplete="off"
-                          value={openAiKey}
-                          placeholder="sk-…"
-                          onChange={(event) => setOpenAiKey(event.target.value)}
-                        />
-                        <button type="submit" disabled={!openAiKey.trim() || providerOperation !== null}>Connect</button>
-                      </div>
-                    </form>
-                  ) : null}
-                </section>
-              ) : credentialError ? (
-                <div className="account-failure" role="alert">
-                  <p>{credentialError}</p>
-                  <button type="button" onClick={() => void loadCredentials()}>Retry</button>
                 </div>
-              ) : null}
 
-              {keys ? (
-                <section className="api-key-panel" aria-labelledby="api-key-heading">
+                {credentialError ? (
+                  <div className="account-failure" role="alert">
+                    <p>{credentialError}</p>
+                    <button type="button" onClick={() => void loadCredentials()}>Retry</button>
+                  </div>
+                ) : null}
+
+                <ProfileConnectors
+                  accountId={session.account.id}
+                  key={session.account.id}
+                  requiresLogin={!session.account.persistent}
+                  refreshSession={refreshSession}
+                >
+                  {credentials ? (
+                    <>
+                      <div className="account-provider-row">
+                        <div>
+                          <strong>ChatGPT</strong>
+                          <span>{credentials.chatgpt.connected
+                            ? `Connected${credentials.active === "chatgpt" ? " · active" : ""}`
+                            : "Not connected"}</span>
+                        </div>
+                        {credentials.chatgpt.connected ? (
+                          <button type="button" onClick={() => void disconnectProvider("chatgpt")}>Disconnect</button>
+                        ) : (
+                          <button type="button" onClick={() => void startChatGpt()}>Connect ChatGPT</button>
+                        )}
+                      </div>
+                      {credentials.chatgpt.login ? (
+                        <div className="new-api-key" role="status">
+                          <strong>Finish ChatGPT sign-in</strong>
+                          <p>Enter this code on the OpenAI page, then leave this panel open.</p>
+                          <code>{credentials.chatgpt.login.userCode}</code>
+                          <a href={credentials.chatgpt.login.verificationUrl} target="_blank" rel="noreferrer">Open sign-in page</a>
+                        </div>
+                      ) : null}
+                    </>
+                  ) : null}
+                </ProfileConnectors>
+
+                <div className="account-api-keys" aria-labelledby="api-key-heading">
                   <div className="api-key-heading">
                     <div>
                       <h2 id="api-key-heading">API keys</h2>
-                      <p>Use keys with the Nanocodex managed API.</p>
+                      <p>Bring an OpenAI key or create one for the Nanocodex managed API.</p>
                     </div>
-                    <button type="button" onClick={() => void loadKeys()}>Refresh</button>
                   </div>
+
+                  {credentials ? (
+                    <>
+                      <div className="account-provider-row">
+                        <div>
+                          <strong>OpenAI</strong>
+                          <span>{credentials.openai.connected
+                            ? `Connected${credentials.active === "openai" ? " · active" : ""}`
+                            : "Not connected"}</span>
+                        </div>
+                        {credentials.openai.connected ? (
+                          <button type="button" onClick={() => void disconnectProvider("openai")}>Disconnect</button>
+                        ) : null}
+                      </div>
+                      {!credentials.openai.connected ? (
+                        <form className="api-key-create" onSubmit={(event) => void connectOpenAi(event)}>
+                          <label htmlFor="openai-key">OpenAI API key</label>
+                          <div>
+                            <input
+                              id="openai-key"
+                              type="password"
+                              autoComplete="off"
+                              value={openAiKey}
+                              placeholder="sk-…"
+                              onChange={(event) => setOpenAiKey(event.target.value)}
+                            />
+                            <button type="submit" disabled={!openAiKey.trim() || providerOperation !== null}>Connect</button>
+                          </div>
+                        </form>
+                      ) : null}
+                    </>
+                  ) : null}
 
                   {keyError ? (
                     <div className="account-failure" role="alert">
@@ -496,7 +501,7 @@ export function AccountMenu() {
                     </div>
                   ) : null}
 
-                  {newKey ? (
+                  {keys && newKey ? (
                     <div className="new-api-key" role="status">
                       <strong>Copy this key now</strong>
                       <p>It won’t be shown again.</p>
@@ -511,21 +516,23 @@ export function AccountMenu() {
                     </div>
                   ) : null}
 
-                  <form className="api-key-create" onSubmit={(event) => void createKey(event)}>
-                    <label htmlFor="api-key-label">New key label</label>
-                    <div>
-                      <input
-                        id="api-key-label"
-                        value={label}
-                        maxLength={120}
-                        placeholder="CLI, CI, or laptop"
-                        onChange={(event) => setLabel(event.target.value)}
-                      />
-                      <button type="submit" disabled={keyOperation !== null}>Create key</button>
-                    </div>
-                  </form>
+                  {keys ? (
+                    <form className="api-key-create" onSubmit={(event) => void createKey(event)}>
+                      <label htmlFor="api-key-label">Nanocodex API key</label>
+                      <div>
+                        <input
+                          id="api-key-label"
+                          value={label}
+                          maxLength={120}
+                          placeholder="CLI, CI, or laptop"
+                          onChange={(event) => setLabel(event.target.value)}
+                        />
+                        <button type="submit" disabled={keyOperation !== null}>Create</button>
+                      </div>
+                    </form>
+                  ) : null}
 
-                  {keys.length ? (
+                  {keys?.length ? (
                     <ul className="api-key-list">
                       {keys.map((key) => (
                         <li key={key.id}>
@@ -546,16 +553,11 @@ export function AccountMenu() {
                         </li>
                       ))}
                     </ul>
-                  ) : (
+                  ) : keys ? (
                     <p className="api-key-empty">No API keys.</p>
-                  )}
-                </section>
-              ) : keyError ? (
-                <div className="account-failure" role="alert">
-                  <p>{keyError}</p>
-                  <button type="button" onClick={() => void loadKeys()}>Retry</button>
+                  ) : null}
                 </div>
-              ) : null}
+              </section>
             </>
           ) : (
             <div className="account-auth-actions">
