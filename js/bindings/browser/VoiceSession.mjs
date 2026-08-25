@@ -59,6 +59,7 @@ export class BrowserVoiceSession {
   #channel;
   #sideband;
   #sidebandUrl;
+  #sidebandCallId;
   #sidebandOpenedAt;
   #sidebandGeneration = 0;
   #microphone;
@@ -145,16 +146,19 @@ export class BrowserVoiceSession {
 
     const call = new AbortController();
     this.#call = call;
-    const response = await fetch(this.#options.callUrl ?? "/api/realtime/calls", {
-      method: "POST",
-      signal: call.signal,
-      credentials: "same-origin",
-      headers: {
-        "content-type": "application/json",
-        "x-nanocodex-request": "1",
-      },
-      body: await core.callBody(sdp),
-    });
+    const body = await core.callBody(sdp);
+    const response = this.#options.call
+      ? await this.#options.call(body, call.signal)
+      : await fetch(this.#options.callUrl ?? "/api/realtime/calls", {
+          method: "POST",
+          signal: call.signal,
+          credentials: "same-origin",
+          headers: {
+            "content-type": "application/json",
+            "x-nanocodex-request": "1",
+          },
+          body,
+        });
     if (!response.ok) throw new Error(await responseError(response, "voice connection failed"));
     const location = response.headers.get("x-nanocodex-realtime-location");
     if (!location) throw new Error("voice connection did not return a Realtime Location");
@@ -163,10 +167,10 @@ export class BrowserVoiceSession {
     await peer.setRemoteDescription({ type: "answer", sdp: completed.sdp });
     if (this.#closed) return;
 
-    const sidebandUrl = this.#options.sidebandUrl
-      ? this.#options.sidebandUrl(completed.call_id, this.#options.sessionId)
-      : await core.sidebandUrl(completed.call_id);
-    this.#sidebandUrl = String(sidebandUrl);
+    this.#sidebandCallId = completed.call_id;
+    this.#sidebandUrl = this.#options.sidebandUrl
+      ? undefined
+      : String(await core.sidebandUrl(completed.call_id));
     await this.#openSideband();
     if (this.#closed) return;
     this.#status(`Voice active (${this.#options.voice}) — /voice off to stop`);
@@ -265,7 +269,11 @@ export class BrowserVoiceSession {
 
   async #openSideband() {
     const generation = ++this.#sidebandGeneration;
-    const sideband = new WebSocket(this.#sidebandUrl);
+    const sidebandUrl = this.#options.sidebandUrl
+      ? await this.#options.sidebandUrl(this.#sidebandCallId, this.#options.sessionId)
+      : this.#sidebandUrl;
+    if (this.#closed || generation !== this.#sidebandGeneration) return;
+    const sideband = new WebSocket(String(sidebandUrl));
     this.#sideband = sideband;
     let opened = false;
     sideband.addEventListener("message", (event) => {

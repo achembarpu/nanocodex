@@ -17,7 +17,14 @@ import "nanocodex-terminal/styles.css";
 structural `Agent` from `nanocodex-react/agent` but never creates one or chooses
 its runtime, transport, credentials, or persistence policy. It forwards
 `maxEntries` to the canonical controller and supports `showToolCalls` without
-changing retained state.
+changing retained state. Set `voice` to render and own the standard microphone
+control; normalized managed and Connect sources retain their canonical voice
+handle, while a normal browser Agent works directly. `voiceOptions` is available
+for application policy such as a pre-turn authorization fence.
+
+```tsx
+<AgentTerminalView agent={agent} voice {...terminalProps} />
+```
 
 `TerminalTranscriptSurface` and `TerminalComposer` are lower-level controlled
 pieces for consumers that already own their controller composition. The

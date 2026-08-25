@@ -87,9 +87,11 @@ await Actions.voice.destroy(voice);
 ```
 
 `Voice.create(...)` remains the equivalent namespaced resource constructor, and
-`Voice.voices` is the exact ChatGPT V3 voice catalog. Authentication stays in
-the same-origin `/api/realtime/calls` and `/api/realtime/sideband` host routes;
-the browser binding never receives ChatGPT credentials.
+`Voice.voices` is the exact ChatGPT V3 voice catalog. The constructor accepts a
+normal browser Agent, an account-owned managed Agent, or a grant-scoped
+`ConnectAgent`. Authentication stays in the owning host routes; Connect uses a
+fresh one-use sideband ticket, and the browser binding never receives ChatGPT
+credentials or places its reusable grant bearer in a WebSocket URL.
 
 ### Durable Cloudflare Agent
 

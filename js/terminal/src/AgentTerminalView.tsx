@@ -12,6 +12,11 @@ import {
   type Agent,
   type AgentControllerEvent,
 } from "nanocodex-react/agent";
+import {
+  useVoice,
+  type UseVoiceParameters,
+  type UseVoiceReturnType,
+} from "nanocodex-react";
 import { TerminalComposer } from "./TerminalComposer.js";
 import { TerminalTranscriptSurface } from "./TerminalTranscriptSurface.js";
 import type {
@@ -40,6 +45,8 @@ export function AgentTerminalView({
   promptIntent,
   retryAgent,
   showToolCalls = true,
+  voice = false,
+  voiceOptions,
   welcome,
 }: {
   accessory?(controls: AgentTerminalAccessory): ReactNode;
@@ -58,6 +65,9 @@ export function AgentTerminalView({
   promptIntent?: "queue" | "steer";
   retryAgent(): void;
   showToolCalls?: boolean;
+  /** Enables the package-owned microphone control. */
+  voice?: boolean;
+  voiceOptions?: Omit<UseVoiceParameters, "enabled">;
   welcome?: string;
 }) {
   const [touchDraft, setTouchDraft] = useState("");
@@ -118,6 +128,10 @@ export function AgentTerminalView({
     visible: mode !== "hidden",
     onEvent: handleControllerEvent,
   });
+  const voiceState = useVoice(
+    agent?.voiceSource ?? (agent as Parameters<typeof useVoice>[0]),
+    { ...voiceOptions, enabled: voice && mode !== "hidden" },
+  );
   const agentStatus: AgentStatus = agentError
     ? "error"
     : agent && readySessionId === agent.sessionId
@@ -169,7 +183,10 @@ export function AgentTerminalView({
     <TerminalTranscriptSurface
       composer={(
         <TerminalComposer
-          controls={controls?.({ agentReady: agentStatus === "ready" })}
+          controls={(voice || controls) ? <>
+            {voice ? <VoiceControl agentReady={agentStatus === "ready"} voice={voiceState} /> : null}
+            {controls?.({ agentReady: agentStatus === "ready" })}
+          </> : undefined}
           draft={touchDraft}
           pending={pendingTouchSubmission !== undefined}
           running={terminalRunning}
@@ -201,6 +218,39 @@ export function AgentTerminalView({
       {accessory?.({ agentReady: agentStatus === "ready", submit: submitAccessoryPrompt })}
     </div>
   ) : terminal;
+}
+
+function VoiceControl({
+  agentReady,
+  voice,
+}: {
+  agentReady: boolean;
+  voice: UseVoiceReturnType;
+}) {
+  const engaged = voice.isActive || voice.isConnecting;
+  return <>
+    <button
+      className="agent-voice-button"
+      type="button"
+      aria-label={engaged ? "Stop voice" : "Start voice"}
+      aria-pressed={engaged}
+      disabled={!agentReady}
+      onClick={() => { void voice.toggle().catch(() => {}); }}
+    >
+      <svg aria-hidden="true" viewBox="0 0 24 24">
+        <path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3Zm-7-3a1 1 0 1 1 2 0 5 5 0 0 0 10 0 1 1 0 1 1 2 0 7 7 0 0 1-6 6.92V21h3a1 1 0 1 1 0 2H8a1 1 0 1 1 0-2h3v-2.08A7 7 0 0 1 5 12Z" />
+      </svg>
+      <span className="agent-terminal-sr-only">Voice</span>
+    </button>
+    {voice.isActive ? (
+      <span className="agent-terminal-sr-only" role="status">{voice.voice}</span>
+    ) : null}
+    {voice.isError ? (
+      <span className="agent-voice-error" role="alert">
+        {voice.error?.message ?? "Voice failed. Check microphone access and retry."}
+      </span>
+    ) : null}
+  </>;
 }
 
 type PromptTiming = {

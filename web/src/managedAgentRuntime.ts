@@ -24,7 +24,7 @@ export type ManagedConversation = Readonly<{
   turnCount?: number;
 }>;
 
-export type ManagedTerminalSource = Pick<ManagedAgent, "events" | "id" | "turn">;
+export type ManagedTerminalSource = Pick<ManagedAgent, "events" | "id" | "turn" | "type">;
 
 export function listManagedConversations(accountId = "default"): Promise<readonly ManagedConversation[]> {
   const retained = managedLists.get(accountId);
@@ -87,6 +87,7 @@ export function managedTerminalAgent(
   const submitted = historyEnabled ? undefined : new Set<string>();
   return Object.freeze({
     sessionId: managed.id,
+    ...(isManagedAgent(managed) ? { voiceSource: managed } : {}),
     events: Object.freeze({
       watch: () => managedEventWatcher(managed, submitted, historyEnabled),
     }),
@@ -98,6 +99,11 @@ export function managedTerminalAgent(
       },
     }),
   });
+}
+
+function isManagedAgent(source: ManagedTerminalSource): source is ManagedAgent {
+  const candidate = source as Partial<ManagedAgent>;
+  return typeof candidate.state === "function" && typeof candidate.delete === "function";
 }
 
 function managedTerminalTurn(managed: ManagedTerminalSource, turnId: string, input: string): AgentTurn {

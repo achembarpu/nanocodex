@@ -1,5 +1,8 @@
 import { createBrowserVoice } from "../internal.mjs";
-import { observeManagedAgentEvents } from "../managed/internal.mjs";
+import {
+  managedBrowserVoiceTransport,
+  observeManagedAgentEvents,
+} from "../managed/internal.mjs";
 import { createManagedBrowserVoice } from "../managed/Voice.mjs";
 import { BrowserVoiceSession } from "./VoiceSession.mjs";
 
@@ -23,7 +26,7 @@ export function create(agent, options = {}) {
   validateOptions(options);
   const listeners = new Set();
   const eventListeners = new Set();
-  const managed = agent.type === "managed";
+  const managed = agent.type === "managed" || agent.type === "connect";
   const sessionId = managed ? agent.id : agent.sessionId;
   const target = Object.freeze({ pane: "main", branchId: sessionId });
   let snapshot = IDLE_SNAPSHOT;
@@ -93,10 +96,13 @@ export function create(agent, options = {}) {
     const core = Promise.resolve().then(() => managed
       ? createManagedBrowserVoice(agent, selectedVoice)
       : createBrowserVoice(agent, selectedVoice));
+    const transport = managed ? managedBrowserVoiceTransport(agent) : undefined;
     const next = new BrowserVoiceSession({
       core,
       sessionId,
       voice: selectedVoice,
+      ...(transport?.call === undefined ? {} : { call: transport.call }),
+      ...(transport?.sidebandUrl === undefined ? {} : { sidebandUrl: transport.sidebandUrl }),
       ...(options.callUrl === undefined ? {} : { callUrl: options.callUrl }),
       ...(options.sidebandUrl === undefined ? {} : { sidebandUrl: options.sidebandUrl }),
       ...(options.captureMicrophone === undefined ? {} : { captureMicrophone: options.captureMicrophone }),
@@ -214,7 +220,7 @@ export function create(agent, options = {}) {
 
 function validateAgent(agent) {
   const local = typeof agent?.sessionId === "string";
-  const managed = agent?.type === "managed" && typeof agent.id === "string"
+  const managed = (agent?.type === "managed" || agent?.type === "connect") && typeof agent.id === "string"
     && typeof agent.turn?.prompt === "function";
   if (!agent || typeof agent !== "object" || (!local && !managed) || typeof agent.events?.watch !== "function") {
     throw new TypeError("Voice.create requires a Nanocodex Agent");

@@ -79,6 +79,7 @@ const PROVIDER_CREDENTIAL_PLACEHOLDER = "Bearer NANOCODEX_PROVIDER_CREDENTIAL";
 const CONNECTOR_STATE_TTL = 10 * 60;
 const CONNECT_APPROVAL_TTL = 10 * 60;
 const MODEL_TICKET_TTL = 60;
+const REALTIME_TICKET_TTL = 60;
 const ACCOUNT_LINK_TTL = 5 * 60;
 const REGISTERED_APP_ID = "atlas-workspace";
 const MAX_BROKER_BODY_BYTES = 16 * 1024;
@@ -214,6 +215,11 @@ type ModelTicket = Readonly<{
   sessionId: string;
   turnState?: string;
 }>;
+type RealtimeTicket = Readonly<{
+  agentId: string;
+  callId: string;
+  grantId: `0x${string}`;
+}>;
 
 export default {
   async fetch(request: Request, env: Env, context: WorkerContext): Promise<Response> {
@@ -238,6 +244,19 @@ export default {
           store,
           url,
           modelSocket[1] as `0x${string}`,
+        );
+      }
+      const realtimeSocket = url.pathname.match(
+        /^\/v1\/grants\/(0x[0-9a-fA-F]{64})\/agents\/([^/]+)\/realtime\/sideband$/,
+      );
+      if (realtimeSocket) {
+        return openGrantRealtimeWebSocket(
+          request,
+          env,
+          store,
+          url,
+          realtimeSocket[1] as `0x${string}`,
+          decodeURIComponent(realtimeSocket[2]!),
         );
       }
       if (request.method === "GET" && url.pathname === "/v1/machine-usd/config") {
@@ -811,6 +830,15 @@ async function handleGrantRoute(
   if (action === "model/ticket" && request.method === "POST") {
     return Response.json(await issueModelTicket(store, grant, await json(request)));
   }
+  const realtimeTicket = action?.match(/^agents\/([^/]+)\/realtime\/ticket$/);
+  if (realtimeTicket && request.method === "POST") {
+    requirePlaygroundOrigin(request);
+    const requestedAgentId = decodeURIComponent(realtimeTicket[1]!);
+    if (requestedAgentId !== grant.agentId) {
+      throw new ApiFailure(403, "agent_not_granted", "This durable agent is outside the signed Connect authorization.");
+    }
+    return Response.json(await issueRealtimeTicket(store, grant, await json(request)));
+  }
   if (action === "mpp/charge" && request.method === "POST") {
     const body = await json(request);
     return Response.json(await withGrantMutationLock(store, grant.id, async () => {
@@ -977,6 +1005,14 @@ async function proxyManagedAgent(
   if (requestedAgentId !== grant.agentId || request.method === "DELETE") {
     throw new ApiFailure(403, "agent_not_granted", "This durable agent is outside the signed Connect authorization.");
   }
+  if (suffix.startsWith("/realtime/")) {
+    if (!grant.capabilities.includes("chatgpt")) {
+      throw new ApiFailure(403, "chatgpt_not_granted", "Connect ChatGPT before starting voice.");
+    }
+    if (!grant.capabilities.includes("agent.output.final")) {
+      throw new ApiFailure(403, "agent_output_not_granted", "Voice requires access to final agent replies.");
+    }
+  }
   const target = new URL(
     `/v1/agents/${encodeURIComponent(grant.agentId)}${suffix}${new URL(request.url).search}`,
     "https://nanocodex.internal",
@@ -1003,7 +1039,7 @@ async function projectManagedResponse(
   resource: string,
 ): Promise<Response> {
   const responseHeaders = new Headers();
-  for (const name of ["content-type", "retry-after"]) {
+  for (const name of ["content-type", "retry-after", "x-nanocodex-realtime-location"]) {
     const value = upstream.headers.get(name);
     if (value) responseHeaders.set(name, value);
   }
@@ -1586,6 +1622,89 @@ async function issueModelTicket(
   return { ticket, expires_in: MODEL_TICKET_TTL };
 }
 
+async function issueRealtimeTicket(
+  store: Kv.Kv,
+  grant: GrantRecord,
+  body: Record<string, unknown>,
+): Promise<{ ticket: string; expires_in: number }> {
+  if (grant.status !== "active") throw new ApiFailure(409, "grant_inactive", "The grant is not active.");
+  remainingGrantTtl(grant);
+  if (!grant.capabilities.includes("chatgpt")) {
+    throw new ApiFailure(403, "chatgpt_not_granted", "Connect ChatGPT before starting voice.");
+  }
+  if (!grant.capabilities.includes("agent.output.final")) {
+    throw new ApiFailure(403, "agent_output_not_granted", "Voice requires access to final agent replies.");
+  }
+  const callId = realtimeCallId(body.call_id);
+  const ticket = randomSubject();
+  if (!store.create || !await store.create(`realtime-ticket:${ticket}`, {
+    agentId: grant.agentId,
+    callId,
+    grantId: grant.id,
+  } satisfies RealtimeTicket, { ttl: REALTIME_TICKET_TTL })) {
+    throw new ApiFailure(500, "realtime_ticket_unavailable", "The voice connection could not be reserved.");
+  }
+  return { ticket, expires_in: REALTIME_TICKET_TTL };
+}
+
+async function openGrantRealtimeWebSocket(
+  request: Request,
+  env: Env,
+  store: Kv.Kv,
+  url: URL,
+  grantId: `0x${string}`,
+  agentId: string,
+): Promise<Response> {
+  requirePlaygroundOrigin(request);
+  if (request.method !== "GET" || request.headers.get("upgrade")?.toLowerCase() !== "websocket") {
+    throw new ApiFailure(426, "websocket_required", "The voice sideband requires a WebSocket upgrade.");
+  }
+  const keys = [...url.searchParams.keys()];
+  if (keys.some((key) => key !== "call_id" && key !== "ticket")
+    || url.searchParams.getAll("call_id").length !== 1
+    || url.searchParams.getAll("ticket").length !== 1) {
+    throw new ApiFailure(400, "invalid_realtime_request", "The voice sideband query is invalid.");
+  }
+  const callId = realtimeCallId(url.searchParams.get("call_id"));
+  const ticketValue = boundedIdentifier(url.searchParams.get("ticket"), "ticket", 64);
+  if (!store.take) throw new ApiFailure(500, "realtime_ticket_unavailable", "One-time voice tickets are unavailable.");
+  const ticket = await store.take<RealtimeTicket>(`realtime-ticket:${ticketValue}`);
+  if (!isRealtimeTicket(ticket)
+    || ticket.grantId.toLowerCase() !== grantId.toLowerCase()
+    || ticket.agentId !== agentId
+    || ticket.callId !== callId) {
+    throw new ApiFailure(403, "invalid_realtime_ticket", "The one-time voice ticket is invalid or expired.");
+  }
+  const grant = await store.get<GrantRecord>(`grant:${grantId}`);
+  if (!isGrantRecord(grant)
+    || grant.status !== "active"
+    || grant.agentId !== agentId
+    || !grant.capabilities.includes("chatgpt")
+    || !grant.capabilities.includes("agent.output.final")) {
+    throw new ApiFailure(403, "chatgpt_not_granted", "The active grant does not include ChatGPT.");
+  }
+  remainingGrantTtl(grant);
+  const target = new URL(
+    `/v1/agents/${encodeURIComponent(agentId)}/realtime/sideband?call_id=${encodeURIComponent(callId)}`,
+    "https://nanocodex.internal",
+  );
+  const response = await env.ACCOUNTS.fetch(new Request(target, {
+    headers: {
+      upgrade: "websocket",
+      "x-nanocodex-connect-user": grant.brokerUserId,
+    },
+  }));
+  const upstream = (response as Response & { webSocket?: WorkerWebSocket }).webSocket;
+  if (response.status !== 101 || !upstream) return response;
+
+  const pair = new WebSocketPair();
+  const [downstream, server] = Object.values(pair);
+  upstream.accept();
+  server.accept();
+  superviseGrantSocket(store, grant, server, upstream);
+  return new Response(null, { status: 101, webSocket: downstream } as ResponseInit);
+}
+
 async function openGrantModelWebSocket(
   request: Request,
   env: Env,
@@ -1707,6 +1826,27 @@ function isModelTicket(value: unknown): value is ModelTicket {
     && typeof value.sessionId === "string"
     && value.sessionId.length > 0
     && (value.turnState === undefined || typeof value.turnState === "string");
+}
+
+function isRealtimeTicket(value: unknown): value is RealtimeTicket {
+  return isRecord(value)
+    && /^0x[0-9a-fA-F]{64}$/.test(String(value.grantId))
+    && typeof value.agentId === "string"
+    && value.agentId.length > 0
+    && typeof value.callId === "string"
+    && validRealtimeCallId(value.callId);
+}
+
+function realtimeCallId(value: unknown): string {
+  if (typeof value !== "string" || !validRealtimeCallId(value)) {
+    throw new ApiFailure(400, "invalid_realtime_call", "The voice call identifier is invalid.");
+  }
+  return value;
+}
+
+function validRealtimeCallId(value: string): boolean {
+  return /^rtc_[A-Za-z0-9._:-]{1,196}$/.test(value)
+    || /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(value);
 }
 
 async function revokeGrant(
@@ -2732,7 +2872,7 @@ function cors(response: Response, request: Request) {
     response.headers.set("access-control-max-age", "86400");
     response.headers.set(
       "access-control-expose-headers",
-      "payment-receipt, payment-response, payment-session, payment-session-snapshot, www-authenticate",
+      "payment-receipt, payment-response, payment-session, payment-session-snapshot, www-authenticate, x-nanocodex-realtime-location",
     );
     response.headers.set("vary", "Origin");
   }

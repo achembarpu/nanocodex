@@ -1,4 +1,5 @@
 import { Agent as ManagedAgent } from "../../managed/index.mjs";
+import { registerManagedAgentAlias } from "../../managed/internal.mjs";
 
 const PROVIDER_NAME = "ChatGPT · Nanocodex Connect";
 
@@ -31,12 +32,15 @@ export async function create(client, options) {
     ),
   };
   const managed = ManagedAgent.open(connection.agentId, managedOptions);
-  return connectAgent(managed, connection);
+  return connectAgent(managed, connection, {
+    baseUrl: client.transport.baseUrl,
+    grantSession,
+  });
 }
 
-function connectAgent(managed, connection) {
+function connectAgent(managed, connection, transport) {
   const visibility = connection.grant.visibility;
-  return Object.freeze({
+  const agent = {
     id: managed.id,
     sessionId: managed.id,
     type: "connect",
@@ -93,6 +97,40 @@ function connectAgent(managed, connection) {
     session: Object.freeze({
       async shutdown() {},
     }),
+  };
+  registerManagedAgentAlias(agent, managed, {
+    voiceTransport: connectVoiceTransport(transport, connection.grant.id, connection.agentId),
+  });
+  return Object.freeze(agent);
+}
+
+function connectVoiceTransport({ baseUrl, grantSession }, grantId, agentId) {
+  const grantPath = `/v1/grants/${grantId}/agents/${encodeURIComponent(agentId)}/realtime`;
+  return Object.freeze({
+    call(body, signal) {
+      return grantSession.fetch(new Request(new URL(`${grantPath}/calls`, baseUrl), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body,
+        signal,
+      }));
+    },
+    async sidebandUrl(callId) {
+      const response = await grantSession.fetch(new Request(new URL(`${grantPath}/ticket`, baseUrl), {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ call_id: callId }),
+      }));
+      const receipt = await response.json().catch(() => undefined);
+      if (!response.ok || typeof receipt?.ticket !== "string") {
+        throw new Error(receipt?.error?.message ?? "voice sideband authorization failed");
+      }
+      const url = new URL(`${grantPath}/sideband`, baseUrl);
+      url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+      url.searchParams.set("call_id", callId);
+      url.searchParams.set("ticket", receipt.ticket);
+      return url;
+    },
   });
 }
 

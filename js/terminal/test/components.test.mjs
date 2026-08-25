@@ -44,7 +44,18 @@ test("controller-backed terminal remains caller-owned when no Agent is attached"
   });
   assert.equal(renderer.root.findByProps({ role: "log" }).props["aria-live"], "off");
   assert.equal(renderer.root.findByType("form").props["aria-label"], "Nanocodex message composer");
+  assert.equal(renderer.root.findAllByProps({ "aria-label": "Start voice" }).length, 0);
   assert.equal(states.at(-1).status, "starting");
+  await act(async () => renderer.update(React.createElement(AgentTerminalView, {
+    agent: undefined,
+    agentError: undefined,
+    mode: "preview",
+    onConversationActivity() {},
+    onStateChange(state) { states.push(state); },
+    retryAgent() {},
+    voice: true,
+  })));
+  assert.equal(renderer.root.findByProps({ "aria-label": "Start voice" }).props.disabled, true);
   await act(async () => renderer.unmount());
 });
 

@@ -1,5 +1,6 @@
 import type { DefaultAgent } from "../types.mjs";
 import type { Agent as ManagedAgent } from "../managed/Agent.mjs";
+import type { ConnectAgent } from "../cloud/types.mjs";
 
 export const voices: readonly ["juniper", "maple", "spruce", "ember", "vale", "breeze", "arbor", "sol", "cove"];
 export const defaultVoice: "cove";
@@ -21,7 +22,7 @@ export type Event =
 export type Options = Readonly<{
   voice?: VoiceName | undefined;
   callUrl?: string | URL | undefined;
-  sidebandUrl?(callId: string, sessionId: string): string | URL;
+  sidebandUrl?(callId: string, sessionId: string): string | URL | Promise<string | URL>;
   captureMicrophone?(): Promise<MediaStream>;
   beforeAgentTurn?(): Promise<void>;
 }>;
@@ -35,4 +36,4 @@ export type Voice = Readonly<{
   subscribe(listener: () => void): () => void;
   toggle(options?: { voice?: VoiceName | undefined }): Promise<void>;
 }>;
-export function create(agent: DefaultAgent | ManagedAgent, options?: Options): Voice;
+export function create(agent: DefaultAgent | ManagedAgent | ConnectAgent, options?: Options): Voice;

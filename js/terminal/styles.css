@@ -218,6 +218,31 @@
 .agent-touch-actions button:disabled { color: var(--terminal-muted, #6b6b6b); background: transparent; cursor: default; }
 .agent-touch-composer.is-running .agent-touch-actions button { color: var(--terminal-muted, #6b6b6b); }
 
+.agent-terminal-sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+.agent-voice-error {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 9px);
+  width: max-content;
+  max-width: min(280px, calc(100vw - 24px));
+  padding: 7px 9px;
+  color: var(--terminal-negative, #b42318);
+  font: 11px/1.35 var(--font-mono, ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace);
+  background: var(--terminal-background, #fff);
+  border: 1px solid var(--terminal-border, #ddd);
+}
+
 @media (pointer: coarse), (any-pointer: coarse) {
   .agent-terminal-shell {
     display: grid;

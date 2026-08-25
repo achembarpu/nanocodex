@@ -19,6 +19,7 @@ export function createConnectAgentSource(connectAgent, options) {
   const submitted = options.history ? undefined : new Set();
   return Object.freeze({
     sessionId: connectAgent.sessionId,
+    voiceSource: connectAgent,
     events: Object.freeze({
       watch: () => connectEventWatcher(connectAgent, submitted, options.history),
     }),

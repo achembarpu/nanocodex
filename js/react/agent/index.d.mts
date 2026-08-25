@@ -30,6 +30,12 @@ export type AgentEventWatcher = Readonly<{
 /** Normalized structural Agent contract consumed by the headless controller. */
 export type Agent = Readonly<{
   sessionId: string;
+  /** Optional canonical SDK resource used by presentation-owned voice controls. */
+  voiceSource?:
+    | import("nanocodex").DefaultAgent
+    | import("nanocodex/managed").ManagedAgent
+    | import("nanocodex/connect").ConnectAgent
+    | undefined;
   turn: Readonly<{
     prompt(options: Readonly<{ input: string }>): AgentTurn;
   }>;

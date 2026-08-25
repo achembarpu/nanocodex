@@ -67,6 +67,7 @@ test("history-disabled Connect sources tail latest and expose only source-submit
     /explicit history boolean/,
   );
   const source = createConnectAgentSource(connectAgent, { history: false });
+  assert.equal(source.voiceSource, connectAgent);
   const watcher = source.events.watch();
   const events = [];
   const histories = [];

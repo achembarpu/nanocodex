@@ -108,6 +108,40 @@ test("requests the microphone before waiting for the Rust controller", async () 
   }
 });
 
+test("refreshes an asynchronous sideband authorization before reconnecting", async () => {
+  const fixture = installBrowserVoiceFixture();
+  const calls = [];
+  let tickets = 0;
+  try {
+    const session = new BrowserVoiceSession({
+      core: fakeVoiceCore(calls),
+      sessionId: "connect-agent",
+      voice: "cove",
+      captureMicrophone: async () => fakeMicrophone(calls),
+      call: async () => new Response("v=answer", {
+        headers: { "x-nanocodex-realtime-location": "/v1/live/rtc_connect" },
+      }),
+      async sidebandUrl(callId) {
+        tickets += 1;
+        return `wss://connect.example/sideband?call_id=${callId}&ticket=${tickets}`;
+      },
+      onStatus() {},
+      onTranscript() {},
+      onTerminated() {},
+    });
+    await session.start();
+    assert.match(fixture.sidebandUrls[0], /ticket=1$/);
+    const first = fixture.sideband;
+    first.close();
+    await new Promise((resolve) => setTimeout(resolve, 210));
+    await waitFor(() => fixture.sideband !== first);
+    assert.match(fixture.sidebandUrls[1], /ticket=2$/);
+    await session.close();
+  } finally {
+    fixture.restore();
+  }
+});
+
 test("stop tears browser media down while startup boundaries are stalled", async () => {
   for (const boundary of ["ice", "fetch", "sideband"]) {
     const fixture = installBrowserVoiceFixture({ boundary });
@@ -305,7 +339,13 @@ function installBrowserVoiceFixture({ boundary } = {}) {
     location: globalThis.location,
     window: globalThis.window,
   };
-  const fixture = { peer: undefined, request: undefined, requestSignal: undefined, sideband: undefined };
+  const fixture = {
+    peer: undefined,
+    request: undefined,
+    requestSignal: undefined,
+    sideband: undefined,
+    sidebandUrls: [],
+  };
   class FakePeer {
     connectionState = "connected";
     iceGatheringState = boundary === "ice" ? "gathering" : "complete";
@@ -328,7 +368,8 @@ function installBrowserVoiceFixture({ boundary } = {}) {
     readyState = FakeWebSocket.CONNECTING;
     listeners = new Map();
     sent = [];
-    constructor() {
+    constructor(url) {
+      fixture.sidebandUrls.push(String(url));
       fixture.sideband = this;
       if (boundary === "sideband") return;
       queueMicrotask(() => {
@@ -367,6 +408,7 @@ function installBrowserVoiceFixture({ boundary } = {}) {
     get requestSignal() { return fixture.requestSignal; },
     get peer() { return fixture.peer; },
     get sideband() { return fixture.sideband; },
+    get sidebandUrls() { return fixture.sidebandUrls; },
     restore() { Object.assign(globalThis, previous); },
   };
 }

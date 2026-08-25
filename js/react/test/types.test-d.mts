@@ -61,7 +61,7 @@ function Consumer() {
 }
 void Consumer;
 
-function VoiceConsumer(agent: DefaultAgent | ManagedAgent | undefined) {
+function VoiceConsumer(agent: DefaultAgent | ManagedAgent | ConnectAgent | undefined) {
   const voice: UseVoiceReturnType = useVoice(agent, {
     beforeAgentTurn: async () => {},
     voice: "cove",
@@ -138,6 +138,7 @@ const normalizedDefaultAgent: Agent = defaultAgent;
 void normalizedDefaultAgent;
 
 declare const connectAgent: ConnectAgent;
+void VoiceConsumer(connectAgent);
 const connectSourceOptions: ConnectAgentSourceOptions = { history: false };
 const normalizedConnectAgent: Agent = createConnectAgentSource(connectAgent, connectSourceOptions);
 void normalizedConnectAgent;

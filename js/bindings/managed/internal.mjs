@@ -2,7 +2,21 @@ const managedAgents = new WeakMap();
 
 /** @internal Retains the authenticated client without exposing it on the public Agent handle. */
 export function registerManagedAgent(agent, client, id) {
-  managedAgents.set(agent, { client, id });
+  managedAgents.set(agent, { client, eventAgent: agent, id });
+}
+
+/** @internal Retains managed lifecycle ownership for a capability-bound Agent projection. */
+export function registerManagedAgentAlias(agent, source, options = {}) {
+  const state = managedAgent(source);
+  managedAgents.set(agent, {
+    ...state,
+    ...(options.voiceTransport === undefined ? {} : { voiceTransport: options.voiceTransport }),
+  });
+}
+
+/** @internal Resolves an optional browser media transport owned by an Agent projection. */
+export function managedBrowserVoiceTransport(agent) {
+  return managedAgent(agent).voiceTransport;
 }
 
 /** @internal Starts the canonical Realtime lifecycle on the selected durable Agent. */
@@ -56,7 +70,8 @@ export function observeManagedAgentEvents(agent, listener) {
   const controller = new AbortController();
   void (async () => {
     try {
-      for await (const envelope of agent.events.watch({
+      const { eventAgent } = managedAgent(agent);
+      for await (const envelope of eventAgent.events.watch({
         cursor: "latest",
         signal: controller.signal,
       })) {

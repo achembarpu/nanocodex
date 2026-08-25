@@ -177,19 +177,6 @@
   color: var(--negative);
 }
 
-.agent-voice-error {
-  position: absolute;
-  right: 0;
-  bottom: calc(100% + 9px);
-  width: max-content;
-  max-width: min(280px, calc(100vw - 24px));
-  padding: 7px 9px;
-  color: var(--negative);
-  font: 11px/1.35 var(--font-mono);
-  background: var(--terminal-background);
-  border: 1px solid var(--terminal-border);
-}
-
 @media (pointer: coarse), (any-pointer: coarse) {
 
   .agent-session-bar,

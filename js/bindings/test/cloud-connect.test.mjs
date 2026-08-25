@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { Actions, Client, Dialog, Errors, Transport } from "../cloud/index.mjs";
+import { Voice } from "../browser/index.mjs";
 import { projectAgentObservations } from "../cloud/actions/agent.mjs";
 import { connectionFromWire } from "../cloud/internal.mjs";
+import { managedBrowserVoiceTransport } from "../managed/internal.mjs";
 
 test("Connect opens its grant-provisioned durable agent without a redundant state probe", async () => {
   const requests = [];
@@ -23,6 +25,14 @@ test("Connect opens its grant-provisioned durable agent without a redundant stat
           async fetch(input, init) {
             const request = new Request(input, init);
             requests.push(request);
+            if (new URL(request.url).pathname.endsWith("/realtime/calls")) {
+              return new Response("v=answer", {
+                headers: { "x-nanocodex-realtime-location": "/realtime/calls/rtc_connect" },
+              });
+            }
+            if (new URL(request.url).pathname.endsWith("/realtime/ticket")) {
+              return Response.json({ ticket: "one-use-ticket" });
+            }
             return Response.json({ agent_id: agentId, session_id: agentId });
           },
           async request() { throw new Error("control-plane request was unexpected"); },
@@ -42,6 +52,21 @@ test("Connect opens its grant-provisioned durable agent without a redundant stat
   assert.equal(agent.id, agentId);
   assert.equal(agent.type, "connect");
   assert.equal(requests.length, 0);
+  const voice = Voice.create(agent);
+  assert.equal(voice.getSnapshot().status, "idle");
+  await voice.destroy();
+  const voiceTransport = managedBrowserVoiceTransport(agent);
+  const call = await voiceTransport.call("call-body");
+  assert.equal(await call.text(), "v=answer");
+  assert.equal(new URL(requests[0].url).pathname, `/v1/grants/${connection.grant.id}/agents/${agentId}/realtime/calls`);
+  assert.equal(requests[0].headers.get("authorization"), "Bearer grant-session-test");
+  assert.equal(await requests[0].text(), "call-body");
+  const sideband = await voiceTransport.sidebandUrl("rtc_connect");
+  assert.equal(sideband.protocol, "wss:");
+  assert.equal(sideband.searchParams.get("call_id"), "rtc_connect");
+  assert.equal(sideband.searchParams.get("ticket"), "one-use-ticket");
+  assert.equal(new URL(requests[1].url).pathname, `/v1/grants/${connection.grant.id}/agents/${agentId}/realtime/ticket`);
+  assert.equal(requests[1].headers.get("authorization"), "Bearer grant-session-test");
   await assert.rejects(
     client.agent.create({ connection, sessionId: "browser-local" }),
     /do not accept app-local sessionId/,

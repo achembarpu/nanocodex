@@ -1,4 +1,5 @@
 import { Actions, Client, Dialog, Transport, type Connection } from "nanocodex/connect";
+import { Voice } from "nanocodex/browser";
 
 const client = Client.create({
   appId: "type-probe",
@@ -39,9 +40,11 @@ client.connection.connect({
   },
 });
 const agent = client.agent.create({ connection });
+const voice = Voice.create(await agent);
 const agentTurn = (await agent).turn.prompt({ input: "Review my pull requests" });
 const agentResult = agentTurn.result();
 void agentResult;
+void voice;
 client.machineUsd.fund({
   accountAddress: connection.accountAddress,
   grantId: connection.grant.id,

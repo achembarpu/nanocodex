@@ -115,7 +115,8 @@ Without a selector, `useNanocodex` returns the full query-like resource shown ab
 `useAgentEvents` is the narrow hook for ordered typed events.
 
 `useVoice` is the thin React adapter over the Rust/WASM-owned Codex voice
-resource:
+resource. It accepts the same normal, managed, and Connect Agent handles as the
+lower-level browser binding:
 
 ```tsx
 const { data: agent } = useNanocodex({ config, threadId });

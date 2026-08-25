@@ -1,11 +1,12 @@
 "use client";
-import { jsx as _jsx, jsxs as _jsxs } from "react/jsx-runtime";
+import { jsx as _jsx, Fragment as _Fragment, jsxs as _jsxs } from "react/jsx-runtime";
 import { useCallback, useEffect, useRef, useState, } from "react";
 import { useAgentController, } from "nanocodex-react/agent";
+import { useVoice, } from "nanocodex-react";
 import { TerminalComposer } from "./TerminalComposer.js";
 import { TerminalTranscriptSurface } from "./TerminalTranscriptSurface.js";
 /** Shared website terminal presentation. Runtime and authorization policy stay with its consumer. */
-export function AgentTerminalView({ accessory, agent, agentError, controls, inactiveMessage, maxEntries, mode, onConversationActivity, onTerminalEvent, onStateChange, promptIntent, retryAgent, showToolCalls = true, welcome, }) {
+export function AgentTerminalView({ accessory, agent, agentError, controls, inactiveMessage, maxEntries, mode, onConversationActivity, onTerminalEvent, onStateChange, promptIntent, retryAgent, showToolCalls = true, voice = false, voiceOptions, welcome, }) {
     const [touchDraft, setTouchDraft] = useState("");
     const [pendingTouchSubmission, setPendingTouchSubmission] = useState();
     const [followTailRequest, setFollowTailRequest] = useState(0);
@@ -55,6 +56,7 @@ export function AgentTerminalView({ accessory, agent, agentError, controls, inac
         visible: mode !== "hidden",
         onEvent: handleControllerEvent,
     });
+    const voiceState = useVoice(agent?.voiceSource ?? agent, { ...voiceOptions, enabled: voice && mode !== "hidden" });
     const agentStatus = agentError
         ? "error"
         : agent && readySessionId === agent.sessionId
@@ -97,11 +99,15 @@ export function AgentTerminalView({ accessory, agent, agentError, controls, inac
         retainSubmittedPrompt(submittedPrompts.current, input, submittedAt);
         void controller.submit(input, { intent: "queue" });
     }, [agentStatus, controller]);
-    const terminal = (_jsx(TerminalTranscriptSurface, { composer: (_jsx(TerminalComposer, { controls: controls?.({ agentReady: agentStatus === "ready" }), draft: touchDraft, pending: pendingTouchSubmission !== undefined, running: terminalRunning, status: agentStatus, onCancel: cancelTouchTurn, onChange: (value) => {
+    const terminal = (_jsx(TerminalTranscriptSurface, { composer: (_jsx(TerminalComposer, { controls: (voice || controls) ? _jsxs(_Fragment, { children: [voice ? _jsx(VoiceControl, { agentReady: agentStatus === "ready", voice: voiceState }) : null, controls?.({ agentReady: agentStatus === "ready" })] }) : undefined, draft: touchDraft, pending: pendingTouchSubmission !== undefined, running: terminalRunning, status: agentStatus, onCancel: cancelTouchTurn, onChange: (value) => {
                 setPendingTouchSubmission(undefined);
                 setTouchDraft(value);
             }, onSubmit: submitTouchPrompt })), canLoadOlder: controller.canLoadOlder, entries: controller.entries, followTailRequest: followTailRequest, inactiveMessage: unavailableMessage ?? "", isLoadingOlder: controller.isLoadingOlder, mode: mode, showToolCalls: showToolCalls, status: agentStatus, welcome: welcome, onLoadOlder: controller.loadOlder }));
     return mode === "full" ? (_jsxs("div", { className: "agent-terminal-workspace", children: [terminal, accessory?.({ agentReady: agentStatus === "ready", submit: submitAccessoryPrompt })] })) : terminal;
+}
+function VoiceControl({ agentReady, voice, }) {
+    const engaged = voice.isActive || voice.isConnecting;
+    return _jsxs(_Fragment, { children: [_jsxs("button", { className: "agent-voice-button", type: "button", "aria-label": engaged ? "Stop voice" : "Start voice", "aria-pressed": engaged, disabled: !agentReady, onClick: () => { void voice.toggle().catch(() => { }); }, children: [_jsx("svg", { "aria-hidden": "true", viewBox: "0 0 24 24", children: _jsx("path", { d: "M12 15a3 3 0 0 0 3-3V6a3 3 0 1 0-6 0v6a3 3 0 0 0 3 3Zm-7-3a1 1 0 1 1 2 0 5 5 0 0 0 10 0 1 1 0 1 1 2 0 7 7 0 0 1-6 6.92V21h3a1 1 0 1 1 0 2H8a1 1 0 1 1 0-2h3v-2.08A7 7 0 0 1 5 12Z" }) }), _jsx("span", { className: "agent-terminal-sr-only", children: "Voice" })] }), voice.isActive ? (_jsx("span", { className: "agent-terminal-sr-only", role: "status", children: voice.voice })) : null, voice.isError ? (_jsx("span", { className: "agent-voice-error", role: "alert", children: voice.error?.message ?? "Voice failed. Check microphone access and retry." })) : null] });
 }
 function submitPrompt(controller, submittedPrompts, input, submittedAt, intent) {
     retainSubmittedPrompt(submittedPrompts, input, submittedAt);
