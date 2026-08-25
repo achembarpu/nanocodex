@@ -2143,7 +2143,7 @@ function isConnectorState(value: unknown): value is ConnectorState {
 
 function requestedConnectors(value: unknown): ConnectorId[] {
   if (value === undefined) return [];
-  if (!Array.isArray(value) || value.length > CONNECTOR_IDS.length) {
+  if (!Array.isArray(value)) {
     throw new ApiFailure(400, "invalid_requested_connectors", "requested_connectors must be a connector ID array.");
   }
   const requested = new Set<ConnectorId>();
