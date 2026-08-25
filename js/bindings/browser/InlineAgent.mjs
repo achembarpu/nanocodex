@@ -62,10 +62,7 @@ export async function create(options = {}) {
     WebSocketImpl,
     createWebSocket,
   } = resolveResponsesTransport(transport ?? defaultHostManagedTransport());
-  const { tools: hostTools, subagents: subagentConfig } = resolveTools(
-    tools,
-    durability !== undefined || durabilityId !== undefined,
-  );
+  const { tools: hostTools, subagents: subagentConfig } = resolveTools(tools);
   if (filesystem && workspace !== undefined && workspace !== filesystem.root) {
     throw new TypeError("workspace must match filesystem.root when both are provided");
   }

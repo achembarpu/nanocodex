@@ -45,9 +45,9 @@ test("subagents are an explicit branded Rust extension", () => {
     () => resolveTools([...subagents, ...subagents]),
     /only be included once/,
   );
-  assert.throws(
-    () => resolveTools([...subagents], true),
-    /cannot be combined with durability.*cannot be reconstructed after recovery/,
-  );
+  assert.deepEqual(resolveTools([...subagents]), {
+    tools: {},
+    subagents: { max_concurrency: 7 },
+  });
   assert.throws(() => Subagents.create({ maxConcurrency: 0 }), /positive safe integer/);
 });

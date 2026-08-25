@@ -2437,11 +2437,6 @@ fn validate(config: &WasmConfig) -> Result<(), JsValue> {
     {
         return Err(js_error("subagents.max_concurrency must be at least 1"));
     }
-    if config.durability_id.is_some() && config.subagents.is_some() {
-        return Err(js_error(
-            "subagents cannot be combined with durability because child agents are runtime-owned and cannot be reconstructed after recovery",
-        ));
-    }
     Ok(())
 }
 

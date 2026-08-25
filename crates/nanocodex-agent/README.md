@@ -121,6 +121,6 @@ OpenAI API-key and managed ChatGPT credentials belong to
 Portable journals, durable admission, and recovery policy belong to
 `nanocodex-durability`, which depends on this crate; the agent never depends on
 that optional layer. An attached execution policy is owned by exactly one
-agent. `spawn` and `fork` therefore return an explicit error instead of creating
-a child that silently drops the policy; applications that need a child build it
-with its own policy.
+agent. A clean `spawn` deliberately creates an ordinary in-memory child without
+that policy; `fork` returns an explicit error because inherited committed context
+requires an independently owned policy.

@@ -223,8 +223,73 @@ export default {
       const phoneOutput = input.find((item) => (
         item?.type === "function_call_output" && item.call_id === "managed-phone"
       ));
+      const spawnOutput = input.find((item) => (
+        item?.type === "function_call_output" && item.call_id === "managed-spawn"
+      ));
+      const waitOutput = input.find((item) => (
+        item?.type === "function_call_output" && item.call_id === "managed-wait"
+      ));
+      const submitOutput = input.find((item) => (
+        item?.type === "function_call_output" && item.call_id === "managed-submit"
+      ));
       pendingResponse = setTimeout(() => {
         pendingResponse = undefined;
+        if (submitOutput) {
+          server.send(JSON.stringify({
+            type: "response.completed",
+            response: {
+              id: crypto.randomUUID(),
+              status: "completed",
+              output: [{
+                type: "message",
+                role: "assistant",
+                content: [{ type: "output_text", text: "submitted" }],
+              }],
+              usage: null,
+            },
+          }));
+          return;
+        }
+        if (waitOutput) {
+          const valid = String(waitOutput.output).includes('"state":"completed"')
+            && String(waitOutput.output).includes('"report":"MANAGED_SUBAGENT_CHILD_OK"');
+          server.send(JSON.stringify({
+            type: "response.completed",
+            response: {
+              id: crypto.randomUUID(),
+              status: "completed",
+              output: [{
+                type: "message",
+                role: "assistant",
+                content: [{
+                  type: "output_text",
+                  text: valid ? "MANAGED_SUBAGENTS_OK" : "MANAGED_SUBAGENTS_BAD",
+                }],
+              }],
+              usage: null,
+            },
+          }));
+          return;
+        }
+        if (spawnOutput) {
+          let agentId;
+          try { agentId = JSON.parse(String(spawnOutput.output)).agent_id; } catch {}
+          server.send(JSON.stringify({
+            type: "response.completed",
+            response: {
+              id: crypto.randomUUID(),
+              status: "completed",
+              output: [{
+                type: "function_call",
+                call_id: "managed-wait",
+                name: "wait_agent",
+                arguments: JSON.stringify({ agent_ids: [agentId], timeout_ms: 5_000 }),
+              }],
+              usage: null,
+            },
+          }));
+          return;
+        }
         if (phoneOutput) {
           const output = String(phoneOutput.output);
           const valid = output.includes('"ok":true')
@@ -339,6 +404,52 @@ export default {
                 name: "exec_command",
                 arguments: JSON.stringify({
                   cmd: "printf 'COMPUTER_RUNTIME_OK\\n' > /workspace/computer.txt && cat /workspace/computer.txt && gh api repos/gakonst/nanocodex | jq -r .full_name",
+                }),
+              }],
+              usage: null,
+            },
+          }));
+          return;
+        }
+        if (text.includes("E2E_MANAGED_SUBAGENTS")) {
+          server.send(JSON.stringify({
+            type: "response.completed",
+            response: {
+              id: crypto.randomUUID(),
+              status: "completed",
+              output: [{
+                type: "function_call",
+                call_id: "managed-spawn",
+                name: "spawn_agent",
+                arguments: JSON.stringify({
+                  role: "managed-reviewer",
+                  task: "Return MANAGED_SUBAGENT_CHILD_OK. Marker: E2E_MANAGED_SUBAGENT_CHILD",
+                  output_schema: {
+                    type: "object",
+                    properties: { report: { type: "string" } },
+                    required: ["report"],
+                    additionalProperties: false,
+                  },
+                }),
+              }],
+              usage: null,
+            },
+          }));
+          return;
+        }
+        if (text.includes("E2E_MANAGED_SUBAGENT_CHILD")) {
+          server.send(JSON.stringify({
+            type: "response.completed",
+            response: {
+              id: crypto.randomUUID(),
+              status: "completed",
+              output: [{
+                type: "function_call",
+                call_id: "managed-submit",
+                name: "submit_result",
+                arguments: JSON.stringify({
+                  turn_token: 1,
+                  output: { report: "MANAGED_SUBAGENT_CHILD_OK" },
                 }),
               }],
               usage: null,

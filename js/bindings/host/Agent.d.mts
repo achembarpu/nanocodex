@@ -40,8 +40,8 @@ export declare namespace create {
     | {
       durability: DurabilityStore;
       durabilityId: string;
-      /** Durable agents accept caller tools, but not runtime-owned subagent extensions. */
-      tools?: ToolConfiguration | undefined;
+      /** The root remains durable; clean subagent children are in-memory. */
+      tools?: ToolConfiguration<SubagentTool> | undefined;
     }
   );
   type ReturnType = Agent;

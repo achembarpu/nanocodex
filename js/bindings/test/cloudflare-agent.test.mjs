@@ -5,6 +5,7 @@ import { test } from "node:test";
 import * as HostAgent from "../host/Agent.mjs";
 import { bindAgent, create, destroy } from "../cloudflare/Agent.mjs";
 import { createCloudflareDurabilityStore } from "../runtime/cloudflare-durability-store.mjs";
+import * as Subagents from "../runtime/subagents.mjs";
 
 const FIRST_OBJECT_ID = "a".repeat(64);
 const SECOND_OBJECT_ID = "b".repeat(64);
@@ -183,7 +184,10 @@ test("Cloudflare Agent isolates journals per Durable Object and can recreate aft
   const owner = (storage, id) => durableOwner(storage, binding, id);
 
   const [first, second] = await Promise.all([
-    create(module, owner(firstStorage, FIRST_OBJECT_ID), { terminalReceiptRetention: 512 }),
+    create(module, owner(firstStorage, FIRST_OBJECT_ID), {
+      terminalReceiptRetention: 512,
+      tools: [...Subagents.create({ maxConcurrency: 2 })],
+    }),
     create(module, owner(secondStorage, SECOND_OBJECT_ID)),
   ]);
   assert.notEqual(first.sessionId, second.sessionId);

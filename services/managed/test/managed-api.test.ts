@@ -1512,6 +1512,28 @@ describe("managed agents REST and resumable SSE", () => {
     await events.cancel();
   });
 
+  it("runs the existing in-memory Rust subagent tree from a durable managed root", async () => {
+    const agent = await createAgent();
+    const accepted = await submit(agent, "turn-managed-subagents", "E2E_MANAGED_SUBAGENTS");
+    const events = sseReader(await SELF.fetch(
+      `${agent.events_url}?cursor=${accepted.accepted_cursor}`,
+    ));
+    let event;
+    const observed: unknown[] = [];
+    do {
+      event = await nextWithin(events, "managed subagent completion");
+      observed.push(event.data);
+    } while (event.data.type !== "turn_completed");
+    expect(JSON.stringify(observed)).toContain("spawn_agent");
+    expect(JSON.stringify(observed)).toContain("MANAGED_SUBAGENT_CHILD_OK");
+    expect(event.data).toMatchObject({
+      id: "turn-managed-subagents",
+      final_message: "MANAGED_SUBAGENTS_OK",
+      type: "turn_completed",
+    });
+    await events.cancel();
+  });
+
   it("does not let an unrelated bearer mint managed agents", async () => {
     const response = await RAW_SELF.fetch("https://example.test/v1/agents", {
       method: "POST",

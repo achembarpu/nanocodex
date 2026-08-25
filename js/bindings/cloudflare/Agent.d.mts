@@ -5,6 +5,7 @@ import type {
   ToolConfiguration,
 } from "../types.mjs";
 import type { CloudflareDurableObjectStorage } from "../runtime/cloudflare-durability-store.mjs";
+import type { Tool as SubagentTool } from "../runtime/subagents.mjs";
 
 export type DurableObjectContext = Readonly<{
   storage: CloudflareDurableObjectStorage;
@@ -68,7 +69,8 @@ export declare namespace create {
      * The caller must preserve older exact-ID results before selecting this.
      */
     terminalReceiptRetention?: number | undefined;
-    tools?: ToolConfiguration | undefined;
+    /** The root remains durable; clean subagent children are in-memory. */
+    tools?: ToolConfiguration<SubagentTool> | undefined;
   }>;
   type ReturnType = Agent;
 }

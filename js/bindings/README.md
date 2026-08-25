@@ -148,8 +148,9 @@ Cloudflare Agents default to direct tool mode because Workers prohibit dynamic
 `eval`/`new Function`. Caller-defined tools therefore work without a code
 evaluator. Select `toolMode: "code"` only when also supplying an evaluator that
 is explicitly compatible with the deployed Worker runtime. Runtime-owned
-`Subagents.create()` tools are rejected for durable Agents; child lifecycles
-cannot be reconstructed from the durable journal.
+`Subagents.create()` may be attached to a durable root. Clean children use the
+existing in-memory Rust task tree and are closed with the live root; their
+lifecycles are not reconstructed from the durable journal.
 
 Each Durable Object persists a private runtime identity in its own SQLite
 storage and derives its journal identity from it, so multiple objects in one

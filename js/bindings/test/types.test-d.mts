@@ -202,7 +202,6 @@ async function check() {
     transport: HostTransport.hostManaged(),
   });
   await CloudflareAgent.create(cloudflareOwner, {
-    // @ts-expect-error durable Cloudflare agents cannot reconstruct runtime-owned subagents.
     tools: [...BrowserSubagents.create()],
   });
   await CloudflareAgent.create(cloudflareOwner, {
@@ -348,10 +347,8 @@ async function check() {
     transport: HostTransport.openAi({ apiKey }),
     durability,
     durabilityId: "journal-1",
-    // @ts-expect-error runtime-owned subagents cannot be reconstructed by a durable Agent.
     tools: [...BrowserSubagents.create()],
   });
-  // @ts-expect-error runtime-owned subagents cannot be reconstructed by a durable Agent.
   await Agent.create({
     transport: Transport.openAi({ apiKey }),
     durability,

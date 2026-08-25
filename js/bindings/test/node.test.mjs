@@ -6,6 +6,7 @@ import { WebSocketServer } from "ws";
 
 import { Actions, Agent, Subagents, Transport } from "../node/index.mjs";
 import { createNodeHost } from "../node/host.mjs";
+import { createMemoryDurabilityStore } from "../runtime/durability-store.mjs";
 
 const SESSION_IDS = Object.freeze({
   primary: "018f1f9a-7b3c-7a01-8000-000000000001",
@@ -265,15 +266,18 @@ test("Node-hosted WASM preserves follow-ons, cache identity, events, and custom 
   await server.close();
 });
 
-test("Node-hosted WASM runs the canonical Rust subagent task tree", async () => {
+test("a durable Node-hosted root runs the canonical in-memory Rust subagent task tree", async () => {
   const server = await startServer();
   const decoyServer = await startServer();
   const events = [];
+  const durabilityId = "node-durable-root-subagents";
   const agent = await createWarmAgent({
     apiKey: "test-key",
     websocketUrl: server.url,
     thinking: "none",
     sessionId: "018f1f9a-7b3c-7a08-8000-000000000008",
+    durability: createMemoryDurabilityStore(durabilityId),
+    durabilityId,
     tools: [
       {
         name: "rootOnly",

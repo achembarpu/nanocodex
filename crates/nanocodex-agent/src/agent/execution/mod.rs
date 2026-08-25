@@ -343,11 +343,13 @@ impl ExecutionConfig {
     // The WASM platform configuration is const, while native rollout cloning is not.
     #[cfg_attr(target_family = "wasm", allow(clippy::missing_const_for_fn))]
     pub(crate) fn for_new_thread(&self, operation: &'static str) -> Result<Self> {
-        if self.policy.is_some() {
+        if self.policy.is_some() && operation != "spawn" {
             return Err(NanocodexError::ExecutionPolicyBranchUnsupported { operation });
         }
         Ok(Self {
             platform: self.platform.for_new_thread(),
+            // A clean child is a new in-memory agent. It must never share the
+            // root's operation journal or execution-policy owner.
             policy: None,
         })
     }

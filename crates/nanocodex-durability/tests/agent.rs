@@ -2822,7 +2822,7 @@ async fn changed_tool_profile_blocks_replay_after_spawn_without_creating_a_ghost
 }
 
 #[tokio::test]
-async fn attached_execution_policy_rejects_spawn_before_creating_a_child() -> Result<()> {
+async fn attached_execution_policy_spawns_a_nondurable_clean_child() -> Result<()> {
     let store = crate::MemoryStore::new()?;
     let journal = crate::DurableSession::open(store, "spawn-policy").await?;
     let service_factories = Arc::new(std::sync::atomic::AtomicUsize::new(0));
@@ -2847,16 +2847,15 @@ async fn attached_execution_policy_rejects_spawn_before_creating_a_child() -> Re
         .await?;
     let (agent, events) = builder.build()?;
 
-    assert!(matches!(
-        agent.spawn().await,
-        Err(NanocodexError::ExecutionPolicyBranchUnsupported { operation: "spawn" })
-    ));
+    let (child, child_events) = agent.spawn().await?;
     assert_eq!(
         service_factories.load(std::sync::atomic::Ordering::SeqCst),
-        1,
-        "rejecting spawn must not construct a child service or driver"
+        2,
+        "the clean child must receive its own service and driver"
     );
 
+    child.shutdown().await?;
+    drop((child, child_events));
     agent.shutdown().await?;
     drop((agent, events));
     std::fs::remove_dir_all(workspace)?;

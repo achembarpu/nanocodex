@@ -148,9 +148,9 @@ pub enum NanocodexError {
         capability: &'static str,
     },
 
-    /// A child agent was requested from an execution-policy-owned session.
+    /// A context-inheriting branch was requested from an execution-policy-owned session.
     #[error(
-        "cannot {operation} from an agent with an attached execution policy; build the child with its own execution policy"
+        "cannot {operation} from an agent with an attached execution policy; build the branch with its own execution policy"
     )]
     ExecutionPolicyBranchUnsupported {
         /// Requested child operation.
