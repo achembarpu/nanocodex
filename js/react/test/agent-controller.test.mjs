@@ -83,6 +83,45 @@ test("useAgentController projects the complete ordered semantic transcript", asy
   }
 });
 
+test("authoritative turn results release running state without a terminal stream event", async () => {
+  const frames = fakeAnimationFrames();
+  const source = fakeAgent();
+  let controller;
+
+  function Consumer() {
+    controller = useAgentController(source.agent);
+    return null;
+  }
+
+  let root;
+  try {
+    await act(async () => { root = create(createElement(Consumer)); });
+    await flushFrames(frames);
+    await act(async () => { await controller.submit("first"); });
+    await act(async () => source.emit(event(1, "run.started", { turn_id: "turn-1" })));
+    await flushFrames(frames);
+    assert.equal(controller.running, true);
+
+    await act(async () => source.turns[0].complete("finished authoritatively"));
+    await flushFrames(frames);
+    assert.equal(controller.running, false);
+    assert.equal(controller.pendingTurns, 0);
+
+    await act(async () => { await controller.submit("second", { intent: "queue" }); });
+    assert.equal(source.turns[1].input, "second");
+    await act(async () => source.emit(event(2, "run.started", { turn_id: "turn-2" })));
+    await flushFrames(frames);
+    assert.equal(controller.running, true);
+    await act(async () => source.turns[1].fail(new Error("request failed")));
+    await flushFrames(frames);
+    assert.equal(controller.running, false);
+    assert.equal(controller.pendingTurns, 0);
+    await act(async () => root.unmount());
+  } finally {
+    frames.restore();
+  }
+});
+
 test("prompt controls steer active work, queue roots, cancel the latest turn, and dispose exactly", async () => {
   const frames = fakeAnimationFrames();
   const source = fakeAgent();

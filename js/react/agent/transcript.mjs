@@ -80,6 +80,19 @@ export function turnFinished(state, error, finalMessage, promptId, historyEntryI
     displayedQueuedPrompt: state.displayedQueuedPrompt === promptId
       ? undefined : state.displayedQueuedPrompt,
   };
+  const finishedActiveRun = state.running && (
+    (turnId !== undefined && state.activeTurnId === turnId)
+    || (state.activeTurnId === undefined && next.pendingTurns === 0)
+  );
+  if (finishedActiveRun) {
+    next = {
+      ...next,
+      running: false,
+      activeTurnId: undefined,
+      pendingRunError: undefined,
+      status: error ? "Turn failed" : "Ready",
+    };
+  }
   if (finalMessage?.trim()) {
     let userIndex = -1;
     let assistantIndex = -1;
