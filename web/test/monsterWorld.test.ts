@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
-  GUEST_AGENT_IDS,
   LIVE_AGENT_IDS,
   RESIDENT_IDS,
   VOICE_RADIUS,
@@ -174,7 +173,7 @@ test("voice is spatial off-center and guild-wide at the central relay", () => {
   assert.equal(Object.keys(relay.actors).length, RESIDENT_IDS.length + 1);
   assert.equal(LIVE_AGENT_IDS.length, 6);
   assert.equal(RESIDENT_IDS.length, 48);
-  assert.equal(BASE_RESIDENT_COUNT, 24);
+  assert.equal(BASE_RESIDENT_COUNT, 36);
   assert.equal(MAX_RESIDENT_COUNT, 48);
   assert.equal(activeResidentCount(relay), BASE_RESIDENT_COUNT);
   assert.equal(isGuildRelayActive(relay), true);
@@ -422,11 +421,11 @@ test("raw speech reaches every resident mind without inventing a reducer destina
 
   const withArrival = createWorldState();
   setPopulationTarget(withArrival, BASE_RESIDENT_COUNT + 1);
-  const rejected = playerSpeak(withArrival, "Ash go to the bridge", "call");
+  const rejected = playerSpeak(withArrival, "Mika go to the bridge", "call");
   assert.ok(rejected?.order);
   assert.equal(rejected.order.assigned.length, 0);
   assert.deepEqual(rejected.order.rejected.map(({ actorId, reason }) => ({ actorId, reason })), [
-    { actorId: "guest01", reason: "not-active" },
+    { actorId: "guest13", reason: "not-active" },
   ]);
   assert.equal(orderById(withArrival, rejected.order.id).assignments[0]?.status, "rejected");
 });
@@ -503,7 +502,7 @@ test("imperative orders preserve interactions and can target another resident", 
 test("mixed accepted and rejected assignments settle without claiming full completion", () => {
   const state = createWorldState();
   setPopulationTarget(state, BASE_RESIDENT_COUNT + 1);
-  const receipt = playerSpeak(state, "Cinder and Ash go to the bridge.", "call")?.order;
+  const receipt = playerSpeak(state, "Cinder and Mika go to the bridge.", "call")?.order;
   assert.ok(receipt);
   assert.equal(receipt.assigned.length, 1);
   assert.equal(receipt.rejected.length, 1);
@@ -590,7 +589,12 @@ test("population changes enter from outside, remain physical, and cross an edge 
   assert.equal(activeResidentCount(state), BASE_RESIDENT_COUNT);
   assert.equal(setPopulationTarget(state, Number.NaN).target, BASE_RESIDENT_COUNT);
   assert.equal(state.populationTarget, BASE_RESIDENT_COUNT);
-  assert.ok(GUEST_AGENT_IDS.every((id) => state.actors[id].presence === "absent"));
+  assert.ok(RESIDENT_IDS.slice(0, BASE_RESIDENT_COUNT).every((id) => (
+    state.actors[id].presence === "active"
+  )));
+  assert.ok(RESIDENT_IDS.slice(BASE_RESIDENT_COUNT).every((id) => (
+    state.actors[id].presence === "absent"
+  )));
 
   const increase = setPopulationTarget(state, BASE_RESIDENT_COUNT + 3);
   assert.equal(increase.entering.length, 3);
@@ -602,6 +606,9 @@ test("population changes enter from outside, remain physical, and cross an edge 
   for (let index = 0; index < 20; index += 1) updateWorld(state, 100);
   assert.equal(activeResidentCount(state), BASE_RESIDENT_COUNT + 3);
   assert.ok(increase.entering.every((id) => state.actors[id].presence === "active"));
+  const restored = createWorldState(serializeWorldState(state));
+  assert.equal(restored.populationTarget, BASE_RESIDENT_COUNT + 3);
+  assert.equal(activeResidentCount(restored), BASE_RESIDENT_COUNT + 3);
 
   const selected = increase.entering[0];
   assert.ok(selected);
@@ -621,7 +628,7 @@ test("population changes enter from outside, remain physical, and cross an edge 
   const leaveAll = setPopulationTarget(state, 0);
   assert.equal(leaveAll.exiting.length, BASE_RESIDENT_COUNT + 2);
   assert.equal(activeResidentCount(state), BASE_RESIDENT_COUNT + 2);
-  for (let index = 0; index < 240; index += 1) updateWorld(state, 100);
+  for (let index = 0; index < 600; index += 1) updateWorld(state, 100);
   assert.equal(activeResidentCount(state), 0);
 
   const fillTown = setPopulationTarget(state, MAX_RESIDENT_COUNT);
@@ -678,7 +685,9 @@ test("the World surface stays statically available, stoppable, and semantically 
   assert.match(component, /wake"\} \$\{onMapMindIds\.length\} minds/);
   assert.match(component, /Orchestrate by voice/);
   assert.match(component, /Q cycles loudness/);
-  assert.match(component, /MAX_RESIDENT_TURN_SLOTS = 6/);
+  assert.match(component, /MAX_CONCURRENT_RESIDENT_TURNS = 6/);
+  assert.match(component, /slice\(0, MAX_CONCURRENT_RESIDENT_TURNS\)/);
+  assert.doesNotMatch(component, /turn slots/);
   assert.doesNotMatch(component, /MAX_MODEL_TURNS|MAX_AGENT_TOKENS|modelBudgetExhausted/);
   assert.match(component, /type: "think_batch"/);
   assert.match(component, /Semantic event stream/);

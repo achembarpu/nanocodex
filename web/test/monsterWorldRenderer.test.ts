@@ -8,7 +8,7 @@ import {
 import { drawMonsterWorld } from "../src/monsterWorldRenderer.ts";
 import { createWorldState } from "../src/monsterWorldSimulation.ts";
 
-test("the renderer draws the town and both interiors into the fixed logical viewport", () => {
+test("the renderer draws the town and both interiors into a dense logical viewport", () => {
   const { context, canvas, labels, operations } = recordingContext();
   const state = createWorldState();
 
@@ -26,10 +26,11 @@ test("the renderer draws the town and both interiors into the fixed logical view
     operations.length = 0;
 
     assert.doesNotThrow(() => {
-      drawMonsterWorld(context, state, undefined, { reducedMotion: false });
+      drawMonsterWorld(context, state, undefined, { reducedMotion: false, pixelRatio: 2 });
     });
-    assert.equal(canvas.width, WORLD_PIXEL_WIDTH);
-    assert.equal(canvas.height, WORLD_PIXEL_HEIGHT);
+    assert.equal(canvas.width, WORLD_PIXEL_WIDTH * 4);
+    assert.equal(canvas.height, WORLD_PIXEL_HEIGHT * 4);
+    assert.ok(operations.includes("setTransform(4,0,0,4,0,0)"));
     assert.ok(labels.includes(label), `${scene} plaque`);
     assert.ok(operations.includes(foreground), `${scene} foreground`);
     assert.equal(
@@ -42,17 +43,18 @@ test("the renderer draws the town and both interiors into the fixed logical view
 
 function recordingContext(): Readonly<{
   context: CanvasRenderingContext2D;
-  canvas: { width: number; height: number };
+  canvas: { width: number; height: number; clientWidth: number };
   labels: string[];
   operations: string[];
 }> {
-  const canvas = { width: 0, height: 0 };
+  const canvas = { width: 0, height: 0, clientWidth: WORLD_PIXEL_WIDTH * 2 };
   const labels: string[] = [];
   const operations: string[] = [];
   const methods: Record<string, (...args: unknown[]) => unknown> = {
     measureText: (text) => ({ width: String(text).length * 3 }),
     fillText: (text) => labels.push(String(text)),
     fillRect: (...args) => operations.push(`fillRect(${args.join(",")})`),
+    setTransform: (...args) => operations.push(`setTransform(${args.join(",")})`),
     translate: (...args) => operations.push(`translate(${args.join(",")})`),
   };
   const context = new Proxy({ canvas } as unknown as CanvasRenderingContext2D, {

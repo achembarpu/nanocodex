@@ -73,7 +73,7 @@ import {
 } from "./monsterWorldSimulation";
 import "./MonsterWorld.css";
 
-const MAX_RESIDENT_TURN_SLOTS = 6;
+const MAX_CONCURRENT_RESIDENT_TURNS = 6;
 const WORLD_RENDER_INTERVAL_MS = 50;
 
 type RuntimeStatus = "offline" | "starting" | "ready" | "blocked" | "error";
@@ -235,7 +235,10 @@ export function MonsterWorld() {
         if (now >= nextCanvasDraw) dirty = true;
       }
       if (activeWorld && dirty) {
-        drawMonsterWorld(context, activeWorld, assetsRef.current, { reducedMotion });
+        drawMonsterWorld(context, activeWorld, assetsRef.current, {
+          reducedMotion,
+          pixelRatio: window.devicePixelRatio,
+        });
         dirty = false;
         nextCanvasDraw = now + WORLD_RENDER_INTERVAL_MS;
       }
@@ -487,7 +490,7 @@ export function MonsterWorld() {
           || actor.departure
         ) return false;
         return true;
-      }).slice(0, MAX_RESIDENT_TURN_SLOTS);
+      }).slice(0, MAX_CONCURRENT_RESIDENT_TURNS);
       if (agentIds.length === 0) return;
 
       const batchId = `world-batch-${crypto.randomUUID()}`;
@@ -942,7 +945,6 @@ export function MonsterWorld() {
             <div className="monster-world-scale" aria-label="World population architecture">
               <span><strong>{residentsOnMap}</strong> on map</span>
               <span><strong>1:1</strong> resident/session</span>
-              <span><strong>{MAX_RESIDENT_TURN_SLOTS}</strong> turn slots</span>
             </div>
             <ol>
               {onMapMindIds.map((id) => {
@@ -1083,7 +1085,7 @@ export function MonsterWorld() {
               <strong>{usage.modelTurns} turns · {usage.modelBatches} envelopes</strong>
             </div>
             <p>{usage.totalTokens.toLocaleString()} observed tokens · {usage.estimatedUsd > 0 ? `$${usage.estimatedUsd.toFixed(4)} estimated` : "cost appears when reported"}</p>
-            <p>GPT-5.6 Luna · thinking none · one persistent Luna session per resident · {MAX_RESIDENT_TURN_SLOTS} bounded concurrent turn slots.</p>
+            <p>GPT-5.6 Luna · thinking none · one persistent session per resident · bounded concurrent execution.</p>
             <p>Scout orders are reducer-owned and remain physical under model failure. Autonomous entries marked <b>nanocodex</b> come only from completed Luna batches.</p>
           </footer>
         </aside>

@@ -88,11 +88,20 @@ export function drawMonsterWorld(
   context: CanvasRenderingContext2D,
   state: WorldState,
   assets: WorldAssets | undefined,
-  options: Readonly<{ reducedMotion: boolean }>,
+  options: Readonly<{ reducedMotion: boolean; pixelRatio: number }>,
 ): void {
-  ensureLogicalViewport(context.canvas);
+  const pixelRatio = normalizedPixelRatio(options.pixelRatio);
+  ensureRenderViewport(context.canvas, pixelRatio);
   const camera = worldCameraForState(state);
 
+  context.setTransform(
+    context.canvas.width / WORLD_PIXEL_WIDTH,
+    0,
+    0,
+    context.canvas.height / WORLD_PIXEL_HEIGHT,
+    0,
+    0,
+  );
   context.save();
   context.imageSmoothingEnabled = false;
   context.clearRect(0, 0, WORLD_PIXEL_WIDTH, WORLD_PIXEL_HEIGHT);
@@ -113,15 +122,28 @@ export function drawMonsterWorld(
   context.restore();
 }
 
-function ensureLogicalViewport(canvas: HTMLCanvasElement): void {
+function normalizedPixelRatio(value: number): number {
+  if (!Number.isFinite(value)) return 1;
+  return Math.max(1, Math.min(3, value));
+}
+
+function ensureRenderViewport(
+  canvas: HTMLCanvasElement,
+  pixelRatio: number,
+): void {
+  const cssWidth = canvas.clientWidth > 0 ? canvas.clientWidth : WORLD_PIXEL_WIDTH;
+  const width = Math.max(WORLD_PIXEL_WIDTH, Math.round(cssWidth * pixelRatio));
+  const height = Math.max(
+    WORLD_PIXEL_HEIGHT,
+    Math.round(width * WORLD_PIXEL_HEIGHT / WORLD_PIXEL_WIDTH),
+  );
   if (
-    canvas.width === WORLD_PIXEL_WIDTH &&
-    canvas.height === WORLD_PIXEL_HEIGHT
+    canvas.width !== width ||
+    canvas.height !== height
   ) {
-    return;
+    canvas.width = width;
+    canvas.height = height;
   }
-  canvas.width = WORLD_PIXEL_WIDTH;
-  canvas.height = WORLD_PIXEL_HEIGHT;
 }
 
 function drawScene(

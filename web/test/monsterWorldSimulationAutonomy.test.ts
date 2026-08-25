@@ -100,13 +100,15 @@ test("speech, observations, calls, and plans include non-legacy residents", () =
 
 test("resident lifecycle and global weather changes fence every affected decision", () => {
   const lifecycle = createWorldState();
-  const guestVersion = lifecycle.decisionVersions.guest01;
-  assert.deepEqual(setPopulationTarget(lifecycle, BASE_RESIDENT_COUNT + 1).entering, ["guest01"]);
-  assert.equal(lifecycle.decisionVersions.guest01, guestVersion + 1);
+  const nextResident = AUTONOMOUS_AGENT_IDS[BASE_RESIDENT_COUNT];
+  assert.ok(nextResident);
+  const guestVersion = lifecycle.decisionVersions[nextResident];
+  assert.deepEqual(setPopulationTarget(lifecycle, BASE_RESIDENT_COUNT + 1).entering, [nextResident]);
+  assert.equal(lifecycle.decisionVersions[nextResident], guestVersion + 1);
   for (let index = 0; index < 20; index += 1) updateWorld(lifecycle, 100);
-  const activeVersion = observationFor(lifecycle, "guest01").stateVersion;
-  assert.equal(requestResidentExit(lifecycle, "guest01"), true);
-  assert.equal(lifecycle.decisionVersions.guest01, activeVersion + 1);
+  const activeVersion = observationFor(lifecycle, nextResident).stateVersion;
+  assert.equal(requestResidentExit(lifecycle, nextResident), true);
+  assert.equal(lifecycle.decisionVersions[nextResident], activeVersion + 1);
 
   const weather = createWorldState();
   const versions = { ...weather.decisionVersions };
@@ -150,7 +152,11 @@ test("online Luna control suppresses only new idle fallback routines", () => {
   const fallback = createWorldState();
   setWorldAgentsOnline(fallback, true);
   for (let index = 0; index < 200; index += 1) updateWorld(fallback, 100);
+  const fallbackIds = liveAgentIdsInWorld(fallback);
+  const fallbackIndexes = Object.fromEntries(
+    fallbackIds.map((id) => [id, fallback.actors[id].routineIndex]),
+  );
   setWorldAgentsOnline(fallback, false);
-  updateWorld(fallback, 100);
-  assert.ok(liveAgentIdsInWorld(fallback).every((id) => fallback.actors[id].tasks.length > 0));
+  for (let index = 0; index < 150; index += 1) updateWorld(fallback, 100);
+  assert.ok(fallbackIds.every((id) => fallback.actors[id].routineIndex !== fallbackIndexes[id]));
 });

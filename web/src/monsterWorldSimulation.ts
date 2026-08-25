@@ -59,7 +59,7 @@ export const WORLD_PIXEL_HEIGHT = MAP_PIXEL_HEIGHT;
 export const WORLD_SAVE_KEY = "nanocodex-monster-world-v3";
 export const WORLD_POIS = SCENE_WORLD_POIS;
 export const GUILD_RELAY_RADIUS = 3.25;
-export const BASE_RESIDENT_COUNT = LIVE_AGENT_IDS.length + NAMED_ROUTINE_AGENT_IDS.length;
+export const BASE_RESIDENT_COUNT = 36;
 export const MAX_RESIDENT_COUNT = RESIDENT_IDS.length;
 const RETAINED_TERMINAL_ORDERS = 8;
 const OUTDOOR_TILE_ENERGY_COST = 1;
@@ -1737,9 +1737,7 @@ function createActor(id: ActorId, index: number): WorldActor {
     id,
     ...definition,
     scene: "town",
-    presence: id !== "player" && (GUEST_AGENT_IDS as readonly string[]).includes(id)
-      ? "absent"
-      : "active",
+    presence: id !== "player" && index > BASE_RESIDENT_COUNT ? "absent" : "active",
     direction: "down",
     tasks: [],
     activity: id === "player" ? "exploring the guild grounds" : "starting the morning round",
