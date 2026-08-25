@@ -20,6 +20,7 @@ if (!new Set(["control", "turn"]).has(mode)) {
 const receipts = new Array(agents);
 const phases = {};
 let failure;
+let cleanupPending = 0;
 const runStarted = performance.now();
 try {
   phases.boundary = await phase("boundary", 1, async () => {
@@ -97,6 +98,14 @@ try {
         new URL(`/v1/agents/${retained[index].agent_id}`, baseUrl),
         { method: "DELETE" },
       );
+      if (response.status === 503) {
+        const body = await response.json().catch(() => undefined);
+        if (body?.error === "session_cleanup_pending") {
+          cleanupPending += 1;
+          return;
+        }
+        throw new Error(`cleanup returned HTTP 503: ${JSON.stringify(body)?.slice(0, 1_024)}`);
+      }
       if (response.status !== 204 && response.status !== 404) {
         throw new Error(`cleanup returned HTTP ${response.status}: ${await boundedText(response)}`);
       }
@@ -104,6 +113,23 @@ try {
     }, { continueOnError: true }).catch((error) => {
       failure = failure
         ? new AggregateError([failure, error], "load and cleanup failed")
+        : error;
+      return { error: errorMessage(error) };
+    });
+    phases.cleanup_verify = await phase("cleanup_verify", 1, async () => {
+      const response = await request(new URL("/v1/agents", baseUrl));
+      if (!response.ok) throw new Error(`cleanup verification returned HTTP ${response.status}`);
+      const listed = await response.json();
+      const created = new Set(retained.map(({ agent_id }) => agent_id));
+      const leaked = Array.isArray(listed.data)
+        ? listed.data.filter((id) => typeof id === "string" && created.has(id))
+        : undefined;
+      if (!leaked || leaked.length > 0) {
+        throw new Error(`cleanup verification retained ${leaked?.length ?? "an invalid listing"} agents`);
+      }
+    }).catch((error) => {
+      failure = failure
+        ? new AggregateError([failure, error], "load and cleanup verification failed")
         : error;
       return { error: errorMessage(error) };
     });
@@ -117,6 +143,7 @@ const result = {
   concurrency,
   elapsed_ms: rounded(performance.now() - runStarted),
   phases,
+  cleanup_pending: cleanupPending,
   process: {
     max_rss_bytes: process.resourceUsage().maxRSS * 1_024,
     user_cpu_ms: rounded(process.resourceUsage().userCPUTime / 1_000),
