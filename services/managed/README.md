@@ -221,15 +221,22 @@ npm run smoke:multiplayer --prefix services/managed
 
 ## Managed REST and resumable SSE
 
-Create an agent with an account-issued Nanocodex API key. The UUIDv7 is only a
+Create an agent with an account-issued Nanocodex API key. The UUID is only a
 routing ID. Creation and every state, turn, event, WebSocket, cancellation, and
 deletion route authenticate the account again; knowing an agent ID is not
 authorization. A valid key owned by another account receives the same hidden
 not-found result as an unknown ID.
 
+Supply a stable `Idempotency-Key` for every logical create. The account and key
+derive one opaque agent ID without a shared allocator, so retrying after a lost
+response resumes the same idempotent creation state machine instead of creating
+an unknown second agent. Reusing a key after that agent is permanently deleted
+cannot resurrect it.
+
 ```sh
 curl -fsS -X POST \
   -H "Authorization: Bearer $NANOCODEX_API_KEY" \
+  -H 'Idempotency-Key: create-request-42' \
   http://127.0.0.1:8787/v1/agents
 ```
 

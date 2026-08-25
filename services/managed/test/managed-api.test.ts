@@ -2180,6 +2180,73 @@ describe("managed agents REST and resumable SSE", () => {
     }
   });
 
+  it("derives one agent identity from a caller idempotency key", async () => {
+    const create = () => SELF.fetch("https://example.test/v1/agents", {
+      method: "POST",
+      headers: { "idempotency-key": "create-request-stable-1" },
+    });
+    const [first, replay] = await Promise.all([create(), create()]);
+    expect(first.status, await first.clone().text()).toBe(201);
+    expect(replay.status, await replay.clone().text()).toBe(201);
+    const [firstReceipt, replayReceipt] = await Promise.all([
+      first.json<AgentReceipt>(),
+      replay.json<AgentReceipt>(),
+    ]);
+    expect(replayReceipt).toEqual(firstReceipt);
+    createdAgents.add(firstReceipt.agent_id);
+    expect(await (await SELF.fetch("https://example.test/v1/agents")).json()).toMatchObject({
+      data: [firstReceipt.agent_id],
+    });
+
+    const invalid = await SELF.fetch("https://example.test/v1/agents", {
+      method: "POST",
+      headers: { "idempotency-key": "contains a space" },
+    });
+    expect(invalid.status).toBe(400);
+    expect(await invalid.json()).toEqual({ error: "invalid_idempotency_key" });
+  });
+
+  it("absorbs four transient cleanup-preparation responses", async () => {
+    const originalSessions = testEnv.NANOCODEX_SESSIONS;
+    let attempts = 0;
+    let forwardedStatus: number | undefined;
+    testEnv.NANOCODEX_SESSIONS = {
+      idFromName(name: string) { return originalSessions.idFromName(name); },
+      getByName(name: string) {
+        const session = originalSessions.getByName(name);
+        return {
+          async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+            const request = new Request(input, init);
+            if (request.method === "PUT"
+              && new URL(request.url).pathname === "/credential-binding") {
+              attempts += 1;
+              if (attempts < 5) return new Response(null, { status: 503 });
+            }
+            const response = await session.fetch(request);
+            forwardedStatus = response.status;
+            return response;
+          },
+        } as DurableObjectStub;
+      },
+    } as Env["NANOCODEX_SESSIONS"];
+
+    try {
+      const response = await SELF.fetch("https://example.test/v1/agents", {
+        method: "POST",
+        headers: { "idempotency-key": "create-request-transient-prepare" },
+      });
+      expect(
+        response.status,
+        `${await response.clone().text()} attempts=${attempts} forwarded=${forwardedStatus}`,
+      ).toBe(201);
+      const receipt = await response.json<AgentReceipt>();
+      createdAgents.add(receipt.agent_id);
+      expect(attempts).toBe(5);
+    } finally {
+      testEnv.NANOCODEX_SESSIONS = originalSessions;
+    }
+  });
+
   it("retains durable cleanup ownership when binding and the first unbind both fail", async () => {
     const originalBroker = testEnv.NANOCODEX;
     let session: DurableObjectStub<NanocodexSession> | undefined;

@@ -111,13 +111,12 @@ const MAX_REALTIME_REQUEST_BYTES = 64 * 1024;
 const MAX_REALTIME_CONTEXT_BYTES = 1024 * 1024;
 const MAX_PENDING_REALTIME_OPERATIONS = 32;
 const MAX_RETRY_DELAY_MS = 60_000;
-const SESSION_ID =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const UUID =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const SESSION_ID = UUID;
 const ROOM_ROUTE_ID =
   /^([0-9a-f]{8}-[0-9a-f]{4}-7[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12})~([A-Za-z0-9_-]{43})$/;
 const AGENT_TOKEN = /^[A-Za-z0-9_-]{43}$/;
-const UUID =
-  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
 const TURN_ID = /^[A-Za-z0-9._:-]{1,128}$/;
 const IDEMPOTENCY_KEY = /^[\x21-\x7e]{1,256}$/;
 const REALTIME_ID = /^[A-Za-z0-9._:-]{1,128}$/;
@@ -419,7 +418,13 @@ export default {
       if (!principal) return json({ error: "unauthorized" }, { status: 401 });
       const originFailure = requireSameOriginMutation(request, url, principal);
       if (originFailure) return originFailure;
-      const agentId = uuidV7();
+      const requestKey = request.headers.get("idempotency-key");
+      if (requestKey !== null && !IDEMPOTENCY_KEY.test(requestKey)) {
+        return json({ error: "invalid_idempotency_key" }, { status: 400 });
+      }
+      const agentId = requestKey === null
+        ? uuidV7()
+        : await idempotentAgentId(principal.userId, requestKey);
       const subject = env.NANOCODEX_SESSIONS.idFromName(agentId).toString();
       const stub = env.NANOCODEX_SESSIONS.getByName(agentId);
       const ownershipTimeoutMs = managedOwnershipTimeoutMs(env);
@@ -433,7 +438,7 @@ export default {
             session_id: agentId,
             subject,
           }),
-        }, ownershipTimeoutMs, "agent cleanup preparation");
+        }, ownershipTimeoutMs, "agent cleanup preparation", 5);
       } catch {
         return json({ error: "agent cleanup initialization failed" }, { status: 503 });
       }
@@ -908,6 +913,16 @@ export class NanocodexSession extends DurableComputerSession {
           await transaction.setAlarm(prepared.cleanup_at);
         });
         this.#credentialBinding = prepared;
+      } else if (current.state === "preparing") {
+        const refreshed = {
+          ...current,
+          cleanup_at: Date.now() + CREDENTIAL_BINDING_PREPARE_TIMEOUT_MS,
+        };
+        await this.ctx.storage.transaction(async (transaction) => {
+          await transaction.put(CREDENTIAL_BINDING_KEY, refreshed);
+          await transaction.setAlarm(refreshed.cleanup_at);
+        });
+        this.#credentialBinding = refreshed;
       }
       return new Response(null, { status: 204 });
     }
@@ -3802,9 +3817,10 @@ async function fetchCreateStage(
   init: RequestInit,
   timeoutMs: number,
   operation: string,
+  attempts = 2,
 ): Promise<Response> {
   let failure: unknown;
-  for (let attempt = 0; attempt < 2; attempt += 1) {
+  for (let attempt = 0; attempt < attempts; attempt += 1) {
     try {
       const response = await fetchWithDeadline(binding, input, init, timeoutMs, operation);
       if (response.status !== 408 && response.status !== 429 && response.status < 500) {
@@ -3815,8 +3831,8 @@ async function fetchCreateStage(
     } catch (error) {
       failure = error;
     }
-    if (attempt === 0) {
-      await scheduler.wait(50 + Math.floor(Math.random() * 50));
+    if (attempt + 1 < attempts) {
+      await scheduler.wait((50 * 2 ** attempt) + Math.floor(Math.random() * 50));
     }
   }
   throw failure;
@@ -4328,6 +4344,18 @@ function uuidV7(): string {
     timestamp >>= 8n;
   }
   bytes[6] = (bytes[6]! & 0x0f) | 0x70;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+async function idempotentAgentId(userId: string, requestKey: string): Promise<string> {
+  const digest = new Uint8Array(await crypto.subtle.digest(
+    "SHA-256",
+    encoder.encode(`${userId}\0${requestKey}`),
+  ));
+  const bytes = digest.slice(0, 16);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x80;
   bytes[8] = (bytes[8]! & 0x3f) | 0x80;
   const hex = [...bytes].map((byte) => byte.toString(16).padStart(2, "0")).join("");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;

@@ -27,7 +27,27 @@ const eventEncoder = new TextEncoder();
 /** Create a new managed agent owned by the authenticated account. */
 export async function create(options = {}) {
   const client = managedClient(options);
-  const receipt = await client.json("/v1/agents", { method: "POST" });
+  const idempotencyKey = `managed-create:${globalThis.crypto.randomUUID()}`;
+  let receipt;
+  let failure;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      receipt = await client.json("/v1/agents", {
+        method: "POST",
+        idempotencyKey,
+      });
+      break;
+    } catch (error) {
+      failure = error;
+      if (!(error instanceof ManagedError)
+        || !["network_error", "agent cleanup initialization failed"].includes(error.code)
+        || attempt === 2) {
+        throw error;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
+    }
+  }
+  if (!receipt) throw failure;
   return agentHandle(client, requiredString(receipt, "agent_id"));
 }
 

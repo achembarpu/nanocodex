@@ -92,10 +92,7 @@ ui.newAgent.addEventListener("click", async () => {
   if (!captureAccountKey()) return;
   setBusy(true);
   try {
-    const response = await fetch("/v1/agents", {
-      method: "POST",
-      headers: authHeaders(),
-    });
+    const response = await createAgentRequest("operator-create:" + crypto.randomUUID());
     if (response.status === 401) return rejectAccountKey();
     if (!response.ok) throw new Error("agent creation failed with HTTP " + response.status);
     const created = await response.json();
@@ -464,6 +461,26 @@ function captureAccountKey() {
 
 function authHeaders(extra) {
   return { authorization: "Bearer " + accountKey, ...(extra || {}) };
+}
+
+async function createAgentRequest(idempotencyKey) {
+  let failure;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const response = await fetch("/v1/agents", {
+        method: "POST",
+        headers: authHeaders({ "idempotency-key": idempotencyKey }),
+      });
+      if (response.status !== 503) return response;
+      const body = await response.clone().json().catch(() => undefined);
+      if (body && body.error !== "agent cleanup initialization failed") return response;
+      failure = new Error("agent cleanup initialization failed");
+    } catch (error) {
+      failure = error;
+    }
+    if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
+  }
+  throw failure;
 }
 
 function rejectAccountKey() {

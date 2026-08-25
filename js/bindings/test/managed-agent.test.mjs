@@ -39,6 +39,7 @@ test("managed Agent covers account-scoped create, list, get, and delete", async 
   assert.equal(created.id, agentId);
   assert.equal(Object.hasOwn(created, "websocket_url"), false);
   assert.equal(Object.isFrozen(created), true);
+  assert.match(calls[0].headers.get("idempotency-key"), /^managed-create:[0-9a-f-]{36}$/);
 
   const listed = await Agent.list(options);
   assert.deepEqual(listed.map((agent) => agent.id), [agentId]);
@@ -58,6 +59,32 @@ test("managed Agent covers account-scoped create, list, get, and delete", async 
   assert.equal(calls.filter((request) =>
     request.method === "GET" && new URL(request.url).pathname === `/v1/agents/${agentId}`
   ).length, 2, "open constructs a handle without adding a state probe");
+});
+
+test("managed Agent retries creation with one stable identity", async () => {
+  const keys = [];
+  let attempt = 0;
+  const created = await Agent.create({
+    baseUrl: origin,
+    fetch: async (input, init) => {
+      const request = new Request(input, init);
+      keys.push(request.headers.get("idempotency-key"));
+      attempt += 1;
+      if (attempt === 1) throw new Error("injected lost response");
+      if (attempt === 2) {
+        return Response.json(
+          { error: "agent cleanup initialization failed" },
+          { status: 503 },
+        );
+      }
+      return Response.json({ agent_id: agentId }, { status: 201 });
+    },
+  });
+
+  assert.equal(created.id, agentId);
+  assert.equal(attempt, 3);
+  assert.equal(new Set(keys).size, 1);
+  assert.match(keys[0], /^managed-create:[0-9a-f-]{36}$/);
 });
 
 test("managed server authentication sends only an ncx_live bearer and omits cookies", async () => {
