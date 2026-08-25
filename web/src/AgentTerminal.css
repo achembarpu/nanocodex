@@ -220,12 +220,6 @@
   overflow-wrap: anywhere;
 }
 
-.agent-terminal-brand {
-  display: block;
-  margin-bottom: 22px;
-  font-weight: 700;
-}
-
 .agent-terminal-user {
   margin: 0 0 20px;
   padding-left: 12px;

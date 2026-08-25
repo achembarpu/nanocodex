@@ -298,7 +298,6 @@ export function TerminalTranscriptSurface({
         }}
       >
         <div className="agent-dom-transcript-inner">
-          <strong className="agent-terminal-brand">nanocodex</strong>
           {visibleWelcome ? <article className="agent-terminal-markdown is-assistant is-welcome">
             <Streamdown components={MARKDOWN_COMPONENTS} controls={false} linkSafety={LINK_SAFETY} mode="static" skipHtml>
               {visibleWelcome}

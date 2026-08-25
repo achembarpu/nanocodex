@@ -99,6 +99,7 @@ test("terminal readiness follows the public controller attachment identity", () 
 test("the DOM transcript and native composer remain the only terminal surfaces", () => {
   assert.match(terminal, /className="agent-dom-transcript"/);
   assert.match(composer, /<textarea/);
+  assert.doesNotMatch(terminal, /agent-terminal-brand/);
   assert.doesNotMatch(`${terminal}\n${composer}`, /Xterm|agent-xterm|xterm-helper-textarea/);
 });
 
