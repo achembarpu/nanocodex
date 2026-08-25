@@ -17,15 +17,10 @@ const MAX_REFRESH_BACKOFF_ATTEMPT = 5;
 const MAX_PROVIDER_RESPONSE_BYTES = 16 * 1024;
 const SUBJECT = /^[A-Za-z0-9_-]{43,128}$/;
 const USER_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
-const SUBJECT_DIRECTORY_PREFIX = "agent-subject-v1:";
 const SUBJECT_TOMBSTONE_PREFIX = "!deleted:";
-const SUBJECT_REVISION_PREFIX = "subject-revision:";
-const DEFAULT_SUBJECT_DIRECTORY_IO_TIMEOUT_MS = 10_000;
-const MAX_SUBJECT_RECONCILIATION_ATTEMPTS = 4;
 
 export interface BrokerEnv extends CredentialVaultEnv {
   AGENT_SUBJECTS: DurableObjectNamespace<AgentSubjectDirectory>;
-  SUBJECT_DIRECTORY_IO_TIMEOUT_MS?: string;
   CHATGPT_ISSUER?: string;
   ALLOW_LOCAL_CREDENTIAL_CLAIM?: string;
   LOCAL_CHATGPT_BOOTSTRAP?: string;
@@ -72,15 +67,11 @@ type StoredRow = { envelope: EncryptedEnvelope };
 
 export class AgentSubjectDirectory extends DurableObject<BrokerEnv> {
   readonly #state: DurableObjectState;
-  readonly #env: BrokerEnv;
-  readonly #isSubjectShard: boolean;
   readonly #subjectTails = new Map<string, Promise<void>>();
 
   constructor(state: DurableObjectState, env: BrokerEnv) {
     super(state, env);
     this.#state = state;
-    this.#env = env;
-    this.#isSubjectShard = state.id.name?.startsWith(SUBJECT_DIRECTORY_PREFIX) === true;
   }
 
   async fetch(request: Request): Promise<Response> {
@@ -119,11 +110,7 @@ export class AgentSubjectDirectory extends DurableObject<BrokerEnv> {
     if (!body) return jsonError(400, "invalid_json");
     const subject = stringField(body, "subject");
     if ((url.pathname === "/v1/bind" || url.pathname === "/v1/unbind"
-        || url.pathname === "/v1/shard-unbind" || url.pathname === "/v1/resolve"
-        || url.pathname === "/v1/shard-reconcile"
-        || url.pathname === "/v1/sharded-bind"
-        || url.pathname === "/v1/sharded-unbind"
-        || url.pathname === "/v1/authoritative-resolve")
+        || url.pathname === "/v1/resolve")
       && !SUBJECT.test(subject ?? "")) {
       return jsonError(400, "invalid_subject");
     }
@@ -136,183 +123,27 @@ export class AgentSubjectDirectory extends DurableObject<BrokerEnv> {
         if (subjectTombstoneOwner(current) !== undefined) return "deleted" as const;
         if (current && current !== userId) return "conflict" as const;
         if (!current) await transaction.put(key, userId!);
-        if (this.#isSubjectShard) await incrementSubjectRevision(transaction, subject!);
         return current ? "unchanged" as const : "bound" as const;
       });
       if (result === "deleted") return jsonError(410, "subject_deleted");
       if (result === "conflict") return jsonError(409, "subject_already_bound");
       return json({ status: result }, 200);
     }
-    if (request.method === "POST" && url.pathname === "/v1/unbind"
-      && !this.#isSubjectShard) {
+    if (request.method === "POST" && url.pathname === "/v1/unbind") {
       const userId = stringField(body, "user_id");
       if (!USER_ID.test(userId ?? "")) return jsonError(400, "invalid_user_id");
       const removed = await this.#tombstoneSubject(subject!, userId!);
-      if (removed === "mismatch") return jsonError(409, "subject_owner_mismatch");
-      try { await this.#reconcileShard(subject!); }
-      catch { return jsonError(503, "subject_reconciliation_failed"); }
-      return new Response(null, { status: 204, headers: noStoreHeaders() });
-    }
-    if (request.method === "POST" && (url.pathname === "/v1/shard-unbind"
-      || (url.pathname === "/v1/unbind" && this.#isSubjectShard))) {
-      const userId = stringField(body, "user_id");
-      if (!USER_ID.test(userId ?? "")) return jsonError(400, "invalid_user_id");
-      const removed = await this.#state.storage.transaction(async (transaction) => {
-        const key = `subject:${subject}`;
-        const current = await transaction.get<string>(key);
-        const retainedOwner = subjectTombstoneOwner(current);
-        if ((retainedOwner ?? current) && (retainedOwner ?? current) !== userId) {
-          return "mismatch" as const;
-        }
-        await transaction.put(key, subjectTombstone(userId!));
-        await incrementSubjectRevision(transaction, subject!);
-        return true;
-      });
       if (removed === "mismatch") return jsonError(409, "subject_owner_mismatch");
       return new Response(null, { status: 204, headers: noStoreHeaders() });
     }
     if (request.method === "POST" && url.pathname === "/v1/resolve") {
       const retained = await this.#state.storage.get<string>(`subject:${subject}`);
-      const revision = this.#isSubjectShard
-        ? await this.#state.storage.get<number>(subjectRevisionKey(subject!)) ?? 0
-        : 0;
       const deletedUserId = subjectTombstoneOwner(retained);
       return retained && deletedUserId === undefined
-        ? json({ user_id: retained, revision }, 200)
-        : json({
-          error: "subject_not_bound",
-          revision,
-          ...(deletedUserId === undefined ? {} : { deleted_user_id: deletedUserId }),
-        }, 404);
-    }
-    if (request.method === "POST" && url.pathname === "/v1/shard-reconcile"
-      && this.#isSubjectShard) {
-      const expectedRevision = numberField(body, "expected_revision");
-      const authoritativeState = stringField(body, "authoritative_state");
-      const userId = stringField(body, "user_id");
-      if (expectedRevision === undefined || expectedRevision < 0) {
-        return jsonError(400, "invalid_expected_revision");
-      }
-      if (authoritativeState !== "bound" && authoritativeState !== "deleted"
-        && authoritativeState !== "absent") {
-        return jsonError(400, "invalid_authoritative_state");
-      }
-      if ((authoritativeState === "bound" || authoritativeState === "deleted")
-        && !USER_ID.test(userId ?? "")) {
-        return jsonError(400, "invalid_user_id");
-      }
-      if (authoritativeState === "absent" && userId !== undefined) {
-        return jsonError(400, "unexpected_user_id");
-      }
-      const reconciled = await this.#state.storage.transaction(async (transaction) => {
-        const revisionKey = subjectRevisionKey(subject!);
-        const currentRevision = await transaction.get<number>(revisionKey) ?? 0;
-        if (currentRevision !== expectedRevision) return "stale" as const;
-        const key = `subject:${subject}`;
-        if (authoritativeState === "bound") await transaction.put(key, userId!);
-        else if (authoritativeState === "deleted") {
-          await transaction.put(key, subjectTombstone(userId!));
-        } else await transaction.delete(key);
-        await transaction.put(revisionKey, currentRevision + 1);
-        return currentRevision + 1;
-      });
-      return reconciled === "stale"
-        ? jsonError(409, "stale_shard_revision")
-        : json({ status: "reconciled", revision: reconciled }, 200);
-    }
-    // During the rollback-compatible rollout, the legacy shared directory is
-    // authoritative. Same-subject operations stay ordered through shard
-    // reconciliation, while unrelated subjects never share a network-waiting
-    // tail. A later cutover may remove this hop only after rollback to a
-    // legacy-only broker has been retired.
-    if (request.method === "POST" && url.pathname === "/v1/sharded-bind") {
-      const userId = stringField(body, "user_id");
-      if (!USER_ID.test(userId ?? "")) return jsonError(400, "invalid_user_id");
-      const legacy = await this.#state.storage.get<string>(`subject:${subject}`);
-      if (subjectTombstoneOwner(legacy) !== undefined) return jsonError(410, "subject_deleted");
-      if (legacy && legacy !== userId) return jsonError(409, "subject_already_bound");
-      let authorityUnchanged: boolean;
-      try { authorityUnchanged = await this.#reconcileShardSnapshot(subject!, userId!, legacy); }
-      catch { return jsonError(503, "subject_reconciliation_failed"); }
-      if (!authorityUnchanged) {
-        try { await this.#reconcileShard(subject!); }
-        catch { return jsonError(503, "subject_reconciliation_failed"); }
-      }
-      const committed = await this.#state.storage.transaction(async (transaction) => {
-        const current = await transaction.get<string>(`subject:${subject}`);
-        if (subjectTombstoneOwner(current) !== undefined) return "deleted" as const;
-        if (current && current !== userId) return "conflict" as const;
-        if (!current) await transaction.put(`subject:${subject}`, userId!);
-        return current ? "unchanged" as const : "bound" as const;
-      });
-      if (committed === "deleted") return jsonError(410, "subject_deleted");
-      if (committed === "conflict") return jsonError(409, "subject_already_bound");
-      return json({ status: committed }, 200);
-    }
-    if (request.method === "POST" && url.pathname === "/v1/sharded-unbind") {
-      const userId = stringField(body, "user_id");
-      if (!USER_ID.test(userId ?? "")) return jsonError(400, "invalid_user_id");
-      const key = `subject:${subject}`;
-      const legacy = await this.#state.storage.get<string>(key);
-      const retainedOwner = subjectTombstoneOwner(legacy);
-      if ((retainedOwner ?? legacy) && (retainedOwner ?? legacy) !== userId) {
-        return jsonError(409, "subject_owner_mismatch");
-      }
-      const removed = await this.#tombstoneSubject(subject!, userId!);
-      if (removed === "mismatch") return jsonError(409, "subject_owner_mismatch");
-      try { await this.#reconcileShard(subject!); }
-      catch { return jsonError(503, "subject_reconciliation_failed"); }
-      return new Response(null, { status: 204, headers: noStoreHeaders() });
-    }
-    if (request.method === "POST" && url.pathname === "/v1/authoritative-resolve") {
-      let retained: string | undefined;
-      try { retained = await this.#reconcileShard(subject!); }
-      catch { return jsonError(503, "subject_reconciliation_failed"); }
-      const userId = subjectTombstoneOwner(retained) === undefined ? retained : undefined;
-      return userId ? json({ user_id: userId }, 200) : jsonError(404, "subject_not_bound");
+        ? json({ user_id: retained }, 200)
+        : jsonError(404, "subject_not_bound");
     }
     return jsonError(404, "not_found");
-  }
-
-  async #shardState(subject: string): Promise<{
-    owner?: string;
-    deletedOwner?: string;
-    revision: number;
-  }> {
-    return withDeadline(
-      async (signal) => {
-        const response = await this.#shard(subject).fetch(
-          "https://subjects.internal/v1/resolve",
-          {
-            method: "POST",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ subject }),
-            signal,
-          },
-        );
-        if (!response.ok && response.status !== 404) {
-          await cancelResponseBody(response);
-          throw new Error("subject shard resolution failed");
-        }
-        const value = await response.json<Record<string, unknown>>();
-        const revision = numberField(value, "revision") ?? 0;
-        if (revision < 0) throw new Error("subject shard returned an invalid revision");
-        if (response.status === 404) {
-          const deletedOwner = stringField(value, "deleted_user_id");
-          if (deletedOwner !== undefined && !USER_ID.test(deletedOwner)) {
-            throw new Error("subject shard returned an invalid deletion owner");
-          }
-          return { revision, ...(deletedOwner === undefined ? {} : { deletedOwner }) };
-        }
-        const userId = stringField(value, "user_id");
-        if (!USER_ID.test(userId ?? "")) {
-          throw new Error("subject shard returned an invalid owner");
-        }
-        return { owner: userId!, revision };
-      },
-      this.#directoryIoTimeoutMs(),
-      "subject shard resolution",
-    );
   }
 
   async #tombstoneSubject(subject: string, userId: string): Promise<true | "mismatch"> {
@@ -328,80 +159,6 @@ export class AgentSubjectDirectory extends DurableObject<BrokerEnv> {
     });
   }
 
-  async #reconcileShard(subject: string): Promise<string | undefined> {
-    const key = `subject:${subject}`;
-    for (let attempt = 0; attempt < MAX_SUBJECT_RECONCILIATION_ATTEMPTS; attempt += 1) {
-      const authoritative = await this.#state.storage.get<string>(key);
-      if (await this.#reconcileShardSnapshot(subject, authoritative, authoritative)) {
-        return authoritative;
-      }
-    }
-    throw new Error("subject shard reconciliation did not converge");
-  }
-
-  async #reconcileShardSnapshot(
-    subject: string,
-    authoritative: string | undefined,
-    expectedAuthority: string | undefined,
-  ): Promise<boolean> {
-    const key = `subject:${subject}`;
-    for (let attempt = 0; attempt < MAX_SUBJECT_RECONCILIATION_ATTEMPTS; attempt += 1) {
-      const observed = await this.#shardState(subject);
-      if (await this.#state.storage.get<string>(key) !== expectedAuthority) return false;
-      const deletedOwner = subjectTombstoneOwner(authoritative)
-        ?? (authoritative === undefined ? observed.deletedOwner ?? observed.owner : undefined);
-      const authoritativeState = authoritative !== undefined && deletedOwner === undefined
-        ? "bound"
-        : deletedOwner === undefined ? "absent" : "deleted";
-      const userId = authoritativeState === "bound" ? authoritative : deletedOwner;
-      const reconciled = await withDeadline(
-        async (signal) => {
-          const response = await this.#shard(subject).fetch(
-            "https://subjects.internal/v1/shard-reconcile",
-            {
-              method: "POST",
-              headers: { "content-type": "application/json" },
-              body: JSON.stringify({
-                subject,
-                expected_revision: observed.revision,
-                authoritative_state: authoritativeState,
-                ...(userId === undefined ? {} : { user_id: userId }),
-              }),
-              signal,
-            },
-          );
-          if (response.status === 409) {
-            await cancelResponseBody(response);
-            return "stale" as const;
-          }
-          if (!response.ok) {
-            await cancelResponseBody(response);
-            throw new Error("subject shard reconciliation failed");
-          }
-          await cancelResponseBody(response);
-          return "reconciled" as const;
-        },
-        this.#directoryIoTimeoutMs(),
-        "subject shard reconciliation",
-      );
-      const revalidated = await this.#state.storage.get<string>(key);
-      if (revalidated !== expectedAuthority) return false;
-      if (reconciled === "reconciled") return true;
-    }
-    throw new Error("subject shard reconciliation did not converge");
-  }
-
-  #shard(subject: string): DurableObjectStub<AgentSubjectDirectory> {
-    return this.#env.AGENT_SUBJECTS.getByName(`${SUBJECT_DIRECTORY_PREFIX}${subject}`);
-  }
-
-  #directoryIoTimeoutMs(): number {
-    const configured = Number(
-      this.#env.SUBJECT_DIRECTORY_IO_TIMEOUT_MS ?? DEFAULT_SUBJECT_DIRECTORY_IO_TIMEOUT_MS,
-    );
-    return Number.isFinite(configured) ? Math.min(60_000, Math.max(1, configured))
-      : DEFAULT_SUBJECT_DIRECTORY_IO_TIMEOUT_MS;
-  }
 }
 
 function subjectTombstone(userId: string): string {
@@ -412,40 +169,6 @@ function subjectTombstoneOwner(value: string | undefined): string | undefined {
   return value?.startsWith(SUBJECT_TOMBSTONE_PREFIX)
     ? value.slice(SUBJECT_TOMBSTONE_PREFIX.length)
     : undefined;
-}
-
-function subjectRevisionKey(subject: string): string {
-  return `${SUBJECT_REVISION_PREFIX}${subject}`;
-}
-
-async function incrementSubjectRevision(
-  transaction: DurableObjectTransaction,
-  subject: string,
-): Promise<void> {
-  const key = subjectRevisionKey(subject);
-  const current = await transaction.get<number>(key) ?? 0;
-  await transaction.put(key, current + 1);
-}
-
-async function withDeadline<T>(
-  operation: (signal: AbortSignal) => Promise<T>,
-  timeoutMs: number,
-  description: string,
-): Promise<T> {
-  const controller = new AbortController();
-  const pending = Promise.resolve().then(() => operation(controller.signal));
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const deadline = new Promise<never>((_resolve, reject) => {
-    timer = setTimeout(() => {
-      reject(new Error(`${description} timed out after ${timeoutMs}ms`));
-      controller.abort();
-    }, timeoutMs);
-  });
-  try {
-    return await Promise.race([pending, deadline]);
-  } finally {
-    if (timer !== undefined) clearTimeout(timer);
-  }
 }
 
 export class UserCredentialBroker extends DurableObject<BrokerEnv> {

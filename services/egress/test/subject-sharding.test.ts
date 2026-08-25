@@ -3,7 +3,7 @@ import { describe, expect, it } from "vitest";
 import { handleEgress, type EgressEnv } from "../src/egress";
 
 describe("credential subject directory routing", () => {
-  it("serializes subject mutations through the stable legacy rollout coordinator", async () => {
+  it("routes each subject directly to its own authoritative Durable Object", async () => {
     const routed: string[] = [];
     const stub = {
       fetch: async () => Response.json({ status: "bound" }),
@@ -32,9 +32,9 @@ describe("credential subject directory routing", () => {
     }
 
     expect(routed).toEqual([
-      "agent-subjects-v1",
-      "agent-subjects-v1",
-      "agent-subjects-v1",
+      `agent-subject-v1:${subjectA}`,
+      `agent-subject-v1:${subjectB}`,
+      `agent-subject-v1:${subjectA}`,
     ]);
   });
 });
