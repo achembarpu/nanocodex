@@ -15,6 +15,7 @@ import {
   actorRenderPoint,
   actorsInPaintOrder,
   actorWorldPosition,
+  worldFormationProgress,
   worldCameraForState,
   type WorldActor,
   type WorldState,
@@ -107,6 +108,7 @@ export function drawMonsterWorld(
   context.clearRect(0, 0, WORLD_PIXEL_WIDTH, WORLD_PIXEL_HEIGHT);
   drawScene(context, state, camera, assets?.tileset, options.reducedMotion);
   drawSpeechWave(context, state, camera, options.reducedMotion);
+  drawFormationGuide(context, state, camera);
 
   const actors = actorsInPaintOrder(state).filter((actor) =>
     isActorVisible(actor, camera),
@@ -119,6 +121,42 @@ export function drawMonsterWorld(
   drawAtmosphere(context, state, camera.scene, options.reducedMotion);
   for (const actor of actors) drawActorOverlay(context, state, camera, actor);
   drawScenePlaque(context, camera.scene);
+  context.restore();
+}
+
+function drawFormationGuide(
+  context: CanvasRenderingContext2D,
+  state: WorldState,
+  camera: WorldCamera,
+): void {
+  const progress = worldFormationProgress(state);
+  if (!progress) return;
+  context.save();
+  context.lineWidth = 1;
+  context.setLineDash([2, 2]);
+  context.strokeStyle = progress.verdict === "pass"
+    ? "rgba(151, 226, 174, .62)"
+    : "rgba(241, 239, 218, .42)";
+  for (const path of progress.paths) {
+    const points = path.positions
+      .map((position) => worldToViewport(camera, position))
+      .filter((point): point is Readonly<{ x: number; y: number }> => point !== undefined);
+    if (points.length < 2 || points.length !== path.positions.length) continue;
+    context.beginPath();
+    context.moveTo(points[0]!.x + TILE / 2, points[0]!.y + TILE / 2);
+    for (const point of points.slice(1)) context.lineTo(point.x + TILE / 2, point.y + TILE / 2);
+    if (path.closed) context.closePath();
+    context.stroke();
+  }
+  context.setLineDash([]);
+  for (const target of progress.targets) {
+    const point = worldToViewport(camera, target.position);
+    if (!point) continue;
+    const x = Math.round(point.x + TILE / 2);
+    const y = Math.round(point.y + TILE / 2);
+    context.fillStyle = target.covered ? "rgba(151, 226, 174, .78)" : "rgba(241, 239, 218, .5)";
+    context.fillRect(x - 1, y - 1, 3, 3);
+  }
   context.restore();
 }
 

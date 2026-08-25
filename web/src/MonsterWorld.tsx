@@ -21,6 +21,7 @@ import {
   isResidentId,
   isWorldAgentMessage,
   isWorldUsageLimitMessage,
+  worldObservationCallId,
   type Direction,
   type ResidentId,
   type VoiceLevel,
@@ -29,6 +30,11 @@ import {
   type WorldFailureClass,
   type WorldUsage,
 } from "./monsterWorldProtocol";
+import {
+  WORLD_FORMATION_LADDER,
+  type WorldFormationKind,
+  type WorldFormationPreset,
+} from "./monsterWorldFormations";
 import {
   drawMonsterWorld,
   loadWorldAssets,
@@ -64,10 +70,13 @@ import {
   residentAtWorldPoint,
   serializeWorldState,
   setPopulationTarget,
+  settleWorldFormationTurn,
   setWorldAgentsOnline,
   updateWorld,
   worldToolResultAtDecisionBoundary,
   worldCameraForState,
+  worldFormationProgress,
+  worldFormationResidentNeedsTurn,
   type WorldActor,
   type WorldState,
   type WorldToolAction,
@@ -89,6 +98,7 @@ type UsageTotals = {
 type PendingResidentRequest = {
   requestId: string;
   agentId: ResidentId;
+  callId?: number;
   resultReceived: boolean;
   rejected: boolean;
   cancelled: boolean;
@@ -294,7 +304,7 @@ export function MonsterWorld() {
     workerRef.current = undefined;
     if (worker) {
       worker.postMessage({ protocol: WORLD_PROTOCOL, type: "shutdown" });
-      window.setTimeout(() => worker.terminate(), 900);
+      worker.terminate();
     }
     pendingRequests.current.clear();
     pendingWorldActions.current.clear();
@@ -411,6 +421,9 @@ export function MonsterWorld() {
       || message.failure === "budget"
       || isWorldUsageLimitMessage(failureMessage);
     const activeWorld = worldRef.current;
+    if (activeWorld) {
+      settleWorldFormationTurn(activeWorld, request.callId, request.agentId, message.outcome);
+    }
     const unanswered = activeWorld
       ? hasUnansweredPlayerOrder(activeWorld, request.agentId)
         || hasUnansweredGuildCall(activeWorld, request.agentId)
@@ -499,6 +512,7 @@ export function MonsterWorld() {
         || paused
       ) return;
       const now = performance.now();
+      const formationProgress = worldFormationProgress(activeWorld);
       const activeAgentIds = new Set([...pendingRequests.current.values()].map(({ agentId }) => agentId));
       const orderedAgentIds = [...liveAgentIdsInWorld(activeWorld)].sort((left, right) => {
         const callPriority = Number(
@@ -511,6 +525,7 @@ export function MonsterWorld() {
       const agentIds = orderedAgentIds.filter((agentId) => {
         if (activeAgentIds.has(agentId)) return false;
         if (now < nextThinkAt.current[agentId]) return false;
+        if (!worldFormationResidentNeedsTurn(activeWorld, agentId, formationProgress)) return false;
         const actor = activeWorld.actors[agentId];
         if (
           actor.activeOrderId !== undefined
@@ -523,9 +538,12 @@ export function MonsterWorld() {
       if (agentIds.length === 0) return;
 
       for (const agentId of agentIds) {
+        const observation = observationFor(activeWorld, agentId, formationProgress);
+        const callId = worldObservationCallId(observation);
         const request: PendingResidentRequest = {
           requestId: `world-request-${crypto.randomUUID()}`,
           agentId,
+          ...(callId === undefined ? {} : { callId }),
           resultReceived: false,
           rejected: false,
           cancelled: false,
@@ -538,7 +556,7 @@ export function MonsterWorld() {
             type: "think",
             requestId: request.requestId,
             agentId,
-            observation: observationFor(activeWorld, agentId),
+            observation,
             memory: residentMemoryFor(activeWorld, agentId),
           } satisfies WorldAgentCommand);
         } catch (cause) {
@@ -644,10 +662,9 @@ export function MonsterWorld() {
     return matchingRequests.length;
   };
 
-  const submitDialogue = (event: FormEvent) => {
-    event.preventDefault();
+  const issueDialogue = (input: string) => {
     if (!worldRef.current) return;
-    const speech = playerSpeak(worldRef.current, draft, voiceLevel);
+    const speech = playerSpeak(worldRef.current, input, voiceLevel);
     if (!speech) return;
     const mindsToWake = speech.liveAddressed;
     for (const agentId of mindsToWake) nextThinkAt.current[agentId] = 0;
@@ -665,6 +682,15 @@ export function MonsterWorld() {
     if (mindsToWake.length > 0) startAgents();
     setDraft("");
     invalidateWorld();
+  };
+
+  const submitDialogue = (event: FormEvent) => {
+    event.preventDefault();
+    issueDialogue(draft);
+  };
+
+  const runFormation = (preset: WorldFormationPreset) => {
+    issueDialogue(preset.prompt);
   };
 
   const nudgePlayer = (direction: Direction) => {
@@ -769,6 +795,7 @@ export function MonsterWorld() {
     ? undefined
     : orderProgressNotice(world, latestOrderId);
   const currentSpeechNotice = [speechNotice, latestOrderNotice].filter(Boolean).join(" ");
+  const formationProgress = worldFormationProgress(world);
   void revision;
 
   if (assetError) throw assetError;
@@ -862,6 +889,44 @@ export function MonsterWorld() {
                     : `${voiceLevel} reaches ${VOICE_RADIUS[voiceLevel]} tiles · Q cycles loudness.`}
                 </p>
                 {currentSpeechNotice ? <p className="monster-world-speech-notice" role="status">{currentSpeechNotice}</p> : null}
+                <section className="monster-world-formation-lab" aria-labelledby="world-formation-title">
+                  <header>
+                    <span id="world-formation-title">Formation lab</span>
+                    <b>simple → complex</b>
+                  </header>
+                  <div className="monster-world-formation-ladder">
+                    {WORLD_FORMATION_LADDER.map((preset, index) => (
+                      <button
+                        key={preset.kind}
+                        type="button"
+                        aria-label={`Run ${preset.label} formation`}
+                        title={preset.prompt}
+                        data-active={formationProgress?.kind === preset.kind ? "true" : "false"}
+                        onClick={() => runFormation(preset)}
+                      >
+                        <small>{index + 1}</small>
+                        {preset.label}
+                      </button>
+                    ))}
+                  </div>
+                  {formationProgress ? (
+                    <div
+                      className="monster-world-formation-score"
+                      data-verdict={formationProgress.verdict}
+                      role="status"
+                      aria-live="polite"
+                    >
+                      <strong>{formationProgress.verdict === "pass" ? "PASS" : formationProgress.verdict === "needs_correction" ? "CORRECT" : "RUNNING"}</strong>
+                      <span>{formationProgress.coveredSlots}/{formationProgress.participants} slots</span>
+                      <span>{formationProgress.openSlots} gaps</span>
+                      <span>{formationProgress.spacingPercent}% even</span>
+                      <span>{formationProgress.overlaps} overlaps</span>
+                      <span>{formationProgress.corrections} corrections</span>
+                    </div>
+                  ) : (
+                    <p className="monster-world-formation-empty">Each resident moves independently. The reducer only observes coverage and spacing.</p>
+                  )}
+                </section>
               </form>
             </div>
             <div className="monster-world-population">
@@ -950,6 +1015,27 @@ export function MonsterWorld() {
             </div>
             {agentNotice ? <p className="monster-world-agent-notice" role="status">{agentNotice}</p> : null}
           </div>
+
+          {formationProgress && world.formationExperiment ? (
+            <section className="monster-world-formation-run" aria-labelledby="world-formation-run-title">
+              <header>
+                <div>
+                  <p>Reducer-scored · no central movement plan</p>
+                  <h2 id="world-formation-run-title">{formationLabel(formationProgress.kind)}</h2>
+                </div>
+                <span data-verdict={formationProgress.verdict}>{formationProgress.verdict.replace("_", " ")}</span>
+              </header>
+              <div className="monster-world-formation-metrics">
+                <span><strong>{formationProgress.acted}/{formationProgress.participants}</strong> acted</span>
+                <span><strong>{formationProgress.settled}/{formationProgress.participants}</strong> turns</span>
+                <span><strong>{formationProgress.coveredSlots}/{formationProgress.participants}</strong> coverage</span>
+                <span><strong>{formationProgress.spacingPercent}%</strong> even</span>
+                <span><strong>{formationProgress.maxGapPixels}px</strong> max gap</span>
+                <span><strong>{formationProgress.corrections}</strong> corrections</span>
+              </div>
+              <p>“{world.formationExperiment.prompt}”</p>
+            </section>
+          ) : null}
 
           <section className="monster-world-cast" aria-labelledby="world-cast-title">
             <header>
@@ -1135,6 +1221,10 @@ function carriedItemLabel(item: WorldActor["carrying"]): string {
   if (item === "sunberry") return "Sunberry";
   if (item === "supply_pack") return "Supply pack";
   return "Empty satchel";
+}
+
+function formationLabel(kind: WorldFormationKind): string {
+  return WORLD_FORMATION_LADDER.find((preset) => preset.kind === kind)?.label ?? kind;
 }
 
 function commitModelUsage(

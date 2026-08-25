@@ -1,5 +1,9 @@
 import { Agent, Transport } from "nanocodex/host";
 import type { DefaultAgent, Tool, ToolContext, Turn, TurnResult, TurnUsage } from "nanocodex/host";
+import {
+  createHostManagedWebSocketMultiplexer,
+  defaultHostManagedWebSocketUrl,
+} from "nanocodex/browser";
 import { justBash } from "nanocodex/tools/bash";
 import {
   ACTOR_IDS,
@@ -11,6 +15,7 @@ import {
   decodeWorldPrimitiveAction,
   isWorldAgentCommand,
   isWorldUsageLimitMessage,
+  worldObservationCallId,
   type ResidentId,
   type WorldBoardMessage,
   type WorldAgentCommand,
@@ -70,9 +75,11 @@ const EMOTE_PARAMETERS = Object.freeze({
   properties: { icon: { type: "string", enum: [...WORLD_EMOTES] } },
 });
 
+const createWorldWebSocket = createHostManagedWebSocketMultiplexer();
+
 const WORLD_INSTRUCTIONS = `You are one persistent Luna resident inside Springleaf Rescue Guild, a busy mystery-dungeon world simulated in the user's browser tab.
 
-For every WORLD OBSERVATION, control only your own body with move, interact, emote, and wait. Tool results are authoritative fresh observations from the live World. Continue reasoning and call another tool when reality differs from your expectation; finish only when your part of the instruction is satisfied or cannot progress. Never choose actions for another resident.
+For every WORLD OBSERVATION, control only your own body with move, interact, emote, and observe. Tool results are authoritative fresh observations from the live World. Continue reasoning and call another tool when reality differs from your expectation; finish only when your part of the instruction is satisfied or cannot progress. Never choose actions for another resident.
 
 There is no local speech tool. Every resident shares /workspace/world/room/messages.jsonl through exec_command. Use tail, grep, sed, or awk when room context would help. Post one short message by writing to /workspace/world/room/send. When Scout asks you to coordinate through the room, reading and writing these files is mandatory; merely finishing your turn does not satisfy the instruction. The reducer authenticates you as the author and serializes the post; never edit messages.jsonl. Room reads may be slightly stale, so re-read and correct when coordination matters. Do not post merely to narrate routine movement.
 
@@ -80,7 +87,9 @@ The browser reducer alone owns scene-qualified position, doors, pathfinding, col
 
 Scout's playerOrder contains the player's raw order. It is urgent and completely replaces your previous intent: every action must directly execute this newest order. Interpret natural language and likely typos through your own identity, position, and relationships. guildCall records whether Scout's voice was also physically heard and is spatial context, not a substitute for playerOrder. If requestedTarget is present, move to or interact with exactly that target. The browser may already be executing a recognized destination, so use current state and never pretend an uncommitted result happened.
 
-coListeners is the shared stable identity ordering of every resident reacting to the same utterance. The observation also gives your generic coordinationBasis so you never need to guess or calculate your unique rank. When the natural-language order describes a circle or closed ring, use coordinationBasis.radial as your exact move_relative offset. For a star, use coordinationBasis.star. When it describes two left/right sides, use coordinationBasis.twoSides as your exact offset. For any other spatial formation, interpret it independently using your index, count, and these stable reference vectors, then choose your own distinct move_relative offset. The basis is spatial context, not an order: you must still understand Scout's words and decide whether and how it applies. Check visible positions on later observations and correct crowding. An explicit spatial order remains your social commitment after arrival until Scout gives a newer order.
+coListeners is the shared stable identity ordering of every resident reacting to the same utterance. The observation also gives your generic coordinationBasis so you never need to guess or calculate your unique rank. When Scout describes two left/right sides, use coordinationBasis.twoSides as your exact offset. The basis is spatial context, not an order: you must still understand Scout's words and decide whether and how it applies. After every move result, inspect your fresh position and nearby residents. If you were blocked, displaced, overlapping, or left beside a visibly uneven gap, move again to correct it. Do not finish merely because movement started. Finish only when you occupy your assigned place and local spacing is as even as the World permits. An explicit spatial order remains your social commitment until Scout gives a newer order.
+
+observation.formation is durable reducer feedback for your current formation commitment. Its assignedOffset is your own exact move offset from player, covered says whether you occupy your slot, and coveredSlots/openSlots/spacingPercent/maxGapPixels describe the whole outline. Tool results refresh the same feedback. When formation.covered is false, your first tool call MUST be move to formation.assignedOffset; do not observe, post, or finish first. If that move returns blocked or you remain uncovered, move again from the fresh result until your slot is covered or physically unreachable. When formation.covered is true, hold that slot. Never move another resident.
 
 Use move with anchor and pixel offsets for free spatial instructions. Positive x is right/east, negative x is left/west, positive y is down/south, and negative y is up/north. One world tile is 8 pixels; the reducer rounds to a safe reachable tile.
 
@@ -192,7 +201,11 @@ async function createResidentAgent(entry: WorldThinkEntry): Promise<DefaultAgent
     model: "gpt-5.6-luna",
     thinking: "none",
     toolMode: "direct",
-    transport: Transport.hostManaged({ websocketPreconnect: false }),
+    transport: Transport.hostManaged({
+      createWebSocket: createWorldWebSocket,
+      websocketPreconnect: false,
+      websocketUrl: defaultHostManagedWebSocketUrl(),
+    }),
     tools: {
       move: {
         description: "Move your own resident toward a named target or an exact pixel offset from an anchor. Returns at a decision boundary with fresh World state.",
@@ -215,8 +228,8 @@ async function createResidentAgent(entry: WorldThinkEntry): Promise<DefaultAgent
           );
         },
       },
-      wait: {
-        description: "Wait and observe until the requested duration or an earlier decision boundary.",
+      observe: {
+        description: "Pause briefly and receive fresh World state at the next decision boundary.",
         parameters: WAIT_PARAMETERS,
         handler(input, context) {
           return requestWorldAction(
@@ -368,14 +381,14 @@ function requestWorldAction(
     });
     pendingWorldActions.set(actionId, { active, resolve, reject, signal, onAbort });
     signal.addEventListener("abort", onAbort, { once: true });
-    const call = active.entry.observation.playerOrder ?? active.entry.observation.guildCall;
+    const callId = worldObservationCallId(active.entry.observation);
     post({
       protocol: WORLD_PROTOCOL,
       type: "action",
       actionId,
       requestId: active.entry.requestId,
       agentId: active.entry.agentId,
-      ...(call === undefined ? {} : { heardCallId: call.id }),
+      ...(callId === undefined ? {} : { heardCallId: callId }),
       action,
     });
   });
@@ -400,14 +413,14 @@ function requestWorldRoomSend(
     });
     pendingRoomSends.set(sendId, { active, resolve, reject, signal, onAbort });
     signal.addEventListener("abort", onAbort, { once: true });
-    const call = active.entry.observation.playerOrder ?? active.entry.observation.guildCall;
+    const callId = worldObservationCallId(active.entry.observation);
     post({
       protocol: WORLD_PROTOCOL,
       type: "room_send",
       sendId,
       requestId: active.entry.requestId,
       agentId: active.entry.agentId,
-      ...(call === undefined ? {} : { heardCallId: call.id }),
+      ...(callId === undefined ? {} : { heardCallId: callId }),
       text,
     });
   });
@@ -632,6 +645,7 @@ function residentPrompt(entry: WorldThinkEntry): string {
       roster: observation.roster,
       ...(observation.playerOrder === undefined ? {} : { playerOrder: observation.playerOrder }),
       ...(observation.guildCall === undefined ? {} : { guildCall: observation.guildCall }),
+      ...(observation.formation === undefined ? {} : { formation: observation.formation }),
       ...(coordinationBasis === undefined ? {} : { coordinationBasis }),
       room: {
         path: "/workspace/world/room/messages.jsonl",

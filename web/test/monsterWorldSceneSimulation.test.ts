@@ -10,6 +10,11 @@ import {
   type WorldTarget,
 } from "../src/monsterWorldProtocol.ts";
 import {
+  WORLD_FORMATION_KINDS,
+  WORLD_FORMATION_LADDER,
+  formationOffset,
+} from "../src/monsterWorldFormations.ts";
+import {
   WORLD_POIS,
   isWorldPositionBlocked,
 } from "../src/monsterWorldMap.ts";
@@ -22,6 +27,7 @@ import {
   WORLD_SAVE_KEY,
   actorWorldPosition,
   applyWorldPlan,
+  applyWorldToolAction,
   createWorldState,
   movePlayer,
   observationFor,
@@ -30,8 +36,11 @@ import {
   requestResidentExit,
   serializeWorldState,
   setWorldAgentsOnline,
+  settleWorldFormationTurn,
   updateWorld,
   worldCameraForState,
+  worldFormationProgress,
+  worldFormationResidentNeedsTurn,
   type WorldState,
 } from "../src/monsterWorldSimulation.ts";
 
@@ -326,14 +335,12 @@ test("observations and hearing are scene-aware while the public board and roster
   );
 });
 
-test("six situated residents execute stable circle, star, and two-side slots without collisions or swaps", () => {
+test("six situated residents execute every progressive formation without collisions or swaps", () => {
   const listeners = ["cinder", "moss", "rill", "luma", "iris", "rook"] as const;
-  for (const formation of ["radial", "star", "twoSides"] as const) {
+  for (const formation of WORLD_FORMATION_KINDS) {
     const state = formationWorld(listeners);
-    for (const id of listeners) {
-      const basis = coordinationBasisFor(listeners, id);
-      assert.ok(basis);
-      const offset = basis[formation];
+    for (const [index, id] of listeners.entries()) {
+      const offset = formationOffset(formation, index, listeners.length);
       applyRelativePlan(
         state,
         id,
@@ -346,16 +353,61 @@ test("six situated residents execute stable circle, star, and two-side slots wit
     advanceFormation(state, listeners);
     const destinations = listeners.map((id) => actorWorldPosition(state.actors[id]));
     assert.equal(new Set(destinations.map(positionKey)).size, listeners.length);
-    assert.deepEqual(destinations, listeners.map((id) => {
-      const basis = coordinationBasisFor(listeners, id);
-      assert.ok(basis);
-      const offset = basis[formation];
+    assert.deepEqual(destinations, listeners.map((_id, index) => {
+      const offset = formationOffset(formation, index, listeners.length);
       return {
         scene: "town",
         x: state.actors.player.x + offset.dxPixels / 8,
         y: state.actors.player.y + offset.dyPixels / 8,
       };
     }));
+  }
+});
+
+test("formation experiments score complete coverage, even spacing, and independent settlement", () => {
+  const listeners = ["cinder", "moss", "rill", "luma", "iris", "rook"] as const;
+  for (const preset of WORLD_FORMATION_LADDER) {
+    const state = formationWorld(listeners);
+    const speech = playerSpeak(state, preset.prompt, "call");
+    assert.ok(speech);
+    for (const [index, id] of listeners.entries()) {
+      const observation = observationFor(state, id);
+      assert.ok(observation.playerOrder);
+      const offset = formationOffset(preset.kind, index, listeners.length);
+      const application = applyWorldToolAction(state, {
+        actionId: `${preset.kind}-${id}`,
+        requestId: `${preset.kind}-${id}-turn`,
+        agentId: id,
+        heardCallId: speech.callId,
+        action: {
+          kind: "move_relative",
+          anchor: "player",
+          dx_pixels: offset.dxPixels,
+          dy_pixels: offset.dyPixels,
+        },
+      });
+      assert.equal(application.accepted, true, `${preset.kind}-${id}`);
+      settleWorldFormationTurn(state, speech.callId, id, "completed");
+    }
+    advanceFormation(state, listeners);
+    const progress = worldFormationProgress(state);
+    assert.ok(progress);
+    assert.equal(progress.kind, preset.kind);
+    assert.equal(progress.acted, listeners.length);
+    assert.equal(progress.settled, listeners.length);
+    assert.equal(progress.coveredSlots, listeners.length);
+    assert.equal(progress.openSlots, 0);
+    assert.equal(progress.overlaps, 0);
+    assert.equal(progress.spacingPercent, 100);
+    assert.equal(progress.maxGapPixels, 0);
+    assert.equal(progress.verdict, "pass");
+    for (const id of listeners) {
+      assert.equal(worldFormationResidentNeedsTurn(state, id), false, `${preset.kind}-${id}-held`);
+    }
+    state.actors.player.x += 2;
+    for (const id of listeners) {
+      assert.equal(worldFormationResidentNeedsTurn(state, id), true, `${preset.kind}-${id}-reanchor`);
+    }
   }
 });
 

@@ -141,18 +141,10 @@ test("one resident action is correlated to its owning turn and fresh reducer res
   }), false);
 });
 
-test("stable co-listener ordering yields unique circle, star, and mirrored two-side slots", () => {
+test("stable co-listener ordering yields mirrored two-side slots", () => {
   const listeners = ["cinder", "moss", "rill", "luma", "iris", "rook"] as const;
   const bases = listeners.map((id) => coordinationBasisFor(listeners, id));
 
-  assert.deepEqual(bases.map((basis) => basis?.radial), [
-    { dxPixels: 64, dyPixels: 0 },
-    { dxPixels: 32, dyPixels: 56 },
-    { dxPixels: -32, dyPixels: 56 },
-    { dxPixels: -64, dyPixels: 0 },
-    { dxPixels: -32, dyPixels: -56 },
-    { dxPixels: 32, dyPixels: -56 },
-  ]);
   assert.deepEqual(bases.map((basis) => basis?.twoSides), [
     { side: "left", dxPixels: -64, dyPixels: -32 },
     { side: "left", dxPixels: -64, dyPixels: 0 },
@@ -161,21 +153,6 @@ test("stable co-listener ordering yields unique circle, star, and mirrored two-s
     { side: "right", dxPixels: 64, dyPixels: 0 },
     { side: "right", dxPixels: 64, dyPixels: 32 },
   ]);
-  assert.deepEqual(bases.map((basis) => basis?.star), [
-    { dxPixels: 0, dyPixels: -96 },
-    { dxPixels: 72, dyPixels: -32 },
-    { dxPixels: 48, dyPixels: 32 },
-    { dxPixels: 0, dyPixels: 40 },
-    { dxPixels: -48, dyPixels: 32 },
-    { dxPixels: -72, dyPixels: -32 },
-  ]);
-  assert.equal(new Set(bases.map((basis) => JSON.stringify(basis?.radial))).size, listeners.length);
-  assert.equal(new Set(bases.map((basis) => JSON.stringify(basis?.star))).size, listeners.length);
-  const fullPopulation = RESIDENT_IDS.slice(0, 36);
-  assert.equal(
-    new Set(fullPopulation.map((id) => JSON.stringify(coordinationBasisFor(fullPopulation, id)?.star))).size,
-    fullPopulation.length,
-  );
   assert.deepEqual(coordinationBasisFor(listeners, "cinder"), bases[0]);
   assert.equal(coordinationBasisFor(listeners, "june"), undefined);
 });

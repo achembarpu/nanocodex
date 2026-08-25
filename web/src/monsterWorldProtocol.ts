@@ -1,4 +1,10 @@
-export const WORLD_PROTOCOL = "nanocodex.monster-world.v5" as const;
+import {
+  WORLD_FORMATION_KINDS,
+  type WorldFormationKind,
+  type WorldFormationOffset,
+} from "./monsterWorldFormations.ts";
+
+export const WORLD_PROTOCOL = "nanocodex.monster-world.v6" as const;
 
 export const WORLD_SCENE_IDS = ["town", "guild_hall", "trail_shop"] as const;
 export const WORLD_ITEM_KINDS = ["sunberry", "supply_pack"] as const;
@@ -171,6 +177,22 @@ export type WorldPlayerOrder = Readonly<{
   requestedTarget?: WorldTarget;
 }>;
 
+export type WorldFormationFeedback = Readonly<{
+  callId: number;
+  kind: WorldFormationKind;
+  prompt: string;
+  index: number;
+  count: number;
+  assignedOffset: WorldFormationOffset;
+  assignedPosition: WorldPosition;
+  errorPixels: number;
+  covered: boolean;
+  coveredSlots: number;
+  openSlots: number;
+  spacingPercent: number;
+  maxGapPixels: number;
+}>;
+
 export type WorldBoardMessage = Readonly<{
   id: number;
   fromId: ActorId;
@@ -232,6 +254,7 @@ export type WorldObservation = Readonly<{
   }>[];
   playerOrder?: WorldPlayerOrder;
   guildCall?: HeardGuildCall;
+  formation?: WorldFormationFeedback;
   guildBoard: readonly WorldBoardMessage[];
   recentEvents: readonly string[];
   availableTargets: readonly WorldTarget[];
@@ -262,6 +285,12 @@ export const EMPTY_WORLD_RESIDENT_MEMORY: WorldResidentMemory = Object.freeze({
   lastBoardMessageId: 0,
 });
 
+export function worldObservationCallId(observation: WorldObservation): number | undefined {
+  return observation.playerOrder?.id
+    ?? observation.guildCall?.id
+    ?? observation.formation?.callId;
+}
+
 export type WorldThinkEntry = Readonly<{
   requestId: string;
   agentId: ResidentId;
@@ -281,6 +310,7 @@ export type WorldToolResult = Readonly<{
   self: WorldObservation["self"];
   nearby: WorldObservation["nearby"];
   relevantEvents: readonly string[];
+  formation?: WorldFormationFeedback;
 }>;
 
 export type WorldRoomSendResult =
@@ -479,8 +509,6 @@ function memoryAfterDecision(
 export type ResidentCoordinationBasis = Readonly<{
   index: number;
   count: number;
-  radial: Readonly<{ dxPixels: number; dyPixels: number }>;
-  star: Readonly<{ dxPixels: number; dyPixels: number }>;
   twoSides: Readonly<{
     side: "left" | "right";
     dxPixels: number;
@@ -495,7 +523,6 @@ export function coordinationBasisFor(
   const index = coListeners.indexOf(residentId);
   const count = coListeners.length;
   if (index < 0 || count < 1) return undefined;
-  const angle = (Math.PI * 2 * index) / count;
   const leftSize = Math.ceil(count / 2);
   const left = index < leftSize;
   const rank = left ? index : index - leftSize;
@@ -503,40 +530,11 @@ export function coordinationBasisFor(
   return Object.freeze({
     index,
     count,
-    radial: Object.freeze({
-      dxPixels: roundToEight(64 * Math.cos(angle)),
-      dyPixels: roundToEight(64 * Math.sin(angle)),
-    }),
-    star: starCoordinationOffset(index, count),
     twoSides: Object.freeze({
       side: left ? "left" : "right",
       dxPixels: left ? -64 : 64,
       dyPixels: roundToEight(32 * (rank - (groupSize - 1) / 2)),
     }),
-  });
-}
-
-function starCoordinationOffset(
-  index: number,
-  count: number,
-): Readonly<{ dxPixels: number; dyPixels: number }> {
-  const progress = index * 10 / count;
-  const segment = Math.floor(progress);
-  const fraction = progress - segment;
-  const start = starVertex(segment);
-  const end = starVertex((segment + 1) % 10);
-  return Object.freeze({
-    dxPixels: roundToEight(start.x + (end.x - start.x) * fraction),
-    dyPixels: roundToEight(start.y + (end.y - start.y) * fraction),
-  });
-}
-
-function starVertex(index: number): Readonly<{ x: number; y: number }> {
-  const angle = -Math.PI / 2 + index * Math.PI / 5;
-  const radius = index % 2 === 0 ? 96 : 40;
-  return Object.freeze({
-    x: radius * Math.cos(angle),
-    y: radius * Math.sin(angle),
   });
 }
 
@@ -664,6 +662,7 @@ function isWorldToolResult(value: unknown, agentId: ResidentId): value is WorldT
     || !isWorldObservationSelf(result.self, agentId)
     || !isDenseArrayOf(result.nearby, isWorldNearbyActor)
     || !isDenseArrayOf(result.relevantEvents, isString)
+    || (result.formation !== undefined && !isWorldFormationFeedback(result.formation))
   ) return false;
   const outcome = result.outcome as Partial<WorldActionOutcome>;
   return (
@@ -742,6 +741,7 @@ function isWorldObservation(value: unknown, agentId: ResidentId): value is World
     && isDenseArrayOf(observation.roster, isWorldRosterActor)
     && (observation.playerOrder === undefined || isWorldPlayerOrder(observation.playerOrder))
     && (observation.guildCall === undefined || isHeardGuildCall(observation.guildCall))
+    && (observation.formation === undefined || isWorldFormationFeedback(observation.formation))
     && isDenseArrayOf(observation.guildBoard, isWorldBoardMessage)
     && isDenseArrayOf(observation.recentEvents, isString)
     && isDenseArrayOf(observation.availableTargets, isWorldTarget)
@@ -827,6 +827,48 @@ function isWorldPlayerOrder(value: unknown): value is WorldPlayerOrder {
     && order.text.length <= 140
     && isUniqueResidentList(order.coListeners)
     && (order.requestedTarget === undefined || isWorldTarget(order.requestedTarget));
+}
+
+function isWorldFormationFeedback(value: unknown): value is WorldFormationFeedback {
+  if (!isJsonObject(value)) return false;
+  const feedback = value as Partial<WorldFormationFeedback>;
+  return Number.isSafeInteger(feedback.callId)
+    && (feedback.callId as number) > 0
+    && typeof feedback.kind === "string"
+    && (WORLD_FORMATION_KINDS as readonly string[]).includes(feedback.kind)
+    && typeof feedback.prompt === "string"
+    && feedback.prompt.length > 0
+    && feedback.prompt.length <= 140
+    && Number.isSafeInteger(feedback.index)
+    && (feedback.index as number) >= 0
+    && Number.isSafeInteger(feedback.count)
+    && (feedback.count as number) > 0
+    && (feedback.index as number) < (feedback.count as number)
+    && isWorldFormationOffset(feedback.assignedOffset)
+    && isWorldPosition(feedback.assignedPosition)
+    && Number.isSafeInteger(feedback.errorPixels)
+    && (feedback.errorPixels as number) >= 0
+    && typeof feedback.covered === "boolean"
+    && Number.isSafeInteger(feedback.coveredSlots)
+    && (feedback.coveredSlots as number) >= 0
+    && (feedback.coveredSlots as number) <= (feedback.count as number)
+    && Number.isSafeInteger(feedback.openSlots)
+    && (feedback.openSlots as number) === (feedback.count as number) - (feedback.coveredSlots as number)
+    && Number.isSafeInteger(feedback.spacingPercent)
+    && (feedback.spacingPercent as number) >= 0
+    && (feedback.spacingPercent as number) <= 100
+    && Number.isSafeInteger(feedback.maxGapPixels)
+    && (feedback.maxGapPixels as number) >= 0;
+}
+
+function isWorldFormationOffset(value: unknown): value is WorldFormationOffset {
+  if (!isJsonObject(value)) return false;
+  return Number.isSafeInteger(value.dxPixels)
+    && Math.abs(value.dxPixels as number) <= 192
+    && (value.dxPixels as number) % 8 === 0
+    && Number.isSafeInteger(value.dyPixels)
+    && Math.abs(value.dyPixels as number) <= 192
+    && (value.dyPixels as number) % 8 === 0;
 }
 
 function isWorldBoardMessage(value: unknown): value is WorldBoardMessage {

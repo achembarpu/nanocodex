@@ -19,6 +19,7 @@ import {
   type VoiceLevel,
   type WorldAction,
   type WorldBoardMessage,
+  type WorldFormationFeedback,
   type WorldInteraction,
   type WorldItemKind,
   type WorldObservation,
@@ -32,6 +33,12 @@ import {
   type WorldTarget,
   type WorldToolResult,
 } from "./monsterWorldProtocol.ts";
+import {
+  formationKindForPrompt,
+  formationOffset,
+  formationPathGroups,
+  type WorldFormationKind,
+} from "./monsterWorldFormations.ts";
 import {
   WORLD_ENTRY_PORTALS,
   WORLD_PIXEL_HEIGHT as MAP_PIXEL_HEIGHT,
@@ -189,6 +196,44 @@ export type WorldMission = {
   detail: string;
 };
 
+export type WorldFormationExperiment = {
+  callId: number;
+  kind: WorldFormationKind;
+  prompt: string;
+  startedAtMs: number;
+  participantIds: readonly ResidentId[];
+  actionCounts: Partial<Record<ResidentId, number>>;
+  moveCounts: Partial<Record<ResidentId, number>>;
+  settled: Partial<Record<ResidentId, "completed" | "failed" | "cancelled">>;
+};
+
+export type WorldFormationProgress = Readonly<{
+  callId: number;
+  kind: WorldFormationKind;
+  participants: number;
+  acted: number;
+  settled: number;
+  coveredSlots: number;
+  openSlots: number;
+  overlaps: number;
+  corrections: number;
+  spacingPercent: number;
+  maxGapPixels: number;
+  elapsedMs: number;
+  physicallySettled: boolean;
+  verdict: "running" | "pass" | "needs_correction";
+  targets: readonly Readonly<{
+    agentId: ResidentId;
+    position: WorldPosition;
+    covered: boolean;
+    errorPixels: number;
+  }>[];
+  paths: readonly Readonly<{
+    closed: boolean;
+    positions: readonly WorldPosition[];
+  }>[];
+}>;
+
 export type WorldState = {
   elapsedMs: number;
   minuteOfDay: number;
@@ -217,6 +262,7 @@ export type WorldState = {
   rng: number;
   seenRequestIds: string[];
   orders: WorldOrder[];
+  formationExperiment?: WorldFormationExperiment;
   agentsOnline: boolean;
   agentDecisions: number;
   populationTarget: number;
@@ -854,6 +900,19 @@ export function playerSpeak(
   });
   const directives = resolvePlayerDirectives(state, text, boardReaders);
   const callId = state.nextActivityId;
+  const formationKind = formationKindForPrompt(text);
+  state.formationExperiment = formationKind === undefined
+    ? undefined
+    : {
+        callId,
+        kind: formationKind,
+        prompt: text,
+        startedAtMs: state.elapsedMs,
+        participantIds: Object.freeze([...boardReaders]),
+        actionCounts: {},
+        moveCounts: {},
+        settled: {},
+      };
   const order = directives.size > 0
     ? queuePlayerOrder(state, callId, text, directives)
     : undefined;
@@ -1480,6 +1539,7 @@ export function applyWorldPlan(state: WorldState, plan: WorldPlan): PlanApplicat
   state.seenRequestIds.push(plan.requestId);
   if (state.seenRequestIds.length > 128) state.seenRequestIds.shift();
   state.agentDecisions += 1;
+  recordFormationActions(state, plan.agentId, plan.heardCallId, plan.steps);
   addActivity(
     state,
     "nanocodex",
@@ -1523,6 +1583,7 @@ export function applyWorldToolAction(
   state.seenRequestIds.push(request.actionId);
   if (state.seenRequestIds.length > 128) state.seenRequestIds.shift();
   state.agentDecisions += 1;
+  recordFormationActions(state, request.agentId, request.heardCallId, [request.action]);
 
   return {
     accepted: true,
@@ -1532,6 +1593,33 @@ export function applyWorldToolAction(
       activityCursor: state.nextActivityId - 1,
     }),
   };
+}
+
+export function settleWorldFormationTurn(
+  state: WorldState,
+  callId: number | undefined,
+  agentId: ResidentId,
+  outcome: "completed" | "failed" | "cancelled",
+): void {
+  const experiment = state.formationExperiment;
+  if (!experiment || experiment.callId !== callId || !experiment.participantIds.includes(agentId)) return;
+  experiment.settled[agentId] = outcome;
+}
+
+function recordFormationActions(
+  state: WorldState,
+  agentId: ResidentId,
+  callId: number | undefined,
+  actions: readonly WorldAction[],
+): void {
+  const experiment = state.formationExperiment;
+  if (!experiment || experiment.callId !== callId || !experiment.participantIds.includes(agentId)) return;
+  const flattened = actions.flatMap((action) => action.kind === "random_choice"
+    ? [...action.if_true, ...action.if_false]
+    : [action]);
+  experiment.actionCounts[agentId] = (experiment.actionCounts[agentId] ?? 0) + flattened.length;
+  const moves = flattened.filter((action) => action.kind === "move" || action.kind === "move_relative").length;
+  if (moves > 0) experiment.moveCounts[agentId] = (experiment.moveCounts[agentId] ?? 0) + moves;
 }
 
 export function applyWorldRoomSend(
@@ -1641,6 +1729,7 @@ function worldToolResult(
     self: observation.self,
     nearby: observation.nearby,
     relevantEvents: Object.freeze(relevantEvents),
+    ...(observation.formation === undefined ? {} : { formation: observation.formation }),
   });
 }
 
@@ -1667,7 +1756,11 @@ function actionTargetsPresent(state: WorldState, action: WorldAction): boolean {
     || state.actors[action.target].presence === "active";
 }
 
-export function observationFor(state: WorldState, agentId: ResidentId): WorldObservation {
+export function observationFor(
+  state: WorldState,
+  agentId: ResidentId,
+  formationProgress = worldFormationProgress(state),
+): WorldObservation {
   const actor = state.actors[agentId];
   const selfPoint = actorRenderPoint(actor);
   const nearby = ACTOR_IDS
@@ -1702,6 +1795,7 @@ export function observationFor(state: WorldState, agentId: ResidentId): WorldObs
   const playerOrder = hasUnansweredPlayerOrder(state, agentId)
     ? state.playerOrders[agentId]
     : undefined;
+  const formation = worldFormationFeedbackFor(state, agentId, formationProgress);
   const availableTargets = WORLD_TARGETS.filter((target) =>
     !isActorId(target)
     || target === "player"
@@ -1747,6 +1841,7 @@ export function observationFor(state: WorldState, agentId: ResidentId): WorldObs
     roster: Object.freeze(roster),
     ...(playerOrder === undefined ? {} : { playerOrder }),
     ...(guildCall === undefined ? {} : { guildCall }),
+    ...(formation === undefined ? {} : { formation }),
     guildBoard: Object.freeze(
       state.guildMessages
         .filter(({ audience }) => audience === undefined || audience.includes(agentId))
@@ -1761,6 +1856,155 @@ export function observationFor(state: WorldState, agentId: ResidentId): WorldObs
     ),
     availableTargets: Object.freeze(availableTargets),
     supplies: Object.freeze({ ...state.supplies }),
+  });
+}
+
+export function worldFormationProgress(state: WorldState): WorldFormationProgress | undefined {
+  const experiment = state.formationExperiment;
+  if (!experiment) return undefined;
+  const player = actorWorldPosition(state.actors.player);
+  const actorPoints = new Map(experiment.participantIds.map((agentId) => [
+    agentId,
+    actorRenderPoint(state.actors[agentId]),
+  ]));
+  const targets = experiment.participantIds.map((agentId, index) => {
+    const offset = formationOffset(experiment.kind, index, experiment.participantIds.length);
+    const position = Object.freeze({
+      scene: player.scene,
+      x: player.x + offset.dxPixels / 8,
+      y: player.y + offset.dyPixels / 8,
+    }) satisfies WorldPosition;
+    const actor = state.actors[agentId];
+    const actorPoint = actorPoints.get(agentId)!;
+    const errorPixels = actor.scene === position.scene
+      ? Math.round(Math.hypot(actorPoint.x - position.x, actorPoint.y - position.y) * 8)
+      : WORLD_PIXEL_WIDTH;
+    return Object.freeze({
+      agentId,
+      position,
+      covered: errorPixels <= 8,
+      errorPixels,
+    });
+  });
+  const pathGroups = formationPathGroups(experiment.kind, targets.length);
+  const paths = pathGroups.map(({ indexes, closed }) =>
+    Object.freeze({
+      closed,
+      positions: Object.freeze(indexes.map((index) => targets[index]!.position)),
+    })
+  );
+  const gaps = pathGroups.flatMap(({ indexes, closed }) => {
+    const pairCount = closed ? indexes.length : Math.max(0, indexes.length - 1);
+    return Array.from({ length: pairCount }, (_, pairIndex) => {
+      const leftIndex = indexes[pairIndex]!;
+      const rightIndex = indexes[(pairIndex + 1) % indexes.length]!;
+      const leftTarget = targets[leftIndex]!.position;
+      const rightTarget = targets[rightIndex]!.position;
+      const leftAgentId = targets[leftIndex]!.agentId;
+      const rightAgentId = targets[rightIndex]!.agentId;
+      const leftActor = state.actors[leftAgentId];
+      const rightActor = state.actors[rightAgentId];
+      const leftPoint = actorPoints.get(leftAgentId)!;
+      const rightPoint = actorPoints.get(rightAgentId)!;
+      const expected = positionDistance(leftTarget, rightTarget) * 8;
+      const actual = leftActor.scene === rightActor.scene
+        ? Math.hypot(
+            leftPoint.x - rightPoint.x,
+            leftPoint.y - rightPoint.y,
+          ) * 8
+        : expected + WORLD_PIXEL_WIDTH;
+      return Object.freeze({ expected, actual });
+    });
+  });
+  const totalExpectedGap = gaps.reduce((sum, gap) => sum + gap.expected, 0);
+  const totalGapError = gaps.reduce((sum, gap) => sum + Math.abs(gap.actual - gap.expected), 0);
+  const spacingPercent = totalExpectedGap === 0
+    ? 100
+    : Math.max(0, Math.round(100 * (1 - totalGapError / totalExpectedGap)));
+  const maxGapPixels = Math.round(gaps.reduce(
+    (largest, gap) => Math.max(largest, Math.max(0, gap.actual - gap.expected)),
+    0,
+  ));
+  const occupied = new Map<string, number>();
+  for (const { agentId } of targets) {
+    const position = actorWorldPosition(state.actors[agentId]);
+    const key = positionKey(position);
+    occupied.set(key, (occupied.get(key) ?? 0) + 1);
+  }
+  const overlaps = [...occupied.values()].reduce((sum, count) => sum + Math.max(0, count - 1), 0);
+  const coveredSlots = targets.filter(({ covered }) => covered).length;
+  const acted = experiment.participantIds.filter((id) => (experiment.actionCounts[id] ?? 0) > 0).length;
+  const settled = experiment.participantIds.filter((id) => experiment.settled[id] !== undefined).length;
+  const corrections = experiment.participantIds.reduce(
+    (sum, id) => sum + Math.max(0, (experiment.moveCounts[id] ?? 0) - 1),
+    0,
+  );
+  const physicallySettled = experiment.participantIds.every((id) => {
+    const actor = state.actors[id];
+    return !actor.movement && actor.tasks.length === 0;
+  });
+  const passed = coveredSlots === targets.length
+    && overlaps === 0
+    && spacingPercent >= 90
+    && physicallySettled
+    && settled === targets.length;
+  const terminal = physicallySettled && settled === targets.length;
+  return Object.freeze({
+    callId: experiment.callId,
+    kind: experiment.kind,
+    participants: targets.length,
+    acted,
+    settled,
+    coveredSlots,
+    openSlots: targets.length - coveredSlots,
+    overlaps,
+    corrections,
+    spacingPercent,
+    maxGapPixels,
+    elapsedMs: Math.max(0, state.elapsedMs - experiment.startedAtMs),
+    physicallySettled,
+    verdict: passed ? "pass" : terminal ? "needs_correction" : "running",
+    targets: Object.freeze(targets),
+    paths: Object.freeze(paths),
+  });
+}
+
+export function worldFormationResidentNeedsTurn(
+  state: WorldState,
+  agentId: ResidentId,
+  progress = worldFormationProgress(state),
+): boolean {
+  const experiment = state.formationExperiment;
+  if (!experiment || !experiment.participantIds.includes(agentId)) return true;
+  if (experiment.settled[agentId] === undefined) return true;
+  return progress?.targets.find((target) => target.agentId === agentId)?.covered !== true;
+}
+
+function worldFormationFeedbackFor(
+  state: WorldState,
+  agentId: ResidentId,
+  progress = worldFormationProgress(state),
+): WorldFormationFeedback | undefined {
+  const experiment = state.formationExperiment;
+  if (!experiment) return undefined;
+  const index = experiment.participantIds.indexOf(agentId);
+  if (index < 0) return undefined;
+  const target = progress?.targets[index];
+  if (!progress || !target) return undefined;
+  return Object.freeze({
+    callId: experiment.callId,
+    kind: experiment.kind,
+    prompt: experiment.prompt,
+    index,
+    count: experiment.participantIds.length,
+    assignedOffset: formationOffset(experiment.kind, index, experiment.participantIds.length),
+    assignedPosition: target.position,
+    errorPixels: target.errorPixels,
+    covered: target.covered,
+    coveredSlots: progress.coveredSlots,
+    openSlots: progress.openSlots,
+    spacingPercent: progress.spacingPercent,
+    maxGapPixels: progress.maxGapPixels,
   });
 }
 
