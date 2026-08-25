@@ -134,9 +134,9 @@ test("the homepage is one local, terminal-first agent on desktop and mobile", ()
   assert.match(application, /hidden=\{surface !== "home" && surface !== "agent"\}/);
   assert.match(application, /inert=\{surface !== "home" && surface !== "agent" \? true : undefined\}/);
   assert.doesNotMatch(application, /home-intro|home-install|home-demo-head|live agent · local or durable/);
-  assert.match(experience, /const activeRuntime = landing \? "local" : runtime/);
-  assert.match(experience, /landing \? null : <div className="agent-runtime-switch"/);
   assert.match(experience, /landing \? null : <ConversationHistoryRail/);
+  assert.match(experience, /runtime="managed"/);
+  assert.doesNotMatch(experience, /agent-runtime-switch|Local browser|Managed durable/);
   assert.match(experience, /High-performance Codex SDK\. Runs anywhere\./);
   assert.match(experience, /curl -fsSL https:\/\/nanocodex\.paradigm\.xyz \| bash/);
   assert.match(experience, /Terminal-Bench 2\.1 high · 82\.2% · 890\/890 runs/);

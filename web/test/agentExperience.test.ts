@@ -14,7 +14,7 @@ const viteConfig = source("../vite.config.ts");
 test("one thread-scoped Config supplies clone-safe MCP servers to the retained Agent", () => {
   const declaration = section(terminal, "export const AgentTerminal", "export const ManagedAgentTerminal");
   assert.equal(matches(terminal, /createConfig\(/g), 1);
-  assert.match(declaration, /useMemo\(\(\) => createConfig\(\{[\s\S]*?mcp: browserMcpConfiguration\(location\.origin, threadId\)[\s\S]*?\[durable, threadId\]/);
+  assert.match(declaration, /useMemo\(\(\) => createConfig\(\{[\s\S]*?mcp: browserMcpConfiguration\(location\.origin, threadId\)[\s\S]*?durability: false[\s\S]*?\[threadId\]/);
   assert.match(
     terminal,
     /useNanocodex\(\{ config: agentConfig, threadId \}\)/,
@@ -32,15 +32,14 @@ test("one thread-scoped Config supplies clone-safe MCP servers to the retained A
     && Object.values(server.headers).every((value) => typeof value === "string")));
 });
 
-test("the landing terminal is ephemeral while the Agent demo retains durability", () => {
+test("the landing terminal is ephemeral while the Agent demo is managed-durable only", () => {
   const declaration = section(terminal, "export const AgentTerminal", "export const ManagedAgentTerminal");
-  assert.match(declaration, /\.\.\.\(durable \? \{\} : \{ durability: false \}\)/);
-  assert.match(declaration, /\? durable[\s\S]*?\? localTerminalAgent\([\s\S]*?: agent/);
-  assert.match(experience, /const durable = !landing && threadId !== undefined/);
-  assert.match(experience, /durable \? loadLocalConversations\(activeThreadId\) : \[\]/);
-  assert.match(experience, /if \(durable\) \{[\s\S]*?recordLocalConversationPrompt/);
-  assert.match(experience, /key=\{`\$\{durable \? "durable" : "ephemeral"\}:\$\{activeThreadId\}`\}/);
-  assert.match(experience, /durable=\{durable\}/);
+  assert.match(declaration, /durability: false/);
+  assert.doesNotMatch(declaration, /localTerminalAgent|\bdurable\b/);
+  assert.match(experience, /activeCapabilityError = landing \? capabilityError : undefined/);
+  assert.match(experience, /landing[\s\S]*?\? hasCredential[\s\S]*?<AgentTerminal[\s\S]*?: hasCredential && managedConversationId[\s\S]*?<ManagedAgentTerminal/);
+  assert.match(experience, /runtime="managed"/);
+  assert.doesNotMatch(experience, /activeRuntime|agent-runtime-switch|Local browser|Managed durable|localConversations/);
 });
 
 test("the landing welcome is replaced atomically by the first transcript entry", () => {
