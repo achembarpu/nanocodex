@@ -2037,8 +2037,7 @@ describe("managed agents REST and resumable SSE", () => {
       const response = await within(creation, "bounded credential bind");
       expect(response.status).toBe(503);
       const session = sessionForSubject(subject!);
-      const markers = await cleanupMarkers(session);
-      if (markers.deleting) expect(await runDurableObjectAlarm(session)).toBe(true);
+      await runCleanupAlarmsUntilDeleted(session);
       expect(await cleanupMarkers(session)).toEqual({ binding: false, deleting: false });
       expect(await (await SELF.fetch("https://example.test/v1/agents")).json()).toEqual({
         data: [],
@@ -2126,9 +2125,19 @@ describe("managed agents REST and resumable SSE", () => {
     expect(lateAttach.status).toBe(410);
   });
 
-  it("cleans an applied commit when its response is lost", async () => {
+  it.each([
+    ["cleanup preparation after a lost response", "PUT", "/credential-binding", "lost"],
+    ["cleanup preparation after HTTP 503", "PUT", "/credential-binding", "unavailable"],
+    ["credential binding after a lost response", "POST", "/credential-binding/bind", "lost"],
+    ["credential binding after HTTP 503", "POST", "/credential-binding/bind", "unavailable"],
+    ["initialization after a lost response", "PUT", "/initialize", "lost"],
+    ["initialization after HTTP 503", "PUT", "/initialize", "unavailable"],
+    ["cleanup commit after a lost response", "POST", "/credential-binding/commit", "lost"],
+    ["cleanup commit after HTTP 503", "POST", "/credential-binding/commit", "unavailable"],
+  ])("replays %s", async (_operation, method, path, failure) => {
     const originalSessions = testEnv.NANOCODEX_SESSIONS;
-    let committedAgentId: string | undefined;
+    const attemptedAgentIds: string[] = [];
+    const attemptedBodies: string[] = [];
     testEnv.NANOCODEX_SESSIONS = {
       idFromName(name: string) { return originalSessions.idFromName(name); },
       getByName(name: string) {
@@ -2136,14 +2145,20 @@ describe("managed agents REST and resumable SSE", () => {
         return {
           async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
             const request = new Request(input, init);
-            if (request.method === "POST"
-              && new URL(request.url).pathname === "/credential-binding/commit") {
-              committedAgentId = name;
-              const response = await session.fetch(input, init);
-              await response.body?.cancel();
-              throw new Error("injected lost commit response");
+            if (request.method === method && new URL(request.url).pathname === path) {
+              attemptedAgentIds.push(name);
+              attemptedBodies.push(await request.clone().text());
+              if (attemptedAgentIds.length === 1 && failure === "unavailable") {
+                return Response.json({ error: "injected_unavailable" }, { status: 503 });
+              }
+              const response = await session.fetch(request);
+              if (attemptedAgentIds.length === 1) {
+                await response.body?.cancel();
+                throw new Error(`injected lost ${path} response`);
+              }
+              return response;
             }
-            return session.fetch(input, init);
+            return session.fetch(request);
           },
         } as DurableObjectStub;
       },
@@ -2151,19 +2166,18 @@ describe("managed agents REST and resumable SSE", () => {
 
     try {
       const response = await SELF.fetch("https://example.test/v1/agents", { method: "POST" });
-      expect(response.status).toBe(503);
-      expect(await response.json()).toEqual({ error: "agent cleanup commit failed" });
+      expect(response.status).toBe(201);
+      const receipt = await response.json<AgentReceipt>();
+      createdAgents.add(receipt.agent_id);
+      expect(attemptedAgentIds).toEqual([receipt.agent_id, receipt.agent_id]);
+      expect(attemptedBodies[1]).toBe(attemptedBodies[0]);
+      expect(await (await SELF.fetch("https://example.test/v1/agents")).json()).toMatchObject({
+        data: [receipt.agent_id],
+        summaries: { [receipt.agent_id]: { title: "", turn_count: 0 } },
+      });
     } finally {
       testEnv.NANOCODEX_SESSIONS = originalSessions;
     }
-
-    expect(committedAgentId).toMatch(/^[0-9a-f-]{36}$/);
-    expect(await (await SELF.fetch("https://example.test/v1/agents")).json()).toEqual({
-      data: [],
-      summaries: {},
-    });
-    expect(await cleanupMarkers(originalSessions.getByName(committedAgentId!)))
-      .toEqual({ binding: false, deleting: false });
   });
 
   it("retains durable cleanup ownership when binding and the first unbind both fail", async () => {

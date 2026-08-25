@@ -425,7 +425,7 @@ export default {
       const ownershipTimeoutMs = managedOwnershipTimeoutMs(env);
       let prepared: Response;
       try {
-        prepared = await fetchWithDeadline(stub, "https://session.internal/credential-binding", {
+        prepared = await fetchCreateStage(stub, "https://session.internal/credential-binding", {
           method: "PUT",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
@@ -442,14 +442,14 @@ export default {
         return json({ error: "agent cleanup initialization failed" }, { status: 503 });
       }
       const [credentialBinding, initialization] = await Promise.allSettled([
-        fetchWithDeadline(
+        fetchCreateStage(
           stub,
           "https://session.internal/credential-binding/bind",
           { method: "POST" },
           ownershipTimeoutMs,
           "agent credential binding",
         ),
-        fetchWithDeadline(stub, "https://session.internal/initialize", {
+        fetchCreateStage(stub, "https://session.internal/initialize", {
           method: "PUT",
           headers: { "content-type": "application/json" },
           body: JSON.stringify({
@@ -477,7 +477,7 @@ export default {
       }
       let committed: Response | undefined;
       try {
-        committed = await fetchWithDeadline(
+        committed = await fetchCreateStage(
           stub,
           "https://session.internal/credential-binding/commit",
           { method: "POST" },
@@ -3794,6 +3794,32 @@ async function fetchWithDeadline(
   } finally {
     if (timer !== undefined) clearTimeout(timer);
   }
+}
+
+async function fetchCreateStage(
+  binding: Pick<Fetcher, "fetch">,
+  input: RequestInfo | URL,
+  init: RequestInit,
+  timeoutMs: number,
+  operation: string,
+): Promise<Response> {
+  let failure: unknown;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const response = await fetchWithDeadline(binding, input, init, timeoutMs, operation);
+      if (response.status !== 408 && response.status !== 429 && response.status < 500) {
+        return response;
+      }
+      failure = new Error(`${operation} returned HTTP ${response.status}`);
+      try { await response.body?.cancel(); } catch { /* Retrying owns the next attempt. */ }
+    } catch (error) {
+      failure = error;
+    }
+    if (attempt === 0) {
+      await scheduler.wait(50 + Math.floor(Math.random() * 50));
+    }
+  }
+  throw failure;
 }
 
 function managedHttpError(error: unknown, fallbackCode = "managed_request_failed") {
