@@ -43,6 +43,7 @@ cancels the active turn. Follow-on prompts reuse the same WASM agent history.
 ## Build and check
 
 ```sh
+npm ci --prefix js/bindings
 npm ci --prefix extensions/chrome
 npm test --prefix extensions/chrome
 npm run build --prefix extensions/chrome
