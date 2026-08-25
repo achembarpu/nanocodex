@@ -119,6 +119,7 @@ export const ManagedAgentTerminal = memo(function ManagedAgentTerminal({
         agentStatus,
         authStatus,
         capabilityError: undefined,
+        runtime: "managed",
         source,
       })}
       mode={mode}

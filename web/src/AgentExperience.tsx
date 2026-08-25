@@ -92,7 +92,8 @@ export const AgentExperience = memo(function AgentExperience({
     ? "idle" : runtimeState?.status ?? "starting";
   const agentError = runtimeState?.error;
   const inactiveMessage = inactiveTerminalMessage({
-    agentError, agentStatus, authStatus, capabilityError: activeCapabilityError, source: credentialSource,
+    agentError, agentStatus, authStatus, capabilityError: activeCapabilityError,
+    runtime: landing ? "browser" : "managed", source: credentialSource,
   });
 
   const selectManaged = useCallback((id: string) => {

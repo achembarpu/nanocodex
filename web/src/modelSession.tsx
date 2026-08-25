@@ -16,6 +16,7 @@ export type SessionPresentation = {
   agentStatus: AgentStatus;
   authStatus: ModelSessionStatus | undefined;
   capabilityError?: string;
+  runtime?: "browser" | "managed";
   source: CredentialSource | undefined;
 };
 
@@ -24,16 +25,18 @@ export function inactiveTerminalMessage({
   agentStatus,
   authStatus,
   capabilityError,
+  runtime = "browser",
   source,
 }: SessionPresentation): string {
   if (capabilityError) return capabilityError;
   if (agentStatus === "starting") return "";
   if (agentStatus === "error" && source) return agentStartFailure(agentError);
   if (source === undefined || authStatus === undefined) return "";
-  if (authStatus.state === "signed_out") return "Sign in with a passkey to start the browser agent.";
+  const agent = runtime === "managed" ? "managed agent" : "browser agent";
+  if (authStatus.state === "signed_out") return `Sign in with a passkey to start the ${agent}.`;
   if (authStatus.state === "error") return "Could not check your model connection. Use Retry above.";
   if (!authStatus.ready) {
-    return "Connect ChatGPT or an OpenAI API key from the account menu to start the browser agent.";
+    return `Connect ChatGPT or an OpenAI API key from the account menu to start the ${agent}.`;
   }
   return "";
 }
