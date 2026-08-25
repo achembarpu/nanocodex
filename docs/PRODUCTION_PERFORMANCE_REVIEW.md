@@ -1,12 +1,12 @@
 # Production performance review
 
-Date: 2026-08-24
+Date: 2026-08-25
 
 Production URL: `https://nanocodex.gakonst.workers.dev/`
 
 Web deployment: `286dc899-fa50-4e0d-8631-5720f0cd8e8b`
 
-Managed deployment: `28558f3f-3fb4-4ce5-8716-fb0924633b06`
+Managed deployment: `ad53c2ec-5e7e-4258-b1f1-e77c90ca1493`
 
 ## Outcome
 
@@ -28,19 +28,22 @@ it still does not establish a live cache-hit rate or cold durable-restart
 performance. The review baseline and remaining benchmark are in
 [`PROMPT_CACHE_REVIEW.md`](PROMPT_CACHE_REVIEW.md).
 
-The measured managed deployment had a pathological one-second failed-prewarm
-alarm loop. The implementation fixes are now complete: startup rollback spans
-the real host lifecycle, passive polling is removed, persisted owner fences
-exclude stale writers, and structural authority failures require reopening a
-fresh Agent. The follow-on fault-injection pass also fixed transient startup
-classification and a missing retry alarm caused by scheduling before admission
-task cleanup. Production redeployment and a quiet-log observation remain
-operational verification, not missing implementation.
+The pathological failed-prewarm alarm loop and the durability ownership races
+found by that deployment are fixed. The current managed Worker is deployed from
+master `f0e13b2c`: startup rollback spans the real host lifecycle, persisted
+owner fences exclude stale writers, and structural authority failures require
+a fresh authoritative reopen.
 
-The final numbers below are from the current localhost build, not a
-deployment. They verify the release slice in the real browser but do not claim
-that the current code is deployed or production-verified. The deployment IDs
-above identify the older production baseline only.
+The scale pass also removed both account-sized coordination structures. Subject
+ownership routes directly to one named Durable Object per subject, and each
+account/agent membership is one SQLite row rather than an aggregate JSON array.
+Every idempotent public create stage now has bounded replay on an ambiguous
+transport result or transient HTTP status, and a caller `Idempotency-Key`
+derives one account-scoped agent identity for safe outer retry. The production
+browser created a new managed conversation, completed `CREATE_STAGE_REPLAY_OK`,
+and recovered the exact turn after reload with zero page errors. The hosted
+10,000-agent control run then completed every create, isolated state read,
+deletion, and leak check.
 
 ## Measurement scope and caveats
 
@@ -419,6 +422,32 @@ capped exponential-jitter fallback, is persisted before response disposal and
 drives the broker alarm. An ordinary call may keep using a still-unexpired
 access token during proactive-refresh backoff; explicit recovery and expired
 credentials remain fail-closed.
+
+## Hosted durability API scale
+
+The control harness reaches the public website Worker with a real account API
+key, crosses the private managed service binding, creates independent AgentDOs,
+reads every new agent's state, deletes every receipt, and finally proves none of
+the run's IDs remain in the account index. It stops new work on the first phase
+failure but still deletes all successful receipts. Exact
+`503 session_cleanup_pending` responses count as retained durable cleanup
+ownership and must also disappear from the final account listing.
+
+The post-fix 10,000-agent run at concurrency 128 completed with no errors, no
+pending cleanup, and no leaked account rows:
+
+| Phase | Throughput | p50 | p95 | p99 | max |
+| --- | ---: | ---: | ---: | ---: | ---: |
+| Create | 87.69/s | 1.351 s | 2.219 s | 2.359 s | 17.701 s |
+| State | 436.32/s | 256 ms | 637 ms | 794 ms | 2.856 s |
+| Delete | 209.14/s | 524 ms | 1.223 s | 1.299 s | 9.637 s |
+
+This is a control-plane and durability-coordination result, not a claim that
+10,000 simultaneous provider generations fit one upstream account. It exercises
+the horizontally sharded Worker/DO ownership path without paying for model
+turns. Registered-user capacity is therefore driven by independent per-user and
+per-agent objects rather than one coordinator, while active-turn capacity must
+also include provider quotas, model latency, and per-agent sequential execution.
 
 ## Instrumentation gaps
 

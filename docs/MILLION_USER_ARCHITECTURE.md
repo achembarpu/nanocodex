@@ -1,10 +1,8 @@
 # Million-user managed architecture
 
-Status: active implementation on `codex/million-user-architecture`. This
-document describes the inherited managed-agent topology, the intended
-no-global-coordinator topology, and the split between live coordination state
-and retained history. The measured/implemented section below records what has
-already changed on this branch.
+Status: implemented and production-tested. This document describes the current
+no-global-coordinator topology, the remaining signed-capability target, and the
+split between live coordination state and retained history.
 
 ## Measured and implemented first slice
 
@@ -62,7 +60,20 @@ This branch now:
   Managed selects 512 only because its outer receipt archive preserves older
   exact results first. Successful compaction prunes both the stored checkpoint
   and the live Rust state; all other SDK consumers keep indefinite replay by
-  default.
+  default;
+- routes every credential subject directly to the existing
+  `agent-subject-v1:<subject>` Durable Object. The old `agent-subjects-v1`
+  singleton is unreachable from production requests and retained only as
+  forensic cutover evidence;
+- stores each account/agent membership and deletion tombstone as its own
+  `UserAccount` SQLite row. Create, activity, detach, and deletion no longer
+  rewrite an account-sized JSON array or summary object; and
+- replays every idempotent public agent-creation stage with bounded
+  exponential jitter for transport failure, HTTP 408/429, or 5xx. Preparation
+  absorbs four consecutive transient responses; later stages replay once. A
+  caller `Idempotency-Key` derives one account-scoped agent UUID, so an outer
+  lost response also retries the same identity and byte-identical request. A
+  definitive 4xx enters the existing durable cleanup path immediately.
 
 The hot durability head is now bounded by explicit policy. Model checkpoints,
 unresolved operations, ambiguous steps, recent exact receipts, recent managed
@@ -106,8 +117,10 @@ The governing rule is simple:
        | Fixed-name auth DOs  |              | UserAccountDO    |   | NanocodexSession |
        | account / webauthn / |              | keyed by user    |   | keyed by agent   |
        | account-link state   |              +------------------+   +---------+--------+
-       +----------------------+                                           |
-                                                                          |
+       +----------------------+              | one SQL row per  |             |
+                                             | agent + tombstone|             |
+                                             +------------------+             |
+                                                                                |
                            one agent's SQLite storage                      |
                  +--------------------------------------------------------+
                  |                                                        |
@@ -128,35 +141,36 @@ The governing rule is simple:
                                                               | Egress Worker        |
                                                               +----------+-----------+
                                                                          |
-                     +---------------------------------------------------+------------+
-                     |                                                   |            |
-                     v                                                   v            v
-       +-----------------------------+                    +-------------------+  +----------+
-       | AgentSubjectDirectory       |                    | Subject shard     |  | User     |
-       | "agent-subjects-v1"         |<------------------>| keyed by subject  |  | credential|
-       | deployment-global authority |                    +-------------------+  | broker   |
-       +-----------------------------+                                           +----+-----+
-                                                                                      |
-                                                                                      v
-                                                                                 Provider
+                     +---------------------------------------------------+
+                     | deterministic name                                |
+                     v                                                   v
+       +----------------------------------+                       +------------------+
+       | AgentSubjectDirectory(subject)   |---------------------->| User credential  |
+       | agent-subject-v1:<subject>       | resolved user ID      | DO(user ID)      |
+       | bound | permanent tombstone      |                       +--------+---------+
+       +----------------------------------+                                |
+                                                                           v
+                                                                      Provider
 ```
 
-The normal session actor is already the correct atom for turn ordering,
-durability, client fanout, and model ownership. The scale problems are the
-shared identity paths around it and the amount of historical data retained in
-its hot SQLite database.
+The normal session actor is the atom for turn ordering, durability, client
+fanout, and model ownership. Subject ownership is also sharded one object per
+subject, and account indexing is row-wise. No request crosses a mutable
+deployment-global subject or account registry. The remaining scale variable is
+per-agent historical data retained in the hot SQLite database.
 
 Current source anchors:
 
-- `services/managed/src/index.ts` owns the session, managed turns, and managed
-  event projection;
+- `services/managed/src/index.ts` owns the session, managed turns, managed
+  event projection, and idempotent create/cleanup state machine;
+- `services/managed/src/account-auth.ts` owns the row-wise account agent index;
 - `services/managed/src/durable-events.ts` owns managed cursor replay;
 - `js/bindings/cloudflare/Agent.mjs` installs the raw AgentEvent projection;
 - `js/bindings/cloudflare/event-socket.mjs` retains raw AgentEvents;
 - `js/bindings/runtime/durability-store.mjs` retains and reloads journal
   batches; and
-- `services/egress/src/egress.ts` and `services/egress/src/broker.ts` own the
-  legacy authority and subject shards.
+- `services/egress/src/egress.ts` and `services/egress/src/broker.ts` route to
+  and own the direct one-subject state machines.
 
 ## What currently grows
 

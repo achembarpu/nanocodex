@@ -57,24 +57,30 @@ credential/cookie fields, but a WebSocket peer necessarily controls its frames;
 bind the broker only to the owned managed Worker and use only an audited relay
 that cannot reflect injected credentials.
 
-### Subject-directory rollout
+### Direct subject ownership and cutover
 
-Deploy the broker before deploying managed-agent changes. During the sharding
-rollout, `agent-subjects-v1` remains the authoritative coordinator and rollback
-copy, with mutation ordering scoped per subject so shard I/O cannot block other
-tenants. New binds write both it and the per-subject shard. Every resolution
-dual-reads through the coordinator, cold-copies a legacy-only binding, replaces
-a stale shard owner, or deletes a shard whose legacy binding was removed.
-Replacement and deletion use one revision-fenced shard reconciliation mutation;
-they never compose ordinary unbind and bind across a tombstone. Both
-the current control path and direct legacy `/v1/unbind` reconcile the shard
-before deleting authoritative metadata; reconciliation failure retains the
-legacy owner. Keep this broker-first, legacy-authoritative version deployed
-until rollback is retired and every pre-sharding session has been rebound or
-deleted; only then may a later focused cutover remove the legacy read. If a
-legacy-only broker binary handled mutations during rollback, do not cut over
-until this version is redeployed and every affected subject is explicitly
-reconciled or rebound: that old binary cannot update the shard copy.
+The broker routes a subject directly to the existing
+`agent-subject-v1:<subject>` `AgentSubjectDirectory` Durable Object. That object
+accepts only its name-matching subject and atomically owns one state machine:
+absent, bound to one user, or permanently tombstoned for that user. Same-owner
+bind/unbind is idempotent, a foreign owner conflicts, and no operation can turn
+a tombstone back into a binding. An unbind of an absent subject writes the
+tombstone so a delayed bind whose response was lost cannot resurrect a failed
+agent creation.
+
+There is no production request path through the old `agent-subjects-v1`
+singleton. Keep the deployed class name, `AGENT_SUBJECTS` binding, v2 SQLite
+migration, and exact shard prefix stable: changing any of them abandons the
+active state. The singleton storage remains orphaned as forensic evidence.
+
+This cutover is roll-forward-only. The pre-cutover reconciler can interpret
+shard-only state as deletion and can overwrite a shard tombstone from stale
+legacy state, so it is not a safe rollback target and must never receive a
+gradual version split with the direct router. Deploy direct-routing broker
+versions at 100%, preserve the named shard namespace, and repair forward.
+Dormant pre-sharding agents remain recoverable because their AgentDO retains
+the authoritative owner and idempotently binds its direct shard before model
+use; deletion similarly creates the permanent shard tombstone.
 
 All API keys, ChatGPT access/refresh state, device-login state, connector
 access/refresh tokens, PKCE verifiers, OAuth state, and refresh markers are
