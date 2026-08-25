@@ -112,11 +112,13 @@ export function ConnectAgentExperience({
             <AgentTerminalView
               agent={terminalAgent}
               agentError={undefined}
+              maxEntries={visibility.conversationHistory ? Number.MAX_SAFE_INTEGER : undefined}
               mode="preview"
               onConversationActivity={recordActivity}
               onTerminalEvent={observeTerminalEvent}
               onStateChange={recordState}
               retryAgent={retryAgent}
+              showToolCalls={visibility.rawTraces}
             />
           </div>
         </div>

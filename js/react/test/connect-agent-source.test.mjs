@@ -195,7 +195,7 @@ test("Connect turns replay the same durable operation after a transient submissi
   turn.dispose();
 });
 
-test("history-enabled Connect sources page, order, dedupe, and serialize older loads", async () => {
+test("history-enabled Connect sources hydrate every retained page in order", async () => {
   const pageCalls = [];
   let resolveInitial;
   const initialReady = new Promise((resolve) => { resolveInitial = resolve; });
@@ -266,13 +266,10 @@ test("history-enabled Connect sources page, order, dedupe, and serialize older l
   ]);
   assert.deepEqual(histories[0].map(({ seq }) => seq), [1, 2, 3]);
 
-  const firstLoad = watcher.loadOlder();
-  const duplicateLoad = watcher.loadOlder();
-  assert.equal(duplicateLoad, firstLoad);
+  await waitFor(() => pageCalls.length === 2);
   assert.equal(pageCalls.length, 2);
   resolveOlder();
-  assert.equal(await firstLoad, true);
-  assert.equal(await duplicateLoad, true);
+  await waitFor(() => histories.length === 2);
   assert.deepEqual(historyText(histories.at(-1)), [
     "older prompt", "older answer", "recent prompt", "recent answer",
   ]);
@@ -286,7 +283,7 @@ test("history-enabled Connect sources page, order, dedupe, and serialize older l
   assert.equal(pageCalls.every(({ signal }) => signal instanceof AbortSignal), true);
 });
 
-test("Connect source history retention is bounded without orphaning complete turns", async () => {
+test("history-enabled Connect sources preserve every completed durable turn", async () => {
   const turnCount = 200;
   let liveFinished;
   const finished = new Promise((resolve) => { liveFinished = resolve; });
@@ -319,7 +316,8 @@ test("Connect source history retention is bounded without orphaning complete tur
   watcher.onEvent(() => {});
   await finished;
   const retained = await new Promise((resolve) => watcher.onHistory(resolve));
-  assert.ok(retained.length <= 256);
+  assert.equal(retained.length, turnCount * 3);
+  assert.equal(retained.some(({ payload }) => payload.turn_id === "turn-1"), true);
   assert.equal(retained.some(({ payload }) => payload.turn_id === `turn-${turnCount}`), true);
   const prompts = new Set(retained
     .filter(({ type }) => type === "managed.prompt")

@@ -1,5 +1,5 @@
 const HISTORY_PAGE_SIZE = 128;
-const MAX_RETAINED_ENVELOPES = HISTORY_PAGE_SIZE * 2;
+const MAX_LIVE_ENVELOPES = HISTORY_PAGE_SIZE * 2;
 const HISTORY_ATTEMPTS = 3;
 const HISTORY_ATTEMPT_TIMEOUT_MS = 10_000;
 const HISTORY_RETRY_INITIAL_MS = 1_000;
@@ -85,10 +85,12 @@ function connectEventWatcher(connectAgent, submitted, historyEnabled) {
   let historyRetryDelay = HISTORY_RETRY_INITIAL_MS;
   let historyRetryTimer;
   let latestLiveCursor;
+  let historySnapshot = Object.freeze([]);
 
   const projectedHistory = () => connectHistoryEvents(envelopes, connectAgent.sessionId);
   const emitHistory = () => {
     const events = projectedHistory();
+    historySnapshot = events;
     sequence = Math.max(sequence, events.length);
     for (const listener of historyListeners) listener(events);
   };
@@ -96,7 +98,6 @@ function connectEventWatcher(connectAgent, submitted, historyEnabled) {
     if (seen.has(envelope.cursor)) return false;
     seen.add(envelope.cursor);
     envelopes.push(envelope);
-    compactEnvelopeRetention(envelopes, seen);
     return seen.has(envelope.cursor);
   };
   const requestHistoryPage = (pageOptions) => historyPageAttempt((signal) => {
@@ -155,10 +156,14 @@ function connectEventWatcher(connectAgent, submitted, historyEnabled) {
               sequence + 1,
             );
             sequence += projected.length;
+            if (historyEnabled && projected.length > 0) {
+              historySnapshot = Object.freeze([...historySnapshot, ...projected]);
+            }
             for (const event of projected) {
               for (const listener of listeners) listener(event);
             }
             if (turnId && isOuterTerminal(envelope)) submitted?.delete(turnId);
+            if (historyLoaded && !hasOlder) compactEnvelopeRetention(envelopes, seen);
           }
         } catch (error) {
           if (controller.signal.aborted) return;
@@ -205,7 +210,7 @@ function connectEventWatcher(connectAgent, submitted, historyEnabled) {
       }
       for (const envelope of initial.data) retain(envelope);
       envelopes.sort((left, right) => compareCursor(left.cursor, right.cursor));
-      hasOlder = initial.hasMore && envelopes.length < MAX_RETAINED_ENVELOPES;
+      hasOlder = initial.hasMore;
       historyLoaded = true;
       latestLiveCursor = initial.latestCursor;
       outageReported = false;
@@ -214,6 +219,8 @@ function connectEventWatcher(connectAgent, submitted, historyEnabled) {
       historyRetryTimer = undefined;
       emitHistory();
       startTail(initial.latestCursor);
+      if (hasOlder) void loadRemainingHistory();
+      else compactEnvelopeRetention(envelopes, seen);
       return true;
     })().finally(() => { loadingInitial = undefined; });
     return loadingInitial;
@@ -223,6 +230,35 @@ function connectEventWatcher(connectAgent, submitted, historyEnabled) {
     if (historyRetryTimer !== undefined) clearTimeout(historyRetryTimer);
     historyRetryTimer = undefined;
     void loadInitial();
+  };
+  const loadOlderPage = () => {
+    if (!historyEnabled || !historyLoaded || !hasOlder || controller.signal.aborted) {
+      return Promise.resolve(false);
+    }
+    if (loadingOlder) return loadingOlder;
+    const before = envelopes[0]?.cursor;
+    if (!before) return Promise.resolve(false);
+    loadingOlder = requestHistoryPage({ before, limit: HISTORY_PAGE_SIZE }).then((page) => {
+      let added = false;
+      for (const envelope of page.data) added = retain(envelope) || added;
+      if (added) envelopes.sort((left, right) => compareCursor(left.cursor, right.cursor));
+      hasOlder = page.hasMore;
+      if (added) emitHistory();
+      return added;
+    }).finally(() => { loadingOlder = undefined; });
+    return loadingOlder;
+  };
+  const loadRemainingHistory = async () => {
+    try {
+      while (hasOlder && !controller.signal.aborted) {
+        const added = await loadOlderPage();
+        if (!added) break;
+      }
+    } catch (error) {
+      reportHistoryOutage(error);
+    } finally {
+      if (!hasOlder) compactEnvelopeRetention(envelopes, seen);
+    }
   };
 
   if (historyEnabled) {
@@ -240,25 +276,13 @@ function connectEventWatcher(connectAgent, submitted, historyEnabled) {
     },
     onHistory(listener) {
       historyListeners.add(listener);
-      if (historyLoaded) listener(projectedHistory());
+      if (historyLoaded) listener(historySnapshot);
       return () => historyListeners.delete(listener);
     },
     loadOlder() {
       if (!historyEnabled) return Promise.resolve(false);
       if (!historyLoaded) return loadInitial();
-      if (!hasOlder || controller.signal.aborted) return Promise.resolve(false);
-      if (loadingOlder) return loadingOlder;
-      const before = envelopes[0]?.cursor;
-      if (!before) return Promise.resolve(false);
-      loadingOlder = requestHistoryPage({ before, limit: HISTORY_PAGE_SIZE }).then((page) => {
-        let added = false;
-        for (const envelope of page.data) added = retain(envelope) || added;
-        if (added) envelopes.sort((left, right) => compareCursor(left.cursor, right.cursor));
-        hasOlder = page.hasMore && envelopes.length < MAX_RETAINED_ENVELOPES;
-        if (added) emitHistory();
-        return added;
-      }).finally(() => { loadingOlder = undefined; });
-      return loadingOlder;
+      return loadOlderPage();
     },
     off() {
       if (controller.signal.aborted) return;
@@ -305,10 +329,10 @@ async function historyPageAttempt(load, lifetimeSignal) {
 }
 
 function compactEnvelopeRetention(envelopes, seen) {
-  while (envelopes.length > MAX_RETAINED_ENVELOPES) {
+  while (envelopes.length > MAX_LIVE_ENVELOPES) {
     const groups = envelopeGroups(envelopes);
     const oversizedComplete = [...groups.values()].find((group) =>
-      group.complete && group.envelopes.length > MAX_RETAINED_ENVELOPES
+      group.complete && group.envelopes.length > MAX_LIVE_ENVELOPES
     );
     if (oversizedComplete) {
       removeEnvelopes(

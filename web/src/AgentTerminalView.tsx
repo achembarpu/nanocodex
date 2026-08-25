@@ -37,11 +37,13 @@ export function AgentTerminalView({
   agentError,
   controls,
   inactiveMessage,
+  maxEntries,
   mode,
   onConversationActivity,
   onTerminalEvent,
   onStateChange,
   retryAgent,
+  showToolCalls = true,
   welcome,
 }: {
   accessory?(controls: AgentTerminalAccessory): ReactNode;
@@ -52,11 +54,13 @@ export function AgentTerminalView({
     agentError: string | undefined;
     agentStatus: AgentStatus;
   }>): string | undefined;
+  maxEntries?: number;
   mode: AgentTerminalMode;
   onConversationActivity(input: string): void;
   onTerminalEvent?(event: AgentControllerEvent): void;
   onStateChange(state: AgentTerminalState): void;
   retryAgent(): void;
+  showToolCalls?: boolean;
   welcome?: string;
 }) {
   const [touchDraft, setTouchDraft] = useState("");
@@ -112,6 +116,7 @@ export function AgentTerminalView({
     }
   }, [agent?.sessionId, onConversationActivity, onTerminalEvent]);
   const controller = useAgentController(agent, {
+    maxEntries,
     visible: mode !== "hidden",
     onEvent: handleControllerEvent,
   });
@@ -181,6 +186,7 @@ export function AgentTerminalView({
       inactiveMessage={unavailableMessage ?? ""}
       isLoadingOlder={controller.isLoadingOlder}
       mode={mode}
+      showToolCalls={showToolCalls}
       status={agentStatus}
       welcome={welcome}
       onLoadOlder={controller.loadOlder}
@@ -202,6 +208,7 @@ export function TerminalTranscriptSurface({
   inactiveMessage,
   isLoadingOlder,
   mode,
+  showToolCalls = true,
   status,
   welcome,
   onLoadOlder,
@@ -212,6 +219,7 @@ export function TerminalTranscriptSurface({
   inactiveMessage: string;
   isLoadingOlder: boolean;
   mode: AgentTerminalMode;
+  showToolCalls?: boolean;
   status: AgentStatus;
   welcome?: string;
   onLoadOlder(): Promise<boolean>;
@@ -285,7 +293,9 @@ export function TerminalTranscriptSurface({
               {visibleWelcome}
             </Streamdown>
           </article> : null}
-          {entries.map((entry) => <TerminalEntryView entry={entry} key={entry.id} />)}
+          {entries.map((entry) => (
+            <TerminalEntryView entry={entry} key={entry.id} showToolCalls={showToolCalls} />
+          ))}
           {status !== "ready" && inactiveMessage ? (
             <p className="agent-terminal-status" role={status === "error" ? "alert" : "status"}>
               {inactiveMessage}
@@ -299,7 +309,13 @@ export function TerminalTranscriptSurface({
   );
 }
 
-const TerminalEntryView = memo(function TerminalEntryView({ entry }: { entry: AgentEntry }) {
+const TerminalEntryView = memo(function TerminalEntryView({
+  entry,
+  showToolCalls,
+}: {
+  entry: AgentEntry;
+  showToolCalls: boolean;
+}) {
   if (entry.kind === "user") return <pre className="agent-terminal-user">{entry.text}</pre>;
   if (entry.kind === "assistant" || entry.kind === "reasoning") return (
     <article className={`agent-terminal-markdown is-${entry.kind}`}>
@@ -322,7 +338,7 @@ const TerminalEntryView = memo(function TerminalEntryView({ entry }: { entry: Ag
       {step.step}
     </li>)}
   </ol>;
-  return <TerminalToolView tool={entry.tool} />;
+  return showToolCalls ? <TerminalToolView tool={entry.tool} /> : null;
 });
 
 function MarkdownInput({
