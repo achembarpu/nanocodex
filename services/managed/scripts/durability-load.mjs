@@ -13,6 +13,7 @@ const agents = integer("NANOCODEX_LOAD_AGENTS", 1_000, 1, 100_000);
 const concurrency = integer("NANOCODEX_LOAD_CONCURRENCY", 128, 1, 1_000);
 const timeoutMs = integer("NANOCODEX_LOAD_TIMEOUT_MS", 30_000, 1_000, 600_000);
 const preserve = process.env.NANOCODEX_LOAD_PRESERVE === "true";
+const runId = randomUUID();
 if (!new Set(["control", "turn"]).has(mode)) {
   throw new Error("NANOCODEX_LOAD_MODE must be control or turn");
 }
@@ -21,6 +22,8 @@ const receipts = new Array(agents);
 const phases = {};
 let failure;
 let cleanupPending = 0;
+let baselineAgentIds = new Set();
+let finalAgentCount;
 const runStarted = performance.now();
 try {
   phases.boundary = await phase("boundary", 1, async () => {
@@ -31,14 +34,10 @@ try {
     // Worker binding.
     const response = await request(new URL("/v1/agents", baseUrl));
     if (!response.ok) throw new Error(`API boundary returned HTTP ${response.status}`);
-    await response.body?.cancel();
+    baselineAgentIds = new Set(agentIds(await response.json(), "boundary"));
   });
   phases.create = await phase("create", agents, async (index) => {
-    const response = await request(new URL("/v1/agents", baseUrl), { method: "POST" });
-    if (response.status !== 201) {
-      throw new Error(`create returned HTTP ${response.status}: ${await boundedText(response)}`);
-    }
-    receipts[index] = parseManagedAgentReceipt(await response.json());
+    receipts[index] = await createAgent(index);
   });
   phases.state = await phase("state", agents, async (index) => {
     const response = await request(new URL(`/v1/agents/${receipts[index].agent_id}`, baseUrl));
@@ -119,13 +118,11 @@ try {
     phases.cleanup_verify = await phase("cleanup_verify", 1, async () => {
       const response = await request(new URL("/v1/agents", baseUrl));
       if (!response.ok) throw new Error(`cleanup verification returned HTTP ${response.status}`);
-      const listed = await response.json();
-      const created = new Set(retained.map(({ agent_id }) => agent_id));
-      const leaked = Array.isArray(listed.data)
-        ? listed.data.filter((id) => typeof id === "string" && created.has(id))
-        : undefined;
-      if (!leaked || leaked.length > 0) {
-        throw new Error(`cleanup verification retained ${leaked?.length ?? "an invalid listing"} agents`);
+      const listed = agentIds(await response.json(), "cleanup verification");
+      finalAgentCount = listed.length;
+      const leaked = listed.filter((id) => !baselineAgentIds.has(id));
+      if (leaked.length > 0) {
+        throw new Error(`cleanup verification retained ${leaked.length} post-baseline agents`);
       }
     }).catch((error) => {
       failure = failure
@@ -144,6 +141,10 @@ const result = {
   elapsed_ms: rounded(performance.now() - runStarted),
   phases,
   cleanup_pending: cleanupPending,
+  account: {
+    baseline_agents: baselineAgentIds.size,
+    ...(finalAgentCount === undefined ? {} : { final_agents: finalAgentCount }),
+  },
   process: {
     max_rss_bytes: process.resourceUsage().maxRSS * 1_024,
     user_cpu_ms: rounded(process.resourceUsage().userCPUTime / 1_000),
@@ -206,12 +207,48 @@ async function request(url, init = {}) {
   });
 }
 
+async function createAgent(index) {
+  const idempotencyKey = `load-create:${runId}:${index}`;
+  let failure;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const response = await request(new URL("/v1/agents", baseUrl), {
+        method: "POST",
+        headers: { "idempotency-key": idempotencyKey },
+      });
+      if (response.status === 201) {
+        return parseManagedAgentReceipt(await response.json());
+      }
+      const body = await boundedText(response);
+      failure = new Error(`create returned HTTP ${response.status}: ${body}`);
+      let error;
+      try { error = JSON.parse(body)?.error; } catch { /* Non-JSON is definitive. */ }
+      if (response.status !== 503 || error !== "agent cleanup initialization failed") {
+        throw Object.assign(failure, { definitive: true });
+      }
+    } catch (error) {
+      if (error?.definitive === true) throw error;
+      failure = error;
+    }
+    if (attempt < 2) await new Promise((resolve) => setTimeout(resolve, 250 * 2 ** attempt));
+  }
+  throw failure;
+}
+
 function integer(name, fallback, minimum, maximum) {
   const value = Number(process.env[name] ?? fallback);
   if (!Number.isSafeInteger(value) || value < minimum || value > maximum) {
     throw new Error(`${name} must be an integer from ${minimum} through ${maximum}`);
   }
   return value;
+}
+
+function agentIds(value, operation) {
+  if (!value || !Array.isArray(value.data)
+    || value.data.some((id) => typeof id !== "string")) {
+    throw new Error(`${operation} returned an invalid agent listing`);
+  }
+  return value.data;
 }
 
 function quantile(sorted, fraction) {
