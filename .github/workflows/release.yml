@@ -43,7 +43,8 @@ jobs:
       - name: Validate installers and crate packages
         shell: bash
         run: |
-          bash -n install scripts/changelog.sh scripts/check-crate-boundaries.sh scripts/check-docs.sh scripts/publish-crates.sh scripts/release-crates.sh
+          bash -n install scripts/changelog.sh scripts/check-crate-boundaries.sh scripts/check-docs.sh scripts/publish-crates.sh scripts/release-crates.sh scripts/test-install.sh
+          ./scripts/test-install.sh
           ./scripts/check-crate-boundaries.sh
           ./scripts/release-crates.sh check
           for crate in $(./scripts/release-crates.sh names); do

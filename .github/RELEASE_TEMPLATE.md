@@ -1,4 +1,4 @@
-Install on macOS or Linux:
+Install on Apple Silicon macOS or x86-64 glibc Linux:
 
 ```sh
 curl -fsSL https://nanocodex.paradigm.xyz | bash

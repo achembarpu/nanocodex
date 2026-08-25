@@ -71,7 +71,7 @@ VIRTUAL_ENV="$PWD/py/bindings/.venv" \
   py/bindings/.venv/bin/maturin develop --manifest-path py/bindings/Cargo.toml
 ```
 
-Or install the native CLI/TUI on macOS or Linux:
+Or install the native CLI/TUI on Apple Silicon macOS or x86-64 glibc Linux:
 
 ```sh
 curl -fsSL https://nanocodex.paradigm.xyz | bash

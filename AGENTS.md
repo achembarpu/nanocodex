@@ -25,8 +25,8 @@
   Fix the root cause at the highest boundary that owns it, then rerun the
   corrected workflow from that boundary; do not paper over the problem with a
   downstream workaround.
-- Follow the active work in `PLAN.md` in order. Build complete vertical slices
-  with a real consumer; do not accumulate speculative abstractions.
+- Build complete vertical slices with a real consumer; do not accumulate
+  speculative abstractions.
 - Prefer deletion and direct ownership over adapters that merely move data.
   Cleanup must materially reduce production or planning surface.
 - Use existing project tooling and patterns. Add a dependency only for a

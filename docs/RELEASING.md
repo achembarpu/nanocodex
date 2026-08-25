@@ -123,6 +123,11 @@ The tag starts the release workflow. It:
 7. attaches gzip-compressed binaries, raw compatibility executables, and
    `SHA256SUMS` to the draft.
 
+The release check also exercises the public installer contract against both
+asset layouts. The installer prefers the compressed binary and uses the raw
+compatibility executable only when that is the artifact named by
+`SHA256SUMS`, as on `v0.5.0`.
+
 Open the draft at <https://github.com/gakonst/nanocodex/releases>, inspect the
 notes, verify `SHA256SUMS`, and smoke-test a downloaded platform binary. Then
 click **Publish release** and immediately smoke the public curl installer and

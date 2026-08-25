@@ -1,9 +1,8 @@
 # Nanocodex refactor
 
 This is the design record for the Nanocodex monorepo refactor. It captures the
-decisions that produced the current implementation slices. The active delivery
-order, parity checkpoint, and acceptance gates now live in
-[`PLAN.md`](PLAN.md).
+decisions that produced the current implementation slices. The active plan
+that originally accompanied this record has been retired.
 
 ## Outcome
 

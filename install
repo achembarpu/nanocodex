@@ -35,7 +35,6 @@ case "${architecture}-${platform}" in
 esac
 
 binary="nanocodex-${architecture}-${platform}"
-asset="$binary.gz"
 temporary_dir="$(mktemp -d 2>/dev/null)" || {
   echo "nanocodex: failed to create a temporary directory" >&2
   exit 1
@@ -55,9 +54,22 @@ if [[ -z "$release_tag" || -z "$version" || "$version" == "$release_tag" ]]; the
   exit 1
 fi
 release_url="https://github.com/$repository/releases/download/$release_tag"
+curl --fail --silent --show-error --location "$release_url/SHA256SUMS" --output "$temporary_dir/SHA256SUMS"
+
+compressed_asset="$binary.gz"
+if awk -v asset="$compressed_asset" '$2 == asset || $2 == "*" asset { found = 1 } END { exit !found }' "$temporary_dir/SHA256SUMS"; then
+  asset="$compressed_asset"
+  compressed=true
+elif awk -v asset="$binary" '$2 == asset || $2 == "*" asset { found = 1 } END { exit !found }' "$temporary_dir/SHA256SUMS"; then
+  asset="$binary"
+  compressed=false
+else
+  echo "nanocodex: SHA256SUMS contains neither $compressed_asset nor $binary" >&2
+  exit 1
+fi
+
 echo "Downloading $asset..."
 curl --fail --show-error --location --progress-bar "$release_url/$asset" --output "$temporary_dir/$asset"
-curl --fail --silent --show-error --location "$release_url/SHA256SUMS" --output "$temporary_dir/SHA256SUMS"
 
 expected="$(awk -v asset="$asset" '$2 == asset || $2 == "*" asset { print $1; exit }' "$temporary_dir/SHA256SUMS")"
 if [[ -z "$expected" ]]; then
@@ -65,7 +77,7 @@ if [[ -z "$expected" ]]; then
   exit 1
 fi
 
-if ! command -v gzip >/dev/null 2>&1; then
+if [[ "$compressed" == true ]] && ! command -v gzip >/dev/null 2>&1; then
   echo "nanocodex: gzip is required to unpack the download" >&2
   exit 1
 fi
@@ -87,17 +99,21 @@ if [[ "$actual" != "$expected" ]]; then
   echo "nanocodex: checksum mismatch for $asset" >&2
   exit 1
 fi
-if ! gzip -dc "$temporary_dir/$asset" > "$temporary_dir/$binary"; then
-  echo "nanocodex: failed to unpack $asset" >&2
-  exit 1
+binary_path="$temporary_dir/$asset"
+if [[ "$compressed" == true ]]; then
+  binary_path="$temporary_dir/$binary"
+  if ! gzip -dc "$temporary_dir/$asset" > "$binary_path"; then
+    echo "nanocodex: failed to unpack $asset" >&2
+    exit 1
+  fi
 fi
-binary_checksum="$(sha256_file "$temporary_dir/$binary")"
+binary_checksum="$(sha256_file "$binary_path")"
 
 version_dir="$versions_dir/$version"
 mkdir -p "$bin_dir" "$version_dir" "$updater_dir"
-install -m 755 "$temporary_dir/$binary" "$version_dir/nanocodex"
+install -m 755 "$binary_path" "$version_dir/nanocodex"
 printf '%s\n' "$binary_checksum" > "$version_dir/nanocodex.sha256"
-install -m 755 "$temporary_dir/$binary" "$updater_dir/nanocodex"
+install -m 755 "$binary_path" "$updater_dir/nanocodex"
 printf '%s\n' "$binary_checksum" > "$updater_dir/nanocodex.sha256"
 
 ln -sfn "versions/$version" "$install_root/current"
@@ -121,14 +137,21 @@ exec "$install_root/current/nanocodex" "$@"
 EOF
 install -m 755 "$temporary_dir/nanocodex-launcher" "$bin_dir/nanocodex"
 
-path_line="export PATH=\"\$PATH:$bin_dir\""
+shell_quote() {
+  local quoted
+  quoted="${1//\'/\'\"\'\"\'}"
+  printf "'%s'" "$quoted"
+}
+
+quoted_bin_dir="$(shell_quote "$bin_dir")"
+path_line="export PATH=\"\$PATH\":$quoted_bin_dir"
 profile=""
 case "${SHELL:-}" in
   */zsh) profile="${ZDOTDIR:-$HOME}/.zshenv" ;;
   */bash) profile="$HOME/.bashrc" ;;
   */fish)
     profile="${XDG_CONFIG_HOME:-$HOME/.config}/fish/config.fish"
-    path_line="fish_add_path -a \"$bin_dir\""
+    path_line="fish_add_path -a -- $quoted_bin_dir"
     ;;
   */ash|*/dash|*/ksh|*/sh) profile="$HOME/.profile" ;;
 esac

@@ -4,8 +4,8 @@
 > This is the former working plan preserved as a historical implementation
 > log. It is not the active roadmap, and checkpoint or validation claims below
 > describe what was recorded at the time rather than current verified state.
-> See [`../PLAN.md`](../PLAN.md) for the plan now being executed and
-> [`../AGENTS.md`](../AGENTS.md) for authoritative development invariants.
+> See [`../AGENTS.md`](../AGENTS.md) for authoritative development invariants.
+> The active plan that originally accompanied this history has been retired.
 
 ## Goal
 
