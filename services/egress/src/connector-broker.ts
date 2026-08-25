@@ -208,13 +208,13 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
         auditAction = "disconnect";
         auditConnector = id;
         const connector = this.#connectors.connectors[id];
-        if (connector) await this.#revoke(id, connector);
+        const providerRevoked = connector ? await this.#revoke(id, connector) : false;
         const disconnected = this.#deleteConnectorGrant(id, connector);
         delete this.#connectors.pending[id];
         await this.#persist();
         connectorAudit("disconnect", "allow", id, {
           status: 204,
-          provider_revoked: Boolean(connector),
+          provider_revoked: providerRevoked,
           disconnected_connectors: disconnected.length,
         });
         return new Response(null, { status: 204, headers: noStoreHeaders() });
@@ -441,30 +441,34 @@ export class UserConnectorBroker extends DurableObject<ConnectorBrokerEnv> {
     return next;
   }
 
-  async #revoke(id: ConnectorId, connector: StoredConnector): Promise<void> {
+  async #revoke(id: ConnectorId, connector: StoredConnector): Promise<boolean> {
     if (id === "x") {
       const credentials = providerCredentials(id, this.#env);
-      const tokens = [...new Set([
-        connector.refreshToken,
-        connector.accessToken,
-      ].filter((token): token is string => Boolean(token)))];
+      const tokens = [...new Set([connector.refreshToken, connector.accessToken]
+        .filter((token): token is string => Boolean(token)))];
       for (const token of tokens) {
         const response = await providerFetch(buildXRevocationRequest(
           credentials.clientId,
-          credentials.clientSecret,
           token,
         ));
         await response.body?.cancel();
-        if (response.status !== 200) {
+        const terminal = terminalRevocationStatus(response.status);
+        connectorAudit("revoke", response.ok ? "allow" : terminal ? "deny" : "error", id, {
+          status: response.status,
+          token_kind: token === connector.refreshToken ? "refresh" : "access",
+        });
+        if (response.ok) return true;
+        if (!terminal) {
           throw new ConnectorFailure(503, "connector_revocation_failed");
         }
       }
-      return;
+      return false;
     }
     const response = await providerFetch(revocationRequest(id, connector, this.#env));
     await response.body?.cancel();
     const revoked = id === "github" ? response.status === 204 : response.status === 200;
     if (!revoked) throw new ConnectorFailure(503, "connector_revocation_failed");
+    return true;
   }
 
   #disconnectIds(id: ConnectorId, connector: StoredConnector): ConnectorId[] {
@@ -746,6 +750,13 @@ function revocationRequest(
   });
 }
 
+function terminalRevocationStatus(status: number): boolean {
+  return status >= 400 && status < 500
+    && status !== 408
+    && status !== 425
+    && status !== 429;
+}
+
 function decodeIdentity(id: ConnectorId, value: unknown): { accountId: string; displayLabel: string } {
   if (id === "github") return decodeGitHubIdentity(value);
   if (id === "gmail") return decodeGmailIdentity(value);
@@ -983,6 +994,7 @@ type ConnectorAuditAction =
   | "authorize_callback"
   | "disconnect"
   | "refresh"
+  | "revoke"
   | "use";
 
 function connectorAudit(

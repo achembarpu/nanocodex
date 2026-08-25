@@ -121,16 +121,13 @@ export function buildXRefreshRequest(
 
 export function buildXRevocationRequest(
   clientId: string,
-  clientSecret: string,
   token: string,
 ): Request {
   const id = required(clientId, "client ID");
-  const secret = required(clientSecret, "client secret");
   return new Request(X_PROVIDER.revocationUrl, {
     method: "POST",
     headers: {
       accept: "application/json",
-      authorization: `Basic ${btoa(`${id}:${secret}`)}`,
       "content-type": "application/x-www-form-urlencoded",
     },
     body: new URLSearchParams({

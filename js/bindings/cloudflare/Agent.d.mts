@@ -57,7 +57,17 @@ export function create(owner: create.Owner, options?: create.Options): Promise<c
 export declare namespace create {
   type Owner = DurableObjectOwner;
   type Options = Readonly<{
+    /**
+     * `durable` retains the adapter's resumable event socket. `caller` leaves
+     * event retention to the embedding Durable Object and disables connect().
+     */
+    eventPersistence?: "durable" | "caller" | undefined;
     instructions?: string | undefined;
+    /**
+     * Bounds terminal receipts retained in the hot Rust journal checkpoint.
+     * The caller must preserve older exact-ID results before selecting this.
+     */
+    terminalReceiptRetention?: number | undefined;
     tools?: ToolConfiguration | undefined;
   }>;
   type ReturnType = Agent;

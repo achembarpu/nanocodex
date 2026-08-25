@@ -102,6 +102,51 @@ export async function append(
   );
 }
 
+export async function compact(
+  routeId,
+  journalId,
+  ownerId,
+  fence,
+  expectedRevision,
+  payload,
+) {
+  const store = requiredRoute(routeId, journalId).store;
+  if (typeof store.compact !== "function") {
+    return JSON.stringify({
+      status: "not_committed",
+      message: "durability store does not support journal compaction",
+    });
+  }
+  const result = await store.compact(journalId, {
+    ownerId,
+    fence,
+    expectedRevision,
+    payload,
+  });
+  if (result?.status === "compacted") {
+    return JSON.stringify({
+      status: "compacted",
+      revision: revision(result.revision, "durability compact revision"),
+    });
+  }
+  if (result?.status === "conflict") {
+    return JSON.stringify({
+      status: "conflict",
+      actual_revision: revision(result.actualRevision, "durability conflict revision"),
+    });
+  }
+  if (result?.status === "not_committed") {
+    return JSON.stringify({
+      status: "not_committed",
+      message: requiredString(result.message, "durability not-committed message"),
+    });
+  }
+  if (result?.status === "fenced") return JSON.stringify({ status: "fenced" });
+  throw new TypeError(
+    "durability.compact() must return a compacted, conflict, fenced, or not_committed result",
+  );
+}
+
 function requiredRoute(routeId, journalId) {
   const route = hosts.get(routeId);
   if (!route) throw new Error(`no Nanocodex host owns durability route: ${routeId}`);

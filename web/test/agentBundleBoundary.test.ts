@@ -25,7 +25,7 @@ test("Vite owns one static application graph without manual module loaders", () 
   );
   assert.match(
     experience,
-    /hasCredential && !activeCapabilityError[\s\S]*?\(activeRuntime === "local" \|\| managedConversationId\)[\s\S]*?<AgentTerminal[\s\S]*?<ManagedAgentTerminal/,
+    /landing[\s\S]*?<AgentTerminal[\s\S]*?: hasCredential && managedConversationId[\s\S]*?<ManagedAgentTerminal/,
   );
   assert.doesNotMatch(
     applicationGraph,

@@ -1,10 +1,9 @@
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { selectBrowserThread } from "nanocodex/tools/browser";
 import type { AgentStatus, AgentTerminalMode, AgentTerminalState } from "./agentTerminalTypes";
 import { AgentTerminal, ManagedAgentTerminal } from "./AgentTerminal";
 import { TerminalTranscriptSurface } from "./AgentTerminalView";
 import { useAccountSession } from "./AccountSession";
-import { ConversationHistoryRail, type ConversationSummary } from "./ConversationHistoryRail";
+import { ConversationHistoryRail } from "./ConversationHistoryRail";
 import { browserAgentCapabilityError } from "./browserAgentCapabilities";
 import { clientFailureMessage } from "./clientFailure";
 import {
@@ -13,13 +12,7 @@ import {
   type ModelSessionStatus,
   type CredentialSource,
 } from "./modelSession";
-import {
-  conversationTitle,
-  createLocalConversation,
-  loadLocalConversations,
-  recordLocalConversationPrompt,
-  type LocalConversation,
-} from "./localConversationRuntime";
+import { conversationTitle } from "./localConversationRuntime";
 import {
   createManagedConversation,
   listManagedConversations,
@@ -28,34 +21,23 @@ import {
 import "./AgentTerminal.css";
 import "./Home.css";
 
-/** Account-aware shell around the local and managed Agent consumers. */
+/** Ephemeral homepage consumer and managed-durable Agent demo. */
 export const AgentExperience = memo(function AgentExperience({
-  beforeLocalTurn, deploymentCurrent, landing, mode, onThreadChange, threadId,
+  beforeLocalTurn, deploymentCurrent, landing, mode,
 }: {
   beforeLocalTurn(): Promise<void>;
   deploymentCurrent: boolean;
   landing?: boolean;
   mode: AgentTerminalMode;
-  onThreadChange(threadId: string): void;
-  threadId?: string;
 }) {
   const [ephemeralThreadId] = useState(() => crypto.randomUUID());
-  const durable = !landing && threadId !== undefined;
-  const activeThreadId = landing || threadId === undefined ? ephemeralThreadId : threadId;
   const account = useAccountSession();
   const capabilityError = useMemo(() => browserAgentCapabilityError(), []);
-  const [runtime, setRuntime] = useState<"local" | "managed">(() =>
-    localStorage.getItem("nanocodex.agent-runtime.v1") === "managed" ? "managed" : "local"
-  );
-  const activeRuntime = landing ? "local" : runtime;
   const [authStatus, setAuthStatus] = useState<ModelSessionStatus>();
   const [credentialSource, setCredentialSource] = useState<CredentialSource>();
   const credentialSourceRef = useRef<CredentialSource | undefined>(undefined);
   const [runtimeState, setRuntimeState] = useState<AgentTerminalState>();
   const [railOpen, setRailOpen] = useState(false);
-  const [localConversations, setLocalConversations] = useState<readonly LocalConversation[]>(() =>
-    durable ? loadLocalConversations(activeThreadId) : []
-  );
   const [managedConversations, setManagedConversations] = useState<readonly ManagedConversation[]>([]);
   const [managedConversationId, setManagedConversationId] = useState<string>();
   const [managedError, setManagedError] = useState<string>();
@@ -64,19 +46,16 @@ export const AgentExperience = memo(function AgentExperience({
   const hasCredential = credentialSource === "brokered";
 
   useEffect(() => {
-    setLocalConversations(durable ? loadLocalConversations(activeThreadId) : []);
-  }, [activeThreadId, durable]);
-  useEffect(() => {
-    if (deploymentCurrent || authStatus?.state !== "ready") return;
+    if (!landing || deploymentCurrent || authStatus?.state !== "ready") return;
     void beforeLocalTurn().catch(() => {});
-  }, [authStatus, beforeLocalTurn, deploymentCurrent]);
+  }, [authStatus, beforeLocalTurn, deploymentCurrent, landing]);
   useEffect(() => {
     setManagedConversations([]);
     setManagedConversationId(undefined);
     setRuntimeState(undefined);
   }, [account.account?.id]);
   useEffect(() => {
-    if (activeRuntime !== "managed" || account.status !== "ready" || !account.account) return;
+    if (landing || account.status !== "ready" || !account.account) return;
     let cancelled = false;
     const accountId = account.account.id;
     const retainedId = safeGet(managedSelectionKey(accountId)) ?? undefined;
@@ -97,7 +76,7 @@ export const AgentExperience = memo(function AgentExperience({
       if (!cancelled) setConversationPending(false);
     });
     return () => { cancelled = true; };
-  }, [account.account?.id, account.status, activeRuntime, hasCredential, managedAttempt]);
+  }, [account.account?.id, account.status, hasCredential, landing, managedAttempt]);
 
   const changeCredentialSource = useCallback((source: CredentialSource) => {
     if (credentialSourceRef.current === "brokered" && source !== "brokered") setRuntimeState(undefined);
@@ -108,20 +87,15 @@ export const AgentExperience = memo(function AgentExperience({
     onStatusChange: setAuthStatus,
     onSourceChange: changeCredentialSource,
   });
-  const activeCapabilityError = activeRuntime === "local" ? capabilityError : undefined;
+  const activeCapabilityError = landing ? capabilityError : undefined;
   const agentStatus: AgentStatus = !hasCredential || activeCapabilityError
     ? "idle" : runtimeState?.status ?? "starting";
   const agentError = runtimeState?.error;
   const inactiveMessage = inactiveTerminalMessage({
-    agentError, agentStatus, authStatus, capabilityError: activeCapabilityError, source: credentialSource,
+    agentError, agentStatus, authStatus, capabilityError: activeCapabilityError,
+    runtime: landing ? "browser" : "managed", source: credentialSource,
   });
 
-  const selectLocal = useCallback((id: string) => {
-    selectBrowserThread(id);
-    onThreadChange(id);
-    setRuntimeState(undefined);
-    setRailOpen(false);
-  }, [onThreadChange]);
   const selectManaged = useCallback((id: string) => {
     setManagedConversationId(id);
     if (account.account) safeSet(managedSelectionKey(account.account.id), id);
@@ -129,17 +103,7 @@ export const AgentExperience = memo(function AgentExperience({
     setRailOpen(false);
   }, [account.account]);
   const createConversation = useCallback(() => {
-    if (conversationPending) return;
-    if (activeRuntime === "local") {
-      const created = createLocalConversation(localConversations);
-      setLocalConversations(created.conversations);
-      selectBrowserThread(created.conversation.id);
-      onThreadChange(created.conversation.id);
-      setRuntimeState(undefined);
-      setRailOpen(false);
-      return;
-    }
-    if (!account.account) return;
+    if (conversationPending || !account.account) return;
     setConversationPending(true);
     setManagedError(undefined);
     void createManagedConversation(account.account.id).then((conversation) => {
@@ -150,20 +114,12 @@ export const AgentExperience = memo(function AgentExperience({
       setRailOpen(false);
     }).catch((error) => setManagedError(errorMessage(error)))
       .finally(() => setConversationPending(false));
-  }, [account.account, activeRuntime, conversationPending, localConversations, onThreadChange]);
+  }, [account.account, conversationPending]);
   const retryManagedConversations = useCallback(() => {
     setManagedError(undefined);
     setManagedAttempt((value) => value + 1);
   }, []);
   const recordActivity = useCallback((input: string) => {
-    if (activeRuntime === "local") {
-      if (durable) {
-        setLocalConversations((current) =>
-          recordLocalConversationPrompt(current, activeThreadId, input)
-        );
-      }
-      return;
-    }
     if (!managedConversationId) return;
     setManagedConversations((current) => current.map((item) => item.id === managedConversationId ? {
       ...item,
@@ -171,53 +127,36 @@ export const AgentExperience = memo(function AgentExperience({
       turnCount: (item.turnCount ?? 0) + 1,
       updatedAt: Date.now(),
     } : item).sort((a, b) => (b.updatedAt ?? 0) - (a.updatedAt ?? 0)));
-  }, [activeRuntime, activeThreadId, durable, managedConversationId]);
+  }, [managedConversationId]);
 
-  const conversations: readonly ConversationSummary[] = activeRuntime === "local"
-    ? localConversations : managedConversations;
-  const selectedId = activeRuntime === "local" ? activeThreadId : managedConversationId;
   return <div className={`nanocodex-demo is-${mode}${landing ? " is-landing" : ""}`}>
-    {landing ? null : <div className="agent-runtime-switch" role="group" aria-label="Agent runtime">
-      {(["local", "managed"] as const).map((value) => <button
-        key={value} type="button" aria-pressed={runtime === value}
-        onClick={() => {
-          localStorage.setItem("nanocodex.agent-runtime.v1", value);
-          setRuntimeState(undefined);
-          setRuntime(value);
-          setRailOpen(false);
-        }}
-      >{value === "local" ? "Local browser" : "Managed durable"}</button>)}
-    </div>}
     <div className="conversation-workspace">
       {landing ? null : <ConversationHistoryRail
         agentStatus={agentStatus}
-        conversations={conversations} error={activeRuntime === "managed" ? managedError : undefined}
-        mobileOpen={railOpen} pending={conversationPending} runtime={activeRuntime} selectedId={selectedId}
+        conversations={managedConversations} error={managedError}
+        mobileOpen={railOpen} pending={conversationPending} runtime="managed" selectedId={managedConversationId}
         onClose={() => setRailOpen(false)} onCreate={createConversation} onOpen={() => setRailOpen(true)}
         onRetry={retryManagedConversations}
-        onSelect={activeRuntime === "local" ? selectLocal : selectManaged}
+        onSelect={selectManaged}
       />}
       <div className="conversation-main">
-        {hasCredential && !activeCapabilityError
-          && (activeRuntime === "managed" || deploymentCurrent)
-          && (activeRuntime === "local" || managedConversationId)
-          ? activeRuntime === "local" ? <AgentTerminal
-              key={`${durable ? "durable" : "ephemeral"}:${activeThreadId}`}
+        {landing
+          ? hasCredential && !activeCapabilityError && deploymentCurrent
+            ? <AgentTerminal
+              key={`ephemeral:${ephemeralThreadId}`}
               authStatus={authStatus} beforeLocalTurn={beforeLocalTurn}
-              durable={durable}
-              mode={mode} onConversationActivity={recordActivity}
-              onStateChange={setRuntimeState} source={credentialSource} threadId={activeThreadId}
-              welcome={landing ? HOME_TERMINAL_WELCOME : undefined}
-            /> : <ManagedAgentTerminal
+              mode={mode} onConversationActivity={NO_CONVERSATION_ACTIVITY}
+              onStateChange={setRuntimeState} source={credentialSource} threadId={ephemeralThreadId}
+              welcome={HOME_TERMINAL_WELCOME}
+            />
+            : <ReservedTerminal message={inactiveMessage} mode={mode} welcome={HOME_TERMINAL_WELCOME} />
+          : hasCredential && managedConversationId
+            ? <ManagedAgentTerminal
               key={managedConversationId} agentId={managedConversationId!} authStatus={authStatus}
               mode={mode} onConversationActivity={recordActivity} onStateChange={setRuntimeState}
               source={credentialSource}
             />
-          : <ReservedTerminal
-              message={inactiveMessage}
-              mode={mode}
-              welcome={landing ? HOME_TERMINAL_WELCOME : undefined}
-            />}
+            : <ReservedTerminal message={inactiveMessage} mode={mode} />}
       </div>
     </div>
   </div>;
@@ -246,6 +185,7 @@ function ReservedTerminal({
 }
 
 const NO_OLDER_HISTORY = async () => false;
+const NO_CONVERSATION_ACTIVITY = () => {};
 
 const HOME_TERMINAL_WELCOME = `# High-performance Codex SDK. Runs anywhere.
 

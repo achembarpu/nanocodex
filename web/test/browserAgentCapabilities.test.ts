@@ -53,8 +53,8 @@ test("the terminal fails before thread or Worker creation and exposes the capabi
   const terminal = source("../src/AgentTerminal.tsx");
   const session = source("../src/modelSession.tsx");
   assert.match(experience, /const capabilityError = useMemo\(\(\) => browserAgentCapabilityError\(\), \[\]\)/);
-  assert.match(experience, /activeCapabilityError = activeRuntime === "local" \? capabilityError : undefined/);
-  assert.match(experience, /hasCredential && !activeCapabilityError[\s\S]*?<AgentTerminal/);
+  assert.match(experience, /activeCapabilityError = landing \? capabilityError : undefined/);
+  assert.match(experience, /landing[\s\S]*?hasCredential && !activeCapabilityError[\s\S]*?<AgentTerminal/);
   assert.match(terminal, /threadId: string/);
   assert.match(terminal, /useNanocodex\(\{ config: agentConfig, threadId \}\)/);
   assert.match(session, /<p className="agent-byok-error" role="alert">\{capabilityError\}<\/p>/);

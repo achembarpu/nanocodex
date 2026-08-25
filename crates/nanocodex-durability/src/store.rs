@@ -134,6 +134,22 @@ pub trait JournalStore: Send {
         expected_revision: u64,
         payload: &'a str,
     ) -> StoreFuture<'a, Result<u64, StoreError>>;
+
+    /// Atomically replaces the retained batch prefix with one equivalent
+    /// checkpoint at the unchanged current revision.
+    fn compact<'a>(
+        &'a mut self,
+        _journal_id: &'a str,
+        _owner: &'a OwnerToken,
+        _expected_revision: u64,
+        _payload: &'a str,
+    ) -> StoreFuture<'a, Result<u64, StoreError>> {
+        Box::pin(async {
+            Err(StoreError::NotCommitted(
+                "durability store does not support journal compaction".to_owned(),
+            ))
+        })
+    }
 }
 
 /// Minimal host-owned persistence contract.
@@ -159,4 +175,20 @@ pub trait JournalStore {
         expected_revision: u64,
         payload: &'a str,
     ) -> StoreFuture<'a, Result<u64, StoreError>>;
+
+    /// Atomically replaces the retained batch prefix with one equivalent
+    /// checkpoint at the unchanged current revision.
+    fn compact<'a>(
+        &'a mut self,
+        _journal_id: &'a str,
+        _owner: &'a OwnerToken,
+        _expected_revision: u64,
+        _payload: &'a str,
+    ) -> StoreFuture<'a, Result<u64, StoreError>> {
+        Box::pin(async {
+            Err(StoreError::NotCommitted(
+                "durability store does not support journal compaction".to_owned(),
+            ))
+        })
+    }
 }

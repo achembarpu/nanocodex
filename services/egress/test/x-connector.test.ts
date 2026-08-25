@@ -76,9 +76,9 @@ describe("X OAuth connector", () => {
       grant_type: "refresh_token",
     });
 
-    const revocation = buildXRevocationRequest("x-client", "x-secret", "refresh-secret");
+    const revocation = buildXRevocationRequest("x-client", "refresh-secret");
     expect(revocation.url).toBe(X_PROVIDER.revocationUrl);
-    expect(revocation.headers.get("authorization")).toMatch(/^Basic /);
+    expect(revocation.headers.get("authorization")).toBeNull();
     expect(Object.fromEntries(await revocation.formData())).toEqual({
       token: "refresh-secret",
       client_id: "x-client",

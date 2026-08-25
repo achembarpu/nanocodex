@@ -49,10 +49,13 @@ test("credential presence is distinct from agent readiness and failures are manu
   assert.doesNotMatch(`${terminal}\n${session}`, /Connect to start\./);
 });
 
-test("signed-out browsers wait for the account-owned model connection", () => {
+test("signed-out runtimes wait for the account-owned model connection", () => {
   assert.match(experience, /credentialSource === "brokered"/);
-  assert.match(experience, /hasCredential && !activeCapabilityError[\s\S]*?\(activeRuntime === "local" \|\| managedConversationId\)/);
-  assert.match(session, /Sign in with a passkey to start the browser agent/);
+  assert.match(experience, /landing[\s\S]*?hasCredential && !activeCapabilityError && deploymentCurrent/);
+  assert.match(experience, /hasCredential && managedConversationId[\s\S]*?<ManagedAgentTerminal/);
+  assert.match(session, /Sign in with a passkey to start the \$\{agent\}/);
+  assert.match(session, /runtime === "managed" \? "managed agent" : "browser agent"/);
+  assert.match(experience, /runtime: landing \? "browser" : "managed"/);
   assert.doesNotMatch(`${experience}\n${terminal}\n${session}`, /guest|sponsor|"deployment"|backend-anon|anonymous (?:OpenAI|ChatGPT|Codex)/i);
 });
 

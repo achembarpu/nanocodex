@@ -2,7 +2,6 @@ import {
   memo,
   useCallback,
   useMemo,
-  useState,
 } from "react";
 import {
   createConfig,
@@ -22,7 +21,6 @@ import { ArtifactDock } from "./ArtifactDock";
 import { browserMcpConfiguration } from "./browserMcp";
 import { clientFailureMessage } from "./clientFailure";
 import { managedTerminalAgent, openManagedAgent } from "./managedAgentRuntime";
-import { localTerminalAgent } from "./localAgentRuntime";
 
 export type { AgentTerminalMode, AgentTerminalState } from "./agentTerminalTypes";
 export { AgentTerminalView } from "./AgentTerminalView";
@@ -31,7 +29,6 @@ export { AgentTerminalView } from "./AgentTerminalView";
 export const AgentTerminal = memo(function AgentTerminal({
   authStatus,
   beforeLocalTurn,
-  durable,
   mode,
   onConversationActivity,
   onStateChange,
@@ -41,7 +38,6 @@ export const AgentTerminal = memo(function AgentTerminal({
 }: {
   authStatus: ModelSessionStatus | undefined;
   beforeLocalTurn(): Promise<void>;
-  durable: boolean;
   mode: AgentTerminalMode;
   onConversationActivity(input: string): void;
   onStateChange(state: AgentTerminalState): void;
@@ -52,46 +48,26 @@ export const AgentTerminal = memo(function AgentTerminal({
   const agentConfig = useMemo(() => createConfig({
     agent: {
       mcp: browserMcpConfiguration(location.origin, threadId),
-      ...(durable ? {} : { durability: false }),
+      durability: false,
     },
-  }), [durable, threadId]);
+  }), [threadId]);
   const {
     data: agent,
     error,
     isError,
     refetch,
   } = useNanocodex({ config: agentConfig, threadId });
-  const [localFailure, setLocalFailure] = useState<{
-    agent: typeof agent;
-    message: string;
-    threadId: string;
-  }>();
   const voice = useVoice(agent, {
     beforeAgentTurn: beforeLocalTurn,
     enabled: mode !== "hidden",
   });
-  const terminalAgent = useMemo(
-    () => agent
-      ? durable
-        ? localTerminalAgent(agent, threadId, undefined, (failure) => {
-            setLocalFailure({ agent, message: errorMessage(failure), threadId });
-          }, undefined, undefined, beforeLocalTurn)
-        : agent
-      : undefined,
-    [agent, beforeLocalTurn, durable, threadId],
-  );
-  const localAgentError = durable && localFailure
-    && localFailure.agent === agent
-    && localFailure.threadId === threadId
-    ? localFailure.message
-    : undefined;
   const retryAgent = useCallback(() => {
     refetch();
   }, [refetch]);
   return (
     <AgentTerminalView
-      agent={terminalAgent}
-      agentError={isError ? errorMessage(error) : localAgentError}
+      agent={agent}
+      agentError={isError ? errorMessage(error) : undefined}
       inactiveMessage={({ agentError, agentStatus }) => inactiveTerminalMessage({
         agentError,
         agentStatus,
@@ -143,6 +119,7 @@ export const ManagedAgentTerminal = memo(function ManagedAgentTerminal({
         agentStatus,
         authStatus,
         capabilityError: undefined,
+        runtime: "managed",
         source,
       })}
       mode={mode}

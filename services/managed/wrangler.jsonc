@@ -12,12 +12,23 @@
       "enabled": true,
       "invocation_logs": true,
       "persist": true
+    },
+    "traces": {
+      "enabled": true,
+      "head_sampling_rate": 1,
+      "persist": true
     }
   },
   "services": [
     {
       "binding": "NANOCODEX",
       "service": "nanocodex-egress"
+    }
+  ],
+  "r2_buckets": [
+    {
+      "binding": "NANOCODEX_HISTORY",
+      "bucket_name": "nanocodex-managed-history"
     }
   ],
   "durable_objects": {

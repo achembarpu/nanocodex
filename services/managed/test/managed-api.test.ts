@@ -8,6 +8,7 @@ import {
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 
 import { NanocodexSession, UserAccount, type Env } from "../src/index";
+import { ManagedEventArchive } from "../src/managed-event-archive";
 
 const testEnv = env as unknown as Env;
 const USER_ID = "11111111-1111-4111-8111-111111111111";
@@ -30,6 +31,384 @@ afterEach(async () => {
 });
 
 describe("managed agents REST and resumable SSE", () => {
+  it("accounts for each independently growing per-agent durable payload", async () => {
+    const agent = await createAgent();
+    await submit(agent, "turn-capacity", "CAPACITY_ACCOUNTING");
+    await waitForTurnState(agent, "turn-capacity", "completed");
+
+    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    const response = await session.fetch("https://session.internal/capacity");
+    expect(response.status).toBe(200);
+    const capacity = await response.json<{
+      archived_turns: { archived_bytes: number; archived_receipts: number; objects: number };
+      database_size_bytes: number;
+      journal: { bytes: number; max_batch_bytes: number; revision: string; rows: number };
+      known_payload_bytes: number;
+      managed_events: { bytes: number; rows: number };
+      raw_events: { bytes: number; rows: number };
+      turns: {
+        blocked_rows: number;
+        input_bytes: number;
+        terminal_bytes: number;
+        terminal_rows: number;
+        total_rows: number;
+        unfinished_rows: number;
+      };
+      unattributed_database_bytes: number;
+    }>();
+
+    expect(capacity.database_size_bytes).toBeGreaterThan(0);
+    expect(capacity.journal).toMatchObject({ rows: expect.any(Number) });
+    expect(capacity.journal.rows).toBeGreaterThan(0);
+    expect(capacity.journal.bytes).toBeGreaterThan(0);
+    expect(capacity.journal.max_batch_bytes).toBeGreaterThan(0);
+    expect(BigInt(capacity.journal.revision)).toBeGreaterThan(0n);
+    expect(capacity.managed_events.rows).toBeGreaterThan(0);
+    expect(capacity.managed_events.bytes).toBeGreaterThan(0);
+    expect(capacity.raw_events).toEqual({ rows: 0, bytes: 0 });
+    expect(capacity.turns).toMatchObject({
+      blocked_rows: 0,
+      terminal_rows: 1,
+      total_rows: 1,
+      unfinished_rows: 0,
+    });
+    expect(capacity.turns.input_bytes).toBeGreaterThan(0);
+    expect(capacity.turns.terminal_bytes).toBeGreaterThan(0);
+    expect(capacity.archived_turns).toEqual({
+      archived_bytes: 0,
+      archived_receipts: 0,
+      objects: 0,
+    });
+    expect(capacity.known_payload_bytes).toBeGreaterThan(0);
+    expect(capacity.database_size_bytes).toBeGreaterThanOrEqual(capacity.known_payload_bytes);
+    expect(capacity.unattributed_database_bytes).toBe(
+      capacity.database_size_bytes - capacity.known_payload_bytes,
+    );
+  });
+
+  it("seals immutable event prefixes and replays one exact R2 and SQLite cursor space", async () => {
+    const agent = await createAgent();
+    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    for (let index = 0; index < 3; index += 1) {
+      const id = `turn-archive-${index}`;
+      await submit(agent, id, `ARCHIVE_${index}`);
+      await waitForTurnState(agent, id, "completed");
+      const sealed = await session.fetch("https://session.internal/events/archive", {
+        method: "POST",
+      });
+      expect(sealed.status).toBe(200);
+      expect(await sealed.json()).toMatchObject({ sealed: true });
+    }
+
+    const complete = await managedHistory(agent);
+    const capacity = await (await session.fetch("https://session.internal/capacity")).json<{
+      archived_events: {
+        archived_events: number;
+        archived_through: string;
+        recent_descriptors: number;
+        segments: number;
+      };
+      managed_events: { rows: number };
+    }>();
+    expect(capacity.archived_events).toMatchObject({
+      archived_events: expect.any(Number),
+      archived_through: expect.stringMatching(/^[1-9][0-9]*$/),
+      recent_descriptors: 3,
+      segments: 3,
+    });
+    expect(capacity.archived_events.archived_events).toBeGreaterThan(0);
+    expect(capacity.managed_events.rows).toBe(1);
+
+    const paged: ManagedHistoryEvent[] = [];
+    let before: string | undefined;
+    while (true) {
+      const query = new URL(`${agent.events_url}/history`);
+      query.searchParams.set("limit", "3");
+      if (before !== undefined) query.searchParams.set("before", before);
+      const response = await SELF.fetch(query);
+      expect(response.status).toBe(200);
+      const page = await response.json<ManagedHistory>();
+      paged.unshift(...page.data);
+      if (!page.has_more) break;
+      before = page.data[0]!.cursor;
+    }
+    expect(paged.map(({ cursor }) => cursor)).toEqual(
+      complete.data.map(({ cursor }) => cursor),
+    );
+
+    const replay = sseReader(await SELF.fetch(`${agent.events_url}?cursor=0`));
+    const replayed: string[] = [];
+    while (replayed.length < complete.data.length) {
+      replayed.push((await nextWithin(replay, "archived SSE replay")).id);
+    }
+    await replay.cancel();
+    expect(replayed).toEqual(complete.data.map(({ cursor }) => cursor));
+
+    const subject = testEnv.NANOCODEX_SESSIONS.idFromName(agent.agent_id).toString();
+    const prefix = `agents/${subject}/managed-events/`;
+    await testEnv.NANOCODEX_HISTORY.put(`${prefix}segments/orphan.json`, "orphan");
+    expect((await testEnv.NANOCODEX_HISTORY.list({ prefix })).objects.length).toBeGreaterThan(0);
+    const deleted = await SELF.fetch(`https://example.test/v1/agents/${agent.agent_id}`, {
+      method: "DELETE",
+    });
+    expect(deleted.status).toBe(204);
+    createdAgents.delete(agent.agent_id);
+    expect((await testEnv.NANOCODEX_HISTORY.list({ prefix })).objects).toHaveLength(0);
+  }, 30_000);
+
+  it("bounds the hot archive manifest after immutable index rollover", async () => {
+    const agent = await createAgent();
+    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    const messageJson = JSON.stringify({ type: "stream_failed", error: "rollover" });
+    const messageBytes = new TextEncoder().encode(messageJson).byteLength;
+    for (let index = 0; index < 34; index += 1) {
+      await runInDurableObject(session, (_instance, state) => {
+        state.storage.transactionSync(() => {
+          state.storage.sql.exec(
+            "INSERT INTO managed_events (turn_id, message_json, created_at) VALUES (NULL, ?, ?)",
+            messageJson,
+            Date.now() + index,
+          );
+          state.storage.sql.exec(
+            "UPDATE managed_event_meta SET total_bytes = total_bytes + ? WHERE singleton = 1",
+            messageBytes,
+          );
+        });
+      });
+      const response = await session.fetch("https://session.internal/events/archive", {
+        method: "POST",
+      });
+      expect(response.status).toBe(200);
+      expect(await response.json()).toMatchObject({ sealed: true });
+    }
+
+    const capacity = await (await session.fetch("https://session.internal/capacity")).json<{
+      archived_events: {
+        index_nodes: number;
+        recent_descriptors: number;
+        segments: number;
+      };
+      managed_events: { rows: number };
+    }>();
+    expect(capacity.archived_events).toMatchObject({
+      index_nodes: 2,
+      recent_descriptors: 2,
+      segments: 34,
+    });
+    expect(capacity.managed_events.rows).toBe(1);
+
+    const history = await managedHistory(agent);
+    expect(history.data).toHaveLength(35);
+    expect(history.data.map(({ cursor }) => BigInt(cursor))).toEqual(
+      [...history.data.map(({ cursor }) => BigInt(cursor))]
+        .sort((left, right) => left < right ? -1 : 1),
+    );
+
+    const replay = sseReader(await SELF.fetch(`${agent.events_url}?cursor=0`));
+    const replayed: string[] = [];
+    while (replayed.length < history.data.length) {
+      replayed.push((await nextWithin(replay, "indexed archive SSE replay")).id);
+    }
+    await replay.cancel();
+    expect(replayed).toEqual(history.data.map(({ cursor }) => cursor));
+  }, 45_000);
+
+  it("keeps SQLite authoritative when a seal source changes after the R2 put", async () => {
+    const agent = await createAgent();
+    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    const messageJson = JSON.stringify({ type: "stream_failed", error: "fence" });
+    const messageBytes = new TextEncoder().encode(messageJson).byteLength;
+    await runInDurableObject(session, (_instance, state) => {
+      state.storage.transactionSync(() => {
+        state.storage.sql.exec(
+          "INSERT INTO managed_events (turn_id, message_json, created_at) VALUES (NULL, ?, ?)",
+          messageJson,
+          Date.now(),
+        );
+        state.storage.sql.exec(
+          "UPDATE managed_event_meta SET total_bytes = total_bytes + ? WHERE singleton = 1",
+          messageBytes,
+        );
+      });
+    });
+
+    const result = await runInDurableObject(session, async (_instance, state) => {
+      let notifyUploaded!: () => void;
+      let releasePut!: () => void;
+      const uploaded = new Promise<void>((resolve) => { notifyUploaded = resolve; });
+      const held = new Promise<void>((resolve) => { releasePut = resolve; });
+      const delayedBucket = new Proxy(testEnv.NANOCODEX_HISTORY, {
+        get(target, property) {
+          if (property === "put") {
+            return async (...args: Parameters<R2Bucket["put"]>) => {
+              const stored = await target.put(...args);
+              notifyUploaded();
+              await held;
+              return stored;
+            };
+          }
+          const value = Reflect.get(target, property);
+          return typeof value === "function" ? value.bind(target) : value;
+        },
+      });
+      const archive = new ManagedEventArchive<{ type: string }>(
+        state.storage,
+        delayedBucket,
+        state.id.toString(),
+      );
+      const sealing = archive.seal(true);
+      await uploaded;
+      state.storage.sql.exec(
+        "UPDATE managed_events SET created_at = created_at + 1 WHERE cursor = (SELECT MIN(cursor) FROM managed_events)",
+      );
+      releasePut();
+      let failure = "";
+      try { await sealing; } catch (error) {
+        failure = error instanceof Error ? error.message : String(error);
+      }
+      state.storage.sql.exec(
+        "UPDATE managed_events SET created_at = created_at - 1 WHERE cursor = (SELECT MIN(cursor) FROM managed_events)",
+      );
+      return { capacity: archive.capacity(), failure };
+    });
+    expect(result.failure).toContain("source prefix changed before commit");
+    expect(result.capacity).toMatchObject({
+      archived_events: 0,
+      archived_through: "0",
+      segments: 0,
+    });
+
+    const subject = testEnv.NANOCODEX_SESSIONS.idFromName(agent.agent_id).toString();
+    const prefix = `agents/${subject}/managed-events/`;
+    expect((await testEnv.NANOCODEX_HISTORY.list({ prefix })).objects).toHaveLength(1);
+    expect((await managedHistory(agent)).data).toHaveLength(2);
+  }, 30_000);
+
+  it("archives a byte-heavy tail even when it is smaller than the recent event window", async () => {
+    const agent = await createAgent();
+    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    const result = await runInDurableObject(session, async (_instance, state) => {
+      const archive = new ManagedEventArchive<{ type: string }>(
+        state.storage,
+        testEnv.NANOCODEX_HISTORY,
+        state.id.toString(),
+        { recentEventCount: 512, sealThresholdBytes: 1, segmentTargetBytes: 1024 * 1024 },
+      );
+      const sealed = await archive.seal(false);
+      const localRows = state.storage.sql.exec<{ rows: number }>(
+        "SELECT COUNT(*) AS rows FROM managed_events",
+      ).one().rows;
+      return { localRows, sealed };
+    });
+    expect(result.sealed).toMatchObject({ archived_events: 1, sealed: true });
+    expect(result.localRows).toBe(0);
+    const history = await managedHistory(agent);
+    expect(history.data).toHaveLength(1);
+    expect(history.data[0]).toMatchObject({ type: "agent_created" });
+  });
+
+  it("archives terminal receipts without weakening exact idempotency", async () => {
+    const agent = await createAgent();
+    for (let index = 0; index < 3; index += 1) {
+      const id = `turn-receipt-${index}`;
+      await submit(agent, id, `RECEIPT_${index}`);
+      await waitForTurnState(agent, id, "completed");
+    }
+    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    const sealed = await session.fetch("https://session.internal/turns/archive", {
+      method: "POST",
+    });
+    expect(sealed.status).toBe(200);
+    expect(await sealed.json()).toMatchObject({
+      archived_receipts: 2,
+      objects: 4,
+      sealed: true,
+    });
+
+    const capacity = await (await session.fetch("https://session.internal/capacity")).json<{
+      archived_turns: { archived_receipts: number; objects: number };
+      turns: { terminal_rows: number; total_rows: number };
+    }>();
+    expect(capacity.archived_turns).toMatchObject({ archived_receipts: 2, objects: 4 });
+    expect(capacity.turns).toMatchObject({ terminal_rows: 1, total_rows: 1 });
+
+    const oldTurnUrl = agent.events_url.replace(/\/events$/, "/turns/turn-receipt-0");
+    const retained = await SELF.fetch(oldTurnUrl);
+    expect(retained.status).toBe(200);
+    expect(await retained.json()).toMatchObject({
+      state: "completed",
+      turn_id: "turn-receipt-0",
+    });
+
+    const replay = await SELF.fetch(agent.events_url.replace(/\/events$/, "/turns"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "request-turn-receipt-0",
+      },
+      body: JSON.stringify({ id: "turn-receipt-0", input: "RECEIPT_0" }),
+    });
+    expect(replay.status).toBe(200);
+    expect(replay.headers.get("x-nanocodex-turn-created")).toBeNull();
+
+    const conflictingKey = await SELF.fetch(agent.events_url.replace(/\/events$/, "/turns"), {
+      method: "POST",
+      headers: {
+        "content-type": "application/json",
+        "idempotency-key": "request-turn-receipt-0",
+      },
+      body: JSON.stringify({ id: "another-turn", input: "RECEIPT_0" }),
+    });
+    expect(conflictingKey.status).toBe(409);
+    expect(await conflictingKey.json()).toMatchObject({ error: "idempotency_conflict" });
+
+    const state = await (await session.fetch("https://session.internal/state")).json<{
+      completed_turns: number;
+      first_prompt: string;
+    }>();
+    expect(state).toMatchObject({ completed_turns: 3, first_prompt: "RECEIPT_0" });
+
+    const subject = testEnv.NANOCODEX_SESSIONS.idFromName(agent.agent_id).toString();
+    const idHash = await testHash("turn-receipt-0");
+    await testEnv.NANOCODEX_HISTORY.put(
+      `agents/${subject}/managed-turns/by-id/${idHash}.json`,
+      "corrupt",
+    );
+    const corrupt = await SELF.fetch(oldTurnUrl);
+    expect(corrupt.status).toBe(503);
+    expect(await corrupt.json()).toMatchObject({ error: "turn_archive_unavailable" });
+  }, 30_000);
+
+  it("compacts a terminal journal prefix and cold-reopens from the retained checkpoint", async () => {
+    const agent = await createAgent();
+    for (let index = 0; index < 22; index += 1) {
+      const id = `turn-compaction-${index}`;
+      await submit(agent, id, `COMPACTION_${index}`);
+      await waitForTurnState(agent, id, "completed");
+    }
+
+    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    const before = await (await session.fetch("https://session.internal/capacity")).json<{
+      journal: { revision: string; rows: number };
+    }>();
+    expect(BigInt(before.journal.revision)).toBeGreaterThanOrEqual(66n);
+    expect(BigInt(before.journal.rows)).toBeLessThan(BigInt(before.journal.revision));
+
+    await waitForScheduledAlarm(session);
+    await runDurableObjectAlarm(session);
+    await evictDurableObject(session);
+
+    await submit(agent, "turn-after-compaction-reopen", "AFTER_COMPACTION_REOPEN");
+    await waitForTurnState(agent, "turn-after-compaction-reopen", "completed");
+    const after = await (await session.fetch("https://session.internal/capacity")).json<{
+      journal: { revision: string; rows: number };
+      turns: { terminal_rows: number };
+    }>();
+    expect(BigInt(after.journal.revision)).toBeGreaterThan(BigInt(before.journal.revision));
+    expect(BigInt(after.journal.rows)).toBeLessThan(BigInt(after.journal.revision));
+    expect(after.turns.terminal_rows).toBe(23);
+  }, 30_000);
+
   it("keeps connector OAuth state and credentials behind a persistent account", async () => {
     const publicEgressEnvelope = JSON.stringify({
       thread_id: "77777777-7777-4777-8777-777777777777",
@@ -1145,6 +1524,104 @@ describe("managed agents REST and resumable SSE", () => {
       ).one().count,
     );
     expect(operationCount).toBe(2);
+
+    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    const archived = await session.fetch("https://session.internal/realtime/archive", {
+      method: "POST",
+    });
+    expect(archived.status).toBe(200);
+    expect(await archived.json()).toMatchObject({
+      archived_receipts: 1,
+      objects: 1,
+      sealed: true,
+    });
+    expect(await runInDurableObject(
+      session,
+      (_instance, state) => state.storage.sql.exec<{ count: number }>(
+        "SELECT COUNT(*) AS count FROM managed_realtime_operations",
+      ).one().count,
+    )).toBe(1);
+
+    const archivedStartReplay = await managedRealtime(agent, "start", {
+      operation_id: "voice-start-operation",
+      voice_session_id: "voice-lifecycle-session",
+    });
+    expect(await archivedStartReplay.json()).toEqual(startValue);
+    const capacity = await (await session.fetch("https://session.internal/capacity")).json<{
+      archived_realtime: { archived_receipts: number; objects: number };
+    }>();
+    expect(capacity.archived_realtime).toMatchObject({ archived_receipts: 1, objects: 1 });
+  });
+
+  it("ends realtime before releasing the managed lease", async () => {
+    const agent = await createAgent();
+    const first = await managedRealtime(agent, "start", {
+      operation_id: "voice-order-first-start",
+      voice_session_id: "voice-order-first",
+    });
+    expect(first.status).toBe(200);
+
+    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    const blockLeaseDeletion = () => runInDurableObject(
+      session,
+      (_instance, state) => state.storage.sql.exec(
+        `CREATE TRIGGER block_managed_realtime_lease_delete
+         BEFORE DELETE ON managed_realtime_session
+         BEGIN
+           SELECT RAISE(FAIL, 'managed realtime lease deletion blocked');
+         END`,
+      ),
+    );
+    const allowLeaseDeletion = () => runInDurableObject(
+      session,
+      (_instance, state) => state.storage.sql.exec(
+        "DROP TRIGGER block_managed_realtime_lease_delete",
+      ),
+    );
+    const activeVoiceSession = () => runInDurableObject(
+      session,
+      (_instance, state) => state.storage.sql.exec<{ voice_session_id: string }>(
+        "SELECT voice_session_id FROM managed_realtime_session WHERE singleton = 1",
+      ).one().voice_session_id,
+    );
+
+    await blockLeaseDeletion();
+    const blockedReplacement = await managedRealtime(agent, "start", {
+      operation_id: "voice-order-second-start",
+      voice_session_id: "voice-order-second",
+    });
+    expect(blockedReplacement.status).toBe(500);
+    expect(await activeVoiceSession()).toBe("voice-order-first");
+
+    await allowLeaseDeletion();
+    const replacement = await managedRealtime(agent, "start", {
+      operation_id: "voice-order-second-start",
+      voice_session_id: "voice-order-second",
+    });
+    expect(replacement.status).toBe(200);
+    const replacementValue = await replacement.json<ManagedRealtimeLifecycleResponse>();
+    expect(JSON.stringify(replacementValue.context.history).match(
+      /Realtime conversation ended\./g,
+    )).toHaveLength(2);
+
+    await blockLeaseDeletion();
+    const blockedStop = await managedRealtime(agent, "stop", {
+      operation_id: "voice-order-stop",
+      voice_session_id: "voice-order-second",
+    });
+    expect(blockedStop.status).toBe(500);
+    expect(await activeVoiceSession()).toBe("voice-order-second");
+
+    await allowLeaseDeletion();
+    const stopped = await managedRealtime(agent, "stop", {
+      operation_id: "voice-order-stop",
+      voice_session_id: "voice-order-second",
+    });
+    expect(stopped.status).toBe(200);
+    const stopValue = await stopped.json<ManagedRealtimeLifecycleResponse>();
+    expect(JSON.stringify(stopValue.context.history).match(
+      /Realtime conversation ended\./g,
+    )).toHaveLength(4);
   });
 
   it("atomically starts or steers realtime delegation under managed turn ownership", async () => {
@@ -1207,6 +1684,77 @@ describe("managed agents REST and resumable SSE", () => {
     });
     expect(conflict.status).toBe(409);
     expect(await conflict.json()).toMatchObject({ error: "idempotency_conflict" });
+  });
+
+  it("rejects an in-flight realtime identity conflict before joining its promise", async () => {
+    const agent = await createAgent();
+    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    const originalBroker = testEnv.NANOCODEX;
+    let releaseUpgrade!: () => void;
+    const heldUpgrade = new Promise<void>((resolve) => { releaseUpgrade = resolve; });
+    testEnv.NANOCODEX = {
+      async fetch(input: RequestInfo | URL, init?: RequestInit): Promise<Response> {
+        const request = new Request(input, init);
+        if (request.headers.get("upgrade")?.toLowerCase() === "websocket") {
+          await heldUpgrade;
+        }
+        return originalBroker.fetch(input, init);
+      },
+    } as Fetcher;
+
+    try {
+      const started = managedRealtime(agent, "start", {
+        operation_id: "voice-inflight-conflict",
+        voice_session_id: "voice-inflight-session",
+      });
+      for (let attempt = 0; attempt < 100; attempt += 1) {
+        const pending = await runInDurableObject(
+          session,
+          (_instance, state) => state.storage.sql.exec<{ count: number }>(
+            "SELECT COUNT(*) AS count FROM managed_realtime_operations WHERE state = 'pending'",
+          ).one().count,
+        );
+        if (pending === 1) break;
+        await scheduler.wait(5);
+      }
+      const conflict = await managedRealtime(agent, "stop", {
+        operation_id: "voice-inflight-conflict",
+        voice_session_id: "voice-inflight-session",
+      });
+      expect(conflict.status).toBe(409);
+      expect(await conflict.json()).toMatchObject({ error: "idempotency_conflict" });
+      releaseUpgrade();
+      expect((await started).status).toBe(200);
+    } finally {
+      releaseUpgrade();
+      testEnv.NANOCODEX = originalBroker;
+    }
+  });
+
+  it("bounds unique pending realtime operations before retaining more work", async () => {
+    const agent = await createAgent();
+    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    await runInDurableObject(session, (_instance, state) => {
+      for (let index = 0; index < 32; index += 1) {
+        state.storage.sql.exec(
+          `INSERT INTO managed_realtime_operations (
+             voice_session_id, operation_id, kind, request_hash, state,
+             response_json, created_at, updated_at
+           ) VALUES (?, ?, 'start', ?, 'pending', NULL, ?, ?)`,
+          `voice-cap-${index}`,
+          `operation-cap-${index}`,
+          "0".repeat(64),
+          Date.now(),
+          Date.now(),
+        );
+      }
+    });
+    const rejected = await managedRealtime(agent, "start", {
+      operation_id: "operation-over-cap",
+      voice_session_id: "voice-over-cap",
+    });
+    expect(rejected.status).toBe(429);
+    expect(await rejected.json()).toMatchObject({ error: "realtime_queue_full" });
   });
 
   it("fences stale managed voice sessions and never replays a pending mutation", async () => {
@@ -2406,6 +2954,42 @@ describe("managed agents REST and resumable SSE", () => {
     }
   });
 
+  it("does not idle-shutdown durable accepted work after in-memory ownership is lost", async () => {
+    const agent = await createAgent();
+    const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
+    const id = "turn-cold-alarm-recovery";
+    const info = vi.spyOn(console, "info").mockImplementation(() => {});
+    try {
+      await runInDurableObject(session, async (instance, state) => {
+        const now = Date.now();
+        state.storage.sql.exec(
+          `INSERT INTO managed_turns (
+             id, request_key, request_hash, input_json, state,
+             accepted_cursor, may_have_inner_operation, created_at, accepted_at, updated_at
+           ) VALUES (?, ?, ?, ?, 'accepted', 1, 0, ?, ?, ?)`,
+          id,
+          `request-${id}`,
+          `hash-${id}`,
+          JSON.stringify("recover accepted work before considering idle shutdown"),
+          now,
+          now,
+          now,
+        );
+
+        await instance.alarm();
+      });
+
+      expect(info.mock.calls.some(([entry]) => (
+        entry && typeof entry === "object"
+          && (entry as { type?: unknown }).type === "managed.capacity"
+          && (entry as { reason?: unknown }).reason === "idle_shutdown"
+      ))).toBe(false);
+      await waitForTurnState(agent, id, "completed");
+    } finally {
+      info.mockRestore();
+    }
+  });
+
   it("does not construct a replacement after deletion supersedes cold construction", async () => {
     const agent = await createAgent();
     const session = testEnv.NANOCODEX_SESSIONS.getByName(agent.agent_id);
@@ -2958,7 +3542,6 @@ describe("managed agents REST and resumable SSE", () => {
   });
 
   it("does not let an idempotent submission bypass a durable admission retry deadline", async () => {
-    vi.useFakeTimers({ toFake: ["Date"] });
     const agent = await createAgent();
     const id = "turn-admission-retry-deadline";
     const turnsUrl = agent.events_url.replace(/\/events$/, "/turns");
@@ -2989,10 +3572,19 @@ describe("managed agents REST and resumable SSE", () => {
       const retryable = await waitForTurnAttempt(agent, id, 1);
       expect(retryable.state).toBe("retryable");
       expect(retryable.retry_at).not.toBeNull();
-      const retryAt = retryable.retry_at!;
+      await waitForScheduledAlarm(session);
+      const retryAt = await runInDurableObject(session, async (_instance, state) => {
+        const deadline = Date.now() + 60_000;
+        state.storage.sql.exec(
+          "UPDATE managed_turns SET retry_at = ? WHERE id = ?",
+          deadline,
+          id,
+        );
+        await state.storage.setAlarm(deadline);
+        return deadline;
+      });
       const upgradesBeforeDeadline = upgradeCount;
 
-      vi.setSystemTime(retryAt - 1);
       expect((await SELF.fetch(turnsUrl, request)).status).toBe(200);
       expect(await runDurableObjectAlarm(session)).toBe(true);
       await scheduler.wait(25);
@@ -3008,14 +3600,21 @@ describe("managed agents REST and resumable SSE", () => {
       expect(await runInDurableObject(session, (_instance, state) => state.storage.getAlarm()))
         .toBe(retryAt);
 
-      vi.setSystemTime(retryAt);
+      await runInDurableObject(session, async (_instance, state) => {
+        const due = Date.now() - 1;
+        state.storage.sql.exec(
+          "UPDATE managed_turns SET retry_at = ? WHERE id = ?",
+          due,
+          id,
+        );
+        await state.storage.setAlarm(Date.now() + 60_000);
+      });
       expect(await runDurableObjectAlarm(session)).toBe(true);
       const retried = await waitForTurnAttempt(agent, id, 2);
       expect(retried.state).toBe("retryable");
       expect(upgradeCount).toBe(upgradesBeforeDeadline + 1);
     } finally {
       testEnv.NANOCODEX = originalBroker;
-      vi.useRealTimers();
     }
   });
 
@@ -3292,6 +3891,7 @@ type ManagedHistoryEvent = {
 
 type ManagedHistory = {
   data: ManagedHistoryEvent[];
+  has_more: boolean;
   latest_cursor: string;
 };
 

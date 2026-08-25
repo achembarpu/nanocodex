@@ -111,13 +111,22 @@ export default defineConfig({
             const refresh = body.get("grant_type") === "refresh_token";
             const code = String(body.get("code") ?? "");
             const revocationFailure = code === "x-revocation-failure-code";
+            const partialRevocation = code === "x-partially-revoked-code";
+            const alreadyRevoked = code === "x-already-revoked-code";
+            const revocationThrottled = code === "x-revocation-throttled-code";
             return Response.json({
               access_token: refresh ? "x-refreshed-access"
                 : revocationFailure ? "x-revocation-failure-access"
+                : partialRevocation ? "x-partially-revoked-access"
+                : alreadyRevoked ? "x-already-revoked-access"
+                : revocationThrottled ? "x-revocation-throttled-access"
                 : "x-connector-access",
               ...(code === "x-no-refresh-code" ? {} : {
                 refresh_token: revocationFailure
                   ? "x-revocation-failure-refresh"
+                  : partialRevocation ? "x-partially-revoked-refresh"
+                  : alreadyRevoked ? "x-already-revoked-refresh"
+                  : revocationThrottled ? "x-revocation-throttled-refresh"
                   : "x-connector-refresh",
               }),
               expires_in: !refresh && code === "x-expiring-code" ? 1 : 7_200,
@@ -131,6 +140,17 @@ export default defineConfig({
             && url.pathname === "/2/oauth2/revoke") {
             const body = await request.clone().formData();
             const token = String(body.get("token") ?? "");
+            if (request.headers.has("authorization") || token === "x-connector-access") {
+              return Response.json({ error: "invalid revocation request" }, { status: 400 });
+            }
+            if (token === "x-partially-revoked-refresh"
+              || token === "x-already-revoked-refresh"
+              || token === "x-already-revoked-access") {
+              return Response.json({ error: "invalid token" }, { status: 400 });
+            }
+            if (token === "x-revocation-throttled-refresh") {
+              return Response.json({ error: "rate limited" }, { status: 429 });
+            }
             if (token === "x-revocation-failure-refresh") {
               return Response.json({ error: "provider unavailable" }, { status: 503 });
             }

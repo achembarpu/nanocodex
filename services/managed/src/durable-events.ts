@@ -1,4 +1,4 @@
-const REPLAY_PAGE_SIZE = 16;
+const REPLAY_PAGE_SIZE = 256;
 export const MAX_HISTORY_PAGE_SIZE = 256;
 const KEEPALIVE_MS = 15_000;
 const MAX_EVENT_BYTES = 2 * 1024 * 1024;
@@ -44,6 +44,7 @@ type Subscriber = {
   dirty: boolean;
   keepalive?: ReturnType<typeof setInterval>;
   running: boolean;
+  page: (after: string, limit: number) => Promise<DurableEvent<{ type: string }>[]>;
   tail: Promise<void>;
   writer: WritableStreamDefaultWriter<Uint8Array>;
 };
@@ -192,11 +193,24 @@ export class DurableEventLog<Message extends { type: string }> {
   }
 
   stream(after: string, signal?: AbortSignal): Response {
+    return this.streamWithPage(
+      after,
+      this.latestCursor(),
+      async (cursor, limit) => this.page(cursor, limit),
+      signal,
+    );
+  }
+
+  streamWithPage(
+    after: string,
+    latest: string,
+    page: (after: string, limit: number) => Promise<DurableEvent<Message>[]>,
+    signal?: AbortSignal,
+  ): Response {
     const cursor = parseCursor(after);
     if (cursor === undefined) {
       return Response.json({ error: "invalid_cursor" }, { status: 400 });
     }
-    const latest = this.latestCursor();
     if (compareCursor(cursor, latest) > 0) {
       return Response.json(
         { error: "cursor_ahead", latest_cursor: latest },
@@ -218,6 +232,7 @@ export class DurableEventLog<Message extends { type: string }> {
       after: cursor,
       closed: false,
       dirty: false,
+      page: page as Subscriber["page"],
       running: false,
       tail: Promise.resolve(),
       writer: body.writable.getWriter(),
@@ -275,7 +290,7 @@ export class DurableEventLog<Message extends { type: string }> {
 
   async #catchUp(subscriber: Subscriber): Promise<void> {
     while (!subscriber.closed) {
-      const events = this.page(subscriber.after);
+      const events = await subscriber.page(subscriber.after, REPLAY_PAGE_SIZE);
       if (events.length === 0) return;
       for (const event of events) {
         await subscriber.writer.write(encodeEvent(event));

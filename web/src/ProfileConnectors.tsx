@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState, type ReactNode } from "react";
 import { isRecord, responseFailure } from "./AccountSession";
 import { clientFailureMessage } from "./clientFailure";
 
@@ -22,10 +22,12 @@ const connectorDefinitions = [
 
 export function ProfileConnectors({
   accountId,
+  children,
   requiresLogin = false,
   refreshSession,
 }: {
   accountId: string;
+  children?: ReactNode;
   requiresLogin?: boolean;
   refreshSession(): Promise<void>;
 }) {
@@ -108,16 +110,8 @@ export function ProfileConnectors({
 
   if (requiresLogin) {
     return (
-      <section
-        className="api-key-panel account-connections profile-connectors profile-connectors--locked"
-        aria-labelledby="connectors-heading"
-      >
-        <div className="api-key-heading">
-          <div>
-            <h2 id="connectors-heading">Connectors</h2>
-            <p>Sign in with a passkey to authorize services for your agents.</p>
-          </div>
-        </div>
+      <div className="profile-connectors profile-connectors--locked">
+        {children}
         {connectorDefinitions.map((definition) => (
           <div className="account-provider-row connector-row" key={definition.id}>
             <div>
@@ -127,21 +121,13 @@ export function ProfileConnectors({
             <button type="button" disabled>Requires login</button>
           </div>
         ))}
-      </section>
+      </div>
     );
   }
 
-  if (!connectors && !error && !result) return null;
-
   return (
-    <section className="api-key-panel account-connections profile-connectors" aria-labelledby="connectors-heading">
-      <div className="api-key-heading">
-        <div>
-          <h2 id="connectors-heading">Connectors</h2>
-          <p>Authorize services for your agents without sharing credentials with the browser.</p>
-        </div>
-        {connectors ? <button type="button" onClick={() => void load()}>Refresh</button> : null}
-      </div>
+    <div className="profile-connectors">
+      {children}
       {result ? (
         <p className={`connector-result connector-result--${result.result}`} role="status">
           {connectorResultMessage(result)}
@@ -175,7 +161,7 @@ export function ProfileConnectors({
           </div>
         );
       }) : null}
-    </section>
+    </div>
   );
 }
 

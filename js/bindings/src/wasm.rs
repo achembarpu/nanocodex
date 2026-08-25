@@ -101,6 +101,16 @@ extern "C" {
         payload: &str,
     ) -> Result<Promise, JsValue>;
 
+    #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = durabilityCompact)]
+    fn host_durability_compact(
+        route_id: &str,
+        journal_id: &str,
+        owner_id: &str,
+        fence: &str,
+        expected_revision: &str,
+        payload: &str,
+    ) -> Result<Promise, JsValue>;
+
     #[wasm_bindgen(catch, js_namespace = ["globalThis", "nanocodexHost"], js_name = readWorkspaceFile)]
     fn host_read_workspace_file(path: &str, session_id: &str) -> Result<Promise, JsValue>;
 
@@ -294,6 +304,15 @@ enum JavaScriptAppendResult {
     NotCommitted { message: String },
 }
 
+#[derive(Deserialize)]
+#[serde(tag = "status", rename_all = "snake_case")]
+enum JavaScriptCompactResult {
+    Compacted { revision: String },
+    Conflict { actual_revision: String },
+    Fenced,
+    NotCommitted { message: String },
+}
+
 impl JournalStore for JavaScriptDurabilityStore {
     fn acquire_owner<'a>(
         &'a mut self,
@@ -374,6 +393,51 @@ impl JournalStore for JavaScriptDurabilityStore {
                 }),
                 JavaScriptAppendResult::Fenced => Err(StoreError::Fenced),
                 JavaScriptAppendResult::NotCommitted { message } => {
+                    Err(StoreError::NotCommitted(message))
+                }
+            }
+        })
+    }
+
+    fn compact<'a>(
+        &'a mut self,
+        journal_id: &'a str,
+        owner: &'a OwnerToken,
+        expected_revision: u64,
+        payload: &'a str,
+    ) -> StoreFuture<'a, Result<u64, StoreError>> {
+        Box::pin(async move {
+            let fence = owner.fence().to_string();
+            let expected = expected_revision.to_string();
+            let promise = host_durability_compact(
+                &self.route_id,
+                journal_id,
+                owner.owner_id().as_str(),
+                &fence,
+                &expected,
+                payload,
+            )
+            .map_err(|error| StoreError::Backend(host_error_message(&error)))?;
+            let value = JsFuture::from(promise)
+                .await
+                .map_err(|error| StoreError::Backend(host_error_message(&error)))?;
+            let encoded = value.as_string().ok_or_else(|| {
+                StoreError::Backend(
+                    "JavaScript durability compact returned a non-string".to_owned(),
+                )
+            })?;
+            match serde_json::from_str::<JavaScriptCompactResult>(&encoded).map_err(|error| {
+                StoreError::Backend(format!("invalid durability compact result: {error}"))
+            })? {
+                JavaScriptCompactResult::Compacted { revision } => parse_revision(&revision),
+                JavaScriptCompactResult::Conflict { actual_revision } => {
+                    Err(StoreError::Conflict {
+                        expected: expected_revision,
+                        actual: parse_revision(&actual_revision)?,
+                    })
+                }
+                JavaScriptCompactResult::Fenced => Err(StoreError::Fenced),
+                JavaScriptCompactResult::NotCommitted { message } => {
                     Err(StoreError::NotCommitted(message))
                 }
             }
@@ -678,6 +742,8 @@ struct WasmConfig {
     #[serde(default)]
     durability_host_id: Option<String>,
     #[serde(default)]
+    terminal_receipt_retention: Option<usize>,
+    #[serde(default)]
     subagents: Option<WasmSubagentsConfig>,
 }
 
@@ -941,11 +1007,20 @@ impl WasmNanocodex {
         if let (Some(route_id), Some(journal_id)) =
             (config.durability_host_id, config.durability_id)
         {
-            let journal = nanocodex::agent::durability::DurableSession::open(
-                JavaScriptDurabilityStore { route_id },
-                journal_id,
-            )
-            .await
+            let store = JavaScriptDurabilityStore { route_id };
+            let journal = if let Some(limit) = config.terminal_receipt_retention {
+                if !(1..=4_096).contains(&limit) {
+                    return Err(js_error(
+                        "terminal_receipt_retention must be from 1 through 4096",
+                    ));
+                }
+                nanocodex::agent::durability::DurableSession::open_with_terminal_receipt_limit(
+                    store, journal_id, limit,
+                )
+                .await
+            } else {
+                nanocodex::agent::durability::DurableSession::open(store, journal_id).await
+            }
             .map_err(js_error)?;
             builder = builder.durability(journal).await.map_err(js_error)?;
         }

@@ -1344,7 +1344,7 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
                   className="sr-only"
                   id={surface === "agent" ? "agent-page-title" : "home-title"}
                 >
-                  {surface === "agent" ? "Nanocodex durable browser agent" : "High-performance Codex SDK. Runs anywhere."}
+                  {surface === "agent" ? "Nanocodex durable agent" : "High-performance Codex SDK. Runs anywhere."}
                 </h1>
                 <section className="home-demo" id="agent-demo">
                   <AgentExperience
@@ -1358,8 +1358,6 @@ function NanocodexShell({ preparedRoute }: Required<NanocodexAppProps>) {
                           ? "preview"
                           : "hidden"
                     }
-                    onThreadChange={setThreadId}
-                    threadId={threadId}
                   />
                 </section>
               </article>
