@@ -146,7 +146,7 @@ test("nonlegacy plans and exact Scout orders retain fixed cross-scene goals", ()
     agent_id: "cinder",
     state_version: staleVersion,
     summary: "continues a stale patrol",
-    steps: [{ kind: "wait", duration_ms: 300 }],
+    steps: [{ kind: "emote", icon: "?" }],
   }, {
     requestId: "cinder-before-cross-scene-order",
     agentId: "cinder",

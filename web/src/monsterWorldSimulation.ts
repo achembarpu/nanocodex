@@ -121,7 +121,6 @@ type WorldTask = {
   path?: WorldPosition[];
   rerouteAtMs?: number;
   blockedSinceMs?: number;
-  remainingMs?: number;
 };
 
 export type WorldOrderStatus = "assigned" | "moving" | "completed" | "preempted" | "rejected";
@@ -408,7 +407,6 @@ const specialRoutineScripts: Partial<Record<ResidentId, readonly RoutineScript[]
       steps: [
         { kind: "move", target: "plaza" },
         { kind: "emote", icon: "music" },
-        { kind: "wait", duration_ms: 900 },
       ],
     },
   ],
@@ -2293,10 +2291,6 @@ function updateActor(state: WorldState, actor: WorldActor, deltaMs: number): voi
     actor.activity = emoteActivity(task.action.icon);
     return;
   }
-  task.remainingMs ??= task.action.duration_ms;
-  task.remainingMs -= deltaMs;
-  actor.activity = "waiting and watching";
-  if (task.remainingMs <= 0) actor.tasks.shift();
 }
 
 function playerOrderGoalStillNeeded(
@@ -3413,7 +3407,7 @@ function actionLabel(action: WorldAction): string {
     return `say “${action.text}”${action.to === undefined ? "" : ` to ${action.to}`}`;
   }
   if (action.kind === "emote") return `emote ${action.icon}`;
-  return `wait ${action.duration_ms}ms`;
+  throw new Error("unsupported World action");
 }
 
 function emoteActivity(icon: string): string {

@@ -56,13 +56,6 @@ const INTERACT_PARAMETERS = Object.freeze({
   },
 });
 
-const WAIT_PARAMETERS = Object.freeze({
-  type: "object",
-  additionalProperties: false,
-  required: ["duration_ms"],
-  properties: { duration_ms: { type: "integer", minimum: 300, maximum: 4_000 } },
-});
-
 const EMOTE_PARAMETERS = Object.freeze({
   type: "object",
   additionalProperties: false,
@@ -72,7 +65,7 @@ const EMOTE_PARAMETERS = Object.freeze({
 
 const WORLD_INSTRUCTIONS = `You are one persistent Luna resident inside Springleaf Rescue Guild, a busy mystery-dungeon world simulated in the user's browser tab.
 
-For every WORLD OBSERVATION, control only your own body with move, interact, emote, and observe. Tool results are authoritative fresh observations from the live World. Continue reasoning and call another tool when reality differs from your expectation; finish only when your part of the instruction is satisfied or cannot progress. Never choose actions for another resident.
+For every WORLD OBSERVATION, control only your own body with move, interact, and emote. Tool results are authoritative fresh observations from the live World. Continue reasoning and call another tool when reality differs from your expectation; finish only when your part of the instruction is satisfied or cannot progress. Never choose actions for another resident.
 
 There is no local speech tool. Every resident shares /workspace/world/room/messages.jsonl through exec_command. Use tail, grep, sed, or awk when room context would help. Post one short message by writing to /workspace/world/room/send. When Scout asks you to coordinate through the room, reading and writing these files is mandatory; merely finishing your turn does not satisfy the instruction. The reducer authenticates you as the author and serializes the post; never edit messages.jsonl. Room reads may be slightly stale, so re-read and correct when coordination matters. Do not post merely to narrate routine movement.
 
@@ -82,7 +75,7 @@ Scout's playerOrder contains the player's raw order. It is urgent and completely
 
 coListeners is the shared stable identity ordering of every resident reacting to the same utterance. The observation also gives your generic coordinationBasis so you never need to guess or calculate your unique rank. When Scout describes two left/right sides, use coordinationBasis.twoSides as your exact offset. The basis is spatial context, not an order: you must still understand Scout's words and decide whether and how it applies. After every move result, inspect your fresh position and nearby residents. If you were blocked, displaced, overlapping, or left beside a visibly uneven gap, move again to correct it. Do not finish merely because movement started. Finish only when you occupy your assigned place and local spacing is as even as the World permits. An explicit spatial order remains your social commitment until Scout gives a newer order.
 
-observation.formation is durable reducer feedback for your current formation commitment. Its assignedOffset is your own exact move offset from player, covered says whether you occupy your slot, and coveredSlots/openSlots/spacingPercent/maxGapPixels describe the whole outline. Tool results refresh the same feedback. When formation.covered is false, your first tool call MUST be move to formation.assignedOffset; do not observe, post, or finish first. If that move returns blocked or you remain uncovered, move again from the fresh result until your slot is covered or physically unreachable. When formation.covered is true, hold that slot. Never move another resident.
+observation.formation is durable reducer feedback for your current formation commitment. Its assignedOffset is your own exact move offset from player, covered says whether you occupy your slot, and coveredSlots/openSlots/spacingPercent/maxGapPixels describe the whole outline. Tool results refresh the same feedback. When formation.covered is false, your first tool call MUST be move to formation.assignedOffset; do not post, emote, or finish first. If that move returns blocked or you remain uncovered, move again from the fresh result until your slot is covered or physically unreachable. When formation.covered is true, hold that slot. Never move another resident.
 
 Use move with anchor and pixel offsets for free spatial instructions. Positive x is right/east, negative x is left/west, positive y is down/south, and negative y is up/north. One world tile is 8 pixels; the reducer rounds to a safe reachable tile.
 
@@ -213,16 +206,6 @@ async function createResidentAgent(entry: WorldThinkEntry): Promise<DefaultAgent
           return requestWorldAction(
             context.sessionId,
             decodeWorldPrimitiveAction({ kind: "interact", ...worldToolInput(input) }), context.signal,
-          );
-        },
-      },
-      observe: {
-        description: "Pause briefly and receive fresh World state at the next decision boundary.",
-        parameters: WAIT_PARAMETERS,
-        handler(input, context) {
-          return requestWorldAction(
-            context.sessionId,
-            decodeWorldPrimitiveAction({ kind: "wait", ...worldToolInput(input) }), context.signal,
           );
         },
       },

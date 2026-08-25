@@ -178,7 +178,7 @@ test("runtime action messages reject malformed physical actions", () => {
   } as const;
   assert.equal(isWorldAgentMessage(roomSend), true);
   assert.equal(isWorldAgentMessage({ ...roomSend, text: "" }), false);
-  assert.equal(isWorldAgentMessage({ ...action, action: { kind: "wait", duration_ms: 9_000 } }), false);
+  assert.equal(isWorldAgentMessage({ ...action, action: { kind: "wait", duration_ms: 300 } }), false);
 });
 
 test("cancel selectors are real bounded arrays of nonempty unique ids", () => {

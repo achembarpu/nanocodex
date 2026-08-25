@@ -136,8 +136,7 @@ export type WorldPrimitiveAction =
       kind: "interact";
       target: WorldTarget;
       action: WorldInteraction;
-    }>
-  | Readonly<{ kind: "wait"; duration_ms: number }>;
+    }>;
 
 export type WorldAction = WorldPrimitiveAction | Readonly<{
   kind: "random_choice";
@@ -1060,12 +1059,6 @@ function decodePrimitiveAction(action: JsonObject, kind: string): WorldPrimitive
       kind,
       target: member(action.target, WORLD_TARGETS, "action.target"),
       action: member(action.action, WORLD_INTERACTIONS, "action.action"),
-    });
-  }
-  if (kind === "wait") {
-    return Object.freeze({
-      kind,
-      duration_ms: integer(action.duration_ms, "action.duration_ms", 300, 4_000),
     });
   }
   throw new Error(`unsupported action kind: ${kind}`);

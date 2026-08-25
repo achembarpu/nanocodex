@@ -168,25 +168,22 @@ test("independent resident tools mutate through one reducer and return fresh obs
     action: { kind: "say", text: "Taking my place." },
   });
   const june = applyWorldToolAction(state, {
-    actionId: "june-wait-1",
+    actionId: "june-emote-1",
     requestId: "june-turn-1",
     agentId: "june",
-    action: { kind: "wait", duration_ms: 300 },
+    action: { kind: "emote", icon: "?" },
   });
   assert.equal(cinder.accepted, true);
   assert.equal(june.accepted, true);
   if (!cinder.accepted || !june.accepted) return;
   assert.equal(state.actors.cinder.tasks[0]?.requestId, "cinder-say-1");
-  assert.equal(state.actors.june.tasks[0]?.requestId, "june-wait-1");
+  assert.equal(state.actors.june.tasks[0]?.requestId, "june-emote-1");
 
   updateWorld(state, 100);
   const cinderResult = worldToolResultAtDecisionBoundary(state, cinder.pending);
   assert.equal(cinderResult?.outcome.status, "completed");
   assert.equal(cinderResult?.self.id, "cinder");
   assert.equal(cinderResult?.worldRevision, observationFor(state, "cinder").stateVersion);
-  assert.equal(worldToolResultAtDecisionBoundary(state, june.pending), undefined);
-  updateWorld(state, 100);
-  updateWorld(state, 100);
   const juneResult = worldToolResultAtDecisionBoundary(state, june.pending);
   assert.equal(juneResult?.outcome.status, "completed");
   assert.equal(juneResult?.self.id, "june");

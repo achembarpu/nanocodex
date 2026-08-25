@@ -107,7 +107,7 @@ test("world plans are bounded, versioned, and normalized before entering the sim
         true_label: "heads",
         false_label: "tails",
         if_true: [],
-        if_false: [{ kind: "wait", duration_ms: 300 }],
+        if_false: [{ kind: "emote", icon: "?" }],
       }],
     }, expected),
     /must contain 1-3 physical actions/,
@@ -140,7 +140,7 @@ test("the reducer owns movement, mission effects, stale rejection, and idempoten
     agent_id: "moss",
     state_version: observation.stateVersion,
     summary: "repeats an old thought",
-    steps: [{ kind: "wait", duration_ms: 300 }],
+    steps: [{ kind: "emote", icon: "?" }],
   }, {
     requestId: "moss-2",
     agentId: "moss",
@@ -227,7 +227,7 @@ test("a reducer-owned Scout order blocks model overwrite until physical completi
     agent_id: "cinder",
     state_version: staleObservation.stateVersion,
     summary: "continues an old patrol",
-    steps: [{ kind: "wait", duration_ms: 300 }],
+    steps: [{ kind: "emote", icon: "?" }],
   }, {
     requestId: "old-cinder",
     agentId: "cinder",
@@ -633,6 +633,8 @@ test("one map resident owns one isolated retained Luna session and turn", () => 
   assert.match(worker, /async function residentAgentFor[\s\S]*?residentBoots\.get[\s\S]*?residentBoots\.set[\s\S]*?residentAgents\.set/);
   assert.match(worker, /async function createResidentAgent[\s\S]*?return Agent\.create/);
   assert.match(worker, /decodeWorldPrimitiveAction/);
+  assert.doesNotMatch(worker, /\n\s*observe:\s*\{/);
+  assert.doesNotMatch(worker, /WAIT_PARAMETERS|kind: "wait"/);
   assert.match(worker, /result = await turn\.result\(\)/);
   assert.match(worker, /agent\.turn\.prompt\(\{ input: residentPrompt\(entry\) \}\)/);
   assert.doesNotMatch(worker, /agent\.turn\.prompt\(\{\s*id:/);
