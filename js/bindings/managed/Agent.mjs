@@ -21,6 +21,7 @@ const EVENT_STREAM_INACTIVITY_TIMEOUT_MS = 45_000;
 const TURN_SUBMISSION_TIMEOUT_MS = 10_000;
 const TURN_STATE_POLL_INITIAL_MS = 1_000;
 const TURN_STATE_POLL_MAX_MS = 5_000;
+const TURN_STATE_READ_TIMEOUT_MS = 2_000;
 const ALLOWED_OPTIONS = new Set(["apiKey", "baseUrl", "fetch"]);
 const eventEncoder = new TextEncoder();
 
@@ -307,7 +308,11 @@ async function waitForResult(client, agentId, eventStream, submission, signal) {
             observation.value.terminal_cursor,
           );
         }
-        statePollMs = Math.min(statePollMs * 2, TURN_STATE_POLL_MAX_MS);
+        // A failed read says nothing about the durable turn. Retry it at the
+        // initial cadence; only a successful nonterminal observation backs off.
+        statePollMs = observation.value
+          ? Math.min(statePollMs * 2, TURN_STATE_POLL_MAX_MS)
+          : TURN_STATE_POLL_INITIAL_MS;
         stateObservation = observedTurnState(
           client,
           agentId,
@@ -317,6 +322,7 @@ async function waitForResult(client, agentId, eventStream, submission, signal) {
         );
         continue;
       }
+      if (observation.kind === "state_abort") throw observation.error;
       if (observation.kind === "event_error") throw observation.error;
       if (observation.value.done) break;
       eventObservation = observedEvent(events);
@@ -345,15 +351,36 @@ function observedEvent(events) {
 }
 
 async function observedTurnState(client, agentId, turnId, milliseconds, signal) {
+  await delay(milliseconds, signal);
+  const attempt = new AbortController();
+  let rejectBoundary;
+  const boundary = new Promise((_, reject) => { rejectBoundary = reject; });
+  const interrupt = (reason) => {
+    if (attempt.signal.aborted) return;
+    attempt.abort(reason);
+    rejectBoundary(reason);
+  };
+  const aborted = () => interrupt(abortError(signal.reason));
+  if (signal.aborted) aborted();
+  else signal.addEventListener("abort", aborted, { once: true });
+  const timeout = setTimeout(() => interrupt(new ManagedError(
+    "network_error",
+    "Managed turn state did not settle. Retrying the authoritative read.",
+  )), TURN_STATE_READ_TIMEOUT_MS);
+  timeout.unref?.();
+  const request = client.json(turnPath(agentId, turnId), { signal: attempt.signal });
+  void request.catch(() => {});
   try {
-    await delay(milliseconds, signal);
-    const value = await client.json(turnPath(agentId, turnId), { signal });
+    const value = await Promise.race([request, boundary]);
     return { kind: "state", value };
-  } catch {
-    if (signal.aborted) return { kind: "state", value: undefined };
+  } catch (error) {
+    if (signal.aborted) return { kind: "state_abort", error: abortError(signal.reason) };
     // The cursor stream remains the primary low-latency path. State reads are
     // an authoritative recovery path and must not make a healthy stream fail.
     return { kind: "state", value: undefined };
+  } finally {
+    clearTimeout(timeout);
+    signal.removeEventListener("abort", aborted);
   }
 }
 

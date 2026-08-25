@@ -1342,6 +1342,75 @@ test("managed results recover a retained terminal from authoritative turn state"
   }
 });
 
+test("managed result recovery retries a nonsettling authoritative turn read", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  const connections = [];
+  let stateReads = 0;
+  let firstReadAborted = false;
+  let closedConnections = 0;
+  globalThis.setTimeout = (callback, delay, ...args) => originalSetTimeout(
+    callback,
+    [1_000, 2_000, 4_000, 5_000].includes(delay) ? 0 : delay,
+    ...args,
+  );
+  try {
+    const agent = Agent.open(agentId, {
+      baseUrl: origin,
+      fetch: async (input, init) => {
+        const request = new Request(input, init);
+        const url = new URL(request.url);
+        if (request.method === "POST" && url.pathname.endsWith("/turns")) {
+          return Response.json({
+            turn_id: "turn-state-retry",
+            state: "accepted",
+            accepted_cursor: "1",
+            terminal_cursor: null,
+          }, { status: 202 });
+        }
+        if (request.method === "GET" && url.pathname.endsWith("/events")) {
+          const connection = controlledEventStream(request.signal, () => { closedConnections += 1; });
+          connections.push(connection);
+          return connection.response;
+        }
+        if (request.method === "GET" && url.pathname.endsWith("/turns/turn-state-retry")) {
+          stateReads += 1;
+          if (stateReads === 1) {
+            return new Promise((_, reject) => request.signal.addEventListener("abort", () => {
+              firstReadAborted = true;
+              reject(request.signal.reason);
+            }, { once: true }));
+          }
+          return Response.json({
+            turn_id: "turn-state-retry",
+            state: "completed",
+            accepted_cursor: "1",
+            terminal_cursor: "2",
+            terminal: {
+              type: "turn_completed",
+              final_message: "recovered after a half-open state read",
+              usage: null,
+            },
+          });
+        }
+        return Response.json({ error: "not_found" }, { status: 404 });
+      },
+    });
+
+    const result = await agent.turn.prompt({
+      id: "turn-state-retry",
+      input: "recover the half-open read",
+      idempotencyKey: "state-retry-request",
+    }).result();
+
+    assert.equal(result.finalMessage, "recovered after a half-open state read");
+    assert.equal(stateReads, 2);
+    assert.equal(firstReadAborted, true);
+    await waitFor(() => connections.length === 1 && closedConnections === 1);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
 function agentState() {
   return {
     agent_id: agentId,
