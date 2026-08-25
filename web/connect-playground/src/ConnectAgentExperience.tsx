@@ -116,6 +116,7 @@ export function ConnectAgentExperience({
               onConversationActivity={recordActivity}
               onTerminalEvent={observeTerminalEvent}
               onStateChange={recordState}
+              promptIntent="queue"
               retryAgent={retryAgent}
               showToolCalls={visibility.rawTraces}
             />

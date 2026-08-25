@@ -1254,6 +1254,67 @@ test("managed prompts replay a committed turn when its acknowledgement never set
   }
 });
 
+test("managed results recover a retained terminal from authoritative turn state", async () => {
+  const originalSetTimeout = globalThis.setTimeout;
+  const connections = [];
+  let stateReads = 0;
+  let closedConnections = 0;
+  globalThis.setTimeout = (callback, delay, ...args) => originalSetTimeout(
+    callback,
+    delay === 1_000 ? 0 : delay,
+    ...args,
+  );
+  try {
+    const agent = Agent.open(agentId, {
+      baseUrl: origin,
+      fetch: async (input, init) => {
+        const request = new Request(input, init);
+        const url = new URL(request.url);
+        if (request.method === "POST" && url.pathname.endsWith("/turns")) {
+          return Response.json({
+            turn_id: "turn-state-recovery",
+            state: "accepted",
+            accepted_cursor: "1",
+            terminal_cursor: null,
+          }, { status: 202 });
+        }
+        if (request.method === "GET" && url.pathname.endsWith("/events")) {
+          const connection = controlledEventStream(request.signal, () => { closedConnections += 1; });
+          connections.push(connection);
+          return connection.response;
+        }
+        if (request.method === "GET" && url.pathname.endsWith("/turns/turn-state-recovery")) {
+          stateReads += 1;
+          return Response.json({
+            turn_id: "turn-state-recovery",
+            state: "completed",
+            accepted_cursor: "1",
+            terminal_cursor: "2",
+            terminal: {
+              type: "turn_completed",
+              final_message: "recovered from durable state",
+              usage: null,
+            },
+          });
+        }
+        return Response.json({ error: "not_found" }, { status: 404 });
+      },
+    });
+
+    const result = await agent.turn.prompt({
+      id: "turn-state-recovery",
+      input: "recover me",
+      idempotencyKey: "state-recovery-request",
+    }).result();
+
+    assert.equal(result.finalMessage, "recovered from durable state");
+    assert.equal(stateReads, 1);
+    await waitFor(() => connections.length === 1 && closedConnections === 1);
+  } finally {
+    globalThis.setTimeout = originalSetTimeout;
+  }
+});
+
 function agentState() {
   return {
     agent_id: agentId,

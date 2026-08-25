@@ -19,6 +19,8 @@ const SUBSCRIBER_QUEUE_BYTES = 32 * 1024 * 1024;
 const EVENT_STREAM_FRAME_BYTES = 2 * 1024 * 1024;
 const EVENT_STREAM_INACTIVITY_TIMEOUT_MS = 45_000;
 const TURN_SUBMISSION_TIMEOUT_MS = 10_000;
+const TURN_STATE_POLL_INITIAL_MS = 1_000;
+const TURN_STATE_POLL_MAX_MS = 5_000;
 const ALLOWED_OPTIONS = new Set(["apiKey", "baseUrl", "fetch"]);
 const eventEncoder = new TextEncoder();
 
@@ -196,8 +198,8 @@ function managedTurn(client, agentId, eventStream, options) {
         throw new TypeError("managed turn result signal must be an AbortSignal");
       }
       return observerSignal === undefined
-        ? result ??= waitForResult(eventStream, submission, signal)
-        : waitForResult(eventStream, submission, observerSignal);
+        ? result ??= waitForResult(client, agentId, eventStream, submission, signal)
+        : waitForResult(client, agentId, eventStream, submission, observerSignal);
     },
   };
   return Object.freeze(turn);
@@ -253,16 +255,52 @@ async function boundedSubmission(client, path, init, signal) {
   }
 }
 
-async function waitForResult(eventStream, submission, signal) {
+async function waitForResult(client, agentId, eventStream, submission, signal) {
   const accepted = await observePromise(submission, signal);
   const turnId = requiredString(accepted, "turn_id");
   if (accepted.terminal) return terminalResult(turnId, accepted.terminal, accepted.terminal_cursor);
   const cursor = requiredCursor(accepted, "accepted_cursor");
   const events = eventStream.subscribe({ cursor, signal });
+  const pollController = new AbortController();
+  const abortPolling = () => pollController.abort(signal?.reason);
+  if (signal?.aborted) abortPolling();
+  else signal?.addEventListener("abort", abortPolling, { once: true });
   try {
     const retained = eventStream.terminal(turnId, cursor);
     if (retained) return terminalResult(turnId, retained.data, retained.cursor);
-    for await (const event of events) {
+    let eventObservation = observedEvent(events);
+    let statePollMs = TURN_STATE_POLL_INITIAL_MS;
+    let stateObservation = observedTurnState(
+      client,
+      agentId,
+      turnId,
+      statePollMs,
+      pollController.signal,
+    );
+    while (true) {
+      const observation = await Promise.race([eventObservation, stateObservation]);
+      if (observation.kind === "state") {
+        if (observation.value?.terminal) {
+          return terminalResult(
+            turnId,
+            observation.value.terminal,
+            observation.value.terminal_cursor,
+          );
+        }
+        statePollMs = Math.min(statePollMs * 2, TURN_STATE_POLL_MAX_MS);
+        stateObservation = observedTurnState(
+          client,
+          agentId,
+          turnId,
+          statePollMs,
+          pollController.signal,
+        );
+        continue;
+      }
+      if (observation.kind === "event_error") throw observation.error;
+      if (observation.value.done) break;
+      eventObservation = observedEvent(events);
+      const event = observation.value.value;
       const data = event.data;
       if (data.type === "stream_failed") {
         throw new ManagedError("stream_failed", stringOr(data.error, "managed event stream failed"));
@@ -271,10 +309,32 @@ async function waitForResult(eventStream, submission, signal) {
       if (TERMINAL_TYPES.has(data.type)) return terminalResult(turnId, data, event.cursor);
     }
   } finally {
+    signal?.removeEventListener("abort", abortPolling);
+    pollController.abort();
     await events.return();
   }
   if (signal?.aborted) throw abortError(signal.reason);
   throw new ManagedError("event_stream_ended", "managed event stream ended before the turn completed");
+}
+
+function observedEvent(events) {
+  return events.next().then(
+    (value) => ({ kind: "event", value }),
+    (error) => ({ kind: "event_error", error }),
+  );
+}
+
+async function observedTurnState(client, agentId, turnId, milliseconds, signal) {
+  try {
+    await delay(milliseconds, signal);
+    const value = await client.json(turnPath(agentId, turnId), { signal });
+    return { kind: "state", value };
+  } catch {
+    if (signal.aborted) return { kind: "state", value: undefined };
+    // The cursor stream remains the primary low-latency path. State reads are
+    // an authoritative recovery path and must not make a healthy stream fail.
+    return { kind: "state", value: undefined };
+  }
 }
 
 function observePromise(promise, signal) {

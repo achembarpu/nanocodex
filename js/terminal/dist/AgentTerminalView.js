@@ -5,7 +5,7 @@ import { useAgentController, } from "nanocodex-react/agent";
 import { TerminalComposer } from "./TerminalComposer.js";
 import { TerminalTranscriptSurface } from "./TerminalTranscriptSurface.js";
 /** Shared website terminal presentation. Runtime and authorization policy stay with its consumer. */
-export function AgentTerminalView({ accessory, agent, agentError, controls, inactiveMessage, maxEntries, mode, onConversationActivity, onTerminalEvent, onStateChange, retryAgent, showToolCalls = true, welcome, }) {
+export function AgentTerminalView({ accessory, agent, agentError, controls, inactiveMessage, maxEntries, mode, onConversationActivity, onTerminalEvent, onStateChange, promptIntent, retryAgent, showToolCalls = true, welcome, }) {
     const [touchDraft, setTouchDraft] = useState("");
     const [pendingTouchSubmission, setPendingTouchSubmission] = useState();
     const [followTailRequest, setFollowTailRequest] = useState(0);
@@ -75,16 +75,16 @@ export function AgentTerminalView({ accessory, agent, agentError, controls, inac
             setPendingTouchSubmission({ input, submittedAt });
             return;
         }
-        submitPrompt(controller, submittedPrompts.current, input, submittedAt);
+        submitPrompt(controller, submittedPrompts.current, input, submittedAt, promptIntent);
         setTouchDraft("");
-    }, [agentStatus, controller]);
+    }, [agentStatus, controller, promptIntent]);
     useEffect(() => {
         if (agentStatus !== "ready" || !pendingTouchSubmission)
             return;
-        submitPrompt(controller, submittedPrompts.current, pendingTouchSubmission.input, pendingTouchSubmission.submittedAt);
+        submitPrompt(controller, submittedPrompts.current, pendingTouchSubmission.input, pendingTouchSubmission.submittedAt, promptIntent);
         setPendingTouchSubmission(undefined);
         setTouchDraft("");
-    }, [agentStatus, controller, pendingTouchSubmission]);
+    }, [agentStatus, controller, pendingTouchSubmission, promptIntent]);
     const cancelTouchTurn = useCallback(() => {
         if (agentStatus === "ready")
             void controller.cancel();
@@ -103,9 +103,9 @@ export function AgentTerminalView({ accessory, agent, agentError, controls, inac
             }, onSubmit: submitTouchPrompt })), canLoadOlder: controller.canLoadOlder, entries: controller.entries, followTailRequest: followTailRequest, inactiveMessage: unavailableMessage ?? "", isLoadingOlder: controller.isLoadingOlder, mode: mode, showToolCalls: showToolCalls, status: agentStatus, welcome: welcome, onLoadOlder: controller.loadOlder }));
     return mode === "full" ? (_jsxs("div", { className: "agent-terminal-workspace", children: [terminal, accessory?.({ agentReady: agentStatus === "ready", submit: submitAccessoryPrompt })] })) : terminal;
 }
-function submitPrompt(controller, submittedPrompts, input, submittedAt) {
+function submitPrompt(controller, submittedPrompts, input, submittedAt, intent) {
     retainSubmittedPrompt(submittedPrompts, input, submittedAt);
-    void controller.submit(input);
+    void controller.submit(input, intent === undefined ? undefined : { intent });
 }
 function retainSubmittedPrompt(submissions, input, submittedAt) {
     const prompt = input.trim();

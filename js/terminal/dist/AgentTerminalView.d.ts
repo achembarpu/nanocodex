@@ -6,7 +6,7 @@ export type AgentTerminalAccessory = Readonly<{
     submit(input: string): void;
 }>;
 /** Shared website terminal presentation. Runtime and authorization policy stay with its consumer. */
-export declare function AgentTerminalView({ accessory, agent, agentError, controls, inactiveMessage, maxEntries, mode, onConversationActivity, onTerminalEvent, onStateChange, retryAgent, showToolCalls, welcome, }: {
+export declare function AgentTerminalView({ accessory, agent, agentError, controls, inactiveMessage, maxEntries, mode, onConversationActivity, onTerminalEvent, onStateChange, promptIntent, retryAgent, showToolCalls, welcome, }: {
     accessory?(controls: AgentTerminalAccessory): ReactNode;
     agent: Agent | undefined;
     agentError: string | undefined;
@@ -20,6 +20,7 @@ export declare function AgentTerminalView({ accessory, agent, agentError, contro
     onConversationActivity(input: string): void;
     onTerminalEvent?(event: AgentControllerEvent): void;
     onStateChange(state: AgentTerminalState): void;
+    promptIntent?: "queue" | "steer";
     retryAgent(): void;
     showToolCalls?: boolean;
     welcome?: string;

@@ -37,6 +37,7 @@ export function AgentTerminalView({
   onConversationActivity,
   onTerminalEvent,
   onStateChange,
+  promptIntent,
   retryAgent,
   showToolCalls = true,
   welcome,
@@ -54,6 +55,7 @@ export function AgentTerminalView({
   onConversationActivity(input: string): void;
   onTerminalEvent?(event: AgentControllerEvent): void;
   onStateChange(state: AgentTerminalState): void;
+  promptIntent?: "queue" | "steer";
   retryAgent(): void;
   showToolCalls?: boolean;
   welcome?: string;
@@ -137,9 +139,9 @@ export function AgentTerminalView({
       setPendingTouchSubmission({ input, submittedAt });
       return;
     }
-    submitPrompt(controller, submittedPrompts.current, input, submittedAt);
+    submitPrompt(controller, submittedPrompts.current, input, submittedAt, promptIntent);
     setTouchDraft("");
-  }, [agentStatus, controller]);
+  }, [agentStatus, controller, promptIntent]);
   useEffect(() => {
     if (agentStatus !== "ready" || !pendingTouchSubmission) return;
     submitPrompt(
@@ -147,10 +149,11 @@ export function AgentTerminalView({
       submittedPrompts.current,
       pendingTouchSubmission.input,
       pendingTouchSubmission.submittedAt,
+      promptIntent,
     );
     setPendingTouchSubmission(undefined);
     setTouchDraft("");
-  }, [agentStatus, controller, pendingTouchSubmission]);
+  }, [agentStatus, controller, pendingTouchSubmission, promptIntent]);
   const cancelTouchTurn = useCallback(() => {
     if (agentStatus === "ready") void controller.cancel();
   }, [agentStatus, controller]);
@@ -220,9 +223,10 @@ function submitPrompt(
   submittedPrompts: Array<{ input: string; submittedAt: number }>,
   input: string,
   submittedAt: number,
+  intent?: "queue" | "steer",
 ) {
   retainSubmittedPrompt(submittedPrompts, input, submittedAt);
-  void controller.submit(input);
+  void controller.submit(input, intent === undefined ? undefined : { intent });
 }
 
 function retainSubmittedPrompt(
