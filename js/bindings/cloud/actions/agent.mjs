@@ -127,6 +127,11 @@ function projectManagedEvent(event, visibility) {
   if (!data || typeof data !== "object") return undefined;
   if (data.type === "event") {
     const eventType = data.event?.type;
+    if ((eventType === "assistant.delta" || eventType === "assistant.message")
+      && visibility.finalMessages) {
+      const payload = data.event?.payload;
+      return payload?.phase === "commentary" ? undefined : event;
+    }
     return visibility.actionSummaries
       && (eventType === "tool.call" || eventType === "tool.result")
       ? event

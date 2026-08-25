@@ -1069,7 +1069,27 @@ function projectManagedEvent(value: unknown, grant: GrantRecord): Record<string,
   const finalMessages = traces || grant.capabilities.includes("agent.output.final");
   if (value.type === "event") {
     if (traces) return { ...value };
-    if (!actions || !isRecord(value.event) || typeof value.event.type !== "string") return undefined;
+    if (!isRecord(value.event) || typeof value.event.type !== "string") return undefined;
+    if (value.event.type === "assistant.delta" || value.event.type === "assistant.message") {
+      if (!finalMessages) return undefined;
+      const payload = isRecord(value.event.payload) ? value.event.payload : {};
+      if (payload.phase === "commentary") return undefined;
+      return {
+        ...value,
+        event: {
+          ...value.event,
+          payload: {
+            ...(typeof payload.model_call_index === "number"
+              ? { model_call_index: payload.model_call_index }
+              : {}),
+            ...(typeof payload.item_id === "string" ? { item_id: payload.item_id } : {}),
+            ...(typeof payload.phase === "string" ? { phase: payload.phase } : {}),
+            ...(typeof payload.text === "string" ? { text: payload.text } : {}),
+          },
+        },
+      };
+    }
+    if (!actions) return undefined;
     if (value.event.type !== "tool.call" && value.event.type !== "tool.result") return undefined;
     const payload = isRecord(value.event.payload) ? value.event.payload : {};
     const safePayload = value.event.type === "tool.call"
