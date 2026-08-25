@@ -22,9 +22,14 @@ const phases = {};
 let failure;
 const runStarted = performance.now();
 try {
-  phases.health = await phase("health", 1, async () => {
-    const response = await request(new URL("/health", baseUrl));
-    if (!response.ok) throw new Error(`health returned HTTP ${response.status}`);
+  phases.boundary = await phase("boundary", 1, async () => {
+    // The managed Worker is normally reached through the public website's
+    // service binding, which intentionally does not proxy its private /health
+    // route. An authenticated list proves the complete public API boundary:
+    // website routing, API-key resolution, account ownership, and the managed
+    // Worker binding.
+    const response = await request(new URL("/v1/agents", baseUrl));
+    if (!response.ok) throw new Error(`API boundary returned HTTP ${response.status}`);
     await response.body?.cancel();
   });
   phases.create = await phase("create", agents, async (index) => {
