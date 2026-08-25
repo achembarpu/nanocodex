@@ -42,7 +42,7 @@ test("the account trigger remains stable while session data is unavailable", () 
 test("connections and API keys share one account surface", () => {
   assert.match(
     accountMenu,
-    /<section className="api-key-panel account-profile-content"[\s\S]*?<h2 id="connections-heading">Connections<[\s\S]*?<ProfileConnectors[\s\S]*?<strong>ChatGPT<[\s\S]*?<div className="account-api-keys"/,
+    /<section className="api-key-panel account-profile-content"[\s\S]*?<h2 id="connections-heading">Connections<[\s\S]*?<ProfileConnectors[\s\S]*?<strong>OpenAI subscription<[\s\S]*?<strong>OpenRouter<[\s\S]*?<div className="account-api-keys"/,
   );
   assert.match(accountMenu, /<h2 id="api-key-heading">API keys<[\s\S]*?<strong>OpenAI</);
   assert.match(profileConnectors, /\{children\}[\s\S]*?connectorDefinitions\.map/);

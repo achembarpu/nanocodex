@@ -376,7 +376,10 @@ test("the terminal chrome delegates account and model connection controls to the
   assert.doesNotMatch(modelSession, /Connected to your ChatGPT subscription/);
   assert.doesNotMatch(modelSession, /The agent runs in your browser/);
   assert.match(modelSession, /aria-live="polite"/);
-  assert.match(modelSession, /Connect ChatGPT or an OpenAI API key from the account menu/);
+  assert.match(
+    modelSession,
+    /Connect an OpenAI subscription, OpenRouter, or an OpenAI API key from the account menu/,
+  );
   assert.match(modelSession, /Sign in with a passkey from the account menu/);
   assert.doesNotMatch(`${terminal}\n${modelSession}`, /Tempo|MPP|payment details|onSelectTransport/);
 });
