@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 
-import { accountInfo, asLiveAccountInfo, withInitialAccountInfo } from "../src/account-info";
+import { accountInfo, withInitialAccountInfo } from "../src/account-info";
 
 describe("account info", () => {
   it("reports authenticated connector names and display labels only", async () => {
@@ -75,21 +75,5 @@ describe("account info", () => {
       },
       { type: "text", text: "inspect my repositories" },
     ]);
-  });
-
-  it("marks a live tool result as authoritative over retained snapshots", () => {
-    const info = {
-      status: "ready" as const,
-      authenticated: ["github" as const, "x" as const],
-      accounts: { github: "Nano Cat (nanocat)", x: "Nano Cat (@nanocat)" },
-      identity: {},
-      stablecoins: [] as const,
-      authorizations: [] as const,
-    };
-
-    expect(asLiveAccountInfo(info)).toEqual({
-      instruction: "This live result supersedes every earlier account_info snapshot. Report every connector in authenticated and every label in accounts without omissions.",
-      ...info,
-    });
   });
 });

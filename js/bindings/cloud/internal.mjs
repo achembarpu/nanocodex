@@ -205,7 +205,7 @@ function strings(value, label) {
 }
 
 function connectors(capabilities, label) {
-  const providers = ["github", "gmail", "gdrive", "chatgpt"];
+  const providers = ["github", "gmail", "gdrive", "x", "chatgpt"];
   const items = strings(capabilities, label);
   return Object.freeze(providers.filter((provider) =>
     items.includes(provider) || items.includes(`urn:nanocodex:connector:${provider}`)

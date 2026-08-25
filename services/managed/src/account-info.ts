@@ -16,10 +16,6 @@ export type AccountInfo = Readonly<{
   authorizations: readonly [];
 }>;
 
-export type LiveAccountInfo = AccountInfo & Readonly<{
-  instruction: string;
-}>;
-
 export async function accountInfo(
   binding: BrokerBinding,
   userId: string,
@@ -74,13 +70,6 @@ export function withInitialAccountInfo(input: PromptInput, info: AccountInfo): P
   return typeof input === "string"
     ? [context, { type: "text", text: input }]
     : [context, ...input];
-}
-
-export function asLiveAccountInfo(info: AccountInfo): LiveAccountInfo {
-  return {
-    instruction: "This live result supersedes every earlier account_info snapshot. Report every connector in authenticated and every label in accounts without omissions.",
-    ...info,
-  };
 }
 
 function emptyInfo(status: "disabled" | "unavailable"): AccountInfo {

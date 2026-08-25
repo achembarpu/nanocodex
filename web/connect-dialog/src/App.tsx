@@ -23,7 +23,7 @@ export async function logoutAccount() {
   await provider.request({ method: "wallet_disconnect" });
 }
 
-const connectorIds = ["github", "gmail", "gdrive", "chatgpt"] as const;
+const connectorIds = ["github", "gmail", "gdrive", "x", "chatgpt"] as const;
 const connectorResourcePrefix = "urn:nanocodex:connector:";
 const connectorsResourcePrefix = "urn:nanocodex:connectors:";
 const nanocodexOrigin = "https://nanocodex.gakonst.workers.dev";
@@ -1067,6 +1067,9 @@ function ConnectorLogo({ id, name }: Readonly<{ id: string; name: string }>) {
       </span>
     );
   }
+  if (id === "x") {
+    return <span className="connector-logo connector-logo-x" aria-hidden="true">X</span>;
+  }
   return (
     <span className="connector-logo connector-logo-nanocodex" aria-hidden="true" title={name}>
       <svg viewBox="0 0 24 24" role="presentation">
@@ -1089,6 +1092,7 @@ function permissionTitle(id: string, fallback: string) {
   if (id === "github") return "GitHub";
   if (id === "gmail") return "Gmail";
   if (id === "gdrive") return "Google Drive";
+  if (id === "x") return "X";
   if (id === "chatgpt" || id === "model") return "ChatGPT";
   return fallback;
 }
@@ -1325,6 +1329,7 @@ function connectorDefinition(id: ConnectorId) {
   if (id === "github") return { id, name: "GitHub", detail: "Repositories and workflows" };
   if (id === "gmail") return { id, name: "Gmail", detail: "Read and send email" };
   if (id === "gdrive") return { id, name: "Google Drive", detail: "Read and create files" };
+  if (id === "x") return { id, name: "X", detail: "Posts, follows, likes, lists, and messages" };
   return { id, name: "ChatGPT", detail: "Model access through your account" };
 }
 

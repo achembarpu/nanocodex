@@ -336,6 +336,11 @@ dd {
   height: 21px;
 }
 
+.connector-logo-x {
+  font-size: 15px;
+  font-weight: 600;
+}
+
 .connector-logo-mercator svg {
   fill: none;
   stroke: currentColor;

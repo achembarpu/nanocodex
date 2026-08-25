@@ -1,6 +1,6 @@
 export type Hex = `0x${string}`;
 
-export type CloudAccount = "github" | "gmail" | "gdrive" | "chatgpt";
+export type CloudAccount = "github" | "gmail" | "gdrive" | "x" | "chatgpt";
 
 export type AccessKey = Readonly<{
   address: Hex;
