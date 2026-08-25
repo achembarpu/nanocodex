@@ -430,6 +430,20 @@ test("Connect persists, validates, and clears an app-scoped grant session", asyn
     },
     permission: "agent.run",
   }), undefined);
+
+  const narrowerConnectorClient = Client.create({
+    appId: "session-workspace",
+    dialog: Dialog.memory(),
+    provider: { request() { throw new Error("wallet must not reopen"); } },
+    session: mismatchedStorage,
+    transport,
+  });
+  assert.ok(narrowerConnectorClient._resumeConnection({
+    capabilities: {
+      cloudAccounts: { github: true, gmail: true, gdrive: true, x: true, chatgpt: true },
+    },
+    permission: "agent.run",
+  }));
   const mismatched = await mismatchedClient.connection.reconnect({
     capabilities: {
       agent: { finalMessages: true, actionSummaries: true },

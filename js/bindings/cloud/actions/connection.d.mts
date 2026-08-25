@@ -87,7 +87,7 @@ export function disconnect(client: Client, options?: disconnect.Options | undefi
 
 export declare namespace reconnect {
   type Options = Readonly<{
-    /** Reject a retained grant that does not carry these exact app capabilities. */
+    /** Reject a retained grant outside these app capability boundaries. */
     capabilities?: Pick<Capabilities, "agent" | "cloudAccounts"> | undefined;
     /** Reject a retained grant issued for another permission preset. */
     permission?: string | undefined;

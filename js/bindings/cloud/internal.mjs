@@ -43,11 +43,13 @@ export function connectionMatchesRequest(connection, options = {}) {
   }
   const requestedCloudAccounts = options.capabilities?.cloudAccounts;
   if (requestedCloudAccounts !== undefined) {
-    const expected = CLOUD_ACCOUNT_PROVIDERS.filter(
+    const allowed = new Set(CLOUD_ACCOUNT_PROVIDERS.filter(
       (provider) => requestedCloudAccounts?.[provider] === true,
-    );
-    if (connection.grant.connectors.length !== expected.length
-      || !connection.grant.connectors.every((value, index) => value === expected[index])) {
+    ));
+    // A request may include accounts the user has not connected yet, so the
+    // issued grant can legitimately be narrower. It must never restore with a
+    // connector the current app request did not include.
+    if (!connection.grant.connectors.every((provider) => allowed.has(provider))) {
       return false;
     }
   }
